@@ -322,7 +322,7 @@ type Config struct {
 	AuthProvider       auth.Provider
 	SlackSigningSecret string
 	NewClient          func(apiKey string) *client.Client
-	// ConnectorAPIURL is the qurl-connector API base including /v1. Guided
+	// ConnectorAPIURL is the qURL platform API base including /v1. Guided
 	// tunnel setup writes it into every rendered runtime definition so sandbox
 	// installs never silently fall back to production.
 	ConnectorAPIURL string
@@ -401,7 +401,7 @@ type Config struct {
 	PostDM PostDMFunc
 
 	// TunnelImage is the Docker image shown by `/qurl-admin protect-connector`.
-	// The public env var is QURL_CONNECTOR_IMAGE; this field keeps the
+	// The public env var is QURL_IMAGE; this field keeps the
 	// historical tunnel naming used by the install-rendering code.
 	// Empty falls back to the public client image with the `latest` tag only for
 	// explicit dev/sandbox installs; production cmd/main.go fails closed unless
@@ -1958,7 +1958,7 @@ var _ workspaceStateBeforeIdentityDeleter = (*auth.DDBProvider)(nil)
 // rather than writing it, so the confirmation button and any future surface
 // converge on one teardown path instead of forking the revoke/delete/purge
 // ordering. The caller owns delivery (response_url) and the context budget.
-func (h *Handler) uninstallWorkspaceReply(ctx context.Context, teamID, userID string, purgeWorkspaceIDs []string) string {
+func (h *Handler) uninstallWorkspaceReply(ctx context.Context, teamID, userID string, purgeWorkspaceIDs []string) (string, bool) {
 	// The trailing sentence is the honest boundary of what this command does. It
 	// clears qURL's per-workspace data but deliberately leaves the Slack app —
 	// and the bot token Slack issued to it — in place, because only a fresh Slack
@@ -2020,7 +2020,7 @@ func (h *Handler) uninstallWorkspaceReply(ctx context.Context, teamID, userID st
 		// Covers all abort arms — a failed revoke, but also the key_id read and
 		// client-build (KMS) failures where no revoke was even attempted — so the
 		// copy says "disconnect", not "revoke".
-		return ":warning: Couldn't disconnect qURL right now. Nothing was disconnected — try again in a moment, and contact your qURL operator if it keeps failing."
+		return ":warning: Couldn't disconnect qURL right now. Nothing was disconnected — try again in a moment, and contact your qURL operator if it keeps failing.", false
 	}
 
 	if err := h.cfg.AuthProvider.DeleteAPIKey(ctx, teamID); err != nil {
@@ -2032,23 +2032,23 @@ func (h *Handler) uninstallWorkspaceReply(ctx context.Context, teamID, userID st
 				// success, not the contradictory "isn't currently connected".
 				slog.Info("/qurl uninstall: upstream key revoked; local row already cleared", "team_id", teamID, "caller_user_id", userID)
 				schedulePurge("qurl_key_already_cleared_after_revoke")
-				return revokedReply
+				return revokedReply, true
 			}
 			schedulePurge("qurl_key_not_configured")
-			return "qURL isn't currently connected to this workspace.\n\n" + localSlackDataPurgeScheduledReply + "\n\nContact your qURL operator if the owner is unavailable."
+			return "qURL isn't currently connected to this workspace.\n\n" + localSlackDataPurgeScheduledReply + "\n\nContact your qURL operator if the owner is unavailable.", true
 		case errors.Is(err, auth.ErrWorkspaceAPIKeyDeleteUnsupported):
-			return uninstallUnsupportedMessage
+			return uninstallUnsupportedMessage, false
 		default:
 			slog.Error("/qurl uninstall: DeleteAPIKey failed", "error", err, "team_id", teamID, "caller_user_id", userID)
-			return ":warning: could not disconnect qURL from this workspace. Try again in a moment."
+			return ":warning: could not disconnect qURL from this workspace. Try again in a moment.", false
 		}
 	}
 	schedulePurge("delete_api_key_succeeded")
 	slog.Info("/qurl uninstall: disconnected workspace Slack commands", "team_id", teamID, "caller_user_id", userID, "upstream_revoked", revoked)
 	if revoked {
-		return revokedReply
+		return revokedReply, true
 	}
-	return "qURL has been disconnected from this workspace's Slack commands.\n\n" + localSlackDataPurgeScheduledReply + "\n\nThis does not revoke the qURL API key outside Slack; contact the operator if you're disconnecting because the key may be exposed."
+	return "qURL has been disconnected from this workspace's Slack commands.\n\n" + localSlackDataPurgeScheduledReply + "\n\nThis does not revoke the qURL API key outside Slack; contact the operator if you're disconnecting because the key may be exposed.", true
 }
 
 func workspaceStatePurgeCutoff(provider auth.Provider, fallbackNow func() time.Time) time.Time {
@@ -2574,7 +2574,7 @@ func (h *Handler) userHelpMessage(command string) string {
 		lines = append(lines,
 			"• `/qurl setup <email> --rotate` — Replace the workspace qURL key on the same qURL account",
 			"• `/qurl setup <email> --repoint` — Move the workspace to a different qURL account (cross-account moves route to an operator)",
-			"_`$id` identifies a resource. A `$alias` is an alternate name for a resource in a channel — several aliases can point to one ID. Use either with `/qurl get`._",
+			"_A CRID is a resource's permanent identifier. In Slack, use a listed `$id` or `$alias` with `/qurl get`. Several aliases can point to one resource._",
 			"",
 			"• `/qurl get <$id|$alias>` — Create a qURL for a resource `$id` or a `$alias` configured in this channel",
 		)

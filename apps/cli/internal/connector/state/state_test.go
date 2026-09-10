@@ -4,7 +4,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	qurl "github.com/layervai/qurl-go/qurl"
@@ -13,7 +12,7 @@ import (
 // clearStateEnv detaches the test from any ambient operator configuration.
 func clearStateEnv(t *testing.T) {
 	t.Helper()
-	for _, name := range []string{EnvStateDirPrimary, EnvStateDir, EnvAgentID, "XDG_STATE_HOME"} {
+	for _, name := range []string{EnvStateDirPrimary, EnvAgentID, "XDG_STATE_HOME", "HOME", "LOCALAPPDATA"} {
 		t.Setenv(name, "restore-after-test")
 		if err := os.Unsetenv(name); err != nil {
 			t.Fatal(err)
@@ -25,10 +24,8 @@ func TestResolveDirPrecedence(t *testing.T) {
 	clearStateEnv(t)
 	override := t.TempDir()
 	primary := t.TempDir()
-	legacy := t.TempDir()
 
 	t.Setenv(EnvStateDirPrimary, primary)
-	t.Setenv(EnvStateDir, legacy)
 
 	got, err := ResolveDir(override)
 	if err != nil || got != override {
@@ -38,16 +35,19 @@ func TestResolveDirPrecedence(t *testing.T) {
 	if err != nil || got != primary {
 		t.Fatalf("ResolveDir() = (%q, %v), want %s value %q", got, err, EnvStateDirPrimary, primary)
 	}
-	if err := os.Unsetenv(EnvStateDirPrimary); err != nil {
-		t.Fatal(err)
-	}
-	got, err = ResolveDir("")
-	if err != nil || got != legacy {
-		t.Fatalf("ResolveDir() = (%q, %v), want legacy %s value %q", got, err, EnvStateDir, legacy)
+}
+
+func TestResolveDirWithoutConfiguredNamespace(t *testing.T) {
+	clearStateEnv(t)
+	if got, err := ResolveDir(""); got != "" || !errors.Is(err, ErrNoDefaultStateDir) {
+		t.Fatalf("ResolveDir() = (%q, %v), want ErrNoDefaultStateDir", got, err)
 	}
 }
 
 func TestResolveDirXDGFallback(t *testing.T) {
+	if isWindows(t) {
+		t.Skip("XDG state paths are a Unix contract")
+	}
 	clearStateEnv(t)
 	xdg := t.TempDir()
 	t.Setenv("XDG_STATE_HOME", xdg)
@@ -55,7 +55,7 @@ func TestResolveDirXDGFallback(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := filepath.Join(xdg, "qurl", "connector")
+	want := filepath.Join(xdg, "qurl", "connector-v2")
 	if got != want {
 		t.Fatalf("ResolveDir() = %q, want XDG state path %q", got, want)
 	}
@@ -65,12 +65,11 @@ func TestResolveDirXDGFallback(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("XDG_STATE_HOME", "relative/state")
 	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home) // Windows os.UserHomeDir source
 	got, err = ResolveDir("")
 	if err != nil {
 		t.Fatal(err)
 	}
-	want = filepath.Join(home, ".local", "state", "qurl", "connector")
+	want = filepath.Join(home, ".local", "state", "qurl", "connector-v2")
 	if got != want {
 		t.Fatalf("ResolveDir() = %q, want home state path %q", got, want)
 	}
@@ -87,13 +86,12 @@ func TestResolveDirTrimsAndAbsolutizes(t *testing.T) {
 }
 
 func TestEnsureDirModePinsOwnerOnly(t *testing.T) {
-	if isWindows(t) {
-		t.Skip("POSIX permission bits are not meaningful on Windows")
-	}
 	base := t.TempDir()
 	dir := filepath.Join(base, "loose")
-	if err := os.MkdirAll(dir, 0o750); err != nil {
-		t.Fatal(err)
+	if !isWindows(t) {
+		if err := os.MkdirAll(dir, 0o750); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if err := EnsureDirMode(dir); err != nil {
 		t.Fatal(err)
@@ -102,7 +100,7 @@ func TestEnsureDirModePinsOwnerOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm() != 0o700 {
+	if !isWindows(t) && info.Mode().Perm() != 0o700 {
 		t.Fatalf("EnsureDirMode left mode %04o, want 0700", info.Mode().Perm())
 	}
 	if err := EnsureDirMode(""); err == nil {
@@ -126,15 +124,28 @@ func isWindows(t *testing.T) bool {
 	return os.PathSeparator == '\\'
 }
 
-// openTestStore opens a Store in a fresh temp dir, skipping on platforms
-// where qurl-go's pinned local agent state is unsupported (Windows today).
+// secureStateTestDir creates the test namespace through the production state
+// setup path. This is required on Windows, where t.TempDir() correctly retains
+// an inherited ACL that the production store must reject.
+func secureStateTestDir(t *testing.T) string {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), "state")
+	if err := EnsureDirMode(dir); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// openTestStore opens a Store in a fresh temp directory on each supported OS.
 func openTestStore(t *testing.T) *Store {
 	t.Helper()
-	store, err := Open(t.TempDir())
+	return openTestStoreAt(t, secureStateTestDir(t))
+}
+
+func openTestStoreAt(t *testing.T, dir string) *Store {
+	t.Helper()
+	store, err := Open(dir)
 	if err != nil {
-		if errors.Is(err, qurl.ErrAgentStateContinuity) && strings.Contains(err.Error(), "unsupported on this platform") {
-			t.Skipf("qurl-go pinned agent state unsupported here: %v", err)
-		}
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
@@ -162,6 +173,31 @@ func TestStoreHandoffReturnsConcreteSDKStore(t *testing.T) {
 	}
 }
 
+func TestAgentStatePresentDistinguishesOnlyTrueAbsence(t *testing.T) {
+	store := openTestStore(t)
+	if present, err := store.AgentStatePresent(); err != nil || present {
+		t.Fatalf("AgentStatePresent on fresh store = (%v, %v), want false, nil", present, err)
+	}
+	if err := os.WriteFile(filepath.Join(store.Dir(), AgentStateFile), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if present, err := store.AgentStatePresent(); err != nil || !present {
+		t.Fatalf("AgentStatePresent with state entry = (%v, %v), want true, nil", present, err)
+	}
+	if err := os.Remove(filepath.Join(store.Dir(), AgentStateFile)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("missing-agent-state", filepath.Join(store.Dir(), AgentStateFile)); err != nil {
+		if isWindows(t) {
+			t.Skipf("symlink creation unavailable: %v", err)
+		}
+		t.Fatal(err)
+	}
+	if present, err := store.AgentStatePresent(); err != nil || !present {
+		t.Fatalf("AgentStatePresent with unsafe entry = (%v, %v), want true, nil so SDK validation remains authoritative", present, err)
+	}
+}
+
 func TestStoreFailsClosedAfterClose(t *testing.T) {
 	store := openTestStore(t)
 	if err := store.Close(); err != nil {
@@ -176,9 +212,6 @@ func TestStoreFailsClosedAfterClose(t *testing.T) {
 	if err := store.ValidateContinuity(); !errors.Is(err, qurl.ErrAgentStateContinuity) {
 		t.Fatalf("ValidateContinuity() after Close = %v, want state-continuity error", err)
 	}
-	if err := store.RequestRefresh("still closed"); err == nil {
-		t.Fatal("RequestRefresh() after Close = nil, want failure")
-	}
 	var nilStore *Store
 	if err := nilStore.Close(); err != nil {
 		t.Fatalf("nil Close() = %v, want nil", err)
@@ -188,53 +221,5 @@ func TestStoreFailsClosedAfterClose(t *testing.T) {
 	}
 	if nilStore.Dir() != "" {
 		t.Fatal("nil Dir() should be empty")
-	}
-}
-
-func TestStoreMarkerLifecycleThroughStore(t *testing.T) {
-	store := openTestStore(t)
-
-	if _, present, err := store.LoadRefreshMarker(); err != nil || present {
-		t.Fatalf("LoadRefreshMarker on fresh dir = (present=%v, err=%v), want absent", present, err)
-	}
-	if err := store.RequestRefresh("sustained native NHP knock failures"); err != nil {
-		t.Fatal(err)
-	}
-	marker, present, err := store.LoadRefreshMarker()
-	if err != nil || !present {
-		t.Fatalf("LoadRefreshMarker = (present=%v, err=%v), want armed marker", present, err)
-	}
-	if marker.Attempted || marker.Reason != "sustained native NHP knock failures" || marker.Version != refreshMarkerVersion || marker.SetAtUnix <= 0 {
-		t.Fatalf("armed marker = %+v", marker)
-	}
-	if err := store.MarkRefreshAttempted(); err != nil {
-		t.Fatal(err)
-	}
-	marker, present, err = store.LoadRefreshMarker()
-	if err != nil || !present || !marker.Attempted {
-		t.Fatalf("marker after MarkRefreshAttempted = (%+v, present=%v, err=%v), want Attempted=true", marker, present, err)
-	}
-	// Episode idempotency at the Store surface: re-arming does not reset the
-	// consumed attempt.
-	if err := store.RequestRefresh("later budget exit"); err != nil {
-		t.Fatal(err)
-	}
-	marker, _, err = store.LoadRefreshMarker()
-	if err != nil || !marker.Attempted || marker.Reason != "sustained native NHP knock failures" {
-		t.Fatalf("marker after re-arm = (%+v, %v), want untouched attempted episode", marker, err)
-	}
-	if err := store.ClearRefreshMarker(); err != nil {
-		t.Fatal(err)
-	}
-	if _, present, err = store.LoadRefreshMarker(); err != nil || present {
-		t.Fatalf("marker after clear = (present=%v, err=%v), want absent", present, err)
-	}
-	// A new episode after a healthy clear starts unattempted.
-	if err := store.RequestRefresh("fresh episode"); err != nil {
-		t.Fatal(err)
-	}
-	marker, _, err = store.LoadRefreshMarker()
-	if err != nil || marker.Attempted || marker.Reason != "fresh episode" {
-		t.Fatalf("re-armed marker = (%+v, %v), want fresh unattempted episode", marker, err)
 	}
 }

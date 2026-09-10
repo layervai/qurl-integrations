@@ -26,11 +26,14 @@ type Error struct {
 	InvalidFields map[string]string
 	// RetryAfter is the server-requested wait in seconds for 429 responses
 	// that survived the transport's bounded retry, 0 when absent.
-	RetryAfter int
+	RetryAfter uint64
 	// RequestID correlates the failure with server logs, when provided.
 	RequestID string
 
 	err error
+
+	agentEnrollmentScopeRequired     bool
+	connectorEnrollmentScopeRequired bool
 }
 
 // Error renders a single line: the fixed frame, the server's title (or
@@ -53,6 +56,18 @@ func (e *Error) Error() string {
 // Unwrap keeps the original wire error chain — SDK sentinels included —
 // reachable for errors.Is and errors.As.
 func (e *Error) Unwrap() error { return e.err }
+
+// AgentEnrollmentScopeRequired reports that an account key could not mint the
+// one-time registered-device credential.
+func (e *Error) AgentEnrollmentScopeRequired() bool {
+	return e != nil && e.agentEnrollmentScopeRequired
+}
+
+// ConnectorEnrollmentScopeRequired reports that a registered device could
+// not mint the one-time credential for a local Connector.
+func (e *Error) ConnectorEnrollmentScopeRequired() bool {
+	return e != nil && e.connectorEnrollmentScopeRequired
+}
 
 // CustomerMessages returns the fixed customer-facing strings this package
 // can emit, for the CLI-wide jargon gate. Server-provided problem text is

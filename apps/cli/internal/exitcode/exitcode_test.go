@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/layervai/qurl-go/crid"
 	"github.com/layervai/qurl-go/qurl"
@@ -19,9 +20,10 @@ import (
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/auth"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/config"
-	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/agent"
+	connectordaemon "github.com/layervai/qurl-integrations/apps/cli/internal/connector/daemon"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/hub"
-	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/supervisor"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/sessionconfig"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/consume"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/cridux"
 )
@@ -34,55 +36,49 @@ var cliSentinels = map[string]struct {
 	err  error
 	code int
 }{
-	"auth.ErrNoCredential":         {auth.ErrNoCredential, Auth},
-	"auth.ErrInvalidKey":           {auth.ErrInvalidKey, Auth},
-	"config.ErrInvalidProfileName": {config.ErrInvalidProfileName, Config},
-	"config.ErrConfigFile":         {config.ErrConfigFile, Config},
-	"config.ErrSecretInConfig":     {config.ErrSecretInConfig, Config},
-	"cridux.ErrUnusableID":         {cridux.ErrUnusableID, InvalidInput},
-	"cridux.ErrTestIDOnProduction": {cridux.ErrTestIDOnProduction, Usage},
-	"consume.ErrPipedNeedsFile":    {consume.ErrPipedNeedsFile, Usage},
-	"consume.ErrFileExists":        {consume.ErrFileExists, Conflict},
-	"consume.ErrLinkExpired":       {consume.ErrLinkExpired, NotFound},
-	"consume.ErrLinkFetch":         {consume.ErrLinkFetch, ServerError},
-	"consume.ErrUnopenableLink":    {consume.ErrUnopenableLink, ServerError},
+	"auth.ErrNoCredential":          {auth.ErrNoCredential, Auth},
+	"auth.ErrInvalidKey":            {auth.ErrInvalidKey, Auth},
+	"auth.ErrCredentialConflict":    {auth.ErrCredentialConflict, Conflict},
+	"auth.ErrDeviceAccountConflict": {auth.ErrDeviceAccountConflict, Conflict},
+	"config.ErrInvalidProfileName":  {config.ErrInvalidProfileName, Config},
+	"config.ErrConfigFile":          {config.ErrConfigFile, Config},
+	"config.ErrSecretInConfig":      {config.ErrSecretInConfig, Config},
+	"cridux.ErrUnusableID":          {cridux.ErrUnusableID, InvalidInput},
+	"cridux.ErrTestIDOnProduction":  {cridux.ErrTestIDOnProduction, Usage},
+	"consume.ErrPipedNeedsFile":     {consume.ErrPipedNeedsFile, Usage},
+	"consume.ErrFileExists":         {consume.ErrFileExists, Conflict},
+	"consume.ErrLinkExpired":        {consume.ErrLinkExpired, NotFound},
+	"consume.ErrLinkUnavailable":    {consume.ErrLinkUnavailable, Unavailable},
+	"consume.ErrLinkFetch":          {consume.ErrLinkFetch, ServerError},
+	"consume.ErrUnopenableLink":     {consume.ErrUnopenableLink, ServerError},
 
 	// Platform access flow (direct downloads through the SDK opener). The
 	// two settings sentinels share the Hub triple's Config row; the local
 	// link check shares CRID verification's fail-closed row; a platform
 	// deny is Forbidden and a platform defer is Unavailable.
-	"consume.ErrAccessNotConfigured":    {consume.ErrAccessNotConfigured, Config},
-	"consume.ErrAccessSettingsMismatch": {consume.ErrAccessSettingsMismatch, Config},
-	"consume.ErrLinkVerification":       {consume.ErrLinkVerification, VerificationFailed},
-	"consume.ErrAccessDenied":           {consume.ErrAccessDenied, Forbidden},
-	"consume.ErrAccessBusy":             {consume.ErrAccessBusy, Unavailable},
+	"consume.ErrAccessNotConfigured":        {consume.ErrAccessNotConfigured, Config},
+	"consume.ErrUnsupportedCRIDVersion":     {consume.ErrUnsupportedCRIDVersion, Config},
+	"consume.ErrAccessSettingsMismatch":     {consume.ErrAccessSettingsMismatch, Config},
+	"consume.ErrLinkVerification":           {consume.ErrLinkVerification, VerificationFailed},
+	"consume.ErrAccessDenied":               {consume.ErrAccessDenied, Forbidden},
+	"consume.ErrAccessBusy":                 {consume.ErrAccessBusy, Unavailable},
+	"daemon.ErrAlreadyRunning":              {connectordaemon.ErrAlreadyRunning, Conflict},
+	"daemon.ErrDirectEgressRequired":        {connectordaemon.ErrDirectEgressRequired, Config},
+	"daemon.ErrResourceGone":                {connectordaemon.ErrResourceGone, NotFound},
+	"state.ErrNoDefaultStateDir":            {state.ErrNoDefaultStateDir, Config},
+	"state.ErrLocalShareOwnerConflict":      {state.ErrLocalShareOwnerConflict, Conflict},
+	"state.ErrLocalShareVersionUnsupported": {state.ErrLocalShareVersionUnsupported, Config},
 
-	// `qurl connector run` lifecycle sentinels. Each choice is argued at its
-	// case in connectorSentinelCode; the rows here are the tripwire's pin.
-	// The missing enrollment credential is the Auth row for this surface.
-	"agent.ErrEnrollmentTokenRequired": {agent.ErrEnrollmentTokenRequired, Auth},
-	// Valid inputs conflicting with this machine's persisted identity: the
-	// Conflict row, resolved by dropping the override or reprovisioning.
-	"agent.ErrIdentityConflict": {agent.ErrIdentityConflict, Conflict},
-	// The manual refresh gate is a missing confirmation (msgNeedsYes's shape):
-	// re-run once with --refresh-mode auto.
-	"agent.ErrRefreshApprovalRequired": {agent.ErrRefreshApprovalRequired, Usage},
-	// Standing configuration forbids the required refresh; remedy is a
-	// configuration change, so Config — an unattended restart hits this with
-	// a valid command line.
-	"agent.ErrRefreshDisabled": {agent.ErrRefreshDisabled, Config},
-	// Reached only via the LAYERV_AGENT_REGISTRATION_REFRESH_MODE env path
-	// (the flag validates as Usage in the command): broken standing config.
-	"agent.ErrRefreshModeInvalid": {agent.ErrRefreshModeInvalid, Config},
-	// The episode's one self-heal already ran and the platform still is not
-	// serving this Connector: an Unavailable posture, kin to the budget exit.
-	"agent.ErrRefreshAlreadyAttempted": {agent.ErrRefreshAlreadyAttempted, Unavailable},
+	// A same-Connector response contradiction is a fail-closed verification
+	// failure; a cross-Connector alias is valid identity in conflicting state.
+	"state.ErrConnectorResourceVerification":  {state.ErrConnectorResourceVerification, VerificationFailed},
+	"state.ErrConnectorResourceStateConflict": {state.ErrConnectorResourceStateConflict, Conflict},
+	"state.ErrConnectorResourceRetired":       {state.ErrConnectorResourceRetired, Conflict},
+	"state.ErrConnectorResourceState":         {state.ErrConnectorResourceState, General},
 	// The Hub trust triple (or a dark build's absent pin) is configuration
 	// even though it lives in the environment.
-	"hub.ErrConfig": {hub.ErrConfig, Config},
-	// The knock-budget exit: the platform's access-granting path stayed
-	// unusable across the whole retry budget — the Unavailable row.
-	"supervisor.ErrTooManyKnockFailures": {supervisor.ErrTooManyKnockFailures, Unavailable},
+	"hub.ErrConfig":           {hub.ErrConfig, Config},
+	"sessionconfig.ErrConfig": {sessionconfig.ErrConfig, Config},
 }
 
 // sdkSentinels pins the mapping for every qurl-go sentinel the CLI can
@@ -91,28 +87,67 @@ var sdkSentinels = map[string]struct {
 	err  error
 	code int
 }{
-	"qurl.ErrTemporaryAccessLinksDisabled":       {qurl.ErrTemporaryAccessLinksDisabled, Unavailable},
-	"qurl.ErrNoCRID":                             {qurl.ErrNoCRID, VerificationFailed},
-	"qurl.ErrCRIDMismatch":                       {qurl.ErrCRIDMismatch, VerificationFailed},
-	"qurl.ErrInvalidClientConfig":                {qurl.ErrInvalidClientConfig, Config},
-	"qurl.ErrInvalidResourceRequest":             {qurl.ErrInvalidResourceRequest, InvalidInput},
-	"qurl.ErrInvalidPortalRequest":               {qurl.ErrInvalidPortalRequest, InvalidInput},
-	"qurl.ErrInvalidAPIResponse":                 {qurl.ErrInvalidAPIResponse, ServerError},
-	"qurl.ErrCredentialStateNotFound":            {qurl.ErrCredentialStateNotFound, Auth},
-	"qurl.ErrInsecureCredentialStatePermissions": {qurl.ErrInsecureCredentialStatePermissions, Auth},
-	"crid.ErrCharset":                            {crid.ErrCharset, InvalidInput},
-	"crid.ErrLength":                             {crid.ErrLength, InvalidInput},
-	"crid.ErrChecksum":                           {crid.ErrChecksum, InvalidInput},
-	"crid.ErrNonCanonical":                       {crid.ErrNonCanonical, InvalidInput},
-	"crid.ErrForbiddenVersion":                   {crid.ErrForbiddenVersion, InvalidInput},
+	"qurl.ErrTemporaryAccessLinksDisabled":        {qurl.ErrTemporaryAccessLinksDisabled, Unavailable},
+	"qurl.ErrNoCRID":                              {qurl.ErrNoCRID, VerificationFailed},
+	"qurl.ErrCRIDMismatch":                        {qurl.ErrCRIDMismatch, VerificationFailed},
+	"qurl.ErrInvalidClientConfig":                 {qurl.ErrInvalidClientConfig, Config},
+	"qurl.ErrInvalidResourceRequest":              {qurl.ErrInvalidResourceRequest, InvalidInput},
+	"qurl.ErrInvalidPortalRequest":                {qurl.ErrInvalidPortalRequest, InvalidInput},
+	"qurl.ErrInvalidAPIResponse":                  {qurl.ErrInvalidAPIResponse, ServerError},
+	"qurl.ErrCredentialStateNotFound":             {qurl.ErrCredentialStateNotFound, Auth},
+	"qurl.ErrInsecureCredentialStatePermissions":  {qurl.ErrInsecureCredentialStatePermissions, Auth},
+	"qurl.ErrDeviceCredentialMissing":             {qurl.ErrDeviceCredentialMissing, Auth},
+	"qurl.ErrCredentialRecoveryRequired":          {qurl.ErrCredentialRecoveryRequired, Auth},
+	"qurl.ErrEndpointNoReply":                     {qurl.ErrEndpointNoReply, Unavailable},
+	"qurl.ErrInvalidRegisterConfig":               {qurl.ErrInvalidRegisterConfig, Config},
+	"qurl.ErrAgentBindingPersistence":             {qurl.ErrAgentBindingPersistence, General},
+	"qurl.ErrAgentCompletionCandidatePersistence": {qurl.ErrAgentCompletionCandidatePersistence, General},
+	"qurl.ErrAgentSetupLock":                      {qurl.ErrAgentSetupLock, General},
+	"qurl.ErrKeyRejected":                         {qurl.ErrKeyRejected, Auth},
+	"qurl.ErrBootstrapSetupKeyConsumed":           {qurl.ErrBootstrapSetupKeyConsumed, Auth},
+	"qurl.ErrAgentIdentityConflict":               {qurl.ErrAgentIdentityConflict, Conflict},
+	"qurl.ErrRegistrationDisabled":                {qurl.ErrRegistrationDisabled, Forbidden},
+	"qurl.ErrRegistrationRateLimited":             {qurl.ErrRegistrationRateLimited, RateLimited},
+	"qurl.ErrRegistrationRecoveryRequired":        {qurl.ErrRegistrationRecoveryRequired, Unavailable},
+	"qurl.ErrAssignmentTicketInvalid":             {qurl.ErrAssignmentTicketInvalid, ServerError},
+	"qurl.ErrAssignmentTicketExpired":             {qurl.ErrAssignmentTicketExpired, Unavailable},
+	"qurl.ErrRegistrationInvalidInput":            {qurl.ErrRegistrationInvalidInput, InvalidInput},
+	"qurl.ErrRegisterReplyMalformed":              {qurl.ErrRegisterReplyMalformed, ServerError},
+	"qurl.ErrRegistrationKeyKindDisallowed":       {qurl.ErrRegistrationKeyKindDisallowed, ServerError},
+	"qurl.ErrCompletionUnavailable":               {qurl.ErrCompletionUnavailable, Unavailable},
+	"qurl.ErrCompletionIdentityRejected":          {qurl.ErrCompletionIdentityRejected, Auth},
+	"qurl.ErrDeviceKeyQuotaExceeded":              {qurl.ErrDeviceKeyQuotaExceeded, Forbidden},
+	"qurl.ErrCompletionCredentialConflict":        {qurl.ErrCompletionCredentialConflict, Conflict},
+	"qurl.ErrCompletionRequestRejected":           {qurl.ErrCompletionRequestRejected, InvalidInput},
+	"qurl.ErrCompletionRecoveryRequired":          {qurl.ErrCompletionRecoveryRequired, Unavailable},
+	"crid.ErrCharset":                             {crid.ErrCharset, InvalidInput},
+	"crid.ErrLength":                              {crid.ErrLength, InvalidInput},
+	"crid.ErrChecksum":                            {crid.ErrChecksum, InvalidInput},
+	"crid.ErrNonCanonical":                        {crid.ErrNonCanonical, InvalidInput},
+	"crid.ErrForbiddenVersion":                    {crid.ErrForbiddenVersion, InvalidInput},
 
-	// The enrollment/assignment taxonomy `qurl connector run` can surface.
+	// The enrollment/assignment taxonomy a local publish can surface.
 	// Each choice is argued at its case in connectorSentinelCode.
 	// The enrollment token is this surface's credential: refusing it, or the
 	// identity it vouches for, is the Auth row.
-	"qurl.ErrAssignmentKeyRejected":       {qurl.ErrAssignmentKeyRejected, Auth},
-	"qurl.ErrAssignmentBootstrapConsumed": {qurl.ErrAssignmentBootstrapConsumed, Auth},
-	"qurl.ErrAssignmentIdentityRejected":  {qurl.ErrAssignmentIdentityRejected, Auth},
+	"qurl.ErrAssignmentKeyRejected":                        {qurl.ErrAssignmentKeyRejected, Auth},
+	"qurl.ErrAssignmentBootstrapConsumed":                  {qurl.ErrAssignmentBootstrapConsumed, Auth},
+	"qurl.ErrAssignmentIdentityRejected":                   {qurl.ErrAssignmentIdentityRejected, Auth},
+	"qurl.ErrRecoveryCredentialRejected":                   {qurl.ErrRecoveryCredentialRejected, Auth},
+	"qurl.ErrCredentialRecoveryIdentityRejected":           {qurl.ErrCredentialRecoveryIdentityRejected, Auth},
+	"qurl.ErrCredentialRecoveryExpired":                    {qurl.ErrCredentialRecoveryExpired, Auth},
+	"qurl.ErrCredentialRecoveryRevokeRequired":             {qurl.ErrCredentialRecoveryRevokeRequired, Conflict},
+	"qurl.ErrCredentialRecoveryCandidateConflict":          {qurl.ErrCredentialRecoveryCandidateConflict, Conflict},
+	"qurl.ErrCredentialRecoveryRequestRejected":            {qurl.ErrCredentialRecoveryRequestRejected, InvalidInput},
+	"qurl.ErrCredentialRecoveryRateLimited":                {qurl.ErrCredentialRecoveryRateLimited, RateLimited},
+	"qurl.ErrCredentialRecoveryUnavailable":                {qurl.ErrCredentialRecoveryUnavailable, Unavailable},
+	"qurl.ErrCredentialReplacementUnavailable":             {qurl.ErrCredentialReplacementUnavailable, Unavailable},
+	"qurl.ErrCredentialRecoveryAssignmentRequired":         {qurl.ErrCredentialRecoveryAssignmentRequired, Unavailable},
+	"qurl.ErrCredentialRecoveryGrantRejected":              {qurl.ErrCredentialRecoveryGrantRejected, Unavailable},
+	"qurl.ErrCredentialRecoveryRetryRequired":              {qurl.ErrCredentialRecoveryRetryRequired, Unavailable},
+	"qurl.ErrCredentialRecoveredAssignmentRefreshRequired": {qurl.ErrCredentialRecoveredAssignmentRefreshRequired, Unavailable},
+	"qurl.ErrCredentialRecoveryInvalidResponse":            {qurl.ErrCredentialRecoveryInvalidResponse, ServerError},
+	"qurl.ErrCredentialRecoveryCandidatePersistence":       {qurl.ErrCredentialRecoveryCandidatePersistence, General},
 	// The request, not the credential, was rejected — a valid token minted for
 	// another Connector lands here.
 	"qurl.ErrAssignmentRequestRejected": {qurl.ErrAssignmentRequestRejected, InvalidInput},
@@ -128,6 +163,17 @@ var sdkSentinels = map[string]struct {
 	"qurl.ErrAssignmentLeaseExpired":         {qurl.ErrAssignmentLeaseExpired, Unavailable},
 	// An authenticated producer-contract violation.
 	"qurl.ErrAssignmentInvalidResponse": {qurl.ErrAssignmentInvalidResponse, ServerError},
+
+	// Native assigned-cell Connector-resource setup taxonomy.
+	"qurl.ErrInvalidNativeConnectorResourceRequest":  {qurl.ErrInvalidNativeConnectorResourceRequest, InvalidInput},
+	"qurl.ErrConnectorResourceUnavailable":           {qurl.ErrConnectorResourceUnavailable, Unavailable},
+	"qurl.ErrConnectorResourceIdentityRejected":      {qurl.ErrConnectorResourceIdentityRejected, Auth},
+	"qurl.ErrConnectorResourceEntitlementDenied":     {qurl.ErrConnectorResourceEntitlementDenied, Forbidden},
+	"qurl.ErrConnectorResourceIdentityConflict":      {qurl.ErrConnectorResourceIdentityConflict, Conflict},
+	"qurl.ErrConnectorResourceQuotaExceeded":         {qurl.ErrConnectorResourceQuotaExceeded, Forbidden},
+	"qurl.ErrConnectorResourceRateLimited":           {qurl.ErrConnectorResourceRateLimited, RateLimited},
+	"qurl.ErrConnectorResourceRequestRejected":       {qurl.ErrConnectorResourceRequestRejected, InvalidInput},
+	"qurl.ErrInvalidNativeConnectorResourceResponse": {qurl.ErrInvalidNativeConnectorResourceResponse, ServerError},
 }
 
 // TestSentinelMapping asserts every defined sentinel — CLI and SDK — maps to
@@ -138,6 +184,28 @@ func TestSentinelMapping(t *testing.T) {
 	}
 	for name, row := range sdkSentinels {
 		assertCode(t, name, row.err, row.code)
+	}
+}
+
+func TestRecoveredAssignmentRefreshKeepsUnavailableExitCode(t *testing.T) {
+	err := &qurl.CredentialRecoveredAssignmentRefreshRequiredError{
+		Cause: errors.Join(&qurl.AssignmentError{Code: "52201"}, qurl.ErrAssignmentIdentityRejected),
+	}
+	if got := FromError(err); got != Unavailable {
+		t.Fatalf("recovered assignment refresh exit code = %d, want %d", got, Unavailable)
+	}
+}
+
+func TestCredentialRecoveryRetryKeepsLastAuthenticatedExitCode(t *testing.T) {
+	last := errors.Join(
+		&qurl.CredentialRecoveryError{Code: "52404", Phase: "hub_issue_recovery"},
+		qurl.ErrCredentialRecoveryRateLimited,
+	)
+	err := &qurl.CredentialRecoveryRetryRequiredError{
+		Phase: "hub_issue_recovery", Attempts: 3, Elapsed: time.Minute, Last: last,
+	}
+	if got := FromError(err); got != RateLimited {
+		t.Fatalf("credential recovery retry exit code = %d, want %d", got, RateLimited)
 	}
 }
 
@@ -226,6 +294,9 @@ func TestTypedWrappers(t *testing.T) {
 	if got := FromError(UsageError(errors.New("bad flag"))); got != Usage {
 		t.Errorf("UsageError = %d, want %d", got, Usage)
 	}
+	if got := FromError(InvalidInputError("unsupported operand", errors.New("service detail"))); got != InvalidInput {
+		t.Errorf("InvalidInputError = %d, want %d", got, InvalidInput)
+	}
 	if got := FromError(NotImplemented("later")); got != General {
 		t.Errorf("NotImplemented = %d, want %d", got, General)
 	}
@@ -239,6 +310,27 @@ func TestTypedWrappers(t *testing.T) {
 	}
 	if UsageError(nil) != nil {
 		t.Error("UsageError(nil) must be nil")
+	}
+	if InvalidInputError("bad operand", nil) == nil {
+		t.Error("InvalidInputError with a message must not be nil")
+	}
+}
+
+func TestConnectorResourceJoinedErrorUsesSpecificExitCode(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want int
+	}{
+		{name: "verification", err: errors.Join(state.ErrConnectorResourceVerification, state.ErrConnectorResourceState), want: VerificationFailed},
+		{name: "request rejection", err: errors.Join(qurl.ErrConnectorResourceRequestRejected, state.ErrConnectorResourceState), want: InvalidInput},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := FromError(test.err); got != test.want {
+				t.Errorf("joined Connector resource error = %d, want %d", got, test.want)
+			}
+		})
 	}
 }
 

@@ -3,19 +3,21 @@ package main
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"io"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	connectorshare "github.com/layervai/qurl-connector/pkg/share"
+	qurl "github.com/layervai/qurl-go/qurl"
 	"github.com/spf13/cobra"
 
-	"github.com/layervai/qurl-integrations/apps/cli/internal/auth"
-	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/agent"
-	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/supervisor"
+	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
+	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/consume"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/output"
 )
 
@@ -31,57 +33,22 @@ func rootCmd(version string) *cobra.Command {
 // the pinned 51-character wire format (prefix + 43 URL-safe base-64 chars).
 const testAPIKey = "lv_test_abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG"
 
-// testAPIKeyStored is a second shape-valid key, distinguishable from
-// testAPIKey, for asserting which credential source a command actually used.
-const testAPIKeyStored = "lv_test_storedstoredstoredstoredstoredstored0123456"
+// connectorStateTestDir creates a state namespace through the same
+// owner-only setup path that a real CLI invocation uses. Windows temp
+// directories inherit a broad ACL, so passing t.TempDir() itself would test
+// the intentional fail-closed path instead of a normal installation.
+func connectorStateTestDir(t *testing.T) string {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), "connector-state")
+	if err := connectorstate.EnsureDirMode(dir); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
 
 // fixedNow is the harness clock: one day after the mock server's canned
 // created_at timestamps, so relative times render deterministically.
 var fixedNow = time.Date(2026, 3, 2, 0, 0, 0, 0, time.UTC)
-
-// fakeKeyring is the harness's OS-keyring stand-in, injected so cmd tests
-// never touch a developer's real keyring. It obeys the CredentialStore
-// contract Chain keys on: an empty available keyring wraps ErrNoCredential,
-// an unavailable one errors any other way (reads included), and deleteErr
-// models a reachable keyring whose delete genuinely fails.
-type fakeKeyring struct {
-	key         string
-	unavailable bool
-	deleteErr   error
-}
-
-var errFakeKeyringDown = errors.New("no keyring daemon on this bus")
-
-func (f *fakeKeyring) Name() string { return "OS keyring" }
-func (f *fakeKeyring) Save(key string) error {
-	if f.unavailable {
-		return errFakeKeyringDown
-	}
-	f.key = key
-	return nil
-}
-func (f *fakeKeyring) Load() (string, error) {
-	if f.unavailable {
-		return "", errFakeKeyringDown
-	}
-	if f.key == "" {
-		return "", fmt.Errorf("%w: nothing stored", auth.ErrNoCredential)
-	}
-	return f.key, nil
-}
-func (f *fakeKeyring) Delete() (bool, error) {
-	if f.unavailable {
-		return false, errFakeKeyringDown
-	}
-	if f.deleteErr != nil {
-		return false, f.deleteErr
-	}
-	if f.key == "" {
-		return false, nil
-	}
-	f.key = ""
-	return true, nil
-}
 
 // fakeBrowser is the harness's browser-launcher stand-in: it records every
 // link the CLI tried to open and never starts a process. The seam is always
@@ -112,36 +79,50 @@ type runOpts struct {
 	// Only the clisandbox-tagged live sandbox suite sets it; hermetic tests
 	// never wall-clock sleep.
 	realSleep bool
-	// keyring is the injected OS-keyring stand-in; nil means an empty,
-	// available fake. The file side of the chain is always the real file
-	// store rooted at configDir.
-	keyring *fakeKeyring
 	// browser is the injected launcher recorder; nil means a fresh recorder
 	// (pass one to assert on what was — or was not — opened).
 	browser *fakeBrowser
-	// enterPortal is the injected platform access opener; nil means a
-	// refusing fake, so no hermetic test can ever send a real access
-	// request (the clisandbox journey uses the production wiring via
-	// realOpener instead).
-	enterPortal func(ctx context.Context, link string) (string, error)
+	// enterPortalGrant is the injected platform access opener; nil means a
+	// refusing fake, so no hermetic test can ever send a real access request
+	// (the clisandbox journey uses the production wiring via realOpener).
+	enterPortalGrant func(ctx context.Context, link string) (consume.AccessGrant, error)
 	// realOpener keeps the production access opener in place instead of the
 	// refusing fake. Only the clisandbox-tagged live suite sets it.
 	realOpener bool
+	verifyLink func(context.Context, string, string) error
 
-	// ctx, when non-nil, replaces context.Background() so a test can cancel
-	// a long-running command (connector run's simulated INT/TERM).
-	ctx context.Context
-	// Connector seams; nil keeps the production wiring (agent.Open /
-	// knock.NewNative / package-default supervisor timings).
-	connectorOpen func(ctx context.Context, cfg *agent.Config) (*agent.Runtime, error)
-	newKnocker    func(rt *agent.Runtime, knockResourceID string) (connectorKnocker, error)
-	connectorTune func(cfg *supervisor.Config)
+	// ctx, when non-nil, replaces context.Background() so a test can cancel a
+	// foreground daemon or another long-running command.
+	ctx                  context.Context
+	localShares          []connectorstate.LocalShare
+	localSharesErr       error
+	localSharesLoads     *int
+	readLocalShares      func(context.Context, string) ([]connectorstate.LocalShare, bool, error)
+	shareRegistry        localShareRegistry
+	shareDaemon          shareDaemonController
+	shareRegistryFactory func(string) (localShareRegistry, error)
+	shareDaemonFactory   func(string, string) shareDaemonController
+	preflightTarget      func(context.Context, string, int) error
+	shareStateDir        string
+	shareStateDirErr     error
+	localResource        localResourceResolver
+	foregroundDaemon     func(context.Context, *globalOpts, string, string) error
+	sharingWaitLimit     time.Duration
+	// platformGOOS overrides the hermetic default of darwin for tests that
+	// exercise the production platform fence.
+	platformGOOS string
 	// syncStreams serializes writes to the captured stdout/stderr buffers.
 	// The connector serve test needs it: the linked FRP client and the
 	// in-process test server log from their own goroutines through the
 	// redirected process-global logger while the command goroutine writes
 	// too.
 	syncStreams bool
+	// openRegisteredClient overrides login's native enrollment boundary.
+	// The default returns the already-validated account mock as a registered
+	// client so command tests stay HTTP-only; dedicated API and connector tests
+	// cover the real registered-state seams.
+	openRegisteredClient func(context.Context, qurlapi.AccountClient, string, *qurlapi.Identity) (qurlapi.Client, *qurlapi.Identity, error)
+	openAPIClient        func(context.Context) (qurlapi.Client, error)
 }
 
 // runResult captures one invocation's streams and exit code.
@@ -183,16 +164,18 @@ func runCLI(t *testing.T, o *runOpts) *runResult {
 		streams.Err = &syncWriter{w: &res.stderr}
 	}
 
-	kr := o.keyring
-	if kr == nil {
-		kr = &fakeKeyring{}
-	}
 	browser := o.browser
 	if browser == nil {
 		browser = &fakeBrowser{}
 	}
 
 	root, opts := newRoot("test", streams, func(g *globalOpts) {
+		// Exercise the injected background-job/daemon boundary on every host. The
+		// separate platform-contract test keeps unsupported hosts fail-closed.
+		g.backgroundShareGOOS = o.platformGOOS
+		if g.backgroundShareGOOS == "" {
+			g.backgroundShareGOOS = "darwin"
+		}
 		g.lookupEnv = func(key string) (string, bool) {
 			v, ok := env[key]
 			return v, ok
@@ -200,19 +183,40 @@ func runCLI(t *testing.T, o *runOpts) *runResult {
 		g.configDir = configDir
 		g.now = func() time.Time { return fixedNow }
 		g.newRequestID = func() string { return "cli-req-fixed" }
-		g.newCredentialStore = func(dir string, onFileRead func()) *auth.Chain {
-			return auth.NewChain(kr, auth.NewFileStore(dir), onFileRead)
+		g.openAPIClient = func(context.Context) (qurlapi.Client, error) {
+			key, err := g.apiCredential()
+			if err != nil {
+				return nil, err
+			}
+			return g.apiClient(key)
+		}
+		if o.openRegisteredClient != nil {
+			g.openRegisteredClient = o.openRegisteredClient
+		} else {
+			g.openRegisteredClient = func(_ context.Context, account qurlapi.AccountClient, _ string, identity *qurlapi.Identity) (qurlapi.Client, *qurlapi.Identity, error) {
+				return account, identity, nil
+			}
+		}
+		if o.openAPIClient != nil {
+			g.openAPIClient = o.openAPIClient
 		}
 		g.openBrowser = browser.open
+		if o.verifyLink != nil {
+			g.verifyLink = o.verifyLink
+		} else if !o.realOpener {
+			// Command orchestration fixtures use synthetic links. Binding tests
+			// inject the real SDK verifier; live journeys keep production trust.
+			g.verifyLink = func(context.Context, string, string) error { return nil }
+		}
 		switch {
-		case o.enterPortal != nil:
-			g.enterPortal = o.enterPortal
+		case o.enterPortalGrant != nil:
+			g.enterPortalGrant = o.enterPortalGrant
 		case o.realOpener:
 			// nil is the production default: newRoot wires the real
 			// consume.AccessOpener over this invocation's lookupEnv.
 		default:
-			g.enterPortal = func(_ context.Context, link string) (string, error) {
-				return "", fmt.Errorf("test invoked the platform access opener without injecting one (link %d bytes)", len(link))
+			g.enterPortalGrant = func(_ context.Context, link string) (consume.AccessGrant, error) {
+				return consume.AccessGrant{}, fmt.Errorf("test invoked the platform access opener without injecting one (link %d bytes)", len(link))
 			}
 		}
 		switch {
@@ -226,14 +230,45 @@ func runCLI(t *testing.T, o *runOpts) *runResult {
 		default:
 			g.sleep = func(time.Duration) {} // tests never wall-clock sleep
 		}
-		if o.connectorOpen != nil {
-			g.openConnectorRuntime = o.connectorOpen
+		g.loadLocalShares = func(context.Context) ([]connectorstate.LocalShare, error) {
+			if o.localSharesLoads != nil {
+				*o.localSharesLoads++
+			}
+			return append([]connectorstate.LocalShare(nil), o.localShares...), o.localSharesErr
 		}
-		if o.newKnocker != nil {
-			g.newConnectorKnocker = o.newKnocker
+		if o.readLocalShares != nil {
+			g.readLocalShares = o.readLocalShares
 		}
-		if o.connectorTune != nil {
-			g.tuneConnectorSupervisor = o.connectorTune
+		if o.shareRegistryFactory != nil {
+			g.openShareRegistry = o.shareRegistryFactory
+		} else if o.shareRegistry != nil {
+			g.openShareRegistry = func(string) (localShareRegistry, error) { return o.shareRegistry, nil }
+		}
+		if o.shareDaemonFactory != nil {
+			g.newShareDaemon = o.shareDaemonFactory
+		} else if o.shareDaemon != nil {
+			g.newShareDaemon = func(string, string) shareDaemonController { return o.shareDaemon }
+		}
+		if o.preflightTarget != nil {
+			g.preflightTarget = o.preflightTarget
+		}
+		resolvedShareStateDir := o.shareStateDir
+		if resolvedShareStateDir == "" {
+			resolvedShareStateDir = filepath.Join(configDir, "connector-state")
+		}
+		g.resolveShareStateDir = func(string) (string, error) { return resolvedShareStateDir, o.shareStateDirErr }
+		g.resolveSessionConfig = func(ownerID string) (connectorshare.NativeSessionOperationAuthority, error) {
+			return connectorshare.NativeSessionOperationAuthority{OwnerID: ownerID}, nil
+		}
+		if o.localResource != nil {
+			g.resolveLocalResource = o.localResource
+			g.resolveHubBootstrap = func() (qurl.HubBootstrap, error) { return qurl.HubBootstrap{}, nil }
+		}
+		if o.foregroundDaemon != nil {
+			g.runForegroundDaemon = o.foregroundDaemon
+		}
+		if o.sharingWaitLimit > 0 {
+			g.sharingWaitLimit = o.sharingWaitLimit
 		}
 		// The FRP global logger is pinned once for the whole test binary in
 		// TestMain; a per-invocation swap would race the in-process tunnel

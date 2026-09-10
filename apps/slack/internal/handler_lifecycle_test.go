@@ -1070,3 +1070,46 @@ func TestUninstallConfirmRefusedClickReportsNoCleanup(t *testing.T) {
 		t.Fatalf("refused click leaked the left-behind-data caveat: %q", got)
 	}
 }
+
+func TestUninstallConfirmFailedTeardownReportsNoCleanup(t *testing.T) {
+	h, provider, ts := newLifecycleTestHandler(t)
+	provider.deleteErr = errors.New("storage unavailable")
+	ts.seedWorkspace(t, testEnterpriseID, testAdminOwnerID, testAdminUserID, testWorkspaceConfiguredAt)
+
+	value, ok := uninstallConfirmButtonValue(t, h, testAdminTeamID, testAdminUserID, uninstallGridContext{
+		enterpriseID:        testEnterpriseID,
+		isEnterpriseInstall: slackFormBoolTrue,
+	})
+	if !ok {
+		t.Fatalf("bare verb did not render a confirm button; got %q", value)
+	}
+
+	captured := &capturedResponseURL{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		captured.record(b)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+
+	// An authorized click drops the enterprise id, but storage prevents teardown.
+	body := exposeBlockActionsBodyWithEnterprise(t, testAdminTeamID, "", testAdminUserID, testExposeChannel, srv.URL, uninstallConfirmActionID, value)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, newSignedRequest(t, pathSlackInteractions, body, body))
+	if w.Code != http.StatusOK {
+		t.Fatalf("click ack = %d, want 200", w.Code)
+	}
+	got := parseSlackText(t, captured.waitForBody(t, 2*time.Second))
+	h.Wait()
+
+	if provider.deleteCalls != 1 {
+		t.Fatalf("DeleteAPIKey calls = %d, want 1 for an authorized click", provider.deleteCalls)
+	}
+	if !strings.Contains(got, "could not disconnect") {
+		t.Fatalf("reply = %q, want the disconnect failure", got)
+	}
+	// No teardown ran, so the admin must NOT be told data was left behind.
+	if strings.Contains(got, "could not be verified from this click") {
+		t.Fatalf("failed teardown leaked the left-behind-data caveat: %q", got)
+	}
+}

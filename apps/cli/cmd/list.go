@@ -1,9 +1,14 @@
 package main
 
 import (
+	"context"
+	"errors"
+
 	"github.com/spf13/cobra"
 
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
+	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/output"
 )
 
 func listCmd(opts *globalOpts) *cobra.Command {
@@ -19,14 +24,15 @@ func listCmd(opts *globalOpts) *cobra.Command {
 		Short: "List your published resources",
 		Long: `List the resources published under your account, one row per resource.
 
-The text table shortens each CRID from the middle so rows stay readable;
-JSON output and --quiet always carry the full CRID. Pages continue with
---cursor when there are more results.`,
+The text table always prints the full CRID. Local tunnel rows include their
+loopback target and durable desired state. Observed tunnel state is shown as
+unknown in this paged view; use qurl status <CRID> for an authoritative live
+observation. Pages continue with --cursor when there are more results.`,
 		Example: `  qurl list --status active
-  qurl list --quiet | xargs -n1 qurl resolve --quiet`,
+  qurl list --quiet | xargs -n1 qurl share --quiet`,
 		Args: noArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			client, err := opts.newClient()
+			client, err := opts.newClient(cmd.Context())
 			if err != nil {
 				return err
 			}
@@ -39,6 +45,14 @@ JSON output and --quiet always carry the full CRID. Pages continue with
 			if err != nil {
 				return err
 			}
+			// JSON is the same structured document with or without --quiet.
+			// Keep its local tunnel targets stable; only quiet text skips the
+			// registry read because it prints identifiers alone.
+			if !opts.quiet || opts.resolvedFormat == output.FormatJSON {
+				if err := enrichTunnelList(cmd.Context(), opts, page); err != nil {
+					return err
+				}
+			}
 			return opts.printer().List(page)
 		},
 	}
@@ -49,4 +63,39 @@ JSON output and --quiet always carry the full CRID. Pages continue with
 	cmd.Flags().StringVar(&resType, "type", "", "only resources of this kind: url or tunnel")
 
 	return cmd
+}
+
+func enrichTunnelList(ctx context.Context, opts *globalOpts, page *qurlapi.ResourcePage) error {
+	tunnelRows := make([]int, 0, len(page.Items))
+	for index := range page.Items {
+		if page.Items[index].Type == connectorResourceType {
+			tunnelRows = append(tunnelRows, index)
+		}
+	}
+	if len(tunnelRows) == 0 {
+		return nil
+	}
+	shares, err := opts.loadLocalShares(ctx)
+	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if errors.Is(err, connectorstate.ErrNoDefaultStateDir) {
+			return nil
+		}
+		opts.printer().Warnf("Local sharing state is invalid or inaccessible; local targets were omitted: %v", err)
+		return nil
+	}
+	localTargets := make(map[string]string, len(shares))
+	for index := range shares {
+		share := &shares[index]
+		localTargets[share.ResourceID] = share.TargetURL
+	}
+	for _, index := range tunnelRows {
+		if target := localTargets[page.Items[index].ResourceID]; target != "" {
+			page.Items[index].TargetURL = target
+		}
+	}
+
+	return nil
 }

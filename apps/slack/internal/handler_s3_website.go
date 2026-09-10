@@ -37,9 +37,10 @@ const (
 const S3OriginImageDigestRequired = "S3 origin image reference must be digest-pinned as image@sha256:<64 lowercase hex>"
 
 // TODO(upstream-contract): the generated Docker, Compose, and Kubernetes
-// artifacts assume qurl-connector and origins/s3-static-connector both run as
-// distroless nonroot UID/GID 65532. Keep host ownership, fsGroup, runAsUser,
-// runAsGroup, and Secret defaultMode in lockstep with those image users.
+// artifacts assume the qurl sidecar and origins/s3-static-connector both run
+// as distroless nonroot UID/GID 65532. Keep host ownership, fsGroup,
+// runAsUser, runAsGroup, and Secret defaultMode in lockstep with those image
+// users.
 // TODO(upstream-contract): origins/s3-static-connector treats S3_PREFIX="" as
 // the bucket root. All renderers emit that explicit empty value.
 
@@ -82,9 +83,12 @@ type s3WebsiteInstallArgs struct {
 	// Server-issued connector fields are populated after parsing, immediately
 	// before rendering; Slack modal input can never supply them.
 	ResourceID         string
+	CRID               string
 	ConnectorRoutingID string
 	KnockResourceID    string
+	ServingEpoch       uint64
 	APIURL             string
+	OwnerID            string
 }
 
 type s3WebsiteInstallRequest struct {
@@ -109,16 +113,16 @@ func (h *Handler) handleConnectorSetupSubmission(w http.ResponseWriter, payload 
 	setupType := strings.TrimSpace(interactionStateText(payload.View.State.Values, connectorSetupBlockType, connectorSetupActionType))
 	log := slog.With(
 		"command", "connector_setup_modal",
-		"team_id", sanitizeS3WebsiteLogValue(payload.Team.ID),
-		"user_id", sanitizeS3WebsiteLogValue(payload.User.ID),
-		"view_id", sanitizeS3WebsiteLogValue(payload.View.ID),
+		"team_id", sanitizeLogValue(payload.Team.ID),
+		"user_id", sanitizeLogValue(payload.User.ID),
+		"view_id", sanitizeLogValue(payload.View.ID),
 	)
 	if setupType != connectorSetupExistingService && setupType != connectorSetupS3Website {
 		log.Warn("connector setup modal rejected unknown setup type")
 		respondViewErrors(w, map[string]string{connectorSetupBlockType: "Choose one of the listed qURL Connector setup types."})
 		return
 	}
-	log = log.With("setup_type", sanitizeS3WebsiteLogValue(setupType))
+	log = log.With("setup_type", sanitizeLogValue(setupType))
 
 	var meta TunnelInstallModalMetadata
 	if err := json.Unmarshal([]byte(payload.View.PrivateMetadata), &meta); err != nil {
@@ -133,17 +137,17 @@ func (h *Handler) handleConnectorSetupSubmission(w http.ResponseWriter, payload 
 	}
 	modalAge := h.now().Sub(time.Unix(meta.CreatedAtUnix, 0))
 	if meta.CreatedAtUnix <= 0 || modalAge > tunnelInstallModalTTL || modalAge < -tunnelBootstrapSkew {
-		log.Warn("connector setup modal expired", "created_at_unix", sanitizeS3WebsiteLogValue(strconv.FormatInt(meta.CreatedAtUnix, 10)), "modal_age_ms", sanitizeS3WebsiteLogValue(strconv.FormatInt(modalAge.Milliseconds(), 10)))
+		log.Warn("connector setup modal expired", "created_at_unix", sanitizeLogValue(strconv.FormatInt(meta.CreatedAtUnix, 10)), "modal_age_ms", sanitizeLogValue(strconv.FormatInt(modalAge.Milliseconds(), 10)))
 		respondConnectorInstallModalError(w, "This modal expired. Run /qurl-admin protect and choose qURL Connector again.")
 		return
 	}
 	if payload.Team.ID == "" || payload.Team.ID != meta.TeamID {
-		log.Warn("connector setup modal team mismatch", "payload_team_id", sanitizeS3WebsiteLogValue(payload.Team.ID), "metadata_team_id", sanitizeS3WebsiteLogValue(meta.TeamID))
+		log.Warn("connector setup modal team mismatch", "payload_team_id", sanitizeLogValue(payload.Team.ID), "metadata_team_id", sanitizeLogValue(meta.TeamID))
 		respondConnectorInstallModalError(w, "This modal was opened for a different workspace. Run /qurl-admin protect and choose qURL Connector again.")
 		return
 	}
 	if payload.User.ID == "" || payload.User.ID != meta.UserID {
-		log.Warn("connector setup modal user mismatch", "payload_user_id", sanitizeS3WebsiteLogValue(payload.User.ID), "metadata_user_id", sanitizeS3WebsiteLogValue(meta.UserID))
+		log.Warn("connector setup modal user mismatch", "payload_user_id", sanitizeLogValue(payload.User.ID), "metadata_user_id", sanitizeLogValue(meta.UserID))
 		respondConnectorInstallModalError(w, "Only the admin who opened this modal can submit it. Run /qurl-admin protect and choose qURL Connector again to start a new setup.")
 		return
 	}
@@ -176,36 +180,36 @@ func (h *Handler) handleConnectorSetupSubmission(w http.ResponseWriter, payload 
 func (h *Handler) handleS3WebsiteInstallSubmission(w http.ResponseWriter, payload *ViewSubmission) {
 	var meta TunnelInstallModalMetadata
 	if err := json.Unmarshal([]byte(payload.View.PrivateMetadata), &meta); err != nil {
-		slog.Warn("S3 website install modal metadata parse failed", "error", sanitizeS3WebsiteLogValue(err.Error()), "team_id", sanitizeS3WebsiteLogValue(payload.Team.ID), "user_id", sanitizeS3WebsiteLogValue(payload.User.ID), "view_id", sanitizeS3WebsiteLogValue(payload.View.ID))
+		slog.Warn("S3 website install modal metadata parse failed", "error", sanitizeLogValue(err.Error()), "team_id", sanitizeLogValue(payload.Team.ID), "user_id", sanitizeLogValue(payload.User.ID), "view_id", sanitizeLogValue(payload.View.ID))
 		respondS3WebsiteInstallModalError(w, "Could not verify this modal. Run /qurl-admin protect and choose qURL Connector again.")
 		return
 	}
 	if meta.TeamID == "" || meta.ChannelID == "" || meta.UserID == "" || meta.ResponseURL == "" {
-		slog.Warn("S3 website install modal metadata incomplete", "team_id", sanitizeS3WebsiteLogValue(payload.Team.ID), "user_id", sanitizeS3WebsiteLogValue(payload.User.ID), "view_id", sanitizeS3WebsiteLogValue(payload.View.ID))
+		slog.Warn("S3 website install modal metadata incomplete", "team_id", sanitizeLogValue(payload.Team.ID), "user_id", sanitizeLogValue(payload.User.ID), "view_id", sanitizeLogValue(payload.View.ID))
 		respondS3WebsiteInstallModalError(w, "Could not verify this modal. Run /qurl-admin protect and choose qURL Connector again.")
 		return
 	}
 	log := slog.With(
 		"command", "s3_website_install_modal",
-		"team_id", sanitizeS3WebsiteLogValue(meta.TeamID),
-		"channel_id", sanitizeS3WebsiteLogValue(meta.ChannelID),
-		"user_id", sanitizeS3WebsiteLogValue(meta.UserID),
-		"view_id", sanitizeS3WebsiteLogValue(payload.View.ID),
+		"team_id", sanitizeLogValue(meta.TeamID),
+		"channel_id", sanitizeLogValue(meta.ChannelID),
+		"user_id", sanitizeLogValue(meta.UserID),
+		"view_id", sanitizeLogValue(payload.View.ID),
 	)
 
 	modalAge := h.now().Sub(time.Unix(meta.CreatedAtUnix, 0))
 	if meta.CreatedAtUnix <= 0 || modalAge > tunnelInstallModalTTL || modalAge < -tunnelBootstrapSkew {
-		log.Warn("S3 website install modal expired", "created_at_unix", sanitizeS3WebsiteLogValue(strconv.FormatInt(meta.CreatedAtUnix, 10)), "modal_age_ms", sanitizeS3WebsiteLogValue(strconv.FormatInt(modalAge.Milliseconds(), 10)))
+		log.Warn("S3 website install modal expired", "created_at_unix", sanitizeLogValue(strconv.FormatInt(meta.CreatedAtUnix, 10)), "modal_age_ms", sanitizeLogValue(strconv.FormatInt(modalAge.Milliseconds(), 10)))
 		respondS3WebsiteInstallModalError(w, "This modal expired. Run /qurl-admin protect and choose qURL Connector again.")
 		return
 	}
 	if payload.Team.ID == "" || payload.Team.ID != meta.TeamID {
-		log.Warn("S3 website install modal team mismatch", "payload_team_id", sanitizeS3WebsiteLogValue(payload.Team.ID), "metadata_team_id", sanitizeS3WebsiteLogValue(meta.TeamID))
+		log.Warn("S3 website install modal team mismatch", "payload_team_id", sanitizeLogValue(payload.Team.ID), "metadata_team_id", sanitizeLogValue(meta.TeamID))
 		respondS3WebsiteInstallModalError(w, "This modal was opened for a different workspace. Run /qurl-admin protect and choose qURL Connector again.")
 		return
 	}
 	if payload.User.ID == "" || payload.User.ID != meta.UserID {
-		log.Warn("S3 website install modal user mismatch", "payload_user_id", sanitizeS3WebsiteLogValue(payload.User.ID), "metadata_user_id", sanitizeS3WebsiteLogValue(meta.UserID))
+		log.Warn("S3 website install modal user mismatch", "payload_user_id", sanitizeLogValue(payload.User.ID), "metadata_user_id", sanitizeLogValue(meta.UserID))
 		respondS3WebsiteInstallModalError(w, "Only the admin who opened this modal can submit it. Run /qurl-admin protect and choose qURL Connector again to start a new setup.")
 		return
 	}
@@ -358,15 +362,6 @@ func normalizeS3WebsitePrefix(raw string) (prefix, reason string) {
 	return prefix, ""
 }
 
-// sanitizeS3WebsiteLogValue preserves diagnostic context while preventing a
-// Slack- or API-controlled value from forging a second plain-text log entry.
-// Production uses the shared JSON slog handler, which also escapes control
-// bytes; this remains a defense-in-depth boundary if the handler changes.
-func sanitizeS3WebsiteLogValue(value string) string {
-	value = strings.ReplaceAll(value, "\r", `\r`)
-	return strings.ReplaceAll(value, "\n", `\n`)
-}
-
 func respondS3WebsiteInstallModalError(w http.ResponseWriter, message string) {
 	view, err := S3WebsiteInstallErrorModal(message)
 	if err != nil {
@@ -387,6 +382,9 @@ func (h *Handler) processS3WebsiteInstall(ctx context.Context, log *slog.Logger,
 			log.Error("S3 website install: panic in setup worker", "recover", rec, "stack", string(debug.Stack()))
 			if panicCleanup != nil {
 				safeRevokeBootstrapKeyAfterInstallFailure(h.baseCtx, log, panicCleanup.client, panicCleanup.key, "s3_website_unexpected_panic")
+				if panicCleanup.disableOnFail {
+					disableSharingAfterInstallFailure(h.baseCtx, log, panicCleanup.client, panicCleanup.resource.ResourceID, "s3_website_unexpected_panic")
+				}
 			}
 			h.postS3WebsiteInstallUnexpectedFailureNotice(log, req)
 		}
@@ -398,7 +396,7 @@ func (h *Handler) processS3WebsiteInstall(ctx context.Context, log *slog.Logger,
 	}
 	args := req.args
 	if h.cfg.PostDM == nil {
-		log.Error("S3 website install: enrollment-token DM delivery is not configured; refusing to mint", "slug", sanitizeS3WebsiteLogValue(args.Slug))
+		log.Error("S3 website install: enrollment-token DM delivery is not configured; refusing to mint", "slug", sanitizeLogValue(args.Slug))
 		_ = h.postResponse(log, req.responseURL, "S3 website qURL Connector setup needs Slack DM delivery for the temporary enrollment token. No enrollment token was minted. Ask the operator to update the qURL Slack app, then run `/qurl-admin protect` again.")
 		return
 	}
@@ -409,10 +407,13 @@ func (h *Handler) processS3WebsiteInstall(ctx context.Context, log *slog.Logger,
 	}
 	panicCleanup = build
 
-	log.Info("S3 website qURL Connector setup succeeded", "slug", sanitizeS3WebsiteLogValue(args.Slug), "shortcut", sanitizeS3WebsiteLogValue(args.Alias), "environment", sanitizeS3WebsiteLogValue(string(args.Environment)), "resource_id", sanitizeS3WebsiteLogValue(build.resource.ResourceID))
+	log.Info("S3 website qURL Connector setup succeeded", "slug", sanitizeLogValue(args.Slug), "shortcut", sanitizeLogValue(args.Alias), "environment", sanitizeLogValue(string(args.Environment)), "resource_id", sanitizeLogValue(build.resource.ResourceID))
 	if err := h.postTunnelInstallDM(ctx, req.teamID, req.enterpriseID, req.userID, build.secretMessage); err != nil {
-		log.Error("S3 website install: Slack DM delivery failed after enrollment token mint; revoking token before posting install instructions", "error", sanitizeS3WebsiteLogValue(err.Error()), "slug", sanitizeS3WebsiteLogValue(args.Slug), "resource_id", sanitizeS3WebsiteLogValue(build.resource.ResourceID), "key_id", sanitizeS3WebsiteLogValue(build.key.KeyID))
+		log.Error("S3 website install: Slack DM delivery failed after enrollment token mint; revoking token before posting install instructions", "error", sanitizeLogValue(err.Error()), "slug", sanitizeLogValue(args.Slug), "resource_id", sanitizeLogValue(build.resource.ResourceID), "key_id", sanitizeLogValue(build.key.KeyID))
 		safeRevokeBootstrapKeyAfterInstallFailure(h.baseCtx, log, build.client, build.key, "s3_website_dm_delivery_failed")
+		if build.disableOnFail {
+			disableSharingAfterInstallFailure(h.baseCtx, log, build.client, build.resource.ResourceID, "s3_website_dm_delivery_failed")
+		}
 		panicCleanup = nil
 		message := "Slack could not deliver the qURL Connector enrollment token by DM, so the temporary token was revoked and the install instructions were not posted."
 		if errors.Is(err, ErrSlackMissingScope) {
@@ -428,21 +429,27 @@ func (h *Handler) processS3WebsiteInstall(ctx context.Context, log *slog.Logger,
 	case tunnelInstallInstructionsDeliverySucceeded, tunnelInstallInstructionsDeliveryDegraded:
 		panicCleanup = nil
 	case tunnelInstallInstructionsDeliveryFailed:
-		log.Error("S3 website install: Slack follow-up delivery failed after enrollment token mint; revoking token", "slug", sanitizeS3WebsiteLogValue(args.Slug), "resource_id", sanitizeS3WebsiteLogValue(build.resource.ResourceID), "key_id", sanitizeS3WebsiteLogValue(build.key.KeyID))
+		log.Error("S3 website install: Slack follow-up delivery failed after enrollment token mint; revoking token", "slug", sanitizeLogValue(args.Slug), "resource_id", sanitizeLogValue(build.resource.ResourceID), "key_id", sanitizeLogValue(build.key.KeyID))
 		safeRevokeBootstrapKeyAfterInstallFailure(h.baseCtx, log, build.client, build.key, "s3_website_response_url_delivery_failed")
+		if build.disableOnFail {
+			disableSharingAfterInstallFailure(h.baseCtx, log, build.client, build.resource.ResourceID, "s3_website_response_url_delivery_failed")
+		}
 		panicCleanup = nil
 		if err := h.postTunnelInstallDM(h.baseCtx, req.teamID, req.enterpriseID, req.userID, "The S3 website qURL Connector install instructions were not delivered, so the temporary enrollment token from the previous DM was revoked. Discard that token and run `/qurl-admin protect` again."); err != nil {
-			log.Error("S3 website install: Slack discard DM delivery failed after enrollment token revoke", "error", sanitizeS3WebsiteLogValue(err.Error()), "slug", sanitizeS3WebsiteLogValue(args.Slug), "resource_id", sanitizeS3WebsiteLogValue(build.resource.ResourceID), "key_id", sanitizeS3WebsiteLogValue(build.key.KeyID), "event", "s3_website_bootstrap_discard_dm_delivery_failed")
+			log.Error("S3 website install: Slack discard DM delivery failed after enrollment token revoke", "error", sanitizeLogValue(err.Error()), "slug", sanitizeLogValue(args.Slug), "resource_id", sanitizeLogValue(build.resource.ResourceID), "key_id", sanitizeLogValue(build.key.KeyID), "event", "s3_website_bootstrap_discard_dm_delivery_failed")
 		}
 		if !h.postResponse(log, req.responseURL, "Slack did not confirm delivery of the S3 website qURL Connector install instructions, so the enrollment token was revoked. If the install block from this attempt appears later, discard it because its token is no longer valid. Run `/qurl-admin protect` again.") {
-			log.Error("S3 website install: Slack discard notice delivery failed after enrollment token revoke", "slug", sanitizeS3WebsiteLogValue(args.Slug), "resource_id", sanitizeS3WebsiteLogValue(build.resource.ResourceID), "key_id", sanitizeS3WebsiteLogValue(build.key.KeyID), "event", "s3_website_bootstrap_discard_notice_delivery_failed")
+			log.Error("S3 website install: Slack discard notice delivery failed after enrollment token revoke", "slug", sanitizeLogValue(args.Slug), "resource_id", sanitizeLogValue(build.resource.ResourceID), "key_id", sanitizeLogValue(build.key.KeyID), "event", "s3_website_bootstrap_discard_notice_delivery_failed")
 		}
 	default:
-		log.Error("S3 website install: unknown Slack follow-up delivery state after enrollment token mint; revoking token", "slug", sanitizeS3WebsiteLogValue(args.Slug), "resource_id", sanitizeS3WebsiteLogValue(build.resource.ResourceID), "key_id", sanitizeS3WebsiteLogValue(build.key.KeyID))
+		log.Error("S3 website install: unknown Slack follow-up delivery state after enrollment token mint; revoking token", "slug", sanitizeLogValue(args.Slug), "resource_id", sanitizeLogValue(build.resource.ResourceID), "key_id", sanitizeLogValue(build.key.KeyID))
 		safeRevokeBootstrapKeyAfterInstallFailure(h.baseCtx, log, build.client, build.key, "s3_website_unknown_response_url_delivery_state")
+		if build.disableOnFail {
+			disableSharingAfterInstallFailure(h.baseCtx, log, build.client, build.resource.ResourceID, "s3_website_unknown_response_url_delivery_state")
+		}
 		panicCleanup = nil
 		if !h.postResponse(log, req.responseURL, "Slack returned an unexpected delivery state for the S3 website qURL Connector install instructions, so the enrollment token was revoked. If an install block from this attempt appears later, discard it because its token is no longer valid. Run `/qurl-admin protect` again.") {
-			log.Error("S3 website install: unknown delivery-state discard notice failed after enrollment token revoke", "slug", sanitizeS3WebsiteLogValue(args.Slug), "resource_id", sanitizeS3WebsiteLogValue(build.resource.ResourceID), "key_id", sanitizeS3WebsiteLogValue(build.key.KeyID), "event", "s3_website_unknown_delivery_discard_notice_failed")
+			log.Error("S3 website install: unknown delivery-state discard notice failed after enrollment token revoke", "slug", sanitizeLogValue(args.Slug), "resource_id", sanitizeLogValue(build.resource.ResourceID), "key_id", sanitizeLogValue(build.key.KeyID), "event", "s3_website_unknown_delivery_discard_notice_failed")
 		}
 	}
 }
@@ -462,25 +469,38 @@ func (h *Handler) postS3WebsiteInstallUnexpectedFailureNotice(log *slog.Logger, 
 	_ = h.postResponse(log, req.responseURL, s3WebsiteUnexpectedFailureNotice)
 }
 
+//nolint:gocognit,gocyclo // Keeping the ordered mutation and compensation transaction visible prevents cleanup ownership from drifting between stages.
 func (h *Handler) buildS3WebsiteInstall(ctx context.Context, log *slog.Logger, teamID, channelID, userID string, args *s3WebsiteInstallArgs, attemptID string) (*tunnelInstallBuild, string, error) {
 	var c *client.Client
 	var mintedKey *client.APIKey
+	var resourceID string
+	sharingNeedsCleanup := false
 	buildComplete := false
 	defer func() {
 		if rec := recover(); rec != nil {
 			if mintedKey != nil && !buildComplete {
 				safeRevokeBootstrapKeyAfterInstallFailure(h.baseCtx, log, c, mintedKey, "s3_website_build_panic")
 			}
+			if sharingNeedsCleanup && !buildComplete {
+				disableSharingAfterInstallFailure(h.baseCtx, log, c, resourceID, "s3_website_build_panic")
+			}
 			panic(rec)
+		}
+		if sharingNeedsCleanup && !buildComplete {
+			disableSharingAfterInstallFailure(h.baseCtx, log, c, resourceID, "s3_website_build_failed")
 		}
 	}()
 
 	c, err := h.authenticatedClient(ctx, teamID)
 	if err != nil {
-		log.Error("S3 website install: failed to get API key", "error", sanitizeS3WebsiteLogValue(err.Error()))
+		log.Error("S3 website install: failed to get API key", "error", sanitizeLogValue(err.Error()))
 		return nil, authErrorMessage(err), err
 	}
 
+	ownerID, err := resolveInstallOwnerID(ctx, c, log, "S3 website install", args.Slug)
+	if err != nil {
+		return nil, ownerLookupFailureMessage(err), err
+	}
 	resource, err := c.CreateResource(ctx, &client.CreateResourceInput{
 		Type:         client.ResourceTypeTunnel,
 		Slug:         args.Slug,
@@ -488,38 +508,57 @@ func (h *Handler) buildS3WebsiteInstall(ctx context.Context, log *slog.Logger, t
 		Description:  defaultS3WebsiteDescription,
 	})
 	if err != nil {
-		log.Error("S3 website install: create/find resource failed", "error", sanitizeS3WebsiteLogValue(err.Error()), "slug", sanitizeS3WebsiteLogValue(args.Slug))
-		return nil, sanitizeAPIError(err, "Failed to create or find the qURL Connector resource"), err
+		log.Error("S3 website install: create/find resource failed", withAPIErrorAttrs(err, "error", err, "slug", sanitizeLogValue(args.Slug))...)
+		return nil, connectorResourceCreateErrorMessage(err), err
 	}
 	resolvedArgs := *args
 	if err := resolvedArgs.pinConnectorResource(resource, h.cfg.ConnectorAPIURL); err != nil {
 		if errors.Is(err, errConnectorAPIURLMissing) || errors.Is(err, errConnectorAPIURLInvalid) {
-			log.Error("S3 website install: local connector API URL configuration invalid", "error", sanitizeS3WebsiteLogValue(err.Error()), "slug", sanitizeS3WebsiteLogValue(args.Slug))
+			log.Error("S3 website install: local connector API URL configuration invalid", "error", sanitizeLogValue(err.Error()), "slug", sanitizeLogValue(args.Slug))
 			return nil, "S3 website qURL Connector setup is unavailable because this Slack deployment has an invalid QURL_ENDPOINT. No enrollment token was minted. Contact the operator.", err
 		}
 		resourceIDPresent := resource != nil && strings.TrimSpace(resource.ResourceID) != ""
 		connectorRoutingIDPresent := resource != nil && strings.TrimSpace(resource.ConnectorRoutingID) != ""
 		knockResourceIDPresent := resource != nil && strings.TrimSpace(resource.KnockResourceID) != ""
-		log.Error("S3 website install: qURL API response missing pinned connector identity", "error", sanitizeS3WebsiteLogValue(err.Error()), "slug", sanitizeS3WebsiteLogValue(args.Slug), "resource_id_present", resourceIDPresent, "connector_routing_id_present", connectorRoutingIDPresent, "knock_resource_id_present", knockResourceIDPresent)
-		return nil, "qURL Connector setup could not receive the complete routing details needed for enrollment. No enrollment token was minted. Please retry after the qURL API returns resource_id, connector_routing_id, and knock_resource_id for Connector resources.", fmt.Errorf("qURL Connector resource identity incomplete: %w", err)
+		log.Error("S3 website install: qURL API response missing pinned connector identity", "error", sanitizeLogValue(err.Error()), "slug", sanitizeLogValue(args.Slug), "resource_id_present", resourceIDPresent, "connector_routing_id_present", connectorRoutingIDPresent, "knock_resource_id_present", knockResourceIDPresent)
+		return nil, "qURL Connector setup could not receive the complete routing details needed for enrollment. No enrollment token was minted. Please retry or contact support.", fmt.Errorf("qURL Connector resource identity incomplete: %w", err)
 	}
+	resolvedArgs.OwnerID = ownerID
+	resourceID = resource.ResourceID
 
 	aliasStatus, err := h.ensureTunnelAlias(ctx, teamID, channelID, args.Alias, resolvedArgs.ResourceID)
 	if err != nil {
-		log.Error("S3 website install: channel shortcut bind failed", "error", sanitizeS3WebsiteLogValue(err.Error()), "shortcut", sanitizeS3WebsiteLogValue(args.Alias), "resource_id", sanitizeS3WebsiteLogValue(resolvedArgs.ResourceID))
+		log.Error("S3 website install: channel shortcut bind failed", "error", sanitizeLogValue(err.Error()), "shortcut", sanitizeLogValue(args.Alias), "resource_id", sanitizeLogValue(resolvedArgs.ResourceID))
 		return nil, aliasStatus, err
 	}
+	previousSharing, err := c.GetSharing(ctx, resource.ResourceID)
+	if err != nil {
+		return nil, sanitizeAPIError(err, "Failed to read qURL Connector sharing state"), err
+	}
+	restarted, err := restartSharingForInstall(ctx, c, resource.ResourceID, previousSharing)
+	if err != nil {
+		return nil, sanitizeAPIError(err, "Failed to enable qURL Connector sharing"), err
+	}
+	// Preserve prior authoritative intent. A prior-on sidecar can reacquire the
+	// rotated epoch through the stale-session path; only a prior-off install
+	// owns a new on transition that must be compensated if setup fails.
+	sharingNeedsCleanup = previousSharing.DesiredState == sharingDesiredOff
+	resolvedArgs.CRID = restarted.CRID
+	resolvedArgs.ServingEpoch = restarted.ServingEpoch
 
 	preparedMessage, err := h.prepareS3WebsiteInstallMessage(&resolvedArgs)
 	if err != nil {
-		log.Error("S3 website install: render preflight failed", "error", sanitizeS3WebsiteLogValue(err.Error()), "slug", sanitizeS3WebsiteLogValue(args.Slug), "resource_id", sanitizeS3WebsiteLogValue(resolvedArgs.ResourceID))
-		return nil, "S3 website qURL Connector setup could not render the install instructions. No enrollment token was minted. Please retry or contact support.", err
+		log.Error("S3 website install: render preflight failed", "error", sanitizeLogValue(err.Error()), "slug", sanitizeLogValue(args.Slug), "resource_id", sanitizeLogValue(resolvedArgs.ResourceID))
+		return nil, sharingInstallFailureMessage("S3 website qURL Connector setup could not render the install instructions. No enrollment token was minted. Please retry or contact support.", previousSharing), err
 	}
 
 	key, err := c.CreateAPIKey(ctx, &client.CreateAPIKeyInput{
-		Name:           "Slack qURL Connector enrollment " + args.Slug,
-		Kind:           client.CredentialKindEnrollmentToken,
-		Target:         client.CredentialTargetConnector,
+		Name: "Slack qURL Connector enrollment " + args.Slug,
+		Kind: client.CredentialKindEnrollmentToken,
+		// Agent-target (see handler_tunnel.go): owner-scoped device enrollment.
+		Target: client.CredentialTargetAgent,
+		// Bound agent token (qurl-service #1347): owner-scoped session-control
+		// enrollment that stays bound to this resource.
 		Claims:         []client.CredentialClaim{{Type: client.CredentialClaimTypeConnector, ID: args.Slug}},
 		ExpiresIn:      tunnelBootstrapTTL,
 		IdempotencyKey: tunnelBootstrapIdempotencyKey(teamID, channelID, userID, args.Slug, attemptID),
@@ -528,36 +567,42 @@ func (h *Handler) buildS3WebsiteInstall(ctx context.Context, log *slog.Logger, t
 		// Match the tunnel twin: APIError.Error() renders only "Title (Status):
 		// Detail", so the bare error drops the server's invalid_fields — the part
 		// that names the rejected key on a kind-first contract rejection.
-		log.Error("S3 website install: enrollment token mint failed", withAPIErrorAttrs(err, "error", err, "slug", sanitizeS3WebsiteLogValue(args.Slug), "resource_id", sanitizeS3WebsiteLogValue(resolvedArgs.ResourceID))...)
-		return nil, sanitizeAPIError(err, "Failed to mint a qURL Connector enrollment token"), err
+		log.Error("S3 website install: enrollment token mint failed", withAPIErrorAttrs(err, "error", err, "slug", sanitizeLogValue(args.Slug), "resource_id", sanitizeLogValue(resolvedArgs.ResourceID))...)
+		return nil, sharingInstallFailureMessage(sanitizeAPIError(err, "Failed to mint a qURL Connector enrollment token"), previousSharing), err
 	}
 	mintedKey = key
+	// Correlate on resource_id/key_id rather than the caller-supplied
+	// slug; keeping user-controlled input out of this line avoids a
+	// go/log-injection finding.
+	if err := h.rejectUnconfirmedCredential(log, c, key, kindFirstGate{resourceID: resource.ResourceID, slug: args.Slug, flow: "S3 website install", revokeReason: "s3_website_kind_first_unconfirmed"}); err != nil {
+		return nil, sharingInstallFailureMessage(kindFirstUnconfirmedInstallMessage, previousSharing), err
+	}
 	if key.APIKey == "" {
-		log.Error("S3 website install: create api key response missing plaintext", "slug", sanitizeS3WebsiteLogValue(args.Slug), "resource_id", sanitizeS3WebsiteLogValue(resolvedArgs.ResourceID), "key_id", sanitizeS3WebsiteLogValue(key.KeyID))
+		log.Error("S3 website install: create api key response missing plaintext", "slug", sanitizeLogValue(args.Slug), "resource_id", sanitizeLogValue(resolvedArgs.ResourceID), "key_id", sanitizeLogValue(key.KeyID))
 		revokeBootstrapKeyAfterInstallFailure(h.baseCtx, log, c, key, "s3_website_missing_plaintext")
-		return nil, "The qURL API did not return an enrollment token. Please retry or contact support.", errMissingBootstrapPlaintext
+		return nil, sharingInstallFailureMessage("The qURL API did not return an enrollment token. Please retry or contact support.", previousSharing), errMissingBootstrapPlaintext
 	}
 	if err := validateBootstrapAPIKeyForShell(key.APIKey); err != nil {
-		log.Error("S3 website install: create api key response was not shell-renderable", "error", sanitizeS3WebsiteLogValue(err.Error()), "slug", sanitizeS3WebsiteLogValue(args.Slug), "resource_id", sanitizeS3WebsiteLogValue(resolvedArgs.ResourceID), "key_id", sanitizeS3WebsiteLogValue(key.KeyID))
+		log.Error("S3 website install: create api key response was not shell-renderable", "error", sanitizeLogValue(err.Error()), "slug", sanitizeLogValue(args.Slug), "resource_id", sanitizeLogValue(resolvedArgs.ResourceID), "key_id", sanitizeLogValue(key.KeyID))
 		revokeBootstrapKeyAfterInstallFailure(h.baseCtx, log, c, key, "s3_website_shell_validation_failed")
-		return nil, "The qURL API returned an enrollment token in an unexpected format. Please retry or contact support.", err
+		return nil, sharingInstallFailureMessage("The qURL API returned an enrollment token in an unexpected format. Please retry or contact support.", previousSharing), err
 	}
 
 	msg, err := preparedMessage.render(&resolvedArgs, key, aliasStatus, resource.Description, h.now())
 	if err != nil {
-		log.Error("S3 website install: render failed after enrollment token mint", "error", sanitizeS3WebsiteLogValue(err.Error()), "slug", sanitizeS3WebsiteLogValue(args.Slug), "resource_id", sanitizeS3WebsiteLogValue(resolvedArgs.ResourceID), "key_id", sanitizeS3WebsiteLogValue(key.KeyID))
+		log.Error("S3 website install: render failed after enrollment token mint", "error", sanitizeLogValue(err.Error()), "slug", sanitizeLogValue(args.Slug), "resource_id", sanitizeLogValue(resolvedArgs.ResourceID), "key_id", sanitizeLogValue(key.KeyID))
 		revokeBootstrapKeyAfterInstallFailure(h.baseCtx, log, c, key, "s3_website_message_render_failed")
-		return nil, "S3 website qURL Connector setup could not render the install instructions. The temporary enrollment token was revoked. Please retry or contact support.", err
+		return nil, sharingInstallFailureMessage("S3 website qURL Connector setup could not render the install instructions. The temporary enrollment token was revoked. Please retry or contact support.", previousSharing), err
 	}
 	secretMsg, err := renderTunnelBootstrapSecretMessage(&tunnelInstallArgs{Slug: args.Slug}, key, h.now())
 	if err != nil {
-		log.Error("S3 website install: secret message render failed after enrollment token mint", "error", sanitizeS3WebsiteLogValue(err.Error()), "slug", sanitizeS3WebsiteLogValue(args.Slug), "resource_id", sanitizeS3WebsiteLogValue(resolvedArgs.ResourceID), "key_id", sanitizeS3WebsiteLogValue(key.KeyID))
+		log.Error("S3 website install: secret message render failed after enrollment token mint", "error", sanitizeLogValue(err.Error()), "slug", sanitizeLogValue(args.Slug), "resource_id", sanitizeLogValue(resolvedArgs.ResourceID), "key_id", sanitizeLogValue(key.KeyID))
 		revokeBootstrapKeyAfterInstallFailure(h.baseCtx, log, c, key, "s3_website_secret_message_render_failed")
-		return nil, "S3 website qURL Connector setup could not render the enrollment-token DM. The temporary enrollment token was revoked. Please retry or contact support.", err
+		return nil, sharingInstallFailureMessage("S3 website qURL Connector setup could not render the enrollment-token DM. The temporary enrollment token was revoked. Please retry or contact support.", previousSharing), err
 	}
 
 	buildComplete = true
-	return &tunnelInstallBuild{client: c, resource: resource, key: key, message: msg, secretMessage: secretMsg}, "", nil
+	return &tunnelInstallBuild{client: c, resource: resource, key: key, disableOnFail: sharingNeedsCleanup, message: msg, secretMessage: secretMsg}, "", nil
 }
 
 func (h *Handler) prepareS3WebsiteInstallMessage(args *s3WebsiteInstallArgs) (preparedS3WebsiteInstallMessage, error) {
@@ -692,8 +737,11 @@ func renderS3WebsiteConnectorConfigYAML(args *s3WebsiteInstallArgs) (string, err
 		Slug:               args.Slug,
 		LocalPort:          s3WebsiteOriginPort,
 		ResourceID:         args.ResourceID,
+		CRID:               args.CRID,
 		ConnectorRoutingID: args.ConnectorRoutingID,
 		KnockResourceID:    args.KnockResourceID,
+		ServingEpoch:       args.ServingEpoch,
+		OwnerID:            args.OwnerID,
 	})
 }
 
@@ -736,6 +784,10 @@ func renderDockerS3WebsiteInstructions(args *s3WebsiteInstallArgs, connectorImag
 	if err != nil {
 		return "", err
 	}
+	endpoint, err := qurlEndpointFromConnectorAPIURL(args.APIURL)
+	if err != nil {
+		return "", err
+	}
 	docker := fmt.Sprintf(`set -eu
 %s
 
@@ -747,11 +799,10 @@ AWS_REGION=%s
 S3_PREFIX=%s
 INDEX_DOCUMENT=%s
 ORIGIN_CONTAINER="qurl-s3-origin-${QURL_CONNECTOR_ID}"
-CONNECTOR_CONTAINER="qurl-connector-${QURL_CONNECTOR_ID}"
-SECRET_DIR="/run/secrets/qurl-connector/${QURL_CONNECTOR_ID}"
-AGENT_STATE_DIR="/var/lib/layerv/qurl-connector/${QURL_CONNECTOR_ID}/agent"
-AUDIT_DIR="/var/log/layerv/qurl-connector/${QURL_CONNECTOR_ID}"
-CONFIG_FILE="$PWD/qurl-proxy-${QURL_CONNECTOR_ID}.yaml"
+CONNECTOR_CONTAINER="qurl-${QURL_CONNECTOR_ID}"
+SECRET_DIR="/run/secrets/qurl/${QURL_CONNECTOR_ID}"
+AGENT_STATE_DIR="/var/lib/layerv/qurl/${QURL_CONNECTOR_ID}"
+CONFIG_FILE="$PWD/qurl-share-${QURL_CONNECTOR_ID}.yaml"
 
 cat > "$CONFIG_FILE" <<'QURL_PROXY_YAML_EOF'
 %s
@@ -760,7 +811,6 @@ $SUDO chmod 0644 "$CONFIG_FILE"
 
 $SUDO install -d -m 0700 -o 65532 -g 65532 "$SECRET_DIR"
 $SUDO install -d -m 0700 -o 65532 -g 65532 "$AGENT_STATE_DIR"
-$SUDO install -d -m 0700 -o 65532 -g 65532 "$AUDIT_DIR"
 %s
 %s
 
@@ -774,7 +824,7 @@ fi
 docker run -d \
   --name "$ORIGIN_CONTAINER" \
   --user 65532:65532 \
-  --restart=on-failure:5 \
+  --restart=unless-stopped \
   --cap-drop=ALL \
   --security-opt=no-new-privileges:true \
   -e S3_BUCKET="$S3_BUCKET" \
@@ -788,28 +838,28 @@ docker run -d \
   --name "$CONNECTOR_CONTAINER" \
   --user 65532:65532 \
   --network "container:${ORIGIN_CONTAINER}" \
-  --restart=on-failure:5 \
+  --restart=unless-stopped \
   --read-only \
   --tmpfs /tmp:rw,size=64m \
   --cap-drop=ALL \
   --security-opt=no-new-privileges:true \
   --pids-limit=512 \
-  -v "$AGENT_STATE_DIR:/var/lib/layerv/agent" \
-  -v "$AUDIT_DIR:/var/log/layerv/qurl-connector" \
-  -v "$SECRET_DIR:$SECRET_DIR:ro" \
-  -v "$CONFIG_FILE:/work/qurl-proxy.yaml:ro" \
-  -e QURL_API_KEY_FILE="$SECRET_DIR/api_key" \
-  -e QURL_AUDIT_FILE=%s \
-  -e QURL_CONNECTOR_ID="$QURL_CONNECTOR_ID" \
-  -e QURL_API_URL=%s \
-  %s`, renderPortablePipefailShell(), renderSudoDetectionShell(), shellSingleQuote(args.Slug), shellSingleQuote(args.Bucket), shellSingleQuote(args.Region), shellSingleQuote(args.Prefix), shellSingleQuote(args.IndexDocument), configYAML, renderBootstrapKeyPromptShell(), renderBootstrapKeyFileInstallShell(`"$SECRET_DIR/api_key"`), shellSingleQuote(originImage), shellSingleQuote(connectorAuditFilePath), shellSingleQuote(args.APIURL), shellSingleQuote(connectorImage))
+  -v "$AGENT_STATE_DIR:/var/lib/qurl" \
+  -v "$SECRET_DIR:/run/secrets/qurl:ro" \
+  -v "$CONFIG_FILE:/etc/qurl/share.yaml:ro" \
+  -e QURL_ENDPOINT=%s \
+  --entrypoint /usr/local/bin/qurl \
+  %s daemon run \
+    --state-dir /var/lib/qurl \
+    --headless-config /etc/qurl/share.yaml \
+    --enrollment-token-file /run/secrets/qurl/enrollment-token`, renderPortablePipefailShell(), renderSudoDetectionShell(), shellSingleQuote(args.Slug), shellSingleQuote(args.Bucket), shellSingleQuote(args.Region), shellSingleQuote(args.Prefix), shellSingleQuote(args.IndexDocument), configYAML, renderBootstrapKeyPromptShell(), renderBootstrapKeyFileInstallShell(`"$SECRET_DIR/enrollment-token"`), shellSingleQuote(originImage), shellSingleQuote(endpoint), shellSingleQuote(connectorImage))
 
 	block, err := slackCodeBlock(docker)
 	if err != nil {
 		return "", err
 	}
 	intro := "Run this whole block on the Linux Docker host that has IAM access to the private S3 bucket. The host or container runtime must provide AWS credentials with s3:GetObject on the objects and s3:ListBucket on the bucket; on EC2 Docker hosts using instance roles, IMDSv2 needs hop-limit 2 for container credential access. No static AWS key is needed in the generated qURL Connector setup. The block prompts for the enrollment token so the secret does not land in shell history."
-	return intro + "\n\n" + block + "\n\nVerify with `docker logs -f qurl-connector-" + args.Slug + "` and `docker logs -f qurl-s3-origin-" + args.Slug + "`; after the qURL Connector connects, delete the enrollment-token file. If you recreate the S3 origin container or Docker auto-restarts it after a crash, recreate or restart the qURL Connector container too because it shares the origin container's network namespace. After a Docker daemon restart, verify both containers are running; if the Connector exhausted retries before the origin namespace existed, rerun this block to recreate both containers.", nil
+	return intro + "\n\n" + block + "\n\nVerify with `docker logs -f qurl-" + args.Slug + "` and `docker logs -f qurl-s3-origin-" + args.Slug + "`; after qURL connects, delete the enrollment-token file. If you recreate the S3 origin container or Docker auto-restarts it after a crash, recreate or restart qURL too because it shares the origin container's network namespace.", nil
 }
 
 func renderDockerComposeS3WebsiteInstructions(args *s3WebsiteInstallArgs, connectorImage, originImage string) (string, error) {
@@ -818,9 +868,13 @@ func renderDockerComposeS3WebsiteInstructions(args *s3WebsiteInstallArgs, connec
 		return "", err
 	}
 	originServiceName := "qurl-s3-origin-" + args.Slug
-	connectorServiceName := "qurl-connector-" + args.Slug
+	connectorServiceName := "qurl-" + args.Slug
+	endpoint, err := qurlEndpointFromConnectorAPIURL(args.APIURL)
+	if err != nil {
+		return "", err
+	}
 	quoted, err := yamlSingleQuotedValues(
-		connectorImage, originImage, args.Slug, args.APIURL,
+		connectorImage, originImage, args.Slug, endpoint,
 		args.Bucket, args.Region, args.Prefix, args.IndexDocument,
 		originServiceName, connectorServiceName,
 	)
@@ -845,12 +899,11 @@ func renderDockerComposeS3WebsiteInstructions(args *s3WebsiteInstallArgs, connec
 %s
 
 QURL_CONNECTOR_ID=%s
-QURL_API_URL_YAML=%s
+QURL_ENDPOINT_YAML=%s
 ORIGIN_SERVICE_NAME=%s
-SECRET_DIR="/run/secrets/qurl-connector/${QURL_CONNECTOR_ID}"
-AGENT_STATE_DIR="/var/lib/layerv/qurl-connector/${QURL_CONNECTOR_ID}/agent"
-AUDIT_DIR="/var/log/layerv/qurl-connector/${QURL_CONNECTOR_ID}"
-CONFIG_FILE="$PWD/qurl-proxy-${QURL_CONNECTOR_ID}.yaml"
+SECRET_DIR="/run/secrets/qurl/${QURL_CONNECTOR_ID}"
+AGENT_STATE_DIR="/var/lib/layerv/qurl/${QURL_CONNECTOR_ID}"
+CONFIG_FILE="$PWD/qurl-share-${QURL_CONNECTOR_ID}.yaml"
 QURL_COMPOSE_FILE="$PWD/qurl-s3-website-${QURL_CONNECTOR_ID}.compose.yaml"
 
 cat > "$CONFIG_FILE" <<'QURL_PROXY_YAML_EOF'
@@ -860,7 +913,6 @@ $SUDO chmod 0644 "$CONFIG_FILE"
 
 $SUDO install -d -m 0700 -o 65532 -g 65532 "$SECRET_DIR"
 $SUDO install -d -m 0700 -o 65532 -g 65532 "$AGENT_STATE_DIR"
-$SUDO install -d -m 0700 -o 65532 -g 65532 "$AUDIT_DIR"
 %s
 %s
 
@@ -869,7 +921,7 @@ services:
   %s:
     image: %s
     user: "65532:65532"
-    restart: on-failure:5
+    restart: unless-stopped
     cap_drop:
       - ALL
     security_opt:
@@ -883,7 +935,7 @@ services:
   %s:
     image: %s
     user: "65532:65532"
-    restart: on-failure:5
+    restart: unless-stopped
     read_only: true
     tmpfs:
       - /tmp:rw,size=64m
@@ -892,32 +944,28 @@ services:
       - ALL
     security_opt:
       - 'no-new-privileges:true'
+    entrypoint: ['/usr/local/bin/qurl']
+    command: ['daemon', 'run', '--state-dir', '/var/lib/qurl', '--headless-config', '/etc/qurl/share.yaml', '--enrollment-token-file', '/run/secrets/qurl/enrollment-token']
     network_mode: "service:${ORIGIN_SERVICE_NAME}"
     depends_on:
       %s:
         condition: service_started
     volumes:
-      - ${AGENT_STATE_DIR}:/var/lib/layerv/agent
-      - ${AUDIT_DIR}:/var/log/layerv/qurl-connector
-      # Compose uses one stable in-container secret path; the Docker renderer
-      # instead preserves its connector-specific host path inside the container.
-      - ${SECRET_DIR}:/run/secrets/qurl-connector:ro
-      - ./qurl-proxy-${QURL_CONNECTOR_ID}.yaml:/work/qurl-proxy.yaml:ro
+      - ${AGENT_STATE_DIR}:/var/lib/qurl
+      - ${SECRET_DIR}:/run/secrets/qurl:ro
+      - ./qurl-share-${QURL_CONNECTOR_ID}.yaml:/etc/qurl/share.yaml:ro
     environment:
-      QURL_API_KEY_FILE: /run/secrets/qurl-connector/api_key
-      QURL_AUDIT_FILE: /var/log/layerv/qurl-connector/audit.log
-      QURL_CONNECTOR_ID: %s
-      QURL_API_URL: ${QURL_API_URL_YAML}
+      QURL_ENDPOINT: ${QURL_ENDPOINT_YAML}
 QURL_COMPOSE_YAML_EOF
 
-docker compose -f "$QURL_COMPOSE_FILE" up -d`, renderPortablePipefailShell(), renderSudoDetectionShell(), shellSingleQuote(args.Slug), shellSingleQuote(quotedAPIURL), shellSingleQuote(originServiceName), configYAML, renderBootstrapKeyPromptShell(), renderBootstrapKeyFileInstallShell(`"$SECRET_DIR/api_key"`), quotedOriginService, quotedOriginImage, quotedBucket, quotedRegion, quotedPrefix, quotedIndex, quotedSlug, quotedConnectorService, quotedConnectorImage, quotedOriginService, quotedSlug)
+docker compose -f "$QURL_COMPOSE_FILE" up -d`, renderPortablePipefailShell(), renderSudoDetectionShell(), shellSingleQuote(args.Slug), shellSingleQuote(quotedAPIURL), shellSingleQuote(originServiceName), configYAML, renderBootstrapKeyPromptShell(), renderBootstrapKeyFileInstallShell(`"$SECRET_DIR/enrollment-token"`), quotedOriginService, quotedOriginImage, quotedBucket, quotedRegion, quotedPrefix, quotedIndex, quotedSlug, quotedConnectorService, quotedConnectorImage, quotedOriginService)
 
 	block, err := slackCodeBlock(compose)
 	if err != nil {
 		return "", err
 	}
 	intro := "Run this from the Docker Compose project directory on a Linux host that has IAM access to the private S3 bucket. On EC2 Docker hosts using instance roles, IMDSv2 needs hop-limit 2 for container credential access. It writes a standalone Compose file for the private S3 origin plus qURL Connector, and prompts for the enrollment token so the secret does not land in shell history."
-	return intro + "\n\n" + block + "\n\nVerify with `docker compose -f qurl-s3-website-" + args.Slug + ".compose.yaml logs -f qurl-connector-" + args.Slug + "`; after the qURL Connector connects, delete the enrollment-token file. If you recreate, rename, or Docker auto-restarts the S3 origin service after a crash, recreate or restart the qURL Connector service too because it shares the origin service network namespace. After a Docker daemon restart, verify both services are running; if the Connector exhausted retries before the origin namespace existed, rerun this block to recreate both services.", nil
+	return intro + "\n\n" + block + "\n\nVerify with `docker compose -f qurl-s3-website-" + args.Slug + ".compose.yaml logs -f qurl-" + args.Slug + "`; after qURL connects, delete the enrollment-token file. If the S3 origin service is recreated, restart qURL too because it shares the origin network namespace.", nil
 }
 
 func renderECSS3WebsiteInstructions(args *s3WebsiteInstallArgs, connectorImage, originImage string) (string, error) {
@@ -937,29 +985,31 @@ func renderECSS3WebsiteInstructions(args *s3WebsiteInstallArgs, connectorImage, 
 	if err != nil {
 		return "", err
 	}
-	secretName := "qurl-connector-" + args.Slug
 	intro := strings.Join([]string{
 		"Use this as an " + ecsFargateChecklistText + ".",
-		"Create the AWS Secrets Manager secret as `" + secretName + "` using the temporary enrollment token delivered separately by DM.",
+		"Write the temporary enrollment token to `enrollment-token` on a read-only qurl-bootstrap EFS access point; never place it in task environment or argv.",
 		"Run both containers in the same task; Fargate awsvpc networking lets the qURL Connector reach the private S3 origin on `127.0.0.1:" + strconv.Itoa(s3WebsiteOriginPort) + "`.",
 		"Both containers are essential, so a failure of either one restarts the whole task.",
 		"The START dependency orders container launch only, so the qURL Connector may log local connection errors until the origin is listening.",
 		"The task role needs s3:GetObject on the objects and s3:ListBucket on the bucket.",
-		"Configure the qurl-agent-state, qurl-audit, and qurl-config EFS access points with POSIX UID/GID `65532:65532`, matching the qURL Connector image user; use root-directory modes 0700, 0750, and 0755 respectively, and make qurl-proxy.yaml mode 0644.",
-		"The qurl-audit volume preserves rotated audit records while the Connector uses a read-only root filesystem.",
+		"Configure qurl-agent-state for POSIX UID/GID `65532:65532`, and mount qurl-config and qurl-bootstrap read-only. Do not share qurl-agent-state across concurrently running sidecars.",
 		"Both generated containers drop every Linux capability.",
 	}, " ")
 	return intro + "\n\n" +
-		"1. Store the enrollment token from the separate DM in AWS Secrets Manager. This install-instructions message intentionally does not contain the token.\n\n" +
-		"2. Put qurl-proxy.yaml at `/work/qurl-proxy.yaml` on an EFS access point mounted into the task as the `qurl-config` volume:\n\n" +
+		"1. Store the enrollment token from the separate DM as the read-only qurl-bootstrap/enrollment-token file. This message intentionally does not contain it.\n\n" +
+		"2. Put share.yaml at `/etc/qurl/share.yaml` on the qurl-config EFS access point:\n\n" +
 		configBlock + "\n\n" +
-		"3. Add these two containers to the same task definition. Replace `REPLACE_WITH_SECRET_ARN_FOR_QURL_CONNECTOR_" + args.Slug + "` with the full secret ARN shown by Secrets Manager and replace each `" + ecsLogRegionPlaceholder + "` with the ECS task region:\n\n" +
+		"3. Add these two containers to the same task definition and replace each `" + ecsLogRegionPlaceholder + "` with the ECS task region:\n\n" +
 		containerBlock + "\n\n" +
 		"4. Create the CloudWatch Logs group `" + s3WebsiteECSLogGroup + "` in the ECS task region if it does not already exist.\n" +
-		"5. Add durable EFS-backed volumes named qurl-agent-state, qurl-audit, and qurl-config. Do not share qurl-agent-state across concurrently running sidecars. After the qURL Connector logs show it connected, register and deploy a warm-start task revision with the QURL_API_KEY entry removed from `secrets`; verify the replacement task connects from qurl-agent-state, then delete the enrollment-token secret. Deleting it first prevents replacement tasks from starting.", nil
+		"5. Add EFS-backed qurl-agent-state, qurl-config, and qurl-bootstrap volumes. After qURL connects, deploy a warm-start revision without the bootstrap mount/flag, verify reconnect, then delete the enrollment-token file.", nil
 }
 
 func renderS3WebsiteECSContainerJSON(args *s3WebsiteInstallArgs, connectorImage, originImage string) (string, error) {
+	endpoint, err := qurlEndpointFromConnectorAPIURL(args.APIURL)
+	if err != nil {
+		return "", err
+	}
 	// The S3 origin is the protected workload, so both containers are essential:
 	// losing either one should fail/restart the ECS task.
 	containers := []ecsContainerDefinition{
@@ -981,21 +1031,18 @@ func renderS3WebsiteECSContainerJSON(args *s3WebsiteInstallArgs, connectorImage,
 		{
 			Name:                   connectorContainerName,
 			Image:                  connectorImage,
+			EntryPoint:             []string{"/usr/local/bin/qurl"},
+			Command:                []string{"daemon", "run", "--state-dir", "/var/lib/qurl-volume/state", "--headless-config", "/etc/qurl/share.yaml", "--enrollment-token-file", "/run/secrets/qurl/enrollment-token"},
 			User:                   ecsConnectorUser,
 			Essential:              true,
 			ReadonlyRootFilesystem: true,
 			Environment: []ecsEnvironmentVar{
-				{Name: ecsConnectorIDEnv, Value: args.Slug},
-				{Name: "QURL_API_URL", Value: args.APIURL},
-				{Name: connectorAuditFileEnv, Value: connectorAuditFilePath},
-			},
-			Secrets: []ecsSecret{
-				{Name: tunnelEnvAPIKey, ValueFrom: "REPLACE_WITH_SECRET_ARN_FOR_QURL_CONNECTOR_" + args.Slug},
+				{Name: "QURL_ENDPOINT", Value: endpoint},
 			},
 			MountPoints: []ecsMountPoint{
-				{SourceVolume: "qurl-agent-state", ContainerPath: "/var/lib/layerv/agent"},
-				{SourceVolume: "qurl-audit", ContainerPath: connectorAuditDir},
-				{SourceVolume: "qurl-config", ContainerPath: "/work", ReadOnly: true},
+				{SourceVolume: "qurl-agent-state", ContainerPath: "/var/lib/qurl-volume"},
+				{SourceVolume: "qurl-config", ContainerPath: "/etc/qurl", ReadOnly: true},
+				{SourceVolume: "qurl-bootstrap", ContainerPath: "/run/secrets/qurl", ReadOnly: true},
 			},
 			LogConfiguration: awslogsConfiguration(s3WebsiteECSLogGroup, "qurl"),
 			LinuxParameters:  hardenedECSLinuxParameters(),
@@ -1009,18 +1056,22 @@ func renderS3WebsiteECSContainerJSON(args *s3WebsiteInstallArgs, connectorImage,
 
 func renderKubernetesS3WebsiteInstructions(args *s3WebsiteInstallArgs, connectorImage, originImage string) (string, error) {
 	names := kubernetesTunnelObjectNames(args.Slug)
+	endpoint, err := qurlEndpointFromConnectorAPIURL(args.APIURL)
+	if err != nil {
+		return "", err
+	}
 	quoted, err := yamlSingleQuotedValues(
-		names.configMap, names.agentPVC, names.auditPVC, names.secret, connectorImage, originImage,
-		args.Slug, args.APIURL, args.Bucket, args.Region,
+		names.configMap, names.agentPVC, names.secret, connectorImage, originImage,
+		args.Slug, endpoint, args.Bucket, args.Region,
 		args.Prefix, args.IndexDocument,
 	)
 	if err != nil {
 		return "", err
 	}
-	quotedConfigMap, quotedAgentPVC, quotedAuditPVC, quotedSecret := quoted[0], quoted[1], quoted[2], quoted[3]
-	quotedConnectorImage, quotedOriginImage, quotedSlug := quoted[4], quoted[5], quoted[6]
-	quotedAPIURL, quotedBucket, quotedRegion := quoted[7], quoted[8], quoted[9]
-	quotedPrefix, quotedIndex := quoted[10], quoted[11]
+	quotedConfigMap, quotedAgentPVC, quotedSecret := quoted[0], quoted[1], quoted[2]
+	quotedConnectorImage, quotedOriginImage, quotedSlug := quoted[3], quoted[4], quoted[5]
+	quotedEndpoint, quotedBucket, quotedRegion := quoted[6], quoted[7], quoted[8]
+	quotedPrefix, quotedIndex := quoted[9], quoted[10]
 	configYAML, err := renderS3WebsiteConnectorConfigYAML(args)
 	if err != nil {
 		return "", err
@@ -1038,7 +1089,7 @@ kind: ConfigMap
 metadata:
   name: %s
 data:
-  qurl-proxy.yaml: |
+  share.yaml: |
 %s
 ---
 apiVersion: v1
@@ -1050,17 +1101,7 @@ spec:
   resources:
     requests:
       storage: 1Gi
----
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: %s
-spec:
-  accessModes: ["ReadWriteOnce"]
-  resources:
-    requests:
-      storage: 1Gi
-QURL_K8S_YAML_EOF`, renderPortablePipefailShell(), shellSingleQuote(names.secret), renderBootstrapKeyPromptShell(), renderBootstrapKeyToCommandShell(`kubectl create secret generic "$QURL_BOOTSTRAP_SECRET" --from-file=api_key=/dev/stdin --dry-run=client -o yaml | kubectl apply -f -`), quotedConfigMap, indentLines(configYAML, 4), quotedAgentPVC, quotedAuditPVC)
+QURL_K8S_YAML_EOF`, renderPortablePipefailShell(), shellSingleQuote(names.secret), renderBootstrapKeyPromptShell(), renderBootstrapKeyToCommandShell(`kubectl create secret generic "$QURL_BOOTSTRAP_SECRET" --from-file=enrollment-token=/dev/stdin --dry-run=client -o yaml | kubectl apply -f -`), quotedConfigMap, indentLines(configYAML, 4), quotedAgentPVC)
 
 	originContainer := fmt.Sprintf(`  - name: %s
     image: %s
@@ -1088,9 +1129,8 @@ QURL_K8S_YAML_EOF`, renderPortablePipefailShell(), shellSingleQuote(names.secret
 		precedingContainers: originContainer,
 		imageYAML:           quotedConnectorImage,
 		slugYAML:            quotedSlug,
-		apiURLYAML:          quotedAPIURL,
+		endpointYAML:        quotedEndpoint,
 		agentPVCYAML:        quotedAgentPVC,
-		auditPVCYAML:        quotedAuditPVC,
 		secretYAML:          quotedSecret,
 		configMapYAML:       quotedConfigMap,
 	})
@@ -1104,12 +1144,11 @@ QURL_K8S_YAML_EOF`, renderPortablePipefailShell(), shellSingleQuote(names.secret
 		return "", err
 	}
 	intro := strings.Join([]string{
-		"Run this once in the target namespace, then deploy the S3 origin and qURL Connector containers in the same pod so `127.0.0.1:" + strconv.Itoa(s3WebsiteOriginPort) + "` reaches the private S3 origin.",
+		"Run this once in the target namespace, then deploy the S3 origin and qurl containers in the same pod so `127.0.0.1:" + strconv.Itoa(s3WebsiteOriginPort) + "` reaches the private S3 origin.",
 		"The pod identity or node role needs s3:GetObject on the objects and s3:ListBucket on the bucket.",
-		"The Connector uses separate state and audit PVCs. qurl-go rejects group-writable identity state, so do not add pod-level `fsGroup`; the permissions init container enforces owner-only state modes before each start.",
-		"Your admission policy must permit the two root init containers: volume permissions uses CHOWN, DAC_OVERRIDE, and FOWNER, while the one-time bootstrap copy uses CHOWN only. The long-running Connector remains nonroot, read-only-root, seccomp-confined, and capability-free.",
+		"The pod-level fsGroup makes the PVC mount root writable; qURL creates its nested owner-only state directory as UID 65532.",
 		"The enrollment token is streamed through your local shell into `kubectl`; do not run this from a shared, recorded, or command-traced terminal session.",
-		"After the pod connects, create and roll out a warm-start workload revision that removes `qurl-bootstrap-copy`, both enrollment-token volumes and their mounts, and `QURL_API_KEY_FILE`. Verify the replacement pod connects from its persisted state, then delete the enrollment-token Secret; deleting it first prevents a replacement pod from starting.",
+		"After the pod connects, roll out a warm-start revision without `--enrollment-token-file` or its Secret mount. Verify reconnect, then delete the enrollment-token Secret.",
 	}, "\n")
-	return intro + "\n\n" + objectsBlock + "\n\nPod spec additions:\nAppend both generated init containers under your existing `initContainers:` list, add both runtime containers under `containers:`, and append the volumes under `volumes:`. Do not add pod-level `fsGroup` and do not duplicate existing YAML keys.\n\n" + patchBlock, nil
+	return intro + "\n\n" + objectsBlock + "\n\nPod spec additions:\nMerge the generated pod securityContext, add both runtime containers under `containers:`, and append the volumes. Do not duplicate existing YAML keys.\n\n" + patchBlock, nil
 }

@@ -1,7 +1,7 @@
 name: "cli: Nightly"
 
 # Deep CLI exercises too slow or too stateful for the per-PR gates in cli.yml
-# — fuzzing, an extended sandbox pass, a full GoReleaser snapshot build — plus
+# — fuzzing and a full GoReleaser snapshot build — plus
 # one no PR can gate at all: a customer-path smoke of the latest SHIPPED
 # release (PRs validate the tree; the release smoke validates what
 # `brew install layervai/tap/qurl` serves customers today).
@@ -64,36 +64,6 @@ jobs:
             echo "no fuzz targets under apps/cli yet; nothing to fuzz (this job arms when the first FuzzXxx test lands)"
           fi
 
-  sandbox-extended:
-    name: cli-nightly / sandbox e2e extended
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    # Same arming variable as cli.yml's sandbox-e2e gate, and the same
-    # repo-wide serialization group: there is one sandbox tenancy, and the
-    # nightly must queue behind (never cancel) a PR-time run.
-    if: vars.CLI_SANDBOX_E2E == 'enabled'
-    concurrency:
-      group: cli-sandbox-e2e
-      cancel-in-progress: false
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: go.mod
-          cache: true
-
-      # Extended: -count=3 re-runs the suite to shake out flaky or stateful
-      # sandbox behaviour a single PR-time pass misses. Placeholder semantics
-      # match cli.yml's sandbox-e2e step: nothing carries the clisandbox tag
-      # yet, and the notice self-silences when the first tagged test lands.
-      - name: Run extended sandbox e2e suite
-        run: |
-          go test -tags=clisandbox -count=3 ./apps/cli/...
-          if ! grep -rq --include='*.go' 'go:build.*clisandbox' apps/cli; then
-            echo "::notice::cli-nightly / sandbox e2e extended: no sandbox suite yet — no file carries the clisandbox build tag"
-          fi
-
   snapshot:
     name: cli-nightly / goreleaser snapshot
     runs-on: ubuntu-latest
@@ -114,9 +84,42 @@ jobs:
       # exercises SBOM generation exactly like release-cli. Keep the pin and
       # `syft-version` in lockstep with release-please.yml's copy.
       - name: Install syft
-        uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        uses: anchore/sbom-action/download-syft@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
         with:
           syft-version: 'v1.42.3'
+
+      - name: Verify the production NHP Hub trust pin
+        env:
+          QURL_RELEASE_HUB_PUBLIC_KEY_B64: ${{ secrets.QURL_PROD_NHP_HUB_PUBLIC_KEY_B64 }}
+          QURL_RELEASE_HUB_PUBLIC_KEY_SHA256: ${{ secrets.QURL_PROD_NHP_HUB_PUBLIC_KEY_SHA256 }}
+        run: |
+          set -euo pipefail
+          test_name=TestReleaseHubPinEnvironment
+          test_pattern='^TestReleaseHubPinEnvironment$'
+          actual_test="$(go test ./apps/cli/internal/connector/hub -list "$test_pattern" | sed -n '/^Test/p')"
+          if [[ "$actual_test" != "$test_name" ]]; then
+            echo "::error::exact production Hub-pin test declaration is missing or ambiguous"
+            exit 1
+          fi
+          events=$(mktemp)
+          trap 'rm -f "$events"' EXIT
+          test_status=0
+          go test ./apps/cli/internal/connector/hub -run "$test_pattern" -count=1 -json >"$events" || test_status=$?
+          jq -j 'select(.Output != null) | .Output' "$events"
+          passed="$(jq -r --arg test "$test_name" 'select(.Action == "pass" and .Test == $test) | .Test' "$events")"
+          skipped="$(jq -r --arg test "$test_name" 'select(.Action == "skip" and .Test == $test) | .Test' "$events")"
+          if [[ -z "$QURL_RELEASE_HUB_PUBLIC_KEY_B64" && -z "$QURL_RELEASE_HUB_PUBLIC_KEY_SHA256" ]]; then
+            if [[ "$skipped" != "$test_name" || -n "$passed" ]]; then
+              echo "::error::dark nightly Hub-pin test must report one SKIP and no PASS"
+              exit 1
+            fi
+          elif [[ -n "$skipped" || "$passed" != "$test_name" ]]; then
+            echo "::error::configured nightly Hub-pin test must report one PASS and no SKIP"
+            exit 1
+          fi
+          if (( test_status != 0 )); then
+            exit "$test_status"
+          fi
 
       # Unlike `cli / goreleaser check` (config validation only), the snapshot
       # exercises the real release pipeline without publishing: every OS/arch
@@ -133,6 +136,8 @@ jobs:
         with:
           version: "~> v2"
           args: release --snapshot --clean --skip=sign
+        env:
+          QURL_RELEASE_HUB_PUBLIC_KEY_B64: ${{ secrets.QURL_PROD_NHP_HUB_PUBLIC_KEY_B64 }}
 
   # Customer-path smoke of the latest SHIPPED release — the surface neither a
   # PR gate nor the snapshot build can cover, because it validates what is

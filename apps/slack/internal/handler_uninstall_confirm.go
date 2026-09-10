@@ -117,8 +117,8 @@ func (h *Handler) handleUninstallConfirmClick(w http.ResponseWriter, payload *in
 		if !h.requireUninstallAdminOrOwnerForClick(ctx, log, responseURL, teamID, userID) {
 			return
 		}
-		reply := h.uninstallWorkspaceReply(ctx, teamID, userID, purgeIDs)
-		if len(droppedIDs) > 0 {
+		reply, purgeScheduled := h.uninstallWorkspaceReply(ctx, teamID, userID, purgeIDs)
+		if purgeScheduled && len(droppedIDs) > 0 {
 			// Only meaningful once a teardown has actually run — emitting this on
 			// the ack path would raise cleanup_action_required for refused clicks
 			// and for a saturated pool, where nothing was purged at all. Ids are

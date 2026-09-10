@@ -3,9 +3,9 @@
 //
 //	command-line flag > environment variable > profile/config file > built-in default
 //
-// Config files never hold secrets: the API key lives in the credential store
-// (or the QURL_API_KEY environment variable), and a config file that tries to
-// smuggle one in is rejected outright rather than silently honored.
+// Config files never hold secrets: an API key is accepted only for one-time
+// login or through QURL_API_KEY/QURL_API_KEY_FILE bootstrap, and a config file
+// that tries to smuggle one in is rejected rather than silently honored.
 package config
 
 import (
@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -35,7 +36,7 @@ var (
 	// ErrConfigFile reports a config file that exists but cannot be read or parsed.
 	ErrConfigFile = errors.New("cli: invalid config file")
 	// ErrSecretInConfig reports a config file carrying an api_key entry.
-	// Config files never hold secrets; the credential store and QURL_API_KEY do.
+	// Config files never hold secrets; login and explicit bootstrap inputs do.
 	ErrSecretInConfig = errors.New("cli: config files must not contain an API key")
 )
 
@@ -44,18 +45,14 @@ type Config struct {
 	Endpoint string `yaml:"endpoint,omitempty"`
 	Output   string `yaml:"output,omitempty"`
 	Color    string `yaml:"color,omitempty"`
-	// ConnectorID names the Connector `qurl connector run` serves when --id
-	// is not passed — its ID, the route name the app serves under, the same
-	// identity the standalone qurl-connector configures as QURL_CONNECTOR_ID
-	// / YAML `id:`. It is an identity, not a secret: the enrollment token
-	// and Connector state never live in config files.
+	// ConnectorID is the stable identity used for local publish when --id is
+	// not passed. It is an identity, not a secret; credentials and native state
+	// never live in config files.
 	ConnectorID string `yaml:"connector_id,omitempty"`
-	// ConnectorSlug is v1.1.0's spelling of ConnectorID, still read so an
-	// existing connector_slug profile keeps working; ConnectorID wins when
-	// both are set.
-	//
-	// Deprecated: remove at the next major.
-	ConnectorSlug string `yaml:"connector_slug,omitempty"`
+	// ShareGroupMode selects how the local sharing daemon maps its shares onto
+	// Connector session groups: "single" (the default, one session for every
+	// share) or "per-share" (one session per share). Operational, not secret.
+	ShareGroupMode string `yaml:"share_group_mode,omitempty"`
 }
 
 // Enum vocabularies for config-file values. These mirror the output
@@ -65,7 +62,16 @@ type Config struct {
 var (
 	validOutputs = []string{"text", "json"}
 	validColors  = []string{"auto", "always", "never"}
+	// validShareGroupModes mirrors the daemon package's GroupModeValues the
+	// same way (config sits below the daemon too). The daemon package pins its
+	// values against ShareGroupModes, so the dependency arrow only ever points
+	// from daemon to config.
+	validShareGroupModes = []string{"single", "per-share"}
 )
+
+// ShareGroupModes lists the share_group_mode values a config file may carry,
+// default first.
+func ShareGroupModes() []string { return slices.Clone(validShareGroupModes) }
 
 // validate rejects enum-valued settings a config file spelled wrongly. The
 // config layer is the only place that knows the value came from a FILE, so
@@ -76,7 +82,10 @@ func (c *Config) validate(path string) error {
 	if err := validateEnum(path, "output", c.Output, validOutputs); err != nil {
 		return err
 	}
-	return validateEnum(path, "color", c.Color, validColors)
+	if err := validateEnum(path, "color", c.Color, validColors); err != nil {
+		return err
+	}
+	return validateEnum(path, "share_group_mode", c.ShareGroupMode, validShareGroupModes)
 }
 
 func validateEnum(path, setting, value string, valid []string) error {
@@ -177,9 +186,9 @@ func loadFile(p string) (*Config, error) {
 }
 
 // rejectSecrets refuses config files that carry credential-shaped keys. The
-// v2 contract is that config files hold no secrets, so an api_key entry left
-// over from an older setup is surfaced loudly instead of silently ignored —
-// silence would leave a live credential sitting in a plaintext file.
+// v2 contract is that config files hold no secrets, so an api_key entry is
+// surfaced loudly instead of silently ignored. Silence would leave a live
+// credential sitting in a plaintext file.
 func rejectSecrets(data []byte, path string) error {
 	var raw map[string]any
 	if err := yaml.Unmarshal(data, &raw); err != nil {

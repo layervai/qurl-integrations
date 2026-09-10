@@ -11,295 +11,444 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"net/http"
-	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 
 	qurl "github.com/layervai/qurl-go/qurl"
-)
 
-// connectorWire is the producer's generic resource payload as the mock hub
-// serves it.
-type connectorWire struct {
-	ResourceID         string `json:"resource_id"`
-	ConnectorRoutingID string `json:"connector_routing_id"`
-	KnockResourceID    string `json:"knock_resource_id"`
-	Type               string `json:"type"`
-	Status             string `json:"status"`
-	Slug               string `json:"slug"`
-}
+	"github.com/layervai/qurl-integrations/apps/cli/internal/apitest"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
+)
 
 var routingIDEncoding = base32.NewEncoding("abcdefghijklmnopqrstuvwxyz234567").WithPadding(base32.NoPadding)
 
-// testConnectorRow mints a wire row that satisfies the SDK's fail-closed
-// response validation: a real P-256 resource id, a canonical c-prefixed
-// routing id, and a distinct opaque knock resource.
-func testConnectorRow(t *testing.T, slug string) connectorWire {
+func testNativeResource(t *testing.T, connectorID string) *qurl.ConnectorResource {
 	t.Helper()
-	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
-	der, err := x509.MarshalPKIXPublicKey(&priv.PublicKey)
+	der, err := x509.MarshalPKIXPublicKey(&privateKey.PublicKey)
 	if err != nil {
 		t.Fatal(err)
 	}
 	digest := sha256.Sum256(der)
-	return connectorWire{
-		ResourceID:         base64.RawURLEncoding.EncodeToString(der),
+	return &qurl.ConnectorResource{
+		ResourcePublicKey:  base64.RawURLEncoding.EncodeToString(der),
+		CRID:               apitest.DeriveCRID(t, der, apitest.VersionProduction),
 		ConnectorRoutingID: "c-" + routingIDEncoding.EncodeToString(digest[:]),
-		KnockResourceID:    "resource-public-key",
-		Type:               "tunnel",
-		Status:             "active",
-		Slug:               slug,
+		KnockResourceID:    "nhp-resource-a",
+		Slug:               connectorID,
 	}
 }
 
-// mockHub is a scriptable mock of the producer's Connector-resource routes,
-// following the CLI's apitest pattern: default happy-path handlers plus a
-// consume-once script queue keyed by "METHOD /path".
-type mockHub struct {
-	*httptest.Server
-	t *testing.T
-
-	mu       sync.Mutex
-	requests []string
-	scripts  map[string][]http.HandlerFunc
-	rows     []connectorWire
+func TestResolveResourceRejectsMissingCRID(t *testing.T) {
+	store := openResourceTestStore(t)
+	resource := testNativeResource(t, "missing-crid")
+	resource.CRID = ""
+	installResourceResolver(t, func(context.Context, *qurl.AgentRuntimeBinding,
+		*qurl.NativeConnectorResourceRequest, ...qurl.AgentRuntimeUDPOption,
+	) (*qurl.ConnectorResourceResolution, error) {
+		return &qurl.ConnectorResourceResolution{Resource: resource}, nil
+	})
+	_, err := ResolveResourceWithResult(context.Background(), &qurl.AgentRuntimeBinding{}, store, resource.Slug)
+	if !errors.Is(err, state.ErrConnectorResourceVerification) || !strings.Contains(err.Error(), "crid is required") {
+		t.Fatalf("missing native CRID = %v, want terminal verification error", err)
+	}
+	if pending := pendingRequestFromDisk(t, store, resource.Slug); pending != nil {
+		t.Fatalf("missing native CRID retained request: %+v", pending)
+	}
 }
 
-func newMockHub(t *testing.T, rows ...connectorWire) *mockHub {
+func installResourceResolver(t *testing.T, resolver func(context.Context, *qurl.AgentRuntimeBinding, *qurl.NativeConnectorResourceRequest, ...qurl.AgentRuntimeUDPOption) (*qurl.ConnectorResourceResolution, error)) {
 	t.Helper()
-	m := &mockHub{t: t, scripts: map[string][]http.HandlerFunc{}, rows: rows}
-	m.Server = httptest.NewServer(http.HandlerFunc(m.handle))
-	t.Cleanup(m.Close)
-	return m
+	original := resolveRegisteredAgentConnectorResource
+	resolveRegisteredAgentConnectorResource = resolver
+	t.Cleanup(func() { resolveRegisteredAgentConnectorResource = original })
 }
 
-func (m *mockHub) script(method, path string, handlers ...http.HandlerFunc) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	key := method + " " + path
-	m.scripts[key] = append(m.scripts[key], handlers...)
-}
-
-func (m *mockHub) requestLog() []string {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return append([]string(nil), m.requests...)
-}
-
-func (m *mockHub) handle(w http.ResponseWriter, r *http.Request) {
-	m.mu.Lock()
-	m.requests = append(m.requests, r.Method+" "+r.URL.Path)
-	var scripted http.HandlerFunc
-	key := r.Method + " " + r.URL.Path
-	if queue := m.scripts[key]; len(queue) > 0 {
-		scripted = queue[0]
-		m.scripts[key] = queue[1:]
-	}
-	m.mu.Unlock()
-	if scripted != nil {
-		scripted(w, r)
-		return
-	}
-	switch {
-	case r.Method == http.MethodGet && r.URL.Path == "/v1/resources":
-		slug := r.URL.Query().Get("slug")
-		matches := []connectorWire{}
-		for _, row := range m.rows {
-			if row.Slug == slug {
-				matches = append(matches, row)
-			}
-		}
-		writeJSON(m.t, w, http.StatusOK, map[string]any{"data": matches})
-	case r.Method == http.MethodPost && r.URL.Path == "/v1/resources":
-		var body struct {
-			Type         string `json:"type"`
-			Slug         string `json:"slug"`
-			FindOrCreate bool   `json:"find_or_create"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Type != "tunnel" || !body.FindOrCreate {
-			writeJSON(m.t, w, http.StatusBadRequest, map[string]any{"code": "invalid_request", "title": "Bad Request", "detail": "ensure body must pin type and find_or_create"})
-			return
-		}
-		row := testConnectorRow(m.t, body.Slug)
-		m.mu.Lock()
-		m.rows = append(m.rows, row)
-		m.mu.Unlock()
-		writeJSON(m.t, w, http.StatusCreated, map[string]any{"data": row, "meta": map[string]any{"found_existing": false}})
-	default:
-		writeJSON(m.t, w, http.StatusNotFound, map[string]any{"code": "not_found", "title": "Not Found", "detail": "no such route in the mock hub"})
-	}
-}
-
-func writeJSON(t *testing.T, w http.ResponseWriter, status int, body any) {
+func openResourceTestStore(t *testing.T) *state.Store {
 	t.Helper()
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	if err := json.NewEncoder(w).Encode(body); err != nil {
-		t.Errorf("encode mock response: %v", err)
-	}
-}
-
-func newMockClient(t *testing.T, m *mockHub) *qurl.Client {
-	t.Helper()
-	client, err := qurl.NewClient(qurl.BearerToken("test-device-credential"), qurl.WithBaseURL(m.URL))
+	store, err := state.Open(resourceTestStateDir(t))
 	if err != nil {
 		t.Fatal(err)
 	}
-	return client
+	t.Cleanup(func() { _ = store.Close() })
+	return store
 }
 
-func TestResolveResourceFindsExistingBySlug(t *testing.T) {
-	t.Parallel()
-	row := testConnectorRow(t, "my-service")
-	m := newMockHub(t, row)
-	client := newMockClient(t, m)
+func resourceTestStateDir(t *testing.T) string {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), "state")
+	if err := state.EnsureDirMode(dir); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
 
-	got, err := ResolveResource(context.Background(), client, "my-service")
+func pendingRequestFromDisk(t *testing.T, store *state.Store, connectorID string) map[string]any {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(store.Dir(), state.ConnectorResourcesFile))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.ResourceID != row.ResourceID || got.Slug != "my-service" || got.KnockResourceID != row.KnockResourceID {
-		t.Fatalf("ResolveResource = %+v, want the existing row", got)
+	var envelope struct {
+		Pending map[string]map[string]any `json:"pending"`
 	}
-	for _, req := range m.requestLog() {
-		if strings.HasPrefix(req, http.MethodPost) {
-			t.Fatalf("existing slug still triggered a mutation: %v", m.requestLog())
+	if err := json.Unmarshal(data, &envelope); err != nil {
+		t.Fatal(err)
+	}
+	return envelope.Pending[connectorID]
+}
+
+func TestResolveResourcePersistsBeforeDispatchAndCommitsCompleteBinding(t *testing.T) {
+	store := openResourceTestStore(t)
+	resource := testNativeResource(t, "billing-api")
+	installResourceResolver(t, func(_ context.Context, _ *qurl.AgentRuntimeBinding, request *qurl.NativeConnectorResourceRequest, _ ...qurl.AgentRuntimeUDPOption) (*qurl.ConnectorResourceResolution, error) {
+		pending := pendingRequestFromDisk(t, store, request.ConnectorID)
+		if got := pending["request_nonce"]; got != request.RequestNonce {
+			t.Fatalf("durable nonce before dispatch = %v, want %q", got, request.RequestNonce)
+		}
+		if _, exists := pending["expected_crid"]; exists {
+			t.Fatal("fresh request persisted an expected_crid")
+		}
+		return &qurl.ConnectorResourceResolution{Resource: resource, FoundExisting: false}, nil
+	})
+
+	result, err := ResolveResourceWithResult(context.Background(), &qurl.AgentRuntimeBinding{}, store, "billing-api")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Resource != resource || result.FoundExisting == nil || *result.FoundExisting {
+		t.Fatalf("result = %+v, want created authenticated resource", result)
+	}
+	data, err := os.ReadFile(filepath.Join(store.Dir(), state.ConnectorResourcesFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var envelope struct {
+		Bindings map[string]state.ConnectorResourceBinding        `json:"bindings"`
+		Pending  map[string]state.PendingConnectorResourceRequest `json:"pending"`
+	}
+	if err := json.Unmarshal(data, &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if len(envelope.Pending) != 0 {
+		t.Fatalf("pending after commit = %+v, want empty", envelope.Pending)
+	}
+	if got := envelope.Bindings["billing-api"]; got.ResourceID != resource.ResourcePublicKey || got.ConnectorRoutingID != resource.ConnectorRoutingID || got.KnockResourceID != resource.KnockResourceID {
+		t.Fatalf("binding = %+v, want complete authenticated resource", got)
+	}
+}
+
+func TestResolveConfiguredResourceReauthorizesExactBinding(t *testing.T) {
+	store := openResourceTestStore(t)
+	resource := testNativeResource(t, "headless-api")
+	t.Setenv(EnvKnockResourceID, "headless-knock-override")
+	configured := &state.ConnectorResourceBinding{
+		ConnectorID: resource.Slug, ResourceID: resource.ResourcePublicKey, CRID: resource.CRID,
+		ConnectorRoutingID: resource.ConnectorRoutingID, KnockResourceID: "headless-knock-override",
+	}
+	installResourceResolver(t, func(_ context.Context, _ *qurl.AgentRuntimeBinding, request *qurl.NativeConnectorResourceRequest, _ ...qurl.AgentRuntimeUDPOption) (*qurl.ConnectorResourceResolution, error) {
+		if request.ConnectorID != configured.ConnectorID || request.ExpectedCRID != configured.CRID || request.RequestNonce == "" {
+			t.Fatalf("configured native request = %+v", request)
+		}
+		return &qurl.ConnectorResourceResolution{Resource: resource, FoundExisting: true}, nil
+	})
+
+	result, err := ResolveConfiguredResourceWithResult(context.Background(), &qurl.AgentRuntimeBinding{}, store, configured)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result == nil || result.Resource != resource || result.FoundExisting == nil || !*result.FoundExisting {
+		t.Fatalf("configured result = %+v", result)
+	}
+	durable, retired, found, err := store.ConnectorResourceBinding(context.Background(), configured.ConnectorID)
+	if err != nil || !found || retired || durable.KnockResourceID != resource.KnockResourceID {
+		t.Fatalf("durable platform binding = %+v retired=%t found=%t err=%v", durable, retired, found, err)
+	}
+}
+
+func TestResolveConfiguredResourceRejectsEffectiveKnockMismatch(t *testing.T) {
+	store := openResourceTestStore(t)
+	resource := testNativeResource(t, "headless-api")
+	configured := &state.ConnectorResourceBinding{
+		ConnectorID: resource.Slug, ResourceID: resource.ResourcePublicKey, CRID: resource.CRID,
+		ConnectorRoutingID: resource.ConnectorRoutingID, KnockResourceID: "configured-knock-override",
+	}
+	t.Setenv(EnvKnockResourceID, "different-knock-override")
+	installResourceResolver(t, func(context.Context, *qurl.AgentRuntimeBinding, *qurl.NativeConnectorResourceRequest, ...qurl.AgentRuntimeUDPOption) (*qurl.ConnectorResourceResolution, error) {
+		t.Fatal("conflicting local knock override reached the assigned cell")
+		return nil, errors.New("unexpected resolver call")
+	})
+
+	_, err := ResolveConfiguredResourceWithResult(context.Background(), &qurl.AgentRuntimeBinding{}, store, configured)
+	if !errors.Is(err, state.ErrConnectorResourceVerification) || !strings.Contains(err.Error(), EnvKnockResourceID) {
+		t.Fatalf("effective knock mismatch = %v, want actionable verification error", err)
+	}
+	if _, statErr := os.Lstat(filepath.Join(store.Dir(), state.ConnectorResourcesFile)); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("effective knock mismatch changed resource state: %v", statErr)
+	}
+}
+
+func TestResolveResourceLostResponseReplaysExactNonceThenWarmStartPinsIdentity(t *testing.T) {
+	for _, reuse := range []bool{false, true} {
+		name := "fresh name"
+		if reuse {
+			name = "reused name after delete"
+		}
+		t.Run(name, func(t *testing.T) { testResolveResourceLostResponse(t, reuse) })
+	}
+}
+
+func testResolveResourceLostResponse(t *testing.T, reuse bool) {
+	t.Helper()
+	dir := resourceTestStateDir(t)
+	store, err := state.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	resource := testNativeResource(t, "orders-api")
+	if reuse {
+		old := testNativeResource(t, resource.Slug)
+		tx, err := store.BeginConnectorResource(context.Background(), old.Slug)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := tx.Commit(&state.ConnectorResourceBinding{
+			ConnectorID: old.Slug, ResourceID: old.ResourcePublicKey, CRID: old.CRID,
+			ConnectorRoutingID: old.ConnectorRoutingID, KnockResourceID: old.KnockResourceID,
+		}); err != nil {
+			_ = tx.Close()
+			t.Fatal(err)
+		}
+		if err := tx.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if retired, err := store.RetireConnectorResource(context.Background(), old.CRID); err != nil || !retired {
+			t.Fatalf("retire original resource = %t, %v", retired, err)
+		}
+		if err := store.PrepareConnectorResourceReuse(context.Background(), old.Slug); err != nil {
+			t.Fatal(err)
 		}
 	}
-}
+	var mu sync.Mutex
+	var requests []qurl.NativeConnectorResourceRequest
+	lost := true
+	installResourceResolver(t, func(_ context.Context, _ *qurl.AgentRuntimeBinding, request *qurl.NativeConnectorResourceRequest, _ ...qurl.AgentRuntimeUDPOption) (*qurl.ConnectorResourceResolution, error) {
+		mu.Lock()
+		requests = append(requests, *request)
+		first := lost
+		lost = false
+		mu.Unlock()
+		if first {
+			return nil, errors.New("UDP response lost after dispatch")
+		}
+		return &qurl.ConnectorResourceResolution{Resource: resource, FoundExisting: true}, nil
+	})
 
-func TestResolveResourceEnsuresWhenAbsent(t *testing.T) {
-	t.Parallel()
-	m := newMockHub(t)
-	client := newMockClient(t, m)
-
-	got, err := ResolveResource(context.Background(), client, "fresh-connector")
-	if err != nil {
+	if _, err := ResolveResourceWithResult(context.Background(), &qurl.AgentRuntimeBinding{}, store, "orders-api"); err == nil {
+		t.Fatal("lost response = nil error")
+	}
+	if pendingRequestFromDisk(t, store, "orders-api") == nil {
+		t.Fatal("lost response cleared the durable request")
+	}
+	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if got.Slug != "fresh-connector" || got.ResourceID == "" || got.ConnectorRoutingID == "" {
-		t.Fatalf("ensured resource = %+v", got)
-	}
-	log := m.requestLog()
-	if len(log) != 2 || log[0] != "GET /v1/resources" || log[1] != "POST /v1/resources" {
-		t.Fatalf("request order = %v, want read-by-slug then ensure", log)
-	}
-}
-
-func TestResolveResourceSurfacesAuthoritativeEnsureRejection(t *testing.T) {
-	t.Parallel()
-	m := newMockHub(t)
-	client := newMockClient(t, m)
-	m.script(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(t, w, http.StatusForbidden, map[string]any{"code": "quota_exceeded", "title": "Forbidden", "detail": "connector quota reached"})
-	})
-
-	_, err := ResolveResource(context.Background(), client, "quota-blocked")
-	if err == nil {
-		t.Fatal("ResolveResource = nil error, want the platform rejection")
-	}
-	var apiErr *qurl.APIError
-	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusForbidden {
-		t.Fatalf("rejection = %v, want the 403 APIError preserved", err)
-	}
-	// A definitive rejection must not trigger the read-back adoption path.
-	log := m.requestLog()
-	if len(log) != 2 {
-		t.Fatalf("requests after authoritative rejection = %v, want no reconcile read", log)
-	}
-}
-
-func TestResolveResourceReconcilesUncertainEnsure(t *testing.T) {
-	t.Parallel()
-	row := testConnectorRow(t, "flaky-net")
-	m := newMockHub(t)
-	client := newMockClient(t, m)
-	// First read: not found. Ensure: 500 (outcome unknown). Reconcile read:
-	// the row is visible — the mutation had committed server-side.
-	m.script(http.MethodGet, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(t, w, http.StatusOK, map[string]any{"data": []connectorWire{}})
-	})
-	m.script(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(t, w, http.StatusInternalServerError, map[string]any{"code": "internal", "title": "Internal", "detail": "please retry"})
-	})
-	m.script(http.MethodGet, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(t, w, http.StatusOK, map[string]any{"data": []connectorWire{row}})
-	})
-
-	got, err := ResolveResource(context.Background(), client, "flaky-net")
+	store, err = state.Open(dir)
 	if err != nil {
-		t.Fatalf("uncertain ensure with committed row = %v, want adoption", err)
+		t.Fatalf("reopen state after simulated process restart: %v", err)
 	}
-	if got.ResourceID != row.ResourceID {
-		t.Fatalf("adopted resource = %+v, want the committed row", got)
+	if _, err := ResolveResourceWithResult(context.Background(), &qurl.AgentRuntimeBinding{}, store, "orders-api"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ResolveResourceWithResult(context.Background(), &qurl.AgentRuntimeBinding{}, store, "orders-api"); err != nil {
+		t.Fatal(err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(requests) != 3 {
+		t.Fatalf("requests = %d, want lost + exact replay + warm continuity", len(requests))
+	}
+	if requests[0].ExpectedCRID != "" {
+		t.Fatal("new resource request retained the deleted resource identity")
+	}
+	if requests[0] != requests[1] {
+		t.Fatalf("lost-response replay changed request:\nfirst %+v\nretry %+v", requests[0], requests[1])
+	}
+	if requests[2].RequestNonce == requests[1].RequestNonce {
+		t.Fatal("completed warm start reused the spent nonce")
+	}
+	if requests[2].ExpectedCRID != resource.CRID {
+		t.Fatalf("warm expected_crid = %q, want %q", requests[2].ExpectedCRID, resource.CRID)
 	}
 }
 
-func TestResolveResourceUncertainEnsureWithoutRowFailsClosed(t *testing.T) {
-	t.Parallel()
-	m := newMockHub(t)
-	client := newMockClient(t, m)
-	m.script(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(t, w, http.StatusInternalServerError, map[string]any{"code": "internal", "title": "Internal", "detail": "please retry"})
+// A failed service-side slug release can leave a deleted resource discoverable.
+// Explicit name reuse must preserve that native conflict and retry only through
+// the normal resource exchange after the service has released the name.
+func TestResolveResourceReusePreservesNativeConflict(t *testing.T) {
+	store := openResourceTestStore(t)
+	old := testNativeResource(t, "reusable-api")
+	replacement := testNativeResource(t, old.Slug)
+	var requests []qurl.NativeConnectorResourceRequest
+	installResourceResolver(t, func(_ context.Context, _ *qurl.AgentRuntimeBinding, request *qurl.NativeConnectorResourceRequest, _ ...qurl.AgentRuntimeUDPOption) (*qurl.ConnectorResourceResolution, error) {
+		requests = append(requests, *request)
+		switch len(requests) {
+		case 1:
+			return &qurl.ConnectorResourceResolution{Resource: old}, nil
+		case 2:
+			return nil, qurl.ErrConnectorResourceIdentityConflict
+		default:
+			return &qurl.ConnectorResourceResolution{Resource: replacement}, nil
+		}
 	})
-
-	_, err := ResolveResource(context.Background(), client, "lost-outcome")
-	if err == nil || !strings.Contains(err.Error(), "not retrying automatically") {
-		t.Fatalf("uncertain ensure without a visible row = %v, want fail-closed uncertainty", err)
+	ctx := context.Background()
+	if _, err := ResolveResourceWithResult(ctx, &qurl.AgentRuntimeBinding{}, store, old.Slug); err != nil {
+		t.Fatal(err)
 	}
-	if !errors.Is(err, qurl.ErrConnectorResourceOutcomeUnknown) {
-		t.Fatalf("uncertainty error = %v, want ErrConnectorResourceOutcomeUnknown preserved", err)
+	if retired, err := store.RetireConnectorResource(ctx, old.CRID); err != nil || !retired {
+		t.Fatalf("retire old resource = %t, %v", retired, err)
+	}
+	if err := store.PrepareConnectorResourceReuse(ctx, old.Slug); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ResolveResourceWithResult(ctx, &qurl.AgentRuntimeBinding{}, store, old.Slug); !errors.Is(err, qurl.ErrConnectorResourceIdentityConflict) {
+		t.Fatalf("reuse with retained revoked slug = %v, want native identity conflict", err)
+	}
+	if len(requests) != 2 || pendingRequestFromDisk(t, store, old.Slug) != nil {
+		t.Fatal("terminal conflict retried or retained the rejected request")
+	}
+	if _, _, found, err := store.ConnectorResourceBinding(ctx, old.Slug); err != nil || found {
+		t.Fatalf("native conflict committed a replacement binding: found=%t err=%v", found, err)
+	}
+	if err := store.PrepareConnectorResourceReuse(ctx, old.Slug); err != nil {
+		t.Fatal(err)
+	}
+	result, err := ResolveResourceWithResult(ctx, &qurl.AgentRuntimeBinding{}, store, old.Slug)
+	if err != nil || result.Resource.ResourcePublicKey != replacement.ResourcePublicKey {
+		t.Fatalf("retry after service slug release = %+v, %v", result, err)
+	}
+	if requests[1].ExpectedCRID != "" || requests[2].ExpectedCRID != "" ||
+		requests[1].RequestNonce == requests[0].RequestNonce || requests[2].RequestNonce == requests[1].RequestNonce {
+		t.Fatal("reuse retained a deleted identity or replayed a terminal request")
 	}
 }
 
-func TestResolveResourceRejectsNilClient(t *testing.T) {
-	t.Parallel()
-	if _, err := ResolveResource(context.Background(), nil, "any"); err == nil {
-		t.Fatal("nil client accepted")
-	}
-}
-
-func TestKnockResourceIDPrefersTrimmedEnvOverride(t *testing.T) {
-	resource := &qurl.ConnectorResource{KnockResourceID: "producer-assigned"}
+func TestResolveResourcePendingPolicy(t *testing.T) {
 	tests := []struct {
-		name     string
-		env      string
-		envSet   bool
-		resource *qurl.ConnectorResource
-		want     string
-		wantErr  bool
+		name        string
+		err         error
+		wantPending bool
 	}{
-		{name: "producer mapping without override", resource: resource, want: "producer-assigned"},
-		{name: "explicit override wins", env: "  custom-admission-target  ", envSet: true, resource: resource, want: "custom-admission-target"},
-		{name: "whitespace override falls back to producer mapping", env: " \t ", envSet: true, resource: resource, want: "producer-assigned"},
-		{name: "missing mapping without override fails closed", resource: &qurl.ConnectorResource{}, wantErr: true},
-		{name: "nil resource without override fails closed", wantErr: true},
-		{name: "override supplies missing producer mapping", env: "custom-admission-target", envSet: true, resource: &qurl.ConnectorResource{}, want: "custom-admission-target"},
+		{name: "transport", err: errors.New("UDP timeout"), wantPending: true},
+		{name: "unavailable", err: qurl.ErrConnectorResourceUnavailable, wantPending: true},
+		{name: "rate limited", err: qurl.ErrConnectorResourceRateLimited, wantPending: true},
+		{name: "invalid response", err: qurl.ErrInvalidNativeConnectorResourceResponse, wantPending: true},
+		{name: "invalid local request", err: qurl.ErrInvalidNativeConnectorResourceRequest, wantPending: true},
+		{name: "identity rejected", err: qurl.ErrConnectorResourceIdentityRejected},
+		{name: "entitlement", err: qurl.ErrConnectorResourceEntitlementDenied},
+		{name: "identity conflict", err: qurl.ErrConnectorResourceIdentityConflict},
+		{name: "quota", err: qurl.ErrConnectorResourceQuotaExceeded},
+		{name: "invalid request", err: qurl.ErrConnectorResourceRequestRejected},
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Setenv(EnvKnockResourceID, "restore-after-test")
-			if tt.envSet {
-				t.Setenv(EnvKnockResourceID, tt.env)
-			} else if err := os.Unsetenv(EnvKnockResourceID); err != nil {
-				t.Fatal(err)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			store := openResourceTestStore(t)
+			installResourceResolver(t, func(context.Context, *qurl.AgentRuntimeBinding, *qurl.NativeConnectorResourceRequest, ...qurl.AgentRuntimeUDPOption) (*qurl.ConnectorResourceResolution, error) {
+				return nil, test.err
+			})
+			_, err := ResolveResourceWithResult(context.Background(), &qurl.AgentRuntimeBinding{}, store, "policy-api")
+			if !errors.Is(err, test.err) {
+				t.Fatalf("error = %v, want %v", err, test.err)
 			}
-			got, err := KnockResourceID(tt.resource)
-			if tt.wantErr {
-				if err == nil {
-					t.Fatalf("KnockResourceID = %q, want fail-closed error", got)
-				}
-				return
-			}
-			if err != nil || got != tt.want {
-				t.Fatalf("KnockResourceID = (%q, %v), want %q", got, err, tt.want)
+			gotPending := pendingRequestFromDisk(t, store, "policy-api") != nil
+			if gotPending != test.wantPending {
+				t.Fatalf("pending = %v, want %v", gotPending, test.wantPending)
 			}
 		})
+	}
+}
+
+func TestResolveResourceLocalBindingContradictionsAreTerminal(t *testing.T) {
+	tests := []struct {
+		name       string
+		resolution func(*testing.T) *qurl.ConnectorResourceResolution
+	}{
+		{
+			name: "missing resolution",
+			resolution: func(*testing.T) *qurl.ConnectorResourceResolution {
+				return nil
+			},
+		},
+		{
+			name: "missing resource",
+			resolution: func(*testing.T) *qurl.ConnectorResourceResolution {
+				return &qurl.ConnectorResourceResolution{}
+			},
+		},
+		{
+			name: "response Connector ID mismatch",
+			resolution: func(t *testing.T) *qurl.ConnectorResourceResolution {
+				return &qurl.ConnectorResourceResolution{Resource: testNativeResource(t, "other-api")}
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			store := openResourceTestStore(t)
+			var nonces []string
+			installResourceResolver(t, func(_ context.Context, _ *qurl.AgentRuntimeBinding, request *qurl.NativeConnectorResourceRequest, _ ...qurl.AgentRuntimeUDPOption) (*qurl.ConnectorResourceResolution, error) {
+				nonces = append(nonces, request.RequestNonce)
+				return test.resolution(t), nil
+			})
+
+			for attempt := 0; attempt < 2; attempt++ {
+				_, err := ResolveResourceWithResult(context.Background(), &qurl.AgentRuntimeBinding{}, store, "stable-api")
+				if !errors.Is(err, state.ErrConnectorResourceVerification) {
+					t.Fatalf("attempt %d error = %v, want local verification failure", attempt+1, err)
+				}
+				if pendingRequestFromDisk(t, store, "stable-api") != nil {
+					t.Fatalf("attempt %d retained a locally rejected completed request", attempt+1)
+				}
+			}
+			if len(nonces) != 2 || nonces[0] == nonces[1] {
+				t.Fatalf("request nonces = %v, want a fresh request after the terminal local rejection", nonces)
+			}
+		})
+	}
+}
+
+func TestResolveResourceRejectsNilRuntimeInputsBeforeStateMutation(t *testing.T) {
+	store := openResourceTestStore(t)
+	if _, err := ResolveResourceWithResult(context.Background(), nil, store, "nil-api"); err == nil {
+		t.Fatal("nil binding = nil error")
+	}
+	if _, err := os.Lstat(filepath.Join(store.Dir(), state.ConnectorResourcesFile)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("nil binding state file error = %v, want not exist", err)
+	}
+	if _, err := ResolveResourceWithResult(context.Background(), &qurl.AgentRuntimeBinding{}, nil, "nil-api"); err == nil {
+		t.Fatal("nil store = nil error")
+	}
+}
+
+func TestKnockResourceID(t *testing.T) {
+	t.Setenv(EnvKnockResourceID, "")
+	if got, err := KnockResourceID(&qurl.ConnectorResource{KnockResourceID: "assigned-target"}); err != nil || got != "assigned-target" {
+		t.Fatalf("assigned KnockResourceID = (%q, %v)", got, err)
+	}
+	t.Setenv(EnvKnockResourceID, " custom-target ")
+	if got, err := KnockResourceID(nil); err != nil || got != "custom-target" {
+		t.Fatalf("override KnockResourceID = (%q, %v)", got, err)
+	}
+	t.Setenv(EnvKnockResourceID, "")
+	if _, err := KnockResourceID(nil); err == nil {
+		t.Fatal("missing KnockResourceID = nil error")
 	}
 }

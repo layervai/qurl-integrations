@@ -23,7 +23,7 @@ const QURLConfig = typeof globalThis !== 'undefined' && globalThis.QURLConfig
 // trailing slash it carries is stripped by normalizeQurlApiBase via resolveDefaultQurlApiConfig.
 const DEFAULT_QURL_API_BASE = QURLConfig ? QURLConfig.DEFAULT_QURL_API_BASE : null;
 // Pre-flight (storage + permission lookups) must finish within this budget so a torn-down
-// MV3 service worker that drops a Chrome callback can't hang the upload forever.
+// MV3 service worker that drops a browser callback cannot hang the upload forever.
 const UPLOAD_PREFLIGHT_TIMEOUT_MS = 10 * 1000;
 const QURL_API_BASE_STORAGE_KEY = 'qurlApiBase';
 const UPLOAD_REQUEST_TIMEOUT_MS = 5 * 60 * 1000;
@@ -55,7 +55,7 @@ async function uploadFile(fileBuffer, filename, contentType) {
   let hasPermission;
   try {
     // Bound the pre-flight: storage.local.get and permissions.contains are Promise-wrapped
-    // Chrome callbacks with no native timeout. If the service worker is torn down mid-call
+    // browser callbacks with no native timeout. If the service worker is torn down mid-call
     // the callback can be dropped, which would otherwise hang the popup on "Uploading…"
     // forever (the fetch AbortController below is not armed until after this resolves).
     const preflight = (async function () {
@@ -275,7 +275,7 @@ async function getStoredQurlApiBase() {
  */
 async function setStoredQurlApiBase(value, options) {
   if (typeof chrome === 'undefined' || !chrome.storage || !chrome.storage.local) {
-    throw new Error('Chrome storage is not available.');
+    throw new Error('Browser storage is not available.');
   }
 
   const normalized = normalizeQurlApiBase(value);
@@ -472,7 +472,7 @@ function _sanitizeContentType(contentType) {
 
 /**
  * Rejects a pending promise if it does not settle within the given budget.
- * Used to bound Chrome callback-backed promises that have no native timeout.
+ * Used to bound browser callback-backed promises that have no native timeout.
  *
  * @param {Promise<T>} promise
  * @param {number} timeoutMs
@@ -634,7 +634,7 @@ function _sanitizeFilename(name) {
 }
 
 function createMultipartBoundary() {
-  // crypto.getRandomValues is present in every Chrome at/after minimum_chrome_version, so there
+  // crypto.getRandomValues is present in every supported host browser, so there
   // is no non-crypto fallback to maintain (Node test runs provide it via the global crypto too).
   const bytes = new Uint8Array(16);
   globalThis.crypto.getRandomValues(bytes);
@@ -701,7 +701,7 @@ function resolveDefaultQurlApiConfig(baseUrl) {
 /**
  * Builds the host permission pattern for the given qURL base URL.
  *
- * Chrome match patterns do not permit a port in the host, so a base URL with an
+ * Browser match patterns do not permit a port in the host, so a base URL with an
  * explicit port (e.g. https://host:8443) must yield a port-less pattern. Host match
  * patterns authorize any port on the host, which is the intended behavior here.
  *

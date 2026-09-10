@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,6 +16,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/layervai/qurl-go/crid"
 )
 
 const (
@@ -22,6 +25,8 @@ const (
 	defaultMaxRetries = 3
 	defaultBaseDelay  = 500 * time.Millisecond
 	defaultMaxDelay   = 30 * time.Second
+	desiredStateOn    = "on"
+	desiredStateOff   = "off"
 )
 
 // HeaderIdempotencyKey is the request header the qURL API reads to dedupe
@@ -117,6 +122,13 @@ var ErrRevokeAPIKeyEmptyID = errors.New("revoke api key: key_id is empty")
 // is empty.
 var ErrDeleteResourceEmptyID = errors.New("delete resource: resource_id is empty")
 
+// ErrGetResourceEmptyID is returned when a resource lookup has no identity.
+var ErrGetResourceEmptyID = errors.New("get resource: resource_id is empty")
+
+// ErrSharingResourceEmptyID is returned when a sharing lifecycle call has no
+// public resource identity.
+var ErrSharingResourceEmptyID = errors.New("sharing: resource_id is empty")
+
 // ErrUpdateResourceEmptyID is returned by UpdateResource when resourceID
 // is the empty string.
 var ErrUpdateResourceEmptyID = errors.New("update resource: resource_id is empty")
@@ -176,6 +188,11 @@ const (
 	// CredentialTargetConnector constrains an enrollment token to Connector
 	// enrollment.
 	CredentialTargetConnector = "connector"
+	// CredentialTargetAgent constrains an enrollment token to registered-device
+	// (agent) enrollment: the owner-scoped credential a headless Connector
+	// daemon needs for native session control. Connector-target tokens are
+	// connector-scoped and cannot open native sessions.
+	CredentialTargetAgent = "agent"
 	// CredentialClaimTypeConnector binds an enrollment token to one Connector
 	// resource identifier. Sharing the literal "connector" with
 	// CredentialTargetConnector is deliberate: `target` and `claims[].type`
@@ -554,6 +571,113 @@ type Resource struct {
 	ConnectorRoutingID string `json:"connector_routing_id,omitempty"`
 }
 
+// SharingState is the account-authorized lifecycle state for one tunnel.
+// NHP admission remains resource/session bound; this HTTP surface controls
+// customer intent and provides the serving observation used by guided setup.
+type SharingState struct {
+	ResourceID      string `json:"resource_id"`
+	CRID            string `json:"crid"`
+	DesiredState    string `json:"desired_state"`
+	ServingEpoch    uint64 `json:"serving_epoch"`
+	ConnectionState string `json:"connection_state"`
+}
+
+// UnmarshalJSON requires the lifecycle fence to be present even for an off
+// resource. A missing or null epoch must not silently become zero because
+// Slack uses the prior epoch to determine whether an ambiguous restart was
+// accepted exactly once.
+func (s *SharingState) UnmarshalJSON(data []byte) error {
+	if s == nil {
+		return errors.New("sharing state is nil")
+	}
+	seen, err := validateSharingStateFields(data)
+	if err != nil {
+		return err
+	}
+	type sharingStateWire struct {
+		ResourceID      string          `json:"resource_id"`
+		CRID            string          `json:"crid"`
+		DesiredState    string          `json:"desired_state"`
+		ServingEpoch    json.RawMessage `json:"serving_epoch"`
+		ConnectionState string          `json:"connection_state"`
+	}
+	var wire sharingStateWire
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+	if !seen["serving_epoch"] {
+		return errors.New("sharing response is missing serving_epoch")
+	}
+	encodedEpoch := strings.TrimSpace(string(wire.ServingEpoch))
+	if encodedEpoch == "" || strings.IndexFunc(encodedEpoch, func(r rune) bool { return r < '0' || r > '9' }) >= 0 {
+		return errors.New("sharing response serving_epoch must be an unsigned decimal integer")
+	}
+	servingEpoch, err := strconv.ParseUint(encodedEpoch, 10, 64)
+	if err != nil {
+		return fmt.Errorf("sharing response serving_epoch: %w", err)
+	}
+	*s = SharingState{
+		ResourceID: wire.ResourceID, CRID: wire.CRID, DesiredState: wire.DesiredState,
+		ServingEpoch: servingEpoch, ConnectionState: wire.ConnectionState,
+	}
+	return nil
+}
+
+func validateSharingStateFields(data []byte) (map[string]bool, error) {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	first, err := decoder.Token()
+	if err != nil {
+		return nil, err
+	}
+	if delimiter, ok := first.(json.Delim); !ok || delimiter != '{' {
+		return nil, errors.New("sharing response must be an object")
+	}
+	known := map[string]bool{
+		"resource_id": true, "crid": true, "desired_state": true,
+		"serving_epoch": true, "connection_state": true,
+	}
+	seen := make(map[string]bool, len(known))
+	for decoder.More() {
+		field, err := decoder.Token()
+		if err != nil {
+			return nil, err
+		}
+		name, ok := field.(string)
+		if !ok {
+			return nil, errors.New("sharing response field name is invalid")
+		}
+		var value json.RawMessage
+		if err := decoder.Decode(&value); err != nil {
+			return nil, err
+		}
+		if !known[name] {
+			continue
+		}
+		if seen[name] {
+			return nil, fmt.Errorf("sharing response has duplicate %s", name)
+		}
+		seen[name] = true
+	}
+	last, err := decoder.Token()
+	if err != nil {
+		return nil, err
+	}
+	if delimiter, ok := last.(json.Delim); !ok || delimiter != '}' {
+		return nil, errors.New("sharing response object is incomplete")
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return nil, errors.New("sharing response has trailing JSON")
+		}
+		return nil, err
+	}
+	return seen, nil
+}
+
+type sharingUpdate struct {
+	DesiredState string `json:"desired_state"`
+}
+
 // CreateResourceInput is the input for `POST /v1/resources`. Idempotent on
 // `(owner_id, target_url_hash)` — repeat calls with the same target return
 // the existing resource. Per the PR-3a.2 contract, supplying `Alias` here
@@ -766,6 +890,159 @@ func (c *Client) CreateResource(ctx context.Context, input *CreateResourceInput)
 		return nil, err
 	}
 	return &out, nil
+}
+
+// GetResource retrieves one resource by its public resource identity.
+func (c *Client) GetResource(ctx context.Context, resourceID string) (*Resource, error) {
+	resourceID = strings.TrimSpace(resourceID)
+	if resourceID == "" {
+		return nil, ErrGetResourceEmptyID
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/v1/resources/"+url.PathEscape(resourceID), http.NoBody)
+	if err != nil {
+		return nil, fmt.Errorf("build request: %w", err)
+	}
+	var out Resource
+	if _, err := c.do(req, &out, "GET /v1/resources/:id"); err != nil {
+		return nil, err
+	}
+	if out.ResourceID != resourceID {
+		return nil, errors.New("get resource response identity does not match request")
+	}
+	return &out, nil
+}
+
+// Identity is the account identity behind the client credential (GET /v1/me).
+//
+// TODO(upstream-contract): mirrors qurl-service `GET /v1/me` (`owner_id`,
+// `api_key` present only for API-key principals).
+type Identity struct {
+	// OwnerID is the principal behind the credential: the account owner for
+	// an API key, the calling user for a delegated credential. Callers that
+	// need the account owner must check APIKey != nil.
+	OwnerID string `json:"owner_id"`
+	// APIKey is present only when the request was authenticated by an API key.
+	APIKey *IdentityAPIKey `json:"api_key,omitempty"`
+}
+
+// IdentityAPIKey identifies the API key behind an Identity.
+type IdentityAPIKey struct {
+	KeyID string `json:"key_id,omitempty"`
+}
+
+// Me returns the account identity behind the client credential (GET /v1/me).
+// OwnerID is the durable account owner the headless share config must name.
+func (c *Client) Me(ctx context.Context) (*Identity, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/v1/me", http.NoBody)
+	if err != nil {
+		return nil, fmt.Errorf("build request: %w", err)
+	}
+	var out Identity
+	if _, err := c.do(req, &out, "GET /v1/me"); err != nil {
+		return nil, err
+	}
+	out.OwnerID = strings.TrimSpace(out.OwnerID)
+	if out.OwnerID == "" {
+		return nil, errors.New("identity response missing owner_id")
+	}
+	if out.APIKey != nil && strings.TrimSpace(out.APIKey.KeyID) == "" {
+		// An api_key object without key_id is not proof of an API-key principal.
+		out.APIKey = nil
+	}
+	return &out, nil
+}
+
+// GetSharing retrieves authoritative desired and observed sharing state.
+func (c *Client) GetSharing(ctx context.Context, resourceID string) (*SharingState, error) {
+	return c.doSharing(ctx, http.MethodGet, resourceID, nil, "GET /v1/resources/:id/sharing", true)
+}
+
+// SetSharing changes authoritative sharing intent to on or off.
+func (c *Client) SetSharing(ctx context.Context, resourceID, desired string) (*SharingState, error) {
+	if desired != desiredStateOn && desired != desiredStateOff {
+		return nil, fmt.Errorf("sharing desired_state %q must be on or off", desired)
+	}
+	return c.doSharing(ctx, http.MethodPut, resourceID, &sharingUpdate{DesiredState: desired}, "PUT /v1/resources/:id/sharing", true)
+}
+
+// RestartSharing always turns sharing on and advances the serving epoch.
+func (c *Client) RestartSharing(ctx context.Context, resourceID string) (*SharingState, error) {
+	// Restart is deliberately not replayed: every accepted POST advances the
+	// serving epoch, and the service does not yet expose an idempotency key for
+	// this route. A lost response is reconciled by the guided-install caller
+	// with an authoritative GET instead of silently sending a second POST.
+	return c.doSharing(ctx, http.MethodPost, resourceID, nil, "POST /v1/resources/:id/sharing/restart", false)
+}
+
+func (c *Client) doSharing(ctx context.Context, method, resourceID string, input any, label string, allowRetry bool) (*SharingState, error) {
+	resourceID = strings.TrimSpace(resourceID)
+	if resourceID == "" {
+		return nil, ErrSharingResourceEmptyID
+	}
+	path := c.baseURL + "/v1/resources/" + url.PathEscape(resourceID) + "/sharing"
+	if method == http.MethodPost {
+		path += "/restart"
+	}
+	var body io.Reader = http.NoBody
+	if input != nil {
+		encoded, err := json.Marshal(input)
+		if err != nil {
+			return nil, fmt.Errorf("marshal sharing input: %w", err)
+		}
+		body = bytes.NewReader(encoded)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, path, body)
+	if err != nil {
+		return nil, fmt.Errorf("build request: %w", err)
+	}
+	var out SharingState
+	request := c.do
+	if !allowRetry {
+		request = c.doOnce
+	}
+	if _, err := request(req, &out, label); err != nil {
+		return nil, err
+	}
+	if err := validateSharingState(resourceID, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func validateSharingState(requestResourceID string, sharing *SharingState) error {
+	if sharing == nil || sharing.ResourceID != requestResourceID {
+		return errors.New("sharing response identity does not match request")
+	}
+	if sharing.CRID == "" {
+		return errors.New("sharing response CRID is missing")
+	}
+	der, err := base64.RawURLEncoding.Strict().DecodeString(sharing.ResourceID)
+	if err != nil {
+		return errors.New("sharing response resource identity is invalid")
+	}
+	matched, err := crid.KeyMatches(sharing.CRID, der)
+	if err != nil || !matched {
+		return errors.New("sharing response CRID does not match resource identity")
+	}
+	switch sharing.DesiredState {
+	case desiredStateOff:
+		if sharing.ConnectionState != "stopped" {
+			return errors.New("sharing response off state must be stopped")
+		}
+	case desiredStateOn:
+		if sharing.ServingEpoch == 0 {
+			return errors.New("sharing response on state requires a positive serving epoch")
+		}
+		if sharing.ConnectionState != "connecting" && sharing.ConnectionState != "serving" {
+			return errors.New("sharing response on state must be connecting or serving")
+		}
+	default:
+		return errors.New("sharing response desired state is invalid")
+	}
+	if sharing.ConnectionState == "stopped" && sharing.DesiredState != desiredStateOff {
+		return errors.New("sharing response stopped state requires desired off")
+	}
+	return nil
 }
 
 // CreateAPIKey creates a qURL credential. Slack onboarding uses it to mint a
@@ -1081,6 +1358,14 @@ type apiErrorDetail struct {
 // --- HTTP plumbing ---
 
 func (c *Client) do(req *http.Request, out any, endpoint string) (*ResponseMeta, error) {
+	return c.doWithRetryLimit(req, out, endpoint, c.maxRetries)
+}
+
+func (c *Client) doOnce(req *http.Request, out any, endpoint string) (*ResponseMeta, error) {
+	return c.doWithRetryLimit(req, out, endpoint, 0)
+}
+
+func (c *Client) doWithRetryLimit(req *http.Request, out any, endpoint string, maxRetries int) (*ResponseMeta, error) {
 	req.Header.Set("Content-Type", "application/json")
 	// NOTE: If you add header logging, redact the Authorization value to avoid leaking API keys.
 	req.Header.Set("Authorization", "Bearer "+c.apiKey)
@@ -1101,7 +1386,7 @@ func (c *Client) do(req *http.Request, out any, endpoint string) (*ResponseMeta,
 	}
 
 	var lastErr error
-	for attempt := 0; attempt <= c.maxRetries; attempt++ {
+	for attempt := 0; attempt <= maxRetries; attempt++ {
 		if attempt > 0 {
 			if err := c.waitForRetry(req.Context(), attempt, lastErr); err != nil {
 				return nil, err
@@ -1117,7 +1402,7 @@ func (c *Client) do(req *http.Request, out any, endpoint string) (*ResponseMeta,
 		resp, err := c.httpClient.Do(req)
 		if err != nil {
 			lastErr = fmt.Errorf("http request: %w", err)
-			if attempt < c.maxRetries {
+			if attempt < maxRetries {
 				continue
 			}
 			return nil, lastErr
@@ -1133,7 +1418,7 @@ func (c *Client) do(req *http.Request, out any, endpoint string) (*ResponseMeta,
 
 		if resp.StatusCode >= 400 {
 			apiErr := c.parseError(resp, respBody)
-			if isRetryable(resp.StatusCode) && attempt < c.maxRetries {
+			if isRetryable(resp.StatusCode) && attempt < maxRetries {
 				lastErr = apiErr
 				continue
 			}

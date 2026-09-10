@@ -9,17 +9,11 @@ import (
 
 func TestRenderDockerComposeTunnelInstructionsUsesWebService(t *testing.T) {
 	t.Parallel()
-	got := mustRenderDockerComposeTunnelInstructions(t, &tunnelInstallArgs{
-		Slug:               testTunnelSlug,
-		Alias:              testTunnelSlug,
-		LocalPort:          9090,
-		Environment:        tunnelEnvCompose,
-		WebRef:             testTunnelDockerWeb,
-		ResourceID:         testTunnelResourceID,
-		ConnectorRoutingID: testTunnelRoutingID,
-		KnockResourceID:    testTunnelKnockID,
-		APIURL:             testTunnelAPIURL,
-	}, testTunnelImageRef)
+	args := testTunnelInstallArgs()
+	args.LocalPort = 9090
+	args.Environment = tunnelEnvCompose
+	args.WebRef = testTunnelDockerWeb
+	got := mustRenderDockerComposeTunnelInstructions(t, args, testTunnelImageRef)
 
 	for _, want := range []string{
 		"Run this from your Docker Compose project directory on the Linux Docker host.",
@@ -30,17 +24,15 @@ func TestRenderDockerComposeTunnelInstructionsUsesWebService(t *testing.T) {
 		"WEB_SERVICE='" + testTunnelDockerWeb + "'",
 		`case "$WEB_SERVICE" in`,
 		"WEB_SERVICE may contain only letters, numbers, underscores, and hyphens.",
-		"CONNECTOR_SERVICE='qurl-connector-" + testTunnelSlug + "'",
-		`CONFIG_FILE="$PWD/qurl-proxy-${QURL_CONNECTOR_ID}.yaml"`,
-		`AUDIT_DIR="/var/log/layerv/qurl-connector/${QURL_CONNECTOR_ID}"`,
-		`$SUDO install -d -m 0700 -o 65532 -g 65532 "$AUDIT_DIR"`,
+		"CONNECTOR_SERVICE='qurl-" + testTunnelSlug + "'",
+		`CONFIG_FILE="$PWD/qurl-share-${QURL_CONNECTOR_ID}.yaml"`,
 		"client-safe public/routing metadata",
 		`$SUDO chmod 0644 "$CONFIG_FILE"`,
-		`QURL_COMPOSE_FILE="$PWD/qurl-connector-${QURL_CONNECTOR_ID}.compose.yaml"`,
+		`QURL_COMPOSE_FILE="$PWD/qurl-${QURL_CONNECTOR_ID}.compose.yaml"`,
 		testTunnelKeyPromptLine,
 		testTunnelKeyInstallLine,
-		"qurl-connector-" + testTunnelSlug + ".compose.yaml",
-		"'qurl-connector-" + testTunnelSlug + "':",
+		"qurl-" + testTunnelSlug + ".compose.yaml",
+		"'qurl-" + testTunnelSlug + "':",
 		`network_mode: "service:${WEB_SERVICE}"`,
 		`user: "65532:65532"`,
 		"read_only: true",
@@ -48,19 +40,21 @@ func TestRenderDockerComposeTunnelInstructionsUsesWebService(t *testing.T) {
 		"pids_limit: 512",
 		"- ALL",
 		"- 'no-new-privileges:true'",
-		"QURL_AUDIT_FILE: /var/log/layerv/qurl-connector/audit.log",
+		"restart: unless-stopped",
+		"entrypoint: ['/usr/local/bin/qurl']",
+		"command: ['daemon', 'run', '--state-dir', '/var/lib/qurl', '--headless-config', '/etc/qurl/share.yaml', '--enrollment-token-file', '/run/secrets/qurl/enrollment-token']",
 		"do not hand-edit the generated fragment",
-		"bring the qURL Connector service up again too",
+		"bring the qurl service up again too",
 		"depends_on:",
 		"condition: service_started",
 		testTunnelAgentDirFragment,
-		"QURL_CONNECTOR_ID: ${QURL_CONNECTOR_ID}",
 		"QURL_CONNECTOR_ID='" + testTunnelSlug + "'",
+		"crid: '" + testTunnelCRID + "'",
 		"resource_id: '" + testTunnelResourceID + "'",
+		"knock_resource_id: '" + testTunnelKnockID + "'",
 		`docker compose -f "$APP_COMPOSE_FILE" -f "$QURL_COMPOSE_FILE" up -d "$CONNECTOR_SERVICE"`,
-		"Verify with `docker compose -f compose.yaml -f qurl-connector-" + testTunnelSlug + ".compose.yaml logs -f qurl-connector-" + testTunnelSlug + "`",
+		"Verify with `docker compose -f compose.yaml -f qurl-" + testTunnelSlug + ".compose.yaml logs -f qurl-" + testTunnelSlug + "`",
 		"if you changed `APP_COMPOSE_FILE`, use that file there too",
-		"logs -f qurl-connector-" + testTunnelSlug,
 		testTunnelLocalPort9090Line,
 		testTunnelImageRef,
 	} {
@@ -81,7 +75,7 @@ func TestRenderDockerComposeTunnelInstructionsUsesWebService(t *testing.T) {
 			t.Fatalf("Docker Compose instructions used unscoped service %q:\n%s", forbidden, got)
 		}
 	}
-	for _, forbidden := range []string{testForbiddenSlackYAMLFence, testForbiddenSlackShellFence, testForbiddenResourceLabel, testForbiddenBootstrapArgv, testTunnelAPIKey, "QURL_CONNECTOR_SLUG", "QURL_BOOTSTRAP_URL", "knock_resource_id", "LAYERV_KNOCK_RESOURCE_ID"} {
+	for _, forbidden := range []string{testForbiddenSlackYAMLFence, testForbiddenSlackShellFence, testForbiddenResourceLabel, testForbiddenBootstrapArgv, testTunnelAPIKey, "QURL_CONNECTOR_SLUG", "QURL_BOOTSTRAP_URL", "LAYERV_KNOCK_RESOURCE_ID", "ghcr.io/layervai/qurl-connector", "/usr/local/bin/qurl-connector"} {
 		if strings.Contains(got, forbidden) {
 			t.Fatalf("Docker Compose instructions leaked %q:\n%s", forbidden, got)
 		}
@@ -90,17 +84,11 @@ func TestRenderDockerComposeTunnelInstructionsUsesWebService(t *testing.T) {
 
 func TestRenderDockerComposeTunnelInstructionsEmitsParseableComposeFragment(t *testing.T) {
 	t.Parallel()
-	got := mustRenderDockerComposeTunnelInstructions(t, &tunnelInstallArgs{
-		Slug:               testTunnelSlug,
-		Alias:              testTunnelSlug,
-		LocalPort:          9090,
-		Environment:        tunnelEnvCompose,
-		WebRef:             "web",
-		ResourceID:         testTunnelResourceID,
-		ConnectorRoutingID: testTunnelRoutingID,
-		KnockResourceID:    testTunnelKnockID,
-		APIURL:             testTunnelAPIURL,
-	}, testTunnelImageRef)
+	args := testTunnelInstallArgs()
+	args.LocalPort = 9090
+	args.Environment = tunnelEnvCompose
+	args.WebRef = "web"
+	got := mustRenderDockerComposeTunnelInstructions(t, args, testTunnelImageRef)
 
 	start := "cat > \"$QURL_COMPOSE_FILE\" <<QURL_COMPOSE_YAML_EOF\n"
 	bodyStart := strings.Index(got, start)
@@ -123,12 +111,15 @@ func TestRenderDockerComposeTunnelInstructionsEmitsParseableComposeFragment(t *t
 			SecurityOpt []string          `yaml:"security_opt"`
 			Volumes     []string          `yaml:"volumes"`
 			Environment map[string]string `yaml:"environment"`
+			EntryPoint  []string          `yaml:"entrypoint"`
+			Command     []string          `yaml:"command"`
+			Restart     string            `yaml:"restart"`
 		} `yaml:"services"`
 	}
 	if err := yaml.Unmarshal([]byte(got[bodyStart:bodyStart+bodyEnd]), &parsed); err != nil {
 		t.Fatalf("Compose fragment did not parse: %v", err)
 	}
-	service := parsed.Services["qurl-connector-"+testTunnelSlug]
+	service := parsed.Services["qurl-"+testTunnelSlug]
 	if service.Image != testTunnelImageRef {
 		t.Fatalf("Compose service image = %q, want %q", service.Image, testTunnelImageRef)
 	}
@@ -141,8 +132,14 @@ func TestRenderDockerComposeTunnelInstructionsEmitsParseableComposeFragment(t *t
 	if len(service.CapDrop) != 1 || service.CapDrop[0] != testCapabilityAll || len(service.SecurityOpt) != 1 || service.SecurityOpt[0] != "no-new-privileges:true" {
 		t.Fatalf("Compose capability/security options = %v / %v", service.CapDrop, service.SecurityOpt)
 	}
-	if got := service.Environment[connectorAuditFileEnv]; got != connectorAuditFilePath {
-		t.Fatalf("Compose %s = %q, want %q", connectorAuditFileEnv, got, connectorAuditFilePath)
+	if service.Restart != "unless-stopped" || len(service.EntryPoint) != 1 || service.EntryPoint[0] != "/usr/local/bin/qurl" {
+		t.Fatalf("Compose runtime = restart %q entrypoint %v", service.Restart, service.EntryPoint)
+	}
+	if len(service.Command) < 4 || service.Command[0] != "daemon" || service.Command[1] != "run" {
+		t.Fatalf("Compose command = %v, want hidden daemon run", service.Command)
+	}
+	if _, ok := service.Environment["QURL_AUDIT_FILE"]; ok {
+		t.Fatal("Compose rendered retired QURL_AUDIT_FILE")
 	}
 	if _, ok := service.Environment["LAYERV_KNOCK_RESOURCE_ID"]; ok {
 		t.Fatal("Compose service rendered the advanced knock-resource override")
@@ -151,17 +148,11 @@ func TestRenderDockerComposeTunnelInstructionsEmitsParseableComposeFragment(t *t
 
 func TestRenderDockerComposeTunnelInstructionsPinsValidatedExpansionInputs(t *testing.T) {
 	t.Parallel()
-	got := mustRenderDockerComposeTunnelInstructions(t, &tunnelInstallArgs{
-		Slug:               testTunnelSlug,
-		Alias:              testTunnelSlug,
-		LocalPort:          9090,
-		Environment:        tunnelEnvCompose,
-		WebRef:             testTunnelComposeWeb,
-		ResourceID:         testTunnelResourceID,
-		ConnectorRoutingID: testTunnelRoutingID,
-		KnockResourceID:    testTunnelKnockID,
-		APIURL:             testTunnelAPIURL,
-	}, testTunnelImageRef)
+	args := testTunnelInstallArgs()
+	args.LocalPort = 9090
+	args.Environment = tunnelEnvCompose
+	args.WebRef = testTunnelComposeWeb
+	got := mustRenderDockerComposeTunnelInstructions(t, args, testTunnelImageRef)
 
 	for _, want := range []string{
 		"WEB_SERVICE='" + testTunnelComposeWeb + "'",
@@ -171,9 +162,8 @@ func TestRenderDockerComposeTunnelInstructionsPinsValidatedExpansionInputs(t *te
 		"adding new shell variables here",
 		"intentionally unquoted so it expands the validated variables",
 		"<<QURL_COMPOSE_YAML_EOF",
-		`'qurl-connector-` + testTunnelSlug + `':`,
+		`'qurl-` + testTunnelSlug + `':`,
 		`network_mode: "service:${WEB_SERVICE}"`,
-		`QURL_CONNECTOR_ID: ${QURL_CONNECTOR_ID}`,
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("Docker Compose instructions missing validated-expansion guard %q:\n%s", want, got)

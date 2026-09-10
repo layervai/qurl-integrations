@@ -22,6 +22,23 @@ const revokeUsageMessage = "Usage: `/qurl-admin revoke $<id>` — revoke a prote
 // *userError — but a future refactor mustn't leak an internal error to Slack.
 const commonRevokeFailedMessage = "Failed to revoke the resource. Please try again."
 
+// revokeTeardownNote is appended only to successful revoke replies. It LEADS
+// with what revoke did do — qurl-service flips the resource to revoked (new
+// viewers blocked) and deletes its viewer sessions — because to an admin of a
+// security product an opener like "revoking doesn't stop X" reads as "the
+// revoke didn't work", and that's a support ticket. The gap and the teardown
+// steps follow. Connector before S3 origin matches the Docker dependency (the
+// connector runs `--network container:<origin>`).
+//
+// Nothing falsifiable is named — no command, container name, or console path.
+// The install environment isn't persisted, and displayToken may be a channel
+// alias while containers are named off the connector slug, so naming one would
+// be actively wrong. "Workloads you run", not "customer-hosted": the reader IS
+// the customer.
+// TODO(upstream-contract): Revisit when layervai/qurl-service#1411 makes revoke
+// terminate active tunnel sessions; customer-hosted workloads remain operator-owned.
+const revokeTeardownNote = "New viewers are blocked and existing viewer sessions deleted. Workloads you run keep running: if you installed a qURL Connector for this resource, stop and remove it, then the S3 origin workload for an S3 static site."
+
 // revokeConfirmText is the confirm-dialog body shared by the `/qurl list`
 // Revoke button and the `/qurl-admin revoke` prompt. It spells out the blast
 // radius: revoke destroys the resource (and every qURL on it) in EVERY channel
@@ -169,6 +186,40 @@ func (h *Handler) revokeResourceResult(ctx context.Context, log *slog.Logger, te
 		log.Error("revoke: failed to get API key", "error", err, "team_id", teamID, "user_id", userID)
 		return newActionCoreResult(false, authErrorMessage(err), "Workspace API key was not available.")
 	}
+	resource, err := c.GetResource(ctx, resourceID)
+	if err != nil {
+		var apiErr *client.APIError
+		if errors.As(err, &apiErr) {
+			switch apiErr.StatusCode {
+			case http.StatusNotFound, http.StatusGone:
+				log.Info("revoke: resource not found before lifecycle teardown", "team_id", teamID, "user_id", userID, "resource_id", resourceID)
+				h.purgeResourceBindings(ctx, log, teamID, resourceID)
+				return newActionCoreResult(false, fmt.Sprintf("`$%s` not found — already revoked, or check the id.", escapeMrkdwnCode(displayToken)), "Resource was not found or was already revoked.")
+			case http.StatusUnauthorized, http.StatusForbidden:
+				log.Warn("revoke: upstream auth rejected", "status", apiErr.StatusCode, "team_id", teamID, "user_id", userID, "resource_id", resourceID)
+				return newActionCoreResult(false, "This workspace's API key was rejected by the qURL service — re-run `/qurl setup <email>` to reconnect.", "Workspace API key was rejected.")
+			}
+		}
+		log.Error("read resource before revoke failed", "error", err, "team_id", teamID, "user_id", userID, "resource_id", resourceID)
+		return newActionCoreResult(false, ":warning: "+sanitizeAPIError(err, fmt.Sprintf("Failed to inspect `$%s` before revoke", escapeMrkdwnCode(displayToken))), "Resource could not be inspected before revoke.")
+	}
+	switch resource.Type {
+	case client.ResourceTypeTunnel:
+		if _, err := c.SetSharing(ctx, resourceID, "off"); err != nil {
+			var apiErr *client.APIError
+			if !errors.As(err, &apiErr) || (apiErr.StatusCode != http.StatusNotFound && apiErr.StatusCode != http.StatusGone) {
+				log.Error("stop tunnel sharing before revoke failed", "error", err, "team_id", teamID, "user_id", userID, "resource_id", resourceID)
+				return newActionCoreResult(false, ":warning: "+sanitizeAPIError(err, fmt.Sprintf("Failed to stop sharing `$%s` before revoke", escapeMrkdwnCode(displayToken))), "Sharing could not be stopped before revoke.")
+			}
+			// A concurrent delete already achieved the desired fail-closed state;
+			// continue into idempotent DELETE so cleanup/reply behavior converges.
+		}
+	case client.ResourceTypeURL:
+		// URL resources have no Connector lifecycle state.
+	default:
+		log.Error("revoke: resource response has unknown type", "type", resource.Type, "team_id", teamID, "user_id", userID, "resource_id", resourceID)
+		return newActionCoreResult(false, ":warning: Failed to revoke the resource because its type was not recognized.", "Resource type was not recognized.")
+	}
 	if err := c.DeleteResource(ctx, resourceID); err != nil {
 		var apiErr *client.APIError
 		if errors.As(err, &apiErr) {
@@ -203,7 +254,14 @@ func (h *Handler) revokeResourceResult(ctx context.Context, log *slog.Logger, te
 	// is already gone, so a sweep failure only leaves a recoverable orphan and
 	// must not change the revoke reply.
 	h.purgeResourceBindings(ctx, log, teamID, resourceID)
-	return newActionCoreResult(true, fmt.Sprintf("Revoked `$%s` and all its qURLs.", escapeMrkdwnCode(displayToken)), "Resource and all of its qURLs were revoked.")
+	// The teardown note rides on the SUCCESS branch only. A REPEAT revoke lands
+	// here, not on the 404 branch — qurl-service answers 204 for an
+	// already-revoked resource (RevokeQurl returns nil once the status is
+	// already `revoked`) — and re-showing the note is right: the workloads it
+	// names may well still be running. The 404 branch means "never owned, or a
+	// typo'd id", where this workspace has no confirmation it ever ran anything,
+	// so pointing the admin at teardown would be a guess.
+	return newActionCoreResult(true, fmt.Sprintf("Revoked `$%s` and all its qURLs.\n\n%s", escapeMrkdwnCode(displayToken), revokeTeardownNote), "Resource and all of its qURLs were revoked.")
 }
 
 // purgeResourceBindings removes the just-revoked resourceID from every channel

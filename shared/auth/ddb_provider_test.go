@@ -171,6 +171,7 @@ func requireDurableWorkspaceStateWrite(t *testing.T, in *dynamodb.UpdateItemInpu
 	const reservedOAuthStateTTLAttr = "ttl"
 	if in == nil {
 		t.Fatal("expected workspace credential UpdateItem")
+		return
 	}
 	if strings.Contains(aws.ToString(in.UpdateExpression), reservedOAuthStateTTLAttr) {
 		t.Fatalf("durable workspace write must not touch reserved OAuth-state TTL: %q", aws.ToString(in.UpdateExpression))

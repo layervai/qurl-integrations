@@ -2,8 +2,12 @@ package output
 
 import (
 	"bytes"
+	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"slices"
 	"strings"
 	"testing"
@@ -13,8 +17,12 @@ import (
 	"github.com/layervai/qurl-go/qurl"
 
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/apitest"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/auth"
-	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/agent"
+	connectordaemon "github.com/layervai/qurl-integrations/apps/cli/internal/connector/daemon"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/hub"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/exitcode"
 )
 
 func lookupFrom(env map[string]string) func(string) (string, bool) {
@@ -189,19 +197,69 @@ func TestQuietProjections(t *testing.T) {
 	}
 
 	out.Reset()
-	if err := p.Publish(&qurlapi.Published{ResourceID: "rid-only"}); err != nil {
-		t.Fatal(err)
-	}
-	if out.String() != "rid-only\n" {
-		t.Errorf("quiet publish without CRID = %q", out.String())
-	}
-
-	out.Reset()
-	if err := p.Resolve(&qurlapi.Resolved{QURL: "https://qurl.link/#x"}); err != nil {
+	if err := p.ShareLink(&qurlapi.ShareLink{QURL: "https://qurl.link/#x"}); err != nil {
 		t.Fatal(err)
 	}
 	if out.String() != "https://qurl.link/#x\n" {
-		t.Errorf("quiet resolve = %q", out.String())
+		t.Errorf("quiet share link = %q", out.String())
+	}
+}
+
+// TestPublishFoundExistingTriState pins the local reconciliation boundary:
+// unknown provenance must never be rendered as a confirmed fresh publish.
+// Known service answers remain explicit for scripts in both directions.
+func TestPublishFoundExistingTriState(t *testing.T) {
+	t.Parallel()
+	knownFalse := false
+	knownTrue := true
+	for _, tc := range []struct {
+		name          string
+		foundExisting *bool
+		wantJSON      string
+		wantNote      bool
+	}{
+		{name: "unknown is omitted", foundExisting: nil},
+		{name: "known fresh is explicit", foundExisting: &knownFalse, wantJSON: `"found_existing": false`},
+		{name: "known existing is explicit", foundExisting: &knownTrue, wantJSON: `"found_existing": true`, wantNote: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var out, errBuf bytes.Buffer
+			p := newTestPrinter(&out, &errBuf, FormatJSON, false, false, false)
+			if err := p.Publish(&qurlapi.Published{
+				CRID:          "thecrid",
+				ResourceID:    "rid",
+				TargetURL:     "http://127.0.0.1:3000",
+				FoundExisting: tc.foundExisting,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if tc.wantJSON == "" {
+				if strings.Contains(out.String(), `"found_existing"`) {
+					t.Fatalf("unknown provenance claimed a boolean outcome: %s", out.String())
+				}
+			} else if !strings.Contains(out.String(), tc.wantJSON) {
+				t.Fatalf("JSON = %s, want %s", out.String(), tc.wantJSON)
+			}
+			if got := strings.Contains(errBuf.String(), msgAlreadyPublished); got != tc.wantNote {
+				t.Fatalf("already-published note = %t, want %t; stderr=%q", got, tc.wantNote, errBuf.String())
+			}
+		})
+	}
+
+	for _, quiet := range []bool{false, true} {
+		var out, errBuf bytes.Buffer
+		p := newTestPrinter(&out, &errBuf, FormatText, quiet, false, false)
+		if err := p.Publish(&qurlapi.Published{
+			CRID:          "thecrid",
+			TargetURL:     "http://127.0.0.1:3000",
+			FoundExisting: nil,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(out.String(), "Already published") || strings.Contains(out.String(), msgPublishFoundExisting) || errBuf.Len() != 0 {
+			t.Fatalf("unknown provenance made an existing/fresh claim: stdout=%q stderr=%q", out.String(), errBuf.String())
+		}
 	}
 }
 
@@ -237,10 +295,36 @@ func TestRedactionGrepProof(t *testing.T) {
 func TestRenderErrorAnatomies(t *testing.T) {
 	var buf bytes.Buffer
 
+	// A stopped Connector keeps the existing unavailable class, but the
+	// machine-readable service code selects a fixed, actionable message before
+	// the generic 503 posture. Server-controlled detail must not be repeated.
+	stopped := fmt.Errorf("%w: %w", qurl.ErrTemporaryAccessLinksDisabled, &qurlapi.Error{
+		StatusCode: http.StatusServiceUnavailable,
+		Code:       "CoNnEcToR_StOpPeD",
+		Title:      "Connector Stopped",
+		Detail:     "internal sandbox cell us-secret-1 uses credential lv_live_NEVER_PRINT_THIS",
+	})
+	RenderError(&buf, stopped, false)
+	if got := buf.String(); got != "Error: "+msgConnectorStopped+"\n\n  "+hintConnectorStopped+"\n" {
+		t.Errorf("stopped Connector rendering = %q", got)
+	}
+	for _, banned := range []string{"sandbox", "us-secret-1", "lv_live_", "Connector Stopped"} {
+		if strings.Contains(buf.String(), banned) {
+			t.Errorf("server-controlled text %q reached the customer surface: %q", banned, buf.String())
+		}
+	}
+	if got := exitcode.FromError(stopped); got != exitcode.Unavailable {
+		t.Errorf("stopped Connector exit code = %d, want %d", got, exitcode.Unavailable)
+	}
+
+	buf.Reset()
 	// Typed dark-surface posture wins over the generic API rendering.
-	dark := fmt.Errorf("%w: %w", qurl.ErrTemporaryAccessLinksDisabled, &qurlapi.Error{StatusCode: 503})
+	dark := fmt.Errorf("%w: %w", qurl.ErrTemporaryAccessLinksDisabled, &qurlapi.Error{
+		StatusCode: http.StatusServiceUnavailable,
+		Code:       "service_unavailable",
+	})
 	RenderError(&buf, dark, false)
-	if !strings.Contains(buf.String(), "aren't available from this qURL endpoint") {
+	if got := buf.String(); got != "Error: "+msgLinksUnavailable+"\n" {
 		t.Errorf("dark rendering = %q", buf.String())
 	}
 
@@ -267,6 +351,51 @@ func TestRenderErrorAnatomies(t *testing.T) {
 	// Fields render sorted.
 	if strings.Index(rendered, "alias:") > strings.Index(rendered, "target_url:") {
 		t.Errorf("invalid fields not sorted:\n%s", rendered)
+	}
+
+	buf.Reset()
+	custom := exitcode.InvalidInputError("stop applies only to a local qURL Connector", &qurlapi.Error{
+		StatusCode: http.StatusBadRequest,
+		Title:      "Invalid Input",
+		RequestID:  "req_stop",
+	})
+	RenderError(&buf, custom, false)
+	rendered = buf.String()
+	if !strings.Contains(rendered, "stop applies only to a local qURL Connector") ||
+		!strings.Contains(rendered, "Request ID: req_stop") || strings.Contains(rendered, "Invalid Input") {
+		t.Errorf("custom invalid-input rendering = %q", rendered)
+	}
+}
+
+func TestRenderEnrollmentScopeRemedy(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		apitest.WriteProblem(t, w, http.StatusForbidden, "insufficient_scope", "Forbidden", "minting enrollment tokens requires qurl:agent")
+	}))
+	t.Cleanup(srv.Close)
+	client, err := qurlapi.New(&qurlapi.Config{
+		BaseURL: srv.URL,
+		APIKey:  "lv_test_logincredential123456789",
+		Version: "test",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = client.MintConnectorEnrollmentToken(context.Background(), qurlapi.MintConnectorEnrollmentTokenOptions{
+		ConnectorID:    "local-scope-test",
+		IdempotencyKey: "0123456789abcdef0123456789abcdef",
+	})
+	if err == nil {
+		t.Fatal("mint unexpectedly succeeded")
+	}
+
+	var buf bytes.Buffer
+	RenderError(&buf, fmt.Errorf("bootstrap local Connector: %w", err), false)
+	got := buf.String()
+	if !strings.Contains(got, "registered device") || !strings.Contains(got, "publish local apps") {
+		t.Errorf("operation-specific remedy missing:\n%s", got)
+	}
+	if strings.Contains(got, hintScope) {
+		t.Errorf("generic resource-scope remedy won over enrollment remedy:\n%s", got)
 	}
 }
 
@@ -321,6 +450,318 @@ func TestConnectorAssignmentRenderings(t *testing.T) {
 	}
 }
 
+func TestConnectorRecoveryCredentialRenderingHidesSDKInternals(t *testing.T) {
+	err := errors.Join(
+		&qurl.CredentialRecoveryError{Code: "52401", Phase: "hub_issue_recovery"},
+		qurl.ErrRecoveryCredentialRejected,
+	)
+	var buf bytes.Buffer
+	RenderError(&buf, fmt.Errorf("recover rejected native identity: %w", err), false)
+	got := buf.String()
+	for _, want := range []string{msgConnectorRecoveryCredentialRejected, hintConnectorRecoveryCredentialRejected} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("recovery rendering missing %q:\n%s", want, got)
+		}
+	}
+	for _, forbidden := range []string{"hub_issue_recovery", "52401", "qurl:"} {
+		if strings.Contains(got, forbidden) {
+			t.Fatalf("recovery rendering exposed SDK detail %q:\n%s", forbidden, got)
+		}
+	}
+}
+
+func TestConnectorRecoveryTaxonomyRenderingHidesEveryWirePhase(t *testing.T) {
+	tests := []struct {
+		name     string
+		code     string
+		phase    string
+		sentinel error
+		headline string
+		hint     string
+	}{
+		{"hub unavailable", "52400", "hub_issue_recovery", qurl.ErrCredentialRecoveryUnavailable, msgConnectorRecoveryUnavailable, hintConnectorRecoveryUnavailable},
+		{"hub identity rejected", "52402", "hub_issue_recovery", qurl.ErrCredentialRecoveryIdentityRejected, msgConnectorRecoveryIdentityRejected, hintConnectorRecoveryIdentityRejected},
+		{"revoke required", "52403", "hub_issue_recovery", qurl.ErrCredentialRecoveryRevokeRequired, msgConnectorRecoveryRevokeRequired, hintConnectorRecoveryRevokeRequired},
+		{"rate limited", "52404", "hub_issue_recovery", qurl.ErrCredentialRecoveryRateLimited, msgConnectorRecoveryUnavailable, hintConnectorRecoveryUnavailable},
+		{"hub invalid", "52405", "hub_issue_recovery", qurl.ErrCredentialRecoveryRequestRejected, msgConnectorRecoveryInvalid, hintConnectorRecoveryInvalid},
+		{"assignment required", "52406", "hub_issue_recovery", qurl.ErrCredentialRecoveryAssignmentRequired, msgConnectorRecoveryUnavailable, hintConnectorRecoveryUnavailable},
+		{"replacement unavailable", "52410", "assigned_cell_complete_recovery", qurl.ErrCredentialReplacementUnavailable, msgConnectorRecoveryUnavailable, hintConnectorRecoveryUnavailable},
+		{"grant rejected", "52411", "assigned_cell_complete_recovery", qurl.ErrCredentialRecoveryGrantRejected, msgConnectorRecoveryUnavailable, hintConnectorRecoveryUnavailable},
+		{"cell identity rejected", "52412", "assigned_cell_complete_recovery", qurl.ErrCredentialRecoveryIdentityRejected, msgConnectorRecoveryIdentityRejected, hintConnectorRecoveryIdentityRejected},
+		{"candidate conflict", "52413", "assigned_cell_complete_recovery", qurl.ErrCredentialRecoveryCandidateConflict, msgConnectorRecoveryConflict, hintConnectorRecoveryConflict},
+		{"cell invalid", "52414", "assigned_cell_complete_recovery", qurl.ErrCredentialRecoveryRequestRejected, msgConnectorRecoveryInvalid, hintConnectorRecoveryInvalid},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := errors.Join(
+				&qurl.CredentialRecoveryError{Code: test.code, Phase: test.phase},
+				test.sentinel,
+			)
+			if test.code == "52400" || test.code == "52404" || test.code == "52410" {
+				err = &qurl.CredentialRecoveryRetryRequiredError{
+					Phase: test.phase, Attempts: 3, Elapsed: time.Second, Last: err,
+				}
+			}
+			var buf bytes.Buffer
+			RenderError(&buf, fmt.Errorf("recover rejected native identity: %w", err), false)
+			got := buf.String()
+			for _, want := range []string{test.headline, test.hint} {
+				if !strings.Contains(got, want) {
+					t.Fatalf("recovery rendering missing %q:\n%s", want, got)
+				}
+			}
+			for _, forbidden := range []string{test.phase, test.code, "qurl:"} {
+				if strings.Contains(got, forbidden) {
+					t.Fatalf("recovery rendering exposed SDK detail %q:\n%s", forbidden, got)
+				}
+			}
+		})
+	}
+}
+
+func TestConnectorRecoveryStateRenderingHidesSDKDetails(t *testing.T) {
+	tests := []struct {
+		name     string
+		err      error
+		headline string
+		hint     string
+	}{
+		{"persistence", qurl.ErrCredentialRecoveryCandidatePersistence, msgConnectorRecoveryPersistence, hintConnectorRecoveryPersistence},
+		{"invalid response", qurl.ErrCredentialRecoveryInvalidResponse, msgConnectorRecoveryInvalid, hintConnectorRecoveryInvalid},
+		{"expired", qurl.ErrCredentialRecoveryExpired, msgConnectorRecoveryExpired, hintConnectorRecoveryExpired},
+		{"retry exhausted", qurl.ErrCredentialRecoveryRetryRequired, msgConnectorRecoveryUnavailable, hintConnectorRecoveryUnavailable},
+		{"refresh required", qurl.ErrCredentialRecoveredAssignmentRefreshRequired, msgConnectorRecoveryUnavailable, hintConnectorRecoveryUnavailable},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			RenderError(&buf, fmt.Errorf("recover rejected native identity: internal phase: %w", test.err), false)
+			got := buf.String()
+			for _, want := range []string{test.headline, test.hint} {
+				if !strings.Contains(got, want) {
+					t.Fatalf("recovery rendering missing %q:\n%s", want, got)
+				}
+			}
+			if strings.Contains(got, "internal phase") || strings.Contains(got, "qurl:") {
+				t.Fatalf("recovery rendering exposed SDK detail:\n%s", got)
+			}
+		})
+	}
+}
+
+func TestConnectorDeviceCredentialRenderingHidesIdentityAndSDKAdvice(t *testing.T) {
+	err := &qurl.NativeCredentialRecoveryRequiredError{
+		AgentID: "agent-private-identity",
+		Cause:   fmt.Errorf("internal recovery phase: %w", qurl.ErrDeviceCredentialMissing),
+	}
+	var buf bytes.Buffer
+	RenderError(&buf, fmt.Errorf("open registered runtime: %w", err), false)
+	got := buf.String()
+	for _, want := range []string{msgConnectorDeviceCredential, hintConnectorDeviceCredential} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("device credential rendering missing %q:\n%s", want, got)
+		}
+	}
+	for _, forbidden := range []string{"agent-private-identity", "RecoverAgentRuntime", "internal recovery phase", "qurl:", "X25519"} {
+		if strings.Contains(got, forbidden) {
+			t.Fatalf("device credential rendering exposed %q:\n%s", forbidden, got)
+		}
+	}
+}
+
+func TestConnectorPeerTimeoutRenderingHidesEndpointAndTopology(t *testing.T) {
+	err := errors.Join(
+		&qurl.EndpointNoReplyError{
+			Endpoint: "private-cell.sandbox.invalid:443",
+			Attempts: 4,
+			Elapsed:  3 * time.Second,
+			Last:     errors.New("private route dropped UDP"),
+		},
+		qurl.ErrAssignmentRecoveryRequired,
+	)
+	var buf bytes.Buffer
+	RenderError(&buf, fmt.Errorf("refresh assignment: %w", err), false)
+	got := buf.String()
+	for _, want := range []string{msgConnectorPeerTimeout, hintConnectorPeerTimeout} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("peer-timeout rendering missing %q:\n%s", want, got)
+		}
+	}
+	for _, forbidden := range []string{"private-cell", "sandbox", "private route", "source-fenced", "qurl:", "UDP"} {
+		if strings.Contains(got, forbidden) {
+			t.Fatalf("peer-timeout rendering exposed %q:\n%s", forbidden, got)
+		}
+	}
+}
+
+func TestConnectorEnrollmentRenderingsHideSDKInternals(t *testing.T) {
+	tests := []struct {
+		name     string
+		err      error
+		headline string
+		hint     string
+	}{
+		{"invalid local config", qurl.ErrInvalidRegisterConfig, msgConnectorEnrollmentConfig, hintConnectorEnrollmentConfig},
+		{"binding persistence", qurl.ErrAgentBindingPersistence, msgConnectorEnrollmentPersistence, hintConnectorEnrollmentPersistence},
+		{"candidate persistence", qurl.ErrAgentCompletionCandidatePersistence, msgConnectorEnrollmentPersistence, hintConnectorEnrollmentPersistence},
+		{"setup lock", qurl.ErrAgentSetupLock, msgConnectorEnrollmentPersistence, hintConnectorEnrollmentPersistence},
+		{"REG recovery", qurl.ErrRegistrationRecoveryRequired, msgConnectorEnrollmentUnavailable, hintConnectorEnrollmentUnavailable},
+		{"REG rate limited", qurl.ErrRegistrationRateLimited, msgConnectorEnrollmentUnavailable, hintConnectorEnrollmentUnavailable},
+		{"ticket expired", qurl.ErrAssignmentTicketExpired, msgConnectorEnrollmentUnavailable, hintConnectorEnrollmentUnavailable},
+		{"completion unavailable", qurl.ErrCompletionUnavailable, msgConnectorEnrollmentUnavailable, hintConnectorEnrollmentUnavailable},
+		{"completion recovery", qurl.ErrCompletionRecoveryRequired, msgConnectorEnrollmentUnavailable, hintConnectorEnrollmentUnavailable},
+		{"key rejected", qurl.ErrKeyRejected, msgConnectorTokenRejected, hintConnectorTokenRejected},
+		{"bootstrap consumed", qurl.ErrBootstrapSetupKeyConsumed, msgConnectorTokenConsumed, hintConnectorTokenConsumed},
+		{"completion identity", qurl.ErrCompletionIdentityRejected, msgConnectorEnrollmentIdentity, hintConnectorEnrollmentIdentity},
+		{"agent identity conflict", qurl.ErrAgentIdentityConflict, msgConnectorEnrollmentConflict, hintConnectorEnrollmentConflict},
+		{"completion conflict", qurl.ErrCompletionCredentialConflict, msgConnectorEnrollmentConflict, hintConnectorEnrollmentConflict},
+		{"REG invalid input", qurl.ErrRegistrationInvalidInput, msgConnectorEnrollmentInvalid, hintConnectorEnrollmentInvalid},
+		{"completion rejected", qurl.ErrCompletionRequestRejected, msgConnectorEnrollmentInvalid, hintConnectorEnrollmentInvalid},
+		{"registration disabled", qurl.ErrRegistrationDisabled, msgConnectorEnrollmentDisabled, hintConnectorEnrollmentDisabled},
+		{"device quota", qurl.ErrDeviceKeyQuotaExceeded, msgConnectorDeviceQuota, hintConnectorDeviceQuota},
+		{"ticket invalid", qurl.ErrAssignmentTicketInvalid, msgConnectorEnrollmentMismatch, hintConnectorEnrollmentMismatch},
+		{"reply malformed", qurl.ErrRegisterReplyMalformed, msgConnectorEnrollmentMismatch, hintConnectorEnrollmentMismatch},
+		{"key kind disallowed", qurl.ErrRegistrationKeyKindDisallowed, msgConnectorEnrollmentMismatch, hintConnectorEnrollmentMismatch},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := fmt.Errorf(
+				"private assigned-cell phase for agent-private; call WithAgentRuntimeHeadlessEnrollment; code 52399: %w",
+				test.err,
+			)
+			var buf bytes.Buffer
+			RenderError(&buf, err, false)
+			got := buf.String()
+			for _, want := range []string{test.headline, test.hint} {
+				if !strings.Contains(got, want) {
+					t.Fatalf("enrollment rendering missing %q:\n%s", want, got)
+				}
+			}
+			for _, forbidden := range []string{"assigned-cell", "agent-private", "WithAgentRuntime", "52399", "qurl:"} {
+				if strings.Contains(got, forbidden) {
+					t.Fatalf("enrollment rendering exposed %q:\n%s", forbidden, got)
+				}
+			}
+		})
+	}
+}
+
+func TestConnectorResourceRenderings(t *testing.T) {
+	cases := []struct {
+		name     string
+		err      error
+		code     string
+		headline string
+		hint     string
+	}{
+		{"invalid local request", qurl.ErrInvalidNativeConnectorResourceRequest, "", msgConnectorResourceInvalidRequest, hintConnectorResourceInvalidRequest},
+		{"request rejected", qurl.ErrConnectorResourceRequestRejected, "52506", msgConnectorResourceInvalidRequest, hintConnectorResourceInvalidRequest},
+		{"identity rejected", qurl.ErrConnectorResourceIdentityRejected, "52501", msgConnectorIdentityRejected, hintConnectorIdentityRejected},
+		{"entitlement", qurl.ErrConnectorResourceEntitlementDenied, "52502", msgConnectorResourceEntitlement, hintConnectorResourceEntitlement},
+		{"continuity conflict", qurl.ErrConnectorResourceIdentityConflict, "52503", msgConnectorResourceConflict, hintConnectorResourceConflict},
+		// Pin the copy: 52504 covers account-wide resource and monthly data limits.
+		{"quota", qurl.ErrConnectorResourceQuotaExceeded, "52504",
+			"Your qURL account has reached a plan limit.",
+			"Hint: limits apply to the account across all API keys. Run qurl list --status active to check resources; use qurl delete <CRID> to delete one you no longer need. For monthly data usage or plan changes, contact your qURL administrator or LayerV support. Monthly data limits reset at the next calendar month (UTC)."},
+		{"rate limited", qurl.ErrConnectorResourceRateLimited, "52505", msgConnectorResourceUnavailable, hintConnectorResourceUnavailable},
+		{"unavailable", qurl.ErrConnectorResourceUnavailable, "52500", msgConnectorResourceUnavailable, hintConnectorResourceUnavailable},
+		{"invalid response", qurl.ErrInvalidNativeConnectorResourceResponse, "", msgConnectorResourceInvalidResponse, hintConnectorResourceInvalidResponse},
+		{"local verification", state.ErrConnectorResourceVerification, "", msgConnectorResourceLocalVerification, hintConnectorResourceLocalVerification},
+		{"local cross-Connector conflict", state.ErrConnectorResourceStateConflict, "", msgConnectorResourceLocalConflict, hintConnectorResourceLocalConflict},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			poison := "assigned cell private-cell.example:443 returned LRT during routing/knock with QURL_CONNECTOR_HUB_HOST and qurl: raw detail"
+			err := fmt.Errorf("%s: %w", poison, test.err)
+			if test.code != "" {
+				err = errors.Join(err, &qurl.ConnectorResourceDiscoveryError{Code: test.code})
+			}
+			for _, rendering := range []struct {
+				err      error
+				wantCode bool
+			}{
+				{err: test.err},
+				{err: err, wantCode: test.code != ""},
+			} {
+				var buf bytes.Buffer
+				RenderError(&buf, rendering.err, false)
+				got := buf.String()
+				if !strings.Contains(got, test.headline) || !strings.Contains(got, test.hint) {
+					t.Fatalf("rendered error missing customer posture:\n%s", got)
+				}
+				if rendering.wantCode && !strings.Contains(got, labelConnectorErrorCode+" "+test.code) {
+					t.Fatalf("rendered error missing safe support code %q:\n%s", test.code, got)
+				}
+				for _, forbidden := range []string{
+					"assigned cell", "private-cell.example", "LRT", "routing/knock",
+					"QURL_CONNECTOR_HUB_HOST", "qurl: raw detail",
+				} {
+					if strings.Contains(got, forbidden) {
+						t.Fatalf("resource rendering exposed %q:\n%s", forbidden, got)
+					}
+				}
+			}
+		})
+	}
+
+	t.Run("malformed support code stays hidden", func(t *testing.T) {
+		err := errors.Join(
+			qurl.ErrConnectorResourceUnavailable,
+			&qurl.ConnectorResourceDiscoveryError{Code: "host1"},
+		)
+		var buf bytes.Buffer
+		RenderError(&buf, err, false)
+		if got := buf.String(); strings.Contains(got, "host1") || strings.Contains(got, labelConnectorErrorCode) {
+			t.Fatalf("malformed support code reached customer output:\n%s", got)
+		}
+	})
+}
+
+func TestConnectorConnectionConfigRenderingHidesTopology(t *testing.T) {
+	for name, err := range map[string]error{
+		"Hub": fmt.Errorf(
+			"%w: private-cell.example:443 Hub server public key via QURL_CONNECTOR_HUB_HOST/QURL_CONNECTOR_HUB_PORT",
+			hub.ErrConfig,
+		),
+	} {
+		t.Run(name, func(t *testing.T) {
+			var buf bytes.Buffer
+			RenderError(&buf, err, false)
+			got := buf.String()
+			for _, want := range []string{msgConnectorConnectionConfig, hintConnectorConnectionConfig} {
+				if !strings.Contains(got, want) {
+					t.Fatalf("connection configuration rendering missing %q:\n%s", want, got)
+				}
+			}
+			for _, forbidden := range []string{
+				"private-cell.example", "secret", "Hub", "server public key",
+				"QURL_CONNECTOR_HUB_", ":443",
+			} {
+				if strings.Contains(got, forbidden) {
+					t.Fatalf("connection configuration rendering exposed %q:\n%s", forbidden, got)
+				}
+			}
+		})
+	}
+}
+
+func TestConnectorDirectEgressRenderingIsActionableAndRedacted(t *testing.T) {
+	err := fmt.Errorf("%w: http://user:secret@private-proxy.example:8080", connectordaemon.ErrDirectEgressRequired)
+	var buf bytes.Buffer
+	RenderError(&buf, err, false)
+	got := buf.String()
+	for _, want := range []string{msgConnectorDirectEgress, hintConnectorDirectEgress} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("direct-egress rendering missing %q:\n%s", want, got)
+		}
+	}
+	for _, forbidden := range []string{"secret", "private-proxy.example", "user:", ":8080"} {
+		if strings.Contains(got, forbidden) {
+			t.Fatalf("direct-egress rendering exposed %q:\n%s", forbidden, got)
+		}
+	}
+}
+
 // TestConnectorAssignmentOrdering pins the two overlaps that a naive switch
 // order would render wrongly, because in both the SDK (or the CLI) matches two
 // sentinels at once.
@@ -338,21 +779,6 @@ func TestConnectorAssignmentOrdering(t *testing.T) {
 		}
 		if strings.Contains(buf.String(), msgConnectorAssignmentInvalid) {
 			t.Errorf("the contract-violation headline must not win:\n%s", buf.String())
-		}
-	})
-
-	// agent.ErrRefreshAlreadyAttempted is joined with its warm-open cause, so
-	// it can carry an assignment sentinel too. The CLI's lifecycle reading is
-	// the more specific one and must win.
-	t.Run("CLI lifecycle beats the SDK sentinel it carries", func(t *testing.T) {
-		joined := errors.Join(
-			fmt.Errorf("%w in this failure episode", agent.ErrRefreshAlreadyAttempted),
-			fmt.Errorf("warm-open after attempted refresh: %w", qurl.ErrAssignmentLeaseExpired),
-		)
-		var buf bytes.Buffer
-		RenderError(&buf, joined, false)
-		if !strings.Contains(buf.String(), msgConnectorRefreshExhausted) {
-			t.Errorf("want the refresh-exhausted headline, got:\n%s", buf.String())
 		}
 	})
 }
@@ -381,41 +807,6 @@ func TestConnectorRequestRejectedDropsSDKRemedy(t *testing.T) {
 	}
 }
 
-// TestConnectorServingNote pins the startup note byte-exactly at the
-// rendering seam: the CRID lands last and alone on its line (the copy
-// contract), a platform that returned no CRID gets the original one-line note
-// with no empty label, and color styles only the label — never the CRID
-// itself, which would bury escape bytes inside a value people paste.
-func TestConnectorServingNote(t *testing.T) {
-	const headline = "Starting Connector \"billing\" for your local app at 127.0.0.1:8080. Press Ctrl-C to stop.\n"
-
-	var out, errBuf bytes.Buffer
-	p := newTestPrinter(&out, &errBuf, FormatText, false, false, false)
-	p.ConnectorServing("billing", "127.0.0.1:8080", "acrid")
-	want := headline + "\n  Anyone authorized can reach it with `qurl get <CRID>`.\n\nCRID: acrid\n"
-	if got := errBuf.String(); got != want {
-		t.Errorf("serving note =\n%q\nwant\n%q", got, want)
-	}
-	// The note is status, not data: a serve loop that runs until interrupted
-	// has no stdout document to put it in.
-	if out.Len() != 0 {
-		t.Errorf("serving note wrote to stdout: %q", out.String())
-	}
-
-	errBuf.Reset()
-	p.ConnectorServing("billing", "127.0.0.1:8080", "")
-	if got := errBuf.String(); got != headline {
-		t.Errorf("note without a CRID =\n%q\nwant the unchanged one-liner\n%q", got, headline)
-	}
-
-	errBuf.Reset()
-	colored := newTestPrinter(&out, &errBuf, FormatText, false, true, false)
-	colored.ConnectorServing("billing", "127.0.0.1:8080", "acrid")
-	if got := errBuf.String(); !strings.HasSuffix(got, " acrid\n") {
-		t.Errorf("colored note must end with the bare CRID, got %q", got)
-	}
-}
-
 // TestEveryConnectorMessageIsRegistered guards the jargon gate's reach: a
 // headline or hint that renders but is missing from CustomerMessages is never
 // checked for jargon by cmd's gate.
@@ -425,11 +816,32 @@ func TestEveryConnectorMessageIsRegistered(t *testing.T) {
 		registered[msg] = true
 	}
 	rendered := []string{
-		msgConnectorServing, msgConnectorReachIt, labelCRID,
+		labelCRID,
+		msgConnectorStopped, hintConnectorStopped,
+		msgConnectorResourceLocalVerification, hintConnectorResourceLocalVerification,
+		msgConnectorResourceLocalConflict, hintConnectorResourceLocalConflict,
 		msgConnectorTokenConsumed, hintConnectorTokenConsumed,
 		msgConnectorTokenRejected, hintConnectorTokenRejected,
 		msgConnectorEnrollmentRejected, hintConnectorEnrollmentRejected,
 		msgConnectorEnrollmentDisabled, hintConnectorEnrollmentDisabled,
+		msgConnectorRecoveryCredentialRejected, hintConnectorRecoveryCredentialRejected,
+		msgConnectorRecoveryIdentityRejected, hintConnectorRecoveryIdentityRejected,
+		msgConnectorRecoveryRevokeRequired, hintConnectorRecoveryRevokeRequired,
+		msgConnectorRecoveryUnavailable, hintConnectorRecoveryUnavailable,
+		msgConnectorRecoveryConflict, hintConnectorRecoveryConflict,
+		msgConnectorRecoveryPersistence, hintConnectorRecoveryPersistence,
+		msgConnectorRecoveryInvalid, hintConnectorRecoveryInvalid,
+		msgConnectorRecoveryExpired, hintConnectorRecoveryExpired,
+		msgConnectorDeviceCredential, hintConnectorDeviceCredential,
+		msgConnectorPeerTimeout, hintConnectorPeerTimeout,
+		msgConnectorEnrollmentConfig, hintConnectorEnrollmentConfig,
+		msgConnectorEnrollmentUnavailable, hintConnectorEnrollmentUnavailable,
+		msgConnectorEnrollmentIdentity, hintConnectorEnrollmentIdentity,
+		msgConnectorEnrollmentConflict, hintConnectorEnrollmentConflict,
+		msgConnectorEnrollmentInvalid, hintConnectorEnrollmentInvalid,
+		msgConnectorEnrollmentMismatch, hintConnectorEnrollmentMismatch,
+		msgConnectorDeviceQuota, hintConnectorDeviceQuota,
+		msgConnectorEnrollmentPersistence, hintConnectorEnrollmentPersistence,
 		msgConnectorIdentityRejected, hintConnectorIdentityRejected,
 		msgConnectorQuotaExceeded, hintConnectorQuotaExceeded,
 		msgConnectorAssignmentUnavailable, hintConnectorAssignmentUnavailable,
@@ -447,7 +859,7 @@ func TestJSONProjectionIsRepoOwned(t *testing.T) {
 	var out, errBuf bytes.Buffer
 	p := newTestPrinter(&out, &errBuf, FormatJSON, false, false, false)
 	expires := time.Date(2026, 3, 1, 0, 5, 0, 0, time.UTC)
-	if err := p.Resolve(&qurlapi.Resolved{
+	if err := p.ShareLink(&qurlapi.ShareLink{
 		QURL:             "https://qurl.link/#x",
 		CRID:             "acrid",
 		Type:             "qv2",
@@ -460,7 +872,7 @@ func TestJSONProjectionIsRepoOwned(t *testing.T) {
 	got := out.String()
 	for _, want := range []string{`"qurl"`, `"crid"`, `"type"`, `"expires_at"`, `"expires_in_seconds"`, `"single_use"`} {
 		if !strings.Contains(got, want) {
-			t.Errorf("resolve JSON missing key %s:\n%s", want, got)
+			t.Errorf("share link JSON missing key %s:\n%s", want, got)
 		}
 	}
 }
@@ -515,10 +927,40 @@ func TestListJSONCarriesRowMetadata(t *testing.T) {
 	}
 }
 
-// TestListTextOmitsRowMetadata pins the deliberate table decision: the five
-// columns stay as they are, and the metadata reaches scripts through JSON
-// only. The apps/cli goldens pin the same thing from the other side (their
-// mock row carries a description that never appears in the table).
+func TestListJSONCarriesZeroTunnelEpochButNotURLLifecycleFields(t *testing.T) {
+	var out, errBuf bytes.Buffer
+	p := newTestPrinter(&out, &errBuf, FormatJSON, false, false, false)
+	if err := p.List(&qurlapi.ResourcePage{Items: []qurlapi.ResourceSummary{
+		{CRID: "tunnel", ResourceID: "r1", Type: "tunnel", Status: "active", DesiredState: qurlapi.DesiredStateOff},
+		{CRID: "url", ResourceID: "r2", Type: "url", Status: "active"},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	var document struct {
+		Resources []map[string]any `json:"resources"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &document); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := document.Resources[0]["serving_epoch"]; !ok || got != float64(0) {
+		t.Fatalf("tunnel serving_epoch = %#v, present=%v; want explicit zero", got, ok)
+	}
+	if got := document.Resources[0]["desired_state"]; got != "off" {
+		t.Fatalf("tunnel desired_state = %#v, want off", got)
+	}
+	if _, ok := document.Resources[0]["connection_state"]; ok {
+		t.Fatalf("list fabricated a live tunnel observation: %#v", document.Resources[0])
+	}
+	if _, ok := document.Resources[1]["serving_epoch"]; ok {
+		t.Fatalf("URL row emitted tunnel serving_epoch: %#v", document.Resources[1])
+	}
+	if _, ok := document.Resources[1]["desired_state"]; ok {
+		t.Fatalf("URL row emitted tunnel desired_state: %#v", document.Resources[1])
+	}
+}
+
+// TestListTextOmitsRowMetadata keeps publish metadata JSON-only while the text
+// table adds only lifecycle state needed to operate a share.
 func TestListTextOmitsRowMetadata(t *testing.T) {
 	var out, errBuf bytes.Buffer
 	p := newTestPrinter(&out, &errBuf, FormatText, false, false, false)
@@ -539,11 +981,33 @@ func TestListTextOmitsRowMetadata(t *testing.T) {
 			t.Errorf("text table rendered %q; the metadata columns are deliberately absent:\n%s", unwanted, got)
 		}
 	}
-	// tabwriter pads the header into columns, so compare the fields rather
-	// than the raw line: exactly the five documented columns, in order.
+	// tabwriter pads the header into columns, so compare fields.
 	header := strings.Fields(strings.SplitN(got, "\n", 2)[0])
-	if want := []string{"CRID", "TARGET", "STATUS", "CREATED", "EXPIRES"}; !slices.Equal(header, want) {
+	if want := []string{"CRID", "TARGET", "DESIRED", "OBSERVED", "CREATED", "EXPIRES"}; !slices.Equal(header, want) {
 		t.Errorf("table header = %v, want %v", header, want)
+	}
+}
+
+func TestListTextKeepsFullCRIDTargetAndTunnelStates(t *testing.T) {
+	var out, errBuf bytes.Buffer
+	p := newTestPrinter(&out, &errBuf, FormatText, false, false, false)
+	full := "qf4ucjgkv5qabcdefghijklmnopqrstuvwxyz0123456789abbkntl3eifq"
+	longTarget := "http://127.0.0.1:3000/a/path/longer/than/forty/characters/with-tail"
+	if err := p.List(&qurlapi.ResourcePage{Items: []qurlapi.ResourceSummary{
+		{CRID: full, ResourceID: "r1", TargetURL: longTarget, Type: "tunnel", DesiredState: qurlapi.DesiredStateOn},
+		{CRID: "remote", ResourceID: "r2", Type: "tunnel", DesiredState: qurlapi.DesiredStateOff},
+		{CRID: "serving", ResourceID: "r3", TargetURL: "http://127.0.0.1:4000", Type: "tunnel", DesiredState: qurlapi.DesiredStateOn},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	got := out.String()
+	for _, want := range []string{full, longTarget, "on", "off", "unknown"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("list table missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "…") {
+		t.Fatalf("list table truncated identity:\n%s", got)
 	}
 }
 

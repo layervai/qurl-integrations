@@ -92,7 +92,18 @@ func HandlerDark503(t *testing.T) http.HandlerFunc {
 	}
 }
 
-// HandlerRevoked400 answers a resolve of a revoked (API-deleted) resource:
+// HandlerConnectorStopped503 answers a share for a stopped Connector. The
+// detail is deliberately hostile so customer-surface tests can prove that the
+// CLI selects fixed text by code and never repeats server-controlled prose.
+func HandlerConnectorStopped503(t *testing.T) http.HandlerFunc {
+	t.Helper()
+	return func(w http.ResponseWriter, _ *http.Request) {
+		WriteProblem(t, w, http.StatusServiceUnavailable, "connector_stopped", "Connector Stopped",
+			"internal sandbox cell us-secret-1 uses credential lv_live_NEVER_PRINT_THIS")
+	}
+}
+
+// HandlerRevoked400 answers a share of a revoked (API-deleted) resource:
 // the owner-truthful 400 `revoked`, deliberately distinct from the ambiguous
 // 404 anti-oracle.
 func HandlerRevoked400(t *testing.T) http.HandlerFunc {
@@ -103,7 +114,7 @@ func HandlerRevoked400(t *testing.T) http.HandlerFunc {
 	}
 }
 
-// HandlerTombstoned410 answers a resolve of a tombstoned resource: 410
+// HandlerTombstoned410 answers a share of a tombstoned resource: 410
 // `resource_tombstoned` plus meta.tombstone.
 func HandlerTombstoned410(t *testing.T) http.HandlerFunc {
 	t.Helper()
@@ -115,7 +126,7 @@ func HandlerTombstoned410(t *testing.T) http.HandlerFunc {
 }
 
 // HandlerNotFound404 answers with one of the platform's two not-found code
-// spellings: resolve emits resource_not_found, every other resource route
+// spellings: share emits resource_not_found, every other resource route
 // emits not_found.
 func HandlerNotFound404(t *testing.T, code string) http.HandlerFunc {
 	t.Helper()
@@ -125,8 +136,8 @@ func HandlerNotFound404(t *testing.T, code string) http.HandlerFunc {
 	}
 }
 
-// HandlerInsufficientScope403 answers a resolve with a key that lacks the
-// dedicated resolve scope.
+// HandlerInsufficientScope403 answers a share with a key that lacks the
+// dedicated qurl:resolve scope.
 func HandlerInsufficientScope403(t *testing.T) http.HandlerFunc {
 	t.Helper()
 	return func(w http.ResponseWriter, _ *http.Request) {

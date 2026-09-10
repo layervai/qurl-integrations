@@ -24,9 +24,10 @@ import (
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/auth"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/config"
-	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/agent"
+	connectordaemon "github.com/layervai/qurl-integrations/apps/cli/internal/connector/daemon"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/hub"
-	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/supervisor"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/sessionconfig"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/consume"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/cridux"
 )
@@ -85,6 +86,29 @@ func UsageError(err error) error {
 	return &usageError{err: err}
 }
 
+// invalidInputError keeps a customer-specific message while retaining the
+// underlying service problem for diagnostics and request-id rendering.
+type invalidInputError struct {
+	message string
+	cause   error
+}
+
+func (e *invalidInputError) Error() string { return e.message }
+func (e *invalidInputError) Unwrap() error { return e.cause }
+
+// UserMessage returns the operation-specific text that must win over the
+// wrapped generic service problem during terminal rendering.
+func (e *invalidInputError) UserMessage() string { return e.message }
+
+// InvalidInputError marks a valid command whose operand is not supported by
+// that operation. It maps to the stable InvalidInput exit code.
+func InvalidInputError(message string, cause error) error {
+	if cause == nil {
+		cause = errors.New(message)
+	}
+	return &invalidInputError{message: message, cause: cause}
+}
+
 // notImplementedError marks a feature absent from this build (exit 1, by the
 // table's General row: the command is valid, the capability just is not
 // shipped yet).
@@ -126,6 +150,10 @@ func FromError(err error) int {
 	var usage *usageError
 	if errors.As(err, &usage) {
 		return Usage
+	}
+	var invalidInput *invalidInputError
+	if errors.As(err, &invalidInput) {
+		return InvalidInput
 	}
 	var notImpl *notImplementedError
 	if errors.As(err, &notImpl) {
@@ -201,8 +229,12 @@ func cliSentinelCode(err error) (int, bool) {
 		return Conflict, true
 	case errors.Is(err, consume.ErrLinkExpired):
 		// Expiry that survived the one automatic refresh joins the
-		// platform's gone family: the link does not resolve to content now.
+		// platform's gone family: the link no longer leads to content.
 		return NotFound, true
+	case errors.Is(err, consume.ErrLinkUnavailable):
+		// The URL-bearing request or transport cause is intentionally removed,
+		// but this remains a retryable reachability failure.
+		return Unavailable, true
 	case errors.Is(err, consume.ErrLinkFetch):
 		// A freshly minted, verified link that then refuses to serve is the
 		// service answering outside its contract.
@@ -212,7 +244,8 @@ func cliSentinelCode(err error) (int, bool) {
 		// service outside its contract — never handed to a launcher.
 		return ServerError, true
 	case errors.Is(err, consume.ErrAccessNotConfigured),
-		errors.Is(err, consume.ErrAccessSettingsMismatch):
+		errors.Is(err, consume.ErrAccessSettingsMismatch),
+		errors.Is(err, consume.ErrUnsupportedCRIDVersion):
 		// Direct downloads need deployment settings (QURL_DEPLOYMENT or the
 		// build's own); absent or mismatched settings are the same remedy
 		// class as the Hub trust triple below — fix the configuration, not
@@ -233,6 +266,8 @@ func cliSentinelCode(err error) (int, bool) {
 		return Unavailable, true
 	case errors.Is(err, auth.ErrNoCredential), errors.Is(err, auth.ErrInvalidKey):
 		return Auth, true
+	case errors.Is(err, auth.ErrCredentialConflict), errors.Is(err, auth.ErrDeviceAccountConflict):
+		return Conflict, true
 	case errors.Is(err, config.ErrInvalidProfileName),
 		errors.Is(err, config.ErrConfigFile),
 		errors.Is(err, config.ErrSecretInConfig):
@@ -242,72 +277,99 @@ func cliSentinelCode(err error) (int, bool) {
 	}
 }
 
-// connectorSentinelCode maps the `qurl connector run` lifecycle sentinels.
-// Each choice is documented at its case because the conditions do not all
-// share one row of the §16.5 table.
-func connectorSentinelCode(err error) (int, bool) {
+// connectorSentinelCode maps the native local-share lifecycle sentinels.
+func connectorSentinelCode(err error) (int, bool) { //nolint:gocyclo // Keep the closed connector sentinel-to-exit-code mapping in one boundary.
+	if code, ok := connectorResourceSentinelCode(err); ok {
+		return code, true
+	}
 	switch {
-	case errors.Is(err, agent.ErrEnrollmentTokenRequired):
-		// A missing enrollment credential is the Auth row's "no credential"
-		// for the Connector surface: the enrollment token is the credential
-		// this command needed and did not have.
-		return Auth, true
-	case errors.Is(err, agent.ErrIdentityConflict):
-		// The command and its inputs are valid; they conflict with the
-		// identity already persisted on this machine — exactly the Conflict
-		// row's "request conflicts with current state", resolved by dropping
-		// the override or deliberately reprovisioning.
+	case errors.Is(err, connectordaemon.ErrAlreadyRunning):
 		return Conflict, true
-	case errors.Is(err, agent.ErrRefreshApprovalRequired):
-		// The manual gate is a missing-confirmation stop, the same shape as
-		// delete's --yes guard (msgNeedsYes → Usage): the remedy is re-running
-		// once with the explicit approval flag, not fixing configuration or
-		// waiting out the platform.
-		return Usage, true
-	case errors.Is(err, agent.ErrRefreshDisabled):
-		// Disabled mode is standing operator configuration forbidding the
-		// refresh this state requires; the remedy is changing that
-		// configuration, so it takes the Config row — not Usage, because an
-		// unattended restart hits it with a perfectly valid command line.
+	case errors.Is(err, connectordaemon.ErrDirectEgressRequired):
 		return Config, true
-	case errors.Is(err, agent.ErrRefreshModeInvalid):
-		// Only the environment path reaches this sentinel (the command
-		// validates its own flag as a usage error first), so a bad spelling
-		// here is broken standing configuration.
+	case errors.Is(err, connectordaemon.ErrResourceGone):
+		return NotFound, true
+	case errors.Is(err, state.ErrLocalShareOwnerConflict):
+		return Conflict, true
+	case errors.Is(err, state.ErrLocalShareVersionUnsupported):
 		return Config, true
-	case errors.Is(err, agent.ErrRefreshAlreadyAttempted):
-		// The one self-heal this episode allows already ran and the platform
-		// still is not serving this Connector: an Unavailable posture, kin to
-		// the budget exit below, not a mistake the caller made.
-		return Unavailable, true
+	case errors.Is(err, state.ErrNoDefaultStateDir):
+		return Config, true
 	case errors.Is(err, hub.ErrConfig):
 		// The QURL_CONNECTOR_HUB_* trust triple (or a dark build missing its
 		// production pin) is configuration in the §16.5 sense even though it
 		// lives in the environment: the config files row is the closest
 		// remedy class, and Usage would wrongly blame the command line.
 		return Config, true
-	case supervisor.IsTooManyKnockFailures(err):
-		// The budget exit means the platform's access-granting path stayed
-		// unusable across the whole retry budget: the service "cannot be
-		// reached or is not serving this surface" — the Unavailable row.
-		// Matched via the predicate the supervisor exports for exactly this
-		// interpretation. Ordering note: FromError maps context.Canceled
-		// before this, so an exhaustion whose final cause was the user's own
-		// interrupt still exits 130.
+	case errors.Is(err, sessionconfig.ErrConfig):
+		return Config, true
+	case errors.Is(err, qurl.ErrCredentialRecoveredAssignmentRefreshRequired):
+		// Recovery already committed a new device credential. A nested refresh
+		// cause must not relabel that completed transition as an authentication
+		// failure; the saved runtime needs a later assignment refresh.
 		return Unavailable, true
-
-	// qurl-go's enrollment/assignment taxonomy. It is tested after the CLI's
-	// own lifecycle sentinels above so the CLI's reading wins wherever both
-	// match — agent.ErrRefreshAlreadyAttempted is joined with its warm-open
-	// cause and can therefore also carry ErrAssignmentLeaseExpired.
+	case errors.Is(err, qurl.ErrDeviceCredentialMissing),
+		errors.Is(err, qurl.ErrCredentialRecoveryRequired):
+		return Auth, true
+	case errors.Is(err, qurl.ErrEndpointNoReply):
+		return Unavailable, true
+	case errors.Is(err, qurl.ErrInvalidRegisterConfig):
+		return Config, true
+	case errors.Is(err, qurl.ErrAgentBindingPersistence),
+		errors.Is(err, qurl.ErrAgentCompletionCandidatePersistence),
+		errors.Is(err, qurl.ErrAgentSetupLock):
+		return General, true
+	case errors.Is(err, qurl.ErrKeyRejected),
+		errors.Is(err, qurl.ErrBootstrapSetupKeyConsumed),
+		errors.Is(err, qurl.ErrCompletionIdentityRejected):
+		return Auth, true
+	case errors.Is(err, qurl.ErrAgentIdentityConflict),
+		errors.Is(err, qurl.ErrCompletionCredentialConflict):
+		return Conflict, true
+	case errors.Is(err, qurl.ErrRegistrationDisabled),
+		errors.Is(err, qurl.ErrDeviceKeyQuotaExceeded):
+		return Forbidden, true
+	case errors.Is(err, qurl.ErrRegistrationRateLimited):
+		return RateLimited, true
+	case errors.Is(err, qurl.ErrRegistrationRecoveryRequired),
+		errors.Is(err, qurl.ErrAssignmentTicketExpired),
+		errors.Is(err, qurl.ErrCompletionUnavailable),
+		errors.Is(err, qurl.ErrCompletionRecoveryRequired):
+		return Unavailable, true
+	case errors.Is(err, qurl.ErrRegistrationInvalidInput),
+		errors.Is(err, qurl.ErrCompletionRequestRejected):
+		return InvalidInput, true
+	case errors.Is(err, qurl.ErrAssignmentTicketInvalid),
+		errors.Is(err, qurl.ErrRegisterReplyMalformed),
+		errors.Is(err, qurl.ErrRegistrationKeyKindDisallowed):
+		return ServerError, true
+	// qurl-go's enrollment/assignment taxonomy.
 	case errors.Is(err, qurl.ErrAssignmentKeyRejected),
 		errors.Is(err, qurl.ErrAssignmentBootstrapConsumed),
-		errors.Is(err, qurl.ErrAssignmentIdentityRejected):
+		errors.Is(err, qurl.ErrAssignmentIdentityRejected),
+		errors.Is(err, qurl.ErrRecoveryCredentialRejected),
+		errors.Is(err, qurl.ErrCredentialRecoveryIdentityRejected),
+		errors.Is(err, qurl.ErrCredentialRecoveryExpired):
 		// The enrollment token is this surface's credential, and all three of
 		// these are the platform refusing the credential or the identity it
 		// vouches for — the Auth row's "the service rejected the credential",
-		// the same row agent.ErrEnrollmentTokenRequired takes for its absence.
+		// a stable authentication posture for scripts.
 		return Auth, true
+	case errors.Is(err, qurl.ErrCredentialRecoveryRevokeRequired),
+		errors.Is(err, qurl.ErrCredentialRecoveryCandidateConflict):
+		return Conflict, true
+	case errors.Is(err, qurl.ErrCredentialRecoveryRequestRejected):
+		return InvalidInput, true
+	case errors.Is(err, qurl.ErrCredentialRecoveryRateLimited):
+		return RateLimited, true
+	case errors.Is(err, qurl.ErrCredentialRecoveryUnavailable),
+		errors.Is(err, qurl.ErrCredentialReplacementUnavailable),
+		errors.Is(err, qurl.ErrCredentialRecoveryAssignmentRequired),
+		errors.Is(err, qurl.ErrCredentialRecoveryGrantRejected),
+		errors.Is(err, qurl.ErrCredentialRecoveryRetryRequired):
+		return Unavailable, true
+	case errors.Is(err, qurl.ErrCredentialRecoveryInvalidResponse):
+		return ServerError, true
 	case errors.Is(err, qurl.ErrAssignmentRequestRejected):
 		// 52205/52109 reject the request itself rather than the credential:
 		// "an operand or request the service rejected as invalid" is the
@@ -334,7 +396,7 @@ func connectorSentinelCode(err error) (int, bool) {
 		errors.Is(err, qurl.ErrAssignmentLeaseExpired):
 		// The platform could not place this Connector, or its assignment
 		// lapsed and could not be renewed: "cannot be reached or is not
-		// serving this surface". Kin to ErrRefreshAlreadyAttempted's row.
+		// serving this surface".
 		// ErrAssignmentLeaseExpired is matched here, before the invalid
 		// response below, because Validate wraps an expired lease with both.
 		return Unavailable, true
@@ -348,10 +410,49 @@ func connectorSentinelCode(err error) (int, bool) {
 	}
 }
 
+func connectorResourceSentinelCode(err error) (int, bool) {
+	switch {
+	case errors.Is(err, state.ErrConnectorResourceVerification):
+		// An authenticated response contradicted the exact durable request or
+		// the same Connector's accepted identity. No replacement was accepted.
+		return VerificationFailed, true
+	case errors.Is(err, state.ErrConnectorResourceStateConflict):
+		// The authenticated response aliases a different Connector already in
+		// this owner's durable state: valid identities in conflicting state.
+		return Conflict, true
+	case errors.Is(err, state.ErrConnectorResourceRetired):
+		// A deleted Connector ID needs an explicit publish to authorize reuse;
+		// an implicit native resource request cannot reclaim it.
+		return Conflict, true
+	case errors.Is(err, qurl.ErrInvalidNativeConnectorResourceRequest),
+		errors.Is(err, qurl.ErrConnectorResourceRequestRejected):
+		return InvalidInput, true
+	case errors.Is(err, qurl.ErrConnectorResourceIdentityRejected):
+		return Auth, true
+	case errors.Is(err, qurl.ErrConnectorResourceEntitlementDenied),
+		errors.Is(err, qurl.ErrConnectorResourceQuotaExceeded):
+		return Forbidden, true
+	case errors.Is(err, qurl.ErrConnectorResourceIdentityConflict):
+		return Conflict, true
+	case errors.Is(err, qurl.ErrConnectorResourceRateLimited):
+		return RateLimited, true
+	case errors.Is(err, qurl.ErrConnectorResourceUnavailable):
+		return Unavailable, true
+	case errors.Is(err, qurl.ErrInvalidNativeConnectorResourceResponse):
+		return ServerError, true
+	case errors.Is(err, state.ErrConnectorResourceState):
+		// The local journal is corrupt or violates its security contract. Every
+		// specific joined resource outcome takes priority above this fallback.
+		return General, true
+	default:
+		return 0, false
+	}
+}
+
 // apiErrorCode maps a typed qURL API error by status class, with the pinned
 // code-level exceptions: the platform's "gone" family — 404 (both code
 // spellings), 400 `revoked`, and 410 `resource_tombstoned` — all mean the
-// resource does not resolve and share the not-found exit code; only the
+// resource can no longer be shared and all map to the not-found exit code; only the
 // stderr message distinguishes them.
 func apiErrorCode(err error) (int, bool) {
 	var apiErr *qurlapi.Error
