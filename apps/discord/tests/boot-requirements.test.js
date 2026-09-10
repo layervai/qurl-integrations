@@ -1,13 +1,3 @@
-/**
- * Unit tests for src/boot-requirements.js. These lists drive the
- * fail-fast behavior of index.js — a regression here would either boot
- * prod with missing secrets or die on a spurious false-positive, so the
- * exact set per mode is pinned down here.
- *
- * NOTE: the boot key helpers take no mode parameter. Both deployment
- * modes (single-guild and multi-tenant) require the same keys — the
- * only thing GUILD_ID changes is command registration scope.
- */
 
 const {
   bootRequired,
@@ -55,8 +45,6 @@ describe('missingBootKeys', () => {
   });
 
   it('does not flag GUILD_ID or BASE_URL as missing — both are optional here', () => {
-    // Multi-tenant: GUILD_ID unset, BASE_URL unset — boot should not
-    // fail as long as DISCORD_TOKEN is there.
     expect(missingBootKeys({ DISCORD_TOKEN: 't' })).toEqual([]);
   });
 
@@ -87,25 +75,15 @@ describe('missingKekRequiredKeys', () => {
 
   it('flags KEY_ENCRYPTION_KEY when qURL OAuth is configured without KEK', () => {
     expect(missingKekRequiredKeys({}, true)).toEqual(['KEY_ENCRYPTION_KEY']);
-    // Empty-string KEK counts as missing (matches the
-    // boot-requirements `!env[k]` falsy treatment elsewhere).
     expect(missingKekRequiredKeys({ KEY_ENCRYPTION_KEY: '' }, true)).toEqual(['KEY_ENCRYPTION_KEY']);
   });
 
   it('returns empty when both hold, regardless of NODE_ENV', () => {
-    // Independent of NODE_ENV by design — staging/preview deploys that
-    // run guided setup persist real qURL API keys and must satisfy this
-    // gate even though missingProdKeys does not run for them.
     expect(missingKekRequiredKeys({ KEY_ENCRYPTION_KEY: 'k' }, true)).toEqual([]);
   });
 });
 
 describe('baseUrlHttpsProblem', () => {
-  // Mirrors the shape index.js passes: a parsed config object (BASE_URL is
-  // already defaulted to http://localhost:3000 in config.js when unset),
-  // plus the caller-computed `baseUrlExplicitlySet` boolean. Default cfg is
-  // a plain non-consuming deploy with BASE_URL unset (the localhost
-  // fallback); each test overrides the mode flags / BASE_URL it exercises.
   const LOCALHOST = 'http://localhost:3000'; // config.js BASE_URL default
   function cfg(overrides = {}) {
     return {
@@ -122,9 +100,6 @@ describe('baseUrlHttpsProblem', () => {
   });
 
   it('accepts public origins that the local-only screen must not false-positive', () => {
-    // A 4-label FQDN is the shape most at risk from isPrivateIPv4Literal's
-    // dotted-quad parse, and 172.32 / public IPv6 sit just outside the
-    // private ranges the screen rejects.
     for (const good of [
       'https://bot.eu.example.com',
       'https://bot.example.com:8443',
@@ -136,21 +111,14 @@ describe('baseUrlHttpsProblem', () => {
   });
 
   it('accepts an uppercase HTTPS:// scheme (URL scheme is case-insensitive)', () => {
-    // The parse-based check normalizes the scheme, so a valid HTTPS:// origin
-    // isn't falsely rejected at boot (the pre-#619 prefix check was case-sensitive).
     expect(
       baseUrlHttpsProblem(cfg({ isQurlOAuthConfigured: true, BASE_URL: 'HTTPS://bot.example.com' }), true),
     ).toBeNull();
   });
 
   it('rejects a host-less "https://" BASE_URL (would build a broken redirect)', () => {
-    // new URL('https://') throws — a scheme with no host can't be a usable
-    // redirect base, so a consuming deploy must still fail fast rather than
-    // pass a prefix check.
     const msg = baseUrlHttpsProblem(cfg({ isQurlOAuthConfigured: true, BASE_URL: 'https://' }), true);
     expect(msg).not.toBeNull();
-    // Pin the OAuth-aware branch and the echoed value. A bare toContain('https://')
-    // would pass on either branch's static prose, so it could never fail.
     expect(msg).toContain('public bare https:// origin');
     expect(msg).toContain('Got: https://.');
   });
@@ -169,12 +137,6 @@ describe('baseUrlHttpsProblem', () => {
   });
 
   it('redacts BASE_URL userinfo from boot errors — malformed values too', () => {
-    // A hand-edited SSM param is the input most likely to be BOTH malformed
-    // and credential-bearing, so the values new URL() cannot parse into a
-    // username/password matter more here than the well-formed one. A
-    // distinctive secret is used so the assertion can't pass on a partial
-    // leak (username alone, or a password that happens to share a substring
-    // with the static prose).
     for (const bad of [
       'https://svc:hunter2@bot.example.com', //      parses -> URL-level redaction
       'https://svc:hunter2@bot.example.com:port', // invalid port -> parse throws
@@ -190,9 +152,6 @@ describe('baseUrlHttpsProblem', () => {
   });
 
   it('redacts surgically — the host survives so the error stays diagnosable', () => {
-    // The absence assertions above would all pass if redaction returned ''.
-    // An operator needs to see WHICH value was wrong, so pin that everything
-    // except the credential is echoed intact, on the malformed path too.
     const msg = baseUrlHttpsProblem(
       cfg({ isQurlOAuthConfigured: true, BASE_URL: 'https://svc:hunter2@bot.example.com:port' }),
       true,
@@ -225,22 +184,12 @@ describe('baseUrlHttpsProblem', () => {
   });
 
   it('lets a non-consuming deploy keep a non-origin https BASE_URL', () => {
-    // Without AUTH0_*, nothing builds an OAuth redirect from BASE_URL, so the
-    // origin-shape rules deliberately do not apply — only the stale-http://
-    // canary does. Pins the boundary: a path-prefixed https value boots here
-    // but is rejected the moment the same deploy configures qURL OAuth.
     const nonConsuming = { isQurlOAuthConfigured: false, BASE_URL: 'https://bot.example.com/prefix' };
     expect(baseUrlHttpsProblem(nonConsuming, true)).toBeNull();
     expect(baseUrlHttpsProblem({ ...nonConsuming, isQurlOAuthConfigured: true }, true)).not.toBeNull();
   });
 
   it('rejects alternate IPv4 encodings of a local-only host', () => {
-    // isPrivateIPv4Literal reads parsed.hostname, which WHATWG has already
-    // re-serialized to dotted-decimal for a special scheme — that
-    // canonicalization is the only reason hex/decimal/octal/short forms are
-    // caught, and nothing else in the suite pins it. Without these cases a
-    // future parser change (or a move off new URL) could silently reopen the
-    // loopback and 169.254.169.254 metadata holes with every other test green.
     for (const bad of [
       'https://0x7f000001', // hex      -> 127.0.0.1
       'https://2130706433', // decimal  -> 127.0.0.1
@@ -254,11 +203,6 @@ describe('baseUrlHttpsProblem', () => {
     }
   });
 
-  // The public-origin screen and the SSRF guard share one range table
-  // (src/utils/private-host.js), but deliberately ask different questions —
-  // these pin the ranges this caller must NOT screen. Widening the shared
-  // table, or passing includeCgnat/includeMulticast here, would fail a valid
-  // deploy with every other test in this file still green.
   it('accepts public origins the SSRF guard would reject', () => {
     for (const ok of [
       'https://100.64.0.1', //       CGNAT 100.64/10 can front a reachable origin
@@ -274,10 +218,6 @@ describe('baseUrlHttpsProblem', () => {
     }
   });
 
-  // The #619 headline regression: a deploy with the qURL OAuth setup flow
-  // configured (AUTH0_* set) but BASE_URL left unset silently falls back to
-  // localhost and dead-ends /qurl setup at the OAuth redirect. Boot must
-  // reject — fail-fast at deploy, not at setup time.
   it('rejects qURL OAuth configured + BASE_URL unset (localhost fallback)', () => {
     const msg = baseUrlHttpsProblem(
       cfg({ isQurlOAuthConfigured: true, BASE_URL: LOCALHOST }),
@@ -287,29 +227,19 @@ describe('baseUrlHttpsProblem', () => {
     expect(msg).toMatch(/BASE_URL/);
     expect(msg).toMatch(/https:\/\//);
     expect(msg).toMatch(/qURL/);
-    // Echoes the offending value so an operator pasting the log line sees it.
     expect(msg).toContain(LOCALHOST);
   });
 
-  // The non-consuming false-positive guard: a plain single-guild / multi-
-  // tenant deploy with no OAuth surface ignores BASE_URL, so the localhost
-  // default (unset, not explicitly set) must NOT fail boot.
   it('does not false-positive a non-consuming deploy with BASE_URL unset', () => {
     expect(baseUrlHttpsProblem(cfg({ BASE_URL: LOCALHOST }), false)).toBeNull();
   });
 
-  // ...but a stale explicit http:// value in a non-consuming deploy is still
-  // rejected — the original canary, in case a future code path re-enables use.
   it('rejects a stale explicit http:// BASE_URL even when no surface consumes it', () => {
     const msg = baseUrlHttpsProblem(cfg({ BASE_URL: 'http://stale.example.com' }), true);
     expect(msg).not.toBeNull();
     expect(msg).toContain('http://stale.example.com');
   });
 
-  // The two non-https rejections carry distinct messages: the consuming-
-  // surface message explains why BASE_URL matters (operator remediation);
-  // the non-consuming path keeps the terse legacy canary message. Pin the
-  // distinction so a refactor can't collapse them and strip the guidance.
   it('uses the OAuth-aware message for consuming surfaces and the terse canary otherwise', () => {
     const consuming = baseUrlHttpsProblem(cfg({ isQurlOAuthConfigured: true, BASE_URL: LOCALHOST }), false);
     const canary = baseUrlHttpsProblem(cfg({ BASE_URL: 'http://x.example.com' }), true);
@@ -323,7 +253,6 @@ describe('missingEventShipperKeys', () => {
   it('returns empty when the flag is unset (event-shipper path inactive)', () => {
     expect(missingEventShipperKeys({})).toEqual([]);
     expect(missingEventShipperKeys({ ENABLE_EVENT_SHIPPER: false })).toEqual([]);
-    // Even with a missing queue URL — the flag is the gate, not the URL.
     expect(
       missingEventShipperKeys({ ENABLE_EVENT_SHIPPER: false, QURL_BOT_EVENTS_QUEUE_URL: undefined })
     ).toEqual([]);
@@ -333,8 +262,6 @@ describe('missingEventShipperKeys', () => {
     expect(
       missingEventShipperKeys({ ENABLE_EVENT_SHIPPER: true })
     ).toEqual(['QURL_BOT_EVENTS_QUEUE_URL']);
-    // Empty string counts as missing — matches the `!env[k]` falsy
-    // treatment elsewhere in this module.
     expect(
       missingEventShipperKeys({ ENABLE_EVENT_SHIPPER: true, QURL_BOT_EVENTS_QUEUE_URL: '' })
     ).toEqual(['QURL_BOT_EVENTS_QUEUE_URL']);
@@ -350,71 +277,10 @@ describe('missingEventShipperKeys', () => {
   });
 });
 
-describe('missingViewUpdatePushKeys', () => {
-  const { missingViewUpdatePushKeys } = require('../src/boot-requirements');
-
-  it('returns empty when the flag is unset (view-update-push path inactive)', () => {
-    expect(missingViewUpdatePushKeys({})).toEqual([]);
-    expect(missingViewUpdatePushKeys({ ENABLE_VIEW_UPDATE_PUSH: false })).toEqual([]);
-    expect(
-      missingViewUpdatePushKeys({ ENABLE_VIEW_UPDATE_PUSH: false, QURL_BOT_VIEW_UPDATES_QUEUE_URL: undefined })
-    ).toEqual([]);
-  });
-
-  it('flags QURL_BOT_VIEW_UPDATES_QUEUE_URL when flag is on without a URL', () => {
-    expect(
-      missingViewUpdatePushKeys({ ENABLE_VIEW_UPDATE_PUSH: true })
-    ).toEqual(['QURL_BOT_VIEW_UPDATES_QUEUE_URL']);
-    expect(
-      missingViewUpdatePushKeys({ ENABLE_VIEW_UPDATE_PUSH: true, QURL_BOT_VIEW_UPDATES_QUEUE_URL: '' })
-    ).toEqual(['QURL_BOT_VIEW_UPDATES_QUEUE_URL']);
-  });
-
-  it('returns empty when both are set', () => {
-    expect(
-      missingViewUpdatePushKeys({
-        ENABLE_VIEW_UPDATE_PUSH: true,
-        QURL_BOT_VIEW_UPDATES_QUEUE_URL: 'https://sqs.us-east-2.amazonaws.com/123/qurl-bot-view-updates',
-      }),
-    ).toEqual([]);
-  });
-
-  // Pin the asymmetric "URL set without the flag" case. During the
-  // flag-flip rollout, infra changes may land the URL on the task
-  // def BEFORE the flag flips — the boot check must treat that as
-  // a harmlessly-ignored config.
-  it('returns empty when URL is set but flag is off (mid-rollout shape)', () => {
-    expect(
-      missingViewUpdatePushKeys({
-        ENABLE_VIEW_UPDATE_PUSH: false,
-        QURL_BOT_VIEW_UPDATES_QUEUE_URL: 'https://sqs.us-east-2.amazonaws.com/123/qurl-bot-view-updates',
-      }),
-    ).toEqual([]);
-  });
-});
-
-// Pin the contract that combined-mode + view-update-push
-// is intentionally accepted (no analog of `unsupportedRoleShipperCombo`).
-// Locks the design so a copy-paste-from-shipper refactor doesn't silently
-// add a rejection.
-describe('combined-mode + view-update-push (no equivalent of unsupportedRoleShipperCombo)', () => {
-  it('boot-requirements exports no view-update combined-mode rejector', () => {
-    // The shipper has unsupportedRoleShipperCombo for combined-mode
-    // rejection. The view-update-push intentionally has no such
-    // helper — the registry's silent-drop-on-miss + status==='opened'
-    // idempotency guard make combined-mode safe.
-    const bootReq = require('../src/boot-requirements');
-    expect(bootReq.unsupportedRoleShipperCombo).toBeDefined();
-    expect(bootReq.unsupportedRoleViewUpdatePushCombo).toBeUndefined();
-  });
-});
-
 describe('unsupportedRoleShipperCombo', () => {
   it('rejects combined + flag-on with operator-facing remediation', () => {
     const msg = unsupportedRoleShipperCombo('combined', true);
     expect(msg).not.toBeNull();
-    // Pin the message contract so a wording drift can't silently
-    // strip the remediation hint operators rely on to fix the deploy.
     expect(msg).toMatch(/PROCESS_ROLE=combined/);
     expect(msg).toMatch(/ENABLE_EVENT_SHIPPER=true/);
     expect(msg).toMatch(/PROCESS_ROLE=gateway/);
@@ -434,98 +300,41 @@ describe('unsupportedRoleShipperCombo', () => {
 
 describe('unsupportedRoleResumeCombo', () => {
   it('returns null when resume=false regardless of other inputs', () => {
-    // Flag-off is the legacy path — every (role, shipper, storeType)
-    // combination is supported (or rejected by
-    // unsupportedRoleShipperCombo). Pin every input as null so a
-    // future shape change can't accidentally start rejecting legacy
-    // deploys.
     for (const role of ['combined', 'gateway', 'http']) {
       for (const shipper of [true, false]) {
-        for (const storeType of ['sqlite', 'ddb']) {
-          expect(unsupportedRoleResumeCombo(role, false, shipper, storeType)).toBeNull();
-        }
+        expect(unsupportedRoleResumeCombo(role, false, shipper)).toBeNull();
       }
     }
   });
 
   it('rejects resume=true with combined role and surfaces shim/Client conflict', () => {
-    // combined+resume is rejected ahead of every other check because
-    // combined mode is the higher-order failure. Pin the message
-    // contract so a future wording drift can't strip the operator
-    // remediation hint.
-    const msg = unsupportedRoleResumeCombo('combined', true, true, 'ddb');
+    const msg = unsupportedRoleResumeCombo('combined', true, true);
     expect(msg).not.toBeNull();
     expect(msg).toMatch(/PROCESS_ROLE=combined/);
     expect(msg).toMatch(/ENABLE_GATEWAY_RESUME=true/);
     expect(msg).toMatch(/PROCESS_ROLE=gateway/);
     expect(msg).toMatch(/PROCESS_ROLE=http/);
-    // combined-mode check is sequenced first so it dominates the
-    // shipper/store-type rejections.
-    expect(unsupportedRoleResumeCombo('combined', true, false, 'sqlite')).toBe(msg);
+    expect(unsupportedRoleResumeCombo('combined', true, false)).toBe(msg);
   });
 
   it('rejects resume=true with shipper=false on supported roles', () => {
     for (const role of ['gateway', 'http']) {
-      const msg = unsupportedRoleResumeCombo(role, true, false, 'ddb');
+      const msg = unsupportedRoleResumeCombo(role, true, false);
       expect(msg).not.toBeNull();
       expect(msg).toMatch(/ENABLE_GATEWAY_RESUME=true requires ENABLE_EVENT_SHIPPER=true/);
-      // Role-neutral framing: the rejection should not mention
-      // gateway-tier-specific implementation details (the shim is
-      // never constructed on http, so an http operator reading the
-      // message wouldn't see "the shim replaces Client" verbiage).
       expect(msg).not.toMatch(/replaces discord\.js Client/);
       expect(msg).not.toMatch(/@discordjs\/ws/);
     }
   });
 
-  it('rejects resume=true with non-ddb storeType (would lose state across processes)', () => {
-    // A non-ddb backend (no such backend is supported today after the
-    // SQLite removal; this branch is defense-in-depth for a future
-    // backend addition) lacks the cross-process visibility the next
-    // ECS task needs. Without rejecting at boot, the bot would
-    // silently IDENTIFY on every restart — mimicking flag-off
-    // behavior and burning Discord's per-bot IDENTIFY budget.
-    // We pass the literal string 'sqlite' here because it surfaces
-    // the most realistic regression — an operator carrying over an
-    // env file from before the DDB-only world.
-    //
-    // Unreachable-in-real-boot caveat: `src/store/index.js`'s
-    // validator throws on any non-`ddb` STORE_TYPE before this
-    // function ever sees the value (config.STORE_TYPE === 'ddb' is
-    // the only outcome of a successful boot). The test exercises
-    // the function in isolation so the defense-in-depth message
-    // contract stays pinned for a hypothetical future backend
-    // addition that updates VALID_BACKENDS without thinking through
-    // the cross-process resume semantics. Do not "simplify" by
-    // deleting this test — it's intentionally dead-defense coverage.
-    const msg = unsupportedRoleResumeCombo('gateway', true, true, 'sqlite');
-    expect(msg).not.toBeNull();
-    expect(msg).toMatch(/STORE_TYPE=ddb/);
-    expect(msg).toMatch(/gateway-session/);
-    expect(msg).toMatch(/'sqlite'/);
-  });
-
-  it('returns null for the production-shape path (gateway + shipper + ddb)', () => {
-    expect(unsupportedRoleResumeCombo('gateway', true, true, 'ddb')).toBeNull();
-    // http tier accepts resume=true as a no-op so the operator can
-    // ship one task-def with uniform env across both tiers.
-    expect(unsupportedRoleResumeCombo('http', true, true, 'ddb')).toBeNull();
+  it('returns null for the production-shape path', () => {
+    expect(unsupportedRoleResumeCombo('gateway', true, true)).toBeNull();
+    expect(unsupportedRoleResumeCombo('http', true, true)).toBeNull();
   });
 });
 
 describe('shouldRegisterInteractionListener', () => {
-  // The full 3 roles × 2 flag states truth table. Combined + flag-on
-  // is rejected at boot (unsupportedRoleShipperCombo), so its
-  // intended-behavior is "unreachable in production." We still pin
-  // the predicate's output for that input so a future caller that
-  // bypasses the boot guard sees a coherent value.
-  //
-  // The mapping is derived via resolveProcessRole semantics:
-  //   combined → isGateway=true, isHttp=true
-  //   gateway  → isGateway=true, isHttp=false
-  //   http     → isGateway=false, isHttp=true
   test.each([
-    // [role,       flag,  expected, rationale]
     ['combined',   false, true,  'legacy in-process; local listener handles dispatch'],
     ['combined',   true,  true,  'unreachable in prod (boot reject); predicate output coherent'],
     ['gateway',    false, true,  'legacy in-process gateway tier (single-process deploy)'],
@@ -538,9 +347,6 @@ describe('shouldRegisterInteractionListener', () => {
   });
 
   it('is a pure function (no side effects, same input → same output)', () => {
-    // Predicate must be referentially transparent — a side effect
-    // would couple boot to non-determinism and undermine the
-    // unit-testability that motivated the lift.
     const args = { isGateway: true, isHttp: false, eventShipperEnabled: true };
     const first = shouldRegisterInteractionListener(args);
     const second = shouldRegisterInteractionListener(args);
@@ -552,8 +358,6 @@ describe('missingMapCommandKeys', () => {
   it('returns empty when the flag is off — Maps key state is irrelevant', () => {
     expect(missingMapCommandKeys({})).toEqual([]);
     expect(missingMapCommandKeys({ MAP_COMMAND_ENABLED: false })).toEqual([]);
-    // Even with a missing or PLACEHOLDER key — the toggle is the gate.
-    // No /qurl map registration means no Places call possible.
     expect(
       missingMapCommandKeys({ MAP_COMMAND_ENABLED: false, GOOGLE_MAPS_API_KEY: '' }),
     ).toEqual([]);
@@ -575,11 +379,6 @@ describe('missingMapCommandKeys', () => {
   });
 
   it('flags GOOGLE_MAPS_API_KEY when toggle is on but the key is still the PLACEHOLDER sentinel', () => {
-    // The exact regression that triggered the toggle PR: the SSM
-    // parameter shipped as the literal "PLACEHOLDER" value in both
-    // sandbox + prod accounts. Without this branch, an operator
-    // flipping the toggle without seeding the SSM secret would boot
-    // successfully and fail at the first /qurl map invocation.
     expect(
       missingMapCommandKeys({
         MAP_COMMAND_ENABLED: true,
@@ -636,15 +435,11 @@ describe('resolveProcessRole', () => {
     }
     expect(caught).toBeInstanceOf(Error);
     expect(caught.code).toBe('INVALID_PROCESS_ROLE');
-    // Message names the bad value AND lists the valid ones — operators
-    // pasting the log line into a ticket should see both immediately.
     expect(caught.message).toMatch(/'gatewayy'/);
     expect(caught.message).toMatch(/combined, gateway, http/);
   });
 
   it('rejects case-variant roles (no silent normalization)', () => {
-    // SQLITE-vs-sqlite parity: an env-templating bug that produces
-    // 'GATEWAY' should fail loud, not silently coerce.
     expect(() => resolveProcessRole('GATEWAY')).toThrow(/GATEWAY/);
     expect(() => resolveProcessRole('Combined')).toThrow(/Combined/);
   });
@@ -664,8 +459,6 @@ describe('unsupportedRoleHotStandbyCombo', () => {
     expect(msg).not.toBeNull();
     expect(msg).toMatch(/ENABLE_GATEWAY_HOT_STANDBY=true/);
     expect(msg).toMatch(/PROCESS_ROLE=gateway/);
-    // Names the actual role so an operator pasting the log line into
-    // a ticket sees their misconfiguration immediately.
     expect(msg).toMatch(/'combined'/);
   });
 
@@ -677,10 +470,6 @@ describe('unsupportedRoleHotStandbyCombo', () => {
   });
 
   it('rejects hot-standby=true with resume=false (would session-flap)', () => {
-    // The push-handoff path adopts the outgoing leader's
-    // session_id+sequence on the standby — without RESUME, the
-    // standby would IDENTIFY against the same token and Discord
-    // would flap the session identity.
     const msg = unsupportedRoleHotStandbyCombo('gateway', true, false);
     expect(msg).not.toBeNull();
     expect(msg).toMatch(/requires ENABLE_GATEWAY_RESUME=true/);
@@ -692,13 +481,6 @@ describe('unsupportedRoleHotStandbyCombo', () => {
   });
 
   it('sequences role check before resume check (operator sees the dominant fix first)', () => {
-    // combined+hot-standby+resume-off is doubly broken. The role
-    // check fires first because PROCESS_ROLE is the higher-order
-    // misconfig — fixing the role + leaving resume off would leave
-    // the second rejection still firing; fixing resume + leaving
-    // combined would re-fire the role rejection. Sequencing the
-    // role check first means the first redeploy lands the higher-
-    // order fix.
     const msg = unsupportedRoleHotStandbyCombo('combined', true, false);
     expect(msg).toMatch(/PROCESS_ROLE=gateway/);
     expect(msg).not.toMatch(/ENABLE_GATEWAY_RESUME=true/);
@@ -719,7 +501,6 @@ describe('missingHotStandbyKeys', () => {
   it('returns empty when the flag is off (no requirements)', () => {
     expect(missingHotStandbyKeys({
       ENABLE_GATEWAY_HOT_STANDBY: false,
-      // Everything else unset — must still be empty.
     })).toEqual([]);
   });
 
@@ -736,18 +517,11 @@ describe('missingHotStandbyKeys', () => {
   });
 
   it('surfaces missing GATEWAY_HANDOFF_HMAC (via hasGatewayHandoffHmac flag)', () => {
-    // The presence check reads `hasGatewayHandoffHmac` (boolean) rather
-    // than the raw secret string — see config.js's
-    // `takeGatewayHandoffHmac` for the heap-dump security rationale.
     expect(missingHotStandbyKeys(cfg({ hasGatewayHandoffHmac: false })))
       .toEqual(['GATEWAY_HANDOFF_HMAC']);
   });
 
   it('returns every missing key (not just the first) for one-shot remediation', () => {
-    // Order is the function's natural push order (INSTANCE_ID,
-    // INSTANCE_IP, GATEWAY_HANDOFF_HMAC); pinning it documents that
-    // contract so a refactor that reorders the pushes flags the
-    // operator-facing log-message ordering as a change.
     const missing = missingHotStandbyKeys(cfg({
       INSTANCE_ID: undefined,
       INSTANCE_IP: undefined,
@@ -780,12 +554,6 @@ describe('invalidHotStandbyValues', () => {
   });
 
   it('flags unsubstituted template literal in INSTANCE_ID — env-override paste footgun', () => {
-    // The specific scenario: an operator sets
-    // `INSTANCE_ID=${ECS_TASK_ARN}` as an env override (e.g. pasted
-    // from a runbook) and the surrounding shell fails to expand it.
-    // Without this check the literal `${ECS_TASK_ARN}` would key the
-    // lock + heartbeat rows and every replica would think it owns
-    // the same identifier.
     const problems = invalidHotStandbyValues(cfg({ INSTANCE_ID: '${ECS_TASK_ARN}' }));
     expect(problems).toHaveLength(1);
     expect(problems[0]).toMatch(/INSTANCE_ID looks like an unsubstituted template literal/);
@@ -812,11 +580,6 @@ describe('invalidHotStandbyValues', () => {
   });
 
   it('flags link-local INSTANCE_IP (paste-error from ECS metadata endpoint URL)', () => {
-    // Mirrors deriveInstanceIp's link-local filter — without this,
-    // an operator pasting `169.254.172.2` (the ECS task metadata
-    // endpoint) into INSTANCE_IP would slip past the shape check
-    // and re-introduce the Pillar 3 push-handoff bug through the
-    // env override path.
     const problems = invalidHotStandbyValues(cfg({ INSTANCE_IP: '169.254.172.2' }));
     expect(problems).toHaveLength(1);
     expect(problems[0]).toMatch(/link-local/);
@@ -824,11 +587,6 @@ describe('invalidHotStandbyValues', () => {
   });
 
   it('flags leading-zero IPv4 octets (octal-parse hazard under some resolvers)', () => {
-    // `01.02.03.04` parses as octal under glibc's `inet_aton` and a
-    // handful of resolvers — a typo'd "010.0.0.1" would resolve as
-    // 8.0.0.1, silently routing the control channel to a wrong host.
-    // The closed-door fix is to require canonical no-leading-zero
-    // octets, which the ECS task-def injection always produces.
     for (const ip of ['01.0.0.1', '10.01.0.1', '10.0.01.1', '10.0.0.01']) {
       const problems = invalidHotStandbyValues(cfg({ INSTANCE_IP: ip }));
       expect(problems).toHaveLength(1);
@@ -852,25 +610,12 @@ describe('invalidHotStandbyValues', () => {
   });
 
   it('does not trip on present-but-empty INSTANCE_IP (the missingHotStandbyKeys check catches that)', () => {
-    // Separation of concerns: missing-key checks are presence-only,
-    // shape checks only run on present values. An empty string is
-    // "missing" from the perspective of the upstream check and is
-    // skipped here to avoid duplicate operator-facing messages.
     expect(invalidHotStandbyValues(cfg({ INSTANCE_IP: '' }))).toEqual([]);
     expect(invalidHotStandbyValues(cfg({ INSTANCE_ID: '' }))).toEqual([]);
   });
 });
 
 describe('invalidStateSecretValues', () => {
-  // The caller in index.js sits inside the NODE_ENV=production block —
-  // these tests pin the predicate itself: presence is gated on the qURL
-  // OAuth flow being configured (the only consumer of the signer),
-  // while shape applies to any SET secret in every mode, so a short
-  // secret can't deferred-500 the first /qurl setup. Unset keys are
-  // never shape-checked — they simply fall out of the signer's
-  // resolution (the separation-of-concerns mirroring
-  // invalidHotStandbyValues) — pinned implicitly by every []-returning
-  // case below.
 
   it('returns [] when nothing is configured and no state secret is set', () => {
     expect(invalidStateSecretValues({})).toEqual([]);
@@ -882,7 +627,6 @@ describe('invalidStateSecretValues', () => {
     expect(problems[0]).toMatch(/no state-signing secret is available/);
     expect(problems[0]).toMatch(/openssl rand -hex 32/);
 
-    // Flow not configured → nothing resolves the signer, nothing to flag.
     expect(invalidStateSecretValues({ isQurlOAuthConfigured: false })).toEqual([]);
   });
 
@@ -905,9 +649,6 @@ describe('invalidStateSecretValues', () => {
   });
 
   it('flags a set-but-short state secret even when the qURL flow is not configured', () => {
-    // Deliberately fail-loud-on-any-set-value: set-but-wrong is a
-    // misconfig in its own right, and a later config change shouldn't
-    // unearth a latent bad value at the first /qurl setup.
     const problems = invalidStateSecretValues({
       isQurlOAuthConfigured: false,
       OAUTH_STATE_SECRET: 'shrt',
@@ -955,7 +696,6 @@ describe('invalidStateSecretValues', () => {
       isQurlOAuthConfigured: true,
       OAUTH_STATE_SECRET: 'x'.repeat(MIN_STATE_SECRET_LENGTH),
     })).toEqual([]);
-    // openssl rand -hex 32 → 64 chars, the documented generator.
     expect(invalidStateSecretValues({
       isQurlOAuthConfigured: true,
       OAUTH_STATE_SECRET: '0'.repeat(64),

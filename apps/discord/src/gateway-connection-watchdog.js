@@ -9,14 +9,21 @@
 //
 // ── Loop ──
 // Every `pollIntervalMs` (default 1000):
-//   1. If not holding the lock → reset attempts; continue. The
-//      watchdog runs unconditionally, so a standby waiting to be
-//      promoted enters the loop but no-ops until it acquires the
-//      lock. Resetting attempts here means a previous failure ladder
-//      doesn't carry across a lock-give-up + lock-reacquire cycle.
-//   2. If holding the lock AND the manager reports connected → reset
-//      attempts; continue. Steady-state: 1 s tick, no work, no log.
-//   3. Otherwise: attempts++, try `manager.connect()`. On success,
+//   1. If connected → reset attempts/recovery; continue. When local lock
+//      ownership is false, strongly read the holder first and exit only if a
+//      peer owner confirms split brain.
+//   2. If @discordjs/ws is automatically recovering from Closed,
+//      wait for Ready/Resumed. Never race it with manager.connect().
+//      A recovery that stays stuck for maxRecoveryMs releases the lock,
+//      when held, and exits so ECS can replace the process. This limit
+//      also runs on a non-lock-holder, so a stale standby latch cannot
+//      poison a later handoff. Promotion does not reset the process-wide
+//      timer, so lock flapping cannot extend the bound.
+//   3. If not holding the lock → reset attempts; continue. The standby
+//      loop no-ops until promotion, but recovery in step 2 stays bounded.
+//   4. If the leader is already connecting → reset attempts; continue.
+//      This prevents concurrent connect() calls.
+//   5. Otherwise: attempts++, try `manager.connect()`. On success,
 //      reset attempts. On failure, log + exponential backoff sleep
 //      (200 ms, 400 ms, 800 ms, 1.6 s — capped at 5 s, see below).
 //      At `attempts >= maxAttempts` (default 5), release the lock
@@ -49,8 +56,18 @@
 // Real prod calls `process.exit(1)`. Tests inject a no-op so the
 // retries-exhausted branch is observable without killing jest.
 
+const { performance } = require('node:perf_hooks');
+
 const DEFAULT_POLL_INTERVAL_MS = 1_000;
 const DEFAULT_MAX_ATTEMPTS = 5;
+// Give @discordjs/ws 20 seconds to finish its own reconnect loops. This
+// covers the library's 500 ms reconnect delay, Invalid Session backoff,
+// and an IDENTIFY bucket wait, while staying well inside Discord's
+// resumable-session window. Terminal close codes bypass this timer in the
+// shim and enter the explicit-connect failure ladder immediately.
+// TODO(upstream-contract): Re-check this limit when the pinned @discordjs/ws
+// reconnect delay or Discord resumable-session behavior changes.
+const DEFAULT_MAX_RECOVERY_MS = 20_000;
 const BACKOFF_BASE_MS = 100;
 const BACKOFF_CAP_MS = 5_000;
 // Ceilings below bound the WATCHDOG's own failure-replace path —
@@ -81,7 +98,7 @@ const CONNECT_CEILING_MS = 8_000;
 
 // `manager` is conventionally the gateway-ws-shim instance (passed
 // from startHotStandby), but any object satisfying connect() +
-// sync isConnected() is accepted. The raw @discordjs/ws
+// sync isConnected() + isRecovering() is accepted. The raw @discordjs/ws
 // WebSocketManager does NOT satisfy this contract — it exposes
 // only an async fetchStatus() — which is why the shim wraps it.
 function createConnectionWatchdog({
@@ -97,6 +114,12 @@ function createConnectionWatchdog({
   // Tests that don't exercise the inbound-handoff path can pass
   // `() => false`.
   isConnecting,
+  // REQUIRED. Strongly reads the DDB holder row when a connected shard no
+  // longer has local ownership. A missing row can be reacquired by the
+  // leader; a row owned by another instance confirms split brain and makes
+  // this process exit without touching the peer's lock.
+  readCurrentHolder,
+  selfInstanceId,
   releaseLock,
   // Ceilings — see RELEASE_LOCK_CEILING_MS / CONNECT_CEILING_MS above
   // for rationale. Injected for tests so they can be tuned tiny.
@@ -116,19 +139,34 @@ function createConnectionWatchdog({
   logger,
   pollIntervalMs = DEFAULT_POLL_INTERVAL_MS,
   maxAttempts = DEFAULT_MAX_ATTEMPTS,
+  maxRecoveryMs = DEFAULT_MAX_RECOVERY_MS,
   // Injected for tests. Production: setTimeout-based.
   sleep = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); }),
+  // Injected for deterministic tests. performance.now() is monotonic, so an
+  // NTP wall-clock correction cannot shorten or extend the recovery bound.
+  now = () => performance.now(),
+  // Wall time is used only to compare the DDB lease's epoch-seconds expiry.
+  wallClock = () => Date.now(),
   // Injected for tests. Production: process.exit. Tests pass a spy.
   exit = (code) => process.exit(code),
 } = {}) {
-  if (!manager || typeof manager.connect !== 'function' || typeof manager.isConnected !== 'function') {
-    throw new Error('createConnectionWatchdog: manager with connect() and isConnected() is required');
+  if (!manager
+      || typeof manager.connect !== 'function'
+      || typeof manager.isConnected !== 'function'
+      || typeof manager.isRecovering !== 'function') {
+    throw new Error('createConnectionWatchdog: manager with connect(), isConnected(), and isRecovering() is required');
   }
   if (typeof isHoldingLock !== 'function') {
     throw new Error('createConnectionWatchdog: isHoldingLock function is required');
   }
   if (typeof isConnecting !== 'function') {
     throw new Error('createConnectionWatchdog: isConnecting function is required');
+  }
+  if (typeof readCurrentHolder !== 'function') {
+    throw new Error('createConnectionWatchdog: readCurrentHolder function is required');
+  }
+  if (!selfInstanceId) {
+    throw new Error('createConnectionWatchdog: selfInstanceId is required');
   }
   if (typeof releaseLock !== 'function') {
     throw new Error('createConnectionWatchdog: releaseLock function is required');
@@ -139,6 +177,9 @@ function createConnectionWatchdog({
   if (!Number.isInteger(maxAttempts) || maxAttempts <= 0) {
     throw new Error('createConnectionWatchdog: maxAttempts must be a positive integer');
   }
+  if (!Number.isInteger(maxRecoveryMs) || maxRecoveryMs <= 0) {
+    throw new Error('createConnectionWatchdog: maxRecoveryMs must be a positive integer');
+  }
   if (!Number.isInteger(pollIntervalMs) || pollIntervalMs <= 0) {
     throw new Error('createConnectionWatchdog: pollIntervalMs must be a positive integer');
   }
@@ -147,6 +188,12 @@ function createConnectionWatchdog({
   }
   if (!Number.isInteger(connectCeilingMs) || connectCeilingMs <= 0) {
     throw new Error('createConnectionWatchdog: connectCeilingMs must be a positive integer');
+  }
+  if (typeof now !== 'function') {
+    throw new Error('createConnectionWatchdog: now must be a function');
+  }
+  if (typeof wallClock !== 'function') {
+    throw new Error('createConnectionWatchdog: wallClock must be a function');
   }
 
   // Races `promise` against a `ceilingMs` timer that rejects with a
@@ -174,7 +221,50 @@ function createConnectionWatchdog({
   let running = false;
   let loopPromise = null;
   let attempts = 0;
+  let recoveryStartedAt = null;
   let closed = false;
+  let stopping = false;
+
+  function resetRecovery() {
+    recoveryStartedAt = null;
+  }
+
+  async function exitAfterExhaustion({
+    reason,
+    mode,
+    outcome,
+    details = { attempts },
+    releaseOwnedLock = true,
+  }) {
+    const action = releaseOwnedLock ? 'releasing lock' : 'exiting';
+    logger.error(`connection-watchdog: ${mode} ${outcome}, ${action}`, {
+      error: reason, ...details,
+    });
+    if (releaseOwnedLock) {
+      try {
+        // Bounded by RELEASE_LOCK_CEILING_MS. If release hangs, exit
+        // anyway and let the short DDB lease expire.
+        await raceWithCeiling(releaseLock(), releaseLockCeilingMs, 'release_lock_ceiling');
+      } catch (rerr) {
+        logger.error('connection-watchdog: releaseLock failed during exhaustion-exit', {
+          error: rerr.message,
+        });
+      }
+    }
+    // Remove this process from peer discovery before ECS replaces it.
+    if (typeof deleteOwnRow === 'function') {
+      try {
+        await deleteOwnRow();
+      } catch (derr) {
+        logger.warn('connection-watchdog: deleteOwnRow failed during exhaustion-exit', {
+          error: derr.message,
+        });
+      }
+    }
+    closed = true;
+    running = false;
+    exit(1);
+  }
 
   // Run one iteration of the watchdog. Public for tests; production
   // calls it from the `start()` loop. Returns once the iteration
@@ -185,21 +275,98 @@ function createConnectionWatchdog({
     // still be called manually post-exit; without this guard a
     // re-entry would re-fire releaseLock + deleteOwnRow. Test-tool
     // robustness only; production never re-enters.
-    if (closed) return;
-    if (!isHoldingLock()) {
+    if (closed || stopping) return;
+    const holdingLock = isHoldingLock();
+    if (manager.isConnected()) {
       attempts = 0;
+      resetRecovery();
+      // Local ownership can go false after a renew CAS miss because either a
+      // peer owns the row OR the row disappeared. Only the first case proves
+      // split brain. Confirm it with a strong DDB read before exiting; an
+      // absent/self-owned row is safe for the leader's next acquire tick.
+      // The SIGTERM handoff path stops the watchdog before it transfers the
+      // lock, so its expected connected-then-transfer window cannot reach
+      // this guard.
+      if (!holdingLock) {
+        let currentHolder;
+        try {
+          currentHolder = await readCurrentHolder();
+        } catch (err) {
+          if (stopping) return;
+          logger.error('connection-watchdog: could not confirm lock ownership; will retry', {
+            error: err.message,
+          });
+          return;
+        }
+        if (stopping) return;
+        const expiresAt = Number(currentHolder?.expires_at);
+        const currentEpochSeconds = Math.floor(wallClock() / 1000);
+        const peerOwnsLiveLease = currentHolder?.instance_id
+          && currentHolder.instance_id !== selfInstanceId
+          && Number.isFinite(expiresAt)
+          && expiresAt >= currentEpochSeconds;
+        // Exit only for a live peer lease. An expired peer row is acquirable
+        // under gateway-lock's CAS contract. The leader will replace it on its
+        // next tick; if the old peer still has a live shard, its watchdog then
+        // sees this process's live lease and exits that losing replica.
+        if (peerOwnsLiveLease) {
+          await exitAfterExhaustion({
+            reason: 'gateway shard is connected while a peer owns the leader lock',
+            mode: 'lock ownership',
+            outcome: 'violation',
+            details: { peer_instance_id: currentHolder.instance_id },
+            releaseOwnedLock: false,
+          });
+        } else {
+          logger.warn('connection-watchdog: connected without local lock; no peer owner confirmed', {
+            current_instance_id: currentHolder?.instance_id ?? null,
+            current_expires_at: Number.isFinite(expiresAt) ? expiresAt : null,
+          });
+        }
+      }
       return;
     }
-    if (manager.isConnected()) {
+
+    // A Closed event makes @discordjs/ws reconnect internally. Its
+    // implementation has a 500 ms Idle gap before internalConnect(),
+    // so manager.connect() here can create a second live shard. Wait
+    // for the library's reconnect. Track this before the lock and
+    // leader-connect guards: recovery belongs to the process, and must
+    // remain bounded even while this replica is a standby or a leader
+    // connect promise is still settling.
+    if (manager.isRecovering()) {
+      attempts = 0;
+      const currentTime = now();
+      if (recoveryStartedAt === null) {
+        recoveryStartedAt = currentTime;
+        logger.warn('connection-watchdog: automatic reconnect in progress; standing down', {
+          max_recovery_ms: maxRecoveryMs,
+        });
+      }
+      const recoveryElapsedMs = Math.max(0, currentTime - recoveryStartedAt);
+      if (recoveryElapsedMs >= maxRecoveryMs) {
+        await exitAfterExhaustion({
+          reason: 'automatic reconnect did not reach Ready/Resumed',
+          mode: 'automatic reconnect',
+          outcome: 'timed out',
+          details: { recovery_elapsed_ms: recoveryElapsedMs },
+          releaseOwnedLock: holdingLock,
+        });
+      }
+      return;
+    }
+
+    resetRecovery();
+    if (!holdingLock) {
       attempts = 0;
       return;
     }
     // Leader is mid-connect (inbound-handoff path). Stand down —
     // don't race a second concurrent connect against the same
     // WebSocketManager. Reset attempts so the leader's eventual
-    // success doesn't leave a stale failure ladder behind, and
-    // its eventual failure starts the ladder cleanly from 1 on
-    // the next tick when isConnecting() returns false again.
+    // success doesn't leave a stale failure ladder behind. A connect
+    // that never settles without emitting Closed remains the existing
+    // issue #415 case; the automatic-recovery timer above cannot see it.
     if (isConnecting()) {
       attempts = 0;
       return;
@@ -210,49 +377,17 @@ function createConnectionWatchdog({
       // Bounded by CONNECT_CEILING_MS — a hung connect would otherwise
       // pin this tick and the failure-exit recovery would never fire.
       await raceWithCeiling(manager.connect(), connectCeilingMs, 'watchdog_connect_ceiling');
+      if (stopping) return;
       attempts = 0;
       logger.info('connection-watchdog: connect succeeded');
     } catch (err) {
+      if (stopping) return;
       if (attempts >= maxAttempts) {
-        logger.error('connection-watchdog: connect retries exhausted, releasing lock', {
-          error: err.message, attempts,
+        await exitAfterExhaustion({
+          reason: err.message,
+          mode: 'connect',
+          outcome: 'retries exhausted',
         });
-        try {
-          // Bounded by RELEASE_LOCK_CEILING_MS — the leader's
-          // releaseLockForImmediateExit awaits through its
-          // serialization chain; a hung inbound-handoff (parked
-          // inside manager.connect() with `connecting=true` latched)
-          // would block the chain forever and exit(1) would never
-          // fire. On ceiling miss we log and exit anyway; the row
-          // fades via TTL.
-          await raceWithCeiling(releaseLock(), releaseLockCeilingMs, 'release_lock_ceiling');
-        } catch (rerr) {
-          // Logged-and-swallowed: we're already in the failure-exit
-          // path; refusing to exit because of a DDB blip — or the
-          // ceiling-miss above — would leave the lock held with no
-          // live gateway.
-          logger.error('connection-watchdog: releaseLock failed during exhaustion-exit', {
-            error: rerr.message,
-          });
-        }
-        // Best-effort heartbeat-row cleanup, symmetric to gateway-
-        // leader.js's pushHandoff path. Closes the discovery window
-        // immediately so a freshly-promoted peer's listFreshPeers
-        // stops returning this dead row. Optional hook — absence is
-        // a no-op; failure is logged and swallowed (we're already
-        // exiting).
-        if (typeof deleteOwnRow === 'function') {
-          try {
-            await deleteOwnRow();
-          } catch (derr) {
-            logger.warn('connection-watchdog: deleteOwnRow failed during exhaustion-exit', {
-              error: derr.message,
-            });
-          }
-        }
-        closed = true;
-        running = false;
-        exit(1);
         return;
       }
       const backoffMs = Math.min((2 ** attempts) * BACKOFF_BASE_MS, BACKOFF_CAP_MS);
@@ -293,6 +428,7 @@ function createConnectionWatchdog({
     // not spawn a second concurrent loop. Callers that need to
     // re-start MUST await `stop()` first.
     if (loopPromise || closed) return;
+    stopping = false;
     running = true;
     loopPromise = loop().finally(() => { loopPromise = null; });
   }
@@ -303,6 +439,7 @@ function createConnectionWatchdog({
   // the loop check sees running=false). Idempotent. Callers that
   // want to re-start the watchdog MUST await this.
   function stop() {
+    stopping = true;
     running = false;
     return loopPromise ?? Promise.resolve();
   }
@@ -314,6 +451,7 @@ function createConnectionWatchdog({
     _stepForTest: step,
     _getAttemptsForTest() { return attempts; },
     _getRunningForTest() { return running; },
+    _getStoppingForTest() { return stopping; },
     _getLoopPromiseForTest() { return loopPromise; },
   };
 }
@@ -322,6 +460,7 @@ module.exports = {
   createConnectionWatchdog,
   DEFAULT_POLL_INTERVAL_MS,
   DEFAULT_MAX_ATTEMPTS,
+  DEFAULT_MAX_RECOVERY_MS,
   BACKOFF_BASE_MS,
   BACKOFF_CAP_MS,
 };

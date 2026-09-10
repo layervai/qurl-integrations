@@ -45,12 +45,10 @@ itself fails), no in-app coordination needed.
 
 Terraform-side ordering (config lives in `qurl-integrations-infra`):
 
-1. Apply the `qurl-views` DDB table. The `QURL_WEBHOOK_SECRET` SSM
-   SecureString parameter is created by the Lambda's `PutParameter`
-   call on first invocation — Terraform does NOT pre-seed it with a
-   sentinel value. If the Lambda hasn't run yet, the bot's receiver
-   503s on inbound webhooks (qurl-service retries), which is the
-   correct unconfigured-state behavior.
+1. Apply the `qurl-views` DDB table and Terraform's `QURL_WEBHOOK_SECRET`
+   SecureString seeded with `PLACEHOLDER`. The registrar replaces that public
+   bootstrap value with the server's secret before bot tasks start. The bot
+   rejects the sentinel at startup; it must never become an HMAC key.
 2. Apply the Lambda function + IAM role (scoped: `ssm:GetParameter` on
    the `QURL_API_KEY` + `QURL_WEBHOOK_SECRET` paths; `ssm:PutParameter`
    on the `QURL_WEBHOOK_SECRET` path; `logs:CreateLogGroup` +
@@ -102,6 +100,12 @@ finds the existing sub, sees the SSM secret matches, returns `reused`).
   task-def update is skipped, no traffic shifts. Existing bot tasks
   keep running with the previous (still-valid) secret. Root-cause in
   CloudWatch logs for the Lambda; re-run apply when fixed.
+- **Bot reads the seed sentinel or a blank configured secret.** Startup fails
+  before listening. Run the registrar and verify its SSM persist succeeded.
+- **Secret format drift.** The registrar and bot warn without logging secret
+  material, preserve the exact returned bytes, and reuse them on restart.
+  This does not validate arbitrary manual SSM edits: HMAC mismatches still
+  reject deliveries. Restore the registrar-persisted secret or rotate explicitly.
 - **Bot reads empty `QURL_WEBHOOK_SECRET`.** Means the Lambda never
   ran successfully OR ran but SSM `PutParameter` failed (IAM, network).
   Receiver returns 503 (qurl-service retries). Recover by running the

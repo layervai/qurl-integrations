@@ -1,9 +1,8 @@
 // qURL webhook-secret trust boundary.
 //
-// TODO(upstream-contract): keep the strict reusable-secret shape aligned with
-// qurl-service/internal/domain/webhook.go (GenerateWebhookSecret). A stored
-// default secret is trusted across process restarts, so only the documented
-// server-issued shape may cross that startup boundary.
+// TODO(upstream-contract): keep the expected shape aligned with
+// qurl-service/internal/domain/webhook.go (GenerateWebhookSecret). Shape drift
+// warns but must not discard a secret whose upstream rotation already committed.
 const SERVER_SECRET_PREFIX = 'whsec_';
 const SERVER_SECRET_MIN_BODY_LENGTH = 16;
 const SERVER_SECRET_MIN_LENGTH = SERVER_SECRET_PREFIX.length + SERVER_SECRET_MIN_BODY_LENGTH;
@@ -26,22 +25,23 @@ function isServerIssuedSecret(value) {
   return body.length >= SERVER_SECRET_MIN_BODY_LENGTH && SERVER_SECRET_BODY_RE.test(body);
 }
 
-// Unset is intentional pure-BYOK mode. Any configured non-empty value becomes
-// the receiver's default HMAC key, so fail startup unless it is positively
-// identified as qurl-service-issued key material.
+function isUsableSecret(value) {
+  return typeof value === 'string' && value.trim().length > 0 && !isInfraSeedSentinel(value);
+}
+
+// Preserve the exact server bytes, including whitespace, across persistence and
+// restart. Usability is not proof that an operator-supplied key matches upstream.
 function assertConfiguredWebhookSecret(value) {
   if (value === undefined || value === null || value === '') return false;
+  assertUsableResponseSecret(value, 'QURL_WEBHOOK_SECRET');
   if (!isServerIssuedSecret(value)) {
-    throw new Error(`QURL_WEBHOOK_SECRET must be unset for pure-BYOK mode or contain a server-issued ${SERVER_SECRET_EXPECTED_FORMAT}`);
+    require('../logger').warn('qURL configured webhook secret has unrecognized format — preserving stored key');
   }
   return true;
 }
 
-// Create/rotate is different from startup reuse: qurl-service may have already
-// committed a rotation before this response reaches us. Rejecting unfamiliar
-// but usable key material here would discard the only live secret and cause an
-// outage. Reject only values that cannot be HMAC keys or the known public seed;
-// callers separately warn on shape drift before persisting the response.
+// A committed rotation may return a new format. Reject unusable values and the
+// public seed; callers warn on shape drift without changing the HMAC key bytes.
 function assertUsableResponseSecret(value, operation) {
   if (value === undefined || value === null || value === '') {
     throw new Error(`${operation}: contract drift (response secret is missing; expected ${SERVER_SECRET_EXPECTED_FORMAT})`);
@@ -66,4 +66,5 @@ module.exports = {
   assertUsableResponseSecret,
   isInfraSeedSentinel,
   isServerIssuedSecret,
+  isUsableSecret,
 };

@@ -52,6 +52,7 @@ const {
   SERVER_SECRET_MIN_LENGTH,
   isInfraSeedSentinel,
   isServerIssuedSecret,
+  isUsableSecret,
   assertUsableResponseSecret,
 } = require('./utils/webhook-secret');
 
@@ -925,24 +926,15 @@ async function ensureWebhookSubscription(opts) {
   // surviving sub's secret is almost certainly NOT the one in SSM).
   // Force a rotate so SSM gets a known-good value tied to the
   // survivor. One-time cost on dedupe; subsequent restarts reuse.
-  // "Real" means server-issued: qurl-service mints every webhook secret
-  // with a fixed `whsec_` prefix and a token-length body. The SSM parameter
-  // the Lambda reads is seeded by terraform with a sentinel ("PLACEHOLDER")
-  // so it exists before the first registrar run; a non-empty check alone would reuse
-  // that sentinel whenever a subscription already exists for the bridge
-  // URL (a sub that predates the parameter, or an SSM reset), and the
-  // receiver would then 401 every delivery until an operator noticed.
-  // guild-webhook-link intentionally passes no initialSecret, so this
-  // classifier changes only the Lambda/SSM path; its existing per-guild
-  // rotate-and-propagate behavior is unchanged.
-  const initialIsRealSecret = isServerIssuedSecret(initialSecret);
+  // Reuse the stored response bytes even after upstream format drift. A
+  // nonblank secret is not proof of agreement with upstream; SSM must hold the
+  // registrar's persisted response. Never reuse Terraform's public seed.
+  const initialIsRealSecret = isUsableSecret(initialSecret);
   if (existing
       && typeof initialSecret === 'string'
       && initialSecret.length > 0
-      && !initialIsRealSecret) {
-    // Observability only: the reuse decision remains a format allowlist,
-    // not a denylist coupled to terraform's current sentinel literal. The
-    // sentinel is designed bootstrap state, so reserve WARN for surprises.
+      && !isServerIssuedSecret(initialSecret)) {
+    // The sentinel is designed bootstrap state; reserve WARN for surprises.
     const seedSentinel = isInfraSeedSentinel(initialSecret);
     const meta = {
       webhookId: existing.webhook_id,
@@ -952,7 +944,7 @@ async function ensureWebhookSubscription(opts) {
     if (seedSentinel) {
       logger.info('qURL webhook SSM secret is the infra seed sentinel — rotating as designed', meta);
     } else {
-      logger.warn('qURL webhook initial secret has unrecognized format — rotating instead of reusing', meta);
+      logger.warn('qURL webhook initial secret has unrecognized format — preserving usable stored key', meta);
     }
   }
 

@@ -35,15 +35,12 @@ describe('qURL webhook secret trust boundary', () => {
     'PLACEHOLDER',
     ' placeholder\n',
     '   ',
-    'legacy-secret-value',
-    'whsec_',
-    `whsec_${'x'.repeat(15)}`,
   ])('fails server startup before accepting a configured untrusted secret: %s', (value) => {
     jest.resetModules();
     jest.doMock('../src/config', () => ({ QURL_WEBHOOK_SECRET: value }));
 
     expect(() => require('../src/server'))
-      .toThrow(/QURL_WEBHOOK_SECRET.*server-issued.*whsec_/);
+      .toThrow(/QURL_WEBHOOK_SECRET/);
   });
 
   it.each(['PLACEHOLDER', ' placeholder\n'])('rejects public seed responses: %p', (value) => {
@@ -54,7 +51,7 @@ describe('qURL webhook secret trust boundary', () => {
 
   it('does not echo an invalid configured secret in its startup error', () => {
     const { assertConfiguredWebhookSecret } = require('../src/utils/webhook-secret');
-    const value = 'do-not-log-configured-secret';
+    const value = '  PLACEHOLDER  ';
     expect(() => assertConfiguredWebhookSecret(value)).toThrow(/QURL_WEBHOOK_SECRET/);
     try {
       assertConfiguredWebhookSecret(value);
@@ -62,4 +59,10 @@ describe('qURL webhook secret trust boundary', () => {
       expect(err.message).not.toContain(value);
     }
   });
+});
+
+it.each(['whsec_1234567890abcdef', 'new-format-server-secret', ' server-key-bytes '])('accepts persisted usable response on restart: %s', (value) => {
+  const { assertConfiguredWebhookSecret, assertUsableResponseSecret } = require('../src/utils/webhook-secret');
+  expect(assertUsableResponseSecret(value, 'rotateSecret')).toBe(value);
+  expect(assertConfiguredWebhookSecret(value)).toBe(true);
 });

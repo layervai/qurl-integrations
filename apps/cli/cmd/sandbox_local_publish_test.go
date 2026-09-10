@@ -101,6 +101,7 @@ func mintConnectorRow(t *testing.T, slug string) connectorResourceRow {
 	digest := sha256.Sum256(der)
 	return connectorResourceRow{
 		ResourceID:         base64.RawURLEncoding.EncodeToString(der),
+		CRID:               apitest.DeriveCRID(t, der, apitest.VersionTest),
 		ConnectorRoutingID: "c-" + connectorRoutingIDEncoding.EncodeToString(digest[:]),
 		KnockResourceID:    "resource-public-key", Type: "tunnel", Status: "active", Slug: slug,
 	}
@@ -150,17 +151,18 @@ func TestSandboxFullCustomerLifecyclePhaseContract(t *testing.T) {
 // exercising stop/start/restart, and deleting the live share while its
 // foreground daemon is still running.
 //
-// The private orchestrator runs this tagged test with one exact customer CLI
-// artifact. It creates a native device in a fresh state directory, so the lane
-// must provide a short-lived JWT that can revoke the resulting device
-// credential. The JWT must represent the same owner as QURL_API_KEY: 404 is a
-// cleanup failure, because a wrong-owner JWT also cannot see the new key. The
-// resource and device key are both reclaimed before returning. Run explicitly:
+// The main CLI workflow runs this tagged test with one exact customer CLI
+// artifact. It creates a native device in a fresh state directory and records
+// that device for the workflow's terminal cleanup. The test does not receive
+// standing automation authority there; terminal cleanup uses the protected parent
+// API key after it fences the tested process. A direct operator run can supply an interactive cleanup JWT to revoke the
+// device in the test's own cleanup. That JWT must represent the same owner as
+// QURL_API_KEY. Run explicitly:
 //
 //	QURL_CLI_SANDBOX_LOCAL_PUBLISH=enabled \
 //	QURL_CLI_SANDBOX_BINARY=/absolute/path/to/qurl \
 //	QURL_SHARING_RUN_ID=123 QURL_SHARING_RUN_ATTEMPT=1 QURL_SHARING_RUNTIME=host \
-//	QURL_API_KEY=... QURL_ENDPOINT=... QURL_CLI_SANDBOX_CLEANUP_JWT=... \
+//	QURL_API_KEY=... QURL_ENDPOINT=... \
 //	QURL_CONNECTOR_HUB_HOST=... QURL_CONNECTOR_HUB_PORT=... \
 //	QURL_CONNECTOR_HUB_SERVER_PUBLIC_KEY_B64=... \
 //	go test -tags=clisandbox -count=1 -run '^TestSandboxFullCustomerLifecycleSmoke$' ./apps/cli/cmd
@@ -561,7 +563,6 @@ func startSandboxLocalPublishInState(t *testing.T, label, requestedStateDir stri
 	if err := validateSandboxDeviceIdentity(loadedAfterLogin, namespace.AgentID, ""); err != nil {
 		t.Fatalf("one-time customer login durable identity: %v", err)
 	}
-	recordSandboxCleanupDeviceKey(t, loadedAfterLogin.DeviceAPIKeyID)
 	assertSandboxStateExcludesSecret(t, stateDir, bootstrapKey)
 
 	fixture := &sandboxLocalFixture{
@@ -785,6 +786,20 @@ func decodeSandboxSharing(t *testing.T, res *runResult) sandboxSharingDoc {
 
 func waitSandboxSharingState(t *testing.T, binary string, env map[string]string, stateDir, crid, desired, observed string, limit time.Duration) sandboxSharingDoc {
 	t.Helper()
+	return waitSandboxSharing(t, binary, env, stateDir, crid, limit, fmt.Sprintf("%s/%s sharing state", desired, observed), func(doc sandboxSharingDoc) bool {
+		return doc.DesiredState == desired && doc.ConnectionState == observed
+	})
+}
+
+func waitSandboxSharingStateAfterCrash(t *testing.T, binary string, env map[string]string, stateDir, crid, resourceID string, limit time.Duration) sandboxSharingDoc {
+	t.Helper()
+	return waitSandboxSharing(t, binary, env, stateDir, crid, limit, "the exact resource to reflect the foreground crash", func(doc sandboxSharingDoc) bool {
+		return validateSandboxCrashState(doc, crid, resourceID) == nil
+	})
+}
+
+func waitSandboxSharing(t *testing.T, binary string, env map[string]string, stateDir, crid string, limit time.Duration, want string, ready func(sandboxSharingDoc) bool) sandboxSharingDoc {
+	t.Helper()
 	deadline := time.Now().Add(limit)
 	var last string
 	for time.Now().Before(deadline) {
@@ -792,7 +807,7 @@ func waitSandboxSharingState(t *testing.T, binary string, env map[string]string,
 		if res.code == 0 {
 			var doc sandboxSharingDoc
 			if err := json.Unmarshal(res.stdout.Bytes(), &doc); err == nil {
-				if doc.DesiredState == desired && doc.ConnectionState == observed {
+				if ready(doc) {
 					return doc
 				}
 				last = res.stdout.String()
@@ -804,7 +819,7 @@ func waitSandboxSharingState(t *testing.T, binary string, env map[string]string,
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
-	t.Fatalf("timed out waiting for %s/%s sharing state for %s; last result: %s", desired, observed, crid, last)
+	t.Fatalf("timed out waiting for %s for %s; last result: %s", want, crid, last)
 	return sandboxSharingDoc{}
 }
 
@@ -1159,6 +1174,35 @@ func validateSandboxSharingTransition(doc sandboxSharingDoc, desired, observed s
 	return nil
 }
 
+func validateSandboxCrashState(doc sandboxSharingDoc, crid, resourceID string) error { //nolint:gocritic // Passing the immutable decoded snapshot by value keeps validation isolated from later mutation.
+	if doc.CRID != crid || doc.ResourceID != resourceID || doc.ServingEpoch == 0 {
+		return errors.New("status returned an incomplete resource identity")
+	}
+	if doc.DesiredState != "on" {
+		return fmt.Errorf("desired state = %s, want on after crash", doc.DesiredState)
+	}
+	if doc.ConnectionState != "connecting" && doc.ConnectionState != "stopped" {
+		return fmt.Errorf("connection state = %s, want a non-serving crash state", doc.ConnectionState)
+	}
+	return nil
+}
+
+func validateSandboxReattachState(doc sandboxSharingDoc, crid, resourceID string, priorEpoch uint64) error { //nolint:gocritic // Passing the immutable decoded snapshot by value keeps validation isolated from later mutation.
+	if doc.CRID != crid || doc.ResourceID != resourceID {
+		return errors.New("status returned the wrong resource identity")
+	}
+	if doc.DesiredState != "on" || doc.ConnectionState != "serving" {
+		return fmt.Errorf("got %s/%s, want on/serving", doc.DesiredState, doc.ConnectionState)
+	}
+	if priorEpoch == 0 || doc.ServingEpoch == 0 {
+		return fmt.Errorf("serving epoch missing (prior=%d, got %d)", priorEpoch, doc.ServingEpoch)
+	}
+	if doc.ServingEpoch < priorEpoch {
+		return fmt.Errorf("serving epoch %d regressed below %d", doc.ServingEpoch, priorEpoch)
+	}
+	return nil
+}
+
 func TestRunSandboxLocalCLIUsesExactBinaryAndState(t *testing.T) {
 	binary := filepath.Join(t.TempDir(), "qurl")
 	script := `#!/bin/sh
@@ -1322,6 +1366,57 @@ func TestValidateSandboxSharingTransitionRequiresAdvancedEpoch(t *testing.T) {
 				t.Fatal("invalid lifecycle transition accepted")
 			}
 		})
+	}
+}
+
+func TestValidateSandboxCrashStateRequiresExactNonServingResource(t *testing.T) {
+	const crid = "qhtpthw4qt7wkw7khghr6x3z4hsfyn4zbuyhnee4i6bi67yu6yytgvwdbb4q"
+	for _, connectionState := range []string{"connecting", "stopped"} {
+		valid := sandboxSharingDoc{CRID: crid, ResourceID: "resource", DesiredState: "on", ConnectionState: connectionState, ServingEpoch: 8}
+		if err := validateSandboxCrashState(valid, crid, "resource"); err != nil {
+			t.Fatalf("valid %s crash state: %v", connectionState, err)
+		}
+	}
+	for name, doc := range map[string]sandboxSharingDoc{
+		"wrong CRID":     {CRID: "other", ResourceID: "resource", DesiredState: "on", ConnectionState: "connecting", ServingEpoch: 8},
+		"wrong resource": {CRID: crid, ResourceID: "other", DesiredState: "on", ConnectionState: "connecting", ServingEpoch: 8},
+		"zero epoch":     {CRID: crid, ResourceID: "resource", DesiredState: "on", ConnectionState: "connecting"},
+		"desired off":    {CRID: crid, ResourceID: "resource", DesiredState: "off", ConnectionState: "stopped", ServingEpoch: 8},
+		"still serving":  {CRID: crid, ResourceID: "resource", DesiredState: "on", ConnectionState: "serving", ServingEpoch: 8},
+		"unknown state":  {CRID: crid, ResourceID: "resource", DesiredState: "on", ConnectionState: "", ServingEpoch: 8},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := validateSandboxCrashState(doc, crid, "resource"); err == nil {
+				t.Fatal("invalid crash state accepted")
+			}
+		})
+	}
+}
+
+func TestValidateSandboxReattachStateAcceptsCurrentOrNewerEpoch(t *testing.T) {
+	const crid = "qhtpthw4qt7wkw7khghr6x3z4hsfyn4zbuyhnee4i6bi67yu6yytgvwdbb4q"
+	for _, epoch := range []uint64{8, 9} {
+		valid := sandboxSharingDoc{CRID: crid, ResourceID: "resource", DesiredState: "on", ConnectionState: "serving", ServingEpoch: epoch}
+		if err := validateSandboxReattachState(valid, crid, "resource", 8); err != nil {
+			t.Fatalf("valid epoch %d reattach: %v", epoch, err)
+		}
+	}
+	for name, doc := range map[string]sandboxSharingDoc{
+		"wrong CRID":      {CRID: "other", ResourceID: "resource", DesiredState: "on", ConnectionState: "serving", ServingEpoch: 8},
+		"wrong resource":  {CRID: crid, ResourceID: "other", DesiredState: "on", ConnectionState: "serving", ServingEpoch: 8},
+		"wrong desired":   {CRID: crid, ResourceID: "resource", DesiredState: "off", ConnectionState: "serving", ServingEpoch: 8},
+		"not serving":     {CRID: crid, ResourceID: "resource", DesiredState: "on", ConnectionState: "connecting", ServingEpoch: 8},
+		"missing epoch":   {CRID: crid, ResourceID: "resource", DesiredState: "on", ConnectionState: "serving"},
+		"regressed epoch": {CRID: crid, ResourceID: "resource", DesiredState: "on", ConnectionState: "serving", ServingEpoch: 7},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := validateSandboxReattachState(doc, crid, "resource", 8); err == nil {
+				t.Fatal("invalid reattach state accepted")
+			}
+		})
+	}
+	if err := validateSandboxReattachState(sandboxSharingDoc{CRID: crid, ResourceID: "resource", DesiredState: "on", ConnectionState: "serving", ServingEpoch: 1}, crid, "resource", 0); err == nil {
+		t.Fatal("missing prior epoch accepted")
 	}
 }
 
@@ -1772,7 +1867,7 @@ func registerSandboxResourceCleanup(t *testing.T, endpoint, connectorID, deviceA
 			t.Error("find sandbox Connector resource for cleanup failed")
 			return
 		}
-		if err := client.DeleteConnectorResource(ctx, resource.ResourceID); err != nil && !errors.Is(err, qurl.ErrConnectorResourceNotFound) {
+		if err := client.DeleteConnectorResource(ctx, resource.CRID); err != nil && !errors.Is(err, qurl.ErrConnectorResourceNotFound) {
 			t.Error("revoke sandbox Connector resource cleanup failed")
 		}
 	})
@@ -1894,7 +1989,7 @@ func TestSandboxCleanupReclaimsResourceBeforeDeviceCredential(t *testing.T) {
 			if err := json.NewEncoder(w).Encode(map[string]any{"data": []connectorResourceRow{row}}); err != nil {
 				t.Errorf("encode resource lookup: %v", err)
 			}
-		case r.Method == http.MethodDelete && r.URL.EscapedPath() == "/v1/resources/"+url.PathEscape(row.ResourceID):
+		case r.Method == http.MethodDelete && r.URL.EscapedPath() == "/v1/resources/"+url.PathEscape(row.CRID):
 			if got := r.Header.Get("Authorization"); got != "Bearer device-token" {
 				t.Errorf("resource cleanup authorization = %q, want device credential", got)
 			}
