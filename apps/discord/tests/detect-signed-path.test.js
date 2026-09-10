@@ -73,7 +73,7 @@ it('rejects mismatched resource identity', async () => {
 });
 it('closes after native open failure and redacts credentials', async () => {
   opener.start.mockRejectedValue(new Error(`failed ${qurl}`));
-  await expect(detect(Buffer.from('x'), { guildId })).rejects.not.toThrow('test-credential');
+  await expect(detect(Buffer.from('x'), { guildId })).rejects.toThrow(/qv2t1\.\[REDACTED\]/);
   expect(opener.close).toHaveBeenCalledTimes(1);
   expect(send).not.toHaveBeenCalled();
 });
@@ -120,4 +120,28 @@ it('uses fetch supported by the installed native SDK', async () => {
   const real = createPortalOpener({ qurl });
   expect(typeof real.fetch).toBe('function');
   await real.close();
+});
+
+it.each(['QURL_API_KEY', 'DETECT_TUNNEL_SLUG'])('rejects missing %s before network access', async key => {
+  require('../src/config')[key] = '';
+  await expect(detect(Buffer.from('x'), { guildId })).rejects.toThrow(/configured/);
+  expect(mockClient.listAllResources).not.toHaveBeenCalled();
+  expect(mockOpen).not.toHaveBeenCalled();
+});
+it('allows one retry after a slug lookup transport error', async () => {
+  mockClient.listAllResources.mockImplementationOnce(async function* () { yield await Promise.reject(new Error('lookup unavailable')); });
+  await expect(detect(Buffer.from('x'), { guildId })).rejects.toThrow('lookup unavailable');
+  await expect(detect(Buffer.from('x'), { guildId })).resolves.toEqual(result);
+  expect(mockClient.listAllResources).toHaveBeenCalledTimes(2);
+});
+it('accepts the configured sandbox tunnel suffix through the complete request', async () => {
+  jest.resetModules();
+  require('../src/config').QURL_ENDPOINT = 'https://api.layerv.xyz';
+  require('../src/config').DETECT_EXTRA_NON_PROD_QURL_ENDPOINT_HOSTS = ['api.layerv.xyz'];
+  detect = require('../src/connector').detectWatermark;
+  const site = 'https://detect-test.qurl.site.layerv.xyz';
+  mockClient.createQurlForResource.mockResolvedValue({ resource_id: resourceId, qurl_link: qurl, qurl_site: site, target_path: path });
+  opener.fetch.mockImplementation(async build => send(build(new URL(site + path))));
+  await expect(detect(Buffer.from('x'), { guildId })).resolves.toEqual(result);
+  expect(send).toHaveBeenCalledTimes(1);
 });

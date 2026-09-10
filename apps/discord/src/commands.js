@@ -6270,7 +6270,8 @@ async function handleQurlDetect(interaction) {
   // The bot credential mints the guild-scoped capability. No customer key
   // is sent to the detect service.
   if (!config.QURL_API_KEY) {
-    // Deployment configuration cannot be repaired through guild setup.
+    // Detect stays outside API_KEY_GATED_SUBCOMMANDS: no guild setup is needed.
+    // Keep the cooldown for operator configuration failures; user retries cannot fix them.
     logger.audit(AUDIT_EVENTS.QURL_DETECT, {
       result: 'unconfigured',
       guild_id: interaction.guildId,

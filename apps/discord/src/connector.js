@@ -554,7 +554,7 @@ function rememberDetectResourceFailure(error, { immediateBackoff = false, clearR
   // tunnel-contract signal, even if the second is a different shape, so fail
   // closed with a short process-wide backoff instead of granting one retry per
   // failure mode. Key this by slug/resource/kind if detect becomes multi-slug
-  // or high-volume.
+  // or high-volume, or mint failures become guild-specific.
   if (clearResourceCache) _detectResourceId = null;
   const now = Date.now();
   if (_detectResourcePreviousFailureAt && now - _detectResourcePreviousFailureAt > DETECT_RESOURCE_FAILURE_BACKOFF_MS) {
@@ -641,7 +641,7 @@ class DetectQurlSiteError extends Error {}
 // port) and NOT DNS-resolved — a syntactic check ONLY, unlike the link-minting
 // path's assertNotPrivateAfterResolve in qurl.js, which adds a DNS-level
 // anti-rebinding guard. The asymmetry is intentional: qurl_site here comes
-// from a TRUSTED authenticated mint (not user input) and resolve-per-call keeps
+// from a TRUSTED authenticated mint (not user input) and fresh native opening keeps
 // the knock window tight, so a DNS round-trip per detect isn't warranted. A
 // future reader should NOT assume this carries the link guard's DNS guarantee.
 function assertPublicHttpsTarget(targetUrl, expectedQurlSiteHost) {
@@ -697,13 +697,12 @@ function buildDetectTargetUrl(qurlSite, targetPath) {
   }
   const target = new URL(targetPath, parsed);
   assertPublicHttpsTarget(target.href, parsed.hostname);
-  return target.href;
+  return new URL(targetPath, parsed.origin).href;
 }
 
 // Scrub legacy access tokens and qv2t1 credentials before logging.
-// The detect access token originates in the mint RESPONSE (qurl_link fragment)
-// and is echoed back in the resolve request. Keep redaction independent of
-// SDK error formatting. qv2t1 segments use unpadded base64url and dots.
+// Native credentials originate in the mint response fragment. Keep redaction
+// independent of SDK error formatting; also scrub rejected legacy credentials.
 function redactAccessToken(message) {
   return String(message ?? '').replace(/at_[A-Za-z0-9_-]+/g, 'at_[REDACTED]')
     .replace(/qv2t1\.[A-Za-z0-9_.-]+/g, 'qv2t1.[REDACTED]');
@@ -803,6 +802,7 @@ async function resolveDetectTarget(guildId) {
     throw err;
   }
   try {
+    // TODO(upstream-contract): NHP binds this exact path; infra #1562 scopes the lookup by its guild.
     if (minted?.target_path !== targetPath) {
       throw new Error('detect mint returned a mismatched guild path');
     }
@@ -856,12 +856,12 @@ async function resolveDetectTarget(guildId) {
     logger.warn('Detect native open or link validation failed', { error: redactAccessToken(err.message) });
     throw err;
   }
-
 }
 
 /** Recover attribution through an exact, signed external guild path. */
 async function detectWatermark(imageBytes, { guildId, contentType } = {}) {
   if (!config.QURL_API_KEY) throw new Error('QURL_API_KEY is not configured');
+  // TODO(upstream-contract): Discord snowflakes are canonical 17–20 digit strings.
   if (typeof guildId !== 'string' || !/^[0-9]{17,20}$/.test(guildId)) {
     throw new Error('detectWatermark requires a valid Discord guild id');
   }
@@ -904,14 +904,14 @@ async function detectWatermark(imageBytes, { guildId, contentType } = {}) {
     };
   } catch (err) {
     const message = redactAccessToken(err?.message);
-    if (opener && typeof err?.message === 'string' && message !== err.message) {
+    if (typeof err?.message === 'string' && message !== err.message) {
       const safeError = new Error(message);
       safeError.status = err?.status;
       throw safeError;
     }
     throw err;
   } finally {
-    if (opener) await closeDetectOpener(opener);
+    await closeDetectOpener(opener);
   }
 }
 

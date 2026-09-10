@@ -89,7 +89,7 @@ setup) means required to use that feature.
 |----------|----------|-------------|
 | `DISCORD_TOKEN` | Yes | Discord bot token |
 | `DISCORD_CLIENT_ID` | Yes | Discord application client ID |
-| `QURL_API_KEY` | `/qurl detect` | Bot credential required for detect. Server keys from `/qurl setup` apply to other operations. |
+| `QURL_API_KEY` | `/qurl detect` | Required for detect; also the fallback for send operations without a server key from `/qurl setup`. |
 | `QURL_ENDPOINT` | No | qURL API base URL (defaults to production; localhost in dev) |
 | `CONNECTOR_URL` | No | qURL connector URL for file upload + serving |
 | `BASE_URL` | OAuth setup | Public `https://` origin of the bot; required to complete the OAuth `/qurl setup` flow (defaults to `http://localhost:3000`). |
@@ -159,7 +159,8 @@ The bot lists the detect resource by slug only and filters active resources
 client-side because the live API rejects combining `slug` and `status`; the SDK
 auto-paginator walks historical revoked rows for this single dark-launch slug.
 If a tunnel rotation creates more than one active resource for the slug, detect
-fails closed instead of guessing which tunnel should receive the image POST. Persistent hard failures arm a short process-wide retry backoff for
+fails closed instead of guessing which tunnel should receive the image POST.
+Persistent hard failures arm a short process-wide retry backoff for
 the single dark-launch slug so a broken tunnel does not re-walk the full slug
 history on every detect attempt. Before broad enablement, keep the detect slug's
 revoked-resource history trimmed or add upstream server-side active filtering;
