@@ -48,7 +48,7 @@ const logger = require('../src/logger');
 const { AUDIT_EVENTS } = require('../src/constants');
 
 beforeEach(() => {
-  jest.clearAllMocks();
+  logger.audit.mockClear();
   ddbMock.reset();
   mockEncryptStrict.mockReset();
   mockEncryptStrict.mockImplementation((v) => `enc:v1:IV:TAG:${Buffer.from(v || '').toString('hex')}`);
@@ -75,7 +75,11 @@ describe('guild configs', () => {
   });
 
   test('setGuildApiKey: audits when configured_by changes on an existing guild', async () => {
-    ddbMock.on(UpdateCommand).resolves({ Attributes: { configured_by: 'old-admin' } });
+    ddbMock.on(UpdateCommand).resolves({ Attributes: {
+      configured_by: 'old-admin',
+      qurl_api_key: 'enc:v1:IV:TAG:deadbeef',
+      updated_at: '2026-09-10T00:00:00Z',
+    } });
     await store.setGuildApiKey('g-1', 'plain-key', 'new-admin');
     expect(logger.audit).toHaveBeenCalledWith(AUDIT_EVENTS.QURL_SETUP_ADMIN_CHANGED, {
       guild_id: 'g-1',
