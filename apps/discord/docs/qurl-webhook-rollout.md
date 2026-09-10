@@ -100,7 +100,7 @@ finds the existing sub, sees the SSM secret matches, returns `reused`).
   task-def update is skipped, no traffic shifts. Existing bot tasks
   keep running with the previous (still-valid) secret. Root-cause in
   CloudWatch logs for the Lambda; re-run apply when fixed.
-- **Bot reads the seed sentinel or a blank configured secret.** Startup fails
+- **Bot reads the seed sentinel or a whitespace-only configured secret.** Startup fails
   before listening. Run the registrar and verify its SSM persist succeeded.
 - **Secret format drift.** The registrar and bot warn without logging secret
   material, preserve the exact returned bytes, and reuse them on restart.

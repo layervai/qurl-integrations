@@ -944,7 +944,9 @@ async function ensureWebhookSubscription(opts) {
     if (seedSentinel) {
       logger.info('qURL webhook SSM secret is the infra seed sentinel — rotating as designed', meta);
     } else {
-      logger.warn('qURL webhook initial secret has unrecognized format — preserving usable stored key', meta);
+      logger.warn(initialIsRealSecret
+        ? 'qURL webhook initial secret has unrecognized format — preserving usable stored key'
+        : 'qURL webhook initial secret is blank — rotating instead of reusing', meta);
     }
   }
 

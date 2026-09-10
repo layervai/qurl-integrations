@@ -98,6 +98,7 @@ describe('ensureWebhookSubscription — existing sub, bootstrap (no real initial
   it.each([
     ['undefined', undefined, null, null],
     ['an empty string', '', null, null],
+    ['a whitespace-only string', '   ', 'warn', '<22'],
     ['the terraform seed sentinel', 'PLACEHOLDER', 'info', '<22'],
   ])('rotates when initialSecret is %s', async (_label, initialSecret, expectedLogLevel, expectedLengthBucket) => {
     // terraform seeds /qurl-bot-discord/QURL_WEBHOOK_SECRET with a sentinel
@@ -131,7 +132,7 @@ describe('ensureWebhookSubscription — existing sub, bootstrap (no real initial
       if (expectedLogLevel) {
         const expectedMessage = expectedLogLevel === 'info'
           ? 'infra seed sentinel — rotating as designed'
-          : 'initial secret has unrecognized format';
+          : 'initial secret is blank — rotating instead of reusing';
         const spy = expectedLogLevel === 'info' ? infoSpy : warnSpy;
         const logLine = spy.mock.calls
           .map(([message]) => message)
