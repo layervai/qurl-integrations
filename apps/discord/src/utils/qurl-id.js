@@ -10,7 +10,10 @@ const MAX_QURL_ID_LENGTH = 128;
 // bearer-token prefixes, or other arbitrary stored data to the endpoint.
 const CLEANUP_QURL_ID_PATTERN = /^q_[A-Za-z0-9_]+$/;
 
-function qurlIdForCleanup(value) {
+// The single qurl_id classifier: mint validation, persistence, fresh-mint
+// cleanup, and stored-row revoke all use it, so "identified" means the same
+// thing everywhere. Returns the trimmed identity, or null when there is none.
+function normalizeQurlId(value) {
   if (typeof value !== 'string') return null;
   const normalized = value.trim();
   if (
@@ -21,15 +24,7 @@ function qurlIdForCleanup(value) {
   return normalized;
 }
 
-// Persistence rejects whitespace/non-string/unsafe values without claiming the
-// tolerant legacy cleanup grammar is the current upstream canonical format.
-function hasPersistableQurlIdShape(value) {
-  const normalized = qurlIdForCleanup(value);
-  return normalized !== null && normalized === value;
-}
-
 module.exports = {
   MAX_QURL_ID_LENGTH,
-  qurlIdForCleanup,
-  hasPersistableQurlIdShape,
+  normalizeQurlId,
 };

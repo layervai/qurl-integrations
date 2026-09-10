@@ -3,7 +3,7 @@ const { QURLClient } = require('@layervai/qurl');
 const config = require('./config');
 const logger = require('./logger');
 const { validateResourceId, resourceIdLogRef } = require('./utils/resource-id');
-const { qurlIdForCleanup, hasPersistableQurlIdShape } = require('./utils/qurl-id');
+const { normalizeQurlId } = require('./utils/qurl-id');
 
 // Reuse the security-critical, syntactic private/loopback/link-local IP guard
 // from qurl.js rather than duplicating ~50 lines of IP-literal parsing that
@@ -33,6 +33,9 @@ const REVOKE_LINKS_TIMEOUT_MS = 65_000;
 // The 65s deadline applies per chunk: current groups normally need one call,
 // while historical over-cap groups trade bounded additional time for cleanup.
 const REVOKE_LINKS_MAX_IDS = 10;
+// Not checked at request build time: MAX_QURL_ID_LENGTH and validateResourceId
+// bound every accepted input, so a full chunk always fits; a connector test
+// pins that coupling.
 const REVOKE_REQUEST_MAX_BYTES = 4 * 1024;
 
 // Truncate the connector's MD5 of an uploaded file before logging. The full
@@ -110,12 +113,9 @@ function partitionPartialMintLinks(links) {
   const partialQurlIds = [];
   let partialUnidentifiedQurlCount = 0;
   for (const link of links) {
-    const rawQurlId = link && typeof link === 'object' ? link.qurl_id : undefined;
-    const cleanupQurlId = qurlIdForCleanup(rawQurlId);
-    if (cleanupQurlId !== null) partialQurlIds.push(cleanupQurlId);
-    // A present-but-noncanonical identity can still be useful for a bounded
-    // best-effort revoke, but it is not durable proof that the child is known.
-    if (!hasPersistableQurlIdShape(rawQurlId)) partialUnidentifiedQurlCount += 1;
+    const qurlId = normalizeQurlId(link && typeof link === 'object' ? link.qurl_id : undefined);
+    if (qurlId === null) partialUnidentifiedQurlCount += 1;
+    else partialQurlIds.push(qurlId);
   }
   return {
     partialLinkCount: links.length,
@@ -577,7 +577,7 @@ async function revokeMintedLinks(resourceId, qurlIds, apiKey) {
   if (!Array.isArray(qurlIds)) {
     throw new Error('Invalid connector revoke token list');
   }
-  const normalizedIds = qurlIds.map(qurlIdForCleanup);
+  const normalizedIds = qurlIds.map(normalizeQurlId);
   if (normalizedIds.some(id => id === null)) {
     throw new Error('Invalid connector revoke token identity');
   }
@@ -586,6 +586,8 @@ async function revokeMintedLinks(resourceId, qurlIds, apiKey) {
   const ids = [...new Set(normalizedIds)];
   if (ids.length === 0) return true;
 
+  // Sequential by design: the connector's process-wide revoke admission bound
+  // equals its per-request cap, so parallel chunks would self-starve (infra#1556).
   for (let offset = 0; offset < ids.length; offset += REVOKE_LINKS_MAX_IDS) {
     const batchIds = ids.slice(offset, offset + REVOKE_LINKS_MAX_IDS);
     const response = await fetch(`${config.CONNECTOR_URL}/api/revoke_links`, {

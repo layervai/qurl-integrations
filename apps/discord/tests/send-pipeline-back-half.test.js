@@ -839,29 +839,25 @@ describe('revokeAllLinks', () => {
     expect(mockDb.markSendRevoked).not.toHaveBeenCalled();
   });
 
-  it('deletes an unidentified legacy parent but keeps the send unfinalized', async () => {
-    mockDeleteLink.mockResolvedValueOnce(undefined);
+  it('finalizes a legacy send whose rows predate stored token identity, with one warn rollup', async () => {
+    mockDeleteLink.mockResolvedValue(undefined);
     mockDb.getSendItems.mockResolvedValueOnce([
       { resource_id: 'res-1', recipient_discord_id: 'user-1' },
+      { resource_id: 'res-2', recipient_discord_id: 'user-2' },
+      { resource_id: 'res-2', recipient_discord_id: 'user-3' },
     ]);
 
     const result = await revokeAllLinks('send-1', 'sender-1', 'apikey');
 
-    expect(mockRevokeMintedLinks).not.toHaveBeenCalled();
-    expect(mockDeleteLink).toHaveBeenCalledTimes(1);
-    expect(result.success).toBe(0);
-    expect(result.total).toBe(1);
-    expect(mockDb.markSendRevoked).not.toHaveBeenCalled();
-    expect(logger.error).toHaveBeenCalledWith(
-      'Cannot fully revoke resource with missing or malformed stored token identity',
-      expect.objectContaining({
-        unidentifiedTokenCount: 1,
-        connectorRevokeAttempted: false,
-        connectorRevokeConfirmed: null,
-        confirmedTokenCount: 0,
-        resourceRevokeConfirmed: true,
-      }),
+    expect(mockDeleteLink).toHaveBeenCalledTimes(2);
+    expect(result).toMatchObject({ success: 3, total: 3, failureUserIds: [] });
+    expect(mockDb.markSendRevoked).toHaveBeenCalledWith('send-1', 'sender-1');
+    expect(logger.warn).toHaveBeenCalledTimes(1);
+    expect(logger.warn).toHaveBeenCalledWith(
+      'Revoking send rows without stored token identity via parent resource delete',
+      { sendId: 'send-1', row_count: 3, resource_count: 2 },
     );
+    expect(logger.error).not.toHaveBeenCalled();
   });
 
   it('revokes valid children and the parent but stays unfinalized on a malformed stored token id', async () => {
@@ -878,7 +874,7 @@ describe('revokeAllLinks', () => {
     expect(result.total).toBe(1);
     expect(mockDb.markSendRevoked).not.toHaveBeenCalled();
     expect(logger.error).toHaveBeenCalledWith(
-      'Cannot fully revoke resource with missing or malformed stored token identity',
+      'Cannot fully revoke resource with malformed stored token identity',
       expect.objectContaining({ sendId: 'send-1', unidentifiedTokenCount: 1 }),
     );
   });
@@ -896,7 +892,7 @@ describe('revokeAllLinks', () => {
     expect(result.success).toBe(0);
     expect(mockDb.markSendRevoked).not.toHaveBeenCalled();
     expect(logger.error).toHaveBeenCalledWith(
-      'Cannot fully revoke resource with missing or malformed stored token identity',
+      'Cannot fully revoke resource with malformed stored token identity',
       expect.objectContaining({
         connectorRevokeConfirmed: false,
         resourceRevokeConfirmed: false,
@@ -904,26 +900,30 @@ describe('revokeAllLinks', () => {
     );
   });
 
-  it.each([null, undefined, ''])('treats sparse token value %p as unidentified', async (qurlId) => {
+  it.each([null, undefined, ''])('treats sparse token value %p as a parent-minted legacy row', async (qurlId) => {
     mockDb.getSendItems.mockResolvedValueOnce([
       { resource_id: 'res-1', recipient_discord_id: 'user-1', qurl_id: qurlId },
     ]);
 
     const result = await revokeAllLinks('send-1', 'sender-1', 'apikey');
 
-    expect(mockRevokeMintedLinks).not.toHaveBeenCalled();
+    expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-1', [], 'apikey');
     expect(mockDeleteLink).toHaveBeenCalledWith('res-1', 'apikey');
-    expect(result.success).toBe(0);
-    expect(mockDb.markSendRevoked).not.toHaveBeenCalled();
-    expect(logger.error).toHaveBeenCalledWith(
-      'Cannot fully revoke resource with missing or malformed stored token identity',
-      expect.objectContaining({
-        unidentifiedTokenCount: 1,
-        connectorRevokeAttempted: false,
-        connectorRevokeConfirmed: null,
-        resourceRevokeConfirmed: true,
-      }),
-    );
+    expect(result.success).toBe(1);
+    expect(mockDb.markSendRevoked).toHaveBeenCalledWith('send-1', 'sender-1');
+  });
+
+  it('normalizes a whitespace-padded stored token id and finalizes the send', async () => {
+    mockDb.getSendItems.mockResolvedValueOnce([
+      { resource_id: 'res-1', recipient_discord_id: 'user-1', qurl_id: ' q_padded ' },
+    ]);
+
+    const result = await revokeAllLinks('send-1', 'sender-1', 'apikey');
+
+    expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-1', ['q_padded'], 'apikey');
+    expect(mockDeleteLink).toHaveBeenCalledWith('res-1', 'apikey');
+    expect(result.success).toBe(1);
+    expect(mockDb.markSendRevoked).toHaveBeenCalledWith('send-1', 'sender-1');
   });
 
   it('treats a whitespace-only stored token as malformed, not legacy-absent', async () => {
@@ -939,7 +939,7 @@ describe('revokeAllLinks', () => {
     expect(result.success).toBe(0);
     expect(mockDb.markSendRevoked).not.toHaveBeenCalled();
     expect(logger.error).toHaveBeenCalledWith(
-      'Cannot fully revoke resource with missing or malformed stored token identity',
+      'Cannot fully revoke resource with malformed stored token identity',
       expect.objectContaining({ unidentifiedTokenCount: 1, confirmedTokenCount: 1 }),
     );
   });
@@ -956,7 +956,7 @@ describe('revokeAllLinks', () => {
     expect(result.success).toBe(0);
     expect(mockDb.markSendRevoked).not.toHaveBeenCalled();
     expect(logger.error).toHaveBeenCalledWith(
-      'Cannot fully revoke resource with missing or malformed stored token identity',
+      'Cannot fully revoke resource with malformed stored token identity',
       expect.objectContaining({
         unidentifiedTokenCount: 2,
         connectorRevokeAttempted: false,
@@ -984,7 +984,7 @@ describe('revokeAllLinks', () => {
     expect(result.success).toBe(0);
     expect(mockDb.markSendRevoked).not.toHaveBeenCalled();
     expect(logger.error).toHaveBeenCalledWith(
-      'Cannot fully revoke resource with missing or malformed stored token identity',
+      'Cannot fully revoke resource with malformed stored token identity',
       expect.objectContaining({ unidentifiedTokenCount: 1, confirmedTokenCount: 1 }),
     );
   });
@@ -2268,6 +2268,28 @@ describe('handleAddRecipients — file path failure modes', () => {
     );
 
     expect(result.msg).toMatch(/pool exhausted/i);
+  });
+
+  it('reports a location underdelivery from the outer catch without persisting or auditing', async () => {
+    mockDb.getSendConfig.mockResolvedValueOnce({
+      connector_resource_id: null, actual_url: 'https://maps.example.com/x',
+      location_name: 'Eiffel Tower', expires_in: '30m',
+    });
+    mockUploadJsonToConnector.mockResolvedValueOnce({ resource_id: 'res-loc-short' });
+    mockMintLinks.mockResolvedValueOnce([{ qurl_id: 'q_loc_short', qurl_link: 'https://q.test/loc' }]);
+
+    const result = await handleAddRecipients(
+      'send-1', makeUsersCollection([
+        { id: 'u1', username: 'Alice', bot: false },
+        { id: 'u2', username: 'Bob', bot: false },
+      ]),
+      makeInteraction(), 'apikey',
+    );
+
+    expect(result.msg).toBe('Only 1 of 2 location links created. Try again.');
+    expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-loc-short', ['q_loc_short'], 'apikey');
+    expect(mockDb.recordQURLSendBatch).not.toHaveBeenCalled();
+    expect(logger.audit).not.toHaveBeenCalledWith('qurl_send_create_link_failure', expect.anything());
   });
 });
 
@@ -3777,11 +3799,52 @@ describe('mintLinksInBatches', () => {
     expect(mockDeleteLink).toHaveBeenCalledWith('res-1', 'apikey');
   });
 
-  it('rejects a non-canonical qurl_id while using its trimmed identity for cleanup', async () => {
+  it('persists the trimmed identity of a whitespace-padded qurl_id instead of failing the send', async () => {
     mockMintLinks.mockResolvedValueOnce([{
-      qurl_link: 'https://q.test/noncanonical',
-      qurl_id: ' q_noncanonical ',
+      qurl_link: 'https://q.test/padded',
+      qurl_id: ' q_padded ',
     }]);
+
+    const result = await mintLinksInBatches({
+      initialResourceId: 'res-1',
+      reuploadFn: jest.fn(),
+      expiresAt: new Date().toISOString(),
+      recipientCount: 1,
+      apiKey: 'apikey',
+    });
+
+    expect(result).toEqual([
+      { qurl_link: 'https://q.test/padded', qurl_id: 'q_padded', resourceId: 'res-1' },
+    ]);
+    expect(mockRevokeMintedLinks).not.toHaveBeenCalled();
+    expect(mockDeleteLink).not.toHaveBeenCalled();
+  });
+
+  it('throws a typed shortfall after revoking an under-delivered batch', async () => {
+    mockMintLinks.mockResolvedValueOnce([{ qurl_link: 'https://q.test/short', qurl_id: 'q_short' }]);
+
+    await expect(mintLinksInBatches({
+      initialResourceId: 'res-1',
+      reuploadFn: jest.fn(),
+      expiresAt: new Date().toISOString(),
+      recipientCount: 2,
+      apiKey: 'apikey',
+      cleanupContext: { sendId: 'send-short', operationLabel: 'test send' },
+    })).rejects.toMatchObject({ name: 'MintShortfallError', requested: 2, delivered: 1 });
+
+    expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-1', ['q_short'], 'apikey');
+    expect(mockDeleteLink).toHaveBeenCalledWith('res-1', 'apikey');
+    expect(logger.error).toHaveBeenCalledWith(
+      'Connector minted fewer links than requested; cleaning up minted resources',
+      expect.objectContaining({ sendId: 'send-short', reason: 'mint_underdelivery' }),
+    );
+  });
+
+  it('propagates the original mint error when compensation itself throws', async () => {
+    const originalError = new Error('mint failed');
+    mockMintLinks.mockRejectedValueOnce(originalError);
+    // The reconciliation ledger log is compensation's first step.
+    logger.error.mockImplementationOnce(() => { throw new Error('log sink down'); });
 
     await expect(mintLinksInBatches({
       initialResourceId: 'res-1',
@@ -3789,10 +3852,13 @@ describe('mintLinksInBatches', () => {
       expiresAt: new Date().toISOString(),
       recipientCount: 1,
       apiKey: 'apikey',
-    })).rejects.toThrow('missing a valid qurl_id');
+      cleanupContext: { sendId: 'send-cleanup-throw' },
+    })).rejects.toBe(originalError);
 
-    expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-1', ['q_noncanonical'], 'apikey');
-    expect(mockDeleteLink).toHaveBeenCalledTimes(1);
+    expect(logger.error).toHaveBeenCalledWith(
+      'Mint batch compensation failed',
+      expect.objectContaining({ sendId: 'send-cleanup-throw', cleanup_error_name: 'Error' }),
+    );
   });
 
   it('rejects a minted child without a deliverable qurl_link and revokes its known identity', async () => {
