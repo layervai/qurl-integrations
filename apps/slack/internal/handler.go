@@ -1957,7 +1957,8 @@ var _ workspaceStateBeforeIdentityDeleter = (*auth.DDBProvider)(nil)
 // uninstallWorkspaceReply performs the disconnect and RETURNS the reply text
 // rather than writing it, so the confirmation button and any future surface
 // converge on one teardown path instead of forking the revoke/delete/purge
-// ordering. The caller owns delivery (response_url) and the context budget.
+// ordering. The bool reports whether local purge was scheduled.
+// The caller owns delivery (response_url) and the context budget.
 func (h *Handler) uninstallWorkspaceReply(ctx context.Context, teamID, userID string, purgeWorkspaceIDs []string) (string, bool) {
 	// The trailing sentence is the honest boundary of what this command does. It
 	// clears qURL's per-workspace data but deliberately leaves the Slack app —

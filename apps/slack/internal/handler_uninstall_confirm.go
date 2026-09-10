@@ -56,7 +56,8 @@ func uninstallConfirmBlocks(command string, purgeWorkspaceIDs []string) []any {
 // carried. The value round-trips through Slack (which signs the interaction), so
 // it cannot be forged, but it is still echoed input: constrain it to the ids
 // this very interaction is authenticated for, so a replayed card can never point
-// the purge at a partition outside the clicking workspace. Falls back to the
+// the purge beyond the team and (for Grid) enterprise authenticated by this
+// interaction. Falls back to the
 // payload's own team id when nothing survives validation.
 //
 // It also returns what it dropped. Dropping is the fail-safe direction
@@ -102,9 +103,9 @@ func uninstallPurgeIDsForClick(value, teamID, enterpriseID string) (purge, dropp
 func (h *Handler) handleUninstallConfirmClick(w http.ResponseWriter, payload *interactionPayload, action interactionAction) {
 	log := slog.With(
 		"command", "uninstall_confirm",
-		"team_id", payload.Team.ID,
-		"enterprise_id", payload.Enterprise.ID,
-		"user_id", payload.User.ID,
+		"team_id", sanitizeLogValue(payload.Team.ID),
+		"enterprise_id", sanitizeLogValue(payload.Enterprise.ID),
+		"user_id", sanitizeLogValue(payload.User.ID),
 	)
 	responseURL := payload.ResponseURL
 	teamID, userID := payload.Team.ID, payload.User.ID
@@ -125,7 +126,7 @@ func (h *Handler) handleUninstallConfirmClick(w http.ResponseWriter, payload *in
 			// Slack team/enterprise identifiers, not secrets, and are what an
 			// operator needs to finish the job.
 			log.Warn("uninstall confirm: dropped purge partitions not authenticated by this click",
-				"dropped_workspace_ids", droppedIDs,
+				"dropped_workspace_ids", sanitizeLogValue(strings.Join(droppedIDs, uninstallPurgeIDSeparator)),
 				"cleanup_action_required", true,
 			)
 			// The admin is the one who would otherwise be surprised later, so say
