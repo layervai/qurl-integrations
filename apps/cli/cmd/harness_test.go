@@ -34,10 +34,6 @@ func rootCmd(version string) *cobra.Command {
 // the pinned 51-character wire format (prefix + 43 URL-safe base-64 chars).
 const testAPIKey = "lv_test_abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG"
 
-// connectorStateTestDir creates a state namespace through the same
-// owner-only setup path that a real CLI invocation uses. Windows temp
-// directories inherit a broad ACL, so passing t.TempDir() itself would test
-// the intentional fail-closed path instead of a normal installation.
 // stateSocketPath resolves the daemon socket the way a CLI run under the
 // harness's injected environment does: no runtime directory is pinned.
 func stateSocketPath(t *testing.T, stateDir string) string {
@@ -49,6 +45,10 @@ func stateSocketPath(t *testing.T, stateDir string) string {
 	return path
 }
 
+// connectorStateTestDir creates a state namespace through the same
+// owner-only setup path that a real CLI invocation uses. Windows temp
+// directories inherit a broad ACL, so passing t.TempDir() itself would test
+// the intentional fail-closed path instead of a normal installation.
 func connectorStateTestDir(t *testing.T) string {
 	t.Helper()
 	dir := filepath.Join(t.TempDir(), "connector-state")

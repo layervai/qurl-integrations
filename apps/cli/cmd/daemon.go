@@ -272,7 +272,7 @@ commands then reload this daemon and never install a background job.`,
 		},
 	}
 	run.Flags().StringVar(&stateDir, "state-dir", "", "qURL share daemon state directory")
-	run.Flags().StringVar(&runtimeDir, "runtime-dir", "", "directory that holds the qURL share daemon control socket")
+	run.Flags().StringVar(&runtimeDir, "runtime-dir", "", "dedicated per-namespace directory for the qURL share daemon control socket (enforced mode 0700)")
 	run.Flags().StringVar(&jobVersion, "job-version", "", "qURL share daemon job definition version")
 	run.Flags().StringVar(&headlessConfig, "headless-config", "", "read-only version 2 YAML for one headless share")
 	run.Flags().StringVar(&enrollmentTokenFile, "enrollment-token-file", "", "one-time enrollment credential file for first headless bootstrap")
