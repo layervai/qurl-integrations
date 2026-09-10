@@ -902,14 +902,18 @@ func (c *Client) GetResource(ctx context.Context, resourceID string) (*Resource,
 	if err != nil {
 		return nil, fmt.Errorf("build request: %w", err)
 	}
-	var out Resource
+	// TODO(upstream-contract): qurl-service ResourceDetailResponse nests the
+	// resource under data.resource (beside the qurls preview).
+	var out struct {
+		Resource Resource `json:"resource"`
+	}
 	if _, err := c.do(req, &out, "GET /v1/resources/:id"); err != nil {
 		return nil, err
 	}
-	if out.ResourceID != resourceID {
+	if out.Resource.ResourceID != resourceID {
 		return nil, errors.New("get resource response identity does not match request")
 	}
-	return &out, nil
+	return &out.Resource, nil
 }
 
 // Identity is the account identity behind the client credential (GET /v1/me).

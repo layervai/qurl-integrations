@@ -1536,6 +1536,28 @@ func TestDeleteResource(t *testing.T) {
 	}
 }
 
+func TestGetResourceDecodesDetailEnvelope(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/resources/r_abc123test" {
+			t.Fatalf("request = %s %s, want GET /v1/resources/r_abc123test", r.Method, r.URL.Path)
+		}
+		// Mirrors qurl-service ResourceDetailResponse: resource beside a qurls preview.
+		_, _ = w.Write([]byte(`{"data":{"resource":{"resource_id":"r_abc123test","type":"tunnel","status":"active"},"qurls":[]}}`))
+	}))
+	defer srv.Close()
+
+	c := testClient(srv.URL, "test-key")
+	got, err := c.GetResource(context.Background(), "r_abc123test")
+	if err != nil {
+		t.Fatalf("GetResource: %v", err)
+	}
+	if got.ResourceID != "r_abc123test" || got.Type != ResourceTypeTunnel {
+		t.Fatalf("GetResource = %+v, want tunnel r_abc123test", got)
+	}
+}
+
 func TestDeleteResourceReturnsAPIErrorOnFailure(t *testing.T) {
 	t.Parallel()
 

@@ -113,12 +113,12 @@ func newRevokeHandlerWithDeleteStatus(t *testing.T, status int, body string) *Ha
 func addRevokeResourceRead(t *testing.T, ts *adminTestServers, resourceID, resourceType string) {
 	t.Helper()
 	ts.addCustomer(http.MethodGet, "/v1/resources/"+resourceID, func(w http.ResponseWriter, _ *http.Request) {
-		respondQURLEnvelope(t, w, map[string]any{
+		respondQURLEnvelope(t, w, map[string]any{"resource": map[string]any{
 			"resource_id": resourceID,
 			"type":        resourceType,
 			"slug":        testRevokeAlias,
 			"status":      client.StatusActive,
-		})
+		}})
 	})
 }
 
