@@ -74,10 +74,13 @@ replaces the whole overlay and triggers one reconcile, which pushes the full
 desired route set to the live session; the session compares each route's
 definition, headers included, and re-registers only the routes that changed,
 under a fresh proxy name, with no new knock and no effect on their siblings —
-the same per-route isolation `restart` has. In `per-share` mode the overlay is
-handed to every group. A route carries at most 16 headers and 1,024 aggregate
+the same per-route isolation `restart` has. In `per-share` mode each group
+receives only its own overlay entry. An overlay has at most 2,000 routes.
+A route carries at most 16 headers and 1,024 aggregate
 name-and-value bytes, and a non-empty set requires the encrypted tunnel
-transport the daemon always uses.
+transport. Re-registration may interrupt in-flight requests. During
+session rotation the retiring session retains old headers until replacement
+promotion and drain; a header update is not immediate revocation.
 
 ## Modes
 

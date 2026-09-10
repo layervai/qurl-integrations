@@ -219,6 +219,8 @@ copy individual bindings or pending requests into the new state.
 
 ### Supervised installs
 
+These supervised-install options require qURL CLI 2.5.0 or newer.
+
 A program that runs the daemon itself (see
 [External supervision](#external-supervision)) never hands qurl an account API
 key. From its own signed-in session it mints a one-time enrollment token for
@@ -279,7 +281,6 @@ command-line flag > environment variable > profile/config file > built-in defaul
 | Connector ID | `--id` | `QURL_CONNECTOR_ID` | `connector_id` | Stable opaque ID for local `publish` |
 | Session group mode | `--share-group-mode` (`daemon run`) | `QURL_SHARE_GROUP_MODE` | `share_group_mode` | `single` — see [Session group modes](#session-group-modes) |
 | Daemon supervision | `--supervision` | `QURL_DAEMON_SUPERVISION` | `daemon_supervision` | `native` — see [External supervision](#external-supervision) |
-| Daemon socket directory | — | `QURL_CONNECTOR_RUNTIME_DIR` | — | The state directory, or a per-user directory under the temp directory when that socket path is too long — see [External supervision](#external-supervision) |
 
 Config files are YAML. The default file is `~/.config/qurl/config.yaml`; a
 named profile lives at `~/.config/qurl/profiles/<name>.yaml` and is
@@ -349,6 +350,11 @@ or require that file.
 
 #### External supervision
 
+The supervisor lifecycle below requires qURL CLI 2.5.0 or newer. Bootstrap
+a fresh, dedicated state directory with the token-file login flow before
+starting the daemon; a directory already used by native supervision cannot
+be adopted in place.
+
 When another program — a desktop app, a service manager — owns the daemon
 process instead of qurl's per-user background job, start the daemon with
 `--supervision external` and run every lifecycle command against that state
@@ -392,7 +398,8 @@ then follows one lifecycle:
    per-share diagnostics `qurl inspect` shows; a route is serving only when
    its `resources` entry says so. `pid` is the daemon's
    own process ID, so a daemon the supervisor found running can be stopped
-   like one it spawned.
+   like one it spawned. Older daemons can report `pid: 0`; treat zero as
+   absent and never pass it to `kill`.
 4. Stop the daemon with SIGTERM (or SIGINT). It stops its Connector session
    and exits with code 130. Stopping the daemon is a local act: it changes no
    sharing state, so the shares resume on the next start. `qurl stop <CRID>`
@@ -402,15 +409,15 @@ then follows one lifecycle:
 
 The control socket is `<state dir>/daemon.sock` when that path fits the
 platform's socket-address limit, otherwise an owner-only per-user directory
-below the temp directory. `QURL_CONNECTOR_RUNTIME_DIR` pins it: set to a
+below `/tmp`. The environment-only `QURL_CONNECTOR_RUNTIME_DIR` pins it: set to a
 short absolute path (a relative one, or one whose socket path exceeds the
 limit, is rejected), the daemon and every `qurl` command resolve exactly
 `<dir>/daemon.sock`, which is what a host whose state path is long — an app
-container, for example — needs. The directory must be
+container, for example — needs. Use a separate dedicated directory for each state namespace. It must be
 owner-only (mode `0700`); the daemon secures it before it listens. Set the
 variable identically for the daemon and for every command that addresses the
 same state directory. Windows named pipes have no length limit and ignore it.
-The socket speaks HTTP:
+The socket speaks HTTP. When it is in the state directory:
 
 ```bash
 curl --unix-socket "$STATE_DIR/daemon.sock" http://localhost/status
@@ -419,20 +426,23 @@ curl --unix-socket "$STATE_DIR/daemon.sock" -X POST http://localhost/reload
 
 `PUT /overlay` attaches request headers to routes at runtime. The body is
 `{"route_request_headers": {"<connector_id>": {"Header-Name": "value"}}}`,
-keyed by each share's Connector ID — the `--id` given to `qurl publish` — and
-the daemon adds those headers to every request it forwards to that share's
+keyed by each share's Connector ID — a supervisor should publish with an
+explicit `--id` so it knows this key. The daemon adds those headers to every request it forwards to that share's
 local origin, for example a process-random token the origin requires before
 it serves anything. Each request replaces the whole overlay: a route the body
 does not name loses its headers, and `{"route_request_headers": {}}` clears
 it. A valid body is answered with 204. A body over 64 KiB, with unknown
-fields, with more than 16 headers or 1,024 name-and-value bytes for one
-route, or with an invalid, reserved, or duplicated header name or an invalid
-value is answered with 400 and a fixed message that never echoes a header.
+fields, with more than 2,000 routes, with more than 16 headers or 1,024 name-and-value bytes for one
+route, or with an invalid, reserved, or case-variant duplicate header name
+or an invalid value is answered with 400 and a fixed message that never echoes a header.
 The overlay lives in process memory only: it is never written to disk, never
 reported by `/status` or `qurl inspect`, never logged, and a restarted daemon
 starts with an empty one — which is why step 2 pushes it before the first
 reconcile. Changing a route's headers re-registers only that route on the
-live session; its siblings are untouched. See
+live session; its siblings are untouched. Re-registration may interrupt
+in-flight requests. During session rotation the retiring session can retain
+old headers until replacement promotion and drain, so an update is not
+immediate revocation. See
 [docs/session-groups.md](../../docs/session-groups.md#runtime-request-headers).
 
 ### qurl publish
@@ -646,7 +656,7 @@ session cannot keep serving it; the other shares are not disturbed. `status`
 and `inspect` use the same authoritative view. Both work for remote resources
 and include the local target only when this machine owns one.
 
-`restart` can also move a share to a new loopback origin:
+In qURL CLI 2.5.0 or newer, `restart` can also move a share to a new loopback origin:
 
 ```bash
 qurl restart <CRID> --target http://127.0.0.1:4000
