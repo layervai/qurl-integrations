@@ -101,6 +101,10 @@ func newRevokeHandlerWithDeleteStatus(t *testing.T, status int, body string) *Ha
 	t.Helper()
 	ts := newAdminTestServers(t)
 	addRevokeResourceRead(t, ts, testRevokeResourceID, client.ResourceTypeURL)
+	ts.addCustomer(http.MethodPut, "/v1/resources/"+testRevokeResourceID+"/sharing", func(w http.ResponseWriter, _ *http.Request) {
+		t.Error("URL resource revoke must not touch tunnel sharing")
+		w.WriteHeader(http.StatusInternalServerError)
+	})
 	ts.addCustomer(http.MethodDelete, "/v1/resources/"+testRevokeResourceID, func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(status)
 		if body != "" {
@@ -572,6 +576,32 @@ func TestRevokeResource_PurgesChannelBindings(t *testing.T) {
 	}
 	if _, ok := cOther[testRevokeResourceID]; ok {
 		t.Errorf("revoked id still in %s allow-set — team-wide sweep missed it: %v", otherChannelID, cOther)
+	}
+}
+
+// TestRevokeResource_PurgesOnReadGone fences the read-404 branch: when the
+// pre-delete GET already reports the resource gone, the orphaned alias is swept
+// and no DELETE is issued.
+func TestRevokeResource_PurgesOnReadGone(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	ts.seedPolicyAliasBindings(t, testAdminTeamID, "C_test", map[string]string{testRevokeAlias: testRevokeResourceID})
+	ts.addCustomer(http.MethodGet, "/v1/resources/"+testRevokeResourceID, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"error":{"title":"Not Found","detail":"resource gone","code":"not_found","status":404}}`))
+	})
+	ts.addCustomer(http.MethodDelete, "/v1/resources/"+testRevokeResourceID, func(w http.ResponseWriter, _ *http.Request) {
+		t.Error("DELETE issued after the read reported the resource gone")
+		w.WriteHeader(http.StatusNoContent)
+	})
+	h := newAdminTestHandler(t, ts)
+
+	msg := h.revokeResource(context.Background(), slog.Default(), testAdminTeamID, testAdminUserID, testRevokeResourceID, testRevokeAlias)
+	if !strings.Contains(msg, "already revoked") {
+		t.Fatalf("revoke message = %q, want the already-revoked surface", msg)
+	}
+	if _, found, err := h.cfg.AdminStore.LookupChannelAlias(context.Background(), testAdminTeamID, "C_test", testRevokeAlias); err != nil || found {
+		t.Errorf("alias %q still bound after the read reported the resource gone (found=%v, err=%v)", testRevokeAlias, found, err)
 	}
 }
 
