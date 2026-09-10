@@ -6,8 +6,8 @@
 // from the last sequence within its ~60 s resume buffer window.
 //
 // Factory `createGatewaySessionStore` returns a store instance with
-// its own mirror + throttle state, so tests run isolated and a
-// future multi-shard caller can construct one per shard.
+// its own mirror + throttle state, so tests run isolated. Production is
+// limited to shard 0:1 until the process IDENTIFY budget becomes shard-aware.
 //
 // ── Load-bearing contracts ──
 //
@@ -108,6 +108,9 @@ function createGatewaySessionStore({
   const inFlightWrites = new Set();
 
   async function persistRow(info) {
+    if (info.shardId !== configuredShard.shardId || info.shardCount !== configuredShard.shardCount) {
+      throw new Error('gateway session shard geometry does not match configured shard');
+    }
     // Wall-clock epoch ms for `updated_at`. Matches the design
     // doc's table schema. DDB Number type takes JS Number directly;
     // no marshaling concerns up to 2^53.

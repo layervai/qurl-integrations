@@ -29,6 +29,9 @@ function makeFakeLogger() {
   };
 }
 
+// Wiring tripwire only; executable ordering is covered by the helper suites.
+// A behavior-level index test is deferred until index boot can be isolated
+// without extracting another controller solely to satisfy this assertion.
 describe('index gateway-fatal composition contract', () => {
   const indexSource = fs.readFileSync(path.join(__dirname, '../src/index.js'), 'utf8');
 

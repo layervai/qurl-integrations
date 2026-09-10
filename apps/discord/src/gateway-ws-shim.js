@@ -147,7 +147,7 @@ const VERIFIED_DJS_WS_VERSION = '1.2.3';
 // is the library's synthetic 4200 resuming code. The watchdog must stand down
 // only when the library will really start its own recovery.
 //
-// TODO(upstream-contract): When VERIFIED_DJS_WS_MAJOR_MINOR changes, re-check
+// TODO(upstream-contract): When VERIFIED_DJS_WS_VERSION changes, re-check
 // WebSocketShard.onClose for both this terminal-code set and the 500 ms
 // destroy({ recover }) reconnect delay before updating the verified marker.
 const TERMINAL_GATEWAY_CLOSE_CODES = new Set([

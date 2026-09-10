@@ -211,6 +211,24 @@ describe('retrieveSessionInfo — in-memory mirror contract', () => {
   });
 });
 
+describe('persisted session geometry', () => {
+  it.each([
+    { shardId: undefined, shardCount: 1 },
+    { shardId: 0, shardCount: undefined },
+    { shardId: 1, shardCount: 2 },
+    { shardId: '0', shardCount: 1 },
+  ])('does not write unsupported geometry %p', async (geometry) => {
+    const { store, ddbMock, logger } = makeStore();
+    store.updateSessionInfo('0:1', { ...sessionInfo(), ...geometry });
+    await new Promise(resolve => setImmediate(resolve));
+    expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
+    expect(logger.warn).toHaveBeenCalledWith('gateway-session-store: write failed', {
+      error: 'gateway session shard geometry does not match configured shard',
+    });
+    store.stop();
+  });
+});
+
 describe('updateSessionInfo — null-clear contract', () => {
   it('clears mirror, cancels pending flush, and issues DDB delete', async () => {
     let now = 1_000_000;
@@ -438,8 +456,8 @@ describe('flushFinal', () => {
       logger,
     });
 
-    store.updateSessionInfo('0:1', { sessionId: 'sess-A', resumeURL: 'wss://r/a', sequence: 1 });
-    store.updateSessionInfo('0:1', { sessionId: 'sess-B', resumeURL: 'wss://r/b', sequence: 2 });
+    store.updateSessionInfo('0:1', sessionInfo({ sessionId: 'sess-A', resumeURL: 'wss://r/a', sequence: 1 }));
+    store.updateSessionInfo('0:1', sessionInfo({ sessionId: 'sess-B', resumeURL: 'wss://r/b', sequence: 2 }));
     expect(secondWriteFired).toBe(true);
 
     const flushPromise = store.flushFinal();
