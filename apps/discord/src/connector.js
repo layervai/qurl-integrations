@@ -34,6 +34,7 @@ const REVOKE_LINKS_TIMEOUT_MS = 65_000;
 // The 65s deadline applies per chunk: current groups normally need one call,
 // while historical over-cap groups trade bounded additional time for cleanup.
 const REVOKE_LINKS_MAX_IDS = 10;
+// Derived from the ID/count limits; connector-coverage.test.js pins the largest body.
 const REVOKE_REQUEST_MAX_BYTES = 4 * 1024;
 
 // Truncate the connector's MD5 of an uploaded file before logging. The full
@@ -501,6 +502,8 @@ async function mintLinks(resourceId, {
       throw new Error('Private mint requires an explicit expiresIn duration');
     }
     const sessionDuration = formatSessionDurationSeconds(selfDestructSeconds);
+    // TODO(upstream-contract): omitted expiry uses the remaining authority lifetime.
+    // Explicit 24h would exceed the signed 24h bound by time spent uploading.
     const grants = Array.from({ length: n }, () => ({
       ...(expiresIn === '24h' ? {} : { expires_in: expiresIn }),
       one_time_use: true,

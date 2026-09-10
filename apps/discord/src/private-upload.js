@@ -206,6 +206,11 @@ function validateUploadResult(data, { authorityExpiresAt } = {}) {
       || data.authority_expires_at !== authorityExpiresAt) {
     throw new Error('Private upload returned an invalid response');
   }
+  if (Date.parse(data.mint_capability_expires_at) <= Date.now()) {
+    const error = new Error('Private upload returned an expired mint capability');
+    error.noRetry = true; // An exact upload replay cannot extend this capability.
+    throw error;
+  }
   return data;
 }
 

@@ -286,8 +286,10 @@ async function deleteLink(resourceId, apiKey, { deadlineMs } = {}) {
           });
         }
         lastError = err;
-        if ((err.status && !(err.status === 503 && err.apiCode === 'mutation_outcome_unknown'))
-            || (err.status === 0 && ![ERROR_CODE_NETWORK, ERROR_CODE_TIMEOUT].includes(err.apiCode))) {
+        const retryable = (err.status === 503 && err.apiCode === 'mutation_outcome_unknown')
+          || ((err.status === 0 || err.status == null)
+            && [ERROR_CODE_NETWORK, ERROR_CODE_TIMEOUT].includes(err.apiCode));
+        if (!retryable) {
           throw err;
         }
         if (deadlineMs !== undefined && Date.now() >= deadlineMs) {

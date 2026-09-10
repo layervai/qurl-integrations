@@ -522,6 +522,18 @@ describe('qURL client — delegated qURL revoke', () => {
     expect(globalThis.fetch).toHaveBeenCalledTimes(1);
   });
 
+  it('does not retry an unclassified SDK failure', async () => {
+    const { QURLClient } = require('@layervai/qurl');
+    const revoke = jest.spyOn(QURLClient.prototype, 'deleteDelegatedQurl')
+      .mockRejectedValue(new Error('private request detail'));
+    try {
+      await expect(qurl.deleteLink('q_0123456789a')).rejects.toThrow('qURL API request failed (0)');
+      expect(revoke).toHaveBeenCalledTimes(1);
+    } finally {
+      revoke.mockRestore();
+    }
+  });
+
   it('preserves a definitive DELETE denial received at the cleanup deadline', async () => {
     jest.useFakeTimers();
     jest.setSystemTime(1_000);

@@ -1,6 +1,6 @@
 # SDK 2.x and cleanup gates
 
-Discord uses the published @layervai/qurl 2.0.0 for delegated batch creation,
+Discord uses the published qURL™ SDK @layervai/qurl 2.0.0 for delegated batch creation,
 batch reads, and delegated link revocation. The lockfile includes registry
 integrity hashes for the SDK and its native state package. NHP stays at 1.1.
 

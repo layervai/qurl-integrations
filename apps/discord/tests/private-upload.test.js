@@ -66,6 +66,7 @@ function readDerS(signature) {
 }
 
 beforeEach(async () => {
+  jest.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-09-06T21:00:00Z'));
   jest.clearAllMocks();
   mockOpener.health.mockReturnValue({ state: 'ready' });
   await privateUpload.startPrivateUploader();
@@ -74,6 +75,24 @@ beforeEach(async () => {
 
 afterEach(async () => {
   await privateUpload.closePrivateUploader();
+  Date.now.mockRestore?.();
+});
+
+test('an expired upload capability fails without replaying the upload', async () => {
+  const sleep = jest.fn();
+  mockOpener.fetch.mockResolvedValueOnce(jsonResponse(201, { data: {
+    upload_handle: `upl_${'a'.repeat(43)}`, mint_capability: 'qmc1.test',
+    mint_capability_expires_at: '2026-09-06T21:00:00Z',
+    authority_expires_at: UPLOAD_VECTOR.authorityExpiresAt,
+  } }));
+  await expect(privateUpload.uploadPrivate(Buffer.from('hello'), {
+    filename: 'report.txt', contentType: 'text/plain', viewerTtlSeconds: 30,
+    credential: { apiKey: 'lv_test_example', keyId: 'key_A1b2C3d4E5f6' },
+    authorityExpiresAt: UPLOAD_VECTOR.authorityExpiresAt,
+    deadlineMs: Date.now() + 60_000, requestId: UPLOAD_VECTOR.requestId, sleep,
+  })).rejects.toThrow(/expired mint capability/);
+  expect(mockOpener.fetch).toHaveBeenCalledTimes(1);
+  expect(sleep).not.toHaveBeenCalled();
 });
 
 test('upload canonical bytes match the private-upload v1 vector', () => {
