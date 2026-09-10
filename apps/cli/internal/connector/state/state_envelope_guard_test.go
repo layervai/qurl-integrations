@@ -1,6 +1,7 @@
 package state
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -30,7 +31,7 @@ func TestOpenPlaintextRefusesSealedEnvelope(t *testing.T) {
 	if !strings.Contains(err.Error(), connectoragentstate.SealedAgentStateFile) || !strings.Contains(err.Error(), connectoragentstate.EnvKeyProvider) {
 		t.Fatalf("error must name the sealed envelope and the provider env: %v", err)
 	}
-	if _, statErr := os.Lstat(filepath.Join(dir, AgentStateFile)); !os.IsNotExist(statErr) {
+	if _, statErr := os.Lstat(filepath.Join(dir, AgentStateFile)); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("plaintext envelope must not be created next to a sealed one: %v", statErr)
 	}
 }
