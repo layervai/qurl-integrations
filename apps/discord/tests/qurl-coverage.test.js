@@ -51,7 +51,6 @@ describe('qURL client — getResourceStatus', () => {
   });
 
   it.each([
-    ['public key', PUBLIC_KEY_RESOURCE_ID],
     ['CRID', CRID_RESOURCE_ID],
   ])('sends a real-shaped %s ID to GET /v1/qurls/:resourceId', async (_, resourceId) => {
     globalThis.fetch = jest.fn().mockResolvedValue(
@@ -87,13 +86,13 @@ describe('qURL client — getResourceStatus', () => {
   it('throws on 404 API error (status-only message, body redacted)', async () => {
     globalThis.fetch = jest.fn().mockResolvedValue(apiError(404, { code: 'not_found' }));
 
-    await expect(qurl.getResourceStatus('bad-id')).rejects.toThrow(/qURL API GET.*failed.*404/);
+    await expect(qurl.getResourceStatus(CRID_RESOURCE_ID)).rejects.toThrow(/qURL API GET.*failed.*404/);
   });
 
   it('re-wraps an unexpected 204 to a code-only error (status-0 redaction allowlist)', async () => {
     globalThis.fetch = jest.fn().mockResolvedValue(apiOk(204, undefined));
 
-    const thrown = await qurl.getResourceStatus('res-empty').then(
+    const thrown = await qurl.getResourceStatus(CRID_RESOURCE_ID).then(
       () => { throw new Error('expected rejection'); },
       (e) => e,
     );
@@ -153,15 +152,15 @@ describe('qURL client — getResourceStatus', () => {
     ])).not.toContain(malformedId);
   });
 
-  it('does not broaden the access-token check to public IDs beginning with "at"', async () => {
+  it('rejects legacy public key IDs before network work', async () => {
     const publicId = `at${'a'.repeat(105)}`;
     globalThis.fetch = jest.fn().mockResolvedValue(apiOk(200, {
       resource_id: publicId,
       qurls: [],
     }));
 
-    await expect(qurl.getResourceStatus(publicId)).resolves.toBeDefined();
-    expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+    await expect(qurl.getResourceStatus(publicId)).rejects.toThrow(/client_validation/);
+    expect(globalThis.fetch).not.toHaveBeenCalled();
   });
 
   it('re-wraps SDK client-validation errors without echoing the rejected identifier', async () => {
@@ -230,14 +229,14 @@ describe('qURL client — retry + audit behavior', () => {
     globalThis.fetch = jest.fn()
       .mockResolvedValueOnce(apiError(503))
       .mockResolvedValueOnce(apiOk(200, { ok: true }));
-    const r = await qurl.getResourceStatus('res-retry');
+    const r = await qurl.getResourceStatus(CRID_RESOURCE_ID);
     expect(r.ok).toBe(true);
     expect(globalThis.fetch).toHaveBeenCalledTimes(2);
   });
 
   it('does NOT retry on 401', async () => {
     globalThis.fetch = jest.fn().mockResolvedValue(apiError(401));
-    await expect(qurl.getResourceStatus('res-auth')).rejects.toThrow(/401/);
+    await expect(qurl.getResourceStatus(CRID_RESOURCE_ID)).rejects.toThrow(/401/);
     expect(globalThis.fetch).toHaveBeenCalledTimes(1);
   });
 
@@ -246,7 +245,7 @@ describe('qURL client — retry + audit behavior', () => {
     const { AUDIT_EVENTS } = require('../src/constants');
     logger.audit.mockClear();
     globalThis.fetch = jest.fn().mockResolvedValue(apiError(401));
-    await expect(qurl.getResourceStatus('res-auth-401')).rejects.toThrow(/401/);
+    await expect(qurl.getResourceStatus(CRID_RESOURCE_ID)).rejects.toThrow(/401/);
     expect(logger.audit).toHaveBeenCalledWith(
       AUDIT_EVENTS.DEPENDENCY_AUTH_FAILURE,
       expect.objectContaining({
@@ -264,7 +263,7 @@ describe('qURL client — retry + audit behavior', () => {
     const { AUDIT_EVENTS } = require('../src/constants');
     logger.audit.mockClear();
     globalThis.fetch = jest.fn().mockResolvedValue(apiError(403));
-    await expect(qurl.getResourceStatus('res-auth-403')).rejects.toThrow(/403/);
+    await expect(qurl.getResourceStatus(CRID_RESOURCE_ID)).rejects.toThrow(/403/);
     expect(logger.audit).toHaveBeenCalledWith(
       AUDIT_EVENTS.DEPENDENCY_AUTH_FAILURE,
       expect.objectContaining({ dependency: 'qurl_service', status: 403 }),
@@ -276,7 +275,7 @@ describe('qURL client — retry + audit behavior', () => {
     const { AUDIT_EVENTS } = require('../src/constants');
     logger.audit.mockClear();
     globalThis.fetch = jest.fn().mockResolvedValue(apiError(503));
-    await expect(qurl.getResourceStatus('res-503')).rejects.toThrow(/503/);
+    await expect(qurl.getResourceStatus(CRID_RESOURCE_ID)).rejects.toThrow(/503/);
     const authCalls = logger.audit.mock.calls.filter(
       ([event]) => event === AUDIT_EVENTS.DEPENDENCY_AUTH_FAILURE,
     );
@@ -289,7 +288,7 @@ describe('qURL client — retry + audit behavior', () => {
     for (const status of [400, 404, 409]) {
       logger.audit.mockClear();
       globalThis.fetch = jest.fn().mockResolvedValue(apiError(status));
-      await expect(qurl.getResourceStatus(`res-${status}`)).rejects.toThrow(new RegExp(String(status)));
+      await expect(qurl.getResourceStatus(CRID_RESOURCE_ID)).rejects.toThrow(new RegExp(String(status)));
       const authCalls = logger.audit.mock.calls.filter(
         ([event]) => event === AUDIT_EVENTS.DEPENDENCY_AUTH_FAILURE,
       );
@@ -302,7 +301,7 @@ describe('qURL client — retry + audit behavior', () => {
     const { AUDIT_EVENTS } = require('../src/constants');
     logger.audit.mockClear();
     globalThis.fetch = jest.fn().mockResolvedValue(apiError(401));
-    await expect(qurl.getResourceStatus('res-once')).rejects.toThrow(/401/);
+    await expect(qurl.getResourceStatus(CRID_RESOURCE_ID)).rejects.toThrow(/401/);
     expect(globalThis.fetch).toHaveBeenCalledTimes(1); // no retry on auth-class
     const authCalls = logger.audit.mock.calls.filter(
       ([event]) => event === AUDIT_EVENTS.DEPENDENCY_AUTH_FAILURE,
@@ -318,7 +317,7 @@ describe('qURL client — retry + audit behavior', () => {
       apiError(500, { code: 'server_error', detail: `internal failure near ${SECRET}` }),
     );
 
-    const thrown = await qurl.getResourceStatus('res-redact').then(
+    const thrown = await qurl.getResourceStatus(CRID_RESOURCE_ID).then(
       () => { throw new Error('expected rejection'); },
       (e) => e,
     );
@@ -335,7 +334,7 @@ describe('qURL client — retry + audit behavior', () => {
 
   it('gives up after 3 attempts on persistent 503', async () => {
     globalThis.fetch = jest.fn().mockResolvedValue(apiError(503));
-    await expect(qurl.getResourceStatus('res-down')).rejects.toThrow(/503/);
+    await expect(qurl.getResourceStatus(CRID_RESOURCE_ID)).rejects.toThrow(/503/);
     expect(globalThis.fetch).toHaveBeenCalledTimes(3);
   });
 
@@ -343,14 +342,14 @@ describe('qURL client — retry + audit behavior', () => {
     globalThis.fetch = jest.fn()
       .mockRejectedValueOnce(new Error('ECONNRESET'))
       .mockResolvedValueOnce(apiOk(200, { ok: true }));
-    const r = await qurl.getResourceStatus('res-net');
+    const r = await qurl.getResourceStatus(CRID_RESOURCE_ID);
     expect(r.ok).toBe(true);
     expect(globalThis.fetch).toHaveBeenCalledTimes(2);
   });
 
   it('throws after persistent network errors', async () => {
     globalThis.fetch = jest.fn().mockRejectedValue(new Error('ECONNRESET'));
-    await expect(qurl.getResourceStatus('res-netdown')).rejects.toThrow(/ECONNRESET/);
+    await expect(qurl.getResourceStatus(CRID_RESOURCE_ID)).rejects.toThrow(/ECONNRESET/);
     expect(globalThis.fetch).toHaveBeenCalledTimes(3);
   });
 
@@ -358,21 +357,21 @@ describe('qURL client — retry + audit behavior', () => {
     globalThis.fetch = jest.fn()
       .mockResolvedValueOnce(apiError(429))
       .mockResolvedValueOnce(apiOk(200, {}));
-    await qurl.getResourceStatus('res-429');
+    await qurl.getResourceStatus(CRID_RESOURCE_ID);
     expect(globalThis.fetch).toHaveBeenCalledTimes(2);
   });
 
   it('does NOT retry GET on 500 or 408 (SDK narrows the retry set)', async () => {
     for (const status of [500, 408]) {
       globalThis.fetch = jest.fn().mockResolvedValue(apiError(status));
-      await expect(qurl.getResourceStatus(`res-${status}`)).rejects.toThrow(new RegExp(String(status)));
+      await expect(qurl.getResourceStatus(CRID_RESOURCE_ID)).rejects.toThrow(new RegExp(String(status)));
       expect(globalThis.fetch).toHaveBeenCalledTimes(1);
     }
   });
 
   it('does not replay DELETE on 503 because the mutation outcome is unknown', async () => {
     globalThis.fetch = jest.fn().mockResolvedValue(apiError(503));
-    await expect(qurl.deleteLink(PUBLIC_KEY_RESOURCE_ID)).rejects.toThrow(/503/);
+    await expect(qurl.deleteLink(CRID_RESOURCE_ID)).rejects.toThrow(/503/);
     expect(globalThis.fetch).toHaveBeenCalledTimes(1);
   });
 
@@ -380,7 +379,7 @@ describe('qURL client — retry + audit behavior', () => {
     const logger = require('../src/logger');
     const { AUDIT_EVENTS } = require('../src/constants');
     const { resourceIdLogRef } = require('../src/utils/resource-id');
-    const resourceId = 'r_sensitive_resource_marker';
+    const resourceId = CRID_RESOURCE_ID;
     globalThis.fetch = jest.fn().mockResolvedValue(apiError(401));
 
     const thrown = await qurl.deleteLink(resourceId).then(

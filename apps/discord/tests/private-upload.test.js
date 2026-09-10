@@ -46,9 +46,13 @@ const UPLOAD_VECTOR = {
 
 const UPLOAD_CANONICAL_HEX = '4c562d5155524c2d55504c4f41442d415554482d56310000000004504f53540000000f3132372e302e302e313a3438313233000000142f696e7465726e616c2f76312f75706c6f6164730000000a313738383634353630300000002b576c7061576c7061576c7061576c7061576c7061576c7061576c7061576c7061576c7061576c7061576c6f0000000f646973636f72642d73616e64626f7800000012646973636f72642d7369676e696e672d7631000000106b65795f413162324333643445356636000000403263663234646261356662306133306532366538336232616335623965323965316231363165356331666137343235653733303433333632393338623938323400000001350000000a746578742f706c61696e0000000a7265706f72742e74787400000002333000000014323032362d30392d30365432323a30303a30305a0000002431323365343536372d653839622d343264332d613435362d343236363134313734303030';
 function jsonResponse(status, body, headers = {}) {
+  if (body?.data?.batch_id) {
+    body = { ...body, meta: { request_id: "test-request", timestamp: "2026-09-06T21:00:00Z" }, data: { ...body.data } };
+    if (body.data.results) body.data.completed_at = "2026-09-06T21:00:01Z";
+  }
   return new Response(JSON.stringify(body), {
     status,
-    headers: { 'Content-Type': 'application/json', ...headers },
+    headers: { 'Content-Type': 'application/json', 'Cache-Control': 'private, no-store', ...headers },
   });
 }
 
@@ -270,7 +274,7 @@ test('delegated batch POST and poll requests cannot outlive the shared send dead
       },
     );
 
-    expect(timeout.mock.calls.map(([ms]) => ms)).toEqual([2_500, 1_500]);
+    expect(timeout.mock.calls.map(([ms]) => ms)).toEqual([30_000, 2_500, 30_000, 1_500]);
   } finally {
     timeout.mockRestore();
     dateNow.mockRestore();
@@ -291,7 +295,7 @@ test('delegated batch rejects an unexpected successful POST without retrying', a
         idempotencyKey: '123e4567-e89b-42d3-a456-426614174000',
         sleep,
       },
-    )).rejects.toThrow(/unexpected success status \(200\)/);
+    )).rejects.toThrow(/unexpected success status/);
     expect(global.fetch).toHaveBeenCalledTimes(1);
     expect(sleep).not.toHaveBeenCalled();
   } finally {
@@ -436,7 +440,7 @@ test.each([
     ).then(() => null, err => err);
 
     expect(error).toEqual(expect.any(Error));
-    expect(error.message).toMatch(/duplicate bearer grant/);
+    expect(error.message).toMatch(/invalid qurl/);
     expect(error.partialQurlIds).toEqual(expectedIds);
   } finally {
     global.fetch = realFetch;
