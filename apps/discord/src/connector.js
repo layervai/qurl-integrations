@@ -631,6 +631,7 @@ async function mintLinks(resourceId, {
  *   send retryable rather than reporting a revoke that did not happen.
  */
 async function revokeMintedLinks(resourceId, qurlIds, apiKey, options = {}) {
+  apiKey = typeof apiKey === 'object' ? apiKey?.apiKey : apiKey;
   validateResourceId(resourceId);
   if (!Array.isArray(qurlIds)) {
     throw new Error('Invalid connector revoke token list');
@@ -649,6 +650,11 @@ async function revokeMintedLinks(resourceId, qurlIds, apiKey, options = {}) {
     return true;
   }
 
+  const { deadlineMs } = options;
+  if (deadlineMs !== undefined && (!Number.isSafeInteger(deadlineMs) || deadlineMs <= Date.now())) {
+    throw new Error('Child revoke deadline is invalid or expired');
+  }
+  const deadlineSignal = deadlineMs === undefined ? null : AbortSignal.timeout(deadlineMs - Date.now());
   for (let offset = 0; offset < ids.length; offset += REVOKE_LINKS_MAX_IDS) {
     const batchIds = ids.slice(offset, offset + REVOKE_LINKS_MAX_IDS);
     const response = await fetch(`${config.CONNECTOR_URL}/api/revoke_links`, {
@@ -656,7 +662,9 @@ async function revokeMintedLinks(resourceId, qurlIds, apiKey, options = {}) {
       headers: { 'Content-Type': 'application/json', ...connectorAuthHeaders(apiKey) },
       body: JSON.stringify({ resource_id: resourceId, qurl_ids: batchIds }),
       redirect: 'error',
-      signal: AbortSignal.timeout(REVOKE_LINKS_TIMEOUT_MS),
+      signal: deadlineSignal
+        ? AbortSignal.any([deadlineSignal, AbortSignal.timeout(REVOKE_LINKS_TIMEOUT_MS)])
+        : AbortSignal.timeout(REVOKE_LINKS_TIMEOUT_MS),
     });
 
     if (!response.ok) {
@@ -704,7 +712,7 @@ async function revokeMintedLinks(resourceId, qurlIds, apiKey, options = {}) {
     // Revoke only these ordinary children; never delete their shared parent.
     await revokeOrdinaryLinks(resourceId, parsed.results
       .filter(result => result.status === 'not_connector_managed')
-      .map(result => result.qurl_id), apiKey);
+      .map(result => result.qurl_id), apiKey, options);
   }
   logger.info('Confirmed minted link revoke', {
     resource_ref: resourceIdLogRef(resourceId),

@@ -22,6 +22,7 @@ let requests;
 let children;
 let rejectRevoke;
 let parentMismatch;
+let hangRevoke;
 
 beforeAll(async () => {
   server = http.createServer(async (req, res) => {
@@ -33,6 +34,7 @@ beforeAll(async () => {
       res.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'private, no-store', ...headers });
       res.end(JSON.stringify(data));
     };
+    if (req.headers.authorization !== 'Bearer test-guild-key') return json(401, { error: { status: 401, code: 'unauthorized', title: 'Unauthorized' } });
     if (req.url === '/api/revoke_links') {
       return json(200, { success: true, results: body.qurl_ids.map(qurl_id => ({ qurl_id, status: 'not_connector_managed' })) });
     }
@@ -42,6 +44,10 @@ beforeAll(async () => {
     if (req.method === 'DELETE' && [
       `/v1/resources/${crid}/qurls/${newChild}`, `/v1/delegated-qurls/${delegatedChild}`,
     ].includes(req.url)) {
+      if (hangRevoke) {
+        await new Promise(resolve => res.once('close', resolve));
+        return;
+      }
       if (rejectRevoke) return json(503, { error: { status: 503, code: 'service_unavailable', title: 'Unavailable' } });
       children.delete(req.url.endsWith(delegatedChild) ? delegatedChild : newChild);
       res.writeHead(204).end();
@@ -65,14 +71,15 @@ beforeEach(() => {
   children = new Set([oldChild, newChild, delegatedChild]);
   rejectRevoke = false;
   parentMismatch = false;
+  hangRevoke = false;
   mockConfig.PRIVATE_UPLOAD_QURL = null;
 });
 
-test('failed Add Recipients cleanup and repeat revoke preserve the earlier child and shared parent', async () => {
+test.each(['test-guild-key', { apiKey: 'test-guild-key', keyId: 'key_A1b2C3d4E5f6' }])('shared-parent cleanup accepts credential %p', async credential => {
   // Turning private upload on must not change how a historical public row is revoked.
   mockConfig.PRIVATE_UPLOAD_QURL = 'qurl://private-upload';
-  await revokeMintedLinks(source, [newChild], 'test-guild-key');
-  await revokeMintedLinks(source, [newChild], 'test-guild-key');
+  await revokeMintedLinks(source, [newChild], credential);
+  await revokeMintedLinks(source, [newChild], credential);
   expect(children.has(newChild)).toBe(false);
   expect(children.has(oldChild)).toBe(true);
   expect(requests.filter(request => request.method === 'DELETE').map(request => request.path))
@@ -92,8 +99,8 @@ test('a child from a different parent cannot redirect cleanup', async () => {
   expect(requests.some(request => request.method === 'DELETE')).toBe(false);
 });
 
-test('private rows still use delegated revoke after the private flag is removed', async () => {
-  await revokeMintedLinks(delegatedChild, [delegatedChild], 'test-guild-key');
+test.each(['test-guild-key', { apiKey: 'test-guild-key', keyId: 'key_A1b2C3d4E5f6' }])('private rows remain revocable after flag removal with credential %p', async credential => {
+  await revokeMintedLinks(delegatedChild, [delegatedChild], credential);
   expect(children.has(delegatedChild)).toBe(false);
   expect(children.has(oldChild)).toBe(true);
   expect(requests.map(request => request.path)).toEqual([`/v1/delegated-qurls/${delegatedChild}`]);
@@ -107,4 +114,16 @@ test('a queued batch beyond the interaction deadline remains unknown and is not 
   }).catch(err => err);
   expect(error).toMatchObject({ batchOutcomeUnknown: true, batchId, unknownBatchExpiresAt: expiry, partialLinkCount: 0 });
   expect(requests.map(request => request.method)).toEqual(['POST']);
+});
+
+test('ordinary SDK revocation stops at the caller deadline without claiming cleanup', async () => {
+  hangRevoke = true;
+  const started = Date.now();
+  await expect(revokeMintedLinks(source, [newChild], 'test-guild-key', {
+    deadlineMs: started + 1000,
+  })).rejects.toThrow();
+  expect(Date.now() - started).toBeLessThan(4000);
+  expect(requests.some(request => request.method === 'DELETE')).toBe(true);
+  expect(children.has(newChild)).toBe(true);
+  expect(children.has(oldChild)).toBe(true);
 });

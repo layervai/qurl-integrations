@@ -92,12 +92,12 @@ function renderSuccess(res, { guildId, keyPrefix, qurlAccountEmail }) {
   }));
 }
 
-function renderError(res, statusCode, headline, detail) {
+function renderError(res, statusCode, headline, detail, retrySetup = true) {
   return res.status(statusCode).send(res.renderPage({
     title: 'qURL Setup Failed',
     icon: '❌',
     heading: headline,
-    message: detail + ' Run /qurl setup in Discord to start over.',
+    message: detail + (retrySetup ? ' Run /qurl setup in Discord to start over.' : ''),
     type: 'error',
   }));
 }
@@ -498,7 +498,7 @@ router.get('/callback', rateLimit, async (req, res) => {
   }
 
   // 3. Persist the key. Private credentials must store the audience key ID and
-  //    binding together. The public path clears any stale binding metadata.
+  //    binding together. The public path cannot overwrite a live binding.
   try {
     await db.setGuildApiKey(
       guildId,
@@ -517,6 +517,11 @@ router.get('/callback', rateLimit, async (req, res) => {
     // Await one exact retry after a transport-unknown result or 5xx. DELETE
     // is idempotent, and 404 confirms that another attempt completed cleanup.
     await deleteOrphanCredential({ accessToken, bindingId, keyId, guildId });
+    if (!bindingId && err?.name === 'ConditionalCheckFailedException') {
+      return renderError(res, 409, 'Existing qURL connection kept',
+        'This server already has a private qURL binding. Repeating setup will not replace it. '
+        + 'Contact your operator to change the binding.', false);
+    }
     return renderError(res, 500, 'qURL key provisioned but not stored',
       'Your qURL API key was created but the bot could not save it. Please run /qurl setup again. '
       + 'If this keeps happening, contact your layerv.ai admin.');

@@ -70,16 +70,25 @@ function delay(ms) {
 // control-plane calls, not a hot path; constructing here also means the client
 // binds the live globalThis.fetch at call time. baseUrl is the bare API origin
 // — the SDK prepends `/v1/...` itself.
-function makeClient(apiKey) {
+function makeClient(apiKey, { deadlineMs } = {}) {
   const key = apiKey || config.QURL_API_KEY;
   if (!key) {
     throw new Error('QURL_API_KEY is not configured');
   }
+  if (deadlineMs !== undefined && (!Number.isSafeInteger(deadlineMs) || deadlineMs <= Date.now())) {
+    throw new Error('qURL request deadline is invalid or expired');
+  }
+  const deadlineSignal = deadlineMs === undefined ? null : AbortSignal.timeout(deadlineMs - Date.now());
   return new QURLClient({
     apiKey: key,
     baseUrl: config.QURL_ENDPOINT,
     timeout: REQUEST_TIMEOUT_MS,
-    maxRetries: MAX_RETRIES,
+    maxRetries: deadlineSignal ? 0 : MAX_RETRIES,
+    ...(deadlineSignal ? { fetch: (url, init) => {
+      deadlineSignal.throwIfAborted();
+      return fetch(url, { ...init, redirect: 'error',
+        signal: init?.signal ? AbortSignal.any([deadlineSignal, init.signal]) : deadlineSignal });
+    } } : {}),
     userAgent: USER_AGENT,
   });
 }
@@ -317,17 +326,16 @@ async function deleteLink(resourceId, apiKey, { deadlineMs } = {}) {
 // a public resource key. Verify the resolved parent; each SDK DELETE is scoped
 // to that CRID. TODO(upstream-contract): the service checks each child
 // belongs to that parent before deleting it.
-async function revokeOrdinaryLinks(resourceId, qurlIds, apiKey) {
+async function revokeOrdinaryLinks(resourceId, qurlIds, apiKey, options = {}) {
   if (qurlIds.length === 0) return;
-  const client = makeClient(apiKey);
+  const client = makeClient(apiKey, options);
   const parent = await callQurl('GET', QURL_ID_LOG_PATH, () => client.get(qurlIds[0]));
   if (!parent.crid || (parent.resource_id !== resourceId && parent.crid !== resourceId)) {
     throw new Error('qURL revoke parent does not match the recorded source');
   }
-  for (const qurlId of qurlIds) {
-    await callQurl('DELETE', '/resources/:resourceId/qurls/:qurlId',
-      () => client.revokeResourceQurl(parent.crid, qurlId));
-  }
+  // The caller supplies one bounded Connector batch (at most ten children).
+  await Promise.all(qurlIds.map(qurlId => callQurl('DELETE', '/resources/:resourceId/qurls/:qurlId',
+    () => client.revokeResourceQurl(parent.crid, qurlId))));
 }
 
 async function getResourceStatus(resourceId, apiKey) {

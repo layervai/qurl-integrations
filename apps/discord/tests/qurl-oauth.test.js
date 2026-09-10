@@ -751,7 +751,7 @@ describe('qurl-oauth — MAP_COMMAND_ENABLED=true', () => {
 });
 
 describe('qurl-oauth — public upload path', () => {
-  it('keeps the existing API-key endpoint while private upload is disabled', async () => {
+  it.each([false, true])('public setup uses API keys and preserves an existing binding (conflict=%s)', async conflict => {
     const savedPrivateUploadQurl = process.env.PRIVATE_UPLOAD_QURL;
     delete process.env.PRIVATE_UPLOAD_QURL;
     try {
@@ -781,6 +781,9 @@ describe('qurl-oauth — public upload path', () => {
         const supertest = require('supertest');
         // eslint-disable-next-line global-require
         const { app: freshApp } = require('../src/server');
+        if (conflict) require('../src/store').setGuildApiKey.mockRejectedValueOnce(
+          Object.assign(new Error('existing binding'), { name: 'ConditionalCheckFailedException' }),
+        );
         // eslint-disable-next-line global-require
         const { signQurlOAuthState: sign } = require('../src/utils/qurl-oauth-state');
         const state = sign('guild-1', 'admin-2');
@@ -794,12 +797,21 @@ describe('qurl-oauth — public upload path', () => {
             json: () => Promise.resolve({
               data: { key_id: 'key-public-1', api_key: 'lv_live_public', key_prefix: 'lv_live_pub' },
             }),
-          });
+          })
+          .mockResolvedValueOnce({ ok: true, status: 204 });
 
         const res = await supertest(freshApp)
           .get(`/oauth/qurl/callback?code=auth0-code&state=${encodeURIComponent(state)}`)
           .set('Cookie', cookieFor(state));
 
+        if (conflict) {
+          expect(res.status).toBe(409);
+          expect(res.text).toContain('Existing qURL connection kept');
+          expect(res.text).not.toContain('Run /qurl setup');
+          expect(globalThis.fetch.mock.calls.filter(([, init]) => init?.method === 'DELETE').map(([url]) => url))
+            .toEqual(['http://localhost:9999/v1/api-keys/key-public-1']);
+          return;
+        }
         expect(res.status).toBe(200);
         expect(globalThis.fetch.mock.calls[1][0]).toBe('http://localhost:9999/v1/api-keys');
         expect(JSON.parse(globalThis.fetch.mock.calls[1][1].body)).toEqual({
