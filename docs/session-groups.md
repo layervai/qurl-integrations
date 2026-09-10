@@ -61,10 +61,9 @@ platform accepts those in batches, so 1000 shares on one machine become cheap.
 ## Runtime request headers
 
 **Unreleased:** this describes the planned CLI 2.5.0 overlay feature.
-**Security prerequisite still unmet:** the CLI does not yet provision a
-trusted CA for FRP peer verification. Do not use these headers for secrets
-until authenticated TLS is configured; encryption alone leaves them exposed
-to an active intermediary.
+**Unavailable until trust is configured:** the CLI does not yet provision
+a trusted CA for FRP peer verification. The connector rejects header-bearing
+routes until that prerequisite is met.
 
 An external supervisor (see the CLI README's
 [External supervision](../apps/cli/README.md#external-supervision)) can attach

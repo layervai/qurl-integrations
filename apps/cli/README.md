@@ -448,10 +448,9 @@ curl --unix-socket "$STATE_DIR/daemon.sock" http://localhost/status
 curl --unix-socket "$STATE_DIR/daemon.sock" -X POST http://localhost/reload
 ```
 
-**Security prerequisite still unmet:** the CLI does not yet provision a
-trusted CA for FRP peer verification. Do not use runtime headers for secrets
-until authenticated TLS is configured; encryption alone leaves them exposed
-to an active intermediary.
+**Unavailable until trust is configured:** the CLI does not yet provision
+a trusted CA for FRP peer verification. The connector rejects header-bearing
+routes until that prerequisite is met.
 
 `PUT /overlay` attaches request headers to routes at runtime. The body is
 `{"route_request_headers": {"<connector_id>": {"Header-Name": "value"}}}`,
@@ -464,7 +463,8 @@ it. A valid body is answered with 204. A body over 64 KiB, with unknown
 fields, with more than 2,000 routes, with more than 16 headers or 1,024
 name-and-value bytes for one route, or with an invalid, reserved, or
 case-variant duplicate header name or an invalid value is answered with 400
-and a fixed message that never echoes a header.
+and a fixed message that never echoes a header. All limits apply together;
+larger route entries reduce the number that fits within 64 KiB.
 
 The overlay lives in process memory only: it is never written to disk, never
 reported by `/status` or `qurl inspect`, never logged, and a restarted daemon
