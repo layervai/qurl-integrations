@@ -1022,9 +1022,8 @@ module.exports = {
   DISCORD_BOT_VIEW_COUNTER_DESCRIPTION_PREFIX,
   DELETE_OUTCOMES,
   isTruthyEnvFlag,
-  // Exposed for webhook-subscriptions.js so the registry's
-  // discoverDefaultOwnerId tick goes through the same QurlServiceError /
-  // op-tagged transport as the rest of the registrar surface — kept off
+  // Exposed for webhook-subscriptions.js so owner discovery goes through the
+  // same QurlServiceError / op-tagged transport as the registrar — kept off
   // _internals because it has a stable contract and an external caller.
   callQurlService,
   _internals: {

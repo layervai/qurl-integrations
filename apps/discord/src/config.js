@@ -430,6 +430,10 @@ module.exports = {
   // invocation, then injected into the bot's task env. The bot reads
   // it here and never modifies it — Lambda is the sole writer.
   QURL_WEBHOOK_SECRET: process.env.QURL_WEBHOOK_SECRET,
+  // Explicit opt-out for deployments with no Lambda-managed default
+  // subscription. Without this flag, a missing shared secret makes guild
+  // webhook linking fail closed instead of silently taking the rotation path.
+  QURL_WEBHOOK_PURE_BYOK: process.env.QURL_WEBHOOK_PURE_BYOK === 'true',
 
   // qURL OAuth (Auth0) — for /qurl setup admin consent flow.
   // When unset, /qurl setup falls back to the legacy modal-paste path so the
