@@ -60,10 +60,10 @@ describe('qURL webhook secret trust boundary', () => {
     }
   });
 
-// Format drift is intentionally accepted after the upstream rotation commits.
-it.each(['whsec_1234567890abcdef', 'new-format-server-secret', ' server-key-bytes '])('accepts persisted usable response on restart: %s', (value) => {
-  const { assertConfiguredWebhookSecret, assertUsableResponseSecret } = require('../src/utils/webhook-secret');
-  expect(assertUsableResponseSecret(value, 'rotateSecret')).toBe(value);
-  expect(assertConfiguredWebhookSecret(value)).toBe(true);
-});
+  // Format drift is intentionally accepted after the upstream rotation commits.
+  it.each(['whsec_1234567890abcdef', 'new-format-server-secret', ' server-key-bytes '])('accepts persisted usable response on restart: %s', (value) => {
+    const { assertConfiguredWebhookSecret, assertUsableResponseSecret } = require('../src/utils/webhook-secret');
+    expect(assertUsableResponseSecret(value, 'rotateSecret')).toBe(value);
+    expect(assertConfiguredWebhookSecret(value)).toBe(true);
+  });
 });

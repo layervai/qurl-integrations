@@ -47,7 +47,8 @@ Terraform-side ordering (config lives in `qurl-integrations-infra`):
 
 1. Apply the `qurl-views` DDB table and Terraform's `QURL_WEBHOOK_SECRET`
    SecureString seeded with `PLACEHOLDER`. The registrar replaces that public
-   bootstrap value with the server's secret before bot tasks start. The bot
+   bootstrap value with the server's secret before bot tasks start.
+   <!-- TODO(upstream-contract): keep this seed in sync with infra Terraform. --> The bot
    rejects the sentinel at startup; it must never become an HMAC key.
 2. Apply the Lambda function + IAM role (scoped: `ssm:GetParameter` on
    the `QURL_API_KEY` + `QURL_WEBHOOK_SECRET` paths; `ssm:PutParameter`
@@ -101,7 +102,9 @@ finds the existing sub, sees the SSM secret matches, returns `reused`).
   keep running with the previous (still-valid) secret. Root-cause in
   CloudWatch logs for the Lambda; re-run apply when fixed.
 - **Bot reads the seed sentinel or a whitespace-only configured secret.** Startup fails
-  before listening. Run the registrar and verify its SSM persist succeeded.
+  before listening on both gateway and HTTP processes: health, OAuth, and command
+  handling are unavailable, not just webhook delivery. Run the registrar and
+  verify its SSM persist succeeded before starting replacement tasks.
 - **Secret format drift.** The registrar and bot warn without logging secret
   material, preserve the exact returned bytes, and reuse them on restart.
   This does not validate arbitrary manual SSM edits: HMAC mismatches still

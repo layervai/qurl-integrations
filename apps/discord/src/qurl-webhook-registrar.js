@@ -14,8 +14,8 @@
 // inbound webhooks until eventual restart. Fix in this rev: rotate
 // the secret ONLY if (a) no subscription exists yet, or (b) the
 // existing one matches our URL but the caller can't supply a
-// known-good secret to verify against (initialSecret absent or outside
-// qurl-service's server-issued format).
+// usable stored secret (initialSecret absent, blank, or the public seed).
+// Unknown formats warn but reuse the persisted bytes.
 // Steady-state restarts find (existing sub + real SSM secret) and
 // skip the rotate — every replica reads the same secret from SSM/env
 // and stays in lock-step.
@@ -805,7 +805,7 @@ async function reconcileEvents({ apiEndpoint, apiKey, existing }) {
  * @param {string} opts.apiKey         - bot's QURL_API_KEY
  * @param {string} opts.bridgeUrl      - bot's own /webhooks/qurl URL
  * @param {string} opts.description    - human-readable; surfaces in qurl-service UI
- * @param {string} [opts.initialSecret] - the secret the caller already has in-memory (e.g. from SSM/env). When it is a server-issued `whsec_` value AND an existing subscription is found, the registrar SKIPS rotation — every replica reuses the same secret instead of rotating each other into uselessness. Anything else (unset, empty, or the infra-side SSM seed sentinel) takes the bootstrap-rotate path.
+ * @param {string} [opts.initialSecret] - the secret the caller already has in-memory (e.g. from SSM/env). When it is nonblank and not the public seed AND an existing subscription is found, the registrar SKIPS rotation — every replica reuses the same secret instead of rotating each other into uselessness. Unknown formats warn without rotation. Unset, blank, or the infra-side SSM seed sentinel takes the bootstrap-rotate path.
  * @param {Function} [opts.persistSecret] - optional async(secret) → void callback for best-effort persistence
  * @param {boolean} [opts.urlMigrationSweepEnabled=true] - hard guard for the cross-host orphan sweep. Default ON for today's single-host deployment. Set to `false` BEFORE any active-active multi-region rollout under a shared `QURL_API_KEY` — see #827. A false value disables both the orphan classification (no near-miss logging, no DELETE attempts) and short-circuits the whole sweep path; matches + dedupe still run normally.
  * @returns {Promise<{secret: string, webhookId: string, action: 'created' | 'rotated' | 'reused', ownerId: string}>}

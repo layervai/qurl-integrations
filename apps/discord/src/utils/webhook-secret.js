@@ -33,7 +33,9 @@ function isUsableSecret(value) {
 // restart. Usability is not proof that an operator-supplied key matches upstream.
 function assertConfiguredWebhookSecret(value) {
   if (value === undefined || value === null || value === '') return false;
-  assertUsableResponseSecret(value, 'QURL_WEBHOOK_SECRET');
+  if (!isUsableSecret(value)) {
+    throw new Error('QURL_WEBHOOK_SECRET is unusable or the public seed; run the registrar and verify its SSM persist succeeded');
+  }
   if (!isServerIssuedSecret(value)) {
     require('../logger').warn('qURL configured webhook secret has unrecognized format — preserving stored key');
   }
