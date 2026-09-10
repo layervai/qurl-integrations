@@ -157,8 +157,10 @@ const (
 	msgConnectorResourceConflict  = "The qURL platform refused this Connector resource request because of an identity conflict."
 	hintConnectorResourceConflict = "Hint: if this happened after qurl delete, repeat qurl delete <CRID> --yes with the deleted resource's CRID, then try publishing again. If you no longer have that CRID, publish with a different --id. For other conflicts, keep the local state unchanged and contact your qURL administrator or LayerV support."
 
-	msgConnectorResourceQuota  = "Your qURL account has reached a plan limit, so it cannot create this Connector resource."
-	hintConnectorResourceQuota = "Hint: limits apply to the account across all API keys. Check your active protected resources and monthly data usage with the qURL management tools. Revoke an unused resource, wait for the next calendar month if the data limit is reached, or ask your qURL administrator to raise the limit, then run the command again."
+	// TODO(upstream-contract): qurl-service quotaForEnforcement applies account-wide
+	// resource limits; checkDataTransferQuota uses UTC calendar months.
+	msgConnectorResourceQuota  = "Your qURL account has reached a plan limit."
+	hintConnectorResourceQuota = "Hint: limits apply to the account across all API keys. Check your active resources and monthly data usage. Delete an unused resource, wait for the next calendar month if the data limit is reached, or upgrade your plan at https://layerv.ai/pricing."
 
 	msgConnectorResourceInvalidResponse  = "The qURL platform answered this Connector's resource request in a way this version can't accept, so it stopped instead of guessing."
 	hintConnectorResourceInvalidResponse = "Hint: this is a problem on the qURL platform side, not on this machine. Keep the state directory unchanged and contact LayerV support."
