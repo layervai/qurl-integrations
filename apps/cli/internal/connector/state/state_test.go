@@ -12,7 +12,7 @@ import (
 // clearStateEnv detaches the test from any ambient operator configuration.
 func clearStateEnv(t *testing.T) {
 	t.Helper()
-	for _, name := range []string{EnvStateDirPrimary, EnvAgentID, "XDG_STATE_HOME", "HOME", "LOCALAPPDATA"} {
+	for _, name := range []string{EnvStateDirPrimary, EnvAgentID, "XDG_STATE_HOME", "HOME", "LOCALAPPDATA", "LAYERV_KEY_PROVIDER", "LAYERV_LOCAL_KEY_FD"} {
 		t.Setenv(name, "restore-after-test")
 		if err := os.Unsetenv(name); err != nil {
 			t.Fatal(err)
@@ -221,5 +221,19 @@ func TestStoreFailsClosedAfterClose(t *testing.T) {
 	}
 	if nilStore.Dir() != "" {
 		t.Fatal("nil Dir() should be empty")
+	}
+}
+
+func TestOpenUnknownKeyProviderFailsClosed(t *testing.T) {
+	clearStateEnv(t)
+	t.Setenv("LAYERV_KEY_PROVIDER", "not-a-provider")
+	dir := secureStateTestDir(t)
+	store, err := Open(dir)
+	if err == nil {
+		_ = store.Close()
+		t.Fatal("unknown key provider accepted")
+	}
+	if _, err := os.Stat(filepath.Join(dir, AgentStateFile)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("plaintext envelope created: %v", err)
 	}
 }
