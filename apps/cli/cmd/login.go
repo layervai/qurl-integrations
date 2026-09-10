@@ -44,6 +44,11 @@ key.`,
   op read op://team/qurl/key | qurl login`,
 		Args: noArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			// Enrollment writes the namespace's device identity: refuse the
+			// wrong lifecycle contract before the key is even read.
+			if err := opts.requireRuntimeSupervisionIfNamespace(); err != nil {
+				return err
+			}
 			key, err := readSecret(opts, "qURL API key (input hidden): ")
 			if err != nil {
 				return err

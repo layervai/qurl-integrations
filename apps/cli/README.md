@@ -86,8 +86,10 @@ change. Run `qurl stop <CRID>` to turn it off and `qurl start <CRID>` to turn it
 back on. Publishing the same target later reuses the same CRID.
 
 Background lifecycle management is available on Linux, macOS, and Windows.
-Linux uses the native systemd user manager. Use `--foreground` for CI,
-debugging, or a process that another service manager owns.
+Linux uses the native systemd user manager. Use `--foreground` for CI or
+debugging. When another program owns the daemon process, run it with
+`qurl daemon run --supervision external` instead — see
+[External supervision](#external-supervision).
 
 ### 4. Open or share it
 
@@ -230,6 +232,7 @@ command-line flag > environment variable > profile/config file > built-in defaul
 | Color | `--color` | `QURL_COLOR` | `color` | `auto` |
 | Connector ID | `--id` | `QURL_CONNECTOR_ID` | `connector_id` | Stable opaque ID for local `publish` |
 | Session group mode | `--share-group-mode` (`daemon run`) | `QURL_SHARE_GROUP_MODE` | `share_group_mode` | `single` — see [Session group modes](#session-group-modes) |
+| Daemon supervision | `--supervision` | `QURL_DAEMON_SUPERVISION` | `daemon_supervision` | `native` — see [External supervision](#external-supervision) |
 
 Config files are YAML. The default file is `~/.config/qurl/config.yaml`; a
 named profile lives at `~/.config/qurl/profiles/<name>.yaml` and is
@@ -266,11 +269,20 @@ would travel unencrypted; loopback endpoints are exempt.
 Run `qurl <command> --help` for the full help text; installed man pages
 cover the same surface (`man qurl`, `man qurl-publish`, …).
 
+Commands that take a CRID assess it locally first: a likely typo (bad
+checksum, wrong alphabet) is warned about and still forwarded — the server
+is the only authoritative validator. Sending a **test-environment CRID to
+the production endpoint** is refused unless `--yes` is given; a production
+CRID aimed at a non-production endpoint warns and proceeds.
+
 ### qurl daemon run
 
-`qurl daemon run` lets another service manager own the long-running process.
+`qurl daemon run` runs the long-running sharing process in the foreground for
+a headless deployment or for a program that supervises the daemon itself.
 With no headless flags, it serves the local shares already stored under
 `--state-dir`.
+
+#### Headless deployments
 
 Generated Docker, Kubernetes, and other headless deployment instructions can
 also supply `--headless-config <share.yaml>`. This is a non-secret, read-only
@@ -288,11 +300,53 @@ the secret recoverable. Verify that the warm start connects, then remove the
 secret mount and delete the one-time secret. A complete warm start does not read
 or require that file.
 
-Commands that take a CRID assess it locally first: a likely typo (bad
-checksum, wrong alphabet) is warned about and still forwarded — the server
-is the only authoritative validator. Sending a **test-environment CRID to
-the production endpoint** is refused unless `--yes` is given; a production
-CRID aimed at a non-production endpoint warns and proceeds.
+#### External supervision
+
+When another program — a desktop app, a service manager — owns the daemon
+process instead of qURL's per-user background job, start the daemon with
+`--supervision external` and run every lifecycle command against that state
+directory with the same setting (flag `--supervision`, environment
+`QURL_DAEMON_SUPERVISION`, config key `daemon_supervision`):
+
+Use a dedicated, fresh state directory rather than the native default. For
+account-key enrollment, the first daemon invocation establishes the marker and
+is expected to exit with `no durable account owner`. Then log in, and start
+the daemon again:
+
+```bash
+export QURL_CONNECTOR_STATE_DIR="$STATE_DIR"
+export QURL_DAEMON_SUPERVISION=external
+qurl daemon run # first invocation marks the namespace, then exits 1
+qurl login
+qurl daemon run # keep running under the supervisor
+```
+
+Once the daemon is running, lifecycle commands in another process use the same
+two environment settings. A dedicated state directory avoids marking the native
+default namespace by accident; use a different directory to return to native
+supervision instead of deleting a marker beside durable credentials.
+
+External supervision changes three things:
+
+- The first `daemon run --supervision external` marks the state directory as
+  externally supervised (`runtime_mode.json`). It accepts only a directory
+  that holds no natively managed state, and the mark is permanent.
+- `publish`, `start`, and `restart` reload the running daemon and never
+  install or replace a background job. When the daemon is not running they
+  fail with exit code 11 and roll their own cloud change back, so the
+  supervisor can start the daemon and retry.
+- `publish`, `start`, `restart`, `stop`, `delete`, `login`, and `daemon run`
+  refuse a state directory whose mark does not match their `--supervision`
+  setting (exit code 3). A plain `qurl` command therefore never installs a
+  background job over a supervised daemon, and a supervised command never
+  adopts a natively managed directory. Read-only commands work either way.
+
+On every process start, including a warm restart or headless start, an
+externally supervised daemon waits up to 30 seconds for its supervisor's
+first reload (every lifecycle command sends one) before serving the stored
+shares on its own. The supervisor should send `POST /reload` after IPC is
+ready and all runtime state has been restored to avoid that delay. Stopping the daemon is a local act: it changes no sharing
+state, so the shares resume on the next start.
 
 ### qurl publish
 

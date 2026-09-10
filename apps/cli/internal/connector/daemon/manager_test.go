@@ -1024,6 +1024,11 @@ func ipcStatus(t *testing.T, client IPCClient) IPCStatus {
 	if err != nil || !running {
 		t.Fatalf("status running=%v err=%v", running, err)
 	}
+	// The daemon's own process ID rides every status answer so an external
+	// supervisor can stop a daemon it adopted rather than spawned.
+	if status.Pid != os.Getpid() {
+		t.Fatalf("status pid = %d, want this process %d", status.Pid, os.Getpid())
+	}
 	return status
 }
 
@@ -1244,5 +1249,129 @@ func TestManagerRestartOfAWithheldRouteWaitsForItsReAdd(t *testing.T) {
 	}, "restart applied after the route was re-added")
 	if got := manager.Diagnostics()["a"].State; got != diagnosticStateServing {
 		t.Fatalf("sibling a state = %q, want serving", got)
+	}
+}
+
+// TestManagerDefersFirstReconcileUntilTrigger pins external supervision's
+// start-up contract: a deferred daemon serves nothing until its supervisor's
+// first reload, so process-memory state pushed over IPC is in place before
+// any route is registered.
+func TestManagerDefersFirstReconcileUntilTrigger(t *testing.T) {
+	registry := &memoryRegistry{shares: map[string]connectorstate.LocalShare{"a": daemonShare("a", 1, "on")}}
+	factory := newFakeGroupFactory()
+	manager, err := NewManager(registry, factory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.DeferFirstReconcile = true
+	manager.firstReconcileBound = time.Hour
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- manager.Run(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("manager did not stop")
+		}
+	})
+	time.Sleep(50 * time.Millisecond)
+	if factory.startCount() != 0 {
+		t.Fatalf("deferred manager built %d groups before its first trigger", factory.startCount())
+	}
+	if running := manager.Running(); len(running) != 0 {
+		t.Fatalf("deferred manager reports running shares %v before its first trigger", running)
+	}
+	manager.Trigger()
+	waitServing(t, manager, "a")
+	if factory.startCount() != 1 {
+		t.Fatalf("groups after the first trigger = %d, want 1", factory.startCount())
+	}
+}
+
+// TestManagerDeferredFirstReconcileIsBounded pins that a supervisor which
+// died between spawning the daemon and its first reload cannot leave the
+// daemon idle forever: the bound releases the reconcile on its own.
+func TestManagerDeferredFirstReconcileIsBounded(t *testing.T) {
+	registry := &memoryRegistry{shares: map[string]connectorstate.LocalShare{"a": daemonShare("a", 1, "on")}}
+	factory := newFakeGroupFactory()
+	manager, err := NewManager(registry, factory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.DeferFirstReconcile = true
+	manager.firstReconcileBound = 20 * time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- manager.Run(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("manager did not stop")
+		}
+	})
+	waitServing(t, manager, "a")
+	if factory.startCount() != 1 {
+		t.Fatalf("groups after the bound elapsed = %d, want 1", factory.startCount())
+	}
+}
+
+func TestManagerDeferredFirstReconcileStopsOnCancellation(t *testing.T) {
+	registry := &memoryRegistry{shares: map[string]connectorstate.LocalShare{"a": daemonShare("a", 1, "on")}}
+	factory := newFakeGroupFactory()
+	manager, err := NewManager(registry, factory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.DeferFirstReconcile = true
+	manager.firstReconcileBound = time.Hour
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- manager.Run(ctx) }()
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("deferred manager exit = %v, want cancellation", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("deferred manager did not stop on cancellation")
+	}
+	if factory.startCount() != 0 {
+		t.Fatalf("canceled deferred manager built %d groups", factory.startCount())
+	}
+}
+
+// TestManagerDeferredFirstReconcileHonorsAnEarlierTrigger pins that a
+// supervisor's reload which lands before Run starts (the IPC server accepts
+// requests concurrently with the manager's start) is not lost: it is the
+// buffered trigger that releases the deferred first reconcile.
+func TestManagerDeferredFirstReconcileHonorsAnEarlierTrigger(t *testing.T) {
+	registry := &memoryRegistry{shares: map[string]connectorstate.LocalShare{"a": daemonShare("a", 1, "on")}}
+	factory := newFakeGroupFactory()
+	manager, err := NewManager(registry, factory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.DeferFirstReconcile = true
+	manager.firstReconcileBound = time.Hour
+	manager.Trigger()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- manager.Run(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("manager did not stop")
+		}
+	})
+	waitServing(t, manager, "a")
+	if factory.startCount() != 1 {
+		t.Fatalf("groups after the early trigger = %d, want 1", factory.startCount())
 	}
 }
