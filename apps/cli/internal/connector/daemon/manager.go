@@ -153,6 +153,8 @@ type Manager struct {
 	// memory only: never persisted, never reported by /status, never logged.
 	// SetOverlay replaces it whole with a deep copy and no code path mutates
 	// its maps, so a route handed to the group may share one.
+	// TODO(upstream-contract): qurl-connector copies RequestHeaders rather
+	// than mutating a caller-owned route map.
 	overlay map[string]map[string]string
 
 	runner        GroupRunner
@@ -243,7 +245,9 @@ func (m *Manager) Trigger() {
 // overlay (Connector ID to header set) and requests a reconcile, so a route
 // whose header set changed is re-registered and a deferred first reconcile is
 // released exactly as by the supervisor's first reload. The copy lets the
-// caller reuse or mutate its own maps afterward.
+// caller reuse or mutate its own maps afterward. Re-registration can interrupt
+// in-flight requests. During session rotation the retiring session may retain
+// old headers until replacement promotion and drain; this is not revocation.
 func (m *Manager) SetOverlay(overlay map[string]map[string]string) {
 	m.storeOverlay(overlay)
 	m.Trigger()
@@ -496,10 +500,11 @@ func (m *Manager) recordDesired(desired []connectorstate.LocalShare) ([]restartE
 			delete(m.routeToRes, previous.route.RouteID)
 		}
 		next := trackedShare{share: share, route: route, retryAt: previous.retryAt}
-		if !previous.route.Equal(route) {
-			// A route re-registering under a changed target or header set joins
-			// the group afresh with no pending backoff (a brand-new route
-			// carries none).
+		previousTarget, nextTarget := previous.route, route
+		previousTarget.RequestHeaders, nextTarget.RequestHeaders = nil, nil
+		if !previousTarget.Equal(nextTarget) {
+			// Target changes may recover a refused route. Header changes do
+			// not change its platform authorization and must retain backoff.
 			next.retryAt = time.Time{}
 		}
 		m.tracked[share.ResourceID] = next

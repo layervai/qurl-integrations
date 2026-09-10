@@ -1615,3 +1615,27 @@ func TestManagerDeferredFirstReconcileHonorsAnEarlierTrigger(t *testing.T) {
 		t.Fatalf("groups after the early trigger = %d, want 1", factory.startCount())
 	}
 }
+
+func TestOverlayChangePreservesRefusalBackoff(t *testing.T) {
+	registry := &memoryRegistry{shares: map[string]connectorstate.LocalShare{}}
+	manager, err := NewManager(registry, newFakeGroupFactory())
+	if err != nil {
+		t.Fatal(err)
+	}
+	share := daemonShare("a", 1, "on")
+	manager.recordDesired([]connectorstate.LocalShare{share})
+	retryAt := time.Now().Add(time.Minute)
+	tracked := manager.tracked["a"]
+	tracked.retryAt = retryAt
+	manager.tracked["a"] = tracked
+	manager.SetOverlay(map[string]map[string]string{"connector-a": {overlayHeader: "new"}})
+	manager.recordDesired([]connectorstate.LocalShare{share})
+	if !manager.tracked["a"].retryAt.Equal(retryAt) {
+		t.Fatal("header change reset platform refusal backoff")
+	}
+	share.LocalPort++
+	manager.recordDesired([]connectorstate.LocalShare{share})
+	if !manager.tracked["a"].retryAt.IsZero() {
+		t.Fatal("target change retained old refusal backoff")
+	}
+}

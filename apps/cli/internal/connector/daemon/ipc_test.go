@@ -13,10 +13,13 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
+
+	connectorshare "github.com/layervai/qurl-connector/pkg/share"
 
 	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 )
@@ -626,4 +629,24 @@ func emptyManager(t *testing.T) *Manager {
 		t.Fatal(err)
 	}
 	return manager
+}
+
+func TestOverlayIPCBoundsRouteCount(t *testing.T) {
+	t.Parallel()
+	overlay := make(map[string]map[string]string)
+	for i := range connectorshare.MaxGroupRoutes {
+		overlay[strconv.Itoa(i)] = map[string]string{"X": "v"}
+	}
+	raw := overlayJSON(t, overlay)
+	if _, err := decodeIPCOverlay(strings.NewReader(string(raw))); err != nil {
+		t.Fatalf("at-limit overlay rejected: %v", err)
+	}
+	overlay["extra"] = map[string]string{"X": "v"}
+	raw = overlayJSON(t, overlay)
+	if len(raw) >= maxIPCOverlayBytes {
+		t.Fatal("fixture exceeds byte limit")
+	}
+	if _, err := decodeIPCOverlay(strings.NewReader(string(raw))); err == nil {
+		t.Fatal("overlay above route limit accepted")
+	}
 }

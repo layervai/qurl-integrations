@@ -908,6 +908,14 @@ func TestPerShareManagerFansOutOverlay(t *testing.T) {
 			t.Fatalf("group %s pushes after c published = %d, want still one", id, got)
 		}
 	}
+	for _, group := range manager.snapshotGroups() {
+		group.manager.mu.Lock()
+		count := len(group.manager.overlay)
+		group.manager.mu.Unlock()
+		if count != 1 {
+			t.Fatalf("group retains %d overlay entries, want only its own", count)
+		}
+	}
 	manager.SetOverlay(nil)
 	for _, id := range []string{"a", "b", "c"} {
 		runner := runnerFor(t, factory, id)

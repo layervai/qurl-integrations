@@ -81,6 +81,10 @@ func checkReleasedDirectRequirement(path string, raw []byte, modulePath string) 
 	}
 
 	for _, replacement := range parsed.Replace {
+		if strings.HasPrefix(replacement.New.Path, "github.com/layervai/") &&
+			(!semver.IsValid(replacement.New.Version) || module.IsPseudoVersion(replacement.New.Version)) {
+			return fmt.Errorf("%s: %s replacement must use a tagged semantic version", path, replacement.New.Path)
+		}
 		if replacement.Old.Path == modulePath {
 			return fmt.Errorf("%s: %s must not be replaced: released CLI must use the reviewed public module", path, modulePath)
 		}
@@ -138,6 +142,17 @@ func TestCheckReleasedDirectRequirement(t *testing.T) {
 			name:    "pseudo version",
 			goMod:   "module example.com/cli\n\nrequire " + connectorModule + " v0.8.7-0.20260829010203-abcdefabcdef\n",
 			wantErr: "want a tagged semantic version",
+		},
+		{
+			name: "tagged first-party replacement",
+			goMod: "module example.com/cli\n\nrequire " + connectorModule + " v0.8.6\n" +
+				"replace github.com/fatedier/frp => github.com/layervai/frp v1.0.1\n",
+		},
+		{
+			name: "untagged first-party replacement",
+			goMod: "module example.com/cli\n\nrequire " + connectorModule + " v0.8.6\n" +
+				"replace github.com/fatedier/frp => github.com/layervai/frp v1.0.1-0.20260906231730-9a0e4ee61964\n",
+			wantErr: "replacement must use a tagged semantic version",
 		},
 		{
 			name:    "malformed go.mod",
