@@ -115,7 +115,7 @@ func TestLoginProjections(t *testing.T) {
 		if out.Len() != 0 {
 			t.Errorf("login text is a status message; stdout must stay empty, got %q", out.String())
 		}
-		for _, want := range []string{"Enrolled this device for own_output_test.", "Account key:", "consumed, not stored"} {
+		for _, want := range []string{"Enrolled this device for own_output_test.", "Enrollment credential:", "consumed, not stored"} {
 			if !strings.Contains(errBuf.String(), want) {
 				t.Errorf("confirmation missing %q:\n%s", want, errBuf.String())
 			}

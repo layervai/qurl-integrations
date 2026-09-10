@@ -14,3 +14,7 @@ func openExternalEnrollmentTokenNoFollow(string) (*os.File, error) {
 func validateOpenExternalEnrollmentToken(*os.File, os.FileInfo) error {
 	return errors.New("external enrollment token files are unsupported on this platform")
 }
+
+func validateExternalEnrollmentTokenPlatform() error {
+	return errors.New("external enrollment token files are unsupported on this platform")
+}

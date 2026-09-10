@@ -30,3 +30,5 @@ func validateOpenExternalEnrollmentToken(_ *os.File, info os.FileInfo) error {
 	}
 	return nil
 }
+
+func validateExternalEnrollmentTokenPlatform() error { return nil }
