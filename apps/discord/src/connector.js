@@ -531,7 +531,7 @@ const DETECT_TUNNEL_HOST_SUFFIXES = detectTunnelHostSuffixesForEndpoint(config.Q
 // resource_id is a stable, NON-secret identifier, so caching it across calls is
 // safe and skips a slug lookup on every detect. CACHE ONLY THIS, NEVER the
 // minted access token or qurl_site: each detect mints a FRESH ephemeral qURL (a
-// short-lived credential — the mint sets expires_in: '5m') and the native opening/knock
+// short-lived credential — mint and session durations are both '5m') and the native opening/knock
 // grants network access to the caller's CURRENT IP/knock-window. A stale token
 // would be a long-lived credential to leak; qurl_site is per-mint and must stay
 // paired with the fresh knock.
@@ -771,23 +771,15 @@ async function resolveDetectTarget(guildId) {
     _detectResourceId = resourceId;
   }
 
-  // Mint a fresh ephemeral qURL on the resource (per call). `expires_in: '5m'`
-  // bounds the credential lifetime AND caps accumulation of unused mints — the
-  // bot never deletes them, it relies on expiry. Detect uses the token within
-  // seconds (mint → native opening), so 5m is generous margin, not a usage window. The
-  // 201 carries the native credential in the qurl_link fragment. Breadcrumb a
-  // mint failure (message only — no token, no URL) then rethrow so an
-  // activation-time failure is diagnosable at the handler.
-  // TODO(upstream-contract): confirm qurl-service honors `expires_in` on a
-  // resource mint during the sandbox soak (CI mocks the SDK, so this isn't
-  // exercised against the live API here).
+  // Mint a fresh qURL and bound its access session separately. Expiring a
+  // qURL does not shorten an already-open native access grant.
   const targetPath = `${DETECT_TARGET_PATH}/discord/${guildId}`;
   let targetUrl;
   let minted;
   try {
-    // TODO(upstream-contract): the resource-mint API accepts and echoes target_path.
     minted = await getQurlClient().createQurlForResource(resourceId, {
       expires_in: DETECT_LINK_EXPIRES_IN,
+      session_duration: DETECT_LINK_EXPIRES_IN,
       target_path: targetPath,
     });
   } catch (err) {
@@ -802,7 +794,7 @@ async function resolveDetectTarget(guildId) {
     throw err;
   }
   try {
-    // TODO(upstream-contract): NHP binds this exact path; infra #1562 scopes the lookup by its guild.
+    // NHP authorizes the path against active grants; infra scopes lookup by guild.
     if (minted?.target_path !== targetPath) {
       throw new Error('detect mint returned a mismatched guild path');
     }

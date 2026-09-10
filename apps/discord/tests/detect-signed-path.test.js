@@ -35,7 +35,7 @@ beforeEach(() => {
 });
 it('mints the exact guild path and sends no API key or guild header', async () => {
   await expect(detect(Buffer.from('image'), { guildId, contentType: 'image/png' })).resolves.toEqual(result);
-  expect(mockClient.createQurlForResource).toHaveBeenCalledWith(resourceId, { expires_in: '5m', target_path: path });
+  expect(mockClient.createQurlForResource).toHaveBeenCalledWith(resourceId, { expires_in: '5m', session_duration: '5m', target_path: path });
   expect(mockOpen).toHaveBeenCalledWith({ qurl });
   expect(send).toHaveBeenCalledWith(expect.objectContaining({ method: 'POST', headers: { 'Content-Type': 'image/png' } }));
   expect(opener.fetch).toHaveBeenCalledWith(expect.any(Function), { redirects: 'error' });
@@ -93,7 +93,7 @@ it('caches only resource identity and mints anew for each guild', async () => {
   opener.fetch.mockImplementation(async build => send(build(new URL(otherTarget))));
   await detect(Buffer.from('x'), { guildId: otherGuild });
   expect(mockClient.listAllResources).toHaveBeenCalledTimes(1);
-  expect(mockClient.createQurlForResource).toHaveBeenLastCalledWith(resourceId, { expires_in: '5m', target_path: `/api/detect/discord/${otherGuild}` });
+  expect(mockClient.createQurlForResource).toHaveBeenLastCalledWith(resourceId, { expires_in: '5m', session_duration: '5m', target_path: `/api/detect/discord/${otherGuild}` });
 });
 it.each([[[]], [[{ status: 'active', resource_id: resourceId }, { status: 'active', resource_id: resourceId }]]])('rejects absent or ambiguous resources', async resources => {
   mockClient.listAllResources.mockImplementation(async function* () { yield* resources; });
