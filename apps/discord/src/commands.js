@@ -23,8 +23,6 @@ const crypto = require('crypto');
 const config = require('./config');
 const db = require('./store');
 const logger = require('./logger');
-const viewUpdateRegistry = require('./view-update-registry');
-const { createHandleViewUpdate } = require('./view-update-handler');
 const {
   COLORS,
   TIMEOUTS,
@@ -181,8 +179,50 @@ function emitMintFailureAudit(error, { sendId, kind }) {
 // Extracted to deduplicate ~13 identical `.catch(err => logger.warn(...))`
 // one-liners across this file.
 const logIgnoredDiscordErr = (err) => logger.warn('Discord API op failed (ignored)', { error: err.message });
+
 const { sendDM } = require('./discord');
 const { editDM, sendChannelMessage } = require('./discord-rest');
+
+// A component interaction owns its flow mutation only after Discord accepts
+// its acknowledgement. SQS delivery and Gateway reconnects are at-least-once:
+// a duplicate interaction loses the one-shot deferUpdate race with Discord.
+// Continuing after that failure lets the unacknowledged copy mutate DDB, then
+// makes the acknowledged copy lose OCC and replace a valid card with the
+// "superseded" error. Stop at the acknowledgement boundary for every remote
+// or unknown error, not only Discord 10062/40060 responses: a transport failure
+// has an unknown outcome, so continuing could let an unacknowledged copy mutate
+// state. The one exception is discord.js's local InteractionAlreadyReplied
+// error when this same interaction object records that it already acknowledged.
+// If the sole delivery has a transport failure, Discord keeps its retry/toast
+// UX and the user can click again. Preserving state is the safer outcome.
+async function deferUpdateOrStop(interaction, flowId) {
+  try {
+    await interaction.deferUpdate();
+    return true;
+  } catch (err) {
+    // discord.js throws this locally when this interaction object already
+    // completed an acknowledgement. That means this copy still owns the
+    // action. Reconstructed duplicate deliveries use separate objects whose
+    // flags start false, so their rejected REST acknowledgement still stops.
+    if (err?.code === 'InteractionAlreadyReplied'
+        && (interaction.deferred || interaction.replied)) {
+      logger.debug('Interaction was already acknowledged by this handler; continuing', {
+        flow_id: flowId,
+        custom_id: interaction.customId ?? null,
+      });
+      return true;
+    }
+    logger.warn('Interaction acknowledgement failed — stopping before state change', {
+      flow_id: flowId,
+      custom_id: interaction.customId ?? null,
+      error_code: err?.code ?? err?.rawError?.code ?? null,
+      status_code: err?.status ?? null,
+      error: err?.message,
+    });
+    return false;
+  }
+}
+
 // renderViewCounter lives in its own leaf module so the cross-replica
 // webhook fast-path (routes/qurl-webhook.js) can import the SAME pure
 // renderer without pulling commands.js (+ discord.js) into the HTTP
@@ -1292,85 +1332,23 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
     });
   }
 
-  // Hoisted so the createHandleViewUpdate factory closes over the
-  // live `let` binding rather than a pre-initialized TDZ slot — a
-  // future synchronous-handler refactor would otherwise hit
-  // ReferenceError on getViewed/setViewed.
   let viewed = 0;
   let allDone = false;
 
-  // View-update push (feat #60). Shared callback per monitor —
-  // registered against every tracked qurl_id; render goes through
-  // linkStatus mutation + safeEdit (NOT runTick) to avoid the
-  // per-event DDB BatchGet. Polling tick remains the correctness
-  // primitive. Handler factory in view-update-handler.js so the
-  // state matrix is unit-testable without a full monitor closure.
-  //
-  // Unregister at stop() iterates `trackedQurlIds` directly (set
-  // cleared AFTER the unregister loop). Registry.unregister is a
-  // no-op for keys never registered (e.g. when the flag is off), so
-  // iterating the superset is safe.
-  const handleViewUpdate = createHandleViewUpdate({
-    sendId,
-    linkStatus,
-    getButtonRow: () => buttonRow,
-    isStopped: () => stopped,
-    isViewCounterDegraded: () => viewCounterDegraded,
-    hasInteraction: () => !!interaction,
-    getViewed: () => viewed,
-    setViewed: (n) => { viewed = n; },
-    getExpectedCount: () => expectedCount,
-    buildStatusMsg,
-    safeEdit,
-    onAllDone: () => {
-      allDone = true;
-      clearTimeout(timer);
-    },
-    logger,
-  });
-  // Hoist the flag read once per monitor — registerViewUpdateFor
-  // is called up to QURL_SEND_MAX_RECIPIENTS times (default 20000) on
-  // construction + once per /qurl add. Re-reading config on every
-  // call is negligible but the hoist reads cleaner.
-  const viewUpdatePushEnabled = config.ENABLE_VIEW_UPDATE_PUSH;
-  function registerViewUpdateFor(qurlId) {
-    if (!viewUpdatePushEnabled) return;
-    viewUpdateRegistry.register(qurlId, handleViewUpdate);
-  }
-  for (const qurlId of trackedQurlIds) {
-    registerViewUpdateFor(qurlId);
-  }
-
-  // Bumped by addRecipients. A tick whose getQurlViews resolves after
-  // generation advanced must skip its render — the views map was built
-  // against the pre-add tracked set and could under-report.
+  // A tick that began before addRecipients must not render its stale view map.
   let trackingGeneration = 0;
 
   const control = {
-    // newLinks: Array<{qurlId, username}> aligned per-recipient. Must
-    // seed `linkStatus` AND `trackedQurlIds` together — extending only
-    // the tracked set means runTick's view-flip lookup misses the new
-    // qurl_ids and the counter never advances for /qurl add recipients.
+    // Keep the status map and tracked IDs aligned for added recipients.
     addRecipients(count, newLinks) {
-      // Early-out if this monitor has already been stopped. Without
-      // this guard a post-stop addRecipients call would extend
-      // expectedCount, linkStatus, AND register new view-update
-      // callbacks against the registry — the latter wouldn't be
-      // unregistered (stop() has already iterated trackedQurlIds),
-      // pinning the closure (linkStatus + safeEdit) until process
-      // restart. Pre-#60 fields (expectedCount,
-      // linkStatus) also leaked into a dead monitor; this guard
-      // closes both the new + pre-existing leak surfaces.
+      // Ignore additions after stop; they would retain linkStatus and safeEdit until process exit.
       if (stopped) return;
       expectedCount += count;
       if (Array.isArray(newLinks)) {
         for (const item of newLinks) {
           const qid = item && item.qurlId;
           if (!qid) {
-            // Mirror the construction-time warn — an operator chasing
-            // "why is the counter blank?" needs a breadcrumb when the
-            // degraded flip happens mid-life via /qurl add, not just
-            // at the original send.
+            // Keep the monitor degraded if a later recipient has no qurl_id.
             if (!viewCounterDegraded) {
               logger.warn('Monitor view counter degraded mid-life — addRecipients link missing qurl_id', { sendId });
             }
@@ -1380,21 +1358,11 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
           if (!trackedQurlIds.has(qid)) {
             trackedQurlIds.add(qid);
             linkStatus.set(qid, { status: 'pending', username: item.username || 'unknown' });
-            // Register the new qurl_id for view-update push (feat #60).
-            // Symmetric with the construction-time loop above — the
-            // tracked set and the registry must extend together or the
-            // new recipients never get sub-second updates (the polling
-            // path catches them on the next interval regardless).
-            registerViewUpdateFor(qid);
           }
         }
       }
       trackingGeneration++;
-      // /qurl add is an explicit signal the send is NOT idle, so re-enter
-      // the dense early phase. Refreshing earlyPhaseUntil (NOT startTime,
-      // which governs the 14-min life cap) speeds the cadence back up
-      // without extending the monitor's lifetime. nextPollDelay() reads
-      // this at the NEXT reschedule.
+      // Re-enter the dense polling phase without extending monitor lifetime.
       earlyPhaseUntil = Date.now() + EARLY_POLL_WINDOW_MS;
       // Two cases:
       //   - Monitor already settled (all initial recipients viewed → the
@@ -1423,16 +1391,6 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
       stopped = true;
       clearTimeout(timer);
       activeMonitors.delete(control);
-      // Unregister the shared callback from every tracked qurl_id so
-      // the registry doesn't pin this monitor's closure state past
-      // stop() (feat #60). Load-bearing: a long-running monitor that
-      // never unregisters would otherwise hold linkStatus + safeEdit
-      // references via the shared closure until process restart.
-      // Iterates trackedQurlIds directly (no parallel bookkeeping
-      // array) — set cleared in the next two lines, so order matters.
-      for (const qurlId of trackedQurlIds) {
-        viewUpdateRegistry.unregister(qurlId, handleViewUpdate);
-      }
       linkStatus.clear();
       trackedQurlIds.clear();
       interaction = null;
@@ -6309,28 +6267,18 @@ async function handleQurlDetect(interaction) {
   // deferReply, all user-visible output is editReply.
   await interaction.deferReply({ ephemeral: true });
 
-  // Resolve the API key the same way the send paths do: per-guild BYOK
-  // first, global fallback. (handleQurlDetect resolves its own key — it's
-  // intentionally NOT in API_KEY_GATED_SUBCOMMANDS, which would
-  // double-resolve and gate before this handler runs.)
-  const apiKey = await db.getGuildApiKey(interaction.guildId) || config.QURL_API_KEY;
-  if (!apiKey) {
-    // A missing /qurl setup is an honest config error, not abuse — clear
-    // the cooldown so the user can retry the instant an admin configures
-    // the server. Matches the handler's "honest user errors clear the
-    // cooldown" design (non-image / oversize branches above). The SSRF
-    // probe is the one rejection that intentionally KEEPS the cooldown.
-    clearDetectCooldown(interaction.guildId, interaction.user.id);
-    // Audit this branch — unconfigured is an attribution outcome worth
-    // surfacing (see the handler header's audit list). No recipient is
-    // resolved on an unconfigured guild.
+  // The bot credential mints the guild-scoped capability. No customer key
+  // is sent to the detect service.
+  if (!config.QURL_API_KEY) {
+    // Detect stays outside API_KEY_GATED_SUBCOMMANDS: no guild setup is needed.
+    // Keep the cooldown for operator configuration failures; user retries cannot fix them.
     logger.audit(AUDIT_EVENTS.QURL_DETECT, {
       result: 'unconfigured',
       guild_id: interaction.guildId,
       requester_id: interaction.user.id,
     });
     return interaction.editReply({
-      content: '❌ **qURL is not configured for this server.** A server admin needs to run `/qurl setup` first.',
+      content: '❌ **Watermark detection is unavailable.** The bot operator must configure the detect credential.',
     });
   }
 
@@ -6390,7 +6338,6 @@ async function handleQurlDetect(interaction) {
     result = await detectWatermark(bytes, {
       guildId: interaction.guildId,
       contentType: attachment.contentType,
-      apiKey,
     });
   } catch (err) {
     // detectWatermark (the CONNECTOR POST — the CDN download is handled in
@@ -6604,7 +6551,7 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
   // without surfacing as an "interaction failed" toast. Mirrors
   // handleConfirmSendClick / handleConfirmCancelClick. All `update`
   // calls below become `editReply` (the interaction is now deferred).
-  await interaction.deferUpdate().catch(logIgnoredDiscordErr);
+  if (!await deferUpdateOrStop(interaction, flow_id)) return undefined;
 
   // Validate payload.resourceType BEFORE renderConfirmCardContent
   // would throw on it. A corrupt/stale DDB row (manual mutation,
@@ -6936,7 +6883,7 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
 // corrupt payload and surface re-run copy, same shape as
 // handleConfirmUserSelect's resourceType guard.
 async function handleConfirmVoiceEveryone(interaction, { flow_id, row }) {
-  await interaction.deferUpdate().catch(logIgnoredDiscordErr);
+  if (!await deferUpdateOrStop(interaction, flow_id)) return undefined;
 
   const payload = row.payload || {};
   // resourceType guard mirrors handleConfirmUserSelect — a corrupt /
@@ -7246,7 +7193,7 @@ async function handleConfirmVoiceEveryone(interaction, { flow_id, row }) {
 // re-render would re-derive picker layout from a payload that still
 // carried the prior mode and snap back.
 async function handleConfirmPickManual(interaction, { flow_id, row }) {
-  await interaction.deferUpdate().catch(logIgnoredDiscordErr);
+  if (!await deferUpdateOrStop(interaction, flow_id)) return undefined;
 
   const payload = row.payload || {};
   // resourceType guard mirrors the other confirm-card handlers — a
@@ -7323,7 +7270,7 @@ async function handleConfirmPickManual(interaction, { flow_id, row }) {
 // visibility on MENTION_EVERYONE + picker-mode; this defends against
 // a crafted HTTP interaction bypassing the render).
 async function handleConfirmEveryone(interaction, { flow_id, row }) {
-  await interaction.deferUpdate().catch(logIgnoredDiscordErr);
+  if (!await deferUpdateOrStop(interaction, flow_id)) return undefined;
 
   const payload = row.payload || {};
   const payloadResource = payload.resourceType;
@@ -7507,13 +7454,8 @@ async function handleConfirmEveryone(interaction, { flow_id, row }) {
   const newRecipientAliases = Object.fromEntries(
     valid.map((u) => [u.id, resolveRecipientAlias(u, interaction)])
   );
-  // Mode switches to EVERYONE — like voice-everyone, the click is
-  // unambiguous "fan out to all" intent. Picker row is hidden in the
-  // re-render so the user can't accidentally read back a 25-entry
-  // truncated picker selection over the @everyone fan-out (Discord's
-  // MentionableSelect default_values is capped at 25, and any picker
-  // interaction routes through handleConfirmUserSelect which replaces
-  // recipientIds with the picker's view of the world).
+  // TODO(upstream-contract): Discord caps MentionableSelect default_values at 25,
+  // so @everyone replaces any truncated picker selection.
   const newPayload = {
     ...payload,
     recipientIds: valid.map((u) => u.id),
@@ -7685,7 +7627,7 @@ async function handleConfirmExpirySelect(interaction, { flow_id, row }) {
       ephemeral: true,
     }).catch(logIgnoredDiscordErr);
   }
-  await interaction.deferUpdate().catch(logIgnoredDiscordErr);
+  if (!await deferUpdateOrStop(interaction, flow_id)) return undefined;
   const payload = row.payload || {};
   // No-op re-pick (same value as current state) → skip the DDB write
   // + version bump. A version bump would needlessly fence any
@@ -7752,7 +7694,7 @@ async function handleConfirmSelfDestructSelect(interaction, { flow_id, row }) {
       ephemeral: true,
     }).catch(logIgnoredDiscordErr);
   }
-  await interaction.deferUpdate().catch(logIgnoredDiscordErr);
+  if (!await deferUpdateOrStop(interaction, flow_id)) return undefined;
   const selfDestructSeconds = selfDestructSelectValueToSeconds(pickedValue);
   const payload = row.payload || {};
   // No-op re-pick (same value as current state) → skip the write +
@@ -7851,7 +7793,7 @@ async function handleConfirmNoteModal(interaction, { flow_id, row }) {
   // Discord's 3-second hard deadline, after which `update()` /
   // `reply()` both fail and the user gets an "interaction failed"
   // toast. Mirrors the menu handlers' shape.
-  await interaction.deferUpdate().catch(logIgnoredDiscordErr);
+  if (!await deferUpdateOrStop(interaction, flow_id)) return undefined;
   // Defensive read: `getTextInputValue` throws if the customId
   // allowlist ever drifts from SEND_NOTE_MODAL_FIELD_ID. Don't
   // silently clear the existing note — surface an ephemeral error
@@ -7935,16 +7877,15 @@ async function handleConfirmSendClick(interaction, { flow_id, row }) {
   // can take more than Discord's 3-second hard ack deadline without
   // surfacing as an "interaction failed" toast to the user. Cold
   // cache + 25 cache-miss `members.fetch` calls in `resolveRecipientUsers`
-  // alone can chew through the budget. The .catch swallows the
-  // (rare) race where Discord's gateway already acked the
-  // interaction; a duplicate defer there throws InteractionAlreadyReplied
-  // and the subsequent editReply still works.
+  // alone can chew through the budget. If Discord already accepted
+  // another copy's acknowledgement, this copy does not own the action;
+  // deferUpdateOrStop prevents any state change or send.
   //
   // All ephemeral error-replies below switch from `interaction.reply`
   // to `interaction.followUp` (the interaction is now in the
   // deferred state and `.reply` would throw); main-message updates
   // switch from `interaction.update` to `interaction.editReply`.
-  await interaction.deferUpdate().catch(logIgnoredDiscordErr);
+  if (!await deferUpdateOrStop(interaction, flow_id)) return undefined;
 
   // Bot-kicked-between-confirm-and-Send: `interaction.guild` is null.
   // Without this guard the user sees "all recipients left the server"
@@ -8233,7 +8174,7 @@ async function handleConfirmCancelClick(interaction, { flow_id, row }) {
   // is fast in the happy path, but a DDB blip or slow region could
   // still blow the budget. Same pattern handleConfirmSendClick uses
   // (deferUpdate at top, editReply / followUp downstream).
-  await interaction.deferUpdate().catch(logIgnoredDiscordErr);
+  if (!await deferUpdateOrStop(interaction, flow_id)) return undefined;
   // Targeted catch around deleteFlow mirrors handleConfirmSendClick's
   // guards on resolveRecipientUsers + getGuildApiKey. Without it, a
   // DDB throw propagates to the dispatcher's outer catch which

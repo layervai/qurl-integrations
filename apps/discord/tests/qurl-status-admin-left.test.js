@@ -13,7 +13,6 @@
 // "Unknown Member" error code (10007) so transient errors don't
 // mis-flag a present admin as gone.
 
-// OAUTH_STATE_SECRET is pinned globally in tests/setup-env.js.
 process.env.KEY_ENCRYPTION_KEY = '1'.repeat(64);
 process.env.GUILD_ID = '123456789012345678';
 
@@ -583,8 +582,6 @@ describe('/qurl status — admin-offboarding nudge (#185)', () => {
     expect(replyContent).toContain('qURL is configured');
     expect(replyContent).toContain('has left this server');
     expect(replyContent).toContain('<@admin-departed>');
-    // Confirms the remediation guidance is on the wire — the whole
-    // point of the nudge is to tell remaining admins what to do next.
     expect(replyContent).toMatch(/run.*\/qurl setup/i);
   });
 
@@ -604,9 +601,6 @@ describe('/qurl status — admin-offboarding nudge (#185)', () => {
     await handleCommand(interaction);
     const replyContent = interaction._editReply.mock.calls[0][0].content;
     expect(replyContent).toContain('qURL is configured');
-    // Critical: a rate-limit spike must NOT silently tell an admin
-    // their colleague is gone. Only the specific 10007 fires the
-    // notice.
     expect(replyContent).not.toContain('has left this server');
   });
 });

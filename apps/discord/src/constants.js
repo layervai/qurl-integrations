@@ -633,29 +633,9 @@ const GATEWAY_DISPATCH_TYPES = Object.freeze({
   INTERACTION_CREATE: 'INTERACTION_CREATE',
 });
 
-// Structured-log `kind` tags used to correlate failures across the
-// async-boundary trio: the gateway-WS-driven unhandledRejection
-// handler in index.js, the worker-tier dispatch handler rejection
-// path in event-consumer.js (trackDispatch's .catch), and the
-// publish-failure path in event-publisher.js. All three emit the
-// same `kind: 'unhandledRejection'` tag so a single CloudWatch
-// query — filtering on the structured field — finds every site
-// without grepping message text or maintaining per-site filter
-// rules. Centralizing the literal here makes the contract
-// explicit and lets a future tag addition (LOG_KIND_AUDIT, etc.)
-// follow the same pattern.
-//
-// Frozen — see AUDIT_EVENTS for the rationale. A mutation here
-// would silently make one site stop matching the CloudWatch
-// alarm filter the other two sites still emit.
+// Use one tag for gateway and worker rejection alerts.
 const LOG_KINDS = Object.freeze({
   UNHANDLED_REJECTION: 'unhandledRejection',
-  // Separate kind for view-update publish/dispatch failures (feat #60).
-  // Decoupled from UNHANDLED_REJECTION so CloudWatch alarm filters
-  // targeting interaction-loss (event-shipper + global unhandled-
-  // rejection paths) don't page on view-update failures — those are
-  // covered by the polling-tick fallback at the render layer.
-  VIEW_UPDATE_PUBLISH_FAIL: 'viewUpdatePublishFail',
 });
 
 module.exports = {

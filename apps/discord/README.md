@@ -89,7 +89,7 @@ setup) means required to use that feature.
 |----------|----------|-------------|
 | `DISCORD_TOKEN` | Yes | Discord bot token |
 | `DISCORD_CLIENT_ID` | Yes | Discord application client ID |
-| `QURL_API_KEY` | No | Optional fallback qURL API key. Each server normally connects its own key via `/qurl setup`. |
+| `QURL_API_KEY` | `/qurl detect` | Requires `qurl:read` and `qurl:write` for detect; also the fallback for send operations without a server key from `/qurl setup`. |
 | `QURL_ENDPOINT` | No | qURL API base URL (defaults to production; localhost in dev) |
 | `CONNECTOR_URL` | No | qURL connector URL for file upload + serving |
 | `BASE_URL` | OAuth setup | Public `https://` origin of the bot; required to complete the OAuth `/qurl setup` flow (defaults to `http://localhost:3000`). |
@@ -97,12 +97,31 @@ setup) means required to use that feature.
 | `METRICS_TOKEN` | Production | Bearer token guarding the `/metrics` endpoint |
 | `MAP_COMMAND_ENABLED` | No | Set to `true` to enable `/qurl map` (default off) |
 | `DETECT_COMMAND_ENABLED` | No | Set to `true` to enable `/qurl detect` (default off) |
-| `DETECT_TUNNEL_SLUG` | `/qurl detect` | qURL tunnel resource slug used to mint short-lived `/api/detect` qURLs |
+| `QURL_DEPLOYMENT` | Native `/qurl detect` | Environment-specific public SDK trust: JSON or an absolute JSON file path, with `issuers` and `cells` |
+| `DETECT_TUNNEL_SLUG` | `/qurl detect` | qURL tunnel resource slug used to mint short-lived `/api/detect/discord/<guild_id>` qURLs |
 | `DETECT_EXTRA_NON_PROD_QURL_ENDPOINT_HOSTS` | No | Comma-separated extra non-prod `QURL_ENDPOINT` hosts for `/qurl detect` (extends the built-in set below) |
 | `DETECT_EXTRA_NON_PROD_HOST_SUFFIXES` | No | Comma-separated extra `qurl_site` suffixes granted for the hosts above; each entry must start with `.` |
 | `GOOGLE_MAPS_API_KEY` | `/qurl map` | Google Maps key for location autocomplete (needed when map is enabled) |
 | `GUILD_ID` | No | Scope commands to a single server; unset runs the multi-tenant public bot |
 | `PORT` | No | HTTP listen port (default 3000) |
+
+Discord uses `@layervai/qurl/node` to open current `qv2t1` links. Set
+`QURL_ENDPOINT` and `QURL_DEPLOYMENT` for the same environment. The deployment
+settings contain trusted issuer public keys (`kid`, `spki_der_b64`) and cell
+endpoints (`host`, `port`, `server_public_key_b64`). No trust root is embedded
+in the bot image. The SDK verifies the link and opens native UDP access, then
+Discord sends the image to the authenticated detect endpoint. Each request
+closes its opener on success or failure. Detect requires a signed native link.
+The bot mints `target_path=/api/detect/discord/<guild_id>` from the authenticated
+Discord interaction. The image request carries no API key or guild header.
+The detect service uses one exact guild-scoped attribution read. The private
+binding route remains separate and does not accept these guild-scoped rows.
+
+Run `npm run test:detect:live` with the deployment environment above and
+`DETECT_SMOKE_GUILD_ID` set to a test server ID. The check mints, opens, and
+POSTs an unmarked PNG through the real tunnel, and requires a no-match result.
+To check known attribution, add `DETECT_SMOKE_QURL_ID` and run
+`npm run test:detect:live -- /absolute/path/to/watermarked.png`.
 
 When enabling `/qurl detect`, the minted `qurl_site` must be host-only. The
 detect target is constructed from that value, so both have the same hostname
@@ -116,10 +135,11 @@ The authenticated mint is the authority for that hostname, so any hostname
 with only non-empty labels that it returns beneath an allowlisted suffix is
 accepted after the URL and SSRF guards, including hostnames with multiple
 routing labels. The suffix allowlist constrains the target to a trusted qURL
-tunnel namespace; it is not a tenant identity signal. The case-sensitive
-`resource_id` returned by `resolve()` is checked against the slug-resolved
-public key. A missing, empty, or mismatched `resource_id` fails closed before
-the bot sends image bytes or its API-key Bearer to the tunnel host.
+tunnel namespace; it is not a tenant identity signal. The authenticated native
+target must match the exact expected URL before image bytes leave the bot.
+The mint response also must echo the selected resource ID and guild path.
+Both the qURL expiry and access-session duration are set to five minutes;
+expiring a qURL does not shorten an already-open session.
 
 Production `QURL_ENDPOINT` accepts only `*.qurl.site`; sandbox/staging
 tunnel suffixes are accepted as a non-prod set only for explicit non-prod qURL API hosts
@@ -140,8 +160,8 @@ The bot lists the detect resource by slug only and filters active resources
 client-side because the live API rejects combining `slug` and `status`; the SDK
 auto-paginator walks historical revoked rows for this single dark-launch slug.
 If a tunnel rotation creates more than one active resource for the slug, detect
-fails closed instead of guessing which tunnel should receive the Bearer-carrying
-image POST. Persistent hard failures arm a short process-wide retry backoff for
+fails closed instead of guessing which tunnel should receive the image POST.
+Persistent hard failures arm a short process-wide retry backoff for
 the single dark-launch slug so a broken tunnel does not re-walk the full slug
 history on every detect attempt. Before broad enablement, keep the detect slug's
 revoked-resource history trimmed or add upstream server-side active filtering;

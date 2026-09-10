@@ -2,12 +2,10 @@
 //   - gateway-lock           (the DDB CAS lock primitive)
 //   - gateway-peer-heartbeat (standby discovery)
 //   - gateway-control-client (outbound push-handoff)
-//   - manager                (the gateway-ws-shim itself — connect()/isConnected();
-//                              the raw @discordjs/ws WebSocketManager
-//                              does NOT expose isConnected(), only
-//                              async fetchStatus(), which is why the
-//                              shim wraps it rather than the leader
-//                              consuming it directly)
+//   - manager                (the gateway-ws-shim itself — connect(),
+//                              isConnected(), and isRecovering(); the raw
+//                              @discordjs/ws WebSocketManager does not expose
+//                              the two synchronous state methods)
 //
 // And exposes the four hooks the wiring layer (index.js, PR 13b.3)
 // plugs into the other Pillar 3 components:
@@ -53,10 +51,9 @@
 //      If this throws, no `heldLock` flag is set; the watchdog never
 //      sees lock-held when we don't actually hold it.
 //   2. Set `heldLock = true`. Watchdog can now observe and act.
-//   3. `manager.connect()`. If this throws, heldLock stays true; the
-//      watchdog picks up next tick and retries the connect. This is
-//      the design's "succeeded transferLock but failed connect"
-//      recovery path.
+//   3. If the shim reports automatic recovery, accept the handoff and
+//      let that single recovery continue. Otherwise call manager.connect().
+//      If connect throws, heldLock stays true; the watchdog retries.
 // If we flipped heldLock=true BEFORE adopt, a transient adopt failure
 // would leave the watchdog convinced we hold the lock when we don't
 // even have a version cursor. Order matters.
@@ -90,7 +87,7 @@ const DEFAULT_INBOUND_CONNECT_TIMEOUT_MS = 5_000;
 
 // `manager` is conventionally the gateway-ws-shim instance (passed
 // from startHotStandby), but any object satisfying connect() +
-// sync isConnected() is accepted. The raw @discordjs/ws
+// sync isConnected() + isRecovering() is accepted. The raw @discordjs/ws
 // WebSocketManager does NOT satisfy this contract — it exposes
 // only an async fetchStatus() — which is why the shim wraps it.
 function createGatewayLeader({
@@ -111,8 +108,9 @@ function createGatewayLeader({
   if (!controlClient) throw new Error('createGatewayLeader: controlClient is required');
   if (!manager
       || typeof manager.connect !== 'function'
-      || typeof manager.isConnected !== 'function') {
-    throw new Error('createGatewayLeader: manager with connect() and isConnected() is required');
+      || typeof manager.isConnected !== 'function'
+      || typeof manager.isRecovering !== 'function') {
+    throw new Error('createGatewayLeader: manager with connect(), isConnected(), and isRecovering() is required');
   }
   if (!selfInstanceId) throw new Error('createGatewayLeader: selfInstanceId is required');
   if (!shardId) throw new Error('createGatewayLeader: shardId is required');
@@ -242,10 +240,11 @@ function createGatewayLeader({
       try {
         const renewed = await lock.renewLock();
         if (!renewed.renewed) {
-          // CAS failed — peer took the lock out-of-band. Watchdog
-          // will see heldLock=false and stop trying to connect; the
-          // next tick will try acquire again.
-          logger.warn('gateway-leader: lost lock (peer took over out-of-band)');
+          // CAS failed because the row changed or disappeared. The watchdog
+          // confirms the current holder before it treats a still-connected
+          // shard as split brain. If no peer owner is present, the next leader
+          // tick can acquire the absent/expired row again.
+          logger.warn('gateway-leader: lost lock (row changed or disappeared)');
           heldLock = false;
         }
       } catch (err) {
@@ -367,7 +366,7 @@ function createGatewayLeader({
         throw new Error('leader_closed');
       }
       // Stray-handoff guard: if we already hold the lock AND the WS
-      // is connected, a second inbound handoff is either a duplicate
+      // is connected or recovering, a second inbound handoff is either a duplicate
       // from a retry-ing active or a misrouted body (the server-side
       // peer_instance_id binding + isKnownPeer check make this
       // low-probability but not impossible — e.g., a cold-fallback
@@ -377,11 +376,11 @@ function createGatewayLeader({
       // calling manager.connect() would race the existing WS state
       // (@discordjs/ws's WebSocketManager is NOT concurrent-safe).
       // Reject cleanly — the active will exit anyway.
-      if (heldLock && manager.isConnected()) {
-        logger.warn('gateway-leader: inbound handoff rejected — already holding lock + connected', {
+      if (heldLock && (manager.isConnected() || manager.isRecovering())) {
+        logger.warn('gateway-leader: inbound handoff rejected — already holding lock + active WS lifecycle', {
           activeInstanceId, expectedVersion,
         });
-        throw new Error('already_holding_lock_and_connected');
+        throw new Error('already_holding_lock_and_active_ws_lifecycle');
       }
       // Step 1: bootstrap version cursor. THROWS if expectedVersion
       // is malformed — protects against a future control-channel-server
@@ -403,6 +402,17 @@ function createGatewayLeader({
       // the watchdog would race the connect and possibly redundantly
       // re-call it.
       heldLock = true;
+      // The shim may already be inside @discordjs/ws automatic recovery when
+      // this replica receives the lock. Treat that recovery as the handoff's
+      // connection path. Calling connect() here would race the same 500 ms
+      // Idle window that the watchdog guards. The process-wide 20-second
+      // stuck-recovery bound continues across this lock adoption.
+      if (manager.isRecovering()) {
+        logger.info('gateway-leader: adopted lock; automatic recovery already in progress', {
+          activeInstanceId, expectedVersion,
+        });
+        return;
+      }
       // Step 3: bring up the WS. The active is waiting for the ACK
       // (200 ms) before exiting; this connect resolving is what
       // makes the 200 "I'm live" semantic true.

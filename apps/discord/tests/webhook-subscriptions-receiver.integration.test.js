@@ -1,14 +1,3 @@
-// Integration test pinning the seam between the REAL subscription
-// registry (webhook-subscriptions.js) and the REAL receiver
-// (routes/qurl-webhook.js): a row shape returned by
-// db.scanGuildSubscriptions() must produce a cache entry the receiver
-// can look up + HMAC-verify against. A field-shape drift between the
-// two modules (e.g. a future scanGuildSubscriptions rename of
-// `webhookOwnerId` → `ownerId`) would 401 every webhook in prod; here
-// it fails LOUD at test time.
-//
-// All other layers (Discord, monitor UI, view-update publisher) are
-// mocked to keep the test focused on the registry↔receiver contract.
 
 const crypto = require('crypto');
 
@@ -23,9 +12,6 @@ jest.mock('../src/discord', () => ({
   sendDM: jest.fn(),
 }));
 
-// Mock the store but leave the registry REAL. scanGuildSubscriptions
-// returns a fixture row shaped exactly like the ddb-store output
-// contract; if the registry can't read it, the seam is broken.
 const mockScanGuildSubscriptions = jest.fn();
 jest.mock('../src/store', () => ({
   scanGuildSubscriptions: mockScanGuildSubscriptions,
@@ -69,9 +55,6 @@ beforeEach(() => {
 
 describe('webhook-subscriptions → receiver integration (seam contract)', () => {
   it('a row returned by scanGuildSubscriptions can be HMAC-verified by the receiver via owner_id lookup', async () => {
-    // Realistic row shape: every field name + type the ddb-store
-    // contract documents. A drift in any of these silently 401s in
-    // prod; the integration assertion catches it.
     mockScanGuildSubscriptions.mockResolvedValueOnce([
       {
         guildId: 'g_integration',
@@ -108,9 +91,6 @@ describe('webhook-subscriptions → receiver integration (seam contract)', () =>
       },
     ]);
     await subs.scanOnce();
-    // lastScanCompletedAt = Date.now() (just-scanned) is well inside
-    // REFRESH_INTERVAL_MS + SIBLING_LAG_GRACE_MS, so the receiver
-    // upgrades OWNER_UNKNOWN → 503 (retriable for qurl-service).
 
     const payload = buildPayload({ ownerId: 'usr_unknown' });
     const raw = JSON.stringify(payload);
@@ -135,10 +115,6 @@ describe('webhook-subscriptions → receiver integration (seam contract)', () =>
       },
     ]);
     await subs.scanOnce();
-    // Force lastScanCompletedAt into the deep past so the receiver
-    // sees us well past REFRESH_INTERVAL_MS + SIBLING_LAG_GRACE_MS
-    // (35s) and treats OWNER_UNKNOWN as a genuine 401 instead of a
-    // sibling-lag 503.
     subs._setLastScanCompletedAtForTesting(Date.now() - 10 * 60_000);
 
     const payload = buildPayload({ ownerId: 'usr_unknown' });

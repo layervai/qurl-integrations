@@ -1,5 +1,38 @@
 # Changelog
 
+## [2.4.0](https://github.com/layervai/qurl-integrations/compare/v2.3.3...v2.4.0) (2026-09-08)
+
+
+### ⚠ BREAKING CHANGES
+
+* **cli:** Resource commands and native Connector continuity require CRID. Resource public keys are verification data. Old protocol fields and resource journals are rejected without conversion. Before starting fresh, preserve unresolved state, stop the daemon, revoke its device key, move the complete state directory aside, then log in and publish again with new CRIDs.
+
+### Features
+
+* **cli:** use CRID for Connector continuity and resource management ([8779071](https://github.com/layervai/qurl-integrations/commit/877907180c1220ec6ea325c95704818bab926a75))
+
+## [2.3.3](https://github.com/layervai/qurl-integrations/compare/v2.3.2...v2.3.3) (2026-09-07)
+
+
+### Bug Fixes
+
+* **cli:** model crash in warm-restart soak ([#1402](https://github.com/layervai/qurl-integrations/issues/1402)) ([238dacf](https://github.com/layervai/qurl-integrations/commit/238dacf5e1f60d6a0a6a8fe2c6d04664cf6e0ed7))
+* **cli:** recover tunnel sessions after control loss ([#1414](https://github.com/layervai/qurl-integrations/issues/1414)) ([ac94aa3](https://github.com/layervai/qurl-integrations/commit/ac94aa380c7f8b5553b4e3d9ccfece7886de2e32))
+
+## [2.3.2](https://github.com/layervai/qurl-integrations/compare/v2.3.1...v2.3.2) (2026-09-05)
+
+
+### Bug Fixes
+
+* **ci:** keep macOS grant probe on direct egress ([#1307](https://github.com/layervai/qurl-integrations/issues/1307)) ([e730dbf](https://github.com/layervai/qurl-integrations/commit/e730dbf6c66f2168d813999709a7c4a6a4db8dbd))
+
+## [2.3.1](https://github.com/layervai/qurl-integrations/compare/v2.3.0...v2.3.1) (2026-09-05)
+
+
+### Bug Fixes
+
+* **cli:** recover reauthorized headless sharing state ([#1388](https://github.com/layervai/qurl-integrations/issues/1388)) ([100e8ad](https://github.com/layervai/qurl-integrations/commit/100e8adee4b4d3966adc142f878b0b05f0a592ea))
+
 ## [2.3.0](https://github.com/layervai/qurl-integrations/compare/v2.2.0...v2.3.0) (2026-09-05)
 
 
