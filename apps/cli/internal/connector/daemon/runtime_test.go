@@ -84,6 +84,12 @@ func TestDefaultFRPCommonCarriesRuntimeRequestHeaders(t *testing.T) {
 		t.Fatalf("daemon FRP transport tls=%v web server port=%d, want explicit TLS and no web server",
 			common.Transport.TLS.Enable, common.WebServer.Port)
 	}
+	// Local invariant, independent of the pinned connector's own gate: a
+	// headered route needs an authenticated FRP server. When CA provisioning
+	// lands, set the CA here; never delete this assertion to go green.
+	if common.Transport.TLS.TrustedCaFile == "" {
+		t.Fatal("daemon FRP transport has no TrustedCaFile; runtime request headers need a verified FRP server certificate")
+	}
 	headered := []connectorshare.LocalHTTPRoute{{
 		RouteID: "connector-a", LocalIP: "127.0.0.1", LocalPort: 3000,
 		ResourcePublicKey: "resource-a", ConnectorRoutingID: "routing-a",

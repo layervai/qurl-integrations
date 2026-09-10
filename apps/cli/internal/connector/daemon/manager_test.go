@@ -1639,3 +1639,26 @@ func TestOverlayChangePreservesRefusalBackoff(t *testing.T) {
 		t.Fatal("target change retained old refusal backoff")
 	}
 }
+
+// TestOverlaySurvivesGroupRebuild pins that a group rebuilt after a crash
+// re-reads the overlay, so its route comes back with its headers.
+func TestOverlaySurvivesGroupRebuild(t *testing.T) {
+	registry := &memoryRegistry{shares: map[string]connectorstate.LocalShare{"a": daemonShare("a", 1, "on")}}
+	factory := &fakeGroupFactory{autoServe: false, runErr: errors.New("frp login failed")}
+	manager, err := NewManager(registry, factory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.retryDelay = func(int) time.Duration { return time.Millisecond }
+	manager.SetOverlay(map[string]map[string]string{"connector-a": {overlayHeader: "t"}})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- manager.Run(ctx) }()
+	t.Cleanup(func() { cancel(); <-done })
+
+	waitManagerCondition(t, func() bool { return factory.startCount() >= 2 }, "crashed group rebuilt")
+	rebuilt := groupConfigs(factory)[1]
+	if len(rebuilt.Routes) != 1 || rebuilt.Routes[0].RequestHeaders[overlayHeader] != "t" {
+		t.Fatalf("rebuilt group routes = %v, want route a with its overlay headers", rebuilt.Routes)
+	}
+}

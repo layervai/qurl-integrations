@@ -62,6 +62,9 @@ func TestIPCServerReadinessReloadAndShutdown(t *testing.T) {
 	if running, err := client.ReloadIfRunning(context.Background()); err != nil || running {
 		t.Fatalf("post-shutdown reload running=%v err=%v", running, err)
 	}
+	if running, err := client.SetOverlay(context.Background(), nil); err != nil || running {
+		t.Fatalf("post-shutdown overlay running=%v err=%v", running, err)
+	}
 }
 
 func TestStateSocketPathBoundsLongUnixStateDirectories(t *testing.T) {

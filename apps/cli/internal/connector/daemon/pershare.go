@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"os"
 	"sync"
 	"time"
@@ -160,11 +161,17 @@ func (m *PerShareManager) Trigger() {
 // orders; a group Manager's own lock is only ever taken beneath this one.
 func (m *PerShareManager) SetOverlay(overlay map[string]map[string]string) {
 	m.mu.Lock()
+	previous := m.overlay
 	m.overlay = cloneOverlay(overlay)
 	for _, group := range m.groups {
 		group.view.mu.Lock()
 		routeID := group.view.share.ConnectorID
 		group.view.mu.Unlock()
+		// A group whose entry did not change keeps its session untouched, so
+		// rotating one route's headers costs one reconcile, not one per group.
+		if maps.Equal(previous[routeID], m.overlay[routeID]) {
+			continue
+		}
 		group.manager.SetOverlay(overlayForRoute(m.overlay, routeID))
 	}
 	m.mu.Unlock()

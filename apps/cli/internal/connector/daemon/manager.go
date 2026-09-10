@@ -152,7 +152,9 @@ type Manager struct {
 	// ID), pushed by an external supervisor over IPC. It lives in process
 	// memory only: never persisted, never reported by /status, never logged.
 	// SetOverlay replaces it whole with a deep copy and no code path mutates
-	// its maps, so a route handed to the group may share one.
+	// its maps, so a route handed to the group may share one. Entries are
+	// not pruned to the desired set: a supervisor pushes a route's headers
+	// before publishing it, so an entry lives until the next replacement.
 	// TODO(upstream-contract): qurl-connector copies RequestHeaders rather
 	// than mutating a caller-owned route map.
 	overlay map[string]map[string]string
