@@ -89,7 +89,7 @@ setup) means required to use that feature.
 |----------|----------|-------------|
 | `DISCORD_TOKEN` | Yes | Discord bot token |
 | `DISCORD_CLIENT_ID` | Yes | Discord application client ID |
-| `QURL_API_KEY` | `/qurl detect` | Required for detect; also the fallback for send operations without a server key from `/qurl setup`. |
+| `QURL_API_KEY` | `/qurl detect` | Requires `qurl:read` and `qurl:write` for detect; also the fallback for send operations without a server key from `/qurl setup`. |
 | `QURL_ENDPOINT` | No | qURL API base URL (defaults to production; localhost in dev) |
 | `CONNECTOR_URL` | No | qURL connector URL for file upload + serving |
 | `BASE_URL` | OAuth setup | Public `https://` origin of the bot; required to complete the OAuth `/qurl setup` flow (defaults to `http://localhost:3000`). |
@@ -135,10 +135,11 @@ The authenticated mint is the authority for that hostname, so any hostname
 with only non-empty labels that it returns beneath an allowlisted suffix is
 accepted after the URL and SSRF guards, including hostnames with multiple
 routing labels. The suffix allowlist constrains the target to a trusted qURL
-tunnel namespace; it is not a tenant identity signal. The mint's resource ID
-must match the selected resource, and its target path must match the guild
-path. The authenticated native target must match that exact URL before image
-bytes leave the bot.
+tunnel namespace; it is not a tenant identity signal. The authenticated native
+target must match the exact expected URL before image bytes leave the bot.
+The mint response also must echo the selected resource ID and guild path.
+Both the qURL expiry and access-session duration are set to five minutes;
+expiring a qURL does not shorten an already-open session.
 
 Production `QURL_ENDPOINT` accepts only `*.qurl.site`; sandbox/staging
 tunnel suffixes are accepted as a non-prod set only for explicit non-prod qURL API hosts
