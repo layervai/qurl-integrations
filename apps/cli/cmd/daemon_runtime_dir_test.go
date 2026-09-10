@@ -65,3 +65,14 @@ func TestDaemonRunRuntimeDirFlagBeatsTheEnvironment(t *testing.T) {
 		t.Fatalf("--runtime-dir was not secured as an owner-only directory: %v %v", info, err)
 	}
 }
+
+func TestExternalDaemonRejectsRuntimeDirBeforeMarkingNamespace(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), "fresh-state")
+	res := runCLI(t, &runOpts{args: []string{"daemon", "run", "--supervision", "external", "--state-dir", stateDir, "--runtime-dir", "relative"}, shareStateDir: stateDir})
+	if res.code == 0 {
+		t.Fatal("relative runtime directory accepted")
+	}
+	if _, err := os.Lstat(stateDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("invalid runtime directory touched namespace: %v", err)
+	}
+}

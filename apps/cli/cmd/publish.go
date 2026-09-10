@@ -116,6 +116,9 @@ func runLocalPublish(ctx context.Context, opts *globalOpts, target *publishTarge
 	if err != nil {
 		return err
 	}
+	if err := opts.requireRuntimeSupervision(stateDir); err != nil {
+		return err
+	}
 	registry, err := opts.openShareRegistry(stateDir)
 	if err != nil {
 		return err

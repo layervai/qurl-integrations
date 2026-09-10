@@ -51,6 +51,9 @@ type globalOpts struct {
 	// shareGroupMode is bound by `daemon run --share-group-mode`; every other
 	// command resolves the mode from the environment, profile, or default.
 	shareGroupMode string
+	// supervision is the persistent --supervision flag: who owns the sharing
+	// daemon's process for the state namespace a command addresses.
+	supervision string
 
 	version string
 
@@ -117,6 +120,9 @@ type globalOpts struct {
 	// resolvedShareGroupMode is the session group mode the daemon runs in and
 	// the per-user job definition carries.
 	resolvedShareGroupMode connectordaemon.GroupMode
+	// resolvedSupervision is the lifecycle contract every mutating command
+	// checks against the namespace's policy marker before it acts.
+	resolvedSupervision connectorstate.RuntimeSupervision
 }
 
 // rootOption is a test hook for injecting process context.
@@ -233,6 +239,7 @@ QURL_API_KEY for the same one-time bootstrap.`,
 	flags.StringVar(&opts.colorMode, "color", "", "colorize output: auto, always, or never (default auto)")
 	flags.BoolVarP(&opts.verbose, "verbose", "v", false, "print request diagnostics on stderr")
 	flags.StringVar(&opts.profile, "profile", "", "configuration profile name")
+	flags.StringVar(&opts.supervision, "supervision", "", "who runs the sharing daemon: native (qurl manages a background job) or external (another program runs qurl daemon run) (default native)")
 
 	cmd.SetOut(streams.Out)
 	cmd.SetErr(streams.Err)
@@ -267,7 +274,7 @@ QURL_API_KEY for the same one-time bootstrap.`,
 // for one state directory.
 func (o *globalOpts) nativeShareDaemon(stateDir, logDir string) (shareDaemonController, error) {
 	controller, err := connectordaemon.NewJobController(
-		stateDir, logDir, o.version, o.resolvedEndpoint, o.resolvedShareGroupMode, o.resolveHubBootstrap, o.lookupEnv,
+		stateDir, logDir, o.version, o.resolvedEndpoint, o.resolvedShareGroupMode, o.resolvedSupervision, o.resolveHubBootstrap, o.lookupEnv,
 	)
 	if err != nil {
 		return nil, err
@@ -383,8 +390,37 @@ func (o *globalOpts) resolveSettings() error {
 		return exitcode.UsageError(err)
 	}
 	o.resolvedShareGroupMode = groupMode
+
+	supervision := config.Resolve(o.supervision, connectorstate.EnvRuntimeSupervision, o.lookupEnv, cfg.DaemonSupervision, string(connectorstate.DefaultRuntimeSupervision))
+	mode, err := connectorstate.ParseRuntimeSupervision(supervision)
+	if err != nil {
+		return exitcode.UsageError(err)
+	}
+	o.resolvedSupervision = mode
 	o.resolved = true
 	return nil
+}
+
+// requireRuntimeSupervision refuses to mutate a namespace whose supervision
+// policy does not match this invocation's setting, so a native qurl never
+// installs a job over an external supervisor's daemon and an external one
+// never adopts a natively managed namespace.
+func (o *globalOpts) requireRuntimeSupervision(stateDir string) error {
+	return connectorstate.RequireRuntimeSupervision(stateDir, o.resolvedSupervision)
+}
+
+// requireRuntimeSupervisionIfNamespace applies requireRuntimeSupervision to
+// the default namespace and tolerates a host without one: a command that
+// only changes cloud state must still work there.
+func (o *globalOpts) requireRuntimeSupervisionIfNamespace() error {
+	stateDir, err := o.resolveShareStateDir("")
+	if errors.Is(err, connectorstate.ErrNoDefaultStateDir) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return o.requireRuntimeSupervision(stateDir)
 }
 
 // printer builds the per-invocation Printer from the resolved settings.

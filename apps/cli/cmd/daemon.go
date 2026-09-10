@@ -234,7 +234,9 @@ func daemonCmd(opts *globalOpts) *cobra.Command {
 
 On Linux, macOS, and Windows, qurl publish and qurl start normally manage the
 per-user daemon for you. Use daemon run for a headless deployment or when
-another service manager owns the process.`,
+another program owns the process. That program passes --supervision external
+here and to every qurl command it runs against the same state directory; those
+commands then reload this daemon and never install a background job.`,
 		Args: noArgs,
 	}
 	var stateDir, runtimeDir, jobVersion, headlessConfig, enrollmentTokenFile string
@@ -266,7 +268,7 @@ another service manager owns the process.`,
 			if hasHubOverride {
 				hubOverride = &hubBootstrap
 			}
-			return runShareDaemonWithDeployment(cmd.Context(), opts, stateDir, runtimeDir, jobVersion, headlessConfig, enrollmentTokenFile, hubOverride)
+			return runShareDaemonWithDeployment(cmd.Context(), opts, stateDir, runtimeDir, jobVersion, headlessConfig, enrollmentTokenFile, hubOverride, opts.resolvedSupervision == connectorstate.RuntimeSupervisionExternal)
 		},
 	}
 	run.Flags().StringVar(&stateDir, "state-dir", "", "qURL share daemon state directory")
@@ -335,7 +337,7 @@ func runShareDaemon(ctx context.Context, opts *globalOpts, stateDirOverride, job
 }
 
 func runShareDaemonWithBootstrap(ctx context.Context, opts *globalOpts, stateDirOverride, jobVersion, headlessConfigPath, enrollmentTokenPath string) (retErr error) {
-	return runShareDaemonWithDeployment(ctx, opts, stateDirOverride, "", jobVersion, headlessConfigPath, enrollmentTokenPath, nil)
+	return runShareDaemonWithDeployment(ctx, opts, stateDirOverride, "", jobVersion, headlessConfigPath, enrollmentTokenPath, nil, false)
 }
 
 // runtimeDirLookup lets an explicit --runtime-dir stand in for
@@ -360,8 +362,8 @@ func runtimeDirLookup(runtimeDir string, lookupEnv func(string) (string, bool)) 
 
 // resolveDaemonPaths resolves the state directory and the control socket
 // before any durable write, so a bad runtime directory fails a start without
-// binding an owner or a share.
-func resolveDaemonPaths(opts *globalOpts, stateDirOverride, runtimeDirOverride string) (stateDir, socketPath string, err error) {
+// establishing supervision or binding an owner or a share.
+func resolveDaemonPaths(ctx context.Context, opts *globalOpts, stateDirOverride, runtimeDirOverride string) (stateDir, socketPath string, err error) {
 	stateDir, err = opts.resolveShareStateDir(stateDirOverride)
 	if err != nil {
 		return "", "", err
@@ -370,11 +372,14 @@ func resolveDaemonPaths(opts *globalOpts, stateDirOverride, runtimeDirOverride s
 	if err != nil {
 		return "", "", err
 	}
+	if _, err := supervisedShareStateDir(ctx, opts, stateDir); err != nil {
+		return "", "", err
+	}
 	return stateDir, socketPath, nil
 }
 
-func runShareDaemonWithDeployment(ctx context.Context, opts *globalOpts, stateDirOverride, runtimeDirOverride, jobVersion, headlessConfigPath, enrollmentTokenPath string, hubOverride *qurl.HubBootstrap) (retErr error) {
-	stateDir, socketPath, err := resolveDaemonPaths(opts, stateDirOverride, runtimeDirOverride)
+func runShareDaemonWithDeployment(ctx context.Context, opts *globalOpts, stateDirOverride, runtimeDirOverride, jobVersion, headlessConfigPath, enrollmentTokenPath string, hubOverride *qurl.HubBootstrap, deferFirstReconcile bool) (retErr error) {
+	stateDir, socketPath, err := resolveDaemonPaths(ctx, opts, stateDirOverride, runtimeDirOverride)
 	if err != nil {
 		return err
 	}
@@ -463,13 +468,35 @@ func runShareDaemonWithDeployment(ctx context.Context, opts *globalOpts, stateDi
 			retErr = errors.Join(retErr, closeFactory())
 		}
 	}()
-	manager, err := connectordaemon.NewShareManager(registry, factory, opts.resolvedShareGroupMode)
+	manager, err := connectordaemon.NewShareManager(registry, factory, opts.resolvedShareGroupMode, deferFirstReconcile)
 	if err != nil {
 		return err
 	}
 	opts.redirectFRPLogs()
 	server := &connectordaemon.IPCServer{SocketPath: socketPath, Manager: manager, JobVersion: jobVersion}
 	return server.Run(ctx)
+}
+
+// supervisedShareStateDir resolves the daemon's state directory and commits
+// or verifies its supervision policy: an external start marks the namespace
+// (idempotently, refusing a natively managed one) and a native start requires
+// an unmarked one, so no daemon serves a namespace under the wrong lifecycle
+// contract.
+func supervisedShareStateDir(ctx context.Context, opts *globalOpts, override string) (string, error) {
+	stateDir, err := opts.resolveShareStateDir(override)
+	if err != nil {
+		return "", err
+	}
+	if opts.resolvedSupervision == connectorstate.RuntimeSupervisionExternal {
+		if err := connectorstate.EstablishExternalRuntimeMode(ctx, stateDir); err != nil {
+			return "", err
+		}
+		return stateDir, nil
+	}
+	if err := connectorstate.RequireRuntimeSupervision(stateDir, opts.resolvedSupervision); err != nil {
+		return "", err
+	}
+	return stateDir, nil
 }
 
 func configuredHeadlessShare(headless *connectorstate.HeadlessConfig) *connectorstate.LocalShare {

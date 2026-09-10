@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -99,11 +100,9 @@ func (s *IPCServer) Run(ctx context.Context) (retErr error) {
 	})
 	mux.HandleFunc("GET /status", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(struct {
-			JobVersion string                        `json:"job_version"`
-			Running    map[string]string             `json:"running"`
-			Resources  map[string]ResourceDiagnostic `json:"resources"`
-		}{JobVersion: s.JobVersion, Running: s.Manager.Running(), Resources: s.Manager.Diagnostics()})
+		_ = json.NewEncoder(w).Encode(IPCStatus{
+			JobVersion: s.JobVersion, Pid: os.Getpid(), Running: s.Manager.Running(), Resources: s.Manager.Diagnostics(),
+		})
 	})
 	server := &http.Server{Handler: mux, ReadHeaderTimeout: 2 * time.Second}
 	serveDone := make(chan error, 1)
@@ -140,9 +139,13 @@ type IPCClient struct {
 	requestTimeout time.Duration
 }
 
-// IPCStatus is the daemon version handshake and active resource set.
+// IPCStatus is the daemon version handshake and active resource set, encoded
+// by the server and decoded by the client. Pid is the daemon's own process
+// ID, so an external supervisor can stop a daemon it adopted rather than
+// spawned; a daemon older than this field leaves it zero.
 type IPCStatus struct {
 	JobVersion string                        `json:"job_version"`
+	Pid        int                           `json:"pid"`
 	Running    map[string]string             `json:"running"`
 	Resources  map[string]ResourceDiagnostic `json:"resources"`
 }
@@ -181,6 +184,9 @@ func decodeIPCStatus(reader io.Reader) (IPCStatus, error) {
 	}
 	if strings.TrimSpace(status.JobVersion) == "" || status.JobVersion != strings.TrimSpace(status.JobVersion) {
 		return IPCStatus{}, errors.New("decode share daemon status: job_version is missing or invalid")
+	}
+	if status.Pid < 0 {
+		return IPCStatus{}, errors.New("decode share daemon status: pid is invalid")
 	}
 	if status.Running == nil {
 		return IPCStatus{}, errors.New("decode share daemon status: running map is missing")
