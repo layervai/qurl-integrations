@@ -4,16 +4,22 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
+
+	connectorshare "github.com/layervai/qurl-connector/pkg/share"
 
 	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 )
@@ -55,6 +61,9 @@ func TestIPCServerReadinessReloadAndShutdown(t *testing.T) {
 	}
 	if running, err := client.ReloadIfRunning(context.Background()); err != nil || running {
 		t.Fatalf("post-shutdown reload running=%v err=%v", running, err)
+	}
+	if running, err := client.SetOverlay(context.Background(), nil); err != nil || running {
+		t.Fatalf("post-shutdown overlay running=%v err=%v", running, err)
 	}
 }
 
@@ -422,6 +431,191 @@ func TestValidDiagnosticCategoryAcceptsPublicFailureClasses(t *testing.T) {
 	}
 }
 
+// rawIPCRequest sends body verbatim and returns the daemon's status and text.
+func rawIPCRequest(t *testing.T, client IPCClient, method, path string, body []byte) (status int, text string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	response, running, err := client.do(ctx, method, path, body)
+	if err != nil || !running {
+		t.Fatalf("%s %s running=%v err=%v", method, path, running, err)
+	}
+	defer func() { _ = response.Body.Close() }()
+	raw, err := io.ReadAll(io.LimitReader(response.Body, 4096))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return response.StatusCode, string(raw)
+}
+
+func overlayJSON(t *testing.T, overlay map[string]map[string]string) []byte {
+	t.Helper()
+	body, err := json.Marshal(ipcOverlay{RouteRequestHeaders: overlay})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return body
+}
+
+func storedOverlay(manager *Manager) map[string]map[string]string {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	return manager.overlay
+}
+
+// TestOverlayIPCRejectsOversizedAndUnknownFields pins the PUT /overlay
+// contract: every malformed, oversized, or over-limit body is refused with 400
+// and fixed text — the request's header names and values reach neither the
+// response nor the daemon log — and nothing is stored; a body within every
+// limit is accepted with 204 and replaces the whole overlay. Not parallel: it
+// captures the process-global slog default.
+func TestOverlayIPCRejectsOversizedAndUnknownFields(t *testing.T) {
+	var logs lockedLogBuffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	manager := emptyManager(t)
+	path := filepath.Join(shortTempDir(t), SocketFile)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- (&IPCServer{SocketPath: path, Manager: manager, JobVersion: "1/test"}).Run(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("daemon did not stop")
+		}
+	})
+	client := IPCClient{SocketPath: path}
+	readyCtx, readyCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer readyCancel()
+	if err := client.WaitReady(readyCtx); err != nil {
+		t.Fatal(err)
+	}
+
+	const secretName, secretValue = "X-Sekrit-Name", "sekrit-value"
+	tooMany := map[string]string{}
+	for i := range 17 {
+		tooMany[fmt.Sprintf("%s-%d", secretName, i)] = secretValue
+	}
+	var oversized strings.Builder
+	oversized.WriteString(`{"route_request_headers":{`)
+	for i := 0; oversized.Len() <= maxIPCOverlayBytes; i++ {
+		if i > 0 {
+			oversized.WriteByte(',')
+		}
+		fmt.Fprintf(&oversized, `"r%d":{"%s":"%s"}`, i, secretName, secretValue)
+	}
+	oversized.WriteString(`}}`)
+	rejected := map[string][]byte{
+		"too many headers":   overlayJSON(t, map[string]map[string]string{"r1": tooMany}),
+		"too many bytes":     overlayJSON(t, map[string]map[string]string{"r1": {secretName: strings.Repeat("v", 1025-len(secretName))}}),
+		"invalid name":       []byte(`{"route_request_headers":{"r1":{"X-Sekrit Name":"sekrit-value"}}}`),
+		"reserved name":      []byte(`{"route_request_headers":{"r1":{"Host":"sekrit-value"}}}`),
+		"control byte value": []byte(`{"route_request_headers":{"r1":{"X-Sekrit-Name":"sekrit\r\nvalue"}}}`),
+		"duplicate name":     []byte(`{"route_request_headers":{"r1":{"X-Sekrit-Name":"a","x-sekrit-name":"b"}}}`),
+		"unknown field":      []byte(`{"route_request_headers":{},"sekrit_field":"sekrit-value"}`),
+		"blank connector id": []byte(`{"route_request_headers":{"":{"X-Sekrit-Name":"sekrit-value"}}}`),
+		"padded connector":   []byte(`{"route_request_headers":{" r1":{"X-Sekrit-Name":"sekrit-value"}}}`),
+		"non-string value":   []byte(`{"route_request_headers":{"r1":{"X-Sekrit-Name":1}}}`),
+		"missing field":      []byte(`{}`),
+		"null field":         []byte(`{"route_request_headers":null}`),
+		"not an object":      []byte(`[]`),
+		"trailing value":     []byte(`{"route_request_headers":{}} {}`),
+		"oversized body":     []byte(oversized.String()),
+		"oversized tail":     []byte(`{"route_request_headers":{}}` + strings.Repeat(" ", maxIPCOverlayBytes)),
+		"non-ascii name":     []byte(`{"route_request_headers":{"r1":{"X-Sekrit-é":"sekrit-value"}}}`),
+		"array route":        []byte(`{"route_request_headers":{"r1":["X-Sekrit-Name","sekrit-value"]}}`),
+	}
+	for name, body := range rejected {
+		t.Run(name, func(t *testing.T) {
+			status, text := rawIPCRequest(t, client, http.MethodPut, "/overlay", body)
+			if status != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400", status)
+			}
+			if strings.HasPrefix(name, "oversized") && !strings.Contains(text, "body exceeds the size limit") {
+				t.Fatal("oversized overlay response does not identify the byte limit")
+			}
+			if !strings.HasPrefix(text, ipcOverlayRejected) {
+				t.Fatalf("rejection text = %q, want the fixed message", text)
+			}
+			if strings.Contains(strings.ToLower(text), "sekrit") || strings.Contains(strings.ToLower(logs.String()), "sekrit") {
+				t.Fatal("rejection echoed the request in the response or the daemon log")
+			}
+			if got := storedOverlay(manager); len(got) != 0 {
+				t.Fatalf("rejected overlay left %d routes stored", len(got))
+			}
+		})
+	}
+	if !strings.Contains(logs.String(), "rejected a runtime overlay update") {
+		t.Fatalf("daemon log %q does not record the rejections", logs.String())
+	}
+
+	// The limits are inclusive: 16 headers and 1,024 aggregate bytes pass.
+	atLimit := map[string]string{}
+	for i := range 15 {
+		atLimit[fmt.Sprintf("X-%02d", i)] = ""
+	}
+	atLimit["X-Last"] = strings.Repeat("v", 1024-15*4-len("X-Last"))
+	if status, _ := rawIPCRequest(t, client, http.MethodPut, "/overlay", overlayJSON(t, map[string]map[string]string{"r1": atLimit})); status != http.StatusNoContent {
+		t.Fatalf("overlay at the limits returned %d, want 204", status)
+	}
+	if got := storedOverlay(manager)["r1"]; len(got) != 16 {
+		t.Fatalf("stored %d headers for r1, want the 16 at the limit", len(got))
+	}
+	// Shapes a supervisor may legitimately send: a null or empty route entry is
+	// a headerless route and is not stored, and a route key repeated in one
+	// body follows JSON's last-wins rule rather than merging the two sets.
+	for name, body := range map[string][]byte{
+		"null route":  []byte(`{"route_request_headers":{"r1":null}}`),
+		"empty route": []byte(`{"route_request_headers":{"r1":{}}}`),
+	} {
+		if status, _ := rawIPCRequest(t, client, http.MethodPut, "/overlay", body); status != http.StatusNoContent {
+			t.Fatalf("%s returned %d, want 204", name, status)
+		}
+		if got := storedOverlay(manager); len(got) != 0 {
+			t.Fatalf("%s stored %d routes, want a headerless route dropped", name, len(got))
+		}
+	}
+	if status, _ := rawIPCRequest(t, client, http.MethodPut, "/overlay", []byte(`{"route_request_headers":{"r1":{"X-First":"1"},"r1":{"X-Last":"2"}}}`)); status != http.StatusNoContent {
+		t.Fatalf("duplicate route key returned %d, want 204", status)
+	}
+	if got := storedOverlay(manager)["r1"]; len(got) != 1 || got["X-Last"] != "2" {
+		t.Fatalf("duplicate route key stored %v, want only the last entry", got)
+	}
+	if status, _ := rawIPCRequest(t, client, http.MethodPost, "/overlay", overlayJSON(t, nil)); status != http.StatusMethodNotAllowed {
+		t.Fatalf("POST /overlay returned %d, want 405", status)
+	}
+
+	// The client wrapper: a replacement drops every route it does not name, a
+	// rejection surfaces as an error without the headers, and clearing works.
+	overlayCtx, overlayCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer overlayCancel()
+	if running, err := client.SetOverlay(overlayCtx, map[string]map[string]string{"r2": {"X-Token": "t"}}); err != nil || !running {
+		t.Fatalf("SetOverlay running=%v err=%v", running, err)
+	}
+	if got := storedOverlay(manager); len(got) != 1 || got["r2"]["X-Token"] != "t" {
+		t.Fatalf("stored overlay names %d routes, want only r2 after the replacement", len(got))
+	}
+	running, err := client.SetOverlay(overlayCtx, map[string]map[string]string{"r2": {"Host": secretValue}})
+	if err == nil || !running || !strings.Contains(err.Error(), "HTTP 400") || strings.Contains(err.Error(), secretValue) {
+		t.Fatalf("SetOverlay with a reserved header = running %v, %v; want the daemon running with an HTTP 400 error without the value", running, err)
+	}
+	if got := storedOverlay(manager); len(got) != 1 || got["r2"]["X-Token"] != "t" {
+		t.Fatal("a rejected replacement changed the stored overlay")
+	}
+	if running, err := client.SetOverlay(overlayCtx, nil); err != nil || !running {
+		t.Fatalf("SetOverlay(nil) running=%v err=%v", running, err)
+	}
+	if got := storedOverlay(manager); len(got) != 0 {
+		t.Fatalf("stored overlay after clearing names %d routes, want none", len(got))
+	}
+	if strings.Contains(strings.ToLower(logs.String()), "sekrit") {
+		t.Fatal("the daemon log carries an overlay value")
+	}
+}
+
 type closeTracker struct {
 	io.Reader
 	onClose func()
@@ -442,4 +636,24 @@ func emptyManager(t *testing.T) *Manager {
 		t.Fatal(err)
 	}
 	return manager
+}
+
+func TestOverlayIPCBoundsRouteCount(t *testing.T) {
+	t.Parallel()
+	overlay := make(map[string]map[string]string)
+	for i := range connectorshare.MaxGroupRoutes {
+		overlay[strconv.Itoa(i)] = map[string]string{"X": "v"}
+	}
+	raw := overlayJSON(t, overlay)
+	if _, err := decodeIPCOverlay(strings.NewReader(string(raw))); err != nil {
+		t.Fatalf("at-limit overlay rejected: %v", err)
+	}
+	overlay["extra"] = map[string]string{"X": "v"}
+	raw = overlayJSON(t, overlay)
+	if len(raw) >= maxIPCOverlayBytes {
+		t.Fatal("fixture exceeds byte limit")
+	}
+	if _, err := decodeIPCOverlay(strings.NewReader(string(raw))); err == nil {
+		t.Fatal("overlay above route limit accepted")
+	}
 }

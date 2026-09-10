@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"os"
 	"sync"
 	"time"
@@ -14,10 +15,13 @@ import (
 
 // ShareManager is the reconciler the daemon's IPC server drives, whichever
 // GroupMode built it: Run owns every session group until ctx ends, Trigger
-// requests a coalesced reconcile, and Running and Diagnostics feed /status.
+// requests a coalesced reconcile, SetOverlay replaces the runtime
+// request-header overlay (see Manager.SetOverlay), and Running and
+// Diagnostics feed /status.
 type ShareManager interface {
 	Run(context.Context) error
 	Trigger()
+	SetOverlay(map[string]map[string]string)
 	Running() map[string]string
 	Diagnostics() map[string]ResourceDiagnostic
 }
@@ -86,6 +90,10 @@ type PerShareManager struct {
 
 	mu     sync.Mutex
 	groups map[string]*shareGroup // resource ID -> its group
+	// overlay is the runtime request-header overlay; each group gets only its entry:
+	// the live ones on SetOverlay, a new one as it starts. Process memory
+	// only, as Manager.overlay.
+	overlay map[string]map[string]string
 	// retiring holds removed groups that outlived groupStopTimeout. A resource
 	// whose prior group is still retiring is not re-admitted until that group
 	// has finished, so two live sessions are never signed for one resource.
@@ -145,6 +153,38 @@ func (m *PerShareManager) Trigger() {
 	case m.trigger <- struct{}{}:
 	default:
 	}
+}
+
+// SetOverlay replaces the overlay on this manager and every live group, then
+// requests a reconcile so a deferred first reconcile is released. The fan-out
+// runs under m.mu so two replacements cannot reach the groups in different
+// orders; a group Manager's own lock is only ever taken beneath this one.
+func (m *PerShareManager) SetOverlay(overlay map[string]map[string]string) {
+	m.mu.Lock()
+	previous := m.overlay
+	m.overlay = cloneOverlay(overlay)
+	for _, group := range m.groups {
+		group.view.mu.Lock()
+		routeID := group.view.share.ConnectorID
+		group.view.mu.Unlock()
+		// A group whose entry did not change keeps its session untouched, so
+		// rotating one route's headers costs one reconcile, not one per group.
+		if maps.Equal(previous[routeID], m.overlay[routeID]) {
+			continue
+		}
+		group.manager.SetOverlay(overlayForRoute(m.overlay, routeID))
+	}
+	m.mu.Unlock()
+	m.Trigger()
+}
+
+// overlayForRoute keeps a group's memory free of sibling route credentials.
+// The receiving Manager copies the selected headers before retaining them.
+func overlayForRoute(overlay map[string]map[string]string, routeID string) map[string]map[string]string {
+	if len(overlay[routeID]) == 0 {
+		return nil
+	}
+	return map[string]map[string]string{routeID: overlay[routeID]}
 }
 
 // Run reconciles until ctx ends. Every exit path stops every group so a
@@ -225,7 +265,7 @@ func (m *PerShareManager) Reconcile(ctx context.Context) error {
 		share := &desired[i]
 		if group, ok := m.groups[share.ResourceID]; ok {
 			if group.view.set(share) {
-				group.manager.Trigger()
+				group.manager.SetOverlay(overlayForRoute(m.overlay, share.ConnectorID))
 			}
 			continue
 		}
@@ -308,6 +348,7 @@ func (m *PerShareManager) startGroupLocked(share *connectorstate.LocalShare) (*s
 	if m.configure != nil {
 		m.configure(manager)
 	}
+	manager.storeOverlay(overlayForRoute(m.overlay, share.ConnectorID))
 	parent := m.lifetime
 	if parent == nil {
 		parent = context.Background()

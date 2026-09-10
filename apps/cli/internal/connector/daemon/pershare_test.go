@@ -862,3 +862,134 @@ func TestNewShareManagerPropagatesDeferredFirstReconcile(t *testing.T) {
 		t.Fatalf("NewShareManager(single) = %T, want a Manager that reconciles immediately", built)
 	}
 }
+
+// TestPerShareManagerFansOutOverlay pins that an overlay set on the per-share
+// manager reaches every live group — each pushed once, with only its own
+// route and its own headers — and seeds a group started after it, while an
+// unchanged sibling costs no push.
+func TestPerShareManagerFansOutOverlay(t *testing.T) {
+	registry := &memoryRegistry{shares: map[string]connectorstate.LocalShare{
+		"a": perShareRow("a", 1, "on"),
+		"b": perShareRow("b", 1, "on"),
+	}}
+	factory := newFakeGroupFactory()
+	manager := newRunningPerShareManager(t, registry, factory)
+	waitPerShareServing(t, manager, "a", "b")
+	manager.SetOverlay(map[string]map[string]string{
+		"connector-a": {overlayHeader: "ta"},
+		"connector-b": {overlayHeader: "tb"},
+		"connector-c": {overlayHeader: "tc"},
+	})
+	for _, id := range []string{"a", "b"} {
+		runner := runnerFor(t, factory, id)
+		waitManagerCondition(t, func() bool { return len(runner.pushedRoutes()) == 1 }, "one push on group "+id)
+		pushed := runner.pushedRoutes()[0]
+		if len(pushed) != 1 || pushed[0].RouteID != "connector-"+id || pushed[0].RequestHeaders[overlayHeader] != "t"+id {
+			t.Fatalf("group %s pushed %v, want only its own route with its own headers", id, pushed)
+		}
+	}
+	waitPerShareServing(t, manager, "a", "b")
+	if got := factory.startCount(); got != 2 {
+		t.Fatalf("group starts after the overlay = %d, want no new admission", got)
+	}
+	// A share published after the overlay starts with its headers attached,
+	// and its siblings' unchanged rows cost them no push.
+	third := perShareRow("c", 1, "on")
+	registry.setShare(&third)
+	manager.Trigger()
+	waitPerShareServing(t, manager, "c")
+	cfg := groupConfigs(factory)[2]
+	if cfg.ResourceID != "c" || len(cfg.Routes) != 1 || cfg.Routes[0].RequestHeaders[overlayHeader] != "tc" {
+		t.Fatalf("group for c started as %+v, want its route seeded with the overlay's headers", cfg)
+	}
+	time.Sleep(50 * time.Millisecond)
+	for _, id := range []string{"a", "b"} {
+		if got := len(runnerFor(t, factory, id).pushedRoutes()); got != 1 {
+			t.Fatalf("group %s pushes after c published = %d, want still one", id, got)
+		}
+	}
+	for _, group := range manager.snapshotGroups() {
+		group.manager.mu.Lock()
+		count := len(group.manager.overlay)
+		group.manager.mu.Unlock()
+		if count != 1 {
+			t.Fatalf("group retains %d overlay entries, want only its own", count)
+		}
+	}
+	manager.SetOverlay(nil)
+	for _, id := range []string{"a", "b", "c"} {
+		runner := runnerFor(t, factory, id)
+		waitManagerCondition(t, func() bool {
+			pushes := runner.pushedRoutes()
+			return len(pushes) > 0 && pushes[len(pushes)-1][0].RequestHeaders == nil
+		}, "group "+id+" pushed its route headerless after the overlay was cleared")
+	}
+	waitPerShareServing(t, manager, "a", "b", "c")
+}
+
+// TestPerShareManagerOverlayReleasesDeferredFirstReconcile pins that under
+// external supervision the overlay alone (no reload) starts the groups, each
+// already carrying its headers.
+func TestPerShareManagerOverlayReleasesDeferredFirstReconcile(t *testing.T) {
+	registry := &memoryRegistry{shares: map[string]connectorstate.LocalShare{"a": perShareRow("a", 1, "on")}}
+	factory := newFakeGroupFactory()
+	built, err := NewShareManager(registry, factory, GroupModePerShare, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := built.(*PerShareManager)
+	manager.firstReconcileBound = time.Hour
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- manager.Run(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("manager did not stop")
+		}
+	})
+	time.Sleep(50 * time.Millisecond)
+	if factory.startCount() != 0 {
+		t.Fatalf("deferred per-share manager built %d groups before its overlay", factory.startCount())
+	}
+	built.SetOverlay(map[string]map[string]string{"connector-a": {overlayHeader: "ta"}})
+	waitPerShareServing(t, manager, "a")
+	if cfg := groupConfigs(factory)[0]; cfg.Routes[0].RequestHeaders[overlayHeader] != "ta" {
+		t.Fatalf("group for a started as %+v, want its route carrying the overlay's headers", cfg)
+	}
+}
+
+// TestPerShareManagerOverlaySkipsUnchangedGroups pins that rotating one
+// route's headers pushes only that route's group.
+func TestPerShareManagerOverlaySkipsUnchangedGroups(t *testing.T) {
+	registry := &memoryRegistry{shares: map[string]connectorstate.LocalShare{
+		"a": perShareRow("a", 1, "on"),
+		"b": perShareRow("b", 1, "on"),
+		"c": perShareRow("c", 1, "on"),
+	}}
+	factory := newFakeGroupFactory()
+	manager := newRunningPerShareManager(t, registry, factory)
+	waitPerShareServing(t, manager, "a", "b", "c")
+	overlay := map[string]map[string]string{
+		"connector-a": {overlayHeader: "ta"},
+		"connector-b": {overlayHeader: "tb"},
+		"connector-c": {overlayHeader: "tc"},
+	}
+	manager.SetOverlay(overlay)
+	for _, id := range []string{"a", "b", "c"} {
+		runner := runnerFor(t, factory, id)
+		waitManagerCondition(t, func() bool { return len(runner.pushedRoutes()) == 1 }, "one push on group "+id)
+	}
+	overlay["connector-b"] = map[string]string{overlayHeader: "tb2"}
+	manager.SetOverlay(overlay)
+	b := runnerFor(t, factory, "b")
+	waitManagerCondition(t, func() bool { return len(b.pushedRoutes()) == 2 }, "rotated group b pushed again")
+	time.Sleep(50 * time.Millisecond)
+	for _, id := range []string{"a", "c"} {
+		if got := len(runnerFor(t, factory, id).pushedRoutes()); got != 1 {
+			t.Fatalf("group %s pushes after only b rotated = %d, want still one", id, got)
+		}
+	}
+}

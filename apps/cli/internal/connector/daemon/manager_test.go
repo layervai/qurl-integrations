@@ -3,9 +3,14 @@ package daemon
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -84,9 +89,11 @@ func (r *memoryRegistry) share(resourceID string) connectorstate.LocalShare {
 type fakeGroupRunner struct {
 	cfg GroupConfig
 
-	mu              sync.Mutex
-	routes          map[string]connectorshare.RouteState
-	setCalls        [][]string
+	mu       sync.Mutex
+	routes   map[string]connectorshare.RouteState
+	setCalls [][]string
+	// pushed records every route set SetRoutes received, headers included.
+	pushed          [][]connectorshare.LocalHTTPRoute
 	restarts        []string
 	restartFailures int
 	runStart        chan struct{}
@@ -164,7 +171,7 @@ func (r *fakeGroupRunner) SetRoutes(ctx context.Context, routes []connectorshare
 	for _, route := range routes {
 		ids = append(ids, route.RouteID)
 		current, existed := r.routes[route.RouteID]
-		if existed && current.Route.LocalHTTPRoute == route {
+		if existed && current.Route.LocalHTTPRoute.Equal(route) {
 			next[route.RouteID] = current
 			continue
 		}
@@ -175,6 +182,7 @@ func (r *fakeGroupRunner) SetRoutes(ctx context.Context, routes []connectorshare
 	}
 	sort.Strings(ids)
 	r.setCalls = append(r.setCalls, ids)
+	r.pushed = append(r.pushed, append([]connectorshare.LocalHTTPRoute(nil), routes...))
 	r.routes = next
 	added := make([]string, 0)
 	for _, route := range routes {
@@ -259,6 +267,17 @@ func (r *fakeGroupRunner) setRouteCalls() [][]string {
 	out := make([][]string, 0, len(r.setCalls))
 	for _, call := range r.setCalls {
 		out = append(out, append([]string(nil), call...))
+	}
+	return out
+}
+
+// pushedRoutes returns every route set pushed so far, in order.
+func (r *fakeGroupRunner) pushedRoutes() [][]connectorshare.LocalHTTPRoute {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([][]connectorshare.LocalHTTPRoute, 0, len(r.pushed))
+	for _, set := range r.pushed {
+		out = append(out, append([]connectorshare.LocalHTTPRoute(nil), set...))
 	}
 	return out
 }
@@ -1345,6 +1364,227 @@ func TestManagerDeferredFirstReconcileStopsOnCancellation(t *testing.T) {
 	}
 }
 
+// overlayHeader stands in for the request header an external supervisor pushes
+// at runtime (qURL Desktop's file-origin proxy token).
+const overlayHeader = "X-QURL-Desktop-Proxy-Token"
+
+func routesByID(routes []connectorshare.LocalHTTPRoute) map[string]connectorshare.LocalHTTPRoute {
+	byID := make(map[string]connectorshare.LocalHTTPRoute, len(routes))
+	for i := range routes {
+		byID[routes[i].RouteID] = routes[i]
+	}
+	return byID
+}
+
+// TestOverlayAttachesHeadersToMatchingRoute pins the overlay's contract on a
+// group start: the headers ride only the route whose Connector ID the overlay
+// names, every other route stays headerless, the caller's map is copied, and
+// SetOverlay releases a deferred first reconcile exactly as the supervisor's
+// first reload does — so a daemon under external supervision registers its
+// routes with their headers from the very first cycle.
+func TestOverlayAttachesHeadersToMatchingRoute(t *testing.T) {
+	registry := &memoryRegistry{shares: map[string]connectorstate.LocalShare{
+		"a": daemonShare("a", 1, "on"),
+		"b": daemonShare("b", 1, "on"),
+	}}
+	factory := newFakeGroupFactory()
+	manager, err := NewManager(registry, factory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.DeferFirstReconcile = true
+	manager.firstReconcileBound = time.Hour
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- manager.Run(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("manager did not stop")
+		}
+	})
+	time.Sleep(50 * time.Millisecond)
+	if factory.startCount() != 0 {
+		t.Fatalf("deferred manager built %d groups before its overlay", factory.startCount())
+	}
+	headers := map[string]string{overlayHeader: "t"}
+	manager.SetOverlay(map[string]map[string]string{"connector-a": headers})
+	headers[overlayHeader] = "mutated after the call"
+	waitServing(t, manager, "a")
+	waitServing(t, manager, "b")
+	if factory.startCount() != 1 {
+		t.Fatalf("groups after the overlay = %d, want the overlay to release the deferred first reconcile once", factory.startCount())
+	}
+	routes := routesByID(factory.lastConfig().Routes)
+	if got := routes["connector-a"].RequestHeaders; len(got) != 1 || got[overlayHeader] != "t" {
+		t.Fatalf("route a carries %d request headers (digest %q), want the overlay's one, uncopied by the caller's later mutation",
+			len(got), connectorshare.RequestHeadersDigest(got))
+	}
+	if got := routes["connector-b"].RequestHeaders; got != nil {
+		t.Fatalf("route b carries request headers (digest %q), want nil without an overlay entry", connectorshare.RequestHeadersDigest(got))
+	}
+}
+
+// TestOverlayReplaceTriggersReconcileAndRepushesChangedRoute pins the hot path:
+// replacing the overlay on a running group costs exactly one route push, the
+// changed route carries the new header digest, its sibling stays headerless,
+// and no admission or restart is spent. Clearing the overlay pushes the route
+// headerless again.
+func TestOverlayReplaceTriggersReconcileAndRepushesChangedRoute(t *testing.T) {
+	registry := &memoryRegistry{shares: map[string]connectorstate.LocalShare{
+		"a": daemonShare("a", 1, "on"),
+		"b": daemonShare("b", 1, "on"),
+	}}
+	factory := newFakeGroupFactory()
+	manager, _ := newRunningManager(t, registry, factory)
+	waitServing(t, manager, "a")
+	waitServing(t, manager, "b")
+	runner := factory.runner(1)
+	before := len(runner.pushedRoutes())
+	headers := map[string]string{overlayHeader: "t1"}
+	manager.SetOverlay(map[string]map[string]string{"connector-a": headers})
+	waitManagerCondition(t, func() bool { return len(runner.pushedRoutes()) == before+1 }, "one route push after the overlay")
+	pushed := routesByID(runner.pushedRoutes()[before])
+	if len(pushed) != 2 {
+		t.Fatalf("overlay push carried %d routes, want the whole desired set of 2", len(pushed))
+	}
+	want := connectorshare.RequestHeadersDigest(headers)
+	if got := connectorshare.RequestHeadersDigest(pushed["connector-a"].RequestHeaders); got != want || want == "" {
+		t.Fatalf("pushed route a header digest = %q, want the overlay's %q", got, want)
+	}
+	if got := connectorshare.RequestHeadersDigest(pushed["connector-b"].RequestHeaders); got != "" {
+		t.Fatalf("pushed route b header digest = %q, want headerless", got)
+	}
+	waitServing(t, manager, "a")
+	if state := runner.RouteStates()["connector-a"]; !state.Route.LocalHTTPRoute.Equal(pushed["connector-a"]) {
+		t.Fatal("the group serves route a without the pushed header set")
+	}
+	if factory.startCount() != 1 || len(runner.restartedRoutes()) != 0 {
+		t.Fatalf("groups=%d restarts=%v, want the header change to spend no admission and no restart", factory.startCount(), runner.restartedRoutes())
+	}
+	time.Sleep(50 * time.Millisecond)
+	if got := len(runner.pushedRoutes()); got != before+1 {
+		t.Fatalf("pushes after the overlay settled = %d, want exactly one", got-before)
+	}
+
+	manager.SetOverlay(nil)
+	waitManagerCondition(t, func() bool { return len(runner.pushedRoutes()) == before+2 }, "one route push after clearing the overlay")
+	if got := connectorshare.RequestHeadersDigest(routesByID(runner.pushedRoutes()[before+1])["connector-a"].RequestHeaders); got != "" {
+		t.Fatalf("route a header digest after clearing = %q, want headerless", got)
+	}
+	waitServing(t, manager, "a")
+}
+
+// TestStatusNeverContainsOverlayValues drives the real SessionGroupRunner over
+// IPC and pins that an overlay reaches the session's registration and nothing
+// else: not /status, not Diagnostics or Running, not the daemon log. Not
+// parallel: it captures the process-global slog default.
+func TestStatusNeverContainsOverlayValues(t *testing.T) {
+	var logs lockedLogBuffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	manager, _, admitter, sessions, client := newRefusingGroupHarness(t, nil)
+	const name, value = "X-Sekrit-Header", "sekrit-overlay-value"
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if running, err := client.SetOverlay(ctx, map[string]map[string]string{"connector-a": {name: value}}); err != nil || !running {
+		t.Fatalf("SetOverlay running=%v err=%v", running, err)
+	}
+	session := sessions.session(1)
+	waitManagerCondition(t, func() bool {
+		state, ok := session.RouteStates()["connector-a"]
+		return ok && state.Route.RequestHeaders[name] == value && state.Phase == connectorshare.RouteServing
+	}, "session registration carries the overlay header")
+	waitServing(t, manager, "a")
+	if names := session.proxyNames("connector-a"); len(names) != 2 || names[0] == names[1] {
+		t.Fatalf("route a registrations = %v, want re-registration under a fresh name for the header change", names)
+	}
+	if admitter.admissions() != 1 || sessions.startCount() != 1 {
+		t.Fatalf("admissions/sessions = %d/%d, want the overlay to spend neither", admitter.admissions(), sessions.startCount())
+	}
+	response, running, err := client.do(ctx, http.MethodGet, "/status", nil)
+	if err != nil || !running {
+		t.Fatalf("raw status running=%v err=%v", running, err)
+	}
+	status, err := io.ReadAll(io.LimitReader(response.Body, maxIPCStatusBytes))
+	_ = response.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(status), "connector-a") && !strings.Contains(string(status), "crid-a") {
+		t.Fatalf("raw status %q does not report the share; the exposure check would be vacuous", status)
+	}
+	for what, text := range map[string]string{
+		"/status":     string(status),
+		"Diagnostics": fmt.Sprintf("%+v", manager.Diagnostics()),
+		"Running":     fmt.Sprintf("%+v", manager.Running()),
+		"daemon log":  logs.String(),
+	} {
+		for label, secret := range map[string]string{"name": name, "value": value} {
+			if strings.Contains(text, secret) {
+				t.Fatalf("%s exposes the overlay header %s", what, label)
+			}
+		}
+	}
+}
+
+// TestOverlayChangeReRegistersOnlyThatRouteOnTheLiveSession drives the real
+// SessionGroupRunner with two shares and pins the per-route isolation the
+// supervisor's file routes depend on: an overlay for one route re-registers
+// exactly that route under a fresh proxy name, its sibling keeps its single
+// registration, and the change spends no admission and no session.
+func TestOverlayChangeReRegistersOnlyThatRouteOnTheLiveSession(t *testing.T) {
+	registry := &memoryRegistry{shares: map[string]connectorstate.LocalShare{
+		"a": daemonShare("a", 1, "on"),
+		"b": daemonShare("b", 1, "on"),
+	}}
+	admitter := &fakeAdmitter{}
+	sessions := &fakeSessionGroupFactory{}
+	manager, err := NewManager(registry, &NativeGroupFactory{admitter: admitter, sessions: sessions})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.retryDelay = func(int) time.Duration { return 20 * time.Millisecond }
+	manager.refusalDelay = manager.retryDelay
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- manager.Run(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("manager did not stop")
+		}
+	})
+	waitServing(t, manager, "a")
+	waitServing(t, manager, "b")
+	session := sessions.session(1)
+	if session == nil {
+		t.Fatal("no session group started")
+	}
+	manager.SetOverlay(map[string]map[string]string{"connector-a": {overlayHeader: "t"}})
+	waitManagerCondition(t, func() bool { return len(session.proxyNames("connector-a")) == 2 }, "route a re-registered under a fresh proxy name")
+	waitServing(t, manager, "a")
+	waitServing(t, manager, "b")
+	time.Sleep(50 * time.Millisecond)
+	if names := session.proxyNames("connector-a"); len(names) != 2 || names[0] == names[1] {
+		t.Fatalf("route a registrations = %v, want exactly one re-registration under a fresh name", names)
+	}
+	if names := session.proxyNames("connector-b"); len(names) != 1 {
+		t.Fatalf("route b registrations = %v, want its single original registration untouched by a sibling's overlay", names)
+	}
+	if got := session.RouteStates()["connector-b"].Route.RequestHeaders; got != nil {
+		t.Fatalf("route b carries request headers (digest %q), want none", connectorshare.RequestHeadersDigest(got))
+	}
+	if admitter.admissions() != 1 || sessions.startCount() != 1 {
+		t.Fatalf("admissions/sessions = %d/%d, want the overlay to spend neither", admitter.admissions(), sessions.startCount())
+	}
+}
+
 // TestManagerDeferredFirstReconcileHonorsAnEarlierTrigger pins that a
 // supervisor's reload which lands before Run starts (the IPC server accepts
 // requests concurrently with the manager's start) is not lost: it is the
@@ -1373,5 +1613,52 @@ func TestManagerDeferredFirstReconcileHonorsAnEarlierTrigger(t *testing.T) {
 	waitServing(t, manager, "a")
 	if factory.startCount() != 1 {
 		t.Fatalf("groups after the early trigger = %d, want 1", factory.startCount())
+	}
+}
+
+func TestOverlayChangePreservesRefusalBackoff(t *testing.T) {
+	registry := &memoryRegistry{shares: map[string]connectorstate.LocalShare{}}
+	manager, err := NewManager(registry, newFakeGroupFactory())
+	if err != nil {
+		t.Fatal(err)
+	}
+	share := daemonShare("a", 1, "on")
+	manager.recordDesired([]connectorstate.LocalShare{share})
+	retryAt := time.Now().Add(time.Minute)
+	tracked := manager.tracked["a"]
+	tracked.retryAt = retryAt
+	manager.tracked["a"] = tracked
+	manager.SetOverlay(map[string]map[string]string{"connector-a": {overlayHeader: "new"}})
+	manager.recordDesired([]connectorstate.LocalShare{share})
+	if !manager.tracked["a"].retryAt.Equal(retryAt) {
+		t.Fatal("header change reset platform refusal backoff")
+	}
+	share.LocalPort++
+	manager.recordDesired([]connectorstate.LocalShare{share})
+	if !manager.tracked["a"].retryAt.IsZero() {
+		t.Fatal("target change retained old refusal backoff")
+	}
+}
+
+// TestOverlaySurvivesGroupRebuild pins that a group rebuilt after a crash
+// re-reads the overlay, so its route comes back with its headers.
+func TestOverlaySurvivesGroupRebuild(t *testing.T) {
+	registry := &memoryRegistry{shares: map[string]connectorstate.LocalShare{"a": daemonShare("a", 1, "on")}}
+	factory := &fakeGroupFactory{autoServe: false, runErr: errors.New("frp login failed")}
+	manager, err := NewManager(registry, factory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.retryDelay = func(int) time.Duration { return time.Millisecond }
+	manager.SetOverlay(map[string]map[string]string{"connector-a": {overlayHeader: "t"}})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- manager.Run(ctx) }()
+	t.Cleanup(func() { cancel(); <-done })
+
+	waitManagerCondition(t, func() bool { return factory.startCount() >= 2 }, "crashed group rebuilt")
+	rebuilt := groupConfigs(factory)[1]
+	if len(rebuilt.Routes) != 1 || rebuilt.Routes[0].RequestHeaders[overlayHeader] != "t" {
+		t.Fatalf("rebuilt group routes = %v, want route a with its overlay headers", rebuilt.Routes)
 	}
 }

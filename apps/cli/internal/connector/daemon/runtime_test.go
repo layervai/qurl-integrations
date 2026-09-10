@@ -71,6 +71,53 @@ func TestDefaultFRPCommonCannotUseEnvironmentProxy(t *testing.T) {
 	}
 }
 
+// TestDefaultFRPCommonCarriesRuntimeRequestHeaders pins that the daemon's FRP
+// transport can carry a headered route set: qurl-connector refuses one unless
+// the control connection is encrypted and the local FRP web server is off, so
+// a drifted default would silently fail every route the overlay names.
+func TestDefaultFRPCommonCarriesRuntimeRequestHeaders(t *testing.T) {
+	common, err := DefaultFRPCommon(1, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if common.Transport.TLS.Enable == nil || !*common.Transport.TLS.Enable || common.WebServer.Port != 0 {
+		t.Fatalf("daemon FRP transport tls=%v web server port=%d, want explicit TLS and no web server",
+			common.Transport.TLS.Enable, common.WebServer.Port)
+	}
+	// Local invariant, independent of the pinned connector's own gate: a
+	// headered route needs an authenticated FRP server. When CA provisioning
+	// lands, set the CA here; never delete this assertion to go green.
+	if common.Transport.TLS.TrustedCaFile == "" {
+		t.Fatal("daemon FRP transport has no TrustedCaFile; runtime request headers need a verified FRP server certificate")
+	}
+	headered := []connectorshare.LocalHTTPRoute{{
+		RouteID: "connector-a", LocalIP: "127.0.0.1", LocalPort: 3000,
+		ResourcePublicKey: "resource-a", ConnectorRoutingID: "routing-a",
+		RequestHeaders: map[string]string{"X-QURL-Desktop-Proxy-Token": "t"},
+	}}
+	sessions, err := connectorshare.NewFRPSessionGroupFactory(connectorshare.FRPGroupFactoryConfig{Common: common, ClientVersion: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sessions.ValidateRoutes(headered); err != nil {
+		t.Fatalf("daemon transport refuses headered routes: %v", err)
+	}
+	// The pin is live: the same routes on a plaintext transport are refused.
+	plaintext, err := DefaultFRPCommon(1, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	disabled := false
+	plaintext.Transport.TLS.Enable = &disabled
+	sessions, err = connectorshare.NewFRPSessionGroupFactory(connectorshare.FRPGroupFactoryConfig{Common: plaintext, ClientVersion: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sessions.ValidateRoutes(headered); err == nil {
+		t.Fatal("plaintext transport accepted headered routes; the pin proves nothing")
+	}
+}
+
 // TestNativeGroupRetryLogsClassifiedRetryWithoutStoppingDaemon drives the real
 // SessionGroupRunner through the native group factory with an admitter whose
 // knock always fails. The group-wide retry is logged with a redacted error and
