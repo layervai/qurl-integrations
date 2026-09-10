@@ -1544,7 +1544,10 @@ func TestGetResourceDecodesDetailEnvelope(t *testing.T) {
 			t.Fatalf("request = %s %s, want GET /v1/resources/r_abc123test", r.Method, r.URL.Path)
 		}
 		// Mirrors qurl-service ResourceDetailResponse: resource beside a qurls preview.
-		_, _ = w.Write([]byte(`{"data":{"resource":{"resource_id":"r_abc123test","type":"tunnel","status":"active"},"qurls":[]}}`))
+		apiEnvelope(t, w, map[string]any{
+			"resource": map[string]any{"resource_id": "r_abc123test", "type": "tunnel", "status": "active"},
+			"qurls":    []any{},
+		})
 	}))
 	defer srv.Close()
 
