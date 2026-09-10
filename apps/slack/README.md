@@ -59,7 +59,7 @@ personal data out of the repository.
 | `/qurl get <$id\|$alias> reason:"…"` | Mint the link and record a reason in the audit log. |
 | `/qurl list` | List the resources available to you in this channel. |
 | `/qurl aliases` | List this channel's aliases and the resource each one points to. |
-| `/qurl uninstall` | Owner/admin-gated: disconnects qURL from this workspace's Slack commands. This is a **local-only disconnect** — it does **not** revoke the workspace's qURL API key outside Slack (an API key can't revoke itself), so if you're disconnecting because the key may be exposed, revoke it through qURL key management or your operator. |
+| `/qurl uninstall` | Owner/admin-gated: shows a confirmation card. Click **Disconnect qURL** and confirm to disconnect Slack commands and clear the admin list, channel access, and aliases. Reconnecting requires setting up channel access and aliases again. This is a **local-only disconnect** — it does **not** revoke the workspace's qURL API key outside Slack (an API key can't revoke itself), so if you're disconnecting because the key may be exposed, revoke it through qURL key management or your operator. |
 | `/qurl feedback` | Send a bug report or feature request to the qURL team. |
 | `/qurl help` | Show the user command help. |
 

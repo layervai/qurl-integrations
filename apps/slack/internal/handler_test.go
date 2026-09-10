@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -129,9 +130,118 @@ func newUninstallAdminTestHandler(t *testing.T, provider *recordingAuthProvider)
 	return h
 }
 
+// slashUninstallAsAdmin drives the FULL two-step uninstall: the slash verb now
+// only renders the confirmation card, so this runs the verb, pulls the confirm
+// button's value out of the returned blocks, clicks it, and returns the reply
+// the admin actually receives over response_url. Shaped as map[string]string so
+// the existing assertions on respFieldText keep working unchanged.
 func slashUninstallAsAdmin(t *testing.T, h *Handler) map[string]string {
 	t.Helper()
-	return slashResponseForWorkspaceUser(t, h, commandUser, uninstallVerb, testAdminTeamID, testAdminUserID)
+	return slashUninstallConfirmedForUser(t, h, testAdminTeamID, testAdminUserID)
+}
+
+// uninstallConfirmButtonValue runs the slash verb and returns the confirm
+// button's value, failing the test if the card did not render one.
+func uninstallConfirmButtonValue(t *testing.T, h *Handler, teamID, userID string, grid uninstallGridContext) (string, bool) {
+	t.Helper()
+	body := url.Values{
+		fieldCommand:     {commandUser},
+		fieldText:        {uninstallVerb},
+		fieldTeamID:      {teamID},
+		fieldUserID:      {userID},
+		fieldChannelID:   {testExposeChannel},
+		fieldResponseURL: {"https://hooks.slack.com/uninstall"},
+	}
+	if grid.enterpriseID != "" {
+		body.Set(fieldEnterpriseID, grid.enterpriseID)
+	}
+	if grid.isEnterpriseInstall != "" {
+		body.Set(fieldIsEnterpriseInstall, grid.isEnterpriseInstall)
+	}
+	encoded := body.Encode()
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, newSignedRequest(t, pathSlackCommands, encoded, encoded))
+	if w.Code != http.StatusOK {
+		t.Fatalf("uninstall verb status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	var got map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal uninstall verb reply: %v body=%s", err, w.Body.String())
+	}
+	blocks, _ := got["blocks"].([]any)
+	for _, b := range blocks {
+		block, _ := b.(map[string]any)
+		els, _ := block[blockKitFieldElements].([]any)
+		for _, e := range els {
+			el, _ := e.(map[string]any)
+			if el[blockKitFieldActionID] == uninstallConfirmActionID {
+				value, _ := el[blockKitFieldValue].(string)
+				return value, true
+			}
+		}
+	}
+	// No button: the gate refused (unauthorized / unsupported deployment). Hand
+	// the text back so those tests can assert on the refusal copy.
+	text, _ := got[respFieldText].(string)
+	return text, false
+}
+
+// slashUninstallConfirmedForUser performs verb → click and returns the final
+// reply. When the verb refused before rendering a button, that refusal is
+// returned instead, so gate tests read the message they expect.
+func slashUninstallConfirmedForUser(t *testing.T, h *Handler, teamID, userID string) map[string]string {
+	t.Helper()
+	return slashUninstallConfirmedForGrid(t, h, teamID, userID, uninstallGridContext{})
+}
+
+// uninstallGridContext carries the Enterprise Grid fields an org install signs
+// on the slash payload. They decide which partitions the confirmation card
+// records, so the click has to be made under the same enterprise for
+// uninstallPurgeIDsForClick to accept them.
+type uninstallGridContext struct {
+	enterpriseID        string
+	isEnterpriseInstall string
+}
+
+func slashUninstallConfirmedForGrid(t *testing.T, h *Handler, teamID, userID string, grid uninstallGridContext) map[string]string {
+	t.Helper()
+	value, ok := uninstallConfirmButtonValue(t, h, teamID, userID, grid)
+	if !ok {
+		return map[string]string{respFieldText: value}
+	}
+
+	captured := &capturedResponseURL{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		captured.record(b)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+
+	clickBody := exposeBlockActionsBodyWithEnterprise(t, teamID, grid.enterpriseID, userID, testExposeChannel, srv.URL, uninstallConfirmActionID, value)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, newSignedRequest(t, pathSlackInteractions, clickBody, clickBody))
+	if w.Code != http.StatusOK {
+		t.Fatalf("uninstall confirm click ack = %d, want 200", w.Code)
+	}
+	// Return the whole response_url payload (it carries response_type too), so
+	// assertions that predate the button still read the fields they expect.
+	// Decoded as map[string]any because the confirmed reply also carries
+	// replace_original (a bool), which consumes the confirmation card.
+	var raw map[string]any
+	if err := json.Unmarshal(captured.waitForBody(t, 2*time.Second), &raw); err != nil {
+		t.Fatalf("unmarshal uninstall confirm reply: %v", err)
+	}
+	reply := map[string]string{}
+	for k, v := range raw {
+		if str, ok := v.(string); ok {
+			reply[k] = str
+		}
+	}
+	if replace, ok := raw[respFieldReplaceOriginal].(bool); !ok || !replace {
+		t.Fatalf("confirmed uninstall reply must set replace_original so the card is consumed; got %v", raw[respFieldReplaceOriginal])
+	}
+	return reply
 }
 
 // signSlackBody returns the pair of headers Slack would send to authenticate
@@ -1194,7 +1304,7 @@ func TestSlashCommandUninstallAllowsAdminWithoutWorkspaceOwner(t *testing.T) {
 	h := newAdminTestHandler(t, ts)
 	h.cfg.AuthProvider = provider
 
-	resp := slashResponseForWorkspaceUser(t, h, commandUser, uninstallVerb, testAdminTeamID, testAdminUserID)
+	resp := slashUninstallConfirmedForUser(t, h, testAdminTeamID, testAdminUserID)
 
 	if provider.deleteCalls != 1 {
 		t.Fatalf("DeleteAPIKey calls = %d, want 1", provider.deleteCalls)
@@ -1211,7 +1321,7 @@ func TestSlashCommandUninstallAllowsAdminForShapeBadOwner(t *testing.T) {
 	h := newAdminTestHandler(t, ts)
 	h.cfg.AuthProvider = provider
 
-	resp := slashResponseForWorkspaceUser(t, h, commandUser, uninstallVerb, testAdminTeamID, testAdminUserID)
+	resp := slashUninstallConfirmedForUser(t, h, testAdminTeamID, testAdminUserID)
 
 	if provider.deleteCalls != 1 {
 		t.Fatalf("DeleteAPIKey calls = %d, want 1", provider.deleteCalls)
@@ -1277,7 +1387,7 @@ func TestSlashCommandUninstallAllowsWorkspaceAdminOrOwner(t *testing.T) {
 		h := newAdminTestHandler(t, ts)
 		h.cfg.AuthProvider = provider
 
-		admin := slashResponseForWorkspaceUser(t, h, commandUser, uninstallVerb, testAdminTeamID, testAdminUserID)
+		admin := slashUninstallConfirmedForUser(t, h, testAdminTeamID, testAdminUserID)
 		if provider.deleteCalls != 1 {
 			t.Fatalf("admin DeleteAPIKey calls = %d, want 1", provider.deleteCalls)
 		}
@@ -1293,7 +1403,7 @@ func TestSlashCommandUninstallAllowsWorkspaceAdminOrOwner(t *testing.T) {
 		h := newAdminTestHandler(t, ts)
 		h.cfg.AuthProvider = provider
 
-		owner := slashResponseForWorkspaceUser(t, h, commandUser, uninstallVerb, testAdminTeamID, testAdminOwnerID)
+		owner := slashUninstallConfirmedForUser(t, h, testAdminTeamID, testAdminOwnerID)
 		if provider.deleteCalls != 1 {
 			t.Fatalf("owner DeleteAPIKey calls = %d, want 1", provider.deleteCalls)
 		}
