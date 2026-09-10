@@ -1524,7 +1524,7 @@ async function getGuildApiKey(guildId) {
   return res.Item ? decrypt(res.Item.qurl_api_key) : null;
 }
 
-async function setGuildApiKey(guildId, apiKey, configuredBy) {
+async function setGuildApiKey(guildId, apiKey, configuredBy, { keyId, bindingId } = {}) {
   const now = nowIso();
   // SQLite's `ON CONFLICT(guild_id) DO UPDATE SET qurl_api_key=…,
   // configured_by=…, updated_at=…` deliberately preserved
@@ -1534,16 +1534,47 @@ async function setGuildApiKey(guildId, apiKey, configuredBy) {
   // row, including resetting configured_at. Mirror createLink's
   // shape: UpdateCommand with `if_not_exists(configured_at, :u)`
   // so first-write sets it and re-keys leave it alone.
-  await ddb.send(new UpdateCommand({
-    TableName: TABLES.guild_configs,
-    Key: { guild_id: guildId },
-    UpdateExpression: 'SET qurl_api_key = :k, configured_by = :b, updated_at = :u, configured_at = if_not_exists(configured_at, :u)',
-    ExpressionAttributeValues: {
-      ':k': encrypt(apiKey),
-      ':b': configuredBy,
-      ':u': now,
-    },
-  }));
+  let updateExpression = 'SET qurl_api_key = :k, configured_by = :b, updated_at = :u, configured_at = if_not_exists(configured_at, :u)';
+  const values = {
+    ':k': encrypt(apiKey),
+    ':b': configuredBy,
+    ':u': now,
+  };
+  if (keyId !== undefined || bindingId !== undefined) {
+    if (typeof keyId !== 'string' || !/^key_[A-Za-z0-9]{12}$/.test(keyId)
+        || typeof bindingId !== 'string' || !/^eib_[A-Za-z0-9]{11}$/.test(bindingId)) {
+      throw new Error('external identity binding credentials are invalid');
+    }
+    updateExpression += ', qurl_api_key_id = :kid, qurl_binding_id = :bid';
+    values[':kid'] = keyId;
+    values[':bid'] = bindingId;
+  } else {
+    updateExpression += ' REMOVE qurl_api_key_id, qurl_binding_id';
+  }
+  try {
+    await ddb.send(new UpdateCommand({
+      TableName: TABLES.guild_configs,
+      Key: { guild_id: guildId },
+      UpdateExpression: updateExpression,
+      ExpressionAttributeValues: values,
+      // A flag rollback must not discard the live external binding and its key.
+      ...(bindingId === undefined ? { ConditionExpression: 'attribute_not_exists(qurl_binding_id)' } : {}),
+    }));
+  } catch (error) {
+    if (bindingId && error?.name !== 'ConditionalCheckFailedException') {
+      // A timed-out write can have committed. Never delete its binding on an
+      // unknown outcome; a consistent read can confirm the exact stored key.
+      try {
+        const stored = await ddb.send(new GetCommand({
+          TableName: TABLES.guild_configs, Key: { guild_id: guildId }, ConsistentRead: true,
+          ProjectionExpression: 'qurl_binding_id, qurl_api_key_id',
+        }));
+        if (stored.Item?.qurl_binding_id === bindingId && stored.Item?.qurl_api_key_id === keyId) return;
+      } catch { /* Keep the original write error. */ }
+      error.bindingWriteUncertain = true;
+    }
+    throw error;
+  }
 }
 
 // Raw delete. No qurl-service subscription teardown. Today there is

@@ -594,38 +594,8 @@ function assertDetectResourceFailureBackoffAllowed() {
 // re-knocks per call (the full no-cache invariant + rationale live on
 // _detectResourceId above and in resolveDetectTarget's docstring).
 //
-// NOTE: the detect mint deliberately does NOT send `target_path`, even though
-// @layervai/qurl whitelists it on createQurlForResource. `target_path` is a
-// property of MintLinkRequest (`POST /v1/qurls/{id}/mint_link`) and has never
-// been one of CreateQurlForResourceRequest, so qurl-service dropped it on
-// arrival; qurl-service#1402 (`additionalProperties: false`) turns that drop
-// into a 400. The SDK allowlist is inverted here — `target_path` is on
-// CREATE_QURL_FOR_RESOURCE_FIELD_KEYS, where the server rejects it, and absent
-// from MINT_FIELD_KEYS, where the server accepts it — so the SDK forwards it to
-// the one endpoint that will now refuse it. Tracked upstream in qurl-typescript.
-//
-// `/api/detect` still reaches the tunnel: buildDetectTargetUrl appends it to
-// the minted `qurl_site` origin, and that constructed URL — never a
-// server-supplied target — has always been what the detect POST goes to.
-// What the dropped field silently cost is the per-session path SCOPE
-// (qurl-service#928): a session minted with target_path may reach only that
-// path and its descendants. That scope has never applied to detect, and this
-// change does not regress it. Restoring it needs BOTH a qurl-service change
-// (MintLinkData carries no `qurl_site`, so mint_link cannot supply the POST
-// host detect requires) and an SDK change (target_path is not on
-// MINT_FIELD_KEYS, so mintLink rejects it client-side before any request).
-//
-// Bearer note: the SDK's `apiKey` is the qURL API Bearer for the
-// listAllResources (read) / createQurlForResource (mint/write) / resolve calls,
-// so QURL_API_KEY MUST carry all three scopes — `qurl:read` + `qurl:write` +
-// `qurl:resolve`. A key with only `qurl:resolve` passes the mocked tests but
-// 403s at runtime on the first slug lookup/mint. This is enforced server-side
-// by qURL as a key-provisioning step; the bot already holds read+write for
-// /qurl send, so resolve is the scope detect adds. TODO(upstream-contract):
-// confirm the scope→endpoint mapping in the soak. This is intentionally the
-// global config.QURL_API_KEY, decoupled from the per-call `apiKey` that
-// detectWatermark threads only into the detect POST's Bearer via
-// connectorAuthHeaders.
+// The bot credential owns the detect tunnel. Mint only the exact binding path
+// saved by trusted Discord setup; the image request carries no API credential.
 let _qurlClient = null;
 function getQurlClient() {
   if (!_qurlClient) {
@@ -645,30 +615,6 @@ function getQurlClient() {
     });
   }
   return _qurlClient;
-}
-
-function extractAccessToken(qurlLink) {
-  let parsed;
-  try {
-    parsed = new URL(qurlLink);
-  } catch {
-    throw new Error('detect mint returned an invalid qurl_link');
-  }
-  const fragment = parsed.hash ? parsed.hash.slice(1) : '';
-  if (!fragment) {
-    throw new Error('detect mint did not return an access token');
-  }
-  // TODO(upstream-contract): access tokens are `at_` + base64url-style chars
-  // (no `=` padding) and ride as the leading bare qurl_link fragment. Relax
-  // this if qurl-service publishes a named token field or changes the alphabet.
-  // Do not scan arbitrary later fragment segments: the token is a minted
-  // credential and should stay position-pinned unless the service publishes a
-  // broader shape.
-  const token = fragment.split(/[&?#]/)[0];
-  if (!/^at_[A-Za-z0-9_-]+$/.test(token)) {
-    throw new Error('detect mint did not return an access token');
-  }
-  return token;
 }
 
 // Safe host-only context for the qurl_site rejection breadcrumb. The guards
@@ -719,24 +665,8 @@ function assertPublicHttpsTarget(targetUrl, expectedQurlSiteHost) {
   if (isPrivateHost(parsed.hostname)) {
     throw new Error('Detect tunnel qurl_site target points to a private/internal address');
   }
-  // Host-pin (defense-in-depth on this Bearer-carrying oracle leg): the POST
-  // target host MUST exactly match the authenticated mint's qurl_site host and
-  // be under an allowed qURL reverse-tunnel suffix. Production currently uses
-  // `*.qurl.site`; sandbox has been observed as
-  // `*.qurl.site.layerv.xyz`; staging may use `*.qurl.site.layerv.ai`.
-  // Non-prod suffixes are accepted only for an explicit non-prod QURL_ENDPOINT
-  // host; unknown endpoint shapes fail closed to prod-only tunnel hosts.
-  // A malformed mint returning a public NON-qURL host then can't receive the
-  // image bytes + our API-key Bearer. (NOT qurl.link — that's the short-link /
-  // ALB domain, not the tunnel.)
-  // The target is derived from qurl_site today, so equality is a construction
-  // invariant rather than a second identity source. Keep it explicit so a
-  // future caller using a different target source fails closed. resolve()'s
-  // resource_id check below independently binds the fresh access token to the
-  // slug-resolved opaque public key. A missing identity fails closed before the
-  // Bearer-carrying image POST; the suffix is a namespace, not tenant identity.
-  // buildDetectTargetUrl obtains the expected value from the same WHATWG URL
-  // parser, which canonicalizes ASCII DNS hostname case on both values.
+  // Pin the authenticated mint host to the configured tunnel namespace.
+  // The native ACK and exact binding path are checked before sending bytes.
   const targetHost = parsed.hostname;
   if (targetHost !== expectedQurlSiteHost) {
     throw new Error('Detect tunnel qurl_site host does not match the returned qurl_site');
@@ -754,30 +684,19 @@ function assertPublicHttpsTarget(targetUrl, expectedQurlSiteHost) {
   }
 }
 
-// Build the detect POST target: the minted host-only `qurl_site` origin plus
-// DETECT_TARGET_PATH. This local join is the ONLY thing that puts `/api/detect`
-// on the wire — the mint carries no target_path (not a property of
-// CreateQurlForResourceRequest) and resolve's `target_url` is deliberately
-// ignored (it is "" for tunnels). Keep it that way: dropping the join would
-// silently POST image bytes to the tunnel root.
-function buildDetectTargetUrl(qurlSite) {
+// qurl_site is the trusted origin; the separately minted target_path is signed.
+function buildDetectTargetUrl(qurlSite, targetPath) {
   let parsed;
   try {
     parsed = new URL(qurlSite);
   } catch {
     throw new DetectQurlSiteError('detect mint returned an unparseable qurl_site');
   }
-  // Contract is intentionally host-only. If qurl-service ever starts returning
-  // a path-based qurl_site, fail loudly during soak instead of silently discarding
-  // path/query/hash state with `new URL('/api/detect', qurl_site)`.
   if (parsed.pathname !== '/' || parsed.search || parsed.hash) {
     throw new DetectQurlSiteError('detect mint qurl_site must be host-only');
   }
-  const candidateUrl = new URL(DETECT_TARGET_PATH, parsed).toString();
-  assertPublicHttpsTarget(candidateUrl, parsed.hostname);
-  // Rebuild from the validated origin so the value returned to fetch is also
-  // structurally credential-free, independent of later guard refactors.
-  return new URL(DETECT_TARGET_PATH, parsed.origin).toString();
+  assertPublicHttpsTarget(parsed.href, parsed.hostname);
+  return new URL(targetPath, parsed.origin).href;
 }
 
 // Scrub legacy access tokens and qv2t1 credentials before logging.
@@ -797,16 +716,8 @@ async function closeDetectOpener(opener) {
   }
 }
 
-/**
- * Look up the active detect resource and mint a fresh five-minute qURL.
- * Cache only the resource ID. Never cache the minted credential or site.
- * Current qv2t1 links use the native SDK with QURL_DEPLOYMENT runtime trust;
- * legacy at_ links use API resolve. Validate the tunnel site before opening,
- * then bind the authenticated target before sending image bytes or a Bearer.
- *
- * @returns {Promise<{targetUrl: string, opener?: object}>} validated target and optional native opener.
- */
-async function resolveDetectTarget() {
+/** Mint a fresh signed qURL for the trusted guild binding's exact detect path. */
+async function resolveDetectTarget(bindingId) {
   if (!config.DETECT_TUNNEL_SLUG) {
     throw new Error('DETECT_TUNNEL_SLUG is not configured (required to reach the detect tunnel)');
   }
@@ -864,18 +775,19 @@ async function resolveDetectTarget() {
   // bounds the credential lifetime AND caps accumulation of unused mints — the
   // bot never deletes them, it relies on expiry. Detect uses the token within
   // seconds (mint → resolve), so 5m is generous margin, not a usage window. The
-  // 201 carries the `at_…` access token in the `qurl_link` fragment. Breadcrumb a
+  // 201 carries the native credential in the qurl_link fragment. Breadcrumb a
   // mint failure (message only — no token, no URL) then rethrow so an
   // activation-time failure is diagnosable at the handler.
   // TODO(upstream-contract): confirm qurl-service honors `expires_in` on a
   // resource mint during the sandbox soak (CI mocks the SDK, so this isn't
   // exercised against the live API here).
-  let accessToken;
+  const targetPath = `${DETECT_TARGET_PATH}/${bindingId}`;
   let targetUrl;
   let minted;
   try {
     minted = await getQurlClient().createQurlForResource(resourceId, {
       expires_in: DETECT_LINK_EXPIRES_IN,
+      target_path: targetPath,
     });
   } catch (err) {
     // Self-heal a stale resource_id: if the tunnel resource was deleted/
@@ -889,7 +801,10 @@ async function resolveDetectTarget() {
     throw err;
   }
   try {
-    targetUrl = buildDetectTargetUrl(minted?.qurl_site);
+    if (minted?.target_path !== targetPath) {
+      throw new DetectQurlSiteError('detect mint returned a mismatched binding path');
+    }
+    targetUrl = buildDetectTargetUrl(minted?.qurl_site, targetPath);
   } catch (err) {
     // qurl_site hostname-pin failures happen after a successful slug
     // lookup and mint, so keep the cached resource id and retry the mint after
@@ -930,7 +845,7 @@ async function resolveDetectTarget() {
         throw new Error(redactAccessToken(err.message));
       }
     }
-    accessToken = extractAccessToken(minted?.qurl_link);
+    throw new Error('Detect requires a signed native qURL');
   } catch (err) {
     // A malformed qurl_link is a mint response-shape issue, not evidence that
     // the cached resource_id is stale. Keep the resource cache and retry only
@@ -940,103 +855,34 @@ async function resolveDetectTarget() {
     throw err;
   }
 
-  // Resolve (per call — the NHP knock). Breadcrumb the failure so an
-  // activation-time failure is diagnosable rather than an undistinguished throw
-  // at the handler. Log ONLY the redacted error message: never the access_token.
-  let resolved;
-  try {
-    resolved = await getQurlClient().resolve({ access_token: accessToken });
-  } catch (err) {
-    // The lookup and mint succeeded, so do not clear the cached resource id or
-    // arm the detect failure backoff for knock/transport failures. Persistent
-    // knock failures intentionally retry with a fresh 5m mint per detect (not
-    // a slug rewalk); unused qURLs expire quickly, so accumulation is bounded
-    // without coupling the NHP leg to the slug/mint/host-pin backoff.
-    logger.warn('Detect tunnel resolve failed (knock/transport)', { error: redactAccessToken(err.message) });
-    throw err;
-  }
-  // Bind the fresh access token to the slug-resolved resource before sending
-  // image bytes + API-key Bearer to the minted tunnel host. qurl-service's
-  // public resolve handler validates and always serializes resource_id; a
-  // response that omits it is therefore malformed, not a compatibility shape.
-  // TODO(upstream-contract): resource IDs are unpadded base64url public keys;
-  // preserve exact serialization on list and resolve responses.
-  const resolvedResourceId = resolved?.resource_id;
-  if (!resolvedResourceId) {
-    const err = new Error('Detect tunnel resolve omitted resource_id');
-    // The knock already happened, but no image/API key has left the bot. This
-    // is a deterministic response-contract failure, so retain the known slug
-    // resource and back off immediately instead of minting another token.
-    rememberDetectResourceFailure(err, { clearResourceCache: false, immediateBackoff: true });
-    logger.warn('Detect tunnel resolve rejected missing resource_id', {
-      expected_resource_id: resourceId,
-    });
-    throw err;
-  }
-  if (String(resolvedResourceId) !== resourceId) {
-    const err = new Error('Detect tunnel resolve returned a mismatched resource_id');
-    // The knock already happened, but the Bearer-carrying image POST must not.
-    // The minted qURL is unused and expires quickly; clear the cache so the
-    // next attempt rewalks the slug in case the resource was recreated.
-    rememberDetectResourceFailure(err);
-    logger.warn('Detect tunnel resolve returned mismatched resource_id', {
-      expected_resource_id: resourceId,
-      actual_resource_id: resolvedResourceId,
-    });
-    throw err;
-  }
-  clearDetectResourceFailureState();
-  return { targetUrl };
 }
 
-/**
- * Recover watermark attribution through the private detect tunnel.
- * The bot credential lists and mints; an optional guild key authenticates the
- * POST. Current qv2t1 links open through native UDP using runtime SDK trust.
- * Legacy at_ links still require qurl:resolve. Each request closes its native
- * opener, and credentials never go to an unvalidated or redirected target.
- * The caller enforces sender/staff standing and filters attribution by guild.
- *
- * @param {Buffer} imageBytes
- * @param {object} opts
- * @param {string} opts.guildId Discord guild scope.
- * @param {string} [opts.contentType]
- * @param {string} [opts.apiKey] Guild key for the POST; defaults to the bot key.
- * @returns {Promise<{detected: boolean, qurl_id: string|null, match_pct: number|null, confidence: number}>}
- */
-async function detectWatermark(imageBytes, { guildId, contentType, apiKey } = {}) {
-  // The mint+resolve leg always uses the global config.QURL_API_KEY as the
-  // SDK Bearer (see resolveDetectTarget), so this leg requires it even
-  // when a per-call `apiKey` is set — the apiKey overrides only the POST Bearer.
+/** Recover attribution through an exact, signed external binding path. */
+async function detectWatermark(imageBytes, { bindingId, contentType } = {}) {
   if (!config.QURL_API_KEY) throw new Error('QURL_API_KEY is not configured');
-  if (!guildId) throw new Error('detectWatermark requires a guildId (attribution is guild-scoped)');
-
-  // Mint-and-resolve-per-call — never cache the minted token or qurl_site
-  // (rationale in the REACH MODEL note above and resolveDetectTarget's docstring).
-  const { targetUrl, opener } = await resolveDetectTarget();
+  if (typeof bindingId !== 'string' || !/^eib_[A-Za-z0-9]{11}$/.test(bindingId)) {
+    throw new Error('detectWatermark requires a configured external identity binding');
+  }
+  const { targetUrl, opener } = await resolveDetectTarget(bindingId);
 
   try {
     const request = {
       method: 'POST',
       headers: {
         'Content-Type': contentType || 'application/octet-stream',
-        'X-Guild-Id': guildId,
-        ...connectorAuthHeaders(apiKey),
       },
       body: imageBytes,
       // Neural-net inference is the slow leg here; give it the same 60s
       // headroom the upload paths use rather than the 30s mint window.
       signal: AbortSignal.timeout(60000),
     };
-    const response = opener
-      ? await opener.fetchDescendant(['api', 'detect'], (authenticatedTarget) => {
-        // Check the signed ACK target before sending guild data or a Bearer.
+    const response = await opener.fetch((authenticatedTarget) => {
+        // Check the signed ACK target before sending image bytes.
         if (authenticatedTarget.href !== targetUrl) {
           throw new Error('Detect native target does not match the minted tunnel');
         }
         return request;
-      }, { redirects: 'error' })
-      : await fetch(targetUrl, { ...request, redirect: 'error' });
+      }, { redirects: 'error' });
 
     if (!response.ok) {
       return await throwConnectorError('Connector detect', response);

@@ -71,6 +71,36 @@ describe('guild configs', () => {
     expect(input.UpdateExpression).not.toMatch(/^SET configured_at = :u\b/);
   });
 
+  test('binding and encrypted key are written together and legacy setup cannot erase a binding', async () => {
+    ddbMock.on(UpdateCommand).resolves({});
+    await store.setGuildApiKey('g-1', 'plain-key', 'admin', {
+      keyId: 'key_123456789012', bindingId: 'eib_12345678901',
+    });
+    const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
+    expect(input.UpdateExpression).toContain('qurl_binding_id = :bid');
+    expect(input.ExpressionAttributeValues).toMatchObject({ ':bid': 'eib_12345678901', ':kid': 'key_123456789012' });
+    expect(input.ExpressionAttributeValues[':k']).toMatch(/^enc:v1:/);
+    await store.setGuildApiKey('g-1', 'other-key', 'admin');
+    expect(ddbMock.commandCalls(UpdateCommand)[1].args[0].input.ConditionExpression)
+      .toBe('attribute_not_exists(qurl_binding_id)');
+    await expect(store.setGuildApiKey('g-1', 'key', 'admin', { bindingId: 'bad' }))
+      .rejects.toThrow(/invalid/);
+    expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(2);
+  });
+
+  test('an unknown binding write is confirmed by exact identity or kept for recovery', async () => {
+    const credential = { keyId: 'key_123456789012', bindingId: 'eib_12345678901' };
+    ddbMock.on(UpdateCommand).rejects(new Error('timeout'));
+    ddbMock.on(GetCommand).resolves({ Item: {
+      qurl_binding_id: credential.bindingId, qurl_api_key_id: credential.keyId,
+    } });
+    await expect(store.setGuildApiKey('g-1', 'key', 'admin', credential)).resolves.toBeUndefined();
+    expect(ddbMock.commandCalls(GetCommand)[0].args[0].input.ConsistentRead).toBe(true);
+    ddbMock.on(GetCommand).resolves({});
+    await expect(store.setGuildApiKey('g-1', 'key', 'admin', credential))
+      .rejects.toMatchObject({ bindingWriteUncertain: true });
+  });
+
   test('getGuildApiKey: decrypts round-trip', async () => {
     ddbMock.on(GetCommand).resolves({
       Item: { guild_id: 'g-1', qurl_api_key: `enc:v1:IV:TAG:${Buffer.from('plain-key').toString('hex')}` },

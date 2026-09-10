@@ -6267,12 +6267,9 @@ async function handleQurlDetect(interaction) {
   // deferReply, all user-visible output is editReply.
   await interaction.deferReply({ ephemeral: true });
 
-  // Resolve the API key the same way the send paths do: per-guild BYOK
-  // first, global fallback. (handleQurlDetect resolves its own key — it's
-  // intentionally NOT in API_KEY_GATED_SUBCOMMANDS, which would
-  // double-resolve and gate before this handler runs.)
-  const apiKey = await db.getGuildApiKey(interaction.guildId) || config.QURL_API_KEY;
-  if (!apiKey) {
+  // Use the binding saved by trusted Discord setup, never a tenant header.
+  const guildConfig = await db.getGuildConfig(interaction.guildId);
+  if (!guildConfig?.qurl_binding_id) {
     // A missing /qurl setup is an honest config error, not abuse — clear
     // the cooldown so the user can retry the instant an admin configures
     // the server. Matches the handler's "honest user errors clear the
@@ -6348,7 +6345,7 @@ async function handleQurlDetect(interaction) {
     result = await detectWatermark(bytes, {
       guildId: interaction.guildId,
       contentType: attachment.contentType,
-      apiKey,
+      bindingId: guildConfig.qurl_binding_id,
     });
   } catch (err) {
     // detectWatermark (the CONNECTOR POST — the CDN download is handled in

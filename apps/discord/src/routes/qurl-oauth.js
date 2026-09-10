@@ -21,11 +21,11 @@ const { fireAndForgetLinkGuildWebhookSubscription } = require('../guild-webhook-
 
 // Network-call timeouts. Centralized so a future tuning of "qurl-service
 // is slow under load" doesn't require a hunt-and-replace across both
-// route files. 15s matches the existing per-call budget; the 5s and 10s
-// values are for cleanup paths that should fail faster.
+// route files. 15s matches the existing per-call budget. Two 5s orphan
+// DELETE attempts bound persistence-failure cleanup to 10s.
 const AUTH0_TIMEOUT_MS = 15000;
 const QURL_SERVICE_TIMEOUT_MS = 15000;
-const ORPHAN_DELETE_TIMEOUT_MS = 10000;
+const ORPHAN_DELETE_ATTEMPT_TIMEOUT_MS = 5000;
 
 const router = express.Router();
 
@@ -92,12 +92,12 @@ function renderSuccess(res, { guildId, keyPrefix, qurlAccountEmail }) {
   }));
 }
 
-function renderError(res, statusCode, headline, detail) {
+function renderError(res, statusCode, headline, detail, retrySetup = true) {
   return res.status(statusCode).send(res.renderPage({
     title: 'qURL Setup Failed',
     icon: '❌',
     heading: headline,
-    message: detail + ' Run /qurl setup in Discord to start over.',
+    message: detail + (retrySetup ? ' Run /qurl setup in Discord to start over.' : ''),
     type: 'error',
   }));
 }
@@ -105,6 +105,40 @@ function renderError(res, statusCode, headline, detail) {
 function clearQurlOAuthCookies(res) {
   clearQurlOAuthCookie(res);
   clearQurlOAuthPkceCookie(res);
+}
+
+// TODO(upstream-contract): qurl-service binding DELETE atomically revokes its
+// child API key and releases the external identity claim.
+async function deleteOrphanCredential({ accessToken, bindingId, keyId, guildId }) {
+  const isPrivateBinding = Boolean(bindingId);
+  const credentialKind = isPrivateBinding ? 'external identity binding' : 'API key';
+  const resourcePath = isPrivateBinding
+    ? `/v1/external-identity-bindings/${encodeURIComponent(bindingId)}`
+    : `/v1/api-keys/${encodeURIComponent(keyId)}`;
+  let lastError;
+
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      const response = await fetch(`${config.QURL_ENDPOINT}${resourcePath}`, {
+        method: 'DELETE',
+        headers: { 'Authorization': `Bearer ${accessToken}`, 'Accept': 'application/json' },
+        signal: AbortSignal.timeout(ORPHAN_DELETE_ATTEMPT_TIMEOUT_MS),
+      });
+      await response.body?.cancel?.();
+      if (response.status === 204 || response.status === 404) return;
+      if (response.status >= 500 && response.status <= 599 && attempt < 2) continue;
+      logger.warn('Orphan credential delete returned non-terminal status', {
+        status: response.status, credentialKind, guildId,
+      });
+      return;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  logger.warn('Orphan credential delete remained transport-unknown after exact retry', {
+    error: lastError?.message, credentialKind, guildId,
+  });
 }
 
 // /oauth/qurl/start — admin lands here after clicking the link in
@@ -353,23 +387,48 @@ router.get('/callback', rateLimit, async (req, res) => {
     return renderError(res, 502, 'Authorization failed', 'A network error occurred during the Auth0 handshake. Please run /qurl setup again.');
   }
 
-  // 2. Mint a guild-scoped qURL API key via POST /v1/api-keys, owned by
-  //    the admin's qURL account (the Auth0 JWT's sub claim is the owner).
+  // 2. Create or rotate the Discord external-identity binding when detect is enabled. Until then, keep the existing API-key
+  //    setup path so a dormant deployment does not require the binding API.
   let apiKey;
   let keyId;
   let keyPrefix;
+  let bindingId;
   try {
     const keyName = `Discord guild ${guildId}`;
-    const mintResp = await fetch(`${config.QURL_ENDPOINT}/v1/api-keys`, {
+    const useExternalBinding = config.DETECT_COMMAND_ENABLED;
+    const resourcePath = useExternalBinding ? '/v1/external-identity-bindings' : '/v1/api-keys';
+    const request = {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${accessToken}`,
         'Content-Type': 'application/json',
         'Accept': 'application/json',
+        ...(useExternalBinding ? { 'Idempotency-Key': crypto.randomUUID() } : {}),
       },
-      body: JSON.stringify({ kind: 'api_key', name: keyName, scopes: ['qurl:write', 'qurl:read'] }),
-      signal: AbortSignal.timeout(QURL_SERVICE_TIMEOUT_MS),
-    });
+      body: JSON.stringify(useExternalBinding
+        ? { provider: 'discord', external_id: guildId, display_name: keyName }
+        : { kind: 'api_key', name: keyName, scopes: ['qurl:write', 'qurl:read'] }),
+    };
+    let mintResp;
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        mintResp = await fetch(`${config.QURL_ENDPOINT}${resourcePath}`, {
+          ...request,
+          signal: AbortSignal.timeout(QURL_SERVICE_TIMEOUT_MS),
+        });
+      } catch (firstError) {
+        if (!useExternalBinding || attempt === 2) throw firstError;
+        continue;
+      }
+      // A service-side transaction can commit before a 5xx response reaches
+      // us. Retry the exact body and Idempotency-Key once so the durable replay
+      // returns the only copy of the plaintext key.
+      if (useExternalBinding && mintResp.status >= 500 && attempt === 1) {
+        await mintResp.body?.cancel?.();
+        continue;
+      }
+      break;
+    }
     if (!mintResp.ok) {
       const errBody = await mintResp.text().catch(() => '');
       // Parse RFC 7807 problem JSON to discriminate user-quota hits
@@ -401,9 +460,10 @@ router.get('/callback', rateLimit, async (req, res) => {
         'qurl-service rejected the API-key request. Please run /qurl setup again, or contact your layerv.ai admin.');
     }
     const mintJson = await mintResp.json();
-    apiKey = mintJson?.data?.api_key;
-    keyId = mintJson?.data?.key_id;
-    keyPrefix = mintJson?.data?.key_prefix;
+    apiKey = useExternalBinding ? mintJson?.api_key?.plaintext : mintJson?.data?.api_key;
+    keyId = useExternalBinding ? mintJson?.api_key?.key_id : mintJson?.data?.key_id;
+    keyPrefix = useExternalBinding ? mintJson?.api_key?.key_prefix : mintJson?.data?.key_prefix;
+    bindingId = useExternalBinding ? mintJson?.binding_id : undefined;
     // Both api_key AND key_id are required: api_key is what we persist
     // for the bot to use; key_id is what the orphan-cleanup DELETE
     // below targets if persistence then fails. Treating a missing
@@ -413,12 +473,14 @@ router.get('/callback', rateLimit, async (req, res) => {
     // so an upstream contract drift to numeric/object can't poison
     // db.setGuildApiKey or the encodeURIComponent in the DELETE URL.
     // PR #177 follow-up C.3 + round-9 review item #4.
-    if (typeof apiKey !== 'string' || !apiKey
-        || typeof keyId !== 'string' || !keyId) {
+    if (typeof apiKey !== 'string' || !apiKey || typeof keyId !== 'string' || !keyId
+        || (useExternalBinding && (!/^key_[A-Za-z0-9]{12}$/.test(keyId)
+          || typeof bindingId !== 'string' || !/^eib_[A-Za-z0-9]{11}$/.test(bindingId)))) {
       logger.error('qURL API key response missing or non-string required fields', {
         guildId,
         apiKeyType: typeof apiKey,
         keyIdType: typeof keyId,
+        bindingIdType: typeof bindingId,
       });
       return renderError(res, 502, 'Could not provision qURL key',
         'qurl-service returned an unexpected response. Please contact your layerv.ai admin.');
@@ -434,38 +496,36 @@ router.get('/callback', rateLimit, async (req, res) => {
       'A network error occurred while provisioning your qURL key. Please run /qurl setup again.');
   }
 
-  // 3. Persist the key. setGuildApiKey is idempotent (upsert) — the
-  //    previous key (if any) remains valid on qurl-service until the
-  //    admin manually revokes it via layerv.ai.
+  // 3. Persist the key. Private credentials must store the audience key ID and
+  //    binding together. The public path cannot overwrite a live binding.
   try {
-    await db.setGuildApiKey(guildId, apiKey, discordUserId);
+    await db.setGuildApiKey(
+      guildId,
+      apiKey,
+      discordUserId,
+      bindingId ? { keyId, bindingId } : undefined,
+    );
   } catch (err) {
     logger.error('Failed to persist guild API key after successful mint', {
       error: err?.message, guildId, discordUserId, keyId,
     });
-    // Key was minted but not stored. Best-effort delete on qurl-service
-    // so retries don't pile up orphan keys under the admin's account.
-    // Fire-and-forget — even if the cleanup fails, the user-facing 500
-    // response below is the right outcome (admin runs /qurl setup
-    // again to retry; the orphan only persists if delete also fails).
-    // `keyId` is guaranteed non-empty here — the missing-key_id 502
-    // earlier in the handler returned before this block can run, so
-    // the historical `if (keyId)` guard was dead code (round-9 #5).
-    fetch(`${config.QURL_ENDPOINT}/v1/api-keys/${encodeURIComponent(keyId)}`, {
-      method: 'DELETE',
-      headers: { 'Authorization': `Bearer ${accessToken}` },
-      signal: AbortSignal.timeout(ORPHAN_DELETE_TIMEOUT_MS),
-    })
-      .then((r) => {
-        if (!r.ok) {
-          logger.warn('Best-effort orphan-key delete returned non-ok', {
-            status: r.status, keyId, guildId,
-          });
-        }
-      })
-      .catch((dErr) => logger.warn('Best-effort orphan-key delete threw', {
-        error: dErr?.message, keyId, guildId,
-      }));
+    if (err?.bindingWriteUncertain) {
+      return renderError(res, 503, 'qURL setup result is uncertain',
+        'The key and binding were kept because storage confirmation failed. '
+        + 'Contact your operator before repeating setup.', false);
+    }
+    // Key was minted but not stored. Private setup must remove the binding,
+    // which also releases its reserved provider identity; deleting only the
+    // child API key can leave the next setup blocked by a binding conflict.
+    // Public setup still owns only an API key, so it keeps that delete target.
+    // Await one exact retry after a transport-unknown result or 5xx. DELETE
+    // is idempotent, and 404 confirms that another attempt completed cleanup.
+    await deleteOrphanCredential({ accessToken, bindingId, keyId, guildId });
+    if (!bindingId && err?.name === 'ConditionalCheckFailedException') {
+      return renderError(res, 409, 'Existing qURL connection kept',
+        'This server already has a qURL binding. Repeating setup will not replace it. '
+        + 'Contact your operator to change the binding.', false);
+    }
     return renderError(res, 500, 'qURL key provisioned but not stored',
       'Your qURL API key was created but the bot could not save it. Please run /qurl setup again. '
       + 'If this keeps happening, contact your layerv.ai admin.');
@@ -497,3 +557,7 @@ router.get('/callback', rateLimit, async (req, res) => {
 });
 
 module.exports = router;
+
+if (process.env.NODE_ENV === 'test') {
+  module.exports.__testExports = { deleteOrphanCredential };
+}
