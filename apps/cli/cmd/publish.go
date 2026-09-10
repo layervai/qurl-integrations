@@ -44,6 +44,8 @@ until the route is serving, prints the CRID, and exits. The daemon resumes
 desired-on shares after login, sleep, wake, and network changes. Running the
 same command later reuses the same resource and CRID.
 Use --id only when you want to choose the Connector ID yourself.
+After "qurl delete", you can reuse that ID to create a new resource with a new CRID.
+Old links remain invalid.
 
 For a remote URL, qURL registers it, prints the CRID, and exits:
 
@@ -304,12 +306,15 @@ func (e *localEnrollment) resolveID(ctx context.Context, stateDir, agentID strin
 		return "", err
 	}
 	defer func() { retErr = errors.Join(retErr, resourceStore.Close()) }()
-	id, advanced, err := resourceStore.ResolveDefaultConnectorID(ctx, id)
-	if err != nil {
-		return "", err
-	}
-	if advanced > 0 && e.requestedID != "" {
-		return "", exitcode.UsageError(fmt.Errorf("connector ID %q was deleted; choose a new value with --id", e.requestedID))
+	if e.requestedID != "" {
+		if err := resourceStore.PrepareConnectorResourceReuse(ctx, id); err != nil {
+			return "", err
+		}
+	} else {
+		id, _, err = resourceStore.ResolveDefaultConnectorID(ctx, id)
+		if err != nil {
+			return "", err
+		}
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -365,7 +370,7 @@ func activateLocalPublish(
 	knockResourceID string,
 	target *publishTarget,
 ) (*connectorstate.LocalShare, *qurlapi.Sharing, bool, error) {
-	existing, err := registry.Get(ctx, resource.ResourceID)
+	existing, err := registry.Get(ctx, resource.ResourcePublicKey)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, nil, false, err
 	}
@@ -376,7 +381,7 @@ func activateLocalPublish(
 	if err != nil {
 		return nil, nil, false, err
 	}
-	if prior.ResourceID != resource.ResourceID || prior.CRID != resource.CRID {
+	if prior.ResourceID != resource.ResourcePublicKey || prior.CRID != resource.CRID {
 		return nil, nil, false, errors.New("qURL sharing response identity does not match the published resource")
 	}
 	var sharing *qurlapi.Sharing
@@ -392,7 +397,7 @@ func activateLocalPublish(
 		return nil, nil, compensateOff, err
 	}
 	local := &connectorstate.LocalShare{
-		CRID: resource.CRID, ResourceID: resource.ResourceID, ConnectorID: resource.Slug,
+		CRID: resource.CRID, ResourceID: resource.ResourcePublicKey, ConnectorID: resource.Slug,
 		ConnectorRoutingID: resource.ConnectorRoutingID, KnockResourceID: knockResourceID,
 		TargetURL: target.canonicalOrigin, LocalIP: target.localIP, LocalPort: target.localPort,
 		DesiredState: string(sharing.DesiredState), ServingEpoch: sharing.ServingEpoch,
@@ -411,7 +416,7 @@ func compensateLocalPublish(
 	off, offErr := client.SetSharing(ctx, resource.CRID, qurlapi.DesiredStateOff)
 	var localErr error
 	if offErr == nil {
-		localErr = persistCompensatingOff(ctx, registry, resource.ResourceID, resource.CRID, off, true)
+		localErr = persistCompensatingOff(ctx, registry, resource.ResourcePublicKey, resource.CRID, off, true)
 	}
 	return errors.Join(cause, offErr, localErr)
 }

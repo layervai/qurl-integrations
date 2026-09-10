@@ -19,27 +19,9 @@
 // ...)` don't observe these vars at all — the mock replaces the real
 // module before its top-level code runs.
 
-// Test prefix has the same shape as the real one
-// (e.g. `qurl-bot-discord-sandbox-`) — must end with `-` per the
-// flow-state guard. Value is a sentinel that won't collide with any
-// real environment; if a test accidentally lets a real DDB call
-// through, the error message names this prefix so the breakage is
-// obvious.
 process.env.DDB_TABLE_PREFIX = process.env.DDB_TABLE_PREFIX || 'jest-test-';
 process.env.AWS_REGION = process.env.AWS_REGION || 'us-east-1';
 
-// Stable OAuth state-signing secret for every suite in the worker
-// (the PR #177 cross-suite convention, promoted here from per-file
-// pins). Several suites load the REAL config + commands /
-// qurl-oauth-state modules and reach the shared state signer
-// (src/utils/oauth-state.js) via /link dispatch or route tests. The
-// signer enforces a 32-char minimum, so an unpinned worker would
-// resolve whatever secret-shaped value an earlier suite leaked into
-// process.env (e.g. a short OAUTH_STATE_SECRET fixture) and throw
-// order-dependently. One pin makes the resolved secret deterministic
-// for every suite. Suites that need different resolution mock
-// ../src/config wholesale (the signer reads config, not env) or
-// override the var before their own require of config.
 process.env.OAUTH_STATE_SECRET = process.env.OAUTH_STATE_SECRET || '0'.repeat(64);
 
 // No Auth0 connection pin unless a suite opts in. setupFiles runs before each

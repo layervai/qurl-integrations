@@ -10,9 +10,8 @@ Brief description of changes.
 - [ ] `apps/teams/`
 - [ ] `apps/discord/`
 - [ ] `apps/cli/`
-- [ ] `apps/zapier/`
-- [ ] `apps/chrome-extension/` (lockstep with Edge — CI enforces the two stay in sync)
-- [ ] `apps/edge-extension/` (lockstep with Chrome — CI enforces the two stay in sync)
+- [ ] Browser extension source (`apps/chrome-extension/`)
+- [ ] Edge release metadata (`apps/edge-extension/`)
 - [ ] `origins/` (connector image — also triggers Slack CI)
 - [ ] `e2e/` (end-to-end tests — CI gates the offline subset; the live suite is local-only)
 - [ ] `shared/` (triggers tests for ALL apps — coordinate with maintainers)

@@ -5,8 +5,9 @@
 // The public Discord install entrypoint gets a separate per-IP bucket in the
 // same bounded store, so entry-page traffic from one IP cannot consume that
 // IP's callback budget. At the global hard cap, callbacks can evict an
-// install-only entry; public entry-page traffic therefore cannot starve a
-// short-lived Discord authorization code arriving from a new IP.
+// install-only entry, protecting callbacks from install-only traffic. This is
+// organic-traffic fairness, not abuse protection: a callback flood can fill
+// the shared store and shed new clients until entries expire.
 //
 // SCALING: single-instance only. If this bot ever runs horizontally
 // (multiple ECS tasks behind a LB), move this to Redis so limits are

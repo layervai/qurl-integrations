@@ -213,7 +213,7 @@ function removeGuild({ guildId, ownerId }) {
 // closed rather than choosing an owner based on response order. The same
 // assumption underlies BYOK row population via setGuildApiKey, so any change
 // there needs a coordinated rework here.
-async function discoverOwnerId(apiKey) {
+async function discoverOwnerId(apiKey, subject = 'DEFAULT') {
   if (!apiKey || !config.QURL_ENDPOINT) return null;
   // Walk the same bounded surface the registrar can select from. Validating
   // only page 1 would let it mutate a malformed default subscription on a
@@ -230,7 +230,7 @@ async function discoverOwnerId(apiKey) {
     });
     if (!Array.isArray(body?.data)) {
       const err = new Error('discoverOwnerId: qurl-service response data must be an array');
-      err.code = 'DEFAULT_WEBHOOK_OWNER_CONTRACT';
+      err.code = `${subject}_WEBHOOK_OWNER_CONTRACT`;
       throw err;
     }
     for (const webhook of body.data) {
@@ -238,12 +238,12 @@ async function discoverOwnerId(apiKey) {
       // registrar rotate that row using an owner inferred from a valid sibling.
       if (typeof webhook?.owner_id !== 'string' || !webhook.owner_id.length) {
         const err = new Error('discoverOwnerId: non-empty qurl-service response omitted owner_id');
-        err.code = 'DEFAULT_WEBHOOK_OWNER_CONTRACT';
+        err.code = `${subject}_WEBHOOK_OWNER_CONTRACT`;
         throw err;
       }
       if (ownerId && webhook.owner_id !== ownerId) {
         const err = new Error('discoverOwnerId: qurl-service response contained conflicting owner_id values');
-        err.code = 'DEFAULT_WEBHOOK_OWNER_CONFLICT';
+        err.code = `${subject}_WEBHOOK_OWNER_CONFLICT`;
         throw err;
       }
       ownerId = webhook.owner_id;
@@ -253,7 +253,7 @@ async function discoverOwnerId(apiKey) {
     cursor = next;
   }
   const err = new Error('discoverOwnerId: pagination cap hit (50 pages, ~5000 subscriptions)');
-  err.code = 'DEFAULT_WEBHOOK_OWNER_CONTRACT';
+  err.code = `${subject}_WEBHOOK_OWNER_CONTRACT`;
   throw err;
 }
 
@@ -302,7 +302,7 @@ async function resolveDefaultOwnerForApiKey(apiKey) {
 
   const candidateOwnerId = apiKey === config.QURL_API_KEY
     ? ownerId
-    : await discoverOwnerId(apiKey);
+    : await discoverOwnerId(apiKey, 'CANDIDATE');
   return candidateOwnerId === ownerId ? ownerId : null;
 }
 

@@ -166,7 +166,7 @@ func groupConfigFixture() *GroupConfig {
 		KnockResourceID: "q_catalog_key", ResourceID: "resource-a",
 		Routes: []connectorshare.LocalHTTPRoute{{
 			RouteID: "connector-a", LocalIP: "127.0.0.1", LocalPort: 3000,
-			ResourceID: "resource-a", ConnectorRoutingID: "routing-a",
+			ResourcePublicKey: "resource-a", ConnectorRoutingID: "routing-a",
 		}},
 	}
 }

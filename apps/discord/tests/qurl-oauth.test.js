@@ -1,30 +1,13 @@
-// Tests for src/routes/qurl-oauth.js — the OAuth-redirect setup flow that
-// replaces the API-key-paste modal in /qurl setup. Covers:
-//   - /start: 400 invalid-state, 302 redirect to Auth0, cookie set
-//   - /callback: 400 invalid state / missing cookie / cookie mismatch,
-//     502 Auth0 token-exchange failure, 502 qurl-service mint failure,
-//     200 happy path with mint + persist + DM, 500 + orphan-key cleanup
-//   - 503 not-configured response when AUTH0_* env vars are unset
-//     (separate describe — uses jest.isolateModules to load the router
-//     with the env temporarily wiped).
 
-// Auth0 env vars must be set BEFORE requiring the modules that read
-// them at load time. OAUTH_STATE_SECRET is pinned globally in
-// tests/setup-env.js (per PR #177 review on env-var leakage).
 process.env.AUTH0_DOMAIN = 'layerv-test.auth0.com';
 process.env.AUTH0_CLIENT_ID = 'test-client-id';
 process.env.AUTH0_CLIENT_SECRET = 'test-client-secret';
 process.env.AUTH0_AUDIENCE = 'https://api.layerv.test';
 process.env.QURL_ENDPOINT = 'http://localhost:9999';
 process.env.BASE_URL = 'http://localhost:3000';
-// KEY_ENCRYPTION_KEY required for the persist-time guard added in PR #177
-// review round 2; matches the legacy modal-paste path's existing check.
+process.env.MAP_COMMAND_ENABLED = 'false';
 process.env.KEY_ENCRYPTION_KEY = '1'.repeat(64);
-// /qurl-oauth router mounts unconditionally and gates internally
 process.env.GUILD_ID = '123456789012345678';
-// Trust proxy so the Secure-cookie test can simulate ALB-fronted prod
-// via X-Forwarded-Proto: https (server.js reads TRUST_PROXY at module
-// load — must be set BEFORE require('../src/server') below).
 process.env.TRUST_PROXY = '1';
 
 jest.mock('../src/discord', () => ({
@@ -59,10 +42,6 @@ jest.mock('../src/commands', () => ({
   registerCommands: jest.fn(),
 }));
 
-// Mock the JWKS-backed id_token verifier so tests don't need a real Auth0
-// HTTPS endpoint. Default returns ok with the email claim for the happy
-// path; specific tests override via .mockResolvedValueOnce when they
-// want to exercise the verification-failure branch.
 jest.mock('../src/utils/auth0-jwks', () => ({
   verifyAuth0IdToken: jest.fn().mockResolvedValue({
     ok: true, payload: { email: 'alice@layerv.test', sub: 'auth0|abc' },
@@ -145,11 +124,8 @@ describe('qurl-oauth routes', () => {
       expect(loc.searchParams.get('response_type')).toBe('code');
       expect(loc.searchParams.get('client_id')).toBe('test-client-id');
       expect(loc.searchParams.get('audience')).toBe('https://api.layerv.test');
-      // scopes include qurl:write + qurl:read; the state echoes back so the
-      // callback can re-verify the same binding.
       expect(loc.searchParams.get('scope')).toContain('qurl:write');
       expect(loc.searchParams.get('scope')).toContain('qurl:read');
-      // offline_access dropped per PR #177 review — no refresh-token use.
       expect(loc.searchParams.get('scope')).not.toContain('offline_access');
       // `login` asks Auth0 not to reuse its ambient session; `consent` is
       // load-bearing for key rotation — re-running /qurl setup must actually
@@ -167,10 +143,6 @@ describe('qurl-oauth routes', () => {
     });
 
     it('sets Secure flag on the cookie when behind a proxy that sets X-Forwarded-Proto: https', async () => {
-      // Defense vs trust-proxy regression: server.js sets `trust proxy`
-      // so req.protocol reflects X-Forwarded-Proto from the ALB. Flipping
-      // that off would silently downgrade prod cookies to insecure. Pin
-      // the wire-level shape here.
       const state = signQurlOAuthState('guild-1', 'admin-2');
       const res = await request(app)
         .get(`/oauth/qurl/start?state=${encodeURIComponent(state)}`)
@@ -190,12 +162,7 @@ describe('qurl-oauth routes', () => {
       expect(cookieHeader).toMatch(/qurl_setup_session=/);
       expect(cookieHeader).toMatch(/HttpOnly/i);
       expect(cookieHeader).toMatch(/SameSite=Lax/i);
-      // Cookie path narrowed to /oauth/qurl (round-9 item #2): only
-      // the qurl-oauth callback reads it; broader /oauth was a future-
-      // router collision footgun.
       expect(cookieHeader).toMatch(/Path=\/oauth\/qurl(?:;|\s|$)/);
-      // Cookie value is the state itself (double-submit pattern); the
-      // callback re-checks cookie === query.state.
       expect(cookieHeader).toContain(encodeURIComponent(state));
     });
 
@@ -206,9 +173,6 @@ describe('qurl-oauth routes', () => {
     });
 
     it('503s when KEY_ENCRYPTION_KEY is unset (fail-fast before Auth0 round-trip)', async () => {
-      // Pre-Auth0 guard — refusing here keeps the admin from completing
-      // the full sign-in + consent dance only to fail at the persist
-      // step. Mirrors the legacy modal-paste path's pre-modal guard.
       const saved = process.env.KEY_ENCRYPTION_KEY;
       delete process.env.KEY_ENCRYPTION_KEY;
       try {
@@ -223,13 +187,6 @@ describe('qurl-oauth routes', () => {
     });
 
     it('emits Cache-Control: no-store on every /oauth/qurl/* response (router-level pin)', async () => {
-      // Round-9 #6 moved no-store from per-handler to a router-level
-      // middleware in server.js. Pin here so a refactor that drops
-      // the middleware (or an Express version bump that changes
-      // header-merge order) can't silently let an intermediate cache
-      // a success page that surfaces (guild + qURL email + key
-      // prefix). Also cover error/start surfaces so the invariant
-      // applies to every OAuth response, not just success.
       const state = signQurlOAuthState('guild-1', 'admin-2');
       const start = await request(app).get(`/oauth/qurl/start?state=${encodeURIComponent(state)}`);
       expect(start.headers['cache-control']).toBe('no-store');
@@ -238,11 +195,6 @@ describe('qurl-oauth routes', () => {
     });
 
     it('rejects array-shaped state query (?state=a&state=b) via singleStringParam', async () => {
-      // Express parses repeated query params as arrays; `String([...])`
-      // would join with commas and pass through. singleStringParam
-      // returns '' for non-strings, which the verifier rejects upfront
-      // — pin the route-level wire shape so a future refactor that
-      // drops the helper still surfaces the regression.
       const res = await request(app).get('/oauth/qurl/start?state=alpha&state=beta');
       expect(res.status).toBe(400);
       expect(res.text).toContain('Invalid setup link');
@@ -250,7 +202,6 @@ describe('qurl-oauth routes', () => {
 
     it('400s on tampered state', async () => {
       const state = signQurlOAuthState('guild-1', 'admin-2');
-      // Flip the last char of the sig.
       const tampered = state.slice(0, -1) + (state.slice(-1) === '0' ? '1' : '0');
       const res = await request(app).get(`/oauth/qurl/start?state=${encodeURIComponent(tampered)}`);
       expect(res.status).toBe(400);
@@ -321,8 +272,6 @@ describe('qurl-oauth routes', () => {
 
     it('400s on missing CSRF cookie (leaked URL opened in different browser)', async () => {
       const state = signQurlOAuthState('guild-1', 'admin-2');
-      // No .set('Cookie', ...) — simulates a leaked URL opened in a fresh
-      // browser session. Must reject BEFORE any Auth0 token exchange.
       const res = await request(app).get(
         `/oauth/qurl/callback?code=auth0-code&state=${encodeURIComponent(state)}`,
       );
@@ -332,18 +281,7 @@ describe('qurl-oauth routes', () => {
     });
 
     it('cookie value URL-decodes to the same state used in the timingSafeEqual compare (round-9 #8 follow-up)', async () => {
-      // readCookie runs decodeURIComponent on the cookie value; the
-      // callback then does timingSafeEqual against query.state. The
-      // state token is base64url-safe by construction (no chars that
-      // encodeURIComponent escapes), so the encode/decode round-trip
-      // is effectively the identity — but if a future state-shape
-      // change introduces a `%`-needing char (e.g., dropping the
-      // base64url variant), this test would catch the drift before
-      // the cookie/state CSRF check silently fails for every user.
       const state = signQurlOAuthState('guild-1', 'admin-2');
-      // Pre-condition: state IS URL-safe today; we want this assertion
-      // to start failing if a refactor introduces `%`-needing chars
-      // (so it forces a deliberate update of readCookie's contract).
       expect(encodeURIComponent(state)).toBe(state);
       globalThis.fetch = jest.fn()
         .mockResolvedValueOnce({
@@ -449,15 +387,10 @@ describe('qurl-oauth routes', () => {
       const res = await request(app).get(
         `/oauth/qurl/callback?code=auth0-code&state=${encodeURIComponent(state)}`,
       ).set('Cookie', cookieFor(state));
-      // 429 not 403 — qurl-service's 403 is off-spec for a quota hit;
-      // the bot renders the semantically correct status (RFC 7231:
-      // 429 = quota / rate-limit class).
       expect(res.status).toBe(429);
       expect(res.text).toContain('qURL API key limit reached');
       expect(res.text).toContain('Delete an unused key');
       expect(db.setGuildApiKey).not.toHaveBeenCalled();
-      // Failure path must not distort the dispatch / DM metrics —
-      // sendDM is reserved for successful provisioning.
       expect(discord.sendDM).not.toHaveBeenCalled();
       expect(logger.audit).not.toHaveBeenCalledWith(
         AUDIT_EVENTS.QURL_GUILD_KEY_CONFIGURED,
@@ -466,10 +399,6 @@ describe('qurl-oauth routes', () => {
     });
 
     it('falls through to generic 502 when qurl-service returns valid JSON without error.code', async () => {
-      // Pin that the parse path can't accidentally match the api_key_limit
-      // branch when `code` is absent. A future field rename on qurl-service
-      // (e.g. `code` → `kind`) would land here; the user gets the generic
-      // 502 instead of a misclassified quota page.
       const state = signQurlOAuthState('guild-1', 'admin-2');
       globalThis.fetch = jest.fn()
         .mockResolvedValueOnce({
@@ -492,9 +421,6 @@ describe('qurl-oauth routes', () => {
 
     it('200s on happy path: mints key, persists, DMs admin, renders success with binding readout', async () => {
       const state = signQurlOAuthState('guild-1', 'admin-2');
-      // id_token with an `email` claim — base64url-encoded JSON, no
-      // signature verification needed for a display-only readout (token
-      // came from Auth0 over TLS in the same response).
       const idTokenPayload = Buffer.from(JSON.stringify({ email: 'alice@layerv.test', sub: 'auth0|abc' })).toString('base64')
         .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
       const idToken = `header.${idTokenPayload}.sig`;
@@ -518,6 +444,8 @@ describe('qurl-oauth routes', () => {
       ).set('Cookie', cookieFor(state));
       expect(res.status).toBe(200);
       expect(res.text).toContain('qURL is connected');
+      expect(res.text).toContain('/qurl send is ready');
+      expect(res.text).not.toContain('/qurl map');
       expect(db.setGuildApiKey).toHaveBeenCalledWith('guild-1', 'lv_live_abc123', 'admin-2');
       expect(logger.audit).toHaveBeenCalledWith(AUDIT_EVENTS.QURL_GUILD_KEY_CONFIGURED, {
         guild_id: 'guild-1',
@@ -526,24 +454,17 @@ describe('qurl-oauth routes', () => {
         qurl_account_subject_fingerprint: AUTH0_ABC_FINGERPRINT,
         qurl_account_fingerprint_key_epoch: SUBJECT_FINGERPRINT_KEY_EPOCH,
       });
-      expect(discord.sendDM).toHaveBeenCalledWith('admin-2', expect.stringContaining('qURL is connected'));
+      expect(discord.sendDM).toHaveBeenCalledTimes(1);
+      expect(discord.sendDM.mock.calls[0][0]).toBe('admin-2');
+      expect(discord.sendDM.mock.calls[0][1]).toContain('qURL is connected');
+      expect(discord.sendDM.mock.calls[0][1]).toContain('`/qurl send`');
+      expect(discord.sendDM.mock.calls[0][1]).not.toContain('/qurl map');
 
-      // Guild-key mint must send `kind: api_key` — qurl-service's
-      // POST /v1/api-keys requires `kind` and 400s without it. Durable
-      // keys use kind=api_key (enrollment_token and the system-only
-      // device are the other kinds); pin that the legacy `key_type`
-      // field name doesn't reappear.
       const mintCall = fetchMock.mock.calls.find(([url]) => String(url).endsWith('/v1/api-keys'));
       const body = JSON.parse(mintCall[1].body);
       expect(body.kind).toBe('api_key');
       expect(body).not.toHaveProperty('key_type');
 
-      // Confused-deputy mitigation: the success page must surface the
-      // bound (guild_id, qURL email, key prefix) tuple as a structured
-      // label/value list. C.5 upgraded this from grey prose subtext to
-      // a `details` block (label in <dt>, value in <dd>) so the binding
-      // readout is visually prominent — load-bearing UI against
-      // confused-deputy attacks.
       expect(res.text).toMatch(/<dt>Discord guild<\/dt>\s*<dd>guild-1<\/dd>/);
       expect(res.text).toMatch(/<dt>qURL account<\/dt>\s*<dd>alice@layerv\.test<\/dd>/);
       expect(res.text).toMatch(/<dt>API key prefix<\/dt>\s*<dd>lv_live_abc1<\/dd>/);
@@ -648,11 +569,6 @@ describe('qurl-oauth routes', () => {
 
     it('500s when persist fails after successful mint, and best-effort deletes the orphan key', async () => {
       const state = signQurlOAuthState('guild-1', 'admin-2');
-      // Deterministic flush: the third fetch call (orphan DELETE) is
-      // fire-and-forget from the route handler, so the response can
-      // ship before .then() runs. Resolve a controlled promise from
-      // inside the third mock so the test can `await` exactly that
-      // signal — no setImmediate flake.
       let resolveDeleteFired;
       const deleteFired = new Promise((resolve) => { resolveDeleteFired = resolve; });
       const fetchSpy = jest.fn()
@@ -664,8 +580,6 @@ describe('qurl-oauth routes', () => {
           ok: true, status: 201,
           json: () => Promise.resolve({ data: { key_id: 'key-orphan-1', api_key: 'lv_live_abc123', key_prefix: 'lv_live_abc1' } }),
         })
-        // Third call = the orphan DELETE. Resolving the test-side
-        // promise here gives a precise "delete dispatched" signal.
         .mockImplementationOnce(async () => {
           resolveDeleteFired();
           return { ok: true, status: 204, text: () => Promise.resolve('') };
@@ -688,12 +602,6 @@ describe('qurl-oauth routes', () => {
     });
 
     it('renders success without qURL-account-email line when id_token verification fails', async () => {
-      // Forged / wrong-issuer / wrong-audience / expired id_token must
-      // be rejected by the JWKS verifier — falling back to "decode
-      // without verification" would leak a forged email onto the
-      // load-bearing confused-deputy mitigation. Success page should
-      // still render (the API-key mint already succeeded), just
-      // without the qURL-account line.
       const { verifyAuth0IdToken } = require('../src/utils/auth0-jwks');
       verifyAuth0IdToken.mockResolvedValueOnce({ ok: false, reason: 'ERR_JWS_SIGNATURE_VERIFICATION_FAILED' });
       const state = signQurlOAuthState('guild-1', 'admin-2');
@@ -713,10 +621,6 @@ describe('qurl-oauth routes', () => {
       expect(res.text).toContain('qURL is connected');
       expect(res.text).toMatch(/<dt>Discord guild<\/dt>\s*<dd>guild-1<\/dd>/);
       expect(res.text).toMatch(/<dt>API key prefix<\/dt>\s*<dd>lv_live_a<\/dd>/);
-      // No qURL account line — verifier rejected the forged token.
-      // Tight match: must specifically not have the <dt> row, so a
-      // future template change that re-labels the email field would
-      // still surface the regression.
       expect(res.text).not.toMatch(/<dt>qURL account<\/dt>/);
       expect(logger.audit).toHaveBeenCalledWith(
         AUDIT_EVENTS.QURL_GUILD_KEY_CONFIGURED,
@@ -725,13 +629,10 @@ describe('qurl-oauth routes', () => {
     });
 
     it('renders success without qURL-account-email line when id_token field is absent from the Auth0 response', async () => {
-      // Auth0 may legitimately omit id_token if openid scope wasn't
-      // granted; success page should still render.
       const state = signQurlOAuthState('guild-1', 'admin-2');
       globalThis.fetch = jest.fn()
         .mockResolvedValueOnce({
           ok: true, status: 200,
-          // Note: NO id_token field
           json: () => Promise.resolve({ access_token: 'jwt-xyz' }),
         })
         .mockResolvedValueOnce({
@@ -751,9 +652,6 @@ describe('qurl-oauth routes', () => {
     });
 
     it('502s when qurl-service mint response has api_key but missing key_id (orphan-cleanup contract)', async () => {
-      // Both fields are required — without key_id, the orphan-key
-      // DELETE on persist failure can't target the right key. Fail
-      // upfront rather than mint+persist+then-fail-to-cleanup.
       const state = signQurlOAuthState('guild-1', 'admin-2');
       globalThis.fetch = jest.fn()
         .mockResolvedValueOnce({
@@ -762,7 +660,6 @@ describe('qurl-oauth routes', () => {
         })
         .mockResolvedValueOnce({
           ok: true, status: 201,
-          // api_key present, key_id missing
           json: () => Promise.resolve({ data: { api_key: 'lv_live_abc', key_prefix: 'lv_live_a' } }),
         });
       const res = await request(app).get(
@@ -774,10 +671,6 @@ describe('qurl-oauth routes', () => {
     });
 
     it('clears the qurl_setup_session and PKCE cookies on successful callback (one-shot binding)', async () => {
-      // Regression pin — without res.clearCookie, a refreshed callback
-      // URL could re-bind silently. Cookies should be cleared via
-      // Set-Cookie headers that zero the values AND use Path=/oauth/qurl so
-      // the browser actually forgets them (path mismatch = no clear).
       const state = signQurlOAuthState('guild-1', 'admin-2');
       globalThis.fetch = jest.fn()
         .mockResolvedValueOnce({
@@ -827,8 +720,6 @@ describe('qurl-oauth — not configured', () => {
     }
     try {
       await jest.isolateModulesAsync(async () => {
-        // Re-mock dependencies inside the isolate so the freshly-loaded
-        // server.js + router pick them up.
         jest.doMock('../src/discord', () => ({
           sendDM: jest.fn().mockResolvedValue(true),
           assignContributorRole: jest.fn(),
@@ -861,12 +752,6 @@ describe('qurl-oauth — not configured', () => {
         expect(callback.status).toBe(503);
         expect(callback.text).toMatch(/not configured/i);
         expectQurlOAuthCookiesCleared(callback);
-        // Defense-in-depth: qurl-oauth.js renderNotConfigured already
-        // doesn't include env-var names (unlike the legacy
-        // discord-install.js path that pre-C.4 leaked them). Pin here
-        // so a future refactor that adds a reason field can't regress.
-        // Env-var-shaped strings only — the literal word "Auth0" is the
-        // user-visible service name and is fine in copy.
         expect(start.text).not.toMatch(/AUTH0_[A-Z_]+/);
         expect(start.text).not.toMatch(/DISCORD_CLIENT_SECRET/);
         expect(start.text).not.toMatch(/Reason:/i);
@@ -880,6 +765,69 @@ describe('qurl-oauth — not configured', () => {
         if (value === undefined) delete process.env[key];
         else process.env[key] = value;
       }
+    }
+  });
+});
+
+describe('qurl-oauth — MAP_COMMAND_ENABLED=true', () => {
+  it('advertises both enabled commands on the success page and in the admin DM', async () => {
+    const savedMapCommandEnabled = process.env.MAP_COMMAND_ENABLED;
+    process.env.MAP_COMMAND_ENABLED = 'true';
+    try {
+      await jest.isolateModulesAsync(async () => {
+        jest.doMock('../src/discord', () => ({
+          sendDM: jest.fn().mockResolvedValue(true),
+          assignContributorRole: jest.fn(),
+          notifyPRMerge: jest.fn(),
+          notifyBadgeEarned: jest.fn(),
+        }));
+        jest.doMock('../src/store', () => ({
+          setGuildApiKey: jest.fn().mockResolvedValue(undefined),
+          getGuildApiKey: jest.fn(),
+          getGuildConfig: jest.fn().mockResolvedValue({ guild_id: 'guild-1', configured_by: 'admin-2' }),
+          getPendingLink: jest.fn(),
+          consumePendingLink: jest.fn(),
+        }));
+        jest.doMock('../src/commands', () => ({
+          verifyStateBinding: jest.fn().mockReturnValue(true),
+          handleCommand: jest.fn(),
+          commands: [],
+          registerCommands: jest.fn(),
+        }));
+
+        // eslint-disable-next-line global-require
+        const supertest = require('supertest');
+        // eslint-disable-next-line global-require
+        const { app: freshApp } = require('../src/server');
+        // eslint-disable-next-line global-require
+        const freshDiscord = require('../src/discord');
+        // eslint-disable-next-line global-require
+        const { signQurlOAuthState: sign } = require('../src/utils/qurl-oauth-state');
+        const state = sign('guild-1', 'admin-2');
+        globalThis.fetch = jest.fn()
+          .mockResolvedValueOnce({
+            ok: true, status: 200,
+            json: () => Promise.resolve({ access_token: 'jwt-xyz' }),
+          })
+          .mockResolvedValueOnce({
+            ok: true, status: 201,
+            json: () => Promise.resolve({ data: { key_id: 'key-1', api_key: 'lv_live_abc', key_prefix: 'lv_live_a' } }),
+          });
+
+        const res = await supertest(freshApp)
+          .get(`/oauth/qurl/callback?code=auth0-code&state=${encodeURIComponent(state)}`)
+          .set('Cookie', cookieFor(state));
+
+        expect(res.status).toBe(200);
+        expect(res.text).toContain('/qurl send and /qurl map are ready');
+        expect(freshDiscord.sendDM).toHaveBeenCalledTimes(1);
+        expect(freshDiscord.sendDM.mock.calls[0][0]).toBe('admin-2');
+        expect(freshDiscord.sendDM.mock.calls[0][1])
+          .toContain('`/qurl send` and `/qurl map`');
+      });
+    } finally {
+      process.env.MAP_COMMAND_ENABLED = savedMapCommandEnabled;
+      globalThis.fetch = originalFetch;
     }
   });
 });

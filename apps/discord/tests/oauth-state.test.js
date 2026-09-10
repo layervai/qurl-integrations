@@ -27,8 +27,6 @@ const config = require('../src/config');
 const logger = require('../src/logger');
 const { createStateSigner, MIN_STATE_SECRET_LENGTH } = require('../src/utils/oauth-state');
 
-// Fresh signer per test: warn-once state and the random test-fallback
-// secret are per-signer, so nothing leaks across tests.
 function makeSigner(overrides = {}) {
   return createStateSigner({
     flowLabel: 'test OAuth state',
@@ -52,9 +50,6 @@ describe('oauth-state createStateSigner', () => {
   });
 
   it('rejects missing or empty secretConfigKeys at construction', () => {
-    // An empty list would leave nothing to resolve, so every
-    // sign/verify would fall through to the throw (or, inside jest, to
-    // the random test fallback) instead of failing at construction.
     expect(() => createStateSigner({ flowLabel: 'x' })).toThrow(/secretConfigKeys/);
     expect(() => createStateSigner({ flowLabel: 'x', secretConfigKeys: [] })).toThrow(/secretConfigKeys/);
   });
@@ -192,9 +187,6 @@ describe('oauth-state createStateSigner', () => {
 
     it('throws outside the jest/CI harness instead of minting with the fallback', () => {
       const signer = makeSigner();
-      // The harness gate reads the live env at call time (unlike the
-      // secrets, which come through config) — simulate a deployed
-      // process that merely has NODE_ENV=test by accident.
       const savedWorker = process.env.JEST_WORKER_ID;
       const savedCI = process.env.CI;
       delete process.env.JEST_WORKER_ID;

@@ -1,5 +1,57 @@
 # Changelog
 
+## [2.4.0](https://github.com/layervai/qurl-integrations/compare/v2.3.3...v2.4.0) (2026-09-08)
+
+
+### ⚠ BREAKING CHANGES
+
+* **cli:** Resource commands and native Connector continuity require CRID. Resource public keys are verification data. Old protocol fields and resource journals are rejected without conversion. Before starting fresh, preserve unresolved state, stop the daemon, revoke its device key, move the complete state directory aside, then log in and publish again with new CRIDs.
+
+### Features
+
+* **cli:** use CRID for Connector continuity and resource management ([8779071](https://github.com/layervai/qurl-integrations/commit/877907180c1220ec6ea325c95704818bab926a75))
+
+## [2.3.3](https://github.com/layervai/qurl-integrations/compare/v2.3.2...v2.3.3) (2026-09-07)
+
+
+### Bug Fixes
+
+* **cli:** model crash in warm-restart soak ([#1402](https://github.com/layervai/qurl-integrations/issues/1402)) ([238dacf](https://github.com/layervai/qurl-integrations/commit/238dacf5e1f60d6a0a6a8fe2c6d04664cf6e0ed7))
+* **cli:** recover tunnel sessions after control loss ([#1414](https://github.com/layervai/qurl-integrations/issues/1414)) ([ac94aa3](https://github.com/layervai/qurl-integrations/commit/ac94aa380c7f8b5553b4e3d9ccfece7886de2e32))
+
+## [2.3.2](https://github.com/layervai/qurl-integrations/compare/v2.3.1...v2.3.2) (2026-09-05)
+
+
+### Bug Fixes
+
+* **ci:** keep macOS grant probe on direct egress ([#1307](https://github.com/layervai/qurl-integrations/issues/1307)) ([e730dbf](https://github.com/layervai/qurl-integrations/commit/e730dbf6c66f2168d813999709a7c4a6a4db8dbd))
+
+## [2.3.1](https://github.com/layervai/qurl-integrations/compare/v2.3.0...v2.3.1) (2026-09-05)
+
+
+### Bug Fixes
+
+* **cli:** recover reauthorized headless sharing state ([#1388](https://github.com/layervai/qurl-integrations/issues/1388)) ([100e8ad](https://github.com/layervai/qurl-integrations/commit/100e8adee4b4d3966adc142f878b0b05f0a592ea))
+
+## [2.3.0](https://github.com/layervai/qurl-integrations/compare/v2.2.0...v2.3.0) (2026-09-05)
+
+
+### Features
+
+* **cli:** add a per-share session group mode for the local daemon ([#1331](https://github.com/layervai/qurl-integrations/issues/1331)) ([ed2c047](https://github.com/layervai/qurl-integrations/commit/ed2c0475612f91bf4949e756af815bbf8698db8b))
+* **cli:** serve every local share on one Connector session ([#1326](https://github.com/layervai/qurl-integrations/issues/1326)) ([946d0f5](https://github.com/layervai/qurl-integrations/commit/946d0f59db6bfe6e0ac51bbe0b0b8724bce84a2e))
+
+
+### Bug Fixes
+
+* **cli:** allow Connector name reuse after deletion ([#1384](https://github.com/layervai/qurl-integrations/issues/1384)) ([e7b8345](https://github.com/layervai/qurl-integrations/commit/e7b83451ee65678d734724c9e7773423a8e860a9))
+* **cli:** bound retired and pending Connector resource memories ([#1334](https://github.com/layervai/qurl-integrations/issues/1334)) ([a92fbe3](https://github.com/layervai/qurl-integrations/commit/a92fbe3418648711ba52e91fa9aa31a704fd646b))
+* **cli:** converge a deleted share's row when its Connector ID was rebound ([#1341](https://github.com/layervai/qurl-integrations/issues/1341)) ([5dbd819](https://github.com/layervai/qurl-integrations/commit/5dbd81920a9860580f1cbc4898847b71956318ee))
+* **cli:** cut saturated live-tailed chains at the link before the share ([#1336](https://github.com/layervai/qurl-integrations/issues/1336)) ([549bff4](https://github.com/layervai/qurl-integrations/commit/549bff4fd50f861699ad6c676031952ebefbfbdf))
+* **cli:** keep a platform-refused route retrying instead of turning it off ([#1330](https://github.com/layervai/qurl-integrations/issues/1330)) ([cc2d6df](https://github.com/layervai/qurl-integrations/commit/cc2d6df25700a21ae745d5a544cd30457298c694))
+* **cli:** keep live default-ID chains intact under retired eviction ([#1335](https://github.com/layervai/qurl-integrations/issues/1335)) ([fa5b5aa](https://github.com/layervai/qurl-integrations/commit/fa5b5aa2c71f7fdcec14821a701335031eb49cd1))
+* **cli:** reauthorize headless resources before serving ([#1387](https://github.com/layervai/qurl-integrations/issues/1387)) ([cdac5cd](https://github.com/layervai/qurl-integrations/commit/cdac5cd78531805b4e33d0bc6a7ee71651fd11ef))
+
 ## [2.2.0](https://github.com/layervai/qurl-integrations/compare/v2.1.1...v2.2.0) (2026-09-02)
 
 

@@ -497,7 +497,7 @@ test('saving a custom server shows an inline confirmation before requesting orig
 
   assert.equal(setStoredCalled, false);
   assert.equal(confirmPanel.classList.contains('hidden'), false);
-  assert.equal(confirmText.textContent, 'Allow the extension to access https://custom.example.com for qURL uploads? Chrome will show a permission prompt next.');
+  assert.equal(confirmText.textContent, 'Allow the extension to access https://custom.example.com for qURL uploads? Your browser will show a permission prompt next.');
 });
 
 test('saving an invalid custom server surfaces the validation error inline', async function () {

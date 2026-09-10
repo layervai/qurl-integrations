@@ -715,8 +715,8 @@ func (h *Handler) buildTunnelInstall(ctx context.Context, log *slog.Logger, team
 		Description:  defaultTunnelDisplayName(args.Slug),
 	})
 	if err != nil {
-		log.Error("tunnel install: create/find resource failed", "error", err, "slug", sanitizeLogValue(args.Slug))
-		return nil, sanitizeAPIError(err, "Failed to create or find the qURL Connector resource"), err
+		log.Error("tunnel install: create/find resource failed", withAPIErrorAttrs(err, "error", err, "slug", sanitizeLogValue(args.Slug))...)
+		return nil, connectorResourceCreateErrorMessage(err), err
 	}
 	resolvedArgs := *args
 	if err := resolvedArgs.pinTunnelResource(resource, connectorAPIURL); err != nil {
@@ -822,6 +822,22 @@ func sharingInstallFailureMessage(message string, previous *client.SharingState)
 		return message + " Your existing qURL share remains enabled."
 	}
 	return message + " This setup newly enabled sharing, so qURL is turning it back off."
+}
+
+// TODO(upstream-contract): POST /v1/resources returns 403 + quota_exceeded
+// for the protected-resource limit. Other status/code pairs stay generic and
+// remain visible in the structured error log.
+const resourceQuotaExceededCode = "quota_exceeded"
+
+// Only resource creation's quota refusal means the protected-resource limit.
+// Keep this mapping out of the generic sanitizer: other endpoints have other
+// quotas. Never forward upstream detail into Slack.
+func connectorResourceCreateErrorMessage(err error) string {
+	var apiErr *client.APIError
+	if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusForbidden && apiErr.Code == resourceQuotaExceededCode {
+		return appendSlackReference("Your account has reached its protected resource limit", apiErr.RequestID) + ". Ask an admin to revoke unused resources or upgrade your plan, then try connector setup again. Existing resources can still be shared. No enrollment token was minted."
+	}
+	return sanitizeAPIError(err, "Failed to create or find the qURL Connector resource")
 }
 
 func disableSharingAfterInstallFailure(ctx context.Context, log *slog.Logger, c *client.Client, resourceID, reason string) {

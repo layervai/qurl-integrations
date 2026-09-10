@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -22,6 +23,7 @@ import (
 
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/apitest"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/agent"
 	connectordaemon "github.com/layervai/qurl-integrations/apps/cli/internal/connector/daemon"
 	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 )
@@ -103,6 +105,148 @@ func TestLoadHeadlessBootstrapWarmStartDoesNotRequireToken(t *testing.T) {
 	config, credential, err := loadHeadlessBootstrap(context.Background(), stateDir, configPath, filepath.Join(t.TempDir(), "absent-token"))
 	if err != nil || config == nil || credential != "" {
 		t.Fatalf("warm bootstrap = %+v, credential=%q, err=%v", config, credential, err)
+	}
+}
+
+func TestReauthorizeHeadlessResourcePinsEveryConfiguredIdentity(t *testing.T) {
+	config, err := connectorstate.LoadHeadlessConfig(writeHeadlessConfigFixture(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	stateDir := connectorStateTestDir(t)
+	runtime := &connectorshare.NativeRuntime{Binding: &qurl.AgentRuntimeBinding{}}
+	original := resolveConfiguredHeadlessResource
+	t.Cleanup(func() { resolveConfiguredHeadlessResource = original })
+	called := false
+	resolveConfiguredHeadlessResource = func(_ context.Context, binding *qurl.AgentRuntimeBinding, store *connectorstate.Store, configured *connectorstate.ConnectorResourceBinding, opts ...qurl.AgentRuntimeUDPOption) (*agent.ResolvedResource, error) {
+		called = true
+		share := config.Shares[0]
+		if binding != runtime.Binding || store == nil || len(opts) != 0 || configured == nil {
+			t.Fatalf("configured resource authorization inputs = binding %p store %p configured %+v opts %d", binding, store, configured, len(opts))
+		}
+		if store.Dir() != stateDir {
+			t.Fatalf("configured resource state directory = %q, want %q", store.Dir(), stateDir)
+		}
+		for field, values := range map[string][2]string{
+			"Connector ID": {configured.ConnectorID, share.ConnectorID},
+			"resource ID":  {configured.ResourceID, share.ResourceID},
+			"CRID":         {configured.CRID, share.CRID},
+			"routing ID":   {configured.ConnectorRoutingID, share.ConnectorRoutingID},
+			"knock ID":     {configured.KnockResourceID, share.KnockResourceID},
+		} {
+			if values[0] != values[1] {
+				t.Fatalf("configured %s = %q, want %q", field, values[0], values[1])
+			}
+		}
+		return &agent.ResolvedResource{}, nil
+	}
+	if err := reauthorizeHeadlessResource(context.Background(), runtime, &qurlapi.Config{}, stateDir, &config.Shares[0]); err != nil {
+		t.Fatal(err)
+	}
+	if !called {
+		t.Fatal("headless resource authorization was not called")
+	}
+}
+
+func TestReauthorizeHeadlessResourceRestoresAuthoritativeDesiredOnAtSameEpoch(t *testing.T) {
+	config, err := connectorstate.LoadHeadlessConfig(writeHeadlessConfigFixture(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	stateDir := connectorStateTestDir(t)
+	registry, err := openOwnedTestShareRegistry(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.Put(context.Background(), &config.Shares[0]); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := registry.DisableAtCurrentEpoch(context.Background(), config.Shares[0].ResourceID, config.Shares[0].ServingEpoch); err != nil {
+		t.Fatal(err)
+	}
+	runtime := &connectorshare.NativeRuntime{Binding: &qurl.AgentRuntimeBinding{}}
+	authoritativeEpoch := config.Shares[0].ServingEpoch
+	originalResolve := resolveConfiguredHeadlessResource
+	originalRead := readHeadlessAuthoritativeSharing
+	t.Cleanup(func() {
+		resolveConfiguredHeadlessResource = originalResolve
+		readHeadlessAuthoritativeSharing = originalRead
+	})
+	resolveConfiguredHeadlessResource = func(context.Context, *qurl.AgentRuntimeBinding, *connectorstate.Store, *connectorstate.ConnectorResourceBinding, ...qurl.AgentRuntimeUDPOption) (*agent.ResolvedResource, error) {
+		return &agent.ResolvedResource{}, nil
+	}
+	readHeadlessAuthoritativeSharing = func(_ context.Context, gotRuntime *connectorshare.NativeRuntime, _ *qurlapi.Config, id string) (*qurlapi.Sharing, error) {
+		if gotRuntime != runtime || id != config.Shares[0].CRID {
+			t.Fatalf("sharing read = runtime %p id %q", gotRuntime, id)
+		}
+		return &qurlapi.Sharing{
+			ResourceID: config.Shares[0].ResourceID, CRID: config.Shares[0].CRID,
+			DesiredState: qurlapi.DesiredStateOn, ServingEpoch: authoritativeEpoch,
+			ConnectionState: qurlapi.ConnectionConnecting,
+		}, nil
+	}
+	if err := reauthorizeHeadlessResource(context.Background(), runtime, &qurlapi.Config{}, stateDir, &config.Shares[0]); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := registry.Get(context.Background(), config.Shares[0].ResourceID)
+	if err != nil || stored.DesiredState != "on" || stored.ServingEpoch != config.Shares[0].ServingEpoch {
+		t.Fatalf("reconciled local share = %+v, %v", stored, err)
+	}
+	authoritativeEpoch++
+	if _, err := registry.SetDesired(context.Background(), stored.ResourceID, "on", authoritativeEpoch); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := registry.DisableAtCurrentEpoch(context.Background(), stored.ResourceID, authoritativeEpoch); err != nil {
+		t.Fatal(err)
+	}
+	config.Shares[0].ServingEpoch = authoritativeEpoch - 1
+	if err := reauthorizeHeadlessResource(context.Background(), runtime, &qurlapi.Config{}, stateDir, &config.Shares[0]); err != nil {
+		t.Fatal(err)
+	}
+	stored, err = registry.Get(context.Background(), config.Shares[0].ResourceID)
+	if err != nil || stored.DesiredState != "on" || stored.ServingEpoch != authoritativeEpoch || config.Shares[0].ServingEpoch != authoritativeEpoch {
+		t.Fatalf("reconciled newer local epoch = %+v config=%+v, %v", stored, config.Shares[0], err)
+	}
+}
+
+func TestReauthorizeHeadlessResourcePreservesAuthoritativeDesiredOff(t *testing.T) {
+	config, err := connectorstate.LoadHeadlessConfig(writeHeadlessConfigFixture(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	stateDir := connectorStateTestDir(t)
+	registry, err := openOwnedTestShareRegistry(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.Put(context.Background(), &config.Shares[0]); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := registry.DisableAtCurrentEpoch(context.Background(), config.Shares[0].ResourceID, config.Shares[0].ServingEpoch); err != nil {
+		t.Fatal(err)
+	}
+	originalResolve := resolveConfiguredHeadlessResource
+	originalRead := readHeadlessAuthoritativeSharing
+	t.Cleanup(func() {
+		resolveConfiguredHeadlessResource = originalResolve
+		readHeadlessAuthoritativeSharing = originalRead
+	})
+	resolveConfiguredHeadlessResource = func(context.Context, *qurl.AgentRuntimeBinding, *connectorstate.Store, *connectorstate.ConnectorResourceBinding, ...qurl.AgentRuntimeUDPOption) (*agent.ResolvedResource, error) {
+		return &agent.ResolvedResource{}, nil
+	}
+	readHeadlessAuthoritativeSharing = func(context.Context, *connectorshare.NativeRuntime, *qurlapi.Config, string) (*qurlapi.Sharing, error) {
+		return &qurlapi.Sharing{
+			ResourceID: config.Shares[0].ResourceID, CRID: config.Shares[0].CRID,
+			DesiredState: qurlapi.DesiredStateOff, ServingEpoch: config.Shares[0].ServingEpoch,
+			ConnectionState: qurlapi.ConnectionStopped,
+		}, nil
+	}
+	runtime := &connectorshare.NativeRuntime{Binding: &qurl.AgentRuntimeBinding{}}
+	if err := reauthorizeHeadlessResource(context.Background(), runtime, &qurlapi.Config{}, stateDir, &config.Shares[0]); err != nil {
+		t.Fatal(err)
+	}
+	if config.Shares[0].DesiredState != "off" {
+		t.Fatalf("headless config desired state = %q, want authoritative off", config.Shares[0].DesiredState)
 	}
 }
 
@@ -207,7 +351,7 @@ func TestHeadlessDaemonRetriesTransientBootstrapInProcessThenServes(t *testing.T
 	})
 	factory := &headlessTestFactory{started: make(chan struct{})}
 	var attempts atomic.Int32
-	buildNativeSessionFactory = func(_ context.Context, cfg connectorshare.NativeRuntimeConfig, _ *v1.ClientCommonConfig, apiConfig *qurlapi.Config, verifyOwner bool) (connectordaemon.GroupFactory, error) {
+	buildNativeSessionFactory = func(_ context.Context, cfg connectorshare.NativeRuntimeConfig, _ *v1.ClientCommonConfig, apiConfig *qurlapi.Config, verifyOwner bool, configured *connectorstate.LocalShare) (connectordaemon.GroupFactory, error) {
 		if !verifyOwner {
 			t.Fatal("first headless bootstrap did not request authenticated owner verification")
 		}
@@ -220,6 +364,9 @@ func TestHeadlessDaemonRetriesTransientBootstrapInProcessThenServes(t *testing.T
 		}
 		if cfg.SessionOperations.OwnerID != "own_cli_fixture" {
 			t.Fatalf("attempt %d native session authority = %#v", attempts.Load()+1, cfg.SessionOperations)
+		}
+		if configured == nil || configured.ConnectorID != "headless-app" {
+			t.Fatalf("attempt %d configured resource = %+v", attempts.Load()+1, configured)
 		}
 		if len(cfg.UDPOptions) != 0 {
 			t.Fatalf("attempt %d native UDP options = %d, want native UDP defaults", attempts.Load()+1, len(cfg.UDPOptions))
@@ -282,8 +429,13 @@ func TestHeadlessDaemonRetriesTransientBootstrapInProcessThenServes(t *testing.T
 
 func TestHeadlessNativeOpenRetryIsVisibleAndRedacted(t *testing.T) {
 	originalWait := waitHeadlessNativeRetry
-	t.Cleanup(func() { waitHeadlessNativeRetry = originalWait })
+	originalJitter := headlessNativeRetryJitter
+	t.Cleanup(func() {
+		waitHeadlessNativeRetry = originalWait
+		headlessNativeRetryJitter = originalJitter
+	})
 	waitHeadlessNativeRetry = func(context.Context, time.Duration) error { return nil }
+	headlessNativeRetryJitter = func(window time.Duration) time.Duration { return window }
 
 	var logs bytes.Buffer
 	originalLogger := slog.Default()
@@ -313,6 +465,86 @@ func TestHeadlessNativeOpenRetryIsVisibleAndRedacted(t *testing.T) {
 	}
 }
 
+func TestHeadlessNativeRetryDelayUsesBoundedEqualJitter(t *testing.T) {
+	originalJitter := headlessNativeRetryJitter
+	t.Cleanup(func() { headlessNativeRetryJitter = originalJitter })
+
+	tests := []struct {
+		attempt int
+		base    time.Duration
+	}{
+		{attempt: 0, base: 250 * time.Millisecond},
+		{attempt: 1, base: 250 * time.Millisecond},
+		{attempt: 2, base: 500 * time.Millisecond},
+		{attempt: 7, base: 16 * time.Second},
+		{attempt: 8, base: 30 * time.Second},
+		{attempt: 20, base: 30 * time.Second},
+	}
+	for _, test := range tests {
+		t.Run(fmt.Sprintf("attempt-%d", test.attempt), func(t *testing.T) {
+			var gotWindow time.Duration
+			headlessNativeRetryJitter = func(window time.Duration) time.Duration {
+				gotWindow = window
+				return 0
+			}
+			if got := headlessNativeRetryDelay(test.attempt); got != test.base/2 {
+				t.Fatalf("minimum jittered delay = %v, want %v", got, test.base/2)
+			}
+			if gotWindow != test.base/2 {
+				t.Fatalf("jitter window = %v, want %v", gotWindow, test.base/2)
+			}
+
+			headlessNativeRetryJitter = func(window time.Duration) time.Duration { return window }
+			if got := headlessNativeRetryDelay(test.attempt); got != test.base {
+				t.Fatalf("maximum jittered delay = %v, want %v", got, test.base)
+			}
+		})
+	}
+}
+
+func TestHeadlessResourceContinuityFailuresDoNotRetry(t *testing.T) {
+	for _, err := range []error{
+		errHeadlessResourceAuthorization,
+		fmt.Errorf("reauthorize: %w", connectorstate.ErrConnectorResourceVerification),
+		fmt.Errorf("reauthorize: %w", connectorstate.ErrConnectorResourceStateConflict),
+		fmt.Errorf("reauthorize: %w", connectorstate.ErrConnectorResourceRetired),
+		fmt.Errorf("reauthorize: %w", connectorstate.ErrConnectorResourceState),
+		fmt.Errorf("reauthorize: %w", qurl.ErrConnectorResourceIdentityRejected),
+	} {
+		if !isPermanentHeadlessNativeOpenError(err) {
+			t.Fatalf("resource continuity error %v was classified as retryable", err)
+		}
+	}
+	if isPermanentHeadlessNativeOpenError(errors.New("temporary native network failure")) {
+		t.Fatal("temporary native failure was classified as permanent")
+	}
+}
+
+func TestHeadlessInvalidResourceJournalIsPermanentAndOpenErrorsRetry(t *testing.T) {
+	config, err := connectorstate.LoadHeadlessConfig(writeHeadlessConfigFixture(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	stateDir := connectorStateTestDir(t)
+	if err := os.WriteFile(filepath.Join(stateDir, connectorstate.ConnectorResourcesFile), []byte("not-json\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runtime := &connectorshare.NativeRuntime{Binding: &qurl.AgentRuntimeBinding{}}
+	err = reauthorizeHeadlessResource(context.Background(), runtime, &qurlapi.Config{}, stateDir, &config.Shares[0])
+	if !errors.Is(err, connectorstate.ErrConnectorResourceState) || !isPermanentHeadlessNativeOpenError(err) {
+		t.Fatalf("invalid resource journal = %v, want permanent state error", err)
+	}
+
+	nondirectory := filepath.Join(t.TempDir(), "state-file")
+	if err := os.WriteFile(nondirectory, []byte("not-a-directory\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err = reauthorizeHeadlessResource(context.Background(), runtime, &qurlapi.Config{}, nondirectory, &config.Shares[0])
+	if err == nil || errors.Is(err, errHeadlessResourceAuthorization) || isPermanentHeadlessNativeOpenError(err) {
+		t.Fatalf("resource state open failure = %v, want unclassified retryable error", err)
+	}
+}
+
 func TestHeadlessWarmRestartOwnsExactlyThePersistedShare(t *testing.T) {
 	stateDir, err := os.MkdirTemp("/tmp", "qurl-headless-warm-")
 	if err != nil {
@@ -336,12 +568,15 @@ func TestHeadlessWarmRestartOwnsExactlyThePersistedShare(t *testing.T) {
 	originalBuilder := buildNativeSessionFactory
 	t.Cleanup(func() { buildNativeSessionFactory = originalBuilder })
 	factory := &headlessTestFactory{started: make(chan struct{})}
-	buildNativeSessionFactory = func(_ context.Context, cfg connectorshare.NativeRuntimeConfig, _ *v1.ClientCommonConfig, _ *qurlapi.Config, verifyOwner bool) (connectordaemon.GroupFactory, error) {
+	buildNativeSessionFactory = func(_ context.Context, cfg connectorshare.NativeRuntimeConfig, _ *v1.ClientCommonConfig, _ *qurlapi.Config, verifyOwner bool, configured *connectorstate.LocalShare) (connectordaemon.GroupFactory, error) {
 		if verifyOwner {
 			t.Fatal("warm headless restart repeated authenticated owner verification")
 		}
 		if cfg.EnrollmentCredential != "" {
 			t.Fatalf("warm restart retained enrollment credential %q", cfg.EnrollmentCredential)
+		}
+		if configured == nil || configured.ResourceID != config.Shares[0].ResourceID {
+			t.Fatalf("warm configured resource = %+v", configured)
 		}
 		return factory, nil
 	}
@@ -410,7 +645,7 @@ func TestHeadlessBootstrapRejectsChangedOrAdditionalPersistedResources(t *testin
 			originalBuilder := buildNativeSessionFactory
 			t.Cleanup(func() { buildNativeSessionFactory = originalBuilder })
 			var opens atomic.Int32
-			buildNativeSessionFactory = func(context.Context, connectorshare.NativeRuntimeConfig, *v1.ClientCommonConfig, *qurlapi.Config, bool) (connectordaemon.GroupFactory, error) {
+			buildNativeSessionFactory = func(context.Context, connectorshare.NativeRuntimeConfig, *v1.ClientCommonConfig, *qurlapi.Config, bool, *connectorstate.LocalShare) (connectordaemon.GroupFactory, error) {
 				opens.Add(1)
 				return &headlessTestFactory{started: make(chan struct{})}, nil
 			}

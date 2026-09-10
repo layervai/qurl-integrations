@@ -125,7 +125,10 @@ finds the existing sub, sees the SSM secret matches, returns `reused`).
   key or endpoint is missing; `DEFAULT_WEBHOOK_OWNER_CONTRACT`
   means at least one response row was malformed (strictly, even if a sibling
   row has an owner); `DEFAULT_WEBHOOK_OWNER_CONFLICT` means one key listed
-  multiple owners. `DEFAULT_WEBHOOK_OWNER_KEY_INVALID` means the saved guild
+  multiple owners. The `CANDIDATE_WEBHOOK_OWNER_CONTRACT` and
+  `CANDIDATE_WEBHOOK_OWNER_CONFLICT` variants refer to the linking guild key,
+  so inspect that account's subscriptions instead of rerunning the default
+  registrar. `DEFAULT_WEBHOOK_OWNER_KEY_INVALID` means the saved guild
   key ciphertext cannot be decrypted; `DEFAULT_WEBHOOK_OWNER_KEY_CHANGED`
   means a concurrent re-key won. HTTP failures commonly use
   `error_code=Error`; network and timeout failures use their runtime error name.

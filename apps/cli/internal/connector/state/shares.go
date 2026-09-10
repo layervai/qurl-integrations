@@ -231,6 +231,18 @@ func (r *LocalShareRegistry) SetDesired(ctx context.Context, id, desired string,
 // only turn the exact stored epoch from on to off; it never advances an epoch,
 // changes identity or target data, or turns sharing on.
 func (r *LocalShareRegistry) DisableAtCurrentEpoch(ctx context.Context, id string, epoch uint64) (*LocalShare, error) {
+	return r.setDesiredAtCurrentEpoch(ctx, id, epoch, desiredStateOff, "disable")
+}
+
+// EnableAtCurrentEpoch records recovery from a local fail-closed stop after
+// the caller has reauthorized the exact resource and read authoritative
+// desired-on state at the same serving epoch. It cannot advance an epoch,
+// change identity or target data, or turn a cloud-stopped share on.
+func (r *LocalShareRegistry) EnableAtCurrentEpoch(ctx context.Context, id string, epoch uint64) (*LocalShare, error) {
+	return r.setDesiredAtCurrentEpoch(ctx, id, epoch, desiredStateOn, "enable")
+}
+
+func (r *LocalShareRegistry) setDesiredAtCurrentEpoch(ctx context.Context, id string, epoch uint64, desired, action string) (*LocalShare, error) {
 	var updated LocalShare
 	err := r.update(ctx, func(state *localSharesState) error {
 		key, share, ok := findLocalShare(state.Shares, id)
@@ -238,16 +250,16 @@ func (r *LocalShareRegistry) DisableAtCurrentEpoch(ctx context.Context, id strin
 			return os.ErrNotExist
 		}
 		if epoch != share.ServingEpoch {
-			return fmt.Errorf("refuse local disable for serving epoch %d while local epoch is %d", epoch, share.ServingEpoch)
+			return fmt.Errorf("refuse local %s for serving epoch %d while local epoch is %d", action, epoch, share.ServingEpoch)
 		}
 		if share.DesiredState != desiredStateOn && share.DesiredState != desiredStateOff {
 			return fmt.Errorf("invalid local share desired state %q", share.DesiredState)
 		}
 		updated = share
-		if share.DesiredState == desiredStateOff {
+		if share.DesiredState == desired {
 			return errLocalShareUnchanged
 		}
-		share.DesiredState = desiredStateOff
+		share.DesiredState = desired
 		share.UpdatedAt = time.Now().UTC()
 		state.Shares[key] = share
 		updated = share
