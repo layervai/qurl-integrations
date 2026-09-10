@@ -3564,3 +3564,34 @@ func TestRestartWithTargetCompensatesWhenRegistryRefusesTheMove(t *testing.T) {
 		t.Fatalf("compensated local state = %+v err=%v", local, err)
 	}
 }
+
+func TestRestartTargetPreflightFailureLeavesEpochUntouched(t *testing.T) {
+	srv := apitest.NewServer(t)
+	stateDir := connectorStateTestDir(t)
+	registry, err := openOwnedTestShareRegistry(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seed := localShareFixture(srv)
+	if err := registry.Put(context.Background(), &seed); err != nil {
+		t.Fatal(err)
+	}
+	before, err := registry.Get(context.Background(), srv.Key.CRID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	daemon := &recordingShareDaemon{}
+	res := runCLI(t, &runOpts{
+		args:          []string{"--endpoint", srv.URL, "restart", srv.Key.CRID, "--target", "http://127.0.0.1:4000"},
+		env:           map[string]string{"QURL_API_KEY": testAPIKey, "QURL_CONNECTOR_STATE_DIR": stateDir},
+		shareRegistry: registry, shareDaemon: daemon, shareStateDir: stateDir,
+		preflightTarget: func(context.Context, string, int) error { return errors.New("destination unavailable") },
+	})
+	if res.code == 0 || len(srv.Requests()) != 0 || daemon.ensures != 0 || daemon.reloads != 0 {
+		t.Fatalf("preflight reached authority or daemon: exit=%d requests=%v daemon=%+v", res.code, srv.Requests(), daemon)
+	}
+	after, err := registry.Get(context.Background(), srv.Key.CRID)
+	if err != nil || after.TargetURL != before.TargetURL || after.ServingEpoch != before.ServingEpoch || !after.UpdatedAt.Equal(before.UpdatedAt) {
+		t.Fatalf("preflight changed registry: %+v -> %+v (%v)", before, after, err)
+	}
+}
