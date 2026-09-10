@@ -472,9 +472,9 @@ def paged_rows(
         cursor = next_cursor
 
 
-def key_expiry_timestamp(raw: Any) -> float:
+def key_expiry_timestamp(raw: Any, label: str = "automation key") -> float:
     if not isinstance(raw, str):
-        raise CredentialError("automation key expiry is malformed")
+        raise CredentialError(f"{label} expiry is malformed")
     try:
         # Normalize subsecond precision for Python 3.10 as well as newer runners.
         raw = re.sub(
@@ -486,9 +486,9 @@ def key_expiry_timestamp(raw: Any) -> float:
             raw[:-1] + "+00:00" if raw.endswith("Z") else raw
         )
     except ValueError as exc:
-        raise CredentialError("automation key expiry is malformed") from exc
+        raise CredentialError(f"{label} expiry is malformed") from exc
     if expiry.tzinfo is None:
-        raise CredentialError("automation key expiry is malformed")
+        raise CredentialError(f"{label} expiry is malformed")
     return expiry.timestamp()
 
 
@@ -883,11 +883,6 @@ def mint_ordinary_key(endpoint: str, automation_key: str, name: str) -> tuple[st
                 or data.get("status") != "active"
             ):
                 raise CredentialError("qURL returned a malformed ordinary API key")
-            # TODO(upstream-contract): delegated ordinary keys must be finite
-            # and expire within qurl-service's 24-hour child lifetime bound.
-            remaining = key_expiry_timestamp(data.get("expires_at")) - time.time()
-            if not 0 < remaining <= 24 * 60 * 60:
-                raise CredentialError("qURL returned an invalid child-key lifetime")
             return key_id, api_key
         except CredentialError as exc:
             last_error = exc
@@ -987,6 +982,14 @@ def create_with_auth(
             or customer_key.get("scopes") != CUSTOMER_SCOPES
         ):
             raise CredentialError("minted API key does not belong to the CI owner")
+        # TODO(upstream-contract): /v1/me exposes the child's finite expiry.
+        # Check only after recording its ID, so any rejection can revoke it.
+        remaining = (
+            key_expiry_timestamp(customer_key.get("expires_at"), "child key")
+            - time.time()
+        )
+        if not 0 < remaining <= 24 * 60 * 60:
+            raise CredentialError("qURL returned an invalid child-key lifetime")
         write_private(args.output_dir / "api-key", api_key)
     except (OSError, CredentialError) as exc:
         try:

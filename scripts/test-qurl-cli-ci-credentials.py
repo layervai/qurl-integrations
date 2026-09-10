@@ -38,6 +38,9 @@ class FakeAPI:
         self.automation_key = "lv_test_" + "a" * 43
         self.key_id = "key_AbCdEf123456"
         self.api_key = "lv_test_" + "b" * 43
+        self.child_expiry = time.strftime(
+            "%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + 3600)
+        )
         self.identity_checks = 0
         self.api_key_inventory_requests = 0
         self.resource_inventory_requests = 0
@@ -129,6 +132,7 @@ class FakeAPI:
                     "api_key": {
                         "key_id": key_id,
                         "kind": "api_key",
+                        "expires_at": self.child_expiry,
                         "scopes": credentials.CUSTOMER_SCOPES,
                     },
                     "auth_type": "api_key",
@@ -1652,50 +1656,45 @@ def test_unhashable_inventory_fields_remain_bounded() -> None:
 
 
 def test_child_lifetime_response_fails_closed() -> None:
-    row = {
-        "key_id": "key_Child1234567",
-        "api_key": "lv_test_" + "x" * 43,
-        "kind": "api_key",
-        "name": "child",
-        "scopes": credentials.CUSTOMER_SCOPES,
-        "status": "active",
-    }
-    with (
-        mock.patch.object(credentials.time, "sleep"),
-        mock.patch.object(credentials.time, "time", return_value=1700000000),
-    ):
-        for lifetime in (1, 86400):
-            expiry = time.strftime(
-                "%Y-%m-%dT%H:%M:%SZ", time.gmtime(1700000000 + lifetime)
-            )
-            with mock.patch.object(
-                credentials,
-                "qurl_json",
-                return_value=(201, {"data": {**row, "expires_at": expiry}}),
-            ):
-                assert credentials.mint_ordinary_key(
-                    "https://qurl.invalid", "parent", "child"
-                ) == (row["key_id"], row["api_key"])
-        for expiry in (
-            None,
-            "",
-            "bad",
-            "2023-11-14T22:13:20Z",
-            "2023-11-15T22:13:21Z",
-            "2099-01-01T00:00:00Z",
+    fixed_now = 1700000000
+    for lifetime in (1, 86400, None, "", "bad", 0, 86401):
+        with (
+            tempfile.TemporaryDirectory() as raw_root,
+            mock.patch.object(credentials.time, "time", return_value=fixed_now),
+            mock.patch.object(credentials.time, "sleep"),
         ):
-            data = row if expiry is None else {**row, "expires_at": expiry}
-            with mock.patch.object(
-                credentials, "qurl_json", return_value=(201, {"data": data})
-            ):
-                try:
-                    credentials.mint_ordinary_key(
-                        "https://qurl.invalid", "parent", "child"
+            fake = FakeAPI()
+            fake.child_expiry = (
+                time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(fixed_now + lifetime))
+                if isinstance(lifetime, int)
+                else lifetime
+            )
+            output = pathlib.Path(raw_root) / "customer"
+            args = credentials.CredentialCreate("1231", "2", "linux", "primary", output)
+            with mock.patch.object(credentials, "request", fake):
+                if lifetime in (1, 86400):
+                    credentials.create_with_auth(
+                        args, "https://sandbox.example", fake.automation_key, fake.owner
                     )
-                except credentials.CredentialError:
-                    pass
+                    assert (output / "api-key").read_text() == fake.api_key
                 else:
-                    raise AssertionError("invalid child expiry accepted")
+                    try:
+                        credentials.create_with_auth(
+                            args,
+                            "https://sandbox.example",
+                            fake.automation_key,
+                            fake.owner,
+                        )
+                    except credentials.CredentialError as exc:
+                        assert (
+                            str(exc)
+                            == "credential creation failed; the exact key was revoked"
+                        )
+                    else:
+                        raise AssertionError("invalid child expiry accepted")
+                    assert not (output / "api-key").exists()
+                    assert fake.deleted_keys == [fake.key_id]
+                    assert len(fake.issued_api_keys) == 1
 
 
 def main() -> None:
