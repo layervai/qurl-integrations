@@ -1542,6 +1542,7 @@ func TestGetResourceDecodesDetailEnvelope(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet || r.URL.Path != "/v1/resources/r_abc123test" {
 			t.Errorf("request = %s %s, want GET /v1/resources/r_abc123test", r.Method, r.URL.Path)
+			http.Error(w, "unexpected request", http.StatusInternalServerError)
 			return
 		}
 		// Mirrors qurl-service ResourceDetailResponse: resource beside a qurls preview.
@@ -1571,7 +1572,9 @@ func TestGetResourceRejectsMissingOrMismatchedResource(t *testing.T) {
 	}{
 		"null data": {nil, "has no resource"},
 		"missing":   {map[string]any{"qurls": []any{}}, "has no resource"},
-		"mismatch":  {map[string]any{"resource": map[string]any{"resource_id": "r_other"}}, "identity does not match"},
+		// The pre-fix client decoded this flat shape; the service never sends it.
+		"legacy flat": {map[string]any{"resource_id": "r_abc123test", "type": "tunnel"}, "has no resource"},
+		"mismatch":    {map[string]any{"resource": map[string]any{"resource_id": "r_other"}}, "identity does not match"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()

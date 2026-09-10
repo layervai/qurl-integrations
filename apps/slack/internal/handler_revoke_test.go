@@ -130,6 +130,37 @@ func TestRevokeResource_Success(t *testing.T) {
 	}
 }
 
+// TestRevokeResource_TunnelStopsSharingFirst fences the tunnel branch: the
+// detail read must yield the tunnel type so sharing is turned off before DELETE.
+func TestRevokeResource_TunnelStopsSharingFirst(t *testing.T) {
+	ts := newAdminTestServers(t)
+	addRevokeResourceRead(t, ts, testTunnelResourceID, client.ResourceTypeTunnel)
+	var sharingOff, deletes atomic.Int32
+	ts.addCustomer(http.MethodPut, "/v1/resources/"+testTunnelResourceID+"/sharing", func(w http.ResponseWriter, _ *http.Request) {
+		sharingOff.Add(1)
+		respondQURLEnvelope(t, w, map[string]any{
+			"resource_id": testTunnelResourceID, "crid": testTunnelCRID,
+			"desired_state": "off", "serving_epoch": 1, "connection_state": "stopped",
+		})
+	})
+	ts.addCustomer(http.MethodDelete, "/v1/resources/"+testTunnelResourceID, func(w http.ResponseWriter, _ *http.Request) {
+		if sharingOff.Load() == 0 {
+			t.Error("DELETE issued before sharing was turned off")
+		}
+		deletes.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	})
+	h := newAdminTestHandler(t, ts)
+
+	msg := h.revokeResource(context.Background(), slog.Default(), testAdminTeamID, testAdminUserID, testTunnelResourceID, testRevokeAlias)
+	if !strings.Contains(msg, "Revoked") {
+		t.Fatalf("tunnel revoke message = %q, want success", msg)
+	}
+	if sharingOff.Load() != 1 || deletes.Load() != 1 {
+		t.Errorf("sharing off = %d, deletes = %d; want 1 each", sharingOff.Load(), deletes.Load())
+	}
+}
+
 // TestRevokeResource_SuccessCarriesWorkloadNeutralTeardownNote fences the
 // teardown story without assuming Docker: the reply must open with what revoke
 // DID do (new viewers blocked, viewer sessions deleted) before naming the gap,
@@ -553,6 +584,8 @@ func TestRevokeResource_PurgesOnAlreadyGone(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
 	ts.seedPolicyAliasBindings(t, testAdminTeamID, "C_test", map[string]string{testRevokeAlias: testRevokeResourceID})
+	// The read must succeed so the 404 comes from DELETE, the branch under test.
+	addRevokeResourceRead(t, ts, testRevokeResourceID, client.ResourceTypeURL)
 	ts.addCustomer(http.MethodDelete, "/v1/resources/"+testRevokeResourceID, func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 		_, _ = w.Write([]byte(`{"error":{"title":"Not Found","detail":"resource gone","code":"not_found","status":404}}`))
