@@ -521,6 +521,7 @@ func TestOverlayIPCRejectsOversizedAndUnknownFields(t *testing.T) {
 		"not an object":      []byte(`[]`),
 		"trailing value":     []byte(`{"route_request_headers":{}} {}`),
 		"oversized body":     []byte(oversized.String()),
+		"oversized tail":     []byte(`{"route_request_headers":{}}` + strings.Repeat(" ", maxIPCOverlayBytes)),
 		"non-ascii name":     []byte(`{"route_request_headers":{"r1":{"X-Sekrit-é":"sekrit-value"}}}`),
 		"array route":        []byte(`{"route_request_headers":{"r1":["X-Sekrit-Name","sekrit-value"]}}`),
 	}
@@ -529,6 +530,9 @@ func TestOverlayIPCRejectsOversizedAndUnknownFields(t *testing.T) {
 			status, text := rawIPCRequest(t, client, http.MethodPut, "/overlay", body)
 			if status != http.StatusBadRequest {
 				t.Fatalf("status = %d, want 400", status)
+			}
+			if strings.HasPrefix(name, "oversized") && !strings.Contains(text, "body exceeds the size limit") {
+				t.Fatal("oversized overlay response does not identify the byte limit")
 			}
 			if !strings.HasPrefix(text, ipcOverlayRejected) {
 				t.Fatalf("rejection text = %q, want the fixed message", text)

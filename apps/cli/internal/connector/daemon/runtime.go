@@ -26,6 +26,11 @@ var ErrDirectEgressRequired = errors.New("qURL local sharing requires direct egr
 // default: qurl-connector refuses a route set carrying runtime request
 // headers on a plaintext transport (or with the local FRP web server on), so
 // a changed default would silently fail every route the overlay names.
+// TODO(upstream-contract): authenticated runtime headers additionally require
+// TrustedCaFile in the reviewed connector. CA provisioning is still missing
+// here, so ValidateRoutes must reject headered routes until it is configured.
+// TestDefaultFRPCommonCarriesRuntimeRequestHeaders deliberately exposes this
+// release blocker rather than treating unauthenticated TLS as a valid default.
 func DefaultFRPCommon(dialTimeoutSeconds, keepaliveSeconds int64) (*v1.ClientCommonConfig, error) {
 	loginFailExit := true
 	tlsEnabled := true
