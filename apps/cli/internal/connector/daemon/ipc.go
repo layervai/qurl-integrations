@@ -131,7 +131,7 @@ const maxIPCOverlayBytes = 64 * 1024
 
 // ipcOverlayRejected is the whole body of a refused overlay update. It is
 // fixed text: no header name or value from the request is ever echoed.
-const ipcOverlayRejected = `share daemon overlay was rejected: send JSON {"route_request_headers":{"<connector_id>":{"Name":"value"}}} under 64 KiB with no unknown fields, at most 16 valid non-reserved request headers and 1,024 name and value bytes per route`
+const ipcOverlayRejected = `share daemon overlay was rejected: send JSON {"route_request_headers":{"<connector_id>":{"Name":"value"}}} under 64 KiB with no unknown fields, at most 2,000 routes, 16 valid non-reserved request headers and 1,024 name and value bytes per route`
 
 // ipcOverlay is the PUT /overlay body: runtime request headers keyed by the
 // Connector ID of the share they ride on. Each request replaces the whole
@@ -164,7 +164,7 @@ func decodeIPCOverlay(reader io.Reader) (map[string]map[string]string, error) {
 	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
 		return nil, errIPCOverlayMalformed
 	}
-	if body.RouteRequestHeaders == nil {
+	if body.RouteRequestHeaders == nil || len(body.RouteRequestHeaders) > connectorshare.MaxGroupRoutes {
 		return nil, errIPCOverlayMalformed
 	}
 	for connectorID, headers := range body.RouteRequestHeaders {

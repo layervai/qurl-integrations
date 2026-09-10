@@ -89,7 +89,7 @@ type PerShareManager struct {
 
 	mu     sync.Mutex
 	groups map[string]*shareGroup // resource ID -> its group
-	// overlay is the runtime request-header overlay every group is handed:
+	// overlay is the runtime request-header overlay; each group gets only its entry:
 	// the live ones on SetOverlay, a new one as it starts. Process memory
 	// only, as Manager.overlay.
 	overlay map[string]map[string]string
@@ -162,10 +162,22 @@ func (m *PerShareManager) SetOverlay(overlay map[string]map[string]string) {
 	m.mu.Lock()
 	m.overlay = cloneOverlay(overlay)
 	for _, group := range m.groups {
-		group.manager.SetOverlay(m.overlay)
+		group.view.mu.Lock()
+		routeID := group.view.share.ConnectorID
+		group.view.mu.Unlock()
+		group.manager.SetOverlay(overlayForRoute(m.overlay, routeID))
 	}
 	m.mu.Unlock()
 	m.Trigger()
+}
+
+// overlayForRoute keeps a group's memory free of sibling route credentials.
+// The receiving Manager copies the selected headers before retaining them.
+func overlayForRoute(overlay map[string]map[string]string, routeID string) map[string]map[string]string {
+	if len(overlay[routeID]) == 0 {
+		return nil
+	}
+	return map[string]map[string]string{routeID: overlay[routeID]}
 }
 
 // Run reconciles until ctx ends. Every exit path stops every group so a
@@ -246,7 +258,7 @@ func (m *PerShareManager) Reconcile(ctx context.Context) error {
 		share := &desired[i]
 		if group, ok := m.groups[share.ResourceID]; ok {
 			if group.view.set(share) {
-				group.manager.Trigger()
+				group.manager.SetOverlay(overlayForRoute(m.overlay, share.ConnectorID))
 			}
 			continue
 		}
@@ -329,7 +341,7 @@ func (m *PerShareManager) startGroupLocked(share *connectorstate.LocalShare) (*s
 	if m.configure != nil {
 		m.configure(manager)
 	}
-	manager.storeOverlay(m.overlay)
+	manager.storeOverlay(overlayForRoute(m.overlay, share.ConnectorID))
 	parent := m.lifetime
 	if parent == nil {
 		parent = context.Background()

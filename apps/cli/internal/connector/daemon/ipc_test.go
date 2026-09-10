@@ -13,10 +13,13 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
+
+	connectorshare "github.com/layervai/qurl-connector/pkg/share"
 
 	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 )
@@ -518,6 +521,8 @@ func TestOverlayIPCRejectsOversizedAndUnknownFields(t *testing.T) {
 		"not an object":      []byte(`[]`),
 		"trailing value":     []byte(`{"route_request_headers":{}} {}`),
 		"oversized body":     []byte(oversized.String()),
+		"non-ascii name":     []byte(`{"route_request_headers":{"r1":{"X-Sekrit-é":"sekrit-value"}}}`),
+		"array route":        []byte(`{"route_request_headers":{"r1":["X-Sekrit-Name","sekrit-value"]}}`),
 	}
 	for name, body := range rejected {
 		t.Run(name, func(t *testing.T) {
@@ -551,6 +556,26 @@ func TestOverlayIPCRejectsOversizedAndUnknownFields(t *testing.T) {
 	}
 	if got := storedOverlay(manager)["r1"]; len(got) != 16 {
 		t.Fatalf("stored %d headers for r1, want the 16 at the limit", len(got))
+	}
+	// Shapes a supervisor may legitimately send: a null or empty route entry is
+	// a headerless route and is not stored, and a route key repeated in one
+	// body follows JSON's last-wins rule rather than merging the two sets.
+	for name, body := range map[string][]byte{
+		"null route":  []byte(`{"route_request_headers":{"r1":null}}`),
+		"empty route": []byte(`{"route_request_headers":{"r1":{}}}`),
+	} {
+		if status, _ := rawIPCRequest(t, client, http.MethodPut, "/overlay", body); status != http.StatusNoContent {
+			t.Fatalf("%s returned %d, want 204", name, status)
+		}
+		if got := storedOverlay(manager); len(got) != 0 {
+			t.Fatalf("%s stored %d routes, want a headerless route dropped", name, len(got))
+		}
+	}
+	if status, _ := rawIPCRequest(t, client, http.MethodPut, "/overlay", []byte(`{"route_request_headers":{"r1":{"X-First":"1"},"r1":{"X-Last":"2"}}}`)); status != http.StatusNoContent {
+		t.Fatalf("duplicate route key returned %d, want 204", status)
+	}
+	if got := storedOverlay(manager)["r1"]; len(got) != 1 || got["X-Last"] != "2" {
+		t.Fatalf("duplicate route key stored %v, want only the last entry", got)
 	}
 	if status, _ := rawIPCRequest(t, client, http.MethodPost, "/overlay", overlayJSON(t, nil)); status != http.StatusMethodNotAllowed {
 		t.Fatalf("POST /overlay returned %d, want 405", status)
@@ -604,4 +629,24 @@ func emptyManager(t *testing.T) *Manager {
 		t.Fatal(err)
 	}
 	return manager
+}
+
+func TestOverlayIPCBoundsRouteCount(t *testing.T) {
+	t.Parallel()
+	overlay := make(map[string]map[string]string)
+	for i := range connectorshare.MaxGroupRoutes {
+		overlay[strconv.Itoa(i)] = map[string]string{"X": "v"}
+	}
+	raw := overlayJSON(t, overlay)
+	if _, err := decodeIPCOverlay(strings.NewReader(string(raw))); err != nil {
+		t.Fatalf("at-limit overlay rejected: %v", err)
+	}
+	overlay["extra"] = map[string]string{"X": "v"}
+	raw = overlayJSON(t, overlay)
+	if len(raw) >= maxIPCOverlayBytes {
+		t.Fatal("fixture exceeds byte limit")
+	}
+	if _, err := decodeIPCOverlay(strings.NewReader(string(raw))); err == nil {
+		t.Fatal("overlay above route limit accepted")
+	}
 }
