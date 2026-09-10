@@ -315,7 +315,8 @@ async function deleteLink(resourceId, apiKey, { deadlineMs } = {}) {
 // The Connector classifies ordinary children; use the SDK's per-child action.
 // Resolve the CRID from an identified child because old upload rows contain
 // a public resource key. Verify the resolved parent; each SDK DELETE is scoped
-// to that CRID and the service checks each child belongs to it.
+// to that CRID. TODO(upstream-contract): the service checks each child
+// belongs to that parent before deleting it.
 async function revokeOrdinaryLinks(resourceId, qurlIds, apiKey) {
   if (qurlIds.length === 0) return;
   const client = makeClient(apiKey);

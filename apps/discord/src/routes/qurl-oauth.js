@@ -107,6 +107,8 @@ function clearQurlOAuthCookies(res) {
   clearQurlOAuthPkceCookie(res);
 }
 
+// TODO(upstream-contract): qurl-service binding DELETE atomically revokes its
+// child API key and releases the external identity claim.
 async function deleteOrphanCredential({ accessToken, bindingId, keyId, guildId }) {
   const isPrivateBinding = Boolean(bindingId);
   const credentialKind = isPrivateBinding ? 'external identity binding' : 'API key';
@@ -122,6 +124,7 @@ async function deleteOrphanCredential({ accessToken, bindingId, keyId, guildId }
         headers: { 'Authorization': `Bearer ${accessToken}`, 'Accept': 'application/json' },
         signal: AbortSignal.timeout(ORPHAN_DELETE_ATTEMPT_TIMEOUT_MS),
       });
+      await response.body?.cancel?.();
       if (response.status === 204 || response.status === 404) return;
       if (response.status >= 500 && response.status <= 599 && attempt < 2) continue;
       logger.warn('Orphan credential delete returned non-terminal status', {

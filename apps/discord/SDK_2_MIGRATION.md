@@ -52,3 +52,10 @@ The 20,000-recipient configuration ceiling is not a validated private send
 size. Private batches share a 10-minute mint deadline; do not extend it past
 the Discord interaction lifetime. Set QURL_SEND_MAX_RECIPIENTS from the live
 file-size/fan-out test before activation, including cleanup under timeout.
+
+A public re-setup cannot replace a stored external binding after flag rollback:
+DynamoDB rejects that update atomically. Keep the existing bound credential or
+re-enable the private setup flow to rotate it. Binding DELETE on qurl-service
+revokes its key atomically. The 24-hour authority bounds the offered 24-hour
+links as well as batch work; shortening it to the interaction deadline would
+shorten delivered links too. Unknown grants are not distributed.

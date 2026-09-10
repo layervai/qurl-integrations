@@ -65,9 +65,11 @@ function readDerS(signature) {
   return BigInt(`0x${s.toString('hex')}`);
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   jest.clearAllMocks();
   mockOpener.health.mockReturnValue({ state: 'ready' });
+  await privateUpload.startPrivateUploader();
+  jest.clearAllMocks();
 });
 
 afterEach(async () => {
@@ -734,4 +736,42 @@ test.each(['/unexpected', '/internal/v1/uploads?unsigned=true'])('refuses an uns
   })).rejects.toThrow(/signed path/);
   expect(mockOpener.fetch).toHaveBeenCalledTimes(1);
   expect(sleep).not.toHaveBeenCalled();
+});
+
+test('an upload after shutdown cannot create or fetch from a new portal', async () => {
+  await privateUpload.closePrivateUploader();
+  const sleep = jest.fn();
+  await expect(privateUpload.uploadPrivate(Buffer.from('hello'), {
+    filename: 'report.txt', contentType: 'text/plain', viewerTtlSeconds: 30,
+    credential: { apiKey: 'lv_test_example', keyId: 'key_A1b2C3d4E5f6' },
+    authorityExpiresAt: '2027-01-01T00:00:00Z', deadlineMs: Date.now() + 60_000,
+    requestId: UPLOAD_VECTOR.requestId, sleep,
+  })).rejects.toThrow(/uploader is stopped/);
+  expect(mockCreatePortalOpener).not.toHaveBeenCalled();
+  expect(mockOpener.fetch).not.toHaveBeenCalled();
+  expect(sleep).not.toHaveBeenCalled();
+});
+
+test('ArrayBuffer mutation cannot alter the signed body on retry', async () => {
+  const input = new Uint8Array([104, 101, 108, 108, 111]);
+  const seen = [];
+  mockOpener.fetch.mockImplementation(async builder => {
+    const request = builder(new URL('https://private.test/internal/v1/uploads'));
+    seen.push({ body: Buffer.from(request.body), digest: request.headers['Content-Digest'] });
+    input.fill(120);
+    if (seen.length === 1) return jsonResponse(503, { error: { code: 'mutation_outcome_unknown' } });
+    return jsonResponse(201, { data: {
+      upload_handle: `upl_${'a'.repeat(43)}`, mint_capability: 'qmc1.test',
+      mint_capability_expires_at: '2026-09-06T21:15:00Z', authority_expires_at: '2027-01-01T00:00:00Z',
+    } });
+  });
+  await privateUpload.uploadPrivate(input.buffer, {
+    filename: 'report.txt', contentType: 'text/plain', viewerTtlSeconds: 30,
+    credential: { apiKey: 'lv_test_example', keyId: 'key_A1b2C3d4E5f6' },
+    authorityExpiresAt: '2027-01-01T00:00:00Z', deadlineMs: Date.now() + 60_000,
+    requestId: UPLOAD_VECTOR.requestId, sleep: jest.fn(),
+  });
+  expect(seen).toHaveLength(2);
+  expect(seen[0].body.toString()).toBe('hello');
+  expect(seen[1]).toEqual(seen[0]);
 });

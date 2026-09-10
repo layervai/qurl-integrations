@@ -68,6 +68,7 @@ describe('guild configs', () => {
     expect(input.ExpressionAttributeValues[':u']).toBeDefined();
     expect(input.UpdateExpression).toMatch(/if_not_exists\(configured_at, :u\)/);
     expect(input.UpdateExpression).toMatch(/REMOVE qurl_api_key_id, qurl_binding_id/);
+    expect(input.ConditionExpression).toBe('attribute_not_exists(qurl_binding_id)');
     expect(input.UpdateExpression).not.toMatch(/, configured_at = :u\b/);
     expect(input.UpdateExpression).not.toMatch(/^SET configured_at = :u\b/);
   });
@@ -93,6 +94,7 @@ describe('guild configs', () => {
     });
     expect(input.ExpressionAttributeValues[':k']).not.toContain('plain-key');
     expect(input.UpdateExpression).not.toContain(' REMOVE ');
+    expect(input.ConditionExpression).toBeUndefined();
 
     ddbMock.reset();
     ddbMock.on(GetCommand).resolves({ Item: {

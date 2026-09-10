@@ -24,6 +24,7 @@ const UPLOAD_REQUEST_TIMEOUT_MS = 60000;
 const BATCH_REQUEST_TIMEOUT_MS = 30000;
 
 let opener = null;
+let stopped = false;
 let recoveryTimer = null;
 let signerKey = null;
 
@@ -236,6 +237,11 @@ function requirePrivateCredential(credential) {
 }
 
 function getOpener() {
+  if (stopped) {
+    const error = new Error('Private uploader is stopped');
+    error.noRetry = true;
+    throw error;
+  }
   if (!config.PRIVATE_UPLOAD_QURL) throw new Error('PRIVATE_UPLOAD_QURL is not configured');
   if (!opener) opener = createPortalOpener({ qurl: config.PRIVATE_UPLOAD_QURL, openTimeoutMs: 30000 });
   return opener;
@@ -243,11 +249,13 @@ function getOpener() {
 
 async function startPrivateUploader() {
   if (!config.PRIVATE_UPLOAD_QURL) return;
+  stopped = false;
   getSigner();
   await getOpener().start();
-  if (!recoveryTimer) {
+  if (!stopped && !recoveryTimer) {
     recoveryTimer = setInterval(() => {
       const current = opener;
+      // TODO(upstream-contract): SDK 2.0 coalesces overlapping start() calls.
       if (current?.health().state === 'degraded') {
         current.start().catch(err => logger.warn('Private upload NHP session recovery failed', { error: err.message }));
       }
@@ -257,6 +265,7 @@ async function startPrivateUploader() {
 }
 
 async function closePrivateUploader() {
+  stopped = true;
   if (recoveryTimer) clearInterval(recoveryTimer);
   recoveryTimer = null;
   const current = opener;
@@ -274,7 +283,8 @@ async function uploadPrivate(bodyInput, {
   deadlineMs, requestId = randomUUID(), sleep = delay,
 }) {
   // Own immutable bytes across retries; callers may reuse their input buffer.
-  const body = Buffer.from(bodyInput);
+  const body = Buffer.from(bodyInput instanceof ArrayBuffer || bodyInput instanceof SharedArrayBuffer
+    ? new Uint8Array(bodyInput) : bodyInput);
   const digest = createHash('sha256').update(body).digest();
   const bodySha256 = digest.toString('hex');
   const contentDigestHeader = `sha-256=:${digest.toString('base64')}:`;

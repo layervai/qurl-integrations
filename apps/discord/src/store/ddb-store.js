@@ -1566,6 +1566,8 @@ async function setGuildApiKey(guildId, apiKey, configuredBy, { keyId, bindingId 
     Key: { guild_id: guildId },
     UpdateExpression: updateExpression,
     ExpressionAttributeValues: values,
+    // A flag rollback must not discard the live external binding and its key.
+    ...(bindingId === undefined ? { ConditionExpression: 'attribute_not_exists(qurl_binding_id)' } : {}),
   }));
 }
 
