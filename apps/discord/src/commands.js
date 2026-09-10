@@ -1724,6 +1724,7 @@ async function mintLinksInBatches({
         selfDestructSeconds,
         guildId,
       });
+      // Push before the arity check: over-delivered links must reach compensation.
       for (const link of minted) {
         allLinks.push({
           qurl_link: link?.qurl_link,
@@ -3027,17 +3028,18 @@ async function cleanupFreshMintedResources(batchSends, apiKey, sendId, options =
   const cleanupReason = options.reason || (rowsMayHavePersisted ? 'revoked_guard' : 'pre_persistence');
   const operationLabel = options.operationLabel || 'Add Recipients';
   const checkGuardTransaction = options.checkGuardTransaction !== false;
-  const txnActionCount = checkGuardTransaction ? ddbSendConfigGuardActionCount(batchSends) : null;
   if (checkGuardTransaction && rowsMayHavePersisted && !ddbSendConfigGuardFitsTransaction(batchSends)) {
     // Unreachable by construction for today's Add Recipients flow: oversized
     // batches fail before DDB, and revoked errors only come from a single
     // transaction. If a future caller violates that invariant, still revoke
     // the freshly minted qURLs; rows may point at deleted resources, but no DMs
     // have been sent and the grants fail closed.
-    logger.error(`Cleaning up oversized ${operationLabel} batch after possible persistence`, {
+    // Static messages keep log queries stable; the flow goes in `operation`.
+    logger.error('Cleaning up oversized batch after possible persistence', {
       sendId,
+      operation: operationLabel,
       send_count: batchSends.length,
-      txn_actions: txnActionCount,
+      txn_actions: ddbSendConfigGuardActionCount(batchSends),
     });
   }
 
@@ -3111,16 +3113,18 @@ async function cleanupFreshMintedResources(batchSends, apiKey, sendId, options =
     }
   });
   if (failed.length > 0) {
-    logger.error(`Failed to clean up freshly minted ${operationLabel} qURL resources`, {
+    logger.error('Failed to clean up freshly minted qURL resources', {
       sendId,
+      operation: operationLabel,
       reason: cleanupReason,
       failed_count: failed.length,
       total: resourceEntries.length,
       failures: failed,
     });
   } else {
-    logger.info(`Cleaned up freshly minted ${operationLabel} qURL resources`, {
+    logger.info('Cleaned up freshly minted qURL resources', {
       sendId,
+      operation: operationLabel,
       reason: cleanupReason,
       total: resourceEntries.length,
     });
@@ -8757,15 +8761,6 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
       affectedRecipients: invalidResourceRecipientIds.size,
     });
   }
-  if (legacyRowCount > 0) {
-    // One rollup per revoke, not per resource: legacy sends are expected and
-    // must not page. See INVARIANT(absent-qurl-id-is-parent-minted) above.
-    logger.warn('Revoking send rows without stored token identity via parent resource delete', {
-      sendId,
-      row_count: legacyRowCount,
-      resource_count: legacyResourceIds.size,
-    });
-  }
   for (let i = 0; i < results.length; i++) {
     const [resourceId, recipientIds] = resourceEntries[i];
     if (results[i].status === 'fulfilled') {
@@ -8777,6 +8772,17 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
         error: results[i].reason?.message,
       });
     }
+  }
+  if (legacyRowCount > 0) {
+    // One rollup per revoke, not per resource: legacy sends are expected and
+    // must not page. See INVARIANT(absent-qurl-id-is-parent-minted) above.
+    logger.warn('Revoked send rows without stored token identity via parent resource delete', {
+      sendId,
+      row_count: legacyRowCount,
+      resource_count: legacyResourceIds.size,
+      revoked_resource_count: resourceEntries
+        .filter(([resourceId], i) => legacyResourceIds.has(resourceId) && results[i].status === 'fulfilled').length,
+    });
   }
   // Strict success = revoked AND not in any failure bucket.
   for (const id of seenSuccess) {

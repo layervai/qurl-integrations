@@ -854,8 +854,8 @@ describe('revokeAllLinks', () => {
     expect(mockDb.markSendRevoked).toHaveBeenCalledWith('send-1', 'sender-1');
     expect(logger.warn).toHaveBeenCalledTimes(1);
     expect(logger.warn).toHaveBeenCalledWith(
-      'Revoking send rows without stored token identity via parent resource delete',
-      { sendId: 'send-1', row_count: 3, resource_count: 2 },
+      'Revoked send rows without stored token identity via parent resource delete',
+      { sendId: 'send-1', row_count: 3, resource_count: 2, revoked_resource_count: 2 },
     );
     expect(logger.error).not.toHaveBeenCalled();
   });
@@ -2239,7 +2239,7 @@ describe('handleAddRecipients — file path failure modes', () => {
     expect(mockRevokeMintedLinks).not.toHaveBeenCalled();
     expect(mockDeleteLink).toHaveBeenCalledWith('res-new', 'apikey');
     expect(logger.error).toHaveBeenCalledWith(
-      'Failed to clean up freshly minted Add Recipients mint batch qURL resources',
+      'Failed to clean up freshly minted qURL resources',
       expect.objectContaining({
         reason: 'mint_failed',
         failures: [expect.objectContaining({
@@ -2523,7 +2523,7 @@ describe('executeSendPipeline — orphaned qURL log safety', () => {
     );
     expect(mockDeleteLink).not.toHaveBeenCalled();
     expect(logger.error).toHaveBeenCalledWith(
-      'Failed to clean up freshly minted initial send mint batch qURL resources',
+      'Failed to clean up freshly minted qURL resources',
       expect.objectContaining({ reason: 'mint_underdelivery', failed_count: 1 }),
     );
     expect(mockDb.recordQURLSendBatch).not.toHaveBeenCalled();
@@ -2588,7 +2588,7 @@ describe('executeSendPipeline — orphaned qURL log safety', () => {
     expect(mockRevokeMintedLinks.mock.invocationCallOrder[0])
       .toBeLessThan(mockDeleteLink.mock.invocationCallOrder[0]);
     expect(logger.info).toHaveBeenCalledWith(
-      'Cleaned up freshly minted initial send qURL resources',
+      'Cleaned up freshly minted qURL resources',
       expect.objectContaining({
         sendId: expect.any(String),
         reason: 'initial_persistence_failed',
@@ -2630,7 +2630,7 @@ describe('executeSendPipeline — orphaned qURL log safety', () => {
     );
     expect(mockDeleteLink).not.toHaveBeenCalled();
     expect(logger.error).toHaveBeenCalledWith(
-      'Failed to clean up freshly minted initial send qURL resources',
+      'Failed to clean up freshly minted qURL resources',
       expect.objectContaining({
         reason: 'initial_persistence_failed',
         failed_count: 1,
@@ -2677,7 +2677,7 @@ describe('executeSendPipeline — orphaned qURL log safety', () => {
     expect(mockDeleteLink).toHaveBeenCalledWith('resource-public-id', 'apikey');
     expect(mockDeleteLink).toHaveBeenCalledTimes(1);
     expect(logger.error).toHaveBeenCalledWith(
-      'Failed to clean up freshly minted initial send mint batch qURL resources',
+      'Failed to clean up freshly minted qURL resources',
       expect.objectContaining({
         reason: 'mint_failed',
         failures: [expect.objectContaining({
@@ -3210,7 +3210,7 @@ describe('handleAddRecipients — DB failure mid-flow', () => {
     expect(mockRevokeMintedLinks.mock.invocationCallOrder[0])
       .toBeLessThan(mockDeleteLink.mock.invocationCallOrder[0]);
     expect(logger.info).toHaveBeenCalledWith(
-      'Cleaned up freshly minted Add Recipients qURL resources',
+      'Cleaned up freshly minted qURL resources',
       expect.objectContaining({
         sendId: 'send-1',
         reason: 'guarded_transaction_failed',
@@ -3241,7 +3241,7 @@ describe('handleAddRecipients — DB failure mid-flow', () => {
     );
     expect(mockDeleteLink).not.toHaveBeenCalled();
     expect(logger.error).toHaveBeenCalledWith(
-      'Failed to clean up freshly minted Add Recipients qURL resources',
+      'Failed to clean up freshly minted qURL resources',
       expect.objectContaining({
         sendId: 'send-1',
         reason: 'guarded_transaction_failed',
@@ -3281,7 +3281,7 @@ describe('handleAddRecipients — DB failure mid-flow', () => {
     expect(mockRevokeMintedLinks.mock.invocationCallOrder[0])
       .toBeLessThan(mockDeleteLink.mock.invocationCallOrder[0]);
     expect(logger.error).toHaveBeenCalledWith(
-      'Failed to clean up freshly minted Add Recipients mint batch qURL resources',
+      'Failed to clean up freshly minted qURL resources',
       expect.objectContaining({
         sendId: 'send-1',
         reason: 'mint_failed',
@@ -3323,7 +3323,7 @@ describe('handleAddRecipients — DB failure mid-flow', () => {
     expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-new', ['q_known'], 'apikey');
     expect(mockDeleteLink).not.toHaveBeenCalled();
     expect(logger.error).toHaveBeenCalledWith(
-      'Failed to clean up freshly minted Add Recipients mint batch qURL resources',
+      'Failed to clean up freshly minted qURL resources',
       expect.objectContaining({
         reason: 'mint_failed',
         failed_count: 1,
@@ -3385,7 +3385,7 @@ describe('handleAddRecipients — DB failure mid-flow', () => {
     expect(result.msg).toBe('Cannot add recipients — this send has already been revoked.');
     expect(result.newRecipients).toEqual([]);
     expect(logger.error).toHaveBeenCalledWith(
-      'Failed to clean up freshly minted Add Recipients qURL resources',
+      'Failed to clean up freshly minted qURL resources',
       expect.objectContaining({
         sendId: 'send-1',
         reason: 'revoked_guard',
@@ -3775,7 +3775,7 @@ describe('mintLinksInBatches', () => {
     expect(mockRevokeMintedLinks.mock.invocationCallOrder[0])
       .toBeLessThan(mockDeleteLink.mock.invocationCallOrder[0]);
     expect(logger.error).toHaveBeenCalledWith(
-      'Failed to clean up freshly minted test send mint batch qURL resources',
+      'Failed to clean up freshly minted qURL resources',
       expect.objectContaining({
         reason: 'mint_failed',
         failures: [expect.objectContaining({
@@ -3994,7 +3994,7 @@ describe('mintLinksInBatches', () => {
       }),
     );
     expect(logger.error).toHaveBeenCalledWith(
-      'Failed to clean up freshly minted mint batch qURL resources',
+      'Failed to clean up freshly minted qURL resources',
       expect.objectContaining({
         failures: [expect.objectContaining({
           connector_revoke_attempted: false,
