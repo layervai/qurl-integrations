@@ -1541,7 +1541,8 @@ func TestGetResourceDecodesDetailEnvelope(t *testing.T) {
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet || r.URL.Path != "/v1/resources/r_abc123test" {
-			t.Fatalf("request = %s %s, want GET /v1/resources/r_abc123test", r.Method, r.URL.Path)
+			t.Errorf("request = %s %s, want GET /v1/resources/r_abc123test", r.Method, r.URL.Path)
+			return
 		}
 		// Mirrors qurl-service ResourceDetailResponse: resource beside a qurls preview.
 		apiEnvelope(t, w, map[string]any{
@@ -1565,11 +1566,12 @@ func TestGetResourceRejectsMissingOrMismatchedResource(t *testing.T) {
 	t.Parallel()
 
 	for name, tc := range map[string]struct {
-		data    map[string]any
+		data    any
 		wantErr string
 	}{
-		"missing":  {map[string]any{"qurls": []any{}}, "has no resource"},
-		"mismatch": {map[string]any{"resource": map[string]any{"resource_id": "r_other"}}, "identity does not match"},
+		"null data": {nil, "has no resource"},
+		"missing":   {map[string]any{"qurls": []any{}}, "has no resource"},
+		"mismatch":  {map[string]any{"resource": map[string]any{"resource_id": "r_other"}}, "identity does not match"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
