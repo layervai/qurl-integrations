@@ -56,3 +56,20 @@ describe('config — QURL_LINK_DOMAIN', () => {
     });
   });
 });
+
+test('private startup rejects a present but invalid domain through its boot diagnostic', () => {
+  const { spawnSync } = require('node:child_process');
+  const result = spawnSync(process.execPath, [require('node:path').join(__dirname, '../src/index.js')], {
+    encoding: 'utf8', timeout: 5000,
+    env: {
+      PATH: process.env.PATH, NODE_ENV: 'test', AWS_REGION: 'us-east-2',
+      DDB_TABLE_PREFIX: 'test-', DISCORD_TOKEN: 'test-only',
+      PRIVATE_UPLOAD_QURL: 'qurl://test-only',
+      PRIVATE_UPLOAD_SIGNER_PRIVATE_KEY_PEM: 'test-only',
+      PRIVATE_UPLOAD_SIGNER_CLIENT_ID: 'test-only', PRIVATE_UPLOAD_SIGNER_KEY_ID: 'test-only',
+      QURL_DEPLOYMENT: '{}', QURL_LINK_DOMAIN: 'https://invalid.example',
+    },
+  });
+  expect(result.status).toBe(1);
+  expect(result.stdout + result.stderr).toContain('private upload configuration is incomplete: QURL_LINK_DOMAIN');
+});

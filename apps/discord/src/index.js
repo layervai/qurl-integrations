@@ -206,7 +206,7 @@ if (config.PRIVATE_UPLOAD_QURL) {
     'PRIVATE_UPLOAD_SIGNER_KEY_ID',
     'QURL_LINK_DOMAIN',
     'QURL_DEPLOYMENT',
-  ].filter(key => !process.env[key]?.trim());
+  ].filter(key => !(key === 'QURL_LINK_DOMAIN' ? config[key] : process.env[key])?.trim());
   if (privateUploadMissing.length > 0) {
     logger.error(`PRIVATE_UPLOAD_QURL is set but private upload configuration is incomplete: ${privateUploadMissing.join(', ')}`);
     process.exit(1);
