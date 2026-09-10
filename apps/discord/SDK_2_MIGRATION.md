@@ -42,3 +42,13 @@ Keep PRIVATE_UPLOAD_QURL absent until infrastructure PRs #1529/#1530 and the
 signed upload, mint, view, watermark, detect, revoke, and direct-origin-deny
 sandbox journey pass. The HTTP integration tests use the real SDK against a
 local server; they do not establish live private activation readiness.
+
+Private activation changes every guild's send path. Existing guilds must run
+`/qurl setup` to create a current external identity binding and key ID before
+the flag is enabled. The prior credential alone cannot authorize private
+grants. Inventory and migrate these bindings as part of activation.
+
+The 20,000-recipient configuration ceiling is not a validated private send
+size. Private batches share a 10-minute mint deadline; do not extend it past
+the Discord interaction lifetime. Set QURL_SEND_MAX_RECIPIENTS from the live
+file-size/fan-out test before activation, including cleanup under timeout.

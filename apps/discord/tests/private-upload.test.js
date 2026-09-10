@@ -137,6 +137,8 @@ test('upload ambiguity respects Retry-After and accepts an exact 200 replay', as
   expect(seen[0]['X-LayerV-Upload-Request-ID']).toBe(seen[1]['X-LayerV-Upload-Request-ID']);
   expect(seen[0]['X-LayerV-Nonce']).not.toBe(seen[1]['X-LayerV-Nonce']);
   expect(seen[0]['X-LayerV-Viewer-TTL-Seconds']).toBe('30');
+  expect(seen[0]['Content-Digest']).toBe(`sha-256=:${crypto.createHash('sha256').update('hello').digest('base64')}:`);
+  expect(seen[1]['Content-Digest']).toBe(seen[0]['Content-Digest']);
   expect(sleep).toHaveBeenCalledTimes(1);
   expect(sleep).toHaveBeenCalledWith(1000);
 });
@@ -719,4 +721,17 @@ test.each(['lost POST', 'unreadable accepted batch', 'invalid terminal'])('retai
   } finally {
     global.fetch = realFetch;
   }
+});
+
+test.each(['/unexpected', '/internal/v1/uploads?unsigned=true'])('refuses an unsigned portal target %s without retry', async path => {
+  mockOpener.fetch.mockImplementation(async builder => builder(new URL(`https://private.test${path}`)));
+  const sleep = jest.fn();
+  await expect(privateUpload.uploadPrivate(Buffer.from('hello'), {
+    filename: 'report.txt', contentType: 'text/plain', viewerTtlSeconds: 30,
+    credential: { apiKey: 'lv_test_example', keyId: 'key_A1b2C3d4E5f6' },
+    authorityExpiresAt: '2027-01-01T00:00:00Z', deadlineMs: Date.now() + 60_000,
+    requestId: UPLOAD_VECTOR.requestId, sleep,
+  })).rejects.toThrow(/signed path/);
+  expect(mockOpener.fetch).toHaveBeenCalledTimes(1);
+  expect(sleep).not.toHaveBeenCalled();
 });

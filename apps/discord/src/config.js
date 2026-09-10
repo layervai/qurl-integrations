@@ -118,6 +118,7 @@ function normalizeBaseUrl(raw) {
   return value;
 }
 
+// Invalid private-only configuration is reported by the private boot gate.
 function normalizeQurlLinkDomain(raw) {
   const value = raw?.trim().toLowerCase();
   if (!value) return null;
@@ -125,11 +126,11 @@ function normalizeQurlLinkDomain(raw) {
   try {
     url = new URL(`https://${value}`);
   } catch {
-    throw new Error('QURL_LINK_DOMAIN must be a bare hostname');
+    return null;
   }
   if (url.hostname !== value || url.port || url.username || url.password
       || url.pathname !== '/' || url.search || url.hash) {
-    throw new Error('QURL_LINK_DOMAIN must be a bare hostname');
+    return null;
   }
   return url.hostname;
 }

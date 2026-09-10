@@ -145,21 +145,17 @@ function canonicalFilename(value) {
 
 function authorityFor(target) {
   const url = target instanceof URL ? target : new URL(target);
+  if (url.pathname !== UPLOAD_PATH || url.search || url.hash) {
+    const error = new Error('Private upload portal target does not match the signed path');
+    error.noRetry = true;
+    throw error;
+  }
   return url.host.toLowerCase();
 }
 
-function sha256Hex(body) {
-  return createHash('sha256').update(body).digest('hex');
-}
-
-function contentDigest(body) {
-  return `sha-256=:${createHash('sha256').update(body).digest('base64')}:`;
-}
-
-function signedTransportFields({ authority, body, contentType, filename, viewerTtlSeconds, audienceKeyId, authorityExpiresAt, requestId }) {
+function signedTransportFields({ authority, body, bodySha256, contentType, filename, viewerTtlSeconds, audienceKeyId, authorityExpiresAt, requestId }) {
   const timestamp = String(Math.floor(Date.now() / 1000));
   const nonce = randomBytes(32).toString('base64url');
-  const bodySha256 = sha256Hex(body);
   const base = {
     authority,
     timestamp,
@@ -277,7 +273,11 @@ async function uploadPrivate(bodyInput, {
   filename, contentType, viewerTtlSeconds, credential, authorityExpiresAt,
   deadlineMs, requestId = randomUUID(), sleep = delay,
 }) {
+  // Own immutable bytes across retries; callers may reuse their input buffer.
   const body = Buffer.from(bodyInput);
+  const digest = createHash('sha256').update(body).digest();
+  const bodySha256 = digest.toString('hex');
+  const contentDigestHeader = `sha-256=:${digest.toString('base64')}:`;
   if (body.length < 1) throw new Error('private upload body must not be empty');
   if (!Number.isSafeInteger(deadlineMs) || deadlineMs <= Date.now()) {
     throw new Error('Private upload deadline is invalid or expired');
@@ -301,7 +301,7 @@ async function uploadPrivate(bodyInput, {
         );
         const authority = authorityFor(target);
         const auth = signedTransportFields({
-          authority, body, contentType: safeContentType, filename: safeFilename, viewerTtlSeconds: safeViewerTtl,
+          authority, body, bodySha256, contentType: safeContentType, filename: safeFilename, viewerTtlSeconds: safeViewerTtl,
           audienceKeyId: guildCredential.keyId, authorityExpiresAt, requestId,
         });
         return {
@@ -309,7 +309,7 @@ async function uploadPrivate(bodyInput, {
           headers: {
             'Content-Type': safeContentType,
             'Content-Length': String(body.length),
-            'Content-Digest': contentDigest(body),
+            'Content-Digest': contentDigestHeader,
             'X-LayerV-Client-ID': config.PRIVATE_UPLOAD_SIGNER_CLIENT_ID,
             'X-LayerV-Key-ID': config.PRIVATE_UPLOAD_SIGNER_KEY_ID,
             'X-LayerV-Timestamp': auth.timestamp,

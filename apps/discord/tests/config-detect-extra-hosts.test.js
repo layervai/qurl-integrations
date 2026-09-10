@@ -50,9 +50,9 @@ describe('config — QURL_LINK_DOMAIN', () => {
   it.each([
     'https://qurl.example', 'user@qurl.example', 'qurl.example/path',
     'qurl.example:443', 'qurl.example:8443',
-  ])('rejects non-host input %s', (value) => {
+  ])('leaves invalid non-host input %s for the private boot gate', (value) => {
     withFreshConfig({ QURL_LINK_DOMAIN: value }, () => {
-      expect(() => require('../src/config')).toThrow(/QURL_LINK_DOMAIN/);
+      expect(require('../src/config').QURL_LINK_DOMAIN).toBeNull();
     });
   });
 });

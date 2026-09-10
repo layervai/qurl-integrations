@@ -1778,18 +1778,18 @@ async function mintLinksInBatches({
     }
   } catch (error) {
     if (!config.PRIVATE_UPLOAD_QURL) {
-    await cleanupIncompleteMintBatch({
-      allLinks,
-      resourceIds,
-      currentResourceId,
-      partialQurlIds: error?.partialQurlIds,
-      partialUnidentifiedQurlCount: error?.partialUnidentifiedQurlCount,
-      partialCleanupConfirmed: error?.partialCleanupConfirmed === true,
-      apiKey,
-      cleanupContext,
-      reason: 'mint_failed',
-      error,
-    });
+      await cleanupIncompleteMintBatch({
+        allLinks,
+        resourceIds,
+        currentResourceId,
+        partialQurlIds: error?.partialQurlIds,
+        partialUnidentifiedQurlCount: error?.partialUnidentifiedQurlCount,
+        partialCleanupConfirmed: error?.partialCleanupConfirmed === true,
+        apiKey,
+        cleanupContext,
+        reason: 'mint_failed',
+        error,
+      });
       throw error;
     }
     const qurlIds = [...new Set([
@@ -3268,7 +3268,7 @@ async function cleanupIncompleteMintBatch({
   }
   // mintLinks already revokes non-2xx partial children inline. Keep those IDs
   // in the reconciliation ledger, but do not make a second revoke request
-  // after the connector confirmed the first one. Parent cleanup still runs.
+  // after the connector confirmed the first one. Unidentified residue stays unconfirmed.
   const cleanupRows = partialCleanupConfirmed
     ? [
       ...allLinks.map(link => ({ resourceId: link.resourceId, qurlId: link.qurl_id })),

@@ -497,6 +497,9 @@ async function mintLinks(resourceId, {
     if (!Number.isSafeInteger(privateSendDeadlineMs) || privateSendDeadlineMs <= Date.now()) {
       throw new Error('Private mint requires a valid unexpired shared send deadline');
     }
+    if (typeof expiresIn !== 'string' || !expiresIn.trim()) {
+      throw new Error('Private mint requires an explicit expiresIn duration');
+    }
     const sessionDuration = formatSessionDurationSeconds(selfDestructSeconds);
     const grants = Array.from({ length: n }, () => ({
       ...(expiresIn === '24h' ? {} : { expires_in: expiresIn }),
