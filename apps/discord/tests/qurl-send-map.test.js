@@ -2322,13 +2322,13 @@ describe('handleQurlDetect', () => {
 
   let originalFetch;
   beforeEach(() => {
-    mockDb.getGuildConfig.mockResolvedValue({ qurl_binding_id: 'eib_12345678901' });
     originalFetch = global.fetch;
     global.fetch = jest.fn().mockResolvedValue({
       ok: true,
       status: 200,
       arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer,
     });
+    mockDb.getGuildApiKey.mockResolvedValue(null); // → falls back to config.QURL_API_KEY
   });
   afterEach(() => {
     global.fetch = originalFetch;
@@ -2713,11 +2713,11 @@ describe('handleQurlDetect', () => {
     expect(isOnDetectCooldown('guild-1', SENDER_ID)).toBe(false);
   });
 
-  test('no binding configured ⇒ "not configured" ephemeral AND cooldown CLEARED (item 2)', async () => {
+  test('no API key configured ⇒ "not configured" ephemeral AND cooldown CLEARED (item 2)', async () => {
     const config = require('../src/config');
     const savedKey = config.QURL_API_KEY;
     config.QURL_API_KEY = '';
-    mockDb.getGuildConfig.mockResolvedValue(null);
+    mockDb.getGuildApiKey.mockResolvedValue(null);
     const int = makeDetectInteraction();
 
     try {

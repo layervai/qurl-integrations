@@ -6,8 +6,8 @@ const fs = require('node:fs');
 const { detectWatermark } = require('../src/connector');
 
 async function main() {
-  const bindingId = process.env.DETECT_SMOKE_BINDING_ID;
-  assert.match(bindingId || '', /^eib_[A-Za-z0-9]{11}$/, 'Set DETECT_SMOKE_BINDING_ID to the test server binding');
+  const guildId = process.env.DETECT_SMOKE_GUILD_ID;
+  assert.match(guildId || '', /^[0-9]{17,20}$/, 'Set DETECT_SMOKE_GUILD_ID to the test server ID');
   const imagePath = process.argv[2];
   const expectedId = process.env.DETECT_SMOKE_QURL_ID;
   assert.equal(Boolean(imagePath), Boolean(expectedId), 'Supply both an image path and DETECT_SMOKE_QURL_ID');
@@ -15,7 +15,7 @@ async function main() {
     'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=',
     'base64',
   );
-  const result = await detectWatermark(bytes, { bindingId, contentType: 'image/png' });
+  const result = await detectWatermark(bytes, { guildId, contentType: 'image/png' });
   assert.equal(result.detected, Boolean(expectedId));
   assert.equal(result.qurl_id, expectedId || null);
   console.log('Discord detect live smoke passed');

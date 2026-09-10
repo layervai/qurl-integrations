@@ -112,21 +112,13 @@ endpoints (`host`, `port`, `server_public_key_b64`). No trust root is embedded
 in the bot image. The SDK verifies the link and opens native UDP access, then
 Discord sends the image to the authenticated detect endpoint. Each request
 closes its opener on success or failure. Detect requires a signed native link.
-
-With detect enabled, `/qurl setup` creates a Discord external identity binding
-and stores its ID with the encrypted key. Existing servers must complete setup
-once after this migration. The qURL API must trust this bot's Auth0 client and
-have its canonical Control binding table ready. Setup preserves an existing
-binding; it does not silently rotate one.
-
-Detect mints `target_path=/api/detect/<binding_id>` using the server's stored
-binding. The native SDK sends the image only to that exact signed target.
-The image request carries neither an API key nor an `X-Guild-Id` header.
+The bot mints `target_path=/api/detect/discord/<guild_id>` from the authenticated
+Discord interaction. The image request carries no API key or guild header.
+The detect service uses one exact guild-scoped attribution read. The private
+binding route remains separate and does not accept these guild-scoped rows.
 
 Run `npm run test:detect:live` with the deployment environment above and
-`DETECT_SMOKE_BINDING_ID` set to the binding ID saved by test-server setup.
-The infrastructure runner reads it from the configured `DETECT_SMOKE_GUILD_ID`
-record; it does not invent a binding. The check mints, opens, and
+`DETECT_SMOKE_GUILD_ID` set to a test server ID. The check mints, opens, and
 POSTs an unmarked PNG through the real tunnel, and requires a no-match result.
 To check known attribution, add `DETECT_SMOKE_QURL_ID` and run
 `npm run test:detect:live -- /absolute/path/to/watermarked.png`.
@@ -143,10 +135,10 @@ The authenticated mint is the authority for that hostname, so any hostname
 with only non-empty labels that it returns beneath an allowlisted suffix is
 accepted after the URL and SSRF guards, including hostnames with multiple
 routing labels. The suffix allowlist constrains the target to a trusted qURL
-tunnel namespace; it is not a tenant identity signal. The mint's `resource_id`
-must match the selected resource, and its `target_path` must match the stored
-binding path. A mismatched native ACK target fails before image bytes leave
-the bot.
+tunnel namespace; it is not a tenant identity signal. The mint's resource ID
+must match the selected resource, and its target path must match the guild
+path. The authenticated native target must match that exact URL before image
+bytes leave the bot.
 
 Production `QURL_ENDPOINT` accepts only `*.qurl.site`; sandbox/staging
 tunnel suffixes are accepted as a non-prod set only for explicit non-prod qURL API hosts

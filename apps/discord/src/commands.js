@@ -6267,9 +6267,9 @@ async function handleQurlDetect(interaction) {
   // deferReply, all user-visible output is editReply.
   await interaction.deferReply({ ephemeral: true });
 
-  // Use the binding saved by trusted Discord setup, never a tenant header.
-  const guildConfig = await db.getGuildConfig(interaction.guildId);
-  if (!guildConfig?.qurl_binding_id) {
+  // The bot credential mints the guild-scoped capability. No customer key
+  // is sent to the detect service.
+  if (!config.QURL_API_KEY) {
     // A missing /qurl setup is an honest config error, not abuse — clear
     // the cooldown so the user can retry the instant an admin configures
     // the server. Matches the handler's "honest user errors clear the
@@ -6345,7 +6345,6 @@ async function handleQurlDetect(interaction) {
     result = await detectWatermark(bytes, {
       guildId: interaction.guildId,
       contentType: attachment.contentType,
-      bindingId: guildConfig.qurl_binding_id,
     });
   } catch (err) {
     // detectWatermark (the CONNECTOR POST — the CDN download is handled in

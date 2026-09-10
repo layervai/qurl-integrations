@@ -594,8 +594,8 @@ function assertDetectResourceFailureBackoffAllowed() {
 // re-knocks per call (the full no-cache invariant + rationale live on
 // _detectResourceId above and in resolveDetectTarget's docstring).
 //
-// The bot credential owns the detect tunnel. Mint only the exact binding path
-// saved by trusted Discord setup; the image request carries no API credential.
+// The bot credential owns the detect tunnel. Mint only the exact guild path
+// taken from the authenticated Discord interaction; the image request carries no API credential.
 let _qurlClient = null;
 function getQurlClient() {
   if (!_qurlClient) {
@@ -666,7 +666,7 @@ function assertPublicHttpsTarget(targetUrl, expectedQurlSiteHost) {
     throw new Error('Detect tunnel qurl_site target points to a private/internal address');
   }
   // Pin the authenticated mint host to the configured tunnel namespace.
-  // The native ACK and exact binding path are checked before sending bytes.
+  // The native ACK and exact guild path are checked before sending bytes.
   const targetHost = parsed.hostname;
   if (targetHost !== expectedQurlSiteHost) {
     throw new Error('Detect tunnel qurl_site host does not match the returned qurl_site');
@@ -716,8 +716,8 @@ async function closeDetectOpener(opener) {
   }
 }
 
-/** Mint a fresh signed qURL for the trusted guild binding's exact detect path. */
-async function resolveDetectTarget(bindingId) {
+/** Mint a fresh signed qURL for the authenticated guild's exact detect path. */
+async function resolveDetectTarget(guildId) {
   if (!config.DETECT_TUNNEL_SLUG) {
     throw new Error('DETECT_TUNNEL_SLUG is not configured (required to reach the detect tunnel)');
   }
@@ -781,7 +781,7 @@ async function resolveDetectTarget(bindingId) {
   // TODO(upstream-contract): confirm qurl-service honors `expires_in` on a
   // resource mint during the sandbox soak (CI mocks the SDK, so this isn't
   // exercised against the live API here).
-  const targetPath = `${DETECT_TARGET_PATH}/${bindingId}`;
+  const targetPath = `${DETECT_TARGET_PATH}/discord/${guildId}`;
   let targetUrl;
   let minted;
   try {
@@ -802,7 +802,7 @@ async function resolveDetectTarget(bindingId) {
   }
   try {
     if (minted?.target_path !== targetPath) {
-      throw new DetectQurlSiteError('detect mint returned a mismatched binding path');
+      throw new DetectQurlSiteError('detect mint returned a mismatched guild path');
     }
     targetUrl = buildDetectTargetUrl(minted?.qurl_site, targetPath);
   } catch (err) {
@@ -857,13 +857,13 @@ async function resolveDetectTarget(bindingId) {
 
 }
 
-/** Recover attribution through an exact, signed external binding path. */
-async function detectWatermark(imageBytes, { bindingId, contentType } = {}) {
+/** Recover attribution through an exact, signed external guild path. */
+async function detectWatermark(imageBytes, { guildId, contentType } = {}) {
   if (!config.QURL_API_KEY) throw new Error('QURL_API_KEY is not configured');
-  if (typeof bindingId !== 'string' || !/^eib_[A-Za-z0-9]{11}$/.test(bindingId)) {
-    throw new Error('detectWatermark requires a configured external identity binding');
+  if (typeof guildId !== 'string' || !/^[0-9]{17,20}$/.test(guildId)) {
+    throw new Error('detectWatermark requires a configured Discord guild');
   }
-  const { targetUrl, opener } = await resolveDetectTarget(bindingId);
+  const { targetUrl, opener } = await resolveDetectTarget(guildId);
 
   try {
     const request = {
