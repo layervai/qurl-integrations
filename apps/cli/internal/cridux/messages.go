@@ -5,10 +5,8 @@ package cridux
 // the §17.1 anatomy: say what looks wrong, then what to do about it, in
 // plain language.
 const (
-	// MsgTypo is the checksum/shape warning. The value is still forwarded —
-	// the service has the final say — so the message explains the suspicion
-	// without blocking.
-	MsgTypo = "This CRID appears to contain a typo. Double-check it against the original; sending it anyway in case it is newer than this tool."
+	// MsgTypo identifies malformed CRID input.
+	MsgTypo = "This CRID appears to contain a typo. Copy it again from the resource listing."
 
 	// MsgAlphabetHint accompanies MsgTypo when the input contains digits the
 	// CRID alphabet excludes.

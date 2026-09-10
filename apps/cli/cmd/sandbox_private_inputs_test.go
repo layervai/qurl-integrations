@@ -8,10 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"regexp"
-	"runtime"
-	"strconv"
 	"strings"
 	"testing"
 )
@@ -23,56 +20,14 @@ const (
 	sandboxRunAttemptEnv     = "QURL_SHARING_RUN_ATTEMPT"
 	sandboxRuntimeEnv        = "QURL_SHARING_RUNTIME"
 	sandboxQURLImageIDEnv    = "QURL_SHARING_QURL_IMAGE"
-	sandboxCleanupIDDirEnv   = "QURL_CLI_CI_CLEANUP_ID_DIR"
 )
 
-var sandboxPositiveDecimal = regexp.MustCompile(`^[1-9]\d{0,19}$`)
+var sandboxPositiveDecimal = regexp.MustCompile(`^[1-9]\d{0,18}$`)
 var sandboxImmutableImageID = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 
 type sandboxRunNamespace struct {
 	AgentID     string
 	ConnectorID string
-}
-
-func recordSandboxCleanupDeviceKey(t *testing.T, keyID string) {
-	t.Helper()
-	directory := strings.TrimSpace(os.Getenv(sandboxCleanupIDDirEnv))
-	if directory == "" {
-		return
-	}
-	if !filepath.IsAbs(directory) || filepath.Clean(directory) != directory {
-		t.Fatalf("%s must be one exact absolute path", sandboxCleanupIDDirEnv)
-	}
-	info, err := os.Lstat(directory)
-	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-		t.Fatalf("%s is not one existing directory: %v", sandboxCleanupIDDirEnv, err)
-	}
-	if runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
-		t.Fatalf("%s permissions are not private", sandboxCleanupIDDirEnv)
-	}
-	if !regexp.MustCompile(`^key_[A-Za-z0-9]{12}$`).MatchString(keyID) {
-		t.Fatal("sandbox cleanup device key ID is malformed")
-	}
-	digest := sha256.Sum256([]byte(keyID))
-	path := filepath.Join(directory, "device-key-"+hex.EncodeToString(digest[:]))
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) //nolint:gosec // The parent directory and hashed leaf are validated above.
-	if errors.Is(err, os.ErrExist) {
-		raw, readErr := os.ReadFile(path) //nolint:gosec // Exact job-owned cleanup ID file.
-		if readErr != nil || string(raw) != keyID {
-			t.Fatalf("existing sandbox cleanup device key record is inconsistent: %v", readErr)
-		}
-		return
-	}
-	if err != nil {
-		t.Fatalf("create sandbox cleanup device key record: %v", err)
-	}
-	if _, err = file.WriteString(keyID); err == nil {
-		err = file.Sync()
-	}
-	closeErr := file.Close()
-	if err != nil || closeErr != nil {
-		t.Fatalf("persist sandbox cleanup device key record: write %v, close %v", err, closeErr)
-	}
 }
 
 func sandboxNamespace(label string) (sandboxRunNamespace, error) {
@@ -81,12 +36,6 @@ func sandboxNamespace(label string) (sandboxRunNamespace, error) {
 	runtimeName := os.Getenv(sandboxRuntimeEnv)
 	if !sandboxPositiveDecimal.MatchString(runID) || !sandboxPositiveDecimal.MatchString(attempt) {
 		return sandboxRunNamespace{}, errors.New("qURL sharing run ID and attempt must be canonical positive decimals")
-	}
-	if _, err := strconv.ParseUint(runID, 10, 64); err != nil {
-		return sandboxRunNamespace{}, errors.New("qURL sharing run ID exceeds uint64")
-	}
-	if _, err := strconv.ParseUint(attempt, 10, 64); err != nil {
-		return sandboxRunNamespace{}, errors.New("qURL sharing run attempt exceeds uint64")
 	}
 	runtimeCode := ""
 	// TODO(upstream-contract): Keep this exact runtime enum in lockstep with
@@ -141,8 +90,9 @@ func TestSandboxNamespaceIsCanonicalAndSeparated(t *testing.T) {
 		!strings.HasPrefix(first.ConnectorID, "connector-cli-journey-v2-") || len(first.AgentID) > 64 {
 		t.Fatalf("namespace = %+v", first)
 	}
-	if first.ConnectorID != "connector-cli-journey-v2-de8ccdb9ceb99a0657d94412" {
-		t.Fatalf("smoke Connector ID = %q; trusted cleanup derivation would drift", first.ConnectorID)
+	if first.AgentID != "qurl-journey-v2-r32635672597-a2-hs" ||
+		first.ConnectorID != "connector-cli-journey-v2-de8ccdb9ceb99a0657d94412" {
+		t.Fatalf("smoke namespace = %+v; trusted cleanup derivation would drift", first)
 	}
 	seen := map[sandboxRunNamespace]bool{first: true}
 	for _, tc := range []struct{ runtime, label string }{
@@ -155,8 +105,8 @@ func TestSandboxNamespaceIsCanonicalAndSeparated(t *testing.T) {
 		}
 		seen[got] = true
 	}
-	t.Setenv(sandboxRunIDEnv, "18446744073709551615")
-	t.Setenv(sandboxRunAttemptEnv, "18446744073709551615")
+	t.Setenv(sandboxRunIDEnv, "9223372036854775807")
+	t.Setenv(sandboxRunAttemptEnv, "9223372036854775807")
 	t.Setenv(sandboxRuntimeEnv, "hardened_container")
 	maximal, maxErr := sandboxNamespace("soak")
 	if maxErr != nil || len(maximal.AgentID) > 64 {
@@ -177,27 +127,6 @@ func TestSandboxNamespaceIsCanonicalAndSeparated(t *testing.T) {
 				t.Fatalf("run ID %q accepted", value)
 			}
 		})
-	}
-}
-
-func TestRecordSandboxCleanupDeviceKeyIsExactAndIdempotent(t *testing.T) {
-	directory := t.TempDir()
-	if err := os.Chmod(directory, 0o700); err != nil { //nolint:gosec // Directory execute bits are required for one owner.
-		t.Fatal(err)
-	}
-	t.Setenv(sandboxCleanupIDDirEnv, directory)
-	const keyID = "key_AbCdEf123456"
-	recordSandboxCleanupDeviceKey(t, keyID)
-	recordSandboxCleanupDeviceKey(t, keyID)
-	entries, err := os.ReadDir(directory)
-	if err != nil || len(entries) != 1 {
-		t.Fatalf("cleanup device key records = %d, %v; want one", len(entries), err)
-	}
-	digest := sha256.Sum256([]byte(keyID))
-	wantName := "device-key-" + hex.EncodeToString(digest[:])
-	raw, err := os.ReadFile(filepath.Join(directory, wantName)) //nolint:gosec // Exact test-owned path.
-	if err != nil || string(raw) != keyID || entries[0].Name() != wantName {
-		t.Fatalf("cleanup device key record = %q/%q, %v", entries[0].Name(), raw, err)
 	}
 }
 

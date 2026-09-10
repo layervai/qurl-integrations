@@ -22,5 +22,5 @@ func ResolveResourceWithRequestObserver(
 	observer func(qurl.NativeConnectorResourceRequest) error,
 	udpOpts ...qurl.AgentRuntimeUDPOption,
 ) (*ResolvedResource, error) {
-	return resolveResourceWithRequestObserver(ctx, binding, store, connectorID, observer, udpOpts...)
+	return resolveResourceWithRequestObserver(ctx, binding, store, connectorID, nil, observer, udpOpts...)
 }

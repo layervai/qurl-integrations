@@ -1,8 +1,3 @@
-/**
- * Tests for src/utils/sanitize.js — filename sanitization and Discord
- * markdown escaping. The markdown escape is the primary defense against
- * masked-link phishing in embeds, so adversarial coverage matters.
- */
 
 const { sanitizeFilename, escapeDiscordMarkdown, sanitizeContentLabel, stripBidiAndControls, sanitizeDisplayNamePlain } = require('../src/utils/sanitize');
 
@@ -97,12 +92,8 @@ describe('sanitizeContentLabel', () => {
   });
 
   it('caps at the supplied codepoint count, surrogate-pair safe', () => {
-    // 254 ASCII + emoji surrogate pair = 256 codepoints (NFKC keeps
-    // the emoji as a pair), so the cap is not hit.
     const exact = 'a'.repeat(254) + '\u{1F600}';
     expect(sanitizeContentLabel(exact, 256)).toBe(exact);
-    // 255 ASCII + emoji (256 codepoints) — at the boundary. Naive
-    // .slice(0, 256) on UTF-16 code units would land mid-surrogate.
     const boundary = 'a'.repeat(255) + '\u{1F600}';
     const out = sanitizeContentLabel(boundary, 256);
     const lone = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
@@ -116,10 +107,6 @@ describe('sanitizeContentLabel', () => {
   });
 
   it('returns empty for input that becomes empty after strip', () => {
-    // All zero-width — display-name helper falls back to 'Someone'
-    // here, but content-label callers want '' (the
-    // locationName/resourceLabel empty branch then renders nothing
-    // or a default).
     expect(sanitizeContentLabel('​‌‍')).toBe('');
   });
 });
@@ -133,15 +120,11 @@ describe('stripBidiAndControls', () => {
   });
 
   it('does NOT escape markdown chars (sanitizeContentLabel does, this helper does not)', () => {
-    // The personal-message path needs to layer bidi-strip BEFORE its
-    // own markdown escape; this helper must not pre-escape.
     expect(stripBidiAndControls('**bold**')).toBe('**bold**');
     expect(stripBidiAndControls('[link](url)')).toBe('[link](url)');
   });
 
   it('NFKC-normalizes before strip', () => {
-    // U+FEFF (BOM) and a few other strip codepoints are only matched
-    // against canonical forms after NFKC normalization.
     const bom = String.fromCharCode(0xFEFF);
     expect(stripBidiAndControls(`x${bom}y`)).toBe('xy');
   });
@@ -152,24 +135,12 @@ describe('stripBidiAndControls', () => {
   });
 
   it('has no length cap (unlike stripControlAndBidi)', () => {
-    // sanitizeMessage owns its own 500-char cap downstream; this
-    // helper must not pre-truncate.
     const big = 'a'.repeat(2000);
     expect(stripBidiAndControls(big)).toBe(big);
   });
 });
 
 describe('sanitizeDisplayNamePlain — idempotence (load-bearing for rerenderConfirmCard cache-miss path)', () => {
-  // The flow_state payload persists `recipientAliases` produced by
-  // resolveRecipientAlias at pick time. On rerenderConfirmCard's
-  // cache-miss path, the persisted alias is re-passed through
-  // resolveRecipientAlias → sanitizeDisplayNamePlain. The chain is
-  // idempotent today (NFKC + bidi/zero-width strip have fixed points
-  // after one pass + the 64-codepoint cap leaves an already-capped
-  // input unchanged). These tests pin that invariant: a future
-  // sanitize-semantics change that breaks idempotence flips the
-  // cache-miss render into a double-sanitize bug, and these red lights
-  // catch it before that.
 
   it('idempotent on plain ASCII', () => {
     const once = sanitizeDisplayNamePlain('Alice');
@@ -183,7 +154,6 @@ describe('sanitizeDisplayNamePlain — idempotence (load-bearing for rerenderCon
   });
 
   it('idempotent after NFKC normalization', () => {
-    // U+FF21 (FULLWIDTH LATIN CAPITAL A) normalizes to 'A' under NFKC.
     const once = sanitizeDisplayNamePlain('Ａlice');
     expect(sanitizeDisplayNamePlain(once)).toBe(once);
   });

@@ -57,6 +57,7 @@ var cliSentinels = map[string]struct {
 	// link check shares CRID verification's fail-closed row; a platform
 	// deny is Forbidden and a platform defer is Unavailable.
 	"consume.ErrAccessNotConfigured":        {consume.ErrAccessNotConfigured, Config},
+	"consume.ErrUnsupportedCRIDVersion":     {consume.ErrUnsupportedCRIDVersion, Config},
 	"consume.ErrAccessSettingsMismatch":     {consume.ErrAccessSettingsMismatch, Config},
 	"consume.ErrLinkVerification":           {consume.ErrLinkVerification, VerificationFailed},
 	"consume.ErrAccessDenied":               {consume.ErrAccessDenied, Forbidden},
@@ -73,6 +74,7 @@ var cliSentinels = map[string]struct {
 	"state.ErrConnectorResourceVerification":  {state.ErrConnectorResourceVerification, VerificationFailed},
 	"state.ErrConnectorResourceStateConflict": {state.ErrConnectorResourceStateConflict, Conflict},
 	"state.ErrConnectorResourceRetired":       {state.ErrConnectorResourceRetired, Conflict},
+	"state.ErrConnectorResourceState":         {state.ErrConnectorResourceState, General},
 	// The Hub trust triple (or a dark build's absent pin) is configuration
 	// even though it lives in the environment.
 	"hub.ErrConfig":           {hub.ErrConfig, Config},
@@ -311,6 +313,24 @@ func TestTypedWrappers(t *testing.T) {
 	}
 	if InvalidInputError("bad operand", nil) == nil {
 		t.Error("InvalidInputError with a message must not be nil")
+	}
+}
+
+func TestConnectorResourceJoinedErrorUsesSpecificExitCode(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want int
+	}{
+		{name: "verification", err: errors.Join(state.ErrConnectorResourceVerification, state.ErrConnectorResourceState), want: VerificationFailed},
+		{name: "request rejection", err: errors.Join(qurl.ErrConnectorResourceRequestRejected, state.ErrConnectorResourceState), want: InvalidInput},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := FromError(test.err); got != test.want {
+				t.Errorf("joined Connector resource error = %d, want %d", got, test.want)
+			}
+		})
 	}
 }
 

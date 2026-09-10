@@ -95,16 +95,29 @@ jobs:
           cache-dependency-path: apps/discord/package-lock.json
 
       - name: Install dependencies
-        run: npm ci
+        # The next step is the sole dependency audit gate; do not duplicate its
+        # registry request inside installation. Funding output stays enabled;
+        # unlike the audit, it adds no registry request.
+        run: npm ci --no-audit
 
       - name: Audit dependencies
+        # --package-lock-only: audit the graph npm ci resolves from, read from
+        # package-lock.json instead of the installed node_modules tree. npm has
+        # intermittently rejected the installed-tree payload as invalid.
         # --audit-level=high: this bot handles OAuth tokens, encrypted guild
         # keys, and webhook signatures — moderate-severity deps routinely
         # include upstream advisories that don't affect us, so we gate on
         # high+. Critical/high will still fail CI.
         # --omit=dev: exclude dev-only vulnerabilities from the production
-        # audit gate so test-framework advisories don't block deploys.
-        run: npm audit --audit-level=high --omit=dev
+        # audit gate so test-framework advisories don't block deploys. Verified
+        # with npm 10.9.4 against a dev-only vulnerable lockfile fixture.
+        # The wrapper retries only structured registry/transport failures;
+        # vulnerability and non-transport failures remain immediate failures,
+        # and npm's inner fetch retry is disabled so it cannot overrun the
+        # per-attempt deadline. The Workflow Contract check derives the 2m30s
+        # retry budget from the wrapper and asserts it fits this step timeout.
+        timeout-minutes: 3
+        run: node scripts/audit-production-dependencies.js
 
       - name: Lint
         run: npm run lint
