@@ -90,14 +90,14 @@ func TestSocketPathRejectsRelativeOrEmptyStateDir(t *testing.T) {
 }
 
 func TestSocketPathLongStateDirFallsBackToTempDir(t *testing.T) {
-	root := shortTempRoot(t)
+	root := "/tmp"
 	longState := strings.Repeat("/a", 80)
 	got, err := SocketPathForStateDir(longState, lookupEnvFrom(nil))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.HasPrefix(got, root+string(filepath.Separator)) {
-		t.Fatalf("expected TMPDIR-rooted fallback below %q, got %q", root, got)
+		t.Fatalf("expected fixed-root fallback below %q, got %q", root, got)
 	}
 	if len(got) > maxUnixSocketPathBytes || filepath.Base(got) != SocketFile || filepath.Dir(got) == longState {
 		t.Fatalf("fallback %q is not a bounded %s outside the state directory", got, SocketFile)
@@ -113,11 +113,18 @@ func TestSocketPathLongStateDirFallsBackToTempDir(t *testing.T) {
 	}
 }
 
-func TestSocketPathLongStateDirRequiresRuntimeDirWhenTempRootIsLong(t *testing.T) {
-	t.Setenv("TMPDIR", filepath.Join(shortTempRoot(t), strings.Repeat("t", maxUnixSocketPathBytes)))
-	got, err := SocketPathForStateDir(strings.Repeat("/a", 80), nil)
-	if err == nil || got != "" || !strings.Contains(err.Error(), RuntimeDirEnv) {
-		t.Fatalf("got %q err %v, want guidance to set %s", got, err, RuntimeDirEnv)
+func TestSocketPathFallbackIgnoresProcessTempDirectory(t *testing.T) {
+	stateDir := strings.Repeat("/a", 80)
+	original, err := SocketPathForStateDir(stateDir, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, root := range []string{"relative", "/other-temp", strings.Repeat("/long", 40)} {
+		t.Setenv("TMPDIR", root)
+		got, err := SocketPathForStateDir(stateDir, nil)
+		if err != nil || got != original {
+			t.Fatalf("TMPDIR=%q changed socket: %q, %v", root, got, err)
+		}
 	}
 }
 
