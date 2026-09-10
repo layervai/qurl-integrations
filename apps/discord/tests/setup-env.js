@@ -1,5 +1,43 @@
+// Shared Jest setup — runs before EACH test file loads, via
+// jest.config.js `setupFiles`. Sets process.env vars that source
+// modules read at require-time so their fail-fast module-load guards
+// don't throw mid-import in tests.
+//
+// Why shared setup (not repeated declarations in every test): once
+// commands.js started requiring flow-state in PR 5, every test file that imports
+// commands.js (or any of its peers) indirectly loads flow-state.js,
+// which throws at the top level when `DDB_TABLE_PREFIX` or
+// `AWS_REGION` are absent. Forcing each test file to set those two
+// vars by hand would be ~9 copy-pasted lines per file plus a real
+// risk of new test files forgetting. A single setupFiles entry
+// instead.
+//
+// These defaults are restored before every suite. Individual test files can
+// still override via `process.env.X = ...` if they need a different value
+// (and re-require the module to re-read it). Tests
+// that mock flow-state entirely via `jest.mock('../src/flow-state',
+// ...)` don't observe these vars at all — the mock replaces the real
+// module before its top-level code runs.
 
 process.env.DDB_TABLE_PREFIX = process.env.DDB_TABLE_PREFIX || 'jest-test-';
 process.env.AWS_REGION = process.env.AWS_REGION || 'us-east-1';
 
 process.env.OAUTH_STATE_SECRET = process.env.OAUTH_STATE_SECRET || '0'.repeat(64);
+
+// No Auth0 connection pin unless a suite opts in. setupFiles runs before each
+// suite, so this also clears module-level overrides left by an earlier suite in
+// the same worker and keeps authorize-URL tests order-independent.
+delete process.env.AUTH0_EMAIL_CONNECTION;
+
+// Spawn-test caveat: `tests/store-contract.test.js`'s `spawnStoreBoot`
+// helper pins DDB_TABLE_PREFIX (sentinel `'jest-spawn-'`) + AWS_REGION
+// explicitly in the child env (insulating those specific values from
+// sentinel changes here), but every OTHER module-load guard a child
+// inherits (e.g. KEY_ENCRYPTION_KEY from individual specs that set it
+// before `require('../src/store')`) flows through `{...process.env}`.
+// The `'jest-spawn-'` sentinel is named explicitly here so a future
+// grep for either sentinel finds both sides of the env contract.
+// If you ever trim this file's sentinel set, audit the spawn tests
+// first — a silent regression where the child suddenly fails to
+// boot would show up as a `result.status !== 0` mismatch with no
+// hint at the culprit env var.

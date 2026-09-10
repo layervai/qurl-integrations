@@ -1,3 +1,21 @@
+// Tests for src/utils/oauth-state.js — the shared secret-resolution +
+// HMAC signer behind the qURL OAuth setup state
+// (utils/qurl-oauth-state.js). Covers the contract that flow relies on:
+//   1. precedence — first truthy secretConfigKeys entry wins, then
+//      the jest-only random fallback
+//   2. MIN_STATE_SECRET_LENGTH — whichever key wins the resolution is
+//      rejected under 32 chars.
+//   3. sign/verify — round-trip, tamper rejection, and no-throw on
+//      malformed signature input
+//   4. derived-key signing — auxiliary HMACs are isolated from state signatures
+//   5. test-harness gating — outside jest/CI the resolver throws
+//      instead of silently minting with the random fallback
+//
+// The signer reads secrets from the config snapshot lazily on every
+// sign/verify (a documented affordance for exactly this mock shape),
+// so the suite mutates a plain config mock per test — no
+// process.env fiddling or module isolation needed except in the
+// harness-gate test, which exercises the one live-env read.
 
 jest.mock('../src/config', () => ({}));
 jest.mock('../src/logger', () => ({
@@ -120,6 +138,32 @@ describe('oauth-state createStateSigner', () => {
       expect(signer.verify('data', 'abc')).toBe(false); // truncated
       expect(signer.verify('data', '')).toBe(false);
     });
+
+    it('signs auxiliary data under an HKDF-derived key', () => {
+      const signer = makeSigner();
+      const derivedKey = crypto.hkdfSync(
+        'sha256',
+        config.OAUTH_STATE_SECRET,
+        Buffer.alloc(0),
+        'audit:v1',
+        32,
+      );
+
+      expect(signer.signDerived('audit:v1', 'known-data'))
+        .toBe(hmacHex(derivedKey, 'known-data'));
+      expect(signer.signDerived('audit:v1', 'known-data'))
+        .not.toBe(signer.sign('known-data'));
+      expect(signer.signDerived('audit:v2', 'known-data'))
+        .not.toBe(signer.signDerived('audit:v1', 'known-data'));
+    });
+
+    it.each([undefined, '', 42])(
+      'rejects an empty or non-string derivation context: %p',
+      (info) => {
+        expect(() => makeSigner().signDerived(info, 'known-data'))
+          .toThrow(TypeError);
+      },
+    );
   });
 
   describe('test-harness fallback', () => {

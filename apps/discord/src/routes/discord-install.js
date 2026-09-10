@@ -39,6 +39,7 @@ const config = require('../config');
 const logger = require('../logger');
 const { signQurlOAuthState } = require('../utils/qurl-oauth-state');
 const { createPkcePair } = require('../utils/oauth-pkce');
+const { buildAuth0AuthorizeUrl } = require('../utils/auth0-authorize-url');
 const { rateLimit, installRateLimit } = require('../utils/oauth-rate-limit');
 const {
   DISCORD_INSTALL_SESSION_COOKIE,
@@ -191,24 +192,9 @@ router.get('/callback', rateLimit, async (req, res) => {
     }
   }
 
-  // Stage-2 ALWAYS sets prompt=consent on the chained Auth0 redirect,
-  // independent of first-install vs re-install. Stage-2 is the
-  // confused-deputy attack surface (a forwarded /oauth/discord/callback
-  // URL); the explicit consent screen is one extra defense per
-  // Justin's PR #177 round-9 item #1. Stage-1 (/oauth/qurl/start)
-  // gates differently — it's reached from inside the guild via the
-  // /qurl setup slash command, so guild-membership-proof has already
-  // happened and the redundant consent screen on first install adds
-  // friction without security gain.
-  //
-  // No DDB read here — the previous round-9 build kicked off
-  // shouldPromptConsent in parallel for a "previouslyConfigured"
-  // log field, but with prompt=consent unconditional that helper's
-  // bias-toward-true semantics were wrong for an informational
-  // metric. If we ever want the first-install vs re-install signal,
-  // pull it from setGuildApiKey's audit log or call getGuildConfig
-  // directly with a try/catch that distinguishes hit/miss/error.
-  // Round-9.6 item #3.
+  // The shared Auth0 builder requests fresh login + consent on this path and
+  // /qurl setup alike. Neither parameter depends on prior guild config, so no
+  // DDB read is needed before exchanging the Discord code.
 
   // 1. Exchange code at Discord for an access_token and authoritative
   //    installed guild. The token itself
@@ -305,20 +291,7 @@ router.get('/callback', rateLimit, async (req, res) => {
   // subdomain shadowing posture is unchanged by this install entrypoint.
   setQurlOAuthCookie(res, req, qurlState);
   setQurlOAuthPkceCookie(res, req, codeVerifier);
-  const authorizeUrl = new URL(`https://${config.AUTH0_DOMAIN}/authorize`);
-  authorizeUrl.searchParams.set('response_type', 'code');
-  authorizeUrl.searchParams.set('client_id', config.AUTH0_CLIENT_ID);
-  authorizeUrl.searchParams.set('redirect_uri', `${config.BASE_URL}/oauth/qurl/callback`);
-  // offline_access dropped per PR #177 review item 5; `profile` dropped
-  // per follow-up C.2 — only the `email` claim is read from id_token.
-  authorizeUrl.searchParams.set('scope', 'qurl:write qurl:read openid email');
-  authorizeUrl.searchParams.set('audience', config.AUTH0_AUDIENCE);
-  authorizeUrl.searchParams.set('state', qurlState);
-  authorizeUrl.searchParams.set('code_challenge', codeChallenge);
-  authorizeUrl.searchParams.set('code_challenge_method', 'S256');
-  // ALWAYS prompt=consent on Stage-2 (per round-9 item #1) — see the
-  // confused-deputy block at the top of this handler.
-  authorizeUrl.searchParams.set('prompt', 'consent');
+  const authorizeUrl = buildAuth0AuthorizeUrl({ state: qurlState, codeChallenge });
   logger.info('Discord install complete; chaining to Auth0', { guildId, discordUserId });
   return res.redirect(302, authorizeUrl.toString());
 });
