@@ -662,7 +662,7 @@ func TestConnectorResourceRenderings(t *testing.T) {
 		// Pin the copy: 52504 covers account-wide resource and monthly data limits.
 		{"quota", qurl.ErrConnectorResourceQuotaExceeded, "52504",
 			"Your qURL account has reached a plan limit.",
-			"Hint: limits apply to the account across all API keys. Check your active resources and monthly data usage. Delete an unused resource, wait for the next calendar month (UTC) if the data limit is reached, or upgrade your plan at https://layerv.ai/pricing."},
+			"Hint: limits apply to the account across all API keys. Run qurl list --status active to check resources; use qurl delete <CRID> to delete one you no longer need. For monthly data usage or plan changes, contact your qURL administrator or LayerV support. Monthly data limits reset at the next calendar month (UTC)."},
 		{"rate limited", qurl.ErrConnectorResourceRateLimited, "52505", msgConnectorResourceUnavailable, hintConnectorResourceUnavailable},
 		{"unavailable", qurl.ErrConnectorResourceUnavailable, "52500", msgConnectorResourceUnavailable, hintConnectorResourceUnavailable},
 		{"invalid response", qurl.ErrInvalidNativeConnectorResourceResponse, "", msgConnectorResourceInvalidResponse, hintConnectorResourceInvalidResponse},

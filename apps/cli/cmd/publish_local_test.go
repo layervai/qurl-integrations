@@ -336,7 +336,7 @@ func TestLocalPublishQuotaExplainsAccountLimits(t *testing.T) {
 		t.Fatalf("publish = %d, want %d: %s", res.code, exitcode.Forbidden, res.stderr.String())
 	}
 	mustEmptyStdout(t, res)
-	for _, want := range []string{"reached a plan limit", "across all API keys", "active resources and monthly data usage", "52504"} {
+	for _, want := range []string{"reached a plan limit", "across all API keys", "qurl list --status active", "monthly data usage", "52504"} {
 		if !strings.Contains(res.stderr.String(), want) {
 			t.Fatalf("quota refusal lacks %q: %s", want, res.stderr.String())
 		}

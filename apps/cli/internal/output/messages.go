@@ -160,7 +160,7 @@ const (
 	// TODO(upstream-contract): qurl-service quotaForEnforcement applies account-wide
 	// resource limits; checkDataTransferQuota uses UTC calendar months.
 	msgConnectorResourceQuota  = "Your qURL account has reached a plan limit."
-	hintConnectorResourceQuota = "Hint: limits apply to the account across all API keys. Check your active resources and monthly data usage. Delete an unused resource, wait for the next calendar month (UTC) if the data limit is reached, or upgrade your plan at https://layerv.ai/pricing."
+	hintConnectorResourceQuota = "Hint: limits apply to the account across all API keys. Run qurl list --status active to check resources; use qurl delete <CRID> to delete one you no longer need. For monthly data usage or plan changes, contact your qURL administrator or LayerV support. Monthly data limits reset at the next calendar month (UTC)."
 
 	msgConnectorResourceInvalidResponse  = "The qURL platform answered this Connector's resource request in a way this version can't accept, so it stopped instead of guessing."
 	hintConnectorResourceInvalidResponse = "Hint: this is a problem on the qURL platform side, not on this machine. Keep the state directory unchanged and contact LayerV support."
