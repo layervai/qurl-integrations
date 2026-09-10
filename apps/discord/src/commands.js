@@ -1717,23 +1717,11 @@ async function mintLinksInBatches({
           resourceId: currentResourceId,
         });
       }
-      if (minted.length < batchSize) {
-        // Preserve the callers' established "Only N of M" response by
-        // returning the short array, but compensate before it can escape.
-        await cleanupIncompleteMintBatch({
-          allLinks,
-          resourceIds,
-          apiKey,
-          cleanupContext,
-          reason: 'mint_underdelivery',
-        });
-        return allLinks;
-      }
       if (minted.length > batchSize) {
         throw new Error(`Connector mint_link returned ${minted.length} links for a ${batchSize}-link batch`);
       }
       if (minted.some(link => !hasPersistableQurlIdShape(link?.qurl_id))) {
-        // An exact-length response can still be unsafe: qurl_id is the only
+        // Even a short response can be unsafe: qurl_id is the only
         // durable child-revocation identity. Never persist or deliver a link
         // without it; the catch below compensates every identifiable sibling
         // before deleting the parent resource.
@@ -1754,6 +1742,18 @@ async function mintLinksInBatches({
       }
       if (new Set(allLinks.map(link => link.qurl_link)).size !== allLinks.length) {
         throw new Error('Connector mint_link returned a duplicate qurl_link');
+      }
+      if (minted.length < batchSize) {
+        // Preserve the callers' established "Only N of M" response by
+        // returning the short array, but compensate before it can escape.
+        await cleanupIncompleteMintBatch({
+          allLinks,
+          resourceIds,
+          apiKey,
+          cleanupContext,
+          reason: 'mint_underdelivery',
+        });
+        return allLinks;
       }
       tokensUsed += batchSize;
     }

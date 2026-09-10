@@ -864,8 +864,13 @@ func TestS3WebsiteInstallRejectsIncompleteResourceBeforeMintingBootstrapKey(t *t
 	if len(*dmPosts) != 0 {
 		t.Fatalf("bootstrap DM posts = %+v, want none", *dmPosts)
 	}
-	if !strings.Contains(async, "No enrollment token was minted") || !strings.Contains(async, "connector_routing_id") {
+	if !strings.Contains(async, "No enrollment token was minted") || !strings.Contains(async, "Please retry or contact support.") {
 		t.Fatalf("async reply = %q, want incomplete identity error before key mint", async)
+	}
+	for _, field := range []string{"resource_id", "connector_routing_id", "knock_resource_id"} {
+		if strings.Contains(async, field) {
+			t.Errorf("async reply exposes API field %q: %s", field, async)
+		}
 	}
 	if _, found, err := h.cfg.AdminStore.LookupChannelAlias(context.Background(), testAdminTeamID, testTunnelChannelID, "team-dash"); err != nil || found {
 		t.Fatalf("alias lookup found=%v err=%v, want no alias bound before complete identity", found, err)

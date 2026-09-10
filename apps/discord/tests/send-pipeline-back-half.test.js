@@ -2218,7 +2218,7 @@ describe('handleAddRecipients — file path failure modes', () => {
     expect(mockSendDM).not.toHaveBeenCalled();
   });
 
-  it('reports underdelivery after minimizing access when a returned child has no identity', async () => {
+  it('reports a contract failure after minimizing access when a returned child has no identity', async () => {
     mockDb.getSendConfig.mockResolvedValueOnce({
       connector_resource_id: 'res-1', expires_in: '30m',
       attachment_url: 'https://cdn.discordapp.com/x.png',
@@ -2235,13 +2235,13 @@ describe('handleAddRecipients — file path failure modes', () => {
       makeInteraction(), 'apikey',
     );
 
-    expect(result.msg).toMatch(/Only 1 of 2/);
+    expect(result.msg).toMatch(/Failed to prepare links/);
     expect(mockRevokeMintedLinks).not.toHaveBeenCalled();
     expect(mockDeleteLink).toHaveBeenCalledWith('res-new', 'apikey');
     expect(logger.error).toHaveBeenCalledWith(
       'Failed to clean up freshly minted Add Recipients mint batch qURL resources',
       expect.objectContaining({
-        reason: 'mint_underdelivery',
+        reason: 'mint_failed',
         failures: [expect.objectContaining({
           unidentified_qurl_count: 1,
           connector_revoke_attempted: false,
@@ -3763,6 +3763,18 @@ describe('mintLinksInBatches', () => {
         })],
       }),
     );
+  });
+
+  it('rejects a short mint response with an unidentified child after compensation', async () => {
+    mockMintLinks.mockResolvedValueOnce([{ qurl_link: 'https://q.test/unidentified' }]);
+    await expect(mintLinksInBatches({
+      initialResourceId: 'res-1',
+      reuploadFn: jest.fn(),
+      expiresAt: new Date().toISOString(),
+      recipientCount: 2,
+      apiKey: 'apikey',
+    })).rejects.toThrow('missing a valid qurl_id');
+    expect(mockDeleteLink).toHaveBeenCalledWith('res-1', 'apikey');
   });
 
   it('rejects a non-canonical qurl_id while using its trimmed identity for cleanup', async () => {

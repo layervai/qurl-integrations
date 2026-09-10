@@ -293,6 +293,11 @@ func TestCLICustomerJourneyIsConsolidatedAndTrusted(t *testing.T) {
 	}
 
 	journey := workflow.Jobs["journey"]
+	for name, value := range journey.Env {
+		if name == "AUTOMATION_API_KEY" || strings.Contains(fmt.Sprint(value), "secrets.QURL_JOURNEY_API_KEY") {
+			t.Errorf("journey job environment exposes standing authority through %s", name)
+		}
+	}
 	if !slices.Contains(parseWorkflowNeeds(t, "journey", journey.Needs), cliCustomerArtifactsJobID) {
 		t.Error("journey can run without the one artifact build")
 	}
@@ -303,7 +308,7 @@ func TestCLICustomerJourneyIsConsolidatedAndTrusted(t *testing.T) {
 		"QURL_JOURNEY_HUB_HOST":           "${{ secrets.QURL_JOURNEY_HUB_HOST }}",
 		"QURL_JOURNEY_HUB_PORT":           "${{ secrets.QURL_JOURNEY_HUB_PORT }}",
 		"QURL_JOURNEY_HUB_PUBLIC_KEY_B64": "${{ secrets.QURL_JOURNEY_HUB_PUBLIC_KEY_B64 }}",
-		"AUTH_TOKEN_ENDPOINT":             "${{ secrets.QURL_JOURNEY_AUTH_TOKEN_ENDPOINT }}",
+		"QURL_JOURNEY_OWNER_ID":           "${{ secrets.QURL_JOURNEY_OWNER_ID }}",
 	}
 	for name, source := range journeySecretSources {
 		if fmt.Sprint(journey.Env[name]) != source {
@@ -329,9 +334,8 @@ func TestCLICustomerJourneyIsConsolidatedAndTrusted(t *testing.T) {
 			case "bash":
 				posixMint = current
 			}
-			if fmt.Sprint(current.Env["AUTH_CLIENT_ID"]) != "${{ secrets.QURL_JOURNEY_AUTH_CLIENT_ID }}" ||
-				fmt.Sprint(current.Env["AUTH_CLIENT_SECRET"]) != "${{ secrets.QURL_JOURNEY_AUTH_CLIENT_SECRET }}" {
-				t.Errorf("journey does not use the one protected M2M authority: %#v", current.Env)
+			if fmt.Sprint(current.Env["AUTOMATION_API_KEY"]) != "${{ secrets.QURL_JOURNEY_API_KEY }}" {
+				t.Errorf("journey does not use the one protected API-key authority: %#v", current.Env)
 			}
 		case "Run the packaged customer journey":
 			run++
@@ -342,7 +346,7 @@ func TestCLICustomerJourneyIsConsolidatedAndTrusted(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			for _, forbidden := range []string{"QURL_JOURNEY_AUTH_CLIENT", "cleanup-jwt", "AUTH_CLIENT_SECRET"} {
+			for _, forbidden := range []string{"QURL_JOURNEY_AUTH_CLIENT", "cleanup-jwt", "AUTH_CLIENT_SECRET", "AUTOMATION_API_KEY", "secrets.QURL_JOURNEY_API_KEY"} {
 				if strings.Contains(string(encoded), forbidden) {
 					t.Errorf("candidate step receives standing authority %q", forbidden)
 				}
@@ -464,8 +468,8 @@ func TestCLICustomerJourneyIsConsolidatedAndTrusted(t *testing.T) {
 		contract.Jobs["journey-cleanup"].Environment != "cli-customer-journey-cleanup" {
 		t.Errorf("terminal cleanup is not an exact protected trusted-event gate: if=%q", cleanup.If)
 	}
-	if fmt.Sprint(cleanup.Env["AUTH_TOKEN_ENDPOINT"]) != "${{ secrets.QURL_JOURNEY_AUTH_TOKEN_ENDPOINT }}" {
-		t.Errorf("terminal cleanup exposes its token endpoint through a non-secret source: %#v", cleanup.Env)
+	if fmt.Sprint(cleanup.Env["QURL_JOURNEY_OWNER_ID"]) != "${{ secrets.QURL_JOURNEY_OWNER_ID }}" {
+		t.Errorf("terminal cleanup exposes its owner ID through a non-secret source: %#v", cleanup.Env)
 	}
 	var cleanupRun *step
 	for index := range cleanup.Steps {
@@ -894,9 +898,8 @@ exit "$failed"
 						"BATCH_CAPTURE=" + batchCapture,
 						"GITHUB_STEP_SUMMARY=" + summaryCapture,
 						"FAIL_LANE=" + test.failLane,
-						"AUTH_CLIENT_ID=test-client",
-						"AUTH_CLIENT_SECRET=secret-value-must-not-print",
-						"AUTH_TOKEN_ENDPOINT=https://auth.example",
+						"AUTOMATION_API_KEY=secret-value-must-not-print",
+						"QURL_JOURNEY_OWNER_ID=test-owner",
 						"QURL_ENDPOINT=https://sandbox.example",
 						"GITHUB_RUN_ID=700",
 						"GITHUB_RUN_ATTEMPT=2",
