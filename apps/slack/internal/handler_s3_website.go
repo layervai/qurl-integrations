@@ -521,7 +521,7 @@ func (h *Handler) buildS3WebsiteInstall(ctx context.Context, log *slog.Logger, t
 		connectorRoutingIDPresent := resource != nil && strings.TrimSpace(resource.ConnectorRoutingID) != ""
 		knockResourceIDPresent := resource != nil && strings.TrimSpace(resource.KnockResourceID) != ""
 		log.Error("S3 website install: qURL API response missing pinned connector identity", "error", sanitizeLogValue(err.Error()), "slug", sanitizeLogValue(args.Slug), "resource_id_present", resourceIDPresent, "connector_routing_id_present", connectorRoutingIDPresent, "knock_resource_id_present", knockResourceIDPresent)
-		return nil, "qURL Connector setup could not receive the complete routing details needed for enrollment. No enrollment token was minted. Please retry after the qURL API returns resource_id, connector_routing_id, and knock_resource_id for Connector resources.", fmt.Errorf("qURL Connector resource identity incomplete: %w", err)
+		return nil, "qURL Connector setup could not receive the complete routing details needed for enrollment. No enrollment token was minted. Please retry or contact support.", fmt.Errorf("qURL Connector resource identity incomplete: %w", err)
 	}
 	resolvedArgs.OwnerID = ownerID
 	resourceID = resource.ResourceID
