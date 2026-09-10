@@ -622,9 +622,9 @@ async function mintLinks(resourceId, {
  * credentials), transport, and ambiguous responses fail.
  * The connector returns every requested qurl_id exactly once in an unordered
  * unique set.
- * A 404, 410, or 503 from this endpoint itself is never evidence that a
- * historical send lacked connector-managed links, so all non-2xx responses
- * fail closed.
+ * An absent route is never proof that a child is gone. During a staged rollout,
+ * a 404 can use the SDK only if it resolves the recorded source and successfully
+ * revokes each exact child. Service-owned children still require the Connector.
  *
  * @returns {Promise<boolean>} true when the connector revoked (or had nothing to
  *   revoke); throws when links may still be live, so the caller can leave the
@@ -667,6 +667,14 @@ async function revokeMintedLinks(resourceId, qurlIds, apiKey, options = {}) {
         : AbortSignal.timeout(REVOKE_LINKS_TIMEOUT_MS),
     });
 
+    if (response.status === 404) {
+      // Older Connectors do not expose this route. The SDK must independently
+      // prove the recorded parent and revoke its exact children; a hidden or
+      // foreign child fails closed. Never substitute a whole-parent delete.
+      await response.body?.cancel();
+      await revokeOrdinaryLinks(resourceId, batchIds, apiKey, options);
+      continue;
+    }
     if (!response.ok) {
       return throwConnectorError('Connector revoke_links', response);
     }

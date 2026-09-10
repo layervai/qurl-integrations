@@ -889,7 +889,7 @@ describe('Connector client — coverage boost', () => {
       }
     });
 
-    it.each([404, 410, 503])('fails closed on connector HTTP %i', async (status) => {
+    it.each([410, 503])('fails closed on connector HTTP %i', async (status) => {
       globalThis.fetch = jest.fn().mockResolvedValue({
         ok: false,
         status,

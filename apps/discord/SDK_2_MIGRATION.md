@@ -34,9 +34,12 @@ Missing identities or failed confirmation leave the send retryable. Private
 cleanup targets delegated qURL IDs, even after the private flag is removed.
 Upload handles are never passed to resource DELETE.
 
-Public cleanup requires the deployed child-revoke contract from infrastructure
-PR #1553 and its prerequisites. Do not deploy this consumer ahead of that
-endpoint or bypass failed classification with parent deletion.
+Service-owned watermark cleanup requires infrastructure PR #1553 and its
+activation prerequisites. If an older Connector returns 404 for the revoke
+route, ordinary children can still be revoked through the SDK: the lookup must
+match the recorded source, and every per-child DELETE must succeed. A missing
+route never proves cleanup. Hidden or foreign-parent children remain retryable;
+never bypass that failure with parent deletion.
 
 Keep PRIVATE_UPLOAD_QURL absent until infrastructure PRs #1529/#1530 and the
 signed upload, mint, view, watermark, detect, revoke, and direct-origin-deny

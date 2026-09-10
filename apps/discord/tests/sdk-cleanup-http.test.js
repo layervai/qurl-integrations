@@ -23,6 +23,7 @@ let children;
 let rejectRevoke;
 let parentMismatch;
 let hangRevoke;
+let routeMissing;
 
 beforeAll(async () => {
   server = http.createServer(async (req, res) => {
@@ -36,6 +37,7 @@ beforeAll(async () => {
     };
     if (req.headers.authorization !== 'Bearer test-guild-key') return json(401, { error: { status: 401, code: 'unauthorized', title: 'Unauthorized' } });
     if (req.url === '/api/revoke_links') {
+      if (routeMissing) return json(404, { error: 'Not found' });
       return json(200, { success: true, results: body.qurl_ids.map(qurl_id => ({ qurl_id, status: 'not_connector_managed' })) });
     }
     if (req.method === 'GET' && req.url === `/v1/qurls/${newChild}`) {
@@ -72,6 +74,7 @@ beforeEach(() => {
   rejectRevoke = false;
   parentMismatch = false;
   hangRevoke = false;
+  routeMissing = false;
   mockConfig.PRIVATE_UPLOAD_QURL = null;
 });
 
@@ -91,6 +94,24 @@ test('a failed ordinary child revoke is not reported as cleanup success', async 
   await expect(revokeMintedLinks(source, [newChild], 'test-guild-key')).rejects.toThrow(/503/);
   expect(children.has(newChild)).toBe(true);
   expect(children.has(oldChild)).toBe(true);
+});
+
+test('ordinary cleanup works before the Connector revoke route is deployed', async () => {
+  routeMissing = true;
+  await revokeMintedLinks(source, [newChild], 'test-guild-key');
+  await revokeMintedLinks(source, [newChild], 'test-guild-key');
+  expect(children.has(newChild)).toBe(false);
+  expect(children.has(oldChild)).toBe(true);
+  expect(requests.filter(request => request.method === 'DELETE').map(request => request.path))
+    .toEqual(Array(2).fill(`/v1/resources/${crid}/qurls/${newChild}`));
+});
+
+test('an absent Connector route cannot certify a foreign-parent child as revoked', async () => {
+  routeMissing = true;
+  parentMismatch = true;
+  await expect(revokeMintedLinks(source, [newChild], 'test-guild-key')).rejects.toThrow(/does not match/);
+  expect(requests.some(request => request.method === 'DELETE')).toBe(false);
+  expect(children.has(newChild)).toBe(true);
 });
 
 test('a child from a different parent cannot redirect cleanup', async () => {
