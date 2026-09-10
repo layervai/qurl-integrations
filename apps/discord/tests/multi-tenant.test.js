@@ -1,15 +1,5 @@
-// Tests for multi-tenant mode (activated when GUILD_ID env is unset or
-// not a valid Discord snowflake). Covers the code paths in config.js,
-// commands.js, and server.js that branch on it.
-//
-// OAUTH_STATE_SECRET is pinned globally in tests/setup-env.js — command
-// dispatch reaches the shared state signer through the REAL config, and
-// the signer's 32-char floor would otherwise make resolution depend on
-// worker-level env leakage.
 
 describe('multi-tenant mode — config.js GUILD_ID normalization', () => {
-  // Each case re-requires config fresh after setting process.env, because
-  // config.js snapshots process.env.GUILD_ID at module import time.
   function loadConfig(rawGuildId) {
     jest.resetModules();
     if (rawGuildId === undefined) {
@@ -86,11 +76,7 @@ describe('multi-tenant mode — config.js GUILD_ID normalization', () => {
   });
 
 });
-
 describe('multi-tenant mode — registerCommands registration scope', () => {
-  // Explicit GUILD_ID reset before each test — it is the sole input
-  // driving the mode, and a leftover value from a prior test would
-  // silently flip the branch under inspection.
   let originalGuildId;
   beforeAll(() => {
     originalGuildId = process.env.GUILD_ID;
@@ -108,13 +94,6 @@ describe('multi-tenant mode — registerCommands registration scope', () => {
     jest.resetModules();
   });
 
-  // The post-refactor registerCommands signature is
-  // `({rest, appId, guilds})`, so these tests assert the REST call
-  // shape (rest.put with the right Route URL) rather than the legacy
-  // `client.application.commands.set(data, guildId?)` shape.
-  // Route URLs follow discord-api-types/v10's Routes module:
-  //   global  → /applications/{appId}/commands
-  //   guild   → /applications/{appId}/guilds/{guildId}/commands
   it('multi-tenant: registers /qurl on the global commands endpoint', async () => {
     const commandsModule = require('../src/commands');
 
@@ -157,11 +136,7 @@ describe('multi-tenant mode — registerCommands registration scope', () => {
     expect(mockPut).toHaveBeenCalledTimes(1);
     const [route, opts] = mockPut.mock.calls[0];
     expect(route).toBe('/applications/app-123/guilds/123456789012345678/commands');
-    // Same surface in both modes — only the registration scope differs.
     expect(opts.body.map(c => c.name).sort()).toEqual(['qurl']);
-    // Discord only accepts installation/interaction contexts on global
-    // commands. Strip even undefined builder fields so a future builder
-    // setter cannot leak them into this payload.
     expect(opts.body[0]).not.toHaveProperty('integration_types');
     expect(opts.body[0]).not.toHaveProperty('contexts');
     expect(opts.body[0]).not.toHaveProperty('dm_permission');
@@ -182,11 +157,6 @@ describe('multi-tenant mode — registerCommands registration scope', () => {
 });
 
 describe('registerCommands stale-command purge (issue #86)', () => {
-  // A guild served by an older deploy keeps that deploy's guild-scoped
-  // registrations in its slash-command cache — Discord's guild and
-  // global namespaces don't purge each other on .set(). registerCommands
-  // proactively clears them so users don't see dead commands in
-  // autocomplete.
   let originalGuildId;
   beforeAll(() => {
     originalGuildId = process.env.GUILD_ID;
@@ -201,9 +171,6 @@ describe('registerCommands stale-command purge (issue #86)', () => {
     delete process.env.GUILD_ID;
     const commandsModule = require('../src/commands');
 
-    // Two guilds with stale registrations, one empty guild (should not be purged).
-    // Post-refactor: REST returns arrays of Command objects (was discord.js Map
-    // before). The purge helper uses Array.length, so the mock returns arrays.
     const mockGet = jest.fn()
       .mockResolvedValueOnce([{ id: 'cmd-1' }, { id: 'cmd-2' }, { id: 'cmd-3' }]) // guild A: 3 stale
       .mockResolvedValueOnce([{ id: 'cmd-4' }])                                    // guild B: 1 stale
@@ -217,11 +184,8 @@ describe('registerCommands stale-command purge (issue #86)', () => {
       guilds: new Map([['ga', 'A'], ['gb', 'B'], ['gc', 'C']]),
     });
 
-    // get called once per guild (3) — the per-guild fetch.
     expect(mockGet).toHaveBeenCalledTimes(3);
-    // put called 3 times total: 2 purges (empty body, guild route) + 1 final global register.
     expect(mockPut).toHaveBeenCalledTimes(3);
-    // Verify purge routes: applicationGuildCommands(appId, guildId), body=[].
     const purgeCalls = mockPut.mock.calls.filter(([, opts]) => Array.isArray(opts.body) && opts.body.length === 0);
     expect(purgeCalls).toHaveLength(2);
     const purgedRoutes = purgeCalls.map(c => c[0]).sort();
@@ -229,7 +193,6 @@ describe('registerCommands stale-command purge (issue #86)', () => {
       '/applications/app-1/guilds/ga/commands',
       '/applications/app-1/guilds/gb/commands',
     ]);
-    // Verify registration route: applicationCommands(appId), body=non-empty.
     const registerCalls = mockPut.mock.calls.filter(([, opts]) => Array.isArray(opts.body) && opts.body.length > 0);
     expect(registerCalls).toHaveLength(1);
     expect(registerCalls[0][0]).toBe('/applications/app-1/commands');
@@ -250,8 +213,6 @@ describe('registerCommands stale-command purge (issue #86)', () => {
     });
 
     expect(mockGet).toHaveBeenCalledTimes(1);
-    // Purge (empty body) lands BEFORE the registration PUT, so the
-    // fresh registration is never clobbered by its own purge.
     expect(mockPut).toHaveBeenCalledTimes(2);
     expect(mockPut.mock.calls[0][1].body).toEqual([]);
     expect(mockPut.mock.calls[1][0]).toBe('/applications/app-1/guilds/123456789012345678/commands');
@@ -274,25 +235,15 @@ describe('registerCommands stale-command purge (issue #86)', () => {
       guilds: new Map([['ga', 'A'], ['gb', 'B']]),
     });
 
-    // Guild A's get failed but we still tried guild B.
     expect(mockGet).toHaveBeenCalledTimes(2);
-    // Only guild B got purged (A failed before reaching put).
     const purgeCalls = mockPut.mock.calls.filter(([, opts]) => Array.isArray(opts.body) && opts.body.length === 0);
     expect(purgeCalls.map(c => c[0])).toEqual(['/applications/app-1/guilds/gb/commands']);
-    // Final register still ran despite guild A's purge failure.
     const registerCalls = mockPut.mock.calls.filter(([, opts]) => Array.isArray(opts.body) && opts.body.length > 0);
     expect(registerCalls).toHaveLength(1);
   });
 });
 
 describe('handleCommand dispatch-time filter', () => {
-  // Defense-in-depth: a guild served by a pre-#1026 deploy may still
-  // list /link and friends in its slash-command picker, because
-  // Discord's guild and global namespaces don't purge each other on
-  // .set(). The filter at commands.js:handleCommand keeps those stale
-  // registrations from dispatching into handlers that no longer exist,
-  // and replies with a clear "no longer available" message instead of
-  // letting Discord time out the interaction.
   let originalGuildId;
   beforeAll(() => {
     originalGuildId = process.env.GUILD_ID;
@@ -314,7 +265,6 @@ describe('handleCommand dispatch-time filter', () => {
     async (commandName, authorizingIntegrationOwners) => {
       process.env.GUILD_ID = '123456789012345678';
 
-      // Mock dependencies that commands.js transitively pulls in
       jest.doMock('../src/store', () => ({
         getStats: jest.fn(() => ({})),
         recordQURLSend: jest.fn(), getRecentSends: jest.fn(() => []),
@@ -387,10 +337,6 @@ describe('handleCommand dispatch-time filter', () => {
 });
 
 describe('server.js — the GitHub OAuth + webhook surfaces are gone (#1026)', () => {
-  // Regression guard: /auth and /webhook were mounted behind the
-  // removed mode gate. They must now 404 in EVERY mode, not just
-  // multi-tenant — a re-mount would resurrect a surface whose backing
-  // DDB tables no longer exist.
   let originalGuildId;
   beforeAll(() => {
     originalGuildId = process.env.GUILD_ID;
@@ -440,7 +386,3 @@ describe('server.js — the GitHub OAuth + webhook surfaces are gone (#1026)', (
     expect(res.status).toBe(404);
   });
 });
-
-// Note: discord.js's `refreshCache()` multi-tenant early-return is
-// covered directly in tests/discord.test.js, which already mocks the
-// Discord client at module-import time.

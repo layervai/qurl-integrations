@@ -1,25 +1,10 @@
-/**
- * Comprehensive tests for src/commands.js — covers buildDeliveryEmbed,
- * the send-pipeline back-half, monitorLinkStatus, buildConfirmMsg,
- * handleRevoke, revokeAllLinks, handleCommand, and all slash command
- * execute() functions.
- */
 
-// ---------------------------------------------------------------------------
-// Mock setup — BEFORE requiring any modules
-// ---------------------------------------------------------------------------
 
 jest.mock('../src/config', () => ({
   QURL_API_KEY: 'test-api-key',
   QURL_ENDPOINT: 'https://api.test.local',
   CONNECTOR_URL: 'https://connector.test.local',
   GOOGLE_MAPS_API_KEY: 'test-google-key',
-  // /qurl map feature toggle — explicitly false here so the flag-off
-  // describe block below tests the documented production default. A
-  // missing key would *also* read as falsy (the bot's `=== 'true'`
-  // parser), but a future refactor that flipped the default-on
-  // semantics would silently keep these tests green; the explicit
-  // value pins the contract.
   MAP_COMMAND_ENABLED: false,
   DETECT_COMMAND_ENABLED: false,
   QURL_SEND_COOLDOWN_MS: 30000,
@@ -39,7 +24,6 @@ jest.mock('../src/logger', () => ({
   audit: jest.fn(),
 }));
 
-// Track EmbedBuilder instances for assertions
 const embedInstances = [];
 const makeEmbed = () => {
   const embed = {
@@ -54,7 +38,6 @@ const makeEmbed = () => {
     setURL: jest.fn().mockReturnThis(),
     _fields: [],
   };
-  // Track addFields calls so we can inspect
   embed.addFields.mockImplementation(function (...args) {
     embed._fields.push(...args);
     return embed;
@@ -64,10 +47,6 @@ const makeEmbed = () => {
 };
 
 jest.mock('discord.js', () => {
-  // Shared option-builder chainable. Centralized so a new chained
-  // method at the discord.js layer (setMaxLength, addChoices, etc.)
-  // touches one site for the whole test suite — PR #301 regression
-  // surfaced this exact gap when setMaxLength was added.
   const { makeOptionBuilder, makeComponentChainable } = require('./helpers/discord-mock');
   return {
   SlashCommandBuilder: jest.fn().mockImplementation(() => {
@@ -159,9 +138,6 @@ const mockDb = {
   recordQURLSend: jest.fn(),
   recordQURLSendBatch: jest.fn(),
   updateSendDMStatus: jest.fn(),
-  // Default to "no per-guild key configured" → the revoke + send
-  // gates fall through to config.QURL_API_KEY (which is set in
-  // the config mock at the top of this file).
   getGuildApiKey: jest.fn().mockResolvedValue(null),
   setGuildApiKey: jest.fn().mockResolvedValue(undefined),
   getRecentSends: jest.fn(() => []),
@@ -215,19 +191,9 @@ jest.mock('../src/qurl', () => ({
   getResourceStatus: mockGetResourceStatus,
 }));
 
-// Shared places-mock — see tests/helpers/places-mock.js.
 const { mockPlacesModule } = require('./helpers/places-mock');
 jest.mock('../src/places', () => mockPlacesModule);
 
-// flow-state is the DDB-backed harness consumed by /qurl revoke
-// post-conversion (PR 5). Mock it here rather than hit DDB.
-//
-// `supersedeOrCreate` is the consolidated primitive (post-harness-PR)
-// used by slash-command paths to open a fresh row, claiming over a
-// stale predecessor at the same stage. The harness-internal
-// orchestration (createFlow → loadFlow → version-gated deleteFlow →
-// retry) is pinned by flow-state.test.js, not here; commands-side
-// tests just drive its public return shape.
 const mockCreateFlow = jest.fn().mockResolvedValue({ created: true, version: 1 });
 const mockLoadFlow = jest.fn();
 const mockDeleteFlow = jest.fn().mockResolvedValue({ deleted: true });
@@ -241,21 +207,11 @@ jest.mock('../src/flow-state', () => ({
   supersedeOrCreate: (...args) => mockSupersedeOrCreate(...args),
 }));
 
-// The `/qurl setup` paste-flow handler calls linkGuildWebhookSubscription
-// after persisting the key. The helper makes its own fetch() calls to
-// qurl-service that would inflate global.fetch call counts asserted by
-// the setup-modal suite. Stub to a no-op; per-helper coverage lives in
-// tests/guild-webhook-link.test.js.
 jest.mock('../src/guild-webhook-link', () => ({
   linkGuildWebhookSubscription: jest.fn().mockResolvedValue({ ok: true, action: 'created' }),
   fireAndForgetLinkGuildWebhookSubscription: jest.fn(),
 }));
 
-// ---------------------------------------------------------------------------
-// Require modules under test
-// ---------------------------------------------------------------------------
-
-// Mock crypto.randomBytes to produce predictable nonces
 const crypto = require('crypto');
 const originalRandomBytes = crypto.randomBytes;
 const MOCK_NONCE = 'deadbeef01234567';
@@ -263,7 +219,6 @@ crypto.randomBytes = jest.fn((size) => {
   if (size === 8) return Buffer.from(MOCK_NONCE, 'hex');
   return originalRandomBytes(size);
 });
-// Also mock crypto.randomUUID
 const originalRandomUUID = crypto.randomUUID;
 crypto.randomUUID = jest.fn(() => 'mock-uuid-1234');
 
@@ -273,11 +228,6 @@ const {
   isAllowedFileType, isOnCooldown, setCooldown, batchSettled, expiryToISO,
   sendCooldowns, handleAddRecipients,
 } = _test;
-
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
 
 function makeInteraction(overrides = {}) {
   const base = {
@@ -319,10 +269,6 @@ function makeInteraction(overrides = {}) {
   return { ...base, ...overrides };
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
 beforeEach(() => {
   jest.clearAllMocks();
   mockDb.markSendRevoked.mockReset();
@@ -331,11 +277,6 @@ beforeEach(() => {
   sendCooldowns.clear();
 });
 
-// handleCommand's error/audit branches need a command whose execute()
-// can be made to throw on demand. /qurl is the only command the bot
-// ships, so its executor is swapped for the duration of a test rather
-// than reaching through to a real subcommand handler. Restored in
-// afterEach so a throwing stub can't leak into the /qurl suites below.
 const qurlCommand = commands.find(c => c.data.name === 'qurl');
 const realQurlExecute = qurlCommand.execute;
 function stubQurlExecute(impl) {
@@ -362,8 +303,6 @@ describe('commands module exports', () => {
 });
 
 describe('registerCommands', () => {
-  // Signature: ({rest, appId, guilds: Map<id, name>}). Tests assert
-  // the REST-call shape that production wire calls produce.
   it('issues rest.put for the global commands endpoint when GUILD_ID is unset', async () => {
     const rest = {
       put: jest.fn().mockResolvedValue([]),
@@ -398,10 +337,6 @@ describe('handleCommand', () => {
   });
 
   it('replies "no longer available" for unknown command names (stale-registration path)', async () => {
-    // A command name we don't know either doesn't exist globally or is a
-    // stale guild-scoped registration from a prior deploy. Either way
-    // the user deserves an acknowledgement instead of Discord's
-    // "interaction failed" timeout.
     const interaction = makeInteraction({
       commandName: 'nonexistent-cmd',
     });
@@ -457,19 +392,11 @@ describe('handleCommand', () => {
     });
 
     await handleCommand(interaction);
-    // Should not throw, just log
     const logger = require('../src/logger');
     expect(logger.error).toHaveBeenCalled();
   });
 });
 
-// Phase 1 monitoring — handleCommand emits a single audit event per
-// interaction so the terraform metric filters can derive total /
-// failure / per-command latency without needing multiple events. Each
-// failure_type maps to a different alarm at the infra layer:
-//   - ack_timeout → user-visible "did not respond" cluster (count alarm)
-//   - handler_error → backend / dependency degradation (rate alarm)
-//   - unknown_command → stale-registration count (informational)
 describe('handleCommand — INTERACTION_HANDLED audit emission', () => {
   const { AUDIT_EVENTS } = require('../src/constants');
   let logger;
@@ -534,11 +461,6 @@ describe('handleCommand — INTERACTION_HANDLED audit emission', () => {
   });
 
   it('emits failure_type=reply_failed when stale-registration reply throws non-ack error', async () => {
-    // Stale-registration path tries to reply "no longer available" but
-    // the reply itself fails for a non-timeout reason (e.g. permission
-    // missing in the channel). Tag distinctly from ack_timeout so the
-    // dashboard can separate "Discord deadline missed" from "reply
-    // call broke for some other reason."
     const interaction = makeInteraction({
       commandName: 'no-such-cmd',
       reply: jest.fn().mockRejectedValue(new Error('Missing Permissions')),
@@ -581,11 +503,6 @@ describe('handleCommand — INTERACTION_HANDLED audit emission', () => {
   });
 
   it('preserves sub-millisecond handler_duration_ms (no BigInt-truncation regression)', async () => {
-    // Round-3 fix: Number(ns / 1_000_000n) → Number(ns) / 1_000_000.
-    // The bigint-division shape would truncate any sub-ms duration to
-    // 0 and silently destroy fast-path regression detection. Mock
-    // process.hrtime.bigint to return start at 0n and end at 500_000n
-    // (= 500 µs delta). handler_duration_ms must be 0.5, NOT 0.
     const realHrtime = process.hrtime.bigint;
     let callCount = 0;
     process.hrtime.bigint = jest.fn(() => {
@@ -606,11 +523,6 @@ describe('handleCommand — INTERACTION_HANDLED audit emission', () => {
   });
 
   it('emits INTERACTION_HANDLED EXACTLY ONCE across each failure scenario (cardinality lock)', async () => {
-    // Pin emission cardinality, not just value. Existing tests use
-    // toHaveBeenCalledWith which would still pass on duplicate emits.
-    // A future refactor that accidentally splits the event into two
-    // emits (e.g. separate "interaction_started" + "interaction_ended"
-    // pair) would silently double the alarm count without this assertion.
     logger = require('../src/logger');
     const scenarios = [
       ['success path', () => makeInteraction({ commandName: 'stats' })],
@@ -636,12 +548,6 @@ describe('handleCommand — INTERACTION_HANDLED audit emission', () => {
   });
 
   it('preserves handler_error when execute throws AND followUp also throws non-ack', async () => {
-    // Pin the asymmetric precedence rule: in the main path a
-    // handler_error tag is preserved over a follow-up reply_failed
-    // because the original execute failure is the more meaningful
-    // dashboard signal. A future refactor that flips the asymmetry
-    // would silently change failure-type attribution; this test
-    // catches it.
     stubQurlExecute(() => { throw new Error('db crash'); });
     const interaction = makeInteraction({
       commandName: 'qurl',
@@ -657,7 +563,6 @@ describe('handleCommand — INTERACTION_HANDLED audit emission', () => {
   describe('isAckTimeoutError direct regex coverage', () => {
     const { isAckTimeoutError } = _test;
     test.each([
-      // [name, error, expected]
       ['discord.js DiscordAPIError code 10062', { code: 10062 }, true],
       ['exact bare message', new Error('Unknown interaction'), true],
       ['wrapped with RESTJSONError prefix', new Error('RESTJSONError: Unknown interaction'), true],
@@ -687,8 +592,6 @@ describe('handleCommand — INTERACTION_HANDLED audit emission', () => {
 });
 
 describe('/qurl help subcommand', () => {
-  // Config derivation guarantees discordInstall implies qurlOAuth; this helper
-  // accepts both values so the rendering branches stay isolated unit tests.
   async function renderHelp({ qurlOAuth, discordInstall }) {
     const config = require('../src/config');
     const originalQurlOAuth = config.isQurlOAuthConfigured;
@@ -733,10 +636,6 @@ describe('/qurl help subcommand', () => {
     );
   });
 
-  // Positive assertions for the help-text copy. Without these, the only
-  // other help-text assertion is `stringContaining('qURL Bot')`, which
-  // would stay green if every fix below were reverted. Pinning them here
-  // catches accidental regressions on the next edit to this block.
   it('includes the four help-text copy fixes', async () => {
     const cmd = commands.find(c => c.data.name === 'qurl');
     const interaction = makeInteraction({
@@ -751,19 +650,10 @@ describe('/qurl help subcommand', () => {
 
     const { content } = interaction.reply.mock.calls[0][0];
 
-    // (1) layerv.ai URL carries the scheme so Discord auto-linkifies it
     expect(content).toContain('https://layerv.ai');
-    // (2) self-destruct note covers both access AND expiry
-    // PR #134 reworded to singular subject ("a one-time link that
-    // self-destructs..."); the regex tolerates both verb forms so a
-    // future copy tweak doesn't reflexively break this.
     expect(content).toMatch(/self-destructs? on first access.*expiry elapses/);
-    // (3) Terms block disambiguates "protected resource" from "qURL"
     expect(content).toContain('protected resource');
     expect(content).toContain('access link');
-    // (4) Help text doesn't leak internal jargon. The "Large servers"
-    // section explains the role-fanout caveat to end-users without
-    // naming the underlying GUILD_PRESENCES intent.
     expect(content).not.toContain('GUILD_PRESENCES');
   });
 
@@ -791,11 +681,6 @@ describe('/qurl help subcommand', () => {
   });
 });
 
-// The slash command writes a flow_state row to DDB and renders the
-// select menu; the actual revoke executes on the menu's selection
-// event in the dispatcher path. Tests split accordingly — "menu is
-// rendered" lives here, "revoke executes" lives in the
-// `handleRevokeSelect (dispatcher)` describe below.
 describe('/qurl revoke subcommand', () => {
   beforeEach(() => {
     mockSupersedeOrCreate.mockResolvedValue({ created: true, version: 1 });
@@ -817,8 +702,6 @@ describe('/qurl revoke subcommand', () => {
     expect(interaction.editReply).toHaveBeenCalledWith(
       expect.objectContaining({ content: expect.stringContaining('No recent sends') }),
     );
-    // No flow row should be opened when there's nothing to revoke —
-    // an early no-op shouldn't poison the SLI's create-count.
     expect(mockSupersedeOrCreate).not.toHaveBeenCalled();
   });
 
@@ -853,7 +736,6 @@ describe('/qurl revoke subcommand', () => {
     expect(args.flow_id).toMatch(/^0:1#guild-1#ch-1#user-1$/);
     expect(args.ttl_seconds).toEqual(expect.any(Number));
 
-    // Menu was rendered to the user.
     const menuCall = interaction.editReply.mock.calls.find(
       (c) => c[0]?.components?.length > 0,
     );
@@ -921,11 +803,6 @@ describe('/qurl revoke subcommand', () => {
   });
 
   it('renders the menu when supersedeOrCreate claims the slot from a stale predecessor', async () => {
-    // supersedeOrCreate encapsulates the create → load → delete →
-    // retry orchestration. From the caller's view, a successful
-    // claim looks identical to a fresh create — both return
-    // { created: true, version: ... }. The harness-internal
-    // orchestration is pinned by flow-state.test.js, not here.
     mockSupersedeOrCreate.mockResolvedValueOnce({ created: true, version: 1 });
     mockDb.getRecentSends.mockReturnValue([
       {
@@ -951,7 +828,6 @@ describe('/qurl revoke subcommand', () => {
     await cmd.execute(interaction);
 
     expect(mockSupersedeOrCreate).toHaveBeenCalledTimes(1);
-    // Menu rendered after supersede claim.
     const menuCall = interaction.editReply.mock.calls.find(
       (c) => c[0]?.components?.length > 0,
     );
@@ -959,10 +835,6 @@ describe('/qurl revoke subcommand', () => {
   });
 
   it('names a sibling setup-modal flow when revoke supersede cannot claim', async () => {
-    // supersedeOrCreate returns the surviving row when a non-revoke
-    // flow owns this flow_id. The handler resolves the user-visible
-    // wording via the dispatcher's siblingMessageForStage registry
-    // (populated at registerFlow time).
     mockSupersedeOrCreate.mockResolvedValueOnce({
       created: false,
       surviving: { stage: 'awaiting_setup_modal', version: 1 },
@@ -990,8 +862,6 @@ describe('/qurl revoke subcommand', () => {
 
     await cmd.execute(interaction);
 
-    // Sibling-flow message names the in-flight setup modal — not
-    // a generic "could not start" fallback.
     const siblingCall = interaction.editReply.mock.calls.find(
       (c) => /qurl setup/.test(c[0]?.content || ''),
     );
@@ -999,11 +869,6 @@ describe('/qurl revoke subcommand', () => {
   });
 
   it('names a sibling setup-button flow when revoke supersede finds one in the channel', async () => {
-    // Cross-flow collision: /qurl revoke colliding with an unclicked
-    // /qurl setup button at the same flow_id. The setup-button stage
-    // has its own registered siblingMessage (different from modal),
-    // so revoke sees the "click the button or wait" wording rather
-    // than the generic "try again."
     mockSupersedeOrCreate.mockResolvedValueOnce({
       created: false,
       surviving: { stage: 'awaiting_setup_button', version: 1 },
@@ -1038,9 +903,6 @@ describe('/qurl revoke subcommand', () => {
   });
 
   it('falls through to generic error when the surviving row is at an unregistered stage', async () => {
-    // No siblingMessage registered for this fictional stage — the
-    // handler should NOT invent wording, just fall through to the
-    // generic recoverable message.
     mockSupersedeOrCreate.mockResolvedValueOnce({
       created: false,
       surviving: { stage: 'unknown_future_stage', version: 1 },
@@ -1106,10 +968,6 @@ describe('/qurl revoke subcommand', () => {
   });
 });
 
-// Dispatcher-side tests for handleRevokeSelect — the post-conversion
-// execution path. Direct-invocation tests rather than going through
-// the dispatcher itself; the routing layer is covered in
-// flow-dispatch.test.js.
 describe('handleRevokeSelect (dispatcher path)', () => {
   const { handleRevokeSelect } = require('../src/commands');
 
@@ -1151,10 +1009,6 @@ describe('handleRevokeSelect (dispatcher path)', () => {
   });
 
   it('skips revoke when deleteFlow loses the race (deleted=false)', async () => {
-    // A duplicate event (SQS redelivery in the future worker tier,
-    // or a Discord double-dispatch today) — only the worker whose
-    // conditional delete succeeds proceeds. The loser must NOT
-    // touch the qURL API.
     mockDeleteFlow.mockResolvedValueOnce({ deleted: false });
     const interaction = makeSelectInteraction();
 
@@ -1172,8 +1026,6 @@ describe('handleRevokeSelect (dispatcher path)', () => {
   it('updates with an error if apiKey resolution is no longer configured', async () => {
     mockDeleteFlow.mockResolvedValueOnce({ deleted: true });
     mockDb.getGuildApiKey = jest.fn().mockResolvedValue(null);
-    // Drop the fallback as well — emulates an admin unsetting the
-    // key between revoke-init and revoke-execute.
     const originalQurlApiKey = require('../src/config').QURL_API_KEY;
     require('../src/config').QURL_API_KEY = null;
 
@@ -1270,19 +1122,11 @@ describe('handleRevokeSelect (dispatcher path)', () => {
   });
 });
 
-// /qurl setup post-conversion (PR 6): legacy modal-paste path is now
-// button-first. The slash command writes a flow row + replies with a
-// button; clicking the button (dispatcher path) transitions the flow
-// and shows the modal; submitting the modal (dispatcher path)
-// validates the key + persists + deletes the flow.
 describe('/qurl setup subcommand (legacy modal-paste path)', () => {
   const originalKEK = process.env.KEY_ENCRYPTION_KEY;
   const originalAuthDomain = process.env.AUTH0_DOMAIN;
   beforeAll(() => {
     process.env.KEY_ENCRYPTION_KEY = '0'.repeat(64);
-    // Force the legacy path by clearing any Auth0 hints. The config
-    // mock at the top of this file doesn't define AUTH0_* and we
-    // rely on `config.isQurlOAuthConfigured` being falsy.
     delete process.env.AUTH0_DOMAIN;
   });
   afterAll(() => {
@@ -1376,11 +1220,6 @@ describe('/qurl setup subcommand (legacy modal-paste path)', () => {
   });
 
   it('renders the button when supersedeOrCreate claims the slot from a stale predecessor', async () => {
-    // supersedeOrCreate encapsulates the create → load →
-    // version-gated delete → retry orchestration. From the caller's
-    // view a successful claim is identical to a fresh create —
-    // { created: true, version: ... }. The internal orchestration
-    // is pinned by flow-state.test.js, not here.
     mockSupersedeOrCreate.mockResolvedValueOnce({ created: true, version: 1 });
 
     const cmd = commands.find(c => c.data.name === 'qurl');
@@ -1395,11 +1234,6 @@ describe('/qurl setup subcommand (legacy modal-paste path)', () => {
   });
 
   it('blocks with the modal-open message when a mid-modal flow is in progress', async () => {
-    // supersedeOrCreate cannot claim because the surviving row is
-    // at awaiting_setup_modal (different stage). It returns the
-    // surviving row; the dispatcher's siblingMessageForStage
-    // registry resolves the modal-open wording. The registry is
-    // populated at registerFlow time — confirmed by this test.
     mockSupersedeOrCreate.mockResolvedValueOnce({
       created: false,
       surviving: {
@@ -1420,9 +1254,6 @@ describe('/qurl setup subcommand (legacy modal-paste path)', () => {
   });
 
   it('names the sibling revoke flow when supersede surfaces an in-flight revoke menu', async () => {
-    // If the surviving row is awaiting_revoke_select the user sees
-    // actionable wording naming the revoke menu instead of generic
-    // "try again" which would loop until the revoke's TTL fires.
     mockSupersedeOrCreate.mockResolvedValueOnce({
       created: false,
       surviving: {
@@ -1483,13 +1314,6 @@ describe('/qurl setup subcommand (legacy modal-paste path)', () => {
   });
 
   it('surfaces a recoverable error when supersedeOrCreate throws', async () => {
-    // supersedeOrCreate already retried internally — a thrown
-    // exception at this layer is a real DDB/IAM failure. The
-    // handler catches it (one shared try-envelope) and surfaces
-    // "could not start" rather than letting it propagate to
-    // handleCommand's generic envelope, so the user sees an
-    // actionable rerun hint instead of "an error executing this
-    // command."
     mockSupersedeOrCreate.mockRejectedValueOnce(new Error('DDB region timeout'));
 
     const cmd = commands.find(c => c.data.name === 'qurl');
@@ -1532,39 +1356,16 @@ describe('handleSetupButton (dispatcher path)', () => {
     expect(transitionArgs[1]).toBe(1); // version
     expect(transitionArgs[2].stage_to).toBe('awaiting_setup_modal');
     expect(transitionArgs[2].terminal).toBe(false);
-    // Pin the modal-stage TTL window against the production constant
-    // (NOT a duplicated local literal — if the constant is tuned, a
-    // stale local would silently pass).
     const { SETUP_BUTTON_TTL_SECONDS, SETUP_MODAL_TTL_SECONDS } = _test;
     const nowSec = Math.floor(Date.now() / 1000);
-    // Lower bound allows ~50s of clock drift / test execution time;
-    // upper bound is the modal TTL itself.
     expect(transitionArgs[2].set_expires_at).toBeGreaterThan(nowSec + SETUP_MODAL_TTL_SECONDS - 50);
     expect(transitionArgs[2].set_expires_at).toBeLessThanOrEqual(nowSec + SETUP_MODAL_TTL_SECONDS);
-    // `extended: true` audit-flag pin: the new expires_at must
-    // exceed the original button-stage TTL window. flow-state.js
-    // computes `extended = set_expires_at > priorExpires`; the
-    // prior expires_at on a fresh row is at most
-    // `now + SETUP_BUTTON_TTL_SECONDS`, so any value strictly
-    // greater than that guarantees extended=true at the audit
-    // emission.
     expect(transitionArgs[2].set_expires_at).toBeGreaterThan(nowSec + SETUP_BUTTON_TTL_SECONDS);
-    // Pin: button-stage transition must NOT write a payload. The
-    // setup flow carries no encrypted state — the key itself
-    // arrives in interaction.fields on the modal submit, not in
-    // flow_state. A future refactor that accidentally persists
-    // anything sensitive here would trip this assertion.
     expect(transitionArgs[2].payload).toBeUndefined();
 
     expect(interaction.showModal).toHaveBeenCalledTimes(1);
     expect(interaction.reply).not.toHaveBeenCalled();
 
-    // Pin the API-key TextInput length bounds. The 28-char floor
-    // matches the regex's minimum (8-char prefix + 20-char suffix);
-    // the 64-char ceiling carries the TODO(upstream-rebrand) lockstep
-    // marker. A regression that drops either bound — exactly the
-    // risk the marker is meant to surface — would now trip this
-    // assertion instead of sliding through green.
     const { TextInputBuilder } = require('discord.js');
     const lastInputBuilder = TextInputBuilder.mock.results.at(-1).value;
     expect(lastInputBuilder.setMinLength).toHaveBeenCalledWith(28);
@@ -1606,12 +1407,6 @@ describe('handleSetupButton (dispatcher path)', () => {
   });
 
   it('propagates throws from transitionFlow (caught by dispatcher safety net)', async () => {
-    // transitionFlow throws on non-CCFE failures (DDB outage, pre-
-    // read errors); it does not synthesize a `result: 'error'`
-    // return value. The handler must let the throw propagate so the
-    // dispatcher's universal safety net catches it — wrapping it
-    // here would swallow the audit signal flow-state already
-    // emitted for the failure.
     const ddbErr = new Error('DDB region timeout');
     mockTransitionFlow.mockRejectedValueOnce(ddbErr);
     const interaction = makeButtonInteraction();
@@ -1626,19 +1421,6 @@ describe('handleSetupButton (dispatcher path)', () => {
   });
 
   it('rolls back the flow row when showModal throws after transitionFlow committed', async () => {
-    // The transitionFlow commits the row to `awaiting_setup_modal`
-    // before showModal fires. If showModal throws (Discord token
-    // expiry, REST blip), leaving the row in that stage would force
-    // the admin to wait out the full TTL — `/qurl setup` rerun
-    // would see the supersede peek find awaiting_setup_modal and
-    // surface the misleading "you already have a modal open"
-    // wording. Recovery requires the handler to delete the row.
-    //
-    // expectedVersion gates the rollback on the specific version
-    // the transitionFlow just committed (post-bump = 2 from initial
-    // version=1). A concurrent supersede that advanced the row past
-    // version 2 would fail this delete by design — at that point
-    // the row at flow_id is no longer ours to clean up.
     mockTransitionFlow.mockResolvedValueOnce({ result: 'success', version: 2 });
     const showModalErr = new Error('Unknown interaction (token expired during ACK)');
     const interaction = makeButtonInteraction({
@@ -1659,7 +1441,6 @@ describe('handleSetupButton (dispatcher path)', () => {
         expectedVersion: 2,
       },
     );
-    // Best-effort reply attempted (may fail itself; that's logged).
     expect(interaction.reply).toHaveBeenCalledWith(
       expect.objectContaining({
         content: expect.stringContaining('please run `/qurl setup` again'),
@@ -1668,12 +1449,6 @@ describe('handleSetupButton (dispatcher path)', () => {
   });
 });
 
-// Direct shape coverage of SETUP_API_KEY_REGEX. Round-tripping
-// through the handler (via VALID_KEY / 'short-bad-key') exercises
-// the format-rejection PATH; this pins the format itself, so adding
-// a new prefix family (lv_sandbox_, lv_internal_, etc.) requires a
-// deliberate test update rather than silently passing the existing
-// handler-level coverage.
 describe('SETUP_API_KEY_REGEX shape', () => {
   const { SETUP_API_KEY_REGEX, SETUP_API_KEY_MIN_LENGTH, SETUP_API_KEY_MAX_LENGTH } = _test;
 
@@ -1699,13 +1474,8 @@ describe('SETUP_API_KEY_REGEX shape', () => {
   });
 
   it('min/max length constants form a coherent lockstep with the regex', () => {
-    // MIN = 28 = 8 (lv_live_/lv_test_) + 20 (regex suffix floor).
-    // MAX = 64 — defense-in-depth cap, well above MIN. Adding a
-    // new prefix family that changes the prefix length would have
-    // to bump MIN to stay coherent.
     expect(SETUP_API_KEY_MIN_LENGTH).toBe(28);
     expect(SETUP_API_KEY_MAX_LENGTH).toBeGreaterThan(SETUP_API_KEY_MIN_LENGTH);
-    // The regex itself accepts strings at the MIN boundary.
     const atFloor = 'lv_live_' + 'a'.repeat(SETUP_API_KEY_MIN_LENGTH - 'lv_live_'.length);
     expect(atFloor.length).toBe(SETUP_API_KEY_MIN_LENGTH);
     expect(SETUP_API_KEY_REGEX.test(atFloor)).toBe(true);
@@ -1772,8 +1542,6 @@ describe('handleSetupModal (dispatcher path)', () => {
     expect(mockDb.setGuildApiKey).not.toHaveBeenCalled();
     expect(interaction.reply).toHaveBeenCalledWith(
       expect.objectContaining({
-        // Covers both TTL'd and already-processed cases (deleted:false
-        // collapses both into the same branch).
         content: expect.stringMatching(/expired or was already processed/),
       }),
     );
@@ -1790,9 +1558,6 @@ describe('handleSetupModal (dispatcher path)', () => {
     expect(mockDb.setGuildApiKey).not.toHaveBeenCalled();
     const replyArg = interaction.reply.mock.calls.at(-1)[0];
     expect(replyArg.content).toContain('Invalid API key format');
-    // The rerun hint is what closes the UX loop — the admin's flow
-    // row was already deleted by deleteFlow, so without this hint
-    // they'd be stuck without a path forward.
     expect(replyArg.content).toContain('Run `/qurl setup` again');
   });
 
@@ -1803,11 +1568,6 @@ describe('handleSetupModal (dispatcher path)', () => {
     await handleSetupModal(interaction, { flow_id: '0:1#guild-1#ch-1#user-1' });
 
     expect(mockDb.setGuildApiKey).not.toHaveBeenCalled();
-    // Pin the 401-specific phrasing — the format-rejection branch
-    // also includes "Invalid API key", so a substring-only match
-    // could silently route through the wrong branch if VALID_KEY
-    // ever drifts. `Double-check your key` is unique to the 401
-    // path's blurb.
     const replyArg = interaction.editReply.mock.calls.at(-1)[0];
     expect(replyArg.content).toContain('Double-check your key');
     expect(replyArg.content).not.toMatch(/format/);
@@ -1819,9 +1579,6 @@ describe('handleSetupModal (dispatcher path)', () => {
   });
 
   it('redacts network-error details from user-facing reply', async () => {
-    // Internal hostnames or IPs in err.message must NOT leak to
-    // Discord. The pre-conversion code carried this guarantee and
-    // the dispatcher path preserves it.
     global.fetch = jest.fn().mockRejectedValue(
       new Error('connect ECONNREFUSED 10.0.0.5:8080'),
     );
@@ -1851,19 +1608,7 @@ describe('handleSetupModal (dispatcher path)', () => {
   });
 
   it('swallows Discord errors on the post-persist success reply', async () => {
-    // The key is already saved by the time the success editReply
-    // fires. If editReply throws (Discord interaction-token expiry,
-    // transient API blip), the throw must NOT propagate to the
-    // dispatcher's universal safety net — that net replies "run
-    // the command again", which would be misleading after a
-    // successful persist. Admin can confirm via /qurl status.
     const interaction = makeModalInteraction();
-    // First editReply (success path) throws; verify the handler
-    // swallows it. Use mockImplementation rather than mockRejected
-    // so the prior editReply assertions on other tests aren't
-    // disturbed.
-    // Identify the success-path editReply by exact match against
-    // the production constant — no string drift on copy polish.
     const { SETUP_SUCCESS_MSG } = _test;
     let successBranchInvoked = false;
     interaction.editReply = jest.fn().mockImplementation(async (arg) => {
@@ -1878,13 +1623,7 @@ describe('handleSetupModal (dispatcher path)', () => {
       handleSetupModal(interaction, { flow_id: '0:1#guild-1#ch-1#user-1' })
     ).resolves.not.toThrow();
 
-    // setGuildApiKey did commit before the editReply threw.
     expect(mockDb.setGuildApiKey).toHaveBeenCalled();
-    // Guard against a future refactor that augments the success
-    // editReply with extra fields (components, embeds, etc.) — the
-    // strict `arg.content === SETUP_SUCCESS_MSG` mock would silently
-    // miss the new shape and the test would pass green without
-    // exercising the swallow logic. Pin: the throw branch DID fire.
     expect(successBranchInvoked).toBe(true);
     expect(interaction.editReply).toHaveBeenCalledWith(
       expect.objectContaining({ content: SETUP_SUCCESS_MSG }),
@@ -1892,14 +1631,6 @@ describe('handleSetupModal (dispatcher path)', () => {
   });
 
   it('propagates deferReply throw after deleteFlow (flow row already gone, key never persisted)', async () => {
-    // Pin the post-deleteFlow / pre-deferReply window. If
-    // deferReply throws (token expired during the DDB round-trip),
-    // the flow row is already gone but the qURL API call never
-    // fires and setGuildApiKey never runs. Admin sees Discord's
-    // generic "interaction failed" and reruns /qurl setup; the
-    // supersede path finds no row (deleted) so a fresh button
-    // renders cleanly. The throw itself propagates to the
-    // dispatcher's safety net.
     const deferErr = new Error('Unknown interaction (token expired)');
     const interaction = makeModalInteraction({
       deferReply: jest.fn().mockRejectedValue(deferErr),
@@ -1918,19 +1649,10 @@ describe('handleSetupModal (dispatcher path)', () => {
   });
 });
 
-// Flag-off coverage. The config mock at the top of this file does NOT
-// set MAP_COMMAND_ENABLED, so the bot's strict `=== 'true'` parser
-// resolves it to false — matching the production default. Every test
-// in this block verifies a surface that should be inert when the flag
-// is off. The flag-on path is covered by qurl-send-map.test.js (whose
-// config mock sets MAP_COMMAND_ENABLED: true).
 describe('MAP_COMMAND_ENABLED=false (flag-off behavior)', () => {
   const { mockSearchPlaces } = require('./helpers/places-mock');
 
   it('SETUP_SUCCESS_MSG omits /qurl map', () => {
-    // Built at module load with the flag snapshot. Pin against the
-    // production string via _test so a future copy edit can't drift
-    // this assertion from reality.
     expect(_test.SETUP_SUCCESS_MSG).not.toContain('/qurl map');
     expect(_test.SETUP_SUCCESS_MSG).toContain('/qurl send');
   });
@@ -1946,25 +1668,13 @@ describe('MAP_COMMAND_ENABLED=false (flag-off behavior)', () => {
     const replyArg = interaction.reply.mock.calls.find(([arg]) => typeof arg?.content === 'string')?.[0];
     expect(replyArg).toBeDefined();
     expect(replyArg.content).not.toContain('/qurl map');
-    // Sanity: the help reply is still rendered (we want absence of
-    // map, not absence of help). Catches a regression where the
-    // entire help branch goes silent.
     expect(replyArg.content).toContain('/qurl send');
     expect(replyArg.content).toContain('qURL Bot — Help');
-    // Pin the flag-off `sectionVerb` swap — a regression that drops
-    // the conditional verb would render "Share resources" against a
-    // map-disabled deploy. Catches the swap in isolation from the
-    // overall mapCopy structure.
     expect(replyArg.content).toContain('Share files securely');
     expect(replyArg.content).not.toContain('Share resources securely');
   });
 
   it('dispatcher replies with QURL_MAP_DISABLED_REPLY for /qurl map (stale-client safety net)', async () => {
-    // Discord won't normally route a `map` submission when the
-    // subcommand isn't registered, but a stale client carrying the
-    // pre-flip command definition can still submit one. The
-    // dispatcher's defensive branch turns that into a clean ephemeral
-    // instead of falling through to handleQurlMap → Places.
     const interaction = makeInteraction({
       options: {
         ...makeInteraction().options,
@@ -1976,18 +1686,10 @@ describe('MAP_COMMAND_ENABLED=false (flag-off behavior)', () => {
       content: _test.QURL_MAP_DISABLED_REPLY,
       ephemeral: true,
     });
-    // handleQurlMap defers + then hits Places; if the dispatcher ever
-    // routed through it by mistake, deferReply would fire. Negative
-    // assertion guards against that regression.
     expect(interaction.deferReply).not.toHaveBeenCalled();
   });
 
   it('dispatcher replies with QURL_DETECT_DISABLED_REPLY for /qurl detect (stale-client safety net)', async () => {
-    // DETECT_COMMAND_ENABLED is off in this block. A stale client carrying the
-    // pre-flip command def can still submit /qurl detect; the dispatcher's
-    // defensive branch turns that into a clean ephemeral instead of routing to
-    // handleQurlDetect. Enforcing the flag at dispatch also means a stale detect
-    // can't reveal a recipient even if the backend is live but the flag is off.
     const interaction = makeInteraction({
       options: {
         ...makeInteraction().options,
@@ -1999,17 +1701,10 @@ describe('MAP_COMMAND_ENABLED=false (flag-off behavior)', () => {
       content: _test.QURL_DETECT_DISABLED_REPLY,
       ephemeral: true,
     });
-    // handleQurlDetect defers early (ephemeral) before any network work; if the
-    // dispatcher ever routed through it, deferReply would fire. Negative
-    // assertion guards against that regression.
     expect(interaction.deferReply).not.toHaveBeenCalled();
   });
 
   it('autocomplete for /qurl map location does NOT call searchPlaces (Places quota safety)', async () => {
-    // The earlier "responds empty for /qurl map location" test pins
-    // the user-visible contract (respond([])). This one pins the
-    // operator-cost contract: we don't burn the GOOGLE_MAPS_API_KEY
-    // quota on a submit that the dispatcher will reject anyway.
     mockSearchPlaces.mockClear();
     const interaction = makeInteraction({
       commandName: 'qurl',
@@ -2027,12 +1722,6 @@ describe('MAP_COMMAND_ENABLED=false (flag-off behavior)', () => {
   });
 
   it('dispatcher replies with rename hint for stale `/qurl file` submissions (post-rename to /qurl send)', async () => {
-    // Discord won't normally route a `file` submission after the
-    // rename propagates, but a stale client carrying the pre-rename
-    // command definition can still submit one for up to ~1h (global
-    // registration cache TTL). The dispatcher's defensive branch
-    // turns that into an ephemeral rename hint instead of falling
-    // through to an unknown-subcommand void.
     const interaction = makeInteraction({
       options: {
         ...makeInteraction().options,
@@ -2044,26 +1733,10 @@ describe('MAP_COMMAND_ENABLED=false (flag-off behavior)', () => {
       content: expect.stringMatching(/`\/qurl file` has been renamed to `\/qurl send`/),
       ephemeral: true,
     });
-    // The hint must fire BEFORE handleQurlSend's defer path; if the
-    // dispatcher ever routed through it by mistake, deferReply would
-    // fire and the user would see a spurious "thinking..." then the
-    // rename hint. Negative assertion guards against that regression.
     expect(interaction.deferReply).not.toHaveBeenCalled();
   });
 
   it('stale /qurl map in an unconfigured guild hits disabled reply BEFORE the API-key gate (routing order)', async () => {
-    // The most subtle invariant of this PR: API_KEY_GATED_SUBCOMMANDS
-    // intentionally OMITS 'map' when the flag is off. If 'map' had
-    // stayed in the set, the dispatcher's API_KEY_GATED_SUBCOMMANDS
-    // gate would fire "qURL is not configured for this server"
-    // BEFORE the dispatch could route to QURL_MAP_DISABLED_REPLY —
-    // a stale client in a never-configured guild would see the
-    // wrong copy.
-    //
-    // Setup: empty per-guild key (mockDb default) AND empty global
-    // fallback (mutated config). The gate would otherwise fire if
-    // 'map' were still in API_KEY_GATED_SUBCOMMANDS; the disabled
-    // reply firing instead is the load-bearing assertion.
     const configMock = require('../src/config');
     const origQurlApiKey = configMock.QURL_API_KEY;
     configMock.QURL_API_KEY = '';
@@ -2076,12 +1749,6 @@ describe('MAP_COMMAND_ENABLED=false (flag-off behavior)', () => {
         },
       });
       await handleCommand(interaction);
-      // Strict shape: exactly one reply call, exactly the disabled
-      // copy. A future refactor that re-adds 'map' to
-      // API_KEY_GATED_SUBCOMMANDS would either: (a) reply with
-      // "qURL is not configured" instead, OR (b) reply twice (gate
-      // copy first, then disabled copy on fall-through). Both
-      // regressions are caught by the length + value assertion.
       const allReplies = interaction.reply.mock.calls.map(([arg]) => arg?.content || '');
       expect(allReplies).toEqual([_test.QURL_MAP_DISABLED_REPLY]);
     } finally {
@@ -2090,18 +1757,8 @@ describe('MAP_COMMAND_ENABLED=false (flag-off behavior)', () => {
   });
 });
 
-// `revokeAllLinks` coverage lives in send-pipeline-back-half.test.js
-// (direct unit tests) and in the `handleRevokeSelect (dispatcher
-// path)` block above (integration through the flow).
-
-// connector and qurl tests that require resetModules are in send-pipeline-helpers.test.js
-
 describe('autocomplete handling', () => {
   it('routes autocomplete to handleAutocomplete (responds with empty for non-/qurl/map/location focuses)', async () => {
-    // Contract change: handleCommand now dispatches autocomplete to
-    // handleAutocomplete instead of dropping it. For a /qurl autocomplete
-    // whose subcommand isn't 'map', the handler responds with [] (clears
-    // the dropdown) rather than silently dropping the interaction.
     const interaction = makeInteraction({
       commandName: 'qurl',
       isAutocomplete: jest.fn(() => true),

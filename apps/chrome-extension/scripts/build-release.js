@@ -12,6 +12,7 @@ const includePaths = [
   'icons',
   '_locales',
 ];
+const CHROME_DISPLAY_NAME = 'qURL Agent';
 // icons/ is copied wholesale, but logo.png in it is the build-time source generate-icons.js
 // resizes from — nothing in the packaged extension loads it (the manifest and the popup header
 // both reference generated icon*.png), so shipping it is dead weight in the Web Store upload.
@@ -19,26 +20,71 @@ const excludePaths = new Set([
   path.join('icons', 'logo.png'),
 ]);
 
-function main() {
+function resolveTarget(name = 'chrome', root) {
+  if (!['chrome', 'edge'].includes(name)) {
+    throw new Error(`Unknown browser target: ${name}`);
+  }
+  const targetRoot = root || (name === 'edge' ? path.resolve(projectRoot, '..', 'edge-extension') : projectRoot);
+  return {
+    name,
+    root: targetRoot,
+    releaseRoot: path.join(targetRoot, 'release'),
+    displayName: name === 'edge' ? 'qURL File Upload for Edge' : CHROME_DISPLAY_NAME,
+  };
+}
+
+function main(targetName = process.argv[2] || 'chrome') {
+  const target = resolveTarget(targetName);
   const buildConfig = loadBuildConfig();
-  recreateDirectory(releaseRoot);
+  recreateDirectory(target.releaseRoot);
 
   for (const relativePath of includePaths) {
     const source = path.join(projectRoot, relativePath);
-    const target = path.join(releaseRoot, relativePath);
+    const destination = path.join(target.releaseRoot, relativePath);
 
     if (!fs.existsSync(source)) {
       throw new Error(`Missing required release path: ${relativePath}`);
     }
 
-    copyRecursive(source, target);
+    copyRecursive(source, destination);
   }
 
-  applyBuildOverrides(buildConfig);
-  validateReleaseManifest();
+  applyTargetMetadata(target);
+  applyBuildOverrides(buildConfig, target.releaseRoot);
+  validateReleaseManifest(target.releaseRoot, target.name);
 
-  console.log('Release directory generated at:', releaseRoot);
+  console.log('Release directory generated at:', target.releaseRoot);
   console.log('Next step: zip the contents of release/ so manifest.json is at the ZIP root.');
+}
+
+function applyTargetMetadata(target) {
+  const packageJson = JSON.parse(fs.readFileSync(path.join(target.root, 'package.json'), 'utf8'));
+  const manifestPath = path.join(target.releaseRoot, 'manifest.json');
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+  manifest.version = packageJson.version;
+  fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + '\n');
+
+  const localesRoot = path.join(target.releaseRoot, '_locales');
+  const locales = fs.readdirSync(localesRoot, { withFileTypes: true }).filter(entry => entry.isDirectory());
+  // ponytail: a second locale needs per-browser localized names; fail until that map exists.
+  if (locales.length !== 1 || locales[0].name !== 'en') {
+    throw new Error('Browser packages support only the en locale until target-specific locale names exist.');
+  }
+  const messagesPath = path.join(localesRoot, 'en', 'messages.json');
+  const messages = JSON.parse(fs.readFileSync(messagesPath, 'utf8'));
+  if (messages.ext_name?.message !== CHROME_DISPLAY_NAME) {
+    throw new Error(`Shared extension name must be ${CHROME_DISPLAY_NAME}.`);
+  }
+  messages.ext_name.message = target.displayName;
+  fs.writeFileSync(messagesPath, JSON.stringify(messages, null, 2) + '\n');
+
+  const popupPath = path.join(target.releaseRoot, 'popup', 'popup.html');
+  const popup = fs.readFileSync(popupPath, 'utf8');
+  const nameMatches = popup.match(/qURL Agent|qURL File Upload for Edge/g) || [];
+  if (nameMatches.length !== 2) {
+    throw new Error(`Expected two extension names in popup.html; found ${nameMatches.length}.`);
+  }
+  fs.writeFileSync(popupPath, popup.replace(/qURL Agent|qURL File Upload for Edge/g, target.displayName));
 }
 
 function recreateDirectory(dirPath) {
@@ -65,7 +111,7 @@ function copyRecursive(source, target) {
   fs.copyFileSync(source, target);
 }
 
-function validateReleaseManifest(targetReleaseRoot) {
+function validateReleaseManifest(targetReleaseRoot, targetName = 'chrome') {
   const resolvedReleaseRoot = targetReleaseRoot || releaseRoot;
   const manifestPath = path.join(resolvedReleaseRoot, 'manifest.json');
   const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
@@ -76,6 +122,9 @@ function validateReleaseManifest(targetReleaseRoot) {
 
   if (!manifest.action || !manifest.action.default_popup) {
     throw new Error('Release manifest is missing action.default_popup.');
+  }
+  if (targetName === 'edge' && Object.hasOwn(manifest, 'update_url')) {
+    throw new Error('Edge release manifest must not contain update_url.');
   }
 
   const localeMessagesPath = path.join(resolvedReleaseRoot, '_locales', 'en', 'messages.json');
@@ -91,8 +140,25 @@ function validateReleaseManifest(targetReleaseRoot) {
     }
   }
 
+  const otherBrowser = targetName === 'edge' ? 'Chrome' : 'Edge';
+  const otherBrowserPattern = new RegExp(`\\b${otherBrowser}\\b`);
+  const browserSpecificFiles = collectReleaseTextFiles(resolvedReleaseRoot)
+    .filter(file => otherBrowserPattern.test(fs.readFileSync(file, 'utf8')));
+  if (browserSpecificFiles.length > 0) {
+    const paths = browserSpecificFiles.map(file => path.relative(resolvedReleaseRoot, file));
+    throw new Error(`${targetName} release bundle contains ${otherBrowser}-only text: ${paths.join(', ')}`);
+  }
+
   // The bundled default API base and manifest host permission must always move together.
   validateDefaultQurlHostPermission(manifest, resolvedReleaseRoot);
+}
+
+function collectReleaseTextFiles(root) {
+  return fs.readdirSync(root, { withFileTypes: true }).flatMap(entry => {
+    const file = path.join(root, entry.name);
+    if (entry.isDirectory()) return collectReleaseTextFiles(file);
+    return path.extname(entry.name).toLowerCase() === '.png' ? [] : [file];
+  });
 }
 
 function loadBuildConfig() {
@@ -302,6 +368,7 @@ if (require.main === module) {
 }
 
 module.exports = {
+  applyTargetMetadata,
   applyBuildOverrides,
   collectManifestAssetPaths,
   copyRecursive,
@@ -312,6 +379,7 @@ module.exports = {
   parseDotEnv,
   qurlConfigPath,
   readDefaultQurlApiBase,
+  resolveTarget,
   stripWrappingQuotes,
   writeDefaultApiBaseConfig,
   rewriteManifestHostPermission,

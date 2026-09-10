@@ -1,8 +1,4 @@
-// store/ddb-store — DynamoDB backend
-//
-// Implements the Store contract (see `src/store/contract.js`) against
-// the 11 DynamoDB tables provisioned by `modules/qurl-bot-ddb/`
-// in the infra repo. Selected at boot when `STORE_TYPE=ddb`.
+// store/ddb-store — DynamoDB data layer
 //
 // Table naming: tables carry the env in their name
 // (`qurl-bot-discord-<env>-<kebab-name>`). The env prefix is
@@ -105,27 +101,14 @@ function transactionWriteRetryable(err) {
   return err.CancellationReasons.some(r => retryableReasonCodes.has(r?.Code));
 }
 
-// Table name mapping. Map keys (SQL-era snake_case names) match the
-// outputs.tf `table_names` shape in `modules/qurl-bot-ddb/` so
-// consumers look up by the same semantic key.
-//
-// DDB_TABLE_PREFIX is required (no default). See header comment for
-// the prod-footgun rationale. Whitespace-only values are treated as
-// unset to defend against buggy container templating that emits
-// `DDB_TABLE_PREFIX=` with no value — same shape as the STORE_TYPE
-// normalization in `store/index.js`.
+// Keys match the infra module's table_names output. No default prefix is
+// allowed because a local process with AWS credentials could otherwise use
+// production tables.
 const TABLE_PREFIX = (process.env.DDB_TABLE_PREFIX ?? '').trim();
 if (!TABLE_PREFIX) {
-  throw new Error('DDB_TABLE_PREFIX is required when STORE_TYPE=ddb. Set it to the env-specific prefix (e.g. `qurl-bot-discord-sandbox-` for sandbox, `qurl-bot-discord-prod-` for prod) in the deployment template.');
+  throw new Error('DDB_TABLE_PREFIX is required. Set it to the env-specific prefix (e.g. `qurl-bot-discord-sandbox-` for sandbox, `qurl-bot-discord-prod-` for prod) in the deployment template.');
 }
-// Trailing-dash check. The prefix is concatenated directly with each
-// table's kebab-case suffix (`${TABLE_PREFIX}qurl-sends`), so a
-// missing trailing dash silently produces malformed names like
-// `qurl-bot-discord-prodqurl-sends` and the bot's first DDB call
-// returns ResourceNotFoundException — clear at the first call but
-// confusing in CloudWatch logs (looks like a permission or naming
-// issue, not a config typo). Catch it at boot so the failure points
-// directly at the env var.
+// The prefix is concatenated directly with each table suffix.
 if (!TABLE_PREFIX.endsWith('-')) {
   throw new Error(`DDB_TABLE_PREFIX must end with '-' (got '${TABLE_PREFIX}'). The prefix is concatenated with kebab-case table suffixes; a missing dash produces malformed names like '${TABLE_PREFIX}qurl-sends'. Add the trailing '-' in the deployment template.`);
 }
@@ -136,37 +119,23 @@ const TABLES = Object.freeze({
   guild_configs: `${TABLE_PREFIX}guild-configs`,
 });
 
-// AWS_REGION is required (no fallback). Same shape of footgun the
-// DDB_TABLE_PREFIX guard above closes: a developer with stray AWS
-// creds + DDB_TABLE_PREFIX=qurl-bot-discord-prod- + unset
-// AWS_REGION would silently land in whichever region the SDK
-// defaults to (us-east-2 today via the prior `|| 'us-east-2'`
-// fallback), which is presumably the prod region. Catch at boot.
-// Whitespace-only treated as unset, mirroring the prefix guard.
+// No region fallback: a local process must not silently select a production
+// region from ambient AWS configuration.
 const AWS_REGION = (process.env.AWS_REGION ?? '').trim();
 if (!AWS_REGION) {
-  throw new Error('AWS_REGION is required when STORE_TYPE=ddb. Set it to the env-specific region (e.g. `us-east-2` for sandbox, the matching prod region for prod) in the deployment template.');
+  throw new Error('AWS_REGION is required. Set it to the env-specific region (e.g. `us-east-2` for sandbox, the matching prod region for prod) in the deployment template.');
 }
 
-// Allow tests + local-dev to inject a pre-configured endpoint via
-// `process.env.DDB_TEST_ENDPOINT` (DDB-Local at http://localhost:8000,
-// or aws-sdk-client-mock interception). Production path constructs
-// the real client once at module load. The prod-only refusal lives
-// in `config.js` (loaded first), so by the time this constructor
-// runs in production, DDB_TEST_ENDPOINT is guaranteed unset.
+// Tests and local development can opt into DynamoDB Local. Production rejects
+// DDB_TEST_ENDPOINT in config.js before this module loads.
 const rawClient = new DynamoDBClient({
   region: AWS_REGION,
   ...(process.env.DDB_TEST_ENDPOINT ? { endpoint: process.env.DDB_TEST_ENDPOINT } : {}),
 });
 const ddb = DynamoDBDocumentClient.from(rawClient, {
   marshallOptions: {
-    // Remove undefined values (default is to throw) so optional
-    // fields the bot doesn't always populate flow through as
-    // absent attributes rather than per-call errors.
+    // Optional fields must remain absent instead of failing each write.
     removeUndefinedValues: true,
-    // Preserve `""` as a distinct value (default behavior is
-    // fine — DDB v3 SDK handles this correctly). Noted for
-    // clarity.
   },
 });
 
@@ -1865,8 +1834,7 @@ async function healthCheck() {
 
 async function close() {
   // DDB client has no persistent connection to close; AWS SDK v3
-  // manages sockets internally via keep-alive. The method exists
-  // for Store contract parity (other backends may need real cleanup).
+  // manages sockets internally via keep-alive.
   logger.info('DDB store closed (no-op)');
 }
 
@@ -1894,8 +1862,8 @@ module.exports = {
   close, healthCheck,
   // Test-only: surface the prefixed table-name map so
   // `tests/provisioner-schema-parity.test.js` can pin parity with
-  // `scripts/provision-ddb-local.js`. NOT part of the Store contract
-  // — production callers must NOT reach into this; the leading
+  // `scripts/provision-ddb-local.js`. Production callers must NOT
+  // reach into this; the leading
   // underscore signals intent. If you find yourself depending on
   // this outside tests, add a real public API instead.
   _TABLES_FOR_TESTING: TABLES,
