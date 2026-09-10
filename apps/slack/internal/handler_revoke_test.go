@@ -118,7 +118,7 @@ func addRevokeResourceRead(t *testing.T, ts *adminTestServers, resourceID, resou
 			"type":        resourceType,
 			"slug":        testRevokeAlias,
 			"status":      client.StatusActive,
-		}})
+		}, "qurls": []any{}})
 	})
 }
 

@@ -1561,6 +1561,31 @@ func TestGetResourceDecodesDetailEnvelope(t *testing.T) {
 	}
 }
 
+func TestGetResourceRejectsMissingOrMismatchedResource(t *testing.T) {
+	t.Parallel()
+
+	for name, tc := range map[string]struct {
+		data    map[string]any
+		wantErr string
+	}{
+		"missing":  {map[string]any{"qurls": []any{}}, "has no resource"},
+		"mismatch": {map[string]any{"resource": map[string]any{"resource_id": "r_other"}}, "identity does not match"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				apiEnvelope(t, w, tc.data)
+			}))
+			defer srv.Close()
+
+			_, err := testClient(srv.URL, "test-key").GetResource(context.Background(), "r_abc123test")
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("GetResource err = %v, want %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
 func TestDeleteResourceReturnsAPIErrorOnFailure(t *testing.T) {
 	t.Parallel()
 
