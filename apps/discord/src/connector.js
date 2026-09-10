@@ -531,7 +531,7 @@ const DETECT_TUNNEL_HOST_SUFFIXES = detectTunnelHostSuffixesForEndpoint(config.Q
 // resource_id is a stable, NON-secret identifier, so caching it across calls is
 // safe and skips a slug lookup on every detect. CACHE ONLY THIS, NEVER the
 // minted access token or qurl_site: each detect mints a FRESH ephemeral qURL (a
-// short-lived credential — the mint sets expires_in: '5m') and the resolve()/knock
+// short-lived credential — the mint sets expires_in: '5m') and the native opening/knock
 // grants network access to the caller's CURRENT IP/knock-window. A stale token
 // would be a long-lived credential to leak; qurl_site is per-mint and must stay
 // paired with the fresh knock.
@@ -585,12 +585,12 @@ function assertDetectResourceFailureBackoffAllowed() {
 }
 
 // Lazily-constructed, cached qURL SDK client used solely by
-// resolveDetectTarget() to self-mint + resolve the ephemeral detect qURL over
+// resolveDetectTarget() to self-mint the ephemeral detect qURL over
 // the reverse-tunnel. Constructed on first use (not at module load) so the bot
 // boots even when QURL_API_KEY is unset in non-detect deployments, and so tests
 // can inject a mocked @layervai/qurl before the first call.
 //
-// Cache the client, never the minted qurl_site or access token — resolve()
+// Cache the client, never the minted qurl_site or access token — native opening
 // re-knocks per call (the full no-cache invariant + rationale live on
 // _detectResourceId above and in resolveDetectTarget's docstring).
 //
@@ -604,8 +604,8 @@ function getQurlClient() {
     //
     // timeout / maxRetries match the SDK's current defaults but are pinned
     // explicitly so the detect legs' resilience stays stable against
-    // SDK-default drift. resolve() is a fast knock+lookup, so 30s sits well
-    // under the detect POST's 60s and the retry worst case stays inside
+    // SDK-default drift. List and mint use 30s request timeouts, below
+    // the detect POST's 60s; the retry worst case stays inside
     // Discord's 15-min deferred-interaction window.
     _qurlClient = new QURLClient({
       apiKey: config.QURL_API_KEY,
@@ -684,7 +684,7 @@ function assertPublicHttpsTarget(targetUrl, expectedQurlSiteHost) {
   }
 }
 
-// qurl_site is the trusted origin; the separately minted target_path is signed.
+// Join the trusted origin with the bot-constructed path, checked against the mint echo.
 function buildDetectTargetUrl(qurlSite, targetPath) {
   let parsed;
   try {
@@ -695,8 +695,9 @@ function buildDetectTargetUrl(qurlSite, targetPath) {
   if (parsed.pathname !== '/' || parsed.search || parsed.hash) {
     throw new DetectQurlSiteError('detect mint qurl_site must be host-only');
   }
-  assertPublicHttpsTarget(parsed.href, parsed.hostname);
-  return new URL(targetPath, parsed.origin).href;
+  const target = new URL(targetPath, parsed);
+  assertPublicHttpsTarget(target.href, parsed.hostname);
+  return target.href;
 }
 
 // Scrub legacy access tokens and qv2t1 credentials before logging.
@@ -774,7 +775,7 @@ async function resolveDetectTarget(guildId) {
   // Mint a fresh ephemeral qURL on the resource (per call). `expires_in: '5m'`
   // bounds the credential lifetime AND caps accumulation of unused mints — the
   // bot never deletes them, it relies on expiry. Detect uses the token within
-  // seconds (mint → resolve), so 5m is generous margin, not a usage window. The
+  // seconds (mint → native opening), so 5m is generous margin, not a usage window. The
   // 201 carries the native credential in the qurl_link fragment. Breadcrumb a
   // mint failure (message only — no token, no URL) then rethrow so an
   // activation-time failure is diagnosable at the handler.
@@ -785,6 +786,7 @@ async function resolveDetectTarget(guildId) {
   let targetUrl;
   let minted;
   try {
+    // TODO(upstream-contract): the resource-mint API accepts and echoes target_path.
     minted = await getQurlClient().createQurlForResource(resourceId, {
       expires_in: DETECT_LINK_EXPIRES_IN,
       target_path: targetPath,
@@ -802,19 +804,19 @@ async function resolveDetectTarget(guildId) {
   }
   try {
     if (minted?.target_path !== targetPath) {
-      throw new DetectQurlSiteError('detect mint returned a mismatched guild path');
+      throw new Error('detect mint returned a mismatched guild path');
     }
     targetUrl = buildDetectTargetUrl(minted?.qurl_site, targetPath);
   } catch (err) {
     // qurl_site hostname-pin failures happen after a successful slug
     // lookup and mint, so keep the cached resource id and retry the mint after
     // the short failure window instead of re-walking slug history. The mint
-    // created an unredeemed 5m qURL, but failing before resolve() is the safe
+    // created an unredeemed 5m qURL, but failing before native opening is the safe
     // trade: no NHP knock and no image POST are issued to an untrusted host.
     rememberDetectResourceFailure(err, { clearResourceCache: false });
     const label = err instanceof DetectQurlSiteError
       ? 'Detect tunnel mint returned an invalid qurl_site'
-      : 'Detect tunnel target rejected by SSRF guard';
+      : 'Detect tunnel target rejected';
     logger.warn(label, {
       error: redactAccessToken(err.message),
       hostname: detectTargetHostname(minted?.qurl_site),
@@ -861,7 +863,7 @@ async function resolveDetectTarget(guildId) {
 async function detectWatermark(imageBytes, { guildId, contentType } = {}) {
   if (!config.QURL_API_KEY) throw new Error('QURL_API_KEY is not configured');
   if (typeof guildId !== 'string' || !/^[0-9]{17,20}$/.test(guildId)) {
-    throw new Error('detectWatermark requires a configured Discord guild');
+    throw new Error('detectWatermark requires a valid Discord guild id');
   }
   const { targetUrl, opener } = await resolveDetectTarget(guildId);
 
@@ -876,13 +878,14 @@ async function detectWatermark(imageBytes, { guildId, contentType } = {}) {
       // headroom the upload paths use rather than the 30s mint window.
       signal: AbortSignal.timeout(60000),
     };
+    // TODO(upstream-contract): SDK 0.6 fetch authenticates the signed target before this callback.
     const response = await opener.fetch((authenticatedTarget) => {
-        // Check the signed ACK target before sending image bytes.
-        if (authenticatedTarget.href !== targetUrl) {
-          throw new Error('Detect native target does not match the minted tunnel');
-        }
-        return request;
-      }, { redirects: 'error' });
+      // Check the signed ACK target before sending image bytes.
+      if (authenticatedTarget.href !== targetUrl) {
+        throw new Error('Detect native target does not match the minted tunnel');
+      }
+      return request;
+    }, { redirects: 'error' });
 
     if (!response.ok) {
       return await throwConnectorError('Connector detect', response);
@@ -953,9 +956,3 @@ async function uploadJsonToConnector(jsonPayload, filename, apiKey, viewerTtlSec
 }
 
 module.exports = { uploadToConnector, downloadAndUpload, reUploadBuffer, mintLinks, detectWatermark, uploadJsonToConnector, isAllowedSourceUrl, detectTunnelHostSuffixesForEndpoint };
-// Keep the future-caller exact-host invariant directly testable without
-// extending production's connector API. Jest sets NODE_ENV=test, matching the
-// precedent in logger.js.
-if (process.env.NODE_ENV === 'test') {
-  module.exports.__testExports = { assertPublicHttpsTarget };
-}

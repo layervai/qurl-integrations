@@ -6270,22 +6270,14 @@ async function handleQurlDetect(interaction) {
   // The bot credential mints the guild-scoped capability. No customer key
   // is sent to the detect service.
   if (!config.QURL_API_KEY) {
-    // A missing /qurl setup is an honest config error, not abuse — clear
-    // the cooldown so the user can retry the instant an admin configures
-    // the server. Matches the handler's "honest user errors clear the
-    // cooldown" design (non-image / oversize branches above). The SSRF
-    // probe is the one rejection that intentionally KEEPS the cooldown.
-    clearDetectCooldown(interaction.guildId, interaction.user.id);
-    // Audit this branch — unconfigured is an attribution outcome worth
-    // surfacing (see the handler header's audit list). No recipient is
-    // resolved on an unconfigured guild.
+    // Deployment configuration cannot be repaired through guild setup.
     logger.audit(AUDIT_EVENTS.QURL_DETECT, {
       result: 'unconfigured',
       guild_id: interaction.guildId,
       requester_id: interaction.user.id,
     });
     return interaction.editReply({
-      content: '❌ **qURL is not configured for this server.** A server admin needs to run `/qurl setup` first.',
+      content: '❌ **Watermark detection is unavailable.** The bot operator must configure the detect credential.',
     });
   }
 

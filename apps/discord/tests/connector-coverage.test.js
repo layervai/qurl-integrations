@@ -7,33 +7,6 @@ jest.mock('../src/logger', () => ({
   audit: jest.fn(),
 }));
 
-const mockClient = {
-  listAllResources: jest.fn(),
-  createQurlForResource: jest.fn(),
-  resolve: jest.fn(),
-};
-jest.mock('@layervai/qurl', () => ({
-  QURLClient: jest.fn().mockImplementation(() => mockClient),
-}));
-
-const mockCreatePortalOpener = jest.fn();
-jest.mock('@layervai/qurl/node', () => ({
-  createPortalOpener: (...args) => mockCreatePortalOpener(...args),
-}));
-
-function resetDetectSdkMocks() {
-  mockClient.listAllResources.mockReset();
-  mockClient.createQurlForResource.mockReset();
-  mockClient.resolve.mockReset();
-}
-
-function mockListAllResources(resources) {
-  mockClient.listAllResources.mockImplementation(async function* listAllResourcesMock() {
-    for (const resource of resources) yield resource;
-  });
-}
-
-
 const originalFetch = globalThis.fetch;
 
 describe('@layervai/qurl SDK contract — detect pagination', () => {
@@ -585,7 +558,6 @@ describe('Connector client — MD5 hash truncation in upload logs', () => {
 
   beforeEach(() => {
     jest.resetModules();
-    resetDetectSdkMocks();
     jest.mock('../src/config', () => ({
       CONNECTOR_URL: 'https://connector.test.local',
       QURL_ENDPOINT: 'https://api.test.local',

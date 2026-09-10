@@ -89,7 +89,7 @@ setup) means required to use that feature.
 |----------|----------|-------------|
 | `DISCORD_TOKEN` | Yes | Discord bot token |
 | `DISCORD_CLIENT_ID` | Yes | Discord application client ID |
-| `QURL_API_KEY` | No | Optional fallback qURL API key. Each server normally connects its own key via `/qurl setup`. |
+| `QURL_API_KEY` | `/qurl detect` | Bot credential required for detect. Server keys from `/qurl setup` apply to other operations. |
 | `QURL_ENDPOINT` | No | qURL API base URL (defaults to production; localhost in dev) |
 | `CONNECTOR_URL` | No | qURL connector URL for file upload + serving |
 | `BASE_URL` | OAuth setup | Public `https://` origin of the bot; required to complete the OAuth `/qurl setup` flow (defaults to `http://localhost:3000`). |
@@ -98,7 +98,7 @@ setup) means required to use that feature.
 | `MAP_COMMAND_ENABLED` | No | Set to `true` to enable `/qurl map` (default off) |
 | `DETECT_COMMAND_ENABLED` | No | Set to `true` to enable `/qurl detect` (default off) |
 | `QURL_DEPLOYMENT` | Native `/qurl detect` | Environment-specific public SDK trust: JSON or an absolute JSON file path, with `issuers` and `cells` |
-| `DETECT_TUNNEL_SLUG` | `/qurl detect` | qURL tunnel resource slug used to mint short-lived `/api/detect` qURLs |
+| `DETECT_TUNNEL_SLUG` | `/qurl detect` | qURL tunnel resource slug used to mint short-lived `/api/detect/discord/<guild_id>` qURLs |
 | `DETECT_EXTRA_NON_PROD_QURL_ENDPOINT_HOSTS` | No | Comma-separated extra non-prod `QURL_ENDPOINT` hosts for `/qurl detect` (extends the built-in set below) |
 | `DETECT_EXTRA_NON_PROD_HOST_SUFFIXES` | No | Comma-separated extra `qurl_site` suffixes granted for the hosts above; each entry must start with `.` |
 | `GOOGLE_MAPS_API_KEY` | `/qurl map` | Google Maps key for location autocomplete (needed when map is enabled) |
@@ -159,8 +159,7 @@ The bot lists the detect resource by slug only and filters active resources
 client-side because the live API rejects combining `slug` and `status`; the SDK
 auto-paginator walks historical revoked rows for this single dark-launch slug.
 If a tunnel rotation creates more than one active resource for the slug, detect
-fails closed instead of guessing which tunnel should receive the Bearer-carrying
-image POST. Persistent hard failures arm a short process-wide retry backoff for
+fails closed instead of guessing which tunnel should receive the image POST. Persistent hard failures arm a short process-wide retry backoff for
 the single dark-launch slug so a broken tunnel does not re-walk the full slug
 history on every detect attempt. Before broad enablement, keep the detect slug's
 revoked-resource history trimmed or add upstream server-side active filtering;

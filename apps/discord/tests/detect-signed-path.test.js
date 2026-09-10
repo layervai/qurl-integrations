@@ -47,8 +47,8 @@ it.each([undefined, '', 'guild-9', 'eib_short', `${guildId}/other`, `${guildId}?
 });
 it.each([
   target, `${origin}/api/detect`, `${origin}/api/detect/discord/${otherGuild}`, `${target}?x=1`, `${target}#fragment`,
-  `https://localhost${path}`, `https://127.0.0.1${path}`, `http://detect-test.qurl.site${path}`,
-  `https://evil.example${path}`, `https://user:secret@detect-test.qurl.site${path}`,
+  'https://localhost', 'https://127.0.0.1', 'http://detect-test.qurl.site',
+  'https://evil.example', 'https://user:secret@detect-test.qurl.site',
 ])('rejects an untrusted minted target %s before opening', async (site) => {
   mockClient.createQurlForResource.mockResolvedValue({ resource_id: resourceId, qurl_link: qurl, qurl_site: site, target_path: path });
   await expect(detect(Buffer.from('x'), { guildId })).rejects.toThrow();
@@ -99,4 +99,25 @@ it.each([[[]], [[{ status: 'active', resource_id: resourceId }, { status: 'activ
   mockClient.listAllResources.mockImplementation(async function* () { yield* resources; });
   await expect(detect(Buffer.from('x'), { guildId })).rejects.toThrow(/resource/);
   expect(mockClient.createQurlForResource).not.toHaveBeenCalled();
+});
+
+it.each([undefined, '/api/detect', `/api/detect/discord/${otherGuild}`, path + '/'])('rejects a mismatched path echo %s', async target_path => {
+  mockClient.createQurlForResource.mockResolvedValue({ resource_id: resourceId, qurl_link: qurl, qurl_site: origin, target_path });
+  await expect(detect(Buffer.from('x'), { guildId })).rejects.toThrow(/mismatched guild path/);
+  expect(mockOpen).not.toHaveBeenCalled();
+});
+it('refreshes the resource after a failed mint and backs off repeated failures', async () => {
+  mockClient.createQurlForResource.mockRejectedValue(new Error('mint unavailable'));
+  await expect(detect(Buffer.from('x'), { guildId })).rejects.toThrow('mint unavailable');
+  await expect(detect(Buffer.from('x'), { guildId })).rejects.toThrow('mint unavailable');
+  expect(mockClient.listAllResources).toHaveBeenCalledTimes(2);
+  await expect(detect(Buffer.from('x'), { guildId })).rejects.toMatchObject({ retryAfterMs: expect.any(Number) });
+  expect(mockClient.createQurlForResource).toHaveBeenCalledTimes(2);
+});
+
+it('uses fetch supported by the installed native SDK', async () => {
+  const { createPortalOpener } = jest.requireActual('@layervai/qurl/node');
+  const real = createPortalOpener({ qurl });
+  expect(typeof real.fetch).toBe('function');
+  await real.close();
 });
