@@ -42,6 +42,7 @@ const {
   invalidHotStandbyValues,
   invalidStateSecretValues,
   shouldRegisterInteractionListener,
+  shouldStartPrivateUploader,
   resolveProcessRole,
 } = require('./boot-requirements');
 const { initHttpOnly } = require('./http-only-init');
@@ -49,6 +50,7 @@ const eventConsumer = require('./event-consumer');
 const eventPublisher = require('./event-publisher');
 const webhookSubscriptions = require('./webhook-subscriptions');
 const { LOG_KINDS } = require('./constants');
+const { startPrivateUploader, closePrivateUploader } = require('./private-upload');
 
 // Process role — selects which subset of the bot runs in this
 // container. Three modes:
@@ -193,6 +195,20 @@ if (process.env.NODE_ENV === 'production') {
   const stateSecretProblems = invalidStateSecretValues(config);
   if (stateSecretProblems.length > 0) {
     stateSecretProblems.forEach(problem => logger.error(problem));
+    process.exit(1);
+  }
+}
+
+if (config.PRIVATE_UPLOAD_QURL) {
+  const privateUploadMissing = [
+    'PRIVATE_UPLOAD_SIGNER_PRIVATE_KEY_PEM',
+    'PRIVATE_UPLOAD_SIGNER_CLIENT_ID',
+    'PRIVATE_UPLOAD_SIGNER_KEY_ID',
+    'QURL_LINK_DOMAIN',
+    'QURL_DEPLOYMENT',
+  ].filter(key => !(key === 'QURL_LINK_DOMAIN' ? config[key] : process.env[key])?.trim());
+  if (privateUploadMissing.length > 0) {
+    logger.error(`PRIVATE_UPLOAD_QURL is set but private upload configuration is incomplete: ${privateUploadMissing.join(', ')}`);
     process.exit(1);
   }
 }
@@ -657,6 +673,7 @@ async function gracefulShutdown(code = 0) {
     // actually running per process (combined + flag-on is rejected
     // at boot), so the sequencing matters only as documentation.
     await eventPublisher.stop();
+    await closePrivateUploader();
     // Clear gateway-metrics timers BEFORE discordShutdown(): a stray
     // heartbeat tick during client.destroy() would race with the
     // WebSocketShard teardown and surface as a confusing "Sampler
@@ -1011,6 +1028,17 @@ async function start() {
   // assumption ever weakens.
   if (isHttp && !isGateway) {
     await initHttpOnly({ client, config, refreshCache, logger });
+  }
+
+  // Every role that executes Discord commands needs the private uploader.
+  // Warm its one process-level NHP 1.1 session before command intake begins.
+  if (shouldStartPrivateUploader({
+    isGateway,
+    isHttp,
+    eventShipperEnabled: config.ENABLE_EVENT_SHIPPER,
+    privateUploadQurl: config.PRIVATE_UPLOAD_QURL,
+  })) {
+    await startPrivateUploader();
   }
 
   // HTTP listener.

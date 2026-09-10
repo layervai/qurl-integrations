@@ -67,6 +67,8 @@ describe('guild configs', () => {
     expect(input.ExpressionAttributeValues[':b']).toBe('configurer');
     expect(input.ExpressionAttributeValues[':u']).toBeDefined();
     expect(input.UpdateExpression).toMatch(/if_not_exists\(configured_at, :u\)/);
+    expect(input.UpdateExpression).toMatch(/REMOVE qurl_api_key_id, qurl_binding_id/);
+    expect(input.ConditionExpression).toBe('attribute_not_exists(qurl_binding_id)');
     expect(input.UpdateExpression).not.toMatch(/, configured_at = :u\b/);
     expect(input.UpdateExpression).not.toMatch(/^SET configured_at = :u\b/);
   });
@@ -77,6 +79,34 @@ describe('guild configs', () => {
     });
     const result = await store.getGuildApiKey('g-1');
     expect(result).toBe('plain-key');
+  });
+
+  test('external binding credentials persist and read as one guild record', async () => {
+    ddbMock.on(UpdateCommand).resolves({});
+    await store.setGuildApiKey('g-1', 'plain-key', 'configurer', {
+      keyId: 'key_A1b2C3d4E5f6',
+      bindingId: 'eib_A1b2C3d4E5f',
+    });
+    const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
+    expect(input.ExpressionAttributeValues).toMatchObject({
+      ':kid': 'key_A1b2C3d4E5f6',
+      ':bid': 'eib_A1b2C3d4E5f',
+    });
+    expect(input.ExpressionAttributeValues[':k']).not.toContain('plain-key');
+    expect(input.UpdateExpression).not.toContain(' REMOVE ');
+    expect(input.ConditionExpression).toBeUndefined();
+
+    ddbMock.reset();
+    ddbMock.on(GetCommand).resolves({ Item: {
+      qurl_api_key: `enc:v1:IV:TAG:${Buffer.from('plain-key').toString('hex')}`,
+      qurl_api_key_id: 'key_A1b2C3d4E5f6',
+      qurl_binding_id: 'eib_A1b2C3d4E5f',
+    } });
+    await expect(store.getGuildQurlCredential('g-1')).resolves.toEqual({
+      apiKey: 'plain-key',
+      keyId: 'key_A1b2C3d4E5f6',
+      bindingId: 'eib_A1b2C3d4E5f',
+    });
   });
 
   test('getGuildConfig: strips qurl_api_key from returned object', async () => {
@@ -1398,9 +1428,35 @@ describe('qurl sends', () => {
     const items = await store.getSendItems('s1', 'owner', { consistentRead: true });
     const query = ddbMock.commandCalls(QueryCommand)[0].args[0].input;
     expect(query.ConsistentRead).toBe(true);
+    // This is a base-table query with no ProjectionExpression, so DynamoDB
+    // returns every stored attribute, including the sparse qurl_id. Pin both
+    // properties: a future GSI/projection optimization must not silently drop
+    // the connector-child identity needed by revokeAllLinks.
+    expect(query.IndexName).toBeUndefined();
+    expect(query.ProjectionExpression).toBeUndefined();
     expect(items).toEqual([expect.objectContaining({
       resource_id: 'res-1', recipient_discord_id: 'r1', qurl_id: 'q_aaaaaaaaaa1',
     })]);
+  });
+
+  test('recordQURLSendBatch qurl_id round-trips through getSendItems for revoke', async () => {
+    ddbMock.on(BatchWriteCommand).resolves({});
+    await store.recordQURLSendBatch([{
+      sendId: 's1', senderDiscordId: 'owner', recipientDiscordId: 'r1',
+      resourceId: 'res-1', resourceType: 'file', qurlLink: 'https://…',
+      qurlId: 'q_aaaaaaaaaa1', expiresIn: '24h', channelId: 'ch', targetType: 'user',
+    }]);
+    const stored = ddbMock.commandCalls(BatchWriteCommand)[0]
+      .args[0].input.RequestItems['test-prefix-qurl-sends'][0].PutRequest.Item;
+    ddbMock.on(QueryCommand).resolves({ Items: [stored] });
+
+    await expect(store.getSendItems('s1', 'owner', { consistentRead: true }))
+      .resolves.toEqual([expect.objectContaining({
+        resource_id: 'res-1', recipient_discord_id: 'r1', qurl_id: 'q_aaaaaaaaaa1',
+      })]);
+    const query = ddbMock.commandCalls(QueryCommand)[0].args[0].input;
+    expect(query.IndexName).toBeUndefined();
+    expect(query.ProjectionExpression).toBeUndefined();
   });
 
   test('getSendItems: defaults to eventual consistency outside the revoke barrier path', async () => {

@@ -1517,14 +1517,24 @@ async function getSendItems(sendId, senderDiscordId, { consistentRead = false } 
 // ── Guild (BYOK) API keys ──
 
 async function getGuildApiKey(guildId) {
+  const credential = await getGuildQurlCredential(guildId);
+  return credential?.apiKey || null;
+}
+
+async function getGuildQurlCredential(guildId) {
   const res = await ddb.send(new GetCommand({
     TableName: TABLES.guild_configs,
     Key: { guild_id: guildId },
   }));
-  return res.Item ? decrypt(res.Item.qurl_api_key) : null;
+  if (!res.Item?.qurl_api_key) return null;
+  return {
+    apiKey: decrypt(res.Item.qurl_api_key),
+    keyId: res.Item.qurl_api_key_id || null,
+    bindingId: res.Item.qurl_binding_id || null,
+  };
 }
 
-async function setGuildApiKey(guildId, apiKey, configuredBy) {
+async function setGuildApiKey(guildId, apiKey, configuredBy, { keyId, bindingId } = {}) {
   const now = nowIso();
   // SQLite's `ON CONFLICT(guild_id) DO UPDATE SET qurl_api_key=…,
   // configured_by=…, updated_at=…` deliberately preserved
@@ -1534,15 +1544,30 @@ async function setGuildApiKey(guildId, apiKey, configuredBy) {
   // row, including resetting configured_at. Mirror createLink's
   // shape: UpdateCommand with `if_not_exists(configured_at, :u)`
   // so first-write sets it and re-keys leave it alone.
+  let updateExpression = 'SET qurl_api_key = :k, configured_by = :b, updated_at = :u, configured_at = if_not_exists(configured_at, :u)';
+  const values = {
+    ':k': encrypt(apiKey),
+    ':b': configuredBy,
+    ':u': now,
+  };
+  if (keyId !== undefined || bindingId !== undefined) {
+    if (typeof keyId !== 'string' || !/^key_[A-Za-z0-9]{12}$/.test(keyId)
+        || typeof bindingId !== 'string' || !/^eib_[A-Za-z0-9]{11}$/.test(bindingId)) {
+      throw new Error('external identity binding credentials are invalid');
+    }
+    updateExpression += ', qurl_api_key_id = :kid, qurl_binding_id = :bid';
+    values[':kid'] = keyId;
+    values[':bid'] = bindingId;
+  } else {
+    updateExpression += ' REMOVE qurl_api_key_id, qurl_binding_id';
+  }
   await ddb.send(new UpdateCommand({
     TableName: TABLES.guild_configs,
     Key: { guild_id: guildId },
-    UpdateExpression: 'SET qurl_api_key = :k, configured_by = :b, updated_at = :u, configured_at = if_not_exists(configured_at, :u)',
-    ExpressionAttributeValues: {
-      ':k': encrypt(apiKey),
-      ':b': configuredBy,
-      ':u': now,
-    },
+    UpdateExpression: updateExpression,
+    ExpressionAttributeValues: values,
+    // A flag rollback must not discard the live external binding and its key.
+    ...(bindingId === undefined ? { ConditionExpression: 'attribute_not_exists(qurl_binding_id)' } : {}),
   }));
 }
 
@@ -1854,7 +1879,7 @@ module.exports = {
   // QURL views (webhook-fed)
   recordQurlView, getQurlViews,
   // Guild configs
-  getGuildApiKey, setGuildApiKey, _removeGuildApiKeyRaw, getGuildConfig, getGuildConfigWithApiKey,
+  getGuildApiKey, getGuildQurlCredential, setGuildApiKey, _removeGuildApiKeyRaw, getGuildConfig, getGuildConfigWithApiKey,
   // Per-guild webhook subscriptions (BYOK view counter)
   setGuildWebhookSubscription, clearGuildWebhookSubscription,
   listGuildSubscriptionsByOwner, scanGuildSubscriptions, propagateGuildWebhookSubscription,

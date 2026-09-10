@@ -573,6 +573,14 @@ function shouldRegisterInteractionListener({ isGateway, isHttp, eventShipperEnab
   return (isGateway && !eventShipperEnabled) || (isHttp && eventShipperEnabled);
 }
 
+// The private uploader must be warm in every process that can execute a
+// Discord interaction. This includes the production HTTP worker and the
+// legacy gateway or combined roles when the event shipper is off.
+function shouldStartPrivateUploader({ isGateway, isHttp, eventShipperEnabled, privateUploadQurl }) {
+  return Boolean(privateUploadQurl)
+    && shouldRegisterInteractionListener({ isGateway, isHttp, eventShipperEnabled });
+}
+
 module.exports = {
   bootRequired,
   prodRequired,
@@ -588,6 +596,7 @@ module.exports = {
   invalidHotStandbyValues,
   invalidStateSecretValues,
   shouldRegisterInteractionListener,
+  shouldStartPrivateUploader,
   missingMapCommandKeys,
   GOOGLE_MAPS_API_KEY_PLACEHOLDER_SENTINEL,
   VALID_PROCESS_ROLES,

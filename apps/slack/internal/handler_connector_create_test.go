@@ -110,3 +110,25 @@ func TestConnectorCreateNonQuotaErrorsStaySanitized(t *testing.T) {
 		t.Errorf("wrapped quota without reference = %q", got)
 	}
 }
+
+func TestConnectorCreateQuotaDoesNotGuessWhichLimit(t *testing.T) {
+	t.Parallel()
+	for _, detail := range []string{
+		"quota exceeded: protected resource limit reached (10/10)",
+		"quota exceeded: monthly data transfer limit reached (10.0 GiB of 10.0 GiB)",
+	} {
+		got := connectorResourceCreateErrorMessage(&client.APIError{
+			StatusCode: http.StatusForbidden, Code: "quota_exceeded", Detail: detail, RequestID: "ref-quota",
+		})
+		for _, want := range []string{"account quota", "protected resource limit", "monthly data", "next calendar month", "upgrade", "ref-quota", "No enrollment token was minted"} {
+			if !strings.Contains(got, want) {
+				t.Errorf("quota reply missing %q: %s", want, got)
+			}
+		}
+		for _, forbidden := range []string{"has reached its protected resource limit", "Existing resources can still be shared", detail} {
+			if strings.Contains(got, forbidden) {
+				t.Errorf("quota reply guesses a limit or leaks detail: %s", got)
+			}
+		}
+	}
+}

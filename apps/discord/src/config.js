@@ -118,6 +118,23 @@ function normalizeBaseUrl(raw) {
   return value;
 }
 
+// Invalid private-only configuration is reported by the private boot gate.
+function normalizeQurlLinkDomain(raw) {
+  const value = raw?.trim().toLowerCase();
+  if (!value) return null;
+  let url;
+  try {
+    url = new URL(`https://${value}`);
+  } catch {
+    return null;
+  }
+  if (url.hostname !== value || url.port || url.username || url.password
+      || url.pathname !== '/' || url.search || url.hash) {
+    return null;
+  }
+  return url.hostname;
+}
+
 // Safe int parser: handles NaN and falsy-zero correctly.
 //
 // Options:
@@ -381,6 +398,17 @@ module.exports = {
   QURL_API_KEY: process.env.QURL_API_KEY,
   QURL_ENDPOINT: process.env.QURL_ENDPOINT
     || (process.env.NODE_ENV === 'production' ? 'https://api.layerv.ai' : 'http://localhost:8080'),
+  // Must match qurl-service's QURL_LINK_DOMAIN. The private delegated-mint
+  // response is rejected unless every share link uses this exact HTTPS origin.
+  QURL_LINK_DOMAIN: normalizeQurlLinkDomain(process.env.QURL_LINK_DOMAIN),
+
+  // Dormant private-upload v1 consumer. Presence of PRIVATE_UPLOAD_QURL is
+  // the only enablement switch. The qURL and signer key are secrets; the
+  // deployment trust document and signer IDs are public configuration.
+  PRIVATE_UPLOAD_QURL: process.env.PRIVATE_UPLOAD_QURL?.trim() || null,
+  PRIVATE_UPLOAD_SIGNER_PRIVATE_KEY_PEM: process.env.PRIVATE_UPLOAD_SIGNER_PRIVATE_KEY_PEM,
+  PRIVATE_UPLOAD_SIGNER_CLIENT_ID: process.env.PRIVATE_UPLOAD_SIGNER_CLIENT_ID?.trim(),
+  PRIVATE_UPLOAD_SIGNER_KEY_ID: process.env.PRIVATE_UPLOAD_SIGNER_KEY_ID?.trim(),
 
   // Slug of the qURL reverse-tunnel resource that fronts the watermark-detect
   // endpoint (#1101). connector.js's resolveDetectTarget() resolves this slug to
@@ -450,8 +478,8 @@ module.exports = {
   // to the desired bound in their env; the voice-everyone path will then
   // partial-resolve up to that bound rather than refusing.
   // Operational implications a max-size send carries:
-  //   - up to ceil(20000/TOKENS_PER_RESOURCE) = 2000 re-uploads to
-  //     qurl-service per send (`mintLinksInBatches`).
+  //   - up to 2000 public mint requests against one resource, or 200
+  //     private uploads with one delegated capability per 100 recipients.
   //   - DM delivery is bounded by Discord's per-bot DM rate limit
   //     (~5/sec); a 20k send takes >1 hour to finish DM fan-out, and
   //     `monitorLinkStatus`'s interval-based progress tracking must

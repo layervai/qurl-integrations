@@ -1288,21 +1288,31 @@ type QuotaOutput struct {
 }
 
 // RateLimits holds rate limit configuration.
+// TODO(upstream-contract): qurl-service /v1/quota uses -1 for unlimited limits.
+// Pointers preserve missing/null fields from older services as unknown, not zero.
 type RateLimits struct {
-	CreatePerMinute  int `json:"create_per_minute"`
-	CreatePerHour    int `json:"create_per_hour"`
-	ListPerMinute    int `json:"list_per_minute"`
-	ResolvePerMinute int `json:"resolve_per_minute"`
-	MaxActiveQURLs   int `json:"max_active_qurls"`
-	MaxTokensPerQURL int `json:"max_tokens_per_qurl"`
+	CreatePerMinute      int    `json:"create_per_minute"`
+	CreatePerHour        int    `json:"create_per_hour"`
+	ListPerMinute        int    `json:"list_per_minute"`
+	ResolvePerMinute     int    `json:"resolve_per_minute"`
+	MaxActiveResources   *int   `json:"max_active_resources,omitempty"`
+	MaxQURLs             *int   `json:"max_qurls,omitempty"`
+	MaxDataTransferBytes *int64 `json:"max_data_transfer_bytes,omitempty"`
+	// MaxActiveQURLs is the legacy protected-resource limit, not a qURL limit.
+	MaxActiveQURLs   *int `json:"max_active_qurls,omitempty"`
+	MaxTokensPerQURL *int `json:"max_tokens_per_qurl,omitempty"`
 }
 
 // UsageInfo holds usage statistics.
 type UsageInfo struct {
-	QURLsCreated       int     `json:"qurls_created"`
-	ActiveQURLs        int     `json:"active_qurls"`
-	ActiveQURLsPercent float64 `json:"active_qurls_percent"`
-	TotalAccesses      int     `json:"total_accesses"`
+	QURLsCreated           *int     `json:"qurls_created,omitempty"`
+	ActiveResources        *int     `json:"active_resources,omitempty"`
+	ActiveResourcesPercent *float64 `json:"active_resources_percent,omitempty"`
+	DataTransferBytes      *int64   `json:"data_transfer_bytes,omitempty"`
+	// ActiveQURLs is the legacy protected-resource count, not a qURL count.
+	ActiveQURLs        *int     `json:"active_qurls,omitempty"`
+	ActiveQURLsPercent *float64 `json:"active_qurls_percent,omitempty"`
+	TotalAccesses      int      `json:"total_accesses"`
 }
 
 // GetQuota retrieves quota information.
