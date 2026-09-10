@@ -205,7 +205,7 @@ func changeShareState(ctx context.Context, opts *globalOpts, id, action string) 
 	if err := daemon.Ensure(ctx); err != nil {
 		return compensateShareChange(err, compensateOff, client, registry, local, sharing)
 	}
-	sharing, err = waitForSharingWithDiagnostics(ctx, client, local, stateDir, sharing.ServingEpoch, opts.sharingWaitLimit)
+	sharing, err = waitForSharingWithDiagnostics(ctx, opts, client, local, stateDir, sharing.ServingEpoch)
 	if err != nil {
 		return err
 	}
@@ -412,7 +412,11 @@ func convergeStoppedLocalShare(ctx context.Context, opts *globalOpts, lookup loc
 		if logErr != nil {
 			return "", errors.Join(lookup.err, logErr)
 		}
-		_, reloadErr := opts.newShareDaemon(lookup.stateDir, logDir).ReloadIfRunning(ctx)
+		daemon, daemonErr := opts.newShareDaemon(lookup.stateDir, logDir)
+		if daemonErr != nil {
+			return "", errors.Join(lookup.err, daemonErr)
+		}
+		_, reloadErr := daemon.ReloadIfRunning(ctx)
 		return "", errors.Join(lookup.err, reloadErr)
 	}
 	local, stateDir := lookup.share, lookup.stateDir
@@ -439,7 +443,11 @@ func convergeStoppedLocalShare(ctx context.Context, opts *globalOpts, lookup loc
 	if err != nil {
 		return target, err
 	}
-	if _, err := opts.newShareDaemon(stateDir, logDir).ReloadIfRunning(ctx); err != nil {
+	daemon, err := opts.newShareDaemon(stateDir, logDir)
+	if err != nil {
+		return target, err
+	}
+	if _, err := daemon.ReloadIfRunning(ctx); err != nil {
 		return target, err
 	}
 	return target, nil
@@ -507,7 +515,11 @@ func openShareControl(opts *globalOpts) (localShareRegistry, shareDaemonControll
 	if err != nil {
 		return nil, nil, "", err
 	}
-	return registry, opts.newShareDaemon(stateDir, logDir), stateDir, nil
+	daemon, err := opts.newShareDaemon(stateDir, logDir)
+	if err != nil {
+		return nil, nil, "", err
+	}
+	return registry, daemon, stateDir, nil
 }
 
 func inspectLocalSharing(ctx context.Context, opts *globalOpts, local *connectorstate.LocalShare, stateDir string,
@@ -549,10 +561,12 @@ func inspectLocalSharing(ctx context.Context, opts *globalOpts, local *connector
 	if stateDir == "" {
 		return opts.printer().InspectSharing(&inspection)
 	}
+	socketPath, err := connectordaemon.SocketPathForStateDir(stateDir, opts.lookupEnv)
+	if err != nil {
+		return err
+	}
 	statusCtx, cancelStatus := context.WithTimeout(ctx, time.Second)
-	status, running, statusErr := (connectordaemon.IPCClient{
-		SocketPath: connectordaemon.StateSocketPath(stateDir),
-	}).Status(statusCtx)
+	status, running, statusErr := (connectordaemon.IPCClient{SocketPath: socketPath}).Status(statusCtx)
 	cancelStatus()
 	if statusErr != nil {
 		if running {
@@ -585,17 +599,21 @@ func inspectLocalSharing(ctx context.Context, opts *globalOpts, local *connector
 	return opts.printer().InspectSharing(&inspection)
 }
 
-func waitForSharingWithDiagnostics(ctx context.Context, client qurlapi.Client, local *connectorstate.LocalShare,
-	stateDir string, epoch uint64, limit time.Duration,
+func waitForSharingWithDiagnostics(ctx context.Context, opts *globalOpts, client qurlapi.Client,
+	local *connectorstate.LocalShare, stateDir string, epoch uint64,
 ) (*qurlapi.Sharing, error) {
-	sharing, err := waitForSharing(ctx, client, local, epoch, limit)
+	sharing, err := waitForSharing(ctx, client, local, epoch, opts.sharingWaitLimit)
 	if err == nil || local == nil || stateDir == "" {
 		return sharing, err
 	}
 	if ctx.Err() != nil {
 		return nil, err
 	}
-	status, running, statusErr := settledSharingDaemonStatus(ctx, stateDir, local.ResourceID)
+	socketPath, socketErr := connectordaemon.SocketPathForStateDir(stateDir, opts.lookupEnv)
+	if socketErr != nil {
+		return nil, fmt.Errorf("qURL share did not become ready (daemon socket unresolved: %w): %w", socketErr, err)
+	}
+	status, running, statusErr := settledSharingDaemonStatus(ctx, socketPath, local.ResourceID)
 	if statusErr != nil {
 		return nil, fmt.Errorf("qURL share did not become ready (daemon state unavailable): %w", err)
 	}
@@ -628,10 +646,10 @@ func waitForSharingWithDiagnostics(ctx context.Context, client qurlapi.Client, l
 // deadline expires. A single IPC sample can therefore see only "starting".
 // This poll never extends recovery, and a terminal or already-diagnostic state
 // returns immediately.
-func settledSharingDaemonStatus(ctx context.Context, stateDir, resourceID string) (connectordaemon.IPCStatus, bool, error) {
+func settledSharingDaemonStatus(ctx context.Context, socketPath, resourceID string) (connectordaemon.IPCStatus, bool, error) {
 	settleCtx, cancel := context.WithTimeout(ctx, sharingDiagnosticSettleLimit)
 	defer cancel()
-	client := connectordaemon.IPCClient{SocketPath: connectordaemon.StateSocketPath(stateDir)}
+	client := connectordaemon.IPCClient{SocketPath: socketPath}
 	var lastStatus connectordaemon.IPCStatus
 	var lastRunning bool
 	var lastErr error

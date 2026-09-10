@@ -37,7 +37,7 @@ func runDaemonUntilReady(t *testing.T, stateDir string, args ...string) (*runRes
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	client := connectordaemon.IPCClient{SocketPath: connectordaemon.StateSocketPath(stateDir)}
+	client := connectordaemon.IPCClient{SocketPath: stateSocketPath(t, stateDir)}
 	statuses := make(chan connectordaemon.IPCStatus, 1)
 	go func() {
 		defer cancel()
@@ -99,8 +99,8 @@ func TestDaemonRunExternalEstablishesMarker(t *testing.T) {
 	if second.code != 130 {
 		t.Fatalf("supervised daemon stop = exit %d stderr %s, want the cancellation exit", second.code, second.stderr.String())
 	}
-	if status.JobVersion != "3/test" || status.Pid != os.Getpid() {
-		t.Fatalf("external daemon status = %+v, want job version 3/test and pid %d", status, os.Getpid())
+	if status.JobVersion != "4/test" || status.Pid != os.Getpid() {
+		t.Fatalf("external daemon status = %+v, want job version 4/test and pid %d", status, os.Getpid())
 	}
 	after, err := os.Stat(markerPath)
 	if err != nil || !os.SameFile(before, after) {

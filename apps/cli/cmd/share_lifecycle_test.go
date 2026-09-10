@@ -529,11 +529,11 @@ func TestWaitForSharingIncludesRedactedDaemonRootCause(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	server := &connectordaemon.IPCServer{
-		SocketPath: connectordaemon.StateSocketPath(stateDir), Manager: manager, JobVersion: "1/test",
+		SocketPath: stateSocketPath(t, stateDir), Manager: manager, JobVersion: "1/test",
 	}
 	go func() { done <- server.Run(ctx) }()
 	readyCtx, readyCancel := context.WithTimeout(context.Background(), time.Second)
-	if err := (connectordaemon.IPCClient{SocketPath: connectordaemon.StateSocketPath(stateDir)}).WaitReady(readyCtx); err != nil {
+	if err := (connectordaemon.IPCClient{SocketPath: stateSocketPath(t, stateDir)}).WaitReady(readyCtx); err != nil {
 		readyCancel()
 		cancel()
 		t.Fatal(err)
@@ -542,8 +542,8 @@ func TestWaitForSharingIncludesRedactedDaemonRootCause(t *testing.T) {
 	waitCmdCondition(t, func() bool {
 		return manager.Diagnostics()["resource-a"].RetryAttempt == 3
 	}, "route reaches retry attempt 3")
-	_, err = waitForSharingWithDiagnostics(context.Background(), sharingErrorClient{err: errors.New("temporary poll failure")},
-		&local, stateDir, 1, 10*time.Millisecond)
+	_, err = waitForSharingWithDiagnostics(context.Background(), &globalOpts{sharingWaitLimit: 10 * time.Millisecond},
+		sharingErrorClient{err: errors.New("temporary poll failure")}, &local, stateDir, 1)
 	for _, want := range []string{"failure category platform_denied", "failure code 52005", "retry attempt 3"} {
 		if err == nil || !strings.Contains(err.Error(), want) {
 			cancel()
@@ -588,18 +588,18 @@ func TestWaitForSharingSettlesStartingDiagnosticIntoRetryCause(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	server := &connectordaemon.IPCServer{
-		SocketPath: connectordaemon.StateSocketPath(stateDir), Manager: manager, JobVersion: "1/test",
+		SocketPath: stateSocketPath(t, stateDir), Manager: manager, JobVersion: "1/test",
 	}
 	go func() { done <- server.Run(ctx) }()
 	readyCtx, readyCancel := context.WithTimeout(context.Background(), time.Second)
-	if err := (connectordaemon.IPCClient{SocketPath: connectordaemon.StateSocketPath(stateDir)}).WaitReady(readyCtx); err != nil {
+	if err := (connectordaemon.IPCClient{SocketPath: stateSocketPath(t, stateDir)}).WaitReady(readyCtx); err != nil {
 		readyCancel()
 		cancel()
 		t.Fatal(err)
 	}
 	readyCancel()
-	_, err = waitForSharingWithDiagnostics(context.Background(), sharingErrorClient{err: errors.New("temporary poll failure")},
-		&local, stateDir, 1, 10*time.Millisecond)
+	_, err = waitForSharingWithDiagnostics(context.Background(), &globalOpts{sharingWaitLimit: 10 * time.Millisecond},
+		sharingErrorClient{err: errors.New("temporary poll failure")}, &local, stateDir, 1)
 	if err == nil || !strings.Contains(err.Error(), "failure category platform_denied") ||
 		!strings.Contains(err.Error(), "failure code 52029") || !strings.Contains(err.Error(), "retry attempt 1") {
 		cancel()
@@ -620,19 +620,19 @@ func TestWaitForSharingReportsMissingDaemonResourceDiagnostic(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	server := &connectordaemon.IPCServer{
-		SocketPath: connectordaemon.StateSocketPath(stateDir), Manager: manager, JobVersion: "1/test",
+		SocketPath: stateSocketPath(t, stateDir), Manager: manager, JobVersion: "1/test",
 	}
 	go func() { done <- server.Run(ctx) }()
 	readyCtx, readyCancel := context.WithTimeout(context.Background(), time.Second)
-	if err := (connectordaemon.IPCClient{SocketPath: connectordaemon.StateSocketPath(stateDir)}).WaitReady(readyCtx); err != nil {
+	if err := (connectordaemon.IPCClient{SocketPath: stateSocketPath(t, stateDir)}).WaitReady(readyCtx); err != nil {
 		readyCancel()
 		cancel()
 		t.Fatal(err)
 	}
 	readyCancel()
 	local := &connectorstate.LocalShare{ResourceID: "resource-a", CRID: "crid-a", ServingEpoch: 1}
-	_, err = waitForSharingWithDiagnostics(context.Background(), sharingErrorClient{err: errors.New("temporary poll failure")},
-		local, stateDir, 1, 10*time.Millisecond)
+	_, err = waitForSharingWithDiagnostics(context.Background(), &globalOpts{sharingWaitLimit: 10 * time.Millisecond},
+		sharingErrorClient{err: errors.New("temporary poll failure")}, local, stateDir, 1)
 	if err == nil || !strings.Contains(err.Error(), "daemon running, resource diagnostic absent") ||
 		!strings.Contains(err.Error(), "temporary poll failure") {
 		cancel()
@@ -661,9 +661,8 @@ func TestWaitForSharingWithDiagnosticsPreservesCallerCancellation(t *testing.T) 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	pollErr := errors.New("poll interrupted")
-	_, err := waitForSharingWithDiagnostics(ctx, sharingErrorClient{err: pollErr}, &connectorstate.LocalShare{
-		ResourceID: "resource-a", CRID: "crid-a",
-	}, connectorStateTestDir(t), 1, time.Minute)
+	_, err := waitForSharingWithDiagnostics(ctx, &globalOpts{sharingWaitLimit: time.Minute}, sharingErrorClient{err: pollErr},
+		&connectorstate.LocalShare{ResourceID: "resource-a", CRID: "crid-a"}, connectorStateTestDir(t), 1)
 	if !errors.Is(err, context.Canceled) || !errors.Is(err, pollErr) || strings.Contains(err.Error(), "daemon state") {
 		t.Fatalf("canceled diagnosed wait error = %v, want the unmodified caller cancellation", err)
 	}
@@ -1261,11 +1260,11 @@ func TestShareInspectKeepsAuthoritativeStoppedStateOverStaleDaemonDiagnostic(t *
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	server := &connectordaemon.IPCServer{
-		SocketPath: connectordaemon.StateSocketPath(stateDir), Manager: manager, JobVersion: "1/test",
+		SocketPath: stateSocketPath(t, stateDir), Manager: manager, JobVersion: "1/test",
 	}
 	go func() { done <- server.Run(ctx) }()
 	readyCtx, readyCancel := context.WithTimeout(context.Background(), time.Second)
-	if err := (connectordaemon.IPCClient{SocketPath: connectordaemon.StateSocketPath(stateDir)}).WaitReady(readyCtx); err != nil {
+	if err := (connectordaemon.IPCClient{SocketPath: stateSocketPath(t, stateDir)}).WaitReady(readyCtx); err != nil {
 		readyCancel()
 		cancel()
 		t.Fatal(err)
@@ -3203,7 +3202,7 @@ func resolvedLocalResource(srv *apitest.Server, found bool) localResourceResolve
 }
 
 func foregroundIPCTestDaemon(started, stopped chan struct{}) func(context.Context, *globalOpts, string, string) error {
-	return func(ctx context.Context, _ *globalOpts, stateDir, jobVersion string) error {
+	return func(ctx context.Context, opts *globalOpts, stateDir, jobVersion string) error {
 		defer close(stopped)
 		manager, err := connectordaemon.NewManager(emptyForegroundRegistry{}, emptyForegroundFactory{})
 		if err != nil {
@@ -3211,7 +3210,10 @@ func foregroundIPCTestDaemon(started, stopped chan struct{}) func(context.Contex
 		}
 		runCtx, cancelRun := context.WithCancel(ctx)
 		defer cancelRun()
-		path := connectordaemon.StateSocketPath(stateDir)
+		path, err := connectordaemon.SocketPathForStateDir(stateDir, opts.lookupEnv)
+		if err != nil {
+			return err
+		}
 		done := make(chan error, 1)
 		go func() {
 			done <- (&connectordaemon.IPCServer{

@@ -16,10 +16,7 @@ import (
 	"time"
 )
 
-const (
-	maxUnixSocketPathBytes = 100
-	unixIPCRuntimeRoot     = "/tmp"
-)
+const maxUnixSocketPathBytes = 100
 
 var dialUnixSocket = func(path string, timeout time.Duration) (net.Conn, error) {
 	return net.DialTimeout("unix", path, timeout)
@@ -99,21 +96,37 @@ func validatePlatformIPCPath(path string) error {
 	return nil
 }
 
-func platformStateSocketPath(path string) string {
-	path = filepath.Clean(path)
-	if !filepath.IsAbs(path) || len(path) <= maxUnixSocketPathBytes {
-		return path
+// platformSocketPath places the socket in runtimeDir when one is pinned,
+// below a state directory that fits sockaddr_un otherwise, and in a bounded
+// owner-only per-user directory below the temp root as the last resort.
+func platformSocketPath(stateDir, runtimeDir string) (string, error) {
+	if runtimeDir != "" {
+		path := filepath.Join(runtimeDir, SocketFile)
+		if len(path) > maxUnixSocketPathBytes {
+			return "", fmt.Errorf("%s socket path is too long: %d bytes exceeds the %d-byte socket limit", RuntimeDirEnv, len(path), maxUnixSocketPathBytes)
+		}
+		return path, nil
+	}
+	path := filepath.Join(stateDir, SocketFile)
+	if len(path) <= maxUnixSocketPathBytes {
+		return path, nil
 	}
 	digest := sha256.Sum256([]byte(path))
 	// IPCServer.Run passes this predictable directory through EnsureDirMode
 	// before listen. That helper rejects a symlink or a directory owned by any
-	// other user before it changes permissions, so a /tmp pre-creation can only
-	// make startup fail closed.
-	return filepath.Join(
-		unixIPCRuntimeRoot,
-		"layerv-qurl-"+strconv.Itoa(os.Geteuid()),
-		hex.EncodeToString(digest[:16])+".sock",
+	// other user before it changes permissions, so a pre-creation below the
+	// shared temp root can only make startup fail closed. The fixed root makes
+	// foreground daemons and clients agree even when their TMPDIR differs.
+	const runtimeRoot = "/tmp"
+	path = filepath.Join(
+		runtimeRoot,
+		"qurl-"+strconv.Itoa(os.Geteuid())+"-"+hex.EncodeToString(digest[:8]),
+		SocketFile,
 	)
+	if len(path) > maxUnixSocketPathBytes {
+		return "", fmt.Errorf("share daemon socket path is too long below both the state and temp directories; set %s to a short owner-only directory", RuntimeDirEnv)
+	}
+	return path, nil
 }
 
 func prepareSocket(path string) error {

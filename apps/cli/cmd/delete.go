@@ -120,7 +120,11 @@ func cleanupDeletedLocalShare(ctx context.Context, opts *globalOpts, id string) 
 	// socket file. On Windows the same logical address maps to a named pipe and
 	// has no filesystem entry. ReloadIfRunning is side-effect free when no
 	// daemon exists: it neither installs nor starts a background job.
-	_, err = opts.newShareDaemon(stateDir, logDir).ReloadIfRunning(ctx)
+	daemon, err := opts.newShareDaemon(stateDir, logDir)
+	if err != nil {
+		return err
+	}
+	_, err = daemon.ReloadIfRunning(ctx)
 	return err
 }
 

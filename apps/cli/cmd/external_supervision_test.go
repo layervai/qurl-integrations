@@ -85,7 +85,11 @@ func TestShareDaemonJobCarriesTheResolvedSupervision(t *testing.T) {
 	opts.resolvedShareGroupMode = connectordaemon.GroupModeSingle
 	opts.resolvedSupervision = connectorstate.RuntimeSupervisionExternal
 	dir := t.TempDir()
-	controller, ok := opts.newShareDaemon(filepath.Join(dir, "state"), filepath.Join(dir, "logs")).(*connectordaemon.JobController)
+	daemon, err := opts.newShareDaemon(filepath.Join(dir, "state"), filepath.Join(dir, "logs"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller, ok := daemon.(*connectordaemon.JobController)
 	if !ok {
 		t.Fatalf("production share daemon controller is %T, want the native job controller", controller)
 	}

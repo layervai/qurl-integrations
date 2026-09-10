@@ -79,12 +79,12 @@ func TestShareGroupModeRejectsUnknownValuesAtEachSource(t *testing.T) {
 // start the daemon in another, so a definition change is always a restart in
 // the new mode rather than a silent divergence.
 func TestDaemonRunRejectsAJobVersionForAnotherMode(t *testing.T) {
-	res := runCLI(t, &runOpts{args: []string{"daemon", "run", "--job-version", "3/test", "--share-group-mode", "per-share"}})
-	if res.code != 1 || !strings.Contains(res.stderr.String(), `does not match binary "3/test/per-share"`) {
+	res := runCLI(t, &runOpts{args: []string{"daemon", "run", "--job-version", "4/test", "--share-group-mode", "per-share"}})
+	if res.code != 1 || !strings.Contains(res.stderr.String(), `does not match binary "4/test/per-share"`) {
 		t.Fatalf("mode-mismatched job version = exit %d stderr %q", res.code, res.stderr.String())
 	}
-	single := runCLI(t, &runOpts{args: []string{"daemon", "run", "--job-version", "3/test/per-share", "--share-group-mode", "single"}})
-	if single.code != 1 || !strings.Contains(single.stderr.String(), `does not match binary "3/test"`) {
+	single := runCLI(t, &runOpts{args: []string{"daemon", "run", "--job-version", "4/test/per-share", "--share-group-mode", "single"}})
+	if single.code != 1 || !strings.Contains(single.stderr.String(), `does not match binary "4/test"`) {
 		t.Fatalf("single-mode daemon accepted a per-share job version: exit %d stderr %q", single.code, single.stderr.String())
 	}
 }
@@ -94,7 +94,11 @@ func TestShareDaemonJobCarriesTheResolvedShareGroupMode(t *testing.T) {
 	opts.resolvedEndpoint = config.DefaultEndpoint
 	opts.resolvedShareGroupMode = connectordaemon.GroupModePerShare
 	dir := t.TempDir()
-	controller, ok := opts.newShareDaemon(filepath.Join(dir, "state"), filepath.Join(dir, "logs")).(*connectordaemon.JobController)
+	daemon, err := opts.newShareDaemon(filepath.Join(dir, "state"), filepath.Join(dir, "logs"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller, ok := daemon.(*connectordaemon.JobController)
 	if !ok {
 		t.Fatalf("production share daemon controller is %T, want the native job controller", controller)
 	}

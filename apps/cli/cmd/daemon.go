@@ -239,7 +239,7 @@ here and to every qurl command it runs against the same state directory; those
 commands then reload this daemon and never install a background job.`,
 		Args: noArgs,
 	}
-	var stateDir, jobVersion, headlessConfig, enrollmentTokenFile string
+	var stateDir, runtimeDir, jobVersion, headlessConfig, enrollmentTokenFile string
 	var hubHost, hubServerPublicKeyB64 string
 	var hubPort int
 	run := &cobra.Command{
@@ -268,14 +268,11 @@ commands then reload this daemon and never install a background job.`,
 			if hasHubOverride {
 				hubOverride = &hubBootstrap
 			}
-			// An external supervisor reloads the daemon once it has pushed its
-			// runtime-only state; a foreground publish owns its share and
-			// reconciles at once.
-			deferFirstReconcile := opts.resolvedSupervision == connectorstate.RuntimeSupervisionExternal
-			return runShareDaemonWithDeployment(cmd.Context(), opts, stateDir, jobVersion, headlessConfig, enrollmentTokenFile, hubOverride, deferFirstReconcile)
+			return runShareDaemonWithDeployment(cmd.Context(), opts, stateDir, runtimeDir, jobVersion, headlessConfig, enrollmentTokenFile, hubOverride, opts.resolvedSupervision == connectorstate.RuntimeSupervisionExternal)
 		},
 	}
 	run.Flags().StringVar(&stateDir, "state-dir", "", "qURL share daemon state directory")
+	run.Flags().StringVar(&runtimeDir, "runtime-dir", "", "dedicated per-namespace directory for the qURL share daemon control socket (enforced mode 0700)")
 	run.Flags().StringVar(&jobVersion, "job-version", "", "qURL share daemon job definition version")
 	run.Flags().StringVar(&headlessConfig, "headless-config", "", "read-only version 2 YAML for one headless share")
 	run.Flags().StringVar(&enrollmentTokenFile, "enrollment-token-file", "", "one-time enrollment credential file for first headless bootstrap")
@@ -291,7 +288,7 @@ commands then reload this daemon and never install a background job.`,
 	run.Flags().StringVar(&hubHost, "hub-host", "", "pinned share-daemon Hub host")
 	run.Flags().IntVar(&hubPort, "hub-port", 0, "pinned share-daemon Hub port")
 	run.Flags().StringVar(&hubServerPublicKeyB64, "hub-server-public-key-b64", "", "pinned share-daemon Hub server public key")
-	for _, name := range []string{"hub-host", "hub-port", "hub-server-public-key-b64", "job-version", "job-stdout-log", "job-stderr-log"} {
+	for _, name := range []string{"hub-host", "hub-port", "hub-server-public-key-b64", "job-version", "job-stdout-log", "job-stderr-log", "runtime-dir"} {
 		_ = run.Flags().MarkHidden(name)
 	}
 	validateTestCRID := &cobra.Command{
@@ -340,11 +337,49 @@ func runShareDaemon(ctx context.Context, opts *globalOpts, stateDirOverride, job
 }
 
 func runShareDaemonWithBootstrap(ctx context.Context, opts *globalOpts, stateDirOverride, jobVersion, headlessConfigPath, enrollmentTokenPath string) (retErr error) {
-	return runShareDaemonWithDeployment(ctx, opts, stateDirOverride, jobVersion, headlessConfigPath, enrollmentTokenPath, nil, false)
+	return runShareDaemonWithDeployment(ctx, opts, stateDirOverride, "", jobVersion, headlessConfigPath, enrollmentTokenPath, nil, false)
 }
 
-func runShareDaemonWithDeployment(ctx context.Context, opts *globalOpts, stateDirOverride, jobVersion, headlessConfigPath, enrollmentTokenPath string, hubOverride *qurl.HubBootstrap, deferFirstReconcile bool) (retErr error) {
-	stateDir, err := supervisedShareStateDir(ctx, opts, stateDirOverride)
+// runtimeDirLookup lets an explicit --runtime-dir stand in for
+// QURL_CONNECTOR_RUNTIME_DIR. The native job passes the directory the
+// installing CLI resolved, so a daemon under launchd or systemd, whose
+// environment is not the user's shell, listens exactly where that CLI and
+// every later CLI invocation look.
+func runtimeDirLookup(runtimeDir string, lookupEnv func(string) (string, bool)) func(string) (string, bool) {
+	if strings.TrimSpace(runtimeDir) == "" {
+		return lookupEnv
+	}
+	return func(key string) (string, bool) {
+		if key == connectordaemon.RuntimeDirEnv {
+			return runtimeDir, true
+		}
+		if lookupEnv == nil {
+			return "", false
+		}
+		return lookupEnv(key)
+	}
+}
+
+// resolveDaemonPaths resolves the state directory and the control socket
+// before any durable write, so a bad runtime directory fails a start without
+// establishing supervision or binding an owner or a share.
+func resolveDaemonPaths(ctx context.Context, opts *globalOpts, stateDirOverride, runtimeDirOverride string) (stateDir, socketPath string, err error) {
+	stateDir, err = opts.resolveShareStateDir(stateDirOverride)
+	if err != nil {
+		return "", "", err
+	}
+	socketPath, err = connectordaemon.SocketPathForStateDir(stateDir, runtimeDirLookup(runtimeDirOverride, opts.lookupEnv))
+	if err != nil {
+		return "", "", err
+	}
+	if _, err := supervisedShareStateDir(ctx, opts, stateDir); err != nil {
+		return "", "", err
+	}
+	return stateDir, socketPath, nil
+}
+
+func runShareDaemonWithDeployment(ctx context.Context, opts *globalOpts, stateDirOverride, runtimeDirOverride, jobVersion, headlessConfigPath, enrollmentTokenPath string, hubOverride *qurl.HubBootstrap, deferFirstReconcile bool) (retErr error) {
+	stateDir, socketPath, err := resolveDaemonPaths(ctx, opts, stateDirOverride, runtimeDirOverride)
 	if err != nil {
 		return err
 	}
@@ -438,10 +473,7 @@ func runShareDaemonWithDeployment(ctx context.Context, opts *globalOpts, stateDi
 		return err
 	}
 	opts.redirectFRPLogs()
-	server := &connectordaemon.IPCServer{
-		SocketPath: connectordaemon.StateSocketPath(stateDir),
-		Manager:    manager, JobVersion: jobVersion,
-	}
+	server := &connectordaemon.IPCServer{SocketPath: socketPath, Manager: manager, JobVersion: jobVersion}
 	return server.Run(ctx)
 }
 
