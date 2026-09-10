@@ -90,7 +90,7 @@ func ValidateExternalEnrollmentTokenPath(path string) error {
 		!filepath.IsAbs(path) || filepath.Clean(path) != path {
 		return errors.New("external enrollment token file must be an absolute, clean path")
 	}
-	return nil
+	return validateExternalEnrollmentTokenPlatform()
 }
 
 func validExternalEnrollmentTokenInfo(info os.FileInfo) bool {

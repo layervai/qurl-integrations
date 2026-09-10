@@ -124,6 +124,6 @@ func (p *Printer) loginText(id *qurlapi.Identity) error {
 	tw := tabwriter.NewWriter(p.err, 0, 0, 2, ' ', 0)
 	twe := &errWriter{w: tw}
 	twe.printf("  %s\t%s\n", p.bold("Auth:"), id.AuthType)
-	twe.printf("  %s\t%s\n", p.bold("Account key:"), "consumed, not stored")
+	twe.printf("  %s\t%s\n", p.bold("Enrollment credential:"), "consumed, not stored")
 	return twe.flush(tw)
 }
