@@ -219,7 +219,9 @@ copy individual bindings or pending requests into the new state.
 
 ### Supervised installs
 
-These supervised-install options require qURL CLI 2.5.0 or newer.
+**Unreleased:** these supervised-install options describe the planned qURL
+CLI 2.5.0 release. Use the installed CLI's help for currently available
+commands; the examples below require the complete 2.5.0 feature set.
 
 A program that runs the daemon itself (see
 [External supervision](#external-supervision)) never hands qurl an account API
@@ -288,6 +290,10 @@ selected with `--profile` or `QURL_PROFILE`. A missing file simply means
 defaults apply. **Config files never hold secrets** — a file carrying an
 `api_key` entry is rejected outright rather than silently honored.
 
+The 2.5.0 supervisor flow also honors `QURL_CONNECTOR_STATE_DIR` (its durable
+state namespace) and the environment-only `QURL_CONNECTOR_RUNTIME_DIR` (its
+control socket directory); see [External supervision](#external-supervision).
+
 Also honored: `QURL_DEPLOYMENT` (the settings-file path used to verify share
 and access links; environment-only, with no profile override), `NO_COLOR` (disables color while `--color` is `auto`), and
 `QURL_BROWSER` / `BROWSER` (which browser `qurl get` opens). Pointing the
@@ -350,7 +356,8 @@ or require that file.
 
 #### External supervision
 
-The supervisor lifecycle below requires qURL CLI 2.5.0 or newer. Bootstrap
+**Unreleased:** the supervisor lifecycle below targets qURL CLI 2.5.0 and
+requires its token-file, sealed-state, and runtime-directory features. Bootstrap
 a fresh, dedicated state directory with the token-file login flow before
 starting the daemon; a directory already used by native supervision cannot
 be adopted in place.
@@ -363,7 +370,10 @@ directory with the same setting (flag `--supervision`, environment
 
 Use a dedicated, fresh state directory rather than the native default. Enroll
 with the one-shot token file described in [Supervised installs](#supervised-installs),
-then start the daemon:
+then start the daemon. For each command below, the supervising process must
+attach a fresh inherited key descriptor and set `LAYERV_KEY_PROVIDER` and
+`LAYERV_LOCAL_KEY_FD` as described above. Exporting a descriptor number alone
+does not supply the wrapping key:
 
 ```bash
 export QURL_CONNECTOR_STATE_DIR="$STATE_DIR"
@@ -373,14 +383,14 @@ qurl daemon run # keep running under the supervisor
 ```
 
 Once the daemon is running, lifecycle commands in another process use the same
-two environment settings. A dedicated state directory avoids marking the native
+state, supervision, and key-provider settings. A dedicated state directory avoids marking the native
 default namespace by accident; use a different directory to return to native
 supervision instead of deleting a marker beside durable credentials.
 
 External supervision changes three things:
 
-- Token-file login (or the first external daemon invocation) marks the state directory as
-  externally supervised (`runtime_mode.json`). It accepts only a directory
+- Token-file login (or the first external daemon invocation) marks the
+  state directory as externally supervised (`runtime_mode.json`). It accepts only a directory
   that holds no natively managed state, and the mark is permanent.
 - `publish`, `start`, and `restart` reload the running daemon and never
   install or replace a background job. When the daemon is not running they
@@ -420,14 +430,17 @@ then follows one lifecycle:
 
 The control socket is `<state dir>/daemon.sock` when that path fits the
 platform's socket-address limit, otherwise an owner-only per-user directory
-below `/tmp`. The environment-only `QURL_CONNECTOR_RUNTIME_DIR` pins it: set to a
-short absolute path (a relative one, or one whose socket path exceeds the
+below `/tmp`.
+
+The environment-only `QURL_CONNECTOR_RUNTIME_DIR` pins it: set to a short
+absolute path (a relative one, or one whose socket path exceeds the
 limit, is rejected), the daemon and every `qurl` command resolve exactly
 `<dir>/daemon.sock`, which is what a host whose state path is long — an app
 container, for example — needs. Use a separate dedicated directory for each
-state namespace. It must be owner-only (mode `0700`); the daemon secures it before it listens. Set the
-variable identically for the daemon and for every command that addresses the
+state namespace. It must be owner-only (mode `0700`); the daemon secures it
+before it listens. Set the variable identically for the daemon and for every command that addresses the
 same state directory. Windows named pipes have no length limit and ignore it.
+
 The socket speaks HTTP. When it is in the state directory:
 
 ```bash
@@ -435,18 +448,24 @@ curl --unix-socket "$STATE_DIR/daemon.sock" http://localhost/status
 curl --unix-socket "$STATE_DIR/daemon.sock" -X POST http://localhost/reload
 ```
 
+**Security prerequisite still unmet:** the CLI does not yet provision a
+trusted CA for FRP peer verification. Do not use runtime headers for secrets
+until authenticated TLS is configured; encryption alone leaves them exposed
+to an active intermediary.
+
 `PUT /overlay` attaches request headers to routes at runtime. The body is
 `{"route_request_headers": {"<connector_id>": {"Header-Name": "value"}}}`,
 keyed by each share's Connector ID — a supervisor should publish with an
-explicit `--id` so it knows this key. The daemon adds those headers to every request it forwards to that share's
-local origin, for example a process-random token the origin requires before
+explicit `--id` so it knows this key. The daemon adds those headers to every
+request it forwards to that share's local origin, for example a process-random token the origin requires before
 it serves anything. Each request replaces the whole overlay: a route the body
 does not name loses its headers, and `{"route_request_headers": {}}` clears
 it. A valid body is answered with 204. A body over 64 KiB, with unknown
 fields, with more than 2,000 routes, with more than 16 headers or 1,024
 name-and-value bytes for one route, or with an invalid, reserved, or
-case-variant duplicate header name or an invalid value is answered with 400 and a fixed message that never
-echoes a header.
+case-variant duplicate header name or an invalid value is answered with 400
+and a fixed message that never echoes a header.
+
 The overlay lives in process memory only: it is never written to disk, never
 reported by `/status` or `qurl inspect`, never logged, and a restarted daemon
 starts with an empty one — which is why step 2 pushes it before the first

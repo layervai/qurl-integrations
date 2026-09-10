@@ -60,6 +60,12 @@ platform accepts those in batches, so 1000 shares on one machine become cheap.
 
 ## Runtime request headers
 
+**Unreleased:** this describes the planned CLI 2.5.0 overlay feature.
+**Security prerequisite still unmet:** the CLI does not yet provision a
+trusted CA for FRP peer verification. Do not use these headers for secrets
+until authenticated TLS is configured; encryption alone leaves them exposed
+to an active intermediary.
+
 An external supervisor (see the CLI README's
 [External supervision](../apps/cli/README.md#external-supervision)) can attach
 request headers to routes at runtime with `PUT /overlay` on the daemon's
@@ -77,9 +83,7 @@ under a fresh proxy name, with no new knock and no effect on their siblings —
 the same per-route isolation `restart` has. In `per-share` mode each group
 receives only its own overlay entry. An overlay has at most 2,000 routes.
 A route carries at most 16 headers and 1,024 aggregate
-name-and-value bytes. Before sending headers, the FRP transport must verify
-the server certificate against a trusted CA; encryption without peer
-verification does not protect these credentials from an active intermediary. Re-registration may interrupt in-flight requests. During
+name-and-value bytes. Re-registration may interrupt in-flight requests. During
 session rotation the retiring session retains old headers until replacement
 promotion and drain; a header update is not immediate revocation.
 
