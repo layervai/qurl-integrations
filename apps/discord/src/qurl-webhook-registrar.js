@@ -14,7 +14,8 @@
 // inbound webhooks until eventual restart. Fix in this rev: rotate
 // the secret ONLY if (a) no subscription exists yet, or (b) the
 // existing one matches our URL but the caller can't supply a
-// known-good secret to verify against (initialSecret unset/empty).
+// usable stored secret (initialSecret absent, blank, or the public seed).
+// Unknown formats warn but reuse the persisted bytes.
 // Steady-state restarts find (existing sub + real SSM secret) and
 // skip the rotate — every replica reads the same secret from SSM/env
 // and stays in lock-step.
@@ -47,6 +48,13 @@
 
 const logger = require('./logger');
 const { QURL_WEBHOOK_EVENTS } = require('./constants');
+const {
+  SERVER_SECRET_MIN_LENGTH,
+  isInfraSeedSentinel,
+  isServerIssuedSecret,
+  isUsableSecret,
+  assertUsableResponseSecret,
+} = require('./utils/webhook-secret');
 
 // Normalize a string env-var to a boolean using a small allowlist of
 // truthy literals. Used by both call paths (Lambda + bot) so the
@@ -88,6 +96,22 @@ const QURL_EXPIRED = QURL_WEBHOOK_EVENTS.EXPIRED;
 // can never drift to different event lists. Order is irrelevant here;
 // reconcile uses set comparison.
 const TARGET_EVENTS = Object.freeze([QURL_ACCESSED, QURL_EXPIRED]);
+
+function secretLengthBucket(value) {
+  if (value.length < SERVER_SECRET_MIN_LENGTH) return `<${SERVER_SECRET_MIN_LENGTH}`;
+  if (value.length < 64) return `${SERVER_SECRET_MIN_LENGTH}-63`;
+  return '>=64';
+}
+
+function validateResponseSecret(value, operation) {
+  assertUsableResponseSecret(value, operation);
+  if (!isServerIssuedSecret(value)) {
+    logger.warn(`${operation} response secret has an unexpected server format; persisting the authenticated response to avoid discarding an already-committed secret`, {
+      op: operation,
+      valueLengthBucket: secretLengthBucket(value),
+    });
+  }
+}
 
 // Strip secret-shaped fields anywhere in a parsed body before
 // stringifying. Error messages echo response bodies into CloudWatch;
@@ -686,14 +710,11 @@ async function createSubscription({ apiEndpoint, apiKey, bridgeUrl, description 
   // raw TypeError with no context. Surface the contract violation
   // explicitly so the boot-log error is greppable.
   const data = resp?.data;
-  // length > 0 too — an empty-string secret would let the receiver
-  // verify against a zero-length HMAC key (any signature against ''
-  // produces the same digest), trivially bypassable.
   if (!data
-      || typeof data.webhook_id !== 'string' || data.webhook_id.length === 0
-      || typeof data.secret !== 'string' || data.secret.length === 0) {
-    throw new Error('createSubscription: contract drift (response missing or empty webhook_id/secret)');
+      || typeof data.webhook_id !== 'string' || data.webhook_id.length === 0) {
+    throw new Error('createSubscription: contract drift (response missing or empty webhook_id)');
   }
+  validateResponseSecret(data.secret, 'createSubscription');
   return data;
 }
 
@@ -705,9 +726,7 @@ async function rotateSecret({ apiEndpoint, apiKey, webhookId }) {
     apiKey,
   });
   const data = resp?.data;
-  if (!data || typeof data.secret !== 'string' || data.secret.length === 0) {
-    throw new Error('rotateSecret: contract drift (response missing or empty secret)');
-  }
+  validateResponseSecret(data?.secret, 'rotateSecret');
   return data;
 }
 
@@ -786,7 +805,7 @@ async function reconcileEvents({ apiEndpoint, apiKey, existing }) {
  * @param {string} opts.apiKey         - bot's QURL_API_KEY
  * @param {string} opts.bridgeUrl      - bot's own /webhooks/qurl URL
  * @param {string} opts.description    - human-readable; surfaces in qurl-service UI
- * @param {string} [opts.initialSecret] - the secret the caller already has in-memory (e.g. from SSM/env). When set to a non-placeholder value AND an existing subscription is found, the registrar SKIPS rotation — every replica reuses the same secret instead of rotating each other into uselessness.
+ * @param {string} [opts.initialSecret] - the secret the caller already has in-memory (e.g. from SSM/env). When it is nonblank and not the public seed AND an existing subscription is found, the registrar SKIPS rotation — every replica reuses the same secret instead of rotating each other into uselessness. Unknown formats warn without rotation. Unset, blank, or the infra-side SSM seed sentinel takes the bootstrap-rotate path.
  * @param {Function} [opts.persistSecret] - optional async(secret) → void callback for best-effort persistence
  * @param {boolean} [opts.urlMigrationSweepEnabled=true] - hard guard for the cross-host orphan sweep. Default ON for today's single-host deployment. Set to `false` BEFORE any active-active multi-region rollout under a shared `QURL_API_KEY` — see #827. A false value disables both the orphan classification (no near-miss logging, no DELETE attempts) and short-circuits the whole sweep path; matches + dedupe still run normally.
  * @returns {Promise<{secret: string, webhookId: string, action: 'created' | 'rotated' | 'reused', ownerId: string}>}
@@ -907,8 +926,29 @@ async function ensureWebhookSubscription(opts) {
   // surviving sub's secret is almost certainly NOT the one in SSM).
   // Force a rotate so SSM gets a known-good value tied to the
   // survivor. One-time cost on dedupe; subsequent restarts reuse.
-  const initialIsRealSecret = typeof initialSecret === 'string'
-    && initialSecret.length > 0;
+  // Reuse the stored response bytes even after upstream format drift. A
+  // nonblank secret is not proof of agreement with upstream; SSM must hold the
+  // registrar's persisted response. Never reuse Terraform's public seed.
+  const initialIsRealSecret = isUsableSecret(initialSecret);
+  if (existing
+      && typeof initialSecret === 'string'
+      && initialSecret.length > 0
+      && !isServerIssuedSecret(initialSecret)) {
+    // The sentinel is designed bootstrap state; reserve WARN for surprises.
+    const seedSentinel = isInfraSeedSentinel(initialSecret);
+    const meta = {
+      webhookId: existing.webhook_id,
+      seedSentinel,
+      valueLengthBucket: secretLengthBucket(initialSecret),
+    };
+    if (seedSentinel) {
+      logger.info('qURL webhook SSM secret is the infra seed sentinel — rotating as designed', meta);
+    } else {
+      logger.warn(initialIsRealSecret
+        ? 'qURL webhook initial secret has unrecognized format — preserving usable stored key'
+        : 'qURL webhook initial secret is blank — rotating instead of reusing', meta);
+    }
+  }
 
   // Forwarded so per-guild callers can route inbound webhooks
   // without a second GET /v1/webhooks.
@@ -973,10 +1013,9 @@ async function ensureWebhookSubscription(opts) {
     logger.info('qURL webhook subscription created', { webhookId, url: bridgeUrl });
   }
 
-  // Note: no `if (!secret)` guard here — `createSubscription` and
-  // `rotateSecret` both validate `typeof data.secret === 'string'`
-  // and throw their own contract-drift error before returning. A
-  // second check at this point would be unreachable.
+  // Note: no second secret guard here — `createSubscription` and
+  // `rotateSecret` both reject unusable/public-seed responses before
+  // returning, while preserving authenticated format-drift responses.
 
   await bestEffortPersist({ persistSecret, value: secret });
 

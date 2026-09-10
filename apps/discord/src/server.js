@@ -3,6 +3,14 @@ const crypto = require('crypto');
 const express = require('express');
 const helmet = require('helmet');
 const config = require('./config');
+const { assertConfiguredWebhookSecret } = require('./utils/webhook-secret');
+
+// Validate the configured default-key HMAC secret before loading the store,
+// routers, or listener wiring. Unset supports pure-BYOK mode; configured values
+// must be usable and never the public seed. Unknown formats warn and preserve
+// the registrar-persisted bytes rather than discarding a committed rotation.
+assertConfiguredWebhookSecret(config.QURL_WEBHOOK_SECRET);
+
 const db = require('./store');
 const logger = require('./logger');
 const { renderPage } = require('./templates/page');
