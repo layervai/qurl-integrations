@@ -332,8 +332,8 @@ func TestLocalPublishQuotaExplainsAccountLimits(t *testing.T) {
 			return nil, errors.Join(qurl.ErrConnectorResourceQuotaExceeded, &qurl.ConnectorResourceDiscoveryError{Code: "52504"})
 		},
 	})
-	if res.code == 0 {
-		t.Fatal("publish succeeded after quota refusal")
+	if res.code != exitcode.Forbidden {
+		t.Fatalf("publish = %d, want %d: %s", res.code, exitcode.Forbidden, res.stderr.String())
 	}
 	mustEmptyStdout(t, res)
 	for _, want := range []string{"reached a plan limit", "across all API keys", "active resources and monthly data usage", "52504"} {
