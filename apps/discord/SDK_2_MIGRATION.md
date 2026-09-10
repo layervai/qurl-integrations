@@ -12,23 +12,33 @@ recipient mapping, and bounded cleanup of identified links. SDK error details
 are not sent to Discord or logs. Partial link IDs are copied into a writable
 cleanup list.
 
-An unreadable batch is not a failed batch. Failure logs retain the batch ID
-when known and the original idempotency key. Cleaning up all known IDs does
-not clear the unknown-outcome state. The user is told that no new links were
-sent and cleanup is unconfirmed. These logs are investigation evidence, not a
-durable recovery queue. Without a batch ID, the key alone cannot replay the
-request: replay also requires the exact capability and grants, which are
-intentionally not logged. The service must provide durable recovery or
-cancellation before private activation. A client timeout does not cancel work.
+An unreadable batch is not a failed batch. Logs retain the batch ID when
+known, the original idempotency key, the authority expiry, and bounded groups
+of known unrevoked IDs. They never contain capabilities or bearer links.
+Cleaning up known IDs does not clear the unknown state. No links are sent
+until the full mint result has been validated and persisted.
 
-Do not delete an upload parent to compensate a failed send. Public upload
-content deduplication can return a parent shared with an earlier send. Current
-public cleanup still deletes whole resources; safe operation-scoped child
-cleanup remains a merge gate. PR #1420 and infrastructure PR #1553 address
-watermarked child revocation but must also preserve shared parents during
-failure cleanup. Private cleanup targets delegated qURL IDs only; upload
-handles must never be passed to resource DELETE.
+The service bounds each delegated grant by the signed authority expiry and
+stops minting after that expiry. An unknown, undistributed grant therefore
+has a bounded lifetime. A timeout does not cancel accepted work. Logs support
+investigation, not durable replay: replay needs the exact capability and
+grants. Batch cancellation would permit earlier cleanup but is not required
+for this bounded-expiry safety model. Do not claim immediate cleanup when the
+batch cannot be read or a revoke cannot be confirmed.
 
-Keep PRIVATE_UPLOAD_QURL absent. The signed upload, mint, view, watermark,
-detect, revoke, and direct-origin-deny sandbox journey has not been verified
-for this head. Do not treat unit tests or green CI as private activation approval.
+Cleanup and send revocation preserve upload parents. Public content
+deduplication can share a parent with earlier sends. The Connector classifies
+watermarked versus ordinary child tokens; it revokes its watermarked children,
+and Discord uses the SDK to revoke ordinary children on the verified parent.
+Missing identities or failed confirmation leave the send retryable. Private
+cleanup targets delegated qURL IDs, even after the private flag is removed.
+Upload handles are never passed to resource DELETE.
+
+Public cleanup requires the deployed child-revoke contract from infrastructure
+PR #1553 and its prerequisites. Do not deploy this consumer ahead of that
+endpoint or bypass failed classification with parent deletion.
+
+Keep PRIVATE_UPLOAD_QURL absent until infrastructure PRs #1529/#1530 and the
+signed upload, mint, view, watermark, detect, revoke, and direct-origin-deny
+sandbox journey pass. The HTTP integration tests use the real SDK against a
+local server; they do not establish live private activation readiness.

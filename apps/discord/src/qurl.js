@@ -12,6 +12,7 @@ const {
   resourcePath,
   validateResourceId,
 } = require('./utils/resource-id');
+const { isDelegatedQurlId } = require('./utils/qurl-id');
 const { qurlApiError } = require('./utils/qurl-errors');
 const dns = require('dns').promises;
 
@@ -240,7 +241,7 @@ async function createOneTimeLink(targetUrl, expiresIn, label, apiKey) {
 }
 
 async function deleteLink(resourceId, apiKey, { deadlineMs } = {}) {
-  if (config.PRIVATE_UPLOAD_QURL) {
+  if (isDelegatedQurlId(resourceId)) {
     qurlPath(resourceId);
     const key = apiKey || config.QURL_API_KEY;
     if (!key) throw new Error('QURL_API_KEY is not configured');
@@ -311,6 +312,22 @@ async function deleteLink(resourceId, apiKey, { deadlineMs } = {}) {
   logger.info('Revoked qURL resource', { resource_id: resourceId });
 }
 
+// The Connector classifies ordinary children; use the SDK's per-child action.
+// Resolve the CRID from an identified child because old upload rows contain
+// a public resource key. Verify the parent before revoking any child.
+async function revokeOrdinaryLinks(resourceId, qurlIds, apiKey) {
+  if (qurlIds.length === 0) return;
+  const client = makeClient(apiKey);
+  const parent = await callQurl('GET', QURL_ID_LOG_PATH, () => client.get(qurlIds[0]));
+  if (!parent.crid || (parent.resource_id !== resourceId && parent.crid !== resourceId)) {
+    throw new Error('qURL revoke parent does not match the recorded source');
+  }
+  for (const qurlId of qurlIds) {
+    await callQurl('DELETE', '/resources/:resourceId/qurls/:qurlId',
+      () => client.revokeResourceQurl(parent.crid, qurlId));
+  }
+}
+
 async function getResourceStatus(resourceId, apiKey) {
   qurlPath(resourceId);
   const client = makeClient(apiKey);
@@ -327,6 +344,7 @@ async function getResourceStatus(resourceId, apiKey) {
 module.exports = {
   createOneTimeLink,
   deleteLink,
+  revokeOrdinaryLinks,
   getResourceStatus,
   isPrivateHost,
   validateResourceId,

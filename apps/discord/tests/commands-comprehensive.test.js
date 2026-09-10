@@ -174,7 +174,11 @@ const mockDownloadAndUpload = jest.fn();
 const mockReUploadBuffer = jest.fn();
 const mockMintLinks = jest.fn();
 const mockUploadJsonToConnector = jest.fn();
+const mockRevokeMintedLinks = jest.fn().mockResolvedValue(true);
 jest.mock('../src/connector', () => ({
+  // Watermarked views live on the connector's shared tunnel; revoke calls
+  // this before the resource DELETE. Default to a clean no-op revoke.
+  revokeMintedLinks: mockRevokeMintedLinks,
   uploadToConnector: mockUploadToConnector,
   downloadAndUpload: mockDownloadAndUpload,
   reUploadBuffer: mockReUploadBuffer,
@@ -994,11 +998,11 @@ describe('handleRevokeSelect (dispatcher path)', () => {
 
   it('runs revoke when deleteFlow wins (deleted=true)', async () => {
     mockDb.getSendItems.mockReturnValue([
-      { resource_id: 'res-1', recipient_discord_id: 'u-1' },
-      { resource_id: 'res-2', recipient_discord_id: 'u-2' },
-      { resource_id: 'res-3', recipient_discord_id: 'u-3' },
+      { resource_id: 'res-1', recipient_discord_id: 'u-1', qurl_id: 'q_select_1' },
+      { resource_id: 'res-2', recipient_discord_id: 'u-2', qurl_id: 'q_select_2' },
+      { resource_id: 'res-3', recipient_discord_id: 'u-3', qurl_id: 'q_select_3' },
     ]);
-    mockDeleteLink.mockResolvedValue(undefined);
+    mockRevokeMintedLinks.mockResolvedValue(undefined);
     const interaction = makeSelectInteraction({ values: ['send-99'] });
 
     await handleRevokeSelect(interaction, { flow_id: '0:1#guild-1#ch-1#user-1' });
@@ -1007,7 +1011,7 @@ describe('handleRevokeSelect (dispatcher path)', () => {
       '0:1#guild-1#ch-1#user-1',
       { stage: 'awaiting_revoke_select', reason: 'terminal' },
     );
-    expect(mockDeleteLink).toHaveBeenCalledTimes(3);
+    expect(mockRevokeMintedLinks).toHaveBeenCalledTimes(3);
     expect(interaction.update).toHaveBeenCalledWith(
       expect.objectContaining({ content: expect.stringContaining('3/3') }),
     );
@@ -1019,7 +1023,7 @@ describe('handleRevokeSelect (dispatcher path)', () => {
 
     await handleRevokeSelect(interaction, { flow_id: '0:1#guild-1#ch-1#user-1' });
 
-    expect(mockDeleteLink).not.toHaveBeenCalled();
+    expect(mockRevokeMintedLinks).not.toHaveBeenCalled();
     expect(interaction.update).not.toHaveBeenCalled();
     expect(interaction.reply).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -1038,7 +1042,7 @@ describe('handleRevokeSelect (dispatcher path)', () => {
     try {
       await handleRevokeSelect(interaction, { flow_id: '0:1#guild-1#ch-1#user-1' });
 
-      expect(mockDeleteLink).not.toHaveBeenCalled();
+      expect(mockRevokeMintedLinks).not.toHaveBeenCalled();
       expect(interaction.update).toHaveBeenCalledWith(
         expect.objectContaining({
           content: expect.stringContaining('no longer configured'),
@@ -1051,10 +1055,10 @@ describe('handleRevokeSelect (dispatcher path)', () => {
 
   it('reports a partial revoke as an unconfirmed failure', async () => {
     mockDb.getSendItems.mockReturnValue([
-      { resource_id: 'res-1', recipient_discord_id: 'u-1' },
-      { resource_id: 'res-2', recipient_discord_id: 'u-2' },
+      { resource_id: 'res-1', recipient_discord_id: 'u-1', qurl_id: 'q_partial_1' },
+      { resource_id: 'res-2', recipient_discord_id: 'u-2', qurl_id: 'q_partial_2' },
     ]);
-    mockDeleteLink
+    mockRevokeMintedLinks
       .mockResolvedValueOnce(undefined)
       .mockRejectedValueOnce(new Error('not found'));
 
@@ -1068,9 +1072,9 @@ describe('handleRevokeSelect (dispatcher path)', () => {
 
   it('reports successful DELETEs truthfully when the final revoked state write fails', async () => {
     mockDb.getSendItems.mockReturnValue([
-      { resource_id: 'res-1', recipient_discord_id: 'u-1' },
+      { resource_id: 'res-1', recipient_discord_id: 'u-1', qurl_id: 'q_finalize_1' },
     ]);
-    mockDeleteLink.mockResolvedValue(undefined);
+    mockRevokeMintedLinks.mockResolvedValue(undefined);
     mockDb.markSendRevoked.mockRejectedValueOnce(new Error('DDB finalize failed'));
 
     const interaction = makeSelectInteraction({ values: ['send-finalize-fail'] });
@@ -1092,7 +1096,7 @@ describe('handleRevokeSelect (dispatcher path)', () => {
 
     await handleRevokeSelect(interaction, { flow_id: '0:1#guild-1#ch-1#user-1' });
 
-    expect(mockDeleteLink).not.toHaveBeenCalled();
+    expect(mockRevokeMintedLinks).not.toHaveBeenCalled();
     expect(interaction.update).toHaveBeenCalledWith({
       content: 'Could not verify this send for revocation. It may already be revoked or unavailable; run `/qurl revoke` to refresh.',
       components: [],
@@ -1101,10 +1105,10 @@ describe('handleRevokeSelect (dispatcher path)', () => {
 
   it('retries a temporary DELETE failure and finalizes after the next selection', async () => {
     mockDb.getSendItems.mockReturnValue([
-      { resource_id: 'res-1', recipient_discord_id: 'u-1' },
-      { resource_id: 'res-2', recipient_discord_id: 'u-2' },
+      { resource_id: 'res-1', recipient_discord_id: 'u-1', qurl_id: 'q_retry_1' },
+      { resource_id: 'res-2', recipient_discord_id: 'u-2', qurl_id: 'q_retry_2' },
     ]);
-    mockDeleteLink
+    mockRevokeMintedLinks
       .mockResolvedValueOnce(undefined)
       .mockRejectedValueOnce(new Error('temporary qURL 503'))
       .mockResolvedValueOnce(undefined)
@@ -1122,7 +1126,7 @@ describe('handleRevokeSelect (dispatcher path)', () => {
     expect(second.update).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringContaining('Revoked 2/2 users.'),
     }));
-    expect(mockDeleteLink).toHaveBeenCalledTimes(4);
+    expect(mockRevokeMintedLinks).toHaveBeenCalledTimes(4);
     expect(mockDb.markSendRevoked).toHaveBeenCalledWith('send-retry', 'user-1');
   });
 });

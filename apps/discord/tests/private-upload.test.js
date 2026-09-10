@@ -701,10 +701,11 @@ test.each(['lost POST', 'unreadable accepted batch', 'invalid terminal'])('retai
     }));
   }
   try {
-    const error = await privateUpload.redeemDelegatedBatch({ mint_capability: 'qmc1.secret' }, {
+    const error = await privateUpload.redeemDelegatedBatch({ mint_capability: 'qmc1.secret', authority_expires_at: '2027-01-01T00:00:00Z' }, {
       ...batchOptions, idempotencyKey, deadlineMs: Date.now() + 60_000, sleep: jest.fn(),
     }).catch(err => err);
     expect(error.batchOutcomeUnknown).toBe(true);
+    expect(error.unknownBatchExpiresAt).toBe('2027-01-01T00:00:00Z');
     expect(error.batchIdempotencyKey).toBe(idempotencyKey);
     expect(error.batchId).toBe(failure === 'lost POST' ? undefined : `dqb_${'f'.repeat(22)}`);
     expect(error.message).not.toMatch(/secret/);

@@ -417,7 +417,10 @@ async function redeemDelegatedBatch(upload, {
       } catch (error) {
         if (error instanceof DelegatedBatchOutcomeUnknownError) {
           uncertainCreate = true;
-          if (error.batchId) accepted = { batch_id: error.batchId };
+          if (error.batchId) {
+            accepted = { batch_id: error.batchId };
+            break;
+          }
         }
         const cause = error.cause || error;
         if (!(error instanceof DelegatedBatchOutcomeUnknownError)
@@ -456,7 +459,7 @@ async function redeemDelegatedBatch(upload, {
       const partialQurlIds = [...new Set(items
         .filter(item => item?.status === 'succeeded' && /^q_[0-9a-f]{11}$/.test(item?.qurl?.qurl_id || ''))
         .map(item => item.qurl.qurl_id))];
-      if (result.item_count !== grants.length) {
+      if (result.item_count !== grants.length || items.length !== grants.length) {
         const error = new Error('Delegated qURL batch returned an invalid terminal response');
         error.partialQurlIds = partialQurlIds;
         throw error;
@@ -517,6 +520,8 @@ async function redeemDelegatedBatch(upload, {
     if (error.batchOutcomeUnknown) {
       error.batchId = accepted?.batch_id;
       error.batchIdempotencyKey = idempotencyKey;
+      error.unknownBatchExpiresAt = isCanonicalUtcSecond(upload.authority_expires_at)
+        ? upload.authority_expires_at : undefined;
     }
     throw error;
   }
