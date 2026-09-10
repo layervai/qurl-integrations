@@ -758,6 +758,7 @@ jobs:
     # Hermetic CLI gates still run on every relevant pull request and push.
     # The credentialed deployment journey runs daily and on explicit demand;
     # running it for every main push exhausted the Auth0 M2M token allowance.
+    # Credential provisioning and rotation: docs/ci-api-keys.md.
     if: github.ref == 'refs/heads/main' && contains(fromJson('["schedule","workflow_dispatch"]'), github.event_name) && needs.changes.outputs.cli == 'true' && needs.customer-artifacts.result == 'success'
     strategy:
       fail-fast: false
@@ -774,7 +775,7 @@ jobs:
       QURL_JOURNEY_HUB_HOST: ${{ secrets.QURL_JOURNEY_HUB_HOST }}
       QURL_JOURNEY_HUB_PORT: ${{ secrets.QURL_JOURNEY_HUB_PORT }}
       QURL_JOURNEY_HUB_PUBLIC_KEY_B64: ${{ secrets.QURL_JOURNEY_HUB_PUBLIC_KEY_B64 }}
-      AUTH_TOKEN_ENDPOINT: ${{ secrets.QURL_JOURNEY_AUTH_TOKEN_ENDPOINT }}
+      QURL_JOURNEY_OWNER_ID: ${{ secrets.QURL_JOURNEY_OWNER_ID }}
       QURL_SHARING_RUN_ID: ${{ format('{0}{1}', github.run_id, matrix.lane_id) }}
       QURL_SHARING_RUN_ATTEMPT: ${{ github.run_attempt }}
       QURL_SHARING_RUNTIME: host
@@ -903,16 +904,15 @@ jobs:
           "QURL_CLI_SANDBOX_QURL_BINARY=$qurl" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "QURL_CUSTOMER_JOURNEY_TEST=$harness" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-      # The M2M authority exists only in this trusted setup step. The journey
-      # receives two isolated one-time enrollment keys: one for its normal
-      # path and one for the controlled-failure child. It receives no M2M
-      # token or client secret.
+      # The reusable automation key exists only in this trusted setup step. The journey
+      # receives two isolated expiring customer keys: one for its normal
+      # path and one for the controlled-failure child. It receives no
+      # reusable automation key.
       - name: Mint this lane's disposable keys
         if: runner.os != 'Windows'
         shell: bash
         env:
-          AUTH_CLIENT_ID: ${{ secrets.QURL_JOURNEY_AUTH_CLIENT_ID }}
-          AUTH_CLIENT_SECRET: ${{ secrets.QURL_JOURNEY_AUTH_CLIENT_SECRET }}
+          AUTOMATION_API_KEY: ${{ secrets.QURL_JOURNEY_API_KEY }}
         run: |
           set -euo pipefail
           client_dir=$RUNNER_TEMP/qurl-journey-auth
@@ -923,13 +923,11 @@ jobs:
           }
           trap cleanup_authority EXIT
           mkdir -m 0700 "$client_dir" "$credential_dir" "$credential_dir/primary" "$credential_dir/failure" "$key_dir"
-          (umask 077; printf %s "$AUTH_CLIENT_ID" >"$client_dir/client-id")
-          (umask 077; printf %s "$AUTH_CLIENT_SECRET" >"$client_dir/client-secret")
-          unset AUTH_CLIENT_ID AUTH_CLIENT_SECRET
+          (umask 077; printf %s "$AUTOMATION_API_KEY" >"$client_dir/api-key")
+          unset AUTOMATION_API_KEY
           python3 scripts/qurl-cli-ci-credentials.py create-pair \
-            --token-endpoint "$AUTH_TOKEN_ENDPOINT" --audience "$QURL_ENDPOINT" \
-            --qurl-endpoint "$QURL_ENDPOINT" --client-id-file "$client_dir/client-id" \
-            --client-secret-file "$client_dir/client-secret" \
+            --qurl-endpoint "$QURL_ENDPOINT" --api-key-file "$client_dir/api-key" \
+            --owner-id "$QURL_JOURNEY_OWNER_ID" \
             --primary-output-dir "$credential_dir/primary" \
             --failure-output-dir "$credential_dir/failure" \
             --run-id "$QURL_SHARING_RUN_ID" --run-attempt "$QURL_SHARING_RUN_ATTEMPT" \
@@ -953,8 +951,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         env:
-          AUTH_CLIENT_ID: ${{ secrets.QURL_JOURNEY_AUTH_CLIENT_ID }}
-          AUTH_CLIENT_SECRET: ${{ secrets.QURL_JOURNEY_AUTH_CLIENT_SECRET }}
+          AUTOMATION_API_KEY: ${{ secrets.QURL_JOURNEY_API_KEY }}
         run: |
           $clientDir = Join-Path $env:RUNNER_TEMP 'qurl-journey-auth'
           $credentialDir = Join-Path $env:RUNNER_TEMP 'qurl-journey-credential'
@@ -972,15 +969,12 @@ jobs:
               & icacls.exe $path /inheritance:r /grant:r "${env:USERNAME}:(OI)(CI)(F)" '*S-1-5-18:(OI)(CI)(F)' '*S-1-5-32-544:(OI)(CI)(F)' | Out-Null
               if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
             }
-            $clientIDFile = Join-Path $clientDir 'client-id'
-            $clientSecretFile = Join-Path $clientDir 'client-secret'
-            [IO.File]::WriteAllText($clientIDFile, $env:AUTH_CLIENT_ID)
-            [IO.File]::WriteAllText($clientSecretFile, $env:AUTH_CLIENT_SECRET)
-            Remove-Item Env:AUTH_CLIENT_ID, Env:AUTH_CLIENT_SECRET -ErrorAction SilentlyContinue
+            $automationKeyFile = Join-Path $clientDir 'api-key'
+            [IO.File]::WriteAllText($automationKeyFile, $env:AUTOMATION_API_KEY)
+            Remove-Item Env:AUTOMATION_API_KEY -ErrorAction SilentlyContinue
             python scripts/qurl-cli-ci-credentials.py create-pair `
-              --token-endpoint $env:AUTH_TOKEN_ENDPOINT --audience $env:QURL_ENDPOINT `
-              --qurl-endpoint $env:QURL_ENDPOINT --client-id-file $clientIDFile `
-              --client-secret-file $clientSecretFile `
+              --qurl-endpoint $env:QURL_ENDPOINT --api-key-file $automationKeyFile `
+              --owner-id $env:QURL_JOURNEY_OWNER_ID `
               --primary-output-dir $primaryDir --failure-output-dir $failureDir `
               --run-id $env:QURL_SHARING_RUN_ID --run-attempt $env:QURL_SHARING_RUN_ATTEMPT `
               --lane '${{ matrix.lane }}'
@@ -1166,7 +1160,7 @@ jobs:
       contents: read
     env:
       QURL_ENDPOINT: ${{ secrets.QURL_JOURNEY_ENDPOINT }}
-      AUTH_TOKEN_ENDPOINT: ${{ secrets.QURL_JOURNEY_AUTH_TOKEN_ENDPOINT }}
+      QURL_JOURNEY_OWNER_ID: ${{ secrets.QURL_JOURNEY_OWNER_ID }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1177,8 +1171,7 @@ jobs:
       # the fallback workflow reconciles the carried journey attempt.
       - name: Revoke run resources and credentials
         env:
-          AUTH_CLIENT_ID: ${{ secrets.QURL_JOURNEY_AUTH_CLIENT_ID }}
-          AUTH_CLIENT_SECRET: ${{ secrets.QURL_JOURNEY_AUTH_CLIENT_SECRET }}
+          AUTOMATION_API_KEY: ${{ secrets.QURL_JOURNEY_API_KEY }}
           JOURNEY_RUN_ATTEMPT: ${{ github.run_attempt }}
         run: |
           set -euo pipefail
@@ -1186,9 +1179,8 @@ jobs:
           cleanup() { scripts/remove-sensitive-tree.sh "$client_dir"; }
           trap cleanup EXIT
           mkdir -m 0700 "$client_dir"
-          (umask 077; printf %s "$AUTH_CLIENT_ID" >"$client_dir/client-id")
-          (umask 077; printf %s "$AUTH_CLIENT_SECRET" >"$client_dir/client-secret")
-          unset AUTH_CLIENT_ID AUTH_CLIENT_SECRET
+          (umask 077; printf %s "$AUTOMATION_API_KEY" >"$client_dir/api-key")
+          unset AUTOMATION_API_KEY
           [[ "$JOURNEY_RUN_ATTEMPT" =~ ^[1-9][0-9]{0,9}$ ]] || {
             echo "::error::workflow attempt is not a positive integer" >&2
             exit 1
@@ -1200,9 +1192,8 @@ jobs:
             run_specs+=(--run-spec "${GITHUB_RUN_ID}${lane_id}:${JOURNEY_RUN_ATTEMPT}:${lane}:host:${profile}")
           done
           python3 scripts/qurl-cli-ci-credentials.py reconcile-batch \
-            --token-endpoint "$AUTH_TOKEN_ENDPOINT" --audience "$QURL_ENDPOINT" \
-            --qurl-endpoint "$QURL_ENDPOINT" --client-id-file "$client_dir/client-id" \
-            --client-secret-file "$client_dir/client-secret" \
+            --qurl-endpoint "$QURL_ENDPOINT" --api-key-file "$client_dir/api-key" \
+            --owner-id "$QURL_JOURNEY_OWNER_ID" \
             --operation-budget-seconds 900 \
             "${run_specs[@]}"
 
