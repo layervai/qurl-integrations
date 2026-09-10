@@ -1,8 +1,3 @@
-// End-to-end flow test: signed payload (qurl-service wire shape) → Express
-// route → store → monitor.getFullMsg(). Only the wire-shape + render flow
-// is covered here — dedup, out-of-order, and foreign-qurl isolation are
-// pinned at the store layer in ddb-store.test.js (they were duplicating
-// coverage when previously asserted against the in-memory mock).
 
 const crypto = require('crypto');
 
@@ -48,9 +43,6 @@ function makeStore() {
 const mockStore = makeStore();
 jest.mock('../src/store', () => mockStore);
 
-// Multi-secret receiver: route the flow-test owner_id to the
-// flow-test secret via a mocked registry. Without this the receiver
-// returns 503 (unprimed) on every webhook delivery.
 jest.mock('../src/webhook-subscriptions', () => ({
   isPrimed: () => true,
   getSecretForOwner: (ownerId) => (ownerId === 'usr_flow_test' ? 'flow-test-secret' : null),
@@ -72,15 +64,10 @@ const { app } = require('../src/server');
 const { _test } = require('../src/commands');
 const { monitorLinkStatus, activeMonitors } = _test;
 
-// Reproduces qurl-service's webhook payload signing (HMAC-SHA256 bare
-// hex over the raw body), independent of any shared lib so a
-// wire-format regression on either side surfaces here, not via a
-// coupled import.
 function qurlServiceSign(rawBody, secret) {
   return crypto.createHmac('sha256', secret).update(rawBody).digest('hex');
 }
 
-// Field shape pinned to qurl-service WebhookEvent JSON tags.
 function buildQurlAccessedPayload({ id, qurlId, resourceId, accessCount, consumed }) {
   return {
     id,
@@ -116,11 +103,6 @@ beforeEach(() => {
   for (const m of Array.from(activeMonitors)) m.stop();
 });
 
-// Construction order matters: the receiver runs under real timers
-// (supertest needs setImmediate); the monitor's setInterval is
-// installed under fake timers. We populate the store first, then
-// switch to fakes for the monitor — never toggle modes once a
-// setInterval is registered.
 describe('full webhook flow: qurl-service shape → bot receiver → store → monitor UI', () => {
   it('a single delivery flips pending → viewed', async () => {
     const res = await deliverWebhook(buildQurlAccessedPayload({

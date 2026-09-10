@@ -7,9 +7,6 @@
 //   - 302 happy path: redirects to Auth0 with a qURL OAuth state binding
 //     guild_id + discord_user_id
 
-// OAUTH_STATE_SECRET is pinned globally in tests/setup-env.js.
-// KEY_ENCRYPTION_KEY required for the fail-fast guard added in PR #177
-// review round 3; matches the legacy modal-paste path's existing check.
 process.env.KEY_ENCRYPTION_KEY = '1'.repeat(64);
 process.env.AUTH0_DOMAIN = 'layerv-test.auth0.com';
 process.env.AUTH0_CLIENT_ID = 'test-auth0-client-id';
@@ -23,9 +20,6 @@ process.env.DISCORD_CLIENT_SECRET = ' test-discord-secret\n';
 process.env.QURL_ENDPOINT = 'http://localhost:9999';
 process.env.BASE_URL = 'http://localhost:3000';
 process.env.GUILD_ID = '123456789012345678';
-// Trust proxy so the Secure-cookie test can simulate ALB-fronted prod
-// via X-Forwarded-Proto: https (server.js reads TRUST_PROXY at module
-// load — must be set BEFORE require('../src/server') below).
 process.env.TRUST_PROXY = '1';
 
 jest.mock('../src/discord', () => ({
@@ -354,7 +348,6 @@ describe('Discord install callback', () => {
       expect(res.status).toBe(400);
 
       const nonce = extractStyleNonce(res);
-      // 16 random bytes encoded as unpadded base64url.
       expect(nonce).toHaveLength(22);
 
       expect(res.text).toContain(`<style nonce="${nonce}">`);
@@ -614,8 +607,6 @@ describe('Discord install callback', () => {
       expect(loc.pathname).toBe('/authorize');
       expect(loc.searchParams.get('client_id')).toBe('test-auth0-client-id');
       expect(loc.searchParams.get('redirect_uri')).toBe('http://localhost:3000/oauth/qurl/callback');
-      // Auth0 scope must NOT include offline_access (refresh tokens not
-      // stored/used; dropped per PR #177 review item 5).
       expect(loc.searchParams.get('scope')).not.toContain('offline_access');
       // Both halves are load-bearing on every Auth0 entry path: `login`
       // asks Auth0 not to reuse its ambient session, and `consent` lets a
@@ -623,10 +614,6 @@ describe('Discord install callback', () => {
       expect(loc.searchParams.get('prompt')).toBe('login consent');
       expect(loc.searchParams.get('connection')).toBe('email');
 
-      // The state Discord callback minted must round-trip through the
-      // qURL OAuth state verifier with the right guild + discord-user
-      // bindings — that's how the Auth0 callback identifies who set
-      // up which guild.
       const state = loc.searchParams.get('state');
       const verified = verifyQurlOAuthState(state);
       expect(verified.ok).toBe(true);
@@ -639,12 +626,6 @@ describe('Discord install callback', () => {
       expect(loc.searchParams.get('code_challenge')).toBe(pkceChallengeForVerifier(codeVerifier));
       expect(loc.searchParams.get('code_challenge')).not.toBe(codeVerifier);
 
-      // Cookie binding — Stage-2 chain must set the same `qurl_setup_session`
-      // cookie that /oauth/qurl/start sets — Stage-2 sets it at the
-      // discord-install handler so the chained /oauth/qurl/callback
-      // sees it. Path narrowed to /oauth/qurl per round-9 item #2 —
-      // the only reader is /oauth/qurl/callback so the broader /oauth
-      // was unnecessary scope.
       const setCookie = res.headers['set-cookie'];
       expect(setCookie).toBeDefined();
       const cookieHeader = Array.isArray(setCookie) ? setCookie.join('\n') : setCookie;
@@ -726,10 +707,6 @@ describe('Discord install callback', () => {
     });
 
     it('sets Secure flag on the cookie when behind a proxy that sets X-Forwarded-Proto: https', async () => {
-      // Defense vs trust-proxy regression: server.js sets `trust proxy`
-      // so req.protocol reflects X-Forwarded-Proto from the ALB. Flipping
-      // that off would silently downgrade prod cookies to insecure. Pin
-      // the wire-level shape here.
       globalThis.fetch = jest.fn()
         .mockResolvedValueOnce({
           ok: true, status: 200,
@@ -770,12 +747,6 @@ describe('Discord install callback', () => {
     });
 
     it('cookie set at /oauth/discord/callback rides through to /oauth/qurl/callback (round-trip pin per round-9 #8)', async () => {
-      // Round-9 #8 closed: the previous tests inspected the Set-Cookie
-      // header but didn't actually replay the cookie back on the qurl
-      // callback. Path=/oauth/qurl on the cookie + request URL
-      // /oauth/qurl/callback is the prefix-match the browser uses when
-      // deciding to send the cookie back; pin it end-to-end so a
-      // future path narrowing/widening can't silently break Stage-2.
       globalThis.fetch = jest.fn()
         .mockResolvedValueOnce({
           ok: true, status: 200,
@@ -797,13 +768,8 @@ describe('Discord install callback', () => {
       expect(sessionCookieValue).not.toBeNull();
       expect(pkceCookieValue).not.toBeNull();
       const stateFromRedirect = new URL(stage2.headers.location).searchParams.get('state');
-      // The cookie value IS the state token (double-submit pattern).
       expect(sessionCookieValue).toBe(stateFromRedirect);
 
-      // Replay the cookie on /oauth/qurl/callback — the browser would
-      // do this because Path=/oauth/qurl matches the request path.
-      // Stub Auth0 + qurl-service so the chained callback can reach
-      // the cookie/state CSRF check.
       globalThis.fetch = jest.fn()
         .mockResolvedValueOnce({
           ok: true, status: 200,
@@ -820,10 +786,6 @@ describe('Discord install callback', () => {
       expect(stage1Callback.status).toBe(200);
       const tokenBody = new URLSearchParams(globalThis.fetch.mock.calls[0][1].body.toString());
       expect(tokenBody.get('code_verifier')).toBe(pkceCookieValue);
-      // Reaching the success page proves the cookie/state CSRF check
-      // passed — i.e., the cookie minted on /oauth/discord/callback
-      // would actually travel to /oauth/qurl/callback in a real
-      // browser (path attribute does its job).
       expect(stage1Callback.text).toContain('qURL is connected');
     });
 
@@ -856,11 +818,6 @@ describe('Discord install callback', () => {
   });
 });
 
-// Separate describe — exercises the not-configured 503 paths that
-// `isDiscordInstallConfigured` gates. Uses jest.isolateModulesAsync so
-// the env-var unsetting on this branch doesn't leak into the
-// configured-flow describe above (it's already past). Mirrors the
-// equivalent suite in tests/qurl-oauth.test.js for AUTH0_* unset.
 describe('discord-install — not configured', () => {
   it('returns 503 with the AUTH0-unset reason when Auth0 env is missing', async () => {
     const saved = {

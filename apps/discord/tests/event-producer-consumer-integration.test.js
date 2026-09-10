@@ -1,27 +1,3 @@
-/**
- * Integration test: producer → SQS envelope → consumer round-trip.
- *
- * The unit tests in tests/event-publisher.test.js and
- * tests/event-consumer.test.js cover each side in isolation. They
- * do NOT catch envelope-field drift: if the producer emits
- * `eventType: 'INTERACTION_CREATE'` and the consumer reads
- * `parsed.event_type`, both unit suites pass and only sandbox soak
- * surfaces the mismatch. This file plugs that gap by wiring the two
- * sides together against an in-memory SQS substitute
- * (aws-sdk-client-mock) and asserting the consumer dispatches the
- * exact payload the producer published.
- *
- * What this test does NOT cover (still requires sandbox soak / a
- * real queue):
- *   - SQS Standard's at-least-once delivery semantics
- *   - Long-poll timing and visibility-timeout accuracy
- *   - Discord's real interaction-token TTL behavior
- *   - Cross-host clock skew driving the e2e latency metric
- *
- * Both mocks share one queue URL string so the assertions stay
- * semantically coupled (a producer-side QueueUrl change without a
- * consumer-side change would surface as a test failure here).
- */
 
 const TEST_QUEUE_URL = 'https://sqs.us-east-2.amazonaws.com/123/qurl-bot-events-integration';
 
@@ -59,8 +35,6 @@ beforeEach(() => {
   eventConsumer._test._resetStateForTest();
 });
 
-// Inject the same SQSClient into both modules so SendMessage and the
-// downstream processMessage(...) route through the shared mock.
 function withMockedSqs(fn) {
   const client = new SQSClient({ region: 'us-east-2' });
   eventPublisher._test._setSqsClientForTest(client);
@@ -69,8 +43,6 @@ function withMockedSqs(fn) {
 }
 
 function makeRawInteractionPacket({ sequence = 1, data } = {}) {
-  // discord.js's `raw` event delivers GatewayDispatchPayload-shaped
-  // packets: { op: 0, t: <type>, s: <sequence>, d: <payload> }.
   return {
     op: 0,
     t: 'INTERACTION_CREATE',
@@ -80,8 +52,6 @@ function makeRawInteractionPacket({ sequence = 1, data } = {}) {
 }
 
 function makeStubDiscordClient() {
-  // Mirrors tests/event-consumer.test.js's stub — only the surface
-  // the consumer reaches into (client.actions.InteractionCreate.handle).
   return {
     actions: {
       InteractionCreate: {
@@ -117,15 +87,11 @@ describe('producer → consumer envelope round-trip', () => {
     });
     await flushMicro();
 
-    // Capture exactly what the publisher emitted on the wire.
     const sends = sqsMock.commandCalls(SendMessageCommand);
     expect(sends).toHaveLength(1);
     const sentInput = sends[0].args[0].input;
     expect(sentInput.QueueUrl).toBe(TEST_QUEUE_URL);
 
-    // Feed the publisher's body to the consumer as if SQS delivered
-    // it. Pins the wire contract: a field-name change on either side
-    // (eventType ↔ event_type, data ↔ payload, etc.) breaks here.
     const consumerMessage = {
       Body: sentInput.MessageBody,
       ReceiptHandle: 'rh-integration-1',
@@ -134,12 +100,9 @@ describe('producer → consumer envelope round-trip', () => {
     const client = makeStubDiscordClient();
     await withMockedSqs(() => eventConsumer._test.processMessage(client, consumerMessage));
 
-    // Consumer dispatched with EXACTLY the data the producer sent.
     expect(client.actions.InteractionCreate.handle).toHaveBeenCalledTimes(1);
     expect(client.actions.InteractionCreate.handle).toHaveBeenCalledWith(interactionData);
 
-    // And it deleted the message (DeleteMessage is the consumer's
-    // success terminal).
     const deletes = sqsMock.commandCalls(DeleteMessageCommand);
     expect(deletes).toHaveLength(1);
     expect(deletes[0].args[0].input).toMatchObject({
@@ -149,10 +112,6 @@ describe('producer → consumer envelope round-trip', () => {
   });
 
   test('event_id format matches consumer LRU dedup expectations', async () => {
-    // Producer emits `${SHARD_ID}:${packet.s}`; consumer's recordSeen
-    // treats that as an opaque string key. Pin that producer's shape
-    // populates the LRU correctly — a future producer-side reformat
-    // would silently break dup detection without this test.
     sqsMock.on(SendMessageCommand).resolves({ MessageId: 'sqs-event-id' });
     sqsMock.on(DeleteMessageCommand).resolves({});
 
@@ -168,10 +127,6 @@ describe('producer → consumer envelope round-trip', () => {
     const body = JSON.parse(sqsMock.commandCalls(SendMessageCommand)[0].args[0].input.MessageBody);
     expect(body.event_id).toBe('0:7777777');
 
-    // Round-trip the SAME envelope through the consumer twice.
-    // First processMessage populates the LRU; second should observe
-    // the dup. Verifies the producer's event_id key is the SAME shape
-    // the consumer's recordSeen expects.
     const consumerMessage = {
       Body: JSON.stringify(body),
       ReceiptHandle: 'rh-dup-1',
@@ -181,8 +136,6 @@ describe('producer → consumer envelope round-trip', () => {
     await withMockedSqs(() => eventConsumer._test.processMessage(client, consumerMessage));
     expect(eventConsumer._test.seenEventIds.has('0:7777777')).toBe(true);
 
-    // Now re-process the same envelope — recordSeen returns true →
-    // the dup-debug log fires (consumer module-level behavior).
     const dupMessage = {
       Body: JSON.stringify(body),
       ReceiptHandle: 'rh-dup-2',
@@ -197,15 +150,10 @@ describe('producer → consumer envelope round-trip', () => {
   });
 
   test('producer published_at_ms drives consumer e2e latency log', async () => {
-    // Pin the e2e-metric wire contract end-to-end. A producer change
-    // that renames published_at_ms or stops setting it would surface
-    // here as a missing structured-log field on the consumer side.
     sqsMock.on(SendMessageCommand).resolves({ MessageId: 'sqs-e2e' });
     sqsMock.on(DeleteMessageCommand).resolves({});
 
     eventPublisher.start();
-    // Fix Date.now so the e2e delta is predictable across the
-    // producer-call and consumer-call observations of the wall clock.
     const fixedNow = 1_700_000_000_000;
     const dateSpy = jest.spyOn(Date, 'now').mockReturnValue(fixedNow);
     try {
@@ -220,8 +168,6 @@ describe('producer → consumer envelope round-trip', () => {
       const body = JSON.parse(sqsMock.commandCalls(SendMessageCommand)[0].args[0].input.MessageBody);
       expect(body.published_at_ms).toBe(fixedNow);
 
-      // Advance the worker-side clock by 42 ms before processMessage
-      // reads Date.now() to compute the e2e delta.
       dateSpy.mockReturnValue(fixedNow + 42);
       const client = makeStubDiscordClient();
       await withMockedSqs(() => eventConsumer._test.processMessage(client, {
@@ -245,12 +191,6 @@ describe('producer → consumer envelope round-trip', () => {
   });
 
   test('non-INTERACTION_CREATE dispatches from producer never reach consumer', async () => {
-    // Negative contract: ensures the consumer side wouldn't even
-    // SEE a HEARTBEAT_ACK / PRESENCE_UPDATE because the producer
-    // filters before SendMessage. Belt-and-suspenders against a
-    // future relaxation of the producer filter — the consumer's
-    // unhandled-eventType branch would still log+delete, but that's
-    // wasted SQS traffic the round-trip should never carry.
     sqsMock.on(SendMessageCommand).resolves({ MessageId: 'never-fires' });
     eventPublisher.start();
     withMockedSqs(() => {

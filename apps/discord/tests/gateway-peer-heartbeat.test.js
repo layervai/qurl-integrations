@@ -1,11 +1,3 @@
-// Unit tests for src/gateway-peer-heartbeat.js — Pillar 3 standby
-// discovery. Pins the four load-bearing contracts:
-//
-//   1. Freshness filter is the correctness primitive, NOT DDB TTL.
-//   2. Single PutItem per renewal — updated_at + expires_at together.
-//   3. TTL writer shape is epoch SECONDS, never milliseconds.
-//   4. Scan + filter is the correct access pattern (consistency at
-//      6s freshness; small row count).
 
 const { mockClient } = require('aws-sdk-client-mock');
 const {
@@ -63,11 +55,6 @@ describe('createPeerHeartbeat — factory validation', () => {
   });
 
   it('rejects invalid IPs (literal "undefined" from env-stringification, garbage strings, IPs masked as identifiers)', () => {
-    // The classic failure mode: a misconfigured Fargate task that
-    // env-stringifies an undefined IP-resolution result lands the
-    // literal string `"undefined"` on the row. To DDB it's a valid
-    // S value, to the active's POST it's an unreachable hostname.
-    // net.isIP() returns 0 for non-IPs, 4/6 for valid literals.
     const base = {
       ddbClient: {}, tableName: 't', instanceId: 'i', port: 9876,
       shardId: '0:1', logger: {},
@@ -83,9 +70,6 @@ describe('createPeerHeartbeat — factory validation', () => {
   });
 
   it('accepts both IPv4 and IPv6 literals', () => {
-    // Fargate tasks today get IPv4 from the awsvpc network mode,
-    // but ECS supports IPv6-only assigments and the field should
-    // accept either.
     const base = {
       ddbClient: {}, tableName: 't', instanceId: 'i', port: 9876,
       shardId: '0:1', logger: {},
@@ -96,10 +80,6 @@ describe('createPeerHeartbeat — factory validation', () => {
   });
 
   it('rejects non-string or empty-string lockHolder when provided', () => {
-    // `lockHolder` is optional but, when provided, must be a non-
-    // empty string. A stray non-string would write a non-S value to
-    // DDB and surface as a confusing log field at SIGTERM transfer
-    // time. Mirrors the secrets.previous posture in gateway-hmac.
     const base = {
       ddbClient: {}, tableName: 't', instanceId: 'i', ip: '10.0.0.1',
       port: 9876, shardId: '0:1', logger: {},
@@ -112,19 +92,12 @@ describe('createPeerHeartbeat — factory validation', () => {
       .toThrow(/lockHolder must be a non-empty string when provided/);
     expect(() => createPeerHeartbeat({ ...base, lockHolder: {} }))
       .toThrow(/lockHolder must be a non-empty string when provided/);
-    // Omitted and undefined both fine.
     expect(() => createPeerHeartbeat({ ...base })).not.toThrow();
     expect(() => createPeerHeartbeat({ ...base, lockHolder: undefined })).not.toThrow();
     expect(() => createPeerHeartbeat({ ...base, lockHolder: 'task-arn:..../inst-A' })).not.toThrow();
   });
 
   it('rejects invalid ports (string, NaN, 0, negative, >65535, fractional)', () => {
-    // The control-channel port comes from config (env). A bug that
-    // forgot to parseInt would surface as a string; an off-by-one in
-    // a port-allocator could overflow 65535; a leftover sentinel could
-    // pass 0 or -1. All of these would produce an unreachable peer
-    // entry; catch them at construction so a misconfig fails boot
-    // rather than failing the first handoff POST.
     const base = {
       ddbClient: {}, tableName: 't', instanceId: 'i', ip: '10.0.0.1',
       shardId: '0:1', logger: {},
@@ -146,11 +119,6 @@ describe('createPeerHeartbeat — factory validation', () => {
 
 describe('writeHeartbeat', () => {
   it('writes updated_at AND expires_at in the SAME PutItem (contract 2)', async () => {
-    // Splitting these into two ops creates a window where the
-    // freshness signal (updated_at) and the TTL marker (expires_at)
-    // disagree — a partial write could leave a row visible past its
-    // intended reap, or reap a row whose freshness is still good.
-    // Single PutItem keeps them lock-step.
     const { heartbeat, ddbMock } = makeHeartbeat({
       clock: () => 1_700_000_000_000, ttlSeconds: 60,
     });
@@ -166,10 +134,6 @@ describe('writeHeartbeat', () => {
   });
 
   it('writes expires_at as epoch SECONDS (not milliseconds)', async () => {
-    // Contract 3 — same TTL writer shape as gateway-session-store /
-    // gateway-lock. Pinning this catches a refactor that introduces
-    // a `clock()` change (returns seconds instead of ms) without
-    // updating the divide-by-1000.
     const { heartbeat, ddbMock } = makeHeartbeat({
       clock: () => 1_700_000_000_000,
     });
@@ -183,9 +147,6 @@ describe('writeHeartbeat', () => {
   });
 
   it('persists ip, port, shard_id alongside the timestamps', async () => {
-    // The handoff path POSTs to http://<ip>:<port>/control/yours.
-    // Missing any of these on the row makes the peer unreachable
-    // even after a fresh write.
     const { heartbeat, ddbMock } = makeHeartbeat({
       clock: () => 1_700_000_000_000,
     });
@@ -203,11 +164,6 @@ describe('writeHeartbeat', () => {
   });
 
   it('writes lock_holder when supplied, omits when absent', async () => {
-    // The leader's SIGTERM path needs the peer's lockHolder string
-    // to call transferLock(targetInstanceId, targetLockHolder).
-    // Carrying it on the heartbeat row keeps the active from having
-    // to invent or look it up. Absent — back-compat with cold-only
-    // callers, no `lock_holder: undefined` on the DDB write.
     const { heartbeat: withHolder, ddbMock: m1 } = makeHeartbeat({
       clock: () => 1_700_000_000_000,
       lockHolder: 'task-arn:.../inst-A',
@@ -227,10 +183,6 @@ describe('writeHeartbeat', () => {
   });
 
   it('uses no condition expression — idempotent overwrite is the desired shape', async () => {
-    // Heartbeats from THIS replica should always win against any
-    // earlier write. No CAS, no version. A retry of a same-second
-    // heartbeat just overwrites the previous one with identical
-    // fields — harmless.
     const { heartbeat, ddbMock } = makeHeartbeat({
       clock: () => 1_700_000_000_000,
     });
@@ -243,11 +195,6 @@ describe('writeHeartbeat', () => {
   });
 
   it('throws on transport error (caller decides whether a missed beat is fatal)', async () => {
-    // A single missed heartbeat is fine — the freshness window
-    // absorbs three. The leader coordinator catches this and
-    // continues. The module's contract is "throw on transport
-    // failure so the caller can log + count" rather than
-    // silently swallow.
     const { heartbeat, ddbMock } = makeHeartbeat({
       clock: () => 1_700_000_000_000,
     });
@@ -259,9 +206,6 @@ describe('writeHeartbeat', () => {
 
 describe('listFreshPeers', () => {
   it('returns peers whose updated_at is within the freshness window', async () => {
-    // Contract 1 — freshness filter at read time. A row past
-    // `updated_at + freshnessWindowSeconds` must be invisible to
-    // the active even if DDB TTL hasn't reaped it.
     const { heartbeat, ddbMock } = makeHeartbeat({
       clock: () => 1_700_000_010_000, // now = 1700000010
       freshnessWindowSeconds: 6,
@@ -281,8 +225,6 @@ describe('listFreshPeers', () => {
   });
 
   it('excludes the active replica\'s own row by instance_id', async () => {
-    // Even if our own heartbeat is fresh (it always is — we wrote
-    // it 2s ago), we don't push-handoff to ourselves.
     const { heartbeat, ddbMock } = makeHeartbeat({
       clock: () => 1_700_000_010_000, freshnessWindowSeconds: 6,
     });
@@ -296,10 +238,6 @@ describe('listFreshPeers', () => {
   });
 
   it('filters by shard_id so a future sharded topology routes correctly', async () => {
-    // Today every replica carries `"0:1"` so this is a no-op, but
-    // the filter must be in place for the sharded future — otherwise
-    // shard 0's active would scan shard 5's standby and POST to
-    // the wrong target.
     const { heartbeat, ddbMock } = makeHeartbeat({
       clock: () => 1_700_000_010_000, freshnessWindowSeconds: 6,
     });
@@ -315,9 +253,6 @@ describe('listFreshPeers', () => {
   });
 
   it('sorts freshest-first so the caller takes the head of the list', async () => {
-    // Multiple fresh peers (a transient overlap during deploy) —
-    // the active picks the most recently heartbeating one because
-    // it's the most likely to still be alive when the POST lands.
     const { heartbeat, ddbMock } = makeHeartbeat({
       clock: () => 1_700_000_010_000, freshnessWindowSeconds: 6,
     });
@@ -334,10 +269,6 @@ describe('listFreshPeers', () => {
   });
 
   it('drops rows whose updated_at is missing or non-numeric (defensive against partial writes)', async () => {
-    // A corrupted row from a manual operator write, or a partial
-    // failure in some future updater, should not surface as a
-    // peer candidate. Same defense shape as gateway-session-store's
-    // malformed-row hydrate path.
     const { heartbeat, ddbMock } = makeHeartbeat({
       clock: () => 1_700_000_010_000, freshnessWindowSeconds: 6,
     });
@@ -354,8 +285,6 @@ describe('listFreshPeers', () => {
   });
 
   it('returns [] when the scan returns no Items (empty table cold start)', async () => {
-    // Standby hasn't booted yet. The active falls through to the
-    // cold-fallback path (~7 s floor).
     const { heartbeat, ddbMock } = makeHeartbeat({
       clock: () => 1_700_000_010_000,
     });
@@ -365,10 +294,6 @@ describe('listFreshPeers', () => {
   });
 
   it('cutoff is computed from caller-wall-clock, not stored value', async () => {
-    // Symmetric to the lock module's `:now` contract — the freshness
-    // boundary depends on OUR clock. A refactor that cached `cutoff`
-    // somewhere would let the boundary drift and stale peers
-    // re-appear.
     let nowMs = 1_700_000_010_000;
     const { heartbeat, ddbMock } = makeHeartbeat({
       clock: () => nowMs, freshnessWindowSeconds: 6,
@@ -388,9 +313,6 @@ describe('listFreshPeers', () => {
 
 describe('deleteOwnRow', () => {
   it('issues DeleteItem keyed by self instance_id (best-effort, no CAS)', async () => {
-    // Called at clean shutdown to close the discovery window
-    // immediately rather than waiting for the freshness boundary.
-    // No CAS — this row is ours by construction (PK).
     const { heartbeat, ddbMock } = makeHeartbeat();
     ddbMock.on(DeleteCommand).resolves({});
 
@@ -403,9 +325,6 @@ describe('deleteOwnRow', () => {
   });
 
   it('logs but does not throw on transport error (SIGTERM path must stay clean)', async () => {
-    // Called from gracefulShutdown. A throw would unwind into the
-    // shutdown handler and mask the cleaner exit path. The freshness
-    // filter is the actual safety net — this delete is hygiene.
     const { heartbeat, ddbMock, logger } = makeHeartbeat();
     ddbMock.on(DeleteCommand).rejects(new Error('network blip'));
 
@@ -419,10 +338,6 @@ describe('deleteOwnRow', () => {
 
 describe('default constants', () => {
   it('exports the documented freshness window (6s) and TTL (60s, 10x the window)', () => {
-    // Pinning these matters: 6 s freshness is what bounds the
-    // "three missed heartbeats = dead" semantic; 60 s TTL is 10×
-    // the window per the table comment so a transient write hiccup
-    // doesn't reap a live row.
     expect(DEFAULT_FRESHNESS_WINDOW_SECONDS).toBe(6);
     expect(DEFAULT_TTL_SECONDS).toBe(60);
     expect(DEFAULT_TTL_SECONDS).toBe(DEFAULT_FRESHNESS_WINDOW_SECONDS * 10);

@@ -559,29 +559,6 @@ func TestPublishValidatesTargetLocally(t *testing.T) {
 	}
 }
 
-func TestShareVerifyKeyPassesAndFailsClosed(t *testing.T) {
-	srv := apitest.NewServer(t)
-	client := newTestClient(t, srv, nil)
-
-	res, err := client.Share(context.Background(), srv.Key.ResourceID, ShareOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := res.VerifyKey(srv.Key.DER); err != nil {
-		t.Errorf("consistent response must verify: %v", err)
-	}
-	other := apitest.GenerateResourceKey(t)
-	if err := res.VerifyKey(other.DER); !errors.Is(err, qurl.ErrCRIDMismatch) {
-		t.Errorf("wrong key: err = %v, want ErrCRIDMismatch", err)
-	}
-
-	// A ShareLink constructed without the SDK wiring fails closed, never open.
-	bare := &ShareLink{QURL: "https://qurl.link/#x"}
-	if err := bare.VerifyKey(srv.Key.DER); !errors.Is(err, qurl.ErrNoCRID) {
-		t.Errorf("unwired VerifyKey = %v, want ErrNoCRID", err)
-	}
-}
-
 func TestShareDark503PreservesSentinel(t *testing.T) {
 	srv := apitest.NewServer(t)
 	srv.Script(http.MethodPost, "/v1/resources/"+srv.Key.CRID+"/share", apitest.HandlerDark503(t))

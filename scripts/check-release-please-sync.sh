@@ -1,6 +1,7 @@
 #!/bin/sh
 # Verify release-please-config.json and .release-please-manifest.json agree:
-# package keys stay in sync, bare v* tags stay the CLI's alone
+# package keys stay in sync, browser tracks stay linked at equal versions,
+# and bare v* tags stay the CLI's alone
 # (include-component-in-tag: false on any other package would mint a second
 # bare-tag version stream that collides with the tag contract scripts/
 # install.sh and GoReleaser depend on — see .github/workflows/
@@ -21,13 +22,37 @@ python3 - <<'EOF'
 import json
 
 with open("release-please-config.json") as f:
-    packages = json.load(f)["packages"]
+    config = json.load(f)
+packages = config["packages"]
 with open(".release-please-manifest.json") as f:
-    manifest = set(json.load(f))
+    manifest_versions = json.load(f)
+manifest = set(manifest_versions)
 
 drift = sorted(set(packages) ^ manifest)
 if drift:
     raise SystemExit(f"release-please config/manifest key drift: {drift}")
+
+browser_links = [
+    plugin for plugin in config.get("plugins", [])
+    if isinstance(plugin, dict) and plugin.get("type") == "linked-versions"
+    and plugin.get("groupName") == "browser-extensions"
+]
+if len(browser_links) != 1 or set(browser_links[0].get("components", [])) != {
+    "chrome-extension", "edge-extension"
+}:
+    raise SystemExit(
+        "browser extension versions must stay linked: expected one "
+        "browser-extensions linked-versions group"
+    )
+declared_components = {pkg.get("component") for pkg in packages.values()}
+if not set(browser_links[0]["components"]) <= declared_components:
+    raise SystemExit("browser linked-version components must resolve to declared package components")
+
+if manifest_versions["apps/chrome-extension"] != manifest_versions["apps/edge-extension"]:
+    raise SystemExit(
+        "browser extension manifest versions must match; restore equal versions "
+        "for both browser apps in .release-please-manifest.json"
+    )
 
 bare_tagged = sorted(
     name for name, pkg in packages.items()
@@ -73,7 +98,8 @@ if cli.get("draft") is not True or cli.get("force-tag-creation") is not True:
     )
 
 print(
-    "release-please config/manifest in sync; bare v* tag reserved to apps/cli; "
+    "release-please config/manifest in sync; browser extension versions linked; "
+    "bare v* tag reserved to apps/cli; "
     "apps/cli declares no component and creates a tagged draft release"
 )
 EOF

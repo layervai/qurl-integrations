@@ -1,20 +1,3 @@
-/**
- * Unit tests for src/store/ddb-store.js.
- *
- * Uses `aws-sdk-client-mock` to intercept DocumentClient commands
- * without hitting AWS. Covers each Store contract method with:
- *   - A happy-path case verifying the right DDB command is issued
- *     with the expected arguments.
- *   - Edge cases for methods with non-trivial logic (dedup
- *     conditional failures, legacy branches, pagination).
- *
- * Does NOT cover:
- *   - Real DDB behavior (conditional expressions, GSI consistency).
- *     That's integration-test territory (PR 4b follow-up will run
- *     against a sandbox DDB table).
- *   - Timing-dependent operations (TTL actually expiring rows) —
- *     those are DDB-side guarantees, not our code.
- */
 
 const fs = require('fs');
 const path = require('path');
@@ -30,11 +13,6 @@ jest.mock('../src/logger', () => ({
   audit: jest.fn(),
 }));
 
-// Mock crypto wrapper: pass-through so tests can assert on plaintext
-// that flows into the DDB Item. Real encryption + the encryptStrict
-// fail-closed behavior are exercised by crypto.test.js. encryptStrict
-// is a jest.fn so the no-KEK regression test below can override its
-// implementation per-call without a shared mutable flag.
 const mockEncryptStrict = jest.fn((v) => `enc:v1:IV:TAG:${Buffer.from(v || '').toString('hex')}`);
 jest.mock('../src/utils/crypto', () => ({
   encrypt: (v) => `enc:v1:IV:TAG:${Buffer.from(v || '').toString('hex')}`,
@@ -60,9 +38,6 @@ const {
   TransactWriteCommand,
 } = require('@aws-sdk/lib-dynamodb');
 
-// aws-sdk-client-mock intercepts DocumentClient commands globally.
-// The DDB store module creates its client at module-load time, so
-// the mock must be set up before requiring the store.
 const ddbMock = mockClient(DynamoDBDocumentClient);
 
 process.env.DDB_TABLE_PREFIX = 'test-prefix-';
@@ -73,11 +48,6 @@ const logger = require('../src/logger');
 
 beforeEach(() => {
   ddbMock.reset();
-  // mockReset (not mockClear) so a future test setting a sticky
-  // mockImplementation can't leak into the next case — mockClear only
-  // resets call history, leaving the implementation in place. Today
-  // only mockImplementationOnce is used (auto-consumed); the broader
-  // reset is the cheap defensive choice.
   mockEncryptStrict.mockReset();
   mockEncryptStrict.mockImplementation((v) => `enc:v1:IV:TAG:${Buffer.from(v || '').toString('hex')}`);
 });
@@ -86,30 +56,17 @@ afterAll(async () => {
   await store.close();
 });
 
-// ── Guild configs (encryption path) ──
-
 describe('guild configs', () => {
   test('setGuildApiKey: encrypts apiKey before write, preserves configured_at on re-key', async () => {
     ddbMock.on(UpdateCommand).resolves({});
     await store.setGuildApiKey('g-1', 'plain-key', 'configurer');
     const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
     expect(input.Key).toEqual({ guild_id: 'g-1' });
-    // Encryption: ciphertext stored, never the plaintext.
     expect(input.ExpressionAttributeValues[':k']).toMatch(/^enc:v1:/);
     expect(input.ExpressionAttributeValues[':k']).not.toContain('plain-key');
-    // configured_by + updated_at unconditionally set.
     expect(input.ExpressionAttributeValues[':b']).toBe('configurer');
     expect(input.ExpressionAttributeValues[':u']).toBeDefined();
-    // Critical parity-with-SQLite invariant: re-key must NOT
-    // reset configured_at. SQLite's ON CONFLICT only touched
-    // qurl_api_key / configured_by / updated_at; the DDB
-    // equivalent is `if_not_exists(configured_at, :u)` so the
-    // first-ever-configured timestamp survives subsequent rotations.
     expect(input.UpdateExpression).toMatch(/if_not_exists\(configured_at, :u\)/);
-    // Defensive: the bare 'configured_at = :u' shape (which would
-    // clobber on every re-key) MUST NOT appear as a SET assignment.
-    // Only acceptable form is the `if_not_exists(configured_at, :u)`
-    // wrapper above.
     expect(input.UpdateExpression).not.toMatch(/, configured_at = :u\b/);
     expect(input.UpdateExpression).not.toMatch(/^SET configured_at = :u\b/);
   });
@@ -132,12 +89,6 @@ describe('guild configs', () => {
   });
 
   test('propagateGuildWebhookSubscription: swallows ConditionalCheckFailedException as benign', async () => {
-    // Scenario: between listGuildSubscriptionsByOwner returning the
-    // sibling row and the UpdateCommand executing, another path
-    // cleared the sibling's webhook_owner_id (mid-rollback of an
-    // earlier link). The ConditionExpression rejects with CCFE.
-    // That's the documented "row no longer qualifies" signal — it
-    // MUST NOT bubble up as a failure (would mask real failures).
     ddbMock.on(ScanCommand).resolves({ Items: [
       { guild_id: 'g_sibling', webhook_id: 'wh_x', webhook_owner_id: 'usr_o' },
     ] });
@@ -151,9 +102,6 @@ describe('guild configs', () => {
   });
 
   test('propagateGuildWebhookSubscription: non-CCFE errors are counted as failed', async () => {
-    // A real DDB error (throttling, validation, etc.) is NOT benign —
-    // it counts toward the failed-row tally so the caller can decide
-    // whether to log+continue. Pins the discriminator at line 1633.
     ddbMock.on(ScanCommand).resolves({ Items: [
       { guild_id: 'g_sibling', webhook_id: 'wh_x', webhook_owner_id: 'usr_o' },
     ] });
@@ -165,10 +113,6 @@ describe('guild configs', () => {
   });
 
   test('setGuildWebhookSubscription: rejects with CCFE when qurl_api_key row does not exist (orphan guard)', async () => {
-    // ConditionExpression on the UpdateCommand requires
-    // attribute_exists(qurl_api_key) — a caller-bug or race that ran
-    // setGuildWebhookSubscription before setGuildApiKey would otherwise
-    // create an orphan row with webhook_* attrs but no api key.
     const ccfe = new Error('ConditionalCheckFailedException');
     ccfe.name = 'ConditionalCheckFailedException';
     ddbMock.on(UpdateCommand).rejects(ccfe);
@@ -177,9 +121,6 @@ describe('guild configs', () => {
       webhookSecret: 'sec_x',
       webhookOwnerId: 'usr_y',
     })).rejects.toThrow(/ConditionalCheckFailedException/);
-    // Confirm the UpdateCommand actually carried the guard expression
-    // (would otherwise be a false-positive test that passes on any
-    // CCFE source — e.g. a different attribute condition).
     const calls = ddbMock.commandCalls(UpdateCommand);
     expect(calls).toHaveLength(1);
     expect(calls[0].args[0].input.ConditionExpression)
@@ -187,9 +128,6 @@ describe('guild configs', () => {
   });
 
   test('propagateGuildWebhookSubscription: excludes the just-written primary guild', async () => {
-    // excludeGuildId tells propagate to skip the primary row (already
-    // written by setGuildWebhookSubscription). Otherwise the primary
-    // would receive a redundant UpdateCommand with identical data.
     ddbMock.on(ScanCommand).resolves({ Items: [
       { guild_id: 'g_primary', webhook_id: 'wh_p', webhook_owner_id: 'usr_admin' },
     ] });
@@ -197,13 +135,9 @@ describe('guild configs', () => {
       webhookId: 'wh_p', webhookSecret: 'sec_p', excludeGuildId: 'g_primary',
     });
     expect(result).toEqual({ updated: 0, failed: 0 });
-    // Short-circuit: no UpdateCommand fired for an "only excluded"
-    // result set.
     expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
   });
 });
-
-// ── QURL sends lifecycle ──
 
 describe('qurl sends', () => {
   test('recordQURLSend: PutItem with all required fields + default dm_status=pending', async () => {
@@ -233,10 +167,6 @@ describe('qurl sends', () => {
   });
 
   test('recordQURLSend: omits qurl_id when empty/missing (sparse GSI — keep row off the index)', async () => {
-    // Sparse semantics: a row missing the GSI hash-key attribute
-    // doesn't appear in the GSI. Writing an empty string would still
-    // create an index entry, pinning the no-qurl_id row to PK="" and
-    // hot-partitioning the GSI on a single sentinel value.
     ddbMock.on(PutCommand).resolves({});
     for (const bad of [undefined, '', null]) {
       ddbMock.reset();
@@ -253,7 +183,6 @@ describe('qurl sends', () => {
   });
 
   test('recordQURLSend: writes guild_id when provided, omits when empty/missing (#1101)', async () => {
-    // Sparse guild_id on the single-row path, mirroring qurl_id semantics.
     ddbMock.on(PutCommand).resolves({});
     await store.recordQURLSend({
       sendId: 's1', senderDiscordId: 'sender', recipientDiscordId: 'rcpt',
@@ -286,7 +215,6 @@ describe('qurl sends', () => {
         expiresIn: '24h', channelId: 'ch', targetType: 'user' },
       { sendId: 's1', senderDiscordId: 'sender', recipientDiscordId: 'r2',
         resourceId: 'res', resourceType: 'file', qurlLink: 'https://…',
-        // qurlId omitted → row should not surface a qurl_id attribute
         expiresIn: '24h', channelId: 'ch', targetType: 'user' },
     ]);
     const calls = ddbMock.commandCalls(BatchWriteCommand);
@@ -299,11 +227,6 @@ describe('qurl sends', () => {
   });
 
   test('recordQURLSendBatch: writes guild_id per row when provided, sparsely (#1101 attribution)', async () => {
-    // guild_id is a NON-KEY attribute scoping watermark attribution to the
-    // minting guild. Sparse like qurl_id — a row whose input omits guildId
-    // (or sends an empty string) must not surface the attribute. The
-    // /qurl detect read filters sends on guild_id, so the write side must
-    // land it exactly when present.
     ddbMock.on(BatchWriteCommand).resolves({});
     await store.recordQURLSendBatch([
       { sendId: 's1', senderDiscordId: 'sender', recipientDiscordId: 'r1',
@@ -313,12 +236,10 @@ describe('qurl sends', () => {
       { sendId: 's1', senderDiscordId: 'sender', recipientDiscordId: 'r2',
         resourceId: 'res', resourceType: 'file', qurlLink: 'https://…',
         qurlId: 'q_aaaaaaaaaa2',
-        // guildId omitted → row should not surface a guild_id attribute
         expiresIn: '24h', channelId: 'ch', targetType: 'user' },
       { sendId: 's1', senderDiscordId: 'sender', recipientDiscordId: 'r3',
         resourceId: 'res', resourceType: 'file', qurlLink: 'https://…',
         qurlId: 'q_aaaaaaaaaa3', guildId: '',
-        // empty-string guildId → also omitted (sparse, no empty sentinel)
         expiresIn: '24h', channelId: 'ch', targetType: 'user' },
     ]);
     const calls = ddbMock.commandCalls(BatchWriteCommand);
@@ -529,9 +450,6 @@ describe('qurl sends', () => {
   });
 
   test('getRecentSends: uses base-table Query per send for accurate recipient_count', async () => {
-    // GSI returns 2 unique sends. Base-table per-send queries return
-    // 3 and 5 recipients respectively. Config fetches return null (no
-    // revoke). Result should report accurate counts, not GSI-truncated.
     ddbMock.on(QueryCommand).callsFake((input) => {
       const cmd = input;
       if (cmd.IndexName === 'sender_discord_id-created_at-index') {
@@ -542,7 +460,6 @@ describe('qurl sends', () => {
           ],
         });
       }
-      // Base-table queries for recipient count
       const sendId = cmd.ExpressionAttributeValues[':sid'];
       if (sendId === 'sA') {
         return Promise.resolve({ Items: Array.from({ length: 3 }, (_, i) => ({ send_id: 'sA', recipient_discord_id: `r${i}`, dm_status: i < 2 ? 'sent' : 'pending' })) });
@@ -571,21 +488,12 @@ describe('qurl sends', () => {
   );
 
   test('getRecentSends: per-send recipient Query paginates (LEK threading) so a >1MB fanout doesn\'t silently undercount', async () => {
-    // Regression guard: a single send fanning out to thousands of
-    // recipients can exceed the 1MB Query response cap. Without
-    // queryAll's LEK threading, recipient_count would silently
-    // truncate at the first page. Mock returns 60 rows on page 1,
-    // 40 on page 2 (no more LEK) for send 'big' — assert the
-    // function reports recipient_count = 100, not 60.
     ddbMock.on(QueryCommand).callsFake((input) => {
       if (input.IndexName === 'sender_discord_id-created_at-index') {
         return Promise.resolve({
           Items: [{ send_id: 'big', recipient_discord_id: 'r0', dm_status: 'sent', created_at: 'now', resource_type: 'file', target_type: 'user' }],
         });
       }
-      // Per-send recipient queries on the base table — paginated.
-      // Distinguish first call (no ExclusiveStartKey) from second
-      // (has it) to simulate LEK threading.
       if (!input.ExclusiveStartKey) {
         return Promise.resolve({
           Items: Array.from({ length: 60 }, (_, i) => ({ send_id: 'big', recipient_discord_id: `r${i}`, dm_status: 'sent' })),
@@ -605,11 +513,6 @@ describe('qurl sends', () => {
   });
 
   test('getRecentSends: GSI Query carries Limit so a fat send doesn\'t blow up RCU', async () => {
-    // Regression guard: a sender whose latest send fanned out to
-    // 1000 recipients would, without a per-page Limit, read all
-    // 1000 rows on every /qurl history call to extract one unique
-    // send_id. Limit pins the worst-case RCU per page; pagination
-    // handles "didn't get enough unique send_ids in one page."
     ddbMock.on(QueryCommand).resolves({ Items: [] });
     ddbMock.on(GetCommand).resolves({});
     await store.getRecentSends('sender', 10);
@@ -634,7 +537,6 @@ describe('qurl sends', () => {
       return Promise.resolve({ Items: [{ send_id: input.ExpressionAttributeValues[':sid'], recipient_discord_id: 'r1', dm_status: 'sent' }] });
     });
     ddbMock.on(GetCommand).callsFake((input) => {
-      // sA is revoked, sB is not
       if (input.Key.send_id === 'sA') {
         return Promise.resolve({ Item: { send_id: 'sA', revoked_at: 'now' } });
       }
@@ -886,8 +788,6 @@ describe('qurl sends', () => {
     ddbMock.on(UpdateCommand).resolves({});
     await expect(store.markSendRevoked('s1', 'sender')).resolves.toBe(true);
     const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
-    // BOTH :t and :s must be populated — if :s is missing, DDB throws
-    // ValidationException and every non-legacy revoke fails.
     expect(input.ExpressionAttributeValues[':t']).toBeDefined();
     expect(input.ExpressionAttributeValues[':s']).toBe('sender');
     expect(input.ConditionExpression).toMatch(/sender_discord_id = :s/);
@@ -963,13 +863,6 @@ describe('qurl sends', () => {
     expect(putCall.Item.revoked_at).toBeDefined();
     expect(putCall.Item.resource_type).toBe('file');
     expect(putCall.ConditionExpression).toMatch(/attribute_not_exists/);
-    // Hardening: legacy lookup must NOT carry Limit:1 — DDB applies
-    // Limit before FilterExpression, so a partition where the first
-    // server-side row doesn't pass the sender filter would silently
-    // miss. Today's invariant (all rows of one send share a sender)
-    // makes Limit:1 safe but also unnecessary; dropping it keeps
-    // the lookup robust to future migrations / manual repairs that
-    // could break the invariant.
     const queryCall = ddbMock.commandCalls(QueryCommand)[0].args[0].input;
     expect(queryCall.Limit).toBeUndefined();
     expect(queryCall.ConsistentRead).toBe(true);
@@ -992,16 +885,6 @@ describe('qurl sends', () => {
   });
 
   test('markSendRevoked: legacy CCFE recovers via Update (race vs non-revoke writer no longer loses revoke intent)', async () => {
-    // Race scenario:
-    //   T0: markSendRevoked GETs config_configs — no row, enters legacy branch.
-    //   T1: saveSendConfig (or any non-revoke writer) inserts a config
-    //       WITHOUT revoked_at.
-    //   T2: legacy Put hits attribute_not_exists(send_id) → CCFE.
-    // Old code swallowed the CCFE and returned — silent loss of
-    // revoke intent (config exists, send is NOT revoked, user thinks
-    // it was). New code falls through to flipRevokedAt which Updates
-    // the existing config row's revoked_at with the same owner-scoped
-    // + attribute_not_exists guard the primary path uses.
     const ccfe = new Error('exists');
     ccfe.name = 'ConditionalCheckFailedException';
 
@@ -1014,8 +897,6 @@ describe('qurl sends', () => {
 
     await store.markSendRevoked('s1', 'sender');
 
-    // Critical: an UpdateCommand MUST fire after the failed Put.
-    // Without flipRevokedAt the Update count would be 0 (silent loss).
     const updateCalls = ddbMock.commandCalls(UpdateCommand);
     expect(updateCalls).toHaveLength(1);
     expect(updateCalls[0].args[0].input.UpdateExpression).toMatch(/SET revoked_at/);
@@ -1039,10 +920,6 @@ describe('qurl sends', () => {
   });
 
   test('saveSendConfig: persists self_destruct_seconds across the preset range', async () => {
-    // Pins the DDB writer for three cases — sub-second 0.5, integer
-    // 30, omitted-as-null — so a future refactor that drops the field
-    // from the Item silently regresses the bot's selfDestructSeconds
-    // contract with the connector.
     ddbMock.on(PutCommand).resolves({});
     const base = {
       senderDiscordId: 'sender', resourceType: 'file',
@@ -1069,12 +946,6 @@ describe('qurl sends', () => {
   });
 
   test('getSendConfig: SECURITY — strips the SENSITIVE interaction_token from the full-row return', async () => {
-    // PR-B persists the live ~15-min interaction-webhook bearer cred onto
-    // this row. getSendConfig is the full-row getter its (scalar-reading)
-    // callers use, so it must NOT hand the token back — a caller that logs
-    // / audit-ships / error-dumps the config object would otherwise leak
-    // the cred. (The fast-path reads the token via getSendRenderState, the
-    // one return shape that intentionally carries it.)
     ddbMock.on(GetCommand).resolves({
       Item: {
         send_id: 's1', sender_discord_id: 'sender',
@@ -1085,12 +956,9 @@ describe('qurl sends', () => {
     const result = await store.getSendConfig('s1', 'sender');
     expect(result).not.toHaveProperty('interaction_token');
     expect(JSON.stringify(result)).not.toContain('tok-LIVE-bearer-cred');
-    // Non-sensitive config fields the callers DO read survive.
     expect(result.expires_in).toBe('24h');
     expect(result.personal_message).toBe('hi');
   });
-
-  // ── View-counter render state (cross-replica fast-path, PR-B) ──
 
   test('getSendRenderState: SECURITY - decrypted token has one production caller', () => {
     const srcRoot = path.join(__dirname, '../src');
@@ -1112,7 +980,7 @@ describe('qurl sends', () => {
         rel: path.relative(srcRoot, file).replace(/\\/g, '/'),
         text: fs.readFileSync(file, 'utf8'),
       }))
-      .filter(({ rel }) => !['store/ddb-store.js', 'store/contract.js'].includes(rel))
+      .filter(({ rel }) => rel !== 'store/ddb-store.js')
       .filter(({ text }) => /\bgetSendRenderState\s*\(/.test(text))
       .map(({ rel }) => rel)
       .sort();
@@ -1121,11 +989,6 @@ describe('qurl sends', () => {
   });
 
   test('saveSendConfig: does NOT write view-counter render-state (that is saveSendConfirmState only)', async () => {
-    // saveSendConfig runs BEFORE the token/confirmMsg/delivered exist, so
-    // it carries no render-state fields — they are written separately by
-    // saveSendConfirmState after the editReply. Pin that the config Put
-    // never touches the render-state attrs (no second, sensitive-token
-    // write surface to keep in sync).
     ddbMock.on(PutCommand).resolves({});
     await store.saveSendConfig({
       sendId: 's1', senderDiscordId: 'sender', resourceType: 'file',
@@ -1150,7 +1013,6 @@ describe('qurl sends', () => {
         expected_count: 5, last_rendered_count: 2,
       },
     });
-    // No senderDiscordId arg — PR-B's webhook path has no sender context.
     const state = await store.getSendRenderState('s1');
     const input = ddbMock.commandCalls(GetCommand)[0].args[0].input;
     expect(input.ConsistentRead).toBe(true);
@@ -1158,8 +1020,6 @@ describe('qurl sends', () => {
       interactionToken: 'tok-abc', interactionAppId: 'app-1',
       expectedCount: 5, lastRenderedCount: 2,
       viewedCount: null,
-      // last_rendered_at absent on the row → 0 (never edited), which the
-      // fast-path treats as "older than any coalesce window".
       lastRenderedAt: 0,
       baseMsg: undefined, qurlIds: [], terminal: false,
     });
@@ -1185,7 +1045,6 @@ describe('qurl sends', () => {
     const viaRevoke = await store.getSendRenderState('s1');
     expect(viaRevoke.terminal).toBe(terminal);
     expect(viaRevoke.qurlIds).toEqual(['q_a', 'q_b']);
-    // defaults when fields absent
     expect(viaRevoke.expectedCount).toBe(0);
     expect(viaRevoke.lastRenderedCount).toBe(0);
 
@@ -1204,17 +1063,12 @@ describe('qurl sends', () => {
   });
 
   test('getSendRenderState: self-defends past confirm_expires_at — treats a dead token as absent', async () => {
-    // The bot enforces the interaction token's ~15-min lifetime itself
-    // (the table has no DDB TTL yet), so a row whose confirm_expires_at is
-    // in the past returns null → the fast-path skips, the poll backstop
-    // renders. Without this, a stale token would be re-tried until reaped.
     const pastSeconds = Math.floor(Date.now() / 1000) - 60;
     ddbMock.on(GetCommand).resolves({
       Item: { send_id: 's1', interaction_token: 'tok-dead', interaction_app_id: 'app-1', confirm_expires_at: pastSeconds },
     });
     expect(await store.getSendRenderState('s1')).toBeNull();
 
-    // A future confirm_expires_at still returns the live state.
     ddbMock.reset();
     const futureSeconds = Math.floor(Date.now() / 1000) + 600;
     ddbMock.on(GetCommand).resolves({
@@ -1224,10 +1078,6 @@ describe('qurl sends', () => {
   });
 
   test('tryAdvanceRenderedCount: monotonic guard — advances up, rejects equal/lower', async () => {
-    // first advance 0→1 true; re-advance to 1 false; advance 1→2 true;
-    // lower 2→1 false. The store layer is stateless across calls (the
-    // CAS lives in DDB), so we drive the ConditionExpression verdict via
-    // the mock: success resolves, a no-advance CCFEs.
     const ccfe = new Error('cond');
     ccfe.name = 'ConditionalCheckFailedException';
 
@@ -1235,12 +1085,8 @@ describe('qurl sends', () => {
     const before = Date.now();
     expect(await store.tryAdvanceRenderedCount('s1', 1)).toBe(true); // 0→1
     const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
-    // Coalescing: the SAME write stamps last_rendered_at (epoch MS) so the
-    // next webhook's leading-edge debounce sees this confirmed edit.
     expect(input.UpdateExpression).toMatch(/SET last_rendered_count = :n/);
     expect(input.UpdateExpression).toMatch(/last_rendered_at = :now/);
-    // The MS clock lives in the SET clause, NOT the condition — only the
-    // count is guarded monotonic.
     expect(input.ConditionExpression).toBe(
       'attribute_not_exists(last_rendered_count) OR last_rendered_count < :n',
     );
@@ -1379,17 +1225,12 @@ describe('qurl sends', () => {
   });
 
   test('touchRenderedAt: failure-path debounce stamp — SETs last_rendered_at ONLY, no count, no condition', async () => {
-    // Refreshes the coalesce clock on a FAILED edit attempt without
-    // advancing the count (which would strand the stuck-counter guard).
     const before = Date.now();
     ddbMock.on(UpdateCommand).resolves({});
     await store.touchRenderedAt('s1');
     const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
-    // Only last_rendered_at — NOT last_rendered_count.
     expect(input.UpdateExpression).toBe('SET last_rendered_at = :now');
     expect(input.UpdateExpression).not.toMatch(/last_rendered_count/);
-    // Unconditional — the whole point is to stamp even though nothing was
-    // displayed, so there's no count guard.
     expect(input.ConditionExpression).toBeUndefined();
     const stamped = input.ExpressionAttributeValues[':now'];
     expect(stamped).toBeGreaterThanOrEqual(before);
@@ -1445,7 +1286,6 @@ describe('qurl sends', () => {
     const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
     expect(input.Key).toEqual({ send_id: 's1' });
     expect(input.UpdateExpression).toMatch(/^SET /);
-    // Every present field lands; the placeholder values carry the data.
     const vals = Object.values(input.ExpressionAttributeValues);
     expect(vals).toEqual(expect.arrayContaining([
       `enc:v1:IV:TAG:${Buffer.from('tok-live').toString('hex')}`,
@@ -1461,10 +1301,6 @@ describe('qurl sends', () => {
   });
 
   test('saveSendConfirmState: partial /qurl-add re-persist updates ONLY the passed keys — NEVER nulls the live token', async () => {
-    // THE regression guard: a fixed five-attr SET would write
-    // interaction_token = null when the add caller omits it, permanently
-    // disarming the fast-path (its absent-guard skips on a null token).
-    // Build-from-present-keys must touch ONLY expected_count + confirm_base_msg.
     ddbMock.on(UpdateCommand).resolves({});
     await store.saveSendConfirmState('s1', {
       expectedCount: 5, confirmBaseMsg: 'Sent to 5 users',
@@ -1472,7 +1308,6 @@ describe('qurl sends', () => {
     const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
     expect(input.UpdateExpression).toContain('expected_count');
     expect(input.UpdateExpression).toContain('confirm_base_msg');
-    // The token / app id / TTL attrs must NOT appear in the SET clause at all.
     expect(input.UpdateExpression).not.toContain('interaction_token');
     expect(input.UpdateExpression).not.toContain('interaction_app_id');
     expect(input.UpdateExpression).not.toContain('confirm_expires_at');
@@ -1541,11 +1376,6 @@ describe('qurl sends', () => {
     expect(input.IndexName).toBe('qurl_id-index');
     expect(input.KeyConditionExpression).toBe('qurl_id = :q');
     expect(input.ExpressionAttributeValues[':q']).toBe('q_aaaaaaaaaa1');
-    // Limit: 2 is the defense-in-depth cap — the handler only needs
-    // to distinguish 0 / 1 / >1, so a pathological duplicate-key
-    // explosion can't blow up RCU. A regression that removed it
-    // would let a runaway GSI page pull MB of rows the handler
-    // doesn't need.
     expect(input.Limit).toBe(2);
   });
 
@@ -1558,12 +1388,6 @@ describe('qurl sends', () => {
   });
 
   test('getSendItems: projects qurl_id (load-bearing for the view-counter fast-path N)', async () => {
-    // The webhook fast-path maps a send's recipient rows → qurl_ids via
-    // this fn, then counts DISTINCT viewed ids. If the projection ever
-    // drops qurl_id, the fast-path computes qurlIds=[] → N=0 → it never
-    // edits, and EVERY fast-path unit test (which mocks getSendItems to
-    // already carry qurl_id) stays green. This is the one production
-    // dependency the mocks structurally hide — pin it here.
     ddbMock.on(QueryCommand).resolves({
       Items: [{
         send_id: 's1', sender_discord_id: 'owner',
@@ -1588,10 +1412,6 @@ describe('qurl sends', () => {
   });
 
   test('findSendsByQurlId: tolerates DDB returning Count>1 (consumer handles defensively)', async () => {
-    // DDB doesn't enforce GSI hash-key uniqueness — the write-path
-    // invariant is supposed to keep this at 1, but the function MUST
-    // surface the full result set so the caller can detect + log
-    // the regression rather than silent-pick row[0].
     ddbMock.on(QueryCommand).resolves({
       Items: [
         { send_id: 's1', recipient_discord_id: 'r1', qurl_id: 'q_x' },
@@ -1627,9 +1447,6 @@ describe('qurl sends', () => {
   });
 
   test('clearExpiredDMEdited: REMOVE expression on the same composite key', async () => {
-    // Rollback path — called by the qurl.expired handler when editDM
-    // reported a transient failure, so qurl-service's retry can
-    // re-enter and re-attempt the edit.
     ddbMock.on(UpdateCommand).resolves({});
     await store.clearExpiredDMEdited('s1', 'rcpt');
     const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
@@ -1644,9 +1461,6 @@ describe('qurl sends', () => {
   });
 
   test('markConsumedDMEdited: conditional UpdateItem with attribute_not_exists(consumed_edited_at)', async () => {
-    // Parallel to markExpiredDMEdited but on a DISTINCT attribute, so a
-    // consumed-flip and a later expired-flip on the same row each have
-    // their own idempotency marker.
     ddbMock.on(UpdateCommand).resolves({});
     const result = await store.markConsumedDMEdited('s1', 'rcpt');
     expect(result).toBe(true);
@@ -1671,9 +1485,6 @@ describe('qurl sends', () => {
   });
 
   test('clearConsumedDMEdited: REMOVE expression on the same composite key', async () => {
-    // Rollback path — called by the consumed-flip handler when editDM
-    // reported a transient failure, so a redelivery / the qurl.expired
-    // backstop can re-attempt the flip.
     ddbMock.on(UpdateCommand).resolves({});
     await store.clearConsumedDMEdited('s1', 'rcpt');
     const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
@@ -1719,8 +1530,6 @@ describe('qurl sends', () => {
   });
 });
 
-// ── QURL views (webhook-fed view counter) ──
-
 describe('qurl views', () => {
   test('recordQurlView: conditional UpdateItem with MAX-merge + replay-protection clause + TTL refresh', async () => {
     ddbMock.on(UpdateCommand).resolves({});
@@ -1732,10 +1541,6 @@ describe('qurl views', () => {
     const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
     expect(input.TableName).toBe('test-prefix-qurl-views');
     expect(input.Key).toEqual({ qurl_id: 'q_aaaaaaaaaa1' });
-    // Pin the condition exactly so a refactor that drops any clause
-    // (replay, out-of-order, OR the consumed false→true flip on equal
-    // access_count) fails CI rather than silently corrupting the
-    // counter. `#consumed` is the DDB-reserved-keyword alias.
     expect(input.ConditionExpression).toBe(
       'attribute_not_exists(last_event_id) OR ('
       + 'last_event_id <> :eid AND ('
@@ -1749,10 +1554,6 @@ describe('qurl views', () => {
     expect(input.ExpressionAttributeValues).toEqual(expect.objectContaining({
       ':n': 3, ':c': false, ':eid': 'evt-1', ':false': false, ':true': true,
     }));
-    // TTL refresh on every write — 30 days from now, written to
-    // `expires_at` (the canonical TTL-attribute name across every
-    // table in this module). Numeric epoch seconds; DDB silently
-    // refuses to expire rows whose TTL attribute is the wrong type.
     expect(input.UpdateExpression).toMatch(/expires_at = :exp/);
     const THIRTY_DAYS = 30 * 24 * 60 * 60;
     expect(input.ExpressionAttributeValues[':exp']).toBeGreaterThanOrEqual(before + THIRTY_DAYS);
@@ -1867,14 +1668,8 @@ describe('qurl views', () => {
   });
 });
 
-// ── Stats ──
-
 describe('stats', () => {
   test('getStats: counts guild_configs and qurl_sends, paginating Select=COUNT', async () => {
-    // Regression guard for the silent-cliff bug: DDB's Select=COUNT
-    // scan is still capped at 1MB per page, so a single ScanCommand
-    // undercounts once the table grows. countAll must accumulate
-    // across pages until LastEvaluatedKey is empty.
     const pages = { 'test-prefix-guild-configs': 0, 'test-prefix-qurl-sends': 0 };
     ddbMock.on(ScanCommand).callsFake((input) => {
       pages[input.TableName] += 1;
@@ -1892,8 +1687,6 @@ describe('stats', () => {
   });
 });
 
-// ── Health check ──
-
 describe('healthCheck', () => {
   test('issues a single GetItem against guild_configs sentinel key', async () => {
     ddbMock.on(GetCommand).resolves({}); // sentinel key never exists
@@ -1908,9 +1701,6 @@ describe('healthCheck', () => {
   test('does NOT touch any user-data table (no Scan, no leaderboard read)', async () => {
     ddbMock.on(GetCommand).resolves({});
     await store.healthCheck();
-    // Critical contract for /health-cadence callers: zero ScanCommands.
-    // If a future contributor "improves" healthCheck by adding a
-    // getStats() call, this test fires.
     expect(ddbMock.commandCalls(ScanCommand)).toHaveLength(0);
     expect(ddbMock.commandCalls(QueryCommand)).toHaveLength(0);
   });
@@ -1923,32 +1713,6 @@ describe('healthCheck', () => {
   });
 });
 
-// ── Contract adherence ──
-
-describe('Store contract adherence', () => {
-  const { STORE_METHODS, assertStoreShape } = require('../src/store/contract');
-
-  test('ddb-store passes assertStoreShape', () => {
-    expect(() => assertStoreShape(store, 'ddb')).not.toThrow();
-  });
-
-  test('ddb-store exports every STORE_METHODS entry as a function', () => {
-    const missing = STORE_METHODS.filter(m => typeof store[m] !== 'function');
-    expect(missing).toEqual([]);
-  });
-
-});
-
-// ── DDB_TABLE_PREFIX boot-time validation ──
-//
-// The test file at top sets DDB_TABLE_PREFIX='test-prefix-' before
-// requiring the store, so the in-process module already passed
-// validation. Exercising the failure paths needs a clean require, so
-// each case spawns a child `node -e` that requires ddb-store directly
-// with a controlled env. The whole point of the validation is to keep
-// a developer's local shell with stray AWS creds from hitting prod
-// tables, so coverage on every "treat as unset" branch is worth the
-// child-process cost.
 describe('ddb-store boot-time DDB_TABLE_PREFIX validation', () => {
   const { spawnSync } = require('child_process');
   const path = require('path');
@@ -1968,7 +1732,6 @@ describe('ddb-store boot-time DDB_TABLE_PREFIX validation', () => {
     const result = spawnDdbStoreBoot(undefined);
     expect(result.status).not.toBe(0);
     expect(result.stderr).toMatch(/DDB_TABLE_PREFIX is required/);
-    // Names the concrete next action so the operator knows how to fix.
     expect(result.stderr).toMatch(/sandbox/);
     expect(result.stderr).toMatch(/prod/);
   });
@@ -1988,36 +1751,19 @@ describe('ddb-store boot-time DDB_TABLE_PREFIX validation', () => {
   test('boots cleanly when DDB_TABLE_PREFIX is set to a real value', () => {
     const result = spawnDdbStoreBoot('qurl-bot-discord-sandbox-');
     expect(result.status).toBe(0);
-    // Negative-match instead of strict-empty so a future Node
-    // deprecation warning doesn't flake this test — the contract
-    // here is "validation didn't fire", not "stderr is silent".
     expect(result.stderr).not.toMatch(/DDB_TABLE_PREFIX/);
   });
 
   test('throws when DDB_TABLE_PREFIX is missing the trailing dash', () => {
-    // Without the trailing '-', concat with kebab table suffixes
-    // produces malformed names like 'qurl-bot-discord-sandboxqurl-sends'.
-    // First DDB call would return ResourceNotFoundException — clear at
-    // the call site but confusing in CloudWatch (looks like a perms or
-    // schema problem, not a config typo). Boot-time check points
-    // directly at the env var.
     const result = spawnDdbStoreBoot('qurl-bot-discord-sandbox');
     expect(result.status).not.toBe(0);
     expect(result.stderr).toMatch(/must end with '-'/);
-    // Names the offending value AND the example malformed table the
-    // operator would've otherwise hit — concrete next action. The
-    // example must be a table that actually exists, so an operator
-    // grepping for it doesn't land on one infra #372 dropped.
     expect(result.stderr).toMatch(/qurl-bot-discord-sandbox/);
     expect(result.stderr).toMatch(/qurl-sends/);
   });
 });
 
 describe('ddb-store boot-time AWS_REGION validation', () => {
-  // Same shape of footgun the DDB_TABLE_PREFIX guard closes: a dev
-  // with stray AWS creds + DDB_TABLE_PREFIX set to a real value
-  // (sandbox or prod) but unset AWS_REGION would silently land in
-  // whichever region the SDK defaults to. Catch at boot.
   const { spawnSync } = require('child_process');
   const path = require('path');
   const requirePath = JSON.stringify(path.resolve(__dirname, '..', 'src/store/ddb-store'));
@@ -2040,7 +1786,6 @@ describe('ddb-store boot-time AWS_REGION validation', () => {
     const result = spawnDdbStoreBootWithRegion(undefined);
     expect(result.status).not.toBe(0);
     expect(result.stderr).toMatch(/AWS_REGION is required/);
-    // Names a concrete next action.
     expect(result.stderr).toMatch(/us-east-2/);
   });
 
