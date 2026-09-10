@@ -413,8 +413,8 @@ below `/tmp`. The environment-only `QURL_CONNECTOR_RUNTIME_DIR` pins it: set to 
 short absolute path (a relative one, or one whose socket path exceeds the
 limit, is rejected), the daemon and every `qurl` command resolve exactly
 `<dir>/daemon.sock`, which is what a host whose state path is long — an app
-container, for example — needs. Use a separate dedicated directory for each state namespace. It must be
-owner-only (mode `0700`); the daemon secures it before it listens. Set the
+container, for example — needs. Use a separate dedicated directory for each
+state namespace. It must be owner-only (mode `0700`); the daemon secures it before it listens. Set the
 variable identically for the daemon and for every command that addresses the
 same state directory. Windows named pipes have no length limit and ignore it.
 The socket speaks HTTP. When it is in the state directory:
@@ -432,9 +432,10 @@ local origin, for example a process-random token the origin requires before
 it serves anything. Each request replaces the whole overlay: a route the body
 does not name loses its headers, and `{"route_request_headers": {}}` clears
 it. A valid body is answered with 204. A body over 64 KiB, with unknown
-fields, with more than 2,000 routes, with more than 16 headers or 1,024 name-and-value bytes for one
-route, or with an invalid, reserved, or case-variant duplicate header name
-or an invalid value is answered with 400 and a fixed message that never echoes a header.
+fields, with more than 2,000 routes, with more than 16 headers or 1,024
+name-and-value bytes for one route, or with an invalid, reserved, or case-variant duplicate header name
+or an invalid value is answered with 400 and a fixed message that never
+echoes a header.
 The overlay lives in process memory only: it is never written to disk, never
 reported by `/status` or `qurl inspect`, never logged, and a restarted daemon
 starts with an empty one — which is why step 2 pushes it before the first
