@@ -208,7 +208,6 @@ function createGatewayWsShim({
   // oldest. Generalize all three mirrors together before enabling sharding.
   let lastHeartbeatAckAt = null;
   let lastHeartbeatLatencyMs = -1;
-  let hasConnected = false;
   // READY carries the complete guild membership list. A pure RESUME does
   // not, so that path lazily seeds from Discord's paginated user-guilds
   // endpoint before publishing an exact ActiveGuildCount metric. Also single-
@@ -217,6 +216,7 @@ function createGatewayWsShim({
   let activeGuildIds = null;
   let guildSeedPromise = null;
   let guildSeedAttempts = 0;
+  let guildSeedRetryAt = 0;
   const pendingGuildAdds = new Set();
   const pendingGuildRemoves = new Set();
   let wsRecovering = false;
@@ -443,13 +443,11 @@ function createGatewayWsShim({
       manager.on(WebSocketShardEvents.Ready, () => {
         if (stopped) return;
         wsConnected = true;
-        hasConnected = true;
         wsRecovering = false;
       });
       manager.on(WebSocketShardEvents.Resumed, () => {
         if (stopped) return;
         wsConnected = true;
-        hasConnected = true;
         wsRecovering = false;
       });
       // Note: @discordjs/ws v1.2.x Closed payload is `{ code, shardId }`
@@ -663,9 +661,9 @@ function createGatewayWsShim({
       // missing-data alarm still catches the absence of a connected replica;
       // suppressing the companion unhealthy event prevents an idle standby
       // from emitting an unbounded false-unhealthy stream after demotion.
-      if (!hasConnected || stopped || !wsConnected || lastHeartbeatAckAt === null) return null;
       // Before this connection earns its first ACK, the missing-data alarm
       // owns liveness; a normal heartbeat jitter must not emit unhealthy.
+      if (stopped || !wsConnected || lastHeartbeatAckAt === null) return null;
       return {
         // isReady intentionally stays true through transient reconnects for
         // the ECS /health probe. The positive heartbeat must be stricter:
@@ -685,10 +683,18 @@ function createGatewayWsShim({
       if (activeGuildIds) return activeGuildIds.size;
 
       if (!guildSeedPromise) {
-        // A missing gauge is safer than retrying a broken pagination walk
-        // forever. READY can still supply membership after these attempts.
-        if (guildSeedAttempts >= 3) return null;
+        // Three failed walks enter a one-hour cooldown instead of hammering
+        // REST or permanently losing the gauge on a long-lived RESUME.
+        if (guildSeedAttempts >= 3) {
+          if (Date.now() < guildSeedRetryAt) return null;
+          guildSeedAttempts = 0;
+        }
         guildSeedAttempts += 1;
+        guildSeedRetryAt = Date.now() + 60 * 60 * 1000;
+        // The new REST snapshot includes prior events. Retain only changes
+        // during this walk, bounding failed-seed event retention to cooldown.
+        pendingGuildAdds.clear();
+        pendingGuildRemoves.clear();
         guildSeedPromise = (async () => {
           const fetchedGuildIds = new Set();
           let after = null;
@@ -734,7 +740,7 @@ function createGatewayWsShim({
           }
           return activeGuildIds.size;
         })().finally(() => {
-          // On failure the next 60-second tick may retry, up to three walks.
+          // On failure the next metric tick may retry, subject to cooldown.
           // sampleInFlight in gateway-metrics prevents overlapping sweeps.
           guildSeedPromise = null;
         });

@@ -395,7 +395,7 @@ describe('Pillar 3 manager contract — connect() + connection state', () => {
     expect(restInstances[0].get).toHaveBeenCalledTimes(2);
   });
 
-  it('stops failed guild seed walks after three attempts but still accepts READY', async () => {
+  it('cools down failed guild seed walks and recovers without a READY', async () => {
     const { shim, managerInstances, restInstances } = makeShim();
     await shim.start({ connect: false });
     const manager = managerInstances[0];
@@ -403,17 +403,18 @@ describe('Pillar 3 manager contract — connect() + connection state', () => {
     manager.emit(WebSocketShardEvents.Dispatch, {
       data: { t: 'RESUMED', d: {} }, shardId: 0,
     });
+    const now = jest.spyOn(Date, 'now').mockReturnValue(1_700_000_000_000);
     restInstances[0].get.mockRejectedValue(new Error('Discord unavailable'));
     for (let attempt = 0; attempt < 3; attempt += 1) {
       await expect(shim.getActiveGuildCount()).rejects.toThrow('Discord unavailable');
     }
     await expect(shim.getActiveGuildCount()).resolves.toBe(null);
     expect(restInstances[0].get).toHaveBeenCalledTimes(3);
-    manager.emit(WebSocketShardEvents.Dispatch, {
-      data: { t: 'READY', d: { application: { id: 'app-1' }, guilds: [{ id: 'g1' }] } },
-      shardId: 0,
-    });
+    now.mockReturnValue(1_700_003_600_000);
+    restInstances[0].get.mockResolvedValueOnce([{ id: 'g1' }]);
     await expect(shim.getActiveGuildCount()).resolves.toBe(1);
+    expect(restInstances[0].get).toHaveBeenCalledTimes(4);
+    now.mockRestore();
   });
 
   it('bounds a pathological pure-RESUME guild pagination walk', async () => {
