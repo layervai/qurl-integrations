@@ -22,7 +22,8 @@ const SocketFile = "daemon.sock"
 // RuntimeDirEnv pins the directory that holds the share daemon's control
 // socket. A host whose state path cannot fit sockaddr_un, such as an App
 // Sandbox container, sets it to a short owner-only directory so every daemon
-// and client resolves exactly <dir>/daemon.sock.
+// and client resolves exactly <dir>/daemon.sock. This directory must be
+// dedicated to one state namespace; startup enforces owner-only 0700 mode.
 const RuntimeDirEnv = "QURL_CONNECTOR_RUNTIME_DIR"
 
 // SocketPathForStateDir returns the platform IPC address for one state
@@ -30,7 +31,7 @@ const RuntimeDirEnv = "QURL_CONNECTOR_RUNTIME_DIR"
 // function so they always agree. lookupEnv supplies RuntimeDirEnv; nil
 // consults no environment. Unix keeps the socket below a short state
 // directory and derives a bounded owner-only per-user directory below
-// os.TempDir() when the state path cannot fit sockaddr_un. Windows hashes the
+// /tmp when the state path cannot fit sockaddr_un. Windows hashes the
 // returned path into its named-pipe address and ignores RuntimeDirEnv.
 func SocketPathForStateDir(stateDir string, lookupEnv func(string) (string, bool)) (string, error) {
 	stateDir = filepath.Clean(strings.TrimSpace(stateDir))

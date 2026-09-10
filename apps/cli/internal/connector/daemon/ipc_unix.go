@@ -115,11 +115,11 @@ func platformSocketPath(stateDir, runtimeDir string) (string, error) {
 	// IPCServer.Run passes this predictable directory through EnsureDirMode
 	// before listen. That helper rejects a symlink or a directory owned by any
 	// other user before it changes permissions, so a pre-creation below the
-	// shared temp root can only make startup fail closed. Half the digest keeps
-	// the address inside the bound below the 48-byte per-user macOS temp root:
-	// 48 + "/qurl-<uid>-" (at most 17) + 16 + "/daemon.sock" (12) is at most 93.
+	// shared temp root can only make startup fail closed. The fixed root makes
+	// foreground daemons and clients agree even when their TMPDIR differs.
+	const runtimeRoot = "/tmp"
 	path = filepath.Join(
-		os.TempDir(),
+		runtimeRoot,
 		"qurl-"+strconv.Itoa(os.Geteuid())+"-"+hex.EncodeToString(digest[:8]),
 		SocketFile,
 	)
