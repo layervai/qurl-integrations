@@ -234,6 +234,9 @@ func changeShareState(ctx context.Context, opts *globalOpts, id, action string, 
 	var updated *connectorstate.LocalShare
 	var updateErr error
 	if target != nil {
+		// TODO(upstream-contract): SessionGroupRunner.SetRoutes must reconcile a
+		// changed LocalIP/LocalPort for an existing RouteID (qurl-connector's
+		// TestSessionGroupRunnerSetRoutesChangesProxiesWithoutReadmission pins it).
 		updated, updateErr = registry.Retarget(ctx, local.ResourceID, target.canonicalOrigin, sharing.ServingEpoch)
 	} else {
 		updated, updateErr = registry.SetDesired(ctx, local.ResourceID, string(sharing.DesiredState), sharing.ServingEpoch)
