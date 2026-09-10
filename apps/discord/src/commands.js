@@ -9034,7 +9034,8 @@ const commands = [
             const sanitizeIdentityValue = (value) =>
               sanitizeDisplayNamePlain(value, { fallback: '' }).replace(/`/g, '');
             const { key_prefix: rawKeyPrefix, scopes: allScopes } = identity.api_key;
-            const keyPrefix = sanitizeIdentityValue(rawKeyPrefix) || 'unknown';
+            // Bound disclosure locally even if the upstream prefix field widens.
+            const keyPrefix = capUtf16Units(sanitizeIdentityValue(rawKeyPrefix), 12) || 'unknown';
             const shownScopes = allScopes.slice(0, STATUS_SCOPE_DISPLAY_MAX)
               .map(scope => `\`${sanitizeIdentityValue(scope) || 'unnamed'}\``);
             healthyScopeCount = shownScopes.length;

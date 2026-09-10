@@ -441,7 +441,7 @@ describe('/qurl status — admin-offboarding nudge (#185)', () => {
     mockGetIdentity.mockResolvedValueOnce({
       api_key: {
         key_id: 'key-123',
-        key_prefix: 'lv_live_`prefix',
+        key_prefix: 'lv_live_`prefix_do_not_display',
         scopes: ['qurl:read` @everyone'],
       },
     });
@@ -452,7 +452,8 @@ describe('/qurl status — admin-offboarding nudge (#185)', () => {
     await handleCommand(interaction);
 
     const replyContent = interaction._editReply.mock.calls[0][0].content;
-    expect(replyContent).toContain('Key prefix: `lv_live_prefix`');
+    expect(replyContent).toContain('Key prefix: `lv_live_pref`');
+    expect(replyContent).not.toContain('do_not_display');
     expect(replyContent).toContain('Scopes: `qurl:read @everyone`');
   });
 
