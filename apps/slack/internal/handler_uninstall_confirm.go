@@ -41,7 +41,7 @@ func uninstallConfirmBlocks(command string, purgeWorkspaceIDs []string) []any {
 			"• Admin list — everyone added with `" + adminCommand + " add`\n" +
 			"• Channel access — which resources are available in which channel\n" +
 			"• Channel aliases — the `$name` shortcuts bound in each channel"),
-		sectionBlock("Your protected resources and qURL Connectors are *not* affected — they stay on your qURL account. This workspace regains access to them after `" + command + " setup <email>`."),
+		sectionBlock("Your protected resources and qURL Connectors are *not* affected — they stay on your qURL account. Reconnecting with `" + command + " setup <email>` restores the connection; channel access and aliases must be set up again."),
 		contextBlock("To refresh this workspace's qURL key or pick up new scopes, use `" + command + " setup <email> --rotate` instead. That keeps this configuration."),
 		actionsBlock(withConfirmDialog(
 			dangerButtonElement(uninstallConfirmButtonLabel, uninstallConfirmActionID, strings.Join(purgeWorkspaceIDs, uninstallPurgeIDSeparator)),

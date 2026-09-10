@@ -894,6 +894,7 @@ func TestUninstallConfirmBlocksStateWhatIsClearedAndKept(t *testing.T) {
 		"Admin list",
 		"Channel access",
 		"Channel aliases",
+		"channel access and aliases must be set up again",
 		"not* affected", // resources survive
 		"--rotate",      // the non-destructive alternative
 		uninstallConfirmActionID,
