@@ -85,6 +85,7 @@ func TestJobControllerAbsentOwnerPersistsStableInstalledCommandPath(t *testing.T
 			"--runtime-dir", filepath.Dir(controller.IPC.SocketPath), "--job-version", "4/2.4.0", "--share-group-mode", "single",
 			"--hub-host", "hub.sandbox.layerv.xyz", "--hub-port", "443",
 			"--hub-server-public-key-b64", testHubKey,
+			"--supervision", "native",
 		)
 		wantArguments = append(wantArguments, daemonJobLogArguments(
 			filepath.Join(dir, "logs", "share-daemon.log"), filepath.Join(dir, "logs", "share-daemon.err.log"))...)

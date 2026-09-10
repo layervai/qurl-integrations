@@ -303,16 +303,28 @@ or require that file.
 #### External supervision
 
 When another program — a desktop app, a service manager — owns the daemon
-process instead of qurl's per-user background job, start the daemon with
+process instead of qURL's per-user background job, start the daemon with
 `--supervision external` and run every lifecycle command against that state
 directory with the same setting (flag `--supervision`, environment
 `QURL_DAEMON_SUPERVISION`, config key `daemon_supervision`):
 
+Use a dedicated, fresh state directory rather than the native default. For
+account-key enrollment, the first daemon invocation establishes the marker and
+is expected to exit with `no durable account owner`. Then log in, and start
+the daemon again:
+
 ```bash
-qurl daemon run --state-dir "$STATE_DIR" --supervision external
-QURL_DAEMON_SUPERVISION=external qurl publish http://127.0.0.1:3000
-qurl stop <CRID> --supervision external
+export QURL_CONNECTOR_STATE_DIR="$STATE_DIR"
+export QURL_DAEMON_SUPERVISION=external
+qurl daemon run # first invocation marks the namespace, then exits 1
+qurl login
+qurl daemon run # keep running under the supervisor
 ```
+
+Once the daemon is running, lifecycle commands in another process use the same
+two environment settings. A dedicated state directory avoids marking the native
+default namespace by accident; use a different directory to return to native
+supervision instead of deleting a marker beside durable credentials.
 
 External supervision changes three things:
 
@@ -329,9 +341,11 @@ External supervision changes three things:
   background job over a supervised daemon, and a supervised command never
   adopts a natively managed directory. Read-only commands work either way.
 
-An externally supervised daemon waits up to 30 seconds for its supervisor's
+On every process start, including a warm restart or headless start, an
+externally supervised daemon waits up to 30 seconds for its supervisor's
 first reload (every lifecycle command sends one) before serving the stored
-shares on its own. Stopping the daemon is a local act: it changes no sharing
+shares on its own. The supervisor should send `POST /reload` after IPC is
+ready and all runtime state has been restored to avoid that delay. Stopping the daemon is a local act: it changes no sharing
 state, so the shares resume on the next start.
 
 ### qurl publish

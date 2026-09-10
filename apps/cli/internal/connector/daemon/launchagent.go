@@ -200,6 +200,8 @@ func (c *JobController) jobDefinition(hub qurl.HubBootstrap, jobVersion string) 
 		"--share-group-mode", string(c.ShareGroupMode),
 		"--hub-host", hub.Host, "--hub-port", strconv.Itoa(hub.Port),
 		"--hub-server-public-key-b64", hub.ServerPublicKeyB64,
+		// Pin native ownership even if the user later selects external in their profile.
+		"--supervision", string(c.Supervision),
 	)
 	arguments = append(arguments, daemonJobLogArguments(stdoutPath, stderrPath)...)
 	return connectorservice.UserJob{
