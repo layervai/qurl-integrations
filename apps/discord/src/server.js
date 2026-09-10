@@ -219,15 +219,15 @@ if (!config.isQurlOAuthConfigured) {
   logger.info('qURL OAuth routes mounted in not-configured mode (AUTH0_* env vars unset). /qurl setup will fall back to the legacy modal-paste path.');
 }
 
-// Stage-2 Discord install callback. Mounts at /oauth/discord/callback —
-// the redirect_uri Discord OAuth2 hits when an admin clicks "Add to
-// Discord" + selects a server. Always mount so the redirect URI is
-// stable regardless of config; the route gates internally on
-// config.isDiscordInstallConfigured (returns 503 when DISCORD_CLIENT_SECRET
-// or AUTH0_* unset).
+// Stage-2 Discord install flow. /oauth/discord/install creates the
+// session-bound Discord authorization URL; Discord then returns to
+// /oauth/discord/callback after an admin selects a server. Always mount
+// so both public URLs are stable regardless of config; the route gates internally on
+// config.isDiscordInstallConfigured (returns 503 when credentials are
+// incomplete/invalid or BASE_URL cannot retain the Secure session cookie).
 app.use('/oauth/discord', noStoreHeaders, discordInstallRouter);
 if (!config.isDiscordInstallConfigured) {
-  logger.info('Discord install callback mounted in not-configured mode (DISCORD_CLIENT_SECRET or AUTH0_* env vars unset).');
+  logger.info('Discord install flow mounted in not-configured mode (credentials incomplete/invalid or BASE_URL unsafe for Secure cookies).');
 }
 
 // Error handler (Express requires the 4-arg signature; `next` unused)
