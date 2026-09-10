@@ -93,9 +93,18 @@ func ConfiguredAgentID() string {
 	return strings.TrimSpace(os.Getenv(EnvAgentID))
 }
 
+// errStoreNotOpen reports use of a nil or closed Store; it wraps
+// qurl.ErrAgentStateContinuity so callers fail closed on errors.Is.
+var errStoreNotOpen = fmt.Errorf("%w: Connector state store is not open", qurl.ErrAgentStateContinuity)
+
 // sealedProviderSelected reports whether LAYERV_KEY_PROVIDER names a key
 // provider other than the plaintext file default. The connector validates the
 // name and the provider's own environment when the sealed store opens.
+//
+// TODO(upstream-contract): mirrors qurl-connector pkg/agentstate
+// selectedKeyProviderName (trimmed, case-folded, empty means file). If the
+// connector adds a provider that still writes the plaintext envelope, route
+// it here too or the plaintext guard in Open is skipped for it.
 func sealedProviderSelected() bool {
 	name := strings.ToLower(strings.TrimSpace(os.Getenv(connectoragentstate.EnvKeyProvider)))
 	return name != "" && name != connectoragentstate.KeyProviderFile
@@ -128,17 +137,23 @@ type stateOwner interface {
 // fileStateOwner adapts the plaintext file store, which is its own
 // qurl.AgentStateStore, to the stateOwner contract.
 type fileStateOwner struct {
-	*qurl.FileAgentStateStore
+	store *qurl.FileAgentStateStore
 }
 
 // Handoff validates the retained state capability and returns the plaintext
 // store itself.
 func (o fileStateOwner) Handoff() (qurl.AgentStateStore, error) {
-	if err := o.ValidateContinuity(); err != nil {
+	if err := o.store.ValidateContinuity(); err != nil {
 		return nil, err
 	}
-	return o.FileAgentStateStore, nil
+	return o.store, nil
 }
+
+// ValidateContinuity checks the retained plaintext state capability.
+func (o fileStateOwner) ValidateContinuity() error { return o.store.ValidateContinuity() }
+
+// Close releases the plaintext state capability.
+func (o fileStateOwner) Close() error { return o.store.Close() }
 
 // Open prepares dir (owner-only 0700) and opens the agent state envelope
 // inside it: the plaintext file unless LAYERV_KEY_PROVIDER selects a key
@@ -164,6 +179,15 @@ func Open(dir string) (*Store, error) {
 	// supplies a wrapping key over an inherited descriptor) established this
 	// namespace. Writing a plaintext envelope beside it would make the
 	// connector refuse the directory outright, so fail closed here instead.
+	//
+	// TODO(upstream-contract): this is the file-provider clause of the
+	// connector's validateSDKStoreLayoutInNamespace. It is deliberately not
+	// ValidateSDKStoreLayout, which would put the default plaintext path
+	// through the connector's pinned namespace preparation (creating its
+	// durability artifacts) where qurl-go's own capability already pins it.
+	// The sealed branch also inherits the connector's legacy-artifact reject
+	// list (agent_id, private_key, registration_refresh, etc/, ...), so no
+	// file qurl writes into this directory may take one of those names.
 	if _, err := os.Lstat(filepath.Join(dir, connectoragentstate.SealedAgentStateFile)); err == nil {
 		return nil, fmt.Errorf("state directory holds a sealed agent state envelope (%s); set %s and %s to open it, or use a different state directory",
 			connectoragentstate.SealedAgentStateFile, connectoragentstate.EnvKeyProvider, connectoragentstate.EnvLocalKeyFD)
@@ -174,7 +198,7 @@ func Open(dir string) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("initialize plaintext agent state: %w", err)
 	}
-	return &Store{dir: dir, envelope: AgentStateFile, owner: fileStateOwner{file}}, nil
+	return &Store{dir: dir, envelope: AgentStateFile, owner: fileStateOwner{store: file}}, nil
 }
 
 // Dir returns the resolved state directory this store was opened in.
@@ -191,12 +215,12 @@ func (s *Store) Dir() string {
 // hide the store's package-private capabilities.
 func (s *Store) Handoff() (qurl.AgentStateStore, error) {
 	if s == nil {
-		return nil, fmt.Errorf("%w: Connector state store is not open", qurl.ErrAgentStateContinuity)
+		return nil, errStoreNotOpen
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if s.owner == nil {
-		return nil, fmt.Errorf("%w: Connector state store is not open", qurl.ErrAgentStateContinuity)
+		return nil, errStoreNotOpen
 	}
 	return s.owner.Handoff()
 }
@@ -210,7 +234,7 @@ func (s *Store) Handoff() (qurl.AgentStateStore, error) {
 // true absence.
 func (s *Store) AgentStatePresent() (bool, error) {
 	if s == nil {
-		return false, fmt.Errorf("%w: Connector state store is not open", qurl.ErrAgentStateContinuity)
+		return false, errStoreNotOpen
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -234,7 +258,7 @@ func (s *Store) AgentStatePresent() (bool, error) {
 // to its retained directory capability.
 func (s *Store) ValidateContinuity() error {
 	if s == nil {
-		return fmt.Errorf("%w: Connector state store is not open", qurl.ErrAgentStateContinuity)
+		return errStoreNotOpen
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -243,7 +267,7 @@ func (s *Store) ValidateContinuity() error {
 
 func (s *Store) validateContinuityLocked() error {
 	if s.owner == nil {
-		return fmt.Errorf("%w: Connector state store is not open", qurl.ErrAgentStateContinuity)
+		return errStoreNotOpen
 	}
 	return s.owner.ValidateContinuity()
 }
