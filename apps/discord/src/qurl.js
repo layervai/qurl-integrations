@@ -60,18 +60,6 @@ const SAFE_STATUS0_CODES = new Set([
   ERROR_CODE_TIMEOUT,
 ]);
 
-function retryDelayMs(response, attempt) {
-  // TODO(upstream-contract): qURL service mutation_outcome_unknown responses
-  // carry Retry-After delta seconds. Use bounded backoff if an intermediary
-  // removes or damages that advisory header.
-  const raw = response?.headers?.get('retry-after');
-  if (/^\d+$/.test(raw || '')) {
-    const seconds = Number(raw);
-    if (Number.isSafeInteger(seconds) && seconds >= 0 && seconds <= 30) return seconds * 1000;
-  }
-  return RETRY_BACKOFF_BASE_MS * (2 ** attempt);
-}
-
 function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
@@ -260,53 +248,44 @@ async function deleteLink(resourceId, apiKey, { deadlineMs } = {}) {
         && (!Number.isSafeInteger(deadlineMs) || deadlineMs <= Date.now())) {
       throw new Error('Delegated qURL revoke deadline is invalid or expired');
     }
-    const target = `${config.QURL_ENDPOINT}/v1/delegated-qurls/${encodeURIComponent(resourceId)}`;
+    const client = new QURLClient({
+      apiKey: key, baseUrl: config.QURL_ENDPOINT, maxRetries: 0,
+      timeout: REQUEST_TIMEOUT_MS,
+      fetch: (url, init) => {
+        const remainingMs = deadlineMs === undefined ? REQUEST_TIMEOUT_MS : deadlineMs - Date.now();
+        if (remainingMs <= 0) throw new Error('Delegated qURL revoke did not complete before the Discord interaction deadline');
+        const signal = AbortSignal.timeout(Math.min(REQUEST_TIMEOUT_MS, remainingMs));
+        return fetch(url, { ...init, redirect: 'error',
+          signal: init?.signal ? AbortSignal.any([signal, init.signal]) : signal });
+      },
+    });
     let lastError;
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       try {
-        const remainingMs = deadlineMs === undefined ? REQUEST_TIMEOUT_MS : deadlineMs - Date.now();
-        if (remainingMs <= 0) {
-          throw new Error('Delegated qURL revoke did not complete before the Discord interaction deadline');
-        }
-        const response = await fetch(target, {
-          method: 'DELETE',
-          headers: { 'Authorization': `Bearer ${key}`, 'Accept': 'application/json' },
-          redirect: 'error',
-          signal: AbortSignal.timeout(Math.min(REQUEST_TIMEOUT_MS, remainingMs)),
-        });
-        if (response.status === 204) {
-          logger.info('Revoked delegated qURL', { resource_ref: resourceIdLogRef(resourceId) });
-          return;
-        }
-        let code = null;
-        try {
-          const problem = await response.json();
-          code = problem?.error?.code || problem?.code || null;
-        } catch {
-          // The status remains safe to report. Never surface the response body.
-        }
-        if (response.status === 401 || response.status === 403) {
+        await client.deleteDelegatedQurl(resourceId);
+        logger.info('Revoked delegated qURL', { resource_ref: resourceIdLogRef(resourceId) });
+        return;
+      } catch (cause) {
+        const err = new Error(`qURL API request failed (${cause.status || 0})`);
+        err.status = cause.status;
+        err.apiCode = cause.code;
+        if (cause.status === 401 || cause.status === 403) {
           logger.audit(AUDIT_EVENTS.DEPENDENCY_AUTH_FAILURE, {
-            dependency: 'qurl_service',
-            method: 'DELETE', path: '/delegated-qurls/:qurlId', status: response.status,
+            dependency: 'qurl_service', method: 'DELETE',
+            path: '/delegated-qurls/:qurlId', status: cause.status,
           });
         }
-        const err = new Error(`qURL API request failed (${response.status})`);
-        err.status = response.status;
-        err.apiCode = code;
-        err.response = response;
         lastError = err;
-        throw err;
-      } catch (err) {
-        lastError = err;
-        if (err.status && !(err.status === 503 && err.apiCode === 'mutation_outcome_unknown')) {
+        if ((err.status && !(err.status === 503 && err.apiCode === 'mutation_outcome_unknown'))
+            || (err.status === 0 && ![ERROR_CODE_NETWORK, ERROR_CODE_TIMEOUT].includes(err.apiCode))) {
           throw err;
         }
         if (deadlineMs !== undefined && Date.now() >= deadlineMs) {
           throw new Error('Delegated qURL revoke did not complete before the Discord interaction deadline');
         }
         if (attempt < MAX_RETRIES) {
-          const waitMs = retryDelayMs(err.response, attempt);
+          const waitMs = Number.isFinite(cause.retryAfter) && cause.retryAfter > 0
+            ? cause.retryAfter * 1000 : RETRY_BACKOFF_BASE_MS * (2 ** attempt);
           if (deadlineMs !== undefined && Date.now() + waitMs > deadlineMs) {
             throw new Error('Delegated qURL revoke did not complete before the Discord interaction deadline');
           }

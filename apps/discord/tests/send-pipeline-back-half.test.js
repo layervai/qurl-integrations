@@ -2203,6 +2203,24 @@ describe('executeSendPipeline — QURL_SEND_CREATE_LINK_FAILURE emission (#276, 
     expect(JSON.stringify(logger.error.mock.calls)).not.toContain('at_secret');
   });
 
+  it('unknown mint outcome does not invite a new send or claim cleanup', async () => {
+    const interaction = makeInteraction();
+    const error = Object.assign(new Error('batch unconfirmed'), {
+      batchOutcomeUnknown: true, batchId: `dqb_${'f'.repeat(22)}`,
+      batchIdempotencyKey: '123e4567-e89b-42d3-a456-426614174000',
+      partialLinkCount: 0, partialQurlIds: [],
+    });
+    mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-new', fileBuffer: new ArrayBuffer(8) });
+    mockMintLinks.mockRejectedValueOnce(error);
+    await executeSendPipeline(interaction, makePipelineParams());
+    expect(interaction.editReply).toHaveBeenCalledWith({ content: expect.stringContaining('cleanup is not confirmed') });
+    expect(mockDb.recordQURLSendBatch).not.toHaveBeenCalled();
+    expect(logger.error).toHaveBeenCalledWith('Failed to prepare QURL links', expect.objectContaining({
+      batch_outcome_unknown: true, batch_id: error.batchId,
+      batch_idempotency_key: error.batchIdempotencyKey, partial_link_count: 0,
+    }));
+  });
+
   it('file send: quota_exceeded does NOT emit at the primary site either', async () => {
     const interaction = makeInteraction();
     mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-new', fileBuffer: new ArrayBuffer(8) });
@@ -3237,6 +3255,7 @@ describe('mintLinksInBatches', () => {
     const partialError = Object.assign(new Error('delegated batch item failed'), {
       partialLinkCount: 1,
       partialQurlIds: [partialId],
+      batchOutcomeUnknown: true,
     });
     mockMintLinks
       .mockResolvedValueOnce(firstBatch)
@@ -3262,6 +3281,7 @@ describe('mintLinksInBatches', () => {
     expect(error).toBe(partialError);
     expect(error.partialQurlIds).toEqual([]);
     expect(error.partialLinkCount).toBe(0);
+    expect(error.batchOutcomeUnknown).toBe(true);
     expect(mockDeleteLink).toHaveBeenCalledTimes(101);
     expect(mockDeleteLink).toHaveBeenCalledWith(partialId, 'lv_test_example', { deadlineMs: expect.any(Number) });
   });

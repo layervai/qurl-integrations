@@ -176,8 +176,11 @@ function emitMintFailureAudit(error, { sendId, kind }) {
 }
 
 function partialLinkLogFields(error) {
-  if (!error?.partialLinkCount) return {};
+  if (!error?.partialLinkCount && !error?.batchOutcomeUnknown) return {};
   return {
+    batch_outcome_unknown: error.batchOutcomeUnknown === true,
+    batch_id: error.batchId,
+    batch_idempotency_key: error.batchIdempotencyKey,
     partial_link_count: error.partialLinkCount,
     partial_qurl_refs: (error.partialQurlIds || []).slice(0, 5).map(resourceIdLogRef),
   };
@@ -2197,6 +2200,9 @@ async function executeSendPipeline(interaction, {
     // after a return-from-catch, and `releaseSlot` is idempotent via
     // the `fileSendSlotClaimed` flag. Dropping the duplicate call here
     // keeps the single-release-path invariant visible at a glance.
+    if (error.batchOutcomeUnknown) {
+      return interaction.editReply({ content: 'Link creation is unconfirmed. No links were sent. Contact support before trying again; cleanup is not confirmed.' });
+    }
     if (error.apiCode === 'quota_exceeded') {
       return interaction.editReply({
         content: "Couldn't create links because your account has reached a quota. Check your qURL plan and usage before trying again.",
@@ -3312,7 +3318,9 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
         // never reaches a Discord reply. (The expiry-shaped user copy is
         // pre-existing; decoupling it from the network case is tracked in #634.)
         const isExpired = /403|expired|network|CDN/i.test(err.message || '');
-        const msg = err.apiCode === 'quota_exceeded'
+        const msg = err.batchOutcomeUnknown
+          ? 'Link creation is unconfirmed. No new links were sent. Contact support before trying again; cleanup is not confirmed.'
+          : err.apiCode === 'quota_exceeded'
           ? 'Your account has reached a quota. Check your qURL plan and usage before adding recipients.'
           : isExpired
             ? 'Original attachment URL has expired. Please create a new send.'
@@ -3411,7 +3419,9 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
       status: error.status,
       ...partialLinkLogFields(error),
     });
-    const msg = error.apiCode === 'quota_exceeded'
+    const msg = error.batchOutcomeUnknown
+      ? 'Link creation is unconfirmed. No new links were sent. Contact support before trying again; cleanup is not confirmed.'
+      : error.apiCode === 'quota_exceeded'
       ? 'Your account has reached a quota. Check your qURL plan and usage before adding recipients.'
       : error.status === 429
         ? 'Too many requests. Wait a moment before adding recipients again.'

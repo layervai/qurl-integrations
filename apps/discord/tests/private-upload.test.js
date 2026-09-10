@@ -295,7 +295,7 @@ test('delegated batch rejects an unexpected successful POST without retrying', a
         idempotencyKey: '123e4567-e89b-42d3-a456-426614174000',
         sleep,
       },
-    )).rejects.toThrow(/unexpected success status/);
+    )).rejects.toThrow(/result or cleanup may be incomplete/);
     expect(global.fetch).toHaveBeenCalledTimes(1);
     expect(sleep).not.toHaveBeenCalled();
   } finally {
@@ -440,7 +440,7 @@ test.each([
     ).then(() => null, err => err);
 
     expect(error).toEqual(expect.any(Error));
-    expect(error.message).toMatch(/invalid qurl/);
+    expect(error.message).toMatch(/result or cleanup may be incomplete/);
     expect(error.partialQurlIds).toEqual(expectedIds);
   } finally {
     global.fetch = realFetch;
@@ -537,7 +537,7 @@ test('repeated transient batch polls stop at the original deadline', async () =>
   try {
     await expect(privateUpload.redeemDelegatedBatch({ mint_capability: 'qmc1.test' }, {
       ...batchOptions, deadlineMs: 3_500, sleep: async ms => { now += ms; },
-    })).rejects.toThrow(/Discord interaction deadline/);
+    })).rejects.toThrow(/result or cleanup may be incomplete/);
     expect(global.fetch).toHaveBeenCalledTimes(3);
     expect(now).toBe(3_000);
   } finally {
@@ -678,6 +678,43 @@ test('caps fallback poll backoff when repeated Retry-After headers are damaged',
       ...batchOptions, deadlineMs: Date.now() + 60_000, sleep,
     })).resolves.toHaveLength(1);
     expect(Math.max(...sleep.mock.calls.map(([ms]) => ms))).toBe(30_000);
+  } finally {
+    global.fetch = realFetch;
+  }
+});
+
+test.each(['lost POST', 'unreadable accepted batch', 'invalid terminal'])('retains unknown batch recovery identity after %s', async failure => {
+  const realFetch = global.fetch;
+  const idempotencyKey = '123e4567-e89b-42d3-a456-426614174000';
+  global.fetch = jest.fn();
+  if (failure === 'lost POST') {
+    global.fetch.mockRejectedValue(new TypeError('secret upstream detail'));
+  } else if (failure === 'unreadable accepted batch') {
+    global.fetch.mockResolvedValueOnce(batchAccepted())
+      .mockResolvedValueOnce(jsonResponse(404, { error: { code: 'not_found', detail: 'secret upstream detail' } }));
+  } else {
+    const response = batchSucceeded();
+    const body = await response.json();
+    body.data.completed_at = 'invalid';
+    global.fetch.mockResolvedValueOnce(batchAccepted()).mockResolvedValueOnce(new Response(JSON.stringify(body), {
+      status: 200, headers: { 'Content-Type': 'application/json' },
+    }));
+  }
+  try {
+    const error = await privateUpload.redeemDelegatedBatch({ mint_capability: 'qmc1.secret' }, {
+      ...batchOptions, idempotencyKey, deadlineMs: Date.now() + 60_000, sleep: jest.fn(),
+    }).catch(err => err);
+    expect(error.batchOutcomeUnknown).toBe(true);
+    expect(error.batchIdempotencyKey).toBe(idempotencyKey);
+    expect(error.batchId).toBe(failure === 'lost POST' ? undefined : `dqb_${'f'.repeat(22)}`);
+    expect(error.message).not.toMatch(/secret/);
+    if (failure === 'invalid terminal') {
+      expect(error.partialQurlIds).toEqual(['q_00000000001']);
+      error.partialQurlIds = [];
+      expect(error.partialQurlIds).toEqual([]);
+    }
+    expect(global.fetch.mock.calls.filter(([, init]) => init.method === 'POST'))
+      .toHaveLength(failure === 'lost POST' ? 3 : 1);
   } finally {
     global.fetch = realFetch;
   }
