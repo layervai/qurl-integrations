@@ -153,6 +153,9 @@ class FakeAPI:
             self.issued_api_keys[api_key] = (key_id, api_key)
             row = {
                 "api_key": api_key,
+                "expires_at": time.strftime(
+                    "%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + 3600)
+                ),
                 "key_id": key_id,
                 "kind": "api_key",
                 "name": request["name"],
@@ -1648,7 +1651,55 @@ def test_unhashable_inventory_fields_remain_bounded() -> None:
     )
 
 
+def test_child_lifetime_response_fails_closed() -> None:
+    row = {
+        "key_id": "key_Child1234567",
+        "api_key": "lv_test_" + "x" * 43,
+        "kind": "api_key",
+        "name": "child",
+        "scopes": credentials.CUSTOMER_SCOPES,
+        "status": "active",
+    }
+    with (
+        mock.patch.object(credentials.time, "sleep"),
+        mock.patch.object(credentials.time, "time", return_value=1700000000),
+    ):
+        for lifetime in (1, 86400):
+            expiry = time.strftime(
+                "%Y-%m-%dT%H:%M:%SZ", time.gmtime(1700000000 + lifetime)
+            )
+            with mock.patch.object(
+                credentials,
+                "qurl_json",
+                return_value=(201, {"data": {**row, "expires_at": expiry}}),
+            ):
+                assert credentials.mint_ordinary_key(
+                    "https://qurl.invalid", "parent", "child"
+                ) == (row["key_id"], row["api_key"])
+        for expiry in (
+            None,
+            "",
+            "bad",
+            "2023-11-14T22:13:20Z",
+            "2023-11-15T22:13:21Z",
+            "2099-01-01T00:00:00Z",
+        ):
+            data = row if expiry is None else {**row, "expires_at": expiry}
+            with mock.patch.object(
+                credentials, "qurl_json", return_value=(201, {"data": data})
+            ):
+                try:
+                    credentials.mint_ordinary_key(
+                        "https://qurl.invalid", "parent", "child"
+                    )
+                except credentials.CredentialError:
+                    pass
+                else:
+                    raise AssertionError("invalid child expiry accepted")
+
+
 def main() -> None:
+    test_child_lifetime_response_fails_closed()
     test_scheduled_soak_workflow_contract()
     test_pair_and_batch_each_validate_one_automation_key()
     test_batch_rejects_invalid_input_before_authentication_and_attempts_every_run()

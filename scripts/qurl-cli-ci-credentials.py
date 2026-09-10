@@ -472,6 +472,26 @@ def paged_rows(
         cursor = next_cursor
 
 
+def key_expiry_timestamp(raw: Any) -> float:
+    if not isinstance(raw, str):
+        raise CredentialError("automation key expiry is malformed")
+    try:
+        # Normalize subsecond precision for Python 3.10 as well as newer runners.
+        raw = re.sub(
+            r"\.(\d{1,9})(?=Z|[+-])",
+            lambda match: "." + match[1][:6].ljust(6, "0"),
+            raw,
+        )
+        expiry = datetime.datetime.fromisoformat(
+            raw[:-1] + "+00:00" if raw.endswith("Z") else raw
+        )
+    except ValueError as exc:
+        raise CredentialError("automation key expiry is malformed") from exc
+    if expiry.tzinfo is None:
+        raise CredentialError("automation key expiry is malformed")
+    return expiry.timestamp()
+
+
 def authenticated_owner(
     args: argparse.Namespace,
     operation_budget_seconds: int,
@@ -507,28 +527,12 @@ def authenticated_owner(
     # TODO(upstream-contract): MeApiKey omits expires_at for non-expiring keys.
     # A present null or malformed value is not the non-expiring wire contract.
     if "expires_at" in info:
-        raw = info["expires_at"]
-        if not isinstance(raw, str):
-            raise CredentialError("automation key expiry is malformed")
-        try:
-            # Normalize subsecond precision for Python 3.10 as well as newer runners.
-            raw = re.sub(
-                r"\.(\d{1,9})(?=Z|[+-])",
-                lambda match: "." + match[1][:6].ljust(6, "0"),
-                raw,
-            )
-            expiry = datetime.datetime.fromisoformat(
-                raw[:-1] + "+00:00" if raw.endswith("Z") else raw
-            )
-        except ValueError as exc:
-            raise CredentialError("automation key expiry is malformed") from exc
-        if expiry.tzinfo is None:
-            raise CredentialError("automation key expiry is malformed")
+        expiry = key_expiry_timestamp(info["expires_at"])
         required_lifetime = max(
             operation_budget_seconds + RUNNER_CLEANUP_MARGIN_SECONDS,
             minimum_lifetime_seconds,
         )
-        if expiry.timestamp() - time.time() < required_lifetime:
+        if expiry - time.time() < required_lifetime:
             raise CredentialError("automation key does not have the required lifetime")
     return endpoint, key, owner
 
@@ -879,6 +883,11 @@ def mint_ordinary_key(endpoint: str, automation_key: str, name: str) -> tuple[st
                 or data.get("status") != "active"
             ):
                 raise CredentialError("qURL returned a malformed ordinary API key")
+            # TODO(upstream-contract): delegated ordinary keys must be finite
+            # and expire within qurl-service's 24-hour child lifetime bound.
+            remaining = key_expiry_timestamp(data.get("expires_at")) - time.time()
+            if not 0 < remaining <= 24 * 60 * 60:
+                raise CredentialError("qURL returned an invalid child-key lifetime")
             return key_id, api_key
         except CredentialError as exc:
             last_error = exc
