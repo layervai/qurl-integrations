@@ -13,6 +13,7 @@ import (
 	"github.com/layervai/qurl-integrations/apps/cli/internal/config"
 	connectordaemon "github.com/layervai/qurl-integrations/apps/cli/internal/connector/daemon"
 	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/exitcode"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/output"
 )
 
@@ -205,5 +206,106 @@ func TestExternalPublishHandsOffToTheSupervisedDaemon(t *testing.T) {
 	local, err := registry.Get(context.Background(), srv.Key.CRID)
 	if err != nil || local.DesiredState != "on" || local.ServingEpoch != 5 {
 		t.Fatalf("external publish local state = %+v err=%v", local, err)
+	}
+}
+
+// TestExternalLifecycleCommandsRollBackWhenTheDaemonIsAbsent pins the
+// supervisor's recovery contract through the real command tree: when the
+// externally supervised daemon is not running, publish, start, and restart
+// exit with the Unavailable code, name the supervisor's start command, and
+// turn their own cloud change back off (one compensating PUT) so the row and
+// the platform agree the share is off until the supervisor starts the daemon
+// and retries.
+func TestExternalLifecycleCommandsRollBackWhenTheDaemonIsAbsent(t *testing.T) {
+	cases := []struct {
+		name      string
+		args      func(srv *apitest.Server) []string
+		seedState string // "" seeds no row (a fresh publish)
+		script    func(t *testing.T, srv *apitest.Server, path string)
+		wantPuts  int
+	}{
+		{
+			name: "publish", args: func(srv *apitest.Server) []string { return []string{"publish", "http://127.0.0.1:3000"} },
+			script: func(t *testing.T, srv *apitest.Server, path string) {
+				srv.Script(http.MethodGet, path, sharingResponse(t, srv, "off", 4, "stopped"))
+				srv.Script(http.MethodPut, path,
+					sharingResponse(t, srv, "on", 5, "connecting"),
+					sharingResponse(t, srv, "off", 5, "stopped"),
+				)
+			},
+			wantPuts: 2,
+		},
+		{
+			name: "start", args: func(srv *apitest.Server) []string { return []string{"start", srv.Key.CRID} },
+			seedState: "off",
+			script: func(t *testing.T, srv *apitest.Server, path string) {
+				srv.Script(http.MethodGet, path, sharingResponse(t, srv, "off", 4, "stopped"))
+				srv.Script(http.MethodPut, path,
+					sharingResponse(t, srv, "on", 5, "connecting"),
+					sharingResponse(t, srv, "off", 5, "stopped"),
+				)
+			},
+			wantPuts: 2,
+		},
+		{
+			name: "restart", args: func(srv *apitest.Server) []string { return []string{"restart", srv.Key.CRID} },
+			seedState: "on",
+			script: func(t *testing.T, srv *apitest.Server, path string) {
+				srv.Script(http.MethodGet, path, sharingResponse(t, srv, "on", 4, "serving"))
+				srv.Script(http.MethodPost, path+"/restart", sharingResponse(t, srv, "on", 5, "connecting"))
+				srv.Script(http.MethodPut, path, sharingResponse(t, srv, "off", 5, "stopped"))
+			},
+			wantPuts: 1,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := apitest.NewServer(t)
+			stateDir := connectorStateTestDir(t)
+			if err := connectorstate.EstablishExternalRuntimeMode(context.Background(), stateDir); err != nil {
+				t.Fatal(err)
+			}
+			registry, err := openOwnedTestShareRegistry(stateDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.seedState != "" {
+				seed := localShareFixture(srv)
+				seed.DesiredState = tc.seedState
+				if err := registry.Put(context.Background(), &seed); err != nil {
+					t.Fatal(err)
+				}
+			}
+			path := "/v1/resources/" + srv.Key.CRID + "/sharing"
+			tc.script(t, srv, path)
+			daemon := &recordingShareDaemon{ensureErr: connectordaemon.ErrExternalDaemonNotRunning}
+			res := runCLI(t, &runOpts{
+				args:          append([]string{"--endpoint", srv.URL}, tc.args(srv)...),
+				env:           map[string]string{"QURL_API_KEY": testAPIKey, "QURL_DAEMON_SUPERVISION": "external"},
+				shareRegistry: registry, shareDaemon: daemon, shareStateDir: stateDir,
+				preflightTarget: func(context.Context, string, int) error { return nil },
+				localResource:   resolvedLocalResource(srv, true),
+			})
+			if res.code != exitcode.Unavailable || !strings.Contains(res.stderr.String(), "qurl daemon run --supervision external") {
+				t.Fatalf("%s without a daemon = exit %d stderr %q, want exit %d naming the supervisor's start command", tc.name, res.code, res.stderr.String(), exitcode.Unavailable)
+			}
+			mustEmptyStdout(t, res)
+			puts := 0
+			for _, request := range srv.Requests() {
+				if request.Method == http.MethodPut && strings.HasSuffix(request.Path, "/sharing") {
+					puts++
+				}
+			}
+			if puts != tc.wantPuts {
+				t.Fatalf("%s made %d PUT /sharing requests, want %d (the change and its compensation): %+v", tc.name, puts, tc.wantPuts, srv.Requests())
+			}
+			if daemon.ensures != 1 || daemon.reloads != 0 {
+				t.Fatalf("%s daemon handoff = %+v, want exactly one Ensure", tc.name, daemon)
+			}
+			local, err := registry.Get(context.Background(), srv.Key.CRID)
+			if err != nil || local.DesiredState != "off" || local.ServingEpoch != 5 {
+				t.Fatalf("%s local row after the rollback = %+v err=%v, want off at the compensated epoch", tc.name, local, err)
+			}
+		})
 	}
 }
