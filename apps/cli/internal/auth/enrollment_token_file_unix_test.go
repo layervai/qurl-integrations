@@ -84,6 +84,9 @@ func TestReadExternalEnrollmentTokenFileRejectsUnsafeBytesWithoutDisclosure(t *t
 	secret := "do-not-disclose-this-enrollment-token"
 	for name, data := range map[string][]byte{
 		"empty":              {},
+		"nul":                []byte(secret + "\x00"),
+		"escape":             []byte(secret + "\x1b"),
+		"delete":             []byte(secret + "\x7f"),
 		"embedded space":     []byte(secret + " with-space"),
 		"second line ending": []byte(secret + "\n\n"),
 		"bare carriage":      []byte(secret + "\r"),
@@ -159,5 +162,15 @@ func TestReadExternalEnrollmentTokenFileRejectsSymlinkSwap(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "secret-value") {
 		t.Fatalf("token leaked in error: %v", err)
+	}
+}
+
+func TestReadExternalEnrollmentTokenFileRejectsHardLinks(t *testing.T) {
+	path := writeExternalEnrollmentToken(t, []byte("enrollment-value"), 0o400)
+	if err := os.Link(path, path+"-link"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadExternalEnrollmentTokenFile(path); err == nil {
+		t.Fatal("hard-linked token was accepted")
 	}
 }

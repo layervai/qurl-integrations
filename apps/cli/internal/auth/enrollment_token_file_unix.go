@@ -25,8 +25,8 @@ func openExternalEnrollmentTokenNoFollow(path string) (*os.File, error) {
 
 func validateOpenExternalEnrollmentToken(_ *os.File, info os.FileInfo) error {
 	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || stat.Uid != uint32(os.Geteuid()) {
-		return errors.New("external enrollment token must be owned by the current user")
+	if !ok || stat.Uid != uint32(os.Geteuid()) || stat.Nlink != 1 {
+		return errors.New("external enrollment token must be owned by the current user with exactly one link")
 	}
 	return nil
 }

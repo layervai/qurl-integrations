@@ -772,6 +772,7 @@ func (o *globalOpts) openNativeExternalRegisteredClient(
 	ctx context.Context,
 	tokenPath, stateDir string,
 ) (_ qurlapi.Client, _ *qurlapi.Identity, retErr error) {
+	o.warnInsecureEndpoint()
 	if o.nativeRuntime != nil {
 		return nil, nil, errors.New("registered-device runtime is already open")
 	}
