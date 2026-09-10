@@ -1696,6 +1696,8 @@ async function mintLinksInBatches({
   cleanupContext = {},
 }) {
   const allLinks = [];
+  const seenQurlIds = new Set();
+  const seenQurlLinks = new Set();
   let currentResourceId = initialResourceId;
   const resourceIds = [initialResourceId];
   let tokensUsed = 0;
@@ -1725,7 +1727,8 @@ async function mintLinksInBatches({
       for (const link of minted) {
         allLinks.push({
           qurl_link: link?.qurl_link,
-          // Persist the normalized identity; null fails the check below.
+          // Normalized so compensation can revoke a non-canonical child; the
+          // check below still rejects anything that isn't already canonical.
           qurl_id: normalizeQurlId(link?.qurl_id),
           resourceId: currentResourceId,
         });
@@ -1733,12 +1736,16 @@ async function mintLinksInBatches({
       if (minted.length > batchSize) {
         throw new Error(`Connector mint_link returned ${minted.length} links for a ${batchSize}-link batch`);
       }
-      if (allLinks.some(link => link.qurl_id === null)) {
+      if (minted.some(link => {
+        const qurlId = normalizeQurlId(link?.qurl_id);
+        return qurlId === null || qurlId !== link.qurl_id;
+      })) {
         // Fail closed, even on a short response: qurl_id is the only durable
         // child-revocation identity, so a watermarked child minted without it
-        // could never be revoked. Never persist or deliver such a link; the
-        // catch below compensates every identifiable sibling before deleting
-        // the parent resource.
+        // could never be revoked. Fresh connector output must already be
+        // canonical (it is the webhook join key); only stored legacy rows are
+        // trimmed. Never persist or deliver such a link; the catch below
+        // compensates every identifiable sibling before deleting the parent.
         // TODO(upstream-contract): connector mint_link has returned qurl_id on
         // every link since qurl-integrations-infra#747.
         throw new Error('Connector mint_link returned a link missing a valid qurl_id');
@@ -1753,11 +1760,14 @@ async function mintLinksInBatches({
         // that can neither be delivered nor reconstructed later.
         throw new Error('Connector mint_link returned a link missing a valid qurl_link');
       }
-      if (new Set(allLinks.map(link => link.qurl_id)).size !== allLinks.length) {
-        throw new Error('Connector mint_link returned a duplicate qurl_id');
+      // Uniqueness spans the whole multi-resource invocation.
+      for (const link of minted) {
+        if (seenQurlIds.has(link.qurl_id)) throw new Error('Connector mint_link returned a duplicate qurl_id');
+        seenQurlIds.add(link.qurl_id);
       }
-      if (new Set(allLinks.map(link => link.qurl_link)).size !== allLinks.length) {
-        throw new Error('Connector mint_link returned a duplicate qurl_link');
+      for (const link of minted) {
+        if (seenQurlLinks.has(link.qurl_link)) throw new Error('Connector mint_link returned a duplicate qurl_link');
+        seenQurlLinks.add(link.qurl_link);
       }
       if (minted.length < batchSize) {
         // Throw rather than return a short array: the catch below revokes

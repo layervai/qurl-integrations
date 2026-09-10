@@ -3748,6 +3748,7 @@ describe('mintLinksInBatches', () => {
     ['missing', undefined],
     ['whitespace-only', '   '],
     ['overlong', `q_${'a'.repeat(200)}`],
+    ['over the connector per-ID cap', `q_${'a'.repeat(63)}`],
     ['null-entry', null],
   ])('rejects an exact-length 2xx mint with a %s qurl_id before it can be persisted or delivered', async (_label, malformedQurlId) => {
     const links = [
@@ -3787,6 +3788,26 @@ describe('mintLinksInBatches', () => {
     );
   });
 
+  it('rejects a whitespace-padded fresh qurl_id but still revokes its normalized identity', async () => {
+    mockMintLinks.mockResolvedValueOnce([
+      { qurl_link: 'https://q.test/known', qurl_id: 'q_known' },
+      { qurl_link: 'https://q.test/padded', qurl_id: ' q_padded ' },
+    ]);
+
+    await expect(mintLinksInBatches({
+      initialResourceId: 'res-1',
+      reuploadFn: jest.fn(),
+      expiresAt: new Date().toISOString(),
+      recipientCount: 2,
+      apiKey: 'apikey',
+    })).rejects.toThrow('missing a valid qurl_id');
+
+    expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-1', ['q_known', 'q_padded'], 'apikey');
+    expect(mockDeleteLink).toHaveBeenCalledWith('res-1', 'apikey');
+    expect(mockRevokeMintedLinks.mock.invocationCallOrder[0])
+      .toBeLessThan(mockDeleteLink.mock.invocationCallOrder[0]);
+  });
+
   it('rejects a short mint response with an unidentified child after compensation', async () => {
     mockMintLinks.mockResolvedValueOnce([{ qurl_link: 'https://q.test/unidentified' }]);
     await expect(mintLinksInBatches({
@@ -3797,27 +3818,6 @@ describe('mintLinksInBatches', () => {
       apiKey: 'apikey',
     })).rejects.toThrow('missing a valid qurl_id');
     expect(mockDeleteLink).toHaveBeenCalledWith('res-1', 'apikey');
-  });
-
-  it('persists the trimmed identity of a whitespace-padded qurl_id instead of failing the send', async () => {
-    mockMintLinks.mockResolvedValueOnce([{
-      qurl_link: 'https://q.test/padded',
-      qurl_id: ' q_padded ',
-    }]);
-
-    const result = await mintLinksInBatches({
-      initialResourceId: 'res-1',
-      reuploadFn: jest.fn(),
-      expiresAt: new Date().toISOString(),
-      recipientCount: 1,
-      apiKey: 'apikey',
-    });
-
-    expect(result).toEqual([
-      { qurl_link: 'https://q.test/padded', qurl_id: 'q_padded', resourceId: 'res-1' },
-    ]);
-    expect(mockRevokeMintedLinks).not.toHaveBeenCalled();
-    expect(mockDeleteLink).not.toHaveBeenCalled();
   });
 
   it('throws a typed shortfall after revoking an under-delivered batch', async () => {

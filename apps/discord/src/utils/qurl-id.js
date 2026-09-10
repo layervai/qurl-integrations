@@ -1,10 +1,10 @@
 'use strict';
 
-// TODO(upstream-contract): #1553 accepts at most 10 qurl_ids in a <=4 KiB request. Current qurl-service
-// IDs are much shorter; this generous bot-side ceiling keeps even a full batch
-// safely below that transport limit while quarantining corrupt legacy values
-// that could otherwise make every retry fail atomically with 413.
-const MAX_QURL_ID_LENGTH = 128;
+// TODO(upstream-contract): matches #1553's 64-byte per-ID cap, so every ID the
+// bot treats as identified is one the connector accepts. Longer stored values
+// are quarantined as malformed instead of failing every retry of their batch,
+// and ten IDs at this cap plus a maximal resource ID stay under the 4 KiB body.
+const MAX_QURL_ID_LENGTH = 64;
 // TODO(upstream-contract): Current upstream IDs are exactly q_ + 11 lowercase hex chars. Keep cleanup
 // tolerant of older q_-prefixed display handles, but never pass separators,
 // bearer-token prefixes, or other arbitrary stored data to the endpoint.

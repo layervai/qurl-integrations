@@ -27,3 +27,8 @@ describe('qURL display/revocation identity classifier', () => {
     expect(normalizeQurlId(' q_legacy_1 ')).toBe('q_legacy_1');
   });
 });
+
+test('MAX_QURL_ID_LENGTH matches the connector per-ID revoke cap', () => {
+  // qurl-integrations-infra#1553 isSafeRevokeQurlID rejects IDs over 64 bytes.
+  expect(MAX_QURL_ID_LENGTH).toBe(64);
+});

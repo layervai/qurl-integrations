@@ -33,9 +33,8 @@ const REVOKE_LINKS_TIMEOUT_MS = 65_000;
 // The 65s deadline applies per chunk: current groups normally need one call,
 // while historical over-cap groups trade bounded additional time for cleanup.
 const REVOKE_LINKS_MAX_IDS = 10;
-// Not checked at request build time: MAX_QURL_ID_LENGTH and validateResourceId
-// bound every accepted input, so a full chunk always fits; a connector test
-// pins that coupling.
+// Checked at request build time as a backstop: MAX_QURL_ID_LENGTH and
+// validateResourceId already keep a full chunk under it, and a test pins that.
 const REVOKE_REQUEST_MAX_BYTES = 4 * 1024;
 
 // Truncate the connector's MD5 of an uploaded file before logging. The full
@@ -590,10 +589,16 @@ async function revokeMintedLinks(resourceId, qurlIds, apiKey) {
   // equals its per-request cap, so parallel chunks would self-starve (infra#1556).
   for (let offset = 0; offset < ids.length; offset += REVOKE_LINKS_MAX_IDS) {
     const batchIds = ids.slice(offset, offset + REVOKE_LINKS_MAX_IDS);
+    const body = JSON.stringify({ resource_id: resourceId, qurl_ids: batchIds });
+    if (Buffer.byteLength(body, 'utf8') > REVOKE_REQUEST_MAX_BYTES) {
+      const err = new Error('Connector revoke request exceeds the 4 KiB body cap');
+      err.unresolvedCount = batchIds.length;
+      throw err;
+    }
     const response = await fetch(`${config.CONNECTOR_URL}/api/revoke_links`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...connectorAuthHeaders(apiKey) },
-      body: JSON.stringify({ resource_id: resourceId, qurl_ids: batchIds }),
+      body,
       signal: AbortSignal.timeout(REVOKE_LINKS_TIMEOUT_MS),
     });
 
