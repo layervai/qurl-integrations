@@ -94,7 +94,11 @@ func (s *IPCServer) Run(ctx context.Context) (retErr error) {
 		if err != nil {
 			// err is fixed text (see decodeIPCOverlay), never the request.
 			slog.WarnContext(r.Context(), "share daemon rejected a runtime overlay update", "reason", err)
-			http.Error(w, ipcOverlayRejected, http.StatusBadRequest)
+			message := ipcOverlayRejected
+			if errors.Is(err, errIPCOverlayTooLarge) {
+				message += "; " + errIPCOverlayTooLarge.Error()
+			}
+			http.Error(w, message, http.StatusBadRequest)
 			return
 		}
 		s.Manager.SetOverlay(overlay)
@@ -131,7 +135,9 @@ const maxIPCOverlayBytes = 64 * 1024
 
 // ipcOverlayRejected is the whole body of a refused overlay update. It is
 // fixed text: no header name or value from the request is ever echoed.
-const ipcOverlayRejected = `share daemon overlay was rejected: send JSON {"route_request_headers":{"<connector_id>":{"Name":"value"}}} under 64 KiB with no unknown fields, at most 2,000 routes, 16 valid non-reserved request headers and 1,024 name and value bytes per route`
+// TODO(upstream-contract): 2,000/16/1,024 mirror qurl-connector MaxGroupRoutes
+// and ValidateRequestHeaders limits; update this text if those limits move.
+const ipcOverlayRejected = `share daemon overlay was rejected: send JSON {"route_request_headers":{"<connector_id>":{"Name":"value"}}} under 64 KiB with no unknown fields, at most 2,000 routes, 16 valid non-reserved request headers and 1,024 name and value bytes per route; all limits apply together, so larger entries allow fewer routes`
 
 // ipcOverlay is the PUT /overlay body: runtime request headers keyed by the
 // Connector ID of the share they ride on. Each request replaces the whole
@@ -162,6 +168,10 @@ func decodeIPCOverlay(reader io.Reader) (map[string]map[string]string, error) {
 	}
 	var trailing json.RawMessage
 	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			return nil, errIPCOverlayTooLarge
+		}
 		return nil, errIPCOverlayMalformed
 	}
 	if body.RouteRequestHeaders == nil || len(body.RouteRequestHeaders) > connectorshare.MaxGroupRoutes {
