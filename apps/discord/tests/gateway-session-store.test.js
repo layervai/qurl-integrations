@@ -13,7 +13,10 @@ const {
   DEFAULT_WRITE_THROTTLE_MS,
 } = require('../src/gateway-session-store');
 
-function makeStore({ clock, writeThrottleMs } = {}) {
+// Helper to build the standard test store + mocks. Each test calls
+// this fresh so state isolation is automatic (vs reusing a top-level
+// store across tests, which would leak mirror state).
+function makeStore({ clock, writeThrottleMs, shardId = '0:1' } = {}) {
   const rawClient = new DynamoDBClient({});
   const docClient = DynamoDBDocumentClient.from(rawClient);
   const ddbMock = mockClient(docClient);
@@ -26,7 +29,7 @@ function makeStore({ clock, writeThrottleMs } = {}) {
   const store = createGatewaySessionStore({
     ddbClient: docClient,
     tableName: 'test-gateway-session',
-    shardId: '0:1',
+    shardId,
     logger,
     clock,
     writeThrottleMs,
@@ -34,8 +37,19 @@ function makeStore({ clock, writeThrottleMs } = {}) {
   return { store, ddbMock, logger };
 }
 
-function sessionInfo({ sessionId = 'sess-abc', resumeURL = 'wss://r.discord/abc', sequence = 1 } = {}) {
-  return { sessionId, resumeURL, sequence };
+// Realistic SessionInfo shape that @discordjs/ws hands to
+// updateSessionInfo. shardCount is part of its IDENTIFY-vs-RESUME
+// decision, so it is as load-bearing as the session credentials.
+function sessionInfo({
+  sessionId = 'sess-abc',
+  resumeURL = 'wss://r.discord/abc',
+  sequence = 1,
+  shardId = 0,
+  shardCount = 1,
+} = {}) {
+  return {
+    sessionId, resumeURL, sequence, shardId, shardCount,
+  };
 }
 
 describe('createGatewaySessionStore — factory validation', () => {
@@ -46,6 +60,17 @@ describe('createGatewaySessionStore — factory validation', () => {
       .toThrow(/shardId is required/);
     expect(() => createGatewaySessionStore({ ddbClient: {}, tableName: 't', shardId: '0:1' }))
       .toThrow(/logger is required/);
+  });
+
+  it.each(['not-a-shard-key', '0:0', '1:1'])(
+    'rejects invalid shard geometry %s',
+    (shardId) => {
+      expect(() => makeStore({ shardId })).toThrow(/valid k:n shard key/);
+    },
+  );
+
+  it('rejects multi-shard geometry until the process-global budget is shard-aware', () => {
+    expect(() => makeStore({ shardId: '0:2' })).toThrow(/only shard 0 of 1 is supported/);
   });
 });
 
@@ -77,10 +102,15 @@ describe('hydrate', () => {
 
     const result = await store.hydrate();
 
+    // Legacy rows predate the explicit session shard columns. The DDB key
+    // already encodes `index:count`, so hydration must reconstruct the full
+    // @discordjs/ws SessionInfo without forcing a one-time IDENTIFY rollout.
     expect(result).toEqual({
       sessionId: 'sess-xyz',
       resumeURL: 'wss://r.discord/xyz',
       sequence: 42,
+      shardId: 0,
+      shardCount: 1,
     });
     expect(store._getMirrorForTest()).toEqual(result);
   });
@@ -115,6 +145,29 @@ describe('hydrate', () => {
     const serialized = JSON.stringify(payload);
     expect(serialized).not.toMatch(/sess-leaky-secret/);
     expect(serialized).not.toMatch(/leaky-resume-url/);
+  });
+
+  it.each([
+    ['partial migration', { session_shard_id: 0 }],
+    ['mismatched geometry', { session_shard_id: 0, session_shard_count: 2 }],
+  ])('treats %s session shard columns as a cold start', async (_case, shardColumns) => {
+    const { store, ddbMock, logger } = makeStore();
+    ddbMock.on(GetCommand).resolves({
+      Item: {
+        shard_id: '0:1',
+        session_id: 'sess-xyz',
+        resume_url: 'wss://r.discord/xyz',
+        sequence: 42,
+        ...shardColumns,
+      },
+    });
+
+    await expect(store.hydrate()).resolves.toBeNull();
+    expect(store._getMirrorForTest()).toBeNull();
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringMatching(/malformed row/i),
+      expect.objectContaining({ types: expect.any(Object) }),
+    );
   });
 
   it('treats DDB read errors as cold start (does not throw)', async () => {
@@ -155,6 +208,24 @@ describe('retrieveSessionInfo — in-memory mirror contract', () => {
     }
 
     expect(ddbMock.commandCalls(GetCommand)).toHaveLength(1);
+  });
+});
+
+describe('persisted session geometry', () => {
+  it.each([
+    { shardId: undefined, shardCount: 1 },
+    { shardId: 0, shardCount: undefined },
+    { shardId: 1, shardCount: 2 },
+    { shardId: '0', shardCount: 1 },
+  ])('does not write unsupported geometry %p', async (geometry) => {
+    const { store, ddbMock, logger } = makeStore();
+    store.updateSessionInfo('0:1', { ...sessionInfo(), ...geometry });
+    await new Promise(resolve => setImmediate(resolve));
+    expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
+    expect(logger.warn).toHaveBeenCalledWith('gateway-session-store: write failed', {
+      error: 'gateway session shard geometry does not match configured shard',
+    });
+    store.stop();
   });
 });
 
@@ -238,6 +309,8 @@ describe('updateSessionInfo — immediate-write path (sessionId change)', () => 
         session_id: 'sess-Z',
         resume_url: 'wss://r.discord/z',
         sequence: 99,
+        session_shard_id: 0,
+        session_shard_count: 1,
         updated_at: 1_700_000_000_000,
       },
     });
@@ -383,8 +456,8 @@ describe('flushFinal', () => {
       logger,
     });
 
-    store.updateSessionInfo('0:1', { sessionId: 'sess-A', resumeURL: 'wss://r/a', sequence: 1 });
-    store.updateSessionInfo('0:1', { sessionId: 'sess-B', resumeURL: 'wss://r/b', sequence: 2 });
+    store.updateSessionInfo('0:1', sessionInfo({ sessionId: 'sess-A', resumeURL: 'wss://r/a', sequence: 1 }));
+    store.updateSessionInfo('0:1', sessionInfo({ sessionId: 'sess-B', resumeURL: 'wss://r/b', sequence: 2 }));
     expect(secondWriteFired).toBe(true);
 
     const flushPromise = store.flushFinal();

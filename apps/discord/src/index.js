@@ -17,8 +17,10 @@ const {
   shouldUsePushHandoffShutdown,
   selectGatewayReadinessProbe,
   awaitServerListening,
-  tryStop,
   tryClose,
+  stopGatewayHotStandby,
+  runGracefulShutdown,
+  runGatewayFatalShutdown,
   runPushHandoffShutdown,
 } = require('./gateway-shutdown-helpers');
 const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
@@ -376,7 +378,7 @@ const isWorker = isHttp && config.ENABLE_EVENT_SHIPPER;
 // (the leader factory needs the shim's WebSocketManager handle, which
 // only exists after `gatewayShim.start({ connect: false })` resolves).
 // Hoisted to module scope so gracefulShutdown + signal handlers can
-// see them; tryClose/tryStop are null-guarded so a SIGTERM mid-
+// see them; the shutdown helper is null-guarded so a SIGTERM mid-
 // construction is safe, and the `isShuttingDown` re-check in
 // startHotStandby closes the inverse race.
 let gatewayLeader = null;
@@ -419,6 +421,7 @@ if (isGateway && config.ENABLE_GATEWAY_RESUME) {
     intents: GATEWAY_INTENTS_BITFIELD,
     store: sessionStore,
     logger,
+    onFatal: gatewayFatalShutdown,
   });
   logger.info('gateway-resume shim constructed', {
     tableName: `${ddbTablePrefix}gateway-session`,
@@ -627,116 +630,139 @@ let gatewayHeartbeatTimer = null;
 let activeGuildCountTimer = null;
 let isShuttingDown = false;
 
-async function gracefulShutdown(code = 0) {
-  if (isShuttingDown) return;
-  isShuttingDown = true;
-
-  // Force exit after 10s if shutdown hangs
-  setTimeout(() => { logger.error('Shutdown timed out, forcing exit'); process.exit(1); }, 10000).unref();
-
-  logger.info('Graceful shutdown initiated...');
-
-  try {
-    // Wait for in-flight HTTP requests to drain — server.close() is async,
-    // and process.exit() called immediately after would truncate an OAuth
-    // callback mid-flight, leaving the admin's /qurl setup without a
-    // persisted API key.
-    await tryClose('HTTP server', httpServer, logger);
-    stopServerIntervals();
-    // SQS consumer drain. Stops new ReceiveMessage calls, then
-    // awaits the current poll iteration's in-flight `processMessage`
-    // promises. Has to run BEFORE db.close() — running handlers may
-    // still be reading/writing flow-state DDB rows on the way to
-    // ACK'ing the interaction. Idempotent + a no-op when the
-    // consumer was never started, so unconditional here.
-    await eventConsumer.stop();
-    // SQS publisher drain. Same shape as the consumer above:
-    // idempotent + no-op when never started, so unconditional.
-    // Runs AFTER eventConsumer.stop() but both are bounded by their
-    // own DRAIN_DEADLINE_MS; in the split shape only one of them is
-    // actually running per process (combined + flag-on is rejected
-    // at boot), so the sequencing matters only as documentation.
-    await eventPublisher.stop();
-    // Clear gateway-metrics timers BEFORE discordShutdown(): a stray
-    // heartbeat tick during client.destroy() would race with the
-    // WebSocketShard teardown and surface as a confusing "Sampler
-    // threw" warn. Timers are also .unref()'d but order matters for
-    // log cleanliness.
-    if (gatewayHeartbeatTimer) {
-      clearInterval(gatewayHeartbeatTimer);
-    }
-    if (activeGuildCountTimer) {
-      clearInterval(activeGuildCountTimer);
-    }
-    // Pillar 3 standby-path teardown. Active replicas take the
-    // pushHandoffShutdown branch instead; this code only runs when
-    // hot-standby is off, OR hot-standby is on but THIS replica is
-    // the standby (no lock to push).
-    //
-    // Order matters: close the control-channel server FIRST so no
-    // late inbound handoff envelope can land on a half-stopped
-    // leader (handleInboundHandoff against a leader whose tick loop
-    // has already exited is technically a no-op, but the explicit
-    // ordering makes the no-inbound-during-teardown invariant load-
-    // bearing rather than incidental). Watchdog stops next so its
-    // tick can't fire a manager.connect() during teardown. Leader
-    // last so any in-flight tick observes running=false and exits.
-    //
-    // Gated on ENABLE_GATEWAY_HOT_STANDBY for symmetry with the
-    // Pillar 2 shim block below: all three handles are null when
-    // hot-standby is off, so the tryClose/tryStop calls are no-ops,
-    // but skipping the gate would still pay 3 microtask hops per
-    // teardown across every HTTP-only / combined replica that never
-    // built the hot-standby surface.
-    //
-    // No per-call timeout on tryStop/tryClose: a wedged
-    // gatewayLeader.stop() (e.g., DDB hanging in the final renew)
-    // is bounded by the 10 s `force-exit` setTimeout at the top of
-    // this function — which itself sits inside ECS's 30 s SIGTERM
-    // deadline. That layered ceiling is the deliberate outermost
-    // belt; introducing a third per-call timeout here would just
-    // multiply the moving parts without changing the worst-case.
-    if (config.ENABLE_GATEWAY_HOT_STANDBY) {
-      await tryClose('control-channel server', controlChannelServer, logger);
-      await tryStop('connection-watchdog', connectionWatchdog, logger);
-      await tryStop('gateway-leader', gatewayLeader, logger);
-    }
-
-    // Discord client shutdown only meaningful when we're the gateway
-    // role. HTTP-only replicas never called login(), so there's no
-    // WebSocket to close — discordShutdown() on an un-logged-in
-    // client just releases the event emitter handles.
-    //
-    // Pillar 2 shim path is structurally different: the shim owns
-    // the WebSocket (the legacy Client never logged in). stop()
-    // flushes the session store synchronously then drops manager
-    // state WITHOUT calling manager.destroy() — that's the
-    // load-bearing SIGTERM contract that keeps Discord's resume
-    // buffer alive for the next process. The TCP socket drops when
-    // process.exit() fires below, which Discord treats as a network
-    // disconnect rather than a clean close.
-    if (isGateway && config.ENABLE_GATEWAY_RESUME && gatewayShim) {
-      try {
-        await gatewayShim.stop();
-      } catch (err) {
-        logger.error('gateway shim stop failed', { error: err.message });
-      }
-    } else if (isGateway && !config.ENABLE_GATEWAY_RESUME) {
-      // Explicit !ENABLE_GATEWAY_RESUME (vs bare `else if (isGateway)`)
-      // so a future refactor that wraps shim construction in try/catch
-      // (leaving `gatewayShim` null when the flag is on) can't silently
-      // fall through to discordShutdown() — the legacy path would
-      // call .destroy() on an un-logged-in Client, which is harmless
-      // today but masks the underlying construction failure.
-      await discordShutdown();
-    }
-    await db.close();
-    logger.info('Shutdown complete');
-  } catch (error) {
-    logger.error('Error during shutdown', { error: error.message });
+async function gracefulShutdownTeardown({
+  awaitControlChannelServer = true,
+  awaitConnectionWatchdog = true,
+  awaitGatewayLeader = true,
+} = {}) {
+  // Wait for in-flight HTTP requests to drain — server.close() is async,
+  // and process.exit() called immediately after would truncate an OAuth
+  // callback mid-flight, leaving the admin's /qurl setup without a
+  // persisted API key.
+  await tryClose('HTTP server', httpServer, logger);
+  stopServerIntervals();
+  // SQS consumer drain. Stops new ReceiveMessage calls, then
+  // awaits the current poll iteration's in-flight `processMessage`
+  // promises. Has to run BEFORE db.close() — running handlers may
+  // still be reading/writing flow-state DDB rows on the way to
+  // ACK'ing the interaction. Idempotent + a no-op when the
+  // consumer was never started, so unconditional here.
+  await eventConsumer.stop();
+  // SQS publisher drain. Same shape as the consumer above:
+  // idempotent + no-op when never started, so unconditional.
+  // Runs AFTER eventConsumer.stop() but both are bounded by their
+  // own DRAIN_DEADLINE_MS; in the split shape only one of them is
+  // actually running per process (combined + flag-on is rejected
+  // at boot), so the sequencing matters only as documentation.
+  await eventPublisher.stop();
+  // Clear gateway-metrics timers BEFORE discordShutdown(): a stray
+  // heartbeat tick during client.destroy() would race with the
+  // WebSocketShard teardown and surface as a confusing "Sampler
+  // threw" warn. Timers are also .unref()'d but order matters for
+  // log cleanliness.
+  if (gatewayHeartbeatTimer) {
+    clearInterval(gatewayHeartbeatTimer);
+  }
+  if (activeGuildCountTimer) {
+    clearInterval(activeGuildCountTimer);
+  }
+  // Pillar 3 standby-path teardown. Active replicas take the
+  // pushHandoffShutdown branch instead; this code only runs when
+  // hot-standby is off, OR hot-standby is on but THIS replica is
+  // the standby (no lock to push).
+  //
+  // Order matters: close the control-channel server FIRST so no
+  // late inbound handoff envelope can land on a half-stopped
+  // leader (handleInboundHandoff against a leader whose tick loop
+  // has already exited is technically a no-op, but the explicit
+  // ordering makes the no-inbound-during-teardown invariant load-
+  // bearing rather than incidental). Watchdog stops next so its
+  // tick can't fire a manager.connect() during teardown. Leader
+  // last so any in-flight tick observes running=false and exits.
+  //
+  // Gated on ENABLE_GATEWAY_HOT_STANDBY for symmetry with the
+  // Pillar 2 shim block below: all three handles are null when
+  // hot-standby is off, so the helper's close/stop calls are no-ops,
+  // but skipping the gate would still pay 3 microtask hops per
+  // teardown across every HTTP-only / combined replica that never
+  // built the hot-standby surface.
+  //
+  // Normal shutdown awaits both stop calls; a wedged final renew is bounded
+  // by runGracefulShutdown's 10 s force-exit. IDENTIFY-fatal shutdown still
+  // invokes both idempotent stop methods to set their guards, but does not
+  // await work parked behind manager.connect(): gatewayShim.stop() below must
+  // retain the budget to flush the resumable session before process exit.
+  if (config.ENABLE_GATEWAY_HOT_STANDBY) {
+    await stopGatewayHotStandby({
+      controlChannelServer,
+      connectionWatchdog,
+      gatewayLeader,
+      awaitControlChannelServer,
+      awaitConnectionWatchdog,
+      awaitGatewayLeader,
+      logger,
+    });
   }
 
-  process.exit(code);
+  // Discord client shutdown only meaningful when we're the gateway
+  // role. HTTP-only replicas never called login(), so there's no
+  // WebSocket to close — discordShutdown() on an un-logged-in
+  // client just releases the event emitter handles.
+  //
+  // Pillar 2 shim path is structurally different: the shim owns
+  // the WebSocket (the legacy Client never logged in). stop()
+  // flushes the session store synchronously then drops manager
+  // state WITHOUT calling manager.destroy() — that's the
+  // load-bearing SIGTERM contract that keeps Discord's resume
+  // buffer alive for the next process. The TCP socket drops when
+  // process.exit() fires below, which Discord treats as a network
+  // disconnect rather than a clean close.
+  if (isGateway && config.ENABLE_GATEWAY_RESUME && gatewayShim) {
+    try {
+      await gatewayShim.stop();
+    } catch (err) {
+      logger.error('gateway shim stop failed', { error: err.message });
+    }
+  } else if (isGateway && !config.ENABLE_GATEWAY_RESUME) {
+    // Explicit !ENABLE_GATEWAY_RESUME (vs bare `else if (isGateway)`)
+    // so a future refactor that wraps shim construction in try/catch
+    // (leaving `gatewayShim` null when the flag is on) can't silently
+    // fall through to discordShutdown() — the legacy path would
+    // call .destroy() on an un-logged-in Client, which is harmless
+    // today but masks the underlying construction failure.
+    await discordShutdown();
+  }
+  await db.close();
+  logger.info('Shutdown complete');
+}
+
+async function gracefulShutdown(code = 0, {
+  awaitControlChannelServer = true,
+  awaitConnectionWatchdog = true,
+  awaitGatewayLeader = true,
+} = {}) {
+  return runGracefulShutdown({
+    code,
+    claimShutdown: () => {
+      if (isShuttingDown) return false;
+      isShuttingDown = true;
+      return true;
+    },
+    teardown: () => gracefulShutdownTeardown({
+      awaitControlChannelServer,
+      awaitConnectionWatchdog,
+      awaitGatewayLeader,
+    }),
+    logger,
+  });
+}
+
+function gatewayFatalShutdown() {
+  return runGatewayFatalShutdown({
+    gracefulShutdown,
+    getConnectionWatchdog: () => connectionWatchdog,
+    logger,
+  });
 }
 
 // Hot-standby push-handoff SIGTERM path. The body lives in

@@ -1,12 +1,13 @@
 // DDB-backed @discordjs/ws session store. Persists
-// `WebSocketShard.sessionInfo` (`{sessionId, resumeURL, sequence}`)
+// `WebSocketShard.sessionInfo`
+// (`{sessionId, resumeURL, sequence, shardId, shardCount}`)
 // so a process restart can RESUME from the last observed sequence
 // instead of IDENTIFYing fresh — Discord replays buffered events
 // from the last sequence within its ~60 s resume buffer window.
 //
 // Factory `createGatewaySessionStore` returns a store instance with
-// its own mirror + throttle state, so tests run isolated and a
-// future multi-shard caller can construct one per shard.
+// its own mirror + throttle state, so tests run isolated. Production is
+// limited to shard 0:1 until the process IDENTIFY budget becomes shard-aware.
 //
 // ── Load-bearing contracts ──
 //
@@ -46,6 +47,21 @@ const { PutCommand, GetCommand, DeleteCommand } = require('@aws-sdk/lib-dynamodb
 // busy case (interaction storm during a feature launch).
 const DEFAULT_WRITE_THROTTLE_MS = 1000;
 
+function parseShardKey(value) {
+  const match = /^(0|[1-9]\d*):([1-9]\d*)$/.exec(value);
+  if (!match) return null;
+  const parsed = {
+    shardId: Number(match[1]),
+    shardCount: Number(match[2]),
+  };
+  if (!Number.isSafeInteger(parsed.shardId)
+      || !Number.isSafeInteger(parsed.shardCount)
+      || parsed.shardId >= parsed.shardCount) {
+    return null;
+  }
+  return parsed;
+}
+
 function createGatewaySessionStore({
   ddbClient,
   tableName,
@@ -59,6 +75,18 @@ function createGatewaySessionStore({
   if (!tableName) throw new Error('createGatewaySessionStore: tableName is required');
   if (!shardId) throw new Error('createGatewaySessionStore: shardId is required');
   if (!logger) throw new Error('createGatewaySessionStore: logger is required');
+  const configuredShard = parseShardKey(shardId);
+  if (!configuredShard) {
+    throw new Error('createGatewaySessionStore: shardId must be a valid k:n shard key');
+  }
+  // IDENTIFY attempts are capped once per process today. Supporting a wider
+  // shard geometry here before that cap is shard-aware would let one shard
+  // consume another shard's allowance and fail the whole gateway task.
+  if (configuredShard.shardId !== 0 || configuredShard.shardCount !== 1) {
+    throw new Error(
+      'createGatewaySessionStore: only shard 0 of 1 is supported until the IDENTIFY budget is shard-aware',
+    );
+  }
 
   // ── Mirror state ──
   //
@@ -80,6 +108,9 @@ function createGatewaySessionStore({
   const inFlightWrites = new Set();
 
   async function persistRow(info) {
+    if (info.shardId !== configuredShard.shardId || info.shardCount !== configuredShard.shardCount) {
+      throw new Error('gateway session shard geometry does not match configured shard');
+    }
     // Wall-clock epoch ms for `updated_at`. Matches the design
     // doc's table schema. DDB Number type takes JS Number directly;
     // no marshaling concerns up to 2^53.
@@ -90,6 +121,8 @@ function createGatewaySessionStore({
         session_id: info.sessionId,
         resume_url: info.resumeURL,
         sequence: info.sequence,
+        session_shard_id: info.shardId,
+        session_shard_count: info.shardCount,
         updated_at: clock(),
       },
     }));
@@ -185,7 +218,7 @@ function createGatewaySessionStore({
     // Returns a shallow copy. @discordjs/ws's contract doesn't
     // explicitly forbid mutation of the returned object, and if a
     // future minor mutates `sequence` in place between dispatches
-    // the mirror would silently desync. Cost is one 3-field object
+    // the mirror would silently desync. Cost is one 5-field object
     // per reconnect (not per dispatch), so the defensive copy is
     // free.
     retrieveSessionInfo(_shardId) {
@@ -254,10 +287,33 @@ function createGatewaySessionStore({
         // type) is treated as "no session" rather than throwing —
         // the bot must boot even if the DDB row is corrupted, and
         // IDENTIFY recovers the session on the next READY.
-        const { session_id, resume_url, sequence } = result.Item;
+        const {
+          session_id,
+          resume_url,
+          sequence,
+          session_shard_id,
+          session_shard_count,
+        } = result.Item;
+        // Rows written before the full SessionInfo schema shipped do not have
+        // the two explicit shard columns. Their primary key already encodes
+        // the same `index:count`, so derive only when both fields are absent.
+        // A partially migrated or contradictory row is malformed and must
+        // cold-start rather than silently RESUME under the wrong shard shape.
+        const rowHasNoSessionShard = session_shard_id === undefined
+          && session_shard_count === undefined;
+        const hydratedShardId = rowHasNoSessionShard
+          ? configuredShard.shardId
+          : session_shard_id;
+        const hydratedShardCount = rowHasNoSessionShard
+          ? configuredShard.shardCount
+          : session_shard_count;
         if (typeof session_id !== 'string'
             || typeof resume_url !== 'string'
-            || typeof sequence !== 'number') {
+            || typeof sequence !== 'number'
+            || !Number.isSafeInteger(hydratedShardId)
+            || !Number.isSafeInteger(hydratedShardCount)
+            || hydratedShardId !== configuredShard.shardId
+            || hydratedShardCount !== configuredShard.shardCount) {
           // Log only the type signature, not the row contents. The
           // session_id and resume_url are session-bound credentials —
           // a Discord-side gateway endpoint reachable by anyone holding
@@ -268,6 +324,8 @@ function createGatewaySessionStore({
               session_id: typeof session_id,
               resume_url: typeof resume_url,
               sequence: typeof sequence,
+              session_shard_id: typeof session_shard_id,
+              session_shard_count: typeof session_shard_count,
             },
           });
           return null;
@@ -276,6 +334,8 @@ function createGatewaySessionStore({
           sessionId: session_id,
           resumeURL: resume_url,
           sequence,
+          shardId: hydratedShardId,
+          shardCount: hydratedShardCount,
         };
         lastWrittenSessionId = session_id;
         // Note: NOT setting lastWriteAt here — the next dispatch
