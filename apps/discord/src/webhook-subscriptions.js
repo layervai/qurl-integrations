@@ -213,7 +213,7 @@ function removeGuild({ guildId, ownerId }) {
 // closed rather than choosing an owner based on response order. The same
 // assumption underlies BYOK row population via setGuildApiKey, so any change
 // there needs a coordinated rework here.
-async function discoverOwnerId(apiKey, subject = 'DEFAULT') {
+async function discoverOwnerId(apiKey, { subject = 'DEFAULT', skipMalformedRows = false } = {}) {
   if (!apiKey || !config.QURL_ENDPOINT) return null;
   // Walk the same bounded surface the registrar can select from. Validating
   // only page 1 would let it mutate a malformed default subscription on a
@@ -237,6 +237,9 @@ async function discoverOwnerId(apiKey, subject = 'DEFAULT') {
       // Strict per row: skipping a malformed subscription could let the
       // registrar rotate that row using an owner inferred from a valid sibling.
       if (typeof webhook?.owner_id !== 'string' || !webhook.owner_id.length) {
+        // Receiver priming performs no mutation; a valid sibling may still
+        // identify the default owner. Linking must reject every malformed row.
+        if (skipMalformedRows) continue;
         const err = new Error('discoverOwnerId: non-empty qurl-service response omitted owner_id');
         err.code = `${subject}_WEBHOOK_OWNER_CONTRACT`;
         throw err;
@@ -257,8 +260,8 @@ async function discoverOwnerId(apiKey, subject = 'DEFAULT') {
   throw err;
 }
 
-async function discoverDefaultOwnerId() {
-  return discoverOwnerId(config.QURL_API_KEY);
+async function discoverDefaultOwnerId(options) {
+  return discoverOwnerId(config.QURL_API_KEY, options);
 }
 
 // Resolve whether a guild API key belongs to the bot's default owner. This is
@@ -302,7 +305,7 @@ async function resolveDefaultOwnerForApiKey(apiKey) {
 
   const candidateOwnerId = apiKey === config.QURL_API_KEY
     ? ownerId
-    : await discoverOwnerId(apiKey, 'CANDIDATE');
+    : await discoverOwnerId(apiKey, { subject: 'CANDIDATE' });
   return candidateOwnerId === ownerId ? ownerId : null;
 }
 
@@ -355,7 +358,7 @@ async function scanOnce() {
     // retries); BYOK guilds resolve from the DDB rows normally.
     const needsDefaultDiscovery = !!config.QURL_WEBHOOK_SECRET && !defaultOwnerId;
     const discoveryPromise = needsDefaultDiscovery
-      ? discoverDefaultOwnerId().then(
+      ? discoverDefaultOwnerId({ skipMalformedRows: true }).then(
         (owner) => ({ ok: true, owner, fired: true }),
         (err) => ({ ok: false, error: err, fired: true }),
       )

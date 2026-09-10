@@ -467,6 +467,18 @@ describe('webhook-subscriptions registry — default-key discovery', () => {
     expect(global.fetch.mock.calls[2][1].headers.Authorization).toBe('Bearer lv_alias');
   });
 
+  it('primes the receiver from valid rows while linking still rejects a malformed sibling', async () => {
+    mockScan.mockResolvedValueOnce([]);
+    global.fetch = jest.fn(async () => ({
+      ok: true, status: 200,
+      text: async () => JSON.stringify({ data: [{}, { owner_id: 'usr_default' }] }),
+    }));
+    await subs.scanOnce();
+    expect(subs.getSecretForOwner('usr_default')).toBe('default-key-secret');
+    await expect(subs.resolveDefaultOwnerForApiKey('lv_alias'))
+      .rejects.toMatchObject({ code: 'DEFAULT_WEBHOOK_OWNER_CONTRACT' });
+  });
+
   it('fails closed when the cached default owner has no remaining subscriptions', async () => {
     await expect(subs.resolveDefaultOwnerForApiKey('lv_test_abc'))
       .resolves.toBe('usr_default');
