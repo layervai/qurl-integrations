@@ -217,6 +217,57 @@ key in the dashboard, move the complete state directory aside, then run
 `qurl login` and publish again. Fresh publication creates new CRIDs. Do not
 copy individual bindings or pending requests into the new state.
 
+### Supervised installs
+
+**Unreleased:** these supervised-install options describe the planned qURL
+CLI 2.5.0 release. Use the installed CLI's help for currently available
+commands; the examples below require the complete 2.5.0 feature set.
+
+A program that runs the daemon itself (see
+[External supervision](#external-supervision)) never hands qurl an account API
+key. From its own signed-in session it mints a one-time enrollment token for
+target `agent` through the qURL API — the same kind of token `qurl login`
+mints for itself from an account key — writes it to a private file, and runs:
+
+```bash
+qurl login --enrollment-token-file /abs/path/to/token --supervision external
+```
+
+The command reads the file once, only while enrolling; a warm namespace never
+opens it. It reads no account key from anywhere and refuses to run while
+`QURL_API_KEY` or `QURL_API_KEY_FILE` is set (exit code 2). Create the file in
+an owner-only directory and delete it on every exit path, including failures.
+The path must be absolute and clean, and the file must be a regular file — never a symlink — that you own, with mode `0400` or
+`0600`, holding one non-empty token without whitespace, at most 16 KiB, and
+at most one trailing line ending. This reader is stricter than the
+projected-secret reader behind `qurl daemon run --enrollment-token-file` in
+[headless deployments](#headless-deployments): links and group access are
+never accepted.
+
+A supervised install keeps its daemon state sealed rather than in plaintext.
+The command requires `LAYERV_KEY_PROVIDER=local-key` and `LAYERV_LOCAL_KEY_FD`
+naming an inherited descriptor (3 or higher): a pipe or connected local stream
+socket that delivers exactly 32 key bytes and closes, so the wrapping key never
+appears in arguments, the environment, or a file. Every `qurl` process the
+supervisor runs against that state directory — `daemon run` and the lifecycle
+commands included — inherits the same two settings, each with a descriptor of
+its own. The sealed envelope (`agent_state.sealed.json`) and the plaintext one
+(`agent_state.json`) never share a directory: with the provider set, a
+directory that already holds plaintext state is refused, and without it, a
+directory that holds a sealed envelope is refused with the two variable names
+to set. Omitting the provider is an error for token-file login; plaintext
+state remains available to native account-key enrollment. Switching providers
+is therefore a fresh namespace, not an in-place migration. There is no flag for the provider; the supervisor that owns the key
+sets the environment. The token-file reader and the inherited-descriptor key
+transport are available on macOS and Linux.
+
+The enrolled device must be owner-scoped. A token minted for target
+`connector` enrolls a credential that native session operations refuse, so
+`login` fails with exit code 4 and leaves the state directory untouched for
+the supervisor to move aside and enroll again. On success the usual login
+document is printed; with `-o json` it carries `device_key_id` next to
+`owner_id`, the two values a supervisor records.
+
 ## Configuration
 
 Every setting resolves through the same precedence chain:
@@ -240,6 +291,11 @@ selected with `--profile` or `QURL_PROFILE`. A missing file simply means
 defaults apply. **Config files never hold secrets** — a file carrying an
 `api_key` entry is rejected outright rather than silently honored.
 
+`QURL_CONNECTOR_STATE_DIR` selects the durable state namespace for all
+commands. The planned 2.5.0 flow adds the environment-only
+`QURL_CONNECTOR_RUNTIME_DIR` for its control socket directory; see
+[External supervision](#external-supervision).
+
 Also honored: `QURL_DEPLOYMENT` (the settings-file path used to verify share
 and access links; environment-only, with no profile override), `NO_COLOR` (disables color while `--color` is `auto`), and
 `QURL_BROWSER` / `BROWSER` (which browser `qurl get` opens). Pointing the
@@ -256,12 +312,12 @@ would travel unencrypted; loopback endpoints are exempt.
 | `qurl list` | List your published resources |
 | `qurl start <CRID>` | Turn on a previously published local share |
 | `qurl stop <CRID>` | Turn off a local share without deleting it |
-| `qurl restart <CRID>` | Rotate and restart a local share |
+| `qurl restart <CRID>` | Rotate and restart a local share, or move it to a new loopback target with `--target` (planned 2.5.0) |
 | `qurl status <CRID>` | Show desired and platform-observed sharing state |
 | `qurl inspect <CRID>` | Inspect the same authoritative resource or sharing state |
 | `qurl daemon run` | Run the local sharing daemon directly for headless or supervised use |
 | `qurl delete <CRID>` | Delete a published resource |
-| `qurl login` | Enroll this device with a one-time account key |
+| `qurl login` | Enroll this device with a one-time account key, or from a supervisor's enrollment token file (planned 2.5.0) |
 | `qurl whoami` | Show which account this registered device belongs to |
 | `qurl completion <shell>` | Generate shell completions (`bash`, `zsh`, `fish`, `powershell`) |
 | `qurl version` | Print version information |
@@ -302,35 +358,45 @@ or require that file.
 
 #### External supervision
 
+**Unreleased:** the supervisor lifecycle below targets qURL CLI 2.5.0 and
+requires its token-file, sealed-state, and runtime-directory features. Bootstrap
+a fresh, dedicated state directory with the token-file login flow before
+starting the daemon; a directory already used by native supervision cannot
+be adopted in place.
+
 When another program — a desktop app, a service manager — owns the daemon
 process instead of qURL's per-user background job, start the daemon with
 `--supervision external` and run every lifecycle command against that state
 directory with the same setting (flag `--supervision`, environment
 `QURL_DAEMON_SUPERVISION`, config key `daemon_supervision`):
 
-Use a dedicated, fresh state directory rather than the native default. For
-account-key enrollment, the first daemon invocation establishes the marker and
-is expected to exit with `no durable account owner`. Then log in, and start
-the daemon again:
+Use a dedicated, fresh state directory rather than the native default. Enroll
+with the one-shot token file described in [Supervised installs](#supervised-installs),
+then start the daemon. For each command below, the supervising process must
+attach a fresh inherited key descriptor and set `LAYERV_KEY_PROVIDER` and
+`LAYERV_LOCAL_KEY_FD` as described above. Exporting a descriptor number alone
+does not supply the wrapping key:
 
 ```bash
+# Each command also needs the provider settings and a fresh inherited key fd.
 export QURL_CONNECTOR_STATE_DIR="$STATE_DIR"
 export QURL_DAEMON_SUPERVISION=external
-qurl daemon run # first invocation marks the namespace, then exits 1
-qurl login
+qurl login --enrollment-token-file "$TOKEN_FILE"
 qurl daemon run # keep running under the supervisor
 ```
 
 Once the daemon is running, lifecycle commands in another process use the same
-two environment settings. A dedicated state directory avoids marking the native
-default namespace by accident; use a different directory to return to native
-supervision instead of deleting a marker beside durable credentials.
+state, supervision, and key-provider settings. A dedicated state directory
+avoids marking the native default namespace by accident; use a different
+directory to return to native supervision instead of deleting a marker beside durable credentials.
 
 External supervision changes three things:
 
-- The first `daemon run --supervision external` marks the state directory as
-  externally supervised (`runtime_mode.json`). It accepts only a directory
-  that holds no natively managed state, and the mark is permanent.
+- Token-file login (or the first external daemon invocation) marks the
+  state directory as externally supervised (`runtime_mode.json`). It accepts
+  only a directory that holds no natively managed state, and the mark is
+  permanent. Starting the daemon before enrollment exits nonzero with
+  `no durable account owner`; enroll first rather than retrying that startup.
 - `publish`, `start`, and `restart` reload the running daemon and never
   install or replace a background job. When the daemon is not running they
   fail with exit code 11 and roll their own cloud change back, so the
@@ -341,12 +407,85 @@ External supervision changes three things:
   background job over a supervised daemon, and a supervised command never
   adopts a natively managed directory. Read-only commands work either way.
 
-On every process start, including a warm restart or headless start, an
-externally supervised daemon waits up to 30 seconds for its supervisor's
-first reload (every lifecycle command sends one) before serving the stored
-shares on its own. The supervisor should send `POST /reload` after IPC is
-ready and all runtime state has been restored to avoid that delay. Stopping the daemon is a local act: it changes no sharing
-state, so the shares resume on the next start.
+A supervisor enrolls the device once per state directory with the token-file
+form of `qurl login` (see [Supervised installs](#supervised-installs)) and
+then follows one lifecycle:
+
+1. Start `qurl daemon run --state-dir "$STATE_DIR" --supervision external`
+   and keep the process. On every process start, including warm and headless
+   starts, the daemon holds its first reconcile for up to 30 seconds so that
+   runtime state is restored before any route is served. After that bound
+   it serves the stored shares on its own.
+2. Release the first reconcile with `PUT /overlay` (below) or `POST /reload`
+   on the control socket. Every lifecycle command sends a reload as well.
+3. Poll `GET /status`. The document carries `job_version`, `pid`, `running`
+   (resource ID to CRID for every route the session group manages, one
+   waiting out a retry included), and `resources`, the same redacted
+   per-share diagnostics `qurl inspect` shows; a route is serving only when
+   its `resources` entry says so. `pid` is the daemon's
+   own process ID, so a daemon the supervisor found running can be stopped
+   like one it spawned. Older daemons can report `pid: 0`; treat zero as
+   absent and never pass it to `kill`.
+4. Stop the daemon with SIGTERM (or SIGINT). It stops its Connector session
+   and exits with code 130. Stopping the daemon is a local act: it changes no
+   sharing state, so the shares resume on the next start. `qurl stop <CRID>`
+   is the opposite: it is cloud-first, turns the share off on the qURL
+   platform, and the share stays off until `qurl start <CRID>`. Use it to turn
+   a share off, never to pause the daemon.
+
+The control socket is `<state dir>/daemon.sock` when that path fits the
+platform's socket-address limit, otherwise an owner-only per-user directory
+below `/tmp`.
+
+The environment-only `QURL_CONNECTOR_RUNTIME_DIR` pins it: set to a short
+absolute path (a relative one, or one whose socket path exceeds the
+limit, is rejected), the daemon and every `qurl` command resolve exactly
+`<dir>/daemon.sock`, which is what a host whose state path is long — an app
+container, for example — needs. Use a separate dedicated directory for each
+state namespace. It must be owner-only (mode `0700`); the daemon secures it
+before it listens. Set the variable identically for the daemon and for every command that addresses the
+same state directory. Windows named pipes have no length limit and ignore it.
+
+The socket speaks HTTP. When it is in the state directory:
+
+```bash
+curl --unix-socket "$STATE_DIR/daemon.sock" http://localhost/status
+curl --unix-socket "$STATE_DIR/daemon.sock" -X POST http://localhost/reload
+```
+
+**Unavailable until trust is configured:** the CLI does not yet provision
+a trusted CA for FRP peer verification. The Connector rejects header-bearing
+routes until that prerequisite is met.
+
+<!-- TODO(upstream-contract): qurl-connector MaxGroupRoutes, header validation
+limits, route re-registration, and session rotation/drain semantics. -->
+
+`PUT /overlay` attaches request headers to routes at runtime. The body is
+`{"route_request_headers": {"<connector_id>": {"Header-Name": "value"}}}`,
+keyed by each share's Connector ID — a supervisor should publish with an
+explicit `--id` so it knows this key. The daemon adds those headers to every
+request it forwards to that share's local origin, for example a process-random
+token the origin requires before it serves anything. Each request replaces
+the whole overlay: a route the body does not name loses its headers, and `{"route_request_headers": {}}` clears
+it. A valid body is answered with 204. A body over 64 KiB, with unknown
+fields, with more than 2,000 routes, with more than 16 headers or 1,024
+name-and-value bytes for one route, or with an invalid, reserved, or
+case-variant duplicate header name or an invalid value is answered with 400
+and a fixed message that never echoes a header. All limits apply together;
+larger route entries reduce the number that fits within 64 KiB.
+
+Send secret overlay values from the supervisor process; do not put them in
+shell arguments or history.
+
+The overlay lives in process memory only: it is never written to disk, never
+reported by `/status` or `qurl inspect`, never logged, and a restarted daemon
+starts with an empty one — which is why step 2 pushes it before the first
+reconcile. Changing a route's headers re-registers only that route on the
+live session; its siblings are untouched. Re-registration may interrupt
+in-flight requests. During session rotation the retiring session can retain
+old headers until replacement promotion and drain, so an update is not
+immediate revocation. See
+[docs/session-groups.md](../../docs/session-groups.md#runtime-request-headers).
 
 ### qurl publish
 
@@ -559,6 +698,27 @@ session cannot keep serving it; the other shares are not disturbed. `status`
 and `inspect` use the same authoritative view. Both work for remote resources
 and include the local target only when this machine owns one.
 
+In qURL CLI 2.5.0 or newer, `restart` can also move a share to a new loopback origin:
+
+```bash
+qurl restart <CRID> --target http://127.0.0.1:4000
+```
+
+| Flag | Description |
+|------|-------------|
+| `--target <url>` | Move the share to this loopback HTTP origin, e.g. `http://127.0.0.1:4000` |
+
+The CRID and Connector identity stay the same, so an app that now listens on
+another port keeps its links. The destination follows the
+[local publish rules](#local-apps) — a loopback HTTP origin without path,
+query, fragment, or credentials; anything else is a usage error (exit code 2)
+before any request is made — and is preflighted in place of the stored origin,
+which may already be gone. The platform restart runs as usual, then the new
+target is stored together with the serving epoch it returned in one registry
+write, so no durable state pairs the old target with the new epoch or the new
+target with the old one. The text and JSON documents (`target_url`) report the
+new target. Without `--target`, `restart` is unchanged.
+
 Custom deployments must support the current CLI resource-status API. The CLI
 does not scan the full account inventory when one resource-status request
 fails.
@@ -652,6 +812,10 @@ op read op://team/qurl/key | qurl login
 qurl whoami -o json
 ```
 
+`qurl login --enrollment-token-file <path> --supervision external` enrolls
+from a supervisor's one-time enrollment token file instead of an account key;
+see [Supervised installs](#supervised-installs).
+
 ### qurl completion
 
 `qurl completion <shell>` writes a completion script to stdout for
@@ -690,6 +854,7 @@ in every archive.
 | `--endpoint <url>` | qURL API endpoint |
 | `--profile <name>` | Configuration profile |
 | `-v, --verbose` | Request diagnostics on stderr (credentials always redacted) |
+| `--supervision native\|external` | Who runs the sharing daemon: qurl's per-user background job, or another program running `qurl daemon run` — see [External supervision](#external-supervision) |
 
 ## Scripting contract
 
