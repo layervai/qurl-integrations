@@ -6267,28 +6267,18 @@ async function handleQurlDetect(interaction) {
   // deferReply, all user-visible output is editReply.
   await interaction.deferReply({ ephemeral: true });
 
-  // Resolve the API key the same way the send paths do: per-guild BYOK
-  // first, global fallback. (handleQurlDetect resolves its own key — it's
-  // intentionally NOT in API_KEY_GATED_SUBCOMMANDS, which would
-  // double-resolve and gate before this handler runs.)
-  const apiKey = await db.getGuildApiKey(interaction.guildId) || config.QURL_API_KEY;
-  if (!apiKey) {
-    // A missing /qurl setup is an honest config error, not abuse — clear
-    // the cooldown so the user can retry the instant an admin configures
-    // the server. Matches the handler's "honest user errors clear the
-    // cooldown" design (non-image / oversize branches above). The SSRF
-    // probe is the one rejection that intentionally KEEPS the cooldown.
-    clearDetectCooldown(interaction.guildId, interaction.user.id);
-    // Audit this branch — unconfigured is an attribution outcome worth
-    // surfacing (see the handler header's audit list). No recipient is
-    // resolved on an unconfigured guild.
+  // The bot credential mints the guild-scoped capability. No customer key
+  // is sent to the detect service.
+  if (!config.QURL_API_KEY) {
+    // Detect stays outside API_KEY_GATED_SUBCOMMANDS: no guild setup is needed.
+    // Keep the cooldown for operator configuration failures; user retries cannot fix them.
     logger.audit(AUDIT_EVENTS.QURL_DETECT, {
       result: 'unconfigured',
       guild_id: interaction.guildId,
       requester_id: interaction.user.id,
     });
     return interaction.editReply({
-      content: '❌ **qURL is not configured for this server.** A server admin needs to run `/qurl setup` first.',
+      content: '❌ **Watermark detection is unavailable.** The bot operator must configure the detect credential.',
     });
   }
 
@@ -6348,7 +6338,6 @@ async function handleQurlDetect(interaction) {
     result = await detectWatermark(bytes, {
       guildId: interaction.guildId,
       contentType: attachment.contentType,
-      apiKey,
     });
   } catch (err) {
     // detectWatermark (the CONNECTOR POST — the CDN download is handled in
