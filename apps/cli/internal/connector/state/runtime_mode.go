@@ -130,6 +130,8 @@ func EstablishExternalRuntimeMode(ctx context.Context, dir string) (retErr error
 	if present {
 		return nil
 	}
+	// TODO(upstream-contract): Keep this freshness guard aligned with every
+	// durable agent-state envelope introduced by qurl-go and qurl-connector.
 	for _, name := range []string{AgentStateFile, connectoragentstate.SealedAgentStateFile, LocalSharesFile, ConnectorResourcesFile} {
 		_, err := os.Lstat(filepath.Join(dir, name))
 		switch {

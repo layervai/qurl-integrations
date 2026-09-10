@@ -356,20 +356,30 @@ starting the daemon; a directory already used by native supervision cannot
 be adopted in place.
 
 When another program — a desktop app, a service manager — owns the daemon
-process instead of qurl's per-user background job, start the daemon with
+process instead of qURL's per-user background job, start the daemon with
 `--supervision external` and run every lifecycle command against that state
 directory with the same setting (flag `--supervision`, environment
 `QURL_DAEMON_SUPERVISION`, config key `daemon_supervision`):
 
+Use a dedicated, fresh state directory rather than the native default. Enroll
+with the one-shot token file described in [Supervised installs](#supervised-installs),
+then start the daemon:
+
 ```bash
-qurl daemon run --state-dir "$STATE_DIR" --supervision external
-QURL_DAEMON_SUPERVISION=external qurl publish http://127.0.0.1:3000
-qurl stop <CRID> --supervision external
+export QURL_CONNECTOR_STATE_DIR="$STATE_DIR"
+export QURL_DAEMON_SUPERVISION=external
+qurl login --enrollment-token-file "$TOKEN_FILE"
+qurl daemon run # keep running under the supervisor
 ```
+
+Once the daemon is running, lifecycle commands in another process use the same
+two environment settings. A dedicated state directory avoids marking the native
+default namespace by accident; use a different directory to return to native
+supervision instead of deleting a marker beside durable credentials.
 
 External supervision changes three things:
 
-- The first `daemon run --supervision external` marks the state directory as
+- Token-file login (or the first external daemon invocation) marks the state directory as
   externally supervised (`runtime_mode.json`). It accepts only a directory
   that holds no natively managed state, and the mark is permanent.
 - `publish`, `start`, and `restart` reload the running daemon and never
@@ -387,9 +397,10 @@ form of `qurl login` (see [Supervised installs](#supervised-installs)) and
 then follows one lifecycle:
 
 1. Start `qurl daemon run --state-dir "$STATE_DIR" --supervision external`
-   and keep the process. The daemon holds its first reconcile for up to 30
-   seconds so that state pushed over its socket is in place before any route
-   is served; after that bound it serves the stored shares on its own.
+   and keep the process. On every process start, including warm and headless
+   starts, the daemon holds its first reconcile for up to 30 seconds so that
+   runtime state is restored before any route is served. After that bound
+   it serves the stored shares on its own.
 2. Release the first reconcile with `PUT /overlay` (below) or `POST /reload`
    on the control socket. Every lifecycle command sends a reload as well.
 3. Poll `GET /status`. The document carries `job_version`, `pid`, `running`
@@ -433,8 +444,8 @@ it serves anything. Each request replaces the whole overlay: a route the body
 does not name loses its headers, and `{"route_request_headers": {}}` clears
 it. A valid body is answered with 204. A body over 64 KiB, with unknown
 fields, with more than 2,000 routes, with more than 16 headers or 1,024
-name-and-value bytes for one route, or with an invalid, reserved, or case-variant duplicate header name
-or an invalid value is answered with 400 and a fixed message that never
+name-and-value bytes for one route, or with an invalid, reserved, or
+case-variant duplicate header name or an invalid value is answered with 400 and a fixed message that never
 echoes a header.
 The overlay lives in process memory only: it is never written to disk, never
 reported by `/status` or `qurl inspect`, never logged, and a restarted daemon
