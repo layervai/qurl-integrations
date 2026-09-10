@@ -235,9 +235,9 @@ qurl login --enrollment-token-file /abs/path/to/token --supervision external
 
 The command reads the file once, only while enrolling; a warm namespace never
 opens it. It reads no account key from anywhere and refuses to run while
-`QURL_API_KEY` or `QURL_API_KEY_FILE` is set (exit code 2). Delete the file
-when the command exits. The path must be absolute and clean, and the file must
-be a regular file — never a symlink — that you own, with mode `0400` or
+`QURL_API_KEY` or `QURL_API_KEY_FILE` is set (exit code 2). Create the file in
+an owner-only directory and delete it on every exit path, including failures.
+The path must be absolute and clean, and the file must be a regular file — never a symlink — that you own, with mode `0400` or
 `0600`, holding one non-empty token without whitespace, at most 16 KiB, and
 at most one trailing line ending. This reader is stricter than the
 projected-secret reader behind `qurl daemon run --enrollment-token-file` in
@@ -255,8 +255,9 @@ its own. The sealed envelope (`agent_state.sealed.json`) and the plaintext one
 (`agent_state.json`) never share a directory: with the provider set, a
 directory that already holds plaintext state is refused, and without it, a
 directory that holds a sealed envelope is refused with the two variable names
-to set. Switching providers is therefore a fresh namespace, not an in-place
-migration. There is no flag for the provider; the supervisor that owns the key
+to set. Omitting the provider is an error for token-file login; plaintext
+state remains available to native account-key enrollment. Switching providers
+is therefore a fresh namespace, not an in-place migration. There is no flag for the provider; the supervisor that owns the key
 sets the environment. The token-file reader and the inherited-descriptor key
 transport are available on macOS and Linux.
 
@@ -290,9 +291,10 @@ selected with `--profile` or `QURL_PROFILE`. A missing file simply means
 defaults apply. **Config files never hold secrets** — a file carrying an
 `api_key` entry is rejected outright rather than silently honored.
 
-The 2.5.0 supervisor flow also honors `QURL_CONNECTOR_STATE_DIR` (its durable
-state namespace) and the environment-only `QURL_CONNECTOR_RUNTIME_DIR` (its
-control socket directory); see [External supervision](#external-supervision).
+`QURL_CONNECTOR_STATE_DIR` selects the durable state namespace for all
+commands. The planned 2.5.0 flow adds the environment-only
+`QURL_CONNECTOR_RUNTIME_DIR` for its control socket directory; see
+[External supervision](#external-supervision).
 
 Also honored: `QURL_DEPLOYMENT` (the settings-file path used to verify share
 and access links; environment-only, with no profile override), `NO_COLOR` (disables color while `--color` is `auto`), and
@@ -310,12 +312,12 @@ would travel unencrypted; loopback endpoints are exempt.
 | `qurl list` | List your published resources |
 | `qurl start <CRID>` | Turn on a previously published local share |
 | `qurl stop <CRID>` | Turn off a local share without deleting it |
-| `qurl restart <CRID>` | Rotate and restart a local share, or move it to a new loopback target with `--target` |
+| `qurl restart <CRID>` | Rotate and restart a local share, or move it to a new loopback target with `--target` (planned 2.5.0) |
 | `qurl status <CRID>` | Show desired and platform-observed sharing state |
 | `qurl inspect <CRID>` | Inspect the same authoritative resource or sharing state |
 | `qurl daemon run` | Run the local sharing daemon directly for headless or supervised use |
 | `qurl delete <CRID>` | Delete a published resource |
-| `qurl login` | Enroll this device with a one-time account key, or from a supervisor's enrollment token file |
+| `qurl login` | Enroll this device with a one-time account key, or from a supervisor's enrollment token file (planned 2.5.0) |
 | `qurl whoami` | Show which account this registered device belongs to |
 | `qurl completion <shell>` | Generate shell completions (`bash`, `zsh`, `fish`, `powershell`) |
 | `qurl version` | Print version information |
@@ -376,6 +378,7 @@ attach a fresh inherited key descriptor and set `LAYERV_KEY_PROVIDER` and
 does not supply the wrapping key:
 
 ```bash
+# Each command also needs the provider settings and a fresh inherited key fd.
 export QURL_CONNECTOR_STATE_DIR="$STATE_DIR"
 export QURL_DAEMON_SUPERVISION=external
 qurl login --enrollment-token-file "$TOKEN_FILE"
@@ -383,15 +386,17 @@ qurl daemon run # keep running under the supervisor
 ```
 
 Once the daemon is running, lifecycle commands in another process use the same
-state, supervision, and key-provider settings. A dedicated state directory avoids marking the native
-default namespace by accident; use a different directory to return to native
-supervision instead of deleting a marker beside durable credentials.
+state, supervision, and key-provider settings. A dedicated state directory
+avoids marking the native default namespace by accident; use a different
+directory to return to native supervision instead of deleting a marker beside durable credentials.
 
 External supervision changes three things:
 
 - Token-file login (or the first external daemon invocation) marks the
-  state directory as externally supervised (`runtime_mode.json`). It accepts only a directory
-  that holds no natively managed state, and the mark is permanent.
+  state directory as externally supervised (`runtime_mode.json`). It accepts
+  only a directory that holds no natively managed state, and the mark is
+  permanent. Starting the daemon before enrollment exits nonzero with
+  `no durable account owner`; enroll first rather than retrying that startup.
 - `publish`, `start`, and `restart` reload the running daemon and never
   install or replace a background job. When the daemon is not running they
   fail with exit code 11 and roll their own cloud change back, so the
@@ -449,22 +454,28 @@ curl --unix-socket "$STATE_DIR/daemon.sock" -X POST http://localhost/reload
 ```
 
 **Unavailable until trust is configured:** the CLI does not yet provision
-a trusted CA for FRP peer verification. The connector rejects header-bearing
+a trusted CA for FRP peer verification. The Connector rejects header-bearing
 routes until that prerequisite is met.
+
+<!-- TODO(upstream-contract): qurl-connector MaxGroupRoutes, header validation
+limits, route re-registration, and session rotation/drain semantics. -->
 
 `PUT /overlay` attaches request headers to routes at runtime. The body is
 `{"route_request_headers": {"<connector_id>": {"Header-Name": "value"}}}`,
 keyed by each share's Connector ID — a supervisor should publish with an
 explicit `--id` so it knows this key. The daemon adds those headers to every
-request it forwards to that share's local origin, for example a process-random token the origin requires before
-it serves anything. Each request replaces the whole overlay: a route the body
-does not name loses its headers, and `{"route_request_headers": {}}` clears
+request it forwards to that share's local origin, for example a process-random
+token the origin requires before it serves anything. Each request replaces
+the whole overlay: a route the body does not name loses its headers, and `{"route_request_headers": {}}` clears
 it. A valid body is answered with 204. A body over 64 KiB, with unknown
 fields, with more than 2,000 routes, with more than 16 headers or 1,024
 name-and-value bytes for one route, or with an invalid, reserved, or
 case-variant duplicate header name or an invalid value is answered with 400
 and a fixed message that never echoes a header. All limits apply together;
 larger route entries reduce the number that fits within 64 KiB.
+
+Send secret overlay values from the supervisor process; do not put them in
+shell arguments or history.
 
 The overlay lives in process memory only: it is never written to disk, never
 reported by `/status` or `qurl inspect`, never logged, and a restarted daemon

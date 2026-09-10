@@ -62,8 +62,11 @@ platform accepts those in batches, so 1000 shares on one machine become cheap.
 
 **Unreleased:** this describes the planned CLI 2.5.0 overlay feature.
 **Unavailable until trust is configured:** the CLI does not yet provision
-a trusted CA for FRP peer verification. The connector rejects header-bearing
+a trusted CA for FRP peer verification. The Connector rejects header-bearing
 routes until that prerequisite is met.
+
+<!-- TODO(upstream-contract): qurl-connector MaxGroupRoutes, header validation
+limits, route re-registration, and session rotation/drain semantics. -->
 
 An external supervisor (see the CLI README's
 [External supervision](../apps/cli/README.md#external-supervision)) can attach
