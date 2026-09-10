@@ -1,5 +1,6 @@
 {
   "owner_id": "own_cli_fixture",
   "auth_type": "api_key",
+  "device_key_id": "key_fixturecli01",
   "device_enrolled": true
 }

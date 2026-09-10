@@ -115,7 +115,7 @@ func TestLoginProjections(t *testing.T) {
 		if out.Len() != 0 {
 			t.Errorf("login text is a status message; stdout must stay empty, got %q", out.String())
 		}
-		for _, want := range []string{"Enrolled this device for own_output_test.", "Account key:", "consumed, not stored"} {
+		for _, want := range []string{"Enrolled this device for own_output_test.", "Enrollment credential:", "consumed, not stored"} {
 			if !strings.Contains(errBuf.String(), want) {
 				t.Errorf("confirmation missing %q:\n%s", want, errBuf.String())
 			}
@@ -140,13 +140,17 @@ func TestLoginProjections(t *testing.T) {
 			t.Fatal(err)
 		}
 		var doc struct {
-			DeviceEnrolled bool `json:"device_enrolled"`
+			DeviceKeyID    string `json:"device_key_id"`
+			DeviceEnrolled bool   `json:"device_enrolled"`
 		}
 		if err := json.Unmarshal(out.Bytes(), &doc); err != nil {
 			t.Fatal(err)
 		}
 		if !doc.DeviceEnrolled {
 			t.Error("device_enrolled = false, want true")
+		}
+		if doc.DeviceKeyID != "key_outputtest01" {
+			t.Errorf("device_key_id = %q, want the enrolled device key id", doc.DeviceKeyID)
 		}
 	})
 }

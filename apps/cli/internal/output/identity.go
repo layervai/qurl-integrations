@@ -29,8 +29,11 @@ type whoamiJSON struct {
 }
 
 type loginJSON struct {
-	OwnerID        string `json:"owner_id"`
-	AuthType       string `json:"auth_type"`
+	OwnerID  string `json:"owner_id"`
+	AuthType string `json:"auth_type"`
+	// DeviceKeyID is the enrolled device credential's public identifier, the
+	// value a supervising app records next to the owner id.
+	DeviceKeyID    string `json:"device_key_id"`
 	DeviceEnrolled bool   `json:"device_enrolled"`
 }
 
@@ -99,7 +102,11 @@ func (p *Printer) keyExpiry(t *time.Time) string {
 func (p *Printer) Login(id *qurlapi.Identity) error {
 	switch {
 	case p.format == FormatJSON:
-		return p.writeJSON(loginJSON{OwnerID: id.OwnerID, AuthType: id.AuthType, DeviceEnrolled: true})
+		doc := loginJSON{OwnerID: id.OwnerID, AuthType: id.AuthType, DeviceEnrolled: true}
+		if id.Key != nil {
+			doc.DeviceKeyID = id.Key.KeyID
+		}
+		return p.writeJSON(doc)
 	case p.quiet:
 		_, err := fmt.Fprintln(p.out, id.OwnerID)
 		return err
@@ -117,6 +124,6 @@ func (p *Printer) loginText(id *qurlapi.Identity) error {
 	tw := tabwriter.NewWriter(p.err, 0, 0, 2, ' ', 0)
 	twe := &errWriter{w: tw}
 	twe.printf("  %s\t%s\n", p.bold("Auth:"), id.AuthType)
-	twe.printf("  %s\t%s\n", p.bold("Account key:"), "consumed, not stored")
+	twe.printf("  %s\t%s\n", p.bold("Enrollment credential:"), "consumed, not stored")
 	return twe.flush(tw)
 }

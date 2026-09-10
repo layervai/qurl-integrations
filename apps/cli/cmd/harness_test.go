@@ -123,6 +123,10 @@ type runOpts struct {
 	// cover the real registered-state seams.
 	openRegisteredClient func(context.Context, qurlapi.AccountClient, string, *qurlapi.Identity) (qurlapi.Client, *qurlapi.Identity, error)
 	openAPIClient        func(context.Context) (qurlapi.Client, error)
+	// openNativeRuntime drives the real registered-device open against a fake
+	// native runtime. The Hub bootstrap is stubbed with it: no hermetic test
+	// pins a Hub triple.
+	openNativeRuntime func(context.Context, connectorshare.NativeRuntimeConfig) (registeredNativeRuntime, error)
 }
 
 // runResult captures one invocation's streams and exit code.
@@ -199,6 +203,10 @@ func runCLI(t *testing.T, o *runOpts) *runResult {
 		}
 		if o.openAPIClient != nil {
 			g.openAPIClient = o.openAPIClient
+		}
+		if o.openNativeRuntime != nil {
+			g.openNativeRuntime = o.openNativeRuntime
+			g.resolveHubBootstrap = func() (qurl.HubBootstrap, error) { return qurl.HubBootstrap{}, nil }
 		}
 		g.openBrowser = browser.open
 		if o.verifyLink != nil {
