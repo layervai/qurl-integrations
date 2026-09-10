@@ -1,18 +1,4 @@
-/**
- * Residual coverage tests for commands.js — narrow branches that aren't
- * covered by the focused specs (qurl-send-map, send-pipeline-back-half,
- * commands-comprehensive, send-pipeline-helpers).
- *
- * Covers:
- * - handleCommand: double error path (reply + followUp both fail)
- * - bulklink: already-linked-to-another-user, forceLink throw
- * - handleCommand autocomplete early-return
- * - isGoogleMapsURL edge cases (goo.gl path-shape rejection)
- */
 
-// ---------------------------------------------------------------------------
-// Mocks — set up BEFORE requiring modules
-// ---------------------------------------------------------------------------
 
 jest.mock('../src/config', () => ({
   QURL_API_KEY: 'test-api-key',
@@ -22,21 +8,9 @@ jest.mock('../src/config', () => ({
   QURL_SEND_COOLDOWN_MS: 30000,
   QURL_DETECT_COOLDOWN_MS: 30000,
   QURL_SEND_MAX_RECIPIENTS: 50,
-  PENDING_LINK_EXPIRY_MINUTES: 30,
-  ADMIN_USER_IDS: ['admin-1'],
   BASE_URL: 'http://localhost:3000',
   GUILD_ID: 'guild-1',
   isMultiTenant: false,
-  // OpenNHP commands (/link, /stats, /leaderboard, /bulklink, etc.) are
-  // only dispatch-active when config.isOpenNHPActive is true. This
-  // suite exercises several of them; set it here.
-  ENABLE_OPENNHP_FEATURES: true,
-  isOpenNHPActive: true,
-  STAR_MILESTONES: [10, 25, 50, 100],
-  CONTRIBUTOR_ROLE_NAME: 'Contributor',
-  ACTIVE_CONTRIBUTOR_ROLE_NAME: 'Active Contributor',
-  CORE_CONTRIBUTOR_ROLE_NAME: 'Core Contributor',
-  CHAMPION_ROLE_NAME: 'Champion',
 }));
 
 jest.mock('../src/logger', () => ({
@@ -47,7 +21,6 @@ jest.mock('../src/logger', () => ({
   audit: jest.fn(),
 }));
 
-// Track EmbedBuilder calls
 const embedInstances = [];
 const makeEmbed = () => {
   const embed = {
@@ -71,10 +44,6 @@ const makeEmbed = () => {
 };
 
 jest.mock('discord.js', () => {
-  // Shared option-builder chainable from tests/helpers/discord-mock.
-  // Same instance used by commands-comprehensive.test.js so a new
-  // chained method (setMaxLength, addChoices, etc.) at the
-  // discord.js layer only touches one site.
   const { makeOptionBuilder, makeComponentChainable } = require('./helpers/discord-mock');
   return {
   SlashCommandBuilder: jest.fn().mockImplementation(() => {
@@ -167,7 +136,7 @@ const mockDb = {
   updateSendDMStatus: jest.fn(),
   getRecentSends: jest.fn(() => []),
   getSendResourceIds: jest.fn(() => []),
-  markSendRevoked: jest.fn(),
+  markSendRevoked: jest.fn().mockResolvedValue(true),
   getSendConfig: jest.fn(),
   saveSendConfig: jest.fn(),
   forceLink: jest.fn(),
@@ -192,11 +161,6 @@ jest.mock('../src/discord', () => ({
   sendDM: mockSendDM,
 }));
 
-jest.mock('../src/utils/admin', () => ({
-  requireAdmin: jest.fn(async () => true),
-  isAdmin: jest.fn(() => true),
-}));
-
 const mockUploadToConnector = jest.fn();
 const mockDownloadAndUpload = jest.fn();
 const mockReUploadBuffer = jest.fn();
@@ -219,13 +183,8 @@ jest.mock('../src/qurl', () => ({
   getResourceStatus: mockGetResourceStatus,
 }));
 
-// Shared places-mock — see tests/helpers/places-mock.js.
 const { mockPlacesModule } = require('./helpers/places-mock');
 jest.mock('../src/places', () => mockPlacesModule);
-
-// ---------------------------------------------------------------------------
-// Require modules under test
-// ---------------------------------------------------------------------------
 
 const crypto = require('crypto');
 const originalRandomBytes = crypto.randomBytes;
@@ -238,11 +197,6 @@ crypto.randomUUID = jest.fn(() => 'mock-uuid-9999');
 
 const { commands, handleCommand, _test } = require('../src/commands');
 const { sendCooldowns, setCooldown, isGoogleMapsURL } = _test;
-const { requireAdmin } = require('../src/utils/admin');
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
 
 function makeInteraction(overrides = {}) {
   const base = {
@@ -281,10 +235,6 @@ function makeInteraction(overrides = {}) {
   return { ...base, ...overrides };
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
 beforeEach(() => {
   jest.clearAllMocks();
   embedInstances.length = 0;
@@ -294,54 +244,44 @@ beforeEach(() => {
 describe('handleCommand — double error (reply fail + followUp fail)', () => {
   it('logs error when error response itself fails', async () => {
     const logger = require('../src/logger');
+    const qurlCommand = commands.find(c => c.data.name === 'qurl');
+    const realExecute = qurlCommand.execute;
+    qurlCommand.execute = jest.fn(() => { throw new Error('db crash'); });
     const interaction = makeInteraction({
-      commandName: 'stats',
+      commandName: 'qurl',
+      guildId: 'guild-1',
       replied: true,
       followUp: jest.fn().mockRejectedValue(new Error('Cannot send')),
     });
-    mockDb.getStats.mockImplementationOnce(() => { throw new Error('db crash'); });
 
-    await handleCommand(interaction);
+    try {
+      await handleCommand(interaction);
+    } finally {
+      qurlCommand.execute = realExecute;
+    }
     expect(logger.error).toHaveBeenCalledWith('Failed to send error response', expect.objectContaining({ error: 'Cannot send' }));
   });
 });
 
-describe('/bulklink — error paths', () => {
-  const findCmd = () => commands.find(c => c.data.name === 'bulklink');
-
-  it('reports already-linked-to-another-user', async () => {
-    mockDb.getLinkByGithub.mockReturnValue({ discord_id: 'other-user', github_username: 'ghuser' });
-    const interaction = makeInteraction({
-      commandName: 'bulklink',
-      options: { ...makeInteraction().options, getString: jest.fn(() => '111:ghuser') },
-    });
-    await findCmd().execute(interaction);
-    expect(interaction.reply).toHaveBeenCalled();
-  });
-
-  it('reports forceLink throw', async () => {
-    mockDb.getLinkByGithub.mockReturnValue(null);
-    mockDb.forceLink.mockImplementationOnce(() => { throw new Error('DB write fail'); });
-    const interaction = makeInteraction({
-      commandName: 'bulklink',
-      options: { ...makeInteraction().options, getString: jest.fn(() => '111:ghuser') },
-    });
-    await findCmd().execute(interaction);
-    expect(interaction.reply).toHaveBeenCalled();
-  });
-});
-
 describe('handleCommand — autocomplete edge cases', () => {
-  it('routes autocomplete to the /qurl map location handler (which gates on /qurl + map + location)', async () => {
-    // Contract changed in the qurl-map-autocomplete rollout: handleCommand
-    // now routes autocomplete interactions to handleAutocomplete instead
-    // of dropping them. The handler responds with [] for non-location
-    // focused options — see handleAutocomplete in src/commands.js. This
-    // smoke pins the routing: with a non-map subcommand the response is
-    // still []  (so the picker UI doesn't render stale data), but the
-    // respond() call DOES fire.
+  it('acknowledges DM autocomplete with an empty choice list, not a command reply', async () => {
     const interaction = makeInteraction({
       commandName: 'qurl',
+      guildId: null,
+      isAutocomplete: jest.fn(() => true),
+      isChatInputCommand: jest.fn(() => false),
+    });
+
+    await handleCommand(interaction);
+
+    expect(interaction.respond).toHaveBeenCalledWith([]);
+    expect(interaction.reply).not.toHaveBeenCalled();
+  });
+
+  it('routes autocomplete to the /qurl map location handler (which gates on /qurl + map + location)', async () => {
+    const interaction = makeInteraction({
+      commandName: 'qurl',
+      guildId: 'guild-1',
       isAutocomplete: jest.fn(() => true),
       isChatInputCommand: jest.fn(() => false),
       options: {
@@ -355,6 +295,26 @@ describe('handleCommand — autocomplete edge cases', () => {
   });
 });
 
+describe('handleCommand — supported guild-install context', () => {
+  it('executes /qurl when the guild install authorized the interaction', async () => {
+    const qurlCommand = commands.find(c => c.data.name === 'qurl');
+    const realExecute = qurlCommand.execute;
+    qurlCommand.execute = jest.fn().mockResolvedValue(undefined);
+    const interaction = makeInteraction({
+      commandName: 'qurl',
+      guildId: 'guild-1',
+      authorizingIntegrationOwners: { 0: 'guild-1' },
+    });
+
+    try {
+      await handleCommand(interaction);
+      expect(qurlCommand.execute).toHaveBeenCalledWith(interaction);
+    } finally {
+      qurlCommand.execute = realExecute;
+    }
+  });
+});
+
 describe('isGoogleMapsURL — goo.gl edge cases', () => {
   it('rejects goo.gl link without /maps/ path', () => {
     expect(isGoogleMapsURL('https://goo.gl/abcdef')).toBe(false);
@@ -363,4 +323,3 @@ describe('isGoogleMapsURL — goo.gl edge cases', () => {
     expect(isGoogleMapsURL('https://goo.gl/search/abc')).toBe(false);
   });
 });
-

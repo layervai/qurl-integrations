@@ -15,12 +15,27 @@ Polyglot monorepo for qURL integrations. SDKs live in separate repos: [qurl-pyth
 
 - `apps/slack/`, `apps/cli/` — Go (`cmd/` + `internal/`)
 - `apps/discord/` — Node.js (CommonJS, `src/*.js`)
-- `apps/chrome-extension/` — Chrome MV3 extension (JavaScript)
-- `apps/teams/`, `apps/zapier/` — placeholder dirs, no implementation yet
+- `apps/chrome-extension/` — shared Chrome and Edge MV3 extension source
+- `apps/edge-extension/` — Edge version and store documents
+- `apps/teams/` — Node.js (TypeScript ESM, `src/*.ts`); OAuth security core only — no HTTP routes, Teams SDK, or deploy yet
 - `origins/s3-static-connector/` — reusable private S3 static origin image
+- `internal/ciworkflows/` — repo-wide tests for required-check workflow contracts
 - `shared/` — Go packages consumed by every Go app; changes here affect all of them
 - `e2e/` — TypeScript end-to-end tests (Jest)
-- Per-app release tracks via Release Please monorepo mode (`release-please-config.json`)
+- Per-app release tracks via Release Please monorepo mode (`release-please-config.json`); tags are `<component>-v*` except the CLI, which intentionally tags bare `v*` for OSS GoReleaser — see the `.github/workflows/release-please.yml` header before "normalizing" it. A track is earned by cutting a semver version stream that something downstream pins to (Lambda/container deploy, Chrome Web Store, GoReleaser + `install.sh`) — not by having code, nor even by publishing an artifact: `shared/` and `apps/teams/` publish nothing, and `origins/s3-static-connector/` publishes an image tagged only `:main`/`:<sha>`, so none of them have a track. Adding one means editing `release-please-config.json` **and** `.release-please-manifest.json` together — `scripts/check-release-please-sync.sh` fails the build if their keys drift. That script also pins that `apps/cli` declares **no** `component`: because the CLI is bare-tagged its component never reaches a tag, changelog heading or release name, but release-please still compares it against the manifest release PR's branch component and refuses to build the release whenever the CLI is alone in that PR — a green run that tags nothing, then every component's release PR blocked. `scripts/verify-cli-release.sh` fails the release run if it ever happens again; the `.github/workflows/release-please.yml` header has the full mechanism
+
+### Browser extension source
+
+`apps/chrome-extension/` is the source for both browser builds. The Edge build
+copies that source, applies the version in `apps/edge-extension/package.json`,
+and changes only the browser name in the release output. Both builds read
+`apps/chrome-extension/.env`. Keep store-specific documents in their app
+directory. Release Please links the two version tracks;
+the apps keep separate tags and changelogs, but a release of either app bumps
+both versions and requires both store submissions. Both required CI contexts
+come from `.github/workflows/chrome-extension.yml`.
+Shipped shared source must not contain capitalized browser-specific names;
+each package checks every shipped non-PNG file and reports each offender.
 
 ## Commit format
 
@@ -28,7 +43,7 @@ Polyglot monorepo for qURL integrations. SDKs live in separate repos: [qurl-pyth
 <type>(<scope>): <description>
 
 type:  feat | fix | docs | style | refactor | perf | test | build | ci | chore | revert
-scope: slack | teams | discord | cli | zapier | chrome-extension | origins | shared | ci
+scope: slack | teams | discord | cli | chrome-extension | edge-extension | origins | shared | ci
 ```
 
 > Keep this type list aligned with CONTRIBUTING.md and `.github/workflows/pr-title.yml`'s `types:` block.
@@ -64,4 +79,4 @@ The following stay literal — don't "finish" the rebrand:
 
 When upstream qurl-service rebrands its API error strings, the test fixtures in this repo that mirror them (`"QURL not found"`, `"QURL API error (...)"`, `"token limit per QURL reached"` etc.) need to update in lockstep — `git grep TODO(upstream-rebrand)` finds the doc-comment markers.
 
-For non-error external or cross-repo contracts mirrored locally (for example qurl-service TTLs or infra log filters), use `TODO(upstream-contract)` so `git grep TODO(upstream-contract)` finds those lockstep sites.
+For non-error external or cross-repo contracts mirrored locally (for example qurl-service TTLs or infra log filters), use `TODO(upstream-contract)` so `git grep TODO(upstream-contract)` finds those lockstep sites. This covers third-party platform behavior we depend on but do not control, not just our own services — a Slack event shape the code treats as guaranteed belongs here, because the failure mode is the same: the contract changes upstream and nothing local fails loudly.

@@ -1,4 +1,4 @@
-.PHONY: all fmt lint vet test test-race coverage build-slack build-cli docs man vendor release-snapshot security check check-actions-pins test-actions-pins check-discord test-discord clean
+.PHONY: all fmt lint vet test test-race coverage build-slack build-cli docs man vendor release-snapshot security check check-actions-pins test-actions-pins test-install-script check-release-please-sync test-release-please-sync test-cli-release-verifier check-notification-payload test-validated-base check-cli check-discord test-discord check-chrome-extension check-edge-extension check-teams check-e2e check-node pre-commit-install pre-commit-run clean
 
 VERSION ?= dev
 
@@ -12,8 +12,16 @@ fmt:
 
 ## Linting
 
+# Pinned so local runs match CI exactly. Keep in sync with every pin site:
+# .github/workflows/slack.yml (2), .github/workflows/shared-test.yml (2),
+# .github/workflows/cli.yml (2), .github/workflows/workflow-contract.yml (1),
+# and .pre-commit-config.yaml's golangci-lint rev. An unpinned PATH install
+# drifts: newer golangci-lint versions flag issues the pinned config is clean
+# on.
+GOLANGCI_LINT_VERSION := v2.12.2
+
 lint:
-	golangci-lint run --timeout=5m ./...
+	go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION) run --timeout=5m ./...
 
 vet:
 	go vet ./...
@@ -57,10 +65,12 @@ vendor:
 	go mod vendor
 	go mod tidy
 
-## Release (requires goreleaser)
+## Release (requires goreleaser + syft; .goreleaser.yml's sboms block shells
+## out to syft). Signing is skipped: keyless cosign needs GitHub's OIDC
+## broker, which only exists on Actions runs — see `signs:` in .goreleaser.yml.
 
 release-snapshot: # Build release artifacts without publishing
-	goreleaser release --snapshot --clean
+	goreleaser release --snapshot --clean --skip=sign
 
 ## Security
 
@@ -73,6 +83,26 @@ check-actions-pins:
 test-actions-pins:
 	scripts/test-validate-github-actions-pins.sh
 
+## Scripts
+
+test-install-script:
+	scripts/test-install.sh
+
+check-release-please-sync:
+	scripts/check-release-please-sync.sh
+
+check-notification-payload:
+	scripts/check-main-ci-notification-payload.sh
+
+test-validated-base:
+	scripts/test-resolve-validated-base.sh
+
+test-cli-release-verifier:
+	scripts/test-verify-cli-release.sh
+
+test-release-please-sync:
+	scripts/test-check-release-please-sync.sh
+
 ## Pre-commit
 
 pre-commit-install:
@@ -82,16 +112,138 @@ pre-commit-install:
 pre-commit-run:
 	pre-commit run --all-files
 
-## Discord bot (Python)
+## Node.js suites (Discord, Chrome/Edge extensions, Teams, e2e helpers)
+##
+## Opt-in, never prerequisites of `make check`: each installs from its own
+## lockfile, and that does not belong on the target every Go contributor runs.
+## CONTRIBUTING.md#nodejs-apps says which to run when. Each mirrors its app's
+## CI job closely enough to predict it — output-only flags differ, and what a
+## target omits is noted on the target.
+##
+## Side effect worth knowing: these create node_modules/ that Go's `./...` walk
+## then sees (eslint's flatted ships a .go file). .golangci.yml already drops
+## findings under node_modules/, so `lint` is covered; `vet` and `test-race`
+## are not, so a dep shipping malformed Go would surface as a `make check`
+## failure with no Go change behind it. Harmless today — measured at ~0.7s of
+## extra package loading, and the one Go file in there is clean.
 
+# $(1) is the app directory. Every app pins its own Node in .nvmrc and CI
+# feeds that file to setup-node, so a mismatched local Node can pass here and
+# fail there. Warn rather than fail: a newer Node usually works, and a hard
+# failure would make the target unusable for anyone not running nvm.
+define node_version_warning
+@if command -v node >/dev/null 2>&1 && [ "$$(node --version)" != "v$$(cat $(1)/.nvmrc)" ]; then \
+	echo "warning: node $$(node --version) differs from $(1)/.nvmrc v$$(cat $(1)/.nvmrc) (CI uses the pinned version)" >&2; \
+fi
+endef
+
+# Every target below uses `npm ci`, not `npm install`: CI installs the lockfile
+# exactly, and `npm install` can rewrite package-lock.json — which both dirties
+# the tree and breaks the "this predicts CI" property. `--no-fund` only mutes
+# output; `--no-audit` also skips npm's implicit registry request. Neither flag
+# changes the dependency tree.
+
+# cli.yml's quality gates for the host OS, so a contributor can run them
+# before pushing. Adding or removing a gate there means updating this target
+# too. It cannot mirror the three-OS matrix: only the host OS runs here, and CI
+# uses the host's filesystem security controls. Credentialed sandbox
+# smoke runs only in the protected same-repository journey against the exact
+# packaged source SHA. `goreleaser check`
+# needs goreleaser on PATH, like release-snapshot above. The 70 floor mirrors
+# cli.yml's coverage gate and leaves a small margin below the measured v2 CLI.
+check-cli:
+	go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION) run --timeout=5m ./apps/cli/...
+	@go test -race -count=1 -coverprofile=coverage.out -covermode=atomic ./apps/cli/...
+	@COVERAGE=$$(go tool cover -func=coverage.out | grep ^total: | awk '{print $$3}' | tr -d '%'); \
+	echo "Total coverage: $${COVERAGE}%"; \
+	if ! awk -v c="$$COVERAGE" 'BEGIN { exit !(c+0 >= 70) }' </dev/null; then \
+		echo "FAIL: Coverage $${COVERAGE}% is below 70% threshold"; \
+		exit 1; \
+	fi
+	go vet ./apps/cli/...
+	go test -tags=clisandbox -run '^$$' -count=1 ./apps/cli/...
+	go tool govulncheck ./apps/cli/...
+	goreleaser check
+
+# Kept verbose for local debugging — discord.yml adds --silent.
 test-discord:
-	cd apps/discord && pip install -q -r requirements-dev.txt && python -m pytest tests/ -q
+	$(call node_version_warning,apps/discord)
+	cd apps/discord && npm ci --no-audit --no-fund
+	cd apps/discord && npm test -- --ci
 
-check-discord: test-discord
+# discord.yml's build-and-test steps minus the network-dependent
+# `audit-production-dependencies.js` gate. Its sibling docker-check job is a
+# separate gate and is not mirrored here. Run the registry-backed gate locally
+# with `cd apps/discord && node scripts/audit-production-dependencies.js`.
+check-discord:
+	$(call node_version_warning,apps/discord)
+	cd apps/discord && npm ci --no-audit --no-fund
+	cd apps/discord && npm run lint
+	cd apps/discord && npm test -- --ci
 
-## Full check (CI parity)
+# Mirrors the browser extension workflow. The Chrome target stops before the
+# ZIP-writing step, so its wrong-browser text scan is CI-only. The Edge target
+# adds the real Edge package command and therefore requires `zip` on Unix-like hosts.
+#
+# The syntax check is CI's command verbatim, run through `bash -o pipefail`
+# because that is the shell GitHub gives a `run:` step. Without it a Make
+# recipe line runs under /bin/sh, the pipeline reports only xargs's status,
+# and a `find` that failed — a globbed root renamed in some later refactor —
+# would pass here while failing CI. That is the one asymmetry this file's
+# "predicts CI" claim cannot afford. Globbed so a source file added later
+# cannot slip past the check, and piped through xargs rather than `find
+# -exec`, which reports success even when the command it ran failed.
+check-chrome-extension:
+	$(call node_version_warning,apps/chrome-extension)
+	cd apps/chrome-extension && npm ci --no-audit --no-fund
+	cd apps/chrome-extension && npm run lint
+	cd apps/chrome-extension && bash -o pipefail -c "find background.js popup content lib scripts -name '*.js' -print0 | xargs -0 -r -n1 node --check"
+	cd apps/chrome-extension && npm test
 
-check: fmt vet check-actions-pins test-actions-pins lint test-race
+check-edge-extension: check-chrome-extension
+	cd apps/edge-extension && npm run package:release
+
+# teams.yml's build-and-test in full — every step is offline. `npm run build`
+# writes only dist/, which apps/teams/.gitignore already covers.
+check-teams:
+	$(call node_version_warning,apps/teams)
+	cd apps/teams && npm ci --no-audit --no-fund
+	cd apps/teams && npm run typecheck
+	cd apps/teams && npm run lint
+	cd apps/teams && npm test
+	cd apps/teams && npm run build
+
+# e2e.yml's build-and-test in full. Offline subset only: `npm test` there also
+# runs the live suite, which mints real qURL resources and posts real Discord
+# messages against credentials in e2e/.env (see e2e/README.md). CI omits that
+# script for the same reason and has no such credentials, so the two stay
+# step-for-step identical rather than this being the weaker signal.
+#
+# e2e/.nvmrc pins 24.x where the apps pin 22.21.0: e2e/package.json asks for
+# node >=24, and npm does not enforce engines by default, so that file is the
+# only thing making the two agree. It landed with the CI workflow that reads
+# it — before that there was nothing to verify a pin.
+#
+# -p is explicit rather than relying on tsc's upward search, and names the same
+# config ts-jest compiles with (neither jest config overrides it). Note the
+# typecheck is deliberately the wider net: tsconfig.json includes **/*.ts, so
+# it covers helpers/ and the live tests/ too, while test:unit runs only
+# unit/**. For the live suite that typecheck is the only gate there is.
+check-e2e:
+	$(call node_version_warning,e2e)
+	cd e2e && npm ci --no-audit --no-fund
+	cd e2e && npx tsc -p tsconfig.json --noEmit
+	cd e2e && npm run test:unit
+
+# Every Node.js suite at once, for changes that cross app boundaries; prefer a
+# single target when only one app moved. They write into separate directories
+# and npm's cache takes its own locks, so `make -j5 check-node` is safe.
+check-node: check-chrome-extension check-edge-extension check-discord check-teams check-e2e
+
+## Full check (Go + repo-wide checks, matching the Go CI path; the Node.js
+## suites are opt-in above — `make check-node` or a single `check-<app>`)
+
+check: fmt vet check-actions-pins test-actions-pins test-install-script check-release-please-sync test-release-please-sync test-cli-release-verifier check-notification-payload test-validated-base lint test-race
 
 ## Cleanup
 

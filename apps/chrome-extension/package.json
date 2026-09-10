@@ -1,10 +1,10 @@
 {
   "name": "qurl-chrome-extension",
   "private": true,
-  "version": "1.0.2",
+  "version": "1.1.0",
   "description": "Chrome extension for Gmail: upload files to qURL and insert access links into compose drafts.",
   "engines": {
-    "node": ">=18"
+    "node": ">=20.9.0"
   },
   "scripts": {
     "icons": "node scripts/generate-icons.js",
@@ -21,6 +21,6 @@
   },
   "devDependencies": {
     "eslint": "^8.57.1",
-    "sharp": "^0.34.5"
+    "sharp": "^0.35.4"
   }
 }

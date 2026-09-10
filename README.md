@@ -6,25 +6,23 @@ Open-source integrations for [qURL™](https://layerv.ai) — Quantum URLs that 
 
 qURL is built on [OpenNHP](https://github.com/OpenNHP/opennhp) (Network-infrastructure Hiding Protocol), a cryptography-driven protocol that makes servers, ports, and domains invisible to unauthorized users. A qURL wraps any resource behind a short-lived, policy-bound, cryptographically protected access token. When the token is resolved, an NHP knock grants the caller's IP temporary access — the resource literally does not exist on the network until that moment. Think of it like quantum observation: the resource only becomes visible when an authorized user observes it.
 
-This monorepo contains qURL integrations across several surfaces — a Slack app and a CLI tool (Go), a Discord app (Node.js), and a Chrome extension for Gmail — plus shared Go libraries. Microsoft Teams and Zapier are planned.
+This monorepo contains qURL integrations across several surfaces — a Slack app and a CLI tool (Go), a Discord app (Node.js), and Chrome and Edge extensions for Gmail — plus shared Go libraries. A Microsoft Teams OAuth core is in progress.
 
 ## Structure
 
 ```
-apps/                Per-integration apps (independent release tracks)
+apps/                Per-integration apps (released apps get independent release tracks)
   slack/             Slack Secure Access Agent — /qurl slash commands (Go)
   discord/           Discord app — one-time qURL links for files & locations (Node.js)
-  chrome-extension/  Chrome extension — Gmail file uploads as expiring qURL links (MV3)
-  cli/               CLI — create & manage qURLs from the terminal (Go)
-  teams/             Microsoft Teams (planned)
-  zapier/            Zapier integration (planned)
+  chrome-extension/  Shared Chrome and Edge extension source (MV3)
+  edge-extension/    Edge release metadata and store documents
+  cli/               CLI — publish, share, and manage qURL resources by CRID (Go)
+  teams/             Microsoft Teams OAuth security core — no routes/SDK yet (TypeScript)
 origins/             Reusable origin images for qURL Connector-protected resources
   s3-static-connector/  Private S3 static site origin behind qURL Connector
 shared/              Shared Go libraries used by the Go apps
   client/            qURL API client
   auth/              API key helpers
-  events/            Webhook event parsing
-  formatting/        Chat message templates
   observability/     OpenTelemetry setup
 ```
 
@@ -43,9 +41,9 @@ Language SDKs and the qURL MCP server live in standalone repositories:
 The Slack, Discord, and CLI apps connect to the qURL API:
 
 - **Endpoint** — the qURL API is `https://api.layerv.ai`, set via `QURL_ENDPOINT`. Required for Slack; the CLI and Discord use it by default.
-- **Authentication** — an API key (`lv_live_…`) in `QURL_API_KEY`.
+- **Authentication** — the CLI uses an account API key once to enroll a restricted device identity. Run `qurl login`, or set `QURL_API_KEY` for automated bootstrap; qurl does not store the account key. See [apps/cli/README.md](apps/cli/README.md#authentication).
 
-The Chrome extension uploads to a qURL file server instead; see its [README](apps/chrome-extension/README.md) for configuration.
+The Chrome and Edge builds use the same extension source and upload to a qURL file server; see the [browser extension README](apps/chrome-extension/README.md) and [Edge release notes](apps/edge-extension/README.md).
 
 ## Slack Connector Onboarding
 
@@ -63,8 +61,12 @@ for deploying and operating the Secure Access Agent.
 # Install pre-commit hooks
 pip install pre-commit && pre-commit install
 
-# Run all checks (lint, vet, test)
+# Run all checks for the Go apps, shared/, and the repo itself (fmt, vet, lint, test)
 make check
+
+# The Node.js suites are opt-in — run the one matching your change
+# (make check-node runs all five, but that is five npm installs)
+make check-discord
 
 # Run all tests
 go test ./...
@@ -83,16 +85,52 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for development workflow, PR requirements
 ## Releases
 
 This repo uses [Release Please](https://github.com/googleapis/release-please) in monorepo mode.
-Each app has an independent version track:
+Each *released* app has an independent version track. A track is earned by cutting a semver
+version stream that something downstream pins to — not by merely publishing an artifact.
+`origins/s3-static-connector/` ships a container image but tags it only `:main` and `:<sha>`, and
+`shared/` and `apps/teams/` ship nothing, so neither has a track:
 
-- Commits scoped to an app bump only that app: `feat(slack): add thread replies` → `slack/v0.2.0`
-- Changes to `shared/` bump all apps
-- Each app has its own `CHANGELOG.md`
+- Commits scoped to an app bump only that app: `feat(slack): add thread replies` → `slack-v0.2.0`
+- The CLI is the one component tagged **without** its prefix (`v0.2.0`, not `cli-v0.2.0`) so OSS
+  GoReleaser can parse the tag — see the header of
+  [`.github/workflows/release-please.yml`](.github/workflows/release-please.yml) before "normalizing" it
+- Only commits touching an app's directory trigger its release; `shared/` changes ship with each
+  app's next release
+- Each released app gets its own `CHANGELOG.md` once its first release lands
+- CLI release assets are keyless-signed (cosign/Sigstore) and ship per-archive SPDX SBOMs — the
+  consumer verification recipe lives in [RELEASING.md](RELEASING.md)
 
 ## CI
 
-Each app has a path-filtered workflow that only runs when its code (or shared code) changes.
-A `shared-test.yml` workflow runs all app tests when `shared/` is modified.
+Each app's workflow runs on every PR. A `changes` detector job inside it decides whether that
+app's quality gates actually execute, and an always-reporting aggregate check — `slack / required`,
+`discord / required`, `chrome-extension / required`, `edge-extension / required`,
+`teams / required`, `cli / required`, `s3-static-connector / required`, `e2e / required`,
+`shared / required` — summarizes the result. Branch protection requires those aggregates, never
+the gates themselves. The full required-context set, and the rules for changing it, live in
+[CONTRIBUTING.md](CONTRIBUTING.md#merge-result-checks) — keep this list in step with that one.
+
+Path filtering deliberately lives in the detector rather than in `on: paths:`: a workflow skipped
+by a trigger-level path filter never reports its checks at all, so a required aggregate would
+block every PR that happens not to touch that app. The detector's filter is the source of truth
+for which paths need validation, and `shared-test.yml` runs all Go app tests when `shared/`
+is modified.
+
+That pattern is itself under test. `internal/ciworkflows` reads every file in
+`.github/workflows` and fails when a workflow grows a `required` aggregate with no registered
+spec, leaves a quality gate out of `required.needs`, ships a verifier that treats a skipped gate
+as a pass, or makes the contract check conditional. It also records every pull-request workflow's
+intended `branches:` filter, so one recorded as deliberately narrow fails the moment it reports a
+required context — including the nine aggregates, whose recorded filter is weighed against the
+documented contexts rather than only against itself, so narrowing one cannot be laundered by
+editing `requiredWorkflowSpecs` to match. This is the paths filter's trap inverted: a
+workflow filtered off PRs stacked on a feature branch never registers its checks at all, and
+protection guards only `main`, so the stacked PR reads green having run none of them
+(#1183, #1185). Deleting the merged base does not recover the run: GitHub retargets the PR onto
+`main`, but a base change arrives as the `edited` activity type, which no branch-filtered workflow
+here takes, so the retarget re-runs nothing. The PR stalls on the check that never registered until
+its next push (#1219). The package's own check — `Workflow Contract` — is unfiltered and reports
+on every PR, because a check behind a paths filter cannot police the paths filters (#1081).
 
 ## License
 

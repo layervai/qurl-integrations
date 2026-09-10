@@ -1,10 +1,3 @@
-// Tests for the qurl-service webhook self-registration helper.
-//
-// Wire-contract pinned against qurl-service's public Webhooks API:
-//   POST /v1/webhooks                  → creates, returns secret
-//   POST /v1/webhooks/{id}/secret      → rotates, returns NEW secret
-//   GET  /v1/webhooks                  → lists for owner
-//   PATCH /v1/webhooks/{id}            → updates events list
 
 const { ensureWebhookSubscription, buildSsmPersistSecret, _internals } = require('../src/qurl-webhook-registrar');
 
@@ -14,10 +7,6 @@ function mockFetchResponses(handlers) {
   global.fetch = jest.fn(async (url, opts) => {
     const path = url.replace(/^https?:\/\/[^/]+/, '');
     const method = opts.method || 'GET';
-    // Try exact match first (so tests targeting a specific query string
-    // like `?cursor=page2` still work), then fall back to pathname-only
-    // so tests don't have to enumerate every `?limit=100` / `?limit=100&cursor=...`
-    // variation that the registrar adds for defensive reasons.
     const pathnameOnly = path.split('?')[0];
     const handler = handlers[`${method} ${path}`] || handlers[`${method} ${pathnameOnly}`];
     if (!handler) {
@@ -45,9 +34,6 @@ const BASE_OPTS = {
 };
 
 describe('ensureWebhookSubscription — cold bootstrap (no existing sub + no real initialSecret) → creates', () => {
-  // The first-deploy-of-a-fresh-environment path. `initialSecret` is
-  // either unset (env never had QURL_WEBHOOK_SECRET) or an empty
-  // string (SSM parameter not yet populated). Either way, action='created'.
   it.each([
     ['initialSecret undefined', undefined],
     ['initialSecret empty string', ''],
@@ -158,10 +144,6 @@ describe('ensureWebhookSubscription — existing sub, bootstrap (no real initial
 
 describe('ensureWebhookSubscription — existing sub + real initialSecret → REUSE (multi-replica safety)', () => {
   it('skips POST /secret entirely and returns the initialSecret unchanged', async () => {
-    // The load-bearing multi-replica safety property. Pre-fix, each
-    // HTTP replica rotated → server-side last-write-wins → (N-1)
-    // replicas held stale secrets → ALB-routed events 401'd on
-    // ~(N-1)/N of replicas until a follow-up restart.
     let secretEndpointHit = false;
     mockFetchResponses({
       'GET /v1/webhooks': () => ({ body: { data: [{
@@ -197,10 +179,6 @@ describe('ensureWebhookSubscription — existing sub + real initialSecret → RE
   });
 
   it('returns reused successfully even when the events PATCH fails (transient 5xx must not flip the boot log)', async () => {
-    // Receiver is already correct via initialSecret. A transient PATCH
-    // 5xx shouldn't make ensureWebhookSubscription reject — the boot
-    // log would then say "self-registration failed" while the bot is
-    // actually healthy. Catch + log + return reused.
     mockFetchResponses({
       'GET /v1/webhooks': () => ({ body: { data: [{
         webhook_id: 'wh_existing', url: BASE_OPTS.bridgeUrl, events: ['qurl.created'], // drift
@@ -240,8 +218,6 @@ describe('ensureWebhookSubscription — URL canonicalization', () => {
         return { body: { data: { webhook_id: 'wh_existing', secret: 'whsec_x' } } };
       },
     });
-    // bridgeUrl has NO trailing slash; strict equality would miss
-    // and create a duplicate. canonicalUrl matches both.
     const result = await ensureWebhookSubscription({
       ...BASE_OPTS,
       bridgeUrl: 'https://bot.test.example/webhooks/qurl',
@@ -253,10 +229,6 @@ describe('ensureWebhookSubscription — URL canonicalization', () => {
 
 describe('ensureWebhookSubscription — pagination', () => {
   it('walks cursor pages until the matching sub is found', async () => {
-    // Test keys spell the exact path the registrar produces so the
-    // exact-match path-with-query takes precedence over the
-    // pathname-only fallback (which would otherwise return the
-    // first-page handler for every call → cursor walk would loop).
     mockFetchResponses({
       'GET /v1/webhooks?limit=100': () => ({ body: {
         data: [{ webhook_id: 'wh_other', url: 'https://other.example/foo', events: ['qurl.accessed', 'qurl.expired'] }],
@@ -291,11 +263,6 @@ describe('ensureWebhookSubscription — pagination', () => {
 });
 
 describe('ensureWebhookSubscription — set-based reconcileEvents (latent bug fix)', () => {
-  // The pre-fix reconcile short-circuited on `events.includes('qurl.accessed')`,
-  // which would leave an `accessed`-only subscription in place even after
-  // the target set grew to include `expired`. These tests pin the
-  // strict-set-equality semantics so a future event-list addition can
-  // never silently under-cover via the inclusion-check pattern again.
   it('PATCHes when accessed is present but expired is missing (the original latent-bug shape)', async () => {
     let patchedEvents = null;
     mockFetchResponses({
@@ -327,11 +294,6 @@ describe('ensureWebhookSubscription — set-based reconcileEvents (latent bug fi
   });
 
   it('PATCHes when an extra non-target event is present (set equality, not subset)', async () => {
-    // Set equality drops drift extras — a stale event from a removed
-    // target stays subscribed otherwise. Trade-off accepted: if a
-    // future peer ever co-subscribes a third event on the same sub,
-    // this would drop it. There is no co-subscriber today (the bot
-    // owns this subscription, owner_id-scoped).
     let patchedEvents = null;
     mockFetchResponses({
       'GET /v1/webhooks': () => ({ body: { data: [{
@@ -361,10 +323,6 @@ describe('ensureWebhookSubscription — set-based reconcileEvents (latent bug fi
   });
 
   it('PATCHes when events field is a string instead of an array (treats non-array as missing)', async () => {
-    // Defensive against a future contract drift where qurl-service
-    // returns events: "qurl.accessed,qurl.expired" — the pre-fix
-    // .includes() would have matched via string-contains and
-    // silently skipped the PATCH despite drift.
     let patchedEvents = null;
     mockFetchResponses({
       'GET /v1/webhooks': () => ({ body: { data: [{
@@ -412,7 +370,6 @@ describe('ensureWebhookSubscription — error paths', () => {
       'GET /v1/webhooks': () => ({ body: { data: [] } }),
       'POST /v1/webhooks': () => ({ status: 201, body: { data: {
         webhook_id: 'wh_new',
-        // No secret field — contract drift
       } } }),
     });
     await expect(ensureWebhookSubscription(BASE_OPTS)).rejects.toThrow(/contract drift/);
@@ -459,11 +416,6 @@ describe('ensureWebhookSubscription — best-effort secret persistence', () => {
   });
 
   it('returns the secret EVEN IF persistSecret throws (best-effort)', async () => {
-    // Load-bearing safety property: persistence is observability, not
-    // correctness. If IAM denies PutParameter (or whatever backend the
-    // caller wired) we STILL return the secret so the receiver can
-    // verify against it in-process. Without this, an AccessDenied
-    // would crash the registrar and the bot would 503 on every webhook.
     mockFetchResponses({
       'GET /v1/webhooks': () => ({ body: { data: [] } }),
       'POST /v1/webhooks': () => ({ status: 201, body: { data: {
@@ -509,8 +461,6 @@ describe('ensureWebhookSubscription — best-effort secret persistence', () => {
         persistSecret: async () => { throw accessDenied; },
       });
       expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('qURL webhook secret persistence failed'));
-      // Critical: NOT error-level. AccessDenied is the "expected
-      // failure mode" — alarm-tier-distinction documented in runbook.
       expect(errorSpy).not.toHaveBeenCalledWith(expect.stringContaining('qURL webhook secret persistence failed'));
     } finally {
       warnSpy.mockRestore();
@@ -544,10 +494,6 @@ describe('ensureWebhookSubscription — best-effort secret persistence', () => {
 });
 
 describe('ensureWebhookSubscription — description length defense', () => {
-  // Slice lives at the wire boundary (createSubscription) so future
-  // callers don't have to remember the 200-char cap. Defense against
-  // a hypothetical future qurl-service-side length-cap 4xx that
-  // would otherwise infinite-loop on retry-create.
   it('clips description to 200 chars at the wire boundary regardless of caller input', async () => {
     let sentDescription = null;
     const longDescription = 'x'.repeat(500);
@@ -598,10 +544,6 @@ describe('ensureWebhookSubscription — wire-contract pins', () => {
   });
 
   it('events list is the exact ["qurl.accessed"] string (regression guard)', async () => {
-    // The qurl-service spec lists multiple event types; we ONLY want
-    // qurl.accessed. If a future change accidentally subscribes to
-    // qurl.created / .revoked etc., the receiver would ignore those
-    // with 200 — but the metric volume + log noise would grow.
     let body = null;
     mockFetchResponses({
       'GET /v1/webhooks': () => ({ body: { data: [] } }),
@@ -616,9 +558,6 @@ describe('ensureWebhookSubscription — wire-contract pins', () => {
 });
 
 describe('ensureWebhookSubscription — duplicate-subscription recovery', () => {
-  // Cold-bootstrap with N replicas + empty SSM creates N duplicate subs
-  // (each replica POSTs concurrently). This path tests RECOVERY on the
-  // next boot: pick deterministic survivor, DELETE others, continue.
   it('deletes duplicates and keeps oldest-by-created_at survivor (force-rotates the survivor)', async () => {
     const deletedIds = [];
     mockFetchResponses({
@@ -653,9 +592,6 @@ describe('ensureWebhookSubscription — duplicate-subscription recovery', () => 
   });
 
   it('treats DELETE 404 as success (concurrent dedupe race)', async () => {
-    // Two replicas independently picking the same survivor + DELETEing
-    // the same losers means the second DELETE on each loser hits 404.
-    // The dedupe path must NOT crash on this.
     mockFetchResponses({
       'GET /v1/webhooks': () => ({ body: { data: [
         { webhook_id: 'wh_a', url: BASE_OPTS.bridgeUrl, events: ['qurl.accessed', 'qurl.expired'] },
@@ -670,12 +606,6 @@ describe('ensureWebhookSubscription — duplicate-subscription recovery', () => 
   });
 
   it('force-rotates the survivor even when initialSecret is real (closes SSM↔survivor mismatch)', async () => {
-    // Cold-bootstrap created N subs each with distinct server-generated
-    // secrets. The SSM-persisted secret (last-write-wins) almost
-    // certainly belongs to a replica whose sub we just DELETEd. If we
-    // took the REUSE path with initialSecret, the receiver would 401
-    // every inbound forever (survivor's secret is unknown). Force-
-    // rotate produces a known-good secret tied to the survivor.
     let rotated = false;
     mockFetchResponses({
       'GET /v1/webhooks': () => ({ body: { data: [
@@ -711,10 +641,6 @@ describe('ensureWebhookSubscription — duplicate-subscription recovery', () => 
   });
 
   it('rotation does NOT fire when a non-404 DELETE rejects (Promise.all sequencing)', async () => {
-    // The rotate-after-dedupe path runs `await Promise.all(...DELETEs)`
-    // before `rotateSecret`. A rejection there must short-circuit the
-    // rotate so we don't ship a rotated secret while siblings might
-    // still be in-flight or partially failed. Pin the invariant.
     let rotateHit = false;
     mockFetchResponses({
       'GET /v1/webhooks': () => ({ body: { data: [
@@ -731,11 +657,6 @@ describe('ensureWebhookSubscription — duplicate-subscription recovery', () => 
     expect(rotateHit).toBe(false);
   });
 });
-
-// Real-config setter tests removed: webhook-registrar Lambda is the
-// sole writer of QURL_WEBHOOK_SECRET (via SSM). The bot reads it
-// once at boot from env and never mutates it in-process, so there
-// is no setter seam to pin.
 
 describe('ensureWebhookSubscription — multi-subscription scan', () => {
   it('matches the correct sub when several non-matching ones share the page', async () => {
@@ -754,13 +675,6 @@ describe('ensureWebhookSubscription — multi-subscription scan', () => {
 
 describe('ensureWebhookSubscription — rotation survives PATCH failure', () => {
   it('returns the rotated secret even when the events PATCH fails', async () => {
-    // Behavior pin: if PATCH ran before rotate and threw, the bot
-    // would never get a usable secret on this boot — receiver stays
-    // unconfigured and 503s every webhook. Asserting the rotated
-    // secret made it out implicitly proves rotation ran (and
-    // succeeded) despite the PATCH 500. Doesn't pin call order, so
-    // a future refactor that makes rotation+PATCH independent still
-    // passes.
     mockFetchResponses({
       'GET /v1/webhooks': () => ({ body: { data: [{
         webhook_id: 'wh_existing', url: BASE_OPTS.bridgeUrl, events: ['qurl.created'], // drift
@@ -792,8 +706,6 @@ describe('ensureWebhookSubscription — events drift edge cases', () => {
 
 describe('ensureWebhookSubscription — pagination cap', () => {
   it('throws when the 50-page cap is hit (refuses to fall through to create-fresh)', async () => {
-    // Silently returning null + creating-fresh would compound duplicates
-    // on every restart with a stuck cursor.
     global.fetch = jest.fn(async () => ({
       ok: true, status: 200,
       text: async () => JSON.stringify({
@@ -807,20 +719,12 @@ describe('ensureWebhookSubscription — pagination cap', () => {
 
 describe('ensureWebhookSubscription — fetch timeout', () => {
   it('surfaces AbortError when qurl-service hangs past the 10s deadline', async () => {
-    // The registrar relies on AbortSignal.timeout(10_000) — verify the
-    // surface is an error, not a hung promise. Replaces the awaited
-    // fetch with one that throws an AbortError synchronously to avoid
-    // real-time waits in tests.
     const abortErr = new Error('The operation was aborted');
     abortErr.name = 'AbortError';
     global.fetch = jest.fn(async () => { throw abortErr; });
     await expect(ensureWebhookSubscription(BASE_OPTS)).rejects.toThrow(/aborted/i);
   });
   it('attaches `op` to pre-response fetch errors so oncall greps catch network failures too', async () => {
-    // callQurlService used to surface only resp-status errors with op;
-    // pre-response failures (AbortError, DNS, TLS) lacked the op field,
-    // so a "filter logs by op=GET /v1/webhooks" search silently missed
-    // network errors. Now op is attached at the catch site.
     const abortErr = new Error('The operation was aborted');
     abortErr.name = 'AbortError';
     global.fetch = jest.fn(async () => { throw abortErr; });
@@ -862,12 +766,9 @@ describe('redactSecret — recursive scrubbing', () => {
     expect(out).toEqual({ a: 1, b: 'x', c: null, d: false });
   });
   it('fail-closes at depth cap with [TRUNCATED] (deeply-wrapped secret cannot survive)', () => {
-    // Build a body with a `secret` field deeper than REDACT_MAX_DEPTH (8).
     let nested = { secret: 'whsec_deeply_nested' };
     for (let i = 0; i < 10; i++) nested = { wrap: nested };
     const out = redactSecret(nested);
-    // Walk to the truncation point and check the subtree was replaced
-    // by '[TRUNCATED]' instead of the original {secret: ...} subtree.
     const json = JSON.stringify(out);
     expect(json).not.toContain('whsec_deeply_nested');
     expect(json).toContain('[TRUNCATED]');
@@ -876,10 +777,6 @@ describe('redactSecret — recursive scrubbing', () => {
 
 describe('buildSsmPersistSecret — abortSignal placement (regression guard for cr round-8)', () => {
   it('passes abortSignal on send\'s SECOND arg, not on the Command constructor (constructor would silently drop it)', async () => {
-    // The bug round-8 caught: putting {abortSignal: ...} as the second
-    // arg to `new PutParameterCommand({...}, ...)` is silently dropped
-    // because the Command takes only `input`. Has to land on
-    // `client.send(cmd, { abortSignal })`.
     let sendCalls = [];
     const fakeSsmClient = { send: jest.fn(async (cmd, opts) => { sendCalls.push({ cmd, opts }); }) };
     class FakePutParameterCommand {
@@ -898,8 +795,6 @@ describe('buildSsmPersistSecret — abortSignal placement (regression guard for 
       Value: 'whsec_new_value',
       Overwrite: true,
     });
-    // Critical assertion — abortSignal lives on the send-call options,
-    // NOT swallowed by the Command constructor.
     expect(sendCalls[0].opts).toEqual({ abortSignal: expect.any(AbortSignal) });
     expect(sendCalls[0].opts.abortSignal.aborted).toBe(false);
   });
@@ -928,8 +823,6 @@ describe('pickSurvivor — deterministic across replicas', () => {
     expect(winner.webhook_id).toBe('wh_aaa');
   });
   it('prefers the row with a timestamp over the row without (mixed case)', () => {
-    // Asymmetric responses (one row has created_at, the other doesn't)
-    // should resolve to the timestamped row regardless of input order.
     const winner1 = pickSurvivor([
       { webhook_id: 'wh_zzz', created_at: '2026-05-19T10:00:00Z' },
       { webhook_id: 'wh_aaa' /* no timestamp */ },
@@ -944,11 +837,6 @@ describe('pickSurvivor — deterministic across replicas', () => {
 });
 
 describe('ensureWebhookSubscription — return-shape pin (Lambda persists then bot reads from SSM)', () => {
-  // Lambda flow: ensureWebhookSubscription returns a secret →
-  // persistSecret callback writes it to SSM → bot reads it from env
-  // at next deploy. This test pins the return-shape contract that the
-  // Lambda relies on: the secret in result.secret is exactly what the
-  // bot will end up verifying webhooks against.
   it('the secret the registrar returns matches the value the persistSecret callback receives', async () => {
     mockFetchResponses({
       'GET /v1/webhooks': () => ({ body: { data: [] } }),
@@ -967,11 +855,6 @@ describe('ensureWebhookSubscription — return-shape pin (Lambda persists then b
 });
 
 describe('ensureWebhookSubscription — ownerId return field (per-guild receiver routing)', () => {
-  // guild-webhook-link.js consumes result.ownerId to populate the
-  // in-process secret cache. If qurl-service drops `owner_id` from a
-  // response shape, every BYOK guild's first link rolls back with
-  // OWNER_MISSING — pin the field across all three branches so the
-  // upstream contract regression fails loudly here.
   it('forwards owner_id from a POST /v1/webhooks created response', async () => {
     mockFetchResponses({
       'GET /v1/webhooks': () => ({ body: { data: [] } }),
@@ -1018,8 +901,6 @@ describe('ensureWebhookSubscription — ownerId return field (per-guild receiver
   });
 
   it('leaks undefined when a future contract drift drops owner_id (caller must guard)', async () => {
-    // The guild-webhook-link OWNER_MISSING rollback catches this.
-    // Pinning the leakage here makes a contract regression LOUD.
     mockFetchResponses({
       'GET /v1/webhooks': () => ({ body: { data: [] } }),
       'POST /v1/webhooks': () => ({ status: 201, body: { data: {
@@ -1033,10 +914,828 @@ describe('ensureWebhookSubscription — ownerId return field (per-guild receiver
   });
 });
 
-// Pinned to keep webhook-subscriptions.js::discoverDefaultOwnerId
-// from breaking silently if a future registrar refactor changes
-// callQurlService's signature. The external caller relies on
-// (method, path, apiEndpoint, apiKey) + response = parsed-JSON body.
+describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host sweep)', () => {
+  const NEW_URL = 'https://discord.connector.layerv.xyz/webhooks/qurl';
+  const OLD_URL = 'https://discord.layerv.xyz/webhooks/qurl';
+  const BOT_DESC = 'Discord bot view counter (region=us-east-2, env=sandbox)';
+  const BOT_OPTS = { ...BASE_OPTS, bridgeUrl: NEW_URL, description: BOT_DESC };
+
+  function deadOrphan(overrides = {}) {
+    return {
+      webhook_id: 'wh_orphan',
+      url: OLD_URL,
+      description: BOT_DESC,
+      events: ['qurl.accessed', 'qurl.expired'],
+      failure_count: 1475,
+      last_delivery_success: false,
+      ...overrides,
+    };
+  }
+
+  it('deletes a cross-host orphan with matching description + dead liveness before creating fresh at the new URL', async () => {
+    let orphanDeleted = false;
+    let createCalled = false;
+    mockFetchResponses({
+      'GET /v1/webhooks': () => ({ body: { data: [deadOrphan()] } }),
+      'DELETE /v1/webhooks/wh_orphan': () => { orphanDeleted = true; return { status: 204, body: '' }; },
+      'POST /v1/webhooks': () => {
+        createCalled = true;
+        return { status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new' } } };
+      },
+    });
+    const result = await ensureWebhookSubscription(BOT_OPTS);
+    expect(orphanDeleted).toBe(true);
+    expect(createCalled).toBe(true);
+    expect(result.action).toBe('created');
+    expect(result.webhookId).toBe('wh_new');
+  });
+
+  it('does NOT delete a cross-host sub with a DIFFERENT description (sibling-service safety)', async () => {
+    let connectorDeleted = false;
+    let createCalled = false;
+    mockFetchResponses({
+      'GET /v1/webhooks': () => ({ body: { data: [
+        {
+          webhook_id: 'wh_connector',
+          url: 'https://s3-connector.layerv.xyz/webhooks/qurl', // different host, same path
+          description: 'qurl-s3-connector resource.closed subscription',
+          events: ['qurl.accessed'],
+          failure_count: 0,
+          last_delivery_success: true,
+        },
+      ] } }),
+      'DELETE /v1/webhooks/wh_connector': () => { connectorDeleted = true; return { status: 204, body: '' }; },
+      'POST /v1/webhooks': () => {
+        createCalled = true;
+        return { status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new' } } };
+      },
+    });
+    const result = await ensureWebhookSubscription(BOT_OPTS);
+    expect(connectorDeleted).toBe(false); // critical: connector sub untouched
+    expect(createCalled).toBe(true);
+    expect(result.action).toBe('created');
+  });
+
+  it('sweeps a stale cross-host orphan even when the reuse path runs at the new URL (retry-on-next-boot)', async () => {
+    let orphanDeleted = false;
+    let secretEndpointHit = false;
+    mockFetchResponses({
+      'GET /v1/webhooks': () => ({ body: { data: [
+        {
+          webhook_id: 'wh_current',
+          url: NEW_URL,
+          description: BOT_DESC,
+          events: ['qurl.accessed', 'qurl.expired'],
+          owner_id: 'auth0|bot',
+        },
+        deadOrphan({ webhook_id: 'wh_stale_orphan' }),
+      ] } }),
+      'DELETE /v1/webhooks/wh_stale_orphan': () => { orphanDeleted = true; return { status: 204, body: '' }; },
+      'POST /v1/webhooks/wh_current/secret': () => {
+        secretEndpointHit = true;
+        return { body: { data: { webhook_id: 'wh_current', secret: 'whsec_rot' } } };
+      },
+    });
+    const result = await ensureWebhookSubscription(BOT_OPTS);
+    expect(orphanDeleted).toBe(true); // sweep ran despite existing sub at new URL
+    expect(secretEndpointHit).toBe(true); // normal rotate path also ran
+    expect(result.webhookId).toBe('wh_current');
+  });
+
+  it('does NOT delete a HEALTHY cross-host sub (liveness gate protects siblings whose last delivery succeeded)', async () => {
+    let deleted = false;
+    mockFetchResponses({
+      'GET /v1/webhooks': () => ({ body: { data: [
+        {
+          webhook_id: 'wh_other_region',
+          url: 'https://discord.eu-central-1.layerv.xyz/webhooks/qurl', // different host, same path, same description prefix
+          description: 'Discord bot view counter (region=eu-central-1, env=sandbox)',
+          events: ['qurl.accessed', 'qurl.expired'],
+          failure_count: 0,
+          last_delivery_success: true, // healthy
+        },
+      ] } }),
+      'DELETE /v1/webhooks/wh_other_region': () => { deleted = true; return { status: 204, body: '' }; },
+      'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new' } } }),
+    });
+    const result = await ensureWebhookSubscription(BOT_OPTS);
+    expect(deleted).toBe(false); // critical: healthy active-active sibling untouched
+    expect(result.action).toBe('created');
+  });
+
+  it.each([
+    ['null', null],
+    ['undefined', undefined],
+    ['missing entirely (field omitted)', '__MISSING__'],
+  ])('does NOT delete a cross-host sub with last_delivery_success=%s (presumed-alive)', async (_label, livenessValue) => {
+    let deleted = false;
+    const sub = {
+      webhook_id: 'wh_no_deliveries_yet',
+      url: 'https://otherhost.example/webhooks/qurl',
+      description: BOT_DESC,
+      events: ['qurl.accessed'],
+      failure_count: 0,
+    };
+    if (livenessValue !== '__MISSING__') sub.last_delivery_success = livenessValue;
+    mockFetchResponses({
+      'GET /v1/webhooks': () => ({ body: { data: [sub] } }),
+      'DELETE /v1/webhooks/wh_no_deliveries_yet': () => { deleted = true; return { status: 204, body: '' }; },
+      'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new' } } }),
+    });
+    await ensureWebhookSubscription(BOT_OPTS);
+    expect(deleted).toBe(false);
+  });
+
+  it('does NOT delete a description that matches the prefix without the " (" boundary (no over-match)', async () => {
+    let deleted = false;
+    mockFetchResponses({
+      'GET /v1/webhooks': () => ({ body: { data: [
+        {
+          webhook_id: 'wh_overmatch',
+          url: OLD_URL,
+          description: 'Discord bot view counterX (env=sandbox)',
+          events: ['qurl.accessed'],
+          failure_count: 100,
+          last_delivery_success: false,
+        },
+      ] } }),
+      'DELETE /v1/webhooks/wh_overmatch': () => { deleted = true; return { status: 204, body: '' }; },
+      'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new' } } }),
+    });
+    await ensureWebhookSubscription(BOT_OPTS);
+    expect(deleted).toBe(false);
+  });
+
+  it('continues with create when a DELETE fails (5xx) so the bot still registers; next boot retries the orphan', async () => {
+    const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    let createCalled = false;
+    try {
+      mockFetchResponses({
+        'GET /v1/webhooks': () => ({ body: { data: [
+          deadOrphan({ webhook_id: 'wh_orphan_5xx' }),
+        ] } }),
+        'DELETE /v1/webhooks/wh_orphan_5xx': () => ({ status: 503, body: { error: 'transient' } }),
+        'POST /v1/webhooks': () => {
+          createCalled = true;
+          return { status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new' } } };
+        },
+      });
+      const result = await ensureWebhookSubscription(BOT_OPTS);
+      expect(createCalled).toBe(true);
+      expect(result.action).toBe('created');
+      expect(result.webhookId).toBe('wh_new');
+      expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('URL-migration orphan delete failed'));
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  it('retries a previously-failed orphan DELETE on the FOLLOWING boot (sweep is not gated on create-fresh)', async () => {
+    let orphanDeletedOnBoot2 = false;
+    mockFetchResponses({
+      'GET /v1/webhooks': () => ({ body: { data: [
+        { webhook_id: 'wh_new', url: NEW_URL, description: BOT_DESC, events: ['qurl.accessed', 'qurl.expired'], owner_id: 'auth0|bot' },
+        deadOrphan({ webhook_id: 'wh_orphan_retry' }),
+      ] } }),
+      'DELETE /v1/webhooks/wh_orphan_retry': () => { orphanDeletedOnBoot2 = true; return { status: 204, body: '' }; },
+    });
+    const result = await ensureWebhookSubscription({ ...BOT_OPTS, initialSecret: 'whsec_known' });
+    expect(orphanDeletedOnBoot2).toBe(true);
+    expect(result.action).toBe('reused');
+  });
+
+  it('treats DELETE 404 as success AND distinguishes the log line (concurrent cleanup by another invocation)', async () => {
+    const logSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      mockFetchResponses({
+        'GET /v1/webhooks': () => ({ body: { data: [
+          deadOrphan({ webhook_id: 'wh_already_gone' }),
+        ] } }),
+        'DELETE /v1/webhooks/wh_already_gone': () => ({ status: 404, body: { error: 'not found' } }),
+        'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new' } } }),
+      });
+      const result = await ensureWebhookSubscription(BOT_OPTS);
+      expect(result.action).toBe('created');
+      expect(result.webhookId).toBe('wh_new');
+      const lines = logSpy.mock.calls.map(c => c[0]).filter(l => typeof l === 'string');
+      const absentLine = lines.find(l => l.includes('URL-migration orphan already absent'));
+      const deletedLine = lines.find(l => l.includes('URL-migration orphan deleted'));
+      expect(absentLine).toBeDefined();
+      expect(deletedLine).toBeUndefined(); // critical: no false attribution
+    } finally {
+      logSpy.mockRestore();
+    }
+  });
+
+  it('logs a persistent 4xx DELETE failure at WARN exactly once per (webhook_id, status) per process', async () => {
+    const { _resetUrlMigrationOrphanDeleteSuppressionCache } = _internals;
+    _resetUrlMigrationOrphanDeleteSuppressionCache();
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    let deleteAttempts = 0;
+    try {
+      mockFetchResponses({
+        'GET /v1/webhooks': () => ({ body: { data: [
+          deadOrphan({ webhook_id: 'wh_persistent_403' }),
+        ] } }),
+        'DELETE /v1/webhooks/wh_persistent_403': () => {
+          deleteAttempts += 1;
+          return { status: 403, body: { error: 'forbidden' } };
+        },
+        'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new' } } }),
+      });
+      await ensureWebhookSubscription(BOT_OPTS);
+      await ensureWebhookSubscription(BOT_OPTS);
+      expect(deleteAttempts).toBe(2); // DELETE attempted both times
+      const warnLines = warnSpy.mock.calls.map(c => c[0]).filter(l => typeof l === 'string' && l.includes('URL-migration orphan delete failed with persistent 4xx'));
+      const errorLines = errorSpy.mock.calls.map(c => c[0]).filter(l => typeof l === 'string' && l.includes('URL-migration orphan delete failed'));
+      expect(warnLines).toHaveLength(1); // WARN logged exactly once
+      expect(errorLines).toHaveLength(0); // never logged at ERROR
+    } finally {
+      warnSpy.mockRestore();
+      errorSpy.mockRestore();
+      _resetUrlMigrationOrphanDeleteSuppressionCache();
+    }
+  });
+
+  it('routes 429 DELETE failures to the transient/ERROR branch (rate-limit is NOT a persistent client error)', async () => {
+    const { _resetUrlMigrationOrphanDeleteSuppressionCache } = _internals;
+    _resetUrlMigrationOrphanDeleteSuppressionCache();
+    const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      mockFetchResponses({
+        'GET /v1/webhooks': () => ({ body: { data: [
+          deadOrphan({ webhook_id: 'wh_persistent_429' }),
+        ] } }),
+        'DELETE /v1/webhooks/wh_persistent_429': () => ({ status: 429, body: { error: 'rate-limited' } }),
+        'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new' } } }),
+      });
+      await ensureWebhookSubscription(BOT_OPTS);
+      await ensureWebhookSubscription(BOT_OPTS);
+      const errorLines = errorSpy.mock.calls.map(c => c[0]).filter(l => typeof l === 'string' && l.includes('URL-migration orphan delete failed (continuing'));
+      const warnLines = warnSpy.mock.calls.map(c => c[0]).filter(l => typeof l === 'string' && l.includes('URL-migration orphan delete failed with persistent 4xx'));
+      expect(errorLines).toHaveLength(2); // 429 → ERROR on each call (transient)
+      expect(warnLines).toHaveLength(0); // never suppressed at WARN
+    } finally {
+      errorSpy.mockRestore();
+      warnSpy.mockRestore();
+      _resetUrlMigrationOrphanDeleteSuppressionCache();
+    }
+  });
+
+  it('logs a 5xx DELETE failure at ERROR on every invocation (transient — repeating IS the signal)', async () => {
+    const { _resetUrlMigrationOrphanDeleteSuppressionCache } = _internals;
+    _resetUrlMigrationOrphanDeleteSuppressionCache();
+    const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      mockFetchResponses({
+        'GET /v1/webhooks': () => ({ body: { data: [
+          deadOrphan({ webhook_id: 'wh_persistent_503' }),
+        ] } }),
+        'DELETE /v1/webhooks/wh_persistent_503': () => ({ status: 503, body: { error: 'transient' } }),
+        'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new' } } }),
+      });
+      await ensureWebhookSubscription(BOT_OPTS);
+      await ensureWebhookSubscription(BOT_OPTS);
+      const errorLines = errorSpy.mock.calls.map(c => c[0]).filter(l => typeof l === 'string' && l.includes('URL-migration orphan delete failed (continuing'));
+      const warnLines = warnSpy.mock.calls.map(c => c[0]).filter(l => typeof l === 'string' && l.includes('URL-migration orphan delete failed with persistent 4xx'));
+      expect(errorLines).toHaveLength(2); // ERROR on EACH invocation
+      expect(warnLines).toHaveLength(0); // never at WARN
+    } finally {
+      errorSpy.mockRestore();
+      warnSpy.mockRestore();
+      _resetUrlMigrationOrphanDeleteSuppressionCache();
+    }
+  });
+
+  it('does NOT classify same-hostname different-port as cross-host (port-insensitive comparison)', async () => {
+    let deleted = false;
+    mockFetchResponses({
+      'GET /v1/webhooks': () => ({ body: { data: [
+        {
+          webhook_id: 'wh_same_host_diff_port',
+          url: 'https://discord.connector.layerv.xyz:8443/webhooks/qurl',
+          description: BOT_DESC,
+          events: ['qurl.accessed'],
+          failure_count: 9999,
+          last_delivery_success: false,
+        },
+      ] } }),
+      'DELETE /v1/webhooks/wh_same_host_diff_port': () => { deleted = true; return { status: 204, body: '' }; },
+      'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new' } } }),
+    });
+    await ensureWebhookSubscription(BOT_OPTS);
+    expect(deleted).toBe(false);
+  });
+
+  it('does NOT touch same-host subs at a DIFFERENT path (path filter)', async () => {
+    let deleted = false;
+    mockFetchResponses({
+      'GET /v1/webhooks': () => ({ body: { data: [
+        {
+          webhook_id: 'wh_other_path',
+          url: 'https://example.test/webhooks/something-else',
+          description: BOT_DESC, // same prefix
+          events: ['qurl.accessed'],
+          failure_count: 100,
+          last_delivery_success: false,
+        },
+      ] } }),
+      'DELETE /v1/webhooks/wh_other_path': () => { deleted = true; return { status: 204, body: '' }; },
+      'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new' } } }),
+    });
+    const result = await ensureWebhookSubscription(BOT_OPTS);
+    expect(deleted).toBe(false);
+    expect(result.action).toBe('created');
+  });
+
+  it('logs each deletion at INFO with old_url + webhook_id + description + failure_count + last_delivery_success', async () => {
+    const logSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      mockFetchResponses({
+        'GET /v1/webhooks': () => ({ body: { data: [
+          deadOrphan({ webhook_id: 'wh_orphan_log', failure_count: 99 }),
+        ] } }),
+        'DELETE /v1/webhooks/wh_orphan_log': () => ({ status: 204, body: '' }),
+        'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new' } } }),
+      });
+      await ensureWebhookSubscription(BOT_OPTS);
+      const orphanLine = logSpy.mock.calls
+        .map(c => c[0])
+        .find(line => typeof line === 'string' && line.includes('URL-migration orphan deleted'));
+      expect(orphanLine).toBeDefined();
+      const jsonStart = orphanLine.indexOf('{');
+      const meta = JSON.parse(orphanLine.slice(jsonStart));
+      expect(meta).toMatchObject({
+        old_url: OLD_URL,
+        webhook_id: 'wh_orphan_log',
+        description: BOT_DESC,
+        failure_count: 99,
+        last_delivery_success: false,
+      });
+    } finally {
+      logSpy.mockRestore();
+    }
+  });
+
+  it('paginates through orphan candidates (cursor walk on the sweep list, same as findExistingSubscriptions)', async () => {
+    let deletedIds = [];
+    mockFetchResponses({
+      'GET /v1/webhooks?limit=100': () => ({ body: {
+        data: [{ webhook_id: 'wh_unrelated', url: 'https://other.example/hook', description: 'other service', events: [] }],
+        meta: { next_cursor: 'page2', has_more: true },
+      } }),
+      'GET /v1/webhooks?cursor=page2&limit=100': () => ({ body: {
+        data: [deadOrphan({ webhook_id: 'wh_orphan_paged' })],
+        meta: { next_cursor: '', has_more: false },
+      } }),
+      'DELETE /v1/webhooks/wh_orphan_paged': () => { deletedIds.push('wh_orphan_paged'); return { status: 204, body: '' }; },
+      'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new' } } }),
+    });
+    const result = await ensureWebhookSubscription(BOT_OPTS);
+    expect(deletedIds).toEqual(['wh_orphan_paged']);
+    expect(result.action).toBe('created');
+  });
+
+  it('deletes MULTIPLE cross-host orphans (multi-rename history) before create', async () => {
+    const deletedIds = [];
+    mockFetchResponses({
+      'GET /v1/webhooks': () => ({ body: { data: [
+        deadOrphan({ webhook_id: 'wh_orphan_a', url: 'https://oldhost-a.example/webhooks/qurl' }),
+        deadOrphan({ webhook_id: 'wh_orphan_b', url: 'https://oldhost-b.example/webhooks/qurl' }),
+      ] } }),
+      'DELETE /v1/webhooks/wh_orphan_a': () => { deletedIds.push('wh_orphan_a'); return { status: 204, body: '' }; },
+      'DELETE /v1/webhooks/wh_orphan_b': () => { deletedIds.push('wh_orphan_b'); return { status: 204, body: '' }; },
+      'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new' } } }),
+    });
+    const result = await ensureWebhookSubscription(BOT_OPTS);
+    expect(deletedIds.sort()).toEqual(['wh_orphan_a', 'wh_orphan_b']);
+    expect(result.action).toBe('created');
+  });
+
+  it('a single DELETE 5xx does not prevent the OTHER orphan from being deleted in the same sweep', async () => {
+    const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    const deletedIds = [];
+    try {
+      mockFetchResponses({
+        'GET /v1/webhooks': () => ({ body: { data: [
+          deadOrphan({ webhook_id: 'wh_5xx', url: 'https://oldhost-a.example/webhooks/qurl' }),
+          deadOrphan({ webhook_id: 'wh_ok',  url: 'https://oldhost-b.example/webhooks/qurl' }),
+        ] } }),
+        'DELETE /v1/webhooks/wh_5xx': () => ({ status: 503, body: { error: 'transient' } }),
+        'DELETE /v1/webhooks/wh_ok':  () => { deletedIds.push('wh_ok');  return { status: 204, body: '' }; },
+        'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new' } } }),
+      });
+      const result = await ensureWebhookSubscription(BOT_OPTS);
+      expect(deletedIds).toEqual(['wh_ok']);
+      expect(result.action).toBe('created');
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  it('does NOT delete a cross-host sub with last_delivery_success=false but failure_count below the transient-failure floor', async () => {
+    let deleted = false;
+    mockFetchResponses({
+      'GET /v1/webhooks': () => ({ body: { data: [
+        {
+          webhook_id: 'wh_transient',
+          url: 'https://discord.eu-central-1.layerv.xyz/webhooks/qurl',
+          description: BOT_DESC,
+          events: ['qurl.accessed', 'qurl.expired'],
+          failure_count: 1, // below MIN_FAILURES (30)
+          last_delivery_success: false,
+        },
+      ] } }),
+      'DELETE /v1/webhooks/wh_transient': () => { deleted = true; return { status: 204, body: '' }; },
+      'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new' } } }),
+    });
+    await ensureWebhookSubscription(BOT_OPTS);
+    expect(deleted).toBe(false);
+  });
+
+  it('does NOT delete when failure_count is negative (fails closed)', async () => {
+    let deleted = false;
+    mockFetchResponses({
+      'GET /v1/webhooks': () => ({ body: { data: [
+        {
+          webhook_id: 'wh_negative',
+          url: OLD_URL,
+          description: BOT_DESC,
+          events: ['qurl.accessed', 'qurl.expired'],
+          last_delivery_success: false,
+          failure_count: -1,
+        },
+      ] } }),
+      'DELETE /v1/webhooks/wh_negative': () => { deleted = true; return { status: 204, body: '' }; },
+      'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new' } } }),
+    });
+    await ensureWebhookSubscription(BOT_OPTS);
+    expect(deleted).toBe(false);
+  });
+
+  it('does NOT delete when failure_count is missing or non-numeric (fails closed on schema drift)', async () => {
+    let deleted = false;
+    mockFetchResponses({
+      'GET /v1/webhooks': () => ({ body: { data: [
+        {
+          webhook_id: 'wh_no_count',
+          url: OLD_URL,
+          description: BOT_DESC,
+          events: ['qurl.accessed', 'qurl.expired'],
+          last_delivery_success: false,
+        },
+      ] } }),
+      'DELETE /v1/webhooks/wh_no_count': () => { deleted = true; return { status: 204, body: '' }; },
+      'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new' } } }),
+    });
+    await ensureWebhookSubscription(BOT_OPTS);
+    expect(deleted).toBe(false);
+  });
+
+  it('logs the liveness-gated near-miss count for CloudWatch observability', async () => {
+    const { _resetUrlMigrationOrphanDeleteSuppressionCache } = _internals;
+    _resetUrlMigrationOrphanDeleteSuppressionCache();
+    const logSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      mockFetchResponses({
+        'GET /v1/webhooks': () => ({ body: { data: [
+          {
+            webhook_id: 'wh_healthy',
+            url: 'https://discord.eu-central-1.layerv.xyz/webhooks/qurl',
+            description: BOT_DESC,
+            events: ['qurl.accessed'],
+            failure_count: 0,
+            last_delivery_success: true,
+          },
+          {
+            webhook_id: 'wh_transient',
+            url: 'https://discord.eu-west-1.layerv.xyz/webhooks/qurl',
+            description: BOT_DESC,
+            events: ['qurl.accessed'],
+            failure_count: 1,
+            last_delivery_success: false,
+          },
+        ] } }),
+        'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new' } } }),
+      });
+      await ensureWebhookSubscription(BOT_OPTS);
+      const nearMissLine = logSpy.mock.calls
+        .map(c => c[0])
+        .find(line => typeof line === 'string' && line.includes('liveness-gated near-misses'));
+      expect(nearMissLine).toBeDefined();
+      const meta = JSON.parse(nearMissLine.slice(nearMissLine.indexOf('{')));
+      expect(meta).toMatchObject({
+        near_miss_count: 2,
+        orphan_delete_attempts: 0,
+        url: NEW_URL,
+      });
+    } finally {
+      logSpy.mockRestore();
+    }
+  });
+
+  it('dedupes the near-miss log per process (steady-state perpetual near-miss does not spam every boot)', async () => {
+    const { _resetUrlMigrationOrphanDeleteSuppressionCache } = _internals;
+    _resetUrlMigrationOrphanDeleteSuppressionCache();
+    const logSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      mockFetchResponses({
+        'GET /v1/webhooks': () => ({ body: { data: [
+          {
+            webhook_id: 'wh_healthy',
+            url: 'https://discord.eu-central-1.layerv.xyz/webhooks/qurl',
+            description: BOT_DESC,
+            events: ['qurl.accessed'],
+            failure_count: 0,
+            last_delivery_success: true,
+          },
+        ] } }),
+        'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new' } } }),
+      });
+      await ensureWebhookSubscription(BOT_OPTS);
+      await ensureWebhookSubscription(BOT_OPTS);
+      const nearMissLines = logSpy.mock.calls
+        .map(c => c[0])
+        .filter(line => typeof line === 'string' && line.includes('liveness-gated near-misses'));
+      expect(nearMissLines).toHaveLength(1); // suppressed on second invocation
+    } finally {
+      logSpy.mockRestore();
+      _resetUrlMigrationOrphanDeleteSuppressionCache();
+    }
+  });
+
+  it('re-fires the near-miss log when the count CHANGES (something new became sweep-eligible)', async () => {
+    const { _resetUrlMigrationOrphanDeleteSuppressionCache } = _internals;
+    _resetUrlMigrationOrphanDeleteSuppressionCache();
+    const logSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
+    let listCallCount = 0;
+    try {
+      mockFetchResponses({
+        'GET /v1/webhooks': () => {
+          listCallCount += 1;
+          const subs = [{
+            webhook_id: 'wh_healthy_a',
+            url: 'https://discord.eu-central-1.layerv.xyz/webhooks/qurl',
+            description: BOT_DESC,
+            events: ['qurl.accessed'],
+            failure_count: 0,
+            last_delivery_success: true,
+          }];
+          if (listCallCount >= 3) {
+            subs.push({
+              webhook_id: 'wh_healthy_b',
+              url: 'https://discord.eu-west-1.layerv.xyz/webhooks/qurl',
+              description: BOT_DESC,
+              events: ['qurl.accessed'],
+              failure_count: 0,
+              last_delivery_success: true,
+            });
+          }
+          return { body: { data: subs } };
+        },
+        'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new' } } }),
+      });
+      await ensureWebhookSubscription(BOT_OPTS); // count=1, fires
+      await ensureWebhookSubscription(BOT_OPTS); // count=1, suppressed
+      await ensureWebhookSubscription(BOT_OPTS); // count=2, re-fires
+      const nearMissLines = logSpy.mock.calls
+        .map(c => c[0])
+        .filter(line => typeof line === 'string' && line.includes('liveness-gated near-misses'));
+      expect(nearMissLines).toHaveLength(2); // first + third
+    } finally {
+      logSpy.mockRestore();
+      _resetUrlMigrationOrphanDeleteSuppressionCache();
+    }
+  });
+
+  it('does NOT emit the near-miss log when there are zero candidates (steady state, no noise)', async () => {
+    const logSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      mockFetchResponses({
+        'GET /v1/webhooks': () => ({ body: { data: [
+          { webhook_id: 'wh_connector', url: 'https://s3-connector.example/webhooks/qurl', description: 'qurl-s3-connector ...', events: [], failure_count: 0, last_delivery_success: true },
+        ] } }),
+        'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new' } } }),
+      });
+      await ensureWebhookSubscription(BOT_OPTS);
+      const nearMissLine = logSpy.mock.calls
+        .map(c => c[0])
+        .find(line => typeof line === 'string' && line.includes('liveness-gated near-misses'));
+      expect(nearMissLine).toBeUndefined();
+    } finally {
+      logSpy.mockRestore();
+    }
+  });
+
+  it('skips a row with a malformed URL gracefully (urlHost/urlPathname return null)', async () => {
+    let createCalled = false;
+    mockFetchResponses({
+      'GET /v1/webhooks': () => ({ body: { data: [
+        { webhook_id: 'wh_junk_url', url: 'not://a valid url with spaces', description: BOT_DESC, events: [], failure_count: 999, last_delivery_success: false },
+      ] } }),
+      'POST /v1/webhooks': () => { createCalled = true; return { status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new' } } }; },
+    });
+    await ensureWebhookSubscription(BOT_OPTS);
+    expect(createCalled).toBe(true);
+  });
+
+  it('skips the sweep entirely when urlMigrationSweepEnabled=false (hard guard for active-active rollout)', async () => {
+    let deleted = false;
+    let nearMissLogged = false;
+    const logSpy = jest.spyOn(console, 'log').mockImplementation((line) => {
+      if (typeof line === 'string' && line.includes('liveness-gated near-misses')) {
+        nearMissLogged = true;
+      }
+    });
+    try {
+      mockFetchResponses({
+        'GET /v1/webhooks': () => ({ body: { data: [
+          deadOrphan({ webhook_id: 'wh_would_orphan' }),
+          { webhook_id: 'wh_would_near_miss', url: OLD_URL, description: BOT_DESC, events: ['qurl.accessed'], failure_count: 0, last_delivery_success: true },
+        ] } }),
+        'DELETE /v1/webhooks/wh_would_orphan': () => { deleted = true; return { status: 204, body: '' }; },
+        'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new' } } }),
+      });
+      const result = await ensureWebhookSubscription({ ...BOT_OPTS, urlMigrationSweepEnabled: false });
+      expect(deleted).toBe(false); // hard-guard wins
+      expect(nearMissLogged).toBe(false); // no observability noise when disabled
+      expect(result.action).toBe('created');
+    } finally {
+      logSpy.mockRestore();
+    }
+  });
+
+  it('runs the sweep normally when urlMigrationSweepEnabled defaults to true (no opt set)', async () => {
+    let deleted = false;
+    mockFetchResponses({
+      'GET /v1/webhooks': () => ({ body: { data: [deadOrphan()] } }),
+      'DELETE /v1/webhooks/wh_orphan': () => { deleted = true; return { status: 204, body: '' }; },
+      'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new' } } }),
+    });
+    await ensureWebhookSubscription(BOT_OPTS); // no urlMigrationSweepEnabled key
+    expect(deleted).toBe(true);
+  });
+
+  it('skips the sweep when description is empty (cannot derive a safe prefix)', async () => {
+    let deleted = false;
+    mockFetchResponses({
+      'GET /v1/webhooks': () => ({ body: { data: [
+        { webhook_id: 'wh_anything', url: OLD_URL, description: 'literally anything', events: [], failure_count: 1, last_delivery_success: false },
+      ] } }),
+      'DELETE /v1/webhooks/wh_anything': () => { deleted = true; return { status: 204, body: '' }; },
+      'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new' } } }),
+    });
+    await ensureWebhookSubscription({ ...BOT_OPTS, description: '' });
+    expect(deleted).toBe(false);
+  });
+});
+
+describe('isTruthyEnvFlag — env-var normalization (kill-switch semantics)', () => {
+  const { isTruthyEnvFlag } = require('../src/qurl-webhook-registrar');
+  it.each([
+    ['1', true],
+    ['true', true],
+    ['TRUE', true],
+    ['True', true],
+    ['yes', true],
+    ['YES', true],
+    ['on', true],
+    [' on ', true], // whitespace tolerated
+  ])('treats %s as truthy', (value, expected) => {
+    expect(isTruthyEnvFlag(value)).toBe(expected);
+  });
+  it.each([
+    ['0', false],
+    ['false', false],
+    ['FALSE', false],
+    ['no', false],
+    ['off', false],
+    ['', false],
+    ['arbitrary-string', false],
+    [undefined, false],
+    [null, false],
+    [42, false], // non-string
+  ])('treats %s as falsy (no any-non-empty-string footgun)', (value, expected) => {
+    expect(isTruthyEnvFlag(value)).toBe(expected);
+  });
+});
+
+describe('buildUrlMigrationOrphanFilter — predicate factory edge cases', () => {
+  const { buildUrlMigrationOrphanFilter, ORPHAN_FILTER_RESULTS, URL_MIGRATION_ORPHAN_MIN_FAILURES } = _internals;
+
+  it('returns null when descriptionPrefix is empty (sweep disabled)', () => {
+    expect(buildUrlMigrationOrphanFilter({ bridgeUrl: 'https://bot.example/webhooks/qurl', descriptionPrefix: '' })).toBeNull();
+  });
+
+  it('returns null when bridgeUrl is unparseable (sweep disabled, no false-positive deletes possible)', () => {
+    expect(buildUrlMigrationOrphanFilter({ bridgeUrl: 'not://a real url', descriptionPrefix: 'X' })).toBeNull();
+  });
+
+  it('classifies a healthy cross-host candidate as NEAR_MISS_LIVENESS (not MATCH)', () => {
+    const f = buildUrlMigrationOrphanFilter({
+      bridgeUrl: 'https://bot.test.example/webhooks/qurl',
+      descriptionPrefix: 'X',
+    });
+    expect(f({
+      url: 'https://other.test.example/webhooks/qurl',
+      description: 'X (env=prod)',
+      failure_count: 0,
+      last_delivery_success: true,
+    })).toBe(ORPHAN_FILTER_RESULTS.NEAR_MISS_LIVENESS);
+  });
+
+  it('classifies a transient-failure cross-host candidate as NEAR_MISS_LIVENESS (failure_count under threshold)', () => {
+    const f = buildUrlMigrationOrphanFilter({
+      bridgeUrl: 'https://bot.test.example/webhooks/qurl',
+      descriptionPrefix: 'X',
+    });
+    expect(f({
+      url: 'https://other.test.example/webhooks/qurl',
+      description: 'X (env=prod)',
+      failure_count: URL_MIGRATION_ORPHAN_MIN_FAILURES - 1, // just under
+      last_delivery_success: false,
+    })).toBe(ORPHAN_FILTER_RESULTS.NEAR_MISS_LIVENESS);
+  });
+
+  it('classifies a confirmed orphan (cross-host + matching desc + dead + many failures) as MATCH', () => {
+    const f = buildUrlMigrationOrphanFilter({
+      bridgeUrl: 'https://bot.test.example/webhooks/qurl',
+      descriptionPrefix: 'X',
+    });
+    expect(f({
+      url: 'https://other.test.example/webhooks/qurl',
+      description: 'X (env=prod)',
+      failure_count: URL_MIGRATION_ORPHAN_MIN_FAILURES,
+      last_delivery_success: false,
+    })).toBe(ORPHAN_FILTER_RESULTS.MATCH);
+  });
+
+  it('classifies a same-host candidate as NO_MATCH regardless of liveness', () => {
+    const f = buildUrlMigrationOrphanFilter({
+      bridgeUrl: 'https://bot.test.example/webhooks/qurl',
+      descriptionPrefix: 'X',
+    });
+    expect(f({
+      url: 'https://bot.test.example/webhooks/qurl',
+      description: 'X (env=prod)',
+      failure_count: 9999,
+      last_delivery_success: false,
+    })).toBe(ORPHAN_FILTER_RESULTS.NO_MATCH);
+  });
+
+  it.each([
+    ['NaN', NaN],
+    ['Infinity', Infinity],
+    ['-Infinity', -Infinity],
+  ])('classifies a candidate with non-finite failure_count (%s) as NEAR_MISS_LIVENESS (fail-closed against latent fail-open)', (_label, failureCount) => {
+    const f = buildUrlMigrationOrphanFilter({
+      bridgeUrl: 'https://bot.test.example/webhooks/qurl',
+      descriptionPrefix: 'X',
+    });
+    expect(f({
+      url: 'https://other.test.example/webhooks/qurl',
+      description: 'X (env=prod)',
+      failure_count: failureCount,
+      last_delivery_success: false,
+    })).toBe(ORPHAN_FILTER_RESULTS.NEAR_MISS_LIVENESS);
+  });
+
+  it('classifies a sibling-service candidate (non-matching description prefix) as NO_MATCH', () => {
+    const f = buildUrlMigrationOrphanFilter({
+      bridgeUrl: 'https://bot.test.example/webhooks/qurl',
+      descriptionPrefix: 'X',
+    });
+    expect(f({
+      url: 'https://other.test.example/webhooks/qurl',
+      description: 'qurl-s3-connector resource.closed subscription',
+      failure_count: 9999,
+      last_delivery_success: false,
+    })).toBe(ORPHAN_FILTER_RESULTS.NO_MATCH);
+  });
+});
+
+describe('deriveDescriptionPrefix — internal helper (orphan-sweep safety net)', () => {
+  const { deriveDescriptionPrefix } = _internals;
+  it('returns the prefix up to the first " ("', () => {
+    expect(deriveDescriptionPrefix('Discord bot view counter (region=us-east-2, env=sandbox)'))
+      .toBe('Discord bot view counter');
+    expect(deriveDescriptionPrefix('Discord bot view counter (guild=123, via=oauth)'))
+      .toBe('Discord bot view counter');
+  });
+  it('returns the whole string when no " (" is present', () => {
+    expect(deriveDescriptionPrefix('just a flat description')).toBe('just a flat description');
+  });
+  it('returns "" for empty / non-string inputs', () => {
+    expect(deriveDescriptionPrefix('')).toBe('');
+    expect(deriveDescriptionPrefix(undefined)).toBe('');
+    expect(deriveDescriptionPrefix(null)).toBe('');
+    expect(deriveDescriptionPrefix(42)).toBe('');
+  });
+});
+
 describe('callQurlService — exported contract', () => {
   const { callQurlService } = require('../src/qurl-webhook-registrar');
 

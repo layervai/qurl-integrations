@@ -1,15 +1,8 @@
-/**
- * qurl.js tests — the bot's qURL client, now backed by the @layervai/qurl SDK
- * (issue #830). These pin the behaviors qurl.js layers on top of the SDK: the
- * DEPENDENCY_AUTH_FAILURE audit emit on 401/403 (emit-once), error-body
- * redaction, and the 3-attempt retry budget. They also cover getResourceStatus
- * / createOneTimeLink happy paths.
- *
- * The fetch doubles below are richer than the pre-SDK client's: the SDK reads
- * `.json()` for both success and RFC-7807 error envelopes and `.headers.get()`
- * (Retry-After on 429/503), where the old hand-rolled client only read
- * `.text()`. `apiOk` / `apiError` build SDK-parseable doubles.
- */
+
+const {
+  CRID_RESOURCE_ID,
+  PUBLIC_KEY_RESOURCE_ID,
+} = require('./helpers/qurl-fixtures');
 
 jest.mock('../src/logger', () => ({
   info: jest.fn(),
@@ -21,8 +14,6 @@ jest.mock('../src/logger', () => ({
 
 const originalFetch = globalThis.fetch;
 
-// Success Response double. The SDK unwraps the `{ data }` envelope, so wrap the
-// payload the same way the API does. 204 callers pass `data: undefined`.
 function apiOk(status, data) {
   return {
     ok: true,
@@ -32,9 +23,6 @@ function apiOk(status, data) {
   };
 }
 
-// RFC-7807 error Response double. `headers.get` is present because the SDK
-// probes Retry-After on 429/503; `detail` can carry a (fake) sensitive body to
-// prove redaction.
 function apiError(status, { code = 'error', detail } = {}) {
   return {
     ok: false,
@@ -69,43 +57,47 @@ describe('qURL client — getResourceStatus', () => {
     globalThis.fetch = originalFetch;
   });
 
-  it('sends GET request to /v1/qurls/:resourceId and returns data', async () => {
+  it.each([
+    ['public key', PUBLIC_KEY_RESOURCE_ID],
+    ['CRID', CRID_RESOURCE_ID],
+  ])('sends a real-shaped %s ID to GET /v1/qurls/:resourceId', async (_, resourceId) => {
     globalThis.fetch = jest.fn().mockResolvedValue(
       apiOk(200, {
-        resource_id: 'res-123',
+        resource_id: PUBLIC_KEY_RESOURCE_ID,
         qurls: [{ qurl_id: 'q1', use_count: 0, status: 'active', created_at: '2026-01-01' }],
       }),
     );
 
-    const result = await qurl.getResourceStatus('res-123');
+    const result = await qurl.getResourceStatus(resourceId);
 
     expect(globalThis.fetch).toHaveBeenCalledTimes(1);
     const [url, opts] = globalThis.fetch.mock.calls[0];
-    expect(url).toBe('https://api.test.local/v1/qurls/res-123');
+    expect(url).toBe(`https://api.test.local/v1/qurls/${resourceId}`);
     expect(opts.method).toBe('GET');
     expect(opts.headers.Authorization).toBe('Bearer test-api-key');
-    // The bot's User-Agent is preserved across the SDK migration (literal wire
-    // identifier per CLAUDE.md).
     expect(opts.headers['User-Agent']).toBe('qurl-discord-bot/1.0');
-    expect(result.resource_id).toBe('res-123');
-    // The SDK renames the API's wire-format `qurls` field to `access_tokens`.
+    expect(result.resource_id).toBe(PUBLIC_KEY_RESOURCE_ID);
     expect(result.access_tokens).toHaveLength(1);
+  });
+
+  it.each([
+    ['path separators', '../resources/x'],
+    ['an overlong value', 'a'.repeat(1025)],
+  ])('rejects %s before status network work', async (_kind, resourceId) => {
+    globalThis.fetch = jest.fn();
+
+    await expect(qurl.getResourceStatus(resourceId)).rejects
+      .toThrow(/Invalid resource ID format/);
+    expect(globalThis.fetch).not.toHaveBeenCalled();
   });
 
   it('throws on 404 API error (status-only message, body redacted)', async () => {
     globalThis.fetch = jest.fn().mockResolvedValue(apiError(404, { code: 'not_found' }));
 
-    // callQurl re-throws a status-only error (the old wire-contract shape), not
-    // the SDK error whose message would carry the server `detail`.
     await expect(qurl.getResourceStatus('bad-id')).rejects.toThrow(/qURL API GET.*failed.*404/);
   });
 
   it('re-wraps an unexpected 204 to a code-only error (status-0 redaction allowlist)', async () => {
-    // The pre-SDK client returned null here; the SDK treats a body-less GET as a
-    // contract violation (status 0, code `unexpected_response`). That code is
-    // NOT in SAFE_STATUS0_CODES, so callQurl re-wraps it to a code-only message
-    // and the SDK's own text never escapes — exercising the status-0 allowlist's
-    // re-wrap branch (the network-error test below exercises the verbatim branch).
     globalThis.fetch = jest.fn().mockResolvedValue(apiOk(204, undefined));
 
     const thrown = await qurl.getResourceStatus('res-empty').then(
@@ -114,6 +106,115 @@ describe('qURL client — getResourceStatus', () => {
     );
     expect(thrown.message).toMatch(/qURL API GET .*failed \(unexpected_response\)/);
     expect(thrown.message).not.toMatch(/Unexpected 204|No Content/);
+  });
+
+  it.each([
+    ['GET status', resourceId => qurl.getResourceStatus(resourceId)],
+    ['DELETE revoke', resourceId => qurl.deleteLink(resourceId)],
+  ])('rejects an access token passed as a resource ID without logging or echoing it (%s)', async (_label, invoke) => {
+    const logger = require('../src/logger');
+    const accessToken = ['at', 'sensitive-access-marker'].join('_');
+    globalThis.fetch = jest.fn();
+
+    const thrown = await invoke(accessToken).then(
+      () => { throw new Error('expected rejection'); },
+      error => error,
+    );
+
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+    expect(thrown.message).toBe('Invalid resource ID format');
+    expect(thrown.message).not.toContain(accessToken);
+    const allLogs = JSON.stringify([
+      logger.debug.mock.calls,
+      logger.info.mock.calls,
+      logger.warn.mock.calls,
+      logger.error.mock.calls,
+      logger.audit.mock.calls,
+    ]);
+    expect(allLogs).not.toContain(accessToken);
+  });
+
+  it.each([undefined, null, 123, {}, ['r_resource']])(
+    'rejects a non-string resource ID without coercing it (%p)',
+    (resourceId) => {
+      expect(() => qurl.validateResourceId(resourceId)).toThrow('Invalid resource ID format');
+    },
+  );
+
+  it('rejects a malformed resource ID with a generic, non-echoing error', async () => {
+    const logger = require('../src/logger');
+    const malformedId = 'bad/id#sensitive-marker';
+    globalThis.fetch = jest.fn();
+
+    const thrown = await qurl.getResourceStatus(malformedId).catch(error => error);
+
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+    expect(thrown.message).toBe('Invalid resource ID format');
+    expect(thrown.message).not.toContain(malformedId);
+    expect(JSON.stringify([
+      logger.debug.mock.calls,
+      logger.info.mock.calls,
+      logger.warn.mock.calls,
+      logger.error.mock.calls,
+      logger.audit.mock.calls,
+    ])).not.toContain(malformedId);
+  });
+
+  it('does not broaden the access-token check to public IDs beginning with "at"', async () => {
+    const publicId = `at${'a'.repeat(105)}`;
+    globalThis.fetch = jest.fn().mockResolvedValue(apiOk(200, {
+      resource_id: publicId,
+      qurls: [],
+    }));
+
+    await expect(qurl.getResourceStatus(publicId)).resolves.toBeDefined();
+    expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('re-wraps SDK client-validation errors without echoing the rejected identifier', async () => {
+    const logger = require('../src/logger');
+    const { QURLClient, ERROR_CODE_CLIENT_VALIDATION } = require('@layervai/qurl');
+    const unknownCredential = 'ak_sensitive-future-credential';
+    const clientError = Object.assign(
+      new Error(`delete rejected ${unknownCredential}`),
+      { status: 0, code: ERROR_CODE_CLIENT_VALIDATION },
+    );
+    const deleteSpy = jest.spyOn(QURLClient.prototype, 'deleteResource').mockRejectedValueOnce(clientError);
+
+    try {
+      const thrown = await qurl.deleteLink(unknownCredential).catch(error => error);
+
+      expect(thrown.message).toBe(
+        'qURL API DELETE /resources/:resourceId failed (client_validation)',
+      );
+      expect(thrown.message).not.toContain(unknownCredential);
+      expect(JSON.stringify(logger.debug.mock.calls)).not.toContain(unknownCredential);
+    } finally {
+      deleteSpy.mockRestore();
+    }
+  });
+
+  it('re-wraps an uncoded SDK throw without echoing a resource credential', async () => {
+    const logger = require('../src/logger');
+    const { QURLClient } = require('@layervai/qurl');
+    const unknownCredential = 'ak_sensitive-uncoded-credential';
+    const deleteSpy = jest.spyOn(QURLClient.prototype, 'deleteResource')
+      .mockRejectedValueOnce(new TypeError(`delete rejected ${unknownCredential}`));
+
+    try {
+      const thrown = await qurl.deleteLink(unknownCredential).catch(error => error);
+
+      expect(thrown.message).toBe(
+        'qURL API DELETE /resources/:resourceId failed (unknown_error)',
+      );
+      expect(JSON.stringify([
+        thrown.message,
+        logger.debug.mock.calls,
+        logger.audit.mock.calls,
+      ])).not.toContain(unknownCredential);
+    } finally {
+      deleteSpy.mockRestore();
+    }
   });
 });
 
@@ -159,9 +260,10 @@ describe('qURL client — retry + audit behavior', () => {
         dependency: 'qurl_service',
         status: 401,
         method: 'GET',
-        path: '/qurls/res-auth-401',
+        path: '/qurls/:resourceId',
       }),
     );
+    expect(JSON.stringify(logger.debug.mock.calls)).not.toContain('res-auth-401');
   });
 
   it('emits dependency_auth_failure audit event on 403 (Justin #193 §5)', async () => {
@@ -177,9 +279,6 @@ describe('qURL client — retry + audit behavior', () => {
   });
 
   it('does NOT emit dependency_auth_failure on retryable 503', async () => {
-    // Pin that the audit event only fires on auth-class failures —
-    // a transient 503 retry path stays quiet so the alarm count
-    // reflects auth issues specifically, not generic API errors.
     const logger = require('../src/logger');
     const { AUDIT_EVENTS } = require('../src/constants');
     logger.audit.mockClear();
@@ -192,9 +291,6 @@ describe('qURL client — retry + audit behavior', () => {
   });
 
   it('does NOT emit dependency_auth_failure on non-auth 4xx (400, 404, 409)', async () => {
-    // Pin the auth-only scope of the metric. A future match-everything
-    // bug or status-list expansion would otherwise leak generic 4xx into
-    // the auth-failure alarm and dilute its signal.
     const logger = require('../src/logger');
     const { AUDIT_EVENTS } = require('../src/constants');
     for (const status of [400, 404, 409]) {
@@ -209,11 +305,6 @@ describe('qURL client — retry + audit behavior', () => {
   });
 
   it('emits dependency_auth_failure EXACTLY ONCE on 401 (emit-once invariant)', async () => {
-    // EMIT-ONCE INVARIANT: the SDK keeps 401/403 out of its retryable set
-    // ({429,502,503,504}), so the request fails after a single attempt and
-    // the audit emit fires once — not once per attempt. If a future change
-    // made auth-class statuses retryable, this assertion fails: the alarm
-    // count would multiply on a single auth failure.
     const logger = require('../src/logger');
     const { AUDIT_EVENTS } = require('../src/constants');
     logger.audit.mockClear();
@@ -227,15 +318,8 @@ describe('qURL client — retry + audit behavior', () => {
   });
 
   it('redacts the error body end-to-end — neither the log nor the thrown error carries it', async () => {
-    // REDACTION INVARIANT: a qURL error body can echo request headers or tokens,
-    // so the body must never escape this module — not via the breadcrumb, and
-    // not via the thrown error's message (the revoke path logs `err.message`
-    // unconditionally). Plant a token in the body and assert it reaches neither
-    // logger.debug nor the thrown error, while the status still surfaces in both.
     const logger = require('../src/logger');
     logger.debug.mockClear();
-    // A clearly-fake stand-in for a body that echoes a token — not a real key
-    // pattern, so secret scanners don't flag the fixture.
     const SECRET = 'sensitive-body-marker-do-not-log';
     globalThis.fetch = jest.fn().mockResolvedValue(
       apiError(500, { code: 'server_error', detail: `internal failure near ${SECRET}` }),
@@ -245,11 +329,9 @@ describe('qURL client — retry + audit behavior', () => {
       () => { throw new Error('expected rejection'); },
       (e) => e,
     );
-    // Thrown error: status-only, never the body.
     expect(thrown.message).toMatch(/500/);
     expect(thrown.message).not.toContain(SECRET);
 
-    // Breadcrumb: status logged, body never logged.
     const leaked = logger.debug.mock.calls.some((args) => JSON.stringify(args).includes(SECRET));
     expect(leaked).toBe(false);
     const loggedStatus = logger.debug.mock.calls.some(
@@ -259,8 +341,6 @@ describe('qURL client — retry + audit behavior', () => {
   });
 
   it('gives up after 3 attempts on persistent 503', async () => {
-    // 3 total attempts = the budget the pre-SDK client documented
-    // (initial + 2 retries); qurl.js pins the SDK to maxRetries:2.
     globalThis.fetch = jest.fn().mockResolvedValue(apiError(503));
     await expect(qurl.getResourceStatus('res-down')).rejects.toThrow(/503/);
     expect(globalThis.fetch).toHaveBeenCalledTimes(3);
@@ -290,9 +370,6 @@ describe('qURL client — retry + audit behavior', () => {
   });
 
   it('does NOT retry GET on 500 or 408 (SDK narrows the retry set)', async () => {
-    // The pre-SDK client retried {408, 429, 500, 502, 503, 504}; the SDK's
-    // non-mutating set is {429, 502, 503, 504}, so 500 and 408 are attempted
-    // exactly once. Pins the narrowing alongside the 503/429 retried-set tests.
     for (const status of [500, 408]) {
       globalThis.fetch = jest.fn().mockResolvedValue(apiError(status));
       await expect(qurl.getResourceStatus(`res-${status}`)).rejects.toThrow(new RegExp(String(status)));
@@ -300,14 +377,34 @@ describe('qURL client — retry + audit behavior', () => {
     }
   });
 
-  it('retries DELETE on 503 then succeeds (revoke shares the GET/DELETE retry budget)', async () => {
-    // DELETE is idempotent, so unlike POST it does get the {429,502,503,504}
-    // retry budget — pin that the revoke path retries a transient 503.
-    globalThis.fetch = jest.fn()
-      .mockResolvedValueOnce(apiError(503))
-      .mockResolvedValueOnce(apiOk(204, undefined));
-    await qurl.deleteLink('r_resource1234');
-    expect(globalThis.fetch).toHaveBeenCalledTimes(2);
+  it('does not replay DELETE on 503 because the mutation outcome is unknown', async () => {
+    globalThis.fetch = jest.fn().mockResolvedValue(apiError(503));
+    await expect(qurl.deleteLink(PUBLIC_KEY_RESOURCE_ID)).rejects.toThrow(/503/);
+    expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('redacts the resource ID from DELETE error logs and auth audit metadata', async () => {
+    const logger = require('../src/logger');
+    const { AUDIT_EVENTS } = require('../src/constants');
+    const { resourceIdLogRef } = require('../src/utils/resource-id');
+    const resourceId = 'r_sensitive_resource_marker';
+    globalThis.fetch = jest.fn().mockResolvedValue(apiError(401));
+
+    const thrown = await qurl.deleteLink(resourceId).then(
+      () => { throw new Error('expected rejection'); },
+      error => error,
+    );
+
+    expect(thrown.message).not.toContain(resourceId);
+    expect(JSON.stringify(logger.debug.mock.calls)).not.toContain(resourceId);
+    expect(logger.debug).toHaveBeenCalledWith(
+      'qURL API error',
+      expect.objectContaining({ resource_ref: resourceIdLogRef(resourceId) }),
+    );
+    expect(logger.audit).toHaveBeenCalledWith(
+      AUDIT_EVENTS.DEPENDENCY_AUTH_FAILURE,
+      expect.objectContaining({ method: 'DELETE', path: '/resources/:resourceId' }),
+    );
   });
 });
 
@@ -338,13 +435,32 @@ describe('qURL client — createOneTimeLink happy path', () => {
   });
 
   it('does NOT retry the create POST on a transient 503 (mutating-retry policy)', async () => {
-    // POST is non-idempotent: the SDK retries it only on 429, never 5xx — so a
-    // create is attempted exactly once on a 503, removing the duplicate-create
-    // risk the pre-SDK client carried (it retried POST on transient 5xx).
     globalThis.fetch = jest.fn().mockResolvedValue(apiError(503));
     await expect(qurl.createOneTimeLink('https://example.com/file', '1h', 'label'))
       .rejects.toThrow(/qURL API POST.*failed.*503/);
     expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('redacts uncoded SDK validation text that could echo the target URL', async () => {
+    const logger = require('../src/logger');
+    const { QURLClient } = require('@layervai/qurl');
+    const targetUrl = 'https://example.com/file?secret=sensitive-target-marker';
+    const createSpy = jest.spyOn(QURLClient.prototype, 'create')
+      .mockRejectedValueOnce(new Error(`invalid target_url: ${targetUrl}`));
+
+    try {
+      const thrown = await qurl.createOneTimeLink(targetUrl, '1h', 'label')
+        .catch(error => error);
+
+      expect(thrown.message).toBe('qURL API POST /qurls failed (unknown_error)');
+      expect(JSON.stringify([
+        thrown.message,
+        logger.debug.mock.calls,
+        logger.audit.mock.calls,
+      ])).not.toContain(targetUrl);
+    } finally {
+      createSpy.mockRestore();
+    }
   });
 
   it('rejects when DNS lookup fails', async () => {

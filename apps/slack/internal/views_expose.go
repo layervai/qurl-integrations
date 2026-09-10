@@ -42,10 +42,10 @@ const (
 	// labels are truncated to it so a long target URL or display name can't 400
 	// the view at views.open.
 	slackOptionTextMaxRunes = 75
-	// slackOptionValueMaxChars is Slack's per-option value cap. URL picker values
-	// carry resource_id, so skip overlong IDs rather than rendering a modal Slack
-	// will reject.
-	slackOptionValueMaxChars = 75
+	// slackOptionValueMaxChars is Slack's per-option value cap. This differs
+	// from the 75-character label cap; option values allow 150 characters.
+	// Public qURL resource IDs are 122-character P-256 keys and fit here.
+	slackOptionValueMaxChars = 150
 )
 
 // exposeOpenFailedMessage is the ephemeral shown (via the chooser's
@@ -54,12 +54,12 @@ const (
 const exposeOpenFailedMessage = "Couldn't open the dialog. Run `/qurl-admin protect` and tap the button again."
 
 // exposeChooserBlocks builds the two-button picker posted by `/qurl-admin
-// protect`: "Protect qURL Connector" opens the guided connector installer and
+// protect`: "Protect qURL Connector" opens the connector setup chooser and
 // "Protect URL" opens the URL-resource picker. The target channel is shown so
-// the admin confirms where access lands (both modals act on it).
+// the admin confirms where access lands (both modal paths act on it).
 func exposeChooserBlocks(channelID string) []any {
 	return []any{
-		sectionBlock("*Protect something in this channel*\n*qURL Connector:* Generate install instructions and a bootstrap key for a private service.\n*URL:* Choose an existing URL resource and bind a channel alias."),
+		sectionBlock("*Protect something in this channel*\n*qURL Connector:* Generate install instructions and a one-shot enrollment token for a web app, HTTP API, or S3 static website.\n*URL:* Choose an existing URL resource and bind a channel alias."),
 		contextBlock("Target channel: " + slackChannelMention(channelID)),
 		actionsBlock(
 			buttonElement("Protect qURL Connector", exposeConnectorActionID, exposeConnectorValue),

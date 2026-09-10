@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,6 +16,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/layervai/qurl-go/crid"
 )
 
 const (
@@ -22,6 +25,8 @@ const (
 	defaultMaxRetries = 3
 	defaultBaseDelay  = 500 * time.Millisecond
 	defaultMaxDelay   = 30 * time.Second
+	desiredStateOn    = "on"
+	desiredStateOff   = "off"
 )
 
 // HeaderIdempotencyKey is the request header the qURL API reads to dedupe
@@ -44,6 +49,11 @@ const (
 //     `Create` rejects anything else with `ErrIdempotencyKeyInvalid` to
 //     dodge encoding ambiguity in the upstream key hash.
 const HeaderIdempotencyKey = "Idempotency-Key"
+
+// CreateForResourcePathLabel is the canonical redacted qURL-service path label
+// for resource-scoped qURL creation. Keep audit/log code on this constant so it
+// cannot drift from Client.Create's ResourceID route label.
+const CreateForResourcePathLabel = "/v1/resources/:id/qurls"
 
 // MaxIdempotencyKeyLength is the byte cap mirrored from qurl-service's
 // idempotency-store schema (see `idempotency_dynamodb.go`). Since the
@@ -99,12 +109,25 @@ var ErrCreateResourceTunnelRejectsTargetURL = errors.New("create resource: type=
 // ErrCreateAPIKeyNilInput is returned by CreateAPIKey when input is nil.
 var ErrCreateAPIKeyNilInput = errors.New("create api key: input is nil")
 
+// ErrCreateAPIKeyMissingKind is returned by CreateAPIKey when Kind is empty.
+// `kind` is required by the kind-first credential contract, so the server
+// returns 400 either way — failing fast saves a round-trip and yields a typed
+// Go error instead of an opaque wire rejection.
+var ErrCreateAPIKeyMissingKind = errors.New("create api key: kind is required")
+
 // ErrRevokeAPIKeyEmptyID is returned by RevokeAPIKey when keyID is empty.
 var ErrRevokeAPIKeyEmptyID = errors.New("revoke api key: key_id is empty")
 
 // ErrDeleteResourceEmptyID is returned by DeleteResource when resourceID
 // is empty.
 var ErrDeleteResourceEmptyID = errors.New("delete resource: resource_id is empty")
+
+// ErrGetResourceEmptyID is returned when a resource lookup has no identity.
+var ErrGetResourceEmptyID = errors.New("get resource: resource_id is empty")
+
+// ErrSharingResourceEmptyID is returned when a sharing lifecycle call has no
+// public resource identity.
+var ErrSharingResourceEmptyID = errors.New("sharing: resource_id is empty")
 
 // ErrUpdateResourceEmptyID is returned by UpdateResource when resourceID
 // is the empty string.
@@ -133,14 +156,8 @@ var ErrUpdateResourceNoFieldsSet = errors.New("update resource: input has no fie
 // StatusActive indicates the qURL is live and accepting access requests.
 const StatusActive = "active"
 
-// StatusExpired indicates the qURL's TTL has elapsed.
-const StatusExpired = "expired"
-
 // StatusRevoked indicates the qURL was manually revoked (deleted).
 const StatusRevoked = "revoked"
-
-// StatusConsumed indicates a one-time qURL has been used.
-const StatusConsumed = "consumed"
 
 // --- Resource type constants (mirrors qurl-service/api/openapi.yaml
 // `ResourceType` enum).
@@ -151,9 +168,44 @@ const ResourceTypeURL = "url"
 // ResourceTypeTunnel is the FRP-backed reverse-tunnel type.
 const ResourceTypeTunnel = "tunnel"
 
-// APIKeyPurposeTunnelBootstrap is the restricted key purpose used by the
-// Docker reverse-tunnel onboarding flow.
-const APIKeyPurposeTunnelBootstrap = "tunnel_bootstrap"
+// Credential kinds and targets for `POST /v1/api-keys`.
+//
+// TODO(upstream-contract): these mirror qurl-service's kind-first
+// `CreateApiKeyRequest` enums; they must move in lockstep with that schema.
+// The Slack workspace-key mint keeps its own copy of the `api_key` kind in
+// apps/slack/internal/oauth (that package hand-rolls its HTTP client and does
+// not import shared/client).
+const (
+	// CredentialKindEnrollmentToken is the one-shot credential kind used for
+	// headless enrollment.
+	CredentialKindEnrollmentToken = "enrollment_token"
+	// CredentialKindAPIKey is the ordinary, long-lived credential kind. No
+	// in-repo caller passes it today — the one CreateAPIKey call site mints
+	// enrollment tokens — but it is kept so the `kind` enum this client now
+	// requires is documented in one place, and so the Slack minter's unexported
+	// copy has a named counterpart to stay in lockstep with.
+	CredentialKindAPIKey = "api_key"
+	// CredentialTargetConnector constrains an enrollment token to Connector
+	// enrollment.
+	CredentialTargetConnector = "connector"
+	// CredentialTargetAgent constrains an enrollment token to registered-device
+	// (agent) enrollment: the owner-scoped credential a headless Connector
+	// daemon needs for native session control. Connector-target tokens are
+	// connector-scoped and cannot open native sessions.
+	CredentialTargetAgent = "agent"
+	// CredentialClaimTypeConnector binds an enrollment token to one Connector
+	// resource identifier. Sharing the literal "connector" with
+	// CredentialTargetConnector is deliberate: `target` and `claims[].type`
+	// are independent enums in the upstream schema that happen to agree here,
+	// so they stay separate constants and may diverge without a coupled edit.
+	CredentialClaimTypeConnector = "connector"
+	// APIKeyTypeTunnelBootstrap is the retired `key_type` value. Response
+	// decoding does not need it — APIKey.KeyType keys off the `key_type` JSON
+	// tag — so it survives only for the tests that pin legacy-response decode
+	// during the producer rollout. New requests must use
+	// CredentialKindEnrollmentToken.
+	APIKeyTypeTunnelBootstrap = "tunnel_bootstrap"
+)
 
 // Logger is an optional interface for debug logging.
 type Logger interface {
@@ -239,25 +291,6 @@ type ResponseMeta struct {
 
 // --- qURL types (match API schema) ---
 
-// QURL represents a qURL resource as returned by the API.
-type QURL struct {
-	ResourceID  string     `json:"resource_id"`
-	TargetURL   string     `json:"target_url"`
-	Status      string     `json:"status"`
-	CreatedAt   time.Time  `json:"created_at"`
-	ExpiresAt   *time.Time `json:"expires_at,omitempty"`
-	OneTimeUse  bool       `json:"one_time_use"`
-	MaxSessions int        `json:"max_sessions,omitempty"`
-	// SessionDuration read-back is intentionally omitted (no consumer yet): an
-	// int field would couple the whole QURL decode to session_duration's wire
-	// type. Add it with a decode test when a consumer needs it. See qurl-service
-	// #778 for the wire shape (response is a number; CreateInput sends a string).
-	Description  string        `json:"description,omitempty"`
-	QURLSite     string        `json:"qurl_site,omitempty"`
-	QURLLink     string        `json:"qurl_link,omitempty"`
-	AccessPolicy *AccessPolicy `json:"access_policy,omitempty"`
-}
-
 // AccessPolicy defines access restrictions for a qURL.
 //
 // All subfields MUST keep `omitempty` — `&AccessPolicy{}` is the
@@ -282,6 +315,13 @@ type AccessPolicy struct {
 // rather than serializing the zero value `""`, which would otherwise trip the
 // server's exclusivity check.
 type CreateInput struct {
+	// The json tags below document each field's wire NAME; CreateInput
+	// itself is never marshaled. Both endpoints serialize a declared body
+	// ([createQurlBody] / [createForResourceBody]) instead, because the
+	// service rejects unknown fields (qurl-service#1402) — so a field added
+	// here for client-side use cannot reach the wire just by existing.
+	// Adding a wire field means adding it to the matching body struct and
+	// to TestMintBodiesCarryOnlyDeclaredFields's allowed set.
 	TargetURL string `json:"target_url,omitempty"`
 	// ResourceID, when set, mints a qURL bound to an existing resource
 	// (e.g. an existing tunnel resource). Mutually exclusive with
@@ -303,12 +343,6 @@ type CreateInput struct {
 	// stays off the wire and inherits the server/plan default.
 	SessionDuration string        `json:"session_duration,omitempty"`
 	AccessPolicy    *AccessPolicy `json:"access_policy,omitempty"`
-	// Reason is forwarded to the audit log when set (e.g. an
-	// operator-supplied "for incident #123" annotation from the
-	// `/qurl get $alias reason:"…"` slash-command flag). The server
-	// writes this to the audit row only; it is not persisted on the
-	// resulting qURL.
-	Reason string `json:"reason,omitempty"`
 
 	// IdempotencyKey, when non-empty, is sent as the Idempotency-Key
 	// request header so the API dedupes retried writes. See
@@ -374,11 +408,11 @@ func validateIdempotencyKey(key string) error {
 //     required for that endpoint.
 //
 // Note: Create takes a value receiver for backward-compat with the existing
-// callers in apps/slack and apps/cli; the new methods ([Client.CreateResource],
+// callers in apps/slack; the new methods ([Client.CreateResource],
 // [Client.UpdateResource]) take *Input pointers, which is the going-forward
 // idiom. Pointer migration tracked at #146.
 //
-//nolint:gocritic // hugeParam: CreateInput is 104 bytes; *CreateInput migration tracked at #146.
+//nolint:gocritic // hugeParam: CreateInput is 120 bytes; *CreateInput migration tracked at #146.
 func (c *Client) Create(ctx context.Context, input CreateInput) (*CreateOutput, error) {
 	if input.TargetURL == "" && input.ResourceID == "" {
 		return nil, ErrCreateRequiresTarget
@@ -399,11 +433,8 @@ func (c *Client) Create(ctx context.Context, input CreateInput) (*CreateOutput, 
 	if input.ResourceID != "" {
 		// /v1/resources/{id}/qurls — id rides in the path; the body
 		// drops target_url + resource_id and ships the policy subset.
-		// Reason ships in the body too (silently dropped by the server
-		// if not in its schema; harmless either way and matches the
-		// URL-form posture).
 		endpoint = c.baseURL + "/v1/resources/" + url.PathEscape(input.ResourceID) + "/qurls"
-		logLabel = "POST /v1/resources/:id/qurls"
+		logLabel = http.MethodPost + " " + CreateForResourcePathLabel
 		body, err = json.Marshal(createForResourceBody{
 			Label:           input.Label,
 			ExpiresIn:       input.ExpiresIn,
@@ -411,12 +442,19 @@ func (c *Client) Create(ctx context.Context, input CreateInput) (*CreateOutput, 
 			MaxSessions:     input.MaxSessions,
 			SessionDuration: input.SessionDuration,
 			AccessPolicy:    input.AccessPolicy,
-			Reason:          input.Reason,
 		})
 	} else {
 		endpoint = c.baseURL + "/v1/qurls"
 		logLabel = "POST /v1/qurls"
-		body, err = json.Marshal(input)
+		body, err = json.Marshal(createQurlBody{
+			TargetURL:       input.TargetURL,
+			Label:           input.Label,
+			ExpiresIn:       input.ExpiresIn,
+			OneTimeUse:      input.OneTimeUse,
+			MaxSessions:     input.MaxSessions,
+			SessionDuration: input.SessionDuration,
+			AccessPolicy:    input.AccessPolicy,
+		})
 	}
 	if err != nil {
 		return nil, fmt.Errorf("marshal create input: %w", err)
@@ -441,6 +479,26 @@ func (c *Client) Create(ctx context.Context, input CreateInput) (*CreateOutput, 
 	return &out, nil
 }
 
+// createQurlBody is the wire shape for `POST /v1/qurls`. Mirrors the qURL
+// service's `CreateQurlRequest` schema.
+//
+// This is a DECLARED body rather than a marshal of [CreateInput] itself:
+// the service rejects unknown fields (qurl-service#1402 adds
+// `additionalProperties: false` to both create schemas), so a field added
+// to CreateInput for client-side use must not reach the wire just by
+// existing. Anything sent here has to be a property of CreateQurlRequest —
+// TestMintBodiesCarryOnlyDeclaredFields is the guard.
+type createQurlBody struct {
+	TargetURL string `json:"target_url,omitempty"`
+	// `label` per CreateQurlRequest (not `description`).
+	Label           string        `json:"label,omitempty"`
+	ExpiresIn       string        `json:"expires_in,omitempty"`
+	OneTimeUse      bool          `json:"one_time_use,omitempty"`
+	MaxSessions     int           `json:"max_sessions,omitempty"`
+	SessionDuration string        `json:"session_duration,omitempty"`
+	AccessPolicy    *AccessPolicy `json:"access_policy,omitempty"`
+}
+
 // createForResourceBody is the wire shape for `POST
 // /v1/resources/{id}/qurls`. Mirrors the qURL service's
 // `CreateQurlForResourceRequest` schema (resource id rides in the URL
@@ -454,152 +512,6 @@ type createForResourceBody struct {
 	MaxSessions     int           `json:"max_sessions,omitempty"`
 	SessionDuration string        `json:"session_duration,omitempty"`
 	AccessPolicy    *AccessPolicy `json:"access_policy,omitempty"`
-	Reason          string        `json:"reason,omitempty"`
-}
-
-// Get retrieves a qURL by ID.
-func (c *Client) Get(ctx context.Context, id string) (*QURL, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/v1/qurls/"+url.PathEscape(id), http.NoBody)
-	if err != nil {
-		return nil, fmt.Errorf("build request: %w", err)
-	}
-
-	var qurl QURL
-	if _, err := c.do(req, &qurl, "GET /v1/qurls/:id"); err != nil {
-		return nil, err
-	}
-	return &qurl, nil
-}
-
-// ListInput is the input for listing qURLs.
-type ListInput struct {
-	Limit  int
-	Cursor string
-	Status string
-	Query  string
-	Sort   string
-}
-
-// ListOutput is the output of listing qURLs.
-type ListOutput struct {
-	QURLs      []QURL `json:"qurls"`
-	NextCursor string `json:"next_cursor,omitempty"`
-	HasMore    bool   `json:"has_more,omitempty"`
-}
-
-// List retrieves a paginated list of qURLs.
-func (c *Client) List(ctx context.Context, input ListInput) (*ListOutput, error) {
-	params := url.Values{}
-	if input.Limit > 0 {
-		params.Set("limit", strconv.Itoa(input.Limit))
-	}
-	if input.Cursor != "" {
-		params.Set("cursor", input.Cursor)
-	}
-	if input.Status != "" {
-		params.Set("status", input.Status)
-	}
-	if input.Query != "" {
-		params.Set("q", input.Query)
-	}
-	if input.Sort != "" {
-		params.Set("sort", input.Sort)
-	}
-
-	u := c.baseURL + "/v1/qurls"
-	if len(params) > 0 {
-		u += "?" + params.Encode()
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, http.NoBody)
-	if err != nil {
-		return nil, fmt.Errorf("build request: %w", err)
-	}
-
-	var qurls []QURL
-	meta, err := c.do(req, &qurls, "GET /v1/qurls")
-	if err != nil {
-		return nil, err
-	}
-
-	out := &ListOutput{QURLs: qurls}
-	if meta != nil {
-		out.NextCursor = meta.NextCursor
-		out.HasMore = meta.HasMore
-	}
-	return out, nil
-}
-
-// Delete revokes a qURL by ID.
-func (c *Client) Delete(ctx context.Context, id string) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.baseURL+"/v1/qurls/"+url.PathEscape(id), http.NoBody)
-	if err != nil {
-		return fmt.Errorf("build request: %w", err)
-	}
-	_, err = c.do(req, nil, "DELETE /v1/qurls/:id")
-	return err
-}
-
-// ExtendInput holds input for extending a qURL.
-type ExtendInput struct {
-	ExtendBy  string     `json:"extend_by,omitempty"`
-	ExpiresAt *time.Time `json:"expires_at,omitempty"`
-}
-
-// Extend extends a qURL's expiration.
-// Both Extend and Update use PATCH /v1/qurls/:id — the server differentiates
-// by request body fields (extend_by/expires_at vs description).
-func (c *Client) Extend(ctx context.Context, id string, input ExtendInput) (*QURL, error) {
-	return c.patchQURL(ctx, id, input)
-}
-
-// UpdateInput holds input for updating a qURL's mutable properties.
-type UpdateInput struct {
-	Description *string `json:"description,omitempty"`
-}
-
-// Update updates a qURL's mutable properties.
-func (c *Client) Update(ctx context.Context, id string, input UpdateInput) (*QURL, error) {
-	return c.patchQURL(ctx, id, input)
-}
-
-// patchQURL sends a PATCH request to /v1/qurls/:id with the given body.
-func (c *Client) patchQURL(ctx context.Context, id string, input any) (*QURL, error) {
-	body, err := json.Marshal(input)
-	if err != nil {
-		return nil, fmt.Errorf("marshal patch input: %w", err)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, c.baseURL+"/v1/qurls/"+url.PathEscape(id), bytes.NewReader(body))
-	if err != nil {
-		return nil, fmt.Errorf("build request: %w", err)
-	}
-
-	var qurl QURL
-	if _, err := c.do(req, &qurl, "PATCH /v1/qurls/:id"); err != nil {
-		return nil, err
-	}
-	return &qurl, nil
-}
-
-// MintOutput holds the result of minting an access link.
-type MintOutput struct {
-	QURLLink  string     `json:"qurl_link"`
-	ExpiresAt *time.Time `json:"expires_at,omitempty"`
-}
-
-// MintLink mints a new access link for a qURL.
-func (c *Client) MintLink(ctx context.Context, id string) (*MintOutput, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/v1/qurls/"+url.PathEscape(id)+"/mint_link", http.NoBody)
-	if err != nil {
-		return nil, fmt.Errorf("build request: %w", err)
-	}
-
-	var out MintOutput
-	if _, err := c.do(req, &out, "POST /v1/qurls/:id/mint_link"); err != nil {
-		return nil, err
-	}
-	return &out, nil
 }
 
 // --- Resources ---
@@ -634,15 +546,15 @@ type Resource struct {
 	Description  string `json:"description,omitempty"`
 	// Status is one of [StatusActive] or [StatusRevoked] per the
 	// `ResourceData` schema in qurl-service/api/openapi.yaml. The
-	// QURL-only [StatusConsumed] / [StatusExpired] don't apply at the
-	// resource level — resource state is binary (live or revoked);
-	// per-qURL TTL/one-time semantics are tracked on QURL instead.
+	// qURL-only wire statuses ("expired" / "consumed") don't apply at
+	// the resource level — resource state is binary (live or revoked);
+	// per-qURL TTL/one-time semantics live on the qURL objects, which
+	// this client no longer models (the token-era CLI was their only
+	// consumer).
 	Status string `json:"status"`
 	// CreatedAt uses `omitzero` (Go 1.24+) — it honors the time.Time
 	// zero value, eliding "0001-01-01T00:00:00Z" from the wire when
-	// the field is unset on a response. (QURL.CreatedAt still uses
-	// `json:"created_at"` without omitzero — that's a separate
-	// migration tracked outside this PR.)
+	// the field is unset on a response.
 	CreatedAt time.Time `json:"created_at,omitzero"`
 	// UpdatedAt is also a time.Time + omitzero now that we're on
 	// Go 1.24+. The pre-1.24 *time.Time idiom is no longer needed —
@@ -653,6 +565,117 @@ type Resource struct {
 	// KnockResourceID is the client-safe NHP resource_id the tunnel sidecar
 	// knocks before dialing FRP. It is surfaced on tunnel resource creates.
 	KnockResourceID string `json:"knock_resource_id,omitempty"`
+	// ConnectorRoutingID is the opaque DNS-safe FRP routing label. It is
+	// distinct from the public-key ResourceID and must be passed to connectors
+	// verbatim rather than derived client-side.
+	ConnectorRoutingID string `json:"connector_routing_id,omitempty"`
+}
+
+// SharingState is the account-authorized lifecycle state for one tunnel.
+// NHP admission remains resource/session bound; this HTTP surface controls
+// customer intent and provides the serving observation used by guided setup.
+type SharingState struct {
+	ResourceID      string `json:"resource_id"`
+	CRID            string `json:"crid"`
+	DesiredState    string `json:"desired_state"`
+	ServingEpoch    uint64 `json:"serving_epoch"`
+	ConnectionState string `json:"connection_state"`
+}
+
+// UnmarshalJSON requires the lifecycle fence to be present even for an off
+// resource. A missing or null epoch must not silently become zero because
+// Slack uses the prior epoch to determine whether an ambiguous restart was
+// accepted exactly once.
+func (s *SharingState) UnmarshalJSON(data []byte) error {
+	if s == nil {
+		return errors.New("sharing state is nil")
+	}
+	seen, err := validateSharingStateFields(data)
+	if err != nil {
+		return err
+	}
+	type sharingStateWire struct {
+		ResourceID      string          `json:"resource_id"`
+		CRID            string          `json:"crid"`
+		DesiredState    string          `json:"desired_state"`
+		ServingEpoch    json.RawMessage `json:"serving_epoch"`
+		ConnectionState string          `json:"connection_state"`
+	}
+	var wire sharingStateWire
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+	if !seen["serving_epoch"] {
+		return errors.New("sharing response is missing serving_epoch")
+	}
+	encodedEpoch := strings.TrimSpace(string(wire.ServingEpoch))
+	if encodedEpoch == "" || strings.IndexFunc(encodedEpoch, func(r rune) bool { return r < '0' || r > '9' }) >= 0 {
+		return errors.New("sharing response serving_epoch must be an unsigned decimal integer")
+	}
+	servingEpoch, err := strconv.ParseUint(encodedEpoch, 10, 64)
+	if err != nil {
+		return fmt.Errorf("sharing response serving_epoch: %w", err)
+	}
+	*s = SharingState{
+		ResourceID: wire.ResourceID, CRID: wire.CRID, DesiredState: wire.DesiredState,
+		ServingEpoch: servingEpoch, ConnectionState: wire.ConnectionState,
+	}
+	return nil
+}
+
+func validateSharingStateFields(data []byte) (map[string]bool, error) {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	first, err := decoder.Token()
+	if err != nil {
+		return nil, err
+	}
+	if delimiter, ok := first.(json.Delim); !ok || delimiter != '{' {
+		return nil, errors.New("sharing response must be an object")
+	}
+	known := map[string]bool{
+		"resource_id": true, "crid": true, "desired_state": true,
+		"serving_epoch": true, "connection_state": true,
+	}
+	seen := make(map[string]bool, len(known))
+	for decoder.More() {
+		field, err := decoder.Token()
+		if err != nil {
+			return nil, err
+		}
+		name, ok := field.(string)
+		if !ok {
+			return nil, errors.New("sharing response field name is invalid")
+		}
+		var value json.RawMessage
+		if err := decoder.Decode(&value); err != nil {
+			return nil, err
+		}
+		if !known[name] {
+			continue
+		}
+		if seen[name] {
+			return nil, fmt.Errorf("sharing response has duplicate %s", name)
+		}
+		seen[name] = true
+	}
+	last, err := decoder.Token()
+	if err != nil {
+		return nil, err
+	}
+	if delimiter, ok := last.(json.Delim); !ok || delimiter != '}' {
+		return nil, errors.New("sharing response object is incomplete")
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return nil, errors.New("sharing response has trailing JSON")
+		}
+		return nil, err
+	}
+	return seen, nil
+}
+
+type sharingUpdate struct {
+	DesiredState string `json:"desired_state"`
 }
 
 // CreateResourceInput is the input for `POST /v1/resources`. Idempotent on
@@ -694,13 +717,19 @@ type CreateResourceInput struct {
 	AccessPolicy *AccessPolicy `json:"access_policy,omitempty"`
 }
 
-// CreateAPIKeyInput is the input for `POST /v1/api-keys`.
+// CredentialClaim narrows an enrollment token to one resource.
+type CredentialClaim struct {
+	Type string `json:"type"`
+	ID   string `json:"id"`
+}
+
+// CreateAPIKeyInput is the kind-first input for `POST /v1/api-keys`.
 type CreateAPIKeyInput struct {
-	Name       string   `json:"name"`
-	Scopes     []string `json:"scopes"`
-	ExpiresIn  string   `json:"expires_in,omitempty"`
-	Purpose    string   `json:"purpose,omitempty"`
-	TunnelSlug string   `json:"tunnel_slug,omitempty"`
+	Name      string            `json:"name"`
+	Kind      string            `json:"kind"`
+	Target    string            `json:"target,omitempty"`
+	Claims    []CredentialClaim `json:"claims,omitempty"`
+	ExpiresIn string            `json:"expires_in,omitempty"`
 
 	// IdempotencyKey, when non-empty, is sent as the Idempotency-Key
 	// request header so retries replay the same plaintext key.
@@ -710,18 +739,25 @@ type CreateAPIKeyInput struct {
 // APIKey represents an API key create response. APIKey is populated only on
 // create; list/update responses never return plaintext keys.
 type APIKey struct {
-	KeyID     string     `json:"key_id,omitempty"`
-	APIKey    string     `json:"api_key,omitempty"`
-	KeyPrefix string     `json:"key_prefix,omitempty"`
-	Name      string     `json:"name,omitempty"`
-	Scopes    []string   `json:"scopes,omitempty"`
-	Status    string     `json:"status,omitempty"`
-	CreatedAt time.Time  `json:"created_at,omitzero"`
-	ExpiresAt *time.Time `json:"expires_at,omitempty"`
-	// Purpose is the optional constrained-key purpose, such as
-	// "tunnel_bootstrap".
-	Purpose string `json:"purpose,omitempty"`
-	// TunnelSlug is the sidecar slug this constrained key is bound to.
+	KeyID     string            `json:"key_id,omitempty"`
+	APIKey    string            `json:"api_key,omitempty"`
+	KeyPrefix string            `json:"key_prefix,omitempty"`
+	Name      string            `json:"name,omitempty"`
+	Scopes    []string          `json:"scopes,omitempty"`
+	Status    string            `json:"status,omitempty"`
+	CreatedAt time.Time         `json:"created_at,omitzero"`
+	ExpiresAt *time.Time        `json:"expires_at,omitempty"`
+	Kind      string            `json:"kind,omitempty"`
+	Target    string            `json:"target,omitempty"`
+	Claims    []CredentialClaim `json:"claims,omitempty"`
+	// Legacy response fields, decoded so a pre-cutover producer's response
+	// still round-trips rather than erroring at the decode layer. Decoding is
+	// not acceptance: callers that require a kind-first credential check Kind
+	// and Target and fail closed (see the Slack Connector enrollment path). No
+	// production code reads these, and they are absent from CreateAPIKeyInput,
+	// so this client cannot send them. Drop both once every environment is on
+	// the kind-first API.
+	KeyType    string `json:"key_type,omitempty"`
 	TunnelSlug string `json:"tunnel_slug,omitempty"`
 }
 
@@ -856,11 +892,176 @@ func (c *Client) CreateResource(ctx context.Context, input *CreateResourceInput)
 	return &out, nil
 }
 
-// CreateAPIKey creates a qURL API key. It is used by Slack onboarding to mint
-// short-lived, restricted tunnel bootstrap keys from a workspace API key.
+// GetResource retrieves one resource by its public resource identity.
+func (c *Client) GetResource(ctx context.Context, resourceID string) (*Resource, error) {
+	resourceID = strings.TrimSpace(resourceID)
+	if resourceID == "" {
+		return nil, ErrGetResourceEmptyID
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/v1/resources/"+url.PathEscape(resourceID), http.NoBody)
+	if err != nil {
+		return nil, fmt.Errorf("build request: %w", err)
+	}
+	var out Resource
+	if _, err := c.do(req, &out, "GET /v1/resources/:id"); err != nil {
+		return nil, err
+	}
+	if out.ResourceID != resourceID {
+		return nil, errors.New("get resource response identity does not match request")
+	}
+	return &out, nil
+}
+
+// Identity is the account identity behind the client credential (GET /v1/me).
+//
+// TODO(upstream-contract): mirrors qurl-service `GET /v1/me` (`owner_id`,
+// `api_key` present only for API-key principals).
+type Identity struct {
+	// OwnerID is the principal behind the credential: the account owner for
+	// an API key, the calling user for a delegated credential. Callers that
+	// need the account owner must check APIKey != nil.
+	OwnerID string `json:"owner_id"`
+	// APIKey is present only when the request was authenticated by an API key.
+	APIKey *IdentityAPIKey `json:"api_key,omitempty"`
+}
+
+// IdentityAPIKey identifies the API key behind an Identity.
+type IdentityAPIKey struct {
+	KeyID string `json:"key_id,omitempty"`
+}
+
+// Me returns the account identity behind the client credential (GET /v1/me).
+// OwnerID is the durable account owner the headless share config must name.
+func (c *Client) Me(ctx context.Context) (*Identity, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/v1/me", http.NoBody)
+	if err != nil {
+		return nil, fmt.Errorf("build request: %w", err)
+	}
+	var out Identity
+	if _, err := c.do(req, &out, "GET /v1/me"); err != nil {
+		return nil, err
+	}
+	out.OwnerID = strings.TrimSpace(out.OwnerID)
+	if out.OwnerID == "" {
+		return nil, errors.New("identity response missing owner_id")
+	}
+	if out.APIKey != nil && strings.TrimSpace(out.APIKey.KeyID) == "" {
+		// An api_key object without key_id is not proof of an API-key principal.
+		out.APIKey = nil
+	}
+	return &out, nil
+}
+
+// GetSharing retrieves authoritative desired and observed sharing state.
+func (c *Client) GetSharing(ctx context.Context, resourceID string) (*SharingState, error) {
+	return c.doSharing(ctx, http.MethodGet, resourceID, nil, "GET /v1/resources/:id/sharing", true)
+}
+
+// SetSharing changes authoritative sharing intent to on or off.
+func (c *Client) SetSharing(ctx context.Context, resourceID, desired string) (*SharingState, error) {
+	if desired != desiredStateOn && desired != desiredStateOff {
+		return nil, fmt.Errorf("sharing desired_state %q must be on or off", desired)
+	}
+	return c.doSharing(ctx, http.MethodPut, resourceID, &sharingUpdate{DesiredState: desired}, "PUT /v1/resources/:id/sharing", true)
+}
+
+// RestartSharing always turns sharing on and advances the serving epoch.
+func (c *Client) RestartSharing(ctx context.Context, resourceID string) (*SharingState, error) {
+	// Restart is deliberately not replayed: every accepted POST advances the
+	// serving epoch, and the service does not yet expose an idempotency key for
+	// this route. A lost response is reconciled by the guided-install caller
+	// with an authoritative GET instead of silently sending a second POST.
+	return c.doSharing(ctx, http.MethodPost, resourceID, nil, "POST /v1/resources/:id/sharing/restart", false)
+}
+
+func (c *Client) doSharing(ctx context.Context, method, resourceID string, input any, label string, allowRetry bool) (*SharingState, error) {
+	resourceID = strings.TrimSpace(resourceID)
+	if resourceID == "" {
+		return nil, ErrSharingResourceEmptyID
+	}
+	path := c.baseURL + "/v1/resources/" + url.PathEscape(resourceID) + "/sharing"
+	if method == http.MethodPost {
+		path += "/restart"
+	}
+	var body io.Reader = http.NoBody
+	if input != nil {
+		encoded, err := json.Marshal(input)
+		if err != nil {
+			return nil, fmt.Errorf("marshal sharing input: %w", err)
+		}
+		body = bytes.NewReader(encoded)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, path, body)
+	if err != nil {
+		return nil, fmt.Errorf("build request: %w", err)
+	}
+	var out SharingState
+	request := c.do
+	if !allowRetry {
+		request = c.doOnce
+	}
+	if _, err := request(req, &out, label); err != nil {
+		return nil, err
+	}
+	if err := validateSharingState(resourceID, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func validateSharingState(requestResourceID string, sharing *SharingState) error {
+	if sharing == nil || sharing.ResourceID != requestResourceID {
+		return errors.New("sharing response identity does not match request")
+	}
+	if sharing.CRID == "" {
+		return errors.New("sharing response CRID is missing")
+	}
+	der, err := base64.RawURLEncoding.Strict().DecodeString(sharing.ResourceID)
+	if err != nil {
+		return errors.New("sharing response resource identity is invalid")
+	}
+	matched, err := crid.KeyMatches(sharing.CRID, der)
+	if err != nil || !matched {
+		return errors.New("sharing response CRID does not match resource identity")
+	}
+	switch sharing.DesiredState {
+	case desiredStateOff:
+		if sharing.ConnectionState != "stopped" {
+			return errors.New("sharing response off state must be stopped")
+		}
+	case desiredStateOn:
+		if sharing.ServingEpoch == 0 {
+			return errors.New("sharing response on state requires a positive serving epoch")
+		}
+		if sharing.ConnectionState != "connecting" && sharing.ConnectionState != "serving" {
+			return errors.New("sharing response on state must be connecting or serving")
+		}
+	default:
+		return errors.New("sharing response desired state is invalid")
+	}
+	if sharing.ConnectionState == "stopped" && sharing.DesiredState != desiredStateOff {
+		return errors.New("sharing response stopped state requires desired off")
+	}
+	return nil
+}
+
+// CreateAPIKey creates a qURL credential. Slack onboarding uses it to mint a
+// short-lived, one-shot enrollment token bound to one Connector resource.
 func (c *Client) CreateAPIKey(ctx context.Context, input *CreateAPIKeyInput) (*APIKey, error) {
 	if input == nil {
 		return nil, ErrCreateAPIKeyNilInput
+	}
+	// Kind presence is structural, so it is checked before the
+	// idempotency-key bytes (a request-decoration error) — a caller missing
+	// both should learn about the missing kind first.
+	//
+	// Checked trimmed but sent as given: unlike RevokeAPIKey/DeleteResource,
+	// which normalize their own string parameters, input is a caller-owned
+	// pointer and writing back would mutate the caller's struct. A padded kind
+	// is a caller bug the server will reject on its own; the guard only has to
+	// catch the empty case.
+	if strings.TrimSpace(input.Kind) == "" {
+		return nil, ErrCreateAPIKeyMissingKind
 	}
 	if err := validateIdempotencyKey(input.IdempotencyKey); err != nil {
 		return nil, err
@@ -899,10 +1100,10 @@ func (c *Client) RevokeAPIKey(ctx context.Context, keyID string) error {
 	return err
 }
 
-// DeleteResource revokes a resource by its `r_…` ID. The server revokes the
+// DeleteResource revokes a resource by its opaque REST ID. The server revokes the
 // resource AND every qURL minted against it (DELETE /v1/resources/{id} —
 // "Revoke resource and all its qURLs"); the action is not reversible.
-// resourceID must be a resolved `r_…` ID — callers holding a slug/alias must
+// resourceID must be resolved — callers holding a slug/alias must
 // resolve it first (see the Slack bot's resolveTokenForGet). A 200/204 maps to
 // nil; 404/401/403/5xx surface as a *APIError for the caller to map.
 func (c *Client) DeleteResource(ctx context.Context, resourceID string) error {
@@ -919,7 +1120,7 @@ func (c *Client) DeleteResource(ctx context.Context, resourceID string) error {
 }
 
 // UpdateResource updates a resource's mutable properties (alias, description,
-// access policy, etc.). resourceID must be a `r_…` ID; alias-keyed updates
+// access policy, etc.). resourceID is opaque; alias-keyed updates
 // must first resolve the alias to its resource_id.
 //
 // Validation order (first match wins): trim resourceID → empty
@@ -1075,47 +1276,6 @@ func (c *Client) ListResources(ctx context.Context, input ListResourcesInput) (*
 	return out, nil
 }
 
-// --- Resolve ---
-
-// ResolveInput holds input for headless qURL resolution.
-type ResolveInput struct {
-	AccessToken string `json:"access_token"`
-}
-
-// ResolveOutput holds the result of a headless resolution.
-type ResolveOutput struct {
-	TargetURL   string       `json:"target_url"`
-	ResourceID  string       `json:"resource_id"`
-	AccessGrant *AccessGrant `json:"access_grant,omitempty"`
-}
-
-// AccessGrant describes the network access that was granted.
-type AccessGrant struct {
-	ExpiresIn int    `json:"expires_in"`
-	GrantedAt string `json:"granted_at"`
-	SrcIP     string `json:"src_ip"`
-}
-
-// Resolve resolves a qURL access token, triggering a network access request
-// to grant access for the caller's IP.
-func (c *Client) Resolve(ctx context.Context, input ResolveInput) (*ResolveOutput, error) {
-	body, err := json.Marshal(input)
-	if err != nil {
-		return nil, fmt.Errorf("marshal resolve input: %w", err)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/v1/resolve", bytes.NewReader(body))
-	if err != nil {
-		return nil, fmt.Errorf("build request: %w", err)
-	}
-
-	var out ResolveOutput
-	if _, err := c.do(req, &out, "POST /v1/resolve"); err != nil {
-		return nil, err
-	}
-	return &out, nil
-}
-
 // --- Quota ---
 
 // QuotaOutput holds quota information.
@@ -1198,6 +1358,14 @@ type apiErrorDetail struct {
 // --- HTTP plumbing ---
 
 func (c *Client) do(req *http.Request, out any, endpoint string) (*ResponseMeta, error) {
+	return c.doWithRetryLimit(req, out, endpoint, c.maxRetries)
+}
+
+func (c *Client) doOnce(req *http.Request, out any, endpoint string) (*ResponseMeta, error) {
+	return c.doWithRetryLimit(req, out, endpoint, 0)
+}
+
+func (c *Client) doWithRetryLimit(req *http.Request, out any, endpoint string, maxRetries int) (*ResponseMeta, error) {
 	req.Header.Set("Content-Type", "application/json")
 	// NOTE: If you add header logging, redact the Authorization value to avoid leaking API keys.
 	req.Header.Set("Authorization", "Bearer "+c.apiKey)
@@ -1218,7 +1386,7 @@ func (c *Client) do(req *http.Request, out any, endpoint string) (*ResponseMeta,
 	}
 
 	var lastErr error
-	for attempt := 0; attempt <= c.maxRetries; attempt++ {
+	for attempt := 0; attempt <= maxRetries; attempt++ {
 		if attempt > 0 {
 			if err := c.waitForRetry(req.Context(), attempt, lastErr); err != nil {
 				return nil, err
@@ -1234,7 +1402,7 @@ func (c *Client) do(req *http.Request, out any, endpoint string) (*ResponseMeta,
 		resp, err := c.httpClient.Do(req)
 		if err != nil {
 			lastErr = fmt.Errorf("http request: %w", err)
-			if attempt < c.maxRetries {
+			if attempt < maxRetries {
 				continue
 			}
 			return nil, lastErr
@@ -1250,7 +1418,7 @@ func (c *Client) do(req *http.Request, out any, endpoint string) (*ResponseMeta,
 
 		if resp.StatusCode >= 400 {
 			apiErr := c.parseError(resp, respBody)
-			if isRetryable(resp.StatusCode) && attempt < c.maxRetries {
+			if isRetryable(resp.StatusCode) && attempt < maxRetries {
 				lastErr = apiErr
 				continue
 			}

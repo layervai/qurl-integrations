@@ -14,14 +14,30 @@ const {
   TextInputStyle,
   AttachmentBuilder,
 } = require('discord.js');
-const { Routes } = require('discord-api-types/v10');
+const {
+  Routes,
+  ApplicationIntegrationType,
+  InteractionContextType,
+} = require('discord-api-types/v10');
 const crypto = require('crypto');
 const config = require('./config');
 const db = require('./store');
 const logger = require('./logger');
-const viewUpdateRegistry = require('./view-update-registry');
-const { createHandleViewUpdate } = require('./view-update-handler');
-const { COLORS, TIMEOUTS, RESOURCE_TYPES, DM_STATUS, MAX_FILE_SIZE, MAX_CONCURRENT_MONITORS, DISCORD_MEMBERS_PAGE_SIZE, PREWARM_MAX_PAGES, UNLINKED_CACHE_COMPLETENESS_THRESHOLD, AUDIT_EVENTS, TRUST } = require('./constants');
+const {
+  COLORS,
+  TIMEOUTS,
+  RESOURCE_TYPES,
+  DM_STATUS,
+  MAX_FILE_SIZE,
+  TOKENS_PER_RESOURCE,
+  MAX_CONCURRENT_MONITORS,
+  DISCORD_MEMBERS_PAGE_SIZE,
+  PREWARM_MAX_PAGES,
+  AUDIT_EVENTS,
+  TRUST,
+  ddbSendConfigGuardActionCount,
+  ddbSendConfigGuardFitsTransaction,
+} = require('./constants');
 const {
   expiryToISO,
   expiryToMs,
@@ -33,13 +49,22 @@ const {
   SELF_DESTRUCT_PRESETS,
   SELF_DESTRUCT_NO_TIMER_VALUE,
 } = require('./utils/time');
-const { requireAdmin } = require('./utils/admin');
 const { signQurlOAuthState } = require('./utils/qurl-oauth-state');
 const { deleteLink } = require('./qurl');
+const { resourceIdLogRef } = require('./utils/resource-id');
 const { downloadAndUpload, reUploadBuffer, mintLinks, detectWatermark, uploadJsonToConnector, isAllowedSourceUrl } = require('./connector');
 const { deleteFlow, transitionFlow, supersedeOrCreate } = require('./flow-state');
 const { fireAndForgetLinkGuildWebhookSubscription } = require('./guild-webhook-link');
-const { flowIdForInteraction, registerFlow, safeReply, siblingMessageForStage } = require('./flow-dispatch');
+const {
+  flowIdForInteraction,
+  registerFlow,
+  safeReply,
+  siblingMessageForStage,
+} = require('./flow-dispatch');
+const {
+  isUnsupportedQurlContext,
+  UNSUPPORTED_CONTEXT_MSG,
+} = require('./interaction-context');
 const {
   searchPlaces,
   findPlaceFromText,
@@ -49,10 +74,6 @@ const {
   decodePlaceIdSentinel,
   PLACE_ID_SHAPE_RE,
 } = require('./places');
-
-// Max tokens the QURL API allows per resource. When exceeded, a new
-// resource must be created (re-upload) to get a fresh token pool.
-const TOKENS_PER_RESOURCE = 10;
 
 // Absolute floor above which a single send earns a `WARN`-level
 // audit log at executeSendPipeline entry. 1000 chosen as the cliff
@@ -158,8 +179,50 @@ function emitMintFailureAudit(error, { sendId, kind }) {
 // Extracted to deduplicate ~13 identical `.catch(err => logger.warn(...))`
 // one-liners across this file.
 const logIgnoredDiscordErr = (err) => logger.warn('Discord API op failed (ignored)', { error: err.message });
+
 const { sendDM } = require('./discord');
 const { editDM, sendChannelMessage } = require('./discord-rest');
+
+// A component interaction owns its flow mutation only after Discord accepts
+// its acknowledgement. SQS delivery and Gateway reconnects are at-least-once:
+// a duplicate interaction loses the one-shot deferUpdate race with Discord.
+// Continuing after that failure lets the unacknowledged copy mutate DDB, then
+// makes the acknowledged copy lose OCC and replace a valid card with the
+// "superseded" error. Stop at the acknowledgement boundary for every remote
+// or unknown error, not only Discord 10062/40060 responses: a transport failure
+// has an unknown outcome, so continuing could let an unacknowledged copy mutate
+// state. The one exception is discord.js's local InteractionAlreadyReplied
+// error when this same interaction object records that it already acknowledged.
+// If the sole delivery has a transport failure, Discord keeps its retry/toast
+// UX and the user can click again. Preserving state is the safer outcome.
+async function deferUpdateOrStop(interaction, flowId) {
+  try {
+    await interaction.deferUpdate();
+    return true;
+  } catch (err) {
+    // discord.js throws this locally when this interaction object already
+    // completed an acknowledgement. That means this copy still owns the
+    // action. Reconstructed duplicate deliveries use separate objects whose
+    // flags start false, so their rejected REST acknowledgement still stops.
+    if (err?.code === 'InteractionAlreadyReplied'
+        && (interaction.deferred || interaction.replied)) {
+      logger.debug('Interaction was already acknowledged by this handler; continuing', {
+        flow_id: flowId,
+        custom_id: interaction.customId ?? null,
+      });
+      return true;
+    }
+    logger.warn('Interaction acknowledgement failed — stopping before state change', {
+      flow_id: flowId,
+      custom_id: interaction.customId ?? null,
+      error_code: err?.code ?? err?.rawError?.code ?? null,
+      status_code: err?.status ?? null,
+      error: err?.message,
+    });
+    return false;
+  }
+}
+
 // renderViewCounter lives in its own leaf module so the cross-replica
 // webhook fast-path (routes/qurl-webhook.js) can import the SAME pure
 // renderer without pulling commands.js (+ discord.js) into the HTTP
@@ -168,71 +231,6 @@ const { editDM, sendChannelMessage } = require('./discord-rest');
 // across replicas. Still re-exported via _test (see module.exports) so
 // the byte-identity unit test reads it where it always did.
 const { renderViewCounter } = require('./view-counter-render');
-
-
-// Generate an OAuth state token bound to the initiating Discord user.
-//
-// Format: `{nonce}.{hmac}` where hmac = HMAC-SHA256(OAUTH_STATE_SECRET,
-// `${discordId}:${nonce}`). On callback we re-compute the HMAC against the
-// discord_id pulled from consumePendingLink(); a mismatch means the state
-// was tampered with or replayed across users, even if the random nonce
-// happened to collide with a live pending row.
-//
-// Defense-in-depth only — the primary binding is the single-use DB row
-// plus the HttpOnly/SameSite=Lax session cookie. This adds a third check
-// so a stolen state URL cannot be silently coerced to another user.
-let _warnedStateSecretFallback = false;
-// Random per-process fallback so even inside the Jest harness there's no
-// static key that, if accidentally shipped, would be forgeable. Regenerated
-// on every process start; tests that need a stable secret should set
-// OAUTH_STATE_SECRET explicitly in their own mocks.
-const _testFallbackSecret = crypto.randomBytes(32).toString('hex');
-function stateSecret() {
-  // Prefer a dedicated OAUTH_STATE_SECRET so a compromised GITHUB_CLIENT_SECRET
-  // can be rotated without also invalidating in-flight OAuth state tokens —
-  // and vice versa. Blast-radius isolation: leaking one doesn't enable
-  // forgery of the other's use cases. Fall back to GITHUB_CLIENT_SECRET for
-  // backward-compat with existing deployments.
-  const dedicated = process.env.OAUTH_STATE_SECRET;
-  if (dedicated) return dedicated;
-  if (!config.GITHUB_CLIENT_SECRET) {
-    // Only use the static fallback inside Jest (NODE_ENV=test AND either
-    // JEST_WORKER_ID set by Jest, or CI=true). This raises the bar: merely
-    // setting NODE_ENV=test by accident in a deployed env doesn't enable
-    // the forgeable key. Everywhere else throws hard so a misconfig is loud.
-    const inTestHarness = process.env.NODE_ENV === 'test'
-      && (process.env.JEST_WORKER_ID || process.env.CI === 'true');
-    if (!inTestHarness) {
-      throw new Error('Refusing to mint OAuth state: OAUTH_STATE_SECRET or GITHUB_CLIENT_SECRET must be set.');
-    }
-    if (!_warnedStateSecretFallback) {
-      logger.warn('OAuth state HMAC using per-process random test fallback — set OAUTH_STATE_SECRET or GITHUB_CLIENT_SECRET');
-      _warnedStateSecretFallback = true;
-    }
-    return _testFallbackSecret;
-  }
-  return config.GITHUB_CLIENT_SECRET;
-}
-function generateState(discordId) {
-  const nonce = crypto.randomBytes(16).toString('hex');
-  const sig = crypto.createHmac('sha256', stateSecret())
-    .update(`${discordId}:${nonce}`)
-    .digest('hex');
-  return `${nonce}.${sig}`;
-}
-function verifyStateBinding(state, discordId) {
-  if (typeof state !== 'string') return false;
-  const parts = state.split('.');
-  if (parts.length !== 2) return false;
-  const [nonce, sig] = parts;
-  if (!/^[0-9a-f]{32}$/.test(nonce) || !/^[0-9a-f]{64}$/.test(sig)) return false;
-  const expected = crypto.createHmac('sha256', stateSecret())
-    .update(`${discordId}:${nonce}`)
-    .digest('hex');
-  try {
-    return crypto.timingSafeEqual(Buffer.from(sig, 'hex'), Buffer.from(expected, 'hex'));
-  } catch { return false; }
-}
 
 // --- QURL send helpers ---
 
@@ -572,7 +570,8 @@ const addRecipientsLocks = new Set();
 // Same-process per-send Revoke lock. Collector-local `revokeInFlight`
 // handles duplicate clicks inside one management collector; this Set lets
 // another collector in the same process see a Revoke already mutating the
-// send. Cross-process safety still relies on revoked_at/#862.
+// send. Cross-process safety relies on revoked_at plus the guarded
+// recordQURLSendBatch transaction.
 const revokingSendLocks = new Set();
 const ADD_RECIPIENTS_IN_PROGRESS_MSG = 'Already processing an "Add Recipients" action.';
 const ALREADY_REVOKING_SEND_MSG = 'Already revoking links for this send.';
@@ -769,9 +768,10 @@ function resolveRoleNames(guild, ids) {
 // embed copy is intentionally evocative ("opened a door", "Closes")
 // rather than literal ("shared a file with you") — the brand goal is to
 // convey the qURL hidden-layer model, not just announce a file transfer.
-// The qURL link is rendered as a `🚪 Step Through` Link button rather
-// than a bare URL field; recipients click the button to open the link
-// in their default browser.
+// Links within Discord's 512-character component limit render as the
+// original `🚪 Step Through` and trust buttons. Longer qv2 links render
+// both actions as equal-weight Markdown links inside the embed so
+// Discord accepts the DM without changing the qURL itself.
 //
 // `senderAlias` is the sender's friendly display name (Discord nickname
 // > globalName > username) sourced from resolveSenderAlias.
@@ -779,10 +779,8 @@ function resolveRoleNames(guild, ids) {
 // renders as an italicized blockquote between the sender line and the
 // expiry line.
 //
-// Returns the full Discord message options object (`embeds` + `components`)
-// rather than just the embed, since the button is not part of the embed
-// — it lives in a top-level component row alongside it. Callers pass the
-// returned payload directly to `sendDM`.
+// Returns the full Discord message options object (`embeds` + `components`).
+// Callers pass the returned payload directly to `sendDM`.
 //
 // Rendered output (blank rows = Discord's natural section spacing,
 // NOT literal `\n` separators — descLines.join('\n') is single-newline):
@@ -803,7 +801,7 @@ function resolveRoleNames(guild, ids) {
 // Discord's Link-style buttons are always grey/blurple; the green color
 // in the design mockup would require a Success-style button + custom_id
 // + interaction handler that redirects, which adds a click round-trip
-// for marginal aesthetic gain. Sticking with Link button for this pivot.
+// for marginal aesthetic gain.
 // Single source of truth for the SlashCommandBuilder `addChoices(...)` —
 // `EXPIRY_CHOICES` is derived from this map so dropdown labels and values
 // cannot drift. The DM embed renders expiry as a Discord native relative
@@ -969,6 +967,16 @@ function buildTrustButton() {
     .setURL(TRUST.LANDING_URL);
 }
 
+// Discord rejects an entire message when any Link button URL exceeds
+// 512 characters. Current qv2 links can exceed that component-specific
+// limit while remaining well within the embed-description limit.
+// TODO(upstream-contract): Discord API Link Button URL maximum.
+const DISCORD_LINK_BUTTON_URL_MAX = 512;
+
+function requiresMarkdownDeliveryActions(qurlLink) {
+  return qurlLink.length > DISCORD_LINK_BUTTON_URL_MAX;
+}
+
 // The Step Through Link button is the primary action on every DM.
 // Extracted as a factory so the bulk-path call site can compose
 // per-link buttons without round-tripping through buildDeliveryPayload
@@ -1044,12 +1052,13 @@ function capUtf16Units(s, maxUtf16Units) {
   return truncated;
 }
 
-// Composes the embed only (no button row). Split out so the bulk-path
-// dispatch in handleAddRecipients can build N embeds + N step-through
-// buttons + 1 trust button without round-tripping through
-// buildDeliveryPayload (which always allocates a trust button per
-// call). The single-path call sites use buildDeliveryPayload below.
-function buildDeliveryEmbed({ senderAlias, guildName, guildIconUrl, expiresAt, personalMessage }) {
+// Composes the embed only (no button row). The optional Markdown actions
+// are used when a qv2 link exceeds Discord's Link-button URL limit. The
+// single-path call sites use buildDeliveryPayload below.
+function buildDeliveryEmbed({
+  senderAlias, guildName, guildIconUrl, qurlLink, expiresAt, personalMessage,
+  renderActionsAsMarkdown = false,
+}) {
   // Discord's `<t:N:R>` markdown wants a positive integer Unix-seconds
   // value; anything else renders a misleading recipient surface (e.g.
   // `<t:0:R>` → "56 years ago", `<t:undefined:R>` → literal text,
@@ -1149,6 +1158,9 @@ function buildDeliveryEmbed({ senderAlias, guildName, guildIconUrl, expiresAt, p
   }
   const expiryVerb = expiresAt <= Math.floor(Date.now() / 1000) ? 'Closed' : 'Closes';
   descLines.push(`🕐 ${expiryVerb} <t:${expiresAt}:R>`);
+  if (renderActionsAsMarkdown) {
+    descLines.push(`[🚪 Step Through](${qurlLink}) · [🛡️ What is qURL?](${TRUST.LANDING_URL})`);
+  }
 
   // Author row is the embed's "address bar" — anchored top, visually
   // distinct from the description, the closest analog Discord offers
@@ -1169,13 +1181,18 @@ function buildDeliveryEmbed({ senderAlias, guildName, guildIconUrl, expiresAt, p
     .setFooter({ text: `opens ${TRUST.DESTINATION_DOMAIN}` });
 }
 
-// Convenience wrapper composing the embed + one ActionRow holding
-// [Step Through, What is qURL?]. Used by the single-path call site
-// (executeSendPipeline); the bulk path composes from the primitives
-// directly so it can pack N step-throughs with one shared trust button.
+// Convenience wrapper used by executeSendPipeline. Short links preserve
+// the original [Step Through, What is qURL?] ActionRow; long qv2 links
+// place both actions in the embed and return no components.
 function buildDeliveryPayload({ senderAlias, guildName, guildIconUrl, qurlLink, expiresAt, personalMessage }) {
-  const embed = buildDeliveryEmbed({ senderAlias, guildName, guildIconUrl, expiresAt, personalMessage });
-  const components = [new ActionRowBuilder().addComponents(buildStepThroughButton(qurlLink), buildTrustButton())];
+  const renderActionsAsMarkdown = requiresMarkdownDeliveryActions(qurlLink);
+  const embed = buildDeliveryEmbed({
+    senderAlias, guildName, guildIconUrl, qurlLink, expiresAt, personalMessage,
+    renderActionsAsMarkdown,
+  });
+  const components = renderActionsAsMarkdown
+    ? []
+    : [new ActionRowBuilder().addComponents(buildStepThroughButton(qurlLink), buildTrustButton())];
   return { embeds: [embed], components };
 }
 
@@ -1315,85 +1332,23 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
     });
   }
 
-  // Hoisted so the createHandleViewUpdate factory closes over the
-  // live `let` binding rather than a pre-initialized TDZ slot — a
-  // future synchronous-handler refactor would otherwise hit
-  // ReferenceError on getViewed/setViewed.
   let viewed = 0;
   let allDone = false;
 
-  // View-update push (feat #60). Shared callback per monitor —
-  // registered against every tracked qurl_id; render goes through
-  // linkStatus mutation + safeEdit (NOT runTick) to avoid the
-  // per-event DDB BatchGet. Polling tick remains the correctness
-  // primitive. Handler factory in view-update-handler.js so the
-  // state matrix is unit-testable without a full monitor closure.
-  //
-  // Unregister at stop() iterates `trackedQurlIds` directly (set
-  // cleared AFTER the unregister loop). Registry.unregister is a
-  // no-op for keys never registered (e.g. when the flag is off), so
-  // iterating the superset is safe.
-  const handleViewUpdate = createHandleViewUpdate({
-    sendId,
-    linkStatus,
-    getButtonRow: () => buttonRow,
-    isStopped: () => stopped,
-    isViewCounterDegraded: () => viewCounterDegraded,
-    hasInteraction: () => !!interaction,
-    getViewed: () => viewed,
-    setViewed: (n) => { viewed = n; },
-    getExpectedCount: () => expectedCount,
-    buildStatusMsg,
-    safeEdit,
-    onAllDone: () => {
-      allDone = true;
-      clearTimeout(timer);
-    },
-    logger,
-  });
-  // Hoist the flag read once per monitor — registerViewUpdateFor
-  // is called up to QURL_SEND_MAX_RECIPIENTS times (default 20000) on
-  // construction + once per /qurl add. Re-reading config on every
-  // call is negligible but the hoist reads cleaner.
-  const viewUpdatePushEnabled = config.ENABLE_VIEW_UPDATE_PUSH;
-  function registerViewUpdateFor(qurlId) {
-    if (!viewUpdatePushEnabled) return;
-    viewUpdateRegistry.register(qurlId, handleViewUpdate);
-  }
-  for (const qurlId of trackedQurlIds) {
-    registerViewUpdateFor(qurlId);
-  }
-
-  // Bumped by addRecipients. A tick whose getQurlViews resolves after
-  // generation advanced must skip its render — the views map was built
-  // against the pre-add tracked set and could under-report.
+  // A tick that began before addRecipients must not render its stale view map.
   let trackingGeneration = 0;
 
   const control = {
-    // newLinks: Array<{qurlId, username}> aligned per-recipient. Must
-    // seed `linkStatus` AND `trackedQurlIds` together — extending only
-    // the tracked set means runTick's view-flip lookup misses the new
-    // qurl_ids and the counter never advances for /qurl add recipients.
+    // Keep the status map and tracked IDs aligned for added recipients.
     addRecipients(count, newLinks) {
-      // Early-out if this monitor has already been stopped. Without
-      // this guard a post-stop addRecipients call would extend
-      // expectedCount, linkStatus, AND register new view-update
-      // callbacks against the registry — the latter wouldn't be
-      // unregistered (stop() has already iterated trackedQurlIds),
-      // pinning the closure (linkStatus + safeEdit) until process
-      // restart. Pre-#60 fields (expectedCount,
-      // linkStatus) also leaked into a dead monitor; this guard
-      // closes both the new + pre-existing leak surfaces.
+      // Ignore additions after stop; they would retain linkStatus and safeEdit until process exit.
       if (stopped) return;
       expectedCount += count;
       if (Array.isArray(newLinks)) {
         for (const item of newLinks) {
           const qid = item && item.qurlId;
           if (!qid) {
-            // Mirror the construction-time warn — an operator chasing
-            // "why is the counter blank?" needs a breadcrumb when the
-            // degraded flip happens mid-life via /qurl add, not just
-            // at the original send.
+            // Keep the monitor degraded if a later recipient has no qurl_id.
             if (!viewCounterDegraded) {
               logger.warn('Monitor view counter degraded mid-life — addRecipients link missing qurl_id', { sendId });
             }
@@ -1403,21 +1358,11 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
           if (!trackedQurlIds.has(qid)) {
             trackedQurlIds.add(qid);
             linkStatus.set(qid, { status: 'pending', username: item.username || 'unknown' });
-            // Register the new qurl_id for view-update push (feat #60).
-            // Symmetric with the construction-time loop above — the
-            // tracked set and the registry must extend together or the
-            // new recipients never get sub-second updates (the polling
-            // path catches them on the next interval regardless).
-            registerViewUpdateFor(qid);
           }
         }
       }
       trackingGeneration++;
-      // /qurl add is an explicit signal the send is NOT idle, so re-enter
-      // the dense early phase. Refreshing earlyPhaseUntil (NOT startTime,
-      // which governs the 14-min life cap) speeds the cadence back up
-      // without extending the monitor's lifetime. nextPollDelay() reads
-      // this at the NEXT reschedule.
+      // Re-enter the dense polling phase without extending monitor lifetime.
       earlyPhaseUntil = Date.now() + EARLY_POLL_WINDOW_MS;
       // Two cases:
       //   - Monitor already settled (all initial recipients viewed → the
@@ -1446,16 +1391,6 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
       stopped = true;
       clearTimeout(timer);
       activeMonitors.delete(control);
-      // Unregister the shared callback from every tracked qurl_id so
-      // the registry doesn't pin this monitor's closure state past
-      // stop() (feat #60). Load-bearing: a long-running monitor that
-      // never unregisters would otherwise hold linkStatus + safeEdit
-      // references via the shared closure until process restart.
-      // Iterates trackedQurlIds directly (no parallel bookkeeping
-      // array) — set cleared in the next two lines, so order matters.
-      for (const qurlId of trackedQurlIds) {
-        viewUpdateRegistry.unregister(qurlId, handleViewUpdate);
-      }
       linkStatus.clear();
       trackedQurlIds.clear();
       interaction = null;
@@ -1740,6 +1675,12 @@ async function mintLinksInBatches({ initialResourceId, reuploadFn, expiresAt, re
   let currentResourceId = initialResourceId;
   let tokensUsed = 0;
 
+  // Mirrored by planMintBatches in scripts/loadtest-standalone.js, so the load
+  // test issues the upload/mint pattern a real send does. Nothing ties the two
+  // at compile time — tests/loadtest-mint-batches.test.js re-implements this
+  // loop as an oracle and diffs the shapes. If the guard, the increment or the
+  // batchSize formula below changes, update that oracle in the same PR or the
+  // load test keeps measuring the old shape while staying green.
   for (let i = 0; i < recipientCount; i += TOKENS_PER_RESOURCE) {
     if (tokensUsed >= TOKENS_PER_RESOURCE && i > 0) {
       const re = await reuploadFn();
@@ -1841,6 +1782,26 @@ function truncForLog(v) {
     return `${cps.slice(0, 64).join('')}…`;
   }
   return s;
+}
+
+// Best-effort scrub for persistence diagnostics: every HTTP(S) URL is removed,
+// and scheme-less access tokens using qurl-service's current prefix are removed.
+// TODO(upstream-contract): qurl-service owns the `at_` access-token prefix.
+// Other scheme-less credential formats are intentionally outside this narrow
+// helper; callers must still omit raw bearer fields, while the structured
+// logger redacts metadata whose key is shaped like a qURL access link.
+function scrubQurlCredentialForLog(message) {
+  if (typeof message !== 'string') return undefined;
+  return truncForLog(message
+    .replace(/https?:\/\/\S+/gi, '[REDACTED_URL]')
+    .replace(/(?<![A-Za-z_])at(?:_|%5f)[A-Za-z0-9_%-]+/gi, 'at_[REDACTED]'));
+}
+
+function persistenceErrorMessageForLog(err) {
+  if (typeof err?.message === 'string') return scrubQurlCredentialForLog(err.message);
+  if (err?.message != null) return scrubQurlCredentialForLog(String(err.message));
+  if (typeof err !== 'object' || err == null) return scrubQurlCredentialForLog(String(err));
+  return undefined;
 }
 
 async function executeSendPipeline(interaction, {
@@ -2127,6 +2088,10 @@ async function executeSendPipeline(interaction, {
       error: error.message,
       apiCode: error.apiCode,
       status: error.status,
+      ...(error.partialLinkCount ? {
+        partial_link_count: error.partialLinkCount,
+        partial_qurl_ids: error.partialQurlIds,
+      } : {}),
       sendId,
     });
     clearCooldown(interaction.user.id); // allow retry on failure
@@ -2216,11 +2181,24 @@ async function executeSendPipeline(interaction, {
       guildId: interaction.guildId,
     })));
   } catch (err) {
-    // Log the orphaned QURL resources at error level so an operator can
-    // manually revoke them — they exist on the QURL side with no local row.
+    // Log only non-secret identifiers so an operator can manually revoke the
+    // orphaned qURLs. qurlLink carries its live access token in the fragment
+    // and must never reach logs. resourceId drives the same whole-resource
+    // cleanup used by this bot (DELETE /v1/qurls/{resourceId}); qurlId lets an
+    // operator correlate each orphaned token in that resource.
+    // TODO(upstream-contract): qurl-service owns the whole-resource DELETE.
+    // Scrub err.message even for AWS service exceptions: validation messages
+    // can echo offending request values, but contain useful failure details.
     logger.error('recordQURLSendBatch failed; aborting send to keep state consistent', {
-      sendId, error: err.message, linkCount: qurlLinks.length,
-      orphanedResources: qurlLinks.map(l => ({ resourceId: l.resourceId, qurlLink: l.qurlLink })),
+      sendId,
+      errorName: err?.name,
+      errorCode: err?.code,
+      errorFault: err?.$fault,
+      httpStatusCode: err?.$metadata?.httpStatusCode,
+      requestId: err?.$metadata?.requestId,
+      errorMessage: persistenceErrorMessageForLog(err),
+      linkCount: qurlLinks.length,
+      orphanedResources: qurlLinks.map(l => ({ resourceId: l.resourceId, qurlId: l.qurlId })),
     });
     clearCooldown(interaction.user.id);
     return interaction.editReply({
@@ -2532,8 +2510,9 @@ async function executeSendPipeline(interaction, {
     // by a stale "Revoked 0/0". These flags are collector-local UX gates;
     // revokingSendLocks handles same-process cross-collector Revoke only
     // while work is active. After the lock releases, and across processes,
-    // revoked_at is the correctness boundary until #862 closes the write
-    // window.
+    // revoking_at/revoked_at are the correctness boundary;
+    // recordQURLSendBatch enforces them again in the same transaction as any
+    // later Add Recipients rows.
     let revokeResultUserNames = [];
     let revokeResultTotal = 0;
     // Authoritative DDB strict-success count. Tracked separately from
@@ -2541,6 +2520,7 @@ async function executeSendPipeline(interaction, {
     // if a successful recipient_id can't be name-resolved against
     // `recipients[]`.
     let revokeResultSuccess = 0;
+    let revokeResultFinalizationFailed = false;
     let revokeShowAll = false;
     let revokeInFlight = false;
     let revokeSucceeded = false;
@@ -2576,7 +2556,14 @@ async function executeSendPipeline(interaction, {
         // Toggle Show Recipients / Hide Recipients on the post-revoke list.
         await btnInteraction.deferUpdate().catch(logIgnoredDiscordErr);
         revokeShowAll = !revokeShowAll;
-        const updated = renderRevokeMsg(sendId, revokeResultUserNames, revokeResultTotal, revokeShowAll, revokeResultSuccess);
+        const updated = renderRevokeMsg(
+          sendId,
+          revokeResultUserNames,
+          revokeResultTotal,
+          revokeShowAll,
+          revokeResultSuccess,
+          revokeResultFinalizationFailed,
+        );
         await interaction.editReply(revokeReplyPayload(updated)).catch(logIgnoredDiscordErr);
         return;
       }
@@ -2616,6 +2603,7 @@ async function executeSendPipeline(interaction, {
             revokeResultUserNames = [];
             revokeResultTotal = 0;
             revokeResultSuccess = 0;
+            revokeResultFinalizationFailed = false;
             revokeShowAll = false;
             revokeResultKnown = false;
             // Keep revokeInFlight true after success as the collector-local
@@ -2627,6 +2615,23 @@ async function executeSendPipeline(interaction, {
           }
           await interaction.editReply({ content: 'Revoking links...', components: [] }).catch(logIgnoredDiscordErr);
           const revoked = await revokeAllLinks(sendId, interaction.user.id, apiKey, resolveSenderAlias(interaction));
+          if (!revoked.barrierEstablished) {
+            revokeResultUserNames = [];
+            revokeResultTotal = 0;
+            revokeResultSuccess = 0;
+            revokeResultFinalizationFailed = false;
+            revokeShowAll = false;
+            revokeResultKnown = false;
+            // Terminal for this collector even though the exact reason is
+            // intentionally hidden (unknown, foreign, or concurrently
+            // finalized all share the store's fail-closed result).
+            revokeSucceeded = true;
+            await interaction.editReply({
+              content: 'Could not verify this send for revocation. It may already be revoked or unavailable; run `/qurl revoke` to refresh.',
+              components: [],
+            }).catch(logIgnoredDiscordErr);
+            return;
+          }
           // Iterate `recipients` (canonical send-confirmation order)
           // and filter by membership — `successUserIds` walks Set
           // insertion order from resource-grouped iteration, which
@@ -2637,9 +2642,17 @@ async function executeSendPipeline(interaction, {
             .map(r => resolveRecipientAlias(r, interaction));
           revokeResultTotal = revoked.total;
           revokeResultSuccess = revoked.success;
+          revokeResultFinalizationFailed = revoked.finalizationFailed;
           revokeShowAll = false;
           revokeResultKnown = true;
-          const initial = renderRevokeMsg(sendId, revokeResultUserNames, revokeResultTotal, false, revokeResultSuccess);
+          const initial = renderRevokeMsg(
+            sendId,
+            revokeResultUserNames,
+            revokeResultTotal,
+            false,
+            revokeResultSuccess,
+            revokeResultFinalizationFailed,
+          );
           await interaction.editReply(revokeReplyPayload(initial)).catch(logIgnoredDiscordErr);
           // Keep revokeInFlight true after success as the collector-local
           // terminal gate for duplicate Revoke clicks; revokingSendLocks only
@@ -2663,8 +2676,8 @@ async function executeSendPipeline(interaction, {
             content: 'Failed to revoke links. Try `/qurl revoke` instead.',
             components: [],
           }).catch(logIgnoredDiscordErr);
-          // Links still exist after a failed revoke, so Add Recipients can
-          // reopen. Keep only successful revokes sticky.
+          // Release only this collector's retry gate. Durable revoking_at
+          // keeps Add Recipients closed after a partial/external failure.
           revokeInFlight = false;
         } finally {
           revokingSendLocks.delete(sendId);
@@ -2685,16 +2698,18 @@ async function executeSendPipeline(interaction, {
         // release on rejection. That way a future refactor that adds an
         // `await` in the remaining check can't reopen a racy window.
         if (revokingSendLocks.has(sendId) || revokeSucceeded) {
-          // Completed revokes set revoked_at before DELETE attempts, even if
-          // individual deletes later fail, so stale Add clicks stay disabled.
+          // Durable revoking_at/revoked_at state keeps stale Add clicks
+          // disabled even after this collector-local lock is released.
           let content = ALREADY_REVOKING_SEND_MSG;
           if (revokeSucceeded) {
             if (!revokeResultKnown) {
-              content = 'This send has already been revoked. Add Recipients is disabled.';
+              content = 'This send is no longer revocable. Add Recipients is disabled.';
+            } else if (revokeResultFinalizationFailed) {
+              content = 'Links were revoked, but qURL could not save the final state. Add Recipients is disabled; retry `/qurl revoke`.';
             } else if (revokeResultTotal === 0) {
               content = 'No live links remain for this send.';
             } else if (revokeResultSuccess < revokeResultTotal) {
-              content = 'Revoke already ran for this send. Add Recipients is disabled.';
+              content = 'Revocation is incomplete for this send. Add Recipients is disabled; retry `/qurl revoke`.';
             } else {
               content = 'Links for this send have already been revoked.';
             }
@@ -2840,7 +2855,7 @@ async function executeSendPipeline(interaction, {
         if (revokeSucceeded) {
           if (!revokeResultKnown) {
             interaction.editReply({
-              content: 'Links for this send have already been revoked.',
+              content: 'This send is no longer revocable.',
               components: [],
             }).catch(logIgnoredDiscordErr);
             return;
@@ -2849,7 +2864,14 @@ async function executeSendPipeline(interaction, {
           // toggled), strip components. Omit `files`/`attachments`
           // so Discord keeps the existing revoked-users.txt without
           // re-uploading the same blob 15min later.
-          const final = renderRevokeMsg(sendId, revokeResultUserNames, revokeResultTotal, revokeShowAll, revokeResultSuccess);
+          const final = renderRevokeMsg(
+            sendId,
+            revokeResultUserNames,
+            revokeResultTotal,
+            revokeShowAll,
+            revokeResultSuccess,
+            revokeResultFinalizationFailed,
+          );
           interaction.editReply({ content: final.content, components: [] }).catch(logIgnoredDiscordErr);
           return;
         }
@@ -2876,6 +2898,63 @@ async function executeSendPipeline(interaction, {
   }
 }
 
+async function cleanupFreshAddRecipientResources(batchSends, apiKey, sendId, options = {}) {
+  const rowsMayHavePersisted = options.rowsMayHavePersisted !== false;
+  const cleanupReason = options.reason || (rowsMayHavePersisted ? 'revoked_guard' : 'pre_persistence');
+  const txnActionCount = ddbSendConfigGuardActionCount(batchSends);
+  if (rowsMayHavePersisted && !ddbSendConfigGuardFitsTransaction(batchSends)) {
+    // Unreachable by construction for today's Add Recipients flow: oversized
+    // batches fail before DDB, and revoked errors only come from a single
+    // transaction. If a future caller violates that invariant, still revoke
+    // the freshly minted qURLs; rows may point at deleted resources, but no DMs
+    // have been sent and the grants fail closed.
+    logger.error('Cleaning up oversized Add Recipients batch after possible persistence', {
+      sendId,
+      send_count: batchSends.length,
+      txn_actions: txnActionCount,
+    });
+  }
+
+  // Called when no recipient rows landed, or when a terminal guarded
+  // transaction failure is ambiguous enough that deleting freshly minted qURLs
+  // is the fail-closed outcome (no DMs have been sent yet).
+  const resourceIds = [...new Set(
+    batchSends
+      .map(s => s.resourceId)
+      .filter(id => typeof id === 'string' && id.length > 0),
+  )];
+  if (resourceIds.length === 0) return;
+
+  const results = await batchSettled(resourceIds, async (resourceId) => {
+    await deleteLink(resourceId, apiKey);
+    return resourceId;
+  }, 5);
+  const failed = [];
+  results.forEach((result, index) => {
+    if (result.status === 'rejected') {
+      failed.push({
+        resource_ref: resourceIdLogRef(resourceIds[index]),
+        error: result.reason?.message,
+      });
+    }
+  });
+  if (failed.length > 0) {
+    logger.error('Failed to clean up freshly minted Add Recipients qURL resources', {
+      sendId,
+      reason: cleanupReason,
+      failed_count: failed.length,
+      total: resourceIds.length,
+      failures: failed,
+    });
+  } else {
+    logger.info('Cleaned up freshly minted Add Recipients qURL resources', {
+      sendId,
+      reason: cleanupReason,
+      total: resourceIds.length,
+    });
+  }
+}
+
 // Handle adding new recipients to an existing send. senderDiscordId is
 // derived from originalInteraction directly so no caller can pass a
 // mismatched value and accidentally let one user add recipients to another
@@ -2887,13 +2966,20 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
     return { msg: 'Send configuration not found.', newLinks: [], delivered: 0, failed: 0, newRecipients: [] };
   }
 
-  // getSendConfig runs after the user-select await, so revoked_at catches
-  // button, slash-command, and out-of-band revokes that landed while the
-  // Add Recipients picker was open. A revoke after this point can still race
-  // until recordQURLSendBatch grows a conditional write (#862).
+  // getSendConfig runs after the user-select await, so revoking_at/revoked_at
+  // catch button, slash-command, and out-of-band revokes that landed while
+  // the Add Recipients picker was open. recordQURLSendBatch repeats this
+  // guard in the recipient-row transaction to close the post-read write
+  // window.
   if (sendConfig.revoked_at) {
     return {
       msg: 'Cannot add recipients — this send has already been revoked.',
+      newLinks: [], delivered: 0, failed: 0, newRecipients: [],
+    };
+  }
+  if (sendConfig.revoking_at) {
+    return {
+      msg: 'Cannot add recipients — revocation is pending; retry `/qurl revoke`.',
       newLinks: [], delivered: 0, failed: 0, newRecipients: [],
     };
   }
@@ -2927,11 +3013,9 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
     .filter(u => !u.bot && u.id !== senderDiscordId)
     .values()];
   // {id, username} returned on every path after this point so the
-  // caller can extend its recipients[] (post-Add revoke shows
-  // names). The success path is the only one where this is load-
-  // bearing; failure paths return it for contract consistency, and
-  // the caller's `successSet.has(r.id)` filter excludes phantom
-  // IDs from any path that didn't write qurl_sends rows.
+  // caller can extend its recipients[] after a successful add. Most
+  // non-revoked failure paths return it for contract consistency; revoked
+  // paths return [] so the post-revoke render cannot show phantom grants.
   const resolvedRecipients = newRecipients.map(u => ({ id: u.id, username: u.username }));
 
   if (newRecipients.length === 0) {
@@ -2941,33 +3025,54 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
   // Create new QURL links for each resource type in the send config
   // recipientLinks[recipientId] = [{ qurlLink, resourceId, resType, label }]
   const recipientLinks = {};
-  const hasFile = sendConfig.connector_resource_id;
-  const hasLocation = sendConfig.actual_url;
+  // connector_resource_id exists for file AND location sends because maps are
+  // uploaded as JSON resources before minting. Classify by the persisted
+  // payload shape instead, or a location send would look like a mixed send and
+  // produce duplicate (send_id, recipient_id) rows.
+  const hasFilePayload = Boolean(sendConfig.attachment_url);
+  const hasLocation = Boolean(sendConfig.actual_url);
+  if (hasFilePayload && hasLocation) {
+    // Normal saveSendConfig callers persist one payload shape. Seeing both
+    // means a stale/corrupt mixed row; reject it instead of minting duplicate
+    // (send_id, recipient_id) rows that qurl_sends cannot represent cleanly.
+    logger.warn('addRecipients refused mixed file/location send config', { sendId });
+    return {
+      msg: 'Cannot add recipients — mixed file and location sends are not supported. Create a new send instead.',
+      newLinks: [], delivered: 0, failed: 0, newRecipients: [],
+    };
+  }
+  if (hasFilePayload && sendConfig.resource_type && sendConfig.resource_type !== RESOURCE_TYPES.FILE) {
+    logger.warn('addRecipients refused non-file send config with file payload', {
+      sendId,
+      resource_type: sendConfig.resource_type,
+    });
+    return {
+      msg: 'Cannot add recipients — stored send configuration is unsupported. Create a new send instead.',
+      newLinks: [], delivered: 0, failed: 0, newRecipients: [],
+    };
+  }
+  const hasLegacyFileMarker = !sendConfig.resource_type
+    && Boolean(sendConfig.connector_resource_id)
+    && !hasLocation;
+  const hasFile = hasFilePayload
+    || ((sendConfig.resource_type === RESOURCE_TYPES.FILE || hasLegacyFileMarker) && !hasLocation);
 
   if (!hasFile && !hasLocation) {
     return { msg: 'Cannot add recipients — send configuration is incomplete.', newLinks: [], delivered: 0, failed: 0, newRecipients: resolvedRecipients };
   }
 
-  // Tracks which prep paths actually completed so we can emit a single
-  // upload_success per send (not one per kind). A sendConfig with both
-  // file + location would otherwise fire two events for the same send,
-  // which double-counts UploadCount in CloudWatch unless the metric
-  // filter dimensions on `kind` (it doesn't, currently — see
-  // qurl-integrations-infra#309). The collapsed event keeps UploadCount
-  // = "number of fully-prepared sends" regardless of kind composition.
+  // Tracks which prep path completed so upload_success can name the kind
+  // after the shared try/catch. Mixed configs are rejected above because
+  // qurl_sends cannot represent two rows for one send/recipient pair.
   const preparedKinds = [];
   // Inherit the original send's self-destruct timer so additional
   // recipients see the same vanish behavior. Persisted as a REAL/Number
   // column; both stores return null when unset. Hoisted above the file/
-  // location branches because both pull the same value — the branches
-  // can both fire for a sendConfig that had both kinds, and a per-branch
-  // recompute would invite drift.
+  // location branches because both pull the same value.
   const inheritedDestruct = sendConfig.self_destruct_seconds ?? null;
   // activeKind tracks which branch is in-flight when the outer catch
-  // fires. The inner file try/catch returns on file failure, so by the
-  // time we reach the outer catch the failure was NOT in the file
-  // branch — `hasFile ? 'file' : 'location'` would mis-label mixed
-  // sends. Per-branch assignment is the durable fix.
+  // fires. A future refactor that throws before either branch sets it
+  // lands kind=null, which is discoverable in CloudWatch.
   let activeKind = null;
   try {
     if (hasFile) {
@@ -3034,7 +3139,15 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
           ? 'Original attachment URL has expired. Please create a new send.'
           : 'Failed to prepare links. Please try again, or create a new send if the issue persists.';
         logger.error('addRecipients file re-upload failed', {
-          sendId, error: err.message, apiCode: err.apiCode, status: err.status, isExpired,
+          sendId,
+          error: err.message,
+          apiCode: err.apiCode,
+          status: err.status,
+          ...(err.partialLinkCount ? {
+            partial_link_count: err.partialLinkCount,
+            partial_qurl_ids: err.partialQurlIds,
+          } : {}),
+          isExpired,
         });
         // Always emit — every failure here (CDN re-download, connector
         // re-upload, or mint) is a "couldn't create links" event. A rare,
@@ -3106,7 +3219,14 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
     }
   } catch (error) {
     logger.error('Failed to create links for additional recipients', {
-      sendId, error: error.message, apiCode: error.apiCode, status: error.status,
+      sendId,
+      error: error.message,
+      apiCode: error.apiCode,
+      status: error.status,
+      ...(error.partialLinkCount ? {
+        partial_link_count: error.partialLinkCount,
+        partial_qurl_ids: error.partialQurlIds,
+      } : {}),
     });
     const isPoolExhausted = error.message?.includes('429') || error.message?.includes('limit');
     const msg = isPoolExhausted
@@ -3119,9 +3239,8 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
     return { msg, newLinks: [], delivered: 0, failed: 0, newRecipients: resolvedRecipients };
   }
 
-  // Single emission per send. `kind` carries the composition so a future
-  // CloudWatch dimension on it can break the count down per kind without
-  // double-counting mixed sends. Values: 'file' | 'location' | 'mixed'.
+  // Single emission per send. Values: 'file' | 'location'. The fallback is
+  // defensive only; mixed configs are rejected before any prep path runs.
   if (preparedKinds.length > 0) {
     const kind = preparedKinds.length === 1 ? preparedKinds[0] : 'mixed';
     logger.audit(AUDIT_EVENTS.UPLOAD_SUCCESS, { send_id: sendId, kind });
@@ -3180,14 +3299,50 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
       });
     }
   }
-  // Same guarantee as executeSendPipeline: if the DB write fails, abort
-  // BEFORE any DMs go out so we don't leave live QURL links with no
-  // local record.
+  if (!ddbSendConfigGuardFitsTransaction(batchSends)) {
+    logger.error('addRecipients refused oversized guarded write before DDB persistence', {
+      sendId,
+      send_count: batchSends.length,
+      txn_actions: ddbSendConfigGuardActionCount(batchSends),
+    });
+    await cleanupFreshAddRecipientResources(batchSends, apiKey, sendId, {
+      rowsMayHavePersisted: false,
+      reason: 'pre_persistence_oversized_batch',
+    });
+    return {
+      msg: 'Cannot add recipients — too many recipients selected. Try fewer recipients.',
+      newLinks: [], newRecipients: [],
+      delivered: 0,
+      failed: 0,
+    };
+  }
+  // Same dispatch guarantee as executeSendPipeline: if the DB write fails,
+  // abort BEFORE any DMs go out. The revoked-race branch below also deletes
+  // freshly minted resources because those rows deliberately never land.
   try {
-    await db.recordQURLSendBatch(batchSends);
+    await db.recordQURLSendBatch(batchSends, { requireSendConfigUnrevoked: true });
   } catch (err) {
+    if (err?.code === 'SEND_CONFIG_REVOKED') {
+      logger.warn('recordQURLSendBatch refused Add Recipients for revoked send', {
+        sendId, error: err.message, linkCount: batchSends.length,
+      });
+      await cleanupFreshAddRecipientResources(batchSends, apiKey, sendId);
+      return {
+        msg: 'Cannot add recipients — this send has already been revoked.',
+        newLinks: [], newRecipients: [],
+        delivered: 0,
+        failed: 0,
+      };
+    }
     logger.error('recordQURLSendBatch failed in addRecipients; aborting before DMs', {
       sendId, error: err.message, linkCount: batchSends.length,
+    });
+    // Normal transaction failures are atomic, so no rows landed. If the final
+    // retry actually committed but its response was lost, this cleanup can
+    // leave rows pointing at deleted resources; that is still fail-closed
+    // because no DMs were sent and the qURLs no longer grant access.
+    await cleanupFreshAddRecipientResources(batchSends, apiKey, sendId, {
+      reason: 'guarded_transaction_failed',
     });
     return {
       msg: 'Failed to save link records. Recipients were not messaged. Please try again.',
@@ -3228,12 +3383,9 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
     let result = { ok: false };
     try {
       // links.slice(0, 10) caps at Discord's 10-embed-per-message
-      // limit. The embed body is identical per-link (sender + guild +
-      // expiry don't vary), so build the EmbedBuilder once and repeat
-      // the reference N times. discord.js serializes each embeds[]
-      // entry via .toJSON() — a pure read of internal state — so
-      // reference sharing is safe. Saves N-1 EmbedBuilder allocations
-      // + N-1 sanitize-chain runs on the senderAlias/guildName halves.
+      // limit. Short links share one identical EmbedBuilder and keep
+      // the original packed buttons. Long qv2 links need their own
+      // Markdown action in each embed and send no components.
       // packBulkDeliveryComponents enforces 1 <= len <= 10 with
       // fail-loud throws; the upstream guard at line 2372 above
       // (`if (!links || links.length === 0)`) is what keeps us out
@@ -3242,15 +3394,26 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
       // here at the helper boundary — see packBulkDeliveryComponents
       // docstring for the contract.
       const cappedLinks = links.slice(0, 10);
-      const sharedEmbed = buildDeliveryEmbed({
+      const renderActionsAsMarkdown = cappedLinks.some(
+        link => requiresMarkdownDeliveryActions(link.qurlLink),
+      );
+      const embedArgs = {
         senderAlias,
         guildName,
         guildIconUrl,
         expiresAt,
         personalMessage: sendConfig.personal_message,
-      });
-      const allEmbeds = Array(cappedLinks.length).fill(sharedEmbed);
-      const allComponents = packBulkDeliveryComponents(cappedLinks.map(link => link.qurlLink));
+      };
+      const allEmbeds = renderActionsAsMarkdown
+        ? cappedLinks.map(link => buildDeliveryEmbed({
+          ...embedArgs,
+          qurlLink: link.qurlLink,
+          renderActionsAsMarkdown: true,
+        }))
+        : Array(cappedLinks.length).fill(buildDeliveryEmbed(embedArgs));
+      const allComponents = renderActionsAsMarkdown
+        ? []
+        : packBulkDeliveryComponents(cappedLinks.map(link => link.qurlLink));
 
       result = await sendDM(recipient.id, { embeds: allEmbeds, components: allComponents });
     } finally {
@@ -3333,7 +3496,8 @@ function formatRevokeDescription(s) {
   const when = new Date(s.created_at).toLocaleString();
   const delivery = `${s.delivered_count}/${s.recipient_count} delivered`;
   const expiry = `expires ${s.expires_in}`;
-  const base = `${when} · ${delivery} · ${expiry}`;
+  const retry = s.revocation_pending ? 'Retry · ' : '';
+  const base = `${retry}${when} · ${delivery} · ${expiry}`;
   // If there's space left, append a truncated message preview so users
   // can disambiguate sends with the same filename but different notes.
   if (s.personal_message) {
@@ -3519,11 +3683,19 @@ async function handleRevokeSelect(interaction, { flow_id }) {
   const sendId = interaction.values[0];
   const revoked = await revokeAllLinks(sendId, interaction.user.id, apiKey, resolveSenderAlias(interaction));
 
+  if (!revoked.barrierEstablished) {
+    await interaction.update({
+      content: 'Could not verify this send for revocation. It may already be revoked or unavailable; run `/qurl revoke` to refresh.',
+      components: [],
+    });
+    return;
+  }
+
   // Slash-command path lacks the in-scope `recipients` array needed
   // to resolve names → no "Revoked for: …" line here. Operators
   // wanting names should use the inline button after a send.
   await interaction.update({
-    content: buildRevokeHeader(revoked.success, revoked.total),
+    content: safeRevokeHeader(sendId, revoked.success, revoked.total, revoked.finalizationFailed),
     components: [],
   });
 }
@@ -6095,28 +6267,18 @@ async function handleQurlDetect(interaction) {
   // deferReply, all user-visible output is editReply.
   await interaction.deferReply({ ephemeral: true });
 
-  // Resolve the API key the same way the send paths do: per-guild BYOK
-  // first, global fallback. (handleQurlDetect resolves its own key — it's
-  // intentionally NOT in API_KEY_GATED_SUBCOMMANDS, which would
-  // double-resolve and gate before this handler runs.)
-  const apiKey = await db.getGuildApiKey(interaction.guildId) || config.QURL_API_KEY;
-  if (!apiKey) {
-    // A missing /qurl setup is an honest config error, not abuse — clear
-    // the cooldown so the user can retry the instant an admin configures
-    // the server. Matches the handler's "honest user errors clear the
-    // cooldown" design (non-image / oversize branches above). The SSRF
-    // probe is the one rejection that intentionally KEEPS the cooldown.
-    clearDetectCooldown(interaction.guildId, interaction.user.id);
-    // Audit this branch — unconfigured is an attribution outcome worth
-    // surfacing (see the handler header's audit list). No recipient is
-    // resolved on an unconfigured guild.
+  // The bot credential mints the guild-scoped capability. No customer key
+  // is sent to the detect service.
+  if (!config.QURL_API_KEY) {
+    // Detect stays outside API_KEY_GATED_SUBCOMMANDS: no guild setup is needed.
+    // Keep the cooldown for operator configuration failures; user retries cannot fix them.
     logger.audit(AUDIT_EVENTS.QURL_DETECT, {
       result: 'unconfigured',
       guild_id: interaction.guildId,
       requester_id: interaction.user.id,
     });
     return interaction.editReply({
-      content: '❌ **qURL is not configured for this server.** A server admin needs to run `/qurl setup` first.',
+      content: '❌ **Watermark detection is unavailable.** The bot operator must configure the detect credential.',
     });
   }
 
@@ -6176,7 +6338,6 @@ async function handleQurlDetect(interaction) {
     result = await detectWatermark(bytes, {
       guildId: interaction.guildId,
       contentType: attachment.contentType,
-      apiKey,
     });
   } catch (err) {
     // detectWatermark (the CONNECTOR POST — the CDN download is handled in
@@ -6390,7 +6551,7 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
   // without surfacing as an "interaction failed" toast. Mirrors
   // handleConfirmSendClick / handleConfirmCancelClick. All `update`
   // calls below become `editReply` (the interaction is now deferred).
-  await interaction.deferUpdate().catch(logIgnoredDiscordErr);
+  if (!await deferUpdateOrStop(interaction, flow_id)) return undefined;
 
   // Validate payload.resourceType BEFORE renderConfirmCardContent
   // would throw on it. A corrupt/stale DDB row (manual mutation,
@@ -6722,7 +6883,7 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
 // corrupt payload and surface re-run copy, same shape as
 // handleConfirmUserSelect's resourceType guard.
 async function handleConfirmVoiceEveryone(interaction, { flow_id, row }) {
-  await interaction.deferUpdate().catch(logIgnoredDiscordErr);
+  if (!await deferUpdateOrStop(interaction, flow_id)) return undefined;
 
   const payload = row.payload || {};
   // resourceType guard mirrors handleConfirmUserSelect — a corrupt /
@@ -7032,7 +7193,7 @@ async function handleConfirmVoiceEveryone(interaction, { flow_id, row }) {
 // re-render would re-derive picker layout from a payload that still
 // carried the prior mode and snap back.
 async function handleConfirmPickManual(interaction, { flow_id, row }) {
-  await interaction.deferUpdate().catch(logIgnoredDiscordErr);
+  if (!await deferUpdateOrStop(interaction, flow_id)) return undefined;
 
   const payload = row.payload || {};
   // resourceType guard mirrors the other confirm-card handlers — a
@@ -7109,7 +7270,7 @@ async function handleConfirmPickManual(interaction, { flow_id, row }) {
 // visibility on MENTION_EVERYONE + picker-mode; this defends against
 // a crafted HTTP interaction bypassing the render).
 async function handleConfirmEveryone(interaction, { flow_id, row }) {
-  await interaction.deferUpdate().catch(logIgnoredDiscordErr);
+  if (!await deferUpdateOrStop(interaction, flow_id)) return undefined;
 
   const payload = row.payload || {};
   const payloadResource = payload.resourceType;
@@ -7293,13 +7454,8 @@ async function handleConfirmEveryone(interaction, { flow_id, row }) {
   const newRecipientAliases = Object.fromEntries(
     valid.map((u) => [u.id, resolveRecipientAlias(u, interaction)])
   );
-  // Mode switches to EVERYONE — like voice-everyone, the click is
-  // unambiguous "fan out to all" intent. Picker row is hidden in the
-  // re-render so the user can't accidentally read back a 25-entry
-  // truncated picker selection over the @everyone fan-out (Discord's
-  // MentionableSelect default_values is capped at 25, and any picker
-  // interaction routes through handleConfirmUserSelect which replaces
-  // recipientIds with the picker's view of the world).
+  // TODO(upstream-contract): Discord caps MentionableSelect default_values at 25,
+  // so @everyone replaces any truncated picker selection.
   const newPayload = {
     ...payload,
     recipientIds: valid.map((u) => u.id),
@@ -7471,7 +7627,7 @@ async function handleConfirmExpirySelect(interaction, { flow_id, row }) {
       ephemeral: true,
     }).catch(logIgnoredDiscordErr);
   }
-  await interaction.deferUpdate().catch(logIgnoredDiscordErr);
+  if (!await deferUpdateOrStop(interaction, flow_id)) return undefined;
   const payload = row.payload || {};
   // No-op re-pick (same value as current state) → skip the DDB write
   // + version bump. A version bump would needlessly fence any
@@ -7538,7 +7694,7 @@ async function handleConfirmSelfDestructSelect(interaction, { flow_id, row }) {
       ephemeral: true,
     }).catch(logIgnoredDiscordErr);
   }
-  await interaction.deferUpdate().catch(logIgnoredDiscordErr);
+  if (!await deferUpdateOrStop(interaction, flow_id)) return undefined;
   const selfDestructSeconds = selfDestructSelectValueToSeconds(pickedValue);
   const payload = row.payload || {};
   // No-op re-pick (same value as current state) → skip the write +
@@ -7637,7 +7793,7 @@ async function handleConfirmNoteModal(interaction, { flow_id, row }) {
   // Discord's 3-second hard deadline, after which `update()` /
   // `reply()` both fail and the user gets an "interaction failed"
   // toast. Mirrors the menu handlers' shape.
-  await interaction.deferUpdate().catch(logIgnoredDiscordErr);
+  if (!await deferUpdateOrStop(interaction, flow_id)) return undefined;
   // Defensive read: `getTextInputValue` throws if the customId
   // allowlist ever drifts from SEND_NOTE_MODAL_FIELD_ID. Don't
   // silently clear the existing note — surface an ephemeral error
@@ -7721,16 +7877,15 @@ async function handleConfirmSendClick(interaction, { flow_id, row }) {
   // can take more than Discord's 3-second hard ack deadline without
   // surfacing as an "interaction failed" toast to the user. Cold
   // cache + 25 cache-miss `members.fetch` calls in `resolveRecipientUsers`
-  // alone can chew through the budget. The .catch swallows the
-  // (rare) race where Discord's gateway already acked the
-  // interaction; a duplicate defer there throws InteractionAlreadyReplied
-  // and the subsequent editReply still works.
+  // alone can chew through the budget. If Discord already accepted
+  // another copy's acknowledgement, this copy does not own the action;
+  // deferUpdateOrStop prevents any state change or send.
   //
   // All ephemeral error-replies below switch from `interaction.reply`
   // to `interaction.followUp` (the interaction is now in the
   // deferred state and `.reply` would throw); main-message updates
   // switch from `interaction.update` to `interaction.editReply`.
-  await interaction.deferUpdate().catch(logIgnoredDiscordErr);
+  if (!await deferUpdateOrStop(interaction, flow_id)) return undefined;
 
   // Bot-kicked-between-confirm-and-Send: `interaction.guild` is null.
   // Without this guard the user sees "all recipients left the server"
@@ -8019,7 +8174,7 @@ async function handleConfirmCancelClick(interaction, { flow_id, row }) {
   // is fast in the happy path, but a DDB blip or slow region could
   // still blow the budget. Same pattern handleConfirmSendClick uses
   // (deferUpdate at top, editReply / followUp downstream).
-  await interaction.deferUpdate().catch(logIgnoredDiscordErr);
+  if (!await deferUpdateOrStop(interaction, flow_id)) return undefined;
   // Targeted catch around deleteFlow mirrors handleConfirmSendClick's
   // guards on resolveRecipientUsers + getGuildApiKey. Without it, a
   // DDB throw propagates to the dispatcher's outer catch which
@@ -8089,8 +8244,17 @@ function revokeReplyPayload(rendered) {
 // Recipients toggle on the post-revoke "Revoked for: ..." list.
 // All wording assertions live against `renderRevokeContent` directly
 // (see `apps/discord/src/revoke-render.js` + the e2e smoke).
-function renderRevokeMsg(sendId, names, total, showAll, success = names.length) {
-  const data = renderRevokeContent({ names, total, showAll, success });
+function renderRevokeMsg(sendId, names, total, showAll, success, finalizationFailed = false) {
+  let data;
+  try {
+    data = renderRevokeContent({ names, total, showAll, success, finalizationFailed });
+  } catch (err) {
+    data = {
+      content: revokeRenderFallback(sendId, success, total, err),
+      needsExpand: false,
+      attachmentText: null,
+    };
+  }
   const row = data.needsExpand
     ? new ActionRowBuilder().addComponents(
       new ButtonBuilder()
@@ -8100,6 +8264,26 @@ function renderRevokeMsg(sendId, names, total, showAll, success = names.length) 
     )
     : null;
   return { ...data, row };
+}
+
+function revokeRenderFallback(sendId, success, total, err) {
+  logger.error('Failed to render revoke result', {
+    sendId,
+    success,
+    total,
+    error: err?.message ?? String(err),
+  });
+  // DELETEs may already have completed. Avoid a dead Discord interaction
+  // while making no claim about an outcome whose counts are inconsistent.
+  return 'qURL could not display the revocation result. If this send still appears in `/qurl revoke`, retry it there.';
+}
+
+function safeRevokeHeader(sendId, success, total, finalizationFailed = false) {
+  try {
+    return buildRevokeHeader(success, total, { finalizationFailed });
+  } catch (err) {
+    return revokeRenderFallback(sendId, success, total, err);
+  }
 }
 
 // Builds the post-send confirmation body. When the full inline render
@@ -8159,33 +8343,47 @@ function renderSendConfirm({
 // DISPLAY_NAME_FALLBACK, so a forgotten 4th arg still renders
 // gracefully on the recipient side.
 async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DISPLAY_NAME_FALLBACK) {
+  // Establish the durable no-more-recipients barrier before reading the send
+  // rows. getSendItems uses a strongly consistent base-table query, so an Add
+  // transaction that committed before this barrier is included; one racing
+  // after it fails the revoking_at condition check.
+  const barrierEstablished = await db.markSendRevoking(sendId, senderDiscordId);
+  // The durable store returns false for unknown, finalized, or foreign sends.
+  // Never issue a DELETE unless it positively confirms the barrier.
+  if (!barrierEstablished) {
+    return {
+      barrierEstablished: false,
+      finalizationFailed: false,
+      success: 0,
+      total: 0,
+      successUserIds: [],
+      failureUserIds: [],
+    };
+  }
+
   // Items carry dm_channel_id / dm_message_id / dm_status so the post-
   // revoke step can edit each strict-success recipient's DM in place.
   // Legacy rows predating that wire-up have the refs unset — the edit
   // step skips them.
-  const items = await db.getSendItems(sendId, senderDiscordId);
+  const items = await db.getSendItems(sendId, senderDiscordId, { consistentRead: true });
 
   // deleteLink deletes the whole resource; one DELETE per unique
   // resource_id, fan result out to every recipient sharing it.
   // Required because mintLinksInBatches packs up to TOKENS_PER_RESOURCE
   // recipients per resource, so the same resource_id is shared.
   const byResource = new Map();
+  const invalidResourceRecipientIds = new Set();
   for (const item of items) {
+    if (typeof item.resource_id !== 'string' || item.resource_id.trim().length === 0) {
+      invalidResourceRecipientIds.add(item.recipient_discord_id);
+      continue;
+    }
     const list = byResource.get(item.resource_id) || [];
     list.push(item.recipient_discord_id);
     byResource.set(item.resource_id, list);
   }
   const resourceEntries = [...byResource.entries()];
   const totalUsers = new Set(items.map(it => it.recipient_discord_id)).size;
-
-  // Record the user's revocation intent before side-effecting DELETEs.
-  // If this write fails, no qURL resource has been deleted yet, so callers
-  // can safely treat the revoke as failed and leave Add Recipients available.
-  // Do not emit revoke_success/revoke_failed before this point: those audit
-  // events describe qURL DELETE outcomes, and no DELETE has happened yet.
-  // Mark regardless of per-link success: partial failures surface in the
-  // reply ("Revoked X/Y"), and re-picking the same send would not help.
-  await db.markSendRevoked(sendId, senderDiscordId);
 
   const successUserIds = [];
   const failureUserIds = [];
@@ -8201,14 +8399,23 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
   // tell the operator "alice is partial" via failure than misleadingly
   // claim full success.
   const seenSuccess = new Set();
-  const seenFailure = new Set();
+  const seenFailure = new Set(invalidResourceRecipientIds);
+  if (invalidResourceRecipientIds.size > 0) {
+    logger.error('Cannot revoke send row with missing resource identity', {
+      sendId,
+      affectedRecipients: invalidResourceRecipientIds.size,
+    });
+  }
   for (let i = 0; i < results.length; i++) {
     const [resourceId, recipientIds] = resourceEntries[i];
     if (results[i].status === 'fulfilled') {
       for (const id of recipientIds) seenSuccess.add(id);
     } else {
       for (const id of recipientIds) seenFailure.add(id);
-      logger.error('Failed to revoke QURL', { resource_id: resourceId, error: results[i].reason?.message });
+      logger.error('Failed to revoke QURL', {
+        resource_ref: resourceIdLogRef(resourceId),
+        error: results[i].reason?.message,
+      });
     }
   }
   // Strict success = revoked AND not in any failure bucket.
@@ -8219,24 +8426,34 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
 
   const success = successUserIds.length;
   const total = totalUsers;
-  // Audit metric is per-resource (DELETE call), not per-recipient.
+  // Audit success/total describe actual DELETE confirmations. Malformed rows
+  // never fabricate a DELETE denominator; report their affected recipients in
+  // a separate field while keeping finalization fail-closed.
   const auditTotal = byResource.size;
   const auditSuccess = results.filter(r => r.status === 'fulfilled').length;
+  const unresolvableRecipients = invalidResourceRecipientIds.size;
+  const fullyConfirmed = auditSuccess === auditTotal && unresolvableRecipients === 0;
 
   // Emit audit after DELETE attempts so the tally reflects actual qURL API
   // outcomes. The revocation-intent write happened above, before any
   // destructive side effect.
   if (total > 0) {
-    const event = success > 0 ? AUDIT_EVENTS.REVOKE_SUCCESS : AUDIT_EVENTS.REVOKE_FAILED;
-    logger.audit(event, { send_id: sendId, success: auditSuccess, total: auditTotal });
+    const event = fullyConfirmed ? AUDIT_EVENTS.REVOKE_SUCCESS : AUDIT_EVENTS.REVOKE_FAILED;
+    logger.audit(event, {
+      send_id: sendId,
+      success: auditSuccess,
+      total: auditTotal,
+      unresolvable_recipients: unresolvableRecipients,
+    });
   }
 
-  // Top-level `success/total` are per-resource (matches the audit
-  // event); per-recipient counts surface in nested `users`.
+  // Top-level `success/total` are per-resource DELETE confirmations; the
+  // nested `users` tally is the operator-facing per-recipient result.
   logger.info('Revoked send', {
     sendId,
     success: auditSuccess,
     total: auditTotal,
+    unresolvable_recipients: unresolvableRecipients,
     users: { success, total },
   });
 
@@ -8284,6 +8501,10 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
   // Errors are swallowed (logged inside editDM at info/warn) — a 404 /
   // 403 / unknown-message is operational, not a bug, and must not
   // skew the revoke success counts the caller reports to the operator.
+  // A retry deliberately re-PATCHes recipients whose DELETE succeeded on a
+  // prior attempt. PATCH replaces the message with the same terminal payload,
+  // so the operation is idempotent; persisting a second per-DM marker would
+  // introduce a write/edit race that could permanently suppress the rewrite.
   if (success > 0) {
     const successSet = new Set(successUserIds);
     const editTargets = new Map(); // recipient_id → {channelId, messageId}
@@ -8349,12 +8570,48 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
     }
   }
 
-  // failureUserIds is computed but not yet rendered — the "Note:
-  // already-opened links cannot be revoked" disclaimer covers the
-  // common cause. Returned for callers that want to surface partial-
-  // failure detail (e.g., a future "Failed for: …" line or follow-up
-  // alert when count is large).
-  return { success, total, successUserIds, failureUserIds };
+  // Finalize only after every resource DELETE succeeded. Keep this after the
+  // outcome audit and recipient edits: if the DDB write fails, the durable
+  // revoking_at barrier remains and the caller can retry, but the destructive
+  // work that already completed still has an audit record and visible result.
+  //
+  // TODO(upstream-contract): qurl-service's
+  // TestRevokeQurl_Idempotent_SecondRevokeDoesNotRepublish pins repeated
+  // whole-resource DELETE /v1/qurls/{id} as a successful 204 no-op. Retrying
+  // the full set is therefore safe after partial success.
+  //
+  // A permanent-looking failure intentionally does NOT clear the barrier or
+  // finalize the send. qurl-service collapses absent and wrong-owner resources
+  // to the same 404, so treating 404/client-validation as "already revoked"
+  // could hide a still-live link after a key/account mismatch. 401/403 may also
+  // recover after `/qurl setup`. Fail closed, keep the send selectable, and let
+  // the truthful UI direct the operator to retry or reconnect.
+  let finalizationFailed = false;
+  if (fullyConfirmed) {
+    try {
+      const finalized = await db.markSendRevoked(sendId, senderDiscordId);
+      if (finalized !== true) throw new Error('finalization was not confirmed');
+    } catch (err) {
+      finalizationFailed = true;
+      logger.error('Failed to finalize revoked send state', {
+        sendId,
+        error: err?.message ?? String(err),
+      });
+    }
+  }
+
+  // failureUserIds is computed but not yet rendered by name. The shared
+  // header reports the exact unconfirmed count and tells the operator to
+  // retry/reconnect; callers can use this list for a future named-failure
+  // detail without inferring that DELETE failure means the link was opened.
+  return {
+    barrierEstablished: true,
+    finalizationFailed,
+    success,
+    total,
+    successUserIds,
+    failureUserIds,
+  };
 }
 
 // Time-based sweep every 60s (was 5min). With high user counts the Map can
@@ -8386,619 +8643,6 @@ setInterval(sweepCooldowns, 60 * 1000).unref();
 
 // Command definitions
 const commands = [
-  {
-    data: new SlashCommandBuilder()
-      .setName('link')
-      .setDescription('Link your GitHub account to receive Contributor role when PRs are merged'),
-    async execute(interaction) {
-      const discordId = interaction.user.id;
-
-      // Check if already linked
-      const existing = await db.getLinkByDiscord(discordId);
-
-      // Generate state and create pending link. State is HMAC-bound to the
-      // discord user ID so the OAuth callback can verify cross-user replay
-      // didn't happen even if the random nonce were somehow leaked.
-      const state = generateState(discordId);
-      await db.createPendingLink(state, discordId);
-
-      const authUrl = `${config.BASE_URL}/auth/github?state=${state}`;
-
-      const embed = new EmbedBuilder()
-        .setColor(COLORS.PRIMARY)
-        .setTitle('🔗 Link Your GitHub Account')
-        .setDescription(
-          existing
-            ? `You're currently linked to **@${existing.github_username}**.\n\nClick the button below to link a different account or re-verify.`
-            : 'Click the button below to verify your GitHub identity.\n\n' +
-              'Once linked, you\'ll automatically receive the **@Contributor** role when your PRs to OpenNHP repos are merged!'
-        )
-        .addFields({
-          name: '🔒 Privacy',
-          value: 'We only request permission to read your public profile (username). We cannot access your repositories or private information.',
-        })
-        .setFooter({ text: `Link expires in ${config.PENDING_LINK_EXPIRY_MINUTES} minutes` });
-
-      const row = new ActionRowBuilder().addComponents(
-        new ButtonBuilder()
-          .setLabel(existing ? '🔄 Re-link GitHub' : '🔗 Link GitHub Account')
-          .setStyle(ButtonStyle.Link)
-          .setURL(authUrl)
-      );
-
-      await interaction.reply({
-        embeds: [embed],
-        components: [row],
-        ephemeral: true,
-      });
-
-      logger.info('User initiated /link', { discordId, relink: !!existing });
-    },
-  },
-  {
-    data: new SlashCommandBuilder()
-      .setName('unlink')
-      .setDescription('Unlink your GitHub account'),
-    async execute(interaction) {
-      const discordId = interaction.user.id;
-
-      const existing = await db.getLinkByDiscord(discordId);
-      if (!existing) {
-        return interaction.reply({
-          content: 'You don\'t have a GitHub account linked.',
-          ephemeral: true,
-        });
-      }
-
-      // Confirmation prompt
-      const embed = new EmbedBuilder()
-        .setColor(COLORS.ERROR)
-        .setTitle('⚠️ Confirm Unlink')
-        .setDescription(
-          `Are you sure you want to unlink your GitHub account **@${existing.github_username}**?\n\n` +
-          'You will no longer automatically receive the @Contributor role for future PRs.'
-        );
-
-      // Nonce the customIds so two concurrent /unlink flows can't have
-      // their collectors consume each other's button clicks.
-      const nonce = crypto.randomBytes(8).toString('hex');
-      const row = new ActionRowBuilder().addComponents(
-        new ButtonBuilder()
-          .setCustomId(`unlink_confirm_${nonce}`)
-          .setLabel('Yes, Unlink')
-          .setStyle(ButtonStyle.Danger),
-        new ButtonBuilder()
-          .setCustomId(`unlink_cancel_${nonce}`)
-          .setLabel('Cancel')
-          .setStyle(ButtonStyle.Secondary)
-      );
-
-      const response = await interaction.reply({
-        embeds: [embed],
-        components: [row],
-        ephemeral: true,
-      });
-
-      try {
-        const buttonInteraction = await response.awaitMessageComponent({
-          componentType: ComponentType.Button,
-          filter: (i) => i.user.id === interaction.user.id && i.customId.endsWith(`_${nonce}`),
-          time: TIMEOUTS.BUTTON_INTERACTION,
-        });
-
-        if (buttonInteraction.customId === `unlink_confirm_${nonce}`) {
-          await db.deleteLink(discordId);
-          await buttonInteraction.update({
-            content: `✓ Unlinked from GitHub **@${existing.github_username}**.\n\nYou can link a new account anytime with \`/link\`.`,
-            embeds: [],
-            components: [],
-          });
-          logger.info('User unlinked', { discordId, github: existing.github_username });
-        } else {
-          await buttonInteraction.update({
-            content: 'Unlink cancelled. Your GitHub account is still linked.',
-            embeds: [],
-            components: [],
-          });
-        }
-      } catch {
-        await interaction.editReply({
-          content: 'Confirmation timed out. Your GitHub account is still linked.',
-          embeds: [],
-          components: [],
-        });
-      }
-    },
-  },
-  {
-    data: new SlashCommandBuilder()
-      .setName('whois')
-      .setDescription('Check GitHub link for a user')
-      .addUserOption(option =>
-        option
-          .setName('user')
-          .setDescription('The Discord user to check (leave empty for yourself)')
-          .setRequired(false)
-      ),
-    async execute(interaction) {
-      const targetUser = interaction.options.getUser('user') || interaction.user;
-      const link = await db.getLinkByDiscord(targetUser.id);
-
-      if (link) {
-        const contributions = await db.getContributions(targetUser.id);
-        const badges = await db.getBadges(targetUser.id);
-        const streak = await db.getStreak(targetUser.id);
-
-        const embed = new EmbedBuilder()
-          .setColor(COLORS.SUCCESS)
-          .setTitle(`GitHub Link for ${targetUser.username}`)
-          .addFields(
-            { name: 'GitHub', value: `[@${link.github_username}](https://github.com/${link.github_username})`, inline: true },
-            { name: 'Linked Since', value: new Date(link.linked_at).toLocaleDateString(), inline: true },
-            { name: 'PRs Merged', value: `${contributions.length}`, inline: true }
-          );
-
-        // Add badges
-        if (badges.length > 0) {
-          const badgeDisplay = badges
-            .map(b => {
-              const info = db.BADGE_INFO[b.badge_type];
-              return info ? `${info.emoji} ${info.name}` : b.badge_type;
-            })
-            .join(' • ');
-          embed.addFields({ name: '🏅 Badges', value: badgeDisplay });
-        }
-
-        // Add streak (monthly tracking)
-        if (streak && streak.current_streak > 0) {
-          embed.addFields({
-            name: '🔥 Streak',
-            value: `${streak.current_streak} month${streak.current_streak > 1 ? 's' : ''} (Best: ${streak.longest_streak})`,
-            inline: true,
-          });
-        }
-
-        // Add recent contributions
-        if (contributions.length > 0) {
-          const recent = contributions.slice(0, 3)
-            .map(c => `• ${c.repo} #${c.pr_number}`)
-            .join('\n');
-          embed.addFields({ name: 'Recent Contributions', value: recent });
-        }
-
-        const row = new ActionRowBuilder().addComponents(
-          new ButtonBuilder()
-            .setLabel('View on GitHub')
-            .setStyle(ButtonStyle.Link)
-            .setURL(`https://github.com/${link.github_username}`)
-        );
-
-        await interaction.reply({ embeds: [embed], components: [row], ephemeral: true });
-      } else {
-        await interaction.reply({
-          content: targetUser.id === interaction.user.id
-            ? 'You haven\'t linked your GitHub account yet. Use `/link` to get started!'
-            : `${targetUser.username} hasn't linked their GitHub account.`,
-          ephemeral: true,
-        });
-      }
-    },
-  },
-  {
-    data: new SlashCommandBuilder()
-      .setName('contributions')
-      .setDescription('View your contribution history')
-      .addUserOption(option =>
-        option
-          .setName('user')
-          .setDescription('The user to check (leave empty for yourself)')
-          .setRequired(false)
-      ),
-    async execute(interaction) {
-      const targetUser = interaction.options.getUser('user') || interaction.user;
-      const contributions = await db.getContributions(targetUser.id);
-
-      if (contributions.length === 0) {
-        return interaction.reply({
-          content: targetUser.id === interaction.user.id
-            ? 'You don\'t have any recorded contributions yet. Link your GitHub with `/link` and merge a PR!'
-            : `${targetUser.username} doesn't have any recorded contributions.`,
-          ephemeral: true,
-        });
-      }
-
-      // Group by repo
-      const byRepo = {};
-      for (const c of contributions) {
-        if (!byRepo[c.repo]) byRepo[c.repo] = [];
-        byRepo[c.repo].push(c);
-      }
-
-      const embed = new EmbedBuilder()
-        .setColor(COLORS.PURPLE)
-        .setTitle(`📊 Contributions by ${targetUser.username}`)
-        .setDescription(`**${contributions.length}** PRs merged across **${Object.keys(byRepo).length}** repos`)
-        .setTimestamp();
-
-      for (const [repo, prs] of Object.entries(byRepo)) {
-        const prList = prs.slice(0, 5)
-          .map(p => `• #${p.pr_number}${p.pr_title ? `: ${p.pr_title.substring(0, 40)}${p.pr_title.length > 40 ? '...' : ''}` : ''}`)
-          .join('\n');
-        embed.addFields({
-          name: `${repo} (${prs.length})`,
-          value: prList + (prs.length > 5 ? `\n... and ${prs.length - 5} more` : ''),
-        });
-      }
-
-      await interaction.reply({ embeds: [embed], ephemeral: true });
-    },
-  },
-  {
-    data: new SlashCommandBuilder()
-      .setName('stats')
-      .setDescription('Show bot statistics'),
-    async execute(interaction) {
-      const stats = await db.getStats();
-
-      const embed = new EmbedBuilder()
-        .setColor(COLORS.PURPLE)
-        .setTitle('📊 OpenNHP Bot Stats')
-        .addFields(
-          { name: 'Linked Users', value: `${stats.linkedUsers}`, inline: true },
-          { name: 'Total PRs', value: `${stats.totalContributions}`, inline: true },
-          { name: 'Contributors', value: `${stats.uniqueContributors}`, inline: true }
-        );
-
-      if (stats.byRepo.length > 0) {
-        const repoList = stats.byRepo
-          .slice(0, 5)
-          .map(r => `• ${r.repo}: ${r.count} PRs`)
-          .join('\n');
-        embed.addFields({ name: 'Top Repositories', value: repoList });
-      }
-
-      // Add leaderboard
-      const topContributors = await db.getTopContributors(5);
-      if (topContributors.length > 0) {
-        const leaderboard = topContributors
-          .map((c, i) => {
-            const medal = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : `${i + 1}.`;
-            return `${medal} <@${c.discord_id}>: ${c.count} PRs`;
-          })
-          .join('\n');
-        embed.addFields({ name: '🏆 Top Contributors', value: leaderboard });
-      }
-
-      embed.setTimestamp();
-
-      await interaction.reply({ embeds: [embed], ephemeral: true });
-    },
-  },
-  {
-    data: new SlashCommandBuilder()
-      .setName('leaderboard')
-      .setDescription('Show contribution leaderboard'),
-    async execute(interaction) {
-      const topContributors = await db.getTopContributors(10);
-
-      if (topContributors.length === 0) {
-        return interaction.reply({
-          content: 'No contributions recorded yet!',
-          ephemeral: true,
-        });
-      }
-
-      const embed = new EmbedBuilder()
-        .setColor(COLORS.GOLD)
-        .setTitle('🏆 Contribution Leaderboard')
-        .setDescription(
-          topContributors
-            .map((c, i) => {
-              const medal = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : `**${i + 1}.**`;
-              return `${medal} <@${c.discord_id}> — **${c.count}** PRs`;
-            })
-            .join('\n')
-        )
-        .setTimestamp();
-
-      await interaction.reply({ embeds: [embed] });
-    },
-  },
-  {
-    data: new SlashCommandBuilder()
-      .setName('forcelink')
-      .setDescription('(Admin) Force link a Discord user to a GitHub account')
-      .addUserOption(option =>
-        option
-          .setName('user')
-          .setDescription('Discord user to link')
-          .setRequired(true)
-      )
-      .addStringOption(option =>
-        option
-          .setName('github')
-          .setDescription('GitHub username (without @)')
-          .setRequired(true)
-      )
-      .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
-    async execute(interaction) {
-      if (!await requireAdmin(interaction)) return;
-
-      const targetUser = interaction.options.getUser('user');
-      const githubUsername = interaction.options.getString('github').replace(/^@+/, '');
-
-      // Same validation /bulklink uses — reject anything that isn't a valid
-      // GitHub login. A malformed string in guild_links would later be
-      // reflected into embeds and interpolated into search queries.
-      if (!/^[a-zA-Z0-9-]{1,39}$/.test(githubUsername)) {
-        return interaction.reply({
-          content: `❌ Invalid GitHub username format: \`${githubUsername}\`. Must be 1-39 chars, alphanumerics + hyphen only.`,
-          ephemeral: true,
-        });
-      }
-
-      const existingLink = await db.getLinkByGithub(githubUsername);
-      if (existingLink && existingLink.discord_id !== targetUser.id) {
-        return interaction.reply({
-          content: `⚠️ GitHub **@${githubUsername}** is already linked to <@${existingLink.discord_id}>. Unlink them first.`,
-          ephemeral: true,
-        });
-      }
-
-      await db.forceLink(targetUser.id, githubUsername);
-
-      await interaction.reply({
-        content: `✓ Linked <@${targetUser.id}> to GitHub **@${githubUsername}**`,
-        ephemeral: true,
-      });
-
-      logger.info('Admin force-linked user', {
-        admin: interaction.user.id,
-        target: targetUser.id,
-        github: githubUsername,
-      });
-    },
-  },
-  {
-    data: new SlashCommandBuilder()
-      .setName('bulklink')
-      .setDescription('(Admin) Bulk link users from a list')
-      .addStringOption(option =>
-        option
-          .setName('mappings')
-          .setDescription('Comma-separated discord_id:github pairs (e.g., 123:user1,456:user2)')
-          .setRequired(true)
-      )
-      .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
-    async execute(interaction) {
-      if (!await requireAdmin(interaction)) return;
-
-      const mappings = interaction.options.getString('mappings');
-      const pairs = mappings.split(',').map(s => s.trim());
-
-      let success = 0;
-      let failed = 0;
-      const errors = [];
-
-      for (const pair of pairs) {
-        const [discordId, github] = pair.split(':').map(s => s.trim());
-        if (!discordId || !github) {
-          failed++;
-          errors.push(`Invalid format: "${pair}"`);
-          continue;
-        }
-        if (!/^\d{17,20}$/.test(discordId)) {
-          failed++;
-          errors.push(`Invalid Discord ID: "${discordId}"`);
-          continue;
-        }
-        // GitHub username format: letters/digits/hyphens, can't start/end with
-        // hyphen, no consecutive hyphens, 1-39 chars.
-        if (!/^[a-zA-Z0-9](?:[a-zA-Z0-9]|-(?=[a-zA-Z0-9])){0,38}$/.test(github)) {
-          failed++;
-          errors.push(`Invalid GitHub username: "${github}"`);
-          continue;
-        }
-
-        try {
-          const existing = await db.getLinkByGithub(github);
-          if (existing && existing.discord_id !== discordId) {
-            failed++;
-            errors.push(`@${github} already linked to another user`);
-            continue;
-          }
-
-          await db.forceLink(discordId, github);
-          success++;
-        } catch (error) {
-          failed++;
-          errors.push(`Error linking ${discordId}: ${error.message}`);
-        }
-      }
-
-      const embed = new EmbedBuilder()
-        .setColor(failed === 0 ? COLORS.SUCCESS : COLORS.WARNING)
-        .setTitle('📦 Bulk Link Results')
-        .addFields(
-          { name: '✓ Success', value: `${success}`, inline: true },
-          { name: '✗ Failed', value: `${failed}`, inline: true }
-        );
-
-      if (errors.length > 0) {
-        embed.addFields({
-          name: 'Errors',
-          value: errors.slice(0, 10).join('\n') + (errors.length > 10 ? `\n... and ${errors.length - 10} more` : ''),
-        });
-      }
-
-      await interaction.reply({ embeds: [embed], ephemeral: true });
-
-      logger.info('Admin bulk-linked users', {
-        admin: interaction.user.id,
-        success,
-        failed,
-      });
-    },
-  },
-  {
-    data: new SlashCommandBuilder()
-      .setName('backfill-milestones')
-      .setDescription('(Admin) Backfill star milestones for a repo that already has stars')
-      .addStringOption(option =>
-        option
-          .setName('repo')
-          .setDescription('Full repo name (e.g., OpenNHP/opennhp)')
-          .setRequired(true)
-      )
-      .addIntegerOption(option =>
-        option
-          .setName('stars')
-          .setDescription('Current star count')
-          .setRequired(true)
-      )
-      .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
-    async execute(interaction) {
-      if (!await requireAdmin(interaction)) return;
-
-      const repo = interaction.options.getString('repo');
-      if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) {
-        return interaction.reply({ content: 'Invalid repo format. Use `owner/repo` (e.g., `OpenNHP/opennhp`).', ephemeral: true });
-      }
-      const stars = interaction.options.getInteger('stars');
-
-      let backfilled = 0;
-      let skipped = 0;
-
-      for (const milestone of config.STAR_MILESTONES) {
-        if (stars >= milestone) {
-          if (!(await db.hasMilestoneBeenAnnounced('stars', milestone, repo))) {
-            if (await db.recordMilestone('stars', milestone, repo)) {
-              backfilled++;
-            }
-          } else {
-            skipped++;
-          }
-        }
-      }
-
-      const embed = new EmbedBuilder()
-        .setColor(COLORS.SUCCESS)
-        .setTitle('✓ Milestones Backfilled')
-        .setDescription(`Backfilled milestones for **${repo}** (${stars} stars)`)
-        .addFields(
-          { name: 'Backfilled', value: `${backfilled}`, inline: true },
-          { name: 'Already Recorded', value: `${skipped}`, inline: true }
-        );
-
-      await interaction.reply({ embeds: [embed], ephemeral: true });
-
-      logger.info('Admin backfilled milestones', {
-        admin: interaction.user.id,
-        repo,
-        stars,
-        backfilled,
-      });
-    },
-  },
-  {
-    data: new SlashCommandBuilder()
-      .setName('unlinked')
-      .setDescription('(Admin) Show contributors who haven\'t linked their GitHub')
-      .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
-    async execute(interaction) {
-      if (!await requireAdmin(interaction)) return;
-
-      await interaction.deferReply({ ephemeral: true });
-
-      try {
-        const guild = interaction.guild;
-        const contributorRole = guild.roles.cache.find(r => r.name === config.CONTRIBUTOR_ROLE_NAME);
-
-        if (!contributorRole) {
-          return interaction.editReply({
-            content: `❌ Could not find role "${config.CONTRIBUTOR_ROLE_NAME}"`,
-          });
-        }
-
-        // `guild.members.fetch()` (no args) crashes in http-only worker
-        // mode because it relies on a gateway shard; route through the
-        // REST prewarm helper instead. After it resolves, the cache is
-        // the authoritative member set.
-        await prewarmGuildMembersCache(guild, { command: '/unlinked' });
-        // Prewarm swallows REST failures (correct for /qurl send
-        // degraded mode). For an admin reporting command, an empty
-        // OR partial cache is pathological — reporting "all linked"
-        // against an incomplete member set is a silent false positive.
-        // Mid-pagination failures (e.g. 429 on page 6 of 12) leave a
-        // non-empty cache that's still missing members. Compare against
-        // the expected count with `UNLINKED_CACHE_COMPLETENESS_THRESHOLD`
-        // tolerance to allow approximate-count drift but catch
-        // substantive shortfalls.
-        //
-        // Edge case: when both `memberCount` AND
-        // `approximateMemberCount` are absent (rare in practice — the
-        // guild loaded via REST `?with_counts=true` populates the
-        // latter), this falls back to a `size === 0` check only.
-        // Best-effort under that condition; a guild that fails
-        // mid-pagination with no count metadata available will
-        // currently still surface "all linked" if cache is non-empty.
-        const expectedMembers = effectiveGuildMemberCount(guild);
-        const cacheSize = guild.members.cache?.size ?? 0;
-        // `cacheSize === 0` is a sound proxy for "prewarm produced
-        // nothing" because `GET /guilds/{id}/members` includes the bot
-        // itself — a real guild with the bot present can never
-        // legitimately return zero members. The check defends against
-        // degraded-API silence, not against zero-member guilds.
-        const looksIncomplete = cacheSize === 0
-          || (expectedMembers != null && cacheSize < expectedMembers * UNLINKED_CACHE_COMPLETENESS_THRESHOLD);
-        if (looksIncomplete) {
-          // Debug-log the trip so dashboards can surface false-positive
-          // patterns (e.g. `approximateMemberCount` over-reporting on
-          // guilds with high churn → healthy run flagged degraded).
-          logger.debug('unlinked surfaced degraded-cache message', {
-            command: '/unlinked', guild_id: guild.id,
-            cache_size: cacheSize, expected_members: expectedMembers,
-          });
-          return interaction.editReply({
-            content: '⚠️ Could not load complete member list (Discord API may be degraded). Please retry.',
-          });
-        }
-        const contributors = guild.members.cache.filter(
-          (m) => m.roles.cache.has(contributorRole.id),
-        );
-
-        // Check which ones are not linked (single bulk query, not N+1)
-        const linkedIds = await db.getLinkedDiscordIds();
-        const unlinked = [];
-        for (const [id, member] of contributors) {
-          if (!linkedIds.has(id)) unlinked.push(member);
-        }
-
-        if (unlinked.length === 0) {
-          return interaction.editReply({
-            content: '✓ All contributors have linked their GitHub accounts!',
-          });
-        }
-
-        const embed = new EmbedBuilder()
-          .setColor(COLORS.ERROR)
-          .setTitle('⚠️ Unlinked Contributors')
-          .setDescription(
-            `${unlinked.length} contributor(s) have the @${config.CONTRIBUTOR_ROLE_NAME} role but haven't linked their GitHub:\n\n` +
-            unlinked.slice(0, 20).map(m => `• <@${m.id}> (${m.user.tag})`).join('\n') +
-            (unlinked.length > 20 ? `\n... and ${unlinked.length - 20} more` : '')
-          )
-          .setFooter({ text: 'Use /forcelink to manually link these users' });
-
-        await interaction.editReply({ embeds: [embed] });
-      } catch (error) {
-        logger.error('Error in /unlinked', { error: error.message });
-        await interaction.editReply({
-          content: '❌ An error occurred while checking unlinked contributors.',
-        });
-      }
-    },
-  },
   {
     // NOTE: adding/removing/renaming a `/qurl` subcommand? Update the
     // expected-set assertion in
@@ -9429,21 +9073,23 @@ const commands = [
         // Section order: user-facing flow first (Getting started → How it
         // works), then admin-only setup (now the OAuth-redirect flow per
         // PR #177), then glossary (Terms), then operational caveat
-        // The "Setting up" section pivots based on
-        // whether OAuth is configured — when it is, we describe the
-        // /qurl setup OAuth flow + the "Add to Discord" install-flow
-        // entry point. When unset (sandbox before Auth0 secrets land),
-        // we keep the legacy "API key paste" wording so the help text
-        // matches what /qurl setup actually does at that moment.
+        // The "Setting up" section pivots on whether qURL OAuth is
+        // configured. When unset (sandbox before Auth0 secrets land), keep
+        // the legacy API-key wording so help matches what /qurl setup does.
+        // The Add to Discord entrypoint has an additional Discord client-
+        // secret dependency, so advertise it only when the full customer
+        // install flow is ready.
         const oauthSetupSection = config.isQurlOAuthConfigured
           ? '**Setting up (for Admins):**\n'
             + '  `/qurl setup` — connect qURL via OAuth (admin only). Click the link, sign in to layerv.ai, consent. No API key paste.\n'
             + '  `/qurl status` — check if qURL is configured (admin only)\n\n'
-            + '_Adding the bot to a new server?_ Use the "Add to Discord" link on **https://layerv.ai** — '
-            + 'it walks you through server selection, permissions consent, and qURL connection in one click chain.\n\n'
           : '**Setting up (for Admins):**\n'
             + '  `/qurl setup` — configure your API key (admin only)\n'
             + '  `/qurl status` — check if qURL is configured (admin only)\n\n';
+        const discordInstallSection = config.isDiscordInstallConfigured
+          ? '_Adding the bot to a new server?_ Use the "Add to Discord" link on **https://layerv.ai** — '
+            + 'it walks you through server selection, permissions consent, and qURL connection in one click chain.\n\n'
+          : '';
         // `cmd` is used in two spots (Terms + Large servers); a
         // single token keeps them in lockstep across copy edits.
         const mapCopy = config.MAP_COMMAND_ENABLED
@@ -9481,6 +9127,7 @@ const commands = [
             '  3. Confirm the card, then click **Send**\n' +
             '  4. Recipients get a one-time link by DM that self-destructs on first access (or when the expiry elapses)\n\n' +
             oauthSetupSection +
+            discordInstallSection +
             `**Terms:** a *protected resource* is ${mapCopy.resource} you're sharing. ` +
             'A *qurl* (or *access link*) is the single-use URL that delivers it. ' +
             `You create a qurl for a protected resource each time you run ${mapCopy.cmd}.\n\n` +
@@ -9496,54 +9143,21 @@ const commands = [
   },
 ];
 
-// Commands that are safe to register outside the OpenNHP community guild.
-// Everything else (/link, /whois, /contributions, /stats, /leaderboard,
-// /forcelink, /bulklink, /unlinked, /backfill-milestones, /unlink) are
-// OpenNHP-community features that depend on single-guild state (the
-// cached guild, BASE_URL, GITHUB_* secrets). Registering them outside
-// the OpenNHP guild would put them in autocomplete where they'd fail
-// opaquely — /link would build a URL with an undefined BASE_URL,
-// /forcelink would try to fetch members from a null guild, etc.
-//
-// The full command set is only registered when the bot is in "OpenNHP
-// mode": GUILD_ID points at a real guild AND ENABLE_OPENNHP_FEATURES is
-// true. Every other configuration (multi-tenant, OR single-guild-plain
-// /qurl install like the test playground or a customer server) gets
-// only the allowlist.
-//
-// Keep the allowlist explicit and near the commands array so adding a
-// new customer-safe command requires updating both locations
-// intentionally.
-const CUSTOMER_SAFE_COMMANDS = new Set(['qurl']);
-
-// Single callsite for the active command set. `registerCommands` (at
-// boot) and `handleCommand` (per interaction) both ask this so a future
-// gating change — e.g. a third mode, a per-command flag — touches one
-// place instead of two. Keeps the two sites from drifting.
-function getActiveCommands() {
-  return config.isOpenNHPActive
-    ? commands
-    : commands.filter(cmd => CUSTOMER_SAFE_COMMANDS.has(cmd.data.name));
-}
-
 // Proactively clear stale guild-scoped command registrations from any
 // guild the bot is in. Discord's guild and global command namespaces do
-// not purge each other on a fresh PUT call, so a bot that previously
-// ran in OpenNHP mode (GUILD_ID=X, full command set registered to guild
-// X) and is now redeployed in multi-tenant or single-guild-plain mode
-// will leave /link, /leaderboard, etc. visible in X's slash-command
-// autocomplete until Discord's cache ages out. The dispatch-time filter
-// in handleCommand prevents those stale commands from doing anything
-// harmful, but users still see dead commands in the picker. Issuing
-// PUT-with-empty-body on the guild-commands endpoint clears the
-// guild-scoped set.
+// not purge each other on a fresh PUT call, so a guild that was served
+// by an older deploy registering a wider command set keeps those
+// entries visible in its slash-command autocomplete until Discord's
+// cache ages out. The dispatch-time filter in handleCommand prevents
+// stale commands from doing anything harmful, but users still see dead
+// commands in the picker. Issuing PUT-with-empty-body on the guild-
+// commands endpoint clears the guild-scoped set.
 //
-// Scoped to non-OpenNHP modes: in OpenNHP mode we intentionally register
-// guild-scoped commands to config.GUILD_ID, so purging there would
-// race with the upcoming PUT. Only iterates the `guilds` map the caller
-// passes in — we can't and shouldn't enumerate guilds we've never joined.
+// Runs before the registration PUT below, so in single-guild mode the
+// purge and the subsequent guild-scoped PUT are strictly sequential —
+// no race. Only iterates the `guilds` map the caller passes in — we
+// can't and shouldn't enumerate guilds we've never joined.
 async function purgeStaleGuildCommands({ rest, appId, guilds }) {
-  if (config.isOpenNHPActive) return; // guild-scoped register is the goal in OpenNHP mode
   // Parallelize the per-guild fetch+put. Promise.allSettled so one
   // slow/failing guild doesn't block the others; Discord's guild-
   // commands endpoint uses a separate rate bucket per guild.
@@ -9562,9 +9176,7 @@ async function purgeStaleGuildCommands({ rest, appId, guilds }) {
   })()));
 }
 
-// Register commands with Discord. `config.isOpenNHPActive` is the
-// single source of truth for "this deployment exercises the OpenNHP
-// community surface" — see config.js for the derivation.
+// Register commands with Discord.
 //
 // Signature decoupled from discord.js Client so both the legacy
 // Client path AND the @discordjs/ws shim path can call this:
@@ -9576,22 +9188,37 @@ async function purgeStaleGuildCommands({ rest, appId, guilds }) {
 async function registerCommands({ rest, appId, guilds = new Map() }) {
   await purgeStaleGuildCommands({ rest, appId, guilds });
 
-  const activeCommands = getActiveCommands();
-  const commandData = activeCommands.map(cmd => cmd.data.toJSON());
+  const commandData = commands.map(cmd => {
+    const data = cmd.data.toJSON();
+    // Deprecated by Discord in favour of `contexts`; never send both.
+    // Omitting the legacy field also avoids relying on builder defaults.
+    delete data.dm_permission;
+    // These fields are global-command-only in Discord's API. Pin them
+    // explicitly so Developer Portal defaults cannot expose the server-
+    // scoped qURL workflows through user installs or DM contexts.
+    if (!config.GUILD_ID) {
+      data.integration_types = [ApplicationIntegrationType.GuildInstall];
+      data.contexts = [InteractionContextType.Guild];
+    } else {
+      delete data.integration_types;
+      delete data.contexts;
+    }
+    return data;
+  });
 
   try {
     if (config.GUILD_ID) {
       // Guild-scoped registration: commands appear instantly in just this
-      // guild. Used by the single-guild OpenNHP deployment where fast command
+      // guild. Used by single-guild deployments where fast command
       // iteration matters more than appearing in other guilds.
-      logger.info(`Registering ${activeCommands.length} slash commands to guild ${config.GUILD_ID}...`);
+      logger.info(`Registering ${commands.length} slash commands to guild ${config.GUILD_ID}...`);
       await rest.put(Routes.applicationGuildCommands(appId, config.GUILD_ID), { body: commandData });
     } else {
       // Global registration: commands appear in every guild the bot joins.
       // Discord caches global commands for up to 1 hour, so newly-added
       // commands may take that long to propagate. Used for multi-tenant
       // deployments (customers invite the bot to their own servers).
-      logger.info(`Registering ${activeCommands.length} slash commands globally (multi-tenant mode): ${activeCommands.map(c => c.data.name).join(', ')}`);
+      logger.info(`Registering ${commands.length} slash commands globally (multi-tenant mode): ${commands.map(c => c.data.name).join(', ')}`);
       await rest.put(Routes.applicationCommands(appId), { body: commandData });
     }
     logger.info('Slash commands registered.');
@@ -9655,13 +9282,12 @@ async function handleAutocomplete(interaction) {
     if (interaction.commandName !== 'qurl') {
       return await interaction.respond([]);
     }
-    // Reject DM autocomplete — handleQurlMap rejects DMs at submit time
-    // (see commands.js:~3502) but Discord could still deliver an
-    // autocomplete interaction without a guildId. Without this guard a
-    // user who somehow triggered autocomplete in DM would burn the
-    // operator's global GOOGLE_MAPS_API_KEY quota for a send that's
-    // about to be rejected.
-    if (!interaction.guildId) {
+    // Reject DM and user-install-only autocomplete — handleQurlMap
+    // rejects those contexts at submit time, but Discord could still
+    // deliver autocomplete while global registration changes propagate.
+    // Without this guard the invalid interaction would burn the operator's
+    // global GOOGLE_MAPS_API_KEY quota for a send that's about to fail.
+    if (isUnsupportedQurlContext(interaction)) {
       return await interaction.respond([]);
     }
     const subcommand = interaction.options.getSubcommand(false);
@@ -9795,18 +9421,36 @@ async function handleCommand(interaction) {
     });
   };
 
-  // Defense-in-depth for mode-flip: if an operator switches from OpenNHP
-  // mode to customer-safe mode (flip GUILD_ID unset OR flip
-  // ENABLE_OPENNHP_FEATURES to false), the prior guild-scoped /link,
-  // /whois, etc. registrations remain in the old guild — Discord's two
-  // namespaces (guild and global) don't purge each other on a new .set()
-  // call. Those stale handlers all assume cached guild state (BASE_URL,
-  // contributor roles) that customer-safe mode doesn't populate and
-  // would crash on. Filter the handler lookup to the active set so a
-  // stale registration from a previous deploy can't dispatch to a broken
-  // path.
-  const activeCommands = getActiveCommands();
-  const command = activeCommands.find(cmd => cmd.data.name === interaction.commandName);
+  // Global command updates can take up to an hour to propagate. Reject any
+  // stale DM or user-install-only invocation centrally so no subcommand can
+  // bypass the guild-install product boundary during that window. A user-
+  // installed command may still be invoked inside a guild, so guildId alone
+  // is not sufficient; inspect Discord's authorizing-integration mapping too.
+  if (isUnsupportedQurlContext(interaction)) {
+    try {
+      await interaction.reply({
+        content: UNSUPPORTED_CONTEXT_MSG,
+        ephemeral: true,
+      });
+      emitInteractionMetric(false, 'unsupported_context');
+    } catch (err) {
+      logger.warn('Failed to reject command in unsupported context', {
+        command: interaction.commandName, error: err.message,
+      });
+      emitInteractionMetric(false, isAckTimeoutError(err) ? 'ack_timeout' : 'reply_failed');
+    }
+    return;
+  }
+
+  // Defense-in-depth against stale registrations: a guild served by an
+  // older deploy may still list commands this build no longer ships
+  // (the GitHub account-linking and contributor-role commands, removed
+  // in #1026), because Discord's guild and global namespaces don't
+  // purge each other on a new .set() call. purgeStaleGuildCommands
+  // clears them at boot, but Discord's cache can lag. Look the handler
+  // up in the shipped set so a stale registration can't dispatch into a
+  // path that no longer exists.
+  const command = commands.find(cmd => cmd.data.name === interaction.commandName);
   if (!command) {
     // The interaction is for a command we know exists globally (Discord
     // only dispatches registered commands to us) but is not in the
@@ -9997,7 +9641,6 @@ module.exports = {
   handleConfirmVoiceEveryone,
   handleConfirmPickManual,
   handleConfirmEveryone,
-  verifyStateBinding,
   // _test is only exported in non-production so live state (sendCooldowns)
   // and internal handlers can't leak into prod consumers. Tests run with
   // NODE_ENV=test (jest's default); production deploys set NODE_ENV=production.
@@ -10045,6 +9688,7 @@ module.exports = {
       monitorLinkStatus,
       revokeAllLinks,
       renderRevokeMsg,
+      safeRevokeHeader,
       renderSendConfirm,
       // Pure view-counter render, re-exported (defined in
       // ./view-counter-render) so the wording/floor contract is pinned

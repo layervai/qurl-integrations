@@ -38,6 +38,7 @@ type recordingStreamPort struct {
 	starts     []AgentStreamStart
 	appends    []string
 	stops      int
+	stopBlocks []any
 }
 
 func (r *recordingStreamPort) StartStream(_ context.Context, start *AgentStreamStart) (string, error) {
@@ -59,8 +60,9 @@ func (r *recordingStreamPort) AppendStream(_ context.Context, _, _, _, _, markdo
 	return nil
 }
 
-func (r *recordingStreamPort) StopStream(context.Context, string, string, string, string) error {
+func (r *recordingStreamPort) StopStream(_ context.Context, _, _, _, _ string, blocks []any) error {
 	r.stops++
+	r.stopBlocks = blocks
 	return nil
 }
 
@@ -97,6 +99,17 @@ func TestAgentStreamer_NoDeltas_NotHandled(t *testing.T) {
 	}
 }
 
+func TestAgentStreamer_NoNarrationProposalDoesNotOpenDisclaimerStream(t *testing.T) {
+	port := &recordingStreamPort{}
+	s := newTestStreamer(port)
+	if s.finalizeReply(&agent.Result{Proposal: &agent.Proposal{Action: agent.ActionRevoke}}) {
+		t.Fatal("a proposal must still be delivered by the caller")
+	}
+	if port.startCalls != 0 || port.stops != 0 || port.appended() != "" {
+		t.Fatalf("no-narration proposal must not open an orphan disclaimer stream: %+v", port)
+	}
+}
+
 func TestAgentStreamer_NormalReply_StreamsCoalescedAndStops(t *testing.T) {
 	port := &recordingStreamPort{}
 	s := newTestStreamer(port)
@@ -110,11 +123,25 @@ func TestAgentStreamer_NormalReply_StreamsCoalescedAndStops(t *testing.T) {
 	if port.startCalls != 1 || port.stops != 1 {
 		t.Fatalf("expected one start + one stop, got start=%d stop=%d", port.startCalls, port.stops)
 	}
-	if port.appended() != reply {
-		t.Fatalf("appends must reassemble the reply\n got: %q\nwant: %q", port.appended(), reply)
+	want := agentLLMReplyWithDisclaimer(reply)
+	if port.appended() != want {
+		t.Fatalf("appends must reassemble the reply and footer\n got: %q\nwant: %q", port.appended(), want)
 	}
 	if len(port.appends) >= len(reply) {
 		t.Fatalf("coalescing should yield far fewer appends than deltas, got %d", len(port.appends))
+	}
+}
+
+func TestAgentStreamer_WhitespaceOnlyReplyDoesNotAddDisclaimer(t *testing.T) {
+	port := &recordingStreamPort{}
+	s := newTestStreamer(port)
+	s.onDelta("   ")
+
+	if !s.finalizeReply(&agent.Result{Reply: "   "}) {
+		t.Fatal("an opened healthy stream must remain the delivered reply")
+	}
+	if got := port.appended(); got != "   " {
+		t.Fatalf("whitespace-only stream = %q, want no standalone disclaimer", got)
 	}
 }
 
@@ -130,7 +157,7 @@ func TestAgentStreamer_MaskedLinkSplitAcrossDeltas_RevealsDestination(t *testing
 	if !s.finalizeReply(&agent.Result{Reply: reply}) {
 		t.Fatal("a streamed reply must be delivered by the stream")
 	}
-	want := "Use Click here (https://evil.example/login) now."
+	want := agentLLMReplyWithDisclaimer("Use Click here (https://evil.example/login) now.")
 	if port.appended() != want {
 		t.Fatalf("streamed markdown = %q, want %q", port.appended(), want)
 	}
@@ -148,7 +175,7 @@ func TestAgentStreamer_BufferedLinkPrefixDoesNotOpenStream(t *testing.T) {
 	if !s.finalizeReply(&agent.Result{Reply: "[Click here](https://evil.example/login)"}) {
 		t.Fatal("completed link should stream once destination is known")
 	}
-	want := "Click here (https://evil.example/login)"
+	want := agentLLMReplyWithDisclaimer("Click here (https://evil.example/login)")
 	if port.appended() != want {
 		t.Fatalf("streamed markdown = %q, want %q", port.appended(), want)
 	}
@@ -165,7 +192,7 @@ func TestAgentStreamer_UnclosedCodeSpanHardensFollowingLinks(t *testing.T) {
 	if !s.finalizeReply(&agent.Result{Reply: reply}) {
 		t.Fatal("a streamed reply must be delivered by the stream")
 	}
-	want := "Intro: ` then click me (https://evil.example/phish)"
+	want := agentLLMReplyWithDisclaimer("Intro: ` then click me (https://evil.example/phish)")
 	if port.appended() != want {
 		t.Fatalf("streamed markdown = %q, want %q", port.appended(), want)
 	}
@@ -182,7 +209,7 @@ func TestAgentStreamer_RoundBoundaryReferenceDefinitionEscaped(t *testing.T) {
 	if !s.finalizeReply(&agent.Result{Reply: reply}) {
 		t.Fatal("a streamed reply must be delivered by the stream")
 	}
-	want := "Use [click here][evil].\\[evil]: https://evil.example/login"
+	want := agentLLMReplyWithDisclaimer("Use [click here][evil].\\[evil]: https://evil.example/login")
 	if got := port.appended(); got != want {
 		t.Fatalf("streamed markdown = %q, want %q", got, want)
 	}
@@ -205,7 +232,7 @@ func TestAgentStreamer_ReconcileAcceptsChunkBoundaryEscapedReply(t *testing.T) {
 	if !s.finalizeReply(&agent.Result{Reply: reply}) {
 		t.Fatal("a streamed reply must be delivered by the stream")
 	}
-	want := "Use [click here][evil]. \\[evil]: https://evil.example/login"
+	want := agentLLMReplyWithDisclaimer("Use [click here][evil]. \\[evil]: https://evil.example/login")
 	if got := port.appended(); got != want {
 		t.Fatalf("streamed markdown = %q, want %q", got, want)
 	}
@@ -239,15 +266,19 @@ func TestAgentStreamer_SyntheticReply_AppendedNotDoubled(t *testing.T) {
 	}
 }
 
-func TestAgentStreamer_Proposal_StopsButCallerPostsCard(t *testing.T) {
+func TestAgentStreamer_ProposalNarrationGetsDisclaimerAndCallerPostsCard(t *testing.T) {
 	port := &recordingStreamPort{}
 	s := newTestStreamer(port)
-	s.onDelta("Sure — I'll revoke that token; confirm below.")
+	const narration = "Sure — I'll revoke that token; confirm below."
+	s.onDelta(narration)
 	if s.finalizeReply(&agent.Result{Proposal: &agent.Proposal{Action: agent.ActionRevoke}}) {
 		t.Fatal("a proposal must NOT be marked delivered — the caller still posts the confirm card")
 	}
 	if port.stops != 1 {
 		t.Fatalf("the narration stream must still be stopped, got stops=%d", port.stops)
+	}
+	if got, want := port.appended(), agentLLMReplyWithDisclaimer(narration); got != want {
+		t.Fatalf("proposal narration and footer\n got: %q\nwant: %q", got, want)
 	}
 }
 
@@ -344,6 +375,24 @@ func TestAgentStreamer_AppendFailureAtFinalize_FallsBackToPost(t *testing.T) {
 	}
 	if len(port.appends) != 0 {
 		t.Fatalf("the only (failing) append records nothing, got %v", port.appends)
+	}
+}
+
+func TestAgentStreamer_ReconcileFailureLeavesNoBufferedDisclaimer(t *testing.T) {
+	port := &recordingStreamPort{}
+	s := newTestStreamer(port)
+	streamed := strings.Repeat("x", agentStreamFlushBytes)
+	s.onDelta(streamed)
+	port.appendErr = errors.New("reconcile appendStream 500")
+
+	if s.finalizeReply(&agent.Result{Reply: "synthesized final reply"}) {
+		t.Fatal("a reconcile append failure must fall back to the posted reply")
+	}
+	if !s.broken || s.pending.Len() != 0 {
+		t.Fatalf("broken stream must keep pending empty, got broken=%v pending=%q", s.broken, s.pending.String())
+	}
+	if got := port.appended(); got != streamed {
+		t.Fatalf("delivered stream = %q, want no footer after reconcile failure", got)
 	}
 }
 
@@ -484,7 +533,7 @@ func TestProcessAgentEvent_ChannelMentionStreamingSkipsReplyPost(t *testing.T) {
 	e.Event.UserTeam = "T_user"
 	h.processAgentEvent(context.Background(), slog.Default(), e)
 
-	if port.startCalls != 1 || port.stops != 1 || port.appended() != reply {
+	if port.startCalls != 1 || port.stops != 1 || port.appended() != agentLLMReplyWithDisclaimer(reply) {
 		t.Fatalf("channel mention should stream and stop once, got start=%d stop=%d appended=%q", port.startCalls, port.stops, port.appended())
 	}
 	mu.Lock()
@@ -497,8 +546,9 @@ func TestProcessAgentEvent_ChannelMentionStreamingSkipsReplyPost(t *testing.T) {
 func TestProcessAgentEvent_ChannelMentionStreamingProposalStillPostsCard(t *testing.T) {
 	port := &recordingStreamPort{}
 	blocks := &blocksRecorder{}
+	const narration = "I can revoke that token; confirm below."
 	llm := &handlerStreamingLLM{responses: []agent.Response{{
-		Text:       "I can revoke that token; confirm below.",
+		Text:       narration,
 		ToolCalls:  []agent.ToolCall{{ID: "p1", Name: testAgentStreamProposeRevoke, Input: json.RawMessage(`{"token":"staging"}`)}},
 		StopReason: testAgentStreamToolUse,
 	}}}
@@ -510,6 +560,9 @@ func TestProcessAgentEvent_ChannelMentionStreamingProposalStillPostsCard(t *test
 
 	if port.startCalls != 1 || port.stops != 1 {
 		t.Fatalf("proposal narration should stream and stop once, got start=%d stop=%d", port.startCalls, port.stops)
+	}
+	if got, want := port.appended(), agentLLMReplyWithDisclaimer(narration); got != want {
+		t.Fatalf("proposal narration and footer\n got: %q\nwant: %q", got, want)
 	}
 	if len(blocks.calls) != 1 {
 		t.Fatalf("proposal must still post one confirm card, got %d", len(blocks.calls))
@@ -536,5 +589,35 @@ func TestProcessAgentEvent_ChannelMentionStreamingPartialErrorNoDoublePost(t *te
 	defer mu.Unlock()
 	if len(*posts) != 0 {
 		t.Fatalf("healthy partial stream owns the error outcome; got posted fallback %+v", *posts)
+	}
+}
+
+// A turn cut short after streaming narration from a round it then abandoned must
+// NOT reconcile by appending: the stream is append-only, so the abandoned fragment
+// and the real answer would run together into one garbled message. finalizeReply
+// takes the broken-stream fallback so the caller posts the complete answer as its
+// own message. Pairs with
+// agent.TestRun_AbandonedStreamedRoundKeepsTheFinalAnswerOffTheSink, which pins
+// the producing side.
+func TestAgentStreamer_DiscardedStreamTextFallsBackToAPostedReply(t *testing.T) {
+	port := &recordingStreamPort{}
+	s := newTestStreamer(port)
+	// Long enough to pass agentStreamFlushBytes, so the fragment has really reached
+	// Slack and cannot be retracted — the case the fallback exists for.
+	const abandoned = "Let me look that up for you across this channel's res"
+	s.onDelta(abandoned)
+
+	const reply = "I couldn't finish checking $docs in this channel."
+	if s.finalizeReply(&agent.Result{Reply: reply, Cutoff: agent.CutoffBudget, DiscardedStreamText: true}) {
+		t.Fatal("a turn that discarded streamed text must not claim the stream delivered the reply")
+	}
+	if port.stops != 1 {
+		t.Fatalf("the partial stream must still be stopped, got stop=%d", port.stops)
+	}
+	if got := port.appended(); strings.Contains(got, reply) {
+		t.Fatalf("the final answer must not be appended onto the abandoned fragment, got %q", got)
+	}
+	if got := port.appended(); got != abandoned {
+		t.Fatalf("only the already-delivered fragment should have reached Slack, got %q", got)
 	}
 }

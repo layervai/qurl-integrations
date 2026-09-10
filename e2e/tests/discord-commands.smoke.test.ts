@@ -49,10 +49,10 @@ describe('Discord command registration (smoke)', () => {
 
     // Union of globally-registered and guild-scoped `/qurl` commands.
     // The bot registers `/qurl` globally in multi-tenant mode and
-    // guild-scoped in OpenNHP mode (see commands.js's registerCommands).
-    // Fetching both scopes makes the assertion robust across deploy
-    // configurations and catches ghost registrations in whichever scope
-    // we're not actively using.
+    // guild-scoped when GUILD_ID is set (see commands.js's
+    // registerCommands). Fetching both scopes makes the assertion
+    // robust across deploy configurations and catches ghost
+    // registrations in whichever scope we're not actively using.
     //
     // The guild fetch is tolerated failing: if the bot isn't in the
     // configured GUILD_ID (403/404), treat it as "no guild-scoped

@@ -70,8 +70,14 @@ const (
 	blockKitFieldSubmit          = "submit"
 	blockKitFieldTitle           = "title"
 	blockKitFieldType            = "type"
-	blockKitTypeModal            = "modal"
-	blockKitTypeMultiConvSelect  = "multi_conversations_select"
+	// blockKitFieldText is Block Kit's `text` field. Deliberately separate
+	// from fieldText in process.go, which is the slash-command form field of
+	// the same name — two different wire contracts that happen to match.
+	blockKitFieldText           = "text"
+	blockKitTypeModal           = "modal"
+	blockKitTypeSection         = "section"
+	blockKitTypeMrkdwn          = "mrkdwn"
+	blockKitTypeMultiConvSelect = "multi_conversations_select"
 	// Button styles: Slack renders `primary` filled-green and `danger` red.
 	blockKitStylePrimary = "primary"
 	blockKitStyleDanger  = "danger"
@@ -120,15 +126,18 @@ var redactedSubmissionBlockIDs = map[string]struct{}{
 	// Edit/expose aliases and names are redacted even when install aliases are
 	// visible diagnostics: edit/expose submissions can carry existing resource
 	// labels, URL targets, or broad free-form edits from an established setup.
-	claimCodeBlockID:           {},
-	tunnelEditBlockDisplayName: {},
-	tunnelEditBlockAliases:     {},
-	tunnelEditBlockChannels:    {},
-	exposeURLBlockResource:     {},
-	exposeURLBlockAlias:        {},
-	exposeURLBlockTarget:       {},
-	feedbackBlockSummary:       {},
-	feedbackBlockDetails:       {},
+	claimCodeBlockID:            {},
+	tunnelEditBlockDisplayName:  {},
+	tunnelEditBlockAliases:      {},
+	tunnelEditBlockChannels:     {},
+	exposeURLBlockResource:      {},
+	exposeURLBlockAlias:         {},
+	exposeURLBlockTarget:        {},
+	s3WebsiteInstallBlockBucket: {},
+	s3WebsiteInstallBlockPrefix: {},
+	s3WebsiteInstallBlockIndex:  {},
+	feedbackBlockSummary:        {},
+	feedbackBlockDetails:        {},
 }
 
 // IsRedactedSubmissionBlock reports whether a submitted Slack view state block
@@ -218,7 +227,7 @@ type TunnelInstallAgentMetadata struct {
 // response_url lets the async installer post the same ephemeral follow-up
 // shape as the direct `/qurl-admin protect-connector <slug>` path.
 // CreatedAtUnix lets the submit handler reject stale modals before creating a
-// resource or minting a bootstrap key; Slack response URLs are time-limited.
+// resource or minting an enrollment token; Slack response URLs are time-limited.
 // Agent is present only for the conversation-mode confirm flow, never for
 // slash-command initiated connector setup.
 type TunnelInstallModalMetadata struct {
@@ -276,10 +285,10 @@ func TunnelInstallModal(meta *TunnelInstallModalMetadata) ([]byte, error) {
 	return json.Marshal(payload)
 }
 
-// TunnelInstallErrorModal replaces a submitted tunnel-install modal with a
+// ConnectorInstallErrorModal replaces a submitted connector-install modal with a
 // form-level error. Slack's `response_action: errors` can only attach copy to
 // input fields, which makes auth/config failures look like bad user input.
-func TunnelInstallErrorModal(message string) ([]byte, error) {
+func ConnectorInstallErrorModal(message string) ([]byte, error) {
 	payload := map[string]any{
 		blockKitFieldType:  blockKitTypeModal,
 		blockKitFieldTitle: plainTextObj("qURL Connector setup"),
@@ -519,10 +528,10 @@ func ErrorResponse(message string, replaceOriginal bool) ([]byte, error) {
 // shape is verbose.
 func sectionBlock(text string) map[string]any {
 	return map[string]any{
-		"type": "section",
-		"text": map[string]any{
-			"type": "mrkdwn",
-			"text": text,
+		blockKitFieldType: blockKitTypeSection,
+		blockKitFieldText: map[string]any{
+			blockKitFieldType: blockKitTypeMrkdwn,
+			blockKitFieldText: text,
 		},
 	}
 }
@@ -534,8 +543,8 @@ func sectionBlock(text string) map[string]any {
 // short; today the only caller uses the short [listHeaderBlockText] constant.
 func headerBlock(text string) map[string]any {
 	return map[string]any{
-		"type": "header",
-		"text": plainTextObj(text),
+		blockKitFieldType: "header",
+		blockKitFieldText: plainTextObj(text),
 	}
 }
 
@@ -552,14 +561,14 @@ func headerBlock(text string) map[string]any {
 // Callers pass raw, already-validated snippet text.
 func richTextPreformattedBlock(code string) map[string]any {
 	return map[string]any{
-		"type": "rich_text",
+		blockKitFieldType: "rich_text",
 		blockKitFieldElements: []any{
 			map[string]any{
-				"type": "rich_text_preformatted",
+				blockKitFieldType: "rich_text_preformatted",
 				blockKitFieldElements: []any{
 					map[string]any{
-						"type": "text",
-						"text": code,
+						blockKitFieldType: "text",
+						blockKitFieldText: code,
 					},
 				},
 			},
@@ -575,10 +584,10 @@ func richTextPreformattedBlock(code string) map[string]any {
 // button is clicked, so the handler knows which row was tapped.
 func sectionWithAccessory(text string, accessory map[string]any) map[string]any {
 	return map[string]any{
-		"type": "section",
-		"text": map[string]any{
-			"type": "mrkdwn",
-			"text": text,
+		blockKitFieldType: blockKitTypeSection,
+		blockKitFieldText: map[string]any{
+			blockKitFieldType: blockKitTypeMrkdwn,
+			blockKitFieldText: text,
 		},
 		"accessory": accessory,
 	}
@@ -590,11 +599,37 @@ func sectionWithAccessory(text string, accessory map[string]any) map[string]any 
 // actionsBlock (the multi-button admin `/qurl list` rows).
 func buttonElement(buttonText, actionID, value string) map[string]any {
 	return map[string]any{
-		"type":                "button",
-		"text":                plainTextObj(buttonText),
+		blockKitFieldType:     "button",
+		blockKitFieldText:     plainTextObj(buttonText),
 		blockKitFieldActionID: actionID,
 		blockKitFieldValue:    value,
 	}
+}
+
+// urlButtonElement returns a `button` block element whose `url` opens directly
+// in the user's browser on click — Slack's native link-button behavior — rather
+// than round-tripping a block_action to the app like [buttonElement]. An
+// action_id still rides along so the click is routable and shows up in
+// [blockActionIDs] logging; there is no `value` because a link button carries no
+// server-side payload. NOTE: Slack still delivers a block_actions interaction
+// when a url button is clicked, so the action_id MUST be a benign no-op in
+// handleBlockActions (the unrecognized-action `200 OK` path handles this).
+func urlButtonElement(buttonText, actionID, url string) map[string]any {
+	return map[string]any{
+		blockKitFieldType:     "button",
+		blockKitFieldText:     plainTextObj(buttonText),
+		blockKitFieldActionID: actionID,
+		"url":                 url,
+	}
+}
+
+// primaryURLButtonElement is a [urlButtonElement] rendered with Slack's `primary`
+// (filled) style — the URL-button analog of [primaryButtonElement], used for the
+// headline "Enter Portal" link on a minted qURL.
+func primaryURLButtonElement(buttonText, actionID, url string) map[string]any {
+	b := urlButtonElement(buttonText, actionID, url)
+	b["style"] = blockKitStylePrimary
+	return b
 }
 
 // primaryButtonElement is a [buttonElement] rendered with Slack's `primary`
@@ -623,11 +658,11 @@ func dangerButtonElement(buttonText, actionID, value string) map[string]any {
 // Mutates and returns button for call-site chaining.
 func withConfirmDialog(button map[string]any, title, text, confirmLabel string) map[string]any {
 	button["confirm"] = map[string]any{
-		"title":   plainTextObj(title),
-		"text":    map[string]any{"type": "mrkdwn", "text": text},
-		"confirm": plainTextObj(confirmLabel),
-		"deny":    plainTextObj("Cancel"),
-		"style":   blockKitStyleDanger,
+		"title":           plainTextObj(title),
+		blockKitFieldText: map[string]any{blockKitFieldType: blockKitTypeMrkdwn, blockKitFieldText: text},
+		"confirm":         plainTextObj(confirmLabel),
+		"deny":            plainTextObj("Cancel"),
+		"style":           blockKitStyleDanger,
 	}
 	return button
 }
@@ -651,12 +686,26 @@ func actionsBlock(elements ...map[string]any) map[string]any {
 // Used for the "subtext" rows in modals (e.g. the `:lock:` warning).
 func contextBlock(text string) map[string]any {
 	return map[string]any{
-		"type": "context",
+		blockKitFieldType: "context",
 		blockKitFieldElements: []any{
 			map[string]any{
-				"type": "mrkdwn",
-				"text": text,
+				blockKitFieldType: blockKitTypeMrkdwn,
+				blockKitFieldText: text,
 			},
+		},
+	}
+}
+
+// plainTextContextBlock is contextBlock's plain_text sibling: a `context` block
+// with a single plain_text element, so Slack does no mrkdwn parsing on it. The
+// confirm card uses it for its fixed AI-provenance subtext, keeping the card's
+// "no mrkdwn next to the Approve button" invariant (the summary/reason render
+// plain_text for the same injection-defense reason).
+func plainTextContextBlock(text string) map[string]any {
+	return map[string]any{
+		blockKitFieldType: "context",
+		blockKitFieldElements: []any{
+			plainTextObj(text),
 		},
 	}
 }
@@ -666,18 +715,18 @@ func contextBlock(text string) map[string]any {
 // title/submit/close fields require `plain_text` specifically.
 func plainTextObj(text string) map[string]any {
 	return map[string]any{
-		"type":  "plain_text",
-		"text":  text,
-		"emoji": true,
+		blockKitFieldType: "plain_text",
+		blockKitFieldText: text,
+		"emoji":           true,
 	}
 }
 
 func inputBlock(blockID, label, hint string, optional bool, element map[string]any) map[string]any {
 	block := map[string]any{
-		"type":     "input",
-		"block_id": blockID,
-		"label":    plainTextObj(label),
-		"element":  element,
+		blockKitFieldType: "input",
+		"block_id":        blockID,
+		"label":           plainTextObj(label),
+		"element":         element,
 	}
 	if hint != "" {
 		block["hint"] = plainTextObj(hint)
@@ -690,7 +739,7 @@ func inputBlock(blockID, label, hint string, optional bool, element map[string]a
 
 func plainTextInput(actionID, placeholder, initialValue string) map[string]any {
 	element := map[string]any{
-		"type":                "plain_text_input",
+		blockKitFieldType:     "plain_text_input",
 		blockKitFieldActionID: actionID,
 	}
 	if placeholder != "" {
@@ -712,7 +761,7 @@ func multilinePlainTextInput(actionID, placeholder, initialValue string) map[str
 
 func staticSelect(actionID string, options []map[string]any, initial map[string]any) map[string]any {
 	element := map[string]any{
-		"type":                "static_select",
+		blockKitFieldType:     "static_select",
 		blockKitFieldActionID: actionID,
 		"options":             options,
 	}
@@ -720,6 +769,18 @@ func staticSelect(actionID string, options []map[string]any, initial map[string]
 	// nil initial means "no pre-selection" (the URL-protect picker forces a
 	// deliberate choice); a non-nil one pre-selects (e.g. the connector
 	// installer's environment default). Mirrors multiConversationsSelect's guard.
+	if initial != nil {
+		element["initial_option"] = initial
+	}
+	return element
+}
+
+func radioButtons(actionID string, options []map[string]any, initial map[string]any) map[string]any {
+	element := map[string]any{
+		blockKitFieldType:     "radio_buttons",
+		blockKitFieldActionID: actionID,
+		"options":             options,
+	}
 	if initial != nil {
 		element["initial_option"] = initial
 	}
@@ -734,7 +795,7 @@ func staticSelect(actionID string, options []map[string]any, initial map[string]
 // empty array there.
 func multiConversationsSelect(actionID string, initialConversations []string) map[string]any {
 	element := map[string]any{
-		"type":                blockKitTypeMultiConvSelect,
+		blockKitFieldType:     blockKitTypeMultiConvSelect,
 		blockKitFieldActionID: actionID,
 		"placeholder":         plainTextObj("Select channels"),
 		"filter": map[string]any{
@@ -754,9 +815,15 @@ func multiConversationsSelect(actionID string, initialConversations []string) ma
 
 func optionObj(text, value string) map[string]any {
 	return map[string]any{
-		"text":             plainTextObj(text),
+		blockKitFieldText:  plainTextObj(text),
 		blockKitFieldValue: value,
 	}
+}
+
+func optionObjWithDescription(text, value, description string) map[string]any {
+	option := optionObj(text, value)
+	option["description"] = plainTextObj(description)
+	return option
 }
 
 // plainTextSectionBlock returns a `section` block whose text is a plain_text
@@ -767,8 +834,8 @@ func optionObj(text, value string) map[string]any {
 // the operator-visible feedback channel.
 func plainTextSectionBlock(text string) map[string]any {
 	return map[string]any{
-		"type": "section",
-		"text": plainTextObj(text),
+		blockKitFieldType: blockKitTypeSection,
+		blockKitFieldText: plainTextObj(text),
 	}
 }
 

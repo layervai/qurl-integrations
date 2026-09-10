@@ -9,16 +9,10 @@
 // script.
 //
 // Schemas mirror the live shape `ddb-store.js` expects — keys, GSIs,
-// and TTL attributes. Three tables (`qurl_sends`, `qurl_send_configs`,
-// `guild_configs`) match the `modules/qurl-bot-ddb/main.tf`
-// definitions in `qurl-integrations-infra`; the rest are inferred from
-// `ddb-store.js` call sites (key + GSI usage) for the OpenNHP-feature
-// tables (`github_links`, `pending_links`, `contributions`, `badges`,
-// `streaks`, `milestones`, `orphaned_oauth_tokens`). Those tables are
-// intentionally absent from the non-OpenNHP prod deployment per
-// `ddb-store.js`'s top-of-file comment about unused tables — local dev
-// provisions them so an operator can exercise OpenNHP code paths
-// without flipping ENABLE_OPENNHP_FEATURES off first.
+// and TTL attributes. `qurl_sends`, `qurl_send_configs` and
+// `guild_configs` match the `modules/qurl-bot-ddb/main.tf` definitions
+// in `qurl-integrations-infra`; `qurl_views` is inferred from
+// `ddb-store.js` call sites (key + TTL usage).
 //
 // SCOPE: this provisioner covers the Store-contract tables only (those
 // in `src/store/ddb-store.js`'s TABLES map). Other modules use their
@@ -86,10 +80,10 @@ const LOCAL_HOSTNAMES = new Set([
 // have real AWS creds in env locally.
 function validateEnv({ endpoint, prefix }) {
   // Prefix shape — tighter than `endsWith('-')`: also rejects a bare
-  // `'-'` (which would produce table names like `-github-links`).
+  // `'-'` (which would produce table names like `-qurl-sends`).
   // 64-char cap catches a copy-paste accident before any `CreateTable`
   // call surfaces DDB's 255-char `TableName` limit (prefix + the
-  // longest suffix `orphaned-oauth-tokens` = ~85 chars of headroom).
+  // longest suffix `qurl-send-configs` = ~89 chars of headroom).
   if (!/^[a-z0-9][a-z0-9-]*-$/.test(prefix) || prefix.length > 64) {
     console.error(`DDB_TABLE_PREFIX must match /^[a-z0-9][a-z0-9-]*-$/ and be at most 64 chars (got '${prefix}').`);
     process.exit(1);
@@ -98,7 +92,7 @@ function validateEnv({ endpoint, prefix }) {
   // Defense-in-depth refusal: this script is a local-dev tool only.
   // An operator with real AWS creds in their shell who runs the
   // script with `DDB_TEST_ENDPOINT` pointed at a real AWS endpoint
-  // would otherwise happily provision 10 tables in real DDB.
+  // would otherwise happily provision the tables in real DDB.
   let parsed;
   try { parsed = new URL(endpoint); } catch {
     console.error(`Invalid DDB_TEST_ENDPOINT URL: '${endpoint}'.`);
@@ -147,63 +141,6 @@ function makeClient({ region, endpoint }) {
 // listed separately — DDB requires a follow-up UpdateTimeToLive call.
 const tables = [
   {
-    name: 'pending-links',
-    keySchema: [{ AttributeName: 'state', KeyType: 'HASH' }],
-    attributes: [{ AttributeName: 'state', AttributeType: 'S' }],
-    ttlAttribute: 'expires_at',
-  },
-  {
-    name: 'github-links',
-    keySchema: [{ AttributeName: 'discord_id', KeyType: 'HASH' }],
-    attributes: [
-      { AttributeName: 'discord_id', AttributeType: 'S' },
-      { AttributeName: 'github_username', AttributeType: 'S' },
-    ],
-    gsis: [{
-      IndexName: 'github_username-index',
-      KeySchema: [{ AttributeName: 'github_username', KeyType: 'HASH' }],
-      Projection: { ProjectionType: 'KEYS_ONLY' },
-    }],
-  },
-  {
-    name: 'contributions',
-    keySchema: [{ AttributeName: 'contribution_id', KeyType: 'HASH' }],
-    attributes: [
-      { AttributeName: 'contribution_id', AttributeType: 'S' },
-      { AttributeName: 'discord_id', AttributeType: 'S' },
-      { AttributeName: 'merged_at', AttributeType: 'S' },
-    ],
-    gsis: [{
-      IndexName: 'discord_id-merged_at-index',
-      KeySchema: [
-        { AttributeName: 'discord_id', KeyType: 'HASH' },
-        { AttributeName: 'merged_at', KeyType: 'RANGE' },
-      ],
-      Projection: { ProjectionType: 'ALL' },
-    }],
-  },
-  {
-    name: 'badges',
-    keySchema: [
-      { AttributeName: 'discord_id', KeyType: 'HASH' },
-      { AttributeName: 'badge_type', KeyType: 'RANGE' },
-    ],
-    attributes: [
-      { AttributeName: 'discord_id', AttributeType: 'S' },
-      { AttributeName: 'badge_type', AttributeType: 'S' },
-    ],
-  },
-  {
-    name: 'streaks',
-    keySchema: [{ AttributeName: 'discord_id', KeyType: 'HASH' }],
-    attributes: [{ AttributeName: 'discord_id', AttributeType: 'S' }],
-  },
-  {
-    name: 'milestones',
-    keySchema: [{ AttributeName: 'milestone_id', KeyType: 'HASH' }],
-    attributes: [{ AttributeName: 'milestone_id', AttributeType: 'S' }],
-  },
-  {
     name: 'qurl-sends',
     keySchema: [
       { AttributeName: 'send_id', KeyType: 'HASH' },
@@ -240,21 +177,10 @@ const tables = [
     ttlAttribute: 'expires_at',
   },
   {
-    name: 'orphaned-oauth-tokens',
-    keySchema: [{ AttributeName: 'token_hash', KeyType: 'HASH' }],
-    attributes: [{ AttributeName: 'token_hash', AttributeType: 'S' }],
-    ttlAttribute: 'expires_at',
-  },
-  {
     name: 'guild-configs',
     keySchema: [{ AttributeName: 'guild_id', KeyType: 'HASH' }],
     attributes: [{ AttributeName: 'guild_id', AttributeType: 'S' }],
   },
-  // NOTE: TABLES.weekly_stats is listed in `ddb-store.js`'s TABLES map
-  // but has no DDB call site today. When the first reader/writer
-  // lands, add the schema here — `git grep 'TABLES.weekly_stats'`
-  // will surface both this marker and the new call site so the pair
-  // moves together.
 ];
 
 async function ensureTable(client, prefix, spec) {

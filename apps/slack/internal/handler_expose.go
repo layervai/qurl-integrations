@@ -42,14 +42,15 @@ func (h *Handler) handleExpose(w http.ResponseWriter, values url.Values) {
 	respondSlackBlocks(w, "What do you want to protect in this channel?", exposeChooserBlocks(channelID))
 }
 
-// handleExposeConnectorClick opens the existing guided connector installer in
-// response to the "Protect qURL Connector" button. It reuses TunnelInstallModal
-// and its existing submission handler wholesale — the button is just a second
-// entry point to the wizard the bare `/qurl-admin protect-connector` opens.
+// handleExposeConnectorClick opens the qURL Connector setup chooser in response
+// to the "Protect qURL Connector" button. The chooser routes web-app/API setup
+// to the long-standing installer and S3 static website setup to the S3-specific
+// artifact generator.
 // Mirrors handleListEditClick: ack fast, render+open on the async goroutine
 // within Slack's trigger window, fail open via the interaction's response_url.
 // Not admin-re-gated at open (the picker only renders for admins and the modal
-// discloses nothing new); handleTunnelInstallSubmission is the mutation gate.
+// discloses nothing new); the follow-up modal submission handlers are the
+// mutation gates.
 func (h *Handler) handleExposeConnectorClick(w http.ResponseWriter, payload *interactionPayload) {
 	log := slog.With(
 		"command", "protect_connector_click",
@@ -76,7 +77,7 @@ func (h *Handler) handleExposeConnectorClick(w http.ResponseWriter, payload *int
 	}
 	teamID, enterpriseID, triggerID := payload.Team.ID, payload.Enterprise.ID, payload.TriggerID
 	h.Go(func() {
-		view, err := TunnelInstallModal(&meta)
+		view, err := ConnectorSetupModal(&meta)
 		if err != nil {
 			log.Error("protect connector: modal render failed", "error", err)
 			_ = h.postResponse(log, responseURL, ":warning: "+exposeOpenFailedMessage)
@@ -357,18 +358,19 @@ func (h *Handler) handleExposeURLSubmission(w http.ResponseWriter, payload *View
 }
 
 // parseExposeURLModalArgs validates the URL-protect modal's submitted state: the
-// chosen resource_id (the selected dropdown option's value — our own option set
-// only ever carries an `r_…` resource_id, so a non-`r_` value is a crafted
-// submission and is rejected) and the channel alias (required, validated against
-// the shared alias contract; a leading `$` is optional). Returns a per-field
-// error map on any problem.
+// chosen resource_id (the selected dropdown option's opaque value) and the
+// channel alias (required, validated against the shared alias contract; a
+// leading `$` is optional). The async bind path re-resolves the selected ID
+// against the current active URL-resource list, which is the authenticity check;
+// duplicating qurl-service's ID syntax here would break coordinated ID cutovers.
+// Returns a per-field error map on any problem.
 func parseExposeURLModalArgs(values map[string]map[string]interactionStateValue) (resourceID, channelAlias string, fieldErrors map[string]string) {
 	fieldErrors = map[string]string{}
 
 	resourceID = strings.TrimSpace(interactionStateText(values, exposeURLBlockResource, exposeURLActionResource))
 	if resourceID == "" {
 		fieldErrors[exposeURLBlockResource] = "Pick a URL resource to protect."
-	} else if !strings.HasPrefix(resourceID, "r_") || len(resourceID) > slackOptionValueMaxChars {
+	} else if len(resourceID) > slackOptionValueMaxChars {
 		fieldErrors[exposeURLBlockResource] = "Pick a URL resource from the list."
 	}
 

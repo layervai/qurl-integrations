@@ -1,12 +1,13 @@
 # Developer guide
 
-Building, testing, packaging, and releasing the qURL File Upload extension.
+Building, testing, packaging, and releasing the qURL Agent extension.
 If you just want to **use** the extension in Gmail, see the
 [README](../README.md) instead.
 
 ## Prerequisites
 
-- Node 18+ (the repo pins `22.21.0` in `.nvmrc`)
+- Node 20.9+ — the `sharp` devDependency requires it. CI and local dev run the
+  `22.21.0` pinned in `.nvmrc`; nothing below that is tested.
 - Google Chrome, or another Chromium browser, with access to
   `chrome://extensions`
 
@@ -44,12 +45,16 @@ exact steps and `.env.example` for the template.
 
 ## Icons
 
-Regenerate the PNG icons from the SVG sources in `icons/` (the SVGs are
-canonical — see [DESIGN.md](./DESIGN.md#extension-icons)):
+Regenerate the PNG icons from the shared `icons/logo.png` source:
 
 ```bash
 npm run icons
 ```
+
+CI verifies the committed PNGs are byte-identical to a fresh `npm run icons`
+(`test/generate-icons.test.js`), so upgrading `sharp` means regenerating and
+committing the icons in the same PR — its PNG encoder decides the bytes. See
+[#1046](https://github.com/layervai/qurl-integrations/issues/1046).
 
 ## Packaging for the Chrome Web Store
 

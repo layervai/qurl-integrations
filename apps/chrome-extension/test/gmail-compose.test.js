@@ -45,44 +45,118 @@ function createSelectionHarness() {
   };
 }
 
-test('findComposeBodyAsync observes documentElement when document.body is not ready', async function () {
-  const observerCalls = [];
-  let composeBodies = [];
-  let messageListener = null;
-  let observerInstance = null;
-  const execCalls = [];
-  const caretMoves = [];
-  const documentElement = { nodeName: 'HTML' };
-  const selectionHarness = createSelectionHarness();
-  const composeBody = {
-    classList: {
-      contains(name) {
-        return name === 'Am' || name === 'Al' || name === 'editable';
-      },
+// The content script arms real timers that intentionally outlive an insertion: a 30s response
+// cache per completed INSERT_LINKS (INSERT_REQUEST_CACHE_TTL_MS) and a 4s toast auto-dismiss.
+// Both are correct in a browser, but a sandbox wired straight to Node's global setTimeout keeps
+// the whole test process alive until they fire — this file used to spend 30s doing 6ms of work.
+//
+// Sandboxes that want real timers take these tracked wrappers. The after() hook clears whatever
+// is still armed, but first asserts the survivors are exactly the ones the test declared: that
+// hang was the only signal this class of bug ever produced, so quietly sweeping up leftovers
+// would retire it for good. A timer some future path forgets to clear fails here instead, named
+// by its delay. expectedArmed maps a delay to how many of that delay the test means to leave
+// behind; omit it for the usual case of none.
+//
+// The timers stay real — no fake clock, and deliberately no unref(): an unref'd timer still
+// fires, which would make running the content script's callbacks depend on how long the rest of
+// the suite happens to take.
+function createTimerHarness(t, expectedArmed) {
+  const armed = new Map();
+
+  t.after(function () {
+    const survivors = {};
+    armed.forEach(function (delay, timerId) {
+      survivors[delay] = (survivors[delay] || 0) + 1;
+      globalThis.clearTimeout(timerId);
+    });
+    armed.clear();
+    // Asserted after clearing, so a failure reports instead of hanging on the very timers it names.
+    assert.deepEqual(
+      survivors,
+      expectedArmed || {},
+      'timers left armed at teardown should be only the ones this test means to outlive'
+    );
+  });
+
+  return {
+    clearTimeout(timerId) {
+      armed.delete(timerId);
+      globalThis.clearTimeout(timerId);
     },
-    focus() {},
-    getAttribute(name) {
-      if (name === 'contenteditable') return 'true';
-      if (name === 'role') return 'textbox';
-      if (name === 'aria-multiline') return 'true';
-      return null;
-    },
-    getBoundingClientRect() {
-      return { width: 320, height: 24 };
-    },
-    insertAdjacentHTML() {
-      throw new Error('insertAdjacentHTML should not be reached when execCommand succeeds');
+    setTimeout(callback, delay, ...args) {
+      const timerId = globalThis.setTimeout(function () {
+        armed.delete(timerId);
+        callback(...args);
+      }, delay);
+      armed.set(timerId, delay);
+      return timerId;
     },
   };
+}
 
-  class MockMutationObserver {
+// Copies `source` onto `target`, except that a key whose value is `undefined` is deleted instead.
+// The content script feature-detects everything optional with `typeof`, so deletion is how a test
+// says "this browser has no execCommand" rather than "execCommand returns undefined".
+function applyOverrides(target, source) {
+  Object.keys(source || {}).forEach(function (key) {
+    if (source[key] === undefined) {
+      delete target[key];
+      return;
+    }
+    target[key] = source[key];
+  });
+  return target;
+}
+
+// Every test below drives the content script through the same shape of vm sandbox: an object that
+// is its own window/globalThis/self, a chrome.runtime.onMessage listener to capture, a document
+// stub deep enough for compose discovery plus all three insertion paths, and a formatter that
+// yields '<p>links</p>'. Hand-writing it at every call site made every cross-cutting change a
+// many-way edit — createSelectionHarness was one such change, createTimerHarness another — so it
+// lives here once and the genuinely per-test parts arrive as `config`:
+//
+//   expectedArmed  forwarded to createTimerHarness for timers the test means to outlive it
+//   timers         {setTimeout, clearTimeout} to opt out of the tracked harness altogether
+//   document       merged over the document stub (body, querySelectorAll, execCommand, ...)
+//   globals        merged over the sandbox itself (requestAnimationFrame, getComputedStyle, ...)
+//   decorateRange  mutates each range document.createRange hands out, for the selection paths
+//
+// Both merges go through applyOverrides, so `undefined` removes a key. `globals` cannot reach
+// window/globalThis/self: those are assigned afterwards and have to stay self-referential for the
+// content script's `window.foo` lookups to resolve. `t` is only used to register the tracked timer
+// harness, so a test supplying its own `timers` leaves it unused.
+//
+// The returned handle carries what tests assert against: the captured `messageListener`, the
+// MutationObserver `observers` (each recording its observe() calls and its disconnect), the
+// `documentElement` an observer should fall back to, the nodes `appended` to document.body (the
+// failure toast), and the `warnings` console.warn collected.
+function createComposeSandbox(t, config) {
+  const settings = config || {};
+  // Refuse the combination rather than dropping expectedArmed on the floor: it only means anything
+  // to the tracked harness, so a test that stubs timers *and* declares survivors is asking for a
+  // leaked-timer assertion that would never run.
+  assert.ok(
+    !(settings.timers && settings.expectedArmed),
+    'expectedArmed drives the tracked timer harness; a test supplying its own timers cannot use it'
+  );
+  const timers = settings.timers || createTimerHarness(t, settings.expectedArmed);
+  const selectionHarness = createSelectionHarness();
+  const documentElement = { nodeName: 'HTML' };
+  const observers = [];
+  const appended = [];
+  const warnings = [];
+  let messageListener = null;
+
+  class RecordingMutationObserver {
     constructor(callback) {
       this.callback = callback;
-      observerInstance = this;
+      this.observeCalls = [];
+      this.disconnected = false;
+      observers.push(this);
     }
 
     observe(target, options) {
-      observerCalls.push({ target, options });
+      this.observeCalls.push({ target, options });
     }
 
     disconnect() {
@@ -106,104 +180,104 @@ test('findComposeBodyAsync observes documentElement when document.body is not re
         },
       },
     },
-    clearTimeout,
+    clearTimeout: timers.clearTimeout,
     console: {
-      warn() {},
+      warn(...args) {
+        warnings.push(args.map(String).join(' '));
+      },
     },
-    document: {
-      body: null,
+    document: applyOverrides({
+      body: {
+        appendChild(node) {
+          appended.push(node);
+        },
+      },
       documentElement,
       createElement() {
         return {
           setAttribute() {},
           style: {},
           remove() {},
+          textContent: '',
         };
-      },
-      execCommand(command, showUi, html) {
-        execCalls.push({ command, showUi, html });
-        return true;
       },
       createRange() {
         const range = selectionHarness.createRange();
-        range.selectNodeContents = function (node) {
-          caretMoves.push(node);
-        };
+        if (settings.decorateRange) {
+          settings.decorateRange(range);
+        }
         return range;
       },
-      queryCommandSupported(command) {
-        assert.equal(command, 'insertHTML');
+      execCommand() {
+        return true;
+      },
+      queryCommandSupported() {
         return true;
       },
       querySelectorAll() {
-        return composeBodies;
+        return [];
       },
-      addEventListener() {
-        assert.fail('documentElement observation should avoid waiting for DOMContentLoaded');
-      },
+      addEventListener() {},
       removeEventListener() {},
-    },
-    MutationObserver: MockMutationObserver,
+    }, settings.document),
+    MutationObserver: RecordingMutationObserver,
     requestAnimationFrame(callback) {
       callback();
       return 1;
     },
-    setTimeout,
+    setTimeout: timers.setTimeout,
+    getComputedStyle() {
+      return { display: 'block', visibility: 'visible' };
+    },
+    getSelection() {
+      return selectionHarness.selection;
+    },
+    QURLComposeFormatter: {
+      buildLinkHtml() {
+        return '<p>links</p>';
+      },
+    },
   };
 
+  applyOverrides(sandbox, settings.globals);
   sandbox.window = sandbox;
   sandbox.globalThis = sandbox;
   sandbox.self = sandbox;
-  sandbox.getComputedStyle = function () {
-    return { display: 'block', visibility: 'visible' };
-  };
-  sandbox.getSelection = function () {
-    return selectionHarness.selection;
-  };
-  sandbox.QURLComposeFormatter = {
-    buildLinkHtml() {
-      return '<p>links</p>';
-    },
-  };
 
   vm.createContext(sandbox);
   vm.runInContext(contentScriptSource, sandbox);
 
-  const responsePromise = new Promise(function (resolve) {
-    const keepAlive = messageListener({
-      type: 'INSERT_LINKS',
-      results: [{ filename: 'demo.txt', link: 'https://files.example.com/q/demo', expiry: null }],
-    }, null, resolve);
-    assert.equal(keepAlive, true);
-  });
+  return {
+    appended,
+    documentElement,
+    messageListener,
+    observers,
+    warnings,
+  };
+}
 
-  assert.equal(observerCalls.length, 1);
-  assert.equal(observerCalls[0].target, documentElement);
-  assert.equal(observerCalls[0].options.childList, true);
-  assert.equal(observerCalls[0].options.subtree, true);
-  assert.equal('attributes' in observerCalls[0].options, false);
-
-  composeBodies = [composeBody];
-  observerInstance.callback();
-
-  const response = await responsePromise;
-  assert.equal(response.success, true);
-  assert.deepEqual(execCalls, [{
-    command: 'insertHTML',
-    showUi: false,
-    html: '<p>links</p>',
-  }]);
-  assert.equal(caretMoves.length, 1);
-  assert.equal(caretMoves[0], composeBody);
-  assert.equal(observerInstance.disconnected, true);
-});
-
-test('findComposeBodyAsync performs an immediate post-observe lookup on the next frame', async function () {
-  let composeBodies = [];
-  let messageListener = null;
-  const rafCallbacks = [];
-  const selectionHarness = createSelectionHarness();
-  const composeBody = {
+// Every test hands the content script the same fixture element: one that satisfies *both*
+// recognition paths in isLikelyComposeBody (the `Am Al editable` class triple and the
+// role=textbox/contenteditable/aria-multiline triple) and reports a non-empty rect so isVisible
+// keeps it. A hand-written copy at every call site buried the one member a test actually cared
+// about under ~20 identical lines, and made adding a member the content script started reading a
+// many-way edit.
+//
+// `overrides` is merged with applyOverrides, so a key replaces the default member and `undefined`
+// removes it. The three that vary today:
+//
+//   getBoundingClientRect  the default box is only sized (width/height), which is all isVisible
+//                          reads; the tests that rank bodies against each other add top/left
+//   focus                  a no-op unless the test records which body was focused
+//   insertAdjacentHTML     deliberately absent by default. The content script feature-detects it
+//                          as its last-resort insertion path, so a body that always has it would
+//                          let that path be reached silently. Tests that exercise it pass a
+//                          recorder; the one that must never reach it passes a thrower.
+//
+// Each call builds its own members, so no two bodies from this factory are deepEqual — an
+// assertion naming one of them still fails if the content script picked the other.
+function createComposeBody(overrides) {
+  return applyOverrides({
     classList: {
       contains(name) {
         return name === 'Am' || name === 'Al' || name === 'editable';
@@ -219,81 +293,156 @@ test('findComposeBodyAsync performs an immediate post-observe lookup on the next
     getBoundingClientRect() {
       return { width: 320, height: 24 };
     },
-  };
+  }, overrides);
+}
 
-  const sandbox = {
-    chrome: {
-      i18n: {
-        getMessage() {
-          return '';
-        },
+// Drive candidate bodies through the full insertion path and assert which one wins. Ranking tests
+// put a losing candidate first: removing an isolated term leaves that wrong body in place through
+// the stable sort, while inverting precedence lets its conflicting lower-priority term win.
+async function assertComposeRanking(t, candidates, expectedLabel) {
+  const focusCalls = [];
+  const caretMoves = [];
+  const composeBodies = candidates.map(function (candidate) {
+    return createComposeBody({
+      focus() {
+        focusCalls.push(candidate.label);
       },
-      runtime: {
-        lastError: null,
-        onMessage: {
-          addListener(listener) {
-            messageListener = listener;
-          },
-        },
+      getBoundingClientRect() {
+        return candidate.rect;
       },
-    },
-    clearTimeout,
-    console: {
-      warn() {},
-    },
+    });
+  });
+  const zIndexByBody = new Map(composeBodies.map(function (composeBody, index) {
+    return [composeBody, candidates[index].zIndex];
+  }));
+  const expectedIndex = candidates.findIndex(function (candidate) {
+    return candidate.label === expectedLabel;
+  });
+  assert.notEqual(expectedIndex, -1, `missing expected candidate ${expectedLabel}`);
+  assert.notEqual(
+    expectedIndex,
+    0,
+    'list a loser first so a dropped comparator term cannot pass on stable DOM order'
+  );
+
+  const { messageListener } = createComposeSandbox(t, {
     document: {
-      body: {},
-      documentElement: { nodeName: 'HTML' },
-      createElement() {
+      querySelectorAll(selector) {
+        return selector.includes(':focus') ? [] : composeBodies;
+      },
+    },
+    globals: {
+      getComputedStyle(element) {
         return {
-          setAttribute() {},
-          style: {},
-          remove() {},
+          display: 'block',
+          visibility: 'visible',
+          zIndex: String(zIndexByBody.get(element)),
         };
       },
-      execCommand() {
+    },
+    decorateRange(range) {
+      range.selectNodeContents = function (node) {
+        caretMoves.push(node);
+      };
+    },
+  });
+
+  const response = await new Promise(function (resolve) {
+    assert.equal(messageListener({
+      type: 'INSERT_LINKS',
+      results: [{ filename: 'demo.txt', link: 'https://files.example.com/q/demo', expiry: null }],
+    }, null, resolve), true);
+  });
+
+  assert.equal(response.success, true);
+  assert.deepEqual(focusCalls, [expectedLabel]);
+  assert.deepEqual(caretMoves, [composeBodies[expectedIndex]]);
+}
+
+test('findComposeBodyAsync observes documentElement when document.body is not ready', async function (t) {
+  let composeBodies = [];
+  const execCalls = [];
+  const caretMoves = [];
+  const composeBody = createComposeBody({
+    insertAdjacentHTML() {
+      throw new Error('insertAdjacentHTML should not be reached when execCommand succeeds');
+    },
+  });
+
+  const { documentElement, messageListener, observers } = createComposeSandbox(t, {
+    document: {
+      body: null,
+      execCommand(command, showUi, html) {
+        execCalls.push({ command, showUi, html });
         return true;
       },
-      createRange() {
-        return selectionHarness.createRange();
-      },
-      queryCommandSupported() {
+      queryCommandSupported(command) {
+        assert.equal(command, 'insertHTML');
         return true;
       },
       querySelectorAll() {
         return composeBodies;
       },
-      addEventListener() {},
-      removeEventListener() {},
+      addEventListener() {
+        assert.fail('documentElement observation should avoid waiting for DOMContentLoaded');
+      },
     },
-    MutationObserver: class {
-      observe() {}
-      disconnect() {}
+    decorateRange(range) {
+      range.selectNodeContents = function (node) {
+        caretMoves.push(node);
+      };
     },
-    requestAnimationFrame(callback) {
-      rafCallbacks.push(callback);
-      return rafCallbacks.length;
-    },
-    setTimeout,
-  };
+  });
 
-  sandbox.window = sandbox;
-  sandbox.globalThis = sandbox;
-  sandbox.self = sandbox;
-  sandbox.getComputedStyle = function () {
-    return { display: 'block', visibility: 'visible' };
-  };
-  sandbox.getSelection = function () {
-    return selectionHarness.selection;
-  };
-  sandbox.QURLComposeFormatter = {
-    buildLinkHtml() {
-      return '<p>links</p>';
-    },
-  };
+  const responsePromise = new Promise(function (resolve) {
+    const keepAlive = messageListener({
+      type: 'INSERT_LINKS',
+      results: [{ filename: 'demo.txt', link: 'https://files.example.com/q/demo', expiry: null }],
+    }, null, resolve);
+    assert.equal(keepAlive, true);
+  });
 
-  vm.createContext(sandbox);
-  vm.runInContext(contentScriptSource, sandbox);
+  assert.equal(observers.length, 1);
+  const [observer] = observers;
+  assert.equal(observer.observeCalls.length, 1);
+  assert.equal(observer.observeCalls[0].target, documentElement);
+  assert.equal(observer.observeCalls[0].options.childList, true);
+  assert.equal(observer.observeCalls[0].options.subtree, true);
+  assert.equal('attributes' in observer.observeCalls[0].options, false);
+
+  composeBodies = [composeBody];
+  observer.callback();
+
+  const response = await responsePromise;
+  assert.equal(response.success, true);
+  assert.deepEqual(execCalls, [{
+    command: 'insertHTML',
+    showUi: false,
+    html: '<p>links</p>',
+  }]);
+  assert.equal(caretMoves.length, 1);
+  assert.equal(caretMoves[0], composeBody);
+  assert.equal(observer.disconnected, true);
+});
+
+test('findComposeBodyAsync performs an immediate post-observe lookup on the next frame', async function (t) {
+  let composeBodies = [];
+  const rafCallbacks = [];
+  const composeBody = createComposeBody();
+
+  const { messageListener } = createComposeSandbox(t, {
+    document: {
+      querySelectorAll() {
+        return composeBodies;
+      },
+    },
+    globals: {
+      requestAnimationFrame(callback) {
+        rafCallbacks.push(callback);
+        return rafCallbacks.length;
+      },
+    },
+  });
 
   const responsePromise = new Promise(function (resolve) {
     assert.equal(messageListener({
@@ -310,113 +459,70 @@ test('findComposeBodyAsync performs an immediate post-observe lookup on the next
   assert.equal(response.success, true);
 });
 
-test('duplicate INSERT_LINKS requests with the same requestId only insert once', async function () {
+test('findComposeBodyAsync leaves no discovery timeout behind when the first lookup settles synchronously', async function (t) {
+  // Regression guard for the ordering inside findComposeBodyAsync. Both real schedulers are
+  // asynchronous (requestAnimationFrame, or a setTimeout(fn, 16) fallback), so the discovery
+  // timeout is always armed before finish() can run. This sandbox supplies a SYNCHRONOUS
+  // requestAnimationFrame instead: the first queued lookup finds the compose body and calls
+  // finish() while the function body is still running. If the timeout were armed after that
+  // lookup, finish()'s clearTimeout would target a still-null timeoutId and the 4s timer would
+  // be armed afterwards for an operation that already completed — nothing would ever clear it,
+  // and it would fire a full findComposeBody() sweep. createTimerHarness declares no surviving
+  // timers, so that leak fails this test at teardown.
   let composeBodies = [];
-  let messageListener = null;
-  let observerInstance = null;
+  let rafCalls = 0;
+  const composeBody = createComposeBody();
+
+  const { messageListener } = createComposeSandbox(t, {
+    document: {
+      querySelectorAll() {
+        return composeBodies;
+      },
+    },
+    globals: {
+      requestAnimationFrame(callback) {
+        rafCalls += 1;
+        // The compose body appears exactly between the initial miss and this first queued lookup,
+        // so finish() runs inside findComposeBodyAsync rather than on a later frame.
+        composeBodies = [composeBody];
+        callback();
+        return rafCalls;
+      },
+    },
+  });
+
+  // No requestId, so this takes the no-dedup path and the discovery timeout is the only timer
+  // findComposeBodyAsync's caller can leave armed.
+  const response = await new Promise(function (resolve) {
+    assert.equal(messageListener({
+      type: 'INSERT_LINKS',
+      results: [{ filename: 'demo.txt', link: 'https://files.example.com/q/demo', expiry: null }],
+    }, null, resolve), true);
+  });
+
+  assert.equal(response.success, true);
+  assert.equal(rafCalls, 1, 'the compose body should be found by the first queued lookup');
+});
+
+test('duplicate INSERT_LINKS requests with the same requestId only insert once', async function (t) {
+  let composeBodies = [];
   let execInsertCount = 0;
-  const documentElement = { nodeName: 'HTML' };
-  const selectionHarness = createSelectionHarness();
-  const composeBody = {
-    classList: {
-      contains(name) {
-        return name === 'Am' || name === 'Al' || name === 'editable';
-      },
-    },
-    focus() {},
-    getAttribute(name) {
-      if (name === 'contenteditable') return 'true';
-      if (name === 'role') return 'textbox';
-      if (name === 'aria-multiline') return 'true';
-      return null;
-    },
-    getBoundingClientRect() {
-      return { width: 320, height: 24 };
-    },
-  };
+  const composeBody = createComposeBody();
 
-  class MockMutationObserver {
-    constructor(callback) {
-      this.callback = callback;
-      observerInstance = this;
-    }
-
-    observe() {}
-    disconnect() {}
-  }
-
-  const sandbox = {
-    chrome: {
-      i18n: {
-        getMessage() {
-          return '';
-        },
-      },
-      runtime: {
-        lastError: null,
-        onMessage: {
-          addListener(listener) {
-            messageListener = listener;
-          },
-        },
-      },
-    },
-    clearTimeout,
-    console: {
-      warn() {},
-    },
+  const { messageListener, observers } = createComposeSandbox(t, {
+    expectedArmed: { 30000: 1 },
     document: {
       body: null,
-      documentElement,
-      createElement() {
-        return {
-          setAttribute() {},
-          style: {},
-          remove() {},
-        };
-      },
-      createRange() {
-        return selectionHarness.createRange();
-      },
       execCommand(command) {
         assert.equal(command, 'insertHTML');
         execInsertCount += 1;
         return true;
       },
-      queryCommandSupported() {
-        return true;
-      },
       querySelectorAll() {
         return composeBodies;
       },
-      addEventListener() {},
-      removeEventListener() {},
     },
-    MutationObserver: MockMutationObserver,
-    requestAnimationFrame(callback) {
-      callback();
-      return 1;
-    },
-    setTimeout,
-  };
-
-  sandbox.window = sandbox;
-  sandbox.globalThis = sandbox;
-  sandbox.self = sandbox;
-  sandbox.getComputedStyle = function () {
-    return { display: 'block', visibility: 'visible' };
-  };
-  sandbox.getSelection = function () {
-    return selectionHarness.selection;
-  };
-  sandbox.QURLComposeFormatter = {
-    buildLinkHtml() {
-      return '<p>links</p>';
-    },
-  };
-
-  vm.createContext(sandbox);
-  vm.runInContext(contentScriptSource, sandbox);
+  });
 
   const message = {
     type: 'INSERT_LINKS',
@@ -432,7 +538,8 @@ test('duplicate INSERT_LINKS requests with the same requestId only insert once',
   });
 
   composeBodies = [composeBody];
-  observerInstance.callback();
+  assert.equal(observers.length, 1, 'the duplicate request must not start a second discovery');
+  observers[0].callback();
 
   const [first, second] = await Promise.all([firstResponse, secondResponse]);
   assert.equal(first.success, true);
@@ -440,104 +547,29 @@ test('duplicate INSERT_LINKS requests with the same requestId only insert once',
   assert.equal(execInsertCount, 1);
 });
 
-test('completed requests are retained (under the cap) so retries replay instead of re-inserting', async function () {
-  let messageListener = null;
+test('completed requests are retained (under the cap) so retries replay instead of re-inserting', async function (t) {
   let execInsertCount = 0;
-  const selectionHarness = createSelectionHarness();
-  const composeBody = {
-    classList: {
-      contains(name) {
-        return name === 'Am' || name === 'Al' || name === 'editable';
-      },
-    },
-    focus() {},
-    getAttribute(name) {
-      if (name === 'contenteditable') return 'true';
-      if (name === 'role') return 'textbox';
-      if (name === 'aria-multiline') return 'true';
-      return null;
-    },
-    getBoundingClientRect() {
-      return { width: 320, height: 24 };
-    },
-  };
+  const composeBody = createComposeBody();
 
-  const sandbox = {
-    chrome: {
-      i18n: {
-        getMessage() {
-          return '';
-        },
+  const { messageListener } = createComposeSandbox(t, {
+    // Timers are stubbed rather than tracked through createTimerHarness: this test needs the 30s
+    // response cache to stay un-expirable across all 33 requests, which a real timer cannot give it.
+    timers: {
+      clearTimeout() {},
+      setTimeout() {
+        return 1;
       },
-      runtime: {
-        lastError: null,
-        onMessage: {
-          addListener(listener) {
-            messageListener = listener;
-          },
-        },
-      },
-    },
-    clearTimeout() {},
-    console: {
-      warn() {},
     },
     document: {
-      body: {},
-      documentElement: { nodeName: 'HTML' },
-      createElement() {
-        return {
-          setAttribute() {},
-          style: {},
-          remove() {},
-        };
-      },
-      createRange() {
-        return selectionHarness.createRange();
-      },
       execCommand() {
         execInsertCount += 1;
-        return true;
-      },
-      queryCommandSupported() {
         return true;
       },
       querySelectorAll() {
         return [composeBody];
       },
-      addEventListener() {},
-      removeEventListener() {},
     },
-    MutationObserver: class {
-      observe() {}
-      disconnect() {}
-    },
-    requestAnimationFrame(callback) {
-      callback();
-      return 1;
-    },
-    setTimeout() {
-      return 1;
-    },
-  };
-
-  sandbox.window = sandbox;
-  sandbox.globalThis = sandbox;
-  sandbox.self = sandbox;
-  sandbox.getComputedStyle = function () {
-    return { display: 'block', visibility: 'visible' };
-  };
-  sandbox.getSelection = function () {
-    return selectionHarness.selection;
-  };
-  sandbox.QURLComposeFormatter = {
-    buildLinkHtml() {
-      return '<p>links</p>';
-    },
-  };
-
-  vm.createContext(sandbox);
-  vm.runInContext(contentScriptSource, sandbox);
+  });
 
   for (let i = 0; i < 33; i += 1) {
     const response = await new Promise(function (resolve) {
@@ -567,102 +599,30 @@ test('completed requests are retained (under the cap) so retries replay instead 
   assert.equal(execInsertCount, 33);
 });
 
-test('Selection API fallback inserts at the end when execCommand is unavailable', async function () {
-  let messageListener = null;
+test('Selection API fallback inserts at the end when execCommand is unavailable', async function (t) {
   const insertedFragments = [];
   const startAfterCalls = [];
-  const selectionHarness = createSelectionHarness();
-  const composeBody = {
-    classList: {
-      contains(name) {
-        return name === 'Am' || name === 'Al' || name === 'editable';
-      },
-    },
-    focus() {},
-    getAttribute(name) {
-      if (name === 'contenteditable') return 'true';
-      if (name === 'role') return 'textbox';
-      if (name === 'aria-multiline') return 'true';
-      return null;
-    },
-    getBoundingClientRect() {
-      return { width: 320, height: 24 };
-    },
-  };
+  const composeBody = createComposeBody();
 
-  const sandbox = {
-    chrome: {
-      i18n: {
-        getMessage() {
-          return '';
-        },
-      },
-      runtime: {
-        lastError: null,
-        onMessage: {
-          addListener(listener) {
-            messageListener = listener;
-          },
-        },
-      },
-    },
-    clearTimeout,
-    console: {
-      warn() {},
-    },
+  const { messageListener } = createComposeSandbox(t, {
     document: {
-      body: {},
-      documentElement: { nodeName: 'HTML' },
-      createElement() {
-        return {
-          setAttribute() {},
-          style: {},
-          remove() {},
-        };
-      },
-      createRange() {
-        const range = selectionHarness.createRange();
-        range.insertNode = function (fragment) {
-          insertedFragments.push(fragment.html);
-        };
-        range.setStartAfter = function (node) {
-          startAfterCalls.push(node.nodeName);
-        };
-        return range;
-      },
+      execCommand: undefined,
       queryCommandSupported() {
         return false;
       },
       querySelectorAll() {
         return [composeBody];
       },
-      addEventListener() {},
-      removeEventListener() {},
     },
-    MutationObserver: class {
-      observe() {}
-      disconnect() {}
+    decorateRange(range) {
+      range.insertNode = function (fragment) {
+        insertedFragments.push(fragment.html);
+      };
+      range.setStartAfter = function (node) {
+        startAfterCalls.push(node.nodeName);
+      };
     },
-    setTimeout,
-  };
-
-  sandbox.window = sandbox;
-  sandbox.globalThis = sandbox;
-  sandbox.self = sandbox;
-  sandbox.getComputedStyle = function () {
-    return { display: 'block', visibility: 'visible' };
-  };
-  sandbox.getSelection = function () {
-    return selectionHarness.selection;
-  };
-  sandbox.QURLComposeFormatter = {
-    buildLinkHtml() {
-      return '<p>links</p>';
-    },
-  };
-
-  vm.createContext(sandbox);
-  vm.runInContext(contentScriptSource, sandbox);
+  });
 
   const response = await new Promise(function (resolve) {
     assert.equal(messageListener({
@@ -676,103 +636,27 @@ test('Selection API fallback inserts at the end when execCommand is unavailable'
   assert.deepEqual(startAfterCalls, ['LAST']);
 });
 
-test('Selection API fallback runs when execCommand reports insertion failure', async function () {
-  let messageListener = null;
+test('Selection API fallback runs when execCommand reports insertion failure', async function (t) {
   const execCalls = [];
   const insertedFragments = [];
-  const selectionHarness = createSelectionHarness();
-  const composeBody = {
-    classList: {
-      contains(name) {
-        return name === 'Am' || name === 'Al' || name === 'editable';
-      },
-    },
-    focus() {},
-    getAttribute(name) {
-      if (name === 'contenteditable') return 'true';
-      if (name === 'role') return 'textbox';
-      if (name === 'aria-multiline') return 'true';
-      return null;
-    },
-    getBoundingClientRect() {
-      return { width: 320, height: 24 };
-    },
-  };
+  const composeBody = createComposeBody();
 
-  const sandbox = {
-    chrome: {
-      i18n: {
-        getMessage() {
-          return '';
-        },
-      },
-      runtime: {
-        lastError: null,
-        onMessage: {
-          addListener(listener) {
-            messageListener = listener;
-          },
-        },
-      },
-    },
-    clearTimeout,
-    console: {
-      warn() {},
-    },
+  const { messageListener } = createComposeSandbox(t, {
     document: {
-      body: {},
-      documentElement: { nodeName: 'HTML' },
-      createElement() {
-        return {
-          setAttribute() {},
-          style: {},
-          remove() {},
-        };
-      },
-      createRange() {
-        const range = selectionHarness.createRange();
-        range.insertNode = function (fragment) {
-          insertedFragments.push(fragment.html);
-        };
-        return range;
-      },
       execCommand(command, showUi, html) {
         execCalls.push({ command, showUi, html });
         return false;
       },
-      queryCommandSupported() {
-        return true;
-      },
       querySelectorAll() {
         return [composeBody];
       },
-      addEventListener() {},
-      removeEventListener() {},
     },
-    MutationObserver: class {
-      observe() {}
-      disconnect() {}
+    decorateRange(range) {
+      range.insertNode = function (fragment) {
+        insertedFragments.push(fragment.html);
+      };
     },
-    setTimeout,
-  };
-
-  sandbox.window = sandbox;
-  sandbox.globalThis = sandbox;
-  sandbox.self = sandbox;
-  sandbox.getComputedStyle = function () {
-    return { display: 'block', visibility: 'visible' };
-  };
-  sandbox.getSelection = function () {
-    return selectionHarness.selection;
-  };
-  sandbox.QURLComposeFormatter = {
-    buildLinkHtml() {
-      return '<p>links</p>';
-    },
-  };
-
-  vm.createContext(sandbox);
-  vm.runInContext(contentScriptSource, sandbox);
+  });
 
   const response = await new Promise(function (resolve) {
     assert.equal(messageListener({
@@ -790,245 +674,70 @@ test('Selection API fallback runs when execCommand reports insertion failure', a
   assert.deepEqual(insertedFragments, ['<p>links</p>']);
 });
 
-test('findComposeBody prefers the topmost visible compose body when none is focused', async function () {
-  let messageListener = null;
-  const caretMoves = [];
-  const focusCalls = [];
-  const selectionHarness = createSelectionHarness();
-  const backgroundCompose = {
-    classList: {
-      contains(name) {
-        return name === 'Am' || name === 'Al' || name === 'editable';
-      },
-    },
-    focus() {
-      focusCalls.push('background');
-    },
-    getAttribute(name) {
-      if (name === 'contenteditable') return 'true';
-      if (name === 'role') return 'textbox';
-      if (name === 'aria-multiline') return 'true';
-      return null;
-    },
-    getBoundingClientRect() {
-      return { width: 320, height: 24, top: 240, left: 640 };
-    },
-  };
-  const foregroundCompose = {
-    classList: {
-      contains(name) {
-        return name === 'Am' || name === 'Al' || name === 'editable';
-      },
-    },
-    focus() {
-      focusCalls.push('foreground');
-    },
-    getAttribute(name) {
-      if (name === 'contenteditable') return 'true';
-      if (name === 'role') return 'textbox';
-      if (name === 'aria-multiline') return 'true';
-      return null;
-    },
-    getBoundingClientRect() {
-      return { width: 320, height: 24, top: 120, left: 320 };
-    },
-  };
-
-  const sandbox = {
-    chrome: {
-      i18n: {
-        getMessage() {
-          return '';
-        },
-      },
-      runtime: {
-        lastError: null,
-        onMessage: {
-          addListener(listener) {
-            messageListener = listener;
-          },
-        },
-      },
-    },
-    clearTimeout,
-    console: {
-      warn() {},
-    },
-    document: {
-      body: {},
-      documentElement: { nodeName: 'HTML' },
-      createElement() {
-        return {
-          setAttribute() {},
-          style: {},
-          remove() {},
-        };
-      },
-      execCommand() {
-        return true;
-      },
-      createRange() {
-        const range = selectionHarness.createRange();
-        range.selectNodeContents = function (node) {
-          caretMoves.push(node);
-        };
-        return range;
-      },
-      queryCommandSupported() {
-        return true;
-      },
-      querySelectorAll(selector) {
-        return selector.includes(':focus')
-          ? []
-          : [backgroundCompose, foregroundCompose];
-      },
-      addEventListener() {},
-      removeEventListener() {},
-    },
-    MutationObserver: class {
-      observe() {}
-      disconnect() {}
-    },
-    setTimeout,
-  };
-
-  sandbox.window = sandbox;
-  sandbox.globalThis = sandbox;
-  sandbox.self = sandbox;
-  sandbox.getComputedStyle = function (element) {
-    if (element === foregroundCompose) {
-      return { display: 'block', visibility: 'visible', zIndex: '20' };
-    }
-    return { display: 'block', visibility: 'visible', zIndex: '1' };
-  };
-  sandbox.getSelection = function () {
-    return selectionHarness.selection;
-  };
-  sandbox.QURLComposeFormatter = {
-    buildLinkHtml() {
-      return '<p>links</p>';
-    },
-  };
-
-  vm.createContext(sandbox);
-  vm.runInContext(contentScriptSource, sandbox);
-
-  const response = await new Promise(function (resolve) {
-    assert.equal(messageListener({
-      type: 'INSERT_LINKS',
-      results: [{ filename: 'demo.txt', link: 'https://files.example.com/q/demo', expiry: null }],
-    }, null, resolve), true);
-  });
-
-  assert.equal(response.success, true);
-  assert.deepEqual(focusCalls, ['foreground']);
-  assert.deepEqual(caretMoves, [foregroundCompose]);
+test('findComposeBody prefers the topmost visible compose body when none is focused', async function (t) {
+  await assertComposeRanking(t, [
+    { label: 'lower', zIndex: 20, rect: { width: 320, height: 24, top: 240, left: 320 } },
+    { label: 'topmost', zIndex: 20, rect: { width: 320, height: 24, top: 120, left: 320 } },
+  ], 'topmost');
 });
 
-test('pending INSERT_LINKS requests are not evicted before they complete', function () {
-  let messageListener = null;
-  const observerInstances = [];
+test('findComposeBody breaks a top tie on the leftmost compose body', async function (t) {
+  await assertComposeRanking(t, [
+    { label: 'rightmost', zIndex: 20, rect: { width: 320, height: 24, top: 120, left: 640 } },
+    { label: 'leftmost', zIndex: 20, rect: { width: 320, height: 24, top: 120, left: 320 } },
+  ], 'leftmost');
+});
+
+test('findComposeBody breaks an identical-position tie on the largest compose body', async function (t) {
+  await assertComposeRanking(t, [
+    { label: 'wide-short', zIndex: 20, rect: { width: 640, height: 24, top: 120, left: 320 } },
+    { label: 'narrow-tall', zIndex: 20, rect: { width: 240, height: 96, top: 120, left: 320 } },
+    { label: 'largest', zIndex: 20, rect: { width: 480, height: 64, top: 120, left: 320 } },
+  ], 'largest');
+});
+
+test('findComposeBody breaks a tie between identically placed compose bodies on z-index', async function (t) {
+  const tiedRect = { width: 320, height: 24, top: 120, left: 320 };
+  await assertComposeRanking(t, [
+    { label: 'background', zIndex: 1, rect: tiedRect },
+    { label: 'foreground', zIndex: 20, rect: tiedRect },
+  ], 'foreground');
+});
+
+test('findComposeBody prefers a higher z-index over a higher-placed compose body', async function (t) {
+  await assertComposeRanking(t, [
+    { label: 'topmost', zIndex: 1, rect: { width: 320, height: 24, top: 120, left: 320 } },
+    { label: 'raised', zIndex: 20, rect: { width: 320, height: 24, top: 240, left: 320 } },
+  ], 'raised');
+});
+
+test('findComposeBody prefers top position over left position', async function (t) {
+  await assertComposeRanking(t, [
+    { label: 'lower-left', zIndex: 20, rect: { width: 320, height: 24, top: 240, left: 320 } },
+    { label: 'upper-right', zIndex: 20, rect: { width: 320, height: 24, top: 120, left: 640 } },
+  ], 'upper-right');
+});
+
+test('findComposeBody prefers left position over area', async function (t) {
+  await assertComposeRanking(t, [
+    { label: 'right-large', zIndex: 20, rect: { width: 640, height: 64, top: 120, left: 640 } },
+    { label: 'left-small', zIndex: 20, rect: { width: 320, height: 24, top: 120, left: 320 } },
+  ], 'left-small');
+});
+
+test('pending INSERT_LINKS requests are not evicted before they complete', function (t) {
   let composeBodies = [];
   const responseOrder = [];
-  const selectionHarness = createSelectionHarness();
-  const composeBody = {
-    classList: {
-      contains(name) {
-        return name === 'Am' || name === 'Al' || name === 'editable';
-      },
-    },
-    focus() {},
-    getAttribute(name) {
-      if (name === 'contenteditable') return 'true';
-      if (name === 'role') return 'textbox';
-      if (name === 'aria-multiline') return 'true';
-      return null;
-    },
-    getBoundingClientRect() {
-      return { width: 320, height: 24 };
-    },
-  };
+  const composeBody = createComposeBody();
 
-  class MockMutationObserver {
-    constructor(callback) {
-      this.callback = callback;
-      observerInstances.push(this);
-    }
-
-    observe() {}
-    disconnect() {}
-  }
-
-  const sandbox = {
-    chrome: {
-      i18n: {
-        getMessage() {
-          return '';
-        },
-      },
-      runtime: {
-        lastError: null,
-        onMessage: {
-          addListener(listener) {
-            messageListener = listener;
-          },
-        },
-      },
-    },
-    clearTimeout,
-    console: {
-      warn() {},
-    },
+  const { messageListener, observers } = createComposeSandbox(t, {
+    expectedArmed: { 30000: 33 },
     document: {
-      body: {},
-      documentElement: { nodeName: 'HTML' },
-      createElement() {
-        return {
-          setAttribute() {},
-          style: {},
-          remove() {},
-        };
-      },
-      createRange() {
-        return selectionHarness.createRange();
-      },
-      execCommand() {
-        return true;
-      },
-      queryCommandSupported() {
-        return true;
-      },
       querySelectorAll() {
         return composeBodies;
       },
-      addEventListener() {},
-      removeEventListener() {},
     },
-    MutationObserver: MockMutationObserver,
-    requestAnimationFrame(callback) {
-      callback();
-      return 1;
-    },
-    setTimeout,
-  };
-
-  sandbox.window = sandbox;
-  sandbox.globalThis = sandbox;
-  sandbox.self = sandbox;
-  sandbox.getComputedStyle = function () {
-    return { display: 'block', visibility: 'visible' };
-  };
-  sandbox.getSelection = function () {
-    return selectionHarness.selection;
-  };
-  sandbox.QURLComposeFormatter = {
-    buildLinkHtml() {
-      return '<p>links</p>';
-    },
-  };
-
-  vm.createContext(sandbox);
-  vm.runInContext(contentScriptSource, sandbox);
+  });
 
   for (let i = 0; i < 33; i += 1) {
     assert.equal(messageListener({
@@ -1041,7 +750,7 @@ test('pending INSERT_LINKS requests are not evicted before they complete', funct
   }
 
   composeBodies = [composeBody];
-  observerInstances.forEach(function (observer) {
+  observers.forEach(function (observer) {
     observer.callback();
   });
 
@@ -1052,101 +761,30 @@ test('pending INSERT_LINKS requests are not evicted before they complete', funct
   });
 });
 
-test('insertAdjacentHTML is the last resort when selection insertion fails', async function () {
-  let messageListener = null;
+test('insertAdjacentHTML is the last resort when selection insertion fails', async function (t) {
   const insertAdjacentCalls = [];
-  const selectionHarness = createSelectionHarness();
-  const composeBody = {
-    classList: {
-      contains(name) {
-        return name === 'Am' || name === 'Al' || name === 'editable';
-      },
-    },
-    focus() {},
-    getAttribute(name) {
-      if (name === 'contenteditable') return 'true';
-      if (name === 'role') return 'textbox';
-      if (name === 'aria-multiline') return 'true';
-      return null;
-    },
-    getBoundingClientRect() {
-      return { width: 320, height: 24 };
-    },
+  const composeBody = createComposeBody({
     insertAdjacentHTML(position, html) {
       insertAdjacentCalls.push({ position, html });
     },
-  };
+  });
 
-  const sandbox = {
-    chrome: {
-      i18n: {
-        getMessage() {
-          return '';
-        },
-      },
-      runtime: {
-        lastError: null,
-        onMessage: {
-          addListener(listener) {
-            messageListener = listener;
-          },
-        },
-      },
-    },
-    clearTimeout,
-    console: {
-      warn() {},
-    },
+  const { messageListener } = createComposeSandbox(t, {
     document: {
-      body: {},
-      documentElement: { nodeName: 'HTML' },
-      createElement() {
-        return {
-          setAttribute() {},
-          style: {},
-          remove() {},
-        };
-      },
-      createRange() {
-        const range = selectionHarness.createRange();
-        range.createContextualFragment = function () {
-          throw new Error('fragment parse failed');
-        };
-        return range;
-      },
+      execCommand: undefined,
       queryCommandSupported() {
         return false;
       },
       querySelectorAll() {
         return [composeBody];
       },
-      addEventListener() {},
-      removeEventListener() {},
     },
-    MutationObserver: class {
-      observe() {}
-      disconnect() {}
+    decorateRange(range) {
+      range.createContextualFragment = function () {
+        throw new Error('fragment parse failed');
+      };
     },
-    setTimeout,
-  };
-
-  sandbox.window = sandbox;
-  sandbox.globalThis = sandbox;
-  sandbox.self = sandbox;
-  sandbox.getComputedStyle = function () {
-    return { display: 'block', visibility: 'visible' };
-  };
-  sandbox.getSelection = function () {
-    return selectionHarness.selection;
-  };
-  sandbox.QURLComposeFormatter = {
-    buildLinkHtml() {
-      return '<p>links</p>';
-    },
-  };
-
-  vm.createContext(sandbox);
-  vm.runInContext(contentScriptSource, sandbox);
+  });
 
   const response = await new Promise(function (resolve) {
     assert.equal(messageListener({
@@ -1162,87 +800,64 @@ test('insertAdjacentHTML is the last resort when selection insertion fails', asy
   }]);
 });
 
-test('findComposeBodyAsync times out and reports failure when no compose body appears', async function () {
-  let messageListener = null;
-  let observerInstance = null;
-  const timeoutCallbacks = [];
-  const appendedAlerts = [];
-
-  class MockMutationObserver {
-    constructor(callback) {
-      this.callback = callback;
-      observerInstance = this;
-    }
-
-    observe() {}
-
-    disconnect() {
-      this.disconnected = true;
-    }
-  }
-
-  const sandbox = {
-    chrome: {
-      i18n: {
-        getMessage() {
-          return '';
-        },
-      },
-      runtime: {
-        lastError: null,
-        onMessage: {
-          addListener(listener) {
-            messageListener = listener;
-          },
-        },
-      },
+test('a missing compose formatter reports failure instead of inserting nothing', async function (t) {
+  const insertAdjacentCalls = [];
+  const execCalls = [];
+  const composeBody = createComposeBody({
+    insertAdjacentHTML(position, html) {
+      insertAdjacentCalls.push({ position, html });
     },
-    clearTimeout() {},
-    console: {
-      warn() {},
-    },
+  });
+
+  const { messageListener, warnings } = createComposeSandbox(t, {
+    expectedArmed: { 4000: 1 },
     document: {
-      body: {
-        appendChild(node) {
-          appendedAlerts.push(node);
-        },
-      },
-      documentElement: { nodeName: 'HTML' },
-      createElement() {
-        return {
-          setAttribute() {},
-          style: {},
-          remove() {},
-          textContent: '',
-        };
+      execCommand(command, showUi, html) {
+        execCalls.push({ command, showUi, html });
+        return true;
       },
       querySelectorAll() {
-        return [];
+        return [composeBody];
       },
-      addEventListener() {},
-      removeEventListener() {},
     },
-    MutationObserver: MockMutationObserver,
-    setTimeout(callback, delay) {
-      timeoutCallbacks.push({ callback, delay });
-      return timeoutCallbacks.length;
-    },
-  };
+    // Deliberately no QURLComposeFormatter: buildLinkHtml then yields '',
+    // and every insertion path would happily append that empty string.
+    globals: { QURLComposeFormatter: undefined },
+  });
 
-  sandbox.window = sandbox;
-  sandbox.globalThis = sandbox;
-  sandbox.self = sandbox;
-  sandbox.getComputedStyle = function () {
-    return { display: 'block', visibility: 'visible' };
-  };
-  sandbox.QURLComposeFormatter = {
-    buildLinkHtml() {
-      return '<p>links</p>';
-    },
-  };
+  const response = await new Promise(function (resolve) {
+    assert.equal(messageListener({
+      type: 'INSERT_LINKS',
+      results: [{ filename: 'demo.txt', link: 'https://files.example.com/q/demo', expiry: null }],
+    }, null, resolve), true);
+  });
 
-  vm.createContext(sandbox);
-  vm.runInContext(contentScriptSource, sandbox);
+  assert.equal(response.success, false, 'an empty insertion must not be reported as success');
+  assert.deepEqual(execCalls, [], 'nothing should be inserted without the formatter');
+  assert.deepEqual(insertAdjacentCalls, [], 'the fallback path must not append an empty string either');
+  assert.ok(
+    warnings.some(function (line) { return line.includes('formatter unavailable'); }),
+    'the refusal should be logged'
+  );
+});
+
+test('findComposeBodyAsync times out and reports failure when no compose body appears', async function (t) {
+  const timeoutCallbacks = [];
+
+  const { appended, messageListener, observers } = createComposeSandbox(t, {
+    // Timers are stubbed rather than tracked through createTimerHarness: this test fires the 4s
+    // discovery timeout by hand (timeoutCallbacks below), which a real timer would stretch to 4s.
+    timers: {
+      clearTimeout() {},
+      setTimeout(callback, delay) {
+        timeoutCallbacks.push({ callback, delay });
+        return timeoutCallbacks.length;
+      },
+    },
+    // Preserve the browser fallback path this test covered before the shared factory existed:
+    // without requestAnimationFrame, compose lookups schedule through setTimeout(fn, 16).
+    globals: { requestAnimationFrame: undefined },
+  });
 
   const responsePromise = new Promise(function (resolve) {
     assert.equal(messageListener({
@@ -1255,10 +870,288 @@ test('findComposeBodyAsync times out and reports failure when no compose body ap
     return entry.delay === 4000;
   });
   assert.ok(composeTimeout);
+  assert.ok(
+    timeoutCallbacks.some(function (entry) { return entry.delay === 16; }),
+    'the requestAnimationFrame fallback should schedule a 16ms lookup'
+  );
   composeTimeout.callback();
 
   const response = await responsePromise;
   assert.equal(response.success, false);
-  assert.equal(observerInstance.disconnected, true);
-  assert.equal(appendedAlerts.length, 1);
+  assert.equal(observers[0].disconnected, true);
+  assert.equal(appended.length, 1);
+});
+
+// ==================== Compose Body Recognition ====================
+
+// isLikelyComposeBody recognizes a compose body two independent ways — the `Am Al editable` class
+// triple, or role=textbox plus contenteditable=true plus either aria-multiline=true or a
+// [role="dialog"] ancestor — and every fixture above satisfies BOTH. That made either path free to
+// regress in silence: blinding one of them left every pre-existing test above green, and only
+// blinding both failed anything. The tests below give each path a fixture that matches it and
+// misses the other, so each one is now pinned on its own, and pair them with the cases that must be
+// rejected.
+//
+// These drive discovery through the real message listener rather than calling isLikelyComposeBody
+// directly, because the content script is loaded into a vm sandbox and exports nothing.
+
+// Drives a full INSERT_LINKS request against a single fixture and reports what the insertion
+// touched. The fixture is the only element querySelectorAll offers and it is sized, so isVisible
+// can neither keep nor drop it on its own, and the sandbox's execCommand always succeeds — a
+// successful response therefore means isLikelyComposeBody accepted the fixture, and nothing else.
+async function insertIntoComposeBody(t, composeBody) {
+  const caretMoves = [];
+
+  const { messageListener } = createComposeSandbox(t, {
+    document: {
+      querySelectorAll() {
+        return [composeBody];
+      },
+    },
+    decorateRange(range) {
+      range.selectNodeContents = function (node) {
+        caretMoves.push(node);
+      };
+    },
+  });
+
+  const response = await new Promise(function (resolve) {
+    assert.equal(messageListener({
+      type: 'INSERT_LINKS',
+      results: [{ filename: 'demo.txt', link: 'https://files.example.com/q/demo', expiry: null }],
+    }, null, resolve), true);
+  });
+
+  return { caretMoves, response };
+}
+
+// The counterpart for a fixture discovery must refuse. Same setup, so the fixture is again present
+// and sized and recognition is the only thing that can reject it, but here nothing is ever found:
+// the request runs out the 4s discovery timeout and reports failure with the toast appended. As in
+// the timeout test above, timers are stubbed rather than tracked so that timeout can be fired by
+// hand instead of waited out, and the request carries no requestId, so it is the only timer armed.
+async function assertComposeBodyRejected(t, composeBody) {
+  const timeoutCallbacks = [];
+
+  const { appended, messageListener, observers } = createComposeSandbox(t, {
+    timers: {
+      clearTimeout() {},
+      setTimeout(callback, delay) {
+        timeoutCallbacks.push({ callback, delay });
+        return timeoutCallbacks.length;
+      },
+    },
+    document: {
+      querySelectorAll() {
+        return [composeBody];
+      },
+    },
+  });
+
+  const responsePromise = new Promise(function (resolve) {
+    assert.equal(messageListener({
+      type: 'INSERT_LINKS',
+      results: [{ filename: 'demo.txt', link: 'https://files.example.com/q/demo', expiry: null }],
+    }, null, resolve), true);
+  });
+
+  const composeTimeout = timeoutCallbacks.find(function (entry) {
+    return entry.delay === 4000;
+  });
+  assert.ok(composeTimeout, 'the fixture should not have been discovered before the timeout armed');
+  composeTimeout.callback();
+
+  const response = await responsePromise;
+  assert.equal(response.success, false);
+  assert.equal(observers[0].disconnected, true);
+  assert.equal(appended.length, 1);
+}
+
+test('the class triple alone is enough to recognize a compose body', async function (t) {
+  const focusCalls = [];
+  // getAttribute misses every name the role path reads, so the class triple is the only thing
+  // left that can match. It returns null rather than 'false' for contenteditable, which is what
+  // keeps the early return from rejecting the fixture before either path is tried.
+  const composeBody = createComposeBody({
+    focus() {
+      focusCalls.push('class-triple');
+    },
+    getAttribute() {
+      return null;
+    },
+  });
+
+  const { caretMoves, response } = await insertIntoComposeBody(t, composeBody);
+
+  assert.equal(response.success, true);
+  assert.deepEqual(focusCalls, ['class-triple']);
+  assert.deepEqual(caretMoves, [composeBody]);
+});
+
+// The class path is a conjunction, so matching it as a unit above leaves each of its three terms
+// free to be dropped. Each fixture here carries the other two classes and withholds one, with the
+// role path starved as in the test above, so the withheld term is the only thing that can refuse
+// it.
+for (const missingClass of ['Am', 'Al', 'editable']) {
+  test('a body missing the ' + missingClass + ' class is not a compose body', async function (t) {
+    const composeBody = createComposeBody({
+      classList: {
+        contains(name) {
+          return name !== missingClass && (name === 'Am' || name === 'Al' || name === 'editable');
+        },
+      },
+      getAttribute() {
+        return null;
+      },
+    });
+
+    await assertComposeBodyRejected(t, composeBody);
+  });
+}
+
+test('the role/contenteditable/aria-multiline triple alone is enough to recognize a compose body', async function (t) {
+  const focusCalls = [];
+  // classList matches nothing, so the class triple cannot be what recognizes this one.
+  const composeBody = createComposeBody({
+    classList: {
+      contains() {
+        return false;
+      },
+    },
+    focus() {
+      focusCalls.push('role-triple');
+    },
+  });
+
+  const { caretMoves, response } = await insertIntoComposeBody(t, composeBody);
+
+  assert.equal(response.success, true);
+  assert.deepEqual(focusCalls, ['role-triple']);
+  assert.deepEqual(caretMoves, [composeBody]);
+});
+
+test('a dialog ancestor stands in for aria-multiline on the role path', async function (t) {
+  const closestSelectors = [];
+  const dialog = { nodeName: 'DIV' };
+  // No fixture above defines closest, because aria-multiline=true short-circuits the disjunction
+  // before the content script can reach it. Dropping aria-multiline is what forces the call.
+  const composeBody = createComposeBody({
+    classList: {
+      contains() {
+        return false;
+      },
+    },
+    closest(selector) {
+      closestSelectors.push(selector);
+      return dialog;
+    },
+    getAttribute(name) {
+      if (name === 'contenteditable') return 'true';
+      if (name === 'role') return 'textbox';
+      return null;
+    },
+  });
+
+  const { caretMoves, response } = await insertIntoComposeBody(t, composeBody);
+
+  assert.equal(response.success, true);
+  assert.deepEqual(caretMoves, [composeBody]);
+  assert.deepEqual(closestSelectors, ['[role="dialog"]']);
+});
+
+test('a textbox with neither aria-multiline nor a dialog ancestor is not a compose body', async function (t) {
+  // The role path's last condition, standing alone: everything it gates on matches except the
+  // disjunction itself, so a fixture that reaches it and is still refused is the only thing that
+  // can tell a consulted closest() from one whose result is ignored.
+  const composeBody = createComposeBody({
+    classList: {
+      contains() {
+        return false;
+      },
+    },
+    closest() {
+      return null;
+    },
+    getAttribute(name) {
+      if (name === 'contenteditable') return 'true';
+      if (name === 'role') return 'textbox';
+      return null;
+    },
+  });
+
+  await assertComposeBodyRejected(t, composeBody);
+});
+
+test('a textbox that is not contenteditable is not a compose body', async function (t) {
+  // The role path's own contenteditable clause, which the contenteditable="false" test below does
+  // not reach: that one is refused by the early return before either path is tried. The early
+  // return only fires on the literal string 'false', so a body that simply lacks the attribute
+  // sails past it with the class triple missing and aria-multiline set — leaving this clause as
+  // the one thing that can still refuse it.
+  const composeBody = createComposeBody({
+    classList: {
+      contains() {
+        return false;
+      },
+    },
+    getAttribute(name) {
+      if (name === 'role') return 'textbox';
+      if (name === 'aria-multiline') return 'true';
+      return null;
+    },
+  });
+
+  await assertComposeBodyRejected(t, composeBody);
+});
+
+test('a contenteditable element that is not a textbox is not a compose body', async function (t) {
+  // The sibling of the clause above. Gmail marks plenty of things contenteditable that are not a
+  // draft body, so the role check is what keeps the second path from claiming them; with the
+  // class triple missing and aria-multiline set, it is again the only thing left to refuse this.
+  const composeBody = createComposeBody({
+    classList: {
+      contains() {
+        return false;
+      },
+    },
+    getAttribute(name) {
+      if (name === 'contenteditable') return 'true';
+      if (name === 'aria-multiline') return 'true';
+      return null;
+    },
+  });
+
+  await assertComposeBodyRejected(t, composeBody);
+});
+
+test('a body matching neither recognition path is not a compose body', async function (t) {
+  const composeBody = createComposeBody({
+    classList: {
+      contains() {
+        return false;
+      },
+    },
+    getAttribute() {
+      return null;
+    },
+  });
+
+  await assertComposeBodyRejected(t, composeBody);
+});
+
+test('contenteditable="false" rejects a body the class triple would otherwise match', async function (t) {
+  // The class triple still matches here, so only the early return can be what refuses this
+  // fixture. The selector list screens the same case with :not([contenteditable="false"]), but
+  // these tests stub querySelectorAll, so this pins the guard in isLikelyComposeBody rather than
+  // the CSS — the one that still has to hold for the other two selectors, which do not screen it.
+  const composeBody = createComposeBody({
+    getAttribute(name) {
+      if (name === 'contenteditable') return 'false';
+      if (name === 'role') return 'textbox';
+      if (name === 'aria-multiline') return 'true';
+      return null;
+    },
+  });
+
+  await assertComposeBodyRejected(t, composeBody);
 });

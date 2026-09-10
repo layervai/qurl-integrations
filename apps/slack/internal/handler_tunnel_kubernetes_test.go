@@ -14,18 +14,15 @@ import (
 
 func TestRenderKubernetesTunnelInstructionsYAMLAndSecurityContext(t *testing.T) {
 	t.Parallel()
-	args := &tunnelInstallArgs{
-		Slug:        testTunnelSlug,
-		Alias:       testTunnelSlug,
-		LocalPort:   9090,
-		Environment: tunnelEnvKubernetes,
-	}
+	args := testTunnelInstallArgs()
+	args.LocalPort = 9090
+	args.Environment = tunnelEnvKubernetes
 	got := mustRenderKubernetesTunnelInstructions(t, args, testTunnelImageRef)
 
 	for _, want := range []string{
 		"QURL_BOOTSTRAP_SECRET='qurl-connector-" + testTunnelSlug + "'",
 		testTunnelKeyPromptLine,
-		`head -c "$QURL_BOOTSTRAP_KEY_LEN" <<QURL_BOOTSTRAP_KEY_EOF | kubectl create secret generic "$QURL_BOOTSTRAP_SECRET" --from-file=api_key=/dev/stdin --dry-run=client -o yaml | kubectl apply -f -`,
+		`head -c "$QURL_BOOTSTRAP_KEY_LEN" <<QURL_BOOTSTRAP_KEY_EOF | kubectl create secret generic "$QURL_BOOTSTRAP_SECRET" --from-file=enrollment-token=/dev/stdin --dry-run=client -o yaml | kubectl apply -f -`,
 		"unset QURL_BOOTSTRAP_KEY",
 	} {
 		if !strings.Contains(got, want) {
@@ -44,7 +41,7 @@ func TestRenderKubernetesTunnelInstructionsYAMLAndSecurityContext(t *testing.T) 
 	}
 	docs := strings.Split(got[bodyStart:bodyStart+bodyEnd], "\n---\n")
 	if len(docs) != 2 {
-		t.Fatalf("Kubernetes bootstrap docs = %d, want 2: %#v", len(docs), docs)
+		t.Fatalf("Kubernetes bootstrap docs = %d, want ConfigMap + state PVC: %#v", len(docs), docs)
 	}
 	for i, doc := range docs {
 		var parsed map[string]any
@@ -62,8 +59,8 @@ func TestRenderKubernetesTunnelInstructionsYAMLAndSecurityContext(t *testing.T) 
 	if err != nil {
 		t.Fatalf("renderTunnelConfigYAML() err = %v", err)
 	}
-	if gotConfig := configMap.Data["qurl-proxy.yaml"]; gotConfig != wantConfig {
-		t.Fatalf("ConfigMap qurl-proxy.yaml = %q, want %q", gotConfig, wantConfig)
+	if gotConfig := configMap.Data["share.yaml"]; gotConfig != wantConfig {
+		t.Fatalf("ConfigMap share.yaml = %q, want %q", gotConfig, wantConfig)
 	}
 	patchMarker := "Pod spec additions:\n"
 	patchSectionStart := strings.Index(got, patchMarker)
@@ -81,39 +78,59 @@ func TestRenderKubernetesTunnelInstructionsYAMLAndSecurityContext(t *testing.T) 
 	}
 	var podSpecFragment struct {
 		SecurityContext map[string]any `yaml:"securityContext"`
-		Containers      []struct {
-			Name            string         `yaml:"name"`
-			SecurityContext map[string]any `yaml:"securityContext"`
+		InitContainers  []struct {
+			Name  string `yaml:"name"`
+			Image string `yaml:"image"`
+		} `yaml:"initContainers"`
+		Containers []struct {
+			Name            string              `yaml:"name"`
+			SecurityContext map[string]any      `yaml:"securityContext"`
+			Env             []ecsEnvironmentVar `yaml:"env"`
 		} `yaml:"containers"`
+		Volumes []map[string]any `yaml:"volumes"`
 	}
 	if err := yaml.Unmarshal([]byte(got[patchCodeStart:patchCodeStart+patchCodeEnd]), &podSpecFragment); err != nil {
 		t.Fatalf("PodSpec fragment YAML did not parse: %v", err)
 	}
-	if podSpecFragment.SecurityContext["fsGroup"] == nil || len(podSpecFragment.Containers) != 1 || podSpecFragment.Containers[0].Name != "qurl-connector" {
-		t.Fatalf("PodSpec fragment = %+v, want fsGroup and qurl-connector container", podSpecFragment)
+	if podSpecFragment.SecurityContext["fsGroup"] != 65532 || len(podSpecFragment.InitContainers) != 0 || len(podSpecFragment.Containers) != 1 || len(podSpecFragment.Volumes) != 4 || podSpecFragment.Containers[0].Name != "qurl" {
+		t.Fatalf("PodSpec fragment = %+v, want fsGroup, one qurl container, and four volumes", podSpecFragment)
+	}
+	if podSpecFragment.Containers[0].SecurityContext["readOnlyRootFilesystem"] != true {
+		t.Fatalf("Connector securityContext = %+v, want readOnlyRootFilesystem", podSpecFragment.Containers[0].SecurityContext)
+	}
+	if got := ecsEnvMap(podSpecFragment.Containers[0].Env)["QURL_ENDPOINT"]; got != "https://api.sandbox.example" {
+		t.Fatalf("Kubernetes QURL_ENDPOINT = %q", got)
 	}
 	for _, want := range []string{
-		"sidecar/securityContext/volumes block",
-		"Pod Security Admission `restricted`",
+		"qURL sidecar/volumes block",
 		"fsGroup: 65532",
 		"fsGroupChangePolicy: OnRootMismatch",
-		"WARNING: pod-level fsGroup applies to every volume in this pod",
 		"securityContext:",
-		"name: qurl-connector",
-		"value: '" + testTunnelSlug + "'",
+		"name: qurl",
+		"command: ['/usr/local/bin/qurl']",
+		"--headless-config', '/etc/qurl/share.yaml'",
+		"--enrollment-token-file', '/run/secrets/qurl/enrollment-token'",
+		"crid: '" + testTunnelCRID + "'",
+		"resource_id: '" + testTunnelResourceID + "'",
+		"knock_resource_id: '" + testTunnelKnockID + "'",
+		"name: QURL_ENDPOINT",
+		"value: 'https://api.sandbox.example'",
 		"runAsUser: 65532",
 		"runAsGroup: 65532",
 		"runAsNonRoot: true",
 		"allowPrivilegeEscalation: false",
+		"readOnlyRootFilesystem: true",
 		"drop: [\"ALL\"]",
 		"type: RuntimeDefault",
+		"name: qurl-tmp",
+		"mountPath: /tmp",
 		"defaultMode: 0440",
-		"pre-provision qURL agent-state ownership separately",
-		"including existing app volumes",
+		"subPath: share.yaml",
 		"local shell into `kubectl`",
 		"shared, recorded",
 		"command-traced terminal session",
 		"generated Secret manifest",
+		"warm-start workload revision",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("Kubernetes instructions missing %q:\n%s", want, got)
@@ -121,9 +138,12 @@ func TestRenderKubernetesTunnelInstructionsYAMLAndSecurityContext(t *testing.T) 
 	}
 	for _, forbidden := range []string{
 		"initContainers:",
-		"runAsUser: 0",
-		"defaultMode: 0400",
-		"defaultMode: 0444",
+		"QURL_BOOTSTRAP_URL",
+		"LAYERV_KNOCK_RESOURCE_ID",
+		"api_key",
+		"qurl-proxy.yaml",
+		"/usr/local/bin/qurl-connector",
+		"ghcr.io/layervai/qurl-connector",
 	} {
 		if strings.Contains(got, forbidden) {
 			t.Fatalf("Kubernetes instructions included pod-level or unreadable secret setting %q:\n%s", forbidden, got)
@@ -136,18 +156,36 @@ func TestRenderKubernetesTunnelInstructionsYAMLAndSecurityContext(t *testing.T) 
 	}
 }
 
+func TestRenderKubernetesTunnelInstructionsYAMLQuotesAPIURL(t *testing.T) {
+	t.Parallel()
+	args := testTunnelInstallArgs()
+	args.Environment = tunnelEnvKubernetes
+	args.APIURL = testShellSignificantTunnelAPIURL
+
+	got := mustRenderKubernetesTunnelInstructions(t, args, testTunnelImageRef)
+	endpoint, err := qurlEndpointFromConnectorAPIURL(args.APIURL)
+	if err != nil {
+		t.Fatalf("qurlEndpointFromConnectorAPIURL: %v", err)
+	}
+	quoted, err := yamlSingleQuoted(endpoint)
+	if err != nil {
+		t.Fatalf("yamlSingleQuoted: %v", err)
+	}
+	if count := strings.Count(got, "value: "+quoted); count != 1 {
+		t.Fatalf("Kubernetes instructions contain %d quoted API URL values, want 1:\n%s", count, got)
+	}
+}
+
 func TestRenderKubernetesPodSpecFragmentDryRunsWithKubectl(t *testing.T) {
 	t.Parallel()
 	kubectl, err := exec.LookPath("kubectl")
 	if err != nil {
 		t.Skip("kubectl not on PATH")
 	}
-	got := mustRenderKubernetesTunnelInstructions(t, &tunnelInstallArgs{
-		Slug:        testTunnelSlug,
-		Alias:       testTunnelSlug,
-		LocalPort:   9090,
-		Environment: tunnelEnvKubernetes,
-	}, testTunnelImageRef)
+	args := testTunnelInstallArgs()
+	args.LocalPort = 9090
+	args.Environment = tunnelEnvKubernetes
+	got := mustRenderKubernetesTunnelInstructions(t, args, testTunnelImageRef)
 	fragment := kubernetesPodSpecFragmentFromInstructions(t, got)
 	pod := "apiVersion: v1\nkind: Pod\nmetadata:\n  name: qurl-connector-render-test\nspec:\n" + indentLines(fragment, 2) + "\n"
 	const kubectlDryRunTimeout = 20 * time.Second
@@ -159,7 +197,13 @@ func TestRenderKubernetesPodSpecFragmentDryRunsWithKubectl(t *testing.T) {
 		if ctx.Err() != nil {
 			t.Skipf("kubectl dry-run exceeded %s in this environment", kubectlDryRunTimeout)
 		}
-		if bytes.Contains(out, []byte("couldn't get current server API group list")) {
+		// Newer kubectl emits the discovery failure through klog with a capital
+		// "Couldn't" and then "unable to recognize"; older builds print it in
+		// lowercase. Either shape means the runner has no cluster to discover
+		// against, which is an environment limit rather than a rendering bug.
+		lowered := bytes.ToLower(out)
+		if bytes.Contains(lowered, []byte("couldn't get current server api group list")) ||
+			bytes.Contains(lowered, []byte("unable to recognize")) {
 			t.Skipf("kubectl dry-run needs cluster discovery in this environment: %s", out)
 		}
 		t.Fatalf("kubectl dry-run failed: %v\n%s\n--- pod ---\n%s", err, out, pod)
@@ -170,12 +214,11 @@ func TestKubernetesTunnelObjectNamesShortenLongSlug(t *testing.T) {
 	t.Parallel()
 	slug := strings.Repeat("a", 42) + "-" + strings.Repeat("b", 21)
 	dns1123Label := regexp.MustCompile(`^[a-z]([-a-z0-9]*[a-z0-9])?$`)
-	args := &tunnelInstallArgs{
-		Slug:        slug,
-		Alias:       slug,
-		LocalPort:   9090,
-		Environment: tunnelEnvKubernetes,
-	}
+	args := testTunnelInstallArgs()
+	args.Slug = slug
+	args.Alias = slug
+	args.LocalPort = 9090
+	args.Environment = tunnelEnvKubernetes
 	names := kubernetesTunnelObjectNames(slug)
 	for label, name := range map[string]string{
 		"secret":     names.secret,
@@ -212,6 +255,7 @@ func TestKubernetesTunnelObjectNamesShortenLongSlug(t *testing.T) {
 		"qurl-connector-" + slug,
 		"qurl-proxy-" + slug,
 		"qurl-agent-" + slug,
+		"qurl-audit-" + slug,
 	} {
 		if strings.Contains(got, forbidden) {
 			t.Fatalf("Kubernetes instructions contain overlong name %q:\n%s", forbidden, got)

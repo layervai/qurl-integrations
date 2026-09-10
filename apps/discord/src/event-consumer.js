@@ -165,7 +165,7 @@ const { GATEWAY_DISPATCH_TYPES, LOG_KINDS } = require('./constants');
 // SQS polling parameters. Hardcoded module constants — see the
 // rationale below for each. If an operator needs to tune these in
 // flight, add env overrides via the intEnv pattern in config.js
-// (matches REFRESH_INTERVAL_MS in src/http-only-init.js).
+// (e.g. QURL_SEND_COOLDOWN_MS).
 //
 // MaxNumberOfMessages (10) — SQS's API cap. We accept whatever the
 // queue serves and process them in parallel.

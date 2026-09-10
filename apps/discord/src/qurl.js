@@ -2,22 +2,32 @@ const {
   QURLClient,
   ERROR_CODE_NETWORK,
   ERROR_CODE_TIMEOUT,
-  ERROR_CODE_CLIENT_VALIDATION,
 } = require('@layervai/qurl');
 const config = require('./config');
 const logger = require('./logger');
 const { AUDIT_EVENTS } = require('./constants');
+const {
+  qurlPath,
+  resourceIdLogRef,
+  resourcePath,
+  validateResourceId,
+} = require('./utils/resource-id');
+const { qurlApiError } = require('./utils/qurl-errors');
 const dns = require('dns').promises;
+
+const { isPrivateHost } = require('./utils/private-host');
 
 /**
  * qURL API client for the bot's link create / status / revoke calls, backed by
  * the @layervai/qurl SDK. This is the bot's single qURL client (issue #830 —
  * the prior hand-rolled `qurlFetch` is gone); the detect path in connector.js
- * uses the same SDK. This module adds only the concerns the SDK doesn't own:
+ * uses the same SDK. Create and status use `/qurls`; whole-resource revoke
+ * uses `/resources`. This module adds only the concerns the SDK doesn't own:
  *   - the DEPENDENCY_AUTH_FAILURE audit emit on 401/403 (emit-once) and
  *     error-body redaction — in logs and in the errors it throws — see callQurl();
  *   - the SSRF guards for the user-supplied create target (isPrivateHost +
- *     assertNotPrivateAfterResolve), which are client-independent.
+ *     assertNotPrivateAfterResolve), which are client-independent;
+ *   - a non-echoing resource-ID guard and low-cardinality telemetry labels.
  */
 
 // Per-attempt timeout + retry budget. Pins the SDK's resilience to the budget
@@ -33,6 +43,12 @@ const MAX_RETRIES = 2;
 // User-Agent the qURL service sees for the bot's calls. Preserved verbatim
 // across the SDK migration (a literal wire identifier — see CLAUDE.md).
 const USER_AGENT = 'qurl-discord-bot/1.0';
+// Safe labels for status/revoke telemetry. The actual identifier is attacker-
+// influenced; keeping the value out of route labels prevents an accidentally
+// cross-wired credential from reaching logs or audit events.
+const QURL_ID_LOG_PATH = '/qurls/:resourceId';
+const RESOURCE_ID_LOG_PATH = '/resources/:resourceId';
+const UNKNOWN_STATUS0_CODE = 'unknown_error';
 
 // status-0 SDK error codes whose message the SDK synthesizes itself (no server
 // body) — the only status-0 errors callQurl surfaces verbatim. See its
@@ -41,7 +57,6 @@ const USER_AGENT = 'qurl-discord-bot/1.0';
 const SAFE_STATUS0_CODES = new Set([
   ERROR_CODE_NETWORK,
   ERROR_CODE_TIMEOUT,
-  ERROR_CODE_CLIENT_VALIDATION,
 ]);
 
 // Construct a per-call SDK client. Per-call (not cached) because each call
@@ -65,14 +80,14 @@ function makeClient(apiKey) {
 
 /**
  * Run an SDK call, layering on the bot-specific behaviors the SDK doesn't own.
- * `method`/`path` are labels for the audit/log/error payload (the same
- * dependency/method/path shape the pre-SDK client emitted) — the SDK owns the
- * actual wire path.
+ * `method`/`path` are low-cardinality labels for audit/log/error payloads; the
+ * SDK owns the actual wire path. Identifier-bearing routes use a static path
+ * template so credentials accidentally passed as IDs cannot reach telemetry.
  *
  *   - AUDIT: emit DEPENDENCY_AUTH_FAILURE on a 401/403 so the dependency-auth
  *     alarm fires independently of any caller's catch path.
- *   - EMIT-ONCE INVARIANT: the SDK never retries 401/403 (its retryable set is
- *     {429, 502, 503, 504}), so this fires once per request, not once per
+ *   - EMIT-ONCE INVARIANT: the SDK never retries 401/403, so this fires
+ *     once per request, not once per
  *     attempt. If that ever changes, the audit count would multiply on a single
  *     auth failure. Pinned by tests/qurl-coverage.test.js.
  *   - REDACTION: never let a qURL error body escape this module. On an
@@ -85,11 +100,12 @@ function makeClient(apiKey) {
  *     — e.g. an unexpected-response shape error that could embed a body snippet
  *     — is re-wrapped to a code-only message, so the invariant holds structurally
  *     rather than by trusting SDK internals. Body-free SDK errors (network /
- *     timeout / client-validation) and non-SDK throws (programming errors, which
- *     carry no server body) propagate verbatim so their stack survives. Pinned
- *     by tests/qurl-coverage.test.js.
+ *     timeout) propagate verbatim. Every other status-0 throw, including an
+ *     uncoded plain Error, is re-wrapped: item calls may carry a cross-wired
+ *     credential, while create validation may echo a secret-bearing target
+ *     URL. Pinned by tests/qurl-coverage.test.js.
  */
-async function callQurl(method, path, fn) {
+async function callQurl(method, path, fn, logContext = {}) {
   try {
     return await fn();
   } catch (err) {
@@ -97,7 +113,9 @@ async function callQurl(method, path, fn) {
     // errors; a positive status is a real HTTP status from the API.
     const status = Number.isInteger(err?.status) ? err.status : 0;
     // Redaction: status + error code only — never err.message / err.detail.
-    logger.debug('qURL API error', { method, path, status, code: err?.code });
+    logger.debug('qURL API error', {
+      method, path, status, code: err?.code, ...logContext,
+    });
     if (status === 401 || status === 403) {
       logger.audit(AUDIT_EVENTS.DEPENDENCY_AUTH_FAILURE, {
         dependency: 'qurl_service',
@@ -110,87 +128,29 @@ async function callQurl(method, path, fn) {
     // a status-only error so that body can't leak through a caller that logs
     // `err.message`.
     if (status > 0) {
-      throw new Error(`qURL API ${method} ${path} failed (${status})`);
+      throw qurlApiError(method, path, status);
     }
-    // status 0: re-wrap ONLY a coded SDK error outside the body-free SAFE set —
-    // i.e. one whose synthesized message could embed a body snippet (e.g.
-    // `unexpected_response`). Defense-in-depth: the SDK doesn't embed bodies in
-    // status-0 messages today, but we don't rely on it. A body-free SDK error
-    // (network / timeout / client-validation) or a non-SDK throw (a programming
-    // error like a TypeError, which carries no server body) propagates verbatim,
-    // so its message and stack survive for debugging.
-    if (typeof err?.code === 'string' && !SAFE_STATUS0_CODES.has(err.code)) {
-      throw new Error(`qURL API ${method} ${path} failed (${err.code})`);
+    // status 0: only the SDK's known body-free network/timeout errors may keep
+    // their message. Client validation, unexpected response shapes, and plain
+    // uncoded throws are generic because any of them can echo request input.
+    const code = typeof err?.code === 'string' ? err.code : UNKNOWN_STATUS0_CODE;
+    if (!SAFE_STATUS0_CODES.has(code)) {
+      throw qurlApiError(method, path, code);
     }
     throw err;
   }
 }
 
-// Reject hostnames that resolve (by syntax) to loopback, link-local, or
-// RFC1918 private ranges. Defense-in-depth against a caller passing
-// `http://169.254.169.254/latest/meta-data/...` or similar; even if the
-// downstream qURL API is the one that actually fetches, we block at our
-// own input validation layer.
-function isPrivateHost(host) {
-  if (!host) return true;
-  const h = host.toLowerCase();
-  if (h === 'localhost' || h === '0.0.0.0' || h === '::' || h === '::1') return true;
-  if (h.startsWith('[') && h.endsWith(']')) {
-    // Bracketed IPv6 literal — strip and check.
-    return isPrivateHost(h.slice(1, -1));
-  }
-  // IPv6 locals reach here bracket-stripped, so they always contain a ':':
-  // unique-local fc00::/7 (fc/fd), link-local fe80::/10, and deprecated
-  // site-local fec0::/10 — the latter two span first-hextet fe80–feff, i.e.
-  // `fe[89a-f][0-9a-f]:` (a real /10 literal always writes the full 4-digit
-  // hextet). Gate on the ':' so a PUBLIC DNS name that merely starts with these
-  // letters (e.g. `fd-cdn.example.com`, reaching here UNbracketed) is NOT
-  // misclassified as an IPv6 local literal — DNS names never contain a colon.
-  if (h.includes(':')) {
-    if (h.startsWith('fc') || h.startsWith('fd')) return true;  // fc00::/7 unique-local
-    if (/^fe[89a-f][0-9a-f]:/.test(h)) return true;             // fe80::/10 + fec0::/10 site-local
-  }
-  // IPv4-mapped IPv6 literal: ::ffff:127.0.0.1, ::ffff:7f00:1, etc. Strip the
-  // prefix (URL parsing already stripped the brackets) and re-check.
-  const mapped = h.match(/^::ffff:([0-9.]+)$/);
-  if (mapped) return isPrivateHost(mapped[1]);
-  // Decimal IPv4 literal (e.g. `2130706433` = 127.0.0.1) — browsers accept,
-  // Node's URL does too. Convert to dotted-quad.
-  if (/^\d+$/.test(h)) {
-    const n = Number(h);
-    if (n >= 0 && n <= 0xFFFFFFFF) {
-      const dotted = [(n >>> 24) & 0xFF, (n >>> 16) & 0xFF, (n >>> 8) & 0xFF, n & 0xFF].join('.');
-      return isPrivateHost(dotted);
-    }
-    return true; // out-of-range numeric host: reject outright
-  }
-  // Hex IPv4 literal (e.g. `0x7f000001` = 127.0.0.1)
-  if (/^0x[0-9a-f]+$/.test(h)) {
-    const n = Number(h);
-    if (Number.isFinite(n) && n >= 0 && n <= 0xFFFFFFFF) {
-      const dotted = [(n >>> 24) & 0xFF, (n >>> 16) & 0xFF, (n >>> 8) & 0xFF, n & 0xFF].join('.');
-      return isPrivateHost(dotted);
-    }
-    return true;
-  }
-  // Octal-prefixed IPv4 (e.g. `0177.0.0.1`) — treat any leading-zero component
-  // as suspicious and reject conservatively.
-  if (/^0\d/.test(h) && /^[0-9.]+$/.test(h)) return true;
-  // Standard IPv4 dotted-quad
-  const v4 = h.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
-  if (v4) {
-    const [a, b] = v4.slice(1).map(Number);
-    if (a === 10) return true;                          // 10.0.0.0/8
-    if (a === 127) return true;                         // 127.0.0.0/8
-    if (a === 169 && b === 254) return true;            // 169.254.0.0/16 (link-local, IMDS)
-    if (a === 172 && b >= 16 && b <= 31) return true;   // 172.16.0.0/12
-    if (a === 192 && b === 168) return true;            // 192.168.0.0/16
-    if (a === 100 && b >= 64 && b <= 127) return true;  // 100.64.0.0/10 (CGNAT)
-    if (a === 0) return true;                           // 0.0.0.0/8
-    if (a >= 224) return true;                          // multicast + reserved
-  }
-  return false;
-}
+// The syntactic private/loopback/link-local screen lives in utils/private-host.js
+// so the boot path can consume the same range table without pulling in the
+// @layervai/qurl SDK, constants.js and `dns` that this module requires. Re-exported
+// here (see module.exports) because connector.js imports it from qurl.js.
+//
+// The classifier stays pure. Each rejection site below logs the host that
+// triggered it before returning the deliberately shape-independent error to the
+// caller; connector.js does the same for its detect guard. URL parsing strips
+// CR/LF from hostname input, and logger.js JSON-encodes metadata, so those
+// breadcrumbs cannot forge log lines.
 
 // Resolve all A/AAAA records for a hostname and reject if ANY of them point
 // to a private/internal range. Defense against DNS rebinding: a malicious
@@ -220,6 +180,15 @@ async function assertNotPrivateAfterResolve(hostname) {
   }
   for (const { address } of addrs) {
     if (isPrivateHost(address)) {
+      // Name the resolved address as well as the host: on this leg the hostname
+      // alone doesn't explain the rejection (it looked public syntactically), so
+      // the address distinguishes a rebinding attempt from a name that
+      // legitimately points inside. dns.lookup() returns an inet_ntop-rendered
+      // IP string, so it is safe to include in structured log metadata.
+      logger.warn('Target URL rejected by SSRF guard (DNS resolved to a private address)', {
+        hostname,
+        address,
+      });
       throw new Error('Target URL points to a private/internal address');
     }
   }
@@ -232,6 +201,12 @@ async function createOneTimeLink(targetUrl, expiresIn, label, apiKey) {
       throw new Error('Only http/https URLs are allowed');
     }
     if (isPrivateHost(parsed.hostname)) {
+      // Keep this distinct from the DNS-leg message so operators can tell which
+      // guard fired. Warn deliberately: a typo and an SSRF probe are
+      // indistinguishable here, and Discord's command rate limits bound volume.
+      logger.warn('Target URL rejected by SSRF guard (private host literal)', {
+        hostname: parsed.hostname,
+      });
       throw new Error('Target URL points to a private/internal address');
     }
     await assertNotPrivateAfterResolve(parsed.hostname);
@@ -241,6 +216,8 @@ async function createOneTimeLink(targetUrl, expiresIn, label, apiKey) {
   }
 
   const client = makeClient(apiKey);
+  // The collection label has no resource ID, so unlike item routes it needs no
+  // validated path builder; keep this literal deliberately aligned to SDK create().
   const result = await callQurl('POST', '/qurls', () =>
     client.create({
       target_url: targetUrl,
@@ -257,31 +234,44 @@ async function createOneTimeLink(targetUrl, expiresIn, label, apiKey) {
   return result;
 }
 
-// Bot-side charset guard on the resource ID, independent of the SDK client (in
-// the same defense-in-depth spirit as the SSRF guards): rejects malformed IDs
-// with a stable bot-side message before any network work. The SDK's delete()
-// adds the semantic `r_` resource-ID check on top.
-function validateResourceId(resourceId) {
-  if (!resourceId || !/^[\w-]+$/.test(resourceId)) {
-    throw new Error(`Invalid resource ID format: ${resourceId}`);
-  }
-}
-
 async function deleteLink(resourceId, apiKey) {
-  validateResourceId(resourceId);
+  resourcePath(resourceId);
   const client = makeClient(apiKey);
-  // delete() requires a qurl-service resource ID (r_ prefix); the bot's send
-  // rows store exactly that, so the revoke path satisfies it.
-  await callQurl('DELETE', `/qurls/${resourceId}`, () => client.delete(resourceId));
-  logger.info('Revoked qURL', { resource_id: resourceId });
+  // Revoke at the resource level: every link minted on the resource stops
+  // resolving. Repeats against an existing revoked row are idempotent 204;
+  // a never-existent public ID remains 404, so a corrupt send-row ID cannot
+  // report false success. SDK 0.3.x's delete() rejects current public IDs using
+  // a retired `r_` prefix check before any request is sent.
+  // qurl-typescript#244 fixes that older SDK method for other consumers; keep
+  // deleteResource() here because it directly names this whole-resource action.
+  await callQurl(
+    'DELETE',
+    RESOURCE_ID_LOG_PATH,
+    () => client.deleteResource(resourceId),
+    { resource_ref: resourceIdLogRef(resourceId) },
+  );
+  logger.info('Revoked qURL resource', { resource_id: resourceId });
 }
 
 async function getResourceStatus(resourceId, apiKey) {
-  validateResourceId(resourceId);
+  qurlPath(resourceId);
   const client = makeClient(apiKey);
+  // SDK 0.3.x's get() applies only its non-empty-ID guard; unlike delete(), it
+  // does not impose the retired `r_` prefix before making this request.
   // Returns the SDK's QURL shape — access tokens are under `access_tokens`
   // (the SDK renames the API's wire-format `qurls` field).
-  return callQurl('GET', `/qurls/${resourceId}`, () => client.get(resourceId));
+  return callQurl(
+    'GET',
+    QURL_ID_LOG_PATH,
+    () => client.get(resourceId),
+    { resource_ref: resourceIdLogRef(resourceId) },
+  );
 }
 
-module.exports = { createOneTimeLink, deleteLink, getResourceStatus, isPrivateHost };
+module.exports = {
+  createOneTimeLink,
+  deleteLink,
+  getResourceStatus,
+  isPrivateHost,
+  validateResourceId,
+};

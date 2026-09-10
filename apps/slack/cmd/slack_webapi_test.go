@@ -26,7 +26,28 @@ import (
 const (
 	testWorkspaceSlackBotToken        = "xoxb-123456789012345678901234567890"
 	testRotatedWorkspaceSlackBotToken = "xoxb-223456789012345678901234567890"
+	testEnterpriseSlackBotToken       = "xoxb-enterprise-token"
+	testSlackWebAPIUserAgent          = "qurl-slack/test"
+	testGridTeamID                    = "T_grid"
+	testGridEnterpriseID              = "E_grid"
 )
+
+// Preserve the production views.open client policy while swapping in the
+// server-owned transport. Server.Close closes idle connections on
+// http.DefaultTransport, which can interrupt parallel tests.
+func slackOpenViewTestClient(srv *httptest.Server) *http.Client {
+	client := defaultSlackViewsOpenClient()
+	client.Transport = srv.Client().Transport
+	return client
+}
+
+// Preserve the shared Slack Web API client policy while swapping in the
+// server-owned transport for test isolation.
+func slackWebAPITestClient(srv *httptest.Server) *http.Client {
+	client := defaultSlackWebAPIClient()
+	client.Transport = srv.Client().Transport
+	return client
+}
 
 type fakeSlackBotTokenProvider struct {
 	token string
@@ -101,15 +122,15 @@ func TestSlackOpenViewFuncPostsViewsOpenPayload(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	err := newSlackOpenViewFunc("xoxb-test", "qurl-slack/test", srv.URL)(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
+	err := newSlackOpenViewFuncWithClient("xoxb-test", testSlackWebAPIUserAgent, srv.URL, slackOpenViewTestClient(srv))(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
 	if err != nil {
 		t.Fatalf("views.open: %v", err)
 	}
-	if gotAuth != "Bearer xoxb-test" {
+	if gotAuth != testBearerXoxb {
 		t.Fatalf("Authorization = %q, want Bearer token", gotAuth)
 	}
-	if gotUA != "qurl-slack/test" {
-		t.Fatalf("User-Agent = %q, want qurl-slack/test", gotUA)
+	if gotUA != testSlackWebAPIUserAgent {
+		t.Fatalf("User-Agent = %q, want %s", gotUA, testSlackWebAPIUserAgent)
 	}
 	if gotContentType != "application/json" {
 		t.Fatalf("Content-Type = %q, want application/json", gotContentType)
@@ -135,7 +156,7 @@ func TestSlackOpenViewFuncUsesWorkspaceTokenLookup(t *testing.T) {
 	openView := newSlackOpenViewFuncWithTokenLookup(func(_ context.Context, teamID string) (string, error) {
 		gotTeam = teamID
 		return "xoxb-workspace-token", nil
-	}, "qurl-slack/test", srv.URL, nil)
+	}, testSlackWebAPIUserAgent, srv.URL, slackOpenViewTestClient(srv))
 	if err := openView(context.Background(), "T_lookup", "trigger_test", []byte(`{"type":"modal"}`)); err != nil {
 		t.Fatalf("views.open: %v", err)
 	}
@@ -144,6 +165,152 @@ func TestSlackOpenViewFuncUsesWorkspaceTokenLookup(t *testing.T) {
 	}
 	if gotAuth != "Bearer xoxb-workspace-token" {
 		t.Fatalf("Authorization = %q", gotAuth)
+	}
+}
+
+func TestSlackUserLookupFuncWithTokenLookup(t *testing.T) {
+	var gotAuth string
+	var gotUA string
+	var logBuf bytes.Buffer
+	prevLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(prevLogger) })
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		gotUA = r.Header.Get("User-Agent")
+		switch r.URL.Query().Get("user") {
+		case "UFOUND001":
+			_, _ = w.Write([]byte(`{"ok":true,"user":{"id":"UFOUND001","deleted":false}}`))
+		case "UMISMAT1":
+			_, _ = w.Write([]byte(`{"ok":true,"user":{"id":"UOTHER001","deleted":false}}`))
+		case "UDELETED1":
+			_, _ = w.Write([]byte(`{"ok":true,"user":{"id":"UDELETED1","deleted":true}}`))
+		case "UBOTUSER1":
+			_, _ = w.Write([]byte(`{"ok":true,"user":{"id":"UBOTUSER1","deleted":false,"is_bot":true}}`))
+		case "UMISSCOPE":
+			_, _ = w.Write([]byte(`{"ok":false,"error":"missing_scope"}`))
+		case "UHTTP500":
+			http.Error(w, "slack exploded", http.StatusInternalServerError)
+		case "UHUGE":
+			_, _ = w.Write([]byte(strings.Repeat("x", slackWebAPIResponseBodyLimit+1)))
+		default:
+			_, _ = w.Write([]byte(`{"ok":false,"error":"user_not_found"}`))
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	lookup := newSlackUserLookupFuncWithTokenLookup(staticTokenLookup("xoxb-test"), testSlackWebAPIUserAgent, srv.URL, slackWebAPITestClient(srv))
+	for _, tc := range []struct {
+		name string
+		user string
+		want bool
+	}{
+		{name: "active", user: "UFOUND001", want: true},
+		{name: "missing", user: "UMISSING1", want: false},
+		{name: "mismatched id", user: "UMISMAT1", want: false},
+		{name: "deleted", user: "UDELETED1", want: false},
+		{name: "bot", user: "UBOTUSER1", want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := lookup(context.Background(), "T_lookup", "", tc.user)
+			if err != nil {
+				t.Fatalf("SlackUserLookup error = %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("SlackUserLookup(%q) = %v, want %v", tc.user, got, tc.want)
+			}
+		})
+	}
+	logs := logBuf.String()
+	for _, want := range []string{"reason=user_not_found", "reason=mismatched_id", "reason=deleted", "reason=bot", "returned_user_id=UOTHER001"} {
+		if !strings.Contains(logs, want) {
+			t.Fatalf("SlackUserLookup rejection logs missing %q: %s", want, logs)
+		}
+	}
+	if _, err := lookup(context.Background(), "T_lookup", "", "UMISSCOPE"); !errors.Is(err, internal.ErrSlackMissingScope) {
+		t.Fatalf("SlackUserLookup missing_scope error = %v, want ErrSlackMissingScope", err)
+	}
+	if _, err := lookup(context.Background(), "T_lookup", "", "UHTTP500"); err == nil || !strings.Contains(err.Error(), "users.info returned HTTP 500") {
+		t.Fatalf("SlackUserLookup HTTP error = %v, want users.info HTTP 500 error", err)
+	}
+	if _, err := lookup(context.Background(), "T_lookup", "", "UHUGE"); err == nil || !strings.Contains(err.Error(), "users.info response exceeded") {
+		t.Fatalf("SlackUserLookup oversized response error = %v, want response limit error", err)
+	}
+	if gotAuth != testBearerXoxb {
+		t.Fatalf("Authorization = %q, want Bearer token", gotAuth)
+	}
+	if gotUA != testSlackWebAPIUserAgent {
+		t.Fatalf("User-Agent = %q, want %s", gotUA, testSlackWebAPIUserAgent)
+	}
+}
+
+func TestSlackUserLookupFuncWithTokenLookupRequiresWorkspaceToken(t *testing.T) {
+	var httpCalls atomic.Int64
+	var gotOwners []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		httpCalls.Add(1)
+		_, _ = w.Write([]byte(`{"ok":true,"user":{"id":"UGRIDUSER","deleted":false}}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	lookup := newSlackUserLookupFuncWithTokenLookup(func(_ context.Context, ownerID string) (string, error) {
+		gotOwners = append(gotOwners, ownerID)
+		if ownerID == testGridTeamID {
+			return "", auth.ErrSlackBotTokenNotConfigured
+		}
+		if ownerID == testGridEnterpriseID {
+			t.Fatalf("ownership transfer lookup must not fall back to the Enterprise Grid token")
+		}
+		return "", fmt.Errorf("unexpected token owner %q", ownerID)
+	}, testSlackWebAPIUserAgent, srv.URL, slackWebAPITestClient(srv))
+
+	ok, err := lookup(context.Background(), testGridTeamID, testGridEnterpriseID, "UGRIDUSER")
+	if !errors.Is(err, auth.ErrSlackBotTokenNotConfigured) {
+		t.Fatalf("SlackUserLookup error = %v, want missing workspace token", err)
+	}
+	if ok {
+		t.Fatal("SlackUserLookup returned true without a workspace token")
+	}
+	if strings.Join(gotOwners, ",") != testGridTeamID {
+		t.Fatalf("token lookup owners = %v, want only team", gotOwners)
+	}
+	if calls := httpCalls.Load(); calls != 0 {
+		t.Fatalf("users.info calls = %d, want 0", calls)
+	}
+}
+
+func TestSlackUserLookupFuncWithTokenLookupPropagatesWorkspaceTokenErrors(t *testing.T) {
+	var httpCalls atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		httpCalls.Add(1)
+		_, _ = w.Write([]byte(`{"ok":true,"user":{"id":"UGRIDUSER","deleted":false}}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	var gotOwners []string
+	lookup := newSlackUserLookupFuncWithTokenLookup(func(_ context.Context, ownerID string) (string, error) {
+		gotOwners = append(gotOwners, ownerID)
+		if ownerID == testGridTeamID {
+			return "", errors.New("ddb unavailable")
+		}
+		if ownerID == testGridEnterpriseID {
+			t.Fatalf("ownership transfer lookup must not fall back to the Enterprise Grid token")
+		}
+		return "", fmt.Errorf("unexpected token owner %q", ownerID)
+	}, testSlackWebAPIUserAgent, srv.URL, slackWebAPITestClient(srv))
+
+	ok, err := lookup(context.Background(), testGridTeamID, testGridEnterpriseID, "UGRIDUSER")
+	if err == nil {
+		t.Fatal("SlackUserLookup error = nil, want team lookup error")
+	}
+	if ok {
+		t.Fatal("SlackUserLookup returned true after team lookup error")
+	}
+	if strings.Join(gotOwners, ",") != testGridTeamID {
+		t.Fatalf("token lookup owners = %v, want only team", gotOwners)
+	}
+	if calls := httpCalls.Load(); calls != 0 {
+		t.Fatalf("users.info calls = %d, want 0", calls)
 	}
 }
 
@@ -456,7 +623,7 @@ func TestSlackOpenViewFuncLookupErrorSkipsRequest(t *testing.T) {
 
 	openView := newSlackOpenViewFuncWithTokenLookup(func(context.Context, string) (string, error) {
 		return "", errors.New("missing workspace token")
-	}, "qurl-slack/test", srv.URL, nil)
+	}, testSlackWebAPIUserAgent, srv.URL, slackOpenViewTestClient(srv))
 	err := openView(context.Background(), "T_missing", "trigger_test", []byte(`{"type":"modal"}`))
 	if err == nil || !strings.Contains(err.Error(), "token lookup") {
 		t.Fatalf("error = %v, want token lookup error", err)
@@ -475,7 +642,7 @@ func TestSlackOpenViewFuncDefaultsUserAgent(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	err := newSlackOpenViewFunc("xoxb-test", "", srv.URL)(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
+	err := newSlackOpenViewFuncWithClient("xoxb-test", "", srv.URL, slackOpenViewTestClient(srv))(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
 	if err != nil {
 		t.Fatalf("views.open: %v", err)
 	}
@@ -491,7 +658,7 @@ func TestSlackOpenViewFuncSurfacesSlackError(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	err := newSlackOpenViewFunc("xoxb-test", "", srv.URL)(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
+	err := newSlackOpenViewFuncWithClient("xoxb-test", "", srv.URL, slackOpenViewTestClient(srv))(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
 	if !errors.Is(err, internal.ErrSlackTriggerExpired) || !strings.Contains(err.Error(), "invalid_trigger") {
 		t.Fatalf("error = %v, want trigger-expired sentinel wrapping invalid_trigger", err)
 	}
@@ -527,7 +694,7 @@ func TestSlackOpenViewFuncSurfacesRateLimit(t *testing.T) {
 			srv := httptest.NewServer(tc.handler)
 			t.Cleanup(srv.Close)
 
-			err := newSlackOpenViewFunc("xoxb-test", "", srv.URL)(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
+			err := newSlackOpenViewFuncWithClient("xoxb-test", "", srv.URL, slackOpenViewTestClient(srv))(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
 			if !errors.Is(err, internal.ErrSlackRateLimited) {
 				t.Fatalf("error = %v, want rate-limited sentinel", err)
 			}
@@ -577,7 +744,7 @@ func TestSlackOpenViewFuncSurfacesHTTPError(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	err := newSlackOpenViewFunc("xoxb-test", "", srv.URL)(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
+	err := newSlackOpenViewFuncWithClient("xoxb-test", "", srv.URL, slackOpenViewTestClient(srv))(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
 	if err == nil || !strings.Contains(err.Error(), "HTTP 502") {
 		t.Fatalf("error = %v, want HTTP 502", err)
 	}
@@ -602,7 +769,7 @@ func TestSlackOpenViewFuncSurfacesEmptyRedirectBody(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	err := newSlackOpenViewFunc("xoxb-test", "", srv.URL)(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
+	err := newSlackOpenViewFuncWithClient("xoxb-test", "", srv.URL, slackOpenViewTestClient(srv))(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
 	if err == nil || err.Error() != "views.open returned HTTP 307" {
 		t.Fatalf("error = %v, want bare HTTP 307", err)
 	}
@@ -616,7 +783,7 @@ func TestSlackOpenViewFuncCapsHTTPErrorBodySnippet(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	err := newSlackOpenViewFunc("xoxb-test", "", srv.URL)(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
+	err := newSlackOpenViewFuncWithClient("xoxb-test", "", srv.URL, slackOpenViewTestClient(srv))(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
 	if err == nil || !strings.Contains(err.Error(), "HTTP 502") {
 		t.Fatalf("error = %v, want HTTP 502", err)
 	}
@@ -634,7 +801,7 @@ func TestSlackOpenViewFuncMakesHTTPErrorBodySnippetPrintable(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	err := newSlackOpenViewFunc("xoxb-test", "", srv.URL)(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
+	err := newSlackOpenViewFuncWithClient("xoxb-test", "", srv.URL, slackOpenViewTestClient(srv))(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
 	if err == nil || !strings.Contains(err.Error(), "<script>?alert(1)</script>") {
 		t.Fatalf("error = %v, want printable body snippet", err)
 	}
@@ -680,7 +847,7 @@ func TestSlackOpenViewFuncSurfacesMalformedJSON(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	err := newSlackOpenViewFunc("xoxb-test", "", srv.URL)(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
+	err := newSlackOpenViewFuncWithClient("xoxb-test", "", srv.URL, slackOpenViewTestClient(srv))(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
 	if err == nil || !strings.Contains(err.Error(), "response JSON") {
 		t.Fatalf("error = %v, want response JSON", err)
 	}
@@ -697,7 +864,7 @@ func TestSlackOpenViewFuncSurfacesHTMLSuccessAsMalformedJSON(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	err := newSlackOpenViewFunc("xoxb-test", "", srv.URL)(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
+	err := newSlackOpenViewFuncWithClient("xoxb-test", "", srv.URL, slackOpenViewTestClient(srv))(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
 	if err == nil || !strings.Contains(err.Error(), "response JSON") {
 		t.Fatalf("error = %v, want response JSON for HTTP 200 HTML body", err)
 	}
@@ -713,7 +880,7 @@ func TestSlackOpenViewFuncSurfacesEmptyResponseBody(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	err := newSlackOpenViewFunc("xoxb-test", "", srv.URL)(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
+	err := newSlackOpenViewFuncWithClient("xoxb-test", "", srv.URL, slackOpenViewTestClient(srv))(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
 	if err == nil || !strings.Contains(err.Error(), "empty response body") {
 		t.Fatalf("error = %v, want empty response body", err)
 	}
@@ -726,7 +893,7 @@ func TestSlackOpenViewFuncSurfacesNotOKFallback(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	err := newSlackOpenViewFunc("xoxb-test", "", srv.URL)(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
+	err := newSlackOpenViewFuncWithClient("xoxb-test", "", srv.URL, slackOpenViewTestClient(srv))(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
 	if err == nil || !strings.Contains(err.Error(), "not_ok") {
 		t.Fatalf("error = %v, want not_ok fallback", err)
 	}
@@ -739,7 +906,7 @@ func TestSlackOpenViewFuncMakesSlackErrorCodePrintable(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	err := newSlackOpenViewFunc("xoxb-test", "", srv.URL)(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
+	err := newSlackOpenViewFuncWithClient("xoxb-test", "", srv.URL, slackOpenViewTestClient(srv))(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
 	if err == nil || !strings.Contains(err.Error(), "bad code") {
 		t.Fatalf("error = %v, want printable Slack error code", err)
 	}
@@ -774,7 +941,7 @@ func TestSlackOpenViewFuncAcceptsLargeSuccessfulViewEcho(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	err = newSlackOpenViewFunc("xoxb-test", "", srv.URL)(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
+	err = newSlackOpenViewFuncWithClient("xoxb-test", "", srv.URL, slackOpenViewTestClient(srv))(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
 	if err != nil {
 		t.Fatalf("views.open: %v", err)
 	}
@@ -795,7 +962,7 @@ func TestSlackOpenViewFuncAcceptsResponseAtBodyLimit(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	err := newSlackOpenViewFunc("xoxb-test", "", srv.URL)(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
+	err := newSlackOpenViewFuncWithClient("xoxb-test", "", srv.URL, slackOpenViewTestClient(srv))(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
 	if err != nil {
 		t.Fatalf("views.open exactly at body limit: %v", err)
 	}
@@ -808,7 +975,7 @@ func TestSlackOpenViewFuncSurfacesOversizedResponse(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	err := newSlackOpenViewFunc("xoxb-test", "", srv.URL)(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
+	err := newSlackOpenViewFuncWithClient("xoxb-test", "", srv.URL, slackOpenViewTestClient(srv))(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
 	if err == nil || !strings.Contains(err.Error(), "exceeded 65536 bytes") {
 		t.Fatalf("error = %v, want oversized response", err)
 	}
@@ -827,7 +994,7 @@ func TestSlackOpenViewFuncRefusesRedirects(t *testing.T) {
 	}))
 	t.Cleanup(redirector.Close)
 
-	err := newSlackOpenViewFunc("xoxb-test", "", redirector.URL)(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
+	err := newSlackOpenViewFuncWithClient("xoxb-test", "", redirector.URL, slackOpenViewTestClient(redirector))(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
 	if err == nil {
 		t.Fatal("views.open followed redirect and returned nil error")
 	}
@@ -948,7 +1115,7 @@ func TestSlackWebAPIPosterGridFallbackWarningSanitizesOwnerIDs(t *testing.T) {
 			return testSlackValidationToken, nil
 		}
 		return "", auth.ErrSlackBotTokenNotConfigured
-	}, testSlackValidationUA, srv.URL, "chat.postMessage", slackChatPostMessageResponseError, srv.Client())
+	}, testSlackValidationUA, srv.URL, "chat.postMessage", slackChatPostMessageResponseError, slackWebAPITestClient(srv))
 
 	if _, err := poster.gridPost(context.Background(), teamID, enterpriseID, []byte(`{"channel":"C123","text":"hello"}`)); err != nil {
 		t.Fatalf("gridPost: %v", err)

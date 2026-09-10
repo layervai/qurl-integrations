@@ -74,15 +74,15 @@ func assistantEventBody(eventType, eventID, channelID, threadTS, contextChannel 
 		`"channel_id":"` + channelID + `","thread_ts":"` + threadTS + `"` + ctx + `}}}`
 }
 
-func newAssistantHandler(t *testing.T, seam AssistantThreadsPort) *Handler {
+func newAssistantHandler(t *testing.T, seam AssistantThreadsPort) (*Handler, *[]capturedReply, *sync.Mutex) {
 	t.Helper()
 	store := &slackdata.AgentStore{Client: newMemAgentDDB(), TableName: "agent_state"}
-	post, _, _ := capturingPostMessage()
+	post, posts, mu := capturingPostMessage()
 	// AgentDefaultEnabled so the per-workspace gate (workspaceAgentEnabled) is open;
 	// the workspace-off case is its own test.
 	h := NewHandler(Config{AgentLLM: fakeAgentLLM{reply: "x"}, AgentStore: store, PostMessage: post, AssistantThreads: seam, AgentDefaultEnabled: true})
 	t.Cleanup(h.Wait)
-	return h
+	return h, posts, mu
 }
 
 func TestAssistantStarterPrompts(t *testing.T) {
@@ -101,10 +101,11 @@ func TestAssistantStarterPrompts(t *testing.T) {
 }
 
 func TestHandleEvent_AssistantThreadStarted(t *testing.T) {
+	const paneThreadTS = "1700000000.000100"
 	fake := &fakeAssistantThreads{}
-	h := newAssistantHandler(t, fake)
+	h, posts, mu := newAssistantHandler(t, fake)
 
-	h.handleEvent(httptest.NewRecorder(), []byte(assistantThreadStartedBody("D1", "1700000000.000100")))
+	h.handleEvent(httptest.NewRecorder(), []byte(assistantThreadStartedBody("D1", paneThreadTS)))
 	h.Wait()
 
 	fake.mu.Lock()
@@ -112,21 +113,36 @@ func TestHandleEvent_AssistantThreadStarted(t *testing.T) {
 	if len(fake.titles) != 1 {
 		t.Fatalf("want one setTitle, got %d", len(fake.titles))
 	}
-	if got := fake.titles[0]; got.channelID != "D1" || got.threadTS != "1700000000.000100" || got.title != assistantThreadTitle {
+	if got := fake.titles[0]; got.channelID != "D1" || got.threadTS != paneThreadTS || got.title != assistantThreadTitle {
 		t.Fatalf("setTitle = %+v", got)
 	}
 	if len(fake.prompts) != 1 {
 		t.Fatalf("want one setSuggestedPrompts, got %d", len(fake.prompts))
 	}
-	if got := fake.prompts[0]; got.channelID != "D1" || got.threadTS != "1700000000.000100" || len(got.prompts) != len(assistantStarterPrompts) {
+	if got := fake.prompts[0]; got.channelID != "D1" || got.threadTS != paneThreadTS || len(got.prompts) != len(assistantStarterPrompts) {
 		t.Fatalf("setSuggestedPrompts = %+v", got)
+	}
+	// The first-run AI disclosure is posted into the pane thread.
+	mu.Lock()
+	defer mu.Unlock()
+	var sawDisclosure bool
+	for _, p := range *posts {
+		if p.text == agentAIDisclosure {
+			if p.channel != "D1" || p.threadTS != paneThreadTS {
+				t.Fatalf("disclosure posted to wrong place: %+v", p)
+			}
+			sawDisclosure = true
+		}
+	}
+	if !sawDisclosure {
+		t.Fatalf("first-run must post the AI disclosure, posts=%+v", *posts)
 	}
 }
 
 func TestAssistantThreadStarted_NilSeamIsNoOp(t *testing.T) {
 	// AssistantThreads unwired: the event is accepted (200 by handleEvent) and
 	// silently dropped — no panic, nothing scheduled.
-	h := newAssistantHandler(t, nil)
+	h, _, _ := newAssistantHandler(t, nil)
 	h.handleEvent(httptest.NewRecorder(), []byte(assistantThreadStartedBody("D1", "100.1")))
 	h.Wait()
 }
@@ -157,7 +173,7 @@ func TestAssistantThreadStarted_MissingThreadFieldsSkipped(t *testing.T) {
 	// A malformed assistant_thread (no channel/thread) can't be addressed — skip it
 	// rather than post to an empty channel/thread.
 	fake := &fakeAssistantThreads{}
-	h := newAssistantHandler(t, fake)
+	h, _, _ := newAssistantHandler(t, fake)
 	h.handleEvent(httptest.NewRecorder(), []byte(assistantThreadStartedBody("", "")))
 	h.Wait()
 

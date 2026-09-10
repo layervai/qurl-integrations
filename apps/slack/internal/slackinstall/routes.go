@@ -47,6 +47,7 @@ const (
 	botScopeCommands            = "commands"
 	botScopeChatWrite           = "chat:write"
 	botScopeIMWrite             = "im:write"
+	botScopeUsersRead           = "users:read"
 	slackOAuthErrorBadRedirect  = "bad_redirect_uri"
 	slackOAuthErrorUnrecognized = "unrecognized"
 )
@@ -68,7 +69,11 @@ code{background:#e5e7eb;padding:.1rem .3rem;border-radius:4px;font-size:.875em}
 <body>
 <div class="card">
 <h1><span class="ok">&#10003;</span> qURL Slack app installed</h1>
-<p>Guided qURL Connector setup is enabled for this workspace. Return to Slack and run <code>/qurl-admin protect-connector</code>.</p>
+<p>Next steps in Slack:</p>
+<ol>
+<li>Run <code>/qurl setup &lt;email&gt;</code> to connect this workspace to your qURL account.</li>
+<li>Run <code>/qurl-admin protect-connector</code> to set up your first connector.</li>
+</ol>
 <p>Install target: <code>{{.InstallTarget}}</code></p>
 </div>
 </body>
@@ -102,11 +107,12 @@ type TokenStore interface {
 // DefaultBotScopes returns the minimum Slack bot scopes the install flow
 // requests. `commands` installs the slash-command surface. `chat:write` lets the
 // bot post replies. `im:write` lets the bot open or resume 1:1 DMs before
-// delivering `dm:true` links and qURL Connector bootstrap keys.
+// delivering `dm:true` links and qURL Connector enrollment tokens. `users:read`
+// lets the owner-transfer verb verify the target user before rewriting owner_id.
 // Do not add `views:write`: it is not a real Slack scope, so Slack rejects it
 // at the authorize step with `invalid_scope`.
 func DefaultBotScopes() []string {
-	return []string{botScopeCommands, botScopeChatWrite, botScopeIMWrite}
+	return []string{botScopeCommands, botScopeChatWrite, botScopeIMWrite, botScopeUsersRead}
 }
 
 // DropUnsupportedScopes removes scope strings that are not real Slack OAuth
@@ -333,7 +339,7 @@ func Callback(cfg *Config) http.HandlerFunc {
 		if cfg.OnTokenStored != nil {
 			cfg.OnTokenStored(tokenOwnerID)
 		}
-		slog.Info("Slack app install stored workspace bot token", // #nosec G706 -- Slack IDs are structured slog attributes; JSON handlers escape control bytes.
+		slog.Info("Slack app install stored workspace bot token",
 			"token_owner_id", tokenOwnerID, "team_id", teamID, "installed_by", installedBy,
 			"bot_user_id", resp.BotUserID, "app_id", resp.AppID,
 			"enterprise_id", enterpriseID, "is_enterprise_install", resp.IsEnterpriseInstall)
@@ -576,30 +582,30 @@ func safeSlackOAuthErrorCode(raw string) string {
 }
 
 func logSlackInstallCallbackError(errorCode string, errorLen int) {
-	slog.Warn("Slack install callback returned error", "error", errorCode, "error_len", errorLen) // #nosec G706 -- error is allowlisted by safeSlackOAuthErrorCode before logging.
+	slog.Warn("Slack install callback returned error", "error", errorCode, "error_len", errorLen)
 }
 
 func logSlackInstallMissingTeamID(appIDPresent bool) {
-	slog.Error("Slack install token exchange missing team id", "app_id_present", appIDPresent) // #nosec G706 -- only a boolean is logged; no Slack string reaches the attribute.
+	slog.Error("Slack install token exchange missing team id", "app_id_present", appIDPresent)
 }
 
 func logSlackInstallMissingEnterpriseID(appIDPresent bool) {
-	slog.Error("Slack install token exchange missing enterprise id for org install", "app_id_present", appIDPresent) // #nosec G706 -- only a boolean is logged; no Slack string reaches the attribute.
+	slog.Error("Slack install token exchange missing enterprise id for org install", "app_id_present", appIDPresent)
 }
 
 func logSlackInstallMissingAuthedUser(teamIDPresent bool) {
-	slog.Error("Slack install token exchange missing authed user id", "team_id_present", teamIDPresent) // #nosec G706 -- only a boolean is logged; no Slack string reaches the attribute.
+	slog.Error("Slack install token exchange missing authed user id", "team_id_present", teamIDPresent)
 }
 
 func logSlackInstallPersistFailed(err error, tokenOwnerIDPresent, installedByPresent bool) {
-	slog.Error("Slack install token persist failed", // #nosec G706 -- only booleans plus the storage error are logged.
+	slog.Error("Slack install token persist failed",
 		"error", err, "token_owner_id_present", tokenOwnerIDPresent, "installed_by_present", installedByPresent)
 }
 
 func logSlackInstallMissingRequiredScopes(missing []string, tokenOwnerIDPresent bool) {
 	// missing follows DefaultBotScopes order for operator readability. Stored
 	// scopes are normalized separately as a sorted DDB String Set.
-	slog.Warn("Slack install token exchange missing required bot scope(s)", // #nosec G706 -- missing scopes come from DefaultBotScopes constants.
+	slog.Warn("Slack install token exchange missing required bot scope(s)",
 		"missing_scopes", strings.Join(missing, ","), "token_owner_id_present", tokenOwnerIDPresent)
 }
 

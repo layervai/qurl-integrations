@@ -1,8 +1,4 @@
-// store/ddb-store — DynamoDB backend
-//
-// Implements the Store contract (see `src/store/contract.js`) against
-// the 11 DynamoDB tables provisioned by `modules/qurl-bot-ddb/`
-// in the infra repo. Selected at boot when `STORE_TYPE=ddb`.
+// store/ddb-store — DynamoDB data layer
 //
 // Table naming: tables carry the env in their name
 // (`qurl-bot-discord-<env>-<kebab-name>`). The env prefix is
@@ -17,35 +13,13 @@
 // scoping happens infra-side, not here.
 //
 // App-layer encryption: sensitive fields
-// (`guild_configs.qurl_api_key`, `orphaned_oauth_tokens.access_token`,
-// `qurl_send_configs.attachment_url`, `qurl_send_configs.interaction_token`)
-// are envelope-encrypted via `utils/crypto.encrypt`. Ciphertext is stored
-// as a regular `S` string.
+// (`guild_configs.qurl_api_key`, `qurl_send_configs.attachment_url`,
+// `qurl_send_configs.interaction_token`) are envelope-encrypted via
+// `utils/crypto.encrypt`. Ciphertext is stored as a regular `S` string.
 // DDB server-side encryption (AWS-managed aws/dynamodb CMK,
 // configured at the table level) is defense-in-
 // depth — the primary encryption is the app-layer envelope.
 //
-// Composite key encoding — two tables flatten a SQLite UNIQUE into
-// a string hash key to preserve dedup semantics under
-// `ConditionExpression: attribute_not_exists(pk)`:
-//
-//   - `contributions.contribution_id = "<repo>#<pr_number>"`
-//     Uniqueness invariant: neither component contains `#`
-//     (GitHub owner/name slug disallows it; PR numbers are
-//     integers).
-//
-//   - `milestones.milestone_id = "<repo-or-sentinel>#<type>#<value>"`
-//     Uniqueness invariant: real repo values always contain `/`
-//     (owner/name GitHub slug) so no real repo can equal the
-//     `__NONE__` sentinel used for account-wide milestones.
-//
-// Cross-process streak + badge writes: `recordContribution` chains
-// into `updateStreak` and badge-award helpers just like the SQLite
-// impl. DDB doesn't support atomic read-modify-write on different
-// items, so the streak update is a best-effort follow-up — a
-// concurrent second recordContribution call for the same user could
-// race the streak counter. Acceptable at projected write volume;
-// revisit with `TransactWriteItems` if contention ever surfaces.
 
 const crypto = require('crypto');
 const {
@@ -61,106 +35,107 @@ const {
   ScanCommand,
   BatchGetCommand,
   BatchWriteCommand,
+  TransactWriteCommand,
 } = require('@aws-sdk/lib-dynamodb');
 
-const { encrypt, encryptStrict, decrypt } = require('../utils/crypto');
-const config = require('../config');
+const { encrypt, decrypt } = require('../utils/crypto');
 const logger = require('../logger');
-const { DM_STATUS, AUDIT_EVENTS } = require('../constants');
-const { isPositiveFinite } = require('../utils/time');
+const {
+  DM_STATUS,
+  AUDIT_EVENTS,
+  DDB_TRANSACTION_MAX_ACTIONS,
+  ddbSendConfigGuardActionCount,
+  ddbSendConfigGuardFitsTransaction,
+} = require('../constants');
 
-// Badge taxonomy — stable string enum values so callers that
-// compare or persist them across boots stay consistent.
-const BADGE_TYPES = {
-  FIRST_PR: 'first_pr',
-  FIRST_ISSUE: 'first_issue',
-  DOCS_HERO: 'docs_hero',
-  BUG_HUNTER: 'bug_hunter',
-  ON_FIRE: 'on_fire',
-  STREAK_MASTER: 'streak_master',
-  MULTI_REPO: 'multi_repo',
-};
+class SendConfigRevokedError extends Error {
+  constructor(sendIds) {
+    const ids = Array.isArray(sendIds) ? sendIds : [sendIds].filter(Boolean);
+    const label = ids.length === 1 ? `send ${ids[0]}` : 'one or more sends';
+    super(`recordQURLSendBatch: ${label} was revoked or no longer matched the sender before recipient rows were saved`);
+    this.name = 'SendConfigRevokedError';
+    this.code = 'SEND_CONFIG_REVOKED';
+    this.sendId = ids.length === 1 ? ids[0] : undefined;
+    this.sendIds = ids;
+  }
+}
 
-const BADGE_INFO = {
-  [BADGE_TYPES.FIRST_PR]: { emoji: '🌱', name: 'First PR', description: 'Merged your first PR' },
-  [BADGE_TYPES.FIRST_ISSUE]: { emoji: '💡', name: 'First Issue', description: 'Opened your first issue' },
-  [BADGE_TYPES.DOCS_HERO]: { emoji: '📚', name: 'Docs Hero', description: 'Contributed to documentation' },
-  [BADGE_TYPES.BUG_HUNTER]: { emoji: '🐛', name: 'Bug Hunter', description: 'Fixed a bug' },
-  [BADGE_TYPES.ON_FIRE]: { emoji: '🔥', name: 'On Fire', description: '2+ PRs in one month' },
-  [BADGE_TYPES.STREAK_MASTER]: { emoji: '🎯', name: 'Streak Master', description: '3 consecutive months of contributions' },
-  [BADGE_TYPES.MULTI_REPO]: { emoji: '🌐', name: 'Multi-Repo', description: 'Contributed to multiple repositories' },
-};
+function transactionGuardConditionFailed(err, guardCount) {
+  // CancellationReasons are positional. recordQURLSendBatch builds guarded
+  // transactions with all ConditionCheck items first, so only the first
+  // guardCount reasons may represent revoked/deleted/sender-mismatch state.
+  return err?.name === 'TransactionCanceledException'
+    && Array.isArray(err.CancellationReasons)
+    && err.CancellationReasons
+      .slice(0, guardCount)
+      .some(r => r?.Code === 'ConditionalCheckFailed');
+}
 
-// Table name mapping. Map keys (SQL-era snake_case names) match the
-// outputs.tf `table_names` shape in `modules/qurl-bot-ddb/` so
-// consumers look up by the same semantic key.
-//
-// DDB_TABLE_PREFIX is required (no default). See header comment for
-// the prod-footgun rationale. Whitespace-only values are treated as
-// unset to defend against buggy container templating that emits
-// `DDB_TABLE_PREFIX=` with no value — same shape as the STORE_TYPE
-// normalization in `store/index.js`.
+function transactionConditionFailedSendIds(err, sendIds) {
+  const failed = err.CancellationReasons
+    .slice(0, sendIds.length)
+    .flatMap((reason, index) => (reason?.Code === 'ConditionalCheckFailed' ? [sendIds[index]] : []));
+  return failed;
+}
+
+function transactionWriteRetryable(err) {
+  if (!err || typeof err !== 'object') return false;
+  // The SDK retries top-level throttling, but transaction cancellations can
+  // surface per-item throughput/conflict reasons as CancellationReasons. Keep
+  // this narrow outer loop so those transaction-specific shapes get backoff
+  // too, with the same ClientRequestToken reused for idempotency.
+  const retryableNames = new Set([
+    'ProvisionedThroughputExceededException',
+    'RequestLimitExceeded',
+    'ThrottlingException',
+  ]);
+  if (retryableNames.has(err.name)) return true;
+  if (err.name !== 'TransactionCanceledException' || !Array.isArray(err.CancellationReasons)) {
+    return false;
+  }
+  const retryableReasonCodes = new Set([
+    'ProvisionedThroughputExceeded',
+    'ThrottlingError',
+    'TransactionConflict',
+  ]);
+  return err.CancellationReasons.some(r => retryableReasonCodes.has(r?.Code));
+}
+
+// Keys match the infra module's table_names output. No default prefix is
+// allowed because a local process with AWS credentials could otherwise use
+// production tables.
 const TABLE_PREFIX = (process.env.DDB_TABLE_PREFIX ?? '').trim();
 if (!TABLE_PREFIX) {
-  throw new Error('DDB_TABLE_PREFIX is required when STORE_TYPE=ddb. Set it to the env-specific prefix (e.g. `qurl-bot-discord-sandbox-` for sandbox, `qurl-bot-discord-prod-` for prod) in the deployment template.');
+  throw new Error('DDB_TABLE_PREFIX is required. Set it to the env-specific prefix (e.g. `qurl-bot-discord-sandbox-` for sandbox, `qurl-bot-discord-prod-` for prod) in the deployment template.');
 }
-// Trailing-dash check. The prefix is concatenated directly with each
-// table's kebab-case suffix (`${TABLE_PREFIX}github-links`), so a
-// missing trailing dash silently produces malformed names like
-// `qurl-bot-discord-prodgithub-links` and the bot's first DDB call
-// returns ResourceNotFoundException — clear at the first call but
-// confusing in CloudWatch logs (looks like a permission or naming
-// issue, not a config typo). Catch it at boot so the failure points
-// directly at the env var.
+// The prefix is concatenated directly with each table suffix.
 if (!TABLE_PREFIX.endsWith('-')) {
-  throw new Error(`DDB_TABLE_PREFIX must end with '-' (got '${TABLE_PREFIX}'). The prefix is concatenated with kebab-case table suffixes; a missing dash produces malformed names like '${TABLE_PREFIX}github-links'. Add the trailing '-' in the deployment template.`);
+  throw new Error(`DDB_TABLE_PREFIX must end with '-' (got '${TABLE_PREFIX}'). The prefix is concatenated with kebab-case table suffixes; a missing dash produces malformed names like '${TABLE_PREFIX}qurl-sends'. Add the trailing '-' in the deployment template.`);
 }
 const TABLES = Object.freeze({
-  github_links: `${TABLE_PREFIX}github-links`,
-  pending_links: `${TABLE_PREFIX}pending-links`,
-  contributions: `${TABLE_PREFIX}contributions`,
-  badges: `${TABLE_PREFIX}badges`,
-  streaks: `${TABLE_PREFIX}streaks`,
-  milestones: `${TABLE_PREFIX}milestones`,
-  weekly_stats: `${TABLE_PREFIX}weekly-stats`,
   qurl_sends: `${TABLE_PREFIX}qurl-sends`,
   qurl_send_configs: `${TABLE_PREFIX}qurl-send-configs`,
   qurl_views: `${TABLE_PREFIX}qurl-views`,
-  orphaned_oauth_tokens: `${TABLE_PREFIX}orphaned-oauth-tokens`,
   guild_configs: `${TABLE_PREFIX}guild-configs`,
 });
 
-// AWS_REGION is required (no fallback). Same shape of footgun the
-// DDB_TABLE_PREFIX guard above closes: a developer with stray AWS
-// creds + DDB_TABLE_PREFIX=qurl-bot-discord-prod- + unset
-// AWS_REGION would silently land in whichever region the SDK
-// defaults to (us-east-2 today via the prior `|| 'us-east-2'`
-// fallback), which is presumably the prod region. Catch at boot.
-// Whitespace-only treated as unset, mirroring the prefix guard.
+// No region fallback: a local process must not silently select a production
+// region from ambient AWS configuration.
 const AWS_REGION = (process.env.AWS_REGION ?? '').trim();
 if (!AWS_REGION) {
-  throw new Error('AWS_REGION is required when STORE_TYPE=ddb. Set it to the env-specific region (e.g. `us-east-2` for sandbox, the matching prod region for prod) in the deployment template.');
+  throw new Error('AWS_REGION is required. Set it to the env-specific region (e.g. `us-east-2` for sandbox, the matching prod region for prod) in the deployment template.');
 }
 
-// Allow tests + local-dev to inject a pre-configured endpoint via
-// `process.env.DDB_TEST_ENDPOINT` (DDB-Local at http://localhost:8000,
-// or aws-sdk-client-mock interception). Production path constructs
-// the real client once at module load. The prod-only refusal lives
-// in `config.js` (loaded first), so by the time this constructor
-// runs in production, DDB_TEST_ENDPOINT is guaranteed unset.
+// Tests and local development can opt into DynamoDB Local. Production rejects
+// DDB_TEST_ENDPOINT in config.js before this module loads.
 const rawClient = new DynamoDBClient({
   region: AWS_REGION,
   ...(process.env.DDB_TEST_ENDPOINT ? { endpoint: process.env.DDB_TEST_ENDPOINT } : {}),
 });
 const ddb = DynamoDBDocumentClient.from(rawClient, {
   marshallOptions: {
-    // Remove undefined values (default is to throw) so optional
-    // fields the bot doesn't always populate flow through as
-    // absent attributes rather than per-call errors.
+    // Optional fields must remain absent instead of failing each write.
     removeUndefinedValues: true,
-    // Preserve `""` as a distinct value (default behavior is
-    // fine — DDB v3 SDK handles this correctly). Noted for
-    // clarity.
   },
 });
 
@@ -168,459 +143,18 @@ const ddb = DynamoDBDocumentClient.from(rawClient, {
 
 const nowIso = () => new Date().toISOString();
 
-// Sentinel for milestones' nullable `repo` column — guaranteed
-// distinct from any real GitHub slug because real slugs always
-// contain `/`.
-const NONE_SENTINEL = '__NONE__';
-
-function contributionId(repo, prNumber) {
-  return `${repo}#${prNumber}`;
-}
-
-function milestoneId(type, value, repo) {
-  return `${repo || NONE_SENTINEL}#${type}#${value}`;
-}
-
-// sha-256 hex of a string — used as the PK for orphaned_oauth_tokens
-// so we don't index the non-deterministic AES-GCM ciphertext.
-function sha256Hex(str) {
-  return crypto.createHash('sha256').update(str).digest('hex');
-}
-
-function getMonthString(date = new Date()) {
-  const d = new Date(date);
-  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
-}
-
-function getPreviousMonthString(date = new Date()) {
-  const d = new Date(date);
-  d.setUTCDate(1);
-  d.setUTCMonth(d.getUTCMonth() - 1);
-  return getMonthString(d);
-}
-
-// Validated at module load. config.PENDING_LINK_EXPIRY_MINUTES is
-// fed into createPendingLink as the TTL — if it's missing or non-
-// numeric, `Math.trunc(Number(undefined))` yields NaN, and DDB
-// throws ValidationException at every PutItem rather than at boot.
-// Same fail-fast philosophy as the DDB_TABLE_PREFIX / AWS_REGION
-// guards above.
-const PENDING_LINK_EXPIRY_MS = Math.trunc(Number(config.PENDING_LINK_EXPIRY_MINUTES)) * 60 * 1000;
-if (!isPositiveFinite(PENDING_LINK_EXPIRY_MS)) {
-  throw new Error(`config.PENDING_LINK_EXPIRY_MINUTES is required to be a positive number when STORE_TYPE=ddb (got '${config.PENDING_LINK_EXPIRY_MINUTES}'). Set it in the deployment template alongside DDB_TABLE_PREFIX / AWS_REGION.`);
-}
-
 // ── Pending OAuth state tokens ──
 
-async function createPendingLink(state, discordId) {
-  const minsMs = PENDING_LINK_EXPIRY_MS;
-  const expiresAt = Math.floor((Date.now() + minsMs) / 1000); // epoch seconds for DDB TTL
-  await ddb.send(new PutCommand({
-    TableName: TABLES.pending_links,
-    Item: {
-      state,
-      discord_id: discordId,
-      created_at: nowIso(),
-      expires_at: expiresAt,
-    },
-  }));
-  logger.debug('Created pending link', { discordId, state: state.substring(0, 8) + '...' });
-}
-
-async function getPendingLink(state) {
-  const res = await ddb.send(new GetCommand({
-    TableName: TABLES.pending_links,
-    Key: { state },
-  }));
-  return res.Item ? { discord_id: res.Item.discord_id } : undefined;
-}
-
-async function deletePendingLink(state) {
-  await ddb.send(new DeleteCommand({
-    TableName: TABLES.pending_links,
-    Key: { state },
-  }));
-}
-
-// Atomic consume via ReturnValues=ALL_OLD: the delete returns the
-// pre-delete row in one round-trip, closing the TOCTOU window in
-// the OAuth callback handler.
-async function consumePendingLink(state) {
-  const res = await ddb.send(new DeleteCommand({
-    TableName: TABLES.pending_links,
-    Key: { state },
-    ReturnValues: 'ALL_OLD',
-  }));
-  return res.Attributes ? { discord_id: res.Attributes.discord_id } : undefined;
-}
-
-// ── GitHub-Discord account links ──
-
-async function createLink(discordId, githubUsername) {
-  const now = nowIso();
-  // Preserve the original `linked_at` across re-links — SQLite's
-  // `ON CONFLICT(discord_id) DO UPDATE SET github_username = excluded…`
-  // only touched github_username + updated_at, so the "when did I
-  // first link" timestamp stayed stable. A naive PutItem would
-  // overwrite linked_at on every re-link, breaking any analytics
-  // on first-link cohort age. UpdateExpression with
-  // `if_not_exists(linked_at, :now)` keeps the SQLite behavior:
-  // set linked_at only on first write; always update
-  // github_username + updated_at.
-  await ddb.send(new UpdateCommand({
-    TableName: TABLES.github_links,
-    Key: { discord_id: discordId },
-    UpdateExpression: 'SET github_username = :g, updated_at = :now, linked_at = if_not_exists(linked_at, :now)',
-    ExpressionAttributeValues: {
-      ':g': githubUsername.toLowerCase(),
-      ':now': now,
-    },
-  }));
-  logger.info('Created/updated GitHub link', { discordId, github: githubUsername });
-}
-
-async function getLinkByDiscord(discordId) {
-  const res = await ddb.send(new GetCommand({
-    TableName: TABLES.github_links,
-    Key: { discord_id: discordId },
-  }));
-  return res.Item || undefined;
-}
-
-async function getLinkedDiscordIds() {
-  // Scan + project only the PK. At projected scale (< 10k rows total)
-  // the full scan is acceptable; the caller uses this to pre-filter a
-  // guild-wide sync, not per-request. Revisit if contributions table
-  // sizing grows past 50k and this query shows up in flame graphs.
-  const ids = new Set();
-  let ExclusiveStartKey;
-  do {
-    const res = await ddb.send(new ScanCommand({
-      TableName: TABLES.github_links,
-      ProjectionExpression: 'discord_id',
-      ExclusiveStartKey,
-    }));
-    for (const item of res.Items || []) ids.add(item.discord_id);
-    ExclusiveStartKey = res.LastEvaluatedKey;
-  } while (ExclusiveStartKey);
-  return ids;
-}
-
-async function getLinkByGithub(githubUsername) {
-  const res = await ddb.send(new QueryCommand({
-    TableName: TABLES.github_links,
-    IndexName: 'github_username-index',
-    KeyConditionExpression: 'github_username = :u',
-    ExpressionAttributeValues: { ':u': githubUsername.toLowerCase() },
-    Limit: 1,
-  }));
-  if (!res.Items || res.Items.length === 0) return undefined;
-  // GSI is KEYS_ONLY — hop back to the base table for the full item.
-  const { discord_id } = res.Items[0];
-  return getLinkByDiscord(discord_id);
-}
-
-async function deleteLink(discordId) {
-  const res = await ddb.send(new DeleteCommand({
-    TableName: TABLES.github_links,
-    Key: { discord_id: discordId },
-    ReturnValues: 'ALL_OLD',
-  }));
-  const deleted = !!res.Attributes;
-  logger.info('Deleted GitHub link', { discordId, deleted });
-  // Return shape: `{ changes: 0 | 1 }` so callers can check
-  // `result.changes > 0` uniformly without branching on `undefined`
-  // for the not-found case.
-  return { changes: deleted ? 1 : 0 };
-}
-
-async function forceLink(discordId, githubUsername) {
-  return createLink(discordId, githubUsername);
-}
-
-// ── Contributions (merged PRs) ──
-
-async function recordContribution(discordId, githubUsername, prNumber, repo, prTitle = null) {
-  const id = contributionId(repo, prNumber);
-  // Tri-state return: 'recorded' | 'duplicate' | 'failed'.
-  // Why three states instead of boolean: callers want to act
-  // differently on each. Webhook handler skips role+badges on both
-  // dup AND failure (preserves the "no role without persisted
-  // credit" invariant — but failure is the case where GitHub will
-  // re-deliver, dup is steady-state). Historical-backfill loop in
-  // routes/oauth.js wants to count NEW contributions only, AND
-  // surface transient failures so the user-visible message doesn't
-  // silently undercount during onboarding. The boolean shape
-  // collapsed the second case into "no-op."
-  //
-  // Split into two try blocks so a streak-update failure doesn't
-  // mask a successful contribution insert. DDB's two-round-trip
-  // streak flow (Get + Put/Update) has a higher base failure rate
-  // than SQLite's same-transaction write; collapsing the catches
-  // would mean a transient streak timeout causes the caller to
-  // skip badge evaluation for a contribution that actually landed.
-  try {
-    await ddb.send(new PutCommand({
-      TableName: TABLES.contributions,
-      Item: {
-        contribution_id: id,
-        discord_id: discordId,
-        github_username: githubUsername.toLowerCase(),
-        pr_number: prNumber,
-        repo,
-        pr_title: prTitle,
-        merged_at: nowIso(),
-      },
-      ConditionExpression: 'attribute_not_exists(contribution_id)',
-    }));
-    logger.info('Recorded contribution', { discordId, github: githubUsername, pr: prNumber, repo });
-  } catch (err) {
-    if (err.name === 'ConditionalCheckFailedException') {
-      // Dedup: a webhook redelivery for the same (repo, pr_number)
-      // hits this branch. Streak update is intentionally NOT
-      // attempted on this path — if the streak failed during the
-      // ORIGINAL recordContribution call, it logged loudly there
-      // and the next contribution will pick the streak back up via
-      // updateStreak's reconciliation. Retrying streak on every
-      // dedup'd redelivery would amplify load with no correctness
-      // win.
-      logger.debug('Contribution already exists', { pr: prNumber, repo });
-      return 'duplicate';
-    }
-    logger.error('Failed to record contribution', { error: err.message, pr: prNumber, repo });
-    return 'failed';
-  }
-
-  try {
-    await updateStreak(discordId);
-  } catch (err) {
-    // Don't fail the caller — contribution IS recorded. Log so an
-    // operator notices sustained streak failures (would indicate a
-    // streak-table IAM / capacity issue, not a correctness bug).
-    logger.error('Streak update failed after recordContribution succeeded', {
-      discordId, pr: prNumber, repo, error: err.message,
-    });
-  }
-  return 'recorded';
-}
-
-async function getContributions(discordId, limit = 50) {
-  const res = await ddb.send(new QueryCommand({
-    TableName: TABLES.contributions,
-    IndexName: 'discord_id-merged_at-index',
-    KeyConditionExpression: 'discord_id = :d',
-    ExpressionAttributeValues: { ':d': discordId },
-    ScanIndexForward: false, // newest first
-    Limit: limit,
-  }));
-  return res.Items || [];
-}
-
-async function getAllContributions(limit = 100) {
-  // No natural partition key for "newest N across all users" — full
-  // scan, sorted client-side. DDB Scan returns items in internal-hash
-  // order (not chronological), so an early-termination cap could miss
-  // the newest rows if they happen to sit late in the scan order.
-  // At projected volume (< 10k rows) a full scan is acceptable; if
-  // contributions ever grow past ~50k, introduce a dedicated "newest
-  // across users" GSI (pk=__all__, sk=merged_at) or an aggregated
-  // counter row and query that instead.
-  const items = await scanAll(TABLES.contributions);
-  items.sort((a, b) => (b.merged_at || '').localeCompare(a.merged_at || ''));
-  return items.slice(0, limit);
-}
-
-async function getContributionCount(discordId, { justWrote = false } = {}) {
-  // GSI queries are eventually consistent — ConsistentRead isn't
-  // supported on GSIs. A `Query` issued immediately after a base-
-  // table `PutItem` (see recordContribution → checkAndAwardBadges
-  // chain) can return a count of 0 when it should be 1, because
-  // the GSI hasn't propagated the new row yet. That's a permanent
-  // miss for the FIRST_PR badge — on the next contribution the
-  // count is 2 and the `count === 1` check never fires again.
-  //
-  // Mitigation, opt-in via `{ justWrote: true }`: short retry loop.
-  // DDB GSI lag under normal load is typically <50ms; retry with
-  // backoff covers the tail. Only re-issues on count=0 to avoid
-  // noise for users with established histories.
-  //
-  // Why opt-in: a caller asking "does this user have any
-  // contribution history?" for a genuinely-zero user (e.g.
-  // unlinked Discord account) would otherwise eat the full ~350ms
-  // budget on every query. Default no-retry keeps the legitimate-
-  // zero path at single-digit ms; the post-write call site
-  // (checkAndAwardBadges) explicitly opts in.
-  if (!justWrote) {
-    const res = await ddb.send(new QueryCommand({
-      TableName: TABLES.contributions,
-      IndexName: 'discord_id-merged_at-index',
-      KeyConditionExpression: 'discord_id = :d',
-      ExpressionAttributeValues: { ':d': discordId },
-      Select: 'COUNT',
-    }));
-    return res.Count || 0;
-  }
-
-  const MAX_RETRIES = 3;
-  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-    const res = await ddb.send(new QueryCommand({
-      TableName: TABLES.contributions,
-      IndexName: 'discord_id-merged_at-index',
-      KeyConditionExpression: 'discord_id = :d',
-      ExpressionAttributeValues: { ':d': discordId },
-      Select: 'COUNT',
-    }));
-    const count = res.Count || 0;
-    if (count > 0 || attempt === MAX_RETRIES) return count;
-    // Backoff: 50ms, 100ms, 200ms. Total worst case ~350ms before
-    // giving up and returning 0.
-    await new Promise(resolve => setTimeout(resolve, 50 * Math.pow(2, attempt)));
-  }
-}
-
-async function getWeeklyContributions(discordId) {
-  // queryAll: a contributor with many PRs in the 7-day window can
-  // hit the 1MB Query page cap, silently truncating the count.
-  // Same shape as the getUniqueRepos fix (and matches SQLite's
-  // unlimited SELECT).
-  const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
-  return queryAll({
-    TableName: TABLES.contributions,
-    IndexName: 'discord_id-merged_at-index',
-    KeyConditionExpression: 'discord_id = :d AND merged_at >= :t',
-    ExpressionAttributeValues: { ':d': discordId, ':t': sevenDaysAgo },
-    ScanIndexForward: false,
-  });
-}
-
-async function getMonthlyContributions(discordId) {
-  // queryAll for the same 1MB-truncate-silently reason as
-  // getWeeklyContributions. ON_FIRE badge gates on monthlyPRs.length
-  // >= 2 — truncation here could miss the badge, but only for users
-  // with >>2 PRs in a month so unlikely to bite. Pagination is
-  // cheap and matches SQLite's `SELECT ... WHERE merged_at >= ?`
-  // shape.
-  const now = new Date();
-  const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)).toISOString();
-  return queryAll({
-    TableName: TABLES.contributions,
-    IndexName: 'discord_id-merged_at-index',
-    KeyConditionExpression: 'discord_id = :d AND merged_at >= :t',
-    ExpressionAttributeValues: { ':d': discordId, ':t': monthStart },
-    ScanIndexForward: false,
-  });
-}
-
-async function getUniqueRepos(discordId) {
-  // Pagination + projection. Why not getContributions(discordId, 10000)?
-  //   1. DDB Query response is capped at 1MB per page regardless of
-  //      the requested Limit, with LastEvaluatedKey set when more
-  //      pages exist. A user with many contributions (or longer
-  //      pr_title / repo strings) hits the cap before 10k rows and
-  //      getContributions silently truncates — getUniqueRepos
-  //      would then miss MULTI_REPO badge eligibility.
-  //   2. We only need `repo` to dedup; pulling the full row is
-  //      wasted RCU + bytes. ProjectionExpression cuts the read
-  //      cost on a path that fires from checkAndAwardBadges on
-  //      every contribution insert.
-  const repos = new Set();
-  let ExclusiveStartKey;
-  do {
-    const res = await ddb.send(new QueryCommand({
-      TableName: TABLES.contributions,
-      IndexName: 'discord_id-merged_at-index',
-      KeyConditionExpression: 'discord_id = :d',
-      ExpressionAttributeValues: { ':d': discordId },
-      ProjectionExpression: 'repo',
-      ExclusiveStartKey,
-    }));
-    for (const item of res.Items || []) repos.add(item.repo);
-    ExclusiveStartKey = res.LastEvaluatedKey;
-  } while (ExclusiveStartKey);
-  return [...repos];
-}
-
-async function getLastWeekContributions() {
-  const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
-  const items = [];
-  let ExclusiveStartKey;
-  do {
-    const res = await ddb.send(new ScanCommand({
-      TableName: TABLES.contributions,
-      FilterExpression: 'merged_at >= :t',
-      ExpressionAttributeValues: { ':t': sevenDaysAgo },
-      ExclusiveStartKey,
-    }));
-    items.push(...(res.Items || []));
-    ExclusiveStartKey = res.LastEvaluatedKey;
-  } while (ExclusiveStartKey);
-  items.sort((a, b) => (b.merged_at || '').localeCompare(a.merged_at || ''));
-  return items;
-}
-
-async function getNewContributorsThisWeek() {
-  // "Users whose FIRST ever contribution was in the last 7 days."
-  // SQL did this with a GROUP BY + HAVING. DDB: fetch all
-  // contributions (scoped by users who appeared recently is
-  // already a narrow set), compute per-user MIN(merged_at),
-  // filter to the window.
-  const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
-  const all = [];
-  let ExclusiveStartKey;
-  do {
-    const res = await ddb.send(new ScanCommand({
-      TableName: TABLES.contributions,
-      ExclusiveStartKey,
-    }));
-    all.push(...(res.Items || []));
-    ExclusiveStartKey = res.LastEvaluatedKey;
-  } while (ExclusiveStartKey);
-  const firstByUser = new Map();
-  for (const it of all) {
-    const prev = firstByUser.get(it.discord_id);
-    if (!prev || (it.merged_at || '') < prev.first_contribution) {
-      firstByUser.set(it.discord_id, {
-        discord_id: it.discord_id,
-        github_username: it.github_username,
-        first_contribution: it.merged_at,
-      });
-    }
-  }
-  return [...firstByUser.values()].filter(r => (r.first_contribution || '') >= sevenDaysAgo);
-}
-
-// ── Aggregate stats and leaderboard ──
-
+// Aggregate counters for the token-gated /metrics endpoint. Both are
+// full-table Scans, which is why /health uses healthCheck() instead —
+// see the note there. /metrics is rate-limited and bearer-gated, so the
+// scan cost is bounded to deliberate operator scrapes.
 async function getStats() {
-  const [linkedUsers, contribs] = await Promise.all([
-    countAll(TABLES.github_links),
-    scanAll(TABLES.contributions),
+  const [configuredGuilds, totalSends] = await Promise.all([
+    countAll(TABLES.guild_configs),
+    countAll(TABLES.qurl_sends),
   ]);
-  const contributors = new Set();
-  const repoCounts = new Map();
-  for (const c of contribs) {
-    contributors.add(c.discord_id);
-    repoCounts.set(c.repo, (repoCounts.get(c.repo) || 0) + 1);
-  }
-  const byRepo = [...repoCounts.entries()]
-    .map(([repo, count]) => ({ repo, count }))
-    .sort((a, b) => b.count - a.count);
-  return {
-    linkedUsers,
-    totalContributions: contribs.length,
-    uniqueContributors: contributors.size,
-    byRepo,
-  };
-}
-
-async function getTopContributors(limit = 10) {
-  const contribs = await scanAll(TABLES.contributions);
-  const counts = new Map();
-  for (const c of contribs) counts.set(c.discord_id, (counts.get(c.discord_id) || 0) + 1);
-  return [...counts.entries()]
-    .map(([discord_id, count]) => ({ discord_id, count }))
-    .sort((a, b) => b.count - a.count)
-    .slice(0, limit);
+  return { configuredGuilds, totalSends };
 }
 
 // Paginated `Select: COUNT` scan. DDB Scan with Select=COUNT is
@@ -685,270 +219,6 @@ async function scanAll(TableName, { consistentRead = false } = {}) {
 
 // ── Badges ──
 
-async function awardBadge(discordId, badgeType) {
-  try {
-    await ddb.send(new PutCommand({
-      TableName: TABLES.badges,
-      Item: {
-        discord_id: discordId,
-        badge_type: badgeType,
-        earned_at: nowIso(),
-      },
-      ConditionExpression: 'attribute_not_exists(discord_id) AND attribute_not_exists(badge_type)',
-    }));
-    logger.info('Badge awarded', { discordId, badge: badgeType });
-    return true;
-  } catch (err) {
-    if (err.name === 'ConditionalCheckFailedException') return false; // already had it
-    logger.error('Error awarding badge', { error: err.message });
-    return false;
-  }
-}
-
-async function getBadges(discordId) {
-  const res = await ddb.send(new QueryCommand({
-    TableName: TABLES.badges,
-    KeyConditionExpression: 'discord_id = :d',
-    ExpressionAttributeValues: { ':d': discordId },
-  }));
-  return (res.Items || [])
-    .map(i => ({ badge_type: i.badge_type, earned_at: i.earned_at }))
-    .sort((a, b) => (a.earned_at || '').localeCompare(b.earned_at || ''));
-}
-
-async function hasBadge(discordId, badgeType) {
-  const res = await ddb.send(new GetCommand({
-    TableName: TABLES.badges,
-    Key: { discord_id: discordId, badge_type: badgeType },
-  }));
-  return !!res.Item;
-}
-
-async function checkAndAwardBadges(discordId, prTitle, repo) {
-  const awarded = [];
-  // justWrote: this function is invoked from recordContribution
-  // RIGHT AFTER a base-table PutItem, so a GSI count=0 here is
-  // almost-always replication lag. Opt into the bounded retry
-  // loop. Other callers asking "is this user a contributor?"
-  // shouldn't pay that latency for a legitimate zero.
-  const count = await getContributionCount(discordId, { justWrote: true });
-
-  // FIRST_PR award: idempotent on `count >= 1 && !hasBadge(FIRST_PR)`
-  // rather than `count === 1`. Two reasons the strict-equality check
-  // could permanently miss the badge on DDB:
-  //   1. Webhook redelivery: GitHub re-sends a PR-merged webhook
-  //      after 4xx/5xx; recordContribution dedups via CCFE on the
-  //      base table, but if a SECOND legitimate PR landed in the
-  //      same window the GSI may already show count=2 for the
-  //      first user's first-ever contribution.
-  //   2. GSI lag inversion: the retry loop in getContributionCount
-  //      papers over count=0, but if writes for two contributions
-  //      hit the GSI between the retry's reads, count can jump
-  //      directly from 0 → 2 and skip count=1.
-  // Idempotent form: hasBadge is the source of truth (badge table
-  // has its own composite-PK dedup), so awardBadge can fire on any
-  // count≥1 and the condition self-clears after the first award.
-  // SQLite has the same race window in theory but a much narrower
-  // one — flagging here so a future SQLite cleanup follows the
-  // same shape.
-  if (count >= 1 && !(await hasBadge(discordId, BADGE_TYPES.FIRST_PR))) {
-    if (await awardBadge(discordId, BADGE_TYPES.FIRST_PR)) awarded.push(BADGE_TYPES.FIRST_PR);
-  }
-
-  const isDocsPR = /doc|readme|guide|tutorial|example/i.test(prTitle) || /doc|example|demo/i.test(repo);
-  if (isDocsPR && !(await hasBadge(discordId, BADGE_TYPES.DOCS_HERO))) {
-    if (await awardBadge(discordId, BADGE_TYPES.DOCS_HERO)) awarded.push(BADGE_TYPES.DOCS_HERO);
-  }
-
-  const isBugFix = /fix|bug|issue|patch|resolve/i.test(prTitle);
-  if (isBugFix && !(await hasBadge(discordId, BADGE_TYPES.BUG_HUNTER))) {
-    if (await awardBadge(discordId, BADGE_TYPES.BUG_HUNTER)) awarded.push(BADGE_TYPES.BUG_HUNTER);
-  }
-
-  const monthlyPRs = await getMonthlyContributions(discordId);
-  if (monthlyPRs.length >= 2 && !(await hasBadge(discordId, BADGE_TYPES.ON_FIRE))) {
-    if (await awardBadge(discordId, BADGE_TYPES.ON_FIRE)) awarded.push(BADGE_TYPES.ON_FIRE);
-  }
-
-  const streak = await getStreak(discordId);
-  if (streak && streak.current_streak >= 3 && !(await hasBadge(discordId, BADGE_TYPES.STREAK_MASTER))) {
-    if (await awardBadge(discordId, BADGE_TYPES.STREAK_MASTER)) awarded.push(BADGE_TYPES.STREAK_MASTER);
-  }
-
-  const uniqueRepos = await getUniqueRepos(discordId);
-  if (uniqueRepos.length >= 2 && !(await hasBadge(discordId, BADGE_TYPES.MULTI_REPO))) {
-    if (await awardBadge(discordId, BADGE_TYPES.MULTI_REPO)) awarded.push(BADGE_TYPES.MULTI_REPO);
-  }
-
-  return awarded;
-}
-
-async function awardFirstIssueBadge(discordId) {
-  if (!(await hasBadge(discordId, BADGE_TYPES.FIRST_ISSUE))) {
-    if (await awardBadge(discordId, BADGE_TYPES.FIRST_ISSUE)) return [BADGE_TYPES.FIRST_ISSUE];
-  }
-  return [];
-}
-
-// ── Streaks ──
-
-async function getStreak(discordId) {
-  // Public Store contract: eventually-consistent GetItem. The
-  // signature stays free of ConsistentRead opts — updateStreak's
-  // CCFE-recurse path issues its own GetCommand with the strong-read
-  // flag inline (see that comment), so backend-specific options
-  // don't leak onto the contract.
-  const res = await ddb.send(new GetCommand({
-    TableName: TABLES.streaks,
-    Key: { discord_id: discordId },
-  }));
-  return res.Item;
-}
-
-async function updateStreak(discordId, { _afterRace = false } = {}) {
-  const currentMonth = getMonthString();
-  // First call: eventually-consistent via getStreak (cheaper, and
-  // any staleness here just means we'll attempt the conditional
-  // Put and either succeed or take the CCFE → recurse path).
-  // Recurse re-entry: ConsistentRead inline so we KNOW the
-  // concurrent winner's row is visible. We don't widen getStreak's
-  // signature for this backend-specific concern; the inline
-  // GetCommand keeps the post-race reconciliation visible at its
-  // call site.
-  let existing;
-  if (_afterRace) {
-    const res = await ddb.send(new GetCommand({
-      TableName: TABLES.streaks,
-      Key: { discord_id: discordId },
-      ConsistentRead: true,
-    }));
-    existing = res.Item;
-  } else {
-    existing = await getStreak(discordId);
-  }
-
-  if (!existing) {
-    // First-write race: two concurrent recordContribution calls for
-    // a brand-new contributor BOTH see existing == null and BOTH
-    // PutItem. Without a condition the second clobbers the first
-    // (still streak=1 here, so the data outcome matches; but the
-    // second writer's attribution race-loses silently). Guard with
-    // attribute_not_exists; on CCFE fall through to the update path
-    // — by definition a streak row now exists, so re-reading it
-    // (ConsistentRead, since the concurrent winner JUST committed)
-    // and running the same-month / consecutive-month / break logic
-    // produces the correct end state. Cheap fix that closes the
-    // insert-branch race without TransactWriteItems.
-    if (_afterRace) {
-      // Defense-in-depth: a ConsistentRead after CCFE that STILL
-      // returns undefined would mean DDB lost the concurrent
-      // winner's write, which violates DDB's strong-consistency
-      // contract. Rather than infinite-recurse, throw loud.
-      throw new Error(`updateStreak: streak row for ${discordId} still missing after CCFE + ConsistentRead — DDB consistency violation or a bug above this layer.`);
-    }
-    try {
-      await ddb.send(new PutCommand({
-        TableName: TABLES.streaks,
-        Item: {
-          discord_id: discordId,
-          current_streak: 1,
-          longest_streak: 1,
-          last_contribution_week: currentMonth,
-          updated_at: nowIso(),
-        },
-        ConditionExpression: 'attribute_not_exists(discord_id)',
-      }));
-      return { current: 1, longest: 1, isNew: true };
-    } catch (err) {
-      if (err.name !== 'ConditionalCheckFailedException') throw err;
-      // Concurrent writer beat us to the insert. Recurse with
-      // _afterRace=true so getStreak does a ConsistentRead — the
-      // row is durably present per CCFE, so eventual consistency
-      // could still return undefined for a few ms and re-enter
-      // this branch. ConsistentRead closes that hole.
-      return updateStreak(discordId, { _afterRace: true });
-    }
-  }
-
-  if (existing.last_contribution_week === currentMonth) {
-    return { current: existing.current_streak, longest: existing.longest_streak, isNew: false };
-  }
-
-  const lastMonth = getPreviousMonthString();
-  const newStreak = existing.last_contribution_week === lastMonth ? existing.current_streak + 1 : 1;
-  const newLongest = Math.max(newStreak, existing.longest_streak);
-
-  await ddb.send(new UpdateCommand({
-    TableName: TABLES.streaks,
-    Key: { discord_id: discordId },
-    UpdateExpression: 'SET current_streak = :c, longest_streak = :l, last_contribution_week = :w, updated_at = :u',
-    ExpressionAttributeValues: {
-      ':c': newStreak,
-      ':l': newLongest,
-      ':w': currentMonth,
-      ':u': nowIso(),
-    },
-  }));
-  return { current: newStreak, longest: newLongest, isNew: newStreak > existing.current_streak };
-}
-
-// ── Announcement milestones ──
-
-async function hasMilestoneBeenAnnounced(type, value, repo = null) {
-  const id = milestoneId(type, value, repo);
-  const res = await ddb.send(new GetCommand({
-    TableName: TABLES.milestones,
-    Key: { milestone_id: id },
-  }));
-  return !!res.Item;
-}
-
-async function recordMilestone(type, value, repo = null) {
-  const id = milestoneId(type, value, repo);
-  try {
-    await ddb.send(new PutCommand({
-      TableName: TABLES.milestones,
-      Item: {
-        milestone_id: id,
-        milestone_type: type,
-        milestone_value: value,
-        repo: repo || null,
-        announced_at: nowIso(),
-      },
-      ConditionExpression: 'attribute_not_exists(milestone_id)',
-    }));
-    return true;
-  } catch (err) {
-    if (err.name === 'ConditionalCheckFailedException') return false;
-    logger.error('recordMilestone failed', { type, value, repo, error: err.message });
-    return false;
-  }
-}
-
-// ── Weekly digest ──
-
-async function getWeeklyDigestData() {
-  const [lastWeekPRs, newContributors] = await Promise.all([
-    getLastWeekContributions(),
-    getNewContributorsThisWeek(),
-  ]);
-  const byRepo = {};
-  for (const pr of lastWeekPRs) {
-    if (!byRepo[pr.repo]) byRepo[pr.repo] = [];
-    byRepo[pr.repo].push(pr);
-  }
-  const uniqueContributors = [...new Set(lastWeekPRs.map(pr => pr.discord_id))];
-  return {
-    totalPRs: lastWeekPRs.length,
-    uniqueContributors: uniqueContributors.length,
-    newContributors,
-    byRepo,
-    prs: lastWeekPRs.slice(0, 10),
-  };
-}
-
-// ── QURL sends ──
-
 async function recordQURLSend({
   sendId, senderDiscordId, recipientDiscordId, resourceId, resourceType,
   qurlLink, qurlId, expiresIn, channelId, targetType, guildId,
@@ -991,20 +261,41 @@ async function recordQURLSend({
   }));
 }
 
-async function recordQURLSendBatch(sends) {
+function qurlSendBatchItem(s, createdAt) {
+  // qurl_id is sparsely written so an empty/missing value (e.g.
+  // a future emit path that doesn't surface it) doesn't pollute
+  // the qurl_id-index GSI. See recordQURLSend for the same gate.
+  const Item = {
+    send_id: s.sendId,
+    recipient_discord_id: s.recipientDiscordId,
+    sender_discord_id: s.senderDiscordId,
+    resource_id: s.resourceId,
+    resource_type: s.resourceType,
+    qurl_link: s.qurlLink,
+    expires_in: s.expiresIn,
+    channel_id: s.channelId,
+    target_type: s.targetType,
+    dm_status: 'pending',
+    created_at: createdAt,
+  };
+  if (typeof s.qurlId === 'string' && s.qurlId.length > 0) {
+    Item.qurl_id = s.qurlId;
+  }
+  // guild_id: non-key attribute scoping watermark attribution to
+  // the minting guild (#1101). Sparse like qurl_id — a legacy /
+  // non-guild send omits it. No Terraform change needed (schemaless
+  // non-key attr); rides the qurl_id-index GSI for the /qurl detect
+  // read (projection = ALL). See recordQURLSend for the full why.
+  if (typeof s.guildId === 'string' && s.guildId.length > 0) {
+    Item.guild_id = s.guildId;
+  }
+  return Item;
+}
+
+async function recordQURLSendBatch(sends, options = {}) {
   if (!sends || sends.length === 0) return;
-  // DDB BatchWriteItem caps at 25 items per request. A batch can come
-  // back with `UnprocessedItems` populated — DDB returns items that
-  // were throttled, rejected on the 4MB payload limit, or hit a
-  // transient 5xx. The caller MUST retry those with exponential
-  // backoff; silent-drop would leak recipients (the row never lands
-  // in qurl_sends, so `updateSendDMStatus` against the missing
-  // composite key later becomes a no-op and the user sees a missing
-  // delivery). SQLite used `db.transaction` which was atomic; DDB
-  // has no equivalent so the retry loop IS the durability guarantee.
-  const CHUNK = 25;
   const MAX_RETRIES = 5;
-  // Single `now` shared across every chunk + every retry of this
+  // Single `now` shared across every batch chunk / guarded transaction of this
   // batch. INTENTIONAL parity with SQLite's transactional insert —
   // every recipient of one send shares one `created_at`, and
   // downstream queries (getRecentSends groups by send_id and uses
@@ -1014,56 +305,101 @@ async function recordQURLSendBatch(sends) {
   // values, fragmenting the GSI ordering and making a single send
   // look like several distinct events to consumers.
   const now = nowIso();
-  for (let i = 0; i < sends.length; i += CHUNK) {
-    const slice = sends.slice(i, i + CHUNK);
-    let requestItems = {
-      [TABLES.qurl_sends]: slice.map(s => {
-        // qurl_id is sparsely written so an empty/missing value (e.g.
-        // a future emit path that doesn't surface it) doesn't pollute
-        // the qurl_id-index GSI. See recordQURLSend for the same gate.
-        const Item = {
-          send_id: s.sendId,
-          recipient_discord_id: s.recipientDiscordId,
-          sender_discord_id: s.senderDiscordId,
-          resource_id: s.resourceId,
-          resource_type: s.resourceType,
-          qurl_link: s.qurlLink,
-          expires_in: s.expiresIn,
-          channel_id: s.channelId,
-          target_type: s.targetType,
-          dm_status: 'pending',
-          created_at: now,
-        };
-        if (typeof s.qurlId === 'string' && s.qurlId.length > 0) {
-          Item.qurl_id = s.qurlId;
+  const requireSendConfigUnrevoked = options.requireSendConfigUnrevoked === true;
+
+  if (!requireSendConfigUnrevoked) {
+    // Default path for initial sends: keep the cheaper BatchWriteItem flow.
+    // Add Recipients is the only caller with a persisted config row that can
+    // be revoked between read and write, so it opts into the guarded
+    // transaction path below.
+    const CHUNK = 25;
+    for (let i = 0; i < sends.length; i += CHUNK) {
+      const slice = sends.slice(i, i + CHUNK);
+      let requestItems = {
+        [TABLES.qurl_sends]: slice.map(s => ({ PutRequest: { Item: qurlSendBatchItem(s, now) } })),
+      };
+      for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+        const res = await ddb.send(new BatchWriteCommand({ RequestItems: requestItems }));
+        const unprocessed = res.UnprocessedItems || {};
+        const remaining = unprocessed[TABLES.qurl_sends];
+        if (!remaining || remaining.length === 0) break;
+        if (attempt === MAX_RETRIES) {
+          // All attempts exhausted — fail loud rather than silently
+          // dropping recipients. Caller's retry policy (workflow-level)
+          // decides whether to re-invoke the originating send command.
+          throw new Error(`recordQURLSendBatch: ${remaining.length} unprocessed items after ${MAX_RETRIES + 1} attempts`);
         }
-        // guild_id: non-key attribute scoping watermark attribution to
-        // the minting guild (#1101). Sparse like qurl_id — a legacy /
-        // non-guild send omits it. No Terraform change needed (schemaless
-        // non-key attr); rides the qurl_id-index GSI for the /qurl detect
-        // read (projection = ALL). See recordQURLSend for the full why.
-        if (typeof s.guildId === 'string' && s.guildId.length > 0) {
-          Item.guild_id = s.guildId;
-        }
-        return { PutRequest: { Item } };
-      }),
-    };
-    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-      const res = await ddb.send(new BatchWriteCommand({ RequestItems: requestItems }));
-      const unprocessed = res.UnprocessedItems || {};
-      const remaining = unprocessed[TABLES.qurl_sends];
-      if (!remaining || remaining.length === 0) break;
-      if (attempt === MAX_RETRIES) {
-        // All attempts exhausted — fail loud rather than silently
-        // dropping recipients. Caller's retry policy (workflow-level)
-        // decides whether to re-invoke the originating send command.
-        throw new Error(`recordQURLSendBatch: ${remaining.length} unprocessed items after ${MAX_RETRIES + 1} attempts`);
+        // Exponential backoff: 50ms, 100ms, 200ms, 400ms, 800ms.
+        // `.unref()`-equivalent for Promise sleep isn't needed; the
+        // await keeps the event loop moving.
+        await new Promise(resolve => setTimeout(resolve, 50 * Math.pow(2, attempt)));
+        requestItems = unprocessed;
       }
-      // Exponential backoff: 50ms, 100ms, 200ms, 400ms, 800ms.
-      // `.unref()`-equivalent for Promise sleep isn't needed; the
-      // await keeps the event loop moving.
-      await new Promise(resolve => setTimeout(resolve, 50 * Math.pow(2, attempt)));
-      requestItems = unprocessed;
+    }
+    return;
+  }
+
+  // Add Recipients uses one TransactWriteItems call so recipient-row Put(s)
+  // are atomically guarded by the send config row's revoking/revoked state. This
+  // keeps the extra transaction cost scoped to the path that has the post-read
+  // revoke race: if a revoke wins and sets revoking_at before this transaction
+  // commits, none of the newly minted recipient rows land. The Add Recipients
+  // UI caps at Discord's 25-select limit today, so this should stay far below
+  // the 100-action transaction cap. If a future caller exceeds the cap, fail
+  // before any DDB write instead of partially committing earlier chunks.
+  if (!ddbSendConfigGuardFitsTransaction(sends)) {
+    throw new Error(`recordQURLSendBatch: guarded batch exceeds TransactWriteItems action limit (${ddbSendConfigGuardActionCount(sends)} > ${DDB_TRANSACTION_MAX_ACTIONS})`);
+  }
+
+  const senderMap = new Map();
+  for (const send of sends) {
+    const existingSender = senderMap.get(send.sendId);
+    if (existingSender !== undefined && existingSender !== send.senderDiscordId) {
+      throw new Error(`recordQURLSendBatch: conflicting sender_discord_id for send_id ${send.sendId}`);
+    }
+    senderMap.set(send.sendId, send.senderDiscordId);
+  }
+
+  const sendIds = [...senderMap.keys()];
+  // Keep ConditionChecks before Puts. The cancellation-reason parser above
+  // relies on this guard-first order to map ConditionalCheckFailed reasons
+  // back to the send ids that lost the revoke/delete/sender-mismatch race.
+  const TransactItems = [
+    ...sendIds.map(sendId => ({
+      ConditionCheck: {
+        TableName: TABLES.qurl_send_configs,
+        Key: { send_id: sendId },
+        // Missing config rows, revoking/revoked rows, and sender mismatches all
+        // fail closed here. Add Recipients already read the config row; if
+        // it disappears before persistence, do not create recipient rows.
+        ConditionExpression: 'sender_discord_id = :sender AND attribute_not_exists(revoking_at) AND attribute_not_exists(revoked_at)',
+        ExpressionAttributeValues: { ':sender': senderMap.get(sendId) },
+      },
+    })),
+    ...sends.map(s => ({
+      Put: {
+        TableName: TABLES.qurl_sends,
+        Item: qurlSendBatchItem(s, now),
+      },
+    })),
+  ];
+  const ClientRequestToken = crypto.randomUUID();
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      await ddb.send(new TransactWriteCommand({ TransactItems, ClientRequestToken }));
+      break;
+    } catch (err) {
+      // Fail closed before considering retries: a ConditionCheck failure on
+      // the config guard means revoked/deleted/sender-mismatch state won the
+      // race, even if other transaction items also report transient reasons.
+      if (transactionGuardConditionFailed(err, sendIds.length)) {
+        throw new SendConfigRevokedError(transactionConditionFailedSendIds(err, sendIds));
+      }
+      if (attempt < MAX_RETRIES && transactionWriteRetryable(err)) {
+        await new Promise(resolve => setTimeout(resolve, 50 * Math.pow(2, attempt)));
+        continue;
+      }
+      throw err;
     }
   }
 }
@@ -1349,10 +685,14 @@ async function clearConsumedDMEdited(sendId, recipientDiscordId) {
 // the door" — re-editing to "Closed N ago" would overwrite that copy
 // with a less-specific message and obscure the revoke signal.
 //
-// Reads qurl_send_configs (the table markSendRevoked writes to);
-// returns true iff revoked_at is set on the row. Falsy / missing row
-// returns false so a config-less legacy send (none exist today, but
-// the row insert in markSendRevoked is lazy) still gets the
+// Reads qurl_send_configs (the table the revoke state machine writes to).
+// Returns true only once revocation finishes. A revoking_at-only row means at
+// least one DELETE may have failed and the recipient link may still be live;
+// expiry/consumed events must therefore keep their normal DM-edit behavior.
+// On a partial revoke this may replace the stronger revoke copy for recipients
+// whose links did close. The state is send-level, so preserving truthful access
+// status for the unconfirmed recipients takes priority over that cosmetic loss.
+// Falsy / missing rows return false so config-less legacy sends still get the
 // expiry-edit treatment.
 async function isSendRevoked(sendId) {
   if (typeof sendId !== 'string' || sendId.length === 0) return false;
@@ -1364,6 +704,12 @@ async function isSendRevoked(sendId) {
 }
 
 async function getRecentSends(senderDiscordId, limit = 10) {
+  if (!Number.isInteger(limit) || limit <= 0) {
+    throw new TypeError('getRecentSends: limit must be a positive integer');
+  }
+  // This is the revoke-menu query (handleRevoke is its only production
+  // caller). Its result deliberately prioritizes retryable revocations over
+  // global newest-first ordering, including when a one-slot caller is used.
   // SQL did a LEFT JOIN on qurl_send_configs + GROUP BY send_id to
   // produce one row per send with per-send metadata. DDB: query the
   // sender's recent send_ids via the GSI to build the UNIQUE set of
@@ -1463,6 +809,11 @@ async function getRecentSends(senderDiscordId, limit = 10) {
     const meta = metaBySendId.get(sendId);
     const recipients = allRecipients[i] || [];
     const cfg = allConfigs[i].Item;
+    // revoking_at intentionally remains selectable: it means at least one
+    // prior DELETE failed and the operator must be able to retry. Only the
+    // fully finalized revoked_at state removes the send from the menu.
+    // TODO(#1376): add an audited operator-dismissed state for permanently
+    // unrecoverable rows so they do not occupy the bounded menu forever.
     if (cfg && cfg.revoked_at) continue;
     const recipientCount = recipients.length;
     const deliveredCount = recipients.filter(r => r.dm_status === 'sent').length;
@@ -1478,10 +829,33 @@ async function getRecentSends(senderDiscordId, limit = 10) {
       attachment_name: cfg?.attachment_name,
       location_name: cfg?.location_name,
       personal_message: cfg?.personal_message,
+      revocation_pending: Boolean(cfg?.revoking_at),
     });
   }
-  rows.sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
-  return rows.slice(0, limit);
+  // Pending revocations are urgent, but permanently-unconfirmable rows must
+  // not dominate the bounded Discord menu. When both kinds exist, reserve at
+  // least half the slots for live sends. A one-slot caller keeps the pending
+  // send because it is the only path to retry the in-progress destructive
+  // operation. #1376 tracks an explicit audited dismissal path.
+  const newestFirst = (a, b) => (b.created_at || '').localeCompare(a.created_at || '');
+  const pending = rows.filter(row => row.revocation_pending).sort(newestFirst);
+  const live = rows.filter(row => !row.revocation_pending).sort(newestFirst);
+  if (pending.length === 0) return live.slice(0, limit);
+  if (live.length === 0) return pending.slice(0, limit);
+  if (limit === 1) return pending.slice(0, 1);
+  const pendingLimit = Math.max(1, Math.floor(limit / 2));
+  const selectedPending = pending.slice(0, pendingLimit);
+  const selectedLive = live.slice(0, limit - selectedPending.length);
+  const backfillCount = limit - selectedPending.length - selectedLive.length;
+  return [
+    ...selectedPending,
+    ...selectedLive,
+    ...pending.slice(selectedPending.length, selectedPending.length + backfillCount),
+  ];
+}
+
+function hasSenderIdentity(value) {
+  return typeof value === 'string' && value.trim().length > 0;
 }
 
 async function flipRevokedAt(sendId, senderDiscordId) {
@@ -1493,36 +867,129 @@ async function flipRevokedAt(sendId, senderDiscordId) {
     await ddb.send(new UpdateCommand({
       TableName: TABLES.qurl_send_configs,
       Key: { send_id: sendId },
-      UpdateExpression: 'SET revoked_at = :t',
+      UpdateExpression: 'SET revoked_at = :t REMOVE revoking_at',
       ExpressionAttributeValues: {
         ':t': nowIso(),
         ':s': senderDiscordId,
       },
       ConditionExpression: 'sender_discord_id = :s AND attribute_not_exists(revoked_at)',
     }));
+    return true;
   } catch (err) {
-    // Swallow CCFE — either revoked_at is already set (idempotent
-    // success) or sender_discord_id doesn't match (ownership reject,
-    // matching the SQL `WHERE sender_discord_id = ?` filter). Any
-    // other error propagates.
     if (err.name !== 'ConditionalCheckFailedException') throw err;
+    // Distinguish an idempotent same-owner revoke from a rejected/missing
+    // row. Callers must never report finalization unless the durable state is
+    // positively confirmed.
+    const res = await ddb.send(new GetCommand({
+      TableName: TABLES.qurl_send_configs,
+      Key: { send_id: sendId },
+      ConsistentRead: true,
+    }));
+    return res.Item?.sender_discord_id === senderDiscordId && Boolean(res.Item.revoked_at);
+  }
+}
+
+async function flipRevokingAt(sendId, senderDiscordId) {
+  try {
+    await ddb.send(new UpdateCommand({
+      TableName: TABLES.qurl_send_configs,
+      Key: { send_id: sendId },
+      UpdateExpression: 'SET revoking_at = if_not_exists(revoking_at, :t)',
+      ExpressionAttributeValues: {
+        ':t': nowIso(),
+        ':s': senderDiscordId,
+      },
+      ConditionExpression: 'sender_discord_id = :s AND attribute_not_exists(revoked_at)',
+    }));
+    return true;
+  } catch (err) {
+    if (err.name !== 'ConditionalCheckFailedException') throw err;
+    // A concurrent writer may have finalized the send or inserted a
+    // different owner's config row. Verify the durable barrier instead of
+    // assuming the failed conditional write established it.
+    const res = await ddb.send(new GetCommand({
+      TableName: TABLES.qurl_send_configs,
+      Key: { send_id: sendId },
+      ConsistentRead: true,
+    }));
+    if (!res.Item) return false;
+    return res.Item.sender_discord_id === senderDiscordId
+      && Boolean(res.Item.revoking_at)
+      && !res.Item.revoked_at;
+  }
+}
+
+async function markSendRevoking(sendId, senderDiscordId) {
+  if (!hasSenderIdentity(senderDiscordId)) return false;
+  const cfgRes = await ddb.send(new GetCommand({
+    TableName: TABLES.qurl_send_configs,
+    Key: { send_id: sendId },
+    ConsistentRead: true,
+  }));
+  if (cfgRes.Item) {
+    if (!hasSenderIdentity(cfgRes.Item.sender_discord_id)) {
+      logger.warn('markSendRevoking rejected config without sender identity', { sendId });
+      return false;
+    }
+    if (cfgRes.Item.sender_discord_id !== senderDiscordId) return false;
+    if (cfgRes.Item.revoked_at) return false;
+    if (cfgRes.Item.revoking_at) return true;
+    return flipRevokingAt(sendId, senderDiscordId);
+  }
+
+  const legacyItems = await queryAll({
+    TableName: TABLES.qurl_sends,
+    ConsistentRead: true,
+    KeyConditionExpression: 'send_id = :sid',
+    FilterExpression: 'sender_discord_id = :s',
+    ExpressionAttributeValues: { ':sid': sendId, ':s': senderDiscordId },
+  });
+  if (legacyItems.length === 0) return false;
+  const legacy = legacyItems[0];
+  try {
+    await ddb.send(new PutCommand({
+      TableName: TABLES.qurl_send_configs,
+      Item: {
+        send_id: sendId,
+        sender_discord_id: senderDiscordId,
+        resource_type: legacy.resource_type,
+        expires_in: legacy.expires_in || '24h',
+        attachment_name: legacy.attachment_name,
+        location_name: legacy.location_name,
+        personal_message: legacy.personal_message,
+        revoking_at: nowIso(),
+        created_at: legacy.created_at || nowIso(),
+      },
+      ConditionExpression: 'attribute_not_exists(send_id)',
+    }));
+    return true;
+  } catch (err) {
+    if (err.name !== 'ConditionalCheckFailedException') throw err;
+    return flipRevokingAt(sendId, senderDiscordId);
   }
 }
 
 async function markSendRevoked(sendId, senderDiscordId) {
   // Two-branch logic:
   // (a) Normal path: config row exists — flip revoked_at.
-  // (b) Legacy path: config row doesn't exist — insert minimal row.
+  // (b) Legacy path: config row doesn't exist — insert minimal row. Current
+  // revokeAllLinks establishes markSendRevoking first, but keep this branch for
+  // direct store callers during mixed-version rollout/backward compatibility.
   // Scoped to senderDiscordId for defense-in-depth.
+  if (!hasSenderIdentity(senderDiscordId)) return false;
   const cfgRes = await ddb.send(new GetCommand({
     TableName: TABLES.qurl_send_configs,
     Key: { send_id: sendId },
+    ConsistentRead: true,
   }));
   if (cfgRes.Item) {
-    if (cfgRes.Item.sender_discord_id !== senderDiscordId) return; // ownership check
-    if (cfgRes.Item.revoked_at) return; // idempotent
-    await flipRevokedAt(sendId, senderDiscordId);
-    return;
+    if (!hasSenderIdentity(cfgRes.Item.sender_discord_id)) {
+      logger.warn('markSendRevoked rejected config without sender identity', { sendId });
+      return false;
+    }
+    if (cfgRes.Item.sender_discord_id !== senderDiscordId) return false; // ownership check
+    if (cfgRes.Item.revoked_at) return true; // idempotent, durable state confirmed
+    return flipRevokedAt(sendId, senderDiscordId);
   }
 
   // Legacy — look up qurl_sends row, insert minimal config with revoked_at.
@@ -1534,17 +1001,17 @@ async function markSendRevoked(sendId, senderDiscordId) {
   // would be safe — but a future migration / manual repair / partial
   // write that violated the invariant would silently miss the
   // matching row and the revoke would no-op. Dropping the Limit makes
-  // the lookup robust regardless of the partition layout: the
-  // partition is bounded by recipient count anyway, and the match-
-  // first-then-stop happens client-side via the .find() below.
-  const legacyRes = await ddb.send(new QueryCommand({
+  // the lookup robust regardless of the partition layout. The partition is
+  // bounded by recipient count, and queryAll follows every filtered page.
+  const legacyItems = await queryAll({
     TableName: TABLES.qurl_sends,
+    ConsistentRead: true,
     KeyConditionExpression: 'send_id = :sid',
     FilterExpression: 'sender_discord_id = :s',
     ExpressionAttributeValues: { ':sid': sendId, ':s': senderDiscordId },
-  }));
-  if (!legacyRes.Items || legacyRes.Items.length === 0) return;
-  const legacy = legacyRes.Items[0];
+  });
+  if (legacyItems.length === 0) return false;
+  const legacy = legacyItems[0];
   try {
     await ddb.send(new PutCommand({
       TableName: TABLES.qurl_send_configs,
@@ -1558,6 +1025,7 @@ async function markSendRevoked(sendId, senderDiscordId) {
       },
       ConditionExpression: 'attribute_not_exists(send_id)',
     }));
+    return true;
   } catch (err) {
     if (err.name !== 'ConditionalCheckFailedException') throw err;
     // Race: between the GetCommand at the top of this function
@@ -1573,9 +1041,9 @@ async function markSendRevoked(sendId, senderDiscordId) {
     //     same owner-scoped + attribute_not_exists guard the
     //     primary path uses).
     //   - A racing markSendRevoked AND a non-revoke writer
-    //     interleave: flipRevokedAt's CCFE-swallow handles the
+    //     interleave: flipRevokedAt's CCFE re-read confirms the
     //     "already revoked" case idempotently.
-    await flipRevokedAt(sendId, senderDiscordId);
+    return flipRevokedAt(sendId, senderDiscordId);
   }
 }
 
@@ -1708,6 +1176,8 @@ async function getSendRenderState(sendId) {
     lastRenderedAt: row.last_rendered_at ?? 0,
     baseMsg: row.confirm_base_msg ?? undefined,
     qurlIds: Array.isArray(row.confirm_qurl_ids) ? row.confirm_qurl_ids : [],
+    // revoking_at is intent, not completion: a failed DELETE may leave links
+    // live, so view updates must continue until revoked_at is confirmed.
     terminal: Boolean(row.revoked_at) || row.confirm_terminal === true,
   };
 }
@@ -2011,9 +1481,15 @@ async function getSendResourceIds(sendId, senderDiscordId) {
 // recipient's DM to "closed the door". Legacy rows predating the
 // ref-capture wire-up have those fields unset — the revoke loop's
 // missing-refs guard skips the edit naturally.
-async function getSendItems(sendId, senderDiscordId) {
+async function getSendItems(sendId, senderDiscordId, { consistentRead = false } = {}) {
   const items = await queryAll({
     TableName: TABLES.qurl_sends,
+    // Revoke opts into a strongly consistent base-table query after writing
+    // revoking_at: every Add Recipients transaction committed before the
+    // barrier is visible, while later transactions fail the state guard.
+    // Webhook/render fallback callers do not require that ordering and retain
+    // the cheaper eventual-consistency default.
+    ConsistentRead: consistentRead,
     KeyConditionExpression: 'send_id = :sid',
     FilterExpression: 'sender_discord_id = :s',
     ExpressionAttributeValues: { ':sid': sendId, ':s': senderDiscordId },
@@ -2343,79 +1819,6 @@ async function scanGuildSubscriptions() {
 
 // ── Orphaned OAuth tokens ──
 
-async function recordOrphanedToken(accessToken) {
-  // Caller must gate non-null upstream — encryptStrict passes null
-  // through (see crypto.js for rationale), which would surface here
-  // as a confusing DDB ValidationException on access_token.
-  const ttlDays = parseInt(process.env.ORPHAN_TOKEN_RETENTION_DAYS, 10) || (process.env.NODE_ENV === 'production' ? 7 : 1);
-  const expiresAt = Math.floor((Date.now() + ttlDays * 24 * 60 * 60 * 1000) / 1000);
-  // Dedup on token_hash. A retry / replay of the same plaintext
-  // (e.g. a flaky revoke path that re-enqueues) would otherwise
-  // overwrite the existing row and push expires_at 7 days
-  // further out — silently extending the credential's lifetime
-  // in the queue beyond the operator-stated retention. CCFE on
-  // the second insert is the correct shape: same row already
-  // exists, no-op. Mirrors the createLink / setGuildApiKey
-  // first-write-wins pattern.
-  try {
-    await ddb.send(new PutCommand({
-      TableName: TABLES.orphaned_oauth_tokens,
-      Item: {
-        token_hash: sha256Hex(accessToken),
-        access_token: encryptStrict(accessToken),
-        recorded_at: nowIso(),
-        expires_at: expiresAt,
-      },
-      ConditionExpression: 'attribute_not_exists(token_hash)',
-    }));
-  } catch (err) {
-    if (err.name !== 'ConditionalCheckFailedException') throw err;
-    // Token already in queue; original recorded_at + expires_at
-    // are preserved. Idempotent caller-visible behavior.
-  }
-}
-
-async function countOrphanedTokens() {
-  return countAll(TABLES.orphaned_oauth_tokens);
-}
-
-async function listOrphanedTokens(limit = 50) {
-  // Why scanAll instead of `ScanCommand({ Limit })`: DDB applies
-  // Scan's Limit BEFORE returning items, so a `Limit: 50` Scan
-  // returns the first 50 items in DDB internal-hash order, then
-  // we sort those 50. The actually-oldest tokens may never appear
-  // in that arbitrary subset — and the sweeper depends on
-  // oldest-first to retry tokens before the 7-day TTL purges
-  // them. True oldest-N requires a full-table read here (sort then
-  // slice) since DDB Scan doesn't sort. Bounded by
-  // ORPHAN_TOKEN_RETENTION_DAYS
-  // × write rate; per the module-header projection this stays
-  // small. If the queue ever grows past a few thousand, swap in a
-  // `pk='__all__', sk=recorded_at` GSI and Query it.
-  const items = await scanAll(TABLES.orphaned_oauth_tokens);
-  items.sort((a, b) => (a.recorded_at || '').localeCompare(b.recorded_at || ''));
-  return items.slice(0, limit).map(r => ({ id: r.token_hash, encryptedAccessToken: r.access_token }));
-}
-
-// Caller passes the encrypted blob from listOrphanedTokens; we
-// decrypt one at a time so only a single plaintext is in memory.
-// Async to match the rest of the Store contract even though the
-// body is sync CPU work — callers `await` uniformly and a future
-// backend that needs async decrypt (e.g. KMS GenerateDataKey) can
-// drop in without call-site churn.
-async function decryptOrphanedToken(encryptedAccessToken) {
-  return decrypt(encryptedAccessToken);
-}
-
-async function deleteOrphanedToken(id) {
-  await ddb.send(new DeleteCommand({
-    TableName: TABLES.orphaned_oauth_tokens,
-    Key: { token_hash: id },
-  }));
-}
-
-// ── Lifecycle ──
-
 // Cheap "is the data layer functional" probe for /health. Single
 // GetItem against a sentinel key on a low-cardinality table verifies
 // SDK init, network path, IAM, and that the table exists, in one
@@ -2429,19 +1832,11 @@ async function deleteOrphanedToken(id) {
 // any fleet. /metrics keeps the full aggregation — that's the right
 // home for it.
 async function healthCheck() {
-  // Probe `guild_configs` rather than `pending_links`. The latter was
-  // removed by qurl-integrations-infra PR #372 (the OpenNHP-only tables
-  // — pending_links, github_links, contributions, badges, streaks,
-  // milestones, weekly_stats, orphaned_oauth_tokens — were dropped as
-  // unused after audit). With pending_links gone, GetItem returned
-  // ResourceNotFoundException on every ALB probe → /health 503 → ECS
-  // circuit-breaker rolls back the deployment.
-  //
-  // Surviving tables are qurl_sends, qurl_send_configs, guild_configs.
-  // guild_configs is the right pick: lowest write rate (configured per
-  // guild, not per send), simplest key schema (just `guild_id` HASH),
-  // and exists in every env regardless of OpenNHP-feature flagging.
-  // GetItem on a missing key returns an empty result (no exception),
+  // Probe `guild_configs` rather than a higher-traffic table. It has
+  // the lowest write rate (configured per guild, not per send), the
+  // simplest key schema (just `guild_id` HASH), and exists in every
+  // environment. GetItem on a missing key returns an empty result
+  // (no exception),
   // so a sentinel `__healthcheck__` guild_id is safe and never collides
   // with a real Discord guild snowflake (numeric only).
   await ddb.send(new GetCommand({
@@ -2453,35 +1848,16 @@ async function healthCheck() {
 
 async function close() {
   // DDB client has no persistent connection to close; AWS SDK v3
-  // manages sockets internally via keep-alive. The method exists
-  // for Store contract parity (other backends may need real cleanup).
+  // manages sockets internally via keep-alive.
   logger.info('DDB store closed (no-op)');
 }
 
 module.exports = {
-  BADGE_TYPES,
-  BADGE_INFO,
-  // Pending links
-  createPendingLink, getPendingLink, deletePendingLink, consumePendingLink,
-  // Links
-  createLink, getLinkByDiscord, getLinkedDiscordIds, getLinkByGithub, deleteLink, forceLink,
-  // Contributions
-  recordContribution, getContributions, getAllContributions, getContributionCount,
-  getWeeklyContributions, getMonthlyContributions, getUniqueRepos,
-  getLastWeekContributions, getNewContributorsThisWeek,
   // Stats
-  getStats, getTopContributors,
-  // Badges
-  awardBadge, getBadges, hasBadge, checkAndAwardBadges, awardFirstIssueBadge,
-  // Streaks
-  getStreak, updateStreak,
-  // Milestones
-  hasMilestoneBeenAnnounced, recordMilestone,
-  // Weekly digest
-  getWeeklyDigestData,
+  getStats,
   // QURL sends
   recordQURLSend, recordQURLSendBatch, updateSendDMStatus, markSendDMDelivered,
-  getRecentSends, markSendRevoked, isSendRevoked,
+  getRecentSends, markSendRevoking, markSendRevoked, isSendRevoked,
   saveSendConfig, getSendConfig, getSendResourceIds, getSendItems,
   findSendsByQurlId, markExpiredDMEdited, clearExpiredDMEdited,
   markConsumedDMEdited, clearConsumedDMEdited,
@@ -2496,15 +1872,12 @@ module.exports = {
   // Per-guild webhook subscriptions (BYOK view counter)
   setGuildWebhookSubscription, clearGuildWebhookSubscription,
   listGuildSubscriptionsByOwner, scanGuildSubscriptions, propagateGuildWebhookSubscription,
-  // Orphaned tokens
-  recordOrphanedToken, countOrphanedTokens, listOrphanedTokens,
-  decryptOrphanedToken, deleteOrphanedToken,
   // Lifecycle
   close, healthCheck,
   // Test-only: surface the prefixed table-name map so
   // `tests/provisioner-schema-parity.test.js` can pin parity with
-  // `scripts/provision-ddb-local.js`. NOT part of the Store contract
-  // — production callers must NOT reach into this; the leading
+  // `scripts/provision-ddb-local.js`. Production callers must NOT
+  // reach into this; the leading
   // underscore signals intent. If you find yourself depending on
   // this outside tests, add a real public API instead.
   _TABLES_FOR_TESTING: TABLES,

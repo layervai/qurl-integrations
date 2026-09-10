@@ -22,13 +22,19 @@ longer than it needs to.
 Run `/qurl help` (or `/qurl-admin help`) any time for the exact commands your
 workspace's Secure Access Agent supports.
 
+Marketplace submission owners should fill and exercise the
+[Slack Marketplace reviewer test path](docs/marketplace-reviewer-test-path.md)
+before giving Slack reviewer instructions. Keep credentials and reviewer
+personal data out of the repository.
+
 ## Concepts
 
 - **Resource** — something you can mint links for. Two kinds: a **qURL
   Connector** (fronts a service running in your own environment) or a **URL
   resource** (an existing web URL). Admins create resources with the
   `/qurl-admin protect…` commands.
-- **`$id`** — a resource's identifier. Pass it to `/qurl get` to mint a link.
+- **`$id`** — a resource's name for Slack commands. Pass it to `/qurl get`
+  to mint a link. The resource's permanent identifier is its **CRID**.
 - **Alias** — an alternate name for a resource within a channel. Several
   aliases can point at one resource. Use an alias anywhere you'd use a `$id`.
 - **Channel scope** — resources are available per channel. A resource shows up
@@ -72,9 +78,9 @@ command variants below it are for power users and scripting.
 
 | Command | What it does |
 |---------|--------------|
-| `/qurl-admin protect` | Guided picker — choose **qURL Connector** or **URL**, then fill in a short form. The recommended starting point. |
-| `/qurl-admin protect-connector` | Guided setup for a qURL Connector; opens a form and returns copy-paste deploy steps. |
-| `/qurl-admin protect-connector <id> [env:…] [port:8080] [alias:$alias]` | Typed connector setup for power users. |
+| `/qurl-admin protect` | Guided picker — choose **qURL Connector** or **URL**; qURL Connector setup then asks whether you're protecting an existing service or S3 hosted website. The recommended starting point. |
+| `/qurl-admin protect-connector` | Guided setup for an existing-service qURL Connector; opens a form and returns copy-paste deploy steps. |
+| `/qurl-admin protect-connector <id> [env:…] [port:8080] [alias:$alias]` | Typed existing-service connector setup for power users. |
 | `/qurl-admin protect-url` | Guided setup to protect an existing URL resource. |
 | `/qurl-admin protect-url $<alias> [as:$channel-alias]` | Typed: protect a URL resource that **already has an alias** in this channel. |
 | `/qurl-admin protect-url url:<target-url> as:$channel-alias` | Typed: protect a URL that **has no alias yet** by its target URL. |
@@ -100,26 +106,46 @@ command variants below it are for power users and scripting.
 |---------|--------------|
 | `/qurl-admin add @user` | Promote a Slack user to admin. |
 | `/qurl-admin remove @user` | Demote a Slack user from admin. |
+| `/qurl-admin transfer-ownership @user` | Owner-only: hand off who may reconnect qURL for this workspace. This changes the Slack owner gate only; the qURL account/key changes only if the new owner later runs `/qurl setup`. |
 | `/qurl-admin admins` | List the owner and the current admins. |
 | `/qurl-admin help` | Show the admin command help. |
+
+Existing Slack installs must re-run the Slack install flow before ownership
+transfer can verify targets, because the command requires the `users:read` bot
+scope. The previous owner remains an admin after transfer and can be removed
+with `/qurl-admin remove @user` if needed. Enterprise Grid org-level bot tokens
+are not used for ownership transfer; use a workspace-level install/token until
+workspace-member verification lands.
 
 ## Protecting a resource
 
 `/qurl-admin protect` is the guided entry point. It asks whether you're
-exposing a **qURL Connector** or an existing **URL**, then walks you through a
-short form. Both make the resource available **in the current channel** — to
-reach more channels, use the **Edit** button on the resource's `/qurl list`
-row and pick additional channels.
+exposing a **qURL Connector** or an existing **URL**. The qURL Connector path
+then asks whether you're protecting an existing service or an S3 hosted
+website. Both make the resource available **in the current channel** — to reach
+more channels, use the **Edit** button on the resource's `/qurl list` row and
+pick additional channels.
 
-**qURL Connector** — for a service that runs in your own environment. The
-guided form asks for the connector ID, an optional channel alias, the local
-port, and where you'll run it (Docker, Docker Compose, ECS/Fargate, or
-Kubernetes). qURL replies with copy-paste deploy steps tailored to that
-choice, plus a short-lived bootstrap key. Remove the bootstrap key from your
-environment once the connector logs show it has connected. If you run the
-paste block from a non-interactive shell, set `QURL_BOOTSTRAP_KEY` from your
-secret manager instead of typing it at the prompt. If you generate setup more
-than once, use the newest Slack message and discard older install blocks.
+**qURL Connector for an existing service** — for a service that already runs in
+your own environment. The guided form asks for the connector ID, an optional
+channel alias, the local port, and where you'll run it (Docker, Docker Compose,
+ECS/Fargate, or Kubernetes). qURL replies with copy-paste deploy steps tailored
+to that choice, plus a one-shot enrollment token that expires after one hour.
+
+**qURL Connector for an S3 hosted website** — for a private S3 static website.
+The guided form asks for the connector ID, optional channel alias, target
+environment, bucket, region, optional prefix, and index document. qURL replies
+with deploy steps for both the qURL Connector and the private S3 origin
+container, plus a one-shot enrollment token that expires after one hour. The
+origin currently requires a non-dotted, DNS-compatible bucket name; the form
+rejects dotted buckets before generating deployment instructions.
+
+Remove the enrollment token from your environment once the Connector logs show
+it has connected; the machine keeps the device credential produced by
+enrollment. If you run the paste block from a non-interactive shell, set the
+legacy-named `QURL_BOOTSTRAP_KEY` variable from your secret manager instead of
+typing the token at the prompt. If you generate setup more than once, use the
+newest Slack message and discard older install blocks.
 
 **URL resource** — for an existing web URL. Point an alias at it and it's
 immediately available for `/qurl get` in the channel.

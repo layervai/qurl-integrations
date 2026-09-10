@@ -11,7 +11,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -20,6 +22,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	ddbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
+	"gopkg.in/yaml.v3"
 
 	"github.com/layervai/qurl-integrations/apps/slack/internal/agent"
 	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
@@ -28,25 +31,33 @@ import (
 )
 
 const (
-	testTunnelSlug         = "prod-dashboard"
-	testTunnelAliasDash    = "dash" // sample channel alias used across get/tunnel tests
-	testTunnelResourceID   = "r_prod_dash01"
-	testTunnelWizardCmd    = "protect-connector"                        // bare verb → guided modal
-	testTunnelInstallCmd   = testTunnelWizardCmd + " " + testTunnelSlug // typed: `protect-connector prod-dashboard`
-	testTunnelChannelID    = "C_test"
-	testTunnelImageRef     = "ghcr.io/layervai/qurl-connector:v-test"
-	testTunnelAPIKey       = "lv_live_test_bootstrap"
-	testTunnelAPIKeyID     = "key_tunnel_bootstrap"
-	testSlackResponseURL   = "https://hooks.slack.test/response"
-	testAgentAuditTable    = "agent_state"
-	testTunnelAgentReason  = "customer requested connector setup"
-	testTunnelDockerLine   = `CONNECTOR_CONTAINER="qurl-connector-${QURL_CONNECTOR_ID}"`
-	testTunnelModalKey     = "lv_live_modal_bootstrap"
-	testTunnelPipefailLine = "set -o pipefail"
-	testTunnelComposeWeb   = "web_1"
-	testTunnelDockerWeb    = "web_1-2"
-	testSlackTriggerID     = "trigger_test"
-	testEnterpriseID       = "E_GRID"
+	testTunnelSlug                   = "prod-dashboard"
+	testOwnerID                      = "email|test-owner-id"
+	testTunnelAliasDash              = "dash" // sample channel alias used across get/tunnel tests
+	testTunnelResourceID             = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE2cTVv5_3eeYCcLLq5ROYCqcmY50HiKZ9ATglIkPnCji1E_S63UMtXba1moR8-Q6EV7oM6zwwh9_j2CDujzXvLA"
+	testTunnelCRID                   = "qhpviqz46qwcvx56glfatm3p3ooccwfcf2it4sdgjervwdkapykw2j2vj4uq"
+	testTunnelRoutingID              = "c-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	testTunnelKnockID                = "qurl-tunnel-server"
+	testTunnelAPIURL                 = "https://api.sandbox.example/v1"
+	testInvalidRemoteConnectorAPIURL = "http://api.example.test/v1"
+	testShellSignificantTunnelAPIURL = "https://api.$(touch-should-not-run).example.test/v1"
+	testTunnelWizardCmd              = "protect-connector"                        // bare verb → guided modal
+	testTunnelInstallCmd             = testTunnelWizardCmd + " " + testTunnelSlug // typed: `protect-connector prod-dashboard`
+	testTunnelChannelID              = "C_test"
+	testTunnelImageRef               = "ghcr.io/layervai/qurl@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	testTunnelAPIKey                 = "lv_live_test_bootstrap"
+	testTunnelAPIKeyID               = "key_tunnel_bootstrap"
+	testSlackResponseURL             = "https://hooks.slack.test/response"
+	testAgentAuditTable              = "agent_state"
+	testTunnelAgentReason            = "customer requested connector setup"
+	testTunnelDockerLine             = `CONNECTOR_CONTAINER="qurl-${QURL_CONNECTOR_ID}"`
+	testTunnelModalKey               = "lv_live_modal_bootstrap"
+	testTunnelPipefailLine           = "set -o pipefail"
+	testTunnelComposeWeb             = "web_1"
+	testTunnelDockerWeb              = "web_1-2"
+	testSlackTriggerID               = "trigger_test"
+	testEnterpriseID                 = "E_GRID"
+	testCapabilityAll                = "ALL"
 )
 
 type failingAuthProvider struct{ err error }
@@ -157,11 +168,27 @@ func protectConnectorAgentMetadataFromToolCall(t *testing.T) *TunnelInstallAgent
 
 func testTunnelInstallArgs() *tunnelInstallArgs {
 	return &tunnelInstallArgs{
-		Slug:        testTunnelSlug,
-		Alias:       testTunnelSlug,
-		LocalPort:   defaultTunnelLocalPort,
-		Environment: tunnelEnvDocker,
+		Slug:               testTunnelSlug,
+		Alias:              testTunnelSlug,
+		LocalPort:          defaultTunnelLocalPort,
+		Environment:        tunnelEnvDocker,
+		ResourceID:         testTunnelResourceID,
+		CRID:               testTunnelCRID,
+		ConnectorRoutingID: testTunnelRoutingID,
+		KnockResourceID:    testTunnelKnockID,
+		ServingEpoch:       1,
+		OwnerID:            testOwnerID,
+		APIURL:             testTunnelAPIURL,
 	}
+}
+
+func ecsMountPointPresent(mounts []ecsMountPoint, source, path string, readOnly bool) bool {
+	for _, mount := range mounts {
+		if mount.SourceVolume == source && mount.ContainerPath == path && mount.ReadOnly == readOnly {
+			return true
+		}
+	}
+	return false
 }
 
 func testTunnelInstallAgentAudit() *tunnelInstallAgentAudit {
@@ -189,12 +216,11 @@ const (
 	testForbiddenSlackYAMLFence  = "```yaml"
 	testForbiddenSlackShellFence = "```sh"
 	testForbiddenBootstrapArgv   = `printf '%s' "$QURL_BOOTSTRAP_KEY"`
-	testTunnelAgentDirFragment   = `/var/lib/layerv/qurl-connector/${QURL_CONNECTOR_ID}/agent`
+	testTunnelAgentDirFragment   = `/var/lib/layerv/qurl/${QURL_CONNECTOR_ID}`
 	testTunnelLocalPort9090Line  = "local_port: 9090"
-	testTunnelKeyHistoryNote     = "prompts for the bootstrap key"
-	testTunnelKeyPromptLine      = "Paste qURL bootstrap key (input hidden)"
-	testTunnelKeyInstallLine     = `QURL_BOOTSTRAP_KEY_LEN=${#QURL_BOOTSTRAP_KEY}`
-	testTunnelECSAPIKeyNameLine  = `"name": "QURL_API_KEY"`
+	testTunnelKeyHistoryNote     = "prompts for the enrollment token"
+	testTunnelKeyPromptLine      = "Paste qURL enrollment token (input hidden)"
+	testTunnelKeyInstallLine     = `QURL_BOOTSTRAP_KEY_LEN=${#QURL_BOOTSTRAP_KEY_VALUE}`
 	testForbiddenConnectorSlug   = "QURL_CONNECTOR_SLUG"
 )
 
@@ -262,16 +288,181 @@ func mustRenderECSFargateTunnelInstructions(t *testing.T, args *tunnelInstallArg
 	return got
 }
 
-func TestRenderTunnelConfigYAMLUsesRouteID(t *testing.T) {
-	got, err := renderTunnelConfigYAML(&tunnelInstallArgs{Slug: testTunnelSlug, LocalPort: 9090})
+func TestRenderTunnelConfigYAMLUsesPinnedResourceID(t *testing.T) {
+	got, err := renderTunnelConfigYAML(&tunnelInstallArgs{
+		Slug:               testTunnelSlug,
+		LocalPort:          9090,
+		ResourceID:         testTunnelResourceID,
+		CRID:               testTunnelCRID,
+		ConnectorRoutingID: testTunnelRoutingID,
+		KnockResourceID:    testTunnelKnockID,
+		ServingEpoch:       1,
+		OwnerID:            testOwnerID,
+		APIURL:             testTunnelAPIURL,
+	})
 	if err != nil {
 		t.Fatalf("renderTunnelConfigYAML: %v", err)
 	}
-	if !strings.Contains(got, "  - id: '"+testTunnelSlug+"'") {
-		t.Fatalf("config missing route id:\n%s", got)
+	if !strings.Contains(got, "version: 2\nowner_id: '"+testOwnerID+"'\nshares:\n  - crid: '"+testTunnelCRID+"'") {
+		t.Fatalf("config missing versioned one-share header:\n%s", got)
 	}
-	if strings.Contains(got, "  - name:") {
-		t.Fatalf("config should not emit legacy route name:\n%s", got)
+	if !strings.Contains(got, "    resource_id: '"+testTunnelResourceID+"'") {
+		t.Fatalf("config missing pinned resource_id:\n%s", got)
+	}
+	if !strings.Contains(got, "    connector_routing_id: '"+testTunnelRoutingID+"'") {
+		t.Fatalf("config missing persisted routing identity:\n%s", got)
+	}
+	if !strings.Contains(got, "    knock_resource_id: '"+testTunnelKnockID+"'") {
+		t.Fatalf("config missing knock_resource_id:\n%s", got)
+	}
+	for _, want := range []string{"    connector_id: '" + testTunnelSlug + "'", "    target_url: 'http://127.0.0.1:9090'", "    desired_state: on", "    serving_epoch: 1"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("config missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestRenderedConfigsMatchHeadlessOneShareSchema(t *testing.T) {
+	// TODO(upstream-contract): mirrors the strict versioned qurl daemon
+	// headless config. Unknown fields are rejected by the runtime loader.
+	type shareContract struct {
+		CRID               string `yaml:"crid"`
+		ResourceID         string `yaml:"resource_id"`
+		ConnectorID        string `yaml:"connector_id"`
+		ConnectorRoutingID string `yaml:"connector_routing_id"`
+		KnockResourceID    string `yaml:"knock_resource_id"`
+		TargetURL          string `yaml:"target_url"`
+		LocalIP            string `yaml:"local_ip"`
+		LocalPort          int    `yaml:"local_port"`
+		DesiredState       string `yaml:"desired_state"`
+		ServingEpoch       uint64 `yaml:"serving_epoch"`
+	}
+	type configContract struct {
+		Version int             `yaml:"version"`
+		OwnerID string          `yaml:"owner_id"`
+		Shares  []shareContract `yaml:"shares"`
+	}
+
+	tunnelConfig, err := renderTunnelConfigYAML(testTunnelInstallArgs())
+	if err != nil {
+		t.Fatalf("renderTunnelConfigYAML: %v", err)
+	}
+	s3Config, err := renderS3WebsiteConnectorConfigYAML(testS3WebsiteArgs(tunnelEnvDocker))
+	if err != nil {
+		t.Fatalf("renderS3WebsiteConnectorConfigYAML: %v", err)
+	}
+
+	for name, rendered := range map[string]string{
+		"existing service": tunnelConfig,
+		"S3 website":       s3Config,
+	} {
+		t.Run(name, func(t *testing.T) {
+			var parsed configContract
+			decoder := yaml.NewDecoder(strings.NewReader(rendered))
+			decoder.KnownFields(true)
+			if err := decoder.Decode(&parsed); err != nil {
+				t.Fatalf("headless qurl strict decode failed: %v\n%s", err, rendered)
+			}
+			if parsed.Version != 2 || parsed.OwnerID != testOwnerID || len(parsed.Shares) != 1 {
+				t.Fatalf("config = %+v, want version 2, owner %q and exactly one share", parsed, testOwnerID)
+			}
+			share := parsed.Shares[0]
+			if share.CRID != testTunnelCRID || share.ConnectorID != testTunnelSlug || share.LocalIP != "127.0.0.1" || share.LocalPort == 0 || share.ResourceID != testTunnelResourceID || share.ConnectorRoutingID != testTunnelRoutingID || share.KnockResourceID == "" || share.TargetURL == "" || share.DesiredState != "on" || share.ServingEpoch == 0 {
+				t.Fatalf("share = %+v, want complete desired-on headless share", share)
+			}
+		})
+	}
+}
+
+func TestRenderTunnelConfigYAMLRequiresOwnerID(t *testing.T) {
+	t.Parallel()
+	args := testTunnelInstallArgs()
+	args.OwnerID = " "
+	if _, err := renderTunnelConfigYAML(args); err == nil || !strings.Contains(err.Error(), "requires the account owner id") {
+		t.Fatalf("renderTunnelConfigYAML error = %v, want owner id guard", err)
+	}
+	// An apostrophe is a supportable character: the shared quoter doubles it.
+	args.OwnerID = "email|o'brien"
+	got, err := renderTunnelConfigYAML(args)
+	if err != nil || !strings.Contains(got, "owner_id: 'email|o''brien'") {
+		t.Fatalf("apostrophe owner: got %q, %v; want doubled single quote", got, err)
+	}
+}
+
+func TestRenderTunnelConfigYAMLRejectsPartialPinnedIdentity(t *testing.T) {
+	_, err := renderTunnelConfigYAML(&tunnelInstallArgs{Slug: testTunnelSlug, LocalPort: 9090, ResourceID: testTunnelResourceID})
+	if err == nil || !strings.Contains(err.Error(), "connector_routing_id") {
+		t.Fatalf("renderTunnelConfigYAML err = %v, want partial identity rejection", err)
+	}
+}
+
+func TestRenderTunnelConfigYAMLNormalizesPinnedIdentity(t *testing.T) {
+	args := testTunnelInstallArgs()
+	args.ResourceID = "  " + args.ResourceID + "  "
+	args.ConnectorRoutingID = "\t" + args.ConnectorRoutingID + "\n"
+	args.KnockResourceID = " " + args.KnockResourceID + " "
+
+	got, err := renderTunnelConfigYAML(args)
+	if err != nil {
+		t.Fatalf("renderTunnelConfigYAML: %v", err)
+	}
+	for _, want := range []struct{ field, value string }{
+		{"resource_id", testTunnelResourceID},
+		{"connector_routing_id", testTunnelRoutingID},
+		{"knock_resource_id", testTunnelKnockID},
+	} {
+		if !strings.Contains(got, want.field+": '"+want.value+"'") {
+			t.Fatalf("config did not normalize %s:\n%s", want.field, got)
+		}
+	}
+}
+
+func TestValidateTunnelConnectorContract(t *testing.T) {
+	t.Parallel()
+	valid := tunnelInstallArgs{
+		ResourceID:         testTunnelResourceID,
+		ConnectorRoutingID: testTunnelRoutingID,
+		KnockResourceID:    testTunnelKnockID,
+		APIURL:             testTunnelAPIURL,
+	}
+	cases := []struct {
+		name    string
+		mutate  func(*tunnelInstallArgs)
+		wantErr string
+	}{
+		{name: "valid", mutate: func(*tunnelInstallArgs) {}},
+		{name: "missing resource id", mutate: func(a *tunnelInstallArgs) { a.ResourceID = "" }, wantErr: "resource_id is missing"},
+		{name: "legacy internal resource id", mutate: func(a *tunnelInstallArgs) { a.ResourceID = "r_legacy" }, wantErr: "resource_id is a legacy internal label"},
+		{name: "malformed resource id", mutate: func(a *tunnelInstallArgs) { a.ResourceID = "public key with spaces" }, wantErr: "resource_id is invalid"},
+		{name: "missing routing id", mutate: func(a *tunnelInstallArgs) { a.ConnectorRoutingID = "" }, wantErr: "connector_routing_id is missing"},
+		{name: "malformed routing id", mutate: func(a *tunnelInstallArgs) { a.ConnectorRoutingID = "c-not-a-routing-id" }, wantErr: "connector_routing_id is invalid"},
+		{name: "missing knock id", mutate: func(a *tunnelInstallArgs) { a.KnockResourceID = "" }, wantErr: "knock_resource_id is missing"},
+		{name: "malformed knock id", mutate: func(a *tunnelInstallArgs) { a.KnockResourceID = "bad knock id" }, wantErr: "knock_resource_id is invalid"},
+		{name: "missing api url", mutate: func(a *tunnelInstallArgs) { a.APIURL = "" }, wantErr: "QURL_API_URL is missing"},
+		{name: "relative api url", mutate: func(a *tunnelInstallArgs) { a.APIURL = connectorAPIVersionPath }, wantErr: "QURL_API_URL is invalid"},
+		{name: "remote http api url", mutate: func(a *tunnelInstallArgs) { a.APIURL = testInvalidRemoteConnectorAPIURL }, wantErr: "QURL_API_URL is invalid"},
+		{name: "nested api path", mutate: func(a *tunnelInstallArgs) { a.APIURL = "https://api.example.test/foo/v1" }, wantErr: "QURL_API_URL is invalid"},
+		{name: "fragment", mutate: func(a *tunnelInstallArgs) { a.APIURL = "https://api.example.test/v1#fragment" }, wantErr: "QURL_API_URL is invalid"},
+		{name: "invalid api url takes precedence over incomplete identity", mutate: func(a *tunnelInstallArgs) { a.APIURL = connectorAPIVersionPath; a.ConnectorRoutingID = "" }, wantErr: "QURL_API_URL is invalid"},
+		{name: "loopback http api url", mutate: func(a *tunnelInstallArgs) { a.APIURL = "http://127.0.0.1:8080/v1" }},
+		{name: "uppercase localhost http api url", mutate: func(a *tunnelInstallArgs) { a.APIURL = "http://LOCALHOST:8080/v1" }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			args := valid
+			tc.mutate(&args)
+			err := validateTunnelConnectorContract(&args)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("validateTunnelConnectorContract() err = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil || err.Error() != tc.wantErr {
+				t.Fatalf("validateTunnelConnectorContract() err = %v, want %q", err, tc.wantErr)
+			}
+		})
 	}
 }
 
@@ -513,6 +704,11 @@ func TestTunnelInstallWizardRequest(t *testing.T) {
 func TestTunnelInstallCreatesResourceBindsAliasAndMintsBootstrapKey(t *testing.T) {
 	now := fixedNow
 
+	// The happy path must not trip the kind-first gate. Capture the default
+	// logger so a gate that rejected valid responses would fail here rather
+	// than only in the dedicated rejection test.
+	logs := captureDefaultSlog(t)
+
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
 
@@ -524,11 +720,12 @@ func TestTunnelInstallCreatesResourceBindsAliasAndMintsBootstrapKey(t *testing.T
 			t.Fatalf("decode resource body: %v", err)
 		}
 		respondQURLEnvelope(t, w, map[string]any{
-			testKeyResourceID:   testTunnelResourceID,
-			testKeyType:         client.ResourceTypeTunnel,
-			testKeySlug:         testTunnelSlug,
-			testKeyStatus:       client.StatusActive,
-			"knock_resource_id": "qurl-tunnel-server",
+			testKeyResourceID:         testTunnelResourceID,
+			testKeyConnectorRoutingID: testTunnelRoutingID,
+			testKeyType:               client.ResourceTypeTunnel,
+			testKeySlug:               testTunnelSlug,
+			testKeyStatus:             client.StatusActive,
+			testKeyKnockResourceID:    testTunnelKnockID,
 		})
 	})
 	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, r *http.Request) {
@@ -537,14 +734,15 @@ func TestTunnelInstallCreatesResourceBindsAliasAndMintsBootstrapKey(t *testing.T
 			t.Fatalf("decode api key body: %v", err)
 		}
 		respondQURLEnvelope(t, w, map[string]any{
-			testKeyKeyID:      testTunnelAPIKeyID,
-			testKeyAPIKey:     testTunnelAPIKey,
-			"name":            "Slack qURL Connector bootstrap " + testTunnelSlug,
-			"scopes":          []string{tunnelScopeAgent, tunnelScopeWrite},
-			testKeyStatus:     client.StatusActive,
-			testKeyPurpose:    client.APIKeyPurposeTunnelBootstrap,
-			testKeyTunnelSlug: testTunnelSlug,
-			testKeyExpiresAt:  now.Add(time.Hour).Format(time.RFC3339),
+			testKeyKeyID:     testTunnelAPIKeyID,
+			testKeyAPIKey:    testTunnelAPIKey,
+			"name":           "Slack qURL Connector enrollment " + testTunnelSlug,
+			"scopes":         []string{tunnelScopeAgent, tunnelScopeWrite},
+			testKeyStatus:    client.StatusActive,
+			"kind":           client.CredentialKindEnrollmentToken,
+			"target":         client.CredentialTargetAgent,
+			"claims":         []map[string]any{{testKeyType: client.CredentialClaimTypeConnector, "id": testTunnelSlug}},
+			testKeyExpiresAt: now.Add(time.Hour).Format(time.RFC3339),
 		})
 	})
 
@@ -586,8 +784,14 @@ func TestTunnelInstallCreatesResourceBindsAliasAndMintsBootstrapKey(t *testing.T
 	if got, want := resourceBody[testKeyDescription], defaultTunnelDisplayName(testTunnelSlug); got != want {
 		t.Errorf("resource body description = %v, want install default %q", got, want)
 	}
-	if apiKeyBody[testKeyPurpose] != client.APIKeyPurposeTunnelBootstrap || apiKeyBody[testKeyTunnelSlug] != testTunnelSlug || apiKeyBody["expires_in"] != tunnelBootstrapTTL {
-		t.Errorf("api key body = %+v, want constrained tunnel bootstrap key", apiKeyBody)
+	assertAgentEnrollmentKind(t, apiKeyBody)
+	if apiKeyBody[testKeyExpiresIn] != tunnelBootstrapTTL {
+		t.Errorf("api key body expires_in = %v, want %q", apiKeyBody[testKeyExpiresIn], tunnelBootstrapTTL)
+	}
+	assertSingleConnectorClaim(t, apiKeyBody, testTunnelSlug)
+	assertNoRetiredCredentialFields(t, apiKeyBody)
+	if logs.contains(kindFirstRejection) {
+		t.Error("a kind-first mint response must not be rejected")
 	}
 	if idempotencyKey == "" {
 		t.Error("Idempotency-Key header was empty")
@@ -599,9 +803,9 @@ func TestTunnelInstallCreatesResourceBindsAliasAndMintsBootstrapKey(t *testing.T
 	for _, want := range []string{
 		"qURL Connector `" + testTunnelSlug + "` is ready to install.",
 		"qURL alias `$" + testTunnelSlug + "` is ready in this channel.",
-		"temporary bootstrap key expires in 1 hour and was sent separately by DM",
+		"temporary enrollment token expires in 1 hour and was sent separately by DM",
 		"The install instructions below either prompt for it or reference your platform secret manager",
-		"Paste the DM key only when prompted or into your secret manager",
+		"Paste the DM token only when prompted or into your secret manager",
 		"Run this whole block on the Linux Docker host",
 		testTunnelKeyHistoryNote,
 		"set -eu",
@@ -609,15 +813,19 @@ func TestTunnelInstallCreatesResourceBindsAliasAndMintsBootstrapKey(t *testing.T
 		testTunnelKeyPromptLine,
 		"cat > \"$CONFIG_FILE\" <<'QURL_PROXY_YAML_EOF'",
 		"QURL_CONNECTOR_ID='" + testTunnelSlug + "'",
+		"resource_id: '" + testTunnelResourceID + "'",
+		"connector_routing_id: '" + testTunnelRoutingID + "'",
+		"QURL_ENDPOINT='https://api.sandbox.example'",
 		testTunnelKeyInstallLine,
 		testTunnelLocalPort9090Line,
+		"resource_id: '" + testTunnelResourceID + "'",
 		"WEB_CONTAINER='YOUR_WEB_CONTAINER_NAME'",
 		testTunnelDockerLine,
 		`docker rm -f "$CONNECTOR_CONTAINER"`,
 		`--network "container:${WEB_CONTAINER}"`,
 		testTunnelAgentDirFragment,
 		testTunnelImageRef,
-		"Treat the separate bootstrap-key DM as secret",
+		"Treat the separate enrollment-token DM as secret",
 		"Keep the qURL agent-state directory, volume, or PVC",
 		"/qurl get $" + testTunnelSlug,
 	} {
@@ -625,7 +833,7 @@ func TestTunnelInstallCreatesResourceBindsAliasAndMintsBootstrapKey(t *testing.T
 			t.Errorf("async reply missing %q:\n%s", want, async)
 		}
 	}
-	for _, forbidden := range []string{testForbiddenResourceLabel, testTunnelResourceID, testTunnelAPIKey, "expires at", "`qurl-proxy.yaml`", testForbiddenSlackYAMLFence, testForbiddenSlackShellFence, "connect.layerv", "proxy.layerv", "frps-", "<web-container>", testForbiddenConnectorSlug} {
+	for _, forbidden := range []string{testForbiddenResourceLabel, testTunnelAPIKey, "expires at", "`qurl-proxy.yaml`", testForbiddenSlackYAMLFence, testForbiddenSlackShellFence, "connect.layerv", "proxy.layerv", "frps-", "<web-container>", testForbiddenConnectorSlug, "LAYERV_KNOCK_RESOURCE_ID"} {
 		if strings.Contains(async, forbidden) {
 			t.Errorf("async reply leaked %q:\n%s", forbidden, async)
 		}
@@ -638,7 +846,7 @@ func TestTunnelInstallCreatesResourceBindsAliasAndMintsBootstrapKey(t *testing.T
 		t.Fatalf("PostDM target = team %q user %q, want %q/%q", dm.teamID, dm.userID, testAdminTeamID, testAdminUserID)
 	}
 	for _, want := range []string{
-		"Temporary qURL Connector bootstrap key for `" + testTunnelSlug + "` expires in 1 hour.",
+		"Temporary qURL Connector enrollment token for `" + testTunnelSlug + "` expires in 1 hour.",
 		"install instructions were sent separately",
 		"Delete this DM from Slack history",
 		testTunnelAPIKey,
@@ -675,24 +883,26 @@ func TestTunnelInstallReinstallShowsExistingDisplayName(t *testing.T) {
 		// find_or_create returns the EXISTING resource, carrying the admin's
 		// previously-set Display Name in description (not the install default).
 		respondQURLEnvelope(t, w, map[string]any{
-			testKeyResourceID:   testTunnelResourceID,
-			testKeyType:         client.ResourceTypeTunnel,
-			testKeySlug:         testTunnelSlug,
-			testKeyStatus:       client.StatusActive,
-			testKeyDescription:  existingDisplayName,
-			"knock_resource_id": "qurl-tunnel-server",
+			testKeyResourceID:         testTunnelResourceID,
+			testKeyConnectorRoutingID: testTunnelRoutingID,
+			testKeyType:               client.ResourceTypeTunnel,
+			testKeySlug:               testTunnelSlug,
+			testKeyStatus:             client.StatusActive,
+			testKeyDescription:        existingDisplayName,
+			testKeyKnockResourceID:    testTunnelKnockID,
 		})
 	})
 	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, _ *http.Request) {
 		respondQURLEnvelope(t, w, map[string]any{
-			testKeyKeyID:      testTunnelAPIKeyID,
-			testKeyAPIKey:     testTunnelAPIKey,
-			"name":            "Slack qURL Connector bootstrap " + testTunnelSlug,
-			"scopes":          []string{tunnelScopeAgent, tunnelScopeWrite},
-			testKeyStatus:     client.StatusActive,
-			testKeyPurpose:    client.APIKeyPurposeTunnelBootstrap,
-			testKeyTunnelSlug: testTunnelSlug,
-			testKeyExpiresAt:  now.Add(time.Hour).Format(time.RFC3339),
+			testKeyKeyID:     testTunnelAPIKeyID,
+			testKeyAPIKey:    testTunnelAPIKey,
+			"name":           "Slack qURL Connector enrollment " + testTunnelSlug,
+			"scopes":         []string{tunnelScopeAgent, tunnelScopeWrite},
+			testKeyStatus:    client.StatusActive,
+			"kind":           client.CredentialKindEnrollmentToken,
+			"target":         client.CredentialTargetAgent,
+			"claims":         []map[string]any{{testKeyType: client.CredentialClaimTypeConnector, "id": testTunnelSlug}},
+			testKeyExpiresAt: now.Add(time.Hour).Format(time.RFC3339),
 		})
 	})
 
@@ -1343,6 +1553,10 @@ func TestTunnelInstallModalSubmissionMintsKubernetesInstructions(t *testing.T) {
 	now := fixedNow
 	modalCreatedAt := now.Add(-10 * time.Minute)
 
+	// Same guard on the modal entry point: a kind-first response must pass the
+	// gate cleanly.
+	logs := captureDefaultSlog(t)
+
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
 
@@ -1354,10 +1568,11 @@ func TestTunnelInstallModalSubmissionMintsKubernetesInstructions(t *testing.T) {
 			t.Fatalf("decode resource body: %v", err)
 		}
 		respondQURLEnvelope(t, w, map[string]any{
-			testKeyResourceID: testTunnelResourceID,
-			testKeyType:       client.ResourceTypeTunnel,
-			testKeySlug:       testTunnelSlug,
-			testKeyStatus:     client.StatusActive,
+			testKeyResourceID:   testTunnelResourceID,
+			"knock_resource_id": testTunnelKnockID,
+			testKeyType:         client.ResourceTypeTunnel,
+			testKeySlug:         testTunnelSlug,
+			testKeyStatus:       client.StatusActive,
 		})
 	})
 	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, r *http.Request) {
@@ -1365,15 +1580,20 @@ func TestTunnelInstallModalSubmissionMintsKubernetesInstructions(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&apiKeyBody); err != nil {
 			t.Fatalf("decode api key body: %v", err)
 		}
+		// Post-cutover response shape. The slash-path fixtures deliberately
+		// keep the legacy envelope so both shapes stay covered on the Slack
+		// side through the rollout window; this one exercises the kind-first
+		// response the producer will actually send afterwards.
 		respondQURLEnvelope(t, w, map[string]any{
-			testKeyKeyID:      testTunnelAPIKeyID,
-			testKeyAPIKey:     testTunnelModalKey,
-			"name":            "Slack qURL Connector bootstrap " + testTunnelSlug,
-			"scopes":          []string{tunnelScopeAgent, tunnelScopeWrite},
-			testKeyStatus:     client.StatusActive,
-			testKeyPurpose:    client.APIKeyPurposeTunnelBootstrap,
-			testKeyTunnelSlug: testTunnelSlug,
-			testKeyExpiresAt:  now.Add(time.Hour).Format(time.RFC3339),
+			testKeyKeyID:     testTunnelAPIKeyID,
+			testKeyAPIKey:    testTunnelModalKey,
+			"name":           "Slack qURL Connector enrollment " + testTunnelSlug,
+			"scopes":         []string{tunnelScopeAgent, tunnelScopeWrite},
+			testKeyStatus:    client.StatusActive,
+			"kind":           client.CredentialKindEnrollmentToken,
+			"target":         client.CredentialTargetAgent,
+			"claims":         []map[string]any{{testKeyType: client.CredentialClaimTypeConnector, "id": testTunnelSlug}},
+			testKeyExpiresAt: now.Add(time.Hour).Format(time.RFC3339),
 		})
 	})
 
@@ -1418,8 +1638,14 @@ func TestTunnelInstallModalSubmissionMintsKubernetesInstructions(t *testing.T) {
 	if resourceBody[testKeyType] != client.ResourceTypeTunnel || resourceBody[testKeySlug] != testTunnelSlug || resourceBody["find_or_create"] != true {
 		t.Errorf("resource body = %+v, want tunnel find-or-create slug", resourceBody)
 	}
-	if apiKeyBody[testKeyPurpose] != client.APIKeyPurposeTunnelBootstrap || apiKeyBody[testKeyTunnelSlug] != testTunnelSlug {
-		t.Errorf("api key body = %+v, want tunnel bootstrap key", apiKeyBody)
+	// The modal path shares buildTunnelInstall with the slash path, but assert
+	// the full wire contract here too so a claims/retired-field regression is
+	// caught on either entry point independently.
+	assertAgentEnrollmentKind(t, apiKeyBody)
+	assertSingleConnectorClaim(t, apiKeyBody, testTunnelSlug)
+	assertNoRetiredCredentialFields(t, apiKeyBody)
+	if logs.contains(kindFirstRejection) {
+		t.Error("a kind-first mint response must not be rejected")
 	}
 	if len(*dmPosts) != 1 || !strings.Contains((*dmPosts)[0].text, testTunnelModalKey) {
 		t.Fatalf("bootstrap DM posts = %+v, want one containing modal key", *dmPosts)
@@ -1439,25 +1665,30 @@ func TestTunnelInstallModalSubmissionMintsKubernetesInstructions(t *testing.T) {
 		"QURL_BOOTSTRAP_SECRET='qurl-connector-" + testTunnelSlug + "'",
 		testTunnelPipefailLine,
 		testTunnelKeyPromptLine,
-		`kubectl create secret generic "$QURL_BOOTSTRAP_SECRET" --from-file=api_key=/dev/stdin`,
+		`kubectl create secret generic "$QURL_BOOTSTRAP_SECRET" --from-file=enrollment-token=/dev/stdin`,
 		"kubectl apply -f -",
 		"kind: ConfigMap",
 		"name: 'qurl-proxy-" + testTunnelSlug + "'",
 		"kind: PersistentVolumeClaim",
 		"Pod spec additions:",
-		"Append the `qurl-connector` container under your existing `containers:` list",
+		"Merge the generated pod `securityContext`",
 		"fsGroup: 65532",
 		"fsGroupChangePolicy: OnRootMismatch",
 		"securityContext:",
+		"name: qurl",
+		"command: ['/usr/local/bin/qurl']",
 		"runAsUser: 65532",
 		"runAsNonRoot: true",
+		"readOnlyRootFilesystem: true",
 		"drop: [\"ALL\"]",
 		"type: RuntimeDefault",
 		"claimName: 'qurl-agent-" + testTunnelSlug + "'",
 		"secretName: 'qurl-connector-" + testTunnelSlug + "'",
 		"defaultMode: 0440",
-		"QURL_CONNECTOR_ID",
-		"value: '" + testTunnelSlug + "'",
+		"name: QURL_ENDPOINT",
+		"value: 'https://api.sandbox.example'",
+		"resource_id: '" + testTunnelResourceID + "'",
+		"knock_resource_id: '" + testTunnelKnockID + "'",
 		testTunnelLocalPort9090Line,
 		testTunnelImageRef,
 		"/qurl get $team-dash",
@@ -1466,7 +1697,7 @@ func TestTunnelInstallModalSubmissionMintsKubernetesInstructions(t *testing.T) {
 			t.Errorf("async reply missing %q:\n%s", want, async)
 		}
 	}
-	for _, forbidden := range []string{testForbiddenResourceLabel, testTunnelResourceID, testTunnelModalKey, testForbiddenSlackYAMLFence, testForbiddenSlackShellFence, "connect.layerv", "proxy.layerv", "frps-", "initContainers:", "runAsUser: 0", testForbiddenConnectorSlug} {
+	for _, forbidden := range []string{testForbiddenResourceLabel, testTunnelModalKey, testForbiddenSlackYAMLFence, testForbiddenSlackShellFence, "connect.layerv", "proxy.layerv", "frps-", testForbiddenConnectorSlug, "LAYERV_KNOCK_RESOURCE_ID", "from-file=api_key", "qurl-proxy.yaml"} {
 		if strings.Contains(async, forbidden) {
 			t.Errorf("async reply leaked %q:\n%s", forbidden, async)
 		}
@@ -1496,7 +1727,7 @@ func TestTunnelInstallModalSubmissionRendersDockerTargets(t *testing.T) {
 				"Target environment: Docker sidecar.",
 				"WEB_CONTAINER='web.1'",
 				testTunnelDockerLine,
-				"docker logs -f qurl-connector-" + testTunnelSlug,
+				"docker logs -f qurl-" + testTunnelSlug,
 			},
 		},
 		{
@@ -1506,9 +1737,9 @@ func TestTunnelInstallModalSubmissionRendersDockerTargets(t *testing.T) {
 			want: []string{
 				"Target environment: Docker Compose.",
 				"WEB_SERVICE='" + testTunnelComposeWeb + "'",
-				"CONNECTOR_SERVICE='qurl-connector-" + testTunnelSlug + "'",
-				"'qurl-connector-" + testTunnelSlug + "':",
-				"docker compose -f compose.yaml -f qurl-connector-" + testTunnelSlug + ".compose.yaml logs -f qurl-connector-" + testTunnelSlug,
+				"CONNECTOR_SERVICE='qurl-" + testTunnelSlug + "'",
+				"'qurl-" + testTunnelSlug + "':",
+				"docker compose -f compose.yaml -f qurl-" + testTunnelSlug + ".compose.yaml logs -f qurl-" + testTunnelSlug,
 			},
 		},
 		{
@@ -1518,8 +1749,8 @@ func TestTunnelInstallModalSubmissionRendersDockerTargets(t *testing.T) {
 				"Target environment: AWS ECS/Fargate.",
 				ecsFargateChecklistText,
 				ecsFargateRegionPlaceholderNote,
-				testTunnelECSAPIKeyNameLine,
-				`REPLACE_WITH_SECRET_ARN_FOR_QURL_CONNECTOR_` + testTunnelSlug,
+				`"name": "QURL_ENDPOINT"`,
+				`"sourceVolume": "qurl-bootstrap"`,
 			},
 		},
 	}
@@ -1529,20 +1760,22 @@ func TestTunnelInstallModalSubmissionRendersDockerTargets(t *testing.T) {
 			ts.seedAdmin(t)
 			ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, r *http.Request) {
 				respondQURLEnvelope(t, w, map[string]any{
-					testKeyResourceID: testTunnelResourceID,
-					testKeyType:       client.ResourceTypeTunnel,
-					testKeySlug:       testTunnelSlug,
-					testKeyStatus:     client.StatusActive,
+					testKeyResourceID:   testTunnelResourceID,
+					"knock_resource_id": testTunnelKnockID,
+					testKeyType:         client.ResourceTypeTunnel,
+					testKeySlug:         testTunnelSlug,
+					testKeyStatus:       client.StatusActive,
 				})
 			})
 			ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, r *http.Request) {
 				respondQURLEnvelope(t, w, map[string]any{
-					testKeyKeyID:      testTunnelAPIKeyID,
-					testKeyAPIKey:     testTunnelModalKey,
-					testKeyStatus:     client.StatusActive,
-					testKeyPurpose:    client.APIKeyPurposeTunnelBootstrap,
-					testKeyTunnelSlug: testTunnelSlug,
-					testKeyExpiresAt:  now.Add(time.Hour).Format(time.RFC3339),
+					testKeyKeyID:     testTunnelAPIKeyID,
+					testKeyAPIKey:    testTunnelModalKey,
+					testKeyStatus:    client.StatusActive,
+					"kind":           client.CredentialKindEnrollmentToken,
+					"target":         client.CredentialTargetAgent,
+					"claims":         []map[string]any{{testKeyType: client.CredentialClaimTypeConnector, "id": testTunnelSlug}},
+					testKeyExpiresAt: now.Add(time.Hour).Format(time.RFC3339),
 				})
 			})
 
@@ -1601,20 +1834,22 @@ func TestTunnelInstallSubmissionAuditsOnlyAgentProtectConnector(t *testing.T) {
 			ts.seedAdmin(t)
 			ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, r *http.Request) {
 				respondQURLEnvelope(t, w, map[string]any{
-					testKeyResourceID: testTunnelResourceID,
-					testKeyType:       client.ResourceTypeTunnel,
-					testKeySlug:       testTunnelSlug,
-					testKeyStatus:     client.StatusActive,
+					testKeyResourceID:   testTunnelResourceID,
+					"knock_resource_id": testTunnelKnockID,
+					testKeyType:         client.ResourceTypeTunnel,
+					testKeySlug:         testTunnelSlug,
+					testKeyStatus:       client.StatusActive,
 				})
 			})
 			ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, r *http.Request) {
 				respondQURLEnvelope(t, w, map[string]any{
-					testKeyKeyID:      testTunnelAPIKeyID,
-					testKeyAPIKey:     testTunnelModalKey,
-					testKeyStatus:     client.StatusActive,
-					testKeyPurpose:    client.APIKeyPurposeTunnelBootstrap,
-					testKeyTunnelSlug: testTunnelSlug,
-					testKeyExpiresAt:  now.Add(time.Hour).Format(time.RFC3339),
+					testKeyKeyID:     testTunnelAPIKeyID,
+					testKeyAPIKey:    testTunnelModalKey,
+					testKeyStatus:    client.StatusActive,
+					"kind":           client.CredentialKindEnrollmentToken,
+					"target":         client.CredentialTargetAgent,
+					"claims":         []map[string]any{{testKeyType: client.CredentialClaimTypeConnector, "id": testTunnelSlug}},
+					testKeyExpiresAt: now.Add(time.Hour).Format(time.RFC3339),
 				})
 			})
 
@@ -1697,6 +1932,7 @@ func TestTunnelInstallAgentAuditFromMetadataTruncatesReason(t *testing.T) {
 	}
 	if audit == nil {
 		t.Fatal("audit = nil, want protect-connector audit")
+		return
 	}
 	if audit.target != testTunnelSlug {
 		t.Fatalf("target = %q, want submitted slug %q", audit.target, testTunnelSlug)
@@ -1738,10 +1974,11 @@ func TestTunnelInstallModalRejectsUnexpectedAgentActionBeforeMintingKey(t *testi
 	ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
 		resourceHits.Add(1)
 		respondQURLEnvelope(t, w, map[string]any{
-			testKeyResourceID: testTunnelResourceID,
-			testKeyType:       client.ResourceTypeTunnel,
-			testKeySlug:       testTunnelSlug,
-			testKeyStatus:     client.StatusActive,
+			testKeyResourceID:   testTunnelResourceID,
+			"knock_resource_id": testTunnelKnockID,
+			testKeyType:         client.ResourceTypeTunnel,
+			testKeySlug:         testTunnelSlug,
+			testKeyStatus:       client.StatusActive,
 		})
 	})
 
@@ -2230,20 +2467,22 @@ func TestTunnelInstallModalTailAuditReleasesWorkerSlot(t *testing.T) {
 	now := fixedNow
 	ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
 		respondQURLEnvelope(t, w, map[string]any{
-			testKeyResourceID: testTunnelResourceID,
-			testKeyType:       client.ResourceTypeTunnel,
-			testKeySlug:       testTunnelSlug,
-			testKeyStatus:     client.StatusActive,
+			testKeyResourceID:   testTunnelResourceID,
+			"knock_resource_id": testTunnelKnockID,
+			testKeyType:         client.ResourceTypeTunnel,
+			testKeySlug:         testTunnelSlug,
+			testKeyStatus:       client.StatusActive,
 		})
 	})
 	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, _ *http.Request) {
 		respondQURLEnvelope(t, w, map[string]any{
-			testKeyKeyID:      testTunnelAPIKeyID,
-			testKeyAPIKey:     testTunnelModalKey,
-			testKeyStatus:     client.StatusActive,
-			testKeyPurpose:    client.APIKeyPurposeTunnelBootstrap,
-			testKeyTunnelSlug: testTunnelSlug,
-			testKeyExpiresAt:  now.Add(time.Hour).Format(time.RFC3339),
+			testKeyKeyID:     testTunnelAPIKeyID,
+			testKeyAPIKey:    testTunnelModalKey,
+			testKeyStatus:    client.StatusActive,
+			"kind":           client.CredentialKindEnrollmentToken,
+			"target":         client.CredentialTargetAgent,
+			"claims":         []map[string]any{{testKeyType: client.CredentialClaimTypeConnector, "id": testTunnelSlug}},
+			testKeyExpiresAt: now.Add(time.Hour).Format(time.RFC3339),
 		})
 	})
 
@@ -2292,13 +2531,31 @@ func TestTunnelInstallModalTailAuditReleasesWorkerSlot(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 body=%s", w.Code, w.Body.String())
 	}
+	// stepTimeout bounds each synchronization step below: comfortably above the
+	// goroutine-spawn / slot-release latency of a legitimate run on loaded CI, and —
+	// via the guard — under agentConnectorAuditWriteTimeout, so a regressed synchronous
+	// audit (which pins the worker in PutItem until that ctx fires) is still holding the
+	// slot when the claim times out instead of freeing first.
+	const stepTimeout = 2 * time.Second
+	if stepTimeout >= agentConnectorAuditWriteTimeout {
+		t.Fatalf("stepTimeout (%s) must stay under agentConnectorAuditWriteTimeout (%s)", stepTimeout, agentConnectorAuditWriteTimeout)
+	}
 	select {
 	case <-ddb.started:
-	case <-time.After(2 * time.Second):
+	case <-time.After(stepTimeout):
 		t.Fatal("tail audit write did not start")
 	}
-	if got := len(h.sem); got != 0 {
-		t.Fatalf("worker semaphore len = %d, want 0 while tail audit is blocked", got)
+	// Don't sample len(h.sem): the pooled worker frees its slot in runOnPool's deferred
+	// <-sem — a different goroutine with no happens-before to ddb.started, so the read is
+	// nondeterministic (the original flake). Claim the slot instead; with cap(h.sem)==1 the
+	// send blocks until the worker frees it. The slot is then left held — no more pool work.
+	if cap(h.sem) != 1 {
+		t.Fatalf("test assumes cap(h.sem) == 1, got %d", cap(h.sem))
+	}
+	select {
+	case h.sem <- struct{}{}:
+	case <-time.After(stepTimeout):
+		t.Fatal("worker slot not released while tail audit is blocked")
 	}
 	releaseAudit()
 	h.Wait()
@@ -2640,12 +2897,7 @@ func TestRenderTunnelInstallMessageWarnsOnDefaultImage(t *testing.T) {
 
 	h := NewHandler(Config{})
 	freezeTunnelBootstrapNow(t, h, now)
-	got, err := h.renderTunnelInstallMessage(&tunnelInstallArgs{
-		Slug:        testTunnelSlug,
-		Alias:       testTunnelSlug,
-		LocalPort:   defaultTunnelLocalPort,
-		Environment: tunnelEnvDocker,
-	}, &client.APIKey{APIKey: testTunnelAPIKey, ExpiresAt: &expiresAt}, "qURL alias `$prod-dashboard` is ready in this channel.")
+	got, err := h.renderTunnelInstallMessage(testTunnelInstallArgs(), &client.APIKey{APIKey: testTunnelAPIKey, ExpiresAt: &expiresAt}, "qURL alias `$prod-dashboard` is ready in this channel.")
 	if err != nil {
 		t.Fatalf("renderTunnelInstallMessage: %v", err)
 	}
@@ -2662,8 +2914,13 @@ func TestRenderTunnelInstallMessageWarnsOnDefaultImage(t *testing.T) {
 	if imageIdx < 0 || envIdx < 0 || instructionsIdx < 0 || imageIdx > envIdx || envIdx > instructionsIdx {
 		t.Fatalf("fallback image warning should appear before target environment and install block:\n%s", got)
 	}
-	if strings.Contains(got, testForbiddenResourceLabel) || strings.Contains(got, testTunnelResourceID) {
-		t.Fatalf("rendered install message leaked resource details:\n%s", got)
+	if strings.Contains(got, testForbiddenResourceLabel) {
+		t.Fatalf("rendered install message leaked retired resource label:\n%s", got)
+	}
+	for _, identity := range []string{testTunnelCRID, testTunnelResourceID, testTunnelRoutingID, testTunnelKnockID} {
+		if !strings.Contains(got, identity) {
+			t.Fatalf("rendered install message missing pinned identity %q:\n%s", identity, got)
+		}
 	}
 }
 
@@ -2671,12 +2928,7 @@ func TestRenderTunnelInstallMessageRejectsUnsafeBootstrapKey(t *testing.T) {
 	t.Parallel()
 	expiresAt := time.Date(2026, 5, 27, 5, 30, 0, 0, time.UTC)
 
-	_, err := NewHandler(Config{}).renderTunnelInstallMessage(&tunnelInstallArgs{
-		Slug:        testTunnelSlug,
-		Alias:       testTunnelSlug,
-		LocalPort:   defaultTunnelLocalPort,
-		Environment: tunnelEnvDocker,
-	}, &client.APIKey{APIKey: "lv_live_bad`key", ExpiresAt: &expiresAt}, "qURL alias `$prod-dashboard` is ready in this channel.")
+	_, err := NewHandler(Config{}).renderTunnelInstallMessage(testTunnelInstallArgs(), &client.APIKey{APIKey: "lv_live_bad`key", ExpiresAt: &expiresAt}, "qURL alias `$prod-dashboard` is ready in this channel.")
 	if err == nil || !strings.Contains(err.Error(), "unsupported characters") {
 		t.Fatalf("renderTunnelInstallMessage err = %v, want unsupported-character rejection", err)
 	}
@@ -2686,12 +2938,7 @@ func TestRenderTunnelInstallMessageRejectsUnsafeTunnelImage(t *testing.T) {
 	t.Parallel()
 	expiresAt := time.Date(2026, 5, 27, 5, 30, 0, 0, time.UTC)
 
-	_, err := NewHandler(Config{TunnelImage: testTunnelImageRef + ";bad"}).renderTunnelInstallMessage(&tunnelInstallArgs{
-		Slug:        testTunnelSlug,
-		Alias:       testTunnelSlug,
-		LocalPort:   defaultTunnelLocalPort,
-		Environment: tunnelEnvDocker,
-	}, &client.APIKey{APIKey: testTunnelAPIKey, ExpiresAt: &expiresAt}, "qURL alias `$prod-dashboard` is ready in this channel.")
+	_, err := NewHandler(Config{TunnelImage: testTunnelImageRef + ";bad"}).renderTunnelInstallMessage(testTunnelInstallArgs(), &client.APIKey{APIKey: testTunnelAPIKey, ExpiresAt: &expiresAt}, "qURL alias `$prod-dashboard` is ready in this channel.")
 	if err == nil || !strings.Contains(err.Error(), "tunnel image reference must use only") {
 		t.Fatalf("renderTunnelInstallMessage err = %v, want tunnel image rejection", err)
 	}
@@ -2705,12 +2952,7 @@ func TestRenderTunnelInstallMessageRejectsUnsafeTunnelImage(t *testing.T) {
 func TestRenderTunnelInstall_ShowsDisplayNameOnReinstall(t *testing.T) {
 	now := fixedNow
 	expiresAt := now.Add(time.Hour)
-	args := &tunnelInstallArgs{
-		Slug:        testTunnelSlug,
-		Alias:       testTunnelSlug,
-		LocalPort:   defaultTunnelLocalPort,
-		Environment: tunnelEnvDocker,
-	}
+	args := testTunnelInstallArgs()
 	h := NewHandler(Config{TunnelImage: testTunnelImageRef})
 	freezeTunnelBootstrapNow(t, h, now)
 	prepared, err := h.prepareTunnelInstallMessage(args)
@@ -2756,6 +2998,32 @@ func TestYAMLSingleQuotedRejectsControlsAndNewlines(t *testing.T) {
 	}
 }
 
+func TestRenderDockerComposeTunnelInstructionsShellQuotesAPIURL(t *testing.T) {
+	t.Parallel()
+	apiURL := testShellSignificantTunnelAPIURL
+	endpoint, err := qurlEndpointFromConnectorAPIURL(apiURL)
+	if err != nil {
+		t.Fatalf("qurlEndpointFromConnectorAPIURL: %v", err)
+	}
+	quotedYAML, err := yamlSingleQuoted(endpoint)
+	if err != nil {
+		t.Fatalf("yamlSingleQuoted: %v", err)
+	}
+	args := testTunnelInstallArgs()
+	args.APIURL = apiURL
+	got := mustRenderDockerComposeTunnelInstructions(t, args, testTunnelImageRef)
+	if !strings.Contains(got, "QURL_ENDPOINT_YAML="+shellSingleQuote(quotedYAML)) {
+		t.Fatalf("Compose instructions did not shell-quote the YAML API URL scalar:\n%s", got)
+	}
+	for _, want := range []string{
+		"QURL_ENDPOINT: ${QURL_ENDPOINT_YAML}",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("Compose instructions missing %q:\n%s", want, got)
+		}
+	}
+}
+
 func TestRenderedInstallShellBlocksParseAfterValidatedInputs(t *testing.T) {
 	t.Parallel()
 	sh, err := exec.LookPath("sh")
@@ -2771,11 +3039,18 @@ func TestRenderedInstallShellBlocksParseAfterValidatedInputs(t *testing.T) {
 			name: "docker",
 			render: func(t *testing.T) string {
 				return mustRenderDockerTunnelInstructions(t, &tunnelInstallArgs{
-					Slug:        renderShellTestSlug,
-					Alias:       renderShellTestSlug,
-					LocalPort:   9090,
-					Environment: tunnelEnvDocker,
-					WebRef:      "web.1_2-3",
+					Slug:               renderShellTestSlug,
+					Alias:              renderShellTestSlug,
+					LocalPort:          9090,
+					Environment:        tunnelEnvDocker,
+					WebRef:             "web.1_2-3",
+					ResourceID:         testTunnelResourceID,
+					CRID:               testTunnelCRID,
+					ServingEpoch:       1,
+					OwnerID:            testOwnerID,
+					ConnectorRoutingID: testTunnelRoutingID,
+					KnockResourceID:    testTunnelKnockID,
+					APIURL:             testTunnelAPIURL,
 				}, testTunnelImageRef)
 			},
 		},
@@ -2783,11 +3058,18 @@ func TestRenderedInstallShellBlocksParseAfterValidatedInputs(t *testing.T) {
 			name: string(tunnelEnvCompose),
 			render: func(t *testing.T) string {
 				return mustRenderDockerComposeTunnelInstructions(t, &tunnelInstallArgs{
-					Slug:        renderShellTestSlug,
-					Alias:       renderShellTestSlug,
-					LocalPort:   9090,
-					Environment: tunnelEnvCompose,
-					WebRef:      "web_1-2",
+					Slug:               renderShellTestSlug,
+					Alias:              renderShellTestSlug,
+					LocalPort:          9090,
+					Environment:        tunnelEnvCompose,
+					WebRef:             "web_1-2",
+					ResourceID:         testTunnelResourceID,
+					CRID:               testTunnelCRID,
+					ServingEpoch:       1,
+					OwnerID:            testOwnerID,
+					ConnectorRoutingID: testTunnelRoutingID,
+					KnockResourceID:    testTunnelKnockID,
+					APIURL:             testTunnelAPIURL,
 				}, testTunnelImageRef)
 			},
 		},
@@ -2795,10 +3077,17 @@ func TestRenderedInstallShellBlocksParseAfterValidatedInputs(t *testing.T) {
 			name: "kubernetes",
 			render: func(t *testing.T) string {
 				return mustRenderKubernetesTunnelInstructions(t, &tunnelInstallArgs{
-					Slug:        renderShellTestSlug,
-					Alias:       renderShellTestSlug,
-					LocalPort:   9090,
-					Environment: tunnelEnvKubernetes,
+					Slug:               renderShellTestSlug,
+					Alias:              renderShellTestSlug,
+					LocalPort:          9090,
+					Environment:        tunnelEnvKubernetes,
+					ResourceID:         testTunnelResourceID,
+					CRID:               testTunnelCRID,
+					ServingEpoch:       1,
+					OwnerID:            testOwnerID,
+					ConnectorRoutingID: testTunnelRoutingID,
+					KnockResourceID:    testTunnelKnockID,
+					APIURL:             testTunnelAPIURL,
 				}, testTunnelImageRef)
 			},
 		},
@@ -2829,6 +3118,42 @@ func firstSlackCodeBlock(t *testing.T, body string) string {
 		t.Fatalf("missing Slack code block terminator:\n%s", body)
 	}
 	return body[start : start+end]
+}
+
+func TestBootstrapEnvironmentInputIsRemovedBeforeAnyChildProcess(t *testing.T) {
+	const secret = "lv_test_child_environment_secret"
+	seen := map[string]bool{}
+	for _, name := range []string{"sh", "dash", "bash", "ash"} {
+		shell, err := exec.LookPath(name)
+		if err != nil || seen[shell] {
+			continue
+		}
+		seen[shell] = true
+		t.Run(name, func(t *testing.T) {
+			environmentPath := filepath.Join(t.TempDir(), "child.env")
+			script := "set -eu\nset -a\n" + renderBootstrapKeyPromptShell() + "\n" +
+				"case \"$QURL_BOOTSTRAP_KEY_VALUE\" in " + secret + ") ;; *) exit 9 ;; esac\n" +
+				"env > " + shellSingleQuote(environmentPath) + "\n"
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, shell)
+			cmd.Stdin = strings.NewReader(script)
+			cmd.Env = append(os.Environ(), "QURL_BOOTSTRAP_KEY="+secret)
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("bootstrap prompt script failed: %v\n%s", err, out)
+			}
+			childEnv, err := os.ReadFile(environmentPath) //nolint:gosec // test-owned temporary path.
+			if err != nil {
+				t.Fatal(err)
+			}
+			if bytes.Contains(childEnv, []byte(secret)) || bytes.Contains(childEnv, []byte("QURL_BOOTSTRAP_KEY=")) {
+				t.Fatalf("%s child inherited enrollment token environment: %q", name, childEnv)
+			}
+		})
+	}
+	if len(seen) == 0 {
+		t.Fatal("no POSIX shell available for credential environment test")
+	}
 }
 
 func TestValidateTunnelImageRefAllowsBoringImageRefs(t *testing.T) {
@@ -2893,18 +3218,20 @@ func TestTunnelInstallRejectsMissingPlaintextBootstrapKey(t *testing.T) {
 	var revokeHits int
 	ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
 		respondQURLEnvelope(t, w, map[string]any{
-			testKeyResourceID: testTunnelResourceID,
-			testKeyType:       client.ResourceTypeTunnel,
-			testKeySlug:       testTunnelSlug,
-			testKeyStatus:     client.StatusActive,
+			testKeyResourceID:   testTunnelResourceID,
+			"knock_resource_id": testTunnelKnockID,
+			testKeyType:         client.ResourceTypeTunnel,
+			testKeySlug:         testTunnelSlug,
+			testKeyStatus:       client.StatusActive,
 		})
 	})
 	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, _ *http.Request) {
 		respondQURLEnvelope(t, w, map[string]any{
-			testKeyKeyID:      testTunnelAPIKeyID,
-			testKeyAPIKey:     "",
-			testKeyPurpose:    client.APIKeyPurposeTunnelBootstrap,
-			testKeyTunnelSlug: testTunnelSlug,
+			testKeyKeyID:  testTunnelAPIKeyID,
+			testKeyAPIKey: "",
+			"kind":        client.CredentialKindEnrollmentToken,
+			"target":      client.CredentialTargetAgent,
+			"claims":      []map[string]any{{testKeyType: client.CredentialClaimTypeConnector, "id": testTunnelSlug}},
 		})
 	})
 	ts.addCustomer(http.MethodDelete, "/v1/api-keys/"+testTunnelAPIKeyID, func(w http.ResponseWriter, _ *http.Request) {
@@ -2917,11 +3244,223 @@ func TestTunnelInstallRejectsMissingPlaintextBootstrapKey(t *testing.T) {
 	h.SetAliasStore(h.cfg.AdminStore)
 	_, _, async := newAdminSlashInvoker(t, h).invokeAdminAsync(testTunnelInstallCmd, testAdminTeamID, testAdminUserID)
 
-	if !strings.Contains(async, "did not return a bootstrap key") {
+	if !strings.Contains(async, "did not return an enrollment token") {
 		t.Fatalf("async reply = %q, want missing-plaintext copy", async)
 	}
 	if revokeHits != 1 {
 		t.Fatalf("bootstrap key revoke hits = %d, want 1", revokeHits)
+	}
+}
+
+// TestTunnelInstallRejectsCredentialThatDoesNotConfirmKindFirst pins the
+// fail-closed gate. A producer that predates the kind-first API returns 200
+// with an ordinary workspace-scoped key rather than a one-shot,
+// Connector-bound enrollment token — so the bot must revoke it and fail the
+// install rather than DM an admin a credential with more authority than the
+// flow promises. The secret must never reach a DM.
+func TestTunnelInstallRejectsCredentialThatDoesNotConfirmKindFirst(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		envelope map[string]any
+	}{
+		{
+			// Pre-cutover producer: ignored `kind` entirely and echoed the
+			// retired fields instead.
+			name: "pre-cutover envelope",
+			envelope: map[string]any{
+				testKeyKeyID:      testTunnelAPIKeyID,
+				testKeyAPIKey:     testTunnelAPIKey,
+				testKeyStatus:     client.StatusActive,
+				testKeyKeyType:    client.APIKeyTypeTunnelBootstrap,
+				testKeyTunnelSlug: testTunnelSlug,
+			},
+		},
+		{
+			// Producer honored `kind` but bound the credential to something
+			// other than Connector enrollment — a real disagreement, not a
+			// missing echo.
+			name: "target disagrees",
+			envelope: map[string]any{
+				testKeyKeyID:  testTunnelAPIKeyID,
+				testKeyAPIKey: testTunnelAPIKey,
+				testKeyStatus: client.StatusActive,
+				"kind":        client.CredentialKindEnrollmentToken,
+				"target":      "workspace",
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			logs := captureDefaultSlog(t)
+			ts := newAdminTestServers(t)
+			ts.seedAdmin(t)
+			var revokeHits int
+			ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+				respondQURLEnvelope(t, w, map[string]any{
+					testKeyResourceID: testTunnelResourceID,
+					testKeyType:       client.ResourceTypeTunnel,
+					testKeySlug:       testTunnelSlug,
+					testKeyStatus:     client.StatusActive,
+				})
+			})
+			ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, _ *http.Request) {
+				respondQURLEnvelope(t, w, tc.envelope)
+			})
+			ts.addCustomer(http.MethodDelete, "/v1/api-keys/"+testTunnelAPIKeyID, func(w http.ResponseWriter, _ *http.Request) {
+				revokeHits++
+				w.WriteHeader(http.StatusNoContent)
+			})
+
+			h := newAdminTestHandler(t, ts)
+			dmPosts := captureTunnelPostDMSuccess(h)
+			h.SetAliasStore(h.cfg.AdminStore)
+			_, _, async := newAdminSlashInvoker(t, h).invokeAdminAsync(testTunnelInstallCmd, testAdminTeamID, testAdminUserID)
+
+			if !strings.Contains(async, "did not return a Connector enrollment token") {
+				t.Fatalf("async reply = %q, want the kind-first rejection copy", async)
+			}
+			if revokeHits != 1 {
+				t.Fatalf("unconfirmed credential revoke hits = %d, want 1", revokeHits)
+			}
+			// Non-fatal so the more specific leak assertion below still runs:
+			// "a DM was sent" and "the DM carried the secret" are different
+			// failures, and the second is the one that matters most.
+			if len(*dmPosts) != 0 {
+				t.Errorf("an unconfirmed credential must never be DMed; got %d DM(s)", len(*dmPosts))
+			}
+			for _, post := range *dmPosts {
+				if strings.Contains(post.text, testTunnelAPIKey) {
+					t.Fatal("plaintext credential leaked into a DM")
+				}
+			}
+			if !logs.contains(kindFirstRejection) {
+				t.Error("the rejection must be logged so an operator can trace it")
+			}
+		})
+	}
+}
+
+// TestTunnelInstallRejectsUnconfirmedCredentialWhenRevokeFails pins the
+// best-effort half of the gate. Cleanup can fail — the qURL API may be the
+// very thing that is broken — and the install must still fail closed and
+// still withhold the DM. The credential then lingers for however long the
+// non-conforming producer decided to grant it: a producer that ignored the
+// requested `kind` gives no assurance it honored the requested expiry either.
+// That open-ended exposure is why the runbook makes manual revoke
+// unconditional on `tunnel_bootstrap_cleanup_failed`.
+func TestTunnelInstallRejectsUnconfirmedCredentialWhenRevokeFails(t *testing.T) {
+	logs := captureDefaultSlog(t)
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	var revokeHits int
+	ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		respondQURLEnvelope(t, w, map[string]any{
+			testKeyResourceID: testTunnelResourceID,
+			testKeyType:       client.ResourceTypeTunnel,
+			testKeySlug:       testTunnelSlug,
+			testKeyStatus:     client.StatusActive,
+		})
+	})
+	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, _ *http.Request) {
+		respondQURLEnvelope(t, w, map[string]any{
+			testKeyKeyID:  testTunnelAPIKeyID,
+			testKeyAPIKey: testTunnelAPIKey,
+			testKeyStatus: client.StatusActive,
+			// Pre-cutover: no kind echoed.
+			testKeyKeyType: client.APIKeyTypeTunnelBootstrap,
+		})
+	})
+	ts.addCustomer(http.MethodDelete, "/v1/api-keys/"+testTunnelAPIKeyID, func(w http.ResponseWriter, _ *http.Request) {
+		revokeHits++
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+
+	h := newAdminTestHandler(t, ts)
+	dmPosts := captureTunnelPostDMSuccess(h)
+	h.SetAliasStore(h.cfg.AdminStore)
+	_, _, async := newAdminSlashInvoker(t, h).invokeAdminAsync(testTunnelInstallCmd, testAdminTeamID, testAdminUserID)
+
+	if revokeHits == 0 {
+		t.Error("a revoke must still be attempted when the credential is unconfirmed")
+	}
+	if !strings.Contains(async, "did not return a Connector enrollment token") {
+		t.Fatalf("async reply = %q, want the kind-first rejection copy even when cleanup fails", async)
+	}
+	if len(*dmPosts) != 0 {
+		t.Errorf("a failed revoke must not cause the credential to be DMed; got %d DM(s)", len(*dmPosts))
+	}
+	for _, post := range *dmPosts {
+		if strings.Contains(post.text, testTunnelAPIKey) {
+			t.Fatal("plaintext credential leaked into a DM")
+		}
+	}
+	if !logs.contains("tunnel_bootstrap_cleanup_failed") {
+		t.Error("a failed cleanup must log tunnel_bootstrap_cleanup_failed so an operator can revoke manually")
+	}
+}
+
+func TestTunnelInstallRejectsIncompleteResourceBeforeMintingBootstrapKey(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	var apiKeyHits int
+	ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		respondQURLEnvelope(t, w, map[string]any{
+			testKeyResourceID:         testTunnelResourceID,
+			testKeyConnectorRoutingID: "",
+			testKeyType:               client.ResourceTypeTunnel,
+			testKeySlug:               testTunnelSlug,
+			testKeyStatus:             client.StatusActive,
+		})
+	})
+	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, _ *http.Request) {
+		apiKeyHits++
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+
+	h := newAdminTestHandler(t, ts)
+	captureTunnelPostDMSuccess(h)
+	h.SetAliasStore(h.cfg.AdminStore)
+	_, _, async := newAdminSlashInvoker(t, h).invokeAdminAsync(testTunnelInstallCmd, testAdminTeamID, testAdminUserID)
+
+	if !strings.Contains(async, "complete Connector routing metadata") || !strings.Contains(async, "No enrollment token was minted") {
+		t.Fatalf("async reply = %q, want incomplete-resource pre-mint refusal", async)
+	}
+	if apiKeyHits != 0 {
+		t.Fatalf("api key route hit %d times; bootstrap key must not be minted without pinned resource identity", apiKeyHits)
+	}
+}
+
+func TestTunnelInstallRejectsMissingResourceIDBeforeMintingBootstrapKey(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	var apiKeyHits int
+	ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		respondQURLEnvelope(t, w, map[string]any{
+			testKeyType:   client.ResourceTypeTunnel,
+			testKeySlug:   testTunnelSlug,
+			testKeyStatus: client.StatusActive,
+		})
+	})
+	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, _ *http.Request) {
+		apiKeyHits++
+		t.Fatalf("api key should not be minted when qURL resource identity is incomplete")
+	})
+
+	h := newAdminTestHandler(t, ts)
+	dmPosts := captureTunnelPostDMSuccess(h)
+	h.SetAliasStore(h.cfg.AdminStore)
+	_, _, async := newAdminSlashInvoker(t, h).invokeAdminAsync(testTunnelInstallCmd, testAdminTeamID, testAdminUserID)
+
+	if apiKeyHits != 0 {
+		t.Fatalf("api key hits = %d, want 0", apiKeyHits)
+	}
+	if len(*dmPosts) != 0 {
+		t.Fatalf("bootstrap DM posts = %+v, want none", *dmPosts)
+	}
+	if !strings.Contains(async, "No enrollment token was minted") || !strings.Contains(async, "routing metadata") {
+		t.Fatalf("async reply = %q, want incomplete resource placement error before key mint", async)
+	}
+	if _, found, err := h.cfg.AdminStore.LookupChannelAlias(context.Background(), testAdminTeamID, testTunnelChannelID, testTunnelSlug); err != nil || found {
+		t.Fatalf("alias lookup found=%v err=%v, want no alias bound before complete identity", found, err)
 	}
 }
 
@@ -2942,7 +3481,7 @@ func TestTunnelInstallRefusesWhenPostDMUnwiredBeforeMintingKey(t *testing.T) {
 	h.SetAliasStore(h.cfg.AdminStore)
 	_, _, async := newAdminSlashInvoker(t, h).invokeAdminAsync(testTunnelInstallCmd, testAdminTeamID, testAdminUserID)
 
-	if !strings.Contains(async, "No bootstrap key was minted") || !strings.Contains(async, "Slack DM delivery") {
+	if !strings.Contains(async, "No enrollment token was minted") || !strings.Contains(async, "Slack DM delivery") {
 		t.Fatalf("async reply = %q, want DM-unwired pre-mint refusal", async)
 	}
 	if resourceHits != 0 || apiKeyHits != 0 {
@@ -2998,6 +3537,141 @@ func TestRevokeBootstrapKeyAfterInstallFailureNoopsWithoutKeyID(t *testing.T) {
 	revokeBootstrapKeyAfterInstallFailure(context.Background(), log, c, &client.APIKey{}, "missing_key_id")
 	if !strings.Contains(logs.String(), "missing_key_id") || !strings.Contains(logs.String(), "missing key_id") {
 		t.Fatalf("log = %q, want missing-key-id warning", logs.String())
+	}
+}
+
+func TestRestartSharingForInstallReconcilesAmbiguousAppliedPost(t *testing.T) {
+	t.Parallel()
+	var methodsMu sync.Mutex
+	var methods []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		methodsMu.Lock()
+		methods = append(methods, r.Method)
+		methodsMu.Unlock()
+		switch r.Method {
+		case http.MethodPost:
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = io.WriteString(w, `{"error":{"title":"response uncertain","status":503}}`)
+		case http.MethodGet:
+			writeSharingEnvelope(t, w, "on", 8, "connecting")
+		case http.MethodPut:
+			writeSharingEnvelope(t, w, "off", 9, "stopped")
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c := client.New(srv.URL, "unused", client.WithRetry(3))
+	prior := &client.SharingState{
+		ResourceID: testTunnelResourceID, CRID: testTunnelCRID,
+		DesiredState: "off", ServingEpoch: 7, ConnectionState: "stopped",
+	}
+
+	current, err := restartSharingForInstall(context.Background(), c, testTunnelResourceID, prior)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.DesiredState != "on" || current.ServingEpoch != 8 {
+		t.Fatalf("reconciled sharing = %+v", current)
+	}
+	// Simulate any later render/delivery failure: a prior-off install owns the
+	// transition and must turn sharing back off even though POST's response was
+	// lost and the advanced epoch came from the reconciliation GET.
+	disableSharingAfterInstallFailure(context.Background(), slog.Default(), c, testTunnelResourceID, "later_failure")
+	methodsMu.Lock()
+	gotMethods := append([]string(nil), methods...)
+	methodsMu.Unlock()
+	if got := strings.Join(gotMethods, ","); got != "POST,GET,PUT" {
+		t.Fatalf("lifecycle requests = %s, want one POST then GET reconciliation and cleanup PUT", got)
+	}
+}
+
+func TestRestartSharingForInstallRejectsAmbiguousUnchangedEpoch(t *testing.T) {
+	t.Parallel()
+	var posts, gets atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPost:
+			posts.Add(1)
+			w.WriteHeader(http.StatusServiceUnavailable)
+		case http.MethodGet:
+			gets.Add(1)
+			writeSharingEnvelope(t, w, "on", 7, "serving")
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c := client.New(srv.URL, "unused", client.WithRetry(3))
+	prior := &client.SharingState{
+		ResourceID: testTunnelResourceID, CRID: testTunnelCRID,
+		DesiredState: "on", ServingEpoch: 7, ConnectionState: "serving",
+	}
+	if _, err := restartSharingForInstall(context.Background(), c, testTunnelResourceID, prior); err == nil || !strings.Contains(err.Error(), "did not advance") {
+		t.Fatalf("error = %v, want explicit unchanged-epoch ambiguity", err)
+	}
+	if posts.Load() != 1 || gets.Load() != 1 {
+		t.Fatalf("requests post/get=%d/%d, want 1/1", posts.Load(), gets.Load())
+	}
+}
+
+func TestRestartSharingForInstallDoesNotReconcileDeterministicClientError(t *testing.T) {
+	t.Parallel()
+	var posts, gets atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPost:
+			posts.Add(1)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = io.WriteString(w, `{"error":{"title":"forbidden","status":403}}`)
+		case http.MethodGet:
+			gets.Add(1)
+			// A concurrent actor advanced the resource. The rejected POST must
+			// not claim this epoch through reconciliation.
+			writeSharingEnvelope(t, w, "on", 8, "serving")
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c := client.New(srv.URL, "unused", client.WithRetry(3))
+	prior := &client.SharingState{
+		ResourceID: testTunnelResourceID, CRID: testTunnelCRID,
+		DesiredState: "on", ServingEpoch: 7, ConnectionState: "serving",
+	}
+
+	if _, err := restartSharingForInstall(context.Background(), c, testTunnelResourceID, prior); err == nil {
+		t.Fatal("error = nil, want deterministic forbidden error")
+	} else {
+		var apiErr *client.APIError
+		if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusForbidden {
+			t.Fatalf("error = %v, want APIError status 403", err)
+		}
+	}
+	if posts.Load() != 1 || gets.Load() != 0 {
+		t.Fatalf("requests post/get=%d/%d, want 1/0", posts.Load(), gets.Load())
+	}
+}
+
+func TestSharingInstallFailureMessageDescribesPriorState(t *testing.T) {
+	t.Parallel()
+	priorOn := &client.SharingState{DesiredState: "on"}
+	if got := sharingInstallFailureMessage("failed", priorOn); !strings.Contains(got, "existing qURL share remains enabled") {
+		t.Fatalf("prior-on failure message = %q", got)
+	}
+	priorOff := &client.SharingState{DesiredState: "off"}
+	if got := sharingInstallFailureMessage("failed", priorOff); !strings.Contains(got, "newly enabled sharing") || !strings.Contains(got, "turning it back off") {
+		t.Fatalf("prior-off failure message = %q", got)
+	}
+}
+
+func writeSharingEnvelope(t *testing.T, w http.ResponseWriter, desired string, epoch uint64, connection string) {
+	t.Helper()
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{
+		"resource_id": testTunnelResourceID, "crid": testTunnelCRID,
+		"desired_state": desired, "serving_epoch": epoch, "connection_state": connection,
+	}}); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -3082,21 +3756,40 @@ func TestRevokeBootstrapKeyAfterInstallFailureHonorsParentCancellation(t *testin
 func TestTunnelInstallRevokesBootstrapKeyWhenShellValidationFails(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
-	var revokeHits int
+	var revokeHits, sharingOffHits int
+	sharingPath := "/v1/resources/" + testTunnelResourceID + "/sharing"
+	ts.addCustomer(http.MethodGet, sharingPath, func(w http.ResponseWriter, _ *http.Request) {
+		writeSharingEnvelope(t, w, "on", 7, "serving")
+	})
+	ts.addCustomer(http.MethodPost, sharingPath+"/restart", func(w http.ResponseWriter, _ *http.Request) {
+		writeSharingEnvelope(t, w, "on", 8, "connecting")
+	})
+	ts.addCustomer(http.MethodPut, sharingPath, func(w http.ResponseWriter, r *http.Request) {
+		var input struct {
+			DesiredState string `json:"desired_state"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&input); err != nil || input.DesiredState != "off" {
+			t.Fatalf("sharing compensation = %+v, %v", input, err)
+		}
+		sharingOffHits++
+		writeSharingEnvelope(t, w, "off", 9, "stopped")
+	})
 	ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
 		respondQURLEnvelope(t, w, map[string]any{
-			testKeyResourceID: testTunnelResourceID,
-			testKeyType:       client.ResourceTypeTunnel,
-			testKeySlug:       testTunnelSlug,
-			testKeyStatus:     client.StatusActive,
+			testKeyResourceID:   testTunnelResourceID,
+			"knock_resource_id": testTunnelKnockID,
+			testKeyType:         client.ResourceTypeTunnel,
+			testKeySlug:         testTunnelSlug,
+			testKeyStatus:       client.StatusActive,
 		})
 	})
 	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, _ *http.Request) {
 		respondQURLEnvelope(t, w, map[string]any{
-			testKeyKeyID:      testTunnelAPIKeyID,
-			testKeyAPIKey:     "lv_live_bad'quote",
-			testKeyPurpose:    client.APIKeyPurposeTunnelBootstrap,
-			testKeyTunnelSlug: testTunnelSlug,
+			testKeyKeyID:  testTunnelAPIKeyID,
+			testKeyAPIKey: "lv_live_bad'quote",
+			"kind":        client.CredentialKindEnrollmentToken,
+			"target":      client.CredentialTargetAgent,
+			"claims":      []map[string]any{{testKeyType: client.CredentialClaimTypeConnector, "id": testTunnelSlug}},
 		})
 	})
 	ts.addCustomer(http.MethodDelete, "/v1/api-keys/"+testTunnelAPIKeyID, func(w http.ResponseWriter, _ *http.Request) {
@@ -3115,6 +3808,12 @@ func TestTunnelInstallRevokesBootstrapKeyWhenShellValidationFails(t *testing.T) 
 	if revokeHits != 1 {
 		t.Fatalf("bootstrap key revoke hits = %d, want 1", revokeHits)
 	}
+	if sharingOffHits != 0 {
+		t.Fatalf("sharing compensation hits = %d, want 0 for prior-on reinstall", sharingOffHits)
+	}
+	if !strings.Contains(async, "existing qURL share remains enabled") {
+		t.Fatalf("async reply = %q, want explicit prior-on sharing outcome", async)
+	}
 }
 
 func TestTunnelInstallRevokesBootstrapKeyWhenSlackFollowupFails(t *testing.T) {
@@ -3125,18 +3824,20 @@ func TestTunnelInstallRevokesBootstrapKeyWhenSlackFollowupFails(t *testing.T) {
 	var revokeHits int
 	ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
 		respondQURLEnvelope(t, w, map[string]any{
-			testKeyResourceID: testTunnelResourceID,
-			testKeyType:       client.ResourceTypeTunnel,
-			testKeySlug:       testTunnelSlug,
-			testKeyStatus:     client.StatusActive,
+			testKeyResourceID:   testTunnelResourceID,
+			"knock_resource_id": testTunnelKnockID,
+			testKeyType:         client.ResourceTypeTunnel,
+			testKeySlug:         testTunnelSlug,
+			testKeyStatus:       client.StatusActive,
 		})
 	})
 	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, _ *http.Request) {
 		respondQURLEnvelope(t, w, map[string]any{
-			testKeyKeyID:      testTunnelAPIKeyID,
-			testKeyAPIKey:     testTunnelAPIKey,
-			testKeyPurpose:    client.APIKeyPurposeTunnelBootstrap,
-			testKeyTunnelSlug: testTunnelSlug,
+			testKeyKeyID:  testTunnelAPIKeyID,
+			testKeyAPIKey: testTunnelAPIKey,
+			"kind":        client.CredentialKindEnrollmentToken,
+			"target":      client.CredentialTargetAgent,
+			"claims":      []map[string]any{{testKeyType: client.CredentialClaimTypeConnector, "id": testTunnelSlug}},
 		})
 	})
 	ts.addCustomer(http.MethodDelete, "/v1/api-keys/"+testTunnelAPIKeyID, func(w http.ResponseWriter, _ *http.Request) {
@@ -3181,7 +3882,7 @@ func TestTunnelInstallRevokesBootstrapKeyWhenSlackFollowupFails(t *testing.T) {
 		t.Fatalf("response_url bodies leaked bootstrap key: %v", responseBodies)
 	}
 	last := responseBodies[len(responseBodies)-1]
-	if !strings.Contains(last, "bootstrap key was revoked") || !strings.Contains(last, "discard it") {
+	if !strings.Contains(last, "enrollment token was revoked") || !strings.Contains(last, "discard it") {
 		t.Fatalf("last response_url body = %q, want revoked-key discard follow-up", last)
 	}
 	if len(*dmPosts) != 2 {
@@ -3190,7 +3891,7 @@ func TestTunnelInstallRevokesBootstrapKeyWhenSlackFollowupFails(t *testing.T) {
 	if !strings.Contains((*dmPosts)[0].text, testTunnelAPIKey) {
 		t.Fatalf("first DM = %q, want bootstrap key", (*dmPosts)[0].text)
 	}
-	if strings.Contains((*dmPosts)[1].text, testTunnelAPIKey) || !strings.Contains((*dmPosts)[1].text, "was revoked") || !strings.Contains((*dmPosts)[1].text, "Discard that key") {
+	if strings.Contains((*dmPosts)[1].text, testTunnelAPIKey) || !strings.Contains((*dmPosts)[1].text, "was revoked") || !strings.Contains((*dmPosts)[1].text, "Discard that token") {
 		t.Fatalf("second DM = %q, want discard notice without key", (*dmPosts)[1].text)
 	}
 	got, err := agentStore.ListAuditEntries(context.Background(), testAdminTeamID, testAdminUserID, 10)
@@ -3221,18 +3922,20 @@ func TestTunnelInstallAgentAuditWriteFailureDoesNotBlockInstall(t *testing.T) {
 
 	ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
 		respondQURLEnvelope(t, w, map[string]any{
-			testKeyResourceID: testTunnelResourceID,
-			testKeyType:       client.ResourceTypeTunnel,
-			testKeySlug:       testTunnelSlug,
-			testKeyStatus:     client.StatusActive,
+			testKeyResourceID:   testTunnelResourceID,
+			"knock_resource_id": testTunnelKnockID,
+			testKeyType:         client.ResourceTypeTunnel,
+			testKeySlug:         testTunnelSlug,
+			testKeyStatus:       client.StatusActive,
 		})
 	})
 	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, _ *http.Request) {
 		respondQURLEnvelope(t, w, map[string]any{
-			testKeyKeyID:      testTunnelAPIKeyID,
-			testKeyAPIKey:     testTunnelAPIKey,
-			testKeyPurpose:    client.APIKeyPurposeTunnelBootstrap,
-			testKeyTunnelSlug: testTunnelSlug,
+			testKeyKeyID:  testTunnelAPIKeyID,
+			testKeyAPIKey: testTunnelAPIKey,
+			"kind":        client.CredentialKindEnrollmentToken,
+			"target":      client.CredentialTargetAgent,
+			"claims":      []map[string]any{{testKeyType: client.CredentialClaimTypeConnector, "id": testTunnelSlug}},
 		})
 	})
 
@@ -3403,18 +4106,20 @@ func TestTunnelInstallAgentAuditRecordsUnexpectedPanic(t *testing.T) {
 	var revokeHits int
 	ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
 		respondQURLEnvelope(t, w, map[string]any{
-			testKeyResourceID: testTunnelResourceID,
-			testKeyType:       client.ResourceTypeTunnel,
-			testKeySlug:       testTunnelSlug,
-			testKeyStatus:     client.StatusActive,
+			testKeyResourceID:   testTunnelResourceID,
+			"knock_resource_id": testTunnelKnockID,
+			testKeyType:         client.ResourceTypeTunnel,
+			testKeySlug:         testTunnelSlug,
+			testKeyStatus:       client.StatusActive,
 		})
 	})
 	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, _ *http.Request) {
 		respondQURLEnvelope(t, w, map[string]any{
-			testKeyKeyID:      testTunnelAPIKeyID,
-			testKeyAPIKey:     testTunnelAPIKey,
-			testKeyPurpose:    client.APIKeyPurposeTunnelBootstrap,
-			testKeyTunnelSlug: testTunnelSlug,
+			testKeyKeyID:  testTunnelAPIKeyID,
+			testKeyAPIKey: testTunnelAPIKey,
+			"kind":        client.CredentialKindEnrollmentToken,
+			"target":      client.CredentialTargetAgent,
+			"claims":      []map[string]any{{testKeyType: client.CredentialClaimTypeConnector, "id": testTunnelSlug}},
 		})
 	})
 	ts.addCustomer(http.MethodDelete, "/v1/api-keys/"+testTunnelAPIKeyID, func(w http.ResponseWriter, _ *http.Request) {
@@ -3470,18 +4175,20 @@ func TestTunnelInstallBuildPanicRevokesBootstrapKeyAndAudits(t *testing.T) {
 	var revokeHits int
 	ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
 		respondQURLEnvelope(t, w, map[string]any{
-			testKeyResourceID: testTunnelResourceID,
-			testKeyType:       client.ResourceTypeTunnel,
-			testKeySlug:       testTunnelSlug,
-			testKeyStatus:     client.StatusActive,
+			testKeyResourceID:   testTunnelResourceID,
+			"knock_resource_id": testTunnelKnockID,
+			testKeyType:         client.ResourceTypeTunnel,
+			testKeySlug:         testTunnelSlug,
+			testKeyStatus:       client.StatusActive,
 		})
 	})
 	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, _ *http.Request) {
 		respondQURLEnvelope(t, w, map[string]any{
-			testKeyKeyID:      testTunnelAPIKeyID,
-			testKeyAPIKey:     testTunnelAPIKey,
-			testKeyPurpose:    client.APIKeyPurposeTunnelBootstrap,
-			testKeyTunnelSlug: testTunnelSlug,
+			testKeyKeyID:  testTunnelAPIKeyID,
+			testKeyAPIKey: testTunnelAPIKey,
+			"kind":        client.CredentialKindEnrollmentToken,
+			"target":      client.CredentialTargetAgent,
+			"claims":      []map[string]any{{testKeyType: client.CredentialClaimTypeConnector, "id": testTunnelSlug}},
 		})
 	})
 	ts.addCustomer(http.MethodDelete, "/v1/api-keys/"+testTunnelAPIKeyID, func(w http.ResponseWriter, _ *http.Request) {
@@ -3642,18 +4349,20 @@ func TestTunnelInstallRetriesTransientTextDeliveryBeforeRevoking(t *testing.T) {
 	ts.seedAdmin(t)
 	ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
 		respondQURLEnvelope(t, w, map[string]any{
-			testKeyResourceID: testTunnelResourceID,
-			testKeyType:       client.ResourceTypeTunnel,
-			testKeySlug:       testTunnelSlug,
-			testKeyStatus:     client.StatusActive,
+			testKeyResourceID:   testTunnelResourceID,
+			"knock_resource_id": testTunnelKnockID,
+			testKeyType:         client.ResourceTypeTunnel,
+			testKeySlug:         testTunnelSlug,
+			testKeyStatus:       client.StatusActive,
 		})
 	})
 	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, _ *http.Request) {
 		respondQURLEnvelope(t, w, map[string]any{
-			testKeyKeyID:      testTunnelAPIKeyID,
-			testKeyAPIKey:     testTunnelAPIKey,
-			testKeyPurpose:    client.APIKeyPurposeTunnelBootstrap,
-			testKeyTunnelSlug: testTunnelSlug,
+			testKeyKeyID:  testTunnelAPIKeyID,
+			testKeyAPIKey: testTunnelAPIKey,
+			"kind":        client.CredentialKindEnrollmentToken,
+			"target":      client.CredentialTargetAgent,
+			"claims":      []map[string]any{{testKeyType: client.CredentialClaimTypeConnector, "id": testTunnelSlug}},
 		})
 	})
 	var revokeHits int
@@ -3722,18 +4431,20 @@ func TestTunnelInstallRevokesBootstrapKeyWhenDMSendFails(t *testing.T) {
 	var revokeHits int
 	ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
 		respondQURLEnvelope(t, w, map[string]any{
-			testKeyResourceID: testTunnelResourceID,
-			testKeyType:       client.ResourceTypeTunnel,
-			testKeySlug:       testTunnelSlug,
-			testKeyStatus:     client.StatusActive,
+			testKeyResourceID:   testTunnelResourceID,
+			"knock_resource_id": testTunnelKnockID,
+			testKeyType:         client.ResourceTypeTunnel,
+			testKeySlug:         testTunnelSlug,
+			testKeyStatus:       client.StatusActive,
 		})
 	})
 	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, _ *http.Request) {
 		respondQURLEnvelope(t, w, map[string]any{
-			testKeyKeyID:      testTunnelAPIKeyID,
-			testKeyAPIKey:     testTunnelAPIKey,
-			testKeyPurpose:    client.APIKeyPurposeTunnelBootstrap,
-			testKeyTunnelSlug: testTunnelSlug,
+			testKeyKeyID:  testTunnelAPIKeyID,
+			testKeyAPIKey: testTunnelAPIKey,
+			"kind":        client.CredentialKindEnrollmentToken,
+			"target":      client.CredentialTargetAgent,
+			"claims":      []map[string]any{{testKeyType: client.CredentialClaimTypeConnector, "id": testTunnelSlug}},
 		})
 	})
 	ts.addCustomer(http.MethodDelete, "/v1/api-keys/"+testTunnelAPIKeyID, func(w http.ResponseWriter, _ *http.Request) {
@@ -3774,7 +4485,7 @@ func TestTunnelInstallRevokesBootstrapKeyWhenDMSendFails(t *testing.T) {
 			t.Fatalf("DM-failure notice leaked install secret/details %q: %s", forbidden, failure)
 		}
 	}
-	if !strings.Contains(failure, "could not deliver") || !strings.Contains(failure, "temporary key was revoked") {
+	if !strings.Contains(failure, "could not deliver") || !strings.Contains(failure, "temporary token was revoked") {
 		t.Fatalf("failure notice = %s, want DM failure and revoke copy", failure)
 	}
 	got, err := agentStore.ListAuditEntries(context.Background(), testAdminTeamID, testAdminUserID, 10)
@@ -3802,18 +4513,20 @@ func TestTunnelInstallMissingScopeDMFailureMentionsSlackReinstall(t *testing.T) 
 	var revokeHits int
 	ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
 		respondQURLEnvelope(t, w, map[string]any{
-			testKeyResourceID: testTunnelResourceID,
-			testKeyType:       client.ResourceTypeTunnel,
-			testKeySlug:       testTunnelSlug,
-			testKeyStatus:     client.StatusActive,
+			testKeyResourceID:   testTunnelResourceID,
+			"knock_resource_id": testTunnelKnockID,
+			testKeyType:         client.ResourceTypeTunnel,
+			testKeySlug:         testTunnelSlug,
+			testKeyStatus:       client.StatusActive,
 		})
 	})
 	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, _ *http.Request) {
 		respondQURLEnvelope(t, w, map[string]any{
-			testKeyKeyID:      testTunnelAPIKeyID,
-			testKeyAPIKey:     testTunnelAPIKey,
-			testKeyPurpose:    client.APIKeyPurposeTunnelBootstrap,
-			testKeyTunnelSlug: testTunnelSlug,
+			testKeyKeyID:  testTunnelAPIKeyID,
+			testKeyAPIKey: testTunnelAPIKey,
+			"kind":        client.CredentialKindEnrollmentToken,
+			"target":      client.CredentialTargetAgent,
+			"claims":      []map[string]any{{testKeyType: client.CredentialClaimTypeConnector, "id": testTunnelSlug}},
 		})
 	})
 	ts.addCustomer(http.MethodDelete, "/v1/api-keys/"+testTunnelAPIKeyID, func(w http.ResponseWriter, _ *http.Request) {
@@ -3849,7 +4562,7 @@ func TestTunnelInstallMissingScopeDMFailureMentionsSlackReinstall(t *testing.T) 
 	}
 	failure := parseSlackText(t, []byte(responseBodies[0]))
 	for _, want := range []string{
-		"temporary key was revoked",
+		"temporary token was revoked",
 		"latest qURL Slack app install",
 		"<https://slack-bot.example/oauth/slack/install|the qURL Slack install link>",
 		"/qurl-admin protect-connector",
@@ -3873,10 +4586,11 @@ func TestTunnelInstallRetryAfterDMRevokeUsesFreshIdempotencyKey(t *testing.T) {
 	var idempotencyKeys []string
 	ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
 		respondQURLEnvelope(t, w, map[string]any{
-			testKeyResourceID: testTunnelResourceID,
-			testKeyType:       client.ResourceTypeTunnel,
-			testKeySlug:       testTunnelSlug,
-			testKeyStatus:     client.StatusActive,
+			testKeyResourceID:   testTunnelResourceID,
+			"knock_resource_id": testTunnelKnockID,
+			testKeyType:         client.ResourceTypeTunnel,
+			testKeySlug:         testTunnelSlug,
+			testKeyStatus:       client.StatusActive,
 		})
 	})
 	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, r *http.Request) {
@@ -3884,10 +4598,11 @@ func TestTunnelInstallRetryAfterDMRevokeUsesFreshIdempotencyKey(t *testing.T) {
 		idempotencyKeys = append(idempotencyKeys, r.Header.Get(client.HeaderIdempotencyKey))
 		keyID := fmt.Sprintf("key_retry_%d", apiKeyHits)
 		respondQURLEnvelope(t, w, map[string]any{
-			testKeyKeyID:      keyID,
-			testKeyAPIKey:     fmt.Sprintf("lv_live_retry_bootstrap_%d", apiKeyHits),
-			testKeyPurpose:    client.APIKeyPurposeTunnelBootstrap,
-			testKeyTunnelSlug: testTunnelSlug,
+			testKeyKeyID:  keyID,
+			testKeyAPIKey: fmt.Sprintf("lv_live_retry_bootstrap_%d", apiKeyHits),
+			"kind":        client.CredentialKindEnrollmentToken,
+			"target":      client.CredentialTargetAgent,
+			"claims":      []map[string]any{{testKeyType: client.CredentialClaimTypeConnector, "id": testTunnelSlug}},
 		})
 	})
 	ts.addCustomer(http.MethodDelete, "/v1/api-keys/key_retry_1", func(w http.ResponseWriter, _ *http.Request) {
@@ -3967,18 +4682,20 @@ func TestTunnelInstallFallsBackToTextWhenBlocksRejected(t *testing.T) {
 	ts.seedAdmin(t)
 	ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
 		respondQURLEnvelope(t, w, map[string]any{
-			testKeyResourceID: testTunnelResourceID,
-			testKeyType:       client.ResourceTypeTunnel,
-			testKeySlug:       testTunnelSlug,
-			testKeyStatus:     client.StatusActive,
+			testKeyResourceID:   testTunnelResourceID,
+			"knock_resource_id": testTunnelKnockID,
+			testKeyType:         client.ResourceTypeTunnel,
+			testKeySlug:         testTunnelSlug,
+			testKeyStatus:       client.StatusActive,
 		})
 	})
 	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, _ *http.Request) {
 		respondQURLEnvelope(t, w, map[string]any{
-			testKeyKeyID:      testTunnelAPIKeyID,
-			testKeyAPIKey:     testTunnelAPIKey,
-			testKeyPurpose:    client.APIKeyPurposeTunnelBootstrap,
-			testKeyTunnelSlug: testTunnelSlug,
+			testKeyKeyID:  testTunnelAPIKeyID,
+			testKeyAPIKey: testTunnelAPIKey,
+			"kind":        client.CredentialKindEnrollmentToken,
+			"target":      client.CredentialTargetAgent,
+			"claims":      []map[string]any{{testKeyType: client.CredentialClaimTypeConnector, "id": testTunnelSlug}},
 		})
 	})
 	var revokeHits int
@@ -4079,10 +4796,11 @@ func TestTunnelInstallRetryRemintsWhenAliasAlreadyMatches(t *testing.T) {
 	var idempotencyKeys []string
 	ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
 		respondQURLEnvelope(t, w, map[string]any{
-			testKeyResourceID: testTunnelResourceID,
-			testKeyType:       client.ResourceTypeTunnel,
-			testKeySlug:       testTunnelSlug,
-			testKeyStatus:     client.StatusActive,
+			testKeyResourceID:   testTunnelResourceID,
+			"knock_resource_id": testTunnelKnockID,
+			testKeyType:         client.ResourceTypeTunnel,
+			testKeySlug:         testTunnelSlug,
+			testKeyStatus:       client.StatusActive,
 		})
 	})
 	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, r *http.Request) {
@@ -4094,11 +4812,12 @@ func TestTunnelInstallRetryRemintsWhenAliasAlreadyMatches(t *testing.T) {
 			return
 		}
 		respondQURLEnvelope(t, w, map[string]any{
-			testKeyKeyID:      testTunnelAPIKeyID,
-			testKeyAPIKey:     "lv_live_retry_bootstrap",
-			testKeyPurpose:    client.APIKeyPurposeTunnelBootstrap,
-			testKeyTunnelSlug: testTunnelSlug,
-			testKeyExpiresAt:  now.Add(time.Hour).Format(time.RFC3339),
+			testKeyKeyID:     testTunnelAPIKeyID,
+			testKeyAPIKey:    "lv_live_retry_bootstrap",
+			"kind":           client.CredentialKindEnrollmentToken,
+			"target":         client.CredentialTargetAgent,
+			"claims":         []map[string]any{{testKeyType: client.CredentialClaimTypeConnector, "id": testTunnelSlug}},
+			testKeyExpiresAt: now.Add(time.Hour).Format(time.RFC3339),
 		})
 	})
 
@@ -4159,7 +4878,8 @@ func TestTunnelInstallTypedEnvironmentInstructions(t *testing.T) {
 			want: []string{
 				"Target environment: AWS ECS/Fargate.",
 				ecsFargateChecklistText,
-				testTunnelECSAPIKeyNameLine,
+				`"name": "QURL_ENDPOINT"`,
+				"Validate the warm-start task revision above before deleting the enrollment-token file from the qurl-bootstrap EFS access point.",
 			},
 		},
 		{
@@ -4170,6 +4890,7 @@ func TestTunnelInstallTypedEnvironmentInstructions(t *testing.T) {
 				"kubectl apply -f -",
 				"Pod spec additions:",
 				"Do not duplicate existing YAML keys.",
+				"Validate the warm-start workload revision above before deleting the Kubernetes enrollment-token Secret.",
 			},
 		},
 	}
@@ -4179,19 +4900,21 @@ func TestTunnelInstallTypedEnvironmentInstructions(t *testing.T) {
 			ts.seedAdmin(t)
 			ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
 				respondQURLEnvelope(t, w, map[string]any{
-					testKeyResourceID: testTunnelResourceID,
-					testKeyType:       client.ResourceTypeTunnel,
-					testKeySlug:       testTunnelSlug,
-					testKeyStatus:     client.StatusActive,
+					testKeyResourceID:   testTunnelResourceID,
+					"knock_resource_id": testTunnelKnockID,
+					testKeyType:         client.ResourceTypeTunnel,
+					testKeySlug:         testTunnelSlug,
+					testKeyStatus:       client.StatusActive,
 				})
 			})
 			ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, _ *http.Request) {
 				respondQURLEnvelope(t, w, map[string]any{
-					testKeyKeyID:      testTunnelAPIKeyID,
-					testKeyAPIKey:     testTunnelAPIKey,
-					testKeyPurpose:    client.APIKeyPurposeTunnelBootstrap,
-					testKeyTunnelSlug: testTunnelSlug,
-					testKeyExpiresAt:  now.Add(time.Hour).Format(time.RFC3339),
+					testKeyKeyID:     testTunnelAPIKeyID,
+					testKeyAPIKey:    testTunnelAPIKey,
+					"kind":           client.CredentialKindEnrollmentToken,
+					"target":         client.CredentialTargetAgent,
+					"claims":         []map[string]any{{testKeyType: client.CredentialClaimTypeConnector, "id": testTunnelSlug}},
+					testKeyExpiresAt: now.Add(time.Hour).Format(time.RFC3339),
 				})
 			})
 
@@ -4211,7 +4934,7 @@ func TestTunnelInstallTypedEnvironmentInstructions(t *testing.T) {
 					t.Fatalf("%s async reply missing %q:\n%s", tc.name, want, async)
 				}
 			}
-			if strings.Contains(async, testForbiddenResourceLabel) || strings.Contains(async, testTunnelResourceID) || strings.Contains(async, testTunnelAPIKey) {
+			if strings.Contains(async, testForbiddenResourceLabel) || strings.Contains(async, testTunnelAPIKey) {
 				t.Fatalf("%s async reply leaked resource details:\n%s", tc.name, async)
 			}
 		})
@@ -4226,10 +4949,11 @@ func TestTunnelInstallRefusesExistingDifferentAliasBeforeMintingKey(t *testing.T
 	var apiKeyHits int
 	ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
 		respondQURLEnvelope(t, w, map[string]any{
-			testKeyResourceID: testTunnelResourceID,
-			testKeyType:       client.ResourceTypeTunnel,
-			testKeySlug:       testTunnelSlug,
-			testKeyStatus:     client.StatusActive,
+			testKeyResourceID:   testTunnelResourceID,
+			"knock_resource_id": testTunnelKnockID,
+			testKeyType:         client.ResourceTypeTunnel,
+			testKeySlug:         testTunnelSlug,
+			testKeyStatus:       client.StatusActive,
 		})
 	})
 	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, _ *http.Request) {
@@ -4247,6 +4971,107 @@ func TestTunnelInstallRefusesExistingDifferentAliasBeforeMintingKey(t *testing.T
 	}
 	if apiKeyHits != 0 {
 		t.Fatalf("api key route hit %d times; bootstrap key must not be minted when alias bind fails", apiKeyHits)
+	}
+}
+
+func TestTunnelInstallRefusesIncompleteConnectorContractBeforeMintingKey(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+
+	var apiKeyHits int
+	ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		respondRawQURLEnvelope(t, w, map[string]any{
+			testKeyResourceID:   testTunnelResourceID,
+			testKeyType:         client.ResourceTypeTunnel,
+			testKeySlug:         testTunnelSlug,
+			testKeyStatus:       client.StatusActive,
+			"knock_resource_id": testTunnelKnockID,
+		})
+	})
+	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, _ *http.Request) {
+		apiKeyHits++
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+
+	h := newAdminTestHandler(t, ts)
+	captureTunnelPostDMSuccess(h)
+	h.SetAliasStore(h.cfg.AdminStore)
+	_, _, async := newAdminSlashInvoker(t, h).invokeAdminAsync(testTunnelInstallCmd, testAdminTeamID, testAdminUserID)
+
+	if !strings.Contains(async, "complete Connector routing metadata") || !strings.Contains(async, "No enrollment token was minted") {
+		t.Fatalf("async reply = %q, want incomplete connector contract refusal", async)
+	}
+	if apiKeyHits != 0 {
+		t.Fatalf("api key route hit %d times; incomplete routing metadata must not consume a bootstrap key", apiKeyHits)
+	}
+}
+
+func TestTunnelInstallRefusesLegacyResourceIDBeforeMintingKey(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+
+	var apiKeyHits int
+	ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		respondQURLEnvelope(t, w, map[string]any{
+			testKeyResourceID: "r_legacy-internal",
+			testKeyType:       client.ResourceTypeTunnel,
+			testKeySlug:       testTunnelSlug,
+			testKeyStatus:     client.StatusActive,
+		})
+	})
+	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, _ *http.Request) {
+		apiKeyHits++
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+
+	h := newAdminTestHandler(t, ts)
+	captureTunnelPostDMSuccess(h)
+	h.SetAliasStore(h.cfg.AdminStore)
+	_, _, async := newAdminSlashInvoker(t, h).invokeAdminAsync(testTunnelInstallCmd, testAdminTeamID, testAdminUserID)
+
+	if !strings.Contains(async, "complete Connector routing metadata") || !strings.Contains(async, "No enrollment token was minted") {
+		t.Fatalf("async reply = %q, want legacy resource ID refusal", async)
+	}
+	if apiKeyHits != 0 {
+		t.Fatalf("api key route hit %d times; legacy resource ID must not consume a bootstrap key", apiKeyHits)
+	}
+}
+
+func TestTunnelInstallRefusesInvalidLocalEndpointBeforeMintingKey(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+
+	var resourceHits, apiKeyHits int
+	ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		resourceHits++
+		respondQURLEnvelope(t, w, map[string]any{
+			testKeyResourceID:      testTunnelResourceID,
+			"connector_routing_id": testTunnelRoutingID,
+			testKeyType:            client.ResourceTypeTunnel,
+			testKeySlug:            testTunnelSlug,
+			testKeyStatus:          client.StatusActive,
+			"knock_resource_id":    testTunnelKnockID,
+		})
+	})
+	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, _ *http.Request) {
+		apiKeyHits++
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+
+	h := newAdminTestHandler(t, ts)
+	h.cfg.ConnectorAPIURL = testInvalidRemoteConnectorAPIURL
+	captureTunnelPostDMSuccess(h)
+	h.SetAliasStore(h.cfg.AdminStore)
+	_, _, async := newAdminSlashInvoker(t, h).invokeAdminAsync(testTunnelInstallCmd, testAdminTeamID, testAdminUserID)
+
+	if !strings.Contains(async, "invalid QURL_ENDPOINT") || !strings.Contains(async, "Contact the operator") {
+		t.Fatalf("async reply = %q, want local endpoint configuration refusal", async)
+	}
+	if resourceHits != 0 {
+		t.Fatalf("resource route hit %d times; invalid local endpoint must fail before find-or-create", resourceHits)
+	}
+	if apiKeyHits != 0 {
+		t.Fatalf("api key route hit %d times; invalid local endpoint must not consume a bootstrap key", apiKeyHits)
 	}
 }
 
@@ -4381,6 +5206,32 @@ func TestSlackCodeBlock(t *testing.T) {
 
 func respondQURLEnvelope(t *testing.T, w http.ResponseWriter, data any) {
 	t.Helper()
+	// Most tests exercise unrelated Slack behavior, so tunnel responses receive
+	// the current routing fields by default. Contract-gap tests must encode their
+	// response directly when they intentionally need a field to stay absent.
+	if resource, ok := data.(map[string]any); ok &&
+		resource[testKeyType] == client.ResourceTypeTunnel &&
+		resource[testKeyResourceID] != nil {
+		copied := make(map[string]any, len(resource)+2)
+		for key, value := range resource {
+			copied[key] = value
+		}
+		resource = copied
+		if _, exists := resource["connector_routing_id"]; !exists {
+			resource["connector_routing_id"] = testTunnelRoutingID
+		}
+		if _, exists := resource["knock_resource_id"]; !exists {
+			resource["knock_resource_id"] = testTunnelKnockID
+		}
+		data = resource
+	}
+	respondRawQURLEnvelope(t, w, data)
+}
+
+// respondRawQURLEnvelope deliberately bypasses tunnel identity defaults for
+// contract-gap tests that need a routing field to remain absent.
+func respondRawQURLEnvelope(t *testing.T, w http.ResponseWriter, data any) {
+	t.Helper()
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(map[string]any{
 		"data": data,
@@ -4425,4 +5276,300 @@ func tunnelInstallViewSubmissionBodyWithIdentity(t *testing.T, meta *TunnelInsta
 		t.Fatalf("marshal private_metadata: %v", err)
 	}
 	return viewSubmissionBody(t, "V_test_tunnel", callbackIDTunnelInstall, string(pm), payloadTeamID, payloadUserID, values)
+}
+
+// TestCredentialConfirmsKindFirst pins the response-confirmation semantics the
+// rollout warning keys off. The two cases that matter most are the ones that
+// pull in opposite directions: a pre-cutover producer (no `kind` at all) must
+// warn, because it silently minted a broader credential than requested; a
+// post-cutover producer that echoes `kind` but omits the corroborating
+// `target` must NOT warn, or the signal becomes permanent noise.
+func TestCredentialConfirmsKindFirst(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name string
+		key  *client.APIKey
+		want bool
+	}{
+		{
+			name: "kind, target and bound claim confirmed",
+			key:  &client.APIKey{Kind: client.CredentialKindEnrollmentToken, Target: client.CredentialTargetAgent, Claims: []client.CredentialClaim{{Type: client.CredentialClaimTypeConnector, ID: testTunnelSlug}}},
+			want: true,
+		},
+		{
+			name: "claim dropped by the producer",
+			key:  &client.APIKey{Kind: client.CredentialKindEnrollmentToken, Target: client.CredentialTargetAgent},
+			want: false,
+		},
+		{
+			name: "claim bound to another connector",
+			key:  &client.APIKey{Kind: client.CredentialKindEnrollmentToken, Target: client.CredentialTargetAgent, Claims: []client.CredentialClaim{{Type: client.CredentialClaimTypeConnector, ID: "other"}}},
+			want: false,
+		},
+		{
+			name: "kind confirmed but producer still mints connector-target tokens",
+			key:  &client.APIKey{Kind: client.CredentialKindEnrollmentToken, Target: client.CredentialTargetConnector},
+			want: false,
+		},
+		{
+			// No leniency: qurl-service echoes target since #1347 (deployed), and
+			// an unconfirmable owner-scoped credential must never be DM'd.
+			name: "kind confirmed, target not echoed",
+			key:  &client.APIKey{Kind: client.CredentialKindEnrollmentToken},
+			want: false,
+		},
+		{
+			name: "kind confirmed but target disagrees",
+			key:  &client.APIKey{Kind: client.CredentialKindEnrollmentToken, Target: "workspace"},
+			want: false,
+		},
+		{
+			name: "pre-cutover producer echoes nothing",
+			key:  &client.APIKey{KeyType: client.APIKeyTypeTunnelBootstrap, TunnelSlug: testTunnelSlug},
+			want: false,
+		},
+		{
+			name: "producer minted an ordinary api key",
+			key:  &client.APIKey{Kind: client.CredentialKindAPIKey},
+			want: false,
+		},
+		{
+			name: "nil key",
+			key:  nil,
+			want: false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := credentialConfirmsKindFirst(tc.key, testTunnelSlug); got != tc.want {
+				t.Errorf("credentialConfirmsKindFirst(%+v) = %v, want %v", tc.key, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestValidateConnectorAPIURLLoopbackHostCasing pins the property that used to be
+// guaranteed locally by a strings.ToLower at the call site and now lives in
+// nethost.IsLoopback. Nothing else calls ValidateConnectorAPIURL directly — its
+// coverage is incidental through handler paths — so an upper-case loopback host
+// regressing here would surface as a failed install, not a failed test.
+func TestValidateConnectorAPIURLLoopbackHostCasing(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name    string
+		raw     string
+		wantErr error
+	}{
+		{name: "uppercase localhost over http", raw: "http://LOCALHOST:8080/v1"},
+		{name: "mixed case localhost over http", raw: "http://LocalHost:8080/v1"},
+		{name: "lowercase localhost over http", raw: "http://localhost:8080/v1"},
+		{name: "loopback ip over http", raw: "http://127.0.0.1:8080/v1"},
+		{name: "uppercase public host over http", raw: "http://EXAMPLE.COM/v1", wantErr: errConnectorAPIURLInvalid},
+		{name: "public host over http", raw: "http://example.com/v1", wantErr: errConnectorAPIURLInvalid},
+		// The one deliberate behavior delta from moving this predicate into nethost:
+		// url.URL.Hostname can return surrounding Unicode whitespace from a URL that
+		// parsed cleanly, and nethost.IsLoopback trims where the old call site did not.
+		// Pinned so re-tightening or further loosening trips a test rather than shipping.
+		{name: "loopback with trailing nbsp over http", raw: "http://localhost\u00a0:8080/v1"},
+		// Interior whitespace survives the trim, so this stays rejected.
+		{name: "nbsp separated impostor host over http", raw: "http://localhost\u00a0.evil.com/v1", wantErr: errConnectorAPIURLInvalid},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := ValidateConnectorAPIURL(tc.raw)
+			if tc.wantErr == nil {
+				if err != nil {
+					t.Fatalf("ValidateConnectorAPIURL(%q) = %v, want nil", tc.raw, err)
+				}
+				return
+			}
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("ValidateConnectorAPIURL(%q) = %v, want %v", tc.raw, err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// TestTunnelInstallFailsClosedWhenOwnerLookupFails pins the ordering the
+// headless v2 config depends on: the account owner is resolved before any
+// remote mutation, so a GET /v1/me outage mints no token, creates no
+// resource, and surfaces an actionable reply.
+func TestTunnelInstallFailsClosedWhenOwnerLookupFails(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	var resourceHits, keyHits, sharingHits int
+	ts.addCustomer(http.MethodPut, "/v1/resources/"+testTunnelResourceID+"/sharing", func(w http.ResponseWriter, _ *http.Request) {
+		sharingHits++
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	// A non-retried status: the client retries 5xx with backoff, which would
+	// outlast the async reply window without changing the fail-closed path.
+	ts.addCustomer(http.MethodGet, "/v1/me", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+	})
+	ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		resourceHits++
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, _ *http.Request) {
+		keyHits++
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	h := newAdminTestHandler(t, ts)
+	captureTunnelPostDMSuccess(h)
+	h.SetAliasStore(h.cfg.AdminStore)
+	_, _, async := newAdminSlashInvoker(t, h).invokeAdminAsync(testTunnelInstallCmd, testAdminTeamID, testAdminUserID)
+	if !strings.Contains(async, "Failed to resolve the qURL account owner") {
+		t.Fatalf("async reply = %q, want owner-lookup failure copy", async)
+	}
+	if resourceHits != 0 || keyHits != 0 || sharingHits != 0 {
+		t.Fatalf("resource creates = %d, key mints = %d, sharing writes = %d; want all 0 (owner lookup must precede mutation)", resourceHits, keyHits, sharingHits)
+	}
+}
+
+// TestTunnelInstallRejectsWhenTargetNotEchoed isolates the target clause: kind
+// and the bound claim are echoed, target is not, so the owner-scoped
+// credential cannot be confirmed and is revoked, never DM'd.
+func TestTunnelInstallRejectsWhenTargetNotEchoed(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	var revokeHits int
+	ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		respondQURLEnvelope(t, w, map[string]any{
+			testKeyResourceID:   testTunnelResourceID,
+			"knock_resource_id": testTunnelKnockID,
+			testKeyType:         client.ResourceTypeTunnel,
+			testKeySlug:         testTunnelSlug,
+			testKeyStatus:       client.StatusActive,
+		})
+	})
+	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, _ *http.Request) {
+		respondQURLEnvelope(t, w, map[string]any{
+			testKeyKeyID:  testTunnelAPIKeyID,
+			testKeyAPIKey: testTunnelModalKey,
+			"kind":        client.CredentialKindEnrollmentToken,
+			"claims":      []map[string]any{{testKeyType: client.CredentialClaimTypeConnector, "id": testTunnelSlug}},
+		})
+	})
+	ts.addCustomer(http.MethodDelete, "/v1/api-keys/"+testTunnelAPIKeyID, func(w http.ResponseWriter, _ *http.Request) {
+		revokeHits++
+		w.WriteHeader(http.StatusNoContent)
+	})
+	h := newAdminTestHandler(t, ts)
+	dmPosts := captureTunnelPostDMSuccess(h)
+	h.SetAliasStore(h.cfg.AdminStore)
+	_, _, async := newAdminSlashInvoker(t, h).invokeAdminAsync(testTunnelInstallCmd, testAdminTeamID, testAdminUserID)
+	if len(*dmPosts) != 0 || revokeHits != 1 || !strings.Contains(async, kindFirstUnconfirmedInstallMessage) {
+		t.Fatalf("DM posts = %d, revokes = %d, reply = %q; want no DM, one revoke, shared copy", len(*dmPosts), revokeHits, async)
+	}
+}
+
+func TestOwnerLookupFailureMessage(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name          string
+		err           error
+		want          string
+		wantRequestID string
+	}{
+		{name: "404 names the missing capability", err: fmt.Errorf("resolve account identity: %w", &client.APIError{StatusCode: http.StatusNotFound, RequestID: "req-404"}), want: "identity lookup (endpoint unavailable)", wantRequestID: "req-404"},
+		{name: "405 names the missing capability", err: fmt.Errorf("resolve account identity: %w", &client.APIError{StatusCode: http.StatusMethodNotAllowed}), want: "identity lookup (endpoint unavailable)"},
+		{name: "non API-key principal is permanent", err: fmt.Errorf("resolve account identity: %w", errNonAPIKeyPrincipal), want: "not an account API key"},
+		{name: "other API errors stay generic", err: fmt.Errorf("resolve account identity: %w", &client.APIError{StatusCode: http.StatusBadRequest}), want: "Failed to resolve the qURL account owner"},
+		{name: "transport errors stay generic", err: errors.New("dial tcp: refused"), want: "Failed to resolve the qURL account owner."},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := ownerLookupFailureMessage(tc.err); !strings.Contains(got, tc.want) {
+				t.Fatalf("message = %q, want containing %q", got, tc.want)
+			}
+			if tc.wantRequestID != "" && !strings.Contains(ownerLookupFailureMessage(tc.err), tc.wantRequestID) {
+				t.Fatalf("message lost the request reference %q: %q", tc.wantRequestID, ownerLookupFailureMessage(tc.err))
+			}
+		})
+	}
+}
+
+// TestTunnelInstallFailsClosedForNonAPIKeyPrincipal pins the install policy
+// guard: /v1/me without api_key means owner_id would name a delegated user,
+// so nothing is created or minted and the admin sees the generic copy.
+func TestTunnelInstallFailsClosedForNonAPIKeyPrincipal(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	var resourceHits, keyHits int
+	ts.addCustomer(http.MethodGet, "/v1/me", func(w http.ResponseWriter, _ *http.Request) {
+		respondQURLEnvelope(t, w, map[string]any{"owner_id": testOwnerID})
+	})
+	ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		resourceHits++
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, _ *http.Request) {
+		keyHits++
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	h := newAdminTestHandler(t, ts)
+	captureTunnelPostDMSuccess(h)
+	h.SetAliasStore(h.cfg.AdminStore)
+	_, _, async := newAdminSlashInvoker(t, h).invokeAdminAsync(testTunnelInstallCmd, testAdminTeamID, testAdminUserID)
+	if !strings.Contains(async, "not an account API key") || resourceHits != 0 || keyHits != 0 {
+		t.Fatalf("reply = %q, creates = %d, mints = %d; want the non-API-key copy and no mutation", async, resourceHits, keyHits)
+	}
+}
+
+// TestTunnelInstallRejectsWhenClaimNotEchoed pins that the kind-first gate
+// also confirms the resource binding: a producer that drops the connector
+// claim mints an unbound owner-scoped token, which is revoked, never DM'd.
+func TestTunnelInstallRejectsWhenClaimNotEchoed(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	var revokeHits, meHits int
+	ts.addCustomer(http.MethodGet, "/v1/me", func(w http.ResponseWriter, _ *http.Request) {
+		meHits++
+		respondQURLEnvelope(t, w, map[string]any{"owner_id": testOwnerID, "api_key": map[string]any{"key_id": "key_workspace"}})
+	})
+	ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		respondQURLEnvelope(t, w, map[string]any{
+			testKeyResourceID:   testTunnelResourceID,
+			"knock_resource_id": testTunnelKnockID,
+			testKeyType:         client.ResourceTypeTunnel,
+			testKeySlug:         testTunnelSlug,
+			testKeyStatus:       client.StatusActive,
+		})
+	})
+	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, _ *http.Request) {
+		respondQURLEnvelope(t, w, map[string]any{
+			testKeyKeyID:  testTunnelAPIKeyID,
+			testKeyAPIKey: testTunnelModalKey,
+			"kind":        client.CredentialKindEnrollmentToken,
+			"target":      client.CredentialTargetAgent,
+		})
+	})
+	ts.addCustomer(http.MethodDelete, "/v1/api-keys/"+testTunnelAPIKeyID, func(w http.ResponseWriter, _ *http.Request) {
+		revokeHits++
+		w.WriteHeader(http.StatusNoContent)
+	})
+	h := newAdminTestHandler(t, ts)
+	dmPosts := captureTunnelPostDMSuccess(h)
+	h.SetAliasStore(h.cfg.AdminStore)
+	_, _, async := newAdminSlashInvoker(t, h).invokeAdminAsync(testTunnelInstallCmd, testAdminTeamID, testAdminUserID)
+	if len(*dmPosts) != 0 || revokeHits != 1 || !strings.Contains(async, kindFirstUnconfirmedInstallMessage) {
+		t.Fatalf("DM posts = %d, revokes = %d, reply = %q; want no DM, one revoke, shared copy", len(*dmPosts), revokeHits, async)
+	}
+	if meHits != 1 {
+		t.Fatalf("GET /v1/me hits = %d, want exactly one owner lookup per install", meHits)
+	}
+}
+
+func TestRenderS3WebsiteConnectorConfigYAMLRequiresOwnerID(t *testing.T) {
+	t.Parallel()
+	args := testS3WebsiteArgs(tunnelEnvDocker)
+	args.OwnerID = ""
+	if _, err := renderS3WebsiteConnectorConfigYAML(args); err == nil || !strings.Contains(err.Error(), "requires the account owner id") {
+		t.Fatalf("renderS3WebsiteConnectorConfigYAML error = %v, want owner id guard", err)
+	}
 }

@@ -28,29 +28,25 @@ const { startServer, stopIntervals: stopServerIntervals } = require('./server');
 const { startGatewayHealthServer } = require('./gateway-health');
 const { startGatewayHeartbeat, startActiveGuildCount, noteGatewayActivity } = require('./gateway-metrics');
 const db = require('./store');
-const { startOrphanTokenSweeper } = require('./orphan-token-sweeper');
 const {
   missingBootKeys,
   missingProdKeys,
   missingKekRequiredKeys,
+  baseUrlHttpsProblem,
   missingEventShipperKeys,
-  missingViewUpdatePushKeys,
-  discordInstallStateConfigProblems,
-  discordInstallStateConfigWarnings,
   missingMapCommandKeys,
   unsupportedRoleShipperCombo,
   unsupportedRoleResumeCombo,
   unsupportedRoleHotStandbyCombo,
   missingHotStandbyKeys,
   invalidHotStandbyValues,
+  invalidStateSecretValues,
   shouldRegisterInteractionListener,
   resolveProcessRole,
 } = require('./boot-requirements');
 const { initHttpOnly } = require('./http-only-init');
 const eventConsumer = require('./event-consumer');
 const eventPublisher = require('./event-publisher');
-const viewUpdateConsumer = require('./view-update-consumer');
-const viewUpdatePublisher = require('./view-update-publisher');
 const webhookSubscriptions = require('./webhook-subscriptions');
 const { LOG_KINDS } = require('./constants');
 
@@ -87,23 +83,17 @@ const { LOG_KINDS } = require('./constants');
 // http-only mode (`PROCESS_ROLE=http`) needs two things login()
 // would otherwise do for free: (1) a token on `client.rest` so
 // REST helpers (sendDM, channels.X.send, member.roles.add) can
-// authenticate, and (2) an initial `refreshCache()` so the
-// route handlers find a populated guild/roles/channels cache on
-// the first OAuth callback or webhook. Both are seeded
-// explicitly in start() below — see the `if (isHttp && !isGateway)`
-// branch (runs BEFORE startServer so the ALB can't route a
-// request through a half-initialized replica).
+// authenticate, and (2) an initial `refreshCache()`, which both warms
+// the cached guild handle and doubles as a fatal reachability check
+// before this replica is allowed to serve. Both are seeded explicitly
+// in start() below — see the `if (isHttp && !isGateway)` branch (runs
+// BEFORE startServer so the ALB can't route a request through a
+// half-initialized replica).
 //
-// Known gap (acceptable for now): cache invalidation in http-only
-// mode. The `client.on('roleDelete' / 'channelDelete')` handlers
-// in src/discord.js only fire when the Gateway is connected, so
-// deletions made on the OpenNHP guild stay cached as stale
-// references until the replica restarts. The lazy refresh in
-// each helper checks `if (!channels.X)` — non-null but stale
-// doesn't trigger a refresh. OpenNHP guild admins rarely delete
-// tracked channels; if this becomes load-bearing, a periodic
-// REST-driven `refreshCache()` would close the gap without
-// needing a Gateway connection.
+// That refresh is one-shot: no request path reads the cached guild
+// handle, so there is nothing for a periodic re-fetch to keep fresh.
+// See the module header in src/http-only-init.js.
+
 // Resolve PROCESS_ROLE via the helper in boot-requirements.js so the
 // invalid-value path is unit-testable without a child-process spawn.
 let PROCESS_ROLE, isGateway, isHttp;
@@ -128,23 +118,18 @@ try {
 logger.info('Process role configured', { role: PROCESS_ROLE, isGateway, isHttp });
 
 // Multi-tenant mode: when GUILD_ID is unset (or not a valid snowflake), the
-// bot treats itself as a public multi-server app. Commands register globally,
-// per-guild qURL API keys come from /qurl setup (stored encrypted in
-// guild_configs), and OpenNHP-specific features (contributor roles, welcome
-// DMs, GitHub OAuth linking, PR webhook notifications) are dormant because
-// no single guild is being tracked.
-//
-// When GUILD_ID is set to a valid Discord snowflake, the original
-// single-guild OpenNHP deployment behavior is preserved: commands register
-// to that guild only, and all OpenNHP features are active.
+// bot treats itself as a public multi-server app and commands register
+// globally. When GUILD_ID is set to a valid Discord snowflake, commands
+// register to that guild only so they propagate instantly. Per-guild qURL
+// API keys come from /qurl setup (stored encrypted in guild_configs) in
+// either mode.
 const { isMultiTenant } = config;
 
 // Validate required config. Fail fast at boot so misconfigurations are caught
 // during deploy, not when the first request arrives. Lists live in
 // boot-requirements.js so they can be unit-tested without side-effecting
-// a bot boot. Gated on isOpenNHPActive (see config.js) — single-guild-plain
-// and multi-tenant both use the short required list.
-const missing = missingBootKeys(config, config.isOpenNHPActive);
+// a bot boot.
+const missing = missingBootKeys(config);
 
 if (missing.length > 0) {
   logger.error('Missing required environment variables:');
@@ -153,73 +138,68 @@ if (missing.length > 0) {
   process.exit(1);
 }
 
-// Boot-log the effective mode so prod triage can grep it. The three
-// lines correspond exactly to the supported modes in config.js.
+// Boot-log the effective mode so prod triage can grep it. The two lines
+// correspond exactly to the supported modes in config.js.
 if (isMultiTenant) {
-  logger.info('Multi-tenant mode (GUILD_ID unset): commands will register globally; OpenNHP features are dormant.');
-} else if (config.isOpenNHPActive) {
-  logger.info(`Single-guild OpenNHP mode: targeting GUILD_ID=${config.GUILD_ID}. OpenNHP community features active.`);
+  logger.info('Multi-tenant mode (GUILD_ID unset): commands will register globally.');
 } else {
-  logger.info(`Single-guild plain mode: targeting GUILD_ID=${config.GUILD_ID}. OpenNHP features dormant; only /qurl registered.`);
+  logger.info(`Single-guild mode: targeting GUILD_ID=${config.GUILD_ID}. Commands register scoped to that guild.`);
 }
 
 // Production-only required secrets. In dev these are optional so localhost
 // workflows stay convenient. Keep this list in sync with the production
 // comments in .env.example.
 if (process.env.NODE_ENV === 'production') {
-  // QURL_API_KEY is the global-fallback key for /qurl send + /qurl map.
-  // Only the OpenNHP community server demands it at boot; single-guild-
-  // plain and multi-tenant deployments rely on per-guild /qurl setup.
-  // List is in boot-requirements.js for testability.
-  const prodMissing = missingProdKeys(process.env, config.isOpenNHPActive);
+  // QURL_API_KEY is deliberately NOT required: it is only the global
+  // fallback for /qurl send + /qurl map, and every deployment shape
+  // relies on per-guild /qurl setup. List is in boot-requirements.js
+  // for testability.
+  const prodMissing = missingProdKeys(process.env);
   if (prodMissing.length > 0) {
     logger.error(`NODE_ENV=production but missing required env vars: ${prodMissing.join(', ')}`);
     logger.error('For KEY_ENCRYPTION_KEY, generate with: node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'base64\'))"');
     process.exit(1);
   }
 
-  // BASE_URL https check: unconditional in OpenNHP mode. An OpenNHP
-  // prod deploy that forgets to set BASE_URL in its task-def would
-  // otherwise fall through to the "http://localhost:3000" default in
-  // config.js — which would boot successfully but fail at the first
-  // OAuth callback, exactly the deferred-error mode this fail-fast
-  // exists to prevent. In non-OpenNHP modes BASE_URL is unused
-  // (no /auth or /webhook routes mounted), so we only enforce https
-  // there if the operator explicitly set it — lets single-guild-plain
-  // and multi-tenant deployments ignore BASE_URL without a false-
-  // positive failure, while still catching a stale http:// SSM value
-  // if a future code path re-enables BASE_URL use.
-  if (config.isOpenNHPActive && !config.BASE_URL.startsWith('https://')) {
-    logger.error(`BASE_URL must use https:// in production (OpenNHP mode). Got: ${config.BASE_URL}`);
-    process.exit(1);
-  }
-  // Treat "" and whitespace-only as unset (matches GUILD_ID's normalization
-  // robustness). An operator who parameterized the SSM value but seeded it
-  // with "" or " " should not silently escape the https check — but they
-  // also shouldn't get a false-positive boot failure from an accidentally-
-  // empty param, since config.BASE_URL falls through to the localhost
-  // default in that case and the downstream "http://localhost:3000" is
-  // caught by the OpenNHP https check above anyway.
+  // BASE_URL https check — fail fast at boot when the qURL guided setup flow
+  // is configured (isQurlOAuthConfigured) but BASE_URL isn't a usable https
+  // origin, so /qurl setup can't dead-end at the OAuth redirect later (#619).
+  // The qURL OAuth router (server.js) mounts unconditionally, so this applies
+  // to plain single-guild and multi-tenant deploys alike.
+  //
+  // With the GitHub OAuth surface removed (#1026), isQurlOAuthConfigured is
+  // now the COMPLETE set of BASE_URL consumers: /oauth/qurl/callback is the
+  // Auth0 redirect_uri, and /oauth/discord/callback rides the same value
+  // (isDiscordInstallConfigured implies isQurlOAuthConfigured — see
+  // config.js). The gap #842 left open — a deploy whose GitHub /auth
+  // callback needed BASE_URL but which this gate didn't cover — is closed by
+  // construction now that /auth no longer exists.
+  //
+  // See baseUrlHttpsProblem for the consumer inventory + the operator-facing
+  // message. baseUrlExplicitlySet treats "" / whitespace-only as unset
+  // (matches GUILD_ID normalization) so an accidentally-empty SSM param
+  // neither escapes the check nor false-positives a non-consuming deploy.
   const baseUrlExplicitlySet = Boolean(process.env.BASE_URL?.trim());
-  if (!config.isOpenNHPActive && baseUrlExplicitlySet && !config.BASE_URL.startsWith('https://')) {
-    logger.error(`BASE_URL must use https:// in production (got ${config.BASE_URL})`);
+  const baseUrlProblem = baseUrlHttpsProblem(config, baseUrlExplicitlySet);
+  if (baseUrlProblem) {
+    logger.error(baseUrlProblem);
     process.exit(1);
   }
 
-  // OAUTH_STATE_SECRET guards GitHub OAuth state, which is dormant
-  // unless OpenNHP mode is active (the only mode that mounts /auth +
-  // /webhook routes). Require it only when that surface is live.
-  if (config.isOpenNHPActive && !process.env.OAUTH_STATE_SECRET) {
-    // Falling back to GITHUB_CLIENT_SECRET couples the two secrets —
-    // rotating GitHub's client secret would invalidate all in-flight
-    // OAuth states and vice versa. A prod deploy must set this explicitly.
-    logger.error('OAUTH_STATE_SECRET must be set in production. Generate with: openssl rand -hex 32');
+  // Presence + length-floor policy for the OAuth state-signing secrets
+  // lives in boot-requirements.js (invalidStateSecretValues) so it's
+  // unit-testable; this is just the log-and-exit plumbing, same
+  // pattern as the hot-standby value checks below.
+  const stateSecretProblems = invalidStateSecretValues(config);
+  if (stateSecretProblems.length > 0) {
+    stateSecretProblems.forEach(problem => logger.error(problem));
     process.exit(1);
   }
 }
 
-// Any deploy that issues real GitHub OAuth tokens must encrypt persisted
-// credentials at rest, in any NODE_ENV — the orphan-token path uses
+// Any deploy that runs the qURL OAuth setup flow must encrypt persisted
+// credentials at rest, in any NODE_ENV — guild_configs.qurl_api_key is
+// written straight out of that callback. setGuildApiKey uses
 // encryptStrict as a backstop, but failing closed at boot is the loud
 // signal. Smoke-test the key material so a malformed value is caught here
 // instead of on the first encrypt() call minutes into serving traffic.
@@ -228,9 +208,9 @@ if (process.env.NODE_ENV === 'production') {
 // OAuth callback, but env vars are uniform across roles in a single
 // deploy, so one role refusing to boot while another silently degrades
 // is worse than refusing both.
-const kekMissing = missingKekRequiredKeys(process.env);
+const kekMissing = missingKekRequiredKeys(process.env, config.isQurlOAuthConfigured);
 if (kekMissing.length > 0) {
-  logger.error(`GITHUB_CLIENT_SECRET is set but ${kekMissing.join(', ')} is missing — refusing to boot. Any deployment that issues real GitHub OAuth tokens must encrypt persisted credentials at rest.`);
+  logger.error(`qURL OAuth is configured (AUTH0_* set) but ${kekMissing.join(', ')} is missing — refusing to boot. Any deployment that persists qURL API keys must encrypt them at rest.`);
   logger.error('Generate KEY_ENCRYPTION_KEY with: node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'base64\'))"');
   process.exit(1);
 }
@@ -250,10 +230,6 @@ if (process.env.KEY_ENCRYPTION_KEY) {
 }
 
 // Validate numeric config values
-if (isNaN(config.PENDING_LINK_EXPIRY_MINUTES) || config.PENDING_LINK_EXPIRY_MINUTES <= 0) {
-  logger.error('PENDING_LINK_EXPIRY_MINUTES must be a positive integer');
-  process.exit(1);
-}
 if (!isPositiveFinite(config.RATE_LIMIT_WINDOW_MS)) {
   logger.error('RATE_LIMIT_WINDOW_MS must be a positive integer (set to 0 would disable rate limiting)');
   process.exit(1);
@@ -262,17 +238,6 @@ if (!isPositiveFinite(config.RATE_LIMIT_MAX_REQUESTS)) {
   logger.error('RATE_LIMIT_MAX_REQUESTS must be a positive integer');
   process.exit(1);
 }
-// Each org name is interpolated into GitHub search queries
-// (`type:pr author:X org:<org> is:merged`). Reject anything that doesn't
-// match GitHub's org-name rules so an injected space can't smuggle extra
-// search qualifiers.
-for (const org of config.ALLOWED_GITHUB_ORGS) {
-  if (!/^[a-z0-9](?:[a-z0-9]|-(?=[a-z0-9])){0,38}$/.test(org)) {
-    logger.error(`ALLOWED_GITHUB_ORGS contains invalid org name: "${org}"`);
-    process.exit(1);
-  }
-}
-
 if (config.QURL_ENDPOINT === 'https://api.layerv.ai') {
   logger.warn('QURL_ENDPOINT is using production default — set via env var for non-prod');
 }
@@ -294,74 +259,32 @@ if (process.env.NODE_ENV === 'production') {
   }
 }
 
-// Event-shipper (zero-downtime Pillar 1) — when the flag is on, the
-// queue URL is the load-bearing piece: producer publishes to it,
-// consumer polls from it. Role-agnostic by design: env vars are
-// uniform across roles in a single deploy, so one role refusing to
-// boot is preferable to a half-wired split.
+// The queue is required on every role when the shipper is enabled. A partial
+// split would otherwise drop interactions without a boot failure.
 const eventShipperMissing = missingEventShipperKeys(config);
 if (eventShipperMissing.length > 0) {
   logger.error(`ENABLE_EVENT_SHIPPER=true but missing required env vars: ${eventShipperMissing.join(', ')}`);
   process.exit(1);
 }
 
-// View-update push (feat #60). Same boot-time refusal pattern: if
-// the flag is on but the queue URL is missing, fail closed at boot
-// rather than silently dropping every view event at runtime.
-const viewUpdatePushMissing = missingViewUpdatePushKeys(config);
-if (viewUpdatePushMissing.length > 0) {
-  logger.error(`ENABLE_VIEW_UPDATE_PUSH=true but missing required env vars: ${viewUpdatePushMissing.join(', ')}`);
-  process.exit(1);
-}
-
-// Discord install signed-state rollout. Keep the default lenient while
-// marketing deploys signed links, but once the required-state flag is
-// flipped, fail at boot if the verifier cannot possibly accept tokens.
-const discordInstallStateProblems = discordInstallStateConfigProblems(config);
-if (discordInstallStateProblems.length > 0) {
-  discordInstallStateProblems.forEach(problem => logger.error(problem));
-  process.exit(1);
-}
-discordInstallStateConfigWarnings(config).forEach(warning => logger.warn(warning));
-
-// Reject combined + flag-on. In combined mode the gateway-side
-// publish hook AND the worker-side consumer would both arm in one
-// process, double-dispatching every interaction (gateway WS frame
-// + SQS round-trip). See unsupportedRoleShipperCombo for the full
-// rationale and operator-facing remediation.
+// Combined mode would handle each interaction in-process and through SQS.
 const roleShipperConflict = unsupportedRoleShipperCombo(PROCESS_ROLE, config.ENABLE_EVENT_SHIPPER);
 if (roleShipperConflict) {
   logger.error(roleShipperConflict);
   process.exit(1);
 }
 
-// Gateway-RESUME (Pillar 2) precondition check. Rejects two shapes:
-//   1. ENABLE_GATEWAY_RESUME=true with ENABLE_EVENT_SHIPPER=false
-//      (the resume shim replaces discord.js Client and only has a
-//      forward-to-SQS path; the in-process dispatcher would be
-//      unreachable).
-//   2. ENABLE_GATEWAY_RESUME=true with PROCESS_ROLE=combined (the
-//      legacy Client owns the WS in combined mode; the shim would
-//      conflict).
-// Sequenced AFTER unsupportedRoleShipperCombo so the operator sees
-// the shipper-first remediation when both are misconfigured, rather
-// than chasing a downstream resume error.
+// Validate the shipper split before the resume and hot-standby dependencies.
 const roleResumeConflict = unsupportedRoleResumeCombo(
   PROCESS_ROLE,
   config.ENABLE_GATEWAY_RESUME,
   config.ENABLE_EVENT_SHIPPER,
-  config.STORE_TYPE,
 );
 if (roleResumeConflict) {
   logger.error(roleResumeConflict);
   process.exit(1);
 }
 
-// Pillar 3 hot-standby — sequenced AFTER unsupportedRoleResumeCombo
-// so an operator who turned both flags on but forgot the prerequisites
-// sees the RESUME-side fix first (the hot-standby gate then becomes a
-// derivative of "RESUME is on"). Same boot-fail shape as the others
-// above: log + exit(1), no partial-state teardown.
 const roleHotStandbyConflict = unsupportedRoleHotStandbyCombo(
   PROCESS_ROLE,
   config.ENABLE_GATEWAY_HOT_STANDBY,
@@ -700,7 +623,6 @@ process.on('uncaughtException', error => {
 
 // Graceful shutdown
 let httpServer = null;
-let httpRefreshTimer = null;
 let gatewayHeartbeatTimer = null;
 let activeGuildCountTimer = null;
 let isShuttingDown = false;
@@ -716,9 +638,9 @@ async function gracefulShutdown(code = 0) {
 
   try {
     // Wait for in-flight HTTP requests to drain — server.close() is async,
-    // process.exit() called immediately after would truncate OAuth callbacks
-    // mid-flight and leave users with a consumed pending_link but no GitHub
-    // link created.
+    // and process.exit() called immediately after would truncate an OAuth
+    // callback mid-flight, leaving the admin's /qurl setup without a
+    // persisted API key.
     await tryClose('HTTP server', httpServer, logger);
     stopServerIntervals();
     // SQS consumer drain. Stops new ReceiveMessage calls, then
@@ -735,26 +657,6 @@ async function gracefulShutdown(code = 0) {
     // actually running per process (combined + flag-on is rejected
     // at boot), so the sequencing matters only as documentation.
     await eventPublisher.stop();
-    // View-update plumbing drain (feat #60). Same idempotent shape;
-    // unconditional. Consumer + publisher are stopped in parallel
-    // via Promise.all so the combined drain stays within the
-    // gracefulShutdown 10s budget — sequencing each module's
-    // DRAIN_DEADLINE_MS (3s each) plus the event-shipper drains
-    // above would push worst-case past 10s. Order-independence is
-    // safe: publisher.stop() snapshots inFlightSends; consumer.stop()
-    // aborts the long-poll; neither depends on the other's state.
-    await Promise.all([
-      viewUpdateConsumer.stop(),
-      viewUpdatePublisher.stop(),
-    ]);
-    // Periodic REST refreshCache in http-only mode is .unref()ed so it
-    // wouldn't block exit on its own, but clearing explicitly keeps
-    // shutdown symmetric with the other intervals (server.js, oauth.js
-    // rateLimitStore sweep, webhooks.js badSig sweep) and avoids one
-    // last refresh firing mid-teardown.
-    if (httpRefreshTimer) {
-      clearInterval(httpRefreshTimer);
-    }
     // Clear gateway-metrics timers BEFORE discordShutdown(): a stray
     // heartbeat tick during client.destroy() would race with the
     // WebSocketShard teardown and surface as a confusing "Sampler
@@ -855,7 +757,9 @@ async function gracefulShutdown(code = 0) {
 async function pushHandoffShutdown(code = 0) {
   if (isShuttingDown) return;
   isShuttingDown = true;
-  await runPushHandoffShutdown({ code, gatewayLeader, eventPublisher, logger });
+  await runPushHandoffShutdown({
+    code, gatewayLeader, connectionWatchdog, eventPublisher, logger,
+  });
 }
 
 // SIGTERM during boot (gatewayLeader still null) falls through to
@@ -897,15 +801,15 @@ process.on('SIGINT', () => {
 //   1. Construct lock + peer-heartbeat (DDB-backed, no manager dep).
 //   2. Load + validate the HMAC secret (JSON shape + hex format).
 //   3. Construct hmac, controlClient, leader (leader is wired against
-//      `gatewayShim` itself — the shim provides the connect() +
-//      isConnected() contract that @discordjs/ws's WebSocketManager
-//      lacks isConnected() for).
+//      `gatewayShim` itself — the shim provides connect(), isConnected(),
+//      and isRecovering(). The raw manager lacks the synchronous state
+//      methods).
 //   4. Start the control-channel HTTP server. AWAIT `listening` event
 //      before continuing — if we start the leader first, the peer could
 //      acquire the lock and pushHandoff to us before our listener is
 //      up, dropping the connection.
-//   5. Start the leader tick loop. The watchdog wakes inside the tick
-//      flow on the active path; standby just heartbeats and waits.
+//   5. Start the leader and watchdog loops. The watchdog connects only
+//      for the lock holder; the standby only heartbeats and waits.
 //
 // Errors propagate to start().catch() → gracefulShutdown(1). Constructing
 // inside a single function (vs. spreading across start()) keeps the
@@ -971,7 +875,7 @@ async function startHotStandby() {
   }
 
   // The shim itself satisfies the leader/watchdog `manager` contract
-  // (connect() + isConnected()). Passing the raw @discordjs/ws
+  // (connect() + isConnected() + isRecovering()). Passing the raw @discordjs/ws
   // WebSocketManager would fail the factory's typeof check because
   // upstream exposes only fetchStatus() (async) — see gateway-ws-shim
   // module header "Pillar 3 manager contract".
@@ -1054,6 +958,8 @@ async function startHotStandby() {
     manager: gatewayShim,
     isHoldingLock: gatewayLeader.isHoldingLock,
     isConnecting: gatewayLeader.isConnecting,
+    readCurrentHolder: lock.readCurrentHolder,
+    selfInstanceId: lock.instanceId,
     releaseLock: gatewayLeader.releaseLockForImmediateExit,
     deleteOwnRow: peerHeartbeat.deleteOwnRow,
     logger,
@@ -1085,14 +991,13 @@ async function start() {
   logger.info(`Version: ${require('../package.json').version}`);
   logger.info(`Environment: ${process.env.NODE_ENV || 'development'}`);
 
-  // Pure http-only mode: seed the REST token + warm the cache BEFORE
-  // opening the listener. Otherwise there's a race window where the
-  // ALB can route OAuth callbacks / webhooks to a replica whose
-  // `client.rest` has no token and whose channel/role cache is cold —
-  // the request would 401 inside sendDM / assignContributorRole.
-  // See src/http-only-init.js for the full rationale (token + cache
-  // + periodic-REST-refresh that compensates for missing roleDelete /
-  // channelDelete events). Failures are fatal — propagated through
+  // Pure http-only mode: seed the REST token BEFORE opening the
+  // listener. Otherwise there's a race window where the ALB can route
+  // OAuth callbacks / webhooks to a replica whose `client.rest` has no
+  // token — the request would 401 inside sendDM. See
+  // src/http-only-init.js for the full rationale (REST token +
+  // client.user seed + boot-time cache warm, and why there is no
+  // periodic refresh). Failures are fatal — propagated through
   // start().catch() into gracefulShutdown(1) so a Discord-unreachable
   // replica crash-loops instead of silently serving 5xx.
   //
@@ -1105,18 +1010,7 @@ async function start() {
   // init-before-listen pattern to combined mode if the health-gate
   // assumption ever weakens.
   if (isHttp && !isGateway) {
-    const timer = await initHttpOnly({ client, config, refreshCache, logger });
-    // Tight race: SIGTERM during the await above runs gracefulShutdown,
-    // which clears `httpRefreshTimer` (still null) and proceeds. The
-    // setInterval inside initHttpOnly then registers AFTER the
-    // clearInterval already happened. Guard against that here so a stray
-    // refreshCache() doesn't fire mid-teardown. (.unref() means it can't
-    // block exit either way; this just keeps the log noise clean.)
-    if (isShuttingDown && timer) {
-      clearInterval(timer);
-    } else {
-      httpRefreshTimer = timer;
-    }
+    await initHttpOnly({ client, config, refreshCache, logger });
   }
 
   // HTTP listener.
@@ -1189,20 +1083,6 @@ async function start() {
     });
   }
 
-  // Background retry-revoke for any OAuth tokens whose initial
-  // revoke failed. Pinned to `isGateway` not because of any Discord
-  // dependency (the sweeper only calls api.github.com — no Discord
-  // client / REST calls anywhere in src/orphan-token-sweeper.js) but
-  // to keep the sweeper a singleton: N HTTP replicas racing on the
-  // same orphaned-tokens table would each claim and re-revoke every
-  // row. Pinning to the single gateway process avoids that without
-  // a distributed work queue. If this ever needs to scale beyond one
-  // worker, replace with SQS / a Redis lock — not by spreading the
-  // sweeper across HTTP replicas.
-  if (isGateway) {
-    startOrphanTokenSweeper();
-  }
-
   // SQS consumer for the worker tier (zero-downtime Pillar 1).
   // Started after the HTTP listener is up so the /health endpoint
   // can accept probes during the consumer's first poll. Gated on
@@ -1237,40 +1117,19 @@ async function start() {
     eventPublisher.start();
   }
 
-  // View-update SQS plumbing is superseded by the interaction-token
-  // fast-path. The webhook no longer publishes to SQS, so starting this
-  // loop would only burn empty receives. Follow-up #875 removes the dead
-  // publisher/consumer/registry wiring; until then, keep the flag as an
-  // explicit no-op so operator config fails quiet instead of starting cost.
-  if (config.ENABLE_VIEW_UPDATE_PUSH && isHttp && !isShuttingDown) {
-    logger.info('ENABLE_VIEW_UPDATE_PUSH set but the SQS view-update path is superseded by the webhook fast-path — not starting the (producer-less) publisher/consumer; see index.js');
+  // TODO(upstream-contract): qurl-integrations-infra still emits and
+  // provisions the retired view-update queue. No app producer remains; remove
+  // its variables, queue, and IAM there, then delete this compatibility log.
+  if (process.env.ENABLE_VIEW_UPDATE_PUSH === 'true' && isHttp && !isShuttingDown) {
+    logger.info('ENABLE_VIEW_UPDATE_PUSH is retired; using the webhook fast path and polling fallback');
   }
 
-  // Open the Discord gateway WebSocket. Two disjoint paths:
-  //
-  //   - Pillar 2 (ENABLE_GATEWAY_RESUME=true): hydrate the persisted
-  //     session from DDB, then start the @discordjs/ws shim. On the
-  //     RESUME path the shim's `retrieveSessionInfo` returns the
-  //     hydrated row and Discord replays buffered events since the
-  //     last sequence (no IDENTIFY). On the cold-start path
-  //     (sandbox fresh boot / resume window expired) the mirror is
-  //     null and @discordjs/ws falls back to IDENTIFY.
-  //   - Legacy (flag-off): client.login() with the same 30s timeout
-  //     that the pre-Pillar-2 code carried.
-  //
-  // Both are gated on `isGateway`. HTTP-only replicas never open a
-  // second Gateway connection on the bot token (Discord would flap
-  // session identity between the two WebSockets).
+  // Resume uses the shim's persisted Discord session. The legacy path keeps
+  // discord.js as the WebSocket owner. HTTP-only replicas open no gateway.
   if (isGateway && config.ENABLE_GATEWAY_RESUME && gatewayShim) {
     const hydrated = await gatewayShim.hydrate();
+    // This mode is the restart-resume SLI.
     logger.info('gateway-resume hydrate complete', {
-      // Log "resume" vs "cold start" as an SLI — operators can
-      // correlate restart frequency with successful-resume rate.
-      // Under hot-standby, the standby's hydrated mirror is largely
-      // wasted (any inbound push-handoff carries a fresh snapshot
-      // that replaces it). The boot sequence stays symmetric across
-      // active/standby so the hydrate path remains a single code path
-      // worth one log line for SLI parity.
       mode: hydrated ? 'resume' : 'cold-start',
     });
     // Under hot-standby, both replicas construct the manager + attach
@@ -1309,8 +1168,7 @@ async function start() {
     // Shutdown-race guard: if SIGTERM landed during client.login() above,
     // gracefulShutdown has already cleared the (still-null) timer locals
     // and is racing to exit. Skip starting new timers in that case so we
-    // don't register a setInterval that no one will ever clear. Mirrors
-    // the httpRefreshTimer guard pattern at line 393.
+    // don't register a setInterval that no one will ever clear.
     if (!isShuttingDown) {
       gatewayHeartbeatTimer = startGatewayHeartbeat(client);
       activeGuildCountTimer = startActiveGuildCount(client);

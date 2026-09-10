@@ -44,6 +44,7 @@ func TestParse_HappyPaths(t *testing.T) {
 		{name: "add mention with display name", text: "add <@U12345678|kevin>", wantSub: SubcmdAdmin, wantAdmin: AdminAdd, wantUserID: "U12345678", wantFlags: map[string]string{}},
 		{name: "remove mention", text: "remove <@U67890123>", wantSub: SubcmdAdmin, wantAdmin: AdminRemove, wantUserID: "U67890123", wantFlags: map[string]string{}},
 		{name: testAdminListCmd, text: testAdminListCmd, wantSub: SubcmdAdmin, wantAdmin: AdminList, wantFlags: map[string]string{}},
+		{name: "transfer ownership", text: "transfer-ownership <@U23456789>", wantSub: SubcmdAdmin, wantAdmin: AdminTransferOwnership, wantUserID: "U23456789", wantFlags: map[string]string{}},
 		{name: "list", text: "list", wantSub: SubcmdList, wantFlags: map[string]string{}},
 		{name: "setalias with quoted target strips outer quotes", text: `setalias $prod-db "https://internal.example.com"`, wantSub: SubcmdSetAlias, wantAlias: "prod-db", wantTarget: "https://internal.example.com", wantFlags: map[string]string{}},
 		// Unbalanced quotes: tokenize tolerates (does not reject)

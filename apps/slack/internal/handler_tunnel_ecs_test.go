@@ -8,44 +8,46 @@ import (
 
 func TestRenderECSFargateTunnelInstructions(t *testing.T) {
 	t.Parallel()
-	got := mustRenderECSFargateTunnelInstructions(t, &tunnelInstallArgs{
-		Slug:        testTunnelSlug,
-		Alias:       testTunnelSlug,
-		LocalPort:   9090,
-		Environment: tunnelEnvECSFargate,
-	}, testTunnelImageRef)
+	args := testTunnelInstallArgs()
+	args.LocalPort = 9090
+	args.Environment = tunnelEnvECSFargate
+	got := mustRenderECSFargateTunnelInstructions(t, args, testTunnelImageRef)
 
 	for _, want := range []string{
 		ecsFargateChecklistText,
-		"non-essential sidecar container",
+		"non-essential qURL sidecar container",
 		"Fargate's awsvpc network mode",
-		"Replace `REPLACE_WITH_SECRET_ARN_FOR_QURL_CONNECTOR_" + testTunnelSlug + "`",
 		ecsFargateRegionPlaceholderNote,
-		"AWS appends a random suffix",
 		"127.0.0.1:9090",
-		"AWS Secrets Manager",
-		"Store the bootstrap key from the separate DM",
-		"install-instructions message intentionally does not contain the key",
-		"ECS injects this bootstrap secret as `QURL_API_KEY`, which is an environment variable",
-		"file-mounted secret runtimes should use `QURL_API_KEY_FILE` instead",
-		"prefer a file-mounted secret runtime",
-		"secret as `qurl-connector-" + testTunnelSlug + "`",
+		"POSIX UID/GID `65532:65532`",
+		`"readonlyRootFilesystem": true`,
+		`"restartPolicy": {`,
+		`"restartAttemptPeriod": 60`,
+		"warm-start revision",
+		"Store the enrollment token from the separate DM",
+		"message intentionally does not contain the token",
 		testTunnelImageRef,
-		"Put qurl-proxy.yaml at `/work/qurl-proxy.yaml` on an EFS access point",
-		"mounted into the task as the `qurl-config` volume",
+		"Put share.yaml at `/etc/qurl/share.yaml`",
 		testTunnelLocalPort9090Line,
-		`"name": "QURL_CONNECTOR_ID"`,
-		`"value": "` + testTunnelSlug + `"`,
-		testTunnelECSAPIKeyNameLine,
-		`REPLACE_WITH_SECRET_ARN_FOR_QURL_CONNECTOR_` + testTunnelSlug,
+		"crid: '" + testTunnelCRID + "'",
+		"resource_id: '" + testTunnelResourceID + "'",
+		"connector_routing_id: '" + testTunnelRoutingID + "'",
+		"knock_resource_id: '" + testTunnelKnockID + "'",
+		`"entryPoint": [`,
+		`"/usr/local/bin/qurl"`,
+		`"name": "QURL_ENDPOINT"`,
+		`"value": "https://api.sandbox.example"`,
+		`"user": "65532:65532"`,
 		`"sourceVolume": "qurl-agent-state"`,
 		`"sourceVolume": "qurl-config"`,
+		`"sourceVolume": "qurl-bootstrap"`,
+		`"readonlyRootFilesystem": true`,
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("ECS instructions missing %q:\n%s", want, got)
 		}
 	}
-	for _, forbidden := range []string{testForbiddenSlackYAMLFence, testForbiddenSlackShellFence, testForbiddenResourceLabel, testTunnelResourceID, testTunnelAPIKey, "QURL_CONNECTOR_SLUG"} {
+	for _, forbidden := range []string{testForbiddenSlackYAMLFence, testForbiddenSlackShellFence, testForbiddenResourceLabel, testTunnelAPIKey, "QURL_CONNECTOR_SLUG", "QURL_BOOTSTRAP_URL", "LAYERV_KNOCK_RESOURCE_ID", "QURL_API_KEY", "ghcr.io/layervai/qurl-connector", "/usr/local/bin/qurl-connector"} {
 		if strings.Contains(got, forbidden) {
 			t.Fatalf("ECS instructions leaked %q:\n%s", forbidden, got)
 		}
@@ -57,12 +59,7 @@ func TestRenderECSFargateTunnelInstructions(t *testing.T) {
 		t.Fatalf("ECS instructions rendered %d code fences, want 4 for two independently copyable artifacts:\n%s", gotFenceCount, got)
 	}
 
-	containerJSON, err := renderECSSidecarContainerJSON(&tunnelInstallArgs{
-		Slug:        testTunnelSlug,
-		Alias:       testTunnelSlug,
-		LocalPort:   9090,
-		Environment: tunnelEnvECSFargate,
-	}, testTunnelImageRef)
+	containerJSON, err := renderECSSidecarContainerJSON(args, testTunnelImageRef)
 	if err != nil {
 		t.Fatalf("renderECSSidecarContainerJSON: %v", err)
 	}
@@ -73,10 +70,32 @@ func TestRenderECSFargateTunnelInstructions(t *testing.T) {
 	if container.Essential {
 		t.Fatal("ECS sidecar Essential = true, want false so the tunnel does not take down the app task")
 	}
-	if len(container.Secrets) != 1 || container.Image != testTunnelImageRef || container.Secrets[0].Name != tunnelEnvAPIKey {
-		t.Fatalf("ECS sidecar = %+v, want image and bootstrap secret wiring", container)
+	if container.RestartPolicy == nil || !container.RestartPolicy.Enabled || container.RestartPolicy.RestartAttemptPeriod != ecsRestartAttemptPeriodSeconds {
+		t.Fatalf("ECS restart policy = %+v, want enabled with %ds attempt period", container.RestartPolicy, ecsRestartAttemptPeriodSeconds)
 	}
-	if container.Secrets[0].ValueFrom != "REPLACE_WITH_SECRET_ARN_FOR_QURL_CONNECTOR_"+testTunnelSlug {
-		t.Fatalf("ECS secret ValueFrom = %q, want unmistakable replacement placeholder", container.Secrets[0].ValueFrom)
+	if container.User != ecsConnectorUser {
+		t.Fatalf("ECS sidecar User = %q, want connector image UID/GID", container.User)
+	}
+	if !container.ReadonlyRootFilesystem {
+		t.Fatal("ECS sidecar ReadonlyRootFilesystem = false, want true")
+	}
+	if got := container.LinuxParameters.Capabilities.Drop; len(got) != 1 || got[0] != testCapabilityAll {
+		t.Fatalf("ECS sidecar capability drop = %v, want [ALL]", got)
+	}
+	if len(container.Secrets) != 0 || container.Image != testTunnelImageRef {
+		t.Fatalf("ECS sidecar = %+v, want qurl image and no environment secret", container)
+	}
+	env := map[string]string{}
+	for _, e := range container.Environment {
+		env[e.Name] = e.Value
+	}
+	if got := env["QURL_ENDPOINT"]; got != "https://api.sandbox.example" {
+		t.Fatalf("ECS QURL_ENDPOINT = %q", got)
+	}
+	if !ecsMountPointPresent(container.MountPoints, "qurl-bootstrap", "/run/secrets/qurl", true) {
+		t.Fatalf("ECS mountPoints = %+v, want read-only enrollment-token mount", container.MountPoints)
+	}
+	if _, ok := env["LAYERV_KNOCK_RESOURCE_ID"]; ok {
+		t.Fatal("ECS environment rendered the advanced knock-resource override")
 	}
 }

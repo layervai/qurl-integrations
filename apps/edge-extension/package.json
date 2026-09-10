@@ -1,0 +1,13 @@
+{
+  "name": "qurl-gmail-edge-extension",
+  "private": true,
+  "version": "1.1.0",
+  "description": "Microsoft Edge extension for Gmail: upload files to qURL and insert access links into compose drafts.",
+  "engines": {
+    "node": ">=20.9.0"
+  },
+  "scripts": {
+    "release": "node ../chrome-extension/scripts/build-release.js edge",
+    "package:release": "node ../chrome-extension/scripts/package-release.js edge"
+  }
+}

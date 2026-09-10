@@ -1,7 +1,9 @@
 package internal
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -18,6 +20,13 @@ const (
 	testDisplayNameProdAPI      = "Prod API"
 	testDisplayNameMissingMsg   = "Missing Display Name"
 	testDisplayNameInvalidIDMsg = "valid qURL Connector id"
+
+	// Channel-alias resolution fixtures: an admin targets a connector by a
+	// channel `$alias` whose name differs from the connector's own slug.
+	testDisplayNameAlias     = "dashboard"          // the channel alias the admin types
+	testDisplayNameSlug      = "stats-connector"    // the connector's real (different) slug
+	testDisplayNameTunnelRID = testPublicResourceID // its public resource id
+	testDisplayNameNewName   = "Stats Dashboard"
 )
 
 // --- install-default constructor -----------------------------------------
@@ -426,5 +435,387 @@ func TestSetDisplayName_NoAdminStoreWired(t *testing.T) {
 	got := decodeSlackText(t, w.Body.Bytes())
 	if !strings.Contains(got, "not configured") {
 		t.Errorf("response = %q, want not-configured copy", got)
+	}
+}
+
+// --- channel-alias resolution -------------------------------------------
+
+// displayNameScanQURLServer models qurl-service for the channel-alias path:
+// `GET /v1/resources?slug=X` filters to that slug (returning scanResource only
+// when X equals its own slug), and a no-slug `GET` returns the first-page list —
+// the scan resolveActiveTunnelByResourceID runs after a channel alias resolves
+// to a resource_id. PATCH records the description like displayNameQURLServer.
+// The alias under test deliberately differs from scanResource's slug, so the
+// slug-first lookup misses and the alias fallback drives resolution.
+func displayNameScanQURLServer(t *testing.T, scanResource map[string]any, capPatch *capturedPatch) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == testResourcesPath:
+			// `?slug=` is a server-side filter: return the resource only when the
+			// queried slug equals its own. The alias under test never equals the
+			// slug, so the slug-first lookup gets an empty page and falls through
+			// to the channel-alias binding; the no-slug scan returns the resource.
+			if slug := r.URL.Query().Get("slug"); slug != "" {
+				if rs, _ := scanResource[testKeySlug].(string); rs != "" && rs == slug {
+					respondQURLEnvelope(t, w, []map[string]any{scanResource})
+				} else {
+					respondQURLEnvelope(t, w, []map[string]any{})
+				}
+				return
+			}
+			respondQURLEnvelope(t, w, []map[string]any{scanResource})
+		case r.Method == http.MethodPatch && strings.HasPrefix(r.URL.Path, "/v1/resources/"):
+			capPatch.calls.Add(1)
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				t.Fatalf("read PATCH body: %v", err)
+			}
+			var in struct {
+				Description *string `json:"description"`
+			}
+			if err := json.Unmarshal(body, &in); err != nil {
+				t.Fatalf("unmarshal PATCH body: %v", err)
+			}
+			capPatch.description = in.Description
+			id := strings.TrimPrefix(r.URL.Path, "/v1/resources/")
+			respondQURLEnvelope(t, w, map[string]any{
+				testKeyResourceID: id,
+				testKeyType:       client.ResourceTypeTunnel,
+				testKeyStatus:     client.StatusActive,
+			})
+		default:
+			t.Fatalf("unexpected upstream request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// seedDisplayNameAliasTunnel wires a handler whose team owns one active tunnel
+// (slug testDisplayNameSlug, id testDisplayNameTunnelRID) reachable in
+// testAliasChannelID ONLY via the channel alias testDisplayNameAlias — the shape
+// that left set/unset-display-name unable to resolve it (slug-only) before this
+// path learned to honor channel aliases.
+func seedDisplayNameAliasTunnel(t *testing.T, capPatch *capturedPatch) *Handler {
+	t.Helper()
+	t.Setenv("QURL_API_KEY", "test-key")
+	h := newTestHandler(t, displayNameScanQURLServer(t, map[string]any{
+		testKeyResourceID: testDisplayNameTunnelRID,
+		testKeyType:       client.ResourceTypeTunnel,
+		testKeySlug:       testDisplayNameSlug,
+		testKeyStatus:     client.StatusActive,
+	}, capPatch))
+	seedAliasAdminGate(t, h, testAliasTeamID)
+	if err := h.cfg.AdminStore.BindChannelAlias(context.Background(), testAliasTeamID, testAliasChannelID, testDisplayNameAlias, testDisplayNameTunnelRID); err != nil {
+		t.Fatalf("seed channel alias binding: %v", err)
+	}
+	return h
+}
+
+// TestSetDisplayName_ResolvesByChannelAlias is the fix's core case: the admin
+// types a channel `$alias` whose name differs from the connector slug. The
+// slug-first lookup misses (no connector is named `dashboard`), then the
+// alias_bindings entry resolves to the live tunnel and the PATCH fires — the
+// same channel alias `/qurl get` and `/qurl-admin revoke` already honor.
+func TestSetDisplayName_ResolvesByChannelAlias(t *testing.T) {
+	capPatch := &capturedPatch{}
+	h := seedDisplayNameAliasTunnel(t, capPatch)
+
+	_, ack, async := newAdminSlashInvokerOnChannel(t, h, testAliasChannelID).
+		invokeAdminAsync("set-display-name "+testDisplayNameAlias+" "+testDisplayNameNewName, testAliasTeamID, "U_alias_admin")
+
+	if ack != ackWorkingOnIt {
+		t.Fatalf("ack = %q, want async working copy", ack)
+	}
+	// Success copy echoes the alias id the admin typed + the new name. (Asserting
+	// the name + id rather than the shared "Display Name updated" prefix keeps
+	// that literal under goconst's occurrence cap.)
+	if !strings.Contains(async, testDisplayNameNewName) || !strings.Contains(async, "`"+testDisplayNameAlias+"`") {
+		t.Errorf("async reply = %q, want success copy echoing the alias id + name", async)
+	}
+	if capPatch.calls.Load() != 1 {
+		t.Fatalf("PATCH calls = %d, want 1 (the channel alias must resolve end-to-end)", capPatch.calls.Load())
+	}
+	if capPatch.description == nil || *capPatch.description != testDisplayNameNewName {
+		t.Errorf("PATCH description = %v, want pointer to %q", capPatch.description, testDisplayNameNewName)
+	}
+}
+
+// TestUnsetDisplayName_ResolvesByChannelAlias is the unset counterpart, and also
+// pins that the reset value is built from the connector's REAL slug — not the
+// alias name — so it matches what install wrote even when the two differ.
+func TestUnsetDisplayName_ResolvesByChannelAlias(t *testing.T) {
+	capPatch := &capturedPatch{}
+	h := seedDisplayNameAliasTunnel(t, capPatch)
+
+	_, _, async := newAdminSlashInvokerOnChannel(t, h, testAliasChannelID).
+		invokeAdminAsync("unset-display-name "+testDisplayNameAlias, testAliasTeamID, "U_alias_admin")
+
+	if !strings.Contains(async, "`"+testDisplayNameAlias+"`") {
+		t.Errorf("async reply = %q, want reset copy echoing the alias id", async)
+	}
+	if capPatch.calls.Load() != 1 {
+		t.Fatalf("PATCH calls = %d, want 1", capPatch.calls.Load())
+	}
+	// Reset to the install default off the connector's REAL slug, not the alias.
+	want := defaultTunnelDisplayName(testDisplayNameSlug)
+	if capPatch.description == nil || *capPatch.description != want {
+		t.Errorf("PATCH description = %v, want pointer to %q (install default off the real slug)", capPatch.description, want)
+	}
+}
+
+// TestSetDisplayName_ChannelAliasToURLResourceRejected guards the type fence on
+// the alias path: a channel alias can point at a URL resource, but Display Names
+// apply only to connectors. The alias resolves, the recovered resource is
+// type=url, and the verb refuses with connector-only copy rather than PATCHing a
+// URL resource's description or nudging the admin to clear a valid URL alias.
+func TestSetDisplayName_ChannelAliasToURLResourceRejected(t *testing.T) {
+	t.Setenv("QURL_API_KEY", "test-key")
+	const urlResourceID = "r_url_resource"
+	capPatch := &capturedPatch{}
+	h := newTestHandler(t, displayNameScanQURLServer(t, map[string]any{
+		testKeyResourceID: urlResourceID,
+		testKeyType:       client.ResourceTypeURL,
+		testKeyStatus:     client.StatusActive,
+	}, capPatch))
+	seedAliasAdminGate(t, h, testAliasTeamID)
+	if err := h.cfg.AdminStore.BindChannelAlias(context.Background(), testAliasTeamID, testAliasChannelID, testDisplayNameAlias, urlResourceID); err != nil {
+		t.Fatalf("seed channel alias binding: %v", err)
+	}
+
+	_, _, async := newAdminSlashInvokerOnChannel(t, h, testAliasChannelID).
+		invokeAdminAsync("set-display-name "+testDisplayNameAlias+" "+testDisplayNameNewName, testAliasTeamID, "U_alias_admin")
+
+	if !strings.Contains(async, "Display Names apply only to qURL Connectors") {
+		t.Errorf("async reply = %q, want the connector-only hint", async)
+	}
+	if strings.Contains(async, "unset-alias") || strings.Contains(async, "no longer points at an active") {
+		t.Errorf("async reply = %q, must not recommend clearing a valid URL-resource alias", async)
+	}
+	if capPatch.calls.Load() != 0 {
+		t.Errorf("PATCH fired against a non-connector resource (calls = %d)", capPatch.calls.Load())
+	}
+}
+
+// TestSetDisplayName_ChannelAliasToRevokedTunnelRejected is the production
+// scenario the fix most resembles: the alias is bound, but its target connector
+// has since been revoked (Status != Active). This exercises the Status clause —
+// distinct from the Type clause TestSetDisplayName_ChannelAliasToURLResourceRejected
+// covers — so no PATCH fires and the admin gets the unset-alias hint.
+func TestSetDisplayName_ChannelAliasToRevokedTunnelRejected(t *testing.T) {
+	t.Setenv("QURL_API_KEY", "test-key")
+	capPatch := &capturedPatch{}
+	h := newTestHandler(t, displayNameScanQURLServer(t, map[string]any{
+		testKeyResourceID: testDisplayNameTunnelRID,
+		testKeyType:       client.ResourceTypeTunnel,
+		testKeySlug:       testDisplayNameSlug,
+		testKeyStatus:     client.StatusRevoked,
+	}, capPatch))
+	seedAliasAdminGate(t, h, testAliasTeamID)
+	if err := h.cfg.AdminStore.BindChannelAlias(context.Background(), testAliasTeamID, testAliasChannelID, testDisplayNameAlias, testDisplayNameTunnelRID); err != nil {
+		t.Fatalf("seed channel alias binding: %v", err)
+	}
+
+	_, _, async := newAdminSlashInvokerOnChannel(t, h, testAliasChannelID).
+		invokeAdminAsync("set-display-name "+testDisplayNameAlias+" "+testDisplayNameNewName, testAliasTeamID, "U_alias_admin")
+
+	if !strings.Contains(async, "no longer points at an active qURL Connector") || !strings.Contains(async, "unset-alias") {
+		t.Errorf("async reply = %q, want the alias-not-a-connector hint", async)
+	}
+	if capPatch.calls.Load() != 0 {
+		t.Errorf("PATCH fired against a revoked connector (calls = %d)", capPatch.calls.Load())
+	}
+}
+
+// displayNameScanWindowQURLServer models a >first-page workspace: the no-slug
+// scan returns scanResource as the first page WITH has_more=true (more pages
+// remain). It drives both scan-window cases — pass an UNRELATED resource for
+// "bound id absent from page 1", or the bound-but-dead resource for "id present
+// on page 1 but not an active tunnel". The slug-first GET always misses (the
+// alias isn't any connector's slug). PATCH should never fire on these paths.
+func displayNameScanWindowQURLServer(t *testing.T, scanResource map[string]any, capPatch *capturedPatch) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == testResourcesPath:
+			if r.URL.Query().Get("slug") != "" {
+				respondQURLEnvelope(t, w, []map[string]any{})
+				return
+			}
+			// First page = scanResource, with has_more=true (respondQURLEnvelope
+			// always reports false, so emit the envelope directly).
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(map[string]any{
+				"data": []map[string]any{scanResource},
+				"meta": map[string]any{"request_id": "req_test", "has_more": true},
+			}); err != nil {
+				t.Fatalf("encode qurl envelope: %v", err)
+			}
+		case r.Method == http.MethodPatch && strings.HasPrefix(r.URL.Path, "/v1/resources/"):
+			// Record so the no-PATCH assertion reports cleanly if this regresses.
+			capPatch.calls.Add(1)
+			respondQURLEnvelope(t, w, map[string]any{testKeyResourceID: "r_unexpected", testKeyType: client.ResourceTypeTunnel, testKeyStatus: client.StatusActive})
+		default:
+			t.Fatalf("unexpected upstream request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// TestSetDisplayName_ChannelAliasPastScanWindow covers the case cr flagged: the
+// alias is bound to a connector that exists but sits past the first
+// ListResources page (HasMore, and the bound id is ABSENT from page 1). The
+// lookup can't confirm the binding is stale, so it must NOT claim the alias is
+// dead or recommend unset-alias (which would unbind a live alias) — it surfaces
+// a lookup-limit message and issues no PATCH.
+func TestSetDisplayName_ChannelAliasPastScanWindow(t *testing.T) {
+	t.Setenv("QURL_API_KEY", "test-key")
+	capPatch := &capturedPatch{}
+	// First page holds an UNRELATED connector + more pages; the bound id is absent.
+	h := newTestHandler(t, displayNameScanWindowQURLServer(t, map[string]any{
+		testKeyResourceID: "r_some_other_connector",
+		testKeyType:       client.ResourceTypeTunnel,
+		testKeySlug:       "other-connector",
+		testKeyStatus:     client.StatusActive,
+	}, capPatch))
+	seedAliasAdminGate(t, h, testAliasTeamID)
+	if err := h.cfg.AdminStore.BindChannelAlias(context.Background(), testAliasTeamID, testAliasChannelID, testDisplayNameAlias, testDisplayNameTunnelRID); err != nil {
+		t.Fatalf("seed channel alias binding: %v", err)
+	}
+
+	_, _, async := newAdminSlashInvokerOnChannel(t, h, testAliasChannelID).
+		invokeAdminAsync("set-display-name "+testDisplayNameAlias+" "+testDisplayNameNewName, testAliasTeamID, "U_alias_admin")
+
+	// Must not nudge the admin to destroy a possibly-live binding.
+	if strings.Contains(async, "unset-alias") || strings.Contains(async, "no longer points at an active") {
+		t.Errorf("async reply = %q, must not recommend unbinding a possibly-live alias", async)
+	}
+	if !strings.Contains(async, "lookup limit") {
+		t.Errorf("async reply = %q, want the non-destructive lookup-limit message", async)
+	}
+	if capPatch.calls.Load() != 0 {
+		t.Errorf("PATCH fired on an unresolved scan-window lookup (calls = %d)", capPatch.calls.Load())
+	}
+}
+
+// TestSetDisplayName_RevokedTargetOnFirstPageWithMorePages locks in the round-3
+// fix: when the bound resource IS on the first page but revoked, a workspace with
+// more pages (HasMore) must still get the DEFINITIVE stale-alias hint — a
+// seen-but-dead target is not a scan-window ambiguity, so the soft lookup-limit
+// copy must not mask it.
+func TestSetDisplayName_RevokedTargetOnFirstPageWithMorePages(t *testing.T) {
+	t.Setenv("QURL_API_KEY", "test-key")
+	capPatch := &capturedPatch{}
+	// Bound resource present on page 1 but revoked, and more pages exist.
+	h := newTestHandler(t, displayNameScanWindowQURLServer(t, map[string]any{
+		testKeyResourceID: testDisplayNameTunnelRID,
+		testKeyType:       client.ResourceTypeTunnel,
+		testKeySlug:       testDisplayNameSlug,
+		testKeyStatus:     client.StatusRevoked,
+	}, capPatch))
+	seedAliasAdminGate(t, h, testAliasTeamID)
+	if err := h.cfg.AdminStore.BindChannelAlias(context.Background(), testAliasTeamID, testAliasChannelID, testDisplayNameAlias, testDisplayNameTunnelRID); err != nil {
+		t.Fatalf("seed channel alias binding: %v", err)
+	}
+
+	_, _, async := newAdminSlashInvokerOnChannel(t, h, testAliasChannelID).
+		invokeAdminAsync("set-display-name "+testDisplayNameAlias+" "+testDisplayNameNewName, testAliasTeamID, "U_alias_admin")
+
+	// Seen-but-revoked is definitively stale even with HasMore=true: the admin
+	// SHOULD get the unset-alias hint, NOT the soft lookup-limit copy.
+	if !strings.Contains(async, "no longer points at an active") || !strings.Contains(async, "unset-alias") {
+		t.Errorf("async reply = %q, want the definitive stale-alias hint", async)
+	}
+	if strings.Contains(async, "lookup limit") {
+		t.Errorf("async reply = %q, must not use the scan-window copy for a seen-but-dead target", async)
+	}
+	if capPatch.calls.Load() != 0 {
+		t.Errorf("PATCH fired against a revoked connector (calls = %d)", capPatch.calls.Load())
+	}
+}
+
+// TestSetDisplayName_NoChannelResolvesBySlug pins the channelID=="" degrade: with
+// no channel_id the alias fallback is skipped (it needs a channel), but slug
+// resolution must still work — channel_id is not required for it.
+func TestSetDisplayName_NoChannelResolvesBySlug(t *testing.T) {
+	t.Setenv("QURL_API_KEY", "test-key")
+	capPatch := &capturedPatch{}
+	h := newTestHandler(t, displayNameQURLServer(t, testTunnelSlug, capPatch))
+	seedAliasAdminGate(t, h, testAliasTeamID)
+
+	// channelID "" sends a truly-empty channel_id on the wire.
+	_, _, async := newAdminSlashInvokerOnChannel(t, h, "").
+		invokeAdminAsync("set-display-name "+testTunnelSlug+" "+testDisplayNameNewName, testAliasTeamID, "U_alias_admin")
+
+	if !strings.Contains(async, testDisplayNameNewName) || !strings.Contains(async, "`"+testTunnelSlug+"`") {
+		t.Errorf("async reply = %q, want the slug to resolve with no channel_id", async)
+	}
+	if capPatch.calls.Load() != 1 {
+		t.Fatalf("PATCH calls = %d, want 1 (slug must resolve without a channel)", capPatch.calls.Load())
+	}
+}
+
+// TestSetDisplayName_ChannelAliasLookupErrorSurfacesServiceUnavailable pins the
+// outage signal: when the channel_policies GetItem errors, the resolver surfaces
+// the service-unavailable copy (matching /qurl get), NOT a misleading "no such
+// id", and never PATCHes. The admin gate reads workspace_mappings (a different
+// table), so it still passes — only the alias-lookup read is failed.
+func TestSetDisplayName_ChannelAliasLookupErrorSurfacesServiceUnavailable(t *testing.T) {
+	t.Setenv("QURL_API_KEY", "test-key")
+	capPatch := &capturedPatch{}
+	// knownSlug differs from the alias, so the slug-first lookup returns empty and
+	// the resolver reaches the channel-alias fallback.
+	h := newTestHandler(t, displayNameQURLServer(t, "some-other-slug", capPatch))
+
+	// Seed the admin gate inline (like seedAliasAdminGate) but keep the fake so we
+	// can fail the channel_policies GetItem.
+	names := defaultTestTableNames()
+	ddb := newFakeDDB(t, names, nil)
+	ddb.seedItem(t, names.workspace, seedWorkspaceAdmins(testAliasTeamID, testAdminOwnerID, []string{"U_admin", "U_alias_admin"}, testWorkspaceConfiguredAt))
+	ddb.SetGetItemErr(names.channelPolicy, errors.New("ddb unavailable"))
+	h.cfg.AdminStore = newStoreFromFake(t, ddb, names, nil)
+
+	_, _, async := newAdminSlashInvokerOnChannel(t, h, testAliasChannelID).
+		invokeAdminAsync("set-display-name "+testDisplayNameAlias+" "+testDisplayNameNewName, testAliasTeamID, "U_alias_admin")
+
+	if !strings.Contains(async, "Could not reach qURL") {
+		t.Errorf("async reply = %q, want the service-unavailable copy after the alias-lookup error", async)
+	}
+	if strings.Contains(async, "No qURL Connector with id") {
+		t.Errorf("async reply = %q, must not misdiagnose a channel_policies outage as a missing id", async)
+	}
+	if capPatch.calls.Load() != 0 {
+		t.Errorf("PATCH fired despite the alias-lookup error (calls = %d)", capPatch.calls.Load())
+	}
+}
+
+// TestSetDisplayName_LegacyURLBindingRefused mirrors /qurl get's legacy guard: a
+// channel alias bound to a raw URL (a pre-resource set-alias row, not an `r_`
+// id) is refused with the re-bind hint before any resource scan — never a PATCH,
+// and never the misleading scan-window copy.
+func TestSetDisplayName_LegacyURLBindingRefused(t *testing.T) {
+	t.Setenv("QURL_API_KEY", "test-key")
+	capPatch := &capturedPatch{}
+	// knownSlug differs from the alias so the slug-first lookup misses; the alias
+	// then resolves to a legacy raw-URL binding.
+	h := newTestHandler(t, displayNameQURLServer(t, "some-other-slug", capPatch))
+	seedAliasAdminGate(t, h, testAliasTeamID)
+	if err := h.cfg.AdminStore.BindChannelAlias(context.Background(), testAliasTeamID, testAliasChannelID, testDisplayNameAlias, "https://legacy.example.com"); err != nil {
+		t.Fatalf("seed legacy URL binding: %v", err)
+	}
+
+	_, _, async := newAdminSlashInvokerOnChannel(t, h, testAliasChannelID).
+		invokeAdminAsync("set-display-name "+testDisplayNameAlias+" "+testDisplayNameNewName, testAliasTeamID, "U_alias_admin")
+
+	if !strings.Contains(async, "no longer supported") || !strings.Contains(async, "set-alias") {
+		t.Errorf("async reply = %q, want the legacy re-bind hint", async)
+	}
+	if strings.Contains(async, "lookup limit") {
+		t.Errorf("async reply = %q, legacy binding must not surface the scan-window copy", async)
+	}
+	if capPatch.calls.Load() != 0 {
+		t.Errorf("PATCH fired for a legacy URL binding (calls = %d)", capPatch.calls.Load())
 	}
 }

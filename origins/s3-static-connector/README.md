@@ -18,6 +18,27 @@ runs the behavior contract against that exact candidate digest for both
 `:main` and `:<git-sha>`. Deployments should pin the resolved image digest
 once the published image has soaked in the target environment.
 
+## qURL Connector compatibility
+
+The origin's Connector-facing contract is intentionally small: plain HTTP on
+`127.0.0.1:8080`, with both containers running as UID/GID `65532`. Connector
+enrollment is independent of the origin and uses the current native UDP
+lifecycle: a one-shot, owner-scoped, resource-bound enrollment token is consumed on the
+first start, and the Connector persists the resulting device credential.
+
+Slack validates the complete server-issued `resource_id`,
+`connector_routing_id`, and `knock_resource_id` tuple before minting that
+enrollment token. It persists only the first two route identities; the
+Connector rehydrates the knock target from the authenticated resource response
+and does not use the retired public HTTP bootstrap lifecycle.
+
+Slack pins the origin by multi-architecture digest. Its CI extracts that exact
+pin, runs this image's complete behavior suite on both `linux/amd64` and
+`linux/arm64`, and verifies the numeric user, exposed port, and loopback listen
+default before accepting a Slack or origin change. The same gate boots the
+immutable current Connector release and requires strict config loading to
+accept the canonical loopback route.
+
 The image packages two pinned processes:
 
 - **nginx** owns the website surface — clean URLs, the security header set,
@@ -111,16 +132,29 @@ replaces; viewer TLS is terminated before traffic reaches nginx.
 | --- | ---: | --- | --- |
 | Missing key (S3 `404`) | 404 | `Not Found` | access log `upstream_status:404` |
 | Signing / auth failure (S3 `403`) | 404 | `Not Found` | access log `upstream_status:403` (drives the SigV4-denied alarm) |
-| Other expected non-throttle S3 `4xx` responses (`400`, `401`, `409`, `411`, `412`) | 404 | `Not Found` | access log preserves the exact `upstream_status` |
+| Wrong-region bucket (S3 `301 PermanentRedirect`) | 404 | `Not Found` | access log `upstream_status:301` |
+| Any other S3 `3xx`/`4xx` response | 404 | `Not Found` | access log preserves the exact `upstream_status` |
 | S3 throttle (`429`) | 502 | `Bad Gateway` | access log `upstream_status:429` |
-| Upstream 5xx / Envoy down / credential-chain failure | 502 | `Bad Gateway` | access log `status:502` (drives the origin-5xx alarm) |
-| Method other than GET/HEAD | 405 | (nginx default) | access log only |
+| Any S3 `5xx` / Envoy down / credential-chain failure | 502 | `Bad Gateway` | access log `status:502` (drives the origin-5xx alarm) |
+| Method other than GET/HEAD | 405 | `Method Not Allowed` | access log only |
 
-S3 error bodies and the 403-vs-404 distinction are never leaked to clients; the
-distinction is preserved in the access log for alarming. Production deployments
-must wire the SigV4-denied alarm on `upstream_status:403` before relying on this
-image, because a signing or IAM failure intentionally looks like a normal 404 to
-viewers.
+Only a `2xx` object hit reaches the viewer. Every other upstream status is
+intercepted, so a status S3 starts returning in future is masked by default
+rather than passed through. Upstream `405` is included in that mapping; nginx's
+local method guard returns its own `405` body without consulting the upstream
+error mapping. The other exceptions are responses nginx produces itself: `304`
+for a viewer's conditional GET and `416` for an unsatisfiable range.
+
+S3 error bodies, `x-amz-*` response headers, and the 403-vs-404 distinction are
+never leaked to clients; the distinction is preserved in the access log for
+alarming. Envoy strips the complete `x-amz-*` namespace, including user-defined
+`x-amz-meta-*` values, KMS key IDs, and website redirect metadata, while nginx
+strips Envoy's `x-envoy-upstream-service-time`. Standard HTTP object metadata
+such as `Content-Type`, `Cache-Control`, `Content-Encoding`, `ETag`,
+`Last-Modified`, `Expires`, and range headers still passes through. Production
+deployments must wire the SigV4-denied alarm on `upstream_status:403` before
+relying on this image, because a signing or IAM failure intentionally looks like
+a normal 404 to viewers.
 
 Range serving is intended for uncompressed objects. nginx gzip takes precedence
 for compressible content types such as CSS, JS, JSON, SVG, and XML, so text

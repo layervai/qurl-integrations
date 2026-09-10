@@ -13,8 +13,10 @@ package agent
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 // streamingFakeLLM implements both LLM and streamingLLM. It replays one response per
@@ -312,5 +314,141 @@ func TestRun_StreamingLLM_NoSink_UsesComplete(t *testing.T) {
 	}
 	if res.Reply != "hello" {
 		t.Fatalf("Result.Reply = %q, want %q", res.Reply, "hello")
+	}
+}
+
+// streamingSlowThenAnswerLLM streams a partial fragment and then blocks until the
+// round's own ration expires, before answering the final round normally — the
+// shape that produces a truncated delta followed by a complete answer.
+type streamingSlowThenAnswerLLM struct {
+	partial string
+	final   Response
+	calls   int
+}
+
+func (s *streamingSlowThenAnswerLLM) Complete(ctx context.Context, req *Request) (Response, error) {
+	return s.StreamComplete(ctx, req, nil)
+}
+
+func (s *streamingSlowThenAnswerLLM) StreamComplete(ctx context.Context, _ *Request, onText func(string)) (Response, error) {
+	s.calls++
+	if s.calls == 1 {
+		// Mirror the real StreamComplete, which forwards only non-empty deltas.
+		if onText != nil && s.partial != "" {
+			onText(s.partial)
+		}
+		<-ctx.Done()
+		return Response{}, ctx.Err()
+	}
+	if onText != nil {
+		onText(s.final.Text)
+	}
+	return s.final, nil
+}
+
+// A gathering round that streams text and THEN outruns its ration leaves the
+// fragment with the caller — deltas are never rolled back (see WithStreamSink).
+// The reserved final answer must therefore stay OFF the sink: the caller delivers
+// Reply as its own message (the DiscardedStreamText contract), and the sink writes
+// into the SAME already-open stream — streaming it would append the answer onto
+// the fragment and then the caller would post it again, so the user reads it
+// twice. The consuming side is pinned by
+// TestAgentStreamer_DiscardedStreamTextFallsBackToAPostedReply.
+func TestRun_AbandonedStreamedRoundKeepsTheFinalAnswerOffTheSink(t *testing.T) {
+	llm := &streamingSlowThenAnswerLLM{
+		partial: "Let me check the res",
+		final:   textResp("I couldn't finish checking $docs in this channel."),
+	}
+	var deltas []string
+	_, tc := testCtx()
+	ctx, cancel := context.WithTimeout(context.Background(), finalAnswerReserve+250*time.Millisecond)
+	defer cancel()
+
+	res, _, err := New(llm, &fakeBackend{}, WithStreamSink(func(d string) {
+		deltas = append(deltas, d)
+	})).Run(ctx, tc, nil, "give me access to $docs")
+	if err != nil {
+		t.Fatalf("Run must degrade to an answer, not fail: %v", err)
+	}
+	if res.Reply != llm.final.Text {
+		t.Fatalf("Result.Reply = %q, want the final answer", res.Reply)
+	}
+	if res.Cutoff != CutoffBudget {
+		t.Fatalf("Cutoff = %q, want %q", res.Cutoff, CutoffBudget)
+	}
+	if !res.DiscardedStreamText {
+		t.Fatal("the abandoned round streamed text, so the caller must be told not to append onto it")
+	}
+	if llm.calls != 2 {
+		t.Fatalf("the final answer must come from a real round-trip, got %d calls", llm.calls)
+	}
+	// Only the abandoned fragment reaches the sink. If the final answer streamed too
+	// it would be appended onto that fragment in the live message AND reposted by the
+	// caller, so the user would read the answer twice.
+	if want := []string{"Let me check the res"}; !reflect.DeepEqual(deltas, want) {
+		t.Fatalf("sink saw %q, want only the abandoned fragment", deltas)
+	}
+}
+
+// The same budget fallback, but the abandoned round streamed NOTHING — the common
+// shape, since the system prompt tells the model to lead with the answer rather
+// than preamble. Nothing was discarded, so the delivery layer keeps its normal
+// reconcile and the user sees one clean streamed message.
+func TestRun_SilentAbandonedRoundDoesNotDiscardStreamText(t *testing.T) {
+	llm := &streamingSlowThenAnswerLLM{
+		partial: "", // the round emits no deltas before it outruns its ration
+		final:   textResp("Nothing in this channel matches $docs."),
+	}
+	var deltas []string
+	_, tc := testCtx()
+	ctx, cancel := context.WithTimeout(context.Background(), finalAnswerReserve+250*time.Millisecond)
+	defer cancel()
+
+	res, _, err := New(llm, &fakeBackend{}, WithStreamSink(func(d string) {
+		deltas = append(deltas, d)
+	})).Run(ctx, tc, nil, "give me access to $docs")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.DiscardedStreamText {
+		t.Fatal("no text was streamed before the round was abandoned; nothing was discarded")
+	}
+	if !reflect.DeepEqual(deltas, []string{llm.final.Text}) {
+		t.Fatalf("sink saw %q, want only the final answer", deltas)
+	}
+}
+
+// The blank-final-answer fallback on a STREAMING cut-short turn — the last
+// uncovered corner of that fallback. Two synthesized-vs-streamed hazards meet
+// here: the final round produces no text, so Reply is iterationCapMessage, which
+// no delta ever carried; and the abandoned round DID stream, so the reply must
+// still be kept off the sink. Both must hold at once, or the user gets either an
+// empty message or the fallback twice.
+func TestRun_BlankFinalAnswerOnAStreamedCutShortTurn(t *testing.T) {
+	llm := &streamingSlowThenAnswerLLM{
+		partial: "Let me check the res",
+		final:   textResp("   "), // model returns nothing usable
+	}
+	var deltas []string
+	_, tc := testCtx()
+	ctx, cancel := context.WithTimeout(context.Background(), finalAnswerReserve+250*time.Millisecond)
+	defer cancel()
+
+	res, _, err := New(llm, &fakeBackend{}, WithStreamSink(func(d string) {
+		deltas = append(deltas, d)
+	})).Run(ctx, tc, nil, "give me access to $docs")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Reply != iterationCapMessage {
+		t.Fatalf("a blank final answer must fall back to the ask-again reply, got %q", res.Reply)
+	}
+	if !res.DiscardedStreamText {
+		t.Fatal("the abandoned round streamed, so the fallback reply must be delivered separately")
+	}
+	// The synthesized fallback was never streamed, and the abandoned fragment is all
+	// the sink ever saw — so the delivery layer posts the fallback as its own message.
+	if want := []string{"Let me check the res"}; !reflect.DeepEqual(deltas, want) {
+		t.Fatalf("sink saw %q, want only the abandoned fragment", deltas)
 	}
 }

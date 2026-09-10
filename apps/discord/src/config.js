@@ -1,3 +1,4 @@
+// QURL_DEPLOYMENT is consumed and strictly validated by @layervai/qurl/node.
 const os = require('os');
 
 // Prod safety guard: refuse to boot with DDB_TEST_ENDPOINT set under
@@ -38,8 +39,8 @@ if (process.env.NODE_ENV === 'production' && process.env.DDB_TEST_ENDPOINT) {
 // circuit and both replicas would believe they hold leadership.
 // The peer-heartbeat row collision (two writers on the same composite
 // key) would surface post-deploy as a telemetry signal.
-// Env overrides are trimmed for parity with GUILD_ID / STORE_TYPE /
-// ALLOWED_GITHUB_ORGS upstream — a trailing space on INSTANCE_ID
+// Env overrides are trimmed for parity with GUILD_ID / STORE_TYPE
+// upstream — a trailing space on INSTANCE_ID
 // would otherwise silently key into the DDB lock and a replica
 // mismatch would be hard to spot.
 //
@@ -98,6 +99,23 @@ function deriveInstanceIp() {
     }
   }
   return null;
+}
+
+function normalizeBaseUrl(raw) {
+  // Trim BEFORE applying the default: `(raw || default).trim()` turns a
+  // whitespace-only env var into '', breaking the "BASE_URL is always
+  // truthy" invariant that boot-requirements.js relies on for its
+  // diagnostics.
+  const value = (raw ?? '').trim() || 'http://localhost:3000';
+  try {
+    const url = new URL(value);
+    if (!url.username && !url.password && url.pathname === '/' && !url.search && !url.hash) {
+      return `${url.protocol}//${url.host}`;
+    }
+  } catch {
+    // Leave malformed values untouched so boot diagnostics quote what was set.
+  }
+  return value;
 }
 
 // Safe int parser: handles NaN and falsy-zero correctly.
@@ -165,72 +183,21 @@ if (rawGuildId) {
   }
 }
 
-// Multi-tenant mode: derived once here, consumed everywhere else. When true,
-// the bot treats itself as a public multi-server app (commands global,
-// OpenNHP features dormant, /auth + /webhook routes not mounted). When
-// false, the bot runs in single-guild mode targeting normalizedGuildId.
+// Multi-tenant mode: derived once here, consumed everywhere else. When
+// true, the bot treats itself as a public multi-server app (commands
+// register globally). When false, the bot runs in single-guild mode
+// targeting normalizedGuildId, registering commands scoped to that guild
+// so they propagate instantly instead of waiting out Discord's global
+// command cache.
+//
 // Keeping this derived in config.js (single source of truth) means every
 // downstream check is `if (config.isMultiTenant)` — semantic name at
 // every callsite.
 //
-// Together with ENABLE_OPENNHP_FEATURES (below), this selects one of
-// three supported modes:
-//
-//   (!isMultiTenant, ENABLE_OPENNHP_FEATURES=true)
-//       Single-guild OpenNHP community server. Full command set
-//       registers scoped to the guild; ensureRolesAndChannels creates
-//       contributor roles + #contribute / #github-feed; /auth and
-//       /webhook routes mount; weekly digest runs. Requires
-//       ManageRoles + ManageChannels perms in the guild.
-//
-//   (!isMultiTenant, ENABLE_OPENNHP_FEATURES=false)
-//       Single-guild plain qURL sharing tool. Only /qurl registers
-//       (scoped to the guild for instant propagation); no role or
-//       channel creation; /auth and /webhook routes dormant. Needs
-//       only the 4 runtime perms (ViewChannel, SendMessages,
-//       EmbedLinks, UseApplicationCommands).
-//
-//   (isMultiTenant, ENABLE_OPENNHP_FEATURES=false)
-//       Multi-tenant plain qURL sharing tool. Commands register
-//       globally (up to 1 hr Discord cache propagation); per-guild
-//       config via /qurl setup; every OpenNHP code path is gated off.
-//       Default for the public-bot install.
-//
-//   (isMultiTenant, ENABLE_OPENNHP_FEATURES=true)
-//       Not a supported combination. OpenNHP behaviors need a
-//       specific guild cache to target; the ready handler skips its
-//       single-guild setup when isMultiTenant, so the flag has no
-//       effect in multi-tenant mode.
+// Both modes run the same command surface (/qurl) and the same routes.
+// Per-guild qURL configuration flows through /qurl setup in either mode;
+// the only behavioral difference is command registration scope.
 const isMultiTenant = !normalizedGuildId;
-
-// OpenNHP community features (role auto-creation + auto-assign, channel
-// auto-creation, welcome DM, badge announcements). Default OFF so a
-// vanilla install of the bot into any guild — single-tenant or
-// multi-tenant — only exercises the 4 runtime permissions it was
-// invited with (View Channels, Send Messages, Embed Links, Use
-// Application Commands). Only the OpenNHP community server sets this
-// true; everywhere else the bot is a plain qURL sharing tool with no
-// elevated expectations. Must be the literal string "true" — any other
-// value (including unset, empty, "TRUE", "1", "yes") keeps it disabled,
-// so an env-var typo can't silently re-enable role/channel creation
-// attempts in a guild that hasn't granted those permissions.
-const enableOpenNHPFeatures = process.env.ENABLE_OPENNHP_FEATURES === 'true';
-
-// Unsupported combination — catch at config load so an operator doesn't
-// spend time wondering why "ENABLE_OPENNHP_FEATURES=true" had no effect
-// in multi-tenant mode. logger isn't available this early (config is
-// a require() dependency of logger's callers), so use console.warn.
-if (!normalizedGuildId && enableOpenNHPFeatures) {
-  console.warn('[config] ENABLE_OPENNHP_FEATURES=true is ignored when GUILD_ID is unset (multi-tenant mode): OpenNHP behaviors target a cached single guild that multi-tenant mode never populates. Either set GUILD_ID to the OpenNHP guild snowflake, or clear ENABLE_OPENNHP_FEATURES to silence this warning.');
-}
-
-// Single source of truth for "OpenNHP is active". Consumed by
-// commands.js (command-set filter), server.js (route-mount gate),
-// boot-requirements.js (which env-vars are required), and discord.js
-// (every OpenNHP short-circuit). Deriving in one place means a future
-// change to the predicate — e.g. adding a third flag, or broadening
-// what "multi-tenant" means — only touches this file.
-const isOpenNHPActive = !isMultiTenant && enableOpenNHPFeatures;
 
 // AUTH0_DOMAIN must be a bare hostname — the codebase composes it as
 // `https://${AUTH0_DOMAIN}/...` for the JWKS endpoint, /authorize, and
@@ -321,8 +288,28 @@ function takeGatewayHandoffHmac() {
 // independently of send cadence. See setDetectCooldown in commands.js.
 const sendCooldownMs = intEnv('QURL_SEND_COOLDOWN_MS', 30000, { minPositive: true });
 const detectCooldownMs = intEnv('QURL_DETECT_COOLDOWN_MS', sendCooldownMs, { minPositive: true });
-const DISCORD_INSTALL_STATE_SECRET_MIN_CHARS = 64;
-const discordInstallStateSecret = process.env.DISCORD_INSTALL_STATE_SECRET?.trim() || '';
+
+// Env-extendable additions to connector.js's non-prod detect-tunnel
+// allowlist (DETECT_TUNNEL_NON_PROD_QURL_ENDPOINT_HOSTS /
+// DETECT_TUNNEL_NON_PROD_HOST_SUFFIXES). Those built-ins are hardcoded and
+// public; real sandbox/staging qURL-tunnel hostnames are infra-owned and
+// must not be committed to this public repo. These two comma-separated env
+// vars let the private infra repo inject them at deploy time — connector.js
+// merges them into the built-in sets: split on comma, trim, lowercase,
+// drop empties.
+const detectExtraNonProdEndpointHosts = (process.env.DETECT_EXTRA_NON_PROD_QURL_ENDPOINT_HOSTS || '')
+  .split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+const detectExtraNonProdHostSuffixes = (process.env.DETECT_EXTRA_NON_PROD_HOST_SUFFIXES || '')
+  .split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+// Fail fast (same posture as the DDB_TEST_ENDPOINT guard above): because the
+// detect host pin uses `host.endsWith(suffix)`, an entry missing the leading
+// '.' could admit a look-alike such as `eviltunnel.example`. Reject at config
+// load instead of widening the non-prod namespace on an operator typo.
+for (const suffix of detectExtraNonProdHostSuffixes) {
+  if (!suffix.startsWith('.')) {
+    throw new Error(`DETECT_EXTRA_NON_PROD_HOST_SUFFIXES entry '${suffix}' must start with '.' (e.g. '.tunnel.example.internal') — fix the env var before booting.`);
+  }
+}
 
 // Configuration from environment variables
 module.exports = {
@@ -336,44 +323,20 @@ module.exports = {
   // /oauth/discord/callback route will return 503 with a documented
   // "not configured" page until Justin sets the secret.
   DISCORD_CLIENT_SECRET: process.env.DISCORD_CLIENT_SECRET,
-  // Shared HMAC secret for layerv.ai's signed "Add to Discord" links.
-  // Trimmed at config load so an SSM newline/space does not turn every
-  // state-bearing install into a signature mismatch. Presence/length are
-  // enforced at boot only once DISCORD_INSTALL_STATE_REQUIRED=true.
-  DISCORD_INSTALL_STATE_SECRET: discordInstallStateSecret,
-  DISCORD_INSTALL_STATE_SECRET_MIN_CHARS,
-  // Rollout switch: false accepts missing `state` while marketing flips
-  // links; true rejects missing state so the bypass closes after rollout.
-  DISCORD_INSTALL_STATE_REQUIRED: process.env.DISCORD_INSTALL_STATE_REQUIRED === 'true',
   GUILD_ID: normalizedGuildId,
   isMultiTenant,
-  ENABLE_OPENNHP_FEATURES: enableOpenNHPFeatures,
-  isOpenNHPActive,
   isQurlOAuthConfigured,
   isDiscordInstallConfigured,
 
-  // Role names for progression
-  CONTRIBUTOR_ROLE_NAME: process.env.CONTRIBUTOR_ROLE_NAME || 'Contributor',
-  ACTIVE_CONTRIBUTOR_ROLE_NAME: process.env.ACTIVE_CONTRIBUTOR_ROLE_NAME || 'Active Contributor',
-  CORE_CONTRIBUTOR_ROLE_NAME: process.env.CORE_CONTRIBUTOR_ROLE_NAME || 'Core Contributor',
-  CHAMPION_ROLE_NAME: process.env.CHAMPION_ROLE_NAME || 'Champion',
-
-  // Role thresholds (lowered for realistic contribution cadence)
-  ACTIVE_CONTRIBUTOR_THRESHOLD: intEnv('ACTIVE_CONTRIBUTOR_THRESHOLD', 3),
-  CORE_CONTRIBUTOR_THRESHOLD: intEnv('CORE_CONTRIBUTOR_THRESHOLD', 10),
-  CHAMPION_THRESHOLD: intEnv('CHAMPION_THRESHOLD', 25),
-
-  // Channel names
-  GENERAL_CHANNEL_NAME: process.env.GENERAL_CHANNEL_NAME || 'general',
-  NOTIFICATION_CHANNEL_NAME: process.env.NOTIFICATION_CHANNEL_NAME || 'general',
-  ANNOUNCEMENTS_CHANNEL_NAME: process.env.ANNOUNCEMENTS_CHANNEL_NAME || 'announcements',
-  CONTRIBUTE_CHANNEL_NAME: process.env.CONTRIBUTE_CHANNEL_NAME || 'contribute',
-  GITHUB_FEED_CHANNEL_NAME: process.env.GITHUB_FEED_CHANNEL_NAME || 'github-feed',
-
-  // GitHub OAuth
-  GITHUB_CLIENT_ID: process.env.GITHUB_CLIENT_ID,
-  GITHUB_CLIENT_SECRET: process.env.GITHUB_CLIENT_SECRET,
-  GITHUB_WEBHOOK_SECRET: process.env.GITHUB_WEBHOOK_SECRET,
+  // Legacy shared HMAC secret for OAuth state tokens. Retained as the
+  // fallback below QURL_OAUTH_STATE_SECRET so a deploy that predates
+  // the flow-dedicated secret keeps minting valid state through the
+  // rotation window. Resolution precedence + the 32-char minimum live
+  // in src/utils/oauth-state.js (createStateSigner);
+  // boot-requirements.js's invalidStateSecretValues enforces the floor
+  // (when set) and presence (when qURL OAuth is configured) at
+  // production boot.
+  OAUTH_STATE_SECRET: process.env.OAUTH_STATE_SECRET,
 
   // qURL webhook receiver HMAC. Written to SSM by the webhook-registrar
   // Lambda (apps/discord/lambda/webhook-registrar/) on each deploy
@@ -392,52 +355,29 @@ module.exports = {
   AUTH0_CLIENT_SECRET: process.env.AUTH0_CLIENT_SECRET,
   AUTH0_AUDIENCE: process.env.AUTH0_AUDIENCE,
 
-  // Allowed GitHub organizations (comma-separated)
-  ALLOWED_GITHUB_ORGS: (process.env.ALLOWED_GITHUB_ORGS || 'OpenNHP').split(',').map(s => s.trim().toLowerCase()).filter(Boolean),
+  // Flow-dedicated HMAC secret for the qURL OAuth state token
+  // (utils/qurl-oauth-state.js) — the preferred key, so ops can rotate
+  // the signer on its own schedule (#184). Falls back to
+  // OAUTH_STATE_SECRET (legacy shared secret); precedence + the 32-char
+  // minimum live in src/utils/oauth-state.js (createStateSigner).
+  QURL_OAUTH_STATE_SECRET: process.env.QURL_OAUTH_STATE_SECRET,
 
   // Server
   PORT: intEnv('PORT', 3000),
-  BASE_URL: process.env.BASE_URL || 'http://localhost:3000',
+  BASE_URL: normalizeBaseUrl(process.env.BASE_URL),
 
   // Rate limiting
   RATE_LIMIT_WINDOW_MS: intEnv('RATE_LIMIT_WINDOW_MS', 60000), // 1 minute
   RATE_LIMIT_MAX_REQUESTS: intEnv('RATE_LIMIT_MAX_REQUESTS', 30),
 
-  // OAuth link expiry (in minutes)
-  // Shortened from 30 to 10 minutes: the OAuth state is not bound to the
-  // initiating browser session, so a shorter expiry narrows the window for
-  // a leaked/shoulder-surfed state token to be replayed by an attacker.
-  PENDING_LINK_EXPIRY_MINUTES: intEnv('PENDING_LINK_EXPIRY_MINUTES', 10),
-
-  // Admin Discord user IDs (comma-separated) — can use /forcelink, /bulklink,
-  // /unlinked. Each entry is validated to look like a Discord snowflake
-  // (17–20 digits) so a typo like "1234, 5678 " (stray space or non-numeric)
-  // can't silently create a dead admin ID that never matches an interaction.
-  ADMIN_USER_IDS: (process.env.ADMIN_USER_IDS || '')
-    .split(',')
-    .map(s => s.trim())
-    .filter(s => {
-      if (!s) return false;
-      if (!/^\d{17,20}$/.test(s)) {
-        // Using console.warn directly — logger isn't loaded this early in config import.
-        console.warn(`[config] Dropping malformed ADMIN_USER_IDS entry (not a Discord snowflake): ${JSON.stringify(s)}`);
-        return false;
-      }
-      return true;
-    }),
-
-  // Milestones to announce (star counts) - extended for mature repos
-  STAR_MILESTONES: [10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 15000, 20000, 25000, 50000, 75000, 100000],
-
-  // Weekly digest schedule (cron format) - default Sunday 9am UTC
-  WEEKLY_DIGEST_CRON: process.env.WEEKLY_DIGEST_CRON || '0 9 * * 0',
-
-  // Welcome message (for new member DM)
-  WELCOME_DM_ENABLED: process.env.WELCOME_DM_ENABLED !== 'false',
-
   // qURL. In production we fall back to the real endpoints; in dev we fall
   // back to localhost so a missing .env file doesn't silently hit prod APIs.
-  // index.js enforces that both env vars are set when NODE_ENV=production.
+  //
+  // Neither is a boot blocker. QURL_ENDPOINT can't be missing — the
+  // ternary below always yields a value. QURL_API_KEY is only the
+  // global fallback for /qurl send + /qurl map; every deployment shape
+  // configures a per-guild key through /qurl setup, so it is
+  // deliberately absent from prodRequired() in boot-requirements.js.
   QURL_API_KEY: process.env.QURL_API_KEY,
   QURL_ENDPOINT: process.env.QURL_ENDPOINT
     || (process.env.NODE_ENV === 'production' ? 'https://api.layerv.ai' : 'http://localhost:8080'),
@@ -453,6 +393,12 @@ module.exports = {
   // configured-error (resolveDetectTarget throws) rather than silently failing.
   // Set at detect activation, the same gated step that flips DETECT_COMMAND_ENABLED.
   DETECT_TUNNEL_SLUG: process.env.DETECT_TUNNEL_SLUG,
+
+  // Env-extendable additions to connector.js's non-prod detect-tunnel
+  // allowlist — see the parsing + fail-fast validation above. Empty
+  // arrays when unset (no behavior change from today).
+  DETECT_EXTRA_NON_PROD_QURL_ENDPOINT_HOSTS: detectExtraNonProdEndpointHosts,
+  DETECT_EXTRA_NON_PROD_HOST_SUFFIXES: detectExtraNonProdHostSuffixes,
 
   // qurl-s3-connector
   CONNECTOR_URL: process.env.CONNECTOR_URL
@@ -472,9 +418,10 @@ module.exports = {
   // in commands.js for the full set of MAP_COMMAND_ENABLED gates.
   //
   // Snapshot semantics: this value is read ONCE at module load and
-  // baked into the slash registration (commands.js IIFE) +
-  // SETUP_SUCCESS_MSG. Flipping MAP_COMMAND_ENABLED at runtime is
-  // a no-op until the task restarts; the deploy model handles this
+  // baked into the slash registration (commands.js IIFE),
+  // SETUP_SUCCESS_MSG, and the OAuth success/DM copy.
+  // Flipping MAP_COMMAND_ENABLED at runtime is a no-op until the task
+  // restarts; the deploy model handles this
   // (ECS rolls fresh tasks on every task-def revision).
   MAP_COMMAND_ENABLED: process.env.MAP_COMMAND_ENABLED === 'true',
 
@@ -543,9 +490,9 @@ module.exports = {
   // runs the legacy in-process shape — gateway role both receives WS
   // dispatches AND runs handlers; worker role is dormant on the queue.
   //
-  // Must be the literal string "true" — same shape as
-  // ENABLE_OPENNHP_FEATURES so an env-var typo (TRUE/1/yes/etc.) can't
-  // silently flip a production deploy into the new dispatch path.
+  // Must be the literal string "true", so an env-var typo (TRUE/1/yes/
+  // etc.) can't silently flip a production deploy into the new dispatch
+  // path.
   //
   // Rollback cliff: this flag is valid only through PR 10 (gateway
   // strip-down). The follow-up that removes the in-process fallback
@@ -662,27 +609,7 @@ module.exports = {
   // error message as before — no observable behavior change.
   hasGatewayHandoffHmac: Boolean(process.env.GATEWAY_HANDOFF_HMAC),
 
-  // Persistence backend selector. Lifted from raw env into config
-  // so the boot-guard (`unsupportedRoleResumeCombo`) and the
-  // gateway-shim wiring both read through the same parsed shape.
-  // Unset / empty / whitespace-only falls back to 'ddb', matching
-  // src/store/index.js's selection precedence.
-  //
-  // `src/store/index.js` is the source of truth for STORE_TYPE
-  // validation — it throws on unknown values at module load (which
-  // runs before any consumer reads this config field). This field
-  // is retained solely so the downstream guard `unsupportedRole-
-  // ResumeCombo` and other config-level checks can read a normalized
-  // string instead of re-parsing the env. Don't add validation
-  // logic here; surface it in store/index.js where it belongs.
-  STORE_TYPE: (process.env.STORE_TYPE ?? '').trim() || 'ddb',
-
-  // DDB table-name prefix shared by every per-table consumer
-  // (ddb-store.js + gateway-session-store.js construction in
-  // index.js). Trimmed here so a whitespace-padded env value
-  // doesn't compute a different table name at one call site than
-  // the others — ddb-store.js's `.trim()` was the original
-  // normalization point.
+  // One normalized prefix feeds every DynamoDB table-name consumer.
   DDB_TABLE_PREFIX: (process.env.DDB_TABLE_PREFIX ?? '').trim(),
 
   // SQS Standard queue the gateway publishes to and the worker
@@ -692,24 +619,6 @@ module.exports = {
   // silently no-op'ing the consumer or dropping every dispatch on
   // the producer side.
   QURL_BOT_EVENTS_QUEUE_URL: process.env.QURL_BOT_EVENTS_QUEUE_URL,
-
-  // View-update push (feat #60, sub-second view counter). When true,
-  // qurl-webhook.js publishes view events to a separate SQS queue
-  // after a successful recordQurlView; the HTTP tier (same process
-  // that owns the webhook receiver and the live monitorLinkStatus
-  // instances) drains the queue and dispatches into the process-
-  // local view-update-registry. The polling fallback in
-  // commands.js stays as the correctness primitive — this flag gates
-  // ONLY the latency-optimization path. Default false so a deploy
-  // without the flag behaves identically to the legacy polling shape.
-  // Must be the literal string "true" (same parsing posture as
-  // ENABLE_EVENT_SHIPPER) so an env-var typo can't flip prod.
-  ENABLE_VIEW_UPDATE_PUSH: process.env.ENABLE_VIEW_UPDATE_PUSH === 'true',
-
-  // SQS Standard queue for view updates (separate from
-  // QURL_BOT_EVENTS_QUEUE_URL, which carries Discord interactions).
-  // Required when ENABLE_VIEW_UPDATE_PUSH=true.
-  QURL_BOT_VIEW_UPDATES_QUEUE_URL: process.env.QURL_BOT_VIEW_UPDATES_QUEUE_URL,
 
   // Backpressure cap for the event consumer's in-flight handler
   // tracker (see src/event-consumer.js module header). Read here

@@ -1,16 +1,16 @@
 {
   "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "plugins": [
+    {
+      "type": "linked-versions",
+      "groupName": "browser-extensions",
+      "components": ["chrome-extension", "edge-extension"]
+    }
+  ],
   "packages": {
     "apps/slack": {
       "release-type": "go",
       "component": "slack",
-      "changelog-path": "CHANGELOG.md",
-      "bump-minor-pre-major": true,
-      "bump-patch-for-minor-pre-major": true
-    },
-    "apps/teams": {
-      "release-type": "go",
-      "component": "teams",
       "changelog-path": "CHANGELOG.md",
       "bump-minor-pre-major": true,
       "bump-patch-for-minor-pre-major": true
@@ -36,19 +36,21 @@
         }
       ]
     },
-    "apps/cli": {
-      "release-type": "go",
-      "component": "cli",
+    "apps/edge-extension": {
+      "release-type": "node",
+      "component": "edge-extension",
       "changelog-path": "CHANGELOG.md",
       "bump-minor-pre-major": true,
       "bump-patch-for-minor-pre-major": true
     },
-    "apps/zapier": {
+    "apps/cli": {
       "release-type": "go",
-      "component": "zapier",
       "changelog-path": "CHANGELOG.md",
       "bump-minor-pre-major": true,
-      "bump-patch-for-minor-pre-major": true
+      "bump-patch-for-minor-pre-major": true,
+      "include-component-in-tag": false,
+      "draft": true,
+      "force-tag-creation": true
     }
   }
 }

@@ -1,0 +1,3 @@
+Error: This qURL CLI is missing required built-in connection settings, so local sharing can't start.
+
+  Hint: install or reinstall an official qURL release. For a custom deployment, use the release supplied by your qURL administrator.

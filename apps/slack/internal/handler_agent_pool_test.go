@@ -7,7 +7,6 @@ package internal
 
 import (
 	"context"
-	"encoding/json"
 	"net/http/httptest"
 	"sync"
 	"testing"
@@ -17,26 +16,38 @@ import (
 	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
 )
 
+const agentPoolTestThreadTS = "100.0"
+
 // followupEventBody is a channel thread REPLY (message + thread_ts, channel_type != im,
 // no subtype) — what isAgentChannelFollowup admits onto the follow-up pool.
 func followupEventBody(eventID, ts, threadTS string) string {
-	return `{"type":"event_callback","team_id":"T1","event_id":"` + eventID + `",` +
+	return `{"type":"event_callback","team_id":"T1","api_app_id":"A1","event_id":"` + eventID + `",` +
 		`"event":{"type":"message","channel_type":"channel","user":"U2","channel":"C1",` +
 		`"ts":"` + ts + `","thread_ts":"` + threadTS + `","text":"more please"}}`
 }
 
-// seedAgentThread writes a one-message transcript so the follow-up gate admits a reply in
-// channel/threadTS (partition "T1" — team, no enterprise).
-func seedAgentThread(t *testing.T, mem *memAgentDDB, channel, threadTS string) {
-	t.Helper()
-	store := &slackdata.AgentStore{Client: mem, TableName: "agent_state", Now: func() time.Time { return fixedNow }}
-	blob, err := json.Marshal([]agent.Message{{}})
-	if err != nil {
-		t.Fatalf("marshal seed: %v", err)
+type countingThreadHistory struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (h *countingThreadHistory) read(_ context.Context, _, _, _, threadTS, _ string) ([]AgentThreadMessage, error) {
+	h.mu.Lock()
+	h.calls++
+	h.mu.Unlock()
+	if threadTS != agentPoolTestThreadTS {
+		return nil, nil
 	}
-	if err := store.SaveConversation(context.Background(), "T1", agentThreadKey(channel, threadTS), blob, 0); err != nil {
-		t.Fatalf("seed conversation: %v", err)
-	}
+	return []AgentThreadMessage{
+		{UserID: "U1", Text: "question", TS: agentPoolTestThreadTS},
+		{AppID: "A1", Text: "answer", TS: "100.1"},
+	}, nil
+}
+
+func (h *countingThreadHistory) callCount() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.calls
 }
 
 type blockingAgentLLM struct {
@@ -55,22 +66,23 @@ func (b *blockingAgentLLM) Complete(ctx context.Context, _ *agent.Request) (agen
 	}
 }
 
-func waitForGetCalls(t *testing.T, mem *memAgentDDB, want int) {
+func waitForHistoryCalls(t *testing.T, history *countingThreadHistory, want int) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if got := mem.getItemCalls(); got >= want {
+		if got := history.callCount(); got >= want {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatalf("GetItem calls = %d, want at least %d", mem.getItemCalls(), want)
+	t.Fatalf("history calls = %d, want at least %d", history.callCount(), want)
 }
 
 func TestAgentEventFollowupPoolIsolation(t *testing.T) {
-	newH := func(t *testing.T, mem *memAgentDDB) (*Handler, *[]capturedReply, *sync.Mutex) {
+	newH := func(t *testing.T, mem *memAgentDDB) (*Handler, *countingThreadHistory, *[]capturedReply, *sync.Mutex) {
 		t.Helper()
 		store := &slackdata.AgentStore{Client: mem, TableName: "agent_state", Now: func() time.Time { return fixedNow }}
+		history := &countingThreadHistory{}
 		post, posts, mu := capturingPostMessage()
 		h := NewHandler(Config{
 			AgentLLM:                       fakeAgentLLM{reply: "ok"},
@@ -81,9 +93,10 @@ func TestAgentEventFollowupPoolIsolation(t *testing.T) {
 			MaxConcurrentAsync:             1,
 			MaxConcurrentFollowupAsync:     1,
 			MaxConcurrentFollowupGateAsync: 1,
+			AgentThreadHistory:             history.read,
 		})
 		t.Cleanup(h.Wait)
-		return h, posts, mu
+		return h, history, posts, mu
 	}
 	postCount := func(posts *[]capturedReply, mu *sync.Mutex) int {
 		mu.Lock()
@@ -93,14 +106,13 @@ func TestAgentEventFollowupPoolIsolation(t *testing.T) {
 
 	t.Run("saturated follow-up gate pool drops before history read but not @mentions", func(t *testing.T) {
 		mem := newMemAgentDDB()
-		h, posts, mu := newH(t, mem)
-		seedAgentThread(t, mem, "C1", "100.0")
+		h, history, posts, mu := newH(t, mem)
 		h.followupGateSem <- struct{}{} // hold the only gate slot (never released)
 
 		// Follow-up -> full gate pool -> dropped before the transcript read.
-		fireTurn(t, h, followupEventBody("Ev0", "101.0", "100.0"))
-		if got := mem.getItemCalls(); got != 0 {
-			t.Fatalf("GetItem calls = %d, want 0 — saturated gate must drop before spending DDB reads", got)
+		fireTurn(t, h, followupEventBody("Ev0", "101.0", agentPoolTestThreadTS))
+		if got := history.callCount(); got != 0 {
+			t.Fatalf("history calls = %d, want 0 — saturated gate must drop before reading Slack", got)
 		}
 
 		// @mention -> main pool (free) -> full turn -> one post.
@@ -112,12 +124,11 @@ func TestAgentEventFollowupPoolIsolation(t *testing.T) {
 
 	t.Run("saturated follow-up turn pool drops follow-ups but not @mentions", func(t *testing.T) {
 		mem := newMemAgentDDB()
-		h, posts, mu := newH(t, mem)
-		seedAgentThread(t, mem, "C1", "100.0") // the follow-up's thread, so the gate would admit it
-		h.followupSem <- struct{}{}            // hold the only follow-up turn slot (never released)
+		h, _, posts, mu := newH(t, mem)
+		h.followupSem <- struct{}{} // hold the only follow-up turn slot (never released)
 
 		// Follow-up -> gate admits -> full follow-up turn pool -> dropped (no turn, no post).
-		fireTurn(t, h, followupEventBody("Ev2", "101.0", "100.0"))
+		fireTurn(t, h, followupEventBody("Ev2", "101.0", agentPoolTestThreadTS))
 		// @mention → main pool (free) → full turn → one post.
 		fireTurn(t, h, rateLimitEventBody("Ev3", "U2", "200.0"))
 
@@ -128,14 +139,13 @@ func TestAgentEventFollowupPoolIsolation(t *testing.T) {
 
 	t.Run("saturated main pool drops @mentions but not follow-ups", func(t *testing.T) {
 		mem := newMemAgentDDB()
-		h, posts, mu := newH(t, mem)
-		seedAgentThread(t, mem, "C1", "100.0")
+		h, _, posts, mu := newH(t, mem)
 		h.sem <- struct{}{} // hold the only main slot
 
 		// @mention → full main pool → dropped (no post).
 		fireTurn(t, h, rateLimitEventBody("Ev4", "U2", "200.0"))
 		// Follow-up → follow-up pool (free) → admitted by the gate → full turn → one post.
-		fireTurn(t, h, followupEventBody("Ev5", "101.0", "100.0"))
+		fireTurn(t, h, followupEventBody("Ev5", "101.0", agentPoolTestThreadTS))
 
 		if got := postCount(posts, mu); got != 1 {
 			t.Fatalf("posts = %d, want 1 — the follow-up must still run on its own pool while the main pool is saturated", got)
@@ -146,7 +156,7 @@ func TestAgentEventFollowupPoolIsolation(t *testing.T) {
 func TestAgentEventFollowupGateReleasesBeforeTurn(t *testing.T) {
 	mem := newMemAgentDDB()
 	store := &slackdata.AgentStore{Client: mem, TableName: "agent_state", Now: func() time.Time { return fixedNow }}
-	seedAgentThread(t, mem, "C1", "100.0")
+	history := &countingThreadHistory{}
 
 	release := make(chan struct{})
 	releaseOnce := sync.Once{}
@@ -161,26 +171,27 @@ func TestAgentEventFollowupGateReleasesBeforeTurn(t *testing.T) {
 		MaxConcurrentAsync:             1,
 		MaxConcurrentFollowupAsync:     1,
 		MaxConcurrentFollowupGateAsync: 1,
+		AgentThreadHistory:             history.read,
 	})
 	t.Cleanup(func() {
 		releaseOnce.Do(func() { close(release) })
 		h.Wait()
 	})
 
-	h.handleEvent(httptest.NewRecorder(), []byte(followupEventBody("EvGate1", "101.0", "100.0")))
+	h.handleEvent(httptest.NewRecorder(), []byte(followupEventBody("EvGate1", "101.0", agentPoolTestThreadTS)))
 	select {
 	case <-llm.started:
 	case <-time.After(2 * time.Second):
 		t.Fatal("first follow-up turn did not start")
 	}
-	firstGateReads := mem.getItemCalls()
+	firstGateReads := history.callCount()
 
 	// While the first admitted turn is still blocked in the LLM, a reply in another
 	// thread must still be able to take the gate slot, read, and drop. If the gate
 	// semaphore were held for the whole turn, this second delivery would be dropped
-	// before the GetItem below.
+	// before the Slack history read below.
 	h.handleEvent(httptest.NewRecorder(), []byte(followupEventBody("EvGate2", "201.0", "200.0")))
-	waitForGetCalls(t, mem, firstGateReads+1)
+	waitForHistoryCalls(t, history, firstGateReads+1)
 
 	releaseOnce.Do(func() { close(release) })
 	h.Wait()

@@ -4,11 +4,11 @@
 # ignore list (default frontend reads only `<context>/.dockerignore`,
 # which is the wrong place for a multi-app monorepo).
 
-# Bumped 1.26.3 → 1.26.4 for the net/textproto fix (GO-2026-5039 / GO-2026-5037);
-# go.mod requires go 1.26.4. SHA-pinned to the multi-arch index digest, same as
+# Bumped 1.26.5 → 1.26.6 for the standard-library fixes caught by govulncheck;
+# go.mod requires go 1.26.6. SHA-pinned to the multi-arch index digest, same as
 # the rest of the repo's base images — GOTOOLCHAIN stays the image default
 # `local`, so there's no unpinned build-time toolchain fetch.
-FROM golang:1.26.4-alpine@sha256:f23e8b227fb4493eabe03bede4d5a32d04092da71962f1fb79b5f7d1e6c2a17f AS build
+FROM golang:1.26.6-alpine@sha256:af8d6740070b8906d12eae1c3e3ea0957fb63f492051ea05e354c38ef9fe88df AS build
 
 WORKDIR /src
 

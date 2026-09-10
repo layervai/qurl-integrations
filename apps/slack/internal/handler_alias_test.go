@@ -31,7 +31,7 @@ const (
 	// (the not-a-`$slug` rejection), used to assert that any non-`$`
 	// target — a URL, an `r_<id>`, or a sigil-less typo — gets the
 	// uniform not-a-tunnel copy rather than the generic usage dump.
-	testAliasNotTunnelSub = "URLs and resource IDs aren't supported"
+	testAliasNotTunnelSub = "URLs, CRIDs, and internal handles aren't supported"
 	// testResourcesPath is the qurl-service list/lookup endpoint the
 	// slug-target set-alias path hits. Lifted so the slug-resolving
 	// test servers in this file don't trip goconst on the literal.
@@ -1048,6 +1048,24 @@ func TestUserHelpGatesGetAliasesAndUninstall(t *testing.T) {
 	}
 	if strings.Contains(strings.ToLower(withStore), "tunnel") {
 		t.Errorf("user help leaked tunnel terminology with AdminStore wired: %q", withStore)
+	}
+}
+
+// TestUserHelpGatesDMTrueOnPostDMBlocks fences that the `dm:true` help line is
+// advertised iff PostDMBlocks is wired — the SAME seam getWork gates its dm:true
+// refusal on. Without this lockstep, a deploy with PostDMBlocks nil would advertise
+// a path whose only reply is ":warning: DM delivery is not configured".
+func TestUserHelpGatesDMTrueOnPostDMBlocks(t *testing.T) {
+	const dmLine = "dm:true`"
+	h := newTestHandler(t, noopQURLServer(t))
+	// AdminStore gates the get verbs at all; the dm:true line nests under it.
+	seedAliasAdminGate(t, h, testAliasTeamID)
+	if got := h.userHelpMessage(commandUser); strings.Contains(got, dmLine) {
+		t.Errorf("user help advertised dm:true with PostDMBlocks nil: %q", got)
+	}
+	h.cfg.PostDMBlocks = func(context.Context, string, string, string, []any, string) error { return nil }
+	if got := h.userHelpMessage(commandUser); !strings.Contains(got, dmLine) {
+		t.Errorf("user help omitted dm:true with PostDMBlocks wired: %q", got)
 	}
 }
 

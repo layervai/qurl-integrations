@@ -1,16 +1,5 @@
-/**
- * Tests for shared send-pipeline helpers used by /qurl send + /qurl map:
- * helper functions, the qURL client, connector client, and places client.
- * The polling/back-half coverage lives in send-pipeline-back-half.test.js;
- * the data-layer roundtrip coverage lives in tests/ddb-store.test.js
- * (which exercises the qurl_sends + qurl_send_configs DDB tables).
- */
 
-// ---------------------------------------------------------------------------
-// Mocks — set up BEFORE requiring modules under test
-// ---------------------------------------------------------------------------
 
-// Minimal config stub (avoids pulling in real env vars)
 jest.mock('../src/config', () => ({
   QURL_API_KEY: 'test-api-key',
   QURL_ENDPOINT: 'https://api.test.local',
@@ -19,11 +8,8 @@ jest.mock('../src/config', () => ({
   QURL_SEND_COOLDOWN_MS: 30000,
   QURL_DETECT_COOLDOWN_MS: 30000,
   QURL_SEND_MAX_RECIPIENTS: 50,
-  PENDING_LINK_EXPIRY_MINUTES: 30,
-  ADMIN_USER_IDS: [],
 }));
 
-// Silence logger output during tests
 jest.mock('../src/logger', () => ({
   info: jest.fn(),
   warn: jest.fn(),
@@ -32,15 +18,12 @@ jest.mock('../src/logger', () => ({
   audit: jest.fn(),
 }));
 
-// Mock dns.lookup so createOneTimeLink's DNS-rebinding guard doesn't hit
-// the network. Any public-looking hostname resolves to a public IP.
 jest.mock('dns', () => ({
   promises: {
     lookup: jest.fn().mockResolvedValue([{ address: '93.184.216.34', family: 4 }]),
   },
 }));
 
-// Mock discord.js (commands.js imports it at top-level)
 jest.mock('discord.js', () => ({
   SlashCommandBuilder: jest.fn().mockImplementation(() => {
     const builder = {
@@ -103,10 +86,6 @@ jest.mock('discord.js', () => ({
   })),
 }));
 
-// Thin stub of the Store contract — the helpers under test only need the
-// qURL-send methods, and a no-op stub avoids constructing the real DDB
-// client at module-load time (which would otherwise issue zero network
-// calls but still allocates SDK objects this suite doesn't need).
 jest.mock('../src/store', () => {
   return {
     recordQURLSend: jest.fn(),
@@ -120,7 +99,6 @@ jest.mock('../src/store', () => {
   };
 });
 
-// Mock discord helper module
 jest.mock('../src/discord', () => ({
   assignContributorRole: jest.fn(),
   notifyPRMerge: jest.fn(),
@@ -132,13 +110,6 @@ jest.mock('../src/discord', () => ({
   sendDM: jest.fn(),
 }));
 
-// Mock admin util
-jest.mock('../src/utils/admin', () => ({
-  requireAdmin: jest.fn(() => true),
-  isAdmin: jest.fn(() => false),
-}));
-
-// Mock form-data (for connector.js)
 jest.mock('form-data', () => {
   return jest.fn().mockImplementation(() => ({
     append: jest.fn(),
@@ -146,17 +117,15 @@ jest.mock('form-data', () => {
   }));
 });
 
-// Mock Readable.fromWeb to avoid needing a real ReadableStream in tests
 const { Readable } = require('stream');
 const originalFromWeb = Readable.fromWeb;
 Readable.fromWeb = jest.fn(() => new Readable({ read() { this.push(null); } }));
 
-// Global fetch mock (node 18+ built-in)
 const originalFetch = globalThis.fetch;
-
-// ---------------------------------------------------------------------------
-// Now require modules under test
-// ---------------------------------------------------------------------------
+const {
+  PUBLIC_KEY_RESOURCE_ID,
+  CRID_RESOURCE_ID,
+} = require('./helpers/qurl-fixtures');
 
 const { _test } = require('../src/commands');
 const {
@@ -171,14 +140,7 @@ const {
   sendCooldowns,
 } = _test;
 
-// =========================================================================
-// 1. Helper Functions (pure logic)
-// =========================================================================
-
 describe('Helper functions', () => {
-  // -----------------------------------------------------------------------
-  // isGoogleMapsURL
-  // -----------------------------------------------------------------------
   describe('isGoogleMapsURL', () => {
     it('matches google.com/maps paths', () => {
       expect(isGoogleMapsURL('https://www.google.com/maps/place/Eiffel+Tower')).toBe(true);
@@ -214,16 +176,9 @@ describe('Helper functions', () => {
     });
 
     it('host-anchor contract: hostname must END at google.{tld} — no suffix attack', () => {
-      // Defense-in-depth pin: even if a future MAPS_URL_PATTERNS
-      // relaxation lets `google.com.evil.com` through the regex,
-      // isGoogleMapsURL is the second line of defense and MUST reject
-      // any host that has additional segments after the google.{tld}
-      // suffix. The host-anchor regex /^(www\.)?google\.[a-z]{2,3}...$/
-      // is what makes this work.
       expect(isGoogleMapsURL('https://google.com.evil.com/maps/place/x')).toBe(false);
       expect(isGoogleMapsURL('https://www.google.com.evil.com/maps')).toBe(false);
       expect(isGoogleMapsURL('https://google.co.uk.evil.com/maps')).toBe(false);
-      // Pre-suffix attacks (e.g. evil-google.com) also rejected.
       expect(isGoogleMapsURL('https://evil-google.com/maps')).toBe(false);
       expect(isGoogleMapsURL('https://notgoogle.com/maps')).toBe(false);
     });
@@ -235,9 +190,6 @@ describe('Helper functions', () => {
     });
   });
 
-  // -----------------------------------------------------------------------
-  // sanitizeFilename
-  // -----------------------------------------------------------------------
   describe('sanitizeFilename', () => {
     it('replaces path traversal sequences', () => {
       const result = sanitizeFilename('../../etc/passwd');
@@ -272,9 +224,6 @@ describe('Helper functions', () => {
     });
   });
 
-  // -----------------------------------------------------------------------
-  // sanitizeMessage
-  // -----------------------------------------------------------------------
   describe('sanitizeMessage', () => {
     it('defuses @everyone', () => {
       const result = sanitizeMessage('hey @everyone look');
@@ -316,9 +265,6 @@ describe('Helper functions', () => {
     });
 
     it('strips bidi / zero-width / control codepoints (RLO spoofing defense)', () => {
-      // U+202E (RLO) flips text direction in Discord renders \u2014 a
-      // crafted personal-message could visually spoof phishing in the
-      // recipient's DM body AND the sender's confirm-card preview.
       const rlo = String.fromCharCode(0x202E);
       const zwsp = String.fromCharCode(0x200B);
       const result = sanitizeMessage(`Hello${rlo}gnitsihP${zwsp}world`);
@@ -329,21 +275,12 @@ describe('Helper functions', () => {
     });
 
     it('strips zero-width chars that would otherwise obfuscate @-mentions', () => {
-      // ZWSP between `@` and `everyone` previously slipped past the
-      // @-mention regex because the literal sequence didn't match.
-      // sanitizeMessage now strips bidi/zero-width FIRST, so the
-      // @-mention defense catches the obfuscated form too.
       const obfuscated = '@every\u200bone heads up';
       const result = sanitizeMessage(obfuscated);
-      // ZWSP stripped, @everyone caught + neutered with \u200b INSERTED
-      // by the @-mention defense (different position).
       expect(result).toMatch(/@\u200beveryone/i);
     });
   });
 
-  // -----------------------------------------------------------------------
-  // isAllowedFileType
-  // -----------------------------------------------------------------------
   describe('isAllowedFileType', () => {
     it.each([
       ['image/png', true],
@@ -385,9 +322,6 @@ describe('Helper functions', () => {
     });
   });
 
-  // -----------------------------------------------------------------------
-  // batchSettled
-  // -----------------------------------------------------------------------
   describe('batchSettled', () => {
     it('processes items in batches of 5', async () => {
       const items = [1, 2, 3, 4, 5, 6, 7];
@@ -440,21 +374,16 @@ describe('Helper functions', () => {
       const fn = jest.fn(async (x) => {
         concurrentCalls++;
         maxConcurrent = Math.max(maxConcurrent, concurrentCalls);
-        // Simulate async work
         await new Promise(r => setTimeout(r, 10));
         concurrentCalls--;
         return x;
       });
 
       await batchSettled(items, fn, 2);
-      // Within each batch of 2, both fire concurrently
       expect(maxConcurrent).toBeLessThanOrEqual(2);
     });
   });
 
-  // -----------------------------------------------------------------------
-  // expiryToISO
-  // -----------------------------------------------------------------------
   describe('expiryToISO', () => {
     beforeEach(() => {
       jest.useFakeTimers();
@@ -514,9 +443,6 @@ describe('Helper functions', () => {
     });
   });
 
-  // -----------------------------------------------------------------------
-  // isOnCooldown / setCooldown
-  // -----------------------------------------------------------------------
   describe('isOnCooldown / setCooldown', () => {
     beforeEach(() => {
       sendCooldowns.clear();
@@ -542,17 +468,11 @@ describe('Helper functions', () => {
   });
 });
 
-// =========================================================================
-// 2. qURL Client (src/qurl.js)
-// =========================================================================
-
 describe('qURL client', () => {
   let qurl;
 
   beforeEach(() => {
-    // Reset module registry so fetch mock is fresh each time
     jest.resetModules();
-    // Re-apply essential mocks after resetModules
     jest.mock('../src/config', () => ({
       QURL_API_KEY: 'test-api-key',
       QURL_ENDPOINT: 'https://api.test.local',
@@ -574,13 +494,9 @@ describe('qURL client', () => {
 
   describe('createOneTimeLink', () => {
     it('sends correct POST body with one_time_use: true', async () => {
-      globalThis.fetch = jest.fn().mockResolvedValue({
-        ok: true,
-        status: 200,
-        json: async () => ({
-          data: { resource_id: 'res-1', qurl_link: 'https://q.test/abc' },
-        }),
-      });
+      globalThis.fetch = jest.fn().mockImplementation(async () => Response.json({
+        data: { resource_id: 'res-1', qurl_link: 'https://q.test/abc' },
+      }, { status: 201 }));
 
       const result = await qurl.createOneTimeLink('https://example.com', '24h', 'test label');
 
@@ -592,7 +508,6 @@ describe('qURL client', () => {
       expect(body.one_time_use).toBe(true);
       expect(body.target_url).toBe('https://example.com');
       expect(body.expires_in).toBe('24h');
-      // create uses `label`, not `description`
       expect(body.label).toBe('test label');
       expect(body.description).toBeUndefined();
 
@@ -601,8 +516,6 @@ describe('qURL client', () => {
     });
 
     it('throws on API error', async () => {
-      // SDK-parseable error double: it reads `.json()` (RFC-7807 envelope) and
-      // `.headers.get()`, unlike the pre-SDK client's `.text()`-only shape.
       globalThis.fetch = jest.fn().mockResolvedValue({
         ok: false,
         status: 500,
@@ -615,11 +528,9 @@ describe('qURL client', () => {
     });
 
     it('includes authorization header', async () => {
-      globalThis.fetch = jest.fn().mockResolvedValue({
-        ok: true,
-        status: 200,
-        json: async () => ({ data: { resource_id: 'r1', qurl_link: 'l1' } }),
-      });
+      globalThis.fetch = jest.fn().mockImplementation(async () => Response.json({
+        data: { resource_id: 'r1', qurl_link: 'l1' },
+      }, { status: 201 }));
 
       await qurl.createOneTimeLink('https://example.com', '1h', 'label');
 
@@ -629,37 +540,108 @@ describe('qURL client', () => {
   });
 
   describe('deleteLink', () => {
-    it('sends DELETE request with correct path', async () => {
-      globalThis.fetch = jest.fn().mockResolvedValue({
-        ok: true,
-        status: 204,
-      });
+    it.each([
+      ['public-key resource ID', PUBLIC_KEY_RESOURCE_ID],
+      ['CRID', CRID_RESOURCE_ID],
+    ])('revokes a %s through DELETE /v1/resources/{id}', async (_kind, resourceId) => {
+      globalThis.fetch = jest.fn().mockImplementation(async () => new Response(null, { status: 204 }));
 
-      // delete() requires a qurl-service resource ID (r_ prefix).
-      await qurl.deleteLink('r_resource42abc');
+      await qurl.deleteLink(resourceId);
 
       expect(globalThis.fetch).toHaveBeenCalledTimes(1);
       const [url, opts] = globalThis.fetch.mock.calls[0];
-      expect(url).toBe('https://api.test.local/v1/qurls/r_resource42abc');
+      expect(url).toBe(`https://api.test.local/v1/resources/${resourceId}`);
+      expect(opts.method).toBe('DELETE');
+      const logger = require('../src/logger');
+      expect(logger.info).toHaveBeenCalledWith('Revoked qURL resource', {
+        resource_id: resourceId,
+      });
+    });
+
+    it('reports a static resource path in auth telemetry', async () => {
+      const logger = require('../src/logger');
+      const { AUDIT_EVENTS } = require('../src/constants');
+      const { resourceIdLogRef } = require('../src/utils/resource-id');
+      logger.audit.mockClear();
+      globalThis.fetch = jest.fn().mockResolvedValue({
+        ok: false,
+        status: 401,
+        headers: { get: () => null },
+        json: async () => ({
+          error: { status: 401, code: 'unauthorized', title: 'Unauthorized' },
+        }),
+      });
+
+      await expect(qurl.deleteLink(CRID_RESOURCE_ID)).rejects.toThrow(/401/);
+      expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+      expect(logger.audit).toHaveBeenCalledWith(
+        AUDIT_EVENTS.DEPENDENCY_AUTH_FAILURE,
+        expect.objectContaining({
+          dependency: 'qurl_service',
+          status: 401,
+          method: 'DELETE',
+          path: '/resources/:resourceId',
+        }),
+      );
+      expect(logger.debug).toHaveBeenCalledWith(
+        'qURL API error',
+        expect.objectContaining({ resource_ref: resourceIdLogRef(CRID_RESOURCE_ID) }),
+      );
+    });
+
+    it('sends a legacy private ID to the service for its 400 rejection', async () => {
+      globalThis.fetch = jest.fn().mockResolvedValue({
+        ok: false,
+        status: 400,
+        headers: { get: () => null },
+        json: async () => ({ error: { status: 400, code: 'invalid_resource_id', title: 'HTTP 400' } }),
+      });
+
+      await expect(qurl.deleteLink('r_legacy42')).rejects.toThrow(/qURL API DELETE.*failed.*400/);
+      expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+      const [url, opts] = globalThis.fetch.mock.calls[0];
+      expect(url).toBe('https://api.test.local/v1/resources/r_legacy42');
       expect(opts.method).toBe('DELETE');
     });
 
-    it('throws on API error', async () => {
+    it.each([
+      ['path separators', '../qurls/x'],
+      ['an overlong value', 'a'.repeat(1025)],
+    ])('rejects %s before network work', async (_kind, resourceId) => {
+      globalThis.fetch = jest.fn();
+
+      await expect(qurl.deleteLink(resourceId)).rejects.toThrow(/Invalid resource ID format/);
+      expect(globalThis.fetch).not.toHaveBeenCalled();
+    });
+
+    it('reports a 404 from the resource endpoint', async () => {
       globalThis.fetch = jest.fn().mockResolvedValue({
         ok: false,
         status: 404,
         headers: { get: () => null },
-        json: async () => ({ error: { status: 404, code: 'not_found', title: 'HTTP 404', detail: 'qURL not found' } }),
+        json: async () => ({
+          error: {
+            status: 404,
+            code: 'not_found',
+            title: 'HTTP 404',
+            detail: 'sensitive response detail',
+          },
+        }),
       });
 
-      await expect(qurl.deleteLink('r_badid1234567')).rejects.toThrow(/qURL API DELETE.*failed.*404/);
+      const thrown = await qurl.deleteLink(CRID_RESOURCE_ID).then(
+        () => null,
+        (error) => error,
+      );
+
+      expect(thrown).toEqual(expect.any(Error));
+      expect(thrown.status).toBe(404);
+      expect(thrown.message).toMatch(/qURL API DELETE.*failed.*404/);
+      expect(thrown.message).not.toContain('sensitive response detail');
+      expect(globalThis.fetch).toHaveBeenCalledTimes(1);
     });
   });
 });
-
-// =========================================================================
-// 3. Connector Client (src/connector.js)
-// =========================================================================
 
 describe('Connector client', () => {
   let connector;
@@ -693,7 +675,6 @@ describe('Connector client', () => {
 
   describe('uploadToConnector', () => {
     it('downloads from source URL then uploads to connector', async () => {
-      // First call: Discord CDN download. Second call: connector upload.
       globalThis.fetch = jest.fn()
         .mockResolvedValueOnce({
           ok: true,
@@ -717,10 +698,8 @@ describe('Connector client', () => {
 
       expect(globalThis.fetch).toHaveBeenCalledTimes(2);
 
-      // First call: download from Discord CDN
       expect(globalThis.fetch.mock.calls[0][0]).toBe('https://cdn.discordapp.com/file.png');
 
-      // Second call: upload to connector
       const [uploadUrl, uploadOpts] = globalThis.fetch.mock.calls[1];
       expect(uploadUrl).toBe('https://connector.test.local/api/upload');
       expect(uploadOpts.method).toBe('POST');
@@ -774,6 +753,17 @@ describe('Connector client', () => {
   });
 
   describe('mintLinks', () => {
+    it.each([
+      ['a non-string resource ID', 12345],
+      ['an overlong resource ID', 'a'.repeat(1025)],
+    ])('rejects %s before minting', async (_kind, resourceId) => {
+      globalThis.fetch = jest.fn();
+
+      await expect(connector.mintLinks(resourceId, { expiresAt: 'date', n: 1 }))
+        .rejects.toThrow(/Invalid resource ID format/);
+      expect(globalThis.fetch).not.toHaveBeenCalled();
+    });
+
     it('sends POST with correct body and returns links', async () => {
       const mockLinks = [
         { qurl_link: 'https://q.test/1' },
@@ -794,9 +784,6 @@ describe('Connector client', () => {
       const body = JSON.parse(opts.body);
       expect(body.expires_at).toBe('2026-01-16T00:00:00.000Z');
       expect(body.n).toBe(2);
-      // Regression guard: bot MUST send one_time_use: true so each
-      // minted link is single-use. Dropping this field produces
-      // reusable links on some API-key tiers.
       expect(body.one_time_use).toBe(true);
       expect(result).toEqual(mockLinks);
     });
@@ -823,10 +810,6 @@ describe('Connector client', () => {
     });
   });
 });
-
-// =========================================================================
-// 4. Places Client (src/places.js)
-// =========================================================================
 
 describe('Places client', () => {
   let places;
@@ -953,7 +936,6 @@ describe('Places client', () => {
             {
               place_id: 'p1',
               description: 'Some Place, Country',
-              // no structured_formatting
             },
           ],
         }),
@@ -965,11 +947,6 @@ describe('Places client', () => {
     });
   });
 });
-
-
-// =========================================================================
-// 5. handleAddRecipients logic
-// =========================================================================
 
 describe('handleAddRecipients', () => {
   let handleAddRecipients;
@@ -984,7 +961,6 @@ describe('handleAddRecipients', () => {
   beforeEach(() => {
     jest.resetModules();
 
-    // Mock config
     jest.mock('../src/config', () => ({
       QURL_API_KEY: 'test-api-key',
       QURL_ENDPOINT: 'https://api.test.local',
@@ -993,11 +969,8 @@ describe('handleAddRecipients', () => {
       QURL_SEND_COOLDOWN_MS: 30000,
       QURL_DETECT_COOLDOWN_MS: 30000,
       QURL_SEND_MAX_RECIPIENTS: 50,
-      PENDING_LINK_EXPIRY_MINUTES: 30,
-      ADMIN_USER_IDS: [],
     }));
 
-    // Mock logger
     jest.mock('../src/logger', () => ({
       info: jest.fn(),
       warn: jest.fn(),
@@ -1006,7 +979,6 @@ describe('handleAddRecipients', () => {
       audit: jest.fn(),
     }));
 
-    // Mock discord.js
     jest.mock('discord.js', () => ({
       SlashCommandBuilder: jest.fn().mockImplementation(() => {
         const builder = {
@@ -1085,7 +1057,6 @@ describe('handleAddRecipients', () => {
       TextInputStyle: { Short: 1, Paragraph: 2 },
     }));
 
-    // Mock database
     mockDb = {
       getSendConfig: jest.fn(),
       saveSendConfig: jest.fn(),
@@ -1098,7 +1069,6 @@ describe('handleAddRecipients', () => {
     };
     jest.mock('../src/store', () => mockDb);
 
-    // Mock discord helper
     mockSendDM = jest.fn().mockResolvedValue({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
     jest.mock('../src/discord', () => ({
       assignContributorRole: jest.fn(),
@@ -1114,20 +1084,12 @@ describe('handleAddRecipients', () => {
       editDM: jest.fn().mockResolvedValue({ ok: true }),
     }));
 
-    // Mock admin util
-    jest.mock('../src/utils/admin', () => ({
-      requireAdmin: jest.fn(() => true),
-      isAdmin: jest.fn(() => false),
-    }));
-
-    // Mock qurl
     mockCreateOneTimeLink = jest.fn();
     jest.mock('../src/qurl', () => ({
       createOneTimeLink: mockCreateOneTimeLink,
       deleteLink: jest.fn(),
     }));
 
-    // Mock connector
     mockMintLinks = jest.fn();
     mockDownloadAndUpload = jest.fn();
     mockReUploadBuffer = jest.fn();
@@ -1141,12 +1103,10 @@ describe('handleAddRecipients', () => {
       isAllowedSourceUrl: (url) => typeof url === 'string' && url.startsWith('https://cdn.discordapp.com'),
     }));
 
-    // Mock places
     jest.mock('../src/places', () => ({
       searchPlaces: jest.fn(),
     }));
 
-    // Mock form-data
     jest.mock('form-data', () => {
       return jest.fn().mockImplementation(() => ({
         append: jest.fn(),
@@ -1158,7 +1118,6 @@ describe('handleAddRecipients', () => {
     handleAddRecipients = commands._test.handleAddRecipients;
   });
 
-  // Helper to create a Discord-like users Collection (Map with filter/map support)
   function makeUsersCollection(users) {
     const map = new Map(users.map(u => [u.id, u]));
     map.filter = function (fn) {
@@ -1275,34 +1234,22 @@ describe('handleAddRecipients', () => {
 
     const result = await handleAddRecipients('send-file-1', users, mockOriginalInteraction, 'test-api-key');
 
-    // Re-uploads a fresh resource from the stored attachment URL rather than
-    // reusing the (possibly-drained) original connector_resource_id
     expect(mockDownloadAndUpload).toHaveBeenCalledWith(
       'https://cdn.discordapp.com/attachments/1/2/report.pdf',
       'report.pdf',
       'application/pdf',
       'test-api-key',
-      // sendConfig has no self_destruct_seconds → null inherits through.
       null,
     );
-    // mintLinks is called against the NEW resource (conn-res-43)
     expect(mockMintLinks).toHaveBeenCalledWith('conn-res-43', { expiresAt: expect.any(String), n: 2, apiKey: 'test-api-key', selfDestructSeconds: null });
-    // createOneTimeLink should NOT have been called
     expect(mockCreateOneTimeLink).not.toHaveBeenCalled();
-    // DMs should have been sent
     expect(mockSendDM).toHaveBeenCalledTimes(2);
-    // DB should record the new sends
     expect(mockDb.recordQURLSendBatch).toHaveBeenCalledTimes(1);
     expect(mockDb.recordQURLSendBatch.mock.calls[0][0]).toHaveLength(2);
     expect(result.msg).toMatch(/Added 2 recipients/);
   });
 
   it('file send: inherits the original send\'s self-destruct timer into the re-upload', async () => {
-    // Pins the inheritance contract — when "Add Recipients" is clicked
-    // against an original send that had a timer set, the additional
-    // recipients' re-uploaded resource carries the same timer through to
-    // the connector. Without this, Add Recipients would silently strip
-    // the self-destruct semantic from the second batch.
     mockDb.getSendConfig.mockReturnValue({
       resource_type: 'file',
       connector_resource_id: 'conn-res-42',
@@ -1332,13 +1279,6 @@ describe('handleAddRecipients', () => {
       'test-api-key',
       30,
     );
-    // End-to-end fence (CR cycle 2 ask): selfDestructSeconds must
-    // also reach mintLinks. The 7 sibling assertions in this file
-    // pin the call signature with null; this one pins that a
-    // non-null value flows through mintLinksInBatches → mintLinks
-    // unchanged. Without this, a future rename of the
-    // mintLinksInBatches opt key (selfDestructSeconds → ...) would
-    // silently drop the value at the boundary.
     expect(mockMintLinks).toHaveBeenCalledWith(
       'conn-res-44',
       { expiresAt: expect.any(String), n: 1, apiKey: 'test-api-key', selfDestructSeconds: 30 },
@@ -1382,8 +1322,6 @@ describe('handleAddRecipients', () => {
   });
 
   it('URL/maps send: inherits the original send\'s self-destruct timer into the re-upload', async () => {
-    // Symmetric with the file-path inheritance test — the location/url
-    // re-upload through uploadJsonToConnector must carry the timer too.
     mockDb.getSendConfig.mockReturnValue({
       resource_type: 'url',
       connector_resource_id: null,
@@ -1410,11 +1348,6 @@ describe('handleAddRecipients', () => {
       'test-api-key',
       300,
     );
-    // Symmetric with the file-path end-to-end fence above:
-    // selfDestructSeconds must also reach mintLinks on the URL/maps
-    // re-upload path. Without this, a future rename of the
-    // mintLinksInBatches opt key would silently drop the value here
-    // even if the upload side caught it.
     expect(mockMintLinks).toHaveBeenCalledWith(
       'res-loc-2',
       { expiresAt: expect.any(String), n: 1, apiKey: 'test-api-key', selfDestructSeconds: 300 },
@@ -1446,7 +1379,6 @@ describe('handleAddRecipients', () => {
 
     const result = await handleAddRecipients('send-maps-1', users, mockOriginalInteraction, 'test-api-key');
 
-    // Should use uploadJsonToConnector with the location name
     expect(mockUploadJsonToConnector).toHaveBeenCalledWith(
       expect.objectContaining({ type: 'google-map', url: 'https://www.google.com/maps/place/Eiffel+Tower', name: 'Eiffel Tower' }),
       'location.json', 'test-api-key',
@@ -1474,7 +1406,6 @@ describe('handleAddRecipients', () => {
       { qurl_link: 'https://q.test/link2' },
     ]);
 
-    // First DM succeeds, second fails
     mockSendDM
       .mockResolvedValueOnce({ ok: true, channelId: 'dm-c-1', messageId: 'dm-m-1' })
       .mockResolvedValueOnce({ ok: false });
@@ -1488,8 +1419,6 @@ describe('handleAddRecipients', () => {
 
     expect(result.msg).toMatch(/Added 1 recipient/);
     expect(result.msg).toMatch(/1 could not be reached/);
-    // Happy path coalesces status='sent' + DM refs into markSendDMDelivered;
-    // failure path keeps the status-only update (no refs to persist).
     expect(mockDb.markSendDMDelivered).toHaveBeenCalledWith('send-partial', 'rcpt-1', 'dm-c-1', 'dm-m-1');
     expect(mockDb.updateSendDMStatus).toHaveBeenCalledWith('send-partial', 'rcpt-2', 'failed');
   });
@@ -1541,7 +1470,6 @@ describe('handleAddRecipients', () => {
 
     const result = await handleAddRecipients('send-mixed', users, mockOriginalInteraction, 'test-api-key');
 
-    // Only Alice and Bob should get DMs (bot and sender excluded)
     expect(mockSendDM).toHaveBeenCalledTimes(2);
     expect(mockUploadJsonToConnector).toHaveBeenCalledTimes(1);
     expect(mockMintLinks).toHaveBeenCalledWith('conn-loc-mixed', { expiresAt: expect.any(String), n: 2, apiKey: 'test-api-key', selfDestructSeconds: null });
@@ -1562,7 +1490,11 @@ describe('handleAddRecipients', () => {
     });
 
     mockDownloadAndUpload.mockResolvedValue({ resource_id: 'new-res', fileBuffer: new ArrayBuffer(4) });
-    mockMintLinks.mockRejectedValue(new Error('Connector down'));
+    const partialErr = new Error('Connector mint_link failed (502)');
+    partialErr.status = 502;
+    partialErr.partialLinkCount = 2;
+    partialErr.partialQurlIds = ['q_partial_one', 'q_partial_two'];
+    mockMintLinks.mockRejectedValue(partialErr);
 
     const users = makeUsersCollection([
       { id: 'rcpt-1', bot: false, username: 'Alice' },
@@ -1570,6 +1502,19 @@ describe('handleAddRecipients', () => {
 
     const result = await handleAddRecipients('send-fail', users, mockOriginalInteraction, 'test-api-key');
     expect(result.msg).toMatch(/Failed to prepare links/);
+
+    const logger = require('../src/logger');
+    expect(logger.error).toHaveBeenCalledWith(
+      'addRecipients file re-upload failed',
+      expect.objectContaining({
+        sendId: 'send-fail',
+        status: 502,
+        partial_link_count: 2,
+        partial_qurl_ids: ['q_partial_one', 'q_partial_two'],
+      }),
+    );
+    expect(JSON.stringify(logger.error.mock.calls)).not.toContain('qurl.link');
+    expect(JSON.stringify(logger.error.mock.calls)).not.toContain('at_secret');
   });
 
   it('file send: batches > 10 new recipients into multiple mintLinks calls', async () => {
@@ -1585,7 +1530,6 @@ describe('handleAddRecipients', () => {
       attachment_url: 'https://cdn.discordapp.com/attachments/1/2/big.pdf',
     });
 
-    // 12 recipients = 2 batches (10 + 2), each on a fresh resource
     const userList = [];
     for (let i = 0; i < 12; i++) {
       userList.push({ id: `rcpt-${i}`, bot: false, username: `User${i}` });
@@ -1671,10 +1615,6 @@ describe('handleAddRecipients', () => {
   });
 });
 
-// =========================================================================
-// 6. Additional isGoogleMapsURL tests (URL parsing edge cases)
-// =========================================================================
-
 describe('isGoogleMapsURL — additional URL parsing', () => {
   it('matches google.com.au/maps (two-part country TLD)', () => {
     expect(isGoogleMapsURL('https://www.google.com.au/maps/place/Sydney')).toBe(true);
@@ -1711,7 +1651,6 @@ describe('isGoogleMapsURL — additional URL parsing', () => {
   });
 
   it('handles uppercase in hostname', () => {
-    // URL constructor lowercases hostname, so this should still match
     expect(isGoogleMapsURL('https://WWW.GOOGLE.COM/maps/place/test')).toBe(true);
   });
 

@@ -9,23 +9,50 @@ import (
 )
 
 type ecsContainerDefinition struct {
-	Name             string              `json:"name"`
-	Image            string              `json:"image"`
-	Essential        bool                `json:"essential"`
-	Environment      []ecsEnvironmentVar `json:"environment"`
-	Secrets          []ecsSecret         `json:"secrets"`
-	MountPoints      []ecsMountPoint     `json:"mountPoints"`
-	LogConfiguration ecsLogConfiguration `json:"logConfiguration"`
+	Name       string   `json:"name"`
+	Image      string   `json:"image"`
+	EntryPoint []string `json:"entryPoint"`
+	Command    []string `json:"command"`
+	// User intentionally has no omitempty: every generated connector container
+	// must explicitly pin the audited nonroot runtime identity.
+	User                   string                   `json:"user"`
+	Essential              bool                     `json:"essential"`
+	ReadonlyRootFilesystem bool                     `json:"readonlyRootFilesystem"`
+	Environment            []ecsEnvironmentVar      `json:"environment"`
+	Secrets                []ecsSecret              `json:"secrets,omitempty"`
+	MountPoints            []ecsMountPoint          `json:"mountPoints"`
+	LogConfiguration       ecsLogConfiguration      `json:"logConfiguration"`
+	LinuxParameters        ecsLinuxParameters       `json:"linuxParameters"`
+	DependsOn              []ecsContainerDependency `json:"dependsOn,omitempty"`
+	RestartPolicy          *ecsRestartPolicy        `json:"restartPolicy,omitempty"`
 }
 
-type ecsEnvironmentVar struct {
-	Name  string `json:"name"`
-	Value string `json:"value"`
+type ecsRestartPolicy struct {
+	Enabled              bool `json:"enabled"`
+	RestartAttemptPeriod int  `json:"restartAttemptPeriod"`
 }
 
 type ecsSecret struct {
 	Name      string `json:"name"`
 	ValueFrom string `json:"valueFrom"`
+}
+
+type ecsLinuxParameters struct {
+	Capabilities ecsLinuxCapabilities `json:"capabilities"`
+}
+
+type ecsLinuxCapabilities struct {
+	Drop []string `json:"drop"`
+}
+
+type ecsContainerDependency struct {
+	ContainerName string `json:"containerName"`
+	Condition     string `json:"condition"`
+}
+
+type ecsEnvironmentVar struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
 }
 
 type ecsMountPoint struct {
@@ -40,8 +67,14 @@ type ecsLogConfiguration struct {
 }
 
 const (
-	ecsFargateChecklistText         = "ECS/Fargate task-definition checklist"
-	ecsFargateRegionPlaceholderNote = "Also replace the `<region>` placeholder in the `awslogs-region` field below."
+	ecsFargateChecklistText = "ECS/Fargate task-definition checklist"
+	connectorContainerName  = "qurl"
+	// TODO(upstream-contract): keep in lockstep with the qurl image USER.
+	ecsConnectorUser                = "65532:65532"
+	ecsLogRegionOption              = "awslogs-region"
+	ecsLogRegionPlaceholder         = "<region>"
+	ecsFargateRegionPlaceholderNote = "Also replace the `" + ecsLogRegionPlaceholder + "` placeholder in the `" + ecsLogRegionOption + "` field below."
+	ecsRestartAttemptPeriodSeconds  = 60
 )
 
 func renderECSFargateTunnelInstructions(args *tunnelInstallArgs, image string) (string, error) {
@@ -49,7 +82,6 @@ func renderECSFargateTunnelInstructions(args *tunnelInstallArgs, image string) (
 	if err != nil {
 		return "", err
 	}
-	secretName := "qurl-connector-" + args.Slug
 	configYAML, err := renderTunnelConfigYAML(args)
 	if err != nil {
 		return "", err
@@ -64,53 +96,75 @@ func renderECSFargateTunnelInstructions(args *tunnelInstallArgs, image string) (
 	}
 	intro := strings.Join([]string{
 		"Use this as an " + ecsFargateChecklistText + ".",
-		"Create the AWS Secrets Manager secret as `" + secretName + "` using the temporary bootstrap key delivered separately by DM so the task definition's `valueFrom` ARN resolves.",
-		"Replace `REPLACE_WITH_SECRET_ARN_FOR_QURL_CONNECTOR_" + args.Slug + "` with the full secret ARN shown by Secrets Manager; AWS appends a random suffix to secret ARNs.",
+		"Write the temporary enrollment token delivered separately by DM to `enrollment-token` on a read-only `qurl-bootstrap` EFS access point. Do not place it in the task definition, environment, or command line.",
 		ecsFargateRegionPlaceholderNote,
 		"Fargate's awsvpc network mode shares one task ENI across containers, so no explicit network_mode is needed; `127.0.0.1:" + strconv.Itoa(args.LocalPort) + "` reaches the target container.",
+		"Configure qurl-agent-state for POSIX UID/GID `" + ecsConnectorUser + "`; qURL creates its owner-only nested state directory. Mount qurl-config and qurl-bootstrap read-only with share.yaml and enrollment-token respectively.",
+		"The generated sidecar drops every Linux capability.",
+		"Its ECS restart policy retries the non-essential qURL container indefinitely after the 60-second minimum run window without restarting the target application container.",
 	}, " ")
 	return intro + "\n\n" +
-		"1. Store the bootstrap key from the separate DM in AWS Secrets Manager. This install-instructions message intentionally does not contain the key.\n\n" +
-		"2. Put qurl-proxy.yaml at `/work/qurl-proxy.yaml` on an EFS access point mounted into the task as the `qurl-config` volume:\n\n" +
+		"1. Store the enrollment token from the separate DM as the read-only `enrollment-token` file on the qurl-bootstrap EFS access point. This message intentionally does not contain the token.\n\n" +
+		"2. Put share.yaml at `/etc/qurl/share.yaml` on the read-only qurl-config EFS access point:\n\n" +
 		configBlock + "\n\n" +
-		"3. Add this non-essential sidecar container to the same task definition as the target container. ECS injects this bootstrap secret as `QURL_API_KEY`, which is an environment variable; file-mounted secret runtimes should use `QURL_API_KEY_FILE` instead:\n\n" +
+		"3. Add this non-essential qURL sidecar container to the same task definition as the target container:\n\n" +
 		containerBlock + "\n\n" +
-		"4. Add durable EFS-backed volumes named qurl-agent-state and qurl-config. Do not share qurl-agent-state across concurrently running sidecars. After the task logs show the qURL Connector connected, delete the bootstrap secret. For future bootstrap rotation, prefer a file-mounted secret runtime so new bootstrap keys are not revealed through task environment variables.", nil
+		"4. Add EFS-backed volumes named qurl-agent-state, qurl-config, and qurl-bootstrap. Do not share qurl-agent-state across concurrently running sidecars. After the task logs show qURL connected, deploy a warm-start revision without `--enrollment-token-file` or the qurl-bootstrap mount; verify it reconnects from qurl-agent-state, then delete the enrollment-token file.", nil
 }
 
 func renderECSSidecarContainerJSON(args *tunnelInstallArgs, image string) (string, error) {
+	endpoint, err := qurlEndpointFromConnectorAPIURL(args.APIURL)
+	if err != nil {
+		return "", err
+	}
 	container := ecsContainerDefinition{
-		Name:      "qurl-connector",
-		Image:     image,
-		Essential: false,
+		Name:                   connectorContainerName,
+		Image:                  image,
+		EntryPoint:             []string{"/usr/local/bin/qurl"},
+		Command:                []string{"daemon", "run", "--state-dir", "/var/lib/qurl-volume/state", "--headless-config", "/etc/qurl/share.yaml", "--enrollment-token-file", "/run/secrets/qurl/enrollment-token"},
+		User:                   ecsConnectorUser,
+		Essential:              false,
+		ReadonlyRootFilesystem: true,
 		Environment: []ecsEnvironmentVar{
-			{Name: "QURL_CONNECTOR_ID", Value: args.Slug},
-		},
-		// TODO(qurl-connector-ecs-secret-file): prefer QURL_API_KEY_FILE once the
-		// ECS/Fargate guide uses a file-mounted secret runtime instead of native
-		// Secrets Manager environment injection.
-		Secrets: []ecsSecret{
-			{Name: tunnelEnvAPIKey, ValueFrom: "REPLACE_WITH_SECRET_ARN_FOR_QURL_CONNECTOR_" + args.Slug},
+			{Name: "QURL_ENDPOINT", Value: endpoint},
 		},
 		MountPoints: []ecsMountPoint{
-			{SourceVolume: "qurl-agent-state", ContainerPath: "/var/lib/layerv/agent"},
-			{SourceVolume: "qurl-config", ContainerPath: "/work", ReadOnly: true},
+			{SourceVolume: "qurl-agent-state", ContainerPath: "/var/lib/qurl-volume"},
+			{SourceVolume: "qurl-config", ContainerPath: "/etc/qurl", ReadOnly: true},
+			{SourceVolume: "qurl-bootstrap", ContainerPath: "/run/secrets/qurl", ReadOnly: true},
 		},
-		LogConfiguration: ecsLogConfiguration{
-			LogDriver: "awslogs",
-			Options: map[string]string{
-				"awslogs-group":         "/ecs/qurl-connector",
-				"awslogs-region":        "<region>",
-				"awslogs-stream-prefix": "qurl",
-			},
+		LogConfiguration: awslogsConfiguration("/ecs/qurl-connector", "qurl"),
+		LinuxParameters:  hardenedECSLinuxParameters(),
+		RestartPolicy: &ecsRestartPolicy{
+			Enabled:              true,
+			RestartAttemptPeriod: ecsRestartAttemptPeriodSeconds,
 		},
 	}
+	return marshalECSContainerJSON(container, "ECS sidecar JSON")
+}
+
+func hardenedECSLinuxParameters() ecsLinuxParameters {
+	return ecsLinuxParameters{Capabilities: ecsLinuxCapabilities{Drop: []string{"ALL"}}}
+}
+
+func awslogsConfiguration(group, streamPrefix string) ecsLogConfiguration {
+	return ecsLogConfiguration{
+		LogDriver: "awslogs",
+		Options: map[string]string{
+			"awslogs-group":         group,
+			ecsLogRegionOption:      ecsLogRegionPlaceholder,
+			"awslogs-stream-prefix": streamPrefix,
+		},
+	}
+}
+
+func marshalECSContainerJSON(v any, what string) (string, error) {
 	var b bytes.Buffer
 	enc := json.NewEncoder(&b)
 	enc.SetEscapeHTML(false)
 	enc.SetIndent("", "  ")
-	if err := enc.Encode(container); err != nil {
-		return "", fmt.Errorf("marshal ECS sidecar JSON: %w", err)
+	if err := enc.Encode(v); err != nil {
+		return "", fmt.Errorf("marshal %s: %w", what, err)
 	}
 	return strings.TrimSuffix(b.String(), "\n"), nil
 }

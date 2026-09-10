@@ -841,7 +841,7 @@ func (p *emptyStreamTSValidationPort) AppendStream(context.Context, string, stri
 	return nil
 }
 
-func (p *emptyStreamTSValidationPort) StopStream(context.Context, string, string, string, string) error {
+func (p *emptyStreamTSValidationPort) StopStream(context.Context, string, string, string, string, []any) error {
 	p.stops++
 	return nil
 }

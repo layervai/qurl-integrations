@@ -1,5 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const { webcrypto } = require('node:crypto');
 
 const qurlApi = require('../lib/qurl-api.js');
 
@@ -7,12 +8,30 @@ const originalFetch = global.fetch;
 const originalChrome = global.chrome;
 const originalSetTimeout = global.setTimeout;
 const originalClearTimeout = global.clearTimeout;
+// createMultipartBoundary() in lib/qurl-api.js calls globalThis.crypto.getRandomValues. Chrome
+// always provides it, and package.json's `engines.node: >=20.9.0` floor is
+// past the v19 that first exposed a global `crypto` in Node — so this pin is belt-and-braces,
+// keeping the upload tests independent of the ambient runtime, and restores it afterwards.
+const originalCryptoDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'crypto');
+
+function restoreGlobalCrypto() {
+  if (originalCryptoDescriptor) {
+    Object.defineProperty(globalThis, 'crypto', originalCryptoDescriptor);
+    return;
+  }
+  delete globalThis.crypto;
+}
 
 test.beforeEach(function () {
   global.fetch = originalFetch;
   global.chrome = originalChrome;
   global.setTimeout = originalSetTimeout;
   global.clearTimeout = originalClearTimeout;
+  Object.defineProperty(globalThis, 'crypto', {
+    value: webcrypto,
+    configurable: true,
+    writable: true,
+  });
 });
 
 test.afterEach(function () {
@@ -20,6 +39,7 @@ test.afterEach(function () {
   global.chrome = originalChrome;
   global.setTimeout = originalSetTimeout;
   global.clearTimeout = originalClearTimeout;
+  restoreGlobalCrypto();
 });
 
 test('normalizeQurlApiBase strips /api/upload and requires https', function () {
@@ -175,6 +195,67 @@ test('_extractPayload and _parseExpiry support wrapped and timestamp values', fu
   assert.equal(qurlApi._parseExpiry({ expires_at: Number.POSITIVE_INFINITY }), null);
 });
 
+test('_parseExpiry returns null for numeric timestamps outside the Date range', function () {
+  // A backend emitting nanoseconds (Go's UnixNano is ~1.7e18) overshoots the 8.64e15 ms
+  // ECMAScript time-value limit. Before the range check, toISOString() threw a RangeError.
+  assert.equal(qurlApi._parseExpiry({ expires_at: 1.7e18 }), null);
+  assert.equal(qurlApi._parseExpiry({ expires_at: -1e18 }), null);
+
+  // 8.64e15 is the largest representable time value and 8.64e15 + 1 overflows it, but both are
+  // year ~275760, so the plausibility ceiling below now answers first and the range check no
+  // longer decides the positive side. The negative pair below is what still pins the range
+  // check to the post-multiply value, since a past date is not something that ceiling rejects.
+  assert.equal(qurlApi._parseExpiry({ expires_at: 8.64e15 }), null);
+  assert.equal(qurlApi._parseExpiry({ expires_at: 8.64e15 + 1 }), null);
+
+  // Negatives never satisfy `raw >= 1e12`, so they always take the seconds branch and can
+  // only overflow after the *1000 — which puts their limit at -8.64e12 in input space, not
+  // -8.64e15. Only a boundary this tight pins the guard to the post-multiply value: a guard
+  // written against `raw` instead of `ms` passes every other case in this file.
+  assert.equal(
+    qurlApi._parseExpiry({ expires_at: -8.64e12 }),
+    new Date(-8.64e15).toISOString()
+  );
+  assert.equal(qurlApi._parseExpiry({ expires_at: -8.64e12 - 1 }), null);
+});
+
+test('_parseExpiry returns null for timestamps too far ahead to be a real expiry', function () {
+  // Microseconds (Go's UnixMicro is ~1.7e15) are the gap the Date-range check cannot see: they
+  // stay inside the representable range, so they decoded to a valid-looking year ~55840 and
+  // reached both the popup and — via buildExpirySuffix — the user's Gmail draft, showing the
+  // recipient "(Expires: 55840-11-08 ...)" beside a link that had not expired at all.
+  assert.equal(qurlApi._parseExpiry({ expires_at: 1.7e15 }), null);
+  assert.equal(qurlApi._parseExpiry({ expires_at: Date.now() * 1000 }), null);
+
+  // Not just the microsecond band: any in-range value past the ceiling is refused, so a
+  // corrupted millisecond value also lands on "no expiry" instead of a plausible-looking year.
+  // A heuristic that only recognized the microsecond magnitude would still render this one.
+  assert.equal(qurlApi._parseExpiry({ expires_at: 5e14 }), null);
+
+  // Real expiries are untouched. 7 days is the longest TTL any qURL surface offers.
+  const sevenDaysOut = Date.now() + 7 * 24 * 60 * 60 * 1000;
+  assert.equal(
+    qurlApi._parseExpiry({ expires_at: sevenDaysOut }),
+    new Date(sevenDaysOut).toISOString()
+  );
+
+  // Pin the ceiling exactly. Date.now is stubbed because the bound is relative to it, so a
+  // +/-1 ms assertion against the live clock would race the call it is measuring.
+  const realNow = Date.now;
+  const frozenNow = 1.7e12;
+  const ceiling = frozenNow + 365 * 24 * 60 * 60 * 1000;
+  Date.now = function () { return frozenNow; };
+  try {
+    assert.equal(
+      qurlApi._parseExpiry({ expires_at: ceiling }),
+      new Date(ceiling).toISOString()
+    );
+    assert.equal(qurlApi._parseExpiry({ expires_at: ceiling + 1 }), null);
+  } finally {
+    Date.now = realNow;
+  }
+});
+
 test('_get returns the first populated candidate key', function () {
   // Empty strings are skipped, but finite numbers are coerced to strings
   // to support backends that serialize IDs as numbers.
@@ -308,6 +389,77 @@ test('uploadFile returns parsed success payload', async function () {
     qurl_link: 'https://files.example.com/q/abc123',
     resource_url: null,
     expires_at: '2026-05-01T12:00:00.000Z',
+    error: null,
+  });
+});
+
+test('uploadFile succeeds when the server returns an out-of-range expires_at', async function () {
+  // The upload itself worked and the link is usable, so an unrepresentable expiry must not
+  // sink the whole result: _parseExpiry runs inside the success return, so the RangeError it
+  // used to throw was swallowed by uploadFile's catch and surfaced as
+  // { success: false, error: 'Invalid time value' } — no link in the popup, nothing inserted
+  // into the Gmail draft, and no way left for the user to reach the file they just uploaded.
+  global.chrome = undefined;
+  global.fetch = async function () {
+    return {
+      ok: true,
+      async json() {
+        return {
+          success: true,
+          data: {
+            resource_id: 'abc123',
+            qurl_link: 'https://files.example.com/q/abc123',
+            // Nanoseconds, as Go's UnixNano would emit.
+            expires_at: 1.7e18,
+          },
+        };
+      },
+    };
+  };
+
+  const result = await qurlApi.uploadFile(new Uint8Array([1, 2, 3]), 'demo.txt', 'text/plain');
+
+  assert.deepEqual(result, {
+    success: true,
+    resource_id: 'abc123',
+    qurl_link: 'https://files.example.com/q/abc123',
+    resource_url: null,
+    expires_at: null,
+    error: null,
+  });
+});
+
+test('uploadFile succeeds when the server returns a microsecond expires_at', async function () {
+  // Unlike the nanosecond case above, this one never threw — it parsed, so the upload already
+  // "succeeded" while carrying an absurd expiry onward. The link is real and the upload is
+  // fine, so the result stays successful and only the expiry drops out; buildExpirySuffix
+  // renders '' for a null expiry, so nothing is appended to what the recipient receives.
+  global.chrome = undefined;
+  global.fetch = async function () {
+    return {
+      ok: true,
+      async json() {
+        return {
+          success: true,
+          data: {
+            resource_id: 'abc123',
+            qurl_link: 'https://files.example.com/q/abc123',
+            // Microseconds, as Go's UnixMicro would emit.
+            expires_at: 1.7e15,
+          },
+        };
+      },
+    };
+  };
+
+  const result = await qurlApi.uploadFile(new Uint8Array([1, 2, 3]), 'demo.txt', 'text/plain');
+
+  assert.deepEqual(result, {
+    success: true,
+    resource_id: 'abc123',
+    qurl_link: 'https://files.example.com/q/abc123',
+    resource_url: null,
+    expires_at: null,
     error: null,
   });
 });

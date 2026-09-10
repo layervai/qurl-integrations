@@ -1135,3 +1135,39 @@ func TestHandle_ListExactMatchOnly(t *testing.T) {
 		})
 	}
 }
+
+// TestWithAPIErrorAttrs pins that a contract rejection's actionable context —
+// the request ID, status, code, detail, and the invalid_fields map naming the
+// offending key — reaches the log. APIError.Error() renders none of these
+// beyond title/status/detail, so without this helper a 400 from the kind-first
+// cutover would log as only "Bad Request (400)".
+func TestWithAPIErrorAttrs(t *testing.T) {
+	t.Parallel()
+
+	apiErr := &client.APIError{
+		StatusCode:    http.StatusBadRequest,
+		Code:          "invalid_field",
+		Title:         "Bad Request",
+		Detail:        "kind is required",
+		InvalidFields: map[string]string{"kind": "must not be empty"},
+		RequestID:     "req_kind",
+	}
+	got := fmt.Sprint(withAPIErrorAttrs(fmt.Errorf("mint: %w", apiErr), "slug", "acme")...)
+	for _, want := range []string{"req_kind", "400", "invalid_field", "kind is required", "must not be empty", "acme"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("attrs %q must contain %q", got, want)
+		}
+	}
+}
+
+// TestWithAPIErrorAttrsPassesThroughNonAPIError pins that a transport error
+// (no APIError in the chain) is left exactly as the caller passed it, so the
+// helper is safe to use at log sites that see both error classes.
+func TestWithAPIErrorAttrsPassesThroughNonAPIError(t *testing.T) {
+	t.Parallel()
+
+	attrs := withAPIErrorAttrs(errors.New("dial tcp: connection refused"), "slug", "acme")
+	if len(attrs) != 2 || attrs[0] != "slug" || attrs[1] != "acme" {
+		t.Errorf("attrs = %v, want the caller's attrs unchanged", attrs)
+	}
+}

@@ -20,6 +20,8 @@ package oauth
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -47,15 +49,36 @@ const (
 // GenerateDataKey + DDB PutItem) approaches 30s. http.TimeoutHandler
 // gives the OAuth routes a per-handler ceiling without bumping the
 // server-wide write timeout (which would mask hung /slack/* requests).
-const oauthHandlerTimeout = 60 * time.Second
+const (
+	oauthHandlerTimeout = 60 * time.Second
+	// stateStoreMintTimeout stays below Slack's 3-second slash-command ack
+	// window while leaving headroom for a cold DynamoDB connection.
+	stateStoreMintTimeout = 2 * time.Second
+	// Browser start/callback requests run under oauthHandlerTimeout rather than
+	// Slack's ack window, so they tolerate a longer transient DDB delay.
+	stateStoreRequestTimeout = 5 * time.Second
+)
+
+// defaultPasswordlessConnection is the Auth0 connection the Slack setup flow
+// signs in with unless AUTH0_EMAIL_CONNECTION overrides it. "email" is Auth0's
+// passwordless email connection and the same value qurl-desktop pins, so one
+// human keeps one Auth0 subject — and therefore one qURL account — across both
+// surfaces.
+//
+// TODO(upstream-contract): keep in lockstep with qurl-desktop's connection pin
+// (src/main/auth.ts, browserAuthorizationOptions). If either surface repoints
+// its connection without the other, the same human authenticates as two Auth0
+// subjects and their qURL accounts fork silently — nothing fails loudly,
+// because each surface works in isolation.
+const defaultPasswordlessConnection = "email"
 
 // apiKeyScopes is the qurl-service scope set requested by the legacy fallback
-// for the workspace API key. Returned fresh on each call so an in-package caller
-// can't mutate the slice and silently change every future mint. authorizeURL
-// also weaves "openid email" in for the id_token email claim consumed by the
-// success page.
+// for the workspace API key and by the Auth0 user token that mints it. Returned
+// fresh on each call so an in-package caller can't mutate the slice and silently
+// change every future mint. authorizeURL also weaves "openid email" in for the
+// id_token email claim consumed by the success page.
 func apiKeyScopes() []string {
-	return []string{"qurl:read", "qurl:write"}
+	return []string{"qurl:read", "qurl:write", "qurl:agent"}
 }
 
 // callbackURL composes the Auth0 redirect_uri. SlackBaseURL is tolerated
@@ -75,20 +98,19 @@ func callbackURL(slackBaseURL string) string {
 	if u, err := url.Parse(slackBaseURL); err == nil && u.Host != "" {
 		host = u.Host
 	}
-	//nolint:gosec // G706: slog escapes control bytes in attribute values, same posture as the request-path slog sites.
 	slog.Warn("callbackURL: url.JoinPath failed — falling back to concat",
 		"slack_base_host", host)
 	return slackBaseURL + callbackPath
 }
 
 // SetupConfig is the slice of runtime configuration the /qurl setup
-// slash-command handler needs to mint a state token and build the link
+// slash-command handler needs to store an opaque state handle and build the link
 // to /start. Carrying its own struct (vs accepting Config) keeps the
 // slash-command surface decoupled from the OAuth-handler surface — a
 // future addition like SetupLinkTTL only changes one signature.
 type SetupConfig struct {
-	StateSecret  []byte
 	SlackBaseURL string
+	StateStore   StateStore
 }
 
 // SetupURL builds the /qurl setup link from the supplied state token.
@@ -147,36 +169,33 @@ type AsyncTracker interface {
 	Go(fn func())
 }
 
-// IDTokenVerifier verifies an Auth0 id_token JWT against Auth0's JWKS
-// and returns the claims the callback consumes.
-//
-// Two split methods rather than one combined return so the existing
-// success-page email path (best-effort, suppress-on-error) and the
-// new BindWorkspace OwnerID path (mandatory, fail-the-bind-on-error)
-// can branch independently.
-//
-//   - VerifyEmail returns the email claim. Returns ("", err) on
-//     verify-failure or ("", nil) when the claim is missing /
-//     email_verified is false — the success page renders without the
-//     email line in either case.
-//
-//   - VerifySub returns the Auth0 `sub` claim used as the workspace
-//     OwnerID in BindWorkspace. Returns ("", err) on verify-failure;
-//     callers MUST surface the error (an empty sub can't legitimately
-//     bind a workspace).
+// IDTokenClaims carries the claims consumed by the callback. EmailErr remains
+// best-effort for success-page display; SubErr is fatal to workspace binding.
+type IDTokenClaims struct {
+	Email    string
+	Sub      string
+	EmailErr error
+	SubErr   error
+}
+
+// IDTokenVerifier verifies an Auth0 id_token once, binds its nonce to the
+// authorization request, and extracts the callback claims from that verified
+// token. The returned error covers token or nonce verification; per-claim
+// extraction errors remain separate so the callback preserves its established
+// email/sub behavior.
 type IDTokenVerifier interface {
-	VerifyEmail(ctx context.Context, idToken string) (email string, err error)
-	VerifySub(ctx context.Context, idToken string) (sub string, err error)
+	VerifySetupClaims(ctx context.Context, idToken, expectedNonce string) (IDTokenClaims, error)
 }
 
 // WorkspaceMapping is the value BindWorkspace persists. Re-declared
 // here (vs importing slackdata) so the oauth package's only inbound
-// dependency stays the shared/auth package — slackdata depends on
-// oauth's interfaces in cmd/main.go but the reverse would create a
-// cycle.
+// dependency stays the shared/auth package; the slackdata bridge lives
+// in internal/oauth_bind_wiring.go, while importing slackdata here
+// would create a cycle.
 //
 // Fields mirror slackdata.WorkspaceMapping exactly; the drift fence
-// lives in cmd/main_test.go's TestAdminStoreAdapterMappingShapesMatch.
+// lives in internal/oauth_bind_wiring_test.go's
+// TestAdminStoreAdapterMappingShapesMatch.
 type WorkspaceMapping struct {
 	TeamID    string
 	OwnerID   string
@@ -185,9 +204,8 @@ type WorkspaceMapping struct {
 
 // AdminStore is the slice of slackdata.Store the callback hits to
 // persist the workspace_mappings row that seeds the installer as the
-// first admin. Optional — when nil (sandbox / no-DDB deploy) the
-// callback skips the bind with a slog.Warn so the API-key surface
-// stays functional.
+// first admin. Optional — when nil (admin storage disabled) the callback
+// skips the bind with a slog.Warn so the API-key surface stays functional.
 type AdminStore interface {
 	BindWorkspace(ctx context.Context, m *WorkspaceMapping, seedAdmin string) error
 }
@@ -198,9 +216,9 @@ type AdminStore interface {
 // slackdata.
 //
 // Values intentionally mirror slackdata.ErrCodeWorkspace* constants
-// verbatim — drift either side and the classifier wiring in
-// cmd/main.go silently routes the wrong 409 to the success-page
-// rebind-refusal branch.
+// verbatim — drift either side and ClassifyOAuthBindError in
+// internal/oauth_bind_wiring.go silently routes the wrong 409 to the
+// success-page rebind-refusal branch.
 type BindConflictCode string
 
 const (
@@ -232,9 +250,12 @@ type Config struct {
 	// qurl-service API), pasted into the `audience` param so the
 	// returned access_token actually carries the qurl:* scopes.
 	Auth0Audience string
-	// Auth0EmailConnection optionally forces an Auth0 connection for
-	// email-bound setup states. Empty sends only login_hint and lets the
-	// Auth0 application choose from its enabled connections.
+	// Auth0EmailConnection overrides the Auth0 connection pinned on every setup
+	// path. Empty pins defaultPasswordlessConnection ("email"), so the login
+	// method is a property of this surface rather than of the tenant's enabled
+	// connections. Set it only when a deployment named its passwordless
+	// connection differently — pointing it at a non-passwordless connection
+	// changes the login method for every workspace admin.
 	Auth0EmailConnection string
 
 	// SlackBaseURL is the public origin of the Slack bot (e.g.
@@ -255,9 +276,16 @@ type Config struct {
 	APIKeyMintReplayWindowHours int
 
 	// OAuthStateSecret is the HMAC-SHA256 key used to mint and verify
-	// the `state` token threaded through Auth0. Operator-set; the
-	// constructor refuses anything shorter than stateMinSecret.
+	// legacy signed `state` tokens during short deploy overlap. New
+	// setup links use StateStore-backed opaque handles. Operator-set;
+	// the constructor refuses anything shorter than stateMinSecret.
 	OAuthStateSecret []byte
+
+	// StateStore keeps team/user/email/mode/nonce/PKCE verifier out of
+	// front-channel OAuth URLs and consumes callback state atomically.
+	// Nil falls back to legacy signed-state verification for tests and
+	// short deploy overlap only; production buildOAuthConfig wires DDB.
+	StateStore StateStore
 
 	// Provider is the DDB-backed key store. Normal setup reuses a valid
 	// stored key or persists a fresh key with metadata; explicit rotation
@@ -288,9 +316,10 @@ type Config struct {
 	// BindWorkspace before qurl-service key work, so a refused rebind
 	// cannot overwrite the existing owner's stored key.
 	//
-	// Nil disables the bind (sandbox / no-DDB deploy) — the callback
+	// Nil disables the bind (admin storage disabled) — the callback
 	// emits a slog.Warn and continues with the existing API-key
-	// surface. Production cmd/main.go wires a *slackdata.Store.
+	// surface. Production cmd/main.go wires NewOAuthAdminStoreAdapter
+	// over a *slackdata.Store.
 	AdminStore AdminStore
 
 	// BindClassifyError classifies a BindWorkspace error into a
@@ -299,17 +328,18 @@ type Config struct {
 	// validation failure that the callback should treat as a
 	// generic bind failure (500).
 	//
-	// Wired in cmd/main.go to a small classifier that errors.As's
-	// the *slackdata.Error and returns its Code field when
-	// StatusCode == 409. Nil falls back to "always treat as
-	// generic bind failure".
+	// Wired in cmd/main.go to internal.ClassifyOAuthBindError, which
+	// errors.As's the *slackdata.Error and returns its Code field when
+	// StatusCode == 409. Nil falls back to "always treat as generic
+	// bind failure".
 	//
 	// COUPLING: callers that set AdminStore MUST also set
 	// BindClassifyError. Otherwise every bind conflict — including
 	// idempotent same-caller re-entries — falls through to the
 	// default 500 arm in handleBindError, downgrading rebind-refused
-	// to a generic failure for the user. cmd/main.go wires both
-	// together; future callers should mirror that pairing.
+	// to a generic failure for the user. cmd/main.go wires both via
+	// internal/oauth_bind_wiring.go; future callers should mirror that
+	// pairing.
 	BindClassifyError func(err error) BindConflictCode
 
 	// HTTPClient is used for Auth0 token-exchange calls. Defaults to
@@ -375,13 +405,18 @@ var _ WorkspaceStore = (*auth.DDBProvider)(nil)
 //
 //nolint:gocritic // hugeParam: Config is value-passed at startup once; pointer churn here isn't worth the API surface friction.
 func RegisterRoutes(mux *http.ServeMux, cfg Config) {
+	registerRoutes(mux, cfg, defaultOAuthRateLimiter)
+}
+
+//nolint:gocritic // hugeParam: see RegisterRoutes.
+func registerRoutes(mux *http.ServeMux, cfg Config, limiter *oauthRateLimiter) {
 	if err := cfg.Validate(); err != nil {
 		panic("oauth.RegisterRoutes: " + err.Error())
 	}
-	mux.Handle(StartPath, http.TimeoutHandler(
-		Start(cfg), oauthHandlerTimeout, "oauth/start timed out"))
-	mux.Handle(callbackPath, http.TimeoutHandler(
-		Callback(cfg), oauthHandlerTimeout, "oauth/callback timed out"))
+	mux.Handle(StartPath, rateLimitOAuth(limiter, http.TimeoutHandler(
+		Start(cfg), oauthHandlerTimeout, "oauth/start timed out")))
+	mux.Handle(callbackPath, rateLimitOAuth(limiter, http.TimeoutHandler(
+		Callback(cfg), oauthHandlerTimeout, "oauth/callback timed out")))
 }
 
 // Validate checks the cross-field invariants that the callback's
@@ -405,17 +440,29 @@ func (c Config) Validate() error {
 	if c.APIKeyMintReplayWindowHours < 0 {
 		return errors.New("APIKeyMintReplayWindowHours must be zero or positive")
 	}
+	if c.StateStore == nil {
+		return errors.New("StateStore is required for one-shot OAuth state")
+	}
+	if c.IDTokenVerifier == nil {
+		return errors.New("IDTokenVerifier is required for OAuth nonce verification")
+	}
 	return nil
 }
 
 // authorizeURL composes the Auth0 /authorize redirect target.
 //
-// prompt=consent keeps setup re-entry explicit: even when an existing
-// workspace key is reused, the admin still confirms the Auth0 account/email
-// that is allowed to keep the Slack workspace bound. Confirmation alone is not
-// a healthy-key rotation or qURL-account switch; the stored key must be revoked
-// first so validation fails 401 and the callback mints under the newly
-// authenticated account.
+// Two parameters decide WHO is allowed to bind the workspace, and both halves
+// are load-bearing. prompt=login re-authenticates the admin, so an ambient
+// Auth0 session cannot silently authorize a bind or a rotation; prompt=consent
+// keeps setup re-entry explicit, because Auth0 reuses a prior consent grant
+// without it and setup must actually issue a new token. connection pins the
+// login method to passwordless so the tenant's enabled connections cannot route
+// an admin to a different Auth0 subject — qurl-service keys accounts on the
+// id_token sub, so a different connection is a different qURL account.
+//
+// Neither replaces the callback's own gates: reuse still confirms the verified
+// email claim, and a rotation onto a different qURL account still fails closed
+// there rather than here.
 //
 //nolint:gocritic // hugeParam: value-passed in line with the rest of the package's posture; see Callback.
 func authorizeURL(cfg Config, state string, verified VerifiedState) string {
@@ -428,19 +475,49 @@ func authorizeURL(cfg Config, state string, verified VerifiedState) string {
 	q.Set("response_type", "code")
 	q.Set("client_id", cfg.Auth0ClientID)
 	q.Set("audience", cfg.Auth0Audience)
-	// Scope set is symmetric with the Discord flow (qurl-oauth.js):
-	// APIKeyScopes for the qurl-service mint, openid + email for the
-	// id_token claim used in the success-page binding readout.
+	// The qurl:* scopes authorize the qurl-service mint and become the legacy
+	// workspace key's requested scopes. qurl:agent must be present on the JWT
+	// because agent-bearing durable keys may only be minted by a principal that
+	// already holds qurl:agent. openid + email provide the id_token claim used in
+	// the success-page binding readout.
 	q.Set("scope", strings.Join(apiKeyScopes(), " ")+" openid email")
 	q.Set("redirect_uri", callbackURL(cfg.SlackBaseURL))
 	q.Set("state", state)
-	q.Set("prompt", "consent")
+	if verified.Nonce != "" {
+		q.Set("nonce", verified.Nonce)
+	}
+	if verified.CodeVerifier != "" {
+		q.Set("code_challenge", pkceCodeChallenge(verified.CodeVerifier))
+		q.Set("code_challenge_method", "S256")
+	}
+	// `login` on every path: setup and rotation both decide which qURL account
+	// a Slack workspace is bound to, and qurl-service keys accounts on the
+	// id_token sub. Riding an ambient Auth0 session — from qurl-desktop, the
+	// dashboard, or a previous bot run — lets whichever identity that session
+	// happens to hold silently claim or move the workspace. `consent` stays
+	// alongside it because Auth0 reuses a prior consent grant without it, and
+	// setup must actually issue a new token.
+	q.Set("prompt", "login consent")
+	// Passwordless is the Slack surface's login method, not a tenant-by-tenant
+	// choice: it is the lowest-friction path for a workspace admin, and it
+	// matches the connection qurl-desktop pins for the same human
+	// (src/main/auth.ts: connection 'email'), so both land on one Auth0
+	// subject instead of forking the account across connections.
+	// Auth0EmailConnection stays an override for a tenant that named its
+	// passwordless connection something else.
+	connection := strings.TrimSpace(cfg.Auth0EmailConnection)
+	if connection == "" {
+		connection = defaultPasswordlessConnection
+	}
+	q.Set("connection", connection)
 	if verified.Email != "" {
-		if connection := strings.TrimSpace(cfg.Auth0EmailConnection); connection != "" {
-			q.Set("connection", connection)
-		}
 		q.Set("login_hint", verified.Email)
 	}
 	u.RawQuery = q.Encode()
 	return u.String()
+}
+
+func pkceCodeChallenge(codeVerifier string) string {
+	sum := sha256.Sum256([]byte(codeVerifier))
+	return base64.RawURLEncoding.EncodeToString(sum[:])
 }

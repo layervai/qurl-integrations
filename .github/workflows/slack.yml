@@ -4,7 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+    # Stacked Slack PRs must run the same gates before their base reaches main.
+    branches: ["**"]
 
 permissions:
   contents: read
@@ -21,23 +22,50 @@ jobs:
     permissions:
       contents: read
       pull-requests: read
+      # Reading this workflow's own run history is what lets the step below
+      # find the last SHA it actually validated.
+      actions: read
     outputs:
-      slack: ${{ steps.filter.outputs.slack }}
+      # An unresolvable base forces every gate to run. A redundant run costs
+      # minutes; a wrongly narrow diff ships unvalidated code green (#1022).
+      slack: ${{ steps.base.outputs.force == 'true' && 'true' || steps.filter.outputs.slack }}
     steps:
       # On PRs, paths-filter uses the pull request API; push events need git
       # history to compute the diff.
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: github.event_name == 'push'
         with:
           fetch-depth: 0
 
-      - uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d # v4.0.1
+      # `cancel-in-progress: false` protects a run already in progress, not one
+      # still pending: GitHub keeps at most one pending run per concurrency
+      # group, so a burst of merges to main cancels the intermediate runs.
+      # Diffing this push alone would then skip the gates for changes that
+      # landed in those cancelled runs — every check green, app CI never having
+      # executed (#1022). Diff against the last validated SHA instead.
+      - name: Resolve validated base
+        id: base
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/resolve-validated-base.sh
+
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
         id: filter
+        # Skipped when no base could be resolved. The job output already forces
+        # every gate true there, and running the filter anyway would let a
+        # filter error redden this job instead of honouring the fail-closed
+        # intent.
+        if: steps.base.outputs.force != 'true'
         with:
+          # Empty on pull_request, where the push-only step above never ran and
+          # paths-filter takes its PR API path instead.
+          base: ${{ steps.base.outputs.sha }}
           filters: |
             slack:
               # Source of truth for Slack-impacting paths on PR and main push events.
               - 'apps/slack/**'
+              - 'origins/s3-static-connector/**'
               - 'shared/**'
               - 'go.mod'
               - 'go.sum'
@@ -50,20 +78,20 @@ jobs:
     needs: changes
     if: needs.changes.outputs.slack == 'true'
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
           cache: true
 
       - name: Verify golangci-lint config
-        run: go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.10.1 config verify
+        run: go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 config verify
 
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@82606bf257cbaff209d206a39f5134f0cfbfd2ee # v9.2.1
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
-          version: v2.10.1
+          version: v2.12.2
           verify: false # Avoid the action's network JSONSchema fetch; config verification runs in the previous pinned step.
           args: --timeout=5m
 
@@ -73,9 +101,9 @@ jobs:
     needs: changes
     if: needs.changes.outputs.slack == 'true'
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
           cache: true
@@ -103,9 +131,9 @@ jobs:
     needs: changes
     if: needs.changes.outputs.slack == 'true'
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
           cache: true
@@ -122,18 +150,66 @@ jobs:
     # GitHub Actions cache export is part of the job. Keep the timeout above
     # the observed build+cache path so successful image builds do not get
     # canceled during cache upload.
-    timeout-minutes: 20
+    timeout-minutes: 30
+    env:
+      # Pulled anonymously: the ghcr.io/layervai/qurl package is public. If it ever
+      # turns private, add docker/login-action and `packages: read` here.
+      # TODO(upstream-contract): mirrors qurl-integrations-infra QURL_IMAGE (keep in lockstep).
+      # Released qurl CLI image (v2.1.1 index digest; derived from
+      # `docker buildx imagetools inspect ghcr.io/layervai/qurl:v2.1.1`) that must strict-decode
+      # the guided v2 headless config and stop at the credential gate. Keep in
+      # lockstep with qurl-integrations-infra's QURL_IMAGE pin.
+      QURL_IMAGE: ghcr.io/layervai/qurl@sha256:5de963d335cca0a6e9a030978d7f3de6587ae1e26f369a38afbf168c04ee220a
+      QURL_RELEASE_IMAGE_REQUIRED: "true"
+      # PRs #1158 and #1231 add security assertions the currently pinned
+      # immutable origin predates. Waive only that exact digest so the producer
+      # fixes can merge and publish; behavior_test.sh rejects a malformed or
+      # mismatched waiver. The pin-rotation PR must remove this line.
+      S3_ORIGIN_SECURITY_WAIVER_IMAGE: "ghcr.io/layervai/qurl-integrations/s3-static-connector@sha256:808620eb60fcb128cda086f4af80f69d876bc5bef5092dfedde3d94902e1c7c3"
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@06116385d9baf250c9f4dcb4858b16962ea869c3 # v4.1.0
+        uses: docker/setup-qemu-action@1f40c72289eff860ee54a304f1438e3cff362e0a # v4.3.0
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - name: Resolve Slack-pinned S3 origin image
+        id: s3-origin
+        shell: bash
+        run: |
+          pins="$(sed -nE 's/^[[:space:]]*defaultS3StaticConnectorImage[[:space:]]*=[[:space:]]*"([^"]+)"$/\1/p' apps/slack/internal/handler_s3_website.go)"
+          count="$(printf '%s\n' "$pins" | sed '/^$/d' | wc -l | tr -d ' ')"
+          if [ "$count" != "1" ]; then
+            echo "::error::expected exactly one defaultS3StaticConnectorImage, found $count"
+            exit 1
+          fi
+          echo "image=$pins" >> "$GITHUB_OUTPUT"
+
+      # The script owns the pin, the resolvability preflight, the warn-vs-fail
+      # decision, and the linux/amd64 + linux/arm64 sweep, so a local run
+      # behaves exactly like CI. It reads QURL_RELEASE_IMAGE_REQUIRED from
+      # the job env above.
+      - name: Verify released qurl S3 headless config
+        run: bash origins/s3-static-connector/test/qurl_image_release_contract.sh
+
+      - name: Verify Slack-pinned S3 origin (linux/amd64)
+        env:
+          S3_ORIGIN_IMAGE: ${{ steps.s3-origin.outputs.image }}
+        run: |
+          SKIP_BUILD=true PLATFORM=linux/amd64 IMG="$S3_ORIGIN_IMAGE" \
+            bash origins/s3-static-connector/test/behavior_test.sh
+
+      - name: Verify Slack-pinned S3 origin (linux/arm64)
+        env:
+          S3_ORIGIN_IMAGE: ${{ steps.s3-origin.outputs.image }}
+        run: |
+          SKIP_BUILD=true PLATFORM=linux/arm64 IMG="$S3_ORIGIN_IMAGE" \
+            bash origins/s3-static-connector/test/behavior_test.sh
 
       - name: Build slack bot image (linux/arm64)
-        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           file: apps/slack/Dockerfile
@@ -223,7 +299,7 @@ jobs:
     # The reusable authenticates via App secrets; the caller's GITHUB_TOKEN
     # isn't read by any step, so deny everything.
     permissions: {}
-    uses: layervai/ops-routines-workflows/.github/workflows/dispatch-deploy.yml@f9a4ab4e4697980ebd21efed7d643441f0ea0993 # v0.7.0
+    uses: layervai/ops-routines-workflows/.github/workflows/dispatch-deploy.yml@d07fa2fe3a103907ff2b1a1a71509a6dcd8e9d32 # v0.13.0
     with:
       target_repo: qurl-integrations-infra
       # An off-allowlist value hard-fails in the reusable; an allowlisted

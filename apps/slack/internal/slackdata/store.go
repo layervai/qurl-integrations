@@ -45,6 +45,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strconv"
 	"time"
 
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
@@ -76,10 +77,10 @@ type DynamoDBClient interface {
 	PutItem(ctx context.Context, params *dynamodb.PutItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.PutItemOutput, error)
 	UpdateItem(ctx context.Context, params *dynamodb.UpdateItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.UpdateItemOutput, error)
 	DeleteItem(ctx context.Context, params *dynamodb.DeleteItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.DeleteItemOutput, error)
-	// Query backs [Store.ChannelsForResource] — the only Query caller — which
-	// pages every channel_policies row for a team to find the channels a
-	// resource is exposed to. It requires the dynamodb:Query action on the
-	// channel_policies table; the other ops only need item-level grants.
+	// Query backs team/partition sweeps such as [Store.ChannelsForResource],
+	// [Store.PurgeTeamChannelPolicies], [AgentStore.ListAuditEntries], and
+	// [AgentStore.PurgeWorkspaceAgentState]. It requires the dynamodb:Query action
+	// on whichever table the concrete store targets.
 	Query(ctx context.Context, params *dynamodb.QueryInput, optFns ...func(*dynamodb.Options)) (*dynamodb.QueryOutput, error)
 }
 
@@ -287,7 +288,13 @@ func ddbToError(op string, err error) error {
 		// AddAdmin, RemoveAdmin) catches
 		// ConditionalCheckFailedException BEFORE calling
 		// ddbToError, so this 412 branch is currently unreachable.
-		// Any new op that calls ddbToError MUST do the same — the
+		// The one deliberate exception is PutPendingAction, which
+		// lets its conditional create surface AS an error (see its
+		// doc comment) and so does reach this branch. That is safe
+		// because nothing there reads the status: postAgentConfirm
+		// logs the error and falls back to the text preview, so no
+		// user-facing copy is selected from it either way.
+		// Any other new op that calls ddbToError MUST catch it — the
 		// handler layer doesn't dispatch on 412, so a leak through
 		// here would surface to the user as the generic 503 copy
 		// even when the underlying failure was a conditional check.
@@ -306,6 +313,17 @@ func ddbToError(op string, err error) error {
 		Title:      op,
 		Detail:     err.Error(),
 	}
+}
+
+// joinSweepErrors preserves every failure from a paged purge: the per-row
+// DeleteItem errors already observed plus the terminal Query error that stopped
+// pagination. The lifecycle retry path needs the full residue set for both
+// channel_policies and qurl_agent_state purges.
+func joinSweepErrors(deleteErrs []error, queryErr error) error {
+	all := make([]error, 0, len(deleteErrs)+1)
+	all = append(all, deleteErrs...)
+	all = append(all, queryErr)
+	return errors.Join(all...)
 }
 
 // stringAttr is a small helper for string DDB AttributeValues. Empty
@@ -390,3 +408,18 @@ func readTime(item map[string]ddbtypes.AttributeValue, key string) time.Time {
 // expires_at > :now read across multiple UpdateExpression callers.
 // Lifted to a constant to satisfy goconst.
 const exprNow = ":now"
+
+const exprNowNano = ":now_nano"
+
+// The remaining DDB expression placeholders shared across UpdateExpression
+// callers in this package. Lifted to constants to satisfy goconst, same as
+// exprNow above.
+const (
+	exprOne             = ":one"
+	exprUpdatedAtNano   = "#updated_at_nano"
+	exprPurgeCutoffNano = ":purge_cutoff_nano"
+)
+
+func unixNanoAttr(t time.Time) ddbtypes.AttributeValue {
+	return &ddbtypes.AttributeValueMemberN{Value: strconv.FormatInt(t.UTC().UnixNano(), 10)}
+}

@@ -1,0 +1,820 @@
+#!/bin/sh
+# Verify .github/workflows/main-ci-notifications.yml can actually build its
+# Slack payload. That workflow runs only on `workflow_run` completion from the
+# default branch's copy of the file, so no PR check ever executes it: a broken
+# payload reaches main and then fails open, silently swallowing every main-CI
+# failure alert. That is not hypothetical — a bare `+` string concatenation in
+# jq object-construction position (a restricted production on jq <= 1.7, which
+# ubuntu-latest ships) shipped green and broke the notifier until #1021.
+#
+# The version skew is the trap: jq 1.8 accepts the bare form, so a developer
+# checking locally on a newer jq sees the broken filter compile fine. Only the
+# CI runner's jq makes this check authoritative; see the warning below.
+#
+# To enforce that half locally — rather than pushing and waiting for CI — run
+# this script in a container whose jq matches the runner's. The pairing is the
+# point, not the image tag: ubuntu:24.04 ships jq 1.7, the version
+# ubuntu-latest has today. Should ubuntu-latest ever ship jq >= 1.8, the
+# restricted grammar stops applying to the notifier too — there is then no
+# image that restores this half, and nothing left for one to catch.
+#
+#   docker run --rm -v "$PWD:/src:ro" ubuntu:24.04 bash -c '
+#     export DEBIAN_FRONTEND=noninteractive
+#     apt-get update -qq && apt-get install -y -qq jq python3 git
+#     mkdir -p /work && cd /work
+#     cp -R /src/.github /src/scripts .
+#     git init -q .
+#     sh scripts/check-main-ci-notification-payload.sh'
+#
+# The copy and fresh `git init` are load-bearing: this script starts with
+# `cd "$(git rev-parse --show-toplevel)"`, and the read-only mount carries no
+# .git the container can use (in a worktree it is a file pointing outside the
+# mount), so /work has to be a repo root of its own. `sh` runs it so the recipe
+# does not depend on the executable bit surviving the copy.
+#
+# Rather than pattern-matching the jq source (brittle, and would need updating
+# on every reword), this extracts the step's shell body and runs it verbatim
+# against a stub `curl`, then asserts on the payload it actually produced.
+set -eu
+
+cd "$(git rev-parse --show-toplevel)"
+
+command -v python3 >/dev/null 2>&1 || {
+    echo "Error: python3 is required; install python3 and retry" >&2
+    exit 1
+}
+command -v jq >/dev/null 2>&1 || {
+    echo "Error: jq is required; install jq and retry" >&2
+    exit 1
+}
+command -v bash >/dev/null 2>&1 || {
+    echo "Error: bash is required (the step body uses bash syntax)" >&2
+    exit 1
+}
+
+python3 - <<'EOF'
+import fnmatch
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+
+WORKFLOW = ".github/workflows/main-ci-notifications.yml"
+STEP_NAME = "Post Slack notification"
+# Emitted by the `*)` arm of the workflow's impact case statement.
+FALLBACK_IMPACT_PREFIX = "Main CI did not complete successfully before"
+# This repository's default branch. STUB below carries the same value as
+# payload data; these are two different facts that only coincide today.
+DEFAULT_BRANCH = "main"
+
+# Workflows that reach main (or run on a schedule) yet deliberately do not
+# notify #build-notifications. Keyed by workflow `name:`, valued by the reason
+# -- an entry here is a decision, so make it read like one in review.
+# Empty today: every workflow that can trigger the notifier is wired into it.
+NOTIFY_EXEMPT = {}
+
+# Stand-in for the workflow_run context the step reads from its env: block.
+STUB = {
+    "SLACK_WEBHOOK_URL": "https://hooks.example.invalid/stub",
+    "GH_TOKEN": "stub-token",
+    "REPOSITORY": "layervai/qurl-integrations",
+    "REPOSITORY_URL": "https://github.com/layervai/qurl-integrations",
+    "WORKFLOW_PATH": ".github/workflows/slack.yml",
+    "WORKFLOW_ID": "242171096",
+    "EVENT": "push",
+    "CONCLUSION": "failure",
+    "HEAD_SHA": "8d0bf8686e2904c3dcdef76a077c226070a52ea1",
+    "RUN_ID": "33949467588",
+    "RUN_ATTEMPT": "1",
+    "RUN_NUMBER": "3837",
+    "RUN_URL": "https://github.com/layervai/qurl-integrations/actions/runs/1",
+    "DEFAULT_BRANCH": "main",
+    "ACTOR": "octocat",
+    "COMMIT_MESSAGE": "test: exercise notifier",
+}
+
+def die(msg, path=None):
+    """Abort, naming the file at fault -- the notifier unless `path` says otherwise."""
+    raise SystemExit("%s: %s" % (path or WORKFLOW, msg))
+
+with open(WORKFLOW) as fh:
+    lines = fh.read().split("\n")
+
+# --- structural extraction (stdlib only; PyYAML is not guaranteed on runners)
+
+def extract_run_block(step_name):
+    """Return the dedented run: block of the named step.
+
+    Anchored on the step name rather than "first run: block in the file", so
+    inserting a step ahead of this one cannot silently redirect the check at
+    the wrong script.
+    """
+    start = None
+    for i, line in enumerate(lines):
+        if re.match(r"^ {6}- name: %s\s*$" % re.escape(step_name), line):
+            start = i
+            break
+    if start is None:
+        return None
+    for i in range(start + 1, len(lines)):
+        if re.match(r"^ {6}- ", lines[i]):
+            break  # next step; this one has no run: block
+        if re.match(r"^ {8}run: \|\s*$", lines[i]):
+            body, pad = [], " " * 10
+            for nxt in lines[i + 1:]:
+                if nxt.strip() and not nxt.startswith(pad):
+                    break
+                body.append(nxt[10:] if nxt.startswith(pad) else "")
+            return "\n".join(body)
+    return None
+
+def uncomment(value):
+    """Drop a trailing YAML comment.
+
+    Requires whitespace before the `#`, which is YAML's own rule -- so a branch
+    name like `feat#123` survives while `[main]  # primary` loses the note.
+    """
+    return re.sub(r"\s+#.*$", "", value)
+
+def on_block(path):
+    """Return the top-level `on:` mapping of a workflow as {key: [sub-lines]}."""
+    with open(path) as fh:
+        wf = fh.read().split("\n")
+    start = None
+    for i, line in enumerate(wf):
+        # YAML 1.1 reads a bare `on` as a boolean, so some formatters quote the
+        # key; GitHub accepts either. A trailing comment is fine here too.
+        m = re.match(r"""^(?:on|"on"|'on'):(.*)$""", line)
+        if not m:
+            continue
+        inline = uncomment(m.group(1)).strip()
+        if inline:
+            if not (inline.startswith("[") and inline.endswith("]")):
+                die("unparsed inline `on:` value %r -- teach this check the "
+                    "new form rather than letting the workflow go unchecked"
+                    % inline, path)
+            # `on: [push, pull_request]` -- event names with no filters, so
+            # each maps to an empty sub-block.
+            return {v.strip().strip("'\""): []
+                    for v in inline[1:-1].split(",") if v.strip()}
+        start = i
+        break
+    if start is None:
+        die("no block-form `on:` -- teach this check the new form rather "
+            "than letting the workflow go unchecked", path)
+    keys, cur = {}, None
+    for line in wf[start + 1:]:
+        if line.strip() and not line.startswith((" ", "#")):
+            break  # next top-level key ends the block
+        m = re.match(r"^ {2}([a-z_]+):\s*(\S.*)?$", line)
+        if m:
+            cur = m.group(1)
+            if m.group(2) and not m.group(2).startswith("#"):
+                die("%s: inline value on `on.%s` -- teach this check the new "
+                    "form rather than letting the workflow go unchecked"
+                    % (path, cur))
+            keys[cur] = []
+        elif cur is not None:
+            keys[cur].append(line)
+    if not keys:
+        die("could not read any `on:` triggers", path)
+    return keys
+
+def yaml_list(path, sub, key, prefix):
+    """Return the list under `key` in these `on:` sub-lines, or None if absent.
+
+    None means the key is absent, which is not the same as present-but-empty:
+    `push` with no `branches` runs on every branch, so the two must not collapse.
+    `prefix` names the parent key for error messages, e.g. `on.push`.
+    """
+    label = "%s.%s" % (prefix, key)
+    for i, line in enumerate(sub):
+        m = re.match(r"^ {4}%s:(.*)$" % re.escape(key), line)
+        if not m:
+            continue
+        inline = uncomment(m.group(1)).strip()
+        if inline:
+            if not (inline.startswith("[") and inline.endswith("]")):
+                die("unparsed `%s` value %r -- teach this check the new "
+                    "form" % (label, inline), path)
+            out = [v.strip().strip("'\"") for v in inline[1:-1].split(",")
+                   if v.strip()]
+        else:
+            out = []
+            for nxt in sub[i + 1:]:
+                if not nxt.strip() or nxt.lstrip().startswith("#"):
+                    continue  # blank or comment between items
+                mm = re.match(r"^ {6}- (.+?)\s*$", nxt)
+                if not mm:
+                    break  # next key ends the list
+                out.append(uncomment(mm.group(1)).strip().strip("'\""))
+        if not out:
+            die("`%s` is present but yielded no entries -- teach this "
+                "check the new form rather than silently reading it as "
+                "'matches nothing'" % label, path)
+        return out
+    return None
+
+def can_trigger_notifier(path):
+    """True if this workflow can raise a workflow_run event the notifier acts on.
+
+    The notifier's `if:` gate -- not the workflow's purpose -- is what decides
+    whether listing it could ever do anything: a pull_request-only or
+    issue-only workflow listed there would be dead config. NOTIFY_EVENTS is
+    read out of that gate rather than restated here, so widening the gate
+    cannot leave this check quietly disagreeing with it.
+    """
+    keys = on_block(path)
+    reachable = NOTIFY_EVENTS.intersection(keys)
+    if not reachable:
+        return False
+    # Only `push` carries a branch filter worth reading; any other admitted
+    # event (`schedule` today) runs on the default branch by construction.
+    if reachable - {"push"}:
+        return True
+    # fnmatch does not distinguish GitHub's `*` (stops at `/`) from `**`
+    # (crosses it). Only the literal default-branch name is ever matched here,
+    # and it contains no `/`, so the distinction cannot change an answer.
+    push = keys["push"]
+    only = yaml_list(path, push, "branches", "on.push")
+    if only is not None:
+        return any(fnmatch.fnmatch(DEFAULT_BRANCH, pat) for pat in only)
+    skip = yaml_list(path, push, "branches-ignore", "on.push")
+    if skip is not None:
+        return not any(fnmatch.fnmatch(DEFAULT_BRANCH, pat) for pat in skip)
+    # A tag-only push -- the publish-on-tag pattern -- cannot reach the
+    # notifier: workflow_run.head_branch carries the tag, so the
+    # `head_branch == default_branch` gate never matches. Demanding such a
+    # workflow be listed would add config that only ever hits the generic arm.
+    if any(yaml_list(path, push, k, "on.push") is not None
+           for k in ("tags", "tags-ignore")):
+        return False
+    return True  # unfiltered push runs on every branch, the default one included
+
+run_script = extract_run_block(STEP_NAME)
+if not run_script or "jq -n" not in run_script:
+    die("could not extract the %r step's run: block -- if the workflow was "
+        "restructured, update this check rather than deleting it" % STEP_NAME)
+
+workflow_text = "\n".join(lines)
+# The job gate must keep admitting verified reruns, or the recovery path below
+# becomes dead configuration while its payload tests continue to pass.
+for fragment in (
+    "github.event.workflow_run.conclusion == 'success'",
+    "github.event.workflow_run.run_attempt > 1",
+):
+    if fragment not in workflow_text:
+        die("job gate does not admit verified successful reruns: missing %r"
+            % fragment)
+
+# Read the alert outcomes from the real gate, then require the recovery case to
+# use that same set. The other arm must remain the exhaustive complement of
+# GitHub's documented workflow-run conclusions.
+known_conclusions = {
+    "action_required", "cancelled", "failure", "neutral", "skipped", "stale",
+    "startup_failure", "success", "timed_out",
+}
+m = re.search(
+    r"fromJson\('(\[[^']*\])'\),\s*"
+    r"github\.event\.workflow_run\.conclusion\b",
+    workflow_text,
+)
+if not m:
+    die("could not read the alert-conclusion allowlist from the job gate")
+alert_conclusions = set(json.loads(m.group(1)))
+case_match = re.search(
+    r'case "\$recovered_from" in\s*\n\s*([a-z_|]+)\)\s*\n\s*;;\s*\n'
+    r'\s*([a-z_|]+)\)',
+    run_script,
+)
+if not case_match:
+    die("could not read the recovery conclusion partition")
+recovery_alerts = set(case_match.group(1).split("|"))
+recovery_quiet = set(case_match.group(2).split("|"))
+if recovery_alerts != alert_conclusions:
+    die("recovery alert conclusions %s do not match job-gate alerts %s"
+        % (sorted(recovery_alerts), sorted(alert_conclusions)))
+if recovery_alerts & recovery_quiet or \
+        recovery_alerts | recovery_quiet != known_conclusions:
+    die("recovery conclusion arms must partition all known conclusions")
+
+# A missing actions permission or token does not crash the cancellation path: it
+# deliberately degrades to amber. Fence the wiring statically so every benign
+# supersession does not silently become a false alert after a permissions edit.
+if not re.search(r"(?m)^permissions:\n  actions: read\s*$", workflow_text):
+    die("top-level permissions must grant actions: read for supersession lookup")
+for variable, expression in {
+    "GH_TOKEN": "github.token",
+    "WORKFLOW_PATH": "github.event.workflow_run.path",
+    "RUN_ID": "github.event.workflow_run.id",
+    "RUN_ATTEMPT": "github.event.workflow_run.run_attempt",
+}.items():
+    pattern = r"(?m)^          %s: \$\{\{ %s \}\}\s*$" % (
+        re.escape(variable), re.escape(expression)
+    )
+    if not re.search(pattern, workflow_text):
+        die("Post Slack notification must pass %s as %s"
+            % (expression, variable))
+
+notifier_on = on_block(WORKFLOW)
+if "workflow_run" not in notifier_on:
+    die("no `on.workflow_run` block to read the trigger list from")
+
+# Same parser the reverse check uses on every other workflow, rather than a
+# second, weaker one: the hand-rolled loop this replaces stopped at the first
+# comment in the list, which after the reverse check below would report the
+# workflows it silently dropped as "absent from" a list they are sitting in.
+triggers = yaml_list(WORKFLOW, notifier_on["workflow_run"], "workflows",
+                     "on.workflow_run")
+if triggers is None:
+    die("could not extract on.workflow_run.workflows")
+
+# The job's `if:` decides which originating events this notifier acts on. Read
+# it rather than restating it: a second copy here would keep answering "push or
+# schedule" after someone widened the real gate, and the workflows that gate
+# newly admits would go unlisted with nothing failing -- the omission this
+# check exists to catch, arrived at from above it.
+m = re.search(
+    r"fromJson\('(\[[^']*\])'\),\s*github\.event\.workflow_run\.event\b",
+    "\n".join(lines),
+)
+if not m:
+    die("could not read the originating-event allowlist from the job's `if:` "
+        "-- teach this check the new form rather than letting it mirror a "
+        "gate that has moved on")
+NOTIFY_EVENTS = set(json.loads(m.group(1)))
+
+# --- 1. every trigger names a workflow that still exists (a missed rename
+#        means the notifier silently never fires -- no red run at all)
+
+# Assumes each workflow declares a top-level `name:`. GitHub otherwise keys a
+# workflow by its file path, which could never match a trigger entry here.
+names = {}
+unnamed = []
+for entry in sorted(os.listdir(".github/workflows")):
+    if not entry.endswith((".yml", ".yaml")):
+        continue
+    path = os.path.join(".github/workflows", entry)
+    with open(path) as fh:
+        for line in fh:
+            m = re.match(r'^name: *([\'"]?)(.+?)\1\s*$', line)
+            if m:
+                names[m.group(2)] = path
+                break
+        else:
+            unnamed.append(path)
+
+missing = [t for t in triggers if t not in names]
+if missing:
+    die("on.workflow_run.workflows names no live workflow: %s (a renamed "
+        "upstream workflow makes this notifier silently never fire)" % missing)
+
+# --- 2. and the reverse: every workflow that *can* trigger the notifier is
+#        listed. Check 1 alone only walks listed -> live, so a new app whose
+#        workflow was never wired in is invisible to CI -- it just fails on
+#        main and notifies nobody, which is how the Edge extension shipped
+#        unwired in #909. Adding a main-branch workflow now forces a choice:
+#        list it, or record why not in NOTIFY_EXEMPT.
+
+candidates = {n: p for n, p in names.items() if can_trigger_notifier(p)}
+
+# `candidates` is keyed by name, so a workflow that declares none would slip
+# past this whole check. It cannot be exempt-by-omission: GitHub keys it by
+# file path, which no trigger entry can name, yet it still fails on main and
+# still notifies nobody. Undecidable rather than allowed -- make it declare one.
+nameless = sorted(p for p in unnamed if can_trigger_notifier(p))
+if nameless:
+    die("these workflows run on the default branch but declare no top-level "
+        "`name:`, so they cannot be named in on.workflow_run.workflows at "
+        "all: %s (give each one a name)" % nameless)
+
+unlisted = sorted("%s (%s)" % (n, p) for n, p in candidates.items()
+                  if n not in triggers and n not in NOTIFY_EXEMPT)
+if unlisted:
+    die("these workflows run on the default branch but are absent from "
+        "on.workflow_run.workflows, so their main failures notify nobody: %s "
+        "(add each one there with an impact case arm, or add it to "
+        "NOTIFY_EXEMPT with a reason)" % unlisted)
+
+# Check 1 proves a listed trigger still names a live workflow, but not that the
+# workflow still reaches this notifier. Retarget a listed one at `pull_request`
+# and it goes on failing on main while quietly never firing -- the same silent
+# non-firing this PR exists to kill, just arrived at from the other side.
+dead = sorted("%s (%s)" % (t, names[t])
+              for t in triggers if t not in candidates)
+if dead:
+    die("on.workflow_run.workflows lists workflows that can no longer trigger "
+        "it, so they are listed but will never fire: %s (restore the "
+        "default-branch `push`/`schedule` trigger, or drop the entry)" % dead)
+
+# A workflow that stopped running on main -- or was deleted -- leaves its
+# exemption behind as a claim nobody rechecks.
+blank = sorted(n for n, why in NOTIFY_EXEMPT.items() if not why.strip())
+if blank:
+    die("NOTIFY_EXEMPT entries must carry a reason, these are empty: %s"
+        % blank)
+
+stale = sorted(n for n in NOTIFY_EXEMPT if n not in candidates)
+if stale:
+    die("NOTIFY_EXEMPT names workflows that can no longer trigger this "
+        "notifier: %s (drop the entry)" % stale)
+
+# --- 3. run the real step body against stubbed Slack and GitHub APIs
+
+tmp = tempfile.mkdtemp()
+try:
+    script = os.path.join(tmp, "step.sh")
+    with open(script, "w") as fh:
+        fh.write(run_script)
+
+    bindir = os.path.join(tmp, "bin")
+    os.mkdir(bindir)
+    stub = os.path.join(bindir, "curl")
+    with open(stub, "w") as fh:
+        fh.write(
+            '#!/bin/sh\nprev=""\nfor a in "$@"; do\n'
+            '  [ "$prev" = "--data" ] && printf \'%s\' "$a" > "$PAYLOAD_OUT"\n'
+            '  prev="$a"\ndone\nexit 0\n'
+        )
+    os.chmod(stub, 0o755)
+    gh_stub = os.path.join(bindir, "gh")
+    with open(gh_stub, "w") as fh:
+        fh.write(
+            '#!/bin/sh\n'
+            'args=" $* "\n'
+            'case "$args" in *" --method GET "*) ;; *) exit 3 ;; esac\n'
+            'case "$args" in\n'
+            '  *" repos/layervai/qurl-integrations/actions/workflows/242171096/runs "*)\n'
+            '    case "$args" in *" -f branch=main "*) ;; *) exit 3 ;; esac\n'
+            '    case "$args" in *" -f event=push "*) ;; *) exit 3 ;; esac\n'
+            '    case "$args" in *" -f per_page=100 "*) ;; *) exit 3 ;; esac\n'
+            '    case "$args" in *" --jq "*) ;; *) exit 3 ;; esac\n'
+            '    case "${GH_STUB_MODE:-successor}" in\n'
+            '      successor) printf "3838\\thttps://github.example.invalid/runs/2\\n" ;;\n'
+            '      none) exit 0 ;;\n'
+            '      failure) exit 1 ;;\n'
+            '      *) echo "unexpected successor mode" >&2; exit 2 ;;\n'
+            '    esac\n'
+            '    ;;\n'
+            '  *" repos/layervai/qurl-integrations/actions/runs/33949467588/attempts/1 "*)\n'
+            '    case "$args" in *" --jq .conclusion // empty "*) ;; *) exit 3 ;; esac\n'
+            '    case "${GH_STUB_MODE:-previous}" in\n'
+            '      previous) printf "%s\\n" "${GH_PREVIOUS_CONCLUSION-failure}" ;;\n'
+            '      previous_lookup_failure) exit 1 ;;\n'
+            '      *) echo "unexpected previous-attempt mode" >&2; exit 2 ;;\n'
+            '    esac\n'
+            '    ;;\n'
+            '  *" repos/layervai/qurl-integrations/actions/runs/33949467588/attempts/2 "*)\n'
+            '    case "$args" in *" --jq .conclusion // empty "*) ;; *) exit 3 ;; esac\n'
+            '    case "${GH_STUB_MODE:-previous}" in\n'
+            '      previous) printf "%s\\n" "${GH_PREVIOUS_CONCLUSION_ATTEMPT_2-timed_out}" ;;\n'
+            '      previous_lookup_failure) exit 1 ;;\n'
+            '      *) echo "unexpected previous-attempt mode" >&2; exit 2 ;;\n'
+            '    esac\n'
+            '    ;;\n'
+            '  *) exit 3 ;;\n'
+            'esac\n'
+        )
+    os.chmod(gh_stub, 0o755)
+    out = os.path.join(tmp, "payload.json")
+
+    def run(env_overrides):
+        env = dict(os.environ)
+        env.update(STUB)
+        env.update({
+            "PATH": bindir + os.pathsep + os.environ.get("PATH", ""),
+            "PAYLOAD_OUT": out,
+        })
+        env.update(env_overrides)
+        if os.path.exists(out):
+            os.remove(out)
+        proc = subprocess.run(
+            ["bash", script], env=env, capture_output=True, text=True
+        )
+        if not os.path.exists(out):
+            return proc, None
+        with open(out) as fh:
+            return proc, fh.read()
+
+    # Every trigger, plus an unlisted name to prove the fallback arm works.
+    cases = [(w, {}) for w in triggers + ["Some Unlisted Workflow"]]
+    # Two branches unreachable by varying WORKFLOW_NAME alone: a scheduled run
+    # relabels the actor, and a missing actor must fall back rather than render
+    # an empty field.
+    cases.append((triggers[0], {"EVENT": "schedule"}))
+    cases.append(("cli: Build and Test", {"EVENT": "schedule"}))
+    cases.append(("Operator CLI soak", {
+        "EVENT": "schedule", "WORKFLOW_PATH": ".github/workflows/cli.yml",
+    }))
+    cases.append((triggers[0], {"ACTOR": ""}))
+
+    for workflow, extra in cases:
+        effective_workflow = ("cli: Build and Test"
+                              if extra.get("WORKFLOW_PATH") ==
+                              ".github/workflows/cli.yml" else workflow)
+        listed = effective_workflow in triggers
+        env = {"WORKFLOW_NAME": workflow}
+        env.update(extra)
+        label = "%s%s" % (workflow, (" " + str(extra)) if extra else "")
+        proc, payload = run(env)
+        if proc.returncode != 0:
+            die("step failed for %s (exit %d)\n%s"
+                % (label, proc.returncode, proc.stderr.strip()))
+        if payload is None:
+            die("step posted nothing for %s" % label)
+        try:
+            obj = json.loads(payload)
+        except ValueError as exc:
+            die("invalid JSON payload for %s: %s" % (label, exc))
+
+        if set(obj) != {"text", "attachments"}:
+            die("payload keys changed for %s: %s" % (label, sorted(obj)))
+        if len(obj["attachments"]) != 1:
+            die("expected one Slack attachment for %s" % label)
+        attachment = obj["attachments"][0]
+        if set(attachment) != {"color", "blocks"}:
+            die("attachment keys changed for %s: %s"
+                % (label, sorted(attachment)))
+        blocks = attachment["blocks"]
+        if len(blocks) != 5:
+            die("expected 5 Slack blocks for %s, got %d"
+                % (label, len(blocks)))
+        fields = blocks[1]["fields"]
+        if len(fields) != 4:
+            die("expected 4 fields for %s" % label)
+
+        # Compare each field in full. A substring probe is not enough: the
+        # repository slug also occurs inside the repository URL, so wiring the
+        # label to the wrong --arg still contains the expected text. Exact
+        # equality is the payload contract -- an intentional reword updates
+        # this list, and the mismatch message shows both sides.
+        ctx = dict(STUB)
+        ctx.update(extra)
+        trigger = ("Scheduled" if ctx["EVENT"] == "schedule"
+                   else "Push by %s" % (ctx["ACTOR"] or "unknown"))
+        expected = [
+            "*Workflow:*\n`%s`" % effective_workflow,
+            "*Result:*\n:x: `failure`",
+            "*Branch:*\n`%s` (%s)"
+            % (ctx["DEFAULT_BRANCH"], ctx["HEAD_SHA"][:7]),
+            "*Trigger:*\n%s" % trigger,
+        ]
+        for i, want in enumerate(expected):
+            if fields[i]["text"] != want:
+                die("field %d rendered wrong for %s\n  expected: %r\n"
+                    "  actual:   %r" % (i, label, want, fields[i]["text"]))
+
+        if attachment["color"] != "#dc3545":
+            die("failure attachment color wrong for %s: %r"
+                % (label, attachment["color"]))
+        if blocks[0]["text"]["text"] != ":x: *qURL Integrations CI* failed":
+            die("failure header wrong for %s: %r"
+                % (label, blocks[0]["text"]["text"]))
+        if blocks[2]["text"]["text"] != "*Commit:* `test: exercise notifier`":
+            die("commit block rendered wrong for %s" % label)
+        footer = ("<%s/commit/%s|%s>  |  <%s|View workflow>"
+                  % (ctx["REPOSITORY_URL"], ctx["HEAD_SHA"],
+                     ctx["HEAD_SHA"][:7], ctx["RUN_URL"]))
+        if blocks[-1]["elements"][0]["text"] != footer:
+            die("footer rendered wrong for %s" % label)
+
+        for block in blocks:
+            for text in ([block["text"]["text"]] if "text" in block else []) + \
+                        [f["text"] for f in block.get("fields", [])] + \
+                        [e["text"] for e in block.get("elements", [])]:
+                if text.strip() in ("", "*Impact*"):
+                    die("empty text rendered for %s: %r" % (label, text))
+
+        impact = blocks[-2]["text"]["text"]
+        generic = FALLBACK_IMPACT_PREFIX in impact
+        # A listed trigger falling through to the generic arm means the case
+        # statement and the trigger list drifted apart.
+        if listed and generic:
+            die("%r is triggered but has no impact case arm (trigger list and "
+                "case statement drifted)" % workflow)
+        if not listed and not generic:
+            die("unlisted %r did not hit the fallback arm" % workflow)
+        if effective_workflow == "cli: Build and Test" and \
+                extra.get("EVENT") == "schedule" and \
+                "Slack result-delivery gate" not in impact:
+            die("scheduled CLI failure impact does not cover result delivery")
+
+    # Every admitted conclusion gets its own visual/operational classification.
+    outcome_cases = [
+        ({"CONCLUSION": "success", "RUN_ATTEMPT": "2",
+          "GH_STUB_MODE": "previous", "GH_PREVIOUS_CONCLUSION": "failure"},
+         "#28a745", ":white_check_mark:", "recovered on attempt 2"),
+        ({"CONCLUSION": "timed_out"}, "#dc3545", ":x:", "timed out"),
+        ({"CONCLUSION": "cancelled", "GH_STUB_MODE": "successor"},
+         "#6c757d", ":fast_forward:", "superseded by run #3838"),
+        ({"CONCLUSION": "cancelled", "GH_STUB_MODE": "none"},
+         "#ffc107", ":warning:", "stopped early"),
+        ({"CONCLUSION": "cancelled", "GH_STUB_MODE": "failure"},
+         "#ffc107", ":warning:", "stopped early"),
+    ]
+    for extra, color, result_emoji, status_text in outcome_cases:
+        env = {"WORKFLOW_NAME": triggers[0]}
+        env.update(extra)
+        label = str(extra)
+        proc, payload = run(env)
+        if proc.returncode != 0 or payload is None:
+            die("step failed for outcome %s (exit %d)\nstdout: %s\nstderr: %s"
+                % (label, proc.returncode, proc.stdout.strip(),
+                   proc.stderr.strip()))
+        obj = json.loads(payload)
+        attachment = obj["attachments"][0]
+        blocks = attachment["blocks"]
+        if attachment["color"] != color:
+            die("outcome %s color = %r, want %r"
+                % (label, attachment["color"], color))
+        if blocks[0]["text"]["text"] != ":%s: *qURL Integrations CI* %s" \
+                % (result_emoji.strip(":"), status_text):
+            die("outcome %s header rendered wrong: %r"
+                % (label, blocks[0]["text"]["text"]))
+        if blocks[1]["fields"][1]["text"] != \
+                "*Result:*\n%s `%s`" % (result_emoji, extra["CONCLUSION"]):
+            die("outcome %s result field rendered wrong" % label)
+        impact = blocks[-2]["text"]["text"]
+        if extra.get("CONCLUSION") == "success":
+            if "Recovered — no action needed" not in impact or \
+                    "Attempt 2 passed after attempt 1 concluded failure" not in impact:
+                die("successful rerun did not render the recovery impact")
+        elif extra.get("GH_STUB_MODE") == "successor":
+            if "Superseded — no action needed" not in impact or \
+                    "runs/2|run #3838" not in impact:
+                die("verified successor did not render a no-action impact")
+        elif extra.get("GH_STUB_MODE") == "none":
+            if "No newer" not in impact:
+                die("stranded cancellation did not ask for a re-run")
+        elif extra.get("GH_STUB_MODE") == "failure":
+            if "could not verify" not in impact:
+                die("lookup failure did not fail closed")
+
+    # A successful rerun closes only an alert this notifier could have opened.
+    # Do not post green noise after a prior success or another non-alert result.
+    for preceding in (
+        "success", "action_required", "neutral", "skipped", "stale",
+        "startup_failure",
+    ):
+        proc, payload = run({
+            "WORKFLOW_NAME": triggers[0], "CONCLUSION": "success",
+            "RUN_ATTEMPT": "2",
+            "GH_STUB_MODE": "previous", "GH_PREVIOUS_CONCLUSION": preceding,
+        })
+        if proc.returncode != 0 or payload is not None:
+            die("successful rerun after %s must exit cleanly without posting"
+                % preceding)
+
+    # The dedicated soak job already posts the scheduled CLI success. A rerun
+    # must not add a second green message from this general notifier.
+    proc, payload = run({
+        "WORKFLOW_NAME": "Scheduled CLI soak",
+        "WORKFLOW_PATH": ".github/workflows/cli.yml", "EVENT": "schedule",
+        "CONCLUSION": "success", "RUN_ATTEMPT": "2",
+        "GH_STUB_MODE": "previous", "GH_PREVIOUS_CONCLUSION": "failure",
+    })
+    if proc.returncode != 0 or payload is not None or \
+            "dedicated soak notifier owns" not in proc.stdout + proc.stderr:
+        die("scheduled CLI recovery emitted a duplicate general green message")
+
+    # A healthy watchdog has no dedicated green sender. Its successful rerun
+    # must close the failure alert emitted for the prior attempt.
+    proc, payload = run({
+        "WORKFLOW_NAME": "qURL CLI Soak Freshness Watchdog",
+        "EVENT": "schedule", "CONCLUSION": "success", "RUN_ATTEMPT": "2",
+        "GH_STUB_MODE": "previous", "GH_PREVIOUS_CONCLUSION": "failure",
+    })
+    watchdog_recovery = json.loads(payload) if payload is not None else None
+    watchdog_impact = (watchdog_recovery["attachments"][0]["blocks"][-2]
+                       ["text"]["text"] if watchdog_recovery else "")
+    if proc.returncode != 0 or watchdog_recovery is None or \
+            "Recovered" not in watchdog_impact:
+        die("successful watchdog rerun did not close its prior failure alert")
+
+    # A recovery must be verified against the exact previous attempt. If that
+    # read fails, do not emit an unverified green notification.
+    proc, payload = run({
+        "WORKFLOW_NAME": triggers[0],
+        "CONCLUSION": "success", "RUN_ATTEMPT": "2",
+        "GH_STUB_MODE": "previous_lookup_failure",
+    })
+    if proc.returncode == 0 or payload is not None or \
+            "::error::" not in proc.stdout + proc.stderr:
+        die("previous-attempt lookup failure must fail closed without posting")
+
+    # Reject invalid attempt values before arithmetic or an API request. This
+    # keeps malformed event data out of Bash's arithmetic evaluator.
+    for attempt in ("1", "08", "not-a-number"):
+        proc, payload = run({
+            "WORKFLOW_NAME": triggers[0],
+            "CONCLUSION": "success", "RUN_ATTEMPT": attempt,
+        })
+        if proc.returncode == 0 or payload is not None or \
+                "requires run attempt 2 or later" not in proc.stdout + proc.stderr:
+            die("invalid successful rerun attempt %r must fail closed without posting"
+                % attempt)
+
+    # Unknown and missing conclusions cannot verify that an alert was opened.
+    for preceding in ("unknown", ""):
+        proc, payload = run({
+            "WORKFLOW_NAME": triggers[0],
+            "CONCLUSION": "success", "RUN_ATTEMPT": "2",
+            "GH_STUB_MODE": "previous",
+            "GH_PREVIOUS_CONCLUSION": preceding,
+        })
+        if proc.returncode == 0 or payload is not None or \
+                "unknown conclusion" not in proc.stdout + proc.stderr:
+            die("unrecognized preceding conclusion %r must fail closed without posting"
+                % preceding)
+
+    for preceding in ("timed_out", "cancelled"):
+        proc, payload = run({
+            "WORKFLOW_NAME": triggers[0], "CONCLUSION": "success",
+            "RUN_ATTEMPT": "2",
+            "GH_STUB_MODE": "previous", "GH_PREVIOUS_CONCLUSION": preceding,
+        })
+        if proc.returncode != 0 or payload is None:
+            die("successful rerun after %s must post a recovery; exit=%d "
+                "stdout=%r stderr=%r"
+                % (preceding, proc.returncode, proc.stdout, proc.stderr))
+        impact = json.loads(payload)["attachments"][0]["blocks"][-2]["text"]["text"]
+        if "Attempt 2 passed after attempt 1 concluded %s" % preceding not in impact:
+            die("successful rerun after %s rendered the wrong recovery impact"
+                % preceding)
+
+    # Pin the API lookup to RUN_ATTEMPT - 1. Attempt 2 returns a different
+    # result from attempt 1, so a hard-coded attempts/1 request cannot pass.
+    proc, payload = run({
+        "WORKFLOW_NAME": triggers[0], "CONCLUSION": "success",
+        "RUN_ATTEMPT": "3", "GH_STUB_MODE": "previous",
+        "GH_PREVIOUS_CONCLUSION": "failure",
+        "GH_PREVIOUS_CONCLUSION_ATTEMPT_2": "timed_out",
+    })
+    if proc.returncode != 0 or payload is None:
+        die("attempt 3 recovery must read attempt 2")
+    impact = json.loads(payload)["attachments"][0]["blocks"][-2]["text"]["text"]
+    if "Attempt 3 passed after attempt 2 concluded timed_out" not in impact:
+        die("attempt 3 recovery did not use attempt 2's conclusion")
+
+    # An empty commit message omits the optional block without changing the
+    # fixed ordering of impact and footer.
+    proc, payload = run({
+        "WORKFLOW_NAME": triggers[0], "COMMIT_MESSAGE": ""
+    })
+    if proc.returncode != 0 or payload is None:
+        die("step failed for empty commit message")
+    if len(json.loads(payload)["attachments"][0]["blocks"]) != 4:
+        die("empty commit message must omit its block")
+
+    # Backticks in a commit subject must not break the inline-code wrapper.
+    proc, payload = run({
+        "WORKFLOW_NAME": triggers[0], "COMMIT_MESSAGE": "fix: keep `code` readable"
+    })
+    if proc.returncode != 0 or payload is None:
+        die("step failed for commit message containing backticks")
+    commit_block = json.loads(payload)["attachments"][0]["blocks"][2]
+    if commit_block["text"]["text"] != "*Commit:* `fix: keep 'code' readable`":
+        die("commit-message backticks must be normalized inside mrkdwn code")
+
+    # --- 4. a missing webhook must fail loudly before any outcome lookup
+    for missing_case in (
+        {"WORKFLOW_NAME": triggers[0], "SLACK_WEBHOOK_URL": ""},
+        {
+            "WORKFLOW_NAME": triggers[0], "SLACK_WEBHOOK_URL": "",
+            "CONCLUSION": "success", "RUN_ATTEMPT": "2",
+            "GH_STUB_MODE": "must-not-run",
+        },
+    ):
+        proc, payload = run(missing_case)
+        if proc.returncode == 0 or payload is not None:
+            die("empty SLACK_WEBHOOK_URL must fail without posting")
+        if "SLACK_WEBHOOK_URL is required" not in proc.stdout + proc.stderr:
+            die("empty SLACK_WEBHOOK_URL must fail before outcome lookup")
+finally:
+    shutil.rmtree(tmp, ignore_errors=True)
+
+# --- authority warning: the compile half is version-dependent
+
+version = subprocess.run(
+    ["jq", "--version"], capture_output=True, text=True
+).stdout.strip()
+digits = re.search(r"(\d+)\.(\d+)", version)
+if digits and (int(digits.group(1)), int(digits.group(2))) >= (1, 8):
+    sys.stderr.write(
+        "warning: %s relaxed the object-construction grammar, so this run "
+        "cannot catch a jq <= 1.7 parse regression. Only CI (ubuntu-latest, "
+        "jq 1.7) enforces that half.\n"
+        "hint: to enforce it locally, run this script inside a jq 1.7 "
+        "container -- see the docker recipe in its header comment.\n"
+        % version
+    )
+
+print("main CI notification payload builds on %s for all %d triggers "
+      "(+ fallback, schedule, missing actor, every conclusion, recovery, and "
+      "successor lookup outcome); the list and the %d reachable workflows "
+      "agree in both directions; webhook guard fails loudly"
+      % (version, len(triggers), len(candidates)))
+EOF

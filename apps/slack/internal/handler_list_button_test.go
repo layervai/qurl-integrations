@@ -1,8 +1,10 @@
 package internal
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -418,6 +420,56 @@ func TestHandleBlockActions_UnknownActionIgnored(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 	if mintHits.Load() != 0 {
 		t.Errorf("mint reached for an unrecognized action (hits = %d)", mintHits.Load())
+	}
+}
+
+// TestHandleBlockActions_EnterPortalNoOp fences the Enter Portal URL button: a
+// click on a minted qURL's link button is acked 200 (Slack shows no error) and,
+// unlike an unrecognized button, is routed to an EXPLICIT no-op that does NOT
+// emit the "no recognized action" breadcrumb — the click opens the qURL in the
+// browser directly, so there is no server work, and keeping that Info log off the
+// primary CTA reserves it for a button genuinely rendered but never wired. The
+// mint is never reached.
+//
+// Reads the breadcrumb off the process-global slog default, so it swaps the
+// default to a buffer and restores it in cleanup. Safe from cross-test
+// interference: the test is non-parallel (newAdminTestHandler calls t.Setenv,
+// which makes a later t.Parallel panic), so Go runs it in the sequential phase
+// where no other test executes concurrently — the swap window can't overlap a
+// parallel test reading the default. Race-safe too: the no-op path is synchronous
+// (spawns no worker), so the buffer is only ever touched on this goroutine.
+func TestHandleBlockActions_EnterPortalNoOp(t *testing.T) {
+	var logBuf bytes.Buffer
+	prevDefault := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	t.Cleanup(func() { slog.SetDefault(prevDefault) })
+
+	ts := newAdminTestServers(t)
+	var mintHits atomic.Int32
+	ts.addCustomer("POST", mintByTestResourcePath, func(w http.ResponseWriter, _ *http.Request) {
+		mintHits.Add(1)
+		w.WriteHeader(http.StatusOK)
+	})
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	// A URL button carries no value; the empty value is irrelevant — the no-op
+	// branch matches on action_id and returns before reading it.
+	body := listCreateQurlBlockActionsBody(t, testAdminTeamID, testAdminUserID, "C_test", inv.responseU.URL, enterPortalActionID, "")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, newSignedRequest(t, pathSlackInteractions, body, body))
+
+	if w.Code != http.StatusOK || strings.TrimSpace(w.Body.String()) != "{}" {
+		t.Fatalf("Enter Portal ack = %d %q, want 200 and {}", w.Code, w.Body.String())
+	}
+	if strings.Contains(logBuf.String(), "no recognized action") {
+		t.Fatalf("Enter Portal click must not fire the unrecognized-action breadcrumb; logs=%q", logBuf.String())
+	}
+	// No async worker is started for the no-op; the brief wait gives a (buggy)
+	// one a chance to fire so the negative assertion bites.
+	time.Sleep(50 * time.Millisecond)
+	if mintHits.Load() != 0 {
+		t.Errorf("Enter Portal no-op must not reach the mint (hits = %d)", mintHits.Load())
 	}
 }
 

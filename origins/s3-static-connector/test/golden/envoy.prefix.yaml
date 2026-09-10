@@ -49,6 +49,17 @@ static_resources:
               - prefix: x-envoy
               - exact: x-amzn-trace-id
               - exact: x-request-id
+          # S3 can add new response headers and user-controlled x-amz-meta-*
+          # values. Strip the entire namespace before nginx can cache or serve
+          # it, rather than maintaining an incomplete exact-name denylist.
+          - name: envoy.filters.http.header_mutation
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.http.header_mutation.v3.HeaderMutation
+              mutations:
+                response_mutations:
+                - remove_on_match:
+                    key_matcher:
+                      prefix: x-amz-
           - name: envoy.filters.http.router
             typed_config:
               "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router

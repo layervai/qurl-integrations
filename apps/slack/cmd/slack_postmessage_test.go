@@ -22,6 +22,11 @@ func staticTokenLookup(token string) slackBotTokenLookup {
 	return func(context.Context, string) (string, error) { return token, nil }
 }
 
+// Keep httptest traffic off http.DefaultTransport. Server.Close calls
+// http.DefaultTransport.CloseIdleConnections, so parallel server cleanups can abort
+// another test's in-flight POST when a nil client selects the production default.
+// Every server-backed constructor in this package must receive its server's client.
+
 func TestSlackPostMessageFuncPostsThreadedPayload(t *testing.T) {
 	t.Parallel()
 	var gotAuth, gotUA, gotContentType string
@@ -41,7 +46,7 @@ func TestSlackPostMessageFuncPostsThreadedPayload(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	post := newSlackPostMessageFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "qurl-slack/test", srv.URL, nil)
+	post := newSlackPostMessageFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "qurl-slack/test", srv.URL, slackWebAPITestClient(srv))
 	if err := post(context.Background(), "T_test", "E_test", "C_chan", "1700000000.000100", "hello"); err != nil {
 		t.Fatalf("chat.postMessage: %v", err)
 	}
@@ -69,7 +74,7 @@ func TestSlackPostMessageFuncOmitsEmptyThreadTS(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	post := newSlackPostMessageFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "", srv.URL, nil)
+	post := newSlackPostMessageFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "", srv.URL, slackWebAPITestClient(srv))
 	if err := post(context.Background(), "T_test", "", "C_chan", "", "top-level reply"); err != nil {
 		t.Fatalf("chat.postMessage: %v", err)
 	}
@@ -90,7 +95,7 @@ func TestSlackPostMessageFuncUsesWorkspaceTokenLookup(t *testing.T) {
 	post := newSlackPostMessageFuncWithTokenLookup(func(_ context.Context, teamID string) (string, error) {
 		gotTeam = teamID
 		return "xoxb-workspace-token", nil
-	}, "qurl-slack/test", srv.URL, nil)
+	}, "qurl-slack/test", srv.URL, slackWebAPITestClient(srv))
 	if err := post(context.Background(), "T_lookup", "", "C_chan", "", "hi"); err != nil {
 		t.Fatalf("chat.postMessage: %v", err)
 	}
@@ -139,7 +144,7 @@ func TestSlackPostDMFuncOpensIMThenPostsWithGridFallback(t *testing.T) {
 			return "", auth.ErrSlackBotTokenNotConfigured
 		}
 		return "xoxb-enterprise-token", nil
-	}, "", srv.URL+"/conversations.open", srv.URL+"/chat.postMessage", nil)
+	}, "", srv.URL+"/conversations.open", srv.URL+"/chat.postMessage", slackWebAPITestClient(srv))
 	if err := postDM(context.Background(), testSlackTeamID, "E_org", "U_admin", "secret text"); err != nil {
 		t.Fatalf("PostDM: %v", err)
 	}
@@ -174,7 +179,7 @@ func TestSlackPostDMFuncMissingOpenScopeWrapsSentinel(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	postDM := newSlackPostDMFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "", srv.URL+"/conversations.open", srv.URL+"/chat.postMessage", nil)
+	postDM := newSlackPostDMFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "", srv.URL+"/conversations.open", srv.URL+"/chat.postMessage", slackWebAPITestClient(srv))
 	err := postDM(context.Background(), testSlackTeamID, "", "U_admin", "secret text")
 	if !errors.Is(err, internal.ErrSlackMissingScope) {
 		t.Fatalf("PostDM error = %v, want ErrSlackMissingScope", err)
@@ -202,7 +207,7 @@ func TestSlackPostMessageFuncGridFallback(t *testing.T) {
 				return "", auth.ErrSlackBotTokenNotConfigured
 			}
 			return "xoxb-enterprise-token", nil
-		}, "", srv.URL, nil)
+		}, "", srv.URL, slackWebAPITestClient(srv))
 		if err := post(context.Background(), testSlackTeamID, "E_org", "C_chan", "", "hi"); err != nil {
 			t.Fatalf("chat.postMessage: %v", err)
 		}
@@ -242,7 +247,7 @@ func TestSlackPostMessageFuncSurfacesSlackError(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	post := newSlackPostMessageFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "", srv.URL, nil)
+	post := newSlackPostMessageFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "", srv.URL, slackWebAPITestClient(srv))
 	err := post(context.Background(), "T_test", "", "C_gone", "", "hi")
 	if err == nil || !strings.Contains(err.Error(), "channel_not_found") {
 		t.Fatalf("error = %v, want channel_not_found", err)
@@ -256,7 +261,7 @@ func TestSlackPostMessageFuncWrapsMissingScope(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	post := newSlackPostMessageFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "", srv.URL, nil)
+	post := newSlackPostMessageFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "", srv.URL, slackWebAPITestClient(srv))
 	err := post(context.Background(), "T_test", "", "C_chan", "", "hi")
 	if !errors.Is(err, internal.ErrSlackMissingScope) {
 		t.Fatalf("error = %v, want missing-scope sentinel", err)
@@ -303,7 +308,7 @@ func TestSlackPostMessageFuncSurfacesRateLimit(t *testing.T) {
 			srv := httptest.NewServer(tc.handler)
 			t.Cleanup(srv.Close)
 
-			post := newSlackPostMessageFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "", srv.URL, nil)
+			post := newSlackPostMessageFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "", srv.URL, slackWebAPITestClient(srv))
 			err := post(context.Background(), "T_test", "", "C_chan", "", "hi")
 			if !errors.Is(err, internal.ErrSlackRateLimited) {
 				t.Fatalf("error = %v, want rate-limited sentinel", err)
@@ -325,7 +330,7 @@ func TestSlackPostMessageFuncRejectsOversizedResponse(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	post := newSlackPostMessageFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "", srv.URL, nil)
+	post := newSlackPostMessageFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "", srv.URL, slackWebAPITestClient(srv))
 	err := post(context.Background(), "T_test", "", "C_chan", "", "hi")
 	if err == nil || !strings.Contains(err.Error(), "exceeded") {
 		t.Fatalf("error = %v, want response-exceeded", err)
@@ -339,7 +344,7 @@ func TestSlackPostMessageFuncRejectsEmptyResponseBody(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	post := newSlackPostMessageFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "", srv.URL, nil)
+	post := newSlackPostMessageFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "", srv.URL, slackWebAPITestClient(srv))
 	err := post(context.Background(), "T_test", "", "C_chan", "", "hi")
 	if err == nil || !strings.Contains(err.Error(), "empty response body") {
 		t.Fatalf("error = %v, want empty response body", err)
@@ -354,7 +359,7 @@ func TestSlackPostMessageFuncSurfacesHTTPError(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	post := newSlackPostMessageFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "", srv.URL, nil)
+	post := newSlackPostMessageFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "", srv.URL, slackWebAPITestClient(srv))
 	err := post(context.Background(), "T_test", "", "C_chan", "", "hi")
 	if err == nil || !strings.Contains(err.Error(), "HTTP 500") {
 		t.Fatalf("error = %v, want HTTP 500", err)
@@ -370,7 +375,7 @@ func TestSlackPostMessageFuncLookupErrorSkipsRequest(t *testing.T) {
 
 	post := newSlackPostMessageFuncWithTokenLookup(func(context.Context, string) (string, error) {
 		return "", errors.New("lookup boom")
-	}, "", srv.URL, nil)
+	}, "", srv.URL, slackWebAPITestClient(srv))
 	err := post(context.Background(), "T_test", "", "C_chan", "", "hi")
 	if err == nil || !strings.Contains(err.Error(), "token lookup") {
 		t.Fatalf("error = %v, want token lookup failure", err)
@@ -384,7 +389,7 @@ func TestSlackPostMessageFuncRejectsEmptyToken(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	post := newSlackPostMessageFuncWithTokenLookup(staticTokenLookup("   "), "", srv.URL, nil)
+	post := newSlackPostMessageFuncWithTokenLookup(staticTokenLookup("   "), "", srv.URL, slackWebAPITestClient(srv))
 	err := post(context.Background(), "T_test", "", "C_chan", "", "hi")
 	if err == nil || !strings.Contains(err.Error(), "empty token") {
 		t.Fatalf("error = %v, want empty token", err)
@@ -400,7 +405,7 @@ func TestSlackPostMessageFuncDefaultsUserAgent(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	post := newSlackPostMessageFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "", srv.URL, nil)
+	post := newSlackPostMessageFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "", srv.URL, slackWebAPITestClient(srv))
 	if err := post(context.Background(), "T_test", "", "C_chan", "", "hi"); err != nil {
 		t.Fatalf("chat.postMessage: %v", err)
 	}
@@ -412,11 +417,13 @@ func TestSlackPostMessageFuncDefaultsUserAgent(t *testing.T) {
 func TestSlackPostMessageBlocksFuncPostsBlocksAndFallback(t *testing.T) {
 	t.Parallel()
 	var gotBody struct {
-		Channel  string           `json:"channel"`
-		ThreadTS string           `json:"thread_ts"`
-		Text     string           `json:"text"`
-		Blocks   []map[string]any `json:"blocks"`
-		Mrkdwn   *bool            `json:"mrkdwn"` // pointer: assert it was explicitly sent, not merely absent
+		Channel     string           `json:"channel"`
+		ThreadTS    string           `json:"thread_ts"`
+		Text        string           `json:"text"`
+		Blocks      []map[string]any `json:"blocks"`
+		Mrkdwn      *bool            `json:"mrkdwn"`       // pointer: assert it was explicitly sent, not merely absent
+		UnfurlLinks *bool            `json:"unfurl_links"` // pointer: assert explicit suppression, not merely absent
+		UnfurlMedia *bool            `json:"unfurl_media"`
 	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
@@ -426,7 +433,7 @@ func TestSlackPostMessageBlocksFuncPostsBlocksAndFallback(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	post := newSlackPostMessageBlocksFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "qurl-slack/test", srv.URL, nil)
+	post := newSlackPostMessageBlocksFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "qurl-slack/test", srv.URL, slackWebAPITestClient(srv))
 	blocks := []any{map[string]any{"type": "section", "text": map[string]any{"type": "plain_text", "text": "Revoke $x?"}}}
 	if err := post(context.Background(), "T1", "E1", "C_chan", "1700.0001", blocks, "Revoke $x? (fallback)"); err != nil {
 		t.Fatalf("postBlocks: %v", err)
@@ -445,6 +452,40 @@ func TestSlackPostMessageBlocksFuncPostsBlocksAndFallback(t *testing.T) {
 	if gotBody.Mrkdwn == nil || *gotBody.Mrkdwn {
 		t.Fatalf("mrkdwn = %v, want explicit false (literal fallback)", gotBody.Mrkdwn)
 	}
+	// Defense-in-depth: unfurl_links/unfurl_media must be explicitly false so a raw
+	// one-time URL in the fallback (the PostDMBlocks Enter Portal path) can't be
+	// brushed by a background unfurl fetch.
+	if gotBody.UnfurlLinks == nil || *gotBody.UnfurlLinks {
+		t.Fatalf("unfurl_links = %v, want explicit false", gotBody.UnfurlLinks)
+	}
+	if gotBody.UnfurlMedia == nil || *gotBody.UnfurlMedia {
+		t.Fatalf("unfurl_media = %v, want explicit false", gotBody.UnfurlMedia)
+	}
+}
+
+func TestSlackAgentStreamStopPostsFeedbackBlocks(t *testing.T) {
+	t.Parallel()
+	var gotBody struct {
+		Channel string           `json:"channel"`
+		TS      string           `json:"ts"`
+		Blocks  []map[string]any `json:"blocks"`
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatalf("decode stop body: %v", err)
+		}
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	port := newSlackAgentStreamPortWithTokenLookup(staticTokenLookup("xoxb-test"), "qurl-slack/test", srv.URL, srv.URL, srv.URL, slackWebAPITestClient(srv))
+	blocks := []any{map[string]any{"type": "context_actions"}}
+	if err := port.StopStream(context.Background(), "T1", "", "C1", "1700.01", blocks); err != nil {
+		t.Fatalf("stop stream: %v", err)
+	}
+	if gotBody.Channel != "C1" || gotBody.TS != "1700.01" || len(gotBody.Blocks) != 1 || gotBody.Blocks[0]["type"] != "context_actions" {
+		t.Fatalf("stop body = %+v, want channel/ts/feedback block", gotBody)
+	}
 }
 
 func TestSlackPostMessageBlocksFuncGridFallback(t *testing.T) {
@@ -462,7 +503,7 @@ func TestSlackPostMessageBlocksFuncGridFallback(t *testing.T) {
 			return "", auth.ErrSlackBotTokenNotConfigured
 		}
 		return "xoxb-enterprise", nil
-	}, "", srv.URL, nil)
+	}, "", srv.URL, slackWebAPITestClient(srv))
 	if err := post(context.Background(), "T1", "E1", "C_chan", "", []any{}, "x"); err != nil {
 		t.Fatalf("postBlocks: %v", err)
 	}
@@ -477,10 +518,119 @@ func TestSlackPostMessageBlocksFuncSurfacesSlackError(t *testing.T) {
 		_, _ = w.Write([]byte(`{"ok":false,"error":"channel_not_found"}`))
 	}))
 	t.Cleanup(srv.Close)
-	post := newSlackPostMessageBlocksFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "", srv.URL, nil)
+	post := newSlackPostMessageBlocksFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "", srv.URL, slackWebAPITestClient(srv))
 	err := post(context.Background(), "T1", "", "C_gone", "", []any{}, "x")
 	if err == nil || !strings.Contains(err.Error(), "channel_not_found") {
 		t.Fatalf("error = %v, want channel_not_found", err)
+	}
+}
+
+// Shared literals for the Block Kit seam tests, kept as consts so goconst's
+// repeated-string counter stays quiet once the new seam tests reuse them.
+const (
+	pathConversationsOpen = "/conversations.open"
+	pathChatPostMessage   = "/chat.postMessage"
+	blockTypeSection      = "section"
+)
+
+// TestSlackPostDMBlocksFuncOpensIMThenPostsBlocks pins the DM Block Kit seam's
+// two-hop: conversations.open → extract the opened channel id → post the blocks
+// via the shared chat.postMessage block poster (so the `dm:true` Enter Portal
+// button lands in the user's DM). Also confirms the shared poster's
+// defense-in-depth (mrkdwn:false, unfurl_links:false) carries through this path.
+func TestSlackPostDMBlocksFuncOpensIMThenPostsBlocks(t *testing.T) {
+	t.Parallel()
+	var openBody struct {
+		Users string `json:"users"`
+	}
+	var postBody struct {
+		Channel     string           `json:"channel"`
+		ThreadTS    string           `json:"thread_ts"`
+		Text        string           `json:"text"`
+		Blocks      []map[string]any `json:"blocks"`
+		Mrkdwn      *bool            `json:"mrkdwn"`
+		UnfurlLinks *bool            `json:"unfurl_links"`
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case pathConversationsOpen:
+			if err := json.NewDecoder(r.Body).Decode(&openBody); err != nil {
+				t.Fatalf("decode open body: %v", err)
+			}
+			_, _ = w.Write([]byte(`{"ok":true,"channel":{"id":"D_dm"}}`))
+		case pathChatPostMessage:
+			if err := json.NewDecoder(r.Body).Decode(&postBody); err != nil {
+				t.Fatalf("decode post body: %v", err)
+			}
+			_, _ = w.Write([]byte(`{"ok":true}`))
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	post := newSlackPostDMBlocksFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "qurl-slack/test", srv.URL+pathConversationsOpen, srv.URL+pathChatPostMessage, slackWebAPITestClient(srv))
+	blocks := []any{map[string]any{"type": blockTypeSection, "text": map[string]any{"type": "mrkdwn", "text": "portal"}}}
+	if err := post(context.Background(), testSlackTeamID, "E_org", "U_dm", blocks, "dm blocks fallback"); err != nil {
+		t.Fatalf("PostDMBlocks: %v", err)
+	}
+	// conversations.open targets the user; the post goes to the opened DM channel.
+	if openBody.Users != "U_dm" {
+		t.Fatalf("open body = %+v, want the Slack user", openBody)
+	}
+	if postBody.Channel != "D_dm" || postBody.Text != "dm blocks fallback" {
+		t.Fatalf("post body channel/text = %+v, want opened DM channel + fallback", postBody)
+	}
+	if len(postBody.Blocks) != 1 || postBody.Blocks[0]["type"] != blockTypeSection {
+		t.Fatalf("blocks = %+v, want one section block", postBody.Blocks)
+	}
+	// Inherited from the shared chat.postMessage block seam: the one-time URL in the
+	// fallback can't render as markup or be unfurled.
+	if postBody.Mrkdwn == nil || *postBody.Mrkdwn {
+		t.Fatalf("mrkdwn = %v, want explicit false", postBody.Mrkdwn)
+	}
+	if postBody.UnfurlLinks == nil || *postBody.UnfurlLinks {
+		t.Fatalf("unfurl_links = %v, want explicit false", postBody.UnfurlLinks)
+	}
+}
+
+// TestSlackPostEphemeralBlocksFuncPostsBlocksAndFallback pins the channel Block
+// Kit ephemeral seam's body shape: channel/user/thread routing plus the blocks +
+// fallback text with mrkdwn explicitly false.
+func TestSlackPostEphemeralBlocksFuncPostsBlocksAndFallback(t *testing.T) {
+	t.Parallel()
+	var gotBody struct {
+		Channel  string           `json:"channel"`
+		User     string           `json:"user"`
+		ThreadTS string           `json:"thread_ts"`
+		Text     string           `json:"text"`
+		Blocks   []map[string]any `json:"blocks"`
+		Mrkdwn   *bool            `json:"mrkdwn"`
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	post := newSlackPostEphemeralBlocksFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "qurl-slack/test", srv.URL, slackWebAPITestClient(srv))
+	blocks := []any{map[string]any{"type": blockTypeSection, "text": map[string]any{"type": "mrkdwn", "text": "portal"}}}
+	if err := post(context.Background(), testSlackTeamID, "E1", mdTestChannel, "1700.0005", "U_eph", blocks, "eph blocks fallback"); err != nil {
+		t.Fatalf("PostEphemeralBlocks: %v", err)
+	}
+	if gotBody.Channel != mdTestChannel || gotBody.User != "U_eph" || gotBody.ThreadTS != "1700.0005" {
+		t.Fatalf("body channel/user/thread = %+v", gotBody)
+	}
+	if gotBody.Text != "eph blocks fallback" {
+		t.Fatalf("fallback text = %q, want the fallback", gotBody.Text)
+	}
+	if len(gotBody.Blocks) != 1 || gotBody.Blocks[0]["type"] != blockTypeSection {
+		t.Fatalf("blocks = %+v, want one section block", gotBody.Blocks)
+	}
+	if gotBody.Mrkdwn == nil || *gotBody.Mrkdwn {
+		t.Fatalf("mrkdwn = %v, want explicit false (literal fallback)", gotBody.Mrkdwn)
 	}
 }
 
@@ -512,7 +662,7 @@ func TestSlackPostMarkdownMessageFuncPostsMarkdownBlockAndFallback(t *testing.T)
 	}))
 	t.Cleanup(srv.Close)
 
-	post := newSlackPostMarkdownMessageFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "qurl-slack/test", srv.URL, nil)
+	post := newSlackPostMarkdownMessageFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "qurl-slack/test", srv.URL, slackWebAPITestClient(srv))
 	if err := post(context.Background(), "T_test", "E_test", mdTestChannel, "1700000000.000100", "Use **bold** and `code`"); err != nil {
 		t.Fatalf("chat.postMessage markdown_text: %v", err)
 	}
@@ -551,7 +701,7 @@ func TestSlackPostMarkdownMessageFuncHardensMarkdownBlockDefenseInDepth(t *testi
 	}))
 	t.Cleanup(srv.Close)
 
-	post := newSlackPostMarkdownMessageFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "", srv.URL, nil)
+	post := newSlackPostMarkdownMessageFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "", srv.URL, slackWebAPITestClient(srv))
 	in := "Use [billing](https://phish.example/login) or <https://phish.example/admin|admin portal>."
 	want := "Use billing (https://phish.example/login) or admin portal (https://phish.example/admin)."
 	if err := post(context.Background(), "T_test", "", mdTestChannel, "", in); err != nil {
@@ -608,7 +758,7 @@ func TestSlackPostMarkdownMessageFuncOmitsEmptyThreadTS(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	post := newSlackPostMarkdownMessageFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "", srv.URL, nil)
+	post := newSlackPostMarkdownMessageFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "", srv.URL, slackWebAPITestClient(srv))
 	if err := post(context.Background(), "T_test", "", mdTestChannel, "", "top-level **answer**"); err != nil {
 		t.Fatalf("chat.postMessage markdown_text: %v", err)
 	}
@@ -634,7 +784,7 @@ func TestSlackPostMarkdownMessageFuncFallsBackToMarkdownTextWhenBlocksRejected(t
 			}))
 			t.Cleanup(srv.Close)
 
-			post := newSlackPostMarkdownMessageFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "", srv.URL, nil)
+			post := newSlackPostMarkdownMessageFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "", srv.URL, slackWebAPITestClient(srv))
 			if err := post(context.Background(), "T_test", "", mdTestChannel, "1700000000.000100", "Use **bold**"); err != nil {
 				t.Fatalf("chat.postMessage markdown fallback: %v", err)
 			}
@@ -673,7 +823,7 @@ func TestSlackPostMarkdownMessageFuncMarkdownTextRetryHardensSlackMrkdwnLinkText
 	}))
 	t.Cleanup(srv.Close)
 
-	post := newSlackPostMarkdownMessageFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "", srv.URL, nil)
+	post := newSlackPostMarkdownMessageFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "", srv.URL, slackWebAPITestClient(srv))
 	const answer = "Literal <https://evil.example|safe label>"
 	if err := post(context.Background(), "T_test", "", mdTestChannel, "", answer); err != nil {
 		t.Fatalf("chat.postMessage markdown fallback: %v", err)
@@ -697,7 +847,7 @@ func TestSlackPostMarkdownMessageFuncSurfacesMarkdownTextRetryError(t *testing.T
 	}))
 	t.Cleanup(srv.Close)
 
-	post := newSlackPostMarkdownMessageFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "", srv.URL, nil)
+	post := newSlackPostMarkdownMessageFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "", srv.URL, slackWebAPITestClient(srv))
 	err := post(context.Background(), "T_test", "", mdTestChannel, "", "Use **bold**")
 	if err == nil || !strings.Contains(err.Error(), "channel_not_found") {
 		t.Fatalf("error = %v, want markdown_text retry failure", err)
@@ -739,7 +889,7 @@ func TestSlackPostEphemeralFuncPostsScopedThreadedPayload(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	post := newSlackPostEphemeralFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "qurl-slack/test", srv.URL, nil)
+	post := newSlackPostEphemeralFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "qurl-slack/test", srv.URL, slackWebAPITestClient(srv))
 	if err := post(context.Background(), "T1", "E1", mdTestChannel, "1700.0001", "U_clicker", "your link"); err != nil {
 		t.Fatalf("chat.postEphemeral: %v", err)
 	}
@@ -758,7 +908,7 @@ func TestSlackPostEphemeralFuncOmitsEmptyThreadTS(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	post := newSlackPostEphemeralFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "", srv.URL, nil)
+	post := newSlackPostEphemeralFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "", srv.URL, slackWebAPITestClient(srv))
 	if err := post(context.Background(), "T1", "", mdTestChannel, "", "U_clicker", "top-level"); err != nil {
 		t.Fatalf("chat.postEphemeral: %v", err)
 	}
@@ -776,7 +926,7 @@ func TestSlackPostEphemeralFuncSurfacesSlackError(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	post := newSlackPostEphemeralFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "", srv.URL, nil)
+	post := newSlackPostEphemeralFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "", srv.URL, slackWebAPITestClient(srv))
 	err := post(context.Background(), "T1", "", mdTestChannel, "", "U_clicker", "x")
 	if err == nil || !strings.Contains(err.Error(), "user_not_in_channel") {
 		t.Fatalf("error = %v, want user_not_in_channel surfaced", err)

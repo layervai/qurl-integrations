@@ -37,11 +37,14 @@ import (
 
 const (
 	listenAddr                    = ":8080"
-	envQURLConnectorImage         = "QURL_CONNECTOR_IMAGE"
-	envQURLConnectorImageFallback = "QURL_CONNECTOR_IMAGE_FALLBACK"
+	envQURLConnectorImage         = "QURL_IMAGE"
+	envQURLConnectorImageFallback = "QURL_IMAGE_FALLBACK"
+	envQURLS3OriginImage          = "QURL_S3_ORIGIN_IMAGE"
 	envQURLBindingTTLContract     = "QURL_BINDING_IDEMPOTENCY_TTL_CONTRACT"
 	envQURLAPIKeyMintTTLContract  = "QURL_API_KEY_MINT_IDEMPOTENCY_TTL_CONTRACT"
 	envSlackRateLimitEnabled      = "QURL_SLACK_RATE_LIMIT_ENABLED"
+	envAuth0ExpectedAudience      = "AUTH0_EXPECTED_AUDIENCE"
+	envSlackBotTokenRotation      = "QURL_SLACK_BOT_TOKEN_ROTATION_ENABLED"
 	connectorImageFallbackSandbox = "dev-sandbox"
 	connectorImageFallbackOptIn   = envQURLConnectorImageFallback + "=" + connectorImageFallbackSandbox
 	connectorImageFallbackHint    = "dev/sandbox fallback requires leaving " + envQURLConnectorImage + " empty and setting " + connectorImageFallbackOptIn
@@ -119,11 +122,14 @@ const (
 var version = "dev"
 
 func newAppLogger(w io.Writer) *slog.Logger {
-	// JSON handler is load-bearing for log-injection safety and operational log
-	// metrics: the G706 gosec suppressions in apps/slack/internal/handler.go
-	// assume slog's JSON output escapes control characters in tainted attribute
-	// values, and alert filters match the JSON "msg" field. Don't swap to
-	// TextHandler without revisiting those sites.
+	// JSON handler is load-bearing for operational log metrics: alert filters
+	// match the JSON "msg" field. It is not, on its own, what makes the attribute
+	// values safe — apps/slack/internal/handler.go logs request-controlled values
+	// such as r.URL.Path as slog attributes, and both stdlib handlers escape
+	// control characters in attribute values (gosec v2.26.1 scopes its G706 check
+	// to args[0] for exactly that reason). The message is the part TextHandler
+	// would write verbatim. Don't swap to TextHandler without revisiting those
+	// sites.
 	// Redaction mirrors Discord: matched keys blank string/byte values, while
 	// containers under matched keys are walked by their inner field names.
 	return slog.New(observability.NewRedactingJSONHandler(w, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -162,9 +168,10 @@ func run() error {
 	// Required env vars are explicit by design: a missing QURL_ENDPOINT
 	// previously fell back to the sandbox URL, which is the kind of silent
 	// misconfiguration that ships a prod deploy at sandbox.
-	qurlEndpoint := os.Getenv("QURL_ENDPOINT")
-	if qurlEndpoint == "" {
-		return errors.New("QURL_ENDPOINT is required")
+	rawQURLEndpoint := os.Getenv("QURL_ENDPOINT")
+	qurlEndpoint, connectorAPIURL, err := connectorAPIURLFromEndpoint(rawQURLEndpoint)
+	if err != nil {
+		return err
 	}
 
 	slackSigningSecret := os.Getenv("SLACK_SIGNING_SECRET")
@@ -174,6 +181,10 @@ func run() error {
 	// Validate the customer-rendered connector image before infra clients so
 	// manifest mistakes fail with the image-specific startup error.
 	tunnelImage, err := readTunnelImageConfig()
+	if err != nil {
+		return err
+	}
+	s3OriginImage, err := readS3OriginImageConfig()
 	if err != nil {
 		return err
 	}
@@ -206,7 +217,8 @@ func run() error {
 	}
 	workspaceTokenLookup, invalidateWorkspaceSlackToken := newWorkspaceSlackTokenLookupWithInvalidation(ddbProvider, slackBotToken, slackWorkspaceTokenCacheTTL, time.Now)
 	openView := newSlackOpenViewFuncWithTokenLookup(workspaceTokenLookup, userAgent, slackViewsOpenURL, nil)
-	slog.Info("Slack views.open wired with per-workspace token lookup", "legacy_fallback_enabled", slackBotToken != "") // #nosec G706 -- only a boolean derived from token presence is logged; the token value is never logged.
+	slackUserLookup := newSlackUserLookupFuncWithTokenLookup(workspaceTokenLookup, userAgent, slackUsersInfoURL, nil)
+	slog.Info("Slack views.open wired with per-workspace token lookup", "legacy_fallback_enabled", slackBotToken != "")
 
 	postFeedback := buildPostFeedback(userAgent)
 
@@ -218,7 +230,7 @@ func run() error {
 	// the slash-command modals.
 	postMessage := newSlackPostMessageFuncWithTokenLookup(workspaceTokenLookup, userAgent, slackChatPostMessageURL, nil)
 	// DM seam for secret-bearing user deliveries (`/qurl get dm:true` and qURL
-	// Connector bootstrap keys). Same token lookup + Grid fallback as channel posts.
+	// Connector enrollment tokens). Same token lookup + Grid fallback as channel posts.
 	postDM := newSlackPostDMFuncWithTokenLookup(workspaceTokenLookup, userAgent, slackConversationsOpenURL, slackChatPostMessageURL, nil)
 	// chat.postEphemeral seam: delivers a get's one-time link privately in a channel as a
 	// standalone ephemeral (the response_url ephemeral collides with the card-replace).
@@ -227,6 +239,16 @@ func run() error {
 	// renders like the streaming pane while still carrying a fallback.
 	postMarkdownMessage := newSlackPostMarkdownMessageFuncWithTokenLookup(workspaceTokenLookup, userAgent, slackChatPostMessageURL, nil)
 	postMessageBlocks := newSlackPostMessageBlocksFuncWithTokenLookup(workspaceTokenLookup, userAgent, slackChatPostMessageURL, nil)
+	// Block Kit DM + ephemeral seams: deliver a minted `/qurl get` (dm:true) or
+	// agent-confirm channel link as an "Enter Portal" URL button rather than a raw
+	// hyperlink. Same token lookup + Grid fallback as their text siblings above.
+	// PostEphemeralBlocks is effectively REQUIRED when agent-confirm is on: a confirmed
+	// channel get commits to it with no text fallback (deliverConfirmEphemeral), so an
+	// unwired seam fails channel get approvals AFTER the mint is burned — logConfirmModeState
+	// warns loudly at boot. PostDMBlocks is only for `/qurl get dm:true`, which is refused
+	// pre-mint when it's nil (getWork), so that path degrades gracefully.
+	postDMBlocks := newSlackPostDMBlocksFuncWithTokenLookup(workspaceTokenLookup, userAgent, slackConversationsOpenURL, slackChatPostMessageURL, nil)
+	postEphemeralBlocks := newSlackPostEphemeralBlocksFuncWithTokenLookup(workspaceTokenLookup, userAgent, slackChatPostEphemeralURL, nil)
 	// reactions.add/remove seam for the agent's best-effort "working on it" ack. Always
 	// wired (same token lookup as the post seams); inert until the agent surface is live
 	// and needs the reactions:write scope in the Slack manifest to actually land.
@@ -234,6 +256,9 @@ func run() error {
 	// conversations.info metadata seam for surface-specific confirm decisions (notably
 	// refusing group-DM get links before minting until mpim delivery is proven safe).
 	agentResolveConversationInfo := newSlackResolveConversationInfoFuncWithTokenLookup(workspaceTokenLookup, userAgent, slackConversationsInfoURL, nil)
+	// conversations.replies seam for zero-copy agent continuity. Recent thread
+	// context is read from Slack for each turn and is never stored by LayerV.
+	agentThreadHistory := newSlackAgentThreadHistoryFuncWithTokenLookup(workspaceTokenLookup, userAgent, slackConversationsRepliesURL, nil)
 	// Channel-name projection so the agent's system prompt can render "#general
 	// (C123)". Shares the same conversations.info closure as the confirm surface
 	// classifier; degrades to the bare channel id until the relevant
@@ -264,6 +289,14 @@ func run() error {
 	agentConfirmEnabled := readAgentConfirmEnabled()
 	agentChannelFollowups := readAgentChannelFollowups()
 	agentSurfaceExclusiveAcks := readAgentSurfaceExclusiveAcks()
+	slackBotTokenRotationEnabled, err := readSlackBotTokenRotationEnabled()
+	if err != nil {
+		return err
+	}
+	slog.Info("Slack bot-token revoke handling configured",
+		"slack_bot_token_rotation_enabled", slackBotTokenRotationEnabled,
+		"tokens_revoked_bot_token_triggers_workspace_purge", !slackBotTokenRotationEnabled,
+	)
 	// Per-workspace toggle default: false during the staged opt-in rollout, flipped
 	// true at GA (every workspace on unless it explicitly opted out). Fail-safe to
 	// false. The per-workspace flag itself lives in workspace_mappings (AdminStore).
@@ -291,7 +324,8 @@ func run() error {
 		storeWired:            agentStore != nil,
 		postWired:             postMessage != nil,
 		blocksWired:           postMessageBlocks != nil,
-		assistantThreadsWired: agentAssistantThreads != nil,
+		ephemeralBlocksWired:  postEphemeralBlocks != nil,
+		assistantThreadsWired: true,
 		confirmFlag:           agentConfirmEnabled,
 		exclusiveAcksFlag:     agentSurfaceExclusiveAcks,
 		killed:                agentDisabled,
@@ -310,13 +344,17 @@ func run() error {
 	handler := internal.NewHandler(internal.Config{
 		AuthProvider:                   authProvider,
 		SlackSigningSecret:             slackSigningSecret,
+		SlackBotTokenRotationEnabled:   slackBotTokenRotationEnabled,
 		BaseContext:                    handlerCtx,
 		MaxConcurrentAsync:             maxConcurrentAsync,
 		MaxConcurrentFollowupAsync:     maxConcurrentFollowupAsync,
 		MaxConcurrentFollowupGateAsync: maxConcurrentFollowupGateAsync,
 		AdminStore:                     adminStore,
+		SlackUserLookup:                slackUserLookup,
 		OpenView:                       openView,
 		TunnelImage:                    tunnelImage,
+		S3OriginImage:                  s3OriginImage,
+		ConnectorAPIURL:                connectorAPIURL,
 		PostFeedback:                   postFeedback,
 		NewClient: func(apiKey string) *client.Client {
 			return client.New(qurlEndpoint, apiKey,
@@ -330,12 +368,15 @@ func run() error {
 		},
 		AgentLLM:                    agentLLM,
 		AgentStore:                  agentStore,
+		AgentThreadHistory:          agentThreadHistory,
 		PostDM:                      postDM,
 		PostMessage:                 postMessage,
 		PostEphemeral:               postEphemeral,
 		PostMarkdownMessage:         postMarkdownMessage,
 		AgentDisabled:               agentDisabled,
 		PostMessageBlocks:           postMessageBlocks,
+		PostDMBlocks:                postDMBlocks,
+		PostEphemeralBlocks:         postEphemeralBlocks,
 		AgentConfirmEnabled:         agentConfirmEnabled,
 		AgentChannelFollowups:       agentChannelFollowups,
 		AgentSurfaceExclusiveAcks:   agentSurfaceExclusiveAcks,
@@ -370,54 +411,8 @@ func run() error {
 	// Route the callback's fire-and-forget goroutines through handler.wg
 	// so they fall inside the same shutdown drain budget as the
 	// slash-command async workers.
-	var oauthAdminStore oauth.AdminStore
-	if adminStore != nil {
-		oauthAdminStore = &adminStoreAdapter{store: adminStore}
-	}
-	oauthCfg, ok, err := buildOAuthConfig(shutdownSignals.ctx, ddbProvider, handler, oauthAdminStore)
-	if err != nil {
-		return fmt.Errorf("OAuth config: %w", err)
-	}
-	if ok {
-		oauth.RegisterRoutes(rootMux, oauthCfg)
-		slog.Info("registered /oauth/qurl/{start,callback} routes")
-		handler.SetOAuthSetup(oauth.SetupConfig{
-			StateSecret:  oauthCfg.OAuthStateSecret,
-			SlackBaseURL: oauthCfg.SlackBaseURL,
-		})
-		// Operator reminder: /qurl-admin carries the admin verbs (tunnel
-		// install, set-alias, admin add/remove/list/revoke). It must be
-		// registered in the Slack app config pointing at the same request
-		// URL as /qurl — or those verbs never arrive. Admin enforcement is
-		// in-code: every admin verb runs requireAdminSync against the qURL
-		// admin set (admin_slack_user_ids), so the AdminStore must be
-		// wired. The "admins only" restriction on the /qurl-admin
-		// registration is a cosmetic Slack-picker hint, NOT the
-		// enforcement boundary — Slack does not gate slash-command
-		// invocation on workspace-admin role. /qurl setup is NOT on
-		// /qurl-admin and is intentionally open to any workspace member so
-		// the first claimant of an unbound workspace can reach it
-		// (first-come-claims). Setup re-runs are still owner-only, enforced
-		// in code in handleSetup via AdminStore, with the OAuth-callback
-		// BindWorkspace check as the structural backstop. The remaining
-		// exposure is the first-install claim: restrict who can reach the
-		// command at install time (Slack app manifest / onboarding) if
-		// first-claim ownership matters for this deployment.
-		slog.Info("CONFIGURATION REMINDER: register /qurl-admin in the Slack app config at the same request URL as /qurl (or admin verbs never arrive) and wire the AdminStore — admin enforcement is the in-code requireAdminSync gate, not the manifest 'admin-only' label, which Slack does not enforce for slash commands. Do NOT restrict /qurl to admins: /qurl setup is intentionally open (first-come-claims) so the first claimant can reach it — though setup re-runs are owner-only (enforced in code) — and an admin-only /qurl would lock out the first claimant of an unbound workspace")
-	}
-	// Else: buildOAuthConfig already logged the specific missing-var
-	// list; nothing more to say here.
-	slackInstallCfg, ok, err := buildSlackInstallConfig(ddbProvider)
-	if err != nil {
-		return fmt.Errorf("slack install config: %w", err)
-	}
-	if ok {
-		handler.SetSlackInstallURL(strings.TrimRight(slackInstallCfg.SlackBaseURL, "/") + slackinstall.InstallPath)
-		slackInstallCfg.OnTokenStored = invalidateWorkspaceSlackToken
-		if err := slackinstall.RegisterRoutes(rootMux, &slackInstallCfg); err != nil {
-			return fmt.Errorf("slack install routes: %w", err)
-		}
-		slog.Info("registered /oauth/slack/{install,callback} routes")
+	if err := registerOptionalSetupRoutes(shutdownSignals.ctx, rootMux, ddbProvider, handler, adminStore, invalidateWorkspaceSlackToken); err != nil {
+		return err
 	}
 
 	srv := &http.Server{
@@ -492,6 +487,97 @@ func run() error {
 	}
 	slog.Info("server stopped cleanly")
 	return nil
+}
+
+func registerOptionalSetupRoutes(ctx context.Context, rootMux *http.ServeMux, provider *auth.DDBProvider, handler *internal.Handler, adminStore *slackdata.Store, invalidateWorkspaceSlackToken func(string)) error {
+	var oauthAdminStore oauth.AdminStore
+	if adminStore != nil {
+		oauthAdminStore = internal.NewOAuthAdminStoreAdapter(adminStore)
+	}
+	oauthCfg, ok, err := buildOAuthConfig(ctx, provider, handler, oauthAdminStore)
+	if err != nil {
+		return fmt.Errorf("OAuth config: %w", err)
+	}
+	if ok {
+		oauth.RegisterRoutes(rootMux, oauthCfg)
+		slog.Info("registered /oauth/qurl/{start,callback} routes")
+		handler.SetOAuthSetup(oauth.SetupConfig{
+			SlackBaseURL: oauthCfg.SlackBaseURL,
+			StateStore:   oauthCfg.StateStore,
+		})
+		// Operator reminder: /qurl-admin carries the admin verbs (tunnel
+		// install, set-alias, admin add/remove/list/revoke). It must be
+		// registered in the Slack app config pointing at the same request
+		// URL as /qurl — or those verbs never arrive. Admin enforcement is
+		// in-code: every admin verb runs requireAdminSync against the qURL
+		// admin set (admin_slack_user_ids), so the AdminStore must be
+		// wired. The "admins only" restriction on the /qurl-admin
+		// registration is a cosmetic Slack-picker hint, NOT the
+		// enforcement boundary — Slack does not gate slash-command
+		// invocation on workspace-admin role. /qurl setup is NOT on
+		// /qurl-admin and is intentionally open to any workspace member so
+		// the first claimant of an unbound workspace can reach it
+		// (first-come-claims). Setup re-runs are still owner-only, enforced
+		// in code in handleSetup via AdminStore, with the OAuth-callback
+		// BindWorkspace check as the structural backstop. The remaining
+		// exposure is the first-install claim: restrict who can reach the
+		// command at install time (Slack app manifest / onboarding) if
+		// first-claim ownership matters for this deployment.
+		slog.Info("CONFIGURATION REMINDER: register /qurl-admin in the Slack app config at the same request URL as /qurl (or admin verbs never arrive) and wire the AdminStore — admin enforcement is the in-code requireAdminSync gate, not the manifest 'admin-only' label, which Slack does not enforce for slash commands. Do NOT restrict /qurl to admins: /qurl setup is intentionally open (first-come-claims) so the first claimant can reach it — though setup re-runs are owner-only (enforced in code) — and an admin-only /qurl would lock out the first claimant of an unbound workspace")
+	}
+	// Else: buildOAuthConfig already logged the specific missing-var
+	// list; nothing more to say here.
+	slackInstallCfg, ok, err := buildSlackInstallConfig(provider)
+	if err != nil {
+		return fmt.Errorf("slack install config: %w", err)
+	}
+	if !ok {
+		return nil
+	}
+	handler.SetSlackInstallURL(strings.TrimRight(slackInstallCfg.SlackBaseURL, "/") + slackinstall.InstallPath)
+	slackInstallCfg.OnTokenStored = invalidateWorkspaceSlackToken
+	if err := slackinstall.RegisterRoutes(rootMux, &slackInstallCfg); err != nil {
+		return fmt.Errorf("slack install routes: %w", err)
+	}
+	slog.Info("registered /oauth/slack/{install,callback} routes")
+	return nil
+}
+
+func connectorAPIURLFromEndpoint(raw string) (endpoint, apiURL string, err error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return "", "", errors.New("QURL_ENDPOINT is required")
+	}
+	endpoint = strings.TrimRight(trimmed, "/")
+	if endpoint == "" {
+		return "", "", errors.New("QURL_ENDPOINT must be an absolute URL origin")
+	}
+	// These pre-checks add operator-specific messages. ValidateConnectorAPIURL
+	// remains the canonical security and endpoint-shape validator.
+	if parsed, parseErr := url.Parse(endpoint); parseErr == nil && parsed.IsAbs() && parsed.Host != "" {
+		if parsed.User != nil {
+			return "", "", errors.New("QURL_ENDPOINT must not include credentials")
+		}
+		if parsed.RawQuery != "" {
+			return "", "", errors.New("QURL_ENDPOINT must not include a query")
+		}
+		if parsed.Fragment != "" {
+			return "", "", errors.New("QURL_ENDPOINT must not include a fragment")
+		}
+		// Give the common already-versioned value a migration-specific error;
+		// every other non-empty path is rejected by the general shape check.
+		if strings.EqualFold(strings.Trim(parsed.Path, "/"), "v1") {
+			return "", "", errors.New("QURL_ENDPOINT must omit the /v1 API suffix")
+		}
+		if parsed.Path != "" {
+			return "", "", errors.New("QURL_ENDPOINT must not include a path")
+		}
+	}
+	apiURL = endpoint + "/v1"
+	if validateErr := internal.ValidateConnectorAPIURL(apiURL); validateErr != nil {
+		return "", "", fmt.Errorf("QURL_ENDPOINT is invalid: %w", validateErr)
+	}
+	return endpoint, apiURL, nil
 }
 
 func lameduckForSignal(sig os.Signal) time.Duration {
@@ -846,7 +932,7 @@ func missingOAuthEnvVars(vals map[string]string) []string {
 	// Stable order so the slog attribute is diff-friendly across runs.
 	keys := []string{
 		"AUTH0_DOMAIN", "AUTH0_CLIENT_ID", "AUTH0_CLIENT_SECRET",
-		"AUTH0_AUDIENCE", "SLACK_BASE_URL", "OAUTH_STATE_SECRET", "QURL_ENDPOINT",
+		"AUTH0_AUDIENCE", envSlackBaseURL, "OAUTH_STATE_SECRET", "QURL_ENDPOINT",
 	}
 	var missing []string
 	for _, k := range keys {
@@ -863,17 +949,42 @@ func missingOAuthEnvVars(vals map[string]string) []string {
 // degraded silently into a fail-fast startup error.
 var errOAuthStateSecretTooShort = errors.New("OAUTH_STATE_SECRET shorter than required minimum")
 
+// validateAuth0AudienceMatchesExpected fails fast when infra provides the
+// Auth0 API identifier expected for this qURL endpoint and AUTH0_AUDIENCE
+// drifts from it. The endpoint->audience mapping intentionally lives in
+// deployment config so sandbox/internal domains are not mirrored in public
+// source. AUTH0_AUDIENCE is compared exactly because Auth0 API identifiers
+// are exact-match strings; only the infra-provided expected value is trimmed
+// before comparison. The caller rejects surrounding whitespace in audience
+// before calling this helper because that raw value is sent to Auth0. Leaving
+// the expected value unset disables only this drift check, preserving
+// local/self-hosted deployments that own their own audience contract.
+func validateAuth0AudienceMatchesExpected(qurlEndpoint, audience, expectedAudience string) error {
+	expectedAudience = strings.TrimSpace(expectedAudience)
+	if expectedAudience == "" || audience == expectedAudience {
+		return nil
+	}
+	return fmt.Errorf(
+		"AUTH0_AUDIENCE %q does not exactly match %s %q for QURL_ENDPOINT %q",
+		audience, envAuth0ExpectedAudience, expectedAudience, qurlEndpoint)
+}
+
 // buildOAuthConfig assembles the oauth.Config from env. Returns
 // (cfg, false, nil) when any required env var is missing — the caller
 // logs and skips route registration so a sandbox boot with no Auth0
 // configured still serves the existing Slack surface. Returns
 // (_, false, err) when a required env var is set but malformed
 // (short secret, non-HTTPS SlackBaseURL) — the caller fails-fast.
+// run() initializes the workspace DDB provider unconditionally before this
+// function, so no supported deployment can enable OAuth without usable DDB.
 //
 // Required env vars:
 //
 //	AUTH0_DOMAIN, AUTH0_CLIENT_ID, AUTH0_CLIENT_SECRET, AUTH0_AUDIENCE
 //	SLACK_BASE_URL, OAUTH_STATE_SECRET, QURL_ENDPOINT
+//
+// TODO(#864): remove OAUTH_STATE_SECRET from this required set and oauth.Config
+// after the signed-state deploy-overlap parser is retired.
 //
 // ctx is the parent context for the JWKS refresh goroutine spawned
 // inside NewJWKSVerifier — pass the signal-canceled context so the
@@ -902,8 +1013,11 @@ func buildOAuthConfig(ctx context.Context, provider *auth.DDBProvider, tracker o
 	clientID := os.Getenv("AUTH0_CLIENT_ID")
 	clientSecret := os.Getenv("AUTH0_CLIENT_SECRET")
 	audience := os.Getenv("AUTH0_AUDIENCE")
+	// TODO(upstream-contract): private infra owns the QURL_ENDPOINT ->
+	// Auth0 audience mapping and sets this env var for managed deployments.
+	expectedAudience := os.Getenv(envAuth0ExpectedAudience)
 	emailConnection := strings.TrimSpace(os.Getenv("AUTH0_EMAIL_CONNECTION"))
-	baseURL := strings.TrimRight(os.Getenv("SLACK_BASE_URL"), "/")
+	baseURL := strings.TrimRight(os.Getenv(envSlackBaseURL), "/")
 	stateSecret := os.Getenv("OAUTH_STATE_SECRET")
 	qurlEndpoint := strings.TrimRight(os.Getenv("QURL_ENDPOINT"), "/")
 
@@ -916,13 +1030,19 @@ func buildOAuthConfig(ctx context.Context, provider *auth.DDBProvider, tracker o
 		"AUTH0_CLIENT_ID":     clientID,
 		"AUTH0_CLIENT_SECRET": clientSecret,
 		"AUTH0_AUDIENCE":      audience,
-		"SLACK_BASE_URL":      baseURL,
+		envSlackBaseURL:       baseURL,
 		"OAUTH_STATE_SECRET":  stateSecret,
 		"QURL_ENDPOINT":       qurlEndpoint,
 	})
 	if len(missing) > 0 {
 		slog.Warn("OAuth routes NOT registered — required env vars unset", "missing", missing)
 		return oauth.Config{}, false, nil
+	}
+	if strings.TrimSpace(audience) != audience {
+		return oauth.Config{}, false, fmt.Errorf("AUTH0_AUDIENCE must not contain surrounding whitespace (got %q)", audience)
+	}
+	if err := validateAuth0AudienceMatchesExpected(qurlEndpoint, audience, expectedAudience); err != nil {
+		return oauth.Config{}, false, err
 	}
 	// SLACK_BASE_URL must be HTTPS: the state cookie is Secure, and a
 	// browser silently drops Set-Cookie: Secure on an http:// response,
@@ -954,18 +1074,17 @@ func buildOAuthConfig(ctx context.Context, provider *auth.DDBProvider, tracker o
 	if err != nil {
 		return oauth.Config{}, false, err
 	}
+	stateStore, err := oauth.NewDDBStateStore(provider)
+	if err != nil {
+		return oauth.Config{}, false, fmt.Errorf("OAuth state store init failed: %w", err)
+	}
 
 	// JWKS verifier opens the network for the initial JWKS fetch
 	// (bounded inside NewJWKSVerifier). The callback uses the verifier
 	// to extract the id_token `sub` claim, which becomes the
 	// workspace_mappings OwnerID at BindWorkspace time. Without a
-	// usable verifier, every callback in production would refuse the
-	// install (no OwnerID → no bind → 500). Fail-fast at boot when
-	// adminStore is wired so the operator sees the configuration error
-	// immediately instead of after the first user tries /qurl setup.
-	// On sandbox / no-DDB deploys (adminStore==nil) the bind is
-	// skipped anyway, so the verifier is downgraded to "email line
-	// missing on the success page" — non-fatal, log and continue.
+	// usable verifier, nonce binding cannot be enforced and every callback must
+	// fail closed. Surface that at boot instead of after the first setup attempt.
 	issuer := "https://" + domain + "/"
 	// id_tokens carry the application's client_id as their `aud`
 	// claim, distinct from AUTH0_AUDIENCE (the API resource server
@@ -973,11 +1092,7 @@ func buildOAuthConfig(ctx context.Context, provider *auth.DDBProvider, tracker o
 	// clientID here matches what Auth0 actually stamps into id_tokens.
 	verifier, err := newJWKSVerifier(ctx, issuer, clientID)
 	if err != nil {
-		if adminStore != nil {
-			return oauth.Config{}, false, fmt.Errorf("JWKS verifier init failed and AdminStore is wired — every callback would refuse the install: %w", err)
-		}
-		slog.Warn("JWKS verifier init failed — id_token email will not be displayed for the lifetime of this task (AdminStore=nil so bind is skipped anyway)", "error", err)
-		verifier = nil
+		return oauth.Config{}, false, fmt.Errorf("JWKS verifier init failed — OAuth nonce verification is unavailable: %w", err)
 	}
 
 	return oauth.Config{
@@ -990,18 +1105,20 @@ func buildOAuthConfig(ctx context.Context, provider *auth.DDBProvider, tracker o
 		SetupBindingReplayWindowHours: setupBindingReplayWindowHours,
 		APIKeyMintReplayWindowHours:   apiKeyMintReplayWindowHours,
 		OAuthStateSecret:              []byte(stateSecret),
+		StateStore:                    stateStore,
 		Provider:                      provider,
 		IDTokenVerifier:               verifier,
 		Minter:                        &oauth.HTTPAPIKeyMinter{BaseURL: qurlEndpoint},
 		AsyncTracker:                  tracker,
 		AdminStore:                    adminStore,
-		BindClassifyError:             classifyBindError,
+		BindClassifyError:             internal.ClassifyOAuthBindError,
 		// SlackClient left nil for now — DM-after-success Slack-API
 		// wiring is a follow-up; the success-page HTML still renders.
 	}, true, nil
 }
 
 const (
+	envSlackBaseURL                     = "SLACK_BASE_URL"
 	envSlackClientID                    = "SLACK_CLIENT_ID"
 	envSlackClientSecret                = "SLACK_CLIENT_SECRET"
 	envSlackInstallStateSecret          = "SLACK_INSTALL_STATE_SECRET"
@@ -1012,7 +1129,7 @@ const (
 func buildSlackInstallConfig(provider *auth.DDBProvider) (slackinstall.Config, bool, error) {
 	clientID := strings.TrimSpace(os.Getenv(envSlackClientID))
 	clientSecret := strings.TrimSpace(os.Getenv(envSlackClientSecret))
-	baseURL := strings.TrimRight(strings.TrimSpace(os.Getenv("SLACK_BASE_URL")), "/")
+	baseURL := strings.TrimRight(strings.TrimSpace(os.Getenv(envSlackBaseURL)), "/")
 	stateSecret := os.Getenv(envSlackInstallStateSecret)
 	if stateSecret == "" {
 		stateSecret = os.Getenv("OAUTH_STATE_SECRET")
@@ -1021,7 +1138,7 @@ func buildSlackInstallConfig(provider *auth.DDBProvider) (slackinstall.Config, b
 	missing := missingSlackInstallEnvVars(map[string]string{
 		envSlackClientID:                    clientID,
 		envSlackClientSecret:                clientSecret,
-		"SLACK_BASE_URL":                    baseURL,
+		envSlackBaseURL:                     baseURL,
 		displayKeySlackInstallStateFallback: stateSecret,
 	})
 	if len(missing) > 0 {
@@ -1058,7 +1175,7 @@ func buildSlackInstallConfig(provider *auth.DDBProvider) (slackinstall.Config, b
 }
 
 func missingSlackInstallEnvVars(values map[string]string) []string {
-	keys := []string{envSlackClientID, envSlackClientSecret, "SLACK_BASE_URL", displayKeySlackInstallStateFallback}
+	keys := []string{envSlackClientID, envSlackClientSecret, envSlackBaseURL, displayKeySlackInstallStateFallback}
 	var missing []string
 	for _, k := range keys {
 		if values[k] == "" {
@@ -1070,66 +1187,6 @@ func missingSlackInstallEnvVars(values map[string]string) []string {
 		}
 	}
 	return missing
-}
-
-// adminStoreAdapter bridges *slackdata.Store to the oauth.AdminStore
-// interface. The two declare WorkspaceMapping in their own packages
-// so the callback doesn't import slackdata directly; the adapter
-// translates the field-for-field equivalent shape and forwards the
-// call.
-//
-// `store` is typed as the slackdataBinder interface (not concrete
-// *slackdata.Store) so the adapter's translation logic can be
-// exercised end-to-end in tests against a captor without standing
-// up a real Store. *slackdata.Store satisfies the interface by
-// declaring BindWorkspace with the matching signature.
-type adminStoreAdapter struct {
-	store slackdataBinder
-}
-
-// slackdataBinder is the slice of slackdata.Store that the adapter
-// depends on. Defined here (rather than imported from slackdata)
-// so cmd/main_test.go can inject a captor that fences the
-// translation without dragging in the full Store surface.
-type slackdataBinder interface {
-	BindWorkspace(ctx context.Context, m *slackdata.WorkspaceMapping, seedAdmin string) error
-}
-
-func (a *adminStoreAdapter) BindWorkspace(ctx context.Context, m *oauth.WorkspaceMapping, seedAdmin string) error {
-	return a.store.BindWorkspace(ctx, &slackdata.WorkspaceMapping{
-		TeamID:    m.TeamID,
-		OwnerID:   m.OwnerID,
-		CreatedAt: m.CreatedAt,
-	}, seedAdmin)
-}
-
-// classifyBindError errors.As's the slackdata.Error and returns the
-// matching oauth.BindConflictCode for 409 paths so the callback can
-// branch idempotent vs. rebind-refused vs. generic-failure. Non-409
-// or non-*slackdata.Error returns "" so the callback treats it as a
-// generic failure (500).
-func classifyBindError(err error) oauth.BindConflictCode {
-	var ae *slackdata.Error
-	if !errors.As(err, &ae) || ae.StatusCode != http.StatusConflict {
-		return ""
-	}
-	switch ae.Code {
-	case slackdata.ErrCodeWorkspaceAlreadyBoundToCaller:
-		return oauth.BindConflictAlreadyBoundToCaller
-	case slackdata.ErrCodeWorkspaceAlreadyBound:
-		return oauth.BindConflictAlreadyBound
-	case slackdata.ErrCodeWorkspaceBindUnverified:
-		return oauth.BindConflictUnverified
-	default:
-		// A 409 from slackdata with an unmapped Code means a new
-		// conflict variant was added on the producer side without
-		// the classifier here being updated. Surface a warn so
-		// on-call sees the drift on CloudWatch before users start
-		// reporting "every rebind 500s."
-		slog.Warn("classifyBindError: slackdata returned 409 with unmapped Code — defaulting to generic 500 (classifier and slackdata.ErrCodeWorkspace* have drifted)",
-			"code", ae.Code, "title", ae.Title)
-		return ""
-	}
 }
 
 // missingAdminStoreEnvVars returns the slackdata table env-var names
@@ -1218,46 +1275,18 @@ func readTunnelImageConfig() (string, error) {
 		return "", fmt.Errorf("%s: %w", envQURLConnectorImage, err)
 	}
 	if image != "" {
-		// An explicit image wins over QURL_CONNECTOR_IMAGE_FALLBACK so stale
+		// An explicit image wins over QURL_IMAGE_FALLBACK so stale
 		// dev/sandbox env cannot break a correctly pinned production image.
 		// Keep startup errors explicit: they land in operator logs, and each
 		// branch carries the remediation so bad image config cannot be masked.
-		switch connectorimage.ClassifyPin(image) {
-		case connectorimage.Accepted:
-			return image, nil
-		case connectorimage.LatestDigest:
-			return "", fmt.Errorf(
-				"%s: %s",
-				envQURLConnectorImage, connectorImageErrLatestDigest,
-			)
-		case connectorimage.UppercaseDigest:
-			return "", fmt.Errorf(
-				"%s: %s",
-				envQURLConnectorImage, connectorImageErrDigestLowercase,
-			)
-		case connectorimage.MalformedReference:
-			return "", fmt.Errorf(
-				"%s: %s",
-				envQURLConnectorImage, connectorImageErrMalformedRef,
-			)
-		case connectorimage.AmbiguousReference:
-			return "", fmt.Errorf(
-				"%s: %s",
-				envQURLConnectorImage, connectorImageErrAmbiguousRef,
-			)
-		case connectorimage.MalformedDigest:
-			return "", fmt.Errorf(
-				"%s: %s",
-				envQURLConnectorImage, connectorImageErrMalformedDigest,
-			)
-		case connectorimage.Floating:
-			return "", fmt.Errorf(
-				"%s: %s; %s",
-				envQURLConnectorImage, connectorImageErrFloating, connectorImageFallbackHint,
-			)
+		pinned, err := readPinnedImageConfig(envQURLConnectorImage, image, connectorImageFallbackHint)
+		if err != nil {
+			return "", err
 		}
-		// Future connectorimage.PinStatus values must fail closed.
-		return "", fmt.Errorf("%s could not validate image pinning", envQURLConnectorImage)
+		if !strings.Contains(pinned, "@sha256:") {
+			return "", fmt.Errorf("%s must use the immutable ghcr.io/layervai/qurl@sha256:<64 lowercase hex> reference published with the CLI release", envQURLConnectorImage)
+		}
+		return pinned, nil
 	}
 
 	rawFallback := strings.TrimSpace(os.Getenv(envQURLConnectorImageFallback))
@@ -1270,6 +1299,67 @@ func readTunnelImageConfig() (string, error) {
 	default:
 		return "", fmt.Errorf("%s=%q is unsupported; set %s only for dev/sandbox, or set %s to a specific non-latest tag or digest", envQURLConnectorImageFallback, rawFallback, connectorImageFallbackOptIn, envQURLConnectorImage)
 	}
+}
+
+func readS3OriginImageConfig() (string, error) {
+	image := strings.TrimSpace(os.Getenv(envQURLS3OriginImage))
+	if image == "" {
+		return "", nil
+	}
+	if err := internal.ValidateTunnelImageRef(image); err != nil {
+		return "", fmt.Errorf("%s: %w", envQURLS3OriginImage, err)
+	}
+	pinned, err := readPinnedImageConfig(envQURLS3OriginImage, image, "")
+	if err != nil {
+		return "", err
+	}
+	// readPinnedImageConfig owns startup's detailed operator diagnostics;
+	// RequireS3OriginImageDigest deliberately classifies again because it is
+	// also the shared render-boundary guard and narrows accepted pins to sha256.
+	if err := internal.RequireS3OriginImageDigest(pinned); err != nil {
+		return "", fmt.Errorf("%s: %w", envQURLS3OriginImage, err)
+	}
+	return pinned, nil
+}
+
+func readPinnedImageConfig(envName, image, floatingHint string) (string, error) {
+	switch connectorimage.ClassifyPin(image) {
+	case connectorimage.Accepted:
+		return image, nil
+	case connectorimage.LatestDigest:
+		return "", fmt.Errorf(
+			"%s: %s",
+			envName, connectorImageErrLatestDigest,
+		)
+	case connectorimage.UppercaseDigest:
+		return "", fmt.Errorf(
+			"%s: %s",
+			envName, connectorImageErrDigestLowercase,
+		)
+	case connectorimage.MalformedReference:
+		return "", fmt.Errorf(
+			"%s: %s",
+			envName, connectorImageErrMalformedRef,
+		)
+	case connectorimage.AmbiguousReference:
+		return "", fmt.Errorf(
+			"%s: %s",
+			envName, connectorImageErrAmbiguousRef,
+		)
+	case connectorimage.MalformedDigest:
+		return "", fmt.Errorf(
+			"%s: %s",
+			envName, connectorImageErrMalformedDigest,
+		)
+	case connectorimage.Floating:
+		msg := connectorImageErrFloating
+		if floatingHint != "" {
+			msg += "; " + floatingHint
+		}
+		return "", fmt.Errorf("%s: %s", envName, msg)
+	}
+	// Future connectorimage.PinStatus values must fail closed.
+	return "", fmt.Errorf("%s could not validate image pinning", envName)
 }
 
 // readPoolSizeEnv parses a pool-size env var. Empty is "use default" silently;
@@ -1286,11 +1376,11 @@ func readPoolSizeEnv(name string) int {
 	parsed, err := strconv.Atoi(raw)
 	switch {
 	case err != nil:
-		slog.Warn("ignoring malformed pool-size env var; falling back to default", //nolint:gosec // G706: raw is env-var input; slog's JSON handler escapes control bytes in attribute values, same posture as the request-path slog sites.
+		slog.Warn("ignoring malformed pool-size env var; falling back to default",
 			"env", name, "raw", raw, "error", err)
 		return 0
 	case parsed <= 0:
-		slog.Warn("ignoring non-positive pool-size env var; falling back to default", //nolint:gosec // G706: raw is env-var input; slog's JSON handler escapes control bytes in attribute values, same posture as the request-path slog sites.
+		slog.Warn("ignoring non-positive pool-size env var; falling back to default",
 			"env", name, "raw", raw)
 		return 0
 	default:
@@ -1338,7 +1428,7 @@ func readBoolEnvFailSafe(name string, emptyDefault, parseErrDefault bool) bool {
 	}
 	v, err := strconv.ParseBool(raw)
 	if err != nil {
-		slog.Warn("env flag set to an unparseable value; using the fail-safe default", //nolint:gosec // G706: operator-set flag value, not a secret; slog's JSON handler escapes control bytes like the other env-logging sites.
+		slog.Warn("env flag set to an unparseable value; using the fail-safe default",
 			"env", name, "value", raw, "fail_safe_default", parseErrDefault)
 		return parseErrDefault
 	}
@@ -1399,6 +1489,23 @@ func readSlackRateLimitEnabled() bool {
 	return readBoolEnvFailSafe(envSlackRateLimitEnabled, false, false)
 }
 
+// readSlackBotTokenRotationEnabled reads QURL_SLACK_BOT_TOKEN_ROTATION_ENABLED.
+// Absent → false, preserving today's Marketplace cleanup behavior where a bot
+// tokens_revoked callback means local teardown. A set-but-unparseable value
+// fails startup: silently choosing either pole could suppress a Marketplace
+// cleanup signal or make a routine Slack token rotation destructive.
+func readSlackBotTokenRotationEnabled() (bool, error) {
+	raw := strings.TrimSpace(os.Getenv(envSlackBotTokenRotation))
+	if raw == "" {
+		return false, nil
+	}
+	v, err := strconv.ParseBool(raw)
+	if err != nil {
+		return false, fmt.Errorf("%s must be a boolean: %w", envSlackBotTokenRotation, err)
+	}
+	return v, nil
+}
+
 // Conservative per-hour turn caps applied when the operator doesn't set the env, so
 // a GA-live agent always has a cost backstop. Tunable via QURL_AGENT_MAX_TURNS_PER_*;
 // an explicit 0 disables the cap.
@@ -1429,7 +1536,7 @@ func readIntEnvFailSafe(name string, def int) int {
 	}
 	v, err := strconv.Atoi(raw)
 	if err != nil || v < 0 {
-		slog.Warn("agent env int flag set to an invalid value; using the fail-safe default", //nolint:gosec // G706: operator-set flag value, not a secret; slog's JSON handler escapes control bytes like the other env-logging sites.
+		slog.Warn("agent env int flag set to an invalid value; using the fail-safe default",
 			"env", name, "value", raw, "fail_safe_default", def)
 		return def
 	}
@@ -1444,6 +1551,7 @@ type agentSurfaceState struct {
 	storeWired            bool
 	postWired             bool
 	blocksWired           bool
+	ephemeralBlocksWired  bool // PostEphemeralBlocks — confirm-flow channel get-link delivery
 	assistantThreadsWired bool
 	confirmFlag           bool // QURL_AGENT_CONFIRM_ENABLED
 	exclusiveAcksFlag     bool // QURL_AGENT_SURFACE_EXCLUSIVE_ACKS
@@ -1489,22 +1597,45 @@ func logAgentSurfaceState(s agentSurfaceState) {
 			"missing", strings.Join(missing, ", "))
 	}
 
-	// Confirm/mutation mode sits ON TOP of the read-only surface. Report its EFFECTIVE
-	// state, never the raw flag — a flag set while the surface is dark must NOT read
-	// as enabled (the #670 LIVE-gate-consistency lesson, applied to the riskier flip).
+	// Confirm/mutation mode sits ON TOP of the read-only surface. Split into its own
+	// helper so each stays under the cyclomatic-complexity budget.
+	logConfirmModeState(s, readOnlyLive)
+
+	if !s.killed && s.exclusiveAcksFlag && !s.assistantThreadsWired {
+		slog.Warn("QURL_AGENT_SURFACE_EXCLUSIVE_ACKS is set but AssistantThreads is not wired; pane turns will not have a working-on-it indicator")
+	}
+}
+
+// logConfirmModeState emits the confirm/mutation startup line(s), keyed on the
+// EFFECTIVE predicate (Handler.agentConfirmEnabled), never the raw flag — a flag
+// set while the surface is dark must NOT read as enabled (the #670 LIVE-gate
+// consistency lesson, applied to the riskier flip). readOnlyLive is the read-only
+// surface verdict computed by logAgentSurfaceState.
+func logConfirmModeState(s agentSurfaceState, readOnlyLive bool) {
 	switch {
 	case readOnlyLive && s.confirmFlag && s.blocksWired:
 		slog.Warn("conversation mode CONFIRM (mutation execution) is LIVE: an admin Approving a card EXECUTES the change. Confirm the hard pre-enablement gates (get-link authorization; R2 public-card replace_original; C1 connector key-privacy; C2 connector trigger-window) AND the DPA/data-handling review have cleared before relying on this.")
+		// A confirmed CHANNEL get delivers the minted link via PostEphemeralBlocks with
+		// NO text fallback (deliverConfirmEphemeral), so if it's unwired every channel
+		// get approval fails AFTER the mint is burned. (The confirm DM leg rides on
+		// PostMessageBlocks — already required by the gate above — and PostDMBlocks is a
+		// separate `/qurl get dm:true` concern, refused pre-mint, so neither belongs
+		// here.) WARN, not gate: unlike PostMessageBlocks (which renders the confirm CARD
+		// for EVERY action, so its absence correctly forces confirm DARK), PostEphemeralBlocks
+		// is needed only for GET delivery — folding it into the agentConfirmEnabled gate
+		// would also disable revoke/alias/protect confirms that don't touch it. So the
+		// targeted choice is to keep confirm live and surface the risk loudly at boot,
+		// rather than as a silent per-request post-mint failure in production.
+		if !s.ephemeralBlocksWired {
+			slog.Warn("CONFIRM is LIVE but PostEphemeralBlocks is unwired; agent channel get approvals will FAIL after minting (no text fallback). Wire PostEphemeralBlocks.",
+				"ephemeral_blocks_wired", s.ephemeralBlocksWired)
+		}
 	case !s.killed && s.confirmFlag:
 		// When killed, the kill-switch line above is the accurate cause; a confirm-DARK
 		// line here would name the seams as the blocker, not the kill switch — so let
 		// the kill-switch line stand alone (the un-kill restart re-reports confirm state).
 		slog.Warn("QURL_AGENT_CONFIRM_ENABLED is set but confirm mode is DARK; mutations will NOT execute until the read-only surface is live and PostMessageBlocks is wired",
 			"read_only_live", readOnlyLive, "blocks_wired", s.blocksWired)
-	}
-
-	if !s.killed && s.exclusiveAcksFlag && !s.assistantThreadsWired {
-		slog.Warn("QURL_AGENT_SURFACE_EXCLUSIVE_ACKS is set but AssistantThreads is not wired; pane turns will not have a working-on-it indicator")
 	}
 }
 
@@ -1528,7 +1659,7 @@ func buildAdminStore(ctx context.Context) *slackdata.Store {
 		slog.Error("slackdata.NewStore failed; /qurl-admin admin will be disabled", "error", err)
 		return nil
 	}
-	slog.Info("admin store wired", //nolint:gosec // G706: env-var values are operator-controlled; slog's JSON handler escapes any control bytes the same way as the request-path slog sites.
+	slog.Info("admin store wired",
 		"workspace_mappings_table", os.Getenv(slackdata.EnvWorkspaceMappingsTable),
 		"channel_policies_table", os.Getenv(slackdata.EnvChannelPoliciesTable),
 		"slack_rate_limit_enabled", rateLimitEnabled)
@@ -1555,7 +1686,7 @@ func buildPostFeedback(userAgent string) internal.PostFeedbackFunc {
 		return nil
 	default:
 		if !strings.EqualFold(host, slackIncomingWebhookHost) {
-			slog.Warn("FEEDBACK_SLACK_WEBHOOK_URL host is not Slack's incoming-webhook host; delivering feedback there anyway", "host", host, "expected", slackIncomingWebhookHost) // #nosec G706 -- host is operator-set; slog's JSON handler escapes control bytes in attribute values.
+			slog.Warn("FEEDBACK_SLACK_WEBHOOK_URL host is not Slack's incoming-webhook host; delivering feedback there anyway", "host", host, "expected", slackIncomingWebhookHost)
 		}
 		slog.Info("feedback delivery wired via Slack incoming webhook")
 		return newFeedbackWebhookPoster(feedbackWebhookURL, userAgent, nil)

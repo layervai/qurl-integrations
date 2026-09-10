@@ -3,7 +3,10 @@ package slackdata
 import (
 	"context"
 	"errors"
+	"maps"
+	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -14,16 +17,26 @@ import (
 )
 
 // agentFakeDDB is a focused in-memory DynamoDBClient for AgentStore tests. It
-// models only what AgentStore uses: GetItem and conditional PutItem with the
+// models the shapes AgentStore uses: point GetItem, conditional PutItem with the
 // `attribute_not_exists(pk)` and `attribute_not_exists(pk) OR conv_version = :ev`
-// shapes. Keyed by pk|sk.
+// conditions, partition Query, and unconditional DeleteItem. Keyed by pk|sk.
 type agentFakeDDB struct {
-	items     map[string]map[string]ddbtypes.AttributeValue
-	putErr    error
-	getErr    error
-	queryErr  error
-	putCalls  int
-	lastPutAt map[string]string // sk -> ttl value, for assertions
+	items         map[string]map[string]ddbtypes.AttributeValue
+	putErr        error
+	getErr        error
+	queryErr      error
+	deleteErr     error
+	queryPageSize int
+	putCalls      int
+	deleteCalls   int
+	lastPutAt     map[string]string // sk -> ttl value, for assertions
+	// lostResponse models the SDK retry seam for ONE PutItem call. The standard
+	// retryer runs inside the DynamoDBClient call this fake replaces, so a write
+	// whose response is dropped never surfaces as the retryable 5xx — it surfaces
+	// as the conditional-check failure the NEXT attempt raised, with the first
+	// attempt's item already in the table. Consumed by the next PutItem whatever
+	// that call does, so it is a true one-shot rather than a broken client.
+	lostResponse bool
 }
 
 func newAgentFakeDDB() *agentFakeDDB {
@@ -55,9 +68,15 @@ func (f *agentFakeDDB) PutItem(_ context.Context, in *dynamodb.PutItemInput, _ .
 	}
 	k := keyOf(in.Item)
 	existing, present := f.items[k]
-	if cond := aws.ToString(in.ConditionExpression); cond != "" {
+	// Consume the flag up front so it is a true one-shot. Clearing it only on the
+	// path below would leak it onto a later unrelated write whenever THIS write
+	// loses its condition outright.
+	lost := f.lostResponse
+	f.lostResponse = false
+	cond := aws.ToString(in.ConditionExpression)
+	if cond != "" {
 		if !f.evalCond(cond, existing, present, in.ExpressionAttributeValues) {
-			return nil, &ddbtypes.ConditionalCheckFailedException{Message: aws.String("conditional check failed")}
+			return nil, condFailure(in.ReturnValuesOnConditionCheckFailure, existing)
 		}
 	}
 	f.items[k] = in.Item
@@ -65,42 +84,74 @@ func (f *agentFakeDDB) PutItem(_ context.Context, in *dynamodb.PutItemInput, _ .
 		sk, _ := in.Item[attrAgentSK].(*ddbtypes.AttributeValueMemberS)
 		f.lastPutAt[sk.Value] = ttl.Value
 	}
+	if lost {
+		// The write above is attempt #1; its response never came back. Attempt #2
+		// replays the same conditional write against what #1 stored. Re-evaluate
+		// rather than assuming it loses: deriving the answer is what keeps this
+		// honest for a future marker whose condition would still pass on replay.
+		if cond != "" && !f.evalCond(cond, f.items[k], true, in.ExpressionAttributeValues) {
+			return nil, condFailure(in.ReturnValuesOnConditionCheckFailure, f.items[k])
+		}
+	}
 	return &dynamodb.PutItemOutput{}, nil
 }
 
-// evalCond models the two condition shapes AgentStore emits.
-func (f *agentFakeDDB) evalCond(cond string, existing map[string]ddbtypes.AttributeValue, present bool, vals map[string]ddbtypes.AttributeValue) bool {
-	notExists := !present
-	if !strings.Contains(cond, " OR ") {
-		// Single-term existence guard used by MarkEventSeen.
-		return notExists
+// condFailure builds the error a conditional write fails with, modeling
+// ReturnValuesOnConditionCheckFailure=ALL_OLD. Honoring the request field rather
+// than always attaching the item is the point: it is what makes the lost-response
+// tests fail if putMarker ever stops asking for ALL_OLD.
+//
+// Takes the field rather than the input struct so the PutItem and UpdateItem fakes
+// in this package share one encoding of that rule and cannot drift on it. No
+// "present" flag is needed — a lookup miss yields a nil map and maps.Clone(nil) is
+// nil, which is exactly the "no item came back" the SDK reports.
+func condFailure(rv ddbtypes.ReturnValuesOnConditionCheckFailure, existing map[string]ddbtypes.AttributeValue) error {
+	err := &ddbtypes.ConditionalCheckFailedException{Message: aws.String("conditional check failed")}
+	if rv == ddbtypes.ReturnValuesOnConditionCheckFailureAllOld {
+		err.Item = maps.Clone(existing)
 	}
-	// attribute_not_exists(pk) OR conv_version = :ev
-	if notExists {
+	return err
+}
+
+// evalCond models the create-if-absent conditions AgentStore emits. It really
+// evaluates them: a stub that ignored the condition would make every
+// conditional-write branch unreachable and the latch tests vacuous.
+func (f *agentFakeDDB) evalCond(cond string, existing map[string]ddbtypes.AttributeValue, present bool, values map[string]ddbtypes.AttributeValue) bool {
+	if !present {
 		return true
 	}
-	want, ok := vals[":ev"].(*ddbtypes.AttributeValueMemberN)
-	if !ok {
-		return false
+	// putMarkerIfExpired: "attribute_not_exists(pk) OR #ttl <= :now" also wins
+	// against a marker whose window has already closed.
+	if strings.Contains(cond, "#ttl <= :now") {
+		// DynamoDB evaluates a comparison against a NONEXISTENT attribute as false,
+		// so a marker with no ttl counts as live. readNumber returns 0 for an absent
+		// attribute, which would invert that — check presence first.
+		if _, ok := existing[attrAgentTTL]; !ok {
+			return false
+		}
+		return readNumber(existing, attrAgentTTL) <= readNumber(values, ":now")
 	}
-	cur, ok := existing[attrAgentVersion].(*ddbtypes.AttributeValueMemberN)
-	if !ok {
-		return false
-	}
-	return cur.Value == want.Value
+	return false
 }
 
 func (f *agentFakeDDB) UpdateItem(context.Context, *dynamodb.UpdateItemInput, ...func(*dynamodb.Options)) (*dynamodb.UpdateItemOutput, error) {
 	return nil, errors.New("not implemented")
 }
 
-func (f *agentFakeDDB) DeleteItem(context.Context, *dynamodb.DeleteItemInput, ...func(*dynamodb.Options)) (*dynamodb.DeleteItemOutput, error) {
-	return nil, errors.New("not implemented")
+func (f *agentFakeDDB) DeleteItem(_ context.Context, in *dynamodb.DeleteItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.DeleteItemOutput, error) {
+	f.deleteCalls++
+	if f.deleteErr != nil {
+		return nil, f.deleteErr
+	}
+	delete(f.items, keyOf(in.Key))
+	return &dynamodb.DeleteItemOutput{}, nil
 }
 
-// Query models the one shape ListAuditEntries emits: pk equality + begins_with(sk),
-// with ScanIndexForward + Limit applied. It reads the :pk / :prefix expression values
-// directly rather than parsing the KeyConditionExpression text.
+// Query models the two AgentStore shapes that tests need: ListAuditEntries emits
+// pk equality + begins_with(sk) with ScanIndexForward + Limit, while
+// PurgeWorkspaceAgentState emits pk equality only and pages over the whole
+// partition. It reads the expression values directly rather than parsing the
+// KeyConditionExpression text.
 func (f *agentFakeDDB) Query(_ context.Context, in *dynamodb.QueryInput, _ ...func(*dynamodb.Options)) (*dynamodb.QueryOutput, error) {
 	if f.queryErr != nil {
 		return nil, f.queryErr
@@ -131,6 +182,30 @@ func (f *agentFakeDDB) Query(_ context.Context, in *dynamodb.QueryInput, _ ...fu
 	if in.Limit != nil && int(*in.Limit) < len(matched) {
 		matched = matched[:*in.Limit]
 	}
+	if f.queryPageSize > 0 && f.queryPageSize < len(matched) {
+		start := 0
+		if len(in.ExclusiveStartKey) != 0 {
+			startKey := keyOf(in.ExclusiveStartKey)
+			for i, item := range matched {
+				if keyOf(item) == startKey {
+					start = i + 1
+					break
+				}
+			}
+		}
+		end := start + f.queryPageSize
+		if end > len(matched) {
+			end = len(matched)
+		}
+		out := &dynamodb.QueryOutput{Items: matched[start:end]}
+		if end < len(matched) {
+			out.LastEvaluatedKey = map[string]ddbtypes.AttributeValue{
+				attrAgentPK: matched[end-1][attrAgentPK],
+				attrAgentSK: matched[end-1][attrAgentSK],
+			}
+		}
+		return out, nil
+	}
 	return &dynamodb.QueryOutput{Items: matched}, nil
 }
 
@@ -160,7 +235,7 @@ func TestNewAgentStore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewAgentStore: %v", err)
 	}
-	if s.ConversationTTL != defaultConversationTTL || s.DedupeTTL != defaultDedupeTTL {
+	if s.ContextTTL != defaultContextTTL || s.DedupeTTL != defaultDedupeTTL {
 		t.Error("defaults not applied")
 	}
 }
@@ -191,70 +266,6 @@ func TestMarkEventSeen_Validation(t *testing.T) {
 	}
 	if _, err := s.MarkEventSeen(context.Background(), "T1", ""); err == nil {
 		t.Error("expected validation error for empty event id")
-	}
-}
-
-func TestConversation_RoundTripAndVersioning(t *testing.T) {
-	fake := newAgentFakeDDB()
-	s := newTestAgentStore(fake)
-	ctx := context.Background()
-	const part, thread = "T1", "C1:1700.0001"
-
-	// Empty thread.
-	blob, ver, err := s.LoadConversation(ctx, part, thread)
-	if err != nil || blob != nil || ver != 0 {
-		t.Fatalf("empty load: blob=%q ver=%d err=%v", blob, ver, err)
-	}
-
-	// First save (expectedVersion 0 → stored version 1).
-	if err := s.SaveConversation(ctx, part, thread, []byte(`[{"role":"user"}]`), 0); err != nil {
-		t.Fatalf("first save: %v", err)
-	}
-	blob, ver, err = s.LoadConversation(ctx, part, thread)
-	if err != nil || ver != 1 || string(blob) != `[{"role":"user"}]` {
-		t.Fatalf("after first save: blob=%q ver=%d err=%v", blob, ver, err)
-	}
-
-	// Second save with the matching version succeeds and bumps to 2.
-	if err := s.SaveConversation(ctx, part, thread, []byte(`[{"role":"user"},{"role":"assistant"}]`), 1); err != nil {
-		t.Fatalf("second save: %v", err)
-	}
-	_, ver, _ = s.LoadConversation(ctx, part, thread)
-	if ver != 2 {
-		t.Fatalf("version should be 2, got %d", ver)
-	}
-
-	// A stale writer (expectedVersion 1 again) must conflict, not clobber.
-	err = s.SaveConversation(ctx, part, thread, []byte(`[{"role":"stale"}]`), 1)
-	if !errors.Is(err, ErrConversationConflict) {
-		t.Fatalf("expected ErrConversationConflict, got %v", err)
-	}
-	// The clobber didn't land.
-	blob, _, _ = s.LoadConversation(ctx, part, thread)
-	if strings.Contains(string(blob), "stale") {
-		t.Fatalf("stale write clobbered the conversation: %s", blob)
-	}
-}
-
-func TestConversation_Validation(t *testing.T) {
-	s := newTestAgentStore(newAgentFakeDDB())
-	if _, _, err := s.LoadConversation(context.Background(), "", "t"); err == nil {
-		t.Error("expected validation error")
-	}
-	if err := s.SaveConversation(context.Background(), "p", "", nil, 0); err == nil {
-		t.Error("expected validation error")
-	}
-}
-
-func TestConversation_TTLRefreshedOnSave(t *testing.T) {
-	fake := newAgentFakeDDB()
-	s := newTestAgentStore(fake)
-	if err := s.SaveConversation(context.Background(), "T1", "C1:1", []byte("x"), 0); err != nil {
-		t.Fatalf("save: %v", err)
-	}
-	// now=1_700_000_000, conversation TTL default 30m → 1_700_001_800.
-	if got := fake.lastPutAt[convSKPrefix+"C1:1"]; got != "1700001800" {
-		t.Fatalf("conversation ttl = %q, want 1700001800", got)
 	}
 }
 
@@ -303,7 +314,7 @@ func TestGetThreadContext_ReadTimeExpiry(t *testing.T) {
 	// (the reaper lags) reads as gone and the turn falls back to the DM.
 	fake := newAgentFakeDDB()
 	now := time.Unix(1_700_000_000, 0)
-	s := &AgentStore{Client: fake, TableName: "agent_state", Now: func() time.Time { return now }, ConversationTTL: 30 * time.Minute}
+	s := &AgentStore{Client: fake, TableName: "agent_state", Now: func() time.Time { return now }, ContextTTL: 30 * time.Minute}
 	ctx := context.Background()
 
 	if err := s.PutThreadContext(ctx, "T1", "D1:100.1", "C9"); err != nil {
@@ -431,5 +442,445 @@ func TestPendingAction_Validation(t *testing.T) {
 	}
 	if _, err := s.ClaimPendingAction(ctx, "", "id"); err == nil {
 		t.Error("ClaimPendingAction: expected validation error for empty partition")
+	}
+}
+
+func TestPurgeWorkspaceAgentState(t *testing.T) {
+	fake := newAgentFakeDDB()
+	fake.queryPageSize = 2
+	s := newTestAgentStore(fake)
+	ctx := context.Background()
+
+	// Legacy deployments stored transcript rows. The zero-copy runtime no longer
+	// creates them, but workspace purge must still delete any residue.
+	fake.items["T1|conv#C1:1"] = map[string]ddbtypes.AttributeValue{
+		attrAgentPK:  stringAttr("T1"),
+		attrAgentSK:  stringAttr("conv#C1:1"),
+		attrAgentTTL: numberAttr(1700001800),
+	}
+	if _, err := s.MarkEventSeen(ctx, "T1", "Ev1"); err != nil {
+		t.Fatalf("MarkEventSeen: %v", err)
+	}
+	if err := s.PutThreadContext(ctx, "T1", "D1:1", "C1"); err != nil {
+		t.Fatalf("PutThreadContext: %v", err)
+	}
+	if err := s.PutPendingAction(ctx, "T1", "pending1", []byte(`{"action":"get"}`)); err != nil {
+		t.Fatalf("PutPendingAction: %v", err)
+	}
+	if _, err := s.ClaimPendingAction(ctx, "T1", "pending1"); err != nil {
+		t.Fatalf("ClaimPendingAction: %v", err)
+	}
+	if err := s.PutAuditEntry(ctx, "T1", &AuditEntry{Actor: "U1", Action: "get", Target: "r_1"}); err != nil {
+		t.Fatalf("PutAuditEntry: %v", err)
+	}
+	fake.items["T1|"+rateSKPrefix+"team#1700000000"] = map[string]ddbtypes.AttributeValue{
+		attrAgentPK:   stringAttr("T1"),
+		attrAgentSK:   stringAttr(rateSKPrefix + "team#1700000000"),
+		attrTurnCount: numberAttr(1),
+		attrAgentTTL:  numberAttr(1700003600),
+	}
+	fake.items["T2|conv#C2:1"] = map[string]ddbtypes.AttributeValue{
+		attrAgentPK:  stringAttr("T2"),
+		attrAgentSK:  stringAttr("conv#C2:1"),
+		attrAgentTTL: numberAttr(1700001800),
+	}
+
+	if err := s.PurgeWorkspaceAgentState(ctx, "T1"); err != nil {
+		t.Fatalf("PurgeWorkspaceAgentState: %v", err)
+	}
+	if fake.deleteCalls != 7 {
+		t.Fatalf("DeleteItem calls = %d, want 7", fake.deleteCalls)
+	}
+	for key := range fake.items {
+		if strings.HasPrefix(key, "T1|") {
+			t.Fatalf("T1 agent-state row survived purge: %s", key)
+		}
+	}
+	if _, ok := fake.items["T2|conv#C2:1"]; !ok {
+		t.Fatal("purge removed another workspace's agent-state row")
+	}
+
+	if err := s.PurgeWorkspaceAgentState(ctx, "T1"); err != nil {
+		t.Fatalf("second purge should be idempotent: %v", err)
+	}
+}
+
+func TestPurgeWorkspaceAgentState_ValidationAndErrors(t *testing.T) {
+	t.Run("empty partition", func(t *testing.T) {
+		s := newTestAgentStore(newAgentFakeDDB())
+		err := s.PurgeWorkspaceAgentState(context.Background(), "")
+		var ae *Error
+		if !errors.As(err, &ae) || ae.StatusCode != http.StatusBadRequest {
+			t.Fatalf("err = %v, want 400 *Error", err)
+		}
+	})
+
+	t.Run("query error", func(t *testing.T) {
+		fake := newAgentFakeDDB()
+		fake.queryErr = errors.New("ddb query down")
+		s := newTestAgentStore(fake)
+		err := s.PurgeWorkspaceAgentState(context.Background(), "T1")
+		var ae *Error
+		if !errors.As(err, &ae) || ae.StatusCode != http.StatusServiceUnavailable {
+			t.Fatalf("err = %v, want 503 *Error", err)
+		}
+	})
+
+	t.Run("delete error", func(t *testing.T) {
+		fake := newAgentFakeDDB()
+		s := newTestAgentStore(fake)
+		fake.items["T1|conv#C1:1"] = map[string]ddbtypes.AttributeValue{
+			attrAgentPK: stringAttr("T1"),
+			attrAgentSK: stringAttr("conv#C1:1"),
+		}
+		fake.deleteErr = errors.New("ddb delete down")
+		err := s.PurgeWorkspaceAgentState(context.Background(), "T1")
+		var ae *Error
+		if !errors.As(err, &ae) || ae.StatusCode != http.StatusServiceUnavailable {
+			t.Fatalf("err = %v, want 503 *Error", err)
+		}
+		if _, ok := fake.items["T1|conv#C1:1"]; !ok {
+			t.Fatal("delete-error path should not remove the row in the fake")
+		}
+	})
+
+	t.Run("malformed row surfaces cleanup error", func(t *testing.T) {
+		fake := newAgentFakeDDB()
+		fake.items["T1|"] = map[string]ddbtypes.AttributeValue{
+			attrAgentPK: stringAttr("T1"),
+			attrAgentSK: stringAttr(""),
+		}
+		s := newTestAgentStore(fake)
+		err := s.PurgeWorkspaceAgentState(context.Background(), "T1")
+		var ae *Error
+		if !errors.As(err, &ae) || ae.StatusCode != http.StatusInternalServerError {
+			t.Fatalf("err = %v, want 500 *Error", err)
+		}
+		if fake.deleteCalls != 0 {
+			t.Fatalf("DeleteItem calls = %d, want 0 for malformed key", fake.deleteCalls)
+		}
+	})
+}
+
+// TestMarkMediaNoticeSent_LatchesPerConversation pins the outbound cap behind the
+// unsupported-media reply: the first upload in a conversation wins the notice, the
+// rest of the burst loses it, and neither another conversation nor another
+// workspace is affected.
+func TestMarkMediaNoticeSent_LatchesPerConversation(t *testing.T) {
+	s := newTestAgentStore(newAgentFakeDDB())
+	ctx := context.Background()
+
+	first, err := s.MarkMediaNoticeSent(ctx, "T1", "C1:U2")
+	if err != nil || !first {
+		t.Fatalf("first upload must win the notice: first=%v err=%v", first, err)
+	}
+	// The rest of one member's drag-and-drop burst: distinct messages, distinct
+	// event ids, so dedupe passes every one — this latch is what collapses them.
+	for i := range 3 {
+		again, err := s.MarkMediaNoticeSent(ctx, "T1", "C1:U2")
+		if err != nil || again {
+			t.Fatalf("burst upload %d must be suppressed: again=%v err=%v", i, again, err)
+		}
+	}
+	// Another member in the same channel was never told the limitation.
+	otherUser, err := s.MarkMediaNoticeSent(ctx, "T1", "C1:U3")
+	if err != nil || !otherUser {
+		t.Fatalf("another member's first upload must still be answered: %v %v", otherUser, err)
+	}
+	// Same member, different conversation.
+	otherChannel, err := s.MarkMediaNoticeSent(ctx, "T1", "D9:U2")
+	if err != nil || !otherChannel {
+		t.Fatalf("the same member in another conversation must still be answered: %v %v", otherChannel, err)
+	}
+	// A different workspace shares neither the partition nor the latch.
+	otherTeam, err := s.MarkMediaNoticeSent(ctx, "T2", "C1:U2")
+	if err != nil || !otherTeam {
+		t.Fatalf("another workspace must not inherit this latch: %v %v", otherTeam, err)
+	}
+}
+
+func TestMarkMediaNoticeSent_TTL(t *testing.T) {
+	f := newAgentFakeDDB()
+	s := newTestAgentStore(f)
+	if _, err := s.MarkMediaNoticeSent(context.Background(), "T1", "C1:U2"); err != nil {
+		t.Fatalf("MarkMediaNoticeSent: %v", err)
+	}
+	// There is no read-time check: the stamped epoch IS the window, and
+	// putMarkerIfExpired enforces it at WRITE time by comparing against it (see
+	// TestMarkMediaNoticeSent_WindowReopensOnExpiry). So a wrong epoch silently
+	// resizes the suppression window — the reaper is cleanup, not the clock.
+	wantSK := mediaNoticeSKPrefix + "C1:U2"
+	want := strconv.FormatInt(s.now().Add(defaultMediaNoticeTTL).Unix(), 10)
+	if got := f.lastPutAt[wantSK]; got != want {
+		t.Fatalf("marker ttl = %q, want %q", got, want)
+	}
+
+	f2 := newAgentFakeDDB()
+	s2 := newTestAgentStore(f2)
+	s2.MediaNoticeTTL = 90 * time.Second
+	if _, err := s2.MarkMediaNoticeSent(context.Background(), "T1", "C1:U2"); err != nil {
+		t.Fatalf("MarkMediaNoticeSent: %v", err)
+	}
+	want2 := strconv.FormatInt(s2.now().Add(90*time.Second).Unix(), 10)
+	if got := f2.lastPutAt[wantSK]; got != want2 {
+		t.Fatalf("override ttl = %q, want %q", got, want2)
+	}
+}
+
+// TestMarkMediaNoticeSent_WindowReopensOnExpiry is the point of routing this
+// marker through putMarkerIfExpired. DynamoDB's TTL reaper is documented to delete
+// "within a few days", so an absent-only condition would hold the latch for however
+// long the sweep takes — turning a 5-minute cap into days of silence, which is the
+// very failure the notice exists to prevent. The window has to close on the clock.
+func TestMarkMediaNoticeSent_WindowReopensOnExpiry(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	f := newAgentFakeDDB()
+	// The fake never reaps: the marker written below is still present for every
+	// call here, so anything that wins later did so on the TTL comparison alone.
+	s := &AgentStore{Client: f, TableName: "agent_state", Now: func() time.Time { return now }}
+	ctx := context.Background()
+
+	first, err := s.MarkMediaNoticeSent(ctx, "T1", "C1:U2")
+	if err != nil || !first {
+		t.Fatalf("first notice: first=%v err=%v", first, err)
+	}
+	// One second short of the window: still suppressed.
+	now = now.Add(defaultMediaNoticeTTL - time.Second)
+	if again, err := s.MarkMediaNoticeSent(ctx, "T1", "C1:U2"); err != nil || again {
+		t.Fatalf("inside the window the notice must stay suppressed: again=%v err=%v", again, err)
+	}
+	// Past it: the member hears the limitation again even though the reaper has
+	// not touched the item.
+	now = now.Add(2 * time.Second)
+	reopened, err := s.MarkMediaNoticeSent(ctx, "T1", "C1:U2")
+	if err != nil || !reopened {
+		t.Fatalf("the window must reopen on the clock, not on the reaper: reopened=%v err=%v", reopened, err)
+	}
+	// Reclaiming re-stamps the deadline, so the next window is a full one rather
+	// than an item stuck permanently in the past.
+	wantTTL := strconv.FormatInt(now.Add(defaultMediaNoticeTTL).Unix(), 10)
+	if got := f.lastPutAt[mediaNoticeSKPrefix+"C1:U2"]; got != wantTTL {
+		t.Fatalf("reclaimed marker ttl = %q, want %q", got, wantTTL)
+	}
+	if suppressed, err := s.MarkMediaNoticeSent(ctx, "T1", "C1:U2"); err != nil || suppressed {
+		t.Fatalf("the fresh window must suppress again: suppressed=%v err=%v", suppressed, err)
+	}
+}
+
+// TestPutMarkerIfAbsent_IgnoresExpiry is the contrast: the dedupe and claim latches
+// deliberately do NOT reopen, because for them a late expiry only means suppressing
+// a duplicate again. Guards against "fixing" them the same way.
+func TestPutMarkerIfAbsent_IgnoresExpiry(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	s := &AgentStore{Client: newAgentFakeDDB(), TableName: "agent_state", Now: func() time.Time { return now }}
+	ctx := context.Background()
+	if first, err := s.MarkEventSeen(ctx, "T1", "Ev1"); err != nil || !first {
+		t.Fatalf("first sighting: %v %v", first, err)
+	}
+	now = now.Add(30 * 24 * time.Hour) // long past the dedupe TTL; the fake never reaps
+	if again, err := s.MarkEventSeen(ctx, "T1", "Ev1"); err != nil || again {
+		t.Fatalf("an unreaped dedupe marker must still suppress: again=%v err=%v", again, err)
+	}
+}
+
+// TestMarkMediaNoticeSent_TTLlessMarkerCountsAsLive pins the invariant
+// putMarkerIfExpired's doc comment leans on. A marker with no ttl attribute must
+// fail the comparison and so suppress, not win — the opposite of what a fake
+// reading an absent attribute as 0 would report.
+func TestMarkMediaNoticeSent_TTLlessMarkerCountsAsLive(t *testing.T) {
+	f := newAgentFakeDDB()
+	s := newTestAgentStore(f)
+	f.items["T1|"+mediaNoticeSKPrefix+"C1:U2"] = map[string]ddbtypes.AttributeValue{
+		attrAgentPK: stringAttr("T1"),
+		attrAgentSK: stringAttr(mediaNoticeSKPrefix + "C1:U2"),
+		// deliberately no ttl
+	}
+	sent, err := s.MarkMediaNoticeSent(context.Background(), "T1", "C1:U2")
+	if err != nil {
+		t.Fatalf("MarkMediaNoticeSent: %v", err)
+	}
+	if sent {
+		t.Fatal("a marker with no ttl must count as live (DynamoDB compares a nonexistent attribute as false)")
+	}
+}
+
+func TestMarkMediaNoticeSent_Validation(t *testing.T) {
+	s := newTestAgentStore(newAgentFakeDDB())
+	if _, err := s.MarkMediaNoticeSent(context.Background(), "", "C1:U2"); err == nil {
+		t.Error("expected validation error for empty partition")
+	}
+	if _, err := s.MarkMediaNoticeSent(context.Background(), "T1", ""); err == nil {
+		t.Error("expected validation error for empty conversation key")
+	}
+}
+
+// TestMarkMediaNoticeSent_LostResponseStillClaims covers the retry seam a plain
+// conditional write cannot see. No custom retryer is configured, so the AWS SDK's
+// standard retryer is live with 3 attempts — and it retries INSIDE the
+// DynamoDBClient call this fake replaces. So a created-then-dropped response does
+// not arrive here as the retryable 5xx; it arrives already collapsed into the
+// conditional-check failure the retry attempt raised, with the first attempt's
+// item sitting in the table. That is what lostResponse models.
+//
+// Getting this wrong produces silence, not a duplicate: the caller reads "another
+// writer won" and posts nothing for the rest of the window, and claimMediaNotice's
+// fail-open branch cannot rescue it because there is no error to fail open on.
+func TestMarkMediaNoticeSent_LostResponseStillClaims(t *testing.T) {
+	f := newAgentFakeDDB()
+	f.lostResponse = true
+	s := newTestAgentStore(f)
+	ctx := context.Background()
+
+	sent, err := s.MarkMediaNoticeSent(ctx, "T1", "C1:U2")
+	if err != nil {
+		t.Fatalf("MarkMediaNoticeSent: %v", err)
+	}
+	if !sent {
+		t.Fatal("a lost response on this call's own successful write must still claim the notice; reporting false silences the whole burst")
+	}
+	// The claim is real, not a fabricated true: the marker did land.
+	if _, ok := f.items["T1|"+mediaNoticeSKPrefix+"C1:U2"]; !ok {
+		t.Fatal("the write behind the lost response must still have landed")
+	}
+	// And it still latches — the next upload carries a different token, so it
+	// loses to the marker this call left behind.
+	if again, err := s.MarkMediaNoticeSent(ctx, "T1", "C1:U2"); err != nil || again {
+		t.Fatalf("the burst behind the lost response must still be suppressed: again=%v err=%v", again, err)
+	}
+}
+
+// TestMarkEventSeen_LostResponseStillReportsFirst pins that the recovery lives in
+// the shared putMarker body, not just the expired variant. A dropped duplicate
+// would be invisible here, since that is what dedupe is for — but this case is not
+// a duplicate: the marker is written BEFORE the handler acts, so reporting false
+// for this call's own write drops the event having processed it zero times, not
+// once.
+func TestMarkEventSeen_LostResponseStillReportsFirst(t *testing.T) {
+	f := newAgentFakeDDB()
+	f.lostResponse = true
+	s := newTestAgentStore(f)
+	ctx := context.Background()
+
+	if first, err := s.MarkEventSeen(ctx, "T1", "Ev1"); err != nil || !first {
+		t.Fatalf("a lost response must not drop the event: first=%v err=%v", first, err)
+	}
+	// A genuine redelivery still loses: it carries its own token, which cannot
+	// match the one already stored.
+	if again, err := s.MarkEventSeen(ctx, "T1", "Ev1"); err != nil || again {
+		t.Fatalf("the real duplicate must still be suppressed: again=%v err=%v", again, err)
+	}
+}
+
+// TestClaimPendingAction_LostResponseStillClaims is where this behavior change
+// carries the most weight. ClaimPendingAction is the last gate before a
+// user-confirmed mutation executes: before the writer token, a lost response meant
+// the click was silently swallowed and the mutation never ran at all. It must now
+// recover — while a genuine double-click, which mints its own token, still loses.
+func TestClaimPendingAction_LostResponseStillClaims(t *testing.T) {
+	f := newAgentFakeDDB()
+	f.lostResponse = true
+	s := newTestAgentStore(f)
+	ctx := context.Background()
+
+	claimed, err := s.ClaimPendingAction(ctx, "T1", "pa1")
+	if err != nil || !claimed {
+		t.Fatalf("a lost response must not swallow the confirmed mutation: claimed=%v err=%v", claimed, err)
+	}
+	if again, err := s.ClaimPendingAction(ctx, "T1", "pa1"); err != nil || again {
+		t.Fatalf("consume-once must survive the recovery: again=%v err=%v", again, err)
+	}
+}
+
+// TestMarkMediaNoticeSent_PreTokenMarkerStillSuppresses pins the rolling-deploy case
+// through the store: a marker written before attrWriterToken existed reads back no
+// token, which cannot match the real one this call carries, so it must still
+// suppress. If it matched, the cap would vanish exactly when both item shapes are
+// live in the same table. (The empty-token branch of markerWrittenBy is unreachable
+// from here — see TestMarkerWrittenBy.)
+func TestMarkMediaNoticeSent_PreTokenMarkerStillSuppresses(t *testing.T) {
+	f := newAgentFakeDDB()
+	s := newTestAgentStore(f)
+	sk := mediaNoticeSKPrefix + "C1:U2"
+	f.items["T1|"+sk] = map[string]ddbtypes.AttributeValue{
+		attrAgentPK:  stringAttr("T1"),
+		attrAgentSK:  stringAttr(sk),
+		attrAgentTTL: numberAttr(s.now().Add(time.Minute).Unix()), // live window, no writer token
+	}
+	sent, err := s.MarkMediaNoticeSent(context.Background(), "T1", "C1:U2")
+	if err != nil {
+		t.Fatalf("MarkMediaNoticeSent: %v", err)
+	}
+	if sent {
+		t.Fatal("a marker carrying no writer token belongs to another writer and must suppress")
+	}
+}
+
+// TestMarkerWrittenBy exercises the comparison directly. The store-level tests
+// cannot reach its empty-token branch — rand.Text never returns empty, so every
+// path through putMarker compares a real token, and a real token is already
+// unequal to the "" a pre-token marker reads back. The guard is there for a
+// refactor that changes where the token comes from, and this is the only thing
+// holding it.
+func TestMarkerWrittenBy(t *testing.T) {
+	mine := map[string]ddbtypes.AttributeValue{attrWriterToken: stringAttr("tok-a")}
+	// A marker written before attrWriterToken existed: no token at all.
+	preToken := map[string]ddbtypes.AttributeValue{attrAgentPK: stringAttr("T1")}
+
+	if !markerWrittenBy(mine, "tok-a") {
+		t.Error("this call's own token must match: that is the lost-response recovery")
+	}
+	if markerWrittenBy(mine, "tok-b") {
+		t.Error("another writer's token must not match")
+	}
+	if markerWrittenBy(preToken, "tok-a") {
+		t.Error("a pre-token marker must not match a real token")
+	}
+	if markerWrittenBy(preToken, "") {
+		t.Error("an empty token must not match a marker that carries none; that would hand the latch to every caller at once")
+	}
+	if markerWrittenBy(nil, "tok-a") {
+		t.Error("a condition failure that returned no item must not match")
+	}
+}
+
+// TestMarkerLatchName pins that the recovery log names the latch and nothing more.
+// The tail of a marker sk is an event id or a channel:user pair, so echoing any of
+// it into a log line would both break the field contract the agent surface keeps
+// and put the line back in the go/log-injection alert class.
+func TestMarkerLatchName(t *testing.T) {
+	for sk, want := range map[string]string{
+		eventSKPrefix + "Ev123":       "event_dedupe",
+		pendClaimSKPrefix + "abc":     "pending_action_claim",
+		mediaNoticeSKPrefix + "C1:U2": "media_notice",
+		threadCtxSKPrefix + "x":       "other",
+		"nohash":                      "other",
+		"":                            "other",
+	} {
+		if got := markerLatchName(sk); got != want {
+			t.Errorf("markerLatchName(%q) = %q, want %q", sk, got, want)
+		}
+	}
+	// The point of the allowlist: no input can smuggle itself into the log.
+	for _, sk := range []string{"evt#\nfake log line", "media#C1:U2\u0000", "../../etc"} {
+		got := markerLatchName(sk)
+		if strings.ContainsAny(got, "\n\u0000/") {
+			t.Errorf("markerLatchName(%q) = %q, must never echo caller input", sk, got)
+		}
+	}
+}
+
+// TestMarkMediaNoticeSent_ErrorSurfaces pins that a store failure reaches the
+// caller rather than being swallowed into a false "already sent" — the handler
+// fails OPEN on this error, and it can only do that if it sees one.
+func TestMarkMediaNoticeSent_ErrorSurfaces(t *testing.T) {
+	f := newAgentFakeDDB()
+	f.putErr = errors.New("ddb down")
+	s := newTestAgentStore(f)
+	sent, err := s.MarkMediaNoticeSent(context.Background(), "T1", "C1:U2")
+	if err == nil {
+		t.Fatal("expected the store error to surface")
+	}
+	if sent {
+		t.Fatal("a failed write must not report a won latch")
 	}
 }

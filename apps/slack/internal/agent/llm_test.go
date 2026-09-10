@@ -72,7 +72,7 @@ func TestBuildParams_SetsBothCacheBreakpoints(t *testing.T) {
 		SystemStable:  "RULES",
 		SystemPerTurn: "ctx",
 		Tools:         toolSpecs(),
-		Messages:      []Message{{Role: roleUser, Text: "hi"}},
+		Messages:      []Message{{Role: RoleUser, Text: "hi"}},
 	})
 	// Message-level breakpoint (auto-places on the last message block).
 	if cc, _ := json.Marshal(params.CacheControl); !strings.Contains(string(cc), "ephemeral") {
@@ -81,6 +81,41 @@ func TestBuildParams_SetsBothCacheBreakpoints(t *testing.T) {
 	// System breakpoint: exactly one, on the stable block.
 	if sys, _ := json.Marshal(params.System); strings.Count(string(sys), "cache_control") != 1 {
 		t.Fatalf("expected exactly one system cache breakpoint: %s", sys)
+	}
+}
+
+func TestBuildParams_ToolChoiceMatchesTheRound(t *testing.T) {
+	l := &anthropicLLM{}
+	msgs := []Message{
+		{Role: RoleUser, Text: "hi"},
+		{Role: RoleAssistant, ToolCalls: []ToolCall{{ID: "tu_1", Name: toolListResources}}},
+		{Role: RoleUser, ToolResults: []ToolResult{{ToolUseID: "tu_1", Content: "none"}}},
+	}
+
+	gathering := l.buildParams(&Request{Tools: toolSpecs(), Messages: msgs})
+	if gathering.ToolChoice.OfAuto == nil {
+		t.Fatal("a gathering round must send tool_choice: auto")
+	}
+	if !gathering.ToolChoice.OfAuto.DisableParallelToolUse.Value {
+		t.Fatal("parallel tool use must stay disabled: the loop assumes one call per round")
+	}
+
+	final := l.buildParams(&Request{Tools: toolSpecs(), Messages: msgs, TextOnly: true})
+	if final.ToolChoice.OfNone == nil {
+		t.Fatal("the final round must send tool_choice: none")
+	}
+	if final.ToolChoice.OfAuto != nil {
+		t.Fatal("tool_choice must be exactly one of auto/none")
+	}
+	// Load-bearing: the Messages API rejects a transcript containing
+	// tool_use/tool_result blocks when the request defines no tools, and by the time
+	// a turn finalizes the transcript virtually always contains them. `none` is what
+	// makes "no tool calls" expressible without dropping the definitions.
+	if len(final.Tools) != len(toolSpecs()) {
+		t.Fatalf("the final round must still define every tool, got %d", len(final.Tools))
+	}
+	if raw, _ := json.Marshal(final.ToolChoice); !strings.Contains(string(raw), `"none"`) {
+		t.Fatalf("tool_choice did not marshal as none: %s", raw)
 	}
 }
 
@@ -104,14 +139,14 @@ func TestSystemBlocks_ReassembleToSystemPrompt(t *testing.T) {
 // this translation, so it's verified here by marshaling to the wire shape.
 func TestToSDKMessages_PreservesToolUseAndResult(t *testing.T) {
 	history := []Message{
-		{Role: roleUser, Text: "what can I reach?"},
-		{Role: roleAssistant, Text: "Let me check.", ToolCalls: []ToolCall{
+		{Role: RoleUser, Text: "what can I reach?"},
+		{Role: RoleAssistant, Text: "Let me check.", ToolCalls: []ToolCall{
 			{ID: "tu_1", Name: toolListResources, Input: json.RawMessage(`{}`)},
 		}},
-		{Role: roleUser, ToolResults: []ToolResult{
+		{Role: RoleUser, ToolResults: []ToolResult{
 			{ToolUseID: "tu_1", Content: "staging-dash (r_1)", IsError: false},
 		}},
-		{Role: roleAssistant, Text: "You can reach staging-dash."},
+		{Role: RoleAssistant, Text: "You can reach staging-dash."},
 	}
 
 	params := toSDKMessages(history)
@@ -140,8 +175,8 @@ func TestToSDKMessages_SkipsEmptyAssistantTurn(t *testing.T) {
 	// An assistant message with neither text nor tool calls produces no blocks
 	// and must be skipped (the SDK rejects empty-content messages).
 	params := toSDKMessages([]Message{
-		{Role: roleAssistant},
-		{Role: roleUser, Text: "hi"},
+		{Role: RoleAssistant},
+		{Role: RoleUser, Text: "hi"},
 	})
 	if len(params) != 1 {
 		t.Fatalf("expected the empty assistant turn to be skipped, got %d messages", len(params))
@@ -159,14 +194,14 @@ func TestToSDKMessages_KeepsConsecutiveUserTurnsAfterProposal(t *testing.T) {
 	// Full cross-turn shape: turn 1 (user ask → assistant propose tool_use →
 	// persisted propose ack tool_result) followed by turn 2's prepended user text.
 	history := []Message{
-		{Role: roleUser, Text: "protect the staging connector"},
-		{Role: roleAssistant, ToolCalls: []ToolCall{
+		{Role: RoleUser, Text: "protect the staging connector"},
+		{Role: RoleAssistant, ToolCalls: []ToolCall{
 			{ID: proposeID, Name: toolProposeProtectConnector, Input: json.RawMessage(`{}`)},
 		}},
-		{Role: roleUser, ToolResults: []ToolResult{
+		{Role: RoleUser, ToolResults: []ToolResult{
 			{ToolUseID: proposeID, Content: proposalAckResult},
 		}},
-		{Role: roleUser, Text: "actually, revoke it instead"},
+		{Role: RoleUser, Text: "actually, revoke it instead"},
 	}
 
 	params := toSDKMessages(history)

@@ -23,10 +23,18 @@ const QURLConfig = typeof globalThis !== 'undefined' && globalThis.QURLConfig
 // trailing slash it carries is stripped by normalizeQurlApiBase via resolveDefaultQurlApiConfig.
 const DEFAULT_QURL_API_BASE = QURLConfig ? QURLConfig.DEFAULT_QURL_API_BASE : null;
 // Pre-flight (storage + permission lookups) must finish within this budget so a torn-down
-// MV3 service worker that drops a Chrome callback can't hang the upload forever.
+// MV3 service worker that drops a browser callback cannot hang the upload forever.
 const UPLOAD_PREFLIGHT_TIMEOUT_MS = 10 * 1000;
 const QURL_API_BASE_STORAGE_KEY = 'qurlApiBase';
 const UPLOAD_REQUEST_TIMEOUT_MS = 5 * 60 * 1000;
+// Upper bound on how far ahead an expiry can plausibly land, used to reject values that parse
+// but cannot be real. The ceiling sits far above any TTL qURL actually issues -- the longest
+// expiry any surface offers is 7 days (apps/discord's EXPIRY_LABELS, the CLI's documented
+// `-e 7d`), and apps/discord/src/utils/time.js already hard-caps a parsed expiry at 30 days --
+// while a unit slip overshoots by four orders of magnitude, so the two cannot collide.
+// TODO(upstream-contract): if qurl-service ever issues an expiry beyond a year, this bound
+// starts hiding real ones instead of absurd ones; raise it in lockstep.
+const MAX_PLAUSIBLE_EXPIRY_MS = 365 * 24 * 60 * 60 * 1000;
 const DEFAULT_QURL_API_CONFIG = resolveDefaultQurlApiConfig(DEFAULT_QURL_API_BASE);
 const DEFAULT_QURL_API_BASE_NORMALIZED = DEFAULT_QURL_API_CONFIG.normalized;
 const DEFAULT_QURL_API_ORIGIN = DEFAULT_QURL_API_CONFIG.origin;
@@ -47,7 +55,7 @@ async function uploadFile(fileBuffer, filename, contentType) {
   let hasPermission;
   try {
     // Bound the pre-flight: storage.local.get and permissions.contains are Promise-wrapped
-    // Chrome callbacks with no native timeout. If the service worker is torn down mid-call
+    // browser callbacks with no native timeout. If the service worker is torn down mid-call
     // the callback can be dropped, which would otherwise hang the popup on "Uploading…"
     // forever (the fetch AbortController below is not armed until after this resolves).
     const preflight = (async function () {
@@ -58,7 +66,7 @@ async function uploadFile(fileBuffer, filename, contentType) {
     const result = await withTimeout(
       preflight,
       UPLOAD_PREFLIGHT_TIMEOUT_MS,
-      getMessage('upload_preflight_timeout_error', 'Timed out preparing the upload. Please try again.')
+      apiGetMessage('upload_preflight_timeout_error', 'Timed out preparing the upload. Please try again.')
     );
     baseUrl = result.resolvedBase;
     hasPermission = result.granted;
@@ -79,7 +87,7 @@ async function uploadFile(fileBuffer, filename, contentType) {
       qurl_link: null,
       resource_url: null,
       expires_at: null,
-      error: getMessage(
+      error: apiGetMessage(
         'permission_missing_error',
         'Permission to access the configured qURL server is missing. Open settings and save the server URL again.'
       ),
@@ -128,7 +136,7 @@ async function uploadFile(fileBuffer, filename, contentType) {
         qurl_link: null,
         resource_url: null,
         expires_at: null,
-        error: getMessage(
+        error: apiGetMessage(
           'api_invalid_json_error',
           'Invalid JSON response: $1',
           [text.substring(0, 200)]
@@ -147,7 +155,7 @@ async function uploadFile(fileBuffer, filename, contentType) {
         qurl_link: null,
         resource_url: null,
         expires_at: null,
-        error: getMessage(
+        error: apiGetMessage(
           'api_invalid_payload_error',
           'Invalid API response payload.'
         ),
@@ -181,7 +189,7 @@ async function uploadFile(fileBuffer, filename, contentType) {
         qurl_link: null,
         resource_url: null,
         expires_at: null,
-        error: getMessage(
+        error: apiGetMessage(
           'api_missing_link_error',
           'Server returned success but no download link was provided.'
         ),
@@ -204,7 +212,7 @@ async function uploadFile(fileBuffer, filename, contentType) {
         qurl_link: null,
         resource_url: null,
         expires_at: null,
-        error: getMessage('upload_timeout_error', 'Upload timed out after 5 minutes.'),
+        error: apiGetMessage('upload_timeout_error', 'Upload timed out after 5 minutes.'),
       };
     }
     return {
@@ -267,7 +275,7 @@ async function getStoredQurlApiBase() {
  */
 async function setStoredQurlApiBase(value, options) {
   if (typeof chrome === 'undefined' || !chrome.storage || !chrome.storage.local) {
-    throw new Error('Chrome storage is not available.');
+    throw new Error('Browser storage is not available.');
   }
 
   const normalized = normalizeQurlApiBase(value);
@@ -282,7 +290,7 @@ async function setStoredQurlApiBase(value, options) {
   if (normalized) {
     const granted = await ensureQurlHostPermission(normalized, !resolvedOptions.skipPermissionRequest);
     if (!granted) {
-      throw new Error(getMessage(
+      throw new Error(apiGetMessage(
         'permission_request_denied_error',
         'Permission to access this qURL server was not granted.'
       ));
@@ -464,7 +472,7 @@ function _sanitizeContentType(contentType) {
 
 /**
  * Rejects a pending promise if it does not settle within the given budget.
- * Used to bound Chrome callback-backed promises that have no native timeout.
+ * Used to bound browser callback-backed promises that have no native timeout.
  *
  * @param {Promise<T>} promise
  * @param {number} timeoutMs
@@ -551,10 +559,37 @@ function _parseExpiry(payload) {
 
     // Current Unix timestamps in seconds are ~1e9, while millisecond timestamps are ~1e12.
     // Treat exactly 1e12 as milliseconds (year 2001 in ms vs year ~33658 in seconds).
+    // TODO(upstream-contract): this two-unit split mirrors qurl-service emitting expires_at in
+    // seconds or milliseconds. A switch to a finer unit does not fail loudly here -- it decodes
+    // to a wrong but representable date -- so the plausibility bound below is what catches it.
     const ms = raw >= 1e12 ? raw : raw * 1000;
-    return new Date(ms).toISOString();
+
+    // A nanosecond timestamp (Go's UnixNano is ~1.7e18) overflows the Date range, and the
+    // RangeError toISOString() throws would reach uploadFile's catch as a failed upload for a
+    // file the server had already stored. Signal "no usable expiry" like the string branch.
+    const date = new Date(ms);
+    if (Number.isNaN(date.getTime())) {
+      console.warn('[qURL] Ignoring out-of-range expires_at:', raw);
+      return null;
+    }
+
+    // A microsecond timestamp (Go's UnixMicro is ~1.7e15) stays inside the Date range, so the
+    // check above passes and toISOString() yields a valid-but-absurd year ~55840. That string
+    // does not stop at the popup: buildExpirySuffix inserts it into the user's Gmail draft, so
+    // the recipient reads "(Expires: 55840-11-08 ...)" beside a link that is genuinely live.
+    // Treat an implausible expiry as no expiry, which both callers already render by omission.
+    if (ms > Date.now() + MAX_PLAUSIBLE_EXPIRY_MS) {
+      console.warn('[qURL] Ignoring implausibly distant expires_at:', raw);
+      return null;
+    }
+
+    return date.toISOString();
   }
 
+  // MAX_PLAUSIBLE_EXPIRY_MS is deliberately not applied below. It exists to catch a *unit* slip,
+  // which is a numeric-encoding failure: an ISO string names an instant unambiguously, so an
+  // absurd year in one is the server being wrong rather than this code decoding it wrong, and
+  // bounding it here would only trade that for a silently dropped expiry.
   if (typeof raw === 'string') {
     const trimmed = raw.trim();
     if (!trimmed) return null;
@@ -599,7 +634,7 @@ function _sanitizeFilename(name) {
 }
 
 function createMultipartBoundary() {
-  // crypto.getRandomValues is present in every Chrome at/after minimum_chrome_version, so there
+  // crypto.getRandomValues is present in every supported host browser, so there
   // is no non-crypto fallback to maintain (Node test runs provide it via the global crypto too).
   const bytes = new Uint8Array(16);
   globalThis.crypto.getRandomValues(bytes);
@@ -624,14 +659,14 @@ function normalizeQurlApiBase(value) {
   try {
     parsed = new URL(trimmed);
   } catch (err) {
-    throw new Error(getMessage(
+    throw new Error(apiGetMessage(
       'config_invalid_url_error',
       'qURL server URL must be a valid http(s) URL.'
     ));
   }
 
   if (parsed.protocol !== 'https:') {
-    throw new Error(getMessage(
+    throw new Error(apiGetMessage(
       'config_https_required_error',
       'qURL server URL must start with https://'
     ));
@@ -666,7 +701,7 @@ function resolveDefaultQurlApiConfig(baseUrl) {
 /**
  * Builds the host permission pattern for the given qURL base URL.
  *
- * Chrome match patterns do not permit a port in the host, so a base URL with an
+ * Browser match patterns do not permit a port in the host, so a base URL with an
  * explicit port (e.g. https://host:8443) must yield a port-less pattern. Host match
  * patterns authorize any port on the host, which is the intended behavior here.
  *
@@ -693,7 +728,12 @@ function isDefaultQurlOrigin(baseUrl) {
   }
 }
 
-function getMessage(key, fallback, substitutions) {
+// Named apiGetMessage rather than getMessage on purpose. popup.html loads this
+// file and popup.js as classic scripts into one shared global scope, so a
+// top-level `function getMessage` here and in popup.js would be the same
+// binding, with the last-loaded file silently winning for both. Keep the name
+// distinct so the two cannot capture each other.
+function apiGetMessage(key, fallback, substitutions) {
   if (QURLI18n && typeof QURLI18n.getMessage === 'function') {
     return QURLI18n.getMessage(key, fallback, substitutions);
   }
@@ -717,7 +757,7 @@ if (typeof module !== 'undefined' && module.exports) {
     getQurlApiBase,
     getQurlHostPermissionPattern,
     getStoredQurlApiBase,
-    getMessage,
+    apiGetMessage,
     isDefaultQurlOrigin,
     normalizeQurlApiBase,
     requestQurlHostPermission,

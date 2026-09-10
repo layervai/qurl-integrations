@@ -28,6 +28,14 @@ import (
 const (
 	authFailureMessage       = "Failed to authenticate. Please check your qURL API key configuration."
 	workspaceNotSetupMessage = "qURL isn't connected to this workspace yet. Run `/qurl setup <email>` to connect it."
+	// setupStateMintBudget combines with adminGateBudget on /qurl setup's
+	// synchronous path. 800ms + 1.5s leaves at least 700ms of Slack's 3s ack
+	// window for parsing, response encoding, and network overhead. The OAuth
+	// package retains its own broader 2s store ceiling for non-handler callers.
+	setupStateMintBudget = 1500 * time.Millisecond
+	// qurlContactURL is the public support path used by proactive help surfaces
+	// and by deployment-specific error fallbacks that need a real next step.
+	qurlContactURL = "https://layerv.ai/contact"
 )
 
 // ErrSlackTriggerExpired lets Config.OpenView report Slack's short-lived
@@ -80,6 +88,15 @@ func NewSlackRateLimitError(retryAfter string) error {
 
 // OpenViewFunc posts a Slack modal through `views.open`.
 type OpenViewFunc func(ctx context.Context, teamID, triggerID string, viewJSON []byte) error
+
+// SlackUserLookupFunc reports whether userID is an active Slack user visible to
+// the app token used for the team. Used by ownership transfer so a manually
+// pasted `<@U...>` shape cannot move owner_id to a malformed, deleted, bot, or
+// invisible account. The enterpriseID parameter is reserved for future
+// Enterprise Grid support; the production users.info adapter intentionally does
+// not fall back to an org token because that proves org visibility, not
+// workspace membership (qurl-integrations#877).
+type SlackUserLookupFunc func(ctx context.Context, teamID, enterpriseID, userID string) (bool, error)
 
 // PostFeedbackFunc delivers a `/qurl feedback` submission to the internal
 // feedback Slack channel by POSTing a Block Kit payload to a Slack incoming
@@ -286,6 +303,13 @@ const maxRequestBodyBytes = 1 << 20
 // of a richer payload fails (unreachable for current callers).
 const internalErrorEnvelope = `{"error":"internal"}`
 
+// errEnvelopeKey is the single JSON key of this handler's OWN HTTP error
+// envelope — the 400/401/404/405/413 replies on the non-Slack surfaces. It is
+// deliberately not one of the respField* Slack slash-command response keys
+// further down. internalErrorEnvelope above spells the same key literally
+// because it is pre-marshaled for the path where marshaling itself failed.
+const errEnvelopeKey = "error"
+
 // Config carries the runtime wiring for [NewHandler]. Every field is
 // captured by value into [Handler.cfg] once and then read on the
 // request hot path without synchronization — callers MUST NOT mutate
@@ -298,6 +322,10 @@ type Config struct {
 	AuthProvider       auth.Provider
 	SlackSigningSecret string
 	NewClient          func(apiKey string) *client.Client
+	// ConnectorAPIURL is the qURL platform API base including /v1. Guided
+	// tunnel setup writes it into every rendered runtime definition so sandbox
+	// installs never silently fall back to production.
+	ConnectorAPIURL string
 
 	// BaseContext is the server-lifetime parent of every async work
 	// goroutine's context. SIGTERM cancels it, which propagates to
@@ -333,9 +361,15 @@ type Config struct {
 	// AdminStore is the DDB-direct facade for workspace_mappings +
 	// channel_policies. When nil, the admin verbs short-circuit to a
 	// graceful "admin features are not configured" reply — fine for
-	// sandbox / no-DDB tests. Production wires one in cmd/main.go
+	// admin-storage-disabled tests. Production wires one in cmd/main.go
 	// from the QURL_*_TABLE env vars (see slackdata.NewStore).
 	AdminStore *slackdata.Store
+
+	// SlackUserLookup verifies an ownership-transfer target against Slack's
+	// users.info API before owner_id is rewritten. Nil keeps transfer
+	// fail-closed with a "not configured" reply; production wires it in
+	// cmd/main.go.
+	SlackUserLookup SlackUserLookupFunc
 
 	// OpenView posts a `views.open` Slack web API call to display a
 	// modal in response to a slash command. The token owner parameter is
@@ -353,6 +387,12 @@ type Config struct {
 	// operator-only reinstall prompt.
 	SlackInstallURL string
 
+	// SlackBotTokenRotationEnabled means Slack may send tokens_revoked for a
+	// routine bot-token rotation while the workspace remains installed. When true,
+	// tokens_revoked is acknowledged but never treated as an uninstall teardown;
+	// app_uninstalled remains the destructive lifecycle signal.
+	SlackBotTokenRotationEnabled bool
+
 	// PostDM posts a direct message via chat.postMessage on the
 	// per-workspace bot token, with the same Enterprise Grid fallback as
 	// OpenView/PostMessage. `/qurl get dm:true` and qURL Connector
@@ -361,7 +401,7 @@ type Config struct {
 	PostDM PostDMFunc
 
 	// TunnelImage is the Docker image shown by `/qurl-admin protect-connector`.
-	// The public env var is QURL_CONNECTOR_IMAGE; this field keeps the
+	// The public env var is QURL_IMAGE; this field keeps the
 	// historical tunnel naming used by the install-rendering code.
 	// Empty falls back to the public client image with the `latest` tag only for
 	// explicit dev/sandbox installs; production cmd/main.go fails closed unless
@@ -370,6 +410,12 @@ type Config struct {
 	// that construct Config directly must pass a pinned image unless they
 	// intentionally exercise the dev/sandbox fallback path.
 	TunnelImage string
+
+	// S3OriginImage is the private S3 website origin image shown by the
+	// `/qurl-admin protect` S3 website flow. Empty falls back to this package's
+	// digest-pinned default; production can set QURL_S3_ORIGIN_IMAGE to a
+	// tested digest when rotating the origin independently from the Slack app.
+	S3OriginImage string
 
 	// PostFeedback delivers a `/qurl feedback` submission to the internal
 	// feedback Slack channel. Nil disables `/qurl feedback`: the command
@@ -388,9 +434,17 @@ type Config struct {
 	// factory. Nil disables conversation mode.
 	AgentLLM agent.LLM
 
-	// AgentStore persists per-thread conversation history and Slack event-id
-	// dedupe. Nil disables conversation mode.
+	// AgentStore persists metadata-only conversation state: Slack event dedupe,
+	// pending confirmations, pane context, rate counters, and audit entries. Slack
+	// message content is reconstructed from Slack in real time instead of stored.
+	// Nil disables conversation mode.
 	AgentStore *slackdata.AgentStore
+
+	// AgentThreadHistory reads the current Slack thread via conversations.replies.
+	// Nil keeps direct turns single-turn and channel follow-ups fail-closed, which is
+	// useful in tests; production wires this so conversation continuity remains
+	// zero-copy.
+	AgentThreadHistory AgentThreadHistoryFunc
 
 	// PostMessage posts a chat.postMessage reply (threaded on threadTS) using
 	// the per-workspace bot token, the same token seam as OpenView/PostDM.
@@ -429,6 +483,20 @@ type Config struct {
 	// PostMessage (text-only) can't carry buttons. Nil keeps the confirm flow off
 	// (see agentConfirmEnabled); production wires it in cmd/main.go.
 	PostMessageBlocks PostMessageBlocksFunc
+
+	// PostDMBlocks posts a Block Kit direct message (conversations.open then a
+	// chat.postMessage with blocks) — the DM analog of PostMessageBlocks. It
+	// delivers the `/qurl get dm:true` minted link as an "Enter Portal" URL button
+	// instead of a raw hyperlink. Nil makes getWork refuse `dm:true` (the privacy
+	// contract can't be met without it); production wires it in cmd/main.go.
+	PostDMBlocks PostDMBlocksFunc
+
+	// PostEphemeralBlocks posts a Block Kit chat.postEphemeral (visible only to
+	// userID) — the Block Kit analog of PostEphemeral. The confirm flow delivers a
+	// get's minted link this way in a channel/private channel as an "Enter Portal"
+	// URL button. Nil → the channel get delivery reports failure and the card
+	// downgrades; it is NOT part of the agentEnabled gate.
+	PostEphemeralBlocks PostEphemeralBlocksFunc
 
 	// AgentConfirmEnabled gates the propose→confirm→execute flow on top of the
 	// read-only conversation surface. While false (the default), a proposed
@@ -566,6 +634,22 @@ type PostEphemeralFunc func(ctx context.Context, teamID, enterpriseID, channelID
 // post with mrkdwn disabled as defense-in-depth.
 type PostMessageBlocksFunc func(ctx context.Context, teamID, enterpriseID, channelID, threadTS string, blocks []any, fallbackText string) error
 
+// PostDMBlocksFunc posts a Block Kit direct message to slackUserID (conversations.open
+// then a chat.postMessage with blocks) on the per-workspace bot token — the DM analog
+// of PostMessageBlocksFunc, used to deliver a `/qurl get dm:true` link as an Enter
+// Portal URL button. fallbackText is the notification/non-block fallback (it carries
+// the raw URL so a non-block client isn't dead-ended). enterpriseID is passed for
+// Enterprise Grid token resolution, matching PostDMFunc.
+type PostDMBlocksFunc func(ctx context.Context, teamID, enterpriseID, slackUserID string, blocks []any, fallbackText string) error
+
+// PostEphemeralBlocksFunc posts a Block Kit chat.postEphemeral (visible only to userID)
+// on the per-workspace bot token — the Block Kit analog of PostEphemeralFunc. threadTS
+// threads it into the card's conversation. Like PostEphemeralFunc it's a standalone
+// message a same-response_url card-replace can't clobber, and it returns an error on a
+// non-ok response so the caller can downgrade the card. fallbackText is the
+// notification/non-block fallback.
+type PostEphemeralBlocksFunc func(ctx context.Context, teamID, enterpriseID, channelID, threadTS, userID string, blocks []any, fallbackText string) error
+
 // AppHomePublishFunc publishes a user's App Home tab via views.publish on the
 // per-workspace bot token (enterpriseID for Grid token resolution). blocks is the
 // Home view's content (the map[string]any block shape the views.go builders emit); the
@@ -596,7 +680,7 @@ type AgentStreamStart struct {
 type AgentStreamPort interface {
 	StartStream(ctx context.Context, start *AgentStreamStart) (streamTS string, err error)
 	AppendStream(ctx context.Context, teamID, enterpriseID, channelID, streamTS, markdownText string) error
-	StopStream(ctx context.Context, teamID, enterpriseID, channelID, streamTS string) error
+	StopStream(ctx context.Context, teamID, enterpriseID, channelID, streamTS string, blocks []any) error
 }
 
 // ResolveChannelNameFunc resolves a channel id to its human name via
@@ -619,6 +703,34 @@ type ConversationInfo struct {
 // resolution). It returns an error on a missing scope, unknown conversation, or
 // transport/decode failure; callers choose whether that is best-effort or fail-closed.
 type ResolveConversationInfoFunc func(ctx context.Context, teamID, enterpriseID, channelID string) (ConversationInfo, error)
+
+// AgentThreadMessage is the narrow Slack message slice needed to rebuild model
+// context in memory. AppID and UserID identify this app's own replies; BotID lets
+// the handler reject messages from other bots.
+type AgentThreadMessage struct {
+	AppID  string
+	BotID  string
+	UserID string
+	Text   string
+	TS     string
+	// HasFiles reports that Slack described this message as carrying an
+	// attachment. Presence only, exactly like the live-event path: no name, type,
+	// size, or content survives the decode (see SlackMessageHasUpload).
+	//
+	// It exists because an upload's own turn is refused with
+	// agentUnsupportedMediaReply, but the caption stays in the Slack thread and is
+	// rebuilt into model context on every LATER turn. Without this flag that
+	// caption replays as an ordinary message — "protect everything in this" with
+	// nothing saying a file was ever involved — which is the same misrepresentation
+	// the refusal exists to prevent, one turn later.
+	HasFiles bool
+}
+
+// AgentThreadHistoryFunc retrieves a thread from Slack in real time. oldestTS
+// bounds the request to the same recent-context window the agent previously used;
+// implementations must return messages oldest-first, and must set HasFiles for any
+// message Slack described as carrying an attachment.
+type AgentThreadHistoryFunc func(ctx context.Context, teamID, enterpriseID, channelID, threadTS, oldestTS string) ([]AgentThreadMessage, error)
 
 // ChannelMembershipFunc reports whether userID is a member of channelID via
 // conversations.members on the per-workspace bot token (enterpriseID for Grid token
@@ -680,6 +792,10 @@ type Handler struct {
 	// missing env vars) — /qurl setup returns a "not configured"
 	// ephemeral in that case rather than minting a useless link.
 	oauthSetup *oauth.SetupConfig
+	// setupLinkRateLimiter bounds signed setup-link minting per Slack workspace/user.
+	// The owner/rebind checks still run first so invalid or refused setup attempts
+	// do not consume the caller's small retry budget.
+	setupLinkRateLimiter *setupLinkRateLimiter
 	// aliasStore persists per-channel alias bindings for the
 	// `/qurl-admin set-alias` / `/qurl-admin unset-alias` verbs. nil when not
 	// configured (sandbox / pre-#231/#233 deploys) — handlers fail
@@ -701,6 +817,17 @@ type Handler struct {
 	// agentAckTimeout is captured from Config.AgentAckTimeout once at construction.
 	// The handler reads it without synchronization on the request hot path.
 	agentAckTimeout time.Duration
+	// driftLogged latches which envelope field paths have already reported a
+	// tolerated JSON type drift, so a systematic Slack schema change reports
+	// once per field instead of once per request. See logEventDrift for why the
+	// key space is bounded. A zero sync.Map is fully usable, so this latches
+	// correctly on a hand-built Handler that never went through NewHandler.
+	//
+	// Embedded BY VALUE, which makes "a Handler is used through a pointer" a
+	// real constraint rather than a convention: sync.Map carries a noCopy, so
+	// copying a Handler now trips go vet's copylocks. Every use is already
+	// *Handler, and the vet run in `make check` keeps it that way.
+	driftLogged sync.Map
 	// wg tracks live async workers so cmd/main.go's Wait() can drain
 	// them after http.Server.Shutdown returns. wg.Add MUST happen on
 	// the request goroutine (before the `go` keyword) — adding inside
@@ -772,7 +899,7 @@ func (h *Handler) SetAliasStore(store AliasStore) {
 
 // SetOAuthSetup wires the per-workspace OAuth configuration into the
 // /qurl setup slash command. Must be called exactly once, before
-// srv.Serve. Empty/short secret or empty base URL is a no-op
+// srv.Serve. An empty base URL or nil state store is a no-op
 // (/qurl setup will reply that OAuth is not configured). A second call
 // panics — the field is read without synchronization on the request
 // hot path, and the only safe write window is before any goroutine can
@@ -781,18 +908,9 @@ func (h *Handler) SetOAuthSetup(cfg oauth.SetupConfig) {
 	if h.oauthSetup != nil {
 		panic("SetOAuthSetup called twice — must be called once before Serve")
 	}
-	if len(cfg.StateSecret) == 0 || cfg.SlackBaseURL == "" {
+	if cfg.SlackBaseURL == "" || cfg.StateStore == nil {
 		return
 	}
-	if len(cfg.StateSecret) < oauth.StateMinSecret {
-		// Fail-fast at startup: MintState would reject this later, but
-		// the operator-facing failure is more discoverable here.
-		panic("SetOAuthSetup: StateSecret shorter than oauth.StateMinSecret")
-	}
-	// Defensive copy: the field is read on the request hot path without
-	// a lock. A caller mutating the original byte slice would silently
-	// poison every subsequent MintState call.
-	cfg.StateSecret = append([]byte(nil), cfg.StateSecret...)
 	h.oauthSetup = &cfg
 }
 
@@ -861,6 +979,7 @@ func NewHandler(cfg Config) *Handler {
 		validateResponseURLFn: validateResponseURL,
 		channelNames:          newChannelNameCache(channelNameTTL),
 		channelMembers:        newChannelMembershipCache(channelMembershipTTL),
+		setupLinkRateLimiter:  newSetupLinkRateLimiter(),
 	}
 }
 
@@ -1003,16 +1122,16 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// /slack/commands); logging each would be noise. Slack and
 		// health paths are the only legitimate surface and they get
 		// their own log lines.
-		respondJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+		respondJSON(w, http.StatusNotFound, map[string]string{errEnvelopeKey: "not found"})
 		return
 	}
 
-	slog.Info("received request", "path", r.URL.Path, "method", r.Method) //nolint:gosec // G706: slog's JSON handler escapes control chars in attribute values, so tainted paths can't inject log lines.
+	slog.Info("received request", "path", r.URL.Path, "method", r.Method)
 
 	// Honest oversize declarations get rejected before allocation.
 	// MaxBytesReader still catches dishonest senders during the read.
 	if r.ContentLength > maxRequestBodyBytes {
-		slog.Info("oversize body rejected", "path", r.URL.Path, "reason", "content_length_pre_check", "declared", r.ContentLength) //nolint:gosec // G706: see ServeHTTP — slog escapes tainted attribute values.
+		slog.Info("oversize body rejected", "path", r.URL.Path, "reason", "content_length_pre_check", "declared", r.ContentLength)
 		respondPayloadTooLarge(w)
 		return
 	}
@@ -1023,17 +1142,17 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// above; bucket them together so dashboards see one 413 stream.
 		var mbErr *http.MaxBytesError
 		if errors.As(err, &mbErr) {
-			slog.Info("oversize body rejected", "path", r.URL.Path, "reason", "max_bytes_during_read") //nolint:gosec // G706: see ServeHTTP — slog escapes tainted attribute values.
+			slog.Info("oversize body rejected", "path", r.URL.Path, "reason", "max_bytes_during_read")
 			respondPayloadTooLarge(w)
 			return
 		}
-		slog.Warn("failed to read request body", "error", err, "path", r.URL.Path) //nolint:gosec // G706: see ServeHTTP — slog escapes tainted attribute values.
-		respondJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid body"})
+		slog.Warn("failed to read request body", "error", err, "path", r.URL.Path)
+		respondJSON(w, http.StatusBadRequest, map[string]string{errEnvelopeKey: "invalid body"})
 		return
 	}
 
 	if err := h.verifySlackRequest(r, body); err != nil {
-		respondJSON(w, http.StatusUnauthorized, map[string]string{"error": "signature verification failed"})
+		respondJSON(w, http.StatusUnauthorized, map[string]string{errEnvelopeKey: "signature verification failed"})
 		return
 	}
 
@@ -1074,9 +1193,9 @@ func (h *Handler) verifySlackRequest(r *http.Request, body []byte) error {
 		// Empty secret means the deployment is effectively open — page on
 		// it distinctly from ordinary 401 noise.
 		if errors.Is(err, errSlackSigningSecretEmpty) {
-			slog.Error("slack signature verification failed — signing secret is empty (deployment is open)", attrs...) //nolint:gosec // G706: attrs carries r.URL.Path which slog escapes.
+			slog.Error("slack signature verification failed — signing secret is empty (deployment is open)", attrs...)
 		} else {
-			slog.Warn("slack signature verification failed", attrs...) //nolint:gosec // G706: attrs carries r.URL.Path which slog escapes.
+			slog.Warn("slack signature verification failed", attrs...)
 		}
 	}
 	return err
@@ -1124,31 +1243,35 @@ const (
 	adminVerbProtectURL       = "protect-url"
 	// adminVerbAgent is `/qurl-admin agent on|off` — the per-workspace
 	// conversation-mode toggle (bare `agent` shows the current state).
-	adminVerbAgent = "agent"
+	adminVerbAgent             = "agent"
+	adminVerbAdd               = "add"
+	adminVerbRemove            = "remove"
+	adminVerbAdmins            = "admins"
+	adminVerbTransferOwnership = "transfer-ownership"
 )
 
 // Used to redirect a user who typed an admin verb on `/qurl` and to
 // classify the wrong-surface case. `set-alias`/`unset-alias` carry both
 // spellings because slashVerb accepts the dash-free historical form too.
-// `add`/`remove`/`admins`/`revoke` are the flat membership + revoke verbs;
+// `add`/`remove`/`admins`/`transfer-ownership`/`revoke` are the flat admin verbs;
 // `admin` is retained only so the deprecated `admin <verb>` prefix still
 // classifies here (it gets a redirect in dispatchAdminCommand). `setup` is
 // deliberately NOT here — it lives on `/qurl` (see handleSetup) so the first
 // claimant of an unbound workspace can reach it.
 //
-// Adding an admin verb touches three places that must stay in sync: this
-// list (wrong-surface classification), a dispatch case in
+// Adding an admin verb touches four places that must stay in sync: this
+// list (wrong-surface classification), Parse, a dispatch case in
 // dispatchAdminCommand, and — if it's user-facing — adminHelpMessage.
 //
 // Immutable: read-only on the request hot path (slashVerb ranges it); a
 // var only because Go has no const slice. Do not mutate at runtime.
-var adminVerbs = []string{string(SubcmdAdmin), adminVerbProtect, adminVerbProtectConnector, adminVerbProtectURL, adminVerbAgent, "set-alias", string(SubcmdSetAlias), "unset-alias", string(SubcmdUnsetAlias), "set-display-name", "unset-display-name", "add", "remove", "admins", "revoke"}
+var adminVerbs = []string{string(SubcmdAdmin), adminVerbProtect, adminVerbProtectConnector, adminVerbProtectURL, adminVerbAgent, "set-alias", string(SubcmdSetAlias), "unset-alias", string(SubcmdUnsetAlias), "set-display-name", "unset-display-name", adminVerbAdd, adminVerbRemove, adminVerbAdmins, adminVerbTransferOwnership, string(SubcmdRevoke)}
 
 // userVerbs are the leading verb words that belong to `/qurl`. Used to
 // redirect a user who typed a user verb on `/qurl-admin`. `setup` is a
 // user verb (first-come-claims; see handleSetup), so `/qurl-admin setup`
 // redirects here to `/qurl setup`. Immutable like adminVerbs (see above).
-var userVerbs = []string{"get", "list", "aliases", "create", "setup", uninstallVerb, "feedback"}
+var userVerbs = []string{"get", "list", string(SubcmdAliases), "create", setupVerb, uninstallVerb, "feedback"}
 
 // isAdminVerb reports whether text's leading verb is an admin verb.
 func isAdminVerb(text string) bool {
@@ -1257,7 +1380,7 @@ func stripUnsetDisplayNamePrefix(text string) string {
 func (h *Handler) handleSlashCommand(w http.ResponseWriter, body []byte) {
 	values, err := url.ParseQuery(string(body))
 	if err != nil {
-		respondJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid form body"})
+		respondJSON(w, http.StatusBadRequest, map[string]string{errEnvelopeKey: "invalid form body"})
 		return
 	}
 
@@ -1369,7 +1492,7 @@ func (h *Handler) dispatchUserCommand(w http.ResponseWriter, command, text strin
 		// routing here. The parser then produces ErrEmptyResource
 		// for a bare `get`.
 		h.handleGet(w, values)
-	case text == "aliases":
+	case text == string(SubcmdAliases):
 		h.handleAliases(w, values)
 	case slashSubcommand(text, "feedback"):
 		// feedback is a user verb available to any workspace member — no
@@ -1395,12 +1518,13 @@ func (h *Handler) dispatchUserCommand(w http.ResponseWriter, command, text strin
 
 // dispatchAdminCommand routes the admin-facing `/qurl-admin` verbs:
 // tunnel install, set-alias, unset-alias, set-display-name,
-// unset-display-name, the flat membership verbs add/remove/admins, revoke,
+// unset-display-name, the flat membership/ownership verbs
+// add/remove/admins/transfer-ownership, revoke,
 // and help. User verbs typed on `/qurl-admin` — including `setup`, which is a
 // `/qurl` verb (first-come-claims; see handleSetup) — get a redirect to
 // `/qurl` so a user who fat-fingers the command gets a direct correction.
 //
-// The membership verbs are flat (`/qurl-admin add @user`, not `admin add`):
+// The membership/ownership verbs are flat (`/qurl-admin add @user`, not `admin add`):
 // the whole command is already admin-scoped, so the `admin` sub-word was
 // redundant. Listing admins is `admins` (a plural noun) rather than `list` so
 // it doesn't collide with `/qurl list` (which lists resources). The legacy
@@ -1428,9 +1552,9 @@ func (h *Handler) dispatchAdminCommand(w http.ResponseWriter, command, text stri
 		// per-link kill. Runs async (multi-hop resolve+delete); see
 		// handleRevoke.
 		h.handleRevoke(w, values)
-	case slashSubcommand(text, "add"), slashSubcommand(text, "remove"), slashSubcommand(text, "admins"):
-		// Flat bot-admin membership verbs. handleAdmin parses the flat form
-		// (Parse maps add/remove/admins → SubcmdAdmin + AdminAction) and gates
+	case slashSubcommand(text, adminVerbAdd), slashSubcommand(text, adminVerbRemove), slashSubcommand(text, adminVerbAdmins), slashSubcommand(text, adminVerbTransferOwnership):
+		// Flat bot-admin membership/ownership verbs. handleAdmin parses the flat form
+		// (Parse maps add/remove/admins/transfer-ownership → SubcmdAdmin + AdminAction) and gates
 		// each in its own handler (requireAdminSync). Bare `add`/`remove`
 		// surface ErrMissingUserMention; `admins` takes no args.
 		h.handleAdmin(w, values)
@@ -1438,7 +1562,7 @@ func (h *Handler) dispatchAdminCommand(w http.ResponseWriter, command, text stri
 		// Deprecated `admin <verb>` prefix — the word is redundant on an
 		// already-admin command. Redirect to the flat verbs rather than
 		// silently accepting it, so muscle-memory users learn the new grammar.
-		respondSlack(w, fmt.Sprintf("The `admin` prefix isn't needed anymore — use `%[1]s add @user`, `%[1]s remove @user`, `%[1]s admins`, or `%[1]s revoke $<id>` directly.", command))
+		respondSlack(w, fmt.Sprintf("The `admin` prefix isn't needed anymore — use `%[1]s add @user`, `%[1]s remove @user`, `%[1]s transfer-ownership @user`, `%[1]s admins`, or `%[1]s revoke $<id>` directly.", command))
 	// protect-connector / protect-url precede the bare `protect` chooser. slashVerb
 	// matches an exact token or a `verb ` (space) prefix, so `protect` can't
 	// shadow the hyphenated verbs regardless of order; the adjacency is for
@@ -1564,13 +1688,15 @@ func setupModeFlag(mode oauth.SetupMode) string {
 // setupModeAction is the user-facing verb for an explicit setup mode, for copy.
 func setupModeAction(mode oauth.SetupMode) string {
 	switch mode {
+	case "", oauth.SetupModeReuse:
+		return "setup"
 	case oauth.SetupModeRotate:
 		return "key rotation"
 	case oauth.SetupModeRepoint:
 		return "key repoint"
-	case oauth.SetupModeReuse:
-		return "setup"
 	default:
+		// Unknown future modes fall back to the legacy setup copy until
+		// they get explicit user-facing language.
 		return "setup"
 	}
 }
@@ -1603,7 +1729,7 @@ func setupModeAction(mode oauth.SetupMode) string {
 // non-owners don't get a setup URL minted in their name at all (cleaner
 // audit, no half-completed OAuth flows).
 //
-// AdminStore=nil (sandbox / no-DDB) permits first-time setup but rejects
+// AdminStore=nil (admin storage disabled) permits first-time setup but rejects
 // explicit rotation because rotation must prove the caller is the workspace
 // owner before revoking a stored key. That is a separate short-circuit from
 // the oauthSetup==nil check below, which is the branch that returns "qURL
@@ -1611,7 +1737,7 @@ func setupModeAction(mode oauth.SetupMode) string {
 // consulted).
 func (h *Handler) handleSetup(w http.ResponseWriter, values url.Values, setupCmd setupCommand) {
 	if h.oauthSetup == nil {
-		respondSlack(w, "qURL OAuth is not configured on this Secure Access Agent deployment. Contact the operator.")
+		respondSlack(w, "qURL OAuth is not configured on this Secure Access Agent deployment. Contact qURL support at "+qurlContactURL+".")
 		return
 	}
 	teamID := strings.TrimSpace(values.Get(fieldTeamID))
@@ -1625,7 +1751,7 @@ func (h *Handler) handleSetup(w http.ResponseWriter, values url.Values, setupCmd
 		return
 	}
 	// Owner gate. AdminStore==nil only reaches here for first-time/reuse setup
-	// (sandbox/no-DDB); explicit rotation/repoint was rejected above because it
+	// (admin storage disabled); explicit rotation/repoint was rejected above because it
 	// cannot skip the owner check. Otherwise check whether the workspace has an owner
 	// and whether it's the invoking user. CheckAdmin returns (isAdmin, ownerID,
 	// err); we only consume ownerID here — the admin-set membership
@@ -1676,10 +1802,10 @@ func (h *Handler) handleSetup(w http.ResponseWriter, values url.Values, setupCmd
 			// into a `<@%s>` mention. BindWorkspace writes owner_id
 			// from the OAuth callback (a different code path than the
 			// parser), and a pre-pivot row holds an Auth0 sub, not a
-			// Slack ID. Mirrors the looksLikeSlackUserID guard in
-			// handleAdminList so a malformed value can't break out of
+			// Slack ID. Use slackdata.LooksLikeSlackUserID, the same
+			// shape guard as admin renders, so a malformed value can't break out of
 			// the mention surface.
-			if looksLikeSlackUserID(ownerID) {
+			if slackdata.LooksLikeSlackUserID(ownerID) {
 				slog.Warn("/qurl setup: rebind refused at slash-command gate — caller is not the workspace owner", "team_id", teamID, "caller_user_id", userID, "owner_user_id", ownerID)
 				respondSlack(w, fmt.Sprintf("`/qurl setup <email>` can only be re-run by the person who first connected qURL to this workspace (<@%s>). This stops anyone else from re-pointing it at a different qURL account, so ask them to re-run it. For admin tasks that don't need re-connecting, use the `/qurl-admin` commands.", ownerID))
 				return
@@ -1701,9 +1827,28 @@ func (h *Handler) handleSetup(w http.ResponseWriter, values url.Values, setupCmd
 			slog.Warn("/qurl setup: stored owner_id is shape-bad (likely a pre-pivot Auth0 sub) — allowing setup to reclaim the legacy row", "team_id", teamID, "caller_user_id", userID, "legacy_owner_prefix", slackdata.LegacyOwnerPrefix(ownerID), "owner_id_len", len(ownerID))
 		}
 	}
-	state, err := oauth.MintStateWithEmailMode(h.oauthSetup.StateSecret, teamID, userID, setupCmd.email, setupCmd.mode, h.now())
+	// This is deliberately a minting throttle, not a general slash-command
+	// request shield: the owner gate above still runs first so refused setup
+	// attempts do not consume quota. That means repeat non-owner attempts can
+	// still spend the owner-gate read; avoiding that would need a separate
+	// request shield above this gate. The quota is consumed before state storage
+	// so repeated local failures still get throttled instead of retrying without
+	// bound.
+	now := h.now()
+	if ok, retry := h.setupLinkRateLimiter.allow(teamID, userID, now); !ok {
+		slog.Info("/qurl setup: setup-link mint rate limited", "team_id", teamID, "caller_user_id", userID, "retry_after", retry.String())
+		retryCommand := "`/qurl setup <email>`"
+		if setupCmd.mode.Explicit() {
+			retryCommand = fmt.Sprintf("`/qurl setup <email> %s`", setupModeFlag(setupCmd.mode))
+		}
+		respondSlack(w, fmt.Sprintf(":warning: You have generated several qURL setup links recently. Wait %s, then run %s again.", humanizeRetry(retry), retryCommand))
+		return
+	}
+	mintCtx, mintCancel := context.WithTimeout(h.baseCtx, setupStateMintBudget)
+	defer mintCancel()
+	state, err := oauth.MintStoredStateWithEmailMode(mintCtx, h.oauthSetup.StateStore, teamID, userID, setupCmd.email, setupCmd.mode, now)
 	if err != nil {
-		slog.Error("/qurl setup: MintStateWithEmailMode failed", "error", err)
+		slog.Error("/qurl setup: mint OAuth state failed", "error", err)
 		respondSlack(w, "Could not generate setup link. Please try again or contact support.")
 		return
 	}
@@ -1717,7 +1862,21 @@ func (h *Handler) handleUninstall(w http.ResponseWriter, values url.Values) {
 	if !ok {
 		return
 	}
-	h.deleteWorkspaceAPIKey(w, teamID, userID)
+	h.deleteWorkspaceAPIKey(w, teamID, userID, slashUninstallPurgeWorkspaceIDs(values, teamID))
+}
+
+func slashUninstallPurgeWorkspaceIDs(values url.Values, teamID string) []string {
+	var set orderedIDSet
+	set.add(teamID)
+	if strings.EqualFold(strings.TrimSpace(values.Get(fieldIsEnterpriseInstall)), slackFormBoolTrue) {
+		// The destructive command is still authorized against the signed
+		// team_id's owner/admin row. Slack signs is_enterprise_install and
+		// enterprise_id in the slash payload; adding the enterprise partition here
+		// only lets an authorized workspace admin clear the org-install rows that
+		// can back that same Slack app install.
+		set.add(values.Get(fieldEnterpriseID))
+	}
+	return set.ids
 }
 
 // requireUninstallAvailableAndAuthorized is the single precondition path for
@@ -1771,7 +1930,20 @@ type workspaceKeyRevoker interface {
 // uninstall to local-only.
 var _ workspaceKeyRevoker = (*auth.DDBProvider)(nil)
 
-func (h *Handler) deleteWorkspaceAPIKey(w http.ResponseWriter, teamID, userID string) {
+// Ensure the production provider keeps satisfying the workspace-row teardown
+// capability so a refactor that drops DeleteWorkspaceState surfaces here rather
+// than silently leaving the encrypted bot token behind on uninstall.
+var _ workspaceStateDeleter = (*auth.DDBProvider)(nil)
+
+// Ensure production lifecycle purge keeps returning the deleted row's qURL key
+// identity for the deferred upstream-revoke follow-up (#926).
+var _ workspaceStateIdentityDeleter = (*auth.DDBProvider)(nil)
+
+// Ensure production lifecycle purge uses the reinstall-race guard when deleting
+// workspace_state rows.
+var _ workspaceStateBeforeIdentityDeleter = (*auth.DDBProvider)(nil)
+
+func (h *Handler) deleteWorkspaceAPIKey(w http.ResponseWriter, teamID, userID string, purgeWorkspaceIDs []string) {
 	// Reuse the sync admin-verb budget (1.2s): after the owner/admin gate, the
 	// optional upstream revoke plus the DeleteAPIKey write stay inside Slack's 3s
 	// ack window. The revoke is best-effort within this ctx — the qURL client may
@@ -1780,10 +1952,58 @@ func (h *Handler) deleteWorkspaceAPIKey(w http.ResponseWriter, teamID, userID st
 	ctx, cancel := context.WithTimeout(h.baseCtx, adminSyncVerbBudget)
 	defer cancel()
 
+	// The trailing sentence is the honest boundary of what this command does. It
+	// clears qURL's per-workspace data but deliberately leaves the Slack app —
+	// and the bot token Slack issued to it — in place, because only a fresh Slack
+	// app authorization can ever re-issue that token (see purgeScopeDisconnect).
+	// An admin who wants the token gone too has to remove the app in Slack, which
+	// fires app_uninstalled and runs the full purge.
+	const localSlackDataPurgeScheduledReply = "Local Slack app data for this workspace is being cleared; Slack features stay disconnected until the recorded workspace owner runs `/qurl setup <email>`. The qURL Slack app itself stays installed — to remove it and the Slack token it was granted, remove qURL from your workspace's Slack app management page."
+
 	// Shown only on the revoked=true paths (204/404), which are unreachable for a
 	// self-revoke (see classifyUninstallRevokeError) — defensive for #806. The
 	// "(or was already revoked upstream)" hedge covers the 404 case it would surface.
-	const revokedReply = "qURL has been disconnected from this workspace's Slack commands, and this workspace's qURL API key has been revoked (or was already revoked upstream).\n\nThe recorded workspace owner can run `/qurl setup <email>` to reconnect it."
+	const revokedReply = "qURL has been disconnected from this workspace's Slack commands, and this workspace's qURL API key has been revoked (or was already revoked upstream).\n\n" + localSlackDataPurgeScheduledReply
+
+	// DeleteAPIKey clears only the qURL key columns. Whenever the command reaches
+	// a terminal local-disconnect result (success, or already-no-qURL-key), forget
+	// the rest of the workspace too — the encrypted Slack bot token + data key,
+	// the workspace_mappings row, and every channel_policies row — so `/qurl
+	// uninstall` leaves nothing behind (the same teardown a Slack app_uninstalled
+	// event triggers). Enterprise Grid org installs can have local rows keyed by
+	// both team_id and enterprise_id, so the slash payload resolves the full set
+	// of local partitions to sweep while the primary qURL-key delete remains
+	// team-scoped. Best-effort and idempotent: the primary disconnect path has
+	// already reached a terminal reply, so a sweep failure is logged inside
+	// purgeWorkspace and does not change the Slack response. Run it on a tracked
+	// async goroutine off h.baseCtx (NOT this request's ctx, which `defer
+	// cancel()`s on return) so the extra DeleteItem/Query round-trips — which can
+	// be several on a workspace used in many channels — stay off the slash ack's
+	// tight sync budget. h.Go is wg-tracked so shutdown waits for the purge
+	// goroutine to unwind; because the purge context derives from h.baseCtx,
+	// shutdown cancellation may abort the best-effort sweep before it completes.
+	schedulePurge := func(reason string) {
+		ids := append([]string(nil), purgeWorkspaceIDs...)
+		// Capture the cutoff only after DeleteAPIKey reaches a terminal local
+		// result. DeleteAPIKey itself stamps updated_at_unix_nano; taking this
+		// cutoff earlier would make the guarded workspace_state delete retain the
+		// row this uninstall just cleared. In production, source the cutoff from
+		// auth.DDBProvider's clock so the stamp and cutoff share one injectable
+		// clock; tests/fallback providers use the handler clock.
+		purgeCutoff := workspaceStatePurgeCutoff(h.cfg.AuthProvider, h.now)
+		purgeLog := slog.With("surface", "uninstall", "team_id", teamID, "caller_user_id", userID, "reason", reason, "workspace_ids", ids, "purge_cutoff", purgeCutoff.UTC().Format(time.RFC3339))
+		h.Go(func() {
+			baseCtx := h.baseCtx
+			if baseCtx == nil {
+				baseCtx = context.Background()
+			}
+			for _, workspaceID := range ids {
+				purgeCtx, purgeCancel := context.WithTimeout(baseCtx, lifecyclePurgeTimeout)
+				h.purgeWorkspaceWithRetry(purgeCtx, purgeLog.With("workspace_id", workspaceID), workspaceID, purgeCutoff, purgeScopeDisconnect)
+				purgeCancel()
+			}
+		})
+	}
 
 	// revoked reports whether the upstream key was revoked; a non-nil error means
 	// the key may still be live, so abort before local removal to preserve the
@@ -1805,10 +2025,12 @@ func (h *Handler) deleteWorkspaceAPIKey(w http.ResponseWriter, teamID, userID st
 				// / partial row), but this call did revoke the upstream key — report
 				// success, not the contradictory "isn't currently connected".
 				slog.Info("/qurl uninstall: upstream key revoked; local row already cleared", "team_id", teamID, "caller_user_id", userID)
+				schedulePurge("qurl_key_already_cleared_after_revoke")
 				respondSlack(w, revokedReply)
 				return
 			}
-			respondSlack(w, "qURL isn't currently connected to this workspace. The recorded workspace owner can run `/qurl setup <email>` to connect it; contact your qURL operator if the owner is unavailable.")
+			schedulePurge("qurl_key_not_configured")
+			respondSlack(w, "qURL isn't currently connected to this workspace.\n\n"+localSlackDataPurgeScheduledReply+"\n\nContact your qURL operator if the owner is unavailable.")
 			return
 		case errors.Is(err, auth.ErrWorkspaceAPIKeyDeleteUnsupported):
 			respondUninstallUnsupported(w)
@@ -1819,12 +2041,23 @@ func (h *Handler) deleteWorkspaceAPIKey(w http.ResponseWriter, teamID, userID st
 			return
 		}
 	}
+	schedulePurge("delete_api_key_succeeded")
 	slog.Info("/qurl uninstall: disconnected workspace Slack commands", "team_id", teamID, "caller_user_id", userID, "upstream_revoked", revoked)
 	if revoked {
 		respondSlack(w, revokedReply)
 		return
 	}
-	respondSlack(w, "qURL has been disconnected from this workspace's Slack commands.\n\nThis does not revoke the qURL API key outside Slack; contact the operator if you're disconnecting because the key may be exposed.\n\nThe recorded workspace owner can run `/qurl setup <email>` to reconnect it.")
+	respondSlack(w, "qURL has been disconnected from this workspace's Slack commands.\n\n"+localSlackDataPurgeScheduledReply+"\n\nThis does not revoke the qURL API key outside Slack; contact the operator if you're disconnecting because the key may be exposed.")
+}
+
+func workspaceStatePurgeCutoff(provider auth.Provider, fallbackNow func() time.Time) time.Time {
+	if ddb, ok := provider.(*auth.DDBProvider); ok && ddb.Now != nil {
+		return ddb.Now()
+	}
+	if fallbackNow != nil {
+		return fallbackNow()
+	}
+	return time.Now()
 }
 
 // revokeWorkspaceUpstreamKey best-effort revokes the workspace's upstream qURL
@@ -1954,7 +2187,7 @@ func classifyUninstallRevokeError(revokeErr error, teamID, userID, keyID string)
 }
 
 func respondUninstallUnsupported(w http.ResponseWriter) {
-	respondSlack(w, "`/qurl uninstall` isn't supported on this Secure Access Agent deployment. Contact the operator.")
+	respondSlack(w, "`/qurl uninstall` isn't supported on this Secure Access Agent deployment. Contact qURL support at "+qurlContactURL+".")
 }
 
 type uninstallUnavailableReason int
@@ -1969,14 +2202,14 @@ const (
 func respondUninstallUnavailable(w http.ResponseWriter, reason uninstallUnavailableReason) {
 	switch reason {
 	case uninstallUnavailableCredentialStorage:
-		respondSlack(w, "qURL credential storage is not configured on this Secure Access Agent deployment. Contact the operator.")
+		respondSlack(w, "qURL credential storage is not configured on this Secure Access Agent deployment. Contact qURL support at "+qurlContactURL+".")
 		return
 	case uninstallUnavailableOwnerVerification:
-		respondSlack(w, "qURL owner verification is not configured on this Secure Access Agent deployment. Contact the operator.")
+		respondSlack(w, "qURL owner verification is not configured on this Secure Access Agent deployment. Contact qURL support at "+qurlContactURL+".")
 		return
 	default:
 		slog.Error("/qurl uninstall: unknown unavailable reason", "reason", int(reason))
-		respondSlack(w, "qURL uninstall is not available on this Secure Access Agent deployment. Contact the operator.")
+		respondSlack(w, "qURL uninstall is not available on this Secure Access Agent deployment. Contact qURL support at "+qurlContactURL+".")
 		return
 	}
 }
@@ -2010,7 +2243,7 @@ func (h *Handler) requireUninstallAdminOrOwner(w http.ResponseWriter, teamID, us
 		// from this recoverable local disconnect; log it for operator cleanup.
 		if ownerID == "" {
 			slog.Warn("/qurl uninstall: admin allowed with missing owner_id", "team_id", teamID, "caller_user_id", userID)
-		} else if !looksLikeSlackUserID(ownerID) {
+		} else if !slackdata.LooksLikeSlackUserID(ownerID) {
 			slog.Warn("/qurl uninstall: admin allowed with shape-bad owner_id", "team_id", teamID, "caller_user_id", userID, "owner_id_len", len(ownerID))
 		}
 		return true
@@ -2029,18 +2262,260 @@ func (h *Handler) authenticatedClient(ctx context.Context, teamID string) (*clie
 	return h.cfg.NewClient(apiKey), nil
 }
 
+// jsonFieldTypeDrift reports whether a decode error is a per-FIELD type
+// mismatch — a JSON value the decoder could not put in the struct field it
+// landed in — rather than a failure to parse the body at all, and returns the
+// dotted path of the field it happened on.
+//
+// The distinction is what lets handleEvent salvage the first case. A
+// *json.SyntaxError leaves the envelope completely zero, because encoding/json
+// validates the whole document before decoding any of it. A
+// *json.UnmarshalTypeError is the opposite: the decoder records it, skips only
+// the offending value, and keeps filling in the rest.
+//
+// Two edges worth knowing before relying on that:
+//
+//   - Only the FIRST mismatch is reported, but EVERY mismatched field is
+//     zeroed. The returned path names one field; it is not an inventory.
+//   - A numeric literal that is well-typed but out of range for the target
+//     (`"event_time": 1e30`) also arrives as *json.UnmarshalTypeError.
+//
+// errors.As rather than a type assertion is defensive, not required: today the
+// decoder MUTATES the error to add context rather than wrapping it, so a plain
+// assertion would work. An empty Field means the mismatch was against the whole
+// document (a body that is a bare array or string), which populates nothing and
+// so is not field drift.
+func jsonFieldTypeDrift(err error) (field string, ok bool) {
+	var typeErr *json.UnmarshalTypeError
+	if !errors.As(err, &typeErr) || typeErr.Field == "" {
+		return "", false
+	}
+	return typeErr.Field, true
+}
+
+// lifecycleDropDriftReason is the operator-facing half of refusing to purge on a
+// drifted envelope. Split out so the message lives next to the reasoning rather
+// than inline in the switch.
+const lifecycleDropDriftReason = "lifecycle event NOT purged: envelope field type drift makes the purge SCOPE untrustworthy; no workspace data was deleted"
+
+// logEventDrift reports a tolerated field-type drift, at Warn the first time it
+// sees a given field path and at Debug after that.
+//
+// The latch is per PROCESS and never expires, which is the right shape for what
+// this reports: drift means Slack's schema moved, so the first line is the whole
+// signal and every repeat is the same news at request volume.
+//
+// It never expires, which has a cost worth stating: a single transient
+// malformed payload latches its field forever, so if that same field later
+// moved for real, the schema change would surface at Debug rather than Warn.
+// Accepted because the alternative — a TTL — reintroduces the flood it exists
+// to stop, and the first sighting is always reported either way.
+//
+// An unbounded map on the request path needs its key space justified. Keys are
+// *json.UnmarshalTypeError.Field, which encoding/json builds from STRUCT TAGS
+// only — it carries neither slice indices nor map keys (verified: a mistyped
+// value under `map[string]string` reports the map's own field name, not the
+// payload's key). Every envelope field is a string, int64, bool, pointer, slice
+// or struct today, so the ceiling is the number of fields we declare and a
+// payload cannot move it. Adding a map-typed field would not breach that either,
+// on current behavior — but it is the change that would put this assumption back
+// in play, so re-check it there.
+//
+// nil-receiver-safe, and correct on a Handler built without NewHandler: sync.Map
+// needs no construction, so only a nil *Handler* skips the latch.
+func (h *Handler) logEventDrift(err error, driftField string, env *slackEventEnvelope, bodyLength int) {
+	// slog evaluates its variadic args before it filters on level, so the
+	// demoted repeats would each build a record the sink then discards — and
+	// those repeats are per-request during exactly the systematic drift this
+	// latch exists for. Ask first.
+	//
+	// ORDER MATTERS: the level check comes before the latch is claimed, never
+	// after. Claiming first would let a sink with Warn disabled consume a
+	// field's one guaranteed report, so a later REAL schema move on that field
+	// would only ever surface at Debug — the latch quietly eating the thing it
+	// exists to deliver. Returning early instead costs nothing, because a
+	// threshold sink that rejects Warn rejects Debug too.
+	ctx := context.Background()
+	level := slog.LevelWarn
+	if !slog.Default().Enabled(ctx, level) {
+		return
+	}
+	if h != nil {
+		if _, seen := h.driftLogged.LoadOrStore(driftField, struct{}{}); seen {
+			level = slog.LevelDebug
+			if !slog.Default().Enabled(ctx, level) {
+				return
+			}
+		}
+	}
+	// team_id/event_id match what the adjacent lifecycle and agent branches
+	// already log in the clear, and are what makes a drift report actionable
+	// (which workspace, which delivery) rather than just "something changed".
+	slog.Log(ctx, level, "event JSON field type drift tolerated; drifted field left empty, event handled on what did decode",
+		"error", err,
+		"drift_field", driftField,
+		"body_length", bodyLength,
+		"envelope_type", env.Type,
+		"inner_event_type", env.Event.Type,
+		"team_id", env.TeamID,
+		"event_id", env.EventID,
+	)
+}
+
+// isLifecycleEventType reports whether an inner event type names a teardown,
+// WITHOUT looking at any other field. handleEvent uses it to recognize "a purge
+// was meant here" on an envelope whose other fields it does not trust; the real
+// admission decision stays in isLifecycleEvent.
+//
+// It deliberately does NOT mirror isLifecycleEvent's botTokenRotationEnabled
+// carve-out for tokens_revoked. Reading a flag here would be answering "would
+// this have purged?" when the question is "was a purge meant?", and the answer
+// has to hold for an envelope we have already decided not to trust. With
+// rotation enabled a drifted tokens_revoked is therefore refused rather than
+// ignored — the same outcome (nothing is purged) by a louder route. Both
+// functions are named in handler_lifecycle.go's "revisit if bot-token rotation
+// is enabled" note, so they cannot drift apart unnoticed.
+func isLifecycleEventType(eventType string) bool {
+	return eventType == slackEventTypeAppUninstalled || eventType == slackEventTypeTokensRevoked
+}
+
 func (h *Handler) handleEvent(w http.ResponseWriter, body []byte) {
 	var env slackEventEnvelope
-	switch err := json.Unmarshal(body, &env); {
-	case err != nil:
-		// Bad JSON shouldn't 4xx (Slack retries on non-2xx). Surface
-		// the parse error at Debug so spec drift / corrupt payloads
-		// are visible to operators without breaking the contract.
-		slog.Debug("event JSON parse failed", "error", err, "body_length", len(body))
+	err := json.Unmarshal(body, &env)
+	driftField, drifted := jsonFieldTypeDrift(err)
+	// A single drifted FIELD must not cost the whole event. It used to: ANY
+	// decode error aborted here, so one unexpected JSON type anywhere in the
+	// payload silently discarded the event — invisibly, at Debug, with a 200
+	// that stops Slack retrying. PR #971 bought `files` out of that with a
+	// shape-tolerant decoder; this backstops every field that has no such
+	// decoder. The two are complementary, not substitutes: a blanket tolerance
+	// can only degrade a field to its ZERO value, so a field whose safe
+	// degradation is something else still needs its own UnmarshalJSON (drop
+	// slackEventFiles and a drifted `files` reads as "no attachment", and the
+	// agent answers past a file instead of refusing).
+	//
+	// What it cannot rescue is drift in a DISCRIMINATOR — env.Type or
+	// env.Event.Type — because those are what a route is selected on, and a
+	// drifted string is empty. Such an event still reaches no route. That is
+	// inherent rather than a gap to close later, and it is still an improvement
+	// on what it replaces: the drop is now announced at Warn, and a teardown
+	// lost this way is named specifically (see lifecycleRefused below).
+	//
+	// The tolerance is scoped by CONSEQUENCE, not applied uniformly, because
+	// "the rest of the struct decoded" is not the same as "the rest of the
+	// struct is trustworthy". A conversation turn is cheap and reversible —
+	// the worst case is one reply too many or too few. The lifecycle purge is
+	// neither: it deletes a workspace's bot token, qURL key, mappings and
+	// policies, and Slack has already been acked. So a drifted envelope may
+	// drive a turn but is refused the purge, below.
+	//
+	// That is not caution for its own sake. Drift genuinely can REDIRECT the
+	// purge rather than merely withhold it, in three ways that all sit behind
+	// that one route: a drifted team_id falls back to enterprise_id (a
+	// different workspace, not none); is_enterprise_install is a BOOL, so
+	// drift flips a Grid org teardown onto the workspace branch; and a drifted
+	// ELEMENT of tokens.bot still counts toward the array's length. Refusing
+	// the route kills all three at the door — and costs nothing that worked
+	// before, since such an event used to be dropped whole.
+	//
+	// The refusal is deliberately keyed on ANY drift in the envelope, not just
+	// drift in a field the purge scope reads. Narrowing it to those fields
+	// looks tempting and is UNSOUND: encoding/json reports only the FIRST
+	// mismatch while zeroing every mismatched field, so a payload that drifts
+	// an ignorable field before team_id would present as "drift, but not in a
+	// field we care about" while team_id had already been zeroed. driftField
+	// is a lead for an operator, never an inventory to branch on.
+	//
+	// The cost is real and accepted: a teardown whose only drift is in a field
+	// the purge never reads is refused too, so that workspace's data persists
+	// until an operator acts on the Warn below. Fail-safe and observable beats
+	// the alternative, which is deleting the wrong tenant's install.
+	// Deliberately NOT gated on env.Type == event_callback. This branch only
+	// logs, so it costs nothing to recognize a teardown whose ENVELOPE type is
+	// the field that drifted — and that is the case an operator would otherwise
+	// never hear about, since the generic line would say "routing on the fields
+	// that decoded" while a teardown quietly matched no route at all.
+	// url_verification keeps precedence by sitting earlier in the switch.
+	lifecycleRefused := drifted && isLifecycleEventType(env.Event.Type)
+	// The refusal branch logs its own, more specific line; emitting the generic
+	// one too would tell an operator we were "routing on the fields that
+	// decoded" immediately before saying we refused to.
+	if drifted && !lifecycleRefused {
+		// Warn, not Debug: this is now the ONLY signal that Slack's payload
+		// shape has moved away from what we model. Drift used to announce
+		// itself by making events disappear; that symptom is exactly what the
+		// tolerance removes, so the line has to be visible at prod log levels.
+		//
+		// Latched per field path because real drift is systematic — a Slack
+		// schema change drifts EVERY event, so an unlatched line would flood
+		// exactly when the service is degraded. The key space is bounded by
+		// our own struct shape, not by anything a payload controls, so the
+		// latch cannot grow without a code change.
+		h.logEventDrift(err, driftField, &env, len(body))
+	}
+	switch {
+	case err != nil && !drifted:
+		// Body-level parse failure: a syntax error, or a mismatch against the
+		// whole document. Nothing usable decoded, so there is nothing to route.
+		//
+		// Bad JSON shouldn't 4xx — Slack retries on non-2xx — but this drops an
+		// event permanently, since the 200 below stops redelivery. That makes it
+		// MORE worth seeing than tolerated drift, not less, so it matches the
+		// Warn that the sibling routing layer already uses for the same failure
+		// (see handleInteraction). It sat at Debug, invisible in prod, which is
+		// how the bug this function now fixes stayed hidden for so long.
+		//
+		// Un-latched, unlike the drift line above, and deliberately: drift is
+		// systematic by nature (a schema change moves EVERY event), while a
+		// body Slack signed but did not encode validly is a one-off. There is
+		// also no stable key to latch on — a syntax error names an offset, not
+		// a field.
+		slog.Warn("event JSON parse failed", "error", err, "body_length", len(body))
 	case env.Type == "url_verification":
 		respondJSON(w, http.StatusOK, map[string]string{"challenge": env.Challenge})
 		return
-	case env.Type == "event_callback":
+	case lifecycleRefused:
+		// Ack it (Slack must not retry) but do not purge. See the CONSEQUENCE
+		// paragraph above: the inner event type decoded cleanly, so we know a
+		// teardown was MEANT, but every field that decides WHICH partitions it
+		// hits is now suspect. A dropped teardown leaves data in place, which
+		// is recoverable by an operator; a misdirected one is not.
+		//
+		// Un-latched, unlike the generic drift line, and deliberately: this one
+		// reports a specific workspace whose teardown needs investigation, so
+		// collapsing repeats would hide the second workspace. Teardowns are rare
+		// enough that the volume argument does not apply to them. The ids are data
+		// fields in the production JSON log handler (which escapes control bytes),
+		// not message text; without them the runbook cannot identify the retained
+		// workspace or the Slack delivery that needs reconciliation.
+		slog.Warn(lifecycleDropDriftReason,
+			"event_type", lifecycleEventTypeForLog(env.Event.Type),
+			"drift_field", driftField,
+			"team_id", env.TeamID,
+			"enterprise_id", env.EnterpriseID,
+			"event_id", env.EventID,
+			"has_team_id", env.TeamID != "",
+			"has_enterprise_id", env.EnterpriseID != "",
+			"has_event_id", env.EventID != "",
+		)
+	case env.Type == slackEnvelopeTypeEventCallback && h.cfg.SlackBotTokenRotationEnabled && isBotTokensRevokedEvent(&env.Event):
+		// In token-rotation deployments this callback can mean "Slack rotated the
+		// bot token" rather than "workspace uninstalled the app". Ack it, but do
+		// not wipe a still-installed workspace. This branch is log-only:
+		// isLifecycleEvent(..., true) already suppresses tokens_revoked teardown.
+		slog.Info("tokens_revoked bot-token event ignored because Slack bot-token rotation is enabled",
+			"has_team_id", env.TeamID != "",
+			"has_enterprise_id", env.EnterpriseID != "",
+			"has_event_id", env.EventID != "",
+		)
+	case env.Type == slackEnvelopeTypeEventCallback && isLifecycleEvent(&env.Event, h.cfg.SlackBotTokenRotationEnabled):
+		// App uninstall / token revoke. Routed here BEFORE handleAgentEvent
+		// because the cascade must run regardless of conversation-mode wiring
+		// (handleAgentEvent returns early when the agent is disabled). It only
+		// schedules the async purge; the 200 below is the ack Slack needs to stop
+		// retrying.
+		h.handleLifecycleEvent(&env)
+	case env.Type == slackEnvelopeTypeEventCallback:
 		// Conversation mode. handleAgentEvent only schedules async work (or
 		// no-ops when disabled/filtered); we always ack 200 below so Slack
 		// never retries a delivery we accepted.
@@ -2052,7 +2527,7 @@ func (h *Handler) handleEvent(w http.ResponseWriter, body []byte) {
 
 // userHelpMessage renders the `/qurl help` text — the user-facing verbs
 // only. Verbs that depend on optional Config wiring are omitted when that
-// wiring is nil — a workspace without PostDM won't see the dm:true
+// wiring is nil — a workspace without PostDMBlocks won't see the dm:true
 // variant. The verbs still dispatch if a user types them directly; the
 // omission is just so help text doesn't advertise a path that will reply
 // with ":warning: not configured". The admin verbs live on `/qurl-admin`
@@ -2068,7 +2543,7 @@ func (h *Handler) userHelpMessage(command string) string {
 	}
 	// setup is a user verb (first-come-claims), so it leads the user
 	// surface. The owner semantics only exist when AdminStore is wired; on
-	// the sandbox/no-DDB path the owner gate in handleSetup is skipped and
+	// the admin-storage-disabled path the owner gate in handleSetup is skipped and
 	// the OAuth callback still owns key reuse/replacement. Append the owner
 	// parenthetical only there so the help text matches the deployment's
 	// actual behavior.
@@ -2094,11 +2569,14 @@ func (h *Handler) userHelpMessage(command string) string {
 		lines = append(lines,
 			"• `/qurl setup <email> --rotate` — Replace the workspace qURL key on the same qURL account",
 			"• `/qurl setup <email> --repoint` — Move the workspace to a different qURL account (cross-account moves route to an operator)",
-			"_`$id` identifies a resource. A `$alias` is an alternate name for a resource in a channel — several aliases can point to one ID. Use either with `/qurl get`._",
+			"_A CRID is a resource's permanent identifier. In Slack, use a listed `$id` or `$alias` with `/qurl get`. Several aliases can point to one resource._",
 			"",
 			"• `/qurl get <$id|$alias>` — Create a qURL for a resource `$id` or a `$alias` configured in this channel",
 		)
-		if h.cfg.PostDM != nil {
+		// Gate on PostDMBlocks (the seam deliverGetDM uses to deliver the Enter Portal
+		// button), matching getWork's dm:true refusal — so help never advertises dm:true
+		// when its only reply would be ":warning: DM delivery is not configured".
+		if h.cfg.PostDMBlocks != nil {
 			lines = append(lines, "• `/qurl get <$id|$alias> dm:true` — DM the link to you instead of posting it in-channel")
 		}
 		lines = append(lines,
@@ -2120,7 +2598,7 @@ func (h *Handler) userHelpMessage(command string) string {
 	}
 	if h.cfg.PostFeedback != nil {
 		// feedback needs no AdminStore/setup — only the PostFeedback seam —
-		// so it gates on that alone and shows even on no-DDB deploys.
+		// so it gates on that alone and shows even when admin storage is disabled.
 		lines = append(lines,
 			"• `/qurl feedback` — Send a bug report or feature request to the qURL team",
 		)
@@ -2174,7 +2652,7 @@ func (h *Handler) adminHelpMessage(command string) string {
 	appendSectionHeader := func(title string) {
 		lines = append(lines, "", title)
 	}
-	// Protect resources: stand up new access in this channel (a connector tunnel
+	// Protect resources: stand up new access in this channel (a qURL Connector
 	// or an existing URL resource). Gates on aliasStore + AdminStore, the same
 	// pair the install/protect verbs need; the guided-vs-typed split nests under
 	// OpenView, the condition the guided modals themselves require.
@@ -2182,9 +2660,9 @@ func (h *Handler) adminHelpMessage(command string) string {
 		appendSectionHeader("*Protect resources*")
 		if h.cfg.OpenView != nil {
 			lines = append(lines,
-				"• `/qurl-admin protect` — Guided chooser: protect a connector service or an existing URL resource (recommended)",
-				"• `/qurl-admin protect-connector` — Guided connector setup (Docker, Docker Compose, ECS/Fargate, Kubernetes)",
-				"• `/qurl-admin protect-connector <id> [env:...] [port:8080] [alias:$alias]` — Typed connector setup; creates a bootstrap key and binds `$<id>` in this channel",
+				"• `/qurl-admin protect` — Guided chooser for qURL Connector setup or existing URL resources (recommended)",
+				"• `/qurl-admin protect-connector` — Guided connector setup for web apps and HTTP APIs (Docker, Docker Compose, ECS/Fargate, Kubernetes)",
+				"• `/qurl-admin protect-connector <id> [env:...] [port:8080] [alias:$alias]` — Typed Connector setup for web apps and HTTP APIs; creates an enrollment token and binds `$<id>` in this channel",
 				"• `/qurl-admin protect-url` — Guided URL picker; choose an existing URL resource and channel alias",
 				"• `/qurl-admin protect-url $<alias> [as:$channel-alias]` — Typed: protect an existing URL resource in this channel",
 				"• `/qurl-admin protect-url url:<target-url> as:$channel-alias` — Typed: protect an existing no-alias URL resource in this channel",
@@ -2192,7 +2670,7 @@ func (h *Handler) adminHelpMessage(command string) string {
 			)
 		} else {
 			lines = append(lines,
-				"• `/qurl-admin protect-connector <id> [env:...] [port:8080] [alias:$alias]` — Create a sidecar bootstrap key and bind `$<id>` in this channel",
+				"• `/qurl-admin protect-connector <id> [env:...] [port:8080] [alias:$alias]` — Create a sidecar enrollment token and bind `$<id>` in this channel",
 				"• `/qurl-admin protect-url $<alias> [as:$channel-alias]` — Protect an existing URL resource in this channel",
 				"• `/qurl-admin protect-url url:<target-url> as:$channel-alias` — Protect an existing no-alias URL resource in this channel",
 				"  Guided setup (bare `/qurl-admin protect-connector` / `protect-url`) is not enabled in this deployment; use the typed forms above.",
@@ -2246,6 +2724,7 @@ func (h *Handler) adminHelpMessage(command string) string {
 		lines = append(lines,
 			"• `/qurl-admin add @user` — Promote a Slack user to admin",
 			"• `/qurl-admin remove @user` — Demote a Slack user from admin",
+			"• `/qurl-admin transfer-ownership @user` — Owner-only: hand off who may reconnect qURL for this workspace",
 			"• `/qurl-admin admins` — List who connected qURL (the owner) and the current admins",
 		)
 		appendSectionHeader("*Conversation mode*")
@@ -2272,14 +2751,14 @@ func (h *Handler) adminHelpMessage(command string) string {
 // from "missing path" (404) and "auth-gated" (401).
 func respondMethodNotAllowed(w http.ResponseWriter, allow string) {
 	w.Header().Set("Allow", allow)
-	respondJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+	respondJSON(w, http.StatusMethodNotAllowed, map[string]string{errEnvelopeKey: "method not allowed"})
 }
 
 // respondPayloadTooLarge writes 413 for both the Content-Length pre-check
 // and the MaxBytesReader-during-read paths. Centralizing keeps the wire
 // envelope identical so operator dashboards bucket them together.
 func respondPayloadTooLarge(w http.ResponseWriter) {
-	respondJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "body too large"})
+	respondJSON(w, http.StatusRequestEntityTooLarge, map[string]string{errEnvelopeKey: "body too large"})
 }
 
 func respondJSON(w http.ResponseWriter, status int, body any) {
@@ -2314,6 +2793,11 @@ const (
 	// respActionUpdate is the response_action value that swaps the current
 	// modal for a replacement view (the modal error responders use it).
 	respActionUpdate = "update"
+	// respFieldUnfurlLinks / respFieldUnfurlMedia disable link/media unfurling on a
+	// response_url block payload (postResponseBlocks) — kept as consts to match the
+	// other response-payload keys rather than bare literals.
+	respFieldUnfurlLinks = "unfurl_links"
+	respFieldUnfurlMedia = "unfurl_media"
 )
 
 func respondSlack(w http.ResponseWriter, text string) {

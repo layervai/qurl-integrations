@@ -55,6 +55,12 @@ export async function sendMessage(token: string, channelId: string, content: str
   return api(token, 'POST', `/channels/${channelId}/messages`, { content });
 }
 
+/** Delete a message the bot posted (test cleanup — bots may always delete
+ * their own posts; MANAGE_MESSAGES is only needed for others'). */
+export async function deleteMessage(token: string, channelId: string, messageId: string): Promise<void> {
+  await api(token, 'DELETE', `/channels/${channelId}/messages/${messageId}`);
+}
+
 /** Get recent messages from a channel */
 export async function getMessages(token: string, channelId: string, limit = 25): Promise<DiscordMessage[]> {
   return api(token, 'GET', `/channels/${channelId}/messages?limit=${limit}`);
@@ -94,12 +100,21 @@ export async function waitForMessage(
   while (Date.now() < deadline) {
     const messages = opts.afterMessageId
       ? await getMessagesAfter(token, channelId, opts.afterMessageId)
-      : await getMessages(token, channelId, 10);
+      : // 25-message window (not 10) for the content-only branch: the
+        // shared test channel also receives reporter rollups and
+        // sibling-suite posts, and a burst between the send and the
+        // first successful poll could push the target past a narrow
+        // window — a spurious timeout that looks like a delivery bug.
+        await getMessages(token, channelId, 25);
 
     for (const msg of messages) {
       if (opts.fromAuthorId && msg.author.id !== opts.fromAuthorId) continue;
+      // Match against the embed's actual TEXT surfaces (like
+      // extractQurlLink does), not JSON.stringify(embed) — the
+      // serialized form includes keys/structure, so a containsText that
+      // happens to be a substring of the shape would false-match.
       if (opts.containsText && !msg.content.includes(opts.containsText) &&
-          !msg.embeds.some(e => JSON.stringify(e).includes(opts.containsText!))) continue;
+          !msg.embeds.some(e => embedText(e).includes(opts.containsText!))) continue;
       return msg;
     }
 
@@ -108,11 +123,25 @@ export async function waitForMessage(
   throw new Error(`No matching message in ${channelId} within ${timeout}ms`);
 }
 
+/** All human-visible text surfaces of an embed (title, description,
+ * author name, field names/values, footer), joined — the single shared
+ * haystack for waitForMessage's containsText match and
+ * extractQurlLink's URL regex. */
+function embedText(e: DiscordMessage['embeds'][number]): string {
+  return [
+    e.title,
+    e.description,
+    e.author?.name,
+    ...(e.fields?.flatMap((f) => [f.name, f.value]) ?? []),
+    e.footer?.text,
+  ]
+    .filter(Boolean)
+    .join(' ');
+}
+
 /** Extract qURL link from an embed */
 export function extractQurlLink(msg: DiscordMessage): string | null {
-  const allText = msg.embeds.map(e =>
-    [e.description, ...(e.fields?.map(f => f.value) ?? [])].join(' ')
-  ).join(' ');
+  const allText = msg.embeds.map(embedText).join(' ');
   const match = allText.match(/https:\/\/qurl\.(link|io|dev|site)\/[A-Za-z0-9_-]+/);
   return match ? match[0] : null;
 }

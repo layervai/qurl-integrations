@@ -239,7 +239,7 @@ func TestPaneScope_AppMentionSkipsMembershipCheck(t *testing.T) {
 
 func TestPaneContextChannel_RefreshesTTLOnScope(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
-	store := &slackdata.AgentStore{Client: newMemAgentDDB(), TableName: "agent_state", Now: func() time.Time { return now }, ConversationTTL: 30 * time.Minute}
+	store := &slackdata.AgentStore{Client: newMemAgentDDB(), TableName: "agent_state", Now: func() time.Time { return now }, ContextTTL: 30 * time.Minute}
 	post, _, _ := capturingPostMessage()
 	h := NewHandler(Config{
 		AgentLLM: fakeAgentLLM{reply: "x"}, AgentStore: store, PostMessage: post, AgentDefaultEnabled: true,

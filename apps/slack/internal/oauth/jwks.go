@@ -2,6 +2,7 @@ package oauth
 
 import (
 	"context"
+	"crypto/hmac"
 	"errors"
 	"fmt"
 	"time"
@@ -19,9 +20,9 @@ const (
 	// well below 1 req/min.
 	jwksRefreshInterval = 15 * time.Minute
 	// jwksPrimeTimeout caps how long NewJWKSVerifier may wait on the
-	// initial refresh. If Auth0 is briefly unreachable at boot we'd
-	// rather start up degraded and warm the cache on the first /callback
-	// than wedge in init for the full request-timeout budget.
+	// initial refresh. The Slack app intentionally fails startup when this
+	// bounded prime fails: serving OAuth routes without nonce verification is
+	// not supported, and the orchestrator can retry once Auth0 recovers.
 	jwksPrimeTimeout = 5 * time.Second
 )
 
@@ -43,10 +44,10 @@ type JWKSVerifier struct {
 // cancels on shutdown (e.g. the signal-canceled context from
 // signal.NotifyContext) so the goroutine doesn't outlive the process.
 //
-// The initial prime fetch is bounded by jwksPrimeTimeout so a briefly
-// unreachable Auth0 doesn't wedge startup; on prime-failure the
-// returned error is surfaced and the caller decides whether to fall
-// back to the no-verifier code path.
+// The initial prime fetch is bounded by jwksPrimeTimeout so an unreachable
+// Auth0 does not wedge startup. Prime failure is returned to the caller; the
+// Slack app treats it as boot-fatal because nonce verification cannot operate
+// safely without a primed verifier.
 func NewJWKSVerifier(ctx context.Context, issuer, audience string) (*JWKSVerifier, error) {
 	jwksURL := issuer + ".well-known/jwks.json"
 	c := jwk.NewCache(ctx)
@@ -61,10 +62,9 @@ func NewJWKSVerifier(ctx context.Context, issuer, audience string) (*JWKSVerifie
 	return &JWKSVerifier{Issuer: issuer, Audience: audience, jwksURL: jwksURL, cache: c}, nil
 }
 
-// verifiedToken parses + verifies the id_token signature + claims
-// against Auth0's JWKS. Shared by VerifyEmail and VerifySub so the
-// verify posture (kid required, alg inferred from key, iss + aud
-// validated) lives in one place.
+// verifiedToken parses + verifies the id_token signature + claims against
+// Auth0's JWKS. The verify posture (kid required, alg inferred from key, iss +
+// aud validated) lives in one place.
 func (v *JWKSVerifier) verifiedToken(ctx context.Context, idToken string) (jwt.Token, error) {
 	if v.cache == nil {
 		return nil, errors.New("JWKSVerifier: cache not initialized")
@@ -92,14 +92,7 @@ func (v *JWKSVerifier) verifiedToken(ctx context.Context, idToken string) (jwt.T
 	return tok, nil
 }
 
-// VerifyEmail verifies the id_token signature + claims and returns the
-// email claim. Returns ("", err) on any verify failure — the callback
-// treats this as non-fatal (success page renders without the email).
-func (v *JWKSVerifier) VerifyEmail(ctx context.Context, idToken string) (string, error) {
-	tok, err := v.verifiedToken(ctx, idToken)
-	if err != nil {
-		return "", err
-	}
+func verifiedEmail(tok jwt.Token) (string, error) {
 	// Fail-closed on email_verified: surface the email only when the
 	// claim is present *and* a `bool` *and* explicitly true. Some
 	// Auth0 enterprise/SAML connections omit the claim entirely;
@@ -129,17 +122,7 @@ func (v *JWKSVerifier) VerifyEmail(ctx context.Context, idToken string) (string,
 	return s, nil
 }
 
-// VerifySub verifies the id_token and returns the `sub` claim — Auth0's
-// stable identifier for the authenticated user, used as the workspace
-// OwnerID when BindWorkspace seeds the admin row. Returns ("", err) on
-// any verify failure or an absent / empty sub claim. The callback
-// treats this as fatal-to-bind (unlike VerifyEmail's best-effort
-// posture): an empty sub can't legitimately key a workspace.
-func (v *JWKSVerifier) VerifySub(ctx context.Context, idToken string) (string, error) {
-	tok, err := v.verifiedToken(ctx, idToken)
-	if err != nil {
-		return "", err
-	}
+func verifiedSub(tok jwt.Token) (string, error) {
 	// jwt.Token.Subject() reads the standard `sub` claim (RFC 7519
 	// §4.1.2). Auth0 always populates it on id_tokens; an empty value
 	// signals a misconfigured federation upstream.
@@ -148,4 +131,37 @@ func (v *JWKSVerifier) VerifySub(ctx context.Context, idToken string) (string, e
 		return "", errors.New("sub claim missing or empty")
 	}
 	return sub, nil
+}
+
+func verifyNonceClaim(tok jwt.Token, expectedNonce string) error {
+	if expectedNonce == "" {
+		return errors.New("expected nonce is empty")
+	}
+	rawNonce, ok := tok.Get("nonce")
+	if !ok {
+		return errors.New("nonce claim missing")
+	}
+	nonce, ok := rawNonce.(string)
+	if !ok {
+		return errors.New("nonce claim is not a string")
+	}
+	if !hmac.Equal([]byte(nonce), []byte(expectedNonce)) {
+		return errors.New("nonce claim mismatch")
+	}
+	return nil
+}
+
+// VerifySetupClaims performs the callback's token verification once, then
+// reads nonce, email, and sub from the same verified token.
+func (v *JWKSVerifier) VerifySetupClaims(ctx context.Context, idToken, expectedNonce string) (IDTokenClaims, error) {
+	tok, err := v.verifiedToken(ctx, idToken)
+	if err != nil {
+		return IDTokenClaims{}, err
+	}
+	if err := verifyNonceClaim(tok, expectedNonce); err != nil {
+		return IDTokenClaims{}, err
+	}
+	email, emailErr := verifiedEmail(tok)
+	sub, subErr := verifiedSub(tok)
+	return IDTokenClaims{Email: email, Sub: sub, EmailErr: emailErr, SubErr: subErr}, nil
 }

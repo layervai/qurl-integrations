@@ -1,18 +1,3 @@
-// Unit tests for src/gateway-control-client.js — Pillar 3 outbound
-// push-handoff. Pins the load-bearing contracts:
-//
-//   1. Builds a signed envelope via hmac.sign + wrapEnvelope. ts +
-//      nonce are added by the client; caller passes only routing
-//      + version.
-//   2. POSTs to peer's /control/yours with the wire envelope as
-//      body and a Content-Length header.
-//   3. Returns a result OBJECT, never throws. 2xx → ok:true;
-//      timeout → reason:'timeout'; non-2xx → reason:'rejected';
-//      transport/error → reason:'http_error'.
-//   4. Per-call timeout (default 200 ms) bounds the SIGTERM stall.
-//   5. End-to-end with the real control-channel server: the
-//      generated envelope is accepted by hmac.verify and routed
-//      to onHandoff with the right activeInstanceId + expectedVersion.
 
 const { EventEmitter } = require('node:events');
 
@@ -36,11 +21,7 @@ function makeLogger() {
   };
 }
 
-// Build a fake http.request that captures the options + body and
-// drives the (response, timeout, error) lifecycle via test hooks.
 function makeFakeHttpRequest({ behavior }) {
-  // `behavior` is invoked with the captured call context and decides
-  // how to settle: respond, timeout, or error.
   const calls = [];
 
   function fakeRequest(options, responseHandler) {
@@ -56,8 +37,6 @@ function makeFakeHttpRequest({ behavior }) {
           const res = new EventEmitter();
           res.statusCode = status;
           res.destroyed = false;
-          // Real http.IncomingMessage exposes .destroy() — the client
-          // calls it on body-cap-exceeded to stop the stream.
           res.destroy = () => { res.destroyed = true; };
           responseHandler(res);
           setImmediate(() => {
@@ -66,12 +45,6 @@ function makeFakeHttpRequest({ behavior }) {
           });
         },
         respondThenAbort(status) {
-          // Headers + partial body arrive, then peer crashes. Node 17+
-          // (after `aborted` was deprecated) signals this as `close`
-          // on the response with `destroyed=true` and a statusCode
-          // already set from headers — that's what the client listens
-          // for now. See the comment in gateway-control-client.js's
-          // res.on('close') handler for why.
           const res = new EventEmitter();
           res.statusCode = status;
           res.destroyed = false;
@@ -117,9 +90,6 @@ describe('createControlClient — factory validation', () => {
 
 describe('pushHandoff — argument validation', () => {
   it('returns ok:false reason:invalid_arg on missing required args (never throws)', async () => {
-    // The "never throws" contract documented in the module header is
-    // load-bearing for the SIGTERM caller. Validators must surface as
-    // result objects, not rejected promises.
     const hmac = makeHmac();
     const client = createControlClient({ hmac, logger: makeLogger() });
     await expect(client.pushHandoff({}))
@@ -137,13 +107,6 @@ describe('pushHandoff — argument validation', () => {
   });
 
   it('rejects peerIp that is not an IPv4/IPv6 literal (defense-in-depth vs corrupted heartbeat row)', async () => {
-    // The heartbeat-side validator (gateway-peer-heartbeat.js) uses
-    // net.isIP() to reject hostnames + the literal "undefined" from
-    // env-stringification. The client mirrors that check so a
-    // corrupted row (or pre-13b.2 callers that bypassed the write-
-    // time validator) doesn't get a free DNS resolution + POST to
-    // an arbitrary host. Returned as result object (see "never
-    // throws" contract in the module header).
     const hmac = makeHmac();
     const client = createControlClient({ hmac, logger: makeLogger() });
     for (const bad of ['discord.com', 'localhost', 'undefined', 'not-an-ip', '10.0.0', '10.0.0.0.0']) {
@@ -151,8 +114,6 @@ describe('pushHandoff — argument validation', () => {
       await expect(client.pushHandoff({ ...validArgs, peerIp: bad }))
         .resolves.toMatchObject({ ok: false, reason: 'invalid_arg', arg: 'peerIp' });
     }
-    // IPv4 + IPv6 literals pass validation. Use a fake httpRequest
-    // so the assertion runs without actually opening a socket.
     const { fakeRequest } = makeFakeHttpRequest({
       behavior: (ctx) => ctx.respond(200, '{}'),
     });
@@ -189,7 +150,6 @@ describe('pushHandoff — request shape', () => {
       'Content-Type': 'application/json',
       'Content-Length': calls[0].body.length,
     });
-    // The body should unwrap cleanly into bodyBytes + signature.
     const unwrapped = unwrapEnvelope(calls[0].body);
     expect(unwrapped).not.toBeNull();
     expect(typeof unwrapped.signature).toBe('string');
@@ -282,28 +242,16 @@ describe('pushHandoff — result mapping', () => {
   });
 
   it('caps response body and returns reason:http_error on cap exceeded', async () => {
-    // Defense vs OOM during SIGTERM: a misrouted POST hitting an
-    // HTML error page (or hostile in-VPC actor) could otherwise
-    // return multi-MB. The client must settle as http_error before
-    // buffering grows unbounded.
     const hmac = makeHmac();
     const { fakeRequest } = makeFakeHttpRequest({
       behavior: (ctx) => {
-        // Simulate a streaming response of chunks that together
-        // exceed the configured cap. We send via the 'respond'
-        // helper which fires data + end, but we want to drive
-        // multiple data chunks. Reach inside to do it manually.
         const res = new (require('events').EventEmitter)();
         res.statusCode = 200;
         ctx.options; // no-op — keep ctx referenced
-        // The responseHandler lives in the closure of httpRequest;
-        // simplest path is to use the 'respond' helper with a giant
-        // body so the single data emit > cap.
         ctx.respond(200, 'X'.repeat(100));
       },
     });
     const logger = makeLogger();
-    // Set a tiny cap so a 100-byte response trips it.
     const client = createControlClient({
       hmac, logger, httpRequest: fakeRequest, responseByteCap: 50,
     });
@@ -318,12 +266,6 @@ describe('pushHandoff — result mapping', () => {
   });
 
   it('drops in-flight chunks AFTER bodyCapExceeded fires (synchronous-destroy + flag-mark)', async () => {
-    // The cap path settles synchronously on the over-cap chunk AND
-    // calls res.destroy(), but subsequent 'data' events already in
-    // the event-loop pipeline still arrive. The bodyCapExceeded
-    // flag must drop them without growing the buffer or re-firing
-    // settle (which is idempotent but a second log/state mutation
-    // would be a regression). Pin this contract.
     const hmac = makeHmac();
     let capturedRes;
     const fakeRequest = (options, responseHandler) => {
@@ -336,8 +278,6 @@ describe('pushHandoff — result mapping', () => {
         res.destroy = () => { res.destroyed = true; };
         capturedRes = res;
         responseHandler(res);
-        // First chunk: under cap. Second chunk: trips cap. Third
-        // chunk: arrives AFTER cap-exceeded → must be dropped.
         setImmediate(() => {
           res.emit('data', Buffer.from('A'.repeat(30), 'utf8'));
           res.emit('data', Buffer.from('B'.repeat(30), 'utf8')); // 60 > 50 cap
@@ -356,10 +296,7 @@ describe('pushHandoff — result mapping', () => {
     expect(result).toEqual({
       ok: false, reason: 'http_error', error: 'response_body_too_large',
     });
-    // res.destroy() fires synchronously on the over-cap chunk.
     expect(capturedRes.destroyed).toBe(true);
-    // Cap-exceeded log fires exactly once (not three times — the
-    // post-cap drops must be silent).
     const capLogs = logger.warn.mock.calls.filter(
       ([msg]) => msg === 'control-client: response body exceeded cap',
     );
@@ -367,9 +304,6 @@ describe('pushHandoff — result mapping', () => {
   });
 
   it('returns reason:http_error when the response is aborted mid-stream', async () => {
-    // Peer sends headers then crashes — `aborted` event fires but
-    // `end` never will. Without an aborted handler we'd block on
-    // the 200 ms timeout; with it we settle immediately.
     const hmac = makeHmac();
     const { fakeRequest } = makeFakeHttpRequest({
       behavior: (ctx) => ctx.respondThenAbort(200),
@@ -387,11 +321,6 @@ describe('pushHandoff — result mapping', () => {
   });
 
   it('returns reason:http_error when the connection aborts BEFORE headers (req error path)', async () => {
-    // Pin the pre-headers abort contract. If the socket dies before
-    // any response headers arrive, `statusCode` is undefined and the
-    // `close` handler intentionally does NOT settle (its gate is
-    // `res.destroyed && res.statusCode !== undefined`). Settlement
-    // is owned by req.on('error') in that case.
     const hmac = makeHmac();
     const { fakeRequest } = makeFakeHttpRequest({
       behavior: (ctx) => ctx.error(new Error('ECONNRESET')),
@@ -402,13 +331,10 @@ describe('pushHandoff — result mapping', () => {
   });
 
   it('settles exactly once when timeout + error both fire', async () => {
-    // Real http: timeout event fires THEN we destroy(err) THEN the
-    // 'error' event fires. Result must be timeout, not http_error.
     const hmac = makeHmac();
     const { fakeRequest } = makeFakeHttpRequest({
       behavior: (ctx) => {
         ctx.timeout();
-        // simulate the post-destroy error event
         setImmediate(() => ctx.error(new Error('handoff_timeout')));
       },
     });
@@ -464,14 +390,6 @@ describe('end-to-end — client → server', () => {
 });
 
 describe('end-to-end — IPv6 loopback (::1)', () => {
-  // peer-heartbeat rows can carry IPv6 literals; pushHandoff's
-  // validator accepts ::1, and node:http handles bare-IPv6 hostname
-  // correctly. This test closes the loop end-to-end on v6 so a
-  // future deploy onto an IPv6-only ENI doesn't surface an
-  // untested wire path.
-  //
-  // Some CI environments disable IPv6 entirely. Probe ::1 bindability
-  // in beforeAll and skip the suite cleanly if unavailable.
   let server;
   let port;
   let ipv6Available = false;

@@ -1,0 +1,876 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"io"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"testing/iotest"
+	"time"
+
+	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/apitest"
+	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/output"
+)
+
+// T3 contract tests: the implemented commands against the mock qURL API,
+// asserting the wire contract (headers, retry, verification, typed-error UX)
+// rather than rendering bytes (goldens own those).
+
+func TestPublishContract(t *testing.T) {
+	srv := apitest.NewServer(t)
+	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "--quiet", "publish", "https://example.com/data"}})
+
+	if res.code != 0 {
+		t.Fatalf("exit = %d, stderr: %s", res.code, res.stderr.String())
+	}
+	if got, want := res.stdout.String(), srv.Key.CRID+"\n"; got != want {
+		t.Errorf("quiet stdout = %q, want %q", got, want)
+	}
+
+	requests := srv.Requests()
+	if len(requests) != 1 {
+		t.Fatalf("expected 1 request, got %d", len(requests))
+	}
+	req := requests[0]
+	if req.Method != http.MethodPost || req.Path != "/v1/resources" {
+		t.Errorf("request = %s %s, want POST /v1/resources", req.Method, req.Path)
+	}
+	if ua := req.Header.Get("User-Agent"); ua != "qurl-cli/test" {
+		t.Errorf("User-Agent = %q, want qurl-cli/test", ua)
+	}
+	if rid := req.Header.Get("X-Request-Id"); rid != "cli-req-fixed" {
+		t.Errorf("X-Request-Id = %q, want the harness-injected id", rid)
+	}
+	if auth := req.Header.Get("Authorization"); auth != "Bearer "+testAPIKey {
+		t.Errorf("Authorization header not set as expected (got %d bytes)", len(auth))
+	}
+}
+
+func TestListContractHeadersAndPagination(t *testing.T) {
+	srv := apitest.NewServer(t)
+	srv.Script(http.MethodGet, "/v1/resources", func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Query().Get("cursor"); got != "page2" {
+			t.Errorf("cursor = %q, want page2", got)
+		}
+		if got := r.URL.Query().Get("limit"); got != "5" {
+			t.Errorf("limit = %q, want 5", got)
+		}
+		apitest.WriteEnvelope(t, w, http.StatusOK, []map[string]any{{
+			"resource_id": srv.Key.ResourceID,
+			"crid":        srv.Key.CRID,
+			"target_url":  "https://example.com/data",
+			"status":      "active",
+			"type":        "url",
+		}}, map[string]any{"next_cursor": "page3", "has_more": true})
+	})
+
+	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "list", "--cursor", "page2", "--limit", "5"}})
+	if res.code != 0 {
+		t.Fatalf("exit = %d, stderr: %s", res.code, res.stderr.String())
+	}
+	if !strings.Contains(res.stderr.String(), "--cursor page3") {
+		t.Errorf("expected next-page note on stderr, got %q", res.stderr.String())
+	}
+	req := srv.Requests()[0]
+	if req.Header.Get("User-Agent") != "qurl-cli/test" || req.Header.Get("X-Request-Id") == "" {
+		t.Errorf("direct REST path missing CLI headers: %+v", req.Header)
+	}
+}
+
+func TestListQuietPrintsFullCRIDs(t *testing.T) {
+	srv := apitest.NewServer(t)
+	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "-q", "list"}})
+	if res.code != 0 {
+		t.Fatalf("exit = %d, stderr: %s", res.code, res.stderr.String())
+	}
+	if got, want := res.stdout.String(), srv.Key.CRID+"\n"; got != want {
+		t.Errorf("quiet list stdout = %q, want %q", got, want)
+	}
+}
+
+func TestShareByCRIDEchoVerifies(t *testing.T) {
+	srv := apitest.NewServer(t)
+	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "share", srv.Key.CRID}})
+	if res.code != 0 {
+		t.Fatalf("exit = %d, stderr: %s", res.code, res.stderr.String())
+	}
+	if got := res.stdout.String(); got != "https://qurl.link/#qv2t1.1.1.1.AQ.AQ.AQ\n" {
+		t.Errorf("piped share stdout = %q, want the bare link", got)
+	}
+}
+
+func TestResourceCommandsRejectNonCRIDBeforeRequest(t *testing.T) {
+	for _, command := range []string{"share", "get", "delete"} {
+		for _, kind := range []string{"public key", "unknown"} {
+			t.Run(command+"/"+kind, func(t *testing.T) {
+				srv := apitest.NewServer(t)
+				operand := "not-a-crid"
+				if kind == "public key" {
+					operand = srv.Key.ResourceID
+				}
+				res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, command, operand}})
+				if res.code != 8 || len(srv.Requests()) != 0 {
+					t.Fatalf("exit = %d, requests = %d, stderr: %s", res.code, len(srv.Requests()), res.stderr.String())
+				}
+				if !strings.Contains(res.stderr.String(), "CRID") {
+					t.Errorf("missing CRID guidance: %s", res.stderr.String())
+				}
+				mustEmptyStdout(t, res)
+			})
+		}
+	}
+}
+
+func TestShareWrongKeyCRIDMismatchEmitsNothingExit12(t *testing.T) {
+	srv := apitest.NewServer(t)
+	other := apitest.GenerateResourceKey(t)
+	srv.SetShareCRID(other.CRID)
+
+	// By CRID: the echo check fails.
+	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "share", srv.Key.CRID}})
+	if res.code != 12 {
+		t.Fatalf("exit = %d, want 12; stderr: %s", res.code, res.stderr.String())
+	}
+	mustEmptyStdout(t, res)
+	if !strings.Contains(res.stderr.String(), "nothing was printed") {
+		t.Errorf("expected fail-closed message on stderr, got %q", res.stderr.String())
+	}
+}
+
+func TestShareResponseWithoutCRIDFailsClosed(t *testing.T) {
+	srv := apitest.NewServer(t)
+	srv.Script(http.MethodPost, "/v1/resources/"+srv.Key.CRID+"/share", func(w http.ResponseWriter, _ *http.Request) {
+		apitest.WriteEnvelope(t, w, http.StatusOK, map[string]any{
+			"qurl": "https://qurl.link/#qv2t1.1.1.1.AQ.AQ.AQ",
+			"type": "qv2",
+		}, nil)
+	})
+	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "share", srv.Key.CRID}})
+	if res.code != 12 {
+		t.Fatalf("exit = %d, want 12; stderr: %s", res.code, res.stderr.String())
+	}
+	mustEmptyStdout(t, res)
+}
+
+func TestShare429RetryAfterHonored(t *testing.T) {
+	srv := apitest.NewServer(t)
+	srv.Script(http.MethodPost, "/v1/resources/"+srv.Key.CRID+"/share", apitest.Handler429(t, 3))
+
+	var sleeps []time.Duration
+	res := runCLI(t, &runOpts{
+		args:   []string{"--endpoint", srv.URL, "share", srv.Key.CRID},
+		sleeps: &sleeps,
+	})
+	if res.code != 0 {
+		t.Fatalf("exit = %d after retry, stderr: %s", res.code, res.stderr.String())
+	}
+	if len(sleeps) != 1 || sleeps[0] != 3*time.Second {
+		t.Errorf("sleeps = %v, want exactly [3s] from Retry-After", sleeps)
+	}
+	if got := len(srv.Requests()); got != 2 {
+		t.Errorf("requests = %d, want 2 (429 then success)", got)
+	}
+}
+
+func TestRateLimitExhaustionSurfaces429(t *testing.T) {
+	srv := apitest.NewServer(t)
+	srv.ScriptRepeat(http.MethodGet, "/v1/resources", 3, apitest.Handler429(t, 1))
+
+	var sleeps []time.Duration
+	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "list"}, sleeps: &sleeps})
+	if res.code != 9 {
+		t.Fatalf("exit = %d, want 9; stderr: %s", res.code, res.stderr.String())
+	}
+	if len(sleeps) != 2 {
+		t.Errorf("sleeps = %v, want two waits before giving up", sleeps)
+	}
+	if got := len(srv.Requests()); got != 3 {
+		t.Errorf("requests = %d, want 3 attempts", got)
+	}
+}
+
+func TestShareDark503TypedUX(t *testing.T) {
+	srv := apitest.NewServer(t)
+	srv.Script(http.MethodPost, "/v1/resources/"+srv.Key.CRID+"/share", apitest.HandlerDark503(t))
+
+	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "share", srv.Key.CRID}})
+	if res.code != 11 {
+		t.Fatalf("exit = %d, want 11; stderr: %s", res.code, res.stderr.String())
+	}
+	mustEmptyStdout(t, res)
+	if !strings.Contains(res.stderr.String(), "aren't available from this qURL endpoint") {
+		t.Errorf("expected the dark-surface message, got %q", res.stderr.String())
+	}
+}
+
+func TestDeleteContract(t *testing.T) {
+	srv := apitest.NewServer(t)
+	res := runCLI(t, &runOpts{
+		args:             []string{"--endpoint", srv.URL, "delete", srv.Key.CRID, "--yes"},
+		shareStateDirErr: connectorstate.ErrNoDefaultStateDir,
+	})
+	if res.code != 0 {
+		t.Fatalf("exit = %d, stderr: %s", res.code, res.stderr.String())
+	}
+	req := srv.Requests()[0]
+	if req.Method != http.MethodDelete || req.Path != "/v1/resources/"+srv.Key.CRID {
+		t.Errorf("request = %s %s, want DELETE of the CRID path", req.Method, req.Path)
+	}
+}
+
+// TestDeleteIsIdempotentAtCLILevel pins the UX half of idempotent delete: a
+// 404 on delete is success (exit 0) with an already-gone note, never an
+// error.
+func TestDeleteIsIdempotentAtCLILevel(t *testing.T) {
+	srv := apitest.NewServer(t)
+	srv.Script(http.MethodDelete, "/v1/resources/"+srv.Key.CRID, apitest.HandlerNotFound404(t, "not_found"))
+	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "delete", srv.Key.CRID, "--yes"}})
+	if res.code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr: %s", res.code, res.stderr.String())
+	}
+	if !strings.Contains(res.stderr.String(), "already deleted") {
+		t.Errorf("expected the already-gone note, got %q", res.stderr.String())
+	}
+	if strings.Contains(res.stderr.String(), "Deleted ") {
+		t.Errorf("already-gone must not also claim a fresh deletion, got %q", res.stderr.String())
+	}
+}
+
+// TestDeleteTestCRIDOnProductionRefusedWithoutYes pins the same environment
+// guard on the destructive command that share carries: a test CRID aimed
+// at the production endpoint is refused before any request without --yes.
+func TestDeleteTestCRIDOnProductionRefusedWithoutYes(t *testing.T) {
+	srv := apitest.NewServer(t) // never contacted
+	res := runCLI(t, &runOpts{args: []string{"--endpoint", "https://api.layerv.ai", "delete", srv.Key.CRID}})
+	if res.code != 2 {
+		t.Fatalf("exit = %d, want 2; stderr: %s", res.code, res.stderr.String())
+	}
+	mustEmptyStdout(t, res)
+	if !strings.Contains(res.stderr.String(), "production") {
+		t.Errorf("expected the environment-guard message, got %q", res.stderr.String())
+	}
+	if len(srv.Requests()) != 0 {
+		t.Error("the guard must fire before any request")
+	}
+}
+
+// TestShareAfterDeleteIsOwnerTruthful pins the revoked path: sharing a
+// deleted resource answers 400 `revoked`, which the CLI maps to exit 5 with
+// the owner-truthful message rather than the ambiguous 404 anatomy.
+func TestShareAfterDeleteIsOwnerTruthful(t *testing.T) {
+	srv := apitest.NewServer(t)
+	srv.Script(http.MethodPost, "/v1/resources/"+srv.Key.CRID+"/share", apitest.HandlerRevoked400(t))
+	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "share", srv.Key.CRID}})
+	if res.code != 5 {
+		t.Fatalf("exit = %d, want 5; stderr: %s", res.code, res.stderr.String())
+	}
+	mustEmptyStdout(t, res)
+	if !strings.Contains(res.stderr.String(), "this resource was deleted") {
+		t.Errorf("expected the owner-truthful hint, got %q", res.stderr.String())
+	}
+}
+
+// TestGetAndStatusAfterDeleteAreOwnerTruthful pins the other two customer
+// commands used by the protected deletion journey. Both must preserve the
+// revoked condition without creating output or download artifacts.
+func TestGetAndStatusAfterDeleteAreOwnerTruthful(t *testing.T) {
+	assertDeleted := func(t *testing.T, res *runResult) {
+		t.Helper()
+		hasDeletedHint := strings.Contains(strings.ToLower(res.stderr.String()), "deleted")
+		if res.code != 5 || res.stdout.Len() != 0 || !hasDeletedHint {
+			t.Fatalf(
+				"deleted command = exit %d, stdout %d bytes, stderr %d bytes, deleted diagnostic %t",
+				res.code,
+				res.stdout.Len(),
+				res.stderr.Len(),
+				hasDeletedHint,
+			)
+		}
+	}
+
+	t.Run("get", func(t *testing.T) {
+		srv := apitest.NewServer(t)
+		srv.Script(http.MethodPost, "/v1/resources/"+srv.Key.CRID+"/share", apitest.HandlerRevoked400(t))
+		downloadDir := t.TempDir()
+		res := runCLI(t, &runOpts{args: []string{
+			"--endpoint", srv.URL,
+			"get", srv.Key.CRID,
+			"--file", filepath.Join(downloadDir, "deleted-payload"),
+		}})
+		assertDeleted(t, res)
+		entries, err := os.ReadDir(downloadDir)
+		if err != nil || len(entries) != 0 {
+			t.Fatalf("deleted get left %d download artifacts: %v", len(entries), err)
+		}
+	})
+
+	t.Run("status", func(t *testing.T) {
+		srv := apitest.NewServer(t)
+		srv.Script(http.MethodGet, "/v1/resources/"+srv.Key.CRID+"/sharing", apitest.HandlerRevoked400(t))
+		res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "status", srv.Key.CRID}})
+		assertDeleted(t, res)
+	})
+}
+
+// TestShareInsufficientScope pins the dedicated-scope failure UX.
+func TestShareInsufficientScope(t *testing.T) {
+	srv := apitest.NewServer(t)
+	srv.Script(http.MethodPost, "/v1/resources/"+srv.Key.CRID+"/share", apitest.HandlerInsufficientScope403(t))
+	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "share", srv.Key.CRID}})
+	if res.code != 6 {
+		t.Fatalf("exit = %d, want 6; stderr: %s", res.code, res.stderr.String())
+	}
+	if !strings.Contains(res.stderr.String(), "isn't allowed to request access links") {
+		t.Errorf("expected the share-scope hint, got %q", res.stderr.String())
+	}
+}
+
+// TestPublishFoundExistingNote pins the already-published UX under --quiet:
+// success plus a stderr note, never an error, and stdout stays CRID-only.
+func TestPublishFoundExistingNote(t *testing.T) {
+	srv := apitest.NewServer(t)
+	srv.SetPublishFoundExisting(true)
+	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "--quiet", "publish", "https://example.com/data"}})
+	if res.code != 0 {
+		t.Fatalf("exit = %d, stderr: %s", res.code, res.stderr.String())
+	}
+	if !strings.Contains(res.stderr.String(), "already published") {
+		t.Errorf("expected the found-existing note, got %q", res.stderr.String())
+	}
+	if got, want := res.stdout.String(), srv.Key.CRID+"\n"; got != want {
+		t.Errorf("stdout = %q, want the CRID", got)
+	}
+}
+
+// TestPublishFoundExistingTextAnatomy pins the replay document in text mode:
+// exit 0, the "Already published" headline, the explanatory note with its
+// next step, no raw resource id, and the CRID still last, alone on its line.
+func TestPublishFoundExistingTextAnatomy(t *testing.T) {
+	srv := apitest.NewServer(t)
+	srv.SetPublishFoundExisting(true)
+	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "publish", "https://example.com/data"}})
+	if res.code != 0 {
+		t.Fatalf("exit = %d, stderr: %s", res.code, res.stderr.String())
+	}
+	// The document itself tells the story in text mode; the stderr note
+	// belongs to --quiet and JSON only, so any stderr here is double-noting.
+	if res.stderr.Len() != 0 {
+		t.Errorf("text mode must not also note the replay on stderr, got %q", res.stderr.String())
+	}
+	stdout := res.stdout.String()
+	if !strings.HasPrefix(stdout, "Already published\n") {
+		t.Errorf("headline must say the resource already existed, got %q", stdout)
+	}
+	if !strings.Contains(stdout, "already has an active resource") || !strings.Contains(stdout, "Delete it first") {
+		t.Errorf("expected the what-happened note with its next step, got %q", stdout)
+	}
+	if strings.Contains(stdout, "Resource ID:") {
+		t.Errorf("the raw resource id must not render in text mode, got %q", stdout)
+	}
+	lines := strings.Split(strings.TrimRight(stdout, "\n"), "\n")
+	if last, want := lines[len(lines)-1], "CRID: "+srv.Key.CRID; last != want {
+		t.Errorf("last line = %q, want %q (the CRID must stay last)", last, want)
+	}
+}
+
+// TestPublishNoCRIDFailsClosed pins the current service contract: a successful
+// publish must contain the permanent public identity that the command exists
+// to return. Do not silently accept an older, partial response.
+func TestPublishNoCRIDFailsClosed(t *testing.T) {
+	srv := apitest.NewServer(t)
+	srv.SetPublishOmitCRID(true)
+	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "publish", "https://example.com/data"}})
+	if res.code == 0 {
+		t.Fatalf("exit = 0, stdout: %s", res.stdout.String())
+	}
+	if res.stdout.Len() != 0 {
+		t.Errorf("stdout = %q, want no partial publish identity", res.stdout.String())
+	}
+	if !strings.Contains(res.stderr.String(), "publish response missing crid") {
+		t.Errorf("stderr = %q, want missing-CRID cause", res.stderr.String())
+	}
+}
+
+// TestListZeroItemPageWithMoreDoesNotSayNotFound pins the has_more rule:
+// empty pages with more behind them must not read as "nothing found".
+func TestListZeroItemPageWithMoreDoesNotSayNotFound(t *testing.T) {
+	srv := apitest.NewServer(t)
+	srv.Script(http.MethodGet, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		apitest.WriteEnvelope(t, w, http.StatusOK, []map[string]any{},
+			map[string]any{"has_more": true, "next_cursor": "cur9"})
+	})
+	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "list"}})
+	if res.code != 0 {
+		t.Fatalf("exit = %d, stderr: %s", res.code, res.stderr.String())
+	}
+	if strings.Contains(res.stderr.String(), "No resources found") {
+		t.Errorf("empty-but-has-more page must not claim nothing found: %q", res.stderr.String())
+	}
+	if !strings.Contains(res.stderr.String(), "--cursor cur9") {
+		t.Errorf("expected the continuation note, got %q", res.stderr.String())
+	}
+}
+
+func TestListUsesPagedDesiredStateAndLocalTargetWithoutSharingFanout(t *testing.T) {
+	srv := apitest.NewServer(t)
+	srv.Script(http.MethodGet, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		apitest.WriteEnvelope(t, w, http.StatusOK, []map[string]any{{
+			"resource_id":   srv.Key.ResourceID,
+			"crid":          srv.Key.CRID,
+			"type":          "tunnel",
+			"status":        "active",
+			"desired_state": "on",
+			"serving_epoch": 7,
+		}}, map[string]any{"has_more": false})
+	})
+	res := runCLI(t, &runOpts{
+		args: []string{"--endpoint", srv.URL, "list"},
+		localShares: []connectorstate.LocalShare{{
+			ResourceID: srv.Key.ResourceID,
+			CRID:       srv.Key.CRID,
+			TargetURL:  "http://127.0.0.1:3000",
+		}},
+	})
+	if res.code != 0 {
+		t.Fatalf("exit = %d, stderr: %s", res.code, res.stderr.String())
+	}
+	for _, want := range []string{srv.Key.CRID, "http://127.0.0.1:3000", "on", "unknown"} {
+		if !strings.Contains(res.stdout.String(), want) {
+			t.Errorf("list output missing %q:\n%s", want, res.stdout.String())
+		}
+	}
+	if strings.Contains(res.stdout.String(), "…") {
+		t.Fatalf("list truncated the CRID:\n%s", res.stdout.String())
+	}
+}
+
+func TestListDoesNotIssuePerTunnelSharingReads(t *testing.T) {
+	srv := apitest.NewServer(t)
+	key2 := apitest.GenerateResourceKey(t)
+	resource2 := key2.ResourceID
+	crid2 := key2.CRID
+	srv.Script(http.MethodGet, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		apitest.WriteEnvelope(t, w, http.StatusOK, []map[string]any{
+			{"resource_id": srv.Key.ResourceID, "crid": srv.Key.CRID, "type": "tunnel", "status": "active", "desired_state": "on", "serving_epoch": 7},
+			{"resource_id": resource2, "crid": crid2, "type": "tunnel", "status": "active", "desired_state": "off", "serving_epoch": 8},
+		}, map[string]any{"has_more": false})
+	})
+	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "list"}})
+	if res.code != 0 {
+		t.Fatalf("exit = %d, stderr: %s", res.code, res.stderr.String())
+	}
+	for _, want := range []string{srv.Key.CRID, "on", crid2, "off", "unknown"} {
+		if !strings.Contains(res.stdout.String(), want) {
+			t.Errorf("list output missing %q:\n%s", want, res.stdout.String())
+		}
+	}
+	if strings.Contains(res.stderr.String(), "observed state") || strings.Contains(res.stderr.String(), "sharing") {
+		t.Fatalf("list emitted per-row sharing warning despite no fanout:\n%s", res.stderr.String())
+	}
+}
+
+func TestListWarnsAndOmitsTargetsWhenLocalStateIsUnavailable(t *testing.T) {
+	srv := apitest.NewServer(t)
+	srv.Script(http.MethodGet, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		apitest.WriteEnvelope(t, w, http.StatusOK, []map[string]any{{
+			"resource_id": srv.Key.ResourceID, "crid": srv.Key.CRID, "type": "tunnel",
+			"status": "active", "desired_state": "on", "serving_epoch": 7,
+		}}, map[string]any{"has_more": false})
+	})
+	res := runCLI(t, &runOpts{
+		args:           []string{"--endpoint", srv.URL, "list"},
+		localSharesErr: errors.New("corrupt local registry"),
+	})
+	if res.code != 0 {
+		t.Fatalf("exit=%d stderr=%s", res.code, res.stderr.String())
+	}
+	for _, want := range []string{srv.Key.CRID, "on", "unknown"} {
+		if !strings.Contains(res.stdout.String(), want) {
+			t.Errorf("list output missing %q:\n%s", want, res.stdout.String())
+		}
+	}
+	if strings.Contains(res.stdout.String(), "127.0.0.1") {
+		t.Fatalf("list fabricated a local target:\n%s", res.stdout.String())
+	}
+	if got := strings.Count(res.stderr.String(), "Local sharing state is invalid or inaccessible; local targets were omitted: corrupt local registry"); got != 1 {
+		t.Fatalf("warning count=%d stderr=%q", got, res.stderr.String())
+	}
+	if requests := srv.Requests(); len(requests) != 1 || requests[0].Path != "/v1/resources" {
+		t.Fatalf("list requests=%#v, want only authoritative list", requests)
+	}
+}
+
+func TestListDoesNotWarnWhenThisPlatformHasNoDefaultLocalStateDirectory(t *testing.T) {
+	srv := apitest.NewServer(t)
+	srv.Script(http.MethodGet, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		apitest.WriteEnvelope(t, w, http.StatusOK, []map[string]any{{
+			"resource_id": srv.Key.ResourceID, "crid": srv.Key.CRID, "type": "tunnel",
+			"status": "active", "desired_state": "on", "serving_epoch": 7,
+		}}, map[string]any{"has_more": false})
+	})
+	res := runCLI(t, &runOpts{
+		args:           []string{"--endpoint", srv.URL, "list"},
+		localSharesErr: connectorstate.ErrNoDefaultStateDir,
+	})
+	if res.code != 0 {
+		t.Fatalf("exit=%d stderr=%s", res.code, res.stderr.String())
+	}
+	if strings.Contains(res.stderr.String(), "Local sharing state") {
+		t.Fatalf("list warned when local state is not supported on this platform: %q", res.stderr.String())
+	}
+	if !strings.Contains(res.stdout.String(), srv.Key.CRID) {
+		t.Fatalf("list omitted the remote Connector row: %q", res.stdout.String())
+	}
+}
+
+func TestEnrichTunnelListReturnsParentCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	streams := &output.Streams{Out: io.Discard, Err: io.Discard}
+	opts := &globalOpts{streams: streams, resolvedFormat: output.FormatText, loadLocalShares: func(context.Context) ([]connectorstate.LocalShare, error) {
+		return nil, errors.New("local read interrupted")
+	}}
+	page := &qurlapi.ResourcePage{Items: []qurlapi.ResourceSummary{{Type: "tunnel"}}}
+	if err := enrichTunnelList(ctx, opts, page); !errors.Is(err, context.Canceled) {
+		t.Fatalf("enrichTunnelList()=%v, want parent cancellation", err)
+	}
+}
+
+func TestDefaultLocalShareLoaderUsesConfiguredStateDirectoryResolver(t *testing.T) {
+	want := errors.New("configured state directory unavailable")
+	opts := &globalOpts{resolveShareStateDir: func(string) (string, error) { return "", want }}
+	opts.applyDefaults()
+	if _, err := opts.loadLocalShares(context.Background()); !errors.Is(err, want) {
+		t.Fatalf("loadLocalShares() = %v, want configured resolver error", err)
+	}
+}
+
+func TestListQuietSkipsLocalRegistryAndSharingReads(t *testing.T) {
+	srv := apitest.NewServer(t)
+	srv.Script(http.MethodGet, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		apitest.WriteEnvelope(t, w, http.StatusOK, []map[string]any{{
+			"resource_id": srv.Key.ResourceID, "crid": srv.Key.CRID, "type": "tunnel",
+			"status": "active", "desired_state": "on", "serving_epoch": 1,
+		}}, map[string]any{"has_more": false})
+	})
+	loads := 0
+	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "--quiet", "list"}, localSharesLoads: &loads})
+	if res.code != 0 || res.stdout.String() != srv.Key.CRID+"\n" {
+		t.Fatalf("quiet list: code=%d stdout=%q stderr=%q", res.code, res.stdout.String(), res.stderr.String())
+	}
+	if loads != 0 {
+		t.Fatalf("local registry loads = %d, want zero", loads)
+	}
+	if requests := srv.Requests(); len(requests) != 1 || requests[0].Path != "/v1/resources" {
+		t.Fatalf("quiet list requests = %#v, want only resource list", requests)
+	}
+}
+
+func TestListJSONQuietKeepsLocalTunnelTargets(t *testing.T) {
+	srv := apitest.NewServer(t)
+	run := func(t *testing.T, quiet bool) string {
+		t.Helper()
+		srv.Script(http.MethodGet, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+			apitest.WriteEnvelope(t, w, http.StatusOK, []map[string]any{{
+				"resource_id": srv.Key.ResourceID, "crid": srv.Key.CRID, "type": "tunnel",
+				"status": "active", "desired_state": "on", "serving_epoch": 1,
+			}}, map[string]any{"has_more": false})
+		})
+		args := []string{"--endpoint", srv.URL, "--output", "json"}
+		if quiet {
+			args = append(args, "--quiet")
+		}
+		args = append(args, "list")
+		loads := 0
+		res := runCLI(t, &runOpts{
+			args: args,
+			localShares: []connectorstate.LocalShare{{
+				ResourceID: srv.Key.ResourceID,
+				CRID:       srv.Key.CRID,
+				TargetURL:  "http://127.0.0.1:3000",
+			}},
+			localSharesLoads: &loads,
+		})
+		if res.code != 0 {
+			t.Fatalf("JSON list: code=%d stdout=%q stderr=%q", res.code, res.stdout.String(), res.stderr.String())
+		}
+		if loads != 1 {
+			t.Fatalf("local registry loads = %d, want one", loads)
+		}
+		return res.stdout.String()
+	}
+
+	regular := run(t, false)
+	quiet := run(t, true)
+	if quiet != regular {
+		t.Fatalf("--quiet changed JSON list output:\nregular: %s\nquiet: %s", regular, quiet)
+	}
+	if !strings.Contains(quiet, `"target_url": "http://127.0.0.1:3000"`) {
+		t.Fatalf("JSON list omitted local tunnel target: %s", quiet)
+	}
+}
+
+func TestDeleteNonInteractiveRequiresYes(t *testing.T) {
+	srv := apitest.NewServer(t)
+	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "delete", srv.Key.CRID}})
+	if res.code != 2 {
+		t.Fatalf("exit = %d, want 2; stderr: %s", res.code, res.stderr.String())
+	}
+	if len(srv.Requests()) != 0 {
+		t.Error("no request may be sent when confirmation is refused")
+	}
+}
+
+func TestDeleteInteractiveConfirmAndCancel(t *testing.T) {
+	srv := apitest.NewServer(t)
+	res := runCLI(t, &runOpts{
+		args:  []string{"--endpoint", srv.URL, "delete", srv.Key.CRID},
+		stdin: strings.NewReader("y\n"),
+		inTTY: true,
+	})
+	if res.code != 0 || len(srv.Requests()) != 1 {
+		t.Fatalf("confirmed delete: exit=%d requests=%d, stderr: %s", res.code, len(srv.Requests()), res.stderr.String())
+	}
+
+	srv2 := apitest.NewServer(t)
+	res = runCLI(t, &runOpts{
+		args:  []string{"--endpoint", srv2.URL, "delete", srv2.Key.CRID},
+		stdin: strings.NewReader("n\n"),
+		inTTY: true,
+	})
+	if res.code != 0 {
+		t.Fatalf("canceled delete should exit 0, got %d", res.code)
+	}
+	if len(srv2.Requests()) != 0 {
+		t.Error("canceled delete must not send a request")
+	}
+	if !strings.Contains(res.stderr.String(), "Canceled") {
+		t.Errorf("expected cancel note, got %q", res.stderr.String())
+	}
+}
+
+func TestDeleteInteractiveReadErrorIsSurfaced(t *testing.T) {
+	srv := apitest.NewServer(t)
+	want := errors.New("confirmation input failed")
+	res := runCLI(t, &runOpts{
+		args:  []string{"--endpoint", srv.URL, "delete", srv.Key.CRID},
+		stdin: iotest.ErrReader(want),
+		inTTY: true,
+	})
+	if res.code != 1 || !strings.Contains(res.stderr.String(), want.Error()) {
+		t.Fatalf("delete input error = exit %d stderr %q", res.code, res.stderr.String())
+	}
+	if len(srv.Requests()) != 0 {
+		t.Fatal("delete input error must not send a request")
+	}
+}
+
+func TestTestCRIDOnProductionRefusedWithoutYes(t *testing.T) {
+	srv := apitest.NewServer(t) // never contacted
+	res := runCLI(t, &runOpts{args: []string{"--endpoint", "https://api.layerv.ai", "share", srv.Key.CRID}})
+	if res.code != 2 {
+		t.Fatalf("exit = %d, want 2; stderr: %s", res.code, res.stderr.String())
+	}
+	mustEmptyStdout(t, res)
+	if !strings.Contains(res.stderr.String(), "--yes") {
+		t.Errorf("expected the --yes remedy in the message, got %q", res.stderr.String())
+	}
+	if len(srv.Requests()) != 0 {
+		t.Error("the guard must fire before any request")
+	}
+}
+
+func TestProductionCRIDOnLocalEndpointWarnsAndProceeds(t *testing.T) {
+	srv := apitest.NewServer(t)
+	prodCRID := apitest.DeriveCRID(t, srv.Key.DER, apitest.VersionProduction)
+	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "share", prodCRID}})
+	if res.code != 0 {
+		t.Fatalf("exit = %d, stderr: %s", res.code, res.stderr.String())
+	}
+	if !strings.Contains(res.stderr.String(), "non-production endpoint") {
+		t.Errorf("expected the environment warning, got %q", res.stderr.String())
+	}
+	if res.stdout.Len() == 0 {
+		t.Error("warn-only mismatch must still emit the link")
+	}
+}
+
+func TestCRIDTypoRejectsBeforeRequest(t *testing.T) {
+	srv := apitest.NewServer(t)
+	// Corrupt the final character to break the CRID's internal check while
+	// keeping the alphabet and length valid.
+	typo := srv.Key.CRID[:59] + flipCRIDChar(srv.Key.CRID[59])
+	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "share", typo}})
+	if res.code != 8 {
+		t.Fatalf("exit = %d, stderr: %s", res.code, res.stderr.String())
+	}
+	if !strings.Contains(res.stderr.String(), "appears to contain a typo") {
+		t.Errorf("expected the typo warning, got %q", res.stderr.String())
+	}
+	if len(srv.Requests()) != 0 {
+		t.Errorf("invalid CRID must not be forwarded, requests = %d", len(srv.Requests()))
+	}
+}
+
+func flipCRIDChar(c byte) string {
+	if c == 'a' {
+		return "b"
+	}
+	return "a"
+}
+
+// TestVersionAndCompletionSurviveBrokenConfig pins the shell-init contract:
+// a malformed or secret-bearing legacy config file must never brick
+// `eval "$(qurl completion bash)"` or `qurl version` — neither command
+// touches settings, credentials, or the network.
+func TestVersionAndCompletionSurviveBrokenConfig(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte("api_key: lv_live_shouldnotbehere000\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"version"}, {"completion", "bash"}} {
+		res := runCLI(t, &runOpts{args: args, configDir: dir})
+		if res.code != 0 {
+			t.Errorf("%v exit = %d with a secret-bearing config; stderr: %s", args, res.code, res.stderr.String())
+		}
+	}
+}
+
+// TestDocsRejectsUnknownMode pins usage discipline on the hidden docs
+// command: an invalid mode is a usage error, not a zero-exit help print.
+func TestDocsRejectsUnknownMode(t *testing.T) {
+	res := runCLI(t, &runOpts{args: []string{"docs", "bogus"}})
+	if res.code != 2 {
+		t.Errorf("exit = %d, want 2; stderr: %s", res.code, res.stderr.String())
+	}
+}
+
+// TestShareSubSecondTTLRefused pins clamp-and-report: a requested lifetime
+// is never silently dropped, and a sub-second --ttl would truncate to zero
+// on the whole-second wire.
+func TestShareSubSecondTTLRefused(t *testing.T) {
+	srv := apitest.NewServer(t) // never contacted
+	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "share", srv.Key.CRID, "--ttl", "500ms"}})
+	if res.code != 2 {
+		t.Errorf("exit = %d, want 2; stderr: %s", res.code, res.stderr.String())
+	}
+	if len(srv.Requests()) != 0 {
+		t.Error("sub-second ttl must be refused before any request")
+	}
+}
+
+// TestListJSONCarriesHasMore pins the scripting contract: has_more — not
+// next_cursor presence — is the pagination terminator, so the JSON
+// projection must carry it even on a zero-item page.
+func TestListJSONCarriesHasMore(t *testing.T) {
+	srv := apitest.NewServer(t)
+	srv.Script(http.MethodGet, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		apitest.WriteEnvelope(t, w, http.StatusOK, []map[string]any{}, map[string]any{"next_cursor": "page2", "has_more": true})
+	})
+	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "-o", "json", "list"}})
+	if res.code != 0 {
+		t.Fatalf("exit = %d, stderr: %s", res.code, res.stderr.String())
+	}
+	if !strings.Contains(res.stdout.String(), `"has_more": true`) {
+		t.Errorf("json list must carry has_more on an empty-but-more page; got %s", res.stdout.String())
+	}
+}
+
+// TestPublishJSONCarriesFoundExisting mirrors the text-mode note for
+// scripts: the replay document states found_existing: true and still carries
+// the existing resource's CRID. The fresh-publish document's explicit
+// found_existing: false is pinned by the publish JSON golden.
+func TestPublishJSONCarriesFoundExisting(t *testing.T) {
+	srv := apitest.NewServer(t)
+	srv.SetPublishFoundExisting(true)
+	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "-o", "json", "publish", "https://example.com/data"}})
+	if res.code != 0 {
+		t.Fatalf("exit = %d, stderr: %s", res.code, res.stderr.String())
+	}
+	if !strings.Contains(res.stdout.String(), `"found_existing": true`) {
+		t.Errorf("json publish must carry found_existing; got %s", res.stdout.String())
+	}
+	if !strings.Contains(res.stdout.String(), `"crid": "`+srv.Key.CRID+`"`) {
+		t.Errorf("replay json must carry the existing resource's CRID; got %s", res.stdout.String())
+	}
+}
+
+// TestInsecureEndpointWarning pins the cleartext-credential warning table:
+// plain http warns only off-loopback (mocks and harnesses are exempt).
+func TestInsecureEndpointWarning(t *testing.T) {
+	cases := map[string]bool{
+		"http://api.example.com":    true,
+		"http://192.0.2.10":         true,
+		"https://api.example.com":   false,
+		"http://localhost:8080":     false,
+		"http://LOCALHOST:8080":     false,
+		"http://api.localhost:8080": true,
+		"http://127.0.0.1:8080":     false,
+		"http://[::1]:8080":         false,
+	}
+	for endpoint, wantWarn := range cases {
+		if got := insecureEndpointWarning(endpoint) != ""; got != wantWarn {
+			t.Errorf("insecureEndpointWarning(%q) warned=%t, want %t", endpoint, got, wantWarn)
+		}
+	}
+}
+
+func TestRegisteredClientWarnsOnceForCleartextRemoteEndpoint(t *testing.T) {
+	var stderr bytes.Buffer
+	opts := &globalOpts{
+		resolvedEndpoint: "http://api.example.com",
+		resolvedFormat:   output.FormatText,
+		streams:          &output.Streams{Out: io.Discard, Err: &stderr},
+	}
+	opts.openAPIClient = func(context.Context) (qurlapi.Client, error) {
+		// Repeat the gate here to model a recovery path that also opens an account
+		// client, then return an inert loopback client without sending a request.
+		opts.warnInsecureEndpoint()
+		return qurlapi.New(&qurlapi.Config{BaseURL: "http://127.0.0.1", APIKey: testAPIKey})
+	}
+	if _, err := opts.newClient(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Count(stderr.String(), "Warning:"); got != 1 {
+		t.Fatalf("cleartext registered-client warnings = %d, want one; stderr=%q", got, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "authorization credential would travel unencrypted") {
+		t.Fatalf("registered-client warning does not cover its device credential: %q", stderr.String())
+	}
+}
+
+func TestDaemonRunDocumentsPublicInputsAndHidesJobSupervisionDetails(t *testing.T) {
+	res := runCLI(t, &runOpts{args: []string{"daemon", "run", "--help"}})
+	if res.code != 0 {
+		t.Fatalf("exit = %d, stderr: %s", res.code, res.stderr.String())
+	}
+	for _, public := range []string{"--state-dir", "--headless-config", "--enrollment-token-file", "--share-group-mode"} {
+		if !strings.Contains(res.stdout.String(), public) {
+			t.Errorf("daemon run help lost supported public input %q", public)
+		}
+	}
+	for _, hidden := range []string{
+		"--job-version", "--job-stdout-log", "--job-stderr-log",
+		"--hub-host", "--hub-port", "--hub-server-public-key-b64",
+	} {
+		if strings.Contains(res.stdout.String(), hidden) {
+			t.Errorf("daemon run help exposes internal supervision flag %q", hidden)
+		}
+	}
+}
+
+func TestDaemonRunRejectsRemovedSessionRelayFlag(t *testing.T) {
+	res := runCLI(t, &runOpts{args: []string{
+		"daemon", "run", "--session-relay-url", "https://relay.example.com",
+	}})
+	if res.code != 2 || !strings.Contains(res.stderr.String(), "unknown flag") {
+		t.Fatalf("removed session-relay flag = exit %d stderr %q", res.code, res.stderr.String())
+	}
+}

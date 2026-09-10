@@ -62,7 +62,7 @@ func TestExposeChooserBlocks(t *testing.T) {
 		exposeURLActionID,
 		"Protect qURL Connector",
 		"Protect URL",
-		"Generate install instructions and a bootstrap key",
+		"Generate install instructions and a one-shot enrollment token",
 		"Choose an existing URL resource and bind a channel alias",
 		testExposeChannel,
 	} {
@@ -307,10 +307,11 @@ func TestAdminHelpReflectsExposeVerb(t *testing.T) {
 
 // --- button clicks (block_actions) ----------------------------------------
 
-// TestHandleExposeConnectorClick_OpensInstallModal fences that the "Protect qURL
-// Connector" button opens the existing connector installer modal (reused
-// wholesale — same callback_id its bare-command path uses).
-func TestHandleExposeConnectorClick_OpensInstallModal(t *testing.T) {
+// TestHandleExposeConnectorClick_OpensSetupChooser fences that the "Protect
+// qURL Connector" button opens a connector-specific branch screen. The
+// existing-service branch still routes to the historical installer; S3 hosted
+// websites get their own follow-up form.
+func TestHandleExposeConnectorClick_OpensSetupChooser(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
 	h := newAdminTestHandler(t, ts)
@@ -338,8 +339,22 @@ func TestHandleExposeConnectorClick_OpensInstallModal(t *testing.T) {
 	if err := json.Unmarshal(view, &modal); err != nil {
 		t.Fatalf("modal JSON: %v", err)
 	}
-	if modal[blockKitFieldCallbackID] != callbackIDTunnelInstall {
-		t.Errorf("callback_id = %v, want %s", modal[blockKitFieldCallbackID], callbackIDTunnelInstall)
+	if modal[blockKitFieldCallbackID] != callbackIDConnectorSetup {
+		t.Errorf("callback_id = %v, want %s", modal[blockKitFieldCallbackID], callbackIDConnectorSetup)
+	}
+	viewBody := string(view)
+	for _, want := range []string{
+		"Web app or HTTP API",
+		"App, dashboard, admin tool, or API reachable on an HTTP port.",
+		"S3 static website",
+		"Static-site files in an S3 bucket.",
+		"What type of resource are you protecting?",
+		"radio_buttons",
+		connectorSetupActionType,
+	} {
+		if !strings.Contains(viewBody, want) {
+			t.Errorf("connector setup chooser missing %q: %s", want, viewBody)
+		}
 	}
 }
 
@@ -951,7 +966,7 @@ func TestParseExposeURLModalArgs(t *testing.T) {
 		{name: "valid", resourceValue: testResourceExposeID, aliasValue: "$docs", wantResource: testResourceExposeID, wantAlias: "docs"},
 		{name: "alias without sigil", resourceValue: testResourceExposeID, aliasValue: "docs", wantResource: testResourceExposeID, wantAlias: "docs"},
 		{name: "missing resource", resourceValue: "", aliasValue: "$docs", wantErrBlock: exposeURLBlockResource},
-		{name: "non-resource-id value", resourceValue: "not-an-id", aliasValue: "$docs", wantErrBlock: exposeURLBlockResource},
+		{name: "opaque resource id", resourceValue: "not-an-id", aliasValue: "$docs", wantResource: "not-an-id", wantAlias: "docs"},
 		{name: "overlong resource id value", resourceValue: "r_" + strings.Repeat("x", slackOptionValueMaxChars), aliasValue: "$docs", wantErrBlock: exposeURLBlockResource},
 		{name: "missing alias", resourceValue: testResourceExposeID, aliasValue: "", wantErrBlock: exposeURLBlockAlias},
 		{name: "invalid alias", resourceValue: testResourceExposeID, aliasValue: "$Bad Alias", wantErrBlock: exposeURLBlockAlias},
@@ -1018,6 +1033,7 @@ func TestParseExposeURLCreateModalArgs(t *testing.T) {
 			}
 			if got == nil {
 				t.Fatal("args = nil, want parsed args")
+				return
 			}
 			if got.TargetURL != tc.wantTarget || got.ChannelAlias != tc.wantAlias {
 				t.Fatalf("got (target=%q alias=%q), want (target=%q alias=%q)", got.TargetURL, got.ChannelAlias, tc.wantTarget, tc.wantAlias)

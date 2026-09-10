@@ -319,7 +319,7 @@ func TestAgentAck_BestEffortDoesNotFailTurn(t *testing.T) {
 
 	mu.Lock()
 	defer mu.Unlock()
-	if len(*posts) != 1 || (*posts)[0].text != testAgentStillWorksReply {
+	if len(*posts) != 1 || (*posts)[0].text != agentLLMReplyWithDisclaimer(testAgentStillWorksReply) {
 		t.Fatalf("a failing reaction must not fail the turn; reply = %+v", *posts)
 	}
 }

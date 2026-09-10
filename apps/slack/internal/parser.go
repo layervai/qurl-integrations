@@ -35,10 +35,10 @@ const (
 	SubcmdUnsetAlias Subcommand = "unsetalias"
 	// SubcmdAliases lists owner-scoped aliases visible in the channel.
 	SubcmdAliases Subcommand = "aliases"
-	// SubcmdAdmin groups the bot-admin membership verbs; see
+	// SubcmdAdmin groups the bot-admin membership/ownership verbs; see
 	// [Command.AdminAction] for the specific verb. No longer a literal
-	// leading word — the flat `/qurl-admin add|remove|admins` verbs map onto
-	// it (the legacy `admin <verb>` prefix is redirected at dispatch).
+	// leading word — the flat `/qurl-admin add|remove|admins|transfer-ownership`
+	// verbs map onto it (the legacy `admin <verb>` prefix is redirected at dispatch).
 	SubcmdAdmin Subcommand = "admin"
 	// SubcmdRevoke revokes a protected resource (and all its qURLs) by the
 	// `$<id|alias>` the bot shows; the handler resolves the token to a
@@ -49,9 +49,10 @@ const (
 	SubcmdList Subcommand = "list"
 )
 
-// AdminAction names a bot-admin membership verb. The flat `/qurl-admin
-// add|remove|admins` verbs each map onto one of these (the handlers switch on
-// it); resource revoke is its own [SubcmdRevoke], not an AdminAction.
+// AdminAction names a bot-admin membership/ownership verb. The flat
+// `/qurl-admin add|remove|admins|transfer-ownership` verbs each map onto one
+// of these (the handlers switch on it); resource revoke is its own
+// [SubcmdRevoke], not an AdminAction.
 type AdminAction string
 
 // Recognized admin actions.
@@ -66,6 +67,9 @@ const (
 	// AdminList lists the workspace owner and current admins.
 	// No positional arguments.
 	AdminList AdminAction = "list"
+	// AdminTransferOwnership reassigns the workspace owner_id gate to another
+	// Slack user. Same mention-argument shape as [AdminAdd].
+	AdminTransferOwnership AdminAction = "transfer_ownership"
 )
 
 // Admin-gate audit labels. Unlike the parser-enumerated actions above
@@ -185,12 +189,12 @@ var ErrURLNotSupportedGet = errors.New("raw URL not supported by get")
 // Same terse-sentinel / rich-handler-copy split as [ErrURLNotSupportedGet].
 var ErrResourceIDNotSupportedGet = errors.New("resource id not supported by get")
 
-// ErrMissingUserMention is returned when `/qurl-admin add` / `remove`
-// are invoked without a `<@U…>` Slack user mention.
+// ErrMissingUserMention is returned when `/qurl-admin add`, `remove`, or
+// `transfer-ownership` are invoked without a `<@U…>` Slack user mention.
 var ErrMissingUserMention = errors.New("missing @user mention")
 
-// ErrInvalidUserMention is returned when the `/qurl-admin add` / `remove`
-// argument doesn't match the Slack mention encoding
+// ErrInvalidUserMention is returned when the `/qurl-admin add`, `remove`, or
+// `transfer-ownership` argument doesn't match the Slack mention encoding
 // `<@U12345>` / `<@U12345|name>`.
 var ErrInvalidUserMention = errors.New("invalid @user mention")
 
@@ -318,20 +322,20 @@ func Parse(text string) (*Command, error) {
 	case SubcmdRevoke:
 		cmd.Subcommand = SubcmdRevoke
 		return parseRevoke(cmd, rest)
-	case "add":
-		// Flat bot-admin membership verbs map onto SubcmdAdmin + an
-		// AdminAction so the membership handlers (handleAdminAdd / Remove /
-		// List) stay unchanged. The legacy `admin <verb>` prefix is redirected
-		// at dispatch (dispatchAdminCommand), so it never reaches Parse. Keep
-		// these spellings in sync with adminVerbs + dispatchAdminCommand.
+	case adminVerbAdd:
+		// Flat bot-admin membership/ownership verbs map onto SubcmdAdmin + an
+		// AdminAction so the handlers can switch on one parsed shape. The
+		// legacy `admin <verb>` prefix is redirected at dispatch
+		// (dispatchAdminCommand), so it never reaches Parse. Keep these spellings
+		// in sync with dispatchAdminCommand.
 		cmd.Subcommand = SubcmdAdmin
 		cmd.AdminAction = AdminAdd
 		return parseAdminMention(cmd, rest)
-	case "remove":
+	case adminVerbRemove:
 		cmd.Subcommand = SubcmdAdmin
 		cmd.AdminAction = AdminRemove
 		return parseAdminMention(cmd, rest)
-	case "admins":
+	case adminVerbAdmins:
 		cmd.Subcommand = SubcmdAdmin
 		cmd.AdminAction = AdminList
 		if len(rest) > 0 {
@@ -341,13 +345,17 @@ func Parse(text string) (*Command, error) {
 			return nil, fmt.Errorf("%w: `%s`", ErrUnexpectedArgument, truncateForError(rest[0]))
 		}
 		return cmd, nil
+	case adminVerbTransferOwnership:
+		cmd.Subcommand = SubcmdAdmin
+		cmd.AdminAction = AdminTransferOwnership
+		return parseAdminMention(cmd, rest)
 	case SubcmdAdmin:
-		// SubcmdAdmin is the value the flat add/remove/admins verbs map onto
-		// (above); it has no literal leading word of its own. The deprecated
-		// `admin <verb>` prefix is redirected at dispatch before Parse runs, so
-		// a literal `admin` reaching here is just an unknown verb. This explicit
-		// arm keeps `exhaustive` enforced for the Subcommand enum (the repo runs
-		// it without default-signifies-exhaustive).
+		// SubcmdAdmin is the value the flat add/remove/admins/transfer-ownership
+		// verbs map onto (above); it has no literal leading word of its own. The
+		// deprecated `admin <verb>` prefix is redirected at dispatch before Parse
+		// runs, so a literal `admin` reaching here is just an unknown verb. This
+		// explicit arm keeps `exhaustive` enforced for the Subcommand enum (the
+		// repo runs it without default-signifies-exhaustive).
 		return nil, fmt.Errorf("%w: %q", ErrUnknownSubcommand, tokens[0])
 	case SubcmdList:
 		cmd.Subcommand = SubcmdList
@@ -529,7 +537,7 @@ func parseAliasOnly(cmd *Command, rest []string) (*Command, error) {
 }
 
 // parseAdminMention parses the single `<@U…>` mention argument for the
-// `/qurl-admin add` / `remove` membership verbs. The leading verb and the
+// `/qurl-admin add` / `remove` / `transfer-ownership` verbs. The leading verb and the
 // AdminAction are already set by [Parse]; the argument arrives as Slack's
 // encoded mention syntax (`<@U12345>` or `<@U12345|name>`) and
 // [userMentionPattern] yields the bare user ID for the handler. A surplus

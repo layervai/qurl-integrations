@@ -4,65 +4,221 @@
 // the highest-risk branch in the module: a regression here could either
 // boot in prod with missing secrets OR die on a spurious false-positive.
 
-// Required at boot in EVERY environment. Gated on `isOpenNHPActive`,
-// NOT `isMultiTenant`: the GITHUB_* vars only matter when /auth +
-// /webhook routes are actually mounted. A single-guild-plain deployment
-// (GUILD_ID set but ENABLE_OPENNHP_FEATURES off) never mounts those
-// routes, so demanding dummy values just to pass the boot check would
-// be a papercut for every customer server.
+const { MIN_STATE_SECRET_LENGTH } = require('./utils/oauth-state');
+const {
+  IPV4_LITERAL_RE,
+  parseIPv4Octets,
+  ipv4LocalScope,
+  ipv6LocalScope,
+  unwrapIPv4Mapped,
+} = require('./utils/private-host');
+
+// Required at boot in EVERY environment.
 //
-// Explicitly NOT on this list even in OpenNHP mode:
-//   - GUILD_ID: if isOpenNHPActive === true then !isMultiTenant, which
-//     means the snowflake validator in config.js already accepted a
-//     17-20 digit value. Re-checking truthiness here would never catch
-//     a missing GUILD_ID — the upstream check is the authority.
+// Explicitly NOT on this list:
+//   - GUILD_ID: optional by design — unset means multi-tenant mode, and
+//     a set value has already been snowflake-validated by config.js.
+//     Re-checking truthiness here would never catch a real misconfig.
 //   - BASE_URL: config.js supplies an unconditional "http://localhost:3000"
-//     default, so `cfg.BASE_URL` is always truthy. The real enforcement
-//     is the https-startswith check in index.js, which runs regardless
-//     of this required-list membership.
+//     default, so `cfg.BASE_URL` is always truthy. The real enforcement is
+//     baseUrlHttpsProblem (below), called from index.js's production block,
+//     which runs regardless of this required-list membership.
 // Listing either would be decorative — the downstream checks are the
 // authority. Keeping this list to the keys whose absence is actually a
 // boot blocker.
-function bootRequired(isOpenNHPActive) {
-  if (!isOpenNHPActive) return ['DISCORD_TOKEN'];
-  return ['DISCORD_TOKEN', 'GITHUB_CLIENT_ID', 'GITHUB_CLIENT_SECRET', 'GITHUB_WEBHOOK_SECRET'];
+function bootRequired() {
+  return ['DISCORD_TOKEN'];
 }
 
-// Additionally required when NODE_ENV=production. QURL_API_KEY is the
-// global-fallback for /qurl send + /qurl map; single-guild-plain and
-// multi-tenant deployments both rely on per-guild /qurl setup, so it's
-// optional outside the OpenNHP community server.
+// Additionally required when NODE_ENV=production. QURL_API_KEY is NOT
+// here: it is only the global fallback for /qurl send + /qurl map, and
+// every deployment shape relies on per-guild /qurl setup instead.
 //
-// KEY_ENCRYPTION_KEY appears here AND in missingKekRequiredKeys.
-// The two checks overlap on prod-with-OAuth (both fail closed there);
-// the load-bearing distinct cases are: this entry catches prod
-// deploys WITHOUT GITHUB_CLIENT_SECRET (KEK still protects
-// guild_configs.qurl_api_key + qurl_send_configs.attachment_url),
-// while missingKekRequiredKeys catches the staging/preview-with-OAuth
-// case the prod block alone would not cover.
-function prodRequired(isOpenNHPActive) {
-  if (!isOpenNHPActive) return ['METRICS_TOKEN', 'KEY_ENCRYPTION_KEY'];
-  return ['METRICS_TOKEN', 'QURL_API_KEY', 'KEY_ENCRYPTION_KEY'];
+// KEY_ENCRYPTION_KEY appears here AND in missingKekRequiredKeys. The
+// two overlap on prod-with-OAuth (both fail closed there); the
+// load-bearing distinct case is staging/preview with qURL OAuth
+// configured, which missingKekRequiredKeys catches and this
+// production-only list would not.
+function prodRequired() {
+  return ['METRICS_TOKEN', 'KEY_ENCRYPTION_KEY'];
 }
 
 // Compute which required keys are missing from a given config-like
 // object. Separate from bootRequired so tests can build a "config" with
 // specific holes and assert the exact missing list.
-function missingBootKeys(cfg, isOpenNHPActive) {
-  return bootRequired(isOpenNHPActive).filter(key => !cfg[key]);
+function missingBootKeys(cfg) {
+  return bootRequired().filter(key => !cfg[key]);
 }
 
-function missingProdKeys(env, isOpenNHPActive) {
-  return prodRequired(isOpenNHPActive).filter(k => !env[k]);
+function missingProdKeys(env) {
+  return prodRequired().filter(k => !env[k]);
 }
 
-// KEY_ENCRYPTION_KEY is required independently of NODE_ENV whenever
-// GITHUB_CLIENT_SECRET is set — staging/preview environments hand out
-// real GitHub OAuth tokens, and crypto.encrypt's dev plaintext fallback
-// must never reach the orphan-token persistence path.
-function missingKekRequiredKeys(env) {
-  if (!env.GITHUB_CLIENT_SECRET) return [];
+// KEY_ENCRYPTION_KEY is required independently of NODE_ENV whenever the
+// qURL OAuth setup flow is configured — staging/preview environments
+// that run guided setup persist real qURL API keys, and crypto.encrypt's
+// dev plaintext fallback must never reach
+// `guild_configs.qurl_api_key`.
+//
+// The trigger is passed in rather than derived here: KEY_ENCRYPTION_KEY
+// lives in raw env (index.js reads process.env for it, and the smoke
+// test below does too), while `isQurlOAuthConfigured` is a derived flag
+// config.js computes from the AUTH0_* block including its domain-shape
+// validation. Taking both keeps this helper pure and avoids a second,
+// drifting copy of that derivation.
+function missingKekRequiredKeys(env, isQurlOAuthConfigured) {
+  if (!isQurlOAuthConfigured) return [];
   return env.KEY_ENCRYPTION_KEY ? [] : ['KEY_ENCRYPTION_KEY'];
+}
+
+// The syntactic range table lives in utils/private-host.js so this boot-path
+// screen and qurl.js's SSRF guard can't drift apart — the failure mode a
+// second copy invites is one of them gaining a range the other lacks. That
+// module is dependency-free, so requiring it costs the earliest phase of
+// startup nothing.
+//
+// The question here is narrower than the SSRF guard's "is this private?": it
+// is "can this origin serve a PUBLIC OAuth redirect?". Hence the scope
+// decisions kept at this call site rather than pushed into the table:
+//
+//   - `.localhost` and a trailing-dot FQDN are name forms that only matter
+//     for an operator-typed BASE_URL, not for a fetch target.
+//   - CGNAT (100.64.0.0/10) is deliberately NOT screened: unlike the ranges
+//     the table always screens, it can front a legitimately reachable origin,
+//     so rejecting it would fail a valid deploy. The same reasoning excludes
+//     multicast/reserved and the deprecated site-local fec0::/10 — this
+//     rejects hosts that CANNOT serve a public origin, not every host that
+//     merely looks unusual.
+//
+// Input is always `new URL().hostname`, i.e. already canonicalized: WHATWG
+// resolves alternate IPv4 literal forms (`010.0.0.1` arrives as `8.0.0.1`)
+// and re-serializes `::ffff:127.0.0.1` to the hex form `::ffff:7f00:1`, which
+// is why the mapped unwrap has to understand the hex tail.
+const LOCAL_ONLY_IPV6_SCOPES = ['unspecified', 'loopback', 'unique-local', 'link-local'];
+
+function isLocalOnlyHost(hostname) {
+  // Strip the brackets the parser keeps around an IPv6 literal, and the
+  // trailing dot of an absolute FQDN — `localhost.` resolves the same as
+  // `localhost`, so it must not slip past the name compares below.
+  const host = hostname.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, '');
+  if (host === 'localhost' || host.endsWith('.localhost')) return true;
+  // parseIPv4Octets rejects labels Number() accepts but the URL spec's IPv4
+  // parser does not, which therefore arrive as ordinary DOMAIN hostnames:
+  // Number('1e2') is 100, so without it a public host like 10.2.3.1e2 would
+  // read as private and crash-loop a valid deploy.
+  const octets = parseIPv4Octets(unwrapIPv4Mapped(host) || host);
+  if (octets) return Boolean(ipv4LocalScope(octets));
+  // The colon test is load-bearing, not a fast path: ipv6LocalScope's parseInt
+  // is a lenient prefix parse, so parseInt('fc00.example.com', 16) is 0xfc00
+  // and the unique-local mask would misread real public hosts as link-local.
+  if (!host.includes(':')) return false;
+  return LOCAL_ONLY_IPV6_SCOPES.includes(ipv6LocalScope(host));
+}
+
+// Textual userinfo strip, for values `new URL` can't parse into a
+// username/password (a malformed origin, or an opaque `scheme:host` form).
+// Those still carry the credential as raw text, so the parsed-only redaction
+// below would put it in the boot log verbatim. WHATWG treats the LAST `@`
+// before the path as the userinfo separator, so the greedy match is correct;
+// `[^/?#]*` keeps it inside the authority, leaving a later `/path@thing`
+// alone.
+function stripUserinfo(value) {
+  return value.replace(/^([a-zA-Z][a-zA-Z0-9+.-]*:(?:\/\/)?)[^/?#]*@/, '$1');
+}
+
+function baseUrlForError(rawBaseUrl) {
+  try {
+    const parsed = new URL(rawBaseUrl);
+    if (parsed.username || parsed.password) {
+      parsed.username = '';
+      parsed.password = '';
+      return parsed.href;
+    }
+  } catch {
+    // Fall through to the textual strip — a value that fails to parse can
+    // still be carrying `user:pass@`, and a hand-edited SSM param is exactly
+    // the input most likely to be both malformed and credential-bearing.
+  }
+  return stripUserinfo(rawBaseUrl);
+}
+
+// BASE_URL https guardrail. The qURL guided setup flow builds an absolute
+// OAuth redirect from config.BASE_URL — the /oauth/qurl/start link
+// (commands.js) and the /oauth/qurl/callback redirect_uri
+// (routes/qurl-oauth.js). That router mounts UNCONDITIONALLY in server.js,
+// and /qurl setup takes the OAuth path whenever isQurlOAuthConfigured, so a
+// localhost BASE_URL silently dead-ends setup at the redirect — in plain
+// single-guild and multi-tenant deploys alike (#619). The Stage-2 Discord
+// install callback (routes/discord-install.js) embeds BASE_URL too, but
+// isDiscordInstallConfigured ⟹ isQurlOAuthConfigured (config.js), so the
+// isQurlOAuthConfigured gate already covers it.
+//
+// The check parses BASE_URL (new URL) rather than prefix-matching: parsing
+// normalizes the case-insensitive scheme (RFC 3986) and rejects a bare
+// "https://" with no host that would still build a broken redirect. OAuth
+// needs a public bare origin because the code composes
+// `${BASE_URL}/oauth/qurl/callback`; embedded paths, query strings, userinfo,
+// or obvious local-only IP literals either miss the registered mux route or
+// can't serve the external Auth0 browser redirect. We intentionally do NOT
+// resolve DNS at boot — reachability belongs in deploy smoke tests — but we
+// can reject localhost/loopback/private IP literals cheaply.
+//
+// Intentionally NOT gated on: the per-guild webhook bridge
+// (guild-webhook-link.js → `${BASE_URL}/webhooks/qurl`) also embeds
+// BASE_URL, but it's fire-and-forget and non-fatal — a wrong bridge URL
+// degrades qURL view-count delivery from push to the existing poll
+// fallback, it doesn't dead-end a user flow. Blocking boot on it would
+// force BASE_URL onto the plain qURL-sharing deploys #619 keeps free to
+// ignore it.
+//
+// Outside the qURL setup flow BASE_URL is unused for redirects, but a stale
+// explicit http:// value is still rejected (the original canary).
+// `baseUrlExplicitlySet` (caller-computed from process.env, treating
+// "" / whitespace-only as unset) separates "operator set a bad value" from
+// "fell back to the localhost default" so an empty SSM param doesn't
+// false-positive. Caller gates on NODE_ENV==='production'; string-or-null
+// mirrors unsupportedRoleShipperCombo et al.
+function baseUrlHttpsProblem(cfg, baseUrlExplicitlySet) {
+  let parsed = null;
+  try {
+    parsed = new URL(cfg.BASE_URL);
+  } catch {
+    // Malformed BASE_URL (incl. a host-less "https://") is not usable.
+  }
+  const usesHttps = parsed?.protocol === 'https:';
+  // Bare origin only. server.js mounts the qURL OAuth router at the root
+  // while the redirect URI is built by concatenation
+  // (`${BASE_URL}/oauth/qurl/callback`), so a path-prefixed BASE_URL yields
+  // a redirect_uri no mounted route can ever serve. qurl-integrations-infra
+  // rejects the same shape at plan time as of qurl-integrations-infra#1379
+  // (its `base_url` variable now validates `^https://[^[:space:]/?#]+$`),
+  // so plan-time and boot-time agree — a prefixed value can no longer reach
+  // a deploy.
+  const isBareOrigin = Boolean(
+    parsed
+      && parsed.host
+      && !parsed.username
+      && !parsed.password
+      && parsed.pathname === '/'
+      && !parsed.search
+      && !parsed.hash
+  );
+  const isPublicOrigin = Boolean(parsed && !isLocalOnlyHost(parsed.hostname));
+  const usableOAuthOrigin = usesHttps && isBareOrigin && isPublicOrigin;
+  if (usableOAuthOrigin) return null;
+  const displayBaseUrl = baseUrlForError(cfg.BASE_URL);
+  if (cfg.isQurlOAuthConfigured) {
+    return (
+      'BASE_URL must be a public bare https:// origin in production ' +
+      '— the qURL guided setup flow builds its OAuth redirect from it, and a ' +
+      `non-public or non-origin value dead-ends setup at the redirect. Got: ${displayBaseUrl}. ` +
+      "Set BASE_URL to the bot's public https:// origin in the deployment template."
+    );
+  }
+  if (baseUrlExplicitlySet && !usesHttps) {
+    return `BASE_URL must use https:// in production (got ${displayBaseUrl})`;
+  }
+  return null;
 }
 
 // QURL_BOT_EVENTS_QUEUE_URL is the load-bearing piece of the event-
@@ -73,102 +229,23 @@ function missingKekRequiredKeys(env) {
 // monitoring until /qurl interactions start timing out from the user's
 // end. Fail-closed at boot is preferable.
 //
-// API asymmetry: this takes the PARSED `cfg` while the siblings
-// (missingBootKeys, missingProdKeys, missingKekRequiredKeys) take
-// raw `env`. The reason is that ENABLE_EVENT_SHIPPER is parsed in
-// config.js (`process.env.ENABLE_EVENT_SHIPPER === 'true'` → boolean)
-// and consumers should not re-implement that parsing. Reading from
-// cfg keeps the literal-'true' contract in one place.
+// API asymmetry across this module's helpers, so a caller knows what
+// to pass: `missingBootKeys` and this helper take the PARSED `cfg`;
+// `missingProdKeys` takes raw `env`; `missingKekRequiredKeys` takes
+// both (raw `env` for KEY_ENCRYPTION_KEY, which never lands on config,
+// plus the derived `isQurlOAuthConfigured` flag). The rule is that a
+// value parsed in config.js should be read from cfg rather than
+// re-parsed here — ENABLE_EVENT_SHIPPER
+// (`process.env.ENABLE_EVENT_SHIPPER === 'true'` → boolean) is the
+// case that motivated it, keeping the literal-'true' contract in one
+// place.
 function missingEventShipperKeys(cfg) {
   if (!cfg.ENABLE_EVENT_SHIPPER) return [];
   return cfg.QURL_BOT_EVENTS_QUEUE_URL ? [] : ['QURL_BOT_EVENTS_QUEUE_URL'];
 }
 
-// View-update push (feat #60). Mirrors missingEventShipperKeys: when
-// ENABLE_VIEW_UPDATE_PUSH=true, QURL_BOT_VIEW_UPDATES_QUEUE_URL is
-// required. A misconfigured deploy would otherwise drop every view
-// event silently (publisher) or throw at start() (consumer); the
-// uniform boot-time check makes the failure mode loud and consistent
-// with the existing event-shipper gate.
-//
-// Intentionally no combined-mode rejector (no analog of
-// unsupportedRoleShipperCombo). The registry's silent-drop-on-miss +
-// status==='opened' idempotency guard make combined-mode safe: a
-// duplicate dispatch within one process is a no-op at the handler
-// layer. Pinned by tests/boot-requirements.test.js's absence
-// assertion — a copy-paste-from-shipper refactor that adds a
-// rejector would fail that test.
-function missingViewUpdatePushKeys(cfg) {
-  if (!cfg.ENABLE_VIEW_UPDATE_PUSH) return [];
-  return cfg.QURL_BOT_VIEW_UPDATES_QUEUE_URL ? [] : ['QURL_BOT_VIEW_UPDATES_QUEUE_URL'];
-}
-
-// Discord install signed-state rollout. Missing state is accepted until
-// DISCORD_INSTALL_STATE_REQUIRED=true; once the flag flips, the secret
-// becomes a boot-time requirement so a bad deploy does not turn every
-// public "Add to Discord" click into a 400. If the install callback
-// itself is not configured yet, that route already fails closed with
-// 503, so defer this verifier-specific check until the callback is live.
-function discordInstallStateConfigProblems(cfg) {
-  if (!cfg.isDiscordInstallConfigured) return [];
-  if (!cfg.DISCORD_INSTALL_STATE_REQUIRED) return [];
-  if (!cfg.DISCORD_INSTALL_STATE_SECRET) {
-    return ['DISCORD_INSTALL_STATE_SECRET is required when DISCORD_INSTALL_STATE_REQUIRED=true'];
-  }
-  const minChars = cfg.DISCORD_INSTALL_STATE_SECRET_MIN_CHARS;
-  if (cfg.DISCORD_INSTALL_STATE_SECRET.length < minChars) {
-    return [`DISCORD_INSTALL_STATE_SECRET must be at least ${minChars} characters when DISCORD_INSTALL_STATE_REQUIRED=true`];
-  }
-  return [];
-}
-
-// Pre-required rollout warnings. While DISCORD_INSTALL_STATE_REQUIRED=false,
-// callbacks that omit state still work, but state-bearing layerv.ai links
-// fail closed unless the verifier has a usable secret. Warn at boot so a
-// marketing-before-secret deploy is visible before public installs 400.
-function discordInstallStateConfigWarnings(cfg) {
-  if (!cfg.isDiscordInstallConfigured || cfg.DISCORD_INSTALL_STATE_REQUIRED) return [];
-  if (!cfg.DISCORD_INSTALL_STATE_SECRET) {
-    return [
-      'DISCORD_INSTALL_STATE_SECRET is unset. Missing Discord install state remains accepted while ' +
-      'DISCORD_INSTALL_STATE_REQUIRED=false, but state-bearing layerv.ai install links will fail closed until the secret is deployed.',
-    ];
-  }
-  const minChars = cfg.DISCORD_INSTALL_STATE_SECRET_MIN_CHARS;
-  if (cfg.DISCORD_INSTALL_STATE_SECRET.length < minChars) {
-    return [
-      `DISCORD_INSTALL_STATE_SECRET is shorter than ${minChars} characters. Missing Discord install state remains accepted while ` +
-      'DISCORD_INSTALL_STATE_REQUIRED=false, but state-bearing layerv.ai install links will fail closed until a valid secret is deployed.',
-    ];
-  }
-  return [];
-}
-
-// PROCESS_ROLE=combined paired with ENABLE_EVENT_SHIPPER=true is
-// unsupported and rejected at boot. In combined mode both `isGateway`
-// and `isHttp` evaluate true, which derives `isWorker=true`, which
-// would arm both the gateway-side publish hook AND the worker-side
-// consumer in one process. Every interaction would land twice: once
-// via the in-process gateway WS frame, once via the SQS round-trip.
-// Side effects (DM fan-out, flow-state writes) double; telemetry
-// reports two dispatches per real interaction. The listener gate
-// alone can't close this — discord.js's InteractionCreate action
-// fires synchronously on the gateway WS frame regardless of whether
-// the local listener is registered, so even gating the worker-side
-// dispatcher leaves the gateway publish path firing alongside the
-// consumer.
-//
-// The supported flag-on shape is the two-process split: a separate
-// PROCESS_ROLE=gateway (singleton) publishing to SQS, and one or
-// more PROCESS_ROLE=http replicas consuming. Combined mode stays
-// supported for sandbox / local-dev / pre-split deployments —
-// just with the flag off, running the legacy in-process path.
-//
-// Returns the operator-facing message on rejection or null on
-// success. Kept as a string-or-null rather than throwing so the
-// caller in index.js logs the message + exits via the same pattern
-// as missingBootKeys (one log + process.exit) rather than handling
-// a thrown error specially.
+// Combined mode would dispatch each interaction both in-process and through
+// SQS. Keep the flag for the supported split gateway and HTTP processes.
 function unsupportedRoleShipperCombo(role, eventShipperEnabled) {
   if (role === 'combined' && eventShipperEnabled) {
     return (
@@ -183,7 +260,7 @@ function unsupportedRoleShipperCombo(role, eventShipperEnabled) {
 }
 
 // Parallel to unsupportedRoleShipperCombo for ENABLE_GATEWAY_RESUME.
-// Three unsupported shapes:
+// Two unsupported shapes:
 //
 //   1. resume=true with role=combined — combined mode runs both
 //      tiers in one process, which the legacy discord.js Client
@@ -195,19 +272,9 @@ function unsupportedRoleShipperCombo(role, eventShipperEnabled) {
 //      `client.on('interactionCreate')` emitter to attach to. The
 //      flag-on path is only coherent when the shipper has already
 //      moved dispatch to SQS.
-//   3. resume=true with storeType!=ddb — the resume guarantee only
-//      holds when session state is persisted across processes.
-//      A non-ddb backend (none supported today; this branch is a
-//      defense-in-depth canary for a future backend addition)
-//      would lack the cross-process visibility the resume path
-//      needs, and a resume against the previous sequence would
-//      fail every restart. Rejecting at boot is preferable to a
-//      silent IDENTIFY-every-restart degradation that mimics
-//      flag-off behavior.
-//
 // Returns the operator-facing message on rejection or null on
 // success. Same string-or-null shape as unsupportedRoleShipperCombo.
-function unsupportedRoleResumeCombo(role, resumeEnabled, eventShipperEnabled, storeType) {
+function unsupportedRoleResumeCombo(role, resumeEnabled, eventShipperEnabled) {
   if (!resumeEnabled) return null;
   if (role === 'combined') {
     return (
@@ -233,30 +300,12 @@ function unsupportedRoleResumeCombo(role, resumeEnabled, eventShipperEnabled, st
       'the shipper first, or leave ENABLE_GATEWAY_RESUME unset.'
     );
   }
-  // Defense-in-depth canary: `store/index.js` already rejects every
-  // non-ddb STORE_TYPE at module load with a listing-of-valid-backends
-  // error, so in practice the bot can't reach this function with a
-  // non-ddb value. This branch survives so that if a future PR adds a
-  // second backend to `VALID_BACKENDS` without thinking through the
-  // RESUME cross-process semantics, the bot still refuses to boot the
-  // unsupported combo instead of silently IDENTIFYing every restart.
-  if (storeType !== 'ddb') {
-    return (
-      `ENABLE_GATEWAY_RESUME=true requires STORE_TYPE=ddb (got '${storeType}'). ` +
-      'Cross-process RESUME persists session state to the gateway-session DDB ' +
-      'table; any non-ddb backend lacks the cross-process visibility the next ' +
-      'process needs. Set STORE_TYPE=ddb (or leave unset to take the default) ' +
-      'in the deployment template, or leave ENABLE_GATEWAY_RESUME unset.'
-    );
-  }
   return null;
 }
 
 // Parallel to unsupportedRoleResumeCombo for ENABLE_GATEWAY_HOT_STANDBY.
 // Caller guarantees the upstream resume combo check has already run
-// (resumeEnabled=true → shipper+ddb already validated upstream), so
-// the 3-arg signature here is sufficient — no need to re-check
-// shipper/storeType.
+// (resumeEnabled=true means the shipper was validated upstream).
 //
 // Two unsupported shapes:
 //
@@ -344,12 +393,13 @@ function missingHotStandbyKeys(cfg) {
 // octal under some resolvers); each octet is `0` alone, `1-9`, or
 // `1[0-9]-25[0-5]` with no leading zero. ECS task-def injection
 // produces canonical no-leading-zero v4 strings; this just closes
-// the operator-typo door.
+// the operator-typo door. That is the same shape the private/local
+// host screen needs, so both use IPV4_LITERAL_RE from
+// utils/private-host.js rather than keeping two copies in this file.
 //
 // Returns an array of operator-facing message strings (one per
 // problem) or [] when all values are well-shaped. Hot-standby off
 // → skip entirely.
-const IPV4_RE = /^(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]\d|\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]\d|\d)$/;
 function invalidHotStandbyValues(cfg) {
   if (!cfg.ENABLE_GATEWAY_HOT_STANDBY) return [];
   const problems = [];
@@ -359,7 +409,7 @@ function invalidHotStandbyValues(cfg) {
       'INSTANCE_ID is derived from os.hostname() by default; an env override here was set to an unresolved placeholder.'
     );
   }
-  if (cfg.INSTANCE_IP && !IPV4_RE.test(cfg.INSTANCE_IP)) {
+  if (cfg.INSTANCE_IP && !IPV4_LITERAL_RE.test(cfg.INSTANCE_IP)) {
     problems.push(
       `INSTANCE_IP must be a valid IPv4 address (got '${cfg.INSTANCE_IP}'). ` +
       'Hot-standby uses v4 for the control-channel binding + peer reach; v6 is not in scope today. ' +
@@ -372,12 +422,64 @@ function invalidHotStandbyValues(cfg) {
   // the same reason. Common operator paste-error: copying the ECS
   // task-metadata endpoint URL (169.254.170.2 / 169.254.172.2) out
   // of AWS docs.
-  if (cfg.INSTANCE_IP && IPV4_RE.test(cfg.INSTANCE_IP) && cfg.INSTANCE_IP.startsWith('169.254.')) {
+  if (cfg.INSTANCE_IP && IPV4_LITERAL_RE.test(cfg.INSTANCE_IP) && cfg.INSTANCE_IP.startsWith('169.254.')) {
     problems.push(
       `INSTANCE_IP is link-local (got '${cfg.INSTANCE_IP}'). ` +
       '169.254.0.0/16 is RFC 3927 link-local and not routable peer-to-peer; push-handoff would POST to an unreachable address. ' +
       'Unset the env override so it falls back to the os.networkInterfaces() derivation, or set it to the task\'s awsvpc-assigned private IP.'
     );
+  }
+  return problems;
+}
+
+// State-signing secret checks for the shared OAuth state signer
+// (utils/oauth-state.js). Two rules, both production-only (the caller
+// in index.js sits inside the NODE_ENV=production block, keeping dev
+// localhost workflows convenient):
+//
+//   Presence — when qURL OAuth is configured (AUTH0_* set; every
+//   sign/verify call site gates on isQurlOAuthConfigured), SOME key in
+//   the signer's resolution chain must exist. Without the rule, a
+//   deploy with Auth0 configured and no state secret would boot and
+//   500 on the first /qurl setup.
+//
+//   Shape — ANY set state secret must clear the signer's length floor,
+//   in EVERY mode, so a short value fails at deploy instead of
+//   deferred-500ing the first /qurl setup. The signer re-enforces the
+//   same floor lazily at sign/verify time; this is the loud-at-deploy
+//   copy. Deliberately fail-loud-on-any-set-value: set-but-wrong is a
+//   misconfig in its own right even where nothing would resolve it, and
+//   a later config change shouldn't unearth a latent bad value.
+//
+// Presence-vs-shape separation mirrors missingHotStandbyKeys /
+// invalidHotStandbyValues: a key that is unset simply doesn't
+// participate in resolution (the signer falls through), so only set
+// values are shape-checked, and each problem gets its own message.
+//
+// Every invalidStateSecretValues message ends with the same remediation
+// clause — one constant so the sites can't drift on the recommended
+// generator.
+const STATE_SECRET_REMEDIATION = 'Generate with: openssl rand -hex 32';
+
+// Returns an array of operator-facing message strings, [] on success
+// (same shape as invalidHotStandbyValues above).
+function invalidStateSecretValues(cfg) {
+  const problems = [];
+  if (cfg.isQurlOAuthConfigured
+      && !cfg.QURL_OAUTH_STATE_SECRET && !cfg.OAUTH_STATE_SECRET) {
+    problems.push(
+      'qURL OAuth is configured (AUTH0_* set) but no state-signing secret is available: ' +
+      `set QURL_OAUTH_STATE_SECRET (preferred) or OAUTH_STATE_SECRET. ${STATE_SECRET_REMEDIATION}`
+    );
+  }
+  for (const key of ['OAUTH_STATE_SECRET', 'QURL_OAUTH_STATE_SECRET']) {
+    const value = cfg[key];
+    if (value && value.length < MIN_STATE_SECRET_LENGTH) {
+      problems.push(
+        `${key} is shorter than ${MIN_STATE_SECRET_LENGTH} chars (got ${value.length}); ` +
+        `the state signer will refuse to mint with it. ${STATE_SECRET_REMEDIATION}`
+      );
+    }
   }
   return problems;
 }
@@ -477,15 +579,14 @@ module.exports = {
   missingBootKeys,
   missingProdKeys,
   missingKekRequiredKeys,
+  baseUrlHttpsProblem,
   missingEventShipperKeys,
-  missingViewUpdatePushKeys,
-  discordInstallStateConfigProblems,
-  discordInstallStateConfigWarnings,
   unsupportedRoleShipperCombo,
   unsupportedRoleResumeCombo,
   unsupportedRoleHotStandbyCombo,
   missingHotStandbyKeys,
   invalidHotStandbyValues,
+  invalidStateSecretValues,
   shouldRegisterInteractionListener,
   missingMapCommandKeys,
   GOOGLE_MAPS_API_KEY_PLACEHOLDER_SENTINEL,

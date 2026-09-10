@@ -37,6 +37,7 @@ import (
 	"log/slog"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -79,6 +80,19 @@ const (
 	attrConfiguredBy  = "configured_by"
 	attrConfiguredAt  = "configured_at"
 	attrUpdatedAt     = "updated_at"
+	// Every workspace_state write must refresh attrUpdatedAtNano. Lifecycle
+	// purges use it as the reinstall-race guard; a writer that skips it can let a
+	// delayed uninstall purge delete freshly reinstalled credentials.
+	// TestWorkspaceStateWritersStampUpdatedAtNano enforces that across every
+	// writer, and TestWorkspaceStateMutatorsAreStampCovered fails when a new
+	// mutator lands without deciding which side of the invariant it sits on.
+	//
+	// The converse binds equally: nothing may bump it gratuitously. A writer
+	// driven by ordinary traffic rather than by a real credential change holds
+	// the row newer than any teardown cutoff, making
+	// DeleteWorkspaceStateBeforeWithIdentity no-op and stranding credentials a
+	// delayed uninstall should have purged.
+	attrUpdatedAtNano = "updated_at_unix_nano"
 
 	attrSlackBotToken       = "slack_bot_token"
 	attrSlackBotTokenDK     = "slack_bot_token_dk"
@@ -88,7 +102,16 @@ const (
 	attrSlackBotUserID      = "slack_bot_user_id"
 	attrSlackAppID          = "slack_app_id"
 	attrSlackEnterpriseID   = "slack_enterprise_id"
-	attrSlackBotScopes      = "slack_bot_scopes"
+	// attrSlackBotScopes records what Slack GRANTED at the OAuth exchange, not
+	// what the live bot token carries: reinstalling from the Slack app config
+	// widens an existing token's scopes in place, and that redirect never reaches
+	// SetSlackBotToken because Callback rejects it at the state guards. So the
+	// set goes stale with nothing failing — observed on the live LayerV workspace
+	// 2026-08-14, the four DefaultBotScopes values stored against a token
+	// carrying thirteen. No code path consumes it; it rides along in the
+	// unprojected GetItem SlackBotToken issues. See SetSlackBotToken for why
+	// nothing should refresh it.
+	attrSlackBotScopes = "slack_bot_scopes"
 )
 
 // Env var names — operator-set via the Fargate task definition (the
@@ -112,6 +135,12 @@ const (
 	apiKeyValidationProjectionKey        = "#api_key"
 	apiKeyValidationProjectionDataKey    = "#data_key"
 	apiKeyValidationProjectionExpression = apiKeyValidationProjectionKey + ", " + apiKeyValidationProjectionDataKey
+
+	// DDB ExpressionAttributeValues placeholders for the current time,
+	// shared by the workspace_state UpdateExpression callers below.
+	// Lifted to constants to satisfy goconst.
+	exprNow     = ":now"
+	exprNowNano = ":now_nano"
 )
 
 // ErrWorkspaceNotConfigured is the sentinel returned by APIKey when the
@@ -127,6 +156,23 @@ var ErrWorkspaceNotConfigured = errors.New("workspace not configured — admin m
 // failures so old installs can be pointed at the reinstall path.
 var ErrSlackBotTokenNotConfigured = errors.New("workspace Slack bot token not configured — admin must reinstall the Slack app")
 
+// ErrWorkspaceStateUpdatedAfterCutoff means a guarded whole-row delete refused
+// to remove workspace_state because the row has been updated since the teardown
+// signal was observed. The Slack lifecycle purge treats this as a successful
+// no-op so a delayed uninstall cleanup cannot clobber a fresh reinstall/setup.
+var ErrWorkspaceStateUpdatedAfterCutoff = errors.New("workspace_state updated after purge cutoff")
+
+// DeletedWorkspaceStateIdentity carries non-secret qURL key provenance returned
+// from a whole-row workspace_state delete. It lets Slack lifecycle cleanup log
+// the upstream key identity before the local row disappears, so operator/manual
+// revoke follow-up remains possible even though the encrypted key material is
+// removed immediately for Marketplace retention.
+type DeletedWorkspaceStateIdentity struct {
+	Deleted       bool
+	QURLAPIKeyID  string
+	QURLAccountID string
+}
+
 // DynamoDBClient is the slice of *dynamodb.Client the provider actually
 // uses. Exposed as an interface so tests can inject a fake without
 // spinning up localstack.
@@ -134,6 +180,11 @@ type DynamoDBClient interface {
 	GetItem(ctx context.Context, params *dynamodb.GetItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.GetItemOutput, error)
 	PutItem(ctx context.Context, params *dynamodb.PutItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.PutItemOutput, error)
 	UpdateItem(ctx context.Context, params *dynamodb.UpdateItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.UpdateItemOutput, error)
+	// DeleteItem backs [DDBProvider.DeleteWorkspaceState] — the Slack-lifecycle
+	// (app_uninstalled / tokens_revoked) and `/qurl uninstall` cascade that
+	// removes the ENTIRE workspace_state row, bot token and all. The
+	// per-column [DDBProvider.DeleteAPIKey] path uses UpdateItem REMOVE instead.
+	DeleteItem(ctx context.Context, params *dynamodb.DeleteItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.DeleteItemOutput, error)
 }
 
 // FieldEncryptor seals/opens an attribute's plaintext using a customer-
@@ -232,7 +283,10 @@ type SlackBotTokenInstall struct {
 	BotUserID    string
 	AppID        string
 	EnterpriseID string
-	Scopes       []string
+	// Scopes is the grant Slack returned at THIS exchange, persisted as the
+	// slack_bot_scopes column. It is not the live token's scope set — see that
+	// column's comment — and no reader should treat it as one.
+	Scopes []string
 }
 
 // nowOrDefault is the safe clock accessor — NewDDBProvider always sets
@@ -244,6 +298,10 @@ func (p *DDBProvider) nowOrDefault() time.Time {
 		return p.Now()
 	}
 	return time.Now()
+}
+
+func unixNanoAttr(t time.Time) ddbtypes.AttributeValue {
+	return &ddbtypes.AttributeValueMemberN{Value: strconv.FormatInt(t.UTC().UnixNano(), 10)}
 }
 
 func (p *DDBProvider) apiKeyCache() *ttlcache.Cache[cachedAPIKey] {
@@ -829,12 +887,12 @@ func (p *DDBProvider) SlackBotToken(ctx context.Context, workspaceID string) (st
 // configuredBy field is informational (the Slack user_id of the admin who
 // completed /oauth/qurl/callback) and is persisted plaintext. qurlAccountID is
 // the qURL account (Auth0 sub) that minted the key, stored for cross-account
-// --repoint detection; it is best-effort (the sandbox/no-verifier path has no
-// verified sub) so an empty value is tolerated and simply leaves any prior
-// provenance untouched rather than erasing it. UpdateItem is used instead of
-// PutItem so Slack app install metadata in the same row is preserved. The
-// apiKey value is stored exactly as minted by qurl-service; APIKey returns the
-// same plaintext without trimming.
+// --repoint detection; it is best-effort (the admin-storage-disabled path can
+// proceed without a usable sub) so an empty value is tolerated and simply
+// leaves any prior provenance untouched rather than erasing it. UpdateItem is
+// used instead of PutItem so Slack app install metadata in the same row is
+// preserved. The apiKey value is stored exactly as minted by qurl-service;
+// APIKey returns the same plaintext without trimming.
 func (p *DDBProvider) SetAPIKeyWithMetadata(ctx context.Context, workspaceID, apiKey, keyID, keyPrefix, qurlAccountID, configuredBy string) error {
 	keyID = strings.TrimSpace(keyID)
 	if keyID == "" {
@@ -868,8 +926,9 @@ func (p *DDBProvider) setAPIKey(ctx context.Context, operation, workspaceID, api
 		attrQURLAPIKeyID + " = :key_id",
 		attrQURLAPIKeyPrefix + " = :key_prefix",
 		attrConfiguredBy + " = :by",
-		attrUpdatedAt + " = :now",
-		attrConfiguredAt + " = if_not_exists(" + attrConfiguredAt + ", :now)",
+		attrUpdatedAt + " = " + exprNow,
+		attrUpdatedAtNano + " = " + exprNowNano,
+		attrConfiguredAt + " = if_not_exists(" + attrConfiguredAt + ", " + exprNow + ")",
 	}
 	values := map[string]ddbtypes.AttributeValue{
 		":key":        &ddbtypes.AttributeValueMemberB{Value: ct},
@@ -877,10 +936,11 @@ func (p *DDBProvider) setAPIKey(ctx context.Context, operation, workspaceID, api
 		":key_id":     &ddbtypes.AttributeValueMemberS{Value: keyID},
 		":key_prefix": &ddbtypes.AttributeValueMemberS{Value: keyPrefix},
 		":by":         &ddbtypes.AttributeValueMemberS{Value: configuredBy},
-		":now":        &ddbtypes.AttributeValueMemberS{Value: nowString},
+		exprNow:       &ddbtypes.AttributeValueMemberS{Value: nowString},
+		exprNowNano:   unixNanoAttr(now),
 	}
 	// Only write qurl_account_id when we have a verified qURL account. An empty
-	// value (sandbox / no-verifier path) is omitted so it never erases the
+	// value (admin-storage-disabled path) is omitted so it never erases the
 	// provenance a prior verified mint recorded.
 	if qurlAccountID = strings.TrimSpace(qurlAccountID); qurlAccountID != "" {
 		setParts = append(setParts, attrQURLAccountID+" = :account_id")
@@ -918,6 +978,22 @@ func (p *DDBProvider) setAPIKey(ctx context.Context, operation, workspaceID, api
 // SetSlackBotToken upserts the encrypted Slack bot token captured during Slack
 // app install or reinstall. It intentionally updates only Slack-specific
 // attributes so the qURL API key columns survive app reauthorization.
+//
+// It is the only writer of the row's Slack columns and the only one that should
+// be: slackinstall's Callback is its sole caller, so those columns describe one
+// OAuth exchange each. Do not add a writer that refreshes them from ordinary Web
+// API traffic — every write here bumps attrUpdatedAtNano, and a row held
+// perpetually fresh makes DeleteWorkspaceStateBeforeWithIdentity no-op, stranding
+// credentials a delayed uninstall should have purged.
+//
+// TODO(upstream-contract): a stale attrSlackBotScopes is harmless only while
+// Slack keeps an (app, workspace) pair's token byte-identical across reinstalls,
+// widening its grant in place. That is not hypothetical — ValidateSlackBotTokenShape
+// already accepts the rotating xoxe.xoxb- prefix, while slackinstall's
+// oauthAccessResponse captures neither refresh_token nor expires_in, so enabling
+// rotation on the Slack app leaves this row holding a dead credential and the
+// first 401 surfaces far from here. If that lands, capture the refresh token in
+// slackinstall.exchangeCode and persist it alongside the bot token.
 func (p *DDBProvider) SetSlackBotToken(ctx context.Context, workspaceID string, install *SlackBotTokenInstall) error {
 	if workspaceID == "" {
 		return errors.New("DDBProvider.SetSlackBotToken: workspaceID is empty")
@@ -937,18 +1013,22 @@ func (p *DDBProvider) SetSlackBotToken(ctx context.Context, workspaceID string, 
 	if err != nil {
 		return fmt.Errorf("DDBProvider.SetSlackBotToken: encrypt: %w", err)
 	}
-	now := p.nowOrDefault().UTC().Format(time.RFC3339)
+	now := p.nowOrDefault()
+	nowISO := now.UTC().Format(time.RFC3339)
 
 	setParts := []string{
 		attrSlackBotToken + " = :token",
 		attrSlackBotTokenDK + " = :dk",
+		attrUpdatedAt + " = :now",
+		attrUpdatedAtNano + " = :now_nano",
 		attrSlackBotUpdatedAt + " = :now",
 		attrSlackBotInstalledAt + " = if_not_exists(" + attrSlackBotInstalledAt + ", :now)",
 	}
 	values := map[string]ddbtypes.AttributeValue{
-		":token": &ddbtypes.AttributeValueMemberB{Value: ct},
-		":dk":    &ddbtypes.AttributeValueMemberB{Value: wrapped},
-		":now":   &ddbtypes.AttributeValueMemberS{Value: now},
+		":token":    &ddbtypes.AttributeValueMemberB{Value: ct},
+		":dk":       &ddbtypes.AttributeValueMemberB{Value: wrapped},
+		exprNow:     &ddbtypes.AttributeValueMemberS{Value: nowISO},
+		exprNowNano: unixNanoAttr(now),
 	}
 	var removeParts []string
 	setStringAttr := func(attr, token, value string) {
@@ -988,7 +1068,7 @@ func (p *DDBProvider) SetSlackBotToken(ctx context.Context, workspaceID string, 
 	}); err != nil {
 		return fmt.Errorf("DDBProvider.SetSlackBotToken: UpdateItem: %w", err)
 	}
-	slog.Info("DDBProvider.SetSlackBotToken stored Slack app bot token metadata", // #nosec G706 -- Slack IDs are structured slog attributes; JSON handlers escape control bytes.
+	slog.Info("DDBProvider.SetSlackBotToken stored Slack app bot token metadata",
 		"workspace_id", workspaceID,
 		"installed_by", install.InstalledBy,
 		"bot_user_id", install.BotUserID,
@@ -1060,7 +1140,7 @@ func (p *DDBProvider) DeleteAPIKey(ctx context.Context, workspaceID string) erro
 		// ConditionExpression: it is only ever written alongside the key, so a row
 		// can't exist with only that attribute, and REMOVE of an absent attribute
 		// is a no-op. (TestDDBProviderDeleteAPIKey pins both expressions.)
-		UpdateExpression: aws.String("SET #updated_at = :now REMOVE #qurl_api_key, #qurl_api_key_dk, #qurl_api_key_id, #qurl_api_key_prefix, #qurl_account_id, #configured_by, #configured_at"),
+		UpdateExpression: aws.String("SET #updated_at = " + exprNow + ", #updated_at_nano = " + exprNowNano + " REMOVE #qurl_api_key, #qurl_api_key_dk, #qurl_api_key_id, #qurl_api_key_prefix, #qurl_account_id, #configured_by, #configured_at"),
 		ConditionExpression: aws.String(
 			"attribute_exists(#qurl_api_key) OR attribute_exists(#qurl_api_key_dk) OR attribute_exists(#qurl_api_key_id) OR attribute_exists(#qurl_api_key_prefix) OR attribute_exists(#configured_by) OR attribute_exists(#configured_at)",
 		),
@@ -1073,9 +1153,11 @@ func (p *DDBProvider) DeleteAPIKey(ctx context.Context, workspaceID string) erro
 			"#configured_by":       attrConfiguredBy,
 			"#configured_at":       attrConfiguredAt,
 			"#updated_at":          attrUpdatedAt,
+			"#updated_at_nano":     attrUpdatedAtNano,
 		},
 		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
-			":now": &ddbtypes.AttributeValueMemberS{Value: now.UTC().Format(time.RFC3339)},
+			exprNow:     &ddbtypes.AttributeValueMemberS{Value: now.UTC().Format(time.RFC3339)},
+			exprNowNano: unixNanoAttr(now),
 		},
 	})
 	if err != nil {
@@ -1088,6 +1170,113 @@ func (p *DDBProvider) DeleteAPIKey(ctx context.Context, workspaceID string) erro
 	}
 	p.invalidateAPIKeyCache(workspaceID, now.Add(apiKeyCacheTTL))
 	return nil
+}
+
+// DeleteWorkspaceState removes the ENTIRE workspace_state row for workspaceID —
+// the encrypted Slack bot token and its data key, the encrypted qURL API key and
+// its data key, and all install/setup metadata. It is the storage half of the
+// Slack-lifecycle cascade (app_uninstalled / tokens_revoked) and of `/qurl
+// uninstall`'s full forget: once Slack uninstalls the app the bot token is dead
+// and the workspace has consented to removal, so nothing in the row should
+// survive. Contrast with [DDBProvider.DeleteAPIKey], which clears only the qURL
+// columns and deliberately preserves the Slack install metadata for a key
+// rotation/reconnect.
+//
+// Idempotent: an unconditional DeleteItem on an absent key is a DynamoDB no-op
+// (no ConditionalCheckFailed, no error), so calling this for a workspace that was
+// never configured, or twice for the same workspace, simply returns nil. The
+// API-key plaintext cache is invalidated with a strong-read marker for one TTL so
+// a same-process eventually-consistent read can't re-cache a key from a row this
+// call just deleted — the same posture DeleteAPIKey takes.
+//
+// Like DeleteAPIKey this touches only local credential state; upstream qURL key
+// revocation is the caller's concern (the lifecycle/uninstall orchestrator
+// best-efforts it before this write), keeping the auth package free of the
+// qurl-service client dependency.
+func (p *DDBProvider) DeleteWorkspaceState(ctx context.Context, workspaceID string) error {
+	_, err := p.deleteWorkspaceState(ctx, workspaceID, false, time.Time{})
+	return err
+}
+
+// DeleteWorkspaceStateWithIdentity removes the entire workspace_state row and
+// returns non-secret qURL key provenance from the deleted item when it existed.
+// It uses DynamoDB ReturnValues=ALL_OLD so identity capture and local deletion
+// are one operation: no pre-read can race with a concurrent update, and no
+// transient identity-read failure can block the Marketplace-required local purge.
+func (p *DDBProvider) DeleteWorkspaceStateWithIdentity(ctx context.Context, workspaceID string) (DeletedWorkspaceStateIdentity, error) {
+	return p.deleteWorkspaceState(ctx, workspaceID, true, time.Time{})
+}
+
+// DeleteWorkspaceStateBeforeWithIdentity removes workspace_state only when the
+// row has not been updated since cutoff. It protects fast uninstall/reinstall
+// flows from a delayed async lifecycle purge: a reinstall or qURL setup writes
+// updated_at, causing this guarded delete to no-op instead of deleting fresh
+// credential material.
+func (p *DDBProvider) DeleteWorkspaceStateBeforeWithIdentity(ctx context.Context, workspaceID string, cutoff time.Time) (DeletedWorkspaceStateIdentity, error) {
+	return p.deleteWorkspaceState(ctx, workspaceID, true, cutoff)
+}
+
+func (p *DDBProvider) deleteWorkspaceState(ctx context.Context, workspaceID string, captureIdentity bool, cutoff time.Time) (DeletedWorkspaceStateIdentity, error) {
+	if workspaceID == "" {
+		return DeletedWorkspaceStateIdentity{}, errors.New("DDBProvider.DeleteWorkspaceState: workspaceID is empty")
+	}
+	input := &dynamodb.DeleteItemInput{
+		TableName: aws.String(p.TableName),
+		Key: map[string]ddbtypes.AttributeValue{
+			attrTeamID: &ddbtypes.AttributeValueMemberS{Value: workspaceID},
+		},
+	}
+	if captureIdentity {
+		input.ReturnValues = ddbtypes.ReturnValueAllOld
+	}
+	if !cutoff.IsZero() {
+		// The attribute_not_exists arm fails OPEN — an unstamped row is deleted —
+		// so rows last written before #820 introduced the stamp remain purgeable.
+		// Keep it: flipping to fail-closed would silently RETAIN the encrypted bot
+		// token on exactly those rows, which is the worse failure (Marketplace
+		// requires uninstall to forget it), and an unstamped row can reappear at any
+		// time from a PITR restore or an out-of-band operator write, so no one-time
+		// backfill retires the arm. What makes the arm safe is the invariant that
+		// every in-code writer stamps: the post-cutoff write this guard protects
+		// against (a reinstall's SetSlackBotToken, a fresh SetAPIKeyWithMetadata)
+		// installs a stamp newer than the cutoff, so the delayed purge falls to the
+		// second arm and no-ops. ddb_provider_stamp_test.go is what holds that.
+		input.ConditionExpression = aws.String("attribute_not_exists(#updated_at_nano) OR #updated_at_nano <= :purge_cutoff_nano")
+		input.ExpressionAttributeNames = map[string]string{
+			"#updated_at_nano": attrUpdatedAtNano,
+		}
+		input.ExpressionAttributeValues = map[string]ddbtypes.AttributeValue{
+			":purge_cutoff_nano": unixNanoAttr(cutoff),
+		}
+	}
+	out, err := p.Client.DeleteItem(ctx, input)
+	if err != nil {
+		var ccfe *ddbtypes.ConditionalCheckFailedException
+		if !cutoff.IsZero() && errors.As(err, &ccfe) {
+			// The row was retained because it is newer than the teardown signal,
+			// but any cached qURL key may still be from before that reinstall.
+			// Evict and force strong reads briefly so callers refill from DDB.
+			p.invalidateAPIKeyCache(workspaceID, p.nowOrDefault().Add(apiKeyCacheTTL))
+			return DeletedWorkspaceStateIdentity{}, ErrWorkspaceStateUpdatedAfterCutoff
+		}
+		return DeletedWorkspaceStateIdentity{}, fmt.Errorf("DDBProvider.DeleteWorkspaceState: DeleteItem: %w", err)
+	}
+	p.invalidateAPIKeyCache(workspaceID, p.nowOrDefault().Add(apiKeyCacheTTL))
+	if !captureIdentity || out == nil {
+		return DeletedWorkspaceStateIdentity{}, nil
+	}
+	return deletedWorkspaceStateIdentityFromItem(out.Attributes), nil
+}
+
+func deletedWorkspaceStateIdentityFromItem(item map[string]ddbtypes.AttributeValue) DeletedWorkspaceStateIdentity {
+	if len(item) == 0 {
+		return DeletedWorkspaceStateIdentity{}
+	}
+	return DeletedWorkspaceStateIdentity{
+		Deleted:       true,
+		QURLAPIKeyID:  stringAttribute(item[attrQURLAPIKeyID]),
+		QURLAccountID: stringAttribute(item[attrQURLAccountID]),
+	}
 }
 
 // --- KMSEncryptor ----------------------------------------------------------

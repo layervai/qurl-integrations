@@ -36,6 +36,51 @@ repos:
         pass_filenames: false
         files: '^scripts/(validate|test-validate)-github-actions-pins\.sh$'
 
+      - id: install-script-tests
+        name: install.sh tests
+        entry: scripts/test-install.sh
+        language: system
+        pass_filenames: false
+        files: '^scripts/(install|test-install)\.sh$'
+
+      - id: release-please-sync
+        name: release-please config/manifest sync
+        entry: scripts/check-release-please-sync.sh
+        language: system
+        pass_filenames: false
+        files: '^(release-please-config\.json|\.release-please-manifest\.json|scripts/check-release-please-sync\.sh)$'
+
+      - id: main-ci-notification-payload
+        name: main CI notification payload builds
+        entry: scripts/check-main-ci-notification-payload.sh
+        language: system
+        pass_filenames: false
+        # The check now reads every workflow's `on:` block, not just the
+        # notifier's, so adding an app workflow has to run it locally too --
+        # that addition is the exact case it exists to catch.
+        files: '^(\.github/workflows/.*\.ya?ml|scripts/check-main-ci-notification-payload\.sh)$'
+
+      - id: validated-base-resolver
+        name: validated-base resolver tests
+        entry: scripts/test-resolve-validated-base.sh
+        language: system
+        pass_filenames: false
+        files: '^scripts/(resolve|test-resolve)-validated-base\.sh$'
+
+      - id: cli-release-verifier
+        name: CLI release verifier tests
+        entry: scripts/test-verify-cli-release.sh
+        language: system
+        pass_filenames: false
+        files: '^scripts/(verify-cli-release|test-verify-cli-release)\.sh$'
+
+      - id: release-please-sync-check
+        name: release-please sync check tests
+        entry: scripts/test-check-release-please-sync.sh
+        language: system
+        pass_filenames: false
+        files: '^scripts/(check-release-please-sync|test-check-release-please-sync)\.sh$'
+
       - id: go-fmt
         name: go fmt
         entry: gofmt -w
@@ -50,7 +95,7 @@ repos:
         files: '(\.go|go\.mod|go\.sum)$'
 
   - repo: https://github.com/golangci/golangci-lint
-    rev: v2.10.1
+    rev: v2.12.2
     hooks:
       - id: golangci-lint
         args: ['--timeout=5m']

@@ -23,7 +23,13 @@ const (
 	testResourceIDAlt = "r_dev_dash01"
 	testTargetURL     = "https://internal.example.com"
 	testTunnelSlug    = "prod-dashboard"
+	testSharingID     = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE155W1ele0q0AK_YFZnQqzfhJLxqLgHaG3B5rXzPO87WZlnYa5TWlrbIO2C6ALvLxT7zaFWm9fc8PCklq1v4arg"
+	testSharingCRID   = "qhtpthw4qt7wkw7khghr6x3z4hsfyn4zbuyhnee4i6bi67yu6yytgvwdbb4q"
 )
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
 
 // testClient creates a client with retries disabled for fast unit tests.
 func testClient(url, key string) *Client {
@@ -51,6 +57,106 @@ func apiEnvelope(t *testing.T, w http.ResponseWriter, data any) {
 	}
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
 		t.Fatalf("encode response: %v", err)
+	}
+}
+
+func TestRestartSharingSendsBodylessSinglePost(t *testing.T) {
+	t.Parallel()
+	var attempts atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts.Add(1)
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/resources/"+testSharingID+"/sharing/restart" {
+			t.Errorf("request = %s %s", r.Method, r.URL.Path)
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(body) != 0 || r.ContentLength != 0 || (r.Header.Get("Content-Length") != "" && r.Header.Get("Content-Length") != "0") {
+			t.Errorf("restart body=%q contentLength=%d header=%q, want no body", body, r.ContentLength, r.Header.Get("Content-Length"))
+		}
+		apiEnvelope(t, w, map[string]any{
+			"resource_id": testSharingID, "crid": testSharingCRID,
+			"desired_state": "on", "serving_epoch": 2, "connection_state": "connecting",
+		})
+	}))
+	defer srv.Close()
+
+	got, err := New(srv.URL, "key", WithRetry(3), withDelaysForTest()).RestartSharing(context.Background(), testSharingID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if attempts.Load() != 1 || got.ServingEpoch != 2 {
+		t.Fatalf("attempts=%d response=%+v", attempts.Load(), got)
+	}
+}
+
+func TestRestartSharingNeverReplaysAmbiguousFailure(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name      string
+		transport roundTripFunc
+	}{
+		{
+			name: "transport error",
+			transport: func(*http.Request) (*http.Response, error) {
+				return nil, errors.New("response lost")
+			},
+		},
+		{
+			name: "retryable status",
+			transport: func(*http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusServiceUnavailable,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(strings.NewReader(`{"error":{"title":"unavailable","status":503}}`)),
+				}, nil
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var attempts atomic.Int32
+			transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				attempts.Add(1)
+				return tc.transport(req)
+			})
+			c := New("https://api.invalid", "key",
+				WithHTTPClient(&http.Client{Transport: transport}), WithRetry(3), withDelaysForTest())
+			if _, err := c.RestartSharing(context.Background(), testSharingID); err == nil {
+				t.Fatal("RestartSharing unexpectedly succeeded")
+			}
+			if attempts.Load() != 1 {
+				t.Fatalf("restart attempts=%d, want exactly one", attempts.Load())
+			}
+		})
+	}
+}
+
+func TestSharingStateRequiresCanonicalServingEpoch(t *testing.T) {
+	t.Parallel()
+	tests := map[string]string{
+		"missing":   `{"resource_id":"` + testSharingID + `","crid":"` + testSharingCRID + `","desired_state":"off","connection_state":"stopped"}`,
+		"null":      `{"resource_id":"` + testSharingID + `","crid":"` + testSharingCRID + `","desired_state":"off","serving_epoch":null,"connection_state":"stopped"}`,
+		"string":    `{"resource_id":"` + testSharingID + `","crid":"` + testSharingCRID + `","desired_state":"off","serving_epoch":"0","connection_state":"stopped"}`,
+		"fraction":  `{"resource_id":"` + testSharingID + `","crid":"` + testSharingCRID + `","desired_state":"off","serving_epoch":0.0,"connection_state":"stopped"}`,
+		"exponent":  `{"resource_id":"` + testSharingID + `","crid":"` + testSharingCRID + `","desired_state":"off","serving_epoch":0e0,"connection_state":"stopped"}`,
+		"negative":  `{"resource_id":"` + testSharingID + `","crid":"` + testSharingCRID + `","desired_state":"off","serving_epoch":-1,"connection_state":"stopped"}`,
+		"overflow":  `{"resource_id":"` + testSharingID + `","crid":"` + testSharingCRID + `","desired_state":"off","serving_epoch":18446744073709551616,"connection_state":"stopped"}`,
+		"duplicate": `{"resource_id":"` + testSharingID + `","crid":"` + testSharingCRID + `","desired_state":"off","serving_epoch":0,"serving_epoch":0,"connection_state":"stopped"}`,
+	}
+	for name, body := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"data":`+body+`}`)
+			}))
+			defer srv.Close()
+			if _, err := testClient(srv.URL, "key").GetSharing(context.Background(), testSharingID); err == nil {
+				t.Fatalf("GetSharing accepted %s serving_epoch", name)
+			}
+		})
 	}
 }
 
@@ -99,185 +205,19 @@ func TestCreate(t *testing.T) {
 func TestUserAgent(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ua := r.Header.Get("User-Agent")
-		if ua != "qurl-cli/1.0.0" {
-			t.Errorf("expected User-Agent 'qurl-cli/1.0.0', got %q", ua)
+		if ua != "qurl-slack/1.0.0" {
+			t.Errorf("expected User-Agent 'qurl-slack/1.0.0', got %q", ua)
 		}
 		apiEnvelope(t, w, map[string]any{
-			"resource_id": "r_test",
-			"target_url":  "https://example.com",
-			"status":      "active",
+			"plan": "free",
 		})
 	}))
 	defer srv.Close()
 
-	c := New(srv.URL, "test-key", WithRetry(0), WithUserAgent("qurl-cli/1.0.0"))
-	_, err := c.Get(context.Background(), "r_test")
+	c := New(srv.URL, "test-key", WithRetry(0), WithUserAgent("qurl-slack/1.0.0"))
+	_, err := c.GetQuota(context.Background())
 	if err != nil {
-		t.Fatalf("Get: %v", err)
-	}
-}
-
-func TestGet(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/qurls/r_abc123test" {
-			t.Errorf("expected /v1/qurls/r_abc123test, got %s", r.URL.Path)
-		}
-		apiEnvelope(t, w, map[string]any{
-			"resource_id":  "r_abc123test",
-			"target_url":   "https://example.com",
-			"status":       "active",
-			"one_time_use": false,
-		})
-	}))
-	defer srv.Close()
-
-	c := testClient(srv.URL, "test-key")
-	got, err := c.Get(context.Background(), "r_abc123test")
-	if err != nil {
-		t.Fatalf("Get: %v", err)
-	}
-
-	if got.ResourceID != "r_abc123test" {
-		t.Errorf("got ResourceID %q, want %q", got.ResourceID, "r_abc123test")
-	}
-	if got.Status != "active" {
-		t.Errorf("got Status %q, want %q", got.Status, "active")
-	}
-}
-
-func TestList(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Query().Get("limit") != "5" {
-			t.Errorf("expected limit=5, got %s", r.URL.Query().Get("limit"))
-		}
-		if r.URL.Query().Get("status") != "active" {
-			t.Errorf("expected status=active, got %s", r.URL.Query().Get("status"))
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		resp := map[string]any{
-			"data": []map[string]any{
-				{"resource_id": "r_1", "target_url": "https://a.com", "status": "active"},
-				{"resource_id": "r_2", "target_url": "https://b.com", "status": "active"},
-			},
-			"meta": map[string]any{
-				"request_id":  "req_test",
-				"page_size":   2,
-				"has_more":    true,
-				"next_cursor": "cursor_abc",
-			},
-		}
-		if err := json.NewEncoder(w).Encode(resp); err != nil {
-			t.Fatalf("encode: %v", err)
-		}
-	}))
-	defer srv.Close()
-
-	c := testClient(srv.URL, "test-key")
-	got, err := c.List(context.Background(), ListInput{Limit: 5, Status: "active"})
-	if err != nil {
-		t.Fatalf("List: %v", err)
-	}
-
-	if len(got.QURLs) != 2 {
-		t.Fatalf("got %d QURLs, want 2", len(got.QURLs))
-	}
-	if got.NextCursor != "cursor_abc" {
-		t.Errorf("got NextCursor %q, want %q", got.NextCursor, "cursor_abc")
-	}
-	if !got.HasMore {
-		t.Error("expected HasMore=true")
-	}
-}
-
-func TestListCursorEscaping(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		cursor := r.URL.Query().Get("cursor")
-		if cursor != "a=b&c=d" {
-			t.Errorf("expected cursor 'a=b&c=d', got %q", cursor)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		resp := map[string]any{
-			"data": []map[string]any{},
-			"meta": map[string]any{"request_id": "req_test"},
-		}
-		if err := json.NewEncoder(w).Encode(resp); err != nil {
-			t.Fatalf("encode: %v", err)
-		}
-	}))
-	defer srv.Close()
-
-	c := testClient(srv.URL, "test-key")
-	_, err := c.List(context.Background(), ListInput{Limit: 10, Cursor: "a=b&c=d"})
-	if err != nil {
-		t.Fatalf("List with special cursor: %v", err)
-	}
-}
-
-func TestResolve(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			t.Errorf("expected POST, got %s", r.Method)
-		}
-		if r.URL.Path != "/v1/resolve" {
-			t.Errorf("expected /v1/resolve, got %s", r.URL.Path)
-		}
-
-		var input ResolveInput
-		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
-			t.Fatalf("decode: %v", err)
-		}
-		if input.AccessToken != "at_testtoken123" {
-			t.Errorf("expected at_testtoken123, got %s", input.AccessToken)
-		}
-
-		apiEnvelope(t, w, map[string]any{
-			"target_url":  "https://api.example.com/data",
-			"resource_id": "r_abc123test",
-			"access_grant": map[string]any{
-				"expires_in": 305,
-				"granted_at": "2026-03-09T15:30:00Z",
-				"src_ip":     "203.0.113.42",
-			},
-		})
-	}))
-	defer srv.Close()
-
-	c := testClient(srv.URL, "test-key")
-	got, err := c.Resolve(context.Background(), ResolveInput{AccessToken: "at_testtoken123"})
-	if err != nil {
-		t.Fatalf("Resolve: %v", err)
-	}
-
-	if got.TargetURL != "https://api.example.com/data" {
-		t.Errorf("got TargetURL %q", got.TargetURL)
-	}
-	if got.AccessGrant == nil {
-		t.Fatal("expected AccessGrant, got nil")
-	}
-	if got.AccessGrant.ExpiresIn != 305 {
-		t.Errorf("got ExpiresIn %d, want 305", got.AccessGrant.ExpiresIn)
-	}
-}
-
-func TestMintLink(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/qurls/r_abc123test/mint_link" {
-			t.Errorf("expected mint_link path, got %s", r.URL.Path)
-		}
-		apiEnvelope(t, w, map[string]any{
-			"qurl_link": "https://qurl.link/at_newtoken",
-		})
-	}))
-	defer srv.Close()
-
-	c := testClient(srv.URL, "test-key")
-	got, err := c.MintLink(context.Background(), "r_abc123test")
-	if err != nil {
-		t.Fatalf("MintLink: %v", err)
-	}
-	if got.QURLLink != "https://qurl.link/at_newtoken" {
-		t.Errorf("got QURLLink %q", got.QURLLink)
+		t.Fatalf("GetQuota: %v", err)
 	}
 }
 
@@ -308,43 +248,6 @@ func TestGetQuota(t *testing.T) {
 	}
 }
 
-func TestUpdate(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPatch {
-			t.Errorf("expected PATCH, got %s", r.Method)
-		}
-		if r.URL.Path != "/v1/qurls/r_abc123test" {
-			t.Errorf("expected /v1/qurls/r_abc123test, got %s", r.URL.Path)
-		}
-
-		var input UpdateInput
-		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
-			t.Fatalf("decode: %v", err)
-		}
-		if input.Description == nil || *input.Description != testDescription {
-			t.Errorf("expected description 'updated', got %v", input.Description)
-		}
-
-		apiEnvelope(t, w, map[string]any{
-			"resource_id": "r_abc123test",
-			"target_url":  "https://example.com",
-			"status":      "active",
-			"description": testDescription,
-		})
-	}))
-	defer srv.Close()
-
-	c := testClient(srv.URL, "test-key")
-	desc := testDescription
-	got, err := c.Update(context.Background(), "r_abc123test", UpdateInput{Description: &desc})
-	if err != nil {
-		t.Fatalf("Update: %v", err)
-	}
-	if got.Description != testDescription {
-		t.Errorf("got Description %q, want %q", got.Description, testDescription)
-	}
-}
-
 func TestAPIErrorRFC7807(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/problem+json")
@@ -369,7 +272,7 @@ func TestAPIErrorRFC7807(t *testing.T) {
 	defer srv.Close()
 
 	c := testClient(srv.URL, "test-key")
-	_, err := c.Get(context.Background(), "r_abc123test")
+	_, err := c.GetQuota(context.Background())
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -414,7 +317,7 @@ func TestAPIErrorRateLimit(t *testing.T) {
 	defer srv.Close()
 
 	c := testClient(srv.URL, "test-key")
-	_, err := c.Get(context.Background(), "r_abc123test")
+	_, err := c.GetQuota(context.Background())
 
 	var apiErr *APIError
 	if !errors.As(err, &apiErr) {
@@ -435,9 +338,7 @@ func TestRetryOn503(t *testing.T) {
 			return
 		}
 		apiEnvelope(t, w, map[string]any{
-			"resource_id": "r_test",
-			"target_url":  "https://example.com",
-			"status":      "active",
+			"plan": "growth",
 		})
 	}))
 	defer srv.Close()
@@ -447,12 +348,12 @@ func TestRetryOn503(t *testing.T) {
 		// Use very short delays for test speed.
 		withDelaysForTest(),
 	)
-	got, err := c.Get(context.Background(), "r_test")
+	got, err := c.GetQuota(context.Background())
 	if err != nil {
-		t.Fatalf("Get after retries: %v", err)
+		t.Fatalf("GetQuota after retries: %v", err)
 	}
-	if got.ResourceID != "r_test" {
-		t.Errorf("got ResourceID %q, want %q", got.ResourceID, "r_test")
+	if got.Plan != "growth" {
+		t.Errorf("got Plan %q, want %q", got.Plan, "growth")
 	}
 	if attempts.Load() != 3 {
 		t.Errorf("expected 3 attempts, got %d", attempts.Load())
@@ -472,7 +373,7 @@ func TestRetryExhausted(t *testing.T) {
 		WithRetry(2),
 		withDelaysForTest(),
 	)
-	_, err := c.Get(context.Background(), "r_test")
+	_, err := c.GetQuota(context.Background())
 	if err == nil {
 		t.Fatal("expected error after exhausting retries")
 	}
@@ -502,27 +403,12 @@ func TestNoRetryOn4xx(t *testing.T) {
 		WithRetry(3),
 		withDelaysForTest(),
 	)
-	_, err := c.Get(context.Background(), "r_test")
+	_, err := c.GetQuota(context.Background())
 	if err == nil {
 		t.Fatal("expected error")
 	}
 	if attempts.Load() != 1 {
 		t.Errorf("expected 1 attempt (no retry on 404), got %d", attempts.Load())
-	}
-}
-
-func TestDelete(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodDelete {
-			t.Errorf("expected DELETE, got %s", r.Method)
-		}
-		w.WriteHeader(http.StatusNoContent)
-	}))
-	defer srv.Close()
-
-	c := testClient(srv.URL, "test-key")
-	if err := c.Delete(context.Background(), "r_abc123test"); err != nil {
-		t.Fatalf("Delete: %v", err)
 	}
 }
 
@@ -1041,6 +927,25 @@ func TestCreateSessionDurationOnWire(t *testing.T) {
 	}
 }
 
+func TestCreateForPublicResourceID(t *testing.T) {
+	const publicResourceID = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEN4yvBX3yjAvYl9qagkStIWB1ie2gp_LF2Jy0w5AdxXefsTNLn9nrOlA4umKRiIQeGfvad9OFVoWa3PAIxcy4qg"
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		apiEnvelope(t, w, map[string]any{"resource_id": publicResourceID})
+	}))
+	defer srv.Close()
+
+	c := testClient(srv.URL, "test-key")
+	if _, err := c.Create(context.Background(), CreateInput{ResourceID: publicResourceID}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	wantPath := "/v1/resources/" + publicResourceID + "/qurls"
+	if gotPath != wantPath {
+		t.Fatalf("request path = %q, want %q", gotPath, wantPath)
+	}
+}
+
 // TestCreateSessionDurationOmittedWhenEmpty pins the omitempty contract so a
 // zero SessionDuration inherits the server/plan default rather than forcing 0.
 func TestCreateSessionDurationOmittedWhenEmpty(t *testing.T) {
@@ -1376,11 +1281,12 @@ func TestCreateResourceTunnelFindOrCreateSlug(t *testing.T) {
 			t.Fatalf("read body: %v", err)
 		}
 		apiEnvelope(t, w, map[string]any{
-			"resource_id":       "r_tunnel01",
-			"type":              ResourceTypeTunnel,
-			"slug":              testTunnelSlug,
-			"status":            StatusActive,
-			"knock_resource_id": "qurl-tunnel-server",
+			"resource_id":          "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE2cTVv5_3eeYCcLLq5ROYCqcmY50HiKZ9ATglIkPnCji1E_S63UMtXba1moR8-Q6EV7oM6zwwh9_j2CDujzXvLA",
+			"connector_routing_id": "c-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			"type":                 ResourceTypeTunnel,
+			"slug":                 testTunnelSlug,
+			"status":               StatusActive,
+			"knock_resource_id":    "qurl-tunnel-server",
 		})
 	}))
 	defer srv.Close()
@@ -1399,6 +1305,9 @@ func TestCreateResourceTunnelFindOrCreateSlug(t *testing.T) {
 	}
 	if got.KnockResourceID != "qurl-tunnel-server" {
 		t.Errorf("KnockResourceID = %q, want qurl-tunnel-server", got.KnockResourceID)
+	}
+	if got.ConnectorRoutingID != "c-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" {
+		t.Errorf("ConnectorRoutingID = %q, want routing ID", got.ConnectorRoutingID)
 	}
 	var raw map[string]any
 	if err := json.Unmarshal(gotBody, &raw); err != nil {
@@ -1425,36 +1334,37 @@ func TestCreateResourceTunnelTypeRejectsTargetURL(t *testing.T) {
 	}
 }
 
-func TestCreateAPIKeyTunnelBootstrap(t *testing.T) {
+func TestCreateAPIKeyConnectorEnrollmentToken(t *testing.T) {
 	var gotHeader string
-	var gotBody CreateAPIKeyInput
+	var gotWire map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/v1/api-keys" {
 			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
 		}
 		gotHeader = r.Header.Get(HeaderIdempotencyKey)
-		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+		if err := json.NewDecoder(r.Body).Decode(&gotWire); err != nil {
 			t.Fatalf("decode body: %v", err)
 		}
 		apiEnvelope(t, w, map[string]any{
-			"key_id":      "key_abc123DEF456",
-			"api_key":     "lv_live_secret",
-			"name":        testTunnelSlug + " bootstrap",
-			"scopes":      []string{"qurl:agent", "qurl:write"},
-			"status":      StatusActive,
-			"purpose":     APIKeyPurposeTunnelBootstrap,
-			"tunnel_slug": testTunnelSlug,
-			"expires_at":  "2026-05-28T00:00:00Z",
+			"key_id":     "key_abc123DEF456",
+			"api_key":    "lv_live_secret",
+			"name":       testTunnelSlug + " enrollment",
+			"scopes":     []string{"qurl:agent", "qurl:write"},
+			"status":     StatusActive,
+			"kind":       CredentialKindEnrollmentToken,
+			"target":     CredentialTargetConnector,
+			"claims":     []map[string]string{{"type": CredentialClaimTypeConnector, "id": testTunnelSlug}},
+			"expires_at": "2026-05-28T00:00:00Z",
 		})
 	}))
 	defer srv.Close()
 
 	c := testClient(srv.URL, "test-key")
 	got, err := c.CreateAPIKey(context.Background(), &CreateAPIKeyInput{
-		Name:           testTunnelSlug + " bootstrap",
-		Scopes:         []string{"qurl:agent", "qurl:write"},
-		Purpose:        APIKeyPurposeTunnelBootstrap,
-		TunnelSlug:     testTunnelSlug,
+		Name:           testTunnelSlug + " enrollment",
+		Kind:           CredentialKindEnrollmentToken,
+		Target:         CredentialTargetConnector,
+		Claims:         []CredentialClaim{{Type: CredentialClaimTypeConnector, ID: testTunnelSlug}},
 		ExpiresIn:      "24h",
 		IdempotencyKey: "bootstrap-key-12345678901234567890",
 	})
@@ -1464,14 +1374,98 @@ func TestCreateAPIKeyTunnelBootstrap(t *testing.T) {
 	if gotHeader != "bootstrap-key-12345678901234567890" {
 		t.Errorf("Idempotency-Key = %q", gotHeader)
 	}
-	if gotBody.Purpose != APIKeyPurposeTunnelBootstrap || gotBody.TunnelSlug != testTunnelSlug {
-		t.Errorf("body = %+v, want tunnel bootstrap fields", gotBody)
+	if gotWire["kind"] != CredentialKindEnrollmentToken || gotWire["target"] != CredentialTargetConnector {
+		t.Errorf("body = %+v, want connector enrollment fields", gotWire)
 	}
-	if got.APIKey != "lv_live_secret" || got.Purpose != APIKeyPurposeTunnelBootstrap || got.TunnelSlug != testTunnelSlug {
+	for _, legacy := range []string{"key_type", "tunnel_slug", "scopes", "purpose"} {
+		if _, ok := gotWire[legacy]; ok {
+			t.Errorf("body contained retired %s field: %+v", legacy, gotWire)
+		}
+	}
+	// Type-check each step so a wrong-shaped body reports a readable failure
+	// rather than panicking the test binary on the assertion itself.
+	claims, ok := gotWire["claims"].([]any)
+	if !ok || len(claims) != 1 {
+		t.Fatalf("body claims = %v, want exactly one claim; body=%+v", gotWire["claims"], gotWire)
+	}
+	claim, ok := claims[0].(map[string]any)
+	if !ok {
+		t.Fatalf("body claims[0] = %v, want a JSON object; body=%+v", claims[0], gotWire)
+	}
+	if claim["type"] != CredentialClaimTypeConnector || claim["id"] != testTunnelSlug {
+		t.Errorf("body claim = %+v, want {type:%q, id:%q}", claim, CredentialClaimTypeConnector, testTunnelSlug)
+	}
+	if got.APIKey != "lv_live_secret" || got.Kind != CredentialKindEnrollmentToken || got.Target != CredentialTargetConnector || len(got.Claims) != 1 || got.Claims[0].ID != testTunnelSlug {
 		t.Errorf("decoded key = %+v", got)
 	}
 	if got.ExpiresAt == nil {
 		t.Fatal("ExpiresAt should decode")
+	}
+}
+
+// TestCreateAPIKeyMissingKindRejected pins the client-side fail-fast for the
+// kind-first contract: `kind` is required server-side, so a caller that omits
+// it would otherwise learn from an opaque 400. Asserts no HTTP request is
+// issued — the guard must run before the round-trip, not after it.
+func TestCreateAPIKeyMissingKindRejected(t *testing.T) {
+	t.Parallel()
+
+	var hits int
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		hits++
+	}))
+	defer srv.Close()
+
+	c := testClient(srv.URL, "test-key")
+	// Table without t.Run: the shared hits counter below is only meaningful if
+	// every case has already run, and parallel subtests would race it.
+	for _, tc := range []struct {
+		name string
+		kind string
+	}{
+		{"empty", ""},
+		{"whitespace only", " \t "},
+	} {
+		_, err := c.CreateAPIKey(context.Background(), &CreateAPIKeyInput{
+			Name: "connector enrollment",
+			Kind: tc.kind,
+		})
+		if !errors.Is(err, ErrCreateAPIKeyMissingKind) {
+			t.Errorf("%s kind: expected ErrCreateAPIKeyMissingKind, got %v", tc.name, err)
+		}
+	}
+	if hits != 0 {
+		t.Errorf("guard must fail before the round-trip; server saw %d requests", hits)
+	}
+}
+
+// TestCreateAPIKeyMissingKindBeatsInvalidIdempotencyKey pins the validation
+// order: kind presence (a structural error) is checked before the
+// idempotency-key bytes (a request-decoration error). Mirrors
+// TestCreateNoTargetBeatsInvalidIdempotencyKey on the qURL-create path.
+func TestCreateAPIKeyMissingKindBeatsInvalidIdempotencyKey(t *testing.T) {
+	t.Parallel()
+
+	c := testClient("http://example.invalid", "test-key")
+	_, err := c.CreateAPIKey(context.Background(), &CreateAPIKeyInput{
+		Name: "connector enrollment",
+		// No Kind AND a key with a control byte (would also fail
+		// validateIdempotencyKey). The kind check runs first.
+		IdempotencyKey: "bad\nkey",
+	})
+	if !errors.Is(err, ErrCreateAPIKeyMissingKind) {
+		t.Fatalf("expected ErrCreateAPIKeyMissingKind (kind beats idempotency), got %v", err)
+	}
+}
+
+// TestCreateAPIKeyNilInputBeatsMissingKind completes the guard-ordering set:
+// a nil input is reported as nil, not as a missing kind.
+func TestCreateAPIKeyNilInputBeatsMissingKind(t *testing.T) {
+	t.Parallel()
+
+	c := testClient("http://example.invalid", "test-key")
+	if _, err := c.CreateAPIKey(context.Background(), nil); !errors.Is(err, ErrCreateAPIKeyNilInput) {
+		t.Fatalf("expected ErrCreateAPIKeyNilInput, got %v", err)
 	}
 }
 
@@ -1581,8 +1575,8 @@ func TestDeleteResourceEscapesIDPathSegment(t *testing.T) {
 	defer srv.Close()
 
 	c := testClient(srv.URL, "test-key")
-	// A resolved resource_id is always `r_…`, but defend the path segment the
-	// same way RevokeAPIKey/UpdateResource do: a stray slash must not escape
+	// Defend the opaque path segment the same way RevokeAPIKey/UpdateResource do:
+	// a stray slash must not escape
 	// the /v1/resources/ collection.
 	if err := c.DeleteResource(context.Background(), "r_a/b"); err != nil {
 		t.Fatalf("DeleteResource: %v", err)
@@ -2174,8 +2168,7 @@ func TestUpdateResourceNilInputRejected(t *testing.T) {
 
 // TestUpdateResourceEscapesIDPathSegment pins the path-escape contract
 // for UpdateResource's resource-id path segment.
-// Server-side resource_id format is `^r_[a-z0-9_-]{11}$` so reserved
-// bytes won't reach this method via normal flows; the test is
+// Current server-generated IDs contain no reserved bytes; the test remains
 // defensive for direct programmatic callers and keeps a future
 // `url.PathEscape` removal from tripping silently.
 func TestUpdateResourceEscapesIDPathSegment(t *testing.T) {
@@ -2334,5 +2327,215 @@ func TestUpdateResourceEmptyAliasPlusClearAliasReportsExclusivityFirst(t *testin
 	})
 	if !errors.Is(err, ErrUpdateResourceAliasClearExclusive) {
 		t.Fatalf("expected ErrUpdateResourceAliasClearExclusive (exclusivity beats empty-pointer), got %v", err)
+	}
+}
+
+// TestListResourcesCursorEscaping fences query-string escaping for opaque
+// cursors: a cursor carrying URL metacharacters must arrive as one intact
+// parameter value, not be split into extra params (regression cover moved
+// here from the removed token-era List test).
+func TestListResourcesCursorEscaping(t *testing.T) {
+	const cursor = "a=b&c=d?e f+g"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Query().Get("cursor"); got != cursor {
+			t.Errorf("cursor query param: got %q, want %q", got, cursor)
+		}
+		if len(r.URL.Query()) != 1 {
+			t.Errorf("cursor must arrive as one param, got %v", r.URL.Query())
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]any{
+			"data": []map[string]any{},
+			"meta": map[string]string{"request_id": "req_test"},
+		}); err != nil {
+			t.Fatalf("encode: %v", err)
+		}
+	}))
+	defer srv.Close()
+
+	c := testClient(srv.URL, "test-key")
+	if _, err := c.ListResources(context.Background(), ListResourcesInput{Cursor: cursor}); err != nil {
+		t.Fatalf("ListResources: %v", err)
+	}
+}
+
+// mintAllowedKeys is the wire contract for the two mint endpoints, transcribed
+// from qurl-service's api/openapi.yaml — deliberately NOT derived from the body
+// structs in this package, so a field added there cannot also grant itself
+// permission to ship. qurl-service#1402 sets `additionalProperties: false` on
+// both schemas, so anything outside these sets is a 400, not the silent drop it
+// used to be.
+var mintAllowedKeys = map[string][]string{
+	// CreateQurlRequest
+	"POST /v1/qurls": {
+		"type", "target_url", "expires_in", "one_time_use",
+		"max_sessions", "session_duration", "access_policy", "label",
+		"custom_domain",
+	},
+	// CreateQurlForResourceRequest — no target_url or resource_id (the id rides
+	// in the path), and no target_path (that is MintLinkRequest's field).
+	"POST /v1/resources/{id}/qurls": {
+		"expires_in", "one_time_use", "max_sessions", "session_duration",
+		"access_policy", "label",
+	},
+}
+
+// fullyPopulatedCreateInput returns a CreateInput with every marshalable field
+// set to a non-zero value. That is what gives
+// TestMintBodiesCarryOnlyDeclaredFields its teeth: a field that is left at its
+// zero value would be dropped by omitempty and sail past the key check, so the
+// completeness assertion below refuses to let this fixture rot.
+func fullyPopulatedCreateInput() CreateInput {
+	return CreateInput{
+		TargetURL:       testTargetURL,
+		ResourceID:      testResourceID,
+		Label:           "for Alice",
+		ExpiresIn:       "7d",
+		OneTimeUse:      true,
+		MaxSessions:     3,
+		SessionDuration: "1h",
+		AccessPolicy:    &AccessPolicy{IPAllowlist: []string{"10.0.0.1"}},
+		IdempotencyKey:  "idem-key-1",
+	}
+}
+
+// TestCreateInputFixtureIsComplete fails when CreateInput grows a field that
+// fullyPopulatedCreateInput doesn't set. Without this, adding a field and
+// forgetting the fixture would silently weaken the key guard below to a
+// no-op for that field rather than failing.
+func TestCreateInputFixtureIsComplete(t *testing.T) {
+	t.Parallel()
+	v := reflect.ValueOf(fullyPopulatedCreateInput())
+	typ := v.Type()
+	for i := range typ.NumField() {
+		field := typ.Field(i)
+		if !field.IsExported() {
+			continue
+		}
+		if v.Field(i).IsZero() {
+			t.Errorf("CreateInput.%s is zero in fullyPopulatedCreateInput — set it, "+
+				"or the mint-body key guard silently stops covering it", field.Name)
+		}
+	}
+}
+
+// TestMintBodiesCarryOnlyDeclaredFields is the regression gate for
+// qurl-service#1402: every key a mint body carries must be a property of that
+// endpoint's request schema. It drives the real Create path with a
+// fully-populated input and reads the body off the wire, so it covers whatever
+// Create actually serializes rather than whatever a body struct claims.
+//
+// This is the guard that `reason` (Slack) and `target_path` (Discord) needed
+// and didn't have: both were declared client-side, marshaled, dropped
+// server-side, and invisible until the schema tightened.
+func TestMintBodiesCarryOnlyDeclaredFields(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name     string
+		endpoint string
+		// mutate adapts the shared fixture to the form under test.
+		// TargetURL and ResourceID are mutually exclusive on the wire, and
+		// which one is set is what routes Create to each endpoint.
+		mutate func(*CreateInput)
+	}{
+		{
+			name:     "target-URL form",
+			endpoint: "POST /v1/qurls",
+			mutate:   func(in *CreateInput) { in.ResourceID = "" },
+		},
+		{
+			name:     "resource form",
+			endpoint: "POST /v1/resources/{id}/qurls",
+			mutate:   func(in *CreateInput) { in.TargetURL = "" },
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var captured []byte
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				captured, _ = io.ReadAll(r.Body)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"data":{"resource_id":"r_1","qurl_link":"https://qurl.link/#at_x"}}`))
+			}))
+			defer srv.Close()
+
+			input := fullyPopulatedCreateInput()
+			tc.mutate(&input)
+			if _, err := testClient(srv.URL, "k").Create(context.Background(), input); err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+
+			var body map[string]json.RawMessage
+			if err := json.Unmarshal(captured, &body); err != nil {
+				t.Fatalf("unmarshal captured body: %v body=%s", err, captured)
+			}
+			allowed := make(map[string]bool, len(mintAllowedKeys[tc.endpoint]))
+			for _, k := range mintAllowedKeys[tc.endpoint] {
+				allowed[k] = true
+			}
+			for key := range body {
+				if !allowed[key] {
+					t.Errorf("%s body carries %q, which is not a property of its request schema "+
+						"(qurl-service rejects unknown fields since #1402); allowed: %v",
+						tc.endpoint, key, mintAllowedKeys[tc.endpoint])
+				}
+			}
+			if len(body) == 0 {
+				t.Errorf("%s body was empty — the fixture stopped reaching the wire, so this "+
+					"guard would pass vacuously; body=%s", tc.endpoint, captured)
+			}
+		})
+	}
+}
+
+func TestMe(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name       string
+		status     int
+		body       string
+		want       string
+		wantErr    string
+		wantNoKey  bool
+		wantAnyErr bool
+	}{
+		{name: "owner resolved", status: http.StatusOK, body: `{"data":{"owner_id":"email|abc","api_key":{"key_id":"key_1"}}}`, want: "email|abc"},
+		{name: "padded owner id trimmed", status: http.StatusOK, body: `{"data":{"owner_id":" email|abc ","api_key":{"key_id":"key_1"}}}`, want: "email|abc"},
+		{name: "owner_id missing", status: http.StatusOK, body: `{"data":{"api_key":{"key_id":"key_1"}}}`, wantErr: "missing owner_id"},
+		{name: "empty body", status: http.StatusOK, body: ``, wantAnyErr: true},
+		{name: "empty api_key object is not a principal", status: http.StatusOK, body: `{"data":{"owner_id":"email|abc","api_key":{}}}`, want: "email|abc", wantNoKey: true},
+		{name: "http error propagates", status: http.StatusInternalServerError, body: `{"error":{"code":"internal","message":"boom"}}`, wantErr: "500"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodGet || r.URL.Path != "/v1/me" {
+					t.Errorf("request = %s %s, want GET /v1/me", r.Method, r.URL.Path)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+			got, err := New(srv.URL, "key").Me(context.Background())
+			if tc.wantAnyErr {
+				if err == nil {
+					t.Fatal("malformed 200 body must not yield an identity")
+				}
+				return
+			}
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("Me error = %v, want containing %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil || got.OwnerID != tc.want {
+				t.Fatalf("Me = %+v, %v; want owner %q", got, err, tc.want)
+			}
+			if tc.wantNoKey && got.APIKey != nil {
+				t.Fatalf("Me = %+v; an empty api_key object must not count as a principal", got)
+			}
+		})
 	}
 }
