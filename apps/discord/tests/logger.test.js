@@ -1,6 +1,3 @@
-/**
- * Tests for src/logger.js
- */
 
 describe('logger', () => {
   let logger;
@@ -9,7 +6,6 @@ describe('logger', () => {
 
   beforeEach(() => {
     originalLogLevel = process.env.LOG_LEVEL;
-    // Reset modules to pick up env changes
     jest.resetModules();
     consoleSpy = {
       error: jest.spyOn(console, 'error').mockImplementation(),
@@ -177,7 +173,6 @@ describe('logger', () => {
 
     const output = consoleSpy.log.mock.calls[0][0];
     expect(output).toContain('INFO: test');
-    // Should not have trailing JSON
     expect(output).not.toContain('{}');
   });
 
@@ -188,7 +183,6 @@ describe('logger', () => {
     logger.info('ts-test');
 
     const output = consoleSpy.log.mock.calls[0][0];
-    // ISO format: [2026-...T...Z]
     expect(output).toMatch(/\[\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/);
   });
 
@@ -224,10 +218,6 @@ describe('logger', () => {
       process.env.LOG_LEVEL = 'info';
       logger = require('../src/logger');
 
-      // redact() matches on KEY name, not value. A future audit meta
-      // field like `tokens_minted` or `token_count` would otherwise
-      // get blanked — which would corrupt a CloudWatch metric
-      // dimension. Verify audit() bypasses redact for these keys.
       logger.audit('upload_success', { tokens_minted: 7, send_id: 'send-1' });
 
       const parsed = JSON.parse(consoleSpy.log.mock.calls[0][0]);
@@ -239,16 +229,10 @@ describe('logger', () => {
       process.env.LOG_LEVEL = 'info';
       logger = require('../src/logger');
 
-      // Circular ref — JSON.stringify throws TypeError on the primary
-      // emission. audit() must (a) not propagate that to the caller
-      // (would fail per-recipient dispatch in batchSettled), and
-      // (b) still emit a CloudWatch-visible audit line so the gap is
-      // discoverable via metric filter, not just a free-text error log.
       const circ = {};
       circ.self = circ;
       expect(() => logger.audit('upload_success', { circ })).not.toThrow();
 
-      // Fallback audit line was emitted with the synthetic event name.
       const auditLines = consoleSpy.log.mock.calls.map(c => {
         try { return JSON.parse(c[0]); } catch { return null; }
       }).filter(Boolean);
@@ -265,11 +249,9 @@ describe('logger', () => {
 
       logger.audit('upload_success', { send_id: 's1', auth_token: 'sk-abc123' });
 
-      // Warn fires with the offending key name.
       expect(consoleSpy.error).toHaveBeenCalled();
       expect(consoleSpy.error.mock.calls[0][0]).toContain('secret-shaped key');  // singular OR plural, matches "secret-shaped key" prefix
       expect(consoleSpy.error.mock.calls[0][0]).toContain('auth_token');
-      // Value redacted in the emitted payload — sibling key untouched.
       const parsed = JSON.parse(consoleSpy.log.mock.calls[0][0]);
       expect(parsed.audit.auth_token).toBe('[REDACTED]');
       expect(parsed.audit.send_id).toBe('s1');
@@ -325,10 +307,6 @@ describe('logger', () => {
     });
 
     it('redacts interaction_token (the PR-B view-counter bearer cred) in the audit path', () => {
-      // The audit path is EXACT-match, so the bare 'token' entry does NOT
-      // cover 'interaction_token' — it's named explicitly. Defense-in-depth
-      // for a send-config row accidentally audit-shipped (getSendConfig
-      // already strips it from its return).
       process.env.LOG_LEVEL = 'info';
       logger = require('../src/logger');
 
@@ -345,9 +323,6 @@ describe('logger', () => {
       process.env.LOG_LEVEL = 'info';
       logger = require('../src/logger');
 
-      // null / number values can't carry a usable secret on their own
-      // — preserve type so a downstream parser doesn't choke on a
-      // string where it expected something else.
       logger.audit('upload_success', { auth_token: null, api_key: 0 });
 
       const parsed = JSON.parse(consoleSpy.log.mock.calls[0][0]);
@@ -359,18 +334,12 @@ describe('logger', () => {
       process.env.LOG_LEVEL = 'info';
       logger = require('../src/logger');
 
-      // Top-level-only iteration would miss this. Recursion is the
-      // whole point — a caller passing `{ context: { auth_token: '...' } }`
-      // is the most realistic accidental-leak path (e.g., dumping
-      // an error context object).
       logger.audit('upload_success', { send_id: 's1', context: { auth_token: 'sk-nested' } });
 
       expect(consoleSpy.error).toHaveBeenCalled();
       expect(consoleSpy.error.mock.calls[0][0]).toContain('auth_token');
       const parsed = JSON.parse(consoleSpy.log.mock.calls[0][0]);
-      // Nested value redacted.
       expect(parsed.audit.context.auth_token).toBe('[REDACTED]');
-      // Top-level send_id still flows.
       expect(parsed.audit.send_id).toBe('s1');
     });
 
@@ -378,31 +347,20 @@ describe('logger', () => {
       process.env.LOG_LEVEL = 'info';
       logger = require('../src/logger');
 
-      // If a caller leaks both auth_token AND password, the warn must
-      // surface both — a single-key report would let them fix one and
-      // re-run before discovering the second.
       logger.audit('upload_success', { send_id: 's1', auth_token: 'a', password: 'b' });
 
       expect(consoleSpy.error).toHaveBeenCalledTimes(1);
       const msg = consoleSpy.error.mock.calls[0][0];
       expect(msg).toContain('auth_token');
       expect(msg).toContain('password');
-      // Both values redacted in the emitted payload.
       const parsed = JSON.parse(consoleSpy.log.mock.calls[0][0]);
       expect(parsed.audit.auth_token).toBe('[REDACTED]');
       expect(parsed.audit.password).toBe('[REDACTED]');
     });
 
     it('mixed-case secret-shaped keys are still detected via .toLowerCase() lookup', () => {
-      // The membership check is `AUDIT_SECRET_KEYS.has(key.toLowerCase())`,
-      // so an entry like 'API_Key' would silently never match. Lock the
-      // invariant so a future addition catches review.
       process.env.LOG_LEVEL = 'info';
       logger = require('../src/logger');
-      // Force re-require so we can pull AUDIT_SECRET_KEYS via the test
-      // export. The set isn't exported today; instead, exercise the
-      // invariant by feeding a deliberately mixed-case key and
-      // confirming it still triggers the warn.
       logger.audit('upload_success', { Auth_Token: 'sk-xyz', PASSWORD: 'p' });
       expect(consoleSpy.error).toHaveBeenCalled();
       const msg = consoleSpy.error.mock.calls[0][0];
@@ -431,15 +389,9 @@ describe('logger', () => {
       process.env.LOG_LEVEL = 'info';
       logger = require('../src/logger');
 
-      // tokens_minted contains "token" as a substring but is NOT in
-      // AUDIT_SECRET_KEYS — it's a legitimate audit dimension. The
-      // warn must use exact-match (not substring) so this kind of
-      // key doesn't trigger a false positive every emission.
       logger.audit('upload_success', { send_id: 's1', tokens_minted: 7, token_count: 3 });
 
-      // No warn for these substring-matching but non-secret keys.
       expect(consoleSpy.error).not.toHaveBeenCalled();
-      // Values emit verbatim.
       const parsed = JSON.parse(consoleSpy.log.mock.calls[0][0]);
       expect(parsed.audit.tokens_minted).toBe(7);
       expect(parsed.audit.token_count).toBe(3);
@@ -470,11 +422,6 @@ describe('logger', () => {
       process.env.LOG_LEVEL = 'info';
       logger = require('../src/logger');
 
-      // Default-param `meta = {}` only fires for `undefined`. A caller
-      // doing `logger.audit('x', someObj?.meta)` could easily pass null.
-      // The coerce-to-{} guard inside audit() must run BEFORE the
-      // Object.keys(meta) loop, otherwise null would crash audit() and
-      // bubble out of batchSettled — defeating the never-throw contract.
       expect(() => logger.audit('dispatch_sent', null)).not.toThrow();
       const parsed = JSON.parse(consoleSpy.log.mock.calls[0][0]);
       expect(parsed.audit.event).toBe('dispatch_sent');
@@ -487,7 +434,6 @@ describe('logger', () => {
 
       expect(() => logger.audit('dispatch_sent', 'oops-stringly-typed')).not.toThrow();
       expect(() => logger.audit('dispatch_sent', 42)).not.toThrow();
-      // Both emit a clean audit line with just event + agent.
       const lines = consoleSpy.log.mock.calls.map(c => JSON.parse(c[0]));
       expect(lines).toHaveLength(2);
       for (const line of lines) {
@@ -500,23 +446,15 @@ describe('logger', () => {
       process.env.LOG_LEVEL = 'info';
       logger = require('../src/logger');
 
-      // typeof [] === 'object', so a `typeof !== 'object'` guard alone
-      // would let an array through and produce `{0:1, 1:2, event, agent}`
-      // — confusing in CloudWatch and likely a caller bug. Coerce to
-      // empty meta instead.
       expect(() => logger.audit('dispatch_sent', [1, 2, 3])).not.toThrow();
       const parsed = JSON.parse(consoleSpy.log.mock.calls[0][0]);
       expect(parsed.audit.event).toBe('dispatch_sent');
       expect(parsed.audit.agent).toBe('discord');
-      // No numeric-index keys leaked from the spread.
       expect(parsed.audit['0']).toBeUndefined();
       expect(parsed.audit['1']).toBeUndefined();
     });
   });
 
-  // The intentional truncated form is `md5_prefix` (per md5Prefix() in
-  // connector.js); these tests pin both that `hash` is redacted and that
-  // `md5_prefix` survives.
   describe('hash-family redaction, drift guards, and recursion semantics', () => {
     const FULL_MD5 = '5d41402abc4b2a76b9719d911017c592';
 
@@ -556,8 +494,6 @@ describe('logger', () => {
       expect(line).not.toContain('REDACTED');
     });
 
-    // Other canonical content-hash names share `hash`'s exact-match treatment
-    // so a future caller using a different name doesn't slip through.
     it('pins the canonical content-hash exact-match key set', () => {
       const { __testExports } = require('../src/logger');
 
@@ -588,11 +524,6 @@ describe('logger', () => {
       expect(line).not.toContain(FULL_MD5);
     });
 
-    // info()'s primitive-passthrough rule preserves legit-audit-dimension
-    // names (`tokens_minted`, `token_count`) when their values are numbers,
-    // even though the substring rule matches the keys. Pins the contract
-    // so a future change that always blanks matched keys regardless of
-    // value type would break this in CI rather than silently break dashboards.
     it('info() preserves tokens_minted / token_count with primitive (number) values', () => {
       process.env.LOG_LEVEL = 'info';
       logger = require('../src/logger');
@@ -605,8 +536,6 @@ describe('logger', () => {
       expect(line).not.toContain('REDACTED');
     });
 
-    // Adjacent names that look like content hashes but aren't on the
-    // exact-match list — they must survive (no over-redaction).
     it.each([
       'md5_prefix', 'sha256_prefix', 'commit_hash', 'fileHash',
     ])('does NOT redact adjacent name "%s"', (keyName) => {
@@ -650,9 +579,6 @@ describe('logger', () => {
 
       logger.info('uploaded', { Hash: FULL_MD5, HASH: FULL_MD5, HaSh: FULL_MD5 });
 
-      // Assert each case variant maps to REDACTED specifically, rather than
-      // counting global occurrences — robust against a future change that
-      // adds an unrelated redacted field to this test's fixture.
       const line = consoleSpy.log.mock.calls[0][0];
       expect(line).toContain('"Hash":"[REDACTED]"');
       expect(line).toContain('"HASH":"[REDACTED]"');
@@ -693,20 +619,11 @@ describe('logger', () => {
       logger.info('uploaded', { hash: { token: 'real-secret', nested_hash: 'also-secret' } });
 
       const line = consoleSpy.log.mock.calls[0][0];
-      // Inner `token` matches REDACT_SUBSTRINGS substring rule.
       expect(line).toContain('"token":"[REDACTED]"');
-      // Inner `nested_hash` does NOT exact-match `hash` and doesn't
-      // substring-match any secret name, so it passes through.
       expect(line).toContain('"nested_hash":"also-secret"');
       expect(line).not.toContain('real-secret');
     });
 
-    // Drift guard: REDACT_EXACT_KEYS and AUDIT_SECRET_KEYS are kept in
-    // sync by hand today (see #221). This test iterates the LIVE
-    // REDACT_EXACT_KEYS set (via __testExports) and fires if a future
-    // edit adds an exact-match key without mirroring it to AUDIT_SECRET_KEYS.
-    // Reverse-direction drift (audit-only key without redact mirror) is NOT
-    // covered here — also tracked in #221.
     it('every REDACT_EXACT_KEYS entry is also redacted by audit()', () => {
       process.env.LOG_LEVEL = 'info';
       const { __testExports } = require('../src/logger');
@@ -722,12 +639,6 @@ describe('logger', () => {
       }
     });
 
-    // Structural regression guard: the formatted log line never contains
-    // a sensitive value as a substring, regardless of where it sat in the
-    // meta. A future change that stringifies meta before redacting (or
-    // any other shape that bypasses the redact pass) would emit the value
-    // in the JSON serialization — key-targeted asserts alone might miss
-    // it; this catches the structural failure mode.
     it('no sensitive value appears as a substring in the log line', () => {
       process.env.LOG_LEVEL = 'info';
       logger = require('../src/logger');
@@ -743,9 +654,6 @@ describe('logger', () => {
         nested: { auth_token: 'sensitive-3' },
       });
 
-      // Sweep BOTH stdout (info/warn/error/debug + audit JSON) and stderr
-      // (audit warn line). The warn line names the offending key but must
-      // not echo the value.
       const allLines = [
         ...consoleSpy.log.mock.calls.map(c => c[0]),
         ...consoleSpy.error.mock.calls.map(c => c[0]),
@@ -758,23 +666,11 @@ describe('logger', () => {
       }
     });
 
-    // Reverse drift guard: every entry in AUDIT_SECRET_KEYS should also
-    // be redacted by the regular pathway — either via REDACT_EXACT_KEYS
-    // exact-match OR via REDACT_SUBSTRINGS substring. Catches the case
-    // where a future audit-only entry (e.g. `etag`) lands without either
-    // a redact mirror or a substring match. #221 will eliminate this risk
-    // via consolidation.
     it('every AUDIT_SECRET_KEYS entry is also redacted by info()', () => {
       process.env.LOG_LEVEL = 'info';
       const { __testExports } = require('../src/logger');
       logger = require('../src/logger');
 
-      // currentLevel is captured at module load; LOG_LEVEL defaults to
-      // 'info' which is what we want here, so no per-iteration env work.
-      // Assumption: redact() is stateless across calls. If a future change
-      // adds per-call state (rate limiter, sampling counter), iteration
-      // coupling would silently couple cases — switch to per-iteration
-      // jest.resetModules() at that point.
       for (const k of __testExports.AUDIT_SECRET_KEYS) {
         consoleSpy.log.mockClear();
         logger.info('uploaded', { [k]: 'real-secret-value' });
@@ -783,28 +679,16 @@ describe('logger', () => {
       }
     });
 
-    // Pin the asymmetry between redact() and redactAuditSecrets()
-    // recursion semantics: redact() uses substring (so `myToken` under
-    // a matched key gets blanked), audit() uses exact-match (so `myToken`
-    // SURVIVES). This is intentional — audit dimensions like `tokens_minted`
-    // / `token_count` must not be blanked. A future refactor that unifies
-    // the two functions and silently tightens audit semantics would break
-    // those dimensions in production dashboards; this test surfaces the
-    // change in CI instead.
     it('recursion semantics: substring (redact) vs exact-match (audit)', () => {
       process.env.LOG_LEVEL = 'info';
       logger = require('../src/logger');
 
-      // audit() pathway: exact-match does NOT catch `myToken` under `hash`,
-      // so the inner value survives.
       logger.audit('upload_success', { send_id: 's1', hash: { myToken: 'audit-survives' } });
       const auditParsed = JSON.parse(consoleSpy.log.mock.calls[0][0]);
       expect(auditParsed.audit.hash.myToken).toBe('audit-survives');
 
       consoleSpy.log.mockClear();
 
-      // redact() pathway: substring catches `myToken` (contains `token`),
-      // so the inner value is blanked.
       logger.info('uploaded', { hash: { myToken: 'redact-blanks' } });
       const infoLine = consoleSpy.log.mock.calls[0][0];
       expect(infoLine).toContain('"myToken":"[REDACTED]"');
@@ -819,9 +703,6 @@ describe('logger', () => {
 
       const parsed = JSON.parse(consoleSpy.log.mock.calls[0][0]);
       expect(parsed.audit.hash.auth_token).toBe('[REDACTED]');
-      // Both outer (`hash`) and inner (`auth_token`) matches surface in the
-      // warn line — guards against a future refactor that returns early
-      // after finding the outer match.
       expect(consoleSpy.error.mock.calls[0][0]).toContain('hash');
       expect(consoleSpy.error.mock.calls[0][0]).toContain('auth_token');
     });

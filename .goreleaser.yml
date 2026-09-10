@@ -124,8 +124,6 @@ homebrew_casks:
     homepage: "https://layerv.ai/"
     description: "Publish and access protected resources"
     license: "MIT"
-    url:
-      verified: github.com/layervai/qurl-integrations/releases/download
     manpages:
       - manpages/qurl-completion.1
       - manpages/qurl-daemon-run.1

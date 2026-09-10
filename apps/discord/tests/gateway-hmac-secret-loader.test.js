@@ -22,11 +22,6 @@ describe('loadGatewayHmacSecret', () => {
     });
 
     it('accepts uppercase hex and normalizes to lowercase on the way out', () => {
-      // Lowercase normalization eliminates the case-as-identity
-      // hazard during rotation: the same logical key re-serialized
-      // with different case would otherwise key createHmac on
-      // different UTF-8 bytes and silently break dual-accept across
-      // the rolling deploy.
       const upper = 'A'.repeat(64);
       const result = loadGatewayHmacSecret(JSON.stringify({ current: upper, previous: 'B'.repeat(64) }));
       expect(result.current).toBe('a'.repeat(64));
@@ -123,10 +118,6 @@ describe('loadGatewayHmacSecret', () => {
     });
 
     it('rejects previous = empty string (would silently disable dual-accept)', () => {
-      // An empty-string `previous` would parse as truthy-falsy in
-      // gateway-hmac's `if (!matched && secrets.previous)` gate,
-      // silently disabling dual-accept during a rotation. The loader
-      // is the chokepoint that catches this misconfig at boot.
       expect(() => loadGatewayHmacSecret(JSON.stringify({ current: VALID_HEX_A, previous: '' })))
         .toThrow(/previous, if present, must be a 64-char hex/);
     });
@@ -143,12 +134,6 @@ describe('loadGatewayHmacSecret', () => {
     });
 
     it('does not leak any prefix of the raw secret in the JSON-parse-failure path', () => {
-      // V8's JSON.parse error message truncates the source to a
-      // ~13-char snippet, so a substring leak is the real hazard
-      // (not the full string). Operator-realistic misconfig: raw hex
-      // pasted without JSON wrapping. Any 8+ char substring of the
-      // raw value appearing in the surfaced error message would leak
-      // key material to CloudWatch.
       const raw = 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2';
       try {
         loadGatewayHmacSecret(raw);

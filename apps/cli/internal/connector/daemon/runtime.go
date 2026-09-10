@@ -81,11 +81,11 @@ func (f *NativeGroupFactory) NewGroupRunner(ctx context.Context, cfg *GroupConfi
 		return nil, err
 	}
 	return connectorshare.NewSessionGroupRunner(connectorshare.SessionGroupConfig{
-		KnockResourceID: cfg.KnockResourceID,
-		ResourceID:      cfg.ResourceID,
-		Routes:          cfg.Routes,
-		Admitter:        f.admitter,
-		Sessions:        f.sessions,
+		KnockResourceID:   cfg.KnockResourceID,
+		ResourcePublicKey: cfg.ResourceID,
+		Routes:            cfg.Routes,
+		Admitter:          f.admitter,
+		Sessions:          f.sessions,
 		OnServing: func(connectorshare.Admission) {
 			// A failed marker clear is retried on the next serving cycle; it
 			// must never tear down a healthy route or its siblings.

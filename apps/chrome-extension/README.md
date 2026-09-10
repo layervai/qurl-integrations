@@ -1,4 +1,4 @@
-# qURL Agent for Gmail
+# qURL browser extension for Gmail
 
 Upload files straight from Gmail's compose window and drop secure, expiring
 links into your draft — no need to attach them to the email itself. Your
@@ -11,7 +11,7 @@ expiry, so a file you share today won't stay reachable forever.
 
 1. **Install** the extension (see [Installing](#installing) below).
 2. Open **Gmail** and click **Compose**.
-3. Click the **qURL Agent** icon in the Chrome toolbar.
+3. Click the **qURL** extension icon in the browser toolbar.
 4. Click **Browse files**, pick one or more, and click **Upload to qURL**.
 5. The secure links appear at the bottom of your draft. Keep writing and send
    as normal.
@@ -23,15 +23,15 @@ give you:
 
 1. Download or build the extension folder your operator provides (the
    unpacked `release/` directory).
-2. Open `chrome://extensions` in Chrome (or any Chromium browser — Edge, Arc,
-   Brave).
+2. Open `chrome://extensions` in Chrome or `edge://extensions` in Edge.
 3. Turn on **Developer mode** (top-right toggle).
 4. Click **Load unpacked** and select the extension folder.
 5. The **qURL Agent** icon appears in your toolbar. Pin it for quick
    access.
 
-Building the extension yourself, or publishing it to the Chrome Web Store, is
-covered in the [developer guide](docs/development.md).
+Building the extension yourself is covered in the
+[developer guide](docs/development.md). Edge store releases also use the
+[submission guide](../edge-extension/docs/edge-add-ons-submission-guide.md).
 
 ## Using the extension
 
@@ -68,7 +68,7 @@ need to change anything. If your organization runs its own qURL server:
    URL (`https://files.example.com`) or a full upload URL; the extension
    tidies it up for you. The address must use `https://`.
 3. Click **Save**. The extension first asks you to confirm the exact address,
-   then Chrome shows its own permission prompt for that server. Approve both to
+   then your browser shows its own permission prompt for that server. Approve both to
    start uploading there.
 4. Click **Use default** at any time to switch back to the built-in server.
 
@@ -81,7 +81,7 @@ need to change anything. If your organization runs its own qURL server:
 | Uploads fail with a connection error | Wrong server address, or the server is unreachable | Check the **qURL server** field in settings, or clear it with **Use default** |
 | A single file is rejected as too large | File exceeds the 100 MB cap, or your server's own limit | Share a smaller file, or ask your operator about server limits |
 | Links inserted but missing in the sent email | Recipient's mail client strips formatting | Links are always inserted; some plain-text clients hide the styled version |
-| Toolbar icon missing | Extension not enabled | Open `chrome://extensions` and make sure it's turned on |
+| Toolbar icon missing | Extension not enabled | Open the browser's extensions page and make sure it is turned on |
 
 ## Privacy
 
@@ -89,7 +89,7 @@ need to change anything. If your organization runs its own qURL server:
   the default hosted server, or the custom one you set in settings.
 - The only thing the extension uploads is the files you choose — it never
   sends the contents of the pages you browse.
-- A custom server is used only after you enter it and approve Chrome's
+- A custom server is used only after you enter it and approve your browser's
   per-server permission prompt.
 
 ## For developers

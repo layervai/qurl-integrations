@@ -1,4 +1,4 @@
-.PHONY: all fmt lint vet test test-race coverage build-slack build-cli docs man vendor release-snapshot security check check-actions-pins test-actions-pins test-install-script check-release-please-sync test-release-please-sync test-cli-release-verifier check-extension-lockstep check-notification-payload test-validated-base check-cli check-discord test-discord check-chrome-extension check-edge-extension check-teams check-e2e check-node pre-commit-install pre-commit-run clean check-i18n-parity test-i18n-parity
+.PHONY: all fmt lint vet test test-race coverage build-slack build-cli docs man vendor release-snapshot security check check-actions-pins test-actions-pins test-install-script check-release-please-sync test-release-please-sync test-cli-release-verifier check-notification-payload test-validated-base check-cli check-discord test-discord check-chrome-extension check-edge-extension check-teams check-e2e check-node pre-commit-install pre-commit-run clean
 
 VERSION ?= dev
 
@@ -91,15 +91,6 @@ test-install-script:
 check-release-please-sync:
 	scripts/check-release-please-sync.sh
 
-check-extension-lockstep:
-	scripts/check-extension-lockstep.sh
-
-check-i18n-parity:
-	scripts/check-i18n-parity.sh
-
-test-i18n-parity:
-	scripts/test-check-i18n-parity.sh
-
 check-notification-payload:
 	scripts/check-main-ci-notification-payload.sh
 
@@ -190,16 +181,9 @@ check-discord:
 	cd apps/discord && npm run lint
 	cd apps/discord && npm test -- --ci
 
-# $(1) is the extension app directory. The recipe is shared rather than written
-# once per extension on purpose: this Makefile is outside the file list in
-# scripts/check-extension-lockstep.sh, so a hand-copied second copy could drift
-# from the first with nothing in CI to catch it.
-#
-# Mirrors the extensions' build-and-test steps minus `npm run package:release`,
-# which writes release/ and dist/ and shells out to zip. That omission is the
-# one place these targets are a weaker signal than CI: `npm test` covers
-# build-release.js and package-release.js through their own suites, but not the
-# real zip-writing path — run it by hand before a store submission.
+# Mirrors the browser extension workflow. The Chrome target stops before the
+# ZIP-writing step, so its wrong-browser text scan is CI-only. The Edge target
+# adds the real Edge package command and therefore requires `zip` on Unix-like hosts.
 #
 # The syntax check is CI's command verbatim, run through `bash -o pipefail`
 # because that is the shell GitHub gives a `run:` step. Without it a Make
@@ -209,19 +193,15 @@ check-discord:
 # "predicts CI" claim cannot afford. Globbed so a source file added later
 # cannot slip past the check, and piped through xargs rather than `find
 # -exec`, which reports success even when the command it ran failed.
-define check_extension
-$(call node_version_warning,$(1))
-cd $(1) && npm ci --no-audit --no-fund
-cd $(1) && npm run lint
-cd $(1) && bash -o pipefail -c "find background.js popup content lib scripts -name '*.js' -print0 | xargs -0 -r -n1 node --check"
-cd $(1) && npm test
-endef
-
 check-chrome-extension:
-	$(call check_extension,apps/chrome-extension)
+	$(call node_version_warning,apps/chrome-extension)
+	cd apps/chrome-extension && npm ci --no-audit --no-fund
+	cd apps/chrome-extension && npm run lint
+	cd apps/chrome-extension && bash -o pipefail -c "find background.js popup content lib scripts -name '*.js' -print0 | xargs -0 -r -n1 node --check"
+	cd apps/chrome-extension && npm test
 
-check-edge-extension:
-	$(call check_extension,apps/edge-extension)
+check-edge-extension: check-chrome-extension
+	cd apps/edge-extension && npm run package:release
 
 # teams.yml's build-and-test in full — every step is offline. `npm run build`
 # writes only dist/, which apps/teams/.gitignore already covers.
@@ -257,14 +237,13 @@ check-e2e:
 
 # Every Node.js suite at once, for changes that cross app boundaries; prefer a
 # single target when only one app moved. They write into separate directories
-# and npm's cache takes its own locks, so `make -j5 check-node` is safe — it
-# finishes with the slowest app rather than the sum of all five.
+# and npm's cache takes its own locks, so `make -j5 check-node` is safe.
 check-node: check-chrome-extension check-edge-extension check-discord check-teams check-e2e
 
 ## Full check (Go + repo-wide checks, matching the Go CI path; the Node.js
 ## suites are opt-in above — `make check-node` or a single `check-<app>`)
 
-check: fmt vet check-actions-pins test-actions-pins test-install-script check-release-please-sync test-release-please-sync test-cli-release-verifier check-extension-lockstep check-i18n-parity test-i18n-parity check-notification-payload test-validated-base lint test-race
+check: fmt vet check-actions-pins test-actions-pins test-install-script check-release-please-sync test-release-please-sync test-cli-release-verifier check-notification-payload test-validated-base lint test-race
 
 ## Cleanup
 

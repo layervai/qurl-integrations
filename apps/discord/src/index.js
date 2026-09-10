@@ -36,7 +36,6 @@ const {
   missingKekRequiredKeys,
   baseUrlHttpsProblem,
   missingEventShipperKeys,
-  missingViewUpdatePushKeys,
   missingMapCommandKeys,
   unsupportedRoleShipperCombo,
   unsupportedRoleResumeCombo,
@@ -50,8 +49,6 @@ const {
 const { initHttpOnly } = require('./http-only-init');
 const eventConsumer = require('./event-consumer');
 const eventPublisher = require('./event-publisher');
-const viewUpdateConsumer = require('./view-update-consumer');
-const viewUpdatePublisher = require('./view-update-publisher');
 const webhookSubscriptions = require('./webhook-subscriptions');
 const { LOG_KINDS } = require('./constants');
 
@@ -264,64 +261,32 @@ if (process.env.NODE_ENV === 'production') {
   }
 }
 
-// Event-shipper (zero-downtime Pillar 1) — when the flag is on, the
-// queue URL is the load-bearing piece: producer publishes to it,
-// consumer polls from it. Role-agnostic by design: env vars are
-// uniform across roles in a single deploy, so one role refusing to
-// boot is preferable to a half-wired split.
+// The queue is required on every role when the shipper is enabled. A partial
+// split would otherwise drop interactions without a boot failure.
 const eventShipperMissing = missingEventShipperKeys(config);
 if (eventShipperMissing.length > 0) {
   logger.error(`ENABLE_EVENT_SHIPPER=true but missing required env vars: ${eventShipperMissing.join(', ')}`);
   process.exit(1);
 }
 
-// View-update push (feat #60). Same boot-time refusal pattern: if
-// the flag is on but the queue URL is missing, fail closed at boot
-// rather than silently dropping every view event at runtime.
-const viewUpdatePushMissing = missingViewUpdatePushKeys(config);
-if (viewUpdatePushMissing.length > 0) {
-  logger.error(`ENABLE_VIEW_UPDATE_PUSH=true but missing required env vars: ${viewUpdatePushMissing.join(', ')}`);
-  process.exit(1);
-}
-
-// Reject combined + flag-on. In combined mode the gateway-side
-// publish hook AND the worker-side consumer would both arm in one
-// process, double-dispatching every interaction (gateway WS frame
-// + SQS round-trip). See unsupportedRoleShipperCombo for the full
-// rationale and operator-facing remediation.
+// Combined mode would handle each interaction in-process and through SQS.
 const roleShipperConflict = unsupportedRoleShipperCombo(PROCESS_ROLE, config.ENABLE_EVENT_SHIPPER);
 if (roleShipperConflict) {
   logger.error(roleShipperConflict);
   process.exit(1);
 }
 
-// Gateway-RESUME (Pillar 2) precondition check. Rejects two shapes:
-//   1. ENABLE_GATEWAY_RESUME=true with ENABLE_EVENT_SHIPPER=false
-//      (the resume shim replaces discord.js Client and only has a
-//      forward-to-SQS path; the in-process dispatcher would be
-//      unreachable).
-//   2. ENABLE_GATEWAY_RESUME=true with PROCESS_ROLE=combined (the
-//      legacy Client owns the WS in combined mode; the shim would
-//      conflict).
-// Sequenced AFTER unsupportedRoleShipperCombo so the operator sees
-// the shipper-first remediation when both are misconfigured, rather
-// than chasing a downstream resume error.
+// Validate the shipper split before the resume and hot-standby dependencies.
 const roleResumeConflict = unsupportedRoleResumeCombo(
   PROCESS_ROLE,
   config.ENABLE_GATEWAY_RESUME,
   config.ENABLE_EVENT_SHIPPER,
-  config.STORE_TYPE,
 );
 if (roleResumeConflict) {
   logger.error(roleResumeConflict);
   process.exit(1);
 }
 
-// Pillar 3 hot-standby — sequenced AFTER unsupportedRoleResumeCombo
-// so an operator who turned both flags on but forgot the prerequisites
-// sees the RESUME-side fix first (the hot-standby gate then becomes a
-// derivative of "RESUME is on"). Same boot-fail shape as the others
-// above: log + exit(1), no partial-state teardown.
 const roleHotStandbyConflict = unsupportedRoleHotStandbyCombo(
   PROCESS_ROLE,
   config.ENABLE_GATEWAY_HOT_STANDBY,
@@ -690,18 +655,6 @@ async function gracefulShutdownTeardown({
     // actually running per process (combined + flag-on is rejected
     // at boot), so the sequencing matters only as documentation.
     await eventPublisher.stop();
-    // View-update plumbing drain (feat #60). Same idempotent shape;
-    // unconditional. Consumer + publisher are stopped in parallel
-    // via Promise.all so the combined drain stays within the
-    // gracefulShutdown 10s budget — sequencing each module's
-    // DRAIN_DEADLINE_MS (3s each) plus the event-shipper drains
-    // above would push worst-case past 10s. Order-independence is
-    // safe: publisher.stop() snapshots inFlightSends; consumer.stop()
-    // aborts the long-poll; neither depends on the other's state.
-    await Promise.all([
-      viewUpdateConsumer.stop(),
-      viewUpdatePublisher.stop(),
-    ]);
     // Clear gateway-metrics timers BEFORE discordShutdown(): a stray
     // heartbeat tick during client.destroy() would race with the
     // WebSocketShard teardown and surface as a confusing "Sampler
@@ -830,7 +783,9 @@ function gatewayFatalShutdown() {
 async function pushHandoffShutdown(code = 0) {
   if (isShuttingDown) return;
   isShuttingDown = true;
-  await runPushHandoffShutdown({ code, gatewayLeader, eventPublisher, logger });
+  await runPushHandoffShutdown({
+    code, gatewayLeader, connectionWatchdog, eventPublisher, logger,
+  });
 }
 
 // SIGTERM during boot (gatewayLeader still null) falls through to
@@ -872,15 +827,15 @@ process.on('SIGINT', () => {
 //   1. Construct lock + peer-heartbeat (DDB-backed, no manager dep).
 //   2. Load + validate the HMAC secret (JSON shape + hex format).
 //   3. Construct hmac, controlClient, leader (leader is wired against
-//      `gatewayShim` itself — the shim provides the connect() +
-//      isConnected() contract that @discordjs/ws's WebSocketManager
-//      lacks isConnected() for).
+//      `gatewayShim` itself — the shim provides connect(), isConnected(),
+//      and isRecovering(). The raw manager lacks the synchronous state
+//      methods).
 //   4. Start the control-channel HTTP server. AWAIT `listening` event
 //      before continuing — if we start the leader first, the peer could
 //      acquire the lock and pushHandoff to us before our listener is
 //      up, dropping the connection.
-//   5. Start the leader tick loop. The watchdog wakes inside the tick
-//      flow on the active path; standby just heartbeats and waits.
+//   5. Start the leader and watchdog loops. The watchdog connects only
+//      for the lock holder; the standby only heartbeats and waits.
 //
 // Errors propagate to start().catch() → gracefulShutdown(1). Constructing
 // inside a single function (vs. spreading across start()) keeps the
@@ -946,7 +901,7 @@ async function startHotStandby() {
   }
 
   // The shim itself satisfies the leader/watchdog `manager` contract
-  // (connect() + isConnected()). Passing the raw @discordjs/ws
+  // (connect() + isConnected() + isRecovering()). Passing the raw @discordjs/ws
   // WebSocketManager would fail the factory's typeof check because
   // upstream exposes only fetchStatus() (async) — see gateway-ws-shim
   // module header "Pillar 3 manager contract".
@@ -1029,6 +984,8 @@ async function startHotStandby() {
     manager: gatewayShim,
     isHoldingLock: gatewayLeader.isHoldingLock,
     isConnecting: gatewayLeader.isConnecting,
+    readCurrentHolder: lock.readCurrentHolder,
+    selfInstanceId: lock.instanceId,
     releaseLock: gatewayLeader.releaseLockForImmediateExit,
     deleteOwnRow: peerHeartbeat.deleteOwnRow,
     logger,
@@ -1186,40 +1143,19 @@ async function start() {
     eventPublisher.start();
   }
 
-  // View-update SQS plumbing is superseded by the interaction-token
-  // fast-path. The webhook no longer publishes to SQS, so starting this
-  // loop would only burn empty receives. Follow-up #875 removes the dead
-  // publisher/consumer/registry wiring; until then, keep the flag as an
-  // explicit no-op so operator config fails quiet instead of starting cost.
-  if (config.ENABLE_VIEW_UPDATE_PUSH && isHttp && !isShuttingDown) {
-    logger.info('ENABLE_VIEW_UPDATE_PUSH set but the SQS view-update path is superseded by the webhook fast-path — not starting the (producer-less) publisher/consumer; see index.js');
+  // TODO(upstream-contract): qurl-integrations-infra still emits and
+  // provisions the retired view-update queue. No app producer remains; remove
+  // its variables, queue, and IAM there, then delete this compatibility log.
+  if (process.env.ENABLE_VIEW_UPDATE_PUSH === 'true' && isHttp && !isShuttingDown) {
+    logger.info('ENABLE_VIEW_UPDATE_PUSH is retired; using the webhook fast path and polling fallback');
   }
 
-  // Open the Discord gateway WebSocket. Two disjoint paths:
-  //
-  //   - Pillar 2 (ENABLE_GATEWAY_RESUME=true): hydrate the persisted
-  //     session from DDB, then start the @discordjs/ws shim. On the
-  //     RESUME path the shim's `retrieveSessionInfo` returns the
-  //     hydrated row and Discord replays buffered events since the
-  //     last sequence (no IDENTIFY). On the cold-start path
-  //     (sandbox fresh boot / resume window expired) the mirror is
-  //     null and @discordjs/ws falls back to IDENTIFY.
-  //   - Legacy (flag-off): client.login() with the same 30s timeout
-  //     that the pre-Pillar-2 code carried.
-  //
-  // Both are gated on `isGateway`. HTTP-only replicas never open a
-  // second Gateway connection on the bot token (Discord would flap
-  // session identity between the two WebSockets).
+  // Resume uses the shim's persisted Discord session. The legacy path keeps
+  // discord.js as the WebSocket owner. HTTP-only replicas open no gateway.
   if (isGateway && config.ENABLE_GATEWAY_RESUME && gatewayShim) {
     const hydrated = await gatewayShim.hydrate();
+    // This mode is the restart-resume SLI.
     logger.info('gateway-resume hydrate complete', {
-      // Log "resume" vs "cold start" as an SLI — operators can
-      // correlate restart frequency with successful-resume rate.
-      // Under hot-standby, the standby's hydrated mirror is largely
-      // wasted (any inbound push-handoff carries a fresh snapshot
-      // that replaces it). The boot sequence stays symmetric across
-      // active/standby so the hydrate path remains a single code path
-      // worth one log line for SLI parity.
       mode: hydrated ? 'resume' : 'cold-start',
     });
     // Under hot-standby, both replicas construct the manager + attach

@@ -236,14 +236,15 @@ function runGatewayFatalShutdown({
   // shutdown today has its own 10/12-second backstop, but this fatal boundary
   // must remain terminal if a future owner forgets one. Fifteen seconds stays
   // inside ECS's 30-second SIGTERM window and trails both existing ceilings.
-  const hardExit = scheduleHardExit(() => {
+  scheduleHardExit(() => {
     try {
       logger.error('Gateway fatal shutdown timed out, forcing exit');
     } finally {
       exit(1);
     }
   }, fatalCeilingMs);
-  if (hardExit && typeof hardExit.unref === 'function') hardExit.unref();
+  // Keep the fatal backstop referenced: a pre-claimed shutdown gate must
+  // not let an otherwise drained event loop exit successfully.
 
   const shutdown = gracefulShutdown(1, {
     awaitControlChannelServer: false,
@@ -269,12 +270,12 @@ function runGatewayFatalShutdown({
 // Push-handoff SIGTERM body. Distinct from gracefulShutdown because
 // the active replica's job is to transfer ownership ASAP — not run
 // the full drain (close DB, flush its own session row, etc.) — the
-// standby is already doing the steady-state work. Three load-bearing
+// standby is already doing the steady-state work. Four load-bearing
 // skips:
 //
 //   * gatewayShim.stop() — flushFinal=true would clobber the (newer)
 //     session row the standby has advanced past our snapshot.
-//   * controlChannelServer close + leader/watchdog stop — leader's
+//   * controlChannelServer close + leader stop — leader's
 //     `closed=true` sentinel (set by pushHandoff itself) short-
 //     circuits any late inbound-handoff envelopes the still-listening
 //     server delivers in the ~ms window before process.exit fires.
@@ -296,12 +297,18 @@ function runGatewayFatalShutdown({
 //     shape refactor doesn't quietly re-introduce a consumer on
 //     the gateway path without re-thinking this list.
 //
-// One NON-skip: `eventPublisher.stop()` runs in parallel with
-// pushHandoff. The publisher's in-flight SQS sends are the outgoing
-// process's responsibility — those frames arrived on OUR WebSocket,
-// the standby cannot replay them. Draining in parallel (not before)
-// means the publisher's DRAIN_DEADLINE_MS doesn't extend the
-// pushHandoff critical path.
+// Two NON-skips:
+//
+//   * `connectionWatchdog.stop()` is invoked synchronously before
+//     pushHandoff transfers the lock. Its synchronous stopping/running writes
+//     block new ticks and make a tick parked in an await return before a later
+//     release/exit action. We do not await the sleeping or in-flight loop
+//     because that would extend the critical path.
+//   * `eventPublisher.stop()` runs in parallel with pushHandoff. The
+//     publisher's in-flight SQS sends are the outgoing process's
+//     responsibility — those frames arrived on OUR WebSocket, the standby
+//     cannot replay them. Draining in parallel (not before) means the
+//     publisher's DRAIN_DEADLINE_MS doesn't extend the critical path.
 //
 // The caller manages the `isShuttingDown` re-entry gate; this
 // function is purely "what runs inside the gate". Deps are injected
@@ -310,6 +317,10 @@ function runGatewayFatalShutdown({
 async function runPushHandoffShutdown({
   code = 0,
   gatewayLeader,
+  // Optional for boot-race and flag-off callers. stop() must flip its running
+  // flag synchronously; its returned settlement promise is observed for
+  // logging but is deliberately not awaited on this critical path.
+  connectionWatchdog = null,
   // Optional. When provided, `.stop()` runs in parallel with
   // pushHandoff so in-flight SQS sends drain inside the 12 s ceiling
   // instead of being truncated at process.exit. Production wires
@@ -339,6 +350,19 @@ async function runPushHandoffShutdown({
     exited = true;
     exit(exitCode);
   };
+  if (connectionWatchdog) {
+    try {
+      Promise.resolve(connectionWatchdog.stop()).catch((err) => {
+        logger.warn('connection-watchdog stop failed', {
+          error: err.message, stack: err.stack,
+        });
+      });
+    } catch (err) {
+      logger.warn('connection-watchdog stop failed', {
+        error: err.message, stack: err.stack,
+      });
+    }
+  }
   const hardExit = scheduleHardExit(() => {
     try {
       logger.error('PushHandoff shutdown timed out, forcing exit');
