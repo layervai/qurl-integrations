@@ -74,7 +74,7 @@ func ReadExternalEnrollmentTokenFile(path string) (string, error) { //nolint:goc
 	}
 	for remaining := tokenBytes; len(remaining) > 0; {
 		r, size := utf8.DecodeRune(remaining)
-		if unicode.IsSpace(r) {
+		if unicode.IsSpace(r) || unicode.IsControl(r) {
 			return "", errors.New("external enrollment token must contain one non-empty value with at most one trailing line ending")
 		}
 		remaining = remaining[size:]
