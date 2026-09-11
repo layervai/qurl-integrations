@@ -907,7 +907,9 @@ func (c *Client) GetResource(ctx context.Context, resourceID string) (*Resource,
 	// (*client).Resource in apps/cli/internal/api/rest.go, except the identity
 	// check here is deliberately resource_id-only: callers pass r_ IDs from
 	// resolveTokenForGet or a button snapshot, never CRIDs. The flat pre-#161
-	// shape is rejected, not tolerated, so contract drift fails loudly.
+	// shape is rejected, not tolerated, so contract drift fails loudly. Only
+	// resource_id and type are validated; status is unchecked because no
+	// caller reads it.
 	var out struct {
 		Resource *Resource `json:"resource"`
 	}
@@ -915,7 +917,7 @@ func (c *Client) GetResource(ctx context.Context, resourceID string) (*Resource,
 		return nil, err
 	}
 	if out.Resource == nil {
-		return nil, errors.New("get resource response has no resource (data.resource absent)")
+		return nil, errors.New("get resource response has no resource (data or data.resource absent)")
 	}
 	if out.Resource.ResourceID != resourceID {
 		return nil, fmt.Errorf("get resource response identity does not match request (want %q, got %q)", resourceID, out.Resource.ResourceID)

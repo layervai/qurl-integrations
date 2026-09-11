@@ -738,7 +738,7 @@ func TestRevokeResource_PurgesOnAlreadyGone(t *testing.T) {
 	addRevokeResourceRead(t, ts, testRevokeResourceID, client.ResourceTypeURL)
 	ts.addCustomer(http.MethodDelete, "/v1/resources/"+testRevokeResourceID, func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
-		_, _ = w.Write([]byte(`{"error":{"title":"Not Found","detail":"resource gone","code":"not_found","status":404}}`))
+		_, _ = w.Write([]byte(revokeNotFoundBody))
 	})
 	h := newAdminTestHandler(t, ts)
 
