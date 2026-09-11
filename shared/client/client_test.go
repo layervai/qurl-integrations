@@ -1587,6 +1587,11 @@ func TestGetResourceRejectsMissingOrMismatchedResource(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 				t.Fatalf("GetResource err = %v, want %q", err, tc.wantErr)
 			}
+			// Callers route *APIError to status-specific replies; drift must not look like one.
+			var apiErr *APIError
+			if errors.As(err, &apiErr) {
+				t.Errorf("GetResource err = %v is an *APIError, want a plain contract error", err)
+			}
 		})
 	}
 }

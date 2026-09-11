@@ -915,10 +915,10 @@ func (c *Client) GetResource(ctx context.Context, resourceID string) (*Resource,
 		return nil, err
 	}
 	if out.Resource == nil {
-		return nil, errors.New("get resource response has no resource")
+		return nil, errors.New("get resource response has no resource (data.resource absent)")
 	}
 	if out.Resource.ResourceID != resourceID {
-		return nil, errors.New("get resource response identity does not match request")
+		return nil, fmt.Errorf("get resource response identity does not match request (want %q, got %q)", resourceID, out.Resource.ResourceID)
 	}
 	return out.Resource, nil
 }

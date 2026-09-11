@@ -616,6 +616,8 @@ func TestRevokeResource_PurgesOnReadGone(t *testing.T) {
 // data.resource: the admin gets the generic inspect failure and no DELETE runs.
 func TestRevokeResource_MalformedReadFailsClosed(t *testing.T) {
 	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	ts.seedPolicyAliasBindings(t, testAdminTeamID, "C_test", map[string]string{testRevokeAlias: testRevokeResourceID})
 	ts.addCustomer(http.MethodGet, "/v1/resources/"+testRevokeResourceID, func(w http.ResponseWriter, _ *http.Request) {
 		respondQURLEnvelope(t, w, map[string]any{"qurls": []any{}})
 	})
@@ -628,6 +630,49 @@ func TestRevokeResource_MalformedReadFailsClosed(t *testing.T) {
 	msg := h.revokeResource(context.Background(), slog.Default(), testAdminTeamID, testAdminUserID, testRevokeResourceID, testRevokeAlias)
 	if !strings.Contains(msg, "Failed to inspect") {
 		t.Errorf("malformed read message = %q, want the inspect failure", msg)
+	}
+	// Unlike read-404, a malformed read proves nothing is gone, so bindings stay.
+	if _, found, err := h.cfg.AdminStore.LookupChannelAlias(context.Background(), testAdminTeamID, "C_test", testRevokeAlias); err != nil || !found {
+		t.Errorf("alias %q purged after a malformed read (found=%v, err=%v)", testRevokeAlias, found, err)
+	}
+}
+
+// TestRevokeResource_UnknownTypeRefusesDelete pins the current default arm: an
+// unrecognized resource type refuses the revoke rather than guessing teardown.
+func TestRevokeResource_UnknownTypeRefusesDelete(t *testing.T) {
+	ts := newAdminTestServers(t)
+	addRevokeResourceRead(t, ts, testRevokeResourceID, "future_type")
+	ts.addCustomer(http.MethodDelete, "/v1/resources/"+testRevokeResourceID, func(w http.ResponseWriter, _ *http.Request) {
+		t.Error("DELETE issued for an unrecognized resource type")
+		w.WriteHeader(http.StatusNoContent)
+	})
+	h := newAdminTestHandler(t, ts)
+
+	msg := h.revokeResource(context.Background(), slog.Default(), testAdminTeamID, testAdminUserID, testRevokeResourceID, testRevokeAlias)
+	if !strings.Contains(msg, "not recognized") {
+		t.Errorf("unknown type message = %q, want the unrecognized-type failure", msg)
+	}
+}
+
+// TestRevokeResource_TunnelSharingGoneStillDeletes fences the concurrent-delete
+// tolerance: a 404 from the sharing stop still proceeds into the DELETE.
+func TestRevokeResource_TunnelSharingGoneStillDeletes(t *testing.T) {
+	ts := newAdminTestServers(t)
+	addRevokeResourceRead(t, ts, testTunnelResourceID, client.ResourceTypeTunnel)
+	ts.addCustomer(http.MethodPut, "/v1/resources/"+testTunnelResourceID+"/sharing", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"error":{"title":"Not Found","detail":"resource gone","code":"not_found","status":404}}`))
+	})
+	var deletes atomic.Int32
+	ts.addCustomer(http.MethodDelete, "/v1/resources/"+testTunnelResourceID, func(w http.ResponseWriter, _ *http.Request) {
+		deletes.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	})
+	h := newAdminTestHandler(t, ts)
+
+	msg := h.revokeResource(context.Background(), slog.Default(), testAdminTeamID, testAdminUserID, testTunnelResourceID, testRevokeAlias)
+	if !strings.Contains(msg, "Revoked") || deletes.Load() != 1 {
+		t.Errorf("message = %q, deletes = %d; want Revoked after one DELETE", msg, deletes.Load())
 	}
 }
 
