@@ -26,7 +26,7 @@ import { validateTunnelHub, validateTunnelImageRef, type TunnelHub } from './tun
 import { UserFacingError } from './user-facing-error.js';
 import type { ConfidentialTokenClient, FetchLike } from './interfaces.js';
 import type { Logger } from './interfaces.js';
-import { RedactingLogger } from './logger.js';
+import { jsonConsoleSink, RedactingLogger } from './logger.js';
 import { toTeamsActivity } from './activity.js';
 
 const DEFAULT_MAX_BODY_BYTES = 1_048_576;
@@ -290,12 +290,9 @@ export async function createProductionTeamsConfig(): Promise<TeamsProductionConf
     // Keep mention normalization in the existing qURL Activity adapter.
     activity: { mentions: { stripText: false } },
   });
-  const logger = new RedactingLogger({
-    debug: (message, context) => runtimeConsole.debug(message, context),
-    info: (message, context) => runtimeConsole.info(message, context),
-    warn: (message, context) => runtimeConsole.warn(message, context),
-    error: (message, context) => runtimeConsole.error(message, context),
-  });
+  // JSON lines, not plain console text: the CloudWatch metric filters behind
+  // the app alarms are JSON selectors and cannot match unstructured output.
+  const logger = new RedactingLogger(jsonConsoleSink(runtimeConsole));
   const bot = new TeamsBot({
     qurlForTenant: new TenantQurlClientFactory(data, qurlEndpoint),
     data,

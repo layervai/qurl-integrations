@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { LogContext, Logger } from '../src/interfaces.js';
-import { RedactingLogger } from '../src/logger.js';
+import { jsonConsoleSink, RedactingLogger } from '../src/logger.js';
 
 describe('RedactingLogger', () => {
   it('redacts secrets, OAuth values, nested errors, and opaque handles', () => {
@@ -76,5 +76,36 @@ describe('RedactingLogger', () => {
       errors: [{ name: 'Error', message: 'same error' }, { name: 'Error', message: 'same error' }],
       circular: { self: '[Circular]' },
     });
+  });
+});
+
+describe('json console sink', () => {
+  it('emits one JSON line per call with the field names the alarms select on', () => {
+    const lines: string[] = [];
+    const target = {
+      debug: (l: string) => lines.push(l),
+      info: (l: string) => lines.push(l),
+      warn: (l: string) => lines.push(l),
+      error: (l: string) => lines.push(l),
+    } as unknown as Console;
+    const logger = new RedactingLogger(jsonConsoleSink(target));
+
+    logger.error('qurl call failed', { error: 'http request: context deadline exceeded', tenantId: 't1' });
+    logger.info('started', undefined);
+
+    const failure = JSON.parse(lines[0] ?? '{}');
+    // `level` upper-case and `error` are the keys app_alarms.tf filters on.
+    expect(failure.level).toBe('ERROR');
+    expect(failure.message).toBe('qurl call failed');
+    expect(failure.error).toContain('context deadline exceeded');
+    expect(failure.tenantId).toBe('t1');
+    expect(JSON.parse(lines[1] ?? '{}').level).toBe('INFO');
+  });
+
+  it('still redacts before serializing', () => {
+    const lines: string[] = [];
+    const target = { debug: () => {}, info: () => {}, warn: () => {}, error: (l: string) => lines.push(l) } as unknown as Console;
+    new RedactingLogger(jsonConsoleSink(target)).error('failed', { authorization: 'Bearer super-secret-value' });
+    expect(lines[0]).not.toContain('super-secret-value');
   });
 });

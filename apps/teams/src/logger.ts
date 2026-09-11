@@ -118,3 +118,32 @@ export class RedactingLogger implements Logger {
     this.#sink[level](safeMessage, safeContext);
   }
 }
+
+/**
+ * A sink that emits one JSON object per line, matching the field contract the
+ * fleet's CloudWatch metric filters select on.
+ *
+ * TODO(upstream-contract): `level` (upper-case) and `error` are the JSON keys
+ * `qurl-bot-teams/terraform/app_alarms.tf` filters on, mirroring apps/slack's
+ * `slog.JSONHandler` output and `qurl-bot-slack/terraform/app_alarms.tf`.
+ * Changing either key silently blinds those alarms -- the filters keep
+ * matching nothing and the alarm sits in OK forever. Change both together.
+ *
+ * Plain `console.*` output is not selectable by a JSON metric filter at all,
+ * which is why this exists rather than writing text.
+ */
+export function jsonConsoleSink(target: Pick<Console, 'debug' | 'info' | 'warn' | 'error'>): LoggerSink {
+  const emit = (level: string, method: 'debug' | 'info' | 'warn' | 'error') =>
+    (message: string, context?: LogContext): void => {
+      // The context is already redacted by RedactingLogger before it reaches a
+      // sink; this only serializes.
+      const line: Record<string, unknown> = { level, message, ...(context ?? {}) };
+      target[method](JSON.stringify(line));
+    };
+  return {
+    debug: emit('DEBUG', 'debug'),
+    info: emit('INFO', 'info'),
+    warn: emit('WARN', 'warn'),
+    error: emit('ERROR', 'error'),
+  };
+}
