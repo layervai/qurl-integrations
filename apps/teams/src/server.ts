@@ -302,6 +302,7 @@ export async function createProductionTeamsConfig(): Promise<TeamsProductionConf
     messages: new TeamsSdkMessagePoster(app),
     connectorImage,
     qurlEndpoint,
+    validateServiceUrl: validateTeamsServiceUrl,
     ...(connectorHub ? { connectorHub } : {}),
     setup: new TeamsSetupLinkBuilder({ state: oauthState, tokenClient, setupBaseUrl: baseUrl }),
     logger,

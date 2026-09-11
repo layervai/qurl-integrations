@@ -29,6 +29,8 @@ export interface TeamsBotOptions {
   readonly qurlEndpoint: string;
   /** NHP Hub triple. Absent until the environment's Hub identity is seeded. */
   readonly connectorHub?: TunnelHub;
+  /** Outbound serviceUrl allowlist, applied when capturing a conversation. */
+  readonly validateServiceUrl?: (serviceUrl: string) => unknown;
   readonly logger?: Logger;
   readonly feedback?: (input: { readonly tenantId: string; readonly actorId: string; readonly message: string }) => Promise<void>;
 }
@@ -210,6 +212,17 @@ export class TeamsBot {
     const tenantId = deriveScope(activity).tenantId;
     const actorAadObjectId = activity.from?.aadObjectId?.trim().toLowerCase() ?? '';
     if (!tenantId || !actorAadObjectId || !activity.serviceUrl || !activity.conversation.id) return;
+    // Validate on the way IN, not just at send time. The SDK authenticates the
+    // inbound activity, so this is not an SSRF gate -- it keeps a row whose
+    // serviceUrl the outbound validator will reject from being stored at all,
+    // where it would silently break setup, dm:true and protect-connector
+    // later with a generic error and stay in the table.
+    try {
+      this.#options.validateServiceUrl?.(activity.serviceUrl);
+    } catch {
+      this.#options.logger?.warn?.('teams: refusing to store a personal conversation with an unusable serviceUrl', { tenantId });
+      return;
+    }
     await this.#options.data.savePersonalConversationRef(tenantId, actorAadObjectId, {
       serviceUrl: activity.serviceUrl,
       conversationId: activity.conversation.id,
@@ -271,7 +284,7 @@ export class TeamsBot {
     // typed a channel alias or the resource id itself.
     const visible = resources.filter(item => allowed.has(item.resourceId));
     const resource = this.resolve(visible, localAliasResourceId ?? token);
-    const wantsDm = command.flags.dm?.toLowerCase() === 'true';
+    const wantsDm = command.flags.dm === 'true';
     const dmActor = activity.from?.aadObjectId?.trim().toLowerCase() ?? '';
     const ref = wantsDm && dmActor ? await this.#options.data.personalConversationRef(tenantId, dmActor) : undefined;
     if (wantsDm && !ref) throw new UserFacingError('Open a personal chat with the bot before using dm:true.');

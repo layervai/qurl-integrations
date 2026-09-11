@@ -29,6 +29,25 @@ a cryptographic claim cross-check until the upstream SDK exposes that claim.
 Do not add a route that invokes the bot directly with caller-supplied Activity
 objects; doing so would violate this tenant-isolation trust boundary.
 
+### Removing channel visibility
+
+`unset-alias` removes the alias row only; the resource stays exposed in that
+channel, so `list` still shows it and `get $<resource-id>` still mints links
+there. That is deliberate — the alias is a shortcut, not the grant. Today the
+only way to remove a resource's channel visibility is the tenant-wide `revoke`.
+`TeamsDataStore.purgeResourceFromScope` exists for a future `unprotect`/`hide`
+verb and is currently exercised only by tests.
+
+### Minted qURLs in channel history
+
+`get` replies in place by default, so the minted one-time link lands in channel
+history where any member — and any export/eDiscovery path — can consume it
+inside its window before the requester does. `dm:true` sends it privately
+instead. This is a deliberate difference from the setup link, which is *never*
+posted in a channel: a setup link binds the tenant account, a minted qURL is
+scoped to one already-protected resource that everyone in the channel can mint
+for themselves anyway. Revisit if channel-scoped exposure stops implying that.
+
 ### Setup-link handling and the forged-start residual
 
 The setup URL carries the opaque one-shot state handle, so `qurl setup` replies
