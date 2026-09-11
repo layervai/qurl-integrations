@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.5.1](https://github.com/layervai/qurl-integrations/compare/slack-v0.5.0...slack-v0.5.1) (2026-09-11)
+
+
+### Bug Fixes
+
+* **slack:** explain connector protection quota failures ([#1422](https://github.com/layervai/qurl-integrations/issues/1422)) ([2babd69](https://github.com/layervai/qurl-integrations/commit/2babd69652a03fbcf324919d1b4278a6aadaa63b))
+* **slack:** use CRID terminology in help and errors ([#1423](https://github.com/layervai/qurl-integrations/issues/1423)) ([5c6fe45](https://github.com/layervai/qurl-integrations/commit/5c6fe45201925e1e346f70c724ec41e47a2b7eed))
+
 ## [0.5.0](https://github.com/layervai/qurl-integrations/compare/slack-v0.4.0...slack-v0.5.0) (2026-09-02)
 
 
