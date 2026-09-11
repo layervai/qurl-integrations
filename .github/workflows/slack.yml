@@ -152,11 +152,15 @@ jobs:
     # canceled during cache upload.
     timeout-minutes: 30
     env:
-      # Until the first qurl image release is digest-pinned here, the script
-      # emits a loud warning and the public CLI image smoke plus byte-identical
-      # guided-config fixture remain the active gates. Flip this to true when
-      # QURL_IMAGE is set to the immutable release digest.
-      QURL_RELEASE_IMAGE_REQUIRED: "false"
+      # Pulled anonymously: the ghcr.io/layervai/qurl package is public. If it ever
+      # turns private, add docker/login-action and `packages: read` here.
+      # TODO(upstream-contract): mirrors qurl-integrations-infra QURL_IMAGE (keep in lockstep).
+      # Released qurl CLI image (v2.1.1 index digest; derived from
+      # `docker buildx imagetools inspect ghcr.io/layervai/qurl:v2.1.1`) that must strict-decode
+      # the guided v2 headless config and stop at the credential gate. Keep in
+      # lockstep with qurl-integrations-infra's QURL_IMAGE pin.
+      QURL_IMAGE: ghcr.io/layervai/qurl@sha256:5de963d335cca0a6e9a030978d7f3de6587ae1e26f369a38afbf168c04ee220a
+      QURL_RELEASE_IMAGE_REQUIRED: "true"
       # PRs #1158 and #1231 add security assertions the currently pinned
       # immutable origin predates. Waive only that exact digest so the producer
       # fixes can merge and publish; behavior_test.sh rejects a malformed or
@@ -166,7 +170,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+        uses: docker/setup-qemu-action@1f40c72289eff860ee54a304f1438e3cff362e0a # v4.3.0
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
@@ -295,7 +299,7 @@ jobs:
     # The reusable authenticates via App secrets; the caller's GITHUB_TOKEN
     # isn't read by any step, so deny everything.
     permissions: {}
-    uses: layervai/ops-routines-workflows/.github/workflows/dispatch-deploy.yml@e8c55b3945b963d0b6a87095214693731c024560 # v0.11.0
+    uses: layervai/ops-routines-workflows/.github/workflows/dispatch-deploy.yml@d07fa2fe3a103907ff2b1a1a71509a6dcd8e9d32 # v0.13.0
     with:
       target_repo: qurl-integrations-infra
       # An off-allowlist value hard-fails in the reusable; an allowlisted

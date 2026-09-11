@@ -2,12 +2,118 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
+
+type cliWorkflowContract struct {
+	Env  map[string]any            `yaml:"env"`
+	Jobs map[string]cliWorkflowJob `yaml:"jobs"`
+}
+
+type cliWorkflowJob struct {
+	If              any               `yaml:"if"`
+	ContinueOnError any               `yaml:"continue-on-error"`
+	Env             map[string]any    `yaml:"env"`
+	Outputs         map[string]any    `yaml:"outputs"`
+	Steps           []cliWorkflowStep `yaml:"steps"`
+	TimeoutMinutes  any               `yaml:"timeout-minutes"`
+}
+
+type cliWorkflowStep struct {
+	Name            string         `yaml:"name"`
+	If              any            `yaml:"if"`
+	ContinueOnError any            `yaml:"continue-on-error"`
+	Env             map[string]any `yaml:"env"`
+	With            map[string]any `yaml:"with"`
+	Uses            string         `yaml:"uses"`
+	Run             string         `yaml:"run"`
+}
+
+func validateRequiredCLIWorkflowGate(job *cliWorkflowJob, step *cliWorkflowStep, expectedJobIf string) error {
+	if job.If != expectedJobIf {
+		return fmt.Errorf("job if = %#v, want %q", job.If, expectedJobIf)
+	}
+	if job.ContinueOnError != nil {
+		return fmt.Errorf("job continue-on-error must be absent, got %#v", job.ContinueOnError)
+	}
+	if step.If != nil {
+		return fmt.Errorf("step if must be absent, got %#v", step.If)
+	}
+	if step.ContinueOnError != nil {
+		return fmt.Errorf("step continue-on-error must be absent, got %#v", step.ContinueOnError)
+	}
+	return nil
+}
+
+func TestRequiredCLIWorkflowGateRejectsBypassMutations(t *testing.T) {
+	t.Parallel()
+	const expectedJobIf = "needs.changes.outputs.cli == 'true'"
+	for _, test := range []struct {
+		name, jobIf, jobExtra, stepExtra string
+		wantErr                          bool
+	}{
+		{name: "valid", jobIf: "    if: needs.changes.outputs.cli == 'true'\n"},
+		{name: "job if removed", wantErr: true},
+		{name: "job if narrowed", jobIf: "    if: github.event_name == 'push'\n", wantErr: true},
+		{name: "job continues on error", jobIf: "    if: needs.changes.outputs.cli == 'true'\n", jobExtra: "    continue-on-error: true\n", wantErr: true},
+		{name: "job explicit false", jobIf: "    if: needs.changes.outputs.cli == 'true'\n", jobExtra: "    continue-on-error: false\n", wantErr: true},
+		{name: "step conditional", jobIf: "    if: needs.changes.outputs.cli == 'true'\n", stepExtra: "        if: github.event_name == 'push'\n", wantErr: true},
+		{name: "step continues on error", jobIf: "    if: needs.changes.outputs.cli == 'true'\n", stepExtra: "        continue-on-error: true\n", wantErr: true},
+		{name: "step explicit false", jobIf: "    if: needs.changes.outputs.cli == 'true'\n", stepExtra: "        continue-on-error: false\n", wantErr: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			source := "jobs:\n  test:\n" + test.jobIf + test.jobExtra +
+				"    steps:\n      - name: required gate\n" + test.stepExtra
+			var workflow cliWorkflowContract
+			if err := yaml.Unmarshal([]byte(source), &workflow); err != nil {
+				t.Fatalf("parse workflow mutation: %v", err)
+			}
+			job := workflow.Jobs["test"]
+			if len(job.Steps) != 1 {
+				t.Fatalf("workflow mutation has %d steps, want one", len(job.Steps))
+			}
+			err := validateRequiredCLIWorkflowGate(&job, &job.Steps[0], expectedJobIf)
+			if (err != nil) != test.wantErr {
+				t.Fatalf("workflow mutation error = %v, want error=%t", err, test.wantErr)
+			}
+		})
+	}
+}
+
+func TestCLICustomerJourneyTimeoutBudget(t *testing.T) {
+	t.Parallel()
+	// This test pins fixed workflow wiring. Numeric matrix bounds live in
+	// internal/ciworkflows and scripts/test-qurl-cli-ci-credentials.py.
+
+	data, err := os.ReadFile(filepath.Join(cliRepoRoot, ".github", "workflows", "cli.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var workflow cliWorkflowContract
+	if err := yaml.Unmarshal(data, &workflow); err != nil {
+		t.Fatalf("parse public CLI workflow: %v", err)
+	}
+	for jobName, want := range map[string]any{
+		"journey":         "${{ matrix.timeout_minutes }}",
+		"journey-cleanup": 15,
+	} {
+		job, ok := workflow.Jobs[jobName]
+		if !ok {
+			t.Fatalf("public CLI workflow has no %q job", jobName)
+		}
+		if fmt.Sprint(job.TimeoutMinutes) != fmt.Sprint(want) {
+			t.Errorf("public CLI workflow %s timeout = %v minutes, want %v", jobName, job.TimeoutMinutes, want)
+		}
+	}
+}
 
 func TestCLIImageContract(t *testing.T) {
 	t.Parallel()
@@ -18,6 +124,8 @@ func TestCLIImageContract(t *testing.T) {
 	dockerfile := string(data)
 	for _, want := range []string{
 		"FROM scratch",
+		"ARG HUB_TRUST_ROOT_B64=",
+		"-X github.com/layervai/qurl-integrations/apps/cli/internal/connector/hub.defaultServerPublicKeyB64=${HUB_TRUST_ROOT_B64}",
 		"COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt",
 		"COPY --from=build /out/qurl /usr/local/bin/qurl",
 		"USER 65532:65532",
@@ -27,7 +135,10 @@ func TestCLIImageContract(t *testing.T) {
 			t.Fatalf("CLI Dockerfile missing %q", want)
 		}
 	}
-	for _, forbidden := range []string{"qurl-connector", " apk ", " apt-get ", "ENTRYPOINT [\"/bin/", "\nVOLUME ", "\nCMD "} {
+	for _, forbidden := range []string{
+		"qurl-connector", "sessionrelay.defaultURL", "SESSION_RELAY_URL", " apk ", " apt-get ",
+		"ENTRYPOINT [\"/bin/", "\nVOLUME ", "\nCMD ",
+	} {
 		if strings.Contains(dockerfile, forbidden) {
 			t.Fatalf("CLI Dockerfile contains forbidden companion/runtime surface %q", forbidden)
 		}
@@ -40,7 +151,7 @@ func TestCLIImageContract(t *testing.T) {
 
 func TestActiveSourcesDoNotReferenceLegacyConnectorArtifacts(t *testing.T) {
 	t.Parallel()
-	repoRoot := filepath.Clean("../../..")
+	repoRoot := filepath.Clean(cliRepoRoot)
 	forbidden := [][]byte{
 		[]byte("ghcr.io/layervai/qurl-connector"),
 		[]byte("/usr/local/bin/qurl-connector"),
@@ -86,54 +197,458 @@ func TestActiveSourcesDoNotReferenceLegacyConnectorArtifacts(t *testing.T) {
 	}
 }
 
-func TestCustomerSharingLiveLanesArePrivate(t *testing.T) {
+func TestCLIRequiredPRTestGatesAreExactAndFailClosed(t *testing.T) {
 	t.Parallel()
-	repoRoot := filepath.Clean("../../..")
-	retiredWorkflows, err := filepath.Glob(filepath.Join(repoRoot, ".github", "workflows", "cli-connector-resource-*.yml"))
+
+	data, err := os.ReadFile(filepath.Join(cliRepoRoot, ".github", "workflows", "cli.yml"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(retiredWorkflows) != 0 {
-		t.Fatalf("retired credential-bearing workflows still exist: %v", retiredWorkflows)
+	var workflow cliWorkflowContract
+	if err := yaml.Unmarshal(data, &workflow); err != nil {
+		t.Fatalf("parse public CLI workflow: %v", err)
+	}
+	const expectedCLIJobIf = "needs.changes.outputs.cli == 'true'"
+	findStep := func(jobName, name string) cliWorkflowStep {
+		t.Helper()
+		job, ok := workflow.Jobs[jobName]
+		if !ok {
+			t.Fatalf("public CLI workflow has no %q job", jobName)
+		}
+		var matches []cliWorkflowStep
+		for _, step := range job.Steps {
+			if step.Name == name {
+				matches = append(matches, step)
+			}
+		}
+		if len(matches) != 1 {
+			t.Fatalf("public CLI workflow %s job has %d %q steps, want one", jobName, len(matches), name)
+		}
+		return matches[0]
+	}
+	assertRequiredGate := func(jobName string, step cliWorkflowStep) {
+		t.Helper()
+		job := workflow.Jobs[jobName]
+		if err := validateRequiredCLIWorkflowGate(&job, &step, expectedCLIJobIf); err != nil {
+			t.Errorf("public CLI workflow %s / %s is bypassable: %v", jobName, step.Name, err)
+		}
 	}
 
-	for _, name := range []string{"cli.yml", "cli-nightly.yml"} {
-		path := filepath.Join(repoRoot, ".github", "workflows", name)
-		data, err := os.ReadFile(path)
+	lifecycleTests := []string{
+		"TestDaemonServesTwoResourcesAndStopsOneIndependently",
+		"TestLinuxStartRotatesEpochAfterLocalTerminalDisable",
+		"TestLocalPublishCompensatesSetupFailureBeforeDaemonOwnership",
+		"TestPublishDaemonLifecycleServesRealHTTPAndStopsCleanly",
+		"TestPublishNewMachineTakeoverRotatesEpochOnce",
+		"TestRestartReconcilesAmbiguousAppliedPostWithoutReplay",
+		"TestRestartSetupFailureAlwaysCompensatesAdvancedEpoch",
+		"TestShareLifecycleCommandsConvergeCloudRegistryAndDaemon",
+		"TestStartFailsImmediatelyWhenServingEpochAdvances",
+	}
+	lifecycleRegex := "^(" + strings.Join(lifecycleTests, "|") + ")$"
+	lifecycleNames := strings.Join(lifecycleTests, "\n")
+	lifecycleListCommand := `go test -race -list "$LIFECYCLE_TEST_REGEX" ./apps/cli/cmd`
+	lifecycleRunCommand := `go test -race -count=1 -json -run "$LIFECYCLE_TEST_REGEX" ./apps/cli/cmd`
+	lifecycleStep := findStep("test", "Run CRID lifecycle unit tests")
+	assertRequiredGate("test", lifecycleStep)
+	if len(lifecycleStep.Env) != 2 || lifecycleStep.Env["LIFECYCLE_TEST_REGEX"] != lifecycleRegex || lifecycleStep.Env["LIFECYCLE_TEST_NAMES"] != lifecycleNames {
+		t.Errorf("public CLI workflow lifecycle env = %#v, want exact regex and sorted test names", lifecycleStep.Env)
+	}
+	for _, required := range []string{
+		lifecycleListCommand,
+		`if [[ "$actual_tests" != "$LIFECYCLE_TEST_NAMES" ]]; then`,
+		lifecycleRunCommand,
+		`jq -j 'select(.Output != null) | .Output'`,
+		`lifecycle_status=0`,
+		`select(.Action == "pass" and ((.Test // "") | test($regex)))`,
+		`select(.Action == "skip" and ((.Test // "") | test($regex)))`,
+		`if [[ -n "$skipped_tests" ]]; then`,
+		`if [[ "$passed_tests" != "$LIFECYCLE_TEST_NAMES" ]]; then`,
+	} {
+		if strings.Count(lifecycleStep.Run, required) != 1 {
+			t.Errorf("public CLI workflow does not pin the exact CRID lifecycle test set with %q", required)
+		}
+	}
+	if strings.Count(lifecycleStep.Run, "LC_ALL=C sort") != 3 {
+		t.Error("public CLI workflow does not sort declaration, PASS, and SKIP results under the C locale")
+	}
+	if strings.Index(lifecycleStep.Run, lifecycleListCommand) >= strings.Index(lifecycleStep.Run, lifecycleRunCommand) {
+		t.Error("public CLI workflow does not verify CRID lifecycle test declarations before execution")
+	}
+
+	validatorTests := []string{
+		"TestCanonicalSandboxFailureRootResolvesAlias",
+		"TestCanonicalSandboxQV2RelayHost",
+		"TestReadSandboxSecretFileFailsClosed",
+		"TestRunSandboxLocalCLIForwardsOnlyHardenedImageBinding",
+		"TestRunSandboxLocalCLIUsesExactBinaryAndState",
+		"TestSandboxDeletedCommandDiagnosticWithholdsChildOutput",
+		"TestSandboxFailureChildEnvironmentUsesItsOwnOneTimeKey",
+		"TestSandboxFailureDiagnosticExtractionIsClosed",
+		"TestSandboxFailureDiagnosticsAreAllowListedAndRedacted",
+		"TestSandboxForegroundLifecycleStateContract",
+		"TestSandboxFullCustomerLifecyclePhaseContract",
+		"TestSandboxGrantedRouteAccessFailureCategories",
+		"TestSandboxGrantedRouteFenceValidator",
+		"TestSandboxGrantedRouteLifetime",
+		"TestSandboxGrantedRouteProbeAllowsCrossOriginWithoutSendingBearer",
+		"TestSandboxGrantedRouteProbeAuthorizesEverySameOriginRequest",
+		"TestSandboxGrantedRouteProbeRejectsMissingAuthorization",
+		"TestSandboxGrantedRouteReadiness",
+		"TestSandboxHarnessPassesInlineAPIKeyToExactBinary",
+		"TestSandboxLocalStateReasonDoesNotForwardHostileLogText",
+		"TestSandboxLocalStateReasonIsClosedAndUsesLatestCause",
+		"TestSandboxNamespaceIsCanonicalAndSeparated",
+		"TestSandboxProcessRecoveryCleanupAfterPreReadyFailure",
+		"TestSandboxPublishProcessReportsEarlyExit",
+		"TestSandboxPublishReadinessWaitsForCompleteCRIDLine",
+		"TestSandboxResourceCleanupIsSafeBeforePublish",
+		"TestSandboxRunIdentityBindsOnlyImmutableHardenedImage",
+		"TestSandboxShareCommandDiagnosticWithholdsChildOutput",
+		"TestSandboxSiblingCleanupPreservesDeviceAfterResourceFailure",
+		"TestSandboxStoppedRouteRefusalMatchesQuietGet",
+		"TestValidateSandboxCLIBinary",
+		"TestValidateSandboxDeviceIdentity",
+		"TestValidateSandboxRouteFence",
+		"TestValidateSandboxSharingTransitionRequiresAdvancedEpoch",
+	}
+	validatorPattern := "^(" + strings.Join(validatorTests, "|") + ")$"
+	validatorNames := strings.Join(validatorTests, "\n")
+	validatorStep := findStep("test", "Run credential-free journey validator tests")
+	assertRequiredGate("test", validatorStep)
+	if len(validatorStep.Env) != 2 || validatorStep.Env["VALIDATOR_TEST_REGEX"] != validatorPattern || validatorStep.Env["VALIDATOR_TEST_NAMES"] != validatorNames {
+		t.Errorf("public CLI workflow validator env = %#v, want exact regex and sorted test names", validatorStep.Env)
+	}
+	validatorSkippedCheck := `if [[ -n "$skipped" ]]; then`
+	validatorPassedCheck := `if [[ "$passed" != "$VALIDATOR_TEST_NAMES" ]]; then`
+	validatorStatusCheck := `if (( validator_status != 0 )); then`
+	for _, required := range []string{"go test -race -tags=clisandbox -list", "go test -race -tags=clisandbox -count=1 -json", `jq -j 'select(.Output != null) | .Output'`, `select(.Action == "pass"`, `select(.Action == "skip"`, validatorSkippedCheck, validatorPassedCheck, validatorStatusCheck} {
+		if strings.Count(validatorStep.Run, required) != 1 {
+			t.Errorf("public CLI workflow validator gate does not fail closed with %q", required)
+		}
+	}
+	if strings.Index(validatorStep.Run, validatorSkippedCheck) >= strings.Index(validatorStep.Run, validatorStatusCheck) ||
+		strings.Index(validatorStep.Run, validatorPassedCheck) >= strings.Index(validatorStep.Run, validatorStatusCheck) {
+		t.Error("public CLI workflow validator gate checks process status before PASS/SKIP diagnostics")
+	}
+
+	windowsValidatorStep := findStep("matrix", "Run Windows credential-free journey validator tests")
+	windowsValidatorJob := workflow.Jobs["matrix"]
+	if windowsValidatorJob.If != expectedCLIJobIf || windowsValidatorJob.ContinueOnError != nil ||
+		windowsValidatorStep.If != "runner.os == 'Windows'" || windowsValidatorStep.ContinueOnError != nil {
+		t.Errorf("Windows credential-free validator is bypassable: job=%#v step=%#v", windowsValidatorJob, windowsValidatorStep)
+	}
+	if fmt.Sprint(windowsValidatorStep.Env["WINDOWS_VALIDATOR_TEST_REGEX"]) != "^TestReadWindowsSandboxLocalStateReasonKeepsClassifiedPrimaryLog$" ||
+		fmt.Sprint(windowsValidatorStep.Env["WINDOWS_VALIDATOR_TEST_NAME"]) != "TestReadWindowsSandboxLocalStateReasonKeepsClassifiedPrimaryLog" {
+		t.Errorf("Windows credential-free validator env = %#v, want one exact test", windowsValidatorStep.Env)
+	}
+	for _, required := range []string{
+		"go test -tags=clisandbox -list $env:WINDOWS_VALIDATOR_TEST_REGEX",
+		"go test -tags=clisandbox -count=1 -json -run $env:WINDOWS_VALIDATOR_TEST_REGEX",
+		"$skipped.Count -ne 0 -or $passed.Count -ne 1",
+	} {
+		if strings.Count(windowsValidatorStep.Run, required) != 1 {
+			t.Errorf("Windows credential-free validator does not fail closed with %q", required)
+		}
+	}
+
+	warmDaemonStep := findStep("test", "Run exact warm-daemon process contract")
+	assertRequiredGate("test", warmDaemonStep)
+	if len(warmDaemonStep.Env) != 2 || warmDaemonStep.Env["WARM_DAEMON_TEST_REGEX"] != "^TestExactWarmDaemonProcessContract$" || warmDaemonStep.Env["WARM_DAEMON_TEST_NAME"] != "TestExactWarmDaemonProcessContract" {
+		t.Errorf("public CLI workflow warm-daemon env = %#v, want one exact test", warmDaemonStep.Env)
+	}
+	warmDaemonSkippedCheck := `if [[ -n "$skipped" ]]; then`
+	warmDaemonPassedCheck := `if [[ "$passed" != "$WARM_DAEMON_TEST_NAME" ]]; then`
+	warmDaemonStatusCheck := `if (( warm_daemon_status != 0 )); then`
+	for _, required := range []string{"go test -race -tags='clisandbox clisoak' -list", "go test -race -tags='clisandbox clisoak' -count=1 -json", `jq -j 'select(.Output != null) | .Output'`, `select(.Action == "pass"`, `select(.Action == "skip"`, warmDaemonSkippedCheck, warmDaemonPassedCheck, warmDaemonStatusCheck} {
+		if strings.Count(warmDaemonStep.Run, required) != 1 {
+			t.Errorf("public CLI workflow warm-daemon gate does not fail closed with %q", required)
+		}
+	}
+	if strings.Index(warmDaemonStep.Run, warmDaemonSkippedCheck) >= strings.Index(warmDaemonStep.Run, warmDaemonStatusCheck) ||
+		strings.Index(warmDaemonStep.Run, warmDaemonPassedCheck) >= strings.Index(warmDaemonStep.Run, warmDaemonStatusCheck) {
+		t.Error("public CLI workflow warm-daemon gate checks process status before PASS/SKIP diagnostics")
+	}
+}
+
+func TestReleaseNativeConnectionWorkflowsRequireExactTestResult(t *testing.T) {
+	t.Parallel()
+	type workflowTarget struct {
+		file, job string
+		release   bool
+	}
+	targets := []workflowTarget{
+		{file: "release-please.yml", job: "release-cli", release: true},
+		{file: "cli-nightly.yml", job: "snapshot"},
+	}
+	for _, target := range targets {
+		data, err := os.ReadFile(filepath.Join(cliRepoRoot, ".github", "workflows", target.file))
 		if err != nil {
 			t.Fatal(err)
 		}
+		var workflow cliWorkflowContract
+		if err := yaml.Unmarshal(data, &workflow); err != nil {
+			t.Fatalf("parse %s: %v", target.file, err)
+		}
+		job, ok := workflow.Jobs[target.job]
+		if !ok {
+			t.Fatalf("%s has no %s job", target.file, target.job)
+		}
+		jobText := fmt.Sprint(job)
+		workflowText := string(data)
 		for _, forbidden := range []string{
-			"CLI_SANDBOX_E2E",
-			"QURL_SANDBOX_API_KEY",
-			"QURL_SANDBOX_CLEANUP_JWT",
-			"QURL_CLI_SANDBOX_CONNECTOR",
-			"-tags=clisoak",
+			"Verify the production NHP session relay",
+			"QURL_PROD_NHP_SESSION_RELAY_URL",
+			"QURL_RELEASE_SESSION_RELAY_URL",
+			"QURL_REQUIRE_RELEASE_SESSION_RELAY",
+			"QURL_CONNECTOR_SESSION_RELAY_URL",
+			"TestReleaseSessionRelayEnvironment",
+			"sessionrelay.defaultURL",
+			"SESSION_RELAY_URL",
 		} {
-			if bytes.Contains(data, []byte(forbidden)) {
-				t.Errorf("public workflow %s retains private live-lane contract %q", name, forbidden)
+			if strings.Contains(workflowText, forbidden) {
+				t.Errorf("%s retains forbidden Connector session-relay contract %q", target.file, forbidden)
 			}
 		}
-	}
-	cliWorkflow, err := os.ReadFile(filepath.Join(repoRoot, ".github", "workflows", "cli.yml"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Contains(cliWorkflow, []byte("go test -tags=clisandbox -run '^$' -count=1 ./apps/cli/...")) {
-		t.Error("public CLI workflow does not compile the private sandbox test surface")
-	}
-
-	makefile, err := os.ReadFile(filepath.Join(repoRoot, "Makefile"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, forbidden := range []string{"-tags=clisoak", "CLI_SANDBOX_E2E"} {
-		if bytes.Contains(makefile, []byte(forbidden)) {
-			t.Errorf("public Makefile retains private live-lane contract %q", forbidden)
+		var matches []cliWorkflowStep
+		pinStepIndex := -1
+		for index, step := range job.Steps {
+			if step.Name == "Verify the production NHP Hub trust pin" {
+				matches = append(matches, step)
+				pinStepIndex = index
+			}
 		}
-	}
-	if !bytes.Contains(makefile, []byte("go test -tags=clisandbox -run '^$$' -count=1 ./apps/cli/...")) {
-		t.Error("public Makefile does not compile the private sandbox test surface")
+		if len(matches) != 1 {
+			t.Fatalf("%s has %d production Hub-pin steps, want one", target.file, len(matches))
+		}
+		step := matches[0]
+		if step.If != nil || step.ContinueOnError != nil || job.ContinueOnError != nil {
+			t.Errorf("%s production Hub-pin gate is bypassable", target.file)
+		}
+		for _, required := range []string{
+			"go test ./apps/cli/internal/connector/hub -list",
+			"go test ./apps/cli/internal/connector/hub -run",
+			"-count=1 -json",
+			`select(.Action == "pass" and .Test == $test)`,
+			`select(.Action == "skip" and .Test == $test)`,
+		} {
+			if strings.Count(step.Run, required) != 1 {
+				t.Errorf("%s production Hub-pin gate does not fail closed with %q", target.file, required)
+			}
+		}
+		requiredMode, hasRequiredMode := step.Env["QURL_REQUIRE_RELEASE_HUB_PIN"]
+		if target.release {
+			releaseGate := strings.Join(strings.Fields(fmt.Sprint(job.If)), " ")
+			const expectedReleaseGate = "!cancelled() && needs.cli-release-gate.result == 'success' && needs.cli-release-gate.outputs.required == 'true'" //nolint:misspell // GitHub spells this function cancelled().
+			if releaseGate != expectedReleaseGate {
+				t.Errorf("%s release-cli gate = %q, want %q", target.file, releaseGate, expectedReleaseGate)
+			}
+			if hasRequiredMode {
+				t.Errorf("%s release Hub-pin step shadows the committed workflow mode with %v", target.file, requiredMode)
+			}
+			if mode := fmt.Sprint(workflow.Env["QURL_REQUIRE_RELEASE_HUB_PIN"]); mode != "0" {
+				t.Errorf("%s release Hub-pin source mode = %q, want reviewed dark mode 0", target.file, mode)
+			}
+			for _, required := range []string{
+				`if [[ -z "$QURL_RELEASE_HUB_PUBLIC_KEY_B64" && -z "$QURL_RELEASE_HUB_PUBLIC_KEY_SHA256" ]]; then`,
+				`if [[ "$QURL_REQUIRE_RELEASE_HUB_PIN" != 0 || "$skipped" != "$test_name" || -n "$passed" ]]; then`,
+				`elif [[ -n "$QURL_RELEASE_HUB_PUBLIC_KEY_B64" && -n "$QURL_RELEASE_HUB_PUBLIC_KEY_SHA256" ]]; then`,
+				`if [[ -n "$skipped" || "$passed" != "$test_name" ]]; then`,
+				`printf 'mode=%s\n' "$mode" >>"$GITHUB_OUTPUT"`,
+			} {
+				if strings.Count(step.Run, required) != 1 {
+					t.Errorf("%s release Hub-pin gate does not pin dark/configured behavior with %q", target.file, required)
+				}
+			}
+			pinSource, pinSourcePresent := step.Env["QURL_RELEASE_HUB_PUBLIC_KEY_B64"].(string)
+			if !pinSourcePresent || strings.TrimSpace(pinSource) == "" {
+				t.Errorf("%s release Hub-pin verifier has no key source", target.file)
+			}
+			var goreleaserSteps []cliWorkflowStep
+			goreleaserStepIndex := -1
+			for index, candidate := range job.Steps {
+				if candidate.Name == "Run GoReleaser" {
+					goreleaserSteps = append(goreleaserSteps, candidate)
+					goreleaserStepIndex = index
+				}
+			}
+			if len(goreleaserSteps) != 1 {
+				t.Fatalf("%s has %d GoReleaser steps, want one", target.file, len(goreleaserSteps))
+			}
+			goreleaserPin, goreleaserPinPresent := goreleaserSteps[0].Env["QURL_RELEASE_HUB_PUBLIC_KEY_B64"].(string)
+			if !goreleaserPinPresent || goreleaserPin != pinSource {
+				t.Errorf("%s GoReleaser step does not consume the exact verified Hub-pin source", target.file)
+			}
+			if pinStepIndex >= goreleaserStepIndex {
+				t.Errorf("%s production Hub-pin gate must run before GoReleaser (pin=%d goreleaser=%d)", target.file, pinStepIndex, goreleaserStepIndex)
+			}
+			var releaseVerifierSteps []cliWorkflowStep
+			releaseVerifierStepIndex := -1
+			for index, candidate := range job.Steps {
+				if candidate.Name == "Verify the draft CLI trust posture" {
+					releaseVerifierSteps = append(releaseVerifierSteps, candidate)
+					releaseVerifierStepIndex = index
+				}
+			}
+			if len(releaseVerifierSteps) != 1 {
+				t.Fatalf("%s has %d draft CLI Hub-pin verifiers, want one", target.file, len(releaseVerifierSteps))
+			}
+			releaseVerifier := releaseVerifierSteps[0]
+			if releaseVerifier.If != nil || releaseVerifier.ContinueOnError != nil || releaseVerifierStepIndex <= goreleaserStepIndex {
+				t.Errorf("%s draft CLI Hub-pin verifier is bypassable or precedes GoReleaser", target.file)
+			}
+			fingerprintSource, ok := releaseVerifier.Env["QURL_RELEASE_HUB_PUBLIC_KEY_SHA256"].(string)
+			if !ok || strings.TrimSpace(fingerprintSource) == "" {
+				t.Errorf("%s released CLI Hub-pin verifier has no fingerprint source", target.file)
+			}
+			artifactPinSource, ok := releaseVerifier.Env["QURL_RELEASE_HUB_PUBLIC_KEY_B64"].(string)
+			if !ok || strings.TrimSpace(artifactPinSource) == "" {
+				t.Errorf("%s released CLI Hub-pin verifier has no public-key source", target.file)
+			}
+			for _, required := range []string{
+				`case "$QURL_RELEASE_HUB_PIN_MODE" in`,
+				`[[ -z "$QURL_RELEASE_HUB_PUBLIC_KEY_B64" && -z "$QURL_RELEASE_HUB_PUBLIC_KEY_SHA256" ]]`,
+				`[[ -n "$QURL_RELEASE_HUB_PUBLIC_KEY_B64" && -n "$QURL_RELEASE_HUB_PUBLIC_KEY_SHA256" ]]`,
+				`gh release download "$CLI_TAG"`,
+				`--pattern 'qurl_*_darwin_*.tar.gz'`,
+				`--pattern 'qurl_*_linux_*.tar.gz'`,
+				`--pattern 'qurl_*_windows_*.zip'`,
+				`if (( ${#archives[@]} != ${#expected[@]} ))`,
+				`[[ "$QURL_RELEASE_HUB_PIN_MODE" == pinned ]]`,
+				`! grep -aFq -- "$QURL_RELEASE_HUB_PUBLIC_KEY_B64" "$binary"`,
+				`version --verify-release-native-trust`,
+				`"$fingerprint" != "$QURL_RELEASE_HUB_PUBLIC_KEY_SHA256"`,
+				`if "$native_binary" version --verify-release-native-trust >"$trust_stdout" 2>"$trust_stderr"; then`,
+				`missing required built-in connection settings`,
+			} {
+				if !strings.Contains(releaseVerifier.Run, required) {
+					t.Errorf("%s draft CLI Hub-pin verifier does not bind exact artifact behavior %q", target.file, required)
+				}
+			}
+			var imageSmokeSteps []cliWorkflowStep
+			for _, candidate := range job.Steps {
+				if candidate.Name == "Smoke both qurl image platforms" {
+					imageSmokeSteps = append(imageSmokeSteps, candidate)
+				}
+			}
+			if len(imageSmokeSteps) != 1 {
+				t.Fatalf("%s has %d qurl image trust verifiers, want one", target.file, len(imageSmokeSteps))
+			}
+			imageSmoke := imageSmokeSteps[0]
+			if fmt.Sprint(imageSmoke.Env["QURL_RELEASE_HUB_PIN_MODE"]) != "${{ steps.release_hub_pin.outputs.mode }}" {
+				t.Errorf("%s image smoke does not consume the validated Hub-pin mode", target.file)
+			}
+			for _, required := range []string{
+				`for platform in linux/amd64 linux/arm64; do`,
+				`container_id=$(docker create --platform "$platform" "$platform_candidate")`,
+				`docker cp "$container_id:/usr/local/bin/qurl" "$binary"`,
+				`if [[ "$QURL_RELEASE_HUB_PIN_MODE" == pinned ]]; then`,
+				`version --verify-release-native-trust`,
+				`missing required built-in connection settings`,
+			} {
+				if !strings.Contains(imageSmoke.Run, required) {
+					t.Errorf("%s image smoke does not pin both trust postures with %q", target.file, required)
+				}
+			}
+			if fmt.Sprint(job.Outputs["hub_pin_mode"]) != "${{ steps.release_hub_pin.outputs.mode }}" {
+				t.Errorf("%s does not export the exact validated Hub-pin mode", target.file)
+			}
+			for _, forbidden := range []string{"QURL_SANDBOX", "QURL_CONNECTOR_HUB_", "openssl genpkey -algorithm X25519"} {
+				if strings.Contains(jobText, forbidden) {
+					t.Errorf("%s release job contains forbidden non-production trust input %q", target.file, forbidden)
+				}
+			}
+			signatureIndex, imageIndex, caskValidationIndex, caskStageIndex := -1, -1, -1, -1
+			for index, candidate := range job.Steps {
+				switch candidate.Name {
+				case "Verify release signature (self-test)":
+					signatureIndex = index
+				case "Promote and sign tested qurl image", "Sign and promote the tested qurl image":
+					imageIndex = index
+				case "Validate generated Homebrew cask":
+					caskValidationIndex = index
+					for _, required := range []string{
+						"dist/homebrew/Casks/qurl.rb",
+						`archive_url_prefix='releases/download/v#{version}/qurl_#{version}_'`,
+						`for archive in darwin_arm64 darwin_amd64 linux_arm64 linux_amd64; do`,
+						"generated Homebrew cask does not bind exactly four release archives",
+						"generated Homebrew cask does not bind the exact ${archive} release archive",
+					} {
+						if strings.Count(candidate.Run, required) != 1 {
+							t.Errorf("%s Homebrew pre-publication gate does not bind %q", target.file, required)
+						}
+					}
+				case "Stage the Homebrew validation bundle":
+					caskStageIndex = index
+					if candidate.Uses != "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a" {
+						t.Errorf("%s stages Homebrew validation with an unpinned action", target.file)
+					}
+				}
+			}
+			if imageIndex >= 0 {
+				t.Errorf("%s promotes the versioned qurl image before native package validation", target.file)
+			}
+			if caskValidationIndex <= releaseVerifierStepIndex || caskValidationIndex <= signatureIndex {
+				t.Errorf("%s validates the generated cask before local artifact gates (cask=%d archive=%d signature=%d)", target.file, caskValidationIndex, releaseVerifierStepIndex, signatureIndex)
+			}
+			if caskStageIndex <= caskValidationIndex {
+				t.Errorf("%s stages the Homebrew bundle before local validation (stage=%d validate=%d)", target.file, caskStageIndex, caskValidationIndex)
+			}
+			if _, present := goreleaserSteps[0].Env["HOMEBREW_TAP_GITHUB_TOKEN"]; present {
+				t.Errorf("%s exposes the tap token to GoReleaser before verification", target.file)
+			}
+			validator, hasValidator := workflow.Jobs["validate-homebrew-cask"]
+			publisher, hasPublisher := workflow.Jobs["publish-cli-release"]
+			tapPublisher, hasTapPublisher := workflow.Jobs["publish-homebrew-cask"]
+			if !hasValidator || !hasPublisher || !hasTapPublisher {
+				t.Fatalf("%s has an incomplete Homebrew publication chain", target.file)
+			}
+			for _, required := range []string{`brew style --fix "$cask"`, `brew audit --cask "$token"`, `brew install --cask "$token"`} {
+				if len(validator.Steps) == 0 || !strings.Contains(fmt.Sprint(validator.Steps), required) {
+					t.Errorf("%s Homebrew validator does not bind %q", target.file, required)
+				}
+			}
+			if !strings.Contains(fmt.Sprint(publisher.Steps), `gh release edit "$CLI_TAG"`) ||
+				!strings.Contains(fmt.Sprint(publisher.Steps), "Sign and promote the tested qurl image") ||
+				!strings.Contains(fmt.Sprint(tapPublisher.Steps), `gh api --method PUT "repos/${tap_repo}/contents/${cask_path}"`) {
+				t.Errorf("%s publication jobs do not preserve release then tap publication", target.file)
+			}
+			continue
+		}
+		if hasRequiredMode {
+			t.Errorf("%s dark nightly Hub-pin gate forces release mode", target.file)
+		}
+		pinSource, pinSourcePresent := step.Env["QURL_RELEASE_HUB_PUBLIC_KEY_B64"].(string)
+		if !pinSourcePresent || strings.TrimSpace(pinSource) == "" {
+			t.Errorf("%s nightly Hub-pin verifier has no key source", target.file)
+		}
+		var snapshotSteps []cliWorkflowStep
+		snapshotStepIndex := -1
+		for index, candidate := range job.Steps {
+			if candidate.Name == "Build snapshot release" {
+				snapshotSteps = append(snapshotSteps, candidate)
+				snapshotStepIndex = index
+			}
+		}
+		if len(snapshotSteps) != 1 {
+			t.Fatalf("%s has %d snapshot release steps, want one", target.file, len(snapshotSteps))
+		}
+		snapshotPin, snapshotPinPresent := snapshotSteps[0].Env["QURL_RELEASE_HUB_PUBLIC_KEY_B64"].(string)
+		if !snapshotPinPresent || snapshotPin != pinSource {
+			t.Errorf("%s snapshot release does not consume the exact verified Hub-pin source", target.file)
+		}
+		if pinStepIndex >= snapshotStepIndex {
+			t.Errorf("%s production Hub-pin gate must run before the snapshot release (pin=%d snapshot=%d)", target.file, pinStepIndex, snapshotStepIndex)
+		}
+		for _, required := range []string{
+			`if [[ -z "$QURL_RELEASE_HUB_PUBLIC_KEY_B64" && -z "$QURL_RELEASE_HUB_PUBLIC_KEY_SHA256" ]]; then`,
+			`if [[ "$skipped" != "$test_name" || -n "$passed" ]]; then`,
+			`elif [[ -n "$skipped" || "$passed" != "$test_name" ]]; then`,
+		} {
+			if strings.Count(step.Run, required) != 1 {
+				t.Errorf("%s nightly Hub-pin gate does not pin dark and configured results with %q", target.file, required)
+			}
+		}
 	}
 }
 
@@ -148,6 +663,7 @@ func TestReleaseSignsAndVerifiesExactQURLImageDigest(t *testing.T) {
 		"timeout-minutes: 40",
 		`[ "$GITHUB_REF" = refs/heads/main ]`,
 		"platforms: linux/amd64,linux/arm64",
+		"HUB_TRUST_ROOT_B64=${{ secrets.QURL_PROD_NHP_HUB_PUBLIC_KEY_B64 }}",
 		"provenance: mode=max",
 		"sbom: true",
 		`candidate="${IMAGE_NAME}@${IMAGE_DIGEST}"`,
@@ -160,6 +676,8 @@ func TestReleaseSignsAndVerifiesExactQURLImageDigest(t *testing.T) {
 		`if length == 1 then .[0].digest`,
 		`platform_candidate="${image_name}@${platform_digest}"`,
 		`docker run --rm --platform "$platform" "$platform_candidate" version`,
+		`docker run --rm --platform "$platform" "$platform_candidate" version --verify-release-native-trust`,
+		`QURL_RELEASE_HUB_PUBLIC_KEY_SHA256: ${{ secrets.QURL_PROD_NHP_HUB_PUBLIC_KEY_SHA256 }}`,
 		"scripts/extract-qurl-image-attestations.sh",
 		"QURL_EXPECTED_VCS_SOURCE=https://github.com/layervai/qurl-integrations",
 		`cosign sign --yes "$candidate"`,
@@ -192,6 +710,9 @@ func TestReleaseSignsAndVerifiesExactQURLImageDigest(t *testing.T) {
 		"ghcr.io/layervai/qurl-connector",
 		"/usr/local/bin/qurl-connector",
 		"QURL_EXPECTED_VCS_SOURCE=https://github.com/layervai/qurl-integrations.git",
+		"QURL_PROD_NHP_SESSION_RELAY_URL",
+		"QURL_RELEASE_SESSION_RELAY_URL",
+		"SESSION_RELAY_URL",
 	} {
 		if strings.Contains(text, forbidden) {
 			t.Errorf("release workflow contains retired artifact %q", forbidden)
@@ -235,11 +756,22 @@ func TestReleaseDocsDescribeIndependentImageTrust(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	text := string(docs)
+	text := strings.Join(strings.Fields(string(docs)), " ")
 	for _, want := range []string{
 		"`qurl-image.txt` is intentionally not in that manifest",
 		"https://layerv.ai/attestations/qurl-image-buildkit-manifest/v1",
 		"Do not replace the digest from",
+		"CLI releases have two reviewed Hub-trust postures",
+		"A production-enabled release must contain the exact production Hub trust root",
+		"A dark release must contain no production Hub trust root",
+		"Native local sharing uses the qURL native UDP protocol",
+		"does not embed or require an HTTPS session-relay origin",
+		"required built-in Hub trust root",
+		"both platform binaries to carry the reviewed Hub-trust posture",
+		"fixed, redacted missing-settings error",
+		"release process rejects partial trust data",
+		"must never embed development or test trust data",
+		"GitHub Release stays draft and the Homebrew tap stays on its prior version",
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("RELEASING.md missing image trust guidance %q", want)

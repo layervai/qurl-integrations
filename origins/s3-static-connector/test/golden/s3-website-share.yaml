@@ -1,4 +1,5 @@
-version: 1
+version: 2
+owner_id: 'email|test-owner-id'
 shares:
   - crid: 'qhpviqz46qwcvx56glfatm3p3ooccwfcf2it4sdgjervwdkapykw2j2vj4uq'
     resource_id: 'MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE2cTVv5_3eeYCcLLq5ROYCqcmY50HiKZ9ATglIkPnCji1E_S63UMtXba1moR8-Q6EV7oM6zwwh9_j2CDujzXvLA'

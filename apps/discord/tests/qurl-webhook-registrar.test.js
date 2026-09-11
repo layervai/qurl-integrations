@@ -1,10 +1,3 @@
-// Tests for the qurl-service webhook self-registration helper.
-//
-// Wire-contract pinned against qurl-service's public Webhooks API:
-//   POST /v1/webhooks                  → creates, returns secret
-//   POST /v1/webhooks/{id}/secret      → rotates, returns NEW secret
-//   GET  /v1/webhooks                  → lists for owner
-//   PATCH /v1/webhooks/{id}            → updates events list
 
 const { ensureWebhookSubscription, buildSsmPersistSecret, _internals } = require('../src/qurl-webhook-registrar');
 
@@ -14,10 +7,6 @@ function mockFetchResponses(handlers) {
   global.fetch = jest.fn(async (url, opts) => {
     const path = url.replace(/^https?:\/\/[^/]+/, '');
     const method = opts.method || 'GET';
-    // Try exact match first (so tests targeting a specific query string
-    // like `?cursor=page2` still work), then fall back to pathname-only
-    // so tests don't have to enumerate every `?limit=100` / `?limit=100&cursor=...`
-    // variation that the registrar adds for defensive reasons.
     const pathnameOnly = path.split('?')[0];
     const handler = handlers[`${method} ${path}`] || handlers[`${method} ${pathnameOnly}`];
     if (!handler) {
@@ -45,9 +34,6 @@ const BASE_OPTS = {
 };
 
 describe('ensureWebhookSubscription — cold bootstrap (no existing sub + no real initialSecret) → creates', () => {
-  // The first-deploy-of-a-fresh-environment path. `initialSecret` is
-  // either unset (env never had QURL_WEBHOOK_SECRET) or an empty
-  // string (SSM parameter not yet populated). Either way, action='created'.
   it.each([
     ['initialSecret undefined', undefined],
     ['initialSecret empty string', ''],
@@ -158,10 +144,6 @@ describe('ensureWebhookSubscription — existing sub, bootstrap (no real initial
 
 describe('ensureWebhookSubscription — existing sub + real initialSecret → REUSE (multi-replica safety)', () => {
   it('skips POST /secret entirely and returns the initialSecret unchanged', async () => {
-    // The load-bearing multi-replica safety property. Pre-fix, each
-    // HTTP replica rotated → server-side last-write-wins → (N-1)
-    // replicas held stale secrets → ALB-routed events 401'd on
-    // ~(N-1)/N of replicas until a follow-up restart.
     let secretEndpointHit = false;
     mockFetchResponses({
       'GET /v1/webhooks': () => ({ body: { data: [{
@@ -197,10 +179,6 @@ describe('ensureWebhookSubscription — existing sub + real initialSecret → RE
   });
 
   it('returns reused successfully even when the events PATCH fails (transient 5xx must not flip the boot log)', async () => {
-    // Receiver is already correct via initialSecret. A transient PATCH
-    // 5xx shouldn't make ensureWebhookSubscription reject — the boot
-    // log would then say "self-registration failed" while the bot is
-    // actually healthy. Catch + log + return reused.
     mockFetchResponses({
       'GET /v1/webhooks': () => ({ body: { data: [{
         webhook_id: 'wh_existing', url: BASE_OPTS.bridgeUrl, events: ['qurl.created'], // drift
@@ -240,8 +218,6 @@ describe('ensureWebhookSubscription — URL canonicalization', () => {
         return { body: { data: { webhook_id: 'wh_existing', secret: 'whsec_x' } } };
       },
     });
-    // bridgeUrl has NO trailing slash; strict equality would miss
-    // and create a duplicate. canonicalUrl matches both.
     const result = await ensureWebhookSubscription({
       ...BASE_OPTS,
       bridgeUrl: 'https://bot.test.example/webhooks/qurl',
@@ -253,10 +229,6 @@ describe('ensureWebhookSubscription — URL canonicalization', () => {
 
 describe('ensureWebhookSubscription — pagination', () => {
   it('walks cursor pages until the matching sub is found', async () => {
-    // Test keys spell the exact path the registrar produces so the
-    // exact-match path-with-query takes precedence over the
-    // pathname-only fallback (which would otherwise return the
-    // first-page handler for every call → cursor walk would loop).
     mockFetchResponses({
       'GET /v1/webhooks?limit=100': () => ({ body: {
         data: [{ webhook_id: 'wh_other', url: 'https://other.example/foo', events: ['qurl.accessed', 'qurl.expired'] }],
@@ -291,11 +263,6 @@ describe('ensureWebhookSubscription — pagination', () => {
 });
 
 describe('ensureWebhookSubscription — set-based reconcileEvents (latent bug fix)', () => {
-  // The pre-fix reconcile short-circuited on `events.includes('qurl.accessed')`,
-  // which would leave an `accessed`-only subscription in place even after
-  // the target set grew to include `expired`. These tests pin the
-  // strict-set-equality semantics so a future event-list addition can
-  // never silently under-cover via the inclusion-check pattern again.
   it('PATCHes when accessed is present but expired is missing (the original latent-bug shape)', async () => {
     let patchedEvents = null;
     mockFetchResponses({
@@ -327,11 +294,6 @@ describe('ensureWebhookSubscription — set-based reconcileEvents (latent bug fi
   });
 
   it('PATCHes when an extra non-target event is present (set equality, not subset)', async () => {
-    // Set equality drops drift extras — a stale event from a removed
-    // target stays subscribed otherwise. Trade-off accepted: if a
-    // future peer ever co-subscribes a third event on the same sub,
-    // this would drop it. There is no co-subscriber today (the bot
-    // owns this subscription, owner_id-scoped).
     let patchedEvents = null;
     mockFetchResponses({
       'GET /v1/webhooks': () => ({ body: { data: [{
@@ -361,10 +323,6 @@ describe('ensureWebhookSubscription — set-based reconcileEvents (latent bug fi
   });
 
   it('PATCHes when events field is a string instead of an array (treats non-array as missing)', async () => {
-    // Defensive against a future contract drift where qurl-service
-    // returns events: "qurl.accessed,qurl.expired" — the pre-fix
-    // .includes() would have matched via string-contains and
-    // silently skipped the PATCH despite drift.
     let patchedEvents = null;
     mockFetchResponses({
       'GET /v1/webhooks': () => ({ body: { data: [{
@@ -412,7 +370,6 @@ describe('ensureWebhookSubscription — error paths', () => {
       'GET /v1/webhooks': () => ({ body: { data: [] } }),
       'POST /v1/webhooks': () => ({ status: 201, body: { data: {
         webhook_id: 'wh_new',
-        // No secret field — contract drift
       } } }),
     });
     await expect(ensureWebhookSubscription(BASE_OPTS)).rejects.toThrow(/contract drift/);
@@ -459,11 +416,6 @@ describe('ensureWebhookSubscription — best-effort secret persistence', () => {
   });
 
   it('returns the secret EVEN IF persistSecret throws (best-effort)', async () => {
-    // Load-bearing safety property: persistence is observability, not
-    // correctness. If IAM denies PutParameter (or whatever backend the
-    // caller wired) we STILL return the secret so the receiver can
-    // verify against it in-process. Without this, an AccessDenied
-    // would crash the registrar and the bot would 503 on every webhook.
     mockFetchResponses({
       'GET /v1/webhooks': () => ({ body: { data: [] } }),
       'POST /v1/webhooks': () => ({ status: 201, body: { data: {
@@ -509,8 +461,6 @@ describe('ensureWebhookSubscription — best-effort secret persistence', () => {
         persistSecret: async () => { throw accessDenied; },
       });
       expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('qURL webhook secret persistence failed'));
-      // Critical: NOT error-level. AccessDenied is the "expected
-      // failure mode" — alarm-tier-distinction documented in runbook.
       expect(errorSpy).not.toHaveBeenCalledWith(expect.stringContaining('qURL webhook secret persistence failed'));
     } finally {
       warnSpy.mockRestore();
@@ -544,10 +494,6 @@ describe('ensureWebhookSubscription — best-effort secret persistence', () => {
 });
 
 describe('ensureWebhookSubscription — description length defense', () => {
-  // Slice lives at the wire boundary (createSubscription) so future
-  // callers don't have to remember the 200-char cap. Defense against
-  // a hypothetical future qurl-service-side length-cap 4xx that
-  // would otherwise infinite-loop on retry-create.
   it('clips description to 200 chars at the wire boundary regardless of caller input', async () => {
     let sentDescription = null;
     const longDescription = 'x'.repeat(500);
@@ -598,10 +544,6 @@ describe('ensureWebhookSubscription — wire-contract pins', () => {
   });
 
   it('events list is the exact ["qurl.accessed"] string (regression guard)', async () => {
-    // The qurl-service spec lists multiple event types; we ONLY want
-    // qurl.accessed. If a future change accidentally subscribes to
-    // qurl.created / .revoked etc., the receiver would ignore those
-    // with 200 — but the metric volume + log noise would grow.
     let body = null;
     mockFetchResponses({
       'GET /v1/webhooks': () => ({ body: { data: [] } }),
@@ -616,9 +558,6 @@ describe('ensureWebhookSubscription — wire-contract pins', () => {
 });
 
 describe('ensureWebhookSubscription — duplicate-subscription recovery', () => {
-  // Cold-bootstrap with N replicas + empty SSM creates N duplicate subs
-  // (each replica POSTs concurrently). This path tests RECOVERY on the
-  // next boot: pick deterministic survivor, DELETE others, continue.
   it('deletes duplicates and keeps oldest-by-created_at survivor (force-rotates the survivor)', async () => {
     const deletedIds = [];
     mockFetchResponses({
@@ -653,9 +592,6 @@ describe('ensureWebhookSubscription — duplicate-subscription recovery', () => 
   });
 
   it('treats DELETE 404 as success (concurrent dedupe race)', async () => {
-    // Two replicas independently picking the same survivor + DELETEing
-    // the same losers means the second DELETE on each loser hits 404.
-    // The dedupe path must NOT crash on this.
     mockFetchResponses({
       'GET /v1/webhooks': () => ({ body: { data: [
         { webhook_id: 'wh_a', url: BASE_OPTS.bridgeUrl, events: ['qurl.accessed', 'qurl.expired'] },
@@ -670,12 +606,6 @@ describe('ensureWebhookSubscription — duplicate-subscription recovery', () => 
   });
 
   it('force-rotates the survivor even when initialSecret is real (closes SSM↔survivor mismatch)', async () => {
-    // Cold-bootstrap created N subs each with distinct server-generated
-    // secrets. The SSM-persisted secret (last-write-wins) almost
-    // certainly belongs to a replica whose sub we just DELETEd. If we
-    // took the REUSE path with initialSecret, the receiver would 401
-    // every inbound forever (survivor's secret is unknown). Force-
-    // rotate produces a known-good secret tied to the survivor.
     let rotated = false;
     mockFetchResponses({
       'GET /v1/webhooks': () => ({ body: { data: [
@@ -711,10 +641,6 @@ describe('ensureWebhookSubscription — duplicate-subscription recovery', () => 
   });
 
   it('rotation does NOT fire when a non-404 DELETE rejects (Promise.all sequencing)', async () => {
-    // The rotate-after-dedupe path runs `await Promise.all(...DELETEs)`
-    // before `rotateSecret`. A rejection there must short-circuit the
-    // rotate so we don't ship a rotated secret while siblings might
-    // still be in-flight or partially failed. Pin the invariant.
     let rotateHit = false;
     mockFetchResponses({
       'GET /v1/webhooks': () => ({ body: { data: [
@@ -731,11 +657,6 @@ describe('ensureWebhookSubscription — duplicate-subscription recovery', () => 
     expect(rotateHit).toBe(false);
   });
 });
-
-// Real-config setter tests removed: webhook-registrar Lambda is the
-// sole writer of QURL_WEBHOOK_SECRET (via SSM). The bot reads it
-// once at boot from env and never mutates it in-process, so there
-// is no setter seam to pin.
 
 describe('ensureWebhookSubscription — multi-subscription scan', () => {
   it('matches the correct sub when several non-matching ones share the page', async () => {
@@ -754,13 +675,6 @@ describe('ensureWebhookSubscription — multi-subscription scan', () => {
 
 describe('ensureWebhookSubscription — rotation survives PATCH failure', () => {
   it('returns the rotated secret even when the events PATCH fails', async () => {
-    // Behavior pin: if PATCH ran before rotate and threw, the bot
-    // would never get a usable secret on this boot — receiver stays
-    // unconfigured and 503s every webhook. Asserting the rotated
-    // secret made it out implicitly proves rotation ran (and
-    // succeeded) despite the PATCH 500. Doesn't pin call order, so
-    // a future refactor that makes rotation+PATCH independent still
-    // passes.
     mockFetchResponses({
       'GET /v1/webhooks': () => ({ body: { data: [{
         webhook_id: 'wh_existing', url: BASE_OPTS.bridgeUrl, events: ['qurl.created'], // drift
@@ -792,8 +706,6 @@ describe('ensureWebhookSubscription — events drift edge cases', () => {
 
 describe('ensureWebhookSubscription — pagination cap', () => {
   it('throws when the 50-page cap is hit (refuses to fall through to create-fresh)', async () => {
-    // Silently returning null + creating-fresh would compound duplicates
-    // on every restart with a stuck cursor.
     global.fetch = jest.fn(async () => ({
       ok: true, status: 200,
       text: async () => JSON.stringify({
@@ -807,20 +719,12 @@ describe('ensureWebhookSubscription — pagination cap', () => {
 
 describe('ensureWebhookSubscription — fetch timeout', () => {
   it('surfaces AbortError when qurl-service hangs past the 10s deadline', async () => {
-    // The registrar relies on AbortSignal.timeout(10_000) — verify the
-    // surface is an error, not a hung promise. Replaces the awaited
-    // fetch with one that throws an AbortError synchronously to avoid
-    // real-time waits in tests.
     const abortErr = new Error('The operation was aborted');
     abortErr.name = 'AbortError';
     global.fetch = jest.fn(async () => { throw abortErr; });
     await expect(ensureWebhookSubscription(BASE_OPTS)).rejects.toThrow(/aborted/i);
   });
   it('attaches `op` to pre-response fetch errors so oncall greps catch network failures too', async () => {
-    // callQurlService used to surface only resp-status errors with op;
-    // pre-response failures (AbortError, DNS, TLS) lacked the op field,
-    // so a "filter logs by op=GET /v1/webhooks" search silently missed
-    // network errors. Now op is attached at the catch site.
     const abortErr = new Error('The operation was aborted');
     abortErr.name = 'AbortError';
     global.fetch = jest.fn(async () => { throw abortErr; });
@@ -862,12 +766,9 @@ describe('redactSecret — recursive scrubbing', () => {
     expect(out).toEqual({ a: 1, b: 'x', c: null, d: false });
   });
   it('fail-closes at depth cap with [TRUNCATED] (deeply-wrapped secret cannot survive)', () => {
-    // Build a body with a `secret` field deeper than REDACT_MAX_DEPTH (8).
     let nested = { secret: 'whsec_deeply_nested' };
     for (let i = 0; i < 10; i++) nested = { wrap: nested };
     const out = redactSecret(nested);
-    // Walk to the truncation point and check the subtree was replaced
-    // by '[TRUNCATED]' instead of the original {secret: ...} subtree.
     const json = JSON.stringify(out);
     expect(json).not.toContain('whsec_deeply_nested');
     expect(json).toContain('[TRUNCATED]');
@@ -876,10 +777,6 @@ describe('redactSecret — recursive scrubbing', () => {
 
 describe('buildSsmPersistSecret — abortSignal placement (regression guard for cr round-8)', () => {
   it('passes abortSignal on send\'s SECOND arg, not on the Command constructor (constructor would silently drop it)', async () => {
-    // The bug round-8 caught: putting {abortSignal: ...} as the second
-    // arg to `new PutParameterCommand({...}, ...)` is silently dropped
-    // because the Command takes only `input`. Has to land on
-    // `client.send(cmd, { abortSignal })`.
     let sendCalls = [];
     const fakeSsmClient = { send: jest.fn(async (cmd, opts) => { sendCalls.push({ cmd, opts }); }) };
     class FakePutParameterCommand {
@@ -898,8 +795,6 @@ describe('buildSsmPersistSecret — abortSignal placement (regression guard for 
       Value: 'whsec_new_value',
       Overwrite: true,
     });
-    // Critical assertion — abortSignal lives on the send-call options,
-    // NOT swallowed by the Command constructor.
     expect(sendCalls[0].opts).toEqual({ abortSignal: expect.any(AbortSignal) });
     expect(sendCalls[0].opts.abortSignal.aborted).toBe(false);
   });
@@ -928,8 +823,6 @@ describe('pickSurvivor — deterministic across replicas', () => {
     expect(winner.webhook_id).toBe('wh_aaa');
   });
   it('prefers the row with a timestamp over the row without (mixed case)', () => {
-    // Asymmetric responses (one row has created_at, the other doesn't)
-    // should resolve to the timestamped row regardless of input order.
     const winner1 = pickSurvivor([
       { webhook_id: 'wh_zzz', created_at: '2026-05-19T10:00:00Z' },
       { webhook_id: 'wh_aaa' /* no timestamp */ },
@@ -944,11 +837,6 @@ describe('pickSurvivor — deterministic across replicas', () => {
 });
 
 describe('ensureWebhookSubscription — return-shape pin (Lambda persists then bot reads from SSM)', () => {
-  // Lambda flow: ensureWebhookSubscription returns a secret →
-  // persistSecret callback writes it to SSM → bot reads it from env
-  // at next deploy. This test pins the return-shape contract that the
-  // Lambda relies on: the secret in result.secret is exactly what the
-  // bot will end up verifying webhooks against.
   it('the secret the registrar returns matches the value the persistSecret callback receives', async () => {
     mockFetchResponses({
       'GET /v1/webhooks': () => ({ body: { data: [] } }),
@@ -967,11 +855,6 @@ describe('ensureWebhookSubscription — return-shape pin (Lambda persists then b
 });
 
 describe('ensureWebhookSubscription — ownerId return field (per-guild receiver routing)', () => {
-  // guild-webhook-link.js consumes result.ownerId to populate the
-  // in-process secret cache. If qurl-service drops `owner_id` from a
-  // response shape, every BYOK guild's first link rolls back with
-  // OWNER_MISSING — pin the field across all three branches so the
-  // upstream contract regression fails loudly here.
   it('forwards owner_id from a POST /v1/webhooks created response', async () => {
     mockFetchResponses({
       'GET /v1/webhooks': () => ({ body: { data: [] } }),
@@ -1018,8 +901,6 @@ describe('ensureWebhookSubscription — ownerId return field (per-guild receiver
   });
 
   it('leaks undefined when a future contract drift drops owner_id (caller must guard)', async () => {
-    // The guild-webhook-link OWNER_MISSING rollback catches this.
-    // Pinning the leakage here makes a contract regression LOUD.
     mockFetchResponses({
       'GET /v1/webhooks': () => ({ body: { data: [] } }),
       'POST /v1/webhooks': () => ({ status: 201, body: { data: {
@@ -1034,30 +915,11 @@ describe('ensureWebhookSubscription — ownerId return field (per-guild receiver
 });
 
 describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host sweep)', () => {
-  // Symptom motivating this block: sandbox `base_url` rename from
-  // `discord.layerv.xyz` → `discord.connector.layerv.xyz` left an
-  // orphan sub (wh_s6wOhbKLPYSk--Jv) alive forever. qurl-service
-  // kept delivering to the old host (DNS still resolved to the same
-  // ALB) and every delivery failed sig-verification at the bot.
-  //
-  // The sweep runs BEFORE the find/reuse/rotate/create branching (so a
-  // transient orphan-DELETE 5xx on one boot is retried on every
-  // subsequent boot, not just the next create-fresh one — that "retry"
-  // window would otherwise close the moment the new sub is created).
-  // Cross-host detection uses host inequality; description-prefix +
-  // boundary anchoring keeps sibling-service subs (e.g. qurl-s3-connector)
-  // out of scope even though they share owner_id with the bot under
-  // today's bot-API-key-shared model (see project_qurl_api_key_blast_radius).
-  // A liveness gate (last_delivery_success === false) prevents the sweep
-  // from cannibalizing a healthy cross-host sibling (e.g. an active-
-  // active multi-region deploy sharing a QURL_API_KEY).
   const NEW_URL = 'https://discord.connector.layerv.xyz/webhooks/qurl';
   const OLD_URL = 'https://discord.layerv.xyz/webhooks/qurl';
   const BOT_DESC = 'Discord bot view counter (region=us-east-2, env=sandbox)';
   const BOT_OPTS = { ...BASE_OPTS, bridgeUrl: NEW_URL, description: BOT_DESC };
 
-  // Default orphan shape used across the cases below — matches all
-  // sweep criteria (cross-host, same path, description-prefix, dead).
   function deadOrphan(overrides = {}) {
     return {
       webhook_id: 'wh_orphan',
@@ -1089,11 +951,6 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
   });
 
   it('does NOT delete a cross-host sub with a DIFFERENT description (sibling-service safety)', async () => {
-    // The bot's QURL_API_KEY today provisions BOTH the view-counter sub
-    // (this bot) AND sibling-service subs (e.g. qurl-s3-connector's
-    // `resource.closed` subscription). They share owner_id. The
-    // description-prefix filter is the load-bearing safety that keeps
-    // the orphan sweep from deleting them.
     let connectorDeleted = false;
     let createCalled = false;
     mockFetchResponses({
@@ -1120,15 +977,10 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
   });
 
   it('sweeps a stale cross-host orphan even when the reuse path runs at the new URL (retry-on-next-boot)', async () => {
-    // The sweep runs BEFORE branching, so a transient DELETE 5xx on a
-    // previous create-fresh boot still gets retried on every subsequent
-    // boot via this very path. Without the hoist, that retry window
-    // would close the moment the new sub is created.
     let orphanDeleted = false;
     let secretEndpointHit = false;
     mockFetchResponses({
       'GET /v1/webhooks': () => ({ body: { data: [
-        // Match at the new URL (with matching description) — reuse path.
         {
           webhook_id: 'wh_current',
           url: NEW_URL,
@@ -1136,8 +988,6 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
           events: ['qurl.accessed', 'qurl.expired'],
           owner_id: 'auth0|bot',
         },
-        // Cross-host orphan from a previous rename — still dead and
-        // never cleaned up. Sweep must still pick it up here.
         deadOrphan({ webhook_id: 'wh_stale_orphan' }),
       ] } }),
       'DELETE /v1/webhooks/wh_stale_orphan': () => { orphanDeleted = true; return { status: 204, body: '' }; },
@@ -1153,13 +1003,6 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
   });
 
   it('does NOT delete a HEALTHY cross-host sub (liveness gate protects siblings whose last delivery succeeded)', async () => {
-    // Active-active multi-region under a shared QURL_API_KEY is the
-    // hypothetical motivating scenario, but the gate only protects
-    // siblings whose LAST delivery succeeded (or hasn't happened yet).
-    // It does NOT protect a sibling in a sustained outage — see the
-    // long comment above buildUrlMigrationOrphanFilter for why these
-    // signals fundamentally can't distinguish that case.
-    // Today's deployment is single-host so this is purely defensive.
     let deleted = false;
     mockFetchResponses({
       'GET /v1/webhooks': () => ({ body: { data: [
@@ -1185,9 +1028,6 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
     ['undefined', undefined],
     ['missing entirely (field omitted)', '__MISSING__'],
   ])('does NOT delete a cross-host sub with last_delivery_success=%s (presumed-alive)', async (_label, livenessValue) => {
-    // A brand-new sub with no deliveries yet typically reports null/undefined.
-    // Strict `=== false` gate treats that as presumed-alive — better to miss
-    // an orphan than to false-positive delete a freshly-created sibling.
     let deleted = false;
     const sub = {
       webhook_id: 'wh_no_deliveries_yet',
@@ -1207,10 +1047,6 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
   });
 
   it('does NOT delete a description that matches the prefix without the " (" boundary (no over-match)', async () => {
-    // The boundary anchor turns the prefix into a full-segment match.
-    // Without it, `startsWith("Discord bot view counter")` would over-
-    // match a sibling like `Discord bot view counter-archiver (...)`
-    // or `Discord bot view counterX`.
     let deleted = false;
     mockFetchResponses({
       'GET /v1/webhooks': () => ({ body: { data: [
@@ -1231,11 +1067,6 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
   });
 
   it('continues with create when a DELETE fails (5xx) so the bot still registers; next boot retries the orphan', async () => {
-    // Load-bearing failure semantics: blocking the create on a stale-
-    // orphan DELETE failure would leave the bot UN-registered AND
-    // orphaned — strictly worse than the orphan-only state we started
-    // in. Log + continue + create. The hoisted sweep means the next
-    // boot ALSO retries the orphan delete (not gated on create-fresh).
     const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
     let createCalled = false;
     try {
@@ -1260,22 +1091,13 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
   });
 
   it('retries a previously-failed orphan DELETE on the FOLLOWING boot (sweep is not gated on create-fresh)', async () => {
-    // Pins the hoisted-cleanup invariant directly: after a successful
-    // create on boot 1 (orphan DELETE 5xx-swallowed), boot 2 finds
-    // BOTH the just-created sub AND the still-alive orphan. Sweep
-    // re-attempts the orphan DELETE here — closing the recurrence
-    // window the cr-bot flagged.
     let orphanDeletedOnBoot2 = false;
     mockFetchResponses({
       'GET /v1/webhooks': () => ({ body: { data: [
-        // Boot 2's listing: new sub from boot 1 + orphan still alive.
         { webhook_id: 'wh_new', url: NEW_URL, description: BOT_DESC, events: ['qurl.accessed', 'qurl.expired'], owner_id: 'auth0|bot' },
         deadOrphan({ webhook_id: 'wh_orphan_retry' }),
       ] } }),
       'DELETE /v1/webhooks/wh_orphan_retry': () => { orphanDeletedOnBoot2 = true; return { status: 204, body: '' }; },
-      // Boot 2 takes reuse path (initialSecret + existing match) — no
-      // secret rotate, but events PATCH might run if drift, which it
-      // doesn't here.
     });
     const result = await ensureWebhookSubscription({ ...BOT_OPTS, initialSecret: 'whsec_known' });
     expect(orphanDeletedOnBoot2).toBe(true);
@@ -1283,10 +1105,6 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
   });
 
   it('treats DELETE 404 as success AND distinguishes the log line (concurrent cleanup by another invocation)', async () => {
-    // 404 propagates through deleteSubscription as a no-throw. The
-    // log line is the "already-absent" variant so the runbook-grep
-    // on `URL-migration orphan deleted` doesn't get false-attributed
-    // to this invocation when another beat us to the DELETE.
     const logSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
     try {
       mockFetchResponses({
@@ -1310,13 +1128,6 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
   });
 
   it('logs a persistent 4xx DELETE failure at WARN exactly once per (webhook_id, status) per process', async () => {
-    // The bot path (linkGuildWebhookSubscription) runs many times/day.
-    // A persistently-undeletable orphan (e.g. 403 if the API key
-    // loses delete scope on that resource) would emit an error line
-    // every guild-link forever without per-process suppression of
-    // identical 4xx logs. Pin: first 4xx logs at WARN; subsequent
-    // identical 4xx on the same webhook_id SUPPRESS the log, while
-    // still attempting the DELETE on each invocation.
     const { _resetUrlMigrationOrphanDeleteSuppressionCache } = _internals;
     _resetUrlMigrationOrphanDeleteSuppressionCache();
     const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
@@ -1333,8 +1144,6 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
         },
         'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new' } } }),
       });
-      // Invoke twice. First attempt should log at WARN; second should
-      // suppress the log but still ATTEMPT the DELETE.
       await ensureWebhookSubscription(BOT_OPTS);
       await ensureWebhookSubscription(BOT_OPTS);
       expect(deleteAttempts).toBe(2); // DELETE attempted both times
@@ -1350,10 +1159,6 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
   });
 
   it('routes 429 DELETE failures to the transient/ERROR branch (rate-limit is NOT a persistent client error)', async () => {
-    // 429 is rate-limiting — transient, retry-with-backoff is the
-    // right behavior. Don't suppress after the first log or a
-    // sustained rate-limit would silently mask itself. The cr-bot's
-    // edge case.
     const { _resetUrlMigrationOrphanDeleteSuppressionCache } = _internals;
     _resetUrlMigrationOrphanDeleteSuppressionCache();
     const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
@@ -1380,9 +1185,6 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
   });
 
   it('logs a 5xx DELETE failure at ERROR on every invocation (transient — repeating IS the signal)', async () => {
-    // 5xx is transient by convention; we want the repeating log line
-    // to be the alarm signal, not a one-shot WARN that gets lost.
-    // Different from the 4xx path — pin that 5xx does NOT suppress.
     const { _resetUrlMigrationOrphanDeleteSuppressionCache } = _internals;
     _resetUrlMigrationOrphanDeleteSuppressionCache();
     const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
@@ -1409,21 +1211,11 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
   });
 
   it('does NOT classify same-hostname different-port as cross-host (port-insensitive comparison)', async () => {
-    // A port-flip rename (`:8080` → `:8443`, or implicit-443 vs
-    // explicit-:443) at the same hostname is NOT a URL-migration:
-    // the new port still resolves to the same backend, no orphan
-    // accrues. Pin that `urlHost` uses `hostname` (port-excluded)
-    // not `host` (port-included). Without this, a sub at
-    // `https://discord.layerv.xyz:443/webhooks/qurl` could be
-    // classified as cross-host against the unparametrized
-    // `https://discord.layerv.xyz/webhooks/qurl` and falsely swept.
     let deleted = false;
     mockFetchResponses({
       'GET /v1/webhooks': () => ({ body: { data: [
         {
           webhook_id: 'wh_same_host_diff_port',
-          // Same hostname as NEW_URL (`discord.connector.layerv.xyz`),
-          // but with an explicit `:8443`.
           url: 'https://discord.connector.layerv.xyz:8443/webhooks/qurl',
           description: BOT_DESC,
           events: ['qurl.accessed'],
@@ -1439,9 +1231,6 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
   });
 
   it('does NOT touch same-host subs at a DIFFERENT path (path filter)', async () => {
-    // A bot rev that ever served `/webhooks/qurl/v2` (hypothetical)
-    // could collide here. Pin that the path filter excludes any sub
-    // whose pathname differs from the new bridge URL's pathname.
     let deleted = false;
     mockFetchResponses({
       'GET /v1/webhooks': () => ({ body: { data: [
@@ -1463,10 +1252,6 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
   });
 
   it('logs each deletion at INFO with old_url + webhook_id + description + failure_count + last_delivery_success', async () => {
-    // The runbook-grep contract for "what got cleaned up" — pin the
-    // field set so a future log-shape regression surfaces here. The
-    // logger emits `[ts] INFO: <msg> <json-of-meta>` via console.log,
-    // so we capture console.log and parse the meta JSON tail.
     const logSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
     try {
       mockFetchResponses({
@@ -1481,8 +1266,6 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
         .map(c => c[0])
         .find(line => typeof line === 'string' && line.includes('URL-migration orphan deleted'));
       expect(orphanLine).toBeDefined();
-      // Pull the JSON meta off the end of the formatted line and verify
-      // every required field is present with the expected value.
       const jsonStart = orphanLine.indexOf('{');
       const meta = JSON.parse(orphanLine.slice(jsonStart));
       expect(meta).toMatchObject({
@@ -1498,8 +1281,6 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
   });
 
   it('paginates through orphan candidates (cursor walk on the sweep list, same as findExistingSubscriptions)', async () => {
-    // Sweep uses the same list endpoint; if the bot's owner_id has many
-    // subs, the orphan could be on page 2+. Pin the cursor walk.
     let deletedIds = [];
     mockFetchResponses({
       'GET /v1/webhooks?limit=100': () => ({ body: {
@@ -1519,8 +1300,6 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
   });
 
   it('deletes MULTIPLE cross-host orphans (multi-rename history) before create', async () => {
-    // Two sequential renames in the past — both leave orphans. Sweep
-    // handles both in one pass.
     const deletedIds = [];
     mockFetchResponses({
       'GET /v1/webhooks': () => ({ body: { data: [
@@ -1537,8 +1316,6 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
   });
 
   it('a single DELETE 5xx does not prevent the OTHER orphan from being deleted in the same sweep', async () => {
-    // Per-orphan failure isolation — one bad apple shouldn't shadow the
-    // rest. Sequential loop with per-iteration catch is the design.
     const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
     const deletedIds = [];
     try {
@@ -1560,12 +1337,6 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
   });
 
   it('does NOT delete a cross-host sub with last_delivery_success=false but failure_count below the transient-failure floor', async () => {
-    // The compound liveness gate (last_delivery_success === false AND
-    // failure_count >= URL_MIGRATION_ORPHAN_MIN_FAILURES) tolerates a
-    // single transient delivery failure on an otherwise-healthy
-    // sibling. Without the floor, a network blip on one delivery would
-    // flip last_delivery_success to false and a peer reboot in that
-    // window would DELETE the live sub.
     let deleted = false;
     mockFetchResponses({
       'GET /v1/webhooks': () => ({ body: { data: [
@@ -1586,13 +1357,6 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
   });
 
   it('does NOT delete when failure_count is negative (fails closed)', async () => {
-    // JSON.stringify maps NaN/Infinity to null, so those can't reach
-    // the predicate through a normal qurl-service JSON response. We
-    // still pin the predicate-level invariant against NaN/Infinity in
-    // the _internals unit tests below (where we can hand-construct the
-    // exact value); here we cover the only end-to-end shape that the
-    // wire could deliver and still slip past `< MIN_FAILURES` — a
-    // negative number (typeof 'number', not non-finite).
     let deleted = false;
     mockFetchResponses({
       'GET /v1/webhooks': () => ({ body: { data: [
@@ -1622,7 +1386,6 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
           description: BOT_DESC,
           events: ['qurl.accessed', 'qurl.expired'],
           last_delivery_success: false,
-          // failure_count omitted — qurl-service contract drift
         },
       ] } }),
       'DELETE /v1/webhooks/wh_no_count': () => { deleted = true; return { status: 204, body: '' }; },
@@ -1633,16 +1396,12 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
   });
 
   it('logs the liveness-gated near-miss count for CloudWatch observability', async () => {
-    // Pin the observability seam: when a host+path+description matches
-    // but the liveness gate held the row back, surface the count so an
-    // operator can grep CloudWatch instead of inspecting subs by hand.
     const { _resetUrlMigrationOrphanDeleteSuppressionCache } = _internals;
     _resetUrlMigrationOrphanDeleteSuppressionCache();
     const logSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
     try {
       mockFetchResponses({
         'GET /v1/webhooks': () => ({ body: { data: [
-          // Two near-miss rows (healthy, transient) — neither gets deleted.
           {
             webhook_id: 'wh_healthy',
             url: 'https://discord.eu-central-1.layerv.xyz/webhooks/qurl',
@@ -1679,11 +1438,6 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
   });
 
   it('dedupes the near-miss log per process (steady-state perpetual near-miss does not spam every boot)', async () => {
-    // Active-active hypothetical (#827): a healthy cross-host sibling
-    // is a PERPETUAL near-miss. Without the dedupe cache, on the bot
-    // path the line would emit on every guild-link event many times/day.
-    // Pin: first invocation emits; subsequent invocations with the
-    // SAME (bridgeUrl, count) suppress.
     const { _resetUrlMigrationOrphanDeleteSuppressionCache } = _internals;
     _resetUrlMigrationOrphanDeleteSuppressionCache();
     const logSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
@@ -1714,8 +1468,6 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
   });
 
   it('re-fires the near-miss log when the count CHANGES (something new became sweep-eligible)', async () => {
-    // Count is part of the dedupe key, so an increase / decrease in
-    // near-misses re-emits — operators see when the cohort changes.
     const { _resetUrlMigrationOrphanDeleteSuppressionCache } = _internals;
     _resetUrlMigrationOrphanDeleteSuppressionCache();
     const logSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
@@ -1724,8 +1476,6 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
       mockFetchResponses({
         'GET /v1/webhooks': () => {
           listCallCount += 1;
-          // First two invocations: 1 healthy sibling = count 1.
-          // Third invocation: 2 healthy siblings = count 2 (re-fires).
           const subs = [{
             webhook_id: 'wh_healthy_a',
             url: 'https://discord.eu-central-1.layerv.xyz/webhooks/qurl',
@@ -1762,14 +1512,10 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
   });
 
   it('does NOT emit the near-miss log when there are zero candidates (steady state, no noise)', async () => {
-    // Avoid log spam on every healthy boot — only emit when we actually
-    // saw a candidate-but-not-orphan row.
     const logSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
     try {
       mockFetchResponses({
         'GET /v1/webhooks': () => ({ body: { data: [
-          // Sibling-service sub — doesn't match description-prefix, so
-          // not a near-miss either.
           { webhook_id: 'wh_connector', url: 'https://s3-connector.example/webhooks/qurl', description: 'qurl-s3-connector ...', events: [], failure_count: 0, last_delivery_success: true },
         ] } }),
         'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new' } } }),
@@ -1785,9 +1531,6 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
   });
 
   it('skips a row with a malformed URL gracefully (urlHost/urlPathname return null)', async () => {
-    // Defensive: a future qurl-service contract drift that lets a junk
-    // URL through (or a manual sub created with an unparseable URL)
-    // must not crash the sweep — it just skips that row.
     let createCalled = false;
     mockFetchResponses({
       'GET /v1/webhooks': () => ({ body: { data: [
@@ -1800,9 +1543,6 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
   });
 
   it('skips the sweep entirely when urlMigrationSweepEnabled=false (hard guard for active-active rollout)', async () => {
-    // Hard guard for the cannibalization risk tracked in #827. When the
-    // flag is false, no row is classified as orphan or near-miss; the
-    // matches + dedupe path still runs normally.
     let deleted = false;
     let nearMissLogged = false;
     const logSpy = jest.spyOn(console, 'log').mockImplementation((line) => {
@@ -1813,9 +1553,7 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
     try {
       mockFetchResponses({
         'GET /v1/webhooks': () => ({ body: { data: [
-          // What would be a confirmed orphan with sweep enabled.
           deadOrphan({ webhook_id: 'wh_would_orphan' }),
-          // What would be a near-miss with sweep enabled.
           { webhook_id: 'wh_would_near_miss', url: OLD_URL, description: BOT_DESC, events: ['qurl.accessed'], failure_count: 0, last_delivery_success: true },
         ] } }),
         'DELETE /v1/webhooks/wh_would_orphan': () => { deleted = true; return { status: 204, body: '' }; },
@@ -1831,8 +1569,6 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
   });
 
   it('runs the sweep normally when urlMigrationSweepEnabled defaults to true (no opt set)', async () => {
-    // Sanity-check: omitting the opt entirely preserves the existing
-    // single-host behavior (sweep runs).
     let deleted = false;
     mockFetchResponses({
       'GET /v1/webhooks': () => ({ body: { data: [deadOrphan()] } }),
@@ -1844,9 +1580,6 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
   });
 
   it('skips the sweep when description is empty (cannot derive a safe prefix)', async () => {
-    // Defensive: an empty description would derive an empty prefix,
-    // which would match LITERALLY every sub via startsWith(''). The
-    // sweep must short-circuit and never delete in that case.
     let deleted = false;
     mockFetchResponses({
       'GET /v1/webhooks': () => ({ body: { data: [
@@ -1958,16 +1691,6 @@ describe('buildUrlMigrationOrphanFilter — predicate factory edge cases', () =>
     ['Infinity', Infinity],
     ['-Infinity', -Infinity],
   ])('classifies a candidate with non-finite failure_count (%s) as NEAR_MISS_LIVENESS (fail-closed against latent fail-open)', (_label, failureCount) => {
-    // JSON.stringify maps these to null at the wire boundary so a
-    // normal qurl-service response can't deliver them, but a
-    // non-JSON-parsed path (raw Node fetch with a non-JSON SDK, a
-    // future contract migration, an in-process injection bug) could.
-    // `Number.isFinite` rejects all three uniformly, matching the
-    // stated fail-closed invariant. Without it, NaN/Infinity would
-    // slip through a `typeof === 'number'` check AND the floor
-    // comparison (NaN < N is false; Infinity < N is false for any
-    // finite N) → classify as MATCH → DELETE. This unit test makes
-    // the predicate-level guarantee wire-independent.
     const f = buildUrlMigrationOrphanFilter({
       bridgeUrl: 'https://bot.test.example/webhooks/qurl',
       descriptionPrefix: 'X',
@@ -2013,10 +1736,6 @@ describe('deriveDescriptionPrefix — internal helper (orphan-sweep safety net)'
   });
 });
 
-// Pinned to keep webhook-subscriptions.js::discoverDefaultOwnerId
-// from breaking silently if a future registrar refactor changes
-// callQurlService's signature. The external caller relies on
-// (method, path, apiEndpoint, apiKey) + response = parsed-JSON body.
 describe('callQurlService — exported contract', () => {
   const { callQurlService } = require('../src/qurl-webhook-registrar');
 

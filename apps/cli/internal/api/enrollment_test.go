@@ -21,8 +21,55 @@ import (
 const (
 	testConnectorID    = "conn-cli-enrollment"
 	testIdempotencyKey = "0123456789abcdef0123456789abcdef"
-	testEnrollmentKey  = "lv_test_enrollmentsecret123456789"
+	testEnrollmentKey  = "lv_test_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"
 )
+
+func TestMintAgentEnrollmentTokenSendsUnboundOneShotShape(t *testing.T) {
+	expiresAt := time.Now().Add(24 * time.Hour).UTC().Truncate(time.Second)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/api-keys" {
+			t.Errorf("request = %s %s, want POST /v1/api-keys", r.Method, r.URL.Path)
+		}
+		if got := r.Header.Get("Idempotency-Key"); got != testIdempotencyKey {
+			t.Errorf("Idempotency-Key = %q", got)
+		}
+		var body map[string]json.RawMessage
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if len(body) != 4 {
+			t.Errorf("request keys = %v, want kind/name/target/expires_in only", body)
+		}
+		if _, ok := body["claims"]; ok {
+			t.Error("unbound agent enrollment must omit claims")
+		}
+		if _, ok := body["scopes"]; ok {
+			t.Error("agent enrollment must not send caller-selected scopes")
+		}
+		assertJSONString(t, body, "kind", connectorEnrollmentKind)
+		assertJSONString(t, body, "name", "qURL CLI registered device")
+		assertJSONString(t, body, "target", agentEnrollmentTarget)
+		assertJSONString(t, body, "expires_in", connectorEnrollmentLifetime)
+		data := validEnrollmentData(expiresAt)
+		data["target"] = agentEnrollmentTarget
+		data["claims"] = []map[string]string{}
+		data["scopes"] = []string{"qurl:agent"}
+		apitest.WriteEnvelope(t, w, http.StatusCreated, data, nil)
+	}))
+	t.Cleanup(srv.Close)
+	client := newEnrollmentTestClient(t, srv.URL)
+	account, ok := client.(AccountClient)
+	if !ok {
+		t.Fatalf("New returned %T, want AccountClient", client)
+	}
+	token, err := account.MintAgentEnrollmentToken(context.Background(), MintAgentEnrollmentTokenOptions{IdempotencyKey: testIdempotencyKey})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if token.Token != testEnrollmentKey || token.KeyID != "key_enrollment_1" || !token.ExpiresAt.Equal(expiresAt) {
+		t.Fatalf("agent token = %+v", token)
+	}
+}
 
 func TestMintConnectorEnrollmentTokenSendsPinnedWireShape(t *testing.T) {
 	expiresAt := time.Now().Add(24 * time.Hour).UTC().Truncate(time.Second)
@@ -157,11 +204,14 @@ func TestMintConnectorEnrollmentTokenRejectsInvalidResponses(t *testing.T) {
 	cases := map[string]func(map[string]any){
 		"missing token":    func(data map[string]any) { delete(data, "api_key") },
 		"whitespace token": func(data map[string]any) { data["api_key"] = " " + testEnrollmentKey },
-		"missing key id":   func(data map[string]any) { delete(data, "key_id") },
-		"padded key id":    func(data map[string]any) { data["key_id"] = " key_enrollment_1" },
-		"wrong kind":       func(data map[string]any) { data["kind"] = "api_key" },
-		"wrong target":     func(data map[string]any) { data["target"] = "agent" },
-		"missing claim":    func(data map[string]any) { data["claims"] = []any{} },
+		"wrong token shape": func(data map[string]any) {
+			data["api_key"] = "opaque-enrollment-token"
+		},
+		"missing key id": func(data map[string]any) { delete(data, "key_id") },
+		"padded key id":  func(data map[string]any) { data["key_id"] = " key_enrollment_1" },
+		"wrong kind":     func(data map[string]any) { data["kind"] = "api_key" },
+		"wrong target":   func(data map[string]any) { data["target"] = "agent" },
+		"missing claim":  func(data map[string]any) { data["claims"] = []any{} },
 		"extra claim": func(data map[string]any) {
 			data["claims"] = []map[string]string{{"type": "connector", "id": testConnectorID}, {"type": "connector", "id": "other"}}
 		},
@@ -173,7 +223,6 @@ func TestMintConnectorEnrollmentTokenRejectsInvalidResponses(t *testing.T) {
 		},
 		"inactive":       func(data map[string]any) { data["status"] = "revoked" },
 		"missing expiry": func(data map[string]any) { delete(data, "expires_at") },
-		"expired":        func(data map[string]any) { data["expires_at"] = time.Now().Add(-time.Minute) },
 		"malformed expiry": func(data map[string]any) {
 			data["expires_at"] = "not-a-timestamp"
 		},
@@ -202,6 +251,45 @@ func TestMintConnectorEnrollmentTokenRejectsInvalidResponses(t *testing.T) {
 				t.Error("invalid-response error leaked the enrollment token")
 			}
 		})
+	}
+}
+
+func TestValidateAgentEnrollmentResponseRejectsWrongTokenShape(t *testing.T) {
+	data := validEnrollmentData(time.Now().Add(time.Hour))
+	data["api_key"] = "opaque-enrollment-token"
+	data["target"] = agentEnrollmentTarget
+	data["claims"] = []map[string]string{}
+	raw, err := json.Marshal(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded connectorEnrollmentData
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateAgentEnrollmentResponse(&decoded); !errors.Is(err, qurl.ErrInvalidAPIResponse) || strings.Contains(err.Error(), "opaque-enrollment-token") {
+		t.Fatalf("agent enrollment validation error = %v, want redacted invalid response", err)
+	}
+}
+
+func TestEnrollmentResponseExpiryDoesNotTrustClientClock(t *testing.T) {
+	past := time.Now().Add(-24 * time.Hour).UTC().Truncate(time.Second)
+	data := validEnrollmentData(past)
+	raw, err := json.Marshal(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded connectorEnrollmentData
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateConnectorEnrollmentResponse(&decoded, testConnectorID); err != nil {
+		t.Fatalf("connector enrollment rejected producer timestamp using client clock: %v", err)
+	}
+	decoded.Target = agentEnrollmentTarget
+	decoded.Claims = nil
+	if err := validateAgentEnrollmentResponse(&decoded); err != nil {
+		t.Fatalf("agent enrollment rejected producer timestamp using client clock: %v", err)
 	}
 }
 
@@ -293,8 +381,27 @@ func TestMintConnectorEnrollmentTokenMapsProblemResponse(t *testing.T) {
 	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusForbidden || apiErr.Code != "insufficient_scope" || apiErr.RequestID != "req_test" {
 		t.Errorf("mapped error = %+v", apiErr)
 	}
-	if !apiErr.ConnectorEnrollmentScopeRequired() {
-		t.Error("enrollment scope failure lost its operation-specific remedy marker")
+	if apiErr.AgentEnrollmentScopeRequired() || !apiErr.ConnectorEnrollmentScopeRequired() {
+		t.Error("Connector enrollment failure lost its registered-device remedy marker")
+	}
+}
+
+func TestMintAgentEnrollmentTokenMapsOnlyAgentScopeRemedy(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		apitest.WriteProblem(t, w, http.StatusForbidden, "insufficient_scope", "Forbidden", "minting enrollment tokens requires qurl:agent")
+	}))
+	t.Cleanup(srv.Close)
+	client, ok := newEnrollmentTestClient(t, srv.URL).(AccountClient)
+	if !ok {
+		t.Fatal("account-key client does not expose agent enrollment")
+	}
+
+	_, err := client.MintAgentEnrollmentToken(context.Background(), MintAgentEnrollmentTokenOptions{
+		IdempotencyKey: testIdempotencyKey,
+	})
+	var apiErr *Error
+	if !errors.As(err, &apiErr) || !apiErr.AgentEnrollmentScopeRequired() || apiErr.ConnectorEnrollmentScopeRequired() {
+		t.Errorf("agent enrollment remedy markers = %+v", apiErr)
 	}
 }
 

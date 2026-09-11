@@ -5,13 +5,19 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
 	"strings"
 
 	"github.com/layervai/qurl-go/qurl"
 )
 
-// Direct access for downloads. A resolved qURL credential link carries its
+const (
+	webSchemeHTTP  = "http"
+	webSchemeHTTPS = "https"
+)
+
+// Direct access for downloads. A qURL credential share link carries its
 // credential in the URL fragment, which HTTP clients never transmit — a plain
 // GET of the link can only ever fetch the in-browser page that consumes the
 // fragment, never the content itself. Downloads therefore go through the SDK's
@@ -27,8 +33,8 @@ import (
 
 // NeedsAccessGrant reports whether link carries an in-link credential and so
 // must be opened through the platform access flow. A link without one (a
-// direct or pre-signed URL) serves its bytes to a plain GET, so the
-// downloader fetches it as delivered. Current-transport classification belongs
+// direct or pre-signed URL) is not a credential link. The CLI rejects such
+// share responses before this classifier; low-level downloader tests use them. Current-transport classification belongs
 // to qurl-go so every consumer follows the same versions and fail-closed shape
 // rule. The retired qv2 prefix is also routed here as a safety tombstone: the
 // opener still rejects it, but the CLI must never plain-GET a fragment-bearing
@@ -48,19 +54,20 @@ func NeedsAccessGrant(link string) bool {
 const (
 	// MsgAccessNotConfigured reports that no deployment trust settings are
 	// available, so direct downloads cannot run at all on this machine.
-	MsgAccessNotConfigured = "this machine isn't set up to download qURL content directly — set QURL_DEPLOYMENT to your deployment settings file, or open the CRID in your browser instead (`qurl get <CRID>` on a terminal, without --file)"
+	MsgAccessNotConfigured = "this machine is not set up to verify qURL links — set QURL_DEPLOYMENT to your deployment settings file"
 
-	// MsgAccessSettingsMismatch reports settings that don't cover the link
-	// the service answered with (typically production settings against a
-	// test service, or the reverse).
-	MsgAccessSettingsMismatch = "your deployment settings don't match the service this access link came from — check QURL_DEPLOYMENT, or ask whoever runs your qURL deployment"
+	// MsgUnsupportedCRIDVersion asks for a verifier that understands the CRID.
+	MsgUnsupportedCRIDVersion = "this CRID needs a newer version of the CLI — update qurl, then try again"
+
+	// MsgAccessSettingsMismatch reports settings that don't cover the link.
+	MsgAccessSettingsMismatch = "your deployment settings do not allow this link — confirm the deployment with its operator before trying again"
 
 	// MsgLinkVerification is the fail-closed discard of a link that did not
 	// pass its local check; same posture as the CRID verification messages.
 	MsgLinkVerification = "the access link failed its safety check, so it was discarded and nothing was downloaded. Try again; if it keeps happening, stop and contact whoever shared the CRID with you"
 
 	// MsgAccessDenied reports an authenticated refusal from the platform.
-	MsgAccessDenied = "the service declined to grant access to this content — resolve the CRID again for a fresh link; if it keeps happening, contact whoever shared the CRID with you"
+	MsgAccessDenied = "the service declined to grant access to this content — share the CRID again for a fresh link; if it keeps happening, contact whoever shared the CRID with you"
 
 	// MsgAccessBusy reports the platform asking the caller to retry later.
 	MsgAccessBusy = "the service is busy right now — try again in a moment"
@@ -75,6 +82,8 @@ var (
 	// ErrAccessSettingsMismatch refuses a link the configured settings
 	// don't cover (configuration).
 	ErrAccessSettingsMismatch = errors.New(MsgAccessSettingsMismatch)
+	// ErrUnsupportedCRIDVersion requires a newer verifier, not new settings.
+	ErrUnsupportedCRIDVersion = errors.New(MsgUnsupportedCRIDVersion)
 	// ErrLinkVerification discards a link that failed its local check
 	// (verification).
 	ErrLinkVerification = errors.New(MsgLinkVerification)
@@ -85,34 +94,98 @@ var (
 	ErrAccessBusy = errors.New(MsgAccessBusy)
 )
 
-// AccessOpener turns a verified link into the reachable content URL by
-// asking the qURL platform for access. The zero value works; LookupEnv is
-// the CLI's injected environment, so hermetic tests never read the process
-// environment.
+// AccessOpener turns a verified link into a reachable, authorized content
+// grant by asking the qURL platform for access. The zero value works;
+// LookupEnv is the CLI's injected environment, so hermetic tests never read
+// the process environment.
 type AccessOpener struct {
 	// LookupEnv resolves QURL_DEPLOYMENT; nil skips the override and uses
 	// the SDK's shipped deployment resolution.
 	LookupEnv func(string) (string, bool)
 }
 
-// Open verifies link, asks the platform for access, and returns the granted
-// content URL. Every failure is mapped to a customer-language sentinel; a
-// link the platform cannot serve headlessly fails loudly here and nothing
-// is ever downloaded in its place.
-func (o *AccessOpener) Open(ctx context.Context, link string) (string, error) {
-	handle, err := o.enter(ctx, link)
-	if err != nil {
-		return "", classifyAccessError(err)
-	}
-	return grantedContentURL(handle.ResourceURL)
+// AccessGrant is a verified, reachable content URL and its server-reported
+// access lifetime. ContentURL carries access authority and must never enter a
+// diagnostic.
+type AccessGrant struct {
+	ContentURL  string
+	OpenSeconds uint32
+	// AuthorizeContentRequest applies the short-lived application-session
+	// credential to the exact granted HTTPS origin. It never exposes the value.
+	AuthorizeContentRequest func(*http.Request) error
 }
 
-// grantedContentURL admits only web URLs as download targets: the granted
-// URL is about to be fetched, and anything else is the service answering
-// outside its contract.
+// Grant verifies link, asks the platform for access, and returns the granted
+// URL with its request authorizer and safe lifetime metadata. Every failure
+// is mapped to a customer-language sentinel; a link the platform cannot serve
+// headlessly fails loudly here and nothing is downloaded in its place.
+func (o *AccessOpener) Grant(ctx context.Context, link string) (AccessGrant, error) {
+	handle, err := o.enter(ctx, link)
+	if err != nil {
+		return AccessGrant{}, classifyAccessError(err)
+	}
+	return accessGrantFromHandle(handle)
+}
+
+// Verify checks the issuer and independently held CRID without requesting access.
+func (o *AccessOpener) Verify(ctx context.Context, link, expectedCRID string) error {
+	d, configured, err := o.loadDeployment()
+	if err != nil {
+		return err
+	}
+	if configured {
+		trust, err := deploymentTrust(&d)
+		if err != nil {
+			return err
+		}
+		_, err = qurl.VerifyLinkForCRID(link, expectedCRID, trust)
+		return classifyAccessError(err)
+	}
+	return classifyAccessError(qurl.VerifyPortalLink(ctx, link, expectedCRID))
+}
+
+// loadDeployment preserves file diagnostics for both verification and access.
+// False means the caller must use the SDK's default deployment resolution.
+func (o *AccessOpener) loadDeployment() (qurl.Deployment, bool, error) {
+	if o.LookupEnv == nil {
+		return qurl.Deployment{}, false, nil
+	}
+	path, ok := o.LookupEnv(qurl.EnvDeploymentPath)
+	if !ok || strings.TrimSpace(path) == "" {
+		return qurl.Deployment{}, false, nil
+	}
+	d, err := qurl.LoadDeployment(strings.TrimSpace(path))
+	if err != nil {
+		return qurl.Deployment{}, false, fmt.Errorf("%w (%w)", ErrAccessNotConfigured, err)
+	}
+	return *d, true, nil
+}
+
+func accessGrantFromHandle(handle *qurl.ResourceHandle) (AccessGrant, error) {
+	if handle == nil {
+		return AccessGrant{}, fmt.Errorf("%w — the access grant was empty", ErrUnopenableLink)
+	}
+	contentURL, err := grantedContentURL(handle.ResourceURL)
+	if err != nil {
+		return AccessGrant{}, err
+	}
+	// This is an SDK method value, not an optional function field. It is
+	// non-nil for this non-nil handle; an empty or invalid handle fails closed
+	// when the method validates the first request.
+	return AccessGrant{
+		ContentURL: contentURL, OpenSeconds: handle.OpenSeconds,
+		AuthorizeContentRequest: handle.AuthorizeContentRequest,
+	}, nil
+}
+
+// grantedContentURL admits only HTTPS URLs as download targets: the opaque
+// application credential is about to be attached, and qurl-go binds it to an
+// exact HTTPS origin. Anything else is the service answering outside its
+// contract.
 func grantedContentURL(raw string) (string, error) {
 	u, err := url.Parse(raw)
-	if err != nil || (u.Scheme != "https" && u.Scheme != "http") {
+	scheme, _, _, validOrigin := normalizedHTTPOrigin(u)
+	if err != nil || !validOrigin || scheme != webSchemeHTTPS {
 		return "", fmt.Errorf("%w — it can't be downloaded", ErrUnopenableLink)
 	}
 	return raw, nil
@@ -124,44 +197,45 @@ func grantedContentURL(raw string) (string, error) {
 // deployment). In production the two views of the environment are the same
 // os.LookupEnv; they differ only under test injection.
 func (o *AccessOpener) enter(ctx context.Context, link string) (*qurl.ResourceHandle, error) {
-	if o.LookupEnv != nil {
-		if path, ok := o.LookupEnv(qurl.EnvDeploymentPath); ok && strings.TrimSpace(path) != "" {
-			d, err := qurl.LoadDeployment(strings.TrimSpace(path))
-			if err != nil {
-				// The SDK's file diagnostics name the path and the JSON
-				// problem — config-file detail worth keeping.
-				return nil, fmt.Errorf("%w (%w)", ErrAccessNotConfigured, err)
-			}
-			cfg, err := openerConfig(d)
-			if err != nil {
-				return nil, err
-			}
-			return qurl.EnterPortalWith(ctx, link, cfg)
+	d, configured, err := o.loadDeployment()
+	if err != nil {
+		return nil, err
+	}
+	if configured {
+		cfg, err := openerConfig(&d)
+		if err != nil {
+			return nil, err
 		}
+		return qurl.EnterPortalWith(ctx, link, cfg)
 	}
 	return qurl.EnterPortal(ctx, link)
 }
 
-// openerConfig converts a loaded deployment into opener configuration via
-// the SDK's exported constructors, failing closed exactly where the SDK
-// would: no issuers, or no transport at all, is not a usable deployment.
-// Conversion failures carry the CLI's own plain detail — the SDK constructor
-// text speaks protocol vocabulary.
-func openerConfig(d *qurl.Deployment) (qurl.Config, error) {
+// deploymentTrust builds the shared verification trust without transport settings.
+func deploymentTrust(d *qurl.Deployment) (*qurl.TrustStore, error) {
 	if d == nil || len(d.Issuers) == 0 {
-		return qurl.Config{}, fmt.Errorf("%w (the deployment settings file is missing required entries)", ErrAccessNotConfigured)
+		return nil, fmt.Errorf("%w (the deployment settings file is missing required entries)", ErrAccessNotConfigured)
 	}
 	derByKID := make(map[string][]byte, len(d.Issuers))
 	for _, iss := range d.Issuers {
 		der, err := base64.RawURLEncoding.DecodeString(iss.SPKIDERB64)
 		if err != nil {
-			return qurl.Config{}, fmt.Errorf("%w (deployment settings entry %q has an unusable key)", ErrAccessNotConfigured, iss.Kid)
+			return nil, fmt.Errorf("%w (deployment settings entry %q has an unusable key)", ErrAccessNotConfigured, iss.Kid)
 		}
 		derByKID[iss.Kid] = der
 	}
 	ts, err := qurl.NewTrustStoreFromDER(derByKID)
 	if err != nil {
-		return qurl.Config{}, fmt.Errorf("%w (deployment settings list an unusable key)", ErrAccessNotConfigured)
+		return nil, fmt.Errorf("%w (deployment settings list an unusable key)", ErrAccessNotConfigured)
+	}
+	return ts, nil
+}
+
+// openerConfig additionally requires a transport for authenticated access.
+func openerConfig(d *qurl.Deployment) (qurl.Config, error) {
+	ts, err := deploymentTrust(d)
+	if err != nil {
+		return qurl.Config{}, err
 	}
 	cfg := qurl.Config{TrustStore: ts}
 	// Blank entries are dropped rather than handed to the SDK: only real,
@@ -213,13 +287,23 @@ func classifyAccessError(err error) error {
 		return ErrAccessNotConfigured
 	case errors.Is(err, qurl.ErrUnknownKID), errors.Is(err, qurl.ErrRelayURL):
 		return ErrAccessSettingsMismatch
-	case errors.Is(err, qurl.ErrSignature),
+	case errors.Is(err, qurl.ErrUnsupportedCRIDVersion):
+		return ErrUnsupportedCRIDVersion
+	case errors.Is(err, qurl.ErrCRIDMismatch), errors.Is(err, qurl.ErrNoCRID),
+		errors.Is(err, qurl.ErrSignature),
 		errors.Is(err, qurl.ErrStrictParse),
 		errors.Is(err, qurl.ErrFragment),
 		errors.Is(err, qurl.ErrEncoding),
 		errors.Is(err, qurl.ErrKeyLength):
 		return ErrLinkVerification
 	case errors.As(err, &deny):
+		// These authenticated server outcomes report temporary platform
+		// readiness, not a bad or expired access grant. Keep the internal code
+		// private while telling the customer that the same fresh link can be
+		// retried.
+		if deny.ErrCode == "52005" || deny.ErrCode == "52028" {
+			return ErrAccessBusy
+		}
 		return ErrAccessDenied
 	case errors.Is(err, qurl.ErrServerOverloaded):
 		return ErrAccessBusy

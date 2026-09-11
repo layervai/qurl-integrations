@@ -32,16 +32,17 @@ const (
 	// generates and persists a UUID when it is empty.
 	EnvAgentID = "QURL_CONNECTOR_AGENT_ID"
 
-	// xdgStateSubdir is the per-application directory appended to the XDG
-	// state base (or ~/.local/state) for the default user path. It is
-	xdgStateSubdir = "qurl/connector"
-
-	dirMode os.FileMode = 0o700
+	// stateSubdir is appended to the platform user-state base. The v2 namespace
+	// is intentionally new: prerelease v2.0.3 state did not retain the
+	// authenticated enrollment kind and cannot authorize native session
+	// operations safely. No decoder, inference, or destructive migration is
+	// permitted for that incomplete state.
+	stateSubdir = "qurl/connector-v2"
 )
 
-// ErrNoDefaultStateDir means no explicit state override, absolute XDG state
-// root, or HOME exists. Read-only remote commands treat this as an absent local
-// share namespace; commands that need to create local state surface it.
+// ErrNoDefaultStateDir means no explicit state override or absolute platform
+// user-state directory exists. Read-only remote commands treat this as an
+// absent local share namespace; commands that create local state surface it.
 var ErrNoDefaultStateDir = errors.New("no default qurl sharing state directory")
 
 // ResolveDir resolves the native-agent state directory. Resolution order,
@@ -49,12 +50,11 @@ var ErrNoDefaultStateDir = errors.New("no default qurl sharing state directory")
 //
 //  1. explicit override argument (a future --state-dir flag)
 //  2. QURL_CONNECTOR_STATE_DIR
-//  3. $XDG_STATE_HOME/qurl/connector, else $HOME/.local/state/qurl/connector
+//  3. the platform user-state directory below qurl/connector-v2
 //
 // There is no root-owned system default: qurl is a per-user tool. When no
-// override is set and no home
-// directory is available, ResolveDir fails with a clear error naming the
-// override instead of silently writing under the working directory.
+// override or platform user-state directory is available, ResolveDir fails
+// with a clear error instead of writing under the working directory.
 func ResolveDir(override string) (string, error) {
 	if dir := absCleanDir(override); dir != "" {
 		return dir, nil
@@ -62,8 +62,8 @@ func ResolveDir(override string) (string, error) {
 	if dir := absCleanDir(os.Getenv(EnvStateDirPrimary)); dir != "" {
 		return dir, nil
 	}
-	if xdg := xdgStateDir(); xdg != "" {
-		return xdg, nil
+	if platform := defaultStateDir(); platform != "" {
+		return platform, nil
 	}
 	return "", fmt.Errorf("%w: set %s", ErrNoDefaultStateDir, EnvStateDirPrimary)
 }
@@ -79,61 +79,6 @@ func absCleanDir(raw string) string {
 		return abs
 	}
 	return filepath.Clean(raw)
-}
-
-// xdgStateDir returns the XDG user state directory for the Connector, or ""
-// when neither an absolute XDG_STATE_HOME nor a home directory is available.
-func xdgStateDir() string {
-	if base := strings.TrimSpace(os.Getenv("XDG_STATE_HOME")); base != "" && filepath.IsAbs(base) {
-		return filepath.Join(base, xdgStateSubdir)
-	}
-	home := strings.TrimSpace(os.Getenv("HOME"))
-	if home == "" || !filepath.IsAbs(home) {
-		return ""
-	}
-	return filepath.Join(home, ".local", "state", xdgStateSubdir)
-}
-
-// EnsureDirMode makes dir exist as an owner-only 0700 directory before
-// qurl-go's pinned-state layer validates it.
-//
-// qurl-go's OpenFileAgentState requires the state directory to be exactly
-// 0700 and fails closed otherwise. It creates a missing directory at 0700,
-// but it deliberately does not loosen or tighten one that already exists — so
-// a directory a user created by hand at 0755 would make the very first run
-// die on a mode check it never had a chance to satisfy. EnsureDirMode closes
-// that gap by satisfying the 0700 requirement up front, without weakening it:
-// os.MkdirAll honors the umask on the components it creates and leaves an
-// existing directory's mode untouched, so an explicit Chmod pins the final
-// directory to exactly 0700. qurl-go still performs its full no-follow and
-// ownership validation afterward, so this cannot turn a symlink or
-// foreign-owned path into an accepted namespace.
-func EnsureDirMode(dir string) error {
-	dir = strings.TrimSpace(dir)
-	if dir == "" {
-		return errors.New("state directory path is empty")
-	}
-	info, err := os.Lstat(dir)
-	if errors.Is(err, os.ErrNotExist) {
-		if err := os.MkdirAll(dir, dirMode); err != nil {
-			return fmt.Errorf("create state directory %s: %w", dir, err)
-		}
-		info, err = os.Lstat(dir)
-	}
-	if err != nil {
-		return fmt.Errorf("inspect state directory %s: %w", dir, err)
-	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() || !connectorResourceOwnerOK(info) {
-		return fmt.Errorf("state directory %s must be an owner-owned non-symlink directory", dir)
-	}
-	if err := os.Chmod(dir, dirMode); err != nil {
-		return fmt.Errorf("restrict state directory %s to owner-only %#o: %w", dir, dirMode, err)
-	}
-	current, err := os.Lstat(dir)
-	if err != nil || current.Mode()&os.ModeSymlink != 0 || !current.IsDir() || !connectorResourceOwnerOK(current) || current.Mode().Perm() != dirMode || !os.SameFile(info, current) {
-		return fmt.Errorf("state directory %s changed while establishing owner-only access", dir)
-	}
-	return nil
 }
 
 // ConfiguredAgentID returns the optional stable identity supplied by the

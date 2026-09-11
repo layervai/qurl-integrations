@@ -8,6 +8,9 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -26,28 +29,29 @@ import (
 
 // T6 live sandbox CRID journey: the design doc's §28.1/§28.3 manual
 // checklist, automated. This file carries the clisandbox build tag so the
-// private qurl-integrations-infra sandbox orchestrator can compile and run it
-// from an exact public integrations commit without storing credentials here.
+// protected main workflow can compile and run it from the exact integrations
+// commit without storing credentials here.
 //
-// Credential contract (all four required before this suite runs anything):
+// Credential contract (four common inputs; full lifecycle entrypoints also
+// require the isolated failure key before they start live work):
 //
-//	QURL_API_KEY  — a sandbox API key holding the qurl:read, qurl:write, and
-//	    qurl:resolve scopes. Read through the CLI's hermetic mode: with the
-//	    variable set, the credential store is bypassed entirely and nothing
-//	    on disk is read or written.
-//	QURL_ENDPOINT — the sandbox qURL API base URL (a repository secret:
-//	    the sandbox hostname is deliberately not public).
+//	QURL_API_KEY  — a sandbox API key holding the qurl:agent, qurl:read,
+//	    qurl:write, and qurl:resolve scopes. The CLI reads it only for
+//	    bootstrap and does not write the account key to disk.
+//	QURL_ENDPOINT — the sandbox qURL API base URL (a protected environment
+//	    secret; the sandbox hostname is deliberately not public).
 //	QURL_SANDBOX_QV2_ISSUER_KEY — the sandbox's link-signing identity as
-//	    "<kid>=<standard-base64 P-256 SPKI DER>" (a repository variable,
-//	    mirrored from the same-named qurl-connector variable).
+//	    "<kid>=<standard-base64 P-256 SPKI DER>" (a protected environment
+//	    secret).
 //	QURL_SANDBOX_QV2_RELAY_URL — the sandbox's platform access URL (a
-//	    repository variable, same provenance).
+//	    protected environment secret).
+//	QURL_CLI_SANDBOX_FAILURE_API_KEY — a second one-time account key used
+//	    only by the controlled-failure child in the full lifecycle.
 //
-// The last two become a QURL_DEPLOYMENT settings file for the download
-// step: `get --file` opens fragment-credential links through the platform
-// access flow, which needs the deployment's trust settings. Their values —
-// like every minted link — never reach the log: repository variables are
-// not masked, and CI logs are public.
+// The issuer and relay values become a QURL_DEPLOYMENT settings file for the
+// download step: `get --file` opens fragment-credential links through the
+// platform access flow, which needs the deployment's trust settings. Their
+// values — like every minted link — never reach the log.
 //
 // Quota safety: each run publishes exactly ONE throwaway resource and always
 // reclaims it. The happy path ends in delete + idempotent re-delete, and a
@@ -57,7 +61,7 @@ import (
 // adds no retry loops of its own.
 //
 // The commands run through runCLI with the PRODUCTION wiring and no injected
-// seams. The private orchestrator requires an exact PASS and rejects SKIP.
+// seams. The protected workflow requires an exact PASS and rejects SKIP.
 
 // journeyTimeout bounds the whole journey. Every API call also carries the
 // transport's own 30-second HTTP timeout; this outer bound exists so a
@@ -69,12 +73,28 @@ const journeyTimeout = 4 * time.Minute
 // sandbox tenancy — or a sweeper reading `qurl list -o json` — can tell a
 // leaked fixture from a real one. assertListFindsCRID holds the CLI to
 // surfacing it: a label no listing carries identifies nothing.
-const journeyDescription = "qurl-integrations cli sandbox e2e journey (self-cleaning; safe to delete)"
+const journeyDescription = "qurl CLI journey v2 (self-cleaning; safe to delete)"
 
-// sandboxJourneyEnv reads the suite's env contract from the real process
+func sandboxJourneyResourceDescription(t *testing.T, env map[string]string) string {
+	t.Helper()
+	runID := strings.TrimSpace(env[sandboxRunIDEnv])
+	attempt := strings.TrimSpace(env[sandboxRunAttemptEnv])
+	runtimeName := strings.TrimSpace(env[sandboxRuntimeEnv])
+	if runID == "" && attempt == "" && runtimeName == "" {
+		return journeyDescription
+	}
+	if !sandboxPositiveDecimal.MatchString(runID) || !sandboxPositiveDecimal.MatchString(attempt) ||
+		(runtimeName != "host" && runtimeName != "hardened_container") {
+		t.Fatal("run-scoped journey resource description received an incomplete identity")
+	}
+	return fmt.Sprintf("qurl CLI journey v2 resource %s/%s/%s", runID, attempt, runtimeName)
+}
+
+// sandboxJourneyEnv reads the common suite env contract from the real process
 // environment and skips loudly — naming every missing variable — when it
-// is not fully provisioned. The returned map is the ONLY environment the
-// CLI invocations see, which is what keeps hermetic mode airtight: the
+// is not fully provisioned. Run-scoped local-publish lanes add their exact
+// run identity through addSandboxRunIdentity. The returned map is the ONLY
+// environment the CLI invocations see, which is what keeps hermetic mode airtight: the
 // deployment settings the download step needs enter it as QURL_DEPLOYMENT,
 // built by journeyDeploymentFile below, never read from the process.
 func sandboxJourneyEnv(t *testing.T) map[string]string {
@@ -97,10 +117,10 @@ func sandboxJourneyEnv(t *testing.T) map[string]string {
 	if len(missing) > 0 {
 		sort.Strings(missing)
 		t.Skipf("SKIPPED LOUDLY: live sandbox CRID journey is disarmed — missing %v. "+
-			"Arm this by setting QURL_API_KEY (a sandbox key with the qurl:read, qurl:write, "+
-			"and qurl:resolve scopes), QURL_ENDPOINT (the sandbox qURL API base URL — a "+
-			"repository secret), and the QURL_SANDBOX_QV2_ISSUER_KEY / "+
-			"QURL_SANDBOX_QV2_RELAY_URL repository variables the download step's deployment "+
+			"Arm this by setting QURL_API_KEY (a sandbox key with the qurl:agent, qurl:read, "+
+			"qurl:write, and qurl:resolve scopes), QURL_ENDPOINT (the sandbox qURL API base URL — a "+
+			"protected input), and the protected QURL_SANDBOX_QV2_ISSUER_KEY / "+
+			"QURL_SANDBOX_QV2_RELAY_URL inputs the download step's deployment "+
 			"settings are built from.", missing)
 	}
 	return map[string]string{
@@ -110,7 +130,62 @@ func sandboxJourneyEnv(t *testing.T) map[string]string {
 	}
 }
 
-// journeyDeploymentFile converts the two sandbox repository variables into
+// sandboxRunIdentity reads the exact protected workflow run identity. A
+// hardened-container run must also bind the immutable image ID that the
+// trusted workflow already verified. A host run must not inherit it.
+func sandboxRunIdentity() (map[string]string, error) {
+	values := map[string]string{
+		sandboxRunIDEnv:      strings.TrimSpace(os.Getenv(sandboxRunIDEnv)),
+		sandboxRunAttemptEnv: strings.TrimSpace(os.Getenv(sandboxRunAttemptEnv)),
+		sandboxRuntimeEnv:    strings.TrimSpace(os.Getenv(sandboxRuntimeEnv)),
+	}
+	missing := []string{}
+	for name, value := range values {
+		if value == "" {
+			missing = append(missing, name)
+		}
+	}
+	if len(missing) > 0 {
+		sort.Strings(missing)
+		return nil, fmt.Errorf("run-scoped sandbox journey is disarmed — missing %v", missing)
+	}
+	switch values[sandboxRuntimeEnv] {
+	case "host":
+		return values, nil
+	case "hardened_container":
+		imageID := os.Getenv(sandboxQURLImageIDEnv)
+		if imageID == "" {
+			return nil, fmt.Errorf("run-scoped hardened-container journey is disarmed — missing [%s]", sandboxQURLImageIDEnv)
+		}
+		if imageID != strings.TrimSpace(imageID) || !sandboxImmutableImageID.MatchString(imageID) {
+			return nil, fmt.Errorf("%s must be one exact immutable sha256 image ID", sandboxQURLImageIDEnv)
+		}
+		values[sandboxQURLImageIDEnv] = imageID
+		return values, nil
+	default:
+		return nil, fmt.Errorf("%s is unsupported; accepted values are host and hardened_container", sandboxRuntimeEnv)
+	}
+}
+
+// addSandboxRunIdentity adds the validated run identity only to lanes that use
+// it for namespace separation or run-scoped receipts. It fails before an exact
+// customer process can start when the hardened image binding is absent.
+func addSandboxRunIdentity(t *testing.T, env map[string]string) {
+	t.Helper()
+	values, err := sandboxRunIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A host lane must not inherit a hardened-container image binding from a
+	// reused environment map. sandboxRunIdentity intentionally omits it for
+	// host runs; clear any earlier value before copying the validated result.
+	delete(env, sandboxQURLImageIDEnv)
+	for name, value := range values {
+		env[name] = value
+	}
+}
+
+// journeyDeploymentFile converts the two protected sandbox inputs into
 // the SDK's deployment settings file and returns its path. Failures name
 // the offending variable but NEVER its value: CI logs are public, and the
 // values identify the sandbox.
@@ -124,9 +199,9 @@ func journeyDeploymentFile(t *testing.T, issuerKey, relayURL string) string {
 	if err != nil {
 		t.Fatal("QURL_SANDBOX_QV2_ISSUER_KEY's key part is not valid standard base64; refusing to print the malformed value (CI logs are public)")
 	}
-	relay, err := url.Parse(relayURL)
-	if err != nil || relay.Scheme != "https" || relay.Host == "" {
-		t.Fatal("QURL_SANDBOX_QV2_RELAY_URL must be an https URL; refusing to print the malformed value (CI logs are public)")
+	relayHost, ok := canonicalSandboxQV2RelayHost(relayURL)
+	if !ok {
+		t.Fatal("QURL_SANDBOX_QV2_RELAY_URL must be one canonical https origin; refusing to print the malformed value (CI logs are public)")
 	}
 	doc := map[string]any{
 		"issuers": []map[string]string{{
@@ -135,7 +210,7 @@ func journeyDeploymentFile(t *testing.T, issuerKey, relayURL string) string {
 			"spki_der_b64": base64.RawURLEncoding.EncodeToString(der),
 		}},
 		"cells":           []any{},
-		"relay_allowlist": []string{relay.Host},
+		"relay_allowlist": []string{relayHost},
 	}
 	raw, err := json.Marshal(doc)
 	if err != nil {
@@ -146,6 +221,86 @@ func journeyDeploymentFile(t *testing.T, issuerKey, relayURL string) string {
 		t.Fatalf("write deployment settings: %v", err)
 	}
 	return path
+}
+
+func canonicalSandboxQV2RelayHost(raw string) (string, bool) {
+	if raw == "" || raw != strings.TrimSpace(raw) || strings.Contains(raw, "#") {
+		return "", false
+	}
+	relay, err := url.Parse(raw)
+	if err != nil || relay.Scheme != "https" || relay.Host == "" || relay.User != nil ||
+		relay.RawQuery != "" || relay.Fragment != "" || relay.Path != "" || relay.RawPath != "" ||
+		relay.ForceQuery || relay.Opaque != "" {
+		return "", false
+	}
+	host := relay.Hostname()
+	// relayHost becomes an exact SDK allowlist entry. Keep one lowercase DNS
+	// spelling, reject IP literals, and omit the default port so link matching
+	// cannot depend on two spellings of the same endpoint.
+	if relay.Host != strings.ToLower(relay.Host) || strings.HasSuffix(relay.Host, ":") ||
+		!validSandboxDNSHost(host) {
+		return "", false
+	}
+	if _, err := netip.ParseAddr(host); err == nil {
+		return "", false
+	}
+	if port := relay.Port(); port != "" {
+		n, err := strconv.Atoi(port)
+		if err != nil || n < 1 || n > 65535 || n == 443 {
+			return "", false
+		}
+	}
+	return relay.Host, true
+}
+
+func validSandboxDNSHost(host string) bool {
+	if host == "" || len(host) > 253 || strings.HasSuffix(host, ".") {
+		return false
+	}
+	for _, label := range strings.Split(host, ".") {
+		if label == "" || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for i := range len(label) {
+			character := label[i]
+			if (character < 'a' || character > 'z') && (character < '0' || character > '9') && character != '-' {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func TestCanonicalSandboxQV2RelayHost(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{name: "canonical", raw: "https://relay.example.com", want: "relay.example.com"},
+		{name: "non-default port", raw: "https://relay.example.com:8443", want: "relay.example.com:8443"},
+		{name: "userinfo", raw: "https://user:secret@relay.example.com"},
+		{name: "path", raw: "https://relay.example.com/path"},
+		{name: "query", raw: "https://relay.example.com?secret=value"},
+		{name: "fragment", raw: "https://relay.example.com#fragment"},
+		{name: "uppercase", raw: "https://Relay.example.com"},
+		{name: "empty label", raw: "https://relay..example.com"},
+		{name: "underscore", raw: "https://relay_.example.com"},
+		{name: "leading hyphen", raw: "https://-relay.example.com"},
+		{name: "trailing hyphen", raw: "https://relay-.example.com"},
+		{name: "IP literal", raw: "https://192.0.2.1"},
+		{name: "IPv6 literal", raw: "https://[2001:db8::1]"},
+		{name: "IPv6 zone", raw: "https://[fe80::1%25eth0]"},
+		{name: "default port", raw: "https://relay.example.com:443"},
+		{name: "whitespace", raw: " https://relay.example.com"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, ok := canonicalSandboxQV2RelayHost(test.raw)
+			if ok != (test.want != "") || got != test.want {
+				t.Fatalf("canonical relay host = %q, %t; want %q", got, ok, test.want)
+			}
+		})
+	}
 }
 
 // runSandboxCLI invokes the real command tree against the live sandbox:
@@ -167,6 +322,296 @@ type journeyPublishDoc struct {
 	FoundExisting bool   `json:"found_existing"`
 }
 
+type journeyResourceStatusDoc struct {
+	CRID       string `json:"crid"`
+	ResourceID string `json:"resource_id"`
+	TargetURL  string `json:"target_url"`
+	Type       string `json:"type"`
+	Status     string `json:"status"`
+}
+
+type sandboxInspectionDoc struct {
+	CRID            string     `json:"crid"`
+	ResourceID      string     `json:"resource_id"`
+	TargetURL       string     `json:"target_url"`
+	DesiredState    string     `json:"desired_state"`
+	ConnectionState string     `json:"connection_state"`
+	ServingEpoch    uint64     `json:"serving_epoch"`
+	DaemonState     *string    `json:"daemon_state"`
+	LastTransition  *time.Time `json:"last_transition"`
+	FailureCategory *string    `json:"failure_category"`
+	FailureCode     *string    `json:"failure_code"`
+	RetryAttempt    *int       `json:"retry_attempt"`
+	NextRetryAt     *time.Time `json:"next_retry_at"`
+	TargetHealth    *string    `json:"local_target_health"`
+}
+
+func sandboxFailureDiagnosticFromInspection(raw []byte) (sandboxFailureDiagnostic, bool) {
+	var document sandboxInspectionDoc
+	if json.Unmarshal(raw, &document) != nil || document.FailureCategory == nil {
+		return sandboxFailureDiagnostic{}, false
+	}
+	diagnostic := sandboxFailureDiagnostic{Category: *document.FailureCategory}
+	if document.FailureCode != nil {
+		diagnostic.Code = *document.FailureCode
+	}
+	if !validSandboxFailureDiagnostic(diagnostic) {
+		return sandboxFailureDiagnostic{}, false
+	}
+	return diagnostic, true
+}
+
+func sandboxFailureASCIIIdentifierByte(character byte) bool {
+	return (character >= '0' && character <= '9') ||
+		(character >= 'A' && character <= 'Z') ||
+		(character >= 'a' && character <= 'z') || character == '_'
+}
+
+func sandboxFailureDiagnosticFromCLIError(stderr string) (sandboxFailureDiagnostic, bool) {
+	const prefix = "error "
+	var code string
+	for offset := 0; offset < len(stderr); {
+		index := strings.Index(stderr[offset:], prefix)
+		if index < 0 {
+			break
+		}
+		prefixStart := offset + index
+		start := prefixStart + len(prefix)
+		end := start
+		for end < len(stderr) && stderr[end] >= '0' && stderr[end] <= '9' {
+			end++
+		}
+		candidate := stderr[start:end]
+		prefixBoundaryOK := prefixStart == 0 || !sandboxFailureASCIIIdentifierByte(stderr[prefixStart-1])
+		codeBoundaryOK := end == len(stderr) || !sandboxFailureASCIIIdentifierByte(stderr[end])
+		if validSandboxFailureCode(candidate) && candidate != "" && prefixBoundaryOK && codeBoundaryOK {
+			if code != "" {
+				return sandboxFailureDiagnostic{}, false
+			}
+			code = candidate
+		}
+		offset = start
+	}
+	if code == "" {
+		return sandboxFailureDiagnostic{}, false
+	}
+	return sandboxFailureDiagnostic{Category: "unknown", Code: code}, true
+}
+
+func markSandboxFailureDiagnosticFromCommand(stdout, stderr string, commandErr error) {
+	if commandErr == nil {
+		if diagnostic, ok := sandboxFailureDiagnosticFromInspection([]byte(stdout)); ok {
+			markSandboxFailureDiagnostic(diagnostic)
+		}
+		return
+	}
+	if diagnostic, ok := sandboxFailureDiagnosticFromCLIError(stderr); ok {
+		markSandboxFailureDiagnostic(diagnostic)
+	}
+}
+
+func markSandboxFailureLoginDiagnostic(stderr string, err error) {
+	writeSandboxFailureLoginDiagnostic(os.Stdout, stderr, err)
+}
+
+func writeSandboxFailureLoginDiagnostic(w io.Writer, stderr string, err error) {
+	exit := sandboxFailureLoginExitUnknown
+	if errors.Is(err, context.DeadlineExceeded) {
+		exit = sandboxFailureLoginExitTimeout
+	} else if code, ok := sandboxFailureExitCodeFromError(err); ok {
+		exit = strconv.Itoa(code)
+	}
+	_, _ = fmt.Fprintf(w, "%s %s\n", sandboxFailureLoginExitMarker, exit)
+	if parsed, ok := sandboxFailureDiagnosticFromCLIError(stderr); ok {
+		writeSandboxFailureDiagnostic(w, parsed)
+	}
+}
+
+// The child process boundary removes the CLI's typed error. Preserve only its
+// stable public exit class and an optional five-digit support code; neither can
+// carry a credential, request ID, path, endpoint, or private topology.
+func sandboxFailureExitCodeFromError(err error) (int, bool) {
+	var exitCoder interface{ ExitCode() int }
+	if !errors.As(err, &exitCoder) {
+		return 0, false
+	}
+	code := exitCoder.ExitCode()
+	return code, validSandboxFailureExitCode(code)
+}
+
+func markSandboxFailureDiagnosticFromError(err error) {
+	writeSandboxFailureDiagnosticFromError(os.Stdout, err)
+}
+
+func writeSandboxFailureDiagnosticFromError(w io.Writer, err error) {
+	diagnostic := sandboxFailureDiagnostic{Category: "unknown"}
+	if err != nil {
+		if parsed, ok := sandboxFailureDiagnosticFromCLIError(err.Error()); ok {
+			diagnostic.Code = parsed.Code
+		}
+	}
+	writeSandboxFailureDiagnostic(w, diagnostic)
+}
+
+func TestSandboxFailureDiagnosticExtractionIsClosed(t *testing.T) {
+	t.Run("inspection", func(t *testing.T) {
+		for _, test := range []struct {
+			name string
+			raw  string
+			want sandboxFailureDiagnostic
+			ok   bool
+		}{
+			{name: "category and code", raw: `{"failure_category":"assignment","failure_code":"52201","target_url":"http://127.0.0.1"}`, want: sandboxFailureDiagnostic{Category: "assignment", Code: "52201"}, ok: true},
+			{name: "category only", raw: `{"failure_category":"network"}`, want: sandboxFailureDiagnostic{Category: "network"}, ok: true},
+			{name: "native UDP verification", raw: `{"failure_category":"verification"}`, want: sandboxFailureDiagnostic{Category: "verification"}, ok: true},
+			{name: "unknown category", raw: `{"failure_category":"internal_topology","failure_code":"52201"}`},
+			{name: "invalid code", raw: `{"failure_category":"identity","failure_code":"secret"}`},
+			{name: "missing category", raw: `{"failure_code":"52201"}`},
+			{name: "malformed", raw: `{"failure_category":`},
+		} {
+			t.Run(test.name, func(t *testing.T) {
+				got, ok := sandboxFailureDiagnosticFromInspection([]byte(test.raw))
+				if ok != test.ok || got != test.want {
+					t.Fatalf("inspection diagnostic = %#v, %t; want %#v, %t", got, ok, test.want, test.ok)
+				}
+			})
+		}
+	})
+	t.Run("CLI error", func(t *testing.T) {
+		for _, test := range []struct {
+			name   string
+			stderr string
+			wantOK bool
+		}{
+			{name: "one canonical code", stderr: "request failed: error 52401", wantOK: true},
+			{name: "absent", stderr: "request failed"},
+			{name: "short", stderr: "error 5240"},
+			{name: "long", stderr: "error 524010"},
+			{name: "embedded", stderr: "error 52401secret"},
+			{name: "embedded prefix", stderr: "terror 52401"},
+			{name: "unicode", stderr: "error ５2401"},
+			{name: "multiple", stderr: "error 52201 then error 52401"},
+		} {
+			t.Run(test.name, func(t *testing.T) {
+				got, ok := sandboxFailureDiagnosticFromCLIError(test.stderr)
+				if ok != test.wantOK {
+					t.Fatalf("CLI diagnostic = %#v, %t; want ok %t", got, ok, test.wantOK)
+				}
+				if ok && got != (sandboxFailureDiagnostic{Category: "unknown", Code: "52401"}) {
+					t.Fatalf("CLI diagnostic = %#v", got)
+				}
+			})
+		}
+	})
+	t.Run("error marker never relays text", func(t *testing.T) {
+		capture := func(err error) string {
+			t.Helper()
+			var output bytes.Buffer
+			writeSandboxFailureDiagnosticFromError(&output, err)
+			return output.String()
+		}
+		const secret = "lv_test_marker_must_not_relay"
+		withCode := capture(errors.New(secret + ": assignment error 52028 at a private path"))
+		withoutCode := capture(errors.New(secret + ": internal endpoint did not settle"))
+		if withCode != sandboxFailureDiagnosticMarker+" unknown 52028\n" ||
+			withoutCode != sandboxFailureDiagnosticMarker+" unknown none\n" ||
+			strings.Contains(withCode+withoutCode, secret) || strings.Contains(withCode+withoutCode, "private path") ||
+			strings.Contains(withCode+withoutCode, "internal endpoint") {
+			t.Fatalf("redacted error markers = %q and %q", withCode, withoutCode)
+		}
+	})
+	t.Run("failed login marker is closed", func(t *testing.T) {
+		const secret = "lv_test_command_marker_must_not_relay"
+		for _, test := range []struct {
+			name string
+			err  error
+			want int
+		}{
+			{name: "authentication", err: sandboxFailureExitError(exitcode.Auth), want: exitcode.Auth},
+			{name: "configuration", err: sandboxFailureExitError(exitcode.Config), want: exitcode.Config},
+			{name: "forbidden", err: sandboxFailureExitError(exitcode.Forbidden), want: exitcode.Forbidden},
+			{name: "unavailable", err: sandboxFailureExitError(exitcode.Unavailable), want: exitcode.Unavailable},
+			{name: "server", err: sandboxFailureExitError(exitcode.ServerError), want: exitcode.ServerError},
+		} {
+			t.Run(test.name, func(t *testing.T) {
+				var output bytes.Buffer
+				writeSandboxFailureLoginDiagnostic(&output,
+					secret+": https://private.invalid/request/secret error 52401", test.err)
+				want := fmt.Sprintf("%s %d\n%s unknown 52401\n",
+					sandboxFailureLoginExitMarker, test.want, sandboxFailureDiagnosticMarker)
+				if output.String() != want || strings.Contains(output.String(), secret) ||
+					strings.Contains(output.String(), "private.invalid") {
+					t.Fatalf("closed command diagnostic = %q, want %q", output.String(), want)
+				}
+			})
+		}
+		var unknown bytes.Buffer
+		writeSandboxFailureLoginDiagnostic(&unknown,
+			secret+": error 52201 then error 52401 at https://private.invalid", errors.New(secret))
+		if want := sandboxFailureLoginExitMarker + " " + sandboxFailureLoginExitUnknown + "\n"; unknown.String() != want ||
+			strings.Contains(unknown.String(), secret) || strings.Contains(unknown.String(), "private.invalid") {
+			t.Fatalf("closed unknown login diagnostic = %q, want %q", unknown.String(), want)
+		}
+		var timeout bytes.Buffer
+		writeSandboxFailureLoginDiagnostic(&timeout, secret, context.DeadlineExceeded)
+		if want := sandboxFailureLoginExitMarker + " " + sandboxFailureLoginExitTimeout + "\n"; timeout.String() != want ||
+			strings.Contains(timeout.String(), secret) {
+			t.Fatalf("closed timeout login diagnostic = %q, want %q", timeout.String(), want)
+		}
+	})
+}
+
+type sandboxFailureExitError int
+
+func (e sandboxFailureExitError) Error() string { return "closed test exit" }
+func (e sandboxFailureExitError) ExitCode() int { return int(e) }
+
+// assertHealthySandboxInspection proves that inspect is the real redacted
+// diagnostic surface, not an alias for status. The healthy journey requires
+// every always-present diagnostic and requires failure and retry details to be
+// absent when no failure exists.
+func assertHealthySandboxInspection(
+	t *testing.T,
+	raw []byte,
+	commandErr error,
+	stderr, cridValue, resourceID, desired, observed string,
+	epoch uint64,
+	forbidden ...string,
+) {
+	t.Helper()
+	if commandErr != nil {
+		t.Fatalf("qurl inspect failed: %v; stderr %q", commandErr, stderr)
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	var document sandboxInspectionDoc
+	if err := decoder.Decode(&document); err != nil {
+		t.Fatalf("decode qurl inspect output: %v; output %q", err, string(raw))
+	}
+	var trailing json.RawMessage
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		t.Fatalf("qurl inspect output has trailing data: %q", string(raw))
+	}
+	if document.CRID != cridValue || document.ResourceID != resourceID || document.DesiredState != desired ||
+		document.ConnectionState != observed || document.ServingEpoch != epoch {
+		t.Fatalf("qurl inspect lifecycle = %+v, want %s/%s at epoch %d for %s", document, desired, observed, epoch, cridValue)
+	}
+	if document.DaemonState == nil || *document.DaemonState != "serving" ||
+		document.LastTransition == nil || document.LastTransition.IsZero() ||
+		document.TargetHealth == nil || *document.TargetHealth != "healthy" ||
+		document.RetryAttempt == nil || *document.RetryAttempt != 0 {
+		t.Fatalf("qurl inspect healthy diagnostics are incomplete: %+v", document)
+	}
+	if document.FailureCategory != nil || document.FailureCode != nil || document.NextRetryAt != nil {
+		t.Fatalf("qurl inspect exposed failure or retry details for a healthy share: %+v", document)
+	}
+	for _, secret := range forbidden {
+		if secret != "" && bytes.Contains(raw, []byte(secret)) {
+			t.Fatal("qurl inspect exposed a bearer credential")
+		}
+	}
+}
+
 // journeyListDoc mirrors the list `-o json` document. HasMore — not cursor
 // presence — is the continuation signal, per the ResourcePage contract.
 type journeyListDoc struct {
@@ -179,9 +624,9 @@ type journeyListDoc struct {
 }
 
 // TestSandboxCRIDJourney walks the whole customer journey against the real
-// sandbox: publish → list (paginated) → resolve (verified, piped bare-URL) →
-// get --file (real bytes through the minted link) → delete --yes →
-// idempotent re-delete → resolve-after-delete (owner-truthful revoked exit).
+// sandbox: publish → status/inspect → list (paginated) → share (verified,
+// piped bare-URL) → get --file (real bytes through the minted link) → delete --yes →
+// idempotent re-delete → share-after-delete (owner-truthful revoked exit).
 func TestSandboxCRIDJourney(t *testing.T) {
 	cliEnv := sandboxJourneyEnv(t)
 	ctx, cancel := context.WithTimeout(context.Background(), journeyTimeout)
@@ -194,7 +639,8 @@ func TestSandboxCRIDJourney(t *testing.T) {
 	// assertion leans on the same stability: this page's body is known to
 	// carry journeyTargetMarker.
 	target := "https://example.com/?qurl-private-sandbox-crid-journey=" + strconv.FormatInt(time.Now().UnixNano(), 10)
-	res := runSandboxCLI(ctx, t, cliEnv, "-o", "json", "publish", target, "--description", journeyDescription)
+	description := sandboxJourneyResourceDescription(t, cliEnv)
+	res := runSandboxCLI(ctx, t, cliEnv, "-o", "json", "publish", target, "--description", description)
 	if res.code != 0 {
 		t.Fatalf("publish exit = %d, want 0\nstderr: %s", res.code, res.stderr.String())
 	}
@@ -215,7 +661,7 @@ func TestSandboxCRIDJourney(t *testing.T) {
 
 	// The minted identifier is a full-form test-environment CRID: 60
 	// characters, and the leading 'q' that marks the test version bytes —
-	// the premise of the environment-guard assertion at the resolve step.
+	// the premise of the environment-guard assertion at the share step.
 	if len(pub.CRID) != 60 || !strings.HasPrefix(pub.CRID, "q") {
 		t.Fatalf("CRID = %q (len %d), want the 60-character 'q'-prefixed test-environment form", pub.CRID, len(pub.CRID))
 	}
@@ -227,13 +673,38 @@ func TestSandboxCRIDJourney(t *testing.T) {
 		t.Fatalf("published CRID environment = %v, want the test environment on the sandbox", environment)
 	}
 
-	assertListFindsCRID(ctx, t, cliEnv, pub.CRID)
-	link := assertResolveJourney(ctx, t, cliEnv, pub.CRID)
+	assertRemoteStatusAndInspect(ctx, t, cliEnv, pub)
+	assertListFindsCRID(ctx, t, cliEnv, pub.CRID, description)
+	link := assertShareJourney(ctx, t, cliEnv, pub.CRID)
 	// The link value never reaches the log: CI logs are public, and a
 	// minted link carries the sandbox hostname and a live qURL credential.
-	t.Logf("resolved %s -> a verified %d-byte https link", pub.CRID, len(link))
+	t.Logf("shared %s -> a verified %d-byte https link", pub.CRID, len(link))
 	assertGetDownloadsBytes(ctx, t, cliEnv, pub.CRID)
 	assertDeleteJourney(ctx, t, cliEnv, pub.CRID)
+}
+
+func assertRemoteStatusAndInspect(ctx context.Context, t *testing.T, cliEnv map[string]string, pub journeyPublishDoc) {
+	t.Helper()
+	var status journeyResourceStatusDoc
+	for _, command := range []string{"status", "inspect"} {
+		res := runSandboxCLI(ctx, t, cliEnv, "-o", "json", command, pub.CRID)
+		if res.code != 0 {
+			t.Fatalf("%s remote URL exit = %d, want 0\nstderr: %s", command, res.code, res.stderr.String())
+		}
+		var got journeyResourceStatusDoc
+		if err := json.Unmarshal(res.stdout.Bytes(), &got); err != nil {
+			t.Fatalf("%s remote URL output %q: %v", command, res.stdout.String(), err)
+		}
+		if got.CRID != pub.CRID || got.ResourceID != pub.ResourceID || got.TargetURL != pub.TargetURL ||
+			got.Type != "url" || got.Status != "active" {
+			t.Fatalf("%s remote URL state = %+v, want published active URL %+v", command, got, pub)
+		}
+		if command == "status" {
+			status = got
+		} else if got != status {
+			t.Fatalf("inspect remote URL state = %+v, want status state %+v", got, status)
+		}
+	}
 }
 
 // listPageLimit keeps pages small enough that pagination is real without
@@ -277,7 +748,7 @@ const (
 // honored server-side (handlers/resource.go parses it into ListFilters) —
 // if it ever stops being, the filter silently becomes a no-op and this walk
 // quietly reverts to scanning the whole history.
-func assertListFindsCRID(ctx context.Context, t *testing.T, cliEnv map[string]string, id string) {
+func assertListFindsCRID(ctx context.Context, t *testing.T, cliEnv map[string]string, id, expectedDescription string) {
 	t.Helper()
 	seen := 0
 	label := ""
@@ -318,43 +789,29 @@ func assertListFindsCRID(ctx context.Context, t *testing.T, cliEnv map[string]st
 	if seen != 1 {
 		t.Fatalf("published CRID appeared %d times across %d newest-first list pages, want exactly once", seen, pages)
 	}
-	// Not a Fatal: the row was found, so the rest of the journey (resolve,
+	// Not a Fatal: the row was found, so the rest of the journey (share,
 	// download, delete) is still worth running and still reclaims the row.
-	if label != journeyDescription {
+	if label != expectedDescription {
 		t.Errorf("listed row description = %q, want %q; nothing built on `qurl list` can identify this fixture",
-			label, journeyDescription)
+			label, expectedDescription)
 	}
 }
 
-// assertResolveJourney resolves the CRID and holds the piped contract: with
+// assertShareJourney shares the CRID and holds the piped contract: with
 // stdout not a terminal the command emits the bare link and nothing else, so
-// `link="$(qurl resolve <CRID>)"` captures it cleanly (the link opens in a
+// `link="$(qurl share <CRID>)"` captures it cleanly (the link opens in a
 // browser — downloading is get's job). Exit 0 here IS the verification
 // evidence — the CLI discards any answer that fails CRID verification before
 // printing (exit 12), so a printed link is a verified link. It also holds
 // the environment-guard case: the sandbox is the test environment, so its
 // 'q'-prefixed CRID at this non-production endpoint must produce no warning
 // at all.
-func assertResolveJourney(ctx context.Context, t *testing.T, cliEnv map[string]string, id string) string {
+func assertShareJourney(ctx context.Context, t *testing.T, cliEnv map[string]string, id string) string {
 	t.Helper()
-	res := runSandboxCLI(ctx, t, cliEnv, "resolve", id)
-	if res.code != 0 {
-		t.Fatalf("resolve exit = %d, want 0 (a non-zero here means the sandbox refused or the answer failed verification)\nstderr: %s", res.code, res.stderr.String())
-	}
-	out := res.stdout.String()
-	link := strings.TrimSuffix(out, "\n")
-	if link == "" || link+"\n" != out || strings.ContainsAny(link, " \n\t") {
-		t.Fatalf("piped resolve stdout = %q, want exactly one bare link and a newline", out)
-	}
-	parsed, err := url.Parse(link)
-	if err != nil || parsed.Scheme != "https" || parsed.Host == "" {
-		t.Fatalf("resolved link %q is not a live https URL: %v", link, err)
-	}
-	// The environment guard must stay quiet: a test CRID against the
-	// configured (non-production) sandbox endpoint is the matched case, so
-	// ANY stderr here is a spurious warning.
-	if res.stderr.Len() != 0 {
-		t.Fatalf("resolve wrote %q to stderr; a test CRID at the sandbox endpoint must resolve without warnings", res.stderr.String())
+	res := runSandboxCLI(ctx, t, cliEnv, "share", id)
+	link, err := validateSandboxShareCommandResult("share", res.code, res.stdout.String(), res.stderr.String())
+	if err != nil {
+		t.Fatal(err)
 	}
 	return link
 }
@@ -411,7 +868,7 @@ func assertGetDownloadsBytes(ctx context.Context, t *testing.T, cliEnv map[strin
 
 // assertDeleteJourney deletes the resource, proves the re-delete is the
 // idempotent success the platform promises, and then holds the
-// owner-truthful revoked path: resolving a deleted resource with the
+// owner-truthful revoked path: sharing a deleted resource with the
 // owner's own key exits with the not-found code and an honest "deleted"
 // story on stderr — never a link, never a silent success.
 func assertDeleteJourney(ctx context.Context, t *testing.T, cliEnv map[string]string, id string) {
@@ -440,14 +897,14 @@ func assertDeleteJourney(ctx context.Context, t *testing.T, cliEnv map[string]st
 		t.Errorf("re-delete stderr = %q, want the already-gone note or the repeated deletion confirmation", stderrText)
 	}
 
-	res = runSandboxCLI(ctx, t, cliEnv, "resolve", id)
-	if res.code != exitcode.NotFound {
-		t.Fatalf("resolve after delete exit = %d, want %d (the platform's gone family)\nstdout: %q\nstderr: %s",
-			res.code, exitcode.NotFound, res.stdout.String(), res.stderr.String())
-	}
-	mustEmptyStdout(t, res)
-	if !strings.Contains(strings.ToLower(res.stderr.String()), "deleted") {
-		t.Errorf("owner-truthful revoked path: stderr = %q never says the resource was deleted", res.stderr.String())
+	res = runSandboxCLI(ctx, t, cliEnv, "share", id)
+	if err := validateSandboxDeletedCommandResult(
+		"share",
+		res.code,
+		res.stdout.String(),
+		res.stderr.String(),
+	); err != nil {
+		t.Fatal(err)
 	}
 }
 

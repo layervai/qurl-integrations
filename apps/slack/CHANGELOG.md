@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.5.0](https://github.com/layervai/qurl-integrations/compare/slack-v0.4.0...slack-v0.5.0) (2026-09-02)
+
+
+### ⚠ BREAKING CHANGES
+
+* **cli:** rename the resolve command to share (hard cutover) ([#1323](https://github.com/layervai/qurl-integrations/issues/1323))
+
+### Features
+
+* **cli:** rename the resolve command to share (hard cutover) ([#1323](https://github.com/layervai/qurl-integrations/issues/1323)) ([ae6a567](https://github.com/layervai/qurl-integrations/commit/ae6a567a4828da75bf3332fae39d31fb908eaddb))
+
+
+### Bug Fixes
+
+* **slack:** mint agent-target enrollment tokens and emit v2 headless config ([#1321](https://github.com/layervai/qurl-integrations/issues/1321)) ([5170fb4](https://github.com/layervai/qurl-integrations/commit/5170fb453172ecec64a8f49a8944d1e23f9401f9))
+
 ## [0.4.0](https://github.com/layervai/qurl-integrations/compare/slack-v0.3.1...slack-v0.4.0) (2026-08-26)
 
 

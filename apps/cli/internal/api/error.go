@@ -26,12 +26,13 @@ type Error struct {
 	InvalidFields map[string]string
 	// RetryAfter is the server-requested wait in seconds for 429 responses
 	// that survived the transport's bounded retry, 0 when absent.
-	RetryAfter int
+	RetryAfter uint64
 	// RequestID correlates the failure with server logs, when provided.
 	RequestID string
 
 	err error
 
+	agentEnrollmentScopeRequired     bool
 	connectorEnrollmentScopeRequired bool
 }
 
@@ -56,10 +57,14 @@ func (e *Error) Error() string {
 // reachable for errors.Is and errors.As.
 func (e *Error) Unwrap() error { return e.err }
 
-// ConnectorEnrollmentScopeRequired reports that this error came from the
-// automatic Connector enrollment mint and the login key lacks qurl:agent.
-// Keeping the operation marker on the typed error lets output give the right
-// remedy without parsing server prose or weakening every other 403 hint.
+// AgentEnrollmentScopeRequired reports that an account key could not mint the
+// one-time registered-device credential.
+func (e *Error) AgentEnrollmentScopeRequired() bool {
+	return e != nil && e.agentEnrollmentScopeRequired
+}
+
+// ConnectorEnrollmentScopeRequired reports that a registered device could
+// not mint the one-time credential for a local Connector.
 func (e *Error) ConnectorEnrollmentScopeRequired() bool {
 	return e != nil && e.connectorEnrollmentScopeRequired
 }

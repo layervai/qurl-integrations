@@ -10,11 +10,11 @@ import (
 
 const apiKeyEnvironmentFileMaxBytes = 4 << 10
 
-func validAPIKeyEnvironmentFileMode(mode os.FileMode) bool {
-	permissions := mode.Perm()
-	return permissions == 0o400 || permissions == 0o600
-}
-
+// The account API-key file is an explicit, short-lived workstation or CI
+// bootstrap authority. Unlike the headless daemon's enrollment file, it does
+// not need Kubernetes projected-secret symlinks or group-readable fsGroup
+// access. Refuse both here so another local principal cannot replace the
+// credential between validation and enrollment.
 func readAPIKeyEnvironmentFile(path string) (string, error) { //nolint:gocyclo // One exact owner-only file and byte fence stays together.
 	if path == "" || path != strings.TrimSpace(path) || strings.ContainsAny(path, "\x00\r\n") ||
 		!filepath.IsAbs(path) || filepath.Clean(path) != path {
@@ -25,8 +25,8 @@ func readAPIKeyEnvironmentFile(path string) (string, error) { //nolint:gocyclo /
 		before.Size() <= 1 || before.Size() > apiKeyEnvironmentFileMaxBytes {
 		return "", fmt.Errorf("%w: %s is not one bounded owner-private regular file", ErrInvalidKey, EnvAPIKeyFile)
 	}
-	if err := validateAPIKeyFilePlatform(before); err != nil {
-		return "", fmt.Errorf("%w: %s has unsafe ownership or link authority", ErrInvalidKey, EnvAPIKeyFile)
+	if err := validateAPIKeyFilePathPlatform(path, before); err != nil {
+		return "", fmt.Errorf("%w: %s has unsafe ownership or link authority: %w", ErrInvalidKey, EnvAPIKeyFile, err)
 	}
 	file, err := openAPIKeyFileNoFollow(path)
 	if err != nil {
@@ -36,7 +36,7 @@ func readAPIKeyEnvironmentFile(path string) (string, error) { //nolint:gocyclo /
 	opened, err := file.Stat()
 	if err != nil || !os.SameFile(before, opened) || !validAPIKeyEnvironmentFileMode(opened.Mode()) ||
 		opened.Mode() != before.Mode() || opened.Size() != before.Size() || !opened.ModTime().Equal(before.ModTime()) ||
-		validateAPIKeyFilePlatform(opened) != nil {
+		validateOpenAPIKeyFilePlatform(file, opened) != nil {
 		return "", fmt.Errorf("%w: %s changed while opening", ErrInvalidKey, EnvAPIKeyFile)
 	}
 	raw, err := io.ReadAll(io.LimitReader(file, apiKeyEnvironmentFileMaxBytes+1))
@@ -48,13 +48,20 @@ func readAPIKeyEnvironmentFile(path string) (string, error) { //nolint:gocyclo /
 	if openedErr != nil || lstatErr != nil || !os.SameFile(opened, openedAfter) || !os.SameFile(before, after) ||
 		openedAfter.Mode() != opened.Mode() || openedAfter.Size() != opened.Size() || !openedAfter.ModTime().Equal(opened.ModTime()) ||
 		after.Mode() != before.Mode() || after.Size() != before.Size() || !after.ModTime().Equal(before.ModTime()) ||
-		validateAPIKeyFilePlatform(openedAfter) != nil || validateAPIKeyFilePlatform(after) != nil {
+		validateOpenAPIKeyFilePlatform(file, openedAfter) != nil || validateAPIKeyFilePathPlatform(path, after) != nil {
 		return "", fmt.Errorf("%w: %s changed while reading", ErrInvalidKey, EnvAPIKeyFile)
 	}
-	if raw[len(raw)-1] != '\n' || bytesContainWhitespaceOrControl(raw[:len(raw)-1]) {
-		return "", fmt.Errorf("%w: %s must contain exact key bytes plus one LF", ErrInvalidKey, EnvAPIKeyFile)
+	if raw[len(raw)-1] != '\n' {
+		return "", fmt.Errorf("%w: %s must contain exact key bytes plus one LF or CRLF", ErrInvalidKey, EnvAPIKeyFile)
 	}
-	key := string(raw[:len(raw)-1])
+	keyBytes := raw[:len(raw)-1]
+	if len(keyBytes) > 0 && keyBytes[len(keyBytes)-1] == '\r' {
+		keyBytes = keyBytes[:len(keyBytes)-1]
+	}
+	if bytesContainWhitespaceOrControl(keyBytes) {
+		return "", fmt.Errorf("%w: %s must contain exact key bytes plus one LF or CRLF", ErrInvalidKey, EnvAPIKeyFile)
+	}
+	key := string(keyBytes)
 	if err := ValidateKeyShape(key); err != nil {
 		return "", err
 	}

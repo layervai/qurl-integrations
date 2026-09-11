@@ -188,6 +188,11 @@ const (
 	// CredentialTargetConnector constrains an enrollment token to Connector
 	// enrollment.
 	CredentialTargetConnector = "connector"
+	// CredentialTargetAgent constrains an enrollment token to registered-device
+	// (agent) enrollment: the owner-scoped credential a headless Connector
+	// daemon needs for native session control. Connector-target tokens are
+	// connector-scoped and cannot open native sessions.
+	CredentialTargetAgent = "agent"
 	// CredentialClaimTypeConnector binds an enrollment token to one Connector
 	// resource identifier. Sharing the literal "connector" with
 	// CredentialTargetConnector is deliberate: `target` and `claims[].type`
@@ -903,6 +908,46 @@ func (c *Client) GetResource(ctx context.Context, resourceID string) (*Resource,
 	}
 	if out.ResourceID != resourceID {
 		return nil, errors.New("get resource response identity does not match request")
+	}
+	return &out, nil
+}
+
+// Identity is the account identity behind the client credential (GET /v1/me).
+//
+// TODO(upstream-contract): mirrors qurl-service `GET /v1/me` (`owner_id`,
+// `api_key` present only for API-key principals).
+type Identity struct {
+	// OwnerID is the principal behind the credential: the account owner for
+	// an API key, the calling user for a delegated credential. Callers that
+	// need the account owner must check APIKey != nil.
+	OwnerID string `json:"owner_id"`
+	// APIKey is present only when the request was authenticated by an API key.
+	APIKey *IdentityAPIKey `json:"api_key,omitempty"`
+}
+
+// IdentityAPIKey identifies the API key behind an Identity.
+type IdentityAPIKey struct {
+	KeyID string `json:"key_id,omitempty"`
+}
+
+// Me returns the account identity behind the client credential (GET /v1/me).
+// OwnerID is the durable account owner the headless share config must name.
+func (c *Client) Me(ctx context.Context) (*Identity, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/v1/me", http.NoBody)
+	if err != nil {
+		return nil, fmt.Errorf("build request: %w", err)
+	}
+	var out Identity
+	if _, err := c.do(req, &out, "GET /v1/me"); err != nil {
+		return nil, err
+	}
+	out.OwnerID = strings.TrimSpace(out.OwnerID)
+	if out.OwnerID == "" {
+		return nil, errors.New("identity response missing owner_id")
+	}
+	if out.APIKey != nil && strings.TrimSpace(out.APIKey.KeyID) == "" {
+		// An api_key object without key_id is not proof of an API-key principal.
+		out.APIKey = nil
 	}
 	return &out, nil
 }

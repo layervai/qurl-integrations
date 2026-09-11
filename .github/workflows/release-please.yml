@@ -3,10 +3,16 @@ name: Release Please
 # Release flow for the monorepo:
 #
 #   1. release-please maintains per-component release PRs (see
-#      release-please-config.json). Merging one creates the tag and the
+#      release-please-config.json). Merging one creates the tag and a draft
 #      GitHub Release.
-#   2. CLI releases additionally run GoReleaser to attach binaries, publish
-#      the Homebrew tap formula, and build deb/rpm packages.
+#      Chrome and Edge use linked versions: either browser change creates both
+#      tags, and release owners must submit both store packages.
+#      The pinned action bundles release-please 17.6.0, whose linked-versions
+#      plugin adds a synthetic commit when one linked component has no changes.
+#   2. CLI releases additionally run GoReleaser to attach binaries and build
+#      deb/rpm packages. The workflow verifies every artifact, audits and
+#      installs the exact staged Homebrew cask, publishes the release, and
+#      only then updates the Homebrew tap.
 #
 # GoReleaser runs as a dependent job here — NOT as a tag-triggered workflow —
 # because release-please tags with the workflow's GITHUB_TOKEN, and GitHub
@@ -21,14 +27,19 @@ name: Release Please
 # release PR can put several components' tags on one commit, and GoReleaser
 # must not guess which one is the CLI's.
 #
-# Failure/recovery semantics: if release-cli fails, the tag and the GitHub
-# Release already exist without binaries (the installer 404s on that version
-# until assets land; a normal minutes-long window like this also exists on
-# every release while GoReleaser uploads). Recover with "Re-run failed jobs"
-# on the failed run, or run this workflow via workflow_dispatch with cli_tag
-# set to the affected tag. Do NOT "Re-run all jobs": release-please then
-# sees the release already exists and skips release-cli. Asset re-uploads
-# are idempotent (release.replace_existing_artifacts in .goreleaser.yml).
+# Failure/recovery semantics: until every verification succeeds, the tag and a
+# draft GitHub Release exist but no new CLI release is public and the Homebrew
+# tap stays on its prior version. Recover with "Re-run failed jobs" on the
+# failed run. To repair an already-public release, first run cli.yml from main
+# for the exact tag, then dispatch this workflow with the tag and exact passing
+# run identity. Asset re-uploads are idempotent
+# (release.replace_existing_artifacts in .goreleaser.yml).
+# The exact release journey includes the scheduled 80-minute soak lane. Expect
+# the draft to remain private for about two hours, including setup and queueing.
+# If the automatic handoff fails, dispatch cli.yml from main with
+# release_source_sha and release_source_tag set to the exact release. After that
+# run passes, dispatch this workflow from main with the tag, source SHA, run ID,
+# and run attempt.
 #
 # The other failure mode, and the worse one, is a release release-please
 # never made. What it looks like: this workflow runs green, main carries an
@@ -66,14 +77,35 @@ on:
         description: "Existing bare CLI release tag (e.g. v0.2.0) to build and attach assets for"
         required: true
         type: string
+      source_sha:
+        description: "Exact source SHA for an automated customer-journey handoff; omit for operator recovery"
+        required: false
+        type: string
+      cli_run_id:
+        description: "Exact successful CLI workflow run ID; required to build or repair CLI assets"
+        required: true
+        type: string
+      cli_run_attempt:
+        description: "Exact successful CLI workflow run attempt; required to build or repair CLI assets"
+        required: true
+        type: string
 
-# Serialize runs: canceling a release mid-publish is exactly the
-# half-published state the recovery notes above exist for.
+# Serialize release maintenance, but keep an exact tag/SHA continuation out of
+# that pending queue. GitHub retains only one pending run per group even when
+# cancel-in-progress is false; a later main push must not replace a ready
+# release continuation before it starts.
 concurrency:
-  group: release-please
+  group: ${{ github.event_name == 'push' && 'release-please-maintenance' || format('release-please-continuation-{0}-{1}', inputs.cli_tag, inputs.source_sha || 'operator') }}
   cancel-in-progress: false
 
 permissions: {}
+
+env:
+  QURL_RELEASE_LIFECYCLE_COMMANDS: start stop restart status inspect daemon
+  # Production native sharing remains dark until its reviewed Hub trust root
+  # exists. Flip this committed gate to 1 when production is ready; never use a
+  # mutable repository variable or a non-production key here.
+  QURL_REQUIRE_RELEASE_HUB_PIN: '0'
 
 jobs:
   release-please:
@@ -114,13 +146,184 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: scripts/verify-cli-release.sh
 
-  release-cli:
+  # Keep Actions write authority away from the third-party release action.
+  # This narrow job starts the credentialed customer journey only for the
+  # exact release commit. The journey signals the continuation after it passes.
+  signal-cli-release:
+    name: Start the exact CLI customer journey
     needs: release-please
+    if: needs.release-please.outputs.cli_release_created == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - name: Dispatch the exact CLI customer journey
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CLI_TAG: ${{ needs.release-please.outputs.cli_tag }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          [[ "$CLI_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          # Both secret-bearing jobs admit only trusted main workflow code.
+          # Fail before dispatch if
+          # an administrator changes either protected environment.
+          for environment in cli-customer-journey cli-customer-journey-cleanup; do
+            environment_json=$(gh api "repos/$GITHUB_REPOSITORY/environments/$environment")
+            jq -e --arg environment "$environment" '
+              .name == $environment and
+              .deployment_branch_policy.protected_branches == false and
+              .deployment_branch_policy.custom_branch_policies == true
+            ' <<<"$environment_json" >/dev/null || {
+              echo "::error::$environment has an unsafe deployment policy" >&2
+              exit 1
+            }
+            policies=$(gh api "repos/$GITHUB_REPOSITORY/environments/$environment/deployment-branch-policies?per_page=100")
+            jq -e '
+              .total_count == 1 and
+              ([.branch_policies[] | {name,type}] | sort_by(.type,.name)) == [
+                {name:"main",type:"branch"}
+              ]
+            ' <<<"$policies" >/dev/null || {
+              echo "::error::$environment must allow only main; see https://github.com/$GITHUB_REPOSITORY/settings/environments" >&2
+              exit 1
+            }
+          done
+          tag_sha=$(gh api "repos/$GITHUB_REPOSITORY/commits/$CLI_TAG" --jq .sha)
+          [[ "$tag_sha" == "$SOURCE_SHA" ]] || {
+            echo "::error::CLI release tag does not match the exact release source" >&2
+            exit 1
+          }
+          # Run trusted workflow code from main. The CLI workflow checks out
+          # and builds this exact immutable tag after it proves main ancestry.
+          # TestCLICustomerJourneyIsConsolidatedAndTrusted pins the display
+          # title, exact gate names, and four-lane release matrix together.
+          gh workflow run cli.yml --repo "$GITHUB_REPOSITORY" --ref main \
+            --field "release_source_sha=$SOURCE_SHA" \
+            --field "release_source_tag=$CLI_TAG"
+
+  # The customer journey enters here after it passes. This job performs one
+  # exact lookup and never polls or holds a runner.
+  cli-release-gate:
+    name: Verify the exact CLI release gate
+    needs: [release-please, signal-cli-release]
+    if: always() && !cancelled() && github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      # GitHub only returns draft releases to identities with push access.
+      # This job does not write content, but contents:write gives its scoped
+      # GITHUB_TOKEN the access level required to verify the draft binding.
+      contents: write
+    outputs:
+      required: ${{ steps.source.outputs.required }}
+      source_sha: ${{ steps.source.outputs.sha }}
+      cli_tag: ${{ steps.source.outputs.tag }}
+      run_id: ${{ steps.verify.outputs.run_id }}
+      run_attempt: ${{ steps.verify.outputs.run_attempt }}
+    steps:
+      - name: Require the canonical release branch
+        run: |
+          [ "$GITHUB_REF" = refs/heads/main ] || {
+            echo "::error::CLI release gates must run from refs/heads/main, got ${GITHUB_REF}" >&2
+            exit 1
+          }
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - id: source
+        name: Resolve the exact release source
+        env:
+          CLI_TAG: ${{ inputs.cli_tag }}
+          HANDOFF_SOURCE_SHA: ${{ inputs.source_sha }}
+          HANDOFF_RUN_ID: ${{ inputs.cli_run_id }}
+          HANDOFF_RUN_ATTEMPT: ${{ inputs.cli_run_attempt }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "$CLI_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]] || {
+            echo "::error::cli_tag must be one bare semantic-version tag" >&2
+            exit 1
+          }
+          source_sha=$(git rev-parse --verify "${CLI_TAG}^{commit}")
+          [[ "$source_sha" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "::error::release source did not resolve to one exact commit" >&2
+            exit 1
+          }
+          if [[ -n "$HANDOFF_SOURCE_SHA" && "$HANDOFF_SOURCE_SHA" != "$source_sha" ]]; then
+            echo "::error::CLI release tag does not match the handed-off source SHA" >&2
+            exit 1
+          fi
+          git merge-base --is-ancestor "$source_sha" origin/main || {
+            echo "::error::CLI release tag is not reachable from current main" >&2
+            exit 1
+          }
+          # The REST release-by-tag route returns 404 for a draft. `gh release
+          # view` is draft-aware, so validate all three bindings before a
+          # recoverable draft can enter the publication pipeline.
+          release=$(gh release view "$CLI_TAG" --repo "$GITHUB_REPOSITORY" \
+            --json tagName,targetCommitish,isDraft)
+          release_tag=$(jq -er '.tagName | select(type == "string")' <<<"$release")
+          release_target=$(jq -er '.targetCommitish | select(type == "string")' <<<"$release")
+          jq -e '(.isDraft | type) == "boolean"' <<<"$release" >/dev/null || {
+            echo "::error::CLI release metadata has no exact draft state" >&2
+            exit 1
+          }
+          draft=$(jq -r '.isDraft' <<<"$release")
+          [[ "$release_tag" == "$CLI_TAG" ]] || {
+            printf '::error::CLI release tag mismatch: observed %q; expected %q\n' "$release_tag" "$CLI_TAG" >&2
+            exit 1
+          }
+          if [[ "$draft" == true && "$release_target" != "$source_sha" ]]; then
+            printf '::error::Draft CLI release target mismatch: observed %q; expected exact tag commit %q\n' "$release_target" "$source_sha" >&2
+            exit 1
+          fi
+          if [[ ! "$HANDOFF_RUN_ID" =~ ^[1-9][0-9]{0,19}$ ||
+            ! "$HANDOFF_RUN_ATTEMPT" =~ ^[1-9][0-9]?$ ]] ||
+            (( 10#$HANDOFF_RUN_ATTEMPT > 30 )); then
+            echo "::error::CLI asset publication requires one exact tested workflow run and attempt" >&2
+            exit 1
+          fi
+          {
+            echo "tag=$CLI_TAG"
+            echo "sha=$source_sha"
+            echo "required=true"
+          } >>"$GITHUB_OUTPUT"
+
+      - id: verify
+        name: Check the exact packaged customer-journey gate once
+        if: steps.source.outputs.required == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CLI_RUN_ID: ${{ inputs.cli_run_id }}
+          CLI_RUN_ATTEMPT: ${{ inputs.cli_run_attempt }}
+        run: |
+          set -euo pipefail
+          selection=$(scripts/check-exact-cli-release-gate.sh \
+            '${{ steps.source.outputs.sha }}' '${{ steps.source.outputs.tag }}' \
+            "$CLI_RUN_ID" "$CLI_RUN_ATTEMPT" 4)
+          {
+            echo "run_id=$(jq -r .run_id <<<"$selection")"
+            echo "run_attempt=$(jq -r .run_attempt <<<"$selection")"
+          } >>"$GITHUB_OUTPUT"
+          jq -r '"Exact packaged customer journey passed: " + .journey_url' <<<"$selection"
+
+  release-cli:
+    needs: cli-release-gate
     if: >-
-      !cancelled() && (
-        needs.release-please.outputs.cli_release_created == 'true' ||
-        github.event_name == 'workflow_dispatch'
-      )
+      !cancelled() && needs.cli-release-gate.result == 'success' &&
+      needs.cli-release-gate.outputs.required == 'true'
+    outputs:
+      qurl_image_digest: ${{ steps.qurl_candidate.outputs.digest }}
+      qurl_image_already_tagged: ${{ steps.qurl_candidate.outputs.already_tagged }}
+      hub_pin_mode: ${{ steps.release_hub_pin.outputs.mode }}
     runs-on: ubuntu-latest
     timeout-minutes: 40
     permissions:
@@ -135,7 +338,7 @@ jobs:
       # identity.
       id-token: write
     env:
-      CLI_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.cli_tag || needs.release-please.outputs.cli_tag }}
+      CLI_TAG: ${{ needs.cli-release-gate.outputs.cli_tag }}
     steps:
       # Recovery dispatches can be launched from any ref in the GitHub UI.
       # Reject them before checkout or GoReleaser can upload anything: the
@@ -158,6 +361,15 @@ jobs:
         with:
           ref: ${{ env.CLI_TAG }}
           fetch-depth: 0
+
+      - name: Verify the gated source matches the release tag
+        env:
+          GATED_SOURCE_SHA: ${{ needs.cli-release-gate.outputs.source_sha }}
+        run: |
+          [ "$(git rev-parse HEAD)" = "$GATED_SOURCE_SHA" ] || {
+            echo "::error::release tag does not match the exact source that passed the CLI customer journey" >&2
+            exit 1
+          }
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
@@ -189,9 +401,56 @@ jobs:
       # Keep in lockstep with cli-nightly.yml's copy (the snapshot exercises
       # the same SBOM path).
       - name: Install syft
-        uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        uses: anchore/sbom-action/download-syft@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
         with:
           syft-version: 'v1.42.3'
+
+      - name: Verify the production NHP Hub trust pin
+        id: release_hub_pin
+        env:
+          QURL_RELEASE_HUB_PUBLIC_KEY_B64: ${{ secrets.QURL_PROD_NHP_HUB_PUBLIC_KEY_B64 }}
+          QURL_RELEASE_HUB_PUBLIC_KEY_SHA256: ${{ secrets.QURL_PROD_NHP_HUB_PUBLIC_KEY_SHA256 }}
+        run: |
+          set -euo pipefail
+          test_name=TestReleaseHubPinEnvironment
+          test_pattern='^TestReleaseHubPinEnvironment$'
+          actual_test="$(go test ./apps/cli/internal/connector/hub -list "$test_pattern" | sed -n '/^Test/p')"
+          if [[ "$actual_test" != "$test_name" ]]; then
+            echo "::error::exact production Hub-pin test declaration is missing or ambiguous"
+            exit 1
+          fi
+          events=$(mktemp)
+          trap 'rm -f "$events"' EXIT
+          test_status=0
+          go test ./apps/cli/internal/connector/hub -run "$test_pattern" -count=1 -json >"$events" || test_status=$?
+          jq -j 'select(.Output != null) | .Output' "$events"
+          passed="$(jq -r --arg test "$test_name" 'select(.Action == "pass" and .Test == $test) | .Test' "$events")"
+          skipped="$(jq -r --arg test "$test_name" 'select(.Action == "skip" and .Test == $test) | .Test' "$events")"
+          case "$QURL_REQUIRE_RELEASE_HUB_PIN" in
+            0|1) ;;
+            *) echo "::error::release Hub-pin requirement must be 0 or 1" >&2; exit 1 ;;
+          esac
+          mode=
+          if [[ -z "$QURL_RELEASE_HUB_PUBLIC_KEY_B64" && -z "$QURL_RELEASE_HUB_PUBLIC_KEY_SHA256" ]]; then
+            if [[ "$QURL_REQUIRE_RELEASE_HUB_PIN" != 0 || "$skipped" != "$test_name" || -n "$passed" ]]; then
+              echo "::error::dark release Hub-pin test must report one SKIP and no PASS" >&2
+              exit 1
+            fi
+            mode=dark
+          elif [[ -n "$QURL_RELEASE_HUB_PUBLIC_KEY_B64" && -n "$QURL_RELEASE_HUB_PUBLIC_KEY_SHA256" ]]; then
+            if [[ -n "$skipped" || "$passed" != "$test_name" ]]; then
+              echo "::error::configured release Hub-pin test must report one PASS and no SKIP" >&2
+              exit 1
+            fi
+            mode=pinned
+          else
+            echo "::error::release Hub public key and fingerprint must both be set or both be absent" >&2
+            exit 1
+          fi
+          if (( test_status != 0 )); then
+            exit "$test_status"
+          fi
+          printf 'mode=%s\n' "$mode" >>"$GITHUB_OUTPUT"
 
       # release.mode keep-existing (pinned in .goreleaser.yml): GoReleaser
       # uploads artifacts to the release release-please just created and
@@ -203,17 +462,129 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+          QURL_RELEASE_HUB_PUBLIC_KEY_B64: ${{ secrets.QURL_PROD_NHP_HUB_PUBLIC_KEY_B64 }}
           # Pin which tag is being released. A combined release PR can tag
           # this commit for several components at once, and GoReleaser's
           # auto-detection would otherwise pick one by version-sort luck.
           GORELEASER_CURRENT_TAG: ${{ env.CLI_TAG }}
 
+      - name: Verify the draft CLI trust posture
+        env:
+          GH_TOKEN: ${{ github.token }}
+          QURL_RELEASE_HUB_PIN_MODE: ${{ steps.release_hub_pin.outputs.mode }}
+          QURL_RELEASE_HUB_PUBLIC_KEY_B64: ${{ secrets.QURL_PROD_NHP_HUB_PUBLIC_KEY_B64 }}
+          QURL_RELEASE_HUB_PUBLIC_KEY_SHA256: ${{ secrets.QURL_PROD_NHP_HUB_PUBLIC_KEY_SHA256 }}
+        run: |
+          set -euo pipefail
+          case "$QURL_RELEASE_HUB_PIN_MODE" in
+            dark)
+              [[ -z "$QURL_RELEASE_HUB_PUBLIC_KEY_B64" && -z "$QURL_RELEASE_HUB_PUBLIC_KEY_SHA256" ]] || {
+                echo "::error::dark release unexpectedly received Hub trust data" >&2
+                exit 1
+              }
+              ;;
+            pinned)
+              [[ -n "$QURL_RELEASE_HUB_PUBLIC_KEY_B64" && -n "$QURL_RELEASE_HUB_PUBLIC_KEY_SHA256" ]] || {
+                echo "::error::pinned release is missing Hub trust data" >&2
+                exit 1
+              }
+              ;;
+            *) echo "::error::release Hub-pin mode is invalid" >&2; exit 1 ;;
+          esac
+          work=$(mktemp -d)
+          trap 'rm -rf "$work"' EXIT
+          gh release download "$CLI_TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern 'qurl_*_darwin_*.tar.gz' \
+            --pattern 'qurl_*_linux_*.tar.gz' \
+            --pattern 'qurl_*_windows_*.zip' \
+            --dir "$work"
+          release_version="${CLI_TAG#v}"
+          expected=(
+            "qurl_${release_version}_darwin_amd64.tar.gz"
+            "qurl_${release_version}_darwin_arm64.tar.gz"
+            "qurl_${release_version}_linux_amd64.tar.gz"
+            "qurl_${release_version}_linux_arm64.tar.gz"
+            "qurl_${release_version}_windows_amd64.zip"
+            "qurl_${release_version}_windows_arm64.zip"
+          )
+          mapfile -t archives < <(find "$work" -maxdepth 1 -type f \( -name 'qurl_*.tar.gz' -o -name 'qurl_*.zip' \) | LC_ALL=C sort)
+          if (( ${#archives[@]} != ${#expected[@]} )); then
+            echo "::error::expected exactly ${#expected[@]} released qurl archives, found ${#archives[@]}" >&2
+            exit 1
+          fi
+          for filename in "${expected[@]}"; do
+            [[ -f "$work/$filename" ]] || {
+              echo "::error::missing exact release archive $filename" >&2
+              exit 1
+            }
+          done
+          native_binary=
+          for index in "${!archives[@]}"; do
+            archive="${archives[$index]}"
+            extracted="$work/extracted-$index"
+            mkdir "$extracted"
+            case "$archive" in
+              *.zip) unzip -q "$archive" -d "$extracted"; binary="$extracted/qurl.exe" ;;
+              *.tar.gz) tar -xzf "$archive" -C "$extracted"; binary="$extracted/qurl" ;;
+              *) echo "::error::unexpected qurl archive: $archive" >&2; exit 1 ;;
+            esac
+            [[ -f "$binary" ]] || {
+              echo "::error::$(basename "$archive") has no qurl binary" >&2
+              exit 1
+            }
+            # A configured key must occur in all six archives. Dark mode must
+            # not grep an empty value: the single GoReleaser linker input and
+            # native fail-closed checks below own that posture instead.
+            if [[ "$QURL_RELEASE_HUB_PIN_MODE" == pinned ]] &&
+              ! grep -aFq -- "$QURL_RELEASE_HUB_PUBLIC_KEY_B64" "$binary"; then
+                echo "::error::$(basename "$archive") does not carry the exact verified production Hub trust root" >&2
+                exit 1
+            fi
+            if [[ "$archive" == *_linux_amd64.tar.gz ]]; then
+              native_binary=$binary
+            fi
+          done
+          if [[ -z "$native_binary" || ! -x "$native_binary" ]]; then
+            echo "::error::released linux/amd64 archive has no executable qurl binary" >&2
+            exit 1
+          fi
+          if [[ "$QURL_RELEASE_HUB_PIN_MODE" == pinned ]]; then
+            fingerprint=$("$native_binary" version --verify-release-native-trust)
+            if [[ "$fingerprint" != "$QURL_RELEASE_HUB_PUBLIC_KEY_SHA256" ]]; then
+              echo "::error::draft CLI does not carry the exact verified production Hub trust pin" >&2
+              exit 1
+            fi
+          else
+            trust_stdout="$work/dark-trust.stdout"
+            trust_stderr="$work/dark-trust.stderr"
+            if "$native_binary" version --verify-release-native-trust >"$trust_stdout" 2>"$trust_stderr"; then
+              echo "::error::dark draft CLI unexpectedly accepted native production trust" >&2
+              exit 1
+            fi
+            [[ ! -s "$trust_stdout" ]] || {
+              echo "::error::dark draft CLI wrote unexpected trust output" >&2
+              exit 1
+            }
+            grep -Fq 'missing required built-in connection settings' "$trust_stderr" || {
+              echo "::error::dark draft CLI did not fail with the fixed redacted diagnostic" >&2
+              exit 1
+            }
+          fi
+          # GoReleaser injects its v-stripped .Version into native archives.
+          reported_version=$("$native_binary" version | awk 'NR == 1 { print $3 }')
+          if [[ "$reported_version" != "$release_version" ]]; then
+            echo "::error::Linux release archive reports ${reported_version}, want ${release_version}" >&2
+            exit 1
+          fi
+          for command in $QURL_RELEASE_LIFECYCLE_COMMANDS; do
+            "$native_binary" "$command" --help >/dev/null
+          done
+
       - name: Set up QEMU for qurl image smoke
-        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+        uses: docker/setup-qemu-action@1f40c72289eff860ee54a304f1438e3cff362e0a # v4.3.0
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
       - name: Log in to GHCR
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
@@ -240,17 +611,19 @@ jobs:
           fi
 
       # Publish an untagged multi-arch candidate first. The tag is promoted
-      # only after both platform manifests run the exact released version.
-      # BuildKit emits the image provenance and SPDX SBOM attestations.
+      # only after both image platforms and all three native release packages
+      # pass. BuildKit emits the image provenance and SPDX SBOM attestations.
       - name: Build qurl image candidate
         id: qurl_image
         if: steps.qurl_existing.outputs.exists != 'true'
-        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           file: apps/cli/Dockerfile
           platforms: linux/amd64,linux/arm64
-          build-args: VERSION=${{ env.CLI_TAG }}
+          build-args: |
+            VERSION=${{ env.CLI_TAG }}
+            HUB_TRUST_ROOT_B64=${{ secrets.QURL_PROD_NHP_HUB_PUBLIC_KEY_B64 }}
           provenance: mode=max
           sbom: true
           outputs: type=image,name=ghcr.io/layervai/qurl,push-by-digest=true,name-canonical=true,push=true
@@ -258,10 +631,21 @@ jobs:
       - name: Smoke both qurl image platforms
         env:
           QURL_IMAGE: ghcr.io/layervai/qurl@${{ steps.qurl_existing.outputs.digest || steps.qurl_image.outputs.digest }}
+          QURL_RELEASE_HUB_PIN_MODE: ${{ steps.release_hub_pin.outputs.mode }}
+          QURL_RELEASE_HUB_PUBLIC_KEY_SHA256: ${{ secrets.QURL_PROD_NHP_HUB_PUBLIC_KEY_SHA256 }}
         run: |
           set -euo pipefail
           image_name="${QURL_IMAGE%@*}"
           index_json="$(docker buildx imagetools inspect "$QURL_IMAGE" --raw)"
+          image_work=$(mktemp -d)
+          container_id=
+          cleanup_image_smoke() {
+            if [[ -n "$container_id" ]]; then
+              docker rm -f "$container_id" >/dev/null 2>&1 || true
+            fi
+            rm -rf "$image_work"
+          }
+          trap cleanup_image_smoke EXIT
           for platform in linux/amd64 linux/arm64; do
             os="${platform%/*}"
             architecture="${platform#*/}"
@@ -276,54 +660,52 @@ jobs:
                 end
               ' <<<"$index_json")"
             platform_candidate="${image_name}@${platform_digest}"
+            binary="$image_work/qurl-${os}-${architecture}"
+            container_id=$(docker create --platform "$platform" "$platform_candidate")
+            docker cp "$container_id:/usr/local/bin/qurl" "$binary"
+            docker rm "$container_id" >/dev/null
+            container_id=
             got="$(docker run --rm --platform "$platform" "$platform_candidate" version | awk '{print $3}')"
             [ "$got" = "$CLI_TAG" ] || {
               echo "::error::${platform} image reports ${got}, want ${CLI_TAG}" >&2
               exit 1
             }
+            if [[ "$QURL_RELEASE_HUB_PIN_MODE" == pinned ]]; then
+              fingerprint=$(docker run --rm --platform "$platform" "$platform_candidate" version --verify-release-native-trust)
+              [ "$fingerprint" = "$QURL_RELEASE_HUB_PUBLIC_KEY_SHA256" ] || {
+                echo "::error::${platform} image does not carry the exact verified production Hub trust pin" >&2
+                exit 1
+              }
+            else
+              trust_error=$(mktemp)
+              if docker run --rm --platform "$platform" "$platform_candidate" version --verify-release-native-trust >/dev/null 2>"$trust_error"; then
+                echo "::error::dark ${platform} image unexpectedly accepted native production trust" >&2
+                exit 1
+              fi
+              grep -Fq 'missing required built-in connection settings' "$trust_error" || {
+                echo "::error::dark ${platform} image did not fail with the fixed redacted diagnostic" >&2
+                exit 1
+              }
+              rm -f "$trust_error"
+            fi
           done
 
-      - name: Promote and sign tested qurl image
+      - name: Record the tested qurl image candidate
+        id: qurl_candidate
         env:
-          GH_TOKEN: ${{ github.token }}
-          IMAGE_NAME: ghcr.io/layervai/qurl
           IMAGE_DIGEST: ${{ steps.qurl_existing.outputs.digest || steps.qurl_image.outputs.digest }}
           IMAGE_ALREADY_TAGGED: ${{ steps.qurl_existing.outputs.exists }}
         run: |
-          candidate="${IMAGE_NAME}@${IMAGE_DIGEST}"
-          tagged="${IMAGE_NAME}:${CLI_TAG}"
-          if [ "$IMAGE_ALREADY_TAGGED" != 'true' ]; then
-            docker buildx imagetools create --tag "$tagged" "$candidate"
-          fi
-          promoted_digest="$(docker buildx imagetools inspect "$tagged" | awk '$1 == "Digest:" { print $2; exit }')"
-          [ "$promoted_digest" = "$IMAGE_DIGEST" ] || {
-            echo "::error::promoted qurl image digest ${promoted_digest} differs from tested ${IMAGE_DIGEST}" >&2
+          [[ "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+            echo "::error::tested qurl image digest is invalid" >&2
             exit 1
           }
-          # A multi-platform OCI index has one BuildKit provenance and SBOM
-          # statement per platform; imagetools' single-image .Provenance/.SBOM
-          # shortcuts do not aggregate them. Fetch and validate the four exact
-          # in-toto blobs, then sign the manifest that binds their digests to
-          # this tested index digest.
-          QURL_EXPECTED_VCS_REVISION="$(git rev-parse HEAD)" \
-          QURL_EXPECTED_VCS_SOURCE=https://github.com/layervai/qurl-integrations \
-            scripts/extract-qurl-image-attestations.sh "$candidate" dist/qurl-image-attestations
-          cp dist/qurl-image-attestations/qurl-image-buildkit-manifest.json dist/qurl-image-buildkit-manifest.json
-          cosign sign --yes "$candidate"
-          cosign attest --yes \
-            --type https://layerv.ai/attestations/qurl-image-buildkit-manifest/v1 \
-            --predicate dist/qurl-image-buildkit-manifest.json \
-            "$candidate"
-          cosign verify \
-            --certificate-identity 'https://github.com/layervai/qurl-integrations/.github/workflows/release-please.yml@refs/heads/main' \
-            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-            "$candidate" >/dev/null
-          cosign verify-attestation --type https://layerv.ai/attestations/qurl-image-buildkit-manifest/v1 \
-            --certificate-identity 'https://github.com/layervai/qurl-integrations/.github/workflows/release-please.yml@refs/heads/main' \
-            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-            "$candidate" >/dev/null
-          printf '%s\n' "$candidate" > dist/qurl-image.txt
-          gh release upload "$CLI_TAG" dist/qurl-image.txt dist/qurl-image-buildkit-manifest.json --clobber
+          [[ "$IMAGE_ALREADY_TAGGED" == true || "$IMAGE_ALREADY_TAGGED" == false ]] || {
+            echo "::error::tested qurl image tag state is invalid" >&2
+            exit 1
+          }
+          echo "digest=$IMAGE_DIGEST" >> "$GITHUB_OUTPUT"
+          echo "already_tagged=$IMAGE_ALREADY_TAGGED" >> "$GITHUB_OUTPUT"
 
       # Self-test the signature with the exact consumer recipe from
       # RELEASING.md. If the documented
@@ -345,13 +727,416 @@ jobs:
             --certificate-oidc-issuer https://token.actions.githubusercontent.com \
             dist/checksums.txt
 
+      - name: Validate generated Homebrew cask
+        run: |
+          set -euo pipefail
+          generated=dist/homebrew/Casks/qurl.rb
+          release_version="${CLI_TAG#v}"
+          [ "v${release_version}" = "$CLI_TAG" ]
+          [ -f "$generated" ] || {
+            echo "::error::GoReleaser did not generate the qurl Homebrew cask" >&2
+            exit 1
+          }
+          version_lines=$(awk -v want="version \"${release_version}\"" '
+            { line=$0; sub(/^[[:space:]]*/, "", line); if (line == want) count++ }
+            END { print count + 0 }
+          ' "$generated")
+          [ "$version_lines" = 1 ] || {
+            echo "::error::generated Homebrew cask does not name the exact CLI version" >&2
+            exit 1
+          }
+          archive_url_prefix='releases/download/v#{version}/qurl_#{version}_'
+          [ "$(grep -Fc "$archive_url_prefix" "$generated")" = 4 ] || {
+            echo "::error::generated Homebrew cask does not bind exactly four release archives" >&2
+            exit 1
+          }
+          for archive in darwin_arm64 darwin_amd64 linux_arm64 linux_amd64; do
+            [ "$(grep -Fc "${archive_url_prefix}${archive}.tar.gz" "$generated")" = 1 ] || {
+              echo "::error::generated Homebrew cask does not bind the exact ${archive} release archive" >&2
+              exit 1
+            }
+          done
+
+      # Linux is validated above on this native runner. Stage the Darwin and
+      # Windows outputs so their native runners test the same GoReleaser bytes.
+      - name: Stage the Homebrew validation bundle
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: qurl-homebrew-validation-${{ needs.cli-release-gate.outputs.source_sha }}
+          path: |
+            dist/homebrew/Casks/qurl.rb
+            dist/qurl_*_darwin_*.tar.gz
+            dist/qurl_*_windows_amd64.zip
+          if-no-files-found: error
+          include-hidden-files: false
+          compression-level: 0
+          retention-days: 1
+
       - name: Post recovery instructions on failure
         if: failure()
         run: |
           {
             echo "## CLI release incomplete"
             echo ""
-            echo "Tag and GitHub Release \`${CLI_TAG}\` exist, but GoReleaser did not finish attaching assets — \`scripts/install.sh\` 404s on this version and the Homebrew tap was not updated."
+            echo "The artifact job did not finish. \`${CLI_TAG}\` remains a draft and the Homebrew tap stays on its prior version."
             echo ""
-            echo "Recovery: fix the cause, then re-run via workflow_dispatch with \`cli_tag=${CLI_TAG}\`, or use **Re-run failed jobs** on this run. Do NOT use 'Re-run all jobs' (release-please will skip this job because the release already exists). Re-uploads are idempotent."
+            echo "Recovery: fix the cause and use **Re-run failed jobs**. For a new recovery run, first pass cli.yml for this exact tag, then dispatch this workflow from main with the tag and exact passing run ID and attempt. Re-uploads are idempotent."
           } >> "$GITHUB_STEP_SUMMARY"
+
+  validate-homebrew-cask:
+    name: Validate exact Homebrew cask before publication
+    needs: [release-cli, cli-release-gate]
+    if: >-
+      !cancelled() && needs.release-cli.result == 'success' &&
+      needs.cli-release-gate.outputs.required == 'true'
+    runs-on: macos-latest
+    timeout-minutes: 20
+    permissions:
+      actions: read
+      contents: read
+    env:
+      CLI_TAG: ${{ needs.cli-release-gate.outputs.cli_tag }}
+      QURL_RELEASE_HUB_PIN_MODE: ${{ needs.release-cli.outputs.hub_pin_mode }}
+      QURL_RELEASE_HUB_PUBLIC_KEY_SHA256: ${{ secrets.QURL_PROD_NHP_HUB_PUBLIC_KEY_SHA256 }}
+      HOMEBREW_NO_AUTO_UPDATE: '1'
+      HOMEBREW_NO_INSTALL_CLEANUP: '1'
+    steps:
+      - name: Download the staged Homebrew bundle
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: qurl-homebrew-validation-${{ needs.cli-release-gate.outputs.source_sha }}
+          path: ${{ runner.temp }}/qurl-homebrew-validation
+          digest-mismatch: error
+
+      - name: Audit and install the exact staged cask
+        env:
+          TAP_ROOT: ${{ runner.temp }}/qurl-homebrew-validation-tap
+        run: |
+          set -euo pipefail
+          cask="$RUNNER_TEMP/qurl-homebrew-validation/homebrew/Casks/qurl.rb"
+          release_version="${CLI_TAG#v}"
+          [[ -f "$cask" && "v${release_version}" == "$CLI_TAG" ]]
+
+          # GoReleaser owns the cask template. Homebrew owns its Ruby layout.
+          # Apply only Homebrew's safe autocorrections, then require a clean
+          # style and audit result on the exact bytes that will be published.
+          brew style --fix "$cask"
+          brew style "$cask"
+
+          tap_link="$(brew --repository)/Library/Taps/layervaici/homebrew-qurl-release-gate"
+          mkdir -p "$TAP_ROOT/Casks" "$(dirname "$tap_link")"
+          install -m 0644 "$cask" "$TAP_ROOT/Casks/qurl.rb"
+          ln -s "$TAP_ROOT" "$tap_link"
+          echo "QURL_HOMEBREW_TAP_LINK=$tap_link" >>"$GITHUB_ENV"
+
+          token=layervaici/qurl-release-gate/qurl
+          brew audit --cask "$token"
+          case "$(uname -m)" in
+            arm64) archive="$RUNNER_TEMP/qurl-homebrew-validation/qurl_${release_version}_darwin_arm64.tar.gz" ;;
+            x86_64) archive="$RUNNER_TEMP/qurl-homebrew-validation/qurl_${release_version}_darwin_amd64.tar.gz" ;;
+            *) echo "::error::unsupported Homebrew validation architecture" >&2; exit 1 ;;
+          esac
+          [[ -f "$archive" ]] || {
+            echo "::error::native Homebrew validation archive is missing" >&2
+            exit 1
+          }
+          cache_path="$(brew --cache --cask "$token")"
+          mkdir -p "$(dirname "$cache_path")"
+          install -m 0644 "$archive" "$cache_path"
+          echo "QURL_HOMEBREW_CACHE_PATH=$cache_path" >>"$GITHUB_ENV"
+
+          # The populated cache makes this a test of the exact staged archive
+          # and cask. It does not require the draft GitHub Release to be public.
+          brew install --cask "$token"
+          installed="$(command -v qurl)"
+          [[ -x "$installed" ]]
+          # GoReleaser injects its v-stripped .Version into native archives.
+          reported_version=$("$installed" version | awk 'NR == 1 { print $3 }')
+          [[ "$reported_version" == "$release_version" ]] || {
+            echo "::error::Homebrew-installed CLI reports ${reported_version}, want ${release_version}" >&2
+            exit 1
+          }
+          if [[ "$QURL_RELEASE_HUB_PIN_MODE" == pinned ]]; then
+            fingerprint=$("$installed" version --verify-release-native-trust)
+            [[ "$fingerprint" == "$QURL_RELEASE_HUB_PUBLIC_KEY_SHA256" ]] || {
+              echo "::error::Homebrew-installed CLI has the wrong production Hub trust pin" >&2
+              exit 1
+            }
+          elif [[ "$QURL_RELEASE_HUB_PIN_MODE" == dark ]]; then
+            trust_error=$(mktemp)
+            if "$installed" version --verify-release-native-trust >/dev/null 2>"$trust_error"; then
+              echo "::error::dark Homebrew-installed CLI unexpectedly accepted native production trust" >&2
+              exit 1
+            fi
+            grep -Fq 'missing required built-in connection settings' "$trust_error" || {
+              echo "::error::dark Homebrew-installed CLI did not fail with the fixed redacted diagnostic" >&2
+              exit 1
+            }
+            rm -f "$trust_error"
+          else
+            echo "::error::Homebrew Hub-pin mode is invalid" >&2
+            exit 1
+          fi
+          for command in $QURL_RELEASE_LIFECYCLE_COMMANDS; do
+            "$installed" "$command" --help >/dev/null
+          done
+
+      - name: Upload the audited and installed cask
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: qurl-homebrew-validated-${{ needs.cli-release-gate.outputs.source_sha }}
+          path: ${{ runner.temp }}/qurl-homebrew-validation/homebrew/Casks/qurl.rb
+          if-no-files-found: error
+          include-hidden-files: false
+          compression-level: 0
+          retention-days: 1
+
+      - name: Remove the validation cask and cache
+        if: always()
+        run: |
+          brew uninstall --cask layervaici/qurl-release-gate/qurl 2>/dev/null || true
+          [[ -z "${QURL_HOMEBREW_TAP_LINK:-}" || ! -L "$QURL_HOMEBREW_TAP_LINK" ]] || unlink "$QURL_HOMEBREW_TAP_LINK"
+          [[ -z "${QURL_HOMEBREW_CACHE_PATH:-}" || ! -f "$QURL_HOMEBREW_CACHE_PATH" ]] || unlink "$QURL_HOMEBREW_CACHE_PATH"
+
+  validate-windows-release-archive:
+    name: Validate exact Windows release archive
+    needs: [release-cli, cli-release-gate]
+    if: >-
+      !cancelled() && needs.release-cli.result == 'success' &&
+      needs.cli-release-gate.outputs.required == 'true'
+    runs-on: windows-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: read
+    env:
+      CLI_TAG: ${{ needs.cli-release-gate.outputs.cli_tag }}
+      QURL_RELEASE_HUB_PIN_MODE: ${{ needs.release-cli.outputs.hub_pin_mode }}
+      QURL_RELEASE_HUB_PUBLIC_KEY_SHA256: ${{ secrets.QURL_PROD_NHP_HUB_PUBLIC_KEY_SHA256 }}
+    steps:
+      - name: Download the staged Windows release archive
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: qurl-homebrew-validation-${{ needs.cli-release-gate.outputs.source_sha }}
+          path: ${{ runner.temp }}/qurl-release-archive-validation
+          digest-mismatch: error
+
+      - name: Validate the exact Windows archive command roster
+        shell: pwsh
+        run: |
+          $releaseVersion = $env:CLI_TAG.TrimStart('v')
+          $archive = Join-Path $env:RUNNER_TEMP "qurl-release-archive-validation/qurl_${releaseVersion}_windows_amd64.zip"
+          $extracted = Join-Path $env:RUNNER_TEMP 'qurl-release-windows'
+          if (-not (Test-Path -LiteralPath $archive -PathType Leaf)) { throw 'exact Windows release archive is missing' }
+          Expand-Archive -LiteralPath $archive -DestinationPath $extracted -ErrorAction Stop
+          $binary = Join-Path $extracted 'qurl.exe'
+          if (-not (Test-Path -LiteralPath $binary -PathType Leaf)) { throw 'Windows release archive has no qurl.exe' }
+          $versionOutput = & $binary version
+          if ($LASTEXITCODE -ne 0) {
+            throw "Windows release archive qurl version exited $LASTEXITCODE"
+          }
+          $versionLine = $versionOutput | Select-Object -First 1
+          if (-not $versionLine) {
+            throw 'Windows release archive printed no version line'
+          }
+          $versionFields = $versionLine.Trim() -split '\s+'
+          if ($versionFields.Count -lt 3 -or $versionFields[2] -cne $releaseVersion) {
+            throw "Windows release archive reports $($versionFields[2]), want $releaseVersion"
+          }
+          $trustOutput = @(& $binary version --verify-release-native-trust 2>&1)
+          $trustStatus = $LASTEXITCODE
+          switch ($env:QURL_RELEASE_HUB_PIN_MODE) {
+            'pinned' {
+              if ($trustStatus -ne 0 -or $trustOutput.Count -ne 1 -or $trustOutput[0] -cne $env:QURL_RELEASE_HUB_PUBLIC_KEY_SHA256) {
+                throw 'Windows release archive has the wrong production Hub trust pin'
+              }
+            }
+            'dark' {
+              $trustText = $trustOutput -join "`n"
+              if ($trustStatus -eq 0 -or $trustText -cnotmatch 'missing required built-in connection settings') {
+                throw 'dark Windows release archive did not fail with the fixed redacted diagnostic'
+              }
+            }
+            default { throw 'Windows release archive Hub-pin mode is invalid' }
+          }
+          foreach ($command in ($env:QURL_RELEASE_LIFECYCLE_COMMANDS -split ' ')) {
+            & $binary $command --help *> $null
+            if ($LASTEXITCODE -ne 0) { throw "Windows release archive does not expose $command" }
+          }
+
+  publish-cli-release:
+    name: Publish the verified CLI release
+    needs: [release-cli, validate-homebrew-cask, validate-windows-release-archive, cli-release-gate]
+    if: >-
+      !cancelled() && needs.release-cli.result == 'success' &&
+      needs.validate-homebrew-cask.result == 'success' &&
+      needs.validate-windows-release-archive.result == 'success' &&
+      needs.cli-release-gate.outputs.required == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
+    env:
+      CLI_TAG: ${{ needs.cli-release-gate.outputs.cli_tag }}
+      QURL_IMAGE_DIGEST: ${{ needs.release-cli.outputs.qurl_image_digest }}
+      QURL_IMAGE_ALREADY_TAGGED: ${{ needs.release-cli.outputs.qurl_image_already_tagged }}
+    steps:
+      - name: Require the canonical release branch
+        run: |
+          [ "$GITHUB_REF" = refs/heads/main ] || {
+            echo "::error::CLI publication must run from refs/heads/main, got ${GITHUB_REF}" >&2
+            exit 1
+          }
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.CLI_TAG }}
+          fetch-depth: 0
+
+      - name: Verify the gated source before image publication
+        env:
+          GATED_SOURCE_SHA: ${{ needs.cli-release-gate.outputs.source_sha }}
+        run: |
+          [ "$(git rev-parse HEAD)" = "$GATED_SOURCE_SHA" ] || {
+            echo "::error::release tag does not match the exact source that passed the CLI customer journey" >&2
+            exit 1
+          }
+
+      - name: Set up Docker Buildx for image publication
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - name: Log in to GHCR for image publication
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install cosign for image publication
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: 'v3.0.6'
+
+      - name: Install ORAS for image publication
+        uses: oras-project/setup-oras@1d808f7d7f6995cc68b7bf507bfe5c5446e1dc9d # v2.0.1
+        with:
+          version: 1.3.1
+
+      - name: Sign and promote the tested qurl image
+        env:
+          GH_TOKEN: ${{ github.token }}
+          IMAGE_NAME: ghcr.io/layervai/qurl
+          IMAGE_DIGEST: ${{ env.QURL_IMAGE_DIGEST }}
+          IMAGE_ALREADY_TAGGED: ${{ env.QURL_IMAGE_ALREADY_TAGGED }}
+        run: |
+          set -euo pipefail
+          [[ "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "$IMAGE_ALREADY_TAGGED" == true || "$IMAGE_ALREADY_TAGGED" == false ]]
+          candidate="${IMAGE_NAME}@${IMAGE_DIGEST}"
+          tagged="${IMAGE_NAME}:${CLI_TAG}"
+          # A multi-platform OCI index has one BuildKit provenance and SBOM
+          # statement per platform. Bind their exact digests to the tested
+          # index only after every native package validator has passed.
+          QURL_EXPECTED_VCS_REVISION="$(git rev-parse HEAD)" \
+          QURL_EXPECTED_VCS_SOURCE=https://github.com/layervai/qurl-integrations \
+            scripts/extract-qurl-image-attestations.sh "$candidate" dist/qurl-image-attestations
+          cp dist/qurl-image-attestations/qurl-image-buildkit-manifest.json dist/qurl-image-buildkit-manifest.json
+          cosign sign --yes "$candidate"
+          cosign attest --yes \
+            --type https://layerv.ai/attestations/qurl-image-buildkit-manifest/v1 \
+            --predicate dist/qurl-image-buildkit-manifest.json \
+            "$candidate"
+          cosign verify \
+            --certificate-identity 'https://github.com/layervai/qurl-integrations/.github/workflows/release-please.yml@refs/heads/main' \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            "$candidate" >/dev/null
+          cosign verify-attestation --type https://layerv.ai/attestations/qurl-image-buildkit-manifest/v1 \
+            --certificate-identity 'https://github.com/layervai/qurl-integrations/.github/workflows/release-please.yml@refs/heads/main' \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            "$candidate" >/dev/null
+          printf '%s\n' "$candidate" > dist/qurl-image.txt
+          gh release upload "$CLI_TAG" dist/qurl-image.txt dist/qurl-image-buildkit-manifest.json --clobber
+          if [ "$IMAGE_ALREADY_TAGGED" != true ]; then
+            docker buildx imagetools create --tag "$tagged" "$candidate"
+          fi
+          # Ask Buildx for only the index digest. Piping its full response into
+          # an early-exit reader under pipefail can make Buildx return 255.
+          promoted_digest="$(docker buildx imagetools inspect --format '{{.Manifest.Digest}}' "$tagged")"
+          [[ "$promoted_digest" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+            echo "::error::promoted qURL image returned a malformed digest: ${promoted_digest:-<empty>}" >&2
+            exit 1
+          }
+          [ "$promoted_digest" = "$IMAGE_DIGEST" ] || {
+            echo "::error::promoted qURL image digest ${promoted_digest} differs from tested ${IMAGE_DIGEST}" >&2
+            exit 1
+          }
+
+      - name: Publish the verified CLI release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release edit "$CLI_TAG" --repo "$GITHUB_REPOSITORY" --draft=false --verify-tag
+          is_draft="$(gh release view "$CLI_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)"
+          [ "$is_draft" = false ] || {
+            echo "::error::verified CLI release remained a draft" >&2
+            exit 1
+          }
+
+  publish-homebrew-cask:
+    name: Publish the audited Homebrew cask
+    needs: [publish-cli-release, validate-homebrew-cask, cli-release-gate]
+    if: >-
+      !cancelled() && needs.publish-cli-release.result == 'success' &&
+      needs.validate-homebrew-cask.result == 'success' &&
+      needs.cli-release-gate.outputs.required == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+    env:
+      CLI_TAG: ${{ needs.cli-release-gate.outputs.cli_tag }}
+    steps:
+      - name: Download the audited Homebrew cask
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: qurl-homebrew-validated-${{ needs.cli-release-gate.outputs.source_sha }}
+          path: ${{ runner.temp }}/qurl-homebrew-validated
+          digest-mismatch: error
+
+      - name: Publish the audited Homebrew cask
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tap_repo=layervai/homebrew-tap
+          tap_branch=main
+          cask_path=Casks/qurl.rb
+          generated="$RUNNER_TEMP/qurl-homebrew-validated/qurl.rb"
+          [[ -f "$generated" ]] || {
+            echo "::error::audited Homebrew cask is missing" >&2
+            exit 1
+          }
+
+          work="$(mktemp -d)"
+          trap 'rm -rf "$work"' EXIT
+          gh api "repos/${tap_repo}/contents/${cask_path}?ref=${tap_branch}" > "$work/current.json"
+          current_sha="$(jq -er '.sha | select(test("^[0-9a-f]{40}$"))' "$work/current.json")"
+          jq -er .content "$work/current.json" | base64 --decode > "$work/current.rb"
+          if cmp -s "$generated" "$work/current.rb"; then
+            echo "Homebrew cask already names ${CLI_TAG}."
+            exit 0
+          fi
+
+          content="$(base64 -w 0 < "$generated")"
+          jq -n \
+            --arg message "qurl ${CLI_TAG}" \
+            --arg content "$content" \
+            --arg sha "$current_sha" \
+            --arg branch "$tap_branch" \
+            '{message:$message,content:$content,sha:$sha,branch:$branch}' |
+            gh api --method PUT "repos/${tap_repo}/contents/${cask_path}" --input - |
+            jq -e '.commit.sha | test("^[0-9a-f]{40}$")' >/dev/null

@@ -1,5 +1,100 @@
 # Changelog
 
+## [2.4.0](https://github.com/layervai/qurl-integrations/compare/v2.3.3...v2.4.0) (2026-09-08)
+
+
+### ⚠ BREAKING CHANGES
+
+* **cli:** Resource commands and native Connector continuity require CRID. Resource public keys are verification data. Old protocol fields and resource journals are rejected without conversion. Before starting fresh, preserve unresolved state, stop the daemon, revoke its device key, move the complete state directory aside, then log in and publish again with new CRIDs.
+
+### Features
+
+* **cli:** use CRID for Connector continuity and resource management ([8779071](https://github.com/layervai/qurl-integrations/commit/877907180c1220ec6ea325c95704818bab926a75))
+
+## [2.3.3](https://github.com/layervai/qurl-integrations/compare/v2.3.2...v2.3.3) (2026-09-07)
+
+
+### Bug Fixes
+
+* **cli:** model crash in warm-restart soak ([#1402](https://github.com/layervai/qurl-integrations/issues/1402)) ([238dacf](https://github.com/layervai/qurl-integrations/commit/238dacf5e1f60d6a0a6a8fe2c6d04664cf6e0ed7))
+* **cli:** recover tunnel sessions after control loss ([#1414](https://github.com/layervai/qurl-integrations/issues/1414)) ([ac94aa3](https://github.com/layervai/qurl-integrations/commit/ac94aa380c7f8b5553b4e3d9ccfece7886de2e32))
+
+## [2.3.2](https://github.com/layervai/qurl-integrations/compare/v2.3.1...v2.3.2) (2026-09-05)
+
+
+### Bug Fixes
+
+* **ci:** keep macOS grant probe on direct egress ([#1307](https://github.com/layervai/qurl-integrations/issues/1307)) ([e730dbf](https://github.com/layervai/qurl-integrations/commit/e730dbf6c66f2168d813999709a7c4a6a4db8dbd))
+
+## [2.3.1](https://github.com/layervai/qurl-integrations/compare/v2.3.0...v2.3.1) (2026-09-05)
+
+
+### Bug Fixes
+
+* **cli:** recover reauthorized headless sharing state ([#1388](https://github.com/layervai/qurl-integrations/issues/1388)) ([100e8ad](https://github.com/layervai/qurl-integrations/commit/100e8adee4b4d3966adc142f878b0b05f0a592ea))
+
+## [2.3.0](https://github.com/layervai/qurl-integrations/compare/v2.2.0...v2.3.0) (2026-09-05)
+
+
+### Features
+
+* **cli:** add a per-share session group mode for the local daemon ([#1331](https://github.com/layervai/qurl-integrations/issues/1331)) ([ed2c047](https://github.com/layervai/qurl-integrations/commit/ed2c0475612f91bf4949e756af815bbf8698db8b))
+* **cli:** serve every local share on one Connector session ([#1326](https://github.com/layervai/qurl-integrations/issues/1326)) ([946d0f5](https://github.com/layervai/qurl-integrations/commit/946d0f59db6bfe6e0ac51bbe0b0b8724bce84a2e))
+
+
+### Bug Fixes
+
+* **cli:** allow Connector name reuse after deletion ([#1384](https://github.com/layervai/qurl-integrations/issues/1384)) ([e7b8345](https://github.com/layervai/qurl-integrations/commit/e7b83451ee65678d734724c9e7773423a8e860a9))
+* **cli:** bound retired and pending Connector resource memories ([#1334](https://github.com/layervai/qurl-integrations/issues/1334)) ([a92fbe3](https://github.com/layervai/qurl-integrations/commit/a92fbe3418648711ba52e91fa9aa31a704fd646b))
+* **cli:** converge a deleted share's row when its Connector ID was rebound ([#1341](https://github.com/layervai/qurl-integrations/issues/1341)) ([5dbd819](https://github.com/layervai/qurl-integrations/commit/5dbd81920a9860580f1cbc4898847b71956318ee))
+* **cli:** cut saturated live-tailed chains at the link before the share ([#1336](https://github.com/layervai/qurl-integrations/issues/1336)) ([549bff4](https://github.com/layervai/qurl-integrations/commit/549bff4fd50f861699ad6c676031952ebefbfbdf))
+* **cli:** keep a platform-refused route retrying instead of turning it off ([#1330](https://github.com/layervai/qurl-integrations/issues/1330)) ([cc2d6df](https://github.com/layervai/qurl-integrations/commit/cc2d6df25700a21ae745d5a544cd30457298c694))
+* **cli:** keep live default-ID chains intact under retired eviction ([#1335](https://github.com/layervai/qurl-integrations/issues/1335)) ([fa5b5aa](https://github.com/layervai/qurl-integrations/commit/fa5b5aa2c71f7fdcec14821a701335031eb49cd1))
+* **cli:** reauthorize headless resources before serving ([#1387](https://github.com/layervai/qurl-integrations/issues/1387)) ([cdac5cd](https://github.com/layervai/qurl-integrations/commit/cdac5cd78531805b4e33d0bc6a7ee71651fd11ef))
+
+## [2.2.0](https://github.com/layervai/qurl-integrations/compare/v2.1.1...v2.2.0) (2026-09-02)
+
+
+### ⚠ BREAKING CHANGES
+
+* **cli:** rename the resolve command to share (hard cutover) ([#1323](https://github.com/layervai/qurl-integrations/issues/1323))
+
+### Features
+
+* **cli:** rename the resolve command to share (hard cutover) ([#1323](https://github.com/layervai/qurl-integrations/issues/1323)) ([ae6a567](https://github.com/layervai/qurl-integrations/commit/ae6a567a4828da75bf3332fae39d31fb908eaddb))
+
+
+### Bug Fixes
+
+* **ci:** validate generated Homebrew archive templates ([#1317](https://github.com/layervai/qurl-integrations/issues/1317)) ([e60cb25](https://github.com/layervai/qurl-integrations/commit/e60cb25d89bbbf5623bf2ec875b8cc2ac339ae21))
+
+## [2.1.1](https://github.com/layervai/qurl-integrations/compare/v2.1.0...v2.1.1) (2026-09-01)
+
+
+### Bug Fixes
+
+* **cli:** use UDP-only Connector control plane ([#1312](https://github.com/layervai/qurl-integrations/issues/1312)) ([748f80c](https://github.com/layervai/qurl-integrations/commit/748f80c0a3f57298cf2449410a75423a88028a42))
+
+## [2.1.0](https://github.com/layervai/qurl-integrations/compare/v2.0.3...v2.1.0) (2026-09-01)
+
+
+### Features
+
+* **cli:** ship registered CRID lifecycle ([#1279](https://github.com/layervai/qurl-integrations/issues/1279)) ([528695b](https://github.com/layervai/qurl-integrations/commit/528695bb8fe2e8418abb4f3c566719473bda3192))
+
+
+### Bug Fixes
+
+* **cli:** carry qv2 session bearer to content ([#1303](https://github.com/layervai/qurl-integrations/issues/1303)) ([502a0a3](https://github.com/layervai/qurl-integrations/commit/502a0a3cfe5f8cc43aff04924bb1670b54d4cb95))
+* **cli:** classify transient access denials ([#1301](https://github.com/layervai/qurl-integrations/issues/1301)) ([f88c71f](https://github.com/layervai/qurl-integrations/commit/f88c71f1e7874c7300306a4c90c6a9ae3f6fce20))
+* **cli:** complete packaged lifecycle journey ([#1296](https://github.com/layervai/qurl-integrations/issues/1296)) ([265d79b](https://github.com/layervai/qurl-integrations/commit/265d79b9b8fcbfa3b6835271a318936e62796009))
+* **cli:** harden packaged lifecycle journey ([#1294](https://github.com/layervai/qurl-integrations/issues/1294)) ([dba10e9](https://github.com/layervai/qurl-integrations/commit/dba10e947eb3fc8b51ffd9a84f28069da134b796))
+* **cli:** permit fail-closed dark releases ([#1300](https://github.com/layervai/qurl-integrations/issues/1300)) ([2c728e1](https://github.com/layervai/qurl-integrations/commit/2c728e1d7f6cf6f8d147167d97ba907c0e2fecaa))
+* **cli:** preserve actionable lifecycle failures ([#1298](https://github.com/layervai/qurl-integrations/issues/1298)) ([ffd119b](https://github.com/layervai/qurl-integrations/commit/ffd119b018eeaf53cf957afa1e9b6dc7b6aeb59f))
+* **cli:** repair packaged customer journey ([#1293](https://github.com/layervai/qurl-integrations/issues/1293)) ([8787051](https://github.com/layervai/qurl-integrations/commit/8787051bd37bf245e00adba1c149d67674200060))
+* **cli:** use native UDP for Connector sessions ([#1308](https://github.com/layervai/qurl-integrations/issues/1308)) ([bb67fac](https://github.com/layervai/qurl-integrations/commit/bb67fac42dbc66d8780e2de317e9f108b25df601))
+* **cli:** stabilize packaged CRID customer journey ([#1297](https://github.com/layervai/qurl-integrations/issues/1297)) ([db24f49](https://github.com/layervai/qurl-integrations/commit/db24f494a38d6bd4689a5e4dbbfd65f15cb9f66f))
+
 ## [2.0.3](https://github.com/layervai/qurl-integrations/compare/v2.0.2...v2.0.3) (2026-08-26)
 
 
@@ -38,21 +133,21 @@
 
 ### Features
 
-* **cli:** add sandbox matched-cohort lifecycle authority ([#1256](https://github.com/layervai/qurl-integrations/issues/1256)) ([7a1b061](https://github.com/layervai/qurl-integrations/commit/7a1b0613d527de8924c59f72aed91fc8a08fb190))
-* **cli:** use shared sandbox fixed canaries ([#1259](https://github.com/layervai/qurl-integrations/issues/1259)) ([78b0254](https://github.com/layervai/qurl-integrations/commit/78b025404be1d52e9fe9144a28812b71dcd80b96))
+* **cli:** add isolated lifecycle validation authority ([#1256](https://github.com/layervai/qurl-integrations/issues/1256)) ([7a1b061](https://github.com/layervai/qurl-integrations/commit/7a1b0613d527de8924c59f72aed91fc8a08fb190))
+* **cli:** stabilize lifecycle validation with fixed test identities ([#1259](https://github.com/layervai/qurl-integrations/issues/1259)) ([78b0254](https://github.com/layervai/qurl-integrations/commit/78b025404be1d52e9fe9144a28812b71dcd80b96))
 
 ## [1.7.0](https://github.com/layervai/qurl-integrations/compare/v1.6.2...v1.7.0) (2026-08-21)
 
 
 ### Features
 
-* **cli:** resolve Connector resources through native NHP ([79c7358](https://github.com/layervai/qurl-integrations/commit/79c735821c64dd7ce2f0590a8258ada8cc2e5402))
+* **cli:** resolve Connector resources through the qURL platform ([79c7358](https://github.com/layervai/qurl-integrations/commit/79c735821c64dd7ce2f0590a8258ada8cc2e5402))
 
 
 ### Bug Fixes
 
-* **cli:** pin Connector proof to sandbox origin ([#1242](https://github.com/layervai/qurl-integrations/issues/1242)) ([13cde81](https://github.com/layervai/qurl-integrations/commit/13cde8130a06fd0e212db1b345559daec8bb3d5e))
-* **cli:** pin proof to the sandbox NHP Hub ([#1243](https://github.com/layervai/qurl-integrations/issues/1243)) ([f39ac2e](https://github.com/layervai/qurl-integrations/commit/f39ac2ed477e9f33dc83b075447e6e5f4742655e))
+* **cli:** bind Connector validation to its deployment ([#1242](https://github.com/layervai/qurl-integrations/issues/1242)) ([13cde81](https://github.com/layervai/qurl-integrations/commit/13cde8130a06fd0e212db1b345559daec8bb3d5e))
+* **cli:** pin Connector validation to the trusted platform endpoint ([#1243](https://github.com/layervai/qurl-integrations/issues/1243)) ([f39ac2e](https://github.com/layervai/qurl-integrations/commit/f39ac2ed477e9f33dc83b075447e6e5f4742655e))
 
 ## [1.6.2](https://github.com/layervai/qurl-integrations/compare/v1.6.1...v1.6.2) (2026-08-20)
 
@@ -122,7 +217,7 @@
 
 ### Features
 
-* **cli:** port the knock-only connector supervisor and link the FRP fork ([#1127](https://github.com/layervai/qurl-integrations/issues/1127)) ([047e1e5](https://github.com/layervai/qurl-integrations/commit/047e1e512f19f5f7fd76ab46a7d30de3359facd7))
+* **cli:** add the local Connector session supervisor ([#1127](https://github.com/layervai/qurl-integrations/issues/1127)) ([047e1e5](https://github.com/layervai/qurl-integrations/commit/047e1e512f19f5f7fd76ab46a7d30de3359facd7))
 * **cli:** qurl connector run — serve a local app through the qURL platform ([#1130](https://github.com/layervai/qurl-integrations/issues/1130)) ([dcc40ee](https://github.com/layervai/qurl-integrations/commit/dcc40eeb3ef1006ec99814dc3c0dfedb0cfcf859))
 
 

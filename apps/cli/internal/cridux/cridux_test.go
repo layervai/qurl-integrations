@@ -1,7 +1,6 @@
 package cridux
 
 import (
-	"bytes"
 	"errors"
 	"strings"
 	"testing"
@@ -104,16 +103,9 @@ func TestAssessResourceKeyForm(t *testing.T) {
 	if a.Kind != KindResourceKey {
 		t.Fatalf("Kind = %v, want KindResourceKey", a.Kind)
 	}
-	if !bytes.Equal(a.KeyDER, key.DER) {
-		t.Error("KeyDER must round-trip the decoded identifier")
-	}
-	ok, err := crid.KeyMatches(key.CRID, a.KeyDER)
-	if err != nil || !ok {
-		t.Errorf("decoded key must derive the key's CRID (ok=%v err=%v)", ok, err)
-	}
 }
 
-func TestAssessUnknownFormsForwardSilently(t *testing.T) {
+func TestAssessUnknownForms(t *testing.T) {
 	for _, input := range []string{
 		"abc",                            // far too short for any known form
 		"AAAA" + strings.Repeat("a", 43), // CRID length but uppercase: some other identifier

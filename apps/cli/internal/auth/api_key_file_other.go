@@ -1,4 +1,4 @@
-//go:build !((linux && !android) || (darwin && !ios))
+//go:build !((linux && !android) || (darwin && !ios)) && !windows
 
 package auth
 
@@ -7,7 +7,13 @@ import (
 	"os"
 )
 
-func validateAPIKeyFilePlatform(os.FileInfo) error {
+func validAPIKeyEnvironmentFileMode(os.FileMode) bool { return false }
+
+func validateAPIKeyFilePathPlatform(string, os.FileInfo) error {
+	return errors.New("API-key file credentials are unsupported on this platform")
+}
+
+func validateOpenAPIKeyFilePlatform(*os.File, os.FileInfo) error {
 	return errors.New("API-key file credentials are unsupported on this platform")
 }
 
