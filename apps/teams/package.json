@@ -2,7 +2,7 @@
   "name": "@layervai/qurl-teams",
   "version": "0.0.0",
   "private": true,
-  "description": "qURL™ Microsoft Teams Bot and OAuth integration",
+  "description": "qURL\u2122 Microsoft Teams Bot and OAuth integration",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
@@ -22,7 +22,8 @@
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint src tests eslint.config.js --max-warnings 0",
-    "test": "vitest run --coverage.enabled=false --config vitest.config.ts"
+    "test": "vitest run --coverage.enabled=false --config vitest.config.ts",
+    "manifest": "node manifest/build.mjs"
   },
   "engines": {
     "node": ">=22"

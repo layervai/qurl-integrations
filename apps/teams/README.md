@@ -74,6 +74,34 @@ and numeric `expires_at`. Tenant administrators can manage tenant-wide resource
 metadata and revocation from any channel; channel aliases and visibility remain
 scope-specific.
 
+## App package (sideloading)
+
+`manifest/` holds the Teams app manifest template, the two required icons, and
+a deterministic builder. The committed template carries **placeholders only** —
+qurl-integrations is public, so the Azure Bot application id and the
+environment hostname are substituted at package time from the private infra
+repo's tfvars/SSM, the same three-layer pattern the Slack manifests use.
+
+```bash
+npm run manifest -- --env sandbox \
+  --app-id <azure-bot-application-client-id> \
+  --domain <bot-hostname>
+# -> manifest/dist/qurl-teams-sandbox.zip  (+ sha256)
+```
+
+Upload that zip in Teams (Apps -> Manage your apps -> Upload a custom app) or
+in the Developer Portal. Rebuilds are byte-identical for identical inputs, so
+the infra repo can pin a package by digest.
+
+Manifest schema is pinned to **1.28**, the latest version on Microsoft's
+*generally available* list. 1.29 is documented but not GA-listed; do not infer
+GA from a reachable schema URL.
+
+**Prerequisites, none of which live in this repo:** a Microsoft 365 tenant that
+permits custom-app upload, an Azure Bot registration whose messaging endpoint
+is `https://<domain>/api/messages`, and the six `/qurl-bot-teams/*` SSM
+parameters seeded in the target environment.
+
 ## Development
 
 ```bash

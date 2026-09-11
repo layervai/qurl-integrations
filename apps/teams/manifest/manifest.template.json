@@ -1,0 +1,63 @@
+{
+  "$schema": "https://developer.microsoft.com/en-us/json-schemas/teams/v1.28/MicrosoftTeams.schema.json",
+  "manifestVersion": "1.28",
+  "version": "0.1.0",
+  "id": "${BOT_APP_ID}",
+  "developer": {
+    "name": "LayerV",
+    "websiteUrl": "https://layerv.ai",
+    "privacyUrl": "https://layerv.ai/privacy",
+    "termsOfUseUrl": "https://layerv.ai/terms",
+    "mpnId": ""
+  },
+  "name": {
+    "short": "${APP_NAME_SHORT}",
+    "full": "qURL Secure Access"
+  },
+  "description": {
+    "short": "Protect internal URLs and Connectors, and share them as expiring qURL links.",
+    "full": "qURL makes infrastructure invisible by default. Protect an internal URL or a qURL Connector from Teams, grant a channel access to it, and mint time-limited links that only open network access for the person who redeems them. Administration, aliases, and revocation all happen in Teams; secrets are delivered in a personal chat, never in channel history."
+  },
+  "icons": {
+    "color": "color.png",
+    "outline": "outline.png"
+  },
+  "accentColor": "#0B0B0F",
+  "bots": [
+    {
+      "botId": "${BOT_APP_ID}",
+      "scopes": ["personal", "team"],
+      "supportsFiles": false,
+      "isNotificationOnly": false,
+      "commandLists": [
+        {
+          "scopes": ["personal", "team"],
+          "commands": [
+            { "title": "help", "description": "Show every qURL command" },
+            { "title": "setup", "description": "Connect this Teams tenant to a qURL account: setup <email>" },
+            { "title": "list", "description": "List the resources visible in this channel" },
+            { "title": "aliases", "description": "List the channel aliases bound here" },
+            { "title": "get", "description": "Mint a qURL: get $<id|alias> [dm:true]" }
+          ]
+        },
+        {
+          "scopes": ["team"],
+          "commands": [
+            { "title": "protect-url", "description": "Protect a URL: protect-url url:https://internal.example.com as:$docs" },
+            { "title": "protect-connector", "description": "Protect a Connector and send install instructions privately" },
+            { "title": "set-alias", "description": "Point a channel alias at a resource" },
+            { "title": "unset-alias", "description": "Remove a channel alias" },
+            { "title": "revoke", "description": "Revoke a resource tenant-wide" },
+            { "title": "admins", "description": "Show the qURL tenant owner and admins" }
+          ]
+        }
+      ]
+    }
+  ],
+  "permissions": ["identity", "messageTeamMembers"],
+  "validDomains": ["${BOT_DOMAIN}"],
+  "webApplicationInfo": {
+    "id": "${BOT_APP_ID}",
+    "resource": "api://${BOT_DOMAIN}/${BOT_APP_ID}"
+  }
+}
