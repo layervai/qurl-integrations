@@ -522,8 +522,10 @@ describe('Teams bot primitives', () => {
     expect(keys[0]).not.toBe(keys[1]);
   });
 
-  it('revokes a connector enrollment key when bootstrap delivery fails', async () => {
+  it.each([false, true])('revokes a connector enrollment key when delivery fails (cancelled=%s)', async cancelled => {
     const revoked: string[] = [];
+    const stopped: string[] = [];
+    const controller = new AbortController();
     const bot = new TeamsBot({
       qurl: {
         listResources: async () => ({ resources: [] }),
@@ -532,8 +534,8 @@ describe('Teams bot primitives', () => {
         me: async () => ({ ownerId: 'auth0|owner', authType: 'api_key', isApiKeyPrincipal: true }),
         getSharing: async () => ({ crid: 'crid-1', desiredState: 'off', servingEpoch: 0 }),
         restartSharing: async () => ({ crid: 'crid-1', desiredState: 'on', servingEpoch: 4 }),
-        stopSharing: async () => undefined,
-        revokeApiKey: async (keyId: string) => { revoked.push(keyId); },
+        stopSharing: async (id: string, signal?: AbortSignal) => { signal?.throwIfAborted(); stopped.push(id); },
+        revokeApiKey: async (keyId: string, signal?: AbortSignal) => { signal?.throwIfAborted(); revoked.push(keyId); },
       } as unknown as QurlClient,
       data: {
         checkAdmin: async () => ({ isAdmin: true }),
@@ -542,21 +544,23 @@ describe('Teams bot primitives', () => {
         bindScopeAlias: async () => undefined,
         exposeResource: async () => undefined,
       } as unknown as TeamsDataStore,
-      messages: { sendText: async () => { throw new Error('delivery failed'); } } as never,
+      messages: { sendText: async () => { if (cancelled) controller.abort(); throw new Error('delivery failed'); } } as never,
       connectorImage: 'ghcr.io/layervai/qurl@sha256:d2f9bd33572ffb7212f5b6cfc3fcfa4267344a4a2c2cdd6ce9b7196e3515516b',
       qurlEndpoint: 'https://api.layerv.xyz',
     });
 
     await expect(bot.execute(
       { type: 'message', id: 'activity-1', from: { id: 'delivery', aadObjectId: 'actor' } },
-      'tenant-1', 'channel-1', true, parseCommand('protect-connector prod'),
+      'tenant-1', 'channel-1', true, parseCommand('protect-connector prod'), controller.signal,
     )).rejects.toThrow('delivery failed');
     expect(revoked).toEqual(['key-1']);
+    expect(stopped).toEqual(['connector-1']);
   });
 
   it('never mints a connector enrollment key when install rendering would fail', async () => {
     const revoked: string[] = [];
     const minted: string[] = [];
+    const stopped: string[] = [];
     const bot = new TeamsBot({
       qurl: {
         listResources: async () => ({ resources: [] }),
@@ -565,7 +569,7 @@ describe('Teams bot primitives', () => {
         me: async () => ({ ownerId: 'auth0|owner', authType: 'api_key', isApiKeyPrincipal: true }),
         getSharing: async () => ({ crid: 'crid-1', desiredState: 'off', servingEpoch: 0 }),
         restartSharing: async () => ({ crid: 'crid-1', desiredState: 'on', servingEpoch: 4 }),
-        stopSharing: async () => undefined,
+        stopSharing: async (id: string) => { stopped.push(id); },
         revokeApiKey: async (keyId: string) => { revoked.push(keyId); },
       } as unknown as QurlClient,
       data: {
@@ -588,6 +592,7 @@ describe('Teams bot primitives', () => {
     // revoke -- the one-time token never existed.
     expect(minted).toEqual([]);
     expect(revoked).toEqual([]);
+    expect(stopped).toEqual(['connector-1']);
   });
 
   it.each([

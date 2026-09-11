@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { describe, expect, it } from 'vitest';
 import { normalizeTunnelEnvironment, renderTunnelBootstrapSecretMessage, renderTunnelConfigYAML, renderTunnelInstallMessage, validateTunnelHub, validateTunnelImageRef, validateTunnelSlug } from '../src/tunnel.js';
 
@@ -18,7 +19,7 @@ const base = {
   servingEpoch: 7,
 } as const;
 
-const hub = { host: 'hub.nhp.layerv.xyz', port: '443', serverPublicKeyB64: 'A'.repeat(43) + '=' } as const;
+const hub = { host: 'hub.nhp.layerv.xyz', port: '443', serverPublicKeyB64: 'CQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=' } as const;
 
 describe('connector tunnel rendering', () => {
   it('validates slugs, image references, aliases, ports, and services', () => {
@@ -72,12 +73,20 @@ describe('connector tunnel rendering', () => {
     expect(() => renderTunnelConfigYAML({ ...base, crid: 'bad\ncrid' })).toThrow('metadata is invalid');
   });
 
-  it('renders the Hub triple only when it is configured', () => {
-    expect(renderTunnelConfigYAML(base)).not.toContain('hub:');
-    const withHub = renderTunnelConfigYAML({ ...base, hub });
-    expect(withHub).toContain('hub:');
-    expect(withHub).toContain("host: 'hub.nhp.layerv.xyz'");
-    expect(withHub).toContain('port: 443');
+  it('passes custom Hub settings through the daemon environment, never share YAML', () => {
+    expect(renderTunnelConfigYAML({ ...base, hub })).toBe(renderTunnelConfigYAML(base));
+    for (const environment of ['docker', 'compose', 'ecs-fargate', 'kubernetes'] as const) {
+      const text = renderTunnelInstallMessage({ ...base, environment, hub });
+      expect(text).toContain('QURL_CONNECTOR_HUB_HOST');
+      expect(text).toContain('QURL_CONNECTOR_HUB_PORT');
+      expect(text).toContain('QURL_CONNECTOR_HUB_SERVER_PUBLIC_KEY_B64');
+      expect(text).toContain(hub.host);
+      expect(text).toContain(hub.serverPublicKeyB64);
+      expect(renderTunnelInstallMessage({ ...base, environment })).not.toContain('QURL_CONNECTOR_HUB_HOST');
+    }
+    const ecs = renderTunnelInstallMessage({ ...base, environment: 'ecs-fargate', hub });
+    const container = JSON.parse(ecs.match(/```json\n([\s\S]*?)\n```/)?.[1] ?? '');
+    expect(container.environment).toContainEqual({ name: 'QURL_CONNECTOR_HUB_HOST', value: hub.host });
   });
 
   it('validates the Hub triple', () => {
@@ -86,6 +95,21 @@ describe('connector tunnel rendering', () => {
     expect(() => validateTunnelHub({ ...hub, host: 'not a host' })).toThrow('hub host');
     expect(() => validateTunnelHub({ ...hub, port: '70000' })).toThrow('hub port');
     expect(() => validateTunnelHub({ ...hub, serverPublicKeyB64: 'short' })).toThrow('hub server public key');
+  });
+
+  it('rejects Hub settings the CLI cannot use as a pinned trust root', () => {
+    for (const host of ['hub.example.com', 'HUB.nhp.layerv.xyz', 'hub.nhp.layerv.xyz.', '127.0.0.1', 'layerv.ai']) {
+      expect(() => validateTunnelHub({ ...hub, host })).toThrow('hub host');
+    }
+    for (const port of ['80', '0443', '+443']) expect(() => validateTunnelHub({ ...hub, port })).toThrow('hub port');
+    const invalidKeys = [
+      'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=', // low-order zero
+      'AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=', // low-order one
+      'CQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB=', // noncanonical base64 padding
+      Buffer.from('ed' + 'ff'.repeat(30) + '7f', 'hex').toString('base64'), // field prime
+      Buffer.from('09' + '00'.repeat(30) + '80', 'hex').toString('base64'), // high bit set
+    ];
+    for (const serverPublicKeyB64 of invalidKeys) expect(() => validateTunnelHub({ ...hub, serverPublicKeyB64 })).toThrow('hub server public key');
   });
 
   it('renders a docker install that runs the CLI daemon, not the retired connector env contract', () => {
@@ -134,7 +158,7 @@ describe('connector tunnel rendering', () => {
 
   it('renders every deployment target with the daemon contract', () => {
     const compose = renderTunnelInstallMessage({ ...base, environment: 'compose' });
-    expect(compose).toContain('network_mode: service:web');
+    expect(compose).toContain('network_mode: service:${WEB_SERVICE}');
     expect(compose).toContain('- --headless-config');
 
     const ecs = renderTunnelInstallMessage({ ...base, environment: 'ecs-fargate' });
@@ -145,6 +169,74 @@ describe('connector tunnel rendering', () => {
     const k8s = renderTunnelInstallMessage({ ...base, environment: 'kubernetes' });
     expect(k8s).toContain('readOnlyRootFilesystem: true');
     expect(k8s).toContain('--enrollment-token-file');
+  });
+
+  it('executes the generated docker invocation as one command with the intended arguments', () => {
+    const text = renderTunnelInstallMessage({ ...base, service: 'web', hub });
+    const command = text.slice(text.indexOf('docker run -d'), text.lastIndexOf('```')).trim();
+    const output = execFileSync('bash', ['-eu', '-c', `docker() { printf '%s\\n' "$@"; }; CONNECTOR_CONTAINER=qurl-prod; WEB_CONTAINER=web; AGENT_STATE_DIR=/state; SECRET_DIR=/secret; CONFIG_FILE=/config; ${command}`], { encoding: 'utf8' });
+    const args = output.trim().split('\n');
+    expect(args).toContain(IMAGE);
+    expect(args).toContain('container:web');
+    expect(args).toContain(`QURL_CONNECTOR_HUB_HOST=${hub.host}`);
+    expect(args).toContain(`QURL_CONNECTOR_HUB_SERVER_PUBLIC_KEY_B64=${hub.serverPublicKeyB64}`);
+    expect(args).toContain('/secret:/run/secrets/qurl:ro');
+    expect(args).not.toContain('\\');
+  });
+
+  it('prepares compose bind mounts for the nonroot daemon and starts the service', () => {
+    const text = renderTunnelInstallMessage({ ...base, environment: 'compose', service: 'web' });
+    expect(text).toContain('install -d -m 0700 -o 65532 -g 65532');
+    expect(text).toContain('chown 65532:65532 "$CONFIG_FILE"');
+    expect(text).toContain('docker compose');
+    expect(text).toContain('up -d');
+    expect(text).toContain('services:');
+    const script = text.slice(text.indexOf('cat > "$COMPOSE_FILE"'), text.indexOf('\n```', text.indexOf('cat > "$COMPOSE_FILE"')));
+    const output = execFileSync('bash', ['-eu', '-c', `docker() { printf '%s\\n' "$@"; }; COMPOSE_FILE=/dev/stdout; APP_COMPOSE_FILE=compose.yaml; WEB_SERVICE=web; AGENT_STATE_DIR=/state; SECRET_DIR=/secret; QURL_CONNECTOR_ID=prod; QURL_ENDPOINT_YAML='"https://api.layerv.xyz"'; ${script}`], { encoding: 'utf8' });
+    expect(output).toContain('network_mode: service:web');
+    expect(output).toContain('/state:/var/lib/qurl');
+    expect(output).toContain('/secret:/run/secrets/qurl:ro');
+    expect(output).toContain('QURL_ENDPOINT: "https://api.layerv.xyz"');
+    expect(output).toContain('up\n-d\nqurl-prod');
+  });
+
+  it('supplies ECS state/config/bootstrap mounts and a warm restart path', () => {
+    const text = renderTunnelInstallMessage({ ...base, environment: 'ecs-fargate' });
+    const block = text.match(/```json\n([\s\S]*?)\n```/)?.[1] ?? '';
+    const container = JSON.parse(block);
+    expect(container.user).toBe('65532:65532');
+    expect(container.mountPoints).toEqual(expect.arrayContaining([
+      expect.objectContaining({ containerPath: '/var/lib/qurl-volume', readOnly: false }),
+      expect.objectContaining({ containerPath: '/etc/qurl', readOnly: true }),
+      expect.objectContaining({ containerPath: '/run/secrets/qurl', readOnly: true }),
+    ]));
+    expect(container.command).toContain('/var/lib/qurl-volume/state');
+    expect(container.restartPolicy.enabled).toBe(true);
+    expect(text).toContain('EFS');
+    expect(text).toContain('0400');
+    expect(text).toContain('0644');
+    expect(text).toContain('warm-start revision');
+    expect(text).toContain('without `--enrollment-token-file`');
+  });
+
+  it('supplies Kubernetes volumes, private persistent state, and removable enrollment mounts', () => {
+    const text = renderTunnelInstallMessage({ ...base, environment: 'kubernetes' });
+    expect(text).toContain('kind: PersistentVolumeClaim');
+    expect(text).toContain('fsGroup: 65532');
+    expect(text).toContain('volumes:');
+    expect(text).toContain('persistentVolumeClaim:');
+    expect(text).toContain('configMap:');
+    expect(text).toContain('secret:');
+    expect(text).toContain('/var/lib/qurl-volume/state');
+    expect(text).toContain('--from-file=enrollment-token=/dev/stdin');
+    expect(text).not.toContain('--from-literal');
+    expect(text).toContain('warm-start revision');
+    expect(text).toContain('without `--enrollment-token-file`');
+  });
+
+  it('uses valid Kubernetes container names for maximum-length connector slugs', () => {
+    const text = renderTunnelInstallMessage({ ...base, environment: 'kubernetes', slug: 'a'.repeat(64) });
+    for (const match of text.matchAll(/name: (?:['"])?([a-z0-9-]+)/g)) expect(match[1]!.length).toBeLessThanOrEqual(63);
   });
 
   it('rejects a non-HTTPS or credential-bearing endpoint', () => {

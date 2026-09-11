@@ -212,14 +212,12 @@ export class TeamsDataStore {
 
   async deleteWorkspace(tenantId: string): Promise<void> {
     assertPresent(tenantId);
-    // DynamoDB has no cross-table transaction for this cleanup. Deletes are
-    // deliberately idempotent so an interrupted uninstall can be retried.
-    for (const [table, keyName] of [[this.#tenantPrincipalsTable, principalKey], [this.#channelPoliciesTable, policyKey]] as const) {
-      const items = await this.#queryTenant(table, tenantId);
-      for (const item of items) {
-        const value = asString(item[keyName]);
-        if (value) await this.#delete(table, keyName === principalKey ? principalDdbKey(tenantId, value) : policyDdbKey(tenantId, value));
-      }
+    // Cleanup can exceed a transaction's item limit. Keep the owner until
+    // the final delete so an interrupted uninstall remains authorized to retry.
+    const policies = await this.#queryTenant(this.#channelPoliciesTable, tenantId);
+    for (const item of policies) {
+      const value = asString(item[policyKey]);
+      if (value) await this.#delete(this.#channelPoliciesTable, policyDdbKey(tenantId, value));
     }
     const conversations = await this.#queryTenant(this.#personalConversationsTable, tenantId);
     for (const item of conversations) {
@@ -227,6 +225,12 @@ export class TeamsDataStore {
       if (actorId) await this.#delete(this.#personalConversationsTable, personalDdbKey(tenantId, actorId));
     }
     await this.#delete(this.#tenantCredentialsTable, { tenant_id: tenantId });
+    const principals = await this.#queryTenant(this.#tenantPrincipalsTable, tenantId);
+    for (const item of principals) {
+      const value = asString(item[principalKey]);
+      if (value && value !== ownerPrincipal) await this.#delete(this.#tenantPrincipalsTable, principalDdbKey(tenantId, value));
+    }
+    await this.#delete(this.#tenantPrincipalsTable, principalDdbKey(tenantId, ownerPrincipal));
   }
 
   async purgeResourceFromTenant(tenantId: string, resourceId: string): Promise<void> {

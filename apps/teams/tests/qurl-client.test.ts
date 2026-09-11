@@ -59,12 +59,38 @@ describe('qURL HTTP adapter', () => {
       apiKey: 'secret',
       fetch: async (_input, init) => {
         body = String(init?.body ?? '');
-        return new Response(JSON.stringify({ data: { key_id: 'key_1', api_key: 'bootstrap' } }), { status: 201 });
+        return new Response(JSON.stringify({ data: { key_id: 'key_1', api_key: 'bootstrap', kind: 'enrollment_token', target: 'agent', claims: [{ type: 'connector', id: 'prod' }] } }), { status: 201 });
       },
     });
 
     await expect(client.createEnrollmentToken('prod', 'idempotency')).resolves.toEqual({ keyId: 'key_1', apiKey: 'bootstrap' });
     expect(JSON.parse(body)).toMatchObject({ kind: 'enrollment_token', target: 'agent', claims: [{ type: 'connector', id: 'prod' }] });
+  });
+
+  it.each([
+    { kind: undefined }, { kind: 'api_key' }, { target: undefined }, { target: 'connector' },
+    { claims: undefined }, { claims: [] }, { claims: [{ type: 'connector', id: 'other' }] },
+    { claims: [{ type: 'resource', id: 'prod' }] },
+    { claims: [{ type: 'connector', id: 'prod' }, { type: 'connector', id: 'other' }] },
+  ])('revokes enrollment credentials whose authority is not confirmed: %j', async override => {
+    const methods: string[] = [];
+    const controller = new AbortController();
+    const client = new HttpQurlClient({
+      endpoint: 'https://api.example.test', apiKey: 'secret',
+      fetch: async (input, init) => {
+        const request = new Request(input, init);
+        methods.push(`${request.method} ${new URL(request.url).pathname}`);
+        if (request.method === 'DELETE') return new Response(null, { status: 204 });
+        // Even if the activity expires just after minting, cleanup must run.
+        controller.abort();
+        return new Response(JSON.stringify({ data: {
+          key_id: 'key_1', api_key: 'must-never-be-delivered', kind: 'enrollment_token',
+          target: 'agent', claims: [{ type: 'connector', id: 'prod' }], ...override,
+        } }), { status: 201 });
+      },
+    });
+    await expect(client.createEnrollmentToken('prod', 'attempt', controller.signal)).rejects.toThrow('enrollment credential');
+    expect(methods).toEqual(['POST /v1/api-keys', 'DELETE /v1/api-keys/key_1']);
   });
 
   it('treats repeated resource and API-key revocation as successful', async () => {

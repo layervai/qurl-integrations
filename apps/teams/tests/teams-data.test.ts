@@ -139,7 +139,32 @@ describe('Teams DynamoDB data paths', () => {
     const deletes = client.requests.filter(request => request.operation === 'delete');
     expect(client.requests.filter(request => request.operation === 'query')).toHaveLength(4);
     expect(deletes).toHaveLength(6);
-    expect(deletes.map(request => request.input.TableName)).toEqual(['principals', 'principals', 'policy', 'policy', 'conversations', 'credentials']);
+    expect(deletes.map(request => request.input.TableName)).toEqual(['policy', 'policy', 'conversations', 'credentials', 'principals', 'principals']);
+    expect(deletes.at(-1)?.input.Key).toMatchObject({ principal_key: 'owner' });
+  });
+
+  it.each(['policy', 'conversations', 'credentials', 'principals'])('keeps the owner authorized to retry after %s cleanup fails', async failingTable => {
+    const pages = new CleanupDynamo();
+    let ownerPresent = true;
+    let fail = true;
+    const client: DynamoClient = {
+      async send<T>(request: DynamoRequest): Promise<T> {
+        const key = request.input.Key as Record<string, string> | undefined;
+        if (request.operation === 'get') return (ownerPresent && key?.principal_key === 'owner'
+          ? { Item: { actor_aad_object_id: 'actor', principal_type: 'owner' } } : {}) as T;
+        if (request.operation === 'delete') {
+          if (fail && request.input.TableName === failingTable) throw new Error('DynamoDB unavailable');
+          if (key?.principal_key === 'owner') ownerPresent = false;
+        }
+        return pages.send<T>(request);
+      },
+    };
+    const store = new TeamsDataStore({ client, tenantPrincipalsTable: 'principals', channelPoliciesTable: 'policy', personalConversationsTable: 'conversations', tenantCredentialsTable: 'credentials' });
+    await expect(store.deleteWorkspace('tenant')).rejects.toThrow('DynamoDB unavailable');
+    await expect(store.checkAdmin('tenant', 'actor')).resolves.toMatchObject({ isAdmin: true });
+    fail = false;
+    await store.deleteWorkspace('tenant');
+    await expect(store.checkAdmin('tenant', 'actor')).resolves.toMatchObject({ isAdmin: false });
   });
 
   it('purges resource policies through the resource_scopes index across pages', async () => {

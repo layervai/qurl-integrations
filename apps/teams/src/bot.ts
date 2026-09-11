@@ -386,28 +386,27 @@ export class TeamsBot {
     // and the CRID both come from that response, and a daemon handed a stale
     // epoch is refused. apps/slack does the same in the same order.
     const previousSharing = await qurl.getSharing(resource.resourceId, signal);
-    const restarted = await qurl.restartSharing(resource.resourceId, signal);
-    const installArgs = {
-      slug,
-      alias,
-      environment: normalizeTunnelEnvironment(command.flags.env ?? 'docker'),
-      port: Number(command.flags.port ?? '8080'),
-      ...(command.flags.service ? { service: command.flags.service } : {}),
-      image: this.#options.connectorImage ?? '',
-      endpoint: this.#options.qurlEndpoint,
-      ownerId,
-      crid: restarted.crid,
-      resourceId: resource.resourceId,
-      connectorRoutingId: resource.connectorRoutingId,
-      knockResourceId: resource.knockResourceId,
-      servingEpoch: restarted.servingEpoch,
-      ...(this.#options.connectorHub ? { hub: this.#options.connectorHub } : {}),
-    };
-    // Render before minting so a bad contract fails without creating a secret.
-    const installText = renderTunnelInstallMessage(installArgs);
     let token: QurlApiKey | undefined;
-    let delivered = false;
     try {
+      const restarted = await qurl.restartSharing(resource.resourceId, signal);
+      const installArgs = {
+        slug,
+        alias,
+        environment: normalizeTunnelEnvironment(command.flags.env ?? 'docker'),
+        port: Number(command.flags.port ?? '8080'),
+        ...(command.flags.service ? { service: command.flags.service } : {}),
+        image: this.#options.connectorImage ?? '',
+        endpoint: this.#options.qurlEndpoint,
+        ownerId,
+        crid: restarted.crid,
+        resourceId: resource.resourceId,
+        connectorRoutingId: resource.connectorRoutingId,
+        knockResourceId: resource.knockResourceId,
+        servingEpoch: restarted.servingEpoch,
+        ...(this.#options.connectorHub ? { hub: this.#options.connectorHub } : {}),
+      };
+      // Render before minting so a bad contract fails without creating a secret.
+      const installText = renderTunnelInstallMessage(installArgs);
       token = await qurl.createEnrollmentToken(slug, idempotencyKey(...operationKey, 'enrollment'), signal);
       // Two messages, both to the personal chat: the install block, then the
       // one-time token on its own. The install block never contains the token
@@ -417,18 +416,18 @@ export class TeamsBot {
       const secretText = renderTunnelBootstrapSecretMessage(slug, token.apiKey);
       await this.#options.messages.sendText(ref.serviceUrl, ref.conversationId, `Connector \`${slug}\` install instructions:\n${installText}`, signal);
       await this.#options.messages.sendText(ref.serviceUrl, ref.conversationId, secretText, signal);
-      delivered = true;
     } catch (error) {
+      // HTTP cleanup keeps its own deadline after the activity is cancelled.
       if (token) {
-        try { await qurl.revokeApiKey(token.keyId, signal); } catch { /* preserve the failure without leaking the bootstrap key */ }
+        try { await qurl.revokeApiKey(token.keyId); } catch { /* preserve the failure without leaking the bootstrap key */ }
       }
       // Resource and alias changes may predate this request or be concurrently updated. The one-time credential is the only newly-created secret and is revoked above.
       // A previously-off Connector owns the `on` transition this request made,
       // so compensate it back off. A previously-on one is left alone: its live
       // daemon reacquires the rotated epoch, and turning it off would be an
       // outage for a device this failure never touched.
-      if (!delivered && previousSharing.desiredState !== 'on') {
-        try { await qurl.stopSharing(resource.resourceId, signal); } catch { /* preserve the original failure */ }
+      if (previousSharing.desiredState !== 'on') {
+        try { await qurl.stopSharing(resource.resourceId); } catch { /* preserve the original failure */ }
       }
       throw error;
     }
@@ -448,7 +447,7 @@ export function helpMessage(): string {
     '',
     'Admin commands:',
     '- `protect-url url:https://internal.example.com as:$docs`',
-    '- `protect-connector <id>`',
+    '- `protect-connector <id> [env:docker|compose|ecs-fargate|kubernetes] [port:8080] [service:web] [alias:$name]`',
     '- `set-alias $alias $resource-id`',
     '- `unset-alias $alias`',
     '- `set-display-name $resource-id Friendly name`',

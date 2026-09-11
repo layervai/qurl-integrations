@@ -2,9 +2,8 @@
 // Builds the sideloadable Teams app package.
 //
 // The template ships with placeholders, never real values: qurl-integrations is
-// a PUBLIC repo, and the bot app id and pre-prod hostname are internal. CI in
-// the private infra repo supplies them from tfvars/SSM at package time, exactly
-// like the Slack manifests.
+// a PUBLIC repo, and environment configuration belongs in the private infra
+// repo. The operator supplies the bot app id and hostname at package time.
 //
 //   node manifest/build.mjs --env sandbox --app-id <uuid> --domain <host>
 //
@@ -31,7 +30,7 @@ const ENVIRONMENTS = {
 export function renderManifest(template, { env, appId, domain }) {
   const environment = ENVIRONMENTS[env];
   if (!environment) throw new Error(`env must be one of ${Object.keys(ENVIRONMENTS).join(', ')}`);
-  if (!UUID.test(appId)) throw new Error('app-id must be the Azure Bot application (client) id as a UUID');
+  if (!UUID.test(appId)) throw new Error('app-id must be the bot application (client) id as a UUID');
   if (!HOST.test(domain)) throw new Error('domain must be a bare DNS host name, with no scheme, port, or path');
 
   const values = { BOT_APP_ID: appId, BOT_DOMAIN: domain, APP_NAME_SHORT: environment.shortName };

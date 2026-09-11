@@ -74,33 +74,67 @@ and numeric `expires_at`. Tenant administrators can manage tenant-wide resource
 metadata and revocation from any channel; channel aliases and visibility remain
 scope-specific.
 
+## Connector flow
+
+As in Slack, an administrator protects a Connector from a team channel; the bot
+sends install instructions and a separate one-time enrollment token to their
+personal chat. Open that personal chat first. For example:
+
+```text
+qurl protect-connector internal-web env:compose service:web port:8080 alias:$docs
+qurl get $docs dm:true
+```
+
+Supported installs are Docker, Docker Compose, ECS/Fargate, and Kubernetes.
+The flow resolves the account owner, creates or reuses the Connector resource,
+restarts sharing, and issues a credential restricted to enrollment of that
+Connector. Failed instruction/token delivery revokes the credential and restores
+previously disabled sharing. Install snippets persist the daemon identity so
+warm restarts do not require another token. Re-running protection supplies new
+bootstrap instructions; `list`, `aliases`, and `get` use the channel exposure,
+and administrators can `revoke $docs` to revoke the resource tenant-wide.
+
+The install must run alongside the HTTP service: `service:` identifies the
+Docker container or Compose service, while ECS/Kubernetes share the task/Pod
+network. `port:` is that service's local HTTP port. Verify enrollment and a
+minted link in the sandbox before production rollout.
+
 ## App package (sideloading)
 
 `manifest/` holds the Teams app manifest template, the two required icons, and
-a deterministic builder. The committed template carries **placeholders only** —
-qurl-integrations is public, so the Azure Bot application id and the
-environment hostname are substituted at package time from the private infra
-repo's tfvars/SSM, the same three-layer pattern the Slack manifests use.
+a deterministic builder. The template carries placeholders; an operator builds
+the package manually using the target environment's bot app ID and hostname
+from the private infrastructure configuration. The deployment workflow does
+not build or upload the Teams app package.
 
 ```bash
 npm run manifest -- --env sandbox \
-  --app-id <azure-bot-application-client-id> \
+  --app-id <bot-application-client-id> \
   --domain <bot-hostname>
 # -> manifest/dist/qurl-teams-sandbox.zip  (+ sha256)
 ```
 
-Upload that zip in Teams (Apps -> Manage your apps -> Upload a custom app) or
-in the Developer Portal. Rebuilds are byte-identical for identical inputs, so
-the infra repo can pin a package by digest.
+Use `--env production` for the production package. Use separate bot registrations
+for sandbox and production: each registration has one messaging endpoint.
+`--app-id` must match the deployed `TEAMS_APP_ID`, and `--domain` must match the
+host in `TEAMS_BASE_URL`. Build from the same application commit as the runtime.
+Upload the zip in Teams (Apps -> Manage your apps -> Upload a custom app) or
+import it in the Developer Portal. Rebuilds are byte-identical for identical inputs.
 
-Manifest schema is pinned to **1.28**, the latest version on Microsoft's
-*generally available* list. 1.29 is documented but not GA-listed; do not infer
-GA from a reachable schema URL.
+The manifest uses supported schema **1.28**; newer versions are unnecessary for
+these capabilities. See [Microsoft's GA schema list](https://learn.microsoft.com/en-us/microsoftteams/platform/resources/schema/manifest-schema).
+Command menus are scoped to the implemented behavior: resource operations run
+in team channels; personal chat supports setup, administration, and private delivery.
 
-**Prerequisites, none of which live in this repo:** a Microsoft 365 tenant that
-permits custom-app upload, an Azure Bot registration whose messaging endpoint
-is `https://<domain>/api/messages`, and the six `/qurl-bot-teams/*` SSM
-parameters seeded in the target environment.
+**Prerequisites:** a Microsoft 365 tenant that permits custom-app upload, a bot
+registration with the Teams channel enabled and messaging endpoint
+`https://<domain>/api/messages`, and the six required `/qurl-bot-teams/*` SSM
+parameters seeded in the target environment using the infrastructure rollout order.
+The registration can be [Teams-managed](https://microsoft.github.io/teams-sdk/cli/concepts/bot-locations/)
+without an Azure subscription. Our Auth0 flow runs in the AWS-hosted application;
+Teams-managed OAuth connections and Teams SSO are not used. The manifest therefore
+has no `webApplicationInfo` or Application ID URI requirement. Entra app registration
+alone does not configure the bot's messaging endpoint or install the Teams app.
 
 ## Development
 
@@ -125,8 +159,8 @@ fixes do not become stale or conflict with a future transitive requirement.
 Every variable below is read in `src/server.ts`. The required ones are read
 through a helper that throws `<NAME> is required` on an empty or missing value,
 so the process fails at startup rather than mid-request. Provisioning the
-backing resources (tables, KMS key, app registration) lives in the
-`qurl-integrations-infra` repository; this table is the contract the process
+backing AWS resources (tables and KMS keys) lives in the
+`qurl-integrations-infra` repository; Microsoft registration is an operator task, and this table is the contract the process
 itself enforces.
 
 | Variable | Required | Notes |
@@ -138,8 +172,8 @@ itself enforces.
 | `TEAMS_APP_PASSWORD` | yes | Bot Framework client secret. |
 | `TEAMS_SERVICE_URL` | no | Pins the outbound Bot Framework service URL. Validated against the trusted-host allowlist in `src/teams-sdk.ts`; unset lets the SDK use the inbound Activity's own service URL. |
 | `QURL_IMAGE` | yes | Released qURL CLI image (`ghcr.io/layervai/qurl@sha256:...`) rendered into Connector installs, which run `qurl daemon run`. The retired standalone `qurl-connector` image is rejected. Validated by `validateTunnelImageRef`. |
-| `QURL_CONNECTOR_HUB_HOST` | no | NHP Hub host rendered into Connector installs. Set all three `QURL_CONNECTOR_HUB_*` values together or none. |
-| `QURL_CONNECTOR_HUB_PORT` | no | NHP Hub port. |
+| `QURL_CONNECTOR_HUB_HOST` | no | Canonical LayerV-owned NHP Hub hostname, forwarded to the Connector environment. Set all three `QURL_CONNECTOR_HUB_*` values together; omission uses the CLI image’s embedded production pin. A different sandbox Hub or an image without that pin requires the triple. |
+| `QURL_CONNECTOR_HUB_PORT` | no | NHP Hub UDP port, exactly `443`. |
 | `QURL_CONNECTOR_HUB_SERVER_PUBLIC_KEY_B64` | no | Base64 NHP Hub server public key pinned by rendered installs. |
 | `QURL_TEAMS_TENANT_PRINCIPALS_TABLE` | yes | Owner and admin rows. |
 | `QURL_TEAMS_CHANNEL_POLICIES_TABLE` | yes | Channel alias and resource-visibility rows. Must carry the `resource_scopes` GSI (`tenant_resource_key` / `scope_item_type_key`, KEYS_ONLY) — `revoke` queries it directly, so a table without it fails at revoke time rather than at startup. |

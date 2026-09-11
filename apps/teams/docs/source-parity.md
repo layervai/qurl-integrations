@@ -2,7 +2,9 @@
 
 This checklist records the security contracts carried into the qURL™ Teams
 OAuth core from the shipped Discord flow and the Slack design reference. It is
-an implementation provenance record, not deployment documentation.
+a historical S04a implementation provenance record, not the current feature
+status or deployment documentation. See [the package README](../README.md) for
+the implemented runtime and Connector flows.
 
 Sources reviewed in order:
 

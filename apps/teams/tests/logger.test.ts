@@ -80,6 +80,26 @@ describe('RedactingLogger', () => {
 });
 
 describe('json console sink', () => {
+  it('renders real AWS and nested transport errors as redacted alarm-matchable strings', () => {
+    const lines: string[] = [];
+    const target = { debug: () => {}, info: () => {}, warn: () => {}, error: (line: string) => lines.push(line) };
+    const logger = new RedactingLogger(jsonConsoleSink(target), ['upstream-secret']);
+    const cause = Object.assign(new Error('connection failed upstream-secret'), { code: 'ECONNREFUSED' });
+    const awsError = Object.assign(new Error('permission denied'), { name: 'AccessDeniedException', code: 'private-oauth-code' });
+    logger.error('Teams command failed', { error: new TypeError('fetch failed', { cause }) });
+    logger.error('Teams command failed', { error: awsError });
+    const transport = JSON.parse(lines[0] ?? '{}');
+    const dataPlane = JSON.parse(lines[1] ?? '{}');
+    expect(transport.error).toBeTypeOf('string');
+    expect(transport.error).toContain('ECONNREFUSED');
+    expect(transport.error).toContain('fetch failed');
+    expect(transport.error).toContain('[REDACTED]');
+    expect(dataPlane.error).toBeTypeOf('string');
+    expect(dataPlane.error).toContain('AccessDeniedException');
+    expect(lines.join('\n')).not.toContain('upstream-secret');
+    expect(lines.join('\n')).not.toContain('private-oauth-code');
+  });
+
   it('emits one JSON line per call with the field names the alarms select on', () => {
     const lines: string[] = [];
     const target = {

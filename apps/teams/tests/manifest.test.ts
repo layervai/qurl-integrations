@@ -15,8 +15,8 @@ describe('teams app manifest', () => {
   it('ships no real identifiers in the committed template', () => {
     // qurl-integrations is PUBLIC. The public marketing URLs on layerv.ai are
     // fine and are locked by D10; what must never appear here is the pre-prod
-    // domain or any sandbox hostname. CI in the private infra repo substitutes
-    // the host and the bot app id at package time.
+    // domain or any sandbox hostname. The operator supplies the host and bot
+    // app id at package time.
     expect(template).not.toMatch(/layerv\.xyz/);
     expect(template).not.toMatch(/teams\.connector\./);
     expect(template).not.toMatch(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
@@ -25,8 +25,7 @@ describe('teams app manifest', () => {
   });
 
   it('pins the GA manifest schema version', () => {
-    // 1.29 is described by Microsoft but is NOT on the "generally available"
-    // list. Sideloading a non-GA manifest version is rejected.
+    // Pin a supported version; this bot does not need newer schema features.
     expect(JSON.parse(render()).manifestVersion).toBe('1.28');
   });
 
@@ -34,7 +33,8 @@ describe('teams app manifest', () => {
     const manifest = JSON.parse(render());
     expect(manifest.id).toBe(BOT_UUID);
     expect(manifest.bots[0].botId).toBe(BOT_UUID);
-    expect(manifest.webApplicationInfo.id).toBe(BOT_UUID);
+    // Authentication uses our external Auth0 flow, not Teams SSO.
+    expect(manifest).not.toHaveProperty('webApplicationInfo');
     expect(manifest.validDomains).toEqual([DOMAIN]);
     expect(render()).not.toMatch(/\$\{\w+\}/);
   });
@@ -62,6 +62,12 @@ describe('teams app manifest', () => {
     expect(titles).toContain('setup');
     expect(titles).toContain('protect-connector');
     expect(titles).toContain('get');
+    const scopes = bot.commandLists.flatMap((list: { scopes: string[] }) => list.scopes);
+    expect(scopes).toEqual(['personal', 'team']);
+    const personal = bot.commandLists.find((list: { scopes: string[] }) => list.scopes.includes('personal'));
+    for (const channelCommand of ['list', 'aliases', 'get']) {
+      expect(personal.commands.map((command: { title: string }) => command.title)).not.toContain(channelCommand);
+    }
   });
 
   it('stays inside the Teams field length limits', () => {

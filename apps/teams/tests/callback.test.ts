@@ -8,6 +8,7 @@ import type {
   ProviderBinder,
   ProviderBindingRequest,
   ProviderBindingResult,
+  LogContext,
 } from '../src/interfaces.js';
 import { OAuthStateManager } from '../src/state.js';
 import {
@@ -75,6 +76,22 @@ async function mintFor(
 }
 
 describe('OAuthCallbackCore', () => {
+  it('logs binding diagnostics while redacting callback credentials', async () => {
+    const state = new OAuthStateManager({ persistence: new InMemoryStatePersistence(), clock: fixedClock(), randomBytes: deterministicRandom() });
+    const minted = await mintFor(state, TEST_ACTOR_A_ID, 'delivery', 'admin@example.com');
+    const entries: Array<LogContext | undefined> = [];
+    const core = new OAuthCallbackCore({
+      state, tokenClient: stubTokenClient(), idTokenVerifier: identityVerifier,
+      providerBinder: { bind: async () => { throw new Error('KMS unavailable synthetic-access-token synthetic-authorization-code'); } },
+      logger: { debug: () => {}, info: () => {}, warn: () => {}, error: (_message, context) => { entries.push(context); } },
+    });
+    await expect(core.complete({ state: minted.handle, cookieState: minted.handle, code: 'synthetic-authorization-code' })).rejects.toMatchObject({ code: 'BINDING_FAILED' });
+    const output = JSON.stringify(entries);
+    expect(output).toContain('KMS unavailable');
+    expect(output).not.toContain('synthetic-access-token');
+    expect(output).not.toContain('synthetic-authorization-code');
+  });
+
   it('rejects CSRF cookie mismatch before consuming state or exchanging a token', async () => {
     let consumed = 0;
     let exchanged = 0;

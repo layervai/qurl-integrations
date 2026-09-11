@@ -151,7 +151,22 @@ export class HttpQurlClient implements QurlClient {
     // owner-scoped enrollment. A connector-target token records
     // connector_bootstrap and is rejected for every session. apps/slack mints
     // the identical shape -- keep the two in lockstep.
-    return apiKeyFromWire(await this.#request(new URL('v1/api-keys', this.#endpoint), { method: 'POST', body: JSON.stringify({ name: `Teams connector ${slug}`, kind: 'enrollment_token', target: 'agent', claims: [{ type: 'connector', id: slug }], expires_in: '15m' }), ...(signal ? { signal } : {}), idempotencyKey }));
+    const key = responseData(await this.#request(new URL('v1/api-keys', this.#endpoint), { method: 'POST', body: JSON.stringify({ name: `Teams connector ${slug}`, kind: 'enrollment_token', target: 'agent', claims: [{ type: 'connector', id: slug }], expires_in: '15m' }), ...(signal ? { signal } : {}), idempotencyKey }), 'qURL API key');
+    const keyId = requiredString(key.key_id, 'qURL API key');
+    try {
+      // TODO(upstream-contract): like Slack's credentialConfirmsKindFirst,
+      // require the service to confirm exactly this authority before delivery.
+      const claim = Array.isArray(key.claims) && key.claims.length === 1 ? object(key.claims[0], 'qURL enrollment claim') : undefined;
+      if (key.kind !== 'enrollment_token' || key.target !== 'agent' || claim?.type !== 'connector' || claim.id !== slug) {
+        throw new Error('qURL enrollment credential authority was not confirmed');
+      }
+      return apiKeyFromWire(key);
+    } catch (error) {
+      // Cleanup has its own HTTP deadline; the activity signal may be expired.
+      try { await this.revokeApiKey(keyId); }
+      catch (cause) { throw new Error('qURL enrollment credential validation and revocation failed', { cause }); }
+      throw error;
+    }
   }
   async me(signal?: AbortSignal): Promise<QurlIdentity> {
     return identityFromWire(await this.#request(new URL('v1/me', this.#endpoint), signal ? { signal } : {}));

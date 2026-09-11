@@ -7,8 +7,7 @@
     "name": "LayerV",
     "websiteUrl": "https://layerv.ai",
     "privacyUrl": "https://layerv.ai/privacy",
-    "termsOfUseUrl": "https://layerv.ai/terms",
-    "mpnId": ""
+    "termsOfUseUrl": "https://layerv.ai/terms"
   },
   "name": {
     "short": "${APP_NAME_SHORT}",
@@ -16,7 +15,7 @@
   },
   "description": {
     "short": "Protect internal URLs and Connectors, and share them as expiring qURL links.",
-    "full": "qURL makes infrastructure invisible by default. Protect an internal URL or a qURL Connector from Teams, grant a channel access to it, and mint time-limited links that only open network access for the person who redeems them. Administration, aliases, and revocation all happen in Teams; secrets are delivered in a personal chat, never in channel history."
+    "full": "qURL makes infrastructure invisible by default. Protect an internal URL or a qURL Connector from Teams, grant a channel access to it, and mint time-limited links that only open network access for the person who redeems them. Administration, aliases, and revocation all happen in Teams; setup links and enrollment tokens are delivered in a personal chat. Resource links are posted in the channel unless you request private delivery."
   },
   "icons": {
     "color": "color.png",
@@ -31,18 +30,21 @@
       "isNotificationOnly": false,
       "commandLists": [
         {
-          "scopes": ["personal", "team"],
+          "scopes": ["personal"],
           "commands": [
             { "title": "help", "description": "Show every qURL command" },
             { "title": "setup", "description": "Connect this Teams tenant to a qURL account: setup <email>" },
-            { "title": "list", "description": "List the resources visible in this channel" },
-            { "title": "aliases", "description": "List the channel aliases bound here" },
-            { "title": "get", "description": "Mint a qURL: get $<id|alias> [dm:true]" }
+            { "title": "admins", "description": "Show the qURL tenant owner and admins" }
           ]
         },
         {
           "scopes": ["team"],
           "commands": [
+            { "title": "help", "description": "Show every qURL command" },
+            { "title": "setup", "description": "Connect this Teams tenant to a qURL account: setup <email>" },
+            { "title": "list", "description": "List the resources visible in this channel" },
+            { "title": "aliases", "description": "List the channel aliases bound here" },
+            { "title": "get", "description": "Mint a qURL: get $<id|alias> [dm:true]" },
             { "title": "protect-url", "description": "Protect a URL: protect-url url:https://internal.example.com as:$docs" },
             { "title": "protect-connector", "description": "Protect a Connector and send install instructions privately" },
             { "title": "set-alias", "description": "Point a channel alias at a resource" },
@@ -55,9 +57,5 @@
     }
   ],
   "permissions": ["identity", "messageTeamMembers"],
-  "validDomains": ["${BOT_DOMAIN}"],
-  "webApplicationInfo": {
-    "id": "${BOT_APP_ID}",
-    "resource": "api://${BOT_DOMAIN}/${BOT_APP_ID}"
-  }
+  "validDomains": ["${BOT_DOMAIN}"]
 }

@@ -277,7 +277,9 @@ export async function createProductionTeamsConfig(): Promise<TeamsProductionConf
   });
   const verifier = createIdTokenVerifier({ issuer: auth0Issuer, audience: env('AUTH0_CLIENT_ID'), fetch: fetch as FetchLike });
   const binder = new HttpProviderBinder({ endpoint: qurlEndpoint, data });
-  const callback = new OAuthCallbackCore({ state: oauthState, tokenClient, idTokenVerifier: verifier, providerBinder: binder });
+  // JSON lines are required by the CloudWatch application alarm filters.
+  const logger = new RedactingLogger(jsonConsoleSink(runtimeConsole));
+  const callback = new OAuthCallbackCore({ state: oauthState, tokenClient, idTokenVerifier: verifier, providerBinder: binder, logger });
   const expressApp = express();
   const configuredServiceUrl = process.env.TEAMS_SERVICE_URL?.trim();
   const serviceUrl = configuredServiceUrl ? validateTeamsServiceUrl(configuredServiceUrl) : undefined;
@@ -290,9 +292,6 @@ export async function createProductionTeamsConfig(): Promise<TeamsProductionConf
     // Keep mention normalization in the existing qURL Activity adapter.
     activity: { mentions: { stripText: false } },
   });
-  // JSON lines, not plain console text: the CloudWatch metric filters behind
-  // the app alarms are JSON selectors and cannot match unstructured output.
-  const logger = new RedactingLogger(jsonConsoleSink(runtimeConsole));
   const bot = new TeamsBot({
     qurlForTenant: new TenantQurlClientFactory(data, qurlEndpoint),
     data,
