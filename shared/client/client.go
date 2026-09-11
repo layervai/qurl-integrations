@@ -893,6 +893,8 @@ func (c *Client) CreateResource(ctx context.Context, input *CreateResourceInput)
 }
 
 // GetResource retrieves one resource by its public resource identity.
+// resourceID must be an r_ resource id: the service also accepts a CRID on this
+// path, but the response identity check here rejects it.
 func (c *Client) GetResource(ctx context.Context, resourceID string) (*Resource, error) {
 	resourceID = strings.TrimSpace(resourceID)
 	if resourceID == "" {
@@ -922,7 +924,7 @@ func (c *Client) GetResource(ctx context.Context, resourceID string) (*Resource,
 	if out.Resource.ResourceID != resourceID {
 		return nil, fmt.Errorf("get resource response identity does not match request (want %q, got %q)", resourceID, out.Resource.ResourceID)
 	}
-	if out.Resource.Type == "" {
+	if strings.TrimSpace(out.Resource.Type) == "" {
 		return nil, errors.New("get resource response has no type")
 	}
 	return out.Resource, nil

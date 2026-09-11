@@ -1567,20 +1567,22 @@ func TestGetResourceRejectsMissingOrMismatchedResource(t *testing.T) {
 	t.Parallel()
 
 	for name, tc := range map[string]struct {
-		data    any
+		body    string
 		wantErr string
 	}{
-		"null data": {nil, "has no resource"},
-		"missing":   {map[string]any{"qurls": []any{}}, "has no resource"},
+		"absent data": {`{"meta":{}}`, "has no resource"},
+		"null data":   {`{"data":null}`, "has no resource"},
+		"missing":     {`{"data":{"qurls":[]}}`, "has no resource"},
 		// The pre-fix client decoded this flat shape; the service never sends it.
-		"legacy flat": {map[string]any{"resource_id": "r_abc123test", "type": "tunnel"}, "has no resource"},
-		"no type":     {map[string]any{"resource": map[string]any{"resource_id": "r_abc123test"}}, "has no type"},
-		"mismatch":    {map[string]any{"resource": map[string]any{"resource_id": "r_other", "type": "tunnel"}}, "identity does not match"},
+		"legacy flat": {`{"data":{"resource_id":"r_abc123test","type":"tunnel"}}`, "has no resource"},
+		"blank type":  {`{"data":{"resource":{"resource_id":"r_abc123test","type":" "}}}`, "has no type"},
+		"mismatch":    {`{"data":{"resource":{"resource_id":"r_other","type":"tunnel"}}}`, "identity does not match"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-				apiEnvelope(t, w, tc.data)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(tc.body))
 			}))
 			defer srv.Close()
 
