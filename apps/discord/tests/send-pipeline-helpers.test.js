@@ -952,6 +952,7 @@ describe('handleAddRecipients', () => {
   let handleAddRecipients;
   let mockDb;
   let mockMintLinks;
+  let mockRevokeMintedLinks;
   let mockDownloadAndUpload;
   let mockReUploadBuffer;
   let mockUploadJsonToConnector;
@@ -1091,6 +1092,7 @@ describe('handleAddRecipients', () => {
     }));
 
     mockMintLinks = jest.fn();
+    mockRevokeMintedLinks = jest.fn().mockResolvedValue(true);
     mockDownloadAndUpload = jest.fn();
     mockReUploadBuffer = jest.fn();
     mockUploadJsonToConnector = jest.fn();
@@ -1099,6 +1101,7 @@ describe('handleAddRecipients', () => {
       downloadAndUpload: mockDownloadAndUpload,
       reUploadBuffer: mockReUploadBuffer,
       mintLinks: mockMintLinks,
+      revokeMintedLinks: mockRevokeMintedLinks,
       uploadJsonToConnector: mockUploadJsonToConnector,
       isAllowedSourceUrl: (url) => typeof url === 'string' && url.startsWith('https://cdn.discordapp.com'),
     }));
@@ -1221,8 +1224,8 @@ describe('handleAddRecipients', () => {
     });
 
     mockMintLinks.mockResolvedValue([
-      { qurl_link: 'https://q.test/mint-1' },
-      { qurl_link: 'https://q.test/mint-2' },
+      { qurl_id: 'q_mint_1', qurl_link: 'https://q.test/mint-1' },
+      { qurl_id: 'q_mint_2', qurl_link: 'https://q.test/mint-2' },
     ]);
 
     mockSendDM.mockResolvedValue({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
@@ -1263,7 +1266,7 @@ describe('handleAddRecipients', () => {
       self_destruct_seconds: 30,
     });
     mockDownloadAndUpload.mockResolvedValue({ resource_id: 'conn-res-44', fileBuffer: new ArrayBuffer(8) });
-    mockMintLinks.mockResolvedValue([{ qurl_link: 'https://q.test/mint-3' }]);
+    mockMintLinks.mockResolvedValue([{ qurl_id: 'q_mint_3', qurl_link: 'https://q.test/mint-3' }]);
     mockSendDM.mockResolvedValue({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
 
     const users = makeUsersCollection([
@@ -1300,7 +1303,7 @@ describe('handleAddRecipients', () => {
       resource_id: 'res-loc-1',
       hash: 'loc-hash',
     });
-    mockMintLinks.mockResolvedValue([{ qurl_link: 'https://q.test/otl-1' }]);
+    mockMintLinks.mockResolvedValue([{ qurl_id: 'q_otl_1', qurl_link: 'https://q.test/otl-1' }]);
     mockSendDM.mockResolvedValue({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
 
     const users = makeUsersCollection([
@@ -1333,7 +1336,7 @@ describe('handleAddRecipients', () => {
       self_destruct_seconds: 300,
     });
     mockUploadJsonToConnector.mockResolvedValue({ resource_id: 'res-loc-2', hash: 'loc-hash' });
-    mockMintLinks.mockResolvedValue([{ qurl_link: 'https://q.test/otl-2' }]);
+    mockMintLinks.mockResolvedValue([{ qurl_id: 'q_otl_2', qurl_link: 'https://q.test/otl-2' }]);
     mockSendDM.mockResolvedValue({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
 
     const users = makeUsersCollection([
@@ -1370,7 +1373,7 @@ describe('handleAddRecipients', () => {
       hash: 'h-maps',
       success: true,
     });
-    mockMintLinks.mockResolvedValue([{ qurl_link: 'https://q.test/maps-1' }]);
+    mockMintLinks.mockResolvedValue([{ qurl_id: 'q_maps_1', qurl_link: 'https://q.test/maps-1' }]);
     mockSendDM.mockResolvedValue({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
 
     const users = makeUsersCollection([
@@ -1402,8 +1405,8 @@ describe('handleAddRecipients', () => {
 
     mockUploadJsonToConnector.mockResolvedValue({ resource_id: 'conn-loc-partial', hash: 'hp', success: true });
     mockMintLinks.mockResolvedValue([
-      { qurl_link: 'https://q.test/link1' },
-      { qurl_link: 'https://q.test/link2' },
+      { qurl_id: 'q_partial_1', qurl_link: 'https://q.test/link1' },
+      { qurl_id: 'q_partial_2', qurl_link: 'https://q.test/link2' },
     ]);
 
     mockSendDM
@@ -1455,8 +1458,8 @@ describe('handleAddRecipients', () => {
 
     mockUploadJsonToConnector.mockResolvedValue({ resource_id: 'conn-loc-mixed', hash: 'hm', success: true });
     mockMintLinks.mockResolvedValue([
-      { qurl_link: 'https://q.test/link1' },
-      { qurl_link: 'https://q.test/link2' },
+      { qurl_id: 'q_mixed_1', qurl_link: 'https://q.test/link1' },
+      { qurl_id: 'q_mixed_2', qurl_link: 'https://q.test/link2' },
     ]);
 
     mockSendDM.mockResolvedValue({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
@@ -1539,8 +1542,8 @@ describe('handleAddRecipients', () => {
     mockDownloadAndUpload.mockResolvedValue({ resource_id: 'new-res-A', fileBuffer });
     mockReUploadBuffer.mockResolvedValue({ resource_id: 'new-res-B' });
 
-    const batch1Links = Array.from({ length: 10 }, (_, i) => ({ qurl_link: `https://q.test/r-${i}` }));
-    const batch2Links = Array.from({ length: 2 }, (_, i) => ({ qurl_link: `https://q.test/r2-${i}` }));
+    const batch1Links = Array.from({ length: 10 }, (_, i) => ({ qurl_id: `q_batch_1_${i}`, qurl_link: `https://q.test/r-${i}` }));
+    const batch2Links = Array.from({ length: 2 }, (_, i) => ({ qurl_id: `q_batch_2_${i}`, qurl_link: `https://q.test/r2-${i}` }));
     mockMintLinks
       .mockResolvedValueOnce(batch1Links)
       .mockResolvedValueOnce(batch2Links);
@@ -1577,7 +1580,7 @@ describe('handleAddRecipients', () => {
     }
 
     mockDownloadAndUpload.mockResolvedValue({ resource_id: 'new-res-C', fileBuffer: new ArrayBuffer(8) });
-    const links = Array.from({ length: 8 }, (_, i) => ({ qurl_link: `https://q.test/l-${i}` }));
+    const links = Array.from({ length: 8 }, (_, i) => ({ qurl_id: `q_small_batch_${i}`, qurl_link: `https://q.test/l-${i}` }));
     mockMintLinks.mockResolvedValueOnce(links);
     mockSendDM.mockResolvedValue({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
 

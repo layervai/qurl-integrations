@@ -2,7 +2,8 @@ const { QURLClient } = require('@layervai/qurl');
 
 const config = require('./config');
 const logger = require('./logger');
-const { validateResourceId } = require('./utils/resource-id');
+const { validateResourceId, resourceIdLogRef } = require('./utils/resource-id');
+const { normalizeQurlId } = require('./utils/qurl-id');
 
 // Reuse the security-critical, syntactic private/loopback/link-local IP guard
 // from qurl.js rather than duplicating ~50 lines of IP-literal parsing that
@@ -16,6 +17,25 @@ const { formatSessionDurationSeconds, isPositiveFinite } = require('./utils/time
 
 const { MAX_FILE_SIZE } = require('./constants');
 const MAX_CDN_REDIRECTS = 3;
+// TODO(upstream-contract): qurl-integrations-infra's render-at-mint handler has
+// a 55s internal request budget (source GET/classification + service remint/render).
+// Leave 10s for response transport so the caller does not abort valid work
+// while the connector can still mint shared-tunnel tokens.
+const MINT_LINK_TIMEOUT_MS = 65_000;
+// TODO(upstream-contract): qurl-integrations-infra#1553 bounds concurrent
+// per-ID processing (at most 10 unique IDs) under one 55s handler deadline.
+// Match mint's 10s response-transport margin so the caller, rather than an
+// accidental 30s race with the connector's qURL client, owns the outer bound.
+const REVOKE_LINKS_TIMEOUT_MS = 65_000;
+// #1553 rejects larger requests atomically. Keep this endpoint contract local
+// rather than coupling connector.js to commands.js's independently tunable
+// TOKENS_PER_RESOURCE; chunking also recovers legacy/corrupt over-cap groups.
+// The 65s deadline applies per chunk: current groups normally need one call,
+// while historical over-cap groups trade bounded additional time for cleanup.
+const REVOKE_LINKS_MAX_IDS = 10;
+// Checked at request build time as a backstop: MAX_QURL_ID_LENGTH and
+// validateResourceId already keep a full chunk under it, and a test pins that.
+const REVOKE_REQUEST_MAX_BYTES = 4 * 1024;
 
 // Truncate the connector's MD5 of an uploaded file before logging. The full
 // hash is treated as sensitive in our broader infrastructure; see internal
@@ -85,27 +105,33 @@ function parseConnectorBody(bodyText) {
   return { parsed, apiCode, apiDetail };
 }
 
-function mintedLinksWithId(links) {
-  if (!Array.isArray(links)) return [];
-  return links.filter(link => (
-    link
-    && typeof link === 'object'
-    && typeof link.qurl_id === 'string'
-    && link.qurl_id.length > 0
-  ));
+function partitionPartialMintLinks(links) {
+  if (!Array.isArray(links)) {
+    return { partialLinkCount: 0, partialQurlIds: [], partialUnidentifiedQurlCount: 0 };
+  }
+  const partialQurlIds = [];
+  let partialUnidentifiedQurlCount = 0;
+  for (const link of links) {
+    const qurlId = normalizeQurlId(link && typeof link === 'object' ? link.qurl_id : undefined);
+    if (qurlId === null) partialUnidentifiedQurlCount += 1;
+    else partialQurlIds.push(qurlId);
+  }
+  return {
+    partialLinkCount: links.length,
+    partialQurlIds,
+    partialUnidentifiedQurlCount,
+  };
 }
 
-function qurlIdsFromLinks(links) {
-  return links.map(link => link.qurl_id);
-}
-
-function throwConnectorErrorFromBody(label, response, {
+function connectorErrorFromBody(label, response, {
   bodyText = '',
   apiCode = null,
   apiDetail = null,
+  partialLinkCount = 0,
   partialQurlIds = [],
+  partialUnidentifiedQurlCount = 0,
 } = {}) {
-  if (partialQurlIds.length === 0) {
+  if (partialLinkCount === 0) {
     logger.debug(`${label} error`, {
       status: response.status,
       apiCode,
@@ -116,11 +142,19 @@ function throwConnectorErrorFromBody(label, response, {
   err.status = response.status;
   err.apiCode = apiCode;
   err.apiDetail = apiDetail;
-  if (partialQurlIds.length > 0) {
-    err.partialLinkCount = partialQurlIds.length;
+  if (partialLinkCount > 0) {
+    err.partialLinkCount = partialLinkCount;
     err.partialQurlIds = partialQurlIds;
+    err.partialCleanupConfirmed = false;
+    if (partialUnidentifiedQurlCount > 0) {
+      err.partialUnidentifiedQurlCount = partialUnidentifiedQurlCount;
+    }
   }
-  throw err;
+  return err;
+}
+
+function throwConnectorErrorFromBody(label, response, options) {
+  throw connectorErrorFromBody(label, response, options);
 }
 
 async function throwConnectorError(label, response) {
@@ -435,7 +469,7 @@ async function mintLinks(resourceId, { expiresAt, n, apiKey, selfDestructSeconds
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...connectorAuthHeaders(apiKey) },
     body: JSON.stringify(body),
-    signal: AbortSignal.timeout(30000),
+    signal: AbortSignal.timeout(MINT_LINK_TIMEOUT_MS),
   });
 
   if (!response.ok) {
@@ -444,25 +478,56 @@ async function mintLinks(resourceId, { expiresAt, n, apiKey, selfDestructSeconds
       bodyText = await response.text();
     } catch { /* network read failed, fall through with empty body */ }
     const { parsed, apiCode, apiDetail } = parseConnectorBody(bodyText);
-    const partialQurlIds = qurlIdsFromLinks(mintedLinksWithId(parsed?.links));
-    if (partialQurlIds.length > 0) {
+    const {
+      partialLinkCount,
+      partialQurlIds,
+      partialUnidentifiedQurlCount,
+    } = partitionPartialMintLinks(parsed?.links);
+    if (partialLinkCount > 0) {
       // TODO(upstream-contract): Best-effort reconciliation signal; connector
       // error bodies must only include qurl_ids for links that were actually minted.
+      // qurl_id is the non-secret display/revocation handle, not the bearer
+      // qurl_link fragment. Log it before cleanup so a process interruption
+      // still leaves operators the identities needed for reconciliation.
       logger.warn('Connector mint_link returned partial links on non-2xx', {
-        resource_id: resourceId,
+        resource_ref: resourceIdLogRef(resourceId),
         status: response.status,
         apiCode,
         bodyLen: bodyText.length,
-        partial_link_count: partialQurlIds.length,
+        partial_link_count: partialLinkCount,
         partial_qurl_ids: partialQurlIds,
+        unidentified_qurl_count: partialUnidentifiedQurlCount,
       });
     }
-    return throwConnectorErrorFromBody('Connector mint_link', response, {
+    const errorOptions = {
       bodyText,
       apiCode,
       apiDetail,
+      partialLinkCount,
       partialQurlIds,
-    });
+      partialUnidentifiedQurlCount,
+    };
+    const mintError = connectorErrorFromBody('Connector mint_link', response, errorOptions);
+    if (partialLinkCount === 0 || partialQurlIds.length === 0) throw mintError;
+
+    // Preserve the mint failure as the caller-visible error, but first clean up
+    // every connector-managed token the non-2xx response proves was minted.
+    // Otherwise a render failure strands live shared-account tokens and retries
+    // consume quota without any durable send row from which to revoke them.
+    try {
+      await revokeMintedLinks(resourceId, partialQurlIds, apiKey);
+      mintError.partialCleanupConfirmed = true;
+    } catch (cleanupError) {
+      logger.error('Connector partial mint cleanup failed', {
+        resource_ref: resourceIdLogRef(resourceId),
+        partial_link_count: partialLinkCount,
+        unidentified_qurl_count: partialUnidentifiedQurlCount,
+        cleanup_error_name: cleanupError?.name,
+        cleanup_status: cleanupError?.status,
+        cleanup_api_code: cleanupError?.apiCode,
+      });
+    }
+    throw mintError;
   }
 
   const result = await response.json();
@@ -475,6 +540,115 @@ async function mintLinks(resourceId, { expiresAt, n, apiKey, selfDestructSeconds
 
   logger.info('Minted links', { resource_id: resourceId, count: result.links.length });
   return result.links;
+}
+
+/**
+ * Revoke the watermarked recipient links minted from an uploaded resource.
+ *
+ * Watermarked views are minted on the connector's own shared fileviewer tunnel,
+ * not on the resource this guild owns, so revoking the resource through the
+ * qURL API cannot reach them (qurl-integrations-infra#1552 — confirmed live: the
+ * recipient token still read `active` after a successful resource revoke). The
+ * connector owns that tunnel and exposes this route to revoke them on our
+ * behalf; it authorizes the call by checking that `apiKey` can see `resourceId`,
+ * so a guild can only ever revoke links derived from its own upload.
+ *
+ * TODO(upstream-contract): qurl-integrations-infra#1553 keeps this endpoint
+ * callable even when render-at-mint is currently disabled. On a mint-row miss,
+ * it strongly reads qurl-service under both identities: only a canonical caller
+ * 200 bound to this exact source plus an authoritative owner-hidden service 404
+ * proves `not_connector_managed`. `already_gone` is reserved for a mapped
+ * child whose DELETE returns the exact dead-token 404/410 proof and whose
+ * service lookup also proves it absent. Service 200 (including same-owner
+ * credentials), transport, and ambiguous responses fail.
+ * The connector returns every requested qurl_id exactly once in an unordered
+ * unique set.
+ * A 404, 410, or 503 from this endpoint itself is never evidence that a
+ * historical send lacked connector-managed links, so all non-2xx responses
+ * fail closed.
+ *
+ * @returns {Promise<boolean>} true when the connector revoked (or had nothing to
+ *   revoke); throws when links may still be live, so the caller can leave the
+ *   send retryable rather than reporting a revoke that did not happen.
+ */
+async function revokeMintedLinks(resourceId, qurlIds, apiKey) {
+  validateResourceId(resourceId);
+  if (!Array.isArray(qurlIds)) {
+    throw new Error('Invalid connector revoke token list');
+  }
+  const normalizedIds = qurlIds.map(normalizeQurlId);
+  if (normalizedIds.some(id => id === null)) {
+    throw new Error('Invalid connector revoke token identity');
+  }
+  // A repaired/resend row can repeat a token. Revoke each identity once and
+  // require one response outcome per unique requested identity.
+  const ids = [...new Set(normalizedIds)];
+  if (ids.length === 0) return true;
+
+  // Sequential by design: the connector's process-wide revoke admission bound
+  // equals its per-request cap, so parallel chunks would self-starve (infra#1556).
+  for (let offset = 0; offset < ids.length; offset += REVOKE_LINKS_MAX_IDS) {
+    const batchIds = ids.slice(offset, offset + REVOKE_LINKS_MAX_IDS);
+    const body = JSON.stringify({ resource_id: resourceId, qurl_ids: batchIds });
+    if (Buffer.byteLength(body, 'utf8') > REVOKE_REQUEST_MAX_BYTES) {
+      const err = new Error('Connector revoke request exceeds the 4 KiB body cap');
+      err.unresolvedCount = batchIds.length;
+      throw err;
+    }
+    const response = await fetch(`${config.CONNECTOR_URL}/api/revoke_links`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...connectorAuthHeaders(apiKey) },
+      body,
+      signal: AbortSignal.timeout(REVOKE_LINKS_TIMEOUT_MS),
+    });
+
+    if (!response.ok) {
+      return throwConnectorError('Connector revoke_links', response);
+    }
+
+    let parsed;
+    try {
+      parsed = await response.json();
+    } catch {
+      const err = new Error('Connector revoke_links returned invalid JSON');
+      err.unresolvedCount = batchIds.length;
+      throw err;
+    }
+
+    // Require one id-keyed all-clear outcome for every requested id. Checking only
+    // for bad statuses would accept an empty/short result array and finalize a
+    // send while omitted links may still be live. Results may be reordered, but
+    // duplicate or foreign outcomes violate the exact-coverage contract.
+    let unresolvedCount = batchIds.length;
+    if (parsed?.success === true && Array.isArray(parsed.results)) {
+      const requested = new Set(batchIds);
+      const confirmed = new Set();
+      let invalidOutcomeCount = 0;
+      for (const result of parsed.results) {
+        const statusConfirmed = result?.status === 'revoked'
+          || result?.status === 'already_gone'
+          || result?.status === 'not_connector_managed';
+        if (!requested.has(result?.qurl_id) || confirmed.has(result.qurl_id) || !statusConfirmed) {
+          invalidOutcomeCount++;
+        } else {
+          confirmed.add(result.qurl_id);
+        }
+      }
+      // Use the larger count so one foreign/duplicate outcome replacing one
+      // missing requested outcome is reported once rather than double-counted.
+      unresolvedCount = Math.max(batchIds.length - confirmed.size, invalidOutcomeCount);
+    }
+    if (unresolvedCount > 0) {
+      const err = new Error(`Connector revoke_links did not confirm ${unresolvedCount} link(s)`);
+      err.unresolvedCount = unresolvedCount;
+      throw err;
+    }
+  }
+  logger.info('Confirmed connector-managed link revoke', {
+    resource_ref: resourceIdLogRef(resourceId),
+    count: ids.length,
+  });
+  return true;
 }
 
 const DETECT_TARGET_PATH = '/api/detect';
@@ -947,4 +1121,24 @@ async function uploadJsonToConnector(jsonPayload, filename, apiKey, viewerTtlSec
   return result;
 }
 
-module.exports = { uploadToConnector, downloadAndUpload, reUploadBuffer, mintLinks, detectWatermark, uploadJsonToConnector, isAllowedSourceUrl, detectTunnelHostSuffixesForEndpoint };
+module.exports = {
+  uploadToConnector,
+  downloadAndUpload,
+  reUploadBuffer,
+  mintLinks,
+  revokeMintedLinks,
+  detectWatermark,
+  uploadJsonToConnector,
+  isAllowedSourceUrl,
+  detectTunnelHostSuffixesForEndpoint,
+};
+// Keep the future-caller exact-host invariant directly testable without
+// extending production's connector API. Jest sets NODE_ENV=test, matching the
+// precedent in logger.js.
+if (process.env.NODE_ENV === 'test') {
+  module.exports.__testExports = {
+    assertPublicHttpsTarget,
+    REVOKE_LINKS_MAX_IDS,
+    REVOKE_REQUEST_MAX_BYTES,
+  };
+}

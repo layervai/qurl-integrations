@@ -1398,9 +1398,35 @@ describe('qurl sends', () => {
     const items = await store.getSendItems('s1', 'owner', { consistentRead: true });
     const query = ddbMock.commandCalls(QueryCommand)[0].args[0].input;
     expect(query.ConsistentRead).toBe(true);
+    // This is a base-table query with no ProjectionExpression, so DynamoDB
+    // returns every stored attribute, including the sparse qurl_id. Pin both
+    // properties: a future GSI/projection optimization must not silently drop
+    // the connector-child identity needed by revokeAllLinks.
+    expect(query.IndexName).toBeUndefined();
+    expect(query.ProjectionExpression).toBeUndefined();
     expect(items).toEqual([expect.objectContaining({
       resource_id: 'res-1', recipient_discord_id: 'r1', qurl_id: 'q_aaaaaaaaaa1',
     })]);
+  });
+
+  test('recordQURLSendBatch qurl_id round-trips through getSendItems for revoke', async () => {
+    ddbMock.on(BatchWriteCommand).resolves({});
+    await store.recordQURLSendBatch([{
+      sendId: 's1', senderDiscordId: 'owner', recipientDiscordId: 'r1',
+      resourceId: 'res-1', resourceType: 'file', qurlLink: 'https://…',
+      qurlId: 'q_aaaaaaaaaa1', expiresIn: '24h', channelId: 'ch', targetType: 'user',
+    }]);
+    const stored = ddbMock.commandCalls(BatchWriteCommand)[0]
+      .args[0].input.RequestItems['test-prefix-qurl-sends'][0].PutRequest.Item;
+    ddbMock.on(QueryCommand).resolves({ Items: [stored] });
+
+    await expect(store.getSendItems('s1', 'owner', { consistentRead: true }))
+      .resolves.toEqual([expect.objectContaining({
+        resource_id: 'res-1', recipient_discord_id: 'r1', qurl_id: 'q_aaaaaaaaaa1',
+      })]);
+    const query = ddbMock.commandCalls(QueryCommand)[0].args[0].input;
+    expect(query.IndexName).toBeUndefined();
+    expect(query.ProjectionExpression).toBeUndefined();
   });
 
   test('getSendItems: defaults to eventual consistency outside the revoke barrier path', async () => {

@@ -52,7 +52,8 @@ const {
 const { signQurlOAuthState } = require('./utils/qurl-oauth-state');
 const { deleteLink } = require('./qurl');
 const { resourceIdLogRef } = require('./utils/resource-id');
-const { downloadAndUpload, reUploadBuffer, mintLinks, detectWatermark, uploadJsonToConnector, isAllowedSourceUrl } = require('./connector');
+const { normalizeQurlId } = require('./utils/qurl-id');
+const { downloadAndUpload, reUploadBuffer, mintLinks, detectWatermark, uploadJsonToConnector, isAllowedSourceUrl, revokeMintedLinks } = require('./connector');
 const { deleteFlow, transitionFlow, supersedeOrCreate } = require('./flow-state');
 const { fireAndForgetLinkGuildWebhookSubscription } = require('./guild-webhook-link');
 const {
@@ -1641,6 +1642,17 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
 // should NOT re-flag this file's length — the split will land in its
 // own PR against a stable baseline.
 
+// Thrown by mintLinksInBatches after compensation when the connector returns
+// fewer links than requested; carries the shortfall for "Only N of M" replies.
+class MintShortfallError extends Error {
+  constructor(requested, delivered) {
+    super(`Connector minted ${delivered} of ${requested} requested links`);
+    this.name = 'MintShortfallError';
+    this.requested = requested;
+    this.delivered = delivered;
+  }
+}
+
 /**
  * Mint one-time links across a stream of connector resources, each capped at
  * TOKENS_PER_RESOURCE tokens. When a resource is exhausted, the caller's
@@ -1668,39 +1680,128 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
  *   Threaded through here (not passed to mintLinks at each call site) because
  *   mintLinks is only reached via this batcher on the real send paths.
  *   Optional/back-compat — omitting it leaves the mint body unchanged.
+ * @param {{sendId?: string, operationLabel?: string}} [opts.cleanupContext] —
+ *   caller identity used only for fail-closed compensation logs.
  * @returns {Array<{qurl_link: string, qurl_id: string, resourceId: string}>}
+ * @throws {MintShortfallError} after compensation, when the connector under-delivers.
  */
-async function mintLinksInBatches({ initialResourceId, reuploadFn, expiresAt, recipientCount, apiKey, selfDestructSeconds = null, guildId }) {
+async function mintLinksInBatches({
+  initialResourceId,
+  reuploadFn,
+  expiresAt,
+  recipientCount,
+  apiKey,
+  selfDestructSeconds = null,
+  guildId,
+  cleanupContext = {},
+}) {
   const allLinks = [];
+  const seenQurlIds = new Set();
+  const seenQurlLinks = new Set();
   let currentResourceId = initialResourceId;
+  const resourceIds = [initialResourceId];
   let tokensUsed = 0;
 
-  // Mirrored by planMintBatches in scripts/loadtest-standalone.js, so the load
-  // test issues the upload/mint pattern a real send does. Nothing ties the two
-  // at compile time — tests/loadtest-mint-batches.test.js re-implements this
-  // loop as an oracle and diffs the shapes. If the guard, the increment or the
-  // batchSize formula below changes, update that oracle in the same PR or the
-  // load test keeps measuring the old shape while staying green.
-  for (let i = 0; i < recipientCount; i += TOKENS_PER_RESOURCE) {
-    if (tokensUsed >= TOKENS_PER_RESOURCE && i > 0) {
-      const re = await reuploadFn();
-      currentResourceId = re.resource_id;
-      tokensUsed = 0;
+  try {
+    // Mirrored by planMintBatches in scripts/loadtest-standalone.js, so the load
+    // test issues the upload/mint pattern a real send does. Nothing ties the two
+    // at compile time — tests/loadtest-mint-batches.test.js re-implements this
+    // loop as an oracle and diffs the shapes. If the guard, the increment or the
+    // batchSize formula below changes, update that oracle in the same PR or the
+    // load test keeps measuring the old shape while staying green.
+    for (let i = 0; i < recipientCount; i += TOKENS_PER_RESOURCE) {
+      if (tokensUsed >= TOKENS_PER_RESOURCE && i > 0) {
+        const re = await reuploadFn();
+        currentResourceId = re.resource_id;
+        resourceIds.push(currentResourceId);
+        tokensUsed = 0;
+      }
+      const batchSize = Math.min(TOKENS_PER_RESOURCE, recipientCount - i);
+      const minted = await mintLinks(currentResourceId, {
+        expiresAt,
+        n: batchSize,
+        apiKey,
+        selfDestructSeconds,
+        guildId,
+      });
+      // Push before the arity check: over-delivered links must reach compensation.
+      for (const link of minted) {
+        allLinks.push({
+          qurl_link: link?.qurl_link,
+          // Normalized so compensation can revoke a non-canonical child; the
+          // check below still rejects anything that isn't already canonical.
+          qurl_id: normalizeQurlId(link?.qurl_id),
+          resourceId: currentResourceId,
+        });
+      }
+      if (minted.length > batchSize) {
+        throw new Error(`Connector mint_link returned ${minted.length} links for a ${batchSize}-link batch`);
+      }
+      if (minted.some(link => {
+        const qurlId = normalizeQurlId(link?.qurl_id);
+        return qurlId === null || qurlId !== link.qurl_id;
+      })) {
+        // Fail closed, even on a short response: qurl_id is the only durable
+        // child-revocation identity, so a watermarked child minted without it
+        // could never be revoked. Fresh connector output must already be
+        // canonical (it is the webhook join key); only stored legacy rows are
+        // trimmed. Never persist or deliver such a link; the catch below
+        // compensates every identifiable sibling before deleting the parent.
+        // TODO(upstream-contract): connector mint_link has returned qurl_id on
+        // every link since qurl-integrations-infra#747.
+        throw new Error('Connector mint_link returned a link missing a valid qurl_id');
+      }
+      if (minted.some(link => (
+        typeof link?.qurl_link !== 'string'
+        || link.qurl_link.trim().length === 0
+        || link.qurl_link.trim() !== link.qurl_link
+      ))) {
+        // qurl_link is the write-once delivery credential. If it is absent or
+        // malformed, revoke the identified child instead of persisting a row
+        // that can neither be delivered nor reconstructed later.
+        throw new Error('Connector mint_link returned a link missing a valid qurl_link');
+      }
+      // Uniqueness spans the whole multi-resource invocation.
+      for (const link of minted) {
+        if (seenQurlIds.has(link.qurl_id)) throw new Error('Connector mint_link returned a duplicate qurl_id');
+        seenQurlIds.add(link.qurl_id);
+      }
+      for (const link of minted) {
+        if (seenQurlLinks.has(link.qurl_link)) throw new Error('Connector mint_link returned a duplicate qurl_link');
+        seenQurlLinks.add(link.qurl_link);
+      }
+      if (minted.length < batchSize) {
+        // Throw rather than return a short array: the catch below revokes
+        // every link minted so far, so none may reach a caller that could
+        // persist or deliver it. Callers render "Only N of M" from the error.
+        throw new MintShortfallError(recipientCount, allLinks.length);
+      }
+      tokensUsed += batchSize;
     }
-    const batchSize = Math.min(TOKENS_PER_RESOURCE, recipientCount - i);
-    const minted = await mintLinks(currentResourceId, {
-      expiresAt,
-      n: batchSize,
-      apiKey,
-      selfDestructSeconds,
-      guildId,
-    });
-    for (const link of minted) {
-      // qurl_id is the join key against qurl.accessed webhooks; empty
-      // string degrades the whole monitor to bare base-msg.
-      allLinks.push({ qurl_link: link.qurl_link, qurl_id: link.qurl_id || '', resourceId: currentResourceId });
+  } catch (error) {
+    try {
+      await cleanupIncompleteMintBatch({
+        allLinks,
+        resourceIds,
+        currentResourceId,
+        partialQurlIds: error?.partialQurlIds,
+        partialUnidentifiedQurlCount: error?.partialUnidentifiedQurlCount,
+        partialCleanupConfirmed: error?.partialCleanupConfirmed === true,
+        apiKey,
+        cleanupContext,
+        reason: error instanceof MintShortfallError ? 'mint_underdelivery' : 'mint_failed',
+        error,
+      });
+    } catch (cleanupError) {
+      // Compensation must never mask the mint error the caller renders.
+      logger.error('Mint batch compensation failed', {
+        sendId: cleanupContext.sendId,
+        cleanup_error_name: cleanupError?.name,
+        cleanup_status: cleanupError?.status,
+        cleanup_api_code: cleanupError?.apiCode,
+      });
     }
-    tokensUsed += batchSize;
+    throw error;
   }
   return allLinks;
 }
@@ -2016,15 +2117,10 @@ async function executeSendPipeline(interaction, {
           // guaranteed non-null here — the /qurl send + /qurl map entry
           // points both DM-reject before reaching the pipeline.
           guildId: interaction.guildId,
+          cleanupContext: { sendId, operationLabel: 'initial send' },
         });
       } finally {
         bufHolder.buf = null;
-      }
-
-      if (allLinks.length < recipients.length) {
-        logger.error('mintLinks returned fewer links than expected', { expected: recipients.length, got: allLinks.length });
-        clearCooldown(interaction.user.id);
-        return interaction.editReply({ content: `Only ${allLinks.length} of ${recipients.length} links could be created. Please try again.` });
       }
 
       qurlLinks = recipients.map((r, i) => ({
@@ -2059,13 +2155,8 @@ async function executeSendPipeline(interaction, {
         // today, but threading guild_id keeps the two pipelines symmetric
         // and future-proofs a watermarked map render.
         guildId: interaction.guildId,
+        cleanupContext: { sendId, operationLabel: 'initial send' },
       });
-
-      if (allLinks.length < recipients.length) {
-        logger.error('mintLinks returned fewer links than expected for location', { expected: recipients.length, got: allLinks.length });
-        clearCooldown(interaction.user.id);
-        return interaction.editReply({ content: `Only ${allLinks.length} of ${recipients.length} links could be created. Please try again.` });
-      }
 
       qurlLinks = recipients.map((r, i) => ({
         recipientId: r.id,
@@ -2076,6 +2167,13 @@ async function executeSendPipeline(interaction, {
       logger.audit(AUDIT_EVENTS.UPLOAD_SUCCESS, { send_id: sendId, kind: 'location' });
     }
   } catch (error) {
+    if (error instanceof MintShortfallError) {
+      // Not a create-link failure audit: the user gets "Only N of M", and
+      // mintLinksInBatches already revoked every link it minted.
+      logger.error('mintLinks returned fewer links than expected', { sendId, expected: error.requested, got: error.delivered });
+      clearCooldown(interaction.user.id);
+      return interaction.editReply({ content: `Only ${error.delivered} of ${error.requested} links could be created. Please try again.` });
+    }
     // Audit for the CloudWatch metric filter + alarm at qurl-integrations-infra
     // qurl-bot-discord/terraform/monitoring.tf (qurl-integrations#276); the why
     // lives in the QURL_SEND_CREATE_LINK_FAILURE docstring in constants.js.
@@ -2199,6 +2297,16 @@ async function executeSendPipeline(interaction, {
       errorMessage: persistenceErrorMessageForLog(err),
       linkCount: qurlLinks.length,
       orphanedResources: qurlLinks.map(l => ({ resourceId: l.resourceId, qurlId: l.qurlId })),
+    });
+    // The write can fail after one or more unguarded BatchWrite chunks have
+    // committed. Revoke every freshly minted child/resource regardless: rows
+    // that did land then point at dead grants, while rows that did not land no
+    // longer leave live untracked grants. The helper logs unresolved residue
+    // but never replaces this persistence failure or the user-facing outcome.
+    await cleanupFreshMintedResources(qurlLinks, apiKey, sendId, {
+      reason: 'initial_persistence_failed',
+      operationLabel: 'initial send',
+      checkGuardTransaction: false,
     });
     clearCooldown(interaction.user.id);
     return interaction.editReply({
@@ -2898,61 +3006,216 @@ async function executeSendPipeline(interaction, {
   }
 }
 
-async function cleanupFreshAddRecipientResources(batchSends, apiKey, sendId, options = {}) {
+function partitionQurlIds(recordedQurlIds) {
+  const identified = new Set();
+  let unidentifiedQurlCount = 0;
+  for (const qurlId of recordedQurlIds) {
+    const normalized = normalizeQurlId(qurlId);
+    if (normalized === null) {
+      unidentifiedQurlCount += 1;
+    } else {
+      identified.add(normalized);
+    }
+  }
+  return { qurlIds: [...identified], unidentifiedQurlCount };
+}
+
+async function cleanupFreshMintedResources(batchSends, apiKey, sendId, options = {}) {
+  // Callers deliberately await this helper before replying/returning. Detached
+  // compensation can be abandoned during process exit or task drain, widening
+  // the live-grant window after a failed send.
   const rowsMayHavePersisted = options.rowsMayHavePersisted !== false;
   const cleanupReason = options.reason || (rowsMayHavePersisted ? 'revoked_guard' : 'pre_persistence');
-  const txnActionCount = ddbSendConfigGuardActionCount(batchSends);
-  if (rowsMayHavePersisted && !ddbSendConfigGuardFitsTransaction(batchSends)) {
+  const operationLabel = options.operationLabel || 'Add Recipients';
+  const checkGuardTransaction = options.checkGuardTransaction !== false;
+  if (checkGuardTransaction && rowsMayHavePersisted && !ddbSendConfigGuardFitsTransaction(batchSends)) {
     // Unreachable by construction for today's Add Recipients flow: oversized
     // batches fail before DDB, and revoked errors only come from a single
     // transaction. If a future caller violates that invariant, still revoke
     // the freshly minted qURLs; rows may point at deleted resources, but no DMs
     // have been sent and the grants fail closed.
-    logger.error('Cleaning up oversized Add Recipients batch after possible persistence', {
+    // Static messages keep log queries stable; the flow goes in `operation`.
+    logger.error('Cleaning up oversized batch after possible persistence', {
       sendId,
+      operation: operationLabel,
       send_count: batchSends.length,
-      txn_actions: txnActionCount,
+      txn_actions: ddbSendConfigGuardActionCount(batchSends),
     });
   }
 
   // Called when no recipient rows landed, or when a terminal guarded
   // transaction failure is ambiguous enough that deleting freshly minted qURLs
   // is the fail-closed outcome (no DMs have been sent yet).
-  const resourceIds = [...new Set(
-    batchSends
-      .map(s => s.resourceId)
-      .filter(id => typeof id === 'string' && id.length > 0),
-  )];
-  if (resourceIds.length === 0) return;
+  const qurlIdsByResource = new Map();
+  for (const resourceId of options.resourceIds || []) {
+    if (typeof resourceId === 'string' && resourceId.length > 0) {
+      qurlIdsByResource.set(resourceId, []);
+    }
+  }
+  for (const send of batchSends) {
+    if (typeof send.resourceId !== 'string' || send.resourceId.length === 0) continue;
+    const qurlIds = qurlIdsByResource.get(send.resourceId) || [];
+    qurlIds.push(send.qurlId);
+    qurlIdsByResource.set(send.resourceId, qurlIds);
+  }
+  const resourceEntries = [...qurlIdsByResource.entries()].map(([resourceId, recordedQurlIds]) => ({
+    resourceId,
+    ...partitionQurlIds(recordedQurlIds),
+  }));
+  if (resourceEntries.length === 0) return;
 
-  const results = await batchSettled(resourceIds, async (resourceId) => {
-    await deleteLink(resourceId, apiKey);
+  const results = await batchSettled(resourceEntries, async ({
+    resourceId, qurlIds, unidentifiedQurlCount,
+  }) => {
+    const connectorRevokeAttempted = qurlIds.length > 0;
+    let connectorRevokeConfirmed = connectorRevokeAttempted ? false : null;
+    let resourceRevokeConfirmed = false;
+    let failure;
+    try {
+      // Revoke every identifiable child before the parent. If fresh connector
+      // output omitted an identity, deleting the caller-owned source afterward
+      // still minimizes live access; #1553 keeps that soft-revoked source
+      // owner-visible as the authorization anchor for operator reconciliation.
+      if (connectorRevokeAttempted) {
+        await revokeMintedLinks(resourceId, qurlIds, apiKey);
+        connectorRevokeConfirmed = true;
+      }
+      await deleteLink(resourceId, apiKey);
+      resourceRevokeConfirmed = true;
+    } catch (error) {
+      failure = error;
+    }
+    if (unidentifiedQurlCount > 0 || failure) {
+      const error = failure || new Error('Fresh connector link is missing its revoke identity');
+      error.connectorRevokeAttempted = connectorRevokeAttempted;
+      error.connectorRevokeConfirmed = connectorRevokeConfirmed;
+      error.resourceRevokeConfirmed = resourceRevokeConfirmed;
+      throw error;
+    }
     return resourceId;
   }, 5);
   const failed = [];
   results.forEach((result, index) => {
     if (result.status === 'rejected') {
+      const { resourceId, qurlIds, unidentifiedQurlCount } = resourceEntries[index];
       failed.push({
-        resource_ref: resourceIdLogRef(resourceIds[index]),
+        resource_ref: resourceIdLogRef(resourceId),
+        qurl_id_count: qurlIds.length,
+        qurl_ids: qurlIds,
+        unidentified_qurl_count: unidentifiedQurlCount,
+        connector_revoke_attempted: result.reason?.connectorRevokeAttempted === true,
+        connector_revoke_confirmed: typeof result.reason?.connectorRevokeConfirmed === 'boolean'
+          ? result.reason.connectorRevokeConfirmed
+          : null,
+        resource_revoke_confirmed: result.reason?.resourceRevokeConfirmed === true,
         error: result.reason?.message,
       });
     }
   });
   if (failed.length > 0) {
-    logger.error('Failed to clean up freshly minted Add Recipients qURL resources', {
+    logger.error('Failed to clean up freshly minted qURL resources', {
       sendId,
+      operation: operationLabel,
       reason: cleanupReason,
       failed_count: failed.length,
-      total: resourceIds.length,
+      total: resourceEntries.length,
       failures: failed,
     });
   } else {
-    logger.info('Cleaned up freshly minted Add Recipients qURL resources', {
+    logger.info('Cleaned up freshly minted qURL resources', {
       sendId,
+      operation: operationLabel,
       reason: cleanupReason,
-      total: resourceIds.length,
+      total: resourceEntries.length,
     });
   }
+}
+
+async function cleanupIncompleteMintBatch({
+  allLinks,
+  resourceIds,
+  currentResourceId,
+  partialQurlIds,
+  partialUnidentifiedQurlCount = 0,
+  partialCleanupConfirmed,
+  apiKey,
+  cleanupContext,
+  reason,
+  error,
+}) {
+  const reconciliationRows = allLinks.map(link => ({
+    resourceId: link.resourceId,
+    qurlId: link.qurl_id,
+  }));
+  if (Array.isArray(partialQurlIds)) {
+    for (const qurlId of partialQurlIds) {
+      reconciliationRows.push({ resourceId: currentResourceId, qurlId });
+    }
+  }
+  for (let i = 0; i < partialUnidentifiedQurlCount; i++) {
+    reconciliationRows.push({ resourceId: currentResourceId, qurlId: undefined });
+  }
+  // mintLinks already revokes non-2xx partial children inline. Keep those IDs
+  // in the reconciliation ledger, but do not make a second revoke request
+  // after the connector confirmed the first one. Parent cleanup still runs.
+  const cleanupRows = partialCleanupConfirmed
+    ? [
+      ...allLinks.map(link => ({ resourceId: link.resourceId, qurlId: link.qurl_id })),
+      ...Array.from({ length: partialUnidentifiedQurlCount }, () => ({
+        resourceId: currentResourceId,
+        qurlId: undefined,
+      })),
+    ]
+    : reconciliationRows;
+
+  const ids = [...new Set(resourceIds.filter(
+    resourceId => typeof resourceId === 'string' && resourceId.length > 0,
+  ))];
+  const ledger = new Map(ids.map(resourceId => [resourceId, []]));
+  for (const row of reconciliationRows) {
+    if (!ledger.has(row.resourceId)) continue;
+    ledger.get(row.resourceId).push(row.qurlId);
+  }
+  const resources = [...ledger.entries()].map(([resourceId, recordedQurlIds]) => {
+    const { qurlIds, unidentifiedQurlCount } = partitionQurlIds(recordedQurlIds);
+    return {
+      resource_ref: resourceIdLogRef(resourceId),
+      qurl_ids: qurlIds,
+      unidentified_qurl_count: unidentifiedQurlCount,
+    };
+  });
+
+  // Log the non-secret reconciliation handles before network cleanup. A
+  // process interruption must not erase the only record of a child minted in
+  // an earlier batch. Bearer qurl_link fragments never enter this ledger.
+  // qurl_ids stay raw on purpose, unlike resource_ids (hashed via
+  // resourceIdLogRef): they are non-secret display handles operators need to
+  // reconcile children.
+  logger.error(reason === 'mint_underdelivery'
+    ? 'Connector minted fewer links than requested; cleaning up minted resources'
+    : 'mintLinksInBatches failed; cleaning up minted resources', {
+    sendId: cleanupContext.sendId,
+    operation: cleanupContext.operationLabel || 'mint batch',
+    reason,
+    resource_count: resources.length,
+    resources,
+    error_name: error?.name,
+    error_status: error?.status,
+    error_api_code: error?.apiCode,
+  });
+  const cleanupOperationLabel = cleanupContext.operationLabel
+    ? `${cleanupContext.operationLabel} mint batch`
+    : 'mint batch';
+  // Intentionally await fail-closed compensation before the caller can reply or
+  // return. A detached cleanup can be abandoned during process exit/task drain,
+  // leaving the very live grants this path exists to minimize.
+  await cleanupFreshMintedResources(cleanupRows, apiKey, cleanupContext.sendId, {
+    rowsMayHavePersisted: false,
+    reason,
+    operationLabel: cleanupOperationLabel,
+    checkGuardTransaction: false,
+    resourceIds: ids,
+  });
 }
 
 // Handle adding new recipients to an existing send. senderDiscordId is
@@ -3127,8 +3390,18 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
           // the filter would silently drop added recipients (fails closed —
           // no leak — but a real watermark would read "no match").
           guildId: originalInteraction.guildId,
+          cleanupContext: { sendId, operationLabel: 'Add Recipients' },
         });
       } catch (err) {
+        if (err instanceof MintShortfallError) {
+          // Underdelivery (fewer links than recipients) is NOT emitted as a
+          // QURL_SEND_CREATE_LINK_FAILURE: the user gets a clear "Only N of M"
+          // message, and it's a distinct shape from the total-failure the
+          // event tracks. The adjacent connector "200 + missing resource_id"
+          // shape is covered by its own alarm.
+          logger.error('mintLinks returned fewer links than expected in addRecipients', { sendId, expected: err.requested, got: err.delivered });
+          return { msg: `Only ${err.delivered} of ${err.requested} links created. Try again.`, newLinks: [], delivered: 0, failed: 0, newRecipients: resolvedRecipients };
+        }
         // Discord CDN URLs are signed and expire (~24h). If the re-download
         // fails, surface a clear user-facing message; log the real error
         // server-side so err.message (which may echo upstream response detail)
@@ -3161,17 +3434,8 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
         return { msg, newLinks: [], delivered: 0, failed: 0, newRecipients: resolvedRecipients };
       }
 
-      if (allLinks.length < newRecipients.length) {
-        // Underdelivery (fewer links than recipients) is NOT emitted as a
-        // QURL_SEND_CREATE_LINK_FAILURE: it isn't a thrown error, the user
-        // gets a clear "Only N of M" message, and it's a distinct shape from
-        // the total-failure the event tracks. The adjacent connector
-        // "200 + missing resource_id" shape is covered by its own alarm.
-        logger.error('mintLinks returned fewer links than expected in addRecipients', { expected: newRecipients.length, got: allLinks.length });
-        return { msg: `Only ${allLinks.length} of ${newRecipients.length} links created. Try again.`, newLinks: [], delivered: 0, failed: 0, newRecipients: resolvedRecipients };
-      }
       // Iterate by allLinks length so an off-by-one can never index out of bounds.
-      // The guard above ensures allLinks.length >= newRecipients.length.
+      // mintLinksInBatches returns exactly newRecipients.length links or throws.
       for (let i = 0; i < allLinks.length; i++) {
         const r = newRecipients[i];
         if (!r) break;
@@ -3200,12 +3464,9 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
         selfDestructSeconds: inheritedDestruct,
         // Guild-scope for attribution (#1101) — see the file branch above.
         guildId: originalInteraction.guildId,
+        cleanupContext: { sendId, operationLabel: 'Add Recipients' },
       });
 
-      if (allLinks.length < newRecipients.length) {
-        logger.error('mintLinks returned fewer links than expected in addRecipients (location)', { expected: newRecipients.length, got: allLinks.length });
-        return { msg: `Only ${allLinks.length} of ${newRecipients.length} location links created. Try again.`, newLinks: [], delivered: 0, failed: 0, newRecipients: resolvedRecipients };
-      }
       newRecipients.forEach((r, i) => {
         if (!recipientLinks[r.id]) recipientLinks[r.id] = [];
         recipientLinks[r.id].push({
@@ -3218,6 +3479,12 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
       preparedKinds.push('location');
     }
   } catch (error) {
+    if (error instanceof MintShortfallError) {
+      // Only the location branch reaches here (the file branch's own catch
+      // returns); same no-audit rationale as the file branch.
+      logger.error('mintLinks returned fewer links than expected in addRecipients (location)', { sendId, expected: error.requested, got: error.delivered });
+      return { msg: `Only ${error.delivered} of ${error.requested} location links created. Try again.`, newLinks: [], delivered: 0, failed: 0, newRecipients: resolvedRecipients };
+    }
     logger.error('Failed to create links for additional recipients', {
       sendId,
       error: error.message,
@@ -3305,7 +3572,7 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
       send_count: batchSends.length,
       txn_actions: ddbSendConfigGuardActionCount(batchSends),
     });
-    await cleanupFreshAddRecipientResources(batchSends, apiKey, sendId, {
+    await cleanupFreshMintedResources(batchSends, apiKey, sendId, {
       rowsMayHavePersisted: false,
       reason: 'pre_persistence_oversized_batch',
     });
@@ -3326,7 +3593,7 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
       logger.warn('recordQURLSendBatch refused Add Recipients for revoked send', {
         sendId, error: err.message, linkCount: batchSends.length,
       });
-      await cleanupFreshAddRecipientResources(batchSends, apiKey, sendId);
+      await cleanupFreshMintedResources(batchSends, apiKey, sendId);
       return {
         msg: 'Cannot add recipients — this send has already been revoked.',
         newLinks: [], newRecipients: [],
@@ -3341,7 +3608,7 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
     // retry actually committed but its response was lost, this cleanup can
     // leave rows pointing at deleted resources; that is still fail-closed
     // because no DMs were sent and the qURLs no longer grant access.
-    await cleanupFreshAddRecipientResources(batchSends, apiKey, sendId, {
+    await cleanupFreshMintedResources(batchSends, apiKey, sendId, {
       reason: 'guarded_transaction_failed',
     });
     return {
@@ -8372,6 +8639,13 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
   // Required because mintLinksInBatches packs up to TOKENS_PER_RESOURCE
   // recipients per resource, so the same resource_id is shared.
   const byResource = new Map();
+  // Per-recipient tokens, kept beside the resource grouping. Watermarked sends
+  // mint these on the connector's shared tunnel rather than on this resource,
+  // so revoking the resource alone leaves them live (infra#1552).
+  const qurlIdsByResource = new Map();
+  const unidentifiedQurlIdCountsByResource = new Map();
+  const legacyResourceIds = new Set();
+  let legacyRowCount = 0;
   const invalidResourceRecipientIds = new Set();
   for (const item of items) {
     if (typeof item.resource_id !== 'string' || item.resource_id.trim().length === 0) {
@@ -8381,6 +8655,29 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
     const list = byResource.get(item.resource_id) || [];
     list.push(item.recipient_discord_id);
     byResource.set(item.resource_id, list);
+    // INVARIANT(absent-qurl-id-is-parent-minted): send rows have persisted
+    // qurl_id since #614, and connector mint_link has returned it on every
+    // link since qurl-integrations-infra#747, both before watermarked
+    // (render-at-mint) children existed (infra#1049). An absent stored qurl_id
+    // therefore marks a token minted on this parent resource, which the
+    // deleteLink below fully revokes.
+    if (item.qurl_id === undefined || item.qurl_id === null || item.qurl_id === '') {
+      legacyRowCount += 1;
+      legacyResourceIds.add(item.resource_id);
+      continue;
+    }
+    // A present value that cannot be normalized is real corruption: keep the
+    // send unfinalized. Overlong/corrupt values never enter the request;
+    // #1553 rejects the whole batch above its 4 KiB body cap.
+    const qurlId = normalizeQurlId(item.qurl_id);
+    if (qurlId === null) {
+      const unidentifiedCount = unidentifiedQurlIdCountsByResource.get(item.resource_id) || 0;
+      unidentifiedQurlIdCountsByResource.set(item.resource_id, unidentifiedCount + 1);
+    } else {
+      const minted = qurlIdsByResource.get(item.resource_id) || [];
+      minted.push(qurlId);
+      qurlIdsByResource.set(item.resource_id, minted);
+    }
   }
   const resourceEntries = [...byResource.entries()];
   const totalUsers = new Set(items.map(it => it.recipient_discord_id)).size;
@@ -8389,6 +8686,53 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
   const failureUserIds = [];
 
   const results = await batchSettled(resourceEntries, async ([resourceId]) => {
+    const qurlIds = qurlIdsByResource.get(resourceId) || [];
+    const unidentifiedTokenCount = unidentifiedQurlIdCountsByResource.get(resourceId) || 0;
+    if (unidentifiedTokenCount > 0) {
+      // We cannot identify every possible connector-managed child, but still
+      // revoke every well-formed child first. The source resource remains the
+      // connector's authorization anchor unless that child step succeeds. Even
+      // after both steps succeed, keep the send unfinalized because the
+      // unidentified residue can never be positively confirmed from this row.
+      // TODO(upstream-contract): infra#1553 authorizes a caller-owned source in
+      // active/revoked/consumed/expired state or by an exact owner-visible
+      // resource_tombstoned 410 envelope, and qurl-service resource DELETE is
+      // idempotent. Therefore a successful parent delete does not erase the
+      // authorization anchor needed after operators repair the malformed row.
+      const connectorRevokeAttempted = qurlIds.length > 0;
+      let connectorRevokeConfirmed = connectorRevokeAttempted ? false : null;
+      let resourceRevokeConfirmed = false;
+      try {
+        if (connectorRevokeAttempted) {
+          await revokeMintedLinks(resourceId, qurlIds, apiKey);
+          connectorRevokeConfirmed = true;
+        }
+        await deleteLink(resourceId, apiKey);
+        resourceRevokeConfirmed = true;
+      } finally {
+        // This is distinct from the generic per-resource failure log below: it
+        // tells operators that repairing stored token identity is required even
+        // when every identifiable revoke happened to succeed.
+        logger.error('Cannot fully revoke resource with malformed stored token identity', {
+          sendId,
+          resource_ref: resourceIdLogRef(resourceId),
+          unidentifiedTokenCount,
+          connectorRevokeAttempted,
+          connectorRevokeConfirmed,
+          confirmedTokenCount: connectorRevokeConfirmed === true ? new Set(qurlIds).size : 0,
+          resourceRevokeConfirmed,
+        });
+      }
+      throw new Error('Cannot fully confirm revoke with malformed stored token identity');
+    }
+    // Revoke the connector-side watermarked views FIRST. If this throws the
+    // resource revoke is skipped, so the send stays retryable instead of being
+    // marked revoked while recipient links are still live. The connector route
+    // remains callable when render-at-mint is off. A mapping miss confirms only
+    // the dual-proof `not_connector_managed` outcome; `already_gone` is reserved
+    // for a mapped child with exact dead-token and service-absence proofs. No
+    // confirmation is ever inferred from this endpoint's HTTP status alone.
+    await revokeMintedLinks(resourceId, qurlIds, apiKey);
     await deleteLink(resourceId, apiKey);
     return resourceId;
   }, 5);
@@ -8417,6 +8761,17 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
         error: results[i].reason?.message,
       });
     }
+  }
+  if (legacyRowCount > 0) {
+    // One rollup per revoke, not per resource: legacy sends are expected and
+    // must not page. See INVARIANT(absent-qurl-id-is-parent-minted) above.
+    logger.warn('Revoked send rows without stored token identity via parent resource delete', {
+      sendId,
+      row_count: legacyRowCount,
+      resource_count: legacyResourceIds.size,
+      revoked_resource_count: resourceEntries
+        .filter(([resourceId], i) => legacyResourceIds.has(resourceId) && results[i].status === 'fulfilled').length,
+    });
   }
   // Strict success = revoked AND not in any failure bucket.
   for (const id of seenSuccess) {
@@ -8457,7 +8812,7 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
     users: { success, total },
   });
 
-  // Edit each strict-success recipient's DM to "Alice closed the door"
+  // Replace each strict-success recipient's DM with "Alice closed the door"
   // so they see immediately that the link is dead rather than tapping a
   // Step Through button that now 404s. Per-recipient (one DM per
   // recipient, even if multiple resources fanned out to them) — keep
