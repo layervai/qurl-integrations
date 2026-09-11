@@ -612,6 +612,31 @@ func TestRevokeResource_PurgesOnReadGone(t *testing.T) {
 	}
 }
 
+// TestRevokeResource_ReadAuthRejected fences the read-side 401/403 arm: setup
+// guidance, no DELETE, and bindings kept (auth failure proves nothing is gone).
+func TestRevokeResource_ReadAuthRejected(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	ts.seedPolicyAliasBindings(t, testAdminTeamID, "C_test", map[string]string{testRevokeAlias: testRevokeResourceID})
+	ts.addCustomer(http.MethodGet, "/v1/resources/"+testRevokeResourceID, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":{"title":"Unauthorized","detail":"bad key","code":"unauthorized","status":401}}`))
+	})
+	ts.addCustomer(http.MethodDelete, "/v1/resources/"+testRevokeResourceID, func(w http.ResponseWriter, _ *http.Request) {
+		t.Error("DELETE issued after the read was auth-rejected")
+		w.WriteHeader(http.StatusNoContent)
+	})
+	h := newAdminTestHandler(t, ts)
+
+	msg := h.revokeResource(context.Background(), slog.Default(), testAdminTeamID, testAdminUserID, testRevokeResourceID, testRevokeAlias)
+	if !strings.Contains(msg, "API key was rejected") {
+		t.Errorf("read 401 message = %q, want setup guidance", msg)
+	}
+	if _, found, err := h.cfg.AdminStore.LookupChannelAlias(context.Background(), testAdminTeamID, "C_test", testRevokeAlias); err != nil || !found {
+		t.Errorf("alias %q purged after an auth-rejected read (found=%v, err=%v)", testRevokeAlias, found, err)
+	}
+}
+
 // TestRevokeResource_MalformedReadFailsClosed fences a 200 read with no
 // data.resource: the admin gets the generic inspect failure and no DELETE runs.
 func TestRevokeResource_MalformedReadFailsClosed(t *testing.T) {
@@ -631,6 +656,9 @@ func TestRevokeResource_MalformedReadFailsClosed(t *testing.T) {
 	if !strings.Contains(msg, "Failed to inspect") {
 		t.Errorf("malformed read message = %q, want the inspect failure", msg)
 	}
+	if strings.Contains(msg, "data.resource") {
+		t.Errorf("malformed read message leaked the raw contract error: %q", msg)
+	}
 	// Unlike read-404, a malformed read proves nothing is gone, so bindings stay.
 	if _, found, err := h.cfg.AdminStore.LookupChannelAlias(context.Background(), testAdminTeamID, "C_test", testRevokeAlias); err != nil || !found {
 		t.Errorf("alias %q purged after a malformed read (found=%v, err=%v)", testRevokeAlias, found, err)
@@ -641,6 +669,8 @@ func TestRevokeResource_MalformedReadFailsClosed(t *testing.T) {
 // unrecognized resource type refuses the revoke rather than guessing teardown.
 func TestRevokeResource_UnknownTypeRefusesDelete(t *testing.T) {
 	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	ts.seedPolicyAliasBindings(t, testAdminTeamID, "C_test", map[string]string{testRevokeAlias: testRevokeResourceID})
 	addRevokeResourceRead(t, ts, testRevokeResourceID, "future_type")
 	ts.addCustomer(http.MethodDelete, "/v1/resources/"+testRevokeResourceID, func(w http.ResponseWriter, _ *http.Request) {
 		t.Error("DELETE issued for an unrecognized resource type")
@@ -651,6 +681,9 @@ func TestRevokeResource_UnknownTypeRefusesDelete(t *testing.T) {
 	msg := h.revokeResource(context.Background(), slog.Default(), testAdminTeamID, testAdminUserID, testRevokeResourceID, testRevokeAlias)
 	if !strings.Contains(msg, "not recognized") {
 		t.Errorf("unknown type message = %q, want the unrecognized-type failure", msg)
+	}
+	if _, found, err := h.cfg.AdminStore.LookupChannelAlias(context.Background(), testAdminTeamID, "C_test", testRevokeAlias); err != nil || !found {
+		t.Errorf("alias %q purged after a refused revoke (found=%v, err=%v)", testRevokeAlias, found, err)
 	}
 }
 

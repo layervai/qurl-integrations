@@ -1574,6 +1574,7 @@ func TestGetResourceRejectsMissingOrMismatchedResource(t *testing.T) {
 		"missing":   {map[string]any{"qurls": []any{}}, "has no resource"},
 		// The pre-fix client decoded this flat shape; the service never sends it.
 		"legacy flat": {map[string]any{"resource_id": "r_abc123test", "type": "tunnel"}, "has no resource"},
+		"no type":     {map[string]any{"resource": map[string]any{"resource_id": "r_abc123test"}}, "has no type"},
 		"mismatch":    {map[string]any{"resource": map[string]any{"resource_id": "r_other"}}, "identity does not match"},
 	} {
 		t.Run(name, func(t *testing.T) {

@@ -903,7 +903,7 @@ func (c *Client) GetResource(ctx context.Context, resourceID string) (*Resource,
 		return nil, fmt.Errorf("build request: %w", err)
 	}
 	// TODO(upstream-contract): qurl-service ResourceDetailResponse nests the
-	// resource under data.resource (beside the qurls preview). Mirrored by
+	// resource under data.resource (beside a qurls preview no caller needs yet). Mirrored by
 	// (*client).Resource in apps/cli/internal/api/rest.go, except the identity
 	// check here is deliberately resource_id-only: callers pass r_ IDs from
 	// resolveTokenForGet or a button snapshot, never CRIDs. The flat pre-#161
@@ -919,6 +919,9 @@ func (c *Client) GetResource(ctx context.Context, resourceID string) (*Resource,
 	}
 	if out.Resource.ResourceID != resourceID {
 		return nil, fmt.Errorf("get resource response identity does not match request (want %q, got %q)", resourceID, out.Resource.ResourceID)
+	}
+	if out.Resource.Type == "" {
+		return nil, errors.New("get resource response has no type")
 	}
 	return out.Resource, nil
 }
