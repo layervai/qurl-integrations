@@ -65,6 +65,8 @@ export type ConditionalConsumeResult =
  */
 export interface OAuthStatePersistence {
   conditionalCreate(state: StoredOAuthState): Promise<ConditionalCreateResult>;
+  /** Returns a state row without consuming it for the authorization redirect. */
+  read(stateKey: string): Promise<StoredOAuthState | undefined>;
   conditionalConsume(
     stateKey: string,
     nowEpochSeconds: number,
@@ -125,11 +127,20 @@ export interface ProviderBindingRequest {
   readonly providerEmail: string;
   /** Ephemeral bearer credential. Implementations must not retain or log it. */
   readonly accessToken: string;
+  /**
+   * Scopes the binding's idempotency key to one setup attempt. Keying only on
+   * the tenant id would make the key identical forever, so a reinstall after
+   * `uninstall` (which revokes the API key) would replay the original request
+   * and could return the cached -- now revoked -- credential, leaving the
+   * tenant "connected" with a dead key and no error anywhere.
+   */
+  readonly setupAttemptId: string;
 }
 
 export type ProviderBindingConflictReason =
   | 'tenant_bound_to_another_account'
-  | 'actor_not_authorized';
+  | 'actor_not_authorized'
+  | 'upstream_binding_cleanup_required';
 
 export type ProviderBindingResult =
   | { readonly status: 'bound'; readonly bindingReference?: string }

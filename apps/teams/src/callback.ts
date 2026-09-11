@@ -66,6 +66,9 @@ export class OAuthCallbackCore {
         providerSubject: identity.subject,
         providerEmail: identity.email,
         accessToken: tokens.accessToken,
+        // One setup attempt = one binding identity. Retries inside this
+        // attempt coalesce; a later reinstall does not replay this one.
+        setupAttemptId: `${transaction.expiresAtEpochSeconds}:${transaction.oidcNonce}`,
       });
       return {
         teamsTenantId: transaction.teamsTenantId,
@@ -77,7 +80,9 @@ export class OAuthCallbackCore {
       };
     } catch (error) {
       const errorCode = isOAuthCoreError(error) ? error.code : 'BINDING_FAILED';
-      this.#logger.error('Provider binding failed after verified OAuth callback.', { errorCode });
+      new RedactingLogger(this.#logger, [input.code, input.state, transaction.pkceVerifier,
+        transaction.oidcNonce, transaction.setupEmail, tokens.accessToken, tokens.idToken])
+        .error('Provider binding failed after verified OAuth callback.', { errorCode, error });
       throw new OAuthCoreError('BINDING_FAILED', 'Provider binding could not be completed.', { retryable: true });
     }
   }
