@@ -191,8 +191,8 @@ the owner-only local state directory. The account API key and one-time
 enrollment credential remain in memory and are not stored by qurl. A warm
 command reuses the device identity and does not read `QURL_API_KEY`.
 
-If enrollment stops before it completes, run `qurl login` again with your
-account key. The CLI resumes enrollment with the saved device identity.
+If enrollment stops before it completes, run `qurl login` again with a key for
+the same account. The CLI resumes enrollment with the saved device identity.
 Keep the local state directory unchanged for this retry.
 
 `qurl whoami` checks the registered device and shows its account.
