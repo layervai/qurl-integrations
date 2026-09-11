@@ -2,6 +2,7 @@ package internal
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -140,7 +141,13 @@ func TestRevokeResource_TunnelStopsSharingFirst(t *testing.T) {
 	ts := newAdminTestServers(t)
 	addRevokeResourceRead(t, ts, testTunnelResourceID, client.ResourceTypeTunnel)
 	var sharingOff, deletes atomic.Int32
-	ts.addCustomer(http.MethodPut, "/v1/resources/"+testTunnelResourceID+"/sharing", func(w http.ResponseWriter, _ *http.Request) {
+	ts.addCustomer(http.MethodPut, "/v1/resources/"+testTunnelResourceID+"/sharing", func(w http.ResponseWriter, r *http.Request) {
+		var in struct {
+			DesiredState string `json:"desired_state"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil || in.DesiredState != "off" {
+			t.Errorf("sharing update = %+v (err %v), want desired_state off", in, err)
+		}
 		sharingOff.Add(1)
 		respondQURLEnvelope(t, w, map[string]any{
 			"resource_id": testTunnelResourceID, "crid": testTunnelCRID,
@@ -597,11 +604,30 @@ func TestRevokeResource_PurgesOnReadGone(t *testing.T) {
 	h := newAdminTestHandler(t, ts)
 
 	msg := h.revokeResource(context.Background(), slog.Default(), testAdminTeamID, testAdminUserID, testRevokeResourceID, testRevokeAlias)
-	if !strings.Contains(msg, "already revoked") {
+	if !strings.Contains(msg, "not found") {
 		t.Fatalf("revoke message = %q, want the already-revoked surface", msg)
 	}
 	if _, found, err := h.cfg.AdminStore.LookupChannelAlias(context.Background(), testAdminTeamID, "C_test", testRevokeAlias); err != nil || found {
 		t.Errorf("alias %q still bound after the read reported the resource gone (found=%v, err=%v)", testRevokeAlias, found, err)
+	}
+}
+
+// TestRevokeResource_MalformedReadFailsClosed fences a 200 read with no
+// data.resource: the admin gets the generic inspect failure and no DELETE runs.
+func TestRevokeResource_MalformedReadFailsClosed(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.addCustomer(http.MethodGet, "/v1/resources/"+testRevokeResourceID, func(w http.ResponseWriter, _ *http.Request) {
+		respondQURLEnvelope(t, w, map[string]any{"qurls": []any{}})
+	})
+	ts.addCustomer(http.MethodDelete, "/v1/resources/"+testRevokeResourceID, func(w http.ResponseWriter, _ *http.Request) {
+		t.Error("DELETE issued after a malformed resource read")
+		w.WriteHeader(http.StatusNoContent)
+	})
+	h := newAdminTestHandler(t, ts)
+
+	msg := h.revokeResource(context.Background(), slog.Default(), testAdminTeamID, testAdminUserID, testRevokeResourceID, testRevokeAlias)
+	if !strings.Contains(msg, "Failed to inspect") {
+		t.Errorf("malformed read message = %q, want the inspect failure", msg)
 	}
 }
 

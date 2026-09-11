@@ -905,8 +905,9 @@ func (c *Client) GetResource(ctx context.Context, resourceID string) (*Resource,
 	// TODO(upstream-contract): qurl-service ResourceDetailResponse nests the
 	// resource under data.resource (beside the qurls preview). Mirrored by
 	// (*client).Resource in apps/cli/internal/api/rest.go, except the identity
-	// check here is deliberately resource_id-only: callers pass resolved r_ IDs,
-	// never CRIDs.
+	// check here is deliberately resource_id-only: callers pass r_ IDs from
+	// resolveTokenForGet or a button snapshot, never CRIDs. The flat pre-#161
+	// shape is rejected, not tolerated, so contract drift fails loudly.
 	var out struct {
 		Resource *Resource `json:"resource"`
 	}
