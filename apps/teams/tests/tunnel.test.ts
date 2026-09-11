@@ -192,7 +192,7 @@ describe('connector tunnel rendering', () => {
     expect(text).toContain('up -d');
     expect(text).toContain('services:');
     const script = text.slice(text.indexOf('cat > "$COMPOSE_FILE"'), text.indexOf('\n```', text.indexOf('cat > "$COMPOSE_FILE"')));
-    const output = execFileSync('bash', ['-eu', '-c', `docker() { printf '%s\\n' "$@"; }; COMPOSE_FILE=/dev/stdout; APP_COMPOSE_FILE=compose.yaml; WEB_SERVICE=web; AGENT_STATE_DIR=/state; SECRET_DIR=/secret; QURL_CONNECTOR_ID=prod; QURL_ENDPOINT_YAML='"https://api.layerv.xyz"'; ${script}`], { encoding: 'utf8' });
+    const output = execFileSync('bash', ['-eu', '-c', `docker() { cat "$COMPOSE_FILE"; printf '%s\\n' "$@"; }; COMPOSE_FILE=$(mktemp); trap 'rm -f "$COMPOSE_FILE"' EXIT; APP_COMPOSE_FILE=compose.yaml; WEB_SERVICE=web; AGENT_STATE_DIR=/state; SECRET_DIR=/secret; QURL_CONNECTOR_ID=prod; QURL_ENDPOINT_YAML='"https://api.layerv.xyz"'; ${script}`], { encoding: 'utf8' });
     expect(output).toContain('network_mode: service:web');
     expect(output).toContain('/state:/var/lib/qurl');
     expect(output).toContain('/secret:/run/secrets/qurl:ro');
