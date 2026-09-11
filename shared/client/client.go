@@ -893,8 +893,8 @@ func (c *Client) CreateResource(ctx context.Context, input *CreateResourceInput)
 }
 
 // GetResource retrieves one resource by its public resource identity.
-// resourceID must be an r_ resource id: the service also accepts a CRID on this
-// path, but the response identity check here rejects it.
+// resourceID must be the resource_id (the public key); the service also accepts
+// a CRID on this path, but the response identity check here rejects it.
 func (c *Client) GetResource(ctx context.Context, resourceID string) (*Resource, error) {
 	resourceID = strings.TrimSpace(resourceID)
 	if resourceID == "" {
@@ -905,13 +905,9 @@ func (c *Client) GetResource(ctx context.Context, resourceID string) (*Resource,
 		return nil, fmt.Errorf("build request: %w", err)
 	}
 	// TODO(upstream-contract): qurl-service ResourceDetailResponse nests the
-	// resource under data.resource (beside a qurls preview no caller needs yet). Mirrored by
-	// (*client).Resource in apps/cli/internal/api/rest.go, except the identity
-	// check here is deliberately resource_id-only: callers pass r_ IDs from
-	// resolveTokenForGet or a button snapshot, never CRIDs. The flat pre-#161
-	// shape is rejected, not tolerated, so contract drift fails loudly. Only
-	// resource_id and type are validated; status is unchecked because no
-	// caller reads it.
+	// resource under data.resource beside a qurls preview; mirrored by
+	// (*client).Resource in apps/cli/internal/api/rest.go (which also accepts
+	// CRIDs). The flat pre-#161 shape is rejected so contract drift fails loudly.
 	var out struct {
 		Resource *Resource `json:"resource"`
 	}
