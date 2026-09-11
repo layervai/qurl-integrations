@@ -60,9 +60,16 @@ export function validateTunnelService(service: string): void { if (service && !s
 
 export function validateTunnelHub(hub: TunnelHub | undefined): void {
   if (!hub) return;
-  if (hub.host.length > 253 || hub.host !== hub.host.toLowerCase() || !hubHostPattern.test(hub.host)
-    || !/\.layerv\.(ai|xyz)$/.test(hub.host)) throw new UserFacingError('connector hub host is invalid');
-  if (hub.port !== '443') throw new UserFacingError('connector hub port is invalid');
+  // Shape only -- no domain allowlist and no fixed port. Which Hub this
+  // environment trusts is infra's decision, validated by
+  // `qurl_connector_hub_{host,port}` in qurl-bot-teams/terraform, exactly as
+  // apps/slack does it: Slack's Go source pins no Hub domain either. Pinning
+  // one here would also put our pre-prod domain in a PUBLIC repo, and would
+  // silently reject a Hub the deployment legitimately configured.
+  if (hub.host.length > 253 || hub.host !== hub.host.toLowerCase() || !hubHostPattern.test(hub.host)) {
+    throw new UserFacingError('connector hub host is invalid');
+  }
+  if (!/^[1-9][0-9]{0,4}$/.test(hub.port) || Number(hub.port) > 65_535) throw new UserFacingError('connector hub port is invalid');
   try {
     const key = Buffer.from(hub.serverPublicKeyB64, 'base64');
     if (!hubKeyPattern.test(hub.serverPublicKeyB64) || key.toString('base64') !== hub.serverPublicKeyB64
@@ -184,14 +191,34 @@ export function renderTunnelBootstrapSecretMessage(slug: string, bootstrapKey: s
 }
 
 // The image runs as UID/GID 65532, matching Slack's Connector installs.
-const tokenPrompt = `printf 'Enrollment token: ' >&2
-stty -echo
-trap 'stty echo' EXIT
-IFS= read -r QURL_ENROLLMENT_TOKEN
-stty echo
-trap - EXIT
+// Mirrors apps/slack's renderBootstrapKeyPromptShell. The TTY guard is the
+// load-bearing part: every block below runs under `set -euo pipefail`, so a
+// bare `stty` against a non-terminal stdin (piped block, `ssh host bash -s`,
+// paste into a non-interactive shell) aborts with `stty: stdin isn't a
+// terminal` and no hint that a TTY was required. Saving and restoring the full
+// termios state -- rather than a blanket `stty echo` -- means an interrupted
+// run leaves the terminal exactly as it was found, and the trap is armed only
+// after the state is captured so there is no window where echo is off with no
+// restore path.
+const tokenPrompt = `if [ ! -t 0 ]; then
+  echo 'Run this block from an interactive terminal: it prompts for the enrollment token.' >&2
+  exit 1
+fi
+printf 'Enrollment token (input hidden): ' >&2
+STTY_STATE="$(stty -g 2>/dev/null | tr -d '[:space:]' || true)"
+if [ -n "$STTY_STATE" ]; then
+  stty -echo
+  trap 'stty "$STTY_STATE" 2>/dev/null || true' INT TERM EXIT
+fi
+if ! IFS= read -r QURL_ENROLLMENT_TOKEN; then
+  QURL_ENROLLMENT_TOKEN=''
+fi
+if [ -n "$STTY_STATE" ]; then
+  stty "$STTY_STATE" 2>/dev/null || true
+  trap - INT TERM EXIT
+fi
 printf '\\n' >&2
-[ -n "$QURL_ENROLLMENT_TOKEN" ] || { echo 'No enrollment token entered.' >&2; exit 1; }`;
+[ -n "$QURL_ENROLLMENT_TOKEN" ] || { echo 'Enrollment token is required.' >&2; exit 1; }`;
 
 function hostSetup(args: TunnelInstallArgs, config: string): string {
   return `SUDO=''

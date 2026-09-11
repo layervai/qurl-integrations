@@ -158,7 +158,19 @@ export class HttpQurlClient implements QurlClient {
       // require the service to confirm exactly this authority before delivery.
       const claim = Array.isArray(key.claims) && key.claims.length === 1 ? object(key.claims[0], 'qURL enrollment claim') : undefined;
       if (key.kind !== 'enrollment_token' || key.target !== 'agent' || claim?.type !== 'connector' || claim.id !== slug) {
-        throw new Error('qURL enrollment credential authority was not confirmed');
+        // Name got-vs-want. The overwhelmingly likely cause is a qurl-service
+        // that predates the kind-first API and simply omits `target`/`claims`,
+        // and a bare "not confirmed" sends the operator hunting in the bot
+        // instead of at the service. apps/slack logs the same shape. The slug
+        // is echoed back from our own request, so it is not attacker-supplied
+        // log content; the plaintext key is never touched here.
+        const claimCount = Array.isArray(key.claims) ? key.claims.length : 0;
+        throw new Error(
+          'qURL enrollment credential authority was not confirmed — qurl-service may predate the kind-first API. '
+          + `got kind=${JSON.stringify(key.kind)} want "enrollment_token"; `
+          + `got target=${JSON.stringify(key.target)} want "agent"; `
+          + `got ${claimCount} claim(s) want 1 of type "connector".`,
+        );
       }
       return apiKeyFromWire(key);
     } catch (error) {

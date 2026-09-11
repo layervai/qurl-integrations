@@ -85,7 +85,7 @@ describe('Teams bot primitives', () => {
       qurl: {} as QurlClient,
       data: { checkAdmin: async () => ({ isAdmin: false }) } as unknown as TeamsDataStore,
       messages: {} as never,
-      qurlEndpoint: 'https://api.layerv.xyz',
+      qurlEndpoint: 'https://api.sandbox.example',
     });
     await bot.handleActivity({
       type: 'message', text: 'list', from: { aadObjectId: 'actor' },
@@ -108,7 +108,7 @@ describe('Teams bot primitives', () => {
       qurl: {} as QurlClient,
       data: { checkAdmin: async () => ({ isAdmin: false }) } as unknown as TeamsDataStore,
       messages: {} as never,
-      qurlEndpoint: 'https://api.layerv.xyz',
+      qurlEndpoint: 'https://api.sandbox.example',
     });
     await bot.handleActivity({
       type: 'message', text: 'admins', from: { aadObjectId: 'actor', id: 'delivery' },
@@ -135,7 +135,7 @@ describe('Teams bot primitives', () => {
       qurl: {} as QurlClient,
       data: { checkAdmin: async () => ({ isAdmin: false }) } as unknown as TeamsDataStore,
       messages: {} as never,
-      qurlEndpoint: 'https://api.layerv.xyz',
+      qurlEndpoint: 'https://api.sandbox.example',
     });
 
     for (const input of commands) {
@@ -152,7 +152,7 @@ describe('Teams bot primitives', () => {
       qurl: {} as QurlClient,
       data: { checkAdmin: async () => { throw new Error('upstream secret detail'); } } as unknown as TeamsDataStore,
       messages: {} as never,
-      qurlEndpoint: 'https://api.layerv.xyz',
+      qurlEndpoint: 'https://api.sandbox.example',
     });
     await bot.handleActivity({
       type: 'message', text: 'list', from: { aadObjectId: 'actor', id: 'delivery' },
@@ -184,7 +184,7 @@ describe('Teams bot primitives', () => {
         qurl: { listResources: async () => ({ resources: [resource] }) } as unknown as QurlClient,
         data,
         messages: {} as never,
-      qurlEndpoint: 'https://api.layerv.xyz',
+      qurlEndpoint: 'https://api.sandbox.example',
       });
       await expect(bot.execute(activity, 'tenant-1', 'channel-1', true,
         parseCommand(`protect-url $${resource.resourceId}`)), resource.resourceId)
@@ -204,7 +204,7 @@ describe('Teams bot primitives', () => {
         exposeResource: async () => undefined,
       } as unknown as TeamsDataStore,
       messages: {} as never,
-      qurlEndpoint: 'https://api.layerv.xyz',
+      qurlEndpoint: 'https://api.sandbox.example',
     });
     await bot.execute({ type: 'message', id: 'activity-1', from: { aadObjectId: 'actor-1', id: 'delivery-1' } },
       'tenant-1', 'channel-1', true, parseCommand('protect-url $RES_01'));
@@ -229,7 +229,7 @@ describe('Teams bot primitives', () => {
         unbindScopeAlias: async () => true,
       } as unknown as TeamsDataStore,
       messages: {} as never,
-      qurlEndpoint: 'https://api.layerv.xyz',
+      qurlEndpoint: 'https://api.sandbox.example',
     });
     await expect(bot.execute({ type: 'message', id: 'activity-1', from: { aadObjectId: 'actor-1', id: 'delivery-1' } },
       'tenant-1', 'channel-1', true, parseCommand('unset-alias $docs')))
@@ -267,7 +267,7 @@ describe('Teams bot primitives', () => {
       } as unknown as TeamsDataStore,
       messages: { sendText: async () => undefined, reply: async () => undefined },
       connectorImage: 'ghcr.io/layervai/qurl@sha256:d2f9bd33572ffb7212f5b6cfc3fcfa4267344a4a2c2cdd6ce9b7196e3515516b',
-      qurlEndpoint: 'https://api.layerv.xyz',
+      qurlEndpoint: 'https://api.sandbox.example',
     });
 
     await expect(bot.execute({ type: 'message', id: 'activity-1', from: { aadObjectId: 'actor-1', id: 'delivery-1' } },
@@ -286,7 +286,7 @@ describe('Teams bot primitives', () => {
         unbindScopeAlias: async () => removed,
       } as unknown as TeamsDataStore,
       messages: {} as never,
-      qurlEndpoint: 'https://api.layerv.xyz',
+      qurlEndpoint: 'https://api.sandbox.example',
     });
     const activity = { type: 'message', id: 'activity-1', from: { aadObjectId: 'actor-1', id: 'delivery-1' } };
     await expect(bot(true).execute(activity, 'tenant-1', 'channel-1', true, parseCommand('unset-alias $docs')))
@@ -300,7 +300,7 @@ describe('Teams bot primitives', () => {
   it('renders ECS and Kubernetes connector instructions', () => {
     const base = {
       slug: 'prod', alias: 'prod', port: 8080, image: 'ghcr.io/layervai/qurl@sha256:d2f9bd33572ffb7212f5b6cfc3fcfa4267344a4a2c2cdd6ce9b7196e3515516b',
-      endpoint: 'https://api.layerv.xyz', ownerId: 'auth0|owner', crid: 'crid-1',
+      endpoint: 'https://api.sandbox.example', ownerId: 'auth0|owner', crid: 'crid-1',
       resourceId: 'res-1', connectorRoutingId: 'routing-1', knockResourceId: 'knock-1', servingEpoch: 4,
     };
     expect(renderTunnelInstallMessage({ ...base, environment: 'ecs-fargate' })).toContain('ECS/Fargate');
@@ -346,7 +346,7 @@ describe('Teams bot primitives', () => {
       lookupScopeAlias: async () => 'resource-1',
       personalConversationRef: async () => undefined,
     } as unknown as TeamsDataStore;
-    const bot = new TeamsBot({ qurl, data, messages: {} as never, qurlEndpoint: 'https://api.layerv.xyz' });
+    const bot = new TeamsBot({ qurl, data, messages: {} as never, qurlEndpoint: 'https://api.sandbox.example' });
 
     await expect(bot.execute(
       { type: 'message', id: 'activity-1', from: { aadObjectId: 'actor-1', id: 'delivery-1' } },
@@ -371,7 +371,7 @@ describe('Teams bot primitives', () => {
         personalConversationRef: async () => undefined,
       } as unknown as TeamsDataStore,
       messages: {} as never,
-      qurlEndpoint: 'https://api.layerv.xyz',
+      qurlEndpoint: 'https://api.sandbox.example',
     });
     const activity = { type: 'message', from: { id: 'delivery', aadObjectId: 'actor' } };
     await bot.execute(activity, 'tenant-1', 'channel-1', true, parseCommand('get $resource-1'));
@@ -386,13 +386,13 @@ describe('Teams bot primitives', () => {
       qurl: {} as QurlClient,
       data: { checkAdmin: async () => ({ isAdmin: true }), addAdmin: async () => { throw new TenantOwnerAlreadyAdminError(); } } as unknown as TeamsDataStore,
       messages: {} as never,
-      qurlEndpoint: 'https://api.layerv.xyz',
+      qurlEndpoint: 'https://api.sandbox.example',
     });
     const removalBot = new TeamsBot({
       qurl: {} as QurlClient,
       data: { checkAdmin: async () => ({ isAdmin: true }), removeAdmin: async () => { throw new TenantOwnerRemovalError(); } } as unknown as TeamsDataStore,
       messages: {} as never,
-      qurlEndpoint: 'https://api.layerv.xyz',
+      qurlEndpoint: 'https://api.sandbox.example',
     });
     const mention = [{ type: 'mention', mentioned: { id: 'owner', aadObjectId: 'owner-aad' } }];
     const replies: string[] = [];
@@ -417,7 +417,7 @@ describe('Teams bot primitives', () => {
         lookupScopeAlias: async () => undefined,
       } as unknown as TeamsDataStore,
       messages: {} as never,
-      qurlEndpoint: 'https://api.layerv.xyz',
+      qurlEndpoint: 'https://api.sandbox.example',
     });
     const activity = { type: 'message', from: { aadObjectId: 'actor' } };
 
@@ -427,7 +427,7 @@ describe('Teams bot primitives', () => {
 
   it('follows a next cursor even when has_more is omitted', async () => {
     const cursors: Array<string | undefined> = [];
-    const bot = new TeamsBot({ qurl: {} as QurlClient, data: {} as TeamsDataStore, messages: {} as never, qurlEndpoint: 'https://api.layerv.xyz' });
+    const bot = new TeamsBot({ qurl: {} as QurlClient, data: {} as TeamsDataStore, messages: {} as never, qurlEndpoint: 'https://api.sandbox.example' });
     const qurl = {
       listResources: async (_signal?: AbortSignal, cursor?: string) => {
         cursors.push(cursor);
@@ -441,20 +441,20 @@ describe('Teams bot primitives', () => {
   });
 
   it('rejects a resource pagination cursor cycle', async () => {
-    const bot = new TeamsBot({ qurl: {} as QurlClient, data: {} as TeamsDataStore, messages: {} as never, qurlEndpoint: 'https://api.layerv.xyz' });
+    const bot = new TeamsBot({ qurl: {} as QurlClient, data: {} as TeamsDataStore, messages: {} as never, qurlEndpoint: 'https://api.sandbox.example' });
     const qurl = { listResources: async () => ({ resources: [], nextCursor: 'loop' }) } as unknown as QurlClient;
     await expect(bot.resources(qurl)).rejects.toThrow('pagination is invalid');
   });
 
   it('rejects has_more without a continuation cursor', async () => {
-    const bot = new TeamsBot({ qurl: {} as QurlClient, data: {} as TeamsDataStore, messages: {} as never, qurlEndpoint: 'https://api.layerv.xyz' });
+    const bot = new TeamsBot({ qurl: {} as QurlClient, data: {} as TeamsDataStore, messages: {} as never, qurlEndpoint: 'https://api.sandbox.example' });
     const qurl = { listResources: async () => ({ resources: [], hasMore: true }) } as unknown as QurlClient;
     await expect(bot.resources(qurl)).rejects.toThrow('pagination is invalid');
   });
 
   it('enforces the resource pagination safety cap', async () => {
     let calls = 0;
-    const bot = new TeamsBot({ qurl: {} as QurlClient, data: {} as TeamsDataStore, messages: {} as never, qurlEndpoint: 'https://api.layerv.xyz' });
+    const bot = new TeamsBot({ qurl: {} as QurlClient, data: {} as TeamsDataStore, messages: {} as never, qurlEndpoint: 'https://api.sandbox.example' });
     const qurl = {
       listResources: async (_signal?: AbortSignal, cursor?: string) => {
         calls += 1;
@@ -472,7 +472,7 @@ describe('Teams bot primitives', () => {
         listResources: async () => ({ resources: [{ resourceId: 'resource-1' }] }),
         create: async () => ({ resourceId: 'resource-1', qurlLink: 'https://qurl.example/one' }),
       } as unknown as QurlClient,
-      qurlEndpoint: 'https://api.layerv.xyz',
+      qurlEndpoint: 'https://api.sandbox.example',
       data: {
         checkAdmin: async () => ({ isAdmin: false }),
         allowedResourceIds: async () => new Set(['resource-1']),
@@ -512,7 +512,7 @@ describe('Teams bot primitives', () => {
       } as unknown as TeamsDataStore,
       messages: { sendText: async () => undefined } as never,
       connectorImage: 'ghcr.io/layervai/qurl@sha256:d2f9bd33572ffb7212f5b6cfc3fcfa4267344a4a2c2cdd6ce9b7196e3515516b',
-      qurlEndpoint: 'https://api.layerv.xyz',
+      qurlEndpoint: 'https://api.sandbox.example',
     });
     await expect(bot.execute(
       { type: 'message', id: 'activity-1', from: { id: 'delivery', aadObjectId: 'actor' } },
@@ -546,7 +546,7 @@ describe('Teams bot primitives', () => {
       } as unknown as TeamsDataStore,
       messages: { sendText: async () => { if (cancelled) controller.abort(); throw new Error('delivery failed'); } } as never,
       connectorImage: 'ghcr.io/layervai/qurl@sha256:d2f9bd33572ffb7212f5b6cfc3fcfa4267344a4a2c2cdd6ce9b7196e3515516b',
-      qurlEndpoint: 'https://api.layerv.xyz',
+      qurlEndpoint: 'https://api.sandbox.example',
     });
 
     await expect(bot.execute(
@@ -581,7 +581,7 @@ describe('Teams bot primitives', () => {
       } as unknown as TeamsDataStore,
       messages: { sendText: async () => { throw new Error('delivery should not run'); } } as never,
       connectorImage: 'invalid image',
-      qurlEndpoint: 'https://api.layerv.xyz',
+      qurlEndpoint: 'https://api.sandbox.example',
     });
 
     await expect(bot.execute(
@@ -620,7 +620,7 @@ describe('Teams bot primitives', () => {
       } as unknown as TeamsDataStore,
       messages: { sendText: async () => { throw new Error('delivery failed'); } } as never,
       connectorImage: 'ghcr.io/layervai/qurl@sha256:d2f9bd33572ffb7212f5b6cfc3fcfa4267344a4a2c2cdd6ce9b7196e3515516b',
-      qurlEndpoint: 'https://api.layerv.xyz',
+      qurlEndpoint: 'https://api.sandbox.example',
     });
 
     await expect(bot.execute(
@@ -644,7 +644,7 @@ describe('Teams bot primitives', () => {
       } as unknown as TeamsDataStore,
       messages: { sendText: async () => undefined } as never,
       connectorImage: 'ghcr.io/layervai/qurl@sha256:d2f9bd33572ffb7212f5b6cfc3fcfa4267344a4a2c2cdd6ce9b7196e3515516b',
-      qurlEndpoint: 'https://api.layerv.xyz',
+      qurlEndpoint: 'https://api.sandbox.example',
     });
     await expect(bot.execute(
       { type: 'message', id: 'activity-1', from: { id: 'delivery', aadObjectId: 'actor' } },
@@ -673,7 +673,7 @@ describe('Teams bot primitives', () => {
       } as unknown as TeamsDataStore,
       messages: { sendText: async () => undefined } as never,
       connectorImage: 'ghcr.io/layervai/qurl@sha256:d2f9bd33572ffb7212f5b6cfc3fcfa4267344a4a2c2cdd6ce9b7196e3515516b',
-      qurlEndpoint: 'https://api.layerv.xyz',
+      qurlEndpoint: 'https://api.sandbox.example',
     });
     await bot.execute(
       { type: 'message', id: 'activity-1', from: { id: 'delivery', aadObjectId: 'actor' } },
@@ -701,8 +701,8 @@ describe('Teams bot primitives', () => {
         personalConversationRef: async () => ({ serviceUrl: 'https://smba.trafficmanager.net/teams', conversationId: 'personal' }),
       } as unknown as TeamsDataStore,
       messages: { sendText: async (_u: string, conversationId: string, text: string) => { sent.push({ conversationId, text }); } } as never,
-      setup: { build: async () => ({ url: new URL('https://teams.connector.layerv.xyz/oauth/qurl/start?state=SECRET-HANDLE') }) } as never,
-      qurlEndpoint: 'https://api.layerv.xyz',
+      setup: { build: async () => ({ url: new URL('https://teams.connector.example/oauth/qurl/start?state=SECRET-HANDLE') }) } as never,
+      qurlEndpoint: 'https://api.sandbox.example',
     });
     const reply = await bot.execute(
       { type: 'message', id: 'activity-1', from: { id: 'delivery', aadObjectId: 'actor' } },
@@ -723,8 +723,8 @@ describe('Teams bot primitives', () => {
         personalConversationRef: async () => undefined,
       } as unknown as TeamsDataStore,
       messages: { sendText: async () => { throw new Error('must not send'); } } as never,
-      setup: { build: async () => ({ url: new URL('https://teams.connector.layerv.xyz/oauth/qurl/start?state=SECRET-HANDLE') }) } as never,
-      qurlEndpoint: 'https://api.layerv.xyz',
+      setup: { build: async () => ({ url: new URL('https://teams.connector.example/oauth/qurl/start?state=SECRET-HANDLE') }) } as never,
+      qurlEndpoint: 'https://api.sandbox.example',
     });
     await expect(bot.execute(
       { type: 'message', id: 'activity-1', from: { id: 'delivery', aadObjectId: 'actor' } },
@@ -752,7 +752,7 @@ describe('Teams bot primitives', () => {
       } as unknown as TeamsDataStore,
       messages: { sendText: async () => undefined } as never,
       connectorImage: 'ghcr.io/layervai/qurl@sha256:d2f9bd33572ffb7212f5b6cfc3fcfa4267344a4a2c2cdd6ce9b7196e3515516b',
-      qurlEndpoint: 'https://api.layerv.xyz',
+      qurlEndpoint: 'https://api.sandbox.example',
     });
     await bot.execute({ type: 'message', id: 'activity-1', from: { id: 'delivery', aadObjectId: 'actor' } }, 'tenant-1', 'channel-1', true, parseCommand('protect-connector prod'));
     expect(listCalls).toBe(1);
@@ -764,7 +764,7 @@ describe('Teams bot primitives', () => {
       qurl: {} as QurlClient,
       data: { savePersonalConversationRef: async () => { throw new Error('temporary DDB failure'); } } as unknown as TeamsDataStore,
       messages: {} as never,
-      qurlEndpoint: 'https://api.layerv.xyz',
+      qurlEndpoint: 'https://api.sandbox.example',
     });
     await bot.handleActivity({ type: 'message', text: 'help', from: { aadObjectId: 'actor' }, serviceUrl: 'https://smba.trafficmanager.net', conversation: { id: 'personal', conversationType: 'personal' }, channelData: { tenant: { id: 'tenant' } } }, undefined, async text => { replies.push(text); });
     expect(replies[0]).toContain('qURL for Teams');
@@ -776,7 +776,7 @@ describe('Teams bot primitives', () => {
       qurl: {} as QurlClient,
       data: {} as TeamsDataStore,
       messages: { reply: async () => { throw new TypeError('Invalid URL'); } } as never,
-      qurlEndpoint: 'https://api.layerv.xyz',
+      qurlEndpoint: 'https://api.sandbox.example',
       logger: { debug: () => undefined, info: () => undefined, warn: () => undefined, error: message => { errors.push(message); } },
     });
     await expect(bot.handleActivity({
@@ -795,7 +795,7 @@ describe('Teams bot primitives', () => {
         lookupScopeAlias: async () => 'other-resource',
       } as unknown as TeamsDataStore,
       messages: {} as never,
-      qurlEndpoint: 'https://api.layerv.xyz',
+      qurlEndpoint: 'https://api.sandbox.example',
     });
     await expect(bot.execute(
       { type: 'message', from: { aadObjectId: 'admin' } },
@@ -812,7 +812,7 @@ describe('Teams bot primitives', () => {
         unbindScopeAlias: async (_tenantId: string, _scopeId: string, alias: string) => { unbound = alias; return true; },
       } as unknown as TeamsDataStore,
       messages: {} as never,
-      qurlEndpoint: 'https://api.layerv.xyz',
+      qurlEndpoint: 'https://api.sandbox.example',
     });
     await expect(bot.execute(
       { type: 'message', from: { aadObjectId: 'admin' } },
@@ -831,7 +831,7 @@ describe('Teams bot primitives', () => {
         deleteWorkspace: async () => { deleted = true; },
       } as unknown as TeamsDataStore,
       messages: {} as never,
-      qurlEndpoint: 'https://api.layerv.xyz',
+      qurlEndpoint: 'https://api.sandbox.example',
     });
     await expect(bot.execute({ type: 'message', from: { aadObjectId: 'admin' } }, 'tenant-1', 'personal', false, parseCommand('uninstall'))).resolves.toContain('operator follow-up');
     expect(deleted).toBe(true);
@@ -845,7 +845,7 @@ describe('Teams bot primitives', () => {
         deleteWorkspace: async () => { deleted = true; },
       } as unknown as TeamsDataStore,
       messages: {} as never,
-      qurlEndpoint: 'https://api.layerv.xyz',
+      qurlEndpoint: 'https://api.sandbox.example',
     });
     await expect(unavailableBot.execute({ type: 'message', from: { aadObjectId: 'admin' } }, 'tenant-1', 'personal', false, parseCommand('uninstall'))).resolves.toContain('operator follow-up');
     expect(deleted).toBe(true);

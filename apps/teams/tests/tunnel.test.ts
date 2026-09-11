@@ -10,7 +10,7 @@ const base = {
   environment: 'docker' as const,
   port: 8080,
   image: IMAGE,
-  endpoint: 'https://api.layerv.xyz',
+  endpoint: 'https://api.sandbox.example',
   ownerId: 'auth0|user123',
   crid: 'crid_abc123',
   resourceId: 'res_abc123',
@@ -19,7 +19,7 @@ const base = {
   servingEpoch: 7,
 } as const;
 
-const hub = { host: 'hub.nhp.layerv.xyz', port: '443', serverPublicKeyB64: 'CQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=' } as const;
+const hub = { host: 'hub.nhp.example', port: '443', serverPublicKeyB64: 'CQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=' } as const;
 
 describe('connector tunnel rendering', () => {
   it('validates slugs, image references, aliases, ports, and services', () => {
@@ -98,10 +98,18 @@ describe('connector tunnel rendering', () => {
   });
 
   it('rejects Hub settings the CLI cannot use as a pinned trust root', () => {
-    for (const host of ['hub.example.com', 'HUB.nhp.layerv.xyz', 'hub.nhp.layerv.xyz.', '127.0.0.1', 'layerv.ai']) {
-      expect(() => validateTunnelHub({ ...hub, host })).toThrow('hub host');
+    // Shape failures only. Which Hub host and port an environment trusts is
+    // infra's call (qurl_connector_hub_{host,port}); the app must not pin a
+    // domain -- that would put our pre-prod domain in a PUBLIC repo and reject
+    // a Hub the deployment legitimately configured. apps/slack pins none.
+    for (const host of ['HUB.nhp.example', 'hub.nhp.example.', 'not a host', 'hub..example', '-hub.example']) {
+      expect(() => validateTunnelHub({ ...hub, host }), host).toThrow('hub host');
     }
-    for (const port of ['80', '0443', '+443']) expect(() => validateTunnelHub({ ...hub, port })).toThrow('hub port');
+    for (const host of ['hub.example.com', 'hub.nhp.example', 'localhost']) {
+      expect(() => validateTunnelHub({ ...hub, host }), host).not.toThrow();
+    }
+    for (const port of ['0443', '+443', '0', '70000', '']) expect(() => validateTunnelHub({ ...hub, port }), port).toThrow('hub port');
+    for (const port of ['443', '8443', '1']) expect(() => validateTunnelHub({ ...hub, port }), port).not.toThrow();
     const invalidKeys = [
       'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=', // low-order zero
       'AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=', // low-order one
@@ -118,7 +126,7 @@ describe('connector tunnel rendering', () => {
     expect(docker).toContain('daemon run');
     expect(docker).toContain('--headless-config /etc/qurl/share.yaml');
     expect(docker).toContain('--enrollment-token-file /run/secrets/qurl/enrollment-token');
-    expect(docker).toContain("-e QURL_ENDPOINT='https://api.layerv.xyz'");
+    expect(docker).toContain("-e QURL_ENDPOINT='https://api.sandbox.example'");
     expect(docker).toContain(IMAGE);
     // Hardening flags must survive; these are the difference between a demo
     // and a root-capable container on a customer host.
@@ -154,6 +162,20 @@ describe('connector tunnel rendering', () => {
     expect(() => renderTunnelBootstrapSecretMessage('prod', '')).toThrow('enrollment token is missing');
     expect(() => renderTunnelBootstrapSecretMessage('prod', 'has space')).toThrow('not renderable');
     expect(() => renderTunnelBootstrapSecretMessage('prod', 'line\nbreak')).toThrow('not renderable');
+  });
+
+  it('refuses to run without a TTY instead of dying inside stty', () => {
+    // Every block runs under `set -euo pipefail`; a bare stty against a
+    // non-terminal aborts with "stty: stdin isn't a terminal" and no hint.
+    for (const environment of ['docker', 'compose', 'kubernetes'] as const) {
+      const block = renderTunnelInstallMessage({ ...base, environment });
+      expect(block).toContain('if [ ! -t 0 ]; then');
+      expect(block).toContain('Run this block from an interactive terminal');
+      // Restore the captured termios state, not a blanket `stty echo`.
+      expect(block).toContain('STTY_STATE="$(stty -g 2>/dev/null');
+      expect(block).toContain(`trap 'stty "$STTY_STATE" 2>/dev/null || true' INT TERM EXIT`);
+      expect(block).not.toMatch(/\ntrap 'stty echo' EXIT/);
+    }
   });
 
   it('renders every deployment target with the daemon contract', () => {
@@ -192,11 +214,11 @@ describe('connector tunnel rendering', () => {
     expect(text).toContain('up -d');
     expect(text).toContain('services:');
     const script = text.slice(text.indexOf('cat > "$COMPOSE_FILE"'), text.indexOf('\n```', text.indexOf('cat > "$COMPOSE_FILE"')));
-    const output = execFileSync('bash', ['-eu', '-c', `docker() { cat "$COMPOSE_FILE"; printf '%s\\n' "$@"; }; COMPOSE_FILE=$(mktemp); trap 'rm -f "$COMPOSE_FILE"' EXIT; APP_COMPOSE_FILE=compose.yaml; WEB_SERVICE=web; AGENT_STATE_DIR=/state; SECRET_DIR=/secret; QURL_CONNECTOR_ID=prod; QURL_ENDPOINT_YAML='"https://api.layerv.xyz"'; ${script}`], { encoding: 'utf8' });
+    const output = execFileSync('bash', ['-eu', '-c', `docker() { cat "$COMPOSE_FILE"; printf '%s\\n' "$@"; }; COMPOSE_FILE=$(mktemp); trap 'rm -f "$COMPOSE_FILE"' EXIT; APP_COMPOSE_FILE=compose.yaml; WEB_SERVICE=web; AGENT_STATE_DIR=/state; SECRET_DIR=/secret; QURL_CONNECTOR_ID=prod; QURL_ENDPOINT_YAML='"https://api.sandbox.example"'; ${script}`], { encoding: 'utf8' });
     expect(output).toContain('network_mode: service:web');
     expect(output).toContain('/state:/var/lib/qurl');
     expect(output).toContain('/secret:/run/secrets/qurl:ro');
-    expect(output).toContain('QURL_ENDPOINT: "https://api.layerv.xyz"');
+    expect(output).toContain('QURL_ENDPOINT: "https://api.sandbox.example"');
     expect(output).toContain('up\n-d\nqurl-prod');
   });
 
@@ -240,7 +262,7 @@ describe('connector tunnel rendering', () => {
   });
 
   it('rejects a non-HTTPS or credential-bearing endpoint', () => {
-    expect(() => renderTunnelInstallMessage({ ...base, endpoint: 'http://api.layerv.xyz' })).toThrow('connector endpoint');
-    expect(() => renderTunnelInstallMessage({ ...base, endpoint: 'https://u:p@api.layerv.xyz' })).toThrow('connector endpoint');
+    expect(() => renderTunnelInstallMessage({ ...base, endpoint: 'http://api.sandbox.example' })).toThrow('connector endpoint');
+    expect(() => renderTunnelInstallMessage({ ...base, endpoint: 'https://u:p@api.sandbox.example' })).toThrow('connector endpoint');
   });
 });

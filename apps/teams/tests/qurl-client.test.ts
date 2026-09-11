@@ -93,6 +93,22 @@ describe('qURL HTTP adapter', () => {
     expect(methods).toEqual(['POST /v1/api-keys', 'DELETE /v1/api-keys/key_1']);
   });
 
+  it('names got-vs-want so a stale qurl-service is diagnosable', async () => {
+    const client = new HttpQurlClient({
+      endpoint: 'https://api.example.test', apiKey: 'secret',
+      // A qurl-service predating the kind-first API omits target and claims.
+      fetch: async () => new Response(JSON.stringify({ data: { key_id: 'key_1', api_key: 'plaintext-secret', kind: 'enrollment_token' } }), { status: 201 }),
+    });
+    const failure = await client.createEnrollmentToken('prod', 'attempt').catch((error: Error) => error);
+    expect(failure).toBeInstanceOf(Error);
+    const message = (failure as Error).message;
+    expect(message).toContain('may predate the kind-first API');
+    expect(message).toContain('want "agent"');
+    expect(message).toContain('want 1 of type "connector"');
+    // The plaintext key must never reach an error string.
+    expect(message).not.toContain('plaintext-secret');
+  });
+
   it('treats repeated resource and API-key revocation as successful', async () => {
     const requests: string[] = [];
     const client = new HttpQurlClient({

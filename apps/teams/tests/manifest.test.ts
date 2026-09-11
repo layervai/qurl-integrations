@@ -6,7 +6,7 @@ import { buildPackage, renderManifest } from '../manifest/build.mjs';
 
 const template = readFileSync(join(import.meta.dirname, '..', 'manifest', 'manifest.template.json'), 'utf8');
 const BOT_UUID = 'a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d';
-const DOMAIN = 'teams.connector.layerv.xyz';
+const DOMAIN = 'teams.connector.example';
 
 const render = (overrides: Record<string, string> = {}) =>
   renderManifest(template, { env: 'sandbox', appId: BOT_UUID, domain: DOMAIN, ...overrides });
@@ -48,8 +48,8 @@ describe('teams app manifest', () => {
   it('rejects an app id or domain Teams would silently not match', () => {
     expect(() => render({ appId: 'not-a-uuid' })).toThrow('app-id must be');
     // A scheme in validDomains never matches: Teams compares host only.
-    expect(() => render({ domain: 'https://teams.connector.layerv.xyz' })).toThrow('domain must be');
-    expect(() => render({ domain: 'teams.connector.layerv.xyz:443' })).toThrow('domain must be');
+    expect(() => render({ domain: 'https://teams.connector.example' })).toThrow('domain must be');
+    expect(() => render({ domain: 'teams.connector.example:443' })).toThrow('domain must be');
     expect(() => render({ domain: 'localhost' })).toThrow('domain must be');
   });
 
