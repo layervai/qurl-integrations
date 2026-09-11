@@ -647,6 +647,46 @@ describe('Teams bot primitives', () => {
     )).rejects.toThrow('cannot provision a connector');
   });
 
+  it('binds the connector alias so get/aliases/unset-alias can see it', async () => {
+    const bound: { alias: string; resourceId: string }[] = [];
+    const bot = new TeamsBot({
+      qurl: {
+        listResources: async () => ({ resources: [] }),
+        createResource: async () => ({ resourceId: 'connector-1', type: 'tunnel', slug: 'prod', connectorRoutingId: 'routing-1', knockResourceId: 'knock-1' }),
+        createEnrollmentToken: async () => ({ keyId: 'key-1', apiKey: 'lv_live_abc' }),
+        me: async () => ({ ownerId: 'auth0|owner', authType: 'api_key', isApiKeyPrincipal: true }),
+        getSharing: async () => ({ crid: 'crid-1', desiredState: 'off', servingEpoch: 0 }),
+        restartSharing: async () => ({ crid: 'crid-1', desiredState: 'on', servingEpoch: 4 }),
+        stopSharing: async () => undefined,
+      } as unknown as QurlClient,
+      data: {
+        checkAdmin: async () => ({ isAdmin: true }),
+        personalConversationRef: async () => ({ serviceUrl: 'https://smba.trafficmanager.net/teams', conversationId: 'conversation' }),
+        lookupScopeAlias: async () => undefined,
+        bindScopeAlias: async (_t: string, _s: string, alias: string, resourceId: string) => { bound.push({ alias, resourceId }); },
+        exposeResource: async () => undefined,
+      } as unknown as TeamsDataStore,
+      messages: { sendText: async () => undefined } as never,
+      connectorImage: 'ghcr.io/layervai/qurl@sha256:d2f9bd33572ffb7212f5b6cfc3fcfa4267344a4a2c2cdd6ce9b7196e3515516b',
+      qurlEndpoint: 'https://api.layerv.xyz',
+    });
+    await bot.execute(
+      { type: 'message', id: 'activity-1', from: { id: 'delivery', aadObjectId: 'actor' } },
+      'tenant-1', 'channel-1', true, parseCommand('protect-connector prod alias:$docs'),
+    );
+    // Previously the flag parsed, validated, and was then discarded, so
+    // `get $docs` reported the alias did not exist.
+    expect(bound).toEqual([{ alias: 'docs', resourceId: 'connector-1' }]);
+  });
+
+  it('accepts the service: flag the install renderers already support', () => {
+    expect(parseCommand('protect-connector prod service:api')).toMatchObject({
+      verb: 'protect-connector',
+      flags: { service: 'api' },
+    });
+    expect(() => parseCommand('protect-connector prod bogus:x')).toThrow('invalid connector option');
+  });
+
   it('sends the setup link to the personal chat, never into channel history', async () => {
     const sent: { readonly conversationId: string; readonly text: string }[] = [];
     const bot = new TeamsBot({

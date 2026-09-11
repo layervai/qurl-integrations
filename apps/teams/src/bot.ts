@@ -339,9 +339,9 @@ export class TeamsBot {
     validateTunnelSlug(slug);
     // A connector id may be 64 characters; a channel alias may be 63. Without
     // alias:, the id becomes the alias, so the wider grammar would otherwise
-    // strand an unremovable row here exactly as #channelAliasFor describes --
-    // and it would do so after the resource, alias, and exposure writes, since
-    // renderTunnelInstallMessage only rejects it at the very end.
+    // strand an unremovable row exactly as #channelAliasFor describes -- and it
+    // would do so after the resource, alias, and exposure writes below. Checked
+    // here so the request fails before any of them.
     const alias = command.flags.alias ?? slug;
     if (!isChannelAlias(alias)) {
       throw new UserFacingError('This connector id is not a usable channel alias. Re-run with `alias:$alias`.');
@@ -364,7 +364,10 @@ export class TeamsBot {
     if (!resource.connectorRoutingId || !resource.knockResourceId) {
       throw new UserFacingError('qURL returned incomplete connector routing metadata. No enrollment token was minted; please retry.');
     }
-
+    // Bind before exposing, same as protectUrl. Without this the `alias:` flag
+    // parses and validates and then does nothing: `get $alias`, `aliases` and
+    // `unset-alias` would all report the alias does not exist.
+    await this.#bindAlias(tenantId, scopeId, alias, resource.resourceId);
     await this.#options.data.exposeResource(tenantId, scopeId, resource.resourceId);
     // Sharing must be restarted before the config is rendered: `serving_epoch`
     // and the CRID both come from that response, and a daemon handed a stale

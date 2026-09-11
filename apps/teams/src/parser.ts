@@ -1,6 +1,6 @@
 import { isChannelAlias } from './alias.js';
 import type { SetupMode } from './interfaces.js';
-import { normalizeTunnelEnvironment, validateTunnelSlug } from './tunnel.js';
+import { normalizeTunnelEnvironment, validateTunnelService, validateTunnelSlug } from './tunnel.js';
 import { UserFacingError } from './user-facing-error.js';
 
 export const BOT_VERBS = Object.freeze([
@@ -119,9 +119,10 @@ export function parseCommand(input: string): TeamsCommand {
       const match = /^([a-z][a-z0-9_-]*):(.*)$/i.exec(token);
       const key = match?.[1]?.toLowerCase();
       const value = match?.[2]?.trim();
-      if (!key || !value || !['env', 'port', 'alias'].includes(key)) throw new UserFacingError('invalid connector option');
+      if (!key || !value || !['env', 'port', 'alias', 'service'].includes(key)) throw new UserFacingError('invalid connector option');
       if (key === 'env') flags.env = normalizeTunnelEnvironment(value);
       else if (key === 'alias') flags.alias = alias(value);
+      else if (key === 'service') { validateTunnelService(value); flags.service = value; }
       else {
         if (!/^\d+$/.test(value)) throw new UserFacingError('connector port is invalid');
         const port = Number(value);
