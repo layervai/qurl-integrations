@@ -64,7 +64,7 @@ describe('qURL HTTP adapter', () => {
     });
 
     await expect(client.createEnrollmentToken('prod', 'idempotency')).resolves.toEqual({ keyId: 'key_1', apiKey: 'bootstrap' });
-    expect(JSON.parse(body)).toMatchObject({ kind: 'enrollment_token', target: 'connector', claims: [{ type: 'connector', id: 'prod' }] });
+    expect(JSON.parse(body)).toMatchObject({ kind: 'enrollment_token', target: 'agent', claims: [{ type: 'connector', id: 'prod' }] });
   });
 
   it('treats repeated resource and API-key revocation as successful', async () => {

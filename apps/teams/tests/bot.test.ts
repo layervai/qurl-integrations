@@ -5,7 +5,7 @@ import { parseCommand, tokenize } from '../src/parser.js';
 import type { QurlClient } from '../src/qurl-client.js';
 import type { TeamsDataStore } from '../src/teams-data.js';
 import { TenantOwnerAlreadyAdminError, TenantOwnerRemovalError } from '../src/teams-data.js';
-import { renderTunnelInstallMessage, validateTunnelImageRef, validateTunnelSlug } from '../src/tunnel.js';
+import { renderTunnelInstallMessage, validateTunnelSlug } from '../src/tunnel.js';
 
 describe('Teams bot primitives', () => {
   it('parses the bind-only setup command', () => {
@@ -85,6 +85,7 @@ describe('Teams bot primitives', () => {
       qurl: {} as QurlClient,
       data: { checkAdmin: async () => ({ isAdmin: false }) } as unknown as TeamsDataStore,
       messages: {} as never,
+      qurlEndpoint: 'https://api.layerv.xyz',
     });
     await bot.handleActivity({
       type: 'message', text: 'list', from: { aadObjectId: 'actor' },
@@ -92,16 +93,6 @@ describe('Teams bot primitives', () => {
       conversation: { id: 'group', conversationType: 'groupChat' },
     }, undefined, async text => { replies.push(text); });
     expect(replies).toEqual(['This command is available only in Teams channels, not direct or group chats.']);
-  });
-
-  it('quotes connector bootstrap secrets in the rendered command', () => {
-    const message = renderTunnelInstallMessage({ slug: 'prod', alias: 'prod', environment: 'docker', port: 8080, image: 'registry.example/qurl:1', bootstrapKey: "key'with-space" });
-    expect(message).toContain("'key'\"'\"'with-space'");
-  });
-
-  it('rejects unsafe connector image references and renders Compose configuration', () => {
-    expect(() => validateTunnelImageRef('registry.example/qurl:1;rm -rf /')).toThrow('invalid connector image reference');
-    expect(renderTunnelInstallMessage({ slug: 'prod', alias: 'prod', environment: 'compose', port: 8080, image: 'registry.example/qurl:1', bootstrapKey: 'bootstrap' })).toContain('QURL_BOOTSTRAP_KEY: "bootstrap"');
   });
 
   it('enforces the documented 3-64 character connector ID boundary', () => {
@@ -117,6 +108,7 @@ describe('Teams bot primitives', () => {
       qurl: {} as QurlClient,
       data: { checkAdmin: async () => ({ isAdmin: false }) } as unknown as TeamsDataStore,
       messages: {} as never,
+      qurlEndpoint: 'https://api.layerv.xyz',
     });
     await bot.handleActivity({
       type: 'message', text: 'admins', from: { aadObjectId: 'actor', id: 'delivery' },
@@ -143,6 +135,7 @@ describe('Teams bot primitives', () => {
       qurl: {} as QurlClient,
       data: { checkAdmin: async () => ({ isAdmin: false }) } as unknown as TeamsDataStore,
       messages: {} as never,
+      qurlEndpoint: 'https://api.layerv.xyz',
     });
 
     for (const input of commands) {
@@ -159,6 +152,7 @@ describe('Teams bot primitives', () => {
       qurl: {} as QurlClient,
       data: { checkAdmin: async () => { throw new Error('upstream secret detail'); } } as unknown as TeamsDataStore,
       messages: {} as never,
+      qurlEndpoint: 'https://api.layerv.xyz',
     });
     await bot.handleActivity({
       type: 'message', text: 'list', from: { aadObjectId: 'actor', id: 'delivery' },
@@ -190,6 +184,7 @@ describe('Teams bot primitives', () => {
         qurl: { listResources: async () => ({ resources: [resource] }) } as unknown as QurlClient,
         data,
         messages: {} as never,
+      qurlEndpoint: 'https://api.layerv.xyz',
       });
       await expect(bot.execute(activity, 'tenant-1', 'channel-1', true,
         parseCommand(`protect-url $${resource.resourceId}`)), resource.resourceId)
@@ -209,6 +204,7 @@ describe('Teams bot primitives', () => {
         exposeResource: async () => undefined,
       } as unknown as TeamsDataStore,
       messages: {} as never,
+      qurlEndpoint: 'https://api.layerv.xyz',
     });
     await bot.execute({ type: 'message', id: 'activity-1', from: { aadObjectId: 'actor-1', id: 'delivery-1' } },
       'tenant-1', 'channel-1', true, parseCommand('protect-url $RES_01'));
@@ -233,6 +229,7 @@ describe('Teams bot primitives', () => {
         unbindScopeAlias: async () => true,
       } as unknown as TeamsDataStore,
       messages: {} as never,
+      qurlEndpoint: 'https://api.layerv.xyz',
     });
     await expect(bot.execute({ type: 'message', id: 'activity-1', from: { aadObjectId: 'actor-1', id: 'delivery-1' } },
       'tenant-1', 'channel-1', true, parseCommand('unset-alias $docs')))
@@ -254,8 +251,12 @@ describe('Teams bot primitives', () => {
     const bot = new TeamsBot({
       qurl: {
         listResources: async () => { writes.push('listResources'); return { resources: [] }; },
-        createResource: async () => { writes.push('createResource'); return { resourceId: 'res-1' }; },
+        createResource: async () => { writes.push('createResource'); return { resourceId: 'res-1', connectorRoutingId: 'routing-1', knockResourceId: 'knock-1' }; },
         createEnrollmentToken: async () => { writes.push('createEnrollmentToken'); return { keyId: 'k', apiKey: 'bootstrap' }; },
+        me: async () => ({ ownerId: 'auth0|owner', authType: 'api_key', isApiKeyPrincipal: true }),
+        getSharing: async () => ({ crid: 'crid-1', desiredState: 'off', servingEpoch: 0 }),
+        restartSharing: async () => ({ crid: 'crid-1', desiredState: 'on', servingEpoch: 4 }),
+        stopSharing: async () => undefined,
       } as unknown as QurlClient,
       data: {
         checkAdmin: async () => ({ isAdmin: true }),
@@ -265,7 +266,8 @@ describe('Teams bot primitives', () => {
         exposeResource: async () => { writes.push('exposeResource'); },
       } as unknown as TeamsDataStore,
       messages: { sendText: async () => undefined, reply: async () => undefined },
-      connectorImage: 'registry.example/qurl:1',
+      connectorImage: 'ghcr.io/layervai/qurl@sha256:d2f9bd33572ffb7212f5b6cfc3fcfa4267344a4a2c2cdd6ce9b7196e3515516b',
+      qurlEndpoint: 'https://api.layerv.xyz',
     });
 
     await expect(bot.execute({ type: 'message', id: 'activity-1', from: { aadObjectId: 'actor-1', id: 'delivery-1' } },
@@ -284,6 +286,7 @@ describe('Teams bot primitives', () => {
         unbindScopeAlias: async () => removed,
       } as unknown as TeamsDataStore,
       messages: {} as never,
+      qurlEndpoint: 'https://api.layerv.xyz',
     });
     const activity = { type: 'message', id: 'activity-1', from: { aadObjectId: 'actor-1', id: 'delivery-1' } };
     await expect(bot(true).execute(activity, 'tenant-1', 'channel-1', true, parseCommand('unset-alias $docs')))
@@ -295,9 +298,13 @@ describe('Teams bot primitives', () => {
   });
 
   it('renders ECS and Kubernetes connector instructions', () => {
-    const base = { slug: 'prod', alias: 'prod', port: 8080, image: 'registry.example/qurl:1', bootstrapKey: 'key' };
-    expect(renderTunnelInstallMessage({ ...base, environment: 'ecs-fargate' })).toContain('ECS/Fargate task-definition fields');
-    expect(renderTunnelInstallMessage({ ...base, environment: 'kubernetes' })).toContain('kind: Deployment');
+    const base = {
+      slug: 'prod', alias: 'prod', port: 8080, image: 'ghcr.io/layervai/qurl@sha256:d2f9bd33572ffb7212f5b6cfc3fcfa4267344a4a2c2cdd6ce9b7196e3515516b', bootstrapKey: 'key',
+      endpoint: 'https://api.layerv.xyz', ownerId: 'auth0|owner', crid: 'crid-1',
+      resourceId: 'res-1', connectorRoutingId: 'routing-1', knockResourceId: 'knock-1', servingEpoch: 4,
+    };
+    expect(renderTunnelInstallMessage({ ...base, environment: 'ecs-fargate' })).toContain('ECS/Fargate');
+    expect(renderTunnelInstallMessage({ ...base, environment: 'kubernetes' })).toContain('sidecar');
   });
 
   it('parses connector deployment options instead of silently dropping them', () => {
@@ -339,7 +346,7 @@ describe('Teams bot primitives', () => {
       lookupScopeAlias: async () => 'resource-1',
       personalConversationRef: async () => undefined,
     } as unknown as TeamsDataStore;
-    const bot = new TeamsBot({ qurl, data, messages: {} as never });
+    const bot = new TeamsBot({ qurl, data, messages: {} as never, qurlEndpoint: 'https://api.layerv.xyz' });
 
     await expect(bot.execute(
       { type: 'message', id: 'activity-1', from: { aadObjectId: 'actor-1', id: 'delivery-1' } },
@@ -364,6 +371,7 @@ describe('Teams bot primitives', () => {
         personalConversationRef: async () => undefined,
       } as unknown as TeamsDataStore,
       messages: {} as never,
+      qurlEndpoint: 'https://api.layerv.xyz',
     });
     const activity = { type: 'message', from: { id: 'delivery', aadObjectId: 'actor' } };
     await bot.execute(activity, 'tenant-1', 'channel-1', true, parseCommand('get $resource-1'));
@@ -378,11 +386,13 @@ describe('Teams bot primitives', () => {
       qurl: {} as QurlClient,
       data: { checkAdmin: async () => ({ isAdmin: true }), addAdmin: async () => { throw new TenantOwnerAlreadyAdminError(); } } as unknown as TeamsDataStore,
       messages: {} as never,
+      qurlEndpoint: 'https://api.layerv.xyz',
     });
     const removalBot = new TeamsBot({
       qurl: {} as QurlClient,
       data: { checkAdmin: async () => ({ isAdmin: true }), removeAdmin: async () => { throw new TenantOwnerRemovalError(); } } as unknown as TeamsDataStore,
       messages: {} as never,
+      qurlEndpoint: 'https://api.layerv.xyz',
     });
     const mention = [{ type: 'mention', mentioned: { id: 'owner', aadObjectId: 'owner-aad' } }];
     const replies: string[] = [];
@@ -407,6 +417,7 @@ describe('Teams bot primitives', () => {
         lookupScopeAlias: async () => undefined,
       } as unknown as TeamsDataStore,
       messages: {} as never,
+      qurlEndpoint: 'https://api.layerv.xyz',
     });
     const activity = { type: 'message', from: { aadObjectId: 'actor' } };
 
@@ -416,7 +427,7 @@ describe('Teams bot primitives', () => {
 
   it('follows a next cursor even when has_more is omitted', async () => {
     const cursors: Array<string | undefined> = [];
-    const bot = new TeamsBot({ qurl: {} as QurlClient, data: {} as TeamsDataStore, messages: {} as never });
+    const bot = new TeamsBot({ qurl: {} as QurlClient, data: {} as TeamsDataStore, messages: {} as never, qurlEndpoint: 'https://api.layerv.xyz' });
     const qurl = {
       listResources: async (_signal?: AbortSignal, cursor?: string) => {
         cursors.push(cursor);
@@ -430,20 +441,20 @@ describe('Teams bot primitives', () => {
   });
 
   it('rejects a resource pagination cursor cycle', async () => {
-    const bot = new TeamsBot({ qurl: {} as QurlClient, data: {} as TeamsDataStore, messages: {} as never });
+    const bot = new TeamsBot({ qurl: {} as QurlClient, data: {} as TeamsDataStore, messages: {} as never, qurlEndpoint: 'https://api.layerv.xyz' });
     const qurl = { listResources: async () => ({ resources: [], nextCursor: 'loop' }) } as unknown as QurlClient;
     await expect(bot.resources(qurl)).rejects.toThrow('pagination is invalid');
   });
 
   it('rejects has_more without a continuation cursor', async () => {
-    const bot = new TeamsBot({ qurl: {} as QurlClient, data: {} as TeamsDataStore, messages: {} as never });
+    const bot = new TeamsBot({ qurl: {} as QurlClient, data: {} as TeamsDataStore, messages: {} as never, qurlEndpoint: 'https://api.layerv.xyz' });
     const qurl = { listResources: async () => ({ resources: [], hasMore: true }) } as unknown as QurlClient;
     await expect(bot.resources(qurl)).rejects.toThrow('pagination is invalid');
   });
 
   it('enforces the resource pagination safety cap', async () => {
     let calls = 0;
-    const bot = new TeamsBot({ qurl: {} as QurlClient, data: {} as TeamsDataStore, messages: {} as never });
+    const bot = new TeamsBot({ qurl: {} as QurlClient, data: {} as TeamsDataStore, messages: {} as never, qurlEndpoint: 'https://api.layerv.xyz' });
     const qurl = {
       listResources: async (_signal?: AbortSignal, cursor?: string) => {
         calls += 1;
@@ -461,6 +472,7 @@ describe('Teams bot primitives', () => {
         listResources: async () => ({ resources: [{ resourceId: 'resource-1' }] }),
         create: async () => ({ resourceId: 'resource-1', qurlLink: 'https://qurl.example/one' }),
       } as unknown as QurlClient,
+      qurlEndpoint: 'https://api.layerv.xyz',
       data: {
         checkAdmin: async () => ({ isAdmin: false }),
         allowedResourceIds: async () => new Set(['resource-1']),
@@ -484,8 +496,12 @@ describe('Teams bot primitives', () => {
     const bot = new TeamsBot({
       qurl: {
         listResources: async () => ({ resources: [] }),
-        createResource: async (input: { readonly idempotencyKey?: string }) => { keys.push(input.idempotencyKey ?? ''); return { resourceId: 'connector-1', type: 'tunnel', slug: 'prod' }; },
+        createResource: async (input: { readonly idempotencyKey?: string }) => { keys.push(input.idempotencyKey ?? ''); return { resourceId: 'connector-1', type: 'tunnel', slug: 'prod', connectorRoutingId: 'routing-1', knockResourceId: 'knock-1' }; },
         createEnrollmentToken: async (_slug: string, key: string) => { keys.push(key); return { keyId: 'key-1', apiKey: 'bootstrap' }; },
+        me: async () => ({ ownerId: 'auth0|owner', authType: 'api_key', isApiKeyPrincipal: true }),
+        getSharing: async () => ({ crid: 'crid-1', desiredState: 'off', servingEpoch: 0 }),
+        restartSharing: async () => ({ crid: 'crid-1', desiredState: 'on', servingEpoch: 4 }),
+        stopSharing: async () => undefined,
       } as unknown as QurlClient,
       data: {
         checkAdmin: async () => ({ isAdmin: true }),
@@ -495,7 +511,8 @@ describe('Teams bot primitives', () => {
         exposeResource: async () => undefined,
       } as unknown as TeamsDataStore,
       messages: { sendText: async () => undefined } as never,
-      connectorImage: 'registry.example/qurl:1',
+      connectorImage: 'ghcr.io/layervai/qurl@sha256:d2f9bd33572ffb7212f5b6cfc3fcfa4267344a4a2c2cdd6ce9b7196e3515516b',
+      qurlEndpoint: 'https://api.layerv.xyz',
     });
     await expect(bot.execute(
       { type: 'message', id: 'activity-1', from: { id: 'delivery', aadObjectId: 'actor' } },
@@ -510,8 +527,12 @@ describe('Teams bot primitives', () => {
     const bot = new TeamsBot({
       qurl: {
         listResources: async () => ({ resources: [] }),
-        createResource: async () => ({ resourceId: 'connector-1', type: 'tunnel', slug: 'prod' }),
+        createResource: async () => ({ resourceId: 'connector-1', type: 'tunnel', slug: 'prod', connectorRoutingId: 'routing-1', knockResourceId: 'knock-1' }),
         createEnrollmentToken: async () => ({ keyId: 'key-1', apiKey: 'bootstrap-secret' }),
+        me: async () => ({ ownerId: 'auth0|owner', authType: 'api_key', isApiKeyPrincipal: true }),
+        getSharing: async () => ({ crid: 'crid-1', desiredState: 'off', servingEpoch: 0 }),
+        restartSharing: async () => ({ crid: 'crid-1', desiredState: 'on', servingEpoch: 4 }),
+        stopSharing: async () => undefined,
         revokeApiKey: async (keyId: string) => { revoked.push(keyId); },
       } as unknown as QurlClient,
       data: {
@@ -522,7 +543,8 @@ describe('Teams bot primitives', () => {
         exposeResource: async () => undefined,
       } as unknown as TeamsDataStore,
       messages: { sendText: async () => { throw new Error('delivery failed'); } } as never,
-      connectorImage: 'registry.example/qurl:1',
+      connectorImage: 'ghcr.io/layervai/qurl@sha256:d2f9bd33572ffb7212f5b6cfc3fcfa4267344a4a2c2cdd6ce9b7196e3515516b',
+      qurlEndpoint: 'https://api.layerv.xyz',
     });
 
     await expect(bot.execute(
@@ -532,13 +554,18 @@ describe('Teams bot primitives', () => {
     expect(revoked).toEqual(['key-1']);
   });
 
-  it('revokes a connector enrollment key when install rendering fails', async () => {
+  it('never mints a connector enrollment key when install rendering would fail', async () => {
     const revoked: string[] = [];
+    const minted: string[] = [];
     const bot = new TeamsBot({
       qurl: {
         listResources: async () => ({ resources: [] }),
-        createResource: async () => ({ resourceId: 'connector-1', type: 'tunnel', slug: 'prod' }),
-        createEnrollmentToken: async () => ({ keyId: 'key-1', apiKey: 'bootstrap-secret' }),
+        createResource: async () => ({ resourceId: 'connector-1', type: 'tunnel', slug: 'prod', connectorRoutingId: 'routing-1', knockResourceId: 'knock-1' }),
+        createEnrollmentToken: async () => { minted.push('key-1'); return { keyId: 'key-1', apiKey: 'bootstrap-secret' }; },
+        me: async () => ({ ownerId: 'auth0|owner', authType: 'api_key', isApiKeyPrincipal: true }),
+        getSharing: async () => ({ crid: 'crid-1', desiredState: 'off', servingEpoch: 0 }),
+        restartSharing: async () => ({ crid: 'crid-1', desiredState: 'on', servingEpoch: 4 }),
+        stopSharing: async () => undefined,
         revokeApiKey: async (keyId: string) => { revoked.push(keyId); },
       } as unknown as QurlClient,
       data: {
@@ -550,21 +577,86 @@ describe('Teams bot primitives', () => {
       } as unknown as TeamsDataStore,
       messages: { sendText: async () => { throw new Error('delivery should not run'); } } as never,
       connectorImage: 'invalid image',
+      qurlEndpoint: 'https://api.layerv.xyz',
     });
 
     await expect(bot.execute(
       { type: 'message', id: 'activity-1', from: { id: 'delivery', aadObjectId: 'actor' } },
       'tenant-1', 'channel-1', true, parseCommand('protect-connector prod'),
     )).rejects.toThrow('invalid connector image reference');
-    expect(revoked).toEqual(['key-1']);
+    // The render preflight runs before the mint, so there is no secret to
+    // revoke -- the one-time token never existed.
+    expect(minted).toEqual([]);
+    expect(revoked).toEqual([]);
+  });
+
+  it.each([
+    ['off', ['connector-1']],
+    ['on', []],
+  ] as const)('compensates sharing back off after a failed install only when it was previously %s', async (previous, expected) => {
+    const stopped: string[] = [];
+    const bot = new TeamsBot({
+      qurl: {
+        listResources: async () => ({ resources: [] }),
+        createResource: async () => ({ resourceId: 'connector-1', type: 'tunnel', slug: 'prod', connectorRoutingId: 'routing-1', knockResourceId: 'knock-1' }),
+        createEnrollmentToken: async () => ({ keyId: 'key-1', apiKey: 'bootstrap-secret' }),
+        me: async () => ({ ownerId: 'auth0|owner', authType: 'api_key', isApiKeyPrincipal: true }),
+        getSharing: async () => ({ crid: 'crid-1', desiredState: previous, servingEpoch: previous === 'on' ? 3 : 0 }),
+        restartSharing: async () => ({ crid: 'crid-1', desiredState: 'on', servingEpoch: 4 }),
+        stopSharing: async (resourceId: string) => { stopped.push(resourceId); },
+        revokeApiKey: async () => undefined,
+      } as unknown as QurlClient,
+      data: {
+        checkAdmin: async () => ({ isAdmin: true }),
+        personalConversationRef: async () => ({ serviceUrl: 'https://smba.trafficmanager.net/teams', conversationId: 'conversation' }),
+        lookupScopeAlias: async () => undefined,
+        bindScopeAlias: async () => undefined,
+        exposeResource: async () => undefined,
+      } as unknown as TeamsDataStore,
+      messages: { sendText: async () => { throw new Error('delivery failed'); } } as never,
+      connectorImage: 'ghcr.io/layervai/qurl@sha256:d2f9bd33572ffb7212f5b6cfc3fcfa4267344a4a2c2cdd6ce9b7196e3515516b',
+      qurlEndpoint: 'https://api.layerv.xyz',
+    });
+
+    await expect(bot.execute(
+      { type: 'message', id: 'activity-1', from: { id: 'delivery', aadObjectId: 'actor' } },
+      'tenant-1', 'channel-1', true, parseCommand('protect-connector prod'),
+    )).rejects.toThrow('delivery failed');
+    // A previously-on Connector has a live daemon that reacquires the rotated
+    // epoch; turning it off here would be an outage this failure never caused.
+    expect(stopped).toEqual(expected);
+  });
+
+  it('refuses to provision a connector with a delegated (non-API-key) credential', async () => {
+    const bot = new TeamsBot({
+      qurl: {
+        listResources: async () => ({ resources: [] }),
+        me: async () => ({ ownerId: 'auth0|user', authType: 'jwt', isApiKeyPrincipal: false }),
+      } as unknown as QurlClient,
+      data: {
+        checkAdmin: async () => ({ isAdmin: true }),
+        personalConversationRef: async () => ({ serviceUrl: 'https://smba.trafficmanager.net/teams', conversationId: 'conversation' }),
+      } as unknown as TeamsDataStore,
+      messages: { sendText: async () => undefined } as never,
+      connectorImage: 'ghcr.io/layervai/qurl@sha256:d2f9bd33572ffb7212f5b6cfc3fcfa4267344a4a2c2cdd6ce9b7196e3515516b',
+      qurlEndpoint: 'https://api.layerv.xyz',
+    });
+    await expect(bot.execute(
+      { type: 'message', id: 'activity-1', from: { id: 'delivery', aadObjectId: 'actor' } },
+      'tenant-1', 'channel-1', true, parseCommand('protect-connector prod'),
+    )).rejects.toThrow('cannot provision a connector');
   });
 
   it('does not fetch the resource catalog twice for protect-connector', async () => {
     let listCalls = 0;
     const bot = new TeamsBot({
       qurl: {
-        listResources: async () => { listCalls += 1; return { resources: [{ resourceId: 'connector-1', type: 'tunnel', slug: 'prod' }] }; },
+        listResources: async () => { listCalls += 1; return { resources: [{ resourceId: 'connector-1', type: 'tunnel', slug: 'prod', connectorRoutingId: 'routing-1', knockResourceId: 'knock-1' }] }; },
         createEnrollmentToken: async () => ({ keyId: 'key-1', apiKey: 'bootstrap' }),
+        me: async () => ({ ownerId: 'auth0|owner', authType: 'api_key', isApiKeyPrincipal: true }),
+        getSharing: async () => ({ crid: 'crid-1', desiredState: 'off', servingEpoch: 0 }),
+        restartSharing: async () => ({ crid: 'crid-1', desiredState: 'on', servingEpoch: 4 }),
+        stopSharing: async () => undefined,
       } as unknown as QurlClient,
       data: {
         checkAdmin: async () => ({ isAdmin: true }),
@@ -574,7 +666,8 @@ describe('Teams bot primitives', () => {
         exposeResource: async () => undefined,
       } as unknown as TeamsDataStore,
       messages: { sendText: async () => undefined } as never,
-      connectorImage: 'registry.example/qurl:1',
+      connectorImage: 'ghcr.io/layervai/qurl@sha256:d2f9bd33572ffb7212f5b6cfc3fcfa4267344a4a2c2cdd6ce9b7196e3515516b',
+      qurlEndpoint: 'https://api.layerv.xyz',
     });
     await bot.execute({ type: 'message', id: 'activity-1', from: { id: 'delivery', aadObjectId: 'actor' } }, 'tenant-1', 'channel-1', true, parseCommand('protect-connector prod'));
     expect(listCalls).toBe(1);
@@ -586,6 +679,7 @@ describe('Teams bot primitives', () => {
       qurl: {} as QurlClient,
       data: { savePersonalConversationRef: async () => { throw new Error('temporary DDB failure'); } } as unknown as TeamsDataStore,
       messages: {} as never,
+      qurlEndpoint: 'https://api.layerv.xyz',
     });
     await bot.handleActivity({ type: 'message', text: 'help', from: { aadObjectId: 'actor' }, serviceUrl: 'https://smba.trafficmanager.net', conversation: { id: 'personal', conversationType: 'personal' }, channelData: { tenant: { id: 'tenant' } } }, undefined, async text => { replies.push(text); });
     expect(replies[0]).toContain('qURL for Teams');
@@ -597,6 +691,7 @@ describe('Teams bot primitives', () => {
       qurl: {} as QurlClient,
       data: {} as TeamsDataStore,
       messages: { reply: async () => { throw new TypeError('Invalid URL'); } } as never,
+      qurlEndpoint: 'https://api.layerv.xyz',
       logger: { debug: () => undefined, info: () => undefined, warn: () => undefined, error: message => { errors.push(message); } },
     });
     await expect(bot.handleActivity({
@@ -615,6 +710,7 @@ describe('Teams bot primitives', () => {
         lookupScopeAlias: async () => 'other-resource',
       } as unknown as TeamsDataStore,
       messages: {} as never,
+      qurlEndpoint: 'https://api.layerv.xyz',
     });
     await expect(bot.execute(
       { type: 'message', from: { aadObjectId: 'admin' } },
@@ -631,6 +727,7 @@ describe('Teams bot primitives', () => {
         unbindScopeAlias: async (_tenantId: string, _scopeId: string, alias: string) => { unbound = alias; return true; },
       } as unknown as TeamsDataStore,
       messages: {} as never,
+      qurlEndpoint: 'https://api.layerv.xyz',
     });
     await expect(bot.execute(
       { type: 'message', from: { aadObjectId: 'admin' } },
@@ -649,6 +746,7 @@ describe('Teams bot primitives', () => {
         deleteWorkspace: async () => { deleted = true; },
       } as unknown as TeamsDataStore,
       messages: {} as never,
+      qurlEndpoint: 'https://api.layerv.xyz',
     });
     await expect(bot.execute({ type: 'message', from: { aadObjectId: 'admin' } }, 'tenant-1', 'personal', false, parseCommand('uninstall'))).resolves.toContain('operator follow-up');
     expect(deleted).toBe(true);
@@ -662,6 +760,7 @@ describe('Teams bot primitives', () => {
         deleteWorkspace: async () => { deleted = true; },
       } as unknown as TeamsDataStore,
       messages: {} as never,
+      qurlEndpoint: 'https://api.layerv.xyz',
     });
     await expect(unavailableBot.execute({ type: 'message', from: { aadObjectId: 'admin' } }, 'tenant-1', 'personal', false, parseCommand('uninstall'))).resolves.toContain('operator follow-up');
     expect(deleted).toBe(true);

@@ -21,7 +21,7 @@ import { createDynamoClient, TeamsDataStore } from './teams-data.js';
 import { KmsCredentialCipher } from './credential-cipher.js';
 import { TeamsBot } from './bot.js';
 import { TeamsSdkMessagePoster, validateTeamsServiceUrl } from './teams-sdk.js';
-import { validateTunnelImageRef } from './tunnel.js';
+import { validateTunnelHub, validateTunnelImageRef, type TunnelHub } from './tunnel.js';
 import type { ConfidentialTokenClient, FetchLike } from './interfaces.js';
 import type { Logger } from './interfaces.js';
 import { RedactingLogger } from './logger.js';
@@ -170,6 +170,27 @@ function env(name: string): string {
   return value;
 }
 
+function optionalEnv(name: string): string {
+  return process.env[name]?.trim() ?? '';
+}
+
+/**
+ * The NHP Hub triple is all-or-nothing. A partial triple is a deployment
+ * error, not a degraded mode: rendering two of three values produces an
+ * install that fails at knock time with nothing pointing back at the cause.
+ */
+function connectorHubFromEnv(): TunnelHub | undefined {
+  const host = optionalEnv('QURL_CONNECTOR_HUB_HOST');
+  const port = optionalEnv('QURL_CONNECTOR_HUB_PORT');
+  const serverPublicKeyB64 = optionalEnv('QURL_CONNECTOR_HUB_SERVER_PUBLIC_KEY_B64');
+  const set = [host, port, serverPublicKeyB64].filter(value => value !== '');
+  if (set.length === 0) return undefined;
+  if (set.length !== 3) throw new Error('QURL_CONNECTOR_HUB_HOST, QURL_CONNECTOR_HUB_PORT, and QURL_CONNECTOR_HUB_SERVER_PUBLIC_KEY_B64 must be set together');
+  const hub = { host, port, serverPublicKeyB64 };
+  validateTunnelHub(hub);
+  return hub;
+}
+
 export function httpsOrigin(value: string, name: string): string {
   const url = new URL(value.includes('://') ? value : `https://${value}`);
   // qURL and the public Teams callback may be served on a non-default HTTPS
@@ -203,8 +224,9 @@ export async function createProductionTeamsConfig(): Promise<TeamsProductionConf
   const region = env('AWS_REGION');
   const appId = env('TEAMS_APP_ID');
   const appPassword = env('TEAMS_APP_PASSWORD');
-  const connectorImage = env('QURL_CONNECTOR_IMAGE');
+  const connectorImage = env('QURL_IMAGE');
   validateTunnelImageRef(connectorImage);
+  const connectorHub = connectorHubFromEnv();
   const ddb = createDynamoClient(DynamoDBDocumentClient.from(new DynamoDBClient({ region }), { marshallOptions: { removeUndefinedValues: true } }));
   const data = new TeamsDataStore({
     client: ddb,
@@ -251,6 +273,8 @@ export async function createProductionTeamsConfig(): Promise<TeamsProductionConf
     data,
     messages: new TeamsSdkMessagePoster(app),
     connectorImage,
+    qurlEndpoint,
+    ...(connectorHub ? { connectorHub } : {}),
     setup: new TeamsSetupLinkBuilder({ state: oauthState, tokenClient, setupBaseUrl: baseUrl }),
     logger,
   });

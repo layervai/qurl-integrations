@@ -72,7 +72,10 @@ itself enforces.
 | `TEAMS_APP_ID` | yes | Bot Framework app (client) id. |
 | `TEAMS_APP_PASSWORD` | yes | Bot Framework client secret. |
 | `TEAMS_SERVICE_URL` | no | Pins the outbound Bot Framework service URL. Validated against the trusted-host allowlist in `src/teams-sdk.ts`; unset lets the SDK use the inbound Activity's own service URL. |
-| `QURL_CONNECTOR_IMAGE` | yes | Connector image reference embedded in the generated install instructions. Validated by `validateTunnelImageRef`. |
+| `QURL_IMAGE` | yes | Released qURL CLI image (`ghcr.io/layervai/qurl@sha256:...`) rendered into Connector installs, which run `qurl daemon run`. The retired standalone `qurl-connector` image is rejected. Validated by `validateTunnelImageRef`. |
+| `QURL_CONNECTOR_HUB_HOST` | no | NHP Hub host rendered into Connector installs. Set all three `QURL_CONNECTOR_HUB_*` values together or none. |
+| `QURL_CONNECTOR_HUB_PORT` | no | NHP Hub port. |
+| `QURL_CONNECTOR_HUB_SERVER_PUBLIC_KEY_B64` | no | Base64 NHP Hub server public key pinned by rendered installs. |
 | `QURL_TEAMS_TENANT_PRINCIPALS_TABLE` | yes | Owner and admin rows. |
 | `QURL_TEAMS_CHANNEL_POLICIES_TABLE` | yes | Channel alias and resource-visibility rows. Must carry the `resource_scopes` GSI (`tenant_resource_key` / `scope_item_type_key`, KEYS_ONLY) — `revoke` queries it directly, so a table without it fails at revoke time rather than at startup. |
 | `QURL_TEAMS_PERSONAL_CONVERSATIONS_TABLE` | yes | Personal-chat references used by `dm:true` and connector bootstrap delivery. |

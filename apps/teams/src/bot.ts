@@ -9,7 +9,7 @@ import { parseCommand } from './parser.js';
 import type { TeamsCommand } from './parser.js';
 import { ScopeAliasConflictError, TenantOwnerAlreadyAdminError, TenantOwnerRemovalError, type TeamsDataStore } from './teams-data.js';
 import type { TeamsSetupLinkBuilder } from './setup-link.js';
-import { normalizeTunnelEnvironment, renderTunnelInstallMessage, validateTunnelSlug } from './tunnel.js';
+import { normalizeTunnelEnvironment, renderTunnelInstallMessage, validateTunnelSlug, type TunnelHub } from './tunnel.js';
 import { isUserFacingError, UserFacingError } from './user-facing-error.js';
 import type { Logger } from './interfaces.js';
 
@@ -25,6 +25,10 @@ export interface TeamsBotOptions {
   readonly messages: TeamsMessagePoster;
   readonly setup?: TeamsSetupLinkBuilder;
   readonly connectorImage?: string;
+  /** qURL API origin rendered into Connector installs as QURL_ENDPOINT. */
+  readonly qurlEndpoint: string;
+  /** NHP Hub triple. Absent until the environment's Hub identity is seeded. */
+  readonly connectorHub?: TunnelHub;
   readonly logger?: Logger;
   readonly feedback?: (input: { readonly tenantId: string; readonly actorId: string; readonly message: string }) => Promise<void>;
 }
@@ -334,22 +338,66 @@ export class TeamsBot {
     }
     const ref = await this.#options.data.personalConversationRef(tenantId, activity.from?.aadObjectId?.trim().toLowerCase() ?? '');
     if (!ref) throw new UserFacingError('Open a personal chat with the bot before protecting a connector.');
+    // Resolved before any remote mutation so an identity outage aborts without
+    // leaving sharing state behind. Only an API-key principal names the account
+    // owner; a delegated credential would name the calling user instead.
+    const identity = await qurl.me(signal);
+    if (!identity.isApiKeyPrincipal) throw new UserFacingError('This qURL credential cannot provision a connector. Re-run `qurl setup`.');
+    const ownerId = identity.ownerId;
     const resources = await this.resources(qurl, signal);
     const operationKey = [tenantId, scopeId, activity.from?.id ?? '', slug, this.#activityIdempotencyField(activity)];
     const resource = resources.find(item => item.type === 'tunnel' && item.slug === slug)
       ?? await qurl.createResource({ type: 'tunnel', slug, findOrCreate: true, idempotencyKey: idempotencyKey(...operationKey, 'resource') }, signal);
-    await this.#bindAlias(tenantId, scopeId, alias, resource.resourceId);
+    // Fail before the alias/exposure writes: a tunnel resource without full
+    // routing metadata cannot produce a config the daemon will accept, and
+    // there is nothing to clean up at this point.
+    if (!resource.connectorRoutingId || !resource.knockResourceId) {
+      throw new UserFacingError('qURL returned incomplete connector routing metadata. No enrollment token was minted; please retry.');
+    }
+
     await this.#options.data.exposeResource(tenantId, scopeId, resource.resourceId);
+    // Sharing must be restarted before the config is rendered: `serving_epoch`
+    // and the CRID both come from that response, and a daemon handed a stale
+    // epoch is refused. apps/slack does the same in the same order.
+    const previousSharing = await qurl.getSharing(resource.resourceId, signal);
+    const restarted = await qurl.restartSharing(resource.resourceId, signal);
+    const installArgs = {
+      slug,
+      alias,
+      environment: normalizeTunnelEnvironment(command.flags.env ?? 'docker'),
+      port: Number(command.flags.port ?? '8080'),
+      ...(command.flags.service ? { service: command.flags.service } : {}),
+      image: this.#options.connectorImage ?? '',
+      endpoint: this.#options.qurlEndpoint,
+      ownerId,
+      crid: restarted.crid,
+      resourceId: resource.resourceId,
+      connectorRoutingId: resource.connectorRoutingId,
+      knockResourceId: resource.knockResourceId,
+      servingEpoch: restarted.servingEpoch,
+      ...(this.#options.connectorHub ? { hub: this.#options.connectorHub } : {}),
+    };
+    // Render before minting so a bad contract fails without creating a secret.
+    renderTunnelInstallMessage({ ...installArgs, bootstrapKey: 'preflight' });
     let token: QurlApiKey | undefined;
+    let delivered = false;
     try {
       token = await qurl.createEnrollmentToken(slug, idempotencyKey(...operationKey, 'enrollment'), signal);
-      const installText = renderTunnelInstallMessage({ slug, alias, environment: normalizeTunnelEnvironment(command.flags.env ?? 'docker'), port: Number(command.flags.port ?? '8080'), image: this.#options.connectorImage ?? '', bootstrapKey: token.apiKey });
+      const installText = renderTunnelInstallMessage({ ...installArgs, bootstrapKey: token.apiKey });
       await this.#options.messages.sendText(ref.serviceUrl, ref.conversationId, `Connector \`${slug}\` bootstrap instructions:\n${installText}`, signal);
+      delivered = true;
     } catch (error) {
       if (token) {
         try { await qurl.revokeApiKey(token.keyId, signal); } catch { /* preserve the failure without leaking the bootstrap key */ }
       }
       // Resource and alias changes may predate this request or be concurrently updated. The one-time credential is the only newly-created secret and is revoked above.
+      // A previously-off Connector owns the `on` transition this request made,
+      // so compensate it back off. A previously-on one is left alone: its live
+      // daemon reacquires the rotated epoch, and turning it off would be an
+      // outage for a device this failure never touched.
+      if (!delivered && previousSharing.desiredState !== 'on') {
+        try { await qurl.stopSharing(resource.resourceId, signal); } catch { /* preserve the original failure */ }
+      }
       throw error;
     }
     return `Protected connector \`$${resource.resourceId}\` and sent the bootstrap instructions to your personal Teams chat.`;

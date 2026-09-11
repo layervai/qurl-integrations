@@ -3,6 +3,13 @@ import { decodeUtf8WithError, readBoundedBytes } from './http.js';
 
 export interface QurlResource {
   readonly resourceId: string;
+  // Connector routing contract. Present only on type=tunnel resources; the
+  // headless share config the daemon reads cannot be rendered without all
+  // three plus the sharing epoch below.
+  readonly crid?: string;
+  readonly connectorRoutingId?: string;
+  readonly knockResourceId?: string;
+  readonly servingEpoch?: number;
   readonly type?: string;
   readonly slug?: string;
   readonly alias?: string;
@@ -24,6 +31,8 @@ export interface QurlCreateInput {
 }
 export interface QurlCreateOutput { readonly resourceId: string; readonly qurlLink: string; readonly expiresAt?: string; }
 export interface QurlApiKey { readonly keyId: string; readonly apiKey: string; }
+export interface QurlIdentity { readonly ownerId: string; readonly authType: string; readonly isApiKeyPrincipal: boolean; }
+export interface QurlSharingState { readonly crid: string; readonly desiredState: string; readonly servingEpoch: number; }
 export interface QurlClient {
   listResources(signal?: AbortSignal, cursor?: string): Promise<QurlPage>;
   create(input: QurlCreateInput, signal?: AbortSignal): Promise<QurlCreateOutput>;
@@ -32,6 +41,10 @@ export interface QurlClient {
   deleteResource(resourceId: string, signal?: AbortSignal): Promise<void>;
   createEnrollmentToken(slug: string, idempotencyKey: string, signal?: AbortSignal): Promise<QurlApiKey>;
   revokeApiKey(keyId: string, signal?: AbortSignal): Promise<void>;
+  me(signal?: AbortSignal): Promise<QurlIdentity>;
+  getSharing(resourceId: string, signal?: AbortSignal): Promise<QurlSharingState>;
+  restartSharing(resourceId: string, signal?: AbortSignal): Promise<QurlSharingState>;
+  stopSharing(resourceId: string, signal?: AbortSignal): Promise<void>;
 }
 export interface QurlClientOptions { readonly endpoint: string; readonly apiKey: string; readonly fetch?: typeof fetch; readonly userAgent?: string; }
 const QURL_REQUEST_TIMEOUT_MS = 15_000;
@@ -47,12 +60,20 @@ function requiredString(value: unknown, label: string): string {
   return value;
 }
 function optionalString(value: unknown): string | undefined { return typeof value === 'string' && value !== '' ? value : undefined; }
+function optionalInteger(value: unknown): number | undefined { return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : undefined; }
+function requiredInteger(value: unknown, label: string): number {
+  const parsed = optionalInteger(value);
+  if (parsed === undefined) throw new Error(`${label} response is invalid`);
+  return parsed;
+}
 function responseData(value: unknown, label: string): JsonObject { const envelope = object(value, label); return object(envelope.data ?? envelope, label); }
 function resourceFromWire(value: unknown): QurlResource {
   const resource = object(value, 'qURL resource');
   const type = optionalString(resource.type); const slug = optionalString(resource.slug); const alias = optionalString(resource.alias);
   const description = optionalString(resource.description); const targetUrl = optionalString(resource.target_url); const status = optionalString(resource.status);
-  return { resourceId: requiredString(resource.resource_id, 'qURL resource'), ...(type ? { type } : {}), ...(slug ? { slug } : {}), ...(alias ? { alias } : {}), ...(description ? { description } : {}), ...(targetUrl ? { targetUrl } : {}), ...(status ? { status } : {}) };
+  const crid = optionalString(resource.crid); const connectorRoutingId = optionalString(resource.connector_routing_id);
+  const knockResourceId = optionalString(resource.knock_resource_id); const servingEpoch = optionalInteger(resource.serving_epoch);
+  return { resourceId: requiredString(resource.resource_id, 'qURL resource'), ...(crid ? { crid } : {}), ...(connectorRoutingId ? { connectorRoutingId } : {}), ...(knockResourceId ? { knockResourceId } : {}), ...(servingEpoch === undefined ? {} : { servingEpoch }), ...(type ? { type } : {}), ...(slug ? { slug } : {}), ...(alias ? { alias } : {}), ...(description ? { description } : {}), ...(targetUrl ? { targetUrl } : {}), ...(status ? { status } : {}) };
 }
 function createOutputFromWire(value: unknown): QurlCreateOutput {
   const output = responseData(value, 'qURL create'); const expiresAt = optionalString(output.expires_at);
@@ -61,6 +82,23 @@ function createOutputFromWire(value: unknown): QurlCreateOutput {
 function apiKeyFromWire(value: unknown): QurlApiKey {
   const key = responseData(value, 'qURL API key');
   return { keyId: requiredString(key.key_id, 'qURL API key'), apiKey: requiredString(key.api_key, 'qURL API key') };
+}
+function identityFromWire(value: unknown): QurlIdentity {
+  const identity = responseData(value, 'qURL identity');
+  const apiKey = identity.api_key;
+  return {
+    ownerId: requiredString(identity.owner_id, 'qURL identity'),
+    authType: requiredString(identity.auth_type, 'qURL identity'),
+    isApiKeyPrincipal: !!apiKey && typeof apiKey === 'object' && !Array.isArray(apiKey),
+  };
+}
+function sharingFromWire(value: unknown): QurlSharingState {
+  const sharing = responseData(value, 'qURL sharing');
+  return {
+    crid: requiredString(sharing.crid, 'qURL sharing'),
+    desiredState: requiredString(sharing.desired_state, 'qURL sharing'),
+    servingEpoch: requiredInteger(sharing.serving_epoch, 'qURL sharing'),
+  };
 }
 function pageFromWire(value: unknown): QurlPage {
   if (Array.isArray(value)) return { resources: value.map(resourceFromWire) };
@@ -108,7 +146,24 @@ export class HttpQurlClient implements QurlClient {
     });
   }
   async createEnrollmentToken(slug: string, idempotencyKey: string, signal?: AbortSignal): Promise<QurlApiKey> {
-    return apiKeyFromWire(await this.#request(new URL('v1/api-keys', this.#endpoint), { method: 'POST', body: JSON.stringify({ name: `Teams connector ${slug}`, kind: 'enrollment_token', target: 'connector', claims: [{ type: 'connector', id: slug }], expires_in: '15m' }), ...(signal ? { signal } : {}), idempotencyKey }));
+    // Target MUST be `agent`, not `connector`: the daemon enrolls its own
+    // device identity with this token, and native session control admits only
+    // owner-scoped enrollment. A connector-target token records
+    // connector_bootstrap and is rejected for every session. apps/slack mints
+    // the identical shape -- keep the two in lockstep.
+    return apiKeyFromWire(await this.#request(new URL('v1/api-keys', this.#endpoint), { method: 'POST', body: JSON.stringify({ name: `Teams connector ${slug}`, kind: 'enrollment_token', target: 'agent', claims: [{ type: 'connector', id: slug }], expires_in: '15m' }), ...(signal ? { signal } : {}), idempotencyKey }));
+  }
+  async me(signal?: AbortSignal): Promise<QurlIdentity> {
+    return identityFromWire(await this.#request(new URL('v1/me', this.#endpoint), signal ? { signal } : {}));
+  }
+  async getSharing(resourceId: string, signal?: AbortSignal): Promise<QurlSharingState> {
+    return sharingFromWire(await this.#request(new URL(`v1/resources/${encodeURIComponent(resourceId)}/sharing`, this.#endpoint), signal ? { signal } : {}));
+  }
+  async restartSharing(resourceId: string, signal?: AbortSignal): Promise<QurlSharingState> {
+    return sharingFromWire(await this.#request(new URL(`v1/resources/${encodeURIComponent(resourceId)}/sharing/restart`, this.#endpoint), { method: 'POST', ...(signal ? { signal } : {}) }));
+  }
+  async stopSharing(resourceId: string, signal?: AbortSignal): Promise<void> {
+    await this.#request(new URL(`v1/resources/${encodeURIComponent(resourceId)}/sharing`, this.#endpoint), { method: 'PUT', body: JSON.stringify({ desired_state: 'off' }), ...(signal ? { signal } : {}) });
   }
   async revokeApiKey(keyId: string, signal?: AbortSignal): Promise<void> {
     await this.#request(new URL(`v1/api-keys/${encodeURIComponent(keyId)}`, this.#endpoint), {
