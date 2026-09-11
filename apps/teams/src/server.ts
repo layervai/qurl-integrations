@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { Console } from 'node:console';
+import { realpathSync } from 'node:fs';
 import { createServer, type Server, type ServerResponse } from 'node:http';
 import { pathToFileURL } from 'node:url';
 import express from 'express';
@@ -22,6 +23,7 @@ import { KmsCredentialCipher } from './credential-cipher.js';
 import { TeamsBot } from './bot.js';
 import { TeamsSdkMessagePoster, validateTeamsServiceUrl } from './teams-sdk.js';
 import { validateTunnelHub, validateTunnelImageRef, type TunnelHub } from './tunnel.js';
+import { UserFacingError } from './user-facing-error.js';
 import type { ConfidentialTokenClient, FetchLike } from './interfaces.js';
 import type { Logger } from './interfaces.js';
 import { RedactingLogger } from './logger.js';
@@ -160,8 +162,26 @@ export interface TeamsProductionConfig {
   readonly host: string;
 }
 
+/**
+ * True when this module is the process entrypoint.
+ *
+ * `realpath` matters: launched through the `qurl-teams` bin symlink
+ * (`node_modules/.bin/qurl-teams`, `npx qurl-teams`), `process.argv[1]` keeps
+ * the SYMLINK path while the ESM loader resolves `import.meta.url` to the
+ * realpath of `dist/server.js`. Comparing them raw returns false, nothing
+ * calls `listen()`, the event loop drains, and the process exits 0 with no
+ * output -- a container healthcheck sees a clean exit, not a crash loop.
+ */
 export function isMainModule(entrypoint: string | undefined, moduleUrl: string): boolean {
-  return entrypoint !== undefined && pathToFileURL(entrypoint).href === moduleUrl;
+  if (entrypoint === undefined) return false;
+  let resolved = entrypoint;
+  try {
+    resolved = realpathSync(entrypoint);
+  } catch {
+    // Entrypoint may not exist on disk (bundled/virtual). Fall back to the
+    // raw path rather than refusing to start.
+  }
+  return pathToFileURL(resolved).href === moduleUrl;
 }
 
 function env(name: string): string {
@@ -213,7 +233,13 @@ class TenantQurlClientFactory {
   constructor(data: TeamsDataStore, endpoint: string) { this.#data = data; this.#endpoint = endpoint; }
   async forTenant(tenantId: string): Promise<HttpQurlClient> {
     const credential = await this.#data.tenantCredential(tenantId);
-    if (!credential) throw new Error('Teams tenant is not connected to qURL');
+    // Deliberately per-activity: a ConsistentRead GetItem plus a KMS Decrypt on
+    // every command. No cache, so `uninstall` and credential rotation take
+    // effect on the very next message everywhere, with no invalidation path to
+    // get wrong. If the interactive latency or the KMS bill becomes the
+    // constraint, a short-TTL cache invalidated on saveTenantCredential and
+    // deleteWorkspace is the upgrade -- see qurl-integrations #1446.
+    if (!credential) throw new UserFacingError('This Teams tenant is not connected to qURL yet. Run `qurl setup <your-email>` in a personal chat with the bot.');
     return new HttpQurlClient({ endpoint: this.#endpoint, apiKey: credential.apiKey, userAgent: 'qurl-teams/1' });
   }
 }
@@ -242,7 +268,9 @@ export async function createProductionTeamsConfig(): Promise<TeamsProductionConf
     issuer: auth0Issuer,
     clientId: env('AUTH0_CLIENT_ID'),
     clientSecret: env('AUTH0_CLIENT_SECRET'),
-    ...(process.env.AUTH0_CLIENT_SECRET_FALLBACK ? { clientSecretFallback: process.env.AUTH0_CLIENT_SECRET_FALLBACK } : {}),
+    // Trimmed like every other config value: an all-whitespace parameter is
+    // not a usable rotation secret and must not read as "configured".
+    ...(optionalEnv('AUTH0_CLIENT_SECRET_FALLBACK') ? { clientSecretFallback: optionalEnv('AUTH0_CLIENT_SECRET_FALLBACK') } : {}),
     audience: env('AUTH0_AUDIENCE'),
     redirectUri: `${baseUrl}/oauth/qurl/callback`,
     fetch: fetch as FetchLike,

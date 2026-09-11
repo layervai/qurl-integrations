@@ -107,8 +107,10 @@ export class TeamsBot {
     // stable Entra object id. The delivery id remains available for Teams
     // replies and idempotency keys, but must not be used as the DDB identity.
     const actorId = (activity.from?.aadObjectId?.trim() ?? '').toLowerCase();
-    if (!tenantId) throw new Error('Teams tenant id is required');
-    if (!actorId) throw new Error('Teams actor AAD object id is required');
+    // Genuine faults, not user error -- but "check the command syntax" sends
+    // the user hunting for a typo they cannot fix. Name the real condition.
+    if (!tenantId) throw new UserFacingError('This activity did not carry a Teams tenant id, so qURL cannot scope the request. Please report this if it repeats.');
+    if (!actorId) throw new UserFacingError('This activity did not carry your Teams directory id, so qURL cannot identify you. Please report this if it repeats.');
     if (command.verb === 'setup') {
       if (!this.#options.setup || !command.email) throw new Error('Teams OAuth setup is not configured');
       const deliveryId = activity.from?.id?.trim() ?? '';

@@ -1,4 +1,8 @@
+import { mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import type { ServerResponse } from 'node:http';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { Readable } from 'node:stream';
 import type { Application, Request } from 'express';
 import express from 'express';
@@ -99,6 +103,27 @@ describe('Teams production URL configuration', () => {
   it('only treats the exact server module as the executable entrypoint', () => {
     expect(isMainModule('/srv/server.js', 'file:///srv/server.js')).toBe(true);
     expect(isMainModule('/srv/server.js', 'file:///srv/consumer.js')).toBe(false);
+  });
+
+  it('starts when launched through the bin symlink the package advertises', () => {
+    // package.json declares `bin: { "qurl-teams": "dist/server.js" }`. Launched
+    // that way, process.argv[1] is the symlink while import.meta.url is the
+    // realpath. Comparing raw made the process exit 0 doing nothing, which a
+    // container healthcheck reads as a clean exit rather than a crash loop.
+    const dir = mkdtempSync(join(tmpdir(), 'qurl-teams-bin-'));
+    const real = join(dir, 'server.js');
+    const link = join(dir, 'qurl-teams');
+    writeFileSync(real, '');
+    symlinkSync(real, link);
+    try {
+      expect(isMainModule(link, pathToFileURL(realpathSync(real)).href)).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('falls back to the raw path when the entrypoint is not on disk', () => {
+    expect(isMainModule('/virtual/server.js', 'file:///virtual/server.js')).toBe(true);
   });
 
   it('accepts HTTPS origins and preserves the OIDC issuer trailing slash', () => {
