@@ -5,11 +5,11 @@ import { describe, expect, it } from 'vitest';
 import { buildPackage, renderManifest } from '../manifest/build.mjs';
 
 const template = readFileSync(join(import.meta.dirname, '..', 'manifest', 'manifest.template.json'), 'utf8');
-const APP_ID = '11111111-2222-3333-4444-555555555555';
+const BOT_UUID = 'a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d';
 const DOMAIN = 'teams.connector.layerv.xyz';
 
 const render = (overrides: Record<string, string> = {}) =>
-  renderManifest(template, { env: 'sandbox', appId: APP_ID, domain: DOMAIN, ...overrides });
+  renderManifest(template, { env: 'sandbox', appId: BOT_UUID, domain: DOMAIN, ...overrides });
 
 describe('teams app manifest', () => {
   it('ships no real identifiers in the committed template', () => {
@@ -32,9 +32,9 @@ describe('teams app manifest', () => {
 
   it('substitutes every placeholder into a valid manifest', () => {
     const manifest = JSON.parse(render());
-    expect(manifest.id).toBe(APP_ID);
-    expect(manifest.bots[0].botId).toBe(APP_ID);
-    expect(manifest.webApplicationInfo.id).toBe(APP_ID);
+    expect(manifest.id).toBe(BOT_UUID);
+    expect(manifest.bots[0].botId).toBe(BOT_UUID);
+    expect(manifest.webApplicationInfo.id).toBe(BOT_UUID);
     expect(manifest.validDomains).toEqual([DOMAIN]);
     expect(render()).not.toMatch(/\$\{\w+\}/);
   });
@@ -72,8 +72,8 @@ describe('teams app manifest', () => {
   });
 
   it('builds a deterministic three-file package', () => {
-    const first = buildPackage({ env: 'sandbox', appId: APP_ID, domain: DOMAIN });
-    const second = buildPackage({ env: 'sandbox', appId: APP_ID, domain: DOMAIN });
+    const first = buildPackage({ env: 'sandbox', appId: BOT_UUID, domain: DOMAIN });
+    const second = buildPackage({ env: 'sandbox', appId: BOT_UUID, domain: DOMAIN });
     // Byte-identical rebuilds let the infra repo pin a package by digest.
     expect(first.equals(second)).toBe(true);
     const text = first.toString('latin1');
