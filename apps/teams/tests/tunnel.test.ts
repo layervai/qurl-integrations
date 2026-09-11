@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { normalizeTunnelEnvironment, renderTunnelConfigYAML, renderTunnelInstallMessage, validateTunnelHub, validateTunnelImageRef, validateTunnelSlug } from '../src/tunnel.js';
+import { normalizeTunnelEnvironment, renderTunnelBootstrapSecretMessage, renderTunnelConfigYAML, renderTunnelInstallMessage, validateTunnelHub, validateTunnelImageRef, validateTunnelSlug } from '../src/tunnel.js';
 
 const IMAGE = 'ghcr.io/layervai/qurl@sha256:d2f9bd33572ffb7212f5b6cfc3fcfa4267344a4a2c2cdd6ce9b7196e3515516b';
 
@@ -9,7 +9,6 @@ const base = {
   environment: 'docker' as const,
   port: 8080,
   image: IMAGE,
-  bootstrapKey: "key'with space",
   endpoint: 'https://api.layerv.xyz',
   ownerId: 'auth0|user123',
   crid: 'crid_abc123',
@@ -109,11 +108,28 @@ describe('connector tunnel rendering', () => {
   });
 
   it('never renders the one-time enrollment token into any install target', () => {
-    // The token is prompted for or placed in a secret store by the operator.
-    // Rendering it inline would put it in Teams message history.
+    // The token is prompted for or placed in a secret store by the operator,
+    // and delivered as its own message. Rendering it inline would put it in
+    // Teams history attached to instructions nobody needs to delete.
+    const token = 'lv_live_abc123';
     for (const environment of ['docker', 'compose', 'ecs-fargate', 'kubernetes'] as const) {
-      expect(renderTunnelInstallMessage({ ...base, environment })).not.toContain(base.bootstrapKey);
+      expect(renderTunnelInstallMessage({ ...base, environment })).not.toContain(token);
     }
+  });
+
+  it('delivers the enrollment token as its own message', () => {
+    const message = renderTunnelBootstrapSecretMessage('prod', 'lv_live_abc123');
+    expect(message).toContain('lv_live_abc123');
+    expect(message).toContain('expires in 15 minutes');
+    expect(message).toContain('sent separately');
+    // No install content here: this is the one message that carries a secret.
+    expect(message).not.toContain('docker run');
+  });
+
+  it('refuses to render an unusable or missing enrollment token', () => {
+    expect(() => renderTunnelBootstrapSecretMessage('prod', '')).toThrow('enrollment token is missing');
+    expect(() => renderTunnelBootstrapSecretMessage('prod', 'has space')).toThrow('not renderable');
+    expect(() => renderTunnelBootstrapSecretMessage('prod', 'line\nbreak')).toThrow('not renderable');
   });
 
   it('renders every deployment target with the daemon contract', () => {

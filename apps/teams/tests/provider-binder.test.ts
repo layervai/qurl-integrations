@@ -4,7 +4,7 @@ import type { TeamsDataStore } from '../src/teams-data.js';
 
 const request = {
   teamsTenantId: 'tenant', actorAadObjectId: 'actor', actorDeliveryId: 'delivery', setupMode: 'bind' as const,
-  providerSubject: 'subject', providerEmail: 'admin@example.com', accessToken: 'access-token',
+  providerSubject: 'subject', providerEmail: 'admin@example.com', accessToken: 'access-token', setupAttemptId: 'attempt-1',
 };
 
 function response(status: number, body = '{}'): Response {

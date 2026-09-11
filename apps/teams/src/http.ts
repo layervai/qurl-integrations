@@ -43,7 +43,7 @@ export async function readBoundedBytes(
 export async function readBoundedBody(
   response: Response,
   limitBytes: number,
-  tooLargeCode: 'TOKEN_RESPONSE_TOO_LARGE' | 'JWKS_RESPONSE_TOO_LARGE',
+  tooLargeCode: 'TOKEN_RESPONSE_TOO_LARGE' | 'JWKS_RESPONSE_TOO_LARGE' | 'BINDING_RESPONSE_TOO_LARGE',
 ): Promise<Uint8Array> {
   return readBoundedBytes(response, limitBytes, {
     invalidLimit: () => new OAuthCoreError('INVALID_INPUT', 'Response body limit is invalid.'),

@@ -66,6 +66,9 @@ export class OAuthCallbackCore {
         providerSubject: identity.subject,
         providerEmail: identity.email,
         accessToken: tokens.accessToken,
+        // One setup attempt = one binding identity. Retries inside this
+        // attempt coalesce; a later reinstall does not replay this one.
+        setupAttemptId: `${transaction.expiresAtEpochSeconds}:${transaction.oidcNonce}`,
       });
       return {
         teamsTenantId: transaction.teamsTenantId,

@@ -9,7 +9,7 @@ import { parseCommand } from './parser.js';
 import type { TeamsCommand } from './parser.js';
 import { ScopeAliasConflictError, TenantOwnerAlreadyAdminError, TenantOwnerRemovalError, type TeamsDataStore } from './teams-data.js';
 import type { TeamsSetupLinkBuilder } from './setup-link.js';
-import { normalizeTunnelEnvironment, renderTunnelInstallMessage, validateTunnelSlug, type TunnelHub } from './tunnel.js';
+import { normalizeTunnelEnvironment, renderTunnelBootstrapSecretMessage, renderTunnelInstallMessage, validateTunnelSlug, type TunnelHub } from './tunnel.js';
 import { isUserFacingError, UserFacingError } from './user-facing-error.js';
 import type { Logger } from './interfaces.js';
 
@@ -114,7 +114,15 @@ export class TeamsBot {
       const deliveryId = activity.from?.id?.trim() ?? '';
       if (!deliveryId) throw new Error('Teams actor delivery id is required');
       const link = await this.#options.setup.build(tenantId, actorId, deliveryId, command.email, command.setupMode ?? 'bind');
-      return `Open this qURL setup link in your browser:\n${link.url.toString()}`;
+      // The setup URL carries the opaque one-shot state handle, which the rest
+      // of this flow treats as secret (httpOnly/Secure/SameSite cookie,
+      // five-minute TTL, constant-time compare). Replying in place would post
+      // it into persistent channel history -- readable by every member and by
+      // any export/eDiscovery path -- so it goes to the personal chat only.
+      const ref = await this.#options.data.personalConversationRef(tenantId, actorId);
+      if (!ref) throw new UserFacingError('Open a personal chat with the bot, then run `qurl setup` again. The setup link is a one-time secret and is never posted in a channel.');
+      await this.#options.messages.sendText(ref.serviceUrl, ref.conversationId, `Open this qURL setup link in your browser:\n${link.url.toString()}`);
+      return 'Sent your one-time qURL setup link to our personal chat. It is not posted here because it is a one-time secret.';
     }
     if (command.verb === 'feedback') {
       // The production runtime does not wire a feedback handler, so the verb is
@@ -378,13 +386,19 @@ export class TeamsBot {
       ...(this.#options.connectorHub ? { hub: this.#options.connectorHub } : {}),
     };
     // Render before minting so a bad contract fails without creating a secret.
-    renderTunnelInstallMessage({ ...installArgs, bootstrapKey: 'preflight' });
+    const installText = renderTunnelInstallMessage(installArgs);
     let token: QurlApiKey | undefined;
     let delivered = false;
     try {
       token = await qurl.createEnrollmentToken(slug, idempotencyKey(...operationKey, 'enrollment'), signal);
-      const installText = renderTunnelInstallMessage({ ...installArgs, bootstrapKey: token.apiKey });
-      await this.#options.messages.sendText(ref.serviceUrl, ref.conversationId, `Connector \`${slug}\` bootstrap instructions:\n${installText}`, signal);
+      // Two messages, both to the personal chat: the install block, then the
+      // one-time token on its own. The install block never contains the token
+      // (it prompts for it), so only the second message carries a secret and
+      // only it has to be deleted afterwards. Secret last, so a delivery
+      // failure cannot leave the token sitting in chat without instructions.
+      const secretText = renderTunnelBootstrapSecretMessage(slug, token.apiKey);
+      await this.#options.messages.sendText(ref.serviceUrl, ref.conversationId, `Connector \`${slug}\` install instructions:\n${installText}`, signal);
+      await this.#options.messages.sendText(ref.serviceUrl, ref.conversationId, secretText, signal);
       delivered = true;
     } catch (error) {
       if (token) {

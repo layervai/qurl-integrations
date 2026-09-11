@@ -65,7 +65,7 @@ export class HttpProviderBinder implements ProviderBinder {
           Accept: 'application/json',
           'Content-Type': 'application/json',
           Authorization: `Bearer ${request.accessToken}`,
-          'Idempotency-Key': `teams-tenant-binding-v1-${sha256Hex(request.teamsTenantId)}`,
+          'Idempotency-Key': `teams-tenant-binding-v1-${sha256Hex(`${request.teamsTenantId}|${request.setupAttemptId}`)}`,
         },
         body: JSON.stringify({ provider: 'teams', external_id: request.teamsTenantId, display_name: `Teams tenant ${request.teamsTenantId}` }),
         redirect: 'error',
@@ -77,7 +77,7 @@ export class HttpProviderBinder implements ProviderBinder {
     }
     let body: Uint8Array;
     try {
-      body = await readBoundedBody(response, BODY_LIMIT, 'TOKEN_RESPONSE_TOO_LARGE');
+      body = await readBoundedBody(response, BODY_LIMIT, 'BINDING_RESPONSE_TOO_LARGE');
     } catch (error) {
       if (controller.signal.aborted) throw new Error('qURL tenant binding request timed out or was cancelled', { cause: error });
       throw error;

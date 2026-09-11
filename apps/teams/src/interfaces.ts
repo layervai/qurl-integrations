@@ -127,6 +127,14 @@ export interface ProviderBindingRequest {
   readonly providerEmail: string;
   /** Ephemeral bearer credential. Implementations must not retain or log it. */
   readonly accessToken: string;
+  /**
+   * Scopes the binding's idempotency key to one setup attempt. Keying only on
+   * the tenant id would make the key identical forever, so a reinstall after
+   * `uninstall` (which revokes the API key) would replay the original request
+   * and could return the cached -- now revoked -- credential, leaving the
+   * tenant "connected" with a dead key and no error anywhere.
+   */
+  readonly setupAttemptId: string;
 }
 
 export type ProviderBindingConflictReason =

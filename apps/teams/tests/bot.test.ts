@@ -299,7 +299,7 @@ describe('Teams bot primitives', () => {
 
   it('renders ECS and Kubernetes connector instructions', () => {
     const base = {
-      slug: 'prod', alias: 'prod', port: 8080, image: 'ghcr.io/layervai/qurl@sha256:d2f9bd33572ffb7212f5b6cfc3fcfa4267344a4a2c2cdd6ce9b7196e3515516b', bootstrapKey: 'key',
+      slug: 'prod', alias: 'prod', port: 8080, image: 'ghcr.io/layervai/qurl@sha256:d2f9bd33572ffb7212f5b6cfc3fcfa4267344a4a2c2cdd6ce9b7196e3515516b',
       endpoint: 'https://api.layerv.xyz', ownerId: 'auth0|owner', crid: 'crid-1',
       resourceId: 'res-1', connectorRoutingId: 'routing-1', knockResourceId: 'knock-1', servingEpoch: 4,
     };
@@ -645,6 +645,46 @@ describe('Teams bot primitives', () => {
       { type: 'message', id: 'activity-1', from: { id: 'delivery', aadObjectId: 'actor' } },
       'tenant-1', 'channel-1', true, parseCommand('protect-connector prod'),
     )).rejects.toThrow('cannot provision a connector');
+  });
+
+  it('sends the setup link to the personal chat, never into channel history', async () => {
+    const sent: { readonly conversationId: string; readonly text: string }[] = [];
+    const bot = new TeamsBot({
+      qurl: {} as QurlClient,
+      data: {
+        checkAdmin: async () => ({ isAdmin: true }),
+        personalConversationRef: async () => ({ serviceUrl: 'https://smba.trafficmanager.net/teams', conversationId: 'personal' }),
+      } as unknown as TeamsDataStore,
+      messages: { sendText: async (_u: string, conversationId: string, text: string) => { sent.push({ conversationId, text }); } } as never,
+      setup: { build: async () => ({ url: new URL('https://teams.connector.layerv.xyz/oauth/qurl/start?state=SECRET-HANDLE') }) } as never,
+      qurlEndpoint: 'https://api.layerv.xyz',
+    });
+    const reply = await bot.execute(
+      { type: 'message', id: 'activity-1', from: { id: 'delivery', aadObjectId: 'actor' } },
+      'tenant-1', 'channel-1', true, parseCommand('setup alice@example.com'),
+    );
+    // The channel reply must not carry the one-shot state handle.
+    expect(reply).not.toContain('SECRET-HANDLE');
+    expect(sent).toHaveLength(1);
+    expect(sent[0]?.conversationId).toBe('personal');
+    expect(sent[0]?.text).toContain('SECRET-HANDLE');
+  });
+
+  it('refuses setup when there is no personal chat to send the link to', async () => {
+    const bot = new TeamsBot({
+      qurl: {} as QurlClient,
+      data: {
+        checkAdmin: async () => ({ isAdmin: true }),
+        personalConversationRef: async () => undefined,
+      } as unknown as TeamsDataStore,
+      messages: { sendText: async () => { throw new Error('must not send'); } } as never,
+      setup: { build: async () => ({ url: new URL('https://teams.connector.layerv.xyz/oauth/qurl/start?state=SECRET-HANDLE') }) } as never,
+      qurlEndpoint: 'https://api.layerv.xyz',
+    });
+    await expect(bot.execute(
+      { type: 'message', id: 'activity-1', from: { id: 'delivery', aadObjectId: 'actor' } },
+      'tenant-1', 'channel-1', true, parseCommand('setup alice@example.com'),
+    )).rejects.toThrow('Open a personal chat');
   });
 
   it('does not fetch the resource catalog twice for protect-connector', async () => {

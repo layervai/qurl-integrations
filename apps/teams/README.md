@@ -29,6 +29,24 @@ a cryptographic claim cross-check until the upstream SDK exposes that claim.
 Do not add a route that invokes the bot directly with caller-supplied Activity
 objects; doing so would violate this tenant-isolation trust boundary.
 
+### Setup-link handling and the forged-start residual
+
+The setup URL carries the opaque one-shot state handle, so `qurl setup` replies
+in the originating conversation with a confirmation only and sends the link
+itself to the requester's personal chat. Never change that to an in-place reply:
+in a shared channel it would put a bearer capability into persistent history and
+into every channel-export path.
+
+`/oauth/qurl/start` necessarily accepts a `state` handle from anyone and issues
+the double-submit cookie itself, so the cookie cannot defend against a *forged
+start*. Residual risk: an attacker with their own Teams tenant mints a setup
+link for a victim's email and gets the victim to open it; if the victim has a
+live Auth0 session for that address and clicks through consent, the attacker's
+tenant binds to the victim's qURL account. The chain requires a deliberate
+consent click, so it is not a drive-by, but it is not fully closed either.
+Closing it needs an interstitial on `/oauth/qurl/start` naming the Teams tenant
+and target email before redirecting — tracked as follow-up, not shipped here.
+
 The Bot supports setup, resource listing/get, URL and connector protection,
 aliases, display names, admin membership, uninstall, feedback, and private
 Teams delivery. Policies and principals are stored as normalized rows matching
