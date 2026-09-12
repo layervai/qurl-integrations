@@ -204,7 +204,7 @@ func (s *Store) BeginConfiguredConnectorResource(ctx context.Context, configured
 
 func (s *Store) beginConnectorResource(ctx context.Context, connectorID string, configured *ConnectorResourceBinding) (_ *ConnectorResourceTransaction, retErr error) {
 	if s == nil {
-		return nil, fmt.Errorf("%w: Connector state store is not open", qurl.ErrAgentStateContinuity)
+		return nil, errStoreNotOpen
 	}
 	if err := validateConnectorID(connectorID); err != nil {
 		return nil, err
@@ -359,7 +359,7 @@ func (s *connectorResourcesState) preparePendingConnectorResource(connectorID st
 // That intent survives dispatch failures so retries can finish the saved request.
 func (s *Store) PrepareConnectorResourceReuse(ctx context.Context, connectorID string) (retErr error) {
 	if s == nil {
-		return fmt.Errorf("%w: Connector state store is not open", qurl.ErrAgentStateContinuity)
+		return errStoreNotOpen
 	}
 	if err := validateConnectorID(connectorID); err != nil {
 		return err
@@ -413,7 +413,7 @@ func (s *Store) PrepareConnectorResourceReuse(ctx context.Context, connectorID s
 // for one exact Connector ID. It never searches by a remote-supplied alias.
 func (s *Store) ConnectorResourceBinding(ctx context.Context, connectorID string) (_ ConnectorResourceBinding, retired, found bool, retErr error) {
 	if s == nil {
-		return ConnectorResourceBinding{}, false, false, fmt.Errorf("%w: Connector state store is not open", qurl.ErrAgentStateContinuity)
+		return ConnectorResourceBinding{}, false, false, errStoreNotOpen
 	}
 	if err := validateConnectorID(connectorID); err != nil {
 		return ConnectorResourceBinding{}, false, false, err
@@ -453,7 +453,7 @@ func (s *Store) ConnectorResourceBinding(ctx context.Context, connectorID string
 // the same step (see pruneRetired).
 func (s *Store) ResolveDefaultConnectorID(ctx context.Context, root string) (id string, advanced int, retErr error) {
 	if s == nil {
-		return "", 0, fmt.Errorf("%w: Connector state store is not open", qurl.ErrAgentStateContinuity)
+		return "", 0, errStoreNotOpen
 	}
 	if err := validateConnectorID(root); err != nil {
 		return "", 0, err
@@ -493,7 +493,7 @@ func (s *Store) ResolveDefaultConnectorID(ctx context.Context, root string) (id 
 // the links of chains that still end in a live share (see pruneRetired).
 func (s *Store) RetireConnectorResource(ctx context.Context, id string) (retired bool, retErr error) {
 	if s == nil {
-		return false, fmt.Errorf("%w: Connector state store is not open", qurl.ErrAgentStateContinuity)
+		return false, errStoreNotOpen
 	}
 	id = strings.TrimSpace(id)
 	if id == "" {
