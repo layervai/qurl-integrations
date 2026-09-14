@@ -15,7 +15,7 @@
   },
   "description": {
     "short": "Protect internal URLs and Connectors, and share them as expiring qURL links.",
-    "full": "qURL makes infrastructure invisible by default. Protect an internal URL or a qURL Connector from Teams, grant a channel access to it, and mint time-limited links that only open network access for the person who redeems them. Administration, aliases, and revocation all happen in Teams; setup links and enrollment tokens are delivered in a personal chat. Resource links are posted in the channel unless you request private delivery."
+    "full": "qURL™ makes infrastructure invisible by default. Protect an internal URL or a qURL Connector from Teams, grant a channel access to it, and mint time-limited links that grant network access only to the person who redeems them. Administration, aliases, and revocation all happen in Teams; setup links and enrollment tokens are delivered in a personal chat. Resource links are posted in the channel unless you request private delivery."
   },
   "icons": {
     "color": "color.png",

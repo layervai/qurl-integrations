@@ -315,8 +315,8 @@ export async function createProductionTeamsConfig(): Promise<TeamsProductionConf
       const timeout = setTimeout(() => controller.abort(), ACTIVITY_TIMEOUT_MS);
       // TODO(upstream-contract): Teams retries activities held past 15 seconds.
       // Acknowledge after SDK authentication, then complete in this service.
-      // The existing message adapter preserves the conversation/thread and
-      // applies its HTTP timeout and this signal to replies as well as DMs.
+      // The message adapter preserves the conversation/thread. Final replies
+      // use its own HTTP timeout independently of this work signal.
       void bot.handleActivity(normalized, controller.signal)
         .catch(error => { logger.error('Teams activity handling failed', { error }); })
         .finally(() => { clearTimeout(timeout); });

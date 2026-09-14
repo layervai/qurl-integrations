@@ -271,10 +271,12 @@ describe('Teams production message handling', () => {
     expect(runtime.app.credentials?.tenantId).toBe('abcdefab-1234-4234-8234-abcdefabcdef');
   });
 
-  it('acknowledges a slow command before completion and cancels its real reply at the activity deadline', async () => {
+  it('acknowledges a slow command before completion and gives its real reply an independent HTTP deadline', async () => {
     configureEnvironment();
     vi.useFakeTimers();
-    vi.spyOn(TeamsBot.prototype, 'execute').mockImplementation(async () => {
+    let workSignal: AbortSignal | undefined;
+    vi.spyOn(TeamsBot.prototype, 'execute').mockImplementation(async (_activity, _tenantId, _scopeId, _channel, _command, signal) => {
+      workSignal = signal;
       await new Promise(resolve => setTimeout(resolve, 20_000));
       return 'qURL result';
     });
@@ -287,14 +289,14 @@ describe('Teams production message handling', () => {
     };
     client.token = async () => undefined;
     let sent: { readonly url: string; readonly body: Record<string, unknown>; readonly timeout: number; readonly signal?: AbortSignal } | undefined;
-    let cancelled = false;
+    let timedOut = false;
     client.http.defaults.adapter = async config => {
       sent = { url: config.url, body: JSON.parse(config.data) as Record<string, unknown>, timeout: config.timeout, ...(config.signal ? { signal: config.signal } : {}) };
       return new Promise((_resolve, reject) => {
-        config.signal?.addEventListener('abort', () => {
-          cancelled = true;
-          reject(new Error('synthetic cancelled delivery'));
-        }, { once: true });
+        setTimeout(() => {
+          timedOut = true;
+          reject(new Error('synthetic delivery timeout'));
+        }, config.timeout);
       });
     };
     // handleActivity logs a failed send; keep that expected test error local.
@@ -311,9 +313,12 @@ describe('Teams production message handling', () => {
       url: 'https://smba.trafficmanager.net/amer/v3/conversations/19%3Achannel%3Bmessageid%3Dactivity-1/activities',
       body: { type: 'message', text: 'qURL result', replyToId: 'activity-1' }, timeout: 15_000,
     });
-    expect(sent?.signal?.aborted).toBe(false);
+    expect(sent?.signal).toBeUndefined();
+    expect(workSignal?.aborted).toBe(false);
     await vi.advanceTimersByTimeAsync(10_000);
-    expect(sent?.signal?.aborted).toBe(true);
-    expect(cancelled).toBe(true);
+    expect(workSignal?.aborted).toBe(true);
+    expect(timedOut).toBe(false);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(timedOut).toBe(true);
   });
 });

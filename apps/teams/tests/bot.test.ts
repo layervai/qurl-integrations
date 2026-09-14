@@ -3,6 +3,7 @@ import { deriveScope, normalizeActivityText, toTeamsActivity } from '../src/acti
 import { TeamsBot } from '../src/bot.js';
 import { parseCommand, tokenize } from '../src/parser.js';
 import { QurlHttpError } from '../src/qurl-client.js';
+import { TeamsSdkMessagePoster } from '../src/teams-sdk.js';
 import type { QurlClient } from '../src/qurl-client.js';
 import type { TeamsDataStore } from '../src/teams-data.js';
 import { TenantOwnerAlreadyAdminError, TenantOwnerRemovalError } from '../src/teams-data.js';
@@ -171,6 +172,39 @@ describe('Teams bot primitives', () => {
       conversation: { id: 'conversation', conversationType: 'channel' },
     }, undefined, async text => { replies.push(text); });
     expect(replies).toEqual(['The qURL command could not be completed. Check the command syntax and try again.']);
+  });
+
+  it.each(['during execution', 'before final reply', 'during final reply'])('delivers a bounded final response when the activity expires %s', async phase => {
+    const controller = new AbortController();
+    const delivered: string[] = [];
+    const messages = new TeamsSdkMessagePoster({ api: { http: {
+      post: async (_url: string, body: { readonly text: string }, options: { readonly timeout: number; readonly signal?: AbortSignal }) => {
+        if (phase === 'during final reply') controller.abort();
+        options.signal?.throwIfAborted();
+        expect(options.timeout).toBe(15_000);
+        delivered.push(body.text);
+        return { data: {} };
+      },
+    } } } as never);
+    const bot = new TeamsBot({
+      qurl: { create: async () => {
+        if (phase !== 'during final reply') controller.abort();
+        if (phase === 'during execution') controller.signal.throwIfAborted();
+        return { resourceId: 'resource-1', qurlLink: 'https://qurl.example/one' };
+      } } as unknown as QurlClient,
+      data: { lookupScopeAlias: async () => 'resource-1', allowedResourceIds: async () => new Set(['resource-1']) } as unknown as TeamsDataStore,
+      messages,
+      qurlEndpoint: 'https://qurl.example',
+    });
+    await bot.handleActivity({
+      type: 'message', text: 'get $docs', from: { aadObjectId: 'actor' },
+      serviceUrl: 'https://smba.trafficmanager.net/teams',
+      channelData: { tenant: { id: 'tenant' }, channel: { id: 'channel' } },
+      conversation: { id: 'conversation', conversationType: 'channel' },
+    }, controller.signal);
+    expect(delivered).toEqual([phase === 'during execution'
+      ? 'The qURL command timed out. Some changes may have completed; check the result before retrying.'
+      : 'qURL for `$docs`: https://qurl.example/one']);
   });
 
   it('refuses to bind a channel alias the alias commands could never parse back', async () => {
@@ -963,18 +997,24 @@ describe('Teams bot primitives', () => {
     expect(replies[0]).toContain('qURL for Teams');
   });
 
-  it('contains final delivery failures instead of rejecting the activity handler', async () => {
+  it('contains an ambiguous final delivery failure without retrying', async () => {
     const errors: string[] = [];
+    let attempts = 0;
+    const messages = new TeamsSdkMessagePoster({ api: { http: {
+      post: async () => { attempts += 1; throw new Error('connection reset'); },
+    } } } as never);
     const bot = new TeamsBot({
       qurl: {} as QurlClient,
       data: {} as TeamsDataStore,
-      messages: { reply: async () => { throw new TypeError('Invalid URL'); } } as never,
+      messages,
       qurlEndpoint: 'https://api.sandbox.example',
       logger: { debug: () => undefined, info: () => undefined, warn: () => undefined, error: message => { errors.push(message); } },
     });
     await expect(bot.handleActivity({
       type: 'message', text: 'help', from: { aadObjectId: 'actor' },
+      serviceUrl: 'https://smba.trafficmanager.net/teams', conversation: { id: 'conversation', conversationType: 'channel' },
     })).resolves.toBeUndefined();
+    expect(attempts).toBe(1);
     expect(errors).toEqual(['Teams message delivery failed']);
   });
 

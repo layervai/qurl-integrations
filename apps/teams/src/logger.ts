@@ -1,3 +1,4 @@
+import { createPublicKey } from 'node:crypto';
 import type { LogContext, Logger } from './interfaces.js';
 
 const REDACTED = '[REDACTED]';
@@ -37,6 +38,17 @@ function isSensitiveKey(key: string): boolean {
     || normalized.includes('verifier');
 }
 
+function isPublicResourceId(value: unknown): value is string {
+  if (typeof value !== 'string' || value.length < 107 || value.length > 214) return false;
+  try {
+    // TODO(upstream-contract): qurl-service resource_key.go accepts canonical
+    // DER SPKI ECDSA P-256 public keys. Opaque token shape alone is not enough.
+    const key = createPublicKey({ key: Buffer.from(value, 'base64url'), format: 'der', type: 'spki' });
+    return key.asymmetricKeyType === 'ec' && key.asymmetricKeyDetails?.namedCurve === 'prime256v1'
+      && key.export({ format: 'der', type: 'spki' }).toString('base64url') === value;
+  } catch { return false; }
+}
+
 function redactValue(value: unknown, protectedValues: readonly string[], seen: WeakSet<object>): unknown {
   if (typeof value === 'string') {
     return redactText(value, protectedValues);
@@ -67,7 +79,9 @@ function redactValue(value: unknown, protectedValues: readonly string[], seen: W
       for (const [key, nested] of Object.entries(value)) {
         output[key] = isSensitiveKey(key)
           ? REDACTED
-          : redactValue(nested, protectedValues, seen);
+          : key === 'resourceId' && isPublicResourceId(nested)
+            && !protectedValues.some(secret => secret.length > 0 && nested.includes(secret))
+            ? nested : redactValue(nested, protectedValues, seen);
       }
       return output;
     } finally {

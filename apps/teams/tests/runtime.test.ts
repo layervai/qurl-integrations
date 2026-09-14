@@ -54,6 +54,12 @@ describe('Teams runtime adapters', () => {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: 'x'.repeat(1_048_576) }),
       });
       expect(oversized.status).toBe(413);
+      expect(await oversized.text()).not.toMatch(/PayloadTooLargeError|node_modules/);
+      const malformed = await fetch(`${origin}/api/messages`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{',
+      });
+      expect(malformed.status).toBe(400);
+      expect(await malformed.text()).not.toMatch(/SyntaxError|node_modules/);
     } finally {
       server.closeAllConnections();
       await new Promise<void>((resolve, reject) => { server.close(error => { if (error) reject(error); else resolve(); }); });

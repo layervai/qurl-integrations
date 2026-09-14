@@ -209,8 +209,8 @@ and [Teams CLI registration options](https://microsoft.github.io/teams-sdk/cli/c
 Authenticated message activities are acknowledged before command completion,
 so a slow qURL request or reply does not hold Teams' 15-second retry window
 open. The 30-second activity signal also cancels DynamoDB queries and deletes
-in uninstall and revoke cleanup. Replies use the SDK-backed adapter's
-15-second HTTP timeout and activity signal while
+in uninstall and revoke cleanup. Final replies use the SDK-backed adapter's
+15-second HTTP timeout independently of that activity signal while
 preserving the inbound service URL, conversation ID, and reply ID.
 [Teams retry behavior](https://learn.microsoft.com/en-us/microsoftteams/platform/bots/bot-concepts).
 
@@ -223,6 +223,10 @@ preserving the inbound service URL, conversation ID, and reply ID.
 - The activity budget is cooperative. Other DynamoDB operations, credential
   KMS decryption, and the SDK's MSAL token acquisition do not receive that
   activity signal, so it is not a hard deadline for the whole command.
+- Personal chat messages update one conversation reference per tenant/actor
+  before binding. These rows have no TTL, and never-bound tenants cannot use
+  normal owner-authorized uninstall cleanup. Choose a retention/deletion policy
+  before activation.
 - The OAuth routes (`/oauth/qurl/start`, `/oauth/qurl/callback`) carry no
   application-level rate limit. They are unauthenticated public entrypoints and
   each request performs one DynamoDB operation, so the ingress in front of this

@@ -1,8 +1,32 @@
 import { describe, expect, it } from 'vitest';
+import { generateKeyPairSync } from 'node:crypto';
 import type { LogContext, Logger } from '../src/interfaces.js';
 import { jsonConsoleSink, RedactingLogger } from '../src/logger.js';
 
 describe('RedactingLogger', () => {
+  it('preserves only canonical public resource IDs in structured recovery context', () => {
+    const keyPair = generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
+    const resourceId = keyPair.publicKey.export({ format: 'der', type: 'spki' }).toString('base64url');
+    const lines: string[] = [];
+    const target = { debug: () => {}, info: () => {}, error: () => {}, warn: (line: string) => lines.push(line) };
+    const logger = new RedactingLogger(jsonConsoleSink(target));
+    logger.warn('Connector sharing rollback requires operator cleanup', { resourceId, otherValue: resourceId });
+    expect(JSON.parse(lines[0] ?? '{}')).toMatchObject({ resourceId, otherValue: '[REDACTED]' });
+
+    const opaqueSecret = 'S'.repeat(resourceId.length);
+    const privateKey = keyPair.privateKey.export({ format: 'der', type: 'pkcs8' }).toString('base64url');
+    for (const value of [opaqueSecret, privateKey, `${resourceId}=`]) {
+      logger.warn('cleanup failed', { resourceId: value });
+      expect(lines.at(-1)).toContain('[REDACTED]');
+      expect(lines.at(-1)).not.toContain(value);
+    }
+    logger.warn('cleanup failed', { keyId: opaqueSecret, bindingId: opaqueSecret, crid: opaqueSecret });
+    expect(JSON.parse(lines.at(-1) ?? '{}')).toMatchObject({ keyId: '[REDACTED]', bindingId: '[REDACTED]', crid: '[REDACTED]' });
+
+    new RedactingLogger(jsonConsoleSink(target), [resourceId]).warn('cleanup failed', { resourceId });
+    expect(JSON.parse(lines.at(-1) ?? '{}').resourceId).toBe('[REDACTED]');
+  });
+
   it('redacts secrets, OAuth values, nested errors, and opaque handles', () => {
     const entries: Array<{ message: string; context?: LogContext }> = [];
     const sink: Logger = {

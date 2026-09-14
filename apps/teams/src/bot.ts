@@ -87,13 +87,17 @@ export class TeamsBot {
       if (isUserFacingError(error)) response = error.message;
       else {
         this.#options.logger?.error('Teams command failed', { error });
-        response = 'The qURL command could not be completed. Check the command syntax and try again.';
+        response = signal?.aborted
+          ? 'The qURL command timed out. Some changes may have completed; check the result before retrying.'
+          : 'The qURL command could not be completed. Check the command syntax and try again.';
       }
     }
     if (response) {
       try {
         if (reply) await reply(response);
-        else await this.#options.messages.reply(activity, response, signal);
+        // Final delivery has the adapter's own HTTP deadline, as Slack's
+        // follow-up does. An expired work signal must not suppress the result.
+        else await this.#options.messages.reply(activity, response);
       } catch (error) {
         // Delivery is outside command execution: a malformed activity (for
         // example, one without serviceUrl or conversation.id) must not turn
