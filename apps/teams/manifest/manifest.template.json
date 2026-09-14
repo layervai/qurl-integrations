@@ -1,7 +1,7 @@
 {
   "$schema": "https://developer.microsoft.com/en-us/json-schemas/teams/v1.28/MicrosoftTeams.schema.json",
   "manifestVersion": "1.28",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "id": "${BOT_APP_ID}",
   "developer": {
     "name": "LayerV",
@@ -44,7 +44,7 @@
             { "title": "setup", "description": "Connect this Teams tenant to a qURL account: setup <email>" },
             { "title": "list", "description": "List the resources visible in this channel" },
             { "title": "aliases", "description": "List the channel aliases bound here" },
-            { "title": "get", "description": "Mint a qURL: get $<id|alias> [dm:true]" },
+            { "title": "get", "description": "Mint a qURL: get $<crid|alias> [dm:true]" },
             { "title": "protect-url", "description": "Protect a URL: protect-url url:https://internal.example.com as:$docs" },
             { "title": "protect-connector", "description": "Protect a Connector and send install instructions privately" },
             { "title": "set-alias", "description": "Point a channel alias at a resource" },

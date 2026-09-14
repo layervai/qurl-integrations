@@ -36,6 +36,7 @@ export interface QurlIdentity { readonly ownerId: string; readonly authType: str
 export interface QurlSharingState { readonly crid: string; readonly desiredState: string; readonly servingEpoch: number; }
 export interface QurlClient {
   listResources(signal?: AbortSignal, cursor?: string): Promise<QurlPage>;
+  getResource(resourceId: string, signal?: AbortSignal): Promise<QurlResource>;
   create(input: QurlCreateInput, signal?: AbortSignal): Promise<QurlCreateOutput>;
   createResource(input: { readonly targetUrl?: string; readonly type: string; readonly slug?: string; readonly findOrCreate?: boolean; readonly idempotencyKey?: string }, signal?: AbortSignal): Promise<QurlResource>;
   updateResource(resourceId: string, description: string, signal?: AbortSignal): Promise<void>;
@@ -53,7 +54,7 @@ const QURL_RESPONSE_LIMIT_BYTES = 1_048_576;
 type JsonObject = Record<string, unknown>;
 
 export class QurlHttpError extends Error {
-  constructor(readonly status: number) {
+  constructor(readonly status: number, readonly code?: string, readonly retryAfterSeconds?: number) {
     super(`qURL request failed (${status})`);
     this.name = 'QurlHttpError';
   }
@@ -132,6 +133,15 @@ export class HttpQurlClient implements QurlClient {
   async listResources(signal?: AbortSignal, cursor?: string): Promise<QurlPage> {
     const url = new URL('v1/resources', this.#endpoint); if (cursor) url.searchParams.set('cursor', cursor);
     return pageFromWire(await this.#request(url, signal ? { signal } : {}));
+  }
+  async getResource(resourceId: string, signal?: AbortSignal): Promise<QurlResource> {
+    const data = responseData(await this.#request(new URL(`v1/resources/${encodeURIComponent(resourceId)}`, this.#endpoint), signal ? { signal } : {}), 'qURL resource');
+    const resource = resourceFromWire(data.resource);
+    // The service verifies the CRID-to-key binding even when a backfill row
+    // has no crid attribute. Present CRIDs and public-key lookups still match.
+    const backfillLookup = !Object.hasOwn(data.resource as object, 'crid') && /^([a-z2-7]{47}|[a-z2-7]{60})$/.test(resourceId);
+    if (resource.resourceId !== resourceId && resource.crid !== resourceId && !backfillLookup) throw new Error('qURL resource identity does not match the request');
+    return resource;
   }
   async create(input: QurlCreateInput, signal?: AbortSignal): Promise<QurlCreateOutput> {
     if (input.resourceId && input.targetUrl) throw new Error('qURL create target and resource are mutually exclusive');
@@ -220,7 +230,21 @@ export class HttpQurlClient implements QurlClient {
         invalidLimit: () => new Error('qURL response body limit is invalid'),
         tooLarge: () => new Error('qURL response exceeded the configured size limit'),
       }), () => new Error('qURL response is invalid UTF-8'));
-      if (!response.ok && !(options.ignoreNotFound && response.status === 404)) throw new QurlHttpError(response.status); if (!text) return undefined;
+      if (!response.ok && !(options.ignoreNotFound && response.status === 404)) {
+        let code: string | undefined;
+        try {
+          const body = JSON.parse(text) as { readonly error?: { readonly code?: unknown } } | null;
+          const candidate = body?.error?.code;
+          // Same bounded identifier grammar as OAuth errors; never retain
+          // upstream title/detail/body text in a thrown or logged error.
+          if (typeof candidate === 'string' && /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(candidate)) code = candidate;
+        } catch { /* A non-JSON error still has a useful HTTP status. */ }
+        const retryHeader = response.headers.get('Retry-After') ?? '';
+        const retrySeconds = /^\d+$/.test(retryHeader) ? Number(retryHeader) : 0;
+        const retryAfterSeconds = response.status === 429 && Number.isSafeInteger(retrySeconds) && retrySeconds > 0 ? retrySeconds : undefined;
+        throw new QurlHttpError(response.status, code, retryAfterSeconds);
+      }
+      if (!text) return undefined;
       try { return JSON.parse(text) as unknown; } catch { throw new Error('qURL response is invalid JSON'); }
     } catch (error) {
       if (controller.signal.aborted) throw new Error('qURL request timed out or was cancelled', { cause: error });

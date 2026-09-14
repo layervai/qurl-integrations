@@ -4,7 +4,7 @@ import type { LogContext, Logger } from '../src/interfaces.js';
 import { jsonConsoleSink, RedactingLogger } from '../src/logger.js';
 
 describe('RedactingLogger', () => {
-  it('preserves only canonical public resource IDs in structured recovery context', () => {
+  it('preserves only canonical public keys in structured recovery context', () => {
     const keyPair = generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
     const resourceId = keyPair.publicKey.export({ format: 'der', type: 'spki' }).toString('base64url');
     const lines: string[] = [];

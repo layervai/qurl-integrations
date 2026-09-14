@@ -243,7 +243,7 @@ describe('Teams production message handling', () => {
       AUTH0_DOMAIN: 'https://auth.example.com', AUTH0_CLIENT_ID: 'synthetic-oauth-client',
       AUTH0_CLIENT_SECRET: 'synthetic-oauth-secret', AUTH0_AUDIENCE: 'https://qurl.example.com',
       QURL_CONNECTOR_HUB_HOST: '', QURL_CONNECTOR_HUB_PORT: '', QURL_CONNECTOR_HUB_SERVER_PUBLIC_KEY_B64: '',
-      AUTH0_CLIENT_SECRET_FALLBACK: '', TEAMS_SERVICE_URL: '', HOST: '', PORT: '',
+      AUTH0_CLIENT_SECRET_FALLBACK: '', AUTH0_EXPECTED_AUDIENCE: '', TEAMS_SERVICE_URL: '', HOST: '', PORT: '',
     };
     for (const [name, value] of Object.entries(values)) vi.stubEnv(name, value);
   }
@@ -261,6 +261,26 @@ describe('Teams production message handling', () => {
     configureEnvironment();
     vi.stubEnv('BOT_TENANT_ID', tenantId);
     await expect(createProductionTeamsConfig().then(() => undefined)).rejects.toThrow('BOT_TENANT_ID');
+  });
+
+  it('rejects an Auth0 audience that differs from the deployment expectation before startup', async () => {
+    configureEnvironment();
+    vi.stubEnv('AUTH0_EXPECTED_AUDIENCE', 'https://other-api.example.com');
+    await expect(createProductionTeamsConfig().then(() => undefined)).rejects.toThrow('AUTH0_AUDIENCE must match AUTH0_EXPECTED_AUDIENCE');
+  });
+
+  it('accepts a matching trimmed audience expectation independently of the API URL', async () => {
+    configureEnvironment();
+    vi.stubEnv('AUTH0_AUDIENCE', '  custom-resource-server  ');
+    vi.stubEnv('AUTH0_EXPECTED_AUDIENCE', '\tcustom-resource-server\n');
+    await expect(createProductionTeamsConfig()).resolves.toHaveProperty('server');
+  });
+
+  it.each([undefined, '', ' \t '])('preserves custom Auth0 audiences when the expectation is %j', async expected => {
+    configureEnvironment();
+    vi.stubEnv('AUTH0_AUDIENCE', 'custom-resource-server');
+    vi.stubEnv('AUTH0_EXPECTED_AUDIENCE', expected);
+    await expect(createProductionTeamsConfig()).resolves.toHaveProperty('server');
   });
 
   it('passes the bot registration tenant explicitly, independently of customer tenant IDs', async () => {

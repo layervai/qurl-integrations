@@ -226,7 +226,7 @@ describe('Teams bot primitives', () => {
     }, controller.signal);
     expect(delivered).toEqual([phase === 'during execution'
       ? 'The qURL command timed out. Some changes may have completed; check the result before retrying.'
-      : 'qURL for `$docs`: https://qurl.example/one']);
+      : 'qURL for `$docs` (one-time use; 1-minute lifetime): https://qurl.example/one']);
   });
 
   it('refuses to bind a channel alias the alias commands could never parse back', async () => {
@@ -469,12 +469,12 @@ describe('Teams bot primitives', () => {
     const revoke = () => bot.execute({ type: 'message', from: { aadObjectId: 'admin' } },
       'tenant', 'channel', true, parseCommand(`revoke $${token}`));
     await expect(revoke()).rejects.toThrow('cleanup unavailable');
-    await expect(revoke()).resolves.toBe('Resource `$resource-1` is revoked or already unavailable to this account.');
+    await expect(revoke()).resolves.toBe(`Resource \`$${token}\` is revoked or already unavailable to this account.`);
     expect(deletions).toEqual(['resource-1', 'resource-1']);
     expect(purgeAttempts).toBe(2);
   });
 
-  it.each(['partial purge', 'lost alias'])('cleans retained exposure by the reported resource id after %s', async scenario => {
+  it.each(['partial purge', 'lost alias'])('cleans retained exposure by the reported public key after %s', async scenario => {
     // Public fixture shared with the Slack tests: a canonical P-256 SPKI key.
     const resourceId = 'MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEN4yvBX3yjAvYl9qagkStIWB1ie2gp_LF2Jy0w5AdxXefsTNLn9nrOlA4umKRiIQeGfvad9OFVoWa3PAIxcy4qg';
     let aliasBound = scenario === 'partial purge';
@@ -527,7 +527,7 @@ describe('Teams bot primitives', () => {
       qurlEndpoint: 'https://qurl.example',
     });
     await expect(bot.execute({ type: 'message', from: { aadObjectId: 'admin' } },
-      'tenant', 'channel', true, parseCommand('revoke $docs'))).resolves.toBe('Resource `$resource-1` is revoked or already unavailable to this account.');
+      'tenant', 'channel', true, parseCommand('revoke $docs'))).resolves.toBe('Resource `$docs` is revoked or already unavailable to this account.');
     expect(operations).toEqual(['delete:resource-1', 'purge:resource-1']);
   });
 
@@ -737,7 +737,7 @@ describe('Teams bot primitives', () => {
       { type: 'message', id: 'activity-1', from: { id: 'delivery', aadObjectId: 'actor' } },
       'tenant-1', 'channel-1', true, parseCommand('get $resource-1 dm:true'),
     )).resolves.toBe('Sent the one-time qURL to your personal Teams chat.');
-    expect(sent).toEqual({ serviceUrl: 'https://smba.trafficmanager.net', conversationId: 'personal-conversation', text: 'qURL for `$resource-1`: https://qurl.example/one' });
+    expect(sent).toEqual({ serviceUrl: 'https://smba.trafficmanager.net', conversationId: 'personal-conversation', text: 'qURL for `$resource-1` (one-time use; 1-minute lifetime): https://qurl.example/one' });
   });
 
   it('uses distinct idempotency keys for connector resources and enrollment tokens', async () => {

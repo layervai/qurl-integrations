@@ -55,7 +55,7 @@ export function createDynamoClient(client: DynamoDBDocumentClient): DynamoClient
 }
 
 export interface PersonalConversationRef { readonly serviceUrl: string; readonly conversationId: string; }
-export interface PolicyEntry { readonly scopeId: string; readonly alias: string; readonly resourceId: string; }
+export interface PolicyEntry { readonly scopeId: string; readonly alias: string; readonly resourceId: string; readonly crid?: string; }
 export interface WorkspaceMapping { readonly tenantId: string; readonly ownerId: string; readonly createdAt?: string; }
 export interface TenantCredential { readonly apiKey: string; readonly keyId?: string; readonly bindingId?: string; readonly keyPrefix?: string; readonly updatedAt?: string; }
 
@@ -326,10 +326,10 @@ export class TeamsDataStore {
       .map(item => asString(item.resource_id)).filter((id): id is string => id !== undefined));
   }
 
-  async bindScopeAlias(tenantId: string, scopeId: string, alias: string, resourceId: string): Promise<void> {
+  async bindScopeAlias(tenantId: string, scopeId: string, alias: string, resourceId: string, crid?: string): Promise<void> {
     assertPresent(tenantId, scopeId, alias, resourceId);
     try {
-      await this.#client.send({ operation: 'put', input: { TableName: this.#channelPoliciesTable, Item: this.#policyItem(tenantId, scopeId, 'alias', alias, resourceId), ConditionExpression: `attribute_not_exists(${tenantKey}) AND attribute_not_exists(${policyKey})` } });
+      await this.#client.send({ operation: 'put', input: { TableName: this.#channelPoliciesTable, Item: { ...this.#policyItem(tenantId, scopeId, 'alias', alias, resourceId), ...(crid ? { crid } : {}) }, ConditionExpression: `attribute_not_exists(${tenantKey}) AND attribute_not_exists(${policyKey})` } });
     } catch (error) {
       if (!isConditionalCheckFailed(error)) throw error;
       // A retry of the same operation is safe, but an existing alias must
@@ -362,7 +362,10 @@ export class TeamsDataStore {
     assertPresent(tenantId, scopeId);
     const items = await this.#queryTenant(this.#channelPoliciesTable, tenantId, { sortKeyName: policyKey, sortKeyPrefix: scopePolicyPrefix(scopeId) });
     return items.filter(item => item.item_type === 'alias')
-      .map(item => ({ scopeId, alias: asString(item.alias) ?? '', resourceId: asString(item.resource_id) ?? '' }))
+      .map(item => {
+        const crid = asString(item.crid);
+        return { scopeId, alias: asString(item.alias) ?? '', resourceId: asString(item.resource_id) ?? '', ...(crid ? { crid } : {}) };
+      })
       .filter(item => item.alias !== '' && item.resourceId !== '').sort((a, b) => a.alias.localeCompare(b.alias));
   }
 

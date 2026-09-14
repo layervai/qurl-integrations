@@ -249,6 +249,9 @@ class TenantQurlClientFactory {
 export async function createProductionTeamsConfig(): Promise<TeamsProductionConfig> {
   const baseUrl = httpsOrigin(env('TEAMS_BASE_URL'), 'TEAMS_BASE_URL');
   const qurlEndpoint = httpsOrigin(env('QURL_ENDPOINT'), 'QURL_ENDPOINT');
+  const auth0Audience = env('AUTH0_AUDIENCE');
+  const expectedAudience = optionalEnv('AUTH0_EXPECTED_AUDIENCE');
+  if (expectedAudience && auth0Audience !== expectedAudience) throw new Error('AUTH0_AUDIENCE must match AUTH0_EXPECTED_AUDIENCE');
   const region = env('AWS_REGION');
   const appId = env('TEAMS_APP_ID');
   const appPassword = env('TEAMS_APP_PASSWORD');
@@ -275,7 +278,7 @@ export async function createProductionTeamsConfig(): Promise<TeamsProductionConf
     // Trimmed like every other config value: an all-whitespace parameter is
     // not a usable rotation secret and must not read as "configured".
     ...(optionalEnv('AUTH0_CLIENT_SECRET_FALLBACK') ? { clientSecretFallback: optionalEnv('AUTH0_CLIENT_SECRET_FALLBACK') } : {}),
-    audience: env('AUTH0_AUDIENCE'),
+    audience: auth0Audience,
     redirectUri: `${baseUrl}/oauth/qurl/callback`,
     fetch: fetch as FetchLike,
   });

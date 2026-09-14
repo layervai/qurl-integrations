@@ -22,7 +22,7 @@
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint src tests manifest eslint.config.js --max-warnings 0",
-    "test": "vitest run --coverage.enabled=false --config vitest.config.ts",
+    "test": "vitest run --coverage --config vitest.config.ts",
     "manifest": "node manifest/build.mjs"
   },
   "engines": {
@@ -42,6 +42,7 @@
     "@eslint/js": "^10.0.0",
     "@types/express": "^5.0.6",
     "@types/node": "^22.19.0",
+    "@vitest/coverage-v8": "5.0.0",
     "eslint": "^10.0.0",
     "typescript": "^6.0.2",
     "typescript-eslint": "^8.46.4",

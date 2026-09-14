@@ -32,11 +32,23 @@ objects; doing so would violate this tenant-isolation trust boundary.
 ### Removing channel visibility
 
 `unset-alias` removes the alias row only; the resource stays exposed in that
-channel, so `list` still shows it and `get $<resource-id>` still mints links
+channel, so `list` still shows it and `get $<crid>` still mints links
 there. That is deliberate — the alias is a shortcut, not the grant. Today the
 only way to remove a resource's channel visibility is the tenant-wide `revoke`.
 `TeamsDataStore.purgeResourceFromScope` exists for a future `unprotect`/`hide`
 verb and is currently exercised only by tests.
+
+Use the **CRID** returned by `list` to identify a protected resource, or use its
+channel alias. A CRID is permanent and does not grant access by itself; a qURL
+is the temporary access link. Commands accept CRIDs and keep the existing
+channel grants intact. Older resources and alias rows without CRIDs still use
+their public keys. New alias rows retain the returned CRID for display while
+their authorization and cleanup keys stay unchanged.
+
+`revoke $<crid>` can retry an ordinary revoked resource after partial channel
+cleanup. If the service no longer retains its identity, use a surviving alias
+or ask the operator to clean up using the retained public key; the bot does
+not claim local cleanup succeeded when that mapping is unavailable.
 
 ### Minted qURLs in channel history
 
@@ -155,6 +167,13 @@ npm run build
 Node.js 22 is pinned in `.nvmrc`, matching the repository's shipped Discord
 runtime convention.
 
+Tests report V8 coverage over all production TypeScript files and enforce the
+thresholds in `vitest.config.ts`. From the repository root,
+`make check-teams-docker` builds and smoke-tests the ARM64 production image
+with synthetic configuration and networking disabled. Docker with Buildx is
+required. The application owns `apps/teams/Dockerfile`; PR CI and infrastructure
+deployment use that same recipe.
+
 The npm overrides in `package.json` pin `fast-xml-parser`, `brace-expansion`,
 and `nanoid` to audited versions. Review these overrides when upgrading
 dependencies, especially the `nanoid` major-version constraint, so security
@@ -193,6 +212,7 @@ itself enforces.
 | `AUTH0_CLIENT_SECRET` | yes | Confidential client secret. |
 | `AUTH0_CLIENT_SECRET_FALLBACK` | no | Second secret accepted during a rotation window. Remove it once the primary is cut over. |
 | `AUTH0_AUDIENCE` | yes | Access-token audience requested for the qURL API. |
+| `AUTH0_EXPECTED_AUDIENCE` | no | Deployment's independently configured expectation for `AUTH0_AUDIENCE`. A mismatch fails startup before listening. The managed runtime sets this to its reviewed qURL API origin; unset or blank preserves custom audience identifiers. Values are trimmed before comparison. |
 | `HOST` | no | Listen address, default `127.0.0.1`. See the deployment note below. |
 | `PORT` | no | Listen port, default `3000`. Rejected unless an integer in 1-65535. |
 
@@ -258,6 +278,9 @@ POST authentication and RS256 ID tokens. Setup requests
 `openid email qurl:read qurl:write qurl:agent` and renewed consent. Its client ID
 must match the API's trusted Teams client ID. Use the approved Auth0 identity
 connections so Teams and the dashboard resolve to the same qURL owner subject.
+The managed sandbox's API audience matches its API origin; the private runtime
+checks the seeded audience against that reviewed expectation. Custom deployments
+can supply a different expected audience or leave the optional check unset.
 
 Setup uses a stable per-tenant idempotency key, as Slack does. A new setup can
 recover a failed local credential save within the service's 24-hour replay

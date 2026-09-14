@@ -49,13 +49,14 @@ export class TeamsBot {
     throw new Error('qURL client is not configured');
   }
 
-  async #bindAlias(tenantId: string, scopeId: string, alias: string, resourceId: string): Promise<void> {
+  async #bindAlias(tenantId: string, scopeId: string, alias: string, resource: QurlResource): Promise<void> {
+    const resourceId = resource.resourceId;
     const existing = await this.#options.data.lookupScopeAlias(tenantId, scopeId, alias);
     if (existing !== undefined && existing !== resourceId) {
       throw new UserFacingError(`Alias \`$${alias}\` is already in use in this channel.`);
     }
     try {
-      await this.#options.data.bindScopeAlias(tenantId, scopeId, alias, resourceId);
+      await this.#options.data.bindScopeAlias(tenantId, scopeId, alias, resourceId, resource.crid);
     } catch (error) {
       if (error instanceof ScopeAliasConflictError) {
         throw new UserFacingError(`Alias \`$${alias}\` is already in use in this channel.`);
@@ -201,20 +202,33 @@ export class TeamsBot {
     if (command.verb === 'revoke') {
       const token = command.resource ?? '';
       const aliasResourceId = await this.#options.data.lookupScopeAlias(tenantId, scopeId, token);
-      // TODO(upstream-contract): qurl-service api/openapi.yaml ResourceId public-key
-      // shape. The API validates semantics and ownership; names still resolve below.
+      // TODO(upstream-contract): qurl-service api/openapi.yaml ResourceId accepts
+      // public keys and 47/60-character CRIDs; the API verifies their semantics.
       const publicKeyShape = /^[A-Za-z0-9_-]{107,214}$/.test(token) && token.length % 4 !== 1;
-      // Revoked resources disappear from active lists, and a partial purge may
-      // already have removed this channel's references. Accept the reported id.
-      const resourceId = aliasResourceId ?? (publicKeyShape || (await this.#options.data.allowedResourceIds(tenantId, scopeId)).has(token)
-        ? token : this.resolve(await this.resources(qurl, signal), token).resourceId);
+      let resource: QurlResource;
+      if (aliasResourceId) resource = { resourceId: aliasResourceId };
+      else if (/^([a-z2-7]{47}|[a-z2-7]{60})$/.test(token)) {
+        try {
+          // Detail reads include ordinarily revoked resources. Recover the
+          // stored public key even after a partial purge loses this alias.
+          resource = await qurl.getResource(token, signal);
+        } catch (error) {
+          if (error instanceof QurlHttpError && (error.status === 404 || error.status === 410)) {
+            throw new UserFacingError('This CRID is unavailable to this account. To retry local cleanup, use a retained channel alias or contact your qURL operator.');
+          }
+          throw error;
+        }
+      } else if (publicKeyShape || (await this.#options.data.allowedResourceIds(tenantId, scopeId)).has(token)) {
+        resource = { resourceId: token };
+      } else resource = this.resolve(await this.resources(qurl, signal), token);
+      const resourceId = resource.resourceId;
       try {
         await qurl.deleteResource(resourceId, signal);
       } catch (error) {
         if (!(error instanceof QurlHttpError) || (error.status !== 404 && error.status !== 410)) throw error;
       }
       await this.#options.data.purgeResourceFromTenant(tenantId, resourceId, signal);
-      return `Resource \`$${resourceId}\` is revoked or already unavailable to this account.`;
+      return `Resource \`$${resource.crid ?? token}\` is revoked or already unavailable to this account.`;
     }
     const resources = await this.resources(qurl, signal);
     if (command.verb === 'list') return this.list(tenantId, scopeId, resources);
@@ -224,7 +238,7 @@ export class TeamsBot {
       const setting = command.verb === 'set-display-name';
       const resource = await this.resolveInScope(tenantId, scopeId, resources, command.resource ?? '');
       await qurl.updateResource(resource.resourceId, setting ? command.text ?? '' : '', signal);
-      return `${setting ? 'Updated' : 'Reset'} display name for \`$${resource.resourceId}\`.`;
+      return `${setting ? 'Updated' : 'Reset'} display name for \`$${resource.crid ?? resource.resourceId}\`.`;
     }
     throw new UserFacingError('Unsupported qURL command.');
   }
@@ -254,7 +268,7 @@ export class TeamsBot {
   async aliases(tenantId: string, scopeId: string): Promise<string> {
     const entries = await this.#options.data.scopeAliases(tenantId, scopeId);
     if (!entries.length) return 'No aliases are configured in this channel.';
-    return `Aliases in this channel:\n${entries.map(entry => `- \`$${entry.alias}\` -> \`$${entry.resourceId}\``).join('\n')}`;
+    return `Aliases in this channel:\n${entries.map(entry => `- \`$${entry.alias}\` -> \`$${entry.crid ?? entry.resourceId}\``).join('\n')}`;
   }
 
   async resources(qurl: QurlClient, signal?: AbortSignal): Promise<QurlResource[]> {
@@ -281,13 +295,13 @@ export class TeamsBot {
     const visible = resources.filter(resource => allowed.has(resource.resourceId));
     if (!visible.length) return 'No protected resources are available in this channel yet.';
     const rows = visible.map(resource =>
-      `- \`$${resource.resourceId}\`  ${resource.description ?? resource.slug ?? resource.targetUrl ?? resource.resourceId}`);
+      `- \`$${resource.crid ?? resource.resourceId}\`  ${resource.description ?? resource.slug ?? resource.targetUrl ?? resource.crid ?? resource.resourceId}`);
     return `Protected resources in this channel:\n${rows.join('\n')}`;
   }
 
   resolve(resources: readonly QurlResource[], token: string): QurlResource {
     const matches = resources.filter(resource =>
-      resource.resourceId === token || resource.slug === token || resource.alias === token);
+      resource.crid === token || resource.resourceId === token || resource.slug === token || resource.alias === token);
     if (matches.length !== 1) {
       throw new UserFacingError(matches.length ? 'Resource token is ambiguous' : `Resource not found: ${token}`);
     }
@@ -323,12 +337,32 @@ export class TeamsBot {
       sessionDuration: '1h',
       idempotencyKey: idempotencyKey(tenantId, scopeId, activity.from?.id ?? '', resourceId, this.#activityIdempotencyField(activity)),
       ...(command.flags.reason ? { label: command.flags.reason } : {}),
-    }, signal);
+    }, signal).catch((error: unknown) => {
+      if (signal?.aborted || isUserFacingError(error)) throw error;
+      if (error instanceof QurlHttpError) {
+        if (error.status === 429) {
+          throw new UserFacingError(error.retryAfterSeconds
+            ? `qURL is rate limited. Try again in ${error.retryAfterSeconds} seconds.`
+            : 'qURL is rate limited. Please try again shortly.');
+        }
+        if (error.status === 403 && error.code === 'connector_disabled') {
+          throw new UserFacingError('Connector access is not enabled in this environment. Contact your qURL operator.');
+        }
+        if (error.status === 403 && (error.code === 'api_key_limit' || error.code === 'quota_exceeded')) {
+          this.#options.logger?.info('qURL mint rejected by an account limit', { code: error.code });
+          throw new UserFacingError('This qURL account has reached a limit and cannot create another link. Ask the account owner to review its limits.');
+        }
+        if (error.status < 500 || error.status >= 600) throw error;
+      }
+      this.#options.logger?.warn('qURL mint request failed', { error });
+      throw new UserFacingError('The qURL service is temporarily unavailable. Please try again.');
+    });
+    const message = `qURL for \`$${token}\` (one-time use; 1-minute lifetime): ${output.qurlLink}`;
     if (ref) {
-      await this.#options.messages.sendText(ref.serviceUrl, ref.conversationId, `qURL for \`$${token}\`: ${output.qurlLink}`, signal);
+      await this.#options.messages.sendText(ref.serviceUrl, ref.conversationId, message, signal);
       return 'Sent the one-time qURL to your personal Teams chat.';
     }
-    return `qURL for \`$${token}\`: ${output.qurlLink}`;
+    return message;
   }
 
   async protectUrl(qurl: QurlClient, activity: TeamsActivity, tenantId: string, scopeId: string, resources: readonly QurlResource[], command: TeamsCommand, signal?: AbortSignal): Promise<string> {
@@ -343,22 +377,22 @@ export class TeamsBot {
       : await this.resolveInScope(tenantId, scopeId, resources, value.replace(/^\$/, ''));
     if (!creating && resource.type !== 'url') throw new UserFacingError('Only URL resources can be protected with protect-url');
     const resolvedAlias = command.flags.as ?? this.#channelAliasFor(resource);
-    await this.#bindAlias(tenantId, scopeId, resolvedAlias, resource.resourceId);
+    await this.#bindAlias(tenantId, scopeId, resolvedAlias, resource);
     await this.#options.data.exposeResource(tenantId, scopeId, resource.resourceId);
-    return `URL resource \`$${resource.resourceId}\` is now available in this channel.`;
+    return `URL resource \`$${resource.crid ?? resource.resourceId}\` is now available in this channel.`;
   }
 
   /**
    * Pick a channel alias for a resource the caller did not name with `as:`.
    *
    * Only `as:` has been through the channel-alias grammar. The upstream alias,
-   * slug, and resource id are qURL-side identifiers under no such constraint,
+   * slug, CRID, and public key are qURL-side identifiers under no such constraint,
    * and `set-alias`/`unset-alias` parse their argument through that same
    * grammar — so binding one that fails it strands the alias in this channel
    * with no way to rename or remove it short of revoking the resource.
    */
   #channelAliasFor(resource: QurlResource): string {
-    const candidate = [resource.alias, resource.slug, resource.resourceId]
+    const candidate = [resource.alias, resource.slug, resource.crid, resource.resourceId]
       .find((value): value is string => value !== undefined && isChannelAlias(value));
     if (!candidate) {
       throw new UserFacingError('This resource has no channel-safe alias. Re-run `protect-url` with `as:$alias`.');
@@ -369,9 +403,9 @@ export class TeamsBot {
   async setAlias(_qurl: QurlClient, tenantId: string, scopeId: string, resources: readonly QurlResource[], command: TeamsCommand, _signal?: AbortSignal): Promise<string> {
     const resource = await this.resolveInScope(tenantId, scopeId, resources, command.target ?? '');
     const alias = command.alias ?? '';
-    await this.#bindAlias(tenantId, scopeId, alias, resource.resourceId);
+    await this.#bindAlias(tenantId, scopeId, alias, resource);
     await this.#options.data.exposeResource(tenantId, scopeId, resource.resourceId);
-    return `Alias \`$${alias}\` now points to \`$${resource.resourceId}\` in this channel.`;
+    return `Alias \`$${alias}\` now points to \`$${resource.crid ?? resource.resourceId}\` in this channel.`;
   }
 
   async protectConnector(qurl: QurlClient, activity: TeamsActivity, tenantId: string, scopeId: string, command: TeamsCommand, signal?: AbortSignal): Promise<string> {
@@ -407,15 +441,25 @@ export class TeamsBot {
     // Bind before exposing, same as protectUrl. Without this the `alias:` flag
     // parses and validates and then does nothing: `get $alias`, `aliases` and
     // `unset-alias` would all report the alias does not exist.
-    await this.#bindAlias(tenantId, scopeId, alias, resource.resourceId);
+    await this.#bindAlias(tenantId, scopeId, alias, resource);
     await this.#options.data.exposeResource(tenantId, scopeId, resource.resourceId);
     // Sharing must be restarted before the config is rendered: `serving_epoch`
     // and the CRID both come from that response, and a daemon handed a stale
     // epoch is refused. apps/slack does the same in the same order.
     const previousSharing = await qurl.getSharing(resource.resourceId, signal);
+    let publicToken: string;
     let token: QurlApiKey | undefined;
     try {
-      const restarted = await qurl.restartSharing(resource.resourceId, signal);
+      const restarted = await qurl.restartSharing(resource.resourceId, signal).catch(async (error: unknown) => {
+        if (signal?.aborted || (error instanceof QurlHttpError && error.status < 500 && error.status !== 429)) throw error;
+        // Like Slack, send this non-idempotent POST once. A lost response may
+        // still have advanced sharing; only an authoritative newer on-state
+        // permits enrollment. Never replay the POST to resolve uncertainty.
+        const current = await qurl.getSharing(resource.resourceId, signal);
+        if (current.desiredState === 'on' && current.servingEpoch > previousSharing.servingEpoch) return current;
+        throw new Error('qURL sharing restart is uncertain; authoritative state did not advance', { cause: error });
+      });
+      publicToken = restarted.crid;
       const installArgs = {
         slug,
         alias,
@@ -460,7 +504,7 @@ export class TeamsBot {
       }
       throw error;
     }
-    return `Protected connector \`$${resource.resourceId}\` and sent the bootstrap instructions to your personal Teams chat.`;
+    return `Protected connector \`$${publicToken}\` and sent the bootstrap instructions to your personal Teams chat.`;
   }
 }
 
@@ -470,18 +514,18 @@ export function helpMessage(): string {
     '',
     'User commands:',
     '- `setup <email>`',
-    '- `get $<id|alias> [dm:true] [reason:"..."]`',
+    '- `get $<crid|alias> [dm:true] [reason:"..."]`',
     '- `list`',
     '- `aliases`',
     '',
     'Admin commands:',
     '- `protect-url url:https://internal.example.com as:$docs`',
     '- `protect-connector <id> [env:docker|compose|ecs-fargate|kubernetes] [port:8080] [service:web] [alias:$name]`',
-    '- `set-alias $alias $resource-id`',
+    '- `set-alias $alias $crid`',
     '- `unset-alias $alias`',
-    '- `set-display-name $resource-id Friendly name`',
-    '- `unset-display-name $resource-id`',
-    '- `revoke $resource-id`',
+    '- `set-display-name $crid Friendly name`',
+    '- `unset-display-name $crid`',
+    '- `revoke $crid`',
     '- `add @user` / `remove @user` / `admins`',
     '- `uninstall`',
   ].join('\n');

@@ -1,5 +1,9 @@
-import { describe, expect, it } from 'vitest';
-import { HttpQurlClient } from '../src/qurl-client.js';
+import { describe, expect, it, vi } from 'vitest';
+import { HttpQurlClient, QurlHttpError } from '../src/qurl-client.js';
+
+// Matching public fixtures from qurl-conformance's resource_key_qv2_v01 vector.
+const RESOURCE_KEY = 'MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEcOtuxu2qhc3gt1E7BiEU0CLqEDlXDwzZq0JnESgMAwERX6y_XXF5Cn5SKITWIZQmUhCZ0pHHlVn7SmFUTAnTGQ';
+const RESOURCE_CRID = 'ae4jqpd7eaoslq7jinmjv4yikgzmcxgpjfsuobiniqnko32lpw743ivbeyha';
 
 describe('qURL HTTP adapter', () => {
   it('rejects a qURL endpoint that is not an origin', () => {
@@ -152,6 +156,7 @@ describe('qURL HTTP adapter', () => {
     controller.abort();
 
     await expect(client.listResources(controller.signal)).rejects.toThrow('timed out or was cancelled');
+    await expect(client.getResource('public-crid', controller.signal)).rejects.toThrow('timed out or was cancelled');
     expect(calls).toBe(0);
   });
 
@@ -162,5 +167,120 @@ describe('qURL HTTP adapter', () => {
       fetch: async () => new Response(new Uint8Array([0xff])),
     });
     await expect(client.listResources()).rejects.toThrow('qURL response is invalid UTF-8');
+  });
+
+  it.each([RESOURCE_CRID, RESOURCE_KEY])('reads resource details by %s while keeping its canonical key and CRID distinct', async id => {
+    const requests: Request[] = [];
+    const client = new HttpQurlClient({
+      endpoint: 'https://api.example.test', apiKey: 'synthetic-account-key', userAgent: 'qurl-teams/1',
+      fetch: async (input, init) => {
+        requests.push(new Request(input, init));
+        return new Response(JSON.stringify({ data: { resource: {
+          resource_id: RESOURCE_KEY, crid: RESOURCE_CRID, type: 'url',
+          target_url: 'https://protected.example.test', status: 'active',
+        } } }));
+      },
+    });
+    expect(typeof client.getResource).toBe('function');
+    await expect(client.getResource(id)).resolves.toEqual({
+      resourceId: RESOURCE_KEY, crid: RESOURCE_CRID, type: 'url',
+      targetUrl: 'https://protected.example.test', status: 'active',
+    });
+    expect(requests[0]?.method).toBe('GET');
+    expect(requests[0]?.url).toBe(`https://api.example.test/v1/resources/${id}`);
+    expect(requests[0]?.headers.get('Authorization')).toBe('Bearer synthetic-account-key');
+    expect(requests[0]?.headers.get('User-Agent')).toBe('qurl-teams/1');
+  });
+
+  it('accepts a service-resolved CRID during backfill before the resource row stores its CRID', async () => {
+    const client = new HttpQurlClient({ endpoint: 'https://api.example.test', apiKey: 'secret', fetch: async () => new Response(JSON.stringify({ data: { resource: { resource_id: RESOURCE_KEY, type: 'url', status: 'revoked' } } })) });
+    await expect(client.getResource(RESOURCE_CRID)).resolves.toEqual({ resourceId: RESOURCE_KEY, type: 'url', status: 'revoked' });
+  });
+
+  it.each([
+    { requested: RESOURCE_CRID, returned: { resource_id: RESOURCE_KEY, crid: 'another-crid' } },
+    { requested: RESOURCE_CRID, returned: { resource_id: RESOURCE_KEY, crid: '' } },
+    { requested: RESOURCE_KEY, returned: { resource_id: 'another-key' } },
+    { requested: 'not-a-crid', returned: { resource_id: RESOURCE_KEY } },
+  ])('does not weaken the resource identity guard for $requested with $returned', async ({ requested, returned }) => {
+    const client = new HttpQurlClient({ endpoint: 'https://api.example.test', apiKey: 'secret', fetch: async () => new Response(JSON.stringify({ data: { resource: returned } })) });
+    await expect(client.getResource(requested)).rejects.toThrow('qURL resource identity does not match the request');
+  });
+
+  it.each([{ data: {} }, { data: { resource: { crid: 'public-crid' } } }])('rejects an incomplete resource detail envelope: %j', async body => {
+    const client = new HttpQurlClient({ endpoint: 'https://api.example.test', apiKey: 'secret', fetch: async () => new Response(JSON.stringify(body)) });
+    expect(typeof client.getResource).toBe('function');
+    await expect(client.getResource('public-crid')).rejects.toThrow('qURL resource response is invalid');
+  });
+
+  it('preserves only safe service error metadata for a throttled request', async () => {
+    const client = new HttpQurlClient({
+      endpoint: 'https://api.example.test', apiKey: 'synthetic-account-key',
+      fetch: async () => new Response(JSON.stringify({
+        error: { code: 'rate_limited', title: 'private upstream title', detail: 'private upstream detail' },
+        meta: { request_id: 'private upstream metadata' },
+      }), { status: 429, headers: { 'Retry-After': '30' } }),
+    });
+    const failure: unknown = await client.listResources().catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(QurlHttpError);
+    expect(failure).toMatchObject({ status: 429, code: 'rate_limited', retryAfterSeconds: 30 });
+    expect(String(failure)).toBe('QurlHttpError: qURL request failed (429)');
+    expect(JSON.stringify(failure)).not.toContain('private upstream');
+    expect(JSON.stringify(failure)).not.toContain('synthetic-account-key');
+  });
+
+  it.each([
+    { status: 403, body: { error: { code: 'connector_disabled' } }, retry: '30', code: 'connector_disabled' },
+    { status: 403, body: { error: { code: 'quota_exceeded' } }, retry: '', code: 'quota_exceeded' },
+    { status: 500, body: { error: { code: 'upstream\nprivate-detail' } }, retry: '', code: undefined },
+    { status: 500, body: { error: { code: 'x'.repeat(65) } }, retry: '', code: undefined },
+    { status: 500, body: { error: { code: { private: 'detail' } } }, retry: '', code: undefined },
+  ])('keeps status $status and sanitizes error code without accepting non-rate retry metadata', async ({ status, body, retry, code }) => {
+    const client = new HttpQurlClient({ endpoint: 'https://api.example.test', apiKey: 'secret', fetch: async () => new Response(JSON.stringify(body), { status, headers: { 'Retry-After': retry } }) });
+    const failure: unknown = await client.listResources().catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(QurlHttpError);
+    expect(failure).toMatchObject({ status });
+    expect((failure as QurlHttpError).code).toBe(code);
+    expect((failure as QurlHttpError).retryAfterSeconds).toBeUndefined();
+    expect(String(failure)).not.toContain('private');
+  });
+
+  it.each(['', '-1', '1.5', '1e3', 'Wed, 21 Oct 2015 07:28:00 GMT', '9007199254740992'])('ignores unsupported Retry-After seconds: %s', async retry => {
+    const client = new HttpQurlClient({ endpoint: 'https://api.example.test', apiKey: 'secret', fetch: async () => new Response('private non-JSON error', { status: 429, headers: { 'Retry-After': retry } }) });
+    const failure: unknown = await client.listResources().catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(QurlHttpError);
+    expect(failure).toMatchObject({ status: 429 });
+    expect((failure as QurlHttpError).retryAfterSeconds).toBeUndefined();
+    expect(String(failure)).not.toContain('private');
+  });
+
+  it.each(['fetch', 'body'])('bounds an in-flight %s with the existing request deadline', async phase => {
+    vi.useFakeTimers();
+    let aborted = false;
+    const client = new HttpQurlClient({
+      endpoint: 'https://api.example.test', apiKey: 'secret',
+      fetch: async (_input, init) => {
+        const signal = init?.signal;
+        if (phase === 'fetch') return await new Promise<Response>((_resolve, reject) => {
+          signal?.addEventListener('abort', () => { aborted = true; reject(new Error('synthetic timeout')); }, { once: true });
+        });
+        return new Response(new ReadableStream<Uint8Array>({
+          start(controller) {
+            signal?.addEventListener('abort', () => { aborted = true; controller.error(new Error('synthetic timeout')); }, { once: true });
+          },
+        }));
+      },
+    });
+    try {
+      const rejected = expect(client.listResources()).rejects.toThrow('qURL request timed out or was cancelled');
+      await vi.advanceTimersByTimeAsync(15_000);
+      await rejected;
+      expect(aborted).toBe(true);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('rejects an oversized resource response before decoding it', async () => {
+    const client = new HttpQurlClient({ endpoint: 'https://api.example.test', apiKey: 'secret', fetch: async () => new Response(' '.repeat(1_048_577)) });
+    await expect(client.listResources()).rejects.toThrow('qURL response exceeded the configured size limit');
   });
 });
