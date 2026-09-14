@@ -12,6 +12,12 @@
  *
  * Health is gated on heartbeat ACK age only. activity_age_ms is
  * reported as a metric for observability but does NOT gate health.
+ * On the gateway-shim path a never-connected, disconnected, stopped, or
+ * pre-first-ACK shim returns null and the tick emits nothing, so the only
+ * remaining gateway_heartbeat_unhealthy trigger is a still-connected shard
+ * whose ACK went stale. Disconnects surface as metric silence (the
+ * missing-data alarm) plus the shim's `shard closed` log, not as an
+ * unhealthy event.
  * Why: discord.js's `client.on('raw', ...)` fires on op-0 dispatched
  * events only — HEARTBEAT_ACK and other control packets never trigger
  * it. So an idle bot (no chat traffic) and a wedged bot (no ACKs)
@@ -166,10 +172,13 @@ function startGatewayHeartbeat(client, opts = {}) {
     }
   }
 
-  // Run once immediately so the first metric datapoint lands inside
-  // the alarm's 60s evaluation window. Without this, setInterval
-  // doesn't fire until t+30s and the alarm transitions
-  // INSUFFICIENT_DATA → ALARM during steady-state boot.
+  // Run once immediately so the first datapoint is not delayed by a full
+  // interval. On the legacy client this lands inside the alarm's first 60s
+  // window. On the shim path it is best-effort only: @discordjs/ws waits a
+  // random fraction of heartbeat_interval before its first heartbeat, so
+  // this tick (and possibly the next) is silent until the first ACK. The
+  // infra alarm tolerates that initial gap; do not read this call as a
+  // guarantee of a datapoint in the first window.
   tick();
 
   const timer = setInterval(tick, intervalMs);

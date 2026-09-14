@@ -292,8 +292,8 @@ describe('startGatewayHeartbeat', () => {
     expect(branchEnd).toBeGreaterThan(branchStart);
     const shimBranch = source.slice(branchStart, branchEnd);
 
-    expect(shimBranch).toContain('gatewayHeartbeatTimer = startGatewayHeartbeat(gatewayShim);');
-    expect(shimBranch).toContain('activeGuildCountTimer = startActiveGuildCount(gatewayShim);');
+    expect(shimBranch).toMatch(/gatewayHeartbeatTimer\s*=\s*startGatewayHeartbeat\(\s*gatewayShim\s*\)/);
+    expect(shimBranch).toMatch(/activeGuildCountTimer\s*=\s*startActiveGuildCount\(\s*gatewayShim\s*\)/);
 
     const shutdownStart = source.indexOf('async function gracefulShutdown(code = 0) {');
     const shutdownEnd = source.indexOf('async function start() {', shutdownStart);

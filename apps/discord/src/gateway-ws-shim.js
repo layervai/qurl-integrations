@@ -665,10 +665,9 @@ function createGatewayWsShim({
       // owns liveness; a normal heartbeat jitter must not emit unhealthy.
       if (stopped || !wsConnected || lastHeartbeatAckAt === null) return null;
       return {
-        // isReady intentionally stays true through transient reconnects for
-        // the ECS /health probe. The positive heartbeat must be stricter:
-        // no connected shard means no healthy datapoint.
-        isReady: isReady && wsConnected,
+        // The guard above already requires a connected shard, so isReady
+        // here never reports a stale-ready disconnected shim as healthy.
+        isReady,
         pingMs: lastHeartbeatLatencyMs,
         lastHeartbeatAckAt,
       };
@@ -743,6 +742,11 @@ function createGatewayWsShim({
           // On failure the next metric tick may retry, subject to cooldown.
           // sampleInFlight in gateway-metrics prevents overlapping sweeps.
           guildSeedPromise = null;
+          if (!activeGuildIds && guildSeedAttempts >= 3) {
+            logger.warn('gateway-ws-shim: guild seed cooldown engaged', {
+              retry_at: new Date(guildSeedRetryAt).toISOString(),
+            });
+          }
         });
       }
       return guildSeedPromise;

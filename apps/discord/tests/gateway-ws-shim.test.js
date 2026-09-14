@@ -285,11 +285,38 @@ describe('Pillar 3 manager contract — connect() + connection state', () => {
     manager.emit(WebSocketShardEvents.Dispatch, {
       data: { t: 'GUILD_DELETE', d: { id: 'g2', unavailable: true } }, shardId: 0,
     });
+    // Real "bot removed from guild" payloads omit `unavailable` entirely.
+    manager.emit(WebSocketShardEvents.Dispatch, {
+      data: { t: 'GUILD_DELETE', d: { id: 'g3' } }, shardId: 0,
+    });
 
-    expect(await shim.getActiveGuildCount()).toBe(2);
+    expect(await shim.getActiveGuildCount()).toBe(1);
     expect(dispatchHandler.mock.calls.map(([payload]) => payload.data.t)).toEqual([
-      'READY', 'GUILD_CREATE', 'GUILD_DELETE', 'GUILD_DELETE',
+      'READY', 'GUILD_CREATE', 'GUILD_DELETE', 'GUILD_DELETE', 'GUILD_DELETE',
     ]);
+  });
+
+  it('prefers a READY snapshot that lands while a pure-RESUME REST seed is in flight', async () => {
+    let resolvePage;
+    const page = new Promise((resolve) => { resolvePage = resolve; });
+    const { shim, managerInstances, restInstances } = makeShim();
+    await shim.start({ connect: false });
+    const manager = managerInstances[0];
+    restInstances[0].get.mockReturnValueOnce(page);
+    manager.emit(WebSocketShardEvents.Resumed, 0);
+    manager.emit(WebSocketShardEvents.Dispatch, {
+      data: { t: 'RESUMED', d: {} }, shardId: 0,
+    });
+
+    const countPromise = shim.getActiveGuildCount();
+    manager.emit(WebSocketShardEvents.Dispatch, {
+      data: { t: 'READY', d: { application: { id: 'app-1' }, guilds: [{ id: 'g1' }, { id: 'g2' }, { id: 'g3' }] } },
+      shardId: 0,
+    });
+    resolvePage([{ id: 'g-stale' }]);
+
+    expect(await countPromise).toBe(3);
+    expect(await shim.getActiveGuildCount()).toBe(3);
   });
 
   it('seeds active-guild count from REST after a pure RESUME and paginates past 200', async () => {
@@ -396,7 +423,7 @@ describe('Pillar 3 manager contract — connect() + connection state', () => {
   });
 
   it('cools down failed guild seed walks and recovers without a READY', async () => {
-    const { shim, managerInstances, restInstances } = makeShim();
+    const { shim, logger, managerInstances, restInstances } = makeShim();
     await shim.start({ connect: false });
     const manager = managerInstances[0];
     manager.emit(WebSocketShardEvents.Resumed, 0);
@@ -410,6 +437,10 @@ describe('Pillar 3 manager contract — connect() + connection state', () => {
     }
     await expect(shim.getActiveGuildCount()).resolves.toBe(null);
     expect(restInstances[0].get).toHaveBeenCalledTimes(3);
+    expect(logger.warn).toHaveBeenCalledWith(
+      'gateway-ws-shim: guild seed cooldown engaged',
+      { retry_at: '2023-11-14T23:13:20.000Z' },
+    );
     now.mockReturnValue(1_700_003_600_000);
     restInstances[0].get.mockResolvedValueOnce([{ id: 'g1' }]);
     await expect(shim.getActiveGuildCount()).resolves.toBe(1);
@@ -1114,7 +1145,7 @@ describe('constants are pinned', () => {
     // If this trips on a dependency bump, re-read the matching upstream event
     // emitter before updating the declaration regex and version contract.
     expect(typeDeclarations).toMatch(
-      /\[WebSocketShardEvents\.HeartbeatComplete\]: \[payload: \{\s*ackAt: number;\s*heartbeatAt: number;\s*latency: number;/,
+      /\[WebSocketShardEvents\.HeartbeatComplete\]:\s*\[payload:\s*\{\s*ackAt:\s*number;\s*heartbeatAt:\s*number;\s*latency:\s*number;/,
     );
   });
 });
