@@ -26,7 +26,9 @@ CREATE_PAIR_BUDGET_SECONDS = 15 * 60
 # Validate the requested credential lifetime; workflow timeouts bound execution.
 MAX_OPERATION_BUDGET_SECONDS = 55 * 60
 RUNNER_CLEANUP_MARGIN_SECONDS = 5 * 60
+# Permit small runner/service clock differences, but reject far-future keys.
 MAX_CLOCK_SKEW_SECONDS = 5 * 60
+MAX_CHILD_LIFETIME_SECONDS = 24 * 60 * 60
 # Cover setup, customer execution, and cleanup without near-expiry authority.
 MIN_AUTOMATION_LIFETIME_SECONDS = 3 * 60 * 60
 # TODO(upstream-contract): qurl-service generates 32-byte base64url API secrets.
@@ -886,7 +888,8 @@ def mint_ordinary_key(
                 or data.get("status") != "active"
             ):
                 raise CredentialError("qURL returned a malformed ordinary API key")
-            # Validate time only after recording the key ID for exact revocation.
+            # TODO(upstream-contract): POST /v1/api-keys supplies created_at.
+            # Validate it after recording the key ID for exact revocation.
             return key_id, api_key, data.get("created_at")
         except CredentialError as exc:
             last_error = exc
@@ -973,7 +976,9 @@ def create_with_auth(
     name = run_credential_name(args.run_id, args.run_attempt, args.lane, args.purpose)
     prepare_output_directory(args.output_dir)
     try:
-        key_id, api_key, raw_created_at = mint_ordinary_key(endpoint, automation_key, name)
+        key_id, api_key, raw_created_at = mint_ordinary_key(
+            endpoint, automation_key, name
+        )
         write_private(args.output_dir / "api-key-id", key_id)
         customer = identity(endpoint, api_key)
         customer_key = customer.get("api_key")
@@ -993,11 +998,10 @@ def create_with_auth(
         # Both timestamps come from the service. Comparing the 24-hour ceiling
         # with the runner clock rejects valid keys when that clock is behind.
         remaining = expiry - time.time()
-        if (
-            not 0 < expiry - created_at <= 24 * 60 * 60
-            or not 0 < remaining <= 24 * 60 * 60 + MAX_CLOCK_SKEW_SECONDS
-        ):
+        if not 0 < expiry - created_at <= MAX_CHILD_LIFETIME_SECONDS:
             raise CredentialError("qURL returned an invalid child-key lifetime")
+        if not 0 < remaining <= MAX_CHILD_LIFETIME_SECONDS + MAX_CLOCK_SKEW_SECONDS:
+            raise CredentialError("child key expiry is not usable on this runner clock")
         write_private(args.output_dir / "api-key", api_key)
     except (OSError, CredentialError) as exc:
         try:
