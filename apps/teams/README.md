@@ -170,12 +170,13 @@ itself enforces.
 | `AWS_REGION` | yes | Region for the DynamoDB and KMS clients. |
 | `TEAMS_APP_ID` | yes | Bot Framework app (client) id. |
 | `TEAMS_APP_PASSWORD` | yes | Bot Framework client secret. |
+| `BOT_TENANT_ID` | yes | Entra tenant UUID where the bot is registered. Passed explicitly to the Teams SDK; independent of the customer tenant in each Activity. |
 | `TEAMS_SERVICE_URL` | no | Pins the outbound Bot Framework service URL. Validated against the trusted-host allowlist in `src/teams-sdk.ts`; unset lets the SDK use the inbound Activity's own service URL. |
 | `QURL_IMAGE` | yes | Released qURL CLI image (`ghcr.io/layervai/qurl@sha256:...`) rendered into Connector installs, which run `qurl daemon run`. The retired standalone `qurl-connector` image is rejected. Validated by `validateTunnelImageRef`. |
 | `QURL_CONNECTOR_HUB_HOST` | no | Canonical LayerV-owned NHP Hub hostname, forwarded to the Connector environment. Set all three `QURL_CONNECTOR_HUB_*` values together; omission uses the CLI image’s embedded production pin. A different sandbox Hub or an image without that pin requires the triple. |
 | `QURL_CONNECTOR_HUB_PORT` | no | NHP Hub UDP port, exactly `443`. |
 | `QURL_CONNECTOR_HUB_SERVER_PUBLIC_KEY_B64` | no | Base64 NHP Hub server public key pinned by rendered installs. |
-| `QURL_TEAMS_TENANT_PRINCIPALS_TABLE` | yes | Owner and admin rows. |
+| `QURL_TEAMS_TENANT_PRINCIPALS_TABLE` | yes | Owner row with its installation ID and administrator set. |
 | `QURL_TEAMS_CHANNEL_POLICIES_TABLE` | yes | Channel alias and resource-visibility rows. Must carry the `resource_scopes` GSI (`tenant_resource_key` / `scope_item_type_key`, KEYS_ONLY) — `revoke` queries it directly, so a table without it fails at revoke time rather than at startup. |
 | `QURL_TEAMS_PERSONAL_CONVERSATIONS_TABLE` | yes | Personal-chat references used by `dm:true` and connector bootstrap delivery. |
 | `QURL_TEAMS_TENANT_CREDENTIALS_TABLE` | yes | Encrypted tenant qURL API keys. Keyed by `tenant_id`, not `teams_tenant_id` — see the note in `src/teams-data.ts`. |
@@ -189,8 +190,29 @@ itself enforces.
 | `HOST` | no | Listen address, default `127.0.0.1`. See the deployment note below. |
 | `PORT` | no | Listen port, default `3000`. Rejected unless an integer in 1-65535. |
 
+The runtime uses client-secret authentication for Azure and Teams-managed bot
+registrations. For Azure `SingleTenant`, `BOT_TENANT_ID` must match the bot's
+registration tenant. For Teams-managed bots, including `myOrg` and
+`multipleOrgs`, map the Teams CLI's generated `CLIENT_ID`, `CLIENT_SECRET`, and
+`TENANT_ID` to `TEAMS_APP_ID`, `TEAMS_APP_PASSWORD`, and `BOT_TENANT_ID`.
+The runtime validates the tenant UUID and does not fall back to the SDK's
+ambient `TENANT_ID` or shared `botframework.com` authority. See Microsoft's
+[app authentication configuration](https://learn.microsoft.com/en-us/microsoftteams/platform/teams-sdk/essentials/app-authentication/overview)
+and [Teams CLI registration options](https://microsoft.github.io/teams-sdk/cli/commands/app/create/).
+
+Authenticated message activities are acknowledged before command completion,
+so a slow qURL request or reply does not hold Teams' 15-second retry window
+open. Commands retain their 30-second cooperative cancellation budget. Replies
+use the SDK-backed adapter's 15-second HTTP timeout and activity signal while
+preserving the inbound service URL, conversation ID, and reply ID.
+[Teams retry behavior](https://learn.microsoft.com/en-us/microsoftteams/platform/bots/bot-concepts).
+
 ### Known limitations
 
+- Accepted message work runs in this service process. A process restart can
+  interrupt a command; acknowledgement is not a durable queue or an exactly-once
+  delivery guarantee. Retry handling for side effects remains the command's
+  existing idempotency contract.
 - The OAuth routes (`/oauth/qurl/start`, `/oauth/qurl/callback`) carry no
   application-level rate limit. They are unauthenticated public entrypoints and
   each request performs one DynamoDB operation, so the ingress in front of this
@@ -217,9 +239,29 @@ email-bound OAuth flow becomes the tenant owner. This first-authenticated-
 installer behavior is intentional; later setup attempts are owner-gated and
 cannot silently rebind the tenant to another qURL account.
 
-Uninstall removes all local tenant state after revoking the tenant API key.
-The current upstream qURL external-identity-binding API has no documented
-owner-authorized delete or rebind operation. If a later setup reports a
-retained upstream binding, the qURL operator must remove it before reinstall;
-the bot deliberately does not treat an unowned local tenant plus upstream 409
-as permission to claim that binding.
+The confidential Auth0 app must allow Authorization Code with client-secret
+POST authentication and RS256 ID tokens. Setup requests
+`openid email qurl:read qurl:write qurl:agent` and renewed consent. Its client ID
+must match the API's trusted Teams client ID. Use the approved Auth0 identity
+connections so Teams and the dashboard resolve to the same qURL owner subject.
+
+Setup uses a stable per-tenant idempotency key, as Slack does. A new setup can
+recover a failed local credential save within the service's 24-hour replay
+window. Every returned or reused API key is checked through `/v1/me` against
+the verified owner's subject before setup succeeds. The stored credential
+includes the upstream binding and key IDs; failed persistence logs these
+non-secret recovery IDs. Tenant keys use KMS GenerateDataKey/Decrypt with local
+AES-256-GCM and tenant-bound encryption context (`kms:v2:`). This prelaunch
+format does not read old prototype ciphertext or migrate prototype admin rows;
+remove any such test installation before the first rollout.
+
+Uninstall attempts to revoke the tenant key before deleting local state.
+Upstream timeouts or service failures preserve local recovery state for a
+retry. A rejected/revoked credential (401/403) permits local disconnect and
+logs the key ID for operator cleanup; it does not prove upstream revocation.
+The upstream binding remains until its qURL owner deletes it through
+`DELETE /v1/external-identity-bindings/{binding_id}` with an owner-authorized
+JWT. That deletion also removes the matching replay record; key revocation
+alone does not. If setup reports a retained binding, complete this cleanup
+before reinstalling. Enrollment credentials and enrolled devices have their
+own lifecycle, as in the other integrations.

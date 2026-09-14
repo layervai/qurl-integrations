@@ -1,5 +1,6 @@
 import { sha256Hex } from './encoding.js';
 import { decodeUtf8WithError, readBoundedBytes } from './http.js';
+import type { FetchLike } from './interfaces.js';
 
 export interface QurlResource {
   readonly resourceId: string;
@@ -46,10 +47,17 @@ export interface QurlClient {
   restartSharing(resourceId: string, signal?: AbortSignal): Promise<QurlSharingState>;
   stopSharing(resourceId: string, signal?: AbortSignal): Promise<void>;
 }
-export interface QurlClientOptions { readonly endpoint: string; readonly apiKey: string; readonly fetch?: typeof fetch; readonly userAgent?: string; }
+export interface QurlClientOptions { readonly endpoint: string; readonly apiKey: string; readonly fetch?: FetchLike; readonly userAgent?: string; }
 const QURL_REQUEST_TIMEOUT_MS = 15_000;
 const QURL_RESPONSE_LIMIT_BYTES = 1_048_576;
 type JsonObject = Record<string, unknown>;
+
+export class QurlHttpError extends Error {
+  constructor(readonly status: number) {
+    super(`qURL request failed (${status})`);
+    this.name = 'QurlHttpError';
+  }
+}
 
 function object(value: unknown, label: string): JsonObject {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`${label} response is invalid`);
@@ -114,7 +122,7 @@ function requestBody(input: QurlCreateInput): JsonObject {
 }
 
 export class HttpQurlClient implements QurlClient {
-  readonly #endpoint: URL; readonly #apiKey: string; readonly #fetch: typeof fetch; readonly #userAgent: string;
+  readonly #endpoint: URL; readonly #apiKey: string; readonly #fetch: FetchLike; readonly #userAgent: string;
   constructor(options: QurlClientOptions) {
     this.#endpoint = new URL(options.endpoint.endsWith('/') ? options.endpoint : `${options.endpoint}/`);
     if (this.#endpoint.protocol !== 'https:' || this.#endpoint.username || this.#endpoint.password || this.#endpoint.pathname !== '/' || this.#endpoint.search || this.#endpoint.hash) throw new Error('qURL endpoint must be an HTTPS origin without credentials');
@@ -176,7 +184,7 @@ export class HttpQurlClient implements QurlClient {
     } catch (error) {
       // Cleanup has its own HTTP deadline; the activity signal may be expired.
       try { await this.revokeApiKey(keyId); }
-      catch (cause) { throw new Error('qURL enrollment credential validation and revocation failed', { cause }); }
+      catch (cause) { throw new Error(`qURL enrollment credential validation and revocation failed; operator cleanup required for key ${JSON.stringify(keyId)}`, { cause }); }
       throw error;
     }
   }
@@ -212,7 +220,7 @@ export class HttpQurlClient implements QurlClient {
         invalidLimit: () => new Error('qURL response body limit is invalid'),
         tooLarge: () => new Error('qURL response exceeded the configured size limit'),
       }), () => new Error('qURL response is invalid UTF-8'));
-      if (!response.ok && !(options.ignoreNotFound && response.status === 404)) throw new Error(`qURL request failed (${response.status})`); if (!text) return undefined;
+      if (!response.ok && !(options.ignoreNotFound && response.status === 404)) throw new QurlHttpError(response.status); if (!text) return undefined;
       try { return JSON.parse(text) as unknown; } catch { throw new Error('qURL response is invalid JSON'); }
     } catch (error) {
       if (controller.signal.aborted) throw new Error('qURL request timed out or was cancelled', { cause: error });

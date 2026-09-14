@@ -1,5 +1,5 @@
 import type { App } from '@microsoft/teams.apps';
-import { toActivityParams, type ActivityLike } from '@microsoft/teams.api';
+import { resolveAadObjectId, toActivityParams, type ActivityLike, type TeamsChannelAccount } from '@microsoft/teams.api';
 import type { TeamsActivity } from './activity.js';
 import type { TeamsMessagePoster } from './connector.js';
 
@@ -52,6 +52,22 @@ export class TeamsSdkMessagePoster implements TeamsMessagePoster {
 
   async sendText(serviceUrl: string, conversationId: string, text: string, signal?: AbortSignal): Promise<void> {
     await this.sendActivity(serviceUrl, conversationId, { type: 'message' as const, text }, signal);
+  }
+
+  async resolveMemberAadObjectId(activity: TeamsActivity, memberId: string, signal?: AbortSignal): Promise<string | undefined> {
+    if (signal?.aborted) throw new TeamsDeliveryError('Teams member lookup was cancelled');
+    const conversationId = activity.conversation?.id ?? '';
+    if (!conversationId.trim() || !memberId.trim()) throw new TeamsDeliveryError('Teams conversation and member ids are required');
+    const baseUrl = validateTeamsServiceUrl(activity.serviceUrl ?? '');
+    // TODO(upstream-contract): the SDK member helper has no per-request
+    // timeout/signal options, so use its HTTP client. Its normalizer supports
+    // the objectId field returned by the Teams member endpoint.
+    const response = await this.#app.api.http.get<TeamsChannelAccount>(`${baseUrl}/v3/conversations/${encodeURIComponent(conversationId)}/members/${encodeURIComponent(memberId)}`, {
+      timeout: 15_000,
+      ...(signal === undefined ? {} : { signal }),
+    });
+    const aadObjectId = resolveAadObjectId(response.data).aadObjectId;
+    return typeof aadObjectId === 'string' ? aadObjectId.trim().toLowerCase() || undefined : undefined;
   }
 
   private async sendActivity(serviceUrl: string, conversationId: string, activity: ActivityLike, signal?: AbortSignal): Promise<void> {

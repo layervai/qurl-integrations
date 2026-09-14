@@ -10,7 +10,7 @@
 // Produces manifest/dist/qurl-teams-<env>.zip.
 
 import { createHash } from 'node:crypto';
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { deflateRawSync } from 'node:zlib';
@@ -87,7 +87,6 @@ function zip(entries) {
     entry.writeUInt32LE(compressed.length, 20);
     entry.writeUInt32LE(data.length, 24);
     entry.writeUInt16LE(nameBytes.length, 28);
-    entry.writeUInt32LE(0, 42);
     entry.writeUInt32LE(offset, 42);
     central.push(entry, nameBytes);
     offset += local.length + nameBytes.length + compressed.length;
@@ -132,7 +131,7 @@ function arg(name) {
   return i === -1 ? undefined : process.argv[i + 1];
 }
 
-if (process.argv[1] && import.meta.url.endsWith(process.argv[1].split('/').pop())) {
+if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const env = arg('env') ?? 'sandbox';
   const appId = arg('app-id');
   const domain = arg('domain');

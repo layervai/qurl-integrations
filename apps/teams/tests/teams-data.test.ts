@@ -25,6 +25,7 @@ class CleanupDynamo implements DynamoClient {
   readonly requests: DynamoRequest[] = [];
   async send<T>(request: DynamoRequest): Promise<T> {
     this.requests.push(request);
+    if (request.operation === 'get') return { Item: { principal_type: 'owner', actor_aad_object_id: 'actor', installation_id: 'installation' } } as T;
     if (request.operation !== 'query') return {} as T;
     const table = request.input.TableName;
     const paged = request.input.ExclusiveStartKey !== undefined;
@@ -62,6 +63,56 @@ class PurgeDynamo implements DynamoClient {
 }
 
 describe('Teams DynamoDB data paths', () => {
+  it('does not grant orphan or previous-installation administrator rows authority', async () => {
+    let owner: Record<string, unknown> | undefined = undefined;
+    const client: DynamoClient = {
+      async send<T>(request: DynamoRequest): Promise<T> {
+        const key = request.input.Key as Record<string, string>;
+        return { Item: key.principal_key === 'owner' ? owner : { principal_type: 'admin', actor_aad_object_id: 'old-admin' } } as T;
+      },
+    };
+    const store = new TeamsDataStore({ client, tenantPrincipalsTable: 'principals', channelPoliciesTable: 'policy', personalConversationsTable: 'conversations', tenantCredentialsTable: 'credentials' });
+    await expect(store.checkAdmin('tenant', 'old-admin')).resolves.toMatchObject({ isAdmin: false });
+    owner = { principal_type: 'owner', actor_aad_object_id: 'new-owner', installation_id: 'new-install', admin_aad_object_ids: new Set(['current-admin']) };
+    await expect(store.checkAdmin('tenant', 'old-admin')).resolves.toMatchObject({ isAdmin: false, ownerId: 'new-owner' });
+    await expect(store.checkAdmin('tenant', 'current-admin')).resolves.toMatchObject({ isAdmin: true, installationId: 'new-install' });
+  });
+
+  it.each(['addAdmin', 'removeAdmin'] as const)('ties %s atomically to the current owner installation', async method => {
+    const writes: DynamoRequest[] = [];
+    const client: DynamoClient = {
+      async send<T>(request: DynamoRequest): Promise<T> {
+        if (request.operation === 'get') return { Item: { principal_type: 'owner', actor_aad_object_id: 'owner', installation_id: 'installation' } } as T;
+        writes.push(request);
+        return {} as T;
+      },
+    };
+    const store = new TeamsDataStore({ client, tenantPrincipalsTable: 'principals', channelPoliciesTable: 'policy', personalConversationsTable: 'conversations', tenantCredentialsTable: 'credentials' });
+    await store[method]('tenant', 'admin', 'installation');
+    expect(writes).toHaveLength(1);
+    expect(writes[0]).toMatchObject({ operation: 'update', input: {
+      Key: { teams_tenant_id: 'tenant', principal_key: 'owner' },
+      ConditionExpression: 'installation_id = :installationId',
+      ExpressionAttributeValues: { ':installationId': 'installation', ':admin': new Set(['admin']) },
+    } });
+  });
+
+  it.each(['addAdmin', 'removeAdmin', 'deleteWorkspace'] as const)('rejects %s authorized by a previous installation before changing any rows', async method => {
+    const requests: DynamoRequest[] = [];
+    const client: DynamoClient = {
+      async send<T>(request: DynamoRequest): Promise<T> {
+        requests.push(request);
+        return { Item: { principal_type: 'owner', actor_aad_object_id: 'new-owner', installation_id: 'new-install' } } as T;
+      },
+    };
+    const store = new TeamsDataStore({ client, tenantPrincipalsTable: 'principals', channelPoliciesTable: 'policy', personalConversationsTable: 'conversations', tenantCredentialsTable: 'credentials' });
+    const mutation = method === 'deleteWorkspace'
+      ? store.deleteWorkspace('tenant', 'old-install')
+      : store[method]('tenant', 'target-admin', 'old-install');
+    await expect(mutation).rejects.toThrow('workspace installation has changed');
+    expect(requests.map(request => request.operation)).toEqual(['get']);
+  });
+
   it('encrypts tenant credentials through the injected CMK adapter', async () => {
     const client = new RecordingDynamo();
     const cipher: CredentialCipher = {
@@ -135,7 +186,7 @@ describe('Teams DynamoDB data paths', () => {
   it('deletes all workspace rows across tables and query pages', async () => {
     const client = new CleanupDynamo();
     const store = new TeamsDataStore({ client, tenantPrincipalsTable: 'principals', channelPoliciesTable: 'policy', personalConversationsTable: 'conversations', tenantCredentialsTable: 'credentials' });
-    await store.deleteWorkspace('tenant');
+    await store.deleteWorkspace('tenant', 'installation');
     const deletes = client.requests.filter(request => request.operation === 'delete');
     expect(client.requests.filter(request => request.operation === 'query')).toHaveLength(4);
     expect(deletes).toHaveLength(6);
@@ -151,7 +202,7 @@ describe('Teams DynamoDB data paths', () => {
       async send<T>(request: DynamoRequest): Promise<T> {
         const key = request.input.Key as Record<string, string> | undefined;
         if (request.operation === 'get') return (ownerPresent && key?.principal_key === 'owner'
-          ? { Item: { actor_aad_object_id: 'actor', principal_type: 'owner' } } : {}) as T;
+          ? { Item: { actor_aad_object_id: 'actor', principal_type: 'owner', installation_id: 'installation' } } : {}) as T;
         if (request.operation === 'delete') {
           if (fail && request.input.TableName === failingTable) throw new Error('DynamoDB unavailable');
           if (key?.principal_key === 'owner') ownerPresent = false;
@@ -160,10 +211,10 @@ describe('Teams DynamoDB data paths', () => {
       },
     };
     const store = new TeamsDataStore({ client, tenantPrincipalsTable: 'principals', channelPoliciesTable: 'policy', personalConversationsTable: 'conversations', tenantCredentialsTable: 'credentials' });
-    await expect(store.deleteWorkspace('tenant')).rejects.toThrow('DynamoDB unavailable');
+    await expect(store.deleteWorkspace('tenant', 'installation')).rejects.toThrow('DynamoDB unavailable');
     await expect(store.checkAdmin('tenant', 'actor')).resolves.toMatchObject({ isAdmin: true });
     fail = false;
-    await store.deleteWorkspace('tenant');
+    await store.deleteWorkspace('tenant', 'installation');
     await expect(store.checkAdmin('tenant', 'actor')).resolves.toMatchObject({ isAdmin: false });
   });
 

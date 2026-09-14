@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import {
   DeleteCommand,
   GetCommand,
@@ -54,7 +55,7 @@ export function createDynamoClient(client: DynamoDBDocumentClient): DynamoClient
 export interface PersonalConversationRef { readonly serviceUrl: string; readonly conversationId: string; }
 export interface PolicyEntry { readonly scopeId: string; readonly alias: string; readonly resourceId: string; }
 export interface WorkspaceMapping { readonly tenantId: string; readonly ownerId: string; readonly createdAt?: string; }
-export interface TenantCredential { readonly apiKey: string; readonly keyId?: string; readonly keyPrefix?: string; readonly updatedAt?: string; }
+export interface TenantCredential { readonly apiKey: string; readonly keyId?: string; readonly bindingId?: string; readonly keyPrefix?: string; readonly updatedAt?: string; }
 
 export interface TeamsDataStoreOptions {
   readonly client: DynamoClient;
@@ -146,6 +147,7 @@ export class TeamsDataStore {
 
   async bindWorkspace(mapping: WorkspaceMapping, seedAdmin: string): Promise<void> {
     assertPresent(mapping.tenantId, mapping.ownerId, seedAdmin);
+    const installationId = randomUUID();
     await this.#client.send({
       operation: 'put',
       input: {
@@ -154,64 +156,71 @@ export class TeamsDataStore {
           ...principalDdbKey(mapping.tenantId, ownerPrincipal),
           principal_type: 'owner',
           actor_aad_object_id: mapping.ownerId,
+          installation_id: installationId,
           created_at: mapping.createdAt ?? nowIso(this.#now),
           updated_at: nowIso(this.#now),
         },
         ConditionExpression: `attribute_not_exists(${tenantKey}) AND attribute_not_exists(${principalKey})`,
       },
     });
-    if (seedAdmin !== mapping.ownerId) await this.addAdmin(mapping.tenantId, seedAdmin);
+    if (seedAdmin !== mapping.ownerId) await this.addAdmin(mapping.tenantId, seedAdmin, installationId);
   }
 
-  async checkAdmin(tenantId: string, actorId: string): Promise<{ readonly isAdmin: boolean; readonly ownerId?: string }> {
+  async checkAdmin(tenantId: string, actorId: string): Promise<{ readonly isAdmin: boolean; readonly ownerId?: string; readonly installationId?: string }> {
     assertPresent(tenantId, actorId);
-    const [owner, admin] = await Promise.all([
-      this.#client.send<{ readonly Item?: Record<string, unknown> }>({ operation: 'get', input: { TableName: this.#tenantPrincipalsTable, Key: principalDdbKey(tenantId, ownerPrincipal), ConsistentRead: true } }),
-      this.#client.send<{ readonly Item?: Record<string, unknown> }>({ operation: 'get', input: { TableName: this.#tenantPrincipalsTable, Key: principalDdbKey(tenantId, `admin#${keyPart(actorId)}`), ConsistentRead: true } }),
-    ]);
-    const ownerId = asString(owner.Item?.actor_aad_object_id);
-    return { isAdmin: ownerId === actorId || admin.Item?.principal_type === 'admin', ...(ownerId ? { ownerId } : {}) };
+    const owner = await this.#owner(tenantId);
+    const ownerId = asString(owner?.actor_aad_object_id);
+    const installationId = asString(owner?.installation_id);
+    return { isAdmin: !!ownerId && (ownerId === actorId || (owner?.admin_aad_object_ids instanceof Set && owner.admin_aad_object_ids.has(actorId))), ...(ownerId ? { ownerId } : {}), ...(installationId ? { installationId } : {}) };
   }
 
   async listAdmins(tenantId: string): Promise<{ readonly ownerId: string; readonly adminIds: readonly string[] }> {
     assertPresent(tenantId);
-    const items = await this.#queryTenant(this.#tenantPrincipalsTable, tenantId);
-    const owner = items.find(item => item.principal_type === 'owner');
+    const owner = await this.#owner(tenantId);
     const ownerId = asString(owner?.actor_aad_object_id);
     if (!ownerId) throw new Error('workspace not bound');
-    const adminIds = items.filter(item => item.principal_type === 'admin')
-      .map(item => asString(item.actor_aad_object_id)).filter((id): id is string => id !== undefined).sort();
+    const adminIds = owner?.admin_aad_object_ids instanceof Set
+      ? [...owner.admin_aad_object_ids].filter((id): id is string => typeof id === 'string').sort() : [];
     return { ownerId, adminIds };
   }
 
-  async addAdmin(tenantId: string, actorId: string): Promise<void> {
-    assertPresent(tenantId, actorId);
-    const owner = await this.#client.send<{ readonly Item?: Record<string, unknown> }>({ operation: 'get', input: { TableName: this.#tenantPrincipalsTable, Key: principalDdbKey(tenantId, ownerPrincipal), ConsistentRead: true } });
-    if (asString(owner.Item?.actor_aad_object_id) === actorId) throw new TenantOwnerAlreadyAdminError();
-    try {
-      await this.#client.send({ operation: 'put', input: {
-        TableName: this.#tenantPrincipalsTable,
-        Item: { ...principalDdbKey(tenantId, `admin#${keyPart(actorId)}`), principal_type: 'admin', actor_aad_object_id: actorId, created_at: nowIso(this.#now), updated_at: nowIso(this.#now) },
-        ConditionExpression: `attribute_not_exists(${principalKey})`,
-      } });
-    } catch (error) {
-      if (!isConditionalCheckFailed(error)) throw error;
-    }
+  async addAdmin(tenantId: string, actorId: string, installationId: string): Promise<void> {
+    await this.#changeAdmin(tenantId, actorId, installationId, 'ADD');
   }
 
-  async removeAdmin(tenantId: string, actorId: string): Promise<void> {
-    assertPresent(tenantId, actorId);
-    const owner = await this.#client.send<{ readonly Item?: Record<string, unknown> }>({ operation: 'get', input: { TableName: this.#tenantPrincipalsTable, Key: principalDdbKey(tenantId, ownerPrincipal), ConsistentRead: true } });
-    if (asString(owner.Item?.actor_aad_object_id) === actorId) throw new TenantOwnerRemovalError();
-    try {
-      await this.#client.send({ operation: 'delete', input: { TableName: this.#tenantPrincipalsTable, Key: principalDdbKey(tenantId, `admin#${keyPart(actorId)}`), ConditionExpression: `attribute_exists(${principalKey})` } });
-    } catch (error) {
-      if (!isConditionalCheckFailed(error)) throw error;
-    }
+  async removeAdmin(tenantId: string, actorId: string, installationId: string): Promise<void> {
+    await this.#changeAdmin(tenantId, actorId, installationId, 'DELETE');
   }
 
-  async deleteWorkspace(tenantId: string): Promise<void> {
-    assertPresent(tenantId);
+  async #owner(tenantId: string): Promise<Record<string, unknown> | undefined> {
+    const result = await this.#client.send<{ readonly Item?: Record<string, unknown> }>({ operation: 'get', input: {
+      TableName: this.#tenantPrincipalsTable, Key: principalDdbKey(tenantId, ownerPrincipal), ConsistentRead: true,
+    } });
+    return result.Item?.principal_type === 'owner' ? result.Item : undefined;
+  }
+
+  async #changeAdmin(tenantId: string, actorId: string, installationId: string, action: 'ADD' | 'DELETE'): Promise<void> {
+    assertPresent(tenantId, actorId, installationId);
+    const owner = await this.#owner(tenantId);
+    if (asString(owner?.installation_id) !== installationId) throw new Error('workspace installation has changed');
+    if (asString(owner?.actor_aad_object_id) === actorId) {
+      throw action === 'ADD' ? new TenantOwnerAlreadyAdminError() : new TenantOwnerRemovalError();
+    }
+    // Keep the generation from the original authorization check: an old
+    // command must not adopt a replacement installation after an async wait.
+    await this.#client.send({ operation: 'update', input: {
+      TableName: this.#tenantPrincipalsTable, Key: principalDdbKey(tenantId, ownerPrincipal),
+      UpdateExpression: `${action} admin_aad_object_ids :admin`,
+      ConditionExpression: 'installation_id = :installationId',
+      ExpressionAttributeValues: { ':installationId': installationId, ':admin': new Set([actorId]) },
+    } });
+  }
+
+  async deleteWorkspace(tenantId: string, installationId: string): Promise<void> {
+    assertPresent(tenantId, installationId);
+    const owner = await this.#owner(tenantId);
+    if (!owner) return;
+    if (asString(owner.installation_id) !== installationId) throw new Error('workspace installation has changed');
     // Cleanup can exceed a transaction's item limit. Keep the owner until
     // the final delete so an interrupted uninstall remains authorized to retry.
     const policies = await this.#queryTenant(this.#channelPoliciesTable, tenantId);
@@ -230,7 +239,11 @@ export class TeamsDataStore {
       const value = asString(item[principalKey]);
       if (value && value !== ownerPrincipal) await this.#delete(this.#tenantPrincipalsTable, principalDdbKey(tenantId, value));
     }
-    await this.#delete(this.#tenantPrincipalsTable, principalDdbKey(tenantId, ownerPrincipal));
+    await this.#client.send({ operation: 'delete', input: {
+      TableName: this.#tenantPrincipalsTable, Key: principalDdbKey(tenantId, ownerPrincipal),
+      ConditionExpression: 'installation_id = :installationId',
+      ExpressionAttributeValues: { ':installationId': installationId },
+    } });
   }
 
   async purgeResourceFromTenant(tenantId: string, resourceId: string): Promise<void> {
@@ -261,17 +274,19 @@ export class TeamsDataStore {
       'qurl_api_key = :apiKey',
       'updated_at = :now',
       ...(credential.keyId !== undefined ? ['qurl_key_id = :keyId'] : []),
+      ...(credential.bindingId !== undefined ? ['qurl_binding_id = :bindingId'] : []),
       ...(credential.keyPrefix !== undefined ? ['qurl_key_prefix = :keyPrefix'] : []),
     ];
     const removeExpressions = [
       ...(credential.keyId === undefined ? ['qurl_key_id'] : []),
+      ...(credential.bindingId === undefined ? ['qurl_binding_id'] : []),
       ...(credential.keyPrefix === undefined ? ['qurl_key_prefix'] : []),
     ];
     await this.#client.send({ operation: 'update', input: {
       TableName: this.#tenantCredentialsTable,
       Key: { tenant_id: tenantId },
       UpdateExpression: `SET ${setExpressions.join(', ')}${removeExpressions.length ? ` REMOVE ${removeExpressions.join(', ')}` : ''}`,
-      ExpressionAttributeValues: { ':apiKey': storedApiKey, ':now': credential.updatedAt ?? nowIso(this.#now), ...(credential.keyId !== undefined ? { ':keyId': credential.keyId } : {}), ...(credential.keyPrefix !== undefined ? { ':keyPrefix': credential.keyPrefix } : {}) },
+      ExpressionAttributeValues: { ':apiKey': storedApiKey, ':now': credential.updatedAt ?? nowIso(this.#now), ...(credential.keyId !== undefined ? { ':keyId': credential.keyId } : {}), ...(credential.bindingId !== undefined ? { ':bindingId': credential.bindingId } : {}), ...(credential.keyPrefix !== undefined ? { ':keyPrefix': credential.keyPrefix } : {}) },
     } });
   }
 
@@ -284,8 +299,9 @@ export class TeamsDataStore {
       ? await this.#credentialCipher.decrypt(tenantId, apiKey)
       : apiKey;
     const keyId = asString(output.Item?.qurl_key_id);
+    const bindingId = asString(output.Item?.qurl_binding_id);
     const keyPrefix = asString(output.Item?.qurl_key_prefix);
-    return { apiKey: decryptedApiKey, ...(keyId ? { keyId } : {}), ...(keyPrefix ? { keyPrefix } : {}) };
+    return { apiKey: decryptedApiKey, ...(keyId ? { keyId } : {}), ...(bindingId ? { bindingId } : {}), ...(keyPrefix ? { keyPrefix } : {}) };
   }
 
   async savePersonalConversationRef(tenantId: string, actorAadObjectId: string, ref: PersonalConversationRef): Promise<void> {
@@ -383,6 +399,7 @@ export class TeamsDataStore {
   #queryTenant(tableName: string, tenantId: string, sortKey?: { readonly sortKeyName: string; readonly sortKeyPrefix: string }): Promise<readonly Record<string, unknown>[]> {
     return this.#queryAll({
       TableName: tableName,
+      ConsistentRead: true,
       KeyConditionExpression: `${tenantKey} = :tenant${sortKey === undefined ? '' : ` AND begins_with(${sortKey.sortKeyName}, :policyPrefix)`}`,
       ExpressionAttributeValues: { ':tenant': tenantId, ...(sortKey === undefined ? {} : { ':policyPrefix': sortKey.sortKeyPrefix }) },
     });

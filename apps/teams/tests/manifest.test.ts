@@ -1,10 +1,14 @@
-import { readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { describe, expect, it } from 'vitest';
 // @ts-expect-error -- plain ESM build script, intentionally not TypeScript.
 import { buildPackage, renderManifest } from '../manifest/build.mjs';
 
 const template = readFileSync(join(import.meta.dirname, '..', 'manifest', 'manifest.template.json'), 'utf8');
+const buildScript = join(import.meta.dirname, '..', 'manifest', 'build.mjs');
 const BOT_UUID = 'a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d';
 const DOMAIN = 'teams.connector.example';
 
@@ -12,6 +16,32 @@ const render = (overrides: Record<string, string> = {}) =>
   renderManifest(template, { env: 'sandbox', appId: BOT_UUID, domain: DOMAIN, ...overrides });
 
 describe('teams app manifest', () => {
+  it('does not run the CLI when imported by another build.mjs', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'qurl teams manifest '));
+    const entrypoint = join(dir, 'build.mjs');
+    writeFileSync(entrypoint, `import ${JSON.stringify(pathToFileURL(buildScript).href)};\nprocess.stdout.write('imported');\n`);
+    try {
+      const result = spawnSync(process.execPath, [entrypoint], { encoding: 'utf8' });
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stdout).toBe('imported');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('runs the CLI when invoked through a differently named symlink', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'qurl teams manifest '));
+    const entrypoint = join(dir, 'qurl-package');
+    symlinkSync(buildScript, entrypoint);
+    try {
+      const result = spawnSync(process.execPath, [entrypoint], { encoding: 'utf8' });
+      expect(result.status, result.stderr).toBe(2);
+      expect(result.stderr).toContain('usage: node manifest/build.mjs');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('ships no real identifiers in the committed template', () => {
     // qurl-integrations is PUBLIC. The public marketing URLs on layerv.ai are
     // fine and are locked by D10; what must never appear here is the pre-prod

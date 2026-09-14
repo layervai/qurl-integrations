@@ -43,4 +43,27 @@ describe('TeamsSdkMessagePoster', () => {
     await expect(poster.sendText('https://smba.trafficmanager.net/teams', 'conversation', 'hello', controller.signal)).rejects.toThrow('cancelled');
     expect(calls).toBe(0);
   });
+
+  it('resolves an ordinary mention through the conversation member endpoint and normalizes its directory ID', async () => {
+    const requests: Array<{ readonly url: string; readonly config: unknown }> = [];
+    const poster = new TeamsSdkMessagePoster({ api: { http: {
+      get: async (url: string, config: unknown) => {
+        requests.push({ url, config });
+        return { data: { id: '29:member', name: 'Adele', objectId: 'ABCDEFAB-1234-4234-8234-ABCDEFABCDEF' } };
+      },
+    } } } as never);
+    const controller = new AbortController();
+    await expect(poster.resolveMemberAadObjectId({
+      serviceUrl: 'https://smba.trafficmanager.net/amer/', conversation: { id: '19:channel;messageid=42' },
+    }, '29:member', controller.signal)).resolves.toBe('abcdefab-1234-4234-8234-abcdefabcdef');
+    expect(requests).toEqual([{
+      url: 'https://smba.trafficmanager.net/amer/v3/conversations/19%3Achannel%3Bmessageid%3D42/members/29%3Amember',
+      config: { timeout: 15_000, signal: controller.signal },
+    }]);
+  });
+
+  it('returns no directory identity when the member lookup has none', async () => {
+    const poster = new TeamsSdkMessagePoster({ api: { http: { get: async () => ({ data: { id: '29:member', name: 'Adele' } }) } } } as never);
+    await expect(poster.resolveMemberAadObjectId({ serviceUrl: 'https://smba.trafficmanager.net/teams', conversation: { id: 'conversation' } }, '29:member')).resolves.toBeUndefined();
+  });
 });

@@ -118,10 +118,12 @@ export function installOAuthRoutes(options: TeamsServerOptions): void {
         // OAuthCallbackCore rejects an absent cookie before it consumes state.
         const completion = await options.callback.complete({ state, code, ...(cookieState === undefined ? {} : { cookieState }) });
         if (completion.binding.status === 'conflict') {
-          status = 409;
+          status = completion.binding.reason === 'actor_not_authorized' ? 403 : 409;
           title = 'qURL setup blocked';
           message = completion.binding.reason === 'upstream_binding_cleanup_required'
             ? 'A previous qURL installation still has an upstream tenant binding. Ask your qURL operator to remove that binding before reinstalling.'
+            : completion.binding.reason === 'actor_not_authorized'
+            ? 'qURL could not authorize this setup. Ask your qURL operator to check the account permissions and Teams application configuration, then run setup again.'
             : 'This Teams tenant is already connected to another qURL account.';
         } else {
           status = 200;
@@ -250,6 +252,8 @@ export async function createProductionTeamsConfig(): Promise<TeamsProductionConf
   const region = env('AWS_REGION');
   const appId = env('TEAMS_APP_ID');
   const appPassword = env('TEAMS_APP_PASSWORD');
+  const botTenantId = env('BOT_TENANT_ID').toLowerCase();
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(botTenantId)) throw new Error('BOT_TENANT_ID must be the bot registration tenant UUID');
   const connectorImage = env('QURL_IMAGE');
   validateTunnelImageRef(connectorImage);
   const connectorHub = connectorHubFromEnv();
@@ -276,9 +280,9 @@ export async function createProductionTeamsConfig(): Promise<TeamsProductionConf
     fetch: fetch as FetchLike,
   });
   const verifier = createIdTokenVerifier({ issuer: auth0Issuer, audience: env('AUTH0_CLIENT_ID'), fetch: fetch as FetchLike });
-  const binder = new HttpProviderBinder({ endpoint: qurlEndpoint, data });
   // JSON lines are required by the CloudWatch application alarm filters.
   const logger = new RedactingLogger(jsonConsoleSink(runtimeConsole));
+  const binder = new HttpProviderBinder({ endpoint: qurlEndpoint, data, logger });
   const callback = new OAuthCallbackCore({ state: oauthState, tokenClient, idTokenVerifier: verifier, providerBinder: binder, logger });
   const expressApp = express();
   const configuredServiceUrl = process.env.TEAMS_SERVICE_URL?.trim();
@@ -286,6 +290,7 @@ export async function createProductionTeamsConfig(): Promise<TeamsProductionConf
   const app = new App({
     clientId: appId,
     clientSecret: appPassword,
+    tenantId: botTenantId,
     httpServerAdapter: new ExpressAdapter(expressApp),
     messagingEndpoint: '/api/messages',
     ...(serviceUrl === undefined ? {} : { serviceUrl }),
@@ -303,16 +308,18 @@ export async function createProductionTeamsConfig(): Promise<TeamsProductionConf
     setup: new TeamsSetupLinkBuilder({ state: oauthState, tokenClient, setupBaseUrl: baseUrl }),
     logger,
   });
-  app.on('message', async ({ activity, reply }) => {
+  app.on('message', ({ activity }) => {
     const normalized = toTeamsActivity(activity);
     if (normalized) {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), ACTIVITY_TIMEOUT_MS);
-      // The Teams SDK replies against its authenticated inbound conversation
-      // reference. validateTeamsServiceUrl intentionally guards only qURL's
-      // DM and other out-of-band Connector sends in TeamsSdkMessagePoster.
-      try { await bot.handleActivity(normalized, controller.signal, async text => { await reply(text); }); }
-      finally { clearTimeout(timeout); }
+      // TODO(upstream-contract): Teams retries activities held past 15 seconds.
+      // Acknowledge after SDK authentication, then complete in this service.
+      // The existing message adapter preserves the conversation/thread and
+      // applies its HTTP timeout and this signal to replies as well as DMs.
+      void bot.handleActivity(normalized, controller.signal)
+        .catch(error => { logger.error('Teams activity handling failed', { error }); })
+        .finally(() => { clearTimeout(timeout); });
     }
   });
   app.on('activity', async ({ activity }) => {

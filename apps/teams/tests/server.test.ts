@@ -7,7 +7,8 @@ import { Readable } from 'node:stream';
 import type { Application, Request } from 'express';
 import express from 'express';
 import type { App } from '@microsoft/teams.apps';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { TeamsBot } from '../src/bot.js';
 import type { OAuthCallbackCore } from '../src/callback.js';
 import type { ConfidentialTokenClient } from '../src/interfaces.js';
 import { createProductionTeamsConfig, createTeamsServer, httpsIssuer, httpsOrigin, installOAuthRoutes, isMainModule } from '../src/server.js';
@@ -96,6 +97,16 @@ describe('Teams OAuth routes', () => {
     const response = await invoke(handler, { state: OPAQUE_STATE, code: 'code' }, `qurl_teams_oauth_state=${OPAQUE_STATE}`);
     expect(response.status).toBe(409);
     expect(response.body).toContain('Ask your qURL operator to remove that binding before reinstalling');
+  });
+
+  it('identifies authorization failure without claiming a different account owns the tenant', async () => {
+    const handler = routes({ complete: async () => ({ binding: { status: 'conflict', reason: 'actor_not_authorized' } }) }).get('/oauth/qurl/callback');
+    if (!handler) throw new Error('callback route was not registered');
+    const response = await invoke(handler, { state: OPAQUE_STATE, code: 'code' }, `qurl_teams_oauth_state=${OPAQUE_STATE}`);
+    expect(response.status).toBe(403);
+    expect(response.body).toContain('could not authorize this setup');
+    expect(response.body).not.toContain('another qURL account');
+    expect(response.headers.get('Set-Cookie')).toContain('Max-Age=0');
   });
 });
 
@@ -210,5 +221,99 @@ describe('Teams HTTP body limits', () => {
     const error = await new Promise<unknown>(resolve => parser(request, {}, resolve));
     expect(error).toMatchObject({ status: 413, type: 'entity.too.large' });
     expect(server).toBeDefined();
+  });
+});
+
+describe('Teams production message handling', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+    vi.useRealTimers();
+  });
+
+  function configureEnvironment(): void {
+    const values = {
+      TEAMS_BASE_URL: 'https://teams.example.com', QURL_ENDPOINT: 'https://qurl.example.com', AWS_REGION: 'us-east-1',
+      TEAMS_APP_ID: '11111111-1111-4111-8111-111111111111', TEAMS_APP_PASSWORD: 'synthetic-bot-secret',
+      BOT_TENANT_ID: '22222222-2222-4222-8222-222222222222',
+      QURL_IMAGE: `ghcr.io/layervai/qurl@sha256:${'a'.repeat(64)}`,
+      QURL_TEAMS_TENANT_PRINCIPALS_TABLE: 'principals', QURL_TEAMS_CHANNEL_POLICIES_TABLE: 'policies',
+      QURL_TEAMS_PERSONAL_CONVERSATIONS_TABLE: 'conversations', QURL_TEAMS_TENANT_CREDENTIALS_TABLE: 'credentials',
+      QURL_TEAMS_TENANT_CREDENTIALS_KMS_KEY_ARN: 'synthetic-kms-key', OAUTH_STATE_TABLE: 'oauth-state',
+      AUTH0_DOMAIN: 'https://auth.example.com', AUTH0_CLIENT_ID: 'synthetic-oauth-client',
+      AUTH0_CLIENT_SECRET: 'synthetic-oauth-secret', AUTH0_AUDIENCE: 'https://qurl.example.com',
+      QURL_CONNECTOR_HUB_HOST: '', QURL_CONNECTOR_HUB_PORT: '', QURL_CONNECTOR_HUB_SERVER_PUBLIC_KEY_B64: '',
+      AUTH0_CLIENT_SECRET_FALLBACK: '', TEAMS_SERVICE_URL: '', HOST: '', PORT: '',
+    };
+    for (const [name, value] of Object.entries(values)) vi.stubEnv(name, value);
+  }
+
+  const activity = {
+    type: 'message', id: 'activity-1', channelId: 'msteams', text: 'qurl help',
+    serviceUrl: 'https://smba.trafficmanager.net/amer/',
+    from: { id: '29:actor', aadObjectId: '33333333-3333-4333-8333-333333333333' },
+    recipient: { id: '28:bot' },
+    conversation: { id: '19:channel;messageid=activity-1', conversationType: 'channel' },
+    channelData: { tenant: { id: '44444444-4444-4444-8444-444444444444' }, channel: { id: '19:channel' } },
+  };
+
+  it.each(['', 'common', 'botframework.com', 'invalid-tenant'])('rejects an invalid registration tenant %j before startup', async tenantId => {
+    configureEnvironment();
+    vi.stubEnv('BOT_TENANT_ID', tenantId);
+    await expect(createProductionTeamsConfig().then(() => undefined)).rejects.toThrow('BOT_TENANT_ID');
+  });
+
+  it('passes the bot registration tenant explicitly, independently of customer tenant IDs', async () => {
+    configureEnvironment();
+    vi.stubEnv('BOT_TENANT_ID', '  ABCDEFAB-1234-4234-8234-ABCDEFABCDEF  ');
+    vi.stubEnv('TENANT_ID', '55555555-5555-4555-8555-555555555555');
+    const runtime = await createProductionTeamsConfig();
+    expect(runtime.app.credentials?.tenantId).toBe('abcdefab-1234-4234-8234-abcdefabcdef');
+  });
+
+  it('acknowledges a slow command before completion and cancels its real reply at the activity deadline', async () => {
+    configureEnvironment();
+    vi.useFakeTimers();
+    vi.spyOn(TeamsBot.prototype, 'execute').mockImplementation(async () => {
+      await new Promise(resolve => setTimeout(resolve, 20_000));
+      return 'qURL result';
+    });
+    const runtime = await createProductionTeamsConfig();
+    // Only the two network boundaries are replaced. The production route,
+    // TeamsBot reply selection, SDK client, and request options stay real.
+    const client = runtime.app.api.http as unknown as {
+      token?: () => Promise<undefined>;
+      http: { defaults: { adapter: (config: { url: string; data: string; timeout: number; signal?: AbortSignal }) => Promise<never> } };
+    };
+    client.token = async () => undefined;
+    let sent: { readonly url: string; readonly body: Record<string, unknown>; readonly timeout: number; readonly signal?: AbortSignal } | undefined;
+    let cancelled = false;
+    client.http.defaults.adapter = async config => {
+      sent = { url: config.url, body: JSON.parse(config.data) as Record<string, unknown>, timeout: config.timeout, ...(config.signal ? { signal: config.signal } : {}) };
+      return new Promise((_resolve, reject) => {
+        config.signal?.addEventListener('abort', () => {
+          cancelled = true;
+          reject(new Error('synthetic cancelled delivery'));
+        }, { once: true });
+      });
+    };
+    // handleActivity logs a failed send; keep that expected test error local.
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    let acknowledged = false;
+    const response = runtime.app.onActivity({ body: activity, token: { serviceUrl: activity.serviceUrl } } as never)
+      .then(value => { acknowledged = true; return value; });
+    await vi.advanceTimersByTimeAsync(1);
+    expect(acknowledged).toBe(true);
+    await expect(response).resolves.toMatchObject({ status: 200 });
+    expect(sent).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(19_999);
+    expect(sent).toMatchObject({
+      url: 'https://smba.trafficmanager.net/amer/v3/conversations/19%3Achannel%3Bmessageid%3Dactivity-1/activities',
+      body: { type: 'message', text: 'qURL result', replyToId: 'activity-1' }, timeout: 15_000,
+    });
+    expect(sent?.signal?.aborted).toBe(false);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(sent?.signal?.aborted).toBe(true);
+    expect(cancelled).toBe(true);
   });
 });

@@ -6,6 +6,11 @@ a historical S04a implementation provenance record, not the current feature
 status or deployment documentation. See [the package README](../README.md) for
 the implemented runtime and Connector flows.
 
+Current runtime update: authorization now includes `qurl:agent` and
+`prompt=consent`; the HTTP provider binder, encrypted credential persistence,
+and live credential ownership checks are implemented. The rows below retain
+the original S04a scope and deferrals as provenance.
+
 Sources reviewed in order:
 
 1. Discord #853 live files: `apps/discord/src/routes/qurl-oauth.js`,

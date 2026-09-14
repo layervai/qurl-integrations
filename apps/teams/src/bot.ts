@@ -3,7 +3,7 @@ import { isChannelAlias } from './alias.js';
 import type { TeamsActivity } from './activity.js';
 import { deriveScope, normalizeActivityText } from './activity.js';
 import type { TeamsMessagePoster } from './connector.js';
-import { idempotencyKey } from './qurl-client.js';
+import { idempotencyKey, QurlHttpError } from './qurl-client.js';
 import type { QurlApiKey, QurlClient, QurlResource } from './qurl-client.js';
 import { parseCommand } from './parser.js';
 import type { TeamsCommand } from './parser.js';
@@ -135,17 +135,18 @@ export class TeamsBot {
       if (!this.#options.feedback) throw new UserFacingError('Feedback is not enabled for this qURL installation.');
       await this.#options.feedback({ tenantId, actorId, message: command.text ?? '' }); return 'Thanks. The qURL team received your feedback.';
     }
-    if (ADMIN_COMMANDS.has(command.verb)) {
-      const admin = await this.#options.data.checkAdmin(tenantId, actorId);
-      if (!admin.isAdmin) throw new UserFacingError('This command is limited to the tenant owner and qURL admins.');
-    }
+    const admin = ADMIN_COMMANDS.has(command.verb) ? await this.#options.data.checkAdmin(tenantId, actorId) : undefined;
+    if (admin && !admin.isAdmin) throw new UserFacingError('This command is limited to the tenant owner and qURL admins.');
     if (command.verb === 'admins') { const admins = await this.#options.data.listAdmins(tenantId); return `Tenant owner: ${admins.ownerId}\nAdmins: ${admins.adminIds.length ? admins.adminIds.join(', ') : 'none'}`; }
-    const mentionedAadObjectId = command.userId === undefined ? undefined : activity.entities?.find(entity => entity.mentioned?.id === command.userId)?.mentioned?.aadObjectId?.trim().toLowerCase();
     if (command.verb === 'add' || command.verb === 'remove') {
-      if (!mentionedAadObjectId) throw new UserFacingError('The Teams user mention has no AAD object id');
+      if (!admin?.installationId) throw new Error('workspace installation is unavailable');
+      const mention = activity.entities?.find(entity => entity.type === 'mention' && entity.mentioned?.id === command.userId)?.mentioned;
+      const mentionedAadObjectId = (mention?.aadObjectId
+        || (mention?.id ? await this.#options.messages.resolveMemberAadObjectId?.(activity, mention.id, signal) : undefined))?.trim().toLowerCase();
+      if (!mentionedAadObjectId) throw new UserFacingError('This Teams member could not be resolved to a directory identity. Select a user mention and try again.');
       try {
-        if (command.verb === 'add') await this.#options.data.addAdmin(tenantId, mentionedAadObjectId);
-        else await this.#options.data.removeAdmin(tenantId, mentionedAadObjectId);
+        if (command.verb === 'add') await this.#options.data.addAdmin(tenantId, mentionedAadObjectId, admin.installationId);
+        else await this.#options.data.removeAdmin(tenantId, mentionedAadObjectId, admin.installationId);
       } catch (error) {
         if (error instanceof TenantOwnerAlreadyAdminError) throw new UserFacingError('The tenant owner already has qURL admin access.');
         if (error instanceof TenantOwnerRemovalError) throw new UserFacingError('The tenant owner cannot be removed.');
@@ -154,19 +155,20 @@ export class TeamsBot {
       return `${command.verb === 'add' ? 'Added' : 'Removed'} Teams user \`${command.userId}\` ${command.verb === 'add' ? 'as a qURL admin' : 'from qURL admins'} for this tenant.`;
     }
     if (command.verb === 'uninstall') {
+      if (!admin?.installationId) throw new Error('workspace installation is unavailable');
       const credential = await this.#options.data.tenantCredential(tenantId);
       let upstreamRevocationPending = credential !== undefined && credential.keyId === undefined;
       if (credential?.keyId) {
         try {
           const qurl = await this.#qurl(tenantId);
           await qurl.revokeApiKey(credential.keyId, signal);
-        } catch {
-          // Local teardown must remain recoverable even when qURL is
-          // unavailable. An operator can revoke the upstream key later.
+        } catch (error) {
+          if (!(error instanceof QurlHttpError) || (error.status !== 401 && error.status !== 403)) throw error;
+          this.#options.logger?.warn('Tenant credential requires upstream cleanup after local disconnect', { tenantId, keyId: credential.keyId, error });
           upstreamRevocationPending = true;
         }
       }
-      await this.#options.data.deleteWorkspace(tenantId);
+      await this.#options.data.deleteWorkspace(tenantId, admin.installationId);
       return upstreamRevocationPending
         ? 'Disconnected qURL from this Teams tenant. Upstream API-key revocation may require operator follow-up.'
         : 'Disconnected qURL from this Teams tenant. If a later reinstall reports a retained upstream binding, contact your qURL operator for cleanup.';
@@ -187,19 +189,19 @@ export class TeamsBot {
     }
     const qurl = await this.#qurl(tenantId);
     if (command.verb === 'protect-connector') return this.protectConnector(qurl, activity, tenantId, scopeId, command, signal);
+    if (command.verb === 'get') return this.get(qurl, activity, tenantId, scopeId, command, signal);
     const resources = await this.resources(qurl, signal);
     if (command.verb === 'list') return this.list(tenantId, scopeId, resources);
-    if (command.verb === 'get') return this.get(qurl, activity, tenantId, scopeId, resources, command, signal);
     if (command.verb === 'protect-url') return this.protectUrl(qurl, activity, tenantId, scopeId, resources, command, signal);
     if (command.verb === 'set-alias') return this.setAlias(qurl, tenantId, scopeId, resources, command, signal);
     if (command.verb === 'set-display-name' || command.verb === 'unset-display-name') {
       const setting = command.verb === 'set-display-name';
-      const resource = this.resolve(resources, command.resource ?? '');
+      const resource = await this.resolveInScope(tenantId, scopeId, resources, command.resource ?? '');
       await qurl.updateResource(resource.resourceId, setting ? command.text ?? '' : '', signal);
       return `${setting ? 'Updated' : 'Reset'} display name for \`$${resource.resourceId}\`.`;
     }
     if (command.verb === 'revoke') {
-      const resource = this.resolve(resources, command.resource ?? '');
+      const resource = await this.resolveInScope(tenantId, scopeId, resources, command.resource ?? '');
       await qurl.deleteResource(resource.resourceId, signal);
       await this.#options.data.purgeResourceFromTenant(tenantId, resource.resourceId);
       return `Revoked resource \`$${resource.resourceId}\`.`;
@@ -274,27 +276,32 @@ export class TeamsBot {
     return resource;
   }
 
-  async get(qurl: QurlClient, activity: TeamsActivity, tenantId: string, scopeId: string, resources: readonly QurlResource[], command: TeamsCommand, signal?: AbortSignal): Promise<string> {
+  async resolveInScope(tenantId: string, scopeId: string, resources: readonly QurlResource[], token: string): Promise<QurlResource> {
+    const resourceId = await this.#options.data.lookupScopeAlias(tenantId, scopeId, token);
+    return this.resolve(resources, resourceId ?? token);
+  }
+
+  async get(qurl: QurlClient, activity: TeamsActivity, tenantId: string, scopeId: string, command: TeamsCommand, signal?: AbortSignal): Promise<string> {
     const token = command.resource ?? '';
-    const [allowed, localAliasResourceId] = await Promise.all([
+    const [allowed, aliasResourceId] = await Promise.all([
       this.#options.data.allowedResourceIds(tenantId, scopeId),
       this.#options.data.lookupScopeAlias(tenantId, scopeId, token),
     ]);
-    // Only resources exposed in this channel are resolvable, whether the user
-    // typed a channel alias or the resource id itself.
-    const visible = resources.filter(item => allowed.has(item.resourceId));
-    const resource = this.resolve(visible, localAliasResourceId ?? token);
+    // A bound channel alias already names the resource, as in Slack. The API
+    // validates its live status at mint; only unbound tokens need discovery.
+    const resourceId = aliasResourceId ?? this.resolve((await this.resources(qurl, signal)).filter(item => allowed.has(item.resourceId)), token).resourceId;
+    if (!allowed.has(resourceId)) throw new UserFacingError(`Resource not found: ${token}`);
     const wantsDm = command.flags.dm === 'true';
     const dmActor = activity.from?.aadObjectId?.trim().toLowerCase() ?? '';
     const ref = wantsDm && dmActor ? await this.#options.data.personalConversationRef(tenantId, dmActor) : undefined;
     if (wantsDm && !ref) throw new UserFacingError('Open a personal chat with the bot before using dm:true.');
     const output = await qurl.create({
-      resourceId: resource.resourceId,
+      resourceId,
       expiresIn: '1m',
       oneTimeUse: true,
       maxSessions: 1,
       sessionDuration: '1h',
-      idempotencyKey: idempotencyKey(tenantId, scopeId, activity.from?.id ?? '', resource.resourceId, this.#activityIdempotencyField(activity)),
+      idempotencyKey: idempotencyKey(tenantId, scopeId, activity.from?.id ?? '', resourceId, this.#activityIdempotencyField(activity)),
       ...(command.flags.reason ? { label: command.flags.reason } : {}),
     }, signal);
     if (ref) {
@@ -313,7 +320,7 @@ export class TeamsBot {
         type: 'url',
         idempotencyKey: idempotencyKey(tenantId, scopeId, activity.from?.id ?? '', value, this.#activityIdempotencyField(activity)),
       }, signal)
-      : this.resolve(resources, value.replace(/^\$/, ''));
+      : await this.resolveInScope(tenantId, scopeId, resources, value.replace(/^\$/, ''));
     if (!creating && resource.type !== 'url') throw new UserFacingError('Only URL resources can be protected with protect-url');
     const resolvedAlias = command.flags.as ?? this.#channelAliasFor(resource);
     await this.#bindAlias(tenantId, scopeId, resolvedAlias, resource.resourceId);
@@ -340,7 +347,7 @@ export class TeamsBot {
   }
 
   async setAlias(_qurl: QurlClient, tenantId: string, scopeId: string, resources: readonly QurlResource[], command: TeamsCommand, _signal?: AbortSignal): Promise<string> {
-    const resource = this.resolve(resources, command.target ?? '');
+    const resource = await this.resolveInScope(tenantId, scopeId, resources, command.target ?? '');
     const alias = command.alias ?? '';
     await this.#bindAlias(tenantId, scopeId, alias, resource.resourceId);
     await this.#options.data.exposeResource(tenantId, scopeId, resource.resourceId);
@@ -419,15 +426,17 @@ export class TeamsBot {
     } catch (error) {
       // HTTP cleanup keeps its own deadline after the activity is cancelled.
       if (token) {
-        try { await qurl.revokeApiKey(token.keyId); } catch { /* preserve the failure without leaking the bootstrap key */ }
+        try { await qurl.revokeApiKey(token.keyId); }
+        catch (cleanupError) { this.#options.logger?.warn('Connector enrollment credential requires operator cleanup', { tenantId, keyId: token.keyId, error: cleanupError }); }
       }
-      // Resource and alias changes may predate this request or be concurrently updated. The one-time credential is the only newly-created secret and is revoked above.
+      // Resource and alias changes may predate this request or be concurrently updated.
       // A previously-off Connector owns the `on` transition this request made,
       // so compensate it back off. A previously-on one is left alone: its live
       // daemon reacquires the rotated epoch, and turning it off would be an
       // outage for a device this failure never touched.
       if (previousSharing.desiredState !== 'on') {
-        try { await qurl.stopSharing(resource.resourceId); } catch { /* preserve the original failure */ }
+        try { await qurl.stopSharing(resource.resourceId); }
+        catch (cleanupError) { this.#options.logger?.warn('Connector sharing rollback requires operator cleanup', { tenantId, resourceId: resource.resourceId, error: cleanupError }); }
       }
       throw error;
     }

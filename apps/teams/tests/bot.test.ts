@@ -355,6 +355,63 @@ describe('Teams bot primitives', () => {
     expect(createdResourceId).toBe('resource-1');
   });
 
+  it('uses the same channel alias for access and mutations despite a colliding account slug', async () => {
+    const targets: string[] = [];
+    const bot = new TeamsBot({
+      qurl: {
+        listResources: async () => ({ resources: [{ resourceId: 'a', type: 'url', slug: 'payroll' }, { resourceId: 'b', type: 'url', slug: 'docs' }] }),
+        create: async ({ resourceId }: { resourceId: string }) => { targets.push(resourceId); return { resourceId, qurlLink: 'https://qurl.example/one' }; },
+        deleteResource: async (id: string) => { targets.push(id); },
+        updateResource: async (id: string) => { targets.push(id); },
+      } as unknown as QurlClient,
+      data: {
+        checkAdmin: async () => ({ isAdmin: true }),
+        lookupScopeAlias: async (_tenant: string, _scope: string, alias: string) => alias === 'docs' ? 'a' : undefined,
+        allowedResourceIds: async () => new Set(['a']),
+        purgeResourceFromTenant: async () => undefined,
+        bindScopeAlias: async (_tenant: string, _scope: string, _alias: string, id: string) => { targets.push(id); },
+        exposeResource: async () => undefined,
+      } as unknown as TeamsDataStore,
+      messages: {} as never,
+      qurlEndpoint: 'https://qurl.example',
+    });
+    for (const text of ['get $docs', 'revoke $docs', 'set-display-name $docs Docs', 'set-alias $new $docs', 'protect-url $docs as:$new']) {
+      await bot.execute({ type: 'message', from: { aadObjectId: 'admin' } }, 'tenant', 'channel', true, parseCommand(text));
+    }
+    expect(targets).toEqual(['a', 'a', 'a', 'a', 'a']);
+  });
+
+  it('resolves an ordinary Teams member mention to its directory identity', async () => {
+    const added: string[] = [];
+    const bot = new TeamsBot({
+      qurl: {} as QurlClient,
+      data: { checkAdmin: async () => ({ isAdmin: true, installationId: 'installation' }), addAdmin: async (_tenant: string, id: string) => { added.push(id); } } as unknown as TeamsDataStore,
+      messages: { resolveMemberAadObjectId: async () => 'member-aad' } as never,
+      qurlEndpoint: 'https://qurl.example',
+    });
+    await bot.execute({ type: 'message', from: { aadObjectId: 'admin' }, entities: [{ type: 'mention', mentioned: { id: '29:member', name: 'Member' } }] },
+      'tenant', 'channel', true, parseCommand('add <@29:member>'));
+    expect(added).toEqual(['member-aad']);
+  });
+
+  it.each(['add', 'remove'])('carries the authorized installation through %s member resolution', async verb => {
+    let installationId = 'old-install';
+    let capturedInstallationId: string | undefined;
+    const changeAdmin = async (_tenant: string, _actor: string, expectedInstallationId: string) => {
+      capturedInstallationId = expectedInstallationId;
+      if (expectedInstallationId !== installationId) throw new Error('workspace installation has changed');
+    };
+    const bot = new TeamsBot({
+      qurl: {} as QurlClient,
+      data: { checkAdmin: async () => ({ isAdmin: true, installationId }), addAdmin: changeAdmin, removeAdmin: changeAdmin } as unknown as TeamsDataStore,
+      messages: { resolveMemberAadObjectId: async () => { installationId = 'new-install'; return 'member-aad'; } } as never,
+      qurlEndpoint: 'https://qurl.example',
+    });
+    await expect(bot.execute({ type: 'message', from: { aadObjectId: 'old-admin' }, entities: [{ type: 'mention', mentioned: { id: '29:member' } }] },
+      'tenant', 'channel', true, parseCommand(`${verb} <@29:member>`))).rejects.toThrow('workspace installation has changed');
+    expect(capturedInstallationId).toBe('old-install');
+  });
+
   it('uses distinct idempotency keys when unexpected activities lack IDs', async () => {
     const keys: string[] = [];
     const bot = new TeamsBot({
@@ -384,13 +441,13 @@ describe('Teams bot primitives', () => {
     const base = { type: 'message' as const, from: { aadObjectId: 'admin' }, channelData: { tenant: { id: 'tenant' }, channel: { id: 'channel' } }, conversation: { id: 'conversation', conversationType: 'channel' } };
     const ownerBot = new TeamsBot({
       qurl: {} as QurlClient,
-      data: { checkAdmin: async () => ({ isAdmin: true }), addAdmin: async () => { throw new TenantOwnerAlreadyAdminError(); } } as unknown as TeamsDataStore,
+      data: { checkAdmin: async () => ({ isAdmin: true, installationId: 'installation' }), addAdmin: async () => { throw new TenantOwnerAlreadyAdminError(); } } as unknown as TeamsDataStore,
       messages: {} as never,
       qurlEndpoint: 'https://api.sandbox.example',
     });
     const removalBot = new TeamsBot({
       qurl: {} as QurlClient,
-      data: { checkAdmin: async () => ({ isAdmin: true }), removeAdmin: async () => { throw new TenantOwnerRemovalError(); } } as unknown as TeamsDataStore,
+      data: { checkAdmin: async () => ({ isAdmin: true, installationId: 'installation' }), removeAdmin: async () => { throw new TenantOwnerRemovalError(); } } as unknown as TeamsDataStore,
       messages: {} as never,
       qurlEndpoint: 'https://api.sandbox.example',
     });
@@ -423,6 +480,24 @@ describe('Teams bot primitives', () => {
 
     await expect(bot.execute(activity, 'tenant-1', 'channel-1', true, parseCommand('list'))).resolves.toMatch(/Visible resource/);
     await expect(bot.execute(activity, 'tenant-1', 'channel-1', true, parseCommand('get $hidden'))).rejects.toThrow('Resource not found');
+  });
+
+  it('mints a channel alias without enumerating the account and rejects a removed channel grant', async () => {
+    let allowed = new Set(['resource-1']);
+    let creates = 0;
+    const bot = new TeamsBot({
+      qurl: {
+        listResources: async () => { throw new Error('A bound channel alias must not enumerate the account'); },
+        create: async ({ resourceId }: { resourceId: string }) => { creates++; expect(resourceId).toBe('resource-1'); return { resourceId, qurlLink: 'https://qurl.example/one' }; },
+      } as unknown as QurlClient,
+      data: { lookupScopeAlias: async () => 'resource-1', allowedResourceIds: async () => allowed } as unknown as TeamsDataStore,
+      messages: {} as never, qurlEndpoint: 'https://qurl.example',
+    });
+    const activity = { type: 'message', from: { aadObjectId: 'actor' } };
+    await expect(bot.execute(activity, 'tenant', 'channel', true, parseCommand('get $docs'))).resolves.toContain('https://qurl.example/one');
+    allowed = new Set();
+    await expect(bot.execute(activity, 'tenant', 'channel', true, parseCommand('get $docs'))).rejects.toThrow('Resource not found');
+    expect(creates).toBe(1);
   });
 
   it('follows a next cursor even when has_more is omitted', async () => {
@@ -792,7 +867,7 @@ describe('Teams bot primitives', () => {
       } as unknown as QurlClient,
       data: {
         checkAdmin: async () => ({ isAdmin: true }),
-        lookupScopeAlias: async () => 'other-resource',
+        lookupScopeAlias: async (_tenant: string, _scope: string, alias: string) => alias === 'docs' ? 'other-resource' : undefined,
       } as unknown as TeamsDataStore,
       messages: {} as never,
       qurlEndpoint: 'https://api.sandbox.example',
@@ -821,12 +896,12 @@ describe('Teams bot primitives', () => {
     expect(unbound).toBe('docs');
   });
 
-  it('always removes local data when uninstalling a damaged or unavailable binding', async () => {
+  it('disconnects a damaged binding but preserves recovery when upstream is unavailable', async () => {
     let deleted = false;
     const bot = new TeamsBot({
       qurl: { revokeApiKey: async () => { throw new Error('qURL unavailable'); } } as unknown as QurlClient,
       data: {
-        checkAdmin: async () => ({ isAdmin: true }),
+        checkAdmin: async () => ({ isAdmin: true, installationId: 'installation' }),
         tenantCredential: async () => ({ apiKey: 'secret' }),
         deleteWorkspace: async () => { deleted = true; },
       } as unknown as TeamsDataStore,
@@ -840,14 +915,35 @@ describe('Teams bot primitives', () => {
     const unavailableBot = new TeamsBot({
       qurl: { revokeApiKey: async () => { throw new Error('qURL unavailable'); } } as unknown as QurlClient,
       data: {
-        checkAdmin: async () => ({ isAdmin: true }),
+        checkAdmin: async () => ({ isAdmin: true, installationId: 'installation' }),
         tenantCredential: async () => ({ apiKey: 'secret', keyId: 'key-1' }),
         deleteWorkspace: async () => { deleted = true; },
       } as unknown as TeamsDataStore,
       messages: {} as never,
       qurlEndpoint: 'https://api.sandbox.example',
     });
-    await expect(unavailableBot.execute({ type: 'message', from: { aadObjectId: 'admin' } }, 'tenant-1', 'personal', false, parseCommand('uninstall'))).resolves.toContain('operator follow-up');
-    expect(deleted).toBe(true);
+    await expect(unavailableBot.execute({ type: 'message', from: { aadObjectId: 'admin' } }, 'tenant-1', 'personal', false, parseCommand('uninstall'))).rejects.toThrow('qURL unavailable');
+    expect(deleted).toBe(false);
+  });
+
+  it('carries the authorized installation through upstream uninstall cleanup', async () => {
+    let installationId = 'old-install';
+    let capturedInstallationId: string | undefined;
+    const bot = new TeamsBot({
+      qurl: { revokeApiKey: async () => { installationId = 'new-install'; } } as unknown as QurlClient,
+      data: {
+        checkAdmin: async () => ({ isAdmin: true, installationId }),
+        tenantCredential: async () => ({ apiKey: 'secret', keyId: 'old-key' }),
+        deleteWorkspace: async (_tenant: string, expectedInstallationId: string) => {
+          capturedInstallationId = expectedInstallationId;
+          if (expectedInstallationId !== installationId) throw new Error('workspace installation has changed');
+        },
+      } as unknown as TeamsDataStore,
+      messages: {} as never,
+      qurlEndpoint: 'https://qurl.example',
+    });
+    await expect(bot.execute({ type: 'message', from: { aadObjectId: 'old-admin' } }, 'tenant', 'personal', false,
+      parseCommand('uninstall'))).rejects.toThrow('workspace installation has changed');
+    expect(capturedInstallationId).toBe('old-install');
   });
 });

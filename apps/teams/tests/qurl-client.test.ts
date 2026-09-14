@@ -109,6 +109,19 @@ describe('qURL HTTP adapter', () => {
     expect(message).not.toContain('plaintext-secret');
   });
 
+  it('retains the non-secret key ID when rejected enrollment authority cannot be revoked', async () => {
+    const client = new HttpQurlClient({
+      endpoint: 'https://api.example.test', apiKey: 'secret',
+      fetch: async (_input, init) => init?.method === 'DELETE'
+        ? new Response(null, { status: 403 })
+        : new Response(JSON.stringify({ data: { key_id: 'key_cleanup', api_key: 'plaintext-secret', kind: 'enrollment_token' } }), { status: 201 }),
+    });
+    const error = await client.createEnrollmentToken('prod', 'attempt').catch((error: Error) => error);
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toContain('key_cleanup');
+    expect((error as Error).message).not.toContain('plaintext-secret');
+  });
+
   it('treats repeated resource and API-key revocation as successful', async () => {
     const requests: string[] = [];
     const client = new HttpQurlClient({
