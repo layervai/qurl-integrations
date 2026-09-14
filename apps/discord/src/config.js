@@ -307,10 +307,12 @@ const discordClientSecret = process.env.DISCORD_CLIENT_SECRET;
 const normalizedDiscordClientId = discordClientId?.trim();
 const normalizedDiscordClientSecret = discordClientSecret?.trim();
 let discordInstallNotConfiguredReason = null;
-if (isAuth0EmailConnectionRejected) {
-  discordInstallNotConfiguredReason = 'AUTH0_EMAIL_CONNECTION rejected';
-} else if (!isQurlOAuthConfigured) {
+// Core config first so a deploy missing AUTH0_* is told that before an
+// optional-pin rejection it would only discover after the next redeploy.
+if (!isQurlOAuthConfigured) {
   discordInstallNotConfiguredReason = 'AUTH0_* unset';
+} else if (isAuth0EmailConnectionRejected) {
+  discordInstallNotConfiguredReason = 'AUTH0_EMAIL_CONNECTION rejected';
 } else if (!normalizedDiscordClientId) {
   discordInstallNotConfiguredReason = 'DISCORD_CLIENT_ID unset';
 } else if (normalizedDiscordClientId === SSM_PLACEHOLDER_SENTINEL) {

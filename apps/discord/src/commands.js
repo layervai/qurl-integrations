@@ -3724,7 +3724,9 @@ const SETUP_AUTH_POLICY_UNAVAILABLE_MSG =
   + 'The bot operator must correct an invalid authentication setting in the deployment.';
 
 function rejectSetupForInvalidAuthPolicy(interaction) {
-  logger.error('Refusing /qurl setup: AUTH0_EMAIL_CONNECTION was rejected at boot');
+  // warn, not error: server.js already raised the one actionable error-level
+  // signal at boot; this fires per user interaction while the deploy is broken.
+  logger.warn('Refusing /qurl setup: AUTH0_EMAIL_CONNECTION was rejected at boot');
   return interaction.reply({
     content: SETUP_AUTH_POLICY_UNAVAILABLE_MSG,
     ephemeral: true,
@@ -8827,7 +8829,9 @@ const commands = [
           return rejectSetupForInvalidAuthPolicy(interaction);
         }
 
-        // OAuth path — preferred when configured.
+        // OAuth path — preferred when configured. After the rejected-policy
+        // return above this equals isQurlOAuthConfigured; it stays the
+        // setup-availability flag so the two cannot be split by a later edit.
         if (config.isQurlSetupAvailable) {
           // Fail-fast on encryption-at-rest BEFORE minting the OAuth
           // setup link — otherwise the admin clicks through, completes
