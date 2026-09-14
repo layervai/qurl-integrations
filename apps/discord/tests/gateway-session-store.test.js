@@ -217,15 +217,21 @@ describe('persisted session geometry', () => {
     { shardId: 0, shardCount: undefined },
     { shardId: 1, shardCount: 2 },
     { shardId: '0', shardCount: 1 },
-  ])('does not write unsupported geometry %p', async (geometry) => {
+  ])('does not write, mirror, or advance the cursor for unsupported geometry %p', async (geometry) => {
     const { store, ddbMock, logger } = makeStore();
     store.updateSessionInfo('0:1', { ...sessionInfo(), ...geometry });
     await new Promise(resolve => setImmediate(resolve));
     expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
-    expect(logger.warn).toHaveBeenCalledWith('gateway-session-store: write failed', {
-      error: 'gateway session shard geometry does not match configured shard',
-    });
-    store.stop();
+    expect(logger.warn).toHaveBeenCalledWith(
+      'gateway-session-store: ignoring session with mismatched shard geometry',
+      { shardId: geometry.shardId, shardCount: geometry.shardCount },
+    );
+    // Rejected info must not be served back to @discordjs/ws, nor claim a
+    // write so the next valid update takes the throttled path.
+    expect(store.retrieveSessionInfo('0:1')).toBeNull();
+    expect(store._getLastWriteAtForTest()).toBe(0);
+    await store.flushFinal();
+    expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
   });
 });
 

@@ -826,27 +826,51 @@ describe('IDENTIFY budget guard', () => {
     );
   });
 
-  it('reports a Discord shard recommendation above the process-global single-shard ceiling', async () => {
-    const { shim, logger, managerInstances } = makeShim();
-    await shim.start();
-    const mgr = managerInstances[0];
-    mgr.fetchGatewayInformation.mockResolvedValue({
-      shards: 2,
-      session_start_limit: { max_concurrency: 1 },
-    });
+  it('reports a Discord shard recommendation above the single-shard ceiling at start(), not only on IDENTIFY', async () => {
+    const { FakeManager } = makeFakeManagerCtor();
+    function ShardedManager(args) {
+      const mgr = new FakeManager(args);
+      mgr.fetchGatewayInformation.mockResolvedValue({
+        shards: 2,
+        session_start_limit: { max_concurrency: 1 },
+      });
+      return mgr;
+    }
+    const { shim, logger } = makeShim({ WebSocketManagerCtor: ShardedManager });
     logger.error.mockImplementation((message) => {
       if (message === 'gateway-ws-shim: Discord recommends more than one shard') {
         throw new Error('logger-failure');
       }
     });
 
-    const throttler = await mgr._constructorArgs.buildIdentifyThrottler(mgr);
-    await expect(throttler.waitForIdentify(0, new AbortController().signal))
-      .resolves.toBeUndefined();
+    // A RESUME-only boot never builds the identify throttler, so the
+    // tripwire must fire from start() alone.
+    await shim.start({ connect: false });
+    await new Promise(resolve => setImmediate(resolve));
+
     expect(logger.error).toHaveBeenCalledWith(
       'gateway-ws-shim: Discord recommends more than one shard',
       { recommendedShards: 2, configuredShards: 1 },
     );
+  });
+
+  it('start() still resolves when the boot-time gateway info fetch fails', async () => {
+    const { FakeManager } = makeFakeManagerCtor();
+    function FailingManager(args) {
+      const mgr = new FakeManager(args);
+      mgr.fetchGatewayInformation.mockRejectedValue(new Error('gateway-down'));
+      return mgr;
+    }
+    const { shim, logger } = makeShim({ WebSocketManagerCtor: FailingManager });
+
+    await expect(shim.start({ connect: false })).resolves.toBeUndefined();
+    await new Promise(resolve => setImmediate(resolve));
+
+    expect(logger.warn).toHaveBeenCalledWith(
+      'gateway-ws-shim: gateway info fetch failed; shard recommendation unchecked',
+      expect.objectContaining({ errorName: 'Error' }),
+    );
+    expect(logger.error).not.toHaveBeenCalled();
   });
 
   it('retains the guard when gateway-fetch fallback logging throws', async () => {
@@ -1006,7 +1030,7 @@ describe('IDENTIFY budget guard', () => {
     expect(shim._getIdentifyAttemptsForTest()).toBe(2);
     mgr.emit(WebSocketShardEvents.Closed, { code: 1000, reason: 'shutdown', shardId: 0 });
     expect(logger.info).toHaveBeenCalledWith(
-      'gateway-ws-shim: shard closed during terminal teardown',
+      'gateway-ws-shim: shard closed after stop',
       { shardId: 0, code: 1000, reason: 'shutdown' },
     );
 
@@ -1018,7 +1042,7 @@ describe('IDENTIFY budget guard', () => {
     await expect(blocked).rejects.toThrow('closed');
   });
 
-  it('contains logger failure when a shard closes during terminal teardown', async () => {
+  it('contains logger failure when a shard closes after stop', async () => {
     const {
       shim, logger, managerInstances,
     } = makeShim();
@@ -1032,7 +1056,7 @@ describe('IDENTIFY budget guard', () => {
     await Promise.resolve();
     await Promise.resolve();
     logger.info.mockImplementation((message) => {
-      if (message === 'gateway-ws-shim: shard closed during terminal teardown') {
+      if (message === 'gateway-ws-shim: shard closed after stop') {
         throw new Error('logger-failure');
       }
     });

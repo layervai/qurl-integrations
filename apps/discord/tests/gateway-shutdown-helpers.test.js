@@ -838,6 +838,25 @@ describe('runPushHandoffShutdown', () => {
     expect(deps.exit).toHaveBeenCalledWith(0);
   });
 
+  it('contains non-Error watchdog stop and pushHandoff rejections', async () => {
+    const deps = makeDeps({
+      connectionWatchdog: { stop: jest.fn().mockRejectedValue(null) },
+      gatewayLeader: { pushHandoff: jest.fn().mockRejectedValue(undefined) },
+    });
+
+    await runPushHandoffShutdown({ code: 0, ...deps });
+
+    expect(deps.logger.warn).toHaveBeenCalledWith(
+      'connection-watchdog stop failed',
+      { error: 'null', stack: undefined },
+    );
+    expect(deps.logger.error).toHaveBeenCalledWith(
+      'pushHandoff threw — exiting anyway so the standby can cold-acquire',
+      { error: 'undefined' },
+    );
+    expect(deps.exit).toHaveBeenCalledWith(1);
+  });
+
   it('on a thrown pushHandoff, exits with forcedExitCode so deploy metrics distinguish clean transfer from throw', async () => {
     const deps = makeDeps({
       gatewayLeader: { pushHandoff: jest.fn().mockRejectedValue(new Error('peer unreachable')) },

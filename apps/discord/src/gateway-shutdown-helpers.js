@@ -354,12 +354,12 @@ async function runPushHandoffShutdown({
     try {
       Promise.resolve(connectionWatchdog.stop()).catch((err) => {
         logger.warn('connection-watchdog stop failed', {
-          error: err.message, stack: err.stack,
+          error: err?.message ?? String(err), stack: err?.stack,
         });
       });
     } catch (err) {
       logger.warn('connection-watchdog stop failed', {
-        error: err.message, stack: err.stack,
+        error: err?.message ?? String(err), stack: err?.stack,
       });
     }
   }
@@ -404,7 +404,7 @@ async function runPushHandoffShutdown({
   } catch (err) {
     handoffThrew = true;
     logger.error('pushHandoff threw — exiting anyway so the standby can cold-acquire', {
-      error: err.message,
+      error: err?.message ?? String(err),
     });
   }
   // Wait for the in-parallel publisher drain to finish before

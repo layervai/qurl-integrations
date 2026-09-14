@@ -371,14 +371,6 @@ function createGatewayWsShim({
         { observedMaxConcurrency: rawMaxConcurrency ?? null },
       );
     }
-    const recommendedShards = gatewayInfo?.shards;
-    if (gatewayInfoFetched && Number.isInteger(recommendedShards) && recommendedShards > 1) {
-      logBestEffort(
-        'error',
-        'gateway-ws-shim: Discord recommends more than one shard',
-        { recommendedShards, configuredShards: 1 },
-      );
-    }
     let delegate;
     try {
       delegate = new IdentifyThrottlerCtor(maxConcurrency);
@@ -469,6 +461,32 @@ function createGatewayWsShim({
     };
   }
 
+  // Boot-time tripwire, not part of the identify throttler: a RESUME-only
+  // process never builds the throttler, so checking there would stay silent
+  // for exactly the long-lived tasks that cross Discord's sharding threshold
+  // (close 4011 → IDENTIFY churn → budget trip). Fire-and-forget; connect()
+  // fetches the same cached gateway info itself.
+  async function checkRecommendedShards(managerInstance) {
+    let recommendedShards;
+    try {
+      recommendedShards = (await managerInstance.fetchGatewayInformation())?.shards;
+    } catch (error) {
+      logBestEffort(
+        'warn',
+        'gateway-ws-shim: gateway info fetch failed; shard recommendation unchecked',
+        { errorName: error?.name, errorCode: error?.code, status: error?.status },
+      );
+      return;
+    }
+    if (Number.isInteger(recommendedShards) && recommendedShards > 1) {
+      logBestEffort(
+        'error',
+        'gateway-ws-shim: Discord recommends more than one shard',
+        { recommendedShards, configuredShards: 1 },
+      );
+    }
+  }
+
   function buildUpdateCallback() {
     // Pass-through to the store. Throttle / write / delete behavior
     // is the store's concern; the shim doesn't second-guess.
@@ -518,6 +536,7 @@ function createGatewayWsShim({
         updateSessionInfo: buildUpdateCallback(),
         buildIdentifyThrottler,
       });
+      checkRecommendedShards(manager);
 
       // Dispatch listener: pluck the appId from READY, mirror the
       // legacy `client.once('ready')` semantics, and fan out to
@@ -623,7 +642,7 @@ function createGatewayWsShim({
       // today it's always undefined, logged as null.
       manager.on(WebSocketShardEvents.Closed, ({ code, reason, shardId }) => {
         if (stopped) {
-          logBestEffort('info', 'gateway-ws-shim: shard closed during terminal teardown', {
+          logBestEffort('info', 'gateway-ws-shim: shard closed after stop', {
             shardId, code, reason: reason ?? null,
           });
           return;

@@ -108,9 +108,6 @@ function createGatewaySessionStore({
   const inFlightWrites = new Set();
 
   async function persistRow(info) {
-    if (info.shardId !== configuredShard.shardId || info.shardCount !== configuredShard.shardCount) {
-      throw new Error('gateway session shard geometry does not match configured shard');
-    }
     // Wall-clock epoch ms for `updated_at`. Matches the design
     // doc's table schema. DDB Number type takes JS Number directly;
     // no marshaling concerns up to 2^53.
@@ -219,8 +216,8 @@ function createGatewaySessionStore({
     // explicitly forbid mutation of the returned object, and if a
     // future minor mutates `sequence` in place between dispatches
     // the mirror would silently desync. Cost is one 5-field object
-    // per reconnect (not per dispatch), so the defensive copy is
-    // free.
+    // per retrieval (connect, heartbeat, and dispatch processing),
+    // so the defensive copy is still free.
     retrieveSessionInfo(_shardId) {
       return mirror ? { ...mirror } : null;
     },
@@ -248,6 +245,17 @@ function createGatewaySessionStore({
           logger.warn('gateway-session-store: null-clear delete failed', { error: err.message });
         }));
         lastWriteAt = clock();
+        return;
+      }
+
+      // Reject before touching the mirror or write cursor: a mismatched
+      // session must not be served back to @discordjs/ws, claim a write
+      // that never happened, or poison flushFinal's last-known-good row.
+      if (info.shardId !== configuredShard.shardId || info.shardCount !== configuredShard.shardCount) {
+        logger.warn('gateway-session-store: ignoring session with mismatched shard geometry', {
+          shardId: info.shardId,
+          shardCount: info.shardCount,
+        });
         return;
       }
 

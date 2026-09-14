@@ -862,6 +862,7 @@ describe('start() / stop() lifecycle', () => {
     expect(releaseLock).not.toHaveBeenCalled();
     expect(exit).not.toHaveBeenCalled();
   });
+
   it('start() schedules ticks via the injected sleep + stop() halts the loop', async () => {
     const manager = makeFakeManager({ initialConnected: true });
     const sleepResolvers = [];
