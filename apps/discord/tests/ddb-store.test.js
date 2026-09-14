@@ -94,10 +94,14 @@ describe('guild configs', () => {
       .resolvesOnce({ Attributes: { guild_id: 'g-1', configured_by: 'admin' } });
     await store.setGuildApiKey('g-1', 'plain-key', 'admin');
     await store.setGuildApiKey('g-1', 'plain-key-2', 'admin');
-    expect(logger.audit).not.toHaveBeenCalledWith(
-      AUDIT_EVENTS.QURL_SETUP_ADMIN_CHANGED,
-      expect.anything(),
-    );
+    expect(logger.audit.mock.calls.map(([event]) => event))
+      .not.toContain(AUDIT_EVENTS.QURL_SETUP_ADMIN_CHANGED);
+  });
+
+  test('setGuildApiKey: does not audit when the write rejects', async () => {
+    ddbMock.on(UpdateCommand).rejects(new Error('ddb down'));
+    await expect(store.setGuildApiKey('g-1', 'plain-key', 'new-admin')).rejects.toThrow('ddb down');
+    expect(logger.audit).not.toHaveBeenCalled();
   });
 
   test('getGuildApiKey: decrypts round-trip', async () => {

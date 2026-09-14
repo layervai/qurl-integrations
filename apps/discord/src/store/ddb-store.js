@@ -1550,7 +1550,7 @@ async function setGuildApiKey(guildId, apiKey, configuredBy) {
     // unread so the audit payload never carries key material.
     ReturnValues: 'UPDATED_OLD',
   }));
-  const oldConfiguredBy = res.Attributes && res.Attributes.configured_by;
+  const oldConfiguredBy = res?.Attributes?.configured_by;
   if (oldConfiguredBy && oldConfiguredBy !== configuredBy) {
     logger.audit(AUDIT_EVENTS.QURL_SETUP_ADMIN_CHANGED, {
       guild_id: guildId,

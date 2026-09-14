@@ -221,7 +221,8 @@ const AUDIT_EVENTS = {
   // dashboard from counting all-failed revokes as successes.
   REVOKE_SUCCESS: 'revoke_success',
   REVOKE_FAILED: 'revoke_failed',
-  // Emitted when Discord OAuth setup rebinds an existing guild to a
+  // Emitted by setGuildApiKey when a successful guild setup (OAuth
+  // callback or `/qurl setup` paste) rebinds an existing guild to a
   // different configured_by admin. TODO(upstream-contract): keep
   // qurl-integrations-infra's qurl_setup_admin_changed CloudWatch
   // filter/alarm in sync with this string. Direct rebinds only: deleting the
