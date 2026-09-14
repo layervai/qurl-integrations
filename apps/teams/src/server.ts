@@ -232,9 +232,13 @@ export function httpsIssuer(value: string, name: string): string {
 class TenantQurlClientFactory {
   readonly #data: TeamsDataStore;
   readonly #endpoint: string;
-  constructor(data: TeamsDataStore, endpoint: string) { this.#data = data; this.#endpoint = endpoint; }
+  readonly #logger: Logger;
+  constructor(data: TeamsDataStore, endpoint: string, logger: Logger) { this.#data = data; this.#endpoint = endpoint; this.#logger = logger; }
   async forTenant(tenantId: string): Promise<HttpQurlClient> {
-    const credential = await this.#data.tenantCredential(tenantId);
+    const credential = await this.#data.tenantCredential(tenantId).catch((error: unknown) => {
+      this.#logger.error('Tenant credentials could not be read', { tenantId, error });
+      throw new UserFacingError('The saved qURL credentials could not be read. Ask your qURL operator to restore credential access or complete recovery.');
+    });
     // Deliberately per-activity: a ConsistentRead GetItem plus a KMS Decrypt on
     // every command. No cache, so `uninstall` and credential rotation take
     // effect on the very next message everywhere, with no invalidation path to
@@ -301,7 +305,7 @@ export async function createProductionTeamsConfig(): Promise<TeamsProductionConf
     activity: { mentions: { stripText: false } },
   });
   const bot = new TeamsBot({
-    qurlForTenant: new TenantQurlClientFactory(data, qurlEndpoint),
+    qurlForTenant: new TenantQurlClientFactory(data, qurlEndpoint, logger),
     data,
     messages: new TeamsSdkMessagePoster(app),
     connectorImage,

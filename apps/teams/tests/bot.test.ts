@@ -674,6 +674,30 @@ describe('Teams bot primitives', () => {
     expect(creates).toBe(1);
   });
 
+  it.each([undefined, 'resource-1'])('keeps missing-resource replies token-free with alias target %s', async aliasResourceId => {
+    const replies: string[] = [];
+    let creates = 0;
+    const bot = new TeamsBot({
+      qurl: {
+        listResources: async () => ({ resources: [] }),
+        create: async () => { creates++; throw new Error('must not mint'); },
+      } as unknown as QurlClient,
+      data: {
+        lookupScopeAlias: async () => aliasResourceId,
+        allowedResourceIds: async () => new Set(),
+      } as unknown as TeamsDataStore,
+      messages: {} as never, qurlEndpoint: 'https://qurl.example',
+    });
+    const token = aliasResourceId ? 'docs' : '`[open](https://example.test)';
+    await bot.handleActivity({
+      type: 'message', text: `get $${token}`, from: { aadObjectId: 'actor' },
+      channelData: { tenant: { id: 'tenant' }, channel: { id: 'channel' } },
+      conversation: { id: 'thread', conversationType: 'channel' },
+    }, undefined, async text => { replies.push(text); });
+    expect(replies).toEqual(['Resource not found.']);
+    expect(creates).toBe(0);
+  });
+
   it('follows a next cursor even when has_more is omitted', async () => {
     const cursors: Array<string | undefined> = [];
     const bot = new TeamsBot({ qurl: {} as QurlClient, data: {} as TeamsDataStore, messages: {} as never, qurlEndpoint: 'https://api.sandbox.example' });

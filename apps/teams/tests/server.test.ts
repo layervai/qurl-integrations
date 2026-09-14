@@ -7,12 +7,14 @@ import { Readable } from 'node:stream';
 import type { Application, Request } from 'express';
 import express from 'express';
 import type { App } from '@microsoft/teams.apps';
+import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { TeamsBot } from '../src/bot.js';
 import type { OAuthCallbackCore } from '../src/callback.js';
 import type { ConfidentialTokenClient } from '../src/interfaces.js';
 import { createProductionTeamsConfig, createTeamsServer, httpsIssuer, httpsOrigin, installOAuthRoutes, isMainModule } from '../src/server.js';
 import type { OAuthStateManager } from '../src/state.js';
+import { TeamsSdkMessagePoster } from '../src/teams-sdk.js';
 
 const OPAQUE_STATE = Buffer.alloc(32, 1).toString('base64url');
 
@@ -289,6 +291,33 @@ describe('Teams production message handling', () => {
     vi.stubEnv('TENANT_ID', '55555555-5555-4555-8555-555555555555');
     const runtime = await createProductionTeamsConfig();
     expect(runtime.app.credentials?.tenantId).toBe('abcdefab-1234-4234-8234-abcdefabcdef');
+  });
+
+  it('explains unreadable stored credentials without modifying tenant recovery state', async () => {
+    configureEnvironment();
+    // Keep the production data read and ciphertext validation real. Replace
+    // only DynamoDB and final delivery; malformed saved ciphertext needs no KMS call.
+    const send = vi.spyOn(DynamoDBDocumentClient.prototype, 'send').mockResolvedValue({
+      Item: { qurl_api_key: 'kms:v2:invalid', qurl_key_id: 'key_123456789abc', qurl_binding_id: 'eib_123456789ab' },
+    } as never);
+    const responses: string[] = [];
+    vi.spyOn(TeamsSdkMessagePoster.prototype, 'reply').mockImplementation(async (_activity, text) => { responses.push(text); });
+    const errors = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const runtime = await createProductionTeamsConfig();
+
+    await runtime.app.onActivity({ body: { ...activity, text: 'qurl list' }, token: { serviceUrl: activity.serviceUrl } } as never);
+    await vi.waitFor(() => expect(responses).toHaveLength(1));
+    expect(responses[0]).toContain('saved qURL credentials could not be read');
+    expect(responses[0]).toContain('Ask your qURL operator');
+    expect(responses[0]).not.toMatch(/command syntax|kms:v2/);
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(send.mock.calls[0]?.[0]).toMatchObject({ input: {
+      TableName: 'credentials', Key: { tenant_id: activity.channelData.tenant.id }, ConsistentRead: true,
+    } });
+    expect(errors).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(String(errors.mock.calls[0]?.[0]))).toMatchObject({
+      level: 'ERROR', error: expect.stringContaining('tenant credential ciphertext is malformed'),
+    });
   });
 
   it('acknowledges a slow command before completion and gives its real reply an independent HTTP deadline', async () => {

@@ -306,7 +306,7 @@ export class TeamsBot {
     const matches = resources.filter(resource =>
       resource.crid === token || resource.resourceId === token || resource.slug === token || resource.alias === token);
     if (matches.length !== 1) {
-      throw new UserFacingError(matches.length ? 'Resource token is ambiguous' : `Resource not found: ${token}`);
+      throw new UserFacingError(matches.length ? 'Resource token is ambiguous' : 'Resource not found.');
     }
     const resource = matches[0];
     if (!resource) throw new UserFacingError('Resource not found');
@@ -327,7 +327,7 @@ export class TeamsBot {
     // A bound channel alias already names the resource, as in Slack. The API
     // validates its live status at mint; only unbound tokens need discovery.
     const resourceId = aliasResourceId ?? this.resolve((await this.resources(qurl, signal)).filter(item => allowed.has(item.resourceId)), token).resourceId;
-    if (!allowed.has(resourceId)) throw new UserFacingError(`Resource not found: ${token}`);
+    if (!allowed.has(resourceId)) throw new UserFacingError('Resource not found.');
     const wantsDm = command.flags.dm === 'true';
     const dmActor = activity.from?.aadObjectId?.trim().toLowerCase() ?? '';
     const ref = wantsDm && dmActor ? await this.#options.data.personalConversationRef(tenantId, dmActor) : undefined;

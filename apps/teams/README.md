@@ -257,6 +257,7 @@ preserving the inbound service URL, conversation ID, and reply ID.
 
 ## Deployment
 
+Production runs use `NODE_ENV=production`, as set by the Dockerfile.
 The production entrypoint listens on `127.0.0.1:3000` by default; `HOST` and
 `PORT` can override those values. Container deployments that receive traffic
 from a sidecar or external load balancer must explicitly set `HOST=0.0.0.0`.
