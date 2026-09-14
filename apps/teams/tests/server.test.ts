@@ -234,7 +234,7 @@ describe('Teams production message handling', () => {
   function configureEnvironment(): void {
     const values = {
       TEAMS_BASE_URL: 'https://teams.example.com', QURL_ENDPOINT: 'https://qurl.example.com', AWS_REGION: 'us-east-1',
-      TEAMS_APP_ID: '11111111-1111-4111-8111-111111111111', TEAMS_APP_PASSWORD: 'synthetic-bot-secret',
+      TEAMS_APP_ID: 'a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d', TEAMS_APP_PASSWORD: 'synthetic-bot-secret',
       BOT_TENANT_ID: '22222222-2222-4222-8222-222222222222',
       QURL_IMAGE: `ghcr.io/layervai/qurl@sha256:${'a'.repeat(64)}`,
       QURL_TEAMS_TENANT_PRINCIPALS_TABLE: 'principals', QURL_TEAMS_CHANNEL_POLICIES_TABLE: 'policies',

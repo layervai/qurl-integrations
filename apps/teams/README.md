@@ -119,7 +119,13 @@ for sandbox and production: each registration has one messaging endpoint.
 `--app-id` must match the deployed `TEAMS_APP_ID`, and `--domain` must match the
 host in `TEAMS_BASE_URL`. Build from the same application commit as the runtime.
 Upload the zip in Teams (Apps -> Manage your apps -> Upload a custom app) or
-import it in the Developer Portal. Rebuilds are byte-identical for identical inputs.
+import it in the Developer Portal. Rebuilds are byte-identical for identical inputs
+and the same Node.js/zlib toolchain; record that toolchain with the package digest.
+When changing an installed app's manifest or package configuration, increment
+`version` in `manifest/manifest.template.json` and commit it with the change before
+building from that deployed app commit. [Teams app updates require a higher app
+version](https://learn.microsoft.com/en-us/microsoftteams/platform/concepts/deploy-and-publish/appsource/post-publish/overview#publish-updates-to-your-app);
+do not hand-edit the generated ZIP.
 
 The manifest uses supported schema **1.28**; newer versions are unnecessary for
 these capabilities. See [Microsoft's GA schema list](https://learn.microsoft.com/en-us/microsoftteams/platform/resources/schema/manifest-schema).
@@ -202,8 +208,9 @@ and [Teams CLI registration options](https://microsoft.github.io/teams-sdk/cli/c
 
 Authenticated message activities are acknowledged before command completion,
 so a slow qURL request or reply does not hold Teams' 15-second retry window
-open. Commands retain their 30-second cooperative cancellation budget. Replies
-use the SDK-backed adapter's 15-second HTTP timeout and activity signal while
+open. The 30-second activity signal also cancels DynamoDB queries and deletes
+in uninstall and revoke cleanup. Replies use the SDK-backed adapter's
+15-second HTTP timeout and activity signal while
 preserving the inbound service URL, conversation ID, and reply ID.
 [Teams retry behavior](https://learn.microsoft.com/en-us/microsoftteams/platform/bots/bot-concepts).
 
@@ -213,6 +220,9 @@ preserving the inbound service URL, conversation ID, and reply ID.
   interrupt a command; acknowledgement is not a durable queue or an exactly-once
   delivery guarantee. Retry handling for side effects remains the command's
   existing idempotency contract.
+- The activity budget is cooperative. Other DynamoDB operations, credential
+  KMS decryption, and the SDK's MSAL token acquisition do not receive that
+  activity signal, so it is not a hard deadline for the whole command.
 - The OAuth routes (`/oauth/qurl/start`, `/oauth/qurl/callback`) carry no
   application-level rate limit. They are unauthenticated public entrypoints and
   each request performs one DynamoDB operation, so the ingress in front of this

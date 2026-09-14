@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { TeamsDataStore, type DynamoClient, type DynamoRequest } from '../src/teams-data.js';
+import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
+import { createDynamoClient, TeamsDataStore, type DynamoClient, type DynamoRequest } from '../src/teams-data.js';
 import type { CredentialCipher } from '../src/credential-cipher.js';
 
 class RecordingDynamo implements DynamoClient {
@@ -192,6 +193,64 @@ describe('Teams DynamoDB data paths', () => {
     expect(deletes).toHaveLength(6);
     expect(deletes.map(request => request.input.TableName)).toEqual(['policy', 'policy', 'conversations', 'credentials', 'principals', 'principals']);
     expect(deletes.at(-1)?.input.Key).toMatchObject({ principal_key: 'owner' });
+  });
+
+  it('forwards cancellation to the native DynamoDB command options', async () => {
+    const reason = new Error('activity deadline reached');
+    const signal = AbortSignal.abort(reason);
+    const client = createDynamoClient({
+      send: async (_command: unknown, options?: { readonly abortSignal?: AbortSignal }) => {
+        options?.abortSignal?.throwIfAborted();
+        return {};
+      },
+    } as unknown as DynamoDBDocumentClient);
+    for (const operation of ['get', 'put', 'update', 'delete', 'query'] as const) {
+      await expect(client.send({ operation, input: {}, signal })).rejects.toBe(reason);
+    }
+  });
+
+  it.each(['query', 'delete'])('keeps the owner authorized when cleanup is aborted after a partial %s', async operation => {
+    const pages = new CleanupDynamo();
+    const controller = new AbortController();
+    const reason = new Error('activity deadline reached');
+    let ownerPresent = true;
+    let cancel = true;
+    const client: DynamoClient = {
+      async send<T>(request: DynamoRequest): Promise<T> {
+        request.signal?.throwIfAborted();
+        const key = request.input.Key as Record<string, string> | undefined;
+        if (request.operation === 'get') return (ownerPresent
+          ? { Item: { actor_aad_object_id: 'actor', principal_type: 'owner', installation_id: 'installation' } } : {}) as T;
+        if (request.operation === 'delete' && key?.principal_key === 'owner') ownerPresent = false;
+        const result = await pages.send<T>(request);
+        if (cancel && request.operation === operation) { cancel = false; controller.abort(reason); }
+        return result;
+      },
+    };
+    const store = new TeamsDataStore({ client, tenantPrincipalsTable: 'principals', channelPoliciesTable: 'policy', personalConversationsTable: 'conversations', tenantCredentialsTable: 'credentials' });
+    await expect(store.deleteWorkspace('tenant', 'installation', controller.signal)).rejects.toBe(reason);
+    await expect(store.checkAdmin('tenant', 'actor')).resolves.toMatchObject({ isAdmin: true });
+    await store.deleteWorkspace('tenant', 'installation');
+    await expect(store.checkAdmin('tenant', 'actor')).resolves.toMatchObject({ isAdmin: false });
+  });
+
+  it('stops resource cleanup after cancellation and permits a fresh retry', async () => {
+    const pages = new PurgeDynamo();
+    const controller = new AbortController();
+    const reason = new Error('activity deadline reached');
+    let cancel = true;
+    const client: DynamoClient = {
+      async send<T>(request: DynamoRequest): Promise<T> {
+        request.signal?.throwIfAborted();
+        const result = await pages.send<T>(request);
+        if (cancel && request.operation === 'delete') { cancel = false; controller.abort(reason); }
+        return result;
+      },
+    };
+    const store = new TeamsDataStore({ client, tenantPrincipalsTable: 'principals', channelPoliciesTable: 'policy', personalConversationsTable: 'conversations', tenantCredentialsTable: 'credentials' });
+    await expect(store.purgeResourceFromTenant('tenant', 'target', controller.signal)).rejects.toBe(reason);
+    expect(pages.requests.filter(request => request.operation === 'delete')).toHaveLength(1);
+    await expect(store.purgeResourceFromTenant('tenant', 'target')).resolves.toBeUndefined();
   });
 
   it.each(['policy', 'conversations', 'credentials', 'principals'])('keeps the owner authorized to retry after %s cleanup fails', async failingTable => {

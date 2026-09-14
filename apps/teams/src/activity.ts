@@ -1,3 +1,5 @@
+import { UserFacingError } from './user-facing-error.js';
+
 export interface TeamsAccount {
   readonly id?: string;
   readonly name?: string;
@@ -162,7 +164,7 @@ export function deriveScope(activity: TeamsActivity): TeamsScope {
   // Reject the only contradictory tenant identities available to us rather
   // than silently preferring one untrusted field over the other.
   if (channelTenantId && conversationTenantId && channelTenantId !== conversationTenantId) {
-    throw new Error('Teams activity tenant identities do not match');
+    throw new UserFacingError('Teams activity tenant identities do not match. Please report this if it repeats.');
   }
   const tenantId = channelTenantId || conversationTenantId;
   const conversationId = (activity.conversation?.id ?? '').trim();

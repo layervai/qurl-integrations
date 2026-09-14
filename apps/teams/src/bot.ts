@@ -152,7 +152,7 @@ export class TeamsBot {
         if (error instanceof TenantOwnerRemovalError) throw new UserFacingError('The tenant owner cannot be removed.');
         throw error;
       }
-      return `${command.verb === 'add' ? 'Added' : 'Removed'} Teams user \`${command.userId}\` ${command.verb === 'add' ? 'as a qURL admin' : 'from qURL admins'} for this tenant.`;
+      return `Teams user \`${mentionedAadObjectId}\` ${command.verb === 'add' ? 'has' : 'does not have'} qURL admin access for this tenant.`;
     }
     if (command.verb === 'uninstall') {
       if (!admin?.installationId) throw new Error('workspace installation is unavailable');
@@ -168,7 +168,7 @@ export class TeamsBot {
           upstreamRevocationPending = true;
         }
       }
-      await this.#options.data.deleteWorkspace(tenantId, admin.installationId);
+      await this.#options.data.deleteWorkspace(tenantId, admin.installationId, signal);
       return upstreamRevocationPending
         ? 'Disconnected qURL from this Teams tenant. Upstream API-key revocation may require operator follow-up.'
         : 'Disconnected qURL from this Teams tenant. If a later reinstall reports a retained upstream binding, contact your qURL operator for cleanup.';
@@ -190,6 +190,24 @@ export class TeamsBot {
     const qurl = await this.#qurl(tenantId);
     if (command.verb === 'protect-connector') return this.protectConnector(qurl, activity, tenantId, scopeId, command, signal);
     if (command.verb === 'get') return this.get(qurl, activity, tenantId, scopeId, command, signal);
+    if (command.verb === 'revoke') {
+      const token = command.resource ?? '';
+      const aliasResourceId = await this.#options.data.lookupScopeAlias(tenantId, scopeId, token);
+      // TODO(upstream-contract): qurl-service api/openapi.yaml ResourceId public-key
+      // shape. The API validates semantics and ownership; names still resolve below.
+      const publicKeyShape = /^[A-Za-z0-9_-]{107,214}$/.test(token) && token.length % 4 !== 1;
+      // Revoked resources disappear from active lists, and a partial purge may
+      // already have removed this channel's references. Accept the reported id.
+      const resourceId = aliasResourceId ?? (publicKeyShape || (await this.#options.data.allowedResourceIds(tenantId, scopeId)).has(token)
+        ? token : this.resolve(await this.resources(qurl, signal), token).resourceId);
+      try {
+        await qurl.deleteResource(resourceId, signal);
+      } catch (error) {
+        if (!(error instanceof QurlHttpError) || (error.status !== 404 && error.status !== 410)) throw error;
+      }
+      await this.#options.data.purgeResourceFromTenant(tenantId, resourceId, signal);
+      return `Revoked resource \`$${resourceId}\`.`;
+    }
     const resources = await this.resources(qurl, signal);
     if (command.verb === 'list') return this.list(tenantId, scopeId, resources);
     if (command.verb === 'protect-url') return this.protectUrl(qurl, activity, tenantId, scopeId, resources, command, signal);
@@ -199,12 +217,6 @@ export class TeamsBot {
       const resource = await this.resolveInScope(tenantId, scopeId, resources, command.resource ?? '');
       await qurl.updateResource(resource.resourceId, setting ? command.text ?? '' : '', signal);
       return `${setting ? 'Updated' : 'Reset'} display name for \`$${resource.resourceId}\`.`;
-    }
-    if (command.verb === 'revoke') {
-      const resource = await this.resolveInScope(tenantId, scopeId, resources, command.resource ?? '');
-      await qurl.deleteResource(resource.resourceId, signal);
-      await this.#options.data.purgeResourceFromTenant(tenantId, resource.resourceId);
-      return `Revoked resource \`$${resource.resourceId}\`.`;
     }
     throw new UserFacingError('Unsupported qURL command.');
   }

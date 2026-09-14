@@ -136,7 +136,7 @@ export class HttpProviderBinder implements ProviderBinder {
   }
 
   async #validateCredential(request: ProviderBindingRequest, credential: TenantCredential): Promise<void> {
-    const identity = await new HttpQurlClient({ endpoint: this.#endpoint.origin, apiKey: credential.apiKey, fetch: this.#fetch }).me();
+    const identity = await new HttpQurlClient({ endpoint: this.#endpoint.origin, apiKey: credential.apiKey, fetch: this.#fetch, userAgent: 'qurl-teams/1' }).me();
     if (identity.ownerId !== request.providerSubject || identity.authType !== 'api_key' || !identity.isApiKeyPrincipal) {
       throw new Error('qURL tenant credential does not belong to the verified account');
     }

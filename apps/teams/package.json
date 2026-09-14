@@ -21,7 +21,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "lint": "eslint src tests eslint.config.js --max-warnings 0",
+    "lint": "eslint src tests manifest eslint.config.js --max-warnings 0",
     "test": "vitest run --coverage.enabled=false --config vitest.config.ts",
     "manifest": "node manifest/build.mjs"
   },

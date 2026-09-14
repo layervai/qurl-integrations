@@ -141,6 +141,7 @@ describe('HttpProviderBinder', () => {
     const binder = new HttpProviderBinder({ endpoint: 'https://qurl.example', data, fetch: async (input, init) => {
       if (new URL(input).pathname !== '/v1/me') return response(409, conflictBody);
       expect(new Headers(init?.headers).get('Authorization')).toBe('Bearer api-key');
+      expect(new Headers(init?.headers).get('User-Agent')).toBe('qurl-teams/1');
       validated = true;
       return response(200, identityBody);
     } });

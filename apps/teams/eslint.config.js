@@ -8,6 +8,10 @@ export default tseslint.config(
   eslint.configs.recommended,
   ...tseslint.configs.recommended,
   {
+    files: ['manifest/**/*.mjs'],
+    languageOptions: { globals: { Buffer: 'readonly', process: 'readonly' } },
+  },
+  {
     files: ['src/**/*.ts', 'tests/**/*.ts'],
     rules: {
       '@typescript-eslint/consistent-type-imports': 'error',
@@ -17,4 +21,3 @@ export default tseslint.config(
     },
   },
 );
-

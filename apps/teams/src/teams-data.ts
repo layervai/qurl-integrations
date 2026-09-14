@@ -31,6 +31,7 @@ export class TenantOwnerAlreadyAdminError extends Error {
 export interface DynamoRequest {
   readonly operation: 'get' | 'put' | 'update' | 'delete' | 'query';
   readonly input: Record<string, unknown>;
+  readonly signal?: AbortSignal;
 }
 
 export interface DynamoClient {
@@ -40,12 +41,13 @@ export interface DynamoClient {
 export function createDynamoClient(client: DynamoDBDocumentClient): DynamoClient {
   return {
     async send<T>(request: DynamoRequest): Promise<T> {
+      const options = request.signal ? { abortSignal: request.signal } : undefined;
       switch (request.operation) {
-        case 'get': return await client.send(new GetCommand(request.input as GetCommandInput)) as T;
-        case 'put': return await client.send(new PutCommand(request.input as PutCommandInput)) as T;
-        case 'update': return await client.send(new UpdateCommand(request.input as UpdateCommandInput)) as T;
-        case 'delete': return await client.send(new DeleteCommand(request.input as DeleteCommandInput)) as T;
-        case 'query': return await client.send(new QueryCommand(request.input as QueryCommandInput)) as T;
+        case 'get': return await client.send(new GetCommand(request.input as GetCommandInput), options) as T;
+        case 'put': return await client.send(new PutCommand(request.input as PutCommandInput), options) as T;
+        case 'update': return await client.send(new UpdateCommand(request.input as UpdateCommandInput), options) as T;
+        case 'delete': return await client.send(new DeleteCommand(request.input as DeleteCommandInput), options) as T;
+        case 'query': return await client.send(new QueryCommand(request.input as QueryCommandInput), options) as T;
       }
       throw new Error(`Unsupported DynamoDB operation: ${request.operation}`);
     },
@@ -192,10 +194,10 @@ export class TeamsDataStore {
     await this.#changeAdmin(tenantId, actorId, installationId, 'DELETE');
   }
 
-  async #owner(tenantId: string): Promise<Record<string, unknown> | undefined> {
+  async #owner(tenantId: string, signal?: AbortSignal): Promise<Record<string, unknown> | undefined> {
     const result = await this.#client.send<{ readonly Item?: Record<string, unknown> }>({ operation: 'get', input: {
       TableName: this.#tenantPrincipalsTable, Key: principalDdbKey(tenantId, ownerPrincipal), ConsistentRead: true,
-    } });
+    }, ...(signal ? { signal } : {}) });
     return result.Item?.principal_type === 'owner' ? result.Item : undefined;
   }
 
@@ -216,37 +218,37 @@ export class TeamsDataStore {
     } });
   }
 
-  async deleteWorkspace(tenantId: string, installationId: string): Promise<void> {
+  async deleteWorkspace(tenantId: string, installationId: string, signal?: AbortSignal): Promise<void> {
     assertPresent(tenantId, installationId);
-    const owner = await this.#owner(tenantId);
+    const owner = await this.#owner(tenantId, signal);
     if (!owner) return;
     if (asString(owner.installation_id) !== installationId) throw new Error('workspace installation has changed');
     // Cleanup can exceed a transaction's item limit. Keep the owner until
     // the final delete so an interrupted uninstall remains authorized to retry.
-    const policies = await this.#queryTenant(this.#channelPoliciesTable, tenantId);
+    const policies = await this.#queryTenant(this.#channelPoliciesTable, tenantId, undefined, signal);
     for (const item of policies) {
       const value = asString(item[policyKey]);
-      if (value) await this.#delete(this.#channelPoliciesTable, policyDdbKey(tenantId, value));
+      if (value) await this.#delete(this.#channelPoliciesTable, policyDdbKey(tenantId, value), signal);
     }
-    const conversations = await this.#queryTenant(this.#personalConversationsTable, tenantId);
+    const conversations = await this.#queryTenant(this.#personalConversationsTable, tenantId, undefined, signal);
     for (const item of conversations) {
       const actorId = asString(item.actor_aad_object_id);
-      if (actorId) await this.#delete(this.#personalConversationsTable, personalDdbKey(tenantId, actorId));
+      if (actorId) await this.#delete(this.#personalConversationsTable, personalDdbKey(tenantId, actorId), signal);
     }
-    await this.#delete(this.#tenantCredentialsTable, { tenant_id: tenantId });
-    const principals = await this.#queryTenant(this.#tenantPrincipalsTable, tenantId);
+    await this.#delete(this.#tenantCredentialsTable, { tenant_id: tenantId }, signal);
+    const principals = await this.#queryTenant(this.#tenantPrincipalsTable, tenantId, undefined, signal);
     for (const item of principals) {
       const value = asString(item[principalKey]);
-      if (value && value !== ownerPrincipal) await this.#delete(this.#tenantPrincipalsTable, principalDdbKey(tenantId, value));
+      if (value && value !== ownerPrincipal) await this.#delete(this.#tenantPrincipalsTable, principalDdbKey(tenantId, value), signal);
     }
     await this.#client.send({ operation: 'delete', input: {
       TableName: this.#tenantPrincipalsTable, Key: principalDdbKey(tenantId, ownerPrincipal),
       ConditionExpression: 'installation_id = :installationId',
       ExpressionAttributeValues: { ':installationId': installationId },
-    } });
+    }, ...(signal ? { signal } : {}) });
   }
 
-  async purgeResourceFromTenant(tenantId: string, resourceId: string): Promise<void> {
+  async purgeResourceFromTenant(tenantId: string, resourceId: string, signal?: AbortSignal): Promise<void> {
     assertPresent(tenantId, resourceId);
     // The resource_scopes hash key already narrows to exactly this tenant and
     // resource, so every returned row is one to delete -- no tenant-wide read
@@ -258,10 +260,10 @@ export class TeamsDataStore {
       IndexName: resourceScopesIndex,
       KeyConditionExpression: 'tenant_resource_key = :resourceKey',
       ExpressionAttributeValues: { ':resourceKey': resourceIndexKey(tenantId, resourceId) },
-    });
+    }, signal);
     for (const item of items) {
       const policyKeyValue = asString(item.policy_key);
-      if (policyKeyValue) await this.#delete(this.#channelPoliciesTable, policyDdbKey(tenantId, policyKeyValue));
+      if (policyKeyValue) await this.#delete(this.#channelPoliciesTable, policyDdbKey(tenantId, policyKeyValue), signal);
     }
   }
 
@@ -396,23 +398,23 @@ export class TeamsDataStore {
     };
   }
 
-  #queryTenant(tableName: string, tenantId: string, sortKey?: { readonly sortKeyName: string; readonly sortKeyPrefix: string }): Promise<readonly Record<string, unknown>[]> {
+  #queryTenant(tableName: string, tenantId: string, sortKey?: { readonly sortKeyName: string; readonly sortKeyPrefix: string }, signal?: AbortSignal): Promise<readonly Record<string, unknown>[]> {
     return this.#queryAll({
       TableName: tableName,
       ConsistentRead: true,
       KeyConditionExpression: `${tenantKey} = :tenant${sortKey === undefined ? '' : ` AND begins_with(${sortKey.sortKeyName}, :policyPrefix)`}`,
       ExpressionAttributeValues: { ':tenant': tenantId, ...(sortKey === undefined ? {} : { ':policyPrefix': sortKey.sortKeyPrefix }) },
-    });
+    }, signal);
   }
 
-  async #queryAll(input: Record<string, unknown>): Promise<readonly Record<string, unknown>[]> {
+  async #queryAll(input: Record<string, unknown>, signal?: AbortSignal): Promise<readonly Record<string, unknown>[]> {
     const items: Record<string, unknown>[] = [];
     let exclusiveStartKey: Record<string, unknown> | undefined;
     do {
       const output = await this.#client.send<{
         readonly Items?: readonly Record<string, unknown>[];
         readonly LastEvaluatedKey?: Record<string, unknown>;
-      }>({ operation: 'query', input: { ...input, ...(exclusiveStartKey ? { ExclusiveStartKey: exclusiveStartKey } : {}) } });
+      }>({ operation: 'query', input: { ...input, ...(exclusiveStartKey ? { ExclusiveStartKey: exclusiveStartKey } : {}) }, ...(signal ? { signal } : {}) });
       items.push(...(output.Items ?? []));
       exclusiveStartKey = output.LastEvaluatedKey;
     } while (exclusiveStartKey && Object.keys(exclusiveStartKey).length > 0);
@@ -421,7 +423,7 @@ export class TeamsDataStore {
 
   // Unconditional: a delete of an absent key succeeds in DynamoDB, which is
   // what makes the teardown paths above safe to rerun after a partial failure.
-  async #delete(tableName: string, key: Record<string, string>): Promise<void> {
-    await this.#client.send({ operation: 'delete', input: { TableName: tableName, Key: key } });
+  async #delete(tableName: string, key: Record<string, string>, signal?: AbortSignal): Promise<void> {
+    await this.#client.send({ operation: 'delete', input: { TableName: tableName, Key: key }, ...(signal ? { signal } : {}) });
   }
 }
