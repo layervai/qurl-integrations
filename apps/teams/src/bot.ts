@@ -53,13 +53,13 @@ export class TeamsBot {
     const resourceId = resource.resourceId;
     const existing = await this.#options.data.lookupScopeAlias(tenantId, scopeId, alias);
     if (existing !== undefined && existing !== resourceId) {
-      throw new UserFacingError(`Alias \`$${alias}\` is already in use in this channel.`);
+      throw new UserFacingError(`Alias \`$${alias}\` is already in use in this channel. Run \`unset-alias $${alias}\` first, or choose another alias.`);
     }
     try {
       await this.#options.data.bindScopeAlias(tenantId, scopeId, alias, resourceId, resource.crid);
     } catch (error) {
       if (error instanceof ScopeAliasConflictError) {
-        throw new UserFacingError(`Alias \`$${alias}\` is already in use in this channel.`);
+        throw new UserFacingError(`Alias \`$${alias}\` is already in use in this channel. Run \`unset-alias $${alias}\` first, or choose another alias.`);
       }
       throw error;
     }
@@ -90,7 +90,7 @@ export class TeamsBot {
         this.#options.logger?.error('Teams command failed', { error });
         response = signal?.aborted
           ? 'The qURL command timed out. Some changes may have completed; check the result before retrying.'
-          : 'The qURL command could not be completed. Check the command syntax and try again.';
+          : 'The qURL command could not be completed. Please try again or contact your qURL operator.';
       }
     }
     if (response) {

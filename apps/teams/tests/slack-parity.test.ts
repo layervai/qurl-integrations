@@ -195,11 +195,21 @@ describe('Slack behavior parity through the Teams bot and HTTP adapter', () => {
     expect(test.requests.filter(request => request.method === 'POST')).toHaveLength(1);
   });
 
-  it.each([401, 403])('keeps an unexpected %s authorization failure generic and visible to operators', async status => {
-    const test = mintScenario(async () => json({ error: { code: 'insufficient_scope', detail: 'private upstream diagnostic' } }, status));
+  it.each([
+    { status: 400, code: 'revoked' },
+    { status: 401, code: 'insufficient_scope' },
+    { status: 403, code: 'insufficient_scope' },
+    { status: 404, code: 'resource_not_found' },
+    { status: 410, code: 'resource_tombstoned' },
+  ])('keeps $status/$code mint failures generic and visible to operators without blaming syntax', async ({ status, code }) => {
+    const test = mintScenario(async () => json({ error: { code, detail: 'private upstream diagnostic' } }, status));
     await test.bot.handleActivity(activity('get $docs'));
     expect(test.errors).toHaveLength(1);
-    expect(test.replies[0]).not.toMatch(/private upstream|insufficient_scope/);
+    expect(test.errors[0]?.context?.error).toMatchObject({ name: 'QurlHttpError', message: `qURL request failed (${status})` });
+    expect(test.replies).toEqual(['The qURL command could not be completed. Please try again or contact your qURL operator.']);
+    expect(test.requests).toHaveLength(1);
+    expect(test.requests[0]?.method).toBe('POST');
+    expect(test.dms).toEqual([]);
   });
 
   it('revokes after the second private send fails and a fresh attempt delivers a fresh enrollment token', async () => {

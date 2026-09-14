@@ -229,7 +229,14 @@ ambient `TENANT_ID` or shared `botframework.com` authority. See Microsoft's
 [app authentication configuration](https://learn.microsoft.com/en-us/microsoftteams/platform/teams-sdk/essentials/app-authentication/overview)
 and [Teams CLI registration options](https://microsoft.github.io/teams-sdk/cli/commands/app/create/).
 
-Authenticated message activities are acknowledged before command completion,
+At most 50 message activities run per process, matching Slack's default async
+work limit. The authenticated SDK middleware returns HTTP 503 for excess work
+before any bot side effect or success acknowledgement. Slots stay occupied
+through final reply delivery, and rejected activities can be retried after
+capacity frees up. This is not a durable queue or a guarantee that Teams will
+automatically redeliver every rejected activity.
+
+Admitted message activities are acknowledged before command completion,
 so a slow qURL request or reply does not hold Teams' 15-second retry window
 open. The 30-second activity signal also cancels DynamoDB queries and deletes
 in uninstall and revoke cleanup. Final replies use the SDK-backed adapter's

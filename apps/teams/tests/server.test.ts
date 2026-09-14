@@ -362,6 +362,46 @@ describe('Teams production message handling', () => {
     });
   });
 
+  it('bounds concurrent message work and rejects overload until accepted final replies finish', async () => {
+    configureEnvironment();
+    vi.useFakeTimers();
+    let finishCommands = (): void => undefined;
+    let finishReplies = (): void => undefined;
+    const commandsDone = new Promise<void>(resolve => { finishCommands = resolve; });
+    const repliesDone = new Promise<void>(resolve => { finishReplies = resolve; });
+    const execute = vi.spyOn(TeamsBot.prototype, 'execute').mockImplementation(async () => {
+      await commandsDone;
+      return 'qURL operation completed';
+    });
+    const reply = vi.spyOn(TeamsSdkMessagePoster.prototype, 'reply').mockImplementation(async () => { await repliesDone; });
+    const runtime = await createProductionTeamsConfig();
+    const dispatch = (id: string) => runtime.app.onActivity({ body: { ...activity, id }, token: { serviceUrl: activity.serviceUrl } } as never);
+    try {
+      // Exercise the actual SDK middleware/router with a concurrent burst.
+      const responses = await Promise.all(Array.from({ length: 55 }, (_, i) => dispatch(`burst-${i}`)));
+      expect(responses.filter(response => response.status === 200)).toHaveLength(50);
+      expect(responses.filter(response => response.status === 503)).toHaveLength(5);
+      expect(execute).toHaveBeenCalledTimes(50);
+      expect(reply).not.toHaveBeenCalled();
+      expect(await dispatch('retry-after-capacity')).toMatchObject({ status: 503 });
+      finishCommands();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(reply).toHaveBeenCalledTimes(50);
+      expect(await dispatch('retry-after-capacity')).toMatchObject({ status: 503 });
+      finishReplies();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(await dispatch('retry-after-capacity')).toMatchObject({ status: 200 });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(execute).toHaveBeenCalledTimes(51);
+      expect(execute.mock.calls.filter(([value]) => value.id === 'retry-after-capacity')).toHaveLength(1);
+      expect(reply).toHaveBeenCalledTimes(51);
+    } finally {
+      finishCommands();
+      finishReplies();
+      await vi.advanceTimersByTimeAsync(0);
+    }
+  });
+
   it('stops HTTP acceptance and drains detached command work through its final reply', async () => {
     configureEnvironment();
     vi.useFakeTimers();

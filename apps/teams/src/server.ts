@@ -32,6 +32,8 @@ import { toTeamsActivity } from './activity.js';
 
 const DEFAULT_MAX_BODY_BYTES = 1_048_576;
 const ACTIVITY_TIMEOUT_MS = 30_000;
+// ponytail: match Slack's 50-slot process pool; split by tenant if load requires it.
+const MAX_ACTIVE_MESSAGES = 50;
 // TODO(upstream-contract): qurl-webhook-runtime gives the task 30 seconds
 // after SIGTERM. Leave time for exit without shortening active work signals.
 const SHUTDOWN_TIMEOUT_MS = 25_000;
@@ -327,6 +329,11 @@ export async function createProductionTeamsConfig(): Promise<TeamsProductionConf
     logger,
   });
   const activeActivities = new Set<Promise<void>>();
+  // TODO(upstream-contract): the SDK propagates this status after authentication.
+  // Reject excess work before acknowledging it or starting any bot side effect.
+  app.use(({ activity, next }) => activity.type === 'message' && activeActivities.size >= MAX_ACTIVE_MESSAGES
+    ? { status: 503 }
+    : next());
   app.on('message', ({ activity }) => {
     const normalized = toTeamsActivity(activity);
     if (normalized) {

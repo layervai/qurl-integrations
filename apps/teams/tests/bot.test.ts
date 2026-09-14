@@ -8,7 +8,7 @@ import { OAuthStateManager } from '../src/state.js';
 import { TeamsSdkMessagePoster } from '../src/teams-sdk.js';
 import type { QurlClient } from '../src/qurl-client.js';
 import type { TeamsDataStore } from '../src/teams-data.js';
-import { TenantOwnerAlreadyAdminError, TenantOwnerRemovalError } from '../src/teams-data.js';
+import { ScopeAliasConflictError, TenantOwnerAlreadyAdminError, TenantOwnerRemovalError } from '../src/teams-data.js';
 import { renderTunnelInstallMessage, validateTunnelSlug } from '../src/tunnel.js';
 import { InMemoryStatePersistence, TEST_ACTOR_A_ID, TEST_TENANT_ID, deterministicRandom, fixedClock } from './helpers.js';
 
@@ -196,7 +196,7 @@ describe('Teams bot primitives', () => {
       channelData: { tenant: { id: 'tenant' }, channel: { id: 'channel' } },
       conversation: { id: 'conversation', conversationType: 'channel' },
     }, undefined, async text => { replies.push(text); });
-    expect(replies).toEqual(['The qURL command could not be completed. Check the command syntax and try again.']);
+    expect(replies).toEqual(['The qURL command could not be completed. Please try again or contact your qURL operator.']);
   });
 
   it.each(['during execution', 'before final reply', 'during final reply'])('delivers a bounded final response when the activity expires %s', async phase => {
@@ -1261,22 +1261,31 @@ describe('Teams bot primitives', () => {
     expect(errors).toEqual(['Teams message delivery failed']);
   });
 
-  it('does not silently reassign an existing alias with set-alias', async () => {
+  it.each([false, true])('explains alias conflict recovery without reassigning or exposing its target (concurrent=%s)', async concurrent => {
+    const replies: string[] = [];
+    let bindAttempts = 0;
+    let exposures = 0;
     const bot = new TeamsBot({
       qurl: {
         listResources: async () => ({ resources: [{ resourceId: 'resource-1' }] }),
       } as unknown as QurlClient,
       data: {
         checkAdmin: async () => ({ isAdmin: true }),
-        lookupScopeAlias: async (_tenant: string, _scope: string, alias: string) => alias === 'docs' ? 'other-resource' : undefined,
+        lookupScopeAlias: async (_tenant: string, _scope: string, alias: string) => alias === 'docs' && !concurrent ? 'other-resource' : undefined,
+        bindScopeAlias: async () => { bindAttempts += 1; throw new ScopeAliasConflictError('docs', 'other-resource'); },
+        exposeResource: async () => { exposures += 1; },
       } as unknown as TeamsDataStore,
       messages: {} as never,
       qurlEndpoint: 'https://api.sandbox.example',
     });
-    await expect(bot.execute(
-      { type: 'message', from: { aadObjectId: 'admin' } },
-      'tenant-1', 'channel-1', true, parseCommand('set-alias $docs $resource-1'),
-    )).rejects.toThrow('Alias `$docs` is already in use in this channel.');
+    await bot.handleActivity({
+      type: 'message', text: 'set-alias $docs $resource-1', from: { aadObjectId: 'admin' },
+      channelData: { tenant: { id: 'tenant-1' }, channel: { id: 'channel-1' } },
+      conversation: { id: 'thread', conversationType: 'channel' },
+    }, undefined, async text => { replies.push(text); });
+    expect(replies).toEqual(['Alias `$docs` is already in use in this channel. Run `unset-alias $docs` first, or choose another alias.']);
+    expect(bindAttempts).toBe(concurrent ? 1 : 0);
+    expect(exposures).toBe(0);
   });
 
   it('explains that unsetting an alias does not unprotect its resource', async () => {
