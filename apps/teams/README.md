@@ -20,12 +20,15 @@ Connector calls. Its OAuth/Signin features are intentionally not enabled.
 ## Tenant trust boundary
 
 The Teams SDK must remain the only public ingress for `/api/messages`: it
-validates the Bot Framework token before the qURL bot receives an Activity.
-The SDK handler seam used by this package does not expose the validated token's
-`tid` claim, so tenant scoping intentionally relies on the tenant identifiers
-delivered in that authenticated Activity. `deriveScope` rejects contradictory
-`channelData.tenant.id` and `conversation.tenantId` values, but cannot perform
-a cryptographic claim cross-check until the upstream SDK exposes that claim.
+authenticates the Microsoft Bot Framework service using the token's signature,
+issuer, bot-application audience and signed service URL before exposing an
+Activity. Customer tenant and actor identity come from the Teams-supplied
+Activity delivered by that authenticated service over HTTPS. This adapter does
+not provide a customer-tenant claim binding; `BOT_TENANT_ID` selects the bot
+registration tenant and must not be substituted for the customer's tenant.
+`deriveScope` rejects contradictory `channelData.tenant.id` and
+`conversation.tenantId` values. Recheck this upstream SDK/Teams trust contract
+on upgrades. See Microsoft's [Bot Framework authentication contract](https://learn.microsoft.com/en-us/azure/bot-service/rest-api/bot-framework-rest-connector-authentication?view=azure-bot-service-4.0).
 Do not add a route that invokes the bot directly with caller-supplied Activity
 objects; doing so would violate this tenant-isolation trust boundary.
 
