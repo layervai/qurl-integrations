@@ -30,6 +30,8 @@ process.env.BASE_URL = 'https://discord.example';
 process.env.AWS_REGION = 'us-east-2';
 process.env.DDB_TABLE_PREFIX = 'qurl-bot-discord-test-';
 
+const logger = require('../src/logger');
+const { AUDIT_EVENTS } = require('../src/constants');
 const subscriptions = require('../src/webhook-subscriptions');
 const { linkGuildWebhookSubscription } = require('../src/guild-webhook-link');
 
@@ -185,6 +187,33 @@ it('does not publish the environment secret when owner-only persistence rejects'
   expect(subscriptions.getSecretForOwner('usr_default')).toBeNull();
   expect(subscriptions.isPrimed()).toBe(false);
   expect(requests.filter(({ method }) => method === 'POST')).toHaveLength(0);
+});
+
+it('fails closed when the default subscription delivers to another deployment', async () => {
+  const config = require('../src/config');
+  const originalBaseUrl = config.BASE_URL;
+  config.BASE_URL = 'https://staging-discord.example';
+  try {
+    const result = await linkGuildWebhookSubscription({
+      guildId: 'g_shared_account',
+      apiKey: 'lv_alias_for_default_owner',
+    });
+
+    expect(result).toEqual({ ok: false, reason: 'register-failed' });
+    expect(requests.filter(({ method }) => method === 'POST')).toHaveLength(0);
+    expect(mockSetGuildDefaultWebhookOwner).not.toHaveBeenCalled();
+    expect(mockSetGuildWebhookSubscription).not.toHaveBeenCalled();
+    expect(logger.audit).toHaveBeenCalledWith(
+      AUDIT_EVENTS.QURL_WEBHOOK_SUBSCRIPTION_REGISTER_FAILED,
+      expect.objectContaining({
+        guild_id: 'g_shared_account',
+        stage: 'owner-resolution',
+        error_code: 'DEFAULT_WEBHOOK_OWNER_URL_MISMATCH',
+      }),
+    );
+  } finally {
+    config.BASE_URL = originalBaseUrl;
+  }
 });
 
 it('fails closed before the registrar when the default secret is unexpectedly absent', async () => {

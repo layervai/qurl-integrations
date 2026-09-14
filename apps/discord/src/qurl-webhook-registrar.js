@@ -1026,6 +1026,9 @@ module.exports = {
   // same QurlServiceError / op-tagged transport as the registrar — kept off
   // _internals because it has a stable contract and an external caller.
   callQurlService,
+  // Same reason: owner discovery compares subscription URLs against the
+  // bridge URL with the registrar's own canonicalization.
+  canonicalUrl,
   _internals: {
     canonicalUrl,
     pickSurvivor,

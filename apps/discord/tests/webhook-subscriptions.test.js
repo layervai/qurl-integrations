@@ -559,6 +559,36 @@ describe('webhook-subscriptions registry — default-key discovery', () => {
       .rejects.toMatchObject({ code: 'CANDIDATE_WEBHOOK_OWNER_CONTRACT' });
   });
 
+  it('rejects a default owner whose subscriptions do not target the bridge URL', async () => {
+    global.fetch = jest.fn(async () => ({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({
+        data: [{ owner_id: 'usr_default', url: 'https://other-env.example/webhooks/qurl' }],
+      }),
+    }));
+
+    await expect(subs.resolveDefaultOwnerForApiKey('lv_alias', { bridgeUrl: 'http://localhost:3000/webhooks/qurl' }))
+      .rejects.toMatchObject({ code: 'DEFAULT_WEBHOOK_OWNER_URL_MISMATCH' });
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('accepts a default subscription whose URL matches the bridge URL after canonicalization', async () => {
+    global.fetch = jest.fn(async () => ({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({
+        data: [
+          { owner_id: 'usr_default', url: 'https://other-env.example/webhooks/qurl' },
+          { owner_id: 'usr_default', url: 'http://LOCALHOST:3000/webhooks/qurl/' },
+        ],
+      }),
+    }));
+
+    await expect(subs.resolveDefaultOwnerForApiKey('lv_test_abc', { bridgeUrl: 'http://localhost:3000/webhooks/qurl' }))
+      .resolves.toBe('usr_default');
+  });
+
   it('fails closed at the webhook discovery pagination cap', async () => {
     global.fetch = jest.fn(async () => ({
       ok: true,

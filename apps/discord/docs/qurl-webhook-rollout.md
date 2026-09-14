@@ -122,15 +122,22 @@ finds the existing sub, sees the SSM secret matches, returns `reused`).
   contract failures, inspect the accompanying application warning in
   CloudWatch. `DEFAULT_WEBHOOK_OWNER_CONFIG` means the shared secret is missing
   without the explicit pure-BYOK flag, or the secret exists but the default API
-  key or endpoint is missing; `DEFAULT_WEBHOOK_OWNER_CONTRACT`
-  means at least one response row was malformed (strictly, even if a sibling
-  row has an owner); `DEFAULT_WEBHOOK_OWNER_CONFLICT` means one key listed
-  multiple owners. The `CANDIDATE_WEBHOOK_OWNER_CONTRACT` and
-  `CANDIDATE_WEBHOOK_OWNER_CONFLICT` variants refer to the linking guild key,
-  so inspect that account's subscriptions instead of rerunning the default
-  registrar. `DEFAULT_WEBHOOK_OWNER_KEY_INVALID` means the saved guild
-  key ciphertext cannot be decrypted; `DEFAULT_WEBHOOK_OWNER_KEY_CHANGED`
-  means a concurrent re-key won. HTTP failures commonly use
+  key or endpoint is missing; `DEFAULT_WEBHOOK_OWNER_CONTRACT` has three
+  causes, distinguished by the warning message: the response `data` was not an
+  array, at least one response row omitted `owner_id` (strictly, even if a
+  sibling row has an owner), or the 50-page listing cap was hit (the only one
+  that is permanent rather than transient — the bot key owns more subscriptions
+  than discovery will walk); `DEFAULT_WEBHOOK_OWNER_CONFLICT` means one key
+  listed multiple owners; `DEFAULT_WEBHOOK_OWNER_URL_MISMATCH` means the
+  default owner has subscriptions but none targets this deployment's
+  `BASE_URL/webhooks/qurl` (typically a qURL account shared across
+  environments) — invoke the registrar Lambda for this environment. The
+  `CANDIDATE_WEBHOOK_OWNER_CONTRACT` and `CANDIDATE_WEBHOOK_OWNER_CONFLICT`
+  variants refer to the linking guild key, so inspect that account's
+  subscriptions instead of rerunning the default registrar.
+  `DEFAULT_WEBHOOK_OWNER_KEY_INVALID` means the saved guild key ciphertext
+  cannot be decrypted; `DEFAULT_WEBHOOK_OWNER_KEY_CHANGED` means a concurrent
+  re-key won or the guild row was removed mid-link. HTTP failures commonly use
   `error_code=Error`; network and timeout failures use their runtime error name.
 - **Guild links fail with `error_code=DEFAULT_WEBHOOK_SECRET_CONFLICT`.** A
   complete legacy DDB row may contain the only secret that still matches the

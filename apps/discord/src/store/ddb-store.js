@@ -1621,6 +1621,8 @@ async function setGuildWebhookSubscription(guildId, { webhookId, webhookSecret, 
 }
 
 function decryptDefaultOwnerGuildApiKey(ciphertext) {
+  // A missing row / key also lands on DEFAULT_WEBHOOK_OWNER_KEY_CHANGED: the
+  // caller's setGuildApiKey write must precede this, so the row was removed.
   if (!ciphertext) return null;
   try {
     return decrypt(ciphertext);

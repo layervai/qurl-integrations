@@ -300,6 +300,14 @@ describe('guild configs', () => {
     expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
   });
 
+  test('setGuildDefaultWebhookOwner: codes a missing guild row as a key change', async () => {
+    ddbMock.on(GetCommand).resolves({});
+
+    await expect(store.setGuildDefaultWebhookOwner('g_default', defaultOwnerArgs()))
+      .rejects.toMatchObject({ code: 'DEFAULT_WEBHOOK_OWNER_KEY_CHANGED' });
+    expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
+  });
+
   test('setGuildDefaultWebhookOwner: codes an undecryptable guild API key', async () => {
     ddbMock.on(GetCommand).resolves({
       Item: { guild_id: 'g_default', qurl_api_key: 'enc:v1:malformed' },

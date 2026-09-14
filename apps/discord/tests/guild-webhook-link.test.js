@@ -123,7 +123,9 @@ describe('linkGuildWebhookSubscription — partial-failure rollback', () => {
       guildId: 'g_happy', apiKey: 'lv_guild_happy',
     });
     expect(result).toEqual({ ok: true, action: 'created' });
-    expect(mockResolveDefaultOwnerForApiKey).toHaveBeenCalledWith('lv_guild_happy');
+    expect(mockResolveDefaultOwnerForApiKey).toHaveBeenCalledWith(
+      'lv_guild_happy', { bridgeUrl: 'http://localhost:3000/webhooks/qurl' },
+    );
     expect(mockEnsureWebhookSubscription).toHaveBeenCalledTimes(1);
     expect(mockEnsureWebhookSubscription).toHaveBeenCalledWith(
       expect.objectContaining({ apiKey: 'lv_guild_happy' }),

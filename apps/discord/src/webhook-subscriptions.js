@@ -24,7 +24,7 @@ const db = require('./store');
 const config = require('./config');
 const logger = require('./logger');
 const { AUDIT_EVENTS } = require('./constants');
-const { callQurlService } = require('./qurl-webhook-registrar');
+const { callQurlService, canonicalUrl } = require('./qurl-webhook-registrar');
 
 const REFRESH_INTERVAL_MS = 30_000;
 // After this many consecutive refresh failures we escalate via audit
@@ -213,13 +213,21 @@ function removeGuild({ guildId, ownerId }) {
 // closed rather than choosing an owner based on response order. The same
 // assumption underlies BYOK row population via setGuildApiKey, so any change
 // there needs a coordinated rework here.
-async function discoverOwnerId(apiKey, { subject = 'DEFAULT', skipMalformedRows = false } = {}) {
+//
+// `requiredUrl`: when set, an owner is only returned if at least one of its
+// subscriptions targets that URL (registrar canonicalization). The linker
+// passes its bridge URL so "reuse the default subscription" is never claimed
+// for a subscription that delivers somewhere else (a shared qURL account
+// across environments).
+async function discoverOwnerId(apiKey, { subject = 'DEFAULT', skipMalformedRows = false, requiredUrl = null } = {}) {
   if (!apiKey || !config.QURL_ENDPOINT) return null;
   // Walk the same bounded surface the registrar can select from. Validating
   // only page 1 would let it mutate a malformed default subscription on a
   // later page after discovery inferred the owner from a sibling.
   let ownerId = null;
   let cursor = '';
+  const targetUrl = requiredUrl ? canonicalUrl(requiredUrl) : null;
+  let targetFound = false;
   for (let page = 0; page < 50; page++) {
     const qs = cursor ? `?cursor=${encodeURIComponent(cursor)}&limit=100` : '?limit=100';
     const body = await callQurlService({
@@ -250,9 +258,19 @@ async function discoverOwnerId(apiKey, { subject = 'DEFAULT', skipMalformedRows 
         throw err;
       }
       ownerId = webhook.owner_id;
+      if (targetUrl && canonicalUrl(webhook.url) === targetUrl) targetFound = true;
     }
+    // TODO(upstream-contract): qurl-service paginates GET /v1/webhooks via
+    // `meta.next_cursor` (same shape findExistingSubscriptions walks).
     const next = body?.meta?.next_cursor;
-    if (!next) return ownerId;
+    if (!next) {
+      if (ownerId && targetUrl && !targetFound) {
+        const err = new Error('discoverOwnerId: no subscription for this owner targets the bridge URL');
+        err.code = `${subject}_WEBHOOK_OWNER_URL_MISMATCH`;
+        throw err;
+      }
+      return ownerId;
+    }
     cursor = next;
   }
   const err = new Error('discoverOwnerId: pagination cap hit (50 pages, ~5000 subscriptions)');
@@ -277,7 +295,13 @@ async function discoverDefaultOwnerId(options) {
 // subscription disappeared. Creating in that state could move the
 // environment-managed account onto a guild-secret path and break Lambda
 // recovery.
-async function resolveDefaultOwnerForApiKey(apiKey) {
+//
+// `bridgeUrl`: the linker's receiver URL. The default owner is rejected
+// (`DEFAULT_WEBHOOK_OWNER_URL_MISMATCH`) when none of its subscriptions
+// targets it — the BYOK path gets the same guarantee from the registrar's
+// URL match, and skipping it here would report `reused` for a subscription
+// that delivers to another deployment.
+async function resolveDefaultOwnerForApiKey(apiKey, { bridgeUrl } = {}) {
   if (!config.QURL_WEBHOOK_SECRET) {
     if (config.QURL_WEBHOOK_PURE_BYOK) return null;
     const err = new Error('resolveDefaultOwnerForApiKey: QURL_WEBHOOK_SECRET is required unless QURL_WEBHOOK_PURE_BYOK=true');
@@ -294,7 +318,7 @@ async function resolveDefaultOwnerForApiKey(apiKey) {
   // stable, but its last subscription can be deleted out of band; accepting a
   // stale cache would let the per-guild registrar recreate the default path
   // with a guild-owned secret.
-  const ownerId = await discoverDefaultOwnerId();
+  const ownerId = await discoverDefaultOwnerId({ requiredUrl: bridgeUrl });
   if (!ownerId) {
     const err = new Error('resolveDefaultOwnerForApiKey: default subscription owner could not be discovered');
     err.code = 'DEFAULT_WEBHOOK_OWNER_UNDISCOVERED';

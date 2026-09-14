@@ -16,6 +16,11 @@
 // 5xx mid-batch) — only the rows that didn't complete on the first
 // pass will be touched on the second.
 //
+// Summary counters: `Scanned` is DDB's ScannedCount, `Matched` is what
+// survived the FilterExpression, `Skipped` counts decrypt failures only
+// (rows without a key or already linked used to be counted here; they now
+// show up in Scanned minus Matched).
+//
 // Usage:
 //   node apps/discord/scripts/provision-guild-subscriptions.js [--dry-run]
 //

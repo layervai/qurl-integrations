@@ -122,7 +122,7 @@ async function linkGuildWebhookSubscription({ guildId, apiKey, descriptionContex
   // neither of which starts the HTTP registry scan.
   let matchedDefaultOwnerId;
   try {
-    matchedDefaultOwnerId = await subs.resolveDefaultOwnerForApiKey(apiKey);
+    matchedDefaultOwnerId = await subs.resolveDefaultOwnerForApiKey(apiKey, { bridgeUrl: bridgeUrl() });
   } catch (err) {
     logger.warn('Per-guild webhook owner resolution failed', {
       error: err?.message, guildId,
