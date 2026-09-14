@@ -119,6 +119,10 @@ export class TeamsBot {
     if (!actorId) throw new UserFacingError('This activity did not carry your Teams directory id, so qURL cannot identify you. Please report this if it repeats.');
     if (command.verb === 'setup') {
       if (!this.#options.setup || !command.email) throw new Error('Teams OAuth setup is not configured');
+      const { ownerId } = await this.#options.data.checkAdmin(tenantId, actorId);
+      if (ownerId !== undefined && ownerId !== actorId) {
+        throw new UserFacingError('This Teams tenant is already connected to qURL. Ask the person who connected it to re-run `qurl setup`.');
+      }
       const deliveryId = activity.from?.id?.trim() ?? '';
       if (!deliveryId) throw new Error('Teams actor delivery id is required');
       const link = await this.#options.setup.build(tenantId, actorId, deliveryId, command.email, command.setupMode ?? 'bind');
@@ -210,7 +214,7 @@ export class TeamsBot {
         if (!(error instanceof QurlHttpError) || (error.status !== 404 && error.status !== 410)) throw error;
       }
       await this.#options.data.purgeResourceFromTenant(tenantId, resourceId, signal);
-      return `Resource \`$${resourceId}\` is revoked or already unavailable to this account. Channel references cleared.`;
+      return `Resource \`$${resourceId}\` is revoked or already unavailable to this account.`;
     }
     const resources = await this.resources(qurl, signal);
     if (command.verb === 'list') return this.list(tenantId, scopeId, resources);

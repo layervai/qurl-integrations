@@ -469,7 +469,7 @@ describe('Teams bot primitives', () => {
     const revoke = () => bot.execute({ type: 'message', from: { aadObjectId: 'admin' } },
       'tenant', 'channel', true, parseCommand(`revoke $${token}`));
     await expect(revoke()).rejects.toThrow('cleanup unavailable');
-    await expect(revoke()).resolves.toBe('Resource `$resource-1` is revoked or already unavailable to this account. Channel references cleared.');
+    await expect(revoke()).resolves.toBe('Resource `$resource-1` is revoked or already unavailable to this account.');
     expect(deletions).toEqual(['resource-1', 'resource-1']);
     expect(purgeAttempts).toBe(2);
   });
@@ -527,7 +527,7 @@ describe('Teams bot primitives', () => {
       qurlEndpoint: 'https://qurl.example',
     });
     await expect(bot.execute({ type: 'message', from: { aadObjectId: 'admin' } },
-      'tenant', 'channel', true, parseCommand('revoke $docs'))).resolves.toBe('Resource `$resource-1` is revoked or already unavailable to this account. Channel references cleared.');
+      'tenant', 'channel', true, parseCommand('revoke $docs'))).resolves.toBe('Resource `$resource-1` is revoked or already unavailable to this account.');
     expect(operations).toEqual(['delete:resource-1', 'purge:resource-1']);
   });
 
@@ -941,12 +941,12 @@ describe('Teams bot primitives', () => {
     expect(() => parseCommand('protect-connector prod bogus:x')).toThrow('invalid connector option');
   });
 
-  it('sends the setup link to the personal chat, never into channel history', async () => {
+  it.each(['fresh', 'owner'])('sends the setup link to the personal chat during %s setup, never into channel history', async ownership => {
     const sent: { readonly conversationId: string; readonly text: string }[] = [];
     const bot = new TeamsBot({
       qurl: {} as QurlClient,
       data: {
-        checkAdmin: async () => ({ isAdmin: true }),
+        checkAdmin: async () => ({ isAdmin: ownership === 'owner', ...(ownership === 'owner' ? { ownerId: 'actor' } : {}) }),
         personalConversationRef: async () => ({ serviceUrl: 'https://smba.trafficmanager.net/teams', conversationId: 'personal' }),
       } as unknown as TeamsDataStore,
       messages: { sendText: async (_u: string, conversationId: string, text: string) => { sent.push({ conversationId, text }); } } as never,
@@ -954,7 +954,7 @@ describe('Teams bot primitives', () => {
       qurlEndpoint: 'https://api.sandbox.example',
     });
     const reply = await bot.execute(
-      { type: 'message', id: 'activity-1', from: { id: 'delivery', aadObjectId: 'actor' } },
+      { type: 'message', id: 'activity-1', from: { id: 'delivery', aadObjectId: ' AcToR ' } },
       'tenant-1', 'channel-1', true, parseCommand('setup alice@example.com'),
     );
     // The channel reply must not carry the one-shot state handle.
@@ -962,6 +962,32 @@ describe('Teams bot primitives', () => {
     expect(sent).toHaveLength(1);
     expect(sent[0]?.conversationId).toBe('personal');
     expect(sent[0]?.text).toContain('SECRET-HANDLE');
+  });
+
+  it.each([false, true])('refuses setup for a different owner before mint or DM (isAdmin: %s)', async isAdmin => {
+    const replies: string[] = [];
+    const errors: string[] = [];
+    let setupCalls = 0;
+    let dmCalls = 0;
+    const bot = new TeamsBot({
+      data: {
+        checkAdmin: async () => ({ isAdmin, ownerId: 'owner' }),
+        personalConversationRef: async () => ({ serviceUrl: 'https://smba.trafficmanager.net/teams', conversationId: 'personal' }),
+      } as unknown as TeamsDataStore,
+      messages: { sendText: async () => { dmCalls += 1; } } as never,
+      setup: { build: async () => { setupCalls += 1; return { url: new URL('https://teams.connector.example/oauth/qurl/start?state=SECRET-HANDLE') }; } } as never,
+      qurlEndpoint: 'https://qurl.example',
+      logger: { debug: () => {}, info: () => {}, warn: () => {}, error: message => { errors.push(message); } },
+    });
+    await bot.handleActivity({
+      type: 'message', text: 'setup alice@example.com', from: { aadObjectId: 'actor', id: 'delivery' },
+      channelData: { tenant: { id: 'tenant' }, channel: { id: 'channel' } },
+      conversation: { id: 'conversation', conversationType: 'channel' },
+    }, undefined, async text => { replies.push(text); });
+    expect(replies).toEqual(['This Teams tenant is already connected to qURL. Ask the person who connected it to re-run `qurl setup`.']);
+    expect(setupCalls).toBe(0);
+    expect(dmCalls).toBe(0);
+    expect(errors).toEqual([]);
   });
 
   it('refuses setup when there is no personal chat to send the link to', async () => {
