@@ -47,9 +47,9 @@ Terraform-side ordering (config lives in `qurl-integrations-infra`):
 
 1. Apply the `qurl-views` DDB table and Terraform's `QURL_WEBHOOK_SECRET`
    SecureString seeded with `PLACEHOLDER`. The registrar replaces that public
-   bootstrap value with the server's secret before bot tasks start.
-   <!-- TODO(upstream-contract): keep this seed in sync with infra Terraform. --> The bot
+   bootstrap value with the server's secret before bot tasks start. The bot
    rejects the sentinel at startup; it must never become an HMAC key.
+   <!-- TODO(upstream-contract): keep this seed in sync with infra Terraform. -->
 2. Apply the Lambda function + IAM role (scoped: `ssm:GetParameter` on
    the `QURL_API_KEY` + `QURL_WEBHOOK_SECRET` paths; `ssm:PutParameter`
    on the `QURL_WEBHOOK_SECRET` path; `logs:CreateLogGroup` +
@@ -101,14 +101,17 @@ finds the existing sub, sees the SSM secret matches, returns `reused`).
   task-def update is skipped, no traffic shifts. Existing bot tasks
   keep running with the previous (still-valid) secret. Root-cause in
   CloudWatch logs for the Lambda; re-run apply when fixed.
-- **Bot reads the seed sentinel or a whitespace-only configured secret.** Startup fails
-  before listening on both gateway and HTTP processes: health, OAuth, and command
-  handling are unavailable, not just webhook delivery. Run the registrar and
-  verify its SSM persist succeeded before starting replacement tasks.
+- **Bot reads the seed sentinel or a whitespace-only configured secret.** The
+  receiver tier (`PROCESS_ROLE=http` or `combined`) fails in `startServer()`
+  before listening: health, OAuth, and webhook delivery are unavailable on that
+  tier. Gateway-only tasks never verify webhook signatures and keep serving
+  commands. Run the registrar and verify its SSM persist succeeded before
+  starting replacement tasks.
 - **Secret format drift.** The registrar and bot warn without logging secret
   material, preserve the exact returned bytes, and reuse them on restart.
   This does not validate arbitrary manual SSM edits: HMAC mismatches still
-  reject deliveries. Restore the registrar-persisted secret or rotate explicitly.
+  reject deliveries. Restore the registrar-persisted secret, or clear SSM and
+  re-invoke the Lambda (same recovery as the empty-secret case below).
 - **Bot reads empty `QURL_WEBHOOK_SECRET`.** Means the Lambda never
   ran successfully OR ran but SSM `PutParameter` failed (IAM, network).
   Receiver returns 503 (qurl-service retries). Recover by running the

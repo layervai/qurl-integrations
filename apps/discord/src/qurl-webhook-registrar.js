@@ -97,10 +97,14 @@ const QURL_EXPIRED = QURL_WEBHOOK_EVENTS.EXPIRED;
 // reconcile uses set comparison.
 const TARGET_EVENTS = Object.freeze([QURL_ACCESSED, QURL_EXPIRED]);
 
+// Upstream secrets are 49 chars (whsec_ + 43 base64url), so every real value
+// lands in the middle bucket; the top bucket only ever flags format drift.
+const SECRET_LENGTH_DRIFT_THRESHOLD = 64;
+
 function secretLengthBucket(value) {
   if (value.length < SERVER_SECRET_MIN_LENGTH) return `<${SERVER_SECRET_MIN_LENGTH}`;
-  if (value.length < 64) return `${SERVER_SECRET_MIN_LENGTH}-63`;
-  return '>=64';
+  if (value.length < SECRET_LENGTH_DRIFT_THRESHOLD) return `${SERVER_SECRET_MIN_LENGTH}-${SECRET_LENGTH_DRIFT_THRESHOLD - 1}`;
+  return `>=${SECRET_LENGTH_DRIFT_THRESHOLD}`;
 }
 
 function validateResponseSecret(value, operation) {
@@ -935,17 +939,23 @@ async function ensureWebhookSubscription(opts) {
       && initialSecret.length > 0
       && !isServerIssuedSecret(initialSecret)) {
     // The sentinel is designed bootstrap state; reserve WARN for surprises.
+    // Log the decision actually taken below (dedupe forces a rotate even
+    // when the stored key is usable), not just the classification.
     const seedSentinel = isInfraSeedSentinel(initialSecret);
+    const reusing = initialIsRealSecret && !wasDedupe;
     const meta = {
       webhookId: existing.webhook_id,
       seedSentinel,
       valueLengthBucket: secretLengthBucket(initialSecret),
+      action: reusing ? WEBHOOK_ACTIONS.REUSED : WEBHOOK_ACTIONS.ROTATED,
     };
     if (seedSentinel) {
       logger.info('qURL webhook SSM secret is the infra seed sentinel — rotating as designed', meta);
+    } else if (reusing) {
+      logger.warn('qURL webhook initial secret has unrecognized format — reusing stored key', meta);
     } else {
       logger.warn(initialIsRealSecret
-        ? 'qURL webhook initial secret has unrecognized format — preserving usable stored key'
+        ? 'qURL webhook initial secret has unrecognized format — rotating after dedupe'
         : 'qURL webhook initial secret is blank — rotating instead of reusing', meta);
     }
   }

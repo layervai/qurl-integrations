@@ -4,13 +4,6 @@ const express = require('express');
 const helmet = require('helmet');
 const config = require('./config');
 const { assertConfiguredWebhookSecret } = require('./utils/webhook-secret');
-
-// Validate the configured default-key HMAC secret before loading the store,
-// routers, or listener wiring. Unset supports pure-BYOK mode; configured values
-// must be usable and never the public seed. Unknown formats warn and preserve
-// the registrar-persisted bytes rather than discarding a committed rotation.
-assertConfiguredWebhookSecret(config.QURL_WEBHOOK_SECRET);
-
 const db = require('./store');
 const logger = require('./logger');
 const { renderPage } = require('./templates/page');
@@ -253,6 +246,14 @@ app.use((err, req, res, next) => {
 
 // Start server
 function startServer() {
+  // Only the receiver tier (http/combined) verifies webhook HMACs, and only
+  // index.js's isHttp branch calls this — before webhookSubscriptions.start()
+  // wires the default-key secret and before the listener binds. Gateway-only
+  // tasks never reach it, so a bad seed cannot crashloop the whole service.
+  // Unset supports pure-BYOK mode; configured values must be usable and never
+  // the public seed. Unknown formats warn and preserve the registrar-persisted
+  // bytes rather than discarding a committed rotation.
+  assertConfiguredWebhookSecret(config.QURL_WEBHOOK_SECRET);
   const server = app.listen(config.PORT, () => {
     logger.info(`Web server listening on port ${config.PORT}`);
     logger.info(`Metrics URL: ${config.BASE_URL}/metrics`);

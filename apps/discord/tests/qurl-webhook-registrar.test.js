@@ -725,6 +725,34 @@ describe('ensureWebhookSubscription — duplicate-subscription recovery', () => 
     expect(result.action).toBe('rotated');
   });
 
+  // The format-drift log states the decision taken, not just the classification:
+  // a usable-but-unrecognized stored key is reused on a clean match but rotated
+  // after dedupe, and the message must say which.
+  it.each([
+    ['reuses', [], 'reusing stored key', 'reused'],
+    ['rotates after dedupe', [{ webhook_id: 'wh_b', url: BASE_OPTS.bridgeUrl, events: ['qurl.accessed', 'qurl.expired'], created_at: '2026-05-19T11:00:00Z' }], 'rotating after dedupe', 'rotated'],
+  ])('logs the outcome for an unrecognized-format stored secret — %s', async (_label, extraSubs, expectedMessage, expectedAction) => {
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      mockFetchResponses({
+        'GET /v1/webhooks': () => ({ body: { data: [
+          { webhook_id: 'wh_a', url: BASE_OPTS.bridgeUrl, events: ['qurl.accessed', 'qurl.expired'], created_at: '2026-05-19T10:00:00Z' },
+          ...extraSubs,
+        ] } }),
+        'DELETE /v1/webhooks/wh_b': () => ({ status: 204, body: '' }),
+        'POST /v1/webhooks/wh_a/secret': () => ({ body: { data: { webhook_id: 'wh_a', secret: 'whsec_post_dedupe_server_generated' } } }),
+      });
+      const result = await ensureWebhookSubscription({ ...BASE_OPTS, initialSecret: 'legacy-format-do-not-log' });
+      expect(result.action).toBe(expectedAction);
+      const logLine = warnSpy.mock.calls.map(([m]) => m).find(m => m.includes('unrecognized format'));
+      expect(logLine).toContain(expectedMessage);
+      expect(logLine).toContain(`"action":"${expectedAction}"`);
+      expect(logLine).not.toContain('do-not-log');
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
   it('force-rotates the survivor even when initialSecret is real (closes SSM↔survivor mismatch)', async () => {
     let rotated = false;
     mockFetchResponses({

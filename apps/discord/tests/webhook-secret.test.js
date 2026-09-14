@@ -1,3 +1,7 @@
+jest.mock('../src/logger', () => ({
+  info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn(), audit: jest.fn(),
+}));
+
 describe('qURL webhook secret trust boundary', () => {
   afterEach(() => {
     jest.resetModules();
@@ -35,12 +39,23 @@ describe('qURL webhook secret trust boundary', () => {
     'PLACEHOLDER',
     ' placeholder\n',
     '   ',
-  ])('fails server startup before accepting a configured untrusted secret: %s', (value) => {
+  ])('fails receiver-tier startup before listening on a configured untrusted secret: %s', (value) => {
     jest.resetModules();
-    jest.doMock('../src/config', () => ({ QURL_WEBHOOK_SECRET: value }));
+    jest.doMock('../src/config', () => ({ ...jest.requireActual('../src/config'), QURL_WEBHOOK_SECRET: value }));
 
-    expect(() => require('../src/server'))
-      .toThrow(/QURL_WEBHOOK_SECRET/);
+    // Loading the module must not throw: gateway-only tasks require server.js
+    // too and never verify webhook signatures. Only startServer() (http/
+    // combined) gates, and it must do so before the listener binds.
+    const { app, startServer } = require('../src/server');
+    const listen = jest.spyOn(app, 'listen').mockImplementation(() => { throw new Error('listener must not bind'); });
+    expect(startServer).toThrow(/QURL_WEBHOOK_SECRET/);
+    expect(listen).not.toHaveBeenCalled();
+  });
+
+  it.each([42, true, {}])('rejects wrong-type responses: %p', (value) => {
+    const { assertUsableResponseSecret } = require('../src/utils/webhook-secret');
+    expect(() => assertUsableResponseSecret(value, 'rotateSecret'))
+      .toThrow(new RegExp(`rotateSecret.*wrong type ${typeof value}.*whsec_`));
   });
 
   it.each(['PLACEHOLDER', ' placeholder\n'])('rejects public seed responses: %p', (value) => {
@@ -61,9 +76,16 @@ describe('qURL webhook secret trust boundary', () => {
   });
 
   // Format drift is intentionally accepted after the upstream rotation commits.
-  it.each(['whsec_1234567890abcdef', 'new-format-server-secret', ' server-key-bytes '])('accepts persisted usable response on restart: %s', (value) => {
+  it.each([
+    ['whsec_1234567890abcdef', 0],
+    ['new-format-server-secret', 1],
+    [' server-key-bytes ', 1],
+  ])('accepts persisted usable response on restart: %s (drift warnings: %i)', (value, warnings) => {
     const { assertConfiguredWebhookSecret, assertUsableResponseSecret } = require('../src/utils/webhook-secret');
+    const logger = require('../src/logger');
     expect(assertUsableResponseSecret(value, 'rotateSecret')).toBe(value);
     expect(assertConfiguredWebhookSecret(value)).toBe(true);
+    expect(logger.warn).toHaveBeenCalledTimes(warnings);
+    expect(JSON.stringify(logger.warn.mock.calls)).not.toContain(value.trim());
   });
 });
