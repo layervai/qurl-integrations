@@ -58,7 +58,10 @@ function alias(value: string): string {
 
 export function parseCommand(input: string): TeamsCommand {
   const raw = input.trim();
-  const tokens = tokenize(raw);
+  // Like Slack, display names are a raw text tail. Tokenize only the verb and
+  // resource so literal quotes survive without changing get/reason parsing.
+  const displayName = /^(?:\/?qurl(?:-admin)?\s+)?(set-display-name)\s+((?:[^\s"]|"[^"]*")+)\s+([\s\S]+)$/i.exec(raw);
+  const tokens = displayName ? [...tokenize(displayName.slice(1, 3).join(' ')), displayName[3] ?? ''] : tokenize(raw);
   if (tokens[0]?.toLowerCase() === 'qurl' || tokens[0]?.toLowerCase() === '/qurl'
     || tokens[0]?.toLowerCase() === 'qurl-admin' || tokens[0]?.toLowerCase() === '/qurl-admin') tokens.shift();
   const verb = (tokens.shift() ?? 'help').toLowerCase();
@@ -144,7 +147,9 @@ export function parseCommand(input: string): TeamsCommand {
     if (args.length < 2) throw new UserFacingError('display name is required');
     const resource = args[0];
     if (!resource) throw new UserFacingError('resource token is required');
-    const text = args.slice(1).join(' ');
+    let text = args.slice(1).join(' ').trim();
+    if (text.length >= 2 && (text[0] === '"' || text[0] === "'") && text.at(-1) === text[0]) text = text.slice(1, -1).trim();
+    if (!text) throw new UserFacingError('display name is required');
     if (text.length > MAX_DISPLAY_NAME_LENGTH) throw new UserFacingError('display name is too long');
     return { raw, verb, resource: lookup(resource), text, flags: {}, args };
   }

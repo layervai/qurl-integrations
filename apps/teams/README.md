@@ -294,7 +294,12 @@ remove any such test installation before the first rollout.
 
 Uninstall attempts to revoke the tenant key before deleting local state.
 Upstream timeouts or service failures preserve local recovery state for a
-retry. A rejected/revoked credential (401/403) permits local disconnect and
+retry. Credential-read or KMS decryption failures also preserve the rows;
+restore the configured CMK and its access before retrying. For unrecoverable
+ciphertext, complete owner-authorized upstream key/binding/replay cleanup
+before a deliberate operator reset of local state. A transient outage must
+not erase the recovery records. A rejected/revoked credential (401/403)
+permits local disconnect and
 logs the key ID for operator cleanup; it does not prove upstream revocation.
 The upstream binding remains until its qURL owner deletes it through
 `DELETE /v1/external-identity-bindings/{binding_id}` with an owner-authorized

@@ -990,7 +990,31 @@ describe('Teams bot primitives', () => {
     expect(errors).toEqual([]);
   });
 
+  it('preserves uninstall recovery state and explains unreadable credentials', async () => {
+    let clientCalls = 0;
+    let deletes = 0;
+    const errors: unknown[] = [];
+    const bot = new TeamsBot({
+      qurlForTenant: { forTenant: async () => { clientCalls += 1; return {} as QurlClient; } },
+      data: {
+        checkAdmin: async () => ({ isAdmin: true, installationId: 'installation' }),
+        tenantCredential: async () => { throw new Error('KMS decrypt failed'); },
+        deleteWorkspace: async () => { deletes += 1; },
+      } as unknown as TeamsDataStore,
+      logger: { error: (_message: string, context: unknown) => errors.push(context) } as never,
+      messages: {} as never, qurlEndpoint: 'https://api.example.test',
+    });
+    await expect(bot.execute(
+      { type: 'message', from: { id: 'delivery', aadObjectId: 'owner' } },
+      'tenant', 'channel', true, parseCommand('uninstall'),
+    )).rejects.toThrow('Nothing was disconnected. Ask your qURL operator');
+    expect(clientCalls).toBe(0);
+    expect(deletes).toBe(0);
+    expect(errors).toHaveLength(1);
+  });
+
   it('refuses setup when there is no personal chat to send the link to', async () => {
+    let setupCalls = 0;
     const bot = new TeamsBot({
       qurl: {} as QurlClient,
       data: {
@@ -998,13 +1022,14 @@ describe('Teams bot primitives', () => {
         personalConversationRef: async () => undefined,
       } as unknown as TeamsDataStore,
       messages: { sendText: async () => { throw new Error('must not send'); } } as never,
-      setup: { build: async () => ({ url: new URL('https://teams.connector.example/oauth/qurl/start?state=SECRET-HANDLE') }) } as never,
+      setup: { build: async () => { setupCalls += 1; return { url: new URL('https://teams.connector.example/oauth/qurl/start?state=SECRET-HANDLE') }; } } as never,
       qurlEndpoint: 'https://api.sandbox.example',
     });
     await expect(bot.execute(
       { type: 'message', id: 'activity-1', from: { id: 'delivery', aadObjectId: 'actor' } },
       'tenant-1', 'channel-1', true, parseCommand('setup alice@example.com'),
     )).rejects.toThrow('Open a personal chat');
+    expect(setupCalls).toBe(0);
   });
 
   it('does not fetch the resource catalog twice for protect-connector', async () => {

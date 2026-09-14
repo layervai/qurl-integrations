@@ -12,6 +12,26 @@ describe('Teams command parser', () => {
     expect(() => tokenize('get $docs reason:"private docs')).toThrow('unterminated quoted value');
   });
 
+  it('preserves embedded and lone quotes in display names', () => {
+    for (const text of ['My "cool" name', 'My "cool name']) {
+      expect(parseCommand(`set-display-name $docs ${text}`)).toMatchObject({
+        verb: 'set-display-name', resource: 'docs', text,
+      });
+    }
+  });
+
+  it('strips only surrounding display-name quotes with quoted resources and command prefixes', () => {
+    for (const prefix of ['', 'qurl ', '/qurl ', 'qurl-admin ', '/qurl-admin ']) {
+      for (const quote of ['"', "'"]) {
+        expect(parseCommand(`${prefix}set-display-name "$docs" ${quote}  My "cool" name  ${quote}`)).toMatchObject({
+          verb: 'set-display-name', resource: 'docs', text: 'My "cool" name',
+        });
+      }
+    }
+    expect(() => parseCommand('set-display-name $docs "  "')).toThrow('display name is required');
+    expect(() => parseCommand(`set-display-name $docs "${'a'.repeat(201)}"`)).toThrow('display name is too long');
+  });
+
   it('validates setup email before starting OAuth', () => {
     expect(parseCommand('setup admin@example.com')).toMatchObject({ verb: 'setup', email: 'admin@example.com' });
     expect(() => parseCommand('setup admin')).toThrow('setup email is invalid');

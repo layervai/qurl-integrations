@@ -126,7 +126,6 @@ export class TeamsBot {
       }
       const deliveryId = activity.from?.id?.trim() ?? '';
       if (!deliveryId) throw new Error('Teams actor delivery id is required');
-      const link = await this.#options.setup.build(tenantId, actorId, deliveryId, command.email, command.setupMode ?? 'bind');
       // The setup URL carries the opaque one-shot state handle, which the rest
       // of this flow treats as secret (httpOnly/Secure/SameSite cookie,
       // five-minute TTL, constant-time compare). Replying in place would post
@@ -134,6 +133,7 @@ export class TeamsBot {
       // any export/eDiscovery path -- so it goes to the personal chat only.
       const ref = await this.#options.data.personalConversationRef(tenantId, actorId);
       if (!ref) throw new UserFacingError('Open a personal chat with the bot, then run `qurl setup` again. The setup link is a one-time secret and is never posted in a channel.');
+      const link = await this.#options.setup.build(tenantId, actorId, deliveryId, command.email, command.setupMode ?? 'bind');
       await this.#options.messages.sendText(ref.serviceUrl, ref.conversationId, `Open this qURL setup link in your browser:\n${link.url.toString()}`);
       return 'Sent your one-time qURL setup link to our personal chat. It is not posted here because it is a one-time secret.';
     }
@@ -165,7 +165,10 @@ export class TeamsBot {
     }
     if (command.verb === 'uninstall') {
       if (!admin?.installationId) throw new Error('workspace installation is unavailable');
-      const credential = await this.#options.data.tenantCredential(tenantId);
+      const credential = await this.#options.data.tenantCredential(tenantId).catch((error: unknown) => {
+        this.#options.logger?.error('Tenant credentials could not be read during uninstall', { tenantId, error });
+        throw new UserFacingError('The saved qURL credentials could not be read. Nothing was disconnected. Ask your qURL operator to restore credential access or complete recovery.');
+      });
       let upstreamRevocationPending = credential !== undefined && credential.keyId === undefined;
       if (credential?.keyId) {
         try {
