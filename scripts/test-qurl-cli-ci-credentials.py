@@ -157,6 +157,9 @@ class FakeAPI:
             self.issued_api_keys[api_key] = (key_id, api_key)
             row = {
                 "api_key": api_key,
+                "created_at": time.strftime(
+                    "%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time())
+                ),
                 "expires_at": time.strftime(
                     "%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + 3600)
                 ),
@@ -1671,7 +1674,15 @@ def test_child_lifetime_response_fails_closed() -> None:
             )
             output = pathlib.Path(raw_root) / "customer"
             args = credentials.CredentialCreate("1231", "2", "linux", "primary", output)
-            with mock.patch.object(credentials, "request", fake):
+
+            def skewed_request(*args, **kwargs):
+                with mock.patch.object(credentials.time, "time", return_value=fixed_now):
+                    return fake(*args, **kwargs)
+
+            with (
+                mock.patch.object(credentials, "request", skewed_request),
+                mock.patch.object(credentials.time, "time", return_value=fixed_now - 1),
+            ):
                 if lifetime in (1, 86400):
                     credentials.create_with_auth(
                         args, "https://sandbox.example", fake.automation_key, fake.owner

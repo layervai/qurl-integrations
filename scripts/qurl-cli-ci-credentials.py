@@ -847,7 +847,9 @@ def reconcile_batch(args: argparse.Namespace) -> None:
     print(f"reconciled {len(parsed)} runs with one automation key")
 
 
-def mint_ordinary_key(endpoint: str, automation_key: str, name: str) -> tuple[str, str]:
+def mint_ordinary_key(
+    endpoint: str, automation_key: str, name: str
+) -> tuple[str, str, float]:
     idempotency = "qurl-cli-ci-" + hashlib.sha256(name.encode("ascii")).hexdigest()
     body = {"kind": "api_key", "name": name, "scopes": CUSTOMER_SCOPES}
     last_error: Exception | None = None
@@ -883,7 +885,8 @@ def mint_ordinary_key(endpoint: str, automation_key: str, name: str) -> tuple[st
                 or data.get("status") != "active"
             ):
                 raise CredentialError("qURL returned a malformed ordinary API key")
-            return key_id, api_key
+            created_at = key_expiry_timestamp(data.get("created_at"), "child key creation")
+            return key_id, api_key, created_at
         except CredentialError as exc:
             last_error = exc
         if attempt + 1 < MAX_ATTEMPTS:
@@ -969,7 +972,7 @@ def create_with_auth(
     name = run_credential_name(args.run_id, args.run_attempt, args.lane, args.purpose)
     prepare_output_directory(args.output_dir)
     try:
-        key_id, api_key = mint_ordinary_key(endpoint, automation_key, name)
+        key_id, api_key, created_at = mint_ordinary_key(endpoint, automation_key, name)
         write_private(args.output_dir / "api-key-id", key_id)
         customer = identity(endpoint, api_key)
         customer_key = customer.get("api_key")
@@ -984,11 +987,10 @@ def create_with_auth(
             raise CredentialError("minted API key does not belong to the CI owner")
         # TODO(upstream-contract): /v1/me exposes the child's finite expiry.
         # Check only after recording its ID, so any rejection can revoke it.
-        remaining = (
-            key_expiry_timestamp(customer_key.get("expires_at"), "child key")
-            - time.time()
-        )
-        if not 0 < remaining <= 24 * 60 * 60:
+        expiry = key_expiry_timestamp(customer_key.get("expires_at"), "child key")
+        # Both timestamps come from the service. Comparing the 24-hour ceiling
+        # with the runner clock rejects valid keys when that clock is behind.
+        if expiry <= time.time() or not 0 < expiry - created_at <= 24 * 60 * 60:
             raise CredentialError("qURL returned an invalid child-key lifetime")
         write_private(args.output_dir / "api-key", api_key)
     except (OSError, CredentialError) as exc:
