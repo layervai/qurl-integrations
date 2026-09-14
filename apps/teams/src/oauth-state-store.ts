@@ -61,7 +61,7 @@ function oldItem(error: unknown): Record<string, unknown> | undefined {
 /**
  * Read expires_at off the item carried by ConditionalCheckFailedException.
  *
- * The document client's unmarshalling middleware runs on a resolved output
+ * TODO(upstream-contract): the document client's unmarshalling middleware runs on a resolved output
  * only, so a thrown exception keeps the raw service shape and this attribute
  * arrives as `{ N: '1000' }` rather than a number. DeleteCommand's outputKeyNodes
  * do not list Item either. A plain number is still accepted so the reader does

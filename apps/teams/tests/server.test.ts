@@ -11,7 +11,8 @@ import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { TeamsBot } from '../src/bot.js';
 import type { OAuthCallbackCore } from '../src/callback.js';
-import type { ConfidentialTokenClient } from '../src/interfaces.js';
+import type { ConfidentialTokenClient, Logger } from '../src/interfaces.js';
+import { OAuthCoreError } from '../src/errors.js';
 import { createProductionTeamsConfig, createTeamsServer, httpsIssuer, httpsOrigin, installOAuthRoutes, isMainModule } from '../src/server.js';
 import type { OAuthStateManager } from '../src/state.js';
 import { TeamsSdkMessagePoster } from '../src/teams-sdk.js';
@@ -26,6 +27,7 @@ type RouteHandler = (request: Request, response: ServerResponse & {
 function routes(input: {
   readonly authorizationRequest?: () => Promise<{ readonly codeChallenge: string; readonly nonce: string; readonly loginHint: string }>;
   readonly complete?: () => Promise<{ readonly binding: { readonly status: 'bound' } | { readonly status: 'conflict'; readonly reason?: string } }>;
+  readonly logger?: Logger;
 } = {}): Map<string, RouteHandler> {
   const registered = new Map<string, RouteHandler>();
   const app = {
@@ -42,6 +44,7 @@ function routes(input: {
     tokenClient,
     state: { authorizationRequest: input.authorizationRequest ?? (async () => ({ codeChallenge: 'server-challenge', nonce: 'server-nonce', loginHint: 'admin@example.com' })) } as unknown as OAuthStateManager,
     callback: { complete: input.complete ?? (async () => ({ binding: { status: 'bound' } })) } as unknown as OAuthCallbackCore,
+    ...(input.logger ? { logger: input.logger } : {}),
   });
   return registered;
 }
@@ -63,6 +66,45 @@ async function invoke(handler: RouteHandler, query: Record<string, string>, cook
 }
 
 describe('Teams OAuth routes', () => {
+  it.each(['start', 'callback'])('logs ordinary %s rejections as warnings while preserving dependency errors', async route => {
+    const cases = [
+      [new OAuthCoreError('INVALID_STATE', 'Invalid state.'), 'warn'],
+      [new OAuthCoreError('STATE_NOT_FOUND', 'Already consumed.'), 'warn'],
+      [new OAuthCoreError('STATE_EXPIRED', 'Expired state.'), 'warn'],
+      [new OAuthCoreError('COOKIE_MISMATCH', 'Cookie mismatch.'), 'warn'],
+      [new OAuthCoreError('STATE_STORE_FAILED', 'State store failed.'), 'error'],
+      [new OAuthCoreError('TOKEN_TIMEOUT', 'Token exchange timed out.'), 'error'],
+      [new OAuthCoreError('BINDING_FAILED', 'Binding failed.'), 'error'],
+      [new OAuthCoreError('ID_TOKEN_NONCE_MISMATCH', 'Nonce mismatch.'), 'error'],
+      [new Error('unexpected private upstream detail'), 'error'],
+    ] as const;
+    for (const [error, level] of cases) {
+      const logger = { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+      const reject = async (): Promise<never> => { throw error; };
+      const handler = routes({ authorizationRequest: reject, complete: reject, logger }).get(`/oauth/qurl/${route}`);
+      if (!handler) throw new Error('OAuth route was not registered');
+      const response = await invoke(handler, { state: OPAQUE_STATE, code: 'private-code' }, `qurl_teams_oauth_state=${OPAQUE_STATE}`);
+      expect(logger[level]).toHaveBeenCalledExactlyOnceWith(`Teams OAuth ${route} failed`, { error });
+      expect(logger[level === 'warn' ? 'error' : 'warn']).not.toHaveBeenCalled();
+      expect(response.status).toBe(400);
+      expect(response.headers.get('Set-Cookie')).toContain('Max-Age=0');
+      expect(response.body).not.toContain(error.message);
+      expect(response.body).not.toContain('private-code');
+      expect(response.body).not.toContain(OPAQUE_STATE);
+    }
+  });
+
+  it('treats a missing setup-link state as an ordinary rejection', async () => {
+    const logger = { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    const handler = routes({ logger }).get('/oauth/qurl/start');
+    if (!handler) throw new Error('start route was not registered');
+    const response = await invoke(handler, {});
+    expect(response.status).toBe(400);
+    expect(logger.warn).toHaveBeenCalledOnce();
+    expect(logger.error).not.toHaveBeenCalled();
+    expect(response.headers.get('Set-Cookie')).toContain('Max-Age=0');
+  });
+
   it('sets the CSRF cookie and uses server-side authorization parameters', async () => {
     const handler = routes().get('/oauth/qurl/start');
     if (!handler) throw new Error('start route was not registered');
@@ -318,6 +360,79 @@ describe('Teams production message handling', () => {
     expect(JSON.parse(String(errors.mock.calls[0]?.[0]))).toMatchObject({
       level: 'ERROR', error: expect.stringContaining('tenant credential ciphertext is malformed'),
     });
+  });
+
+  it('stops HTTP acceptance and drains detached command work through its final reply', async () => {
+    configureEnvironment();
+    vi.useFakeTimers();
+    let finishCommand = (): void => undefined;
+    let finishReply = (): void => undefined;
+    const commandDone = new Promise<void>(resolve => { finishCommand = resolve; });
+    const replyDone = new Promise<void>(resolve => { finishReply = resolve; });
+    let workSignal: AbortSignal | undefined;
+    vi.spyOn(TeamsBot.prototype, 'execute').mockImplementation(async (_activity, _tenant, _scope, _channel, _command, signal) => {
+      workSignal = signal;
+      await commandDone;
+      return 'qURL operation completed';
+    });
+    const reply = vi.spyOn(TeamsSdkMessagePoster.prototype, 'reply').mockImplementation(async () => { await replyDone; });
+    const runtime = await createProductionTeamsConfig();
+    await new Promise<void>(resolve => { runtime.server.listen(0, '127.0.0.1', resolve); });
+    try {
+      await runtime.app.onActivity({ body: activity, token: { serviceUrl: activity.serviceUrl } } as never);
+      await vi.advanceTimersByTimeAsync(0);
+      const shutdown = runtime.shutdown();
+      expect(runtime.shutdown()).toBe(shutdown);
+      let drained = false;
+      void shutdown.then(() => { drained = true; });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(runtime.server.listening).toBe(false);
+      expect(drained).toBe(false);
+      expect(workSignal?.aborted).toBe(false);
+      finishCommand();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(reply).toHaveBeenCalledWith(expect.objectContaining({ id: activity.id, conversation: activity.conversation }), 'qURL operation completed');
+      expect(drained).toBe(false);
+      finishReply();
+      await expect(shutdown).resolves.toBe(true);
+      expect(workSignal?.aborted).toBe(false);
+    } finally {
+      finishCommand();
+      finishReply();
+      runtime.server.closeAllConnections();
+      runtime.server.close();
+    }
+  });
+
+  it('bounds shutdown inside the ECS stop budget without claiming stuck work drained', async () => {
+    configureEnvironment();
+    vi.useFakeTimers();
+    let finishCommand = (): void => undefined;
+    const commandDone = new Promise<void>(resolve => { finishCommand = resolve; });
+    vi.spyOn(TeamsBot.prototype, 'execute').mockImplementation(async () => { await commandDone; return 'late result'; });
+    vi.spyOn(TeamsSdkMessagePoster.prototype, 'reply').mockResolvedValue();
+    const warnings = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const runtime = await createProductionTeamsConfig();
+    await new Promise<void>(resolve => { runtime.server.listen(0, '127.0.0.1', resolve); });
+    try {
+      await runtime.app.onActivity({ body: activity, token: { serviceUrl: activity.serviceUrl } } as never);
+      await vi.advanceTimersByTimeAsync(0);
+      const shutdown = runtime.shutdown();
+      let settled = false;
+      void shutdown.then(() => { settled = true; });
+      await vi.advanceTimersByTimeAsync(24_999);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      await expect(shutdown).resolves.toBe(false);
+      expect(JSON.parse(String(warnings.mock.calls[0]?.[0]))).toMatchObject({
+        level: 'WARN', message: 'Teams shutdown drain timed out', activeActivities: 1,
+      });
+    } finally {
+      finishCommand();
+      await vi.advanceTimersByTimeAsync(0);
+      runtime.server.closeAllConnections();
+      runtime.server.close();
+    }
   });
 
   it('acknowledges a slow command before completion and gives its real reply an independent HTTP deadline', async () => {

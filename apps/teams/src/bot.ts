@@ -133,7 +133,11 @@ export class TeamsBot {
       // any export/eDiscovery path -- so it goes to the personal chat only.
       const ref = await this.#options.data.personalConversationRef(tenantId, actorId);
       if (!ref) throw new UserFacingError('Open a personal chat with the bot, then run `qurl setup` again. The setup link is a one-time secret and is never posted in a channel.');
-      const link = await this.#options.setup.build(tenantId, actorId, deliveryId, command.email, command.setupMode ?? 'bind');
+      const link = await this.#options.setup.build(tenantId, actorId, deliveryId, command.email, command.setupMode ?? 'bind').catch((error: unknown) => {
+        if (signal?.aborted) throw error;
+        this.#options.logger?.error('Teams setup link creation failed', { tenantId, error });
+        throw new UserFacingError('Could not generate setup link. Please try again or contact support.');
+      });
       await this.#options.messages.sendText(ref.serviceUrl, ref.conversationId, `Open this qURL setup link in your browser:\n${link.url.toString()}`);
       return 'Sent your one-time qURL setup link to our personal chat. It is not posted here because it is a one-time secret.';
     }
@@ -434,7 +438,15 @@ export class TeamsBot {
     const resources = await this.resources(qurl, signal);
     const operationKey = [tenantId, scopeId, activity.from?.id ?? '', slug, this.#activityIdempotencyField(activity)];
     const resource = resources.find(item => item.type === 'tunnel' && item.slug === slug)
-      ?? await qurl.createResource({ type: 'tunnel', slug, findOrCreate: true, idempotencyKey: idempotencyKey(...operationKey, 'resource') }, signal);
+      ?? await qurl.createResource({ type: 'tunnel', slug, findOrCreate: true, idempotencyKey: idempotencyKey(...operationKey, 'resource') }, signal).catch((error: unknown) => {
+        // TODO(upstream-contract): only POST /v1/resources 403 quota_exceeded
+        // means the protected-resource limit, as in Slack's Connector setup.
+        if (!signal?.aborted && error instanceof QurlHttpError && error.status === 403 && error.code === 'quota_exceeded') {
+          this.#options.logger?.info('Connector resource creation rejected by an account limit', { status: error.status, code: error.code });
+          throw new UserFacingError('Your account has reached its protected resource limit. Ask an admin to revoke unused resources or upgrade your plan, then try connector setup again. Existing resources can still be shared. No enrollment token was minted.');
+        }
+        throw error;
+      });
     // Fail before the alias/exposure writes: a tunnel resource without full
     // routing metadata cannot produce a config the daemon will accept, and
     // there is nothing to clean up at this point.

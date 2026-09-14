@@ -3,11 +3,14 @@ import { deriveScope, normalizeActivityText, toTeamsActivity } from '../src/acti
 import { TeamsBot } from '../src/bot.js';
 import { parseCommand, tokenize } from '../src/parser.js';
 import { QurlHttpError } from '../src/qurl-client.js';
+import { TeamsSetupLinkBuilder } from '../src/setup-link.js';
+import { OAuthStateManager } from '../src/state.js';
 import { TeamsSdkMessagePoster } from '../src/teams-sdk.js';
 import type { QurlClient } from '../src/qurl-client.js';
 import type { TeamsDataStore } from '../src/teams-data.js';
 import { TenantOwnerAlreadyAdminError, TenantOwnerRemovalError } from '../src/teams-data.js';
 import { renderTunnelInstallMessage, validateTunnelSlug } from '../src/tunnel.js';
+import { InMemoryStatePersistence, TEST_ACTOR_A_ID, TEST_TENANT_ID, deterministicRandom, fixedClock } from './helpers.js';
 
 describe('Teams bot primitives', () => {
   it('parses the bind-only setup command', () => {
@@ -795,6 +798,56 @@ describe('Teams bot primitives', () => {
     expect(keys[0]).not.toBe(keys[1]);
   });
 
+  it.each([
+    [403, 'quota_exceeded', true],
+    [403, 'api_key_limit', false],
+    [500, 'quota_exceeded', false],
+  ] as const)('classifies Connector resource creation failure %s/%s without making later changes', async (status, code, quota) => {
+    const replies: string[] = [];
+    const effects: string[] = [];
+    let creates = 0;
+    const failure = new QurlHttpError(status, code);
+    failure.message = 'private-upstream-detail';
+    const bot = new TeamsBot({
+      qurl: {
+        me: async () => ({ ownerId: 'auth0|owner', authType: 'api_key', isApiKeyPrincipal: true }),
+        listResources: async () => ({ resources: [] }),
+        createResource: async () => { creates += 1; throw failure; },
+        createEnrollmentToken: async () => { effects.push('mint'); return { keyId: 'key-1', apiKey: 'secret' }; },
+        getSharing: async () => ({ crid: 'crid-1', desiredState: 'off', servingEpoch: 0 }),
+        restartSharing: async () => { effects.push('restart'); return { crid: 'crid-1', desiredState: 'on', servingEpoch: 1 }; },
+        stopSharing: async () => { effects.push('stop'); },
+        revokeApiKey: async () => { effects.push('revoke'); },
+      } as unknown as QurlClient,
+      data: {
+        checkAdmin: async () => ({ isAdmin: true }),
+        personalConversationRef: async () => ({ serviceUrl: 'https://smba.trafficmanager.net/teams', conversationId: 'personal' }),
+        lookupScopeAlias: async () => undefined,
+        bindScopeAlias: async () => { effects.push('alias'); },
+        exposeResource: async () => { effects.push('expose'); },
+      } as unknown as TeamsDataStore,
+      messages: { sendText: async () => { effects.push('dm'); } } as never,
+      qurlEndpoint: 'https://api.sandbox.example',
+    });
+    await bot.handleActivity({
+      type: 'message', id: 'activity-1', text: 'protect-connector prod', from: { aadObjectId: 'actor', id: 'delivery' },
+      channelData: { tenant: { id: 'tenant' }, channel: { id: 'channel' } },
+      conversation: { id: 'conversation', conversationType: 'channel' },
+    }, undefined, async text => { replies.push(text); });
+    expect(replies).toHaveLength(1);
+    if (quota) {
+      expect(replies[0]).toContain('protected resource limit');
+      expect(replies[0]).toContain('revoke unused resources or upgrade your plan');
+      expect(replies[0]).toContain('No enrollment token was minted');
+      expect(replies[0]).not.toContain('syntax');
+    } else {
+      expect(replies[0]).not.toContain('protected resource limit');
+    }
+    expect(replies[0]).not.toContain('private-upstream-detail');
+    expect(creates).toBe(1);
+    expect(effects).toEqual([]);
+  });
+
   it.each([false, true])('revokes a connector enrollment key when delivery fails (cancelled=%s)', async cancelled => {
     const revoked: string[] = [];
     const stopped: string[] = [];
@@ -986,6 +1039,45 @@ describe('Teams bot primitives', () => {
     expect(sent).toHaveLength(1);
     expect(sent[0]?.conversationId).toBe('personal');
     expect(sent[0]?.text).toContain('SECRET-HANDLE');
+  });
+
+  it.each(['unavailable', 'collision'])('explains setup-link state mint failure (%s) without sending a link', async failure => {
+    const replies: string[] = [];
+    const sent: string[] = [];
+    const errors: unknown[] = [];
+    const persistence = new InMemoryStatePersistence();
+    persistence.conditionalCreate = async () => {
+      if (failure === 'unavailable') throw new Error('private-storage-detail');
+      return { status: 'conflict' };
+    };
+    const setup = new TeamsSetupLinkBuilder({
+      state: new OAuthStateManager({ persistence, clock: fixedClock(), randomBytes: deterministicRandom() }),
+      tokenClient: { createAuthorizationUrl: () => { throw new Error('failed state mint must not create an authorization URL'); } } as never,
+      setupBaseUrl: 'https://teams.example.com',
+    });
+    const bot = new TeamsBot({
+      data: {
+        checkAdmin: async () => ({ isAdmin: false }),
+        personalConversationRef: async () => ({ serviceUrl: 'https://smba.trafficmanager.net/teams', conversationId: 'personal' }),
+      } as unknown as TeamsDataStore,
+      messages: { sendText: async (_url: string, _conversation: string, text: string) => { sent.push(text); } } as never,
+      setup,
+      logger: { error: (_message: string, context: unknown) => { errors.push(context); } } as never,
+      qurlEndpoint: 'https://api.sandbox.example',
+    });
+    await bot.handleActivity({
+      type: 'message', text: 'setup alice@example.com', from: { aadObjectId: TEST_ACTOR_A_ID, id: '29:synthetic-delivery-a' },
+      channelData: { tenant: { id: TEST_TENANT_ID }, channel: { id: 'channel' } },
+      conversation: { id: 'conversation', conversationType: 'channel' },
+    }, undefined, async text => { replies.push(text); });
+    expect(replies).toHaveLength(1);
+    expect(replies[0]).toContain('generate setup link');
+    expect(replies[0]).toContain('try again or contact support');
+    expect(replies[0]).not.toMatch(/syntax|identify|private-storage-detail|state=/);
+    expect(sent).toEqual([]);
+    expect(persistence.records.size).toBe(0);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toMatchObject({ error: { code: failure === 'unavailable' ? 'STATE_STORE_FAILED' : 'STATE_COLLISION' } });
   });
 
   it.each([false, true])('refuses setup for a different owner before mint or DM (isAdmin: %s)', async isAdmin => {

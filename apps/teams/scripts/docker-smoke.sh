@@ -52,3 +52,8 @@ for (const [body, status] of [
 }
 console.log(JSON.stringify({ health: 200, unsignedMessage: 401, oversizedMessage: 413, malformedMessage: 400, node: process.version, uid: process.getuid(), arch: process.arch }));
 NODE
+
+docker stop --signal SIGTERM --timeout 30 "$container" >/dev/null
+exit_code=$(docker inspect --format '{{.State.ExitCode}}' "$container")
+printf 'SIGTERM exit code: %s\n' "$exit_code"
+test "$exit_code" -eq 0

@@ -10,6 +10,7 @@ import { App, ExpressAdapter } from '@microsoft/teams.apps';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import { OAuthCallbackCore } from './callback.js';
+import { isOAuthCoreError, OAuthCoreError } from './errors.js';
 import { TeamsSetupLinkBuilder } from './setup-link.js';
 import { createOAuthStateCookie, clearOAuthStateCookie, OAUTH_STATE_COOKIE_NAME } from './cookies.js';
 import { createConfidentialTokenClient } from './token-client.js';
@@ -31,6 +32,9 @@ import { toTeamsActivity } from './activity.js';
 
 const DEFAULT_MAX_BODY_BYTES = 1_048_576;
 const ACTIVITY_TIMEOUT_MS = 30_000;
+// TODO(upstream-contract): qurl-webhook-runtime gives the task 30 seconds
+// after SIGTERM. Leave time for exit without shortening active work signals.
+const SHUTDOWN_TIMEOUT_MS = 25_000;
 const DEFAULT_HOST = '127.0.0.1';
 const runtimeConsole = new Console({ stdout: process.stdout, stderr: process.stderr });
 
@@ -76,6 +80,12 @@ function readCookie(request: Request, name: string): string | undefined {
   return undefined;
 }
 
+function logOAuthFailure(logger: Logger | undefined, message: string, error: unknown): void {
+  // Stale links, replays and browser cookie mismatches are routine rejections.
+  const expected = isOAuthCoreError(error) && ['INVALID_STATE', 'STATE_NOT_FOUND', 'STATE_EXPIRED', 'COOKIE_MISMATCH'].includes(error.code);
+  logger?.[expected ? 'warn' : 'error'](message, { error });
+}
+
 export function installOAuthRoutes(options: TeamsServerOptions): void {
   const { expressApp } = options;
   expressApp.get('/health', (_request, response) => {
@@ -85,7 +95,7 @@ export function installOAuthRoutes(options: TeamsServerOptions): void {
   expressApp.get('/oauth/qurl/start', async (request, response) => {
     try {
       const state = request.query.state;
-      if (typeof state !== 'string') throw new Error('invalid setup link');
+      if (typeof state !== 'string') throw new OAuthCoreError('INVALID_STATE', 'Invalid setup link.');
       const authorizationRequest = await options.state.authorizationRequest(state);
       const authorization = options.tokenClient.createAuthorizationUrl({
         state,
@@ -97,7 +107,7 @@ export function installOAuthRoutes(options: TeamsServerOptions): void {
       setCookie(response, cookie);
       response.set('Cache-Control', 'no-store').redirect(302, authorization.toString());
     } catch (error) {
-      options.logger?.error('Teams OAuth start failed', { error });
+      logOAuthFailure(options.logger, 'Teams OAuth start failed', error);
       setCookie(response, clearOAuthStateCookie());
       html(response, 400, 'qURL setup link invalid', 'The qURL setup link is invalid or expired. Return to Teams and run setup again.');
     }
@@ -133,7 +143,7 @@ export function installOAuthRoutes(options: TeamsServerOptions): void {
       }
     } catch (error) {
       // Do not expose OAuth codes, tokens, state, or upstream error details.
-      options.logger?.error('Teams OAuth callback failed', { error });
+      logOAuthFailure(options.logger, 'Teams OAuth callback failed', error);
     }
     setCookie(response, clearOAuthStateCookie());
     html(response, status, title, message);
@@ -162,6 +172,7 @@ export interface TeamsProductionConfig {
   readonly app: App;
   readonly port: number;
   readonly host: string;
+  readonly shutdown: () => Promise<boolean>;
 }
 
 /**
@@ -315,6 +326,7 @@ export async function createProductionTeamsConfig(): Promise<TeamsProductionConf
     setup: new TeamsSetupLinkBuilder({ state: oauthState, tokenClient, setupBaseUrl: baseUrl }),
     logger,
   });
+  const activeActivities = new Set<Promise<void>>();
   app.on('message', ({ activity }) => {
     const normalized = toTeamsActivity(activity);
     if (normalized) {
@@ -324,9 +336,10 @@ export async function createProductionTeamsConfig(): Promise<TeamsProductionConf
       // Acknowledge after SDK authentication, then complete in this service.
       // The message adapter preserves the conversation/thread. Final replies
       // use its own HTTP timeout independently of this work signal.
-      void bot.handleActivity(normalized, controller.signal)
+      const work = bot.handleActivity(normalized, controller.signal)
         .catch(error => { logger.error('Teams activity handling failed', { error }); })
-        .finally(() => { clearTimeout(timeout); });
+        .finally(() => { clearTimeout(timeout); activeActivities.delete(work); });
+      activeActivities.add(work);
     }
   });
   app.on('activity', async ({ activity }) => {
@@ -340,10 +353,43 @@ export async function createProductionTeamsConfig(): Promise<TeamsProductionConf
   const host = process.env.HOST?.trim() || DEFAULT_HOST;
   const port = Number(process.env.PORT?.trim() || '3000');
   if (!Number.isInteger(port) || port < 1 || port > 65_535) throw new Error('PORT is invalid');
-  return { server, app, port, host };
+  let shutdownPromise: Promise<boolean> | undefined;
+  const shutdown = (): Promise<boolean> => {
+    shutdownPromise ??= (async () => {
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      try {
+        // App.stop() cannot close an externally managed Express server.
+        // Finish admitted HTTP requests first, so every acknowledged activity
+        // is in the set before taking the drain snapshot. Do not abort work:
+        // uncertain sharing restarts still need readback and compensation.
+        const drained = await Promise.race([
+          new Promise<void>((resolve, reject) => {
+            server.close(error => { if (error) reject(error); else resolve(); });
+          }).then(async () => { await Promise.allSettled(activeActivities); return true; }),
+          new Promise<boolean>(resolve => { timeout = setTimeout(() => resolve(false), SHUTDOWN_TIMEOUT_MS); }),
+        ]);
+        if (!drained) {
+          logger.warn('Teams shutdown drain timed out', { activeActivities: activeActivities.size });
+          server.closeAllConnections();
+        }
+        return drained;
+      } catch (error) {
+        logger.error('Teams shutdown failed', { error });
+        server.closeAllConnections();
+        return false;
+      } finally {
+        clearTimeout(timeout);
+      }
+    })();
+    return shutdownPromise;
+  };
+  return { server, app, port, host, shutdown };
 }
 
 if (isMainModule(process.argv[1], import.meta.url)) {
   const runtime = await createProductionTeamsConfig();
+  const shutdown = (): void => { void runtime.shutdown().then(drained => { process.exit(drained ? 0 : 1); }); };
+  process.on('SIGTERM', shutdown);
+  process.on('SIGINT', shutdown);
   runtime.server.listen(runtime.port, runtime.host, () => { process.stdout.write(`Teams bot listening on ${runtime.host}:${runtime.port}\n`); });
 }

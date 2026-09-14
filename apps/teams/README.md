@@ -234,6 +234,13 @@ in uninstall and revoke cleanup. Final replies use the SDK-backed adapter's
 preserving the inbound service URL, conversation ID, and reply ID.
 [Teams retry behavior](https://learn.microsoft.com/en-us/microsoftteams/platform/bots/bot-concepts).
 
+SIGTERM and SIGINT stop new HTTP connections and let admitted requests and
+activity work, including compensation and final replies, drain for up to 25
+seconds within the managed ECS task's 30-second stop window. Shutdown does not
+abort activity signals early. If the drain expires, the process logs a warning
+and exits unsuccessfully; a forced stop can still leave partial work to inspect
+or retry.
+
 ### Known limitations
 
 - Accepted message work runs in this service process. A process restart can
