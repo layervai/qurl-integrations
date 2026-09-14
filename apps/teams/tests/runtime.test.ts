@@ -50,6 +50,10 @@ describe('Teams runtime adapters', () => {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'message' }),
       });
       expect(unauthorized.status).toBe(401);
+      const underLimit = await fetch(`${origin}/api/messages`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'message', text: 'x'.repeat(512 * 1024) }),
+      });
+      expect(underLimit.status).toBe(401);
       const oversized = await fetch(`${origin}/api/messages`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: 'x'.repeat(1_048_576) }),
       });

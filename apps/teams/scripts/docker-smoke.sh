@@ -43,6 +43,7 @@ assert.deepEqual(await health.json(), { ok: true });
 assert.equal(health.headers.get('x-powered-by'), null);
 for (const [body, status] of [
   ['{"type":"message"}', 401],
+  [JSON.stringify({ type: 'message', text: 'x'.repeat(512 * 1024) }), 401],
   [JSON.stringify({ text: 'x'.repeat(1_048_576) }), 413],
   ['{', 400],
 ]) {

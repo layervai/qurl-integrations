@@ -237,7 +237,8 @@ export class TeamsBot {
       await this.#options.data.purgeResourceFromTenant(tenantId, resourceId, signal);
       return `Resource \`$${resource.crid ?? token}\` is revoked or already unavailable to this account.`;
     }
-    const resources = await this.resources(qurl, signal);
+    const resources = command.verb === 'protect-url' && command.args[0]?.toLowerCase().startsWith('url:')
+      ? [] : await this.resources(qurl, signal);
     if (command.verb === 'list') return this.list(tenantId, scopeId, resources);
     if (command.verb === 'protect-url') return this.protectUrl(qurl, activity, tenantId, scopeId, resources, command, signal);
     if (command.verb === 'set-alias') return this.setAlias(qurl, tenantId, scopeId, resources, command, signal);
@@ -384,7 +385,13 @@ export class TeamsBot {
       : await this.resolveInScope(tenantId, scopeId, resources, value.replace(/^\$/, ''));
     if (!creating && resource.type !== 'url') throw new UserFacingError('Only URL resources can be protected with protect-url');
     const resolvedAlias = command.flags.as ?? this.#channelAliasFor(resource);
-    await this.#bindAlias(tenantId, scopeId, resolvedAlias, resource);
+    await this.#bindAlias(tenantId, scopeId, resolvedAlias, resource).catch((error: unknown) => {
+      if (creating && isUserFacingError(error)) {
+        // TODO(upstream-contract): URL creates deduplicate on owner + target URL.
+        throw new UserFacingError(`URL resource is ready, but alias \`$${resolvedAlias}\` is already bound in this channel. Choose another alias with \`as:$alias\` and retry the same URL.`);
+      }
+      throw error;
+    });
     await this.#options.data.exposeResource(tenantId, scopeId, resource.resourceId);
     return `URL resource \`$${resource.crid ?? resource.resourceId}\` is now available in this channel.`;
   }

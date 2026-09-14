@@ -263,6 +263,60 @@ describe('Teams bot primitives', () => {
     expect(bound).toEqual([]);
   });
 
+  it('retains a ready URL on alias conflict and permits same-resource alias reuse', async () => {
+    const resource = { resourceId: 'resource-1', type: 'url', targetUrl: 'https://docs.example.com' };
+    const creates: Parameters<QurlClient['createResource']>[0][] = [];
+    const effects: string[] = [];
+    const replies: string[] = [];
+    let boundResource = 'other-resource';
+    let listCalls = 0;
+    const bot = new TeamsBot({
+      qurl: {
+        listResources: async () => { listCalls += 1; return { resources: [resource] }; },
+        // The API's owner+target dedup returns this same existing resource;
+        // this fake does not model or assert service quota accounting.
+        createResource: async (input: Parameters<QurlClient['createResource']>[0]) => { creates.push(input); return resource; },
+        deleteResource: async () => { effects.push('delete'); },
+      } as unknown as QurlClient,
+      data: {
+        checkAdmin: async () => ({ isAdmin: true }),
+        lookupScopeAlias: async () => boundResource,
+        bindScopeAlias: async () => { effects.push('bind'); },
+        exposeResource: async () => { effects.push('expose'); },
+      } as unknown as TeamsDataStore,
+      messages: {} as never,
+      qurlEndpoint: 'https://api.sandbox.example',
+    });
+    const activity = {
+      type: 'message', text: 'protect-url url:https://docs.example.com as:$docs', from: { aadObjectId: 'actor', id: 'delivery' },
+      channelData: { tenant: { id: 'tenant' }, channel: { id: 'channel' } },
+      conversation: { id: 'conversation', conversationType: 'channel' },
+    };
+    for (const id of ['first-attempt', 'retry-attempt']) {
+      await bot.handleActivity({ ...activity, id }, undefined, async text => { replies.push(text); });
+    }
+    expect(replies).toHaveLength(2);
+    for (const reply of replies) {
+      expect(reply).toContain('URL resource is ready');
+      expect(reply).toContain('alias `$docs` is already bound');
+      expect(reply).toContain('another alias');
+      expect(reply).toContain('same URL');
+    }
+    expect(creates).toHaveLength(2);
+    expect(creates).toEqual([
+      expect.objectContaining({ type: 'url', targetUrl: 'https://docs.example.com' }),
+      expect.objectContaining({ type: 'url', targetUrl: 'https://docs.example.com' }),
+    ]);
+    expect(creates[0]?.idempotencyKey).not.toBe(creates[1]?.idempotencyKey);
+    expect(effects).toEqual([]);
+
+    boundResource = resource.resourceId;
+    await bot.handleActivity({ ...activity, id: 'matching-alias' }, undefined, async text => { replies.push(text); });
+    expect(replies[2]).toContain('is now available in this channel');
+    expect(effects).toEqual(['bind', 'expose']);
+    expect(listCalls).toBe(0);
+  });
+
   it('falls back to the first upstream identifier that is a usable channel alias', async () => {
     const bound: string[] = [];
     const bot = new TeamsBot({

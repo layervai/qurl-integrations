@@ -142,6 +142,19 @@ describe('qURL HTTP adapter', () => {
     expect(requests).toEqual(['/v1/resources/resource', '/v1/api-keys/key']);
   });
 
+  it('accepts API not-found envelopes but rejects an HTML routing failure during revocation', async () => {
+    for (const method of ['deleteResource', 'revokeApiKey'] as const) {
+      const client = (body: string, contentType: string): HttpQurlClient => new HttpQurlClient({
+        endpoint: 'https://api.example.test', apiKey: 'secret',
+        fetch: async () => new Response(body, { status: 404, headers: { 'Content-Type': contentType } }),
+      });
+      await expect(client(JSON.stringify({ error: { code: 'not_found' } }), 'application/problem+json')[method]('id')).resolves.toBeUndefined();
+      // An intermediary's HTML 404 does not establish that the upstream key
+      // or resource is absent. Reject so callers retain their recovery rows.
+      await expect(client('<html>private routing failure</html>', 'text/html')[method]('id')).rejects.toThrow('qURL response is invalid JSON');
+    }
+  });
+
   it('does not start a request with an already-aborted signal', async () => {
     let calls = 0;
     const client = new HttpQurlClient({
