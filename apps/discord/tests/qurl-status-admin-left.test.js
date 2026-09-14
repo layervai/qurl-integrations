@@ -41,6 +41,7 @@ jest.mock('../src/store', () => ({
 
 const mockGetIdentity = jest.fn();
 jest.mock('../src/qurl', () => ({
+  ...jest.requireActual('../src/qurl'),
   deleteLink: jest.fn(),
   getIdentity: mockGetIdentity,
   isPrivateHost: jest.fn(),
@@ -363,6 +364,25 @@ describe('/qurl status — admin-offboarding nudge (#185)', () => {
     expect(replyContent).toContain('Configured by: unknown');
     expect(replyContent).not.toContain('<@unknown>');
     expect(interaction.guild.members.fetch).not.toHaveBeenCalled();
+  });
+
+  it('keeps a missing api_key block inside the verdict path', async () => {
+    db.getGuildConfig.mockResolvedValueOnce({
+      guild_id: 'guild-1',
+      configured_by: 'admin-original',
+      updated_at: '2026-01-01T00:00:00Z',
+    });
+    mockGetIdentity.mockResolvedValueOnce({});
+    const interaction = makeStatusInteraction({
+      memberFetchBehavior: async () => ({ id: 'admin-original' }),
+    });
+
+    await handleCommand(interaction);
+
+    const replyContent = interaction._editReply.mock.calls[0][0].content;
+    expect(replyContent).toContain('Key prefix: `unknown`');
+    expect(replyContent).toContain('Scopes: _none_');
+    expect(interaction._followUp).not.toHaveBeenCalled();
   });
 
   it('summarizes service-reported scopes beyond the display limit', async () => {

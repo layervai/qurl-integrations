@@ -8909,9 +8909,12 @@ const commands = [
 
       // /qurl status — verify the stored key. Gate behind ManageGuild because
       // the response discloses the key's prefix, granted scopes and provenance,
-      // and each run spends an upstream qURL API call. This on-demand admin
-      // check relies on Discord's interaction rate limit rather than sharing
-      // the mutation-oriented send/detect cooldowns.
+      // and each run spends a KMS decrypt plus one upstream qURL API call.
+      // No cooldown, accepted deliberately: the same ManageGuild admin can
+      // already drive the uncooled per-submit validation call in the setup
+      // modal above, so this adds no new abuse class, and the send/detect
+      // buckets are kept separate by design (a status check must never lock
+      // out a send).
       if (sub === 'status') {
         if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) {
           return interaction.reply({
@@ -8953,11 +8956,9 @@ const commands = [
           // Stored values are normally a Discord snowflake and an ISO timestamp;
           // escape Markdown and bound their source form so a corrupt row cannot
           // inject content or crowd out the key verdict/offboarding guidance.
-          const sanitizeStoredStatusValue = (value) =>
-            sanitizeContentLabel(value, 64) || 'unknown';
           const sanitizedConfiguredBy = sanitizeContentLabel(guildConfig.configured_by, 64);
           const configuredByDisplay = sanitizedConfiguredBy || 'unknown';
-          const updatedAtDisplay = sanitizeStoredStatusValue(guildConfig.updated_at);
+          const updatedAtDisplay = sanitizeContentLabel(guildConfig.updated_at, 64) || 'unknown';
           const configuredByReference = sanitizedConfiguredBy
             ? `<@${configuredByDisplay}>`
             : configuredByDisplay;
@@ -9002,9 +9003,8 @@ const commands = [
           // Every outcome renders as `<verdict copy> + configurationDetails`;
           // only the verdict differs, so build it here and share one exit.
           const STATUS_SCOPE_DISPLAY_MAX = 10;
+          const STATUS_CONTENT_MAX = 2000;
           let verdict;
-          let renderHealthyVerdict = null;
-          let healthyScopeCount = 0;
           if (keyUnavailable) {
             logger.warn('qURL status key unavailable', { guild_id: interaction.guildId });
             verdict = '❌ **The stored qURL key is unavailable.**\n\n' + reconnectCopy;
@@ -9022,10 +9022,18 @@ const commands = [
               : '⚠️ **Stored qURL configuration found, but the key check could not be completed.**\n'
                 + 'Please try `/qurl status` again later.\n\n';
           } else {
-            // TODO(upstream-contract): qurl-service exposes `key_prefix` as a
-            // non-secret display prefix identifying the key it actually
-            // accepted. It can hint at the tenant, reinforcing the existing
-            // ManageGuild gate above; keep this decision aligned with /v1/me.
+            // Shows the service-issued `key_prefix` where this handler used to
+            // show a sha256 fingerprint of the stored key. That earlier decision
+            // rejected echoing key bytes; it is superseded because /v1/me
+            // designates `key_prefix` as the non-secret display identifier
+            // (the CLI identity model does the same), the OAuth setup success
+            // DM already shows this exact prefix to the same admin, and #1360
+            // asks for the prefix so the admin can match the two. The
+            // brute-force concern does not apply: the prefix is a namespace
+            // plus a few leading bytes of a >=28-char key, and it only reaches
+            // the ManageGuild-gated ephemeral reply. Trade-off: a fingerprint
+            // answered "same key as last setup?"; two keys can share a prefix.
+            // TODO(upstream-contract): keep this aligned with /v1/me.
             //
             // Inline-code content renders backslashes literally, so strip
             // backticks instead of applying general Markdown escaping. The
@@ -9033,13 +9041,14 @@ const commands = [
             // caps each value; the slice below bounds how many scopes render.
             const sanitizeIdentityValue = (value) =>
               sanitizeDisplayNamePlain(value, { fallback: '' }).replace(/`/g, '');
-            const { key_prefix: rawKeyPrefix, scopes: allScopes } = identity.api_key;
+            // getIdentity enforces this shape; default anyway so a contract
+            // drift lands in the verdict machinery, not the generic catch-all.
+            const { key_prefix: rawKeyPrefix, scopes: allScopes = [] } = identity?.api_key ?? {};
             // Bound disclosure locally even if the upstream prefix field widens.
             const keyPrefix = capUtf16Units(sanitizeIdentityValue(rawKeyPrefix), 12) || 'unknown';
             const shownScopes = allScopes.slice(0, STATUS_SCOPE_DISPLAY_MAX)
               .map(scope => `\`${sanitizeIdentityValue(scope) || 'unnamed'}\``);
-            healthyScopeCount = shownScopes.length;
-            renderHealthyVerdict = (shownScopeCount) => {
+            const renderHealthyVerdict = (shownScopeCount) => {
               const renderedScopes = shownScopes.slice(0, shownScopeCount);
               const omittedScopeCount = allScopes.length - renderedScopes.length;
               let scopes = renderedScopes.join(', ');
@@ -9054,32 +9063,17 @@ const commands = [
                 `Scopes: ${scopes}\n`;
             };
             verdict = renderHealthyVerdict(shownScopes.length);
-          }
-          // Keep Discord's 2,000-UTF-16-unit content limit an invariant of the
-          // code rather than of a copy budget spread across the fields above.
-          // Drop whole scope entries instead of slicing Markdown in the middle
-          // of an inline-code span or UTF-16 surrogate pair.
-          const STATUS_CONTENT_MAX = 2000;
-          let content = verdict + configurationDetails;
-          if (content.length > STATUS_CONTENT_MAX && renderHealthyVerdict) {
-            let shownScopeCount = healthyScopeCount;
-            while (content.length > STATUS_CONTENT_MAX && shownScopeCount > 0) {
-              shownScopeCount -= 1;
-              content = renderHealthyVerdict(shownScopeCount) + configurationDetails;
+            // Keep Discord's 2,000-UTF-16-unit content limit an invariant of
+            // the code rather than of a copy budget spread across the fields
+            // above. Drop whole scope entries instead of slicing Markdown in
+            // the middle of an inline-code span or UTF-16 surrogate pair. The
+            // field caps keep the zero-scope render under the limit.
+            for (let n = shownScopes.length; n > 0 && (verdict + configurationDetails).length > STATUS_CONTENT_MAX; n -= 1) {
+              verdict = renderHealthyVerdict(n - 1);
             }
           }
-          if (content.length > STATUS_CONTENT_MAX) {
-            // Defensive backstop for future copy or sanitizer-cap growth. The
-            // current field bounds keep this path unreachable after whole-scope
-            // reduction. Reserve room for a closing backtick and ellipsis so a
-            // future regression still produces valid UTF-16 and balanced inline
-            // Markdown instead of making editReply fail.
-            content = capUtf16Units(content, STATUS_CONTENT_MAX - 2);
-            if ((content.match(/`/g) || []).length % 2 !== 0) content += '`';
-            content += '…';
-          }
           return interaction.editReply({
-            content,
+            content: verdict + configurationDetails,
             allowedMentions: { parse: [] },
           });
         }

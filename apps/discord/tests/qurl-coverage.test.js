@@ -98,6 +98,12 @@ describe('qURL client — getIdentity', () => {
 
     expect(error.status).toBe(status);
     expect(error.message).not.toContain(secretBody);
+    // The module-level debug line carries the guild and status, never the key.
+    expect(logger.debug).toHaveBeenCalledWith('qURL API error', expect.objectContaining({
+      method: 'GET', path: '/me', status, guild_id: 'guild-1',
+    }));
+    expect(JSON.stringify(logger.debug.mock.calls)).not.toContain('stored-guild-key');
+    expect(JSON.stringify(logger.debug.mock.calls)).not.toContain(secretBody);
     // This is a user-initiated tenant-key result. The infra metric filter pages
     // on every dependency-auth audit event, so expected rejected keys must not
     // emit the service-credential outage signal.
