@@ -1,5 +1,19 @@
 # Changelog
 
+## [2.5.0](https://github.com/layervai/qurl-integrations/compare/v2.4.0...v2.5.0) (2026-09-11)
+
+
+### ⚠ BREAKING CHANGES
+
+* **cli:** Share and browser commands require deployment verification settings. Unsigned direct or pre-signed responses are rejected. Issuer-only settings support local verification; downloads also require transport settings.
+
+### Bug Fixes
+
+* **ci:** replace CLI M2M tokens with scoped automation keys ([#1431](https://github.com/layervai/qurl-integrations/issues/1431)) ([4dc4d93](https://github.com/layervai/qurl-integrations/commit/4dc4d933c6a837ab0211184cfb787452f4e61b11))
+* **cli:** bind shared links to the advertised CRID ([#1418](https://github.com/layervai/qurl-integrations/issues/1418)) ([fae32e5](https://github.com/layervai/qurl-integrations/commit/fae32e5856fe77992550dba07272f126fd96801f))
+* **cli:** explain account-wide Connector quota limits ([#1435](https://github.com/layervai/qurl-integrations/issues/1435)) ([33a49cc](https://github.com/layervai/qurl-integrations/commit/33a49ccd225ae1ea582f7922f851a63b8feec0e3))
+* **cli:** resume interrupted device enrollment ([#1447](https://github.com/layervai/qurl-integrations/issues/1447)) ([75a670c](https://github.com/layervai/qurl-integrations/commit/75a670c9569110421229cfba15612b9eb0762813))
+
 ## [2.4.0](https://github.com/layervai/qurl-integrations/compare/v2.3.3...v2.4.0) (2026-09-08)
 
 
