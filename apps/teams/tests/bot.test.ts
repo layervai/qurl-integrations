@@ -469,7 +469,7 @@ describe('Teams bot primitives', () => {
     const revoke = () => bot.execute({ type: 'message', from: { aadObjectId: 'admin' } },
       'tenant', 'channel', true, parseCommand(`revoke $${token}`));
     await expect(revoke()).rejects.toThrow('cleanup unavailable');
-    await expect(revoke()).resolves.toContain('Revoked resource');
+    await expect(revoke()).resolves.toBe('Resource `$resource-1` is revoked or already unavailable to this account. Channel references cleared.');
     expect(deletions).toEqual(['resource-1', 'resource-1']);
     expect(purgeAttempts).toBe(2);
   });
@@ -527,7 +527,7 @@ describe('Teams bot primitives', () => {
       qurlEndpoint: 'https://qurl.example',
     });
     await expect(bot.execute({ type: 'message', from: { aadObjectId: 'admin' } },
-      'tenant', 'channel', true, parseCommand('revoke $docs'))).resolves.toContain('Revoked resource');
+      'tenant', 'channel', true, parseCommand('revoke $docs'))).resolves.toBe('Resource `$resource-1` is revoked or already unavailable to this account. Channel references cleared.');
     expect(operations).toEqual(['delete:resource-1', 'purge:resource-1']);
   });
 

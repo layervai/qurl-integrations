@@ -210,7 +210,7 @@ export class TeamsBot {
         if (!(error instanceof QurlHttpError) || (error.status !== 404 && error.status !== 410)) throw error;
       }
       await this.#options.data.purgeResourceFromTenant(tenantId, resourceId, signal);
-      return `Revoked resource \`$${resourceId}\`.`;
+      return `Resource \`$${resourceId}\` is revoked or already unavailable to this account. Channel references cleared.`;
     }
     const resources = await this.resources(qurl, signal);
     if (command.verb === 'list') return this.list(tenantId, scopeId, resources);
