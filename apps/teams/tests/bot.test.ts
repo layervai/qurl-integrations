@@ -20,6 +20,28 @@ describe('Teams bot primitives', () => {
     expect(() => parseCommand('unset-alias $Docs')).toThrow('invalid alias');
   });
 
+  it.each(['invalid', 'overlong'])('rejects an %s setup email before setup or error logging', async kind => {
+    const email = kind === 'overlong' ? `${'a'.repeat(243)}@example.com` : 'not-an-email';
+    const replies: string[] = [];
+    const errors: string[] = [];
+    let setupCalls = 0;
+    const bot = new TeamsBot({
+      data: {} as TeamsDataStore,
+      messages: {} as never,
+      qurlEndpoint: 'https://qurl.example',
+      setup: { build: async () => { setupCalls += 1; throw new Error('invalid email reached setup'); } } as never,
+      logger: { debug: () => {}, info: () => {}, warn: () => {}, error: message => { errors.push(message); } },
+    });
+    await bot.handleActivity({
+      type: 'message', text: `setup ${email}`, from: { aadObjectId: 'actor', id: 'delivery' },
+      channelData: { tenant: { id: 'tenant' }, channel: { id: 'channel' } },
+      conversation: { id: 'conversation', conversationType: 'channel' },
+    }, undefined, async text => { replies.push(text); });
+    expect(replies).toEqual(['setup email is invalid']);
+    expect(setupCalls).toBe(0);
+    expect(errors).toEqual([]);
+  });
+
   it('removes quote delimiters without corrupting mid-token values', () => {
     expect(tokenize('get $docs reason:"private docs"')).toEqual(['get', '$docs', 'reason:private docs']);
     expect(tokenize('set-display-name $docs "Internal docs"')).toEqual(['set-display-name', '$docs', 'Internal docs']);

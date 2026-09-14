@@ -1,5 +1,6 @@
 import { isChannelAlias } from './alias.js';
 import type { SetupMode } from './interfaces.js';
+import { normalizeEmail } from './state.js';
 import { normalizeTunnelEnvironment, validateTunnelService, validateTunnelSlug } from './tunnel.js';
 import { UserFacingError } from './user-facing-error.js';
 
@@ -27,7 +28,6 @@ const mentionPattern = /^<@([A-Za-z0-9._:-]{1,200})>$/;
 const MAX_FEEDBACK_LENGTH = 2_000;
 const MAX_DISPLAY_NAME_LENGTH = 200;
 const MAX_REASON_LENGTH = 200;
-const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 export function tokenize(text: string): string[] {
   const tokens: string[] = [];
@@ -68,7 +68,8 @@ export function parseCommand(input: string): TeamsCommand {
   if (verb === 'setup') {
     if (!args[0]) throw new UserFacingError('setup email is required');
     if (args.length !== 1) throw new UserFacingError('OAuth setup supports only the bind flow');
-    if (!emailPattern.test(args[0])) throw new UserFacingError('setup email is invalid');
+    try { normalizeEmail(args[0]); }
+    catch { throw new UserFacingError('setup email is invalid'); }
     return { raw, verb, email: args[0], setupMode: 'bind', flags: {}, args };
   }
   if (verb === 'feedback') {
@@ -82,9 +83,10 @@ export function parseCommand(input: string): TeamsCommand {
     if (/^(?:dm|reason):/i.test(args[0])) throw new UserFacingError('resource token is required');
     const flags: Record<string, string> = {};
     for (const token of args.slice(1)) {
-      const match = /^([a-z][a-z0-9_]*):(.*)$/.exec(token);
-      const key = match?.[1];
-      const value = match?.[2]?.trim();
+      const match = /^([a-z][a-z0-9_]*):(.*)$/i.exec(token);
+      const key = match?.[1]?.toLowerCase();
+      let value = match?.[2]?.trim();
+      if (key === 'dm') value = value?.toLowerCase();
       if (!key || value === undefined || !['dm', 'reason'].includes(key)) throw new UserFacingError('invalid get flag');
       if (key === 'dm' && value !== 'true' && value !== 'false') throw new UserFacingError('dm flag must be true or false');
       if (key === 'reason' && value.length > MAX_REASON_LENGTH) throw new UserFacingError('reason is too long');

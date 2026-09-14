@@ -15,10 +15,16 @@ describe('Teams command parser', () => {
   it('validates setup email before starting OAuth', () => {
     expect(parseCommand('setup admin@example.com')).toMatchObject({ verb: 'setup', email: 'admin@example.com' });
     expect(() => parseCommand('setup admin')).toThrow('setup email is invalid');
+    const longestEmail = `${'a'.repeat(242)}@example.com`;
+    expect(parseCommand(`setup ${longestEmail}`)).toMatchObject({ email: longestEmail });
+    expect(() => parseCommand(`setup a${longestEmail}`)).toThrow('setup email is invalid');
   });
 
   it('parses and validates per-command flags', () => {
     expect(parseCommand('get $docs dm:true reason:"private docs"')).toMatchObject({ flags: { dm: 'true', reason: 'private docs' } });
+    expect(parseCommand('get $docs DM:TRUE Reason:"On Call"')).toMatchObject({ flags: { dm: 'true', reason: 'On Call' } });
+    expect(parseCommand('get $docs Dm:FALSE')).toMatchObject({ flags: { dm: 'false' } });
+    expect(() => parseCommand('get $docs DM:yes')).toThrow('dm flag must be true or false');
     expect(parseCommand('protect-connector prod env:compose port:9090 alias:$web')).toMatchObject({ flags: { env: 'compose', port: '9090', alias: 'web' } });
     expect(() => parseCommand('get $docs dm:yes')).toThrow('dm flag must be true or false');
     expect(() => parseCommand('protect-connector prod port:0')).toThrow('connector port is invalid');
