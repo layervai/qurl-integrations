@@ -51,7 +51,7 @@ const {
 } = require('./utils/time');
 const { signQurlOAuthState } = require('./utils/qurl-oauth-state');
 const { deleteLink } = require('./qurl');
-const { resourceIdLogRef } = require('./utils/resource-id');
+const { resourceIdLogRef, validateResourceId } = require('./utils/resource-id');
 const { normalizeQurlId } = require('./utils/qurl-id');
 const { downloadAndUpload, reUploadBuffer, mintLinks, detectWatermark, uploadJsonToConnector, isAllowedSourceUrl, revokeMintedLinks } = require('./connector');
 const { deleteFlow, transitionFlow, supersedeOrCreate } = require('./flow-state');
@@ -1712,6 +1712,9 @@ async function mintLinksInBatches({
     for (let i = 0; i < recipientCount; i += TOKENS_PER_RESOURCE) {
       if (tokensUsed >= TOKENS_PER_RESOURCE && i > 0) {
         const re = await reuploadFn();
+        // Validate before tracking: an unusable identity would be silently
+        // dropped by compensation, leaking the fresh parent untracked.
+        validateResourceId(re?.resource_id);
         currentResourceId = re.resource_id;
         resourceIds.push(currentResourceId);
         tokensUsed = 0;
@@ -3199,6 +3202,9 @@ async function cleanupIncompleteMintBatch({
     reason,
     resource_count: resources.length,
     resources,
+    // Subset of `resources` that mintLinks already revoked inline; the rest
+    // are pending the cleanup below.
+    already_revoked_qurl_ids: (partialCleanupConfirmed && partialQurlIds) || [],
     error_name: error?.name,
     error_status: error?.status,
     error_api_code: error?.apiCode,

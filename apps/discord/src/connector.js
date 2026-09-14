@@ -603,7 +603,9 @@ async function revokeMintedLinks(resourceId, qurlIds, apiKey) {
     });
 
     if (!response.ok) {
-      return throwConnectorError('Connector revoke_links', response);
+      const err = await throwConnectorError('Connector revoke_links', response).catch(e => e);
+      err.unresolvedCount = batchIds.length;
+      throw err;
     }
 
     let parsed;

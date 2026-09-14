@@ -4,6 +4,8 @@
 // bot treats as identified is one the connector accepts. Longer stored values
 // are quarantined as malformed instead of failing every retry of their batch,
 // and ten IDs at this cap plus a maximal resource ID stay under the 4 KiB body.
+// Compared against .length (UTF-16 units); equals bytes only because the
+// pattern below is ASCII-only. Widening the character class breaks that.
 const MAX_QURL_ID_LENGTH = 64;
 // TODO(upstream-contract): Current upstream IDs are exactly q_ + 11 lowercase hex chars. Keep cleanup
 // tolerant of older q_-prefixed display handles, but never pass separators,

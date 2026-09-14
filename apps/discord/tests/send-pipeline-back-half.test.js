@@ -3961,8 +3961,33 @@ describe('mintLinksInBatches', () => {
       'mintLinksInBatches failed; cleaning up minted resources',
       expect.objectContaining({
         resources: [expect.objectContaining({ qurl_ids: ['q_partial'] })],
+        already_revoked_qurl_ids: ['q_partial'],
       }),
     );
+  });
+
+  it('compensates tracked resources and rejects when a re-upload returns an unusable resource_id', async () => {
+    const firstBatch = Array.from({ length: 10 }, (_, i) => ({
+      qurl_link: `https://q.test/${i}`,
+      qurl_id: `q_first_${i}`,
+    }));
+    mockMintLinks.mockResolvedValueOnce(firstBatch);
+    const reuploadFn = jest.fn().mockResolvedValueOnce({ resource_id: 42 });
+
+    await expect(mintLinksInBatches({
+      initialResourceId: 'res-1',
+      reuploadFn,
+      expiresAt: new Date().toISOString(),
+      recipientCount: 11,
+      apiKey: 'apikey',
+    })).rejects.toThrow('Invalid resource ID format');
+
+    expect(mockMintLinks).toHaveBeenCalledTimes(1);
+    expect(mockRevokeMintedLinks).toHaveBeenCalledWith(
+      'res-1', firstBatch.map(link => link.qurl_id), 'apikey',
+    );
+    expect(mockDeleteLink).toHaveBeenCalledTimes(1);
+    expect(mockDeleteLink).toHaveBeenCalledWith('res-1', 'apikey');
   });
 
   it('parent-cleans and reports unidentified partial residue without re-revoking confirmed siblings', async () => {

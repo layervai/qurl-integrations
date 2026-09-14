@@ -865,6 +865,7 @@ describe('Connector client — coverage boost', () => {
         .rejects.toMatchObject({
           message: `Connector revoke_links failed (${status})`,
           status,
+          unresolvedCount: 1,
         });
     });
 
