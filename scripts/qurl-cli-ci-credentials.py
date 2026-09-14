@@ -26,6 +26,7 @@ CREATE_PAIR_BUDGET_SECONDS = 15 * 60
 # Validate the requested credential lifetime; workflow timeouts bound execution.
 MAX_OPERATION_BUDGET_SECONDS = 55 * 60
 RUNNER_CLEANUP_MARGIN_SECONDS = 5 * 60
+MAX_CLOCK_SKEW_SECONDS = 5 * 60
 # Cover setup, customer execution, and cleanup without near-expiry authority.
 MIN_AUTOMATION_LIFETIME_SECONDS = 3 * 60 * 60
 # TODO(upstream-contract): qurl-service generates 32-byte base64url API secrets.
@@ -472,9 +473,9 @@ def paged_rows(
         cursor = next_cursor
 
 
-def key_expiry_timestamp(raw: Any, label: str = "automation key") -> float:
+def key_timestamp(raw: Any, label: str = "automation key expiry") -> float:
     if not isinstance(raw, str):
-        raise CredentialError(f"{label} expiry is malformed")
+        raise CredentialError(f"{label} is malformed")
     try:
         # Normalize subsecond precision for Python 3.10 as well as newer runners.
         raw = re.sub(
@@ -486,9 +487,9 @@ def key_expiry_timestamp(raw: Any, label: str = "automation key") -> float:
             raw[:-1] + "+00:00" if raw.endswith("Z") else raw
         )
     except ValueError as exc:
-        raise CredentialError(f"{label} expiry is malformed") from exc
+        raise CredentialError(f"{label} is malformed") from exc
     if expiry.tzinfo is None:
-        raise CredentialError(f"{label} expiry is malformed")
+        raise CredentialError(f"{label} is malformed")
     return expiry.timestamp()
 
 
@@ -527,7 +528,7 @@ def authenticated_owner(
     # TODO(upstream-contract): MeApiKey omits expires_at for non-expiring keys.
     # A present null or malformed value is not the non-expiring wire contract.
     if "expires_at" in info:
-        expiry = key_expiry_timestamp(info["expires_at"])
+        expiry = key_timestamp(info["expires_at"])
         required_lifetime = max(
             operation_budget_seconds + RUNNER_CLEANUP_MARGIN_SECONDS,
             minimum_lifetime_seconds,
@@ -849,7 +850,7 @@ def reconcile_batch(args: argparse.Namespace) -> None:
 
 def mint_ordinary_key(
     endpoint: str, automation_key: str, name: str
-) -> tuple[str, str, float]:
+) -> tuple[str, str, Any]:
     idempotency = "qurl-cli-ci-" + hashlib.sha256(name.encode("ascii")).hexdigest()
     body = {"kind": "api_key", "name": name, "scopes": CUSTOMER_SCOPES}
     last_error: Exception | None = None
@@ -885,8 +886,8 @@ def mint_ordinary_key(
                 or data.get("status") != "active"
             ):
                 raise CredentialError("qURL returned a malformed ordinary API key")
-            created_at = key_expiry_timestamp(data.get("created_at"), "child key creation")
-            return key_id, api_key, created_at
+            # Validate time only after recording the key ID for exact revocation.
+            return key_id, api_key, data.get("created_at")
         except CredentialError as exc:
             last_error = exc
         if attempt + 1 < MAX_ATTEMPTS:
@@ -932,7 +933,7 @@ def revoke_named_credential(
     else:
         # A create response can be lost after the service commits it. Repeat
         # the same idempotent POST to recover that exact key ID, then revoke it.
-        key_id, _ = mint_ordinary_key(endpoint, automation_key, name)
+        key_id, _, _ = mint_ordinary_key(endpoint, automation_key, name)
         write_private(key_id_path, key_id)
     retry_revoke(endpoint, automation_key, key_id)
 
@@ -972,7 +973,7 @@ def create_with_auth(
     name = run_credential_name(args.run_id, args.run_attempt, args.lane, args.purpose)
     prepare_output_directory(args.output_dir)
     try:
-        key_id, api_key, created_at = mint_ordinary_key(endpoint, automation_key, name)
+        key_id, api_key, raw_created_at = mint_ordinary_key(endpoint, automation_key, name)
         write_private(args.output_dir / "api-key-id", key_id)
         customer = identity(endpoint, api_key)
         customer_key = customer.get("api_key")
@@ -987,10 +988,15 @@ def create_with_auth(
             raise CredentialError("minted API key does not belong to the CI owner")
         # TODO(upstream-contract): /v1/me exposes the child's finite expiry.
         # Check only after recording its ID, so any rejection can revoke it.
-        expiry = key_expiry_timestamp(customer_key.get("expires_at"), "child key")
+        created_at = key_timestamp(raw_created_at, "child key creation timestamp")
+        expiry = key_timestamp(customer_key.get("expires_at"), "child key expiry")
         # Both timestamps come from the service. Comparing the 24-hour ceiling
         # with the runner clock rejects valid keys when that clock is behind.
-        if expiry <= time.time() or not 0 < expiry - created_at <= 24 * 60 * 60:
+        remaining = expiry - time.time()
+        if (
+            not 0 < expiry - created_at <= 24 * 60 * 60
+            or not 0 < remaining <= 24 * 60 * 60 + MAX_CLOCK_SKEW_SECONDS
+        ):
             raise CredentialError("qURL returned an invalid child-key lifetime")
         write_private(args.output_dir / "api-key", api_key)
     except (OSError, CredentialError) as exc:

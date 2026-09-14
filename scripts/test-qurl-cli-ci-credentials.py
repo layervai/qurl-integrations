@@ -1675,9 +1675,9 @@ def test_child_lifetime_response_fails_closed() -> None:
             output = pathlib.Path(raw_root) / "customer"
             args = credentials.CredentialCreate("1231", "2", "linux", "primary", output)
 
-            def skewed_request(*args, **kwargs):
+            def skewed_request(*call_args, **kwargs):
                 with mock.patch.object(credentials.time, "time", return_value=fixed_now):
-                    return fake(*args, **kwargs)
+                    return fake(*call_args, **kwargs)
 
             with (
                 mock.patch.object(credentials, "request", skewed_request),
@@ -1710,6 +1710,8 @@ def test_child_lifetime_response_fails_closed() -> None:
 
 def main() -> None:
     test_child_lifetime_response_fails_closed()
+    test_child_creation_timestamp_and_clock_bound()
+    test_revoke_recovers_key_without_recorded_id()
     test_scheduled_soak_workflow_contract()
     test_pair_and_batch_each_validate_one_automation_key()
     test_batch_rejects_invalid_input_before_authentication_and_attempts_every_run()
@@ -1926,6 +1928,73 @@ def main() -> None:
         assert malformed_device_key_id not in fake.deleted_keys
 
     print("qurl CLI journey credential tests passed")
+
+
+def test_child_creation_timestamp_and_clock_bound() -> None:
+    fixed_now = 1700000000
+    for created_delta, expiry_delta, accepted in (
+        (1, 86401, True),
+        (-1, 86399, True),
+        (300, 86700, True),
+        (301, 86701, False),
+        (-86400, 0, False),
+        (None, 86400, False),
+        ("bad", 86400, False),
+    ):
+        with (
+            tempfile.TemporaryDirectory() as raw_root,
+            mock.patch.object(credentials.time, "time", return_value=fixed_now),
+        ):
+            fake = FakeAPI()
+            fake.child_expiry = time.strftime(
+                "%Y-%m-%dT%H:%M:%SZ", time.gmtime(fixed_now + expiry_delta)
+            )
+
+            def response(*call_args, **kwargs):
+                status, raw = fake(*call_args, **kwargs)
+                if call_args[1] == "POST" and status == 201:
+                    data = json.loads(raw)
+                    data["data"]["created_at"] = (
+                        time.strftime(
+                            "%Y-%m-%dT%H:%M:%SZ",
+                            time.gmtime(fixed_now + created_delta),
+                        )
+                        if isinstance(created_delta, int)
+                        else created_delta
+                    )
+                    raw = json.dumps(data).encode()
+                return status, raw
+
+            output = pathlib.Path(raw_root) / "customer"
+            args = credentials.CredentialCreate("1231", "2", "linux", "primary", output)
+            with mock.patch.object(credentials, "request", response):
+                try:
+                    credentials.create_with_auth(
+                        args, "https://sandbox.example", fake.automation_key, fake.owner
+                    )
+                except credentials.CredentialError:
+                    assert not accepted
+                    assert fake.key_id in fake.deleted_keys
+                else:
+                    assert accepted
+                assert (output / "api-key").exists() == accepted
+
+
+def test_revoke_recovers_key_without_recorded_id() -> None:
+    fake = FakeAPI()
+    with (
+        tempfile.TemporaryDirectory() as raw_root,
+        mock.patch.object(credentials, "request", fake),
+    ):
+        path = pathlib.Path(raw_root) / "api-key-id"
+        credentials.revoke_named_credential(
+            "https://sandbox.example",
+            fake.automation_key,
+            credentials.run_credential_name("1231", "2", "linux", "primary"),
+            path,
+        )
+        assert path.read_text() == fake.key_id
+        assert fake.key_id in fake.deleted_keys
 
 
 if __name__ == "__main__":
