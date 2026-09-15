@@ -86,7 +86,7 @@ test('an expired upload capability fails without replaying the upload', async ()
     authority_expires_at: UPLOAD_VECTOR.authorityExpiresAt,
   } }));
   await expect(privateUpload.uploadPrivate(Buffer.from('hello'), {
-    filename: 'report.txt', contentType: 'text/plain', viewerTtlSeconds: 30,
+    filename: 'report.txt', contentType: 'application/pdf', viewerTtlSeconds: 30,
     credential: { apiKey: 'lv_test_example', keyId: 'key_A1b2C3d4E5f6' },
     authorityExpiresAt: UPLOAD_VECTOR.authorityExpiresAt,
     deadlineMs: Date.now() + 60_000, requestId: UPLOAD_VECTOR.requestId, sleep,
@@ -144,7 +144,7 @@ test('upload ambiguity respects Retry-After and accepts an exact 200 replay', as
 
   const result = await privateUpload.uploadPrivate(Buffer.from('hello'), {
     filename: 'report.txt',
-    contentType: 'text/plain',
+    contentType: 'application/pdf',
     credential: { apiKey: 'lv_test_example', keyId: 'key_A1b2C3d4E5f6' },
     viewerTtlSeconds: 30,
     authorityExpiresAt: '2026-09-06T22:00:00Z',
@@ -174,7 +174,7 @@ test('upload rejects Retry-After beyond the shared send deadline without retaini
 
   await expect(privateUpload.uploadPrivate(Buffer.alloc(25 * 1024 * 1024), {
     filename: 'report.bin',
-    contentType: 'application/octet-stream',
+    contentType: 'application/pdf',
     credential: { apiKey: 'lv_test_example', keyId: 'key_A1b2C3d4E5f6' },
     viewerTtlSeconds: 30,
     authorityExpiresAt: '2026-09-06T22:00:00Z',
@@ -232,7 +232,7 @@ test('upload to delegated batch honors retry timing and accepts terminal 200 wit
   try {
     const credential = { apiKey: 'lv_test_example', keyId: 'key_A1b2C3d4E5f6' };
     const upload = await privateUpload.uploadPrivate(Buffer.from('hello'), {
-      filename: 'report.txt', contentType: 'text/plain', credential,
+      filename: 'report.txt', contentType: 'application/pdf', credential,
       viewerTtlSeconds: 30,
       authorityExpiresAt: '2026-09-06T22:00:00Z',
       deadlineMs: Date.now() + 60_000,
@@ -572,7 +572,7 @@ test('repeated transient batch polls stop at the original deadline', async () =>
 test.each([undefined, '', 'key_short', 'eib_A1b2C3d4E5f6', 'key_A1b2C3d4E5f!'])(
   'private credentials reject an invalid audience key ID %s before uploading', async keyId => {
     await expect(privateUpload.uploadPrivate(Buffer.from('hello'), {
-      filename: 'report.txt', contentType: 'text/plain',
+      filename: 'report.txt', contentType: 'application/pdf',
       credential: { apiKey: 'lv_test_example', keyId },
       authorityExpiresAt: '2026-09-06T22:00:00Z', deadlineMs: Date.now() + 60_000,
     })).rejects.toThrow(/current external identity binding/);
@@ -655,13 +655,13 @@ test.each([
     } });
   });
   await privateUpload.uploadPrivate(Buffer.from('hello'), {
-    filename, contentType: 'text/plain', credential: batchOptions.credential,
+    filename, contentType: 'application/pdf', credential: batchOptions.credential,
     viewerTtlSeconds: 30, authorityExpiresAt: UPLOAD_VECTOR.authorityExpiresAt,
     requestId: UPLOAD_VECTOR.requestId, deadlineMs: Date.now() + 60_000,
   });
   expect(Buffer.from(sentHeaders['X-LayerV-Filename-B64'], 'base64url').toString('utf8')).toBe(expected);
   const canonical = canonicalUploadMessage({
-    ...UPLOAD_VECTOR, filename: expected,
+    ...UPLOAD_VECTOR, filename: expected, contentType: sentHeaders['Content-Type'],
     timestamp: sentHeaders['X-LayerV-Timestamp'], nonce: sentHeaders['X-LayerV-Nonce'],
   });
   expect(crypto.verify('sha256', canonical, mockKeyPair.publicKey,
@@ -748,7 +748,7 @@ test.each(['/unexpected', '/internal/v1/uploads?unsigned=true'])('refuses an uns
   mockOpener.fetch.mockImplementation(async builder => builder(new URL(`https://private.test${path}`)));
   const sleep = jest.fn();
   await expect(privateUpload.uploadPrivate(Buffer.from('hello'), {
-    filename: 'report.txt', contentType: 'text/plain', viewerTtlSeconds: 30,
+    filename: 'report.txt', contentType: 'application/pdf', viewerTtlSeconds: 30,
     credential: { apiKey: 'lv_test_example', keyId: 'key_A1b2C3d4E5f6' },
     authorityExpiresAt: '2027-01-01T00:00:00Z', deadlineMs: Date.now() + 60_000,
     requestId: UPLOAD_VECTOR.requestId, sleep,
@@ -761,7 +761,7 @@ test('an upload after shutdown cannot create or fetch from a new portal', async 
   await privateUpload.closePrivateUploader();
   const sleep = jest.fn();
   await expect(privateUpload.uploadPrivate(Buffer.from('hello'), {
-    filename: 'report.txt', contentType: 'text/plain', viewerTtlSeconds: 30,
+    filename: 'report.txt', contentType: 'application/pdf', viewerTtlSeconds: 30,
     credential: { apiKey: 'lv_test_example', keyId: 'key_A1b2C3d4E5f6' },
     authorityExpiresAt: '2027-01-01T00:00:00Z', deadlineMs: Date.now() + 60_000,
     requestId: UPLOAD_VECTOR.requestId, sleep,
@@ -785,7 +785,7 @@ test('ArrayBuffer mutation cannot alter the signed body on retry', async () => {
     } });
   });
   await privateUpload.uploadPrivate(input.buffer, {
-    filename: 'report.txt', contentType: 'text/plain', viewerTtlSeconds: 30,
+    filename: 'report.txt', contentType: 'application/pdf', viewerTtlSeconds: 30,
     credential: { apiKey: 'lv_test_example', keyId: 'key_A1b2C3d4E5f6' },
     authorityExpiresAt: '2027-01-01T00:00:00Z', deadlineMs: Date.now() + 60_000,
     requestId: UPLOAD_VECTOR.requestId, sleep: jest.fn(),
@@ -793,4 +793,31 @@ test('ArrayBuffer mutation cannot alter the signed body on retry', async () => {
   expect(seen).toHaveLength(2);
   expect(seen[0].body.toString()).toBe('hello');
   expect(seen[1]).toEqual(seen[0]);
+});
+
+
+test.each(['text/plain', 'application/json', 'video/mp4'])('rejects a positive viewer timer for %s before upload', async contentType => {
+  await expect(privateUpload.uploadPrivate(Buffer.from('body'), {
+    filename: 'file', contentType, viewerTtlSeconds: 30,
+    credential: { apiKey: 'lv_test_example', keyId: 'key_A1b2C3d4E5f6' },
+    authorityExpiresAt: UPLOAD_VECTOR.authorityExpiresAt,
+    deadlineMs: Date.now() + 60_000,
+  })).rejects.toThrow('Self-destruct timers require an image or PDF');
+  expect(mockOpener.fetch).not.toHaveBeenCalled();
+});
+
+
+test('permits an upload without a viewer timer for non-rendered media', async () => {
+  mockOpener.fetch.mockResolvedValueOnce(jsonResponse(201, { data: {
+    upload_handle: `upl_${'a'.repeat(43)}`, mint_capability: 'qmc1.test',
+    mint_capability_expires_at: '2026-09-06T21:15:00Z',
+    authority_expires_at: UPLOAD_VECTOR.authorityExpiresAt,
+  } }));
+  await expect(privateUpload.uploadPrivate(Buffer.from('body'), {
+    filename: 'file', contentType: 'text/plain', viewerTtlSeconds: 0,
+    credential: { apiKey: 'lv_test_example', keyId: 'key_A1b2C3d4E5f6' },
+    authorityExpiresAt: UPLOAD_VECTOR.authorityExpiresAt,
+    deadlineMs: Date.now() + 60_000,
+  })).resolves.toHaveProperty('upload_handle');
+  expect(mockOpener.fetch).toHaveBeenCalledTimes(1);
 });

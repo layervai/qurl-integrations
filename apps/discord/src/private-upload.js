@@ -304,6 +304,10 @@ async function uploadPrivate(bodyInput, {
   const safeFilename = canonicalFilename(filename);
   const safeContentType = canonicalContentType(contentType);
   const safeViewerTtl = canonicalViewerTtl(viewerTtlSeconds);
+  // TODO(upstream-contract): the private viewer applies timers only to images/PDFs.
+  if (safeViewerTtl !== '0' && !safeContentType.startsWith('image/') && safeContentType !== 'application/pdf') {
+    throw new Error('Self-destruct timers require an image or PDF; choose no timer for this file');
+  }
   const guildCredential = requirePrivateCredential(credential);
   let lastError;
   for (let attempt = 1; attempt <= MAX_UPLOAD_ATTEMPTS; attempt++) {

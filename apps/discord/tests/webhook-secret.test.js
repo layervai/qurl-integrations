@@ -35,9 +35,9 @@ describe('qURL webhook secret trust boundary', () => {
 
   it('shares the single infra seed sentinel with the Maps boot check', () => {
     const { INFRA_SEED_SENTINEL, isInfraSeedSentinel } = require('../src/utils/webhook-secret');
-    const { GOOGLE_MAPS_API_KEY_PLACEHOLDER_SENTINEL } = require('../src/boot-requirements');
-    expect(GOOGLE_MAPS_API_KEY_PLACEHOLDER_SENTINEL).toBe(INFRA_SEED_SENTINEL);
-    expect(isInfraSeedSentinel(GOOGLE_MAPS_API_KEY_PLACEHOLDER_SENTINEL)).toBe(true);
+    const { SSM_PLACEHOLDER_SENTINEL } = require('../src/utils/ssm-placeholder');
+    expect(SSM_PLACEHOLDER_SENTINEL).toBe(INFRA_SEED_SENTINEL);
+    expect(isInfraSeedSentinel(SSM_PLACEHOLDER_SENTINEL)).toBe(true);
   });
 
   it.each([undefined, null, ''])('preserves pure-BYOK startup for absent value %p', (value) => {

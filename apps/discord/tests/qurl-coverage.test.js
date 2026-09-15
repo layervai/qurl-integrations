@@ -81,7 +81,7 @@ describe('qURL client — getIdentity', () => {
     const logger = require('../src/logger');
     const secretBody = 'sensitive-body-marker-do-not-log';
     const response = apiError(status, { code: 'auth_error', detail: secretBody });
-    response.body = { cancel: jest.fn().mockResolvedValue(undefined) };
+    jest.spyOn(response.body, 'cancel').mockResolvedValue(undefined);
     globalThis.fetch = jest.fn().mockResolvedValue(response);
 
     const error = await qurl.getIdentity('stored-guild-key', 'guild-1').then(
