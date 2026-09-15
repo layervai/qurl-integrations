@@ -33,7 +33,8 @@ personal data out of the repository.
   Connector** (fronts a service running in your own environment) or a **URL
   resource** (an existing web URL). Admins create resources with the
   `/qurl-admin protect…` commands.
-- **`$id`** — a resource's identifier. Pass it to `/qurl get` to mint a link.
+- **`$id`** — a resource's name for Slack commands. Pass it to `/qurl get`
+  to mint a link. The resource's permanent identifier is its **CRID**.
 - **Alias** — an alternate name for a resource within a channel. Several
   aliases can point at one resource. Use an alias anywhere you'd use a `$id`.
 - **Channel scope** — resources are available per channel. A resource shows up

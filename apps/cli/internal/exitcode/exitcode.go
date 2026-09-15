@@ -244,7 +244,8 @@ func cliSentinelCode(err error) (int, bool) {
 		// service outside its contract — never handed to a launcher.
 		return ServerError, true
 	case errors.Is(err, consume.ErrAccessNotConfigured),
-		errors.Is(err, consume.ErrAccessSettingsMismatch):
+		errors.Is(err, consume.ErrAccessSettingsMismatch),
+		errors.Is(err, consume.ErrUnsupportedCRIDVersion):
 		// Direct downloads need deployment settings (QURL_DEPLOYMENT or the
 		// build's own); absent or mismatched settings are the same remedy
 		// class as the Hub trust triple below — fix the configuration, not

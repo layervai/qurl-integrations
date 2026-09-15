@@ -73,7 +73,7 @@ func TestConnectorResourceStateRoundTripsMaxItemsUnderByteCap(t *testing.T) {
 				state.Bindings[binding.ConnectorID] = binding
 				if !shape.retired {
 					state.Pending[binding.ConnectorID] = PendingConnectorResourceRequest{
-						ConnectorID: binding.ConnectorID, RequestNonce: testRequestNonce(t), ExpectedResourceID: binding.ResourceID,
+						ConnectorID: binding.ConnectorID, RequestNonce: testRequestNonce(t), ExpectedCRID: binding.CRID,
 					}
 					continue
 				}
@@ -183,7 +183,7 @@ func TestConnectorResourcePublishDeleteChurnNeverRefusesBinding(t *testing.T) {
 	if err != nil {
 		t.Fatalf("a forgotten retirement must accept a fresh request: %v", err)
 	}
-	if request := forgotten.Request(); request == nil || request.ExpectedResourceID != "" {
+	if request := forgotten.Request(); request == nil || request.ExpectedCRID != "" {
 		t.Fatalf("forgotten retirement request = %+v, want a fresh request with no identity assertion", request)
 	}
 	if err := forgotten.Close(); err != nil {

@@ -31,7 +31,7 @@ const (
 	// (the not-a-`$slug` rejection), used to assert that any non-`$`
 	// target — a URL, an `r_<id>`, or a sigil-less typo — gets the
 	// uniform not-a-tunnel copy rather than the generic usage dump.
-	testAliasNotTunnelSub = "URLs and resource IDs aren't supported"
+	testAliasNotTunnelSub = "URLs, CRIDs, and internal handles aren't supported"
 	// testResourcesPath is the qurl-service list/lookup endpoint the
 	// slug-target set-alias path hits. Lifted so the slug-resolving
 	// test servers in this file don't trip goconst on the literal.

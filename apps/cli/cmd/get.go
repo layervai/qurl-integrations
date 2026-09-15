@@ -116,10 +116,10 @@ func runGet(ctx context.Context, opts *globalOpts, operand string, flags getFlag
 	var shareLink *qurlapi.ShareLink
 	mint := func(ctx context.Context) (string, error) {
 		result, err := client.Share(ctx, assessment.Input, qurlapi.ShareOptions{})
-		if err != nil {
+		if err := verifyShareLink(assessment, result, err); err != nil {
 			return "", err
 		}
-		if err := verifyShareLink(assessment, result); err != nil {
+		if err := opts.verifyLink(ctx, result.QURL, assessment.Input); err != nil {
 			return "", err
 		}
 		shareLink = result
@@ -134,6 +134,8 @@ func runGet(ctx context.Context, opts *globalOpts, operand string, flags getFlag
 		if err != nil {
 			return consume.DownloadTarget{}, err
 		}
+		// Legacy direct-link test path. Production mint rejects unsigned links
+		// before this point; keep plain-URL downloader fixtures isolated here.
 		if !consume.NeedsAccessGrant(link) {
 			return consume.DownloadTarget{URL: link}, nil
 		}

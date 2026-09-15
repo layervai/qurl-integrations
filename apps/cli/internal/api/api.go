@@ -7,12 +7,10 @@
 // honors Retry-After, redaction of credentials from every diagnostic line,
 // and the mapping of wire failures onto typed errors.
 //
-// Share delegates to qurl-go's ShareResource (whose VerifyCRID carries
-// the client half of the CRID trust story). Publish, list, and delete are
-// direct calls against the /v1/resources REST surface through the same
-// transport and error mapping: v0.5.3's ProtectURL does not send the
-// platform's required `type: url` discriminator, and its list/delete
-// variants validate connector-only identifier forms that reject CRIDs.
+// Share delegates to qurl-go's CRID-based ShareResource. Publish, list, and
+// delete use the resource REST surface through the same transport and errors.
+// qurl-go v0.14.0 ProtectURL still omits the required type discriminator;
+// the REST path also preserves the CLI pagination and single-attempt publish contract.
 package qurlapi
 
 import (
@@ -37,7 +35,7 @@ type Client interface {
 	// identity, CRID included when the service mints one.
 	Publish(ctx context.Context, targetURL string, opts PublishOptions) (*Published, error)
 	// Share mints a short-lived share link for the resource identified by
-	// id (CRID or public-key resource identifier; the service dual-accepts).
+	// id, which must be a CRID.
 	// Not to be confused with Sharing below, which reads the connector's
 	// local-app sharing state.
 	Share(ctx context.Context, id string, opts ShareOptions) (*ShareLink, error)
@@ -124,21 +122,6 @@ type ShareLink struct {
 	ExpiresAt        time.Time
 	ExpiresInSeconds int
 	SingleUse        bool
-
-	verifyKey func(derSPKI []byte) error
-}
-
-// VerifyKey ties this response to a resource public key the caller already
-// holds (DER SubjectPublicKeyInfo bytes, exactly as delivered). nil means the
-// response's CRID commits to that key. Any non-nil error is fail-closed: the
-// SDK's qurl.ErrNoCRID when the response carried no CRID, qurl.ErrCRIDMismatch
-// when the key does not derive it, or the crid package sentinels when the
-// held value fails the local gate.
-func (r *ShareLink) VerifyKey(derSPKI []byte) error {
-	if r.verifyKey == nil {
-		return fmt.Errorf("%w: response cannot be verified", qurl.ErrNoCRID)
-	}
-	return r.verifyKey(derSPKI)
 }
 
 // ResourcePage is one page of List results. HasMore — not NextCursor — is
@@ -305,8 +288,7 @@ func NewRegistered(ctx context.Context, cfg *Config, store qurl.AgentStateStore)
 	return &registeredClient{Client: core}, nil
 }
 
-// Share delegates to the SDK's ShareResource and carries its VerifyCRID
-// forward as the result's VerifyKey.
+// Share delegates to the SDK's CRID-based ShareResource.
 func (c *client) Share(ctx context.Context, id string, opts ShareOptions) (*ShareLink, error) {
 	var sdkOpts *qurl.ShareResourceOptions
 	if opts.TTLSeconds > 0 {
@@ -323,7 +305,6 @@ func (c *client) Share(ctx context.Context, id string, opts ShareOptions) (*Shar
 		ExpiresAt:        access.ExpiresAt,
 		ExpiresInSeconds: access.ExpiresInSeconds,
 		SingleUse:        access.SingleUse,
-		verifyKey:        access.VerifyCRID,
 	}, nil
 }
 

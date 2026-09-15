@@ -142,7 +142,7 @@ func (a *journeyAdmitter) Admit(_ context.Context, knockResourceID, resourceID s
 		openTime = time.Hour
 	}
 	return connectorshare.Admission{
-		KnockResourceID: knockResourceID, ResourceID: resourceID,
+		KnockResourceID: knockResourceID, ResourcePublicKey: resourceID,
 		RunID: runID, RunAttempt: 1, Token: "ac-hermetic", ResourceHost: a.host,
 		SessionID: sessionID,
 		SessionReceipt: qurl.NativeSessionReceipt{
@@ -1932,7 +1932,7 @@ func TestLocalPublishCompensatesSetupFailureBeforeDaemonOwnership(t *testing.T) 
 				}
 				found := false
 				return &agent.ResolvedResource{Resource: &qurl.ConnectorResource{
-					ResourceID: srv.Key.ResourceID, CRID: srv.Key.CRID, Slug: id,
+					ResourcePublicKey: srv.Key.ResourceID, CRID: srv.Key.CRID, Slug: id,
 					ConnectorRoutingID: "c-" + strings.Repeat("a", 52), KnockResourceID: "q_catalog_key",
 				}, FoundExisting: &found}, nil
 			}
@@ -1992,7 +1992,7 @@ func TestLocalPublishCompensatesAmbiguousEnableBeforeLocalHandoff(t *testing.T) 
 		preflightTarget: func(context.Context, string, int) error { return nil },
 		localResource: func(context.Context, *connectorshare.NativeRuntimeConfig, func(string) (string, error)) (*agent.ResolvedResource, error) {
 			return &agent.ResolvedResource{Resource: &qurl.ConnectorResource{
-				ResourceID: srv.Key.ResourceID, CRID: srv.Key.CRID, Slug: seed.ConnectorID,
+				ResourcePublicKey: srv.Key.ResourceID, CRID: srv.Key.CRID, Slug: seed.ConnectorID,
 				ConnectorRoutingID: seed.ConnectorRoutingID, KnockResourceID: seed.KnockResourceID,
 			}, FoundExisting: &found}, nil
 		},
@@ -2039,7 +2039,7 @@ func TestLocalPublishCompensatesInvalidRestartBeforeLocalHandoff(t *testing.T) {
 		preflightTarget: func(context.Context, string, int) error { return nil },
 		localResource: func(context.Context, *connectorshare.NativeRuntimeConfig, func(string) (string, error)) (*agent.ResolvedResource, error) {
 			return &agent.ResolvedResource{Resource: &qurl.ConnectorResource{
-				ResourceID: srv.Key.ResourceID, CRID: srv.Key.CRID, Slug: seed.ConnectorID,
+				ResourcePublicKey: srv.Key.ResourceID, CRID: srv.Key.CRID, Slug: seed.ConnectorID,
 				ConnectorRoutingID: seed.ConnectorRoutingID, KnockResourceID: seed.KnockResourceID,
 			}, FoundExisting: &found}, nil
 		},
@@ -2209,7 +2209,7 @@ func TestRepublishPriorOnSetupFailureDoesNotDisableHealthyShare(t *testing.T) {
 				preflightTarget: func(context.Context, string, int) error { return nil },
 				localResource: func(context.Context, *connectorshare.NativeRuntimeConfig, func(string) (string, error)) (*agent.ResolvedResource, error) {
 					return &agent.ResolvedResource{Resource: &qurl.ConnectorResource{
-						ResourceID: srv.Key.ResourceID, CRID: srv.Key.CRID, Slug: seed.ConnectorID,
+						ResourcePublicKey: srv.Key.ResourceID, CRID: srv.Key.CRID, Slug: seed.ConnectorID,
 						ConnectorRoutingID: seed.ConnectorRoutingID, KnockResourceID: seed.KnockResourceID,
 					}, FoundExisting: &found}, nil
 				},
@@ -2542,7 +2542,7 @@ func TestLocalPublishPollingTimeoutLeavesDaemonOwnedRecoveryOn(t *testing.T) {
 		}
 		found := false
 		return &agent.ResolvedResource{Resource: &qurl.ConnectorResource{
-			ResourceID: srv.Key.ResourceID, CRID: srv.Key.CRID, Slug: id,
+			ResourcePublicKey: srv.Key.ResourceID, CRID: srv.Key.CRID, Slug: id,
 			ConnectorRoutingID: "c-" + strings.Repeat("a", 52), KnockResourceID: "q_catalog_key",
 		}, FoundExisting: &found}, nil
 	}
@@ -2700,11 +2700,11 @@ func TestPublishDaemonLifecycleServesRealHTTPAndStopsCleanly(t *testing.T) {
 			}
 		}()
 		request := tx.Request()
-		found := request.ExpectedResourceID != ""
+		found := request.ExpectedCRID != ""
 		if found {
 			continuations++
-			if request.ExpectedResourceID != resourceKey.ResourceID {
-				t.Fatalf("publish continued the wrong resource: %q", request.ExpectedResourceID)
+			if request.ExpectedCRID != resourceKey.CRID {
+				t.Fatalf("publish continued the wrong resource: %q", request.ExpectedCRID)
 			}
 		} else {
 			creates++
@@ -2721,7 +2721,7 @@ func TestPublishDaemonLifecycleServesRealHTTPAndStopsCleanly(t *testing.T) {
 			return nil, err
 		}
 		return &agent.ResolvedResource{Resource: &qurl.ConnectorResource{
-			ResourceID: resourceKey.ResourceID, CRID: resourceKey.CRID, Slug: id,
+			ResourcePublicKey: resourceKey.ResourceID, CRID: resourceKey.CRID, Slug: id,
 			ConnectorRoutingID: routingID, KnockResourceID: "q_catalog_key",
 		}, FoundExisting: &found}, nil
 	}
@@ -3196,7 +3196,7 @@ func TestForegroundPublishCancellationDrainsAndStopsOwnedSharing(t *testing.T) {
 func resolvedLocalResource(srv *apitest.Server, found bool) localResourceResolver {
 	return func(context.Context, *connectorshare.NativeRuntimeConfig, func(string) (string, error)) (*agent.ResolvedResource, error) {
 		return &agent.ResolvedResource{Resource: &qurl.ConnectorResource{
-			ResourceID: srv.Key.ResourceID, CRID: srv.Key.CRID, Slug: "local-test",
+			ResourcePublicKey: srv.Key.ResourceID, CRID: srv.Key.CRID, Slug: "local-test",
 			ConnectorRoutingID: "c-" + strings.Repeat("a", 52), KnockResourceID: "q_catalog_key",
 		}, FoundExisting: &found}, nil
 	}

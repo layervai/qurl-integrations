@@ -370,7 +370,7 @@ func activateLocalPublish(
 	knockResourceID string,
 	target *publishTarget,
 ) (*connectorstate.LocalShare, *qurlapi.Sharing, bool, error) {
-	existing, err := registry.Get(ctx, resource.ResourceID)
+	existing, err := registry.Get(ctx, resource.ResourcePublicKey)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, nil, false, err
 	}
@@ -381,7 +381,7 @@ func activateLocalPublish(
 	if err != nil {
 		return nil, nil, false, err
 	}
-	if prior.ResourceID != resource.ResourceID || prior.CRID != resource.CRID {
+	if prior.ResourceID != resource.ResourcePublicKey || prior.CRID != resource.CRID {
 		return nil, nil, false, errors.New("qURL sharing response identity does not match the published resource")
 	}
 	var sharing *qurlapi.Sharing
@@ -397,7 +397,7 @@ func activateLocalPublish(
 		return nil, nil, compensateOff, err
 	}
 	local := &connectorstate.LocalShare{
-		CRID: resource.CRID, ResourceID: resource.ResourceID, ConnectorID: resource.Slug,
+		CRID: resource.CRID, ResourceID: resource.ResourcePublicKey, ConnectorID: resource.Slug,
 		ConnectorRoutingID: resource.ConnectorRoutingID, KnockResourceID: knockResourceID,
 		TargetURL: target.canonicalOrigin, LocalIP: target.localIP, LocalPort: target.localPort,
 		DesiredState: string(sharing.DesiredState), ServingEpoch: sharing.ServingEpoch,
@@ -416,7 +416,7 @@ func compensateLocalPublish(
 	off, offErr := client.SetSharing(ctx, resource.CRID, qurlapi.DesiredStateOff)
 	var localErr error
 	if offErr == nil {
-		localErr = persistCompensatingOff(ctx, registry, resource.ResourceID, resource.CRID, off, true)
+		localErr = persistCompensatingOff(ctx, registry, resource.ResourcePublicKey, resource.CRID, off, true)
 	}
 	return errors.Join(cause, offErr, localErr)
 }

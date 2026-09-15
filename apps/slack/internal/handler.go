@@ -2569,7 +2569,7 @@ func (h *Handler) userHelpMessage(command string) string {
 		lines = append(lines,
 			"• `/qurl setup <email> --rotate` — Replace the workspace qURL key on the same qURL account",
 			"• `/qurl setup <email> --repoint` — Move the workspace to a different qURL account (cross-account moves route to an operator)",
-			"_`$id` identifies a resource. A `$alias` is an alternate name for a resource in a channel — several aliases can point to one ID. Use either with `/qurl get`._",
+			"_A CRID is a resource's permanent identifier. In Slack, use a listed `$id` or `$alias` with `/qurl get`. Several aliases can point to one resource._",
 			"",
 			"• `/qurl get <$id|$alias>` — Create a qURL for a resource `$id` or a `$alias` configured in this channel",
 		)

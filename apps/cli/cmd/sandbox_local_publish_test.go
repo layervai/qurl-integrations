@@ -101,6 +101,7 @@ func mintConnectorRow(t *testing.T, slug string) connectorResourceRow {
 	digest := sha256.Sum256(der)
 	return connectorResourceRow{
 		ResourceID:         base64.RawURLEncoding.EncodeToString(der),
+		CRID:               apitest.DeriveCRID(t, der, apitest.VersionTest),
 		ConnectorRoutingID: "c-" + connectorRoutingIDEncoding.EncodeToString(digest[:]),
 		KnockResourceID:    "resource-public-key", Type: "tunnel", Status: "active", Slug: slug,
 	}
@@ -153,8 +154,8 @@ func TestSandboxFullCustomerLifecyclePhaseContract(t *testing.T) {
 // The main CLI workflow runs this tagged test with one exact customer CLI
 // artifact. It creates a native device in a fresh state directory and records
 // that device for the workflow's terminal cleanup. The test does not receive
-// M2M authority there; terminal cleanup mints a fresh token after it fences the
-// tested process. A direct operator run can supply a cleanup JWT to revoke the
+// standing automation authority there; terminal cleanup uses the protected parent
+// API key after it fences the tested process. A direct operator run can supply an interactive cleanup JWT to revoke the
 // device in the test's own cleanup. That JWT must represent the same owner as
 // QURL_API_KEY. Run explicitly:
 //
@@ -1866,7 +1867,7 @@ func registerSandboxResourceCleanup(t *testing.T, endpoint, connectorID, deviceA
 			t.Error("find sandbox Connector resource for cleanup failed")
 			return
 		}
-		if err := client.DeleteConnectorResource(ctx, resource.ResourceID); err != nil && !errors.Is(err, qurl.ErrConnectorResourceNotFound) {
+		if err := client.DeleteConnectorResource(ctx, resource.CRID); err != nil && !errors.Is(err, qurl.ErrConnectorResourceNotFound) {
 			t.Error("revoke sandbox Connector resource cleanup failed")
 		}
 	})
@@ -1988,7 +1989,7 @@ func TestSandboxCleanupReclaimsResourceBeforeDeviceCredential(t *testing.T) {
 			if err := json.NewEncoder(w).Encode(map[string]any{"data": []connectorResourceRow{row}}); err != nil {
 				t.Errorf("encode resource lookup: %v", err)
 			}
-		case r.Method == http.MethodDelete && r.URL.EscapedPath() == "/v1/resources/"+url.PathEscape(row.ResourceID):
+		case r.Method == http.MethodDelete && r.URL.EscapedPath() == "/v1/resources/"+url.PathEscape(row.CRID):
 			if got := r.Header.Get("Authorization"); got != "Bearer device-token" {
 				t.Errorf("resource cleanup authorization = %q, want device credential", got)
 			}

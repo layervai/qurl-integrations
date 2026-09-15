@@ -2713,7 +2713,7 @@ describe('handleQurlDetect', () => {
     expect(isOnDetectCooldown('guild-1', SENDER_ID)).toBe(false);
   });
 
-  test('no API key configured ⇒ "not configured" ephemeral AND cooldown CLEARED (item 2)', async () => {
+  test('no API key configured ⇒ operator configuration error AND cooldown retained (item 2)', async () => {
     const config = require('../src/config');
     const savedKey = config.QURL_API_KEY;
     config.QURL_API_KEY = '';
@@ -2728,10 +2728,10 @@ describe('handleQurlDetect', () => {
 
     expect(int.deferReply).toHaveBeenCalled();
     expect(int.editReply).toHaveBeenCalledWith(expect.objectContaining({
-      content: expect.stringMatching(/not configured/i),
+      content: expect.stringMatching(/bot operator must configure/i),
     }));
     expect(mockDetectWatermark).not.toHaveBeenCalled();
-    expect(isOnDetectCooldown('guild-1', SENDER_ID)).toBe(false);
+    expect(isOnDetectCooldown('guild-1', SENDER_ID)).toBe(true);
     expect(logger.audit).toHaveBeenCalledWith('qurl_detect', expect.objectContaining({
       result: 'unconfigured', guild_id: 'guild-1', requester_id: SENDER_ID,
     }));

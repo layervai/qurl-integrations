@@ -191,6 +191,10 @@ the owner-only local state directory. The account API key and one-time
 enrollment credential remain in memory and are not stored by qurl. A warm
 command reuses the device identity and does not read `QURL_API_KEY`.
 
+If enrollment stops before it completes, run `qurl login` again with a key for
+the same account. The CLI resumes enrollment with the saved device identity.
+Keep the local state directory unchanged for this retry.
+
 `qurl whoami` checks the registered device and shows its account.
 
 Authenticated commands need the owner-only local state directory to remain
@@ -206,6 +210,14 @@ revoke the registered device key in the qURL dashboard. Then move or remove the
 complete state directory and run `qurl login` with the other account. Do not
 edit or delete individual state files; qurl rejects cross-account reuse and
 prints the exact directory and device-key ID needed for this recovery.
+
+This release requires CRID continuity and version 3 of the Connector resource
+journal. It does not convert old journals or use the old protocol. Preserve
+old state and finish unresolved operations with its matching binary before
+replacing that environment. To start fresh, stop the daemon, revoke its device
+key in the dashboard, move the complete state directory aside, then run
+`qurl login` and publish again. Fresh publication creates new CRIDs. Do not
+copy individual bindings or pending requests into the new state.
 
 ## Configuration
 
@@ -229,7 +241,8 @@ selected with `--profile` or `QURL_PROFILE`. A missing file simply means
 defaults apply. **Config files never hold secrets** — a file carrying an
 `api_key` entry is rejected outright rather than silently honored.
 
-Also honored: `NO_COLOR` (disables color while `--color` is `auto`), and
+Also honored: `QURL_DEPLOYMENT` (the settings-file path used to verify share
+and access links; environment-only, with no profile override), `NO_COLOR` (disables color while `--color` is `auto`), and
 `QURL_BROWSER` / `BROWSER` (which browser `qurl get` opens). Pointing the
 CLI at a plain-`http` endpoint on a non-local address warns that the key
 would travel unencrypted; loopback endpoints are exempt.
@@ -368,7 +381,8 @@ from a script, use `qurl get <CRID> --file <path>`.
 | `--ttl <duration>` | Requested link lifetime in whole seconds (e.g. `5m`, `1h`). The service may grant less; a shorter grant is reported on stderr, never silent. Sub-second or negative values are refused rather than rounded. |
 | `--yes` | Proceed without confirmation, including sending a test CRID to production |
 
-Before anything is printed, the CLI verifies the service's answer against
+Share needs the deployment verification settings described under `qurl get`.
+Before anything is printed, the CLI verifies the signed link against
 the CRID you asked for; a mismatched answer is discarded and the command
 exits with code 12 without printing a link.
 
@@ -402,12 +416,13 @@ or use `qurl share` if you only need the link. With `-o json`, get is a
 machine asking for data, so browser mode and `--file -` are refused
 loudly; `--file <path> -o json` downloads and emits the outcome document.
 
-Direct downloads use the deployment settings shipped with the CLI. On a
-self-hosted or custom deployment, set `QURL_DEPLOYMENT` to the path of that
-deployment's settings file (ask whoever runs the deployment for it). Without
-usable settings, `get
---file` fails loudly with exit code 3 rather than downloading the wrong
-thing; browser mode needs no settings at all.
+Both `share` and `get` need deployment settings to check that the signed link
+belongs to the CRID you supplied. Set `QURL_DEPLOYMENT` to the path of your
+deployment's settings file (ask whoever runs the deployment for it), unless
+your build includes those settings. Without usable settings, the command
+fails with exit code 3 before printing a link, opening a browser, or downloading.
+Direct or pre-signed URLs in share responses are rejected because they cannot
+be checked against the advertised CRID.
 
 ### qurl list
 
@@ -508,7 +523,10 @@ machine serves up to 2000 local shares (see [Scale](#scale)). On macOS the
 first local `publish` or `start` installs an owner-only LaunchAgent. On Windows
 it installs a least-privilege per-user Task Scheduler job. The installed `qurl`
 path survives normal upgrades, and a binary-version change reloads the resident
-daemon deliberately. Ordinary lifecycle commands reload desired state over an
+daemon deliberately. On macOS, replacement waits for the prior daemon to finish
+its configured shutdown before it retries startup. If that shutdown times out,
+retry the command to restore the background job.
+Ordinary lifecycle commands reload desired state over an
 owner-only local control channel without restarting healthy sibling shares.
 
 <!-- TODO(upstream-contract): the grace mirrors qurl-connector groupControlRecoveryGrace. -->
@@ -649,7 +667,7 @@ exit-code authority in code (`apps/cli/internal/exitcode`):
 | 0 | success | The command did what was asked. |
 | 1 | general | An unclassified failure, including features not yet available in this build. |
 | 2 | usage | The command line itself was wrong: flags, arguments, or missing confirmation. |
-| 3 | configuration | Configuration files or profiles are invalid. |
+| 3 | configuration | Settings or profiles are invalid, or this CRID needs a newer CLI. |
 | 4 | authentication | No credential, an implausible credential, or the service rejected the credential. |
 | 5 | not found | The resource does not exist or is retired — revoked and tombstoned resources included; the stderr message distinguishes them. |
 | 6 | permission | The credential lacks permission for this operation. |

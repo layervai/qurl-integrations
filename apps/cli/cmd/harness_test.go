@@ -89,6 +89,7 @@ type runOpts struct {
 	// realOpener keeps the production access opener in place instead of the
 	// refusing fake. Only the clisandbox-tagged live suite sets it.
 	realOpener bool
+	verifyLink func(context.Context, string, string) error
 
 	// ctx, when non-nil, replaces context.Background() so a test can cancel a
 	// foreground daemon or another long-running command.
@@ -200,6 +201,13 @@ func runCLI(t *testing.T, o *runOpts) *runResult {
 			g.openAPIClient = o.openAPIClient
 		}
 		g.openBrowser = browser.open
+		if o.verifyLink != nil {
+			g.verifyLink = o.verifyLink
+		} else if !o.realOpener {
+			// Command orchestration fixtures use synthetic links. Binding tests
+			// inject the real SDK verifier; live journeys keep production trust.
+			g.verifyLink = func(context.Context, string, string) error { return nil }
+		}
 		switch {
 		case o.enterPortalGrant != nil:
 			g.enterPortalGrant = o.enterPortalGrant

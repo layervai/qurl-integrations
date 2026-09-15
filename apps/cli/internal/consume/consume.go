@@ -12,15 +12,15 @@
 // fragment, never the content — so those links are opened through the SDK's
 // programmatic opener first (AccessOpener over qurl.EnterPortalWith) and the
 // Downloader fetches the granted content URL it returns. A link without an
-// in-link credential serves its bytes to a plain GET and is fetched as
-// delivered. The browser path carries the full link, fragment included, because
+// in-link credential is rejected by the CLI before download; plain URLs
+// remain supported only by the lower-level Downloader. The browser path carries the full link, fragment included, because
 // the in-browser page is exactly what a browser needs.
 //
 // Nothing here carries the qURL API key. An access-granted download does carry
 // one opaque, short-lived application bearer, but the Downloader applies it
 // only to the exact granted HTTPS origin and removes it before any cross-origin
 // redirect. Every link this package acts on has already passed the CLI's CRID
-// verification (cmd.verifyShareLink), and the fresh share link a mid-download
+// verification (the share response and signed-link checks), and the fresh share link a mid-download
 // retry mints goes through the same verifying closure — the platform access
 // request included.
 package consume
@@ -125,6 +125,7 @@ func CustomerMessages() []string {
 		msgDirectoryDest,
 		MsgAccessNotConfigured,
 		MsgAccessSettingsMismatch,
+		MsgUnsupportedCRIDVersion,
 		MsgLinkVerification,
 		MsgAccessDenied,
 		MsgAccessBusy,

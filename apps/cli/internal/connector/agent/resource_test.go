@@ -37,7 +37,7 @@ func testNativeResource(t *testing.T, connectorID string) *qurl.ConnectorResourc
 	}
 	digest := sha256.Sum256(der)
 	return &qurl.ConnectorResource{
-		ResourceID:         base64.RawURLEncoding.EncodeToString(der),
+		ResourcePublicKey:  base64.RawURLEncoding.EncodeToString(der),
 		CRID:               apitest.DeriveCRID(t, der, apitest.VersionProduction),
 		ConnectorRoutingID: "c-" + routingIDEncoding.EncodeToString(digest[:]),
 		KnockResourceID:    "nhp-resource-a",
@@ -112,8 +112,8 @@ func TestResolveResourcePersistsBeforeDispatchAndCommitsCompleteBinding(t *testi
 		if got := pending["request_nonce"]; got != request.RequestNonce {
 			t.Fatalf("durable nonce before dispatch = %v, want %q", got, request.RequestNonce)
 		}
-		if _, exists := pending["expected_resource_id"]; exists {
-			t.Fatal("fresh request persisted an expected_resource_id")
+		if _, exists := pending["expected_crid"]; exists {
+			t.Fatal("fresh request persisted an expected_crid")
 		}
 		return &qurl.ConnectorResourceResolution{Resource: resource, FoundExisting: false}, nil
 	})
@@ -139,7 +139,7 @@ func TestResolveResourcePersistsBeforeDispatchAndCommitsCompleteBinding(t *testi
 	if len(envelope.Pending) != 0 {
 		t.Fatalf("pending after commit = %+v, want empty", envelope.Pending)
 	}
-	if got := envelope.Bindings["billing-api"]; got.ResourceID != resource.ResourceID || got.ConnectorRoutingID != resource.ConnectorRoutingID || got.KnockResourceID != resource.KnockResourceID {
+	if got := envelope.Bindings["billing-api"]; got.ResourceID != resource.ResourcePublicKey || got.ConnectorRoutingID != resource.ConnectorRoutingID || got.KnockResourceID != resource.KnockResourceID {
 		t.Fatalf("binding = %+v, want complete authenticated resource", got)
 	}
 }
@@ -149,11 +149,11 @@ func TestResolveConfiguredResourceReauthorizesExactBinding(t *testing.T) {
 	resource := testNativeResource(t, "headless-api")
 	t.Setenv(EnvKnockResourceID, "headless-knock-override")
 	configured := &state.ConnectorResourceBinding{
-		ConnectorID: resource.Slug, ResourceID: resource.ResourceID, CRID: resource.CRID,
+		ConnectorID: resource.Slug, ResourceID: resource.ResourcePublicKey, CRID: resource.CRID,
 		ConnectorRoutingID: resource.ConnectorRoutingID, KnockResourceID: "headless-knock-override",
 	}
 	installResourceResolver(t, func(_ context.Context, _ *qurl.AgentRuntimeBinding, request *qurl.NativeConnectorResourceRequest, _ ...qurl.AgentRuntimeUDPOption) (*qurl.ConnectorResourceResolution, error) {
-		if request.ConnectorID != configured.ConnectorID || request.ExpectedResourceID != configured.ResourceID || request.RequestNonce == "" {
+		if request.ConnectorID != configured.ConnectorID || request.ExpectedCRID != configured.CRID || request.RequestNonce == "" {
 			t.Fatalf("configured native request = %+v", request)
 		}
 		return &qurl.ConnectorResourceResolution{Resource: resource, FoundExisting: true}, nil
@@ -176,7 +176,7 @@ func TestResolveConfiguredResourceRejectsEffectiveKnockMismatch(t *testing.T) {
 	store := openResourceTestStore(t)
 	resource := testNativeResource(t, "headless-api")
 	configured := &state.ConnectorResourceBinding{
-		ConnectorID: resource.Slug, ResourceID: resource.ResourceID, CRID: resource.CRID,
+		ConnectorID: resource.Slug, ResourceID: resource.ResourcePublicKey, CRID: resource.CRID,
 		ConnectorRoutingID: resource.ConnectorRoutingID, KnockResourceID: "configured-knock-override",
 	}
 	t.Setenv(EnvKnockResourceID, "different-knock-override")
@@ -220,7 +220,7 @@ func testResolveResourceLostResponse(t *testing.T, reuse bool) {
 			t.Fatal(err)
 		}
 		if err := tx.Commit(&state.ConnectorResourceBinding{
-			ConnectorID: old.Slug, ResourceID: old.ResourceID, CRID: old.CRID,
+			ConnectorID: old.Slug, ResourceID: old.ResourcePublicKey, CRID: old.CRID,
 			ConnectorRoutingID: old.ConnectorRoutingID, KnockResourceID: old.KnockResourceID,
 		}); err != nil {
 			_ = tx.Close()
@@ -276,7 +276,7 @@ func testResolveResourceLostResponse(t *testing.T, reuse bool) {
 	if len(requests) != 3 {
 		t.Fatalf("requests = %d, want lost + exact replay + warm continuity", len(requests))
 	}
-	if requests[0].ExpectedResourceID != "" {
+	if requests[0].ExpectedCRID != "" {
 		t.Fatal("new resource request retained the deleted resource identity")
 	}
 	if requests[0] != requests[1] {
@@ -285,8 +285,8 @@ func testResolveResourceLostResponse(t *testing.T, reuse bool) {
 	if requests[2].RequestNonce == requests[1].RequestNonce {
 		t.Fatal("completed warm start reused the spent nonce")
 	}
-	if requests[2].ExpectedResourceID != resource.ResourceID {
-		t.Fatalf("warm expected_resource_id = %q, want %q", requests[2].ExpectedResourceID, resource.ResourceID)
+	if requests[2].ExpectedCRID != resource.CRID {
+		t.Fatalf("warm expected_crid = %q, want %q", requests[2].ExpectedCRID, resource.CRID)
 	}
 }
 
@@ -332,10 +332,10 @@ func TestResolveResourceReusePreservesNativeConflict(t *testing.T) {
 		t.Fatal(err)
 	}
 	result, err := ResolveResourceWithResult(ctx, &qurl.AgentRuntimeBinding{}, store, old.Slug)
-	if err != nil || result.Resource.ResourceID != replacement.ResourceID {
+	if err != nil || result.Resource.ResourcePublicKey != replacement.ResourcePublicKey {
 		t.Fatalf("retry after service slug release = %+v, %v", result, err)
 	}
-	if requests[1].ExpectedResourceID != "" || requests[2].ExpectedResourceID != "" ||
+	if requests[1].ExpectedCRID != "" || requests[2].ExpectedCRID != "" ||
 		requests[1].RequestNonce == requests[0].RequestNonce || requests[2].RequestNonce == requests[1].RequestNonce {
 		t.Fatal("reuse retained a deleted identity or replayed a terminal request")
 	}
