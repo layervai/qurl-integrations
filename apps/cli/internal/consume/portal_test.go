@@ -104,18 +104,14 @@ func envMap(env map[string]string) func(string) (string, bool) {
 	}
 }
 
-// TestGrantWithoutSettingsRefusesConfigured pins the fail-closed default:
-// with no QURL_DEPLOYMENT in the injected environment and the SDK's shipped
-// deployment empty, Grant refuses with the configuration sentinel before any
-// network I/O. The process variable is cleared so a developer's real
-// QURL_DEPLOYMENT can never leak into the hermetic run through the SDK's
-// own fallback.
-func TestGrantWithoutSettingsRefusesConfigured(t *testing.T) {
+// The shipped production configuration must reach link validation with no
+// deployment override. An empty link fails before any network operation.
+func TestGrantWithoutSettingsUsesProductionTrust(t *testing.T) {
 	t.Setenv(qurl.EnvDeploymentPath, "")
 	opener := &AccessOpener{LookupEnv: envMap(nil)}
-	_, err := opener.Grant(context.Background(), portalLink)
-	if !errors.Is(err, ErrAccessNotConfigured) {
-		t.Fatalf("err = %v, want ErrAccessNotConfigured", err)
+	_, err := opener.Grant(context.Background(), "")
+	if !errors.Is(err, ErrLinkVerification) {
+		t.Fatalf("err = %v, want link validation after loading production trust", err)
 	}
 }
 
