@@ -347,7 +347,7 @@ test('delegated batch preserves successful qURL IDs when a terminal item fails',
       submitted_at: '2026-09-06T21:00:00Z',
       results: [
         { index: 0, status: 'succeeded', qurl: { qurl_id: 'q_00000000001', qurl_link: 'https://qurl.site/#at_a', expires_at: '2026-09-06T22:00:00Z' } },
-        { index: 1, status: 'failed', error: { code: 'creation_failed', message: 'failed' } },
+        { index: 1, status: 'failed', error: { code: 'secret_upstream_code', message: 'failed' } },
       ],
     } }));
   try {
@@ -362,6 +362,7 @@ test('delegated batch preserves successful qURL IDs when a terminal item fails',
     ).then(() => null, err => err);
 
     expect(error).toEqual(expect.any(Error));
+    expect(JSON.stringify(error)).not.toContain('secret_upstream_code');
     expect(error.partialQurlIds).toEqual(['q_00000000001']);
     expect(error.partialLinkCount).toBe(1);
   } finally {
@@ -820,4 +821,19 @@ test('permits an upload without a viewer timer for non-rendered media', async ()
     deadlineMs: Date.now() + 60_000,
   })).resolves.toHaveProperty('upload_handle');
   expect(mockOpener.fetch).toHaveBeenCalledTimes(1);
+});
+
+
+test.each(['secret_upstream_code', 'quota_exceeded', 'mutation_outcome_unknown'])('upload exposes only consumer-approved API code %s', async code => {
+  mockOpener.fetch.mockResolvedValueOnce(jsonResponse(400, { error: { code } }));
+  const error = await privateUpload.uploadPrivate(Buffer.from('body'), {
+    filename: 'file', contentType: 'text/plain', viewerTtlSeconds: 0,
+    credential: { apiKey: 'lv_test_example', keyId: 'key_A1b2C3d4E5f6' },
+    authorityExpiresAt: UPLOAD_VECTOR.authorityExpiresAt,
+    deadlineMs: Date.now() + 60_000,
+  }).catch(err => err);
+  expect(error.status).toBe(400);
+  expect(error).not.toHaveProperty('response');
+  expect(error.apiCode).toBe(code === 'secret_upstream_code' ? undefined : code);
+  expect(JSON.stringify(error)).not.toContain('secret_upstream_code');
 });

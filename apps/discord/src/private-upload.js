@@ -177,8 +177,14 @@ function signedTransportFields({ authority, body, bodySha256, contentType, filen
   };
 }
 
+// Callers log apiCode; only these codes affect consumer behavior or name a local failure.
+function safePrivateApiCode(code) {
+  return ['quota_exceeded', 'mutation_outcome_unknown', 'delegated_batch_item_failed'].includes(code)
+    ? code : undefined;
+}
+
 function errorCode(body) {
-  return body?.error?.code || body?.code || null;
+  return safePrivateApiCode(body?.error?.code || body?.code);
 }
 
 function isCanonicalUtcSecond(value) {
@@ -356,10 +362,12 @@ async function uploadPrivate(bodyInput, {
       const data = validateUploadResult(result?.data, { authorityExpiresAt });
       return { ...data, upload_request_id: requestId };
     } catch (err) {
+      const response = err.response;
+      delete err.response; // Transport headers stay inside the retry loop.
       lastError = err;
       if (err.noRetry || (err.status && !(err.status === 503 && err.apiCode === 'mutation_outcome_unknown'))) throw err;
       if (attempt < MAX_UPLOAD_ATTEMPTS) {
-        const waitMs = retryDelayMs(err.response, attempt);
+        const waitMs = retryDelayMs(response, attempt);
         if (Date.now() + waitMs > deadlineMs) {
           throw new Error('Private upload did not complete before the Discord interaction deadline');
         }
@@ -532,7 +540,7 @@ async function redeemDelegatedBatch(upload, {
     // Never pass upstream detail (which can echo credentials) to Discord/logs.
     const error = new Error('Delegated qURL batch failed; result or cleanup may be incomplete');
     error.status = cause.status;
-    error.apiCode = cause.apiCode || cause.code;
+    error.apiCode = safePrivateApiCode(cause.apiCode || cause.code);
     error.partialQurlIds = [...(cause.partialQurlIds || [])];
     error.partialLinkCount = error.partialQurlIds.length;
     error.batchOutcomeUnknown = !terminal && Boolean(accepted || uncertainCreate);
