@@ -6,7 +6,7 @@
 FROM envoyproxy/envoy:v1.39.1@sha256:57e14a549d7bd43c8d3f6d03e8cfa653e037d4b38e133acd9b54f38c524401b4 AS envoy
 
 # Stage 2: pinned nginx-unprivileged (Debian bookworm / glibc) runtime base.
-FROM nginxinc/nginx-unprivileged:1.31.3@sha256:79f1cd903210f98ffc1c8b5e08e90e650d2fadaa9f516a0866197471cb5f75b5
+FROM nginxinc/nginx-unprivileged:1.31.5@sha256:9d689e987337916e713a2d5fa84966550d9532e4cb512e7d6ad99df87ffe1ec8
 LABEL org.opencontainers.image.source="https://github.com/layervai/qurl-integrations"
 
 USER root
