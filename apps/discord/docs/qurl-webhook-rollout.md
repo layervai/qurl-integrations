@@ -49,7 +49,7 @@ Terraform-side ordering (config lives in `qurl-integrations-infra`):
    SecureString seeded with `PLACEHOLDER`. The registrar replaces that public
    bootstrap value with the server's secret before bot tasks start. The bot
    rejects the sentinel at startup; it must never become an HMAC key.
-   <!-- TODO(upstream-contract): keep this seed in sync with infra Terraform. -->
+   <!-- TODO(infra-sentinel-sync): keep this seed in sync with infra Terraform. -->
 2. Apply the Lambda function + IAM role (scoped: `ssm:GetParameter` on
    the `QURL_API_KEY` + `QURL_WEBHOOK_SECRET` paths; `ssm:PutParameter`
    on the `QURL_WEBHOOK_SECRET` path; `logs:CreateLogGroup` +

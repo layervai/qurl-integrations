@@ -265,6 +265,33 @@ describe('webhook-registrar Lambda — steady-state (existing sub + SSM secret p
     expect(result).toEqual({ webhookId: 'wh_existing', action: 'reused' });
     expect(rotateHit).toBe(false); // critical: no rotate, single-source-of-truth secret stays
   });
+
+  it('trims a padded SSM secret so it is reused without a format-drift warning', async () => {
+    ssmMock
+      .on(GetParameterCommand, { Name: '/test/QURL_API_KEY' })
+      .resolves({ Parameter: { Value: 'lv_test_key' } })
+      .on(GetParameterCommand, { Name: '/test/QURL_WEBHOOK_SECRET' })
+      .resolves({ Parameter: { Value: ' whsec_existing_server_generated\n' } })
+      .on(PutParameterCommand)
+      .resolves({});
+    mockQurlService({
+      'GET /v1/webhooks': () => ({ body: { data: [{
+        webhook_id: 'wh_existing',
+        url: BASE_EVENT.bridgeUrl,
+        events: ['qurl.accessed', 'qurl.expired'],
+      }] } }),
+    });
+    const logger = require('../../../src/logger');
+    const warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => {});
+    try {
+      const result = await handler(BASE_EVENT, CONTEXT);
+      expect(result).toEqual({ webhookId: 'wh_existing', action: 'reused' });
+      expect(ssmMock.commandCalls(PutParameterCommand)).toHaveLength(0);
+      expect(warnSpy).not.toHaveBeenCalled();
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
 });
 
 describe('webhook-registrar Lambda — secret never echoes in handler response (all action paths)', () => {

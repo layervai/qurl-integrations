@@ -21,9 +21,17 @@ const SERVER_SECRET_MIN_LENGTH = SERVER_SECRET_PREFIX.length + SERVER_SECRET_MIN
 const SERVER_SECRET_BODY_RE = /^[A-Za-z0-9_-]+$/;
 const SERVER_SECRET_EXPECTED_FORMAT = `${SERVER_SECRET_PREFIX} prefix with at least ${SERVER_SECRET_MIN_BODY_LENGTH} base64url characters after it`;
 
-// TODO(upstream-contract): qurl-integrations-infra/qurl-bot-discord seeds the
-// SSM parameter with this public bootstrap literal. It must never become an
-// HMAC key, whether supplied through SSM or returned by an upstream response.
+// Single definition of the infra seed literal; boot-requirements.js consumes
+// it for the Maps key check. It must never become an HMAC key, whether
+// supplied through SSM or returned by an upstream response.
+//
+// TODO(infra-sentinel-sync): the literal "PLACEHOLDER" is also the seed
+// value for the `aws_ssm_parameter` resources in
+// qurl-integrations-infra/qurl-bot-discord/terraform (search that repo for
+// `value = "PLACEHOLDER"`). If infra ever renames the sentinel (e.g.,
+// "REPLACE_ME"), update here in lockstep — otherwise both checks silently
+// regress to "non-empty value passes" and the original incident class
+// returns. `git grep TODO(infra-sentinel-sync)` finds the marker.
 const INFRA_SEED_SENTINEL = 'PLACEHOLDER';
 
 function isInfraSeedSentinel(value) {
@@ -74,6 +82,7 @@ function assertUsableResponseSecret(value, operation) {
 }
 
 module.exports = {
+  INFRA_SEED_SENTINEL,
   SERVER_SECRET_EXPECTED_FORMAT,
   SERVER_SECRET_MIN_LENGTH,
   assertConfiguredWebhookSecret,
