@@ -46,6 +46,37 @@ embed development or test trust data. The GitHub Release stays draft and the
 Homebrew tap stays on its prior version until all customer-journey, artifact,
 image, trust-posture, and signature checks pass.
 
+## Production default activation after v2.5.0
+
+v2.5.0 was intentionally published without a production Hub pin. Do not replace
+its signed assets or move its tag. Future public releases require the production
+pin; missing inputs block publication. Local/nightly snapshots can remain dark.
+
+Before cutting the next CLI patch release:
+
+1. Provision the production Hub through the governed Control rollout. Read only
+   `/prod/nhp/control/hub/identity/public-key` in account235500187906,
+   regionus-east-2. Verify its canonical32-byte X25519 public key and independently
+   approve its SHA256 fingerprint against the production Hub identity. Never use
+   the private key secret or a sandbox key.
+2. Set the existing repository secrets `QURL_PROD_NHP_HUB_PUBLIC_KEY_B64` and
+   `QURL_PROD_NHP_HUB_PUBLIC_KEY_SHA256` to those reviewed public values. Do not
+   disable `QURL_REQUIRE_RELEASE_HUB_PIN` to pass a release.
+3. Merge the normal CLI release-please patch PR for a new version after2.5.0.
+   Its exact source must pass the existing CLI customer journey. The workflow
+   creates a draft, injects the pin through GoReleaser, verifies all archives and
+   image platforms, and updates Homebrew only after publication checks pass.
+4. If that new draft needs continuation, dispatch `release-please.yml` on `main`
+   with `cli_tag` set to the new tag, `source_sha` to its exact source, and
+   `cli_run_id`/`cli_run_attempt` to the successful exact-source CLI workflow.
+   These are evidence from the completed run, not placeholders to guess. Never
+   dispatch repair for the already-public v2.5.0 assets to change their trust root.
+5. Verify the new downloaded binary with `version --verify-release-native-trust`;
+   require the independently reviewed fingerprint with all Hub overrides unset.
+   Then run the real production login/publish/share/get journey in separate
+   temporary native state. Registration and fixture writes wait for the approved
+   production identity cutover; no existing user state needs to be reset.
+
 ## What a CLI release ships
 
 Merging the CLI's release-please PR tags `vX.Y.Z` and creates a draft GitHub

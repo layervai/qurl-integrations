@@ -2385,8 +2385,8 @@ func TestCLIReleaseValidatesPackagesBeforePublication(t *testing.T) {
 	if globals.Env["QURL_RELEASE_LIFECYCLE_COMMANDS"] != commandRoster {
 		t.Errorf("release lifecycle command roster = %q, want %q", globals.Env["QURL_RELEASE_LIFECYCLE_COMMANDS"], commandRoster)
 	}
-	if globals.Env["QURL_REQUIRE_RELEASE_HUB_PIN"] != "0" {
-		t.Errorf("release Hub-pin source mode = %q, want reviewed dark mode 0", globals.Env["QURL_REQUIRE_RELEASE_HUB_PIN"])
+	if globals.Env["QURL_REQUIRE_RELEASE_HUB_PIN"] != "1" {
+		t.Errorf("release Hub-pin source mode = %q, want production-required mode 1", globals.Env["QURL_REQUIRE_RELEASE_HUB_PIN"])
 	}
 
 	workflow := readWorkflow(t, releasePleaseWorkflow)
