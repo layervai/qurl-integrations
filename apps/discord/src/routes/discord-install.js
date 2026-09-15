@@ -101,8 +101,8 @@ router.get('/install', installRateLimit, (req, res) => {
   }
   // Refuse before Discord installs the bot: without the encryption key, the
   // chained qURL authorization cannot persist the new guild credential.
+  // renderNotConfiguredPage owns the single sanitized log line.
   if (!process.env.KEY_ENCRYPTION_KEY) {
-    logger.error('Refusing /oauth/discord/install: KEY_ENCRYPTION_KEY is not set');
     return renderNotConfiguredPage(res, 'discord-install-entry', 'KEY_ENCRYPTION_KEY unset');
   }
 
@@ -136,7 +136,11 @@ router.get('/callback', rateLimit, async (req, res) => {
       ip: req.ip,
       hasCookie: stateInspection.hasCookie,
     });
-    return renderError(res, 400, 'Invalid install link', 'this install session is invalid or expired.');
+    // No cookie at all is the mobile in-app-browser handoff signature: the
+    // callback landed in a different browser context than /install.
+    return renderError(res, 400, 'Invalid install link', stateInspection.hasCookie
+      ? 'This install session is invalid or expired.'
+      : 'This install session is invalid or expired. No install session was found in this browser, so finish the install in the same browser you started it in.');
   }
 
   // Fail-fast: same encryption-at-rest guard as /oauth/qurl/start. When
@@ -146,7 +150,6 @@ router.get('/callback', rateLimit, async (req, res) => {
   // Discord code on a token exchange + a /users/@me round-trip + an Auth0
   // round-trip before failing at the qURL callback's persist-time guard.
   if (!process.env.KEY_ENCRYPTION_KEY) {
-    logger.error('Refusing /oauth/discord/callback: KEY_ENCRYPTION_KEY is not set');
     return renderNotConfiguredPage(res, 'discord-install', 'KEY_ENCRYPTION_KEY unset');
   }
   // State must authenticate the browser before we trust even the error
@@ -156,9 +159,11 @@ router.get('/callback', rateLimit, async (req, res) => {
   // Round-9 item #5: funnel through singleStringParam for symmetry.
   const errorParam = singleStringParam(req.query.error);
   if (errorParam) {
+    // Both values are attacker-controlled; cap the log work like the
+    // permissions check below.
     logger.warn('Discord install callback received error from Discord', {
-      error: errorParam,
-      errorDescription: singleStringParam(req.query.error_description),
+      error: errorParam.slice(0, 200),
+      errorDescription: singleStringParam(req.query.error_description).slice(0, 200),
       ip: req.ip,
     });
     return renderError(res, 400, 'Authorization declined', 'You declined consent or Discord returned an error.');

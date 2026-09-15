@@ -1,13 +1,14 @@
-// Shared rate-limit middleware for OAuth callback routes.
+// Shared rate-limit middleware for OAuth routes.
 //
-// Extracted from src/routes/oauth.js so the GitHub OAuth flow, the qURL
-// OAuth flow, and the Discord install callback share the same per-IP budget.
-// The public Discord install entrypoint gets a separate per-IP bucket in the
-// same bounded store, so entry-page traffic from one IP cannot consume that
-// IP's callback budget. At the global hard cap, callbacks can evict an
-// install-only entry, protecting callbacks from install-only traffic. This is
-// organic-traffic fairness, not abuse protection: a callback flood can fill
-// the shared store and shed new clients until entries expire.
+// Extracted from src/routes/oauth.js. The GitHub OAuth, qURL OAuth, and
+// Discord install callbacks share one per-IP callback budget. The public
+// Discord install entrypoint gets a separate per-IP bucket with its own
+// (higher) ceiling in the same bounded store, so entry-page traffic from one
+// IP cannot consume that IP's callback budget. At the global hard cap,
+// callbacks can evict an install-only entry, protecting callbacks from
+// install-only traffic. This is organic-traffic fairness, not abuse
+// protection: a callback flood can fill the shared store and shed new clients
+// until entries expire.
 //
 // SCALING: single-instance only. If this bot ever runs horizontally
 // (multiple ECS tasks behind a LB), move this to Redis so limits are
@@ -17,8 +18,10 @@
 // OVERLOAD: the store deliberately grows to the 20k hard cap and then sheds
 // every unseen IP until the periodic sweep can reclaim entries (up to two
 // rate-limit windows). This preserves accumulated per-IP counters instead of
-// weakening the limiter with bulk eviction. Callback traffic may displace an
-// install-only entry in O(1), but it cannot displace another callback entry.
+// weakening the limiter with bulk eviction, with one exception: a callback
+// from an unseen IP may displace the least-recently-active install-only entry
+// in O(1), discarding that entry's counters. It cannot displace another
+// callback entry.
 const config = require('../config');
 const logger = require('../logger');
 
@@ -89,6 +92,16 @@ function sweepRateLimitStore() {
 const sweepHandle = setInterval(sweepRateLimitStore, 30 * 1000);
 sweepHandle.unref();
 
+function stopIntervals() {
+  clearInterval(sweepHandle);
+}
+
+// At saturation the hard-cap branch fires at the full inbound rate, so the
+// alert signal is one warning per rate-limit window carrying the number of
+// IPs shed since the previous warning.
+let hardCapWarnedAt = 0;
+let hardCapShedCount = 0;
+
 // Hard ceiling on total Map size. Under a distributed attack from many
 // unique IPs, new-IP requests get 429 once the store reaches this size
 // until the next sweep reclaims space — better to shed load than OOM.
@@ -104,11 +117,16 @@ function rateLimitForBucket(bucket, req, res, next) {
   if (rateLimitStore.size >= MAX_RATE_LIMIT_STORE_SIZE && !rateLimitStore.has(ip)) {
     if (bucket === CALLBACK_BUCKET) rateLimitStore.evictInstallOnlyEntry();
     if (rateLimitStore.size >= MAX_RATE_LIMIT_STORE_SIZE) {
+      hardCapShedCount += 1;
       // This warning is the operational signal for shared OAuth saturation;
       // alert on it because every unseen callback IP is shed until a sweep.
-      logger.warn('Rate limit store at hard cap, rejecting new IP', {
-        ip, bucket, size: rateLimitStore.size,
-      });
+      if (now - hardCapWarnedAt >= config.RATE_LIMIT_WINDOW_MS) {
+        hardCapWarnedAt = now;
+        logger.warn('Rate limit store at hard cap, rejecting new IP', {
+          ip, bucket, size: rateLimitStore.size, shed: hardCapShedCount,
+        });
+        hardCapShedCount = 0;
+      }
       return res.status(429).send(res.renderPage({
         title: 'Too Many Requests',
         icon: '⏳',
@@ -119,9 +137,12 @@ function rateLimitForBucket(bucket, req, res, next) {
     }
   }
 
+  const maxRequests = bucket === INSTALL_ENTRY_BUCKET
+    ? config.RATE_LIMIT_INSTALL_MAX_REQUESTS
+    : config.RATE_LIMIT_MAX_REQUESTS;
   const buckets = rateLimitStore.get(ip) || {};
   const requests = (buckets[bucket] || []).filter(time => time > windowStart);
-  if (requests.length >= config.RATE_LIMIT_MAX_REQUESTS) {
+  if (requests.length >= maxRequests) {
     logger.warn('OAuth rate limit exceeded', { ip, path: req.path, bucket });
     return res.status(429).send(res.renderPage({
       title: 'Too Many Requests',
@@ -133,7 +154,7 @@ function rateLimitForBucket(bucket, req, res, next) {
   }
 
   requests.push(now);
-  // The rejection above bounds each bucket at RATE_LIMIT_MAX_REQUESTS.
+  // The rejection above bounds each bucket at its maxRequests.
   rateLimitStore.set(ip, { ...buckets, [bucket]: requests });
   return next();
 }
@@ -151,5 +172,6 @@ module.exports = {
   installRateLimit,
   rateLimit,
   rateLimitStore,
+  stopIntervals,
   sweepRateLimitStore,
 };

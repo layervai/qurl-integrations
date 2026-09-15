@@ -102,10 +102,9 @@ permissions: {}
 
 env:
   QURL_RELEASE_LIFECYCLE_COMMANDS: start stop restart status inspect daemon
-  # Production native sharing remains dark until its reviewed Hub trust root
-  # exists. Flip this committed gate to 1 when production is ready; never use a
-  # mutable repository variable or a non-production key here.
-  QURL_REQUIRE_RELEASE_HUB_PIN: '0'
+  # Public releases must carry the reviewed production Hub trust root. Missing
+  # pin inputs block publication; local/nightly snapshots may remain dark.
+  QURL_REQUIRE_RELEASE_HUB_PIN: '1'
 
 jobs:
   release-please:
@@ -850,6 +849,12 @@ jobs:
           brew install --cask "$token"
           installed="$(command -v qurl)"
           [[ -x "$installed" ]]
+          # CI may relax Gatekeeper, so a successful run alone is insufficient.
+          attributes=$(xattr "$(realpath "$installed")")
+          if grep -Fxq com.apple.quarantine <<<"$attributes"; then
+            echo "::error::Homebrew postflight left quarantine on the staged CLI" >&2
+            exit 1
+          fi
           # GoReleaser injects its v-stripped .Version into native archives.
           reported_version=$("$installed" version | awk 'NR == 1 { print $3 }')
           [[ "$reported_version" == "$release_version" ]] || {

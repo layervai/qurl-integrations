@@ -192,3 +192,24 @@ describe('config — QURL_VIEW_COUNTER_COALESCE_MS (sub-second only)', () => {
     });
   });
 });
+
+describe('config — RATE_LIMIT_INSTALL_MAX_REQUESTS (must be a positive integer)', () => {
+  test.each([
+    ['0', 'zero would 429 every /install request'],
+    ['-5', 'negative'],
+    ['120abc', 'trailing garbage'],
+    ['abc', 'non-numeric'],
+  ])('rejects %p (%s) and falls back to default 120 with warn', (raw) => {
+    captureFreshConfig({ RATE_LIMIT_INSTALL_MAX_REQUESTS: raw }, (cfg, warns) => {
+      expect(cfg.RATE_LIMIT_INSTALL_MAX_REQUESTS).toBe(120);
+      expect(warns.some((w) => w.includes('RATE_LIMIT_INSTALL_MAX_REQUESTS') && w.includes('rejected'))).toBe(true);
+    });
+  });
+
+  test('accepts a positive integer override', () => {
+    captureFreshConfig({ RATE_LIMIT_INSTALL_MAX_REQUESTS: '50' }, (cfg, warns) => {
+      expect(cfg.RATE_LIMIT_INSTALL_MAX_REQUESTS).toBe(50);
+      expect(warns.filter((w) => w.includes('RATE_LIMIT_INSTALL_MAX_REQUESTS'))).toHaveLength(0);
+    });
+  });
+});
