@@ -6,6 +6,7 @@
   "scripts": {
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
+    "apply-discord-metadata": "node scripts/apply-discord-metadata.js",
     "lint": "eslint src tests scripts --max-warnings 0",
     "test": "jest --coverage",
     "test:detect:live": "node scripts/smoke-detect.js"
