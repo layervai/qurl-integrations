@@ -146,9 +146,13 @@ homebrew_casks:
       bash: completions/qurl.bash
       zsh: completions/qurl.zsh
       fish: completions/qurl.fish
-    hooks:
-      post:
-        install: 'system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/qurl"] if OS.mac?'
+    # Lifecycle hooks emit deprecated postflight Ruby; use structured steps.
+    custom_block: |
+      on_macos do
+        postflight_steps do
+          run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "qurl"], chdir: "."
+        end
+      end
 
 nfpms:
   - id: qurl

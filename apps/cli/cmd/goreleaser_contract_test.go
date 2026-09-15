@@ -54,6 +54,7 @@ type goreleaserConfig struct {
 		SkipUpload  bool              `yaml:"skip_upload"`
 		Homepage    string            `yaml:"homepage"`
 		Description string            `yaml:"description"`
+		CustomBlock string            `yaml:"custom_block"`
 		Hooks       struct {
 			Post struct {
 				Install string `yaml:"install"`
@@ -116,9 +117,17 @@ func TestCaskMetadataAndPostflightAreHomebrewStyleSafe(t *testing.T) {
 	if cask.Description != "Publish and access protected resources" {
 		t.Errorf("Homebrew description = %q", cask.Description)
 	}
-	const postflight = `system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/qurl"] if OS.mac?`
-	if cask.Hooks.Post.Install != postflight {
-		t.Errorf("Homebrew postflight = %q, want one style-safe modifier", cask.Hooks.Post.Install)
+	const postflight = `on_macos do
+  postflight_steps do
+    run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "qurl"], chdir: "."
+  end
+end
+`
+	if cask.CustomBlock != postflight {
+		t.Errorf("Homebrew custom block = %q, want structured postflight steps", cask.CustomBlock)
+	}
+	if cask.Hooks.Post.Install != "" {
+		t.Error("Homebrew post-install hook emits deprecated postflight")
 	}
 }
 
