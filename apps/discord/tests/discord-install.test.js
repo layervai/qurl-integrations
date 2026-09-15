@@ -252,6 +252,8 @@ describe('Discord install callback', () => {
         expect(cookieValue(res.headers['set-cookie'], QURL_OAUTH_SESSION_COOKIE)).toBeNull();
         expect(cookieValue(res.headers['set-cookie'], QURL_OAUTH_PKCE_COOKIE)).toBeNull();
       }
+      expect(missing.text).toContain('same browser');
+      expect(mismatch.text).not.toContain('same browser');
       expect(globalThis.fetch).not.toHaveBeenCalled();
     });
 

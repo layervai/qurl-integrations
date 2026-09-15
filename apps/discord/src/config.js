@@ -418,7 +418,10 @@ module.exports = {
   RATE_LIMIT_MAX_REQUESTS: intEnv('RATE_LIMIT_MAX_REQUESTS', 30),
   // The public /oauth/discord/install page is a pure redirect that many
   // unrelated admins can reach from one NAT egress, so it gets its own ceiling.
-  RATE_LIMIT_INSTALL_MAX_REQUESTS: intEnv('RATE_LIMIT_INSTALL_MAX_REQUESTS', 120),
+  // 0 or a negative value would 429 every /install request as "heavy load".
+  RATE_LIMIT_INSTALL_MAX_REQUESTS: intEnv('RATE_LIMIT_INSTALL_MAX_REQUESTS', 120, {
+    minPositive: true, strictInteger: true,
+  }),
 
   // qURL. In production we fall back to the real endpoints; in dev we fall
   // back to localhost so a missing .env file doesn't silently hit prod APIs.

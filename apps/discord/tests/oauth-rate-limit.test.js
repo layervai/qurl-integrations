@@ -234,11 +234,33 @@ describe('OAuth rate-limit store', () => {
       // Restore the inherited Map iterator instead of leaving an own property
       // that can leak into later tests through this shared singleton.
       delete rateLimitStore[Symbol.iterator];
-      expect(rateLimitStore[Symbol.iterator]).toBe(originalIterator);
     }
 
+    expect(rateLimitStore[Symbol.iterator]).toBe(originalIterator);
     expect(next).not.toHaveBeenCalled();
     expect(res.status).toHaveBeenCalledWith(429);
     expect(rateLimitStore.size).toBe(MAX_RATE_LIMIT_STORE_SIZE);
+  });
+
+  it('warns once per rate-limit window at the hard cap with the shed count', () => {
+    for (let i = 0; i < MAX_RATE_LIMIT_STORE_SIZE; i += 1) {
+      rateLimitStore.set(`callback-${i}`, { callback: [now] });
+    }
+    const warn = jest.spyOn(logger, 'warn').mockImplementation(() => {});
+    const shed = (ip) => installRateLimit({ ip, path: '/oauth/discord/install' }, response(), jest.fn());
+    // A full window past any warning an earlier test in this file emitted.
+    Date.now.mockReturnValue(now + config.RATE_LIMIT_WINDOW_MS);
+
+    shed('shed-1');
+    shed('shed-2');
+    expect(warn).toHaveBeenCalledTimes(1);
+
+    Date.now.mockReturnValue(now + config.RATE_LIMIT_WINDOW_MS * 2);
+    shed('shed-3');
+    expect(warn).toHaveBeenCalledTimes(2);
+    expect(warn).toHaveBeenLastCalledWith(
+      'Rate limit store at hard cap, rejecting new IP',
+      expect.objectContaining({ ip: 'shed-3', shed: 2 }),
+    );
   });
 });

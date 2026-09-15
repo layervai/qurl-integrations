@@ -11,6 +11,7 @@ const qurlOAuthRouter = require('./routes/qurl-oauth');
 const discordInstallRouter = require('./routes/discord-install');
 const qurlWebhookRouter = require('./routes/qurl-webhook');
 const webhookSubscriptions = require('./webhook-subscriptions');
+const oauthRateLimit = require('./utils/oauth-rate-limit');
 
 const app = express();
 
@@ -254,6 +255,7 @@ function startServer() {
 
 function stopIntervals() {
   clearInterval(metricsSweepInterval);
+  oauthRateLimit.stopIntervals();
   // The qURL webhook router owns bad-signature/unknown-owner sweeps plus
   // sender-counter caches and trailing-flush timers. Its stop hook clears all
   // of them so shutdown and same-process test teardown cannot retain state.

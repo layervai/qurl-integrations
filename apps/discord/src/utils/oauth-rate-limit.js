@@ -92,6 +92,16 @@ function sweepRateLimitStore() {
 const sweepHandle = setInterval(sweepRateLimitStore, 30 * 1000);
 sweepHandle.unref();
 
+function stopIntervals() {
+  clearInterval(sweepHandle);
+}
+
+// At saturation the hard-cap branch fires at the full inbound rate, so the
+// alert signal is one warning per rate-limit window carrying the number of
+// IPs shed since the previous warning.
+let hardCapWarnedAt = 0;
+let hardCapShedCount = 0;
+
 // Hard ceiling on total Map size. Under a distributed attack from many
 // unique IPs, new-IP requests get 429 once the store reaches this size
 // until the next sweep reclaims space — better to shed load than OOM.
@@ -107,11 +117,16 @@ function rateLimitForBucket(bucket, req, res, next) {
   if (rateLimitStore.size >= MAX_RATE_LIMIT_STORE_SIZE && !rateLimitStore.has(ip)) {
     if (bucket === CALLBACK_BUCKET) rateLimitStore.evictInstallOnlyEntry();
     if (rateLimitStore.size >= MAX_RATE_LIMIT_STORE_SIZE) {
+      hardCapShedCount += 1;
       // This warning is the operational signal for shared OAuth saturation;
       // alert on it because every unseen callback IP is shed until a sweep.
-      logger.warn('Rate limit store at hard cap, rejecting new IP', {
-        ip, bucket, size: rateLimitStore.size,
-      });
+      if (now - hardCapWarnedAt >= config.RATE_LIMIT_WINDOW_MS) {
+        hardCapWarnedAt = now;
+        logger.warn('Rate limit store at hard cap, rejecting new IP', {
+          ip, bucket, size: rateLimitStore.size, shed: hardCapShedCount,
+        });
+        hardCapShedCount = 0;
+      }
       return res.status(429).send(res.renderPage({
         title: 'Too Many Requests',
         icon: '⏳',
@@ -157,5 +172,6 @@ module.exports = {
   installRateLimit,
   rateLimit,
   rateLimitStore,
+  stopIntervals,
   sweepRateLimitStore,
 };

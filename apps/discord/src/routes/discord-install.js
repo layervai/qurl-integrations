@@ -135,7 +135,11 @@ router.get('/callback', rateLimit, async (req, res) => {
       ip: req.ip,
       hasCookie: stateInspection.hasCookie,
     });
-    return renderError(res, 400, 'Invalid install link', 'This install session is invalid or expired.');
+    // No cookie at all is the mobile in-app-browser handoff signature: the
+    // callback landed in a different browser context than /install.
+    return renderError(res, 400, 'Invalid install link', stateInspection.hasCookie
+      ? 'This install session is invalid or expired.'
+      : 'This install session is invalid or expired. No install session was found in this browser, so finish the install in the same browser you started it in.');
   }
 
   // Fail-fast: same encryption-at-rest guard as /oauth/qurl/start. When
