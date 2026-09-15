@@ -1561,14 +1561,28 @@ async function setGuildApiKey(guildId, apiKey, configuredBy, { keyId, bindingId 
   } else {
     updateExpression += ' REMOVE qurl_api_key_id, qurl_binding_id';
   }
-  await ddb.send(new UpdateCommand({
+  const res = await ddb.send(new UpdateCommand({
     TableName: TABLES.guild_configs,
     Key: { guild_id: guildId },
     UpdateExpression: updateExpression,
     ExpressionAttributeValues: values,
     // A flag rollback must not discard the live external binding and its key.
     ...(bindingId === undefined ? { ConditionExpression: 'attribute_not_exists(qurl_binding_id)' } : {}),
+    ReturnValues: 'UPDATED_OLD',
   }));
+  const prior = res?.Attributes;
+  const oldConfiguredBy = prior?.configured_by;
+  // A prior qurl_api_key means the guild was already configured even when the
+  // row has no configured_by (hand edit or partial rollback; see
+  // guild-config-state.js). That rebind must still page, so key the guard on
+  // the old key's presence and report the missing admin as null.
+  if (prior?.qurl_api_key && String(oldConfiguredBy) !== String(configuredBy)) {
+    logger.audit(AUDIT_EVENTS.QURL_SETUP_ADMIN_CHANGED, {
+      guild_id: guildId,
+      old_admin_id: oldConfiguredBy ?? null,
+      new_admin_id: configuredBy,
+    });
+  }
 }
 
 // Raw delete. No qurl-service subscription teardown. Today there is
