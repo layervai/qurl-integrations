@@ -515,14 +515,10 @@ func isSuppressibleContainer(value any) bool {
 		return false
 	}
 	kind := rv.Kind()
-	switch kind { //nolint:exhaustive // Only container kinds can require unit suppression.
-	case reflect.Map, reflect.Slice, reflect.Array:
-		return rv.Len() > 0
-	case reflect.Struct:
+	if kind == reflect.Struct {
 		return true
-	default:
-		return false
 	}
+	return (kind == reflect.Map || kind == reflect.Slice || kind == reflect.Array) && rv.Len() > 0
 }
 
 func matchedScalarNeedsRedaction(value any) bool {
