@@ -639,10 +639,11 @@ describe('IDENTIFY budget guard', () => {
     }
     expect(shim._getIdentifyAttemptsForTest()).toBe(0);
 
-    store._setMirror({ sessionId: 'sess-A', resumeURL: 'wss://r/a', sequence: 1 });
-    expect(retrieveSessionInfo('0:1')).toEqual({
-      sessionId: 'sess-A', resumeURL: 'wss://r/a', sequence: 1,
-    });
+    const hydrated = {
+      sessionId: 'sess-A', resumeURL: 'wss://r/a', sequence: 1, shardId: 0, shardCount: 1,
+    };
+    store._setMirror(hydrated);
+    expect(retrieveSessionInfo('0:1')).toEqual(hydrated);
   });
 
   it('counts actual identify grants and blocks a second grant while shutdown starts', async () => {

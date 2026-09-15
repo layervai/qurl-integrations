@@ -690,8 +690,9 @@ async function gracefulShutdownTeardown({
   // Normal shutdown awaits both stop calls; a wedged final renew is bounded
   // by runGracefulShutdown's 10 s force-exit. IDENTIFY-fatal shutdown still
   // invokes both idempotent stop methods to set their guards, but does not
-  // await work parked behind manager.connect(): gatewayShim.stop() below must
-  // retain the budget to flush the resumable session before process exit.
+  // await work parked behind manager.connect(), so the bounded teardown still
+  // reaches gatewayShim.stop() and db.close() before the backstop fires. A
+  // resumable session to flush is the exception on this path, not the rule.
   if (config.ENABLE_GATEWAY_HOT_STANDBY) {
     await stopGatewayHotStandby({
       controlChannelServer,

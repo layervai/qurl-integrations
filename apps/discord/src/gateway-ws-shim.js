@@ -465,7 +465,8 @@ function createGatewayWsShim({
   // process never builds the throttler, so checking there would stay silent
   // for exactly the long-lived tasks that cross Discord's sharding threshold
   // (close 4011 → IDENTIFY churn → budget trip). Fire-and-forget; connect()
-  // fetches the same cached gateway info itself.
+  // fetches the same cached gateway info itself. Boot-only: a task that
+  // crosses the threshold mid-life surfaces here on its post-trip restart.
   async function checkRecommendedShards(managerInstance) {
     let recommendedShards;
     try {
