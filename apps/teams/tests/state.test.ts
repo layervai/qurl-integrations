@@ -1,6 +1,8 @@
 import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { OAuthCoreError } from '../src/errors.js';
+import { TeamsSetupLinkBuilder } from '../src/setup-link.js';
+import { createConfidentialTokenClient } from '../src/token-client.js';
 import {
   OAUTH_STATE_CLOCK_SKEW_SECONDS,
   OAUTH_STATE_TTL_SECONDS,
@@ -29,6 +31,25 @@ function expectCode(error: unknown, code: OAuthCoreError['code']): boolean {
 }
 
 describe('OAuthStateManager', () => {
+  it('builds a local setup link with only an opaque state bound to the installer', async () => {
+    const persistence = new InMemoryStatePersistence();
+    const state = new OAuthStateManager({ persistence, clock: fixedClock(), randomBytes: deterministicRandom() });
+    const tokenClient = createConfidentialTokenClient({
+      issuer: 'https://auth.example.com/', clientId: 'synthetic-client', clientSecret: 'synthetic-secret',
+      audience: 'https://api.example.com', redirectUri: 'https://teams.example.com/oauth/qurl/callback',
+      fetch: async () => { throw new Error('Setup link creation must not call the provider'); },
+    });
+    const builder = new TeamsSetupLinkBuilder({ state, tokenClient, setupBaseUrl: 'https://teams.example.com' });
+    const link = await builder.build(TEST_TENANT_ID, TEST_ACTOR_A_ID, mintInput.actorDeliveryId, mintInput.setupEmail);
+    expect(link.url.origin + link.url.pathname).toBe('https://teams.example.com/oauth/qurl/start');
+    expect([...link.url.searchParams]).toEqual([['state', link.handle]]);
+    const authorization = tokenClient.createAuthorizationUrl({ state: link.handle, ...await state.authorizationRequest(link.handle) });
+    const transaction = await state.consume(link.handle);
+    expect(transaction).toMatchObject({ ...mintInput, setupEmail: 'admin@example.com' });
+    expect(authorization.searchParams.get('code_challenge')).toBe(createHash('sha256').update(transaction.pkceVerifier).digest('base64url'));
+    expect(authorization.searchParams.get('nonce')).toBe(transaction.oidcNonce);
+  });
+
   it('stores only the SHA-256 lookup key and the bound transaction fields', async () => {
     const persistence = new InMemoryStatePersistence();
     const manager = new OAuthStateManager({
@@ -137,6 +158,7 @@ describe('OAuthStateManager', () => {
     const manager = new OAuthStateManager({
       persistence: {
         conditionalCreate: async () => ({ status: 'created' }),
+        read: async () => structuredClone(stored!),
         conditionalConsume: async () => ({ status: 'consumed', state: structuredClone(stored!) }),
       },
       clock: fixedClock(TEST_NOW + OAUTH_STATE_TTL_SECONDS),
@@ -194,5 +216,17 @@ describe('OAuthStateManager', () => {
     await expect(second.mint(mintInput)).rejects.toSatisfy(
       (error: unknown) => expectCode(error, 'STATE_COLLISION'),
     );
+  });
+
+  it('reconstructs provider parameters without consuming the state', async () => {
+    const persistence = new InMemoryStatePersistence();
+    const manager = new OAuthStateManager({ persistence, clock: fixedClock(), randomBytes: deterministicRandom() });
+    const minted = await manager.mint(mintInput);
+
+    await expect(manager.authorizationRequest(minted.handle)).resolves.toMatchObject({
+      nonce: minted.transaction.oidcNonce,
+      loginHint: 'admin@example.com',
+    });
+    await expect(manager.consume(minted.handle)).resolves.toMatchObject({ setupEmail: 'admin@example.com' });
   });
 });

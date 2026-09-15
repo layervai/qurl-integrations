@@ -110,6 +110,19 @@ describe('ID-token verification', () => {
     expect(fetches).toBe(1);
   });
 
+  it('canonicalizes an issuer configured without its root slash', async () => {
+    const verifier = createIdTokenVerifier({
+      issuer: 'https://auth.example.com',
+      audience: AUDIENCE,
+      fetch: async () => jwksResponse(),
+      clock: fixedClock(),
+    });
+    await expect(verifier.verify(await signToken(), {
+      nonce: NONCE,
+      normalizedEmail: 'admin@example.com',
+    })).resolves.toMatchObject({ subject: 'provider|synthetic-user' });
+  });
+
   it('accepts an RSA signing JWK without the optional alg member', async () => {
     const jwkWithoutAlg: JWK = { ...publicJwk };
     delete jwkWithoutAlg.alg;

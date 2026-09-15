@@ -1,0 +1,1455 @@
+import { describe, expect, it } from 'vitest';
+import { deriveScope, normalizeActivityText, toTeamsActivity } from '../src/activity.js';
+import { TeamsBot } from '../src/bot.js';
+import { parseCommand, tokenize } from '../src/parser.js';
+import { QurlHttpError } from '../src/qurl-client.js';
+import { TeamsSetupLinkBuilder } from '../src/setup-link.js';
+import { OAuthStateManager } from '../src/state.js';
+import { TeamsSdkMessagePoster } from '../src/teams-sdk.js';
+import type { QurlClient } from '../src/qurl-client.js';
+import type { TeamsDataStore } from '../src/teams-data.js';
+import { ScopeAliasConflictError, TenantOwnerAlreadyAdminError, TenantOwnerRemovalError } from '../src/teams-data.js';
+import { renderTunnelInstallMessage, validateTunnelSlug } from '../src/tunnel.js';
+import { InMemoryStatePersistence, TEST_ACTOR_A_ID, TEST_TENANT_ID, deterministicRandom, fixedClock } from './helpers.js';
+
+describe('Teams bot primitives', () => {
+  it('parses the bind-only setup command', () => {
+    expect(parseCommand('qurl setup Admin@Example.com')).toMatchObject({ verb: 'setup', email: 'Admin@Example.com', setupMode: 'bind' });
+    expect(() => parseCommand('setup user@example.com --rotate')).toThrow();
+  });
+
+  it('parses get flags and quoted values', () => {
+    expect(parseCommand('get $docs dm:true reason:"private docs"')).toMatchObject({ verb: 'get', resource: 'docs', flags: { dm: 'true', reason: 'private docs' } });
+    expect(() => parseCommand('unset-alias $Docs')).toThrow('invalid alias');
+  });
+
+  it.each(['invalid', 'overlong'])('rejects an %s setup email before setup or error logging', async kind => {
+    const email = kind === 'overlong' ? `${'a'.repeat(243)}@example.com` : 'not-an-email';
+    const replies: string[] = [];
+    const errors: string[] = [];
+    let setupCalls = 0;
+    const bot = new TeamsBot({
+      data: {} as TeamsDataStore,
+      messages: {} as never,
+      qurlEndpoint: 'https://qurl.example',
+      setup: { build: async () => { setupCalls += 1; throw new Error('invalid email reached setup'); } } as never,
+      logger: { debug: () => {}, info: () => {}, warn: () => {}, error: message => { errors.push(message); } },
+    });
+    await bot.handleActivity({
+      type: 'message', text: `setup ${email}`, from: { aadObjectId: 'actor', id: 'delivery' },
+      channelData: { tenant: { id: 'tenant' }, channel: { id: 'channel' } },
+      conversation: { id: 'conversation', conversationType: 'channel' },
+    }, undefined, async text => { replies.push(text); });
+    expect(replies).toEqual(['setup email is invalid']);
+    expect(setupCalls).toBe(0);
+    expect(errors).toEqual([]);
+  });
+
+  it('removes quote delimiters without corrupting mid-token values', () => {
+    expect(tokenize('get $docs reason:"private docs"')).toEqual(['get', '$docs', 'reason:private docs']);
+    expect(tokenize('set-display-name $docs "Internal docs"')).toEqual(['set-display-name', '$docs', 'Internal docs']);
+  });
+
+  it('removes a bot mention and derives a channel tenant scope', () => {
+    const activity = { type: 'message', text: '<at>qURL</at> list', recipient: { id: 'bot' }, entities: [{ type: 'mention', text: '<at>qURL</at>', mentioned: { id: 'bot' } }], channelData: { tenant: { id: 'Tenant' }, channel: { id: 'channel' } }, conversation: { id: 'conversation', conversationType: 'channel' } };
+    expect(normalizeActivityText(activity)).toBe('list');
+    expect(deriveScope(activity)).toEqual({ tenantId: 'tenant', scopeId: 'channel', channel: true });
+  });
+
+  it('normalizes repeated mentions using entity offsets', () => {
+    expect(normalizeActivityText({
+      text: '<at>qURL</at> list <at>qURL</at>',
+      recipient: { id: 'bot' },
+      entities: [
+        { type: 'mention', text: '<at>qURL</at>', offset: 0, length: 13, mentioned: { id: 'bot' } },
+        { type: 'mention', text: '<at>qURL</at>', offset: 19, length: 13, mentioned: { id: 'bot' } },
+      ],
+    })).toBe('list');
+  });
+
+  it('resolves malformed mention metadata without overlapping valid mentions', () => {
+    expect(normalizeActivityText({
+      text: '<at>qURL</at> list <at>other</at>',
+      recipient: { id: 'bot' },
+      entities: [
+        { type: 'mention', text: '<at>other</at>', mentioned: { id: 'other' } },
+        { type: 'mention', text: '<at>qURL</at>', offset: 0, length: 13, mentioned: { id: 'bot' } },
+      ],
+    })).toBe('list <@other>');
+  });
+
+  it('maps only supported inbound activity fields at the SDK boundary', () => {
+    expect(toTeamsActivity({
+      type: 'message',
+      text: 'list',
+      from: { id: 'actor', aadObjectId: 'aad' },
+      conversation: { id: 'conversation', conversationType: 'channel' },
+      unexpectedSecret: 'must not cross the boundary',
+    })).toEqual({
+      type: 'message',
+      text: 'list',
+      from: { id: 'actor', aadObjectId: 'aad' },
+      conversation: { id: 'conversation', conversationType: 'channel' },
+    });
+  });
+
+  it('does not treat group chats as channel policy scopes', () => {
+    expect(deriveScope({ conversation: { id: 'group', conversationType: 'groupChat' }, channelData: { tenant: { id: 'Tenant' } } })).toEqual({
+      tenantId: 'tenant', scopeId: 'personal', channel: false,
+    });
+  });
+
+  it('rejects contradictory tenant identities before deriving a persistence scope', () => {
+    expect(() => deriveScope({
+      channelData: { tenant: { id: 'tenant-a' } },
+      conversation: { tenantId: 'tenant-b' },
+    })).toThrow('tenant identities do not match');
+  });
+
+  it('explains conflicting tenant identities without suggesting a command typo', async () => {
+    const replies: string[] = [];
+    const bot = new TeamsBot({ data: {} as TeamsDataStore, messages: {} as never, qurlEndpoint: 'https://qurl.example' });
+    await bot.handleActivity({
+      type: 'message', text: 'list', channelData: { tenant: { id: 'tenant-a' } },
+      conversation: { tenantId: 'tenant-b', conversationType: 'channel' },
+    }, undefined, async text => { replies.push(text); });
+    expect(replies).toEqual(['Teams activity tenant identities do not match. Please report this if it repeats.']);
+  });
+
+  it('explains that resource commands are unavailable in group chats', async () => {
+    const replies: string[] = [];
+    const bot = new TeamsBot({
+      qurl: {} as QurlClient,
+      data: { checkAdmin: async () => ({ isAdmin: false }) } as unknown as TeamsDataStore,
+      messages: {} as never,
+      qurlEndpoint: 'https://api.sandbox.example',
+    });
+    await bot.handleActivity({
+      type: 'message', text: 'list', from: { aadObjectId: 'actor' },
+      channelData: { tenant: { id: 'tenant' } },
+      conversation: { id: 'group', conversationType: 'groupChat' },
+    }, undefined, async text => { replies.push(text); });
+    expect(replies).toEqual(['This command is available only in Teams channels, not direct or group chats.']);
+  });
+
+  it('enforces the documented 3-64 character connector ID boundary', () => {
+    expect(() => validateTunnelSlug('ab')).toThrow('3-64');
+    expect(() => validateTunnelSlug('abc')).not.toThrow();
+    expect(() => validateTunnelSlug(`a${'b'.repeat(62)}c`)).not.toThrow();
+    expect(() => validateTunnelSlug(`a${'b'.repeat(63)}c`)).toThrow('3-64');
+  });
+
+  it('renders safe authorization errors to the Teams user', async () => {
+    const replies: string[] = [];
+    const bot = new TeamsBot({
+      qurl: {} as QurlClient,
+      data: { checkAdmin: async () => ({ isAdmin: false }) } as unknown as TeamsDataStore,
+      messages: {} as never,
+      qurlEndpoint: 'https://api.sandbox.example',
+    });
+    await bot.handleActivity({
+      type: 'message', text: 'admins', from: { aadObjectId: 'actor', id: 'delivery' },
+      channelData: { tenant: { id: 'tenant' }, channel: { id: 'channel' } },
+      conversation: { id: 'conversation', conversationType: 'channel' },
+    }, undefined, async text => { replies.push(text); });
+    expect(replies).toEqual(['This command is limited to the tenant owner and qURL admins.']);
+  });
+
+  it('rejects every mutating admin command for non-admins', async () => {
+    const commands = [
+      'protect-url url:https://example.com as:$docs',
+      'protect-connector prod',
+      'revoke $resource-1',
+      'set-alias $docs $resource-1',
+      'unset-alias $docs',
+      'set-display-name $resource-1 Friendly name',
+      'unset-display-name $resource-1',
+      'add <@victim>',
+      'remove <@victim>',
+      'uninstall',
+    ];
+    const bot = new TeamsBot({
+      qurl: {} as QurlClient,
+      data: { checkAdmin: async () => ({ isAdmin: false }) } as unknown as TeamsDataStore,
+      messages: {} as never,
+      qurlEndpoint: 'https://api.sandbox.example',
+    });
+
+    for (const input of commands) {
+      await expect(bot.execute(
+        { type: 'message', from: { aadObjectId: 'actor' } },
+        'tenant-1', 'channel-1', true, parseCommand(input),
+      ), input).rejects.toThrow('limited to the tenant owner');
+    }
+  });
+
+  it('keeps unexpected failures generic', async () => {
+    const replies: string[] = [];
+    const bot = new TeamsBot({
+      qurl: {} as QurlClient,
+      data: { checkAdmin: async () => { throw new Error('upstream secret detail'); } } as unknown as TeamsDataStore,
+      messages: {} as never,
+      qurlEndpoint: 'https://api.sandbox.example',
+    });
+    await bot.handleActivity({
+      type: 'message', text: 'list', from: { aadObjectId: 'actor', id: 'delivery' },
+      channelData: { tenant: { id: 'tenant' }, channel: { id: 'channel' } },
+      conversation: { id: 'conversation', conversationType: 'channel' },
+    }, undefined, async text => { replies.push(text); });
+    expect(replies).toEqual(['The qURL command could not be completed. Please try again or contact your qURL operator.']);
+  });
+
+  it.each(['during execution', 'before final reply', 'during final reply'])('delivers a bounded final response when the activity expires %s', async phase => {
+    const controller = new AbortController();
+    const delivered: string[] = [];
+    const messages = new TeamsSdkMessagePoster({ api: { http: {
+      post: async (_url: string, body: { readonly text: string }, options: { readonly timeout: number; readonly signal?: AbortSignal }) => {
+        if (phase === 'during final reply') controller.abort();
+        options.signal?.throwIfAborted();
+        expect(options.timeout).toBe(15_000);
+        delivered.push(body.text);
+        return { data: {} };
+      },
+    } } } as never);
+    const bot = new TeamsBot({
+      qurl: { create: async () => {
+        if (phase !== 'during final reply') controller.abort();
+        if (phase === 'during execution') controller.signal.throwIfAborted();
+        return { resourceId: 'resource-1', qurlLink: 'https://qurl.example/one' };
+      } } as unknown as QurlClient,
+      data: { lookupScopeAlias: async () => 'resource-1', allowedResourceIds: async () => new Set(['resource-1']) } as unknown as TeamsDataStore,
+      messages,
+      qurlEndpoint: 'https://qurl.example',
+    });
+    await bot.handleActivity({
+      type: 'message', text: 'get $docs', from: { aadObjectId: 'actor' },
+      serviceUrl: 'https://smba.trafficmanager.net/teams',
+      channelData: { tenant: { id: 'tenant' }, channel: { id: 'channel' } },
+      conversation: { id: 'conversation', conversationType: 'channel' },
+    }, controller.signal);
+    expect(delivered).toEqual([phase === 'during execution'
+      ? 'The qURL command timed out. Some changes may have completed; check the result before retrying.'
+      : 'qURL for `$docs` (one-time use; 1-minute lifetime): https://qurl.example/one']);
+  });
+
+  it('refuses to bind a channel alias the alias commands could never parse back', async () => {
+    // protect-url without as: falls back to qURL-side identifiers, which are
+    // under no channel-alias constraint. Binding one strands it: set-alias and
+    // unset-alias both reject it, so only revoking the resource clears it.
+    const bound: string[] = [];
+    const data = {
+      checkAdmin: async () => ({ isAdmin: true }),
+      lookupScopeAlias: async () => undefined,
+      bindScopeAlias: async (_tenantId: string, _scopeId: string, alias: string) => { bound.push(alias); },
+      exposeResource: async () => undefined,
+    } as unknown as TeamsDataStore;
+    const activity = { type: 'message', id: 'activity-1', from: { aadObjectId: 'actor-1', id: 'delivery-1' } };
+
+    for (const resource of [
+      { resourceId: '7f3a-report-svc', type: 'url' },
+      { resourceId: 'RES_01', type: 'url', slug: 'Payroll_API' },
+      { resourceId: 'trailing-', type: 'url', alias: 'UPPER' },
+    ]) {
+      const bot = new TeamsBot({
+        qurl: { listResources: async () => ({ resources: [resource] }) } as unknown as QurlClient,
+        data,
+        messages: {} as never,
+      qurlEndpoint: 'https://api.sandbox.example',
+      });
+      await expect(bot.execute(activity, 'tenant-1', 'channel-1', true,
+        parseCommand(`protect-url $${resource.resourceId}`)), resource.resourceId)
+        .rejects.toThrow('no channel-safe alias');
+    }
+    expect(bound).toEqual([]);
+  });
+
+  it('retains a ready URL on alias conflict and permits same-resource alias reuse', async () => {
+    const resource = { resourceId: 'resource-1', type: 'url', targetUrl: 'https://docs.example.com' };
+    const creates: Parameters<QurlClient['createResource']>[0][] = [];
+    const effects: string[] = [];
+    const replies: string[] = [];
+    let boundResource = 'other-resource';
+    let listCalls = 0;
+    const bot = new TeamsBot({
+      qurl: {
+        listResources: async () => { listCalls += 1; return { resources: [resource] }; },
+        // The API's owner+target dedup returns this same existing resource;
+        // this fake does not model or assert service quota accounting.
+        createResource: async (input: Parameters<QurlClient['createResource']>[0]) => { creates.push(input); return resource; },
+        deleteResource: async () => { effects.push('delete'); },
+      } as unknown as QurlClient,
+      data: {
+        checkAdmin: async () => ({ isAdmin: true }),
+        lookupScopeAlias: async () => boundResource,
+        bindScopeAlias: async () => { effects.push('bind'); },
+        exposeResource: async () => { effects.push('expose'); },
+      } as unknown as TeamsDataStore,
+      messages: {} as never,
+      qurlEndpoint: 'https://api.sandbox.example',
+    });
+    const activity = {
+      type: 'message', text: 'protect-url url:https://docs.example.com as:$docs', from: { aadObjectId: 'actor', id: 'delivery' },
+      channelData: { tenant: { id: 'tenant' }, channel: { id: 'channel' } },
+      conversation: { id: 'conversation', conversationType: 'channel' },
+    };
+    for (const id of ['first-attempt', 'retry-attempt']) {
+      await bot.handleActivity({ ...activity, id }, undefined, async text => { replies.push(text); });
+    }
+    expect(replies).toHaveLength(2);
+    for (const reply of replies) {
+      expect(reply).toContain('URL resource is ready');
+      expect(reply).toContain('alias `$docs` is already bound');
+      expect(reply).toContain('another alias');
+      expect(reply).toContain('same URL');
+    }
+    expect(creates).toHaveLength(2);
+    expect(creates).toEqual([
+      expect.objectContaining({ type: 'url', targetUrl: 'https://docs.example.com' }),
+      expect.objectContaining({ type: 'url', targetUrl: 'https://docs.example.com' }),
+    ]);
+    expect(creates[0]?.idempotencyKey).not.toBe(creates[1]?.idempotencyKey);
+    expect(effects).toEqual([]);
+
+    boundResource = resource.resourceId;
+    await bot.handleActivity({ ...activity, id: 'matching-alias' }, undefined, async text => { replies.push(text); });
+    expect(replies[2]).toContain('is now available in this channel');
+    expect(effects).toEqual(['bind', 'expose']);
+    expect(listCalls).toBe(0);
+  });
+
+  it('falls back to the first upstream identifier that is a usable channel alias', async () => {
+    const bound: string[] = [];
+    const bot = new TeamsBot({
+      qurl: { listResources: async () => ({ resources: [{ resourceId: 'RES_01', type: 'url', slug: 'payroll-api' }] }) } as unknown as QurlClient,
+      data: {
+        checkAdmin: async () => ({ isAdmin: true }),
+        lookupScopeAlias: async () => undefined,
+        bindScopeAlias: async (_tenantId: string, _scopeId: string, alias: string) => { bound.push(alias); },
+        exposeResource: async () => undefined,
+      } as unknown as TeamsDataStore,
+      messages: {} as never,
+      qurlEndpoint: 'https://api.sandbox.example',
+    });
+    await bot.execute({ type: 'message', id: 'activity-1', from: { aadObjectId: 'actor-1', id: 'delivery-1' } },
+      'tenant-1', 'channel-1', true, parseCommand('protect-url $RES_01'));
+    // The unusable resourceId is skipped for the slug, and the bound alias
+    // round-trips through the alias commands.
+    expect(bound).toEqual(['payroll-api']);
+    expect(parseCommand('unset-alias $payroll-api')).toMatchObject({ verb: 'unset-alias', resource: 'payroll-api' });
+  });
+
+  it('answers unset-alias from channel policy alone, without any qURL call', async () => {
+    let qurlCalls = 0;
+    let tenantClientBuilds = 0;
+    const bot = new TeamsBot({
+      qurlForTenant: {
+        forTenant: async () => {
+          tenantClientBuilds += 1;
+          return { listResources: async () => { qurlCalls += 1; return { resources: [] }; } } as unknown as QurlClient;
+        },
+      },
+      data: {
+        checkAdmin: async () => ({ isAdmin: true }),
+        unbindScopeAlias: async () => true,
+      } as unknown as TeamsDataStore,
+      messages: {} as never,
+      qurlEndpoint: 'https://api.sandbox.example',
+    });
+    await expect(bot.execute({ type: 'message', id: 'activity-1', from: { aadObjectId: 'actor-1', id: 'delivery-1' } },
+      'tenant-1', 'channel-1', true, parseCommand('unset-alias $docs')))
+      .resolves.toContain('Removed alias `$docs`');
+    // Building the tenant client costs a DynamoDB read plus a KMS decrypt, and
+    // resources() pages the whole catalogue. unset-alias needs neither.
+    expect(tenantClientBuilds).toBe(0);
+    expect(qurlCalls).toBe(0);
+  });
+
+  it('rejects a connector id that is too long to be a channel alias before any write', async () => {
+    // Connector ids may be 64 characters; channel aliases may be 63. Without
+    // alias:, the id becomes the alias, so the gap would strand an unremovable
+    // row -- and the old ordering only noticed at render time, after the
+    // resource, alias, and exposure writes and after minting a bootstrap key.
+    const slug = `a${'b'.repeat(62)}c`;
+    expect(slug).toHaveLength(64);
+    const writes: string[] = [];
+    const bot = new TeamsBot({
+      qurl: {
+        listResources: async () => { writes.push('listResources'); return { resources: [] }; },
+        createResource: async () => { writes.push('createResource'); return { resourceId: 'res-1', connectorRoutingId: 'routing-1', knockResourceId: 'knock-1' }; },
+        createEnrollmentToken: async () => { writes.push('createEnrollmentToken'); return { keyId: 'k', apiKey: 'bootstrap' }; },
+        me: async () => ({ ownerId: 'auth0|owner', authType: 'api_key', isApiKeyPrincipal: true }),
+        getSharing: async () => ({ crid: 'crid-1', desiredState: 'off', servingEpoch: 0 }),
+        restartSharing: async () => ({ crid: 'crid-1', desiredState: 'on', servingEpoch: 4 }),
+        stopSharing: async () => undefined,
+      } as unknown as QurlClient,
+      data: {
+        checkAdmin: async () => ({ isAdmin: true }),
+        personalConversationRef: async () => ({ serviceUrl: 'https://smba.trafficmanager.net/teams', conversationId: 'c1' }),
+        lookupScopeAlias: async () => undefined,
+        bindScopeAlias: async () => { writes.push('bindScopeAlias'); },
+        exposeResource: async () => { writes.push('exposeResource'); },
+      } as unknown as TeamsDataStore,
+      messages: { sendText: async () => undefined, reply: async () => undefined },
+      connectorImage: 'ghcr.io/layervai/qurl@sha256:d2f9bd33572ffb7212f5b6cfc3fcfa4267344a4a2c2cdd6ce9b7196e3515516b',
+      qurlEndpoint: 'https://api.sandbox.example',
+    });
+
+    await expect(bot.execute({ type: 'message', id: 'activity-1', from: { aadObjectId: 'actor-1', id: 'delivery-1' } },
+      'tenant-1', 'channel-1', true, parseCommand(`protect-connector ${slug}`)))
+      .rejects.toThrow('not a usable channel alias');
+    expect(writes).toEqual([]);
+    // An explicit alias: is the documented way through.
+    expect(parseCommand(`protect-connector ${slug} alias:$web`)).toMatchObject({ flags: { alias: 'web' } });
+  });
+
+  it('tells an admin when unset-alias matched nothing', async () => {
+    const bot = (removed: boolean) => new TeamsBot({
+      qurl: {} as QurlClient,
+      data: {
+        checkAdmin: async () => ({ isAdmin: true }),
+        unbindScopeAlias: async () => removed,
+      } as unknown as TeamsDataStore,
+      messages: {} as never,
+      qurlEndpoint: 'https://api.sandbox.example',
+    });
+    const activity = { type: 'message', id: 'activity-1', from: { aadObjectId: 'actor-1', id: 'delivery-1' } };
+    await expect(bot(true).execute(activity, 'tenant-1', 'channel-1', true, parseCommand('unset-alias $docs')))
+      .resolves.toContain('Removed alias `$docs`');
+    // Reporting a removal that never happened lets an admin believe channel
+    // access was revoked when the row is still there.
+    await expect(bot(false).execute(activity, 'tenant-1', 'channel-1', true, parseCommand('unset-alias $typo')))
+      .resolves.toBe('No alias `$typo` is bound in this channel.');
+  });
+
+  it('renders ECS and Kubernetes connector instructions', () => {
+    const base = {
+      slug: 'prod', alias: 'prod', port: 8080, image: 'ghcr.io/layervai/qurl@sha256:d2f9bd33572ffb7212f5b6cfc3fcfa4267344a4a2c2cdd6ce9b7196e3515516b',
+      endpoint: 'https://api.sandbox.example', ownerId: 'auth0|owner', crid: 'crid-1',
+      resourceId: 'res-1', connectorRoutingId: 'routing-1', knockResourceId: 'knock-1', servingEpoch: 4,
+    };
+    expect(renderTunnelInstallMessage({ ...base, environment: 'ecs-fargate' })).toContain('ECS/Fargate');
+    expect(renderTunnelInstallMessage({ ...base, environment: 'kubernetes' })).toContain('sidecar');
+  });
+
+  it('parses connector deployment options instead of silently dropping them', () => {
+    expect(parseCommand('protect-connector prod env:compose port:9090 alias:$web')).toMatchObject({
+      verb: 'protect-connector',
+      resource: 'prod',
+      flags: { env: 'compose', port: '9090', alias: 'web' },
+    });
+    expect(() => parseCommand('protect-connector prod port:0')).toThrow();
+    expect(() => parseCommand('protect-connector prod env:unknown')).toThrow();
+  });
+
+  it('requires an alias when creating a URL resource', () => {
+    expect(() => parseCommand('protect-url url:https://example.com')).toThrow();
+    expect(parseCommand('protect-url url:https://example.com as:$docs')).toMatchObject({
+      verb: 'protect-url', flags: { as: 'docs' },
+    });
+  });
+
+  it('rejects unterminated quotes and invalid boolean get flags', () => {
+    expect(() => parseCommand('get $docs reason:"missing')).toThrow();
+    expect(() => parseCommand('get $docs dm:yes')).toThrow();
+    expect(() => parseCommand(`feedback ${'x'.repeat(2_001)}`)).toThrow('feedback message is too long');
+    expect(() => parseCommand('add not-a-mention')).toThrow('Teams user mention');
+  });
+
+  it('resolves a channel-local alias when minting a qURL', async () => {
+    let createdResourceId = '';
+    const qurl = {
+      listResources: async () => ({ resources: [{ resourceId: 'resource-1' }] }),
+      create: async (input: { readonly resourceId?: string }) => {
+        createdResourceId = input.resourceId ?? '';
+        return { resourceId: createdResourceId, qurlLink: 'https://qurl.example/one' };
+      },
+    } as unknown as QurlClient;
+    const data = {
+      checkAdmin: async () => ({ isAdmin: false }),
+      allowedResourceIds: async () => new Set(['resource-1']),
+      lookupScopeAlias: async () => 'resource-1',
+      personalConversationRef: async () => undefined,
+    } as unknown as TeamsDataStore;
+    const bot = new TeamsBot({ qurl, data, messages: {} as never, qurlEndpoint: 'https://api.sandbox.example' });
+
+    await expect(bot.execute(
+      { type: 'message', id: 'activity-1', from: { aadObjectId: 'actor-1', id: 'delivery-1' } },
+      'tenant-1', 'channel-1', true, parseCommand('get $docs'),
+    )).resolves.toContain('https://qurl.example/one');
+    expect(createdResourceId).toBe('resource-1');
+  });
+
+  it('uses the same channel alias for access and mutations despite a colliding account slug', async () => {
+    const targets: string[] = [];
+    const bot = new TeamsBot({
+      qurl: {
+        listResources: async () => ({ resources: [{ resourceId: 'a', type: 'url', slug: 'payroll' }, { resourceId: 'b', type: 'url', slug: 'docs' }] }),
+        create: async ({ resourceId }: { resourceId: string }) => { targets.push(resourceId); return { resourceId, qurlLink: 'https://qurl.example/one' }; },
+        deleteResource: async (id: string) => { targets.push(id); },
+        updateResource: async (id: string) => { targets.push(id); },
+      } as unknown as QurlClient,
+      data: {
+        checkAdmin: async () => ({ isAdmin: true }),
+        lookupScopeAlias: async (_tenant: string, _scope: string, alias: string) => alias === 'docs' ? 'a' : undefined,
+        allowedResourceIds: async () => new Set(['a']),
+        purgeResourceFromTenant: async () => undefined,
+        bindScopeAlias: async (_tenant: string, _scope: string, _alias: string, id: string) => { targets.push(id); },
+        exposeResource: async () => undefined,
+      } as unknown as TeamsDataStore,
+      messages: {} as never,
+      qurlEndpoint: 'https://qurl.example',
+    });
+    for (const text of ['get $docs', 'revoke $docs', 'set-display-name $docs Docs', 'set-alias $new $docs', 'protect-url $docs as:$new']) {
+      await bot.execute({ type: 'message', from: { aadObjectId: 'admin' } }, 'tenant', 'channel', true, parseCommand(text));
+    }
+    expect(targets).toEqual(['a', 'a', 'a', 'a', 'a']);
+  });
+
+  it.each(['docs', 'resource-1'])('retries revoke cleanup through the surviving local reference $%s', async token => {
+    let revoked = false;
+    let purgeAttempts = 0;
+    const deletions: string[] = [];
+    const bot = new TeamsBot({
+      qurl: {
+        listResources: async () => ({ resources: revoked ? [] : [{ resourceId: 'resource-1' }] }),
+        deleteResource: async (id: string) => { deletions.push(id); revoked = true; },
+      } as unknown as QurlClient,
+      data: {
+        checkAdmin: async () => ({ isAdmin: true }),
+        lookupScopeAlias: async (_tenant: string, _scope: string, alias: string) => alias === 'docs' ? 'resource-1' : undefined,
+        allowedResourceIds: async () => new Set(['resource-1']),
+        purgeResourceFromTenant: async () => { if (++purgeAttempts === 1) throw new Error('cleanup unavailable'); },
+      } as unknown as TeamsDataStore,
+      messages: {} as never,
+      qurlEndpoint: 'https://qurl.example',
+    });
+    const revoke = () => bot.execute({ type: 'message', from: { aadObjectId: 'admin' } },
+      'tenant', 'channel', true, parseCommand(`revoke $${token}`));
+    await expect(revoke()).rejects.toThrow('cleanup unavailable');
+    await expect(revoke()).resolves.toBe(`Resource \`$${token}\` is revoked or already unavailable to this account.`);
+    expect(deletions).toEqual(['resource-1', 'resource-1']);
+    expect(purgeAttempts).toBe(2);
+  });
+
+  it.each(['partial purge', 'lost alias'])('cleans retained exposure by the reported public key after %s', async scenario => {
+    // Public fixture shared with the Slack tests: a canonical P-256 SPKI key.
+    const resourceId = 'MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEN4yvBX3yjAvYl9qagkStIWB1ie2gp_LF2Jy0w5AdxXefsTNLn9nrOlA4umKRiIQeGfvad9OFVoWa3PAIxcy4qg';
+    let aliasBound = scenario === 'partial purge';
+    const exposedScopes = new Set(['channel', 'other-channel']);
+    const operations: string[] = [];
+    const bot = new TeamsBot({
+      qurl: {
+        listResources: async () => { throw new Error('active listing is unavailable'); },
+        deleteResource: async (id: string) => { operations.push(`delete:${id}`); },
+      } as unknown as QurlClient,
+      data: {
+        checkAdmin: async () => ({ isAdmin: true }),
+        lookupScopeAlias: async () => aliasBound ? resourceId : undefined,
+        allowedResourceIds: async () => new Set(exposedScopes.has('channel') ? [resourceId] : []),
+        purgeResourceFromTenant: async (_tenant: string, id: string) => {
+          operations.push(`purge:${id}`);
+          exposedScopes.delete('channel');
+          if (aliasBound) { aliasBound = false; throw new Error('other channel cleanup unavailable'); }
+          exposedScopes.delete('other-channel');
+        },
+      } as unknown as TeamsDataStore,
+      messages: {} as never,
+      qurlEndpoint: 'https://qurl.example',
+    });
+    const revoke = (token: string) => bot.execute({ type: 'message', from: { aadObjectId: 'admin' } },
+      'tenant', 'channel', true, parseCommand(`revoke $${token}`));
+    if (scenario === 'partial purge') {
+      await expect(revoke('docs')).rejects.toThrow('other channel cleanup unavailable');
+      expect(exposedScopes).toEqual(new Set(['other-channel']));
+    }
+    await expect(revoke(resourceId)).resolves.toContain(`$${resourceId}`);
+    expect(operations).toEqual(Array(scenario === 'partial purge' ? 2 : 1).fill([`delete:${resourceId}`, `purge:${resourceId}`]).flat());
+    expect(exposedScopes.size).toBe(0);
+  });
+
+  it.each([404, 410])('purges a retained alias when upstream revoke confirms the resource is gone (%s)', async status => {
+    const operations: string[] = [];
+    const bot = new TeamsBot({
+      qurl: {
+        listResources: async () => ({ resources: [] }),
+        deleteResource: async (id: string) => { operations.push(`delete:${id}`); throw new QurlHttpError(status); },
+      } as unknown as QurlClient,
+      data: {
+        checkAdmin: async () => ({ isAdmin: true }),
+        lookupScopeAlias: async () => 'resource-1',
+        allowedResourceIds: async () => new Set(['resource-1']),
+        purgeResourceFromTenant: async (_tenant: string, id: string) => { operations.push(`purge:${id}`); },
+      } as unknown as TeamsDataStore,
+      messages: {} as never,
+      qurlEndpoint: 'https://qurl.example',
+    });
+    await expect(bot.execute({ type: 'message', from: { aadObjectId: 'admin' } },
+      'tenant', 'channel', true, parseCommand('revoke $docs'))).resolves.toBe('Resource `$docs` is revoked or already unavailable to this account.');
+    expect(operations).toEqual(['delete:resource-1', 'purge:resource-1']);
+  });
+
+  it.each([new QurlHttpError(401), new QurlHttpError(403), new QurlHttpError(500), new Error('network unavailable')])('retains revoke recovery state after %s', async error => {
+    let purged = false;
+    const bot = new TeamsBot({
+      qurl: {
+        listResources: async () => ({ resources: [{ resourceId: 'resource-1' }] }),
+        deleteResource: async () => { throw error; },
+      } as unknown as QurlClient,
+      data: {
+        checkAdmin: async () => ({ isAdmin: true }),
+        lookupScopeAlias: async () => 'resource-1',
+        allowedResourceIds: async () => new Set(['resource-1']),
+        purgeResourceFromTenant: async () => { purged = true; },
+      } as unknown as TeamsDataStore,
+      messages: {} as never,
+      qurlEndpoint: 'https://qurl.example',
+    });
+    await expect(bot.execute({ type: 'message', from: { aadObjectId: 'admin' } },
+      'tenant', 'channel', true, parseCommand('revoke $docs'))).rejects.toBe(error);
+    expect(purged).toBe(false);
+  });
+
+  it.each(['add', 'remove'])('confirms the directory identity and resulting admin state for %s', async verb => {
+    const changed: string[] = [];
+    const changeAdmin = async (_tenant: string, id: string) => { changed.push(id); };
+    const bot = new TeamsBot({
+      qurl: {} as QurlClient,
+      data: { checkAdmin: async () => ({ isAdmin: true, installationId: 'installation' }), addAdmin: changeAdmin, removeAdmin: changeAdmin } as unknown as TeamsDataStore,
+      messages: { resolveMemberAadObjectId: async () => 'member-aad' } as never,
+      qurlEndpoint: 'https://qurl.example',
+    });
+    await expect(bot.execute({ type: 'message', from: { aadObjectId: 'admin' }, entities: [{ type: 'mention', mentioned: { id: '29:member', name: 'Member' } }] },
+      'tenant', 'channel', true, parseCommand(`${verb} <@29:member>`))).resolves.toBe(
+      `Teams user \`member-aad\` ${verb === 'add' ? 'has' : 'does not have'} qURL admin access for this tenant.`,
+    );
+    expect(changed).toEqual(['member-aad']);
+  });
+
+  it.each(['add', 'remove'])('carries the authorized installation through %s member resolution', async verb => {
+    let installationId = 'old-install';
+    let capturedInstallationId: string | undefined;
+    const changeAdmin = async (_tenant: string, _actor: string, expectedInstallationId: string) => {
+      capturedInstallationId = expectedInstallationId;
+      if (expectedInstallationId !== installationId) throw new Error('workspace installation has changed');
+    };
+    const bot = new TeamsBot({
+      qurl: {} as QurlClient,
+      data: { checkAdmin: async () => ({ isAdmin: true, installationId }), addAdmin: changeAdmin, removeAdmin: changeAdmin } as unknown as TeamsDataStore,
+      messages: { resolveMemberAadObjectId: async () => { installationId = 'new-install'; return 'member-aad'; } } as never,
+      qurlEndpoint: 'https://qurl.example',
+    });
+    await expect(bot.execute({ type: 'message', from: { aadObjectId: 'old-admin' }, entities: [{ type: 'mention', mentioned: { id: '29:member' } }] },
+      'tenant', 'channel', true, parseCommand(`${verb} <@29:member>`))).rejects.toThrow('workspace installation has changed');
+    expect(capturedInstallationId).toBe('old-install');
+  });
+
+  it('uses distinct idempotency keys when unexpected activities lack IDs', async () => {
+    const keys: string[] = [];
+    const bot = new TeamsBot({
+      qurl: {
+        listResources: async () => ({ resources: [{ resourceId: 'resource-1' }] }),
+        create: async (input: { readonly idempotencyKey?: string }) => {
+          keys.push(input.idempotencyKey ?? '');
+          return { resourceId: 'resource-1', qurlLink: 'https://qurl.example/one' };
+        },
+      } as unknown as QurlClient,
+      data: {
+        allowedResourceIds: async () => new Set(['resource-1']),
+        lookupScopeAlias: async () => undefined,
+        personalConversationRef: async () => undefined,
+      } as unknown as TeamsDataStore,
+      messages: {} as never,
+      qurlEndpoint: 'https://api.sandbox.example',
+    });
+    const activity = { type: 'message', from: { id: 'delivery', aadObjectId: 'actor' } };
+    await bot.execute(activity, 'tenant-1', 'channel-1', true, parseCommand('get $resource-1'));
+    await bot.execute(activity, 'tenant-1', 'channel-1', true, parseCommand('get $resource-1'));
+    expect(keys).toHaveLength(2);
+    expect(keys[0]).not.toBe(keys[1]);
+  });
+
+  it('returns clear owner-management errors to administrators', async () => {
+    const base = { type: 'message' as const, from: { aadObjectId: 'admin' }, channelData: { tenant: { id: 'tenant' }, channel: { id: 'channel' } }, conversation: { id: 'conversation', conversationType: 'channel' } };
+    const ownerBot = new TeamsBot({
+      qurl: {} as QurlClient,
+      data: { checkAdmin: async () => ({ isAdmin: true, installationId: 'installation' }), addAdmin: async () => { throw new TenantOwnerAlreadyAdminError(); } } as unknown as TeamsDataStore,
+      messages: {} as never,
+      qurlEndpoint: 'https://api.sandbox.example',
+    });
+    const removalBot = new TeamsBot({
+      qurl: {} as QurlClient,
+      data: { checkAdmin: async () => ({ isAdmin: true, installationId: 'installation' }), removeAdmin: async () => { throw new TenantOwnerRemovalError(); } } as unknown as TeamsDataStore,
+      messages: {} as never,
+      qurlEndpoint: 'https://api.sandbox.example',
+    });
+    const mention = [{ type: 'mention', mentioned: { id: 'owner', aadObjectId: 'owner-aad' } }];
+    const replies: string[] = [];
+    await ownerBot.handleActivity({ ...base, text: 'add <@owner>', entities: mention }, undefined, async text => { replies.push(text); });
+    await removalBot.handleActivity({ ...base, text: 'remove <@owner>', entities: mention }, undefined, async text => { replies.push(text); });
+    expect(replies).toEqual([
+      'The tenant owner already has qURL admin access.',
+      'The tenant owner cannot be removed.',
+    ]);
+  });
+
+  it('filters list and get results to resources exposed in the channel', async () => {
+    const resources = [
+      { resourceId: 'visible', description: 'Visible resource' },
+      { resourceId: 'hidden', description: 'Hidden resource' },
+    ];
+    const bot = new TeamsBot({
+      qurl: { listResources: async () => ({ resources }) } as unknown as QurlClient,
+      data: {
+        checkAdmin: async () => { throw new Error('checkAdmin must not run for read commands'); },
+        allowedResourceIds: async () => new Set(['visible']),
+        lookupScopeAlias: async () => undefined,
+      } as unknown as TeamsDataStore,
+      messages: {} as never,
+      qurlEndpoint: 'https://api.sandbox.example',
+    });
+    const activity = { type: 'message', from: { aadObjectId: 'actor' } };
+
+    await expect(bot.execute(activity, 'tenant-1', 'channel-1', true, parseCommand('list'))).resolves.toBe('Protected resources in this channel:\n- `$visible`  Visible resource');
+    await expect(bot.execute(activity, 'tenant-1', 'channel-1', true, parseCommand('get $hidden'))).rejects.toThrow('Resource not found');
+  });
+
+  it.each(['aliases', 'list', 'admins'])('delivers an oversized %s catalogue as complete entries with an omitted count', async command => {
+    const crid = 'aho4gla7hppidc664lhtpy3vq3fif5tn3m2esan3tbgtnhwafvqn6fblhemq';
+    const entries = Array.from({ length: command === 'admins' ? 2_000 : 500 }, (_, i) => ({
+      alias: `alias${i}`.padEnd(63, 'a'), resourceId: `key-${i}`, crid,
+      description: `${'🔐\\"\u0000'.repeat(60)}-${i}`,
+      adminId: `00000000-0000-4000-8000-${String(i).padStart(12, '0')}`,
+    }));
+    const rows = entries.map(entry => command === 'aliases' ? `- \`$${entry.alias}\` -> \`$${crid}\``
+      : command === 'list' ? `- \`$${crid}\`  ${entry.description}` : entry.adminId);
+    const header = command === 'aliases' ? 'Aliases in this channel:\n' : command === 'list'
+      ? 'Protected resources in this channel:\n' : 'Tenant owner: owner\nAdmins: ';
+    const separator = command === 'admins' ? ', ' : '\n';
+    const delivered: string[] = [];
+    const errors: string[] = [];
+    const messages = new TeamsSdkMessagePoster({ api: { http: {
+      post: async (_path: string, body: { text: string }) => {
+        if (Buffer.byteLength(JSON.stringify(body), 'utf16le') > 80_000) throw new Error('MessageSizeTooBig');
+        delivered.push(body.text);
+      },
+    } } } as never);
+    const bot = new TeamsBot({
+      qurl: { listResources: async () => ({ resources: [...entries, { resourceId: 'hidden', description: 'HIDDEN' }] }) } as unknown as QurlClient,
+      data: {
+        scopeAliases: async () => entries,
+        allowedResourceIds: async () => new Set(entries.map(entry => entry.resourceId)),
+        checkAdmin: async () => ({ isAdmin: true }),
+        listAdmins: async () => ({ ownerId: 'owner', adminIds: entries.map(entry => entry.adminId) }),
+      } as unknown as TeamsDataStore,
+      messages, qurlEndpoint: 'https://api.sandbox.example',
+      logger: { error: (message: string) => { errors.push(message); } } as never,
+    });
+    await bot.handleActivity({
+      type: 'message', text: command, from: { aadObjectId: 'actor' }, id: 'incoming',
+      serviceUrl: 'https://smba.trafficmanager.net/teams', conversation: { id: 'thread', conversationType: 'channel' },
+      channelData: { tenant: { id: 'tenant' }, channel: { id: 'channel' } },
+    });
+    expect(delivered).toHaveLength(1);
+    const text = delivered[0]!;
+    expect(Buffer.byteLength(JSON.stringify(text), 'utf16le')).toBeLessThanOrEqual(64_000);
+    const omitted = Number(text.match(/Entries omitted to fit this Teams reply: (\d+)\.$/)?.[1]);
+    expect(omitted).toBeGreaterThan(0);
+    expect(omitted).toBeLessThan(entries.length);
+    expect(text).toBe(`${header}${rows.slice(0, entries.length - omitted).join(separator)}\n\nEntries omitted to fit this Teams reply: ${omitted}.`);
+    expect(text).not.toContain('HIDDEN');
+    expect(errors).toEqual([]);
+  });
+
+  it('reports an oversized first list entry without cutting its CRID or description', async () => {
+    const bot = new TeamsBot({
+      data: { allowedResourceIds: async () => new Set(['visible']) } as unknown as TeamsDataStore,
+      messages: {} as never, qurlEndpoint: 'https://api.sandbox.example',
+    });
+    await expect(bot.list('tenant', 'channel', [{ resourceId: 'visible', description: '🔐'.repeat(40_000) }])).resolves.toBe(
+      'Protected resources in this channel:\n\n\nEntries omitted to fit this Teams reply: 1.',
+    );
+  });
+
+  it.each([{ adminIds: [] }, { adminIds: ['admin-a', 'admin-b'] }])('preserves the owner and ordinary admins output for $adminIds', async ({ adminIds }) => {
+    const bot = new TeamsBot({
+      data: {
+        checkAdmin: async () => ({ isAdmin: true }),
+        listAdmins: async () => ({ ownerId: 'owner', adminIds }),
+      } as unknown as TeamsDataStore,
+      messages: {} as never, qurlEndpoint: 'https://api.sandbox.example',
+    });
+    await expect(bot.execute({ type: 'message', from: { aadObjectId: 'owner' } }, 'tenant', 'personal', false, parseCommand('admins'))).resolves.toBe(
+      `Tenant owner: owner\nAdmins: ${adminIds.length ? adminIds.join(', ') : 'none'}`,
+    );
+  });
+
+  it('mints a channel alias without enumerating the account and rejects a removed channel grant', async () => {
+    let allowed = new Set(['resource-1']);
+    let creates = 0;
+    const bot = new TeamsBot({
+      qurl: {
+        listResources: async () => { throw new Error('A bound channel alias must not enumerate the account'); },
+        create: async ({ resourceId }: { resourceId: string }) => { creates++; expect(resourceId).toBe('resource-1'); return { resourceId, qurlLink: 'https://qurl.example/one' }; },
+      } as unknown as QurlClient,
+      data: { lookupScopeAlias: async () => 'resource-1', allowedResourceIds: async () => allowed } as unknown as TeamsDataStore,
+      messages: {} as never, qurlEndpoint: 'https://qurl.example',
+    });
+    const activity = { type: 'message', from: { aadObjectId: 'actor' } };
+    await expect(bot.execute(activity, 'tenant', 'channel', true, parseCommand('get $docs'))).resolves.toContain('https://qurl.example/one');
+    allowed = new Set();
+    await expect(bot.execute(activity, 'tenant', 'channel', true, parseCommand('get $docs'))).rejects.toThrow('Resource not found');
+    expect(creates).toBe(1);
+  });
+
+  it.each([undefined, 'resource-1'])('keeps missing-resource replies token-free with alias target %s', async aliasResourceId => {
+    const replies: string[] = [];
+    let creates = 0;
+    const bot = new TeamsBot({
+      qurl: {
+        listResources: async () => ({ resources: [] }),
+        create: async () => { creates++; throw new Error('must not mint'); },
+      } as unknown as QurlClient,
+      data: {
+        lookupScopeAlias: async () => aliasResourceId,
+        allowedResourceIds: async () => new Set(),
+      } as unknown as TeamsDataStore,
+      messages: {} as never, qurlEndpoint: 'https://qurl.example',
+    });
+    const token = aliasResourceId ? 'docs' : '`[open](https://example.test)';
+    await bot.handleActivity({
+      type: 'message', text: `get $${token}`, from: { aadObjectId: 'actor' },
+      channelData: { tenant: { id: 'tenant' }, channel: { id: 'channel' } },
+      conversation: { id: 'thread', conversationType: 'channel' },
+    }, undefined, async text => { replies.push(text); });
+    expect(replies).toEqual(['Resource not found.']);
+    expect(creates).toBe(0);
+  });
+
+  it('follows a next cursor even when has_more is omitted', async () => {
+    const cursors: Array<string | undefined> = [];
+    const bot = new TeamsBot({ qurl: {} as QurlClient, data: {} as TeamsDataStore, messages: {} as never, qurlEndpoint: 'https://api.sandbox.example' });
+    const qurl = {
+      listResources: async (_signal?: AbortSignal, cursor?: string) => {
+        cursors.push(cursor);
+        return cursor === undefined
+          ? { resources: [{ resourceId: 'resource-1' }], nextCursor: 'next' }
+          : { resources: [{ resourceId: 'resource-2' }] };
+      },
+    } as unknown as QurlClient;
+    await expect(bot.resources(qurl)).resolves.toEqual([{ resourceId: 'resource-1' }, { resourceId: 'resource-2' }]);
+    expect(cursors).toEqual([undefined, 'next']);
+  });
+
+  it('rejects a resource pagination cursor cycle', async () => {
+    const bot = new TeamsBot({ qurl: {} as QurlClient, data: {} as TeamsDataStore, messages: {} as never, qurlEndpoint: 'https://api.sandbox.example' });
+    const qurl = { listResources: async () => ({ resources: [], nextCursor: 'loop' }) } as unknown as QurlClient;
+    await expect(bot.resources(qurl)).rejects.toThrow('pagination is invalid');
+  });
+
+  it('rejects has_more without a continuation cursor', async () => {
+    const bot = new TeamsBot({ qurl: {} as QurlClient, data: {} as TeamsDataStore, messages: {} as never, qurlEndpoint: 'https://api.sandbox.example' });
+    const qurl = { listResources: async () => ({ resources: [], hasMore: true }) } as unknown as QurlClient;
+    await expect(bot.resources(qurl)).rejects.toThrow('pagination is invalid');
+  });
+
+  it('enforces the resource pagination safety cap', async () => {
+    let calls = 0;
+    const bot = new TeamsBot({ qurl: {} as QurlClient, data: {} as TeamsDataStore, messages: {} as never, qurlEndpoint: 'https://api.sandbox.example' });
+    const qurl = {
+      listResources: async (_signal?: AbortSignal, cursor?: string) => {
+        calls += 1;
+        return { resources: [], nextCursor: String(Number(cursor ?? '0') + 1) };
+      },
+    } as unknown as QurlClient;
+    await expect(bot.resources(qurl)).rejects.toThrow('exceeded the safety limit');
+    expect(calls).toBe(1_000);
+  });
+
+  it('delivers dm:true qURLs to the actor personal conversation', async () => {
+    let sent: { readonly serviceUrl: string; readonly conversationId: string; readonly text: string } | undefined;
+    const bot = new TeamsBot({
+      qurl: {
+        listResources: async () => ({ resources: [{ resourceId: 'resource-1' }] }),
+        create: async () => ({ resourceId: 'resource-1', qurlLink: 'https://qurl.example/one' }),
+      } as unknown as QurlClient,
+      qurlEndpoint: 'https://api.sandbox.example',
+      data: {
+        checkAdmin: async () => ({ isAdmin: false }),
+        allowedResourceIds: async () => new Set(['resource-1']),
+        lookupScopeAlias: async () => undefined,
+        personalConversationRef: async () => ({ serviceUrl: 'https://smba.trafficmanager.net', conversationId: 'personal-conversation' }),
+      } as unknown as TeamsDataStore,
+      messages: {
+        sendText: async (serviceUrl: string, conversationId: string, text: string) => { sent = { serviceUrl, conversationId, text }; },
+      } as never,
+    });
+
+    await expect(bot.execute(
+      { type: 'message', id: 'activity-1', from: { id: 'delivery', aadObjectId: 'actor' } },
+      'tenant-1', 'channel-1', true, parseCommand('get $resource-1 dm:true'),
+    )).resolves.toBe('Sent the one-time qURL to your personal Teams chat.');
+    expect(sent).toEqual({ serviceUrl: 'https://smba.trafficmanager.net', conversationId: 'personal-conversation', text: 'qURL for `$resource-1` (one-time use; 1-minute lifetime): https://qurl.example/one' });
+  });
+
+  it('uses distinct idempotency keys for connector resources and enrollment tokens', async () => {
+    const keys: string[] = [];
+    const bot = new TeamsBot({
+      qurl: {
+        listResources: async () => ({ resources: [] }),
+        createResource: async (input: { readonly idempotencyKey?: string }) => { keys.push(input.idempotencyKey ?? ''); return { resourceId: 'connector-1', type: 'tunnel', slug: 'prod', connectorRoutingId: 'routing-1', knockResourceId: 'knock-1' }; },
+        createEnrollmentToken: async (_slug: string, key: string) => { keys.push(key); return { keyId: 'key-1', apiKey: 'bootstrap' }; },
+        me: async () => ({ ownerId: 'auth0|owner', authType: 'api_key', isApiKeyPrincipal: true }),
+        getSharing: async () => ({ crid: 'crid-1', desiredState: 'off', servingEpoch: 0 }),
+        restartSharing: async () => ({ crid: 'crid-1', desiredState: 'on', servingEpoch: 4 }),
+        stopSharing: async () => undefined,
+      } as unknown as QurlClient,
+      data: {
+        checkAdmin: async () => ({ isAdmin: true }),
+        personalConversationRef: async () => ({ serviceUrl: 'https://smba.trafficmanager.net/teams', conversationId: 'conversation' }),
+        lookupScopeAlias: async () => undefined,
+        bindScopeAlias: async () => undefined,
+        exposeResource: async () => undefined,
+      } as unknown as TeamsDataStore,
+      messages: { sendText: async () => undefined } as never,
+      connectorImage: 'ghcr.io/layervai/qurl@sha256:d2f9bd33572ffb7212f5b6cfc3fcfa4267344a4a2c2cdd6ce9b7196e3515516b',
+      qurlEndpoint: 'https://api.sandbox.example',
+    });
+    await expect(bot.execute(
+      { type: 'message', id: 'activity-1', from: { id: 'delivery', aadObjectId: 'actor' } },
+      'tenant-1', 'channel-1', true, parseCommand('protect-connector prod'),
+    )).resolves.toContain('sent the bootstrap instructions');
+    expect(keys).toHaveLength(2);
+    expect(keys[0]).not.toBe(keys[1]);
+  });
+
+  it.each([
+    [403, 'quota_exceeded', true],
+    [403, 'api_key_limit', false],
+    [500, 'quota_exceeded', false],
+  ] as const)('classifies Connector resource creation failure %s/%s without making later changes', async (status, code, quota) => {
+    const replies: string[] = [];
+    const effects: string[] = [];
+    let creates = 0;
+    const failure = new QurlHttpError(status, code);
+    failure.message = 'private-upstream-detail';
+    const bot = new TeamsBot({
+      qurl: {
+        me: async () => ({ ownerId: 'auth0|owner', authType: 'api_key', isApiKeyPrincipal: true }),
+        listResources: async () => ({ resources: [] }),
+        createResource: async () => { creates += 1; throw failure; },
+        createEnrollmentToken: async () => { effects.push('mint'); return { keyId: 'key-1', apiKey: 'secret' }; },
+        getSharing: async () => ({ crid: 'crid-1', desiredState: 'off', servingEpoch: 0 }),
+        restartSharing: async () => { effects.push('restart'); return { crid: 'crid-1', desiredState: 'on', servingEpoch: 1 }; },
+        stopSharing: async () => { effects.push('stop'); },
+        revokeApiKey: async () => { effects.push('revoke'); },
+      } as unknown as QurlClient,
+      data: {
+        checkAdmin: async () => ({ isAdmin: true }),
+        personalConversationRef: async () => ({ serviceUrl: 'https://smba.trafficmanager.net/teams', conversationId: 'personal' }),
+        lookupScopeAlias: async () => undefined,
+        bindScopeAlias: async () => { effects.push('alias'); },
+        exposeResource: async () => { effects.push('expose'); },
+      } as unknown as TeamsDataStore,
+      messages: { sendText: async () => { effects.push('dm'); } } as never,
+      qurlEndpoint: 'https://api.sandbox.example',
+    });
+    await bot.handleActivity({
+      type: 'message', id: 'activity-1', text: 'protect-connector prod', from: { aadObjectId: 'actor', id: 'delivery' },
+      channelData: { tenant: { id: 'tenant' }, channel: { id: 'channel' } },
+      conversation: { id: 'conversation', conversationType: 'channel' },
+    }, undefined, async text => { replies.push(text); });
+    expect(replies).toHaveLength(1);
+    if (quota) {
+      expect(replies[0]).toContain('protected resource limit');
+      expect(replies[0]).toContain('revoke unused resources or upgrade your plan');
+      expect(replies[0]).toContain('No enrollment token was minted');
+      expect(replies[0]).not.toContain('syntax');
+    } else {
+      expect(replies[0]).not.toContain('protected resource limit');
+    }
+    expect(replies[0]).not.toContain('private-upstream-detail');
+    expect(creates).toBe(1);
+    expect(effects).toEqual([]);
+  });
+
+  it.each([false, true])('revokes a connector enrollment key when delivery fails (cancelled=%s)', async cancelled => {
+    const revoked: string[] = [];
+    const stopped: string[] = [];
+    const controller = new AbortController();
+    const bot = new TeamsBot({
+      qurl: {
+        listResources: async () => ({ resources: [] }),
+        createResource: async () => ({ resourceId: 'connector-1', type: 'tunnel', slug: 'prod', connectorRoutingId: 'routing-1', knockResourceId: 'knock-1' }),
+        createEnrollmentToken: async () => ({ keyId: 'key-1', apiKey: 'bootstrap-secret' }),
+        me: async () => ({ ownerId: 'auth0|owner', authType: 'api_key', isApiKeyPrincipal: true }),
+        getSharing: async () => ({ crid: 'crid-1', desiredState: 'off', servingEpoch: 0 }),
+        restartSharing: async () => ({ crid: 'crid-1', desiredState: 'on', servingEpoch: 4 }),
+        stopSharing: async (id: string, signal?: AbortSignal) => { signal?.throwIfAborted(); stopped.push(id); },
+        revokeApiKey: async (keyId: string, signal?: AbortSignal) => { signal?.throwIfAborted(); revoked.push(keyId); },
+      } as unknown as QurlClient,
+      data: {
+        checkAdmin: async () => ({ isAdmin: true }),
+        personalConversationRef: async () => ({ serviceUrl: 'https://smba.trafficmanager.net/teams', conversationId: 'conversation' }),
+        lookupScopeAlias: async () => undefined,
+        bindScopeAlias: async () => undefined,
+        exposeResource: async () => undefined,
+      } as unknown as TeamsDataStore,
+      messages: { sendText: async () => { if (cancelled) controller.abort(); throw new Error('delivery failed'); } } as never,
+      connectorImage: 'ghcr.io/layervai/qurl@sha256:d2f9bd33572ffb7212f5b6cfc3fcfa4267344a4a2c2cdd6ce9b7196e3515516b',
+      qurlEndpoint: 'https://api.sandbox.example',
+    });
+
+    await expect(bot.execute(
+      { type: 'message', id: 'activity-1', from: { id: 'delivery', aadObjectId: 'actor' } },
+      'tenant-1', 'channel-1', true, parseCommand('protect-connector prod'), controller.signal,
+    )).rejects.toThrow('delivery failed');
+    expect(revoked).toEqual(['key-1']);
+    expect(stopped).toEqual(['connector-1']);
+  });
+
+  it('never mints a connector enrollment key when install rendering would fail', async () => {
+    const revoked: string[] = [];
+    const minted: string[] = [];
+    const stopped: string[] = [];
+    const bot = new TeamsBot({
+      qurl: {
+        listResources: async () => ({ resources: [] }),
+        createResource: async () => ({ resourceId: 'connector-1', type: 'tunnel', slug: 'prod', connectorRoutingId: 'routing-1', knockResourceId: 'knock-1' }),
+        createEnrollmentToken: async () => { minted.push('key-1'); return { keyId: 'key-1', apiKey: 'bootstrap-secret' }; },
+        me: async () => ({ ownerId: 'auth0|owner', authType: 'api_key', isApiKeyPrincipal: true }),
+        getSharing: async () => ({ crid: 'crid-1', desiredState: 'off', servingEpoch: 0 }),
+        restartSharing: async () => ({ crid: 'crid-1', desiredState: 'on', servingEpoch: 4 }),
+        stopSharing: async (id: string) => { stopped.push(id); },
+        revokeApiKey: async (keyId: string) => { revoked.push(keyId); },
+      } as unknown as QurlClient,
+      data: {
+        checkAdmin: async () => ({ isAdmin: true }),
+        personalConversationRef: async () => ({ serviceUrl: 'https://smba.trafficmanager.net/teams', conversationId: 'conversation' }),
+        lookupScopeAlias: async () => undefined,
+        bindScopeAlias: async () => undefined,
+        exposeResource: async () => undefined,
+      } as unknown as TeamsDataStore,
+      messages: { sendText: async () => { throw new Error('delivery should not run'); } } as never,
+      connectorImage: 'invalid image',
+      qurlEndpoint: 'https://api.sandbox.example',
+    });
+
+    await expect(bot.execute(
+      { type: 'message', id: 'activity-1', from: { id: 'delivery', aadObjectId: 'actor' } },
+      'tenant-1', 'channel-1', true, parseCommand('protect-connector prod'),
+    )).rejects.toThrow('invalid connector image reference');
+    // The render preflight runs before the mint, so there is no secret to
+    // revoke -- the one-time token never existed.
+    expect(minted).toEqual([]);
+    expect(revoked).toEqual([]);
+    expect(stopped).toEqual(['connector-1']);
+  });
+
+  it.each([
+    ['off', ['connector-1']],
+    ['on', []],
+  ] as const)('compensates sharing back off after a failed install only when it was previously %s', async (previous, expected) => {
+    const stopped: string[] = [];
+    const bot = new TeamsBot({
+      qurl: {
+        listResources: async () => ({ resources: [] }),
+        createResource: async () => ({ resourceId: 'connector-1', type: 'tunnel', slug: 'prod', connectorRoutingId: 'routing-1', knockResourceId: 'knock-1' }),
+        createEnrollmentToken: async () => ({ keyId: 'key-1', apiKey: 'bootstrap-secret' }),
+        me: async () => ({ ownerId: 'auth0|owner', authType: 'api_key', isApiKeyPrincipal: true }),
+        getSharing: async () => ({ crid: 'crid-1', desiredState: previous, servingEpoch: previous === 'on' ? 3 : 0 }),
+        restartSharing: async () => ({ crid: 'crid-1', desiredState: 'on', servingEpoch: 4 }),
+        stopSharing: async (resourceId: string) => { stopped.push(resourceId); },
+        revokeApiKey: async () => undefined,
+      } as unknown as QurlClient,
+      data: {
+        checkAdmin: async () => ({ isAdmin: true }),
+        personalConversationRef: async () => ({ serviceUrl: 'https://smba.trafficmanager.net/teams', conversationId: 'conversation' }),
+        lookupScopeAlias: async () => undefined,
+        bindScopeAlias: async () => undefined,
+        exposeResource: async () => undefined,
+      } as unknown as TeamsDataStore,
+      messages: { sendText: async () => { throw new Error('delivery failed'); } } as never,
+      connectorImage: 'ghcr.io/layervai/qurl@sha256:d2f9bd33572ffb7212f5b6cfc3fcfa4267344a4a2c2cdd6ce9b7196e3515516b',
+      qurlEndpoint: 'https://api.sandbox.example',
+    });
+
+    await expect(bot.execute(
+      { type: 'message', id: 'activity-1', from: { id: 'delivery', aadObjectId: 'actor' } },
+      'tenant-1', 'channel-1', true, parseCommand('protect-connector prod'),
+    )).rejects.toThrow('delivery failed');
+    // A previously-on Connector has a live daemon that reacquires the rotated
+    // epoch; turning it off here would be an outage this failure never caused.
+    expect(stopped).toEqual(expected);
+  });
+
+  it('refuses to provision a connector with a delegated (non-API-key) credential', async () => {
+    const bot = new TeamsBot({
+      qurl: {
+        listResources: async () => ({ resources: [] }),
+        me: async () => ({ ownerId: 'auth0|user', authType: 'jwt', isApiKeyPrincipal: false }),
+      } as unknown as QurlClient,
+      data: {
+        checkAdmin: async () => ({ isAdmin: true }),
+        personalConversationRef: async () => ({ serviceUrl: 'https://smba.trafficmanager.net/teams', conversationId: 'conversation' }),
+      } as unknown as TeamsDataStore,
+      messages: { sendText: async () => undefined } as never,
+      connectorImage: 'ghcr.io/layervai/qurl@sha256:d2f9bd33572ffb7212f5b6cfc3fcfa4267344a4a2c2cdd6ce9b7196e3515516b',
+      qurlEndpoint: 'https://api.sandbox.example',
+    });
+    await expect(bot.execute(
+      { type: 'message', id: 'activity-1', from: { id: 'delivery', aadObjectId: 'actor' } },
+      'tenant-1', 'channel-1', true, parseCommand('protect-connector prod'),
+    )).rejects.toThrow('cannot provision a connector');
+  });
+
+  it('binds the connector alias so get/aliases/unset-alias can see it', async () => {
+    const bound: { alias: string; resourceId: string }[] = [];
+    const bot = new TeamsBot({
+      qurl: {
+        listResources: async () => ({ resources: [] }),
+        createResource: async () => ({ resourceId: 'connector-1', type: 'tunnel', slug: 'prod', connectorRoutingId: 'routing-1', knockResourceId: 'knock-1' }),
+        createEnrollmentToken: async () => ({ keyId: 'key-1', apiKey: 'lv_live_abc' }),
+        me: async () => ({ ownerId: 'auth0|owner', authType: 'api_key', isApiKeyPrincipal: true }),
+        getSharing: async () => ({ crid: 'crid-1', desiredState: 'off', servingEpoch: 0 }),
+        restartSharing: async () => ({ crid: 'crid-1', desiredState: 'on', servingEpoch: 4 }),
+        stopSharing: async () => undefined,
+      } as unknown as QurlClient,
+      data: {
+        checkAdmin: async () => ({ isAdmin: true }),
+        personalConversationRef: async () => ({ serviceUrl: 'https://smba.trafficmanager.net/teams', conversationId: 'conversation' }),
+        lookupScopeAlias: async () => undefined,
+        bindScopeAlias: async (_t: string, _s: string, alias: string, resourceId: string) => { bound.push({ alias, resourceId }); },
+        exposeResource: async () => undefined,
+      } as unknown as TeamsDataStore,
+      messages: { sendText: async () => undefined } as never,
+      connectorImage: 'ghcr.io/layervai/qurl@sha256:d2f9bd33572ffb7212f5b6cfc3fcfa4267344a4a2c2cdd6ce9b7196e3515516b',
+      qurlEndpoint: 'https://api.sandbox.example',
+    });
+    await bot.execute(
+      { type: 'message', id: 'activity-1', from: { id: 'delivery', aadObjectId: 'actor' } },
+      'tenant-1', 'channel-1', true, parseCommand('protect-connector prod alias:$docs'),
+    );
+    // Previously the flag parsed, validated, and was then discarded, so
+    // `get $docs` reported the alias did not exist.
+    expect(bound).toEqual([{ alias: 'docs', resourceId: 'connector-1' }]);
+  });
+
+  it('accepts the service: flag the install renderers already support', () => {
+    expect(parseCommand('protect-connector prod service:api')).toMatchObject({
+      verb: 'protect-connector',
+      flags: { service: 'api' },
+    });
+    expect(() => parseCommand('protect-connector prod bogus:x')).toThrow('invalid connector option');
+  });
+
+  it.each(['fresh', 'owner'])('sends the setup link to the personal chat during %s setup, never into channel history', async ownership => {
+    const sent: { readonly conversationId: string; readonly text: string }[] = [];
+    const bot = new TeamsBot({
+      qurl: {} as QurlClient,
+      data: {
+        checkAdmin: async () => ({ isAdmin: ownership === 'owner', ...(ownership === 'owner' ? { ownerId: 'actor' } : {}) }),
+        personalConversationRef: async () => ({ serviceUrl: 'https://smba.trafficmanager.net/teams', conversationId: 'personal' }),
+      } as unknown as TeamsDataStore,
+      messages: { sendText: async (_u: string, conversationId: string, text: string) => { sent.push({ conversationId, text }); } } as never,
+      setup: { build: async () => ({ url: new URL('https://teams.connector.example/oauth/qurl/start?state=SECRET-HANDLE') }) } as never,
+      qurlEndpoint: 'https://api.sandbox.example',
+    });
+    const reply = await bot.execute(
+      { type: 'message', id: 'activity-1', from: { id: 'delivery', aadObjectId: ' AcToR ' } },
+      'tenant-1', 'channel-1', true, parseCommand('setup alice@example.com'),
+    );
+    // The channel reply must not carry the one-shot state handle.
+    expect(reply).not.toContain('SECRET-HANDLE');
+    expect(sent).toHaveLength(1);
+    expect(sent[0]?.conversationId).toBe('personal');
+    expect(sent[0]?.text).toContain('SECRET-HANDLE');
+  });
+
+  it.each(['unavailable', 'collision'])('explains setup-link state mint failure (%s) without sending a link', async failure => {
+    const replies: string[] = [];
+    const sent: string[] = [];
+    const errors: unknown[] = [];
+    const persistence = new InMemoryStatePersistence();
+    persistence.conditionalCreate = async () => {
+      if (failure === 'unavailable') throw new Error('private-storage-detail');
+      return { status: 'conflict' };
+    };
+    const setup = new TeamsSetupLinkBuilder({
+      state: new OAuthStateManager({ persistence, clock: fixedClock(), randomBytes: deterministicRandom() }),
+      tokenClient: { createAuthorizationUrl: () => { throw new Error('failed state mint must not create an authorization URL'); } } as never,
+      setupBaseUrl: 'https://teams.example.com',
+    });
+    const bot = new TeamsBot({
+      data: {
+        checkAdmin: async () => ({ isAdmin: false }),
+        personalConversationRef: async () => ({ serviceUrl: 'https://smba.trafficmanager.net/teams', conversationId: 'personal' }),
+      } as unknown as TeamsDataStore,
+      messages: { sendText: async (_url: string, _conversation: string, text: string) => { sent.push(text); } } as never,
+      setup,
+      logger: { error: (_message: string, context: unknown) => { errors.push(context); } } as never,
+      qurlEndpoint: 'https://api.sandbox.example',
+    });
+    await bot.handleActivity({
+      type: 'message', text: 'setup alice@example.com', from: { aadObjectId: TEST_ACTOR_A_ID, id: '29:synthetic-delivery-a' },
+      channelData: { tenant: { id: TEST_TENANT_ID }, channel: { id: 'channel' } },
+      conversation: { id: 'conversation', conversationType: 'channel' },
+    }, undefined, async text => { replies.push(text); });
+    expect(replies).toHaveLength(1);
+    expect(replies[0]).toContain('generate setup link');
+    expect(replies[0]).toContain('try again or contact support');
+    expect(replies[0]).not.toMatch(/syntax|identify|private-storage-detail|state=/);
+    expect(sent).toEqual([]);
+    expect(persistence.records.size).toBe(0);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toMatchObject({ error: { code: failure === 'unavailable' ? 'STATE_STORE_FAILED' : 'STATE_COLLISION' } });
+  });
+
+  it.each([false, true])('refuses setup for a different owner before mint or DM (isAdmin: %s)', async isAdmin => {
+    const replies: string[] = [];
+    const errors: string[] = [];
+    let setupCalls = 0;
+    let dmCalls = 0;
+    const bot = new TeamsBot({
+      data: {
+        checkAdmin: async () => ({ isAdmin, ownerId: 'owner' }),
+        personalConversationRef: async () => ({ serviceUrl: 'https://smba.trafficmanager.net/teams', conversationId: 'personal' }),
+      } as unknown as TeamsDataStore,
+      messages: { sendText: async () => { dmCalls += 1; } } as never,
+      setup: { build: async () => { setupCalls += 1; return { url: new URL('https://teams.connector.example/oauth/qurl/start?state=SECRET-HANDLE') }; } } as never,
+      qurlEndpoint: 'https://qurl.example',
+      logger: { debug: () => {}, info: () => {}, warn: () => {}, error: message => { errors.push(message); } },
+    });
+    await bot.handleActivity({
+      type: 'message', text: 'setup alice@example.com', from: { aadObjectId: 'actor', id: 'delivery' },
+      channelData: { tenant: { id: 'tenant' }, channel: { id: 'channel' } },
+      conversation: { id: 'conversation', conversationType: 'channel' },
+    }, undefined, async text => { replies.push(text); });
+    expect(replies).toEqual(['This Teams tenant is already connected to qURL. Ask the person who connected it to re-run `qurl setup`.']);
+    expect(setupCalls).toBe(0);
+    expect(dmCalls).toBe(0);
+    expect(errors).toEqual([]);
+  });
+
+  it('preserves uninstall recovery state and explains unreadable credentials', async () => {
+    let clientCalls = 0;
+    let deletes = 0;
+    const errors: unknown[] = [];
+    const bot = new TeamsBot({
+      qurlForTenant: { forTenant: async () => { clientCalls += 1; return {} as QurlClient; } },
+      data: {
+        checkAdmin: async () => ({ isAdmin: true, installationId: 'installation' }),
+        tenantCredential: async () => { throw new Error('KMS decrypt failed'); },
+        deleteWorkspace: async () => { deletes += 1; },
+      } as unknown as TeamsDataStore,
+      logger: { error: (_message: string, context: unknown) => errors.push(context) } as never,
+      messages: {} as never, qurlEndpoint: 'https://api.example.test',
+    });
+    await expect(bot.execute(
+      { type: 'message', from: { id: 'delivery', aadObjectId: 'owner' } },
+      'tenant', 'channel', true, parseCommand('uninstall'),
+    )).rejects.toThrow('Nothing was disconnected. Please try again in a moment. If this keeps happening, contact your qURL operator.');
+    expect(clientCalls).toBe(0);
+    expect(deletes).toBe(0);
+    expect(errors).toHaveLength(1);
+  });
+
+  it('refuses setup when there is no personal chat to send the link to', async () => {
+    let setupCalls = 0;
+    const bot = new TeamsBot({
+      qurl: {} as QurlClient,
+      data: {
+        checkAdmin: async () => ({ isAdmin: true }),
+        personalConversationRef: async () => undefined,
+      } as unknown as TeamsDataStore,
+      messages: { sendText: async () => { throw new Error('must not send'); } } as never,
+      setup: { build: async () => { setupCalls += 1; return { url: new URL('https://teams.connector.example/oauth/qurl/start?state=SECRET-HANDLE') }; } } as never,
+      qurlEndpoint: 'https://api.sandbox.example',
+    });
+    await expect(bot.execute(
+      { type: 'message', id: 'activity-1', from: { id: 'delivery', aadObjectId: 'actor' } },
+      'tenant-1', 'channel-1', true, parseCommand('setup alice@example.com'),
+    )).rejects.toThrow('Open a personal chat');
+    expect(setupCalls).toBe(0);
+  });
+
+  it('does not fetch the resource catalog twice for protect-connector', async () => {
+    let listCalls = 0;
+    const bot = new TeamsBot({
+      qurl: {
+        listResources: async () => { listCalls += 1; return { resources: [{ resourceId: 'connector-1', type: 'tunnel', slug: 'prod', connectorRoutingId: 'routing-1', knockResourceId: 'knock-1' }] }; },
+        createEnrollmentToken: async () => ({ keyId: 'key-1', apiKey: 'bootstrap' }),
+        me: async () => ({ ownerId: 'auth0|owner', authType: 'api_key', isApiKeyPrincipal: true }),
+        getSharing: async () => ({ crid: 'crid-1', desiredState: 'off', servingEpoch: 0 }),
+        restartSharing: async () => ({ crid: 'crid-1', desiredState: 'on', servingEpoch: 4 }),
+        stopSharing: async () => undefined,
+      } as unknown as QurlClient,
+      data: {
+        checkAdmin: async () => ({ isAdmin: true }),
+        personalConversationRef: async () => ({ serviceUrl: 'https://smba.trafficmanager.net/teams', conversationId: 'conversation' }),
+        lookupScopeAlias: async () => undefined,
+        bindScopeAlias: async () => undefined,
+        exposeResource: async () => undefined,
+      } as unknown as TeamsDataStore,
+      messages: { sendText: async () => undefined } as never,
+      connectorImage: 'ghcr.io/layervai/qurl@sha256:d2f9bd33572ffb7212f5b6cfc3fcfa4267344a4a2c2cdd6ce9b7196e3515516b',
+      qurlEndpoint: 'https://api.sandbox.example',
+    });
+    await bot.execute({ type: 'message', id: 'activity-1', from: { id: 'delivery', aadObjectId: 'actor' } }, 'tenant-1', 'channel-1', true, parseCommand('protect-connector prod'));
+    expect(listCalls).toBe(1);
+  });
+
+  it('continues commands when personal-conversation capture fails', async () => {
+    const replies: string[] = [];
+    const bot = new TeamsBot({
+      qurl: {} as QurlClient,
+      data: { savePersonalConversationRef: async () => { throw new Error('temporary DDB failure'); } } as unknown as TeamsDataStore,
+      messages: {} as never,
+      qurlEndpoint: 'https://api.sandbox.example',
+    });
+    await bot.handleActivity({ type: 'message', text: 'help', from: { aadObjectId: 'actor' }, serviceUrl: 'https://smba.trafficmanager.net', conversation: { id: 'personal', conversationType: 'personal' }, channelData: { tenant: { id: 'tenant' } } }, undefined, async text => { replies.push(text); });
+    expect(replies[0]).toContain('qURL for Teams');
+  });
+
+  it('contains an ambiguous final delivery failure without retrying', async () => {
+    const errors: string[] = [];
+    let attempts = 0;
+    const messages = new TeamsSdkMessagePoster({ api: { http: {
+      post: async () => { attempts += 1; throw new Error('connection reset'); },
+    } } } as never);
+    const bot = new TeamsBot({
+      qurl: {} as QurlClient,
+      data: {} as TeamsDataStore,
+      messages,
+      qurlEndpoint: 'https://api.sandbox.example',
+      logger: { debug: () => undefined, info: () => undefined, warn: () => undefined, error: message => { errors.push(message); } },
+    });
+    await expect(bot.handleActivity({
+      type: 'message', text: 'help', from: { aadObjectId: 'actor' },
+      serviceUrl: 'https://smba.trafficmanager.net/teams', conversation: { id: 'conversation', conversationType: 'channel' },
+    })).resolves.toBeUndefined();
+    expect(attempts).toBe(1);
+    expect(errors).toEqual(['Teams message delivery failed']);
+  });
+
+  it.each([false, true])('explains alias conflict recovery without reassigning or exposing its target (concurrent=%s)', async concurrent => {
+    const replies: string[] = [];
+    let bindAttempts = 0;
+    let exposures = 0;
+    const bot = new TeamsBot({
+      qurl: {
+        listResources: async () => ({ resources: [{ resourceId: 'resource-1' }] }),
+      } as unknown as QurlClient,
+      data: {
+        checkAdmin: async () => ({ isAdmin: true }),
+        lookupScopeAlias: async (_tenant: string, _scope: string, alias: string) => alias === 'docs' && !concurrent ? 'other-resource' : undefined,
+        bindScopeAlias: async () => { bindAttempts += 1; throw new ScopeAliasConflictError('docs', 'other-resource'); },
+        exposeResource: async () => { exposures += 1; },
+      } as unknown as TeamsDataStore,
+      messages: {} as never,
+      qurlEndpoint: 'https://api.sandbox.example',
+    });
+    await bot.handleActivity({
+      type: 'message', text: 'set-alias $docs $resource-1', from: { aadObjectId: 'admin' },
+      channelData: { tenant: { id: 'tenant-1' }, channel: { id: 'channel-1' } },
+      conversation: { id: 'thread', conversationType: 'channel' },
+    }, undefined, async text => { replies.push(text); });
+    expect(replies).toEqual(['Alias `$docs` is already in use in this channel. Run `unset-alias $docs` first, or choose another alias.']);
+    expect(bindAttempts).toBe(concurrent ? 1 : 0);
+    expect(exposures).toBe(0);
+  });
+
+  it('explains that unsetting an alias does not unprotect its resource', async () => {
+    let unbound = '';
+    const bot = new TeamsBot({
+      qurl: { listResources: async () => ({ resources: [{ resourceId: 'resource-1' }] }) } as unknown as QurlClient,
+      data: {
+        checkAdmin: async () => ({ isAdmin: true }),
+        unbindScopeAlias: async (_tenantId: string, _scopeId: string, alias: string) => { unbound = alias; return true; },
+      } as unknown as TeamsDataStore,
+      messages: {} as never,
+      qurlEndpoint: 'https://api.sandbox.example',
+    });
+    await expect(bot.execute(
+      { type: 'message', from: { aadObjectId: 'admin' } },
+      'tenant-1', 'channel-1', true, parseCommand('unset-alias $docs'),
+    )).resolves.toContain('This resource is still available to everyone in this channel.');
+    expect(unbound).toBe('docs');
+  });
+
+  it('disconnects a damaged binding but preserves recovery when upstream is unavailable', async () => {
+    let deleted = false;
+    const bot = new TeamsBot({
+      qurl: { revokeApiKey: async () => { throw new Error('qURL unavailable'); } } as unknown as QurlClient,
+      data: {
+        checkAdmin: async () => ({ isAdmin: true, installationId: 'installation' }),
+        tenantCredential: async () => ({ apiKey: 'secret' }),
+        deleteWorkspace: async () => { deleted = true; },
+      } as unknown as TeamsDataStore,
+      messages: {} as never,
+      qurlEndpoint: 'https://api.sandbox.example',
+    });
+    await expect(bot.execute({ type: 'message', from: { aadObjectId: 'admin' } }, 'tenant-1', 'personal', false, parseCommand('uninstall'))).resolves.toContain('operator follow-up');
+    expect(deleted).toBe(true);
+
+    deleted = false;
+    const unavailableBot = new TeamsBot({
+      qurl: { revokeApiKey: async () => { throw new Error('qURL unavailable'); } } as unknown as QurlClient,
+      data: {
+        checkAdmin: async () => ({ isAdmin: true, installationId: 'installation' }),
+        tenantCredential: async () => ({ apiKey: 'secret', keyId: 'key-1' }),
+        deleteWorkspace: async () => { deleted = true; },
+      } as unknown as TeamsDataStore,
+      messages: {} as never,
+      qurlEndpoint: 'https://api.sandbox.example',
+    });
+    await expect(unavailableBot.execute({ type: 'message', from: { aadObjectId: 'admin' } }, 'tenant-1', 'personal', false, parseCommand('uninstall'))).rejects.toThrow('qURL unavailable');
+    expect(deleted).toBe(false);
+  });
+
+  it('carries the authorized installation through upstream uninstall cleanup', async () => {
+    let installationId = 'old-install';
+    let capturedInstallationId: string | undefined;
+    const bot = new TeamsBot({
+      qurl: { revokeApiKey: async () => { installationId = 'new-install'; } } as unknown as QurlClient,
+      data: {
+        checkAdmin: async () => ({ isAdmin: true, installationId }),
+        tenantCredential: async () => ({ apiKey: 'secret', keyId: 'old-key' }),
+        deleteWorkspace: async (_tenant: string, expectedInstallationId: string) => {
+          capturedInstallationId = expectedInstallationId;
+          if (expectedInstallationId !== installationId) throw new Error('workspace installation has changed');
+        },
+      } as unknown as TeamsDataStore,
+      messages: {} as never,
+      qurlEndpoint: 'https://qurl.example',
+    });
+    await expect(bot.execute({ type: 'message', from: { aadObjectId: 'old-admin' } }, 'tenant', 'personal', false,
+      parseCommand('uninstall'))).rejects.toThrow('workspace installation has changed');
+    expect(capturedInstallationId).toBe('old-install');
+  });
+
+  it.each(['uninstall', 'revoke $docs'])('passes activity cancellation into local cleanup for %s', async command => {
+    const controller = new AbortController();
+    const reason = new Error('activity deadline reached');
+    const upstreamRevoke = async () => { controller.abort(reason); };
+    let cleanupCompleted = false;
+    const cleanup = async (_tenant: string, _id: string, signal?: AbortSignal) => {
+      signal?.throwIfAborted();
+      cleanupCompleted = true;
+    };
+    const bot = new TeamsBot({
+      qurl: { revokeApiKey: upstreamRevoke, deleteResource: upstreamRevoke } as unknown as QurlClient,
+      data: {
+        checkAdmin: async () => ({ isAdmin: true, installationId: 'installation' }),
+        tenantCredential: async () => ({ apiKey: 'secret', keyId: 'key' }),
+        lookupScopeAlias: async () => 'resource-1',
+        deleteWorkspace: cleanup,
+        purgeResourceFromTenant: cleanup,
+      } as unknown as TeamsDataStore,
+      messages: {} as never,
+      qurlEndpoint: 'https://qurl.example',
+    });
+    await expect(bot.execute({ type: 'message', from: { aadObjectId: 'admin' } }, 'tenant', 'channel', true,
+      parseCommand(command), controller.signal)).rejects.toBe(reason);
+    expect(cleanupCompleted).toBe(false);
+  });
+});
