@@ -147,11 +147,17 @@ func TestHTTPAPIKeyMinterMintWorkspaceHappyPath(t *testing.T) {
 	if gotIdempotencyKey != bindingIdempotencyKey(testTeamID) || len(gotIdempotencyKey) < 32 {
 		t.Errorf("Idempotency-Key = %q, want stable 32+ char key", gotIdempotencyKey)
 	}
+	if !strings.HasPrefix(gotIdempotencyKey, "slack-workspace-binding-v2-") {
+		t.Errorf("Idempotency-Key = %q, want v2 request-body namespace", gotIdempotencyKey)
+	}
 	if gotBody.Provider != "slack" || gotBody.ExternalID != testTeamID {
 		t.Errorf("binding body = %+v, want slack/%s", gotBody, testTeamID)
 	}
 	if gotBody.DisplayName != "Slack workspace "+testTeamID {
 		t.Errorf("display_name = %q", gotBody.DisplayName)
+	}
+	if !gotBody.RotateExisting {
+		t.Error("binding setup must allow lost-commit credential rotation")
 	}
 }
 

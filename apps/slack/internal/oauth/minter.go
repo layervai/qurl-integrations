@@ -191,9 +191,10 @@ type mintRequest struct {
 }
 
 type bindingRequest struct {
-	Provider    string `json:"provider"`
-	ExternalID  string `json:"external_id"`
-	DisplayName string `json:"display_name"`
+	Provider       string `json:"provider"`
+	ExternalID     string `json:"external_id"`
+	DisplayName    string `json:"display_name"`
+	RotateExisting bool   `json:"rotate_existing"`
 }
 
 type mintResponse struct {
@@ -302,8 +303,9 @@ func (m *HTTPAPIKeyMinter) ValidateAPIKey(ctx context.Context, apiKey string) er
 // qurl-service also assigns provider scopes server-side; Slack bindings are
 // pinned to the same qurl:read/qurl:write/qurl:agent set requested by the legacy
 // fallback.
-// After that replay window, the existing binding owns recovery: qurl-service
-// returns already_exists until the binding is rotated or revoked.
+// A setup callback reaches this method only when Slack cannot reuse a valid
+// local key, so it explicitly permits rotation to recover a prior lost commit
+// after that replay window.
 func (m *HTTPAPIKeyMinter) MintWorkspaceAPIKey(ctx context.Context, accessToken, teamID string) (WorkspaceAPIKeyMint, error) {
 	teamID = strings.TrimSpace(teamID)
 	if teamID == "" {
@@ -313,9 +315,10 @@ func (m *HTTPAPIKeyMinter) MintWorkspaceAPIKey(ctx context.Context, accessToken,
 	idempotencyKey := bindingIdempotencyKey(teamID)
 
 	body, err := json.Marshal(bindingRequest{
-		Provider:    "slack",
-		ExternalID:  teamID,
-		DisplayName: displayName,
+		Provider:       "slack",
+		ExternalID:     teamID,
+		DisplayName:    displayName,
+		RotateExisting: true,
 	})
 	if err != nil {
 		return WorkspaceAPIKeyMint{}, fmt.Errorf("marshal: %w", err)
@@ -648,8 +651,9 @@ func drainAndCloseResponse(resp *http.Response) {
 func bindingIdempotencyKey(teamID string) string {
 	// qurl-service requires a 32+ character idempotency key. Slack team IDs
 	// are shorter, so hash to a stable fixed-width key with a readable prefix.
+	// v2 separates rotate_existing=true from the old request body hash.
 	sum := sha256.Sum256([]byte(teamID))
-	return "slack-workspace-binding-v1-" + hex.EncodeToString(sum[:])
+	return "slack-workspace-binding-v2-" + hex.EncodeToString(sum[:])
 }
 
 func replacementIdempotencyKey(teamID, oldKeyID string) string {
