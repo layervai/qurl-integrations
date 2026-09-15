@@ -4,15 +4,17 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	connectoragentstate "github.com/layervai/qurl-connector/pkg/agentstate"
 	qurl "github.com/layervai/qurl-go/qurl"
 )
 
 // clearStateEnv detaches the test from any ambient operator configuration.
 func clearStateEnv(t *testing.T) {
 	t.Helper()
-	for _, name := range []string{EnvStateDirPrimary, EnvAgentID, "XDG_STATE_HOME", "HOME", "LOCALAPPDATA"} {
+	for _, name := range []string{EnvStateDirPrimary, EnvAgentID, "XDG_STATE_HOME", "HOME", "LOCALAPPDATA", connectoragentstate.EnvKeyProvider, connectoragentstate.EnvLocalKeyFD} {
 		t.Setenv(name, "restore-after-test")
 		if err := os.Unsetenv(name); err != nil {
 			t.Fatal(err)
@@ -126,10 +128,16 @@ func isWindows(t *testing.T) bool {
 
 // secureStateTestDir creates the test namespace through the production state
 // setup path. This is required on Windows, where t.TempDir() correctly retains
-// an inherited ACL that the production store must reject.
+// an inherited ACL that the production store must reject. Symlink components
+// are resolved because the connector's sealed store refuses them, and on
+// macOS t.TempDir() lives below the /var alias.
 func secureStateTestDir(t *testing.T) string {
 	t.Helper()
-	dir := filepath.Join(t.TempDir(), "state")
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(base, "state")
 	if err := EnsureDirMode(dir); err != nil {
 		t.Fatal(err)
 	}
@@ -221,5 +229,47 @@ func TestStoreFailsClosedAfterClose(t *testing.T) {
 	}
 	if nilStore.Dir() != "" {
 		t.Fatal("nil Dir() should be empty")
+	}
+}
+
+func TestOpenUnknownKeyProviderFailsClosed(t *testing.T) {
+	clearStateEnv(t)
+	t.Setenv(connectoragentstate.EnvKeyProvider, "not-a-provider")
+	dir := secureStateTestDir(t)
+	store, err := Open(dir)
+	if err == nil {
+		_ = store.Close()
+		t.Fatal("unknown key provider accepted")
+	}
+	// Naming the rejected value proves the provider check failed, not an
+	// earlier directory handshake.
+	if !strings.Contains(err.Error(), connectoragentstate.EnvKeyProvider) || !strings.Contains(err.Error(), "not-a-provider") {
+		t.Fatalf("Open() error = %v, want the provider-name refusal", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, AgentStateFile)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("plaintext envelope created: %v", err)
+	}
+}
+
+// TestOpenLocalKeyWithoutDescriptorFailsClosed runs on every platform: the
+// missing-descriptor refusal comes after the connector has validated the
+// state directory, so it also proves the connector accepts a directory the
+// CLI prepared (including its Windows owner-only DACL).
+func TestOpenLocalKeyWithoutDescriptorFailsClosed(t *testing.T) {
+	clearStateEnv(t)
+	t.Setenv(connectoragentstate.EnvKeyProvider, connectoragentstate.KeyProviderLocalKey)
+	dir := secureStateTestDir(t)
+	store, err := Open(dir)
+	if err == nil {
+		_ = store.Close()
+		t.Fatal("local-key accepted without a key descriptor")
+	}
+	if !strings.Contains(err.Error(), connectoragentstate.EnvLocalKeyFD) {
+		t.Fatalf("Open() error = %v, want the refusal naming %s", err, connectoragentstate.EnvLocalKeyFD)
+	}
+	for _, name := range []string{AgentStateFile, connectoragentstate.SealedAgentStateFile} {
+		if _, err := os.Lstat(filepath.Join(dir, name)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("%s created without a key: %v", name, err)
+		}
 	}
 }
