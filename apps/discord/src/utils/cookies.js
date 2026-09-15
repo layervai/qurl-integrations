@@ -8,6 +8,8 @@
 // cookie, but a browser extension or a sibling-subdomain can produce
 // duplicates with the same name — any ambiguity = no binding,
 // treat as "no cookie."
+const crypto = require('crypto');
+
 function readCookie(req, name) {
   const header = req.headers.cookie;
   if (!header) return null;
@@ -30,4 +32,13 @@ function readCookie(req, name) {
   return matches.length === 1 ? matches[0] : null;
 }
 
-module.exports = { readCookie };
+function timingSafeStringEqual(left, right) {
+  if (typeof left !== 'string' || typeof right !== 'string') return false;
+  const leftBuffer = Buffer.from(left);
+  const rightBuffer = Buffer.from(right);
+  if (leftBuffer.length === 0 || rightBuffer.length === 0) return false;
+  return leftBuffer.length === rightBuffer.length
+    && crypto.timingSafeEqual(leftBuffer, rightBuffer);
+}
+
+module.exports = { readCookie, timingSafeStringEqual };
