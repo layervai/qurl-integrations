@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.5.1](https://github.com/layervai/qurl-integrations/compare/v2.5.0...v2.5.1) (2026-09-15)
+
+
+### Bug Fixes
+
+* **cli:** require production Hub trust in public releases ([#1457](https://github.com/layervai/qurl-integrations/issues/1457)) ([44e3f48](https://github.com/layervai/qurl-integrations/commit/44e3f4822cd9e19124bf3960cb04796bfcc49dcf))
+
 ## [2.5.0](https://github.com/layervai/qurl-integrations/compare/v2.4.0...v2.5.0) (2026-09-11)
 
 
