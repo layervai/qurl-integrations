@@ -29,6 +29,7 @@ type localShareRegistry interface {
 	Get(context.Context, string) (*connectorstate.LocalShare, error)
 	Put(context.Context, *connectorstate.LocalShare) error
 	SetDesired(context.Context, string, string, uint64) (*connectorstate.LocalShare, error)
+	Retarget(context.Context, string, string, uint64) (*connectorstate.LocalShare, error)
 	DisableAtCurrentEpoch(context.Context, string, uint64) (*connectorstate.LocalShare, error)
 	Delete(context.Context, string) error
 }
@@ -52,7 +53,7 @@ func shareStartCmd(opts *globalOpts) *cobra.Command {
 	return &cobra.Command{
 		Use: "start <CRID>", Short: "Start sharing a local app", Args: exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return changeShareState(cmd.Context(), opts, args[0], "start")
+			return changeShareState(cmd.Context(), opts, args[0], "start", nil)
 		},
 	}
 }
@@ -61,18 +62,43 @@ func shareStopCmd(opts *globalOpts) *cobra.Command {
 	return &cobra.Command{
 		Use: "stop <CRID>", Short: "Stop sharing a local app", Args: exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return changeShareState(cmd.Context(), opts, args[0], "stop")
+			return changeShareState(cmd.Context(), opts, args[0], "stop", nil)
 		},
 	}
 }
 
 func shareRestartCmd(opts *globalOpts) *cobra.Command {
-	return &cobra.Command{
+	var target string
+	cmd := &cobra.Command{
 		Use: "restart <CRID>", Short: "Restart sharing a local app", Args: exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return changeShareState(cmd.Context(), opts, args[0], "restart")
+			var destination *publishTarget
+			if cmd.Flags().Changed("target") {
+				var err error
+				if destination, err = restartTarget(target); err != nil {
+					return err
+				}
+			}
+			return changeShareState(cmd.Context(), opts, args[0], "restart", destination)
 		},
 	}
+	cmd.Flags().StringVar(&target, "target", "", "move the share to this loopback HTTP origin, e.g. http://127.0.0.1:4000")
+	return cmd
+}
+
+// restartTarget validates a restart --target with the local publish rules
+// before the command touches local state or the network. A share's target is
+// what the daemon proxies to on this machine, so only a loopback origin can
+// be a destination.
+func restartTarget(raw string) (*publishTarget, error) {
+	target, err := classifyPublishTarget(raw)
+	if err != nil {
+		return nil, err
+	}
+	if target.kind != publishTargetLocal {
+		return nil, invalidPublishTarget(fmt.Errorf("a local share can only move to a loopback HTTP origin such as http://127.0.0.1:4000, not %q", raw))
+	}
+	return target, nil
 }
 
 func shareStatusCmd(opts *globalOpts) *cobra.Command {
@@ -153,7 +179,11 @@ func isPotentialNonConnectorSharingError(err error) bool {
 		apiErr.Code == "invalid_input"
 }
 
-func changeShareState(ctx context.Context, opts *globalOpts, id, action string) error {
+// changeShareState drives start and restart. A non-nil target is a restart
+// that moves the share: the destination is preflighted instead of the stored
+// origin, which may already be gone, and it is stored with the epoch the
+// platform fenced the restart with.
+func changeShareState(ctx context.Context, opts *globalOpts, id, action string, target *publishTarget) error {
 	if action == "stop" {
 		return stopShare(ctx, opts, id)
 	}
@@ -168,7 +198,11 @@ func changeShareState(ctx context.Context, opts *globalOpts, id, action string) 
 	if err != nil {
 		return err
 	}
-	if err := opts.preflightTarget(ctx, local.LocalIP, local.LocalPort); err != nil {
+	preflightIP, preflightPort := local.LocalIP, local.LocalPort
+	if target != nil {
+		preflightIP, preflightPort = target.localIP, target.localPort
+	}
+	if err := opts.preflightTarget(ctx, preflightIP, preflightPort); err != nil {
 		return err
 	}
 	client, err := opts.newClient(ctx)
@@ -197,7 +231,16 @@ func changeShareState(ctx context.Context, opts *globalOpts, id, action string) 
 	if err := validateLocalSharing(local, sharing); err != nil {
 		return compensateShareChange(err, compensateOff, client, registry, local, sharing)
 	}
-	updated, updateErr := registry.SetDesired(ctx, local.ResourceID, string(sharing.DesiredState), sharing.ServingEpoch)
+	var updated *connectorstate.LocalShare
+	var updateErr error
+	if target != nil {
+		// TODO(upstream-contract): SessionGroupRunner.SetRoutes must reconcile a
+		// changed LocalIP/LocalPort for an existing RouteID (qurl-connector's
+		// TestSessionGroupRunnerSetRoutesChangesProxiesWithoutReadmission pins it).
+		updated, updateErr = registry.Retarget(ctx, local.ResourceID, target.canonicalOrigin, sharing.ServingEpoch)
+	} else {
+		updated, updateErr = registry.SetDesired(ctx, local.ResourceID, string(sharing.DesiredState), sharing.ServingEpoch)
+	}
 	if updateErr != nil {
 		return compensateShareChange(updateErr, compensateOff, client, registry, local, sharing)
 	}

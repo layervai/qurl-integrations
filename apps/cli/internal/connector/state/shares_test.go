@@ -466,3 +466,82 @@ func TestLocalSharesRegistryRoundTripsMaxRowsUnderByteCap(t *testing.T) {
 		t.Fatalf("reloaded %d rows, want %d", len(loaded.Shares), localSharesMaxItems)
 	}
 }
+
+func TestLocalShareRegistryRetargetRequiresNewerEpochAndLoopbackTarget(t *testing.T) {
+	dir := secureStateTestDir(t)
+	if err := os.Chmod(dir, 0o700); err != nil { // #nosec G302 -- owner-only directory mode, not a file mode.
+		t.Fatal(err)
+	}
+	registry, err := openOwnedLocalShareRegistry(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding := testResourceBinding(t, "moving-app")
+	binding.CRID = testBindingCRID(t, &binding, apitest.VersionTest)
+	share := LocalShare{
+		CRID: binding.CRID, ResourceID: binding.ResourceID,
+		ConnectorID: binding.ConnectorID, ConnectorRoutingID: binding.ConnectorRoutingID,
+		KnockResourceID: binding.KnockResourceID,
+		TargetURL:       "http://127.0.0.1:3000", LocalIP: "127.0.0.1", LocalPort: 3000,
+		DesiredState: "on", ServingEpoch: 4,
+	}
+	if err := registry.Put(context.Background(), &share); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := registry.Get(context.Background(), share.ResourceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if moved, err := registry.Retarget(context.Background(), share.ResourceID, "http://127.0.0.1:4000", 4); err == nil || moved != nil || !strings.Contains(err.Error(), "newer serving epoch") {
+		t.Fatalf("same-epoch Retarget = %+v, %v; want nil row and a newer-epoch refusal", moved, err)
+	}
+	for name, test := range map[string]struct {
+		target string
+		epoch  uint64
+	}{
+		"older epoch":  {target: "http://127.0.0.1:4000", epoch: 3},
+		"remote host":  {target: "http://192.0.2.1:4000", epoch: 5},
+		"https":        {target: "https://127.0.0.1:4000", epoch: 5},
+		"path":         {target: "http://127.0.0.1:4000/app", epoch: 5},
+		"credentials":  {target: "http://me:secret@127.0.0.1:4000", epoch: 5},
+		"hostname":     {target: "http://localhost:4000", epoch: 5},
+		"missing port": {target: "http://127.0.0.1", epoch: 5},
+		"not a url":    {target: "::not-a-url", epoch: 5},
+	} {
+		if moved, err := registry.Retarget(context.Background(), share.ResourceID, test.target, test.epoch); err == nil || moved != nil {
+			t.Fatalf("%s: Retarget = %+v, %v; want nil row and an error", name, moved, err)
+		}
+	}
+	if _, err := registry.Retarget(context.Background(), "missing", "http://127.0.0.1:4000", 5); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("Retarget of an unknown share = %v, want os.ErrNotExist", err)
+	}
+	unchanged, err := registry.Get(context.Background(), share.ResourceID)
+	if err != nil || unchanged.TargetURL != stored.TargetURL || unchanged.LocalPort != stored.LocalPort ||
+		unchanged.ServingEpoch != stored.ServingEpoch || !unchanged.UpdatedAt.Equal(stored.UpdatedAt) {
+		t.Fatalf("refused Retarget changed the row: %+v -> %+v, %v", stored, unchanged, err)
+	}
+
+	moved, err := registry.Retarget(context.Background(), share.CRID, "http://[::1]:4000", 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if moved.TargetURL != "http://[::1]:4000" || moved.LocalIP != "::1" || moved.LocalPort != 4000 ||
+		moved.DesiredState != "on" || moved.ServingEpoch != 5 || moved.UpdatedAt.Before(stored.UpdatedAt) ||
+		moved.CRID != share.CRID || moved.ConnectorID != share.ConnectorID ||
+		moved.ConnectorRoutingID != share.ConnectorRoutingID || moved.KnockResourceID != share.KnockResourceID {
+		t.Fatalf("moved row = %+v", moved)
+	}
+	durable, err := registry.Get(context.Background(), share.ResourceID)
+	if err != nil || durable.TargetURL != moved.TargetURL || durable.ServingEpoch != 5 || !durable.UpdatedAt.Equal(moved.UpdatedAt) {
+		t.Fatalf("durable moved row = %+v, %v", durable, err)
+	}
+	// A restart is authoritative desired-on: moving a locally fail-closed
+	// share at the newer epoch turns it back on with the new target.
+	if _, err := registry.DisableAtCurrentEpoch(context.Background(), share.ResourceID, 5); err != nil {
+		t.Fatal(err)
+	}
+	reenabled, err := registry.Retarget(context.Background(), share.ResourceID, "http://127.0.0.1:5000", 6)
+	if err != nil || reenabled.DesiredState != "on" || reenabled.ServingEpoch != 6 || reenabled.LocalPort != 5000 {
+		t.Fatalf("Retarget after local disable = %+v, %v", reenabled, err)
+	}
+}
