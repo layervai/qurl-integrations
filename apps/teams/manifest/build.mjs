@@ -28,14 +28,14 @@ const ENVIRONMENTS = {
 };
 
 export function renderManifest(template, { env, appId, domain }) {
+  if (!Object.hasOwn(ENVIRONMENTS, env)) throw new Error(`env must be one of ${Object.keys(ENVIRONMENTS).join(', ')}`);
   const environment = ENVIRONMENTS[env];
-  if (!environment) throw new Error(`env must be one of ${Object.keys(ENVIRONMENTS).join(', ')}`);
   if (!UUID.test(appId)) throw new Error('app-id must be the bot application (client) id as a UUID');
   if (!HOST.test(domain)) throw new Error('domain must be a bare DNS host name, with no scheme, port, or path');
 
   const values = { BOT_APP_ID: appId, BOT_DOMAIN: domain, APP_NAME_SHORT: environment.shortName };
   const rendered = template.replaceAll(/\$\{(\w+)\}/g, (_, key) => {
-    if (!(key in values)) throw new Error(`template references unknown placeholder ${key}`);
+    if (!Object.hasOwn(values, key)) throw new Error(`template references unknown placeholder ${key}`);
     return values[key];
   });
 
@@ -139,10 +139,10 @@ if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.me
     process.stderr.write('usage: node manifest/build.mjs --env <sandbox|production> --app-id <uuid> --domain <host>\n');
     process.exit(2);
   }
+  const pkg = buildPackage({ env, appId, domain });
   const out = join(here, 'dist');
   rmSync(out, { recursive: true, force: true });
   mkdirSync(out, { recursive: true });
-  const pkg = buildPackage({ env, appId, domain });
   const file = join(out, `qurl-teams-${env}.zip`);
   writeFileSync(file, pkg);
   process.stdout.write(`${file}\nsha256 ${createHash('sha256').update(pkg).digest('hex')}\n`);

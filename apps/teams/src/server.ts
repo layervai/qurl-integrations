@@ -330,6 +330,8 @@ export async function createProductionTeamsConfig(): Promise<TeamsProductionConf
   });
   const activeActivities = new Set<Promise<void>>();
   // TODO(upstream-contract): the SDK propagates this status after authentication.
+  // next() enters the message handler synchronously, and its HTTP response is
+  // written after that handler returns. Admission and shutdown depend on this.
   // Reject excess work before acknowledging it or starting any bot side effect.
   app.use(({ activity, next }) => activity.type === 'message' && activeActivities.size >= MAX_ACTIVE_MESSAGES
     ? { status: 503 }

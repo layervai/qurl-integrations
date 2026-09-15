@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -42,6 +42,24 @@ describe('teams app manifest', () => {
     }
   });
 
+  it('retains the previous package when CLI input validation fails', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'qurl teams manifest '));
+    const previous = buildPackage({ env: 'sandbox', appId: BOT_UUID, domain: DOMAIN });
+    const output = join(dir, 'dist', 'qurl-teams-sandbox.zip');
+    try {
+      copyFileSync(buildScript, join(dir, 'build.mjs'));
+      writeFileSync(join(dir, 'manifest.template.json'), template);
+      mkdirSync(join(dir, 'dist'));
+      writeFileSync(output, previous);
+      const result = spawnSync(process.execPath, [join(dir, 'build.mjs'), '--env', 'constructor', '--app-id', BOT_UUID, '--domain', DOMAIN], { encoding: 'utf8' });
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toContain('env must be one of');
+      expect(readFileSync(output).equals(previous)).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('ships no real identifiers in the committed template', () => {
     // qurl-integrations is PUBLIC. The public marketing URLs on layerv.ai are
     // fine and are locked by D10; what must never appear here is the pre-prod
@@ -72,7 +90,16 @@ describe('teams app manifest', () => {
   it('names the app per environment', () => {
     expect(JSON.parse(render()).name.short).toBe('qURL (sandbox)');
     expect(JSON.parse(render({ env: 'production' })).name.short).toBe('qURL');
-    expect(() => render({ env: 'staging' })).toThrow('env must be one of');
+    for (const env of ['staging', 'constructor', 'toString', 'valueOf', '__proto__']) {
+      expect(() => render({ env })).toThrow('env must be one of');
+    }
+  });
+
+  it('rejects unknown placeholders including inherited object properties', () => {
+    for (const key of ['UNKNOWN', 'constructor', 'toString', '__proto__']) {
+      const invalid = template.replace('${APP_NAME_SHORT}', `\${${key}}`);
+      expect(() => renderManifest(invalid, { env: 'sandbox', appId: BOT_UUID, domain: DOMAIN })).toThrow(`template references unknown placeholder ${key}`);
+    }
   });
 
   it('rejects an app id or domain Teams would silently not match', () => {
