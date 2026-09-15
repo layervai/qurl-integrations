@@ -1015,6 +1015,9 @@ async function ensureWebhookSubscription(opts) {
   } else {
     // URL-migration orphan cleanup already ran above (pre-branch), so
     // we can go straight to create here.
+    if (isInfraSeedSentinel(initialSecret)) {
+      logger.info('qURL webhook SSM secret is the infra seed sentinel and no subscription exists — creating as designed');
+    }
     const created = await createSubscription({ apiEndpoint, apiKey, bridgeUrl, description });
     webhookId = created.webhook_id;
     secret = created.secret;

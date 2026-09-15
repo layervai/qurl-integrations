@@ -101,7 +101,7 @@ finds the existing sub, sees the SSM secret matches, returns `reused`).
   task-def update is skipped, no traffic shifts. Existing bot tasks
   keep running with the previous (still-valid) secret. Root-cause in
   CloudWatch logs for the Lambda; re-run apply when fixed.
-- **Bot reads the seed sentinel or a whitespace-only configured secret.** The
+- **Bot reads the seed sentinel.** The
   receiver tier (`PROCESS_ROLE=http` or `combined`) fails in `startServer()`
   before listening: health, OAuth, and webhook delivery are unavailable on that
   tier. Gateway-only tasks never verify webhook signatures and keep serving
@@ -112,7 +112,8 @@ finds the existing sub, sees the SSM secret matches, returns `reused`).
   This does not validate arbitrary manual SSM edits: HMAC mismatches still
   reject deliveries. Restore the registrar-persisted secret, or clear SSM and
   re-invoke the Lambda (same recovery as the empty-secret case below).
-- **Bot reads empty `QURL_WEBHOOK_SECRET`.** Means the Lambda never
+- **Bot reads empty `QURL_WEBHOOK_SECRET`** (outer whitespace is trimmed on
+  read, so a whitespace-only value lands here too)**.** Means the Lambda never
   ran successfully OR ran but SSM `PutParameter` failed (IAM, network).
   Receiver returns 503 (qurl-service retries). Recover by running the
   Lambda manually and verifying CloudWatch logs for the persist call.

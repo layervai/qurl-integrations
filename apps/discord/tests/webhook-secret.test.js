@@ -2,7 +2,10 @@ jest.mock('../src/logger', () => ({
   info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn(), audit: jest.fn(),
 }));
 
+const { captureFreshConfig } = require('./helpers/fresh-config');
+
 describe('qURL webhook secret trust boundary', () => {
+  beforeEach(() => jest.clearAllMocks());
   afterEach(() => {
     jest.resetModules();
     jest.dontMock('../src/config');
@@ -36,9 +39,17 @@ describe('qURL webhook secret trust boundary', () => {
   });
 
   it.each([
+    ['padded server secret', ' whsec_1234567890abcdef\n', 'whsec_1234567890abcdef'],
+    ['whitespace-only', '   ', ''],
+  ])('trims outer whitespace on config read — %s', (_label, raw, expected) => {
+    captureFreshConfig({ QURL_WEBHOOK_SECRET: raw }, (cfg) => {
+      expect(cfg.QURL_WEBHOOK_SECRET).toBe(expected);
+    });
+  });
+
+  it.each([
     'PLACEHOLDER',
     ' placeholder\n',
-    '   ',
   ])('fails receiver-tier startup before listening on a configured untrusted secret: %s', (value) => {
     jest.resetModules();
     jest.doMock('../src/config', () => ({ ...jest.requireActual('../src/config'), QURL_WEBHOOK_SECRET: value }));

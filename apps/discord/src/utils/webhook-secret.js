@@ -14,6 +14,8 @@ const logger = require('../logger');
 // qurl-service/internal/domain/webhook.go (GenerateWebhookSecret). Shape drift
 // warns but must not discard a secret whose upstream rotation already committed.
 const SERVER_SECRET_PREFIX = 'whsec_';
+// Upstream emits 43 chars (32 random bytes, base64url). 16 is a deliberate
+// tolerance band so a plausible future format does not warn; do not tighten.
 const SERVER_SECRET_MIN_BODY_LENGTH = 16;
 const SERVER_SECRET_MIN_LENGTH = SERVER_SECRET_PREFIX.length + SERVER_SECRET_MIN_BODY_LENGTH;
 const SERVER_SECRET_BODY_RE = /^[A-Za-z0-9_-]+$/;
@@ -39,8 +41,9 @@ function isUsableSecret(value) {
   return typeof value === 'string' && value.trim().length > 0 && !isInfraSeedSentinel(value);
 }
 
-// Preserve the exact server bytes, including whitespace, across persistence and
-// restart. Usability is not proof that an operator-supplied key matches upstream.
+// config.js trims outer whitespace on read; beyond that, preserve the exact
+// server bytes across persistence and restart. Usability is not proof that an
+// operator-supplied key matches upstream.
 function assertConfiguredWebhookSecret(value) {
   if (value === undefined || value === null || value === '') return false;
   if (!isUsableSecret(value)) {

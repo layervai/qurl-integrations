@@ -44,6 +44,7 @@ describe('ensureWebhookSubscription — cold bootstrap (no existing sub + no rea
     ['terraform seed sentinel', 'PLACEHOLDER'],
   ])('creates a fresh subscription when no existing matches the bridge URL — %s', async (_label, initialSecret) => {
     const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const infoSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
     try {
       mockFetchResponses({
         'GET /v1/webhooks': () => ({ body: { data: [] } }),
@@ -59,8 +60,14 @@ describe('ensureWebhookSubscription — cold bootstrap (no existing sub + no rea
       expect(result.webhookId).toBe('wh_cold_bootstrap');
       expect(result.secret).toBe('whsec_fresh_bootstrap_secret');
       expect(warnSpy).not.toHaveBeenCalledWith(expect.stringContaining('initial secret has unrecognized format'));
+      // The seed being present on a cold bootstrap is the run an operator is
+      // staring at; it must leave a record even though no rotation happens.
+      const seedLogged = infoSpy.mock.calls
+        .some(([message]) => message.includes('infra seed sentinel and no subscription exists'));
+      expect(seedLogged).toBe(initialSecret === 'PLACEHOLDER');
     } finally {
       warnSpy.mockRestore();
+      infoSpy.mockRestore();
     }
   });
 });
