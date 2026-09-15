@@ -142,6 +142,7 @@ describe('CRIDs at the Teams command boundary', () => {
     const help = helpMessage();
     expect(help).toContain('$<crid|alias>');
     expect(help).not.toMatch(/resource[ -]+ids?/i);
+    expect(help).toContain('User commands (channels only, except setup):');
   });
 
   it('keeps the CRID alongside an alias without changing authorization or index keys', async () => {

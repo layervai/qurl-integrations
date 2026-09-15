@@ -150,7 +150,10 @@ export class TeamsBot {
     }
     const admin = ADMIN_COMMANDS.has(command.verb) ? await this.#options.data.checkAdmin(tenantId, actorId) : undefined;
     if (admin && !admin.isAdmin) throw new UserFacingError('This command is limited to the tenant owner and qURL admins.');
-    if (command.verb === 'admins') { const admins = await this.#options.data.listAdmins(tenantId); return `Tenant owner: ${admins.ownerId}\nAdmins: ${admins.adminIds.length ? admins.adminIds.join(', ') : 'none'}`; }
+    if (command.verb === 'admins') {
+      const admins = await this.#options.data.listAdmins(tenantId);
+      return boundedCatalogue(`Tenant owner: ${admins.ownerId}\nAdmins: `, admins.adminIds.length ? admins.adminIds : ['none'], ', ');
+    }
     if (command.verb === 'add' || command.verb === 'remove') {
       if (!admin?.installationId) throw new Error('workspace installation is unavailable');
       const mention = activity.entities?.find(entity => entity.type === 'mention' && entity.mentioned?.id === command.userId)?.mentioned;
@@ -171,7 +174,7 @@ export class TeamsBot {
       if (!admin?.installationId) throw new Error('workspace installation is unavailable');
       const credential = await this.#options.data.tenantCredential(tenantId).catch((error: unknown) => {
         this.#options.logger?.error('Tenant credentials could not be read during uninstall', { tenantId, error });
-        throw new UserFacingError('The saved qURL credentials could not be read. Nothing was disconnected. Ask your qURL operator to restore credential access or complete recovery.');
+        throw new UserFacingError('The saved qURL credentials could not be read. Nothing was disconnected. Please try again in a moment. If this keeps happening, contact your qURL operator.');
       });
       let upstreamRevocationPending = credential !== undefined && credential.keyId === undefined;
       if (credential?.keyId) {
@@ -200,7 +203,7 @@ export class TeamsBot {
       // not be told channel access was removed when no row was touched.
       const removed = await this.#options.data.unbindScopeAlias(tenantId, scopeId, alias);
       return removed
-        ? `Removed alias \`$${alias}\` from this channel. The resource remains protected.`
+        ? `Removed alias \`$${alias}\` from this channel. This resource is still available to everyone in this channel.`
         : `No alias \`$${alias}\` is bound in this channel.`;
     }
     const qurl = await this.#qurl(tenantId);
@@ -276,7 +279,7 @@ export class TeamsBot {
   async aliases(tenantId: string, scopeId: string): Promise<string> {
     const entries = await this.#options.data.scopeAliases(tenantId, scopeId);
     if (!entries.length) return 'No aliases are configured in this channel.';
-    return `Aliases in this channel:\n${entries.map(entry => `- \`$${entry.alias}\` -> \`$${entry.crid ?? entry.resourceId}\``).join('\n')}`;
+    return boundedCatalogue('Aliases in this channel:\n', entries.map(entry => `- \`$${entry.alias}\` -> \`$${entry.crid ?? entry.resourceId}\``));
   }
 
   async resources(qurl: QurlClient, signal?: AbortSignal): Promise<QurlResource[]> {
@@ -304,7 +307,7 @@ export class TeamsBot {
     if (!visible.length) return 'No protected resources are available in this channel yet.';
     const rows = visible.map(resource =>
       `- \`$${resource.crid ?? resource.resourceId}\`  ${resource.description ?? resource.slug ?? resource.targetUrl ?? resource.crid ?? resource.resourceId}`);
-    return `Protected resources in this channel:\n${rows.join('\n')}`;
+    return boundedCatalogue('Protected resources in this channel:\n', rows);
   }
 
   resolve(resources: readonly QurlResource[], token: string): QurlResource {
@@ -530,11 +533,31 @@ export class TeamsBot {
   }
 }
 
+function boundedCatalogue(header: string, rows: readonly string[], separator = '\n'): string {
+  // TODO(upstream-contract): Teams recommends <=80 KB UTF-16 per message.
+  // Reserve room for the Activity envelope; count JSON escaping conservatively.
+  // https://learn.microsoft.com/en-us/microsoftteams/platform/bots/how-to/format-your-bot-messages
+  // ponytail: one reply preview; add pagination when complete browsing is needed.
+  const footer = (omitted: number) => `\n\nEntries omitted to fit this Teams reply: ${omitted}.`;
+  let remaining = 32_000 - JSON.stringify(header).length - JSON.stringify(footer(rows.length)).length;
+  let text = header;
+  let shown = 0;
+  for (const row of rows) {
+    const part = `${shown ? separator : ''}${row}`;
+    const length = JSON.stringify(part).length - 2;
+    if (length > remaining) break;
+    text += part;
+    remaining -= length;
+    shown += 1;
+  }
+  return shown === rows.length ? text : `${text}${footer(rows.length - shown)}`;
+}
+
 export function helpMessage(): string {
   return [
     'qURL for Teams',
     '',
-    'User commands:',
+    'User commands (channels only, except setup):',
     '- `setup <email>`',
     '- `get $<crid|alias> [dm:true] [reason:"..."]`',
     '- `list`',

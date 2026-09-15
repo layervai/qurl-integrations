@@ -48,6 +48,13 @@ channel grants intact. Older resources and alias rows without CRIDs still use
 their public keys. New alias rows retain the returned CRID for display while
 their authorization and cleanup keys stay unchanged.
 
+`list`, `aliases`, and `admins` keep complete entries within a single reply's
+size budget and report how many entries were omitted. Long catalogues are
+previews, with no pagination yet. A known CRID or alias still works with `get`
+even when it does not fit in the preview. These replies reserve space below
+[Teams' message size limit](https://learn.microsoft.com/en-us/microsoftteams/platform/bots/how-to/format-your-bot-messages);
+setup links and Connector instructions are never truncated by this formatter.
+
 `revoke $<crid>` can retry an ordinary revoked resource after partial channel
 cleanup. If the service no longer retains its identity, use a surviving alias
 or ask the operator to clean up using the retained public key; the bot does

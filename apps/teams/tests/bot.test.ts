@@ -709,8 +709,78 @@ describe('Teams bot primitives', () => {
     });
     const activity = { type: 'message', from: { aadObjectId: 'actor' } };
 
-    await expect(bot.execute(activity, 'tenant-1', 'channel-1', true, parseCommand('list'))).resolves.toMatch(/Visible resource/);
+    await expect(bot.execute(activity, 'tenant-1', 'channel-1', true, parseCommand('list'))).resolves.toBe('Protected resources in this channel:\n- `$visible`  Visible resource');
     await expect(bot.execute(activity, 'tenant-1', 'channel-1', true, parseCommand('get $hidden'))).rejects.toThrow('Resource not found');
+  });
+
+  it.each(['aliases', 'list', 'admins'])('delivers an oversized %s catalogue as complete entries with an omitted count', async command => {
+    const crid = 'aho4gla7hppidc664lhtpy3vq3fif5tn3m2esan3tbgtnhwafvqn6fblhemq';
+    const entries = Array.from({ length: command === 'admins' ? 2_000 : 500 }, (_, i) => ({
+      alias: `alias${i}`.padEnd(63, 'a'), resourceId: `key-${i}`, crid,
+      description: `${'🔐\\"\u0000'.repeat(60)}-${i}`,
+      adminId: `00000000-0000-4000-8000-${String(i).padStart(12, '0')}`,
+    }));
+    const rows = entries.map(entry => command === 'aliases' ? `- \`$${entry.alias}\` -> \`$${crid}\``
+      : command === 'list' ? `- \`$${crid}\`  ${entry.description}` : entry.adminId);
+    const header = command === 'aliases' ? 'Aliases in this channel:\n' : command === 'list'
+      ? 'Protected resources in this channel:\n' : 'Tenant owner: owner\nAdmins: ';
+    const separator = command === 'admins' ? ', ' : '\n';
+    const delivered: string[] = [];
+    const errors: string[] = [];
+    const messages = new TeamsSdkMessagePoster({ api: { http: {
+      post: async (_path: string, body: { text: string }) => {
+        if (Buffer.byteLength(JSON.stringify(body), 'utf16le') > 80_000) throw new Error('MessageSizeTooBig');
+        delivered.push(body.text);
+      },
+    } } } as never);
+    const bot = new TeamsBot({
+      qurl: { listResources: async () => ({ resources: [...entries, { resourceId: 'hidden', description: 'HIDDEN' }] }) } as unknown as QurlClient,
+      data: {
+        scopeAliases: async () => entries,
+        allowedResourceIds: async () => new Set(entries.map(entry => entry.resourceId)),
+        checkAdmin: async () => ({ isAdmin: true }),
+        listAdmins: async () => ({ ownerId: 'owner', adminIds: entries.map(entry => entry.adminId) }),
+      } as unknown as TeamsDataStore,
+      messages, qurlEndpoint: 'https://api.sandbox.example',
+      logger: { error: (message: string) => { errors.push(message); } } as never,
+    });
+    await bot.handleActivity({
+      type: 'message', text: command, from: { aadObjectId: 'actor' }, id: 'incoming',
+      serviceUrl: 'https://smba.trafficmanager.net/teams', conversation: { id: 'thread', conversationType: 'channel' },
+      channelData: { tenant: { id: 'tenant' }, channel: { id: 'channel' } },
+    });
+    expect(delivered).toHaveLength(1);
+    const text = delivered[0]!;
+    expect(Buffer.byteLength(JSON.stringify(text), 'utf16le')).toBeLessThanOrEqual(64_000);
+    const omitted = Number(text.match(/Entries omitted to fit this Teams reply: (\d+)\.$/)?.[1]);
+    expect(omitted).toBeGreaterThan(0);
+    expect(omitted).toBeLessThan(entries.length);
+    expect(text).toBe(`${header}${rows.slice(0, entries.length - omitted).join(separator)}\n\nEntries omitted to fit this Teams reply: ${omitted}.`);
+    expect(text).not.toContain('HIDDEN');
+    expect(errors).toEqual([]);
+  });
+
+  it('reports an oversized first list entry without cutting its CRID or description', async () => {
+    const bot = new TeamsBot({
+      data: { allowedResourceIds: async () => new Set(['visible']) } as unknown as TeamsDataStore,
+      messages: {} as never, qurlEndpoint: 'https://api.sandbox.example',
+    });
+    await expect(bot.list('tenant', 'channel', [{ resourceId: 'visible', description: '🔐'.repeat(40_000) }])).resolves.toBe(
+      'Protected resources in this channel:\n\n\nEntries omitted to fit this Teams reply: 1.',
+    );
+  });
+
+  it.each([{ adminIds: [] }, { adminIds: ['admin-a', 'admin-b'] }])('preserves the owner and ordinary admins output for $adminIds', async ({ adminIds }) => {
+    const bot = new TeamsBot({
+      data: {
+        checkAdmin: async () => ({ isAdmin: true }),
+        listAdmins: async () => ({ ownerId: 'owner', adminIds }),
+      } as unknown as TeamsDataStore,
+      messages: {} as never, qurlEndpoint: 'https://api.sandbox.example',
+    });
+    await expect(bot.execute({ type: 'message', from: { aadObjectId: 'owner' } }, 'tenant', 'personal', false, parseCommand('admins'))).resolves.toBe(
+      `Tenant owner: owner\nAdmins: ${adminIds.length ? adminIds.join(', ') : 'none'}`,
+    );
   });
 
   it('mints a channel alias without enumerating the account and rejects a removed channel grant', async () => {
@@ -1177,7 +1247,7 @@ describe('Teams bot primitives', () => {
     await expect(bot.execute(
       { type: 'message', from: { id: 'delivery', aadObjectId: 'owner' } },
       'tenant', 'channel', true, parseCommand('uninstall'),
-    )).rejects.toThrow('Nothing was disconnected. Ask your qURL operator');
+    )).rejects.toThrow('Nothing was disconnected. Please try again in a moment. If this keeps happening, contact your qURL operator.');
     expect(clientCalls).toBe(0);
     expect(deletes).toBe(0);
     expect(errors).toHaveLength(1);
@@ -1302,7 +1372,7 @@ describe('Teams bot primitives', () => {
     await expect(bot.execute(
       { type: 'message', from: { aadObjectId: 'admin' } },
       'tenant-1', 'channel-1', true, parseCommand('unset-alias $docs'),
-    )).resolves.toContain('resource remains protected');
+    )).resolves.toContain('This resource is still available to everyone in this channel.');
     expect(unbound).toBe('docs');
   });
 
