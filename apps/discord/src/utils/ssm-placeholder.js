@@ -1,6 +1,6 @@
 'use strict';
 
-// TODO(infra-sentinel-sync): qurl-integrations-infra seeds optional SSM
+// TODO(upstream-contract): qurl-integrations-infra seeds optional SSM
 // parameters with this literal in qurl-bot-discord/terraform/main.tf
 // (`value = "PLACEHOLDER"` and `value_wo = "PLACEHOLDER"`). Update this
 // application-side constant in lockstep. If they drift, a seeded sentinel can

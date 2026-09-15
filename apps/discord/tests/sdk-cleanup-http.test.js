@@ -11,6 +11,7 @@ jest.mock('../src/config', () => mockConfig);
 jest.mock('../src/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn(), audit: jest.fn() }));
 
 const { revokeMintedLinks } = require('../src/connector');
+const { deleteLink } = require('../src/qurl');
 const { redeemDelegatedBatch } = require('../src/private-upload');
 const { PUBLIC_KEY_RESOURCE_ID: source, CRID_RESOURCE_ID: crid } = require('./helpers/qurl-fixtures');
 const oldChild = 'q_00000000001';
@@ -147,4 +148,10 @@ test('ordinary SDK revocation stops at the caller deadline without claiming clea
   expect(requests.some(request => request.method === 'DELETE')).toBe(true);
   expect(children.has(newChild)).toBe(true);
   expect(children.has(oldChild)).toBe(true);
+});
+
+
+test.each(['q_ABC123', 'q_123456789012', `upl_${'a'.repeat(43)}`])('SDK rejects non-resource identity %s before any parent DELETE', async id => {
+  await expect(deleteLink(id, 'test-guild-key')).rejects.toThrow();
+  expect(requests).toEqual([]);
 });

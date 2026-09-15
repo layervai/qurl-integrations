@@ -120,7 +120,7 @@ test('P-256 signatures are strict DER, valid, and always low-S', () => {
   expect(readDerS(signature)).toBeLessThanOrEqual(halfOrder);
 });
 
-test('upload ambiguity respects Retry-After and accepts an exact 200 replay', async () => {
+test.each(['1', 'Sun, 06 Sep 2026 21:00:01 GMT'])('upload ambiguity respects Retry-After %s and accepts an exact 200 replay', async retryAfter => {
   const seen = [];
   const sleep = jest.fn();
   mockOpener.fetch
@@ -128,7 +128,7 @@ test('upload ambiguity respects Retry-After and accepts an exact 200 replay', as
       const request = builder(new URL('https://private.test:48123/internal/v1/uploads'));
       seen.push(request.headers);
       return jsonResponse(503, { error: { code: 'mutation_outcome_unknown', retryable: true } }, {
-        'Retry-After': '1',
+        'Retry-After': retryAfter,
       });
     })
     .mockImplementationOnce(async builder => {
