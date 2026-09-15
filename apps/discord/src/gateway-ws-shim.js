@@ -131,6 +131,10 @@ const USER_GUILDS_PAGE_LIMIT = 200;
 // One shard supports at most 2,500 guilds; 25 pages leaves 2x headroom while
 // bounding a malformed/non-advancing upstream pagination walk at 5,000 rows.
 const MAX_USER_GUILDS_PAGES = 25;
+// Three failed REST seed walks enter a one-hour cooldown instead of hammering
+// REST or permanently losing the gauge on a long-lived RESUME.
+const GUILD_SEED_MAX_ATTEMPTS = 3;
+const GUILD_SEED_COOLDOWN_MS = 60 * 60 * 1000;
 
 // The @discordjs/ws major.minor range whose WebSocketShard.onMessage
 // dispatch ordering (shard.emit(Ready) BEFORE shard.emit(Dispatch))
@@ -349,11 +353,11 @@ function createGatewayWsShim({
           // restores a fresh allowance for the next reconnect.
           // See module header.
           identifyAttempts = 0;
-          activeGuildIds = new Set(
-            Array.isArray(data?.d?.guilds)
-              ? data.d.guilds.map((guild) => guild?.id).filter((id) => typeof id === 'string')
-              : [],
-          );
+          // A READY without the guilds array is malformed, not "zero guilds":
+          // leave state unknown so the REST seed publishes an honest count.
+          activeGuildIds = Array.isArray(data?.d?.guilds)
+            ? new Set(data.d.guilds.map((guild) => guild?.id).filter((id) => typeof id === 'string'))
+            : null;
           pendingGuildAdds.clear();
           pendingGuildRemoves.clear();
           logger.info('gateway-ws-shim: READY received', {
@@ -476,12 +480,14 @@ function createGatewayWsShim({
       // TODO(upstream-contract): VERIFIED_DJS_WS_MAJOR_MINOR and its package
       // declaration test pin @discordjs/ws's { ackAt, latency } payload.
       // ackAt is Date.now() epoch milliseconds, as readGatewayHealth requires.
-      manager.on(WebSocketShardEvents.HeartbeatComplete, ({ ackAt, latency } = {}) => {
+      manager.on(WebSocketShardEvents.HeartbeatComplete, (payload) => {
         if (stopped) return;
-        if (typeof ackAt === 'number' && ackAt > 0) {
+        const { ackAt, latency } = payload ?? {};
+        // The sample is atomic: a partial payload yields no opinion rather
+        // than a fresh ACK paired with the -1 latency sentinel, which would
+        // fail readGatewayHealth's ping gate and emit unhealthy every tick.
+        if (typeof ackAt === 'number' && ackAt > 0 && typeof latency === 'number' && latency >= 0) {
           lastHeartbeatAckAt = ackAt;
-        }
-        if (typeof latency === 'number' && latency >= 0) {
           lastHeartbeatLatencyMs = latency;
         }
       });
@@ -682,14 +688,12 @@ function createGatewayWsShim({
       if (activeGuildIds) return activeGuildIds.size;
 
       if (!guildSeedPromise) {
-        // Three failed walks enter a one-hour cooldown instead of hammering
-        // REST or permanently losing the gauge on a long-lived RESUME.
-        if (guildSeedAttempts >= 3) {
+        if (guildSeedAttempts >= GUILD_SEED_MAX_ATTEMPTS) {
           if (Date.now() < guildSeedRetryAt) return null;
           guildSeedAttempts = 0;
         }
         guildSeedAttempts += 1;
-        guildSeedRetryAt = Date.now() + 60 * 60 * 1000;
+        guildSeedRetryAt = Date.now() + GUILD_SEED_COOLDOWN_MS;
         // The new REST snapshot includes prior events. Retain only changes
         // during this walk, bounding failed-seed event retention to cooldown.
         pendingGuildAdds.clear();
@@ -742,7 +746,7 @@ function createGatewayWsShim({
           // On failure the next metric tick may retry, subject to cooldown.
           // sampleInFlight in gateway-metrics prevents overlapping sweeps.
           guildSeedPromise = null;
-          if (!activeGuildIds && guildSeedAttempts >= 3) {
+          if (!activeGuildIds && guildSeedAttempts >= GUILD_SEED_MAX_ATTEMPTS) {
             logger.warn('gateway-ws-shim: guild seed cooldown engaged', {
               retry_at: new Date(guildSeedRetryAt).toISOString(),
             });
