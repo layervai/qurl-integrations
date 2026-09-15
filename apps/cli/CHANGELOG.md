@@ -1,5 +1,40 @@
 # Changelog
 
+## [2.5.3](https://github.com/layervai/qurl-integrations/compare/v2.5.2...v2.5.3) (2026-09-15)
+
+
+### Bug Fixes
+
+* **cli:** wait for macOS daemon shutdown during upgrades ([#1461](https://github.com/layervai/qurl-integrations/issues/1461)) ([a7c9728](https://github.com/layervai/qurl-integrations/commit/a7c97281108d223ca7f5b7ee13bbbbdfe88d3158))
+
+## [2.5.2](https://github.com/layervai/qurl-integrations/compare/v2.5.1...v2.5.2) (2026-09-15)
+
+
+### Bug Fixes
+
+* **cli:** replace deprecated Homebrew postflight hook ([#1459](https://github.com/layervai/qurl-integrations/issues/1459)) ([1f45ff4](https://github.com/layervai/qurl-integrations/commit/1f45ff43d570d6bbeaf64ebed688217883c4c000))
+
+## [2.5.1](https://github.com/layervai/qurl-integrations/compare/v2.5.0...v2.5.1) (2026-09-15)
+
+
+### Bug Fixes
+
+* **cli:** require production Hub trust in public releases ([#1457](https://github.com/layervai/qurl-integrations/issues/1457)) ([44e3f48](https://github.com/layervai/qurl-integrations/commit/44e3f4822cd9e19124bf3960cb04796bfcc49dcf))
+
+## [2.5.0](https://github.com/layervai/qurl-integrations/compare/v2.4.0...v2.5.0) (2026-09-11)
+
+
+### ⚠ BREAKING CHANGES
+
+* **cli:** Share and browser commands require deployment verification settings. Unsigned direct or pre-signed responses are rejected. Issuer-only settings support local verification; downloads also require transport settings.
+
+### Bug Fixes
+
+* **ci:** replace CLI M2M tokens with scoped automation keys ([#1431](https://github.com/layervai/qurl-integrations/issues/1431)) ([4dc4d93](https://github.com/layervai/qurl-integrations/commit/4dc4d933c6a837ab0211184cfb787452f4e61b11))
+* **cli:** bind shared links to the advertised CRID ([#1418](https://github.com/layervai/qurl-integrations/issues/1418)) ([fae32e5](https://github.com/layervai/qurl-integrations/commit/fae32e5856fe77992550dba07272f126fd96801f))
+* **cli:** explain account-wide Connector quota limits ([#1435](https://github.com/layervai/qurl-integrations/issues/1435)) ([33a49cc](https://github.com/layervai/qurl-integrations/commit/33a49ccd225ae1ea582f7922f851a63b8feec0e3))
+* **cli:** resume interrupted device enrollment ([#1447](https://github.com/layervai/qurl-integrations/issues/1447)) ([75a670c](https://github.com/layervai/qurl-integrations/commit/75a670c9569110421229cfba15612b9eb0762813))
+
 ## [2.4.0](https://github.com/layervai/qurl-integrations/compare/v2.3.3...v2.4.0) (2026-09-08)
 
 

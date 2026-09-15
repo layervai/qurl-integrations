@@ -191,6 +191,10 @@ the owner-only local state directory. The account API key and one-time
 enrollment credential remain in memory and are not stored by qurl. A warm
 command reuses the device identity and does not read `QURL_API_KEY`.
 
+If enrollment stops before it completes, run `qurl login` again with a key for
+the same account. The CLI resumes enrollment with the saved device identity.
+Keep the local state directory unchanged for this retry.
+
 `qurl whoami` checks the registered device and shows its account.
 
 Authenticated commands need the owner-only local state directory to remain
@@ -519,7 +523,10 @@ machine serves up to 2000 local shares (see [Scale](#scale)). On macOS the
 first local `publish` or `start` installs an owner-only LaunchAgent. On Windows
 it installs a least-privilege per-user Task Scheduler job. The installed `qurl`
 path survives normal upgrades, and a binary-version change reloads the resident
-daemon deliberately. Ordinary lifecycle commands reload desired state over an
+daemon deliberately. On macOS, replacement waits for the prior daemon to finish
+its configured shutdown before it retries startup. If that shutdown times out,
+retry the command to restore the background job.
+Ordinary lifecycle commands reload desired state over an
 owner-only local control channel without restarting healthy sibling shares.
 
 <!-- TODO(upstream-contract): the grace mirrors qurl-connector groupControlRecoveryGrace. -->
