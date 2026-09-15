@@ -1,5 +1,26 @@
 # Changelog
 
+## [2.5.3](https://github.com/layervai/qurl-integrations/compare/v2.5.2...v2.5.3) (2026-09-15)
+
+
+### Bug Fixes
+
+* **cli:** wait for macOS daemon shutdown during upgrades ([#1461](https://github.com/layervai/qurl-integrations/issues/1461)) ([a7c9728](https://github.com/layervai/qurl-integrations/commit/a7c97281108d223ca7f5b7ee13bbbbdfe88d3158))
+
+## [2.5.2](https://github.com/layervai/qurl-integrations/compare/v2.5.1...v2.5.2) (2026-09-15)
+
+
+### Bug Fixes
+
+* **cli:** replace deprecated Homebrew postflight hook ([#1459](https://github.com/layervai/qurl-integrations/issues/1459)) ([1f45ff4](https://github.com/layervai/qurl-integrations/commit/1f45ff43d570d6bbeaf64ebed688217883c4c000))
+
+## [2.5.1](https://github.com/layervai/qurl-integrations/compare/v2.5.0...v2.5.1) (2026-09-15)
+
+
+### Bug Fixes
+
+* **cli:** require production Hub trust in public releases ([#1457](https://github.com/layervai/qurl-integrations/issues/1457)) ([44e3f48](https://github.com/layervai/qurl-integrations/commit/44e3f4822cd9e19124bf3960cb04796bfcc49dcf))
+
 ## [2.5.0](https://github.com/layervai/qurl-integrations/compare/v2.4.0...v2.5.0) (2026-09-11)
 
 
