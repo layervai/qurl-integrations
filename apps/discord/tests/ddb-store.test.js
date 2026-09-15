@@ -45,8 +45,10 @@ process.env.AWS_REGION = 'us-east-2';
 
 const store = require('../src/store/ddb-store');
 const logger = require('../src/logger');
+const { AUDIT_EVENTS } = require('../src/constants');
 
 beforeEach(() => {
+  logger.audit.mockClear();
   ddbMock.reset();
   mockEncryptStrict.mockReset();
   mockEncryptStrict.mockImplementation((v) => `enc:v1:IV:TAG:${Buffer.from(v || '').toString('hex')}`);
@@ -69,6 +71,48 @@ describe('guild configs', () => {
     expect(input.UpdateExpression).toMatch(/if_not_exists\(configured_at, :u\)/);
     expect(input.UpdateExpression).not.toMatch(/, configured_at = :u\b/);
     expect(input.UpdateExpression).not.toMatch(/^SET configured_at = :u\b/);
+    expect(input.ReturnValues).toBe('UPDATED_OLD');
+  });
+
+  test('setGuildApiKey: audits when configured_by changes on an existing guild', async () => {
+    ddbMock.on(UpdateCommand).resolves({ Attributes: {
+      configured_by: 'old-admin',
+      qurl_api_key: 'enc:v1:IV:TAG:deadbeef',
+      updated_at: '2026-09-10T00:00:00Z',
+    } });
+    await store.setGuildApiKey('g-1', 'plain-key', 'new-admin');
+    expect(logger.audit).toHaveBeenCalledWith(AUDIT_EVENTS.QURL_SETUP_ADMIN_CHANGED, {
+      guild_id: 'g-1',
+      old_admin_id: 'old-admin',
+      new_admin_id: 'new-admin',
+    });
+  });
+
+  test('setGuildApiKey: does not audit first setup or same-admin re-key', async () => {
+    ddbMock.on(UpdateCommand)
+      .resolvesOnce({})
+      // UPDATED_OLD returns only the touched non-key attributes, never guild_id.
+      .resolvesOnce({ Attributes: { configured_by: 'admin', qurl_api_key: 'enc:v1:IV:TAG:deadbeef' } });
+    await store.setGuildApiKey('g-1', 'plain-key', 'admin');
+    await store.setGuildApiKey('g-1', 'plain-key-2', 'admin');
+    expect(logger.audit.mock.calls.map(([event]) => event))
+      .not.toContain(AUDIT_EVENTS.QURL_SETUP_ADMIN_CHANGED);
+  });
+
+  test('setGuildApiKey: audits a rebind of a configured row that lost configured_by', async () => {
+    ddbMock.on(UpdateCommand).resolves({ Attributes: { qurl_api_key: 'enc:v1:IV:TAG:deadbeef' } });
+    await store.setGuildApiKey('g-1', 'plain-key', 'new-admin');
+    expect(logger.audit).toHaveBeenCalledWith(AUDIT_EVENTS.QURL_SETUP_ADMIN_CHANGED, {
+      guild_id: 'g-1',
+      old_admin_id: null,
+      new_admin_id: 'new-admin',
+    });
+  });
+
+  test('setGuildApiKey: does not audit when the write rejects', async () => {
+    ddbMock.on(UpdateCommand).rejects(new Error('ddb down'));
+    await expect(store.setGuildApiKey('g-1', 'plain-key', 'new-admin')).rejects.toThrow('ddb down');
+    expect(logger.audit).not.toHaveBeenCalled();
   });
 
   test('getGuildApiKey: decrypts round-trip', async () => {
