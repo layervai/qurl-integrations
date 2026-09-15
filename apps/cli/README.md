@@ -241,8 +241,8 @@ selected with `--profile` or `QURL_PROFILE`. A missing file simply means
 defaults apply. **Config files never hold secrets** — a file carrying an
 `api_key` entry is rejected outright rather than silently honored.
 
-Also honored: `QURL_DEPLOYMENT` (the settings-file path used to verify share
-and access links; environment-only, with no profile override), `NO_COLOR` (disables color while `--color` is `auto`), and
+Also honored: `QURL_DEPLOYMENT` (a sandbox or custom deployment settings file;
+production settings are included in releases; environment-only, with no profile override), `NO_COLOR` (disables color while `--color` is `auto`), and
 `QURL_BROWSER` / `BROWSER` (which browser `qurl get` opens). Pointing the
 CLI at a plain-`http` endpoint on a non-local address warns that the key
 would travel unencrypted; loopback endpoints are exempt.
@@ -381,7 +381,8 @@ from a script, use `qurl get <CRID> --file <path>`.
 | `--ttl <duration>` | Requested link lifetime in whole seconds (e.g. `5m`, `1h`). The service may grant less; a shorter grant is reported on stderr, never silent. Sub-second or negative values are refused rather than rounded. |
 | `--yes` | Proceed without confirmation, including sending a test CRID to production |
 
-Share needs the deployment verification settings described under `qurl get`.
+Production share verification needs no extra settings. Sandbox and custom
+deployments use the settings described under `qurl get`.
 Before anything is printed, the CLI verifies the signed link against
 the CRID you asked for; a mismatched answer is discarded and the command
 exits with code 12 without printing a link.
@@ -416,10 +417,9 @@ or use `qurl share` if you only need the link. With `-o json`, get is a
 machine asking for data, so browser mode and `--file -` are refused
 loudly; `--file <path> -o json` downloads and emits the outcome document.
 
-Both `share` and `get` need deployment settings to check that the signed link
-belongs to the CRID you supplied. Set `QURL_DEPLOYMENT` to the path of your
-deployment's settings file (ask whoever runs the deployment for it), unless
-your build includes those settings. Without usable settings, the command
+Releases include the production settings used by `share` and `get` to verify
+the signed link and its CRID. Production needs no deployment file. For sandbox
+or a custom deployment, set `QURL_DEPLOYMENT` to that deployment's settings file. Without usable settings, the command
 fails with exit code 3 before printing a link, opening a browser, or downloading.
 Direct or pre-signed URLs in share responses are rejected because they cannot
 be checked against the advertised CRID.
