@@ -191,7 +191,7 @@ jobs:
         shell: bash
         run: |
           # Homebrew quarantines cask downloads and these binaries are
-          # unsigned, so the cask carries a post-install hook that strips the
+          # unsigned, so the cask carries postflight steps that strip the
           # xattr (see homebrew_casks in .goreleaser.yml). Assert the
           # guarantee itself instead of waiting for Gatekeeper: CI runners
           # often run with assessment relaxed, so `qurl version` succeeding
@@ -203,7 +203,7 @@ jobs:
           fi
           real="$(realpath "$bin")"
           if xattr -p com.apple.quarantine "$real" >/dev/null 2>&1; then
-            echo "::error::release smoke: QUARANTINE-POSTFLIGHT link broken — ${real} still carries com.apple.quarantine; the cask's xattr hook did not strip it, so a customer's first run is Gatekeeper-blocked"
+            echo "::error::release smoke: QUARANTINE-POSTFLIGHT link broken — ${real} still carries com.apple.quarantine; the cask's postflight steps did not strip it, so a customer's first run is Gatekeeper-blocked"
             exit 1
           fi
           echo "quarantine postflight OK: ${real} carries no com.apple.quarantine"
