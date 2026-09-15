@@ -52,6 +52,7 @@ const {
 const { signQurlOAuthState } = require('./utils/qurl-oauth-state');
 const { deleteLink, getIdentity } = require('./qurl');
 const { resourceIdLogRef } = require('./utils/resource-id');
+const { qurlApiErrorStatus } = require('./utils/qurl-errors');
 const { downloadAndUpload, reUploadBuffer, mintLinks, detectWatermark, uploadJsonToConnector, isAllowedSourceUrl } = require('./connector');
 const { deleteFlow, transitionFlow, supersedeOrCreate } = require('./flow-state');
 const { fireAndForgetLinkGuildWebhookSubscription } = require('./guild-webhook-link');
@@ -8972,6 +8973,8 @@ const commands = [
           let originalAdminLeftNotice = '';
           if (sanitizedConfiguredBy) {
             try {
+              // fetch takes the raw snowflake; the sanitized form only gates
+              // an empty/all-stripped row.
               await interaction.guild.members.fetch(guildConfig.configured_by);
             } catch (err) {
               // discord.js throws DiscordAPIError code 10007 ("Unknown
@@ -9009,10 +9012,12 @@ const commands = [
             logger.warn('qURL status key unavailable', { guild_id: interaction.guildId });
             verdict = '❌ **The stored qURL key is unavailable.**\n\n' + reconnectCopy;
           } else if (identityFailed) {
-            const status = Number.isInteger(error?.status) ? error.status : null;
+            const status = qurlApiErrorStatus(error);
             logger.warn('qURL status identity check failed', {
               guild_id: interaction.guildId,
               status,
+              code: error?.code ?? null,
+              error_name: error?.name ?? null,
               failure_stage: failureStage,
             });
             // Same 401/403 → "invalid key" policy the legacy setup validator
@@ -9044,7 +9049,10 @@ const commands = [
             // getIdentity enforces this shape; default anyway so a contract
             // drift lands in the verdict machinery, not the generic catch-all.
             const { key_prefix: rawKeyPrefix, scopes: allScopes = [] } = identity?.api_key ?? {};
-            // Bound disclosure locally even if the upstream prefix field widens.
+            // TODO(upstream-contract): 12 mirrors qurl-service's
+            // APIKeyDisplayPrefixLength (the issued prefix is exactly 12 bytes),
+            // so a service prefix renders whole and matches the setup DM; a
+            // wider upstream field is capped rather than echoed.
             const keyPrefix = capUtf16Units(sanitizeIdentityValue(rawKeyPrefix), 12) || 'unknown';
             const shownScopes = allScopes.slice(0, STATUS_SCOPE_DISPLAY_MAX)
               .map(scope => `\`${sanitizeIdentityValue(scope) || 'unnamed'}\``);

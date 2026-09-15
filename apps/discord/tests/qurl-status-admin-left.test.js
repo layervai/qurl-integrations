@@ -222,10 +222,11 @@ describe('/qurl status — admin-offboarding nudge (#185)', () => {
   });
 
   it.each([
-    ['transport error', new Error('connect ECONNREFUSED 10.0.0.5:8080'), null],
-    ['timeout', new DOMException('operation timed out', 'TimeoutError'), null],
-    ['service error', Object.assign(new Error('redacted'), { status: 503 }), 503],
-  ])('does not report a %s as revoked', async (_case, error, expectedStatus) => {
+    ['transport error', new Error('connect ECONNREFUSED 10.0.0.5:8080'), null, null, 'Error'],
+    ['timeout', new DOMException('operation timed out', 'TimeoutError'), null, 23, 'TimeoutError'],
+    ['service error', Object.assign(new Error('redacted'), { status: 503 }), 503, null, 'Error'],
+    ['serialized service error', new Error('qURL API GET /me failed (502)'), 502, null, 'Error'],
+  ])('does not report a %s as revoked', async (_case, error, expectedStatus, expectedCode, expectedName) => {
     db.getGuildConfig.mockResolvedValueOnce({
       guild_id: 'guild-1',
       configured_by: 'admin-original',
@@ -249,6 +250,8 @@ describe('/qurl status — admin-offboarding nudge (#185)', () => {
     expect(logger.warn).toHaveBeenCalledWith('qURL status identity check failed', {
       guild_id: 'guild-1',
       status: expectedStatus,
+      code: expectedCode,
+      error_name: expectedName,
       failure_stage: 'qurl_service',
     });
     expect(JSON.stringify(logger.warn.mock.calls)).not.toContain(STORED_KEY);
@@ -273,6 +276,8 @@ describe('/qurl status — admin-offboarding nudge (#185)', () => {
     expect(logger.warn).toHaveBeenCalledWith('qURL status identity check failed', {
       guild_id: 'guild-1',
       status: null,
+      code: null,
+      error_name: null,
       failure_stage: 'qurl_service',
     });
   });
@@ -320,6 +325,8 @@ describe('/qurl status — admin-offboarding nudge (#185)', () => {
     expect(logger.warn).toHaveBeenCalledWith('qURL status identity check failed', {
       guild_id: 'guild-1',
       status: 403,
+      code: null,
+      error_name: 'Error',
       failure_stage: 'key_store',
     });
     expect(JSON.stringify(logger.warn.mock.calls)).not.toContain(STORED_KEY);
@@ -477,6 +484,26 @@ describe('/qurl status — admin-offboarding nudge (#185)', () => {
     expect(replyContent).toContain('Scopes: `qurl:read @everyone`');
   });
 
+  // TODO(upstream-contract): qurl-service issues exactly 12-byte prefixes; the
+  // display cap must render one whole so it matches the setup DM's readout.
+  it('renders a full-length service prefix without truncation', async () => {
+    db.getGuildConfig.mockResolvedValueOnce({
+      guild_id: 'guild-1',
+      configured_by: 'admin-original',
+      updated_at: '2026-01-01T00:00:00Z',
+    });
+    mockGetIdentity.mockResolvedValueOnce({
+      api_key: { key_id: 'key-123', key_prefix: 'lv_live_ab12', scopes: ['qurl:read'] },
+    });
+    const interaction = makeStatusInteraction({
+      memberFetchBehavior: async () => ({ id: 'admin-original' }),
+    });
+
+    await handleCommand(interaction);
+
+    expect(interaction._editReply.mock.calls[0][0].content).toContain('Key prefix: `lv_live_ab12`');
+  });
+
   // Worst case for the 2,000-char content limit: surrogate-pair scopes (two
   // UTF-16 units per codepoint, which is what discord.js length-checks), an
   // oversized updated_at, and the admin-left notice all in one reply.
@@ -510,6 +537,29 @@ describe('/qurl status — admin-offboarding nudge (#185)', () => {
     expect(replyContent).toMatch(/_(?:\+\d+ more|\d+ scopes omitted)_/);
     expect((replyContent.match(/`/g) || []).length % 2).toBe(0);
     expect(replyContent).not.toContain('\uFFFD');
+  });
+
+  // The failed-check verdicts have no trimming loop; pin that the field caps
+  // alone keep them under the limit with the same worst-case row.
+  it('bounds stored metadata to Discord reply limits on the revoked branch', async () => {
+    db.getGuildConfig.mockResolvedValueOnce({
+      guild_id: 'guild-1',
+      configured_by: '\uD83E\uDDEA'.repeat(64),
+      updated_at: '2026-01-01T00:00:00Z'.repeat(100),
+    });
+    mockGetIdentity.mockRejectedValueOnce(Object.assign(new Error('redacted'), { status: 401 }));
+    const interaction = makeStatusInteraction({
+      memberFetchBehavior: async () => {
+        throw Object.assign(new Error('Unknown Member'), { code: 10007 });
+      },
+    });
+
+    await handleCommand(interaction);
+
+    const replyContent = interaction._editReply.mock.calls[0][0].content;
+    expect(replyContent.length).toBeLessThanOrEqual(2000);
+    expect(replyContent).toMatch(/revoked or invalid/i);
+    expect(replyContent).toContain('again to take over billing.');
   });
 
   it('replies to the deferred interaction when the guild is not configured', async () => {
