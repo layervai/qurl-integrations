@@ -39,6 +39,9 @@ func TestTunnelHubRejectsPartialAndUnsafeConfig(t *testing.T) {
 		{"foreign host", func(h *TunnelHub) { h.Host = "hub.example.com" }},
 		{"empty label", func(h *TunnelHub) { h.Host = "hub..layerv.xyz" }},
 		{"invalid label", func(h *TunnelHub) { h.Host = "-hub.layerv.xyz" }},
+		{"empty interior label", func(h *TunnelHub) { h.Host = "hub..edge.layerv.xyz" }},
+		{"invalid interior label", func(h *TunnelHub) { h.Host = "hub.-edge.layerv.xyz" }},
+		{"overlong label", func(h *TunnelHub) { h.Host = "hub." + strings.Repeat("a", 64) + ".layerv.xyz" }},
 		{"invalid key", func(h *TunnelHub) { h.PublicKey = "not-base64" }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

@@ -31,6 +31,8 @@ func (h TunnelHub) Validate() error {
 	return nil
 }
 
+// TODO(upstream-contract): qurl CLI v2.5.1 daemon run accepts these flags;
+// leaving them unset selects its published production Hub trust.
 func (h TunnelHub) flags() []string {
 	if h == (TunnelHub{}) {
 		return nil
@@ -38,7 +40,8 @@ func (h TunnelHub) flags() []string {
 	return []string{"--hub-host", h.Host, "--hub-port", h.Port, "--hub-server-public-key-b64", h.PublicKey}
 }
 
-// All values passed here have been validated; quote each scalar for YAML and shell.
+// Validate excludes quotes, making shellSingleQuote safe for these YAML scalars
+// too. Revisit this if the allowed values change.
 func (h TunnelHub) quotedFlags(separator string) string {
 	flags := h.flags()
 	for i, value := range flags {
