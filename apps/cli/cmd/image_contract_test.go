@@ -446,8 +446,8 @@ func TestReleaseNativeConnectionWorkflowsRequireExactTestResult(t *testing.T) {
 			if hasRequiredMode {
 				t.Errorf("%s release Hub-pin step shadows the committed workflow mode with %v", target.file, requiredMode)
 			}
-			if mode := fmt.Sprint(workflow.Env["QURL_REQUIRE_RELEASE_HUB_PIN"]); mode != "0" {
-				t.Errorf("%s release Hub-pin source mode = %q, want reviewed dark mode 0", target.file, mode)
+			if mode := fmt.Sprint(workflow.Env["QURL_REQUIRE_RELEASE_HUB_PIN"]); mode != "1" {
+				t.Errorf("%s release Hub-pin source mode = %q, want production-required mode 1", target.file, mode)
 			}
 			for _, required := range []string{
 				`if [[ -z "$QURL_RELEASE_HUB_PUBLIC_KEY_B64" && -z "$QURL_RELEASE_HUB_PUBLIC_KEY_SHA256" ]]; then`,
