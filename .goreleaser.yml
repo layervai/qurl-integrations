@@ -107,8 +107,8 @@ changelog:
 #    real command tree so drift fails CI instead of breaking `brew install`
 #    at the next release.
 #  - Homebrew quarantines cask downloads (it never quarantined formula
-#    installs) and these binaries are unsigned, so without the post-install
-#    hook Gatekeeper blocks the first run on macOS.
+#    installs) and these binaries are unsigned, so without the postflight
+#    steps Gatekeeper blocks the first run on macOS.
 #  - Casks have no `test do` block; the nightly snapshot job covers build
 #    sanity instead.
 homebrew_casks:
@@ -146,9 +146,14 @@ homebrew_casks:
       bash: completions/qurl.bash
       zsh: completions/qurl.zsh
       fish: completions/qurl.fish
-    hooks:
-      post:
-        install: 'system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/qurl"] if OS.mac?'
+    # TODO(upstream-contract): GoReleaser lifecycle hooks emit deprecated Ruby.
+    # Homebrew resolves run.chdir from staged_path (Library/Homebrew/cask/dsl.rb).
+    custom_block: |
+      on_macos do
+        postflight_steps do
+          run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "qurl"], chdir: "."
+        end
+      end
 
 nfpms:
   - id: qurl
