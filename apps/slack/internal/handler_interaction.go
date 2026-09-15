@@ -13,6 +13,11 @@ import (
 	"time"
 )
 
+const (
+	interactionTypeBlockActions   = "block_actions"
+	interactionTypeViewSubmission = "view_submission"
+)
+
 // handleInteraction routes Slack interaction POSTs (button clicks,
 // modal submissions) to the right inner handler. Unknown interactions
 // still ack 200 with an empty body because Slack requires a prompt 200
@@ -31,25 +36,30 @@ func (h *Handler) handleInteraction(w http.ResponseWriter, body []byte) {
 		respondJSON(w, http.StatusOK, map[string]any{})
 		return
 	}
-	slog.Info("interaction received",
-		"type", payload.Type,
-		"callback_id", payload.View.CallbackID,
-		"team_id", payload.Team.ID,
-		"user_id", payload.User.ID,
-		"view_id", payload.View.ID,
-	)
-
 	switch payload.Type {
-	case "block_actions":
+	case interactionTypeBlockActions:
+		logInteractionReceived(payload)
 		// Button clicks in messages — currently the per-row "Create qURL"
 		// button on `/qurl list`. handleBlockActions acks and dispatches.
 		h.handleBlockActions(w, payload)
-	case "view_submission":
+	case interactionTypeViewSubmission:
+		submission := payload.asViewSubmission()
+		LogViewSubmission(slog.Default(), &submission)
 		switch payload.View.CallbackID {
+		case callbackIDConnectorSetup:
+			h.handleConnectorSetupSubmission(w, &submission)
 		case callbackIDTunnelInstall:
-			h.handleTunnelInstallSubmission(w, payload)
+			h.handleTunnelInstallSubmission(w, &submission)
+		case callbackIDS3WebsiteInstall:
+			h.handleS3WebsiteInstallSubmission(w, &submission)
 		case callbackIDTunnelEdit:
-			h.handleTunnelEditSubmission(w, payload)
+			h.handleTunnelEditSubmission(w, &submission)
+		case callbackIDExposeURL:
+			h.handleExposeURLSubmission(w, &submission)
+		case callbackIDExposeURLCreate:
+			h.handleExposeURLCreateSubmission(w, &submission)
+		case callbackIDFeedback:
+			h.handleFeedbackSubmission(w, &submission)
 		default:
 			// Unknown callback_id — ack 200 (Slack hangs the modal
 			// otherwise) and log so a future view drift is visible.
@@ -57,10 +67,21 @@ func (h *Handler) handleInteraction(w http.ResponseWriter, body []byte) {
 			respondJSON(w, http.StatusOK, map[string]any{})
 		}
 	default:
+		logInteractionReceived(payload)
 		// Select menus, shortcuts, and any other interaction type we
 		// don't wire yet. Ack 200 with an empty body and ignore.
 		respondJSON(w, http.StatusOK, map[string]any{})
 	}
+}
+
+func logInteractionReceived(payload *interactionPayload) {
+	slog.Info("interaction received",
+		"type", payload.Type,
+		"callback_id", payload.View.CallbackID,
+		"team_id", payload.Team.ID,
+		"user_id", payload.User.ID,
+		"view_id", payload.View.ID,
+	)
 }
 
 // handleBlockActions routes Slack block_actions interactions (button clicks in
@@ -75,10 +96,52 @@ func (h *Handler) handleInteraction(w http.ResponseWriter, body []byte) {
 // opens a modal (views.open) inside Slack's trigger window — see
 // handleListEditClick.
 func (h *Handler) handleBlockActions(w http.ResponseWriter, payload *interactionPayload) {
-	// Edit is checked first so a row carrying both buttons routes to the modal
+	if act, ok := findActionByID(payload.Actions, agentFeedbackActionID); ok {
+		h.handleAgentFeedbackClick(w, payload, act)
+		return
+	}
+	// Conversation-mode confirm card (distinct action_ids, so order is immaterial
+	// — a click yields exactly one matching action_id).
+	if act, ok := findActionByID(payload.Actions, agentConfirmApproveActionID); ok {
+		h.handleAgentConfirmClick(w, payload, act, true)
+		return
+	}
+	if act, ok := findActionByID(payload.Actions, agentConfirmRejectActionID); ok {
+		h.handleAgentConfirmClick(w, payload, act, false)
+		return
+	}
+	// `/qurl-admin protect` chooser buttons open a guided modal; checked first
+	// (distinct action_ids) so a click routes to the opener, not a list mint.
+	if _, ok := findActionByID(payload.Actions, exposeConnectorActionID); ok {
+		h.handleExposeConnectorClick(w, payload)
+		return
+	}
+	if _, ok := findActionByID(payload.Actions, exposeURLActionID); ok {
+		h.handleExposeURLClick(w, payload)
+		return
+	}
+	// Revoke and Edit are checked before Create: a row carries all three
+	// buttons, but a single click yields exactly one matching action_id, so
+	// matching on action_id routes each button to its own handler.
+	if revokeAction, ok := findActionByID(payload.Actions, listRevokeTunnelActionID); ok {
+		h.handleListRevokeClick(w, payload, revokeAction)
+		return
+	}
+	// Edit is checked before Create so a row carrying both routes to the modal
 	// opener rather than the mint when Edit is the clicked element.
 	if editAction, ok := findActionByID(payload.Actions, listEditTunnelActionID); ok {
 		h.handleListEditClick(w, payload, editAction)
+		return
+	}
+	// The Enter Portal button on a minted qURL is a Slack URL button: the click
+	// opens the qURL directly in the user's browser, so there is NO server work.
+	// Slack still POSTs a block_actions interaction, which we ack 200 and drop.
+	// Handled explicitly (not via the catch-all below) so a legitimate click — now
+	// the primary CTA of every successful get — doesn't fire the "no recognized
+	// action" breadcrumb, keeping that log reserved for a button genuinely rendered
+	// but never wired.
+	if _, ok := findActionByID(payload.Actions, enterPortalActionID); ok {
+		respondJSON(w, http.StatusOK, map[string]any{})
 		return
 	}
 	action, ok := findActionByID(payload.Actions, listCreateQurlActionID)
@@ -123,7 +186,7 @@ func (h *Handler) handleBlockActions(w http.ResponseWriter, payload *interaction
 		Raw:        "get $" + token,
 	}
 	if !h.startAsyncWorker(log, func(ctx context.Context, log *slog.Logger) {
-		h.processButtonGet(ctx, log, responseURL, payload.Team.ID, payload.Channel.ID, payload.User.ID, payload.TriggerID, cmd)
+		h.processButtonGet(ctx, log, responseURL, payload.Team.ID, payload.Enterprise.ID, payload.Channel.ID, payload.User.ID, payload.TriggerID, cmd)
 	}) {
 		// Pool saturated — don't let the click be a silent no-op. h.Go is
 		// wg-tracked but does NOT consume an async slot, so reporting the
@@ -135,12 +198,12 @@ func (h *Handler) handleBlockActions(w http.ResponseWriter, payload *interaction
 }
 
 // processButtonGet is the async-worker body for the `/qurl list`
-// "Create qURL" button. It mints a one-time qURL for the row's tunnel via
-// the same [Handler.getWork] pipeline as `/qurl get $<slug>` (resolve the
-// token → channel-authorize → rate-limit → mint) and posts the outcome to
-// the interaction's response_url. The cmd carries no dm/reason flags —
-// the button is the plain one-time-use mint.
-func (h *Handler) processButtonGet(ctx context.Context, log *slog.Logger, responseURL, teamID, channelID, userID, triggerID string, cmd *Command) {
+// "Create qURL" button. It mints a one-time qURL for the row's resource via
+// the same [Handler.getWork] pipeline as `/qurl get $<token>` (delivery guard
+// → resolve token + channel-authorize → rate-limit → mint) and posts the
+// outcome to the interaction's response_url. The cmd carries no dm/reason
+// flags — the button is the plain one-time-use mint.
+func (h *Handler) processButtonGet(ctx context.Context, log *slog.Logger, responseURL, teamID, enterpriseID, channelID, userID, triggerID string, cmd *Command) {
 	if channelID == "" {
 		// Channel-scope guard mirrors processGet: the resolve path is
 		// channel-scoped, so a channel-less interaction can't authorize.
@@ -148,14 +211,15 @@ func (h *Handler) processButtonGet(ctx context.Context, log *slog.Logger, respon
 		_ = h.postResponse(log, responseURL, ":warning: "+channelRequiredMessage)
 		return
 	}
-	text, err := h.getWork(ctx, log, getWorkArgs{
-		cmd:       cmd,
-		teamID:    teamID,
-		channelID: channelID,
-		userID:    userID,
-		triggerID: triggerID,
+	res, err := h.getWork(ctx, log, &getWorkArgs{
+		cmd:          cmd,
+		teamID:       teamID,
+		enterpriseID: enterpriseID,
+		channelID:    channelID,
+		userID:       userID,
+		triggerID:    triggerID,
 	})
-	h.finishGet(log, responseURL, text, err)
+	h.finishGet(log, responseURL, res, err)
 }
 
 // findActionByID returns the first action in a block_actions payload whose
@@ -182,36 +246,66 @@ func blockActionIDs(actions []interactionAction) []string {
 	return ids
 }
 
-func (h *Handler) handleTunnelInstallSubmission(w http.ResponseWriter, payload *interactionPayload) {
+func (h *Handler) handleTunnelInstallSubmission(w http.ResponseWriter, payload *ViewSubmission) {
 	args, fieldErrors := parseTunnelInstallModalArgs(payload.View.State.Values)
 	if len(fieldErrors) > 0 {
+		// Field validation keeps Slack's modal open for correction and is not a
+		// terminal setup attempt. Wait to audit agent-origin submits until the
+		// submitted form has a trusted target and the modal is actually rejected
+		// or handed to the install worker.
 		respondViewErrors(w, fieldErrors)
 		return
 	}
 
 	var meta TunnelInstallModalMetadata
 	if err := json.Unmarshal([]byte(payload.View.PrivateMetadata), &meta); err != nil {
+		// Without parseable modal metadata from the signed Slack request, there is
+		// no trusted approver/target pair to attach to an App Home row; keep this
+		// as structured logs only.
 		slog.Warn("tunnel install modal metadata parse failed", "error", err, "team_id", payload.Team.ID, "user_id", payload.User.ID, "view_id", payload.View.ID)
-		respondTunnelInstallModalError(w, "Could not verify this modal. Run /qurl-admin tunnel install again.")
+		respondConnectorInstallModalError(w, "Could not verify this modal. Run /qurl-admin protect-connector again.")
 		return
 	}
 	if meta.TeamID == "" || meta.ChannelID == "" || meta.UserID == "" || meta.ResponseURL == "" {
+		// Same as the JSON parse failure: incomplete metadata cannot name a
+		// durable approver-scoped audit row without risking misleading output.
 		slog.Warn("tunnel install modal metadata incomplete", "team_id", payload.Team.ID, "user_id", payload.User.ID, "view_id", payload.View.ID)
-		respondTunnelInstallModalError(w, "Could not verify this modal. Run /qurl-admin tunnel install again.")
+		respondConnectorInstallModalError(w, "Could not verify this modal. Run /qurl-admin protect-connector again.")
 		return
+	}
+	log := slog.With(
+		"command", "tunnel_install_modal",
+		"team_id", meta.TeamID,
+		"channel_id", meta.ChannelID,
+		"user_id", meta.UserID,
+		"view_id", payload.View.ID,
+	)
+	agentAudit, agentActionOK := tunnelInstallAgentAuditFromMetadata(log, &meta, args)
+	req := &tunnelInstallRequest{
+		teamID:       meta.TeamID,
+		enterpriseID: meta.EnterpriseID,
+		channelID:    meta.ChannelID,
+		userID:       meta.UserID,
+		responseURL:  meta.ResponseURL,
+		args:         args,
+		agentAudit:   agentAudit,
 	}
 	// The Slack request signature covers the full form body, including the
 	// view_submission payload and its private_metadata, so CreatedAtUnix is
 	// tamper-resistant once Slack submits the modal. It is still only freshness
 	// state minted by our modal JSON; the team/user cross-checks below are the
 	// authorization boundary.
+	// Expired/future agent-origin modals may audit before those cross-checks;
+	// that row intentionally uses the signed metadata opener and target, while
+	// any mismatched submitter identity stays in the later warning logs.
 	// The timestamp is minted and checked by Slack app pods. Platform clock
 	// sync should keep drift tiny; stale modals and far-future timestamps both
-	// fail closed instead of minting a fresh bootstrap key from stale state.
+	// fail closed instead of minting a fresh enrollment token from stale state.
 	modalAge := h.now().Sub(time.Unix(meta.CreatedAtUnix, 0))
 	if meta.CreatedAtUnix <= 0 || modalAge > tunnelInstallModalTTL || modalAge < -tunnelBootstrapSkew {
 		slog.Warn("tunnel install modal expired", "team_id", meta.TeamID, "user_id", meta.UserID, "view_id", payload.View.ID, "created_at_unix", meta.CreatedAtUnix, "modal_age_ms", modalAge.Milliseconds())
-		respondTunnelInstallModalError(w, "This modal expired. Run /qurl-admin tunnel install again.")
+		respondConnectorInstallModalError(w, "This modal expired. Run /qurl-admin protect-connector again.")
+		h.recordTunnelInstallAgentAuditAsync(log, req, agentProtectConnectorAuditModalRejectedResult)
 		return
 	}
 	// Slack signs the request envelope, not our private_metadata value by
@@ -219,22 +313,42 @@ func (h *Handler) handleTunnelInstallSubmission(w http.ResponseWriter, payload *
 	// across workspaces or users.
 	if payload.Team.ID == "" || payload.Team.ID != meta.TeamID {
 		slog.Warn("tunnel install modal team mismatch", "payload_team_id", payload.Team.ID, "metadata_team_id", meta.TeamID, "view_id", payload.View.ID)
-		respondTunnelInstallModalError(w, "This modal was opened for a different workspace. Run /qurl-admin tunnel install again.")
+		respondConnectorInstallModalError(w, "This modal was opened for a different workspace. Run /qurl-admin protect-connector again.")
+		h.recordTunnelInstallAgentAuditAsync(log, req, agentProtectConnectorAuditModalRejectedResult)
 		return
 	}
 	if payload.User.ID == "" || payload.User.ID != meta.UserID {
 		slog.Warn("tunnel install modal user mismatch", "payload_user_id", payload.User.ID, "metadata_user_id", meta.UserID, "view_id", payload.View.ID)
-		respondTunnelInstallModalError(w, "Only the admin who opened this modal can submit it. Run /qurl-admin tunnel install again to start a new setup.")
+		respondConnectorInstallModalError(w, "Only the admin who opened this modal can submit it. Run /qurl-admin protect-connector again to start a new setup.")
+		// Keep the App Home row scoped to the legitimate modal opener/approver
+		// from signed metadata; the mismatched submitter stays in the warning log.
+		h.recordTunnelInstallAgentAuditAsync(log, req, agentProtectConnectorAuditModalRejectedResult)
+		return
+	}
+	if !agentActionOK {
+		// Agent metadata was present and signed by Slack, but it was not for this
+		// modal action. Treat that as a verified modal rejection, not a slash-like
+		// setup attempt, so App Home keeps the approver/target accountability row.
+		// The same-workspace/same-user checks above run first so this durable row
+		// is still scoped to the verified modal opener.
+		respondConnectorInstallModalError(w, "Could not verify this modal. Run /qurl-admin protect-connector again.")
+		h.recordTunnelInstallAgentAuditAsync(log, req, agentProtectConnectorAuditActionMismatchResult)
 		return
 	}
 	if h.cfg.AdminStore == nil {
-		respondTunnelInstallModalError(w, "Admin features are not configured on this Slack bot deployment.")
+		respondConnectorInstallModalError(w, "Admin features are not configured on this Secure Access Agent deployment.")
+		h.recordTunnelInstallAgentAuditAsync(log, req, agentProtectConnectorAuditConfigurationUnavailableResult)
 		return
 	}
 	if h.aliasStore == nil {
-		respondTunnelInstallModalError(w, "Channel alias storage is not configured on this Slack bot deployment.")
+		respondConnectorInstallModalError(w, "Channel alias storage is not configured on this Secure Access Agent deployment.")
+		h.recordTunnelInstallAgentAuditAsync(log, req, agentProtectConnectorAuditConfigurationUnavailableResult)
 		return
 	}
+	// The valid field state plus signed modal metadata gives agent-origin submits
+	// a concrete target before admin/config gates. Slash-origin submits carry no
+	// agentAudit and no-op, but agent-origin stale/replay/config rejections now
+	// leave the same App Home accountability trace as admin and worker failures.
 
 	// Slack expects modal submissions to be acknowledged quickly; keep this
 	// synchronous admin re-check bounded so a slow store fails closed. Use the
@@ -244,28 +358,28 @@ func (h *Handler) handleTunnelInstallSubmission(w http.ResponseWriter, payload *
 	defer cancel()
 	isAdmin, _, err := h.cfg.AdminStore.CheckAdmin(adminCtx, meta.TeamID, meta.UserID)
 	if err != nil {
-		slog.Error("tunnel install modal admin check failed", "error", err, "team_id", meta.TeamID, "user_id", meta.UserID, "view_id", payload.View.ID)
-		respondTunnelInstallModalError(w, "Could not verify admin status. Retry in a moment.")
+		log.Error("tunnel install modal admin check failed", "error", err)
+		respondConnectorInstallModalError(w, "Could not verify admin status. Retry in a moment.")
+		h.recordTunnelInstallAgentAuditAsync(log, req, agentProtectConnectorAuditAdminVerificationFailedResult)
 		return
 	}
 	if !isAdmin {
-		slog.Warn("tunnel install modal denied: non-admin", "team_id", meta.TeamID, "user_id", meta.UserID, "view_id", payload.View.ID)
-		respondTunnelInstallModalError(w, "This command is admin-only.")
+		log.Warn("tunnel install modal denied: non-admin")
+		// The same-user gate above means this row belongs to the admin who
+		// opened the modal; in practice this is the admin-revoked-mid-flow case.
+		respondConnectorInstallModalError(w, "This command is admin-only.")
+		h.recordTunnelInstallAgentAuditAsync(log, req, agentProtectConnectorAuditAdminDeniedResult)
 		return
 	}
 
-	log := slog.With(
-		"command", "tunnel_install_modal",
-		"team_id", meta.TeamID,
-		"channel_id", meta.ChannelID,
-		"user_id", meta.UserID,
-		"view_id", payload.View.ID,
-	)
 	setupStartedAt := time.Unix(meta.CreatedAtUnix, 0)
+	req.attemptID = tunnelBootstrapModalAttemptID(payload.View.ID, setupStartedAt)
 	if !h.startAsyncWorker(log, func(ctx context.Context, log *slog.Logger) {
-		h.processTunnelInstall(ctx, log, meta.TeamID, meta.ChannelID, meta.UserID, meta.ResponseURL, args, setupStartedAt)
+		result := h.processTunnelInstallCore(ctx, log, req)
+		h.recordTunnelInstallAgentAuditAsync(log, req, result)
 	}) {
-		respondTunnelInstallModalError(w, "Slack bot is busy. Retry in a moment.")
+		respondConnectorInstallModalError(w, modalBusyMsg)
+		h.recordTunnelInstallAgentAuditAsync(log, req, agentProtectConnectorAuditWorkerUnavailableResult)
 		return
 	}
 	respondJSON(w, http.StatusOK, map[string]any{})
@@ -274,23 +388,7 @@ func (h *Handler) handleTunnelInstallSubmission(w http.ResponseWriter, payload *
 func parseTunnelInstallModalArgs(values map[string]map[string]interactionStateValue) (args *tunnelInstallArgs, fieldErrors map[string]string) {
 	fieldErrors = map[string]string{}
 
-	slug := strings.TrimPrefix(strings.TrimSpace(interactionStateText(values, tunnelInstallBlockSlug, tunnelInstallActionSlug)), "$")
-	if !tunnelSlugPattern.MatchString(slug) {
-		fieldErrors[tunnelInstallBlockSlug] = "Use 3-64 lowercase letters, numbers, and hyphens. Start with a letter and end with a letter or number."
-	}
-
-	shortcutRaw := strings.TrimSpace(interactionStateText(values, tunnelInstallBlockShortcut, tunnelInstallActionShortcut))
-	alias := slug
-	if shortcutRaw != "" && !strings.HasPrefix(shortcutRaw, "$") {
-		shortcutRaw = "$" + shortcutRaw
-	}
-	if shortcutRaw != "" {
-		var aliasReason string
-		alias, aliasReason = validateChannelShortcutToken(shortcutRaw)
-		if aliasReason != "" {
-			fieldErrors[tunnelInstallBlockShortcut] = aliasReason
-		}
-	}
+	slug, alias := parseConnectorSlugAndShortcut(values, tunnelInstallBlockSlug, tunnelInstallActionSlug, tunnelInstallBlockShortcut, tunnelInstallActionShortcut, fieldErrors)
 
 	portText, portFound := interactionStateTextOK(values, tunnelInstallBlockLocalPort, tunnelInstallActionLocalPort)
 	portRaw := strings.TrimSpace(portText)
@@ -327,12 +425,6 @@ func parseTunnelInstallModalArgs(values map[string]map[string]interactionStateVa
 	if len(fieldErrors) > 0 {
 		return nil, fieldErrors
 	}
-	// Re-check at the construction boundary so a future edit cannot carry a
-	// stale Docker/Compose web ref after relaxing the earlier field-error path.
-	if msg := tunnelWebRefValidationMessage(env, webRef); msg != "" {
-		fieldErrors[tunnelInstallBlockWebRef] = msg
-		return nil, fieldErrors
-	}
 	args = &tunnelInstallArgs{
 		Slug:        slug,
 		Alias:       alias,
@@ -340,7 +432,35 @@ func parseTunnelInstallModalArgs(values map[string]map[string]interactionStateVa
 		Environment: env,
 		WebRef:      webRef,
 	}
+	// Re-check at the shared construction boundary so a future edit cannot
+	// carry stale or cross-field-invalid values after relaxing the earlier
+	// field-error path.
+	if msg := validateTunnelInstallArgs(args); msg != "" {
+		fieldErrors[tunnelInstallBlockWebRef] = msg
+		return nil, fieldErrors
+	}
 	return args, nil
+}
+
+func parseConnectorSlugAndShortcut(values map[string]map[string]interactionStateValue, slugBlockID, slugActionID, shortcutBlockID, shortcutActionID string, fieldErrors map[string]string) (slug, alias string) {
+	slug = strings.TrimPrefix(strings.TrimSpace(interactionStateText(values, slugBlockID, slugActionID)), "$")
+	if !tunnelSlugPattern.MatchString(slug) {
+		fieldErrors[slugBlockID] = "Use 3-64 lowercase letters, numbers, and hyphens. Start with a letter and end with a letter or number."
+	}
+
+	shortcutRaw := strings.TrimSpace(interactionStateText(values, shortcutBlockID, shortcutActionID))
+	alias = slug
+	if shortcutRaw != "" && !strings.HasPrefix(shortcutRaw, "$") {
+		shortcutRaw = "$" + shortcutRaw
+	}
+	if shortcutRaw != "" {
+		var aliasReason string
+		alias, aliasReason = validateChannelShortcutToken(shortcutRaw)
+		if aliasReason != "" {
+			fieldErrors[shortcutBlockID] = aliasReason
+		}
+	}
+	return slug, alias
 }
 
 func interactionStateText(values map[string]map[string]interactionStateValue, blockID, actionID string) string {
@@ -360,6 +480,18 @@ func interactionStateTextOK(values map[string]map[string]interactionStateValue, 
 	return value.text(), true
 }
 
+// interactionStateConversations reads a multi_conversations_select's
+// selected_conversations from the submitted view state. Returns nil when the
+// block/action is absent — an optional channel multi-select left empty submits
+// with no entry, which the Edit modal treats as "no channels selected".
+func interactionStateConversations(values map[string]map[string]interactionStateValue, blockID, actionID string) []string {
+	block, ok := values[blockID]
+	if !ok {
+		return nil
+	}
+	return block[actionID].SelectedConversations
+}
+
 func respondViewErrors(w http.ResponseWriter, fieldErrors map[string]string) {
 	respondJSON(w, http.StatusOK, map[string]any{
 		respFieldResponseAction: "errors",
@@ -367,18 +499,18 @@ func respondViewErrors(w http.ResponseWriter, fieldErrors map[string]string) {
 	})
 }
 
-func respondTunnelInstallModalError(w http.ResponseWriter, message string) {
-	view, err := TunnelInstallErrorModal(message)
+func respondConnectorInstallModalError(w http.ResponseWriter, message string) {
+	view, err := ConnectorInstallErrorModal(message)
 	if err != nil {
-		slog.Error("tunnel install modal error render failed", "error", err)
+		slog.Error("connector install modal error render failed", "error", err)
 		// Last-ditch fallback: Slack may silently drop this field-level error if
 		// the current view no longer contains the slug block, but it still gives
 		// the original install modal a user-visible failure path.
-		respondViewErrors(w, map[string]string{tunnelInstallBlockSlug: "qURL tunnel setup failed. Contact support."})
+		respondViewErrors(w, map[string]string{tunnelInstallBlockSlug: "qURL Connector setup failed. Contact support."})
 		return
 	}
 	respondJSON(w, http.StatusOK, map[string]any{
-		respFieldResponseAction: "update",
+		respFieldResponseAction: respActionUpdate,
 		respFieldView:           json.RawMessage(view),
 	})
 }
@@ -427,35 +559,70 @@ func tunnelWebRefKindValidationMessage(env tunnelInstallEnvironment, kind tunnel
 	return ""
 }
 
-// interactionPayload is the subset of Slack's view_submission and
-// block_actions payloads we read. Fields we don't touch are intentionally
-// elided so the JSON unmarshal is forgiving to upstream additions.
+func validateTunnelInstallArgs(args *tunnelInstallArgs) string {
+	if args == nil {
+		return "qURL Connector setup is missing install arguments."
+	}
+	if msg := tunnelWebRefValidationMessage(args.Environment, args.WebRef); msg != "" {
+		return msg
+	}
+	return tunnelWebRefKindValidationMessage(args.Environment, args.WebRefKind)
+}
+
+// ViewSubmission is the subset of Slack's view_submission payload we read.
+// Fields we don't touch are intentionally elided so the JSON unmarshal is
+// forgiving to upstream additions.
+type ViewSubmission struct {
+	Type string          `json:"type"`
+	Team interactionID   `json:"team"`
+	User interactionID   `json:"user"`
+	View interactionView `json:"view"`
+}
+
+type interactionID struct {
+	ID string `json:"id"`
+}
+
+type interactionView struct {
+	ID              string `json:"id"`
+	CallbackID      string `json:"callback_id"`
+	PrivateMetadata string `json:"private_metadata"`
+	State           struct {
+		Values map[string]map[string]interactionStateValue `json:"values"`
+	} `json:"state"`
+}
+
+// interactionPayload is the union of Slack interaction payload fields we read.
+// View submissions are projected into [ViewSubmission] before dispatch, while
+// block actions keep using this wider interaction shape.
 type interactionPayload struct {
-	Type string `json:"type"`
-	Team struct {
-		ID string `json:"id"`
-	} `json:"team"`
-	User struct {
-		ID string `json:"id"`
-	} `json:"user"`
-	View struct {
-		ID              string `json:"id"`
-		CallbackID      string `json:"callback_id"`
-		PrivateMetadata string `json:"private_metadata"`
-		State           struct {
-			Values map[string]map[string]interactionStateValue `json:"values"`
-		} `json:"state"`
-	} `json:"view"`
-	TriggerID string `json:"trigger_id"`
+	Type       string          `json:"type"`
+	Team       interactionID   `json:"team"`
+	Enterprise interactionID   `json:"enterprise"`
+	User       interactionID   `json:"user"`
+	View       interactionView `json:"view"`
+	TriggerID  string          `json:"trigger_id"`
 	// Channel, ResponseURL, and Actions are populated on block_actions
 	// (button click) payloads. Channel is the conversation the button was
 	// clicked in (the mint authorizes against it); ResponseURL is where
 	// the minted link is delivered; Actions carries the clicked element(s).
-	Channel struct {
-		ID string `json:"id"`
-	} `json:"channel"`
+	Channel     interactionID       `json:"channel"`
 	ResponseURL string              `json:"response_url"`
 	Actions     []interactionAction `json:"actions"`
+}
+
+func (p *interactionPayload) asViewSubmission() ViewSubmission {
+	if p == nil {
+		return ViewSubmission{}
+	}
+	// Read-only projection: View.State.Values intentionally shares the parsed
+	// map with the interaction envelope.
+	return ViewSubmission{
+		Type: p.Type,
+		Team: p.Team,
+		User: p.User,
+		View: p.View,
+	}
 }
 
 // interactionAction is one entry of a block_actions payload's `actions`
@@ -469,6 +636,10 @@ type interactionAction struct {
 type interactionStateValue struct {
 	Value          string                     `json:"value"`
 	SelectedOption *interactionSelectedOption `json:"selected_option"`
+	// SelectedConversations carries a multi_conversations_select's chosen
+	// conversation IDs (the /qurl list Edit modal's "expose to channels"
+	// field). Absent for plain inputs and static selects.
+	SelectedConversations []string `json:"selected_conversations"`
 }
 
 func (v interactionStateValue) text() string {
@@ -484,7 +655,13 @@ func (v interactionStateValue) text() string {
 	return ""
 }
 
+// S3 bucket, prefix, and index fields are intentionally absent: they can reveal
+// customer infrastructure/object layout and remain redacted. Region is coarse,
+// low-sensitivity deployment context and is safe for operational diagnostics.
 var interactionStateLogAllowlist = map[string]map[string]struct{}{
+	connectorSetupBlockType: {
+		connectorSetupActionType: {},
+	},
 	tunnelInstallBlockSlug: {
 		tunnelInstallActionSlug: {},
 	},
@@ -500,21 +677,96 @@ var interactionStateLogAllowlist = map[string]map[string]struct{}{
 	tunnelInstallBlockWebRef: {
 		tunnelInstallActionWebRef: {},
 	},
+	s3WebsiteInstallBlockSlug: {
+		s3WebsiteInstallActionSlug: {},
+	},
+	s3WebsiteInstallBlockShortcut: {
+		s3WebsiteInstallActionShortcut: {},
+	},
+	s3WebsiteInstallBlockEnvironment: {
+		s3WebsiteInstallActionEnvironment: {},
+	},
+	s3WebsiteInstallBlockRegion: {
+		s3WebsiteInstallActionRegion: {},
+	},
 }
 
-func interactionStateLogValues(values map[string]map[string]interactionStateValue) map[string]map[string]string {
-	logValues := make(map[string]map[string]string, len(values))
+// viewSubmissionStateLogAllowlist contains submitted values that are useful
+// diagnostics and safe to emit. It inherits the tunnel-install fields already
+// considered safe for interaction logging: operator-entered resource aliases,
+// ports, and target-environment hints rather than credentials. Feedback keeps
+// only the category select because summary/details are free-form user text.
+var viewSubmissionStateLogAllowlist = func() map[string]map[string]struct{} {
+	allowlist := cloneStateLogAllowlist(interactionStateLogAllowlist)
+	allowlist[feedbackBlockType] = map[string]struct{}{
+		feedbackActionType: {},
+	}
+	return allowlist
+}()
+
+// viewSubmissionBlockIDs is the package-owned classification registry for
+// submitted view state blocks. Add new modal blocks here when they are rendered,
+// then classify them through viewSubmissionStateLogAllowlist or
+// redactedSubmissionBlockIDs. claimCodeBlockID is included even though no
+// current modal renders it because issue #432 tracks it as a must-redact
+// compatibility contract. This registry is a review/test reminder rather than
+// the runtime safety boundary; unregistered future blocks still redact by
+// default in sanitizedViewSubmissionStateValues.
+var viewSubmissionBlockIDs = []string{
+	claimCodeBlockID,
+	connectorSetupBlockType,
+	tunnelInstallBlockSlug,
+	tunnelInstallBlockShortcut,
+	tunnelInstallBlockEnvironment,
+	tunnelInstallBlockLocalPort,
+	tunnelInstallBlockWebRef,
+	s3WebsiteInstallBlockSlug,
+	s3WebsiteInstallBlockShortcut,
+	s3WebsiteInstallBlockEnvironment,
+	s3WebsiteInstallBlockBucket,
+	s3WebsiteInstallBlockRegion,
+	s3WebsiteInstallBlockPrefix,
+	s3WebsiteInstallBlockIndex,
+	tunnelEditBlockDisplayName,
+	tunnelEditBlockAliases,
+	tunnelEditBlockChannels,
+	exposeURLBlockResource,
+	exposeURLBlockAlias,
+	exposeURLBlockTarget,
+	feedbackBlockType,
+	feedbackBlockSummary,
+	feedbackBlockDetails,
+}
+
+func cloneStateLogAllowlist(in map[string]map[string]struct{}) map[string]map[string]struct{} {
+	out := make(map[string]map[string]struct{}, len(in))
+	for blockID, actions := range in {
+		actionCopy := make(map[string]struct{}, len(actions))
+		for actionID := range actions {
+			actionCopy[actionID] = struct{}{}
+		}
+		out[blockID] = actionCopy
+	}
+	return out
+}
+
+func interactionStateLogValues(values map[string]map[string]interactionStateValue) map[string]map[string]any {
+	// Block-action diagnostics keep the historical allowlist-and-drop shape.
+	// View submissions carry richer user state and use
+	// sanitizedViewSubmissionStateValues, which emits sentinels for redacted or
+	// unclassified blocks instead.
+	logValues := make(map[string]map[string]any, len(values))
 	for blockID, actions := range values {
 		allowedActions, ok := interactionStateLogAllowlist[blockID]
 		if !ok {
 			continue
 		}
-		inner := make(map[string]string, len(actions))
+		inner := make(map[string]any, len(actions))
 		for actionID, v := range actions {
 			if _, ok := allowedActions[actionID]; !ok {
 				continue
 			}
-			inner[actionID] = v.text()
+			inner[actionID] = v.logValue()
 		}
 		if len(inner) > 0 {
 			logValues[blockID] = inner
@@ -527,11 +779,25 @@ type interactionSelectedOption struct {
 	Value string `json:"value"`
 }
 
+func (v interactionStateValue) logValue() any {
+	if text := v.text(); text != "" {
+		return text
+	}
+	if len(v.SelectedConversations) > 0 {
+		return append([]string(nil), v.SelectedConversations...)
+	}
+	return ""
+}
+
 // LogValue implements [slog.LogValuer] so a `slog` call that takes
 // the payload as a value (`slog.Info("interaction", "payload", p)`)
 // emits a stable group shape. State values are emitted only for known
 // non-secret tunnel-install blocks; future secret-bearing blocks are redacted
 // by default unless explicitly added to interactionStateLogAllowlist.
+//
+// The pointer receiver is intentional for this private wide envelope: it keeps
+// nil *interactionPayload logs safe. Use ViewSubmission for the value-safe
+// view-submission logging shape.
 func (p *interactionPayload) LogValue() slog.Value {
 	if p == nil {
 		return slog.AnyValue(nil)
@@ -545,6 +811,92 @@ func (p *interactionPayload) LogValue() slog.Value {
 		slog.String("callback_id", p.View.CallbackID),
 		slog.Any("state_values", interactionStateLogValues(p.View.State.Values)),
 	)
+}
+
+// LogViewSubmission emits the supported view-submission diagnostic shape.
+// Submitted state is sanitized through [IsRedactedSubmissionBlock] before it
+// reaches slog so a future diagnostic call site does not need to remember the
+// redaction contract. It keeps the generic "interaction received" message used
+// by other interaction logs; view submissions intentionally add sanitized
+// state_values for richer modal diagnostics.
+func LogViewSubmission(log *slog.Logger, payload *ViewSubmission) {
+	if log == nil {
+		log = slog.Default()
+	}
+	if payload == nil {
+		return
+	}
+	log.Info("interaction received", viewSubmissionLogArgs(payload)...)
+}
+
+// LogValue implements [slog.LogValuer] for the narrower view-submission type,
+// so direct `slog.Any("submission", payload)` calls use the same redacted
+// representation as [LogViewSubmission] for both pointer and value payloads.
+//
+//nolint:gocritic // Value receiver keeps non-pointer slog.Any calls from reflect-logging raw State.Values.
+func (p ViewSubmission) LogValue() slog.Value {
+	return slog.GroupValue(viewSubmissionLogAttrs(&p)...)
+}
+
+func viewSubmissionLogAttrs(p *ViewSubmission) []slog.Attr {
+	return []slog.Attr{
+		slog.String("type", p.Type),
+		slog.String("team_id", p.Team.ID),
+		slog.String("user_id", p.User.ID),
+		slog.String("view_id", p.View.ID),
+		slog.String("callback_id", p.View.CallbackID),
+		slog.Any("state_values", sanitizedViewSubmissionStateValues(p.View.State.Values)),
+	}
+}
+
+func viewSubmissionLogArgs(p *ViewSubmission) []any {
+	attrs := viewSubmissionLogAttrs(p)
+	args := make([]any, len(attrs))
+	for i, attr := range attrs {
+		args[i] = attr
+	}
+	return args
+}
+
+// sanitizedViewSubmissionStateValues is safe by default: only explicitly
+// allowlisted block/action pairs emit values. Registered sensitive blocks and
+// unknown future blocks are represented by a whole-block sentinel so a new modal
+// cannot silently leak submitted state before its fields are classified.
+func sanitizedViewSubmissionStateValues(values map[string]map[string]interactionStateValue) map[string]any {
+	logValues := make(map[string]any, len(values))
+	for blockID, actions := range values {
+		if IsRedactedSubmissionBlock(blockID) {
+			logValues[blockID] = redactedSubmissionBlockValue(blockID)
+			continue
+		}
+		allowedActions, ok := viewSubmissionStateLogAllowlist[blockID]
+		if !ok {
+			logValues[blockID] = redactedSubmissionBlockValue(blockID)
+			continue
+		}
+		inner := make(map[string]any, len(actions))
+		for actionID, value := range actions {
+			if _, ok := allowedActions[actionID]; !ok {
+				continue
+			}
+			// Preserve empty allowlisted fields: validation diagnostics can need
+			// to distinguish present-but-blank input from a missing block/action.
+			inner[actionID] = value.logValue()
+		}
+		if len(inner) > 0 {
+			logValues[blockID] = inner
+			continue
+		}
+		// If an allowlisted block only carried unexpected sibling actions, drop
+		// it instead of emitting a sentinel. The block is known non-secret, and
+		// the unexpected values should stay invisible rather than become log
+		// noise.
+	}
+	return logValues
+}
+
+func redactedSubmissionBlockValue(blockID string) string {
+	return fmt.Sprintf("<redacted: %s>", blockID)
 }
 
 // parseInteractionPayload decodes the `payload=` form field Slack

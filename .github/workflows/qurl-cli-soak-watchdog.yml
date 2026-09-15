@@ -1,0 +1,119 @@
+name: qURL CLI Soak Freshness Watchdog
+
+# The success notifier in cli.yml proves a completed soak. This workflow
+# covers the separate failure mode where the daily schedule does not complete
+# and therefore cannot emit either its success or workflow-run failure notice.
+# It has no manual trigger because a person must not create a false stale alert;
+# the script and workflow contract tests cover the API plumbing before merge.
+on:
+  schedule:
+    # Run after the four-hour active-run grace period that starts at 06:17 UTC.
+    - cron: "41 11 * * *"
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: qurl-cli-soak-watchdog
+  cancel-in-progress: true
+
+jobs:
+  freshness:
+    if: github.ref == 'refs/heads/main'
+    outputs:
+      stale: ${{ steps.evaluate.outputs.stale }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - id: evaluate
+        name: Require today's successful scheduled soak
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh api --method GET \
+            "repos/${GH_REPOSITORY}/actions/workflows/cli.yml/runs" \
+            -f event=schedule -f per_page=100 >"$RUNNER_TEMP/runs.json"
+          now_epoch=$(date +%s)
+          day_start=$((now_epoch - now_epoch % 86400))
+          # cli.yml starts at 06:17 UTC. Check only today's cohort, so a late
+          # prior-day pass cannot hide a missing run. A current queued or
+          # active attempt remains healthy for four hours from its latest
+          # start; GitHub keeps created_at fixed across re-runs.
+          expected_after=$((day_start + 22620))
+          # A severely delayed watchdog can start after UTC midnight. In that
+          # case, inspect the prior day's cohort instead of a future boundary.
+          if ((now_epoch < expected_after)); then
+            expected_after=$((expected_after - 86400))
+          fi
+          jobs_dir=$RUNNER_TEMP/soak-jobs
+          mkdir -p "$jobs_dir"
+          if ! candidate_runs=$(jq -r --argjson expected "$expected_after" --argjson now "$now_epoch" '
+            def epoch: sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601;
+            .workflow_runs[] |
+            select(.event == "schedule" and .status == "completed") |
+            select((.created_at | epoch) >= $expected and (.created_at | epoch) <= $now) |
+            [.id, .run_attempt] | @tsv
+          ' "$RUNNER_TEMP/runs.json"); then
+            echo "::error::scheduled CLI run history is malformed"
+            exit 1
+          fi
+          while IFS=$'\t' read -r run_id run_attempt; do
+            [[ -n "$run_id" ]] || continue
+            gh api --method GET --paginate --slurp \
+              "repos/${GH_REPOSITORY}/actions/runs/${run_id}/attempts/${run_attempt}/jobs?per_page=100" \
+              | jq -e '
+                  if length == 0 or (.[0].total_count | type) != "number"
+                  then error("job pages are malformed")
+                  else {total_count: .[0].total_count, jobs: [.[].jobs[]]}
+                  end
+                ' >"$jobs_dir/${run_id}-${run_attempt}.json"
+          done <<<"$candidate_runs"
+          set +e
+          watchdog_output=$(QURL_CLI_WATCHDOG_NOW_EPOCH=$now_epoch \
+            scripts/qurl-cli-soak-watchdog.sh \
+              "$RUNNER_TEMP/runs.json" "$jobs_dir" "$expected_after" 14400 4 2>&1)
+          watchdog_status=$?
+          set -e
+          printf '%s\n' "$watchdog_output"
+          case "$watchdog_status" in
+            0) echo "stale=false" >>"$GITHUB_OUTPUT" ;;
+            1) echo "stale=true" >>"$GITHUB_OUTPUT" ;;
+            *) exit "$watchdog_status" ;;
+          esac
+
+  notify-stale:
+    needs: freshness
+    if: "!cancelled() && github.ref == 'refs/heads/main' && needs.freshness.result == 'success' && needs.freshness.outputs.stale == 'true'"
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: cli-customer-journey
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Post stale soak alert to Slack
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          REPOSITORY_URL: ${{ github.server_url }}/${{ github.repository }}
+          HEAD_SHA: ${{ github.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          TRIGGER: schedule
+          SOAK_STATUS: stale
+          SOAK_DURATION: 80m
+        shell: bash
+        run: scripts/notify-qurl-cli-soak-status.sh

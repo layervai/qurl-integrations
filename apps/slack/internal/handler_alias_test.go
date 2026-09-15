@@ -27,6 +27,11 @@ const (
 	testAliasName      = "staging"
 	testSlashCmd       = "/qurl"
 	testOtherAlias     = "other"
+	// testAliasNotTunnelSub is the substring unique to msgAliasTargetNotTunnel
+	// (the not-a-`$slug` rejection), used to assert that any non-`$`
+	// target — a URL, an `r_<id>`, or a sigil-less typo — gets the
+	// uniform not-a-tunnel copy rather than the generic usage dump.
+	testAliasNotTunnelSub = "URLs, CRIDs, and internal handles aren't supported"
 	// testResourcesPath is the qurl-service list/lookup endpoint the
 	// slug-target set-alias path hits. Lifted so the slug-resolving
 	// test servers in this file don't trip goconst on the literal.
@@ -149,7 +154,7 @@ func newAliasTestHandler(t *testing.T) (*Handler, *fakeAliasStore) {
 	//
 	// Note this wires AdminStore unconditionally, so a test that needs the
 	// AdminStore-nil path must build the handler directly rather than through
-	// this helper (see TestUserHelpGatesGetAndAliasesOnAdminStore and
+	// this helper (see TestUserHelpGatesGetAliasesAndUninstall and
 	// TestHelpListsAliasVerbsWhenAliasStoreWired).
 	seedAliasAdminGate(t, h, testAliasTeamID)
 	return h, store
@@ -206,11 +211,6 @@ func decodeSlackText(t *testing.T, raw []byte) string {
 // --- parser unit tests ---------------------------------------------------
 
 func TestParseAliasArgs_SetAlias(t *testing.T) {
-	// notTunnelSub is the substring unique to msgAliasTargetNotTunnel
-	// (the not-a-`$slug` rejection), used to assert that any non-`$`
-	// target — a URL, an `r_<id>`, or a sigil-less typo — gets the
-	// uniform not-a-tunnel copy rather than the generic usage dump.
-	const notTunnelSub = "aren't supported"
 	cases := []struct {
 		name      string
 		input     string
@@ -231,13 +231,23 @@ func TestParseAliasArgs_SetAlias(t *testing.T) {
 
 		// URL / resource-id targets are well-formed but unsupported now —
 		// uniform not-a-tunnel copy (a valid r_<id> and a r_<typo> read
-		// the same; the URL too).
-		{name: "URL target rejected as not-a-tunnel", input: "$staging https://example.com", wantErr: true, wantMsgSub: notTunnelSub},
-		{name: "localhost URL target rejected as not-a-tunnel", input: "$staging http://localhost:3000", wantErr: true, wantMsgSub: notTunnelSub},
-		{name: "resource id target rejected as not-a-tunnel", input: "$staging r_abc123", wantErr: true, wantMsgSub: notTunnelSub},
-		{name: "bare r_ target rejected as not-a-tunnel", input: "$staging r_", wantErr: true, wantMsgSub: notTunnelSub},
-		{name: "garbage non-url target rejected as not-a-tunnel", input: "$staging not-a-url", wantErr: true, wantMsgSub: notTunnelSub},
-		{name: "non-http scheme target rejected as not-a-tunnel", input: "$staging ftp://example.com", wantErr: true, wantMsgSub: notTunnelSub},
+		// the same; the URL too). The private-address URL rows all exercise
+		// the same branch by design: they pin that no URL class gets
+		// special-cased back into set-alias.
+		{name: "URL target rejected as not-a-tunnel", input: "$staging https://example.com", wantErr: true, wantMsgSub: testAliasNotTunnelSub},
+		{name: "localhost URL target rejected as not-a-tunnel", input: "$staging http://localhost:3000", wantErr: true, wantMsgSub: testAliasNotTunnelSub},
+		{name: "loopback IPv4 URL target rejected as not-a-tunnel", input: "$staging http://127.0.0.1:3000", wantErr: true, wantMsgSub: testAliasNotTunnelSub},
+		{name: "RFC1918 10/8 URL target rejected as not-a-tunnel", input: "$staging http://10.0.0.1", wantErr: true, wantMsgSub: testAliasNotTunnelSub},
+		{name: "RFC1918 172.16/12 URL target rejected as not-a-tunnel", input: "$staging http://172.16.0.1", wantErr: true, wantMsgSub: testAliasNotTunnelSub},
+		{name: "RFC1918 192.168/16 URL target rejected as not-a-tunnel", input: "$staging http://192.168.1.1", wantErr: true, wantMsgSub: testAliasNotTunnelSub},
+		{name: "link-local IMDS URL target rejected as not-a-tunnel", input: "$staging http://169.254.169.254/latest/meta-data/", wantErr: true, wantMsgSub: testAliasNotTunnelSub},
+		{name: "IPv6 loopback URL target rejected as not-a-tunnel", input: "$staging http://[::1]/", wantErr: true, wantMsgSub: testAliasNotTunnelSub},
+		{name: "IPv6 link-local URL target rejected as not-a-tunnel", input: "$staging http://[fe80::1]/", wantErr: true, wantMsgSub: testAliasNotTunnelSub},
+		{name: "IPv6 ULA URL target rejected as not-a-tunnel", input: "$staging http://[fd00::1]/", wantErr: true, wantMsgSub: testAliasNotTunnelSub},
+		{name: "resource id target rejected as not-a-tunnel", input: "$staging r_abc123", wantErr: true, wantMsgSub: testAliasNotTunnelSub},
+		{name: "bare r_ target rejected as not-a-tunnel", input: "$staging r_", wantErr: true, wantMsgSub: testAliasNotTunnelSub},
+		{name: "garbage non-url target rejected as not-a-tunnel", input: "$staging not-a-url", wantErr: true, wantMsgSub: testAliasNotTunnelSub},
+		{name: "non-http scheme target rejected as not-a-tunnel", input: "$staging ftp://example.com", wantErr: true, wantMsgSub: testAliasNotTunnelSub},
 
 		// Alias-name / arity errors → usage dump.
 		{name: "missing target", input: "$staging", wantErr: true},
@@ -251,8 +261,8 @@ func TestParseAliasArgs_SetAlias(t *testing.T) {
 		{name: "alias over cap rejected", input: "$" + strings.Repeat("a", 65) + " $prod-dashboard", wantErr: true},
 		// A `$slug` target that fails the tunnel-slug grammar → usage
 		// dump (it passed the `$`-prefix gate but isn't a valid slug).
-		{name: "slug target too short rejected", input: "$staging $ab", wantErr: true, wantMsgSub: "tunnel ID"},
-		{name: "slug target uppercase rejected", input: "$staging $Prod", wantErr: true, wantMsgSub: "tunnel ID"},
+		{name: "slug target too short rejected", input: "$staging $ab", wantErr: true, wantMsgSub: "qURL Connector ID"},
+		{name: "slug target uppercase rejected", input: "$staging $Prod", wantErr: true, wantMsgSub: "qURL Connector ID"},
 		// Backtick / control byte in the target token are rejected before
 		// the slug check so the success-copy fence + audit log stay clean.
 		{name: "backtick in slug target rejected", input: "$staging $prod`bad", wantErr: true},
@@ -331,15 +341,76 @@ func TestSetAlias_URLTargetRejected(t *testing.T) {
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, newSignedRequest(t, "/slack/commands", body, sign))
 
-	if w.Code != 200 {
+	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", w.Code)
 	}
 	got := decodeSlackText(t, w.Body.Bytes())
-	if !strings.Contains(got, "URLs and resource IDs aren't supported") {
+	if !strings.Contains(got, testAliasNotTunnelSub) {
 		t.Errorf("response = %q, want not-a-tunnel rejection copy", got)
 	}
 	if b := store.bindings(testAliasTeamID, testAliasChannelID); b != nil {
 		t.Errorf("URL-target rejection should not touch the store, got bindings=%v", b)
+	}
+}
+
+// TestSetAlias_PrivateURLTargetsRejected closes the old set-alias private-host
+// follow-up by pinning the current stronger contract: set-alias accepts only a
+// tunnel `$slug`, so private URL classes reject before admin lookup, upstream
+// resolution, or alias storage.
+func TestSetAlias_PrivateURLTargetsRejected(t *testing.T) {
+	cases := []string{
+		"http://localhost/internal",
+		"http://10.0.0.1/internal",
+		"http://192.168.1.1/internal",
+		"http://169.254.169.254/latest/meta-data/",
+		"http://[::1]/internal",
+		"http://[fe80::1]/internal",
+		"http://[fd00::1]/internal",
+	}
+	for _, target := range cases {
+		t.Run(target, func(t *testing.T) {
+			h, store := newAliasTestHandler(t)
+			body, sign := aliasSlashRequest(t, "setalias $staging "+target, testAliasTeamID, testAliasChannelID)
+
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, newSignedRequest(t, "/slack/commands", body, sign))
+
+			if w.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200", w.Code)
+			}
+			got := decodeSlackText(t, w.Body.Bytes())
+			if !strings.Contains(got, testAliasNotTunnelSub) {
+				t.Fatalf("response = %q, want not-a-tunnel rejection copy", got)
+			}
+			if b := store.bindings(testAliasTeamID, testAliasChannelID); b != nil {
+				t.Fatalf("private URL rejection should not touch the store, got bindings=%v", b)
+			}
+		})
+	}
+}
+
+func TestSetAlias_PrivateURLAllowlistEnvDoesNotBypassTunnelTargetGate(t *testing.T) {
+	// The original private-host follow-up proposed a sandbox-only URL
+	// allowlist because set-alias used to accept raw URLs. The current
+	// contract is stronger: set-alias cannot bind raw URLs at all, so an
+	// env var with that legacy name must stay unread and must not create
+	// a hidden bypass.
+	t.Setenv("QURL_ALLOW_PRIVATE_ALIAS_TARGETS", "true")
+	h, store := newAliasTestHandler(t)
+	body, sign := aliasSlashRequest(t, "setalias $staging http://10.0.0.1/internal", testAliasTeamID, testAliasChannelID)
+
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, newSignedRequest(t, "/slack/commands", body, sign))
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	got := decodeSlackText(t, w.Body.Bytes())
+	if !strings.Contains(got, testAliasNotTunnelSub) {
+		t.Fatalf("response = %q, want not-a-tunnel rejection copy", got)
+	}
+	if b := store.bindings(testAliasTeamID, testAliasChannelID); b != nil {
+		t.Fatalf("private URL allowlist env must not bypass tunnel-only setalias, got bindings=%v", b)
 	}
 }
 
@@ -353,11 +424,11 @@ func TestSetAlias_ResourceIDTargetRejected(t *testing.T) {
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, newSignedRequest(t, "/slack/commands", body, sign))
 
-	if w.Code != 200 {
+	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", w.Code)
 	}
 	got := decodeSlackText(t, w.Body.Bytes())
-	if !strings.Contains(got, "URLs and resource IDs aren't supported") {
+	if !strings.Contains(got, testAliasNotTunnelSub) {
 		t.Errorf("response = %q, want not-a-tunnel rejection copy", got)
 	}
 	if b := store.bindings(testAliasTeamID, testAliasChannelID); b != nil {
@@ -461,9 +532,8 @@ func TestSetAlias_HappyTunnelSlug(t *testing.T) {
 // admin-only reply BEFORE any tunnel-slug resolution, so no upstream
 // resource lookup and no alias bind happen. Before this gate, set-alias
 // relied only on the (cosmetic) Slack-manifest restriction — see
-// handleSetAlias. Mirrors TestHandleAdminRevoke_NonAdmin for the
-// membership verbs; the upstream-hit assertion pins the gate-before-resolve
-// ordering.
+// handleSetAlias. Mirrors the requireAdminSync gate the membership verbs
+// share; the upstream-hit assertion pins the gate-before-resolve ordering.
 func TestSetAlias_NonAdminDenied(t *testing.T) {
 	t.Setenv("QURL_API_KEY", "test-key")
 	var resolveHits atomic.Int32
@@ -915,7 +985,7 @@ func TestHelpListsAliasVerbsWhenAliasStoreWired(t *testing.T) {
 	// newAliasTestHandler wires an AdminStore, which would advertise tunnel
 	// install and flip that assertion — so construct the handler directly.
 	// (The user-help `/qurl get` and `/qurl aliases` gates are fenced by
-	// TestUserHelpGatesGetAndAliasesOnAdminStore, not here — admin help
+	// TestUserHelpGatesGetAliasesAndUninstall, not here — admin help
 	// never renders those user-verb lines.)
 	h := newTestHandler(t, noopQURLServer(t))
 	h.aliasStore = newFakeAliasStore()
@@ -936,15 +1006,16 @@ func TestHelpListsAliasVerbsWhenAliasStoreWired(t *testing.T) {
 	}
 }
 
-// TestUserHelpGatesGetAndAliasesOnAdminStore fences the AdminStore gate on
-// the `/qurl get` and `/qurl aliases` lines in the USER help: both resolve
-// through the AdminStore (get via resolveTokenForGet, aliases via
-// processAliases) and fail closed when it's nil post-tunnels-only, so
-// userHelpMessage must advertise them only when AdminStore is wired.
+// TestUserHelpGatesGetAliasesAndUninstall fences the AdminStore gate on
+// `/qurl get`, `/qurl aliases`, and `/qurl uninstall` in the USER help.
+// The read verbs resolve through AdminStore (get via resolveTokenForGet,
+// aliases via processAliases), and uninstall additionally needs mutable
+// credential storage plus owner/admin verification, so userHelpMessage must
+// advertise them only when the matching runtime wiring is present.
 // Exercises userHelpMessage directly because `help` routes to the admin
 // surface in the dispatch split, so the slash-command path can't reach
 // user help.
-func TestUserHelpGatesGetAndAliasesOnAdminStore(t *testing.T) {
+func TestUserHelpGatesGetAliasesAndUninstall(t *testing.T) {
 	h := newTestHandler(t, noopQURLServer(t))
 	noStore := h.userHelpMessage(commandUser)
 	if strings.Contains(noStore, "/qurl aliases`") {
@@ -953,6 +1024,12 @@ func TestUserHelpGatesGetAndAliasesOnAdminStore(t *testing.T) {
 	if strings.Contains(noStore, "/qurl get") {
 		t.Errorf("user help advertised /qurl get with no AdminStore: %q", noStore)
 	}
+	if strings.Contains(noStore, "/qurl uninstall") {
+		t.Errorf("user help advertised /qurl uninstall with no AdminStore: %q", noStore)
+	}
+	if strings.Contains(strings.ToLower(noStore), "tunnel") {
+		t.Errorf("user help leaked tunnel terminology with no AdminStore: %q", noStore)
+	}
 	seedAliasAdminGate(t, h, testAliasTeamID)
 	withStore := h.userHelpMessage(commandUser)
 	if !strings.Contains(withStore, "/qurl aliases`") {
@@ -960,6 +1037,35 @@ func TestUserHelpGatesGetAndAliasesOnAdminStore(t *testing.T) {
 	}
 	if !strings.Contains(withStore, "/qurl get") {
 		t.Errorf("user help omitted /qurl get with AdminStore wired: %q", withStore)
+	}
+	if strings.Contains(withStore, "/qurl uninstall") {
+		t.Errorf("user help advertised /qurl uninstall for env-backed provider: %q", withStore)
+	}
+	h.cfg.AuthProvider = &recordingAuthProvider{apiKey: "test-key"}
+	withMutableStore := h.userHelpMessage(commandUser)
+	if !strings.Contains(withMutableStore, "/qurl uninstall") {
+		t.Errorf("user help omitted /qurl uninstall with mutable provider and AdminStore wired: %q", withMutableStore)
+	}
+	if strings.Contains(strings.ToLower(withStore), "tunnel") {
+		t.Errorf("user help leaked tunnel terminology with AdminStore wired: %q", withStore)
+	}
+}
+
+// TestUserHelpGatesDMTrueOnPostDMBlocks fences that the `dm:true` help line is
+// advertised iff PostDMBlocks is wired — the SAME seam getWork gates its dm:true
+// refusal on. Without this lockstep, a deploy with PostDMBlocks nil would advertise
+// a path whose only reply is ":warning: DM delivery is not configured".
+func TestUserHelpGatesDMTrueOnPostDMBlocks(t *testing.T) {
+	const dmLine = "dm:true`"
+	h := newTestHandler(t, noopQURLServer(t))
+	// AdminStore gates the get verbs at all; the dm:true line nests under it.
+	seedAliasAdminGate(t, h, testAliasTeamID)
+	if got := h.userHelpMessage(commandUser); strings.Contains(got, dmLine) {
+		t.Errorf("user help advertised dm:true with PostDMBlocks nil: %q", got)
+	}
+	h.cfg.PostDMBlocks = func(context.Context, string, string, string, []any, string) error { return nil }
+	if got := h.userHelpMessage(commandUser); !strings.Contains(got, dmLine) {
+		t.Errorf("user help omitted dm:true with PostDMBlocks wired: %q", got)
 	}
 }
 

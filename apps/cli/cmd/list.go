@@ -1,63 +1,101 @@
 package main
 
 import (
-	"fmt"
+	"context"
+	"errors"
 
 	"github.com/spf13/cobra"
 
-	"github.com/layervai/qurl-integrations/shared/client"
+	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
+	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/output"
 )
 
 func listCmd(opts *globalOpts) *cobra.Command {
 	var (
-		limit  int
-		cursor string
-		status string
-		query  string
-		sort   string
+		limit   int
+		cursor  string
+		status  string
+		resType string
 	)
 
 	cmd := &cobra.Command{
 		Use:   "list",
-		Short: "List qURLs",
-		Example: `  qurl list
-  qurl list --status active --limit 50
-  qurl list --sort created_at:desc
-  qurl list --query "dashboard"`,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			if status != "" {
-				switch status {
-				case client.StatusActive, client.StatusExpired, client.StatusRevoked, client.StatusConsumed:
-				default:
-					return fmt.Errorf("invalid status %q: must be active, expired, revoked, or consumed", status)
-				}
-			}
+		Short: "List your published resources",
+		Long: `List the resources published under your account, one row per resource.
 
-			c, err := opts.newClient()
+The text table always prints the full CRID. Local tunnel rows include their
+loopback target and durable desired state. Observed tunnel state is shown as
+unknown in this paged view; use qurl status <CRID> for an authoritative live
+observation. Pages continue with --cursor when there are more results.`,
+		Example: `  qurl list --status active
+  qurl list --quiet | xargs -n1 qurl share --quiet`,
+		Args: noArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			client, err := opts.newClient(cmd.Context())
 			if err != nil {
 				return err
 			}
-
-			result, err := c.List(cmd.Context(), client.ListInput{
+			page, err := client.List(cmd.Context(), qurlapi.ListOptions{
 				Limit:  limit,
 				Cursor: cursor,
 				Status: status,
-				Query:  query,
-				Sort:   sort,
+				Type:   resType,
 			})
 			if err != nil {
-				return fmt.Errorf("list qURLs: %w", err)
+				return err
 			}
-
-			return opts.formatter().FormatList(cmd.OutOrStdout(), result)
+			// JSON is the same structured document with or without --quiet.
+			// Keep its local tunnel targets stable; only quiet text skips the
+			// registry read because it prints identifiers alone.
+			if !opts.quiet || opts.resolvedFormat == output.FormatJSON {
+				if err := enrichTunnelList(cmd.Context(), opts, page); err != nil {
+					return err
+				}
+			}
+			return opts.printer().List(page)
 		},
 	}
 
-	cmd.Flags().IntVarP(&limit, "limit", "l", 20, "Maximum number of qURLs to return")
-	cmd.Flags().StringVar(&cursor, "cursor", "", "Pagination cursor from a previous list response")
-	cmd.Flags().StringVar(&status, "status", "", "Filter by status (active, expired, revoked, consumed)")
-	cmd.Flags().StringVar(&query, "query", "", "Search description and target URL")
-	cmd.Flags().StringVar(&sort, "sort", "", "Sort field:direction (e.g., created_at:desc)")
+	cmd.Flags().IntVar(&limit, "limit", 0, "maximum resources per page, 1-100 (default: service decides)")
+	cmd.Flags().StringVar(&cursor, "cursor", "", "continue from a previous page's cursor")
+	cmd.Flags().StringVar(&status, "status", "", "only resources with this status, e.g. active")
+	cmd.Flags().StringVar(&resType, "type", "", "only resources of this kind: url or tunnel")
 
 	return cmd
+}
+
+func enrichTunnelList(ctx context.Context, opts *globalOpts, page *qurlapi.ResourcePage) error {
+	tunnelRows := make([]int, 0, len(page.Items))
+	for index := range page.Items {
+		if page.Items[index].Type == connectorResourceType {
+			tunnelRows = append(tunnelRows, index)
+		}
+	}
+	if len(tunnelRows) == 0 {
+		return nil
+	}
+	shares, err := opts.loadLocalShares(ctx)
+	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if errors.Is(err, connectorstate.ErrNoDefaultStateDir) {
+			return nil
+		}
+		opts.printer().Warnf("Local sharing state is invalid or inaccessible; local targets were omitted: %v", err)
+		return nil
+	}
+	localTargets := make(map[string]string, len(shares))
+	for index := range shares {
+		share := &shares[index]
+		localTargets[share.ResourceID] = share.TargetURL
+	}
+	for _, index := range tunnelRows {
+		if target := localTargets[page.Items[index].ResourceID]; target != "" {
+			page.Items[index].TargetURL = target
+		}
+	}
+
+	return nil
 }

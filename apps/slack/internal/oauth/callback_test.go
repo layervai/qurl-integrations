@@ -1,42 +1,297 @@
 package oauth
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"html"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/layervai/qurl-integrations/shared/auth"
 )
 
 const (
-	testTeamID        = "T123ABCDEF"
-	testUserID        = "U_ADMIN1"
-	testAuth0ClientID = "client-id"
-	testKeyID         = "k_1"
-	testKeyPrefix     = "lv_live_abcd"
-	testAPIKey        = "lv_live_abcd1234"
-	testAdminEmail    = "admin@example.com"
+	testTeamID            = "T123ABCDEF"
+	testUserID            = "U_ADMIN1"
+	testAuth0ClientID     = "client-id"
+	testKeyID             = "k_1"
+	testKeyPrefix         = "lv_live_abcd"
+	testAPIKey            = "lv_live_abcd1234"
+	testOldAPIKey         = "lv_live_oldkey1234"
+	testOldKeyID          = "k_old"
+	testAdminEmail        = "admin@example.com"
+	testAuditAgent        = "slack"
+	testAuditFieldCode    = "code"
+	testInvalidToken      = "invalid_token"
+	testInsufficientScope = "insufficient_scope"
+	testRevokeKeyPath     = apiKeyPath
 )
 
-// fakeWorkspaceStore captures SetAPIKey calls.
+func captureDefaultSlogJSON(t *testing.T) func() []map[string]any {
+	t.Helper()
+	// Mutates process-global slog state; adding t.Parallel anywhere in this
+	// package requires replacing this helper with non-global log capture.
+	var buf lockedLogBuffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return func() []map[string]any {
+		t.Helper()
+		var records []map[string]any
+		for _, line := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
+			if line == "" {
+				continue
+			}
+			var rec map[string]any
+			if err := json.Unmarshal([]byte(line), &rec); err != nil {
+				t.Fatalf("unmarshal log line %q: %v", line, err)
+			}
+			records = append(records, rec)
+		}
+		return records
+	}
+}
+
+type lockedLogBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedLogBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedLogBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+func TestLogOAuthDependencyAuthFailure(t *testing.T) {
+	var logs bytes.Buffer
+	log := slog.New(slog.NewJSONHandler(&logs, nil))
+
+	logOAuthDependencyAuthFailure(log, &DependencyAuthFailureError{
+		Method:     http.MethodPost,
+		Path:       testBindingPath,
+		StatusCode: http.StatusUnauthorized,
+		Code:       testInvalidToken,
+		RequestID:  "req_oauth401",
+	}, "oauth_callback_mint")
+
+	var record struct {
+		Audit map[string]any `json:"audit"`
+	}
+	if err := json.Unmarshal(logs.Bytes(), &record); err != nil {
+		t.Fatalf("unmarshal audit log: %v\n%s", err, logs.String())
+	}
+	for k, want := range map[string]any{
+		"event":            "dependency_auth_failure",
+		"agent":            testAuditAgent,
+		"dependency":       "qurl_service",
+		"route":            "oauth_callback_mint",
+		"method":           http.MethodPost,
+		"path":             testBindingPath,
+		testAuditFieldCode: testInvalidToken,
+		"request_id":       "req_oauth401",
+	} {
+		if record.Audit[k] != want {
+			t.Fatalf("audit[%s] = %#v, want %#v; audit=%#v", k, record.Audit[k], want, record.Audit)
+		}
+	}
+	if record.Audit["status"] != float64(http.StatusUnauthorized) {
+		t.Fatalf("audit[status] = %#v, want %d; audit=%#v", record.Audit["status"], http.StatusUnauthorized, record.Audit)
+	}
+
+	logs.Reset()
+	logOAuthDependencyAuthFailure(log, &DependencyAuthFailureError{
+		Method:     http.MethodDelete,
+		Path:       testRevokeKeyPath,
+		StatusCode: http.StatusForbidden,
+	}, "oauth_callback_orphan_revoke")
+	if err := json.Unmarshal(logs.Bytes(), &record); err != nil {
+		t.Fatalf("unmarshal empty request-id audit log: %v\n%s", err, logs.String())
+	}
+	if record.Audit["request_id"] != "" {
+		t.Fatalf("audit[request_id] = %#v, want empty string; audit=%#v", record.Audit["request_id"], record.Audit)
+	}
+	if record.Audit[testAuditFieldCode] != "" {
+		t.Fatalf("audit[code] = %#v, want empty string; audit=%#v", record.Audit[testAuditFieldCode], record.Audit)
+	}
+
+	logs.Reset()
+	logOAuthDependencyAuthFailure(log, errors.New("ordinary failure"), "oauth_callback_mint")
+	if logs.Len() != 0 {
+		t.Fatalf("generic errors must not emit dependency auth audit: %s", logs.String())
+	}
+}
+
+func requireAuditRoute(t *testing.T, records []map[string]any, route string) map[string]any {
+	t.Helper()
+	for _, rec := range records {
+		audit, ok := rec["audit"].(map[string]any)
+		if ok && audit["route"] == route {
+			return audit
+		}
+	}
+	t.Fatalf("missing audit route %q in records: %#v", route, records)
+	return nil
+}
+
+func assertDependencyAuthFailureAudit(t *testing.T, audit map[string]any, route, method, path string, status int, code, requestID string) {
+	t.Helper()
+	for k, want := range map[string]any{
+		"event":            "dependency_auth_failure",
+		"agent":            testAuditAgent,
+		"dependency":       "qurl_service",
+		"route":            route,
+		"method":           method,
+		"path":             path,
+		testAuditFieldCode: code,
+		"request_id":       requestID,
+	} {
+		if audit[k] != want {
+			t.Fatalf("audit[%s] = %#v, want %#v; audit=%#v", k, audit[k], want, audit)
+		}
+	}
+	if audit["status"] != float64(status) {
+		t.Fatalf("audit[status] = %#v, want %d; audit=%#v", audit["status"], status, audit)
+	}
+}
+
+func TestMintAndPersistDependencyAuthFailureAuditWiring(t *testing.T) {
+	logs := captureDefaultSlogJSON(t)
+	cfg := Config{Minter: &fakeMinter{mintErr: &DependencyAuthFailureError{
+		Method:     http.MethodPost,
+		Path:       testBindingPath,
+		StatusCode: http.StatusUnauthorized,
+		Code:       testInvalidToken,
+		RequestID:  "req_mint",
+	}}}
+
+	rec := httptest.NewRecorder()
+	_, ok := mintAndPersist(rec, cfg, "access-token", testTeamID, testUserID, testAdminSub)
+
+	if ok {
+		t.Fatal("mintAndPersist must fail when qurl-service returns a dependency auth failure")
+	}
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502; body=%s", rec.Code, rec.Body.String())
+	}
+	assertDependencyAuthFailureAudit(t,
+		requireAuditRoute(t, logs(), "oauth_callback_mint"),
+		"oauth_callback_mint", http.MethodPost, testBindingPath, http.StatusUnauthorized, testInvalidToken, "req_mint")
+}
+
+func TestMintReplacementAndPersistDependencyAuthFailureAuditWiring(t *testing.T) {
+	logs := captureDefaultSlogJSON(t)
+	cfg := Config{Minter: &fakeMinter{replacementMintErr: &DependencyAuthFailureError{
+		Method:     http.MethodPost,
+		Path:       testAPIKeysPath,
+		StatusCode: http.StatusForbidden,
+		Code:       testInsufficientScope,
+		RequestID:  "req_replacement_mint",
+	}}}
+
+	rec := httptest.NewRecorder()
+	_, ok := mintReplacementAndPersist(rec, cfg, "access-token", testTeamID, testOldKeyID, testUserID, testAdminSub)
+
+	if ok {
+		t.Fatal("mintReplacementAndPersist must fail when qurl-service returns a dependency auth failure")
+	}
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502; body=%s", rec.Code, rec.Body.String())
+	}
+	assertDependencyAuthFailureAudit(t,
+		requireAuditRoute(t, logs(), "oauth_callback_replacement_mint"),
+		"oauth_callback_replacement_mint", http.MethodPost, testAPIKeysPath, http.StatusForbidden, testInsufficientScope, "req_replacement_mint")
+}
+
+func TestRevokeOrphanKeyAsyncDependencyAuthFailureAuditWiring(t *testing.T) {
+	logs := captureDefaultSlogJSON(t)
+	minter := &fakeMinter{revokeErr: &DependencyAuthFailureError{
+		Method:     http.MethodDelete,
+		Path:       testRevokeKeyPath,
+		StatusCode: http.StatusForbidden,
+		Code:       testInsufficientScope,
+		RequestID:  "req_orphan_revoke",
+	}}
+
+	revokeOrphanKeyAsync(minter, "access-token", testOldKeyID, testTeamID)
+
+	assertDependencyAuthFailureAudit(t,
+		requireAuditRoute(t, logs(), "oauth_callback_orphan_revoke"),
+		"oauth_callback_orphan_revoke", http.MethodDelete, testRevokeKeyPath, http.StatusForbidden, testInsufficientScope, "req_orphan_revoke")
+}
+
+// fakeWorkspaceStore captures SetAPIKeyWithMetadata calls.
 type fakeWorkspaceStore struct {
-	mu      sync.Mutex
-	setArgs *struct {
-		WorkspaceID, APIKey, ConfiguredBy string
+	mu              sync.Mutex
+	existingKey     string
+	existingKeyID   string
+	existingAccount string
+	apiKeyErr       error
+	apiKeyCalls     int
+	setArgs         *struct {
+		WorkspaceID, APIKey, KeyID, KeyPrefix, QURLAccountID, ConfiguredBy string
 	}
 	setErr error
 }
 
-func (f *fakeWorkspaceStore) SetAPIKey(_ context.Context, ws, key, by string) error {
+func (f *fakeWorkspaceStore) APIKey(_ context.Context, _ string) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.setArgs = &struct{ WorkspaceID, APIKey, ConfiguredBy string }{ws, key, by}
+	f.apiKeyCalls++
+	if f.apiKeyErr != nil {
+		return "", f.apiKeyErr
+	}
+	if f.existingKey == "" {
+		return "", auth.ErrWorkspaceNotConfigured
+	}
+	return f.existingKey, nil
+}
+func (f *fakeWorkspaceStore) APIKeyID(_ context.Context, _ string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.apiKeyCalls++
+	if f.apiKeyErr != nil {
+		return "", f.apiKeyErr
+	}
+	if f.existingKey == "" {
+		return "", auth.ErrWorkspaceNotConfigured
+	}
+	return f.existingKeyID, nil
+}
+func (f *fakeWorkspaceStore) APIKeyIdentity(_ context.Context, _ string) (keyID, qurlAccountID string, err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.apiKeyCalls++
+	if f.apiKeyErr != nil {
+		return "", "", f.apiKeyErr
+	}
+	if f.existingKey == "" {
+		return "", "", auth.ErrWorkspaceNotConfigured
+	}
+	return f.existingKeyID, f.existingAccount, nil
+}
+func (f *fakeWorkspaceStore) SetAPIKeyWithMetadata(_ context.Context, ws, key, keyID, keyPrefix, accountID, by string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.setArgs = &struct {
+		WorkspaceID, APIKey, KeyID, KeyPrefix, QURLAccountID, ConfiguredBy string
+	}{ws, key, keyID, keyPrefix, accountID, by}
 	return f.setErr
 }
 func (f *fakeWorkspaceStore) DeleteAPIKey(_ context.Context, _ string) error { return nil }
@@ -45,42 +300,88 @@ func (f *fakeWorkspaceStore) DeleteAPIKey(_ context.Context, _ string) error { r
 type fakeMinter struct {
 	apiKey, keyID, keyPrefix string
 	mintErr                  error
+	replacementMintErr       error
+	bindingBacked            bool
 	mintCalls                int
+	replacementMintOldKeyID  string
+	replacementMintCalls     int
 	mintMu                   sync.Mutex
-	revoked                  bool
+	revokedKeys              []string
+	revokeErr                error
 	revokeMu                 sync.Mutex
+	apiKeyRevoked            bool
+	apiKeyRevokedErr         error
+	apiKeyRevokedCalls       int
+	apiKeyRevokedHasDeadline bool
+	apiKeyRevokedDeadline    time.Duration
+	apiKeyRevokedMu          sync.Mutex
+	validateErr              error
+	validateCalls            int
+	validateMu               sync.Mutex
 }
 
-func (f *fakeMinter) MintAPIKey(_ context.Context, _, _ string, _ []string) (apiKey, keyID, keyPrefix string, err error) {
+func (f *fakeMinter) ValidateAPIKey(_ context.Context, _ string) error {
+	f.validateMu.Lock()
+	defer f.validateMu.Unlock()
+	f.validateCalls++
+	return f.validateErr
+}
+func (f *fakeMinter) MintWorkspaceAPIKey(_ context.Context, _, _ string) (WorkspaceAPIKeyMint, error) {
 	f.mintMu.Lock()
 	f.mintCalls++
 	f.mintMu.Unlock()
-	return f.apiKey, f.keyID, f.keyPrefix, f.mintErr
+	return WorkspaceAPIKeyMint{
+		APIKey:        f.apiKey,
+		KeyID:         f.keyID,
+		KeyPrefix:     f.keyPrefix,
+		BindingBacked: f.bindingBacked,
+	}, f.mintErr
 }
-func (f *fakeMinter) RevokeAPIKey(_ context.Context, _, _ string) error {
+func (f *fakeMinter) MintWorkspaceReplacementAPIKey(_ context.Context, _, _, oldKeyID string) (WorkspaceAPIKeyMint, error) {
+	f.mintMu.Lock()
+	defer f.mintMu.Unlock()
+	f.replacementMintCalls++
+	f.replacementMintOldKeyID = oldKeyID
+	return WorkspaceAPIKeyMint{
+		APIKey:    f.apiKey,
+		KeyID:     f.keyID,
+		KeyPrefix: f.keyPrefix,
+	}, f.replacementMintErr
+}
+func (f *fakeMinter) RevokeAPIKey(_ context.Context, _, keyID string) error {
 	f.revokeMu.Lock()
 	defer f.revokeMu.Unlock()
-	f.revoked = true
-	return nil
+	f.revokedKeys = append(f.revokedKeys, keyID)
+	return f.revokeErr
+}
+func (f *fakeMinter) APIKeyRevoked(ctx context.Context, _, _ string) (bool, error) {
+	f.apiKeyRevokedMu.Lock()
+	defer f.apiKeyRevokedMu.Unlock()
+	f.apiKeyRevokedCalls++
+	if deadline, ok := ctx.Deadline(); ok {
+		f.apiKeyRevokedHasDeadline = true
+		f.apiKeyRevokedDeadline = time.Until(deadline)
+	}
+	return f.apiKeyRevoked, f.apiKeyRevokedErr
 }
 
 // fakeIDTokenVerifier always returns the configured email/sub or err.
 type fakeIDTokenVerifier struct {
 	email  string
 	sub    string
+	nonce  string
 	err    error
 	subErr error
 }
 
-func (f *fakeIDTokenVerifier) VerifyEmail(_ context.Context, _ string) (string, error) {
-	return f.email, f.err
-}
-
-func (f *fakeIDTokenVerifier) VerifySub(_ context.Context, _ string) (string, error) {
-	if f.subErr != nil {
-		return "", f.subErr
+func (f *fakeIDTokenVerifier) VerifySetupClaims(_ context.Context, _, nonce string) (IDTokenClaims, error) {
+	if nonce == "" {
+		return IDTokenClaims{}, errors.New("missing nonce")
 	}
-	return f.sub, nil
+	if f.nonce != "" && f.nonce != nonce {
+		return IDTokenClaims{}, errors.New("nonce mismatch")
+	}
+	return IDTokenClaims{Email: f.email, Sub: f.sub, EmailErr: f.err, SubErr: f.subErr}, nil
 }
 
 // fakeSlackClient captures PostDirectMessage calls.
@@ -140,6 +441,10 @@ func newCallbackCfg(t *testing.T) (Config, *httptest.Server, *fakeWorkspaceStore
 			http.Error(w, "wrong grant", http.StatusBadRequest)
 			return
 		}
+		if r.Form.Get("code_verifier") == "" {
+			http.Error(w, "missing code_verifier", http.StatusBadRequest)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]string{
 			"access_token": "auth0-access",
@@ -148,7 +453,8 @@ func newCallbackCfg(t *testing.T) (Config, *httptest.Server, *fakeWorkspaceStore
 	}))
 	t.Cleanup(auth0.Close)
 	store := &fakeWorkspaceStore{}
-	minter := &fakeMinter{apiKey: testAPIKey, keyID: testKeyID, keyPrefix: testKeyPrefix}
+	stateStore := newMemoryStateStore()
+	minter := &fakeMinter{apiKey: testAPIKey, keyID: testKeyID, keyPrefix: testKeyPrefix, bindingBacked: true}
 
 	// Re-point HTTPClient at the stub Auth0 by rewriting the request host
 	// via a custom Transport. The simplest path: a Transport that
@@ -161,6 +467,7 @@ func newCallbackCfg(t *testing.T) (Config, *httptest.Server, *fakeWorkspaceStore
 		Auth0Audience:     "aud",
 		SlackBaseURL:      "https://slack-bot.example",
 		OAuthStateSecret:  testSecret,
+		StateStore:        stateStore,
 		Provider:          store,
 		IDTokenVerifier:   &fakeIDTokenVerifier{email: testAdminEmail},
 		Minter:            minter,
@@ -190,18 +497,30 @@ func (t *rewriteTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 
 func mintTestState(t *testing.T, cfg *Config) string {
 	t.Helper()
-	state, err := MintState(cfg.OAuthStateSecret, testTeamID, testUserID, cfg.Now())
-	if err != nil {
-		t.Fatalf("MintState: %v", err)
-	}
-	return state
+	return mintStoredTestState(t, cfg, "", SetupModeReuse)
 }
 
 func mintTestStateWithEmail(t *testing.T, cfg *Config, email string) string {
 	t.Helper()
-	state, err := MintStateWithEmail(cfg.OAuthStateSecret, testTeamID, testUserID, email, cfg.Now())
+	return mintStoredTestState(t, cfg, email, SetupModeReuse)
+}
+
+func mintTestStateWithMode(t *testing.T, cfg *Config, mode SetupMode) string {
+	t.Helper()
+	return mintStoredTestState(t, cfg, testAdminEmail, mode)
+}
+
+func mintStoredTestState(t *testing.T, cfg *Config, email string, mode SetupMode) string {
+	t.Helper()
+	if cfg.StateStore == nil {
+		t.Fatal("test callback config must provide StateStore")
+	}
+	state, err := MintStoredStateWithEmailMode(context.Background(), cfg.StateStore, testTeamID, testUserID, email, mode, cfg.Now())
 	if err != nil {
-		t.Fatalf("MintStateWithEmail: %v", err)
+		t.Fatalf("MintStoredStateWithEmailMode: %v", err)
+	}
+	if _, err := cfg.StateStore.StartState(context.Background(), state, cfg.Now()); err != nil {
+		t.Fatalf("StartState: %v", err)
 	}
 	return state
 }
@@ -237,6 +556,69 @@ func assertSecurityHeaders(t *testing.T, rec *httptest.ResponseRecorder) {
 	}
 }
 
+func assertOAuthErrorPage(t *testing.T, rec *httptest.ResponseRecorder, heading string) {
+	t.Helper()
+	assertSecurityHeaders(t, rec)
+	assertLayerVOAuthChrome(t, rec)
+	body := rec.Body.String()
+	wantTitle := "<title>" + html.EscapeString(heading) + "</title>"
+	if !strings.Contains(body, wantTitle) {
+		t.Errorf("body missing error title %q; got: %s", wantTitle, body)
+	}
+	if escapedHeading := html.EscapeString(heading); !strings.Contains(body, escapedHeading) {
+		t.Errorf("body missing heading %q; got: %s", heading, body)
+	}
+	// Headings, titles, and slash-command literals stay unmarked; each page
+	// should carry qURL™ exactly once in body copy.
+	assertSingleQURLTrademark(t, body, "error page")
+}
+
+// assertSingleQURLTrademark is intentionally exact-count. Browser-facing setup
+// pages should mark the first body-copy mention only; headings, titles, and
+// slash-command literals stay plain qURL.
+func assertSingleQURLTrademark(t *testing.T, body, page string) {
+	t.Helper()
+	if count := strings.Count(body, "qURL™"); count != 1 {
+		t.Errorf("%s trademark count: got %d want 1 in body:\n%s", page, count, body)
+	}
+}
+
+func assertLayerVOAuthChrome(t *testing.T, rec *httptest.ResponseRecorder) {
+	t.Helper()
+	body := rec.Body.String()
+	// These exact markers intentionally lock the LayerV-branded shell. A future
+	// restyle should update the assertions alongside the CSS.
+	for _, want := range []string{
+		`<meta name="viewport" content="width=device-width, initial-scale=1">`,
+		`<div class="brand">`,
+		`class="brand-mark" aria-hidden="true"`,
+		`<span>LayerV</span>`,
+		`aria-hidden="true"`,
+		`color-scheme:dark`,
+		`--lime:`,
+		`--cyan:`,
+		`class="card"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("body missing LayerV OAuth chrome marker %q; got: %s", want, body)
+		}
+	}
+	for _, oldColor := range []string{"#f9fafb", "#fef2f2", "#d1d5db", "#b91c1c"} {
+		if strings.Contains(body, oldColor) {
+			t.Errorf("body still contains old light-card palette color %s: %s", oldColor, body)
+		}
+	}
+}
+
+func TestOAuthPageCSSStaysStaticAndSelfContained(t *testing.T) {
+	lowerCSS := strings.ToLower(oauthPageCSS)
+	for _, forbidden := range []string{"{{", "</style", "url(", "@import", "@font-face", "data:"} {
+		if strings.Contains(lowerCSS, forbidden) {
+			t.Fatalf("oauthPageCSS must stay static and self-contained; found %q in:\n%s", forbidden, oauthPageCSS)
+		}
+	}
+}
+
 func TestCallbackHappyPath(t *testing.T) {
 	cfg, _, store, minter := newCallbackCfg(t)
 
@@ -252,6 +634,13 @@ func TestCallbackHappyPath(t *testing.T) {
 	if !strings.Contains(body, "qURL Connected") {
 		t.Errorf("success body missing headline: %s", body)
 	}
+	if !strings.Contains(body, "qURL™ is connected") {
+		t.Errorf("success body missing first body-copy trademark: %s", body)
+	}
+	if strings.Contains(body, "qURL™ Connected") {
+		t.Errorf("success headline should not include trademark: %s", body)
+	}
+	assertSingleQURLTrademark(t, body, "success")
 	// Lock auto-escape: KeyPrefix and Email must render verbatim (html/
 	// template is the load-bearing XSS defense; a refactor to text/template
 	// would silently drop the protection).
@@ -263,11 +652,12 @@ func TestCallbackHappyPath(t *testing.T) {
 	}
 	// Defense-in-depth headers are required on the success page.
 	assertSecurityHeaders(t, rec)
+	assertLayerVOAuthChrome(t, rec)
 
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	if store.setArgs == nil {
-		t.Fatal("SetAPIKey not called")
+		t.Fatal("SetAPIKeyWithMetadata not called")
 	}
 	if store.setArgs.WorkspaceID != testTeamID {
 		t.Errorf("workspaceID: got %q", store.setArgs.WorkspaceID)
@@ -275,13 +665,84 @@ func TestCallbackHappyPath(t *testing.T) {
 	if store.setArgs.APIKey != testAPIKey {
 		t.Errorf("apiKey: got %q", store.setArgs.APIKey)
 	}
+	if store.setArgs.KeyID != testKeyID {
+		t.Errorf("keyID: got %q want %q", store.setArgs.KeyID, testKeyID)
+	}
+	if store.setArgs.KeyPrefix != testKeyPrefix {
+		t.Errorf("keyPrefix: got %q want %q", store.setArgs.KeyPrefix, testKeyPrefix)
+	}
 	// configuredBy must come from the verified state's userID — never
 	// from an unsigned query parameter.
 	if store.setArgs.ConfiguredBy != testUserID {
 		t.Errorf("configuredBy: got %q want %q (must be recovered from signed state)", store.setArgs.ConfiguredBy, testUserID)
 	}
-	if minter.revoked {
+	if len(minter.revokedKeys) != 0 {
 		t.Error("happy path should not revoke")
+	}
+}
+
+func TestCallbackConsumesStoredStateOnce(t *testing.T) {
+	cfg, _, store, _ := newCallbackCfg(t)
+	stateStore := newMemoryStateStore()
+	cfg.StateStore = stateStore
+	state, err := MintStoredStateWithEmailMode(context.Background(), stateStore, testTeamID, testUserID, testAdminEmail, SetupModeReuse, cfg.Now())
+	if err != nil {
+		t.Fatalf("MintStoredStateWithEmailMode: %v", err)
+	}
+	if _, err := stateStore.StartState(context.Background(), state, cfg.Now()); err != nil {
+		t.Fatalf("StartState: %v", err)
+	}
+
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("first callback status: got %d want 200 (body=%s)", rec.Code, rec.Body.String())
+	}
+	stateStore.mu.Lock()
+	consumeHadDeadline := stateStore.consumeHadDeadline
+	stateStore.mu.Unlock()
+	if !consumeHadDeadline {
+		t.Fatal("ConsumeState must receive an explicit deadline")
+	}
+
+	rec = httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("second callback status: got %d want 400 (body=%s)", rec.Code, rec.Body.String())
+	}
+	assertOAuthErrorPage(t, rec, "Setup link is invalid or expired")
+
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if store.setArgs == nil {
+		t.Fatal("first callback should persist workspace key")
+	}
+}
+
+func TestCallbackDoesNotFallbackToLegacyStateOnStoreAvailabilityError(t *testing.T) {
+	cfg, _, store, minter := newCallbackCfg(t)
+	state, err := MintState(cfg.OAuthStateSecret, testTeamID, testUserID, cfg.Now())
+	if err != nil {
+		t.Fatalf("MintState: %v", err)
+	}
+	cfg.StateStore = &unavailableStateStore{err: errors.New("ddb throttled")}
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("got %d want 503 (body=%s)", rec.Code, rec.Body.String())
+	}
+	assertOAuthErrorPage(t, rec, "qURL setup is temporarily unavailable")
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if store.setArgs != nil {
+		t.Fatal("workspace credentials must not persist after a state-store availability failure")
+	}
+	minter.mintMu.Lock()
+	defer minter.mintMu.Unlock()
+	if minter.mintCalls != 0 {
+		t.Fatalf("mint calls = %d, want zero", minter.mintCalls)
 	}
 }
 
@@ -296,15 +757,40 @@ func TestCallbackEmailSetupRequiresMatchingVerifiedEmail(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status: got %d want 400 (body=%s)", rec.Code, rec.Body.String())
 	}
+	assertOAuthErrorPage(t, rec, "qURL account mismatch")
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	if store.setArgs != nil {
-		t.Error("SetAPIKey must not run when the Auth0 email does not match setup state")
+		t.Error("SetAPIKeyWithMetadata must not run when the Auth0 email does not match setup state")
 	}
 	minter.mintMu.Lock()
 	defer minter.mintMu.Unlock()
 	if minter.mintCalls != 0 {
-		t.Errorf("MintAPIKey calls: got %d want 0 on email mismatch", minter.mintCalls)
+		t.Errorf("MintWorkspaceAPIKey calls: got %d want 0 on email mismatch", minter.mintCalls)
+	}
+}
+
+func TestCallbackRejectsIDTokenNonceMismatch(t *testing.T) {
+	cfg, _, store, minter := newCallbackCfg(t)
+	cfg.IDTokenVerifier = &fakeIDTokenVerifier{email: testAdminEmail, nonce: "different-nonce"}
+	state := mintTestStateWithEmail(t, &cfg, testAdminEmail)
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status: got %d want 400 (body=%s)", rec.Code, rec.Body.String())
+	}
+	assertOAuthErrorPage(t, rec, "Authorization couldn't be verified")
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if store.setArgs != nil {
+		t.Error("SetAPIKeyWithMetadata must not run when id_token nonce does not match state")
+	}
+	minter.mintMu.Lock()
+	defer minter.mintMu.Unlock()
+	if minter.mintCalls != 0 {
+		t.Errorf("MintWorkspaceAPIKey calls: got %d want 0 on nonce mismatch", minter.mintCalls)
 	}
 }
 
@@ -319,15 +805,16 @@ func TestCallbackEmailSetupRequiresNonEmptyVerifiedEmail(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status: got %d want 400 (body=%s)", rec.Code, rec.Body.String())
 	}
+	assertOAuthErrorPage(t, rec, "qURL account mismatch")
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	if store.setArgs != nil {
-		t.Error("SetAPIKey must not run when Auth0 does not return a verified setup email")
+		t.Error("SetAPIKeyWithMetadata must not run when Auth0 does not return a verified setup email")
 	}
 	minter.mintMu.Lock()
 	defer minter.mintMu.Unlock()
 	if minter.mintCalls != 0 {
-		t.Errorf("MintAPIKey calls: got %d want 0 on empty verified email", minter.mintCalls)
+		t.Errorf("MintWorkspaceAPIKey calls: got %d want 0 on empty verified email", minter.mintCalls)
 	}
 }
 
@@ -345,7 +832,7 @@ func TestCallbackEmailSetupAcceptsCaseInsensitiveVerifiedEmail(t *testing.T) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	if store.setArgs == nil {
-		t.Fatal("SetAPIKey not called")
+		t.Fatal("SetAPIKeyWithMetadata not called")
 	}
 }
 
@@ -412,6 +899,74 @@ func TestOAuthErrorPageHTMLEscapesInterpolations(t *testing.T) {
 	}
 }
 
+func TestOAuthErrorPageRendersMultipleMessageParagraphs(t *testing.T) {
+	rec := httptest.NewRecorder()
+	renderOAuthErrorPage(rec, http.StatusInternalServerError, "qURL setup did not finish",
+		"qURL™ setup hit <b>unsafe</b> markup.",
+		"Second paragraph keeps the next action scannable.")
+	body := rec.Body.String()
+	first := "qURL™ setup hit &lt;b&gt;unsafe&lt;/b&gt; markup."
+	second := "Second paragraph keeps the next action scannable."
+	firstIdx := strings.Index(body, first)
+	secondIdx := strings.Index(body, second)
+	if firstIdx == -1 || secondIdx == -1 || firstIdx >= secondIdx {
+		t.Fatalf("expected escaped message paragraphs in order, got body:\n%s", body)
+	}
+	betweenMessages := body[firstIdx+len(first) : secondIdx]
+	if !strings.Contains(betweenMessages, "</p>") || !strings.Contains(betweenMessages, "<p") {
+		t.Errorf("expected the two messages to render as separate paragraphs, got between-message markup %q in body:\n%s", betweenMessages, body)
+	}
+	if strings.Contains(body, "<b>unsafe</b>") || !strings.Contains(body, "&lt;b&gt;unsafe&lt;/b&gt;") {
+		t.Errorf("message paragraphs must still be escaped; got:\n%s", body)
+	}
+	assertOAuthErrorPage(t, rec, "qURL setup did not finish")
+}
+
+func TestOAuthErrorPageMarksFirstBodyQURLTrademark(t *testing.T) {
+	rec := httptest.NewRecorder()
+	renderOAuthErrorPage(rec, http.StatusBadRequest, "qURL account mismatch",
+		"The signed-in qURL™ account did not match the email used to start setup.",
+		"Return to Slack and run /qurl setup <email> again with the same qURL account.")
+	body := rec.Body.String()
+	if !strings.Contains(body, "The signed-in qURL™ account did not match") {
+		t.Errorf("expected first body-copy qURL mention to carry trademark:\n%s", body)
+	}
+	if strings.Contains(body, "qURL™ account mismatch") {
+		t.Errorf("heading should not carry trademark:\n%s", body)
+	}
+	if strings.Contains(body, "/qurl™ setup") {
+		t.Errorf("slash-command literal should not carry trademark:\n%s", body)
+	}
+	assertSingleQURLTrademark(t, body, "error page")
+	assertOAuthErrorPage(t, rec, "qURL account mismatch")
+}
+
+func TestOAuthErrorPageSkipsBlankMessageParagraphs(t *testing.T) {
+	rec := httptest.NewRecorder()
+	renderOAuthErrorPage(rec, http.StatusInternalServerError, "qURL setup did not finish", " ", "  Retry qURL™ setup from Slack.  ")
+	body := rec.Body.String()
+	if strings.Contains(body, "<p> </p>") || strings.Contains(body, "<p></p>") {
+		t.Errorf("blank message paragraph rendered:\n%s", body)
+	}
+	if !strings.Contains(body, "Retry qURL™ setup from Slack.") {
+		t.Errorf("expected non-blank rest message to render:\n%s", body)
+	}
+	if strings.Contains(body, "  Retry qURL™ setup from Slack.  ") {
+		t.Errorf("message paragraph should be trimmed before rendering:\n%s", body)
+	}
+	assertOAuthErrorPage(t, rec, "qURL setup did not finish")
+}
+
+func TestOAuthErrorPageFallsBackWhenAllMessagesBlank(t *testing.T) {
+	rec := httptest.NewRecorder()
+	renderOAuthErrorPage(rec, http.StatusInternalServerError, "qURL setup did not finish", " ", "")
+	body := rec.Body.String()
+	if !strings.Contains(body, "qURL™ setup could not finish. Try again or contact your qURL administrator if this keeps happening.") {
+		t.Errorf("expected fallback guidance for all-blank messages:\n%s", body)
+	}
+	assertOAuthErrorPage(t, rec, "qURL setup did not finish")
+}
+
 func TestCallbackIgnoresAdminUserQueryParam(t *testing.T) {
 	// Regression: configuredBy used to be read from ?admin_user=…
 	// which let an attacker pick the DM target. Now the value is
@@ -452,6 +1007,7 @@ func TestCallbackRejectsCSRFMismatch(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("got %d want 400", rec.Code)
 	}
+	assertOAuthErrorPage(t, rec, "Continue setup in the same browser")
 	// On reject, the cookie should be cleared so a refresh isn't stuck
 	// looping on the same mismatch.
 	var clearedCookie *http.Cookie
@@ -467,7 +1023,7 @@ func TestCallbackRejectsCSRFMismatch(t *testing.T) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	if store.setArgs != nil {
-		t.Error("SetAPIKey should NOT have been called on CSRF reject")
+		t.Error("SetAPIKeyWithMetadata should NOT have been called on CSRF reject")
 	}
 }
 
@@ -482,14 +1038,15 @@ func TestCallbackRejectsMissingCookie(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("got %d want 400", rec.Code)
 	}
+	assertOAuthErrorPage(t, rec, "Continue setup in the same browser")
 }
 
 func TestCallbackRejectsExpiredState(t *testing.T) {
 	cfg := newCallbackCfgOnly(t)
-	// Mint state at T0; verify at T0+10min — past stateMaxAge (5min).
+	// Mint state at T0; verify after stateMaxAge.
 	oldNow := cfg.Now()
 	state, _ := MintState(cfg.OAuthStateSecret, testTeamID, testUserID, oldNow)
-	cfg.Now = func() time.Time { return oldNow.Add(10 * time.Minute) }
+	cfg.Now = func() time.Time { return oldNow.Add(stateMaxAge + time.Second) }
 
 	h := Callback(cfg)
 	rec := httptest.NewRecorder()
@@ -497,6 +1054,26 @@ func TestCallbackRejectsExpiredState(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("got %d want 400 (body=%s)", rec.Code, rec.Body.String())
 	}
+	assertOAuthErrorPage(t, rec, "Setup link is invalid or expired")
+}
+
+func TestCallbackRejectsLegacyStateWithoutPKCEVerifierAsOutOfDate(t *testing.T) {
+	cfg := newCallbackCfgOnly(t)
+	now := cfg.Now()
+	state := mintLegacyStateForTest(t,
+		cfg.OAuthStateSecret,
+		testTeamID,
+		testUserID,
+		"legacy-nonce",
+		strconv.FormatInt(now.Unix(), 10))
+
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("got %d want 400 (body=%s)", rec.Code, rec.Body.String())
+	}
+	assertOAuthErrorPage(t, rec, "Setup link is out of date")
 }
 
 // TestCallbackMintFailureDoesNotRevoke locks the contract: when the
@@ -505,6 +1082,8 @@ func TestCallbackRejectsExpiredState(t *testing.T) {
 // spawn earlier would silently regress.
 func TestCallbackMintFailureDoesNotRevoke(t *testing.T) {
 	cfg, _, minter := newCallbackCfgStoreMinter(t)
+	tracker := &countingTracker{}
+	cfg.AsyncTracker = tracker
 	minter.mintErr = errors.New("qurl-service down")
 	state := mintTestState(t, &cfg)
 
@@ -521,12 +1100,17 @@ func TestCallbackMintFailureDoesNotRevoke(t *testing.T) {
 	if body := rec.Body.String(); !strings.Contains(body, "Couldn&#39;t connect qURL") {
 		t.Errorf("502 body should render the styled error page heading; got: %q", body)
 	}
-	assertSecurityHeaders(t, rec)
-	// Give any spurious revoke goroutine a window to fire.
-	time.Sleep(50 * time.Millisecond)
+	assertOAuthErrorPage(t, rec, "Couldn't connect qURL")
+	tracker.wg.Wait()
+	tracker.mu.Lock()
+	used := tracker.used
+	tracker.mu.Unlock()
+	if used != 0 {
+		t.Fatalf("mint failure must not schedule async revoke work; got %d async calls", used)
+	}
 	minter.revokeMu.Lock()
 	defer minter.revokeMu.Unlock()
-	if minter.revoked {
+	if len(minter.revokedKeys) != 0 {
 		t.Error("RevokeAPIKey must NOT be called when mint itself failed (no keyID exists)")
 	}
 }
@@ -538,7 +1122,7 @@ func TestCallbackMintFailureDoesNotRevoke(t *testing.T) {
 // clears a quota). No key is minted, so nothing is persisted.
 func TestCallbackMintAPIKeyLimitRendersGuidance(t *testing.T) {
 	cfg, store, minter := newCallbackCfgStoreMinter(t)
-	minter.mintErr = ErrAPIKeyLimitReached
+	minter.mintErr = ErrAPIKeyProvisioningQuotaReached
 	state := mintTestState(t, &cfg)
 
 	h := Callback(cfg)
@@ -552,16 +1136,125 @@ func TestCallbackMintAPIKeyLimitRendersGuidance(t *testing.T) {
 	if !strings.Contains(body, "limit") || !strings.Contains(body, "revoke") {
 		t.Errorf("body should name the key limit and how to clear it (revoke); got: %q", rec.Body.String())
 	}
-	assertSecurityHeaders(t, rec)
+	assertOAuthErrorPage(t, rec, "qURL key limit reached")
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	if store.setArgs != nil {
-		t.Error("SetAPIKey must NOT run when the mint hit the API-key limit")
+		t.Error("SetAPIKeyWithMetadata must NOT run when the mint hit the API-key limit")
 	}
 }
 
-func TestCallbackRevokesOnPersistFailure(t *testing.T) {
+func TestCallbackExternalIdentityAlreadyBoundRendersRecoveryGuidance(t *testing.T) {
 	cfg, store, minter := newCallbackCfgStoreMinter(t)
+	minter.mintErr = ErrExternalIdentityAlreadyBound
+	state := mintTestState(t, &cfg)
+
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("got %d want 409 (already-bound workspace → 409)", rec.Code)
+	}
+	body := strings.ToLower(rec.Body.String())
+	if !strings.Contains(body, "already connected") || !strings.Contains(body, "administrator") {
+		t.Errorf("body should explain the existing connection and recovery path; got: %q", rec.Body.String())
+	}
+	assertOAuthErrorPage(t, rec, "qURL already connected")
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if store.setArgs != nil {
+		t.Error("SetAPIKeyWithMetadata must NOT run when qurl-service reports an existing workspace binding")
+	}
+}
+
+func TestCallbackKeepsBindingBackedKeyOnPersistFailure(t *testing.T) {
+	cfg, store, minter := newCallbackCfgStoreMinter(t)
+	tracker := &countingTracker{}
+	cfg.AsyncTracker = tracker
+	store.setErr = errors.New("ddb down")
+	state := mintTestState(t, &cfg)
+	// Start capture after state minting so setup logs cannot satisfy the event assertions.
+	logs := captureDefaultSlogJSON(t)
+
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("got %d want 500", rec.Code)
+	}
+	assertOAuthErrorPage(t, rec, "qURL setup did not finish")
+	// Binding-backed keys must stay in qurl-service so the admin can retry
+	// setup and replay the binding idempotency record into Slack storage.
+	tracker.wg.Wait()
+	tracker.mu.Lock()
+	used := tracker.used
+	tracker.mu.Unlock()
+	if used != 0 {
+		t.Fatalf("binding-backed persist failure must not schedule async revoke work; got %d async calls", used)
+	}
+	minter.revokeMu.Lock()
+	defer minter.revokeMu.Unlock()
+	if len(minter.revokedKeys) != 0 {
+		t.Error("binding-backed persist failure must not revoke; retry needs the binding record")
+	}
+	assertSetupBindingPersistFailureLogged(t, logs(), replayWindowHoursOrDefault(cfg.SetupBindingReplayWindowHours, DefaultSetupBindingReplayWindowHours))
+}
+
+func TestCallbackLogsConfiguredBindingReplayWindowOnPersistFailure(t *testing.T) {
+	cfg, store, _ := newCallbackCfgStoreMinter(t)
+	cfg.SetupBindingReplayWindowHours = 12
+	store.setErr = errors.New("ddb down")
+	state := mintTestState(t, &cfg)
+	logs := captureDefaultSlogJSON(t)
+
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("got %d want 500", rec.Code)
+	}
+	assertSetupBindingPersistFailureLogged(t, logs(), 12)
+}
+
+func assertSetupBindingPersistFailureLogged(t *testing.T, records []map[string]any, replayWindowHours int) {
+	t.Helper()
+	matches := 0
+	for _, rec := range records {
+		if rec["event"] != setupBindingPersistFailureEvent {
+			continue
+		}
+		matches++
+		if rec["team_id"] != testTeamID {
+			t.Errorf("team_id = %v, want %q", rec["team_id"], testTeamID)
+		}
+		if rec["key_id"] != testKeyID {
+			t.Errorf("key_id = %v, want %q", rec["key_id"], testKeyID)
+		}
+		if got, ok := rec["error"].(string); !ok || got == "" {
+			t.Errorf("error = %v, want non-empty string", rec["error"])
+		}
+		if rec["retry_window_hours"] != float64(replayWindowHours) {
+			t.Errorf("retry_window_hours = %v, want %d", rec["retry_window_hours"], replayWindowHours)
+		}
+		if rec["cleanup_after_window_hours"] != float64(replayWindowHours) {
+			t.Errorf("cleanup_after_window_hours = %v, want %d", rec["cleanup_after_window_hours"], replayWindowHours)
+		}
+		if rec["operator_action"] != setupBindingPersistFailureOperatorAction {
+			t.Errorf("operator_action = %v, want %q", rec["operator_action"], setupBindingPersistFailureOperatorAction)
+		}
+	}
+	if matches == 0 {
+		t.Fatalf("missing %q log event in records: %#v", setupBindingPersistFailureEvent, records)
+	}
+	if matches > 1 {
+		t.Errorf("found %d %q log events, want 1", matches, setupBindingPersistFailureEvent)
+	}
+}
+
+func TestCallbackRevokesLegacyFallbackKeyOnPersistFailure(t *testing.T) {
+	cfg, store, minter := newCallbackCfgStoreMinter(t)
+	minter.bindingBacked = false
 	store.setErr = errors.New("ddb down")
 	state := mintTestState(t, &cfg)
 
@@ -571,18 +1264,20 @@ func TestCallbackRevokesOnPersistFailure(t *testing.T) {
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("got %d want 500", rec.Code)
 	}
-	// Revoke is fire-and-forget in a goroutine — give it a moment.
+	assertOAuthErrorPage(t, rec, "qURL setup did not finish")
+	// Legacy fallback has no qurl-service binding replay path, so the
+	// unstored key is an orphan and should still be revoked asynchronously.
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
 		minter.revokeMu.Lock()
-		revoked := minter.revoked
+		revoked := len(minter.revokedKeys) > 0
 		minter.revokeMu.Unlock()
 		if revoked {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Error("expected RevokeAPIKey to be called after persist failure")
+	t.Error("expected RevokeAPIKey to be called after legacy persist failure")
 }
 
 func TestCallbackRejectsMissingCode(t *testing.T) {
@@ -594,6 +1289,7 @@ func TestCallbackRejectsMissingCode(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("got %d want 400", rec.Code)
 	}
+	assertOAuthErrorPage(t, rec, "Setup link is incomplete")
 }
 
 // TestCallbackRejectsNonGET locks the method-allow contract: a POST
@@ -609,6 +1305,7 @@ func TestCallbackRejectsNonGET(t *testing.T) {
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Errorf("got %d want 405", rec.Code)
 	}
+	assertOAuthErrorPage(t, rec, "Use the Slack setup link")
 	if got := rec.Header().Get("Allow"); got != "GET" {
 		t.Errorf("Allow header: got %q want GET", got)
 	}
@@ -624,13 +1321,13 @@ func TestCallbackHandlesAuth0Error(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("got %d want 400", rec.Code)
 	}
+	assertOAuthErrorPage(t, rec, "Authorization didn't complete")
 }
 
-// TestCallbackRendersSuccessWhenVerifierFails locks the documented
-// non-fatal contract: a JWKS / id_token verify failure suppresses the
-// email line on the success page but never blocks the key mint or
-// the success render.
-func TestCallbackRendersSuccessWhenVerifierFails(t *testing.T) {
+// TestCallbackRendersSuccessWhenEmailExtractionFails locks the documented
+// non-fatal contract: an email-claim extraction failure suppresses the email
+// line but does not block the already-verified token's key mint.
+func TestCallbackRendersSuccessWhenEmailExtractionFails(t *testing.T) {
 	cfg := newCallbackCfgOnly(t)
 	cfg.IDTokenVerifier = &fakeIDTokenVerifier{err: errors.New("jwks fetch failed")}
 	state := mintTestState(t, &cfg)
@@ -645,6 +1342,17 @@ func TestCallbackRendersSuccessWhenVerifierFails(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "qURL Connected") {
 		t.Errorf("expected success body even when verifier errored: %s", rec.Body.String())
+	}
+}
+
+func TestVerifyIDTokenClaimsFailsClosedWithoutTokenOrVerifier(t *testing.T) {
+	cfg := newCallbackCfgOnly(t)
+	if _, _, ok := verifyIDTokenClaims(context.Background(), cfg, "", "state-nonce"); ok {
+		t.Fatal("empty id_token must fail closed")
+	}
+	cfg.IDTokenVerifier = nil
+	if _, _, ok := verifyIDTokenClaims(context.Background(), cfg, "id-token", "state-nonce"); ok {
+		t.Fatal("nil verifier must fail closed")
 	}
 }
 
@@ -666,6 +1374,24 @@ func TestCallbackAuth0TokenFailure(t *testing.T) {
 	h(rec, callbackRequest(state))
 	if rec.Code != http.StatusBadGateway {
 		t.Errorf("got %d want 502 (auth0 5xx surfaces as 502)", rec.Code)
+	}
+	assertOAuthErrorPage(t, rec, "Couldn't connect qURL")
+}
+
+func TestExchangeAuth0CodeRejectsMissingPKCEVerifier(t *testing.T) {
+	cfg := newCallbackCfgOnly(t)
+	var hits int
+	httpClient := &http.Client{Transport: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+		hits++
+		return nil, errors.New("unexpected request")
+	})}
+
+	_, _, err := exchangeAuth0Code(context.Background(), httpClient, cfg, "abc", "")
+	if err == nil {
+		t.Fatal("exchangeAuth0Code missing verifier: got nil error, want failure")
+	}
+	if hits != 0 {
+		t.Fatalf("token endpoint hits: got %d want 0 when code_verifier is missing", hits)
 	}
 }
 
@@ -730,6 +1456,7 @@ func TestCallbackAuth0EmptyAccessToken(t *testing.T) {
 	if rec.Code != http.StatusBadGateway {
 		t.Errorf("got %d want 502", rec.Code)
 	}
+	assertOAuthErrorPage(t, rec, "Couldn't connect qURL")
 }
 
 // countingTracker satisfies AsyncTracker by tracking how many fn
@@ -801,6 +1528,12 @@ func TestCallbackDMsConfiguredUser(t *testing.T) {
 	defer slackClient.mu.Unlock()
 	if slackClient.gotUser != testUserID {
 		t.Errorf("DM user: got %q want %q", slackClient.gotUser, testUserID)
+	}
+	if !strings.Contains(slackClient.gotText, "qURL™ is connected") {
+		t.Errorf("DM text missing first body-copy trademark: %q", slackClient.gotText)
+	}
+	if strings.Contains(slackClient.gotText, "qURL is connected") {
+		t.Errorf("DM text should not use unmarked first body-copy mention: %q", slackClient.gotText)
 	}
 }
 
@@ -888,21 +1621,22 @@ func TestCallbackBindFailureSkipsMint(t *testing.T) {
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("status: got %d want 500", rec.Code)
 	}
+	assertOAuthErrorPage(t, rec, "Couldn't bind this Slack workspace")
 
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	if store.setArgs != nil {
-		t.Error("SetAPIKey must not run when BindWorkspace failed (would overwrite an existing admin's key row with one we can't even prove ownership of)")
+		t.Error("SetAPIKeyWithMetadata must not run when BindWorkspace failed (would overwrite an existing admin's key row with one we can't even prove ownership of)")
 	}
 }
 
-// TestCallbackBindIdempotentForSameCaller fences the rotation
-// posture: the same Slack user re-running /qurl setup must succeed
-// idempotently. The new API key is persisted (key rotated) and the
-// admin set is unchanged. Without this, an admin re-running setup
-// to rotate keys would see the rebind-refused page.
-func TestCallbackBindIdempotentForSameCaller(t *testing.T) {
+// TestCallbackBindIdempotentForSameCallerReusesExistingKey fences the leak
+// fix: the same Slack user re-running /qurl setup must succeed without
+// minting a second qurl-service API key when the workspace already has a
+// healthy stored key.
+func TestCallbackBindIdempotentForSameCallerReusesExistingKey(t *testing.T) {
 	cfg, store, minter := newCallbackCfgStoreMinter(t)
+	store.existingKey = testAPIKey
 	// The error text is irrelevant — the stubbed classifier returns
 	// the same-caller code regardless. Use sentinel text so a future
 	// reader doesn't think production reads the message string.
@@ -916,24 +1650,955 @@ func TestCallbackBindIdempotentForSameCaller(t *testing.T) {
 	rec := httptest.NewRecorder()
 	h(rec, callbackRequest(state))
 	if rec.Code != http.StatusOK {
-		t.Fatalf("status: got %d want 200 (idempotent rotation, body=%s)", rec.Code, rec.Body.String())
+		t.Fatalf("status: got %d want 200 (idempotent reuse, body=%s)", rec.Code, rec.Body.String())
 	}
-	// The "key rotated" half of the promise — SetAPIKey must actually
-	// run after the idempotent-bind continue. A regression that
-	// short-circuited mint on AlreadyBoundToCaller would pass the
-	// 200-status check but leave the user's stale key in place.
+	if !strings.Contains(rec.Body.String(), testKeyPrefix) {
+		t.Errorf("reuse success body should render a safe key prefix, got: %s", rec.Body.String())
+	}
+	store.mu.Lock()
+	if store.setArgs != nil {
+		t.Fatal("SetAPIKeyWithMetadata must not run when a valid existing key can be reused")
+	}
+	if store.apiKeyCalls != 1 {
+		t.Errorf("APIKey calls: got %d want 1", store.apiKeyCalls)
+	}
+	store.mu.Unlock()
+	minter.mintMu.Lock()
+	if minter.mintCalls != 0 {
+		t.Errorf("MintWorkspaceAPIKey calls: got %d want 0 when existing key is valid", minter.mintCalls)
+	}
+	minter.mintMu.Unlock()
+	minter.validateMu.Lock()
+	if minter.validateCalls != 1 {
+		t.Errorf("ValidateAPIKey calls: got %d want 1", minter.validateCalls)
+	}
+	minter.validateMu.Unlock()
+	minter.revokeMu.Lock()
+	defer minter.revokeMu.Unlock()
+	if len(minter.revokedKeys) != 0 {
+		t.Error("idempotent reuse must not revoke")
+	}
+}
+
+func TestCallbackExplicitRotationRevokesOldKeyBeforeReplacementMint(t *testing.T) {
+	cfg, store, minter := newCallbackCfgStoreMinter(t)
+	const oldKeyID = testOldKeyID
+	store.existingKey = testOldAPIKey
+	store.existingKeyID = oldKeyID
+	state := mintTestStateWithMode(t, &cfg, SetupModeRotate)
+
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d want 200 (rotation, body=%s)", rec.Code, rec.Body.String())
+	}
 	store.mu.Lock()
 	if store.setArgs == nil {
-		t.Fatal("SetAPIKey must run on idempotent rebind so the key rotates")
+		t.Fatal("SetAPIKeyWithMetadata must run after explicit rotation")
 	}
-	if store.setArgs.APIKey != testAPIKey {
-		t.Errorf("SetAPIKey APIKey: got %q want %q (the rotation must persist the freshly minted key)", store.setArgs.APIKey, testAPIKey)
+	if store.setArgs.APIKey != testAPIKey || store.setArgs.KeyID != testKeyID || store.setArgs.KeyPrefix != testKeyPrefix {
+		t.Errorf("stored replacement = %#v, want key/key_id/prefix %q/%q/%q", store.setArgs, testAPIKey, testKeyID, testKeyPrefix)
+	}
+	if store.apiKeyCalls != 1 {
+		t.Errorf("APIKeyID calls: got %d want 1", store.apiKeyCalls)
 	}
 	store.mu.Unlock()
 	minter.revokeMu.Lock()
-	defer minter.revokeMu.Unlock()
-	if minter.revoked {
-		t.Error("idempotent rebind must not revoke the just-minted key")
+	if got := minter.revokedKeys; len(got) != 1 || got[0] != oldKeyID {
+		t.Errorf("revoked keys: got %#v want [%q]", got, oldKeyID)
+	}
+	minter.revokeMu.Unlock()
+	minter.mintMu.Lock()
+	if minter.mintCalls != 0 {
+		t.Errorf("MintWorkspaceAPIKey calls: got %d want 0 on explicit rotation", minter.mintCalls)
+	}
+	if minter.replacementMintCalls != 1 {
+		t.Errorf("MintWorkspaceReplacementAPIKey calls: got %d want 1", minter.replacementMintCalls)
+	}
+	if minter.replacementMintOldKeyID != oldKeyID {
+		t.Errorf("replacement oldKeyID: got %q want %q", minter.replacementMintOldKeyID, oldKeyID)
+	}
+	minter.mintMu.Unlock()
+	minter.validateMu.Lock()
+	if minter.validateCalls != 0 {
+		t.Errorf("ValidateAPIKey calls: got %d want 0 on explicit rotation", minter.validateCalls)
+	}
+	minter.validateMu.Unlock()
+}
+
+// TestCallbackExplicitRotationOnLegacyRowMintsWithoutRevoke covers the row that
+// predates stored key identity. Slack cannot revoke a key it never recorded, so
+// rotation mints without revoking rather than refusing.
+//
+// Refusing was the previous behavior and it protected nothing: the owner's only
+// remaining route was /qurl uninstall, which abandons the same un-revokable key
+// (local-only disconnect) and additionally discards the Slack bot token and
+// workspace binding — and each uninstall/setup cycle mints another live key
+// against the account's plan limit (3 on free tier).
+func TestCallbackExplicitRotationOnLegacyRowMintsWithoutRevoke(t *testing.T) {
+	cfg, store, minter := newCallbackCfgStoreMinter(t)
+	cfg.IDTokenVerifier = &fakeIDTokenVerifier{email: testAdminEmail, sub: testAdminSub}
+	store.existingKey = testOldAPIKey
+	state := mintTestStateWithMode(t, &cfg, SetupModeRotate)
+
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d want 200 (legacy-row rotation should succeed, body=%s)", rec.Code, rec.Body.String())
+	}
+	minter.revokeMu.Lock()
+	revoked := append([]string(nil), minter.revokedKeys...)
+	minter.revokeMu.Unlock()
+	if len(revoked) != 0 {
+		t.Errorf("revoke must not run without a known key_id, got %#v", revoked)
+	}
+	minter.mintMu.Lock()
+	replacementCalls := minter.replacementMintCalls
+	minter.mintMu.Unlock()
+	if replacementCalls != 1 {
+		t.Errorf("replacement mint calls = %d, want 1", replacementCalls)
+	}
+	store.mu.Lock()
+	setArgs := store.setArgs
+	store.mu.Unlock()
+	if setArgs == nil {
+		t.Fatal("replacement key must be persisted so the workspace keeps working")
+		return
+	}
+	// The rotation must record key identity, so this workspace takes the normal
+	// revoke-then-replace path next time instead of orphaning a second key.
+	if setArgs.KeyID == "" {
+		t.Error("rotation must store the new key_id so the next rotation can revoke it")
+	}
+	// And it must record provenance, which is what completes the self-heal: a
+	// row that arrives here has neither, and --repoint stays blocked until the
+	// account is known. Without this the row would be repoint-blocked forever.
+	if setArgs.QURLAccountID == "" {
+		t.Error("rotation must store qurl_account_id so a later --repoint can prove same-vs-cross account")
+	}
+}
+
+func TestCallbackExplicitRotationValidatesReplacementIdempotencyBeforeRevoke(t *testing.T) {
+	cfg, store, minter := newCallbackCfgStoreMinter(t)
+	store.existingKey = testOldAPIKey
+	store.existingKeyID = "k_" + strings.Repeat("x", 240)
+	state := mintTestStateWithMode(t, &cfg, SetupModeRotate)
+
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status: got %d want 500 (unsafe replacement idempotency key, body=%s)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "No key was revoked") {
+		t.Fatalf("body should say rotation stopped before revoke, got: %s", rec.Body.String())
+	}
+	store.mu.Lock()
+	if store.setArgs != nil {
+		t.Fatal("SetAPIKeyWithMetadata must not run when replacement idempotency key is invalid")
+	}
+	store.mu.Unlock()
+	minter.revokeMu.Lock()
+	if len(minter.revokedKeys) != 0 {
+		t.Errorf("revoke must not run after preflight idempotency validation failure, got %#v", minter.revokedKeys)
+	}
+	minter.revokeMu.Unlock()
+	minter.mintMu.Lock()
+	if minter.mintCalls != 0 || minter.replacementMintCalls != 0 {
+		t.Errorf("mint calls: regular=%d replacement=%d, want 0/0", minter.mintCalls, minter.replacementMintCalls)
+	}
+	minter.mintMu.Unlock()
+}
+
+func TestCallbackExplicitRotationStopsWhenOldKeyRevokeFails(t *testing.T) {
+	cfg, store, minter := newCallbackCfgStoreMinter(t)
+	const oldKeyID = testOldKeyID
+	store.existingKey = testOldAPIKey
+	store.existingKeyID = oldKeyID
+	minter.revokeErr = errors.New("qurl-service denied revoke")
+	state := mintTestStateWithMode(t, &cfg, SetupModeRotate)
+
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status: got %d want 502 (revoke failure, body=%s)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "Run /qurl setup &lt;email&gt; with --rotate or --repoint again") {
+		t.Fatalf("body should give retry guidance for transient revoke failures, got: %s", rec.Body.String())
+	}
+	store.mu.Lock()
+	if store.setArgs != nil {
+		t.Fatal("SetAPIKeyWithMetadata must not run when old-key revoke failed")
+	}
+	store.mu.Unlock()
+	minter.revokeMu.Lock()
+	if got := minter.revokedKeys; len(got) != 1 || got[0] != oldKeyID {
+		t.Errorf("revoked keys: got %#v want [%q]", got, oldKeyID)
+	}
+	minter.revokeMu.Unlock()
+	minter.mintMu.Lock()
+	if minter.replacementMintCalls != 0 {
+		t.Errorf("replacement mint calls: got %d want 0 after revoke failure", minter.replacementMintCalls)
+	}
+	minter.mintMu.Unlock()
+	minter.apiKeyRevokedMu.Lock()
+	if minter.apiKeyRevokedCalls != 0 {
+		t.Errorf("APIKeyRevoked calls: got %d want 0 for generic revoke failure", minter.apiKeyRevokedCalls)
+	}
+	minter.apiKeyRevokedMu.Unlock()
+}
+
+func TestCallbackExplicitRotationContinuesWhenOldKeyAlreadyRevokedByOwner(t *testing.T) {
+	cfg, store, minter := newCallbackCfgStoreMinter(t)
+	const oldKeyID = testOldKeyID
+	store.existingKey = testOldAPIKey
+	store.existingKeyID = oldKeyID
+	minter.revokeErr = ErrAPIKeyNotFound
+	minter.apiKeyRevoked = true
+	state := mintTestStateWithMode(t, &cfg, SetupModeRotate)
+
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d want 200 (already-revoked retry, body=%s)", rec.Code, rec.Body.String())
+	}
+	minter.apiKeyRevokedMu.Lock()
+	if minter.apiKeyRevokedCalls != 1 {
+		t.Errorf("APIKeyRevoked calls: got %d want 1", minter.apiKeyRevokedCalls)
+	}
+	if !minter.apiKeyRevokedHasDeadline {
+		t.Fatal("APIKeyRevoked context should have a deadline")
+	}
+	if minter.apiKeyRevokedDeadline <= existingKeyTimeout {
+		t.Errorf("APIKeyRevoked deadline = %s, want larger than existingKeyTimeout %s", minter.apiKeyRevokedDeadline, existingKeyTimeout)
+	}
+	minter.apiKeyRevokedMu.Unlock()
+	minter.mintMu.Lock()
+	if minter.replacementMintCalls != 1 {
+		t.Errorf("replacement mint calls: got %d want 1", minter.replacementMintCalls)
+	}
+	minter.mintMu.Unlock()
+}
+
+func TestCallbackExplicitRotationStopsWhenAlreadyRevokedCheckFails(t *testing.T) {
+	cfg, store, minter := newCallbackCfgStoreMinter(t)
+	const oldKeyID = testOldKeyID
+	store.existingKey = testOldAPIKey
+	store.existingKeyID = oldKeyID
+	minter.revokeErr = ErrAPIKeyNotFound
+	minter.apiKeyRevokedErr = errors.New("qurl-service unavailable")
+	state := mintTestStateWithMode(t, &cfg, SetupModeRotate)
+
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status: got %d want 502 (revoked check failure, body=%s)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "could not confirm") {
+		t.Fatalf("body should distinguish revoke-status uncertainty, got: %s", rec.Body.String())
+	}
+	minter.apiKeyRevokedMu.Lock()
+	if minter.apiKeyRevokedCalls != 1 {
+		t.Errorf("APIKeyRevoked calls: got %d want 1", minter.apiKeyRevokedCalls)
+	}
+	minter.apiKeyRevokedMu.Unlock()
+	minter.mintMu.Lock()
+	if minter.replacementMintCalls != 0 {
+		t.Errorf("replacement mint calls: got %d want 0", minter.replacementMintCalls)
+	}
+	minter.mintMu.Unlock()
+}
+
+func TestCallbackExplicitRotationStopsWhenNotFoundIsNotRevokedByOwner(t *testing.T) {
+	cfg, store, minter := newCallbackCfgStoreMinter(t)
+	const oldKeyID = testOldKeyID
+	store.existingKey = testOldAPIKey
+	store.existingKeyID = oldKeyID
+	minter.revokeErr = ErrAPIKeyNotFound
+	state := mintTestStateWithMode(t, &cfg, SetupModeRotate)
+
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status: got %d want 409 (not confirmed revoked, body=%s)", rec.Code, rec.Body.String())
+	}
+	if body := rec.Body.String(); !strings.Contains(body, "stored key identity may be stale") || !strings.Contains(body, "qURL account/API-key management") {
+		t.Fatalf("body should include stale-identity and dashboard recovery guidance, got: %s", body)
+	}
+	if !strings.Contains(rec.Body.String(), "deleted at qURL") {
+		t.Fatalf("body should name deleted-key recovery, got: %s", rec.Body.String())
+	}
+	minter.apiKeyRevokedMu.Lock()
+	if minter.apiKeyRevokedCalls != 1 {
+		t.Errorf("APIKeyRevoked calls: got %d want 1", minter.apiKeyRevokedCalls)
+	}
+	minter.apiKeyRevokedMu.Unlock()
+	minter.mintMu.Lock()
+	if minter.replacementMintCalls != 0 {
+		t.Errorf("replacement mint calls: got %d want 0", minter.replacementMintCalls)
+	}
+	minter.mintMu.Unlock()
+}
+
+func TestCallbackExplicitRotationKeepsReplacementOnPersistFailure(t *testing.T) {
+	cfg, store, minter := newCallbackCfgStoreMinter(t)
+	const oldKeyID = testOldKeyID
+	store.existingKey = testOldAPIKey
+	store.existingKeyID = oldKeyID
+	store.setErr = errors.New("ddb down")
+	state := mintTestStateWithMode(t, &cfg, SetupModeRotate)
+	logs := captureDefaultSlogJSON(t)
+
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status: got %d want 500 (persist failure, body=%s)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "same replacement key") {
+		t.Fatalf("body should tell admin the retry recovers the same replacement, got: %s", rec.Body.String())
+	}
+	minter.revokeMu.Lock()
+	if got := minter.revokedKeys; len(got) != 1 || got[0] != oldKeyID {
+		t.Errorf("revoked keys: got %#v want only old key [%q]", got, oldKeyID)
+	}
+	minter.revokeMu.Unlock()
+	assertRotationReplacementPersistFailureLogged(t, logs())
+}
+
+func TestCallbackExplicitRotationPersistFailureLogsConfiguredReplayWindow(t *testing.T) {
+	cfg, store, _ := newCallbackCfgStoreMinter(t)
+	const oldKeyID = testOldKeyID
+	cfg.APIKeyMintReplayWindowHours = 18
+	store.existingKey = testOldAPIKey
+	store.existingKeyID = oldKeyID
+	store.setErr = errors.New("ddb down")
+	state := mintTestStateWithMode(t, &cfg, SetupModeRotate)
+	logs := captureDefaultSlogJSON(t)
+
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status: got %d want 500 (persist failure, body=%s)", rec.Code, rec.Body.String())
+	}
+	assertRotationReplacementPersistFailureLogged(t, logs(), 18)
+}
+
+func assertRotationReplacementPersistFailureLogged(t *testing.T, records []map[string]any, wantReplayWindowHours ...int) {
+	t.Helper()
+	wantReplayWindowHour := replayWindowHoursOrDefault(0, DefaultAPIKeyMintReplayWindowHours)
+	if len(wantReplayWindowHours) > 0 {
+		wantReplayWindowHour = wantReplayWindowHours[0]
+	}
+	matches := 0
+	for _, rec := range records {
+		if rec["event"] != rotationReplacementPersistFailureEvent {
+			continue
+		}
+		matches++
+		if rec["team_id"] != testTeamID {
+			t.Errorf("team_id = %v, want %q", rec["team_id"], testTeamID)
+		}
+		if rec["key_id"] != testKeyID {
+			t.Errorf("key_id = %v, want %q", rec["key_id"], testKeyID)
+		}
+		if got, ok := rec["error"].(string); !ok || got == "" {
+			t.Errorf("error = %v, want non-empty string", rec["error"])
+		}
+		if rec["retry_window_hours"] != float64(wantReplayWindowHour) {
+			t.Errorf("retry_window_hours = %v, want %d", rec["retry_window_hours"], wantReplayWindowHour)
+		}
+		if rec["operator_action"] != rotationReplacementPersistFailureAction {
+			t.Errorf("operator_action = %v, want %q", rec["operator_action"], rotationReplacementPersistFailureAction)
+		}
+	}
+	if matches == 0 {
+		t.Fatalf("missing %q log event in records: %#v", rotationReplacementPersistFailureEvent, records)
+	}
+	if matches > 1 {
+		t.Errorf("found %d %q log events, want 1", matches, rotationReplacementPersistFailureEvent)
+	}
+}
+
+func TestCallbackExplicitRotationMintsWhenWorkspaceNotConfigured(t *testing.T) {
+	cfg, store, minter := newCallbackCfgStoreMinter(t)
+	state := mintTestStateWithMode(t, &cfg, SetupModeRotate)
+
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d want 200 (unconfigured rotation fallback, body=%s)", rec.Code, rec.Body.String())
+	}
+	store.mu.Lock()
+	if store.setArgs == nil {
+		t.Fatal("SetAPIKeyWithMetadata must run for unconfigured rotation fallback")
+	}
+	store.mu.Unlock()
+	minter.revokeMu.Lock()
+	if len(minter.revokedKeys) != 0 {
+		t.Errorf("unconfigured rotation must not revoke, got %#v", minter.revokedKeys)
+	}
+	minter.revokeMu.Unlock()
+	minter.mintMu.Lock()
+	if minter.mintCalls != 1 || minter.replacementMintCalls != 0 {
+		t.Errorf("mint calls: regular=%d replacement=%d, want 1/0", minter.mintCalls, minter.replacementMintCalls)
+	}
+	minter.mintMu.Unlock()
+}
+
+// --- Explicit --repoint (cross-account detection) ---
+
+// Same signed-in qURL account as the one holding the key: --repoint is a
+// same-account rotation, so it revokes the old key and mints a replacement,
+// recording the signed-in account as provenance.
+func TestCallbackRepointSameAccountRotates(t *testing.T) {
+	cfg, store, minter := newCallbackCfgStoreMinter(t)
+	cfg.IDTokenVerifier = &fakeIDTokenVerifier{email: testAdminEmail, sub: testAdminSub}
+	const oldKeyID = testOldKeyID
+	store.existingKey = testOldAPIKey
+	store.existingKeyID = oldKeyID
+	store.existingAccount = testAdminSub // same account holds the key
+	state := mintTestStateWithMode(t, &cfg, SetupModeRepoint)
+
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d want 200 (same-account repoint rotates, body=%s)", rec.Code, rec.Body.String())
+	}
+	store.mu.Lock()
+	if store.setArgs == nil {
+		t.Fatal("SetAPIKeyWithMetadata must run after same-account repoint rotation")
+	}
+	if store.setArgs.QURLAccountID != testAdminSub {
+		t.Errorf("stored qURL account = %q, want signed-in account %q", store.setArgs.QURLAccountID, testAdminSub)
+	}
+	store.mu.Unlock()
+	minter.revokeMu.Lock()
+	if got := minter.revokedKeys; len(got) != 1 || got[0] != oldKeyID {
+		t.Errorf("revoked keys: got %#v want [%q]", got, oldKeyID)
+	}
+	minter.revokeMu.Unlock()
+	minter.mintMu.Lock()
+	if minter.replacementMintCalls != 1 || minter.mintCalls != 0 {
+		t.Errorf("mint calls: regular=%d replacement=%d, want 0/1", minter.mintCalls, minter.replacementMintCalls)
+	}
+	minter.mintMu.Unlock()
+}
+
+// Different signed-in qURL account than the one holding the key: a genuine
+// cross-account move. qurl-service has no tenant-facing transfer, so Slack
+// fails closed (no mint, no revoke) after a single provenance read and routes
+// the owner to the operator transfer, emitting the audit event with both ids.
+func TestCallbackRepointCrossAccountRoutesToOperator(t *testing.T) {
+	cfg, store, minter := newCallbackCfgStoreMinter(t)
+	cfg.IDTokenVerifier = &fakeIDTokenVerifier{email: testAdminEmail, sub: testAdminSub}
+	const otherAccount = "auth0|other-account-999"
+	store.existingKey = testOldAPIKey
+	store.existingKeyID = testOldKeyID
+	store.existingAccount = otherAccount // a different qURL account holds the key
+	state := mintTestStateWithMode(t, &cfg, SetupModeRepoint)
+	logs := captureDefaultSlogJSON(t)
+
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status: got %d want 409 (cross-account repoint, body=%s)", rec.Code, rec.Body.String())
+	}
+	if body := rec.Body.String(); !strings.Contains(body, "different qURL account") || !strings.Contains(body, "operator-assisted transfer") {
+		t.Errorf("cross-account page missing operator-transfer guidance: %q", body)
+	}
+	// Must NOT disclose the current owner's qURL account to the browser.
+	if body := rec.Body.String(); strings.Contains(body, otherAccount) {
+		t.Errorf("cross-account page must not echo the current owner's qURL account, got %q", body)
+	}
+	store.mu.Lock()
+	if store.setArgs != nil {
+		t.Error("SetAPIKeyWithMetadata must not run on cross-account repoint")
+	}
+	if store.apiKeyCalls != 1 {
+		t.Errorf("store reads: got %d want 1 (fail closed after one provenance read, no key_id read)", store.apiKeyCalls)
+	}
+	store.mu.Unlock()
+	minter.revokeMu.Lock()
+	if len(minter.revokedKeys) != 0 {
+		t.Errorf("cross-account repoint must not revoke, got %#v", minter.revokedKeys)
+	}
+	minter.revokeMu.Unlock()
+	minter.mintMu.Lock()
+	if minter.mintCalls != 0 || minter.replacementMintCalls != 0 {
+		t.Errorf("cross-account repoint must not mint: regular=%d replacement=%d", minter.mintCalls, minter.replacementMintCalls)
+	}
+	minter.mintMu.Unlock()
+	assertCrossAccountRepointLogged(t, logs(), otherAccount, testAdminSub)
+}
+
+func assertCrossAccountRepointLogged(t *testing.T, records []map[string]any, wantCurrent, wantRequested string) {
+	t.Helper()
+	matches := 0
+	for _, rec := range records {
+		if rec["event"] != crossAccountRepointRequestedEvent {
+			continue
+		}
+		matches++
+		if rec["team_id"] != testTeamID {
+			t.Errorf("team_id = %v, want %q", rec["team_id"], testTeamID)
+		}
+		if rec["current_qurl_account_id"] != wantCurrent {
+			t.Errorf("current_qurl_account_id = %v, want %q", rec["current_qurl_account_id"], wantCurrent)
+		}
+		if rec["requested_qurl_account_id"] != wantRequested {
+			t.Errorf("requested_qurl_account_id = %v, want %q", rec["requested_qurl_account_id"], wantRequested)
+		}
+		if rec["operator_action"] != crossAccountRepointOperatorAction {
+			t.Errorf("operator_action = %v, want %q", rec["operator_action"], crossAccountRepointOperatorAction)
+		}
+	}
+	if matches != 1 {
+		t.Fatalf("found %d %q log events, want 1, in records: %#v", matches, crossAccountRepointRequestedEvent, records)
+	}
+}
+
+// assertLoggedEvent checks that exactly one record carries event==want with the
+// test team_id.
+func assertLoggedEvent(t *testing.T, records []map[string]any, want string) {
+	t.Helper()
+	matches := 0
+	for _, rec := range records {
+		if rec["event"] != want {
+			continue
+		}
+		matches++
+		if rec["team_id"] != testTeamID {
+			t.Errorf("%q event team_id = %v, want %q", want, rec["team_id"], testTeamID)
+		}
+	}
+	if matches != 1 {
+		t.Fatalf("found %d %q log events, want 1, in records: %#v", matches, want, records)
+	}
+}
+
+// A configured row with no recorded qURL account (legacy/unattributed) cannot prove
+// same-vs-cross account, so --repoint fails closed without minting or revoking.
+func TestCallbackRepointLegacyRowWithoutAccountFailsClosed(t *testing.T) {
+	cfg, store, minter := newCallbackCfgStoreMinter(t)
+	cfg.IDTokenVerifier = &fakeIDTokenVerifier{email: testAdminEmail, sub: testAdminSub}
+	store.existingKey = testOldAPIKey
+	store.existingKeyID = testOldKeyID
+	store.existingAccount = "" // legacy row: key present, no provenance
+	state := mintTestStateWithMode(t, &cfg, SetupModeRepoint)
+	logs := captureDefaultSlogJSON(t)
+
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status: got %d want 409 (legacy repoint, body=%s)", rec.Code, rec.Body.String())
+	}
+	if body := rec.Body.String(); !strings.Contains(body, "before Slack recorded which qURL™ account") {
+		t.Errorf("legacy repoint page missing reclaim guidance: %q", body)
+	}
+	assertLoggedEvent(t, logs(), repointLegacyRowRefusedEvent)
+	store.mu.Lock()
+	if store.setArgs != nil {
+		t.Error("SetAPIKeyWithMetadata must not run on legacy repoint")
+	}
+	store.mu.Unlock()
+	minter.revokeMu.Lock()
+	if len(minter.revokedKeys) != 0 {
+		t.Errorf("legacy repoint must not revoke, got %#v", minter.revokedKeys)
+	}
+	minter.revokeMu.Unlock()
+	minter.mintMu.Lock()
+	if minter.mintCalls != 0 || minter.replacementMintCalls != 0 {
+		t.Errorf("legacy repoint must not mint: regular=%d replacement=%d", minter.mintCalls, minter.replacementMintCalls)
+	}
+	minter.mintMu.Unlock()
+}
+
+// --repoint of an unconfigured workspace is just first setup: mint and record
+// the signed-in qURL account as provenance.
+func TestCallbackRepointMintsWhenWorkspaceNotConfigured(t *testing.T) {
+	cfg, store, minter := newCallbackCfgStoreMinter(t)
+	cfg.IDTokenVerifier = &fakeIDTokenVerifier{email: testAdminEmail, sub: testAdminSub}
+	state := mintTestStateWithMode(t, &cfg, SetupModeRepoint)
+
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d want 200 (unconfigured repoint mints, body=%s)", rec.Code, rec.Body.String())
+	}
+	store.mu.Lock()
+	if store.setArgs == nil {
+		t.Fatal("SetAPIKeyWithMetadata must run when no stored key exists")
+	}
+	if store.setArgs.QURLAccountID != testAdminSub {
+		t.Errorf("stored qURL account = %q, want signed-in account %q", store.setArgs.QURLAccountID, testAdminSub)
+	}
+	store.mu.Unlock()
+	minter.mintMu.Lock()
+	if minter.mintCalls != 1 || minter.replacementMintCalls != 0 {
+		t.Errorf("mint calls: regular=%d replacement=%d, want 1/0", minter.mintCalls, minter.replacementMintCalls)
+	}
+	minter.mintMu.Unlock()
+}
+
+func TestCallbackRepointAccountLookupErrorRenders500(t *testing.T) {
+	cfg, store, minter := newCallbackCfgStoreMinter(t)
+	cfg.IDTokenVerifier = &fakeIDTokenVerifier{email: testAdminEmail, sub: testAdminSub}
+	store.existingKey = testOldAPIKey
+	store.apiKeyErr = errors.New("ddb down")
+	state := mintTestStateWithMode(t, &cfg, SetupModeRepoint)
+
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status: got %d want 500 (repoint account read failure, body=%s)", rec.Code, rec.Body.String())
+	}
+	store.mu.Lock()
+	if store.setArgs != nil {
+		t.Error("SetAPIKeyWithMetadata must not run when the account read failed")
+	}
+	store.mu.Unlock()
+	minter.mintMu.Lock()
+	if minter.mintCalls != 0 || minter.replacementMintCalls != 0 {
+		t.Errorf("repoint read failure must not mint: regular=%d replacement=%d", minter.mintCalls, minter.replacementMintCalls)
+	}
+	minter.mintMu.Unlock()
+}
+
+// --rotate signed in with a different qURL account than the one holding the key
+// is now detected proactively from stored provenance: it routes to the operator
+// like --repoint and, crucially, never attempts the doomed wrong-owner revoke.
+func TestCallbackRotateCrossAccountRoutesToOperatorWithoutRevoke(t *testing.T) {
+	cfg, store, minter := newCallbackCfgStoreMinter(t)
+	cfg.IDTokenVerifier = &fakeIDTokenVerifier{email: testAdminEmail, sub: testAdminSub}
+	store.existingKey = testOldAPIKey
+	store.existingKeyID = testOldKeyID
+	store.existingAccount = "auth0|other-account-999" // a different qURL account holds the key
+	state := mintTestStateWithMode(t, &cfg, SetupModeRotate)
+
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status: got %d want 409 (cross-account rotate, body=%s)", rec.Code, rec.Body.String())
+	}
+	if body := rec.Body.String(); !strings.Contains(body, "different qURL account") {
+		t.Errorf("cross-account rotate page missing guidance: %q", body)
+	}
+	store.mu.Lock()
+	if store.apiKeyCalls != 1 {
+		t.Errorf("store reads: got %d want 1 (single identity read, no second read)", store.apiKeyCalls)
+	}
+	store.mu.Unlock()
+	minter.revokeMu.Lock()
+	if len(minter.revokedKeys) != 0 {
+		t.Errorf("cross-account rotate must NOT attempt the doomed wrong-owner revoke, got %#v", minter.revokedKeys)
+	}
+	minter.revokeMu.Unlock()
+	minter.mintMu.Lock()
+	if minter.mintCalls != 0 || minter.replacementMintCalls != 0 {
+		t.Errorf("cross-account rotate must not mint: regular=%d replacement=%d", minter.mintCalls, minter.replacementMintCalls)
+	}
+	minter.mintMu.Unlock()
+}
+
+// Belt-and-suspenders: if an explicit mode ever reaches the key path with an
+// empty signed-in qURL account against a provenance-bearing row (upstream gates
+// make this unreachable in production), it must fail closed with a 500 rather
+// than misroute a would-be same-account request to the operator. This pins the
+// guard independent of checkBindAllowed's ordering. The default config has a nil
+// AdminStore and no verified sub, so qurlAccountID reaches the key path empty.
+func TestCallbackExplicitModeEmptyAccountAgainstProvenanceRowFailsClosed(t *testing.T) {
+	cfg, store, minter := newCallbackCfgStoreMinter(t)
+	store.existingKey = testOldAPIKey
+	store.existingKeyID = testOldKeyID
+	store.existingAccount = "auth0|provenance-acct" // row has recorded provenance
+	state := mintTestStateWithMode(t, &cfg, SetupModeRepoint)
+
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status: got %d want 500 (empty account vs provenance row, body=%s)", rec.Code, rec.Body.String())
+	}
+	if body := rec.Body.String(); !strings.Contains(body, "couldn't confirm") && !strings.Contains(body, "could not confirm") {
+		t.Errorf("page should say the account couldn't be confirmed: %q", body)
+	}
+	store.mu.Lock()
+	if store.setArgs != nil {
+		t.Error("must not persist when the signed-in account is unverified")
+	}
+	store.mu.Unlock()
+	minter.revokeMu.Lock()
+	if len(minter.revokedKeys) != 0 {
+		t.Errorf("must not revoke when the signed-in account is unverified, got %#v", minter.revokedKeys)
+	}
+	minter.revokeMu.Unlock()
+	minter.mintMu.Lock()
+	if minter.mintCalls != 0 || minter.replacementMintCalls != 0 {
+		t.Errorf("must not mint: regular=%d replacement=%d", minter.mintCalls, minter.replacementMintCalls)
+	}
+	minter.mintMu.Unlock()
+}
+
+// --rotate on a legacy row (key present, no recorded account) is the self-heal
+// path: it revokes-then-replaces AND records the signed-in qURL account, so a
+// future --repoint can verify same-vs-cross account. Locks that documented
+// contract.
+func TestCallbackLegacyRotateRecordsQURLAccount(t *testing.T) {
+	cfg, store, minter := newCallbackCfgStoreMinter(t)
+	cfg.IDTokenVerifier = &fakeIDTokenVerifier{email: testAdminEmail, sub: testAdminSub}
+	store.existingKey = testOldAPIKey
+	store.existingKeyID = testOldKeyID
+	store.existingAccount = "" // legacy row: no recorded provenance
+	state := mintTestStateWithMode(t, &cfg, SetupModeRotate)
+
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d want 200 (legacy rotate self-heal, body=%s)", rec.Code, rec.Body.String())
+	}
+	store.mu.Lock()
+	if store.setArgs == nil {
+		t.Fatal("SetAPIKeyWithMetadata must run on legacy rotate")
+	}
+	if store.setArgs.QURLAccountID != testAdminSub {
+		t.Errorf("legacy rotate must record the signed-in qURL account: got %q want %q", store.setArgs.QURLAccountID, testAdminSub)
+	}
+	store.mu.Unlock()
+	minter.revokeMu.Lock()
+	if got := minter.revokedKeys; len(got) != 1 || got[0] != testOldKeyID {
+		t.Errorf("legacy rotate must revoke the old key: got %#v want [%q]", got, testOldKeyID)
+	}
+	minter.revokeMu.Unlock()
+}
+
+func TestCallbackExplicitRotationReplacementMintLimitRendersGuidance(t *testing.T) {
+	cfg, store, minter := newCallbackCfgStoreMinter(t)
+	const oldKeyID = testOldKeyID
+	store.existingKey = testOldAPIKey
+	store.existingKeyID = oldKeyID
+	minter.replacementMintErr = ErrAPIKeyProvisioningQuotaReached
+	state := mintTestStateWithMode(t, &cfg, SetupModeRotate)
+
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status: got %d want 409 (replacement limit, body=%s)", rec.Code, rec.Body.String())
+	}
+	body := strings.ToLower(rec.Body.String())
+	if !strings.Contains(body, "limit") || !strings.Contains(body, "revoke") {
+		t.Errorf("body should name the key limit and revoke recovery, got: %q", rec.Body.String())
+	}
+}
+
+func TestCallbackExplicitRotationReplacementMintFailureRendersRetry(t *testing.T) {
+	cfg, store, minter := newCallbackCfgStoreMinter(t)
+	const oldKeyID = testOldKeyID
+	store.existingKey = testOldAPIKey
+	store.existingKeyID = oldKeyID
+	minter.replacementMintErr = errors.New("qurl-service down")
+	state := mintTestStateWithMode(t, &cfg, SetupModeRotate)
+
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status: got %d want 502 (replacement mint failure, body=%s)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "Couldn&#39;t rotate qURL key") {
+		t.Errorf("body should render rotation retry heading, got: %q", rec.Body.String())
+	}
+}
+
+// TestCallbackBindIdempotentForSameCallerMintsWhenKeyMissing preserves the
+// recovery path for a bind-only workspace state: if an earlier setup seeded
+// workspace_mappings but failed before storing a workspace key, the owner can
+// re-run setup and mint the missing key.
+func TestCallbackBindIdempotentForSameCallerMintsWhenKeyMissing(t *testing.T) {
+	cfg, store, minter := newCallbackCfgStoreMinter(t)
+	admin := &fakeAdminStore{err: errors.New("classified as same-caller")}
+	cfg.AdminStore = admin
+	cfg.IDTokenVerifier = &fakeIDTokenVerifier{email: testAdminEmail, sub: testAdminSub}
+	cfg.BindClassifyError = func(_ error) BindConflictCode { return BindConflictAlreadyBoundToCaller }
+
+	state := mintTestState(t, &cfg)
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d want 200 (missing-key recovery, body=%s)", rec.Code, rec.Body.String())
+	}
+	store.mu.Lock()
+	if store.setArgs == nil {
+		t.Fatal("SetAPIKeyWithMetadata must run when no stored workspace key exists")
+	}
+	if store.setArgs.APIKey != testAPIKey {
+		t.Errorf("SetAPIKeyWithMetadata APIKey: got %q want %q", store.setArgs.APIKey, testAPIKey)
+	}
+	store.mu.Unlock()
+	minter.mintMu.Lock()
+	defer minter.mintMu.Unlock()
+	if minter.mintCalls != 1 {
+		t.Errorf("MintWorkspaceAPIKey calls: got %d want 1", minter.mintCalls)
+	}
+}
+
+func TestCallbackInvalidStoredKeyMintsReplacement(t *testing.T) {
+	cfg, store, minter := newCallbackCfgStoreMinter(t)
+	store.existingKey = "lv_live_revoked"
+	minter.validateErr = ErrStoredAPIKeyInvalid
+	state := mintTestState(t, &cfg)
+
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d want 200 (invalid stored key should be replaceable, body=%s)", rec.Code, rec.Body.String())
+	}
+	store.mu.Lock()
+	if store.setArgs == nil {
+		t.Fatal("SetAPIKeyWithMetadata must run after replacing an invalid stored key")
+	}
+	if store.setArgs.APIKey != testAPIKey {
+		t.Errorf("SetAPIKeyWithMetadata APIKey: got %q want %q", store.setArgs.APIKey, testAPIKey)
+	}
+	store.mu.Unlock()
+	minter.mintMu.Lock()
+	defer minter.mintMu.Unlock()
+	if minter.mintCalls != 1 {
+		t.Errorf("MintWorkspaceAPIKey calls: got %d want 1", minter.mintCalls)
+	}
+}
+
+func TestCallbackInvalidMetadataBearingStoredKeyRequiresExplicitRotation(t *testing.T) {
+	cfg, store, minter := newCallbackCfgStoreMinter(t)
+	store.existingKey = "lv_live_revoked"
+	store.existingKeyID = testOldKeyID
+	minter.validateErr = ErrStoredAPIKeyInvalid
+	state := mintTestState(t, &cfg)
+
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status: got %d want 409 (metadata-bearing invalid key should require rotation, body=%s)", rec.Code, rec.Body.String())
+	}
+	if body := rec.Body.String(); !strings.Contains(body, "--rotate") || !strings.Contains(body, "plain setup") {
+		t.Fatalf("body should tell admin to use explicit rotation and avoid plain setup, got: %s", body)
+	}
+	if !strings.Contains(rec.Body.String(), "deleted at qURL") {
+		t.Fatalf("body should name deleted-key recovery, got: %s", rec.Body.String())
+	}
+	store.mu.Lock()
+	if store.setArgs != nil {
+		t.Fatal("SetAPIKeyWithMetadata must not run when invalid metadata-bearing key requires rotation")
+	}
+	store.mu.Unlock()
+	minter.mintMu.Lock()
+	if minter.mintCalls != 0 || minter.replacementMintCalls != 0 {
+		t.Errorf("mint calls: regular=%d replacement=%d, want 0/0", minter.mintCalls, minter.replacementMintCalls)
+	}
+	minter.mintMu.Unlock()
+}
+
+func TestCallbackStoredKeyValidationFailureDoesNotMint(t *testing.T) {
+	cfg, store, minter := newCallbackCfgStoreMinter(t)
+	store.existingKey = "lv_live_existing"
+	minter.validateErr = errors.New("qurl-service timeout")
+	state := mintTestState(t, &cfg)
+
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status: got %d want 502 (transient validation failure, body=%s)", rec.Code, rec.Body.String())
+	}
+	assertOAuthErrorPage(t, rec, "Couldn't connect qURL")
+	store.mu.Lock()
+	if store.setArgs != nil {
+		t.Fatal("SetAPIKeyWithMetadata must not run when stored-key validation had a transient failure")
+	}
+	store.mu.Unlock()
+	minter.mintMu.Lock()
+	defer minter.mintMu.Unlock()
+	if minter.mintCalls != 0 {
+		t.Errorf("MintWorkspaceAPIKey calls: got %d want 0 on transient validation failure", minter.mintCalls)
+	}
+}
+
+func TestCallbackStoredKeyForbiddenDoesNotMint(t *testing.T) {
+	cfg, store, minter := newCallbackCfgStoreMinter(t)
+	store.existingKey = "lv_live_existing"
+	minter.validateErr = errors.New("qurl-service GET /v1/quota returned 403")
+	state := mintTestState(t, &cfg)
+
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status: got %d want 502 (403 validation failure must not mint, body=%s)", rec.Code, rec.Body.String())
+	}
+	assertOAuthErrorPage(t, rec, "Couldn't connect qURL")
+	store.mu.Lock()
+	if store.setArgs != nil {
+		t.Fatal("SetAPIKeyWithMetadata must not run when stored-key validation returned 403")
+	}
+	store.mu.Unlock()
+	minter.mintMu.Lock()
+	defer minter.mintMu.Unlock()
+	if minter.mintCalls != 0 {
+		t.Errorf("MintWorkspaceAPIKey calls: got %d want 0 on 403 validation failure", minter.mintCalls)
+	}
+}
+
+func TestCallbackStoredKeyLookupFailureDoesNotMint(t *testing.T) {
+	cfg, store, minter := newCallbackCfgStoreMinter(t)
+	store.apiKeyErr = errors.New("kms decrypt failed")
+	state := mintTestState(t, &cfg)
+
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status: got %d want 500 (stored-key lookup failure, body=%s)", rec.Code, rec.Body.String())
+	}
+	assertOAuthErrorPage(t, rec, "Couldn't connect qURL")
+	store.mu.Lock()
+	if store.setArgs != nil {
+		t.Fatal("SetAPIKeyWithMetadata must not run when stored-key lookup failed")
+	}
+	store.mu.Unlock()
+	minter.mintMu.Lock()
+	defer minter.mintMu.Unlock()
+	if minter.mintCalls != 0 {
+		t.Errorf("MintWorkspaceAPIKey calls: got %d want 0 on stored-key lookup failure", minter.mintCalls)
+	}
+}
+
+func TestStoredAPIKeyPrefix(t *testing.T) {
+	if got := storedAPIKeyPrefix("  " + testAPIKey + "  "); got != testKeyPrefix {
+		t.Fatalf("storedAPIKeyPrefix = %q, want %q", got, testKeyPrefix)
+	}
+	for _, short := range []string{"", "lv_live_abcd", "short"} {
+		if got := storedAPIKeyPrefix(short); got != "" {
+			t.Errorf("storedAPIKeyPrefix(%q) = %q, want empty (must not expose a whole short key)", short, got)
+		}
 	}
 }
 
@@ -963,14 +2628,21 @@ func TestCallbackBindRefusedForDifferentAdmin(t *testing.T) {
 	// for a bare http.Error with status 409 would slip past the
 	// status-only check and leave operators staring at the default
 	// error string instead of the rebind-refused copy.
-	if !strings.Contains(rec.Body.String(), "qURL setup blocked") {
-		t.Errorf("rebind-refused page body missing 'qURL setup blocked' headline: %s", rec.Body.String())
+	body := rec.Body.String()
+	if !strings.Contains(body, "qURL setup blocked") {
+		t.Errorf("rebind-refused page body missing 'qURL setup blocked' headline: %s", body)
 	}
+	if !strings.Contains(body, "connected to qURL™ under a different admin") {
+		t.Errorf("rebind-refused body missing first body-copy trademark: %s", body)
+	}
+	assertSingleQURLTrademark(t, body, "rebind-refused")
+	assertSecurityHeaders(t, rec)
+	assertLayerVOAuthChrome(t, rec)
 
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	if store.setArgs != nil {
-		t.Error("SetAPIKey must not run on rebind-refused — would overwrite the existing admin's encrypted key")
+		t.Error("SetAPIKeyWithMetadata must not run on rebind-refused — would overwrite the existing admin's encrypted key")
 	}
 }
 
@@ -996,14 +2668,18 @@ func TestCallbackBindRefusedWhenUnverified(t *testing.T) {
 	if rec.Code != http.StatusConflict {
 		t.Errorf("status: got %d want 409 (rebind-refused page, unverified arm)", rec.Code)
 	}
-	if !strings.Contains(rec.Body.String(), "qURL setup blocked") {
-		t.Errorf("rebind-refused page body missing 'qURL setup blocked' headline: %s", rec.Body.String())
+	body := rec.Body.String()
+	if !strings.Contains(body, "qURL setup blocked") {
+		t.Errorf("rebind-refused page body missing 'qURL setup blocked' headline: %s", body)
 	}
+	assertSingleQURLTrademark(t, body, "rebind-refused")
+	assertSecurityHeaders(t, rec)
+	assertLayerVOAuthChrome(t, rec)
 
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	if store.setArgs != nil {
-		t.Error("SetAPIKey must not run on unverified-rebind — same posture as the cross-admin arm")
+		t.Error("SetAPIKeyWithMetadata must not run on unverified-rebind — same posture as the cross-admin arm")
 	}
 }
 
@@ -1026,6 +2702,7 @@ func TestCallbackBindSkippedWhenSubMissing(t *testing.T) {
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("status: got %d want 500 (cannot bind without sub)", rec.Code)
 	}
+	assertOAuthErrorPage(t, rec, "Couldn't confirm your qURL account")
 	admin.mu.Lock()
 	if admin.calls != 0 {
 		t.Errorf("BindWorkspace must not be called with empty OwnerID; got %d calls", admin.calls)
@@ -1035,7 +2712,7 @@ func TestCallbackBindSkippedWhenSubMissing(t *testing.T) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	if store.setArgs != nil {
-		t.Error("SetAPIKey must not run when sub is unavailable — bind-before-mint reorder gates the mint on bind eligibility")
+		t.Error("SetAPIKeyWithMetadata must not run when sub is unavailable — bind-before-mint reorder gates the mint on bind eligibility")
 	}
 }
 
@@ -1063,6 +2740,7 @@ func TestCallbackBindSucceedsThenMintFails(t *testing.T) {
 	if rec.Code != http.StatusBadGateway {
 		t.Fatalf("first attempt status: got %d want 502 (mint failure)", rec.Code)
 	}
+	assertOAuthErrorPage(t, rec, "Couldn't connect qURL")
 	admin.mu.Lock()
 	if admin.calls != 1 || admin.gotSeed != testUserID {
 		t.Errorf("first attempt: BindWorkspace must run BEFORE mint and seed the admin row (calls=%d seed=%q)", admin.calls, admin.gotSeed)
@@ -1070,13 +2748,14 @@ func TestCallbackBindSucceedsThenMintFails(t *testing.T) {
 	admin.mu.Unlock()
 	store.mu.Lock()
 	if store.setArgs != nil {
-		t.Error("first attempt: SetAPIKey must NOT run when mint failed")
+		t.Error("first attempt: SetAPIKeyWithMetadata must NOT run when mint failed")
 	}
 	store.mu.Unlock()
 
 	// Second attempt: same caller re-runs /qurl setup. Bind now
 	// returns the same-caller-already-bound classifier code; mint
-	// succeeds; rotation completes. This is the documented recovery.
+	// succeeds and the missing workspace key is stored. This is the
+	// documented recovery.
 	admin.err = errors.New("classified as same-caller")
 	cfg.BindClassifyError = func(_ error) BindConflictCode { return BindConflictAlreadyBoundToCaller }
 	minter.mintErr = nil
@@ -1090,14 +2769,14 @@ func TestCallbackBindSucceedsThenMintFails(t *testing.T) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	if store.setArgs == nil {
-		t.Fatal("retry: SetAPIKey must run after bind classifies as same-caller and mint succeeds")
+		t.Fatal("retry: SetAPIKeyWithMetadata must run after bind classifies as same-caller and mint succeeds")
 	}
 	if store.setArgs.APIKey != testAPIKey {
-		t.Errorf("retry: SetAPIKey APIKey: got %q want %q", store.setArgs.APIKey, testAPIKey)
+		t.Errorf("retry: SetAPIKeyWithMetadata APIKey: got %q want %q", store.setArgs.APIKey, testAPIKey)
 	}
 }
 
-// TestCallbackSkipsBindWhenAdminStoreNil fences the sandbox / no-DDB
+// TestCallbackSkipsBindWhenAdminStoreNil fences the admin-storage-disabled
 // contract: AdminStore=nil is the documented degraded path (cmd/main.go
 // surfaces it when slackdata.NewStore fails). The callback must still
 // complete the mint + render the success page so the API-key surface
@@ -1117,6 +2796,288 @@ func TestCallbackSkipsBindWhenAdminStoreNil(t *testing.T) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	if store.setArgs == nil {
-		t.Error("SetAPIKey must still run in the sandbox path so the API-key surface is functional")
+		t.Error("SetAPIKeyWithMetadata must still run in the sandbox path so the API-key surface is functional")
+	}
+}
+
+// TestCallbackLegacyRotationLogsOrphanEvent pins the operator's only handle on
+// the key this path deliberately abandons. Without a findable event the leaked
+// key is invisible until the account hits its API-key plan limit.
+func TestCallbackLegacyRotationLogsOrphanEvent(t *testing.T) {
+	readLogs := captureDefaultSlogJSON(t)
+	cfg, store, _ := newCallbackCfgStoreMinter(t)
+	cfg.IDTokenVerifier = &fakeIDTokenVerifier{email: testAdminEmail, sub: testAdminSub}
+	store.existingKey = testOldAPIKey
+	state := mintTestStateWithMode(t, &cfg, SetupModeRotate)
+
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d want 200 (body=%s)", rec.Code, rec.Body.String())
+	}
+
+	var found map[string]any
+	for _, rec := range readLogs() {
+		if rec["event"] == rotateLegacyRowOrphanEvent {
+			found = rec
+			break
+		}
+	}
+	if found == nil {
+		t.Fatalf("expected a %q log record so operators can find the abandoned key", rotateLegacyRowOrphanEvent)
+	}
+	// qurl_account_id is the operator's primary handle: it names which qURL
+	// account holds the abandoned key, so an empty value here would leave them
+	// with a team_id and no way to locate the key in API-key management.
+	for _, field := range []string{"team_id", "mode", "qurl_account_id", "operator_action"} {
+		if v, ok := found[field]; !ok || v == "" {
+			t.Errorf("orphan log record missing %q: %#v", field, found)
+		}
+	}
+}
+
+// TestCallbackLegacyRotationAtKeyLimitDoesNotClaimRevoke covers the one new
+// failure mode this path introduces: it is net +1 key (nothing is revoked), so
+// an account already at its plan limit fails the mint. The page must not repeat
+// the normal rotation's "previous key was revoked" copy — on this path the old
+// key is still live, and telling the admin otherwise would send them away
+// believing a working credential is dead.
+func TestCallbackLegacyRotationAtKeyLimitDoesNotClaimRevoke(t *testing.T) {
+	readLogs := captureDefaultSlogJSON(t)
+	cfg, store, minter := newCallbackCfgStoreMinter(t)
+	cfg.IDTokenVerifier = &fakeIDTokenVerifier{email: testAdminEmail, sub: testAdminSub}
+	store.existingKey = testOldAPIKey
+	minter.replacementMintErr = ErrAPIKeyProvisioningQuotaReached
+	state := mintTestStateWithMode(t, &cfg, SetupModeRotate)
+
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status: got %d want 409 (quota), body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	// Match the misleading claims specifically. A bare "was revoked" substring
+	// would also hit the correct copy's "nothing was revoked".
+	for _, claim := range []string{
+		"previous workspace key was revoked",
+		"revoked the previous workspace key",
+	} {
+		if strings.Contains(body, claim) {
+			t.Errorf("page must not claim a revoke happened on the legacy path (%q): %s", claim, body)
+		}
+	}
+	// The orphan event must NOT fire here. Its operator_action says to revoke
+	// this workspace's pre-rotation key, and the mint failed — so that key is
+	// still the workspace's live credential. Acting on the event would take the
+	// workspace down.
+	for _, entry := range readLogs() {
+		if entry["event"] == rotateLegacyRowOrphanEvent {
+			t.Fatalf("orphan event must not be logged when the rotation failed: %#v", entry)
+		}
+	}
+	if !strings.Contains(body, "still active") {
+		t.Errorf("page should tell the admin the previous key is still live: %s", body)
+	}
+}
+
+// TestCallbackRepointWithoutKeyIDStillFailsClosed fences the scope of the
+// mint-without-revoke relaxation. It is reachable only by --rotate; a --repoint
+// that reaches the same missing-key_id state must keep failing closed rather
+// than silently minting. The state is unreachable today (provenance and key_id
+// are persisted together), so this guards the invariant rather than a live path
+// — if that ever changes, mint-without-revoke must not widen to account moves.
+func TestCallbackRepointWithoutKeyIDStillFailsClosed(t *testing.T) {
+	cfg, store, minter := newCallbackCfgStoreMinter(t)
+	cfg.IDTokenVerifier = &fakeIDTokenVerifier{email: testAdminEmail, sub: testAdminSub}
+	store.existingKey = testOldAPIKey
+	// Provenance present and matching, so the earlier cross-account and
+	// legacy-repoint guards both pass and control reaches the key_id branch.
+	store.existingAccount = testAdminSub
+	state := mintTestStateWithMode(t, &cfg, SetupModeRepoint)
+
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status: got %d want 409 (repoint must not mint without a key_id), body=%s", rec.Code, rec.Body.String())
+	}
+	minter.mintMu.Lock()
+	replacementCalls := minter.replacementMintCalls
+	minter.mintMu.Unlock()
+	if replacementCalls != 0 {
+		t.Errorf("replacement mint calls = %d, want 0", replacementCalls)
+	}
+}
+
+// TestCallbackLegacyRotationGenericMintFailureCopy locks the non-quota failure
+// copy on the legacy path. Only the limit-reached variant was pinned, so a
+// regression could reintroduce the normal rotation's "previous key was revoked"
+// wording here — on a path where nothing was revoked and the old key is still
+// the workspace's live credential.
+func TestCallbackLegacyRotationGenericMintFailureCopy(t *testing.T) {
+	readLogs := captureDefaultSlogJSON(t)
+	cfg, store, minter := newCallbackCfgStoreMinter(t)
+	cfg.IDTokenVerifier = &fakeIDTokenVerifier{email: testAdminEmail, sub: testAdminSub}
+	store.existingKey = testOldAPIKey
+	minter.replacementMintErr = errors.New("qurl-service unavailable")
+	state := mintTestStateWithMode(t, &cfg, SetupModeRotate)
+
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status: got %d want 502, body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "still active") {
+		t.Errorf("page should tell the admin the previous key is still live: %s", body)
+	}
+	if strings.Contains(body, "revoked the previous workspace key") {
+		t.Errorf("page must not claim a revoke happened: %s", body)
+	}
+	// --repoint still fails closed on a row with no key_id, so suggesting it
+	// here would hand this user a dead end until a rotate heals the row.
+	if strings.Contains(body, "--repoint") {
+		t.Errorf("legacy-path retry copy must not suggest --repoint: %s", body)
+	}
+	for _, entry := range readLogs() {
+		if entry["event"] == rotateLegacyRowOrphanEvent {
+			t.Fatalf("orphan event must not fire when the mint failed: %#v", entry)
+		}
+	}
+}
+
+// TestCallbackLegacyRotationPersistFailureSuppressesOrphanEvent covers the
+// second failure mode the emit-after-ok ordering exists for. A successful mint
+// whose persist fails leaves the store holding the OLD key — so the workspace
+// keeps using it and the new key is the real orphan. Emitting the event here
+// would name the wrong key and tell an operator to revoke a live one.
+func TestCallbackLegacyRotationPersistFailureSuppressesOrphanEvent(t *testing.T) {
+	readLogs := captureDefaultSlogJSON(t)
+	cfg, store, minter := newCallbackCfgStoreMinter(t)
+	cfg.IDTokenVerifier = &fakeIDTokenVerifier{email: testAdminEmail, sub: testAdminSub}
+	store.existingKey = testOldAPIKey
+	store.setErr = errors.New("ddb unavailable")
+	state := mintTestStateWithMode(t, &cfg, SetupModeRotate)
+
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code == http.StatusOK {
+		t.Fatalf("status: got 200, want an error page when the persist failed; body=%s", rec.Body.String())
+	}
+	// The mint did happen — this is exactly the window where a replacement
+	// exists upstream but Slack never stored it.
+	minter.mintMu.Lock()
+	replacementCalls := minter.replacementMintCalls
+	minter.mintMu.Unlock()
+	if replacementCalls != 1 {
+		t.Errorf("replacement mint calls = %d, want 1 (persist, not mint, is what failed)", replacementCalls)
+	}
+	for _, entry := range readLogs() {
+		if entry["event"] == rotateLegacyRowOrphanEvent {
+			t.Fatalf("orphan event must not fire when the persist failed — it would name the old key while the NEW one is the orphan: %#v", entry)
+		}
+	}
+}
+
+// TestCallbackLegacyRotationRefusesWithoutVerifiedAccount pins the fail-closed
+// guard on the mint-without-revoke branch. Everything this path produces is
+// keyed on the signed-in account: the persisted provenance that unblocks a
+// later --repoint, and the orphan event's handle for finding the abandoned key.
+// Minting with an empty account would report success while leaving the row
+// permanently repoint-blocked and emitting an event no operator can act on.
+//
+// Upstream gates make this unreachable in production, but they live on two
+// other surfaces (the slash command's AdminStore requirement and
+// checkBindAllowed's empty-sub refusal) and this branch can see neither.
+func TestCallbackLegacyRotationRefusesWithoutVerifiedAccount(t *testing.T) {
+	readLogs := captureDefaultSlogJSON(t)
+	cfg, store, minter := newCallbackCfgStoreMinter(t)
+	// No IDTokenVerifier override: the callback reaches this branch with no
+	// verified qURL account.
+	store.existingKey = testOldAPIKey
+	state := mintTestStateWithMode(t, &cfg, SetupModeRotate)
+
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status: got %d want 500 (no verified account), body=%s", rec.Code, rec.Body.String())
+	}
+	minter.mintMu.Lock()
+	replacementCalls := minter.replacementMintCalls
+	minter.mintMu.Unlock()
+	if replacementCalls != 0 {
+		t.Errorf("replacement mint calls = %d, want 0 — nothing should be minted without provenance to record", replacementCalls)
+	}
+	store.mu.Lock()
+	setArgs := store.setArgs
+	store.mu.Unlock()
+	if setArgs != nil {
+		t.Errorf("nothing should be persisted without a verified account: %#v", setArgs)
+	}
+	for _, entry := range readLogs() {
+		if entry["event"] == rotateLegacyRowOrphanEvent {
+			t.Fatalf("orphan event must not fire when the rotation was refused: %#v", entry)
+		}
+	}
+}
+
+// TestCallbackLegacyRotationHealsRowForNextRotation drives the sequence the
+// "at most once per workspace" bound rests on: a legacy rotation, then a second
+// rotation on the now-healed row. The first mints without revoking and records
+// key identity; the second must take the normal revoke-then-replace path, so
+// the workspace cannot orphan a second key.
+//
+// The success test asserts the healing structurally (key_id is persisted). This
+// proves the consequence — that the recorded key_id actually routes the next
+// rotation away from the mint-without-revoke branch.
+func TestCallbackLegacyRotationHealsRowForNextRotation(t *testing.T) {
+	cfg, store, minter := newCallbackCfgStoreMinter(t)
+	cfg.IDTokenVerifier = &fakeIDTokenVerifier{email: testAdminEmail, sub: testAdminSub}
+	store.existingKey = testOldAPIKey
+
+	// First rotation: legacy row, nothing to revoke.
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(mintTestStateWithMode(t, &cfg, SetupModeRotate)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("first rotation: got %d want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	minter.revokeMu.Lock()
+	revokedAfterFirst := len(minter.revokedKeys)
+	minter.revokeMu.Unlock()
+	if revokedAfterFirst != 0 {
+		t.Fatalf("first rotation must not revoke, got %d", revokedAfterFirst)
+	}
+	store.mu.Lock()
+	healed := store.setArgs
+	store.mu.Unlock()
+	if healed == nil || healed.KeyID == "" {
+		t.Fatalf("first rotation must persist key identity, got %#v", healed)
+	}
+
+	// Feed the persisted identity back as the stored row, as a later run would
+	// read it, and rotate again.
+	store.mu.Lock()
+	store.existingKey = healed.APIKey
+	store.existingKeyID = healed.KeyID
+	store.existingAccount = healed.QURLAccountID
+	store.setArgs = nil
+	store.mu.Unlock()
+
+	rec2 := httptest.NewRecorder()
+	h(rec2, callbackRequest(mintTestStateWithMode(t, &cfg, SetupModeRotate)))
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("second rotation: got %d want 200, body=%s", rec2.Code, rec2.Body.String())
+	}
+	minter.revokeMu.Lock()
+	revoked := append([]string(nil), minter.revokedKeys...)
+	minter.revokeMu.Unlock()
+	if len(revoked) != 1 || revoked[0] != healed.KeyID {
+		t.Errorf("second rotation must revoke the healed key_id %q, got %#v", healed.KeyID, revoked)
 	}
 }

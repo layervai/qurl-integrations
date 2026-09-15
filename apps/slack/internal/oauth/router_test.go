@@ -15,11 +15,24 @@ func (*noopAdminStore) BindWorkspace(_ context.Context, _ *WorkspaceMapping, _ s
 	return nil
 }
 
+type noopIDTokenVerifier struct{}
+
+func (noopIDTokenVerifier) VerifySetupClaims(context.Context, string, string) (IDTokenClaims, error) {
+	return IDTokenClaims{}, nil
+}
+
+func validConfigForValidation() Config {
+	return Config{
+		StateStore:      newMemoryStateStore(),
+		IDTokenVerifier: noopIDTokenVerifier{},
+	}
+}
+
 // TestConfigValidateRejectsAdminStoreWithoutClassifier fences the
 // AdminStore ↔ BindClassifyError pairing that handleBindError's
 // switch relies on. Without a classifier, every bind conflict —
 // including idempotent same-caller re-entries — would route to the
-// default 500 arm, silently downgrading "key rotated" to "500".
+// default 500 arm, silently downgrading setup re-entry to "500".
 // RegisterRoutes calls Validate() and panics on this misconfiguration
 // so callers see the boot-time error instead of mysterious 500s
 // after the first user runs /qurl setup.
@@ -40,26 +53,75 @@ func TestConfigValidateRejectsAdminStoreWithoutClassifier(t *testing.T) {
 // TestConfigValidateAcceptsPairedAdminStore mirrors the happy-path
 // shape: AdminStore + BindClassifyError both wired → Validate passes.
 func TestConfigValidateAcceptsPairedAdminStore(t *testing.T) {
-	cfg := Config{
-		AdminStore:        &noopAdminStore{},
-		BindClassifyError: func(_ error) BindConflictCode { return "" },
-	}
+	cfg := validConfigForValidation()
+	cfg.AdminStore = &noopAdminStore{}
+	cfg.BindClassifyError = func(_ error) BindConflictCode { return "" }
 	if err := cfg.Validate(); err != nil {
 		t.Errorf("Validate rejected a paired config: %v", err)
 	}
 }
 
-// TestConfigValidateAcceptsSandboxConfig fences the sandbox / no-DDB
-// posture: AdminStore=nil means the callback skips the bind, so a
+// TestConfigValidateAcceptsAdminStoreDisabledConfig fences the optional admin
+// storage posture: AdminStore=nil means the callback skips the bind, so a
 // classifier is irrelevant. Validate must not reject this combination.
-func TestConfigValidateAcceptsSandboxConfig(t *testing.T) {
-	cfg := Config{
-		AdminStore:        nil,
-		BindClassifyError: nil,
-	}
+func TestConfigValidateAcceptsAdminStoreDisabledConfig(t *testing.T) {
+	cfg := validConfigForValidation()
 	if err := cfg.Validate(); err != nil {
 		t.Errorf("Validate rejected the sandbox config: %v", err)
 	}
+}
+
+func TestConfigValidateRequiresStateStoreAndIDTokenVerifier(t *testing.T) {
+	t.Run("state store", func(t *testing.T) {
+		cfg := validConfigForValidation()
+		cfg.StateStore = nil
+		if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "StateStore") {
+			t.Fatalf("Validate error = %v, want missing StateStore", err)
+		}
+	})
+	t.Run("id token verifier", func(t *testing.T) {
+		cfg := validConfigForValidation()
+		cfg.IDTokenVerifier = nil
+		if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "IDTokenVerifier") {
+			t.Fatalf("Validate error = %v, want missing IDTokenVerifier", err)
+		}
+	})
+}
+
+func TestConfigValidateRejectsNegativeSetupBindingReplayWindow(t *testing.T) {
+	cfg := Config{SetupBindingReplayWindowHours: -1}
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("Validate must reject negative SetupBindingReplayWindowHours")
+	}
+	if !strings.Contains(err.Error(), "SetupBindingReplayWindowHours") {
+		t.Errorf("Validate error should mention SetupBindingReplayWindowHours; got %q", err.Error())
+	}
+}
+
+func TestConfigValidateRejectsNegativeAPIKeyMintReplayWindow(t *testing.T) {
+	cfg := Config{APIKeyMintReplayWindowHours: -1}
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("Validate must reject negative APIKeyMintReplayWindowHours")
+	}
+	if !strings.Contains(err.Error(), "APIKeyMintReplayWindowHours") {
+		t.Errorf("Validate error should mention APIKeyMintReplayWindowHours; got %q", err.Error())
+	}
+}
+
+// TestAPIKeyScopesIncludeReadForStoredKeyValidation fences the integration
+// contract with qurl-service: ValidateAPIKey probes GET /v1/quota, and that
+// route is protected by qurl:read. If this bot stops minting qurl:read,
+// healthy stored keys would validate as 403 and setup reruns would fail closed
+// instead of reusing the key.
+func TestAPIKeyScopesIncludeReadForStoredKeyValidation(t *testing.T) {
+	for _, scope := range apiKeyScopes() {
+		if scope == "qurl:read" {
+			return
+		}
+	}
+	t.Fatalf("apiKeyScopes() = %v, want qurl:read for GET /v1/quota validation", apiKeyScopes())
 }
 
 // TestRegisterRoutesPanicsOnInvalidConfig fences that RegisterRoutes

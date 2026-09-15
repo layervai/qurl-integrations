@@ -1,10 +1,5 @@
-// Tests for multi-tenant mode (activated when GUILD_ID env is unset or
-// not a valid Discord snowflake). Covers the code paths added to
-// config.js, commands.js, discord.js, and server.js.
 
 describe('multi-tenant mode — config.js GUILD_ID normalization', () => {
-  // Each case re-requires config fresh after setting process.env, because
-  // config.js snapshots process.env.GUILD_ID at module import time.
   function loadConfig(rawGuildId) {
     jest.resetModules();
     if (rawGuildId === undefined) {
@@ -80,48 +75,14 @@ describe('multi-tenant mode — config.js GUILD_ID normalization', () => {
     expect(cfg.isMultiTenant).toBe(true);
   });
 
-  it('warns when unsupported combo is set: GUILD_ID unset + ENABLE_OPENNHP_FEATURES=true', () => {
-    // Claude review flagged this as an "operator-UX feature without a
-    // test" — if someone removes the warning in a future refactor,
-    // operators who set ENABLE_OPENNHP_FEATURES=true intending to
-    // enable OpenNHP mode would silently get multi-tenant instead
-    // with no signal their intent was ignored.
-    const originalFlag = process.env.ENABLE_OPENNHP_FEATURES;
-    delete process.env.GUILD_ID;
-    process.env.ENABLE_OPENNHP_FEATURES = 'true';
-    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
-    try {
-      jest.resetModules();
-      const cfg = require('../src/config');
-      expect(cfg.isMultiTenant).toBe(true);
-      expect(cfg.isOpenNHPActive).toBe(false); // flag effectively ignored
-      expect(warnSpy).toHaveBeenCalledWith(
-        expect.stringContaining('ignored when GUILD_ID is unset'),
-      );
-    } finally {
-      warnSpy.mockRestore();
-      if (originalFlag === undefined) {
-        delete process.env.ENABLE_OPENNHP_FEATURES;
-      } else {
-        process.env.ENABLE_OPENNHP_FEATURES = originalFlag;
-      }
-    }
-  });
 });
-
-describe('multi-tenant mode — registerCommands command filtering', () => {
-  // Explicit reset on BOTH the env-var pair (GUILD_ID + ENABLE_OPENNHP_FEATURES)
-  // before each test — both inputs now drive the mode, and a leftover value
-  // from a prior test would silently flip the branch under inspection.
+describe('multi-tenant mode — registerCommands registration scope', () => {
   let originalGuildId;
-  let originalOpenNHPFlag;
   beforeAll(() => {
     originalGuildId = process.env.GUILD_ID;
-    originalOpenNHPFlag = process.env.ENABLE_OPENNHP_FEATURES;
   });
   beforeEach(() => {
     delete process.env.GUILD_ID;
-    delete process.env.ENABLE_OPENNHP_FEATURES;
     jest.resetModules();
   });
   afterAll(() => {
@@ -130,22 +91,10 @@ describe('multi-tenant mode — registerCommands command filtering', () => {
     } else {
       process.env.GUILD_ID = originalGuildId;
     }
-    if (originalOpenNHPFlag === undefined) {
-      delete process.env.ENABLE_OPENNHP_FEATURES;
-    } else {
-      process.env.ENABLE_OPENNHP_FEATURES = originalOpenNHPFlag;
-    }
     jest.resetModules();
   });
 
-  // The post-refactor registerCommands signature is
-  // `({rest, appId, guildIds, guildNames})`, so these tests assert the
-  // REST call shape (rest.put with the right Route URL) rather than the
-  // legacy `client.application.commands.set(data, guildId?)` shape.
-  // Route URLs follow discord-api-types/v10's Routes module:
-  //   global  → /applications/{appId}/commands
-  //   guild   → /applications/{appId}/guilds/{guildId}/commands
-  it('multi-tenant: registers only /qurl on the global commands endpoint', async () => {
+  it('multi-tenant: registers /qurl on the global commands endpoint', async () => {
     const commandsModule = require('../src/commands');
 
     const mockPut = jest.fn().mockResolvedValue(undefined);
@@ -160,35 +109,17 @@ describe('multi-tenant mode — registerCommands command filtering', () => {
     expect(mockPut).toHaveBeenCalledTimes(1);
     const [route, opts] = mockPut.mock.calls[0];
     expect(route).toBe('/applications/app-123/commands');
-    // Only /qurl is customer-safe
     expect(opts.body.map(c => c.name).sort()).toEqual(['qurl']);
-  });
-
-  it('single-guild + ENABLE_OPENNHP_FEATURES=true: registers ALL commands on the guild endpoint', async () => {
-    process.env.GUILD_ID = '123456789012345678';
-    process.env.ENABLE_OPENNHP_FEATURES = 'true';
-    jest.resetModules();
-    const commandsModule = require('../src/commands');
-
-    const mockPut = jest.fn().mockResolvedValue(undefined);
-    const mockGet = jest.fn().mockResolvedValue([]);
-    const rest = { put: mockPut, get: mockGet };
-    await commandsModule.registerCommands({
-      rest,
-      appId: 'app-123',
-      guilds: new Map(),
+    expect(opts.body).toHaveLength(1);
+    expect(opts.body[0]).toMatchObject({
+      name: 'qurl',
+      integration_types: [0],
+      contexts: [0],
     });
-
-    expect(mockPut).toHaveBeenCalledTimes(1);
-    const [route, opts] = mockPut.mock.calls[0];
-    expect(route).toBe('/applications/app-123/guilds/123456789012345678/commands');
-    expect(opts.body.length).toBeGreaterThan(1);
-    expect(opts.body.map(c => c.name)).toContain('qurl');
-    // OpenNHP commands register alongside /qurl in the OpenNHP guild
-    expect(opts.body.map(c => c.name)).toContain('link');
+    expect(opts.body[0]).not.toHaveProperty('dm_permission');
   });
 
-  it('single-guild + ENABLE_OPENNHP_FEATURES unset: registers only customer-safe commands on the guild endpoint', async () => {
+  it('single-guild: registers the same command set on the guild endpoint', async () => {
     process.env.GUILD_ID = '123456789012345678';
     jest.resetModules();
     const commandsModule = require('../src/commands');
@@ -205,40 +136,41 @@ describe('multi-tenant mode — registerCommands command filtering', () => {
     expect(mockPut).toHaveBeenCalledTimes(1);
     const [route, opts] = mockPut.mock.calls[0];
     expect(route).toBe('/applications/app-123/guilds/123456789012345678/commands');
-    // Only /qurl, even in single-guild mode, because OpenNHP features are off
     expect(opts.body.map(c => c.name).sort()).toEqual(['qurl']);
-    expect(opts.body.map(c => c.name)).not.toContain('link');
+    expect(opts.body[0]).not.toHaveProperty('integration_types');
+    expect(opts.body[0]).not.toHaveProperty('contexts');
+    expect(opts.body[0]).not.toHaveProperty('dm_permission');
+  });
+
+  it('ships no GitHub account-linking or contributor commands in either mode (#1026)', async () => {
+    const { commands } = require('../src/commands');
+    const names = commands.map(c => c.data.name);
+    expect(names).toEqual(['qurl']);
+    for (const removed of [
+      'link', 'unlink', 'whois', 'contributions', 'stats',
+      'leaderboard', 'forcelink', 'bulklink', 'unlinked',
+      'backfill-milestones',
+    ]) {
+      expect(names).not.toContain(removed);
+    }
   });
 });
 
 describe('registerCommands stale-command purge (issue #86)', () => {
-  // When the bot was previously in OpenNHP mode and has since flipped
-  // to non-OpenNHP mode, prior guild-scoped /link etc. registrations
-  // persist in those guilds' slash-command caches. registerCommands
-  // should proactively clear them so users don't see dead commands in
-  // autocomplete. Only runs in non-OpenNHP modes — in OpenNHP mode the
-  // fresh guild-scoped .set() is the whole point.
   let originalGuildId;
-  let originalFlag;
   beforeAll(() => {
     originalGuildId = process.env.GUILD_ID;
-    originalFlag = process.env.ENABLE_OPENNHP_FEATURES;
   });
   afterAll(() => {
     if (originalGuildId === undefined) delete process.env.GUILD_ID; else process.env.GUILD_ID = originalGuildId;
-    if (originalFlag === undefined) delete process.env.ENABLE_OPENNHP_FEATURES; else process.env.ENABLE_OPENNHP_FEATURES = originalFlag;
     jest.resetModules();
   });
   beforeEach(() => { jest.resetModules(); });
 
   it('multi-tenant mode: purges stale guild-scoped registrations from every guild the bot is in', async () => {
     delete process.env.GUILD_ID;
-    delete process.env.ENABLE_OPENNHP_FEATURES;
     const commandsModule = require('../src/commands');
 
-    // Two guilds with stale registrations, one empty guild (should not be purged).
-    // Post-refactor: REST returns arrays of Command objects (was discord.js Map
-    // before). The purge helper uses Array.length, so the mock returns arrays.
     const mockGet = jest.fn()
       .mockResolvedValueOnce([{ id: 'cmd-1' }, { id: 'cmd-2' }, { id: 'cmd-3' }]) // guild A: 3 stale
       .mockResolvedValueOnce([{ id: 'cmd-4' }])                                    // guild B: 1 stale
@@ -252,11 +184,8 @@ describe('registerCommands stale-command purge (issue #86)', () => {
       guilds: new Map([['ga', 'A'], ['gb', 'B'], ['gc', 'C']]),
     });
 
-    // get called once per guild (3) — the per-guild fetch.
     expect(mockGet).toHaveBeenCalledTimes(3);
-    // put called 3 times total: 2 purges (empty body, guild route) + 1 final global register.
     expect(mockPut).toHaveBeenCalledTimes(3);
-    // Verify purge routes: applicationGuildCommands(appId, guildId), body=[].
     const purgeCalls = mockPut.mock.calls.filter(([, opts]) => Array.isArray(opts.body) && opts.body.length === 0);
     expect(purgeCalls).toHaveLength(2);
     const purgedRoutes = purgeCalls.map(c => c[0]).sort();
@@ -264,37 +193,34 @@ describe('registerCommands stale-command purge (issue #86)', () => {
       '/applications/app-1/guilds/ga/commands',
       '/applications/app-1/guilds/gb/commands',
     ]);
-    // Verify registration route: applicationCommands(appId), body=non-empty.
     const registerCalls = mockPut.mock.calls.filter(([, opts]) => Array.isArray(opts.body) && opts.body.length > 0);
     expect(registerCalls).toHaveLength(1);
     expect(registerCalls[0][0]).toBe('/applications/app-1/commands');
   });
 
-  it('OpenNHP mode: does NOT purge (guild-scoped registration is the goal)', async () => {
+  it('single-guild mode: purges first, then registers guild-scoped (strictly sequential, no race)', async () => {
     process.env.GUILD_ID = '123456789012345678';
-    process.env.ENABLE_OPENNHP_FEATURES = 'true';
     const commandsModule = require('../src/commands');
 
-    const mockGet = jest.fn();
+    const mockGet = jest.fn().mockResolvedValue([{ id: 'stale-1' }]);
     const mockPut = jest.fn().mockResolvedValue(undefined);
     const rest = { get: mockGet, put: mockPut };
 
     await commandsModule.registerCommands({
       rest,
       appId: 'app-1',
-      guilds: new Map([['ga', 'A']]),
+      guilds: new Map([['123456789012345678', 'A']]),
     });
 
-    // get never called — purge skipped in OpenNHP mode.
-    expect(mockGet).not.toHaveBeenCalled();
-    // put called once for the register, no preceding empty-body purge.
-    expect(mockPut).toHaveBeenCalledTimes(1);
-    expect(mockPut.mock.calls[0][1].body.length).toBeGreaterThan(0);
+    expect(mockGet).toHaveBeenCalledTimes(1);
+    expect(mockPut).toHaveBeenCalledTimes(2);
+    expect(mockPut.mock.calls[0][1].body).toEqual([]);
+    expect(mockPut.mock.calls[1][0]).toBe('/applications/app-1/guilds/123456789012345678/commands');
+    expect(mockPut.mock.calls[1][1].body.length).toBeGreaterThan(0);
   });
 
-  it('non-OpenNHP mode: purge failure in one guild does not block registration', async () => {
+  it('purge failure in one guild does not block registration', async () => {
     delete process.env.GUILD_ID;
-    delete process.env.ENABLE_OPENNHP_FEATURES;
     const commandsModule = require('../src/commands');
 
     const mockGet = jest.fn()
@@ -309,143 +235,108 @@ describe('registerCommands stale-command purge (issue #86)', () => {
       guilds: new Map([['ga', 'A'], ['gb', 'B']]),
     });
 
-    // Guild A's get failed but we still tried guild B.
     expect(mockGet).toHaveBeenCalledTimes(2);
-    // Only guild B got purged (A failed before reaching put).
     const purgeCalls = mockPut.mock.calls.filter(([, opts]) => Array.isArray(opts.body) && opts.body.length === 0);
     expect(purgeCalls.map(c => c[0])).toEqual(['/applications/app-1/guilds/gb/commands']);
-    // Final register still ran despite guild A's purge failure.
     const registerCalls = mockPut.mock.calls.filter(([, opts]) => Array.isArray(opts.body) && opts.body.length > 0);
     expect(registerCalls).toHaveLength(1);
   });
 });
 
 describe('handleCommand dispatch-time filter', () => {
-  // This is the defense-in-depth branch: stale guild-scoped command
-  // registrations survive a mode flip (Discord's guild and global
-  // command namespaces don't purge each other on .set()). The filter
-  // at commands.js:handleCommand prevents those stale handlers from
-  // dispatching to code paths that assume populated OpenNHP state,
-  // and replies with a clear "no longer available" message instead
-  // of letting Discord time out the interaction.
   let originalGuildId;
-  let originalFlag;
   beforeAll(() => {
     originalGuildId = process.env.GUILD_ID;
-    originalFlag = process.env.ENABLE_OPENNHP_FEATURES;
   });
   afterAll(() => {
     if (originalGuildId === undefined) delete process.env.GUILD_ID; else process.env.GUILD_ID = originalGuildId;
-    if (originalFlag === undefined) delete process.env.ENABLE_OPENNHP_FEATURES; else process.env.ENABLE_OPENNHP_FEATURES = originalFlag;
     jest.resetModules();
   });
   beforeEach(() => {
     jest.resetModules();
   });
 
-  it('non-OpenNHP mode: stale /link interaction gets an ephemeral "no longer available" reply', async () => {
-    // GUILD_ID set (single-guild mode) but flag unset → isOpenNHPActive=false.
-    // /link is an OpenNHP-only command, so a stale guild-scoped
-    // registration from a prior deploy must not dispatch.
-    process.env.GUILD_ID = '123456789012345678';
-    delete process.env.ENABLE_OPENNHP_FEATURES;
+  it.each([
+    ['link', undefined],
+    ['leaderboard', { 0: '123456789012345678' }],
+    ['forcelink', { 0: '123456789012345678', 1: 'user-1' }],
+  ])(
+    'stale /%s interaction gets an ephemeral "no longer available" reply',
+    async (commandName, authorizingIntegrationOwners) => {
+      process.env.GUILD_ID = '123456789012345678';
 
-    // Mock dependencies that commands.js transitively pulls in
-    jest.doMock('../src/store', () => ({
-      getLinkByDiscord: jest.fn(), getLinkByGithub: jest.fn(),
-      createPendingLink: jest.fn(), getContributions: jest.fn(() => []),
-      getBadges: jest.fn(() => []), getStats: jest.fn(() => ({})),
-      getStreak: jest.fn(() => null), getTopContributors: jest.fn(() => []),
-      recordQURLSend: jest.fn(), getRecentSends: jest.fn(() => []),
-      getSendResourceIds: jest.fn(() => []), getSendConfig: jest.fn(),
-      saveSendConfig: jest.fn(), deleteLink: jest.fn(), forceLink: jest.fn(),
-    }));
+      jest.doMock('../src/store', () => ({
+        getStats: jest.fn(() => ({})),
+        recordQURLSend: jest.fn(), getRecentSends: jest.fn(() => []),
+        getSendResourceIds: jest.fn(() => []), getSendConfig: jest.fn(),
+        saveSendConfig: jest.fn(),
+      }));
+      jest.doMock('../src/discord', () => ({
+        sendDM: jest.fn(),
+        client: { user: { id: 'bot' } },
+      }));
+      jest.doMock('../src/qurl', () => ({ mintLink: jest.fn() }));
+      jest.doMock('../src/connector', () => ({ uploadAttachment: jest.fn() }));
+      jest.doMock('../src/places', () => ({ autocomplete: jest.fn() }));
+
+      const { handleCommand } = require('../src/commands');
+
+      const reply = jest.fn().mockResolvedValue(undefined);
+      const interaction = {
+        isAutocomplete: () => false,
+        isChatInputCommand: () => true,
+        commandName,
+        guildId: '123456789012345678',
+        authorizingIntegrationOwners,
+        user: { id: 'u1' },
+        reply,
+      };
+
+      await handleCommand(interaction);
+
+      expect(reply).toHaveBeenCalledWith(expect.objectContaining({
+        content: expect.stringContaining('no longer available'),
+        ephemeral: true,
+      }));
+    },
+  );
+
+  it.each([
+    ['DM', { guildId: null, user: { id: 'user-1' } }],
+    ['user install inside a guild', {
+      guildId: 'guild-1',
+      authorizingIntegrationOwners: { 1: 'user-1' },
+      user: { id: 'user-1' },
+    }],
+  ])('rejects a stale %s /qurl interaction before subcommand dispatch', async (_label, context) => {
+    jest.doMock('../src/store', () => ({}));
     jest.doMock('../src/discord', () => ({
-      sendDM: jest.fn(), assignContributorRole: jest.fn(),
-      notifyBadgeEarned: jest.fn(),
+      sendDM: jest.fn(),
       client: { user: { id: 'bot' } },
     }));
-    jest.doMock('../src/qurl', () => ({ mintLink: jest.fn() }));
-    jest.doMock('../src/connector', () => ({ uploadAttachment: jest.fn() }));
-    jest.doMock('../src/places', () => ({ autocomplete: jest.fn() }));
 
     const { handleCommand } = require('../src/commands');
-
     const reply = jest.fn().mockResolvedValue(undefined);
     const interaction = {
       isAutocomplete: () => false,
       isChatInputCommand: () => true,
-      commandName: 'link',
-      user: { id: 'u1' },
+      commandName: 'qurl',
+      options: { getSubcommand: jest.fn(() => 'help') },
       reply,
+      ...context,
     };
 
     await handleCommand(interaction);
 
-    expect(reply).toHaveBeenCalledWith(expect.objectContaining({
-      content: expect.stringContaining('no longer available'),
+    expect(reply).toHaveBeenCalledWith({
+      content: 'qURL only works inside a server where it is installed, not in DMs or from a user install.',
       ephemeral: true,
-    }));
-  });
-
-  it('OpenNHP mode: /link dispatches normally (no "no longer available" reply)', async () => {
-    process.env.GUILD_ID = '123456789012345678';
-    process.env.ENABLE_OPENNHP_FEATURES = 'true';
-
-    jest.doMock('../src/store', () => ({
-      getLinkByDiscord: jest.fn().mockReturnValue({ github_username: 'existing' }),
-      createPendingLink: jest.fn(),
-      getLinkByGithub: jest.fn(), getContributions: jest.fn(() => []),
-      getBadges: jest.fn(() => []), getStats: jest.fn(() => ({})),
-      getStreak: jest.fn(() => null), getTopContributors: jest.fn(() => []),
-      recordQURLSend: jest.fn(), getRecentSends: jest.fn(() => []),
-      getSendResourceIds: jest.fn(() => []), getSendConfig: jest.fn(),
-      saveSendConfig: jest.fn(), deleteLink: jest.fn(), forceLink: jest.fn(),
-    }));
-    jest.doMock('../src/discord', () => ({
-      sendDM: jest.fn(), assignContributorRole: jest.fn(),
-      notifyBadgeEarned: jest.fn(),
-      client: { user: { id: 'bot' } },
-    }));
-    jest.doMock('../src/qurl', () => ({ mintLink: jest.fn() }));
-    jest.doMock('../src/connector', () => ({ uploadAttachment: jest.fn() }));
-    jest.doMock('../src/places', () => ({ autocomplete: jest.fn() }));
-
-    const { handleCommand } = require('../src/commands');
-
-    const reply = jest.fn().mockResolvedValue(undefined);
-    const interaction = {
-      isAutocomplete: () => false,
-      isChatInputCommand: () => true,
-      commandName: 'link',
-      user: { id: 'u1' },
-      reply,
-    };
-
-    await handleCommand(interaction);
-
-    // The real /link handler ran. With getLinkByDiscord mocked to
-    // return { github_username: 'existing' }, the already-linked
-    // branch should fire — its positive signal is that the reply
-    // embed references the existing GitHub username. This is a
-    // specific-content assertion rather than a negation, so a future
-    // /link UX tweak that accidentally mentions "no longer available"
-    // (e.g. in the disambiguation text for a relink flow) wouldn't
-    // produce a false positive.
-    const replyArgs = reply.mock.calls[0]?.[0];
-    expect(replyArgs).toBeDefined();
-    const serialized = typeof replyArgs === 'string' ? replyArgs : JSON.stringify(replyArgs);
-    // Either "existing" appears (already-linked confirmation) or
-    // "github" (the OAuth flow embed URL) — both are positive signals
-    // that the real /link handler ran, as opposed to the stale-command
-    // short-circuit. The stale-command branch replies with exactly
-    // "This command is no longer available in this server." which
-    // contains neither of those strings.
-    expect(serialized.toLowerCase()).toMatch(/existing|github/);
+    });
+    expect(interaction.options.getSubcommand).not.toHaveBeenCalled();
   });
 });
 
-describe('multi-tenant mode — server.js route mounting', () => {
+describe('server.js — the GitHub OAuth + webhook surfaces are gone (#1026)', () => {
   let originalGuildId;
   beforeAll(() => {
     originalGuildId = process.env.GUILD_ID;
@@ -459,45 +350,39 @@ describe('multi-tenant mode — server.js route mounting', () => {
     jest.resetModules();
   });
 
-  it('multi-tenant: /auth/github returns 404 (route not mounted)', async () => {
-    delete process.env.GUILD_ID;
-    jest.resetModules();
-    // Mock discord + database to avoid side effects in server import
-    jest.doMock('../src/discord', () => ({
-      assignContributorRole: jest.fn(),
-      notifyPRMerge: jest.fn(),
-      sendDM: jest.fn(),
-    }));
+  function mockServerDeps() {
+    jest.doMock('../src/discord', () => ({ sendDM: jest.fn() }));
     jest.doMock('../src/store', () => ({
-      getPendingLink: jest.fn(),
-      getStats: jest.fn(() => ({ linkedUsers: 0, totalContributions: 0, uniqueContributors: 0, byRepo: [] })),
+      getStats: jest.fn(() => ({ configuredGuilds: 0, totalSends: 0 })),
+      healthCheck: jest.fn(() => ({ ok: true })),
     }));
+  }
+
+  it.each([
+    ['multi-tenant', undefined],
+    ['single-guild', '123456789012345678'],
+  ])('%s: /auth/github returns 404 (route not mounted)', async (_label, guildId) => {
+    if (guildId === undefined) delete process.env.GUILD_ID;
+    else process.env.GUILD_ID = guildId;
+    jest.resetModules();
+    mockServerDeps();
     const request = require('supertest');
     const { app } = require('../src/server');
     const res = await request(app).get('/auth/github?state=whatever');
     expect(res.status).toBe(404);
   });
 
-  it('multi-tenant: /webhook/github returns 404 (route not mounted)', async () => {
-    delete process.env.GUILD_ID;
+  it.each([
+    ['multi-tenant', undefined],
+    ['single-guild', '123456789012345678'],
+  ])('%s: /webhook/github returns 404 (route not mounted)', async (_label, guildId) => {
+    if (guildId === undefined) delete process.env.GUILD_ID;
+    else process.env.GUILD_ID = guildId;
     jest.resetModules();
-    jest.doMock('../src/discord', () => ({
-      notifyPRMerge: jest.fn(),
-      postStarMilestone: jest.fn(),
-    }));
-    jest.doMock('../src/store', () => ({
-      getStats: jest.fn(() => ({ linkedUsers: 0, totalContributions: 0, uniqueContributors: 0, byRepo: [] })),
-    }));
+    mockServerDeps();
     const request = require('supertest');
     const { app } = require('../src/server');
     const res = await request(app).post('/webhook/github').send({});
     expect(res.status).toBe(404);
   });
 });
-
-// Note: discord.js's `refreshCache()` early-return is covered indirectly by
-// the server.js route-gating tests above — if routes are unmounted in
-// multi-tenant mode, nothing webhook- or OAuth-driven can reach
-// `refreshCache()` in the first place. Testing the early-return directly
-// requires mocking out the Discord client at module-import time, which
-// couples the test to discord.js internals; deferred to a follow-up.

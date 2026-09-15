@@ -30,13 +30,9 @@ const noChannelAliasesMessage = ":mag: No aliases are configured for this channe
 //     call (the same source `/qurl list` uses — the one the API
 //     actually returns slugs on), and POSTs the result to response_url.
 //
-// TODO: rate-limit. /qurl aliases costs one DDB GetItem plus one
-// ListResources page per invocation (constant, no longer amplified by
-// the channel's alias count). A user can still spam the verb; the
-// in-bot rate-limit gate (slackdata.CheckRateLimit) is a stub today
-// for /qurl get, and once it lands the same gate should cover /qurl
-// aliases. Tracked alongside the /qurl get rate-limit TODO in
-// SLACK_QURL_ROLLOUT.md.
+// The same in-bot rate-limit gate as `/qurl get` runs before the
+// channel-policy read and upstream ListResources page so repeated clicks can't
+// amplify DDB/API reads past the per-user command budget.
 func (h *Handler) handleAliases(w http.ResponseWriter, values url.Values) {
 	h.runAsync(w, "aliases", values, func(ctx context.Context, log *slog.Logger) {
 		h.processAliases(ctx, log, values)
@@ -48,6 +44,7 @@ func (h *Handler) processAliases(ctx context.Context, log *slog.Logger, values u
 	responseURL := values.Get(fieldResponseURL)
 	teamID := values.Get(fieldTeamID)
 	channelID := values.Get(fieldChannelID)
+	userID := values.Get(fieldUserID)
 
 	if h.cfg.AdminStore == nil {
 		log.Warn("aliases: AdminStore is nil; replying not-configured")
@@ -64,10 +61,23 @@ func (h *Handler) processAliases(ctx context.Context, log *slog.Logger, values u
 		return
 	}
 
+	// Keep the API-key lookup before the limiter so an unconfigured workspace
+	// still gets setup guidance; the limiter fronts the channel-policy read and
+	// resource-list fanout that make this verb expensive to spam.
 	c, err := h.authenticatedClient(ctx, teamID)
 	if err != nil {
 		log.Error("aliases: API key lookup failed", "error", err)
 		_ = h.postResponse(log, responseURL, ":warning: "+authErrorMessage(err))
+		return
+	}
+	ok, retry, err := h.cfg.AdminStore.CheckRateLimit(ctx, userID, teamID)
+	if err != nil {
+		log.Warn("aliases: rate-limit check failed", "error", err, "team_id", teamID, "user_id", userID)
+		_ = h.postResponse(log, responseURL, ":warning: "+rateLimitErrorMessage(err))
+		return
+	}
+	if !ok {
+		_ = h.postResponse(log, responseURL, ":warning: "+rateLimitMessage(retry, ""))
 		return
 	}
 
@@ -180,7 +190,7 @@ func groupsNeedResolution(groups []aliasGroup) bool {
 // (see the call site for why the list path, not the per-id path, is the
 // reliable slug source). Every resource on the page is indexed —
 // intentionally NOT filtered to type=tunnel like /qurl list — so a
-// legacy URL binding still resolves its target_url and renders the
+// legacy URL binding still resolves its target_url and renders the escaped
 // "<url> (legacy URL) → $alias" line.
 //
 // Best-effort: a fetch failure yields (nil, false) — a nil-map lookup
@@ -289,22 +299,22 @@ func formatAliasGroupLine(target, slug, description string, aliases []string) st
 	rhs := make([]string, 0, len(aliases))
 	for _, a := range aliases {
 		if a != slug {
-			rhs = append(rhs, "`$"+a+"`")
+			rhs = append(rhs, mrkdwnTokenSpan(a))
 		}
 	}
 	var left string
 	switch {
 	case slug != "":
-		left = "`$" + slug + "`"
+		left = mrkdwnTokenSpan(slug)
 		// Append the tunnel's Display Name to the id when present. The
 		// description field doubles as the Display Name (see
 		// handleSetDisplayName); it's normally set, but the alias-only
 		// fallback rows pass "" (no resource fetch happened), so guard it.
 		if description != "" {
-			left += " — " + description
+			left += " — " + escapeMrkdwnText(description)
 		}
 	case target != "":
-		left = target + " (legacy URL)"
+		left = escapeMrkdwnText(target) + " (legacy URL)"
 	default:
 		// No slug resolved — never fall back to the opaque resource_id.
 		// Show the channel aliases alone so the row still renders and

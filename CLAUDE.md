@@ -5,6 +5,9 @@
 - **Never push directly to `main`.** Branch protection enforces PRs.
 - **All commits must be GPG/SSH signed.** Unsigned commits are rejected.
 - **`golangci-lint` must pass clean.** Config is strict by design (see `.golangci.yml`); fix the code, not the rules.
+- **GitHub Actions refs must be pinned.** Follow the source-of-truth policy in
+  [CONTRIBUTING.md](CONTRIBUTING.md#pr-requirements): full commit SHA, exact
+  upstream version comment, no `docker://`, and human tag/SHA verification.
 
 ## Layout
 
@@ -12,11 +15,27 @@ Polyglot monorepo for qURL integrations. SDKs live in separate repos: [qurl-pyth
 
 - `apps/slack/`, `apps/cli/` — Go (`cmd/` + `internal/`)
 - `apps/discord/` — Node.js (CommonJS, `src/*.js`)
-- `apps/gmail-extension/` — Chrome MV3 extension (JavaScript)
-- `apps/teams/`, `apps/zapier/` — placeholder dirs, no implementation yet
+- `apps/chrome-extension/` — shared Chrome and Edge MV3 extension source
+- `apps/edge-extension/` — Edge version and store documents
+- `apps/teams/` — Node.js (TypeScript ESM, `src/*.ts`); OAuth security core only — no HTTP routes, Teams SDK, or deploy yet
+- `origins/s3-static-connector/` — reusable private S3 static origin image
+- `internal/ciworkflows/` — repo-wide tests for required-check workflow contracts
 - `shared/` — Go packages consumed by every Go app; changes here affect all of them
 - `e2e/` — TypeScript end-to-end tests (Jest)
-- Per-app release tracks via Release Please monorepo mode (`release-please-config.json`)
+- Per-app release tracks via Release Please monorepo mode (`release-please-config.json`); tags are `<component>-v*` except the CLI, which intentionally tags bare `v*` for OSS GoReleaser — see the `.github/workflows/release-please.yml` header before "normalizing" it. A track is earned by cutting a semver version stream that something downstream pins to (Lambda/container deploy, Chrome Web Store, GoReleaser + `install.sh`) — not by having code, nor even by publishing an artifact: `shared/` and `apps/teams/` publish nothing, and `origins/s3-static-connector/` publishes an image tagged only `:main`/`:<sha>`, so none of them have a track. Adding one means editing `release-please-config.json` **and** `.release-please-manifest.json` together — `scripts/check-release-please-sync.sh` fails the build if their keys drift. That script also pins that `apps/cli` declares **no** `component`: because the CLI is bare-tagged its component never reaches a tag, changelog heading or release name, but release-please still compares it against the manifest release PR's branch component and refuses to build the release whenever the CLI is alone in that PR — a green run that tags nothing, then every component's release PR blocked. `scripts/verify-cli-release.sh` fails the release run if it ever happens again; the `.github/workflows/release-please.yml` header has the full mechanism
+
+### Browser extension source
+
+`apps/chrome-extension/` is the source for both browser builds. The Edge build
+copies that source, applies the version in `apps/edge-extension/package.json`,
+and changes only the browser name in the release output. Both builds read
+`apps/chrome-extension/.env`. Keep store-specific documents in their app
+directory. Release Please links the two version tracks;
+the apps keep separate tags and changelogs, but a release of either app bumps
+both versions and requires both store submissions. Both required CI contexts
+come from `.github/workflows/chrome-extension.yml`.
+Shipped shared source must not contain capitalized browser-specific names;
+each package checks every shipped non-PNG file and reports each offender.
 
 ## Commit format
 
@@ -24,19 +43,29 @@ Polyglot monorepo for qURL integrations. SDKs live in separate repos: [qurl-pyth
 <type>(<scope>): <description>
 
 type:  feat | fix | docs | style | refactor | perf | test | build | ci | chore | revert
-scope: slack | teams | discord | cli | zapier | gmail-extension | shared | ci
+scope: slack | teams | discord | cli | chrome-extension | edge-extension | origins | shared | ci
 ```
 
+> Keep this type list aligned with CONTRIBUTING.md and `.github/workflows/pr-title.yml`'s `types:` block.
+>
+> - When adding a new type: touch CLAUDE.md, CONTRIBUTING.md, and
+>   `.github/workflows/pr-title.yml`.
+>
 > Keep this scope list aligned with the Component dropdown in `.github/ISSUE_TEMPLATE/bug_report.yml`. `.github/workflows/pr-title.yml`'s `scopes:` block is the CI-enforced superset:
 >
 > - It currently lists two extra scopes (`infra`, `deps`) that aren't in this list or the issue template — tracked in #463 for sync.
 > - `requireScope: false`, so a scope is optional in PR titles; but when one is present, `amannn/action-semantic-pull-request` validates it against the workflow's list.
-> - When adding a new scope: touch CLAUDE.md and `bug_report.yml`, plus `pr-title.yml` if it isn't already in its superset.
+> - When adding a new scope: touch CLAUDE.md, CONTRIBUTING.md, and
+>   `bug_report.yml`, plus `pr-title.yml` if it isn't already in its superset.
 > - The dropdown's `other` option is a reporter-UX escape hatch — do NOT add it here (not a valid commit scope).
 
 ## Brand spelling
 
 The product brand is **`qURL`** (case-sensitive: lowercase `q`, uppercase `URL`). Use `qURL` in user-visible prose, log/error messages, doc comments, README content, and anything a human reads.
+
+**Trademark:** mark the first singular mention in a human-readable document (README intro, package description, etc.) as `qURL™`, then use plain `qURL` for the rest. Don't put `™` on a heading or on the plural `qURLs`. This matches the SDKs, the MCP server, and the root README.
+
+**Never "firewall":** LayerV is not a firewall company — don't describe qURL's mechanism in firewall terms. Resolving a token's NHP knock **grants network access** to the caller's IP; use "grant network access" / "grants access", never "open(s) firewall". (Applies to prose, doc comments, and user-visible strings, not wire-protocol identifiers.)
 
 The following stay literal — don't "finish" the rebrand:
 - Go identifiers: types/structs/funcs (`QURL`, `QURLClient`, `Qurl`, `CreateQurlRequest`, `QURLLink`)
@@ -45,7 +74,9 @@ The following stay literal — don't "finish" the rebrand:
 - Wire-protocol HTTP headers (`QURL-Signature`, `X-QURL-*`) and User-Agent strings (`qurl-cli/...`, `qurl-go-client/...`, `qurl-discord-bot/1.0`)
 - Slash command names (`/qurl file`, `/qurl map`, `/qurl help`) and the CLI binary `qurl`
 - OAuth scope identifiers (`qurl:read`, `qurl:write`, `qurl:resolve`)
-- Domain literals (`qurl.link`, `qurl.site`, `q.layerv.xyz`)
+- Domain literals (`qurl.link`, `qurl.site`)
 - Man-page section titles (`QURL(1)` — system-reference convention)
 
 When upstream qurl-service rebrands its API error strings, the test fixtures in this repo that mirror them (`"QURL not found"`, `"QURL API error (...)"`, `"token limit per QURL reached"` etc.) need to update in lockstep — `git grep TODO(upstream-rebrand)` finds the doc-comment markers.
+
+For non-error external or cross-repo contracts mirrored locally (for example qurl-service TTLs or infra log filters), use `TODO(upstream-contract)` so `git grep TODO(upstream-contract)` finds those lockstep sites. This covers third-party platform behavior we depend on but do not control, not just our own services — a Slack event shape the code treats as guaranteed belongs here, because the failure mode is the same: the contract changes upstream and nothing local fails loudly.

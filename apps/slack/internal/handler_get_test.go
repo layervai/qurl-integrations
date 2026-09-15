@@ -1,16 +1,22 @@
 package internal
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	slackoauth "github.com/layervai/qurl-integrations/apps/slack/internal/oauth"
+	"github.com/layervai/qurl-integrations/apps/slack/internal/slackaudit"
+	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
 	"github.com/layervai/qurl-integrations/shared/client"
 )
 
@@ -19,6 +25,20 @@ const (
 	testKeyMeta                 = "meta"
 	testKeyRequestID            = "request_id"
 )
+
+func TestRateLimitErrorMessage(t *testing.T) {
+	notBound := &slackdata.Error{
+		StatusCode: http.StatusNotFound,
+		Code:       slackdata.ErrCodeWorkspaceNotBound,
+		Title:      "CheckRateLimit: workspace is not bound",
+	}
+	if got := rateLimitErrorMessage(notBound); got != workspaceUnboundReply {
+		t.Fatalf("workspace-not-bound copy = %q, want %q", got, workspaceUnboundReply)
+	}
+	if got := rateLimitErrorMessage(errors.New("ddb timeout")); got != serviceUnreachableMessage {
+		t.Fatalf("generic copy = %q, want %q", got, serviceUnreachableMessage)
+	}
+}
 
 // writeCreateFixture writes a POST /v1/qurls success envelope.
 func writeCreateFixture(t *testing.T, w http.ResponseWriter, link, resourceID string) {
@@ -33,6 +53,31 @@ func writeCreateFixture(t *testing.T, w http.ResponseWriter, link, resourceID st
 	if err := json.NewEncoder(w).Encode(body); err != nil {
 		t.Fatalf("encode: %v", err)
 	}
+}
+
+// enterPortalButton digs the Enter Portal URL button out of a renderGetSuccess
+// block slice (the actions block's first element), so tests can assert the minted
+// link rides in the button (not just the notification fallback). Fails the test if
+// the shape isn't the expected section + actions(button) render.
+func enterPortalButton(t *testing.T, blocks []any) map[string]any {
+	t.Helper()
+	for _, b := range blocks {
+		block, ok := b.(map[string]any)
+		if !ok || block["type"] != "actions" {
+			continue
+		}
+		elements, ok := block["elements"].([]any)
+		if !ok || len(elements) == 0 {
+			t.Fatalf("actions block missing elements: %+v", block)
+		}
+		button, ok := elements[0].(map[string]any)
+		if !ok {
+			t.Fatalf("actions element is not a button map: %+v", elements[0])
+		}
+		return button
+	}
+	t.Fatalf("no actions block found in %+v", blocks)
+	return nil
 }
 
 // writeAPIError writes an RFC-7807-shaped error envelope at the
@@ -54,7 +99,7 @@ func writeAPIError(t *testing.T, w http.ResponseWriter, status int, code, title 
 }
 
 // TestHandleGet_HappyPath fences the canonical /qurl get flow:
-// channel-scoped alias lookup → rate-limit OK → mint → channel
+// channel-scoped alias resolution → rate-limit OK → mint → channel
 // ephemeral reply carrying the qURL link.
 func TestHandleGet_HappyPath(t *testing.T) {
 	ts := newAdminTestServers(t)
@@ -77,11 +122,21 @@ func TestHandleGet_HappyPath(t *testing.T) {
 	}
 }
 
-// TestHandleGet_AliasNotFound fences the no-binding path: when the
+// TestHandleGet_AliasNotFound fences the no-binding path on a COLD
+// channel (no channel_policies row → empty allow-set): when the
 // channel's alias_bindings map has no entry for the requested alias
 // (no row, missing map, or missing key), getWork surfaces the
 // "not configured for this channel" copy that points the user at
 // their Slack admin, and never reaches the mint.
+//
+// Post-#534, an empty allow-set short-circuits the slug/alias fallback
+// BEFORE the upstream GET /v1/resources hop (see resolveTokenForGet's
+// cost note): both fallbacks would be gated out by the empty set anyway,
+// so the hop is pure waste and an unmetered probe surface. The registered
+// GET /v1/resources handler therefore asserts ZERO hits — the message is
+// produced from the DDB allow-set read alone. (The warm-channel slug
+// fallback, where the hop DOES run, is fenced by
+// TestHandleGet_DollarSlugNotAllowedNonAdmin.)
 func TestHandleGet_AliasNotFound(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
@@ -90,11 +145,9 @@ func TestHandleGet_AliasNotFound(t *testing.T) {
 		mintHits.Add(1)
 		w.WriteHeader(http.StatusOK)
 	})
-	// On an alias-binding miss, getWork falls back to a tunnel-slug
-	// lookup (GET /v1/resources?slug=…). `$missing` is neither a binding
-	// nor a live tunnel slug, so the resources listing returns empty and
-	// the user sees the "not configured for this channel" copy.
+	var listHits atomic.Int32
 	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		listHits.Add(1)
 		writeResourceListFixture(t, w, []map[string]any{}, "", false)
 	})
 	h := newAdminTestHandler(t, ts)
@@ -107,26 +160,149 @@ func TestHandleGet_AliasNotFound(t *testing.T) {
 	if !strings.Contains(async, "contact your Slack admin") {
 		t.Errorf("async reply missing admin-contact fallback: %q", async)
 	}
+	if listHits.Load() != 0 {
+		t.Errorf("upstream GET /v1/resources reached on a cold channel (hits = %d) — #534 cold-channel short-circuit regressed", listHits.Load())
+	}
 	if mintHits.Load() != 0 {
 		t.Errorf("mint reached despite alias-not-found (hits = %d)", mintHits.Load())
 	}
 }
 
-// TestHandleGet_MintTunnelDisabled fences the 403/tunnel_disabled
-// mint error → user-facing "Tunnel resources are not yet enabled"
+// TestHandleGet_ChannelRejectionsShareCopyModuloToken fences the soft
+// anti-enumeration posture from issue #540: a user must not be able to tell
+// "this token does not resolve" from "this slug exists but is not exposed in
+// this channel" by a changed verb in the rejection copy. The sibling
+// TestHandleGet_DollarSlugNotAllowedNonAdmin fences the blocked-slug path
+// alone; this test pins byte-for-byte parity against the cold missing-token
+// path.
+func TestHandleGet_ChannelRejectionsShareCopyModuloToken(t *testing.T) {
+	normalizeToken := func(reply, token string) string {
+		t.Helper()
+		quotedToken := "`$" + token + "`"
+		if !strings.Contains(reply, quotedToken) {
+			t.Fatalf("reply %q did not echo token %q", reply, quotedToken)
+		}
+		return strings.ReplaceAll(reply, quotedToken, "`$<token>`")
+	}
+
+	missingTS := newAdminTestServers(t)
+	missingTS.seedNonAdmin(t)
+	var missingListHits atomic.Int32
+	missingTS.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		missingListHits.Add(1)
+		writeResourceListFixture(t, w, []map[string]any{}, "", false)
+	})
+	missingH := newAdminTestHandler(t, missingTS)
+	_, _, missingReply := newAdminSlashInvoker(t, missingH).invokeAdminAsync("get $missing", testAdminTeamID, testAdminUserID)
+
+	blockedTS := newAdminTestServers(t)
+	blockedTS.seedNonAdmin(t)
+	blockedTS.seedPolicySet(t, testAdminTeamID, "C_test", "", []string{"r_other_alloc"})
+	var blockedListHits atomic.Int32
+	blockedTS.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		blockedListHits.Add(1)
+		writeTunnelSlugResourceFixture(t, w)
+	})
+	var mintHits atomic.Int32
+	blockedTS.addCustomer("POST", mintByTestResourcePath, func(w http.ResponseWriter, _ *http.Request) {
+		mintHits.Add(1)
+		writeCreateFixture(t, w, "https://qurl.link/should-not", testResourceIDFix)
+	})
+	blockedH := newAdminTestHandler(t, blockedTS)
+	_, _, blockedReply := newAdminSlashInvoker(t, blockedH).invokeAdminAsync("get $"+testTunnelSlug, testAdminTeamID, testAdminUserID)
+
+	if missingListHits.Load() != 0 {
+		t.Fatalf("missing-token branch reached upstream GET /v1/resources despite cold-channel short-circuit (hits = %d)", missingListHits.Load())
+	}
+	if blockedListHits.Load() == 0 {
+		t.Fatal("blocked-slug branch did not reach upstream slug lookup; warm-channel seed broke")
+	}
+	if mintHits.Load() != 0 {
+		t.Fatalf("mint reached despite blocked slug (hits = %d)", mintHits.Load())
+	}
+	missingNormalized := normalizeToken(missingReply, "missing")
+	blockedNormalized := normalizeToken(blockedReply, testTunnelSlug)
+	if blockedNormalized != missingNormalized {
+		t.Fatalf("channel rejection copy drifted:\nmissing: %q\nblocked: %q", missingNormalized, blockedNormalized)
+	}
+}
+
+// TestHandleGet_UnknownSlugColdChannelNoUpstreamHop is the direct
+// regression fence for #534: the unmetered cold-channel probe surface.
+//
+// On a cold channel (workspace seeded but NO channel_policies row, so an
+// empty allow-set), repeated unknown-slug gets — `get $typo1`, `$typo2`,
+// `$typo3` — from one user must each be answered from the DDB allow-set
+// read ALONE, firing ZERO upstream GET /v1/resources hops. Before the fix
+// each miss spent one upstream slug lookup against the workspace API key
+// AHEAD of the per-user rate-limit gate, so a fat-fingering (or hostile)
+// user could fan out unmetered probes. We assert the counter stays at 0
+// across all three, the not-configured copy is returned each time, and the
+// mint route is never hit.
+//
+// Complements TestHandleGet_AliasNotFound (single cold-channel miss) by
+// pinning the *fan-out* case the issue describes, and stands opposite
+// TestHandleGet_DollarSlugNotAllowedNonAdmin, which proves the hop DOES
+// still run for a WARM channel (non-empty allow-set) — i.e. the
+// short-circuit is scoped strictly to the empty set.
+func TestHandleGet_UnknownSlugColdChannelNoUpstreamHop(t *testing.T) {
+	ts := newAdminTestServers(t)
+	// Cold channel: seed the workspace (so AdminStore is usable and the
+	// caller resolves) but NO channel policy/exposure → empty allow-set.
+	// seedNonAdmin (vs TestHandleGet_AliasNotFound's seedAdmin) is the
+	// deliberate pick: the allow-set gate is channel-scoped with no admin
+	// bypass (allowedResourceIDsForGet doc), so the more security-relevant
+	// caller to pin against the cold-channel probe surface is a non-admin.
+	// The two tests together show both an admin and a non-admin caller hit
+	// the same short-circuit.
+	ts.seedNonAdmin(t)
+	var listHits atomic.Int32
+	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		listHits.Add(1)
+		writeResourceListFixture(t, w, []map[string]any{}, "", false)
+	})
+	var mintHits atomic.Int32
+	ts.addCustomerPrefix("POST", "/v1/resources/", func(w http.ResponseWriter, _ *http.Request) {
+		mintHits.Add(1)
+		writeCreateFixture(t, w, "https://qurl.link/should-not", testResourceIDFix)
+	})
+	h := newAdminTestHandler(t, ts)
+
+	// A fresh invoker per call: each spins its own response_url capture
+	// (waitForBody returns the FIRST recorded body, so a reused invoker
+	// would read back call #1's reply for every call). The shared handler
+	// and httptest servers keep listHits/mintHits accumulating across all
+	// three — which is exactly what the fan-out assertion below checks.
+	for _, typo := range []string{"typo1", "typo2", "typo3"} {
+		inv := newAdminSlashInvoker(t, h)
+		_, _, async := inv.invokeAdminAsync("get $"+typo, testAdminTeamID, testAdminUserID)
+		if !strings.Contains(async, "`$"+typo+"` is not configured for this channel") {
+			t.Errorf("get $%s: async reply missing not-configured copy: %q", typo, async)
+		}
+	}
+	if listHits.Load() != 0 {
+		t.Errorf("cold-channel unknown-slug gets hit the upstream GET /v1/resources %d time(s) — #534 unmetered probe surface regressed", listHits.Load())
+	}
+	if mintHits.Load() != 0 {
+		t.Errorf("mint reached on cold-channel unknown-slug gets (hits = %d)", mintHits.Load())
+	}
+}
+
+// TestHandleGet_MintConnectorDisabled fences the 403/connector_disabled
+// mint error → user-facing "Protected resources are not yet enabled"
 // reply.
-func TestHandleGet_MintTunnelDisabled(t *testing.T) {
+func TestHandleGet_MintConnectorDisabled(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedPolicySet(t, testAdminTeamID, "C_test", "prod-db", []string{testResourceIDFix})
 	ts.addCustomer("POST", mintByTestResourcePath, func(w http.ResponseWriter, _ *http.Request) {
-		writeAPIError(t, w, http.StatusForbidden, "tunnel_disabled", "Forbidden")
+		writeAPIError(t, w, http.StatusForbidden, "connector_disabled", "Forbidden")
 	})
 	h := newAdminTestHandler(t, ts)
 	inv := newAdminSlashInvoker(t, h)
 
 	_, _, async := inv.invokeAdminAsync("get $prod-db", testAdminTeamID, testAdminUserID)
-	if !strings.Contains(async, "Tunnel resources are not yet enabled") {
-		t.Errorf("async reply missing tunnel-disabled message: %q", async)
+	if !strings.Contains(async, "Protected resources are not yet enabled") {
+		t.Errorf("async reply missing Connector-disabled message: %q", async)
 	}
 }
 
@@ -166,6 +342,32 @@ func TestHandleGet_MintRateLimit(t *testing.T) {
 	}
 	if strings.Contains(async, "internal API") {
 		t.Errorf("async reply leaked upstream rate-limit title: %q", async)
+	}
+}
+
+func TestHandleGet_InBotRateLimitDeniesAfterLimit(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	ts.seedPolicySet(t, testAdminTeamID, "C_test", "prod-db", []string{testResourceIDFix})
+	var mintHits atomic.Int32
+	ts.addCustomer("POST", mintByTestResourcePath, func(w http.ResponseWriter, _ *http.Request) {
+		mintHits.Add(1)
+		writeCreateFixture(t, w, "https://qurl.link/allowed", testResourceIDFix)
+	})
+	h := newAdminTestHandler(t, ts)
+	enableAdminStoreRateLimit(t, h, 1)
+
+	_, _, first := newAdminSlashInvoker(t, h).invokeAdminAsync("get $prod-db", testAdminTeamID, testAdminUserID)
+	if !strings.Contains(first, "https://qurl.link/allowed") {
+		t.Fatalf("first get did not mint: %q", first)
+	}
+
+	_, _, second := newAdminSlashInvoker(t, h).invokeAdminAsync("get $prod-db", testAdminTeamID, testAdminUserID)
+	if !strings.Contains(second, "Rate limit hit") || !strings.Contains(second, "60m") {
+		t.Fatalf("second get = %q, want in-bot rate-limit copy with retry hint", second)
+	}
+	if got := mintHits.Load(); got != 1 {
+		t.Fatalf("mint hits = %d, want only the under-limit call to reach qURL", got)
 	}
 }
 
@@ -234,8 +436,8 @@ func TestHandleGet_LoneSigil(t *testing.T) {
 // AdminStore is nil (sandbox / no-DDB deployment) and the user
 // requested the alias form: the channel-scoped lookup can't run, so
 // the user sees the "qURL admin features are not yet configured"
-// message that routes them to a workspace admin. The customer API is
-// never reached for the mint.
+// message that routes them to the workspace owner / qURL support. The
+// customer API is never reached for the mint.
 func TestHandleGet_AdminStoreNil(t *testing.T) {
 	ts := newAdminTestServers(t)
 	var mintHits atomic.Int32
@@ -252,8 +454,8 @@ func TestHandleGet_AdminStoreNil(t *testing.T) {
 	if !strings.Contains(async, "qURL admin features are not yet configured") {
 		t.Errorf("async reply missing not-configured message: %q", async)
 	}
-	if !strings.Contains(async, "contact your Slack admin") {
-		t.Errorf("async reply missing admin-contact fallback: %q", async)
+	if !strings.Contains(async, "https://layerv.ai/contact") {
+		t.Errorf("async reply missing actionable support contact: %q", async)
 	}
 	if mintHits.Load() != 0 {
 		t.Errorf("mint reached despite nil AdminStore (hits = %d)", mintHits.Load())
@@ -287,6 +489,292 @@ func TestHandleGet_URLRejected(t *testing.T) {
 	}
 }
 
+// TestHandleGet_URLResourceAliasMints fences the restored URL-resource path:
+// `/qurl list` can render a URL resource's Alias as `$docs`, and pasting that
+// token into `/qurl get $docs` resolves the existing resource only if it is
+// exposed in this channel. The mint uses the resource-scoped endpoint with the
+// same short-lived `/qurl get` policy as tunnel resources.
+func TestHandleGet_URLResourceAliasMints(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedChannelExposure(t, testAdminTeamID, "C_test", testListResIDURLDocs)
+	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		writeResourceListFixture(t, w, []map[string]any{{
+			testKeyResourceID:  testListResIDURLDocs,
+			testKeyType:        client.ResourceTypeURL,
+			fAttrAlias:         testListAliasDocs,
+			testKeyTargetURL:   testListURLDocs,
+			testKeyStatus:      client.StatusActive,
+			testKeyDescription: "Docs portal",
+		}}, "", false)
+	})
+	var capturedBody []byte
+	ts.addCustomer("POST", "/v1/resources/"+testListResIDURLDocs+"/qurls", func(w http.ResponseWriter, r *http.Request) {
+		var err error
+		capturedBody, err = io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read mint body: %v", err)
+		}
+		writeCreateFixture(t, w, "https://qurl.link/url-docs", testListResIDURLDocs)
+	})
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	_, _, async := inv.invokeAdminAsync("get $"+testListAliasDocs, testAdminTeamID, testAdminUserID)
+	if !strings.Contains(async, "https://qurl.link/url-docs") {
+		t.Errorf("async reply missing URL resource qURL: %q", async)
+	}
+	if !strings.Contains(async, "(one-time use · link expires in "+resourceLinkExpiryHuman+")") {
+		t.Errorf("async reply missing one-time-use/expiry note: %q", async)
+	}
+
+	var parsed map[string]any
+	if err := json.Unmarshal(capturedBody, &parsed); err != nil {
+		t.Fatalf("unmarshal captured body: %v body=%s", err, capturedBody)
+	}
+	if got, _ := parsed["one_time_use"].(bool); !got {
+		t.Errorf("one_time_use = %v, want true", parsed["one_time_use"])
+	}
+	for _, absent := range []string{"target_url", "resource_id"} {
+		if _, ok := parsed[absent]; ok {
+			t.Errorf("%s should be absent from URL resource mint body: %v", absent, parsed)
+		}
+	}
+	if got, _ := parsed["expires_in"].(string); got != resourceLinkExpiry {
+		t.Errorf("expires_in = %q, want %q", parsed["expires_in"], resourceLinkExpiry)
+	}
+	if got, _ := parsed["session_duration"].(string); got != resourceSessionDuration {
+		t.Errorf("session_duration = %q, want %q", parsed["session_duration"], resourceSessionDuration)
+	}
+	if got, _ := parsed["max_sessions"].(float64); int(got) != resourceMaxSessions {
+		t.Errorf("max_sessions = %v, want %d", parsed["max_sessions"], resourceMaxSessions)
+	}
+}
+
+// TestHandleGet_URLChannelAliasMints keeps the channel-alias path cheap and
+// broad: if an admin binds `$docs` directly to a URL resource ID, `/qurl get
+// $docs` mints that resource without requiring a pre-mint resource-list lookup.
+func TestHandleGet_URLChannelAliasMints(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedPolicyAliasBindings(t, testAdminTeamID, "C_test", map[string]string{testListAliasDocs: testListResIDURLDocs})
+	var capturedBody []byte
+	ts.addCustomer("POST", "/v1/resources/"+testListResIDURLDocs+"/qurls", func(w http.ResponseWriter, r *http.Request) {
+		var err error
+		capturedBody, err = io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read mint body: %v", err)
+		}
+		writeCreateFixture(t, w, "https://qurl.link/channel-docs", testListResIDURLDocs)
+	})
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	_, _, async := inv.invokeAdminAsync("get $"+testListAliasDocs, testAdminTeamID, testAdminUserID)
+	if !strings.Contains(async, "https://qurl.link/channel-docs") {
+		t.Errorf("async reply missing URL channel-alias qURL: %q", async)
+	}
+
+	var parsed map[string]any
+	if err := json.Unmarshal(capturedBody, &parsed); err != nil {
+		t.Fatalf("unmarshal captured body: %v body=%s", err, capturedBody)
+	}
+	if got, _ := parsed["expires_in"].(string); got != resourceLinkExpiry {
+		t.Errorf("expires_in = %q, want %q", parsed["expires_in"], resourceLinkExpiry)
+	}
+}
+
+// TestHandleGet_URLAliasWinsWhenTunnelSlugCollisionIsNotAllowed covers a
+// mixed-resource collision: a URL resource alias visible in this channel has
+// the same token as a tunnel slug elsewhere. The unallowed tunnel must not
+// block the URL alias round-trip advertised by `/qurl list`.
+func TestHandleGet_URLAliasWinsWhenTunnelSlugCollisionIsNotAllowed(t *testing.T) {
+	const (
+		token         = "shared"
+		urlResourceID = "r_url_shared1"
+		tunnelID      = "r_tunnel_shadow"
+	)
+	ts := newAdminTestServers(t)
+	ts.seedChannelExposure(t, testAdminTeamID, "C_test", urlResourceID)
+	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		writeResourceListFixture(t, w, []map[string]any{
+			{testKeyResourceID: tunnelID, testKeyType: client.ResourceTypeTunnel, testKeySlug: token, testKeyStatus: client.StatusActive},
+			{testKeyResourceID: urlResourceID, testKeyType: client.ResourceTypeURL, fAttrAlias: token, testKeyTargetURL: "https://shared.example.com", testKeyStatus: client.StatusActive},
+		}, "", false)
+	})
+	var tunnelMintHits atomic.Int32
+	ts.addCustomer("POST", "/v1/resources/"+tunnelID+"/qurls", func(w http.ResponseWriter, _ *http.Request) {
+		tunnelMintHits.Add(1)
+		writeCreateFixture(t, w, "https://qurl.link/shadow", tunnelID)
+	})
+	ts.addCustomer("POST", "/v1/resources/"+urlResourceID+"/qurls", func(w http.ResponseWriter, _ *http.Request) {
+		writeCreateFixture(t, w, "https://qurl.link/url-shared", urlResourceID)
+	})
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	_, _, async := inv.invokeAdminAsync("get $"+token, testAdminTeamID, testAdminUserID)
+	if !strings.Contains(async, "https://qurl.link/url-shared") {
+		t.Errorf("async reply missing URL alias qURL despite slug collision: %q", async)
+	}
+	if tunnelMintHits.Load() != 0 {
+		t.Errorf("unallowed colliding tunnel slug was minted (hits = %d)", tunnelMintHits.Load())
+	}
+}
+
+// TestHandleGet_ResourceAliasSkipsUnallowedDuplicate covers the alias
+// shadowing edge: if two listed resources share an alias and the first one in
+// page order is not exposed in this channel, `/qurl get $alias` must continue
+// scanning for a later exposed match rather than reporting "not configured."
+func TestHandleGet_ResourceAliasSkipsUnallowedDuplicate(t *testing.T) {
+	const (
+		shadowID  = "r_url_docs_shadow"
+		allowedID = "r_url_docs_ok"
+	)
+	ts := newAdminTestServers(t)
+	ts.seedChannelExposure(t, testAdminTeamID, "C_test", allowedID)
+	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		writeResourceListFixture(t, w, []map[string]any{
+			{testKeyResourceID: shadowID, testKeyType: client.ResourceTypeURL, fAttrAlias: testListAliasDocs, testKeyTargetURL: "https://shadow.example.com", testKeyStatus: client.StatusActive},
+			{testKeyResourceID: allowedID, testKeyType: client.ResourceTypeURL, fAttrAlias: testListAliasDocs, testKeyTargetURL: testListURLDocs, testKeyStatus: client.StatusActive},
+		}, "", false)
+	})
+	var shadowMintHits atomic.Int32
+	ts.addCustomer("POST", "/v1/resources/"+shadowID+"/qurls", func(w http.ResponseWriter, _ *http.Request) {
+		shadowMintHits.Add(1)
+		writeCreateFixture(t, w, "https://qurl.link/shadow-docs", shadowID)
+	})
+	ts.addCustomer("POST", "/v1/resources/"+allowedID+"/qurls", func(w http.ResponseWriter, _ *http.Request) {
+		writeCreateFixture(t, w, "https://qurl.link/allowed-docs", allowedID)
+	})
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	_, _, async := inv.invokeAdminAsync("get $"+testListAliasDocs, testAdminTeamID, testAdminUserID)
+	if !strings.Contains(async, "https://qurl.link/allowed-docs") {
+		t.Errorf("async reply missing later allowed duplicate-alias qURL: %q", async)
+	}
+	if shadowMintHits.Load() != 0 {
+		t.Errorf("unallowed duplicate alias resource was minted (hits = %d)", shadowMintHits.Load())
+	}
+}
+
+// TestHandleGet_ResourceAliasDuplicateAllowedRefusesAmbiguousMint keeps
+// duplicate aliases fail-closed when more than one matching resource is exposed
+// to the same channel. A slash token cannot disambiguate those rows, and the
+// list path must not make an arbitrary page-order choice on click.
+func TestHandleGet_ResourceAliasDuplicateAllowedRefusesAmbiguousMint(t *testing.T) {
+	const (
+		firstID  = "r_url_docs_first"
+		secondID = "r_url_docs_second"
+	)
+	ts := newAdminTestServers(t)
+	ts.seedChannelExposure(t, testAdminTeamID, "C_test", firstID, secondID)
+	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		writeResourceListFixture(t, w, []map[string]any{
+			{testKeyResourceID: firstID, testKeyType: client.ResourceTypeURL, fAttrAlias: testListAliasDocs, testKeyTargetURL: testListURLFirst, testKeyStatus: client.StatusActive},
+			{testKeyResourceID: secondID, testKeyType: client.ResourceTypeURL, fAttrAlias: testListAliasDocs, testKeyTargetURL: testListURLSecond, testKeyStatus: client.StatusActive},
+		}, "", false)
+	})
+	var mintHits atomic.Int32
+	ts.addCustomerPrefix("POST", "/v1/resources/", func(w http.ResponseWriter, _ *http.Request) {
+		mintHits.Add(1)
+		writeCreateFixture(t, w, "https://qurl.link/unexpected", firstID)
+	})
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	_, _, async := inv.invokeAdminAsync("get $"+testListAliasDocs, testAdminTeamID, testAdminUserID)
+	if !strings.Contains(async, ambiguousResourceAliasMessage(testListAliasDocs)) {
+		t.Errorf("async reply should explain ambiguous duplicate alias: %q", async)
+	}
+	if mintHits.Load() != 0 {
+		t.Errorf("ambiguous duplicate alias attempted mint (hits = %d)", mintHits.Load())
+	}
+}
+
+// TestHandleGet_ResourceAliasNotAllowedLooksNotConfigured fences the
+// non-enumerating failure shape for resource-alias fallback: finding a listed
+// alias that is not protected in this channel collapses to the same user copy as
+// a missing token and never attempts a mint.
+func TestHandleGet_ResourceAliasNotAllowedLooksNotConfigured(t *testing.T) {
+	ts := newAdminTestServers(t)
+	// Expose an UNRELATED resource so the channel is "warm" (non-empty
+	// allow-set). Without this, the cold-channel short-circuit (#534) returns
+	// the not-configured copy before the listed alias is ever resolved, so
+	// this test would pass without exercising the resolve-then-reject branch
+	// it documents. With the set non-empty, the resource-alias fallback runs,
+	// resolves the listed alias, and rejects it because its resource_id is
+	// not in the allow-set.
+	ts.seedChannelExposure(t, testAdminTeamID, "C_test", "r_other_alloc")
+	var listHits atomic.Int32
+	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		listHits.Add(1)
+		writeResourceListFixture(t, w, []map[string]any{{
+			testKeyResourceID: testListResIDURLDocs,
+			testKeyType:       client.ResourceTypeURL,
+			fAttrAlias:        testListAliasDocs,
+			testKeyTargetURL:  testListURLDocs,
+			testKeyStatus:     client.StatusActive,
+		}}, "", false)
+	})
+	var mintHits atomic.Int32
+	ts.addCustomerPrefix("POST", "/v1/resources/", func(w http.ResponseWriter, _ *http.Request) {
+		mintHits.Add(1)
+		writeCreateFixture(t, w, "https://qurl.link/unexpected", testListResIDURLDocs)
+	})
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	_, _, async := inv.invokeAdminAsync("get $"+testListAliasDocs, testAdminTeamID, testAdminUserID)
+	if !strings.Contains(async, noResourceForAliasMessage(testListAliasDocs)) {
+		t.Errorf("async reply should use not-configured copy for unallowed resource alias: %q", async)
+	}
+	// The message above is BYTE-IDENTICAL to the cold-channel short-circuit's
+	// (#534), so it alone can't tell whether the resolve-then-reject branch ran
+	// or the warm seed silently broke and we fell through the short-circuit.
+	// Pin that the alias fallback actually reached upstream: a non-empty
+	// allow-set must let GET /v1/resources fire at least once.
+	if listHits.Load() == 0 {
+		t.Errorf("resource-alias fallback never hit upstream GET /v1/resources — warm-channel seed broke and the test silently regressed to the cold-channel short-circuit")
+	}
+	if mintHits.Load() != 0 {
+		t.Errorf("unallowed resource alias attempted mint (hits = %d)", mintHits.Load())
+	}
+}
+
+// TestHandleGet_ResourceAliasFallbackIgnoresTunnelAlias keeps the restored
+// resource-alias fallback scoped to URL resources. A tunnel's hidden Alias
+// field is not the token `/qurl list` advertises when the tunnel has a slug, so
+// `/qurl get $alias` should not mint it through the URL fallback.
+func TestHandleGet_ResourceAliasFallbackIgnoresTunnelAlias(t *testing.T) {
+	const tunnelID = "r_tunnel_hidden_alias"
+	ts := newAdminTestServers(t)
+	ts.seedChannelExposure(t, testAdminTeamID, "C_test", tunnelID)
+	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		writeResourceListFixture(t, w, []map[string]any{{
+			testKeyResourceID: tunnelID,
+			testKeyType:       client.ResourceTypeTunnel,
+			testKeySlug:       testListSlugOpsTunnel,
+			fAttrAlias:        testListAliasDocs,
+			testKeyStatus:     client.StatusActive,
+		}}, "", false)
+	})
+	var mintHits atomic.Int32
+	ts.addCustomerPrefix("POST", "/v1/resources/", func(w http.ResponseWriter, _ *http.Request) {
+		mintHits.Add(1)
+		writeCreateFixture(t, w, "https://qurl.link/unexpected", tunnelID)
+	})
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	_, _, async := inv.invokeAdminAsync("get $"+testListAliasDocs, testAdminTeamID, testAdminUserID)
+	if !strings.Contains(async, noResourceForAliasMessage(testListAliasDocs)) {
+		t.Errorf("async reply should use not-configured copy for hidden tunnel alias: %q", async)
+	}
+	if mintHits.Load() != 0 {
+		t.Errorf("hidden tunnel alias attempted mint (hits = %d)", mintHits.Load())
+	}
+}
+
 // TestHandleGet_ResourceIDRejected fences the friendly `$r_<id>` redirect:
 // a user pasting a resource-id token (which pre-tunnels-only `/qurl list`
 // surfaced) gets the resource-id-specific copy pointing them at the `$slug`,
@@ -306,7 +794,7 @@ func TestHandleGet_ResourceIDRejected(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("status = %d, want 200", status)
 	}
-	if !strings.Contains(ack, "not a resource ID") {
+	if !strings.Contains(ack, "not an internal `r_...` identifier") {
 		t.Errorf("ack missing resource-id-rejection copy: %q", ack)
 	}
 	if mintHits.Load() != 0 {
@@ -340,7 +828,7 @@ func TestHandleGet_LegacyURLBindingRefused(t *testing.T) {
 	if !strings.Contains(async, "no longer supported") {
 		t.Errorf("async reply missing legacy-binding copy: %q", async)
 	}
-	if !strings.Contains(async, "re-point it at a tunnel") {
+	if !strings.Contains(async, "re-point it at a resource") {
 		t.Errorf("async reply missing re-bind instruction: %q", async)
 	}
 	if mintHits.Load() != 0 {
@@ -365,9 +853,9 @@ func TestGetWork_EmptyAliasRefusesToMint(t *testing.T) {
 		channelID: "C1",
 		userID:    "U1",
 	}
-	reply, err := h.getWork(context.Background(), slogTestLogger(t), args)
-	if reply != "" {
-		t.Errorf("reply = %q, want empty on the refuse-to-mint path", reply)
+	reply, err := h.getWork(context.Background(), slogTestLogger(t), &args)
+	if reply.text != "" || reply.blocks != nil {
+		t.Errorf("reply = %+v, want empty getResult on the refuse-to-mint path", reply)
 	}
 	var ue *userError
 	if !errors.As(err, &ue) {
@@ -378,13 +866,14 @@ func TestGetWork_EmptyAliasRefusesToMint(t *testing.T) {
 	}
 }
 
-// TestHandleGet_DMVariantRefusedWhenPostDMNil fences the privacy-
+// TestHandleGet_DMVariantRefusedWhenPostDMBlocksNil fences the privacy-
 // preserving refusal: dm:true asks for the link in a DM (so it does
-// NOT leak into channel history). When PostDM is not wired we
-// refuse the mint with a user-facing "DM is not configured" copy —
-// silently posting the link in-channel would violate the user's
+// NOT leak into channel history). When PostDMBlocks — the Block Kit DM
+// seam deliverGetDM uses to deliver the Enter Portal button — is not
+// wired we refuse the mint with a user-facing "DM is not configured"
+// copy; silently posting the link in-channel would violate the user's
 // explicit intent. The mint is NOT burned (no POST /v1/qurls).
-func TestHandleGet_DMVariantRefusedWhenPostDMNil(t *testing.T) {
+func TestHandleGet_DMVariantRefusedWhenPostDMBlocksNil(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedPolicySet(t, testAdminTeamID, "C_test", "prod-db", []string{testResourceIDFix})
 	var mintCalls atomic.Int32
@@ -393,7 +882,7 @@ func TestHandleGet_DMVariantRefusedWhenPostDMNil(t *testing.T) {
 		writeCreateFixture(t, w, "https://qurl.link/should-not-be-minted", testResourceIDFix)
 	})
 	h := newAdminTestHandler(t, ts)
-	// PostDM is nil by default.
+	// PostDMBlocks is nil by default.
 	inv := newAdminSlashInvoker(t, h)
 
 	_, _, async := inv.invokeAdminAsync("get $prod-db dm:true", testAdminTeamID, testAdminUserID)
@@ -408,10 +897,11 @@ func TestHandleGet_DMVariantRefusedWhenPostDMNil(t *testing.T) {
 	}
 }
 
-// TestHandleGet_DMVariantPostDMSuccess fences the dm:true happy path:
-// the link goes to PostDM, and the channel ephemeral confirms with
-// the :incoming_envelope: copy. No link in the channel surface.
-func TestHandleGet_DMVariantPostDMSuccess(t *testing.T) {
+// TestHandleGet_DMVariantPostDMBlocksSuccess fences the dm:true happy path:
+// the link goes to PostDMBlocks (the Enter Portal button, with the link in the
+// fallback), and the channel ephemeral confirms with the :incoming_envelope:
+// copy. No link in the channel surface.
+func TestHandleGet_DMVariantPostDMBlocksSuccess(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedPolicySet(t, testAdminTeamID, "C_test", "prod-db", []string{testResourceIDFix})
 	ts.addCustomer("POST", mintByTestResourcePath, func(w http.ResponseWriter, _ *http.Request) {
@@ -420,20 +910,26 @@ func TestHandleGet_DMVariantPostDMSuccess(t *testing.T) {
 
 	var dmCalls atomic.Int32
 	var dmText string
+	var dmBlocks []any
 	h := newAdminTestHandler(t, ts)
-	h.cfg.PostDM = func(_ context.Context, _, text string) error {
+	h.cfg.PostDMBlocks = func(_ context.Context, _, _, _ string, blocks []any, fallbackText string) error {
 		dmCalls.Add(1)
-		dmText = text
+		dmText = fallbackText
+		dmBlocks = blocks
 		return nil
 	}
 	inv := newAdminSlashInvoker(t, h)
 
 	_, _, async := inv.invokeAdminAsync("get $prod-db dm:true", testAdminTeamID, testAdminUserID)
 	if dmCalls.Load() != 1 {
-		t.Errorf("PostDM calls = %d, want 1", dmCalls.Load())
+		t.Errorf("PostDMBlocks calls = %d, want 1", dmCalls.Load())
 	}
 	if !strings.Contains(dmText, "https://qurl.link/dm-secret") {
-		t.Errorf("DM text missing link: %q", dmText)
+		t.Errorf("DM fallback text missing link: %q", dmText)
+	}
+	// The link rides in the Enter Portal button's url, not just the fallback.
+	if url, _ := enterPortalButton(t, dmBlocks)["url"].(string); url != "https://qurl.link/dm-secret" {
+		t.Errorf("Enter Portal button url = %q, want the minted link", url)
 	}
 	if !strings.Contains(async, ":incoming_envelope:") {
 		t.Errorf("async reply missing DM-sent confirmation: %q", async)
@@ -443,16 +939,168 @@ func TestHandleGet_DMVariantPostDMSuccess(t *testing.T) {
 	}
 }
 
-// TestTunnelLinkExpiryConstsInSync is a tripwire: tunnelLinkExpiry (the wire
-// value sent as expires_in) and tunnelLinkExpiryHuman (the Slack reply copy)
+func TestHandleGet_DMVariantMissingScopeMentionsSlackReinstall(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedPolicySet(t, testAdminTeamID, "C_test", "prod-db", []string{testResourceIDFix})
+	ts.addCustomer("POST", mintByTestResourcePath, func(w http.ResponseWriter, _ *http.Request) {
+		writeCreateFixture(t, w, "https://qurl.link/dm-scope", testResourceIDFix)
+	})
+
+	h := newAdminTestHandler(t, ts)
+	h.SetSlackInstallURL("https://slack-bot.example/oauth/slack/install")
+	h.cfg.PostDMBlocks = func(context.Context, string, string, string, []any, string) error {
+		return fmt.Errorf("chat.postMessage: %w", ErrSlackMissingScope)
+	}
+	inv := newAdminSlashInvoker(t, h)
+
+	_, _, async := inv.invokeAdminAsync("get $prod-db dm:true", testAdminTeamID, testAdminUserID)
+	for _, want := range []string{
+		"Could not DM you the link",
+		"latest qURL Slack app install",
+		"<https://slack-bot.example/oauth/slack/install|the qURL Slack install link>",
+		"re-run the command",
+	} {
+		if !strings.Contains(async, want) {
+			t.Fatalf("async reply = %q, missing %q", async, want)
+		}
+	}
+	if strings.Contains(async, "https://qurl.link/dm-scope") {
+		t.Fatalf("async reply leaked dm:true link after DM failure: %q", async)
+	}
+}
+
+// TestResourceLinkExpiryConstsInSync is a tripwire: resourceLinkExpiry (the wire
+// value sent as expires_in) and resourceLinkExpiryHuman (the Slack reply copy)
 // are hand-maintained and must describe the same window. Without this, a bump
 // to one (e.g. "1m"→"5m") that forgets the other would silently diverge the
 // user-facing copy from the actual admit window. Pin the current pair; whoever
 // changes the window updates both consts AND this assertion. (cr #561.)
-func TestTunnelLinkExpiryConstsInSync(t *testing.T) {
-	if tunnelLinkExpiry != "1m" || tunnelLinkExpiryHuman != "1 minute" {
+func TestResourceLinkExpiryConstsInSync(t *testing.T) {
+	if resourceLinkExpiry != "1m" || resourceLinkExpiryHuman != "1 minute" {
 		t.Errorf("link-expiry consts drifted: wire=%q human=%q — update BOTH the consts and this assertion together",
-			tunnelLinkExpiry, tunnelLinkExpiryHuman)
+			resourceLinkExpiry, resourceLinkExpiryHuman)
+	}
+}
+
+// TestRenderGetSuccess locks the Enter Portal render: the minted link rides in a
+// primary URL button (labeled from the SDK-consistent enterPortalButtonLabel, with
+// the no-op enterPortalActionID), the headline section OMITS the raw URL, and the
+// plain-text fallback still carries the link + one-time-use suffix so a non-block
+// client isn't dead-ended.
+func TestRenderGetSuccess(t *testing.T) {
+	t.Parallel()
+	const link = "https://qurl.link/enter-me"
+	fallback, blocks := renderGetSuccess(link)
+
+	if !strings.Contains(fallback, link) {
+		t.Errorf("fallback missing link: %q", fallback)
+	}
+	if !strings.HasSuffix(fallback, "(one-time use · link expires in "+resourceLinkExpiryHuman+")") {
+		t.Errorf("fallback missing one-time-use/expiry suffix: %q", fallback)
+	}
+
+	// The headline section must NOT leak the raw URL — that's the whole point: it
+	// lives in the button now.
+	section, ok := blocks[0].(map[string]any)
+	if !ok || section["type"] != "section" {
+		t.Fatalf("blocks[0] is not a section: %+v", blocks[0])
+	}
+	textObj, ok := section["text"].(map[string]any)
+	if !ok {
+		t.Fatalf("section text is not a text object: %+v", section["text"])
+	}
+	if sectionText, _ := textObj["text"].(string); strings.Contains(sectionText, link) {
+		t.Errorf("headline section leaked the raw URL: %q", sectionText)
+	}
+
+	// The button carries the link, the SDK-consistent label, the no-op action_id,
+	// and the primary style.
+	button := enterPortalButton(t, blocks)
+	if button["url"] != link {
+		t.Errorf("button url = %v, want %q", button["url"], link)
+	}
+	if button["action_id"] != enterPortalActionID {
+		t.Errorf("button action_id = %v, want %q", button["action_id"], enterPortalActionID)
+	}
+	if button["style"] != blockKitStylePrimary {
+		t.Errorf("button style = %v, want %q", button["style"], blockKitStylePrimary)
+	}
+	buttonText, ok := button["text"].(map[string]any)
+	if !ok {
+		t.Fatalf("button text is not a text object: %+v", button["text"])
+	}
+	if label, _ := buttonText["text"].(string); label != enterPortalButtonLabel {
+		t.Errorf("button label = %q, want %q", label, enterPortalButtonLabel)
+	}
+}
+
+// TestHandleGet_MalformedLinkRejected fences the URL-button contract: a mint that
+// returns a non-empty but non-http(s) qurl_link (a server contract surprise) is
+// rejected with the generic retry copy — NOT rendered into an Enter Portal button,
+// which Slack would reject outright, bouncing the whole message after the mint is
+// already burned. Same defensive disposition as an empty qurl_link.
+func TestHandleGet_MalformedLinkRejected(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedPolicySet(t, testAdminTeamID, "C_test", "prod-db", []string{testResourceIDFix})
+	ts.addCustomer("POST", mintByTestResourcePath, func(w http.ResponseWriter, _ *http.Request) {
+		writeCreateFixture(t, w, "not-a-url", testResourceIDFix)
+	})
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	_, _, async := inv.invokeAdminAsync("get $prod-db", testAdminTeamID, testAdminUserID)
+	if !strings.Contains(async, commonGetMintFailedMessage) {
+		t.Errorf("async reply = %q, want the generic mint-failed message for a malformed link", async)
+	}
+	if strings.Contains(async, "not-a-url") {
+		t.Errorf("async reply leaked the malformed link: %q", async)
+	}
+}
+
+// TestHandleGet_SlashRendersEnterPortalButton fences the PRIMARY /qurl get surface:
+// the channel ephemeral must carry the Enter Portal URL button (blocks), not merely
+// a plain-text link — so a regression in finishGet back to a text-only post is caught
+// on the most common path (the DM and agent-confirm paths assert the button separately).
+func TestHandleGet_SlashRendersEnterPortalButton(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedPolicySet(t, testAdminTeamID, "C_test", "prod-db", []string{testResourceIDFix})
+	ts.addCustomer("POST", mintByTestResourcePath, func(w http.ResponseWriter, _ *http.Request) {
+		writeCreateFixture(t, w, "https://qurl.link/slash-btn", testResourceIDFix)
+	})
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	inv.invokeAdmin("get $prod-db", testAdminTeamID, testAdminUserID)
+	body := inv.captured.waitForBody(t, 2*time.Second)
+	blocks := parseSlackBlocks(t, body)
+	if gotURL, _ := enterPortalButton(t, blocks)["url"].(string); gotURL != "https://qurl.link/slash-btn" {
+		t.Fatalf("Enter Portal button url = %q, want the minted link on the slash surface", gotURL)
+	}
+}
+
+// TestIsHTTPSURL fences the button-url guard: absolute https URLs with a host pass;
+// http (looser than the mint contract), empty, scheme-less, scheme-only, or non-web
+// values fail (so they're caught before a doomed block post).
+func TestIsHTTPSURL(t *testing.T) {
+	t.Parallel()
+	for _, c := range []struct {
+		in   string
+		want bool
+	}{
+		{"https://qurl.link/abc", true},
+		{"http://qurl.link/abc", false}, // http is looser than the https-only mint contract
+		{"", false},
+		{"not-a-url", false},
+		{"ftp://qurl.link/abc", false},
+		{"qurl.link/abc", false},
+		{"https://", false},        // scheme-only, no host — Slack would reject the button
+		{"//qurl.link/abc", false}, // scheme-relative, no scheme
+		// A valid https URL past Slack's 3000-char button-url cap still bounces the block post.
+		{"https://qurl.link/" + strings.Repeat("a", slackButtonURLMaxLen), false},
+	} {
+		if got := isHTTPSURL(c.in); got != c.want {
+			t.Errorf("isHTTPSURL(%.60q) = %v, want %v", c.in, got, c.want)
+		}
 	}
 }
 
@@ -471,15 +1119,15 @@ func TestHandleGet_DMRidesOneTimeSuffix(t *testing.T) {
 
 	var dmText string
 	h := newAdminTestHandler(t, ts)
-	h.cfg.PostDM = func(_ context.Context, _, text string) error {
-		dmText = text
+	h.cfg.PostDMBlocks = func(_ context.Context, _, _, _ string, _ []any, fallbackText string) error {
+		dmText = fallbackText
 		return nil
 	}
 	inv := newAdminSlashInvoker(t, h)
 
 	_, _, async := inv.invokeAdminAsync("get $prod-db dm:true", testAdminTeamID, testAdminUserID)
 
-	wantSuffix := "(one-time use · link expires in " + tunnelLinkExpiryHuman + ")"
+	wantSuffix := "(one-time use · link expires in " + resourceLinkExpiryHuman + ")"
 	if !strings.HasSuffix(strings.TrimSpace(dmText), wantSuffix) {
 		t.Errorf("DM payload missing one-time-use/expiry suffix %q: %q", wantSuffix, dmText)
 	}
@@ -556,11 +1204,25 @@ func TestCreateInputJSON_ResourceID(t *testing.T) {
 	}
 }
 
-// TestCreateInputJSON_Reason fences the wire shape: reason flag
-// flows through to the JSON body when set, and is absent when
-// unset. Alias-form mint, so the path is the resource-scoped
-// endpoint.
-func TestCreateInputJSON_Reason(t *testing.T) {
+// TestGetReason_AuditedNotSentOnTheWire fences WHERE the operator's
+// `reason:"…"` goes, on both sides at once.
+//
+// It must NOT ride in the mint body. `reason` has never been a property of
+// CreateQurlRequest or CreateQurlForResourceRequest, so qurl-service dropped it
+// on arrival — the "recorded in the audit log" the flag's help text promises
+// never happened — and qurl-service#1402 (`additionalProperties: false`) turns
+// that silent drop into a 400 on 100% of reasoned gets.
+//
+// It must instead land in Slack's own audit record, which is what makes that
+// promise true. Asserting both halves in one test is deliberate: a fix that
+// merely deleted the field would pass a wire-only assertion while quietly
+// dropping an operator-visible feature.
+//
+// Alias-form mint, so the path is the resource-scoped endpoint.
+func TestGetReason_AuditedNotSentOnTheWire(t *testing.T) {
+	// Before the handler is built: async get work logs through slog.With off
+	// the default logger, so this is the seam that sees the audit record.
+	logs := captureDefaultSlog(t)
 	ts := newAdminTestServers(t)
 	ts.seedPolicySet(t, testAdminTeamID, "C_test", "prod-db", []string{testResourceIDFix})
 	var capturedBody []byte
@@ -578,9 +1240,203 @@ func TestCreateInputJSON_Reason(t *testing.T) {
 	if err := json.Unmarshal(capturedBody, &parsed); err != nil {
 		t.Fatalf("unmarshal captured body: %v body=%s", err, capturedBody)
 	}
-	if got, _ := parsed["reason"].(string); got != "incident #123" {
-		t.Errorf("reason = %v, want %q", parsed["reason"], "incident #123")
+	if _, ok := parsed["reason"]; ok {
+		t.Errorf("reason present on the mint body — qurl-service rejects unknown fields (#1402): %v", parsed)
 	}
+
+	audit := findAuditRecord(logs, slackaudit.QURLMintReason)
+	if audit == nil {
+		t.Fatalf("no %s audit record emitted — the reason was dropped, not re-homed; logs=%s",
+			slackaudit.QURLMintReason, logs.String())
+	}
+	// Every attribute, including channel_id: QURLMintReasonAttrs takes five
+	// positional strings, so asserting a subset would let a transposition at the
+	// call site through on whichever field went unchecked.
+	for k, want := range map[string]any{
+		"agent":       "slack",
+		"reason":      "incident #123",
+		"team_id":     testAdminTeamID,
+		"channel_id":  "C_test",
+		"user_id":     testAdminUserID,
+		"resource_id": testResourceIDFix,
+	} {
+		if audit[k] != want {
+			t.Errorf("audit[%s] = %#v, want %#v; audit=%#v", k, audit[k], want, audit)
+		}
+	}
+}
+
+// TestGetWithoutReason_EmitsNoAuditRecord pins the other half of the contract:
+// the audit record marks an operator DECISION to annotate a mint, so a plain
+// `/qurl get` must not emit an empty-reason row that dilutes the filter.
+func TestGetWithoutReason_EmitsNoAuditRecord(t *testing.T) {
+	logs := captureDefaultSlog(t)
+	ts := newAdminTestServers(t)
+	ts.seedPolicySet(t, testAdminTeamID, "C_test", "prod-db", []string{testResourceIDFix})
+	ts.addCustomer("POST", mintByTestResourcePath, func(w http.ResponseWriter, _ *http.Request) {
+		writeCreateFixture(t, w, "https://qurl.link/abc", testResourceIDFix)
+	})
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	inv.invokeAdminAsync("get $prod-db", testAdminTeamID, testAdminUserID)
+
+	if audit := findAuditRecord(logs, slackaudit.QURLMintReason); audit != nil {
+		t.Errorf("unreasoned get emitted a %s record: %#v", slackaudit.QURLMintReason, audit)
+	}
+}
+
+func TestMapMintErrorDependencyAuthAudit(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		apiErr    *client.APIError
+		wantAudit bool
+	}{
+		{
+			name: "401 emits audit",
+			apiErr: &client.APIError{
+				StatusCode: http.StatusUnauthorized,
+				Code:       "invalid_token",
+				RequestID:  "req_get401",
+			},
+			wantAudit: true,
+		},
+		{
+			name: "unexpected 403 emits audit",
+			apiErr: &client.APIError{
+				StatusCode: http.StatusForbidden,
+				Code:       "insufficient_scope",
+				RequestID:  "req_get403",
+			},
+			wantAudit: true,
+		},
+		{
+			name: "connector_disabled 403 returns friendly message without logs",
+			apiErr: &client.APIError{
+				StatusCode: http.StatusForbidden,
+				Code:       "connector_disabled",
+				RequestID:  "req_connector_disabled",
+			},
+			wantAudit: false,
+		},
+		{
+			name: "expected api_key_limit 403 stays quiet",
+			apiErr: &client.APIError{
+				StatusCode: http.StatusForbidden,
+				Code:       slackoauth.ErrorCodeAPIKeyLimit,
+				RequestID:  "req_api_key_limit",
+			},
+			wantAudit: false,
+		},
+		{
+			name: "expected quota_exceeded 403 stays quiet",
+			apiErr: &client.APIError{
+				StatusCode: http.StatusForbidden,
+				Code:       slackoauth.ErrorCodeQuotaExceeded,
+				RequestID:  "req_quota_exceeded",
+			},
+			wantAudit: false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var logs bytes.Buffer
+			log := slog.New(slog.NewJSONHandler(&logs, nil))
+
+			gotErr := mapMintError(log, tc.apiErr)
+
+			var audit map[string]any
+			for _, line := range strings.Split(strings.TrimSpace(logs.String()), "\n") {
+				if line == "" {
+					continue
+				}
+				var record struct {
+					Audit map[string]any `json:"audit"`
+				}
+				if err := json.Unmarshal([]byte(line), &record); err != nil {
+					t.Fatalf("unmarshal log line %q: %v", line, err)
+				}
+				if record.Audit != nil {
+					audit = record.Audit
+					break
+				}
+			}
+			if tc.wantAudit {
+				if audit == nil {
+					t.Fatalf("missing dependency auth audit; logs=%s", logs.String())
+				}
+				for k, want := range map[string]any{
+					"event":          "dependency_auth_failure",
+					"agent":          "slack",
+					"dependency":     "qurl_service",
+					"route":          "qurl_get",
+					"method":         http.MethodPost,
+					"path":           client.CreateForResourcePathLabel,
+					"code":           tc.apiErr.Code,
+					testKeyRequestID: tc.apiErr.RequestID,
+				} {
+					if audit[k] != want {
+						t.Fatalf("audit[%s] = %#v, want %#v; audit=%#v", k, audit[k], want, audit)
+					}
+				}
+				if audit["status"] != float64(tc.apiErr.StatusCode) {
+					t.Fatalf("audit[status] = %#v, want %d; audit=%#v", audit["status"], tc.apiErr.StatusCode, audit)
+				}
+			} else if audit != nil {
+				t.Fatalf("unexpected dependency auth audit: %#v; logs=%s", audit, logs.String())
+			}
+			if tc.apiErr.Code == "connector_disabled" {
+				if logs.Len() != 0 {
+					t.Fatalf("connector_disabled 403 must not emit logs: %s", logs.String())
+				}
+				var ue *userError
+				if !errors.As(gotErr, &ue) || ue.msg != connectorDisabledMessage {
+					t.Fatalf("connector_disabled 403 msg = %#v (%T), want Connector-disabled copy", gotErr, gotErr)
+				}
+			}
+			if isExpectedGetMintForbiddenCode(tc.apiErr.Code) {
+				if strings.Contains(logs.String(), `"level":"ERROR"`) {
+					t.Fatalf("expected quota-class 403 must not log at ERROR: %s", logs.String())
+				}
+				var ue *userError
+				if !errors.As(gotErr, &ue) || !strings.Contains(ue.msg, "Cannot create another qURL right now") {
+					t.Fatalf("expected quota-class 403 msg = %#v (%T), want limit copy", gotErr, gotErr)
+				}
+			}
+		})
+	}
+}
+
+// TestMapMintError_RetiredTunnelDisabledFailsLoud fences the deliberate
+// greenfield break: the retired public code is not accepted as an alias for
+// connector_disabled.
+func TestMapMintError_RetiredTunnelDisabledFailsLoud(t *testing.T) {
+	var logs bytes.Buffer
+	log := slog.New(slog.NewJSONHandler(&logs, nil))
+
+	gotErr := mapMintError(log, &client.APIError{
+		StatusCode: http.StatusForbidden,
+		Code:       "tunnel_disabled",
+		RequestID:  "req_retired_tunnel_disabled",
+	})
+
+	var userErr *userError
+	if !errors.As(gotErr, &userErr) || userErr.msg != commonGetMintFailedMessage {
+		t.Fatalf("retired tunnel_disabled error = %#v (%T), want generic mint failure", gotErr, gotErr)
+	}
+
+	for _, line := range strings.Split(strings.TrimSpace(logs.String()), "\n") {
+		var record struct {
+			Level string `json:"level"`
+			Msg   string `json:"msg"`
+		}
+		if err := json.Unmarshal([]byte(line), &record); err != nil {
+			t.Fatalf("unmarshal log line %q: %v", line, err)
+		}
+		if record.Level == slog.LevelError.String() && record.Msg == "get: mint rejected with 403 — unmapped error code" {
+			return
+		}
+	}
+	t.Fatalf("retired tunnel_disabled did not emit the unmapped-403 ERROR log: %s", logs.String())
 }
 
 // TestCreateInputJSON_OneTimeDefault fences that one-time use is the
@@ -609,23 +1465,22 @@ func TestCreateInputJSON_OneTimeDefault(t *testing.T) {
 	if got, _ := parsed["one_time_use"].(bool); !got {
 		t.Errorf("one_time_use = %v, want true (one-time use is the unconditional default)", parsed["one_time_use"])
 	}
-	if !strings.HasSuffix(strings.TrimSpace(async), "(one-time use · link expires in "+tunnelLinkExpiryHuman+")") {
+	if !strings.HasSuffix(strings.TrimSpace(async), "(one-time use · link expires in "+resourceLinkExpiryHuman+")") {
 		t.Errorf("async reply missing one-time-use/expiry suffix: %q", async)
 	}
 	// The tight admit window MUST be surfaced at the point of sharing so a
 	// late click isn't a silent dead link (cr #561).
-	if !strings.Contains(async, "link expires in "+tunnelLinkExpiryHuman) {
-		t.Errorf("async reply does not surface the link-expiry window %q: %q", tunnelLinkExpiryHuman, async)
+	if !strings.Contains(async, "link expires in "+resourceLinkExpiryHuman) {
+		t.Errorf("async reply does not surface the link-expiry window %q: %q", resourceLinkExpiryHuman, async)
 	}
 }
 
-// TestCreateInputJSON_TunnelSessionLimits fences that every `/qurl get`
-// mint carries the tunnel access limits on the wire: a 1-minute link
+// TestCreateInputJSON_ResourceSessionLimits fences that every `/qurl get`
+// mint carries the resource access limits on the wire: a 1-minute link
 // expiry, a 1-hour session duration, and a single concurrent session.
-// `/qurl get` is tunnel-only, so these bound a shared tunnel link to one
-// short-lived viewer. Enforcement is server-side; this only fences that the
-// bot sets the policy (and that the resource-scoped body carries all three).
-func TestCreateInputJSON_TunnelSessionLimits(t *testing.T) {
+// Enforcement is server-side; this only fences that the bot sets the policy
+// and that the resource-scoped body carries all three.
+func TestCreateInputJSON_ResourceSessionLimits(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedPolicySet(t, testAdminTeamID, "C_test", "prod-db", []string{testResourceIDFix})
 	var capturedBody []byte
@@ -643,15 +1498,15 @@ func TestCreateInputJSON_TunnelSessionLimits(t *testing.T) {
 	if err := json.Unmarshal(capturedBody, &parsed); err != nil {
 		t.Fatalf("unmarshal captured body: %v body=%s", err, capturedBody)
 	}
-	if got, _ := parsed["expires_in"].(string); got != tunnelLinkExpiry {
-		t.Errorf("expires_in = %q, want %q", parsed["expires_in"], tunnelLinkExpiry)
+	if got, _ := parsed["expires_in"].(string); got != resourceLinkExpiry {
+		t.Errorf("expires_in = %q, want %q", parsed["expires_in"], resourceLinkExpiry)
 	}
-	if got, _ := parsed["session_duration"].(string); got != tunnelSessionDuration {
-		t.Errorf("session_duration = %q, want %q", parsed["session_duration"], tunnelSessionDuration)
+	if got, _ := parsed["session_duration"].(string); got != resourceSessionDuration {
+		t.Errorf("session_duration = %q, want %q", parsed["session_duration"], resourceSessionDuration)
 	}
 	// JSON numbers decode to float64 through map[string]any.
-	if got, _ := parsed["max_sessions"].(float64); int(got) != tunnelMaxSessions {
-		t.Errorf("max_sessions = %v, want %d", parsed["max_sessions"], tunnelMaxSessions)
+	if got, _ := parsed["max_sessions"].(float64); int(got) != resourceMaxSessions {
+		t.Errorf("max_sessions = %v, want %d", parsed["max_sessions"], resourceMaxSessions)
 	}
 }
 
@@ -714,13 +1569,18 @@ func TestMapMintError_Unmapped5xx(t *testing.T) {
 func addTunnelSlugResource(t *testing.T, ts *adminTestServers) {
 	t.Helper()
 	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
-		writeResourceListFixture(t, w, []map[string]any{{
-			testKeyResourceID: testResourceIDFix,
-			testKeyType:       client.ResourceTypeTunnel,
-			testKeySlug:       testTunnelSlug,
-			testKeyStatus:     client.StatusActive,
-		}}, "", false)
+		writeTunnelSlugResourceFixture(t, w)
 	})
+}
+
+func writeTunnelSlugResourceFixture(t *testing.T, w http.ResponseWriter) {
+	t.Helper()
+	writeResourceListFixture(t, w, []map[string]any{{
+		testKeyResourceID: testResourceIDFix,
+		testKeyType:       client.ResourceTypeTunnel,
+		testKeySlug:       testTunnelSlug,
+		testKeyStatus:     client.StatusActive,
+	}}, "", false)
 }
 
 // TestHandleGet_DollarSlugAllowedSetNonAdmin fences the list→get
@@ -855,22 +1715,81 @@ func TestHandleGet_DollarTokenBindingWinsOverSlug(t *testing.T) {
 	}
 }
 
-// TestHandleGet_DollarSlugAdminBypassesAllowedSet fences the admin
-// round-trip: a workspace admin sees every tunnel in /qurl list
-// (unfiltered) and can mint its `$<slug>` even with no alias_binding
-// and no allow-set entry in the current channel.
-func TestHandleGet_DollarSlugAdminBypassesAllowedSet(t *testing.T) {
-	ts := newAdminTestServers(t)
-	ts.seedAdmin(t)
-	addTunnelSlugResource(t, ts)
-	ts.addCustomer("POST", mintByTestResourcePath, func(w http.ResponseWriter, _ *http.Request) {
-		writeCreateFixture(t, w, "https://qurl.link/admin-slug", testResourceIDFix)
-	})
-	h := newAdminTestHandler(t, ts)
-	inv := newAdminSlashInvoker(t, h)
+// TestHandleGet_DollarSlugAdminAlsoChannelScoped is the security regression
+// fence for "even an admin can't /qurl get a tunnel from a channel it isn't
+// protected in". The former admin bypass (admins could mint any slug from any
+// channel, because /qurl list was workspace-wide) is gone: list, alias, and
+// mint now share one channel-scoped definition. An admin minting `$<slug>` in a
+// channel where the resource has no alias binding and no allow-set entry is
+// refused with the same anti-enumeration "not configured for this channel" copy
+// a non-admin gets, and the mint never runs — but the admin DOES mint once the
+// tunnel is protected in the channel.
+func TestHandleGet_DollarSlugAdminAlsoChannelScoped(t *testing.T) {
+	t.Run("blocked when not exposed in this channel", func(t *testing.T) {
+		ts := newAdminTestServers(t)
+		ts.seedAdmin(t) // the caller is a workspace admin
+		// Protect an UNRELATED resource so the channel is "warm" (non-empty
+		// allow-set): the slug fallback must actually run and be rejected by
+		// the allow-set gate, which is what proves there's no admin bypass at
+		// the gate. Without this, the cold-channel short-circuit (#534)
+		// returns not-configured before the slug is ever resolved, so the
+		// admin-bypass property would go unexercised.
+		ts.seedChannelExposure(t, testAdminTeamID, "C_test", "r_other_alloc")
+		// Inlined slug resource (vs addTunnelSlugResource) so listHits can pin
+		// that the slug fallback actually reached upstream — see the assertion
+		// below.
+		var listHits atomic.Int32
+		ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+			listHits.Add(1)
+			writeResourceListFixture(t, w, []map[string]any{{
+				testKeyResourceID: testResourceIDFix,
+				testKeyType:       client.ResourceTypeTunnel,
+				testKeySlug:       testTunnelSlug,
+				testKeyStatus:     client.StatusActive,
+			}}, "", false)
+		})
+		var mintHits atomic.Int32
+		ts.addCustomer("POST", mintByTestResourcePath, func(w http.ResponseWriter, _ *http.Request) {
+			mintHits.Add(1)
+			writeCreateFixture(t, w, "https://qurl.link/should-not", testResourceIDFix)
+		})
+		h := newAdminTestHandler(t, ts)
+		inv := newAdminSlashInvoker(t, h)
 
-	_, _, async := inv.invokeAdminAsync("get $"+testTunnelSlug, testAdminTeamID, testAdminUserID)
-	if !strings.Contains(async, "https://qurl.link/admin-slug") {
-		t.Errorf("admin slug round-trip failed: %q", async)
-	}
+		_, _, async := inv.invokeAdminAsync("get $"+testTunnelSlug, testAdminTeamID, testAdminUserID)
+		if !strings.Contains(async, "`$"+testTunnelSlug+"` is not configured for this channel") {
+			t.Errorf("admin was not channel-scoped — missing not-configured copy: %q", async)
+		}
+		// This not-configured copy is BYTE-IDENTICAL to the cold-channel
+		// short-circuit's (#534). Without the assertion below, a broken warm
+		// seed would fall through the short-circuit and still match the copy —
+		// leaving the admin-no-bypass-at-the-gate property unexercised. Pin
+		// that the slug fallback actually ran and was rejected BY THE GATE: a
+		// non-empty allow-set must let the slug lookup hit upstream.
+		if listHits.Load() == 0 {
+			t.Errorf("slug fallback never hit upstream GET /v1/resources — warm-channel seed broke and the admin-no-bypass property went unexercised (regressed to the cold-channel short-circuit)")
+		}
+		if mintHits.Load() != 0 {
+			t.Errorf("admin minted a tunnel not exposed in this channel (hits = %d) — the bypass is back", mintHits.Load())
+		}
+	})
+
+	t.Run("mints when exposed in this channel", func(t *testing.T) {
+		ts := newAdminTestServers(t)
+		ts.seedAdmin(t)
+		// Expose the slug's resource to C_test (allow-set, no alias) so the
+		// slug-fallback gate passes for the admin exactly as for anyone else.
+		ts.seedChannelExposure(t, testAdminTeamID, "C_test", testResourceIDFix)
+		addTunnelSlugResource(t, ts)
+		ts.addCustomer("POST", mintByTestResourcePath, func(w http.ResponseWriter, _ *http.Request) {
+			writeCreateFixture(t, w, "https://qurl.link/admin-slug", testResourceIDFix)
+		})
+		h := newAdminTestHandler(t, ts)
+		inv := newAdminSlashInvoker(t, h)
+
+		_, _, async := inv.invokeAdminAsync("get $"+testTunnelSlug, testAdminTeamID, testAdminUserID)
+		if !strings.Contains(async, "https://qurl.link/admin-slug") {
+			t.Errorf("admin should mint a tunnel exposed in this channel: %q", async)
+		}
+	})
 }

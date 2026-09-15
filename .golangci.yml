@@ -71,6 +71,15 @@ linters:
     goconst:
       min-len: 3
       min-occurrences: 3
+      # goconst v1.10.0 (golangci-lint v2.12.x) started scanning composite
+      # literals, so every string in a table-driven test's rows now counts.
+      # That is roughly 500 findings anchored in _test.go plus inflated counts for
+      # production strings -- `list` reads as "23 occurrences" when 22 of them
+      # are test-table rows. A path exclusion cannot fix the second half: it
+      # drops the test-anchored issue but goconst still counts the test file's
+      # occurrences. Skipping test files at parse time is the only knob that
+      # does both. (Hard-coded false before v2.12.0; a real setting since.)
+      ignore-tests: true
     gocritic:
       enabled-tags:
         - diagnostic
@@ -96,6 +105,16 @@ linters:
         - G117  # Exported field matches secret pattern (false positives on JSON field names)
         - G703  # Unvalidated errors.As target (false positive: our APIError type is safe)
         - G704  # SSRF via taint analysis (API client takes user-provided URLs by design)
+      # G705/G706 are NOT excluded and still run. Worth knowing what changed
+      # under gosec v2.26.1 (golangci-lint v2.12.x): with every suppression in
+      # this repo stripped, v2.10.1's gosec reported 59 taint findings (56 G706,
+      # 3 G705) and v2.12.2's reports 0. That is the false-positive class going
+      # away, not the check: G706 now inspects only a slog call's msg argument
+      # (attribute values are escaped by both stdlib handlers) and G705 only
+      # fires when the writer is a net/http.ResponseWriter. A genuinely tainted
+      # msg, or tainted data written to a ResponseWriter, still trips them --
+      # which is why the 48 //nolint:gosec directives this repo carried could be
+      # deleted rather than converted into exclusions.
     revive:
       rules:
         - name: blank-imports
@@ -131,11 +150,24 @@ linters:
           - gocyclo
           - dupl
         path: _test\.go
-      # G706's taint pass currently cannot prove Slack's signed interaction
-      # envelope plus slog's structured escaping make these modal identifiers
-      # safe as attributes. Keep the exclusion pinned to the modal handler
-      # rather than disabling log-injection analysis repo-wide.
+      # noctx v0.5.x added this check (v2.12.2 pins v0.5.1; it first shipped in
+      # golangci-lint v2.11.4, so it is new relative to this repo's v2.10.1 pin,
+      # not new in v2.12). It exists to keep context propagating
+      # into real outbound requests; httptest.NewRequest builds a server-side
+      # fixture that is never sent, so the check's own rationale does not apply.
+      # Narrower than "the context is unused": handlers under test do read
+      # r.Context() (oauth.Callback and oauth.Start derive from it), so
+      # NewRequestWithContext(t.Context(), ...) would buy real test-scoped
+      # cancellation in ~15 of the 40 sites. That is a refactor worth doing on
+      # its own merits, not a reason to hold the linter bump. Pinned to the one
+      # check by text so noctx's genuine findings (uncontextualized http.Get and
+      # friends) still apply in tests.
+      #
+      # TODO(upstream-contract): the text below mirrors noctx's own message
+      # string, which we do not control. If upstream rewords it the exclusion
+      # stops matching and every httptest.NewRequest in the repo fails the
+      # check again -- loudly, on the next lint run, not silently.
       - linters:
-          - gosec
-        path: apps/slack/internal/handler_interaction\.go
-        text: "G706: Log injection via taint analysis"
+          - noctx
+        path: _test\.go
+        text: "httptest.NewRequest must not be called"

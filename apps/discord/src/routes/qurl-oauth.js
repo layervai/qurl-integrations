@@ -8,12 +8,12 @@ const express = require('express');
 const config = require('../config');
 const db = require('../store');
 const logger = require('../logger');
-const { renderPage } = require('../templates/page');
 const { sendDM } = require('../discord');
 const { verifyQurlOAuthState } = require('../utils/qurl-oauth-state');
 const { rateLimit } = require('../utils/oauth-rate-limit');
 const { verifyAuth0IdToken } = require('../utils/auth0-jwks');
 const { readCookie } = require('../utils/cookies');
+const { createPkcePair, isPkceVerifier } = require('../utils/oauth-pkce');
 const { shouldPromptConsent } = require('../utils/guild-config-state');
 const { singleStringParam } = require('../utils/query-params');
 const { renderNotConfiguredPage } = require('../utils/oauth-not-configured');
@@ -29,6 +29,13 @@ const ORPHAN_DELETE_TIMEOUT_MS = 10000;
 
 const router = express.Router();
 
+const readyCommandsPlain = config.MAP_COMMAND_ENABLED
+  ? '/qurl send and /qurl map are ready.'
+  : '/qurl send is ready.';
+const readyCommandsMarkdown = config.MAP_COMMAND_ENABLED
+  ? '`/qurl send` and `/qurl map`'
+  : '`/qurl send`';
+
 // Browser-session cookie binding (parallel to /auth/github's qurl_oauth_session
 // pattern). /start sets a HttpOnly cookie holding a random 16-byte token;
 // /callback re-checks it. If a leaked /qurl setup ephemeral URL is opened
@@ -43,8 +50,11 @@ const router = express.Router();
 // follow-up C.1.
 const {
   QURL_OAUTH_SESSION_COOKIE,
+  QURL_OAUTH_PKCE_COOKIE,
   setQurlOAuthCookie,
+  setQurlOAuthPkceCookie,
   clearQurlOAuthCookie,
+  clearQurlOAuthPkceCookie,
 } = require('../utils/oauth-cookies');
 
 // 503 not-configured surface — shared with discord-install.js via
@@ -69,27 +79,32 @@ function renderSuccess(res, { guildId, keyPrefix, qurlAccountEmail }) {
   if (keyPrefix) details.push({ label: 'API key prefix', value: keyPrefix });
   // Cache-Control: no-store is set as a router-level default in
   // server.js for every /oauth/* response — see noStoreHeaders.
-  return res.status(200).send(renderPage({
+  return res.status(200).send(res.renderPage({
     title: 'qURL Connected',
     icon: '✅',
     heading: 'qURL is connected to your Discord server.',
     // CTA folded into message so the "confirm before closing" cue
     // always rides next to the binding readout, including when the
     // qURL-account-email line is missing (JWKS verify failure).
-    message: 'Confirm the binding below matches your server, then close this tab and return to Discord. /qurl send and /qurl map are ready.',
+    message: `Confirm the binding below matches your server, then close this tab and return to Discord. ${readyCommandsPlain}`,
     details,
     type: 'success',
   }));
 }
 
 function renderError(res, statusCode, headline, detail) {
-  return res.status(statusCode).send(renderPage({
+  return res.status(statusCode).send(res.renderPage({
     title: 'qURL Setup Failed',
     icon: '❌',
     heading: headline,
     message: detail + ' Run /qurl setup in Discord to start over.',
     type: 'error',
   }));
+}
+
+function clearQurlOAuthCookies(res) {
+  clearQurlOAuthCookie(res);
+  clearQurlOAuthPkceCookie(res);
 }
 
 // /oauth/qurl/start — admin lands here after clicking the link in
@@ -132,9 +147,11 @@ router.get('/start', rateLimit, async (req, res) => {
   // Double-submit CSRF cookie: value is the same state token the URL
   // carries to Auth0. /callback re-checks cookie === query.state.
   // Same-browser flows pass; leaked URLs in other browsers fail.
-  // Cookie shape (path=/oauth so it spans Stage-2 chain, HttpOnly,
-  // SameSite=Lax, Secure-when-HTTPS) lives in utils/oauth-cookies.js.
+  // Cookie shape (path=/oauth/qurl, HttpOnly, SameSite=Lax,
+  // Secure-when-HTTPS) lives in utils/oauth-cookies.js.
+  const { codeVerifier, codeChallenge } = createPkcePair();
   setQurlOAuthCookie(res, req, state);
+  setQurlOAuthPkceCookie(res, req, codeVerifier);
   const authorizeUrl = new URL(`https://${config.AUTH0_DOMAIN}/authorize`);
   authorizeUrl.searchParams.set('response_type', 'code');
   authorizeUrl.searchParams.set('client_id', config.AUTH0_CLIENT_ID);
@@ -150,6 +167,8 @@ router.get('/start', rateLimit, async (req, res) => {
   authorizeUrl.searchParams.set('scope', 'qurl:write qurl:read openid email');
   authorizeUrl.searchParams.set('audience', config.AUTH0_AUDIENCE);
   authorizeUrl.searchParams.set('state', state);
+  authorizeUrl.searchParams.set('code_challenge', codeChallenge);
+  authorizeUrl.searchParams.set('code_challenge_method', 'S256');
   // prompt=consent only on re-run (key-rotation flow) — without it
   // Auth0 silently re-uses prior consent and re-running /qurl setup
   // can't actually issue a new key. On first install, omit so the
@@ -164,6 +183,7 @@ router.get('/start', rateLimit, async (req, res) => {
 // key on qurl-service, persist it via the Store abstraction, DM the admin.
 router.get('/callback', rateLimit, async (req, res) => {
   if (!config.isQurlOAuthConfigured) {
+    clearQurlOAuthCookies(res);
     return renderNotConfigured(res);
   }
   // Same encryption-at-rest guard the legacy modal-paste path enforces in
@@ -176,6 +196,7 @@ router.get('/callback', rateLimit, async (req, res) => {
   // is the load-bearing check for non-prod environments.
   if (!process.env.KEY_ENCRYPTION_KEY) {
     logger.error('Refusing /oauth/qurl/callback: KEY_ENCRYPTION_KEY is not set');
+    clearQurlOAuthCookies(res);
     return renderError(res, 503, 'qURL setup not provisioned',
       'The bot operator needs to set KEY_ENCRYPTION_KEY (encryption-at-rest) before qURL setup can store keys safely.');
   }
@@ -192,16 +213,19 @@ router.get('/callback', rateLimit, async (req, res) => {
       errorDescription: singleStringParam(req.query.error_description),
       ip: req.ip,
     });
+    clearQurlOAuthCookies(res);
     return renderError(res, 400, 'Authorization declined', 'You declined consent or Auth0 returned an error.');
   }
   const code = singleStringParam(req.query.code);
   const state = singleStringParam(req.query.state);
   if (!code) {
+    clearQurlOAuthCookies(res);
     return renderError(res, 400, 'Missing authorization code', 'Auth0 did not return an authorization code.');
   }
   const verified = verifyQurlOAuthState(state);
   if (!verified.ok) {
     logger.warn('qURL OAuth callback rejected invalid state', { reason: verified.reason });
+    clearQurlOAuthCookies(res);
     return renderError(res, 400, 'Invalid setup link', 'This setup link is invalid or has expired.');
   }
   // Double-submit CSRF cookie check. /start set a cookie carrying the
@@ -212,6 +236,7 @@ router.get('/callback', rateLimit, async (req, res) => {
   const cookieState = readCookie(req, QURL_OAUTH_SESSION_COOKIE);
   if (!cookieState) {
     logger.warn('qURL OAuth callback missing session cookie', { ip: req.ip });
+    clearQurlOAuthCookies(res);
     return renderError(res, 400, 'Invalid setup link', 'Setup must be completed in the same browser tab where /qurl setup was clicked.');
   }
   // Both inputs are strings (cookieState early-returned if null;
@@ -224,11 +249,23 @@ router.get('/callback', rateLimit, async (req, res) => {
     && crypto.timingSafeEqual(cookieBuf, stateBuf);
   if (!cookieMatches) {
     logger.warn('qURL OAuth callback cookie/state mismatch', { ip: req.ip });
+    clearQurlOAuthCookies(res);
     return renderError(res, 400, 'Invalid setup link', 'Setup must be completed in the same browser tab where /qurl setup was clicked.');
   }
-  // Cookie is consumed — clear it so a refreshed callback URL can't
-  // re-bind. Path-must-match invariant lives in clearQurlOAuthCookie.
-  clearQurlOAuthCookie(res);
+  const codeVerifier = readCookie(req, QURL_OAUTH_PKCE_COOKIE);
+  // Shape check keeps malformed cookies out of Auth0; Auth0's stored
+  // challenge/verifier match is the PKCE security boundary. Pre-PKCE
+  // in-flight redirects without this cookie fail here; state TTL bounds
+  // that deploy cutover to 5 minutes.
+  if (!isPkceVerifier(codeVerifier)) {
+    logger.warn('qURL OAuth callback missing or invalid PKCE verifier cookie', { ip: req.ip });
+    clearQurlOAuthCookies(res);
+    return renderError(res, 400, 'Invalid setup link', 'This setup link could not be completed.');
+  }
+  // Cookies are consumed — clear them so a refreshed callback URL can't
+  // re-bind or replay the verifier. Path-must-match invariant lives in
+  // the clear helpers.
+  clearQurlOAuthCookies(res);
   const { guildId, discordUserId } = verified.payload;
 
   // 1. Exchange the code for an access_token + id_token (Auth0 token
@@ -250,6 +287,9 @@ router.get('/callback', rateLimit, async (req, res) => {
         client_id: config.AUTH0_CLIENT_ID,
         client_secret: config.AUTH0_CLIENT_SECRET,
         code,
+        // Guaranteed valid by the cookie gate above; Auth0 matches it against
+        // the S256 challenge stored for this authorization code.
+        code_verifier: codeVerifier,
         redirect_uri: `${config.BASE_URL}/oauth/qurl/callback`,
       }),
       signal: AbortSignal.timeout(AUTH0_TIMEOUT_MS),
@@ -327,7 +367,7 @@ router.get('/callback', rateLimit, async (req, res) => {
         'Content-Type': 'application/json',
         'Accept': 'application/json',
       },
-      body: JSON.stringify({ name: keyName, scopes: ['qurl:write', 'qurl:read'] }),
+      body: JSON.stringify({ kind: 'api_key', name: keyName, scopes: ['qurl:write', 'qurl:read'] }),
       signal: AbortSignal.timeout(QURL_SERVICE_TIMEOUT_MS),
     });
     if (!mintResp.ok) {
@@ -448,7 +488,7 @@ router.get('/callback', rateLimit, async (req, res) => {
   //    `/qurl status` and against the layerv.ai dashboard, which
   //    matters for spotting binding mismatches in the rare confused-
   //    deputy edge case (see PR #177 review item 3).
-  const dmLines = ['✅ **qURL is connected to your Discord server.** Your team can now use `/qurl send` and `/qurl map`. All usage will be billed to your qURL account.'];
+  const dmLines = [`✅ **qURL is connected to your Discord server.** Your team can now use ${readyCommandsMarkdown}. All usage will be billed to your qURL account.`];
   if (keyPrefix) dmLines.push(`Key prefix: \`${keyPrefix}\``);
   sendDM(discordUserId, dmLines.join('\n'))
     .catch((err) => logger.warn('Failed to DM admin after qURL setup', { error: err?.message, discordUserId }));

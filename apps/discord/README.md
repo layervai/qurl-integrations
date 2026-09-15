@@ -1,59 +1,233 @@
 # qURL Discord Bot
 
-Discord bot for qURL-powered secure resource sharing, plus GitHub OAuth
-linking and auto Contributor-role assignment for community members.
+Share files and locations in Discord as **one-time, expiring qURL™ links** —
+delivered privately to each recipient's DMs, never posted in the channel, and
+revocable at any time.
 
 ## Features
 
-- **`/qurl send`** — share a file as a one-time qURL link, delivered to each
-  recipient via DM. Recipients picked via @mentions or a user-select menu.
-- **`/qurl map`** — share a Google Maps location as a one-time qURL link,
-  delivered to each recipient via DM.
-- **`/qurl revoke`** — revoke all links from a previous send.
-- **`/qurl help`** — command reference.
-- **`/qurl setup`** / **`/qurl status`** — admin-only, configure the
-  guild's qURL API key (stored AES-256-GCM encrypted at rest).
-- **GitHub OAuth Linking**: `/link` verifies GitHub identity; the callback
-  is session-cookie-bound to prevent leaked-URL takeover.
-- **Auto Role Assignment**: merged PRs in allowed orgs award the
-  `@Contributor` role automatically.
-- **Contribution Tracking + Badges**: first PR, docs hero, bug hunter,
-  on-fire, streak master, multi-repo — awarded on merged PRs.
-- **Good-first-issue feed + release announcements + star milestones**
-  in configurable channels.
+- **One-time links** — each recipient gets their own link that works exactly
+  once.
+- **Private delivery** — links arrive as a DM, never in the channel.
+- **Expiry & self-destruct** — links expire (default 24 hours) and can start a
+  countdown after the first open.
+- **Personal message** — attach a note shown to each recipient.
+- **Revoke anytime** — kill every link from a previous share with one command.
+- **Per-server setup** — each server connects its own qURL account; keys are
+  encrypted at rest.
 
 ## Commands
 
 | Command | Description |
 |---------|-------------|
-| `/qurl send` | Send a file as one-time qURL links to picked recipients |
-| `/qurl map` | Send a Google Maps location as one-time qURL links to picked recipients |
-| `/qurl revoke` | Revoke links from a previous send |
-| `/qurl help` | Usage reference |
-| `/qurl setup` | *(admin)* Configure the guild's qURL API key |
+| `/qurl send` | Share a file as one-time qURL links, DM'd to the recipients you pick |
+| `/qurl map` | Share a Google Maps location as one-time qURL links *(where enabled)* |
+| `/qurl revoke` | Revoke every link from a previous send |
+| `/qurl help` | Show the command reference |
+| `/qurl setup` | *(admin)* Connect this server to qURL |
 | `/qurl status` | *(admin)* Check whether qURL is configured |
-| `/link` | Link your GitHub account to Discord |
-| `/unlink` | Unlink your GitHub account |
-| `/whois [@user]` | Look up a member's GitHub handle |
-| `/contributions [@user]` | Show a member's merged-PR count + badges |
-| `/stats` | Bot-wide contribution statistics |
-| `/leaderboard` | Top contributors |
-| `/forcelink` | *(admin)* Manually link a Discord user to a GitHub username |
-| `/bulklink` | *(admin)* Bulk-link from a `discordId:github,...` list |
-| `/unlinked` | *(admin)* List contributors who haven't linked |
-| `/backfill-milestones` | *(admin)* Re-announce star milestones |
 
-## Setup
+### `/qurl send` options
 
-### Prerequisites
+| Option | Required | Description |
+|--------|----------|-------------|
+| `attachment` | Yes | The file to share |
+| `recipients` | No | Paste `@mentions`. Leave blank to pick from a menu. |
+| `expires-in` | No | How long the links stay valid (default: 24 hours) |
+| `self-destruct` | No | Countdown after the first open (default: no timer) |
+| `personal-message` | No | A note included in each recipient's DM |
 
-- **Node.js ≥ 22** (see `package.json` engines)
-- The LayerV-owned Discord bot application
-- A GitHub OAuth App
-- A hosting target with a public HTTPS URL (ECS, Railway, Fly, etc.)
-- A qURL API key from https://layerv.ai
+`/qurl map` shares a location instead of a file: it takes a required `location`
+(a Google Maps URL, or a place/address to search) in place of `attachment`, the
+same `recipients` / `expires-in` / `self-destruct` / `personal-message` options,
+and an optional `location-name` to override the label recipients see.
 
-### 1. Configure Discord
+## Getting started
+
+### 1. Add the bot to your server
+
+Invite the qURL bot using the install link from your qURL operator. The bot
+requests only four permissions: **View Channels**, **Send Messages**,
+**Embed Links**, and **Use Application Commands**.
+
+> On the multi-tenant public bot, slash commands can take up to an hour to
+> appear the first time the bot joins a server, while Discord propagates the
+> global command registration. Single-server deployments register per-guild,
+> so commands appear right away.
+
+### 2. Connect qURL (admin)
+
+A server admin runs `/qurl setup` once and follows the prompts to connect this
+server to its own qURL account — by authorizing qURL or entering an API key,
+depending on the deployment. The key is stored **encrypted at rest** and scoped
+to the server. Run `/qurl status` to confirm the connection.
+
+### 3. Share
+
+```
+/qurl send attachment:<file> recipients:@alice @bob
+```
+
+Each recipient receives a DM with a one-time link. Use `/qurl revoke` to
+invalidate the links from any previous send.
+
+> Recipients must allow direct messages from server members to receive their
+> link.
+
+## Configuration
+
+The bot is a Node.js service (**Node ≥ 22**) backed by DynamoDB. Copy
+`.env.example` to `.env` and fill it in — every variable is documented inline.
+The variables below are the ones most deployments need; see `.env.example` for
+the complete reference, including advanced operational and per-deployment knobs.
+
+In the **Required** column: **Yes**/**No** means always/never required; **Production**
+means required when `NODE_ENV=production`; a feature label (e.g. `/qurl map`, OAuth
+setup) means required to use that feature.
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `DISCORD_TOKEN` | Yes | Discord bot token |
+| `DISCORD_CLIENT_ID` | Yes | Discord application client ID |
+| `QURL_API_KEY` | `/qurl detect` | Requires `qurl:read` and `qurl:write` for detect; also the fallback for send operations without a server key from `/qurl setup`. |
+| `QURL_ENDPOINT` | No | qURL API base URL (defaults to production; localhost in dev) |
+| `CONNECTOR_URL` | No | qURL connector URL for file upload + serving |
+| `BASE_URL` | OAuth setup | Public `https://` origin of the bot; required to complete the OAuth `/qurl setup` flow (defaults to `http://localhost:3000`). |
+| `KEY_ENCRYPTION_KEY` | Production | 32 random bytes, base64 — encrypts stored keys at rest |
+| `METRICS_TOKEN` | Production | Bearer token guarding the `/metrics` endpoint |
+| `MAP_COMMAND_ENABLED` | No | Set to `true` to enable `/qurl map` (default off) |
+| `DETECT_COMMAND_ENABLED` | No | Set to `true` to enable `/qurl detect` (default off) |
+| `QURL_DEPLOYMENT` | Native `/qurl detect` | Environment-specific public SDK trust: JSON or an absolute JSON file path, with `issuers` and `cells` |
+| `DETECT_TUNNEL_SLUG` | `/qurl detect` | qURL tunnel resource slug used to mint short-lived `/api/detect/discord/<guild_id>` qURLs |
+| `DETECT_EXTRA_NON_PROD_QURL_ENDPOINT_HOSTS` | No | Comma-separated extra non-prod `QURL_ENDPOINT` hosts for `/qurl detect` (extends the built-in set below) |
+| `DETECT_EXTRA_NON_PROD_HOST_SUFFIXES` | No | Comma-separated extra `qurl_site` suffixes granted for the hosts above; each entry must start with `.` |
+| `GOOGLE_MAPS_API_KEY` | `/qurl map` | Google Maps key for location autocomplete (needed when map is enabled) |
+| `GUILD_ID` | No | Scope commands to a single server; unset runs the multi-tenant public bot |
+| `PORT` | No | HTTP listen port (default 3000) |
+
+Discord uses `@layervai/qurl/node` to open current `qv2t1` links. Set
+`QURL_ENDPOINT` and `QURL_DEPLOYMENT` for the same environment. The deployment
+settings contain trusted issuer public keys (`kid`, `spki_der_b64`) and cell
+endpoints (`host`, `port`, `server_public_key_b64`). No trust root is embedded
+in the bot image. The SDK verifies the link and opens native UDP access, then
+Discord sends the image to the authenticated detect endpoint. Each request
+closes its opener on success or failure. Detect requires a signed native link.
+The bot mints `target_path=/api/detect/discord/<guild_id>` from the authenticated
+Discord interaction. The image request carries no API key or guild header.
+The detect service uses one exact guild-scoped attribution read. The private
+binding route remains separate and does not accept these guild-scoped rows.
+
+Run `npm run test:detect:live` with the deployment environment above and
+`DETECT_SMOKE_GUILD_ID` set to a test server ID. The check mints, opens, and
+POSTs an unmarked PNG through the real tunnel, and requires a no-match result.
+To check known attribution, add `DETECT_SMOKE_QURL_ID` and run
+`npm run test:detect:live -- /absolute/path/to/watermarked.png`.
+
+When enabling `/qurl detect`, the minted `qurl_site` must be host-only. The
+detect target is constructed from that value, so both have the same hostname
+after URL case normalization. Validation retains that equality as a fail-closed
+invariant if the target source changes later. The hostname must also sit under a
+supported qURL tunnel suffix. A qURL site may use an `r_<11 chars>` Traefik
+routing label, but that label carries no resource identity and is not compared
+with the resource's opaque public-key ID.
+
+The authenticated mint is the authority for that hostname, so any hostname
+with only non-empty labels that it returns beneath an allowlisted suffix is
+accepted after the URL and SSRF guards, including hostnames with multiple
+routing labels. The suffix allowlist constrains the target to a trusted qURL
+tunnel namespace; it is not a tenant identity signal. The authenticated native
+target must match the exact expected URL before image bytes leave the bot.
+The mint response also must echo the selected resource ID and guild path.
+Both the qURL expiry and access-session duration are set to five minutes;
+expiring a qURL does not shorten an already-open session.
+
+Production `QURL_ENDPOINT` accepts only `*.qurl.site`; sandbox/staging
+tunnel suffixes are accepted as a non-prod set only for explicit non-prod qURL API hosts
+(`localhost`, `127.0.0.1`, `[::1]`, `api.test.local`,
+`api.staging.layerv.ai`); the endpoint host does not bind to one specific
+non-prod suffix. Unknown endpoint hosts, including unlisted `.local` hosts, fail
+closed to production tunnel suffixes. If tunnel infra adds a suffix or a
+path-based `qurl_site`, update the detect host-pin/path contract and tests before
+flipping `DETECT_COMMAND_ENABLED=true`.
+The built-in non-prod set above can be extended via
+`DETECT_EXTRA_NON_PROD_QURL_ENDPOINT_HOSTS` and `DETECT_EXTRA_NON_PROD_HOST_SUFFIXES`
+(comma-separated, trimmed, lowercased; suffixes must start with `.`) — e.g.
+`DETECT_EXTRA_NON_PROD_QURL_ENDPOINT_HOSTS=api.sandbox.example` paired with
+`DETECT_EXTRA_NON_PROD_HOST_SUFFIXES=.tunnel.sandbox.example` — so a private
+deploy can grant its own non-prod tunnel suffix without a code change to this
+public repo. A malformed suffix (missing the leading `.`) fails the bot at boot.
+The bot lists the detect resource by slug only and filters active resources
+client-side because the live API rejects combining `slug` and `status`; the SDK
+auto-paginator walks historical revoked rows for this single dark-launch slug.
+If a tunnel rotation creates more than one active resource for the slug, detect
+fails closed instead of guessing which tunnel should receive the image POST.
+Persistent hard failures arm a short process-wide retry backoff for
+the single dark-launch slug so a broken tunnel does not re-walk the full slug
+history on every detect attempt. Before broad enablement, keep the detect slug's
+revoked-resource history trimmed or add upstream server-side active filtering;
+cold-cache and backoff-recovery scans grow with accumulated historical rows.
+
+Generate `KEY_ENCRYPTION_KEY` with:
+
+```bash
+node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
+```
+
+In production the process refuses to boot without `KEY_ENCRYPTION_KEY` and
+`METRICS_TOKEN`. In local development, leaving `KEY_ENCRYPTION_KEY` unset stores
+keys in plaintext with a loud warning.
+
+The bot's Discord application must have the **Server Members Intent** privileged
+gateway intent enabled (Developer Portal → Bot → Privileged Gateway Intents).
+It is required to resolve recipients for `/qurl send` and `/qurl map`, and the
+bot fails to start without it.
+
+## Development
+
+```bash
+npm ci
+npm run dev   # node --watch
+npm test      # jest
+npm run lint  # eslint, zero warnings
+```
+
+Slash commands register automatically when the bot starts.
+
+`npm test` mocks the AWS SDK and needs no external services. Running the bot
+locally (`npm run dev`) needs a DynamoDB endpoint — `docker-compose.yml` spins
+up a local DynamoDB and `scripts/provision-ddb-local.js` creates the tables.
+See `.env.example` for the local-development environment setup.
+
+## Architecture
+
+- **Multi-tenant by default** — the bot serves every server it's invited to.
+  Each server connects its own qURL account via `/qurl setup`; keys are
+  envelope-encrypted (AES-256-GCM) at rest in DynamoDB.
+- **qURL API client** — creates one-time links and revokes them, with an
+  SSRF guard on target URLs.
+- **Connector** — uploads and serves shared files through the qURL connector
+  behind an SSRF-guarded fetch.
+- **HTTP surface** — `/health` for load-balancer probes, `/metrics` (bearer
+  authenticated), and the OAuth callback that completes the `/qurl setup` flow.
+
+## Troubleshooting
+
+**"qURL is not configured"** — an admin needs to run `/qurl setup` on this
+server. Check the current state with `/qurl status`.
+
+**Recipients didn't get a DM** — each recipient must allow direct messages from
+server members. The link is delivered privately, never in the channel.
+
+**Slash commands don't appear** — after a first invite, global commands can take
+up to an hour to propagate (single-server installs appear right away). If they
+still don't show, confirm the bot was invited with the **Use Application
+Commands** permission.
+
+## License
+
+[MIT](../../LICENSE) — Copyright (c) 2025-present LayerV, Inc.
+
+## Sandbox application metadata
 
 Use the LayerV-owned sandbox Discord application, not the previous personal
 developer-portal app:
@@ -104,9 +278,8 @@ in https://github.com/layervai/qurl-integrations/issues/588. Username and
 image updates are separate Discord `/users/@me` PATCHes, so respect
 `retry_after` and rerun instead of looping if either edit is rate-limited.
 
-After the live metadata apply, run `npm run register` with the same token/app
-pair so Discord's slash-command picker receives the updated command
-descriptions. Keep `DISCORD_CLIENT_ID` aligned with the metadata application
+After the live metadata apply, restart the bot with the same token/app pair
+so automatic command registration updates Discord's slash-command picker. Keep `DISCORD_CLIENT_ID` aligned with the metadata application
 ID; the script verifies the token's app, while command registration and invite
 links read the client ID from environment/SSM/infra wiring.
 
@@ -138,159 +311,3 @@ The live apply uses Discord v10's documented current-user fields
 `icon`, `cover_image`, `tags`, `install_params`); an application PATCH failure
 is fatal, while bot image failures are reported as partial applies.
 
-### 2. Configure GitHub OAuth
-
-1. https://github.com/settings/developers → New OAuth App
-2. Callback URL: `https://YOUR_DOMAIN/auth/github/callback`
-3. Copy Client ID + generate a Client Secret.
-
-### 3. Configure environment
-
-Copy `.env.example` to `.env` and fill in. Every variable is documented
-inline; the sections below call out the non-obvious ones.
-
-**Always required:**
-
-- `DISCORD_TOKEN`, `DISCORD_CLIENT_ID`, `GUILD_ID`
-- `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, `GITHUB_WEBHOOK_SECRET`
-- `BASE_URL` (must be `https://` in production)
-- `ALLOWED_GITHUB_ORGS` (comma-separated GitHub org names)
-
-**Required when `NODE_ENV=production`** (the process refuses to boot
-without them, see `src/index.js`):
-
-- `METRICS_TOKEN` — bearer token for `/metrics`
-- `QURL_API_KEY` — default qURL key (individual guilds can override via
-  `/qurl setup`)
-- `KEY_ENCRYPTION_KEY` — 32 random bytes, base64. Generate with:
-  ```
-  node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
-  ```
-
-**Optional operational knobs:**
-
-- `PORT` (default 3000)
-- `ADMIN_USER_IDS` — comma-separated Discord IDs with access to
-  `/forcelink`, `/bulklink`, `/backfill-milestones`, `/unlinked`
-- `RATE_LIMIT_WINDOW_MS`, `RATE_LIMIT_MAX_REQUESTS` — OAuth + webhook
-  per-IP rate limiter
-- `QURL_SEND_MAX_RECIPIENTS`, `QURL_SEND_COOLDOWN_MS`
-- `PENDING_LINK_EXPIRY_MINUTES` — OAuth state TTL (default 10 min)
-- `WEEKLY_DIGEST_CRON`, `WELCOME_DM_ENABLED`, `LOG_LEVEL`
-- `CONTRIBUTOR_ROLE_NAME`, `GENERAL_CHANNEL_NAME`, etc.
-
-### 4. Configure GitHub webhook
-
-On each repo you want to track:
-
-1. Repo → Settings → Webhooks → Add webhook
-2. Payload URL: `https://YOUR_DOMAIN/webhook/github`
-3. Content type: `application/json`
-4. Secret: **required** — same value as `GITHUB_WEBHOOK_SECRET`
-5. Events: Pull requests, Issues, Releases, Stars (use "Let me select").
-
-### 5. Run
-
-Local dev needs a DynamoDB-Local container — the bot has no in-process
-data store, so the SDK has to reach a real DDB endpoint somewhere. The
-`docker-compose.yml` here spins up `amazon/dynamodb-local` on port 8000;
-the one-shot provisioner creates every table `ddb-store` expects.
-
-```bash
-npm ci                                  # provisioner needs @aws-sdk/client-dynamodb
-docker compose up -d dynamodb-local
-node scripts/provision-ddb-local.js     # idempotent, re-run after every `compose up`
-DDB_TEST_ENDPOINT=http://localhost:8000 \
-  DDB_TABLE_PREFIX=qurl-bot-discord-local- \
-  AWS_REGION=us-east-1 \
-  AWS_ACCESS_KEY_ID=local AWS_SECRET_ACCESS_KEY=local \
-  npm start
-```
-
-(The fake AWS creds keep the SDK happy without provisioning real IAM.
-`DDB_TEST_ENDPOINT` is the env-var hook `ddb-store.js` already supports
-for re-pointing the SDK at a local endpoint. Use the same
-`DDB_TABLE_PREFIX` for the provisioner and `npm start` — the
-provisioner defaults to `qurl-bot-discord-local-` if unset, and a
-mismatched prefix lands `npm start` against tables that don't exist.)
-
-The DDB-Local container runs `-inMemory`, so a `docker compose down`
-flushes every table. Re-run `node scripts/provision-ddb-local.js`
-after each fresh `docker compose up` (the provisioner is idempotent
-on existing tables, so a re-run against the same container is a
-no-op — but a new container starts empty and needs the create pass).
-For sticky local data across restarts, drop `-inMemory` and add
-`-dbPath ./data` to the compose command (see the `docker-compose.yml`
-header comment).
-
-`npm test` does NOT need DDB Local — every test mocks the AWS SDK via
-`aws-sdk-client-mock`. The local-dev workflow is only required for
-`npm start`.
-
-The provisioner covers the **Store-contract** tables (those in
-`src/store/ddb-store.js`'s `TABLES` map). Other modules use their own
-dedicated tables that this script does NOT create — `flow-state`,
-`gateway-session`, `gateway-lock`, `gateway-peer-heartbeat`. Running
-locally with `ENABLE_EVENT_SHIPPER=true` or `ENABLE_GATEWAY_RESUME=true`
-will hit `ResourceNotFoundException` on these unless you also provision
-them via terraform-against-localhost or `aws dynamodb create-table
---endpoint-url http://localhost:8000`.
-
-Linux note: `host.docker.internal` only resolves inside Docker
-Desktop. If you're running Docker Engine on bare Linux, either start
-the container with `--add-host=host.docker.internal:host-gateway`
-or use `127.0.0.1` from the container side (and bind the
-docker-compose `dynamodb-local` port to the host loopback rather
-than to the container's network).
-
-## Architecture
-
-- `src/index.js` — boot validation + graceful shutdown
-- `src/commands.js` — all slash-command handlers (split tracked in #55)
-- `src/discord.js` — discord.js client + role/channel cache
-- `src/store/` — DynamoDB-backed data layer (encrypted guild keys + per-table CRUD)
-- `src/connector.js` — qurl-s3-connector client (SSRF-guarded CDN fetch)
-- `src/qurl.js` — qURL API client (private-IP blocklist on target URLs)
-- `src/routes/oauth.js` — GitHub OAuth (atomic state consumption,
-  session-cookie binding, retry + background revoke sweeper)
-- `src/routes/webhooks.js` — GitHub HMAC-verified webhooks, per-IP
-  bad-signature rate limit
-- `src/utils/crypto.js` — AES-256-GCM envelope encryption (versioned)
-- `src/utils/sanitize.js` — filename + Discord-markdown escaping
-- `src/orphan-token-sweeper.js` — hourly retry-revoke for failed OAuth
-  token revocations; purges after 7 days
-- `src/templates/page.js` — HTML templates with strict CSP + escapeHtml
-
-## Local Development
-
-```bash
-cp .env.example .env
-# For local dev: leave KEY_ENCRYPTION_KEY unset (stores plaintext with a
-# loud warning). QURL_ENDPOINT/CONNECTOR_URL auto-default to localhost
-# when NODE_ENV != production.
-npm ci
-npm run dev   # node --watch
-```
-
-Useful scripts:
-
-- `npm test` — jest (78/68/78/78 coverage threshold)
-- `npm run lint` — ESLint with `--max-warnings 0`
-- `npm run register` — register slash commands with Discord
-
-## Troubleshooting
-
-**OAuth "Invalid Session"** — the callback requires the same browser
-that opened `/auth/github`. Cleared cookies or switched browsers? Run
-`/link` again.
-
-**Webhook not triggering** — verify the webhook URL, content type, and
-that `GITHUB_WEBHOOK_SECRET` matches GitHub's setting. Failed signatures
-are logged at error level.
-
-**Role not assigned** — the bot role must sit above `@Contributor` in
-the role hierarchy, and the bot needs `Manage Roles`.
-
-## License
-
-Apache-2.0

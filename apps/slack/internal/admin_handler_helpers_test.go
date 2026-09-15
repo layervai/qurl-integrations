@@ -91,6 +91,7 @@ func newAdminTestHandler(t *testing.T, ts *adminTestServers) *Handler {
 	h := NewHandler(Config{
 		AuthProvider:       &auth.EnvProvider{EnvVar: "QURL_API_KEY"},
 		SlackSigningSecret: testSigningSecret,
+		ConnectorAPIURL:    testTunnelAPIURL,
 		NewClient: func(apiKey string) *client.Client {
 			return client.New(ts.customerServer.URL, apiKey, client.WithRetry(0))
 		},
@@ -119,6 +120,16 @@ func newAdminTestHandler(t *testing.T, ts *adminTestServers) *Handler {
 	return h
 }
 
+func enableAdminStoreRateLimit(t *testing.T, h *Handler, limit int) {
+	t.Helper()
+	if h.cfg.AdminStore == nil {
+		t.Fatal("enableAdminStoreRateLimit: AdminStore is nil")
+	}
+	h.cfg.AdminStore.RateLimitEnabled = true
+	h.cfg.AdminStore.RateLimitLimit = limit
+	h.cfg.AdminStore.RateLimitWindow = time.Hour
+}
+
 // adminSlashInvoker bundles the captured response_url and provides
 // invokeAdmin* helpers. The captured response_url is necessary for
 // async verbs (policies, revoke-all) — the synchronous ack is just
@@ -131,8 +142,9 @@ type adminSlashInvoker struct {
 	responseU *httptest.Server
 	// channelID overrides the slash-command channel_id form field
 	// for the next invocation. Empty falls back to "C_test".
-	channelID    string
-	enterpriseID string
+	channelID           string
+	enterpriseID        string
+	isEnterpriseInstall string
 }
 
 // newAdminSlashInvoker spins up a response_url-capturing httptest
@@ -206,6 +218,9 @@ func (a *adminSlashInvoker) invokeAdmin(text, teamID, userID string) (status int
 	if a.enterpriseID != "" {
 		body.Set(fieldEnterpriseID, a.enterpriseID)
 	}
+	if a.isEnterpriseInstall != "" {
+		body.Set(fieldIsEnterpriseInstall, a.isEnterpriseInstall)
+	}
 	encoded := body.Encode()
 	w := httptest.NewRecorder()
 	r := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/slack/commands", strings.NewReader(encoded))
@@ -246,6 +261,24 @@ func parseSlackReplyBool(t *testing.T, body []byte, field string) bool {
 	}
 	value, _ := got[field].(bool)
 	return value
+}
+
+// assertWizardAckReplaced asserts a guided-wizard cleanup REPLACED its "Working
+// on it…" ack in place rather than deleting it: replace_original set,
+// delete_original NOT set (unsupported for slash commands — Slack returns
+// no_text), and the opened-copy text (wantText) present. `when` labels the open
+// path for failure messages.
+func assertWizardAckReplaced(t *testing.T, body []byte, wantText, when string) {
+	t.Helper()
+	if got := parseSlackReplyBool(t, body, "replace_original"); !got {
+		t.Fatalf("replace_original = %v, want true after %s", got, when)
+	}
+	if got := parseSlackReplyBool(t, body, "delete_original"); got {
+		t.Fatal("delete_original must not be set (unsupported for slash commands; Slack returns no_text)")
+	}
+	if text := parseSlackText(t, body); !strings.Contains(text, wantText) {
+		t.Fatalf("ack replace text = %q, want it to contain %q (after %s)", text, wantText, when)
+	}
 }
 
 // workspaceMappingHasAdmin returns true iff the workspace_mappings

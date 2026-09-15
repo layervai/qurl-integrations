@@ -26,14 +26,18 @@ import (
 // it would risk SSRF if the signature gate ever broke, so postResponse
 // validates the scheme and host before dialing.
 const (
-	fieldResponseURL  = "response_url"
-	fieldTeamID       = "team_id"
-	fieldUserID       = "user_id"
-	fieldChannelID    = "channel_id"
-	fieldCommand      = "command"
-	fieldText         = "text"
-	fieldTriggerID    = "trigger_id"
-	fieldEnterpriseID = "enterprise_id"
+	fieldResponseURL         = "response_url"
+	fieldTeamID              = "team_id"
+	fieldTeamDomain          = "team_domain"
+	fieldUserID              = "user_id"
+	fieldUserName            = "user_name"
+	fieldChannelID           = "channel_id"
+	fieldChannelName         = "channel_name"
+	fieldCommand             = "command"
+	fieldText                = "text"
+	fieldTriggerID           = "trigger_id"
+	fieldEnterpriseID        = "enterprise_id"
+	fieldIsEnterpriseInstall = "is_enterprise_install"
 )
 
 // slackResponseURLHost is Slack's webhook ingress for slash-command
@@ -44,7 +48,9 @@ const (
 // docs guarantee for this surface.
 const slackResponseURLHost = "hooks.slack.com"
 
-const deleteOriginalRetryDelay = 250 * time.Millisecond
+const slackFormBoolTrue = "true"
+
+const responseURLRetryDelay = 250 * time.Millisecond
 
 // runAsync acks the request synchronously with ackWorkingOnIt and runs
 // `work` in a bounded-pool goroutine. Returns after the ack is written.
@@ -83,16 +89,37 @@ func (h *Handler) runAsync(w http.ResponseWriter, command string, values url.Val
 // startAsyncWorker runs async slash-command or interaction work through the
 // same bounded pool, shutdown drain, timeout, and panic recovery. The caller
 // owns the Slack ack shape because slash commands and modal submissions have
-// different response contracts.
+// different response contracts. Bounded by [asyncWorkTimeout] (slash-command
+// budget); see [Handler.startAsyncWorkerWithTimeout] for callers that need more.
 func (h *Handler) startAsyncWorker(log *slog.Logger, work func(ctx context.Context, log *slog.Logger)) bool {
+	return h.startAsyncWorkerWithTimeout(log, asyncWorkTimeout, work)
+}
+
+// startAsyncWorkerWithTimeout is startAsyncWorker with a caller-chosen per-work
+// deadline. A conversation-mode turn makes several Anthropic round-trips and so
+// needs a larger budget than the slash-command default, which was sized for a
+// couple of qURL API calls.
+func (h *Handler) startAsyncWorkerWithTimeout(log *slog.Logger, timeout time.Duration, work func(ctx context.Context, log *slog.Logger)) bool {
+	if h.runOnPool(h.sem, log, timeout, work) {
+		return true
+	}
+	log.Warn("async pool saturated — dropping request")
+	return false
+}
+
+// runOnPool acquires a non-blocking slot on sem and runs work in a wg-tracked,
+// panic-recovered, timeout-bounded goroutine off h.baseCtx. It returns false WITHOUT
+// running if sem is full, leaving the saturation log to the caller so each pool reports
+// its own context. The shared turn pool (h.sem) goes through here; channel follow-ups use
+// runAgentFollowupPipeline so their short gate slot can be released before the long turn.
+func (h *Handler) runOnPool(sem chan struct{}, log *slog.Logger, timeout time.Duration, work func(ctx context.Context, log *slog.Logger)) bool {
 	select {
-	case h.sem <- struct{}{}:
+	case sem <- struct{}{}:
 	default:
-		log.Warn("async pool saturated — dropping request")
 		return false
 	}
 
-	h.wg.Add(1)
+	h.asyncStart()
 	go func() {
 		// Defer LIFO is load-bearing here: on panic, the recover
 		// runs FIRST (innermost), absorbs the panic, then sem
@@ -102,19 +129,19 @@ func (h *Handler) startAsyncWorker(log *slog.Logger, work func(ctx context.Conte
 		// panic. The ctx cancel is innermost-of-innermost so
 		// children of that ctx see cancellation before the worker
 		// frame returns.
-		defer h.wg.Done()
-		defer func() { <-h.sem }()
+		defer h.asyncDone()
+		defer func() { <-sem }()
 		defer func() {
 			if rec := recover(); rec != nil {
 				// A panicking goroutine in a long-lived process is
 				// disqualifying — log + stack so the cause is in
 				// CloudWatch, then swallow so the deferred sem release
 				// and wg.Done still run.
-				log.Error("panic in async slash-command worker", "recover", rec, "stack", string(debug.Stack()))
+				log.Error("panic in async worker", "recover", rec, "stack", string(debug.Stack()))
 			}
 		}()
 
-		ctx, cancel := context.WithTimeout(h.baseCtx, asyncWorkTimeout)
+		ctx, cancel := context.WithTimeout(h.baseCtx, timeout)
 		defer cancel()
 		work(ctx, log)
 	}()
@@ -155,6 +182,37 @@ func withRequestIDAttr(requestID string, attrs ...any) []any {
 	return append(out, attrs...)
 }
 
+// withAPIErrorAttrs expands a *client.APIError into log attributes —
+// request ID, status, code, detail, and any per-field validation messages.
+// APIError.Error() renders only "Title (Status): Detail", so a contract
+// rejection's actionable part — invalid_fields, naming the offending key — is
+// parsed and then dropped by any site that logs the bare error. Non-API errors
+// pass through untouched.
+//
+// The get/list handlers hand-roll a narrower version of this shape inline
+// (errors.As then withRequestIDAttr with status/code/detail); they predate this
+// helper and are left alone here to keep the credential-mint change scoped.
+// Converting them is a mechanical follow-up that would also gain them
+// invalid_fields.
+func withAPIErrorAttrs(err error, attrs ...any) []any {
+	var apiErr *client.APIError
+	if !errors.As(err, &apiErr) {
+		return attrs
+	}
+	out := withRequestIDAttr(apiErr.RequestID, attrs...)
+	out = append(out, "status", apiErr.StatusCode)
+	if apiErr.Code != "" {
+		out = append(out, "code", apiErr.Code)
+	}
+	if apiErr.Detail != "" {
+		out = append(out, "detail", apiErr.Detail)
+	}
+	if len(apiErr.InvalidFields) > 0 {
+		out = append(out, "invalid_fields", apiErr.InvalidFields)
+	}
+	return out
+}
+
 // postResponse POSTs an ephemeral follow-up to Slack's response_url.
 // Errors are logged, never retried. The bool tells sensitive callers whether
 // they should add extra audit context after a failed delivery.
@@ -173,10 +231,7 @@ func withRequestIDAttr(requestID string, attrs ...any) []any {
 // kill while still bounding the goroutine's lifetime.
 // handler.Wait()/WaitTimeout in main blocks process exit.
 func (h *Handler) postResponse(log *slog.Logger, responseURL, text string) bool {
-	body, err := json.Marshal(map[string]string{
-		respFieldResponseType: respTypeEphemeral,
-		respFieldText:         text,
-	})
+	body, err := responseURLTextBody(text)
 	if err != nil {
 		// json.Marshal of a map[string]string can't fail in practice; log
 		// and bail rather than POSTing a half-baked body.
@@ -186,17 +241,57 @@ func (h *Handler) postResponse(log *slog.Logger, responseURL, text string) bool 
 	return h.postResponseBody(log, responseURL, body)
 }
 
+// postResponseWithRetry is the opt-in shape for follow-ups where a false
+// delivery negative changes security behavior. Ordinary responses stay
+// single-attempt so non-idempotent Slack blips do not duplicate user-visible
+// messages; sensitive callers such as tunnel install delivery retry once before
+// treating delivery as unconfirmed and revoking freshly minted material.
+func (h *Handler) postResponseWithRetry(log *slog.Logger, responseURL, text, operation string) bool {
+	body, err := responseURLTextBody(text)
+	if err != nil {
+		log.Error("marshal response_url payload failed", "error", err)
+		return false
+	}
+	return h.postResponseBodyWithRetry(log, responseURL, body, operation)
+}
+
+func responseURLTextBody(text string) ([]byte, error) {
+	return json.Marshal(map[string]string{
+		respFieldResponseType: respTypeEphemeral,
+		respFieldText:         text,
+	})
+}
+
 // postResponseBlocks POSTs an ephemeral Block Kit follow-up to Slack's
 // response_url. fallbackText is the plain-text rendering Slack shows in
 // notifications and to clients that can't render blocks — Slack treats a
 // blocks message's `text` as the accessibility/notification fallback, so
 // it MUST still carry the full listing. Same SSRF-fenced delivery,
 // single-attempt-with-logging posture as [Handler.postResponse].
+//
+// It sets unfurl_links/unfurl_media:false for parity with the chat.postMessage
+// block seams: a response_url message is not link-unfurled by Slack today, but the
+// `/qurl get` fallback carries a static one-time URL, so suppressing explicitly keeps
+// the "never unfurled" invariant uniform across surfaces (this is the highest-traffic
+// get path) rather than resting on assumed behavior. The suppression is repo-wide —
+// it applies to EVERY caller (get, /qurl list, revoke, tunnel install) — which is
+// harmless: none of their fallbacks want unfurl.
+//
+// mrkdwn is left at Slack's default (true), unlike the chat.post* block seams
+// (Mrkdwn:false) — deliberately. Those seams set it to neutralize a prompt-injected
+// LLM confirm-card summary in their fallback; postResponseBlocks has no LLM input.
+// Both its fallback shapes are safe (and want) mrkdwn: revoke/list/tunnel pass mrkdwn
+// prose (revoke even uses escaped backtick code, which mrkdwn:false would render
+// literally), and the `/qurl get` fallback carries a STATIC one-time URL — mrkdwn:true
+// merely linkifies it, which is what a "usable link for non-block clients" fallback
+// wants and is safe (static, so no injection; unfurl is already off above).
 func (h *Handler) postResponseBlocks(log *slog.Logger, responseURL, fallbackText string, blocks []any) bool {
 	body, err := json.Marshal(map[string]any{
 		respFieldResponseType: respTypeEphemeral,
 		respFieldText:         fallbackText,
 		blockKitFieldBlocks:   blocks,
+		respFieldUnfurlLinks:  false,
+		respFieldUnfurlMedia:  false,
 	})
 	if err != nil {
 		log.Error("marshal response_url blocks payload failed", "error", err)
@@ -214,34 +309,59 @@ func (h *Handler) postErrorResponse(log *slog.Logger, responseURL, message strin
 	return h.postResponseBody(log, responseURL, body)
 }
 
-func (h *Handler) deleteOriginalResponse(log *slog.Logger, responseURL string) bool {
-	body, err := json.Marshal(map[string]bool{"delete_original": true})
+// replaceOriginalResponse swaps the slash-command's ephemeral "Working on it…"
+// ack for a final message once a wizard modal has opened. Slack does NOT support
+// delete_original for slash commands — it ignores the field and, because the POST
+// then carries no text, rejects it with `no_text` (HTTP 500); an ephemeral ack
+// also can't be deleted. So wizard flows REPLACE the ack rather than delete it.
+// The always-present `text` field is what keeps the POST off the `no_text` path,
+// and replace_original updates the spinner in place instead of stacking a second
+// ephemeral. Same mechanism the error paths already use via ErrorResponse.
+func (h *Handler) replaceOriginalResponse(log *slog.Logger, responseURL, message string) bool {
+	body, err := json.Marshal(map[string]any{
+		respFieldResponseType:    respTypeEphemeral,
+		respFieldReplaceOriginal: true,
+		respFieldText:            message,
+	})
 	if err != nil {
-		log.Error("marshal response_url delete payload failed", "error", err)
+		log.Error("marshal response_url replace payload failed", "error", err)
 		return false
 	}
 	if h.postResponseBody(log, responseURL, body) {
 		return true
 	}
-	// Retry only delete_original: a stale "Working on it" ack is uniquely
+	// Retry only this replace: a stale "Working on it" ack is uniquely
 	// confusing after a modal opens, while ordinary async replies are safer as
-	// single-attempt deliveries with explicit failure logging. The short delay
-	// makes the retry useful for transient Slack blips without materially
-	// extending the async worker's lifetime.
-	log.Warn("response_url delete_original failed; retrying once")
-	if !h.waitForDeleteOriginalRetry() {
-		log.Warn("response_url delete_original retry skipped because handler is shutting down")
-		return false
-	}
-	return h.postResponseBody(log, responseURL, body)
+	// single-attempt deliveries with explicit failure logging.
+	return h.postResponseBodyRetryAfterFailure(log, responseURL, body, "replace_original")
 }
 
-func (h *Handler) waitForDeleteOriginalRetry() bool {
+func (h *Handler) postResponseBodyWithRetry(log *slog.Logger, responseURL string, body []byte, operation string) bool {
+	result := h.postResponseBodyResult(log, responseURL, body)
+	if result == responseURLDeliveryConfirmed {
+		return true
+	}
+	if result == responseURLDeliveryPermanentFailure {
+		return false
+	}
+	return h.postResponseBodyRetryAfterFailure(log, responseURL, body, operation)
+}
+
+func (h *Handler) postResponseBodyRetryAfterFailure(log *slog.Logger, responseURL string, body []byte, operation string) bool {
+	log.Warn("response_url delivery failed; retrying once", "operation", operation)
+	if !h.waitForResponseURLRetry() {
+		log.Warn("response_url delivery retry skipped because handler is shutting down", "operation", operation)
+		return false
+	}
+	return h.postResponseBodyResult(log, responseURL, body) == responseURLDeliveryConfirmed
+}
+
+func (h *Handler) waitForResponseURLRetry() bool {
 	ctx := h.baseCtx
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	timer := time.NewTimer(deleteOriginalRetryDelay)
+	timer := time.NewTimer(responseURLRetryDelay)
 	defer timer.Stop()
 	select {
 	case <-ctx.Done():
@@ -252,14 +372,26 @@ func (h *Handler) waitForDeleteOriginalRetry() bool {
 }
 
 func (h *Handler) postResponseBody(log *slog.Logger, responseURL string, body []byte) bool {
+	return h.postResponseBodyResult(log, responseURL, body) == responseURLDeliveryConfirmed
+}
+
+type responseURLDeliveryResult int
+
+const (
+	responseURLDeliveryConfirmed responseURLDeliveryResult = iota
+	responseURLDeliveryRetryableFailure
+	responseURLDeliveryPermanentFailure
+)
+
+func (h *Handler) postResponseBodyResult(log *slog.Logger, responseURL string, body []byte) responseURLDeliveryResult {
 	if responseURL == "" {
 		log.Warn("missing response_url — async result has nowhere to go")
-		return false
+		return responseURLDeliveryPermanentFailure
 	}
 	target, err := h.validateResponseURLFn(responseURL)
 	if err != nil {
 		log.Warn("invalid response_url — refusing to dial", "error", err)
-		return false
+		return responseURLDeliveryPermanentFailure
 	}
 
 	deliverCtx, cancel := context.WithTimeout(context.Background(), responseURLTimeout)
@@ -275,14 +407,14 @@ func (h *Handler) postResponseBody(log *slog.Logger, responseURL string, body []
 	req, err := http.NewRequestWithContext(deliverCtx, http.MethodPost, target.String(), bytes.NewReader(body))
 	if err != nil {
 		log.Error("build response_url request failed", "error", err)
-		return false
+		return responseURLDeliveryPermanentFailure
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := h.responseURLClient.Do(req)
 	if err != nil {
 		log.Error("response_url POST failed", "error", err)
-		return false
+		return responseURLDeliveryRetryableFailure
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -300,11 +432,15 @@ func (h *Handler) postResponseBody(log *slog.Logger, responseURL string, body []
 		// read only to detect overflow.
 		respBody = respBody[:respBodyCap]
 	}
-	if resp.StatusCode >= 400 {
-		log.Warn("response_url returned non-2xx", "status", resp.StatusCode, "body", string(respBody))
-		return false
+	if resp.StatusCode >= 500 || resp.StatusCode == http.StatusTooManyRequests {
+		log.Warn("response_url returned retryable non-2xx", "status", resp.StatusCode, "body", string(respBody))
+		return responseURLDeliveryRetryableFailure
 	}
-	return true
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		log.Warn("response_url returned non-2xx", "status", resp.StatusCode, "body", string(respBody))
+		return responseURLDeliveryPermanentFailure
+	}
+	return responseURLDeliveryConfirmed
 }
 
 // validateResponseURL fences the response_url POST destination to

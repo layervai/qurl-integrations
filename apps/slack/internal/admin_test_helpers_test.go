@@ -20,6 +20,7 @@ package internal
 //     `ts.addAdmin("GET","/internal/v1/admin/check", ...)` pattern.
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -44,6 +45,45 @@ func newAdminTestServers(t *testing.T) *adminTestServers {
 		customerRoutes: map[string]http.HandlerFunc{},
 		ddb:            newFakeDDB(t, names, nil),
 		tableNames:     names,
+	}
+	// Guided Connector installs always read the authoritative lifecycle and
+	// restart it before minting install credentials. Individual tests can
+	// replace these exact routes when they need failure or prior-on behavior.
+	sharingPath := "/v1/resources/" + testTunnelResourceID + "/sharing"
+	// Every install flow resolves the account owner for the headless share
+	// config (GET /v1/me); serve it by default so tests only override it when
+	// they exercise the failure path.
+	ts.customerRoutes[http.MethodGet+" /v1/me"] = func(w http.ResponseWriter, _ *http.Request) {
+		respondQURLEnvelope(t, w, map[string]any{"owner_id": testOwnerID, "api_key": map[string]any{"key_id": "key_workspace"}})
+	}
+	ts.customerRoutes[http.MethodGet+" "+sharingPath] = func(w http.ResponseWriter, _ *http.Request) {
+		respondQURLEnvelope(t, w, map[string]any{
+			"resource_id": testTunnelResourceID, "crid": testTunnelCRID,
+			"desired_state": "off", "serving_epoch": 0, "connection_state": "stopped",
+		})
+	}
+	ts.customerRoutes[http.MethodPost+" "+sharingPath+"/restart"] = func(w http.ResponseWriter, _ *http.Request) {
+		respondQURLEnvelope(t, w, map[string]any{
+			"resource_id": testTunnelResourceID, "crid": testTunnelCRID,
+			"desired_state": "on", "serving_epoch": 1, "connection_state": "connecting",
+		})
+	}
+	ts.customerRoutes[http.MethodPut+" "+sharingPath] = func(w http.ResponseWriter, r *http.Request) {
+		var input struct {
+			DesiredState string `json:"desired_state"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+			t.Fatalf("decode sharing update: %v", err)
+		}
+		connection, epoch := "connecting", uint64(2)
+		if input.DesiredState == "off" {
+			connection = "stopped"
+			epoch = 1
+		}
+		respondQURLEnvelope(t, w, map[string]any{
+			"resource_id": testTunnelResourceID, "crid": testTunnelCRID,
+			"desired_state": input.DesiredState, "serving_epoch": epoch, "connection_state": connection,
+		})
 	}
 	ts.customerServer = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		key := r.Method + " " + r.URL.Path
@@ -179,6 +219,18 @@ func (ts *adminTestServers) seedPolicySet(t *testing.T, teamID, channelID, alias
 func (ts *adminTestServers) seedPolicyAliasBindings(t *testing.T, teamID, channelID string, bindings map[string]string) {
 	t.Helper()
 	ts.ddb.seedItem(t, ts.tableNames.channelPolicy, seedChannelPolicyAliasBindings(teamID, channelID, bindings))
+}
+
+// seedChannelExposure exposes resourceIDs in (teamID, channelID) by seeding the
+// channel's allowed_resource_ids SS — the channel-scoping that `/qurl list`
+// (disclosure) and `/qurl get` (mint) now require for a tunnel to appear/mint
+// there. Thin alias for seedPolicySet(alias="") that reads as intent at the
+// call sites updated for channel-scoped `/qurl list`. Pass every resource_id
+// the test's /v1/resources fixture returns that should be visible in the
+// channel.
+func (ts *adminTestServers) seedChannelExposure(t *testing.T, teamID, channelID string, resourceIDs ...string) {
+	t.Helper()
+	ts.seedPolicySet(t, teamID, channelID, "", resourceIDs)
 }
 
 // failOnAdminMutation installs a hook that fails the test if any

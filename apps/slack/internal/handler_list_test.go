@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -20,15 +22,26 @@ import (
 // resource-row builder lines visually aligned. Assertion sites read
 // these names too, so a rename surfaces every site at once.
 //
-// `/qurl list` is tunnel-only and renders the slug as the `$<token>`,
-// so the fixtures below are tunnel resources (testKeyType:
-// client.ResourceTypeTunnel) carrying a slug.
+// Most `/qurl list` fixtures below are qURL Connector resources carrying a slug; URL
+// resource tests add explicit URL rows where that behavior matters.
 const (
-	testListAliasProdDB  = "prod-db"
-	testListAliasSecret  = "secret"
-	testListAliasAlpha   = "alpha"
-	testListAliasGrafana = "grafana"
-	testListResIDProdDB  = "r_prod_db_aa"
+	testListAliasProdDB   = "prod-db"
+	testListAliasSecret   = "secret"
+	testListAliasAlpha    = "alpha"
+	testListAliasGrafana  = "grafana"
+	testListAliasDocs     = "docs"
+	testListSlugOpsTunnel = "ops-tunnel"
+	testListResIDProdDB   = "r_prod_db_aa"
+	testListResIDURLDocs  = "r_url_docs01"
+	testListURLDocs       = "https://docs.example.com"
+	testListURLDocsLine   = "• `$docs`"
+	testListURLFirst      = "https://first.example.com"
+	testListURLSecond     = "https://second.example.com"
+	testListGetCommand    = "/qurl get"
+
+	testListEscapedDescriptionCase = "description is mrkdwn escaped"
+	testListUnsafeDescription      = "Use <!channel> <@U123> & *now*"
+	testListEscapedDescription     = "Use &lt;!channel&gt; &lt;@U123&gt; &amp; ∗now∗"
 )
 
 // writeResourceListFixture writes a /v1/resources success envelope
@@ -51,16 +64,13 @@ func writeResourceListFixture(t *testing.T, w http.ResponseWriter, resources []m
 }
 
 // TestHandleList_RendersAllTunnels fences the happy path: /qurl list
-// renders every tunnel the master listing returns, with each row
-// showing the slug as the copy-paste-ready `$<slug>` token. Post-revert
-// of #234 (#459) the listing is unscoped — no channel-policy filter —
-// so this is what every workspace member sees.
+// renders every tunnel protected in the invoker's channel, each row showing
+// the slug as the copy-paste-ready `$<slug>` token. The listing is
+// channel-scoped (see TestHandleList_ScopedToChannel), so both tunnels are
+// protected in C_test here; the admin-vs-non-admin distinction does not affect
+// it (both see the same scoped set).
 func TestHandleList_RendersAllTunnels(t *testing.T) {
 	ts := newAdminTestServers(t)
-	// seedAdmin supplies the workspace_mappings / API-key fixture that
-	// authenticatedClient needs; the admin-vs-non-admin distinction no
-	// longer affects /qurl list, so this happy path renders identically
-	// for a non-admin (see TestHandleList_UnscopedAcrossChannels).
 	ts.seedAdmin(t)
 	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
 		writeResourceListFixture(t, w, []map[string]any{
@@ -68,11 +78,12 @@ func TestHandleList_RendersAllTunnels(t *testing.T) {
 			{testKeyResourceID: "r_stage_db_bb", testKeyType: client.ResourceTypeTunnel, testKeySlug: "stage-db"},
 		}, "", false)
 	})
+	ts.seedChannelExposure(t, testAdminTeamID, "C_test", testListResIDProdDB, "r_stage_db_bb")
 	h := newAdminTestHandler(t, ts)
 	inv := newAdminSlashInvoker(t, h)
 
 	_, _, async := inv.invokeAdminAsync("list", testAdminTeamID, testAdminUserID)
-	if !strings.Contains(async, "Protected Tunnel Resources") {
+	if !strings.Contains(async, "Protected Resources") {
 		t.Errorf("async reply missing header: %q", async)
 	}
 	if !strings.Contains(async, "`$prod-db`") {
@@ -81,7 +92,7 @@ func TestHandleList_RendersAllTunnels(t *testing.T) {
 	if !strings.Contains(async, "`$stage-db`") {
 		t.Errorf("async reply missing stage-db row: %q", async)
 	}
-	if !strings.Contains(async, "/qurl get") {
+	if !strings.Contains(async, testListGetCommand) {
 		t.Errorf("async reply missing copy-paste hint: %q", async)
 	}
 }
@@ -100,6 +111,9 @@ func TestHandleList_ExcludesRevokedTunnels(t *testing.T) {
 			{testKeyResourceID: "r_revoked_01", testKeyType: client.ResourceTypeTunnel, testKeySlug: "dead-db", testKeyStatus: client.StatusRevoked},
 		}, "", false)
 	})
+	// Expose BOTH to C_test so the revoked-row exclusion is what hides dead-db,
+	// not the channel scope.
+	ts.seedChannelExposure(t, testAdminTeamID, "C_test", testListResIDProdDB, "r_revoked_01")
 	h := newAdminTestHandler(t, ts)
 	inv := newAdminSlashInvoker(t, h)
 
@@ -127,18 +141,18 @@ func TestHandleList_ShowsBoundAliases(t *testing.T) {
 		"ops":             resID,
 	})
 	// Description doubles as the Display Name and is always set; here it
-	// carries the install default ("Slack tunnel install for <slug>"). The
+	// carries the install default ("Slack qURL Connector install for <slug>"). The
 	// row shows the bound aliases AND the Display Name after the em-dash.
 	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
 		writeResourceListFixture(t, w, []map[string]any{
-			{testKeyResourceID: resID, testKeyType: client.ResourceTypeTunnel, testKeySlug: "kktest", testKeyDescription: "Slack tunnel install for kktest"},
+			{testKeyResourceID: resID, testKeyType: client.ResourceTypeTunnel, testKeySlug: "kktest", testKeyDescription: "Slack qURL Connector install for kktest"},
 		}, "", false)
 	})
 	h := newAdminTestHandler(t, ts)
 	inv := newAdminSlashInvoker(t, h)
 
 	_, _, async := inv.invokeAdminAsync("list", testAdminTeamID, testAdminUserID)
-	if !strings.Contains(async, "`$kktest` (aliases: `$kevin-dashboard`, `$ops`) — Slack tunnel install for kktest") {
+	if !strings.Contains(async, "`$kktest` (aliases: `$kevin-dashboard`, `$ops`) — Slack qURL Connector install for kktest") {
 		t.Errorf("async reply missing slug + bound-aliases + Display Name row: %q", async)
 	}
 }
@@ -169,7 +183,8 @@ func TestFormatTunnelListLine(t *testing.T) {
 		{name: "slug + Display Name, no aliases", resource: tunnel(testListAliasProdDB, "Prod database"), boundAliases: nil, want: "• `$prod-db` — Prod database"},
 		{name: "slug + one non-slug alias", resource: tunnel(testListAliasProdDB, ""), boundAliases: []string{testListAliasGrafana}, want: "• `$prod-db` (alias: `$grafana`)"},
 		{name: "self-binding slug excluded from extras", resource: tunnel(testListAliasProdDB, "Prod database"), boundAliases: []string{testListAliasProdDB, testListAliasGrafana}, want: "• `$prod-db` (alias: `$grafana`) — Prod database"},
-		{name: "install-default description renders as Display Name", resource: tunnel(testListAliasProdDB, "Slack tunnel install for "+testListAliasProdDB), boundAliases: nil, want: "• `$prod-db` — Slack tunnel install for " + testListAliasProdDB},
+		{name: "install-default description renders as Display Name", resource: tunnel(testListAliasProdDB, "Slack qURL Connector install for "+testListAliasProdDB), boundAliases: nil, want: "• `$prod-db` — Slack qURL Connector install for " + testListAliasProdDB},
+		{name: testListEscapedDescriptionCase, resource: tunnel(testListAliasProdDB, testListUnsafeDescription), boundAliases: nil, want: "• `$prod-db` — " + testListEscapedDescription},
 		{name: "only the self-binding slug bound — no extras rendered", resource: tunnel(testListAliasProdDB, ""), boundAliases: []string{testListAliasProdDB}, want: "• `$prod-db`"},
 		// Slug-less, resource-alias-less tunnel: no `$<token>` of its own.
 		{name: "slug-less tunnel with no bound alias renders bare resource_id", resource: &client.Resource{ResourceID: "r_noslug0001", Type: client.ResourceTypeTunnel, Status: client.StatusActive}, boundAliases: nil, want: "• `r_noslug0001` (no ID — ask your Slack admin to set one)"},
@@ -181,6 +196,132 @@ func TestFormatTunnelListLine(t *testing.T) {
 				t.Errorf("formatTunnelListLine = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestFormatURLListLine(t *testing.T) {
+	urlResource := func(alias, desc string) *client.Resource {
+		return &client.Resource{
+			ResourceID:  "r_url_" + alias,
+			Type:        client.ResourceTypeURL,
+			Alias:       alias,
+			TargetURL:   "https://" + alias + ".example.com",
+			Status:      client.StatusActive,
+			Description: desc,
+		}
+	}
+	cases := []struct {
+		name         string
+		resource     *client.Resource
+		boundAliases []string
+		token        string
+		blockedAlias string
+		want         string
+	}{
+		{name: "resource alias token", resource: urlResource(testListAliasDocs, ""), boundAliases: nil, want: testListURLDocsLine},
+		{name: "resource alias plus description", resource: urlResource("billing", "Billing portal"), boundAliases: nil, want: "• `$billing` — Billing portal"},
+		{name: testListEscapedDescriptionCase, resource: urlResource("alerts", "Use <!channel> *now*"), boundAliases: nil, want: "• `$alerts` — Use &lt;!channel&gt; ∗now∗"},
+		{name: "channel alias fallback when resource alias missing", resource: &client.Resource{ResourceID: testListResIDURLDocs, Type: client.ResourceTypeURL, TargetURL: testListURLDocs, Status: client.StatusActive}, boundAliases: []string{testListAliasDocs}, want: testListURLDocsLine},
+		{name: "resource alias excludes matching channel alias", resource: urlResource(testListAliasDocs, ""), boundAliases: []string{testListAliasDocs, "kb"}, want: "• `$docs` (alias: `$kb`)"},
+		{name: "resource alias token is mrkdwn escaped", resource: &client.Resource{ResourceID: testListResIDURLDocs, Type: client.ResourceTypeURL, Alias: "do`cs", TargetURL: testListURLDocs, Status: client.StatusActive}, boundAliases: nil, want: "• `$doˊcs`"},
+		{name: "substituted channel alias names shadowed resource alias", resource: urlResource(testListAliasDocs, ""), boundAliases: []string{"kb"}, token: "kb", blockedAlias: testListAliasDocs, want: "• `$kb` (resource alias `$docs` is shadowed here)"},
+		{name: "no alias renders visible but unmintable row", resource: &client.Resource{ResourceID: "r_url_noalias", Type: client.ResourceTypeURL, TargetURL: "https://plain.example.com", Status: client.StatusActive}, boundAliases: nil, want: "• `r_url_noalias` (no alias — ask your Slack admin to set one)"},
+		{name: "target URL is not rendered", resource: &client.Resource{ResourceID: testListResIDURLDocs, Type: client.ResourceTypeURL, Alias: testListAliasDocs, TargetURL: "https://docs.example.com/a?x=<bad>&q=`tick`\n<!channel>", Status: client.StatusActive}, boundAliases: nil, want: testListURLDocsLine},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			token := urlDisplayToken(tc.resource, tc.boundAliases)
+			if tc.token != "" {
+				token = tc.token
+			}
+			if got := formatURLListLineWithToken(tc.resource, tc.boundAliases, token, tc.blockedAlias); got != tc.want {
+				t.Errorf("formatURLListLineWithToken = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestFormatTunnelListSection pins the richer, multi-line mrkdwn the interactive
+// /qurl list puts in each row's section block: the `$id` bold on its own line,
+// the Display Name beneath, and a faint "alias(es):" line — distinct from the
+// single-line plain-text fallback in [TestFormatTunnelListLine].
+func TestFormatTunnelListSection(t *testing.T) {
+	tunnel := func(slug, desc string) *client.Resource {
+		return &client.Resource{
+			ResourceID:  "r_" + slug,
+			Type:        client.ResourceTypeTunnel,
+			Slug:        slug,
+			Status:      client.StatusActive,
+			Description: desc,
+		}
+	}
+	cases := []struct {
+		name         string
+		resource     *client.Resource
+		boundAliases []string
+		want         string
+	}{
+		{name: "slug only, no Display Name", resource: tunnel(testListAliasProdDB, ""), boundAliases: nil, want: "*`$prod-db`*"},
+		{name: "slug + Display Name", resource: tunnel(testListAliasProdDB, "Prod database"), boundAliases: nil, want: "*`$prod-db`*\nProd database"},
+		{name: "slug + one non-slug alias, no Display Name", resource: tunnel(testListAliasProdDB, ""), boundAliases: []string{testListAliasGrafana}, want: "*`$prod-db`*\n_alias:_ `$grafana`"},
+		{name: "slug + Display Name + two aliases (self-binding slug excluded)", resource: tunnel(testListAliasProdDB, "Prod database"), boundAliases: []string{testListAliasProdDB, testListAliasGrafana, "metrics"}, want: "*`$prod-db`*\nProd database\n_aliases:_ `$grafana`, `$metrics`"},
+		{name: testListEscapedDescriptionCase, resource: tunnel(testListAliasProdDB, testListUnsafeDescription), boundAliases: nil, want: "*`$prod-db`*\n" + testListEscapedDescription},
+		{name: "only the self-binding slug bound — no aliases line", resource: tunnel(testListAliasProdDB, "Prod database"), boundAliases: []string{testListAliasProdDB}, want: "*`$prod-db`*\nProd database"},
+		{name: "slug-less, alias-less tunnel spells out the missing ID", resource: &client.Resource{ResourceID: "r_noslug0001", Type: client.ResourceTypeTunnel, Status: client.StatusActive}, boundAliases: nil, want: "*`r_noslug0001`*\n_No ID set — ask your Slack admin to set one._"},
+		{name: "slug-less tunnel keeps its Display Name above the no-ID note", resource: &client.Resource{ResourceID: "r_noslug0002", Type: client.ResourceTypeTunnel, Status: client.StatusActive, Description: "ops jump host"}, boundAliases: nil, want: "*`r_noslug0002`*\nops jump host\n_No ID set — ask your Slack admin to set one._"},
+		{name: "slug-less tunnel promotes first bound alias to primary", resource: &client.Resource{ResourceID: "r_noslug0001", Type: client.ResourceTypeTunnel, Status: client.StatusActive}, boundAliases: []string{testListAliasGrafana, "metrics"}, want: "*`$grafana`*\n_alias:_ `$metrics`"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			token := tunnelDisplayToken(tc.resource, tc.boundAliases)
+			if got := formatTunnelListSection(tc.resource, tc.boundAliases, token); got != tc.want {
+				t.Errorf("formatTunnelListSection = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestFormatURLListSection(t *testing.T) {
+	r := &client.Resource{
+		ResourceID:  testListResIDURLDocs,
+		Type:        client.ResourceTypeURL,
+		Alias:       testListAliasDocs,
+		TargetURL:   testListURLDocs,
+		Description: "Docs portal",
+		Status:      client.StatusActive,
+	}
+	boundAliases := []string{testListAliasDocs, "kb"}
+	if got, want := formatURLListSectionWithToken(r, boundAliases, urlDisplayToken(r, boundAliases), ""), "*`$docs`*\nDocs portal\n_alias:_ `$kb`"; got != want {
+		t.Errorf("formatURLListSectionWithToken = %q, want %q", got, want)
+	}
+
+	unsafeDescription := &client.Resource{ResourceID: testListResIDURLDocs, Type: client.ResourceTypeURL, Alias: testListAliasDocs, TargetURL: testListURLDocs, Description: "Use <!channel> *now*"}
+	if got, want := formatURLListSectionWithToken(unsafeDescription, nil, "docs", ""), "*`$docs`*\nUse &lt;!channel&gt; ∗now∗"; got != want {
+		t.Errorf("formatURLListSectionWithToken(unsafe description) = %q, want %q", got, want)
+	}
+
+	if got, want := formatURLListSectionWithToken(r, []string{"kb"}, "kb", testListAliasDocs), "*`$kb`*\n_Resource alias `$docs` is shadowed here._\nDocs portal"; got != want {
+		t.Errorf("formatURLListSectionWithToken(shadowed alias) = %q, want %q", got, want)
+	}
+
+	unsafeTarget := &client.Resource{ResourceID: testListResIDURLDocs, Type: client.ResourceTypeURL, Alias: testListAliasDocs, TargetURL: "https://docs.example.com/a?x=<bad>&q=`tick`\n<!channel>"}
+	if got, want := formatURLListSectionWithToken(unsafeTarget, nil, "docs", ""), "*`$docs`*"; got != want {
+		t.Errorf("formatURLListSectionWithToken(target hidden) = %q, want %q", got, want)
+	}
+
+	unsafeAlias := &client.Resource{ResourceID: testListResIDURLDocs, Type: client.ResourceTypeURL, Alias: "do`cs", TargetURL: testListURLDocs}
+	if got, want := formatURLListSectionWithToken(unsafeAlias, nil, "do`cs", ""), "*`$doˊcs`*"; got != want {
+		t.Errorf("formatURLListSectionWithToken(unsafe alias) = %q, want %q", got, want)
+	}
+
+	underscoreTarget := &client.Resource{ResourceID: testListResIDURLDocs, Type: client.ResourceTypeURL, Alias: testListAliasDocs, TargetURL: "https://docs.example.com/~team/my_page"}
+	if got, want := formatURLListSectionWithToken(underscoreTarget, nil, "docs", ""), "*`$docs`*"; got != want {
+		t.Errorf("formatURLListSectionWithToken(target hidden with underscore) = %q, want %q", got, want)
+	}
+
+	noAlias := &client.Resource{ResourceID: "r_url_noalias", Type: client.ResourceTypeURL, TargetURL: "https://plain.example.com"}
+	if got, want := formatURLListSectionWithToken(noAlias, nil, "", ""), "*`r_url_noalias`*\n_No alias set — ask your Slack admin to set one._"; got != want {
+		t.Errorf("formatURLListSectionWithToken(no alias) = %q, want %q", got, want)
 	}
 }
 
@@ -250,30 +391,31 @@ func TestChannelAliasesByResourceID(t *testing.T) {
 	})
 }
 
-// TestHandleList_UnscopedAcrossChannels pins the post-revert (#459)
-// disclosure surface: /qurl list is workspace-wide for everyone, so the
-// SAME complete tunnel listing renders regardless of the caller's
-// channel. It exercises the three channel shapes that diverged
-// pre-revert (#234) for a non-admin:
+// TestHandleList_ScopedToChannel is the keystone regression fence for the
+// channel-scoping fix: /qurl list shows only the tunnels protected in the
+// invoker's channel — for ADMINS as well as non-admins (the reported bug was an
+// admin running `/qurl list` and seeing every tunnel in every channel,
+// including DMs). It exercises the three channel shapes:
 //
-//   - a channel carrying a restrictive channel_policies row (would have
-//     filtered the listing down to prod-db, hiding secret);
-//   - a channel with no policy row (would have fail-closed to empty);
-//   - a DM (`D…`) channel (would have fail-closed to empty) — the most
-//     user-surprising case, "I ran /qurl list in a 1:1 and saw URLs
-//     from #ops".
+//   - a channel where prod-db is exposed (C_with_policy): prod-db shows, the
+//     secret tunnel — exposed nowhere — does NOT;
+//   - a channel with no policy row (C_no_policy_here): the channel empty state;
+//   - a DM (`D…`) channel: the channel empty state (the most user-surprising
+//     pre-fix case, "I ran /qurl list in a 1:1 and saw tunnels from #ops").
 //
-// Post-revert all three must show every tunnel. The seedNonAdmin +
-// restrictive seedPolicySet below are load-bearing, not inert: the list
-// handler no longer reads them, but if any channel-policy filter were
-// re-introduced on /qurl list this non-admin caller would see the old
-// filtered/empty output and the test would fail.
-func TestHandleList_UnscopedAcrossChannels(t *testing.T) {
+// The C_with_policy case runs for both an admin and a non-admin caller to pin
+// that the scope is channel-only — admins are NOT exempt. If the scope filter
+// regressed (e.g. an admin bypass, or dropping the allow-set read), the secret
+// tunnel would leak and these assertions would fail.
+func TestHandleList_ScopedToChannel(t *testing.T) {
+	const (
+		nonAdminUserID    = "UMEMBER01"
+		channelWithPolicy = "C_with_policy"
+	)
 	ts := newAdminTestServers(t)
-	ts.seedNonAdmin(t)
-	// A channel_policies row that, under the reverted gate, would have
-	// filtered the listing down to prod-db only (secret excluded).
-	ts.seedPolicySet(t, testAdminTeamID, "C_with_policy", testListAliasProdDB, []string{testListResIDProdDB})
+	ts.seedAdmin(t) // testAdminUserID is admin/owner; nonAdminUserID is not
+	// prod-db is protected in channelWithPolicy; the secret tunnel is exposed nowhere.
+	ts.seedChannelExposure(t, testAdminTeamID, channelWithPolicy, testListResIDProdDB)
 	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
 		writeResourceListFixture(t, w, []map[string]any{
 			{testKeyResourceID: testListResIDProdDB, testKeyType: client.ResourceTypeTunnel, testKeySlug: testListAliasProdDB},
@@ -282,69 +424,196 @@ func TestHandleList_UnscopedAcrossChannels(t *testing.T) {
 	})
 	h := newAdminTestHandler(t, ts)
 
-	// "D…" is a Slack DM channel ID; the others are a policy-bearing and
-	// a policy-free regular channel. All must render the full listing.
-	// Subtests so -run can target a single branch and PASS/FAIL is
-	// reported per channel.
-	for _, channelID := range []string{"C_with_policy", "C_no_policy_here", "D_direct_msg_1to1"} {
-		t.Run(channelID, func(t *testing.T) {
+	// In the channel where prod-db is exposed, both an admin and a non-admin see
+	// prod-db and NOT the unexposed secret tunnel.
+	for _, caller := range []struct{ name, userID string }{
+		{"admin-caller", testAdminUserID},
+		{"non-admin-caller", nonAdminUserID},
+	} {
+		t.Run(channelWithPolicy+"/"+caller.name, func(t *testing.T) {
+			inv := newAdminSlashInvokerOnChannel(t, h, channelWithPolicy)
+			_, _, async := inv.invokeAdminAsync("list", testAdminTeamID, caller.userID)
+			if !strings.Contains(async, "`$"+testListAliasProdDB+"`") {
+				t.Errorf("%s should see the exposed prod-db tunnel: %q", caller.name, async)
+			}
+			if strings.Contains(async, "`$"+testListAliasSecret+"`") || strings.Contains(async, "r_secret_xx") {
+				t.Errorf("%s saw the secret tunnel, which is protected in no channel — scope leak: %q", caller.name, async)
+			}
+		})
+	}
+
+	// A channel with no policy row, and a DM, expose nothing → the channel
+	// empty state. (These are the cases #459's revert was meant to avoid
+	// dead-ending; the empty state now names the Edit recovery path.)
+	for _, channelID := range []string{"C_no_policy_here", "D_direct_msg_1to1"} {
+		t.Run("empty/"+channelID, func(t *testing.T) {
 			inv := newAdminSlashInvokerOnChannel(t, h, channelID)
 			_, _, async := inv.invokeAdminAsync("list", testAdminTeamID, testAdminUserID)
-			if !strings.Contains(async, "`$prod-db`") {
-				t.Errorf("non-admin should see prod-db tunnel (listing is unscoped post-revert): %q", async)
+			if !strings.Contains(async, "No protected resources are available in this channel") {
+				t.Errorf("expected the channel empty state in %s: %q", channelID, async)
 			}
-			if !strings.Contains(async, "`$secret`") {
-				t.Errorf("non-admin should see the secret tunnel (no per-channel filter post-revert): %q", async)
+			if !strings.Contains(async, "/qurl-admin protect-connector") {
+				t.Errorf("admin empty state should include setup command in %s: %q", channelID, async)
 			}
-			// Negative fence: a filter reintroduced on only one branch
-			// would surface the empty-state or the (removed) non-admin
-			// pagination-gap copy for this non-admin caller, even if
-			// another branch still rendered rows.
-			if strings.Contains(async, "No tunnels found") {
-				t.Errorf("empty-state copy fired — a channel filter may have dropped the listing: %q", async)
+			if !strings.Contains(async, "Edit") {
+				t.Errorf("admin empty state should include protect-via-Edit hint in %s: %q", channelID, async)
 			}
-			if strings.Contains(async, "past the first page") {
-				t.Errorf("removed non-admin pagination-gap copy reappeared: %q", async)
+			if strings.Contains(async, "`$"+testListAliasProdDB+"`") || strings.Contains(async, "`$"+testListAliasSecret+"`") {
+				t.Errorf("a tunnel leaked into %s, where none is exposed: %q", channelID, async)
 			}
 		})
 	}
 }
 
-// TestHandleList_EmptyWorkspace fences the friendly empty-state copy
-// for a workspace with zero tunnels. The hint nudges the user toward
-// `/qurl tunnel install`.
-func TestHandleList_EmptyWorkspace(t *testing.T) {
+// TestHandleList_ExposedViaAllowedSetShowsWithoutAlias fences that a tunnel
+// protected in a channel purely via allowed_resource_ids (no alias binding —
+// the shape the Edit modal's "expose to channels" writes) is listed there. It
+// pins that the scope gate keys on the full AllowedResourceIDsForChannel union,
+// not just alias bindings.
+func TestHandleList_ExposedViaAllowedSetShowsWithoutAlias(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
 	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
-		writeResourceListFixture(t, w, []map[string]any{}, "", false)
+		writeResourceListFixture(t, w, []map[string]any{
+			{testKeyResourceID: "r_via_set01", testKeyType: client.ResourceTypeTunnel, testKeySlug: "set-exposed"},
+		}, "", false)
+	})
+	// allowed_resource_ids only — no alias_bindings entry in this channel.
+	ts.seedChannelExposure(t, testAdminTeamID, "C_test", "r_via_set01")
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	_, _, async := inv.invokeAdminAsync("list", testAdminTeamID, testAdminUserID)
+	if !strings.Contains(async, "`$set-exposed`") {
+		t.Errorf("tunnel exposed via allowed_resource_ids (no alias) should list: %q", async)
+	}
+}
+
+// TestHandleList_FailsClosedOnScopeReadError fences the fail-closed posture: if
+// the channel allow-set read errors, /qurl list surfaces service-unreachable and
+// does NOT fall back to an unscoped listing (the upstream is never even called).
+func TestHandleList_FailsClosedOnScopeReadError(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	// Make the channel_policies read (AllowedResourceIDsForChannel) fail.
+	ts.ddb.SetGetItemErr(ts.tableNames.channelPolicy, errors.New("ddb unavailable"))
+	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		t.Errorf("ListResources called despite a scope-read failure — must fail closed, not list unscoped")
+		writeResourceListFixture(t, w, []map[string]any{
+			{testKeyResourceID: "r_secret_x", testKeyType: client.ResourceTypeTunnel, testKeySlug: "secret"},
+		}, "", false)
 	})
 	h := newAdminTestHandler(t, ts)
 	inv := newAdminSlashInvoker(t, h)
 
 	_, _, async := inv.invokeAdminAsync("list", testAdminTeamID, testAdminUserID)
-	if !strings.Contains(async, "No tunnels found") {
-		t.Errorf("async reply missing empty-state copy: %q", async)
+	if !strings.Contains(async, "Could not reach qURL") {
+		t.Errorf("scope-read failure should fail closed with service-unreachable: %q", async)
 	}
-	if !strings.Contains(async, "/qurl-admin tunnel install") {
-		t.Errorf("async reply missing tunnel-install hint: %q", async)
+	if strings.Contains(async, "secret") {
+		t.Errorf("a tunnel leaked when the scope read failed — must fail closed: %q", async)
 	}
 }
 
-// TestHandleList_URLResourcesFiltered fences the tunnel-only scope:
-// URL/transit resources MUST NOT appear in `/qurl list` at all — only
-// type=tunnel rows survive. A stray `slug` on a URL row doesn't rescue
-// it either; the filter keys on Type, not the slug field.
-func TestHandleList_URLResourcesFiltered(t *testing.T) {
+// TestHandleList_EmptyChannelRejected fences the channel-required guard: a
+// synthetic payload with no channel_id can't be scoped, so the listing refuses
+// rather than fanning out workspace-wide (mirrors /qurl aliases).
+func TestHandleList_EmptyChannelRejected(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		t.Errorf("ListResources called for a channel-less list — must refuse before any read")
+	})
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvokerOnChannel(t, h, "") // truly-empty channel_id
+
+	_, _, async := inv.invokeAdminAsync("list", testAdminTeamID, testAdminUserID)
+	if !strings.Contains(async, channelRequiredMessage) {
+		t.Errorf("empty channel_id should be refused with the channel-required copy: %q", async)
+	}
+}
+
+// TestHandleList_EmptyChannel fences the friendly empty-state copy when no
+// protected resource is available in the invoker's channel. Non-admins get a
+// plain admin handoff; confirmed admins get the admin setup command and the
+// protect-via-Edit recovery hint. A failing /v1/resources stub asserts the
+// empty allow-set short-circuits before the upstream call.
+func TestHandleList_EmptyChannel(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		seed    func(*testing.T, *adminTestServers)
+		want    []string
+		notWant []string
+	}{
+		{
+			name:    "admin sees setup command",
+			seed:    func(t *testing.T, ts *adminTestServers) { ts.seedAdmin(t) },
+			want:    []string{"/qurl-admin protect-connector", "Edit"},
+			notWant: []string{"Ask a Slack admin"},
+		},
+		{
+			name:    "non-admin gets admin handoff",
+			seed:    func(t *testing.T, ts *adminTestServers) { ts.seedNonAdmin(t) },
+			want:    []string{"Ask a Slack admin"},
+			notWant: []string{"/qurl-admin protect-connector", "Edit", "tunnel"},
+		},
+		{
+			name: "admin check error gets admin handoff",
+			seed: func(t *testing.T, ts *adminTestServers) {
+				ts.seedAdmin(t)
+				ts.ddb.SetGetItemErr(ts.tableNames.workspace, errors.New("injected workspace read failure"))
+			},
+			want:    []string{"Ask a Slack admin"},
+			notWant: []string{"/qurl-admin protect-connector", "Edit", "tunnel"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ts := newAdminTestServers(t)
+			tc.seed(t, ts)
+			ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+				t.Errorf("ListResources called despite an empty channel allow-set (scope short-circuit regressed)")
+				writeAPIError(t, w, http.StatusBadGateway, "upstream_error", "should not be called")
+			})
+			h := newAdminTestHandler(t, ts)
+			inv := newAdminSlashInvoker(t, h)
+
+			_, _, async := inv.invokeAdminAsync("list", testAdminTeamID, testAdminUserID)
+			if !strings.Contains(async, "No protected resources are available in this channel") {
+				t.Errorf("async reply missing empty-state copy: %q", async)
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(async, want) {
+					t.Errorf("async reply missing %q: %q", want, async)
+				}
+			}
+			for _, notWant := range tc.notWant {
+				if strings.Contains(async, notWant) {
+					t.Errorf("async reply leaked %q: %q", notWant, async)
+				}
+			}
+		})
+	}
+}
+
+// TestHandleList_URLResourcesListed fences the restored URL-resource scope:
+// URL resources protected in this channel appear alongside tunnels, using their
+// resource alias as the copy-paste token. A stray slug on a URL row must NOT
+// become the token — slugs are tunnel-only. URL rows with no alias stay visible
+// but render as "no alias" rows, so the list does not advertise an unmintable
+// `$r_...` token.
+func TestHandleList_URLResourcesListed(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
 	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
 		writeResourceListFixture(t, w, []map[string]any{
 			{testKeyResourceID: "r_tun_aaaaaa", testKeyType: client.ResourceTypeTunnel, testKeySlug: "alpha-tunnel"},
-			{testKeyResourceID: "r_url_btarg1", fAttrAlias: "burl", testKeyTargetURL: "https://b.example.com"},
+			{testKeyResourceID: "r_url_btarg1", testKeyType: client.ResourceTypeURL, fAttrAlias: "burl", testKeyTargetURL: "https://b.example.com", testKeyDescription: "Billing portal"},
 			{testKeyResourceID: "r_url_stray1", testKeyTargetURL: "https://c.example.com", testKeySlug: "stray-slug"},
 		}, "", false)
 	})
+	// Expose all three to C_test so the type handling (not channel scope) is
+	// what decides how the URL rows render.
+	ts.seedChannelExposure(t, testAdminTeamID, "C_test", "r_tun_aaaaaa", "r_url_btarg1", "r_url_stray1")
 	h := newAdminTestHandler(t, ts)
 	inv := newAdminSlashInvoker(t, h)
 
@@ -352,11 +621,17 @@ func TestHandleList_URLResourcesFiltered(t *testing.T) {
 	if !strings.Contains(async, "`$alpha-tunnel`") {
 		t.Errorf("async reply missing the tunnel row: %q", async)
 	}
-	if strings.Contains(async, "burl") || strings.Contains(async, "b.example.com") {
-		t.Errorf("URL resource leaked into tunnel-only list: %q", async)
+	if !strings.Contains(async, "`$burl` — Billing portal") {
+		t.Errorf("async reply missing URL resource alias row: %q", async)
 	}
-	if strings.Contains(async, "c.example.com") || strings.Contains(async, "stray-slug") {
-		t.Errorf("URL resource with stray slug leaked into tunnel-only list: %q", async)
+	if !strings.Contains(async, "`r_url_stray1` (no alias — ask your Slack admin to set one)") {
+		t.Errorf("async reply missing no-alias URL row: %q", async)
+	}
+	if strings.Contains(async, "https://b.example.com") || strings.Contains(async, "https://c.example.com") {
+		t.Errorf("URL resource target rendered in /qurl list; rows should match connector formatting: %q", async)
+	}
+	if strings.Contains(async, "`$stray-slug`") {
+		t.Errorf("URL resource with stray slug rendered a tunnel slug token: %q", async)
 	}
 }
 
@@ -366,7 +641,7 @@ func TestHandleList_URLResourcesFiltered(t *testing.T) {
 // label or `[slug:...]` fragment (both redundant now that the whole
 // list is tunnels and the token IS the slug). The customer's
 // onboarding flow reads this slug to match what the sidecar
-// provisioned (via QURL_TUNNEL_ID) and pastes it into `/qurl get`.
+// provisioned (via QURL_CONNECTOR_ID) and pastes it into `/qurl get`.
 func TestHandleList_TunnelSlugIsToken(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
@@ -375,6 +650,7 @@ func TestHandleList_TunnelSlugIsToken(t *testing.T) {
 			{testKeyResourceID: "r_tunnel_slg", fAttrAlias: "dash-alias", testKeyType: client.ResourceTypeTunnel, testKeySlug: "prod-dashboard"},
 		}, "", false)
 	})
+	ts.seedChannelExposure(t, testAdminTeamID, "C_test", "r_tunnel_slg")
 	h := newAdminTestHandler(t, ts)
 	inv := newAdminSlashInvoker(t, h)
 
@@ -410,6 +686,7 @@ func TestHandleList_TunnelAliasFallbackWhenNoSlug(t *testing.T) {
 			{testKeyResourceID: "r_tunnel_aaa", fAttrAlias: "tun", testKeyType: client.ResourceTypeTunnel},
 		}, "", false)
 	})
+	ts.seedChannelExposure(t, testAdminTeamID, "C_test", "r_tunnel_aaa")
 	h := newAdminTestHandler(t, ts)
 	inv := newAdminSlashInvoker(t, h)
 
@@ -436,6 +713,7 @@ func TestHandleList_TunnelResourceIDFallback(t *testing.T) {
 			{testKeyResourceID: "r_tunnel_noa", testKeyType: client.ResourceTypeTunnel},
 		}, "", false)
 	})
+	ts.seedChannelExposure(t, testAdminTeamID, "C_test", "r_tunnel_noa")
 	h := newAdminTestHandler(t, ts)
 	inv := newAdminSlashInvoker(t, h)
 
@@ -460,15 +738,23 @@ func TestHandleList_TunnelWithDisplayName(t *testing.T) {
 	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
 		writeResourceListFixture(t, w, []map[string]any{
 			{testKeyResourceID: "r_tun_desc1", testKeyType: client.ResourceTypeTunnel, testKeySlug: "ops-bastion", testKeyDescription: "ops jump host"},
+			{testKeyResourceID: "r_tun_unsafe", testKeyType: client.ResourceTypeTunnel, testKeySlug: "unsafe-desc", testKeyDescription: testListUnsafeDescription},
 			{testKeyResourceID: "r_tun_nodes", testKeyType: client.ResourceTypeTunnel, testKeySlug: "no-desc-tun"},
 		}, "", false)
 	})
+	ts.seedChannelExposure(t, testAdminTeamID, "C_test", "r_tun_desc1", "r_tun_unsafe", "r_tun_nodes")
 	h := newAdminTestHandler(t, ts)
 	inv := newAdminSlashInvoker(t, h)
 
 	_, _, async := inv.invokeAdminAsync("list", testAdminTeamID, testAdminUserID)
 	if !strings.Contains(async, "`$ops-bastion` — ops jump host") {
 		t.Errorf("async reply missing slug + Display Name row: %q", async)
+	}
+	if !strings.Contains(async, "`$unsafe-desc` — "+testListEscapedDescription) {
+		t.Errorf("async reply missing escaped unsafe Display Name row: %q", async)
+	}
+	if strings.Contains(async, "<!channel>") || strings.Contains(async, "<@U123>") {
+		t.Errorf("async reply rendered raw Slack control sequence: %q", async)
 	}
 	if !strings.Contains(async, "`$no-desc-tun`") {
 		t.Errorf("async reply missing no-Display-Name tunnel row: %q", async)
@@ -478,22 +764,147 @@ func TestHandleList_TunnelWithDisplayName(t *testing.T) {
 	}
 }
 
-// TestHandleList_HasMoreFooter fences the truncation footer when the
-// master list reports has_more=true.
-func TestHandleList_HasMoreFooter(t *testing.T) {
+// TestHandleList_NoTruncationFooterWhenExposedTunnelsFound fences the #590
+// behavior change: once every tunnel in the channel allow-set has been found,
+// the walk stops and renders a complete listing even when the master list
+// still reports has_more=true (more resources of OTHER types past this page).
+// The old "more resources past the first N-row scan" footer — which keyed on
+// the master-list has_more and so over-claimed — is gone, and a satisfied
+// allow-set fetches a single upstream page (no common-case cost regression).
+func TestHandleList_NoTruncationFooterWhenExposedTunnelsFound(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
+	var hits int
 	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		hits++
+		// has_more=true + a cursor: the workspace has more resources of other
+		// types, but the only tunnel protected here is already on this page.
 		writeResourceListFixture(t, w, []map[string]any{
 			{testKeyResourceID: "r_one_aa", testKeyType: client.ResourceTypeTunnel, testKeySlug: "one-tun"},
 		}, "cursor_xyz", true)
 	})
+	ts.seedChannelExposure(t, testAdminTeamID, "C_test", "r_one_aa")
 	h := newAdminTestHandler(t, ts)
 	inv := newAdminSlashInvoker(t, h)
 
 	_, _, async := inv.invokeAdminAsync("list", testAdminTeamID, testAdminUserID)
-	if !strings.Contains(async, "more resources past") {
-		t.Errorf("async reply missing has_more footer: %q", async)
+	if !strings.Contains(async, "`$one-tun`") {
+		t.Errorf("async reply missing exposed tunnel row: %q", async)
+	}
+	if strings.Contains(async, "more resources past") || strings.Contains(async, "may not be shown") {
+		t.Errorf("truncation footer must be gone now the listing is complete: %q", async)
+	}
+	if hits != 1 {
+		t.Errorf("expected exactly 1 upstream page fetch once the allow-set was satisfied, got %d", hits)
+	}
+}
+
+// TestHandleList_FindsTunnelPastFirstPage is the #590 regression test: a
+// tunnel protected in the channel that sorts onto the SECOND page of the owner's
+// resources must still render. The old single-page scan dropped it (it sorted
+// past the page window); the paginated walk follows the cursor until the
+// allow-set is satisfied.
+func TestHandleList_FindsTunnelPastFirstPage(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	const exposedID = "r_page2_tun"
+	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("cursor") == "" {
+			// Page 1: other resources, none protected in this channel, more to come.
+			writeResourceListFixture(t, w, []map[string]any{
+				{testKeyResourceID: "r_unexposed_pg1", testKeyType: client.ResourceTypeTunnel, testKeySlug: "unexposed-pg1"},
+			}, "cursor_p2", true)
+			return
+		}
+		// Page 2: the tunnel actually protected in this channel.
+		writeResourceListFixture(t, w, []map[string]any{
+			{testKeyResourceID: exposedID, testKeyType: client.ResourceTypeTunnel, testKeySlug: "page2-tun"},
+		}, "", false)
+	})
+	// Only the page-2 tunnel is protected in C_test.
+	ts.seedChannelExposure(t, testAdminTeamID, "C_test", exposedID)
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	_, _, async := inv.invokeAdminAsync("list", testAdminTeamID, testAdminUserID)
+	if !strings.Contains(async, "`$page2-tun`") {
+		t.Errorf("tunnel exposed past the first page must render (#590): %q", async)
+	}
+	if strings.Contains(async, "unexposed-pg1") {
+		t.Errorf("a tunnel not protected in this channel leaked into the listing: %q", async)
+	}
+}
+
+// TestHandleList_ExhaustsWhenExposedIDMissing fences that the walk terminates
+// (rather than spinning) when an allow-set id is never found upstream — e.g. a
+// stale channel binding to a deleted resource. The live exposed tunnel still
+// renders; the missing id silently doesn't (fail-safe under-disclosure).
+func TestHandleList_ExhaustsWhenExposedIDMissing(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	var hits int
+	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		if r.URL.Query().Get("cursor") == "" {
+			writeResourceListFixture(t, w, []map[string]any{
+				{testKeyResourceID: "r_live_aa", testKeyType: client.ResourceTypeTunnel, testKeySlug: "live-tun"},
+			}, "cursor_p2", true)
+			return
+		}
+		// Final page: nothing more, and the second exposed id never appeared.
+		writeResourceListFixture(t, w, []map[string]any{}, "", false)
+	})
+	// Two ids exposed; only r_live_aa exists upstream — r_ghost_bb is a stale binding.
+	ts.seedChannelExposure(t, testAdminTeamID, "C_test", "r_live_aa", "r_ghost_bb")
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	_, _, async := inv.invokeAdminAsync("list", testAdminTeamID, testAdminUserID)
+	if !strings.Contains(async, "`$live-tun`") {
+		t.Errorf("the live exposed tunnel must render: %q", async)
+	}
+	if hits != 2 {
+		t.Errorf("expected the walk to page to exhaustion (2 pages) chasing the missing id, got %d", hits)
+	}
+}
+
+// TestHandleList_StopsAtPageCap fences the listMaxResourcePages backstop: when
+// an allow-set id is never found AND the listing never exhausts (every page
+// reports has_more=true with a fresh cursor — a pathological upstream the page
+// cap exists to bound), the walk must stop after exactly listMaxResourcePages
+// fetches rather than spin. The live tunnel found on page 1 still renders; the
+// missing id silently doesn't (fail-safe under-disclosure). This is the one
+// path with no natural-termination signal, so the cap — and the loop bound it
+// guards — is what keeps /qurl list from hammering upstream unboundedly.
+func TestHandleList_StopsAtPageCap(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	var hits int
+	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		hits++
+		var rows []map[string]any
+		if hits == 1 {
+			rows = []map[string]any{
+				{testKeyResourceID: "r_live_aa", testKeyType: client.ResourceTypeTunnel, testKeySlug: "live-tun"},
+			}
+		}
+		// Always a fresh cursor + has_more=true: the natural stop condition
+		// (!HasMore || NextCursor=="") never fires, so only the page cap can
+		// terminate the walk. The cursor value advances so it's never empty.
+		writeResourceListFixture(t, w, rows, "cursor_"+strconv.Itoa(hits), true)
+	})
+	// r_live_aa exists upstream; r_ghost_bb never appears, so pending never
+	// empties and the walk would page forever without the cap.
+	ts.seedChannelExposure(t, testAdminTeamID, "C_test", "r_live_aa", "r_ghost_bb")
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	_, _, async := inv.invokeAdminAsync("list", testAdminTeamID, testAdminUserID)
+	if !strings.Contains(async, "`$live-tun`") {
+		t.Errorf("the live exposed tunnel must still render at the page cap: %q", async)
+	}
+	if hits != listMaxResourcePages {
+		t.Errorf("walk must stop at exactly listMaxResourcePages (%d) fetches, got %d", listMaxResourcePages, hits)
 	}
 }
 
@@ -506,6 +917,10 @@ func TestHandleList_UpstreamError(t *testing.T) {
 	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
 		writeAPIError(t, w, http.StatusBadGateway, "upstream_error", "Bad Gateway from internal API")
 	})
+	// A non-empty channel allow-set so the scope short-circuit doesn't skip the
+	// upstream call this test is exercising (the rid needn't match any fixture
+	// row — the upstream errors before filtering).
+	ts.seedChannelExposure(t, testAdminTeamID, "C_test", "r_unused01")
 	h := newAdminTestHandler(t, ts)
 	inv := newAdminSlashInvoker(t, h)
 
@@ -602,7 +1017,7 @@ func TestMapListResourcesErrorPermanentClassUsesGenericListFailure(t *testing.T)
 			t.Errorf("list permanent-class response leaked %q: %q", leak, msg)
 		}
 	}
-	if !strings.Contains(msg, "Failed to list qURL tunnels") {
+	if !strings.Contains(msg, "Failed to list qURL resources") {
 		t.Errorf("list permanent-class response missing generic list failure: %q", msg)
 	}
 	if strings.Contains(msg, "Could not reach qURL") {
@@ -631,6 +1046,7 @@ func TestHandleList_StableSortByToken(t *testing.T) {
 			{testKeyResourceID: "r_mmm_yyyyy", testKeyType: client.ResourceTypeTunnel, testKeySlug: "middle"},
 		}, "", false)
 	})
+	ts.seedChannelExposure(t, testAdminTeamID, "C_test", "r_zzz_aaaaa", "r_aaa_xxxxx", "r_mmm_yyyyy")
 	h := newAdminTestHandler(t, ts)
 	inv := newAdminSlashInvoker(t, h)
 
@@ -665,6 +1081,7 @@ func TestHandleList_SortTiebreakerOnTokenCollision(t *testing.T) {
 			{testKeyResourceID: "r_aaa_dup", testKeyType: client.ResourceTypeTunnel, testKeySlug: "dup", testKeyDescription: "alpha-desc"},
 		}, "", false)
 	})
+	ts.seedChannelExposure(t, testAdminTeamID, "C_test", "r_bbb_dup", "r_aaa_dup")
 	h := newAdminTestHandler(t, ts)
 	inv := newAdminSlashInvoker(t, h)
 
@@ -743,6 +1160,64 @@ func TestTunnelToken(t *testing.T) {
 			t.Parallel()
 			if got := tunnelToken(&tc.r); got != tc.want {
 				t.Errorf("tunnelToken() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestHandleList_StaleAliasesEmptyState fences the honest empty-state for an
+// orphaned binding: when a channel's allow-set is non-empty (a `$alias` is bound)
+// but every bound resource has been revoked/deleted so nothing resolves, /qurl
+// list must NAME the ghost alias and point at `/qurl-admin unset-alias` — not the
+// generic "install a new resource" copy, which sends the user down the wrong path
+// (the exact confusion the revoke-cascade bug produced). Admins get the verb;
+// non-admins get an admin handoff. Both still see the alias name.
+func TestHandleList_StaleAliasesEmptyState(t *testing.T) {
+	const deadResourceID = "r_dead0001"
+	for _, tc := range []struct {
+		name    string
+		seed    func(*testing.T, *adminTestServers)
+		want    []string
+		notWant []string
+	}{
+		{
+			name: "admin gets the unset-alias fix with the ghost named in the command",
+			seed: func(t *testing.T, ts *adminTestServers) { ts.seedAdmin(t) },
+			// Single ghost → the command itself names it (copy-pasteable).
+			want:    []string{"`$dashboard`", "unset-alias $dashboard"},
+			notWant: []string{"protect-connector", "Ask a Slack admin"},
+		},
+		{
+			name:    "non-admin gets an admin handoff that still names the ghost",
+			seed:    func(t *testing.T, ts *adminTestServers) { ts.seedNonAdmin(t) },
+			want:    []string{"`$dashboard`", "unset-alias $dashboard", "Ask a Slack admin"},
+			notWant: []string{"protect-connector"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ts := newAdminTestServers(t)
+			tc.seed(t, ts)
+			// The channel has a $dashboard alias bound to a resource that no longer
+			// exists — the allow-set is non-empty, so the scope gate passes...
+			ts.seedPolicyAliasBindings(t, testAdminTeamID, "C_test", map[string]string{"dashboard": deadResourceID})
+			// ...but the owner's live resources don't include the dead id, so it
+			// resolves to nothing and the listing comes back empty.
+			ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+				writeResourceListFixture(t, w, []map[string]any{}, "", false)
+			})
+			h := newAdminTestHandler(t, ts)
+			inv := newAdminSlashInvoker(t, h)
+
+			_, _, async := inv.invokeAdminAsync("list", testAdminTeamID, testAdminUserID)
+			for _, want := range tc.want {
+				if !strings.Contains(async, want) {
+					t.Errorf("stale empty-state missing %q: %q", want, async)
+				}
+			}
+			for _, notWant := range tc.notWant {
+				if strings.Contains(async, notWant) {
+					t.Errorf("stale empty-state should not contain %q: %q", notWant, async)
+				}
 			}
 		})
 	}

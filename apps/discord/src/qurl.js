@@ -1,156 +1,156 @@
+const {
+  QURLClient,
+  ERROR_CODE_NETWORK,
+  ERROR_CODE_TIMEOUT,
+} = require('@layervai/qurl');
 const config = require('./config');
 const logger = require('./logger');
 const { AUDIT_EVENTS } = require('./constants');
+const {
+  qurlPath,
+  resourceIdLogRef,
+  resourcePath,
+  validateResourceId,
+} = require('./utils/resource-id');
+const { qurlApiError } = require('./utils/qurl-errors');
 const dns = require('dns').promises;
 
+const { isPrivateHost } = require('./utils/private-host');
+
 /**
- * Lightweight qURL API client using fetch.
- * Avoids ESM/CJS compatibility issues with the @layerv/qurl SDK.
+ * qURL API client for the bot's link create / status / revoke calls, backed by
+ * the @layervai/qurl SDK. This is the bot's single qURL client (issue #830 —
+ * the prior hand-rolled `qurlFetch` is gone); the detect path in connector.js
+ * uses the same SDK. Create and status use `/qurls`; whole-resource revoke
+ * uses `/resources`. This module adds only the concerns the SDK doesn't own:
+ *   - the DEPENDENCY_AUTH_FAILURE audit emit on 401/403 (emit-once) and
+ *     error-body redaction — in logs and in the errors it throws — see callQurl();
+ *   - the SSRF guards for the user-supplied create target (isPrivateHost +
+ *     assertNotPrivateAfterResolve), which are client-independent;
+ *   - a non-echoing resource-ID guard and low-cardinality telemetry labels.
  */
 
-// Retryable statuses: 408 (request timeout), 429 (rate limit), 500/502/503/504
-// (transient server-side). 401/403/404/409 are NOT retried — those are
-// auth/validation failures and retrying won't help.
-const RETRYABLE_STATUSES = new Set([408, 429, 500, 502, 503, 504]);
+// Per-attempt timeout + retry budget. Pins the SDK's resilience to the budget
+// the hand-rolled client documented before this consolidation: "3 attempts
+// total (initial + 2 retries)". `maxRetries` counts RETRIES, so 2 ⇒ 3 total
+// attempts; `timeout` is the per-attempt deadline (matching the old
+// AbortSignal.timeout(30000)). We pin both rather than inherit SDK defaults so
+// a future default drift can't silently change this path's behavior.
+// (connector.js's resolve path pins maxRetries:3 — a separate call site we
+// deliberately leave untouched here.)
+const REQUEST_TIMEOUT_MS = 30000;
+const MAX_RETRIES = 2;
+// User-Agent the qURL service sees for the bot's calls. Preserved verbatim
+// across the SDK migration (a literal wire identifier — see CLAUDE.md).
+const USER_AGENT = 'qurl-discord-bot/1.0';
+// Safe labels for status/revoke telemetry. The actual identifier is attacker-
+// influenced; keeping the value out of route labels prevents an accidentally
+// cross-wired credential from reaching logs or audit events.
+const QURL_ID_LOG_PATH = '/qurls/:resourceId';
+const RESOURCE_ID_LOG_PATH = '/resources/:resourceId';
+const UNKNOWN_STATUS0_CODE = 'unknown_error';
 
-async function qurlFetch(method, path, body, apiKey) {
+// status-0 SDK error codes whose message the SDK synthesizes itself (no server
+// body) — the only status-0 errors callQurl surfaces verbatim. See its
+// REDACTION note: anything else at status 0 is re-wrapped, so the no-body-leak
+// invariant holds structurally rather than by trusting SDK internals.
+const SAFE_STATUS0_CODES = new Set([
+  ERROR_CODE_NETWORK,
+  ERROR_CODE_TIMEOUT,
+]);
+
+// Construct a per-call SDK client. Per-call (not cached) because each call
+// carries its own apiKey (the bot is multi-tenant) and because these are rare
+// control-plane calls, not a hot path; constructing here also means the client
+// binds the live globalThis.fetch at call time. baseUrl is the bare API origin
+// — the SDK prepends `/v1/...` itself.
+function makeClient(apiKey) {
   const key = apiKey || config.QURL_API_KEY;
   if (!key) {
     throw new Error('QURL_API_KEY is not configured');
   }
-  const url = `${config.QURL_ENDPOINT}/v1${path}`;
-  const baseOpts = {
-    method,
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${key}`,
-      'User-Agent': 'qurl-discord-bot/1.0',
-    },
-  };
-  if (body) baseOpts.body = JSON.stringify(body);
-
-  // Up to 3 attempts total (initial + 2 retries) with exponential backoff
-  // plus jitter. A single transient 503 or network blip from qURL's infra
-  // no longer fails a whole send. Non-retryable statuses + non-network
-  // errors throw immediately.
-  const maxAttempts = 3;
-  let lastErr = null;
-  for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    const opts = { ...baseOpts, signal: AbortSignal.timeout(30000) };
-    let resp;
-    try {
-      resp = await fetch(url, opts);
-    } catch (err) {
-      // Network/timeout error: retry if we have attempts left.
-      lastErr = err;
-      if (attempt < maxAttempts - 1) {
-        const delay = 200 * Math.pow(2, attempt) + Math.floor(Math.random() * 100);
-        logger.warn('qURL API network error, retrying', { method, path, attempt, delay, error: err.message });
-        await new Promise(r => setTimeout(r, delay));
-        continue;
-      }
-      throw err;
-    }
-
-    if (!resp.ok) {
-      // Log only status + body length. Including the raw body would be
-      // dangerous: the qURL API error response may echo request headers or
-      // tokens, and anyone flipping LOG_LEVEL=debug during an incident would
-      // then tail those into logs.
-      let bodyLen = 0;
-      try { bodyLen = (await resp.text()).length; } catch { /* ignore */ }
-      logger.debug('qURL API error', { method, path, status: resp.status, bodyLen, attempt });
-      // Emit BEFORE the throw so a caller's catch path can't suppress
-      // the audit — the metric stays independent of caller error
-      // handling.
-      //
-      // EMIT-ONCE INVARIANT: 401/403 must stay OUT of
-      // RETRYABLE_STATUSES (declared at the top of this file). If a
-      // future change adds them, this emit fires per attempt and the
-      // alarm count multiplies. Pinned by tests/qurl-coverage.test.js.
-      if (resp.status === 401 || resp.status === 403) {
-        logger.audit(AUDIT_EVENTS.DEPENDENCY_AUTH_FAILURE, {
-          dependency: 'qurl_service',
-          status: resp.status,
-          method,
-          path,
-        });
-      }
-      if (RETRYABLE_STATUSES.has(resp.status) && attempt < maxAttempts - 1) {
-        const delay = 200 * Math.pow(2, attempt) + Math.floor(Math.random() * 100);
-        logger.warn('qURL API transient failure, retrying', { method, path, status: resp.status, attempt, delay });
-        await new Promise(r => setTimeout(r, delay));
-        continue;
-      }
-      throw new Error(`qURL API ${method} ${path} failed (${resp.status})`);
-    }
-
-    if (resp.status === 204) return null;
-    const envelope = await resp.json();
-    return envelope.data || envelope;
-  }
-  // Unreachable in practice — the loop either returns or throws — but keeps
-  // the control flow explicit for reviewers.
-  throw lastErr || new Error(`qURL API ${method} ${path} exhausted retries`);
+  return new QURLClient({
+    apiKey: key,
+    baseUrl: config.QURL_ENDPOINT,
+    timeout: REQUEST_TIMEOUT_MS,
+    maxRetries: MAX_RETRIES,
+    userAgent: USER_AGENT,
+  });
 }
 
-// Reject hostnames that resolve (by syntax) to loopback, link-local, or
-// RFC1918 private ranges. Defense-in-depth against a caller passing
-// `http://169.254.169.254/latest/meta-data/...` or similar; even if the
-// downstream qURL API is the one that actually fetches, we block at our
-// own input validation layer.
-function isPrivateHost(host) {
-  if (!host) return true;
-  const h = host.toLowerCase();
-  if (h === 'localhost' || h === '0.0.0.0' || h === '::' || h === '::1') return true;
-  if (h.startsWith('[') && h.endsWith(']')) {
-    // Bracketed IPv6 literal — strip and check.
-    return isPrivateHost(h.slice(1, -1));
-  }
-  // IPv6 common locals (::1 already handled above for exact-match; this
-  // catches fc00::/7 unique-local and fe80::/10 link-local prefixes).
-  if (h.startsWith('fc') || h.startsWith('fd') || h.startsWith('fe80:')) return true;
-  // IPv4-mapped IPv6 literal: ::ffff:127.0.0.1, ::ffff:7f00:1, etc. Strip the
-  // prefix (URL parsing already stripped the brackets) and re-check.
-  const mapped = h.match(/^::ffff:([0-9.]+)$/);
-  if (mapped) return isPrivateHost(mapped[1]);
-  // Decimal IPv4 literal (e.g. `2130706433` = 127.0.0.1) — browsers accept,
-  // Node's URL does too. Convert to dotted-quad.
-  if (/^\d+$/.test(h)) {
-    const n = Number(h);
-    if (n >= 0 && n <= 0xFFFFFFFF) {
-      const dotted = [(n >>> 24) & 0xFF, (n >>> 16) & 0xFF, (n >>> 8) & 0xFF, n & 0xFF].join('.');
-      return isPrivateHost(dotted);
+/**
+ * Run an SDK call, layering on the bot-specific behaviors the SDK doesn't own.
+ * `method`/`path` are low-cardinality labels for audit/log/error payloads; the
+ * SDK owns the actual wire path. Identifier-bearing routes use a static path
+ * template so credentials accidentally passed as IDs cannot reach telemetry.
+ *
+ *   - AUDIT: emit DEPENDENCY_AUTH_FAILURE on a 401/403 so the dependency-auth
+ *     alarm fires independently of any caller's catch path.
+ *   - EMIT-ONCE INVARIANT: the SDK never retries 401/403, so this fires
+ *     once per request, not once per
+ *     attempt. If that ever changes, the audit count would multiply on a single
+ *     auth failure. Pinned by tests/qurl-coverage.test.js.
+ *   - REDACTION: never let a qURL error body escape this module. On an
+ *     HTTP-status failure the SDK's `QURLError.message` is `Title (status):
+ *     detail`, where `detail` is parsed from the server body (which can echo
+ *     request headers or tokens). So for any positive status we log only status
+ *     + code and re-throw a status-only Error (callers such as the revoke path
+ *     log the thrown `.message`, so the body must not reach it). At status 0,
+ *     a coded SDK error outside the body-free SAFE set (see SAFE_STATUS0_CODES)
+ *     — e.g. an unexpected-response shape error that could embed a body snippet
+ *     — is re-wrapped to a code-only message, so the invariant holds structurally
+ *     rather than by trusting SDK internals. Body-free SDK errors (network /
+ *     timeout) propagate verbatim. Every other status-0 throw, including an
+ *     uncoded plain Error, is re-wrapped: item calls may carry a cross-wired
+ *     credential, while create validation may echo a secret-bearing target
+ *     URL. Pinned by tests/qurl-coverage.test.js.
+ */
+async function callQurl(method, path, fn, logContext = {}) {
+  try {
+    return await fn();
+  } catch (err) {
+    // The SDK uses status 0 for its client-side validation / network / timeout
+    // errors; a positive status is a real HTTP status from the API.
+    const status = Number.isInteger(err?.status) ? err.status : 0;
+    // Redaction: status + error code only — never err.message / err.detail.
+    logger.debug('qURL API error', {
+      method, path, status, code: err?.code, ...logContext,
+    });
+    if (status === 401 || status === 403) {
+      logger.audit(AUDIT_EVENTS.DEPENDENCY_AUTH_FAILURE, {
+        dependency: 'qurl_service',
+        status,
+        method,
+        path,
+      });
     }
-    return true; // out-of-range numeric host: reject outright
-  }
-  // Hex IPv4 literal (e.g. `0x7f000001` = 127.0.0.1)
-  if (/^0x[0-9a-f]+$/.test(h)) {
-    const n = Number(h);
-    if (Number.isFinite(n) && n >= 0 && n <= 0xFFFFFFFF) {
-      const dotted = [(n >>> 24) & 0xFF, (n >>> 16) & 0xFF, (n >>> 8) & 0xFF, n & 0xFF].join('.');
-      return isPrivateHost(dotted);
+    // A real HTTP status means the SDK error wraps a server response body — throw
+    // a status-only error so that body can't leak through a caller that logs
+    // `err.message`.
+    if (status > 0) {
+      throw qurlApiError(method, path, status);
     }
-    return true;
+    // status 0: only the SDK's known body-free network/timeout errors may keep
+    // their message. Client validation, unexpected response shapes, and plain
+    // uncoded throws are generic because any of them can echo request input.
+    const code = typeof err?.code === 'string' ? err.code : UNKNOWN_STATUS0_CODE;
+    if (!SAFE_STATUS0_CODES.has(code)) {
+      throw qurlApiError(method, path, code);
+    }
+    throw err;
   }
-  // Octal-prefixed IPv4 (e.g. `0177.0.0.1`) — treat any leading-zero component
-  // as suspicious and reject conservatively.
-  if (/^0\d/.test(h) && /^[0-9.]+$/.test(h)) return true;
-  // Standard IPv4 dotted-quad
-  const v4 = h.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
-  if (v4) {
-    const [a, b] = v4.slice(1).map(Number);
-    if (a === 10) return true;                          // 10.0.0.0/8
-    if (a === 127) return true;                         // 127.0.0.0/8
-    if (a === 169 && b === 254) return true;            // 169.254.0.0/16 (link-local, IMDS)
-    if (a === 172 && b >= 16 && b <= 31) return true;   // 172.16.0.0/12
-    if (a === 192 && b === 168) return true;            // 192.168.0.0/16
-    if (a === 100 && b >= 64 && b <= 127) return true;  // 100.64.0.0/10 (CGNAT)
-    if (a === 0) return true;                           // 0.0.0.0/8
-    if (a >= 224) return true;                          // multicast + reserved
-  }
-  return false;
 }
+
+// The syntactic private/loopback/link-local screen lives in utils/private-host.js
+// so the boot path can consume the same range table without pulling in the
+// @layervai/qurl SDK, constants.js and `dns` that this module requires. Re-exported
+// here (see module.exports) because connector.js imports it from qurl.js.
+//
+// The classifier stays pure. Each rejection site below logs the host that
+// triggered it before returning the deliberately shape-independent error to the
+// caller; connector.js does the same for its detect guard. URL parsing strips
+// CR/LF from hostname input, and logger.js JSON-encodes metadata, so those
+// breadcrumbs cannot forge log lines.
 
 // Resolve all A/AAAA records for a hostname and reject if ANY of them point
 // to a private/internal range. Defense against DNS rebinding: a malicious
@@ -180,18 +180,33 @@ async function assertNotPrivateAfterResolve(hostname) {
   }
   for (const { address } of addrs) {
     if (isPrivateHost(address)) {
+      // Name the resolved address as well as the host: on this leg the hostname
+      // alone doesn't explain the rejection (it looked public syntactically), so
+      // the address distinguishes a rebinding attempt from a name that
+      // legitimately points inside. dns.lookup() returns an inet_ntop-rendered
+      // IP string, so it is safe to include in structured log metadata.
+      logger.warn('Target URL rejected by SSRF guard (DNS resolved to a private address)', {
+        hostname,
+        address,
+      });
       throw new Error('Target URL points to a private/internal address');
     }
   }
 }
 
-async function createOneTimeLink(targetUrl, expiresIn, description, apiKey) {
+async function createOneTimeLink(targetUrl, expiresIn, label, apiKey) {
   try {
     const parsed = new URL(targetUrl);
     if (!['http:', 'https:'].includes(parsed.protocol)) {
       throw new Error('Only http/https URLs are allowed');
     }
     if (isPrivateHost(parsed.hostname)) {
+      // Keep this distinct from the DNS-leg message so operators can tell which
+      // guard fired. Warn deliberately: a typo and an SSRF probe are
+      // indistinguishable here, and Discord's command rate limits bound volume.
+      logger.warn('Target URL rejected by SSRF guard (private host literal)', {
+        hostname: parsed.hostname,
+      });
       throw new Error('Target URL points to a private/internal address');
     }
     await assertNotPrivateAfterResolve(parsed.hostname);
@@ -200,32 +215,63 @@ async function createOneTimeLink(targetUrl, expiresIn, description, apiKey) {
     throw new Error(`Invalid target URL: ${err.message}`);
   }
 
-  const result = await qurlFetch('POST', '/qurls', {
-    target_url: targetUrl,
-    one_time_use: true,
-    expires_in: expiresIn,
-    description,
-  }, apiKey);
+  const client = makeClient(apiKey);
+  // The collection label has no resource ID, so unlike item routes it needs no
+  // validated path builder; keep this literal deliberately aligned to SDK create().
+  const result = await callQurl('POST', '/qurls', () =>
+    client.create({
+      target_url: targetUrl,
+      one_time_use: true,
+      expires_in: expiresIn,
+      // The create endpoint uses `label`, not `description` (qurl-service
+      // CreateQurlRequest); the SDK rejects a `description` here as an unknown
+      // field, so don't send one.
+      label,
+    }),
+  );
 
   logger.info('Created one-time qURL', { resource_id: result.resource_id, expires_in: expiresIn });
   return result;
 }
 
-function validateResourceId(resourceId) {
-  if (!resourceId || !/^[\w-]+$/.test(resourceId)) {
-    throw new Error(`Invalid resource ID format: ${resourceId}`);
-  }
-}
-
 async function deleteLink(resourceId, apiKey) {
-  validateResourceId(resourceId);
-  await qurlFetch('DELETE', `/qurls/${resourceId}`, null, apiKey);
-  logger.info('Revoked qURL', { resource_id: resourceId });
+  resourcePath(resourceId);
+  const client = makeClient(apiKey);
+  // Revoke at the resource level: every link minted on the resource stops
+  // resolving. Repeats against an existing revoked row are idempotent 204;
+  // a never-existent public ID remains 404, so a corrupt send-row ID cannot
+  // report false success. SDK 0.3.x's delete() rejects current public IDs using
+  // a retired `r_` prefix check before any request is sent.
+  // qurl-typescript#244 fixes that older SDK method for other consumers; keep
+  // deleteResource() here because it directly names this whole-resource action.
+  await callQurl(
+    'DELETE',
+    RESOURCE_ID_LOG_PATH,
+    () => client.deleteResource(resourceId),
+    { resource_ref: resourceIdLogRef(resourceId) },
+  );
+  logger.info('Revoked qURL resource', { resource_id: resourceId });
 }
 
 async function getResourceStatus(resourceId, apiKey) {
-  validateResourceId(resourceId);
-  return qurlFetch('GET', `/qurls/${resourceId}`, null, apiKey);
+  qurlPath(resourceId);
+  const client = makeClient(apiKey);
+  // SDK 0.3.x's get() applies only its non-empty-ID guard; unlike delete(), it
+  // does not impose the retired `r_` prefix before making this request.
+  // Returns the SDK's QURL shape — access tokens are under `access_tokens`
+  // (the SDK renames the API's wire-format `qurls` field).
+  return callQurl(
+    'GET',
+    QURL_ID_LOG_PATH,
+    () => client.get(resourceId),
+    { resource_ref: resourceIdLogRef(resourceId) },
+  );
 }
 
-module.exports = { createOneTimeLink, deleteLink, getResourceStatus };
+module.exports = {
+  createOneTimeLink,
+  deleteLink,
+  getResourceStatus,
+  isPrivateHost,
+  validateResourceId,
+};

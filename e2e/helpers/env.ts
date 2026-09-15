@@ -14,11 +14,19 @@ export interface E2EEnv {
 
 export interface E2EOptionalEnv {
   // Public HTTPS host for the bot's Express server (e.g.
-  // https://discord-bot-sandbox.layerv.ai). Used by the qURL-OAuth smoke
+  // https://discord-bot.example.com). Used by the qURL-OAuth smoke
   // test to hit /oauth/qurl/start. Optional — tests gracefully skip when
-  // unset. Production sandbox/prod values come from the same SSM source
+  // unset. Per-environment values come from the same SSM source
   // as the bot's BASE_URL config.
   BOT_HTTP_URL?: string;
+
+  // --- Slack bot HTTP smoke (slack-liveness.smoke.test.ts) ---
+  // Public HTTPS base URL of the deployed Slack bot (e.g.
+  // https://slackbot.example.com); a trailing slash is trimmed by the suite.
+  SLACK_BOT_BASE_URL?: string;
+  // The deployed workspace signing secret, used to forge validly-signed
+  // probes. Its presence gates the signed cases (url_verification, /qurl help).
+  SLACK_SIGNING_SECRET?: string;
 }
 
 const REQUIRED: (keyof E2EEnv)[] = [
@@ -47,5 +55,7 @@ export function loadEnv(): E2EEnv {
 export function loadOptionalEnv(): E2EOptionalEnv {
   return {
     BOT_HTTP_URL: process.env.BOT_HTTP_URL,
+    SLACK_BOT_BASE_URL: process.env.SLACK_BOT_BASE_URL,
+    SLACK_SIGNING_SECRET: process.env.SLACK_SIGNING_SECRET,
   };
 }

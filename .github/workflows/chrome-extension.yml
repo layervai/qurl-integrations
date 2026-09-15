@@ -1,0 +1,201 @@
+name: "browser-extensions: Build and Test"
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: ["**"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  changes:
+    name: browser-extensions / detect changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+      actions: read
+    outputs:
+      # Force both gates when the last validated main SHA cannot be resolved;
+      # skipping paths-filter prevents its missing base from defeating fail-closed (#1022).
+      chrome_extension: ${{ steps.base.outputs.force == 'true' && 'true' || steps.filter.outputs.chrome_extension }}
+      edge_extension: ${{ steps.base.outputs.force == 'true' && 'true' || steps.filter.outputs.edge_extension }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: github.event_name == 'push'
+        with:
+          fetch-depth: 0
+
+      # A main push can replace a pending run, so compare with the last validated SHA (#1022).
+      - name: Resolve validated base
+        id: base
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/resolve-validated-base.sh
+
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        id: filter
+        # Without a resolved base, running the filter would error instead of
+        # honoring the forced fail-closed outputs above.
+        if: steps.base.outputs.force != 'true'
+        with:
+          base: ${{ steps.base.outputs.sha }}
+          filters: |
+            chrome_extension:
+              - 'apps/chrome-extension/**'
+              - '.github/workflows/chrome-extension.yml'
+            edge_extension:
+              - 'apps/chrome-extension/**'
+              - 'apps/edge-extension/**'
+              - '.github/workflows/chrome-extension.yml'
+
+  build-chrome:
+    name: chrome-extension / build and test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: changes
+    if: needs.changes.outputs.chrome_extension == 'true'
+    defaults:
+      run:
+        working-directory: apps/chrome-extension
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Keep the lint, syntax, and test steps aligned with Makefile's
+      # check-chrome-extension target; CI alone adds the release package.
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: apps/chrome-extension/.nvmrc
+          cache: npm
+          cache-dependency-path: apps/chrome-extension/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - name: Syntax check
+        # xargs preserves a failing node --check exit; find -exec can hide it.
+        run: find background.js popup content lib scripts -name '*.js' -print0 | xargs -0 -r -n1 node --check
+      - run: npm test
+      - run: npm run package:release
+
+  # Edge-only files are release metadata and store documents. Shared source
+  # changes select both targets and must pass build-chrome before packaging.
+  package-edge:
+    name: edge-extension / package
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [changes, build-chrome]
+    if: ${{ !cancelled() && needs.changes.outputs.edge_extension == 'true' }}
+    defaults:
+      run:
+        working-directory: apps/edge-extension
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Require shared source checks
+        if: needs.changes.outputs.chrome_extension == 'true'
+        env:
+          CHROME_BUILD_RESULT: ${{ needs.build-chrome.result }}
+        run: |
+          if [ "$CHROME_BUILD_RESULT" != success ]; then
+            echo "::error::chrome-extension / build and test concluded ${CHROME_BUILD_RESULT:-<empty>}"
+            exit 1
+          fi
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          # Edge builds shared source, so its Node version comes from there too.
+          node-version-file: apps/chrome-extension/.nvmrc
+      # No npm install: the shared packager uses only Node.js built-ins and zip.
+      - run: npm run package:release
+
+  chrome-required:
+    name: chrome-extension / required
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    # This aggregate can validate only quality gates listed in needs.
+    needs: [changes, build-chrome]
+    if: always()
+    steps:
+      - name: Verify Chrome extension CI result
+        shell: bash
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          CHROME_EXTENSION_CHANGED: ${{ needs.changes.outputs.chrome_extension }}
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: |
+          set -euo pipefail
+          if [ "$CHANGES_RESULT" != success ]; then
+            echo "::error::browser-extensions / detect changes concluded $CHANGES_RESULT"
+            exit 1
+          fi
+          case "$CHROME_EXTENSION_CHANGED" in
+            true) ;;
+            false) echo "No Chrome extension-impacting changes detected"; exit 0 ;;
+            *) echo "::error::unexpected chrome_extension output: ${CHROME_EXTENSION_CHANGED:-<empty>}"; exit 1 ;;
+          esac
+          display_name() {
+            case "$1" in
+              build-chrome) echo "chrome-extension / build and test" ;;
+              *) echo "$1" ;;
+            esac
+          }
+          failed=0
+          needs_rows="$(jq -r 'to_entries[] | [.key, (.value.result // "")] | @tsv' <<<"$NEEDS_JSON")"
+          while IFS=$'\t' read -r job result; do
+            [ -n "$job" ] || continue
+            [ "$job" = changes ] && continue
+            if [ "$result" != success ]; then
+              echo "::error::$(display_name "$job") concluded ${result:-<empty>}"
+              failed=1
+            fi
+          done <<<"$needs_rows"
+          exit "$failed"
+
+  edge-required:
+    name: edge-extension / required
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    # This aggregate can validate only quality gates listed in needs.
+    needs: [changes, package-edge]
+    if: always()
+    steps:
+      - name: Verify Edge extension CI result
+        shell: bash
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          EDGE_EXTENSION_CHANGED: ${{ needs.changes.outputs.edge_extension }}
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: |
+          set -euo pipefail
+          if [ "$CHANGES_RESULT" != success ]; then
+            echo "::error::browser-extensions / detect changes concluded $CHANGES_RESULT"
+            exit 1
+          fi
+          case "$EDGE_EXTENSION_CHANGED" in
+            true) ;;
+            false) echo "No Edge extension-impacting changes detected"; exit 0 ;;
+            *) echo "::error::unexpected edge_extension output: ${EDGE_EXTENSION_CHANGED:-<empty>}"; exit 1 ;;
+          esac
+          display_name() {
+            case "$1" in
+              package-edge) echo "edge-extension / package" ;;
+              *) echo "$1" ;;
+            esac
+          }
+          failed=0
+          needs_rows="$(jq -r 'to_entries[] | [.key, (.value.result // "")] | @tsv' <<<"$NEEDS_JSON")"
+          while IFS=$'\t' read -r job result; do
+            [ -n "$job" ] || continue
+            [ "$job" = changes ] && continue
+            if [ "$result" != success ]; then
+              echo "::error::$(display_name "$job") concluded ${result:-<empty>}"
+              failed=1
+            fi
+          done <<<"$needs_rows"
+          exit "$failed"

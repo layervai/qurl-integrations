@@ -1,36 +1,188 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"time"
 
 	"github.com/spf13/cobra"
+
+	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/consume"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/cridux"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/exitcode"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/output"
 )
 
+// getFlags carries get's flag values into the run helpers.
+type getFlags struct {
+	file  string
+	force bool
+	yes   bool
+}
+
+// getCmd is the Phase-1 consume command: mint a share link for a CRID,
+// verify the answer against it exactly like `qurl share` does, and only
+// then act — open the verified link in the browser on a terminal, or
+// download its bytes with --file. The action decision is local and
+// precedes every network call.
 func getCmd(opts *globalOpts) *cobra.Command {
+	var flags getFlags
+
 	cmd := &cobra.Command{
-		Use:               "get <resource-id>",
-		Short:             "Get qURL details",
-		Example:           "  qurl get r_k8xqp9h2sj9",
-		Args:              cobra.ExactArgs(1),
-		ValidArgsFunction: resourceIDCompletion(opts),
+		Use:   "get <CRID>",
+		Short: "Fetch what a CRID points to",
+		Long: `Fetch the content behind a CRID.
+
+get mints a fresh share link exactly like ` + "`qurl share`" + ` and verifies it
+against the CRID you asked for — a mismatch is discarded and the command
+exits with code 12 before anything happens. Only a verified link is ever
+acted on:
+
+  - On a terminal, get opens the link in your browser (set QURL_BROWSER or
+    BROWSER to choose which one).
+  - With --file <path> it downloads to that path instead. The download is
+    atomic: bytes arrive in <path>.part, which becomes <path> only when the
+    download completes. Existing files are never replaced unless --force is
+    given. If a granted link is not ready, the CLI retries that same grant
+    briefly. It requests one fresh link only after the grant expires.
+  - With --file - the raw bytes stream to stdout, clean for piping.
+
+When stdout is not a terminal, get never opens a browser: pass --file, or
+use ` + "`qurl share`" + ` if you only need the link.`,
+		Example: "  qurl get " + exampleCRID + "\n" +
+			"  qurl get " + exampleCRID + " --file report.pdf\n" +
+			"  qurl get " + exampleCRID + " --file - | shasum",
+		Args: exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := validateResourceID(args[0]); err != nil {
-				return err
+			if cmd.Flags().Changed("file") && flags.file == "" {
+				return exitcode.UsageError(errors.New(msgFileNeedsPath))
 			}
-
-			c, err := opts.newClient()
-			if err != nil {
-				return err
+			if flags.file == "-" && opts.resolvedFormat == output.FormatJSON {
+				// The bytes are the output; a JSON document would corrupt
+				// them. Refuse loudly rather than silently ignoring either
+				// flag.
+				return exitcode.UsageError(errors.New(msgFileDashJSON))
 			}
-
-			qurl, err := c.Get(cmd.Context(), args[0])
-			if err != nil {
-				return fmt.Errorf("get qURL: %w", err)
+			if flags.file == "" && opts.resolvedFormat == output.FormatJSON {
+				// JSON mode is a machine asking for data; spawning a
+				// browser as a side effect would surprise it — the same
+				// refuse-loudly principle as --file - above.
+				return exitcode.UsageError(errors.New(msgBrowserJSON))
 			}
-
-			return opts.formatter().FormatQURL(cmd.OutOrStdout(), qurl)
+			return runGet(cmd.Context(), opts, args[0], flags)
 		},
 	}
 
+	cmd.Flags().StringVar(&flags.file, "file", "", "download to this path instead of opening a browser (\"-\" = raw bytes to stdout)")
+	cmd.Flags().BoolVar(&flags.force, "force", false, "allow --file to replace an existing file")
+	cmd.Flags().BoolVar(&flags.yes, "yes", false, "proceed without confirmation, including sending a test CRID to production")
+
 	return cmd
+}
+
+// runGet applies the CRID guards, decides the action locally, and acts on a
+// verified answer only.
+func runGet(ctx context.Context, opts *globalOpts, operand string, flags getFlags) error {
+	assessment, err := cridux.Assess(operand)
+	if err != nil {
+		return err
+	}
+	printer := opts.printer()
+	if err := applyCRIDGuards(printer, assessment, opts.productionEndpoint(), flags.yes); err != nil {
+		return err
+	}
+
+	action, err := consume.Decide(opts.streams.OutIsTTY, flags.file)
+	if err != nil {
+		return err
+	}
+	if action == consume.ActionSaveFile {
+		// Refuse a doomed destination before touching credentials or the
+		// network: no share link is minted for a download that could never land.
+		if err := consume.CheckDestination(flags.file, flags.force); err != nil {
+			return err
+		}
+	}
+
+	client, err := opts.newClient(ctx)
+	if err != nil {
+		return err
+	}
+	// mint requests a share link and verifies it; every path below — the
+	// browser launch, the download, and the mid-download retry — goes
+	// through it, so nothing ever acts on an unverified answer.
+	var shareLink *qurlapi.ShareLink
+	mint := func(ctx context.Context) (string, error) {
+		result, err := client.Share(ctx, assessment.Input, qurlapi.ShareOptions{})
+		if err := verifyShareLink(assessment, result, err); err != nil {
+			return "", err
+		}
+		if err := opts.verifyLink(ctx, result.QURL, assessment.Input); err != nil {
+			return "", err
+		}
+		shareLink = result
+		return result.QURL, nil
+	}
+	// fetchTarget preserves the lifetime of an acknowledged NHP grant. An
+	// immediate 410 can then converge on that same grant without opening a
+	// second session. It also carries the application authorizer: a protected
+	// target can never degrade to a URL-only download target.
+	fetchTarget := func(ctx context.Context) (consume.DownloadTarget, error) {
+		link, err := mint(ctx)
+		if err != nil {
+			return consume.DownloadTarget{}, err
+		}
+		// Legacy direct-link test path. Production mint rejects unsigned links
+		// before this point; keep plain-URL downloader fixtures isolated here.
+		if !consume.NeedsAccessGrant(link) {
+			return consume.DownloadTarget{URL: link}, nil
+		}
+		started := time.Now()
+		grant, err := opts.enterPortalGrant(ctx, link)
+		if err != nil {
+			return consume.DownloadTarget{}, err
+		}
+		return consume.DownloadTarget{
+			URL:        grant.ContentURL,
+			ValidUntil: started.Add(time.Duration(grant.OpenSeconds) * time.Second),
+			Authorize:  grant.AuthorizeContentRequest,
+		}, nil
+	}
+
+	switch action {
+	case consume.ActionOpenBrowser:
+		if _, err := mint(ctx); err != nil {
+			return err
+		}
+		return openInBrowser(ctx, opts, printer, shareLink)
+	case consume.ActionStreamStdout:
+		downloader := &consume.Downloader{MintTarget: fetchTarget}
+		_, err := downloader.StreamTo(ctx, opts.streams.Out)
+		return err
+	case consume.ActionSaveFile:
+		downloader := &consume.Downloader{MintTarget: fetchTarget}
+		n, err := downloader.SaveTo(ctx, flags.file, flags.force)
+		if err != nil {
+			return err
+		}
+		return printer.Downloaded(shareLink.CRID, flags.file, n)
+	default:
+		return fmt.Errorf("unhandled action %d", action)
+	}
+}
+
+// openInBrowser prints the verified link, then launches the browser at it.
+// Data first: with the link on stdout, a failed launch still leaves the
+// user something to act on.
+func openInBrowser(ctx context.Context, opts *globalOpts, printer *output.Printer, link *qurlapi.ShareLink) error {
+	if err := printer.ShareLink(link); err != nil {
+		return err
+	}
+	printer.Notef(msgOpeningBrowser)
+	if err := opts.openBrowser(ctx, link.QURL); err != nil {
+		return fmt.Errorf(msgBrowserFailed, err)
+	}
+	return nil
 }

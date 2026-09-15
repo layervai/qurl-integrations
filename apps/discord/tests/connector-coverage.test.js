@@ -1,8 +1,3 @@
-/**
- * Additional connector.js tests for 90%+ coverage.
- * Covers: isAllowedSourceUrl catch block (line 15), connectorAuthHeaders with key (line 26),
- * uploadToConnector SSRF rejection (line 38), mintLinks null links (line 96).
- */
 
 jest.mock('../src/logger', () => ({
   info: jest.fn(),
@@ -13,6 +8,22 @@ jest.mock('../src/logger', () => ({
 }));
 
 const originalFetch = globalThis.fetch;
+
+describe('@layervai/qurl SDK contract — detect pagination', () => {
+  it('exposes listAllResources as an async iterable on the pinned runtime package', () => {
+    const { QURLClient: RealQURLClient } = jest.requireActual('@layervai/qurl');
+    const client = new RealQURLClient({
+      apiKey: 'test-key',
+      baseUrl: 'https://qurl.invalid',
+    });
+
+    const iterator = client.listAllResources({ slug: 'detect-sandbox', limit: 100 });
+
+    expect(typeof client.listAllResources).toBe('function');
+    expect(iterator).toBeTruthy();
+    expect(typeof iterator[Symbol.asyncIterator]).toBe('function');
+  });
+});
 
 describe('Connector client — coverage boost', () => {
   let connector;
@@ -62,9 +73,7 @@ describe('Connector client — coverage boost', () => {
       expect(connector.isAllowedSourceUrl('https://media.discordapp.net/path/file.png')).toBe(true);
     });
 
-    // Adversarial SSRF-bypass inputs.
     it('rejects credential-in-URL that smuggles a different host', () => {
-      // https://cdn.discordapp.com@evil.com/file.png parses to hostname evil.com
       expect(connector.isAllowedSourceUrl('https://cdn.discordapp.com@evil.com/file.png')).toBe(false);
     });
 
@@ -106,7 +115,6 @@ describe('Connector client — coverage boost', () => {
         'https://cdn.discordapp.com/file.png', 'file.png', 'image/png',
       );
 
-      // The second fetch call (upload to connector) should include auth header
       expect(globalThis.fetch).toHaveBeenCalledTimes(2);
       const uploadHeaders = globalThis.fetch.mock.calls[1][1].headers;
       expect(uploadHeaders['Authorization']).toBe('Bearer test-key-for-connector');
@@ -114,10 +122,6 @@ describe('Connector client — coverage boost', () => {
   });
 
   describe('viewer_ttl_seconds field forwarding', () => {
-    // Each upload entry-point must thread viewerTtlSeconds onto the
-    // multipart body when the caller passes a positive number, and
-    // omit the field entirely otherwise. Pinning all four paths so a
-    // future entry-point that forgets `appendViewerTtl` gets caught.
     function captureUploadFormFields() {
       globalThis.fetch = jest.fn()
         .mockResolvedValueOnce({ // CDN download (only used by file paths)
@@ -129,12 +133,10 @@ describe('Connector client — coverage boost', () => {
           ok: true,
           json: async () => ({ success: true, hash: 'h1', resource_id: 'r1' }),
         })
-        // Second fetch call for the no-CDN paths (re-upload, JSON) lands here.
         .mockResolvedValueOnce({
           ok: true,
           json: async () => ({ success: true, hash: 'h2', resource_id: 'r2' }),
         });
-      // Hook the FormData append so we can see exactly what the helper sent.
       const originalAppend = globalThis.FormData.prototype.append;
       const appended = [];
       globalThis.FormData.prototype.append = function (...args) {
@@ -191,11 +193,6 @@ describe('Connector client — coverage boost', () => {
       expect(ttlField.value).toBe('60');
     });
 
-    // mintLinks forwards selfDestructSeconds as session_duration so
-    // every minted token on a self-destruct send gets an L7 session
-    // window matching the fileviewer's client-side blank. Sibling of
-    // the viewer_ttl_seconds tests above — same value, different
-    // wire-field (mint_link request JSON, not upload form).
     describe('mintLinks — session_duration forwarding', () => {
       function captureMintBody() {
         let bodyJSON = null;
@@ -208,6 +205,28 @@ describe('Connector client — coverage boost', () => {
         });
         return () => bodyJSON;
       }
+
+      it('rejects a qURL access token used as a resource ID without echoing it', async () => {
+        const logger = require('../src/logger');
+        const accessToken = ['at', 'connector-sensitive-marker'].join('_');
+        globalThis.fetch = jest.fn();
+
+        const thrown = await connector.mintLinks(accessToken, {
+          expiresAt: '2099-01-01T00:00:00Z',
+          n: 1,
+        }).catch(error => error);
+
+        expect(globalThis.fetch).not.toHaveBeenCalled();
+        expect(thrown.message).toBe('Invalid resource ID format');
+        expect(thrown.message).not.toContain(accessToken);
+        expect(JSON.stringify([
+          logger.debug.mock.calls,
+          logger.info.mock.calls,
+          logger.warn.mock.calls,
+          logger.error.mock.calls,
+          logger.audit.mock.calls,
+        ])).not.toContain(accessToken);
+      });
 
       it('sends session_duration when selfDestructSeconds provided', async () => {
         const getBody = captureMintBody();
@@ -239,15 +258,6 @@ describe('Connector client — coverage boost', () => {
         expect(getBody().session_duration).toBeUndefined();
       });
 
-      // Defensive: a future caller passing NaN, ±Infinity, a numeric
-      // string, a boolean, or an object shouldn't put garbage on the
-      // wire ("NaNs", "Infinitys", etc.) and turn a recoverable input
-      // mistake into a confusing 400 from qurl-service's
-      // validateSessionDuration. `Number.isFinite(x) && x > 0` is the
-      // load-bearing predicate. Mirrors the sibling viewer_ttl_seconds
-      // defensive-input test below (same idiom, same belt-and-
-      // suspenders justification: the confirm-card dropdown is the
-      // contract, but mintLinks is exported).
       it('omits session_duration for non-finite / wrong-type / non-positive inputs', async () => {
         const cases = [NaN, Infinity, -Infinity, '30', '0.5', true, false, {}, [], 0, -1, -0.5];
         for (const v of cases) {
@@ -257,14 +267,30 @@ describe('Connector client — coverage boost', () => {
           expect(getBody().session_duration).toBeUndefined();
         }
       });
+
+      it('sends guild_id when guildId provided', async () => {
+        const getBody = captureMintBody();
+        await connector.mintLinks('r_xyz', { expiresAt: '2099-01-01T00:00:00Z', n: 1, guildId: 'guild-123' });
+        expect(getBody().guild_id).toBe('guild-123');
+      });
+
+      it('omits guild_id when guildId is absent (default param)', async () => {
+        const getBody = captureMintBody();
+        await connector.mintLinks('r_xyz', { expiresAt: '2099-01-01T00:00:00Z', n: 1 });
+        expect('guild_id' in getBody()).toBe(false);
+      });
+
+      it('omits guild_id for falsy guildId (empty string / null / undefined)', async () => {
+        for (const v of ['', null, undefined]) {
+          const getBody = captureMintBody();
+          // eslint-disable-next-line no-await-in-loop
+          await connector.mintLinks('r_xyz', { expiresAt: '2099-01-01T00:00:00Z', n: 1, guildId: v });
+          expect('guild_id' in getBody()).toBe(false);
+        }
+      });
     });
 
     it('omits viewer_ttl_seconds for non-positive / non-finite / wrong-type input', async () => {
-      // Defensive: an upstream caller passing 0, NaN, or a string by
-      // mistake shouldn't cause the field to land on the form. The
-      // confirm-card self-destruct dropdown is the contract (only the
-      // 7 preset numeric values reach this layer); the append helper
-      // is belt-and-suspenders.
       const cases = [0, -1, NaN, Infinity, '30', null, undefined, {}];
       for (const v of cases) {
         globalThis.fetch = jest.fn().mockResolvedValueOnce({
@@ -283,12 +309,6 @@ describe('Connector client — coverage boost', () => {
   });
 
   describe('throwConnectorError — quota_exceeded tagging', () => {
-    // The connector wraps upstream qURL API errors as
-    //   { success: false, error: "QURL API error (403): quota exceeded: token limit per QURL reached (12/10)", links: [] }
-    // throwConnectorError must surface this as Error.apiCode = 'quota_exceeded'
-    // so the send-pipeline catch block can show a specific user-facing
-    // message instead of a generic "Failed to create links. Please try
-    // again." (which is unhelpful — the user needs to re-upload, not retry).
     it('tags quota_exceeded when error string contains "quota exceeded"', async () => {
       globalThis.fetch = jest.fn().mockResolvedValue({
         ok: false,
@@ -379,6 +399,86 @@ describe('Connector client — coverage boost', () => {
         expect(e.apiCode).toBeNull();
       }
     });
+
+    it('surfaces partial mint qurl_ids from non-2xx bodies without logging qurl_link tokens', async () => {
+      const logger = require('../src/logger');
+      globalThis.fetch = jest.fn().mockResolvedValue({
+        ok: false,
+        status: 502,
+        text: async () => JSON.stringify({
+          success: false,
+          error: 'render failed after mint',
+          links: [
+            { qurl_id: 'q_partial_one', qurl_link: 'https://qurl.link/#at_secret_one' },
+            { qurl_id: 'q_partial_two', qurl_link: 'https://qurl.link/#at_secret_two' },
+          ],
+        }),
+      });
+
+      try {
+        await connector.mintLinks('res-1', { expiresAt: '2026-01-01T00:00:00Z', n: 2 });
+        throw new Error('expected throw');
+      } catch (e) {
+        expect(e.status).toBe(502);
+        expect(e.partialLinkCount).toBe(2);
+        expect(e.partialQurlIds).toEqual(['q_partial_one', 'q_partial_two']);
+      }
+
+      expect(logger.warn).toHaveBeenCalledWith(
+        'Connector mint_link returned partial links on non-2xx',
+        expect.objectContaining({
+          resource_id: 'res-1',
+          status: 502,
+          bodyLen: expect.any(Number),
+          partial_link_count: 2,
+          partial_qurl_ids: ['q_partial_one', 'q_partial_two'],
+        }),
+      );
+      const serializedLogs = JSON.stringify([
+        logger.warn.mock.calls,
+        logger.debug.mock.calls,
+      ]);
+      expect(serializedLogs).not.toContain('at_secret');
+      expect(serializedLogs).not.toContain('qurl.link');
+    });
+
+    it('ignores malformed partial mint links and uses the generic debug path', async () => {
+      const logger = require('../src/logger');
+      globalThis.fetch = jest.fn().mockResolvedValue({
+        ok: false,
+        status: 502,
+        text: async () => JSON.stringify({
+          success: false,
+          error: 'render failed before usable qurl ids',
+          links: [
+            {},
+            { qurl_id: '' },
+            'not-an-object',
+          ],
+        }),
+      });
+
+      try {
+        await connector.mintLinks('res-1', { expiresAt: '2026-01-01T00:00:00Z', n: 2 });
+        throw new Error('expected throw');
+      } catch (e) {
+        expect(e.status).toBe(502);
+        expect(e.partialLinkCount).toBeUndefined();
+        expect(e.partialQurlIds).toBeUndefined();
+      }
+
+      expect(logger.warn).not.toHaveBeenCalledWith(
+        'Connector mint_link returned partial links on non-2xx',
+        expect.anything(),
+      );
+      expect(logger.debug).toHaveBeenCalledWith(
+        'Connector mint_link error',
+        expect.objectContaining({
+          status: 502,
+          bodyLen: expect.any(Number),
+        }),
+      );
+    });
   });
 
   describe('mintLinks — null/missing links guard (line 96)', () => {
@@ -449,15 +549,10 @@ describe('Connector client — no API key (requireApiKey guard)', () => {
   });
 });
 
-// Guard the truncation invariant from md5Prefix(): the bot must never log the
-// full hash. These tests pin all three upload paths to the helper so a future
-// caller can't quietly revert to `hash: result.hash`. See md5Prefix() in
-// connector.js for the "why."
 describe('Connector client — MD5 hash truncation in upload logs', () => {
   let connector;
   let logger;
 
-  // 32-char hex string. The first 8 chars are what the bot is allowed to log.
   const FULL_MD5 = '5d41402abc4b2a76b9719d911017c592';
   const MD5_PREFIX = '5d41402a';
 
@@ -465,7 +560,9 @@ describe('Connector client — MD5 hash truncation in upload logs', () => {
     jest.resetModules();
     jest.mock('../src/config', () => ({
       CONNECTOR_URL: 'https://connector.test.local',
+      QURL_ENDPOINT: 'https://api.test.local',
       QURL_API_KEY: 'test-key',
+      DETECT_TUNNEL_SLUG: 'detect-sandbox',
     }));
     jest.mock('../src/logger', () => ({
       info: jest.fn(),
@@ -569,10 +666,6 @@ describe('Connector client — MD5 hash truncation in upload logs', () => {
     assertNoFullHashLeaked();
   });
 
-  // Pins the `typeof hash === 'string'` guard against future schema drift
-  // where the connector returns a non-string non-undefined value (number,
-  // null, Buffer, ...). The guard must short-circuit to undefined; without
-  // it, `?.slice` on a Buffer would have produced a usable byte slice.
   it.each([
     ['null', null],
     ['number', 12345],
@@ -598,5 +691,62 @@ describe('Connector client — MD5 hash truncation in upload logs', () => {
       resource_id: 'r5',
     });
     assertNoFullHashLeaked();
+  });
+
+});
+
+describe('detectTunnelHostSuffixesForEndpoint — env-extendable non-prod allowlist', () => {
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  it('grants the extra suffix when QURL_ENDPOINT matches an extra non-prod endpoint host', () => {
+    jest.resetModules();
+    jest.doMock('../src/config', () => ({
+      CONNECTOR_URL: 'https://connector.test.local',
+      QURL_ENDPOINT: 'https://api.sandbox.example',
+      QURL_API_KEY: 'test-key',
+      DETECT_EXTRA_NON_PROD_QURL_ENDPOINT_HOSTS: ['api.sandbox.example'],
+      DETECT_EXTRA_NON_PROD_HOST_SUFFIXES: ['.tunnel.sandbox.example'],
+    }));
+    const { detectTunnelHostSuffixesForEndpoint } = require('../src/connector');
+    expect(detectTunnelHostSuffixesForEndpoint('https://api.sandbox.example'))
+      .toContain('.tunnel.sandbox.example');
+  });
+
+  it('does NOT grant the extra suffix for an endpoint absent from the extra allowlist (fail closed)', () => {
+    jest.resetModules();
+    jest.doMock('../src/config', () => ({
+      CONNECTOR_URL: 'https://connector.test.local',
+      QURL_ENDPOINT: 'https://api.layerv.ai',
+      QURL_API_KEY: 'test-key',
+      DETECT_EXTRA_NON_PROD_QURL_ENDPOINT_HOSTS: ['api.sandbox.example'],
+      DETECT_EXTRA_NON_PROD_HOST_SUFFIXES: ['.tunnel.sandbox.example'],
+    }));
+    const { detectTunnelHostSuffixesForEndpoint } = require('../src/connector');
+    expect(detectTunnelHostSuffixesForEndpoint('https://api.layerv.ai')).toEqual(['.qurl.site']);
+  });
+
+  it('still returns only the production suffix for an unknown endpoint when the extra vars are unset (no behavior change)', () => {
+    jest.resetModules();
+    jest.doMock('../src/config', () => ({
+      CONNECTOR_URL: 'https://connector.test.local',
+      QURL_ENDPOINT: 'https://api.layerv.ai',
+      QURL_API_KEY: 'test-key',
+    }));
+    const { detectTunnelHostSuffixesForEndpoint } = require('../src/connector');
+    expect(detectTunnelHostSuffixesForEndpoint('https://api.layerv.ai')).toEqual(['.qurl.site']);
+  });
+
+  it('still grants the built-in non-prod suffixes for a built-in endpoint host when the extra vars are unset', () => {
+    jest.resetModules();
+    jest.doMock('../src/config', () => ({
+      CONNECTOR_URL: 'https://connector.test.local',
+      QURL_ENDPOINT: 'https://api.staging.layerv.ai',
+      QURL_API_KEY: 'test-key',
+    }));
+    const { detectTunnelHostSuffixesForEndpoint } = require('../src/connector');
+    expect(detectTunnelHostSuffixesForEndpoint('https://api.staging.layerv.ai'))
+      .toEqual(['.qurl.site', '.qurl.site.layerv.xyz', '.qurl.site.layerv.ai']);
   });
 });

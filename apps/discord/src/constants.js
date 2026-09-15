@@ -1,4 +1,4 @@
-// Shared constants for the OpenNHP Discord bot
+// Shared constants for the qURL Discord bot
 
 // Embed colors (Discord uses hex integers)
 const COLORS = {
@@ -80,10 +80,36 @@ const LIMITS = {
   RELEASE_NOTES_TRUNCATE: 500,
 };
 
+// DynamoDB TransactWriteItems hard action cap. Shared so the Add Recipients
+// revoked-race cleanup and DDB guarded write use identical fit checks.
+const DDB_TRANSACTION_MAX_ACTIONS = 100;
+
+function ddbSendConfigGuardActionCount(sends = []) {
+  return sends.length + new Set(sends.map(s => s.sendId)).size;
+}
+
+function ddbSendConfigGuardFitsTransaction(sends = []) {
+  return ddbSendConfigGuardActionCount(sends) <= DDB_TRANSACTION_MAX_ACTIONS;
+}
+
 // Maximum attachment size the bot will accept. Shared between commands.js
 // (user-facing validation) and connector.js (CDN download + streaming cap).
 // Keep in sync with Discord's own 25MB attachment limit.
 const MAX_FILE_SIZE = 25 * 1024 * 1024;
+
+// TODO(upstream-contract): max access tokens the qURL API allows per resource.
+// Draining the pool means a new resource (re-upload) is needed for a fresh
+// one; exceeding it comes back as connector.js's `quota_exceeded` apiCode.
+//
+// The cap is qurl-service's and we do not control it, so nothing here fails
+// loudly if it moves — a smaller cap turns mintLinksInBatches' later batches
+// into quota errors mid-send, a larger one leaves us re-uploading more often
+// than we need to. Lives here rather than in commands.js so the send pipeline
+// and scripts/loadtest-standalone.js read one value: commands.js cannot be
+// required from a standalone script (it pulls in ./store, which throws
+// without DDB_TABLE_PREFIX), and a copy in the script had no way to notice
+// this one moving.
+const TOKENS_PER_RESOURCE = 10;
 
 // Cap on concurrent link-status monitors. Each monitor fires setInterval
 // up to 1 hour; a burst of sends could otherwise stack dozens of timers.
@@ -218,7 +244,8 @@ const AUDIT_EVENTS = {
   // return or this comment is updated. `success: true|false`,
   // `handler_duration_ms` (handler entry → metric emit; not edge-to-ACK
   // — see commands.js comment), and `failure_type` ('ack_timeout' |
-  // 'handler_error' | 'unknown_command' | 'reply_failed' | null)
+  // 'handler_error' | 'unknown_command' | 'reply_failed' |
+  // 'unsupported_context' | null)
   // carry every dimension Phase 1 alarms need. Low-cardinality only —
   // command_name is bounded by registered slash commands.
   //
@@ -479,6 +506,99 @@ const AUDIT_EVENTS = {
   // SUBSCRIPTION_REGISTER_FAILED so the REGISTER_FAILED metric
   // filter unambiguously means "the link failed for the user."
   QURL_WEBHOOK_PROPAGATE_PARTIAL: 'qurl_webhook_propagate_partial',
+
+  // Emitted once per `/qurl send` (or Add Recipients) that fails at the
+  // mint/upload step — the executeSendPipeline + handleAddRecipients
+  // catch blocks in commands.js. Surfaces the user-visible "Failed to
+  // create links" path as a metric so on-call sees a sustained spike
+  // before users do.
+  //
+  // Carries `reason` (categorized failure class), `api_code` (the
+  // upstream-error code if the connector/qurl-service surfaced
+  // RFC 7807-style), `status_code` (the upstream HTTP status), and
+  // `kind` ('file' | 'location' for normal traffic; `null` when an
+  // unrecognized resourceType reaches the initial-send catch, OR when
+  // a future refactor adds throwable work before addRecipients sets
+  // activeKind — both are discoverable in CloudWatch, not silent).
+  // Same low-cardinality value space as UPLOAD_SUCCESS — dashboard
+  // splits stay symmetric.
+  //
+  // Cardinality discipline: `reason` and `kind` are LOW cardinality
+  // (closed enums) — safe to dimension on for dashboard splits.
+  // `status_code` is bounded (HTTP status integers) but NOT a closed
+  // enum — fine as a forensic/dashboard field, but don't treat it as a
+  // fixed-cardinality metric dimension. `api_code` is HIGH cardinality
+  // (free-form upstream string) — log-side forensic field, NOT a
+  // metric dimension. Mirrors DEPENDENCY_AUTH_FAILURE's `path` guidance.
+  //
+  // Reason classes used today:
+  //   - upstream_4xx          — connector or qurl-service 4xx that
+  //                              isn't quota_exceeded (already split
+  //                              into its own user-message path)
+  //   - upstream_5xx          — connector or qurl-service 5xx
+  //   - timeout               — request timed out before status
+  //   - unknown               — fallback for unclassifiable errors
+  //
+  // CloudWatch metric filter + alarm live in qurl-integrations-infra
+  // qurl-bot-discord/terraform/monitoring.tf (qurl-integrations-infra#928,
+  // the #276 terraform half). The alarm counts EVERY emitted failure —
+  // it does NOT split on `reason`, because a systemic outage can be a 4xx
+  // (the 2026-05-13 incident was a sub-floor-session_duration 400) — and
+  // pages on a sustained spike. `reason`/`kind` are forensic + dashboard
+  // dimensions, not the alarm gate. `quota_exceeded` — the one genuinely
+  // high-volume normal condition (a viral upload hitting the per-qURL token
+  // quota) — is skipped at source below, so it can't inflate the metric.
+  //
+  // Everything else emits, by design. Other "expected, user-recoverable"
+  // conditions — an expired Discord CDN URL (Add Recipients on a >24h-old
+  // send) or per-resource pool exhaustion (429, which mintLinksInBatches
+  // auto-handles via re-upload) — are RARE at the catch, so the alarm's
+  // sustained threshold absorbs them; they are NOT skipped at source.
+  // A source-side message/phase-based skip was tried for CDN-expiry and
+  // removed: it kept mis-bucketing real connector 403/auth outages as
+  // "expiry" and silently suppressing them. Skip only what is genuinely
+  // high-volume (quota); let volume + threshold handle the rest.
+  //
+  // The sibling connector_no_resource_id alarm separately catches the
+  // "200 + missing resource_id" shape.
+  QURL_SEND_CREATE_LINK_FAILURE: 'qurl_send_create_link_failure',
+
+  // /qurl detect — watermark-attribution lookup (#1101). Audits the attribution
+  // OUTCOMES and abuse signals — the security-relevant terminal paths — so the
+  // trail records every resolved (or refused) deanonymization query plus the
+  // abuse patterns the cooldown is paired to catch (a high detect rate, a
+  // throttle). It does NOT fire on honest operational failures (CDN download,
+  // connector 5xx/network) or pre-connector input rejects (cooldown, missing /
+  // non-image / oversize attachment) — those log at warn/error and never reach
+  // the connector or resolve a recipient. Outcomes:
+  //   - `result: 'matched'`  — connector matched a same-guild row + the caller
+  //                            had standing; carries `qurl_id` + `match_pct` +
+  //                            `confidence` + `grant_basis` ('sender'|'staff').
+  //   - `result: 'no_match'` — no mark, or a mark with no same-guild row
+  //                            (on the latter, carries `qurl_id`).
+  //   - `result: 'ambiguous'`— >1 same-guild row for one qurl_id (a
+  //                            write-path duplicate violating the
+  //                            one-qurl_id-per-recipient invariant); we
+  //                            refuse to attribute. Carries `qurl_id` as
+  //                            the operator investigation handle.
+  //   - `result: 'rejected'` — the SSRF-probe gate fired (the strongest
+  //                            abuse signal; the one rejection that keeps
+  //                            the cooldown). No connector call.
+  //   - `result: 'unconfigured'` — the guild has no qURL API key (no
+  //                            /qurl setup). No connector call.
+  //   - `result: 'rate_limited'` — the connector 429'd this guild (an abuse
+  //                            signal that KEEPS the cooldown, mirroring
+  //                            'rejected'); the connector call was throttled.
+  //   - `result: 'no_standing'` — a matched qURL, but the caller is neither its
+  //                            original sender nor staff, so the ACCESS MODEL
+  //                            denies the reveal. Carries `qurl_id`; KEEPS the
+  //                            cooldown; the user-facing reply is byte-identical
+  //                            to no_match (the caller can't tell it apart).
+  // Always carries `guild_id` + `requester_id`, and NEVER the resolved
+  // recipient id (audit logs are broader-access than the ephemeral reply;
+  // logging the unmasked recipient would re-leak the very thing the
+  // ephemeral protects — and a rejected/throttled outcome never resolves one).
+  QURL_DETECT: 'qurl_detect',
 };
 
 // Frozen so a stray `AUDIT_EVENTS.UPLOAD_SUCCESS = 'oops'` mutation at
@@ -494,6 +614,7 @@ Object.freeze(AUDIT_EVENTS);
 // silently matching nothing. Mirrors qurl-service WebhookEventType.
 const QURL_WEBHOOK_EVENTS = Object.freeze({
   ACCESSED: 'qurl.accessed',
+  EXPIRED: 'qurl.expired',
 });
 
 // Discord gateway dispatch event names (the `t` field on op=0 frames).
@@ -512,29 +633,9 @@ const GATEWAY_DISPATCH_TYPES = Object.freeze({
   INTERACTION_CREATE: 'INTERACTION_CREATE',
 });
 
-// Structured-log `kind` tags used to correlate failures across the
-// async-boundary trio: the gateway-WS-driven unhandledRejection
-// handler in index.js, the worker-tier dispatch handler rejection
-// path in event-consumer.js (trackDispatch's .catch), and the
-// publish-failure path in event-publisher.js. All three emit the
-// same `kind: 'unhandledRejection'` tag so a single CloudWatch
-// query — filtering on the structured field — finds every site
-// without grepping message text or maintaining per-site filter
-// rules. Centralizing the literal here makes the contract
-// explicit and lets a future tag addition (LOG_KIND_AUDIT, etc.)
-// follow the same pattern.
-//
-// Frozen — see AUDIT_EVENTS for the rationale. A mutation here
-// would silently make one site stop matching the CloudWatch
-// alarm filter the other two sites still emit.
+// Use one tag for gateway and worker rejection alerts.
 const LOG_KINDS = Object.freeze({
   UNHANDLED_REJECTION: 'unhandledRejection',
-  // Separate kind for view-update publish/dispatch failures (feat #60).
-  // Decoupled from UNHANDLED_REJECTION so CloudWatch alarm filters
-  // targeting interaction-loss (event-shipper + global unhandled-
-  // rejection paths) don't page on view-update failures — those are
-  // covered by the polling-tick fallback at the render layer.
-  VIEW_UPDATE_PUBLISH_FAIL: 'viewUpdatePublishFail',
 });
 
 module.exports = {
@@ -544,7 +645,11 @@ module.exports = {
   ROLE_COLORS,
   TIMEOUTS,
   LIMITS,
+  DDB_TRANSACTION_MAX_ACTIONS,
+  ddbSendConfigGuardActionCount,
+  ddbSendConfigGuardFitsTransaction,
   MAX_FILE_SIZE,
+  TOKENS_PER_RESOURCE,
   MAX_CONCURRENT_MONITORS,
   DISCORD_MEMBERS_PAGE_SIZE,
   PREWARM_MAX_PAGES,

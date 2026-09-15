@@ -37,8 +37,12 @@ import (
 	"log/slog"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
+
+	"github.com/layervai/qurl-integrations/internal/ttlcache"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
@@ -59,12 +63,36 @@ const kmsWorkspaceAADKey = "workspace_id"
 // qurl-integrations-infra side in the TF for the table schema; changing
 // these here means a coordinated TF change.
 const (
-	attrTeamID       = "team_id"
-	attrQURLAPIKey   = "qurl_api_key"    // GCM-sealed plaintext, base64 in JSON, raw bytes in DDB
-	attrDataKeyCT    = "qurl_api_key_dk" // ciphertext data key returned by KMS GenerateDataKey
-	attrConfiguredBy = "configured_by"
-	attrConfiguredAt = "configured_at"
-	attrUpdatedAt    = "updated_at"
+	attrTeamID           = "team_id"
+	attrQURLAPIKey       = "qurl_api_key"    // GCM-sealed plaintext, base64 in JSON, raw bytes in DDB
+	attrDataKeyCT        = "qurl_api_key_dk" // ciphertext data key returned by KMS GenerateDataKey
+	attrQURLAPIKeyID     = "qurl_api_key_id"
+	attrQURLAPIKeyPrefix = "qurl_api_key_prefix"
+	// attrQURLAccountID records the qURL account (Auth0 id_token `sub`, which
+	// qurl-service uses as the binding/api-key owner_id) that minted the stored
+	// key. It is key provenance, NOT the workspace ownership anchor — that stays
+	// the Slack user_id in workspace_mappings (see #510). Explicit --repoint
+	// compares this against the signed-in qURL account to detect a cross-account
+	// move before touching any key. Plaintext, non-secret identifier, same
+	// posture as configured_by; legacy/sandbox rows minted before this field
+	// leave it absent (read as "").
+	attrQURLAccountID = "qurl_account_id"
+	attrConfiguredBy  = "configured_by"
+	attrConfiguredAt  = "configured_at"
+	attrUpdatedAt     = "updated_at"
+	// Every workspace_state write must refresh attrUpdatedAtNano. Lifecycle
+	// purges use it as the reinstall-race guard; a writer that skips it can let a
+	// delayed uninstall purge delete freshly reinstalled credentials.
+	// TestWorkspaceStateWritersStampUpdatedAtNano enforces that across every
+	// writer, and TestWorkspaceStateMutatorsAreStampCovered fails when a new
+	// mutator lands without deciding which side of the invariant it sits on.
+	//
+	// The converse binds equally: nothing may bump it gratuitously. A writer
+	// driven by ordinary traffic rather than by a real credential change holds
+	// the row newer than any teardown cutoff, making
+	// DeleteWorkspaceStateBeforeWithIdentity no-op and stranding credentials a
+	// delayed uninstall should have purged.
+	attrUpdatedAtNano = "updated_at_unix_nano"
 
 	attrSlackBotToken       = "slack_bot_token"
 	attrSlackBotTokenDK     = "slack_bot_token_dk"
@@ -74,7 +102,16 @@ const (
 	attrSlackBotUserID      = "slack_bot_user_id"
 	attrSlackAppID          = "slack_app_id"
 	attrSlackEnterpriseID   = "slack_enterprise_id"
-	attrSlackBotScopes      = "slack_bot_scopes"
+	// attrSlackBotScopes records what Slack GRANTED at the OAuth exchange, not
+	// what the live bot token carries: reinstalling from the Slack app config
+	// widens an existing token's scopes in place, and that redirect never reaches
+	// SetSlackBotToken because Callback rejects it at the state guards. So the
+	// set goes stale with nothing failing — observed on the live LayerV workspace
+	// 2026-08-14, the four DefaultBotScopes values stored against a token
+	// carrying thirteen. No code path consumes it; it rides along in the
+	// unprojected GetItem SlackBotToken issues. See SetSlackBotToken for why
+	// nothing should refresh it.
+	attrSlackBotScopes = "slack_bot_scopes"
 )
 
 // Env var names — operator-set via the Fargate task definition (the
@@ -87,6 +124,23 @@ const (
 	// EnvWorkspaceStateKMSKeyARN is the customer-managed CMK ARN used
 	// for envelope-encrypting the qurl_api_key field. Required.
 	EnvWorkspaceStateKMSKeyARN = "WORKSPACE_STATE_KMS_KEY_ARN"
+)
+
+const (
+	apiKeyCacheTTL                     = 5 * time.Minute
+	apiKeyCacheSweepEvery              = time.Minute
+	apiKeySharedContextErrorRetryLimit = 1
+	apiKeyValidationRecheckLimit       = 3
+
+	apiKeyValidationProjectionKey        = "#api_key"
+	apiKeyValidationProjectionDataKey    = "#data_key"
+	apiKeyValidationProjectionExpression = apiKeyValidationProjectionKey + ", " + apiKeyValidationProjectionDataKey
+
+	// DDB ExpressionAttributeValues placeholders for the current time,
+	// shared by the workspace_state UpdateExpression callers below.
+	// Lifted to constants to satisfy goconst.
+	exprNow     = ":now"
+	exprNowNano = ":now_nano"
 )
 
 // ErrWorkspaceNotConfigured is the sentinel returned by APIKey when the
@@ -102,6 +156,23 @@ var ErrWorkspaceNotConfigured = errors.New("workspace not configured — admin m
 // failures so old installs can be pointed at the reinstall path.
 var ErrSlackBotTokenNotConfigured = errors.New("workspace Slack bot token not configured — admin must reinstall the Slack app")
 
+// ErrWorkspaceStateUpdatedAfterCutoff means a guarded whole-row delete refused
+// to remove workspace_state because the row has been updated since the teardown
+// signal was observed. The Slack lifecycle purge treats this as a successful
+// no-op so a delayed uninstall cleanup cannot clobber a fresh reinstall/setup.
+var ErrWorkspaceStateUpdatedAfterCutoff = errors.New("workspace_state updated after purge cutoff")
+
+// DeletedWorkspaceStateIdentity carries non-secret qURL key provenance returned
+// from a whole-row workspace_state delete. It lets Slack lifecycle cleanup log
+// the upstream key identity before the local row disappears, so operator/manual
+// revoke follow-up remains possible even though the encrypted key material is
+// removed immediately for Marketplace retention.
+type DeletedWorkspaceStateIdentity struct {
+	Deleted       bool
+	QURLAPIKeyID  string
+	QURLAccountID string
+}
+
 // DynamoDBClient is the slice of *dynamodb.Client the provider actually
 // uses. Exposed as an interface so tests can inject a fake without
 // spinning up localstack.
@@ -109,6 +180,10 @@ type DynamoDBClient interface {
 	GetItem(ctx context.Context, params *dynamodb.GetItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.GetItemOutput, error)
 	PutItem(ctx context.Context, params *dynamodb.PutItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.PutItemOutput, error)
 	UpdateItem(ctx context.Context, params *dynamodb.UpdateItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.UpdateItemOutput, error)
+	// DeleteItem backs [DDBProvider.DeleteWorkspaceState] — the Slack-lifecycle
+	// (app_uninstalled / tokens_revoked) and `/qurl uninstall` cascade that
+	// removes the ENTIRE workspace_state row, bot token and all. The
+	// per-column [DDBProvider.DeleteAPIKey] path uses UpdateItem REMOVE instead.
 	DeleteItem(ctx context.Context, params *dynamodb.DeleteItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.DeleteItemOutput, error)
 }
 
@@ -127,16 +202,75 @@ type FieldEncryptor interface {
 
 // DDBProvider implements Provider by reading per-workspace API keys from
 // a DynamoDB table, with field-level envelope encryption on the key
-// column.
+// column. It owns mutex-protected cache state and must not be copied after
+// first use; construct and share it as *DDBProvider.
 type DDBProvider struct {
 	Client    DynamoDBClient
 	TableName string
 	Encryptor FieldEncryptor
 
+	// Cache successful APIKey lookups at the DDB/decrypt boundary with the
+	// shared TTL singleflight helper. Cache hits still perform a strongly
+	// consistent DDB projection read of the encrypted key material before
+	// returning plaintext; that trades steady-state DDB-read avoidance for
+	// bounded cross-instance rotation/revocation staleness without putting KMS
+	// Decrypt back on the steady-state slash-command path. Definitive
+	// changed/deleted validation results evict the cache; validation transport
+	// errors fall back to the cached key so a DDB blip does not become a full
+	// Slack outage. The decrypted key remains in heap memory for the TTL as the
+	// accepted KMS/latency trade-off. Validation reads are strongly consistent
+	// so sibling rotations/deletes take effect immediately when DDB is reachable
+	// rather than after eventual-read replication lag.
+	// The validation token is intentionally tied to encrypted key material, so a
+	// future same-plaintext rewrap would invalidate warm entries and re-run KMS
+	// decrypts even though the API key value did not change.
+	// SetAPIKeyWithMetadata seeds this process after a successful write.
+	// DeleteAPIKey evicts this process and forces strongly-consistent refills
+	// for one TTL so a same-process eventually-consistent post-delete read
+	// cannot re-cache the revoked key.
+	apiKeyCacheOnce   sync.Once
+	apiKeyLookupCache *ttlcache.Cache[cachedAPIKey]
+
+	// Protected by apiKeyLookupCache's mutex through ttlcache hooks. Generation
+	// entries are retained by the helper after invalidation even after an
+	// in-flight slot is deleted: that slot deletion detaches the old owner,
+	// which may still finish later, so resetting the generation to zero could
+	// let it cache an old key. The generation map grows for each workspace
+	// seeded or invalidated in this process and is retained for the process
+	// lifetime.
+	apiKeyStrongReadUntil map[string]time.Time
+	apiKeyValidationCalls map[string]*apiKeyValidationCall
+
 	// Now is injected so tests can pin the wall clock for configured_at /
 	// updated_at assertions without poking package-global state. Defaults
 	// to time.Now.
 	Now func() time.Time
+}
+
+type cachedAPIKey struct {
+	apiKey     string
+	cacheToken apiKeyCacheToken
+}
+
+type apiKeyLookupStart struct {
+	apiKey     string
+	cacheToken apiKeyCacheToken
+	// Cached API-key hits only store successful lookups, so err is expected
+	// to be nil. Keeping the Result shape here mirrors ttlcache and makes
+	// that contract explicit at the call site.
+	err            error
+	hit            bool
+	call           *ttlcache.Call[cachedAPIKey]
+	owner          bool
+	generation     uint64
+	consistentRead bool
+}
+
+type apiKeyValidationCall struct {
+	done       chan struct{}
+	cacheToken apiKeyCacheToken
+	current    bool
+	err        error
 }
 
 // SlackBotTokenInstall is the workspace-scoped Slack OAuth material persisted
@@ -149,7 +283,10 @@ type SlackBotTokenInstall struct {
 	BotUserID    string
 	AppID        string
 	EnterpriseID string
-	Scopes       []string
+	// Scopes is the grant Slack returned at THIS exchange, persisted as the
+	// slack_bot_scopes column. It is not the live token's scope set — see that
+	// column's comment — and no reader should treat it as one.
+	Scopes []string
 }
 
 // nowOrDefault is the safe clock accessor — NewDDBProvider always sets
@@ -161,6 +298,33 @@ func (p *DDBProvider) nowOrDefault() time.Time {
 		return p.Now()
 	}
 	return time.Now()
+}
+
+func unixNanoAttr(t time.Time) ddbtypes.AttributeValue {
+	return &ddbtypes.AttributeValueMemberN{Value: strconv.FormatInt(t.UTC().UnixNano(), 10)}
+}
+
+func (p *DDBProvider) apiKeyCache() *ttlcache.Cache[cachedAPIKey] {
+	p.apiKeyCacheOnce.Do(func() {
+		p.apiKeyLookupCache = ttlcache.New[cachedAPIKey](ttlcache.Options[cachedAPIKey]{
+			SweepEvery: apiKeyCacheSweepEvery,
+			OnSweep: func(at time.Time) {
+				// OnSweep runs under the ttlcache lock; keep this hook
+				// non-reentrant and limited to the strong-read sidecar.
+				for workspaceID, until := range p.apiKeyStrongReadUntil {
+					if !at.Before(until) {
+						delete(p.apiKeyStrongReadUntil, workspaceID)
+					}
+				}
+			},
+			OnEvict: func(workspaceID string, _ ttlcache.Result[cachedAPIKey]) {
+				if p.apiKeyValidationCalls != nil {
+					delete(p.apiKeyValidationCalls, workspaceID)
+				}
+			},
+		})
+	})
+	return p.apiKeyLookupCache
 }
 
 // DDBProviderOption configures NewDDBProvider.
@@ -254,45 +418,426 @@ func (p *DDBProvider) APIKey(ctx context.Context, workspaceID string) (string, e
 	if workspaceID == "" {
 		return "", errors.New("DDBProvider.APIKey: workspaceID is empty")
 	}
+	if err := ctx.Err(); err != nil {
+		return "", fmt.Errorf("DDBProvider.APIKey: %w", err)
+	}
 
-	// Eventually-consistent read is correct here: the per-workspace key
-	// only changes on (re-)install, and the few-ms propagation delay is
-	// inside the same "click the setup link" window. Strong reads would
-	// double RCU cost without changing the failure modes that matter.
-	out, err := p.Client.GetItem(ctx, &dynamodb.GetItemInput{
-		TableName: aws.String(p.TableName),
-		Key: map[string]ddbtypes.AttributeValue{
-			attrTeamID: &ddbtypes.AttributeValueMemberS{Value: workspaceID},
-		},
-	})
+	sharedContextErrorRetries := 0
+	validationContextErrorRetries := 0
+	validationRechecks := 0
+	for {
+		now := p.nowOrDefault()
+		start := p.getOrStartAPIKeyLookup(workspaceID, now)
+		if start.hit {
+			apiKey, done, err := p.apiKeyFromValidatedCache(ctx, workspaceID, &start, &validationContextErrorRetries, &validationRechecks)
+			if !done {
+				continue
+			}
+			return apiKey, err
+		}
+		if !start.owner {
+			select {
+			case <-start.call.Done():
+				result := start.call.Result()
+				if shouldRetryAPIKeyLookupAfterSharedError(ctx, result.Err, sharedContextErrorRetries) {
+					sharedContextErrorRetries++
+					continue
+				}
+				return result.Value.apiKey, result.Err
+			case <-ctx.Done():
+				return "", fmt.Errorf("DDBProvider.APIKey: %w", ctx.Err())
+			}
+		}
+
+		return p.fetchAndFinishAPIKeyLookup(ctx, workspaceID, start.call, start.generation, start.consistentRead)
+	}
+}
+
+// apiKeyFromValidatedCache returns done=false when validation observed a
+// retryable state and the caller should re-enter APIKey's lookup loop. When
+// done=true, apiKey/retErr are final for this APIKey call.
+func (p *DDBProvider) apiKeyFromValidatedCache(ctx context.Context, workspaceID string, start *apiKeyLookupStart, validationContextErrorRetries, validationRechecks *int) (apiKey string, done bool, retErr error) {
+	ok, err := p.validateCachedAPIKey(ctx, workspaceID, start.cacheToken)
 	if err != nil {
-		return "", fmt.Errorf("DDBProvider.APIKey: GetItem: %w", err)
+		fallbackAPIKey, fallbackDone, fallbackErr := apiKeyAfterCacheValidationError(ctx, start.apiKey, err, validationContextErrorRetries)
+		if !fallbackDone {
+			return "", false, nil
+		}
+		if fallbackErr == nil && !p.cachedAPIKeyStillLocal(workspaceID, start.cacheToken) {
+			if err := retryAPIKeyCacheValidationLoop(ctx, workspaceID, validationRechecks); err != nil {
+				return "", true, err
+			}
+			return "", false, nil
+		}
+		return fallbackAPIKey, true, fallbackErr
 	}
-	if out == nil || len(out.Item) == 0 {
-		return "", fmt.Errorf("DDBProvider.APIKey: workspace %q: %w", workspaceID, ErrWorkspaceNotConfigured)
+	if !ok {
+		// Token mismatch/delete sets a strong-read refill marker, so the next
+		// loop either observes current DDB state or a newer writer's token.
+		p.evictAPIKeyCacheIfToken(workspaceID, start.cacheToken, p.nowOrDefault().Add(apiKeyCacheTTL))
+		if err := retryAPIKeyCacheValidationLoop(ctx, workspaceID, validationRechecks); err != nil {
+			return "", true, err
+		}
+		return "", false, nil
+	}
+	if !p.cachedAPIKeyStillLocal(workspaceID, start.cacheToken) {
+		// A local writer replaced this token after validation; re-loop to
+		// validate the live cache entry instead of returning stale plaintext.
+		if err := retryAPIKeyCacheValidationLoop(ctx, workspaceID, validationRechecks); err != nil {
+			return "", true, err
+		}
+		return "", false, nil
+	}
+	return start.apiKey, true, nil
+}
+
+func retryAPIKeyCacheValidationLoop(ctx context.Context, workspaceID string, rechecks *int) error {
+	// One budget covers all validation re-loop reasons because each means this
+	// caller has not yet validated the currently local cache token.
+	if *rechecks >= apiKeyValidationRecheckLimit {
+		slog.WarnContext(ctx, "DDBProvider.APIKey cache validation did not converge",
+			slog.String("workspace_id", workspaceID),
+			slog.Int("rechecks", *rechecks),
+			slog.Int("limit", apiKeyValidationRecheckLimit),
+		)
+		return errors.New("DDBProvider.APIKey: cache validation did not converge")
+	}
+	*rechecks++
+	return nil
+}
+
+func apiKeyAfterCacheValidationError(ctx context.Context, cachedKey string, err error, contextErrorRetries *int) (apiKey string, done bool, retErr error) {
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return "", true, fmt.Errorf("DDBProvider.APIKey: %w", ctxErr)
+	}
+	if shouldRetryAPIKeyLookupAfterSharedError(ctx, err, *contextErrorRetries) {
+		*contextErrorRetries++
+		return "", false, nil
+	}
+	return cachedKey, true, nil
+}
+
+// fetchConfiguredAPIKeyItem strongly reads a workspace's auth row and returns it
+// only when a qURL key is actually stored, otherwise [ErrWorkspaceNotConfigured].
+// It bypasses the plaintext-key cache (the explicit rotation/repoint paths need
+// the latest key identity before revoking) and carries the caller's operation
+// label so error messages stay caller-specific. Shared by APIKeyID and
+// APIKeyIdentity so a single strong read backs both.
+func (p *DDBProvider) fetchConfiguredAPIKeyItem(ctx context.Context, workspaceID, operation string) (map[string]ddbtypes.AttributeValue, error) {
+	if workspaceID == "" {
+		return nil, fmt.Errorf("%s: workspaceID is empty", operation)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("%s: %w", operation, err)
+	}
+	item, err := p.fetchAPIKeyItem(ctx, workspaceID, true, operation)
+	if err != nil {
+		return nil, err
+	}
+	if ctBlob, ok := item[attrQURLAPIKey].(*ddbtypes.AttributeValueMemberB); !ok || len(ctBlob.Value) == 0 {
+		return nil, fmt.Errorf("%s: workspace %q: %w", operation, workspaceID, ErrWorkspaceNotConfigured)
+	}
+	return item, nil
+}
+
+// APIKeyID strongly reads the stored qURL key_id for explicit rotation, before
+// revoking.
+func (p *DDBProvider) APIKeyID(ctx context.Context, workspaceID string) (keyID string, err error) {
+	item, err := p.fetchConfiguredAPIKeyItem(ctx, workspaceID, "DDBProvider.APIKeyID")
+	if err != nil {
+		return "", err
+	}
+	return stringAttribute(item[attrQURLAPIKeyID]), nil
+}
+
+// APIKeyIdentity strongly reads both the stored qURL key_id and the qURL account
+// (Auth0 sub) that minted it, in a single read. The explicit rotation/repoint
+// path needs both: the key_id to revoke, and the account to detect a
+// cross-account move before touching any key. A configured workspace whose row
+// predates the account field (or was written by the sandbox/no-verifier path)
+// returns qurlAccountID == "" — the caller must treat that as "provenance
+// unknown" and fail closed rather than assume same-account.
+func (p *DDBProvider) APIKeyIdentity(ctx context.Context, workspaceID string) (keyID, qurlAccountID string, err error) {
+	item, err := p.fetchConfiguredAPIKeyItem(ctx, workspaceID, "DDBProvider.APIKeyIdentity")
+	if err != nil {
+		return "", "", err
+	}
+	return stringAttribute(item[attrQURLAPIKeyID]), stringAttribute(item[attrQURLAccountID]), nil
+}
+
+func shouldRetryAPIKeyLookupAfterSharedError(ctx context.Context, err error, retries int) bool {
+	if err == nil || ctx.Err() != nil || retries >= apiKeySharedContextErrorRetryLimit {
+		return false
+	}
+	// We cannot distinguish the owner's caller being canceled from a lower
+	// layer surfacing the same context error during a DDB brownout. Retrying
+	// keeps healthy waiters from inheriting a dead owner's context, and each
+	// retry re-enters singleflight as a new owner so extra DDB pressure is
+	// sequential rather than a fan-out spike. Keep the retry count tiny so a
+	// persistent context-like lower-layer error cannot spin on a healthy caller.
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+}
+
+func (p *DDBProvider) getOrStartAPIKeyLookup(workspaceID string, now time.Time) apiKeyLookupStart {
+	start, consistentRead := ttlcache.GetOrStartWith[cachedAPIKey, bool](p.apiKeyCache(), workspaceID, now, func() bool {
+		// GetOrStartWith runs this hook under the ttlcache lock; keep it
+		// non-reentrant and limited to the strong-read sidecar.
+		// The hook also runs for waiters so all callers observe and clean up
+		// strong-read sidecar state under the same lock, even though only a
+		// fill owner passes the flag into DDB.
+		if p.apiKeyStrongReadUntil == nil {
+			return false
+		}
+		until, ok := p.apiKeyStrongReadUntil[workspaceID]
+		if !ok {
+			return false
+		}
+		if now.Before(until) {
+			return true
+		}
+		delete(p.apiKeyStrongReadUntil, workspaceID)
+		return false
+	})
+	if start.Hit {
+		return apiKeyLookupStart{apiKey: start.Result.Value.apiKey, cacheToken: start.Result.Value.cacheToken, err: start.Result.Err, hit: true}
+	}
+	if !start.Owner {
+		return apiKeyLookupStart{call: start.Call}
+	}
+	return apiKeyLookupStart{call: start.Call, owner: true, generation: start.Generation, consistentRead: consistentRead}
+}
+
+func (p *DDBProvider) fetchAndFinishAPIKeyLookup(ctx context.Context, workspaceID string, call *ttlcache.Call[cachedAPIKey], generation uint64, consistentRead bool) (string, error) {
+	result := ttlcache.Result[cachedAPIKey]{}
+	finished := false
+	defer func() {
+		if rec := recover(); rec != nil {
+			if !finished {
+				result = ttlcache.Result[cachedAPIKey]{Err: errors.New("DDBProvider.APIKey: lookup panicked")}
+				p.apiKeyCache().Finish(workspaceID, call, result, 0, p.nowOrDefault(), generation)
+			}
+			panic(rec)
+		}
+	}()
+
+	apiKey, cacheToken, err := p.fetchAPIKey(ctx, workspaceID, consistentRead)
+	result = ttlcache.Result[cachedAPIKey]{Value: cachedAPIKey{apiKey: apiKey, cacheToken: cacheToken}, Err: err}
+	finished = true
+	cacheTTL := time.Duration(0)
+	if err == nil {
+		cacheTTL = apiKeyCacheTTL
+	}
+	p.apiKeyCache().Finish(workspaceID, call, result, cacheTTL, p.nowOrDefault(), generation)
+	return apiKey, err
+}
+
+func (p *DDBProvider) fetchAPIKey(ctx context.Context, workspaceID string, consistentRead bool) (string, apiKeyCacheToken, error) {
+	item, err := p.fetchAPIKeyItem(ctx, workspaceID, consistentRead, "DDBProvider.APIKey")
+	if err != nil {
+		return "", apiKeyCacheToken{}, err
 	}
 
-	ctBlob, ok := out.Item[attrQURLAPIKey].(*ddbtypes.AttributeValueMemberB)
+	ctBlob, ok := item[attrQURLAPIKey].(*ddbtypes.AttributeValueMemberB)
 	if !ok || len(ctBlob.Value) == 0 {
-		return "", fmt.Errorf("DDBProvider.APIKey: workspace %q: %w", workspaceID, ErrWorkspaceNotConfigured)
+		return "", apiKeyCacheToken{}, fmt.Errorf("DDBProvider.APIKey: workspace %q: %w", workspaceID, ErrWorkspaceNotConfigured)
 	}
-	wrappedKey, ok := out.Item[attrDataKeyCT].(*ddbtypes.AttributeValueMemberB)
+	wrappedKey, ok := item[attrDataKeyCT].(*ddbtypes.AttributeValueMemberB)
 	if !ok || len(wrappedKey.Value) == 0 {
-		return "", errors.New("DDBProvider.APIKey: stored item missing or has wrong type for qurl_api_key_dk")
+		return "", apiKeyCacheToken{}, errors.New("DDBProvider.APIKey: stored item missing or has wrong type for qurl_api_key_dk")
 	}
 
 	pt, err := p.Encryptor.Open(ctx, ctBlob.Value, wrappedKey.Value, []byte(workspaceID))
 	if err != nil {
-		return "", fmt.Errorf("DDBProvider.APIKey: decrypt: %w", err)
+		return "", apiKeyCacheToken{}, fmt.Errorf("DDBProvider.APIKey: decrypt: %w", err)
 	}
 	// Empty plaintext means the ciphertext decrypted but to zero bytes —
 	// corruption / truncate / unsigned-store-bypass. Fail loud here rather
 	// than handing the caller "" and watching qurl-service surface an
 	// opaque 401.
 	if len(pt) == 0 {
-		return "", errors.New("DDBProvider.APIKey: decrypted plaintext is empty")
+		return "", apiKeyCacheToken{}, errors.New("DDBProvider.APIKey: decrypted plaintext is empty")
 	}
-	return string(pt), nil
+	return string(pt), newAPIKeyCacheToken(ctBlob.Value, wrappedKey.Value), nil
+}
+
+func (p *DDBProvider) fetchAPIKeyItem(ctx context.Context, workspaceID string, consistentRead bool, operation string) (map[string]ddbtypes.AttributeValue, error) {
+	// Eventually-consistent read is correct for normal APIKey lookup: the
+	// per-workspace key only changes on (re-)install, and the few-ms
+	// propagation delay is inside the same "click the setup link" window.
+	// Cache-hit validation is stricter because #766 is specifically about
+	// prompt cross-instance revocation/rotation visibility. DeleteAPIKey and
+	// APIKeyID ask for a strong read when they cannot tolerate stale material.
+	input := &dynamodb.GetItemInput{
+		TableName: aws.String(p.TableName),
+		Key: map[string]ddbtypes.AttributeValue{
+			attrTeamID: &ddbtypes.AttributeValueMemberS{Value: workspaceID},
+		},
+	}
+	if consistentRead {
+		input.ConsistentRead = aws.Bool(true)
+	}
+	out, err := p.Client.GetItem(ctx, input)
+	if err != nil {
+		return nil, fmt.Errorf("%s: GetItem: %w", operation, err)
+	}
+	if out == nil || len(out.Item) == 0 {
+		return nil, fmt.Errorf("%s: workspace %q: %w", operation, workspaceID, ErrWorkspaceNotConfigured)
+	}
+	return out.Item, nil
+}
+
+type apiKeyCacheToken struct {
+	// Intentionally stores encrypted material, not a hash, so cache invalidation
+	// compares the exact DDB ciphertext/wrapped-key pair without retaining any
+	// additional plaintext API-key material.
+	ciphertext string
+	wrappedKey string
+}
+
+func newAPIKeyCacheToken(ciphertext, wrappedKey []byte) apiKeyCacheToken {
+	return apiKeyCacheToken{
+		ciphertext: string(ciphertext),
+		wrappedKey: string(wrappedKey),
+	}
+}
+
+func (p *DDBProvider) cachedAPIKeyStillCurrent(ctx context.Context, workspaceID string, cacheToken apiKeyCacheToken) (bool, error) {
+	out, err := p.Client.GetItem(ctx, &dynamodb.GetItemInput{
+		TableName: aws.String(p.TableName),
+		Key: map[string]ddbtypes.AttributeValue{
+			attrTeamID: &ddbtypes.AttributeValueMemberS{Value: workspaceID},
+		},
+		ProjectionExpression: aws.String(apiKeyValidationProjectionExpression),
+		ExpressionAttributeNames: map[string]string{
+			apiKeyValidationProjectionKey:     attrQURLAPIKey,
+			apiKeyValidationProjectionDataKey: attrDataKeyCT,
+		},
+		ConsistentRead: aws.Bool(true),
+	})
+	if err != nil {
+		return false, fmt.Errorf("DDBProvider.APIKey: cache validation GetItem: %w", err)
+	}
+	if out == nil || len(out.Item) == 0 {
+		return false, nil
+	}
+	ctBlob, ok := out.Item[attrQURLAPIKey].(*ddbtypes.AttributeValueMemberB)
+	if !ok || len(ctBlob.Value) == 0 {
+		return false, nil
+	}
+	wrappedKey, ok := out.Item[attrDataKeyCT].(*ddbtypes.AttributeValueMemberB)
+	if !ok || len(wrappedKey.Value) == 0 {
+		return false, nil
+	}
+	return newAPIKeyCacheToken(ctBlob.Value, wrappedKey.Value) == cacheToken, nil
+}
+
+func (p *DDBProvider) validateCachedAPIKey(ctx context.Context, workspaceID string, cacheToken apiKeyCacheToken) (bool, error) {
+	call, owner := p.getOrStartAPIKeyValidation(workspaceID, cacheToken)
+	if !owner {
+		select {
+		case <-call.done:
+			return call.current, call.err
+		case <-ctx.Done():
+			return false, fmt.Errorf("DDBProvider.APIKey: %w", ctx.Err())
+		}
+	}
+
+	finished := false
+	defer func() {
+		if rec := recover(); rec != nil {
+			if !finished {
+				p.finishAPIKeyValidation(workspaceID, call, false, errors.New("DDBProvider.APIKey: cache validation panicked"))
+			}
+			panic(rec)
+		}
+	}()
+	current, err := p.cachedAPIKeyStillCurrent(ctx, workspaceID, cacheToken)
+	finished = true
+	p.finishAPIKeyValidation(workspaceID, call, current, err)
+	return current, err
+}
+
+func (p *DDBProvider) getOrStartAPIKeyValidation(workspaceID string, cacheToken apiKeyCacheToken) (*apiKeyValidationCall, bool) {
+	var call *apiKeyValidationCall
+	owner := false
+	p.apiKeyCache().WithLock(func() {
+		if p.apiKeyValidationCalls == nil {
+			p.apiKeyValidationCalls = map[string]*apiKeyValidationCall{}
+		}
+		if existing, ok := p.apiKeyValidationCalls[workspaceID]; ok && existing.cacheToken == cacheToken {
+			call = existing
+			return
+		}
+		call = &apiKeyValidationCall{
+			done:       make(chan struct{}),
+			cacheToken: cacheToken,
+		}
+		p.apiKeyValidationCalls[workspaceID] = call
+		owner = true
+	})
+	return call, owner
+}
+
+func (p *DDBProvider) finishAPIKeyValidation(workspaceID string, call *apiKeyValidationCall, current bool, err error) {
+	p.apiKeyCache().WithLock(func() {
+		call.current = current
+		call.err = err
+		if p.apiKeyValidationCalls[workspaceID] == call {
+			delete(p.apiKeyValidationCalls, workspaceID)
+		}
+		close(call.done)
+	})
+}
+
+func (p *DDBProvider) invalidateAPIKeyCache(workspaceID string, strongReadUntil time.Time) {
+	if strings.TrimSpace(workspaceID) == "" {
+		return
+	}
+	p.apiKeyCache().InvalidateWith(workspaceID, func() {
+		// InvalidateWith runs this hook under the ttlcache lock; keep it
+		// non-reentrant and limited to the strong-read sidecar.
+		if !strongReadUntil.IsZero() {
+			if p.apiKeyStrongReadUntil == nil {
+				p.apiKeyStrongReadUntil = map[string]time.Time{}
+			}
+			p.apiKeyStrongReadUntil[workspaceID] = strongReadUntil
+		}
+	})
+}
+
+func (p *DDBProvider) evictAPIKeyCacheIfToken(workspaceID string, cacheToken apiKeyCacheToken, strongReadUntil time.Time) {
+	if strings.TrimSpace(workspaceID) == "" {
+		return
+	}
+	p.apiKeyCache().InvalidateIfWith(workspaceID, func(result ttlcache.Result[cachedAPIKey]) bool {
+		return result.Value.cacheToken == cacheToken
+	}, func() {
+		if !strongReadUntil.IsZero() {
+			if p.apiKeyStrongReadUntil == nil {
+				p.apiKeyStrongReadUntil = map[string]time.Time{}
+			}
+			p.apiKeyStrongReadUntil[workspaceID] = strongReadUntil
+		}
+	})
+}
+
+func (p *DDBProvider) cachedAPIKeyStillLocal(workspaceID string, cacheToken apiKeyCacheToken) bool {
+	return p.apiKeyCache().CachedResultMatches(workspaceID, func(result ttlcache.Result[cachedAPIKey]) bool {
+		return result.Value.cacheToken == cacheToken
+	})
+}
+
+func (p *DDBProvider) seedAPIKeyCache(workspaceID, apiKey string, cacheToken apiKeyCacheToken, now time.Time) {
+	if strings.TrimSpace(workspaceID) == "" {
+		return
+	}
+	p.apiKeyCache().SeedWith(workspaceID, ttlcache.Result[cachedAPIKey]{Value: cachedAPIKey{apiKey: apiKey, cacheToken: cacheToken}}, apiKeyCacheTTL, now, func() {
+		// SeedWith runs this hook under the ttlcache lock; keep it
+		// non-reentrant and limited to the strong-read sidecar.
+		if p.apiKeyStrongReadUntil != nil {
+			delete(p.apiKeyStrongReadUntil, workspaceID)
+		}
+	})
 }
 
 // SlackBotToken looks up the per-workspace Slack bot token captured during
@@ -337,26 +882,71 @@ func (p *DDBProvider) SlackBotToken(ctx context.Context, workspaceID string) (st
 	return string(pt), nil
 }
 
-// SetAPIKey upserts the per-workspace qURL API key. The configuredBy field
-// is informational (the Slack user_id of the admin who completed
-// /oauth/qurl/callback) and is persisted plaintext. UpdateItem is used instead
-// of PutItem so Slack app install metadata in the same row is preserved.
-func (p *DDBProvider) SetAPIKey(ctx context.Context, workspaceID, apiKey, configuredBy string) error {
+// SetAPIKeyWithMetadata stores the per-workspace qURL API key plus its qURL
+// key_id, which explicit rotation needs before it can revoke safely. The
+// configuredBy field is informational (the Slack user_id of the admin who
+// completed /oauth/qurl/callback) and is persisted plaintext. qurlAccountID is
+// the qURL account (Auth0 sub) that minted the key, stored for cross-account
+// --repoint detection; it is best-effort (the admin-storage-disabled path can
+// proceed without a usable sub) so an empty value is tolerated and simply
+// leaves any prior provenance untouched rather than erasing it. UpdateItem is
+// used instead of PutItem so Slack app install metadata in the same row is
+// preserved. The apiKey value is stored exactly as minted by qurl-service;
+// APIKey returns the same plaintext without trimming.
+func (p *DDBProvider) SetAPIKeyWithMetadata(ctx context.Context, workspaceID, apiKey, keyID, keyPrefix, qurlAccountID, configuredBy string) error {
+	keyID = strings.TrimSpace(keyID)
+	if keyID == "" {
+		return errors.New("DDBProvider.SetAPIKeyWithMetadata: keyID is empty")
+	}
+	keyPrefix = strings.TrimSpace(keyPrefix)
+	if keyPrefix == "" {
+		return errors.New("DDBProvider.SetAPIKeyWithMetadata: keyPrefix is empty")
+	}
+	return p.setAPIKey(ctx, "DDBProvider.SetAPIKeyWithMetadata", workspaceID, apiKey, keyID, keyPrefix, qurlAccountID, configuredBy)
+}
+
+func (p *DDBProvider) setAPIKey(ctx context.Context, operation, workspaceID, apiKey, keyID, keyPrefix, qurlAccountID, configuredBy string) error {
 	if workspaceID == "" {
-		return errors.New("DDBProvider.SetAPIKey: workspaceID is empty")
+		return fmt.Errorf("%s: workspaceID is empty", operation)
 	}
 	if apiKey == "" {
-		return errors.New("DDBProvider.SetAPIKey: apiKey is empty")
+		return fmt.Errorf("%s: apiKey is empty", operation)
 	}
 
 	ct, wrapped, err := p.Encryptor.Seal(ctx, []byte(apiKey), []byte(workspaceID))
 	if err != nil {
-		return fmt.Errorf("DDBProvider.SetAPIKey: encrypt: %w", err)
+		return fmt.Errorf("%s: encrypt: %w", operation, err)
 	}
 
-	now := p.nowOrDefault().UTC().Format(time.RFC3339)
-	updateExpr := fmt.Sprintf("SET %s = :key, %s = :dk, %s = :by, %s = :now, %s = if_not_exists(%s, :now)",
-		attrQURLAPIKey, attrDataKeyCT, attrConfiguredBy, attrUpdatedAt, attrConfiguredAt, attrConfiguredAt)
+	now := p.nowOrDefault()
+	nowString := now.UTC().Format(time.RFC3339)
+	setParts := []string{
+		attrQURLAPIKey + " = :key",
+		attrDataKeyCT + " = :dk",
+		attrQURLAPIKeyID + " = :key_id",
+		attrQURLAPIKeyPrefix + " = :key_prefix",
+		attrConfiguredBy + " = :by",
+		attrUpdatedAt + " = " + exprNow,
+		attrUpdatedAtNano + " = " + exprNowNano,
+		attrConfiguredAt + " = if_not_exists(" + attrConfiguredAt + ", " + exprNow + ")",
+	}
+	values := map[string]ddbtypes.AttributeValue{
+		":key":        &ddbtypes.AttributeValueMemberB{Value: ct},
+		":dk":         &ddbtypes.AttributeValueMemberB{Value: wrapped},
+		":key_id":     &ddbtypes.AttributeValueMemberS{Value: keyID},
+		":key_prefix": &ddbtypes.AttributeValueMemberS{Value: keyPrefix},
+		":by":         &ddbtypes.AttributeValueMemberS{Value: configuredBy},
+		exprNow:       &ddbtypes.AttributeValueMemberS{Value: nowString},
+		exprNowNano:   unixNanoAttr(now),
+	}
+	// Only write qurl_account_id when we have a verified qURL account. An empty
+	// value (admin-storage-disabled path) is omitted so it never erases the
+	// provenance a prior verified mint recorded.
+	if qurlAccountID = strings.TrimSpace(qurlAccountID); qurlAccountID != "" {
+		setParts = append(setParts, attrQURLAccountID+" = :account_id")
+		values[":account_id"] = &ddbtypes.AttributeValueMemberS{Value: qurlAccountID}
+	}
+	updateExpr := "SET " + strings.Join(setParts, ", ")
 	// TODO(#265): this UpdateItem closes the old GetItem+PutItem row-clobber
 	// window and preserves Slack install metadata, but the upstream qurl-service
 	// mint still happens before this write. If concurrent admins mint different
@@ -367,31 +957,43 @@ func (p *DDBProvider) SetAPIKey(ctx context.Context, workspaceID, apiKey, config
 		Key: map[string]ddbtypes.AttributeValue{
 			attrTeamID: &ddbtypes.AttributeValueMemberS{Value: workspaceID},
 		},
-		UpdateExpression: aws.String(updateExpr),
-		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
-			":key": &ddbtypes.AttributeValueMemberB{Value: ct},
-			":dk":  &ddbtypes.AttributeValueMemberB{Value: wrapped},
-			":by":  &ddbtypes.AttributeValueMemberS{Value: configuredBy},
-			":now": &ddbtypes.AttributeValueMemberS{Value: now},
-		},
-		ReturnValues: ddbtypes.ReturnValueUpdatedOld,
+		UpdateExpression:          aws.String(updateExpr),
+		ExpressionAttributeValues: values,
+		ReturnValues:              ddbtypes.ReturnValueUpdatedOld,
 	})
 	if err != nil {
-		return fmt.Errorf("DDBProvider.SetAPIKey: UpdateItem: %w", err)
+		return fmt.Errorf("%s: UpdateItem: %w", operation, err)
 	}
 	if out != nil {
 		if _, rotated := out.Attributes[attrQURLAPIKey]; rotated {
-			slog.Warn("DDBProvider.SetAPIKey overwrote existing workspace API key",
+			slog.Warn(operation+" overwrote existing workspace API key",
 				"workspace_id", workspaceID,
 				"configured_by", configuredBy)
 		}
 	}
+	p.seedAPIKeyCache(workspaceID, apiKey, newAPIKeyCacheToken(ct, wrapped), now)
 	return nil
 }
 
 // SetSlackBotToken upserts the encrypted Slack bot token captured during Slack
 // app install or reinstall. It intentionally updates only Slack-specific
 // attributes so the qURL API key columns survive app reauthorization.
+//
+// It is the only writer of the row's Slack columns and the only one that should
+// be: slackinstall's Callback is its sole caller, so those columns describe one
+// OAuth exchange each. Do not add a writer that refreshes them from ordinary Web
+// API traffic — every write here bumps attrUpdatedAtNano, and a row held
+// perpetually fresh makes DeleteWorkspaceStateBeforeWithIdentity no-op, stranding
+// credentials a delayed uninstall should have purged.
+//
+// TODO(upstream-contract): a stale attrSlackBotScopes is harmless only while
+// Slack keeps an (app, workspace) pair's token byte-identical across reinstalls,
+// widening its grant in place. That is not hypothetical — ValidateSlackBotTokenShape
+// already accepts the rotating xoxe.xoxb- prefix, while slackinstall's
+// oauthAccessResponse captures neither refresh_token nor expires_in, so enabling
+// rotation on the Slack app leaves this row holding a dead credential and the
+// first 401 surfaces far from here. If that lands, capture the refresh token in
+// slackinstall.exchangeCode and persist it alongside the bot token.
 func (p *DDBProvider) SetSlackBotToken(ctx context.Context, workspaceID string, install *SlackBotTokenInstall) error {
 	if workspaceID == "" {
 		return errors.New("DDBProvider.SetSlackBotToken: workspaceID is empty")
@@ -411,18 +1013,22 @@ func (p *DDBProvider) SetSlackBotToken(ctx context.Context, workspaceID string, 
 	if err != nil {
 		return fmt.Errorf("DDBProvider.SetSlackBotToken: encrypt: %w", err)
 	}
-	now := p.nowOrDefault().UTC().Format(time.RFC3339)
+	now := p.nowOrDefault()
+	nowISO := now.UTC().Format(time.RFC3339)
 
 	setParts := []string{
 		attrSlackBotToken + " = :token",
 		attrSlackBotTokenDK + " = :dk",
+		attrUpdatedAt + " = :now",
+		attrUpdatedAtNano + " = :now_nano",
 		attrSlackBotUpdatedAt + " = :now",
 		attrSlackBotInstalledAt + " = if_not_exists(" + attrSlackBotInstalledAt + ", :now)",
 	}
 	values := map[string]ddbtypes.AttributeValue{
-		":token": &ddbtypes.AttributeValueMemberB{Value: ct},
-		":dk":    &ddbtypes.AttributeValueMemberB{Value: wrapped},
-		":now":   &ddbtypes.AttributeValueMemberS{Value: now},
+		":token":    &ddbtypes.AttributeValueMemberB{Value: ct},
+		":dk":       &ddbtypes.AttributeValueMemberB{Value: wrapped},
+		exprNow:     &ddbtypes.AttributeValueMemberS{Value: nowISO},
+		exprNowNano: unixNanoAttr(now),
 	}
 	var removeParts []string
 	setStringAttr := func(attr, token, value string) {
@@ -462,7 +1068,7 @@ func (p *DDBProvider) SetSlackBotToken(ctx context.Context, workspaceID string, 
 	}); err != nil {
 		return fmt.Errorf("DDBProvider.SetSlackBotToken: UpdateItem: %w", err)
 	}
-	slog.Info("DDBProvider.SetSlackBotToken stored Slack app bot token metadata", // #nosec G706 -- Slack IDs are structured slog attributes; JSON handlers escape control bytes.
+	slog.Info("DDBProvider.SetSlackBotToken stored Slack app bot token metadata",
 		"workspace_id", workspaceID,
 		"installed_by", install.InstalledBy,
 		"bot_user_id", install.BotUserID,
@@ -490,22 +1096,187 @@ func normalizedStringSet(values []string) []string {
 	return out
 }
 
-// DeleteAPIKey removes the per-workspace row. Used by the uninstall /
-// disconnect flow (not implemented yet — left here so the next PR can
-// wire `/qurl uninstall` to it without re-opening this file).
+func stringAttribute(value ddbtypes.AttributeValue) string {
+	if s, ok := value.(*ddbtypes.AttributeValueMemberS); ok {
+		return strings.TrimSpace(s.Value)
+	}
+	return ""
+}
+
+// SupportsDeleteAPIKey reports that DDBProvider can mutate workspace key state.
+func (p *DDBProvider) SupportsDeleteAPIKey() bool {
+	return true
+}
+
+// DeleteAPIKey removes the qURL API key columns and qurl-service key metadata
+// while preserving Slack app install metadata in the same row. It returns
+// [ErrWorkspaceNotConfigured] when the workspace has no stored qURL key
+// metadata. Workspace ownership/admin gates live outside this auth row, so
+// removing configured_by/configured_at does not change who can reconnect.
+// Removing configured_at lets a reconnect stamp fresh setup metadata while
+// rotations still preserve it via SetAPIKeyWithMetadata. Rows with partial qURL
+// setup metadata but no readable key are treated as cleanup work: the metadata
+// is removed and the user sees a disconnect success rather than an internal
+// partial-row state.
+//
+// DeleteAPIKey only removes local credential state; it does not call
+// qurl-service. Upstream revocation is orchestrated by the caller before this
+// write — the Slack uninstall path strongly reads the stored key_id via
+// [DDBProvider.APIKeyID] and self-revokes the upstream key (legacy rows without
+// a key_id stay on this local-only disconnect path). Keeping revocation out of
+// the auth package preserves its DDB+KMS-only dependency surface (it must not
+// import the qurl-service client), matching the rotation path in oauth/callback.
 func (p *DDBProvider) DeleteAPIKey(ctx context.Context, workspaceID string) error {
 	if workspaceID == "" {
 		return errors.New("DDBProvider.DeleteAPIKey: workspaceID is empty")
 	}
-	if _, err := p.Client.DeleteItem(ctx, &dynamodb.DeleteItemInput{
+	now := p.nowOrDefault()
+	_, err := p.Client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		TableName: aws.String(p.TableName),
 		Key: map[string]ddbtypes.AttributeValue{
 			attrTeamID: &ddbtypes.AttributeValueMemberS{Value: workspaceID},
 		},
-	}); err != nil {
-		return fmt.Errorf("DDBProvider.DeleteAPIKey: DeleteItem: %w", err)
+		// qurl_account_id is in the REMOVE list but intentionally NOT in the
+		// ConditionExpression: it is only ever written alongside the key, so a row
+		// can't exist with only that attribute, and REMOVE of an absent attribute
+		// is a no-op. (TestDDBProviderDeleteAPIKey pins both expressions.)
+		UpdateExpression: aws.String("SET #updated_at = " + exprNow + ", #updated_at_nano = " + exprNowNano + " REMOVE #qurl_api_key, #qurl_api_key_dk, #qurl_api_key_id, #qurl_api_key_prefix, #qurl_account_id, #configured_by, #configured_at"),
+		ConditionExpression: aws.String(
+			"attribute_exists(#qurl_api_key) OR attribute_exists(#qurl_api_key_dk) OR attribute_exists(#qurl_api_key_id) OR attribute_exists(#qurl_api_key_prefix) OR attribute_exists(#configured_by) OR attribute_exists(#configured_at)",
+		),
+		ExpressionAttributeNames: map[string]string{
+			"#qurl_api_key":        attrQURLAPIKey,
+			"#qurl_api_key_dk":     attrDataKeyCT,
+			"#qurl_api_key_id":     attrQURLAPIKeyID,
+			"#qurl_api_key_prefix": attrQURLAPIKeyPrefix,
+			"#qurl_account_id":     attrQURLAccountID,
+			"#configured_by":       attrConfiguredBy,
+			"#configured_at":       attrConfiguredAt,
+			"#updated_at":          attrUpdatedAt,
+			"#updated_at_nano":     attrUpdatedAtNano,
+		},
+		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
+			exprNow:     &ddbtypes.AttributeValueMemberS{Value: now.UTC().Format(time.RFC3339)},
+			exprNowNano: unixNanoAttr(now),
+		},
+	})
+	if err != nil {
+		var missing *ddbtypes.ConditionalCheckFailedException
+		if errors.As(err, &missing) {
+			p.invalidateAPIKeyCache(workspaceID, now.Add(apiKeyCacheTTL))
+			return fmt.Errorf("DDBProvider.DeleteAPIKey: workspace %q: %w", workspaceID, ErrWorkspaceNotConfigured)
+		}
+		return fmt.Errorf("DDBProvider.DeleteAPIKey: UpdateItem: %w", err)
 	}
+	p.invalidateAPIKeyCache(workspaceID, now.Add(apiKeyCacheTTL))
 	return nil
+}
+
+// DeleteWorkspaceState removes the ENTIRE workspace_state row for workspaceID —
+// the encrypted Slack bot token and its data key, the encrypted qURL API key and
+// its data key, and all install/setup metadata. It is the storage half of the
+// Slack-lifecycle cascade (app_uninstalled / tokens_revoked) and of `/qurl
+// uninstall`'s full forget: once Slack uninstalls the app the bot token is dead
+// and the workspace has consented to removal, so nothing in the row should
+// survive. Contrast with [DDBProvider.DeleteAPIKey], which clears only the qURL
+// columns and deliberately preserves the Slack install metadata for a key
+// rotation/reconnect.
+//
+// Idempotent: an unconditional DeleteItem on an absent key is a DynamoDB no-op
+// (no ConditionalCheckFailed, no error), so calling this for a workspace that was
+// never configured, or twice for the same workspace, simply returns nil. The
+// API-key plaintext cache is invalidated with a strong-read marker for one TTL so
+// a same-process eventually-consistent read can't re-cache a key from a row this
+// call just deleted — the same posture DeleteAPIKey takes.
+//
+// Like DeleteAPIKey this touches only local credential state; upstream qURL key
+// revocation is the caller's concern (the lifecycle/uninstall orchestrator
+// best-efforts it before this write), keeping the auth package free of the
+// qurl-service client dependency.
+func (p *DDBProvider) DeleteWorkspaceState(ctx context.Context, workspaceID string) error {
+	_, err := p.deleteWorkspaceState(ctx, workspaceID, false, time.Time{})
+	return err
+}
+
+// DeleteWorkspaceStateWithIdentity removes the entire workspace_state row and
+// returns non-secret qURL key provenance from the deleted item when it existed.
+// It uses DynamoDB ReturnValues=ALL_OLD so identity capture and local deletion
+// are one operation: no pre-read can race with a concurrent update, and no
+// transient identity-read failure can block the Marketplace-required local purge.
+func (p *DDBProvider) DeleteWorkspaceStateWithIdentity(ctx context.Context, workspaceID string) (DeletedWorkspaceStateIdentity, error) {
+	return p.deleteWorkspaceState(ctx, workspaceID, true, time.Time{})
+}
+
+// DeleteWorkspaceStateBeforeWithIdentity removes workspace_state only when the
+// row has not been updated since cutoff. It protects fast uninstall/reinstall
+// flows from a delayed async lifecycle purge: a reinstall or qURL setup writes
+// updated_at, causing this guarded delete to no-op instead of deleting fresh
+// credential material.
+func (p *DDBProvider) DeleteWorkspaceStateBeforeWithIdentity(ctx context.Context, workspaceID string, cutoff time.Time) (DeletedWorkspaceStateIdentity, error) {
+	return p.deleteWorkspaceState(ctx, workspaceID, true, cutoff)
+}
+
+func (p *DDBProvider) deleteWorkspaceState(ctx context.Context, workspaceID string, captureIdentity bool, cutoff time.Time) (DeletedWorkspaceStateIdentity, error) {
+	if workspaceID == "" {
+		return DeletedWorkspaceStateIdentity{}, errors.New("DDBProvider.DeleteWorkspaceState: workspaceID is empty")
+	}
+	input := &dynamodb.DeleteItemInput{
+		TableName: aws.String(p.TableName),
+		Key: map[string]ddbtypes.AttributeValue{
+			attrTeamID: &ddbtypes.AttributeValueMemberS{Value: workspaceID},
+		},
+	}
+	if captureIdentity {
+		input.ReturnValues = ddbtypes.ReturnValueAllOld
+	}
+	if !cutoff.IsZero() {
+		// The attribute_not_exists arm fails OPEN — an unstamped row is deleted —
+		// so rows last written before #820 introduced the stamp remain purgeable.
+		// Keep it: flipping to fail-closed would silently RETAIN the encrypted bot
+		// token on exactly those rows, which is the worse failure (Marketplace
+		// requires uninstall to forget it), and an unstamped row can reappear at any
+		// time from a PITR restore or an out-of-band operator write, so no one-time
+		// backfill retires the arm. What makes the arm safe is the invariant that
+		// every in-code writer stamps: the post-cutoff write this guard protects
+		// against (a reinstall's SetSlackBotToken, a fresh SetAPIKeyWithMetadata)
+		// installs a stamp newer than the cutoff, so the delayed purge falls to the
+		// second arm and no-ops. ddb_provider_stamp_test.go is what holds that.
+		input.ConditionExpression = aws.String("attribute_not_exists(#updated_at_nano) OR #updated_at_nano <= :purge_cutoff_nano")
+		input.ExpressionAttributeNames = map[string]string{
+			"#updated_at_nano": attrUpdatedAtNano,
+		}
+		input.ExpressionAttributeValues = map[string]ddbtypes.AttributeValue{
+			":purge_cutoff_nano": unixNanoAttr(cutoff),
+		}
+	}
+	out, err := p.Client.DeleteItem(ctx, input)
+	if err != nil {
+		var ccfe *ddbtypes.ConditionalCheckFailedException
+		if !cutoff.IsZero() && errors.As(err, &ccfe) {
+			// The row was retained because it is newer than the teardown signal,
+			// but any cached qURL key may still be from before that reinstall.
+			// Evict and force strong reads briefly so callers refill from DDB.
+			p.invalidateAPIKeyCache(workspaceID, p.nowOrDefault().Add(apiKeyCacheTTL))
+			return DeletedWorkspaceStateIdentity{}, ErrWorkspaceStateUpdatedAfterCutoff
+		}
+		return DeletedWorkspaceStateIdentity{}, fmt.Errorf("DDBProvider.DeleteWorkspaceState: DeleteItem: %w", err)
+	}
+	p.invalidateAPIKeyCache(workspaceID, p.nowOrDefault().Add(apiKeyCacheTTL))
+	if !captureIdentity || out == nil {
+		return DeletedWorkspaceStateIdentity{}, nil
+	}
+	return deletedWorkspaceStateIdentityFromItem(out.Attributes), nil
+}
+
+func deletedWorkspaceStateIdentityFromItem(item map[string]ddbtypes.AttributeValue) DeletedWorkspaceStateIdentity {
+	if len(item) == 0 {
+		return DeletedWorkspaceStateIdentity{}
+	}
+	return DeletedWorkspaceStateIdentity{
+		Deleted:       true,
+		QURLAPIKeyID:  stringAttribute(item[attrQURLAPIKeyID]),
+		QURLAccountID: stringAttribute(item[attrQURLAccountID]),
+	}
 }
 
 // --- KMSEncryptor ----------------------------------------------------------

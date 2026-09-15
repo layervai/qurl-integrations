@@ -1,12 +1,15 @@
-// Tests for the link orchestrator (db + registrar wiring + partial-
-// failure rollback). Cache-side scenarios live in
-// tests/webhook-subscriptions.test.js.
 
 const mockEnsureWebhookSubscription = jest.fn();
 const mockDeleteSubscription = jest.fn();
 jest.mock('../src/qurl-webhook-registrar', () => ({
   ensureWebhookSubscription: mockEnsureWebhookSubscription,
   deleteSubscription: mockDeleteSubscription,
+  DISCORD_BOT_VIEW_COUNTER_DESCRIPTION_PREFIX: 'Discord bot view counter',
+  isTruthyEnvFlag: (v) => {
+    if (typeof v !== 'string' || v.length === 0) return false;
+    const n = v.trim().toLowerCase();
+    return n === '1' || n === 'true' || n === 'yes' || n === 'on';
+  },
 }));
 
 const mockSetGuildWebhookSubscription = jest.fn();
@@ -71,11 +74,9 @@ describe('linkGuildWebhookSubscription — partial-failure rollback', () => {
       guildId: 'g1', apiKey: 'lv_guild_1',
     });
     expect(result).toEqual({ ok: false, reason: LINK_RESULTS.PERSIST_FAILED });
-    // Rollback DELETE attempted with the freshly-created webhookId.
     expect(mockDeleteSubscription).toHaveBeenCalledWith({
       apiEndpoint: 'https://qurl.example', apiKey: 'lv_guild_1', webhookId: 'wh_ok',
     });
-    // Failure audit fires (cycle-2 cr concern #6).
     expect(mockAudit).toHaveBeenCalledWith(
       AUDIT_EVENTS.QURL_WEBHOOK_SUBSCRIPTION_REGISTER_FAILED,
       expect.objectContaining({ reason: LINK_RESULTS.PERSIST_FAILED, guild_id: 'g1' }),
@@ -105,7 +106,6 @@ describe('linkGuildWebhookSubscription — partial-failure rollback', () => {
       guildId: 'g3', apiKey: 'lv_guild_3',
     });
     expect(result).toEqual({ ok: false, reason: LINK_RESULTS.REGISTER_FAILED });
-    // No rollback DELETE: nothing was created.
     expect(mockDeleteSubscription).not.toHaveBeenCalled();
     expect(mockAudit).toHaveBeenCalledWith(
       AUDIT_EVENTS.QURL_WEBHOOK_SUBSCRIPTION_REGISTER_FAILED,
@@ -128,6 +128,67 @@ describe('linkGuildWebhookSubscription — partial-failure rollback', () => {
   });
 });
 
+describe('linkGuildWebhookSubscription — URL-migration sweep kill-switch (#827)', () => {
+  it('passes urlMigrationSweepEnabled=true when the env var is unset (default safe for single-host)', async () => {
+    const oldEnv = process.env.QURL_WEBHOOK_REGISTRAR_DISABLE_URL_MIGRATION_SWEEP;
+    delete process.env.QURL_WEBHOOK_REGISTRAR_DISABLE_URL_MIGRATION_SWEEP;
+    try {
+      await linkGuildWebhookSubscription({ guildId: 'g_default', apiKey: 'lv_x' });
+      const call = mockEnsureWebhookSubscription.mock.calls[0][0];
+      expect(call.urlMigrationSweepEnabled).toBe(true);
+    } finally {
+      if (oldEnv === undefined) delete process.env.QURL_WEBHOOK_REGISTRAR_DISABLE_URL_MIGRATION_SWEEP;
+      else process.env.QURL_WEBHOOK_REGISTRAR_DISABLE_URL_MIGRATION_SWEEP = oldEnv;
+    }
+  });
+
+  it.each([
+    ['1', false],     // disable
+    ['true', false],  // disable
+    ['TRUE', false],  // case-insensitive
+    ['yes', false],   // disable
+    ['on', false],    // disable
+    [' 1 ', false],   // whitespace tolerated
+  ])('passes urlMigrationSweepEnabled=false when env var is %s (kill-switch covers the bot path)', async (envValue, expectedEnabled) => {
+    const oldEnv = process.env.QURL_WEBHOOK_REGISTRAR_DISABLE_URL_MIGRATION_SWEEP;
+    process.env.QURL_WEBHOOK_REGISTRAR_DISABLE_URL_MIGRATION_SWEEP = envValue;
+    try {
+      await linkGuildWebhookSubscription({ guildId: 'g_disabled', apiKey: 'lv_x' });
+      const call = mockEnsureWebhookSubscription.mock.calls[0][0];
+      expect(call.urlMigrationSweepEnabled).toBe(expectedEnabled);
+    } finally {
+      if (oldEnv === undefined) delete process.env.QURL_WEBHOOK_REGISTRAR_DISABLE_URL_MIGRATION_SWEEP;
+      else process.env.QURL_WEBHOOK_REGISTRAR_DISABLE_URL_MIGRATION_SWEEP = oldEnv;
+    }
+  });
+
+  it.each([
+    ['0', true],      // intuitive "disabled=0" actually KEEPS sweep enabled (footgun guard)
+    ['false', true],
+    ['no', true],
+    ['off', true],
+    ['', true],
+    ['random-string', true], // not in truthy allowlist
+  ])('treats env var %s as ENABLED (no surprise from non-truthy literals)', async (envValue, expectedEnabled) => {
+    const oldEnv = process.env.QURL_WEBHOOK_REGISTRAR_DISABLE_URL_MIGRATION_SWEEP;
+    process.env.QURL_WEBHOOK_REGISTRAR_DISABLE_URL_MIGRATION_SWEEP = envValue;
+    try {
+      await linkGuildWebhookSubscription({ guildId: 'g_kept', apiKey: 'lv_x' });
+      const call = mockEnsureWebhookSubscription.mock.calls[0][0];
+      expect(call.urlMigrationSweepEnabled).toBe(expectedEnabled);
+    } finally {
+      if (oldEnv === undefined) delete process.env.QURL_WEBHOOK_REGISTRAR_DISABLE_URL_MIGRATION_SWEEP;
+      else process.env.QURL_WEBHOOK_REGISTRAR_DISABLE_URL_MIGRATION_SWEEP = oldEnv;
+    }
+  });
+
+  it('interpolates the shared DISCORD_BOT_VIEW_COUNTER_DESCRIPTION_PREFIX into the description (drift safety)', async () => {
+    await linkGuildWebhookSubscription({ guildId: 'g_desc', apiKey: 'lv_x', descriptionContext: 'via=test' });
+    const call = mockEnsureWebhookSubscription.mock.calls[0][0];
+    expect(call.description).toBe('Discord bot view counter (guild=g_desc, via=test)');
+  });
+});
+
 describe('linkGuildWebhookSubscription — propagation parameter', () => {
   it('passes the just-linked guildId to propagate so primary is skipped', async () => {
     await linkGuildWebhookSubscription({
@@ -139,18 +200,11 @@ describe('linkGuildWebhookSubscription — propagation parameter', () => {
     );
   });
 
-  // Partial propagate failure (e.g., one sibling throttled) MUST fire
-  // an audit. Without this, the sibling cache entry holds the stale
-  // secret for up to 30s and 401s every webhook silently.
   it('emits PROPAGATE_PARTIAL audit (NOT REGISTER_FAILED) when propagate.failed > 0', async () => {
     mockPropagateGuildWebhookSubscription.mockResolvedValueOnce({ updated: 1, failed: 2 });
     const result = await linkGuildWebhookSubscription({
       guildId: 'g_partial', apiKey: 'lv_x',
     });
-    // Registration itself still succeeded — partial propagate is a
-    // secondary signal, not a hard rollback. Distinct event keeps
-    // the REGISTER_FAILED dashboard line unambiguously "the link
-    // failed for the user."
     expect(result).toEqual({ ok: true, action: 'created' });
     expect(mockAudit).toHaveBeenCalledWith(
       AUDIT_EVENTS.QURL_WEBHOOK_PROPAGATE_PARTIAL,
@@ -158,7 +212,6 @@ describe('linkGuildWebhookSubscription — propagation parameter', () => {
         guild_id: 'g_partial', failed: 2, updated: 1,
       }),
     );
-    // And REGISTER_FAILED must NOT be fired on this path.
     const registerFailedCalls = mockAudit.mock.calls.filter(
       ([event]) => event === AUDIT_EVENTS.QURL_WEBHOOK_SUBSCRIPTION_REGISTER_FAILED,
     );
@@ -167,12 +220,6 @@ describe('linkGuildWebhookSubscription — propagation parameter', () => {
 });
 
 describe('linkGuildWebhookSubscription — bestEffortDeleteSubscription failure', () => {
-  // When DDB write throws AFTER subscription creation, the rollback
-  // DELETE fires fire-and-forget. If qurl-service rejects the DELETE
-  // (e.g., 500 — not 401/404 which deleteSubscription itself swallows),
-  // the helper must still emit DELETE_FAILED audit so an orphan-
-  // subscription metric filter catches it. Without this test, the
-  // .catch branch was unexercised.
   it('emits SUBSCRIPTION_DELETE_FAILED audit when rollback DELETE rejects', async () => {
     mockSetGuildWebhookSubscription.mockRejectedValueOnce(new Error('DDB throttled'));
     const dErr = new Error('qurl-service 500');
@@ -181,7 +228,6 @@ describe('linkGuildWebhookSubscription — bestEffortDeleteSubscription failure'
     await linkGuildWebhookSubscription({
       guildId: 'g_rollback_fail', apiKey: 'lv_x',
     });
-    // Fire-and-forget — wait a microtask for the .catch handler.
     await new Promise(setImmediate);
     expect(mockAudit).toHaveBeenCalledWith(
       AUDIT_EVENTS.QURL_WEBHOOK_SUBSCRIPTION_DELETE_FAILED,
@@ -189,13 +235,8 @@ describe('linkGuildWebhookSubscription — bestEffortDeleteSubscription failure'
     );
   });
 
-  // 404 is swallowed inside the registrar (concurrent-delete race).
-  // The .catch in bestEffortDeleteSubscription never fires → no
-  // audit. Pins the contract so future refactor doesn't widen the
-  // alarm-noise surface.
   it('does NOT emit DELETE_FAILED audit when DELETE 404s (registrar swallows)', async () => {
     mockSetGuildWebhookSubscription.mockRejectedValueOnce(new Error('DDB throttled'));
-    // Simulate registrar's swallow: deleteSubscription resolves silently.
     mockDeleteSubscription.mockResolvedValueOnce(undefined);
     await linkGuildWebhookSubscription({
       guildId: 'g_404', apiKey: 'lv_x',
@@ -207,9 +248,6 @@ describe('linkGuildWebhookSubscription — bestEffortDeleteSubscription failure'
     );
   });
 
-  // 401 is the routine re-key signal (admin revoked the key on
-  // layerv.ai before our DELETE landed). Log only — auditing every
-  // re-key would flood the alarm channel.
   it('does NOT emit DELETE_FAILED audit when DELETE 401s (routine re-key)', async () => {
     mockSetGuildWebhookSubscription.mockRejectedValueOnce(new Error('DDB throttled'));
     const dErr = new Error('qurl-service 401');

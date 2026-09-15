@@ -3,10 +3,10 @@
 # Source: https://github.com/layervai/ops-routines-workflows/blob/main/.github/workflows/age-check-pip.yml
 name: Dependency Age Check (pip)
 
-# Fires on every PR (no path filter) so the status check always reports.
-# This lets branch protection require it without the path-filtered-
-# required-check footgun. The reusable's script exits 0 quickly when
-# no requirements/poetry.lock/pyproject.toml changes are in the diff.
+# Fires on every PR with no path filter so branch-protected checks always
+# report and avoid the path-filtered-required-check footgun. The reusable's
+# script exits 0 quickly when no requirements/poetry.lock/pyproject.toml
+# changes are in the diff.
 on:
   pull_request:
   workflow_dispatch:
@@ -33,7 +33,7 @@ jobs:
     # only if/name/needs/permissions/secrets/strategy/uses/with/concurrency
     # are valid on a job that calls a reusable workflow. The reusable
     # workflow itself sets `timeout-minutes: 5` internally.
-    uses: layervai/ops-routines-workflows/.github/workflows/age-check-pip.yml@ca41c7123c507ad45331a723851da6c010541154 # v0.6.2
+    uses: layervai/ops-routines-workflows/.github/workflows/age-check-pip.yml@d07fa2fe3a103907ff2b1a1a71509a6dcd8e9d32 # v0.13.0
     with:
       min_age_days: 7
       # Post a sticky PR comment when an age-check fails, listing each

@@ -1,11 +1,3 @@
-/**
- * Unit tests for src/flow-id.js — the canonical parse/build pair
- * for the shard-aware flow_state.flow_id composite key.
- *
- * Roundtrip and validation surface. Same-format parity is enforced
- * here so a handler producing flow_ids and a worker consuming them
- * can't silently drift on the separator convention.
- */
 const { buildFlowId, parseFlowId } = require('../src/flow-id');
 
 describe('flow-id', () => {
@@ -139,8 +131,6 @@ describe('flow-id', () => {
   });
 
   describe('roundtrip property', () => {
-    // Sample of realistic-shape inputs — the assertion is that
-    // parseFlowId(buildFlowId(x)) deep-equals x for every legal x.
     const cases = [
       { shard_id: '0:1', guild_id: '1', channel_id: '2', user_id: '3' },
       { shard_id: '0:1', guild_id: '111111111111111111', channel_id: '222222222222222222', user_id: '333333333333333333' },

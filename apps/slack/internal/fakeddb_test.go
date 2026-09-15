@@ -60,6 +60,10 @@ type fakeDDB struct {
 	updateItemErrs map[string]error
 	// putItemErrs maps tableName → injected PutItem error.
 	putItemErrs map[string]error
+	// queryErrs maps tableName → injected Query error. Used to drive the
+	// best-effort degradation path in ChannelsForResource (e.g. a missing
+	// dynamodb:Query grant surfacing as AccessDenied).
+	queryErrs map[string]error
 	// getItemCounts tracks call counts per table for the
 	// SetGetItemErrAfter mechanism.
 	getItemCounts map[string]int
@@ -129,6 +133,18 @@ func (f *fakeDDB) SetPutItemErr(table string, err error) {
 		f.putItemErrs = map[string]error{}
 	}
 	f.putItemErrs[table] = err
+}
+
+// SetQueryErr injects an error returned on every Query against `table`.
+// Used to simulate a missing dynamodb:Query grant (AccessDenied) so tests
+// can assert ChannelsForResource degrades without losing data.
+func (f *fakeDDB) SetQueryErr(table string, err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.queryErrs == nil {
+		f.queryErrs = map[string]error{}
+	}
+	f.queryErrs[table] = err
 }
 
 // SetUpdateItemHook installs a callback invoked on every UpdateItem.
@@ -372,9 +388,13 @@ func (f *fakeDDB) UpdateItem(_ context.Context, in *dynamodb.UpdateItemInput, _ 
 			return nil, evalErr
 		}
 		if !ok {
-			return nil, &ddbtypes.ConditionalCheckFailedException{
+			condErr := &ddbtypes.ConditionalCheckFailedException{
 				Message: aws.String("ConditionalCheckFailedException"),
 			}
+			if in.ReturnValuesOnConditionCheckFailure == ddbtypes.ReturnValuesOnConditionCheckFailureAllOld && present {
+				condErr.Item = cloneItem(existing)
+			}
+			return nil, condErr
 		}
 	}
 	// UpdateItem on a missing row materializes the row from the key
@@ -412,8 +432,78 @@ func (f *fakeDDB) DeleteItem(_ context.Context, in *dynamodb.DeleteItemInput, _ 
 	if err != nil {
 		return nil, err
 	}
+	if cond := aws.ToString(in.ConditionExpression); cond != "" {
+		item, present := table[key]
+		ok, err := evalCondition(cond, item, present, in.ExpressionAttributeValues, in.ExpressionAttributeNames)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			return nil, &ddbtypes.ConditionalCheckFailedException{
+				Message: aws.String("ConditionalCheckFailedException"),
+			}
+		}
+	}
 	delete(table, key)
 	return &dynamodb.DeleteItemOutput{}, nil
+}
+
+// Query implements [slackdata.DynamoDBClient]. Supports the single shape
+// [slackdata.Store.ChannelsForResource] emits — a partition-key match
+// `slack_team_id = :tid` over the channel_policies table — returning every
+// item whose PK equals :tid. Pagination (Limit / ExclusiveStartKey /
+// LastEvaluatedKey) is intentionally NOT modeled: the production caller sets
+// no Limit and the in-memory tables are tiny, so one page returns everything
+// and LastEvaluatedKey stays empty (terminating the caller's paging loop).
+// Honors an injected query error so the best-effort degradation path is
+// testable.
+func (f *fakeDDB) Query(_ context.Context, in *dynamodb.QueryInput, _ ...func(*dynamodb.Options)) (*dynamodb.QueryOutput, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	name := aws.ToString(in.TableName)
+	if err, ok := f.queryErrs[name]; ok {
+		return nil, err
+	}
+	table, _, err := f.tableAndSchema(name)
+	if err != nil {
+		return nil, err
+	}
+	want, ok := in.ExpressionAttributeValues[":tid"].(*ddbtypes.AttributeValueMemberS)
+	if !ok {
+		return nil, fmt.Errorf("fakeDDB.Query: expected a :tid string value (KeyConditionExpression %q)", aws.ToString(in.KeyConditionExpression))
+	}
+	var items []map[string]ddbtypes.AttributeValue
+	for _, item := range table {
+		if pk, ok := item[fAttrSlackTeamID].(*ddbtypes.AttributeValueMemberS); ok && pk.Value == want.Value {
+			items = append(items, cloneItem(item))
+		}
+	}
+	return &dynamodb.QueryOutput{Items: items}, nil
+}
+
+// Scan supports the projected begins_with(slack_team_id, :prefix) shape
+// [slackdata.Store.PurgeTeamRateLimitCountersBefore] emits for synthetic
+// rate-limit rows in the PK-only workspace_mappings table.
+func (f *fakeDDB) Scan(_ context.Context, in *dynamodb.ScanInput, _ ...func(*dynamodb.Options)) (*dynamodb.ScanOutput, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	table, _, err := f.tableAndSchema(aws.ToString(in.TableName))
+	if err != nil {
+		return nil, err
+	}
+	prefix, ok := in.ExpressionAttributeValues[":prefix"].(*ddbtypes.AttributeValueMemberS)
+	if !ok {
+		return nil, fmt.Errorf("fakeDDB.Scan: expected a :prefix string value (FilterExpression %q)", aws.ToString(in.FilterExpression))
+	}
+	var items []map[string]ddbtypes.AttributeValue
+	for _, item := range table {
+		if pk, ok := item[fAttrSlackTeamID].(*ddbtypes.AttributeValueMemberS); ok && strings.HasPrefix(pk.Value, prefix.Value) {
+			items = append(items, map[string]ddbtypes.AttributeValue{
+				fAttrSlackTeamID: stringMember(pk.Value),
+			})
+		}
+	}
+	return &dynamodb.ScanOutput{Items: items}, nil
 }
 
 // tableAndSchema looks up the table map and key schema, returning a
@@ -442,6 +532,7 @@ func cloneItem(item map[string]ddbtypes.AttributeValue) map[string]ddbtypes.Attr
 //
 //	SET redeemed = :true, redeemed_by = :user, redeemed_at = :now_iso
 //	ADD allowed_resource_ids :rids SET updated_at = :now
+//	ADD #count :one
 //	DELETE allowed_resource_ids :rids SET updated_at = :now
 //
 // A general DDB expression parser is much larger than this; we'd
@@ -459,7 +550,7 @@ func applyUpdateExpression(expr string, item, vals map[string]ddbtypes.Attribute
 				return err
 			}
 		case "ADD":
-			if err := applyAddClause(c.body, item, vals); err != nil {
+			if err := applyAddClause(c.body, item, vals, names); err != nil {
 				return err
 			}
 		case "DELETE":
@@ -551,9 +642,9 @@ func applyRemoveClause(body string, item map[string]ddbtypes.AttributeValue, nam
 	return nil
 }
 
-// applyAddClause handles `<attr> :v`. Currently only supports the
-// SS (string-set) merge form used by AddAdmin.
-func applyAddClause(body string, item, vals map[string]ddbtypes.AttributeValue) error {
+// applyAddClause handles `<attr> :v`. Supports the SS merge form used by
+// AddAdmin and numeric ADD for rate-limit counters.
+func applyAddClause(body string, item, vals map[string]ddbtypes.AttributeValue, names map[string]string) error {
 	body = strings.TrimSpace(body)
 	parts := strings.Fields(body)
 	if len(parts) != 2 {
@@ -564,14 +655,31 @@ func applyAddClause(body string, item, vals map[string]ddbtypes.AttributeValue) 
 	if !ok {
 		return fmt.Errorf("fakeDDB ADD: unknown value %q", parts[1])
 	}
-	incoming, ok := v.(*ddbtypes.AttributeValueMemberSS)
-	if !ok {
-		return fmt.Errorf("fakeDDB ADD: only string-set ADD is supported, got %T", v)
+	switch incoming := v.(type) {
+	case *ddbtypes.AttributeValueMemberSS:
+		existingRaw, _ := getAttrPath(item, attr, names)
+		existing, _ := existingRaw.(*ddbtypes.AttributeValueMemberSS)
+		return setAttrPath(item, attr, names, &ddbtypes.AttributeValueMemberSS{Value: mergeStringSet(existing, incoming.Value)})
+	case *ddbtypes.AttributeValueMemberN:
+		add, err := strconv.ParseInt(incoming.Value, 10, 64)
+		if err != nil {
+			return err
+		}
+		var cur int64
+		if existingRaw, ok := getAttrPath(item, attr, names); ok {
+			existing, ok := existingRaw.(*ddbtypes.AttributeValueMemberN)
+			if !ok {
+				return fmt.Errorf("fakeDDB ADD: target %q is not N", attr)
+			}
+			cur, err = strconv.ParseInt(existing.Value, 10, 64)
+			if err != nil {
+				return err
+			}
+		}
+		return setAttrPath(item, attr, names, &ddbtypes.AttributeValueMemberN{Value: strconv.FormatInt(cur+add, 10)})
+	default:
+		return fmt.Errorf("fakeDDB ADD: unsupported value type %T", v)
 	}
-	existing, _ := item[attr].(*ddbtypes.AttributeValueMemberSS)
-	merged := mergeStringSet(existing, incoming.Value)
-	item[attr] = &ddbtypes.AttributeValueMemberSS{Value: merged}
-	return nil
 }
 
 // applyDeleteClause handles `<attr> :v`. Currently only supports the
@@ -674,7 +782,7 @@ func splitTopLevelCommas(s string) []string {
 }
 
 // evalCondition supports the exact ConditionExpression shapes the
-// production code emits, joined by " AND ". Each subexpression is
+// production code emits, joined by " AND " or " OR ". Each subexpression is
 // one of:
 //
 //	attribute_exists(<attr>)
@@ -682,6 +790,7 @@ func splitTopLevelCommas(s string) []string {
 //	contains(<attr>, :val)
 //	NOT contains(<attr>, :val)
 //	<attr> = :val
+//	<attr> < :val
 //	<attr> > :val
 //
 // Returns (true, nil) when every subexpression is satisfied. OR is
@@ -690,7 +799,7 @@ func evalCondition(expr string, item map[string]ddbtypes.AttributeValue, present
 	expr = strings.TrimSpace(expr)
 	parts := strings.Split(expr, " AND ")
 	for _, p := range parts {
-		ok, err := evalConditionTerm(strings.TrimSpace(p), item, present, vals, names)
+		ok, err := evalConditionAnyTerm(strings.TrimSpace(p), item, present, vals, names)
 		if err != nil {
 			return false, err
 		}
@@ -699,6 +808,20 @@ func evalCondition(expr string, item map[string]ddbtypes.AttributeValue, present
 		}
 	}
 	return true, nil
+}
+
+func evalConditionAnyTerm(term string, item map[string]ddbtypes.AttributeValue, present bool, vals map[string]ddbtypes.AttributeValue, names map[string]string) (bool, error) {
+	parts := strings.Split(term, " OR ")
+	for _, p := range parts {
+		ok, err := evalConditionTerm(strings.TrimSpace(p), item, present, vals, names)
+		if err != nil {
+			return false, err
+		}
+		if ok {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func evalConditionTerm(term string, item map[string]ddbtypes.AttributeValue, present bool, vals map[string]ddbtypes.AttributeValue, names map[string]string) (bool, error) {

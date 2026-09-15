@@ -11,7 +11,6 @@
 // rate is N × configured.
 const config = require('../config');
 const logger = require('../logger');
-const { renderPage } = require('../templates/page');
 
 const rateLimitStore = new Map();
 
@@ -49,7 +48,7 @@ function rateLimit(req, res, next) {
   // Known IPs still get served because they're not growing the Map.
   if (rateLimitStore.size >= MAX_STORE_SIZE && !rateLimitStore.has(ip)) {
     logger.warn('Rate limit store at hard cap, rejecting new IP', { ip, size: rateLimitStore.size });
-    return res.status(429).send(renderPage({
+    return res.status(429).send(res.renderPage({
       title: 'Too Many Requests',
       icon: '⏳',
       heading: 'Service Overloaded',
@@ -61,7 +60,7 @@ function rateLimit(req, res, next) {
   const requests = (rateLimitStore.get(ip) || []).filter(time => time > windowStart);
   if (requests.length >= config.RATE_LIMIT_MAX_REQUESTS) {
     logger.warn('OAuth rate limit exceeded', { ip, path: req.path });
-    return res.status(429).send(renderPage({
+    return res.status(429).send(res.renderPage({
       title: 'Too Many Requests',
       icon: '⏳',
       heading: 'Slow Down!',

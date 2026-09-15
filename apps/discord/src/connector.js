@@ -1,5 +1,15 @@
+const { QURLClient } = require('@layervai/qurl');
+
 const config = require('./config');
 const logger = require('./logger');
+const { validateResourceId } = require('./utils/resource-id');
+
+// Reuse the security-critical, syntactic private/loopback/link-local IP guard
+// from qurl.js rather than duplicating ~50 lines of IP-literal parsing that
+// could drift out of sync. resolveDetectTarget() self-mints the ephemeral
+// detect qURL via the @layervai/qurl SDK (the standardized client), not qurl.js.
+// qurl.js has no connector.js dependency, so this require introduces no cycle.
+const { isPrivateHost } = require('./qurl');
 
 const { sanitizeFilename } = require('./utils/sanitize');
 const { formatSessionDurationSeconds, isPositiveFinite } = require('./utils/time');
@@ -55,31 +65,71 @@ const QUOTA_EXCEEDED_PATTERNS = [
   /per[\s_-]?resource (token|link|mint) (limit|cap)/i,
 ];
 
-async function throwConnectorError(label, response) {
-  let bodyText = '';
+function parseConnectorBody(bodyText) {
+  let parsed = null;
   let apiCode = null;
   let apiDetail = null;
+  if (!bodyText) return { parsed, apiCode, apiDetail };
+
   try {
-    bodyText = await response.text();
-    if (bodyText) {
-      try {
-        const parsed = JSON.parse(bodyText);
-        // Connector wraps upstream API errors as `{success:false, error:"..."}`.
-        // The wrapped string is what we pattern-match for known codes.
-        const errStr = typeof parsed.error === 'string' ? parsed.error : '';
-        if (QUOTA_EXCEEDED_PATTERNS.some((rx) => rx.test(errStr))) {
-          apiCode = 'quota_exceeded';
-          apiDetail = errStr;
-        }
-      } catch { /* not JSON, ignore */ }
+    parsed = JSON.parse(bodyText);
+    // Connector wraps upstream API errors as `{success:false, error:"..."}`.
+    // The wrapped string is what we pattern-match for known codes.
+    const errStr = typeof parsed.error === 'string' ? parsed.error : '';
+    if (QUOTA_EXCEEDED_PATTERNS.some((rx) => rx.test(errStr))) {
+      apiCode = 'quota_exceeded';
+      apiDetail = errStr;
     }
-  } catch { /* network read failed, fall through with empty body */ }
-  logger.debug(`${label} error`, { status: response.status, apiCode, bodyLen: bodyText.length });
+  } catch { /* not JSON, ignore */ }
+
+  return { parsed, apiCode, apiDetail };
+}
+
+function mintedLinksWithId(links) {
+  if (!Array.isArray(links)) return [];
+  return links.filter(link => (
+    link
+    && typeof link === 'object'
+    && typeof link.qurl_id === 'string'
+    && link.qurl_id.length > 0
+  ));
+}
+
+function qurlIdsFromLinks(links) {
+  return links.map(link => link.qurl_id);
+}
+
+function throwConnectorErrorFromBody(label, response, {
+  bodyText = '',
+  apiCode = null,
+  apiDetail = null,
+  partialQurlIds = [],
+} = {}) {
+  if (partialQurlIds.length === 0) {
+    logger.debug(`${label} error`, {
+      status: response.status,
+      apiCode,
+      bodyLen: bodyText.length,
+    });
+  }
   const err = new Error(`${label} failed (${response.status})`);
   err.status = response.status;
   err.apiCode = apiCode;
   err.apiDetail = apiDetail;
+  if (partialQurlIds.length > 0) {
+    err.partialLinkCount = partialQurlIds.length;
+    err.partialQurlIds = partialQurlIds;
+  }
   throw err;
+}
+
+async function throwConnectorError(label, response) {
+  let bodyText = '';
+  try {
+    bodyText = await response.text();
+  } catch { /* network read failed, fall through with empty body */ }
+  const { apiCode, apiDetail } = parseConnectorBody(bodyText);
+  throwConnectorErrorFromBody(label, response, { bodyText, apiCode, apiDetail });
 }
 
 // Read the response body chunk-by-chunk and abort as soon as we cross the cap.
@@ -347,13 +397,21 @@ async function downloadAndUpload(sourceUrl, filename, contentType, apiKey, viewe
  * @param {number} opts.n — integer 1..100, count of links to mint.
  * @param {?string} [opts.apiKey] — caller API key; falls back to `config.QURL_API_KEY`.
  * @param {?number} [opts.selfDestructSeconds] — see formatSessionDurationSeconds for value mapping. Defaults to null.
+ * @param {?string} [opts.guildId] — Discord guild snowflake. When provided,
+ *   forwarded as `guild_id` so the connector can scope a future
+ *   watermark-attribution `/api/detect` lookup to the minting guild (the
+ *   bot side of the per-guild deanonymization-isolation contract, #1101).
+ *   Optional + back-compat: omitting it leaves the mint body unchanged, so
+ *   legacy callers and pre-#1101 send paths keep working untouched.
  * @returns {Promise<Array<{qurl_id: string, qurl_link: string, expires_at: string}>>}
  */
-async function mintLinks(resourceId, { expiresAt, n, apiKey, selfDestructSeconds = null } = {}) {
+async function mintLinks(resourceId, { expiresAt, n, apiKey, selfDestructSeconds = null, guildId } = {}) {
   if (!apiKey && !config.QURL_API_KEY) throw new Error('QURL_API_KEY is not configured');
-  if (!resourceId || !/^[\w-]+$/.test(resourceId)) {
-    throw new Error(`Invalid resource ID format: ${resourceId}`);
-  }
+  // Same public-resource boundary as status/revoke: mintLinks receives a
+  // connector-returned public ID, never a qURL bearer token. Reuse the shared
+  // generic-error guard so the duplicate validation cannot drift or echo a
+  // cross-wired token into a caller's logs.
+  validateResourceId(resourceId);
   // Bound `n` defensively — callers in this codebase already cap at 10
   // (TOKENS_PER_RESOURCE) or 50 (recipient max), but mintLinks is exported
   // so validate at the API boundary. Negative or non-integer values would
@@ -366,6 +424,13 @@ async function mintLinks(resourceId, { expiresAt, n, apiKey, selfDestructSeconds
   if (sessionDuration !== null) {
     body.session_duration = sessionDuration;
   }
+  // Only attach guild_id when truthy — an empty/undefined value would put a
+  // useless `guild_id: null` on the wire and (worse) could land as an empty
+  // attribution scope on the connector side. Truthy-gate keeps the contract
+  // optional, mirroring the session_duration handling above.
+  if (guildId) {
+    body.guild_id = guildId;
+  }
   const response = await fetch(`${config.CONNECTOR_URL}/api/mint_link/${resourceId}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...connectorAuthHeaders(apiKey) },
@@ -374,7 +439,30 @@ async function mintLinks(resourceId, { expiresAt, n, apiKey, selfDestructSeconds
   });
 
   if (!response.ok) {
-    return throwConnectorError('Connector mint_link', response);
+    let bodyText = '';
+    try {
+      bodyText = await response.text();
+    } catch { /* network read failed, fall through with empty body */ }
+    const { parsed, apiCode, apiDetail } = parseConnectorBody(bodyText);
+    const partialQurlIds = qurlIdsFromLinks(mintedLinksWithId(parsed?.links));
+    if (partialQurlIds.length > 0) {
+      // TODO(upstream-contract): Best-effort reconciliation signal; connector
+      // error bodies must only include qurl_ids for links that were actually minted.
+      logger.warn('Connector mint_link returned partial links on non-2xx', {
+        resource_id: resourceId,
+        status: response.status,
+        apiCode,
+        bodyLen: bodyText.length,
+        partial_link_count: partialQurlIds.length,
+        partial_qurl_ids: partialQurlIds,
+      });
+    }
+    return throwConnectorErrorFromBody('Connector mint_link', response, {
+      bodyText,
+      apiCode,
+      apiDetail,
+      partialQurlIds,
+    });
   }
 
   const result = await response.json();
@@ -387,6 +475,436 @@ async function mintLinks(resourceId, { expiresAt, n, apiKey, selfDestructSeconds
 
   logger.info('Minted links', { resource_id: resourceId, count: result.links.length });
   return result.links;
+}
+
+const DETECT_TARGET_PATH = '/api/detect';
+const DETECT_LINK_EXPIRES_IN = '5m';
+const DETECT_RESOURCE_LIST_LIMIT = 100;
+const DETECT_RESOURCE_FAILURE_BACKOFF_MS = 30 * 1000;
+// TODO(upstream-contract): keep these suffixes in lockstep with qurl-service /
+// qURL tunnel infra hostnames for production, sandbox, and staging.
+const DETECT_TUNNEL_PROD_HOST_SUFFIX = '.qurl.site';
+const DETECT_TUNNEL_NON_PROD_HOST_SUFFIXES = [
+  '.qurl.site.layerv.xyz',
+  '.qurl.site.layerv.ai',
+];
+// Extended (built-ins ∪ extras) via config.DETECT_EXTRA_NON_PROD_QURL_ENDPOINT_HOSTS
+// — env-injected by the private infra repo so real sandbox/staging hostnames
+// never need to be committed to this public repo. `|| []` keeps every mock of
+// ../src/config in the test suite that omits the field working unchanged
+// (empty extra set == today's behavior). See config.js for the parsing +
+// fail-fast shape validation of both DETECT_EXTRA_NON_PROD_* env vars.
+const DETECT_TUNNEL_NON_PROD_QURL_ENDPOINT_HOSTS = new Set([
+  'localhost',
+  '127.0.0.1',
+  '[::1]',
+  'api.test.local',
+  'api.staging.layerv.ai',
+  ...(config.DETECT_EXTRA_NON_PROD_QURL_ENDPOINT_HOSTS || []),
+]);
+
+function detectTunnelHostSuffixesForEndpoint(endpoint) {
+  let host = '';
+  try {
+    host = new URL(endpoint).hostname.toLowerCase();
+  } catch (_err) {
+    // A malformed/missing endpoint will fail elsewhere before detect can mint;
+    // keep host-pin fail-closed here rather than granting non-prod tunnel hosts
+    // to an unknown endpoint shape.
+  }
+  if (DETECT_TUNNEL_NON_PROD_QURL_ENDPOINT_HOSTS.has(host)) {
+    return [
+      DETECT_TUNNEL_PROD_HOST_SUFFIX,
+      ...DETECT_TUNNEL_NON_PROD_HOST_SUFFIXES,
+      ...(config.DETECT_EXTRA_NON_PROD_HOST_SUFFIXES || []),
+    ];
+  }
+  return [DETECT_TUNNEL_PROD_HOST_SUFFIX];
+}
+
+// Intentional load-time computation: QURL_ENDPOINT is static for a bot process,
+// and tests that vary it use jest.resetModules() before requiring connector.js.
+const DETECT_TUNNEL_HOST_SUFFIXES = detectTunnelHostSuffixesForEndpoint(config.QURL_ENDPOINT);
+
+// Module-level cache for the detect tunnel's resource_id (resolved from
+// DETECT_TUNNEL_SLUG via the SDK's listAllResources auto-paginator). The
+// resource_id is a stable, NON-secret identifier, so caching it across calls is
+// safe and skips a slug lookup on every detect. CACHE ONLY THIS, NEVER the
+// minted access token or qurl_site: each detect mints a FRESH ephemeral qURL (a
+// short-lived credential — mint and session durations are both '5m') and the native opening/knock
+// grants network access to the caller's CURRENT IP/knock-window. A stale token
+// would be a long-lived credential to leak; qurl_site is per-mint and must stay
+// paired with the fresh knock.
+let _detectResourceId = null;
+let _detectResourceRetryAfter = 0;
+let _detectResourcePreviousFailure = null;
+let _detectResourceConsecutiveFailures = 0;
+let _detectResourcePreviousFailureAt = 0;
+
+function clearDetectResourceFailureState() {
+  _detectResourceRetryAfter = 0;
+  _detectResourcePreviousFailure = null;
+  _detectResourceConsecutiveFailures = 0;
+  _detectResourcePreviousFailureAt = 0;
+}
+
+function rememberDetectResourceFailure(error, { immediateBackoff = false, clearResourceCache = true } = {}) {
+  // Deliberately shared across cache-clearing failure kinds. For the single
+  // dark-launch slug, two consecutive mint/shape/pin/mismatch failures are a
+  // tunnel-contract signal, even if the second is a different shape, so fail
+  // closed with a short process-wide backoff instead of granting one retry per
+  // failure mode. Key this by slug/resource/kind if detect becomes multi-slug
+  // or high-volume, or mint failures become guild-specific.
+  if (clearResourceCache) _detectResourceId = null;
+  const now = Date.now();
+  if (_detectResourcePreviousFailureAt && now - _detectResourcePreviousFailureAt > DETECT_RESOURCE_FAILURE_BACKOFF_MS) {
+    _detectResourceConsecutiveFailures = 0;
+  }
+  _detectResourceConsecutiveFailures += 1;
+  _detectResourcePreviousFailure = redactAccessToken(error?.message || error);
+  _detectResourcePreviousFailureAt = now;
+  if (immediateBackoff || _detectResourceConsecutiveFailures >= 2) {
+    _detectResourceRetryAfter = now + DETECT_RESOURCE_FAILURE_BACKOFF_MS;
+  }
+}
+
+function assertDetectResourceFailureBackoffAllowed() {
+  if (!_detectResourceRetryAfter) return;
+  const retryAfterMs = _detectResourceRetryAfter - Date.now();
+  if (retryAfterMs <= 0) {
+    clearDetectResourceFailureState();
+    return;
+  }
+  logger.warn('Detect tunnel attempt suppressed by failure backoff', {
+    retry_after_ms: retryAfterMs,
+    previous_error: _detectResourcePreviousFailure,
+  });
+  const err = new Error('Detect tunnel attempt is backing off after a previous failure');
+  err.retryAfterMs = retryAfterMs;
+  throw err;
+}
+
+// Lazily-constructed, cached qURL SDK client used solely by
+// resolveDetectTarget() to self-mint the ephemeral detect qURL over
+// the reverse-tunnel. Constructed on first use (not at module load) so the bot
+// boots even when QURL_API_KEY is unset in non-detect deployments, and so tests
+// can inject a mocked @layervai/qurl before the first call.
+//
+// Cache the client, never the minted qurl_site or access token — native opening
+// re-knocks per call (the full no-cache invariant + rationale live on
+// _detectResourceId above and in resolveDetectTarget's docstring).
+//
+// The bot credential owns the detect tunnel. Mint only the exact guild path
+// taken from the authenticated Discord interaction; the image request carries no API credential.
+let _qurlClient = null;
+function getQurlClient() {
+  if (!_qurlClient) {
+    // baseUrl is the bare qURL API base (no `/v1`) — the SDK prepends the
+    // versioned path itself.
+    //
+    // timeout / maxRetries match the SDK's current defaults but are pinned
+    // explicitly so the detect legs' resilience stays stable against
+    // SDK-default drift. List and mint use 30s request timeouts, below
+    // the detect POST's 60s; the retry worst case stays inside
+    // Discord's 15-min deferred-interaction window.
+    _qurlClient = new QURLClient({
+      apiKey: config.QURL_API_KEY,
+      baseUrl: config.QURL_ENDPOINT,
+      timeout: 30000,
+      maxRetries: 3,
+    });
+  }
+  return _qurlClient;
+}
+
+// Safe host-only context for the qurl_site rejection breadcrumb. The guards
+// intentionally throw constant URL-free messages, so this hostname is the
+// operator signal that distinguishes an infra suffix drift from an SSRF probe.
+// `hostname` excludes credentials, port, path, query, and fragment; undefined
+// on malformed input lets JSON logging omit the field instead of echoing a URL.
+function detectTargetHostname(qurlSite) {
+  try {
+    return new URL(qurlSite).hostname;
+  } catch {
+    return undefined;
+  }
+}
+
+class DetectQurlSiteError extends Error {}
+
+// SSRF guard for the qurl_site-derived tunnel target. Must be a PUBLIC
+// `https:` URL; reject any non-https scheme, embedded userinfo (the
+// `https://good@127.0.0.1/` hostname-confusion bypass), any
+// private/loopback/link-local host (reusing qurl.js's syntactic isPrivateHost),
+// and any host NOT under an expected qURL reverse-tunnel domain.
+// Deliberately NOT port-locked (the tunnel target may sit on a non-standard
+// port) and NOT DNS-resolved — a syntactic check ONLY, unlike the link-minting
+// path's assertNotPrivateAfterResolve in qurl.js, which adds a DNS-level
+// anti-rebinding guard. The asymmetry is intentional: qurl_site here comes
+// from a TRUSTED authenticated mint (not user input) and fresh native opening keeps
+// the knock window tight, so a DNS round-trip per detect isn't warranted. A
+// future reader should NOT assume this carries the link guard's DNS guarantee.
+function assertPublicHttpsTarget(targetUrl, expectedQurlSiteHost) {
+  let parsed;
+  try {
+    parsed = new URL(targetUrl);
+  } catch {
+    // buildDetectTargetUrl passes the serialized target URL today; keep this as
+    // defense-in-depth if a future caller validates a raw target directly.
+    throw new Error('Detect tunnel qurl_site target is unparseable');
+  }
+  if (parsed.protocol !== 'https:') {
+    throw new Error('Detect tunnel qurl_site target must be an https: URL');
+  }
+  // buildDetectTargetUrl deliberately retains any credentials in its candidate
+  // URL so this final-target guard can reject them before returning the
+  // credential-free target, issuing the NHP knock, or posting image bytes.
+  if (parsed.username || parsed.password) {
+    throw new Error('Detect tunnel qurl_site target must not contain userinfo');
+  }
+  if (isPrivateHost(parsed.hostname)) {
+    throw new Error('Detect tunnel qurl_site target points to a private/internal address');
+  }
+  // Pin the authenticated mint host to the configured tunnel namespace.
+  // The native ACK and exact guild path are checked before sending bytes.
+  const targetHost = parsed.hostname;
+  if (targetHost !== expectedQurlSiteHost) {
+    throw new Error('Detect tunnel qurl_site host does not match the returned qurl_site');
+  }
+  // TODO(upstream-contract): qurl_site is an authenticated, host-only tunnel
+  // origin whose routing labels are opaque. If qurl-service changes its tunnel
+  // hostname shapes, update this namespace pin and its deployment allowlists.
+  const hasAllowedSuffix = DETECT_TUNNEL_HOST_SUFFIXES.some((suffix) => {
+    if (!targetHost.endsWith(suffix)) return false;
+    const prefix = targetHost.slice(0, -suffix.length);
+    return prefix.split('.').every(Boolean);
+  });
+  if (!hasAllowedSuffix) {
+    throw new Error('Detect tunnel qurl_site host is not under an expected qURL tunnel domain');
+  }
+}
+
+// Join the trusted origin with the bot-constructed path, checked against the mint echo.
+function buildDetectTargetUrl(qurlSite, targetPath) {
+  let parsed;
+  try {
+    parsed = new URL(qurlSite);
+  } catch {
+    throw new DetectQurlSiteError('detect mint returned an unparseable qurl_site');
+  }
+  if (parsed.pathname !== '/' || parsed.search || parsed.hash) {
+    throw new DetectQurlSiteError('detect mint qurl_site must be host-only');
+  }
+  const target = new URL(targetPath, parsed);
+  assertPublicHttpsTarget(target.href, parsed.hostname);
+  return new URL(targetPath, parsed.origin).href;
+}
+
+// Scrub legacy access tokens and qv2t1 credentials before logging.
+// Native credentials originate in the mint response fragment. Keep redaction
+// independent of SDK error formatting; also scrub rejected legacy credentials.
+function redactAccessToken(message) {
+  return String(message ?? '').replace(/at_[A-Za-z0-9_-]+/g, 'at_[REDACTED]')
+    .replace(/qv2t1\.[A-Za-z0-9_.-]+/g, 'qv2t1.[REDACTED]');
+}
+
+async function closeDetectOpener(opener) {
+  try {
+    await opener.close();
+  } catch (err) {
+    logger.warn('Detect native opener close failed', { error: redactAccessToken(err?.message) });
+  }
+}
+
+/** Mint a fresh signed qURL for the authenticated guild's exact detect path. */
+async function resolveDetectTarget(guildId) {
+  if (!config.DETECT_TUNNEL_SLUG) {
+    throw new Error('DETECT_TUNNEL_SLUG is not configured (required to reach the detect tunnel)');
+  }
+  assertDetectResourceFailureBackoffAllowed();
+
+  // Resolve the tunnel resource_id from the slug, cached across calls — it's a
+  // stable, non-secret identifier. Assign the cache ONLY after a successful
+  // extract so a failed lookup doesn't poison it. The SDK owns pagination and
+  // response shaping: listAllResources yields resources from every page, and
+  // each resource carries `resource_id` (not `id`). There is intentionally no
+  // in-flight dedup for concurrent cold-cache lookups; the failure backoff
+  // bounds repeated hard failures.
+  let resourceId = _detectResourceId;
+  if (!resourceId) {
+    // Breadcrumb a slug-lookup transport failure (message only — no token, no
+    // URL), matching the mint/resolve legs, so a cold-boot activation failure
+    // on the FIRST network call is diagnosable rather than an undistinguished
+    // throw at the handler.
+    const active = [];
+    try {
+      for await (const resource of getQurlClient().listAllResources({
+        slug: config.DETECT_TUNNEL_SLUG,
+        limit: DETECT_RESOURCE_LIST_LIMIT,
+      })) {
+        if (resource?.status === 'active') active.push(resource);
+      }
+    } catch (err) {
+      // Transport blips on the cold slug lookup get one immediate retry, like
+      // mint failures. Deterministic slug contract failures below still arm an
+      // immediate backoff because no retry can make missing/multiple active
+      // resources safe.
+      rememberDetectResourceFailure(err, { clearResourceCache: false });
+      logger.warn('Detect tunnel slug lookup failed', { error: redactAccessToken(err.message) });
+      throw err;
+    }
+    if (active.length > 1) {
+      const err = new Error('Detect tunnel resource slug resolved to multiple active resources');
+      rememberDetectResourceFailure(err, { immediateBackoff: true });
+      logger.warn('Detect tunnel slug resolved to multiple active resources', {
+        slug: config.DETECT_TUNNEL_SLUG,
+        count: active.length,
+      });
+      throw err;
+    }
+    resourceId = active[0]?.resource_id ? String(active[0].resource_id) : null;
+    if (!resourceId) {
+      const err = new Error('Detect tunnel resource not found for slug');
+      rememberDetectResourceFailure(err, { immediateBackoff: true });
+      throw err;
+    }
+    _detectResourceId = resourceId;
+  }
+
+  // Mint a fresh qURL and bound its access session separately. Expiring a
+  // qURL does not shorten an already-open native access grant.
+  const targetPath = `${DETECT_TARGET_PATH}/discord/${guildId}`;
+  let targetUrl;
+  let minted;
+  try {
+    minted = await getQurlClient().createQurlForResource(resourceId, {
+      expires_in: DETECT_LINK_EXPIRES_IN,
+      session_duration: DETECT_LINK_EXPIRES_IN,
+      target_path: targetPath,
+    });
+  } catch (err) {
+    // Self-heal a stale resource_id: if the tunnel resource was deleted/
+    // recreated, the cached id would 404 every mint until process restart.
+    // Drop the cache so a later detect re-resolves the slug. The first
+    // mint transport/API failure gets one immediate self-heal retry; repeated
+    // failures arm the short backoff so a broken tunnel does not re-walk slug
+    // history on every request.
+    rememberDetectResourceFailure(err);
+    logger.warn('Detect tunnel mint failed', { error: redactAccessToken(err.message) });
+    throw err;
+  }
+  try {
+    // NHP authorizes the path against active grants; infra scopes lookup by guild.
+    if (minted?.target_path !== targetPath) {
+      throw new Error('detect mint returned a mismatched guild path');
+    }
+    targetUrl = buildDetectTargetUrl(minted?.qurl_site, targetPath);
+  } catch (err) {
+    // qurl_site hostname-pin failures happen after a successful slug
+    // lookup and mint, so keep the cached resource id and retry the mint after
+    // the short failure window instead of re-walking slug history. The mint
+    // created an unredeemed 5m qURL, but failing before native opening is the safe
+    // trade: no NHP knock and no image POST are issued to an untrusted host.
+    rememberDetectResourceFailure(err, { clearResourceCache: false });
+    const label = err instanceof DetectQurlSiteError
+      ? 'Detect tunnel mint returned an invalid qurl_site'
+      : 'Detect tunnel target rejected';
+    logger.warn(label, {
+      error: redactAccessToken(err.message),
+      hostname: detectTargetHostname(minted?.qurl_site),
+    });
+    throw err;
+  }
+
+  let clearResourceCache = false;
+  try {
+    // qv2t1 carries an offline credential, not an at_ API-resolve token.
+    // The native SDK verifies the issuer and cell against deployment trust.
+    if (typeof minted?.qurl_link === 'string' && minted.qurl_link.split('#')[1]?.startsWith('qv2t1.')) {
+      if (minted.resource_id !== resourceId) {
+        const err = new Error('Detect mint returned a mismatched resource_id');
+        clearResourceCache = true;
+        throw err;
+      }
+      const { createPortalOpener } = require('@layervai/qurl/node');
+      const opener = createPortalOpener({ qurl: minted.qurl_link });
+      try {
+        // SDK 0.6 bounds native opening to 15 seconds and aborts it on close.
+        await opener.start();
+        clearDetectResourceFailureState();
+        return { targetUrl, opener };
+      } catch (err) {
+        await closeDetectOpener(opener);
+        // The command handler also logs this error; keep credentials out of it.
+        throw new Error(redactAccessToken(err.message));
+      }
+    }
+    throw new Error('Detect requires a signed native qURL');
+  } catch (err) {
+    // A malformed qurl_link is a mint response-shape issue, not evidence that
+    // the cached resource_id is stale. Keep the resource cache and retry only
+    // the mint after the short failure window.
+    rememberDetectResourceFailure(err, { clearResourceCache });
+    logger.warn('Detect native open or link validation failed', { error: redactAccessToken(err.message) });
+    throw err;
+  }
+}
+
+/** Recover attribution through an exact, signed external guild path. */
+async function detectWatermark(imageBytes, { guildId, contentType } = {}) {
+  if (!config.QURL_API_KEY) throw new Error('QURL_API_KEY is not configured');
+  // TODO(upstream-contract): Discord snowflakes are canonical 17–20 digit strings.
+  if (typeof guildId !== 'string' || !/^[0-9]{17,20}$/.test(guildId)) {
+    throw new Error('detectWatermark requires a valid Discord guild id');
+  }
+  const { targetUrl, opener } = await resolveDetectTarget(guildId);
+
+  try {
+    const request = {
+      method: 'POST',
+      headers: {
+        'Content-Type': contentType || 'application/octet-stream',
+      },
+      body: imageBytes,
+      // Neural-net inference is the slow leg here; give it the same 60s
+      // headroom the upload paths use rather than the 30s mint window.
+      signal: AbortSignal.timeout(60000),
+    };
+    // TODO(upstream-contract): SDK 0.6 fetch authenticates the signed target before this callback.
+    const response = await opener.fetch((authenticatedTarget) => {
+      // Check the signed ACK target before sending image bytes.
+      if (authenticatedTarget.href !== targetUrl) {
+        throw new Error('Detect native target does not match the minted tunnel');
+      }
+      return request;
+    }, { redirects: 'error' });
+
+    if (!response.ok) {
+      return await throwConnectorError('Connector detect', response);
+    }
+
+    const result = await response.json();
+    // Normalize the shape so the caller can destructure without
+    // optional-chaining every field. The connector owns the values;
+    // we only coerce `detected` to a hard boolean (a missing/garbled
+    // field must read as "no attribution", never as a truthy object).
+    return {
+      detected: result.detected === true,
+      qurl_id: typeof result.qurl_id === 'string' ? result.qurl_id : null,
+      match_pct: typeof result.match_pct === 'number' ? result.match_pct : null,
+      confidence: typeof result.confidence === 'number' ? result.confidence : 0,
+    };
+  } catch (err) {
+    const message = redactAccessToken(err?.message);
+    if (typeof err?.message === 'string' && message !== err.message) {
+      const safeError = new Error(message);
+      safeError.status = err?.status;
+      throw safeError;
+    }
+    throw err;
+  } finally {
+    await closeDetectOpener(opener);
+  }
 }
 
 /**
@@ -429,4 +947,4 @@ async function uploadJsonToConnector(jsonPayload, filename, apiKey, viewerTtlSec
   return result;
 }
 
-module.exports = { uploadToConnector, downloadAndUpload, reUploadBuffer, mintLinks, uploadJsonToConnector, isAllowedSourceUrl };
+module.exports = { uploadToConnector, downloadAndUpload, reUploadBuffer, mintLinks, detectWatermark, uploadJsonToConnector, isAllowedSourceUrl, detectTunnelHostSuffixesForEndpoint };

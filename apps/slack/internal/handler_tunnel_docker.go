@@ -13,6 +13,10 @@ func renderDockerTunnelInstructions(args *tunnelInstallArgs, image string) (stri
 	if err != nil {
 		return "", err
 	}
+	endpoint, err := qurlEndpointFromConnectorAPIURL(args.APIURL)
+	if err != nil {
+		return "", err
+	}
 	docker := fmt.Sprintf(`set -eu
 %s
 
@@ -23,46 +27,56 @@ func renderDockerTunnelInstructions(args *tunnelInstallArgs, image string) (stri
 WEB_CONTAINER=%s
 %s
 
-QURL_TUNNEL_ID=%s
-TUNNEL_CONTAINER="qurl-tunnel-${QURL_TUNNEL_ID}"
-SECRET_DIR="/run/secrets/qurl-tunnel/${QURL_TUNNEL_ID}"
-AGENT_STATE_DIR="/var/lib/layerv/qurl-tunnel/${QURL_TUNNEL_ID}/agent"
-CONFIG_FILE="$PWD/qurl-proxy-${QURL_TUNNEL_ID}.yaml"
+QURL_CONNECTOR_ID=%s
+CONNECTOR_CONTAINER="qurl-${QURL_CONNECTOR_ID}"
+SECRET_DIR="/run/secrets/qurl/${QURL_CONNECTOR_ID}"
+AGENT_STATE_DIR="/var/lib/layerv/qurl/${QURL_CONNECTOR_ID}"
+CONFIG_FILE="$PWD/qurl-share-${QURL_CONNECTOR_ID}.yaml"
 
-# This intentionally overwrites the per-tunnel config so rerunning the install
+# This intentionally overwrites the per-connector config so rerunning the install
 # refreshes the deterministic ID and port values in place.
 cat > "$CONFIG_FILE" <<'QURL_PROXY_YAML_EOF'
 %s
 QURL_PROXY_YAML_EOF
+# The generated config contains only client-safe public/routing metadata.
+$SUDO chmod 0644 "$CONFIG_FILE"
 
 $SUDO install -d -m 0700 -o 65532 -g 65532 "$SECRET_DIR"
 $SUDO install -d -m 0700 -o 65532 -g 65532 "$AGENT_STATE_DIR"
 %s
 %s
 
-if docker ps -a --format '{{.Names}}' | grep -Fxq "$TUNNEL_CONTAINER"; then
-  docker rm -f "$TUNNEL_CONTAINER" >/dev/null
+if docker ps -a --format '{{.Names}}' | grep -Fxq "$CONNECTOR_CONTAINER"; then
+  docker rm -f "$CONNECTOR_CONTAINER" >/dev/null
 fi
 
 docker run -d \
-  --name "$TUNNEL_CONTAINER" \
+  --name "$CONNECTOR_CONTAINER" \
   --network "container:${WEB_CONTAINER}" \
-  --restart=on-failure:5 \
-  -v "$AGENT_STATE_DIR:/var/lib/layerv/agent" \
-  -v "$SECRET_DIR:$SECRET_DIR:ro" \
-  -v "$CONFIG_FILE:/work/qurl-proxy.yaml:ro" \
-  -e QURL_API_KEY_FILE="$SECRET_DIR/api_key" \
-  -e QURL_TUNNEL_ID="$QURL_TUNNEL_ID" \
-  %s`, renderPortablePipefailShell(), renderSudoDetectionShell(), webContainer, renderRequiredShellNameGuard("WEB_CONTAINER", "YOUR_WEB_CONTAINER_NAME", "the Docker container name or ID for your local HTTP server", "A-Za-z0-9_.-", "letters, numbers, dots, underscores, and hyphens"), shellSingleQuote(args.Slug), configYAML, renderBootstrapKeyPromptShell(), renderBootstrapKeyFileInstallShell(`"$SECRET_DIR/api_key"`), shellSingleQuote(image))
+  --restart=unless-stopped \
+  --read-only \
+  --tmpfs /tmp:rw,size=64m \
+  --cap-drop=ALL \
+  --security-opt=no-new-privileges:true \
+  --pids-limit=512 \
+  -v "$AGENT_STATE_DIR:/var/lib/qurl" \
+  -v "$SECRET_DIR:/run/secrets/qurl:ro" \
+  -v "$CONFIG_FILE:/etc/qurl/share.yaml:ro" \
+  -e QURL_ENDPOINT=%s \
+  --entrypoint /usr/local/bin/qurl \
+  %s daemon run \
+    --state-dir /var/lib/qurl \
+    --headless-config /etc/qurl/share.yaml \
+    --enrollment-token-file /run/secrets/qurl/enrollment-token`, renderPortablePipefailShell(), renderSudoDetectionShell(), webContainer, renderRequiredShellNameGuard("WEB_CONTAINER", "YOUR_WEB_CONTAINER_NAME", "the Docker container name or ID for your local HTTP server", "A-Za-z0-9_.-", "letters, numbers, dots, underscores, and hyphens"), shellSingleQuote(args.Slug), configYAML, renderBootstrapKeyPromptShell(), renderBootstrapKeyFileInstallShell(`"$SECRET_DIR/enrollment-token"`), shellSingleQuote(endpoint), shellSingleQuote(image))
 
 	block, err := slackCodeBlock(docker)
 	if err != nil {
 		return "", err
 	}
-	intro := "Run this whole block on the Linux Docker host where your local HTTP server container is running. It prompts for the bootstrap key so the secret does not land in shell history; use a trusted host and shell because local administrators can inspect process state during setup. If your terminal echoes pasted input, stop and use a platform secret manager instead."
+	intro := "Run this whole block on the Linux Docker host where your local HTTP server container is running. It prompts for the enrollment token so the secret does not land in shell history; use a trusted host and shell because local administrators can inspect process state during setup. If your terminal echoes pasted input, stop and use a platform secret manager instead."
 	if args.WebRef == "" {
 		intro += " Replace the value inside `WEB_CONTAINER='YOUR_WEB_CONTAINER_NAME'` first; keep the quotes."
 	}
-	intro += " It writes or overwrites a per-tunnel qurl-proxy config in the current directory. Re-running this install briefly restarts the tunnel container if it already exists. Because the tunnel shares the web container's network namespace, restart the tunnel after replacing or recreating the web container."
-	return intro + "\n\n" + block + "\n\nVerify with `docker logs -f qurl-tunnel-" + args.Slug + "`; after the tunnel connects, delete the bootstrap key file.", nil
+	intro += " It writes or overwrites the qURL share config in the current directory. Re-running this install briefly restarts the qurl container if it already exists. Because qurl shares the web container's network namespace, restart qurl after replacing or recreating the web container."
+	return intro + "\n\n" + block + "\n\nVerify with `docker logs -f qurl-" + args.Slug + "`; after qURL connects, delete the enrollment-token file. Warm restarts use the persisted state volume and do not need it.", nil
 }

@@ -55,6 +55,9 @@
 //                          (Ready/Resumed → true, Closed → false);
 //                          read every tick by the watchdog and
 //                          once per inbound-handoff by the leader.
+//   - isRecovering()     — true after Closed until Ready/Resumed;
+//                          prevents the watchdog from racing the
+//                          library's automatic reconnect.
 //   - isStarted()        — true after start() resolves and before
 //                          stop() runs; used by the Pillar 3 wiring
 //                          for a boot-ordering belt-and-suspenders.
@@ -104,6 +107,7 @@
 
 const { WebSocketManager, WebSocketShardEvents } = require('@discordjs/ws');
 const { REST } = require('@discordjs/rest');
+const { GatewayCloseCodes } = require('discord-api-types/v10');
 
 // Tightly bounded per the budget rationale above. Assumes
 // @discordjs/ws invokes retrieveSessionInfo exactly once per
@@ -125,6 +129,24 @@ const DEFAULT_CONNECT_TIMEOUT_MS = 30_000;
 // minor bump must re-verify the upstream dispatch handler before
 // updating this constant.
 const VERIFIED_DJS_WS_MAJOR_MINOR = '1.2';
+
+// @discordjs/ws v1.2.x emits Closed before it decides whether to recover.
+// These close codes take its terminal `destroy({ code })` branch, with no
+// `recover` option. Every other current branch supplies Reconnect/Resume, or
+// is the library's synthetic 4200 resuming code. The watchdog must stand down
+// only when the library will really start its own recovery.
+//
+// TODO(upstream-contract): When VERIFIED_DJS_WS_MAJOR_MINOR changes, re-check
+// WebSocketShard.onClose for both this terminal-code set and the 500 ms
+// destroy({ recover }) reconnect delay before updating the verified marker.
+const TERMINAL_GATEWAY_CLOSE_CODES = new Set([
+  GatewayCloseCodes.AuthenticationFailed,
+  GatewayCloseCodes.InvalidShard,
+  GatewayCloseCodes.ShardingRequired,
+  GatewayCloseCodes.InvalidAPIVersion,
+  GatewayCloseCodes.InvalidIntents,
+  GatewayCloseCodes.DisallowedIntents,
+]);
 
 function createGatewayWsShim({
   token,
@@ -151,8 +173,10 @@ function createGatewayWsShim({
   // Distinct from `isReady`. `isReady` powers /health — stays true
   // through transient reconnects so a momentary WS blip doesn't
   // flap ECS into replacing the task. `wsConnected` is the Pillar 3
-  // leader/watchdog signal — "should I call connect()" — and flips
-  // false on Closed so the watchdog re-drives connect after a drop.
+  // leader/watchdog signal — "is a shard usable now?" — and flips
+  // false on Closed. @discordjs/ws owns automatic reconnect after a
+  // Closed event; `wsRecovering` keeps the watchdog from calling
+  // manager.connect() during that internal reconnect.
   //
   // Single-shard assumption: this is a module-level boolean, not
   // a per-shardId map, because today's deployment has SHARD_ID=
@@ -165,6 +189,7 @@ function createGatewayWsShim({
   // on the whole manager — upstream rejects "Tried to connect a
   // shard that wasn't idle" for the still-Ready shards.
   let wsConnected = false;
+  let wsRecovering = false;
   let appId = null;
   let identifyAttempts = 0;
   // Two distinct flags:
@@ -357,10 +382,12 @@ function createGatewayWsShim({
       manager.on(WebSocketShardEvents.Ready, () => {
         if (stopped) return;
         wsConnected = true;
+        wsRecovering = false;
       });
       manager.on(WebSocketShardEvents.Resumed, () => {
         if (stopped) return;
         wsConnected = true;
+        wsRecovering = false;
       });
       // Note: @discordjs/ws v1.2.x Closed payload is `{ code, shardId }`
       // only. We destructure `reason` defensively against a future
@@ -369,8 +396,15 @@ function createGatewayWsShim({
       manager.on(WebSocketShardEvents.Closed, ({ code, reason, shardId }) => {
         if (stopped) return;
         wsConnected = false;
+        // Most closes make @discordjs/ws call destroy({ recover }) and start
+        // its own reconnect after a deliberate 500 ms Idle window. Without
+        // this latch, the watchdog can call manager.connect() in that window
+        // and create a second live shard in the same process. Terminal close
+        // codes call destroy({ code }) with no recovery, so leave the latch
+        // clear and let the watchdog use its bounded explicit-connect path.
+        wsRecovering = !TERMINAL_GATEWAY_CLOSE_CODES.has(code);
         logger.info('gateway-ws-shim: shard closed', {
-          shardId, code, reason: reason ?? null,
+          shardId, code, reason: reason ?? null, automatic_recovery: wsRecovering,
         });
       });
 
@@ -440,6 +474,7 @@ function createGatewayWsShim({
       // rather than waiting on the Closed event from the eventual
       // socket teardown.
       wsConnected = false;
+      wsRecovering = false;
       // Drop dispatch handlers so any late dispatch arriving on
       // the way out doesn't trigger a downstream side effect.
       dispatchHandlers.clear();
@@ -502,14 +537,16 @@ function createGatewayWsShim({
     // ── Pillar 3 manager contract ──
     // The leader (gateway-leader.js) and connection watchdog
     // (gateway-connection-watchdog.js) require a manager handle
-    // with `connect()` + `isConnected()`. @discordjs/ws's
+    // with `connect()` + `isConnected()` + `isRecovering()`. @discordjs/ws's
     // WebSocketManager exposes connect() but NOT isConnected() —
     // it has only async fetchStatus(). So the shim itself is the
     // contract-conforming handle: callers pass `gatewayShim`
     // directly into createGatewayLeader / createConnectionWatchdog.
     //
-    // `connect()` delegates straight through. `isConnected()`
-    // returns a sync mirror flag tracked via shard events
+    // `connect()` delegates when the library is idle. It rejects while
+    // @discordjs/ws owns an automatic reconnect so no caller can race
+    // the library's 500 ms reconnect gap with a second connection.
+    // `isConnected()` returns a sync mirror flag tracked via shard events
     // (Ready/Resumed/Closed listeners in start()) — both consumers
     // call it synchronously every tick, so awaiting fetchStatus()
     // there would be wrong.
@@ -527,11 +564,20 @@ function createGatewayWsShim({
           'gateway-ws-shim: connect() called before start() constructed the manager',
         ));
       }
+      if (wsRecovering) {
+        return Promise.reject(new Error(
+          'gateway-ws-shim: connect() called while automatic recovery is in progress',
+        ));
+      }
       return manager.connect();
     },
 
     isConnected() {
       return wsConnected;
+    },
+
+    isRecovering() {
+      return wsRecovering;
     },
 
     // True once start() has constructed the underlying manager and

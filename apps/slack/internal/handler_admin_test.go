@@ -1,232 +1,35 @@
 package internal
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"regexp"
-	"strconv"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
 	ddbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 
-	"github.com/layervai/qurl-integrations/apps/slack/internal/oauth"
 	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
+	"github.com/layervai/qurl-integrations/shared/auth"
 )
 
 // Test-local string constants — keeps the test file free of magic
 // literals that would otherwise repeat across cases. Slack user IDs
 // are uppercase alphanumeric (no underscore), so the fixtures here
 // use that shape — the parser's userMentionPattern rejects the
-// `U_admin`-style IDs the older test fixtures used. qurl_id fixtures
-// are ULID-style 26-char suffixes so the parser's {16,64} length
-// gate accepts them.
+// `U_admin`-style IDs the older test fixtures used.
 const (
 	testTargetUserID  = "UTARGET01"
 	testTargetMention = "<@UTARGET01>"
 	testOtherAdminID  = "UOTHER001"
-	testAdminListCmd  = "admin list"
-	testRevokeQURLID  = "q_01HXYZ8ABCDEF0123456789AB"
-	testMissingQURLID = "q_01HXYZ8MISS123456789ABCDE"
+	testAdminListCmd  = "admins"
+	testSlackBaseURL  = "https://slack-bot.example"
 )
-
-// --- Revoke (single qurl_id, sync) ---
-
-// TestHandleAdminRevoke_HappyPath fences single-qURL revocation.
-func TestHandleAdminRevoke_HappyPath(t *testing.T) {
-	ts := newAdminTestServers(t)
-	ts.seedAdmin(t)
-	var deleteHits atomic.Int32
-	ts.addCustomer("DELETE", "/v1/qurls/"+testRevokeQURLID, func(w http.ResponseWriter, _ *http.Request) {
-		deleteHits.Add(1)
-		w.WriteHeader(http.StatusNoContent)
-	})
-
-	h := newAdminTestHandler(t, ts)
-	inv := newAdminSlashInvoker(t, h)
-
-	_, reply := inv.invokeAdmin("admin revoke "+testRevokeQURLID, testAdminTeamID, testAdminUserID)
-	if !strings.Contains(reply, "Revoked `"+testRevokeQURLID+"`") {
-		t.Errorf("reply missing success line: %q", reply)
-	}
-	if deleteHits.Load() != 1 {
-		t.Errorf("DELETE called %d times, want 1", deleteHits.Load())
-	}
-}
-
-// TestHandleAdminRevoke_404IsGraceful fences the 404-friendly
-// surface: an already-revoked or typo'd qurl_id renders a hint rather
-// than a stack trace.
-func TestHandleAdminRevoke_404IsGraceful(t *testing.T) {
-	ts := newAdminTestServers(t)
-	ts.seedAdmin(t)
-	ts.addCustomer("DELETE", "/v1/qurls/"+testMissingQURLID, func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusNotFound)
-		_, _ = w.Write([]byte(`{"error":{"title":"Not Found","status":404}}`))
-	})
-
-	h := newAdminTestHandler(t, ts)
-	inv := newAdminSlashInvoker(t, h)
-
-	_, reply := inv.invokeAdmin("admin revoke "+testMissingQURLID, testAdminTeamID, testAdminUserID)
-	if !strings.Contains(reply, "already revoked") {
-		t.Errorf("reply missing graceful 404 surface: %q", reply)
-	}
-}
-
-// TestHandleAdminRevoke_InvalidQURLID fences the format check: a
-// pasted token that doesn't match `q_<alphanum>` gets a parser-error
-// hint, not an opaque DELETE 404.
-func TestHandleAdminRevoke_InvalidQURLID(t *testing.T) {
-	ts := newAdminTestServers(t)
-	ts.seedAdmin(t)
-
-	h := newAdminTestHandler(t, ts)
-	inv := newAdminSlashInvoker(t, h)
-
-	_, reply := inv.invokeAdmin("admin revoke not-a-real-id", testAdminTeamID, testAdminUserID)
-	if !strings.Contains(reply, "q_<id>") {
-		t.Errorf("reply missing format hint: %q", reply)
-	}
-}
-
-// TestHandleAdminRevoke_AuthRejected fences the 401/403 surface: a
-// rotated workspace API key surfaces a "re-run /qurl setup <email>" hint
-// instead of the generic upstream-error copy, so the admin has a
-// concrete next step.
-//
-// addCustomer uses map-assignment for routes, so the per-iteration
-// re-register replaces the previous handler — the second iteration
-// genuinely exercises the 403 status, not a stale 401.
-func TestHandleAdminRevoke_AuthRejected(t *testing.T) {
-	ts := newAdminTestServers(t)
-	ts.seedAdmin(t)
-	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden} {
-		ts.addCustomer("DELETE", "/v1/qurls/"+testRevokeQURLID, func(w http.ResponseWriter, _ *http.Request) {
-			w.WriteHeader(status)
-			_, _ = w.Write([]byte(`{"error":{"title":"auth rejected","status":` + strconv.Itoa(status) + `}}`))
-		})
-
-		h := newAdminTestHandler(t, ts)
-		inv := newAdminSlashInvoker(t, h)
-
-		_, reply := inv.invokeAdmin("admin revoke "+testRevokeQURLID, testAdminTeamID, testAdminUserID)
-		if !strings.Contains(reply, "re-run `/qurl setup <email>`") {
-			t.Errorf("status %d: reply missing rotate-hint: %q", status, reply)
-		}
-	}
-}
-
-// TestHandleAdminRevoke_Upstream5xx fences the generic upstream-error
-// surface: a 5xx from qurl-service surfaces the generic
-// "failed to revoke" copy + the detailed slog.Error for triage. The
-// 5xx path is distinct from the 401/403 auth-rejected path (which
-// renders the "re-run /qurl setup <email>" hint) and the 404 path (which
-// renders the "already revoked or typo'd" hint).
-func TestHandleAdminRevoke_Upstream5xx(t *testing.T) {
-	ts := newAdminTestServers(t)
-	ts.seedAdmin(t)
-	ts.addCustomer("DELETE", "/v1/qurls/"+testRevokeQURLID, func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-		_, _ = w.Write([]byte(`{"error":{"title":"Internal Server Error","status":500}}`))
-	})
-
-	h := newAdminTestHandler(t, ts)
-	inv := newAdminSlashInvoker(t, h)
-
-	_, reply := inv.invokeAdmin("admin revoke "+testRevokeQURLID, testAdminTeamID, testAdminUserID)
-	if !strings.Contains(reply, "failed to revoke") {
-		t.Errorf("reply missing generic-error surface: %q", reply)
-	}
-	// Should NOT misclassify as auth-rejected or not-found.
-	if strings.Contains(reply, "re-run `/qurl setup <email>`") {
-		t.Errorf("5xx misclassified as auth-rejected: %q", reply)
-	}
-	if strings.Contains(reply, "already revoked") {
-		t.Errorf("5xx misclassified as not-found: %q", reply)
-	}
-}
-
-// TestHandleAdminRevoke_CheckAdminError fences the 5xx surface on
-// the admin-gate path: a DDB transient failure during CheckAdmin
-// (the GetItem against workspace_mappings) renders the generic
-// "failed to verify admin status" reply rather than misclassifying
-// the user as non-admin. The slog.Error audit attribution is
-// implicitly fenced (test exercises the code path; CloudWatch
-// readers see the captured "error" attr).
-func TestHandleAdminRevoke_CheckAdminError(t *testing.T) {
-	ts := newAdminTestServers(t)
-	ts.seedAdmin(t)
-	ts.ddb.SetGetItemErr(ts.tableNames.workspace, errString("injected DDB transient"))
-
-	h := newAdminTestHandler(t, ts)
-	inv := newAdminSlashInvoker(t, h)
-
-	_, reply := inv.invokeAdmin("admin revoke "+testRevokeQURLID, testAdminTeamID, testAdminUserID)
-	if !strings.Contains(reply, "failed to verify admin status") {
-		t.Errorf("reply missing CheckAdmin-error surface: %q", reply)
-	}
-}
-
-// errString is a tiny test-only error type for injecting transient
-// DDB failures. Production code wraps these through ddbToError into
-// the *slackdata.Error shape, so the underlying type doesn't need to
-// be a DDB exception.
-type errString string
-
-func (e errString) Error() string { return string(e) }
-
-// TestHandleAdminRevoke_MissingTeamOrUserID fences the early-return
-// in requireAdminSync when team_id / user_id are empty. The
-// handleAdmin entry-point TrimSpaces both fields, so a whitespace-
-// only payload reaches the gate as "" and renders the explicit
-// "missing team_id or user_id" warning. No mutation is attempted.
-func TestHandleAdminRevoke_MissingTeamOrUserID(t *testing.T) {
-	ts := newAdminTestServers(t)
-	ts.seedAdmin(t)
-	ts.failOnAdminMutation(t, "missing identity should bail before CheckAdmin")
-
-	h := newAdminTestHandler(t, ts)
-	inv := newAdminSlashInvoker(t, h)
-
-	// Empty team_id, valid user_id.
-	_, reply := inv.invokeAdmin("admin revoke "+testRevokeQURLID, "   ", testAdminUserID)
-	if !strings.Contains(reply, "missing team_id or user_id") {
-		t.Errorf("empty-team reply missing surface: %q", reply)
-	}
-	// Valid team_id, empty user_id.
-	_, reply = inv.invokeAdmin("admin revoke "+testRevokeQURLID, testAdminTeamID, "   ")
-	if !strings.Contains(reply, "missing team_id or user_id") {
-		t.Errorf("empty-user reply missing surface: %q", reply)
-	}
-}
-
-// TestHandleAdminRevoke_NonAdmin fences the admin-only gate on revoke.
-func TestHandleAdminRevoke_NonAdmin(t *testing.T) {
-	ts := newAdminTestServers(t)
-	ts.seedNonAdmin(t)
-	var deleteHits atomic.Int32
-	ts.addCustomerPrefix("DELETE", "/v1/qurls/", func(w http.ResponseWriter, _ *http.Request) {
-		deleteHits.Add(1)
-		w.WriteHeader(http.StatusNoContent)
-	})
-
-	h := newAdminTestHandler(t, ts)
-	inv := newAdminSlashInvoker(t, h)
-
-	_, reply := inv.invokeAdmin("admin revoke "+testRevokeQURLID, testAdminTeamID, testAdminUserID)
-	if !strings.Contains(reply, "admin-only") {
-		t.Errorf("reply missing admin-only fence: %q", reply)
-	}
-	if deleteHits.Load() != 0 {
-		t.Errorf("DELETE fired despite non-admin gate (hits = %d)", deleteHits.Load())
-	}
-}
 
 // --- Add ---
 
@@ -240,7 +43,7 @@ func TestHandleAdminAdd_HappyPath(t *testing.T) {
 	h := newAdminTestHandler(t, ts)
 	inv := newAdminSlashInvoker(t, h)
 
-	_, reply := inv.invokeAdmin("admin add "+testTargetMention, testAdminTeamID, testAdminUserID)
+	_, reply := inv.invokeAdmin("add "+testTargetMention, testAdminTeamID, testAdminUserID)
 	if !strings.Contains(reply, "Added <@"+testTargetUserID+">") {
 		t.Errorf("reply missing success line: %q", reply)
 	}
@@ -266,7 +69,7 @@ func TestHandleAdminAdd_AlreadyAdmin(t *testing.T) {
 	h := newAdminTestHandler(t, ts)
 	inv := newAdminSlashInvoker(t, h)
 
-	_, reply := inv.invokeAdmin("admin add "+testTargetMention, testAdminTeamID, testAdminUserID)
+	_, reply := inv.invokeAdmin("add "+testTargetMention, testAdminTeamID, testAdminUserID)
 	if !strings.Contains(reply, "already an admin") {
 		t.Errorf("reply missing idempotent surface: %q", reply)
 	}
@@ -354,7 +157,7 @@ func TestHandleAdminAdd_Unverified(t *testing.T) {
 	h := newAdminTestHandler(t, ts)
 	inv := newAdminSlashInvoker(t, h)
 
-	_, reply := inv.invokeAdmin("admin add "+testTargetMention, testAdminTeamID, testAdminUserID)
+	_, reply := inv.invokeAdmin("add "+testTargetMention, testAdminTeamID, testAdminUserID)
 	if !strings.Contains(reply, "couldn't confirm admin add") {
 		t.Errorf("reply missing unverified-retry surface: %q", reply)
 	}
@@ -370,7 +173,7 @@ func TestHandleAdminAdd_NonAdminCaller(t *testing.T) {
 	h := newAdminTestHandler(t, ts)
 	inv := newAdminSlashInvoker(t, h)
 
-	_, reply := inv.invokeAdmin("admin add "+testTargetMention, testAdminTeamID, testAdminUserID)
+	_, reply := inv.invokeAdmin("add "+testTargetMention, testAdminTeamID, testAdminUserID)
 	if !strings.Contains(reply, "admin-only") {
 		t.Errorf("reply missing admin-only fence: %q", reply)
 	}
@@ -388,7 +191,7 @@ func TestHandleAdminAdd_SelfAdd(t *testing.T) {
 	h := newAdminTestHandler(t, ts)
 	inv := newAdminSlashInvoker(t, h)
 
-	_, reply := inv.invokeAdmin("admin add <@"+testAdminUserID+">", testAdminTeamID, testAdminUserID)
+	_, reply := inv.invokeAdmin("add <@"+testAdminUserID+">", testAdminTeamID, testAdminUserID)
 	if !strings.Contains(reply, "You're already an admin") {
 		t.Errorf("reply missing self-add surface: %q", reply)
 	}
@@ -405,7 +208,7 @@ func TestHandleAdminAdd_InvalidMention(t *testing.T) {
 	h := newAdminTestHandler(t, ts)
 	inv := newAdminSlashInvoker(t, h)
 
-	for _, text := range []string{"admin add", "admin add someone", "admin add @someone"} {
+	for _, text := range []string{"add", "add someone", "add @someone"} {
 		_, reply := inv.invokeAdmin(text, testAdminTeamID, testAdminUserID)
 		if !strings.Contains(reply, ":warning:") {
 			t.Errorf("%q: reply missing parser-error surface: %q", text, reply)
@@ -432,7 +235,7 @@ func TestHandleAdminRemove_HappyPath(t *testing.T) {
 	h := newAdminTestHandler(t, ts)
 	inv := newAdminSlashInvoker(t, h)
 
-	_, reply := inv.invokeAdmin("admin remove <@"+testOtherAdminID+">", testAdminTeamID, testAdminUserID)
+	_, reply := inv.invokeAdmin("remove <@"+testOtherAdminID+">", testAdminTeamID, testAdminUserID)
 	if !strings.Contains(reply, "Removed <@"+testOtherAdminID+">") {
 		t.Errorf("reply missing success line: %q", reply)
 	}
@@ -452,7 +255,7 @@ func TestHandleAdminRemove_NotAdmin(t *testing.T) {
 	h := newAdminTestHandler(t, ts)
 	inv := newAdminSlashInvoker(t, h)
 
-	_, reply := inv.invokeAdmin("admin remove "+testTargetMention, testAdminTeamID, testAdminUserID)
+	_, reply := inv.invokeAdmin("remove "+testTargetMention, testAdminTeamID, testAdminUserID)
 	if !strings.Contains(reply, "isn't an admin") {
 		t.Errorf("reply missing idempotent surface: %q", reply)
 	}
@@ -469,7 +272,7 @@ func TestHandleAdminRemove_SelfRemoveRefused(t *testing.T) {
 	h := newAdminTestHandler(t, ts)
 	inv := newAdminSlashInvoker(t, h)
 
-	_, reply := inv.invokeAdmin("admin remove <@"+testAdminUserID+">", testAdminTeamID, testAdminUserID)
+	_, reply := inv.invokeAdmin("remove <@"+testAdminUserID+">", testAdminTeamID, testAdminUserID)
 	if !strings.Contains(reply, "can't remove yourself") {
 		t.Errorf("reply missing self-remove guard: %q", reply)
 	}
@@ -491,7 +294,7 @@ func TestHandleAdminRemove_OwnerRemoveRefused(t *testing.T) {
 	h := newAdminTestHandler(t, ts)
 	inv := newAdminSlashInvoker(t, h)
 
-	_, reply := inv.invokeAdmin("admin remove <@"+testAdminOwnerID+">", testAdminTeamID, testAdminUserID)
+	_, reply := inv.invokeAdmin("remove <@"+testAdminOwnerID+">", testAdminTeamID, testAdminUserID)
 	if !strings.Contains(reply, "connected qURL to this workspace") {
 		t.Errorf("reply missing owner-remove guard: %q", reply)
 	}
@@ -507,9 +310,392 @@ func TestHandleAdminRemove_NonAdminCaller(t *testing.T) {
 	h := newAdminTestHandler(t, ts)
 	inv := newAdminSlashInvoker(t, h)
 
-	_, reply := inv.invokeAdmin("admin remove "+testTargetMention, testAdminTeamID, testAdminUserID)
+	_, reply := inv.invokeAdmin("remove "+testTargetMention, testAdminTeamID, testAdminUserID)
 	if !strings.Contains(reply, "admin-only") {
 		t.Errorf("reply missing admin-only fence: %q", reply)
+	}
+}
+
+// --- Transfer ownership ---
+
+func TestHandleAdminTransferOwnership_OwnerSuccessMovesSetupGate(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedWorkspace(t, testAdminTeamID, testAdminOwnerID, testAdminOwnerID, testWorkspaceConfiguredAt)
+
+	h := newAdminTestHandler(t, ts)
+	h.cfg.SlackUserLookup = func(_ context.Context, teamID, enterpriseID, userID string) (bool, error) {
+		if teamID != testAdminTeamID || enterpriseID != "" || userID != testTargetUserID {
+			t.Fatalf("SlackUserLookup got teamID=%q enterpriseID=%q userID=%q", teamID, enterpriseID, userID)
+		}
+		return true, nil
+	}
+	inv := newAdminSlashInvoker(t, h)
+
+	_, reply := inv.invokeAdmin("transfer-ownership "+testTargetMention, testAdminTeamID, testAdminOwnerID)
+	if !strings.Contains(reply, "Transferred qURL workspace ownership to <@"+testTargetUserID+">") {
+		t.Fatalf("reply missing transfer success: %q", reply)
+	}
+	if !strings.Contains(reply, "They can now run `/qurl setup`") {
+		t.Fatalf("reply missing setup handoff: %q", reply)
+	}
+	if !ts.ddb.workspaceMappingHasAdmin(t, testAdminTeamID, testTargetUserID) {
+		t.Fatal("TransferOwnership did not add the new owner to admin_slack_user_ids")
+	}
+	ownerID, _, err := h.cfg.AdminStore.ListAdmins(context.Background(), testAdminTeamID)
+	if err != nil {
+		t.Fatalf("ListAdmins after transfer: %v", err)
+	}
+	if ownerID != testTargetUserID {
+		t.Fatalf("owner_id after transfer = %q, want %q", ownerID, testTargetUserID)
+	}
+
+	h.SetOAuthSetup(newTestOAuthSetupConfig())
+	oldOwner := slashResponseForWorkspaceUser(t, h, commandUser, "setup Admin+Setup@Example.COM", testAdminTeamID, testAdminOwnerID)
+	if text := oldOwner[respFieldText]; !strings.Contains(text, "can only be re-run") || !strings.Contains(text, "<@"+testTargetUserID+">") {
+		t.Fatalf("old owner setup reply missing new-owner gate: %q", text)
+	}
+	newOwner := slashResponseForWorkspaceUser(t, h, commandUser, "setup Admin+Setup@Example.COM", testAdminTeamID, testTargetUserID)
+	if text := newOwner[respFieldText]; !strings.Contains(text, "Continue setup") || !strings.Contains(text, "state=") {
+		t.Fatalf("new owner setup reply did not mint setup state: %q", text)
+	}
+}
+
+func TestHandleAdminTransferOwnership_EnterpriseIDPassedToLookup(t *testing.T) {
+	const enterpriseID = "EGRID001"
+	ts := newAdminTestServers(t)
+	ts.seedWorkspace(t, testAdminTeamID, testAdminOwnerID, testAdminOwnerID, testWorkspaceConfiguredAt)
+
+	h := newAdminTestHandler(t, ts)
+	h.cfg.SlackUserLookup = func(_ context.Context, teamID, gotEnterpriseID, userID string) (bool, error) {
+		if teamID != testAdminTeamID || gotEnterpriseID != enterpriseID || userID != testTargetUserID {
+			t.Fatalf("SlackUserLookup got teamID=%q enterpriseID=%q userID=%q", teamID, gotEnterpriseID, userID)
+		}
+		return true, nil
+	}
+	inv := newAdminSlashInvoker(t, h)
+	inv.enterpriseID = enterpriseID
+
+	_, reply := inv.invokeAdmin("transfer-ownership "+testTargetMention, testAdminTeamID, testAdminOwnerID)
+	if !strings.Contains(reply, "Transferred qURL workspace ownership") {
+		t.Fatalf("reply missing transfer success: %q", reply)
+	}
+}
+
+func TestHandleAdminTransferOwnership_RacedOwnerChangeReturnsOwnerOnly(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedWorkspace(t, testAdminTeamID, testAdminOwnerID, testAdminOwnerID, testWorkspaceConfiguredAt)
+	ts.ddb.SetUpdateItemErr(ts.tableNames.workspace, &ddbtypes.ConditionalCheckFailedException{Message: stringPtr("owner changed after gate")})
+
+	h := newAdminTestHandler(t, ts)
+	h.cfg.SlackUserLookup = func(_ context.Context, _, _, userID string) (bool, error) {
+		if userID != testTargetUserID {
+			t.Fatalf("SlackUserLookup userID = %q, want %q", userID, testTargetUserID)
+		}
+		return true, nil
+	}
+	inv := newAdminSlashInvoker(t, h)
+
+	_, reply := inv.invokeAdmin("transfer-ownership "+testTargetMention, testAdminTeamID, testAdminOwnerID)
+	if !strings.Contains(reply, "owner-only") || !strings.Contains(reply, "/qurl-admin admins") {
+		t.Fatalf("reply missing raced-owner surface: %q", reply)
+	}
+	ownerID, _, err := h.cfg.AdminStore.ListAdmins(context.Background(), testAdminTeamID)
+	if err != nil {
+		t.Fatalf("ListAdmins after raced owner transfer: %v", err)
+	}
+	if ownerID != testAdminOwnerID {
+		t.Fatalf("owner_id changed after raced owner transfer = %q, want %q", ownerID, testAdminOwnerID)
+	}
+}
+
+func TestHandleAdminTransferOwnership_OwnerOffAdminSetKeepsOldOwnerAdmin(t *testing.T) {
+	ts := newAdminTestServers(t)
+	// Legacy/self-healed rows can grant the owner admin rights through owner_id
+	// even when admin_slack_user_ids no longer contains them.
+	ts.seedWorkspace(t, testAdminTeamID, testAdminOwnerID, testOtherAdminID, testWorkspaceConfiguredAt)
+
+	h := newAdminTestHandler(t, ts)
+	h.cfg.SlackUserLookup = func(_ context.Context, _, _, userID string) (bool, error) {
+		if userID != testTargetUserID {
+			t.Fatalf("SlackUserLookup userID = %q, want %q", userID, testTargetUserID)
+		}
+		return true, nil
+	}
+	inv := newAdminSlashInvoker(t, h)
+
+	_, reply := inv.invokeAdmin("transfer-ownership "+testTargetMention, testAdminTeamID, testAdminOwnerID)
+	if !strings.Contains(reply, "Transferred qURL workspace ownership") {
+		t.Fatalf("reply missing transfer success: %q", reply)
+	}
+	if !ts.ddb.workspaceMappingHasAdmin(t, testAdminTeamID, testAdminOwnerID) {
+		t.Fatal("TransferOwnership did not preserve the old owner in admin_slack_user_ids")
+	}
+	if !ts.ddb.workspaceMappingHasAdmin(t, testAdminTeamID, testTargetUserID) {
+		t.Fatal("TransferOwnership did not add the new owner to admin_slack_user_ids")
+	}
+}
+
+func TestHandleAdminTransferOwnership_SelfTransferNoops(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedWorkspace(t, testAdminTeamID, testAdminOwnerID, testAdminOwnerID, testWorkspaceConfiguredAt)
+	ts.failOnAdminMutation(t, "self-transfer should bail before TransferOwnership")
+
+	h := newAdminTestHandler(t, ts)
+	h.cfg.SlackUserLookup = func(context.Context, string, string, string) (bool, error) {
+		t.Fatal("SlackUserLookup should not run for self-transfer")
+		return false, nil
+	}
+	inv := newAdminSlashInvoker(t, h)
+
+	_, reply := inv.invokeAdmin("transfer-ownership <@"+testAdminOwnerID+">", testAdminTeamID, testAdminOwnerID)
+	if !strings.Contains(reply, "You're already the workspace owner") {
+		t.Fatalf("reply missing self-transfer surface: %q", reply)
+	}
+	ownerID, _, err := h.cfg.AdminStore.ListAdmins(context.Background(), testAdminTeamID)
+	if err != nil {
+		t.Fatalf("ListAdmins after self-transfer: %v", err)
+	}
+	if ownerID != testAdminOwnerID {
+		t.Fatalf("owner_id changed after self-transfer = %q, want %q", ownerID, testAdminOwnerID)
+	}
+}
+
+func TestHandleAdminTransferOwnership_LookupUnconfiguredRejected(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedWorkspace(t, testAdminTeamID, testAdminOwnerID, testAdminOwnerID, testWorkspaceConfiguredAt)
+	ts.failOnAdminMutation(t, "nil SlackUserLookup should fail before TransferOwnership")
+
+	h := newAdminTestHandler(t, ts)
+	h.cfg.SlackUserLookup = nil
+	inv := newAdminSlashInvoker(t, h)
+
+	_, reply := inv.invokeAdmin("transfer-ownership "+testTargetMention, testAdminTeamID, testAdminOwnerID)
+	if !strings.Contains(reply, "Contact your Slack admin") {
+		t.Fatalf("reply missing nil-lookup surface: %q", reply)
+	}
+	ownerID, _, err := h.cfg.AdminStore.ListAdmins(context.Background(), testAdminTeamID)
+	if err != nil {
+		t.Fatalf("ListAdmins after nil lookup: %v", err)
+	}
+	if ownerID != testAdminOwnerID {
+		t.Fatalf("owner_id changed after nil lookup = %q, want %q", ownerID, testAdminOwnerID)
+	}
+}
+
+func TestHandleAdminTransferOwnership_NonOwnerAdminRefused(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	ts.failOnAdminMutation(t, "non-owner admin should be gated before TransferOwnership")
+
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	_, reply := inv.invokeAdmin("transfer-ownership "+testTargetMention, testAdminTeamID, testAdminUserID)
+	if !strings.Contains(reply, "owner-only") {
+		t.Fatalf("reply missing owner-only fence: %q", reply)
+	}
+	ownerID, _, err := h.cfg.AdminStore.ListAdmins(context.Background(), testAdminTeamID)
+	if err != nil {
+		t.Fatalf("ListAdmins after refused transfer: %v", err)
+	}
+	if ownerID != testAdminOwnerID {
+		t.Fatalf("owner_id changed after refused transfer = %q, want %q", ownerID, testAdminOwnerID)
+	}
+}
+
+func TestHandleAdminTransferOwnership_WorkspaceNotBound(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.failOnAdminMutation(t, "unbound workspace should fail before TransferOwnership")
+
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	_, reply := inv.invokeAdmin("transfer-ownership "+testTargetMention, testAdminTeamID, testAdminOwnerID)
+	if !strings.Contains(reply, "Workspace isn't bound") || !strings.Contains(reply, "/qurl setup") {
+		t.Fatalf("reply missing workspace-not-bound setup hint: %q", reply)
+	}
+}
+
+func TestHandleAdminTransferOwnership_LegacyOwnerIDRequiresSetupRefresh(t *testing.T) {
+	const legacyOwnerID = "auth0|legacy-owner"
+	ts := newAdminTestServers(t)
+	ts.seedWorkspace(t, testAdminTeamID, legacyOwnerID, testAdminOwnerID, testWorkspaceConfiguredAt)
+	ts.failOnAdminMutation(t, "legacy owner_id should fail before TransferOwnership")
+
+	h := newAdminTestHandler(t, ts)
+	h.cfg.SlackUserLookup = func(context.Context, string, string, string) (bool, error) {
+		t.Fatal("SlackUserLookup should not run for legacy owner_id")
+		return false, nil
+	}
+	inv := newAdminSlashInvoker(t, h)
+
+	_, reply := inv.invokeAdmin("transfer-ownership "+testTargetMention, testAdminTeamID, testAdminOwnerID)
+	if !strings.Contains(reply, "legacy workspace ownership record") || !strings.Contains(reply, "/qurl setup") {
+		t.Fatalf("reply missing legacy-owner setup hint: %q", reply)
+	}
+	if strings.Contains(reply, legacyOwnerID) || strings.Contains(reply, "owner-only") {
+		t.Fatalf("reply leaked legacy owner or used generic owner-only copy: %q", reply)
+	}
+	ownerID, _, err := h.cfg.AdminStore.ListAdmins(context.Background(), testAdminTeamID)
+	if err != nil {
+		t.Fatalf("ListAdmins after legacy owner_id: %v", err)
+	}
+	if ownerID != legacyOwnerID {
+		t.Fatalf("owner_id changed after legacy owner_id refusal = %q, want %q", ownerID, legacyOwnerID)
+	}
+}
+
+func TestHandleAdminTransferOwnership_BadTargetRejected(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedWorkspace(t, testAdminTeamID, testAdminOwnerID, testAdminOwnerID, testWorkspaceConfiguredAt)
+	ts.failOnAdminMutation(t, "bad target should fail before TransferOwnership")
+
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	_, reply := inv.invokeAdmin("transfer-ownership someone", testAdminTeamID, testAdminOwnerID)
+	if !strings.Contains(reply, "invalid @user mention") {
+		t.Fatalf("reply missing bad-target parser surface: %q", reply)
+	}
+	ownerID, _, err := h.cfg.AdminStore.ListAdmins(context.Background(), testAdminTeamID)
+	if err != nil {
+		t.Fatalf("ListAdmins after bad target: %v", err)
+	}
+	if ownerID != testAdminOwnerID {
+		t.Fatalf("owner_id changed after bad target = %q, want %q", ownerID, testAdminOwnerID)
+	}
+}
+
+func TestHandleAdminTransferOwnership_UnknownTargetRejected(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedWorkspace(t, testAdminTeamID, testAdminOwnerID, testAdminOwnerID, testWorkspaceConfiguredAt)
+	ts.failOnAdminMutation(t, "unknown target should fail before TransferOwnership")
+	var logBuf bytes.Buffer
+	prevLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(prevLogger) })
+
+	h := newAdminTestHandler(t, ts)
+	h.cfg.SlackUserLookup = func(_ context.Context, _, _, userID string) (bool, error) {
+		if userID != testTargetUserID {
+			t.Fatalf("SlackUserLookup userID = %q, want %q", userID, testTargetUserID)
+		}
+		return false, nil
+	}
+	inv := newAdminSlashInvoker(t, h)
+
+	_, reply := inv.invokeAdmin("transfer-ownership "+testTargetMention, testAdminTeamID, testAdminOwnerID)
+	if !strings.Contains(reply, "couldn't verify <@"+testTargetUserID+"> as an active Slack user visible to this app") {
+		t.Fatalf("reply missing unknown-target surface: %q", reply)
+	}
+	if logs := logBuf.String(); !strings.Contains(logs, "target user lookup rejected target") || !strings.Contains(logs, testTargetUserID) {
+		t.Fatalf("rejected target log missing detail: %q", logs)
+	}
+	ownerID, _, err := h.cfg.AdminStore.ListAdmins(context.Background(), testAdminTeamID)
+	if err != nil {
+		t.Fatalf("ListAdmins after unknown target: %v", err)
+	}
+	if ownerID != testAdminOwnerID {
+		t.Fatalf("owner_id changed after unknown target = %q, want %q", ownerID, testAdminOwnerID)
+	}
+}
+
+func TestHandleAdminTransferOwnership_LookupTransientErrorRejected(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedWorkspace(t, testAdminTeamID, testAdminOwnerID, testAdminOwnerID, testWorkspaceConfiguredAt)
+	ts.failOnAdminMutation(t, "transient target lookup error should fail before TransferOwnership")
+
+	h := newAdminTestHandler(t, ts)
+	h.cfg.SlackUserLookup = func(_ context.Context, _, _, userID string) (bool, error) {
+		if userID != testTargetUserID {
+			t.Fatalf("SlackUserLookup userID = %q, want %q", userID, testTargetUserID)
+		}
+		return false, errors.New("slack temporary failure")
+	}
+	inv := newAdminSlashInvoker(t, h)
+
+	_, reply := inv.invokeAdmin("transfer-ownership "+testTargetMention, testAdminTeamID, testAdminOwnerID)
+	if !strings.Contains(reply, "Retry in a moment") {
+		t.Fatalf("reply missing transient lookup surface: %q", reply)
+	}
+	ownerID, _, err := h.cfg.AdminStore.ListAdmins(context.Background(), testAdminTeamID)
+	if err != nil {
+		t.Fatalf("ListAdmins after transient target lookup: %v", err)
+	}
+	if ownerID != testAdminOwnerID {
+		t.Fatalf("owner_id changed after transient target lookup = %q, want %q", ownerID, testAdminOwnerID)
+	}
+}
+
+func TestHandleAdminTransferOwnership_MissingUsersReadScopeRejected(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedWorkspace(t, testAdminTeamID, testAdminOwnerID, testAdminOwnerID, testWorkspaceConfiguredAt)
+	ts.failOnAdminMutation(t, "missing users:read should fail before TransferOwnership")
+
+	h := newAdminTestHandler(t, ts)
+	h.cfg.SlackUserLookup = func(_ context.Context, _, _, userID string) (bool, error) {
+		if userID != testTargetUserID {
+			t.Fatalf("SlackUserLookup userID = %q, want %q", userID, testTargetUserID)
+		}
+		return false, ErrSlackMissingScope
+	}
+	inv := newAdminSlashInvoker(t, h)
+
+	_, reply := inv.invokeAdmin("transfer-ownership "+testTargetMention, testAdminTeamID, testAdminOwnerID)
+	if !strings.Contains(reply, "Reinstall the Slack app") || !strings.Contains(reply, "users:read") {
+		t.Fatalf("reply missing reinstall/users:read surface: %q", reply)
+	}
+	ownerID, _, err := h.cfg.AdminStore.ListAdmins(context.Background(), testAdminTeamID)
+	if err != nil {
+		t.Fatalf("ListAdmins after missing-scope target lookup: %v", err)
+	}
+	if ownerID != testAdminOwnerID {
+		t.Fatalf("owner_id changed after missing-scope target lookup = %q, want %q", ownerID, testAdminOwnerID)
+	}
+}
+
+func TestHandleAdminTransferOwnership_MissingSlackBotTokenRejected(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedWorkspace(t, testAdminTeamID, testAdminOwnerID, testAdminOwnerID, testWorkspaceConfiguredAt)
+	ts.failOnAdminMutation(t, "missing Slack bot token should fail before TransferOwnership")
+
+	h := newAdminTestHandler(t, ts)
+	h.cfg.SlackUserLookup = func(_ context.Context, _, _, userID string) (bool, error) {
+		if userID != testTargetUserID {
+			t.Fatalf("SlackUserLookup userID = %q, want %q", userID, testTargetUserID)
+		}
+		return false, auth.ErrSlackBotTokenNotConfigured
+	}
+	inv := newAdminSlashInvoker(t, h)
+
+	_, reply := inv.invokeAdmin("transfer-ownership "+testTargetMention, testAdminTeamID, testAdminOwnerID)
+	if !strings.Contains(reply, "Reinstall the Slack app") || strings.Contains(reply, "Retry in a moment") {
+		t.Fatalf("reply missing reinstall/not-transient surface: %q", reply)
+	}
+	ownerID, _, err := h.cfg.AdminStore.ListAdmins(context.Background(), testAdminTeamID)
+	if err != nil {
+		t.Fatalf("ListAdmins after missing-token target lookup: %v", err)
+	}
+	if ownerID != testAdminOwnerID {
+		t.Fatalf("owner_id changed after missing-token target lookup = %q, want %q", ownerID, testAdminOwnerID)
+	}
+}
+
+func TestTransferOwnership_BadTargetShapeRejected(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedWorkspace(t, testAdminTeamID, testAdminOwnerID, testAdminOwnerID, testWorkspaceConfiguredAt)
+	store := newStoreFromFake(t, ts.ddb, ts.tableNames, nil)
+
+	err := store.TransferOwnership(context.Background(), testAdminTeamID, testAdminOwnerID, "not-a-slack-user")
+	if err == nil {
+		t.Fatal("TransferOwnership accepted a shape-bad target")
+	}
+	ownerID, _, listErr := store.ListAdmins(context.Background(), testAdminTeamID)
+	if listErr != nil {
+		t.Fatalf("ListAdmins after bad target: %v", listErr)
+	}
+	if ownerID != testAdminOwnerID {
+		t.Fatalf("owner_id changed after store bad target = %q, want %q", ownerID, testAdminOwnerID)
 	}
 }
 
@@ -819,68 +1005,27 @@ func TestRemoveAdmin_Concurrent(t *testing.T) {
 
 // --- Dispatch-shell tests ---
 
-// TestHandleAdmin_BareAdminVerb fences the bare `admin` form — a
-// parser error surfaced as the action-roster usage hint, not a panic
-// in the verb-dispatch switch or the terse "missing admin action"
-// sentinel.
-func TestHandleAdmin_BareAdminVerb(t *testing.T) {
+// TestHandleAdmin_LegacyAdminPrefixRedirects fences the deprecated `admin
+// <verb>` prefix: bare `admin` and `admin <verb> ...` both get a one-line
+// redirect pointing at the flat verbs (the `admin` word is redundant on an
+// already-admin command), not a panic in the verb-dispatch switch.
+func TestHandleAdmin_LegacyAdminPrefixRedirects(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
 
 	h := newAdminTestHandler(t, ts)
 	inv := newAdminSlashInvoker(t, h)
 
-	_, reply := inv.invokeAdmin("admin", testAdminTeamID, testAdminUserID)
-	if !strings.Contains(reply, ":warning:") {
-		t.Errorf("reply missing parser-error surface: %q", reply)
-	}
-	// The bare-admin hint lists the available actions rather than echoing
-	// the terse sentinel, so the user learns the grammar.
-	for _, want := range []string{"admin add", "admin remove", "admin list", "admin revoke"} {
-		if !strings.Contains(reply, want) {
-			t.Errorf("bare-admin hint missing %q: %q", want, reply)
+	for _, text := range []string{"admin", "admin add <@U12345678>"} {
+		_, reply := inv.invokeAdmin(text, testAdminTeamID, testAdminUserID)
+		if !strings.Contains(reply, "isn't needed") {
+			t.Errorf("%q: reply missing the prefix-deprecation redirect: %q", text, reply)
 		}
-	}
-}
-
-// TestAdminRosters_InSync is the drift guard for the two independently
-// maintained admin-action rosters: adminUsageMessage (the bare-`admin` arg
-// hint, handler_admin.go) and the `/qurl-admin help` listing (adminHelpMessage,
-// handler.go). A cross-reference comment can't enforce parity, so this fails
-// CI if a future admin action is added to (or dropped from) one roster but not
-// the other.
-func TestAdminRosters_InSync(t *testing.T) {
-	h := newTestHandler(t, noopQURLServer(t))
-	// adminHelpMessage gates the admin add/remove/list/revoke lines on
-	// AdminStore (the same condition the verbs use at runtime), so seed it.
-	seedAliasAdminGate(t, h, testAliasTeamID)
-	help := h.adminHelpMessage(commandAdmin)
-
-	// Both rosters render each action as `<cmd> admin <verb>`, and <cmd> itself
-	// ends in `-admin`, so the verb is the token right after `admin admin`.
-	// That anchor skips the trailing `(admin only)` and the set-display-name
-	// lines, which contain a single `admin` only.
-	re := regexp.MustCompile(`admin admin (\w+)`)
-	extract := func(s string) map[string]bool {
-		set := map[string]bool{}
-		for _, m := range re.FindAllStringSubmatch(s, -1) {
-			set[m[1]] = true
-		}
-		return set
-	}
-	hint, listing := extract(adminUsageMessage), extract(help)
-
-	if len(hint) == 0 || len(listing) == 0 {
-		t.Fatalf("extracted empty action set (hint=%v listing=%v) — a roster's `<cmd> admin <verb>` shape drifted", hint, listing)
-	}
-	for v := range hint {
-		if !listing[v] {
-			t.Errorf("bare-`admin` hint lists action %q that `/qurl-admin help` omits — rosters out of sync", v)
-		}
-	}
-	for v := range listing {
-		if !hint[v] {
-			t.Errorf("`/qurl-admin help` lists action %q that the bare-`admin` hint omits — rosters out of sync", v)
+		// The redirect names the flat verbs so the user learns the new grammar.
+		for _, want := range []string{adminVerbAdd + " @user", adminVerbRemove + " @user", adminVerbTransferOwnership + " @user", testAdminListCmd, string(SubcmdRevoke) + " $<id>"} {
+			if !strings.Contains(reply, want) {
+				t.Errorf("%q: redirect missing flat verb %q: %q", text, want, reply)
+			}
 		}
 	}
 }
@@ -895,26 +1040,96 @@ func TestHandleAdmin_AdminStoreUnconfigured(t *testing.T) {
 	// admin dispatch hits the nil-guard.
 
 	inv := newAdminSlashInvoker(t, h)
-	_, reply := inv.invokeAdmin(testAdminListCmd, testAdminTeamID, testAdminUserID)
-	if !strings.Contains(reply, "not configured") {
-		t.Errorf("reply missing not-configured surface: %q", reply)
+	for _, text := range []string{testAdminListCmd, "transfer-ownership " + testTargetMention} {
+		_, reply := inv.invokeAdmin(text, testAdminTeamID, testAdminUserID)
+		if !strings.Contains(reply, "not configured") {
+			t.Errorf("%q: reply missing not-configured surface: %q", text, reply)
+		}
 	}
 }
 
-// TestHandleAdminRevoke_RejectsAliasShape fences the parser
-// distinction: `admin revoke $alias` is wrong-grammar and the reply
-// must surface a parser hint rather than silently trying to resolve
-// the alias.
-func TestHandleAdminRevoke_RejectsAliasShape(t *testing.T) {
-	ts := newAdminTestServers(t)
-	ts.seedAdmin(t)
+// TestAdminHelpReflectsFlatVerbs pins the command-cleanup contract on the
+// `/qurl-admin help` text: no redundant "(admin only)" labels; the membership
+// + revoke verbs are flat (no `admin` sub-word); listing admins is `admins`;
+// revoke is resource-scoped via `$<id>`; and id references carry the `$`
+// sigil. newAliasTestHandler wires both aliasStore and AdminStore, so every
+// gated help line renders.
+// TestAdminHelpGroupsVerbsUnderSections fences the categorized layout: the
+// admin help renders its verbs under the four bold section headers instead of
+// one flat bullet list. newAliasTestHandler wires aliasStore + AdminStore, so
+// every section's gate passes and all four headers render. A regression that
+// dropped a header (or flattened the grouping) fails here.
+func TestAdminHelpGroupsVerbsUnderSections(t *testing.T) {
+	h, _ := newAliasTestHandler(t)
+	help := h.adminHelpMessage(commandAdmin)
 
-	h := newAdminTestHandler(t, ts)
-	inv := newAdminSlashInvoker(t, h)
+	for _, want := range []string{
+		"*Protect resources*",
+		"*Aliases*",
+		"*Manage resources*",
+		"*Admins*",
+	} {
+		if !strings.Contains(help, want) {
+			t.Errorf("admin help missing section header %q:\n%s", want, help)
+		}
+	}
+}
 
-	_, reply := inv.invokeAdmin("admin revoke $prod-db", testAdminTeamID, testAdminUserID)
-	if !strings.Contains(reply, "q_<id>") && !strings.Contains(reply, "qurl_id") {
-		t.Errorf("reply must guide user toward the qurl_id form: %q", reply)
+// TestAdminHelpOmitsSectionHeadersWhenUnwired fences the "never render an empty
+// header" invariant the adminHelpMessage section comments lean on: with neither
+// aliasStore nor AdminStore wired, none of the four section headers appear — a
+// no-store deploy renders only the title and the always-present help anchor.
+// newTestHandler wires neither store, so it exercises that path directly.
+func TestAdminHelpOmitsSectionHeadersWhenUnwired(t *testing.T) {
+	h := newTestHandler(t, noopQURLServer(t))
+	help := h.adminHelpMessage(commandAdmin)
+
+	for _, absent := range []string{
+		"*Protect resources*",
+		"*Aliases*",
+		"*Manage resources*",
+		"*Admins*",
+	} {
+		if strings.Contains(help, absent) {
+			t.Errorf("unwired admin help leaked section header %q:\n%s", absent, help)
+		}
+	}
+}
+
+func TestAdminHelpReflectsFlatVerbs(t *testing.T) {
+	h, _ := newAliasTestHandler(t)
+	help := h.adminHelpMessage(commandAdmin)
+
+	if strings.Contains(help, "(admin only)") {
+		t.Errorf("admin help still carries the redundant (admin only) label:\n%s", help)
+	}
+	for _, want := range []string{
+		"/qurl-admin add @user",
+		"/qurl-admin remove @user",
+		"/qurl-admin transfer-ownership @user",
+		"/qurl-admin admins",
+		"/qurl-admin revoke $<id>",
+		"/qurl-admin set-display-name $<id>",
+		"/qurl-admin unset-display-name $<id>",
+	} {
+		if !strings.Contains(help, want) {
+			t.Errorf("admin help missing %q:\n%s", want, help)
+		}
+	}
+	// The old `<cmd> admin <verb>` membership grammar and the per-link
+	// `qurl_id` revoke must be gone. Match the precise old forms — a bare
+	// "admin add" substring would false-positive on "/qurl-admin add" (and
+	// "admin admin" on "/qurl-admin admins").
+	for _, gone := range []string{
+		"/qurl-admin admin add",
+		"/qurl-admin admin remove",
+		"/qurl-admin admin list",
+		"/qurl-admin admin revoke",
+		"qurl_id",
+	} {
+		if strings.Contains(help, gone) {
+			t.Errorf("admin help still references removed grammar %q:\n%s", gone, help)
+		}
 	}
 }
 
@@ -994,15 +1209,12 @@ func TestHandleSlashCommand_AdminOvermatchRejected(t *testing.T) {
 	}
 }
 
-// TestLooksLikeSlackUserID_MatchesUserMentionPattern pins the bounds
-// contract between the handler-side `looksLikeSlackUserID` defensive
-// guard and the parser-side `userMentionPattern`. Both gates have to
-// agree: a value rejected by the parser (write path) must also be
-// rejected by the handler (read path), otherwise an admin write
-// stops at parse time but the corresponding render breaks out of
-// the mention surface. Drift in either direction is silent without
-// this fence.
-func TestLooksLikeSlackUserID_MatchesUserMentionPattern(t *testing.T) {
+// TestSlackDataUserIDShape_MatchesUserMentionPattern pins the bounds
+// contract between the store-owned Slack-ID shape check and the parser-side
+// userMentionPattern. Both gates have to agree: a value rejected by the parser
+// (write path) must also be rejected before read-side mrkdwn mention rendering.
+// Drift in either direction is silent without this fence.
+func TestSlackDataUserIDShape_MatchesUserMentionPattern(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		name string
@@ -1021,10 +1233,10 @@ func TestLooksLikeSlackUserID_MatchesUserMentionPattern(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			handlerOK := looksLikeSlackUserID(tc.id)
+			storeOK := slackdata.LooksLikeSlackUserID(tc.id)
 			parserOK := userMentionPattern.MatchString("<@" + tc.id + ">")
-			if handlerOK != parserOK {
-				t.Errorf("drift on %q: looksLikeSlackUserID=%v, userMentionPattern=%v", tc.id, handlerOK, parserOK)
+			if storeOK != parserOK {
+				t.Errorf("drift on %q: LooksLikeSlackUserID=%v, userMentionPattern=%v", tc.id, storeOK, parserOK)
 			}
 		})
 	}
@@ -1042,19 +1254,13 @@ func TestLooksLikeSlackUserID_MatchesUserMentionPattern(t *testing.T) {
 func TestHandleSetup_OwnerGate(t *testing.T) {
 	const (
 		// Use the test-suite constants from admin_test_helpers_test.go.
-		owner    = testAdminOwnerID // UOWNER001 (matches looksLikeSlackUserID).
+		owner    = testAdminOwnerID // UOWNER001 (matches slackdata.LooksLikeSlackUserID).
 		stranger = "USTRANGER000"   // Different Slack user — non-owner caller.
 		team     = testAdminTeamID  // T_team
 	)
-	const slackBaseURL = "https://slack-bot.example"
-	stateSecret := []byte("0123456789abcdef0123456789abcdef") // 32 bytes.
-
 	wireSetup := func(t *testing.T, h *Handler) {
 		t.Helper()
-		h.SetOAuthSetup(oauth.SetupConfig{
-			StateSecret:  stateSecret,
-			SlackBaseURL: slackBaseURL,
-		})
+		h.SetOAuthSetup(newTestOAuthSetupConfig())
 	}
 
 	invokeSetup := func(t *testing.T, h *Handler, userID string) string {
@@ -1087,20 +1293,20 @@ func TestHandleSetup_OwnerGate(t *testing.T) {
 		}
 	})
 
-	t.Run("AdminStore nil (sandbox/no-DDB): owner gate skipped, setup URL minted", func(t *testing.T) {
+	t.Run("AdminStore nil: normal setup URL minted", func(t *testing.T) {
 		ts := newAdminTestServers(t)
 		h := newAdminTestHandler(t, ts)
 		wireSetup(t, h)
-		// Sandbox / no-DDB posture: with AdminStore unset the owner gate
-		// is skipped entirely and /setup mints unconditionally, same as a
-		// fresh install. Null the store after construction to exercise that
-		// short-circuit (mirrors the sandbox cmd/main.go wiring). Even a
-		// non-owner (stranger) must get a URL since the gate never runs.
+		// Admin-storage-disabled posture: normal /setup still mints without an
+		// AdminStore, same as a fresh install. Null the store after construction
+		// to exercise that short-circuit (mirrors the sandbox cmd/main.go
+		// wiring). Explicit rotation is rejected separately because it must not
+		// skip the owner gate before revoking a stored key.
 		h.cfg.AdminStore = nil
 
 		got := invokeSetup(t, h, stranger)
 		if !strings.Contains(got, "/oauth/qurl/start?state=") {
-			t.Errorf("AdminStore nil: expected setup URL (owner gate must be skipped), got: %q", got)
+			t.Errorf("AdminStore nil: expected setup URL, got: %q", got)
 		}
 	})
 
@@ -1146,6 +1352,29 @@ func TestHandleSetup_OwnerGate(t *testing.T) {
 		// new framing stays.
 		if !strings.Contains(got, "connected qURL") {
 			t.Errorf("non-owner: reply missing 'connected qURL' framing for clarity, got: %q", got)
+		}
+	})
+
+	t.Run("non-owner refusals do not consume setup-link quota", func(t *testing.T) {
+		ts := newAdminTestServers(t)
+		ts.seedAdmin(t)
+		h := newAdminTestHandler(t, ts)
+		wireSetup(t, h)
+
+		for i := 0; i < setupLinkRateLimitMax; i++ {
+			got := invokeSetup(t, h, stranger)
+			if strings.Contains(got, "/oauth/qurl/start?state=") {
+				t.Fatalf("non-owner attempt %d minted setup URL: %q", i+1, got)
+			}
+			if strings.Contains(got, "generated several qURL setup links") {
+				t.Fatalf("non-owner attempt %d burned setup-link quota before owner gate: %q", i+1, got)
+			}
+		}
+
+		ts.seedWorkspace(t, team, stranger, stranger, testWorkspaceConfiguredAt.Add(time.Minute))
+		got := invokeSetup(t, h, stranger)
+		if !strings.Contains(got, "/oauth/qurl/start?state=") {
+			t.Fatalf("same caller after becoming owner should not be setup-link limited, got: %q", got)
 		}
 	})
 
@@ -1209,10 +1438,10 @@ func TestHandleSetup_OwnerGate(t *testing.T) {
 		// Workspace is bound, but the owner-gate's CheckAdmin read
 		// fails (transient DDB). The gate is security-relevant, so it
 		// must fail CLOSED: surface the upstream-error reply and do NOT
-		// fall through to mint a setup URL. Mirrors
-		// TestHandleAdminRevoke_CheckAdminError for the admin verbs.
+		// fall through to mint a setup URL. Mirrors the requireAdminSync
+		// fail-closed posture the membership verbs share.
 		ts.seedAdmin(t)
-		ts.ddb.SetGetItemErr(ts.tableNames.workspace, errString("injected DDB transient"))
+		ts.ddb.SetGetItemErr(ts.tableNames.workspace, errors.New("injected DDB transient"))
 		h := newAdminTestHandler(t, ts)
 		wireSetup(t, h)
 
@@ -1231,7 +1460,7 @@ func TestHandleSetup_OwnerGate(t *testing.T) {
 		// admin set. UADMIN001 is an "admin" (can run /qurl admin
 		// list/add/remove/revoke + tunnel etc.) but is NOT the owner.
 		// /setup must refuse them — this is the load-bearing
-		// safeguard against admins rotating the workspace credential.
+		// safeguard against admins re-pointing the workspace credential.
 		ts.seedAdmin(t)
 		h := newAdminTestHandler(t, ts)
 		wireSetup(t, h)

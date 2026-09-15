@@ -40,10 +40,6 @@
  *   9. Run `/qurl status` — confirm it shows the key prefix.
  */
 
-import * as dotenv from 'dotenv';
-import * as path from 'path';
-dotenv.config({ path: path.resolve(__dirname, '..', '.env') });
-
 import { loadOptionalEnv } from '../helpers/env';
 
 const optEnv = loadOptionalEnv();

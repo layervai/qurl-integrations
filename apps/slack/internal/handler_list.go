@@ -15,41 +15,44 @@ import (
 	"github.com/layervai/qurl-integrations/shared/client"
 )
 
-// listResourcesScanLimit is the page size for the single
-// `/v1/resources` fetch backing both `/qurl list` and `/qurl aliases`
-// (the latter joins the page against the channel's alias_bindings by
-// resource_id — see [resourcesByResourceID]). `/qurl list` shows only
-// tunnel resources, but the API has no server-side type filter, so the
-// tunnel filter runs client-side on the fetched page. We over-fetch
-// (the server's max) rather than page to a small display target: a
-// 10-row page could surface zero tunnels in a URL-heavy workspace even
-// when tunnels exist, hiding the very thing the command is for. One
-// generous page keeps the command single-request while making the
-// client-side tunnel filter reliable; tunnel resources are created
-// deliberately (via `/qurl-admin tunnel install`) so a real workspace has few
-// of them, well within Slack's ephemeral-message budget. Bumping this
-// affects both commands.
+// listResourcesScanLimit is the per-page size for the `/v1/resources` fetches
+// backing `/qurl list`, `/qurl aliases`, and the URL resource-alias fallback in
+// `/qurl get`.
 //
-// A server-side `type=tunnel` filter (tracked in #531) would let this
-// drop to a normal page size and make `page.HasMore` mean "more
-// tunnels" rather than "more resources of any type" — see the footer
-// caveat in [Handler.processListResources] and the same caveat on the
-// `/qurl aliases` triage warning in [Handler.processAliases].
+//   - `/qurl list` pages through resources until every resource in the channel
+//     allow-set has been seen (see [Handler.fetchAllowedResources]) — tunnels
+//     and URL resources alike — so the listing is complete regardless of how the
+//     owner's full resource set sorts (#590). The page size only affects how many
+//     requests that walk takes, not which resources render.
+//   - `/qurl aliases` and the `/qurl get` URL resource-alias fallback each scan
+//     a SINGLE page. A bound/aliased resource_id past this page surfaces the
+//     triage warning in [Handler.processAliases] (aliases) or is missed by the
+//     get fallback / duplicate-alias ambiguity check (#590). A server-side type
+//     filter (tracked in #531) would let those single-page surfaces drop to a
+//     normal size.
 const listResourcesScanLimit = 100
 
-// listTunnelsEmptyMessage is the friendly empty-state copy for a
-// workspace with zero tunnels. `/qurl-admin tunnel install` is admin-only,
-// so the copy names the command without imperatively telling every
-// member to run it — a non-admin reading this is routed implicitly to
-// their Slack admin. Post-revert of #234 (#459) `/qurl list` no longer
-// probes admin status, so there is a single empty-state for everyone
-// rather than the old admin/non-admin branch.
-const listTunnelsEmptyMessage = ":mag: No tunnels found in this workspace. A Slack admin can set one up with `/qurl-admin tunnel install <id>`."
+const (
+	// listResourcesEmptyMessage is the friendly empty-state copy when no
+	// protected resource is available in THIS channel. It avoids admin-only
+	// tunnel setup terminology for ordinary users.
+	listResourcesEmptyMessage = ":mag: No protected resources are available in this channel yet. Ask a Slack admin to set one up or make one available here."
+
+	// listResourcesEmptyAdminMessage is shown only after a successful admin
+	// check, so it can name the admin-only setup command and Edit recovery path.
+	listResourcesEmptyAdminMessage = ":mag: No protected resources are available in this channel yet. Install one here with `/qurl-admin protect-connector <id>`, or make an existing resource available here from `/qurl list` → *Edit* in a channel where it already appears."
+)
 
 // listCreateButtonLabel is the text on the per-row "Create qURL" button.
-// Clicking it mints a one-time qURL for that row's tunnel — the same work
+// Clicking it creates a qURL for that row's resource — the same work
 // as typing `/qurl get $<slug>`. (Brand spelling: lowercase q, uppercase URL.)
 const listCreateButtonLabel = "Create qURL"
+
+// listHeaderBlockText titles the interactive /qurl list. It rides on a `header`
+// block, whose text object is plain_text — so the `:lock:` shortcode renders as
+// an icon but there is no mrkdwn bold. The bold "*Protected Resources:*"
+// form still leads the plain-text fallback `body`.
+const listHeaderBlockText = ":lock: Protected Resources"
 
 // listCreateButtonMaxRows caps how many tunnel rows /qurl list renders as
 // interactive section+button blocks. Slack rejects a message with more
@@ -70,10 +73,15 @@ const listCreateButtonLabel = "Create qURL"
 const listCreateButtonMaxRows = 45
 
 // listEditButtonLabel is the text on the admin-only "Edit" button rendered
-// alongside "Create qURL" on each `/qurl list` row for qURL bot admins.
+// alongside "Create qURL" on each `/qurl list` row for qURL admins.
 // Clicking it opens the TunnelEditModal pre-filled with the tunnel's Display
 // Name and channel aliases.
 const listEditButtonLabel = "Edit"
+
+// listRevokeButtonLabel is the text on the admin-only red "Revoke" button
+// rendered beside "Edit" on each `/qurl list` row. Clicking it (after the
+// confirm dialog) revokes the row's resource and all of its qURLs.
+const listRevokeButtonLabel = "Revoke"
 
 // listEditButtonMaxRows caps how many rows may carry the per-row Edit button.
 // An admin row renders TWO blocks (a section line + an actions block carrying
@@ -97,7 +105,7 @@ const listEditButtonMaxRows = listCreateButtonMaxRows / 2
 const slackButtonValueMaxBytes = 2000
 
 const (
-	commonListResourcesFailedPrefix = "Failed to list qURL tunnels"
+	commonListResourcesFailedPrefix = "Failed to list qURL resources"
 	listResourcesFailedLogMessage   = "list: list resources failed"
 )
 
@@ -108,29 +116,79 @@ const (
 // channel aliases bound to this tunnel other than the row's primary Token — so
 // the modal never offers to unbind the tunnel's own canonical name.
 type tunnelEditButtonValue struct {
-	ResourceID  string   `json:"r"`
-	Token       string   `json:"t"`
-	DisplayName string   `json:"d,omitempty"`
-	Aliases     []string `json:"a,omitempty"`
+	ResourceID   string   `json:"r"`
+	Token        string   `json:"t"`
+	DisplayName  string   `json:"d,omitempty"`
+	Aliases      []string `json:"a,omitempty"`
+	ResourceType string   `json:"y,omitempty"`
 }
 
-// buildTunnelEditButtonValue marshals a row's edit snapshot. boundAliases is
-// the full channel-alias set for the resource; the primary token is excluded
-// (the modal manages only the extra aliases). Returns ("", false) when the
-// marshaled value would exceed Slack's button-value cap, so the caller renders
-// a Create-only button instead.
+// buildTunnelEditButtonValue marshals a connector row's edit snapshot.
+// boundAliases is the full channel-alias set for the resource; the primary
+// token is excluded (the modal manages only the extra aliases). Returns ("",
+// false) when the marshaled value would exceed Slack's button-value cap, so the
+// caller renders a Create-only button instead.
 func buildTunnelEditButtonValue(resourceID, token, displayName string, boundAliases []string) (string, bool) {
+	return buildResourceEditButtonValue(&client.Resource{ResourceID: resourceID, Type: client.ResourceTypeTunnel, Description: displayName}, token, boundAliases)
+}
+
+// buildResourceEditButtonValue marshals a protected-resource edit snapshot for
+// the admin /qurl list row. URL resources share the same edit/revoke affordance
+// as qURL Connector resources: display name, channel aliases, and channel
+// availability all reconcile through the same resource_id-backed paths.
+func buildResourceEditButtonValue(resource *client.Resource, token string, boundAliases []string) (string, bool) {
+	if resource == nil {
+		return "", false
+	}
+	resourceType := resource.Type
+	if isURLResource(resource) {
+		resourceType = client.ResourceTypeURL
+	}
 	v := tunnelEditButtonValue{
-		ResourceID:  resourceID,
-		Token:       token,
-		DisplayName: displayName,
-		Aliases:     aliasesExcluding(boundAliases, token),
+		ResourceID:   resource.ResourceID,
+		Token:        token,
+		DisplayName:  resource.Description,
+		Aliases:      aliasesExcluding(boundAliases, token),
+		ResourceType: resourceType,
 	}
 	b, err := json.Marshal(v)
 	if err != nil || len(b) > slackButtonValueMaxBytes {
 		return "", false
 	}
 	return string(b), true
+}
+
+// tunnelRevokeButtonValue is the JSON snapshot on a `/qurl list` Revoke
+// button's `value`: the resolved resource_id (what DELETE /v1/resources/{id}
+// needs — the list already resolved the slug, so the click handler doesn't
+// re-resolve) and the row's `$<token>` (for the reply + confirm copy). Far
+// smaller than the Edit snapshot, so it never approaches the value cap.
+type tunnelRevokeButtonValue struct {
+	ResourceID string `json:"r"`
+	Token      string `json:"t"`
+}
+
+// buildTunnelRevokeButtonValue marshals a row's revoke snapshot. Returns
+// ("", false) if it would exceed Slack's button-value cap (unreachable in
+// practice — two short fields — but mirrors buildTunnelEditButtonValue so the
+// caller can drop the button rather than emit an oversized one).
+func buildTunnelRevokeButtonValue(resourceID, token string) (string, bool) {
+	b, err := json.Marshal(tunnelRevokeButtonValue{ResourceID: resourceID, Token: token})
+	if err != nil || len(b) > slackButtonValueMaxBytes {
+		return "", false
+	}
+	return string(b), true
+}
+
+// parseTunnelRevokeButtonValue is the inverse of buildTunnelRevokeButtonValue,
+// used by handleListRevokeClick to recover the resource_id + token from a
+// clicked button. Mirrors parseTunnelEditButtonValue.
+func parseTunnelRevokeButtonValue(value string) (tunnelRevokeButtonValue, error) {
+	var v tunnelRevokeButtonValue
+	if err := json.Unmarshal([]byte(value), &v); err != nil {
+		return tunnelRevokeButtonValue{}, err
+	}
+	return v, nil
 }
 
 // aliasesExcluding returns boundAliases without the primary token, preserving
@@ -149,7 +207,7 @@ func aliasesExcluding(boundAliases []string, token string) []string {
 // listCallerCanEdit reports whether the `/qurl list` caller should see the
 // admin-only Edit button. It requires the full edit wiring — the modal opener
 // (OpenView), the alias store (to reconcile bindings on submit), and the admin
-// store (to gate) — plus the caller being a qURL bot admin. A CheckAdmin error
+// store (to gate) — plus the caller being a qURL admin. A CheckAdmin error
 // hides the button (fail-closed for the affordance) WITHOUT failing the
 // listing: the list still renders with Create qURL buttons. Runs on the async
 // worker ctx, bounded by adminGateBudget like the other admin gates.
@@ -170,54 +228,187 @@ func (h *Handler) listCallerCanEdit(ctx context.Context, log *slog.Logger, teamI
 	return isAdmin
 }
 
+// listCallerIsAdmin is the fail-soft admin gate shared by the `/qurl list`
+// empty-state copy selectors. It bounds the CheckAdmin read by adminGateBudget
+// and returns false for a nil AdminStore, missing ids, or any read error
+// (logged under purpose) — so the listing degrades to the non-admin copy rather
+// than failing. It does NOT subsume [Handler.listCallerCanEdit], which fails the
+// same way but also requires the Edit-modal wiring (OpenView + aliasStore)
+// before the gate.
+func (h *Handler) listCallerIsAdmin(ctx context.Context, log *slog.Logger, teamID, userID, purpose string) bool {
+	if h.cfg.AdminStore == nil || teamID == "" || userID == "" {
+		return false
+	}
+	gateCtx, cancel := context.WithTimeout(ctx, adminGateBudget)
+	defer cancel()
+	isAdmin, _, err := h.cfg.AdminStore.CheckAdmin(gateCtx, teamID, userID)
+	if err != nil {
+		log.Debug("list: admin check failed — using non-admin copy", "purpose", purpose, "error", err, "team_id", teamID)
+		return false
+	}
+	return isAdmin
+}
+
+// listResourcesEmptyMessageForCaller returns the empty-state copy for /qurl
+// list. Non-admins never see the admin-only tunnel setup command. Admins get a
+// direct setup hint, but only on a successful CheckAdmin read; failures degrade
+// to the ordinary user copy so the list path stays fail-soft. This read happens
+// only on the zero-resource path, where the extra hint changes the otherwise
+// empty response without adding a per-row gate.
+func (h *Handler) listResourcesEmptyMessageForCaller(ctx context.Context, log *slog.Logger, teamID, userID string) string {
+	if !h.listCallerIsAdmin(ctx, log, teamID, userID, "empty-state hint") {
+		return listResourcesEmptyMessage
+	}
+	return listResourcesEmptyAdminMessage
+}
+
+// listResourcesStaleMessageForCaller is the empty-state for a channel whose
+// allow-set is non-empty but resolves to zero live resources: every bound
+// resource was revoked or deleted, leaving orphaned `$alias` bindings. Unlike the
+// generic [Handler.listResourcesEmptyMessageForCaller] "install one" copy — used
+// when the channel has no policy at all — this NAMES the stale aliases and points
+// at `/qurl-admin unset-alias`, so a user isn't sent to set up a new resource when
+// the real fix is unbinding a ghost.
+//
+// It falls back to the generic empty state when no alias name can be surfaced (a
+// stale exposure carried only by allowed_resource_ids, or a policy read failure):
+// with no concrete `$alias` to name, the generic copy is the better guidance.
+//
+// unset-alias is admin-only, so the actionable verb is shown only to a bot admin;
+// others get an admin handoff. The admin test is the shared [Handler.listCallerIsAdmin]
+// gate (a direct CheckAdmin), NOT listCallerCanEdit — an admin on a deployment
+// without the Edit-modal wiring can still run the slash command, so they should
+// still see the fix. A nil store / missing ids / read error all degrade to the
+// handoff copy (fail-soft).
+func (h *Handler) listResourcesStaleMessageForCaller(ctx context.Context, log *slog.Logger, teamID, channelID, userID string) string {
+	aliasesByResource := h.channelAliasesByResourceID(ctx, log, teamID, channelID)
+	stale := make([]string, 0, len(aliasesByResource))
+	for _, aliases := range aliasesByResource {
+		stale = append(stale, aliases...)
+	}
+	if len(stale) == 0 {
+		return h.listResourcesEmptyMessageForCaller(ctx, log, teamID, userID)
+	}
+	sort.Strings(stale)
+	tokens := make([]string, len(stale))
+	for i, a := range stale {
+		tokens[i] = mrkdwnTokenSpan(a)
+	}
+	joined := strings.Join(tokens, ", ")
+	// Singular/plural agreement so the copy reads naturally for one ghost alias
+	// ("a stale alias … Clear it") and many ("stale aliases … Clear them").
+	noun := "stale " + aliasNoun(len(stale))
+	pronoun := "them"
+	// With a single ghost, name it in the command so it's copy-pasteable (the
+	// exact friction this empty-state fixes); with several, the bare verb avoids
+	// an unwieldy command — the names are already listed above.
+	unsetCmd := "`/qurl-admin unset-alias`"
+	if len(stale) == 1 {
+		noun = "a " + noun
+		pronoun = "it"
+		unsetCmd = "`/qurl-admin unset-alias $" + escapeMrkdwnCode(stale[0]) + "`"
+	}
+
+	if h.listCallerIsAdmin(ctx, log, teamID, userID, "stale-state hint") {
+		return fmt.Sprintf(":mag: This channel has no live qURL resources — only %s (%s) left by a revoked or deleted resource. Clear %s with %s, then protect a new resource here.",
+			noun, joined, pronoun, unsetCmd)
+	}
+	return fmt.Sprintf(":mag: This channel has no live qURL resources — only %s (%s) left by a revoked or deleted resource. Ask a Slack admin to clear %s with %s.",
+		noun, joined, pronoun, unsetCmd)
+}
+
 // listFooterText is the guidance line under /qurl list when rendered as
 // plain text — both the Block Kit fallback (`text`) and the visible
 // message when the tunnel set is too large for per-row buttons (see
 // [listCreateButtonMaxRows]). It names the typed path and the
 // one-time-use default; the button path is named only in
 // [listFooterButtons], shown when the buttons are actually present.
-const listFooterText = "Each `$<id>` identifies a tunnel; the `(alias: …)` entries are alternate names for it in this channel. Copy an ID or an alias and run `/qurl get` on it to mint a one-time qURL link — it opens access once, then expires."
+const listFooterText = "Rows that start with a `$...` token can be used with `/qurl get`; the `(alias: …)` entries are alternate names for the same resource in this channel. Run `/qurl get $token` to create a qURL link — it opens access once, then expires."
 
 // listFooterButtons is the guidance line beneath the interactive /qurl
 // list (the version with a per-row Create qURL button). It names BOTH
 // ways to mint — tapping the button and the typed command — and the
 // one-time-use default.
-const listFooterButtons = "Tap *Create qURL* on any tunnel, or copy a `$id` or `$alias` and run `/qurl get`, to mint a one-time qURL link — it opens access once, then expires. A `$id` identifies a tunnel; the `(alias: …)` entries are alternate names for it in this channel."
+const listFooterButtons = "Tap *Create qURL* on any row with a button, or copy a `$...` token or alias and run `/qurl get`, to create a qURL link — it opens access once, then expires."
 
-// handleListResources implements `/qurl list`. It lists the workspace's
-// tunnel resources (type=tunnel only — URL/transit resources are
-// filtered out) so each line is a copy-paste-ready `$<slug>` token the
-// user can pipe into `/qurl get $<slug>` without a manual lookup. The
-// slug is the same stable handle `/qurl-admin tunnel install <slug>` binds as
-// a channel alias, so the listed token resolves directly in `/qurl get`.
+// handleListResources implements `/qurl list`. It lists the resources available
+// in THIS channel: tunnel resources and URL resources. Each row with a usable
+// token is copy-paste-ready for `/qurl get $<token>` without a manual lookup.
+// Tunnel rows prefer their stable slug; URL rows prefer their resource alias,
+// then a channel-bound alias when the resource has no alias.
 //
-// The listing is unscoped: every workspace member sees every tunnel,
-// in every channel including DMs. #234 had added a non-admin
-// channel-policy filter here; #459 reverted it because the gate
-// dead-ended workspace owners who weren't Slack-admins — their only
-// `/qurl list` output was a fail-closed empty state with no recoverable
-// path — while adding no real capability boundary. Capability gating
-// still happens at mint time: `/qurl get $r_<id>` enforces the channel
-// allow-set for non-admins via [Handler.resourceAllowedForUser], and
-// `/qurl get $<slug>` / `$<alias>` resolve through the per-channel
-// binding. So dropping the list-side filter widens disclosure within a
-// workspace (every member sees every tunnel's slug) but not capability.
+// The listing is CHANNEL-SCOPED: a member sees only the tunnels in this
+// channel's [slackdata.Store.AllowedResourceIDsForChannel] set (the union of
+// its `allowed_resource_ids` and `alias_bindings` values) — the same definition
+// `/qurl get` mints against and `/qurl aliases` lists. A resource available in
+// another channel does not appear here until an admin makes it available here
+// via the Edit modal or a channel alias binding. This restores #234's
+// per-channel disclosure (reverted in #459), but with the recoverable path
+// #459 lacked:
+// the empty state names the Edit-modal recovery flow, and the gate applies to
+// admins too (an admin who wants a tunnel here grants channel access, rather than seeing
+// every workspace tunnel from every channel). List, alias, and mint now share
+// one channel-scoped definition, closing the former list/mint asymmetry
+// (TODO(#460)).
 func (h *Handler) handleListResources(w http.ResponseWriter, values url.Values) {
 	h.runAsync(w, "list", values, func(ctx context.Context, log *slog.Logger) {
 		h.processListResources(ctx, log, values)
 	})
 }
 
+// listChannelScope resolves the channel allow-set that scopes /qurl list — the
+// union of the channel's allowed_resource_ids and alias_bindings values, the
+// SAME set `/qurl get` mints against. It handles every fail-closed
+// short-circuit by posting the right message and returning proceed=false:
+//
+//   - empty channel_id (synthetic payload): refuse rather than fan out
+//     workspace-wide — the disclosure this scoping closes. Mirrors /qurl aliases.
+//   - AdminStore nil (no-DDB sandbox): the scope can't be computed, so fail
+//     closed rather than disclose everything — same posture as aliases/get.
+//   - allow-set read error: fail CLOSED (never fall back to an unscoped list).
+//   - nothing protected here: the channel empty state, WITHOUT the upstream
+//     ListResources call (the common case for a channel with no tunnels).
+//
+// On success it returns the non-empty allow-set and true.
+func (h *Handler) listChannelScope(ctx context.Context, log *slog.Logger, responseURL, teamID, channelID, userID string) (map[string]struct{}, bool) {
+	if channelID == "" {
+		log.Warn("list: empty channel_id; refusing workspace-wide list")
+		_ = h.postResponse(log, responseURL, ":warning: "+channelRequiredMessage)
+		return nil, false
+	}
+	if h.cfg.AdminStore == nil {
+		log.Warn("list: AdminStore is nil; cannot scope listing to channel")
+		_ = h.postResponse(log, responseURL, ":warning: Admin features are not configured for this deployment.")
+		return nil, false
+	}
+	allowed, err := h.cfg.AdminStore.AllowedResourceIDsForChannel(ctx, teamID, channelID)
+	if err != nil {
+		log.Warn("list: channel allow-set fetch failed — failing closed", "error", err, "team_id", teamID, "channel_id", channelID)
+		_ = h.postResponse(log, responseURL, ":warning: "+serviceUnreachableMessage)
+		return nil, false
+	}
+	if len(allowed) == 0 {
+		_ = h.postResponse(log, responseURL, h.listResourcesEmptyMessageForCaller(ctx, log, teamID, userID))
+		return nil, false
+	}
+	return allowed, true
+}
+
 // processListResources is the async-worker body for /qurl list.
 func (h *Handler) processListResources(ctx context.Context, log *slog.Logger, values url.Values) {
 	responseURL := values.Get(fieldResponseURL)
 	teamID := values.Get(fieldTeamID)
-	// The tunnel listing is workspace-wide (unscoped post-#459), but the
-	// per-row alias annotations are channel-scoped — channelAliasesByResourceID
-	// reads THIS channel's alias_bindings so each row can show the shortcuts
-	// that resolve here. Empty channelID (synthetic payload / DM) degrades to
-	// slug-only rows inside the helper.
+	userID := strings.TrimSpace(values.Get(fieldUserID))
 	channelID := values.Get(fieldChannelID)
+
+	// Resolve the channel scope first. This handles every fail-closed
+	// short-circuit (no channel, no AdminStore, read error, nothing exposed)
+	// and, on the common "nothing protected here" path, avoids the upstream
+	// ListResources call entirely.
+	allowed, ok := h.listChannelScope(ctx, log, responseURL, teamID, channelID, userID)
+	if !ok {
+		return
+	}
 
 	c, err := h.authenticatedClient(ctx, teamID)
 	if err != nil {
@@ -226,36 +417,53 @@ func (h *Handler) processListResources(ctx context.Context, log *slog.Logger, va
 		return
 	}
 
-	page, err := c.ListResources(ctx, client.ListResourcesInput{Limit: listResourcesScanLimit})
+	// `/qurl list` shows the channel's mintable resources — tunnels AND URL
+	// resources — scoped to the channel allow-set, so every member sees exactly
+	// the resources they could `/qurl get` here, no more. The listing is driven by
+	// paging the owner's resources until every allow-set member has been seen
+	// (#590): a resource protected in this channel can no longer be missed for
+	// sorting past a fixed scan window, because the walk doesn't stop at one. The
+	// common case — every exposed resource on the first page — still costs a
+	// single request.
+	resources, err := h.fetchAllowedResources(ctx, log, c, allowed)
 	if err != nil {
 		_ = h.postResponse(log, responseURL, ":warning: "+mapListResourcesError(log, teamID, err))
 		return
 	}
 
-	// `/qurl list` shows tunnels only. The API has no server-side type
-	// filter, so drop URL/transit resources here. The result is the
-	// full workspace tunnel set — unscoped post-revert of #234 (#459),
-	// so every member sees the same listing regardless of channel.
-	resources := filterTunnelResources(page.Resources)
-
 	if len(resources) == 0 {
-		_ = h.postResponse(log, responseURL, listTunnelsEmptyMessage)
+		// The allow-set was non-empty (listChannelScope passed) yet nothing
+		// resolved to a live resource: every referenced resource was revoked or
+		// deleted, leaving orphaned `$alias` bindings. Name them and point at the
+		// fix, rather than the generic "install one" copy that sends a user to set
+		// up a new resource when the real fix is unbinding a ghost.
+		_ = h.postResponse(log, responseURL, h.listResourcesStaleMessageForCaller(ctx, log, teamID, channelID, userID))
 		return
 	}
 
-	// Map each tunnel's resource_id to its channel-bound `$alias`
-	// shortcuts so each row can show them next to the slug. Best-effort:
-	// a fetch failure renders slug-only. Built BEFORE the sort because the
-	// sort keys on [tunnelDisplayToken], which promotes a slug-less
-	// tunnel's first bound alias — the sort key must match what the row
-	// renders.
+	// Map each resource_id to its channel-bound `$alias` shortcuts so each row
+	// can show them next to the resource's primary token. Best-effort: a fetch
+	// failure renders without the channel alias extras. Built BEFORE the sort
+	// because the sort keys on [resourceDisplayTokenForList], including tunnel
+	// rows whose first bound alias becomes the primary token when they have no
+	// intrinsic token — the sort key must match what the row renders.
 	aliasMap := h.channelAliasesByResourceID(ctx, log, teamID, channelID)
+	channelAliasOwners := channelAliasOwnersByAlias(aliasMap)
+	sharedAliases := sharedResourceAliases(resources)
+	tunnelSlugOwners := tunnelSlugOwnersBySlug(resources)
 
-	// Precompute each row's display token once (keyed by resource_id)
+	// Precompute each row's display token once in a row model
 	// rather than recomputing it inside the O(n log n) comparator below.
-	displayTok := make(map[string]string, len(resources))
+	rows := make([]resourceListRow, 0, len(resources))
 	for i := range resources {
-		displayTok[resources[i].ResourceID] = tunnelDisplayToken(&resources[i], aliasMap[resources[i].ResourceID])
+		aliases := aliasMap[resources[i].ResourceID]
+		token, blockedAlias := resourceDisplayTokenForList(&resources[i], aliases, sharedAliases, channelAliasOwners, tunnelSlugOwners)
+		rows = append(rows, resourceListRow{
+			Resource:     resources[i],
+			Aliases:      aliases,
+			Token:        token,
+			BlockedAlias: blockedAlias,
+		})
 	}
 
 	// Stable order for two-call idempotency at the Slack ephemeral
@@ -267,22 +475,22 @@ func (h *Handler) processListResources(ctx context.Context, log *slog.Logger, va
 	// resource_id as a tiebreaker (so two rows sharing a token — a slug ==
 	// another row's alias, or two tokenless rows — order deterministically
 	// rather than inheriting the unstable upstream order). BEFORE formatting.
-	sort.SliceStable(resources, func(i, j int) bool {
-		ti, tj := displayTok[resources[i].ResourceID], displayTok[resources[j].ResourceID]
+	sort.SliceStable(rows, func(i, j int) bool {
+		ti, tj := rows[i].Token, rows[j].Token
 		if (ti == "") != (tj == "") {
 			return ti != "" // non-empty (legible) token sorts first
 		}
 		if ti != tj {
 			return ti < tj
 		}
-		return resources[i].ResourceID < resources[j].ResourceID
+		return rows[i].Resource.ResourceID < rows[j].Resource.ResourceID
 	})
 
-	// Render each tunnel as a section block carrying a "Create qURL"
+	// Render each resource as a section block carrying a "Create qURL"
 	// accessory button (so a click mints the one-time link without the
-	// user copy-pasting `/qurl get $slug`), and in parallel build the
+	// user copy-pasting `/qurl get $token`), and in parallel build the
 	// plain-text `body` Slack uses as the block fallback. useButtons is
-	// false when the tunnel set exceeds Slack's per-message block ceiling
+	// false when the resource set exceeds Slack's per-message block ceiling
 	// (see listCreateButtonMaxRows) — then only the text path renders.
 	//
 	// Admin callers (with the modal/alias/admin wiring present) also get an
@@ -301,64 +509,32 @@ func (h *Handler) processListResources(ctx context.Context, log *slog.Logger, va
 	// listCallerCanEdit costs a CheckAdmin read, so the size gate is checked
 	// first (&& short-circuits): a list too large to carry Edit buttons skips the
 	// read entirely, since the answer can't change the output.
-	useButtons := len(resources) <= listCreateButtonMaxRows
-	showEdit := len(resources) <= listEditButtonMaxRows &&
-		h.listCallerCanEdit(ctx, log, teamID, values.Get(fieldUserID))
-	lines := make([]string, 0, len(resources))
+	useButtons := len(rows) <= listCreateButtonMaxRows
+	showEdit := len(rows) <= listEditButtonMaxRows &&
+		h.listCallerCanEdit(ctx, log, teamID, userID)
+	lines := make([]string, 0, len(rows))
 	var blocks []any
 	if useButtons {
-		blockCap := len(resources) + 3
+		blockCap := len(rows) + 3
 		if showEdit {
-			blockCap = len(resources)*2 + 3
+			blockCap = len(rows)*2 + 3
 		}
 		blocks = make([]any, 0, blockCap)
-		blocks = append(blocks, sectionBlock("*Protected Tunnel Resources:*"))
+		blocks = append(blocks, headerBlock(listHeaderBlockText))
 	}
-	for i := range resources {
-		line := formatTunnelListLine(&resources[i], aliasMap[resources[i].ResourceID])
+	for i := range rows {
+		row := &rows[i]
+		line := formatResourceListLineWithToken(&row.Resource, row.Aliases, row.Token, row.BlockedAlias)
 		lines = append(lines, line)
 		if !useButtons {
 			continue
 		}
-		// displayTok is "" only for a slug-less, alias-less tunnel — the
-		// "(no slug …)" row, which has no `$<token>` that `/qurl get` (or
-		// the button) could mint against — so that row gets no button.
-		tok := displayTok[resources[i].ResourceID]
-		if tok == "" {
-			blocks = append(blocks, sectionBlock(line))
-			continue
-		}
-		// Admin rows get Create qURL + Edit in an actions block; the Edit
-		// button carries the row's edit snapshot so opening the modal needs no
-		// extra read. A snapshot too large for a button value falls back to the
-		// Create-only accessory button.
-		if showEdit {
-			if editVal, ok := buildTunnelEditButtonValue(resources[i].ResourceID, tok, resources[i].Description, aliasMap[resources[i].ResourceID]); ok {
-				blocks = append(blocks, sectionBlock(line), actionsBlock(
-					buttonElement(listCreateButtonLabel, listCreateQurlActionID, tok),
-					buttonElement(listEditButtonLabel, listEditTunnelActionID, editVal),
-				))
-				continue
-			}
-		}
-		blocks = append(blocks, sectionWithButton(line, listCreateButtonLabel, listCreateQurlActionID, tok))
+		blocks = appendResourceListBlocks(blocks, &row.Resource, row.Aliases, row.Token, row.BlockedAlias, showEdit)
 	}
 
-	body := "*Protected Tunnel Resources:*\n" + strings.Join(lines, "\n") + "\n\n_" + listFooterText + "_"
+	body := "*Protected Resources:*\n" + strings.Join(lines, "\n") + "\n\n_" + listFooterText + "_"
 	if useButtons {
 		blocks = append(blocks, contextBlock(listFooterButtons))
-	}
-	if page.HasMore {
-		// page.HasMore is a master-list signal — more resources of ANY
-		// type, not necessarily more tunnels — so this footer can fire
-		// even when every tunnel is already shown. See the #531 caveat
-		// on listResourcesScanLimit; until then we warn rather than
-		// risk implying the listing is exhaustive.
-		hasMore := fmt.Sprintf("…more resources past the first %d-row scan — some tunnels may not be shown.", listResourcesScanLimit)
-		body += "\n_" + hasMore + "_"
-		if useButtons {
-			blocks = append(blocks, contextBlock(hasMore))
-		}
 	}
 
 	if !useButtons {
@@ -368,33 +544,164 @@ func (h *Handler) processListResources(ctx context.Context, log *slog.Logger, va
 	_ = h.postResponseBlocks(log, responseURL, body, blocks)
 }
 
-// filterTunnelResources returns only the live tunnel-type resources from
-// the fetched page. `/qurl list` is tunnel-scoped; URL/transit resources are
-// dropped. Keys on r.Type == [client.ResourceTypeTunnel] (the upstream
-// discriminator), NOT on an empty target_url, so a non-tunnel row with a
-// transient empty target isn't mis-included.
+type resourceListRow struct {
+	Resource     client.Resource
+	Aliases      []string
+	Token        string
+	BlockedAlias string
+}
+
+func appendResourceListBlocks(blocks []any, resource *client.Resource, aliases []string, token, blockedAlias string, showEdit bool) []any {
+	// The block path renders a richer, multi-line section than the plain-text
+	// fallback line: the `$id` bold on its own row, resource detail beneath it,
+	// and a faint aliases line when present. It takes the precomputed display
+	// token so the section can never name a different token than the row's button
+	// mints against.
+	sectionText := formatResourceListSectionWithToken(resource, aliases, token, blockedAlias)
+	// Button values stay as the same token a user would paste into `/qurl get`.
+	// We deliberately re-run get resolution on click instead of snapshotting a
+	// resource_id here, so channel policy and URL alias ambiguity are checked at
+	// click time too.
+	// token is "" only for a resource with no `$<token>` that `/qurl get` (or a
+	// button) could mint against — so that row gets no button.
+	if token == "" {
+		return append(blocks, sectionBlock(sectionText))
+	}
+	// Create qURL is the row's headline action. It renders as the primary
+	// (filled) button ONLY when admin actions sit beside it, where primary
+	// expresses the Create-over-Edit/Revoke hierarchy. A create-only row has
+	// nothing to outrank, and a whole column of lone primaries reads as noise
+	// (Slack advises using `primary` sparingly), so it gets a default-style
+	// button. Admin rows pair Create qURL with Edit/Revoke in an actions block;
+	// the Edit button carries the row's edit snapshot so opening the modal needs
+	// no extra read. A snapshot too large for a button value falls through to the
+	// Create-only accessory path below.
+	if showEdit {
+		if editVal, ok := buildResourceEditButtonValue(resource, token, aliases); ok {
+			row := []map[string]any{
+				primaryButtonElement(listCreateButtonLabel, listCreateQurlActionID, token),
+				buttonElement(listEditButtonLabel, listEditTunnelActionID, editVal),
+			}
+			// Red "Revoke" beside Edit; the confirm dialog gates the destructive
+			// action and the value carries the resolved resource_id so the click
+			// handler needs no slug re-resolve.
+			if revokeVal, ok := buildTunnelRevokeButtonValue(resource.ResourceID, token); ok {
+				row = append(row, withConfirmDialog(
+					dangerButtonElement(listRevokeButtonLabel, listRevokeTunnelActionID, revokeVal),
+					"Revoke $"+escapeMrkdwnCode(token)+"?",
+					revokeConfirmText,
+					"Revoke",
+				))
+			}
+			return append(blocks, sectionBlock(sectionText), actionsBlock(row...))
+		}
+	}
+	return append(blocks, sectionWithAccessory(sectionText, buttonElement(listCreateButtonLabel, listCreateQurlActionID, token)))
+}
+
+// filterListableResources returns only live resources Slack can mint from the
+// fetched page: tunnels and URL resources. Unknown/future resource types are
+// dropped until the Slack get/list contract knows how to resolve and describe
+// them.
 //
-// Revoked tunnels are dropped too. The list endpoint is status-visible for
+// Revoked resources are dropped too. The list endpoint is status-visible for
 // both active AND revoked rows (a revoke is a soft delete; the row is
-// hard-deleted only after a retention window), so without this guard a
-// revoked tunnel would keep appearing — with a "Create qURL" button that
-// can't mint against it. A missing/empty status is treated as live, so the
-// guard can only ever hide an explicitly revoked row.
-func filterTunnelResources(resources []client.Resource) []client.Resource {
+// hard-deleted only after a retention window), so without this guard a revoked
+// resource would keep appearing — with a "Create qURL" button that can't mint
+// against it. A missing/empty status is treated as live, so the guard can only
+// ever hide an explicitly revoked row.
+func filterListableResources(resources []client.Resource) []client.Resource {
 	out := make([]client.Resource, 0, len(resources))
 	for i := range resources {
-		if resources[i].Type == client.ResourceTypeTunnel && resources[i].Status != client.StatusRevoked {
+		if resourceTypeMintableFromSlack(&resources[i]) && resources[i].Status != client.StatusRevoked {
 			out = append(out, resources[i])
 		}
 	}
 	return out
 }
 
+func resourceTypeMintableFromSlack(r *client.Resource) bool {
+	return isTunnelResource(r) || isURLResource(r)
+}
+
+func isTunnelResource(r *client.Resource) bool {
+	return r.Type == client.ResourceTypeTunnel
+}
+
+// isURLResource treats empty-type target_url rows as URL resources to preserve
+// legacy qurl-service responses until Type is guaranteed on every URL row.
+func isURLResource(r *client.Resource) bool {
+	return r.Type == client.ResourceTypeURL || (r.Type == "" && r.TargetURL != "")
+}
+
+// listMaxResourcePages bounds how many `/v1/resources` pages
+// [Handler.fetchAllowedResources] will walk. It is a safety backstop, not an
+// expected limit: the walk normally stops as soon as every allow-set member is
+// found (the common case is the first page). The cap only bites when an
+// allow-set id is never found — e.g. a stale channel binding to a resource the
+// owner has since deleted — which would otherwise scan to the end of the
+// owner's resource list on every call. At listResourcesScanLimit (100) rows
+// per page this covers far more resources than any real workspace holds, so a
+// capped walk can only ever drop an id the owner's list no longer contains
+// (fail-safe under-disclosure, never a live listed resource).
+const listMaxResourcePages = 50
+
+// fetchAllowedResources returns the live resources — tunnels AND URL resources —
+// protected in the current channel, by paging `/v1/resources` until every
+// resource_id in the channel allow-set has been seen (or the listing is
+// exhausted / the page cap is hit). This is the channel-scoped disclosure half
+// of `/qurl list`: a member sees exactly the resources they could `/qurl get`
+// here.
+//
+// Paging until the allow-set is satisfied — rather than scanning a single fixed
+// page and filtering it — is the #590 fix: a resource protected in this channel
+// can no longer be omitted for sorting past the page window. Allow-set ids are
+// matched as resources stream past and the walk stops as soon as the last one is
+// found, so a workspace whose exposed resources all land on the first page still
+// costs a single request (no regression to the common case).
+//
+// Allow-set membership is matched here; non-mintable / revoked rows are dropped
+// by filterListableResources (tunnels + URL resources). (#596 introduced this as
+// fetchAllowedTunnels; it was generalized to all listable resource types when
+// #599's URL-resource support merged, so the channel-scoped #590 paging fix now
+// covers URL resources too.)
+func (h *Handler) fetchAllowedResources(ctx context.Context, log *slog.Logger, c *client.Client, allowed map[string]struct{}) ([]client.Resource, error) {
+	pending := make(map[string]struct{}, len(allowed))
+	for id := range allowed {
+		pending[id] = struct{}{}
+	}
+	matched := make([]client.Resource, 0, len(allowed))
+	cursor := ""
+	for page := 0; page < listMaxResourcePages; page++ {
+		out, err := c.ListResources(ctx, client.ListResourcesInput{Limit: listResourcesScanLimit, Cursor: cursor})
+		if err != nil {
+			return nil, err
+		}
+		for i := range out.Resources {
+			if _, ok := pending[out.Resources[i].ResourceID]; ok {
+				delete(pending, out.Resources[i].ResourceID)
+				matched = append(matched, out.Resources[i])
+			}
+		}
+		// Stop once every exposed id is found, or the listing is exhausted.
+		if len(pending) == 0 || !out.HasMore || out.NextCursor == "" {
+			return filterListableResources(matched), nil
+		}
+		cursor = out.NextCursor
+	}
+	// Page cap reached with allow-set ids still unresolved — the backstop in
+	// listMaxResourcePages. Not an expected path; surface it for operators. The
+	// unresolved ids simply don't render (fail-safe, never a leak).
+	log.Warn("list: resource-page cap reached before resolving every allow-set member",
+		"pages", listMaxResourcePages, "unresolved", len(pending))
+	return filterListableResources(matched), nil
+}
+
 // tunnelToken returns the resource-intrinsic `$<token>` for a tunnel.
 // Precedence:
 //
-//  1. Slug — the stable, owner-scoped tunnel handle. `/qurl-admin tunnel
-//     install <slug>` binds `$<slug>` as a channel alias, so the slug
+//  1. Slug — the stable, owner-scoped tunnel handle. `/qurl-admin
+//     protect-connector <slug>` binds `$<slug>` as a channel alias, so the slug
 //     pastes straight into `/qurl get $<slug>`. This is the common case
 //     and the identifier we want to surface (never the opaque r_<id>).
 //  2. Resource-level alias — fallback when a tunnel somehow carries no
@@ -435,6 +742,99 @@ func tunnelDisplayToken(r *client.Resource, boundAliases []string) string {
 	return ""
 }
 
+func resourceDisplayToken(r *client.Resource, boundAliases []string) string {
+	if isURLResource(r) {
+		return urlDisplayToken(r, boundAliases)
+	}
+	return tunnelDisplayToken(r, boundAliases)
+}
+
+// resourceDisplayTokenForList mirrors /qurl get precedence so list rows never
+// advertise a Create qURL token that would resolve to a different resource.
+func resourceDisplayTokenForList(r *client.Resource, boundAliases []string, sharedResourceAliases map[string]struct{}, channelAliasOwners, tunnelSlugOwners map[string]string) (token, blockedAlias string) {
+	if isURLResource(r) && r.Alias != "" {
+		_, shared := sharedResourceAliases[r.Alias]
+		owner, channelAliasExists := channelAliasOwners[r.Alias]
+		channelAliasPointsHere := channelAliasExists && owner == r.ResourceID
+		channelAliasPointsElsewhere := channelAliasExists && owner != r.ResourceID
+		slugOwner, slugExists := tunnelSlugOwners[r.Alias]
+		tunnelSlugPointsElsewhere := slugExists && slugOwner != r.ResourceID
+		// Mirror /qurl get precedence: a channel alias pointing here makes the
+		// token safe, a channel alias pointing elsewhere wins over this row, and
+		// tunnel slugs or shared URL aliases would make the token resolve away
+		// from (or ambiguously among) URL rows.
+		if ((shared || tunnelSlugPointsElsewhere) && !channelAliasPointsHere) || channelAliasPointsElsewhere {
+			if token := firstAliasOtherThan(boundAliases, r.Alias); token != "" {
+				return token, r.Alias
+			}
+			return "", r.Alias
+		}
+	}
+	return resourceDisplayToken(r, boundAliases), ""
+}
+
+func tunnelSlugOwnersBySlug(resources []client.Resource) map[string]string {
+	owners := make(map[string]string)
+	for i := range resources {
+		if isTunnelResource(&resources[i]) && resources[i].Slug != "" {
+			owners[resources[i].Slug] = resources[i].ResourceID
+		}
+	}
+	return owners
+}
+
+func firstAliasOtherThan(aliases []string, blocked string) string {
+	for _, alias := range aliases {
+		if alias != blocked {
+			return alias
+		}
+	}
+	return ""
+}
+
+func channelAliasOwnersByAlias(aliasMap map[string][]string) map[string]string {
+	owners := make(map[string]string)
+	for resourceID, aliases := range aliasMap {
+		for _, alias := range aliases {
+			owners[alias] = resourceID
+		}
+	}
+	return owners
+}
+
+func sharedResourceAliases(resources []client.Resource) map[string]struct{} {
+	counts := make(map[string]int)
+	for i := range resources {
+		if isURLResource(&resources[i]) && resources[i].Alias != "" {
+			counts[resources[i].Alias]++
+		}
+	}
+	shared := make(map[string]struct{})
+	for alias, count := range counts {
+		if count > 1 {
+			shared[alias] = struct{}{}
+		}
+	}
+	return shared
+}
+
+func urlDisplayToken(r *client.Resource, boundAliases []string) string {
+	if r.Alias != "" {
+		return r.Alias
+	}
+	if len(boundAliases) > 0 {
+		return boundAliases[0]
+	}
+	return ""
+}
+
+func formatResourceListLineWithToken(r *client.Resource, boundAliases []string, token, blockedAlias string) string {
+	if isURLResource(r) {
+		return formatURLListLineWithToken(r, boundAliases, token, blockedAlias)
+	}
+	return formatTunnelListLine(r, boundAliases)
+}
+
 // formatTunnelListLine renders one tunnel resource as a single text
 // line in /qurl list output:
 //
@@ -471,31 +871,145 @@ func formatTunnelListLine(r *client.Resource, boundAliases []string) string {
 	token := tunnelDisplayToken(r, boundAliases)
 	var line string
 	if token == "" {
-		line = "• `" + r.ResourceID + "` (no ID — ask your Slack admin to set one)"
+		line = "• " + mrkdwnCodeSpan(r.ResourceID) + " (no ID — ask your Slack admin to set one)"
 	} else {
-		line = "• `$" + token + "`"
+		line = "• " + mrkdwnTokenSpan(token)
 	}
-	extras := make([]string, 0, len(boundAliases))
-	for _, a := range boundAliases {
-		if a != token {
-			extras = append(extras, "`$"+a+"`")
-		}
-	}
-	if len(extras) > 0 {
-		label := "aliases: "
-		if len(extras) == 1 {
-			label = "alias: "
-		}
-		line += " (" + label + strings.Join(extras, ", ") + ")"
+	if extras := extraAliasTokens(boundAliases, token); len(extras) > 0 {
+		line += " (" + aliasNoun(len(extras)) + ": " + strings.Join(extras, ", ") + ")"
 	}
 	// Show the tunnel's Display Name next to the id. The description field
 	// doubles as the Display Name (see handleSetDisplayName) and is always
 	// set, so this normally renders; the empty guard is defensive only (an
 	// upstream returning a blank description shouldn't dangle an em-dash).
 	if r.Description != "" {
-		line += " — " + r.Description
+		line += " — " + escapeMrkdwnText(r.Description)
 	}
 	return line
+}
+
+func formatURLListLineWithToken(r *client.Resource, boundAliases []string, token, blockedAlias string) string {
+	var line string
+	if token == "" {
+		if blockedAlias != "" {
+			line = "• " + mrkdwnCodeSpan(r.ResourceID) + " (alias " + mrkdwnTokenSpan(blockedAlias) + " is ambiguous here — ask your Slack admin to set a channel alias)"
+		} else {
+			line = "• " + mrkdwnCodeSpan(r.ResourceID) + " (no alias — ask your Slack admin to set one)"
+		}
+	} else {
+		line = "• " + mrkdwnTokenSpan(token)
+		if blockedAlias != "" {
+			line += " (resource alias " + mrkdwnTokenSpan(blockedAlias) + " is shadowed here)"
+		}
+		if extras := extraAliasTokens(boundAliases, token); len(extras) > 0 {
+			line += " (" + aliasNoun(len(extras)) + ": " + strings.Join(extras, ", ") + ")"
+		}
+	}
+	if r.Description != "" {
+		line += " — " + escapeMrkdwnText(r.Description)
+	}
+	return line
+}
+
+func formatResourceListSectionWithToken(r *client.Resource, boundAliases []string, token, blockedAlias string) string {
+	if isURLResource(r) {
+		return formatURLListSectionWithToken(r, boundAliases, token, blockedAlias)
+	}
+	return formatTunnelListSection(r, boundAliases, token)
+}
+
+// formatTunnelListSection renders one tunnel as the mrkdwn body of a `section`
+// block for the interactive /qurl list. It lays the row out for buttons rather
+// than a plain line: the `$id` bold on its own row, the Display Name beneath
+// it, and a faint "aliases:" line when extra channel aliases are bound. `token`
+// is the row's precomputed display token (see [tunnelDisplayToken]) — the same
+// value the row's button mints against, so the section can't name a different
+// one. The plain-text fallback (and notifications) still use
+// [formatTunnelListLine]; this richer form is block-only. A slug-less,
+// alias-less tunnel has an empty token, so it renders the bare resource_id,
+// keeps the Display Name (the only human-readable handle such a row has), and
+// spells out that it can't be used until an admin sets an ID — matching the
+// fallback's "(no ID …)" honesty, which also retains the Display Name.
+func formatTunnelListSection(r *client.Resource, boundAliases []string, token string) string {
+	var b strings.Builder
+	if token == "" {
+		b.WriteString("*" + mrkdwnCodeSpan(r.ResourceID) + "*")
+		if r.Description != "" {
+			b.WriteString("\n" + escapeMrkdwnText(r.Description))
+		}
+		b.WriteString("\n_No ID set — ask your Slack admin to set one._")
+		return b.String()
+	}
+	b.WriteString("*" + mrkdwnTokenSpan(token) + "*")
+	if r.Description != "" {
+		b.WriteString("\n" + escapeMrkdwnText(r.Description))
+	}
+	if extras := extraAliasTokens(boundAliases, token); len(extras) > 0 {
+		b.WriteString("\n_" + aliasNoun(len(extras)) + ":_ " + strings.Join(extras, ", "))
+	}
+	return b.String()
+}
+
+func formatURLListSectionWithToken(r *client.Resource, boundAliases []string, token, blockedAlias string) string {
+	var b strings.Builder
+	if token == "" {
+		b.WriteString("*" + mrkdwnCodeSpan(r.ResourceID) + "*")
+		if blockedAlias != "" {
+			b.WriteString("\n_Alias " + mrkdwnTokenSpan(blockedAlias) + " is ambiguous here — ask your Slack admin to set a channel alias._")
+		} else {
+			b.WriteString("\n_No alias set — ask your Slack admin to set one._")
+		}
+	} else {
+		b.WriteString("*" + mrkdwnTokenSpan(token) + "*")
+		if blockedAlias != "" {
+			b.WriteString("\n_Resource alias " + mrkdwnTokenSpan(blockedAlias) + " is shadowed here._")
+		}
+	}
+	if r.Description != "" {
+		b.WriteString("\n" + escapeMrkdwnText(r.Description))
+	}
+	if token != "" {
+		if extras := extraAliasTokens(boundAliases, token); len(extras) > 0 {
+			b.WriteString("\n_" + aliasNoun(len(extras)) + ":_ " + strings.Join(extras, ", "))
+		}
+	}
+	return b.String()
+}
+
+// aliasNoun returns "alias" or "aliases" to agree with n. Shared by the
+// plain-text and block list formatters so the singular/plural rule lives in one
+// place.
+func aliasNoun(n int) string {
+	if n == 1 {
+		return "alias"
+	}
+	return "aliases"
+}
+
+// extraAliasTokens returns the channel-bound aliases other than the row's
+// primary token, each wrapped as a mrkdwn `$alias` code span and preserving
+// order. It layers display formatting over [aliasesExcluding] so the "exclude
+// the primary token" rule has a single home. Shared by the plain-text
+// [formatTunnelListLine] and the block [formatTunnelListSection] so the two
+// can't drift on which aliases a row advertises.
+func extraAliasTokens(boundAliases []string, token string) []string {
+	// Mutates the slice in place — safe only because aliasesExcluding returns a
+	// freshly make-allocated slice, never a sub-slice of boundAliases. Preserve
+	// that contract if aliasesExcluding ever changes, or the caller's
+	// boundAliases (and the edit-button alias snapshot) would be corrupted.
+	extras := aliasesExcluding(boundAliases, token)
+	for i, a := range extras {
+		extras[i] = mrkdwnTokenSpan(a)
+	}
+	return extras
+}
+
+func mrkdwnTokenSpan(token string) string {
+	return "`$" + escapeMrkdwnCode(token) + "`"
+}
+
+func mrkdwnCodeSpan(text string) string {
+	return "`" + escapeMrkdwnCode(text) + "`"
 }
 
 // channelAliasesByResourceID builds resource_id → sorted channel-bound
@@ -505,10 +1019,13 @@ func formatTunnelListLine(r *client.Resource, boundAliases []string) string {
 // render slug-only) — the listing must still render.
 //
 // Cost: one GetChannelPolicy (GetItem) per /qurl list, purely for the
-// cosmetic alias display. Post-#459 the list is unscoped — the admin
-// gate / channel-policy filter (scopeResourcesForUser) was removed — so
-// there's no longer an allow-set read on this path to fold this into;
-// it's a standalone read. Acceptable for the discovery surface.
+// cosmetic alias display — a second point read of the same channel_policies
+// row the scope gate already read via AllowedResourceIDsForChannel. The two
+// have different shapes (this returns alias→resource entries; the gate returns
+// the membership set), so they're kept as separate reads rather than folded;
+// both are cheap GetItems on a tiny row behind the dominant upstream
+// ListResources call. Acceptable for the discovery surface; fold into one read
+// if this path ever gets hot.
 func (h *Handler) channelAliasesByResourceID(ctx context.Context, log *slog.Logger, teamID, channelID string) map[string][]string {
 	if h.cfg.AdminStore == nil || channelID == "" {
 		return nil

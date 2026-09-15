@@ -2,11 +2,14 @@ package internal
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/layervai/qurl-integrations/shared/client"
 )
 
 // Block Kit JSON templates for the Slack bot's view-side surfaces.
@@ -25,6 +28,7 @@ const (
 	callbackIDSetAliasRebind = "setalias_rebind_confirm"
 	callbackIDTunnelInstall  = "tunnel_install"
 	callbackIDTunnelEdit     = "tunnel_edit"
+	callbackIDFeedback       = "feedback"
 )
 
 // listCreateQurlActionID is the action_id on the "Create qURL" button
@@ -39,12 +43,20 @@ const listCreateQurlActionID = "list_create_qurl"
 
 // listEditTunnelActionID is the action_id on the admin-only "Edit" button
 // rendered alongside "Create qURL" on each `/qurl list` row when the caller is
-// a qURL bot admin (and the modal/alias/admin wiring is present). The
+// a qURL admin (and the modal/alias/admin wiring is present). The
 // block_actions handler matches on it to open the [TunnelEditModal]
 // pre-filled from the button's value snapshot. Like listCreateQurlActionID it
 // is reused across rows — the clicked tunnel is identified by the button's
 // value (a [tunnelEditButtonValue] JSON snapshot), not the action_id.
 const listEditTunnelActionID = "list_edit_tunnel"
+
+// listRevokeTunnelActionID is the action_id on the admin-only red "Revoke"
+// button rendered beside "Edit" on each `/qurl list` row. The button carries a
+// Slack confirm dialog, so the block_actions handler only sees the click after
+// the admin confirms; it then revokes the row's resource (and all its qURLs).
+// The clicked tunnel is identified by the button's value (a
+// [tunnelRevokeButtonValue] JSON snapshot), not the action_id.
+const listRevokeTunnelActionID = "list_revoke_tunnel"
 
 const (
 	blockKitFieldActionID        = "action_id"
@@ -58,7 +70,17 @@ const (
 	blockKitFieldSubmit          = "submit"
 	blockKitFieldTitle           = "title"
 	blockKitFieldType            = "type"
-	blockKitTypeModal            = "modal"
+	// blockKitFieldText is Block Kit's `text` field. Deliberately separate
+	// from fieldText in process.go, which is the slash-command form field of
+	// the same name — two different wire contracts that happen to match.
+	blockKitFieldText           = "text"
+	blockKitTypeModal           = "modal"
+	blockKitTypeSection         = "section"
+	blockKitTypeMrkdwn          = "mrkdwn"
+	blockKitTypeMultiConvSelect = "multi_conversations_select"
+	// Button styles: Slack renders `primary` filled-green and `danger` red.
+	blockKitStylePrimary = "primary"
+	blockKitStyleDanger  = "danger"
 	// Slack caps private_metadata at 3000 bytes. Today's tunnel metadata is
 	// small; this guard is mainly defense against future field additions or a
 	// pathological response_url making modal submission fail only after open.
@@ -91,7 +113,39 @@ const (
 	tunnelEditActionDisplayName = "edit_display_name_input"
 	tunnelEditBlockAliases      = "edit_aliases"
 	tunnelEditActionAliases     = "edit_aliases_input"
+	tunnelEditBlockChannels     = "edit_channels"
+	tunnelEditActionChannels    = "edit_channels_select"
 )
+
+// claimCodeBlockID is the legacy/anticipated workspace-claim code block from
+// issue #432. No current modal renders it, but submissions carrying this block
+// must never emit their code values to diagnostics.
+const claimCodeBlockID = "claim_code_block"
+
+var redactedSubmissionBlockIDs = map[string]struct{}{
+	// Edit/expose aliases and names are redacted even when install aliases are
+	// visible diagnostics: edit/expose submissions can carry existing resource
+	// labels, URL targets, or broad free-form edits from an established setup.
+	claimCodeBlockID:            {},
+	tunnelEditBlockDisplayName:  {},
+	tunnelEditBlockAliases:      {},
+	tunnelEditBlockChannels:     {},
+	exposeURLBlockResource:      {},
+	exposeURLBlockAlias:         {},
+	exposeURLBlockTarget:        {},
+	s3WebsiteInstallBlockBucket: {},
+	s3WebsiteInstallBlockPrefix: {},
+	s3WebsiteInstallBlockIndex:  {},
+	feedbackBlockSummary:        {},
+	feedbackBlockDetails:        {},
+}
+
+// IsRedactedSubmissionBlock reports whether a submitted Slack view state block
+// must be replaced wholesale before it is emitted to logs.
+func IsRedactedSubmissionBlock(blockID string) bool {
+	_, ok := redactedSubmissionBlockIDs[blockID]
+	return ok
+}
 
 // SetAliasRebindMetadata is the typed shape the rebind modal stores
 // in `private_metadata`. JSON-encoded so the view-submission handler
@@ -152,25 +206,48 @@ func SetAliasRebindModal(aliasName, oldTarget, newTarget string) ([]byte, error)
 	return json.Marshal(payload)
 }
 
+// TunnelInstallAgentMetadata marks a guided connector install modal as having
+// been opened from an already-claimed agent proposal. It stays intentionally
+// small: the modal submit is the enforcement point, so the final connector
+// identity comes from the submitted form, not the LLM proposal. Requester
+// identity is not serialized here; App Home audit rows are approver-scoped,
+// matching recordAgentAudit. Today's protect-connector proposal does not carry
+// a proposed connector slug; add a structured audit field before preserving one
+// here so the enforced target and proposal hint do not get conflated.
+type TunnelInstallAgentMetadata struct {
+	Action string `json:"action"`
+	// Reason is bounded proposal provenance for the audit row. Submit handling
+	// re-truncates it defensively before persistence, and renderers must treat
+	// it as untrusted text.
+	Reason string `json:"reason,omitempty"`
+}
+
 // TunnelInstallModalMetadata is carried through Slack private_metadata from
-// the slash-command request that opened the modal to the later
-// view_submission. The response_url lets the async installer post the same
-// ephemeral follow-up shape as the direct `/qurl-admin tunnel install <slug>` path.
+// the request that opened the modal to the later view_submission. The
+// response_url lets the async installer post the same ephemeral follow-up
+// shape as the direct `/qurl-admin protect-connector <slug>` path.
 // CreatedAtUnix lets the submit handler reject stale modals before creating a
-// resource or minting a bootstrap key; Slack response URLs are time-limited.
+// resource or minting an enrollment token; Slack response URLs are time-limited.
+// Agent is present only for the conversation-mode confirm flow, never for
+// slash-command initiated connector setup.
 type TunnelInstallModalMetadata struct {
-	TeamID        string `json:"team_id"`
-	ChannelID     string `json:"channel_id"`
-	UserID        string `json:"user_id"`
-	ResponseURL   string `json:"response_url"`
-	CreatedAtUnix int64  `json:"created_at_unix,omitempty"`
+	TeamID        string                      `json:"team_id"`
+	EnterpriseID  string                      `json:"enterprise_id,omitempty"`
+	ChannelID     string                      `json:"channel_id"`
+	UserID        string                      `json:"user_id"`
+	ResponseURL   string                      `json:"response_url"`
+	CreatedAtUnix int64                       `json:"created_at_unix,omitempty"`
+	Agent         *TunnelInstallAgentMetadata `json:"agent,omitempty"`
 }
 
 // TunnelInstallModal renders the guided tunnel installer. The modal collects
 // only customer-facing choices: the stable slug, optional channel shortcut,
 // local service port, target environment, and an optional Docker/Compose target
 // name used only by the Docker and Docker Compose renderers.
-func TunnelInstallModal(meta TunnelInstallModalMetadata) ([]byte, error) {
+func TunnelInstallModal(meta *TunnelInstallModalMetadata) ([]byte, error) {
+	if meta == nil {
+		return nil, errors.New("tunnel install modal metadata is missing")
+	}
 	privateMeta, err := json.Marshal(meta)
 	if err != nil {
 		return nil, fmt.Errorf("marshal private_metadata: %w", err)
@@ -182,15 +259,15 @@ func TunnelInstallModal(meta TunnelInstallModalMetadata) ([]byte, error) {
 	payload := map[string]any{
 		blockKitFieldType:            blockKitTypeModal,
 		blockKitFieldCallbackID:      callbackIDTunnelInstall,
-		blockKitFieldTitle:           plainTextObj("Install qURL tunnel"),
+		blockKitFieldTitle:           plainTextObj("Install qURL Connector"),
 		blockKitFieldSubmit:          plainTextObj("Generate"),
 		blockKitFieldClose:           plainTextObj("Cancel"),
 		blockKitFieldPrivateMetadata: string(privateMeta),
 		blockKitFieldBlocks: []any{
 			contextBlock("Target channel: " + slackChannelMention(meta.ChannelID)),
-			inputBlock(tunnelInstallBlockSlug, "qURL tunnel ID", "3-64 lowercase letters, numbers, and hyphens. Start with a letter, end with a letter or number.", false,
+			inputBlock(tunnelInstallBlockSlug, "qURL Connector ID", "3-64 lowercase letters, numbers, and hyphens. Start with a letter, end with a letter or number.", false,
 				plainTextInput(tunnelInstallActionSlug, "prod-dashboard", "")),
-			inputBlock(tunnelInstallBlockShortcut, "Channel alias", "Optional. Leave blank to use the tunnel ID.", true,
+			inputBlock(tunnelInstallBlockShortcut, "Channel alias", "Optional. Leave blank to use the qURL Connector ID.", true,
 				plainTextInput(tunnelInstallActionShortcut, "prod", "")),
 			inputBlock(tunnelInstallBlockEnvironment, "Target environment", "Choose the runtime shape so Slack can tailor the install output. Docker snippets assume a Linux host.", false,
 				staticSelect(tunnelInstallActionEnvironment, []map[string]any{
@@ -208,13 +285,13 @@ func TunnelInstallModal(meta TunnelInstallModalMetadata) ([]byte, error) {
 	return json.Marshal(payload)
 }
 
-// TunnelInstallErrorModal replaces a submitted tunnel-install modal with a
+// ConnectorInstallErrorModal replaces a submitted connector-install modal with a
 // form-level error. Slack's `response_action: errors` can only attach copy to
 // input fields, which makes auth/config failures look like bad user input.
-func TunnelInstallErrorModal(message string) ([]byte, error) {
+func ConnectorInstallErrorModal(message string) ([]byte, error) {
 	payload := map[string]any{
 		blockKitFieldType:  blockKitTypeModal,
-		blockKitFieldTitle: plainTextObj("qURL tunnel setup"),
+		blockKitFieldTitle: plainTextObj("qURL Connector setup"),
 		blockKitFieldClose: plainTextObj("Close"),
 		blockKitFieldBlocks: []any{
 			sectionBlock(":warning: " + message),
@@ -230,7 +307,7 @@ func TunnelInstallErrorModal(message string) ([]byte, error) {
 func TunnelEditErrorModal(message string) ([]byte, error) {
 	payload := map[string]any{
 		blockKitFieldType:  blockKitTypeModal,
-		blockKitFieldTitle: plainTextObj("Edit tunnel"),
+		blockKitFieldTitle: plainTextObj("Edit resource"),
 		blockKitFieldClose: plainTextObj("Close"),
 		blockKitFieldBlocks: []any{
 			sectionBlock(":warning: " + message),
@@ -264,14 +341,31 @@ type TunnelEditModalMetadata struct {
 	// it, so a tunnel that already carries more than listEditMaxAliases aliases
 	// stays editable for a name-only or removal-only change.
 	Aliases []string `json:"aliases,omitempty"`
+	// ExposedChannels is the set of channel IDs the tunnel was already exposed
+	// to when the modal opened (its ChannelsForResource result), used both to
+	// pre-fill the channels multi-select and as the reconcile baseline on
+	// submit: only a channel the admin SAW here and de-selected is revoked, so
+	// a partial enumeration (e.g. the Query grant is missing) can never cause
+	// the submit to drop a channel the admin never saw. Always includes the
+	// current channel (ChannelID), which the reconcile never revokes.
+	ExposedChannels []string `json:"exposed_channels,omitempty"`
+	// ResourceType is carried for copy only. Empty is treated as a qURL
+	// Connector for backwards compatibility with already-rendered connector
+	// buttons that predate this field.
+	ResourceType string `json:"resource_type,omitempty"`
 }
 
 // TunnelEditModal renders the admin Edit modal opened from a `/qurl list` row.
-// It pre-fills the tunnel's current Display Name and its additional channel
-// aliases (the bound aliases other than the row's primary `$<token>`), so the
+// It pre-fills the tunnel's current Display Name, its additional channel
+// aliases (the bound aliases other than the row's primary `$<token>`), and the
+// channels the tunnel is currently protected in (meta.ExposedChannels), so the
 // admin edits an authoritative snapshot rather than re-typing from scratch.
 // `aliases` is the extra-alias set (sigil-free); they render one per line with
-// a leading `$` to match how the admin types them.
+// a leading `$` to match how the admin types them. The channels field is a
+// multi_conversations_select pre-selected with meta.ExposedChannels — adding a
+// channel exposes the tunnel there (it shows in that channel's `/qurl list`
+// and is mintable via `/qurl get`); removing one revokes it (except the
+// channel being edited from, which the submit handler always keeps).
 func TunnelEditModal(meta *TunnelEditModalMetadata, displayName string, aliases []string) ([]byte, error) {
 	privateMeta, err := json.Marshal(meta)
 	if err != nil {
@@ -284,37 +378,47 @@ func TunnelEditModal(meta *TunnelEditModalMetadata, displayName string, aliases 
 	if len(aliases) > 0 {
 		aliasInitial = "$" + strings.Join(aliases, "\n$")
 	}
+	label := editResourceLabel(meta.ResourceType)
 	payload := map[string]any{
 		blockKitFieldType:            blockKitTypeModal,
 		blockKitFieldCallbackID:      callbackIDTunnelEdit,
-		blockKitFieldTitle:           plainTextObj("Edit tunnel"),
+		blockKitFieldTitle:           plainTextObj("Edit " + label),
 		blockKitFieldSubmit:          plainTextObj("Save"),
 		blockKitFieldClose:           plainTextObj("Cancel"),
 		blockKitFieldPrivateMetadata: string(privateMeta),
 		blockKitFieldBlocks: []any{
-			contextBlock("Editing tunnel " + tunnelEditTokenLabel(meta.Token)),
+			contextBlock("Editing " + label + " " + editResourceTokenLabel(meta.Token, meta.ResourceType)),
 			// Optional: a Display Name is not mandatory (a tunnel can have none,
 			// and `/qurl-admin unset-display-name` clears it), so a required field
 			// would block an alias-only edit on an unnamed tunnel — the empty input
 			// pre-fills empty and Slack would refuse submission. With the
 			// changed-only diff, an empty submission on an empty-named tunnel is a
 			// no-op (normalizes to "" == "" → nameChanged=false → PATCH skipped).
-			inputBlock(tunnelEditBlockDisplayName, "Display name", "Optional. Shown next to the tunnel in /qurl list.", true,
+			inputBlock(tunnelEditBlockDisplayName, "Display name", "Optional. Shown next to this resource in /qurl list.", true,
 				plainTextInput(tunnelEditActionDisplayName, "Prod dashboard", displayName)),
-			inputBlock(tunnelEditBlockAliases, "Channel aliases", "Optional. One alias per line (e.g. $staging). These are extra names that resolve to this tunnel in this channel; the tunnel's own name always works and isn't listed here. Clear a line to remove that alias.", true,
+			inputBlock(tunnelEditBlockAliases, "Channel aliases", "Optional. One alias per line (e.g. $staging). These are extra names that resolve to this resource in this channel. Clear a line to remove that alias.", true,
 				multilinePlainTextInput(tunnelEditActionAliases, "$staging\n$db", aliasInitial)),
+			inputBlock(tunnelEditBlockChannels, "Channels", "Channels where this resource shows in /qurl list and can be minted with /qurl get. The channel you're editing from always keeps access. Add channels to protect it there; remove one to revoke it.", true,
+				multiConversationsSelect(tunnelEditActionChannels, meta.ExposedChannels)),
 		},
 	}
 	return json.Marshal(payload)
 }
 
-// tunnelEditTokenLabel renders the edited tunnel's `$<token>` for the modal
+func editResourceLabel(resourceType string) string {
+	if resourceType == client.ResourceTypeURL {
+		return "URL resource"
+	}
+	return "qURL Connector"
+}
+
+// editResourceTokenLabel renders the edited resource's `$<token>` for the modal
 // context line. The token is a charset-validated slug/alias, but it is escaped
 // for the mrkdwn code span as defense-in-depth (same posture as the rebind
 // modal's target labels).
-func tunnelEditTokenLabel(token string) string {
+func editResourceTokenLabel(token, resourceType string) string {
 	if token == "" {
-		return "this tunnel"
+		return "this " + editResourceLabel(resourceType)
 	}
 	return "`$" + escapeMrkdwnCode(token) + "`"
 }
@@ -365,6 +469,15 @@ func escapeMrkdwnCode(s string) string {
 	return mrkdwnCodeEscaper.Replace(s)
 }
 
+// escapeMrkdwnText escapes user-controlled text that is interpolated directly
+// into Slack mrkdwn (not inside an inline code span). Slack requires escaping
+// &, <, and >; backticks, hard line breaks, and cosmetic formatting markers are
+// neutralized too so a displayed value cannot open a code span, split a row, or
+// apply bold/italic/strike formatting to the surrounding message.
+func escapeMrkdwnText(s string) string {
+	return mrkdwnTextEscaper.Replace(s)
+}
+
 // mrkdwnCodeEscaper is the single-pass substitution table used by
 // `escapeMrkdwnCode`. Defined at package scope so the replacer is
 // constructed once at init rather than per-call. Order matters in
@@ -373,6 +486,19 @@ func escapeMrkdwnCode(s string) string {
 // two. (`\n` and `\r` standalone are handled by their own entries.)
 var mrkdwnCodeEscaper = strings.NewReplacer(
 	"`", "ˊ",
+	"\r\n", " ",
+	"\n", " ",
+	"\r", " ",
+)
+
+var mrkdwnTextEscaper = strings.NewReplacer(
+	"&", "&amp;",
+	"<", "&lt;",
+	">", "&gt;",
+	"`", "ˊ",
+	"*", "∗",
+	"_", "＿",
+	"~", "～",
 	"\r\n", " ",
 	"\n", " ",
 	"\r", " ",
@@ -388,9 +514,9 @@ var mrkdwnCodeEscaper = strings.NewReplacer(
 // plan); false for direct slash-command response bodies.
 func ErrorResponse(message string, replaceOriginal bool) ([]byte, error) {
 	payload := map[string]any{
-		respFieldResponseType: respTypeEphemeral,
-		"replace_original":    replaceOriginal,
-		respFieldText:         ":warning: " + message,
+		respFieldResponseType:    respTypeEphemeral,
+		respFieldReplaceOriginal: replaceOriginal,
+		respFieldText:            ":warning: " + message,
 	}
 	return json.Marshal(payload)
 }
@@ -402,11 +528,23 @@ func ErrorResponse(message string, replaceOriginal bool) ([]byte, error) {
 // shape is verbose.
 func sectionBlock(text string) map[string]any {
 	return map[string]any{
-		"type": "section",
-		"text": map[string]any{
-			"type": "mrkdwn",
-			"text": text,
+		blockKitFieldType: blockKitTypeSection,
+		blockKitFieldText: map[string]any{
+			blockKitFieldType: blockKitTypeMrkdwn,
+			blockKitFieldText: text,
 		},
+	}
+}
+
+// headerBlock returns a `header` block — Slack's large, bold title text. Its
+// text object must be plain_text, so `:emoji:` shortcodes render but mrkdwn
+// (e.g. `*bold*`) does not. Slack silently rejects a `header` whose text
+// exceeds 150 characters, so a caller passing a dynamic string must keep it
+// short; today the only caller uses the short [listHeaderBlockText] constant.
+func headerBlock(text string) map[string]any {
+	return map[string]any{
+		blockKitFieldType: "header",
+		blockKitFieldText: plainTextObj(text),
 	}
 }
 
@@ -423,14 +561,14 @@ func sectionBlock(text string) map[string]any {
 // Callers pass raw, already-validated snippet text.
 func richTextPreformattedBlock(code string) map[string]any {
 	return map[string]any{
-		"type": "rich_text",
+		blockKitFieldType: "rich_text",
 		blockKitFieldElements: []any{
 			map[string]any{
-				"type": "rich_text_preformatted",
+				blockKitFieldType: "rich_text_preformatted",
 				blockKitFieldElements: []any{
 					map[string]any{
-						"type": "text",
-						"text": code,
+						blockKitFieldType: "text",
+						blockKitFieldText: code,
 					},
 				},
 			},
@@ -438,34 +576,95 @@ func richTextPreformattedBlock(code string) map[string]any {
 	}
 }
 
-// sectionWithButton returns a `section` block whose accessory is a
-// button. Slack renders an accessory to the RIGHT of the section text —
-// Block Kit has no leading/left accessory slot, so the right-aligned
-// accessory is the idiomatic "one action per row" shape. `value` rides
-// along on the button and is echoed back in the block_actions payload
-// when the button is clicked, so the handler knows which row was tapped.
-func sectionWithButton(text, buttonText, actionID, value string) map[string]any {
+// sectionWithAccessory returns a `section` block with the given element as its
+// accessory. Slack renders an accessory to the RIGHT of the section text —
+// Block Kit has no leading/left accessory slot, so the right-aligned accessory
+// is the idiomatic "one action per row" shape. For a button accessory the
+// `value` rides along and is echoed back in the block_actions payload when the
+// button is clicked, so the handler knows which row was tapped.
+func sectionWithAccessory(text string, accessory map[string]any) map[string]any {
 	return map[string]any{
-		"type": "section",
-		"text": map[string]any{
-			"type": "mrkdwn",
-			"text": text,
+		blockKitFieldType: blockKitTypeSection,
+		blockKitFieldText: map[string]any{
+			blockKitFieldType: blockKitTypeMrkdwn,
+			blockKitFieldText: text,
 		},
-		"accessory": buttonElement(buttonText, actionID, value),
+		"accessory": accessory,
 	}
 }
 
 // buttonElement returns a `button` block element: an action_id plus an opaque
 // `value` echoed back in the block_actions payload when the button is clicked.
-// Used both as a section accessory (sectionWithButton) and inside an
+// Used both as a section accessory (sectionWithAccessory) and inside an
 // actionsBlock (the multi-button admin `/qurl list` rows).
 func buttonElement(buttonText, actionID, value string) map[string]any {
 	return map[string]any{
-		"type":                "button",
-		"text":                plainTextObj(buttonText),
+		blockKitFieldType:     "button",
+		blockKitFieldText:     plainTextObj(buttonText),
 		blockKitFieldActionID: actionID,
 		blockKitFieldValue:    value,
 	}
+}
+
+// urlButtonElement returns a `button` block element whose `url` opens directly
+// in the user's browser on click — Slack's native link-button behavior — rather
+// than round-tripping a block_action to the app like [buttonElement]. An
+// action_id still rides along so the click is routable and shows up in
+// [blockActionIDs] logging; there is no `value` because a link button carries no
+// server-side payload. NOTE: Slack still delivers a block_actions interaction
+// when a url button is clicked, so the action_id MUST be a benign no-op in
+// handleBlockActions (the unrecognized-action `200 OK` path handles this).
+func urlButtonElement(buttonText, actionID, url string) map[string]any {
+	return map[string]any{
+		blockKitFieldType:     "button",
+		blockKitFieldText:     plainTextObj(buttonText),
+		blockKitFieldActionID: actionID,
+		"url":                 url,
+	}
+}
+
+// primaryURLButtonElement is a [urlButtonElement] rendered with Slack's `primary`
+// (filled) style — the URL-button analog of [primaryButtonElement], used for the
+// headline "Enter Portal" link on a minted qURL.
+func primaryURLButtonElement(buttonText, actionID, url string) map[string]any {
+	b := urlButtonElement(buttonText, actionID, url)
+	b["style"] = blockKitStylePrimary
+	return b
+}
+
+// primaryButtonElement is a [buttonElement] rendered with Slack's `primary`
+// (filled) style — used for the headline "Create qURL" action so it reads
+// above the secondary Edit button on admin `/qurl list` rows.
+func primaryButtonElement(buttonText, actionID, value string) map[string]any {
+	b := buttonElement(buttonText, actionID, value)
+	b["style"] = blockKitStylePrimary
+	return b
+}
+
+// dangerButtonElement is a [buttonElement] rendered with Slack's `danger`
+// (red) style — used for the destructive "Revoke" action on admin `/qurl list`
+// rows, against the green `primary` "Create qURL". Pair it with
+// [withConfirmDialog] so the action can't fire on a stray click.
+func dangerButtonElement(buttonText, actionID, value string) map[string]any {
+	b := buttonElement(buttonText, actionID, value)
+	b["style"] = blockKitStyleDanger
+	return b
+}
+
+// withConfirmDialog attaches a Slack confirm dialog to a button element so the
+// block_action only fires after the user confirms — Slack renders it as a
+// modal-style popup. The confirm button inherits the `danger` (red) style for
+// destructive actions. title/confirmLabel are plain_text; text is mrkdwn.
+// Mutates and returns button for call-site chaining.
+func withConfirmDialog(button map[string]any, title, text, confirmLabel string) map[string]any {
+	button["confirm"] = map[string]any{
+		"title":           plainTextObj(title),
+		blockKitFieldText: map[string]any{blockKitFieldType: blockKitTypeMrkdwn, blockKitFieldText: text},
+		"confirm":         plainTextObj(confirmLabel),
+		"deny":            plainTextObj("Cancel"),
+		"style":           blockKitStyleDanger,
+	}
+	return button
 }
 
 // actionsBlock returns an `actions` block holding the given button elements as
@@ -487,12 +686,26 @@ func actionsBlock(elements ...map[string]any) map[string]any {
 // Used for the "subtext" rows in modals (e.g. the `:lock:` warning).
 func contextBlock(text string) map[string]any {
 	return map[string]any{
-		"type": "context",
+		blockKitFieldType: "context",
 		blockKitFieldElements: []any{
 			map[string]any{
-				"type": "mrkdwn",
-				"text": text,
+				blockKitFieldType: blockKitTypeMrkdwn,
+				blockKitFieldText: text,
 			},
+		},
+	}
+}
+
+// plainTextContextBlock is contextBlock's plain_text sibling: a `context` block
+// with a single plain_text element, so Slack does no mrkdwn parsing on it. The
+// confirm card uses it for its fixed AI-provenance subtext, keeping the card's
+// "no mrkdwn next to the Approve button" invariant (the summary/reason render
+// plain_text for the same injection-defense reason).
+func plainTextContextBlock(text string) map[string]any {
+	return map[string]any{
+		blockKitFieldType: "context",
+		blockKitFieldElements: []any{
+			plainTextObj(text),
 		},
 	}
 }
@@ -502,18 +715,18 @@ func contextBlock(text string) map[string]any {
 // title/submit/close fields require `plain_text` specifically.
 func plainTextObj(text string) map[string]any {
 	return map[string]any{
-		"type":  "plain_text",
-		"text":  text,
-		"emoji": true,
+		blockKitFieldType: "plain_text",
+		blockKitFieldText: text,
+		"emoji":           true,
 	}
 }
 
 func inputBlock(blockID, label, hint string, optional bool, element map[string]any) map[string]any {
 	block := map[string]any{
-		"type":     "input",
-		"block_id": blockID,
-		"label":    plainTextObj(label),
-		"element":  element,
+		blockKitFieldType: "input",
+		"block_id":        blockID,
+		"label":           plainTextObj(label),
+		"element":         element,
 	}
 	if hint != "" {
 		block["hint"] = plainTextObj(hint)
@@ -526,7 +739,7 @@ func inputBlock(blockID, label, hint string, optional bool, element map[string]a
 
 func plainTextInput(actionID, placeholder, initialValue string) map[string]any {
 	element := map[string]any{
-		"type":                "plain_text_input",
+		blockKitFieldType:     "plain_text_input",
 		blockKitFieldActionID: actionID,
 	}
 	if placeholder != "" {
@@ -547,17 +760,255 @@ func multilinePlainTextInput(actionID, placeholder, initialValue string) map[str
 }
 
 func staticSelect(actionID string, options []map[string]any, initial map[string]any) map[string]any {
-	return map[string]any{
-		"type":                "static_select",
+	element := map[string]any{
+		blockKitFieldType:     "static_select",
 		blockKitFieldActionID: actionID,
 		"options":             options,
-		"initial_option":      initial,
 	}
+	// Omit initial_option when nil — Slack rejects `"initial_option": null`. A
+	// nil initial means "no pre-selection" (the URL-protect picker forces a
+	// deliberate choice); a non-nil one pre-selects (e.g. the connector
+	// installer's environment default). Mirrors multiConversationsSelect's guard.
+	if initial != nil {
+		element["initial_option"] = initial
+	}
+	return element
+}
+
+func radioButtons(actionID string, options []map[string]any, initial map[string]any) map[string]any {
+	element := map[string]any{
+		blockKitFieldType:     "radio_buttons",
+		blockKitFieldActionID: actionID,
+		"options":             options,
+	}
+	if initial != nil {
+		element["initial_option"] = initial
+	}
+	return element
+}
+
+// multiConversationsSelect returns a multi_conversations_select element — used
+// by the edit modal's "expose to channels" field. It is filtered to public and
+// private channels (DMs/group-DMs and externally-shared channels aren't
+// tunnel-exposure targets) and pre-selects initialConversations. An empty
+// initial set omits the initial_conversations key entirely — Slack rejects an
+// empty array there.
+func multiConversationsSelect(actionID string, initialConversations []string) map[string]any {
+	element := map[string]any{
+		blockKitFieldType:     blockKitTypeMultiConvSelect,
+		blockKitFieldActionID: actionID,
+		"placeholder":         plainTextObj("Select channels"),
+		"filter": map[string]any{
+			"include":                          []any{"public", "private"},
+			"exclude_external_shared_channels": true,
+		},
+	}
+	if len(initialConversations) > 0 {
+		conv := make([]any, len(initialConversations))
+		for i, c := range initialConversations {
+			conv[i] = c
+		}
+		element["initial_conversations"] = conv
+	}
+	return element
 }
 
 func optionObj(text, value string) map[string]any {
 	return map[string]any{
-		"text":             plainTextObj(text),
+		blockKitFieldText:  plainTextObj(text),
 		blockKitFieldValue: value,
 	}
+}
+
+func optionObjWithDescription(text, value, description string) map[string]any {
+	option := optionObj(text, value)
+	option["description"] = plainTextObj(description)
+	return option
+}
+
+// plainTextSectionBlock returns a `section` block whose text is a plain_text
+// object. Slack does NO mrkdwn parsing on plain_text, so embedded `<…>` mention
+// syntax (`<!channel>`, `<@U…>`) and `*`/`_` render literally — that is the
+// reason free-form feedback (summary/details) is rendered through here rather
+// than sectionBlock: it neutralizes mention/link injection from user text into
+// the operator-visible feedback channel.
+func plainTextSectionBlock(text string) map[string]any {
+	return map[string]any{
+		blockKitFieldType: blockKitTypeSection,
+		blockKitFieldText: plainTextObj(text),
+	}
+}
+
+// Feedback modal block/action IDs and input bounds. The bounds are enforced
+// client-side via the inputs' max_length AND re-checked in
+// parseFeedbackModalArgs so a crafted submission cannot exceed them.
+const (
+	feedbackBlockType     = "feedback_type"
+	feedbackActionType    = "feedback_type_select"
+	feedbackBlockSummary  = "feedback_summary"
+	feedbackActionSummary = "feedback_summary_input"
+	feedbackBlockDetails  = "feedback_details"
+	feedbackActionDetails = "feedback_details_input"
+
+	// Character (rune) caps, both well under Slack's 3000-char text-object
+	// limit so the summary/details render in single section blocks.
+	feedbackSummaryMaxLen = 150
+	feedbackDetailsMaxLen = 2800
+)
+
+// Feedback type option values. Stable lowercase tokens chosen to map cleanly
+// onto the GitHub labels the triage routine applies (e.g. type:bug), so the
+// value travels unchanged from modal selection to issue label.
+const (
+	feedbackTypeBug     = "bug"
+	feedbackTypeFeature = "feature"
+	feedbackTypeOther   = "other"
+)
+
+// FeedbackModalMetadata is carried through Slack private_metadata from the
+// `/qurl feedback` slash command that opened the modal to the later
+// view_submission. It captures the submitter attribution at open time — the
+// view_submission payload only carries team/user IDs, not the human-readable
+// handle/workspace — plus the slash command's response_url so the async post
+// can confirm receipt (or report a delivery failure) back in the channel the
+// command was run from. No freshness TTL: feedback mints no secret and is
+// idempotent, so a late submission just posts the same note (the response_url
+// confirmation may simply have expired, which is harmless).
+type FeedbackModalMetadata struct {
+	TeamID       string `json:"team_id"`
+	TeamDomain   string `json:"team_domain,omitempty"`
+	UserID       string `json:"user_id"`
+	UserName     string `json:"user_name,omitempty"`
+	ChannelID    string `json:"channel_id,omitempty"`
+	ChannelName  string `json:"channel_name,omitempty"`
+	EnterpriseID string `json:"enterprise_id,omitempty"`
+	ResponseURL  string `json:"response_url"`
+}
+
+// FeedbackModal renders the `/qurl feedback` modal: a type select, a short
+// required summary, and optional free-form details. The context line warns
+// against pasting secrets because submissions land in an operator-visible
+// internal channel (see Handler.processFeedback).
+func FeedbackModal(meta *FeedbackModalMetadata) ([]byte, error) {
+	privateMeta, err := json.Marshal(meta)
+	if err != nil {
+		return nil, fmt.Errorf("marshal private_metadata: %w", err)
+	}
+	if len(privateMeta) > slackPrivateMetadataMaxBytes {
+		return nil, fmt.Errorf("private_metadata exceeds Slack limit: %d bytes", len(privateMeta))
+	}
+	summaryInput := plainTextInput(feedbackActionSummary, "Short summary of the bug or idea", "")
+	summaryInput["max_length"] = feedbackSummaryMaxLen
+	detailsInput := multilinePlainTextInput(feedbackActionDetails, "Steps to reproduce, what you expected, or extra context", "")
+	detailsInput["max_length"] = feedbackDetailsMaxLen
+	payload := map[string]any{
+		blockKitFieldType:            blockKitTypeModal,
+		blockKitFieldCallbackID:      callbackIDFeedback,
+		blockKitFieldTitle:           plainTextObj("Send feedback"),
+		blockKitFieldSubmit:          plainTextObj("Send"),
+		blockKitFieldClose:           plainTextObj("Cancel"),
+		blockKitFieldPrivateMetadata: string(privateMeta),
+		blockKitFieldBlocks: []any{
+			contextBlock("Goes straight to the qURL team. Please don't include qURL keys, tokens, or other secrets."),
+			inputBlock(feedbackBlockType, "Type", "", false,
+				staticSelect(feedbackActionType, []map[string]any{
+					optionObj("Bug report", feedbackTypeBug),
+					optionObj("Feature request", feedbackTypeFeature),
+					optionObj("Something else", feedbackTypeOther),
+				}, optionObj("Bug report", feedbackTypeBug))),
+			inputBlock(feedbackBlockSummary, "Summary", "", false, summaryInput),
+			inputBlock(feedbackBlockDetails, "Details", "Optional", true, detailsInput),
+		},
+	}
+	return json.Marshal(payload)
+}
+
+// FeedbackErrorModal replaces a submitted feedback modal with a form-level
+// error for the rare structural failures (forged/stale metadata, missing
+// wiring) that aren't tied to a specific input field. Per-field validation
+// problems use response_action:errors via respondViewErrors instead.
+func FeedbackErrorModal(message string) ([]byte, error) {
+	payload := map[string]any{
+		blockKitFieldType:  blockKitTypeModal,
+		blockKitFieldTitle: plainTextObj("Send feedback"),
+		blockKitFieldClose: plainTextObj("Close"),
+		blockKitFieldBlocks: []any{
+			sectionBlock(":warning: " + message),
+		},
+	}
+	return json.Marshal(payload)
+}
+
+// FeedbackMessage builds the Block Kit payload posted to the internal feedback
+// channel via the Slack incoming webhook. The user-provided summary and details
+// render as plain_text blocks (see plainTextSectionBlock) so Slack performs no
+// mrkdwn parsing on them; the fixed labels and the attribution line render as
+// mrkdwn, with the Slack-supplied attribution values escaped because user_name /
+// team_domain — while Slack-issued — sit outside this code's trust boundary. The
+// `text` fallback is kept free of user content so the channel's push
+// notification can't be used to smuggle a mention out of feedback text.
+func FeedbackMessage(meta *FeedbackModalMetadata, typeValue, summary, details string) ([]byte, error) {
+	emoji, label, ok := feedbackTypeDisplay(typeValue)
+	if !ok {
+		return nil, fmt.Errorf("unknown feedback type %q", typeValue)
+	}
+	blocks := []any{
+		headerBlock(emoji + " " + label),
+		plainTextSectionBlock(summary),
+	}
+	if details != "" {
+		blocks = append(blocks,
+			contextBlock("*Details*"),
+			plainTextSectionBlock(details),
+		)
+	}
+	blocks = append(blocks, contextBlock(feedbackAttribution(meta)))
+	payload := map[string]any{
+		blockKitFieldBlocks: blocks,
+		respFieldText:       "New qURL feedback — " + label,
+	}
+	return json.Marshal(payload)
+}
+
+// feedbackTypeDisplay maps a stored feedback type value to its header emoji and
+// label. ok is false for an unrecognized value, which parseFeedbackModalArgs
+// treats as a field error and FeedbackMessage as a render error.
+func feedbackTypeDisplay(typeValue string) (emoji, label string, ok bool) {
+	switch typeValue {
+	case feedbackTypeBug:
+		return ":beetle:", "Bug report", true
+	case feedbackTypeFeature:
+		return ":bulb:", "Feature request", true
+	case feedbackTypeOther:
+		return ":speech_balloon:", "Feedback", true
+	default:
+		return "", "", false
+	}
+}
+
+// feedbackAttribution renders the submitter context line. It pairs the
+// human-readable Slack handle / workspace domain (for the team triaging in
+// Slack) with the stable team/user IDs (the triage routine's join keys and the
+// GitHub-issue attribution). Every dynamic value is escaped for the mrkdwn code
+// span it sits in.
+func feedbackAttribution(meta *FeedbackModalMetadata) string {
+	userLabel := strings.TrimSpace(meta.UserName)
+	if userLabel == "" {
+		userLabel = meta.UserID
+	}
+	workspaceLabel := strings.TrimSpace(meta.TeamDomain)
+	if workspaceLabel == "" {
+		workspaceLabel = meta.TeamID
+	}
+	var b strings.Builder
+	b.WriteString("From `")
+	b.WriteString(escapeMrkdwnCode(userLabel))
+	b.WriteString("` in workspace `")
+	b.WriteString(escapeMrkdwnCode(workspaceLabel))
+	b.WriteString("` · user_id `")
+	b.WriteString(escapeMrkdwnCode(meta.UserID))
+	b.WriteString("` · team_id `")
+	b.WriteString(escapeMrkdwnCode(meta.TeamID))
+	b.WriteString("`")
+	return b.String()
 }

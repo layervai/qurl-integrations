@@ -1,6 +1,3 @@
-/**
- * Tests for src/templates/page.js
- */
 
 jest.mock('../src/constants', () => ({
   COLORS: {
@@ -9,11 +6,8 @@ jest.mock('../src/constants', () => ({
     WARNING: 0xF39C12,
     ERROR: 0xE74C3C,
   },
-  // Required by qurl-webhook-registrar (transitively loaded via
-  // qurl-webhook route → server.js). Keep the wire literal exact —
-  // qurl-service rejects any other event-type string.
-  QURL_WEBHOOK_EVENTS: { ACCESSED: 'qurl.accessed' },
-  // Required by qurl-webhook route — receiver-side audit-event keys.
+  QURL_WEBHOOK_EVENTS: { ACCESSED: 'qurl.accessed', EXPIRED: 'qurl.expired' },
+  DM_STATUS: { SENT: 'sent' },
   AUDIT_EVENTS: {
     QURL_WEBHOOK_RATE_LIMITED: 'qurl_webhook_rate_limited',
     QURL_WEBHOOK_SIGNATURE_INVALID: 'qurl_webhook_signature_invalid',
@@ -24,6 +18,10 @@ jest.mock('../src/constants', () => ({
 
 const { renderPage } = require('../src/templates/page');
 
+function renderTestPage(options) {
+  return renderPage({ cspNonce: 'test-nonce', ...options });
+}
+
 describe('server error handler and startServer', () => {
   it('startServer function exists and is callable', () => {
     const { startServer } = require('../src/server');
@@ -33,8 +31,30 @@ describe('server error handler and startServer', () => {
 });
 
 describe('renderPage', () => {
+  it('renders a nonce on its inline stylesheet', () => {
+    const html = renderTestPage({
+      title: 'Test',
+      icon: '✅',
+      heading: 'H',
+      message: 'M',
+    });
+
+    expect(html).toContain('<style nonce="test-nonce">');
+    expect(html).not.toContain('Content-Security-Policy');
+    expect(html).not.toContain('unsafe-inline');
+  });
+
+  it('requires a valid CSP nonce', () => {
+    expect(() => renderPage({
+      title: 'Test',
+      icon: '✅',
+      heading: 'H',
+      message: 'M',
+    })).toThrow(/CSP nonce/);
+  });
+
   it('renders a success page with all fields', () => {
-    const html = renderPage({
+    const html = renderTestPage({
       title: 'Test Success',
       icon: '✅',
       heading: 'All Good',
@@ -53,7 +73,7 @@ describe('renderPage', () => {
   });
 
   it('renders an error page without subtext or discord button', () => {
-    const html = renderPage({
+    const html = renderTestPage({
       title: 'Test Error',
       icon: '❌',
       heading: 'Something Failed',
@@ -68,7 +88,7 @@ describe('renderPage', () => {
   });
 
   it('renders a warning page', () => {
-    const html = renderPage({
+    const html = renderTestPage({
       title: 'Warning',
       icon: '⚠',
       heading: 'Watch Out',
@@ -80,7 +100,7 @@ describe('renderPage', () => {
   });
 
   it('defaults to info type for unknown type', () => {
-    const html = renderPage({
+    const html = renderTestPage({
       title: 'Unknown',
       icon: '?',
       heading: 'Hmm',
@@ -92,7 +112,7 @@ describe('renderPage', () => {
   });
 
   it('defaults to info type when type is omitted', () => {
-    const html = renderPage({
+    const html = renderTestPage({
       title: 'Default',
       icon: 'ℹ',
       heading: 'Info',
@@ -103,7 +123,7 @@ describe('renderPage', () => {
   });
 
   it('includes Open Discord link when showDiscordButton is true', () => {
-    const html = renderPage({
+    const html = renderTestPage({
       title: 'Test',
       icon: '✅',
       heading: 'H',
@@ -116,7 +136,7 @@ describe('renderPage', () => {
   });
 
   it('does not include Open Discord link when showDiscordButton is false', () => {
-    const html = renderPage({
+    const html = renderTestPage({
       title: 'Test',
       icon: '✅',
       heading: 'H',

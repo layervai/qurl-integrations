@@ -1,30 +1,43 @@
 package internal
 
 import (
+	"bytes"
+	"encoding/json"
 	"io"
 	"log/slog"
+	"strings"
+	"sync"
 	"testing"
+
+	"github.com/layervai/qurl-integrations/shared/client"
 )
 
 // Common keys for the qurl-service response envelope. Lifted to
 // constants in tests because goconst would otherwise flag the 4+
 // duplications across fixture builders.
 const (
-	testKeyData        = "data"
-	testKeyError       = "error"
-	testKeyAPIKey      = "api_key"
-	testKeyExpiresAt   = "expires_at"
-	testKeyKeyID       = "key_id"
-	testKeyPurpose     = "purpose"
-	testKeyResourceID  = "resource_id"
-	testKeySlug        = "slug"
-	testKeyStatus      = "status"
-	testKeyTitle       = "title"
-	testKeyTunnelSlug  = "tunnel_slug"
-	testKeyType        = "type"
-	testKeyTargetURL   = "target_url"
-	testKeyDescription = "description"
-	testResourceIDFix  = "r_prod_db" // canonical test resource_id
+	testKeyData               = "data"
+	testKeyError              = "error"
+	testKeyAPIKey             = "api_key"
+	testKeyExpiresAt          = "expires_at"
+	testKeyExpiresIn          = "expires_in"
+	testKeyKeyID              = "key_id"
+	testKeyKeyType            = "key_type"
+	testKeyKnockResourceID    = "knock_resource_id"
+	testKeyConnectorRoutingID = "connector_routing_id"
+	testKeyResourceID         = "resource_id"
+	testKeySlug               = "slug"
+	testKeyStatus             = "status"
+	testKeyTitle              = "title"
+	testKeyTunnelSlug         = "tunnel_slug"
+	testKeyType               = "type"
+	testKeyTargetURL          = "target_url"
+	testKeyDescription        = "description"
+	// A production-shaped public resource ID. Keeping the canonical get-flow
+	// fixture above the old r_ length ensures Slack and the shared client do not
+	// accidentally reintroduce the pre-cutover identifier contract.
+	testPublicResourceID = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEN4yvBX3yjAvYl9qagkStIWB1ie2gp_LF2Jy0w5AdxXefsTNLn9nrOlA4umKRiIQeGfvad9OFVoWa3PAIxcy4qg"
+	testResourceIDFix    = testPublicResourceID
 	// mintByTestResourcePath is the resource-scoped mint endpoint
 	// that `client.Create` hits when given a ResourceID (alias-form
 	// /qurl get). Lifted so the alias-form tests register their
@@ -38,4 +51,119 @@ const (
 // fixtures can pass a slog.Logger without polluting -v output.
 func slogTestLogger(_ *testing.T) *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+// capturedLogs is a concurrency-safe sink for the default slog logger. The
+// install path logs from a pool goroutine, so the buffer is read from a
+// different goroutine than the one that wrote it.
+type capturedLogs struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (c *capturedLogs) Write(p []byte) (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.buf.Write(p)
+}
+
+func (c *capturedLogs) contains(substr string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return strings.Contains(c.buf.String(), substr)
+}
+
+func (c *capturedLogs) String() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.buf.String()
+}
+
+// findAuditRecord returns the "audit" group of the first captured JSON log
+// record carrying the given event, or nil when none does. Non-JSON lines are
+// skipped rather than fatal: the captured sink sees every record the test
+// happens to produce, not only the one under assertion.
+func findAuditRecord(logs *capturedLogs, event string) map[string]any {
+	for _, line := range strings.Split(strings.TrimSpace(logs.String()), "\n") {
+		if line == "" {
+			continue
+		}
+		var record struct {
+			Audit map[string]any `json:"audit"`
+		}
+		if err := json.Unmarshal([]byte(line), &record); err != nil {
+			continue
+		}
+		if record.Audit != nil && record.Audit["event"] == event {
+			return record.Audit
+		}
+	}
+	return nil
+}
+
+// captureDefaultSlog redirects the default slog logger for one test and
+// restores it on cleanup. Async install work logs through slog.With off the
+// default logger, so this is the only seam that sees those records.
+func captureDefaultSlog(t *testing.T) *capturedLogs {
+	t.Helper()
+	logs := &capturedLogs{}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return logs
+}
+
+// kindFirstRejection is the stable prefix of the log line emitted when a mint
+// response does not confirm the kind-first contract and the install is failed
+// closed. It is deliberately only the prefix — the emitted line continues with
+// a remediation hint that is free to be reworded — and callers substring-match
+// it. Shared so the fires/silent assertions cannot drift apart.
+const kindFirstRejection = "tunnel install: minted credential did not confirm the kind-first contract"
+
+// assertAgentEnrollmentKind pins the decoded POST /v1/api-keys body to an
+// agent-target enrollment token (owner-scoped session-control enrollment).
+func assertAgentEnrollmentKind(t *testing.T, body map[string]any) {
+	t.Helper()
+	if body["kind"] != client.CredentialKindEnrollmentToken || body["target"] != client.CredentialTargetAgent {
+		t.Errorf("api key body = %+v, want kind=%q target=%q",
+			body, client.CredentialKindEnrollmentToken, client.CredentialTargetAgent)
+	}
+}
+
+// assertSingleConnectorClaim pins the decoded POST /v1/api-keys body to a
+// bound agent token: exactly one connector claim naming this install's slug.
+func assertSingleConnectorClaim(t *testing.T, body map[string]any, slug string) {
+	t.Helper()
+	claims, ok := body["claims"].([]any)
+	if !ok {
+		t.Errorf("api key claims = %v (%T), want a claims array; body=%+v", body["claims"], body["claims"], body)
+		return
+	}
+	if len(claims) != 1 {
+		t.Errorf("api key claims = %d entries, want exactly one connector claim; body=%+v", len(claims), body)
+		return
+	}
+	claim, ok := claims[0].(map[string]any)
+	if !ok {
+		t.Errorf("api key claim = %v, want an object; body=%+v", claims[0], body)
+		return
+	}
+	if claim[testKeyType] != client.CredentialClaimTypeConnector {
+		t.Errorf("api key claim type = %v, want %q; body=%+v", claim[testKeyType], client.CredentialClaimTypeConnector, body)
+	}
+	if claim["id"] != slug {
+		t.Errorf("api key claim id = %v, want %q; body=%+v", claim["id"], slug, body)
+	}
+}
+
+// assertNoRetiredCredentialFields pins the kind-first cutover: the retired
+// request fields must never reappear on the wire. They are no longer fields on
+// client.CreateAPIKeyInput, so this fires only if someone re-adds one.
+func assertNoRetiredCredentialFields(t *testing.T, body map[string]any) {
+	t.Helper()
+	for _, retired := range []string{testKeyKeyType, testKeyTunnelSlug, "scopes", "purpose"} {
+		if _, ok := body[retired]; ok {
+			t.Errorf("api key body contained retired %s field: %+v", retired, body)
+		}
+	}
 }

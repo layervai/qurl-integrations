@@ -106,7 +106,48 @@ func TestPostResponseBodyDrainsOversizedErrorBody(t *testing.T) {
 	}
 }
 
-func TestDeleteOriginalResponseRetryHonorsBaseContextCancellation(t *testing.T) {
+// TestReplaceOriginalResponsePayload is the regression guard for the prod
+// `no_text` 500: delete_original is unsupported for slash commands, so the
+// wizard cleanup MUST replace (carry text) rather than delete. This asserts the
+// posted body shape — it fails against the old `{"delete_original": true}`
+// payload, which had no `text` and is exactly what Slack rejected.
+func TestReplaceOriginalResponsePayload(t *testing.T) {
+	t.Parallel()
+
+	var gotBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+
+	h := &Handler{
+		baseCtx:               context.Background(),
+		responseURLClient:     srv.Client(),
+		validateResponseURLFn: url.Parse,
+	}
+
+	const msg = ":white_check_mark: Opened the form."
+	if !h.replaceOriginalResponse(slog.New(slog.NewTextHandler(io.Discard, nil)), srv.URL, msg) {
+		t.Fatal("replaceOriginalResponse returned false for HTTP 200")
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(gotBody, &payload); err != nil {
+		t.Fatalf("response_url body is not JSON: %v (body=%s)", err, gotBody)
+	}
+	if _, ok := payload["delete_original"]; ok {
+		t.Errorf("payload must not contain delete_original (unsupported for slash commands); got %v", payload)
+	}
+	if got, _ := payload["replace_original"].(bool); !got {
+		t.Errorf("replace_original = %v, want true", payload["replace_original"])
+	}
+	if got, _ := payload[respFieldText].(string); got != msg {
+		t.Errorf("%s = %q, want %q", respFieldText, payload[respFieldText], msg)
+	}
+}
+
+func TestReplaceOriginalResponseRetryHonorsBaseContextCancellation(t *testing.T) {
 	t.Parallel()
 
 	var hits atomic.Int32
@@ -125,18 +166,62 @@ func TestDeleteOriginalResponseRetryHonorsBaseContextCancellation(t *testing.T) 
 		validateResponseURLFn: url.Parse,
 	}
 
-	start := time.Now()
-	ok := h.deleteOriginalResponse(slog.New(slog.NewTextHandler(io.Discard, nil)), srv.URL)
-	elapsed := time.Since(start)
+	ok := h.replaceOriginalResponse(slog.New(slog.NewTextHandler(io.Discard, nil)), srv.URL, "msg")
 
 	if ok {
-		t.Fatal("deleteOriginalResponse returned true for HTTP 500")
+		t.Fatal("replaceOriginalResponse returned true for HTTP 500")
 	}
 	if got := hits.Load(); got != 1 {
 		t.Fatalf("response_url hits = %d, want 1 because canceled baseCtx skips retry", got)
 	}
-	if elapsed >= deleteOriginalRetryDelay/2 {
-		t.Fatalf("deleteOriginalResponse took %s with canceled baseCtx; retry sleep was not skipped", elapsed)
+}
+
+func TestPostResponseWithRetrySkipsPermanentHTTPFailure(t *testing.T) {
+	t.Parallel()
+
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"invalid_blocks"}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	h := &Handler{
+		baseCtx:               context.Background(),
+		responseURLClient:     srv.Client(),
+		validateResponseURLFn: url.Parse,
+	}
+
+	ok := h.postResponseWithRetry(slog.New(slog.NewTextHandler(io.Discard, nil)), srv.URL, "msg", "test_permanent")
+
+	if ok {
+		t.Fatal("postResponseWithRetry returned true for HTTP 400")
+	}
+	if got := hits.Load(); got != 1 {
+		t.Fatalf("response_url hits = %d, want 1 because HTTP 400 is permanent", got)
+	}
+}
+
+func TestWaitForResponseURLRetryReturnsImmediatelyWhenCanceled(t *testing.T) {
+	t.Parallel()
+
+	baseCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	h := &Handler{baseCtx: baseCtx}
+
+	done := make(chan bool, 1)
+	go func() {
+		done <- h.waitForResponseURLRetry()
+	}()
+
+	select {
+	case got := <-done:
+		if got {
+			t.Fatal("waitForResponseURLRetry returned true for canceled baseCtx")
+		}
+	case <-time.After(responseURLRetryDelay / 2):
+		t.Fatal("waitForResponseURLRetry slept despite canceled baseCtx")
 	}
 }
 
@@ -192,8 +277,8 @@ func getTokenCommandBody(teamID, triggerID, responseURL string) string {
 // against the resource-scoped endpoint. Used by the async-infra tests
 // in this file, which construct their *Handler with a bespoke Config
 // (custom pool size, retry, or BaseContext) and so can't share
-// newAdminTestHandler. The rate-limit gate is a stubbed always-allow
-// (slackdata.CheckRateLimit), so no rate-limit seed is needed.
+// newAdminTestHandler. The in-bot rate-limit gate is disabled by default
+// on this store, so no rate-limit seed is needed.
 func seedGetAliasBinding(t *testing.T, h *Handler, teamID string) {
 	t.Helper()
 	names := defaultTestTableNames()
@@ -570,11 +655,10 @@ func TestHandle_PanicInAsyncWorkRecovers(t *testing.T) {
 	})
 	h.now = func() time.Time { return fixedNow }
 	h.validateResponseURLFn = url.Parse
-	// Seed the alias so the worker resolves the token and reaches
-	// authenticatedClient, where panickingProvider.APIKey panics. The
-	// panic point sits AFTER alias resolution but BEFORE the rate-limit
-	// gate — without the seed the worker would fail closed at
-	// LookupChannelAlias and never exercise the recover defer.
+	// Seed the alias so the worker resolves the token, passes the rate-limit
+	// gate, and reaches authenticatedClient, where panickingProvider.APIKey
+	// panics. Without the seed the worker would fail closed at LookupChannelAlias
+	// (before the rate-limit gate) and never exercise the recover defer.
 	seedGetAliasBinding(t, h, "T123")
 
 	body := getTokenCommandBody("T123", "trig-panic", rec.URL)
@@ -597,6 +681,16 @@ func TestHandle_PanicInAsyncWorkRecovers(t *testing.T) {
 type panickingProvider struct{}
 
 func (panickingProvider) APIKey(_ context.Context, _ string) (string, error) {
+	panic("provider panic for test")
+}
+
+func (panickingProvider) SupportsDeleteAPIKey() bool {
+	// True is deliberate: this fake should stay on mutable-provider code paths
+	// if a test reaches uninstall, while still panicking for panic-recovery tests.
+	return true
+}
+
+func (panickingProvider) DeleteAPIKey(_ context.Context, _ string) error {
 	panic("provider panic for test")
 }
 
@@ -922,6 +1016,41 @@ func TestHandler_WaitTimeout_DrainsOnSuccess(t *testing.T) {
 	}
 }
 
+// TestHandler_WaitTimeout_ZeroBudgetNoWorkers locks the shutdown edge
+// case where lameduck + HTTP drain consume the full platform budget. A
+// zero remaining budget should not log a bogus async-drain timeout when
+// no workers are registered.
+func TestHandler_WaitTimeout_ZeroBudgetNoWorkers(t *testing.T) {
+	h := &Handler{}
+
+	if drained := h.WaitTimeout(0); !drained {
+		t.Errorf("WaitTimeout(0) returned false with no workers; want true")
+	}
+}
+
+// TestHandler_WaitTimeout_ZeroBudgetWithWorker verifies the zero-budget
+// fast path still reports timeout when a registered worker is actually
+// pending.
+func TestHandler_WaitTimeout_ZeroBudgetWithWorker(t *testing.T) {
+	h := &Handler{}
+	block := make(chan struct{})
+	registered := make(chan struct{})
+
+	h.Go(func() {
+		close(registered)
+		<-block
+	})
+	<-registered
+	t.Cleanup(func() {
+		close(block)
+		h.Wait()
+	})
+
+	if drained := h.WaitTimeout(0); drained {
+		t.Errorf("WaitTimeout(0) returned true with worker still parked; want false")
+	}
+}
+
 // TestHandle_PostResponseRefusesRedirectsEndToEnd is the end-to-end
 // counterpart to TestResponseURLClient_RefusesRedirects: it goes
 // through processCreate → postResponse so a regression that wired the
@@ -1004,5 +1133,41 @@ func TestHandle_ListExactMatchOnly(t *testing.T) {
 				t.Errorf("upstream qURL hits for %q: got %d, want 0", text, got)
 			}
 		})
+	}
+}
+
+// TestWithAPIErrorAttrs pins that a contract rejection's actionable context —
+// the request ID, status, code, detail, and the invalid_fields map naming the
+// offending key — reaches the log. APIError.Error() renders none of these
+// beyond title/status/detail, so without this helper a 400 from the kind-first
+// cutover would log as only "Bad Request (400)".
+func TestWithAPIErrorAttrs(t *testing.T) {
+	t.Parallel()
+
+	apiErr := &client.APIError{
+		StatusCode:    http.StatusBadRequest,
+		Code:          "invalid_field",
+		Title:         "Bad Request",
+		Detail:        "kind is required",
+		InvalidFields: map[string]string{"kind": "must not be empty"},
+		RequestID:     "req_kind",
+	}
+	got := fmt.Sprint(withAPIErrorAttrs(fmt.Errorf("mint: %w", apiErr), "slug", "acme")...)
+	for _, want := range []string{"req_kind", "400", "invalid_field", "kind is required", "must not be empty", "acme"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("attrs %q must contain %q", got, want)
+		}
+	}
+}
+
+// TestWithAPIErrorAttrsPassesThroughNonAPIError pins that a transport error
+// (no APIError in the chain) is left exactly as the caller passed it, so the
+// helper is safe to use at log sites that see both error classes.
+func TestWithAPIErrorAttrsPassesThroughNonAPIError(t *testing.T) {
+	t.Parallel()
+
+	attrs := withAPIErrorAttrs(errors.New("dial tcp: connection refused"), "slug", "acme")
+	if len(attrs) != 2 || attrs[0] != "slug" || attrs[1] != "acme" {
+		t.Errorf("attrs = %v, want the caller's attrs unchanged", attrs)
 	}
 }

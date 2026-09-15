@@ -1,0 +1,1139 @@
+# Operating the qURL Secure Access Agent for Slack
+
+This guide is for operators **running the Secure Access Agent themselves** — endpoints,
+environment variables, Slack app configuration, and local development. If
+you're a Slack user or workspace admin, you want the
+[README](../README.md) instead.
+
+## Command dispatch
+
+User commands live under `/qurl`; admin commands live under a separate
+`/qurl-admin` slash command. Both POST to the same request endpoint and share
+the same signature verification — Slack stamps which command was invoked in
+the `command` field, and the Secure Access Agent dispatches on it.
+
+**Deploy prerequisite:** `/qurl-admin` must be registered as a slash command
+in the Slack app config pointing at the **same request URL** as `/qurl`. The
+admin verbs are inert until that registration exists.
+
+Admin enforcement is **in-code** — every admin verb checks the qURL admin set
+(`admin_slack_user_ids`) via `requireAdminSync`, so the AdminStore must be
+wired. The "admins only" restriction on the `/qurl-admin` registration is a
+cosmetic Slack-picker hint, not the enforcement boundary (Slack does not gate
+slash-command invocation on workspace-admin role).
+
+`setup` is deliberately **not** an admin verb — it stays on `/qurl` so the
+first user to connect an unbound workspace can reach it (qURL is
+first-come-claims). The overwrite guard for an already-bound workspace lives
+at the OAuth-callback bind layer.
+
+## Architecture
+
+- **Runtime:** stateless HTTP service, shipped as a small container. Sits
+  behind a TLS-terminating load balancer that routes `/slack/*`,
+  `/oauth/slack/*`, `/oauth/qurl/*`, and `/health`.
+- **Auth:** per-workspace qURL API key, established via `/qurl setup <email>`
+  → `/oauth/qurl/start` → Auth0 → `/oauth/qurl/callback`. Supplying an email
+  address on setup stores it in signed state, sends Auth0 `login_hint`, and
+  requires the verified Auth0 email claim to match before any workspace bind
+  or key mint. The Secure Access Agent pins Auth0 `connection=email`
+  (passwordless) and `prompt=login consent` on every setup path, so the login
+  method is a property of this surface rather than of tenant configuration —
+  see the prompt/connection contract below. `AUTH0_EMAIL_CONNECTION` overrides
+  the connection name for a deployment that named its passwordless connection
+  differently. Tenant-level Actions still own cross-connection uniqueness:
+  pinning one connection removes the routine way a single human acquires two
+  subjects, but account-linking / duplicate-deny is still what reconciles a
+  human who already has identities on more than one connection. The callback's
+  security gate remains the verified email claim, not the connection pin by
+  itself. If a workspace already has a qURL API key and qurl-service
+  still accepts it, normal setup reuses that key instead of minting another one.
+  Explicit owner requests (`/qurl setup <email> --rotate` and `--repoint`) take
+  the rotation path instead. Both first strongly read the stored key identity in
+  one read — the qURL `key_id` and the `qurl_account_id` (the id_token `sub` that
+  minted the key) — then branch on whether the signed-in account still holds the
+  key:
+  - Same qURL account → revoke-then-replace: revoke the old `key_id` with the
+    freshly authenticated account, then mint and store the replacement plus its
+    new `key_id`. The replacement is minted through qURL's API-key endpoint, not
+    the external-binding create endpoint; the workspace binding remains in
+    qurl-service, and Slack's workspace operations authorize through the active
+    key's qURL scopes.
+  - Different qURL account → a cross-account move. qurl-service has no
+    tenant-facing binding transfer (cross-tenant refusal by design,
+    layervai/qurl-service#910), and the signed-in account cannot revoke the other
+    account's key, so Slack fails closed (no mint, no revoke — detecting this from
+    stored provenance also spares the doomed wrong-owner DELETE that a `--rotate`
+    on the wrong account would otherwise attempt), emits the
+    `setup_cross_account_repoint_requested` event with both account ids and the
+    `mode`, and routes the owner to the operator-assisted transfer
+    (qurl-integrations#790).
+  - Unknown provenance (a row with a key but no recorded `qurl_account_id`, e.g.
+    rows minted before this field) cannot prove same-vs-cross account. `--repoint`
+    fails closed there (emitting `setup_repoint_legacy_row_refused` so operators
+    can measure how often legacy rows block repoint); `--rotate` proceeds (it is
+    same-account by intent) and records the account for next time, which is how an
+    owner self-heals a legacy row so future `--repoint` works.
+  Rotation failure modes to expect:
+  - If the signed-in account cannot revoke the current key, rotation fails
+    closed before any replacement is minted.
+  - A stored row that predates key metadata (no `key_id`) rotates **without
+    revoking**, because Slack cannot identify the predecessor to revoke it.
+    For an on-call operator, the parts that matter:
+    - **What is left behind.** One live qURL key that Slack no longer
+      references, logged as `setup_rotate_legacy_row_orphaned_key` with the
+      owning `team_id`. Revoke it in qURL API-key management; until then it
+      counts against the account's API-key plan limit.
+    - **How often.** Once per workspace. The rotation records the new `key_id`
+      and the signed-in `qurl_account_id`, so the next rotation takes the
+      normal revoke-then-replace route and `--repoint` becomes possible. The
+      bound is one orphaned *key*, not one log line — concurrent rotations mint
+      idempotently but can each emit the event, so dedupe by `team_id`.
+    - **When it refuses.** A rotation with no verified qURL account fails
+      closed rather than storing empty provenance. `--repoint` never takes this
+      path at all; mint-without-revoke is scoped to `--rotate`.
+    - **At the plan limit.** Because nothing is revoked the rotation is net +1
+      key, so an account already at its limit fails the mint and sees a page
+      saying the previous key could not be identified and is still active —
+      not the normal rotation's "previous key was revoked".
+    - **Why not just refuse.** Refusing these rows (the previous behavior)
+      protected nothing: the only remaining route was `/qurl uninstall`, which
+      abandons the same key and also discards the Slack bot token and workspace
+      binding, so a customer following that path leaked one key per cycle.
+  - Missing or revoked legacy stored keys without key identity ask qURL to
+    provision the Slack workspace key; if qURL reports that the workspace is
+    already connected but the stored key cannot be recovered, setup stops with
+    admin-facing recovery guidance.
+  - Once Slack has stored a qURL `key_id`, an invalid stored key requires
+    explicit `--rotate`/`--repoint`; plain setup will not mint around that old
+    key identity because it may be the recovery path for a prior rotation
+    persist-failure.
+  - If the key was deleted at qURL rather than revoked, both plain setup and
+    Slack-side rotation fail closed until an operator verifies the stale key
+    identity or rotates the workspace key from qURL account/API-key management.
+  - Because rotation revokes before minting, a revoke-success/mint-failure
+    window leaves the workspace unable to use qURL until the owner retries
+    `--rotate`. DDB may still hold the old key value and `key_id`, but that key
+    is revoked, so workspace operations fail qurl-service validation until the
+    retry stores the replacement.
+  - If the replacement was minted but not stored, the retry uses qURL API-key
+    idempotency to recover and store the same replacement key instead of
+    spending another live key slot. That recovery is bounded by the qurl-service
+    API-key mint idempotency window; after it expires, a replacement that was
+    minted but never stored can become an orphan and must be revoked through
+    qURL account/API-key management or operator tooling before retrying.
+  If the callback reports that a qURL key was provisioned but not stored,
+  rerun `/qurl setup <email>` for the same workspace and qURL account within
+  qurl-service's configured external-binding idempotency window. qurl-service
+  currently owns a 24-hour default (`QURL_BINDING_IDEMPOTENCY_TTL_CONTRACT`,
+  source: layervai/qurl-service#904). The Slack task emits the same default
+  unless its own `QURL_BINDING_IDEMPOTENCY_TTL_CONTRACT` environment variable is
+  set to a canonical positive whole-hour duration such as `24h` at startup.
+  qURL can replay the setup key during that window. After the window expires,
+  if the stored Slack key is lost/revoked, or if the admin abandons setup, use
+  qURL account/API-key management or operator tooling to revoke the unused
+  workspace key before retrying; binding-level transfer/recovery for rows
+  without stored key metadata is tracked in layervai/qurl-service#910.
+  Rerunning setup without `--rotate`/`--repoint` is intentionally not a
+  healthy-key rotation or qURL-account switch command.
+  Every setup path — first install, `--rotate`, and `--repoint` — sends Auth0
+  `prompt=login consent` and pins `connection=email`. Both halves of `prompt`
+  are load-bearing: `login` stops an ambient Auth0 session (from the desktop
+  app, the dashboard, or a previous bot run) from authorizing the bind, so the
+  admin always re-authenticates, and `consent` stops Auth0 from reusing a prior
+  consent grant, which would let a re-run complete without issuing a new token.
+  A consent screen on its own proves consent, not identity.
+  Passwordless is the Slack login method, not a per-tenant choice. It is the
+  lowest-friction path for a workspace admin, and `email` is the connection
+  qurl-desktop pins for the same human, so both surfaces resolve to one Auth0
+  subject. That matters because qurl-service keys accounts on the id_token
+  `sub`: a different connection is a different qURL account.
+  `AUTH0_EMAIL_CONNECTION` remains an override for a deployment whose
+  passwordless connection is named something else.
+  **Deployment prerequisite:** because the connection is pinned rather than
+  hinted, the Auth0 application must have a passwordless connection named
+  `email` enabled before this ships — or `AUTH0_EMAIL_CONNECTION` must name
+  whatever it is called there. Nothing validates this at startup; the bot
+  cannot enumerate a tenant's connections, so a missing or differently-named
+  connection surfaces only as an Auth0 error at the `/authorize` redirect, and
+  it breaks **every** setup path (first install, `--rotate`, `--repoint`) for
+  every admin. Verify the connection name in the environment's Auth0
+  application, and run one `/qurl setup <email>` end to end, before promoting a
+  build carrying this pin.
+  Migration note: a workspace whose key was minted under a different connection
+  (for example Google) now signs in passwordless, so it authenticates as a
+  different `sub` and therefore a different qURL account. Provenance-bearing
+  rows fail closed on that with the cross-account page and route to the
+  operator-assisted transfer — the intended outcome, since the alternative was
+  silently rotating a workspace onto whichever account the browser happened to
+  hold. Rows with no recorded `qurl_account_id` have no such guard.
+  Keys are field-level encrypted at rest using KMS envelope encryption, with
+  `workspace_id` bound as AAD.
+  Rollout order: the Slack app may deploy before the qURL API binding route is
+  enabled; route-missing or dark-launch responses fall back to legacy key
+  provisioning. Avoid rolling the qURL API binding route back during an active
+  setup persist-failure retry window, because that retry can no longer replay
+  the binding key and will mint through the legacy fallback instead.
+- **Slack app install:** customer workspaces install qURL through
+  `/oauth/slack/install`, which redirects to Slack OAuth with the bot scopes
+  needed by the slash command and modal surfaces. The callback stores Slack's
+  workspace bot token using the same KMS envelope-encryption posture as qURL
+  API keys. `SLACK_BOT_TOKEN` is only a legacy single-workspace fallback;
+  customers do not manually provide bot tokens, and production guided setup
+  should use the per-workspace token captured by Slack install OAuth.
+  Enterprise Grid org-level installs are also supported: the enterprise-scoped
+  bot token is stored under the Slack `enterprise_id`, while qURL API keys and
+  admin state remain scoped to each invoking workspace's `team_id`.
+- **Owner handoff:** `/qurl-admin transfer-ownership @user` is owner-only
+  and rewrites only `workspace_mappings.owner_id`, adding the new owner to
+  `admin_slack_user_ids` if needed. The previous owner remains an admin until
+  someone removes them with `/qurl-admin remove @user`. The transfer does
+  **not** mutate qurl-service `workspace_keys` or the current `auth0_subject`;
+  the credential remains on the existing qURL account until the new owner runs
+  `/qurl setup`, where the normal rotate/repoint flow either refreshes on the
+  same account or routes a cross-account move to operator assistance. Existing
+  Slack installs must re-run the Slack install flow before this command can
+  verify targets, because ownership transfer requires the `users:read` bot
+  scope on a workspace-level bot token. The command intentionally does not fall
+  back to an Enterprise Grid org-level token: Slack `users.info` has no
+  workspace selector, so the org token would prove org visibility rather than
+  membership in the invoking workspace. qurl-integrations#877 tracks safe
+  Grid support for ownership transfer.
+- **Connector onboarding:** `/qurl-admin protect-connector` provisions a qURL
+  Connector sidecar.
+  - **Entry points** — a guided modal (opens with the bot token for the
+    invoking workspace; the admin chooses the qURL Connector ID, optional
+    channel alias, local port, and target environment: Docker, Docker Compose,
+    ECS/Fargate, or Kubernetes), or the typed
+    `/qurl-admin protect-connector <id>` (or `$id`) for CLI-style admins.
+  - **Backend work (both paths)** — use the workspace API key to
+    find-or-create a qURL Connector resource scoped to the connected qURL
+    account, require its public `resource_id`, DNS-safe
+    `connector_routing_id`, and NHP `knock_resource_id`, bind `$<id>` or the
+    `alias:` override in the current Slack channel, and only then mint a
+    one-hour, one-shot enrollment token bound to that Connector. This ordering
+    matters because successful NHP registration consumes the one-shot token.
+    When `alias:` is omitted, the ID doubles as the channel alias.
+  - **Idempotency** — retrying the install within the modal's 25-minute
+    validity window reuses the same enrollment-token idempotency bucket.
+    Retrying after that window can mint a new token, so operators should run the
+    newest Slack install block and discard older enrollment-token messages.
+  - **Output** — persists `resource_id` and `connector_routing_id`, renders a
+    strict one-route `share.yaml`, and is tailored to the selected environment.
+    Every customer workload runs the same `ghcr.io/layervai/qurl` image and
+    hidden `qurl daemon run` entrypoint; qurl-connector remains a Go runtime
+    module and is not a second binary or image.
+    - **Docker / Docker Compose** — guarded pasteable shell blocks write
+      `share.yaml`, install the one-time enrollment token as an owner-only file,
+      create/chown the per-share durable state directory, and run qurl with a
+      read-only root filesystem, bounded `/tmp`, all capabilities dropped,
+      no-new-privileges, a 512-process limit, and `unless-stopped` recovery.
+    - **ECS/Fargate / Kubernetes** — co-locate qurl with the target container,
+      mount durable state plus read-only config/token projections, and run as
+      UID/GID `65532:65532` with a read-only root filesystem. ECS keeps qurl
+      non-essential so an access-path failure cannot stop the customer app and
+      enables the platform container restart policy. Kubernetes uses
+      `runAsNonRoot` plus `fsGroup: 65532`; qurl creates its nested owner-only
+      identity directory inside the writable volume.
+  - **Warm-start transition** — after first registration, remove the
+    enrollment-token reference from the workload definition and prove a
+    replacement task/pod starts from durable agent state before deleting the
+    platform secret. Deleting an ECS Secrets Manager secret or Kubernetes
+    Secret while the active workload definition still references it prevents
+    replacement workloads from starting.
+  - **Token delivery** — the one-time enrollment token is never rendered in
+    argv or an environment variable. Docker and Compose prompt locally and
+    install an owner-only file; Kubernetes and ECS mount a read-only projected
+    secret file. The daemon consumes the token during first native enrollment,
+    never persists it, and warm starts use only the durable native state.
+  - **Constraint** — do not share one agent state volume across concurrently
+    running sidecars.
+  - **Promotion gate** — set `QURL_IMAGE` to the immutable digest published as
+    `qurl-image.txt` by the matching CLI release before promoting this Slack
+    build. Native NHP admission remains inside the qurl-connector runtime module;
+    public HTTPS registration/knock bridges are not supported.
+    As a fail-closed rollout guard, the Slack renderer rejects a legacy internal
+    `r_` resource label before minting an enrollment token; do not treat that guard
+    as a substitute for verifying the complete producer identity triple in
+    sandbox.
+  - **Endpoint migration** — before promotion, replace any `QURL_ENDPOINT` that
+    includes `/v1`, another path, or remote plaintext `http://`. Startup now
+    rejects those shapes; configure the HTTPS API origin only (for example,
+    `https://api.layerv.ai`). Plaintext remains limited to loopback
+    development endpoints.
+  - **Cleanup edge** — if the bot cannot confirm Slack delivery after minting
+    an enrollment token, it retries the final text post once, revokes the token, and
+    posts a discard notice when possible. Cleanup uses the handler's base
+    context so request cancellation does not strand a key, but process shutdown
+    can still interrupt the five-second cleanup window. If that happens, the
+    enrollment token remains bounded by its one-hour TTL; revoke it manually if
+    logs show `tunnel_bootstrap_cleanup_failed`.
+
+### Kind-first credential cutover
+
+The bot mints credentials with the kind-first `POST /v1/api-keys` contract:
+Connector enrollment sends `kind=enrollment_token` with `target=connector`, and
+the workspace key mint sends `kind=api_key` on the two paths that reach
+`/v1/api-keys` — the legacy fallback (taken when the binding route 404s without
+a code, or returns 503 `bindings_disabled`) and the replacement/rotation mint.
+The primary workspace path posts to `/v1/external-identity-bindings`, which is
+not kind-gated and is unaffected. There is no dual-send fallback, so
+**qurl-service must accept kind-first bodies in every API environment Slack
+talks to before this build is deployed there.**
+
+Symptoms of a deploy-order violation, and what to check:
+
+- **Guided Connector setup fails immediately with a 400.** The producer
+  predates the cutover. Connector enrollment logs `tunnel install: enrollment
+  token mint failed` with `status`, `code`, `detail`, and `invalid_fields`
+  naming the rejected key. The workspace mint hits this only on its
+  `/v1/api-keys` paths above, surfacing `qurl-service /v1/api-keys returned 400
+  code=… request_id=…`. Quote the `request_id` when escalating. The fix is to
+  roll the producer forward, not to retry — 400 is not retried by the shared
+  client.
+- **Setup fails after a successful mint, logging `tunnel install: minted
+  credential did not confirm the kind-first contract`.** The producer returned
+  200 but did not echo `kind` (or echoed a `target` that disagrees), so the bot
+  cannot confirm it minted a one-shot, Connector-bound enrollment token rather
+  than an ordinary workspace-scoped key. **The bot fails closed here**: it
+  revokes the credential, never DMs it, and points the admin at support rather
+  than a retry. The log line carries `resource_id`, `key_id`, and the
+  `got_`/`want_` kind and target values.
+
+  This is the in-band enforcement of the deploy-order gate, so it is expected
+  to be silent once every environment is on the kind-first API. If it fires,
+  the fix is to roll the producer forward — retrying will not clear it.
+
+  **The revoke is best-effort. If it fails (`tunnel_bootstrap_cleanup_failed`),
+  revoke the `key_id` by hand and do not wait for it to expire.** The usual
+  one-hour bound comes from the `expires_in` this bot requests, and a producer
+  that ignored the credential *kind* gives no assurance it honored the
+  *expiry* either — the credential may be long-lived or non-expiring, and it
+  may carry broader scopes than an enrollment token. Treat a failed cleanup
+  here as a live, potentially over-scoped credential.
+
+  Expect one `level=error` line per attempt while a pre-cutover producer is
+  still serving, so mute or scope any alert that pages on error level for this
+  message during the rollout window.
+
+  The Connector *resource* is created before this gate runs and is not removed
+  on rejection — the same as every other post-mint failure path (missing
+  plaintext, shell validation, DM delivery), which revoke the credential and
+  leave the resource for the retry to reuse via alias match. After a
+  deploy-order incident you may therefore have Connector resources with no
+  working enrollment; re-running setup for the same slug reuses them, or list
+  and delete unused ones in the qURL dashboard.
+
+  A producer that honors `kind` but simply omits `target` from the response is
+  **not** rejected — `target` is treated as corroborating, so a partial echo
+  cannot break every enrollment.
+
+### Enrollment-token DM live smoke
+
+Run this smoke before relying on Connector enrollment-token DM delivery in a new
+Slack app shape, especially an Enterprise Grid org install. Use a real admin
+user who has not already opened a DM with the bot when possible. The smoke posts
+only non-secret text; do not paste enrollment tokens into the command or result.
+Any `-text` value is sent to Slack, so keep it short, non-secret, and at most
+4000 bytes after cleanup. The message text is not written to the JSON evidence.
+Line breaks, tabs, and control characters in `-text` are normalized before the
+message is sent: line breaks and tabs become spaces, while other control
+characters become `?`.
+
+Production-path DM delivery uses `conversations.open(users=<user_id>)`, then
+`chat.postMessage(channel=<dm_channel_id>)`. Run it with the exact bot token
+shape being validated:
+
+```sh
+printf 'Slack bot token: ' >&2
+read -rs SLACK_BOT_TOKEN
+printf '\n' >&2
+export SLACK_BOT_TOKEN
+go run ./apps/slack/cmd/slack-dm-smoke \
+  -user U0123456789 \
+  -workspace-shape 'Enterprise Grid org install; workspace token unavailable' \
+  -token-owner enterprise \
+  -scopes 'commands,chat:write,im:write'
+```
+
+`-timeout` is the total budget for `auth.test`, DM opening, message posting,
+and any optional direct-user probe. `-request-timeout` caps each Slack Web API
+request. The CLI rejects `-timeout` values below three times
+`-request-timeout`, or below four times `-request-timeout` when
+`-direct-user-probe` is enabled; leave more headroom when validating a slow
+workspace or network path. This guard is a conservative lower bound, not a
+guarantee that every later call can consume its full per-request timeout.
+Only override `-base-url` for a trusted Slack Web API endpoint or local test
+server. **The smoke sends the bearer token to that base URL**, so treat any
+remote override as trusted production infrastructure before running it. Remote
+overrides must use HTTPS; HTTP is accepted only for localhost or loopback test
+servers. The smoke honors Go's standard `HTTP_PROXY`, `HTTPS_PROXY`, and
+`NO_PROXY` environment handling; treat configured proxies as part of the trusted
+network path. The smoke is one-shot and does not retry `http_429` or 5xx
+responses.
+If Slack returns `http_429`, the JSON evidence includes `retry_after` when Slack
+sends that header; Slack normally sends seconds, though HTTP-date values should
+be treated as "wait until that time" before rerunning the smoke. Network
+and cancellation failures are recorded as `request_failed`, `request_timeout`,
+`budget_exhausted`, or `request_canceled` so evidence consumers can distinguish
+transport failures, single slow Slack Web API requests, overall smoke budget
+expiry, and cancellations. Transport-level failures serialize `status_code: 0`.
+Unexpectedly large Slack responses are recorded as `response_too_large` instead
+of parsed Slack evidence.
+
+For Enterprise Grid fallback, pair the token smoke with the actual guided
+connector setup in a workspace where the org-install token is the delivery
+token. Confirm the admin receives the enrollment-token DM and that the token-free
+install instructions post separately. The local fallback contract is covered by
+`TestSlackPostDMFuncOpensIMThenPostsWithGridFallback`; the live smoke confirms
+Slack accepts the org-install token for the real workspace shape.
+
+To record Slack's current behavior for the bare-user-id path without depending
+on it for production, add `-direct-user-probe`. It may send a second non-secret
+test message tagged with ` (direct-user probe)` if Slack accepts the direct
+path; near-limit text is trimmed rune-safely before adding that tag so the
+probe message stays within the same 4000-byte cap. A `channel_not_found` or
+similar direct-channel rejection is useful evidence; it should not block
+the production path when the open-then-post steps succeed. Without strict mode,
+Slack/API/transport failures from this optional probe are recorded and the smoke
+still exits 0 after the production path succeeds; overall timeout or cancellation
+still fails the smoke. Always inspect `direct_user_probe` in the JSON evidence
+when the probe is enabled, especially to distinguish Slack rejections from
+transport errors such as `request_failed`; exit 0 only means the production
+open-then-post path succeeded unless `-strict-direct-user-probe` was used. Use
+`-strict-direct-user-probe` only with `-direct-user-probe` when that optional
+probe should fail the command.
+
+For the failure smoke, use a staging install with the DM-opening scope withheld
+or revoked, then trigger guided connector setup with a disposable connector id.
+Confirm that setup does not post install instructions, the user-facing response
+asks the admin to reinstall or reauthorize the Slack app, and the generated key
+cannot be used. The unit coverage for the same safety contract is
+`TestTunnelInstallRevokesBootstrapKeyWhenDMSendFails`,
+`TestTunnelInstallMissingScopeDMFailureMentionsSlackReinstall`, and
+`TestTunnelInstallRevokesBootstrapKeyWhenSlackFollowupFails`.
+
+Record the result in the PR or issue using this shape. If `conversations.open`
+returns `ok:true` without a usable `channel.id`, the smoke records that
+production step as `missing_dm_channel_id`; treat it as a failed DM-open step
+even though Slack's raw response said `ok:true`. Pre-flight validation errors
+such as invalid flags, empty token/user input, a `-token-env` that is not a
+POSIX environment variable name, or unsafe `-base-url` exit before
+contacting Slack and print stderr only; JSON evidence is emitted for runtime
+smoke attempts.
+
+```text
+Workspace shape:
+Token owner:
+Slack scopes:
+Fresh app-user DM user:
+Production path: conversations.open=<ok/error>, chat.postMessage(D...)=<ok/error>
+Direct user probe, if run: chat.postMessage(U...)=<ok/error>
+Forced failure: instructions posted? <yes/no>; key usable? <yes/no>; user-facing copy:
+Operator setup notes:
+```
+
+### History upload-detection smoke
+
+Run this smoke when you need the numbers in `SlackMessageHasUpload`'s
+`TODO(upstream-contract)` to be true again — before trusting thread continuity in a new
+workspace shape, after a Slack changelog touches the `files` field, or on whatever
+cadence you decide the risk deserves. Nothing runs it for you.
+
+It exists because that classifier has no other observer. When the agent rebuilds a
+thread through `conversations.replies`, a message that carried an upload is annotated so
+the model knows the caption described a file it never saw. On that surface the `files`
+array is the whole signal — the 2026-08-14 scan found `file_share` zero times in 4,668
+messages — so if Slack stops populating it, captions are silently replayed as ordinary
+text and every unit test in the repo stays green, because they supply the field
+themselves and never read Slack.
+
+The smoke is read-only: `conversations.list`, `conversations.history` and
+`conversations.replies`, all GET, nothing posted. Its JSON report carries counts,
+conversation IDs and message timestamps only — no file name, message text, user name or
+mimetype leaves the process.
+
+```sh
+printf 'Slack bot token: ' >&2
+read -rs SLACK_BOT_TOKEN
+printf '\n' >&2
+export SLACK_BOT_TOKEN
+go run ./apps/slack/cmd/slack-history-upload-smoke \
+  -workspace-shape 'single workspace install' \
+  -token-owner workspace \
+  -scopes 'channels:history,groups:history,im:history,mpim:history'
+```
+
+The token needs the history scopes for the conversation types you are scanning, and
+`conversations.list` access unless you name conversations yourself with
+`-channels C0123456789,C9876543210`. It does **not** need `files:read`: the same scan
+confirmed the array arrives without it, and a file the token may not read still occupies
+an entry with `file_access: "access_denied"` and null metadata. Only override
+`-base-url` for a trusted Slack Web API endpoint or a local test server — **the smoke
+sends the bearer token to that base URL**. Remote overrides must use HTTPS; HTTP is
+accepted only for localhost or loopback, and redirects are surfaced rather than followed
+so the token is never replayed down an uninspected chain. The smoke honors Go's standard
+`HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY` handling; treat configured proxies as part of
+the trusted network path.
+
+Exit 0 means the contract still holds. Exit 1 means it does not, and the report on
+stdout is the diagnosis — read it, do not just read the exit code. Exit 2 is a bad
+invocation, checked before any Slack call.
+
+Each message is observed twice: once by a reader that only asks what JSON shape the
+`files` value has, and once through `SlackMessageHasUpload` itself. Read the report's
+two surface blocks — `history` and `replies` — as separate measurements; production
+reads the replies surface, and the recorded scan only covered history.
+
+| Failure | What it means |
+|---------|---------------|
+| `no conversation could be read` | Scope or membership, not wire format. The scan proves nothing about the contract until this is fixed. |
+| `the files array has stopped arriving` | Nothing classified as an upload. Against a workspace that does contain uploads, this is the rot the TODO names. Raise `-min-uploads` above 1 when you know roughly how many to expect. |
+| `did not report as an upload` | A populated `files` array the classifier called text-only. This cannot happen with today's classifier, so treat it as a regression in `SlackMessageHasUpload`, not in Slack. |
+| `Slack changed the wire format` | A `files` value that is not a JSON array. Reported by default and only fatal under `-strict-uncountable`; it is the history-surface twin of the `files_field_present=true` / `files_visible=0` pair `claimMediaNotice` flags on the event path. |
+| `could not be decoded at all` | A message this command could not read as a message. Same class as the row above and governed by the same `-strict-uncountable` flag; `contract.decode_failures` carries the count either way. |
+| `could not be verified` | An `-expect-upload` lookup that failed or found nothing. This is *not* evidence about the classifier — the run never got as far as asking it. |
+
+`-expect-upload C0123456789:1723600000.000200` is the one check whose oracle is a human
+rather than a second reading of the same bytes: name a message you can see carries a
+file, repeat the flag for more, and the smoke fails if the classifier does not agree.
+Thread replies work — the lookup falls back to `conversations.replies` when
+`conversations.history` does not return the timestamp.
+
+Six flags shape the sample, and whatever you leave at its default is what the numbers
+describe. `-max-conversations` (25) caps how many conversations are scanned;
+`-conversation-types` (`public_channel,private_channel,im,mpim`) filters discovery;
+`-max-pages` (4) caps `conversations.history` pages per conversation **and** bounds
+`conversations.list` paging — raising it to read deeper history widens discovery too,
+which is usually harmless because `-max-conversations` stops discovery first; `-page-limit` (200) is messages per page; `-max-threads` (5) is threads
+sampled per conversation on the replies surface; and `-skip-replies` drops that surface
+entirely. Every one of them is echoed back in the report's `bounds` block, so a reader
+can tell a 25-conversation workspace from a 25-conversation cap — and an all-zero
+`replies` block that means "skipped" from one that means "measured and found nothing".
+A conversation cut off by `-max-pages` is flagged `more_pages` on its own line.
+
+`-min-uploads 0` turns the tripwire off and makes the run report-only. That is a
+legitimate mode for a first look at an unfamiliar workspace, but it disables the primary
+check: read `contract.min_uploads` before trusting a `holds: true`.
+
+`-timeout` (20 minutes) is the total budget and must be at least three times
+`-request-timeout`. The default is sized for the default bounds: about 226 requests
+against Slack's tier-3 limit of roughly 50 a minute, or ~4.5 minutes of pure rate-limit
+budget before any `429` wait. Widen the bounds and you must widen this too, or the run
+truncates — which reports as a budget failure and suppresses the upload check rather than
+producing a wrong verdict. A single `429` is retried once after Slack's `Retry-After`, up
+to 30 seconds; anything longer is reported rather than waited out.
+
+Note the asymmetry in how a rate limit lands. One hit while reading a conversation is
+recorded against that conversation and the scan carries on, but one on
+`conversations.list` ends the run: discovery has to succeed before there is anything to
+measure, and a partial conversation list would produce a report that looks complete while
+describing a sample nobody chose. On a busy workspace, either re-run or name the
+conversations yourself with `-channels`, which skips discovery entirely.
+
+Record the result in the PR or issue using this shape. If the numbers disagree with the
+ones in `SlackMessageHasUpload`'s comment, update that comment in the same change — a
+stale measurement is worse than none, because the next reader will trust it.
+
+```text
+Workspace shape:
+Token owner:
+Slack scopes:
+Bounds (from the report's bounds block):
+Conversations scanned:
+history: messages=<n> files_key_present=<n> classified_uploads=<n> file_share_subtypes=<n>
+replies: messages=<n> files_key_present=<n> classified_uploads=<n> file_share_subtypes=<n>
+Distinct uploads: <n>  (deduplicated across surfaces — a thread root arrives on both)
+Uncountable shapes: <n>; decode failures: <n>
+Contract holds: <yes/no>; failures:
+```
+
+The replies figures are the ones `SlackMessageHasUpload`'s comment still lists as
+assumed: the recorded measurement covered `conversations.history` only. A run that
+reports them is what lets that caveat be dropped.
+
+## Binding-backed setup visibility
+
+`event="setup_binding_backed_persist_failure"` means qURL provisioned a
+binding-backed workspace key, but the Slack app failed to store it locally. Treat
+every event as actionable: the admin can recover by rerunning `/qurl setup
+<email>` with the same qURL account only during the binding replay window. The
+emitted `retry_window_hours` reports that window, and the event timestamp starts
+the operator clock. The emitted window comes from the Slack task's
+`QURL_BINDING_IDEMPOTENCY_TTL_CONTRACT` runtime override when set, otherwise it
+uses the 24-hour qurl-service default mirror. Invalid override values fail
+startup; accepted values use the canonical `Nh` form such as `24h` or `48h`
+with no leading zero.
+
+`cleanup_after_window_hours` is intentionally coincident with the same threshold
+today; prefer retry at the exact boundary and treat rows older than the emitted
+cleanup window as cleanup candidates until qurl-service exposes a separate
+cleanup TTL.
+
+Run this CloudWatch Logs Insights query against the Slack app log group with the
+time range set to the current replay window:
+
+```text
+fields @timestamp, team_id, key_id, retry_window_hours, error
+| filter event = "setup_binding_backed_persist_failure"
+| sort @timestamp desc
+| limit 50
+```
+
+Threshold: any result opens an on-call ticket to help the workspace admin rerun
+setup before the replay window expires. For automated alerting, use a metric
+filter (or scheduled Logs Insights query that publishes a metric) matching this
+event and alarm on `count >= 1` in a 5-minute evaluation period; the query lists
+rows for triage instead of returning `stats count()`. If the admin reruns setup
+and the Slack storage write succeeds, close the ticket.
+
+For post-window cleanup, run the same event query over the older incident window
+(for example, a multi-day range whose end time is older than the emitted cleanup
+window):
+
+```text
+fields @timestamp, team_id, key_id, cleanup_after_window_hours, error
+| filter event = "setup_binding_backed_persist_failure"
+| sort @timestamp asc
+| limit 100
+```
+
+Threshold: any unresolved row older than its emitted `cleanup_after_window_hours`
+is a cleanup candidate. Use qURL account/API-key management or operator tooling
+to revoke or recover the unused workspace key before asking the admin to retry.
+Customer self-service recovery for revoked or stale external-identity bindings is
+tracked in
+[layervai/qurl-service#910](https://github.com/layervai/qurl-service/issues/910).
+The setup-binding rollout notes live in
+[qurl-integrations PR #703](https://github.com/layervai/qurl-integrations/pull/703),
+paired with [qurl-service PR #904](https://github.com/layervai/qurl-service/pull/904).
+
+## Explicit rotation visibility
+
+`event="setup_rotation_replacement_persist_failure"` means the Slack app revoked
+the previous workspace key and qURL provisioned a replacement, but the app failed
+to store the replacement locally. Treat every event as actionable: the admin can
+recover by rerunning `/qurl setup <email> --rotate` with the same qURL account
+during the idempotency replay window. The emitted `retry_window_hours` reports
+that window. The emitted window comes from the Slack task's
+`QURL_API_KEY_MINT_IDEMPOTENCY_TTL_CONTRACT` runtime override when set,
+otherwise it uses the 24-hour qurl-service API-key mint default mirror. Invalid
+override values fail startup; accepted values use the canonical positive
+whole-hour `Nh` form such as `24h` or `48h` with no leading zero.
+For post-metadata rows, do not advise plain `/qurl setup <email>` as recovery
+for revoked or deleted keys; use explicit `--rotate`/`--repoint`, qURL
+account/API-key management, or operator tooling.
+
+Run this CloudWatch Logs Insights query against the Slack app log group with the
+time range set to the current replay window:
+
+```text
+fields @timestamp, team_id, key_id, retry_window_hours, operator_action, error
+| filter event = "setup_rotation_replacement_persist_failure"
+| sort @timestamp desc
+| limit 50
+```
+
+Threshold: any result opens an on-call ticket to help the workspace admin rerun
+setup before the replay window expires. For automated alerting, use a metric
+filter (or scheduled Logs Insights query that publishes a metric) matching this
+event and alarm on `count >= 1` in a 5-minute evaluation period. After the replay
+window expires, use qURL account/API-key management or operator tooling to verify
+whether the replacement is live or should be revoked.
+
+If the callback reports `qurl-service revoked API key pagination exceeded`, says
+the key could not be confirmed as revoked, or logs
+`oauth/minter revoked API key scan page cap exceeded`, do not keep asking the
+admin to retry. The old key already returns 404 and the owner-scoped revoked
+list could not confirm it within the bounded scan window. qURL currently lists
+API keys by creation time, not revoke time, so an old workspace key can be buried
+behind newer key history even when it was just revoked. If the key was deleted
+instead of revoked, it will also be absent from the revoked list. Repeated
+retries will keep failing until an operator verifies the key status or uses a
+direct owner-scoped lookup when qURL exposes one.
+
+## Cross-account repoint transfer
+
+`event="setup_cross_account_repoint_requested"` means a workspace owner ran an
+explicit `/qurl setup <email> --repoint` (or `--rotate`) and signed in with a
+qURL account that is *not* the one holding the current workspace key. The app
+fails closed (no key minted, nothing revoked) and routes the owner to an
+operator-assisted transfer, because qurl-service deliberately refuses to let one
+tenant take over another tenant's `(provider, external_id)` binding (cross-tenant
+refusal, layervai/qurl-service#910). The event carries `mode` (`repoint` or
+`rotate`), `current_qurl_account_id` (the account holding the key), and
+`requested_qurl_account_id` (the destination the owner signed in as); the browser
+page intentionally does **not** disclose the current account. A `rotate` here is
+usually a wrong-account sign-in (the browser page tells the owner to re-sign-in
+with the holding account); a `repoint` is usually an intentional move.
+
+The same-vs-cross decision is a plain equality on the stored `qurl_account_id`
+(Auth0 `sub`). One edge case where a *legitimate* owner can get stuck: if the
+stored provenance ever diverges from the key's actual qurl-service owner — e.g.
+an upstream binding migration that doesn't update the Slack row — the owner's own
+`--rotate`/`--repoint` is classified cross-account and the `--rotate` self-heal
+can't help (it's blocked before it records anything). That is the intended
+fail-closed trade-off; resolve it with the operator process below.
+
+Operator process to complete a transfer (after verifying Slack-workspace
+ownership out of band):
+
+1. Confirm the request from the logged event and the owner's out-of-band proof
+   of workspace ownership.
+2. Revoke the `current_qurl_account_id` key for the workspace and free the
+   `(slack, <team_id>)` external-identity binding so the destination account can
+   mint a fresh binding-backed key. **There is no operator-guarded surface for
+   this yet** — qurl-service exposes only `POST /v1/external-identity-bindings`
+   (which refuses reassignment) and `DELETE /v1/api-keys/{key_id}` (owner-scoped),
+   with no binding delete/transfer route. So today this is a manual,
+   high-care step: revoke the key through qURL account/API-key management and
+   free the binding row via internal datastore tooling. The guarded reassign
+   surface that makes this safe and auditable is tracked in
+   layervai/qurl-service#956 — prefer it once it ships.
+3. Tell the owner to rerun `/qurl setup <email>` (plain) signed in as the
+   destination account; with the binding freed this mints and stores the new
+   account's key normally.
+
+Run this CloudWatch Logs Insights query against the Slack app log group:
+
+```text
+fields @timestamp, team_id, mode, current_qurl_account_id, requested_qurl_account_id, operator_action
+| filter event = "setup_cross_account_repoint_requested"
+| sort @timestamp desc
+| limit 50
+```
+
+Threshold: each event is an operator action item (not an outage) — a workspace
+owner is waiting on a manual transfer. Alarm on `count >= 1` only if your
+deployment offers the transfer as a supported self-service-adjacent flow.
+
+## Uninstall revocation visibility
+
+`/qurl uninstall` strongly reads the stored qURL `key_id` and attempts to revoke
+the upstream workspace key before removing local credentials. Because uninstall
+has no live OAuth flow, it can only authenticate that `DELETE /v1/api-keys/{key_id}`
+with the workspace's own API key — and qurl-service **categorically forbids an API
+key from managing API keys** (the DELETE returns `403` for any key id, including
+its own, before any existence check; confirmed in #805). So for a live workspace
+key the upstream revoke always degrades to a **local-only disconnect by design**:
+uninstall reliably severs Slack access but does not revoke the key outside Slack.
+Rotation, by contrast, *can* revoke, because it runs under the owner's freshly
+authenticated JWT (see "Workspace key rotation" above); an owner/operator-
+authenticated uninstall revoke is future work, tracked with the escape hatch in
+#806.
+
+`event`-free log lines under the `/qurl uninstall:` prefix report the outcome; the
+terminal `/qurl uninstall: disconnected workspace Slack commands` line carries
+`upstream_revoked` so a single query separates the rare real revoke from the
+expected local-only disconnect:
+
+```text
+fields @timestamp, team_id, caller_user_id, key_id, upstream_revoked
+| filter @message like "/qurl uninstall:"
+| sort @timestamp desc
+| limit 50
+```
+
+Because upstream revoke is local-only by design, `upstream_revoked` is **always
+`false`** today: a self-revoke authenticates with the workspace's own key against
+its own `key_id`, so a live key 403s and a dead key 401s — both before any
+existence check — and the `revoked=true` (204/404) outcomes can't occur until the
+owner-authenticated revoke path (#806) lands. The local-only log lines and their
+operator implications:
+
+- `upstream qURL key not revoked — local-only disconnect` (`status=403`): the
+  expected path for a live key — qurl-service forbids the self-revoke. The
+  upstream key is **still live**, so if the disconnect was security-motivated
+  (the key may be exposed), revoke it through qURL account/API-key management or
+  operator tooling. The local disconnect removes `key_id` from the workspace
+  row, so this `WARN` line's `key_id` field is the **only** surviving pointer to
+  the still-live key — capture it promptly and make sure the log group's
+  retention outlives the manual-revoke turnaround. (First-class `key_id`
+  preservation on this specific path is folded into the #806 escape-hatch work.)
+- `upstream qURL key not revoked — local-only disconnect` (`status=401`): the
+  workspace key was already revoked or expired upstream (e.g. a prior rotation),
+  so qurl-service rejected the credential before the revoke. The key is already
+  dead — no upstream action is needed.
+- `legacy workspace row has no qURL key id — local-only disconnect`: the
+  workspace connected before `key_id` persistence (added in #791, which this
+  uninstall revocation builds on), so Slack cannot identify which key to revoke.
+  Revoke it through qURL account/API-key management if the disconnect was
+  security-motivated.
+
+`upstream qURL key already absent — treating as revoked` (`status=404`) would be
+the one outcome reporting `upstream_revoked=true`, but it **can't fire for a
+self-revoke**: the credential is the target key, so a deleted key surfaces as a
+`401` (bad credential) at the auth layer, never a `404` at the existence check.
+This branch is defensive scaffolding for the #806 owner-authenticated revoke,
+where the credential and target differ and a real `404`/`204` becomes possible.
+
+`upstream qURL key revoke failed — aborting to preserve key id` (and the `could
+not read stored qURL key id before revoke` / `could not build client to revoke
+upstream key` variants) means nothing was disconnected: the failure was transient
+or unexpected (5xx, transport, timeout), so the stored `key_id` is intentionally
+preserved for a retry that self-heals on the next uninstall. The abort is
+deliberate — it never severs local Slack access while leaving a possibly-live
+upstream key it can no longer identify (that would give false security on a
+compromised workspace, since the leaked key still works via the qURL API).
+
+**Availability note:** this inverts the pre-upstream-revocation behavior, where
+`/qurl uninstall` always cut local Slack access. A persistent upstream outage (or
+a slow upstream that exhausts the sync budget) can now **block the disconnect**
+until it recovers — the trade-off for never orphaning a key the operator can no
+longer identify. If the upstream stays unreachable and Slack access must be cut
+urgently, revoke the key through qURL account/API-key tooling and then clear the
+`workspace_state` row's qURL columns directly — the manual equivalent of the local
+disconnect — rather than waiting on the retry path. A first-class admin/operator
+force/local-only escape hatch is tracked in #806 (sequence it soon, since this
+manual row edit is otherwise the only out during an upstream outage).
+
+## Teardowns refused on Slack payload shape drift
+
+`handleEvent` tolerates a Slack Events API field arriving with an unexpected JSON
+type — the rest of the envelope still decodes, so a conversation turn is answered
+rather than silently dropped. The **workspace purge is deliberately excluded**
+from that tolerance: several fields can silently *redirect* a purge rather than
+withhold it (a drifted `team_id` falls back to `enterprise_id`; the
+`is_enterprise_install` bool zeroes onto the workspace branch; a mistyped element
+of `tokens.bot` still counts toward the array length), so a drifted
+`app_uninstalled` / `tokens_revoked` is acked and **not** purged.
+
+That fail-safe has an operational consequence worth alerting on: a *systematic*
+drift — one Slack schema change touching any envelope field — refuses **every**
+teardown for its duration, so uninstalled workspaces keep their bot token, qURL
+key, mappings and channel policies until someone finishes the purge by hand.
+Drift converts into an accumulating manual-cleanup queue, not a one-off.
+
+Two log lines carry it. The refusal line is intentionally **un-latched**, so each
+affected workspace and Slack delivery is visible rather than collapsed into the
+first:
+
+```text
+fields @timestamp, event_type, drift_field, team_id, enterprise_id, event_id
+| filter @message like /lifecycle event NOT purged/
+```
+
+The generic drift line is latched per field path (first sighting at `WARN`,
+repeats demoted to `DEBUG`), so it reports a schema move once rather than once
+per request:
+
+```text
+fields @timestamp, drift_field, envelope_type, inner_event_type, team_id, event_id
+| filter @message like /field type drift tolerated/
+```
+
+Alert on the first query, not the second: a single `NOT purged` line means one
+workspace needs teardown **investigation**, and a burst means Slack changed a
+shape and the retention backlog may be growing. Treat the line as a queue for
+reconciliation, never as authorization to purge: first confirm from Slack install
+state that the workspace or org was actually uninstalled, then re-deliver the
+teardown or run the manual purge. This matters especially when bot-token rotation
+is enabled, where a drifted `tokens_revoked` can describe a still-installed
+workspace, and for a non-`event_callback` envelope that merely carried a lifecycle
+inner type. `drift_field` names the first field that moved — every drifted field
+is zeroed, but only the first is reported, so treat it as a lead, not an inventory.
+
+## Endpoints
+
+| Endpoint | Purpose |
+|----------|---------|
+| `POST /slack/commands` | Slash command handler (ack-then-async) |
+| `POST /slack/events` | Event subscriptions (link unfurling planned) |
+| `POST /slack/interactions` | Interactive components and modals |
+| `GET /oauth/slack/install` | Begin Slack app install; redirects to Slack OAuth |
+| `GET /oauth/slack/callback` | Slack OAuth redirect target; encrypts + persists workspace bot token |
+| `GET /oauth/qurl/start` | Begin OAuth flow (state token required) |
+| `GET /oauth/qurl/callback` | Auth0 redirect target; provisions + persists key |
+| `GET /health` | Load-balancer health probe |
+
+## Development
+
+```bash
+# Run tests
+go test -race -count=1 ./apps/slack/...
+
+# Run locally — requires AWS creds with read/write on the
+# workspace_state table and KMS Decrypt/GenerateDataKey on the CMK.
+WORKSPACE_STATE_TABLE=workspace-state-dev \
+WORKSPACE_STATE_KMS_KEY_ARN=arn:aws:kms:us-east-1:...:key/... \
+SLACK_SIGNING_SECRET=... \
+SLACK_CLIENT_ID=... \
+SLACK_CLIENT_SECRET=... \
+QURL_ENDPOINT=https://api.layerv.ai \
+QURL_IMAGE_FALLBACK=dev-sandbox \
+AUTH0_DOMAIN=layerv.us.auth0.com \
+AUTH0_CLIENT_ID=... \
+AUTH0_CLIENT_SECRET=... \
+AUTH0_AUDIENCE=https://api.layerv.ai \
+SLACK_BASE_URL=https://slack-bot.example \
+OAUTH_STATE_SECRET=$(openssl rand -hex 32) \
+  go run ./apps/slack/cmd/
+```
+
+`AUTH0_EXPECTED_AUDIENCE` is optional for local runs; set it to the expected
+Auth0 audience when you want the same drift check that managed deployments
+receive from infra.
+
+```bash
+# Build the production container (linux/arm64 to match the deploy target)
+docker buildx build --platform linux/arm64 \
+  -f apps/slack/Dockerfile -t qurl-bot-slack:dev .
+```
+
+## Slack Markdown Renderer Validation
+
+Before enabling the Slack agent standard-Markdown reply surface broadly, run the
+live renderer validation in a real Slack workspace and attach the JSON output to
+the GA enablement issue or to
+[`qurl-integrations#767`](https://github.com/layervai/qurl-integrations/issues/767).
+Run it only in a dedicated validation channel or thread, not a customer-visible
+space: the command intentionally leaves the posted Slack messages in place as
+review evidence and has no dry-run or cleanup mode.
+The command posts the hardened Markdown output for the exact renderer-risk cases
+that CI cannot prove: formatting, inline masked links, reference-style links,
+Slack angle links, raw HTML tag starts, image syntax, the
+notification/screen-reader fallback text, and the `markdown_text` compatibility
+body used when Slack rejects `markdown` blocks.
+It is compiled into the same bot binary intentionally so it exercises the same
+wire helpers as production; it only runs when invoked with the explicit
+`validate-slack-markdown-renderer` subcommand and a validation bot token/channel.
+Keeping it in the shipped binary lets on-call rerun the exact production
+transport path during GA validation instead of rebuilding a tagged diagnostic
+variant.
+Treat the validation bot token as permission to post persistent evidence
+messages to the configured validation channel; run it only with a token and
+channel approved for GA validation evidence. The command requires
+`SLACK_MARKDOWN_VALIDATION_ACK_PERSISTENT_MESSAGES=true` or
+`--ack-persistent-messages` so this side effect is explicit on every live run.
+The overall run timeout defaults to 5 minutes; set
+`SLACK_MARKDOWN_VALIDATION_TIMEOUT` or `--timeout` for slower workspaces.
+
+```bash
+SLACK_MARKDOWN_VALIDATION_BOT_TOKEN=xoxb-... \
+SLACK_MARKDOWN_VALIDATION_CHANNEL=C0123456789 \
+SLACK_MARKDOWN_VALIDATION_ACK_PERSISTENT_MESSAGES=true \
+SLACK_MARKDOWN_VALIDATION_TEAM_ID=T0123456789 \
+  go run ./apps/slack/cmd/ validate-slack-markdown-renderer \
+  > slack-markdown-renderer-validation.json
+```
+
+To validate the assistant-pane streaming surface in the same run, start from a
+workspace where the Slack app has the Agents & AI Apps feature and
+`assistant:write` scope enabled, then include the pane thread identifiers:
+The streamed validation body is one `chat.appendStream` append hardened with the
+same stream hardener used by production replies; production streaming also keeps
+that hardener's state across multiple deltas. This artifact validates Slack's
+rendering of the delivered single-append output and the per-delta stream
+hardener, not chunk-boundary coalescing or the `anywhere=true` reconcile fallback;
+keep those covered by unit tests.
+If all assistant-pane identifiers are omitted, the JSON report marks that surface
+as `skipped` and exits 0 after validating channel replies. If only some
+assistant-pane identifiers are set, the command treats that as a config error
+and exits before writing JSON or posting messages, so a misconfigured assistant
+validation cannot look like a complete run.
+
+```bash
+SLACK_MARKDOWN_VALIDATION_BOT_TOKEN=xoxb-... \
+SLACK_MARKDOWN_VALIDATION_CHANNEL=C0123456789 \
+SLACK_MARKDOWN_VALIDATION_ACK_PERSISTENT_MESSAGES=true \
+SLACK_MARKDOWN_VALIDATION_TEAM_ID=T0123456789 \
+SLACK_MARKDOWN_VALIDATION_ASSISTANT_CHANNEL=D0123456789 \
+SLACK_MARKDOWN_VALIDATION_ASSISTANT_THREAD_TS=1700000000.000100 \
+SLACK_MARKDOWN_VALIDATION_ASSISTANT_RECIPIENT_TEAM_ID=T0123456789 \
+SLACK_MARKDOWN_VALIDATION_ASSISTANT_RECIPIENT_USER_ID=U0123456789 \
+  go run ./apps/slack/cmd/ validate-slack-markdown-renderer \
+  > slack-markdown-renderer-validation.json
+```
+
+The JSON evidence records the delivery `status`, `renderer_verdict`,
+`review_instructions`, each case's original Markdown, the hardened Markdown sent
+to Slack, the fallback text for notification/screen-reader previews, Slack
+timestamps, request shape, and any `error_code` observed when a `markdown` block
+is rejected and the compatibility retry runs. A `status` of `delivered` only
+means Slack accepted the validation messages; `renderer_verdict:
+operator_review_required` means an operator must still check the posted messages
+in Slack against each case's `operator_check`.
+Delivery/API failures still write the partial JSON report with `status:
+delivery_failed`, `renderer_verdict: delivery_incomplete`, and `error` before
+exiting nonzero, so attach that artifact when investigating a renderer or Slack
+API failure, then fix the delivery error and rerun before renderer review.
+CLI config and usage errors exit
+before writing JSON. Slack rate limits abort the current run as a delivery
+failure rather than sleeping and retrying; rerun in the dedicated validation
+channel after the `Retry-After` window. If any Slack-rendered form still hides a
+destination, add code and tests before enablement.
+
+## In-Bot qURL Command Rate Limit
+
+Design decision: `/qurl get` and `/qurl aliases` use a DynamoDB-backed fixed
+window counter per `(Slack team, Slack user)`. The counter is stored as a
+synthetic, user-hashed item in `workspace_mappings` rather than as attributes on
+the real workspace row, so large workspaces do not grow or hot-spot that shared
+row. This was chosen over an in-memory token bucket because it survives task
+restarts and works across multiple Fargate tasks. The tradeoff is a workspace
+existence read plus a conditional counter `UpdateItem` for each gated command;
+rollovers may add one extra conditional `UpdateItem`; denied commands do not
+increment the counter. Counter items stamp `expires_at` for DynamoDB TTL at the
+current window start plus two full windows, so idle users age out after the
+active window plus a safety buffer once the table TTL is enabled. The existence
+read stays inside the limiter even though the current slash-command handlers
+authenticate first, so a future direct caller cannot create orphan counter rows
+for an unbound workspace. When the flag is enabled, DynamoDB read/update
+failures fail closed for `/qurl get` and `/qurl aliases` and surface
+retry-friendly copy.
+
+The default budget is 30 allowed commands per user per hour shared across both
+verbs, with the qurl-service API-key quota still acting as a defense-in-depth
+backstop. Because this is a fixed-window limiter, a caller can burst across the
+hour boundary; treat the practical short-term ceiling as roughly 2x the hourly
+limit. The 30/hour budget and 1-hour window are code-level defaults, not
+operator-tunable environment variables.
+
+The gate is staged behind `QURL_SLACK_RATE_LIMIT_ENABLED`. Leave it unset in
+sandbox/open-gate deployments; set it to `true` in production after confirming
+the task role can read and update `workspace_mappings` and that native TTL is
+enabled on `workspace_mappings.expires_at`. Durable workspace binding rows must
+not write `expires_at`; DynamoDB TTL is table-wide and would reap any real row
+that accidentally carried a numeric value.
+
+## Environment variables
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `SLACK_SIGNING_SECRET` | Yes | Slack app signing secret |
+| `SLACK_CLIENT_ID` | Slack install | Slack app client ID used by `/oauth/slack/install`. Required for customer installs that capture per-workspace bot tokens. |
+| `SLACK_CLIENT_SECRET` | Slack install | Slack app client secret used by `/oauth/slack/callback` to exchange Slack's OAuth code. |
+| `SLACK_INSTALL_STATE_SECRET` | Slack install | HMAC-SHA256 key for Slack install state signing. Must be ≥32 bytes. Use a distinct production secret from `OAUTH_STATE_SECRET`; the fallback is only for local/dev compatibility. |
+| `SLACK_BOT_SCOPES` | No | Comma/space-separated extra bot scopes requested by `/oauth/slack/install`. Empty defaults to `commands,chat:write,im:write,users:read`; when set, those required defaults are still included so the captured token can receive slash commands, open 1:1 DMs, deliver private messages for `dm:true`, agent replies, and qURL Connector enrollment tokens, and verify owner-transfer targets. See [Slack app configuration](#slack-app-configuration) for the full conversation-mode scope list. |
+| `SLACK_BOT_TOKEN` | Legacy | Single-workspace fallback token for `views.open` when a workspace has not yet completed Slack install OAuth. Accepts `xoxb-` and `xoxe.xoxb-` token shapes. Must include `users:read` if ownership transfer should work before Slack install OAuth captures a per-workspace token. Production multi-customer installs should not depend on this fallback. |
+| `SLACK_MARKDOWN_VALIDATION_BOT_TOKEN` | Validation | Bot token used only by `validate-slack-markdown-renderer`. Required for live renderer validation and intentionally separate from production token lookup. |
+| `SLACK_MARKDOWN_VALIDATION_CHANNEL` | Validation | Slack channel id that receives channel-reply validation messages. Required for live renderer validation. |
+| `SLACK_MARKDOWN_VALIDATION_ACK_PERSISTENT_MESSAGES` | Validation | Set to `true` to acknowledge that live renderer validation posts persistent evidence messages. Can also be set with `--ack-persistent-messages`. |
+| `SLACK_MARKDOWN_VALIDATION_TEAM_ID` | Validation | Slack team id recorded in the JSON artifact and used for validation request metadata. |
+| `SLACK_MARKDOWN_VALIDATION_ENTERPRISE_ID` | Validation | Optional Slack Enterprise Grid id recorded in the JSON artifact and used for validation request metadata. |
+| `SLACK_MARKDOWN_VALIDATION_TIMEOUT` | Validation | Optional Go duration for the overall validation run timeout. Defaults to `5m`; can also be set with `--timeout`. |
+| `SLACK_MARKDOWN_VALIDATION_ASSISTANT_CHANNEL` | Validation | Assistant-pane channel id for optional `chat.startStream`/`chat.appendStream` validation. |
+| `SLACK_MARKDOWN_VALIDATION_ASSISTANT_THREAD_TS` | Validation | Assistant-pane thread timestamp for optional streaming validation. |
+| `SLACK_MARKDOWN_VALIDATION_ASSISTANT_RECIPIENT_TEAM_ID` | Validation | Recipient team id for optional streaming validation. |
+| `SLACK_MARKDOWN_VALIDATION_ASSISTANT_RECIPIENT_USER_ID` | Validation | Recipient user id for optional streaming validation. |
+| `QURL_ENDPOINT` | Yes | qURL API base URL (e.g. `https://api.layerv.ai`) |
+| `WORKSPACE_STATE_TABLE` | Yes | DynamoDB table holding per-workspace API keys (provisioned by `qurl-integrations-infra`) |
+| `WORKSPACE_STATE_KMS_KEY_ARN` | Yes | KMS CMK ARN used to envelope-encrypt workspace API keys and Slack bot tokens |
+| `AUTH0_DOMAIN` | OAuth | Auth0 tenant FQDN, e.g. `layerv.us.auth0.com`. Scheme prefix and trailing slash are stripped at config-load. |
+| `AUTH0_CLIENT_ID` | OAuth | Auth0 application client_id for the Secure Access Agent |
+| `AUTH0_CLIENT_SECRET` | OAuth | Auth0 application client_secret |
+| `AUTH0_AUDIENCE` | OAuth | Auth0 audience identifier for the qurl-service API. Must not contain surrounding whitespace. |
+| `AUTH0_EXPECTED_AUDIENCE` | No | Optional infra-owned expected Auth0 audience for the configured qURL endpoint. When set, startup fails if `AUTH0_AUDIENCE` does not match exactly; leave unset to disable this drift check for local or self-hosted deployments. |
+| `AUTH0_EMAIL_CONNECTION` | No | Overrides the Auth0 connection pinned during `/qurl setup <email>`. Empty pins `email`, Auth0's passwordless email connection and the same one qurl-desktop uses, so one human keeps one Auth0 subject across surfaces. Set this only when the deployment's passwordless connection is named something else; pointing it at a non-passwordless connection changes the login method for every workspace admin. |
+| `SLACK_BASE_URL` | OAuth/Slack install | Public origin of the Secure Access Agent, e.g. `https://slack-bot.example`. Used to compose Slack install, Slack callback, Auth0 callback, and `/qurl setup <email>` URLs. |
+| `OAUTH_STATE_SECRET` | OAuth | HMAC-SHA256 key for state-token signing. Must be ≥32 bytes. |
+| `QURL_BINDING_IDEMPOTENCY_TTL_CONTRACT` | No | Runtime mirror of qurl-service's external-binding replay window for setup persist-failure logs. Empty uses the current 24-hour default from layervai/qurl-service#904. Set only when qurl-service changes the binding idempotency TTL before this Slack app redeploys; value must use the canonical positive whole-hour `Nh` form such as `24h`, otherwise startup fails. |
+| `QURL_API_KEY_MINT_IDEMPOTENCY_TTL_CONTRACT` | No | Runtime mirror of qurl-service's API-key mint replay window for rotation persist-failure logs. Empty uses the current 24-hour qurl-service default mirror. Set only when qurl-service changes the API-key mint idempotency TTL before this Slack app redeploys; value must use the canonical positive whole-hour `Nh` form such as `24h`, otherwise startup fails. |
+| `QURL_IMAGE` | Yes in production | Immutable `ghcr.io/layervai/qurl` image rendered by guided sharing setup. The image contains only `/usr/local/bin/qurl`; its hidden headless daemon uses the same local registry and qurl-connector Go runtime module as the desktop CLI. Production must use the lowercase SHA-256 digest from the matching CLI release's `qurl-image.txt`, for example `ghcr.io/layervai/qurl@sha256:<digest>`; tags are rejected. |
+| `QURL_IMAGE_FALLBACK` | No | Set `dev-sandbox` (case-insensitive) to allow an empty `QURL_IMAGE` to render the `ghcr.io/layervai/qurl:latest` fallback in local or sandbox deployments. Leave unset in production; production fails startup unless the qurl image is digest-pinned. |
+| `QURL_S3_ORIGIN_IMAGE` | No | Optional S3 website origin image rendered by the guided `/qurl-admin protect` → **Protect qURL Connector** → **S3 static website** flow. An override must use a lowercase SHA-256 digest, for example `ghcr.io/layervai/qurl-integrations/s3-static-connector@sha256:<digest>`. Empty uses the tested digest-pinned default. |
+| `QURL_SLACK_RATE_LIMIT_ENABLED` | No | Set `true` to enable the DDB-backed in-bot per-user gate for `/qurl get` and `/qurl aliases`. Empty or malformed values leave the gate off for sandbox/open-gate deployments. |
+| `QURL_SLACK_BOT_TOKEN_ROTATION_ENABLED` | No | Set `true` only if Slack bot-token rotation is enabled for the app. When true, `tokens_revoked` bot-token callbacks are acknowledged but not treated as uninstall teardowns; `app_uninstalled` still purges workspace data. Empty preserves the current Marketplace cleanup behavior. Malformed values fail startup because silently choosing either mode can suppress cleanup or make routine token rotation destructive. |
+| `QURL_SLACK_MAX_CONCURRENT_ASYNC` | No | Pool cap for in-flight async slash-command workers. Empty/0 uses the built-in default (50). Tune up if a workspace's load shape sustains `:warning: Secure Access Agent is busy` acks; tune down if memory pressure during retry storms is observed. |
+| `QURL_SLACK_MAX_CONCURRENT_FOLLOWUP_GATE_ASYNC` | No | Pool cap for the short **channel thread follow-up admission gate**: workspace-toggle read plus "is this already an agent thread?" transcript read. Empty/0 uses the built-in default (10). Each gate attempt has a 5s fail-closed budget; slow reads log as `agent: thread-continuity lookup failed; dropping channel reply`. During staged enablement, watch that line plus `agent: follow-up gate pool saturated — dropping channel reply`, and tune from observed DynamoDB latency and read volume. |
+| `QURL_SLACK_MAX_CONCURRENT_FOLLOWUP_ASYNC` | No | Pool cap for in-flight **admitted channel thread follow-up turns** — separate from `QURL_SLACK_MAX_CONCURRENT_ASYNC` so a busy channel's follow-up work can't saturate the main pool that `@mention`/DM/slash/interaction work shares. Empty/0 uses the built-in default (same as the main pool, 50). During staged enablement, watch `agent: follow-up turn pool saturated — dropping admitted channel reply`; main-pool isolation holds at any size. |
+
+Use a full repository path for dotted or port-bearing registries. Slashless
+`host:tag`-style values such as `gcr.io:v1` are rejected as ambiguous; use
+`gcr.io/<org>/<image>:v1` or a digest pin instead.
+
+Channel follow-up concurrency is split into short gate reads and long turns. The worst
+steady-state in-flight turn ceiling is `QURL_SLACK_MAX_CONCURRENT_ASYNC` +
+`QURL_SLACK_MAX_CONCURRENT_FOLLOWUP_ASYNC`; gate reads add only the short
+`QURL_SLACK_MAX_CONCURRENT_FOLLOWUP_GATE_ASYNC` budget. Go's HTTP clients do not set a
+fixed `MaxConnsPerHost` cap here, so connection contention should be governed by these
+semaphores and upstream service limits rather than a smaller local connection pool.
+
+`WORKSPACE_STATE_TABLE` + `WORKSPACE_STATE_KMS_KEY_ARN` are unconditionally
+required at startup — the Secure Access Agent needs DynamoDB + KMS for per-workspace key
+lookups even on `/qurl get` / `/qurl list`.
+
+Before promoting a build with the `QURL_IMAGE` startup check, verify
+the deployment manifest or task definition injects the matching CLI image digest; the
+production manifest is intentionally managed outside this public repository.
+
+The `Slack install` group is required for low-friction customer onboarding.
+Without it, a deployment can still use a manually supplied `SLACK_BOT_TOKEN`
+fallback, but customers cannot self-install the Secure Access Agent. That
+fallback token must include `users:read` for `/qurl-admin transfer-ownership`
+to verify target users; Enterprise Grid org-level fallback tokens are
+intentionally not used for ownership transfer.
+
+The `OAuth` group is required only to serve the
+`/oauth/qurl/{start,callback}` surface. Without it the Secure Access Agent still serves
+`/slack/*` and `/health`; `/qurl setup <email>` replies "OAuth is not
+configured" until the OAuth env vars are set.
+
+## Slack app configuration
+
+For customer Slack installs, configure the Slack app with:
+
+- OAuth redirect URL: `https://<SLACK_BASE_URL host>/oauth/slack/callback`
+- Customer install link: `https://<SLACK_BASE_URL host>/oauth/slack/install`
+- Slash command request URL: `https://<SLACK_BASE_URL host>/slack/commands`
+- Interactivity request URL: `https://<SLACK_BASE_URL host>/slack/interactions`
+- Bot scopes: `commands,chat:write,im:write,users:read` plus any extra scopes from
+  `SLACK_BOT_SCOPES` (`commands` installs the slash command surface and
+  `chat:write` lets the app post messages; `im:write` lets it open 1:1 DMs for
+  `dm:true` and qURL Connector enrollment-token delivery; `users:read` lets
+  `/qurl-admin transfer-ownership` verify the target user before owner_id changes)
+  - Existing installs created before `users:read` was required must re-run this
+    Slack install flow before `/qurl-admin transfer-ownership` can verify a
+    target user.
+  - Enterprise Grid org-level tokens are not enough for ownership transfer until
+    qurl-integrations#877 adds workspace-member verification or an in-product
+    recovery path.
+  - Conversation-mode installs should include `reactions:write` so the agent can
+    add and clear the working-on-it reaction on admitted channel turns and DM
+    turns that still use the reaction fallback before assistant-pane status is
+    enabled. Without it, agent replies still post, but the best-effort reaction
+    ack is absent. This scope is not part of the install defaults; declare it in
+    the app manifest and add it explicitly to `SLACK_BOT_SCOPES`.
+  - Conversation-mode installs should include `files:read` so a rebuilt thread
+    can tell the model that an earlier turn carried an attachment. Slack gates
+    file metadata in message reads on this scope, so without it
+    `conversations.replies` returns no `files` array and the signal rests
+    entirely on the message `subtype` — which still detects a real upload, but
+    leaves nothing to fall back on if Slack's read-back shape changes. An upload
+    is refused on its own turn either way; this affects only what LATER turns in
+    that thread are told about it.
+  - Conversation-mode installs that answer channel/private-channel/group-DM
+    threads should include `channels:read` / `groups:read` / `mpim:read` with the
+    corresponding event scopes. The confirm flow snapshots Slack's event
+    `channel_type`; fresh group-DM (`mpim`) `get` proposals answer directly
+    instead of posting unusable confirm cards, and legacy cards refuse before
+    minting `get` links.
+    `mpim:read` lets the legacy fallback classify snapshot-less `G`
+    conversations via `conversations.info`; without it, ambiguous `G`
+    conversations preserve the existing ephemeral delivery path for private
+    channels. This fallback boundary is best-effort: transient
+    `conversations.info` failures also fall back to the ephemeral path and emit
+    an operator warning. Pending cards created before this `channel_type`
+    snapshot shipped also use the fallback until their short TTL expires.
+- Installation mode: workspace-level installs or Enterprise Grid org-level
+  installs. Org-level bot tokens are stored under Slack `enterprise_id`; qURL
+  workspace setup and admin checks still use workspace `team_id`.
+- Token posture: non-rotating bot tokens. The validator accepts `xoxe.xoxb-`
+  shapes defensively, but qURL does not request or persist Slack refresh
+  tokens yet, so rotation-enabled apps need refresh support before production
+  use.
+
+With per-workspace token storage in place, existing customer workspaces must
+reinstall or reauthorize the Slack app so Slack issues a per-workspace bot
+token. Before deploying a build that depends on newly required Slack scopes,
+send affected workspaces through the reinstall link so guided connector setup
+does not fail closed on day one. New installs through `/oauth/slack/install`
+store that token automatically, and guided `/qurl-admin protect-connector` uses
+it for `views.open` plus enrollment-token DM delivery. If Slack tells a customer
+guided connector setup needs the latest qURL Slack app install, send them
+through this reinstall link.
+Monitor the guided setup open path after deploys: the synchronous admin gate is
+budgeted at 800 ms and the `views.open` call at 1500 ms, leaving headroom inside
+Slack's roughly three-second trigger window. Sustained p99 latency near either
+budget should be treated as an operator action item before customers see setup
+window-expired prompts.

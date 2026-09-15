@@ -3,11 +3,10 @@
 # Source: https://github.com/layervai/ops-routines-workflows/blob/main/.github/workflows/age-check-go.yml
 name: Dependency Age Check (Go)
 
-# Fires on every PR (no path filter) so the status check always reports.
-# This lets branch protection require it without the path-filtered-
-# required-check footgun (a required check that never fires blocks
-# merge with "Expected — Waiting for status to be reported").
-# The reusable's script exits 0 quickly when no go.sum changes are
+# Fires on every PR with no path filter so branch-protected checks always
+# report and avoid the path-filtered-required-check footgun. A required check
+# that never fires blocks merge with "Expected — Waiting for status to be
+# reported". The reusable's script exits 0 quickly when no go.sum changes are
 # in the diff — see "No go.sum changes detected" in age-check-go.sh.
 on:
   pull_request:
@@ -36,9 +35,17 @@ jobs:
     # only if/name/needs/permissions/secrets/strategy/uses/with/concurrency
     # are valid on a job that calls a reusable workflow. The reusable
     # workflow itself sets `timeout-minutes: 5` internally.
-    uses: layervai/ops-routines-workflows/.github/workflows/age-check-go.yml@ca41c7123c507ad45331a723851da6c010541154 # v0.6.2
+    uses: layervai/ops-routines-workflows/.github/workflows/age-check-go.yml@d07fa2fe3a103907ff2b1a1a71509a6dcd8e9d32 # v0.13.0
     with:
       min_age_days: 7
+      # qurl-go, qurl-connector, and qurl-conformance releases share the same
+      # organization. The reusable verifies the exact public proxy origin,
+      # GitHub tag and signed default-branch commit before skipping only these
+      # modules' age delay. qurl-connector is listed twice on purpose: the exact
+      # path exempts the module the CLI pins today (pkg/share ships inside that
+      # one module), and the trailing-slash prefix is the segment-safe form that
+      # covers any future nested submodule without matching a look-alike owner.
+      exempt_module_prefixes: github.com/layervai/qurl-conformance,github.com/layervai/qurl-go,github.com/layervai/qurl-connector,github.com/layervai/qurl-connector/
       # Post a sticky PR comment when an age-check fails, listing each
       # pin with its eligible-after date and days remaining. The PR
       # author / reviewer sees the retry-after date inline on the PR

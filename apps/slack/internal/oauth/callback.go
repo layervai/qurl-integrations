@@ -14,6 +14,9 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/layervai/qurl-integrations/apps/slack/internal/slackaudit"
+	"github.com/layervai/qurl-integrations/shared/auth"
 )
 
 const (
@@ -43,52 +46,139 @@ const (
 	// persistTimeout — the two are separate constants so a future
 	// adjustment of one doesn't accidentally retune the other.
 	bindTimeout = 15 * time.Second
-	// mintTimeout bounds the qurl-service POST /v1/api-keys call from
-	// mintAndPersist. Same fresh-context rationale as persistTimeout:
-	// TimeoutHandler canceling mid-mint would orphan a key the bot
-	// can no longer revoke (no keyID to DELETE against).
-	mintTimeout         = 15 * time.Second
-	dmTimeout           = 5 * time.Second
-	auth0TokenBodyLimit = 8 << 10 // 8 KiB — Auth0's /oauth/token response is ~2 KiB; tighter than the previous 64 KiB.
+	// mintTimeout bounds qurl-service provisioning from mintAndPersist.
+	// Keep one tight budget across binding + optional legacy fallback:
+	// fallback only runs for fast route-missing/dark-launch responses,
+	// while slow or transient binding failures are surfaced. If a fallback-
+	// eligible 404/503 arrives late, the legacy retry inherits only the
+	// remaining budget and may fail once; the admin can rerun setup rather
+	// than widening the post-timeout orphan-key window described below.
+	// Same fresh-context rationale as persistTimeout: TimeoutHandler
+	// canceling mid-mint would orphan a key the bot can no longer revoke
+	// (no keyID to DELETE against).
+	mintTimeout        = 15 * time.Second
+	existingKeyTimeout = 5 * time.Second
+	// revokedKeyScanTimeout gives APIKeyRevoked enough room for its bounded
+	// multi-page owner-scoped scan; existingKeyTimeout is for single-row/local
+	// reads and is too tight for up to apiKeyRevokedMaxPages HTTP requests.
+	revokedKeyScanTimeout                    = 20 * time.Second
+	dmTimeout                                = 5 * time.Second
+	auth0TokenBodyLimit                      = 8 << 10 // 8 KiB — Auth0's /oauth/token response is ~2 KiB; tighter than the previous 64 KiB.
+	setupBindingPersistFailureEvent          = "setup_binding_backed_persist_failure"
+	setupBindingPersistFailureOperatorAction = "rerun_setup_within_retry_window_then_cleanup_after_window"
+	// DefaultSetupBindingReplayWindowHours mirrors qurl-service's
+	// QURL_BINDING_IDEMPOTENCY_TTL_CONTRACT default. Production config can
+	// override this at startup when qurl-service changes before the Slack app
+	// redeploys.
+	// TODO(upstream-contract): keep in sync with layervai/qurl-service#904.
+	DefaultSetupBindingReplayWindowHours = 24
+	// DefaultAPIKeyMintReplayWindowHours mirrors qurl-service's API-key mint
+	// idempotency TTL, which is the source of truth for plaintext replay
+	// lifetime after rotation persist failures. Production config can override
+	// this at startup when qurl-service changes before the Slack app redeploys.
+	// TODO(upstream-contract): keep in sync with layervai/qurl-service#954.
+	DefaultAPIKeyMintReplayWindowHours      = 24
+	rotationReplacementPersistFailureEvent  = "setup_rotation_replacement_persist_failure"
+	rotationReplacementPersistFailureAction = "rerun_setup_rotate_within_retry_window"
+	// crossAccountRepointRequestedEvent marks an explicit --repoint where the
+	// signed-in qURL account differs from the one holding the workspace key.
+	// qurl-service has no tenant-facing cross-account binding transfer (cross-
+	// tenant refusal by design), so Slack fails closed and routes the owner to
+	// the operator-assisted transfer rather than minting a second live key.
+	crossAccountRepointRequestedEvent = "setup_cross_account_repoint_requested"
+	crossAccountRepointOperatorAction = "operator_assisted_binding_transfer_then_rerun_setup"
+	// repointLegacyRowRefusedEvent marks a --repoint refused because the stored
+	// key predates qurl_account_id provenance, so same-vs-cross account can't be
+	// proven. Structured so operators can measure how often legacy rows block
+	// repoint (the owner self-heals with --rotate, which records the account).
+	repointLegacyRowRefusedEvent = "setup_repoint_legacy_row_refused"
+	// rotateLegacyRowOrphanEvent marks a rotation that could not revoke its
+	// predecessor because the row predates stored key identity. The workspace is
+	// healthy afterwards, but one live qURL key is left behind that only an
+	// operator (or the owner, in qURL API-key management) can revoke. Structured
+	// so operators can find and clean up those keys rather than discovering them
+	// when an account hits its API-key plan limit.
+	rotateLegacyRowOrphanEvent = "setup_rotate_legacy_row_orphaned_key"
+	// rotateLegacyRowOperatorAction names the cleanup so the log line is
+	// actionable without cross-referencing this file.
+	rotateLegacyRowOperatorAction = "revoke the workspace's pre-rotation qURL key in qURL API-key management"
+	// Mirrors qurl-service's key_prefix display contract: "lv_live_"
+	// plus four non-secret characters. The reuse path derives this
+	// from stored plaintext because workspace_state stores api_key
+	// but not key_prefix.
+	// TODO(upstream-contract): prefer qurl-service's returned key_prefix
+	// whenever available; this fallback is display-only for older rows.
+	keyPrefixLength = len("lv_live_abcd")
 )
 
-// successPageTemplate mirrors the Discord-side success page
-// (apps/discord/src/routes/qurl-oauth.js renderSuccess). Plain HTML with
-// no external assets so it renders in the strictest CSP / no-JS
-// environments. html/template auto-escapes every {{.Field}} interpolation
-// — that's the load-bearing XSS defense for keyPrefix (qurl-service
-// JSON response) and email (JWKS-verified id_token). teamID is
-// HMAC-recovered from the signed state so it's already a trusted
-// input, but the same auto-escape applies uniformly.
-var successPageTemplate = template.Must(template.New("oauth-success").Parse(`<!DOCTYPE html>
+// oauthPageCSS is a self-contained LayerV-inspired shell for browser-facing
+// OAuth pages. It mirrors the public site's dark surface, lime/cyan accents,
+// fine grid, and translucent cards without loading external fonts, images, or
+// stylesheets. That keeps setOAuthPageSecurityHeaders' strict CSP/no-asset
+// posture intact for setup pages opened from Slack.
+const oauthPageCSS = `
+:root{color-scheme:dark;--bg:#030712;--panel:rgba(255,255,245,.035);--panel-strong:rgba(255,255,245,.055);--hairline:rgba(255,255,245,.13);--text:#f5f5f0;--muted:#b8c0cc;--tertiary:#aeb7c4;--lime:#7ec800;--cyan:#38bdf8;--danger:#f87171}
+*{box-sizing:border-box}
+body{min-height:100vh;margin:0;display:grid;place-items:start center;padding:2rem 1rem;background:radial-gradient(900px 600px at 78% 18%,rgba(255,255,245,.035),transparent 70%),radial-gradient(700px 500px at 22% 88%,rgba(126,200,0,.075),transparent 70%),var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif}
+body:before{content:"";position:fixed;inset:0;pointer-events:none;background-image:linear-gradient(90deg,rgba(255,255,245,.035) 1px,transparent 1px),linear-gradient(180deg,rgba(255,255,245,.035) 1px,transparent 1px);background-size:88px 88px;opacity:.7}
+.card{position:relative;width:100%;max-width:480px;border:1px solid var(--hairline);border-radius:14px;padding:2rem;background:linear-gradient(180deg,var(--panel-strong),var(--panel));box-shadow:0 0 0 1px rgba(255,255,245,.04),0 24px 60px -18px rgba(0,0,0,.65);overflow:hidden}
+.card:before{content:"";position:absolute;left:0;right:0;top:0;height:3px;background:linear-gradient(90deg,var(--lime),var(--cyan))}
+.brand{display:flex;align-items:center;gap:.65rem;margin-bottom:1.5rem;font-size:.75rem;font-weight:700;letter-spacing:.16em;text-transform:uppercase;color:var(--lime)}
+.brand-mark{width:.7rem;height:.7rem;border-radius:50%;background:var(--lime);box-shadow:0 0 20px rgba(126,200,0,.55)}
+h1{margin:0 0 .75rem;font-size:1.5rem;line-height:1.15;font-weight:700;letter-spacing:-.02em}
+p{margin:.75rem 0 0;color:var(--muted);font-size:.95rem;line-height:1.55}
+.kv{margin-top:1.25rem;padding-top:1rem;border-top:1px solid var(--hairline);font-size:.875rem;color:var(--muted)}
+.kv div{display:flex;justify-content:space-between;gap:1rem;margin-top:.5rem}
+.status{display:inline-flex;align-items:center;justify-content:center;width:1.5rem;height:1.5rem;margin-right:.35rem;border:1px solid currentColor;border-radius:999px;font-size:.85rem;vertical-align:.08em}
+.ok{color:var(--lime)}
+.warn{color:var(--danger)}
+code{background:rgba(255,255,245,.08);border:1px solid rgba(255,255,245,.10);padding:.12rem .35rem;border-radius:5px;color:var(--text);font-size:.875em}
+.footer{margin-top:1.5rem;color:var(--tertiary);font-size:.875rem}
+@media (max-width:520px){.card{padding:1.5rem;border-radius:12px}h1{font-size:1.35rem}.kv div{display:block}}
+`
+
+const oauthPageTemplateBeforeTitle = `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>qURL Connected</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>`
+
+const oauthPageTemplateAfterTitle = `</title>
 <meta name="robots" content="noindex">
-<style>
-body{font-family:system-ui,-apple-system,sans-serif;max-width:480px;margin:4rem auto;padding:0 1rem;color:#111}
-.card{border:1px solid #d1d5db;border-radius:12px;padding:2rem;background:#f9fafb}
-h1{margin:0 0 .5rem;font-size:1.5rem}
-.kv{margin-top:1rem;font-size:.875rem;color:#374151}
-.kv div{margin-top:.25rem}
-.ok{color:#059669;font-weight:600}
-code{background:#e5e7eb;padding:.1rem .3rem;border-radius:4px;font-size:.875em}
-</style>
+<style>` + oauthPageCSS + `</style>
 </head>
 <body>
 <div class="card">
-<h1><span class="ok">&#10003;</span> qURL Connected</h1>
-<p>qURL is connected to your Slack workspace. Your team can now use <code>/qurl get</code> and <code>/qurl list</code>.</p>
+<div class="brand"><span class="brand-mark" aria-hidden="true"></span><span>LayerV</span></div>
+`
+
+const oauthPageTemplateEnd = `</div>
+</body>
+</html>`
+
+// mustOAuthPageTemplate parses trusted package-owned template source. The title
+// and body arguments are template source fragments, not user data; dynamic values
+// must stay as {{.Field}} actions so html/template can escape them.
+func mustOAuthPageTemplate(name, title, body string) *template.Template {
+	return template.Must(template.New(name).Parse(oauthPageTemplateBeforeTitle + title + oauthPageTemplateAfterTitle + body + oauthPageTemplateEnd))
+}
+
+// successPageTemplate renders the Slack OAuth success page. html/template
+// auto-escapes every {{.Field}} interpolation — that's the load-bearing XSS
+// defense for keyPrefix (qurl-service JSON response) and email
+// (JWKS-verified id_token). teamID is HMAC-recovered from the signed state so
+// it's already a trusted input, but the same auto-escape applies uniformly.
+var successPageTemplate = mustOAuthPageTemplate("oauth-success", "qURL Connected", `
+<h1><span class="status ok" aria-hidden="true">&#10003;</span> qURL Connected</h1>
+<p>qURL™ is connected to your Slack workspace. Your team can now use <code>/qurl get</code> and <code>/qurl list</code>.</p>
 <div class="kv">
 <div>Slack workspace: <code>{{.TeamID}}</code></div>
 {{if .KeyPrefix}}<div>API key prefix: <code>{{.KeyPrefix}}</code></div>{{end}}
 {{if .Email}}<div>qURL account: <code>{{.Email}}</code></div>{{end}}
 </div>
-<p style="margin-top:1.5rem;font-size:.875rem;color:#6b7280">You can close this tab and return to Slack.</p>
-</div>
-</body>
-</html>`))
+<p class="footer">You can close this tab and return to Slack.</p>
+`)
 
 // successPageData is the model passed to successPageTemplate. Field names
 // must match the template's {{.Field}} accessors.
@@ -107,33 +197,15 @@ type successPageData struct {
 // The API key minted earlier in the callback is revoked before we
 // render this page so a refused install doesn't leave a half-installed
 // key behind.
-var rebindRefusedPageTemplate = template.Must(template.New("oauth-rebind-refused").Parse(`<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<title>qURL setup blocked</title>
-<meta name="robots" content="noindex">
-<style>
-body{font-family:system-ui,-apple-system,sans-serif;max-width:480px;margin:4rem auto;padding:0 1rem;color:#111}
-.card{border:1px solid #d1d5db;border-radius:12px;padding:2rem;background:#fef2f2}
-h1{margin:0 0 .5rem;font-size:1.5rem}
-.kv{margin-top:1rem;font-size:.875rem;color:#374151}
-.warn{color:#b91c1c;font-weight:600}
-code{background:#e5e7eb;padding:.1rem .3rem;border-radius:4px;font-size:.875em}
-</style>
-</head>
-<body>
-<div class="card">
-<h1><span class="warn">&#9888;</span> qURL setup blocked</h1>
-<p>This Slack workspace is already connected to qURL under a different admin. To avoid silently overwriting their configuration, this run of <code>/qurl setup &lt;email&gt;</code> was not applied.</p>
+var rebindRefusedPageTemplate = mustOAuthPageTemplate("oauth-rebind-refused", "qURL setup blocked", `
+<h1><span class="status warn" aria-hidden="true">&#9888;</span> qURL setup blocked</h1>
+<p>This Slack workspace is already connected to qURL™ under a different admin. To avoid silently overwriting their configuration, this run of <code>/qurl setup &lt;email&gt;</code> was not applied.</p>
 <p>Please ask the existing qURL admin in your workspace to add you, or contact LayerV support if the original admin is no longer reachable.</p>
 <div class="kv">
 <div>Slack workspace: <code>{{.TeamID}}</code></div>
 </div>
-<p style="margin-top:1.5rem;font-size:.875rem;color:#6b7280">You can close this tab.</p>
-</div>
-</body>
-</html>`))
+<p class="footer">You can close this tab.</p>
+`)
 
 // rebindRefusedPageData is the model passed to rebindRefusedPageTemplate.
 type rebindRefusedPageData struct {
@@ -144,36 +216,21 @@ type rebindRefusedPageData struct {
 // OAuth-callback failures that previously fell through to bare http.Error
 // (a blank white page with raw text — the experience operators flagged).
 // Same no-asset / strict-CSP posture as the success and rebind-refused
-// pages. Heading and Message are the only interpolations; html/template
-// auto-escapes both (they're operator-authored today, but the escape keeps
+// pages. Heading and Messages are the only interpolations; html/template
+// auto-escapes them (they're operator-authored today, but the escape keeps
 // the page safe if a future caller passes an upstream string through).
-var oauthErrorPageTemplate = template.Must(template.New("oauth-error").Parse(`<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<title>qURL setup</title>
-<meta name="robots" content="noindex">
-<style>
-body{font-family:system-ui,-apple-system,sans-serif;max-width:480px;margin:4rem auto;padding:0 1rem;color:#111}
-.card{border:1px solid #d1d5db;border-radius:12px;padding:2rem;background:#fef2f2}
-h1{margin:0 0 .5rem;font-size:1.5rem}
-p{color:#374151;font-size:.95rem;line-height:1.5}
-.warn{color:#b91c1c;font-weight:600}
-</style>
-</head>
-<body>
-<div class="card">
-<h1><span class="warn">&#9888;</span> {{.Heading}}</h1>
-<p>{{.Message}}</p>
-<p style="margin-top:1.5rem;font-size:.875rem;color:#6b7280">You can close this tab and return to Slack.</p>
-</div>
-</body>
-</html>`))
+// Error-page titles intentionally mirror their H1 so browser chrome names the
+// specific failure without adding a trademark to title or heading text.
+var oauthErrorPageTemplate = mustOAuthPageTemplate("oauth-error", "{{.Heading}}", `
+<h1><span class="status warn" aria-hidden="true">&#9888;</span> {{.Heading}}</h1>
+{{range .Messages}}<p>{{.}}</p>{{end}}
+<p class="footer">You can close this tab and return to Slack.</p>
+`)
 
 // oauthErrorPageData is the model passed to oauthErrorPageTemplate.
 type oauthErrorPageData struct {
-	Heading string
-	Message string
+	Heading  string
+	Messages []string
 }
 
 // auth0TokenResponse is the slice of Auth0's /oauth/token response we read.
@@ -182,13 +239,17 @@ type auth0TokenResponse struct {
 	IDToken     string `json:"id_token"`
 }
 
+var errMissingPKCEVerifier = errors.New("auth0 token exchange missing PKCE verifier")
+
 // Callback returns the http.HandlerFunc for GET /oauth/qurl/callback.
 //
 // Steps:
-//  1. Validate cookie + query.state via timing-safe compare; verify the
-//     state's HMAC + expiry; recover (teamID, userID).
-//  2. POST to Auth0 /oauth/token to exchange code → access_token + id_token.
-//  3. Verify id_token signature against Auth0 JWKS — extract `sub`
+//  1. Validate cookie + query.state via timing-safe compare; consume the
+//     backend state row, or verify a legacy signed state during deploy overlap;
+//     recover (teamID, userID).
+//  2. POST to Auth0 /oauth/token with the state-bound PKCE verifier to
+//     exchange code → access_token + id_token.
+//  3. Verify id_token signature + nonce against Auth0 JWKS — extract `sub`
 //     (workspace OwnerID; mandatory) and `email` (best-effort for the
 //     success-page readout).
 //  4. If setup state carried an email, require the verified Auth0
@@ -199,9 +260,15 @@ type auth0TokenResponse struct {
 //     and short-circuits BEFORE we touch any key state, so a refused
 //     install can't overwrite the existing admin's stored API key.
 //     Same-caller re-entry is idempotent success.
-//  6. POST to qurl-service /v1/api-keys to mint the workspace key.
-//  7. Upsert via WorkspaceStore.SetAPIKey; on failure, fire-and-forget
-//     revoke on qurl-service to bound the orphan-key window.
+//  6. Reuse the stored workspace key when setup mode is normal and it
+//     still validates on qurl-service; explicit rotation revokes the
+//     stored key by key_id before minting a replacement. Explicit
+//     repoint resolves to a same-account rotation, or fails closed and
+//     routes to the operator-assisted transfer when the signed-in qURL
+//     account differs from the one holding the key.
+//  7. For a newly minted key, upsert via WorkspaceStore.SetAPIKeyWithMetadata;
+//     on failure, binding-backed and rotation mints rely on qurl-service
+//     idempotency for retry recovery, while legacy fallback keys are revoked.
 //  8. DM the admin (fire-and-forget; failure doesn't block the page).
 //  9. Render success HTML.
 //
@@ -232,15 +299,30 @@ func Callback(cfg Config) http.HandlerFunc {
 			return
 		}
 
-		accessToken, idToken, err := exchangeAuth0Code(r.Context(), httpClient, cfg, code)
+		accessToken, idToken, err := exchangeAuth0Code(r.Context(), httpClient, cfg, code, verified.CodeVerifier)
 		if err != nil {
+			if errors.Is(err, errMissingPKCEVerifier) {
+				slog.Warn("oauth/callback rejected state without PKCE verifier")
+				renderOAuthErrorPage(w, http.StatusBadRequest, "Setup link is out of date",
+					"This qURL™ setup link was started before the current authorization flow was available.",
+					"Return to Slack and run /qurl setup <email> again.")
+				return
+			}
 			slog.Error("oauth/callback Auth0 token exchange failed", "error", err)
-			http.Error(w, "authorization failed — run /qurl setup <email> again to retry", http.StatusBadGateway)
+			renderOAuthErrorPage(w, http.StatusBadGateway, "Couldn't connect qURL",
+				"Slack finished its handoff, but qURL™ could not complete authorization.",
+				"Run /qurl setup <email> again in a few minutes. If it keeps failing, please contact your qURL administrator.")
 			return
 		}
 
-		qurlEmail, qurlSub := verifyIDTokenClaims(r.Context(), cfg, idToken)
-		if !checkSetupEmailMatches(w, verified, qurlEmail) {
+		qurlEmail, qurlSub, tokenVerified := verifyIDTokenClaims(r.Context(), cfg, idToken, verified.Nonce)
+		if !tokenVerified {
+			renderOAuthErrorPage(w, http.StatusBadRequest, "Authorization couldn't be verified",
+				"qURL™ could not verify the authorization response for this setup request.",
+				"Return to Slack and run /qurl setup <email> again.")
+			return
+		}
+		if !checkSetupEmailMatches(w, verified.Email, qurlEmail) {
 			return
 		}
 
@@ -256,12 +338,12 @@ func Callback(cfg Config) http.HandlerFunc {
 			return
 		}
 
-		keyPrefix, ok := mintAndPersist(w, cfg, accessToken, verified.TeamID, verified.UserID)
+		keyPrefix, ok := ensureWorkspaceAPIKey(w, cfg, accessToken, verified.TeamID, verified.UserID, qurlSub, verified.Mode)
 		if !ok {
 			return
 		}
 
-		slog.Info("oauth/callback completed", "team_id", verified.TeamID, "user_id", verified.UserID, "key_prefix", keyPrefix) //nolint:gosec // G706: slog escapes control bytes in attribute values.
+		slog.Info("oauth/callback completed", "team_id", verified.TeamID, "user_id", verified.UserID, "key_prefix", keyPrefix)
 
 		// DM target is the Slack user_id from the signed state — never
 		// from an unsigned query parameter. Goroutine deliberately uses
@@ -280,14 +362,16 @@ func Callback(cfg Config) http.HandlerFunc {
 	}
 }
 
-func checkSetupEmailMatches(w http.ResponseWriter, verified VerifiedState, qurlEmail string) bool {
-	if verified.Email == "" {
+func checkSetupEmailMatches(w http.ResponseWriter, setupEmail, qurlEmail string) bool {
+	if setupEmail == "" {
 		return true
 	}
 	normalized, err := NormalizeEmail(qurlEmail)
-	if err != nil || normalized != verified.Email {
+	if err != nil || normalized != setupEmail {
 		slog.Warn("oauth/callback email mismatch for setup flow")
-		http.Error(w, "authenticated email did not match setup email — run /qurl setup <email> again", http.StatusBadRequest)
+		renderOAuthErrorPage(w, http.StatusBadRequest, "qURL account mismatch",
+			"The signed-in qURL™ account did not match the email used to start setup.",
+			"Return to Slack and run /qurl setup <email> again with the same qURL account.")
 		return false
 	}
 	return true
@@ -301,13 +385,13 @@ func checkSetupEmailMatches(w http.ResponseWriter, verified VerifiedState, qurlE
 func validateCallbackRequest(w http.ResponseWriter, r *http.Request, cfg Config, now func() time.Time) (verified VerifiedState, code string, ok bool) {
 	if r.Method != http.MethodGet {
 		w.Header().Set("Allow", "GET")
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		renderOAuthErrorPage(w, http.StatusMethodNotAllowed, "Use the Slack setup link",
+			"This qURL™ setup callback only works from the browser redirect opened by /qurl setup <email>.")
 		return VerifiedState{}, "", false
 	}
 
 	q := r.URL.Query()
 	if errParam := q.Get("error"); errParam != "" {
-		//nolint:gosec // G706: slog's JSON handler escapes control bytes in attribute values, same posture as the request-path slog sites.
 		slog.Warn("oauth/callback Auth0 returned error",
 			"error", errParam,
 			// Auth0 enterprise SAML connections occasionally embed
@@ -315,17 +399,21 @@ func validateCallbackRequest(w http.ResponseWriter, r *http.Request, cfg Config,
 			// to bound PII exposure in operator logs.
 			"error_description", truncateForLog(q.Get("error_description"), 128))
 		// Clear the cookie even on the Auth0-error branch so the
-		// stale state can't be replayed within the 5-minute TTL.
+		// stale state can't be replayed within the state TTL.
 		// On the success path, the cookie clears after verify; this
 		// closes the same-browser-replay window on Auth0 reject too.
 		clearStateCookie(w)
-		http.Error(w, "authorization failed — run /qurl setup <email> again to retry", http.StatusBadRequest)
+		renderOAuthErrorPage(w, http.StatusBadRequest, "Authorization didn't complete",
+			"qURL™ setup was not authorized.",
+			"Return to Slack and run /qurl setup <email> again to retry.")
 		return VerifiedState{}, "", false
 	}
 	code = q.Get("code")
 	stateParam := q.Get("state")
 	if code == "" || stateParam == "" {
-		http.Error(w, "missing code or state", http.StatusBadRequest)
+		renderOAuthErrorPage(w, http.StatusBadRequest, "Setup link is incomplete",
+			"The qURL™ authorization link is missing required setup details.",
+			"Return to Slack and run /qurl setup <email> again.")
 		return VerifiedState{}, "", false
 	}
 
@@ -333,11 +421,13 @@ func validateCallbackRequest(w http.ResponseWriter, r *http.Request, cfg Config,
 	if cookieState == "" {
 		slog.Warn("oauth/callback missing state cookie")
 		clearStateCookie(w)
-		http.Error(w, "setup must be completed in the same browser", http.StatusBadRequest)
+		renderOAuthErrorPage(w, http.StatusBadRequest, "Continue setup in the same browser",
+			"This qURL™ setup link must be completed in the same browser where it was opened from Slack.",
+			"Return to Slack and run /qurl setup <email> again.")
 		return VerifiedState{}, "", false
 	}
-	// Both values come from the same MintState call so canonical
-	// length is fixed; hmac.Equal short-circuits to false on
+	// Both values carry the same opaque handle (or deploy-overlap legacy state),
+	// so canonical length is fixed; hmac.Equal short-circuits to false on
 	// length mismatch (length oracle is harmless here because an
 	// attacker who can probe arbitrary cookie+state pairs already
 	// has the HttpOnly cookie). Constant-time byte compare on
@@ -345,17 +435,30 @@ func validateCallbackRequest(w http.ResponseWriter, r *http.Request, cfg Config,
 	if !hmac.Equal([]byte(cookieState), []byte(stateParam)) {
 		slog.Warn("oauth/callback cookie/state mismatch")
 		clearStateCookie(w)
-		http.Error(w, "setup must be completed in the same browser", http.StatusBadRequest)
+		renderOAuthErrorPage(w, http.StatusBadRequest, "Continue setup in the same browser",
+			"This qURL™ setup link must be completed in the same browser where it was opened from Slack.",
+			"Return to Slack and run /qurl setup <email> again.")
 		return VerifiedState{}, "", false
 	}
 
-	// HMAC + expiry on the state token itself; the cookie check
-	// above proves "same browser" but not "minted by us".
-	v, err := VerifyState(cfg.OAuthStateSecret, stateParam, now())
+	// Consume before any Auth0, bind, or mint side effect. A transient failure
+	// therefore requires a fresh /qurl setup link, but no concurrent callback can
+	// race far enough to exchange or mint from the same one-shot state.
+	v, err := consumeCallbackState(r.Context(), cfg, stateParam, now())
 	if err != nil {
-		slog.Warn("oauth/callback rejected invalid state", "reason", err.Error()) //nolint:gosec // G706: slog escapes control bytes in attribute values.
+		if !isStateValidationError(err) {
+			slog.Error("oauth/callback state store failed", "error", err)
+			clearStateCookie(w)
+			renderOAuthErrorPage(w, http.StatusServiceUnavailable, "qURL setup is temporarily unavailable",
+				"qURL™ setup could not verify this setup link.",
+				"Return to Slack and run /qurl setup <email> again in a few minutes.")
+			return VerifiedState{}, "", false
+		}
+		slog.Warn("oauth/callback rejected invalid state", "reason", err.Error())
 		clearStateCookie(w)
-		http.Error(w, "invalid or expired setup link", http.StatusBadRequest)
+		renderOAuthErrorPage(w, http.StatusBadRequest, "Setup link is invalid or expired",
+			"This qURL™ setup link is invalid or expired.",
+			"Return to Slack and run /qurl setup <email> again.")
 		return VerifiedState{}, "", false
 	}
 
@@ -364,22 +467,27 @@ func validateCallbackRequest(w http.ResponseWriter, r *http.Request, cfg Config,
 	return v, code, true
 }
 
-// verifyIDTokenClaims extracts email + sub from the id_token. Email
-// is best-effort for legacy setup (failure logged, returned ""), but
-// becomes mandatory when the signed setup state carries an email; sub
-// is mandatory for the downstream bind (failure returned as "" so
-// checkBindAllowed can fail-closed). Both verifies are skipped cleanly
-// when idToken is empty or the verifier is unwired.
-//
-// In production the verifier is non-nil by construction —
-// cmd/main.go's buildOAuthConfig fails-fast at boot when AdminStore
-// is wired and JWKS prime fails — so the nil-verifier branch is
-// reachable only on the sandbox / no-DDB deploy path, where
-// checkBindAllowed short-circuits on AdminStore==nil before reading
-// the (empty) sub anyway.
+//nolint:gocritic // hugeParam: mirrors Callback's package-wide value-pass Config posture.
+func consumeCallbackState(ctx context.Context, cfg Config, stateParam string, now time.Time) (VerifiedState, error) {
+	if cfg.StateStore != nil {
+		return loadStateWithLegacyFallback(cfg.OAuthStateSecret, stateParam, now, func() (VerifiedState, error) {
+			storeCtx, cancel := context.WithTimeout(ctx, stateStoreRequestTimeout)
+			defer cancel()
+			return cfg.StateStore.ConsumeState(storeCtx, stateParam, now)
+		})
+	}
+	return VerifyState(cfg.OAuthStateSecret, stateParam, now)
+}
+
+// verifyIDTokenClaims verifies the id_token once, including the state-bound
+// nonce, then extracts email + sub. Email remains best-effort for display but
+// becomes mandatory when setup state carries an email; sub remains mandatory
+// for the downstream bind. Missing token/verifier is anomalous and fails closed.
+// The returned ok reports token/nonce verification only; the email/sub policy is
+// intentionally enforced by checkSetupEmailMatches and checkBindAllowed below.
 //
 //nolint:gocritic // hugeParam: Config value-pass posture matches the rest of the package.
-func verifyIDTokenClaims(ctx context.Context, cfg Config, idToken string) (email, sub string) {
+func verifyIDTokenClaims(ctx context.Context, cfg Config, idToken, expectedNonce string) (email, sub string, ok bool) {
 	if idToken == "" {
 		// Auth0 should always return an id_token when openid is in
 		// the scope set (see authorizeURL). An empty id_token here
@@ -388,23 +496,29 @@ func verifyIDTokenClaims(ctx context.Context, cfg Config, idToken string) (email
 		// from "verifier rejected it" so on-call triaging the
 		// downstream 500 doesn't dig through JWKS logs that never
 		// fired.
-		slog.Warn("oauth/callback Auth0 returned empty id_token — sub-verify will be skipped (likely Auth0 application misconfigured without openid scope)")
-		return "", ""
+		slog.Warn("oauth/callback Auth0 returned empty id_token (likely Auth0 application misconfigured without openid scope)")
+		return "", "", false
 	}
 	if cfg.IDTokenVerifier == nil {
-		return "", ""
+		slog.Error("oauth/callback id_token verifier is not configured")
+		return "", "", false
 	}
-	if e, verr := cfg.IDTokenVerifier.VerifyEmail(ctx, idToken); verr != nil {
-		slog.Warn("oauth/callback id_token email-verify failed (non-fatal)", "error", verr)
+	claims, err := cfg.IDTokenVerifier.VerifySetupClaims(ctx, idToken, expectedNonce)
+	if err != nil {
+		slog.Warn("oauth/callback id_token or nonce verification failed", "error", err)
+		return "", "", false
+	}
+	if claims.EmailErr != nil {
+		slog.Warn("oauth/callback id_token email extraction failed (non-fatal)", "error", claims.EmailErr)
 	} else {
-		email = e
+		email = claims.Email
 	}
-	if s, serr := cfg.IDTokenVerifier.VerifySub(ctx, idToken); serr != nil {
-		slog.Warn("oauth/callback id_token sub-verify failed — bind will be skipped (fatal in production where AdminStore is wired)", "error", serr)
+	if claims.SubErr != nil {
+		slog.Warn("oauth/callback id_token sub extraction failed — bind policy will fail closed", "error", claims.SubErr)
 	} else {
-		sub = s
+		sub = claims.Sub
 	}
-	return email, sub
+	return email, sub, true
 }
 
 // checkBindAllowed runs the BindWorkspace pre-flight. Returns true to
@@ -413,9 +527,10 @@ func verifyIDTokenClaims(ctx context.Context, cfg Config, idToken string) (email
 // this runs BEFORE mint, a refused install never produces an orphan
 // key and never overwrites an existing admin's stored credential.
 //
-// AdminStore=nil is the sandbox / no-DDB path — log and skip.
-// qurlSub is the output of the upstream id_token verifier (VerifySub,
-// logged on failure earlier in the callback), not the gate itself.
+// AdminStore=nil is the admin-storage-disabled path — log and skip. The
+// workspace DDB provider is still mandatory at process startup.
+// qurlSub is the output of the upstream id_token claim extraction (logged on
+// failure earlier in the callback), not the gate itself.
 // qurlSub=="" therefore means that verification silently failed — we
 // have no proof the OAuth flow originated from a legit Auth0 session,
 // so we refuse the bind here rather than half-install. The Auth0
@@ -438,14 +553,16 @@ func verifyIDTokenClaims(ctx context.Context, cfg Config, idToken string) (email
 //nolint:gocritic // hugeParam: Config value-pass posture matches the rest of the package.
 func checkBindAllowed(w http.ResponseWriter, cfg Config, verified VerifiedState, qurlSub string) bool {
 	if cfg.AdminStore == nil {
-		slog.Warn("oauth/callback AdminStore not wired — workspace_mappings not seeded", //nolint:gosec // G706: slog escapes control bytes in attribute values.
+		slog.Warn("oauth/callback AdminStore not wired — workspace_mappings not seeded",
 			"team_id", verified.TeamID)
 		return true
 	}
 	if qurlSub == "" {
-		slog.Error("oauth/callback bind skipped — id_token sub unavailable", //nolint:gosec // G706: slog escapes control bytes in attribute values.
+		slog.Error("oauth/callback bind skipped — id_token sub unavailable",
 			"team_id", verified.TeamID)
-		http.Error(w, "workspace identity could not be confirmed — run /qurl setup <email> again", http.StatusInternalServerError)
+		renderOAuthErrorPage(w, http.StatusInternalServerError, "Couldn't confirm your qURL account",
+			"qURL™ could not confirm the signed-in account needed to bind this Slack workspace.",
+			"Run /qurl setup <email> again. If it keeps failing, please contact your qURL administrator.")
 		return false
 	}
 	bindCtx, bindCancel := context.WithTimeout(context.Background(), bindTimeout)
@@ -477,9 +594,12 @@ func handleBindError(w http.ResponseWriter, cfg Config, bindErr error, teamID st
 		// The workspace owner is re-running /qurl setup — the stored
 		// owner_id matches the verified caller (owner-only short-circuit;
 		// added admins do NOT land here, they get AlreadyBound). We
-		// continue to mint, which rotates their API key. Operator-visible
-		// effect: "key rotated, owner + admin set unchanged."
-		slog.Info("oauth/callback rebind idempotent (caller is the workspace owner)", //nolint:gosec // G706: slog escapes control bytes in attribute values.
+		// continue to the key stage, which reuses a healthy stored key
+		// or attempts replacement provisioning only when the stored key
+		// is missing or revoked. Operator-visible effect: setup
+		// succeeds, owner + admin set unchanged, and no extra key is
+		// minted for a healthy workspace.
+		slog.Info("oauth/callback rebind idempotent (caller is the workspace owner)",
 			"team_id", teamID)
 		return true
 	case BindConflictAlreadyBound, BindConflictUnverified:
@@ -489,14 +609,16 @@ func handleBindError(w http.ResponseWriter, cfg Config, bindErr error, teamID st
 		// the safer default is to refuse the rebind than to potentially
 		// overwrite). No mint has happened yet, so nothing to revoke —
 		// the existing owner's key row is untouched.
-		slog.Warn("oauth/callback rebind refused — workspace owned by a different Slack user", //nolint:gosec // G706: slog escapes control bytes in attribute values.
+		slog.Warn("oauth/callback rebind refused — workspace owned by a different Slack user",
 			"team_id", teamID, "conflict", string(code), "error", bindErr)
 		renderRebindRefused(w, teamID)
 		return false
 	default:
-		slog.Error("oauth/callback BindWorkspace failed", //nolint:gosec // G706: slog escapes control bytes in attribute values.
+		slog.Error("oauth/callback BindWorkspace failed",
 			"team_id", teamID, "error", bindErr)
-		http.Error(w, "workspace not bound — run /qurl setup <email> again", http.StatusInternalServerError)
+		renderOAuthErrorPage(w, http.StatusInternalServerError, "Couldn't bind this Slack workspace",
+			"qURL™ could not finish binding this Slack workspace.",
+			"Run /qurl setup <email> again in a few minutes. If it keeps failing, please contact your qURL administrator.")
 		return false
 	}
 }
@@ -511,29 +633,369 @@ func spawnAsync(tracker AsyncTracker, fn func()) {
 	go fn()
 }
 
-// mintAndPersist mints the API key on qurl-service and persists it via
-// WorkspaceStore. Returns (keyPrefix, true) on success; on failure
-// writes the HTTP error response and fires the orphan-key revoke
-// when a mint succeeded but the persist did not. The plaintext apiKey
-// and keyID stay internal: SetAPIKey is the only apiKey consumer and
-// keyID's only use is the persist-failure revoke. With BindWorkspace
-// running BEFORE this step (see Callback), no bind-failure path needs
-// the keyID either.
+// ensureWorkspaceAPIKey returns a working workspace qURL API key prefix for
+// the success page. If the workspace already has a valid stored key, setup is
+// complete and no account-level API-key slot is spent. Missing keys and legacy
+// invalid rows without stored key identity fall through to mintAndPersist so
+// first setup and old recovery rows still work. Metadata-bearing invalid rows
+// require --rotate/--repoint so a prior rotate persist-failure replays the
+// replacement keyed by the old key_id instead of minting around it.
 //
-// Post-timeout-completion footgun: the mint + persist contexts are
-// fresh (decoupled from the request context) so a TimeoutHandler
-// cancel doesn't desync row state from what we tell the user. The
-// flip side: if oauthHandlerTimeout (60s) fires after we already
-// started the mint, the goroutine continues for up to
-// mintTimeout + persistTimeout (≈30s) after we've returned an error
-// to the user. The user retries, mints K2, and the eventual
-// completion of K1 races K2's persist as a row overwrite. K1 then
-// becomes an orphan in qurl-service (no revoke wired for this case).
-// Tracked at #265 alongside the lost-PutItem-race orphan path.
+// qurlAccountID is the verified qURL account (Auth0 sub) of this setup run. It
+// is stored with every mint so future --repoint can detect a cross-account move,
+// and is the signed-in side of that comparison for --repoint itself.
 //
 //nolint:gocritic // hugeParam: see Callback — Config is value-passed.
-func mintAndPersist(w http.ResponseWriter, cfg Config, accessToken, teamID, userID string) (string, bool) {
-	keyName := "Slack workspace " + teamID
+func ensureWorkspaceAPIKey(w http.ResponseWriter, cfg Config, accessToken, teamID, userID, qurlAccountID string, mode SetupMode) (string, bool) {
+	//nolint:exhaustive // SetupModeReuse (and the empty mode) fall through to the reuse-or-mint path below.
+	switch mode {
+	case SetupModeRotate, SetupModeRepoint:
+		return replaceWorkspaceAPIKey(w, cfg, accessToken, teamID, userID, qurlAccountID, mode)
+	}
+	keyPrefix, reused, ok := reuseStoredWorkspaceKey(w, cfg, teamID)
+	if !ok {
+		return "", false
+	}
+	if reused {
+		return keyPrefix, true
+	}
+	return mintAndPersist(w, cfg, accessToken, teamID, userID, qurlAccountID)
+}
+
+// replaceWorkspaceAPIKey performs the explicit owner-requested key operations,
+// --rotate (same-account replacement) and --repoint (account move). It reads the
+// stored key identity once — the qURL key_id and the qURL account that minted it
+// — then branches:
+//
+//   - No stored key: an explicit operation on an unconfigured workspace is just
+//     first setup, so mint and store.
+//   - A different qURL account holds the key: a cross-account move. Neither mode
+//     can take it over — the signed-in account cannot revoke the other account's
+//     key, and qurl-service has no tenant-facing binding transfer (cross-tenant
+//     refusal by design, layervai/qurl-service#910). Slack fails closed (no mint,
+//     no revoke) and routes the owner to the operator-assisted transfer. Minting
+//     would leave the old account's key live alongside a new one — the exact
+//     double-live-key leak #790 guards against. Detecting this from the stored
+//     provenance also spares the doomed wrong-owner DELETE + revoked-list scan
+//     that --rotate would otherwise attempt.
+//   - --repoint against a row with no recorded qURL account (legacy/sandbox):
+//     cross-account safety cannot be proven, so fail closed. A same-account owner
+//     can self-heal with --rotate, which records the account for next time.
+//   - Same qURL account, or --rotate against a legacy row: revoke the stored key
+//     before minting the replacement, so a failed mint never leaves the account
+//     holding both old and new workspace keys.
+//   - Rows with no key_id at all (pre-dating stored key identity) mint without
+//     revoking: Slack cannot prove which qURL key to revoke, and refusing does
+//     not protect that key — it only routes the owner to /qurl uninstall, which
+//     abandons the same key and additionally discards the bot token and
+//     workspace binding. The un-revokable predecessor is logged under
+//     setup_rotate_legacy_row_orphaned_key for operator cleanup, and the
+//     rotation records the new key_id so this happens at most once per
+//     workspace.
+//
+//nolint:gocritic // hugeParam: see Callback — Config is value-passed.
+func replaceWorkspaceAPIKey(w http.ResponseWriter, cfg Config, accessToken, teamID, userID, qurlAccountID string, mode SetupMode) (string, bool) {
+	readCtx, readCancel := context.WithTimeout(context.Background(), existingKeyTimeout)
+	defer readCancel()
+	keyID, storedAccountID, err := cfg.Provider.APIKeyIdentity(readCtx, teamID)
+	if errors.Is(err, auth.ErrWorkspaceNotConfigured) {
+		return mintAndPersist(w, cfg, accessToken, teamID, userID, qurlAccountID)
+	}
+	if err != nil {
+		slog.Error("oauth/callback explicit-mode key identity lookup failed",
+			"error", err, "team_id", teamID, "mode", string(mode))
+		renderOAuthErrorPage(w, http.StatusInternalServerError, "Couldn't update qURL key",
+			"qURL™ is connected to this Slack workspace, but the stored workspace key could not be read. Run /qurl setup <email> with --rotate or --repoint again in a few minutes. If it keeps failing, please contact your qURL administrator.")
+		return "", false
+	}
+	if storedAccountID != "" && storedAccountID != qurlAccountID {
+		if qurlAccountID == "" {
+			// Belt-and-suspenders: a provenance-bearing row with no verified
+			// signed-in account. Upstream gates make this unreachable — the slash
+			// surface rejects --rotate/--repoint when AdminStore is nil, and when it
+			// is wired checkBindAllowed fails closed on an empty id_token sub before
+			// ensureWorkspaceAPIKey runs — but fail closed here too so a future
+			// reorder can't turn an empty signed-in account into a spurious
+			// cross-account operator route (or an unverified same-account rotation).
+			slog.Error("oauth/callback explicit mode reached with empty qURL account against a provenance row",
+				"team_id", teamID, "mode", string(mode))
+			renderOAuthErrorPage(w, http.StatusInternalServerError, "Couldn't confirm your qURL account",
+				"qURL™ could not confirm the signed-in account needed to update this workspace key. Run /qurl setup <email> again. If it keeps failing, please contact your qURL administrator.")
+			return "", false
+		}
+		// A different qURL account holds the key. Do NOT echo it to the browser
+		// (avoid disclosing which qURL account holds a workspace); both IDs are
+		// logged for the operator running the transfer. The single message serves
+		// both modes: a --rotate run that signed in with the wrong account is told
+		// to re-sign-in, while an intentional --repoint is sent to the operator.
+		slog.Warn("oauth/callback cross-account repoint requested — routing to operator transfer",
+			"event", crossAccountRepointRequestedEvent,
+			"team_id", teamID,
+			"mode", string(mode),
+			"current_qurl_account_id", storedAccountID,
+			"requested_qurl_account_id", qurlAccountID,
+			"operator_action", crossAccountRepointOperatorAction)
+		renderOAuthErrorPage(w, http.StatusConflict, "qURL key belongs to a different account",
+			"This Slack workspace's qURL™ key belongs to a different qURL account. To protect the current owner, qURL does not let another account take over a workspace connection automatically.",
+			"If you meant to replace the key on the account that already holds it, run /qurl setup <email> --rotate signed in as that account. To move this workspace to a different qURL account, contact LayerV support for an operator-assisted transfer.")
+		return "", false
+	}
+	if storedAccountID == "" && mode == SetupModeRepoint {
+		// Legacy/sandbox row: key present, provenance unknown. --repoint can't
+		// prove same-vs-cross account, so fail closed; --rotate can refresh it.
+		slog.Warn("oauth/callback repoint refused because stored key has no recorded qURL account",
+			"event", repointLegacyRowRefusedEvent,
+			"team_id", teamID)
+		renderOAuthErrorPage(w, http.StatusConflict, "Can't repoint qURL key from Slack",
+			"This workspace was connected before Slack recorded which qURL™ account holds its key, so a cross-account move can't be verified safely. If you own the current qURL account, run /qurl setup <email> with --rotate to refresh the key (Slack will record the account for next time). To move the workspace to a different qURL account, contact LayerV support for an operator-assisted transfer.")
+		return "", false
+	}
+	// Same qURL account, or --rotate against a legacy row: revoke-then-replace.
+	//
+	// A row with no key_id predates Slack storing qURL key identity, so there is
+	// no key to revoke safely. Mint the replacement anyway rather than refusing:
+	// refusing does not protect the old key, it only pushes the owner to
+	// /qurl uninstall, which abandons that same key (local-only disconnect) AND
+	// discards the Slack bot token and workspace binding. Both paths leave one
+	// un-revokable key behind; only this one keeps the workspace working, and
+	// each uninstall/setup cycle otherwise adds another live key against the
+	// account's plan limit. The orphan is logged for operator cleanup.
+	if keyID == "" && mode == SetupModeRotate {
+		if qurlAccountID == "" {
+			// Both things this branch produces are keyed on the account: the
+			// persisted provenance that unblocks a later --repoint, and the
+			// orphan event's handle for locating the abandoned key. Storing an
+			// empty account would leave the row repoint-blocked forever while
+			// reporting success, and would emit an orphan event no operator can
+			// act on — a silent, permanent degradation.
+			//
+			// Two upstream gates already make this unreachable (the slash
+			// surface rejects explicit modes when AdminStore is nil, and
+			// checkBindAllowed fails closed on an empty sub when it is wired),
+			// but that invariant spans two surfaces and this branch cannot see
+			// either. Fail closed rather than inherit it.
+			slog.Error("oauth/callback legacy rotation refused — no verified qURL account to record",
+				"team_id", teamID, "mode", string(mode))
+			renderOAuthErrorPage(w, http.StatusInternalServerError, "Couldn't confirm your qURL account",
+				"qURL™ could not confirm the signed-in account needed to rotate this workspace key, and nothing was changed. Run /qurl setup <email> with --rotate again. If it keeps failing, please contact your qURL administrator.")
+			return "", false
+		}
+		// Mirror the normal path's pre-mint validation so a malformed key
+		// surfaces as the dedicated page rather than a generic upstream mint
+		// failure. minter_test pins that the empty-oldKeyID form stays inside
+		// qurl-service's 32-256 header bounds, so this should never fire — but
+		// the two branches disagreeing on whether to check is the kind of
+		// asymmetry that rots.
+		if err := validateIdempotencyKey(replacementIdempotencyKey(teamID, "")); err != nil {
+			slog.Error("oauth/callback legacy rotation replacement idempotency key invalid",
+				"error", err, "team_id", teamID)
+			renderOAuthErrorPage(w, http.StatusInternalServerError, "Couldn't rotate qURL key",
+				"Slack could not build a safe qURL™ retry key for this workspace. No key was changed. Contact LayerV support to rotate this workspace key.")
+			return "", false
+		}
+		keyPrefix, ok := mintReplacementAndPersist(w, cfg, accessToken, teamID, "", userID, qurlAccountID)
+		if !ok {
+			// Deliberately silent on failure. The event tells an operator to
+			// revoke this workspace's pre-rotation key, and that is only true
+			// once the replacement is stored. A failed mint (this path is net
+			// +1 key, so an account at its plan limit fails here) or a failed
+			// persist leaves the workspace still using the old key — acting on
+			// the event then would revoke a live credential and take the
+			// workspace down. Staying quiet also keeps the event honest for
+			// sequential retries: repeated quota-blocked attempts would
+			// otherwise re-emit it for the same team_id. The invariant is "at
+			// most one orphaned KEY per workspace", not one log line —
+			// concurrent legacy rotations can both mint (idempotently, so one
+			// key) and both log, which an operator dedups by team_id.
+			return "", false
+		}
+		slog.Warn("oauth/callback rotated a legacy row with no stored key_id — previous key could not be revoked from Slack and needs operator cleanup",
+			"event", rotateLegacyRowOrphanEvent,
+			"team_id", teamID,
+			"mode", string(mode),
+			"qurl_account_id", qurlAccountID,
+			"operator_action", rotateLegacyRowOperatorAction)
+		return keyPrefix, true
+	}
+	if keyID == "" {
+		// --repoint on a row with no key_id. Unreachable today: provenance and
+		// key_id are only ever persisted together (both SetAPIKeyWithMetadata
+		// sites write them from one mint, and a mint without a key_id fails),
+		// so a repoint that got past the provenance guard above must have a
+		// key_id. Kept as a structural fence rather than an upstream-invariant
+		// assumption: mint-without-revoke is scoped to rotation, and if that
+		// invariant ever breaks this must not silently widen to repoint.
+		slog.Warn("oauth/callback repoint refused because stored key has no key_id",
+			"team_id", teamID, "mode", string(mode))
+		renderOAuthErrorPage(w, http.StatusConflict, "Can't repoint qURL key from Slack",
+			"This workspace was connected before Slack stored qURL™ key identity, so a qURL account move can't be verified safely. Run /qurl setup <email> with --rotate to refresh the key, or contact LayerV support.")
+		return "", false
+	}
+	if err := validateIdempotencyKey(replacementIdempotencyKey(teamID, keyID)); err != nil {
+		slog.Error("oauth/callback rotation replacement idempotency key invalid before revoke",
+			"error", err, "team_id", teamID, "key_id", keyID)
+		renderOAuthErrorPage(w, http.StatusInternalServerError, "Couldn't rotate qURL key",
+			"Slack could not build a safe qURL™ retry key for this workspace key identity. No key was revoked. Contact LayerV support to rotate this workspace key.")
+		return "", false
+	}
+
+	revokeCtx, revokeCancel := context.WithTimeout(context.Background(), revokeTimeout)
+	defer revokeCancel()
+	if err := cfg.Minter.RevokeAPIKey(revokeCtx, accessToken, keyID); err != nil {
+		if !confirmStoredKeyAlreadyRevoked(w, cfg, accessToken, teamID, keyID, err) {
+			return "", false
+		}
+	}
+
+	return mintReplacementAndPersist(w, cfg, accessToken, teamID, keyID, userID, qurlAccountID)
+}
+
+// confirmStoredKeyAlreadyRevoked lets a retry continue after the previous
+// attempt successfully revoked the old key but failed before storing a
+// replacement. DELETE 404 alone is not enough: qurl-service also returns 404
+// for wrong-owner keys, so APIKeyRevoked must confirm keyID under this owner.
+// APIKeyRevoked owns the bounded-scan/qurl-service#946 caveats.
+//
+//nolint:gocritic // hugeParam: see Callback — Config is value-passed.
+func confirmStoredKeyAlreadyRevoked(w http.ResponseWriter, cfg Config, accessToken, teamID, keyID string, revokeErr error) bool {
+	if errors.Is(revokeErr, ErrAPIKeyNotFound) {
+		statusCtx, statusCancel := context.WithTimeout(context.Background(), revokedKeyScanTimeout)
+		defer statusCancel()
+		revoked, err := cfg.Minter.APIKeyRevoked(statusCtx, accessToken, keyID)
+		if err == nil && revoked {
+			slog.Warn("oauth/callback rotation old key was already revoked — continuing retry",
+				"team_id", teamID, "key_id", keyID)
+			return true
+		}
+		if err != nil {
+			slog.Warn("oauth/callback rotation old-key revoke status check failed",
+				"error", err, "team_id", teamID, "key_id", keyID)
+			renderOAuthErrorPage(w, http.StatusBadGateway, "Couldn't rotate qURL key",
+				"qURL™ could not confirm whether the previous workspace key was already revoked. Run /qurl setup <email> with --rotate or --repoint again in a few minutes. If it keeps failing, please contact your qURL administrator.")
+			return false
+		}
+		slog.Warn("oauth/callback rotation old key not found and not confirmed revoked",
+			"team_id", teamID, "key_id", keyID)
+		renderOAuthErrorPage(w, http.StatusConflict, "Couldn't rotate qURL key",
+			"The current workspace key could not be confirmed as revoked under this qURL™ account. A recent revoke may still be propagating, the stored key identity may be stale or deleted at qURL, or the key may belong to a different qURL account. Wait a minute, then sign in as the account that owns the existing key and run /qurl setup <email> with --rotate or --repoint again. If it keeps failing, rotate the workspace key from qURL account/API-key management or contact LayerV support.")
+		return false
+	}
+	slog.Warn("oauth/callback rotation old-key revoke failed",
+		"error", revokeErr, "team_id", teamID, "key_id", keyID)
+	renderOAuthErrorPage(w, http.StatusBadGateway, "Couldn't rotate qURL key",
+		"qURL™ could not revoke the previous workspace key. Run /qurl setup <email> with --rotate or --repoint again in a few minutes. If it keeps failing, please contact your qURL administrator.")
+	return false
+}
+
+// reuseStoredWorkspaceKey checks whether the workspace already has a usable
+// qURL API key. Returning (reused=false, ok=true) means the caller should mint
+// a replacement; returning ok=false means this helper already wrote the user
+// response and minting would be unsafe.
+//
+// This intentionally does not backfill qurl_api_key_id for legacy healthy rows:
+// ValidateAPIKey proves the plaintext still works, but it does not return the
+// qURL key_id needed for safe revocation. Those rows fail closed on --rotate
+// until the key is rotated from qURL or replaced after becoming invalid. Once a
+// row does carry qurl_api_key_id, a normal setup retry must not mint around an
+// invalid stored key: that may be the old revoked key from a rotation
+// persist-failure, and only --rotate/--repoint can replay the replacement's
+// old-key idempotency bucket.
+//
+// Replacement still enters mintAndPersist's post-timeout orphan-key window
+// tracked at #265. Keep this read+validate budget short so missing/revoked-key
+// recovery does not materially enlarge that known race.
+//
+//nolint:gocritic // hugeParam: see Callback — Config is value-passed.
+func reuseStoredWorkspaceKey(w http.ResponseWriter, cfg Config, teamID string) (keyPrefix string, reused bool, ok bool) {
+	readCtx, readCancel := context.WithTimeout(context.Background(), existingKeyTimeout)
+	defer readCancel()
+	apiKey, err := cfg.Provider.APIKey(readCtx, teamID)
+	if errors.Is(err, auth.ErrWorkspaceNotConfigured) {
+		return "", false, true
+	}
+	if err != nil {
+		slog.Error("oauth/callback existing workspace key lookup failed",
+			"error", err, "team_id", teamID)
+		renderOAuthErrorPage(w, http.StatusInternalServerError, "Couldn't connect qURL",
+			"qURL™ is already connected to this Slack workspace, but the stored workspace key could not be read.",
+			"Run /qurl setup <email> again in a few minutes. If it keeps failing, please contact your qURL administrator.")
+		return "", false, false
+	}
+
+	validateCtx, validateCancel := context.WithTimeout(context.Background(), existingKeyTimeout)
+	defer validateCancel()
+	if err := cfg.Minter.ValidateAPIKey(validateCtx, apiKey); err != nil {
+		if errors.Is(err, ErrStoredAPIKeyInvalid) {
+			keyIDCtx, keyIDCancel := context.WithTimeout(context.Background(), existingKeyTimeout)
+			defer keyIDCancel()
+			keyID, keyIDErr := cfg.Provider.APIKeyID(keyIDCtx, teamID)
+			if keyIDErr != nil && !errors.Is(keyIDErr, auth.ErrWorkspaceNotConfigured) {
+				slog.Error("oauth/callback invalid workspace key metadata lookup failed",
+					"error", keyIDErr, "team_id", teamID)
+				renderOAuthErrorPage(w, http.StatusInternalServerError, "Couldn't connect qURL",
+					"qURL™ is connected to this Slack workspace, but the stored workspace key metadata could not be read. Run /qurl setup <email> with --rotate or --repoint again in a few minutes. If it keeps failing, please contact your qURL administrator.")
+				return "", false, false
+			}
+			if keyID != "" {
+				slog.Warn("oauth/callback invalid metadata-bearing workspace key requires explicit rotation",
+					"team_id", teamID, "key_id", keyID)
+				renderOAuthErrorPage(w, http.StatusConflict, "qURL key needs rotation",
+					"The stored workspace key is no longer accepted by qURL™. It may have been revoked or deleted at qURL. Run /qurl setup <email> with --rotate or --repoint to recover safely; plain setup will not mint a separate replacement while Slack still has the old key identity.")
+				return "", false, false
+			}
+			// Only a definite auth failure is replaceable-invalid. We do
+			// not store the qurl-service key_id for existing workspace
+			// keys, so a possible scope/server failure must not mint a
+			// replacement that could orphan an otherwise healthy key.
+			slog.Warn("oauth/callback stored workspace key is invalid — minting replacement",
+				"team_id", teamID)
+			return "", false, true
+		}
+		slog.Error("oauth/callback stored workspace key validation failed",
+			"error", err, "team_id", teamID)
+		renderOAuthErrorPage(w, http.StatusBadGateway, "Couldn't connect qURL",
+			"qURL™ is already connected to this Slack workspace, but the stored workspace key could not be verified.",
+			"Run /qurl setup <email> again in a few minutes. If it keeps failing, please contact your qURL administrator.")
+		return "", false, false
+	}
+	slog.Info("oauth/callback reused existing workspace API key", "team_id", teamID)
+	return storedAPIKeyPrefix(apiKey), true, true
+}
+
+func storedAPIKeyPrefix(apiKey string) string {
+	apiKey = strings.TrimSpace(apiKey)
+	if len(apiKey) <= keyPrefixLength {
+		return ""
+	}
+	return apiKey[:keyPrefixLength]
+}
+
+// mintAndPersist provisions the API key on qurl-service and persists it via
+// WorkspaceStore. During rollout, provisioning can be two upstream calls: a
+// binding attempt followed by a legacy fallback mint. Returns (keyPrefix,
+// true) on success; on failure writes the HTTP error response. Legacy fallback
+// keys are revoked after a persist failure; binding-backed keys are
+// intentionally left in place so a retry can replay the qurl-service binding
+// idempotency record and recover the plaintext instead of dead-ending on
+// already_exists. The plaintext apiKey and keyID stay internal:
+// SetAPIKeyWithMetadata stores both for future explicit rotation and the
+// keyID also drives legacy persist-failure revoke. With BindWorkspace running
+// BEFORE this step (see Callback), no
+// bind-failure path needs the keyID either.
+//
+// Post-timeout-completion footgun: the mint + persist contexts are fresh
+// (decoupled from the request context) so a TimeoutHandler cancel doesn't
+// desync row state from what we tell the user. The flip side: if
+// oauthHandlerTimeout (60s) fires after a legacy fallback mint starts, that
+// goroutine continues for up to mintTimeout + persistTimeout (up to 30s) after
+// we've returned an error to the user. A retry can mint K2, and the eventual
+// completion of K1 races K2's persist as a row overwrite. K1 then becomes an
+// orphan in qurl-service (no revoke wired for this case). Binding-backed
+// retries use a stable idempotency key, so they replay K1 rather than minting
+// a distinct K2. Tracked at #265 alongside the lost-PutItem-race orphan path.
+//
+//nolint:gocritic // hugeParam: see Callback — Config is value-passed.
+func mintAndPersist(w http.ResponseWriter, cfg Config, accessToken, teamID, userID, qurlAccountID string) (string, bool) {
 	// Fresh bounded context for the mint, decoupled from the request
 	// context. TimeoutHandler's 60s deadline could fire mid-mint;
 	// qurl-service may have already created the key, but we'd surface
@@ -543,12 +1005,16 @@ func mintAndPersist(w http.ResponseWriter, cfg Config, accessToken, teamID, user
 	// distinctly, qurl-service's idempotency will eventually reconcile.
 	mintCtx, mintCancel := context.WithTimeout(context.Background(), mintTimeout)
 	defer mintCancel()
-	apiKey, keyID, keyPrefix, err := cfg.Minter.MintAPIKey(mintCtx, accessToken,
-		keyName, apiKeyScopes())
+	minted, err := cfg.Minter.MintWorkspaceAPIKey(mintCtx, accessToken, teamID)
 	if err != nil {
-		limitReached := errors.Is(err, ErrAPIKeyLimitReached)
-		//nolint:gosec // G706: slog escapes control bytes in attribute values.
-		slog.Error("oauth/callback qurl-service mint failed", "error", err, "team_id", teamID, "api_key_limit_reached", limitReached)
+		logOAuthDependencyAuthFailure(slog.Default(), err, "oauth_callback_mint")
+		limitReached := errors.Is(err, ErrAPIKeyProvisioningQuotaReached)
+		alreadyBound := errors.Is(err, ErrExternalIdentityAlreadyBound)
+		slog.Error("oauth/callback qurl-service provision failed",
+			"error", err,
+			"team_id", teamID,
+			"api_key_limit_reached", limitReached,
+			"external_identity_already_bound", alreadyBound)
 		if limitReached {
 			// Quota is a precondition the admin must clear themselves —
 			// retrying does nothing (the old "run setup again" advice was
@@ -557,13 +1023,22 @@ func mintAndPersist(w http.ResponseWriter, cfg Config, accessToken, teamID, user
 			// is plan-dependent (free 3 / growth 50 / unlimited) and is
 			// qurl-service's to own.
 			renderOAuthErrorPage(w, http.StatusConflict, "qURL key limit reached",
-				"Your qURL account already has the maximum number of API keys allowed on your plan, so a new one couldn't be created. Each run of /qurl setup <email> creates a new key — revoke one you no longer use, then run /qurl setup <email> again.")
+				"Your qURL™ account already has the maximum number of API keys allowed on your plan, so a new one couldn't be created.",
+				"Revoke one you no longer use, then run /qurl setup <email> again.")
+			return "", false
+		}
+		if alreadyBound {
+			renderOAuthErrorPage(w, http.StatusConflict, "qURL already connected",
+				"qURL™ is already connected for this Slack workspace, but this setup attempt could not recover the workspace key.",
+				"Contact your qURL administrator for help.")
 			return "", false
 		}
 		renderOAuthErrorPage(w, http.StatusBadGateway, "Couldn't connect qURL",
-			"Something went wrong while creating your qURL API key. Run /qurl setup <email> again in a few minutes. If it keeps failing, please contact your qURL administrator.")
+			"Something went wrong while creating your qURL™ API key.",
+			"Run /qurl setup <email> again in a few minutes. If it keeps failing, please contact your qURL administrator.")
 		return "", false
 	}
+	apiKey, keyID, keyPrefix := minted.APIKey, minted.KeyID, minted.KeyPrefix
 
 	// Persist with a fresh bounded context, not the request context.
 	// TimeoutHandler's 60s deadline could fire mid-PutItem; the write
@@ -573,25 +1048,112 @@ func mintAndPersist(w http.ResponseWriter, cfg Config, accessToken, teamID, user
 	// level timeout — what we tell the user matches what's in DDB.
 	persistCtx, persistCancel := context.WithTimeout(context.Background(), persistTimeout)
 	defer persistCancel()
-	if perr := cfg.Provider.SetAPIKey(persistCtx, teamID, apiKey, userID); perr != nil {
-		slog.Error("oauth/callback persist failed — revoking minted key", //nolint:gosec // G706: slog escapes control bytes in attribute values.
-			"error", perr, "team_id", teamID, "key_id", keyID)
-		scheduleOrphanRevoke(cfg, accessToken, keyID, teamID)
-		// TODO(#265): revoke is wired only for the persist-failure case.
-		// A TimeoutHandler-induced abandon (outer 60s fires after mint
-		// has started but before persist returns) escapes this branch
-		// and leaks an orphan. Closes when #265's ConditionExpression
-		// shift lets us detect the lost-race case end-to-end.
-		http.Error(w, "qURL key provisioned but not stored — run /qurl setup <email> again", http.StatusInternalServerError)
+	// Minter success guarantees keyID/keyPrefix are non-empty; the metadata
+	// setter keeps that cross-file contract explicit for future rotations.
+	// qurlAccountID records who minted the key so a later --repoint can detect a
+	// cross-account move; it is best-effort and tolerated empty when admin
+	// storage is disabled (see SetAPIKeyWithMetadata).
+	if perr := cfg.Provider.SetAPIKeyWithMetadata(persistCtx, teamID, apiKey, keyID, keyPrefix, qurlAccountID, userID); perr != nil {
+		if minted.BindingBacked {
+			replayWindowHours := replayWindowHoursOrDefault(cfg.SetupBindingReplayWindowHours, DefaultSetupBindingReplayWindowHours)
+			slog.Error("oauth/callback persist failed — keeping binding-backed key for setup retry",
+				"event", setupBindingPersistFailureEvent,
+				"error", perr,
+				"team_id", teamID,
+				"key_id", keyID,
+				"retry_window_hours", replayWindowHours,
+				"cleanup_after_window_hours", replayWindowHours,
+				"operator_action", setupBindingPersistFailureOperatorAction)
+		} else {
+			slog.Error("oauth/callback persist failed — revoking legacy fallback key",
+				"error", perr, "team_id", teamID, "key_id", keyID)
+			scheduleOrphanRevoke(cfg, accessToken, keyID, teamID)
+		}
+		// TODO(#265): legacy revoke is wired only for the persist-failure
+		// case. A TimeoutHandler-induced abandon (outer 60s fires after
+		// mint has started but before persist returns) escapes this branch
+		// and can leak an orphaned legacy fallback key. Closes when #265's
+		// ConditionExpression shift lets us detect the lost-race case
+		// end-to-end.
+		renderOAuthErrorPage(w, http.StatusInternalServerError, "qURL setup did not finish",
+			"qURL™ created a workspace key, but the Slack integration could not save it before setup finished.",
+			"Run /qurl setup <email> again in a few minutes. If it keeps failing, please contact your qURL administrator.")
 		return "", false
 	}
 	return keyPrefix, true
 }
 
-// scheduleOrphanRevoke fires a fire-and-forget revoke of a key that
-// can't be left in place — persist failure, bind failure, or any
-// other half-install state. Routed through the AsyncTracker so
-// SIGTERM drains it under handler.wg rather than cutting mid-call.
+// mintReplacementAndPersist creates the post-revoke replacement key for an
+// explicit rotation and stores its key identity for the next rotation. If DDB
+// persist fails, keep the qurl-service idempotency replay intact so retrying
+// --rotate can recover and store the same replacement key instead of replaying
+// a key we already revoked.
+//
+//nolint:gocritic // hugeParam: see Callback — Config is value-passed.
+func mintReplacementAndPersist(w http.ResponseWriter, cfg Config, accessToken, teamID, oldKeyID, userID, qurlAccountID string) (string, bool) {
+	mintCtx, mintCancel := context.WithTimeout(context.Background(), mintTimeout)
+	defer mintCancel()
+	minted, err := cfg.Minter.MintWorkspaceReplacementAPIKey(mintCtx, accessToken, teamID, oldKeyID)
+	if err != nil {
+		logOAuthDependencyAuthFailure(slog.Default(), err, "oauth_callback_replacement_mint")
+		limitReached := errors.Is(err, ErrAPIKeyProvisioningQuotaReached)
+		slog.Error("oauth/callback qurl-service replacement provision failed",
+			"error", err,
+			"team_id", teamID,
+			"api_key_limit_reached", limitReached)
+		// A legacy row (empty oldKeyID) revoked nothing, so the copy must not
+		// claim it did — the previous key is still live, and telling an admin
+		// otherwise sends them away believing a working credential is dead.
+		predecessor := "The previous workspace key was revoked, but your"
+		genericPredecessor := "qURL™ revoked the previous workspace key, but a replacement could not be created."
+		if oldKeyID == "" {
+			predecessor = "This workspace's previous key could not be identified, so nothing was revoked and it is still active. Your"
+			genericPredecessor = "This workspace's previous qURL™ key could not be identified, so nothing was revoked and it is still active. A replacement could not be created."
+		}
+		// Steer the legacy path to --rotate only. A row that reached it has no
+		// key_id, and --repoint still fails closed on those, so suggesting it
+		// hands this user a dead end until a rotate succeeds and heals the row.
+		retry := "--rotate or --repoint"
+		if oldKeyID == "" {
+			retry = "--rotate"
+		}
+		if limitReached {
+			renderOAuthErrorPage(w, http.StatusConflict, "qURL key limit reached",
+				predecessor+" qURL™ account is at its API-key limit, so a replacement couldn't be created. Revoke a key you no longer use, then run /qurl setup <email> with "+retry+" again.")
+			return "", false
+		}
+		renderOAuthErrorPage(w, http.StatusBadGateway, "Couldn't rotate qURL key",
+			genericPredecessor+" Run /qurl setup <email> with "+retry+" again in a few minutes. If it keeps failing, please contact your qURL administrator.")
+		return "", false
+	}
+
+	persistCtx, persistCancel := context.WithTimeout(context.Background(), persistTimeout)
+	defer persistCancel()
+	// Replacement mint success has the same metadata invariant as first setup.
+	if perr := cfg.Provider.SetAPIKeyWithMetadata(persistCtx, teamID, minted.APIKey, minted.KeyID, minted.KeyPrefix, qurlAccountID, userID); perr != nil {
+		replayWindowHours := replayWindowHoursOrDefault(cfg.APIKeyMintReplayWindowHours, DefaultAPIKeyMintReplayWindowHours)
+		// TODO(#265): if the owner retries after qurl-service's idempotency
+		// window expires, this live replacement can no longer be replayed and
+		// needs account/API-key management or operator tooling cleanup.
+		slog.Error("oauth/callback replacement persist failed — keeping idempotent replacement key for rotation retry",
+			"error", perr,
+			"event", rotationReplacementPersistFailureEvent,
+			"team_id", teamID,
+			"key_id", minted.KeyID,
+			"retry_window_hours", replayWindowHours,
+			"operator_action", rotationReplacementPersistFailureAction)
+		renderOAuthErrorPage(w, http.StatusInternalServerError, "Couldn't finish qURL key rotation",
+			"qURL™ revoked the previous workspace key, but the replacement could not be stored. Run /qurl setup <email> with --rotate or --repoint again soon to recover and store the same replacement key.")
+		return "", false
+	}
+	return minted.KeyPrefix, true
+}
+
+// scheduleOrphanRevoke fires a fire-and-forget revoke of a legacy fallback
+// key that can't be left in place after persist failure. Binding-backed keys
+// keep their qurl-service binding/idempotency row so setup retry can recover.
+// Routed through the AsyncTracker so SIGTERM drains it under handler.wg
+// rather than cutting mid-call.
 //
 //nolint:gocritic // hugeParam: see Callback — Config is value-passed.
 func scheduleOrphanRevoke(cfg Config, accessToken, keyID, teamID string) {
@@ -604,9 +1166,30 @@ func revokeOrphanKeyAsync(minter QURLAPIKeyMinter, accessToken, keyID, teamID st
 	ctx, cancel := context.WithTimeout(context.Background(), revokeTimeout)
 	defer cancel()
 	if err := minter.RevokeAPIKey(ctx, accessToken, keyID); err != nil {
+		// Count orphan-revoke auth failures in the dependency alarm: even
+		// though cleanup is background work, 401/403 means Slack cannot revoke
+		// qurl-service keys and may leave usable orphan credentials behind.
+		logOAuthDependencyAuthFailure(slog.Default(), err, "oauth_callback_orphan_revoke")
 		slog.Warn("oauth/callback orphan-key revoke failed",
 			"error", err, "key_id", keyID, "team_id", teamID)
 	}
+}
+
+func logOAuthDependencyAuthFailure(log *slog.Logger, err error, route string) {
+	var authErr *DependencyAuthFailureError
+	if !errors.As(err, &authErr) {
+		return
+	}
+	// Keep this stable WARN audit separate from the human ERROR/WARN log the
+	// caller emits with operator detail; CloudWatch filters should key here.
+	slackaudit.LogDependencyAuthFailure(log, slackaudit.DependencyAuthFailureAttrs(
+		route,
+		authErr.Method,
+		authErr.Path,
+		authErr.StatusCode,
+		authErr.Code,
+		authErr.RequestID,
+	)...)
 }
 
 func dmAdminAsync(client SlackClient, userID, teamID, keyPrefix string) {
@@ -615,7 +1198,7 @@ func dmAdminAsync(client SlackClient, userID, teamID, keyPrefix string) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), dmTimeout)
 	defer cancel()
-	msg := "qURL is connected to your Slack workspace. Your team can now use `/qurl get`."
+	msg := "qURL™ is connected to your Slack workspace. Your team can now use `/qurl get`."
 	if keyPrefix != "" {
 		msg += "\nKey prefix: `" + keyPrefix + "`"
 	}
@@ -652,15 +1235,37 @@ func renderRebindRefused(w http.ResponseWriter, teamID string) {
 }
 
 // renderOAuthErrorPage writes a styled error page with the given status.
-// Replaces bare http.Error on the mint-failure path so a callback failure
-// renders human-readable, actionable guidance instead of a blank page with
-// raw text. Same defense-in-depth headers as renderRebindRefused.
-func renderOAuthErrorPage(w http.ResponseWriter, status int, heading, message string) {
+// Replaces bare http.Error callback failures with human-readable, actionable
+// guidance instead of a blank page with raw text. Same defense-in-depth
+// headers as renderRebindRefused. Each non-blank message argument renders as
+// one escaped paragraph; pass separate arguments instead of newline-joining
+// copy. If a future caller accidentally passes only blank messages, the page
+// falls back to generic retry guidance instead of rendering a heading-only
+// card.
+func renderOAuthErrorPage(w http.ResponseWriter, status int, heading, firstParagraph string, rest ...string) {
+	messages := oauthErrorMessages(firstParagraph, rest...)
 	setOAuthPageSecurityHeaders(w)
 	w.WriteHeader(status)
-	if err := oauthErrorPageTemplate.Execute(w, oauthErrorPageData{Heading: heading, Message: message}); err != nil {
+	if err := oauthErrorPageTemplate.Execute(w, oauthErrorPageData{Heading: heading, Messages: messages}); err != nil {
 		slog.Warn("oauth/callback error-page write failed", "error", err)
 	}
+}
+
+// oauthErrorMessages trims blank paragraphs and falls back to generic guidance.
+func oauthErrorMessages(firstParagraph string, rest ...string) []string {
+	messages := make([]string, 0, 1+len(rest))
+	if trimmed := strings.TrimSpace(firstParagraph); trimmed != "" {
+		messages = append(messages, trimmed)
+	}
+	for _, msg := range rest {
+		if trimmed := strings.TrimSpace(msg); trimmed != "" {
+			messages = append(messages, trimmed)
+		}
+	}
+	if len(messages) == 0 {
+		return []string{"qURL™ setup could not finish. Try again or contact your qURL administrator if this keeps happening."}
+	}
+	return messages
 }
 
 func renderSuccess(w http.ResponseWriter, teamID, keyPrefix, email string) {
@@ -703,10 +1308,14 @@ func truncateForLog(s string, limit int) string {
 // /oauth/token and returns (access_token, id_token, err).
 //
 //nolint:gocritic // hugeParam: see Callback above — value-passing is intentional.
-func exchangeAuth0Code(ctx context.Context, httpClient *http.Client, cfg Config, code string) (accessToken, idToken string, err error) {
+func exchangeAuth0Code(ctx context.Context, httpClient *http.Client, cfg Config, code, codeVerifier string) (accessToken, idToken string, err error) {
+	if codeVerifier == "" {
+		return "", "", errMissingPKCEVerifier
+	}
 	form := url.Values{}
 	form.Set("grant_type", "authorization_code")
 	form.Set("code", code)
+	form.Set("code_verifier", codeVerifier)
 	form.Set("redirect_uri", callbackURL(cfg.SlackBaseURL))
 	form.Set("client_id", cfg.Auth0ClientID)
 	form.Set("client_secret", cfg.Auth0ClientSecret)

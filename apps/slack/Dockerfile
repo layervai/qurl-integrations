@@ -4,15 +4,20 @@
 # ignore list (default frontend reads only `<context>/.dockerignore`,
 # which is the wrong place for a multi-app monorepo).
 
-FROM golang:1.26.3-alpine@sha256:91eda9776261207ea25fd06b5b7fed8d397dd2c0a283e77f2ab6e91bfa71079d AS build
+# Bumped 1.26.5 → 1.26.6 for the standard-library fixes caught by govulncheck;
+# go.mod requires go 1.26.6. SHA-pinned to the multi-arch index digest, same as
+# the rest of the repo's base images — GOTOOLCHAIN stays the image default
+# `local`, so there's no unpinned build-time toolchain fetch.
+FROM golang:1.26.6-alpine@sha256:af8d6740070b8906d12eae1c3e3ea0957fb63f492051ea05e354c38ef9fe88df AS build
 
 WORKDIR /src
 
 COPY go.mod go.sum ./
 RUN go mod download
 
-# `shared/` is copied before `apps/slack/` so an app-only edit doesn't
-# invalidate the `shared/` layer's cache. Most PRs touch one app.
+# `internal/` and `shared/` are copied before `apps/slack/` so an app-only edit
+# doesn't invalidate shared-code layers. Most PRs touch one app.
+COPY internal/ ./internal/
 COPY shared/ ./shared/
 COPY apps/slack/ ./apps/slack/
 

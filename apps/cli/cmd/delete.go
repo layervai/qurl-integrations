@@ -2,68 +2,189 @@ package main
 
 import (
 	"bufio"
+	"context"
+	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
+
+	connectordaemon "github.com/layervai/qurl-integrations/apps/cli/internal/connector/daemon"
+	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/cridux"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/exitcode"
 )
 
 func deleteCmd(opts *globalOpts) *cobra.Command {
-	var (
-		yes    bool
-		dryRun bool
-	)
+	var yes bool
 
 	cmd := &cobra.Command{
-		Use:               "delete <resource-id>",
-		Short:             "Revoke/delete a qURL",
-		Example:           "  qurl delete r_k8xqp9h2sj9 --yes",
-		Args:              cobra.ExactArgs(1),
-		Aliases:           []string{"revoke"},
-		ValidArgsFunction: resourceIDCompletion(opts),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			id := args[0]
+		Use:   "delete <CRID>",
+		Short: "Delete a published resource",
+		Long: `Delete a published resource by its CRID.
 
-			if err := validateResourceID(id); err != nil {
+Deletion cannot be undone: the CRID can no longer be shared, and republishing
+the same target later mints a different CRID. Interactive runs confirm first;
+scripts and pipelines must pass --yes.`,
+		Example: "  qurl delete " + exampleCRID + "\n" +
+			"  qurl delete " + exampleCRID + " --yes",
+		Args: exactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			assessment, err := cridux.Assess(args[0])
+			if err != nil {
 				return err
 			}
-
-			if dryRun {
-				_, err := fmt.Fprintf(cmd.OutOrStdout(), "Would revoke qURL %s (dry run, no changes made)\n", id)
+			printer := opts.printer()
+			if err := applyCRIDGuards(printer, assessment, opts.productionEndpoint(), yes); err != nil {
 				return err
 			}
 
 			if !yes {
-				if _, err := fmt.Fprintf(cmd.OutOrStdout(), "Revoke qURL %s? This cannot be undone. [y/N] ", id); err != nil {
+				confirmed, err := confirmDelete(opts, assessment.Input)
+				if err != nil {
 					return err
 				}
-				scanner := bufio.NewScanner(cmd.InOrStdin())
-				if !scanner.Scan() {
+				if !confirmed {
+					printer.Notef(msgDeleteCanceled)
 					return nil
-				}
-				answer := strings.TrimSpace(strings.ToLower(scanner.Text()))
-				if answer != "y" && answer != "yes" {
-					_, err := fmt.Fprintln(cmd.OutOrStdout(), "Canceled.")
-					return err
 				}
 			}
 
-			c, err := opts.newClient()
+			client, err := opts.newClient(cmd.Context())
 			if err != nil {
 				return err
 			}
-
-			if err := c.Delete(cmd.Context(), id); err != nil {
-				return fmt.Errorf("delete qURL: %w", err)
+			result, err := client.Delete(cmd.Context(), assessment.Input)
+			if err != nil {
+				return err
 			}
-
-			_, err = fmt.Fprintf(cmd.OutOrStdout(), "qURL %s has been revoked.\n", id)
-			return err
+			if result.AlreadyGone {
+				// Idempotent delete: already-gone is the requested outcome.
+				printer.Notef(msgAlreadyGone)
+			}
+			// The service deletion is already committed. Local convergence cannot
+			// roll it back, so report the requested outcome as success and make any
+			// incomplete local cleanup explicit as a warning.
+			cleanupErr := cleanupDeletedLocalShare(cmd.Context(), opts, assessment.Input)
+			if err := printer.Delete(assessment.Input, result.AlreadyGone); err != nil {
+				return err
+			}
+			if cleanupErr != nil {
+				printer.Warnf("The resource was deleted, but local sharing cleanup did not finish: %v", cleanupErr)
+			}
+			return nil
 		},
 	}
 
-	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "Skip confirmation prompt")
-	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Show what would be done without making changes")
+	cmd.Flags().BoolVar(&yes, "yes", false, "proceed without confirmation, including sending a test CRID to production")
 
 	return cmd
+}
+
+// cleanupDeletedLocalShare converges local desired state after the service has
+// committed deletion. It signals an existing daemon through IPC but never
+// installs or starts one.
+func cleanupDeletedLocalShare(ctx context.Context, opts *globalOpts, id string) error {
+	stateDir, err := opts.resolveShareStateDir("")
+	if err != nil {
+		if errors.Is(err, connectorstate.ErrNoDefaultStateDir) {
+			return nil
+		}
+		return err
+	}
+	registry, local, err := findDeletedLocalShare(ctx, opts, stateDir, id)
+	if err != nil {
+		return err
+	}
+	if err := retireDeletedConnectorBinding(ctx, stateDir, id, local); err != nil {
+		return err
+	}
+	if local == nil {
+		return nil
+	}
+	if err := registry.Delete(ctx, local.ResourceID); err != nil {
+		return err
+	}
+	logDir, err := connectordaemon.DefaultLogDir(stateDir)
+	if err != nil {
+		return err
+	}
+	// Reload through the platform controller instead of probing for a Unix
+	// socket file. On Windows the same logical address maps to a named pipe and
+	// has no filesystem entry. ReloadIfRunning is side-effect free when no
+	// daemon exists: it neither installs nor starts a background job.
+	_, err = opts.newShareDaemon(stateDir, logDir).ReloadIfRunning(ctx)
+	return err
+}
+
+func findDeletedLocalShare(ctx context.Context, opts *globalOpts, stateDir, id string) (localShareRegistry, *connectorstate.LocalShare, error) {
+	_, present, err := connectorstate.ReadLocalSharesIfPresent(ctx, stateDir)
+	if err != nil || !present {
+		return nil, nil, err
+	}
+	registry, err := opts.openShareRegistry(stateDir)
+	if err != nil {
+		return nil, nil, err
+	}
+	local, err := registry.Get(ctx, id)
+	if errors.Is(err, os.ErrNotExist) {
+		return registry, nil, nil
+	}
+	return registry, local, err
+}
+
+func retireDeletedConnectorBinding(ctx context.Context, stateDir, id string, local *connectorstate.LocalShare) error {
+	_, err := os.Lstat(filepath.Join(stateDir, connectorstate.ConnectorResourcesFile))
+	if errors.Is(err, os.ErrNotExist) {
+		if local == nil {
+			return nil
+		}
+		return errors.New("retire deleted local Connector binding: durable Connector resource state is missing")
+	}
+	if err != nil {
+		return fmt.Errorf("inspect Connector resource state during delete cleanup: %w", err)
+	}
+	resourceStore, err := connectorstate.Open(stateDir)
+	if err != nil {
+		return err
+	}
+	lookupID := id
+	if local != nil {
+		lookupID = local.ResourceID
+	}
+	// RetireConnectorResource reports false for a binding it no longer holds.
+	// With a registry row still present that means an earlier delete retired
+	// the row's binding, its registry cleanup did not finish, and the bounded
+	// retired memory has since forgotten the retirement and binding together;
+	// the row's Connector ID may even be bound again to a newer share by now.
+	// Either way nothing under the row is left to retire, the service deletion
+	// is committed, and the stale row is the only inconsistency: it must go,
+	// or it stays desired-on for a deleted resource and blocks every new row
+	// under its Connector ID. A binding that Connector ID holds for a different
+	// resource belongs to that other share and is left alone.
+	_, retireErr := resourceStore.RetireConnectorResource(ctx, lookupID)
+	return errors.Join(retireErr, resourceStore.Close())
+}
+
+// confirmDelete asks on the terminal. Without a terminal it refuses instead
+// of hanging a pipeline: non-interactive deletion requires --yes.
+func confirmDelete(opts *globalOpts, id string) (bool, error) {
+	if !opts.streams.InIsTTY {
+		return false, exitcode.UsageError(errors.New(msgNeedsYes))
+	}
+	// The prompt is conversation, not data: it goes to stderr.
+	if _, err := fmt.Fprintf(opts.streams.Err, "Delete %s? This cannot be undone. [y/N] ", id); err != nil {
+		return false, err
+	}
+	scanner := bufio.NewScanner(opts.streams.In)
+	if !scanner.Scan() {
+		if err := scanner.Err(); err != nil {
+			return false, fmt.Errorf("read delete confirmation: %w", err)
+		}
+		return false, nil
+	}
+	answer := strings.TrimSpace(strings.ToLower(scanner.Text()))
+	return answer == "y" || answer == "yes", nil
 }

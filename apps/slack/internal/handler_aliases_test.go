@@ -16,6 +16,35 @@ import (
 	"github.com/layervai/qurl-integrations/shared/client"
 )
 
+// TestHandleAliases_ScopedToChannel pins requirement #2 of the channel-scoping
+// fix: /qurl aliases shows only the aliases bound in THIS channel. An alias
+// bound in another channel must not appear here (GetChannelPolicy is a point
+// read on the current (team, channel) row, so this has always held — this
+// fences it against a regression that widened the read workspace-wide).
+func TestHandleAliases_ScopedToChannel(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	// A real alias bound in a DIFFERENT channel.
+	ts.seedPolicyAliasBindings(t, testAdminTeamID, "C_other", map[string]string{
+		"grafana": "r_graf01",
+	})
+	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		writeResourceListFixture(t, w, []map[string]any{
+			{testKeyResourceID: "r_graf01", testKeyType: client.ResourceTypeTunnel, testKeySlug: "graf-tun"},
+		}, "", false)
+	})
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvokerOnChannel(t, h, "C_test") // nothing bound here
+
+	_, _, async := inv.invokeAdminAsync("aliases", testAdminTeamID, testAdminUserID)
+	if strings.Contains(async, "grafana") {
+		t.Errorf("alias bound only in C_other leaked into C_test's /qurl aliases: %q", async)
+	}
+	if !strings.Contains(async, "No aliases are configured for this channel") {
+		t.Errorf("expected the channel empty state for C_test: %q", async)
+	}
+}
+
 // TestHandleAliases_HappyPath fences the canonical /qurl aliases
 // flow: GetChannelPolicy → resolve slugs from a single ListResources
 // page (joined by resource_id) → rendered list. Single alias binding.
@@ -24,7 +53,7 @@ func TestHandleAliases_HappyPath(t *testing.T) {
 	ts.seedPolicySet(t, testAdminTeamID, "C_test", "prod-db", []string{testResourceIDFix})
 	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
 		writeResourceListFixture(t, w, []map[string]any{
-			{testKeyResourceID: testResourceIDFix, testKeyTargetURL: "https://prod.example.com"},
+			{testKeyResourceID: testResourceIDFix, testKeyTargetURL: "https://prod.example.com/?mention=<@U123>&mode=raw"},
 		}, "", false)
 	})
 	h := newAdminTestHandler(t, ts)
@@ -35,9 +64,43 @@ func TestHandleAliases_HappyPath(t *testing.T) {
 		t.Errorf("async reply missing header: %q", async)
 	}
 	// Legacy URL binding: the resource has a target_url and no slug, so the
-	// line reads "<url> (legacy URL) → `$<alias>`".
-	if !strings.Contains(async, "https://prod.example.com (legacy URL) → `$prod-db`") {
+	// line reads "<url> (legacy URL) → `$<alias>`" with the target escaped for
+	// Slack mrkdwn.
+	if !strings.Contains(async, "https://prod.example.com/?mention=&lt;@U123&gt;&amp;mode=raw (legacy URL) → `$prod-db`") {
 		t.Errorf("async reply missing prod-db line: %q", async)
+	}
+	if strings.Contains(async, "<@U123>") {
+		t.Errorf("async reply rendered raw Slack control sequence: %q", async)
+	}
+}
+
+func TestHandleAliases_InBotRateLimitDeniesBeforeListing(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	ts.seedPolicyAliasBindings(t, testAdminTeamID, "C_test", map[string]string{
+		"prod": testResourceIDFix,
+	})
+	var fetches atomic.Int32
+	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		fetches.Add(1)
+		writeResourceListFixture(t, w, []map[string]any{
+			{testKeyResourceID: testResourceIDFix, testKeyType: client.ResourceTypeTunnel, testKeySlug: "prod-db"},
+		}, "", false)
+	})
+	h := newAdminTestHandler(t, ts)
+	enableAdminStoreRateLimit(t, h, 1)
+
+	_, _, first := newAdminSlashInvoker(t, h).invokeAdminAsync("aliases", testAdminTeamID, testAdminUserID)
+	if !strings.Contains(first, "Aliases configured for this channel") {
+		t.Fatalf("first aliases reply = %q, want normal listing", first)
+	}
+
+	_, _, second := newAdminSlashInvoker(t, h).invokeAdminAsync("aliases", testAdminTeamID, testAdminUserID)
+	if !strings.Contains(second, "Rate limit hit") || !strings.Contains(second, "60m") {
+		t.Fatalf("second aliases reply = %q, want in-bot rate-limit copy with retry hint", second)
+	}
+	if got := fetches.Load(); got != 1 {
+		t.Fatalf("ListResources fetches = %d, want throttled call to stop before upstream listing", got)
 	}
 }
 
@@ -139,15 +202,18 @@ func TestHandleAliases_ShowsDisplayName(t *testing.T) {
 	})
 	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
 		writeResourceListFixture(t, w, []map[string]any{
-			{testKeyResourceID: resID, testKeyType: client.ResourceTypeTunnel, testKeySlug: "ops-bastion", testKeyDescription: "Ops jump host"},
+			{testKeyResourceID: resID, testKeyType: client.ResourceTypeTunnel, testKeySlug: "ops-bastion", testKeyDescription: "Ops <!channel> <@U123> & *jump* host"},
 		}, "", false)
 	})
 	h := newAdminTestHandler(t, ts)
 	inv := newAdminSlashInvoker(t, h)
 
 	_, _, async := inv.invokeAdminAsync("aliases", testAdminTeamID, testAdminUserID)
-	if !strings.Contains(async, "`$ops-bastion` — Ops jump host → `$bastion`") {
+	if !strings.Contains(async, "`$ops-bastion` — Ops &lt;!channel&gt; &lt;@U123&gt; &amp; ∗jump∗ host → `$bastion`") {
 		t.Errorf("aliases reply missing id + Display Name + alias mapping: %q", async)
+	}
+	if strings.Contains(async, "<!channel>") || strings.Contains(async, "<@U123>") {
+		t.Errorf("aliases reply rendered raw Slack control sequence: %q", async)
 	}
 }
 

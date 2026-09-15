@@ -34,8 +34,9 @@ jobs:
             teams
             discord
             cli
-            zapier
-            gmail-extension
+            chrome-extension
+            edge-extension
+            origins
             shared
             infra
             ci

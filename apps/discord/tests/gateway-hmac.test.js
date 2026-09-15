@@ -1,34 +1,3 @@
-// Unit tests for src/gateway-hmac.js — Pillar 3 push-handoff
-// HMAC primitive. Pins the load-bearing contracts:
-//
-//   1. Sign produces { bodyBytes, signature } with HMAC computed
-//      over the exact UTF-8 bytes of JSON.stringify(payload).
-//   2. Verify runs HMAC check BEFORE JSON.parse. A malformed body
-//      with a valid HMAC is reported as malformed_body AFTER parse;
-//      an unsigned/bad-sig body never reaches parse.
-//   3. Dual-secret accept: verify tries `current`, then `previous`
-//      iff configured. `previous` may be null/undefined.
-//   4. Timing-safe equality — length mismatches MUST NOT throw
-//      (since timingSafeEqual itself throws on length mismatch).
-//   5. Freshness window: bodies outside ±freshnessWindowMs of clock()
-//      are rejected with reason 'stale'.
-//   6. Nonce LRU: duplicate nonce within freshness window is rejected
-//      with reason 'replay'. LRU is bounded; oldest evicts when full.
-//      Check-then-set must be synchronous (one microtask).
-//   7. Wire shape: { bodyBytes: Buffer, signature: hex-string };
-//      anything else is malformed_body.
-//
-// Each contract maps to a concrete production failure mode:
-//   - (1) parsing-then-re-stringifying would canonicalize key order
-//     and break verification on a sig produced for the original order.
-//   - (2) parsing first lets an attacker OOM the standby with a
-//     giant unsigned JSON body.
-//   - (3) without dual-accept, every rotation deploy would lose
-//     handoffs across the rolling-deploy window.
-//   - (4) timingSafeEqual throws on length mismatch — a naive caller
-//     would crash the verifier on any malformed signature.
-//   - (5)/(6) without freshness+nonce, a replayed body from a prior
-//     handoff could trigger a second standby takeover.
 
 const crypto = require('node:crypto');
 const {
@@ -57,7 +26,6 @@ function makeHmac({
   return { hmac, logger };
 }
 
-// Builds a fresh handoff-shaped payload pinned to a clock tick.
 function freshPayload({ now = 1_700_000_000_000, nonce = 'n'.repeat(32), extras = {} } = {}) {
   return { ts: now, nonce, ...extras };
 }
@@ -112,10 +80,6 @@ describe('createGatewayHmac — factory validation', () => {
   });
 
   it('rejects secrets.previous = "" (empty string) — would silently disable dual-accept', () => {
-    // The verify use site treats falsy `previous` as "not configured"
-    // and skips the second hmac check. Without this validator, a
-    // misconfig writing `previous: ""` would pass at boot and silently
-    // disable the rotation window's dual-accept. Fail loud.
     const logger = { info() {}, warn() {}, error() {}, debug() {} };
     expect(() => createGatewayHmac({
       secrets: { current: 'x', previous: '' }, logger,
@@ -150,7 +114,6 @@ describe('sign', () => {
     expect(Buffer.isBuffer(bodyBytes)).toBe(true);
     expect(bodyBytes.toString('utf8')).toBe(JSON.stringify(payload));
 
-    // Recompute deterministically using `current` and confirm equality.
     const expected = crypto.createHmac('sha256', SECRET_CURRENT)
       .update(bodyBytes)
       .digest('hex');
@@ -165,8 +128,6 @@ describe('sign', () => {
   });
 
   it('produces a signature distinct from the one `previous` would produce', () => {
-    // If the sign path ever drifted to using `previous`, the standby
-    // would never verify a fresh handoff body in steady state.
     const { hmac } = makeHmac();
     const payload = freshPayload();
     const { bodyBytes, signature } = hmac.sign(payload);
@@ -188,8 +149,6 @@ describe('verify — happy path', () => {
   });
 
   it('verifies a body signed by `previous` (dual-accept during rotation)', () => {
-    // Simulate: peer is on `previous`, this replica has rotated to
-    // a new `current` with the old now in `previous`.
     const now = 1_700_000_000_000;
     const { hmac } = makeHmac({
       secrets: { current: 'new'.repeat(20), previous: SECRET_CURRENT },
@@ -229,9 +188,6 @@ describe('verify — rejection reasons', () => {
   });
 
   it('rejects a signature with wrong length WITHOUT throwing', () => {
-    // crypto.timingSafeEqual throws on length mismatch — the module's
-    // timingSafeHexEqual MUST length-check first or this throws and
-    // takes the verifier down.
     const now = 1_700_000_000_000;
     const { hmac } = makeHmac({ clock: () => now });
     const { bodyBytes } = hmac.sign(freshPayload({ now }));
@@ -241,9 +197,6 @@ describe('verify — rejection reasons', () => {
   });
 
   it('rejects non-hex signature WITHOUT throwing', () => {
-    // Buffer.from(s, 'hex') silently drops non-hex chars rather than
-    // throwing. Length check guards us against panic, but a same-
-    // length-non-hex signature still must return bad_signature.
     const now = 1_700_000_000_000;
     const { hmac } = makeHmac({ clock: () => now });
     const { bodyBytes } = hmac.sign(freshPayload({ now }));
@@ -307,11 +260,6 @@ describe('verify — rejection reasons', () => {
   });
 
   it('rejects a body where ts is Infinity (JSON.parse of `1e1000` → Infinity, typeof === number)', () => {
-    // `1e1000` is valid JSON but V8 parses it to Infinity (double-
-    // precision overflow). `Number.isFinite` rejects this; a bare
-    // `typeof === "number"` check would accept it and fall through
-    // to the stale branch — works today but the contract should be
-    // pinned at the field-shape gate, not the freshness arithmetic.
     const now = 1_700_000_000_000;
     const { hmac } = makeHmac({ clock: () => now });
     const bodyBytes = Buffer.from('{"ts":1e1000,"nonce":"nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn"}', 'utf8');
@@ -352,7 +300,6 @@ describe('verify — freshness window', () => {
   it('accepts ts inside ±freshnessWindowMs', () => {
     let now = 1_700_000_000_000;
     const { hmac } = makeHmac({ clock: () => now });
-    // Body signed at t=now, verified at t=now+4999 (just inside 5s window).
     const payload = freshPayload({ now });
     const { bodyBytes, signature } = hmac.sign(payload);
     now += 4_999;
@@ -373,7 +320,6 @@ describe('verify — freshness window', () => {
   });
 
   it('rejects ts far in the future (clock-skew on sender side) as stale', () => {
-    // Symmetric window: a sender whose clock is way ahead is also rejected.
     let now = 1_700_000_000_000;
     const { hmac } = makeHmac({ clock: () => now });
     const payload = freshPayload({ now: now + 5_001 });
@@ -411,25 +357,18 @@ describe('verify — nonce LRU', () => {
   });
 
   it('rejects replay only AFTER signature passes — bad-signature replays do not poison the LRU', () => {
-    // Verifying a body with a bad signature must NOT add its nonce
-    // to the LRU; otherwise an attacker could pre-burn legitimate
-    // nonces with garbage signatures and DoS the standby.
     const now = 1_700_000_000_000;
     const { hmac } = makeHmac({ clock: () => now });
     const payload = freshPayload({ now });
     const bodyBytes = Buffer.from(JSON.stringify(payload), 'utf8');
-    // First call: valid body, bad signature → bad_signature
     expect(hmac.verify({ bodyBytes, signature: 'f'.repeat(64) }))
       .toEqual({ ok: false, reason: 'bad_signature' });
-    // Now the legitimate signed body must still verify (nonce not burned).
     const goodSig = crypto.createHmac('sha256', SECRET_CURRENT)
       .update(bodyBytes).digest('hex');
     expect(hmac.verify({ bodyBytes, signature: goodSig })).toEqual({ ok: true, payload });
   });
 
   it('does not burn the nonce when stale (freshness rejection precedes nonce remember)', () => {
-    // A stale body shouldn't burn its nonce; otherwise a clock-skew
-    // bounce could permanently lock out a still-valid retry.
     let now = 1_700_000_000_000;
     const { hmac } = makeHmac({ clock: () => now });
     const payload = freshPayload({ now });
@@ -454,28 +393,18 @@ describe('verify — nonce LRU', () => {
       return hmac.verify({ bodyBytes, signature });
     }
 
-    // Fill the LRU with 3 distinct nonces.
     expect(signAndVerify('1').ok).toBe(true);
     expect(signAndVerify('2').ok).toBe(true);
     expect(signAndVerify('3').ok).toBe(true);
 
-    // Oldest nonce (nonce='1') is still pinned. Add a 4th — now '1' evicts.
     expect(signAndVerify('4').ok).toBe(true);
 
-    // Replaying nonce='2' (still in LRU) is rejected.
     expect(signAndVerify('2')).toEqual({ ok: false, reason: 'replay' });
 
-    // Replaying nonce='1' (evicted) is ACCEPTED — bounded LRU semantics.
-    // (At default LRU size of 1024 + 5s freshness, real-world traffic
-    // never approaches eviction; this only validates the bound.)
     expect(signAndVerify('1').ok).toBe(true);
   });
 
   it('enforces the size cap — verifying more nonces than the LRU holds settles at cap, not above', () => {
-    // rememberNonce is insert-only and verify rejects duplicates,
-    // so this test exercises only the eviction-at-capacity path:
-    // after many distinct nonces, the LRU size settles at the cap
-    // rather than growing unbounded.
     const now = 1_700_000_000_000;
     const { hmac } = makeHmac({ clock: () => now, nonceLruSize: 5 });
     for (let i = 0; i < 50; i += 1) {
@@ -489,15 +418,6 @@ describe('verify — nonce LRU', () => {
   });
 
   it('an evicted nonce is accepted again (size cap is a deliberate ceiling, not a correctness primitive)', async () => {
-    // Module header explicitly notes: at 5s freshness and 1024
-    // entries, the LRU absorbs ~200 handoffs/sec before still-
-    // fresh nonces start evicting (which would allow replay
-    // within the 5s window). Real rate is 1/deploy, so this
-    // never happens in practice — but the eviction-allows-replay
-    // semantic is intentional. Pin it so a future refactor that
-    // makes eviction equivalent to permanent rejection (e.g.,
-    // appending to a separate "burned" set) doesn't silently
-    // change behavior.
     const now = 1_700_000_000_000;
     const { hmac } = makeHmac({ clock: () => now, nonceLruSize: 3 });
 
@@ -509,24 +429,15 @@ describe('verify — nonce LRU', () => {
       return hmac.verify({ bodyBytes, signature });
     }
 
-    // Fill the LRU. State after each verify (FIFO, oldest first):
     expect(verifyNonce('1').ok).toBe(true);   // [1]
     expect(verifyNonce('2').ok).toBe(true);   // [1, 2]
     expect(verifyNonce('3').ok).toBe(true);   // [1, 2, 3]
     expect(verifyNonce('4').ok).toBe(true);   // [2, 3, 4] (evicted 1)
-    // '1' is now evicted — verifying it AGAIN succeeds.
     expect(verifyNonce('1').ok).toBe(true);   // [3, 4, 1] (evicted 2)
-    // '3' is still in the LRU — replay rejection.
     expect(verifyNonce('3')).toEqual({ ok: false, reason: 'replay' });
   });
 
   it('check-then-set is synchronous — two parallel verifies of the same nonce produce exactly one ok:true', async () => {
-    // The check-then-set MUST run as one microtask. A future refactor
-    // that drops an `await` between `seenNonces.has(nonce)` and
-    // `rememberNonce(nonce)` would let two parallel verifies BOTH
-    // observe "not seen" before either sets — and both would return
-    // ok:true on the same body. We drive two parallel `verify()`
-    // calls of the same body+signature and assert exactly one wins.
     const now = 1_700_000_000_000;
     const { hmac } = makeHmac({ clock: () => now });
     const payload = freshPayload({ now });
@@ -556,11 +467,6 @@ describe('generateNonce', () => {
 
 describe('wrapEnvelope / unwrapEnvelope', () => {
   it('wire envelope key order is exactly [body, signature]', () => {
-    // Pin the on-the-wire key order. V8 preserves insertion order
-    // per the JSON spec, so the order depends entirely on how
-    // wrapEnvelope spells the literal. A refactor that reorders
-    // the keys would change the byte representation across versions
-    // and break consumers that parse strictly. Pin the contract.
     const wire = wrapEnvelope({
       bodyBytes: Buffer.from('{"a":1}', 'utf8'),
       signature: 'sig',
@@ -581,11 +487,6 @@ describe('wrapEnvelope / unwrapEnvelope', () => {
   });
 
   it('preserves inner JSON key order across the round-trip (HMAC-verify-safe)', () => {
-    // The wire wrapping must preserve the inner body verbatim. If
-    // it ever JSON.parsed and re-stringified the inner body, a
-    // sender that signed `{"b":1,"a":2}` would have its key-order
-    // canonicalized to `{"a":2,"b":1}` on the receiver and HMAC
-    // verify would fail.
     const innerStr = '{"z":1,"a":2,"m":3}';
     const bodyBytes = Buffer.from(innerStr, 'utf8');
     const wire = wrapEnvelope({ bodyBytes, signature: 'sig' });

@@ -1,0 +1,5 @@
+{
+  "owner_id": "own_cli_fixture",
+  "auth_type": "api_key",
+  "device_enrolled": true
+}

@@ -1,8 +1,10 @@
 package internal
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -69,21 +71,25 @@ func listCreateQurlBlockActionsBody(t *testing.T, teamID, userID, channelID, res
 }
 
 // TestHandleList_RendersCreateQurlButtons fences the interactive list:
-// every tunnel with a `$<token>` renders a "Create qURL" accessory
-// button valued by that token, the slug-less row gets NO button (it has
-// no token to mint against), and the plain-text fallback still carries
-// the complete listing for notifications / accessibility.
+// every resource with a `$<token>` renders a "Create qURL" accessory button
+// valued by that token, tokenless rows get NO button, and the plain-text
+// fallback still carries the complete listing for notifications /
+// accessibility.
 func TestHandleList_RendersCreateQurlButtons(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
 	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
 		writeResourceListFixture(t, w, []map[string]any{
 			{testKeyResourceID: testListResIDProdDB, testKeyType: client.ResourceTypeTunnel, testKeySlug: testListAliasProdDB},
+			{testKeyResourceID: testListResIDURLDocs, testKeyType: client.ResourceTypeURL, fAttrAlias: testListAliasDocs, testKeyTargetURL: testListURLDocs},
 			{testKeyResourceID: "r_stage_db_bb", testKeyType: client.ResourceTypeTunnel, testKeySlug: "stage-db"},
 			// Slug-less, alias-less tunnel: no `$<token>` → no button.
 			{testKeyResourceID: "r_noslug0001", testKeyType: client.ResourceTypeTunnel},
 		}, "", false)
 	})
+	// Expose every row to C_test (incl. the slug-less row, so its "no ID" line
+	// still renders) — /qurl list is channel-scoped.
+	ts.seedChannelExposure(t, testAdminTeamID, "C_test", testListResIDProdDB, testListResIDURLDocs, "r_stage_db_bb", "r_noslug0001")
 	h := newAdminTestHandler(t, ts)
 	inv := newAdminSlashInvoker(t, h)
 
@@ -97,9 +103,8 @@ func TestHandleList_RendersCreateQurlButtons(t *testing.T) {
 		t.Fatalf("list response carried no blocks: %s", body)
 	}
 	vals := createQurlButtonValues(t, blocks)
-	// Rows sort by token: stage-db < prod-db? No — "prod-db" < "stage-db",
-	// and the tokenless row sorts last. So buttons are [prod-db, stage-db].
-	wantVals := []string{testListAliasProdDB, "stage-db"}
+	// Rows sort by token, with the tokenless row last.
+	wantVals := []string{testListAliasDocs, testListAliasProdDB, "stage-db"}
 	if len(vals) != len(wantVals) {
 		t.Fatalf("Create qURL button values = %v, want %v", vals, wantVals)
 	}
@@ -109,13 +114,130 @@ func TestHandleList_RendersCreateQurlButtons(t *testing.T) {
 		}
 	}
 
-	// Text fallback still lists every tunnel, including the buttonless
-	// slug-less row, plus the one-time-use guidance.
+	// Text fallback still lists every resource, including the buttonless
+	// slug-less row, plus the qURL creation guidance.
 	fallback := parseSlackText(t, body)
-	for _, want := range []string{"`$prod-db`", "`$stage-db`", "no ID", "/qurl get", "one-time qURL link"} {
+	for _, want := range []string{"`$docs`", "`$prod-db`", "`$stage-db`", "no ID", testListGetCommand, "create a qURL link"} {
 		if !strings.Contains(fallback, want) {
 			t.Errorf("text fallback missing %q: %q", want, fallback)
 		}
+	}
+}
+
+// TestHandleList_DuplicateURLResourceAliasesRenderButtonless keeps ambiguous
+// URL resource aliases from producing identical Create buttons. A channel alias
+// can still disambiguate a row; without one, the shared resource alias is shown
+// as admin-actionable context rather than a mintable token.
+func TestHandleList_DuplicateURLResourceAliasesRenderButtonless(t *testing.T) {
+	const (
+		firstID  = "r_url_docs_first"
+		secondID = "r_url_docs_second"
+	)
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		writeResourceListFixture(t, w, []map[string]any{
+			{testKeyResourceID: firstID, testKeyType: client.ResourceTypeURL, fAttrAlias: testListAliasDocs, testKeyTargetURL: testListURLFirst, testKeyStatus: client.StatusActive},
+			{testKeyResourceID: secondID, testKeyType: client.ResourceTypeURL, fAttrAlias: testListAliasDocs, testKeyTargetURL: testListURLSecond, testKeyStatus: client.StatusActive},
+		}, "", false)
+	})
+	ts.seedChannelExposure(t, testAdminTeamID, "C_test", firstID, secondID)
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	if status, _ := inv.invokeAdmin("list", testAdminTeamID, testAdminUserID); status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
+	}
+	body := inv.captured.waitForBody(t, 2*time.Second)
+	if vals := createQurlButtonValues(t, parseSlackBlocks(t, body)); len(vals) != 0 {
+		t.Fatalf("duplicate URL aliases should not render Create buttons; got %v", vals)
+	}
+	fallback := parseSlackText(t, body)
+	for _, want := range []string{"alias `$docs` is ambiguous here", firstID, secondID} {
+		if !strings.Contains(fallback, want) {
+			t.Errorf("text fallback missing %q: %q", want, fallback)
+		}
+	}
+	if strings.Contains(fallback, testListURLFirst) || strings.Contains(fallback, testListURLSecond) {
+		t.Errorf("duplicate URL alias rendered target URL in list fallback: %q", fallback)
+	}
+	if strings.Contains(fallback, "• `$docs`") {
+		t.Errorf("duplicate URL alias rendered as a mintable token: %q", fallback)
+	}
+}
+
+// TestHandleList_URLResourceAliasShadowedByChannelAliasRendersButtonless
+// covers the other ambiguous-token path: `/qurl get $docs` resolves channel
+// aliases before listed resource aliases, so a URL row whose intrinsic alias is
+// already bound to another resource in this channel must not render a `$docs`
+// Create button that would mint the other row.
+func TestHandleList_URLResourceAliasShadowedByChannelAliasRendersButtonless(t *testing.T) {
+	const (
+		urlID    = "r_url_docs_shadowed"
+		tunnelID = "r_tunnel_docs_binding"
+	)
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	ts.seedPolicySet(t, testAdminTeamID, "C_test", testListAliasDocs, []string{tunnelID, urlID})
+	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		writeResourceListFixture(t, w, []map[string]any{
+			{testKeyResourceID: urlID, testKeyType: client.ResourceTypeURL, fAttrAlias: testListAliasDocs, testKeyTargetURL: testListURLDocs, testKeyStatus: client.StatusActive},
+			{testKeyResourceID: tunnelID, testKeyType: client.ResourceTypeTunnel, testKeySlug: testListSlugOpsTunnel, testKeyStatus: client.StatusActive},
+		}, "", false)
+	})
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	if status, _ := inv.invokeAdmin("list", testAdminTeamID, testAdminUserID); status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
+	}
+	body := inv.captured.waitForBody(t, 2*time.Second)
+	if vals := createQurlButtonValues(t, parseSlackBlocks(t, body)); len(vals) != 1 || vals[0] != testListSlugOpsTunnel {
+		t.Fatalf("button values = %v, want only the tunnel token", vals)
+	}
+	fallback := parseSlackText(t, body)
+	if !strings.Contains(fallback, "alias `$docs` is ambiguous here") {
+		t.Errorf("text fallback missing shadowed-alias hint: %q", fallback)
+	}
+	if strings.Contains(fallback, "`$docs` →") {
+		t.Errorf("shadowed URL alias rendered as a mintable token: %q", fallback)
+	}
+}
+
+// TestHandleList_URLResourceAliasShadowedByTunnelSlugRendersButtonless
+// keeps list/get honest when a URL resource alias matches a tunnel slug:
+// `/qurl get $docs` tries the allowed tunnel slug before the listed resource
+// alias fallback, so the URL row must not advertise a `$docs` button.
+func TestHandleList_URLResourceAliasShadowedByTunnelSlugRendersButtonless(t *testing.T) {
+	const (
+		urlID    = "r_url_docs_slug"
+		tunnelID = "r_tunnel_docs_slug"
+	)
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	ts.seedChannelExposure(t, testAdminTeamID, "C_test", tunnelID, urlID)
+	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		writeResourceListFixture(t, w, []map[string]any{
+			{testKeyResourceID: urlID, testKeyType: client.ResourceTypeURL, fAttrAlias: testListAliasDocs, testKeyTargetURL: testListURLDocs, testKeyStatus: client.StatusActive},
+			{testKeyResourceID: tunnelID, testKeyType: client.ResourceTypeTunnel, testKeySlug: testListAliasDocs, testKeyStatus: client.StatusActive},
+		}, "", false)
+	})
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	if status, _ := inv.invokeAdmin("list", testAdminTeamID, testAdminUserID); status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
+	}
+	body := inv.captured.waitForBody(t, 2*time.Second)
+	if vals := createQurlButtonValues(t, parseSlackBlocks(t, body)); len(vals) != 1 || vals[0] != testListAliasDocs {
+		t.Fatalf("button values = %v, want only the tunnel slug token", vals)
+	}
+	fallback := parseSlackText(t, body)
+	if !strings.Contains(fallback, "alias `$docs` is ambiguous here") {
+		t.Errorf("text fallback missing tunnel-slug shadow hint: %q", fallback)
+	}
+	if strings.Contains(fallback, "`$docs` →") {
+		t.Errorf("shadowed URL alias rendered as a mintable token: %q", fallback)
 	}
 }
 
@@ -238,9 +360,12 @@ func TestHandleList_OverflowDegradesToText(t *testing.T) {
 	ts.seedAdmin(t)
 	n := listCreateButtonMaxRows + 1 // one past the cap → text-only path
 	resources := make([]map[string]any, 0, n)
+	rids := make([]string, 0, n)
 	for i := 0; i < n; i++ {
+		rid := fmt.Sprintf("r_tun_%03d", i)
+		rids = append(rids, rid)
 		resources = append(resources, map[string]any{
-			testKeyResourceID: fmt.Sprintf("r_tun_%03d", i),
+			testKeyResourceID: rid,
 			testKeyType:       client.ResourceTypeTunnel,
 			testKeySlug:       fmt.Sprintf("tun-%03d", i),
 		})
@@ -248,6 +373,8 @@ func TestHandleList_OverflowDegradesToText(t *testing.T) {
 	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
 		writeResourceListFixture(t, w, resources, "", false)
 	})
+	// All protected in C_test so the full set reaches the block-ceiling guard.
+	ts.seedChannelExposure(t, testAdminTeamID, "C_test", rids...)
 	h := newAdminTestHandler(t, ts)
 	inv := newAdminSlashInvoker(t, h)
 
@@ -260,7 +387,7 @@ func TestHandleList_OverflowDegradesToText(t *testing.T) {
 	}
 	text := parseSlackText(t, body)
 	// First and last rows both present → the text path truncates nothing.
-	for _, want := range []string{"`$tun-000`", fmt.Sprintf("`$tun-%03d`", n-1), "/qurl get"} {
+	for _, want := range []string{"`$tun-000`", fmt.Sprintf("`$tun-%03d`", n-1), testListGetCommand} {
 		if !strings.Contains(text, want) {
 			t.Errorf("text fallback missing %q", want)
 		}
@@ -294,4 +421,167 @@ func TestHandleBlockActions_UnknownActionIgnored(t *testing.T) {
 	if mintHits.Load() != 0 {
 		t.Errorf("mint reached for an unrecognized action (hits = %d)", mintHits.Load())
 	}
+}
+
+// TestHandleBlockActions_EnterPortalNoOp fences the Enter Portal URL button: a
+// click on a minted qURL's link button is acked 200 (Slack shows no error) and,
+// unlike an unrecognized button, is routed to an EXPLICIT no-op that does NOT
+// emit the "no recognized action" breadcrumb — the click opens the qURL in the
+// browser directly, so there is no server work, and keeping that Info log off the
+// primary CTA reserves it for a button genuinely rendered but never wired. The
+// mint is never reached.
+//
+// Reads the breadcrumb off the process-global slog default, so it swaps the
+// default to a buffer and restores it in cleanup. Safe from cross-test
+// interference: the test is non-parallel (newAdminTestHandler calls t.Setenv,
+// which makes a later t.Parallel panic), so Go runs it in the sequential phase
+// where no other test executes concurrently — the swap window can't overlap a
+// parallel test reading the default. Race-safe too: the no-op path is synchronous
+// (spawns no worker), so the buffer is only ever touched on this goroutine.
+func TestHandleBlockActions_EnterPortalNoOp(t *testing.T) {
+	var logBuf bytes.Buffer
+	prevDefault := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	t.Cleanup(func() { slog.SetDefault(prevDefault) })
+
+	ts := newAdminTestServers(t)
+	var mintHits atomic.Int32
+	ts.addCustomer("POST", mintByTestResourcePath, func(w http.ResponseWriter, _ *http.Request) {
+		mintHits.Add(1)
+		w.WriteHeader(http.StatusOK)
+	})
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	// A URL button carries no value; the empty value is irrelevant — the no-op
+	// branch matches on action_id and returns before reading it.
+	body := listCreateQurlBlockActionsBody(t, testAdminTeamID, testAdminUserID, "C_test", inv.responseU.URL, enterPortalActionID, "")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, newSignedRequest(t, pathSlackInteractions, body, body))
+
+	if w.Code != http.StatusOK || strings.TrimSpace(w.Body.String()) != "{}" {
+		t.Fatalf("Enter Portal ack = %d %q, want 200 and {}", w.Code, w.Body.String())
+	}
+	if strings.Contains(logBuf.String(), "no recognized action") {
+		t.Fatalf("Enter Portal click must not fire the unrecognized-action breadcrumb; logs=%q", logBuf.String())
+	}
+	// No async worker is started for the no-op; the brief wait gives a (buggy)
+	// one a chance to fire so the negative assertion bites.
+	time.Sleep(50 * time.Millisecond)
+	if mintHits.Load() != 0 {
+		t.Errorf("Enter Portal no-op must not reach the mint (hits = %d)", mintHits.Load())
+	}
+}
+
+// primaryCreateButtonPresent reports whether any "Create qURL" button across
+// the list blocks — whether a section accessory or an actions-block element —
+// carries Slack's primary (filled) style.
+func primaryCreateButtonPresent(blocks []any) bool {
+	isPrimaryCreate := func(el map[string]any) bool {
+		return el["action_id"] == listCreateQurlActionID && el["style"] == "primary"
+	}
+	for _, b := range blocks {
+		block, _ := b.(map[string]any)
+		if acc, ok := block["accessory"].(map[string]any); ok && isPrimaryCreate(acc) {
+			return true
+		}
+		if block["type"] == blockKitTypeActions {
+			els, _ := block[blockKitFieldElements].([]any)
+			for _, e := range els {
+				if el, ok := e.(map[string]any); ok && isPrimaryCreate(el) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// TestHandleList_PolishedDesignMarkers fences the /qurl list visual redesign on
+// a create-only (non-admin) list: a `header` block titles the list, each row's
+// section uses the bold multi-line `*$id*` layout, and the lone Create qURL
+// button is the DEFAULT style — not primary, since it has no Edit to outrank.
+func TestHandleList_PolishedDesignMarkers(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	// `/qurl list` is channel-scoped: a tunnel renders only where it's exposed.
+	// Expose prod-db to the invoker's default channel (C_test) so the design
+	// markers below are exercised on a rendered row rather than the empty state.
+	ts.seedChannelExposure(t, testAdminTeamID, "C_test", testListResIDProdDB)
+	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		writeResourceListFixture(t, w, []map[string]any{
+			{testKeyResourceID: testListResIDProdDB, testKeyType: client.ResourceTypeTunnel, testKeySlug: testListAliasProdDB, testKeyDescription: "Prod database"},
+		}, "", false)
+	})
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	if status, _ := inv.invokeAdmin("list", testAdminTeamID, testAdminUserID); status != http.StatusOK {
+		t.Fatalf("status != 200")
+	}
+	body := inv.captured.waitForBody(t, 2*time.Second)
+	blocks := parseSlackBlocks(t, body)
+	if len(blocks) == 0 {
+		t.Fatalf("list response carried no blocks: %s", body)
+	}
+
+	// First block is a header titling the list.
+	head, _ := blocks[0].(map[string]any)
+	if head["type"] != "header" {
+		t.Fatalf("first block type = %v, want header; blocks=%v", head["type"], blocks)
+	}
+	if txt, _ := head["text"].(map[string]any); txt["type"] != "plain_text" || !strings.Contains(fmt.Sprint(txt["text"]), "Protected Resources") {
+		t.Errorf("header text = %v, want plain_text containing the list title", head["text"])
+	}
+
+	// The row section uses the bold multi-line layout, not the bullet line.
+	if !strings.Contains(string(body), "*`$prod-db`*") {
+		t.Errorf("row section missing bold `*$id*` layout: %s", body)
+	}
+
+	// A create-only row's Create button is present but NOT primary (no Edit to
+	// outrank — see [TestHandleList_PrimaryCreateScopedToAdminRows]).
+	if vals := createQurlButtonValues(t, blocks); len(vals) != 1 {
+		t.Errorf("Create qURL accessory missing on create-only row: %v", vals)
+	}
+	if primaryCreateButtonPresent(blocks) {
+		t.Errorf("lone Create qURL should be default style, not primary; blocks=%v", blocks)
+	}
+}
+
+// TestHandleList_PrimaryCreateScopedToAdminRows fences that the primary (filled)
+// Create button is reserved for rows that ALSO carry an Edit button — where it
+// expresses the Create-over-Edit hierarchy. An admin (edit-wired) row gets the
+// primary Create; the same row with the modal opener dropped (create-only) gets
+// a default-style Create.
+func TestHandleList_PrimaryCreateScopedToAdminRows(t *testing.T) {
+	t.Run("admin row pairs primary Create with Edit", func(t *testing.T) {
+		h, _ := editableListHandler(t)
+		inv := newAdminSlashInvoker(t, h)
+		if status, _ := inv.invokeAdmin("list", testAdminTeamID, testAdminUserID); status != http.StatusOK {
+			t.Fatalf("status != 200")
+		}
+		blocks := parseSlackBlocks(t, inv.captured.waitForBody(t, 2*time.Second))
+		if len(editButtonValues(t, blocks)) != 1 {
+			t.Fatalf("expected an Edit button on the admin row; blocks=%v", blocks)
+		}
+		if !primaryCreateButtonPresent(blocks) {
+			t.Errorf("Create qURL beside Edit should be primary; blocks=%v", blocks)
+		}
+	})
+	t.Run("create-only row uses default Create", func(t *testing.T) {
+		h, _ := editableListHandler(t)
+		h.cfg.OpenView = nil // drop the modal opener → no Edit → create-only row
+		inv := newAdminSlashInvoker(t, h)
+		if status, _ := inv.invokeAdmin("list", testAdminTeamID, testAdminUserID); status != http.StatusOK {
+			t.Fatalf("status != 200")
+		}
+		blocks := parseSlackBlocks(t, inv.captured.waitForBody(t, 2*time.Second))
+		if primaryCreateButtonPresent(blocks) {
+			t.Errorf("lone Create qURL should be default style, not primary; blocks=%v", blocks)
+		}
+		if vals := createQurlButtonValues(t, blocks); len(vals) != 1 {
+			t.Errorf("Create qURL accessory missing on create-only row: %v", vals)
+		}
+	})
 }

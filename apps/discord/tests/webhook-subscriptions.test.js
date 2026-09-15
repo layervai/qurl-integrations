@@ -1,13 +1,3 @@
-// In-process subscription registry — tests for cache priming, refresh,
-// failure escalation, multi-guild-shared-owner ref-counting, and the
-// synchronous local-update API. Mocks db.scanGuildSubscriptions +
-// fetch (used for default-key owner_id discovery) so the registry
-// loop is exercised against a deterministic fake.
-//
-// Heavily isolated via jest.resetModules in beforeEach — every test
-// starts with a fresh registry. The module's _resetForTesting helper
-// is the supported way to wipe in-process state without re-requiring;
-// we use both belt-and-suspenders.
 
 const realFetch = global.fetch;
 
@@ -28,8 +18,6 @@ process.env.QURL_API_KEY = 'lv_test_abc';
 process.env.QURL_ENDPOINT = 'https://qurl.layerv.ai';
 process.env.QURL_WEBHOOK_SECRET = 'default-key-secret';
 process.env.BASE_URL = 'http://localhost:3000';
-// AWS_REGION + DDB_TABLE_PREFIX are required by config.js validators
-// even though this test never touches DDB through the real path.
 process.env.AWS_REGION = 'us-east-2';
 process.env.DDB_TABLE_PREFIX = 'qurl-bot-discord-test-';
 
@@ -38,10 +26,6 @@ const subs = require('../src/webhook-subscriptions');
 beforeEach(() => {
   subs._resetForTesting();
   mockScan.mockReset();
-  // Default fetch mock returns the default-key owner_id discovery
-  // shape so the refresh tick can fold it in. text() is required
-  // because discoverDefaultOwnerId goes through callQurlService,
-  // which reads body via text() then JSON.parses.
   global.fetch = jest.fn(async () => {
     const body = { data: [{ owner_id: 'usr_default', webhook_id: 'wh_default' }] };
     return { ok: true, status: 200, text: async () => JSON.stringify(body) };
@@ -65,8 +49,6 @@ describe('webhook-subscriptions registry — priming + lookup', () => {
     await subs.scanOnce();
     expect(subs.isPrimed()).toBe(true);
     expect(subs.getSecretForOwner('usr_a')).toBe('sec_g1');
-    // Unrelated owner_id still resolves to null; primed means
-    // "I've completed a scan", not "everyone is registered".
     expect(subs.getSecretForOwner('usr_unknown')).toBeNull();
   });
 
@@ -74,8 +56,6 @@ describe('webhook-subscriptions registry — priming + lookup', () => {
     mockScan.mockResolvedValueOnce([]);
     await subs.scanOnce();
     expect(subs.isPrimed()).toBe(true);
-    // discoverDefaultOwnerId returned usr_default + QURL_WEBHOOK_SECRET
-    // env is wired as the default secret.
     expect(subs.getSecretForOwner('usr_default')).toBe('default-key-secret');
   });
 
@@ -105,17 +85,10 @@ describe('webhook-subscriptions registry — multi-guild-shared-owner', () => {
       { guildId: 'g3', webhookId: 'wh_shared', webhookSecret: 'sec_shared', webhookOwnerId: 'usr_admin' },
     ]);
     await subs.scanOnce();
-    // One owner → one cached secret. The receiver doesn't need to
-    // know about guild_ids — that's a DDB-layer concern for the
-    // unlink ref-count path.
     expect(subs.getSecretForOwner('usr_admin')).toBe('sec_shared');
   });
 
-  // Rotate-drift tiebreaker: when sibling rows disagree on secret,
-  // the newest updatedAt MUST win (qurl-service signs with the
-  // post-rotate secret; a stale-row pick would 401 every webhook).
   it('picks the secret from the most-recently-updated row on rotate-drift', async () => {
-    // Stale row first so first-write-wins regressions fail this test.
     mockScan.mockResolvedValueOnce([
       {
         guildId: 'g1', webhookId: 'wh_v1', webhookSecret: 'sec_stale', webhookOwnerId: 'usr_admin',
@@ -162,19 +135,12 @@ describe('webhook-subscriptions registry — concurrent upsert during scan', () 
   it('preserves an upsertGuild entry written while scanOnce is awaiting', async () => {
     let resolveScan;
     mockScan.mockImplementationOnce(() => new Promise((resolve) => { resolveScan = resolve; }));
-    // Kick off scanOnce — it'll suspend on the scan promise.
     const scanPromise = subs.scanOnce();
-    // While scan is suspended, a concurrent /qurl setup writes a row.
     subs.upsertGuild({
       guildId: 'g_race', ownerId: 'usr_race', webhookId: 'wh_race', webhookSecret: 'sec_race',
     });
-    // Scan completes — its `rows` doesn't include the racing guild
-    // because the row was written after the DDB read started.
     resolveScan([]);
     await scanPromise;
-    // The synchronous upsert MUST survive the rebuild. Without the
-    // upsertsDuringScan tracker, the clear() would wipe it and this
-    // expectation would fail with null.
     expect(subs.getSecretForOwner('usr_race')).toBe('sec_race');
   });
 
@@ -193,24 +159,14 @@ describe('webhook-subscriptions registry — concurrent upsert during scan', () 
     expect(subs.getSecretForOwner('usr_pre')).toBe('sec_pre_from_scan');
   });
 
-  // Cycle-6 cr regression: scan caught a pre-rotate sibling row for
-  // owner X while a concurrent linkGuildWebhookSubscription wrote
-  // the post-rotate secret via upsertGuild. Without the cycle-6 fix
-  // (upsertsDuringScan overrides scan-result entries), the cache
-  // would hold the stale secret until the next 30s tick.
   it('upsert mid-scan overrides scan result for the same owner (rotate-drift race)', async () => {
     let resolveScan;
     mockScan.mockImplementationOnce(() => new Promise((resolve) => { resolveScan = resolve; }));
     const scanPromise = subs.scanOnce();
-    // Mid-scan: a concurrent link wrote the POST-rotate secret in
-    // memory via upsertGuild. DDB write may or may not be visible
-    // to the in-flight scan; assume it is and the scan caught a
-    // stale sibling row.
     subs.upsertGuild({
       guildId: 'g_primary', ownerId: 'usr_rot',
       webhookId: 'wh_rot', webhookSecret: 'sec_post_rotate',
     });
-    // Scan resolves with the PRE-rotate sibling row (rotate drift).
     resolveScan([
       {
         guildId: 'g_sibling', webhookId: 'wh_rot', webhookSecret: 'sec_pre_rotate',
@@ -219,17 +175,11 @@ describe('webhook-subscriptions registry — concurrent upsert during scan', () 
       },
     ]);
     await scanPromise;
-    // The in-memory upsert MUST win — qurl-service signs with the
-    // post-rotate secret, so any cached pre-rotate secret would
-    // 401 every inbound webhook for this owner.
     expect(subs.getSecretForOwner('usr_rot')).toBe('sec_post_rotate');
   });
 });
 
 describe('webhook-subscriptions registry — synchronous local update API', () => {
-  // upsertGuild / removeGuild are called from setGuildApiKey-adjacent
-  // flows so the registering replica is immediately correct. Sibling
-  // replicas converge on the next tick.
   it('upsertGuild makes the secret immediately resolvable', () => {
     subs.upsertGuild({
       guildId: 'g_new', ownerId: 'usr_new', webhookId: 'wh_new', webhookSecret: 'sec_new',
@@ -256,8 +206,6 @@ describe('webhook-subscriptions registry — synchronous local update API', () =
   });
 
   it('removeGuild keeps the entry when sibling guilds remain', () => {
-    // Multi-guild-shared-owner: removing g1 doesn't kill g2's
-    // delivery. The receiver's secret lookup stays valid for usr_admin.
     subs.upsertGuild({
       guildId: 'g1', ownerId: 'usr_admin', webhookId: 'wh_shared', webhookSecret: 'sec_shared',
     });
@@ -268,19 +216,12 @@ describe('webhook-subscriptions registry — synchronous local update API', () =
     expect(subs.getSecretForOwner('usr_admin')).toBe('sec_shared');
   });
 
-  // Defensive: pre-discovery (defaultOwnerId is null), removeGuild on
-  // a BYOK guild whose owner happens to equal what would BECOME the
-  // default owner could otherwise drop the entry. Doesn't matter
-  // today (no production caller), but pins the future-/qurl-unlink
-  // contract before that caller lands.
   it('removeGuild on a sole-guild owner drops the entry pre-discovery (next scan rediscovers)', async () => {
     subs.upsertGuild({
       guildId: 'g1', ownerId: 'usr_byok', webhookId: 'wh_byok', webhookSecret: 'sec_byok',
     });
     subs.removeGuild({ guildId: 'g1', ownerId: 'usr_byok' });
     expect(subs.getSecretForOwner('usr_byok')).toBeNull();
-    // The DDB row is still authoritative — the next 30s tick will
-    // restore the entry if the caller didn't also DDB-delete it.
     mockScan.mockResolvedValueOnce([
       { guildId: 'g1', webhookId: 'wh_byok', webhookSecret: 'sec_byok', webhookOwnerId: 'usr_byok' },
     ]);
@@ -290,11 +231,6 @@ describe('webhook-subscriptions registry — synchronous local update API', () =
 });
 
 describe('webhook-subscriptions registry — scanInFlight re-entrancy guard', () => {
-  // If a tick takes longer than the 30s interval, the next interval
-  // fires while the first is still awaiting. Both calls would
-  // .clear() upsertsDuringScan and the second wipes the first's in-
-  // flight tracking. The guard drops the overlap. Pin the behavior
-  // so a refactor doesn't accidentally re-introduce the race.
   it('drops an overlapping scanOnce while another is in flight', async () => {
     let resolveFirst;
     mockScan.mockImplementationOnce(() => new Promise((resolve) => { resolveFirst = resolve; }));
@@ -302,20 +238,13 @@ describe('webhook-subscriptions registry — scanInFlight re-entrancy guard', ()
       { guildId: 'g_second', webhookId: 'wh_2', webhookSecret: 'sec_2', webhookOwnerId: 'usr_2' },
     ]);
     const first = subs.scanOnce();
-    // The second call returns IMMEDIATELY because scanInFlight is true;
-    // mockScan is NOT invoked a second time.
     const second = subs.scanOnce();
     await second;
     expect(mockScan).toHaveBeenCalledTimes(1);
-    // Now finish the first scan so subsequent tests aren't tainted.
     resolveFirst([]);
     await first;
   });
 
-  // Skipped scans return 'skipped' sentinel; completed scans return
-  // 'completed'. refreshTick uses this to avoid resetting the
-  // consecutiveFailures counter when a slow scan overlaps the next
-  // tick — otherwise an alarm-worthy outage would be masked.
   it('returns "skipped" sentinel when another scan is in flight, "completed" otherwise', async () => {
     let resolveFirst;
     mockScan.mockImplementationOnce(() => new Promise((resolve) => { resolveFirst = resolve; }));
@@ -329,12 +258,6 @@ describe('webhook-subscriptions registry — scanInFlight re-entrancy guard', ()
 });
 
 describe('webhook-subscriptions registry — default-key + BYOK owner collision', () => {
-  // Edge case: an admin links a BYOK guild using the SAME auth0 owner
-  // as the bot's default key (e.g., bot operator running /qurl setup
-  // in their own server). The BYOK row's webhook_owner_id ===
-  // discoveredOwner. Without the guard, the default-key fold would
-  // overwrite the BYOK entry's guildIds — observationally benign
-  // (the secret is the same) but a silent overwrite is dishonest.
   it('does NOT clobber a BYOK entry that shares the default-key owner_id', async () => {
     mockScan.mockResolvedValueOnce([
       {
@@ -343,28 +266,15 @@ describe('webhook-subscriptions registry — default-key + BYOK owner collision'
         updatedAt: '2026-05-21T00:00:00.000Z',
       },
     ]);
-    // discoverDefaultOwnerId returns 'usr_default' — same as BYOK row.
     await subs.scanOnce();
     expect(subs.isPrimed()).toBe(true);
-    // Secret resolves; BYOK entry is preserved (webhookId stays the
-    // string 'wh_byok', NOT the DEFAULT_KEY_SENTINEL).
     expect(subs.getSecretForOwner('usr_default')).toBe('sec_shared');
   });
 
   it('BYOK row wins over default-key when secrets DIFFER for the same owner (chosen behavior)', async () => {
-    // Future-bug scenario: qurl-service rotates the default-key secret
-    // but the BYOK row's secret stays stale (or vice versa). Today this
-    // can't happen because the BYOK row + default-key share the same
-    // qurl-service subscription on shared owner_id — but if the
-    // identity assumption is ever violated, the BYOK row is what
-    // wins, NOT the env-derived default secret. Pinning the chosen
-    // behavior here forces the next bug that breaks the identity
-    // assumption to surface as a LOUD test failure (the assumption
-    // shifted), not a silent prod 401 storm.
     mockScan.mockResolvedValueOnce([
       {
         guildId: 'g_admin_byok', webhookId: 'wh_byok',
-        // Diverged secret — different from QURL_WEBHOOK_SECRET.
         webhookSecret: 'sec_byok_only',
         webhookOwnerId: 'usr_default',
         updatedAt: '2026-05-21T00:00:00.000Z',
@@ -372,20 +282,11 @@ describe('webhook-subscriptions registry — default-key + BYOK owner collision'
     ]);
     await subs.scanOnce();
     expect(subs.isPrimed()).toBe(true);
-    // BYOK row wins, NOT the env QURL_WEBHOOK_SECRET ('default-key-secret').
     expect(subs.getSecretForOwner('usr_default')).toBe('sec_byok_only');
   });
 });
 
 describe('webhook-subscriptions registry — default-key discovery', () => {
-  // When GET /v1/webhooks returns an empty list (Lambda hasn't run
-  // on a fresh deploy, or QURL_API_KEY/QURL_ENDPOINT are unset),
-  // discoverDefaultOwnerId returns null. scanOnce must still flip
-  // primed=true (so inbound webhooks for KNOWN owners aren't held in
-  // 503), but the default-key entry must NOT be folded in (anything
-  // signed by the Lambda's default sub will 401 until discovery
-  // succeeds — which is the truthful response, since the bot can't
-  // verify those signatures).
   it('still primes the cache when discoverDefaultOwnerId returns null', async () => {
     mockScan.mockResolvedValueOnce([
       { guildId: 'g1', webhookId: 'wh1', webhookSecret: 'sec1', webhookOwnerId: 'usr_byok' },
@@ -395,9 +296,7 @@ describe('webhook-subscriptions registry — default-key discovery', () => {
     }));
     await subs.scanOnce();
     expect(subs.isPrimed()).toBe(true);
-    // BYOK guild's entry still made it in.
     expect(subs.getSecretForOwner('usr_byok')).toBe('sec1');
-    // Default-key entry absent — no usr_default lookup possible.
     expect(subs.getSecretForOwner('usr_default')).toBeNull();
   });
 
@@ -419,10 +318,6 @@ describe('webhook-subscriptions registry — first-scan-failure semantics', () =
   });
 
   it('does NOT throw on owner-discovery fetch failure (BYOK delivery survives a transient qurl-service blip)', async () => {
-    // Decoupled from Promise.all rejection: discovery failure is
-    // caught locally, scan completes with the BYOK row, primed flips
-    // true, and BYOK lookups resolve. The default-key entry stays
-    // absent until discovery recovers.
     mockScan.mockResolvedValueOnce([
       { guildId: 'g_byok', webhookId: 'wh_byok', webhookSecret: 'sec_byok', webhookOwnerId: 'usr_byok' },
     ]);
@@ -438,28 +333,17 @@ describe('webhook-subscriptions registry — first-scan-failure semantics', () =
   it('consecutiveFailures survives a "skipped" scan (long-running outage must still escalate)', async () => {
     const mockLogger = require('../src/logger');
     mockLogger.audit.mockClear();
-    // 2 fails — under threshold, no audit yet.
     for (let i = 0; i < 2; i++) {
       mockScan.mockRejectedValueOnce(new Error('fail'));
       // eslint-disable-next-line no-await-in-loop
       await subs._refreshTickForTesting();
     }
-    // Force a 'skipped' tick by leaving scanInFlight true. Easiest
-    // path: kick a never-resolving scan and call refreshTick on top
-    // of it (the second one returns 'skipped' without throwing).
     let resolveLong;
     mockScan.mockReturnValueOnce(new Promise(r => { resolveLong = r; }));
     const inflight = subs._refreshTickForTesting();
     await subs._refreshTickForTesting(); // skipped — must NOT reset counter
     resolveLong([]); // complete the long scan so the next assertion is meaningful
     await inflight;
-    // The long-running scan that JUST completed was a SUCCESS (no
-    // throw), which resets the counter — this is correct behavior:
-    // a real recovery is real recovery. The point of this test is
-    // that the *skipped* tick alone didn't artificially reset.
-    // To pin the skip-doesn't-reset semantic, restart the failure
-    // streak and observe the audit fires at exactly 3 fails again
-    // (not 1 — would happen if skipped had been counted as success).
     mockLogger.audit.mockClear();
     for (let i = 0; i < 3; i++) {
       mockScan.mockRejectedValueOnce(new Error('fail'));
@@ -475,7 +359,6 @@ describe('webhook-subscriptions registry — first-scan-failure semantics', () =
   it('emits QURL_WEBHOOK_DEFAULT_DISCOVERY_FAIL audit exactly once at the escalation threshold', async () => {
     const mockLogger = require('../src/logger');
     mockLogger.audit.mockClear();
-    // 5 consecutive discovery failures (DDB scan succeeds throughout).
     for (let i = 0; i < 5; i++) {
       mockScan.mockResolvedValueOnce([]);
       global.fetch = jest.fn(async () => ({
@@ -493,14 +376,9 @@ describe('webhook-subscriptions registry — first-scan-failure semantics', () =
     );
   });
 
-  // Alarm-once contract: behavioral test via the test-only
-  // _refreshTickForTesting hook. Five consecutive failures must fire
-  // the QURL_WEBHOOK_CACHE_REFRESH_FAIL audit EXACTLY ONCE at the
-  // escalation threshold, not on every subsequent failed tick.
   it('emits QURL_WEBHOOK_CACHE_REFRESH_FAIL audit exactly once across N consecutive failures', async () => {
     const mockLogger = require('../src/logger');
     mockLogger.audit.mockClear();
-    // 5 consecutive scan failures.
     for (let i = 0; i < 5; i++) {
       mockScan.mockRejectedValueOnce(new Error('DDB throttled'));
       // eslint-disable-next-line no-await-in-loop
@@ -518,16 +396,13 @@ describe('webhook-subscriptions registry — first-scan-failure semantics', () =
   it('resets failure counter + lets the next outage alarm fresh', async () => {
     const mockLogger = require('../src/logger');
     mockLogger.audit.mockClear();
-    // 3 fails → audit fires once.
     for (let i = 0; i < 3; i++) {
       mockScan.mockRejectedValueOnce(new Error('fail'));
       // eslint-disable-next-line no-await-in-loop
       await subs._refreshTickForTesting();
     }
-    // Recovery: a successful scan resets consecutiveFailures.
     mockScan.mockResolvedValueOnce([]);
     await subs._refreshTickForTesting();
-    // 3 MORE fails → the NEXT outage alarms again.
     for (let i = 0; i < 3; i++) {
       mockScan.mockRejectedValueOnce(new Error('fail'));
       // eslint-disable-next-line no-await-in-loop

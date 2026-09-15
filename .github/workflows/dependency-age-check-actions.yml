@@ -3,10 +3,11 @@
 # Source: https://github.com/layervai/ops-routines-workflows/blob/main/.github/workflows/age-check-actions.yml
 name: Dependency Age Check (Actions)
 
-# Fires on every PR (no path filter) so the status check always reports.
-# This lets branch protection require it without the path-filtered-
-# required-check footgun. The reusable's script exits 0 quickly when
-# no workflow/composite-action changes are in the diff.
+# Fires on every PR with no path filter so branch-protected checks always
+# report and avoid the path-filtered-required-check footgun. The local
+# validate-pins job re-scans the full workflow/composite-action tree; the
+# reusable age-check exits 0 quickly when no workflow or composite-action
+# changes are in the diff.
 on:
   pull_request:
   workflow_dispatch:
@@ -22,6 +23,22 @@ permissions:
   contents: read
 
 jobs:
+  validate-pins:
+    # Branch protection requires this exact job name as the status context.
+    # Renaming it requires updating the `main` protection settings and
+    # CONTRIBUTING.md.
+    name: Validate GitHub Actions pins
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Validate SHA pins
+        run: scripts/validate-github-actions-pins.sh
+      - name: Test SHA pin validator
+        run: scripts/test-validate-github-actions-pins.sh
+
   age-check:
     # No outer `if:` for `age-check-bypass`. The required status check
     # is `age-check / Check GitHub Actions pin ages` (caller-job / reusable-inner-job).
@@ -34,7 +51,7 @@ jobs:
     # only if/name/needs/permissions/secrets/strategy/uses/with/concurrency
     # are valid on a job that calls a reusable workflow. The reusable
     # workflow itself sets `timeout-minutes: 5` internally.
-    uses: layervai/ops-routines-workflows/.github/workflows/age-check-actions.yml@ca41c7123c507ad45331a723851da6c010541154 # v0.6.2
+    uses: layervai/ops-routines-workflows/.github/workflows/age-check-actions.yml@88b48c5ab3e1262018f44bbe5f4a03b94a3e39aa # v0.14.0
     with:
       min_age_days: 7
       # Post a sticky PR comment when an age-check fails, listing each

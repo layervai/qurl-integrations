@@ -1,0 +1,78 @@
+package main
+
+// exampleCRID is a structurally valid production CRID used in help text so
+// examples look exactly like real usage (60 characters, lowercase, 'a'
+// first character = production).
+const exampleCRID = "aea6x7mea52zcalolw7nis3g4iy3rcfr7nzyfukkuujsqufnxhmvhhtledfa"
+
+// Fixed customer-facing message constants. They are defined once here and
+// referenced by both the commands and the jargon-gate test, so the strings a
+// customer sees and the strings the gate vets can never drift apart.
+const (
+	// msgVerifyMismatch is printed (stderr only) when a share response
+	// fails CRID verification; nothing is emitted on stdout and the exit
+	// code is 12.
+	msgVerifyMismatch = "the service's answer did not match the CRID you asked for, so the link was discarded and nothing was printed. Try again; if it keeps happening, stop and contact whoever shared the CRID with you"
+
+	// msgVerifyMissing covers a share response that carried nothing to
+	// verify against; same fail-closed contract as msgVerifyMismatch.
+	msgVerifyMissing = "the service's answer carried no CRID to verify against, so the link was discarded and nothing was printed. Try again; if it keeps happening, contact qURL support"
+
+	// msgNeedsYes is the non-interactive guard for destructive commands.
+	msgNeedsYes = "confirmation required: re-run with --yes (interactive confirmation needs a terminal)"
+
+	// msgDeleteCanceled acknowledges a declined confirmation prompt.
+	msgDeleteCanceled = "Canceled — nothing was deleted."
+
+	// msgInsecureEndpoint warns that a plain-http non-loopback endpoint sends
+	// an authorization credential unencrypted. Loopback endpoints never warn.
+	msgInsecureEndpoint = "your authorization credential would travel unencrypted: %s uses plain http on a non-local address — use https"
+
+	// msgTTLClamped reports the service granting a shorter link lifetime
+	// than requested.
+	msgTTLClamped = "Note: the service granted a %s link lifetime instead of the requested %s."
+
+	// msgNoKeyProvided is login's empty-input error.
+	msgNoKeyProvided = "no API key provided"
+
+	// msgAlreadyGone notes an idempotent delete that had nothing left to do.
+	msgAlreadyGone = "It was already deleted; nothing left to do."
+
+	// msgOpeningBrowser is get's browser-mode note, printed after the
+	// verified link and before the launcher runs.
+	msgOpeningBrowser = "Opening it in your browser..."
+
+	// msgBrowserFailed reports a launcher that would not start; the link is
+	// already on stdout by then, so the user is not stranded.
+	msgBrowserFailed = "couldn't open your browser: %w. The access link is printed above — open it yourself, or re-run with --file to download the file"
+
+	// msgFileNeedsPath refuses an explicitly empty --file value.
+	msgFileNeedsPath = "--file needs a path, or \"-\" to stream to stdout"
+
+	// msgFileDashJSON refuses combining raw-byte output with the JSON
+	// document format.
+	msgFileDashJSON = "--file - streams the raw file bytes to stdout and can't be combined with --output json"
+
+	// msgBrowserJSON refuses browser-open under the JSON output mode: a
+	// machine asked for data, and a spawned browser is not data.
+	msgBrowserJSON = "browser opening isn't available with --output json — use --file to download, or `qurl share --output json` for the link"
+)
+
+// customerMessages returns every fixed customer-facing string the cmd
+// package can emit, for the jargon gate.
+func customerMessages() []string {
+	return []string{
+		msgVerifyMismatch,
+		msgVerifyMissing,
+		msgNeedsYes,
+		msgDeleteCanceled,
+		msgTTLClamped,
+		msgNoKeyProvided,
+		msgAlreadyGone,
+		msgOpeningBrowser,
+		msgBrowserFailed,
+		msgFileNeedsPath,
+		msgFileDashJSON,
+		msgBrowserJSON,
+	}
+}
