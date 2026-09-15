@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.5.3](https://github.com/layervai/qurl-integrations/compare/v2.5.2...v2.5.3) (2026-09-15)
+
+
+### Bug Fixes
+
+* **cli:** wait for macOS daemon shutdown during upgrades ([#1461](https://github.com/layervai/qurl-integrations/issues/1461)) ([a7c9728](https://github.com/layervai/qurl-integrations/commit/a7c97281108d223ca7f5b7ee13bbbbdfe88d3158))
+
 ## [2.5.2](https://github.com/layervai/qurl-integrations/compare/v2.5.1...v2.5.2) (2026-09-15)
 
 
