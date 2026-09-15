@@ -25,7 +25,7 @@ revocable at any time.
 | `/qurl revoke` | Revoke every link from a previous send |
 | `/qurl help` | Show the command reference |
 | `/qurl setup` | *(admin)* Connect this server to qURL |
-| `/qurl status` | *(admin)* Check whether qURL is configured |
+| `/qurl status` | *(admin)* Verify the stored key and show its prefix and scopes |
 
 ### `/qurl send` options
 
