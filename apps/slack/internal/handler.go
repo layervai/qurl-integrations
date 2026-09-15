@@ -410,6 +410,7 @@ type Config struct {
 	// that construct Config directly must pass a pinned image unless they
 	// intentionally exercise the dev/sandbox fallback path.
 	TunnelImage string
+	TunnelHub   TunnelHub
 
 	// S3OriginImage is the private S3 website origin image shown by the
 	// `/qurl-admin protect` S3 website flow. Empty falls back to this package's
