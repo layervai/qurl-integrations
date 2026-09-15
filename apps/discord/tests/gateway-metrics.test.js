@@ -300,6 +300,7 @@ describe('startGatewayHeartbeat', () => {
     expect(shutdownStart).toBeGreaterThanOrEqual(0);
     expect(shutdownEnd).toBeGreaterThan(shutdownStart);
     const shutdownBranch = source.slice(shutdownStart, shutdownEnd);
+    expect(shutdownBranch).toContain("await tryStop('private uploader', { stop: closePrivateUploader }, logger);");
     expect(shutdownBranch).toContain('clearInterval(gatewayHeartbeatTimer);');
     expect(shutdownBranch).toContain('clearInterval(activeGuildCountTimer);');
   });

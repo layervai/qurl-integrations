@@ -18,6 +18,7 @@ const {
   selectGatewayReadinessProbe,
   awaitServerListening,
   tryClose,
+  tryStop,
   stopGatewayHotStandby,
   runGracefulShutdown,
   runGatewayFatalShutdown,
@@ -671,7 +672,7 @@ async function gracefulShutdownTeardown({
   // actually running per process (combined + flag-on is rejected
   // at boot), so the sequencing matters only as documentation.
   await eventPublisher.stop();
-  await closePrivateUploader();
+  await tryStop('private uploader', { stop: closePrivateUploader }, logger);
   // Clear gateway-metrics timers BEFORE discordShutdown(): a stray
   // heartbeat tick during client.destroy() would race with the
   // WebSocketShard teardown and surface as a confusing "Sampler
