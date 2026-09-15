@@ -341,8 +341,10 @@ module.exports = {
   // qURL webhook receiver HMAC. Written to SSM by the webhook-registrar
   // Lambda (apps/discord/lambda/webhook-registrar/) on each deploy
   // invocation, then injected into the bot's task env. The bot reads
-  // it here and never modifies it — Lambda is the sole writer.
-  QURL_WEBHOOK_SECRET: process.env.QURL_WEBHOOK_SECRET,
+  // it here and never modifies it — Lambda is the sole writer. Outer
+  // whitespace (an `echo`'d SSM put) is trimmed so it cannot poison the HMAC
+  // key; a whitespace-only value therefore reads as unset (pure-BYOK mode).
+  QURL_WEBHOOK_SECRET: process.env.QURL_WEBHOOK_SECRET?.trim(),
 
   // qURL OAuth (Auth0) — for /qurl setup admin consent flow.
   // When unset, /qurl setup falls back to the legacy modal-paste path so the
