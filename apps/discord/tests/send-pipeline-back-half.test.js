@@ -851,6 +851,8 @@ describe('revokeAllLinks', () => {
     expect(mockDeleteLink).not.toHaveBeenCalled();
     expect(result.success).toBe(0);
     expect(result.total).toBe(1);
+    // Transient: the caller keeps the "retry" guidance.
+    expect(result.malformedIdentity).toBe(false);
     expect(mockDb.markSendRevoked).not.toHaveBeenCalled();
   });
 
@@ -887,6 +889,9 @@ describe('revokeAllLinks', () => {
     expect(mockDeleteLink).toHaveBeenCalledWith('res-1', 'apikey');
     expect(result.success).toBe(0);
     expect(result.total).toBe(1);
+    // Terminal: no retry repairs the stored identity, so callers must not
+    // tell the user to try again.
+    expect(result.malformedIdentity).toBe(true);
     expect(mockDb.markSendRevoked).not.toHaveBeenCalled();
     expect(logger.error).toHaveBeenCalledWith(
       'Cannot fully revoke resource with malformed stored token identity',
@@ -1042,6 +1047,7 @@ describe('revokeAllLinks', () => {
     expect(result).toEqual({
       barrierEstablished: true,
       finalizationFailed: false,
+      malformedIdentity: false,
       success: 3,
       total: 3,
       successUserIds: ['user-1', 'user-2', 'user-3'],
@@ -1122,6 +1128,7 @@ describe('revokeAllLinks', () => {
     expect(result).toEqual({
       barrierEstablished: true,
       finalizationFailed: false,
+      malformedIdentity: false,
       success: 0,
       total: 0,
       successUserIds: [],
@@ -1140,6 +1147,7 @@ describe('revokeAllLinks', () => {
     expect(result).toEqual({
       barrierEstablished: false,
       finalizationFailed: false,
+      malformedIdentity: false,
       success: 0,
       total: 0,
       successUserIds: [],
@@ -1238,6 +1246,7 @@ describe('revokeAllLinks', () => {
     expect(result).toEqual({
       barrierEstablished: true,
       finalizationFailed: true,
+      malformedIdentity: false,
       success: 1,
       total: 1,
       successUserIds: ['user-1'],
@@ -1272,6 +1281,7 @@ describe('revokeAllLinks', () => {
 
     expect(result).toMatchObject({
       finalizationFailed: true,
+      malformedIdentity: false,
       success: 1,
       total: 1,
     });
@@ -1958,6 +1968,10 @@ describe('buildRevokeHeader (slash-command revoke path)', () => {
 
   it('full failure reports unconfirmed revocation without claiming any existing sessions', () => {
     expect(buildRevokeHeader(0, 2)).toBe('Revoked 0/2 users. Could not confirm revocation for 2 users. Retry with `/qurl revoke`; if this continues, run `/qurl setup` and reconnect.');
+  });
+
+  it('points a permanently unrevokable send at support instead of "try again"', () => {
+    expect(buildRevokeHeader(1, 2, { malformedIdentity: true })).toBe('Revoked 1/2 users. Could not confirm revocation for 1 user. Retrying will not resolve this; contact support. Revocation blocks new link access; sessions already opened may remain active.');
   });
 
   it.each([

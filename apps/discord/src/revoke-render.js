@@ -20,7 +20,9 @@ const REVOKE_FOR_PREFIX = '\nRevoked for: ';
 // unconfirmed-failure guidance, and already-opened-session caveat. Used by
 // both the inline-button path (via renderRevokeContent) and the slash-command
 // /qurl revoke handler so a future wording change lands in one place.
-function buildRevokeHeader(success, total, { finalizationFailed = false } = {}) {
+// `malformedIdentity`: at least one stored row has a present-but-unusable
+// token identity, which no retry can repair; point at support instead.
+function buildRevokeHeader(success, total, { finalizationFailed = false, malformedIdentity = false } = {}) {
   if (
     !Number.isSafeInteger(success)
     || !Number.isSafeInteger(total)
@@ -31,8 +33,11 @@ function buildRevokeHeader(success, total, { finalizationFailed = false } = {}) 
     throw new TypeError('revoke success and total must be non-negative integers with success <= total');
   }
   const failed = total - success;
+  const guidance = malformedIdentity
+    ? 'Retrying will not resolve this; contact support.'
+    : 'Retry with `/qurl revoke`; if this continues, run `/qurl setup` and reconnect.';
   const failure = failed > 0
-    ? ` Could not confirm revocation for ${failed} user${failed !== 1 ? 's' : ''}. Retry with \`/qurl revoke\`; if this continues, run \`/qurl setup\` and reconnect.`
+    ? ` Could not confirm revocation for ${failed} user${failed !== 1 ? 's' : ''}. ${guidance}`
     : '';
   const note = success > 0
     ? ' Revocation blocks new link access; sessions already opened may remain active.'
@@ -55,8 +60,8 @@ function buildRevokeHeader(success, total, { finalizationFailed = false } = {}) 
 // `success` is required and authoritative; it may exceed the names the caller
 // could resolve. The header reflects that count while the names list reflects
 // only what's renderable.
-function renderRevokeContent({ names, total, showAll, success, finalizationFailed = false }) {
-  let content = buildRevokeHeader(success, total, { finalizationFailed });
+function renderRevokeContent({ names, total, showAll, success, finalizationFailed = false, malformedIdentity = false }) {
+  let content = buildRevokeHeader(success, total, { finalizationFailed, malformedIdentity });
 
   if (names.length === 0) {
     return { content, needsExpand: false, attachmentText: null };

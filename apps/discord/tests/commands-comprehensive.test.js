@@ -1124,6 +1124,21 @@ describe('handleRevokeSelect (dispatcher path)', () => {
     expect(mockDeleteLink).toHaveBeenCalledTimes(4);
     expect(mockDb.markSendRevoked).toHaveBeenCalledWith('send-retry', 'user-1');
   });
+
+  it('tells the user to contact support, not retry, when a stored token identity is malformed', async () => {
+    mockDb.getSendItems.mockReturnValue([
+      { resource_id: 'res-1', recipient_discord_id: 'u-1', qurl_id: '   ' },
+    ]);
+    mockDeleteLink.mockResolvedValueOnce(undefined);
+
+    const interaction = makeSelectInteraction({ values: ['send-wedged'] });
+    await handleRevokeSelect(interaction, { flow_id: '0:1#guild-1#ch-1#user-1' });
+
+    const { content } = interaction.update.mock.calls[0][0];
+    expect(content).toContain('Could not confirm revocation for 1 user. Retrying will not resolve this; contact support.');
+    expect(content).not.toContain('Retry with');
+    expect(mockDb.markSendRevoked).not.toHaveBeenCalled();
+  });
 });
 
 describe('/qurl setup subcommand (legacy modal-paste path)', () => {

@@ -2632,6 +2632,7 @@ async function executeSendPipeline(interaction, {
     // `recipients[]`.
     let revokeResultSuccess = 0;
     let revokeResultFinalizationFailed = false;
+    let revokeResultMalformedIdentity = false;
     let revokeShowAll = false;
     let revokeInFlight = false;
     let revokeSucceeded = false;
@@ -2674,6 +2675,7 @@ async function executeSendPipeline(interaction, {
           revokeShowAll,
           revokeResultSuccess,
           revokeResultFinalizationFailed,
+          revokeResultMalformedIdentity,
         );
         await interaction.editReply(revokeReplyPayload(updated)).catch(logIgnoredDiscordErr);
         return;
@@ -2754,6 +2756,7 @@ async function executeSendPipeline(interaction, {
           revokeResultTotal = revoked.total;
           revokeResultSuccess = revoked.success;
           revokeResultFinalizationFailed = revoked.finalizationFailed;
+          revokeResultMalformedIdentity = revoked.malformedIdentity;
           revokeShowAll = false;
           revokeResultKnown = true;
           const initial = renderRevokeMsg(
@@ -2763,6 +2766,7 @@ async function executeSendPipeline(interaction, {
             false,
             revokeResultSuccess,
             revokeResultFinalizationFailed,
+            revokeResultMalformedIdentity,
           );
           await interaction.editReply(revokeReplyPayload(initial)).catch(logIgnoredDiscordErr);
           // Keep revokeInFlight true after success as the collector-local
@@ -2982,6 +2986,7 @@ async function executeSendPipeline(interaction, {
             revokeShowAll,
             revokeResultSuccess,
             revokeResultFinalizationFailed,
+            revokeResultMalformedIdentity,
           );
           interaction.editReply({ content: final.content, components: [] }).catch(logIgnoredDiscordErr);
           return;
@@ -3970,7 +3975,7 @@ async function handleRevokeSelect(interaction, { flow_id }) {
   // to resolve names → no "Revoked for: …" line here. Operators
   // wanting names should use the inline button after a send.
   await interaction.update({
-    content: safeRevokeHeader(sendId, revoked.success, revoked.total, revoked.finalizationFailed),
+    content: safeRevokeHeader(sendId, revoked.success, revoked.total, revoked.finalizationFailed, revoked.malformedIdentity),
     components: [],
   });
 }
@@ -8519,10 +8524,10 @@ function revokeReplyPayload(rendered) {
 // Recipients toggle on the post-revoke "Revoked for: ..." list.
 // All wording assertions live against `renderRevokeContent` directly
 // (see `apps/discord/src/revoke-render.js` + the e2e smoke).
-function renderRevokeMsg(sendId, names, total, showAll, success, finalizationFailed = false) {
+function renderRevokeMsg(sendId, names, total, showAll, success, finalizationFailed = false, malformedIdentity = false) {
   let data;
   try {
-    data = renderRevokeContent({ names, total, showAll, success, finalizationFailed });
+    data = renderRevokeContent({ names, total, showAll, success, finalizationFailed, malformedIdentity });
   } catch (err) {
     data = {
       content: revokeRenderFallback(sendId, success, total, err),
@@ -8553,9 +8558,9 @@ function revokeRenderFallback(sendId, success, total, err) {
   return 'qURL could not display the revocation result. If this send still appears in `/qurl revoke`, retry it there.';
 }
 
-function safeRevokeHeader(sendId, success, total, finalizationFailed = false) {
+function safeRevokeHeader(sendId, success, total, finalizationFailed = false, malformedIdentity = false) {
   try {
-    return buildRevokeHeader(success, total, { finalizationFailed });
+    return buildRevokeHeader(success, total, { finalizationFailed, malformedIdentity });
   } catch (err) {
     return revokeRenderFallback(sendId, success, total, err);
   }
@@ -8640,6 +8645,7 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
     return {
       barrierEstablished: false,
       finalizationFailed: false,
+      malformedIdentity: false,
       success: 0,
       total: 0,
       successUserIds: [],
@@ -8984,6 +8990,9 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
   return {
     barrierEstablished: true,
     finalizationFailed,
+    // A present-but-unusable stored qurl_id wedges its resource on every retry;
+    // callers swap the "retry" guidance for "contact support".
+    malformedIdentity: unidentifiedQurlIdCountsByResource.size > 0,
     success,
     total,
     successUserIds,
