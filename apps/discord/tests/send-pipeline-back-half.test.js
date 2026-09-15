@@ -823,6 +823,21 @@ describe('revokeAllLinks', () => {
     expect(result.success).toBe(2);
   });
 
+  it('serializes the connector hop across resources so one revoke request is in flight at a time', async () => {
+    const order = [];
+    const recordRevoke = async (resourceId) => { order.push(`connector:${resourceId}`); return true; };
+    const recordDelete = async (resourceId) => { order.push(`resource:${resourceId}`); };
+    mockRevokeMintedLinks.mockImplementationOnce(recordRevoke).mockImplementationOnce(recordRevoke);
+    mockDeleteLink.mockImplementationOnce(recordDelete).mockImplementationOnce(recordDelete);
+    mockDb.getSendItems.mockResolvedValueOnce(makeItems(2));
+
+    await revokeAllLinks('send-1', 'sender-1', 'apikey');
+
+    // infra#1556: the connector's process-wide revoke bound equals one
+    // resource's ID cap, so the second resource must wait for the first.
+    expect(order).toEqual(['connector:res-1', 'resource:res-1', 'connector:res-2', 'resource:res-2']);
+  });
+
   it('leaves the send retryable and skips the resource delete when connector revoke fails', async () => {
     mockRevokeMintedLinks.mockRejectedValueOnce(
       new Error('Connector revoke_links did not confirm 1 link(s)'),

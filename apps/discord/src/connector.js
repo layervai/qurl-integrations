@@ -153,17 +153,17 @@ function connectorErrorFromBody(label, response, {
   return err;
 }
 
-function throwConnectorErrorFromBody(label, response, options) {
-  throw connectorErrorFromBody(label, response, options);
-}
-
-async function throwConnectorError(label, response) {
+async function connectorErrorFromResponse(label, response) {
   let bodyText = '';
   try {
     bodyText = await response.text();
   } catch { /* network read failed, fall through with empty body */ }
   const { apiCode, apiDetail } = parseConnectorBody(bodyText);
-  throwConnectorErrorFromBody(label, response, { bodyText, apiCode, apiDetail });
+  return connectorErrorFromBody(label, response, { bodyText, apiCode, apiDetail });
+}
+
+async function throwConnectorError(label, response) {
+  throw await connectorErrorFromResponse(label, response);
 }
 
 // Read the response body chunk-by-chunk and abort as soon as we cross the cap.
@@ -603,7 +603,7 @@ async function revokeMintedLinks(resourceId, qurlIds, apiKey) {
     });
 
     if (!response.ok) {
-      const err = await throwConnectorError('Connector revoke_links', response).catch(e => e);
+      const err = await connectorErrorFromResponse('Connector revoke_links', response);
       err.unresolvedCount = batchIds.length;
       throw err;
     }

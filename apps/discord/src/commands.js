@@ -1712,8 +1712,8 @@ async function mintLinksInBatches({
     for (let i = 0; i < recipientCount; i += TOKENS_PER_RESOURCE) {
       if (tokensUsed >= TOKENS_PER_RESOURCE && i > 0) {
         const re = await reuploadFn();
-        // Validate before tracking: an unusable identity would be silently
-        // dropped by compensation, leaking the fresh parent untracked.
+        // Validate before tracking so an unusable identity fails loudly here
+        // instead of as a silent skip inside compensation.
         validateResourceId(re?.resource_id);
         currentResourceId = re.resource_id;
         resourceIds.push(currentResourceId);
@@ -3067,6 +3067,8 @@ async function cleanupFreshMintedResources(batchSends, apiKey, sendId, options =
   }));
   if (resourceEntries.length === 0) return;
 
+  // Concurrency 1: see revokeAllLinks — one resource's IDs fill the
+  // connector's process-wide revoke admission bound (infra#1556).
   const results = await batchSettled(resourceEntries, async ({
     resourceId, qurlIds, unidentifiedQurlCount,
   }) => {
@@ -3096,7 +3098,7 @@ async function cleanupFreshMintedResources(batchSends, apiKey, sendId, options =
       throw error;
     }
     return resourceId;
-  }, 5);
+  }, 1);
   const failed = [];
   results.forEach((result, index) => {
     if (result.status === 'rejected') {
@@ -8611,6 +8613,17 @@ function renderSendConfirm({
   return { content: msg, attachmentText: null, needsExpand: successNames.length > REVOKE_TRUNC_LIMIT };
 }
 
+// Revoke invariants (durable summary; details inline below):
+// - INVARIANT(connector-child-before-parent): per resource, revokeMintedLinks
+//   must be confirmed before deleteLink. The parent is only deleted after every
+//   identifiable child is confirmed dead, and the send finalizes only when
+//   every resource confirmed both steps; otherwise it stays retryable. The
+//   malformed-identity branch still deletes the parent after a confirmed child
+//   revoke because infra#1553 keeps a soft-revoked source authorizable, so the
+//   anchor for operator repair survives.
+// - INVARIANT(absent-qurl-id-is-parent-minted): an absent stored qurl_id is a
+//   pre-watermark row that deleteLink alone fully revokes (one warn rollup).
+//
 // Defaulted senderAlias is defense-in-depth — production callers
 // always pass resolveSenderAlias(interaction), which has its own
 // DISPLAY_NAME_FALLBACK, so a forgotten 4th arg still renders
@@ -8691,6 +8704,9 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
   const successUserIds = [];
   const failureUserIds = [];
 
+  // Concurrency 1: one resource holds at most TOKENS_PER_RESOURCE (10) IDs, the
+  // connector's process-wide revoke admission bound (infra#1556), so a wider
+  // fan-out would self-starve into `capacity` failures.
   const results = await batchSettled(resourceEntries, async ([resourceId]) => {
     const qurlIds = qurlIdsByResource.get(resourceId) || [];
     const unidentifiedTokenCount = unidentifiedQurlIdCountsByResource.get(resourceId) || 0;
@@ -8741,7 +8757,7 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
     await revokeMintedLinks(resourceId, qurlIds, apiKey);
     await deleteLink(resourceId, apiKey);
     return resourceId;
-  }, 5);
+  }, 1);
 
   // User-centric: strict-success = recipient whose every link was
   // revoked (in success but not in failure). Mixed-outcome users
