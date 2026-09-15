@@ -52,9 +52,10 @@ const {
   SELF_DESTRUCT_NO_TIMER_VALUE,
 } = require('./utils/time');
 const { signQurlOAuthState } = require('./utils/qurl-oauth-state');
-const { deleteLink } = require('./qurl');
+const { deleteLink, getIdentity } = require('./qurl');
 const { resourceIdLogRef } = require('./utils/resource-id');
 const { qurlIdForCleanup, hasPersistableQurlIdShape } = require('./utils/qurl-id');
+const { qurlApiErrorStatus } = require('./utils/qurl-errors');
 const { downloadAndUpload, reUploadBuffer, mintLinks, detectWatermark, uploadJsonToConnector, isAllowedSourceUrl, revokeMintedLinks } = require('./connector');
 const { deleteFlow, transitionFlow, supersedeOrCreate } = require('./flow-state');
 const { fireAndForgetLinkGuildWebhookSubscription } = require('./guild-webhook-link');
@@ -9415,9 +9416,14 @@ const commands = [
         });
       }
 
-      // /qurl status — check if configured. Gate behind ManageGuild: the
-      // response echoes the last 4 chars of the API key (billing-sensitive)
-      // and any guild member could previously run this and snoop them.
+      // /qurl status — verify the stored key. Gate behind ManageGuild because
+      // the response discloses the key's prefix, granted scopes and provenance,
+      // and each run spends a KMS decrypt plus one upstream qURL API call.
+      // No cooldown, accepted deliberately: the same ManageGuild admin can
+      // already drive the uncooled per-submit validation call in the setup
+      // modal above, so this adds no new abuse class, and the send/detect
+      // buckets are kept separate by design (a status check must never lock
+      // out a send).
       if (sub === 'status') {
         if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) {
           return interaction.reply({
@@ -9425,20 +9431,46 @@ const commands = [
             ephemeral: true,
           });
         }
-        const guildConfig = await db.getGuildConfig(interaction.guildId);
+        await interaction.deferReply({ ephemeral: true });
+        let guildConfig;
+        try {
+          guildConfig = await db.getGuildConfig(interaction.guildId);
+        } catch {
+          logger.warn('qURL status configuration read failed', {
+            guild_id: interaction.guildId,
+          });
+          return interaction.editReply({
+            content: '⚠️ **The qURL status check could not be completed.**\n'
+              + 'Please try `/qurl status` again later.',
+          });
+        }
         if (guildConfig) {
-          // Show a short sha256 fingerprint instead of any key substring — a
-          // 4-char suffix narrows brute-force space and a prefix leaks tenant
-          // hints. An 8-char hex fingerprint is enough for an admin to confirm
-          // they re-ran setup with the same key, without exposing bytes.
-          // getGuildConfig no longer returns the decrypted key (it would
-          // leak via any row dump); go through the explicit accessor and
-          // let the plaintext fall out of scope immediately after hashing.
-          const plaintextKey = await db.getGuildApiKey(interaction.guildId) || '';
-          const keyFingerprint = crypto.createHash('sha256')
-            .update(plaintextKey)
-            .digest('hex')
-            .slice(0, 8);
+          // Start the independent key/service work before checking guild
+          // membership. Catch inside the promise so an early rejection cannot
+          // become unhandled while members.fetch is still pending.
+          const identityResultPromise = (async () => {
+            let failureStage = 'key_store';
+            try {
+              // Keep the decrypted key out of the longer-lived config object,
+              // even though the explicit accessor costs a second DDB read.
+              const apiKey = await db.getGuildApiKey(interaction.guildId);
+              if (!apiKey) return { keyUnavailable: true };
+              failureStage = 'qurl_service';
+              return { identity: await getIdentity(apiKey, interaction.guildId) };
+            } catch (error) {
+              return { error, failureStage, identityFailed: true };
+            }
+          })();
+
+          // Stored values are normally a Discord snowflake and an ISO timestamp;
+          // escape Markdown and bound their source form so a corrupt row cannot
+          // inject content or crowd out the key verdict/offboarding guidance.
+          const sanitizedConfiguredBy = sanitizeContentLabel(guildConfig.configured_by, 64);
+          const configuredByDisplay = sanitizedConfiguredBy || 'unknown';
+          const updatedAtDisplay = sanitizeContentLabel(guildConfig.updated_at, 64) || 'unknown';
+          const configuredByReference = sanitizedConfiguredBy
+            ? `<@${configuredByDisplay}>`
+            : configuredByDisplay;
 
           // #185 admin-offboarding nudge: the qURL key is owned by the
           // admin who ran setup (Auth0 sub claim); usage bills to their
@@ -9447,8 +9479,10 @@ const commands = [
           // take over billing. Best-effort — a Discord API blip just
           // omits the notice rather than failing the whole status read.
           let originalAdminLeftNotice = '';
-          if (guildConfig.configured_by) {
+          if (sanitizedConfiguredBy) {
             try {
+              // fetch takes the raw snowflake; the sanitized form only gates
+              // an empty/all-stripped row.
               await interaction.guild.members.fetch(guildConfig.configured_by);
             } catch (err) {
               // discord.js throws DiscordAPIError code 10007 ("Unknown
@@ -9458,20 +9492,105 @@ const commands = [
               if (err?.code === 10007) {
                 originalAdminLeftNotice =
                   '\n\n⚠️ The admin who originally ran `/qurl setup` (<@' +
-                  guildConfig.configured_by + '>) has left this server. ' +
+                  configuredByDisplay + '>) has left this server. ' +
                   'qURL usage continues to bill to their layerv.ai account. ' +
                   'A current `ManageGuild` admin can run `/qurl setup` again to take over billing.';
               }
             }
           }
+          const configurationDetails =
+            `Configured by: ${configuredByReference}\n` +
+            `Last updated: ${updatedAtDisplay}` +
+            originalAdminLeftNotice;
 
-          return interaction.reply({
-            content: `✅ **qURL is configured**\n` +
-              `Key fingerprint: \`${keyFingerprint}\`\n` +
-              `Configured by: <@${guildConfig.configured_by}>\n` +
-              `Last updated: ${guildConfig.updated_at}` +
-              originalAdminLeftNotice,
-            ephemeral: true,
+          const {
+            identity,
+            error,
+            keyUnavailable,
+            failureStage,
+            identityFailed,
+          } = await identityResultPromise;
+          const reconnectCopy = 'Re-run `/qurl setup` to connect a valid key.\n\n';
+          // Every outcome renders as `<verdict copy> + configurationDetails`;
+          // only the verdict differs, so build it here and share one exit.
+          const STATUS_SCOPE_DISPLAY_MAX = 10;
+          const STATUS_CONTENT_MAX = 2000;
+          let verdict;
+          if (keyUnavailable) {
+            logger.warn('qURL status key unavailable', { guild_id: interaction.guildId });
+            verdict = '❌ **The stored qURL key is unavailable.**\n\n' + reconnectCopy;
+          } else if (identityFailed) {
+            const status = qurlApiErrorStatus(error);
+            logger.warn('qURL status identity check failed', {
+              guild_id: interaction.guildId,
+              status,
+              code: error?.code ?? null,
+              error_name: error?.name ?? null,
+              failure_stage: failureStage,
+            });
+            // Same 401/403 → "invalid key" policy the legacy setup validator
+            // applies at the top of this file; #1370 tracks consolidating them.
+            verdict = failureStage === 'qurl_service' && (status === 401 || status === 403)
+              ? '❌ **The stored qURL key is revoked or invalid.**\n\n' + reconnectCopy
+              : '⚠️ **Stored qURL configuration found, but the key check could not be completed.**\n'
+                + 'Please try `/qurl status` again later.\n\n';
+          } else {
+            // Shows the service-issued `key_prefix` where this handler used to
+            // show a sha256 fingerprint of the stored key. That earlier decision
+            // rejected echoing key bytes; it is superseded because /v1/me
+            // designates `key_prefix` as the non-secret display identifier
+            // (the CLI identity model does the same), the OAuth setup success
+            // DM already shows this exact prefix to the same admin, and #1360
+            // asks for the prefix so the admin can match the two. The
+            // brute-force concern does not apply: the prefix is a namespace
+            // plus a few leading bytes of a >=28-char key, and it only reaches
+            // the ManageGuild-gated ephemeral reply. Trade-off: a fingerprint
+            // answered "same key as last setup?"; two keys can share a prefix.
+            // TODO(upstream-contract): keep this aligned with /v1/me.
+            //
+            // Inline-code content renders backslashes literally, so strip
+            // backticks instead of applying general Markdown escaping. The
+            // plain display-name sanitizer also strips controls and codepoint-
+            // caps each value; the slice below bounds how many scopes render.
+            const sanitizeIdentityValue = (value) =>
+              sanitizeDisplayNamePlain(value, { fallback: '' }).replace(/`/g, '');
+            // getIdentity enforces this shape; default anyway so a contract
+            // drift lands in the verdict machinery, not the generic catch-all.
+            const { key_prefix: rawKeyPrefix, scopes: allScopes = [] } = identity?.api_key ?? {};
+            // TODO(upstream-contract): 12 mirrors qurl-service's
+            // APIKeyDisplayPrefixLength (the issued prefix is exactly 12 bytes),
+            // so a service prefix renders whole and matches the setup DM; a
+            // wider upstream field is capped rather than echoed.
+            const keyPrefix = capUtf16Units(sanitizeIdentityValue(rawKeyPrefix), 12) || 'unknown';
+            const shownScopes = allScopes.slice(0, STATUS_SCOPE_DISPLAY_MAX)
+              .map(scope => `\`${sanitizeIdentityValue(scope) || 'unnamed'}\``);
+            const renderHealthyVerdict = (shownScopeCount) => {
+              const renderedScopes = shownScopes.slice(0, shownScopeCount);
+              const omittedScopeCount = allScopes.length - renderedScopes.length;
+              let scopes = renderedScopes.join(', ');
+              if (omittedScopeCount > 0) {
+                scopes += scopes
+                  ? `, _+${omittedScopeCount} more_`
+                  : `_${omittedScopeCount} scopes omitted_`;
+              }
+              if (!scopes) scopes = '_none_';
+              return `✅ **qURL is configured**\n` +
+                `Key prefix: \`${keyPrefix}\`\n` +
+                `Scopes: ${scopes}\n`;
+            };
+            verdict = renderHealthyVerdict(shownScopes.length);
+            // Keep Discord's 2,000-UTF-16-unit content limit an invariant of
+            // the code rather than of a copy budget spread across the fields
+            // above. Drop whole scope entries instead of slicing Markdown in
+            // the middle of an inline-code span or UTF-16 surrogate pair. The
+            // field caps keep the zero-scope render under the limit.
+            for (let n = shownScopes.length; n > 0 && (verdict + configurationDetails).length > STATUS_CONTENT_MAX; n -= 1) {
+              verdict = renderHealthyVerdict(n - 1);
+            }
+          }
+          return interaction.editReply({
+            content: verdict + configurationDetails,
+            allowedMentions: { parse: [] },
           });
         }
         // Branch the not-configured copy on the active setup flow so
@@ -9488,9 +9607,8 @@ const commands = [
             + '1. Sign up at **https://layerv.ai** to get your API key\n'
             + '2. Run `/qurl setup` and paste the key into the modal\n\n'
             + 'Only server administrators can run setup.';
-        return interaction.reply({
+        return interaction.editReply({
           content: notConfiguredCopy,
-          ephemeral: true,
         });
       }
 
