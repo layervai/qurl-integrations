@@ -91,11 +91,22 @@ describe('guild configs', () => {
   test('setGuildApiKey: does not audit first setup or same-admin re-key', async () => {
     ddbMock.on(UpdateCommand)
       .resolvesOnce({})
-      .resolvesOnce({ Attributes: { guild_id: 'g-1', configured_by: 'admin' } });
+      // UPDATED_OLD returns only the touched non-key attributes, never guild_id.
+      .resolvesOnce({ Attributes: { configured_by: 'admin', qurl_api_key: 'enc:v1:IV:TAG:deadbeef' } });
     await store.setGuildApiKey('g-1', 'plain-key', 'admin');
     await store.setGuildApiKey('g-1', 'plain-key-2', 'admin');
     expect(logger.audit.mock.calls.map(([event]) => event))
       .not.toContain(AUDIT_EVENTS.QURL_SETUP_ADMIN_CHANGED);
+  });
+
+  test('setGuildApiKey: audits a rebind of a configured row that lost configured_by', async () => {
+    ddbMock.on(UpdateCommand).resolves({ Attributes: { qurl_api_key: 'enc:v1:IV:TAG:deadbeef' } });
+    await store.setGuildApiKey('g-1', 'plain-key', 'new-admin');
+    expect(logger.audit).toHaveBeenCalledWith(AUDIT_EVENTS.QURL_SETUP_ADMIN_CHANGED, {
+      guild_id: 'g-1',
+      old_admin_id: null,
+      new_admin_id: 'new-admin',
+    });
   });
 
   test('setGuildApiKey: does not audit when the write rejects', async () => {

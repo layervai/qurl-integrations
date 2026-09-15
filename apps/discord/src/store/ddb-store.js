@@ -1550,11 +1550,16 @@ async function setGuildApiKey(guildId, apiKey, configuredBy) {
     // unread so the audit payload never carries key material.
     ReturnValues: 'UPDATED_OLD',
   }));
-  const oldConfiguredBy = res?.Attributes?.configured_by;
-  if (oldConfiguredBy && oldConfiguredBy !== configuredBy) {
+  const prior = res?.Attributes;
+  const oldConfiguredBy = prior?.configured_by;
+  // A prior qurl_api_key means the guild was already configured even when the
+  // row has no configured_by (hand edit or partial rollback; see
+  // guild-config-state.js). That rebind must still page, so key the guard on
+  // the old key's presence and report the missing admin as null.
+  if (prior?.qurl_api_key && String(oldConfiguredBy) !== String(configuredBy)) {
     logger.audit(AUDIT_EVENTS.QURL_SETUP_ADMIN_CHANGED, {
       guild_id: guildId,
-      old_admin_id: oldConfiguredBy,
+      old_admin_id: oldConfiguredBy ?? null,
       new_admin_id: configuredBy,
     });
   }
