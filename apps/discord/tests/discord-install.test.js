@@ -162,6 +162,7 @@ describe('Discord install callback', () => {
     it('refuses to begin an install when encryption-at-rest is not configured', async () => {
       const saved = process.env.KEY_ENCRYPTION_KEY;
       const errorSpy = jest.spyOn(logger, 'error').mockImplementation(() => {});
+      const infoSpy = jest.spyOn(logger, 'info').mockImplementation(() => {});
       delete process.env.KEY_ENCRYPTION_KEY;
       try {
         const res = await request(app).get('/oauth/discord/install');
@@ -173,12 +174,15 @@ describe('Discord install callback', () => {
           res.headers['set-cookie'],
           DISCORD_INSTALL_SESSION_COOKIE,
         )).toBeNull();
-        expect(errorSpy).toHaveBeenCalledWith(
-          'Refusing /oauth/discord/install: KEY_ENCRYPTION_KEY is not set',
-        );
+        // One log record per event: the sanitized not-configured line.
+        expect(infoSpy).toHaveBeenCalledWith('discord-install not configured', {
+          surface: 'discord-install-entry', reason: 'KEY_ENCRYPTION_KEY unset',
+        });
+        expect(errorSpy).not.toHaveBeenCalled();
       } finally {
         process.env.KEY_ENCRYPTION_KEY = saved;
         errorSpy.mockRestore();
+        infoSpy.mockRestore();
       }
     });
 
@@ -192,7 +196,10 @@ describe('Discord install callback', () => {
     });
 
     it('keeps a bounded OAuth rate limiter mounted on the public install entrypoint', async () => {
-      for (let i = 0; i < config.RATE_LIMIT_MAX_REQUESTS; i++) {
+      // The public redirect page gets a higher ceiling than a callback, since
+      // many unrelated admins can share one NAT egress IP.
+      expect(config.RATE_LIMIT_INSTALL_MAX_REQUESTS).toBeGreaterThan(config.RATE_LIMIT_MAX_REQUESTS);
+      for (let i = 0; i < config.RATE_LIMIT_INSTALL_MAX_REQUESTS; i++) {
         // Sequential requests make the expected bucket consumption explicit.
         // Each response is a local redirect; no Discord network call occurs.
         // eslint-disable-next-line no-await-in-loop
@@ -203,10 +210,11 @@ describe('Discord install callback', () => {
       const throttled = await request(app).get('/oauth/discord/install');
       expect(throttled.status).toBe(429);
       expect(throttled.text).toContain('Slow Down');
+      expect(cookieValue(throttled.headers['set-cookie'], DISCORD_INSTALL_SESSION_COOKIE)).toBeNull();
     });
 
     it('does not let install-page traffic consume the in-flight callback budget', async () => {
-      for (let i = 0; i < config.RATE_LIMIT_MAX_REQUESTS; i++) {
+      for (let i = 0; i < config.RATE_LIMIT_INSTALL_MAX_REQUESTS; i++) {
         // eslint-disable-next-line no-await-in-loop
         await request(app).get('/oauth/discord/install');
       }
@@ -263,6 +271,8 @@ describe('Discord install callback', () => {
         expect(cookieValue(res.headers['set-cookie'], QURL_OAUTH_SESSION_COOKIE)).toBeNull();
         expect(cookieValue(res.headers['set-cookie'], QURL_OAUTH_PKCE_COOKIE)).toBeNull();
       }
+      expect(missing.text).toContain('same browser');
+      expect(mismatch.text).not.toContain('same browser');
       expect(globalThis.fetch).not.toHaveBeenCalled();
     });
 
@@ -307,6 +317,7 @@ describe('Discord install callback', () => {
       // both the installed and not-yet-installed states.
       const saved = process.env.KEY_ENCRYPTION_KEY;
       const errorSpy = jest.spyOn(logger, 'error').mockImplementation(() => {});
+      const infoSpy = jest.spyOn(logger, 'info').mockImplementation(() => {});
       delete process.env.KEY_ENCRYPTION_KEY;
       try {
         const invalid = await request(app)
@@ -324,12 +335,14 @@ describe('Discord install callback', () => {
           res.headers['set-cookie'],
           DISCORD_INSTALL_SESSION_COOKIE,
         )).toBeUndefined();
-        expect(errorSpy).toHaveBeenCalledWith(
-          'Refusing /oauth/discord/callback: KEY_ENCRYPTION_KEY is not set',
-        );
+        expect(infoSpy).toHaveBeenCalledWith('discord-install not configured', {
+          surface: 'discord-install', reason: 'KEY_ENCRYPTION_KEY unset',
+        });
+        expect(errorSpy).not.toHaveBeenCalled();
       } finally {
         process.env.KEY_ENCRYPTION_KEY = saved;
         errorSpy.mockRestore();
+        infoSpy.mockRestore();
       }
     });
 
@@ -387,8 +400,9 @@ describe('Discord install callback', () => {
     });
 
     it('400s on Discord error param (admin declined consent)', async () => {
+      const warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => {});
       const res = await discordCallback(
-        '/oauth/discord/callback?error=access_denied&error_description=user+declined&guild_id=123456789012345678',
+        `/oauth/discord/callback?error=access_denied&error_description=${'x'.repeat(5000)}&guild_id=123456789012345678`,
       );
       expect(res.status).toBe(400);
       expect(res.text).toContain('Authorization declined');
@@ -396,6 +410,11 @@ describe('Discord install callback', () => {
         res.headers['set-cookie'],
         DISCORD_INSTALL_SESSION_COOKIE,
       )).toBeUndefined();
+      // Attacker-controlled provider strings are capped before logging.
+      expect(warnSpy).toHaveBeenCalledWith(
+        'Discord install callback received error from Discord',
+        expect.objectContaining({ error: 'access_denied', errorDescription: 'x'.repeat(200) }),
+      );
     });
 
     it('502s when Discord token exchange fails', async () => {
@@ -592,6 +611,11 @@ describe('Discord install callback', () => {
       const res = await discordCallback('/oauth/discord/callback?code=ok-code&guild_id=123456789012345678');
       expect(res.status).toBe(502);
       expect(res.text).toContain('Could not identify the installing user');
+      // The Discord code was already redeemed, so the session must not survive.
+      expect(clearedCookieHeader(
+        res.headers['set-cookie'],
+        DISCORD_INSTALL_SESSION_COOKIE,
+      )).toBeDefined();
     });
 
     it('302s to Auth0 on happy path with a valid qURL OAuth state and sets the CSRF cookie', async () => {

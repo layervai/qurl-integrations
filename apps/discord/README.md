@@ -37,8 +37,9 @@ revocable at any time.
 | `self-destruct` | No | Countdown after the first open (default: no timer) |
 | `personal-message` | No | A note included in each recipient's DM |
 
-When `MAP_COMMAND_ENABLED=true`, `/qurl map` shares a location instead of a file: it takes a required `location`
-(a Google Maps URL, or a place/address to search) in place of `attachment`, the
+When `MAP_COMMAND_ENABLED=true`, `/qurl map` shares a location instead of a
+file: it takes a required `location` (a Google Maps URL, or a place/address to
+search) in place of `attachment`, the
 same `recipients` / `expires-in` / `self-destruct` / `personal-message` options,
 and an optional `location-name` to override the label recipients see.
 
@@ -54,9 +55,9 @@ Discord OAuth request includes `identify` because the callback uses
 must register the deployment's exact `/oauth/discord/callback` URL and enable
 **Require OAuth2 Code Grant** so Discord waits for the callback exchange before
 finishing the bot installation. The callback always binds the server from the
-authoritative guild in Discord's token response. Grant only **View Channels**, **Send Messages**,
-**Embed Links**, and **Use Application Commands** (permission bitfield
-`2147503104`).
+authoritative guild in Discord's token response. Grant only **View Channels**,
+**Send Messages**, **Embed Links**, and **Use Application Commands**
+(permission bitfield `2147503104`).
 
 After seeding or rotating `DISCORD_CLIENT_SECRET`, restart the HTTP service;
 ECS injects the SSM value and the bot derives install readiness only at process

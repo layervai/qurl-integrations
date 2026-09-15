@@ -100,6 +100,13 @@ describe('config.AUTH0_EMAIL_CONNECTION', () => {
     });
   });
 
+  it('reports missing core AUTH0_* before a rejected connection pin', () => {
+    withFreshConfig({ AUTH0_EMAIL_CONNECTION: 'email!' }, (config) => {
+      expect(config.isAuth0EmailConnectionRejected).toBe(true);
+      expect(config.discordInstallNotConfiguredReason).toBe('AUTH0_* unset');
+    });
+  });
+
   it('treats the seeded SSM placeholder as intentionally unset', () => {
     captureFreshConfig({
       ...AUTH0_ENV,

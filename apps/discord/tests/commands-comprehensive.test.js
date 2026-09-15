@@ -1220,9 +1220,34 @@ describe('/qurl setup subcommand (legacy modal-paste path)', () => {
       });
       expect(interaction.reply.mock.calls[0][0].content)
         .not.toContain('AUTH0_EMAIL_CONNECTION');
-      expect(require('../src/logger').error).toHaveBeenCalledWith(
+      const logger = require('../src/logger');
+      expect(logger.warn).toHaveBeenCalledWith(
         'Refusing /qurl setup: AUTH0_EMAIL_CONNECTION was rejected at boot',
       );
+      expect(logger.error).not.toHaveBeenCalled();
+    } finally {
+      config.isAuth0EmailConnectionRejected = originalRejected;
+    }
+  });
+
+  it('keeps /qurl send reachable while the connection policy is rejected', async () => {
+    const config = require('../src/config');
+    const originalRejected = config.isAuth0EmailConnectionRejected;
+    config.isAuth0EmailConnectionRejected = true;
+    try {
+      const cmd = commands.find(c => c.data.name === 'qurl');
+      const interaction = makeInteraction();
+
+      await cmd.execute(interaction);
+
+      // The send handler ran to its own input validation instead of the
+      // setup-only policy block.
+      expect(interaction.reply).toHaveBeenCalledWith({
+        content: expect.stringContaining('Attachment is missing or malformed'),
+        ephemeral: true,
+      });
+      expect(interaction.reply.mock.calls[0][0].content)
+        .not.toContain('temporarily unavailable');
     } finally {
       config.isAuth0EmailConnectionRejected = originalRejected;
     }
