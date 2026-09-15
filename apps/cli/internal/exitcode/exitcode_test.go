@@ -56,16 +56,23 @@ var cliSentinels = map[string]struct {
 	// two settings sentinels share the Hub triple's Config row; the local
 	// link check shares CRID verification's fail-closed row; a platform
 	// deny is Forbidden and a platform defer is Unavailable.
-	"consume.ErrAccessNotConfigured":        {consume.ErrAccessNotConfigured, Config},
-	"consume.ErrUnsupportedCRIDVersion":     {consume.ErrUnsupportedCRIDVersion, Config},
-	"consume.ErrAccessSettingsMismatch":     {consume.ErrAccessSettingsMismatch, Config},
-	"consume.ErrLinkVerification":           {consume.ErrLinkVerification, VerificationFailed},
-	"consume.ErrAccessDenied":               {consume.ErrAccessDenied, Forbidden},
-	"consume.ErrAccessBusy":                 {consume.ErrAccessBusy, Unavailable},
-	"daemon.ErrAlreadyRunning":              {connectordaemon.ErrAlreadyRunning, Conflict},
-	"daemon.ErrDirectEgressRequired":        {connectordaemon.ErrDirectEgressRequired, Config},
-	"daemon.ErrResourceGone":                {connectordaemon.ErrResourceGone, NotFound},
-	"state.ErrNoDefaultStateDir":            {state.ErrNoDefaultStateDir, Config},
+	"consume.ErrAccessNotConfigured":    {consume.ErrAccessNotConfigured, Config},
+	"consume.ErrUnsupportedCRIDVersion": {consume.ErrUnsupportedCRIDVersion, Config},
+	"consume.ErrAccessSettingsMismatch": {consume.ErrAccessSettingsMismatch, Config},
+	"consume.ErrLinkVerification":       {consume.ErrLinkVerification, VerificationFailed},
+	"consume.ErrAccessDenied":           {consume.ErrAccessDenied, Forbidden},
+	"consume.ErrAccessBusy":             {consume.ErrAccessBusy, Unavailable},
+	"daemon.ErrAlreadyRunning":          {connectordaemon.ErrAlreadyRunning, Conflict},
+	"daemon.ErrDirectEgressRequired":    {connectordaemon.ErrDirectEgressRequired, Config},
+	"daemon.ErrResourceGone":            {connectordaemon.ErrResourceGone, NotFound},
+	// An externally supervised daemon that is absent is the Unavailable row:
+	// the command and operand are valid, the local service is not serving,
+	// and the supervisor (not qurl) is what brings it back.
+	"daemon.ErrExternalDaemonNotRunning": {connectordaemon.ErrExternalDaemonNotRunning, Unavailable},
+	"state.ErrNoDefaultStateDir":         {state.ErrNoDefaultStateDir, Config},
+	// A supervision mismatch is remedied by the --supervision setting, the
+	// same remedy class as the Hub triple: configuration, not the command line.
+	"state.ErrRuntimeSupervision":           {state.ErrRuntimeSupervision, Config},
 	"state.ErrLocalShareOwnerConflict":      {state.ErrLocalShareOwnerConflict, Conflict},
 	"state.ErrLocalShareVersionUnsupported": {state.ErrLocalShareVersionUnsupported, Config},
 

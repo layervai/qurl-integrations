@@ -234,7 +234,9 @@ func daemonCmd(opts *globalOpts) *cobra.Command {
 
 On Linux, macOS, and Windows, qurl publish and qurl start normally manage the
 per-user daemon for you. Use daemon run for a headless deployment or when
-another service manager owns the process.`,
+another program owns the process. That program passes --supervision external
+here and to every qurl command it runs against the same state directory; those
+commands then reload this daemon and never install a background job.`,
 		Args: noArgs,
 	}
 	var stateDir, jobVersion, headlessConfig, enrollmentTokenFile string
@@ -266,7 +268,11 @@ another service manager owns the process.`,
 			if hasHubOverride {
 				hubOverride = &hubBootstrap
 			}
-			return runShareDaemonWithDeployment(cmd.Context(), opts, stateDir, jobVersion, headlessConfig, enrollmentTokenFile, hubOverride)
+			// An external supervisor reloads the daemon once it has pushed its
+			// runtime-only state; a foreground publish owns its share and
+			// reconciles at once.
+			deferFirstReconcile := opts.resolvedSupervision == connectorstate.RuntimeSupervisionExternal
+			return runShareDaemonWithDeployment(cmd.Context(), opts, stateDir, jobVersion, headlessConfig, enrollmentTokenFile, hubOverride, deferFirstReconcile)
 		},
 	}
 	run.Flags().StringVar(&stateDir, "state-dir", "", "qURL share daemon state directory")
@@ -334,11 +340,11 @@ func runShareDaemon(ctx context.Context, opts *globalOpts, stateDirOverride, job
 }
 
 func runShareDaemonWithBootstrap(ctx context.Context, opts *globalOpts, stateDirOverride, jobVersion, headlessConfigPath, enrollmentTokenPath string) (retErr error) {
-	return runShareDaemonWithDeployment(ctx, opts, stateDirOverride, jobVersion, headlessConfigPath, enrollmentTokenPath, nil)
+	return runShareDaemonWithDeployment(ctx, opts, stateDirOverride, jobVersion, headlessConfigPath, enrollmentTokenPath, nil, false)
 }
 
-func runShareDaemonWithDeployment(ctx context.Context, opts *globalOpts, stateDirOverride, jobVersion, headlessConfigPath, enrollmentTokenPath string, hubOverride *qurl.HubBootstrap) (retErr error) {
-	stateDir, err := opts.resolveShareStateDir(stateDirOverride)
+func runShareDaemonWithDeployment(ctx context.Context, opts *globalOpts, stateDirOverride, jobVersion, headlessConfigPath, enrollmentTokenPath string, hubOverride *qurl.HubBootstrap, deferFirstReconcile bool) (retErr error) {
+	stateDir, err := supervisedShareStateDir(ctx, opts, stateDirOverride)
 	if err != nil {
 		return err
 	}
@@ -427,7 +433,7 @@ func runShareDaemonWithDeployment(ctx context.Context, opts *globalOpts, stateDi
 			retErr = errors.Join(retErr, closeFactory())
 		}
 	}()
-	manager, err := connectordaemon.NewShareManager(registry, factory, opts.resolvedShareGroupMode)
+	manager, err := connectordaemon.NewShareManager(registry, factory, opts.resolvedShareGroupMode, deferFirstReconcile)
 	if err != nil {
 		return err
 	}
@@ -437,6 +443,28 @@ func runShareDaemonWithDeployment(ctx context.Context, opts *globalOpts, stateDi
 		Manager:    manager, JobVersion: jobVersion,
 	}
 	return server.Run(ctx)
+}
+
+// supervisedShareStateDir resolves the daemon's state directory and commits
+// or verifies its supervision policy: an external start marks the namespace
+// (idempotently, refusing a natively managed one) and a native start requires
+// an unmarked one, so no daemon serves a namespace under the wrong lifecycle
+// contract.
+func supervisedShareStateDir(ctx context.Context, opts *globalOpts, override string) (string, error) {
+	stateDir, err := opts.resolveShareStateDir(override)
+	if err != nil {
+		return "", err
+	}
+	if opts.resolvedSupervision == connectorstate.RuntimeSupervisionExternal {
+		if err := connectorstate.EstablishExternalRuntimeMode(ctx, stateDir); err != nil {
+			return "", err
+		}
+		return stateDir, nil
+	}
+	if err := connectorstate.RequireRuntimeSupervision(stateDir, opts.resolvedSupervision); err != nil {
+		return "", err
+	}
+	return stateDir, nil
 }
 
 func configuredHeadlessShare(headless *connectorstate.HeadlessConfig) *connectorstate.LocalShare {

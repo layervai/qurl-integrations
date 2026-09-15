@@ -53,6 +53,11 @@ type Config struct {
 	// Connector session groups: "single" (the default, one session for every
 	// share) or "per-share" (one session per share). Operational, not secret.
 	ShareGroupMode string `yaml:"share_group_mode,omitempty"`
+	// DaemonSupervision selects who owns the local sharing daemon's process:
+	// "native" (the default; qurl installs a per-user background job) or
+	// "external" (another program runs `qurl daemon run --supervision
+	// external` and qurl only reloads it). Operational, not secret.
+	DaemonSupervision string `yaml:"daemon_supervision,omitempty"`
 }
 
 // Enum vocabularies for config-file values. These mirror the output
@@ -67,11 +72,19 @@ var (
 	// values against ShareGroupModes, so the dependency arrow only ever points
 	// from daemon to config.
 	validShareGroupModes = []string{"single", "per-share"}
+	// validDaemonSupervisions mirrors the state package's
+	// RuntimeSupervisionValues the same way; that package pins its values
+	// against DaemonSupervisions.
+	validDaemonSupervisions = []string{"native", "external"}
 )
 
 // ShareGroupModes lists the share_group_mode values a config file may carry,
 // default first.
 func ShareGroupModes() []string { return slices.Clone(validShareGroupModes) }
+
+// DaemonSupervisions lists the daemon_supervision values a config file may
+// carry, default first.
+func DaemonSupervisions() []string { return slices.Clone(validDaemonSupervisions) }
 
 // validate rejects enum-valued settings a config file spelled wrongly. The
 // config layer is the only place that knows the value came from a FILE, so
@@ -85,7 +98,10 @@ func (c *Config) validate(path string) error {
 	if err := validateEnum(path, "color", c.Color, validColors); err != nil {
 		return err
 	}
-	return validateEnum(path, "share_group_mode", c.ShareGroupMode, validShareGroupModes)
+	if err := validateEnum(path, "share_group_mode", c.ShareGroupMode, validShareGroupModes); err != nil {
+		return err
+	}
+	return validateEnum(path, "daemon_supervision", c.DaemonSupervision, validDaemonSupervisions)
 }
 
 func validateEnum(path, setting, value string, valid []string) error {

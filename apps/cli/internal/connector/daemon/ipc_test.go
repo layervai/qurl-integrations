@@ -397,6 +397,7 @@ func TestDecodeIPCStatusRejectsAmbiguousShapes(t *testing.T) {
 		"trailing value":    `{"job_version":"1/test","running":{},"resources":{}} {}`,
 		"blank resource id": `{"job_version":"1/test","running":{"":"crid"},"resources":{}}`,
 		"blank crid":        `{"job_version":"1/test","running":{"resource":""},"resources":{}}`,
+		"negative pid":      `{"job_version":"1/test","pid":-1,"running":{},"resources":{}}`,
 		"unsafe category":   `{"job_version":"1/test","running":{},"resources":{"resource":{"state":"failed","last_transition":"2026-08-30T15:00:00Z","failure_category":"internal_topology","retry_attempt":0}}}`,
 		"unsafe code":       `{"job_version":"1/test","running":{},"resources":{"resource":{"state":"failed","last_transition":"2026-08-30T15:00:00Z","failure_category":"platform_denied","failure_code":"secret","retry_attempt":0}}}`,
 	} {
@@ -406,8 +407,8 @@ func TestDecodeIPCStatusRejectsAmbiguousShapes(t *testing.T) {
 			}
 		})
 	}
-	got, err := decodeIPCStatus(strings.NewReader(`{"job_version":"1/test","running":{"resource":"crid"},"resources":{"resource":{"state":"retrying","last_transition":"2026-08-30T15:00:00Z","failure_category":"platform_denied","failure_code":"52005","retry_attempt":2,"next_retry_at":"2026-08-30T15:00:02Z"}}}`))
-	if err != nil || got.JobVersion != "1/test" || got.Running["resource"] != "crid" ||
+	got, err := decodeIPCStatus(strings.NewReader(`{"job_version":"1/test","pid":4242,"running":{"resource":"crid"},"resources":{"resource":{"state":"retrying","last_transition":"2026-08-30T15:00:00Z","failure_category":"platform_denied","failure_code":"52005","retry_attempt":2,"next_retry_at":"2026-08-30T15:00:02Z"}}}`))
+	if err != nil || got.JobVersion != "1/test" || got.Pid != 4242 || got.Running["resource"] != "crid" ||
 		got.Resources["resource"].FailureCode != "52005" {
 		t.Fatalf("valid status = %+v, %v", got, err)
 	}
