@@ -69,6 +69,14 @@ const TIMEOUTS = {
   QURL_REVOKE_WINDOW: 900000, // 15 minutes - button stays active, /qurl revoke works forever
 };
 
+// TODO(upstream-contract): Discord interaction tokens remain valid for 15
+// minutes after acknowledgement. Give the private upload and DM completion
+// paths five minutes of headroom by limiting all delegated-mint batches in one
+// send to one shared 10-minute deadline.
+const PRIVATE_SEND_MINT_BUDGET_MS = 10 * 60 * 1000;
+// Revocation must still get a bounded attempt after the mint budget expires.
+const PRIVATE_SEND_CLEANUP_BUDGET_MS = 30_000;
+
 // Limits
 const LIMITS = {
   EMBED_DESCRIPTION: 4096,
@@ -97,19 +105,10 @@ function ddbSendConfigGuardFitsTransaction(sends = []) {
 // Keep in sync with Discord's own 25MB attachment limit.
 const MAX_FILE_SIZE = 25 * 1024 * 1024;
 
-// TODO(upstream-contract): max access tokens the qURL API allows per resource.
-// Draining the pool means a new resource (re-upload) is needed for a fresh
-// one; exceeding it comes back as connector.js's `quota_exceeded` apiCode.
-//
-// The cap is qurl-service's and we do not control it, so nothing here fails
-// loudly if it moves — a smaller cap turns mintLinksInBatches' later batches
-// into quota errors mid-send, a larger one leaves us re-uploading more often
-// than we need to. Lives here rather than in commands.js so the send pipeline
-// and scripts/loadtest-standalone.js read one value: commands.js cannot be
-// required from a standalone script (it pulls in ./store, which throws
-// without DDB_TABLE_PREFIX), and a copy in the script had no way to notice
-// this one moving.
-const TOKENS_PER_RESOURCE = 10;
+// TODO(upstream-contract): the public Connector's MaxMintBatchCount bounds
+// each /api/mint_link request. A resource can be reused across any number of
+// these batches; this is not a per-resource qURL quota.
+const PUBLIC_MINT_BATCH_SIZE = 10;
 
 // Cap on concurrent link-status monitors. Each monitor fires setInterval
 // up to 1 hour; a burst of sends could otherwise stack dozens of timers.
@@ -149,13 +148,20 @@ const GOOD_FIRST_ISSUE_PATTERNS = [
   'help wanted',
 ];
 
+// Stable structured-log event names that are queryable operational signals,
+// but are not audit events or CloudWatch metrics.
+const LOG_EVENTS = Object.freeze({
+  QURL_OAUTH_AUTH0_CONNECTION_POLICY: 'qurl_oauth_auth0_connection_policy',
+});
+
 // Canonical event names emitted via logger.audit(). The CloudWatch metric
 // filters at qurl-integrations-infra/qurl-bot-discord/terraform/main.tf
 // pattern-match these strings, so a typo at a call site silently disables
 // the metric. Always import from here rather than passing literal strings.
-// Adding a new event: add the constant here, the call site, AND the
+// Adding a new metric event: add the constant here, the call site, AND the
 // terraform filter (in the same merge train, since the filter is a no-op
-// without the emission and vice versa).
+// without the emission and vice versa). A query-only forensic event may omit
+// the filter when its entry documents that exception explicitly.
 //
 // Scope: this set covers events the qURL service cannot see — transport-
 // layer (DM dispatch), bulk-revoke outcomes (per-link API calls happen
@@ -221,6 +227,25 @@ const AUDIT_EVENTS = {
   // dashboard from counting all-failed revokes as successes.
   REVOKE_SUCCESS: 'revoke_success',
   REVOKE_FAILED: 'revoke_failed',
+  // Emitted by setGuildApiKey when a successful guild setup (OAuth
+  // callback or `/qurl setup` paste) rebinds an existing guild to a
+  // different configured_by admin. TODO(upstream-contract): keep
+  // qurl-integrations-infra's qurl_setup_admin_changed CloudWatch
+  // filter/alarm in sync with this string. Direct rebinds only: deleting the
+  // configuration first has no prior administrator to compare. Guild/admin
+  // IDs are forensic fields, never CloudWatch metric dimensions.
+  QURL_SETUP_ADMIN_CHANGED: 'qurl_setup_admin_changed',
+
+  // Emitted after an OAuth-minted guild key is persisted. This is a forensic
+  // Logs Insights trail while #1366 is outstanding, not a metric; no Terraform
+  // filter is paired intentionally. The Auth0 subject is represented by a
+  // keyed, pseudonymous fingerprint that changes when its HMAC key rotates.
+  // The low-cardinality key-epoch tag makes that boundary observable; compare
+  // fingerprints only within one epoch. #1366 owns durable identity and
+  // rotation semantics. The other payload fields (guild_id, configured_by,
+  // and the fingerprint) are high cardinality and MUST NOT be promoted to
+  // CloudWatch metric dimensions.
+  QURL_GUILD_KEY_CONFIGURED: 'qurl_guild_key_configured',
 
   // Emitted by gateway-health.js on every /health response that
   // returns 503. Carries `reason: 'not_ready' | 'sampler_threw'`
@@ -545,14 +570,12 @@ const AUDIT_EVENTS = {
   // it does NOT split on `reason`, because a systemic outage can be a 4xx
   // (the 2026-05-13 incident was a sub-floor-session_duration 400) — and
   // pages on a sustained spike. `reason`/`kind` are forensic + dashboard
-  // dimensions, not the alarm gate. `quota_exceeded` — the one genuinely
-  // high-volume normal condition (a viral upload hitting the per-qURL token
-  // quota) — is skipped at source below, so it can't inflate the metric.
+  // dimensions, not the alarm gate. Account `quota_exceeded` is skipped at
+  // source below so normal quota enforcement cannot inflate the metric.
   //
   // Everything else emits, by design. Other "expected, user-recoverable"
   // conditions — an expired Discord CDN URL (Add Recipients on a >24h-old
-  // send) or per-resource pool exhaustion (429, which mintLinksInBatches
-  // auto-handles via re-upload) — are RARE at the catch, so the alarm's
+  // send) or upstream rate limiting (429) — are RARE at the catch, so the alarm's
   // sustained threshold absorbs them; they are NOT skipped at source.
   // A source-side message/phase-based skip was tried for CDN-expiry and
   // removed: it kept mis-bucketing real connector 403/auth outages as
@@ -644,18 +667,21 @@ module.exports = {
   DM_STATUS,
   ROLE_COLORS,
   TIMEOUTS,
+  PRIVATE_SEND_MINT_BUDGET_MS,
+  PRIVATE_SEND_CLEANUP_BUDGET_MS,
   LIMITS,
   DDB_TRANSACTION_MAX_ACTIONS,
   ddbSendConfigGuardActionCount,
   ddbSendConfigGuardFitsTransaction,
   MAX_FILE_SIZE,
-  TOKENS_PER_RESOURCE,
+  PUBLIC_MINT_BATCH_SIZE,
   MAX_CONCURRENT_MONITORS,
   DISCORD_MEMBERS_PAGE_SIZE,
   PREWARM_MAX_PAGES,
   UNLINKED_CACHE_COMPLETENESS_THRESHOLD,
   GITHUB_ACTIONS,
   GOOD_FIRST_ISSUE_PATTERNS,
+  LOG_EVENTS,
   AUDIT_EVENTS,
   QURL_WEBHOOK_EVENTS,
   TRUST,

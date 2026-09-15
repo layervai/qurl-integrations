@@ -14,6 +14,8 @@ jest.mock('../src/config', () => ({
   GUILD_ID: 'guild-1',
   SHARD_ID: '0:1',
   isMultiTenant: false,
+  isQurlSetupAvailable: false,
+  isAuth0EmailConnectionRejected: false,
 }));
 
 jest.mock('../src/logger', () => ({
@@ -174,7 +176,11 @@ const mockDownloadAndUpload = jest.fn();
 const mockReUploadBuffer = jest.fn();
 const mockMintLinks = jest.fn();
 const mockUploadJsonToConnector = jest.fn();
+const mockRevokeMintedLinks = jest.fn().mockResolvedValue(true);
 jest.mock('../src/connector', () => ({
+  // Watermarked views live on the connector's shared tunnel; revoke calls
+  // this before the resource DELETE. Default to a clean no-op revoke.
+  revokeMintedLinks: mockRevokeMintedLinks,
   uploadToConnector: mockUploadToConnector,
   downloadAndUpload: mockDownloadAndUpload,
   reUploadBuffer: mockReUploadBuffer,
@@ -221,6 +227,11 @@ crypto.randomBytes = jest.fn((size) => {
 });
 const originalRandomUUID = crypto.randomUUID;
 crypto.randomUUID = jest.fn(() => 'mock-uuid-1234');
+
+afterAll(() => {
+  crypto.randomBytes = originalRandomBytes;
+  crypto.randomUUID = originalRandomUUID;
+});
 
 const { commands, handleCommand, registerCommands, _test } = require('../src/commands');
 const {
@@ -592,11 +603,13 @@ describe('handleCommand — INTERACTION_HANDLED audit emission', () => {
 });
 
 describe('/qurl help subcommand', () => {
-  async function renderHelp({ qurlOAuth, discordInstall }) {
+  async function renderHelp({ qurlOAuth, discordInstall, rejected = false }) {
     const config = require('../src/config');
-    const originalQurlOAuth = config.isQurlOAuthConfigured;
+    const originalQurlSetup = config.isQurlSetupAvailable;
     const originalDiscordInstall = config.isDiscordInstallConfigured;
-    config.isQurlOAuthConfigured = qurlOAuth;
+    const originalRejected = config.isAuth0EmailConnectionRejected;
+    config.isAuth0EmailConnectionRejected = rejected;
+    config.isQurlSetupAvailable = qurlOAuth;
     config.isDiscordInstallConfigured = discordInstall;
 
     try {
@@ -611,8 +624,9 @@ describe('/qurl help subcommand', () => {
       await cmd.execute(interaction);
       return interaction.reply.mock.calls[0][0].content;
     } finally {
-      config.isQurlOAuthConfigured = originalQurlOAuth;
+      config.isQurlSetupAvailable = originalQurlSetup;
       config.isDiscordInstallConfigured = originalDiscordInstall;
+      config.isAuth0EmailConnectionRejected = originalRejected;
     }
   }
 
@@ -671,6 +685,12 @@ describe('/qurl help subcommand', () => {
     expect(content).toContain('`/qurl setup` — configure your API key');
     expect(content).not.toContain('connect qURL via OAuth');
     expect(content).not.toContain('Add to Discord');
+  });
+
+  it('does not advertise key paste when the configured authentication policy is rejected', async () => {
+    const content = await renderHelp({ qurlOAuth: false, discordInstall: false, rejected: true });
+    expect(content).toContain('setup is temporarily unavailable');
+    expect(content).not.toContain('configure your API key');
   });
 
   it('advertises Add to Discord when the customer install flow is configured', async () => {
@@ -989,11 +1009,11 @@ describe('handleRevokeSelect (dispatcher path)', () => {
 
   it('runs revoke when deleteFlow wins (deleted=true)', async () => {
     mockDb.getSendItems.mockReturnValue([
-      { resource_id: 'res-1', recipient_discord_id: 'u-1' },
-      { resource_id: 'res-2', recipient_discord_id: 'u-2' },
-      { resource_id: 'res-3', recipient_discord_id: 'u-3' },
+      { resource_id: 'res-1', recipient_discord_id: 'u-1', qurl_id: 'q_select_1' },
+      { resource_id: 'res-2', recipient_discord_id: 'u-2', qurl_id: 'q_select_2' },
+      { resource_id: 'res-3', recipient_discord_id: 'u-3', qurl_id: 'q_select_3' },
     ]);
-    mockDeleteLink.mockResolvedValue(undefined);
+    mockRevokeMintedLinks.mockResolvedValue(undefined);
     const interaction = makeSelectInteraction({ values: ['send-99'] });
 
     await handleRevokeSelect(interaction, { flow_id: '0:1#guild-1#ch-1#user-1' });
@@ -1002,7 +1022,7 @@ describe('handleRevokeSelect (dispatcher path)', () => {
       '0:1#guild-1#ch-1#user-1',
       { stage: 'awaiting_revoke_select', reason: 'terminal' },
     );
-    expect(mockDeleteLink).toHaveBeenCalledTimes(3);
+    expect(mockRevokeMintedLinks).toHaveBeenCalledTimes(3);
     expect(interaction.update).toHaveBeenCalledWith(
       expect.objectContaining({ content: expect.stringContaining('3/3') }),
     );
@@ -1014,7 +1034,7 @@ describe('handleRevokeSelect (dispatcher path)', () => {
 
     await handleRevokeSelect(interaction, { flow_id: '0:1#guild-1#ch-1#user-1' });
 
-    expect(mockDeleteLink).not.toHaveBeenCalled();
+    expect(mockRevokeMintedLinks).not.toHaveBeenCalled();
     expect(interaction.update).not.toHaveBeenCalled();
     expect(interaction.reply).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -1033,7 +1053,7 @@ describe('handleRevokeSelect (dispatcher path)', () => {
     try {
       await handleRevokeSelect(interaction, { flow_id: '0:1#guild-1#ch-1#user-1' });
 
-      expect(mockDeleteLink).not.toHaveBeenCalled();
+      expect(mockRevokeMintedLinks).not.toHaveBeenCalled();
       expect(interaction.update).toHaveBeenCalledWith(
         expect.objectContaining({
           content: expect.stringContaining('no longer configured'),
@@ -1046,10 +1066,10 @@ describe('handleRevokeSelect (dispatcher path)', () => {
 
   it('reports a partial revoke as an unconfirmed failure', async () => {
     mockDb.getSendItems.mockReturnValue([
-      { resource_id: 'res-1', recipient_discord_id: 'u-1' },
-      { resource_id: 'res-2', recipient_discord_id: 'u-2' },
+      { resource_id: 'res-1', recipient_discord_id: 'u-1', qurl_id: 'q_partial_1' },
+      { resource_id: 'res-2', recipient_discord_id: 'u-2', qurl_id: 'q_partial_2' },
     ]);
-    mockDeleteLink
+    mockRevokeMintedLinks
       .mockResolvedValueOnce(undefined)
       .mockRejectedValueOnce(new Error('not found'));
 
@@ -1063,9 +1083,9 @@ describe('handleRevokeSelect (dispatcher path)', () => {
 
   it('reports successful DELETEs truthfully when the final revoked state write fails', async () => {
     mockDb.getSendItems.mockReturnValue([
-      { resource_id: 'res-1', recipient_discord_id: 'u-1' },
+      { resource_id: 'res-1', recipient_discord_id: 'u-1', qurl_id: 'q_finalize_1' },
     ]);
-    mockDeleteLink.mockResolvedValue(undefined);
+    mockRevokeMintedLinks.mockResolvedValue(undefined);
     mockDb.markSendRevoked.mockRejectedValueOnce(new Error('DDB finalize failed'));
 
     const interaction = makeSelectInteraction({ values: ['send-finalize-fail'] });
@@ -1087,7 +1107,7 @@ describe('handleRevokeSelect (dispatcher path)', () => {
 
     await handleRevokeSelect(interaction, { flow_id: '0:1#guild-1#ch-1#user-1' });
 
-    expect(mockDeleteLink).not.toHaveBeenCalled();
+    expect(mockRevokeMintedLinks).not.toHaveBeenCalled();
     expect(interaction.update).toHaveBeenCalledWith({
       content: 'Could not verify this send for revocation. It may already be revoked or unavailable; run `/qurl revoke` to refresh.',
       components: [],
@@ -1096,10 +1116,10 @@ describe('handleRevokeSelect (dispatcher path)', () => {
 
   it('retries a temporary DELETE failure and finalizes after the next selection', async () => {
     mockDb.getSendItems.mockReturnValue([
-      { resource_id: 'res-1', recipient_discord_id: 'u-1' },
-      { resource_id: 'res-2', recipient_discord_id: 'u-2' },
+      { resource_id: 'res-1', recipient_discord_id: 'u-1', qurl_id: 'q_retry_1' },
+      { resource_id: 'res-2', recipient_discord_id: 'u-2', qurl_id: 'q_retry_2' },
     ]);
-    mockDeleteLink
+    mockRevokeMintedLinks
       .mockResolvedValueOnce(undefined)
       .mockRejectedValueOnce(new Error('temporary qURL 503'))
       .mockResolvedValueOnce(undefined)
@@ -1117,7 +1137,7 @@ describe('handleRevokeSelect (dispatcher path)', () => {
     expect(second.update).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringContaining('Revoked 2/2 users.'),
     }));
-    expect(mockDeleteLink).toHaveBeenCalledTimes(4);
+    expect(mockRevokeMintedLinks).toHaveBeenCalledTimes(4);
     expect(mockDb.markSendRevoked).toHaveBeenCalledWith('send-retry', 'user-1');
   });
 });
@@ -1127,6 +1147,9 @@ describe('/qurl setup subcommand (legacy modal-paste path)', () => {
   const originalAuthDomain = process.env.AUTH0_DOMAIN;
   beforeAll(() => {
     process.env.KEY_ENCRYPTION_KEY = '0'.repeat(64);
+    // Force the legacy path by clearing any Auth0 hints. The config
+    // mock at the top of this file doesn't define AUTH0_* and we
+    // rely on `config.isQurlSetupAvailable` being falsy.
     delete process.env.AUTH0_DOMAIN;
   });
   afterAll(() => {
@@ -1186,6 +1209,56 @@ describe('/qurl setup subcommand (legacy modal-paste path)', () => {
       );
     } finally {
       process.env.KEY_ENCRYPTION_KEY = savedKEK;
+    }
+  });
+
+  it('blocks setup instead of falling back to API-key paste for a rejected connection', async () => {
+    const config = require('../src/config');
+    const originalRejected = config.isAuth0EmailConnectionRejected;
+    config.isAuth0EmailConnectionRejected = true;
+    try {
+      const cmd = commands.find(c => c.data.name === 'qurl');
+      const interaction = makeSetupInteraction();
+
+      await cmd.execute(interaction);
+
+      expect(mockSupersedeOrCreate).not.toHaveBeenCalled();
+      expect(interaction.reply).toHaveBeenCalledWith({
+        content: expect.stringContaining('qURL setup is temporarily unavailable'),
+        ephemeral: true,
+      });
+      expect(interaction.reply.mock.calls[0][0].content)
+        .not.toContain('AUTH0_EMAIL_CONNECTION');
+      const logger = require('../src/logger');
+      expect(logger.warn).toHaveBeenCalledWith(
+        'Refusing /qurl setup: AUTH0_EMAIL_CONNECTION was rejected at boot',
+      );
+      expect(logger.error).not.toHaveBeenCalled();
+    } finally {
+      config.isAuth0EmailConnectionRejected = originalRejected;
+    }
+  });
+
+  it('keeps /qurl send reachable while the connection policy is rejected', async () => {
+    const config = require('../src/config');
+    const originalRejected = config.isAuth0EmailConnectionRejected;
+    config.isAuth0EmailConnectionRejected = true;
+    try {
+      const cmd = commands.find(c => c.data.name === 'qurl');
+      const interaction = makeInteraction();
+
+      await cmd.execute(interaction);
+
+      // The send handler ran to its own input validation instead of the
+      // setup-only policy block.
+      expect(interaction.reply).toHaveBeenCalledWith({
+        content: expect.stringContaining('Attachment is missing or malformed'),
+        ephemeral: true,
+      });
+      expect(interaction.reply.mock.calls[0][0].content)
+        .not.toContain('temporarily unavailable');
+    } finally {
+      config.isAuth0EmailConnectionRejected = originalRejected;
     }
   });
 
@@ -1341,6 +1414,29 @@ describe('handleSetupButton (dispatcher path)', () => {
       ...overrides,
     };
   }
+
+  it('blocks a pre-restart setup button after the auth policy becomes rejected', async () => {
+    const config = require('../src/config');
+    const originalRejected = config.isAuth0EmailConnectionRejected;
+    config.isAuth0EmailConnectionRejected = true;
+    try {
+      const interaction = makeButtonInteraction();
+
+      await handleSetupButton(interaction, {
+        flow_id: '0:1#guild-1#ch-1#user-1',
+        row: { stage: 'awaiting_setup_button', version: 1 },
+      });
+
+      expect(mockTransitionFlow).not.toHaveBeenCalled();
+      expect(interaction.showModal).not.toHaveBeenCalled();
+      expect(interaction.reply).toHaveBeenCalledWith({
+        content: expect.stringContaining('qURL setup is temporarily unavailable'),
+        ephemeral: true,
+      });
+    } finally {
+      config.isAuth0EmailConnectionRejected = originalRejected;
+    }
+  });
 
   it('transitions flow to awaiting_setup_modal + shows modal on success', async () => {
     mockTransitionFlow.mockResolvedValueOnce({ result: 'success', version: 2 });
@@ -1511,6 +1607,29 @@ describe('handleSetupModal (dispatcher path)', () => {
   });
   afterAll(() => {
     global.fetch = originalFetch;
+  });
+
+  it('blocks a pre-restart modal before validation or persistence when policy is rejected', async () => {
+    const config = require('../src/config');
+    const originalRejected = config.isAuth0EmailConnectionRejected;
+    config.isAuth0EmailConnectionRejected = true;
+    try {
+      const interaction = makeModalInteraction();
+
+      await handleSetupModal(interaction, { flow_id: '0:1#guild-1#ch-1#user-1' });
+
+      expect(mockDeleteFlow).not.toHaveBeenCalled();
+      expect(global.fetch).not.toHaveBeenCalled();
+      expect(mockDb.setGuildApiKey).not.toHaveBeenCalled();
+      expect(interaction.reply).toHaveBeenCalledWith({
+        content: expect.stringContaining('qURL setup is temporarily unavailable'),
+        ephemeral: true,
+      });
+      expect(interaction.reply.mock.calls[0][0].content)
+        .not.toContain('AUTH0_EMAIL_CONNECTION');
+    } finally {
+      config.isAuth0EmailConnectionRejected = originalRejected;
+    }
   });
 
   it('validates key + persists + replies success', async () => {

@@ -893,6 +893,8 @@ func (c *Client) CreateResource(ctx context.Context, input *CreateResourceInput)
 }
 
 // GetResource retrieves one resource by its public resource identity.
+// resourceID must be the resource_id (the public key); the service also accepts
+// a CRID on this path, but the response identity check here rejects it.
 func (c *Client) GetResource(ctx context.Context, resourceID string) (*Resource, error) {
 	resourceID = strings.TrimSpace(resourceID)
 	if resourceID == "" {
@@ -902,14 +904,26 @@ func (c *Client) GetResource(ctx context.Context, resourceID string) (*Resource,
 	if err != nil {
 		return nil, fmt.Errorf("build request: %w", err)
 	}
-	var out Resource
+	// TODO(upstream-contract): qurl-service ResourceDetailResponse nests the
+	// resource under data.resource beside a qurls preview; mirrored by
+	// (*client).Resource in apps/cli/internal/api/rest.go (which also accepts
+	// CRIDs). The flat pre-#161 shape is rejected so contract drift fails loudly.
+	var out struct {
+		Resource *Resource `json:"resource"`
+	}
 	if _, err := c.do(req, &out, "GET /v1/resources/:id"); err != nil {
 		return nil, err
 	}
-	if out.ResourceID != resourceID {
-		return nil, errors.New("get resource response identity does not match request")
+	if out.Resource == nil {
+		return nil, errors.New("get resource response has no resource (data or data.resource absent)")
 	}
-	return &out, nil
+	if out.Resource.ResourceID != resourceID {
+		return nil, fmt.Errorf("get resource response identity does not match request (want %q, got %q)", resourceID, out.Resource.ResourceID)
+	}
+	if strings.TrimSpace(out.Resource.Type) == "" {
+		return nil, errors.New("get resource response has no type")
+	}
+	return out.Resource, nil
 }
 
 // Identity is the account identity behind the client credential (GET /v1/me).
@@ -1288,21 +1302,31 @@ type QuotaOutput struct {
 }
 
 // RateLimits holds rate limit configuration.
+// TODO(upstream-contract): qurl-service /v1/quota uses -1 for unlimited limits.
+// Pointers preserve missing/null fields from older services as unknown, not zero.
 type RateLimits struct {
-	CreatePerMinute  int `json:"create_per_minute"`
-	CreatePerHour    int `json:"create_per_hour"`
-	ListPerMinute    int `json:"list_per_minute"`
-	ResolvePerMinute int `json:"resolve_per_minute"`
-	MaxActiveQURLs   int `json:"max_active_qurls"`
-	MaxTokensPerQURL int `json:"max_tokens_per_qurl"`
+	CreatePerMinute      int    `json:"create_per_minute"`
+	CreatePerHour        int    `json:"create_per_hour"`
+	ListPerMinute        int    `json:"list_per_minute"`
+	ResolvePerMinute     int    `json:"resolve_per_minute"`
+	MaxActiveResources   *int   `json:"max_active_resources,omitempty"`
+	MaxQURLs             *int   `json:"max_qurls,omitempty"`
+	MaxDataTransferBytes *int64 `json:"max_data_transfer_bytes,omitempty"`
+	// MaxActiveQURLs is the legacy protected-resource limit, not a qURL limit.
+	MaxActiveQURLs   *int `json:"max_active_qurls,omitempty"`
+	MaxTokensPerQURL *int `json:"max_tokens_per_qurl,omitempty"`
 }
 
 // UsageInfo holds usage statistics.
 type UsageInfo struct {
-	QURLsCreated       int     `json:"qurls_created"`
-	ActiveQURLs        int     `json:"active_qurls"`
-	ActiveQURLsPercent float64 `json:"active_qurls_percent"`
-	TotalAccesses      int     `json:"total_accesses"`
+	QURLsCreated           *int     `json:"qurls_created,omitempty"`
+	ActiveResources        *int     `json:"active_resources,omitempty"`
+	ActiveResourcesPercent *float64 `json:"active_resources_percent,omitempty"`
+	DataTransferBytes      *int64   `json:"data_transfer_bytes,omitempty"`
+	// ActiveQURLs is the legacy protected-resource count, not a qURL count.
+	ActiveQURLs        *int     `json:"active_qurls,omitempty"`
+	ActiveQURLsPercent *float64 `json:"active_qurls_percent,omitempty"`
+	TotalAccesses      int      `json:"total_accesses"`
 }
 
 // GetQuota retrieves quota information.

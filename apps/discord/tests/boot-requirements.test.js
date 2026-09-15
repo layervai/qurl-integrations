@@ -14,15 +14,16 @@ const {
   invalidHotStandbyValues,
   invalidStateSecretValues,
   shouldRegisterInteractionListener,
+  shouldStartPrivateUploader,
   missingMapCommandKeys,
-  GOOGLE_MAPS_API_KEY_PLACEHOLDER_SENTINEL,
   VALID_PROCESS_ROLES,
   resolveProcessRole,
 } = require('../src/boot-requirements');
 const { MIN_STATE_SECRET_LENGTH } = require('../src/utils/oauth-state');
+const { SSM_PLACEHOLDER_SENTINEL } = require('../src/utils/ssm-placeholder');
 
 describe('bootRequired', () => {
-  it('demands only DISCORD_TOKEN (GUILD_ID and BASE_URL are enforced upstream)', () => {
+  it('demands only the bot token for normal bot operation', () => {
     expect(bootRequired()).toEqual(['DISCORD_TOKEN']);
   });
 });
@@ -37,19 +38,23 @@ describe('prodRequired', () => {
 
 describe('missingBootKeys', () => {
   it('returns empty when every boot key is present', () => {
-    expect(missingBootKeys({ DISCORD_TOKEN: 't', GUILD_ID: '123', BASE_URL: 'https://h' })).toEqual([]);
+    expect(missingBootKeys({ DISCORD_TOKEN: 't' })).toEqual([]);
   });
 
   it('surfaces the exact missing key (not just a count)', () => {
     expect(missingBootKeys({})).toEqual(['DISCORD_TOKEN']);
   });
 
-  it('does not flag GUILD_ID or BASE_URL as missing — both are optional here', () => {
-    expect(missingBootKeys({ DISCORD_TOKEN: 't' })).toEqual([]);
+  it('does not make customer-install config a global boot requirement', () => {
+    // Normal command registration gets the application ID from Discord's
+    // READY payload. A missing/invalid client ID must disable only the public
+    // install entrypoint, not crash-loop an otherwise usable bot deployment.
+    expect(missingBootKeys({ DISCORD_TOKEN: 't', DISCORD_CLIENT_ID: null })).toEqual([]);
   });
 
   it('treats empty strings as missing (not just undefined)', () => {
-    expect(missingBootKeys({ DISCORD_TOKEN: '' })).toEqual(['DISCORD_TOKEN']);
+    expect(missingBootKeys({ DISCORD_TOKEN: '', DISCORD_CLIENT_ID: '' }))
+      .toEqual(['DISCORD_TOKEN']);
   });
 });
 
@@ -354,6 +359,22 @@ describe('shouldRegisterInteractionListener', () => {
   });
 });
 
+describe('shouldStartPrivateUploader', () => {
+  test.each([
+    ['combined', false, 'qurl://private-upload', true],
+    ['gateway', false, 'qurl://private-upload', true],
+    ['gateway', true, 'qurl://private-upload', false],
+    ['http', false, 'qurl://private-upload', false],
+    ['http', true, 'qurl://private-upload', true],
+    ['combined', false, null, false],
+  ])('role=%s shipper=%s private=%s -> %s', (role, eventShipperEnabled, privateUploadQurl, expected) => {
+    const { isGateway, isHttp } = resolveProcessRole(role);
+    expect(shouldStartPrivateUploader({
+      isGateway, isHttp, eventShipperEnabled, privateUploadQurl,
+    })).toBe(expected);
+  });
+});
+
 describe('missingMapCommandKeys', () => {
   it('returns empty when the flag is off — Maps key state is irrelevant', () => {
     expect(missingMapCommandKeys({})).toEqual([]);
@@ -364,7 +385,7 @@ describe('missingMapCommandKeys', () => {
     expect(
       missingMapCommandKeys({
         MAP_COMMAND_ENABLED: false,
-        GOOGLE_MAPS_API_KEY: GOOGLE_MAPS_API_KEY_PLACEHOLDER_SENTINEL,
+        GOOGLE_MAPS_API_KEY: SSM_PLACEHOLDER_SENTINEL,
       }),
     ).toEqual([]);
   });
@@ -382,7 +403,7 @@ describe('missingMapCommandKeys', () => {
     expect(
       missingMapCommandKeys({
         MAP_COMMAND_ENABLED: true,
-        GOOGLE_MAPS_API_KEY: GOOGLE_MAPS_API_KEY_PLACEHOLDER_SENTINEL,
+        GOOGLE_MAPS_API_KEY: SSM_PLACEHOLDER_SENTINEL,
       }),
     ).toEqual(['GOOGLE_MAPS_API_KEY']);
   });

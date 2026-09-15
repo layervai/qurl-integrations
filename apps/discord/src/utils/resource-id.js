@@ -92,6 +92,7 @@ function maskResourceIdPath(message) {
 module.exports = {
   hasSafeResourceIdShape,
   LEGACY_RESOURCE_ID_PREFIX,
+  MAX_RESOURCE_ID_LENGTH,
   maskResourceIdPath,
   qurlPath,
   resourceIdLogRef,

@@ -825,17 +825,17 @@ func sharingInstallFailureMessage(message string, previous *client.SharingState)
 }
 
 // TODO(upstream-contract): POST /v1/resources returns 403 + quota_exceeded
-// for the protected-resource limit. Other status/code pairs stay generic and
+// for both protected-resource and monthly data limits. Other pairs stay generic and
 // remain visible in the structured error log.
 const resourceQuotaExceededCode = "quota_exceeded"
 
-// Only resource creation's quota refusal means the protected-resource limit.
+// Resource creation does not distinguish which account quota was exceeded.
 // Keep this mapping out of the generic sanitizer: other endpoints have other
 // quotas. Never forward upstream detail into Slack.
 func connectorResourceCreateErrorMessage(err error) string {
 	var apiErr *client.APIError
 	if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusForbidden && apiErr.Code == resourceQuotaExceededCode {
-		return appendSlackReference("Your account has reached its protected resource limit", apiErr.RequestID) + ". Ask an admin to revoke unused resources or upgrade your plan, then try connector setup again. Existing resources can still be shared. No enrollment token was minted."
+		return appendSlackReference("Connector setup reached an account quota", apiErr.RequestID) + ". Ask an admin to check quota usage: for the protected resource limit, revoke unused resources; for the monthly data limit, wait for the next calendar month. Contact LayerV about a plan upgrade if you need a higher allowance, then retry setup. No enrollment token was minted."
 	}
 	return sanitizeAPIError(err, "Failed to create or find the qURL Connector resource")
 }

@@ -3,29 +3,36 @@
 // (routes/discord-install.js) also chains into. Step-by-step user
 // experience and CSRF posture live in the PR #177 description; Stage-2
 // confused-deputy mitigation is documented in discord-install.js.
-const crypto = require('crypto');
 const express = require('express');
 const config = require('../config');
 const db = require('../store');
 const logger = require('../logger');
+const { AUDIT_EVENTS } = require('../constants');
 const { sendDM } = require('../discord');
-const { verifyQurlOAuthState } = require('../utils/qurl-oauth-state');
+const {
+  verifyQurlOAuthState,
+  fingerprintQurlAccountSubject,
+  qurlAccountFingerprintKeyEpoch,
+} = require('../utils/qurl-oauth-state');
 const { rateLimit } = require('../utils/oauth-rate-limit');
 const { verifyAuth0IdToken } = require('../utils/auth0-jwks');
-const { readCookie } = require('../utils/cookies');
+const { readCookie, timingSafeStringEqual } = require('../utils/cookies');
 const { createPkcePair, isPkceVerifier } = require('../utils/oauth-pkce');
-const { shouldPromptConsent } = require('../utils/guild-config-state');
+const {
+  buildAuth0AuthorizeUrl,
+  qurlOAuthCallbackUrl,
+} = require('../utils/auth0-authorize-url');
 const { singleStringParam } = require('../utils/query-params');
 const { renderNotConfiguredPage } = require('../utils/oauth-not-configured');
 const { fireAndForgetLinkGuildWebhookSubscription } = require('../guild-webhook-link');
 
 // Network-call timeouts. Centralized so a future tuning of "qurl-service
 // is slow under load" doesn't require a hunt-and-replace across both
-// route files. 15s matches the existing per-call budget; the 5s and 10s
-// values are for cleanup paths that should fail faster.
+// route files. 15s matches the existing per-call budget. Two 5s orphan
+// DELETE attempts bound persistence-failure cleanup to 10s.
 const AUTH0_TIMEOUT_MS = 15000;
 const QURL_SERVICE_TIMEOUT_MS = 15000;
-const ORPHAN_DELETE_TIMEOUT_MS = 10000;
+const ORPHAN_DELETE_ATTEMPT_TIMEOUT_MS = 5000;
 
 const router = express.Router();
 
@@ -92,12 +99,12 @@ function renderSuccess(res, { guildId, keyPrefix, qurlAccountEmail }) {
   }));
 }
 
-function renderError(res, statusCode, headline, detail) {
+function renderError(res, statusCode, headline, detail, retrySetup = true) {
   return res.status(statusCode).send(res.renderPage({
     title: 'qURL Setup Failed',
     icon: '❌',
     heading: headline,
-    message: detail + ' Run /qurl setup in Discord to start over.',
+    message: detail + (retrySetup ? ' Run /qurl setup in Discord to start over.' : ''),
     type: 'error',
   }));
 }
@@ -105,6 +112,40 @@ function renderError(res, statusCode, headline, detail) {
 function clearQurlOAuthCookies(res) {
   clearQurlOAuthCookie(res);
   clearQurlOAuthPkceCookie(res);
+}
+
+// TODO(upstream-contract): qurl-service binding DELETE atomically revokes its
+// child API key and releases the external identity claim.
+async function deleteOrphanCredential({ accessToken, bindingId, keyId, guildId }) {
+  const isPrivateBinding = Boolean(bindingId);
+  const credentialKind = isPrivateBinding ? 'external identity binding' : 'API key';
+  const resourcePath = isPrivateBinding
+    ? `/v1/external-identity-bindings/${encodeURIComponent(bindingId)}`
+    : `/v1/api-keys/${encodeURIComponent(keyId)}`;
+  let lastError;
+
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      const response = await fetch(`${config.QURL_ENDPOINT}${resourcePath}`, {
+        method: 'DELETE',
+        headers: { 'Authorization': `Bearer ${accessToken}`, 'Accept': 'application/json' },
+        signal: AbortSignal.timeout(ORPHAN_DELETE_ATTEMPT_TIMEOUT_MS),
+      });
+      await response.body?.cancel?.();
+      if (response.status === 204 || response.status === 404) return;
+      if (response.status >= 500 && response.status <= 599 && attempt < 2) continue;
+      logger.warn('Orphan credential delete returned non-terminal status', {
+        status: response.status, credentialKind, guildId,
+      });
+      return;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  logger.warn('Orphan credential delete remained transport-unknown after exact retry', {
+    error: lastError?.message, credentialKind, guildId,
+  });
 }
 
 // /oauth/qurl/start — admin lands here after clicking the link in
@@ -115,7 +156,7 @@ function clearQurlOAuthCookies(res) {
 // in a different browser, the cookie is absent and /callback rejects
 // before any Auth0 token exchange or qurl-service mint runs.
 router.get('/start', rateLimit, async (req, res) => {
-  if (!config.isQurlOAuthConfigured) {
+  if (!config.isQurlSetupAvailable) {
     // Single log line per request lives in renderNotConfiguredPage —
     // dropping the route-level warn (round-9 item #7 harmonization
     // with discord-install.js's surface).
@@ -138,12 +179,6 @@ router.get('/start', rateLimit, async (req, res) => {
     logger.warn('qURL OAuth start rejected invalid state', { reason: verified.reason });
     return renderError(res, 400, 'Invalid setup link', 'This setup link is invalid or has expired (links last 5 minutes).');
   }
-  // First-install vs re-run gate for prompt=consent (C.8). On re-run,
-  // force prompt=consent so admins can rotate keys; on first install,
-  // skip the redundant screen. Failsafe + bias direction live in
-  // utils/guild-config-state.js (re-run on DDB error — silently
-  // skipping consent on a real re-run would block rotation).
-  const promptConsent = await shouldPromptConsent(verified.payload.guildId, 'qurl-oauth /start');
   // Double-submit CSRF cookie: value is the same state token the URL
   // carries to Auth0. /callback re-checks cookie === query.state.
   // Same-browser flows pass; leaked URLs in other browsers fail.
@@ -152,29 +187,7 @@ router.get('/start', rateLimit, async (req, res) => {
   const { codeVerifier, codeChallenge } = createPkcePair();
   setQurlOAuthCookie(res, req, state);
   setQurlOAuthPkceCookie(res, req, codeVerifier);
-  const authorizeUrl = new URL(`https://${config.AUTH0_DOMAIN}/authorize`);
-  authorizeUrl.searchParams.set('response_type', 'code');
-  authorizeUrl.searchParams.set('client_id', config.AUTH0_CLIENT_ID);
-  authorizeUrl.searchParams.set('redirect_uri', `${config.BASE_URL}/oauth/qurl/callback`);
-  // Drop offline_access — we don't store/use refresh tokens (the API key
-  // mint is one-shot), so requesting them is unnecessary attack surface
-  // per PR #177 review.
-  // Scope set: qurl:write + qurl:read for the API-key mint, openid +
-  // email for the id_token's email claim (used by the success-page
-  // binding readout). `profile` was previously requested but never
-  // read — narrowing per PR #177 follow-up C.2 to tighten the
-  // consent-screen "what is this app asking for?" UX.
-  authorizeUrl.searchParams.set('scope', 'qurl:write qurl:read openid email');
-  authorizeUrl.searchParams.set('audience', config.AUTH0_AUDIENCE);
-  authorizeUrl.searchParams.set('state', state);
-  authorizeUrl.searchParams.set('code_challenge', codeChallenge);
-  authorizeUrl.searchParams.set('code_challenge_method', 'S256');
-  // prompt=consent only on re-run (key-rotation flow) — without it
-  // Auth0 silently re-uses prior consent and re-running /qurl setup
-  // can't actually issue a new key. On first install, omit so the
-  // admin doesn't see a redundant "are you sure?" screen on top of
-  // the standard sign-in. Gate evaluated above. PR #177 follow-up C.8.
-  if (promptConsent) authorizeUrl.searchParams.set('prompt', 'consent');
+  const authorizeUrl = buildAuth0AuthorizeUrl({ state, codeChallenge });
   return res.redirect(302, authorizeUrl.toString());
 });
 
@@ -182,7 +195,7 @@ router.get('/start', rateLimit, async (req, res) => {
 // Validate state, exchange code → access_token, mint a guild-scoped API
 // key on qurl-service, persist it via the Store abstraction, DM the admin.
 router.get('/callback', rateLimit, async (req, res) => {
-  if (!config.isQurlOAuthConfigured) {
+  if (!config.isQurlSetupAvailable) {
     clearQurlOAuthCookies(res);
     return renderNotConfigured(res);
   }
@@ -239,14 +252,7 @@ router.get('/callback', rateLimit, async (req, res) => {
     clearQurlOAuthCookies(res);
     return renderError(res, 400, 'Invalid setup link', 'Setup must be completed in the same browser tab where /qurl setup was clicked.');
   }
-  // Both inputs are strings (cookieState early-returned if null;
-  // state came through singleStringParam, which returns '' for any
-  // non-string), so Buffer.from doesn't throw. Length check before
-  // timingSafeEqual handles the only remaining failure mode.
-  const cookieBuf = Buffer.from(cookieState);
-  const stateBuf = Buffer.from(state);
-  const cookieMatches = cookieBuf.length === stateBuf.length
-    && crypto.timingSafeEqual(cookieBuf, stateBuf);
+  const cookieMatches = timingSafeStringEqual(cookieState, state);
   if (!cookieMatches) {
     logger.warn('qURL OAuth callback cookie/state mismatch', { ip: req.ip });
     clearQurlOAuthCookies(res);
@@ -273,6 +279,7 @@ router.get('/callback', rateLimit, async (req, res) => {
   //    binding readout (sanity-check display, not a security boundary).
   let accessToken;
   let qurlAccountEmail;
+  let qurlAccountSubject;
   try {
     // OAuth2 spec is application/x-www-form-urlencoded for the token
     // endpoint. Auth0 accepts JSON too, but form-urlencoded is the
@@ -290,7 +297,7 @@ router.get('/callback', rateLimit, async (req, res) => {
         // Guaranteed valid by the cookie gate above; Auth0 matches it against
         // the S256 challenge stored for this authorization code.
         code_verifier: codeVerifier,
-        redirect_uri: `${config.BASE_URL}/oauth/qurl/callback`,
+        redirect_uri: qurlOAuthCallbackUrl(),
       }),
       signal: AbortSignal.timeout(AUTH0_TIMEOUT_MS),
     });
@@ -333,9 +340,15 @@ router.get('/callback', rateLimit, async (req, res) => {
       // Auth0 id_token JWKS verification result. Same shape, different
       // payload — keep them lexically separate to avoid reader confusion.
       const idTokenVerified = await verifyAuth0IdToken(tokenJson.id_token);
-      if (idTokenVerified.ok && typeof idTokenVerified.payload?.email === 'string') {
-        qurlAccountEmail = idTokenVerified.payload.email;
-      } else if (!idTokenVerified.ok) {
+      if (idTokenVerified.ok) {
+        if (typeof idTokenVerified.payload?.email === 'string') {
+          qurlAccountEmail = idTokenVerified.payload.email;
+        }
+        const subject = idTokenVerified.payload?.sub;
+        if (typeof subject === 'string' && subject) {
+          qurlAccountSubject = subject;
+        }
+      } else {
         // Severity at this call site mirrors auth0-jwks.js's internal
         // split (round-9 item #6): clock-skew expiry is benign + noisy;
         // signature/claim/JWKS failures are the only signal of a forged
@@ -353,23 +366,49 @@ router.get('/callback', rateLimit, async (req, res) => {
     return renderError(res, 502, 'Authorization failed', 'A network error occurred during the Auth0 handshake. Please run /qurl setup again.');
   }
 
-  // 2. Mint a guild-scoped qURL API key via POST /v1/api-keys, owned by
-  //    the admin's qURL account (the Auth0 JWT's sub claim is the owner).
+  // 2. Create or rotate the Discord external-identity binding only when the
+  //    private upload path is active. Until then, keep the existing API-key
+  //    setup path so a dormant deployment does not require the binding API.
   let apiKey;
   let keyId;
   let keyPrefix;
+  let bindingId;
   try {
     const keyName = `Discord guild ${guildId}`;
-    const mintResp = await fetch(`${config.QURL_ENDPOINT}/v1/api-keys`, {
+    const useExternalBinding = Boolean(config.PRIVATE_UPLOAD_QURL);
+    const resourcePath = useExternalBinding ? '/v1/external-identity-bindings' : '/v1/api-keys';
+    const request = {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${accessToken}`,
         'Content-Type': 'application/json',
         'Accept': 'application/json',
+        ...(useExternalBinding ? { 'Idempotency-Key': crypto.randomUUID() } : {}),
       },
-      body: JSON.stringify({ kind: 'api_key', name: keyName, scopes: ['qurl:write', 'qurl:read'] }),
-      signal: AbortSignal.timeout(QURL_SERVICE_TIMEOUT_MS),
-    });
+      body: JSON.stringify(useExternalBinding
+        ? { provider: 'discord', external_id: guildId, display_name: keyName }
+        : { kind: 'api_key', name: keyName, scopes: ['qurl:write', 'qurl:read'] }),
+    };
+    let mintResp;
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        mintResp = await fetch(`${config.QURL_ENDPOINT}${resourcePath}`, {
+          ...request,
+          signal: AbortSignal.timeout(QURL_SERVICE_TIMEOUT_MS),
+        });
+      } catch (firstError) {
+        if (!useExternalBinding || attempt === 2) throw firstError;
+        continue;
+      }
+      // A service-side transaction can commit before a 5xx response reaches
+      // us. Retry the exact body and Idempotency-Key once so the durable replay
+      // returns the only copy of the plaintext key.
+      if (useExternalBinding && mintResp.status >= 500 && attempt === 1) {
+        await mintResp.body?.cancel?.();
+        continue;
+      }
+      break;
+    }
     if (!mintResp.ok) {
       const errBody = await mintResp.text().catch(() => '');
       // Parse RFC 7807 problem JSON to discriminate user-quota hits
@@ -401,9 +440,10 @@ router.get('/callback', rateLimit, async (req, res) => {
         'qurl-service rejected the API-key request. Please run /qurl setup again, or contact your layerv.ai admin.');
     }
     const mintJson = await mintResp.json();
-    apiKey = mintJson?.data?.api_key;
-    keyId = mintJson?.data?.key_id;
-    keyPrefix = mintJson?.data?.key_prefix;
+    apiKey = useExternalBinding ? mintJson?.api_key?.plaintext : mintJson?.data?.api_key;
+    keyId = useExternalBinding ? mintJson?.api_key?.key_id : mintJson?.data?.key_id;
+    keyPrefix = useExternalBinding ? mintJson?.api_key?.key_prefix : mintJson?.data?.key_prefix;
+    bindingId = useExternalBinding ? mintJson?.binding_id : undefined;
     // Both api_key AND key_id are required: api_key is what we persist
     // for the bot to use; key_id is what the orphan-cleanup DELETE
     // below targets if persistence then fails. Treating a missing
@@ -413,12 +453,14 @@ router.get('/callback', rateLimit, async (req, res) => {
     // so an upstream contract drift to numeric/object can't poison
     // db.setGuildApiKey or the encodeURIComponent in the DELETE URL.
     // PR #177 follow-up C.3 + round-9 review item #4.
-    if (typeof apiKey !== 'string' || !apiKey
-        || typeof keyId !== 'string' || !keyId) {
+    if (typeof apiKey !== 'string' || !apiKey || typeof keyId !== 'string' || !keyId
+        || (useExternalBinding && (!/^key_[A-Za-z0-9]{12}$/.test(keyId)
+          || typeof bindingId !== 'string' || !/^eib_[A-Za-z0-9]{11}$/.test(bindingId)))) {
       logger.error('qURL API key response missing or non-string required fields', {
         guildId,
         apiKeyType: typeof apiKey,
         keyIdType: typeof keyId,
+        bindingIdType: typeof bindingId,
       });
       return renderError(res, 502, 'Could not provision qURL key',
         'qurl-service returned an unexpected response. Please contact your layerv.ai admin.');
@@ -434,38 +476,32 @@ router.get('/callback', rateLimit, async (req, res) => {
       'A network error occurred while provisioning your qURL key. Please run /qurl setup again.');
   }
 
-  // 3. Persist the key. setGuildApiKey is idempotent (upsert) — the
-  //    previous key (if any) remains valid on qurl-service until the
-  //    admin manually revokes it via layerv.ai.
+  // 3. Persist the key. Private credentials must store the audience key ID and
+  //    binding together. The public path cannot overwrite a live binding.
+  // TODO(#1366): enforce durable qURL owner identity before cross-owner rebind.
   try {
-    await db.setGuildApiKey(guildId, apiKey, discordUserId);
+    await db.setGuildApiKey(
+      guildId,
+      apiKey,
+      discordUserId,
+      bindingId ? { keyId, bindingId } : undefined,
+    );
   } catch (err) {
     logger.error('Failed to persist guild API key after successful mint', {
       error: err?.message, guildId, discordUserId, keyId,
     });
-    // Key was minted but not stored. Best-effort delete on qurl-service
-    // so retries don't pile up orphan keys under the admin's account.
-    // Fire-and-forget — even if the cleanup fails, the user-facing 500
-    // response below is the right outcome (admin runs /qurl setup
-    // again to retry; the orphan only persists if delete also fails).
-    // `keyId` is guaranteed non-empty here — the missing-key_id 502
-    // earlier in the handler returned before this block can run, so
-    // the historical `if (keyId)` guard was dead code (round-9 #5).
-    fetch(`${config.QURL_ENDPOINT}/v1/api-keys/${encodeURIComponent(keyId)}`, {
-      method: 'DELETE',
-      headers: { 'Authorization': `Bearer ${accessToken}` },
-      signal: AbortSignal.timeout(ORPHAN_DELETE_TIMEOUT_MS),
-    })
-      .then((r) => {
-        if (!r.ok) {
-          logger.warn('Best-effort orphan-key delete returned non-ok', {
-            status: r.status, keyId, guildId,
-          });
-        }
-      })
-      .catch((dErr) => logger.warn('Best-effort orphan-key delete threw', {
-        error: dErr?.message, keyId, guildId,
-      }));
+    // Key was minted but not stored. Private setup must remove the binding,
+    // which also releases its reserved provider identity; deleting only the
+    // child API key can leave the next setup blocked by a binding conflict.
+    // Public setup still owns only an API key, so it keeps that delete target.
+    // Await one exact retry after a transport-unknown result or 5xx. DELETE
+    // is idempotent, and 404 confirms that another attempt completed cleanup.
+    await deleteOrphanCredential({ accessToken, bindingId, keyId, guildId });
+    if (!bindingId && err?.name === 'ConditionalCheckFailedException') {
+      return renderError(res, 409, 'Existing qURL connection kept',
+        'This server already has a private qURL binding. Repeating setup will not replace it. '
+        + 'Contact your operator to change the binding.', false);
+    }
     return renderError(res, 500, 'qURL key provisioned but not stored',
       'Your qURL API key was created but the bot could not save it. Please run /qurl setup again. '
       + 'If this keeps happening, contact your layerv.ai admin.');
@@ -473,9 +509,50 @@ router.get('/callback', rateLimit, async (req, res) => {
   logger.info('qURL OAuth setup complete', {
     guildId, configuredBy: discordUserId, keyPrefix,
   });
+  // Audit evidence must never break setup. Compute only after persistence,
+  // on the path that emits it. A fingerprint is never emitted without its
+  // epoch; an epoch without a fingerprint is expected when no verified Auth0
+  // subject was available and is inert for owner comparisons.
+  let qurlAccountSubjectFingerprint = null;
+  let qurlAccountFingerprintEpoch = null;
+  try {
+    if (qurlAccountSubject) {
+      qurlAccountSubjectFingerprint = fingerprintQurlAccountSubject(
+        qurlAccountSubject,
+      );
+    }
+    qurlAccountFingerprintEpoch = qurlAccountFingerprintKeyEpoch();
+  } catch (err) {
+    qurlAccountSubjectFingerprint = null;
+    qurlAccountFingerprintEpoch = null;
+    logger.warn('qURL OAuth audit fingerprint unavailable (setup continues)', {
+      error: err?.message,
+      guildId,
+    });
+  }
+  // Interim #1366 evidence: compare this keyed, pseudonymous fingerprint
+  // across bind events to detect qURL-owner changes. The id_token is
+  // JWKS-verified but not nonce-bound, so this is observability only; durable
+  // owner identity and fail-closed comparison belong in #1366.
+  try {
+    logger.audit(AUDIT_EVENTS.QURL_GUILD_KEY_CONFIGURED, {
+      guild_id: guildId,
+      configured_by: discordUserId,
+      // Prefix is already shown in the success page and info log; including it
+      // makes this forensic event self-contained without exposing the API key.
+      key_prefix: keyPrefix || null,
+      qurl_account_subject_fingerprint: qurlAccountSubjectFingerprint,
+      qurl_account_fingerprint_key_epoch: qurlAccountFingerprintEpoch,
+    });
+  } catch (err) {
+    logger.warn('qURL OAuth audit emission failed (setup continues)', {
+      error: err?.message,
+      guildId,
+    });
+  }
 
-  // 3a. Register a per-guild qurl.accessed webhook subscription (BYOK
-  //     view counter). Fire-and-forget via the centralized helper.
+  // 3a. Link webhook view counting: reuse the default owner or provision
+  //     a BYOK subscription. Fire-and-forget via the centralized helper.
   fireAndForgetLinkGuildWebhookSubscription({
     guildId, apiKey, via: 'oauth', configuredBy: discordUserId,
   });
@@ -497,3 +574,7 @@ router.get('/callback', rateLimit, async (req, res) => {
 });
 
 module.exports = router;
+
+if (process.env.NODE_ENV === 'test') {
+  module.exports.__testExports = { deleteOrphanCredential };
+}

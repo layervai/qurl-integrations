@@ -188,12 +188,18 @@ jest.mock('../src/places', () => mockPlacesModule);
 
 const crypto = require('crypto');
 const originalRandomBytes = crypto.randomBytes;
+const originalRandomUUID = crypto.randomUUID;
 const MOCK_NONCE = 'deadbeef01234567';
 crypto.randomBytes = jest.fn((size) => {
   if (size === 8) return Buffer.from(MOCK_NONCE, 'hex');
   return originalRandomBytes(size);
 });
 crypto.randomUUID = jest.fn(() => 'mock-uuid-9999');
+
+afterAll(() => {
+  crypto.randomBytes = originalRandomBytes;
+  crypto.randomUUID = originalRandomUUID;
+});
 
 const { commands, handleCommand, _test } = require('../src/commands');
 const { sendCooldowns, setCooldown, isGoogleMapsURL } = _test;

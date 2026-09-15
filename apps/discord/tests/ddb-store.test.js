@@ -13,9 +13,18 @@ jest.mock('../src/logger', () => ({
   audit: jest.fn(),
 }));
 
-const mockEncryptStrict = jest.fn((v) => `enc:v1:IV:TAG:${Buffer.from(v || '').toString('hex')}`);
+// Mock crypto wrapper: pass-through so tests can assert on plaintext
+// that flows into the DDB Item. Real encryption + the encryptStrict
+// fail-closed behavior are exercised by crypto.test.js. encryptStrict
+// is a jest.fn so the no-KEK regression test below can override its
+// implementation per-call without a shared mutable flag.
+function mockCiphertext(value) {
+  return `enc:v1:IV:TAG:${Buffer.from(value || '').toString('hex')}`;
+}
+
+const mockEncryptStrict = jest.fn(mockCiphertext);
 jest.mock('../src/utils/crypto', () => ({
-  encrypt: (v) => `enc:v1:IV:TAG:${Buffer.from(v || '').toString('hex')}`,
+  encrypt: mockCiphertext,
   encryptStrict: mockEncryptStrict,
   decrypt: (v) => {
     if (!v || !v.startsWith('enc:v1:')) return v;
@@ -45,11 +54,22 @@ process.env.AWS_REGION = 'us-east-2';
 
 const store = require('../src/store/ddb-store');
 const logger = require('../src/logger');
+const { AUDIT_EVENTS } = require('../src/constants');
+
+function defaultOwnerArgs(overrides = {}) {
+  return {
+    webhookOwnerId: 'usr_default',
+    expectedDefaultWebhookSecret: 'whsec_default',
+    expectedApiKey: 'lv_default_alias',
+    ...overrides,
+  };
+}
 
 beforeEach(() => {
+  logger.audit.mockClear();
   ddbMock.reset();
   mockEncryptStrict.mockReset();
-  mockEncryptStrict.mockImplementation((v) => `enc:v1:IV:TAG:${Buffer.from(v || '').toString('hex')}`);
+  mockEncryptStrict.mockImplementation(mockCiphertext);
 });
 
 afterAll(async () => {
@@ -67,8 +87,52 @@ describe('guild configs', () => {
     expect(input.ExpressionAttributeValues[':b']).toBe('configurer');
     expect(input.ExpressionAttributeValues[':u']).toBeDefined();
     expect(input.UpdateExpression).toMatch(/if_not_exists\(configured_at, :u\)/);
+    expect(input.UpdateExpression).toMatch(/REMOVE qurl_api_key_id, qurl_binding_id/);
+    expect(input.ConditionExpression).toBe('attribute_not_exists(qurl_binding_id)');
     expect(input.UpdateExpression).not.toMatch(/, configured_at = :u\b/);
     expect(input.UpdateExpression).not.toMatch(/^SET configured_at = :u\b/);
+    expect(input.ReturnValues).toBe('UPDATED_OLD');
+  });
+
+  test('setGuildApiKey: audits when configured_by changes on an existing guild', async () => {
+    ddbMock.on(UpdateCommand).resolves({ Attributes: {
+      configured_by: 'old-admin',
+      qurl_api_key: 'enc:v1:IV:TAG:deadbeef',
+      updated_at: '2026-09-10T00:00:00Z',
+    } });
+    await store.setGuildApiKey('g-1', 'plain-key', 'new-admin');
+    expect(logger.audit).toHaveBeenCalledWith(AUDIT_EVENTS.QURL_SETUP_ADMIN_CHANGED, {
+      guild_id: 'g-1',
+      old_admin_id: 'old-admin',
+      new_admin_id: 'new-admin',
+    });
+  });
+
+  test('setGuildApiKey: does not audit first setup or same-admin re-key', async () => {
+    ddbMock.on(UpdateCommand)
+      .resolvesOnce({})
+      // UPDATED_OLD returns only the touched non-key attributes, never guild_id.
+      .resolvesOnce({ Attributes: { configured_by: 'admin', qurl_api_key: 'enc:v1:IV:TAG:deadbeef' } });
+    await store.setGuildApiKey('g-1', 'plain-key', 'admin');
+    await store.setGuildApiKey('g-1', 'plain-key-2', 'admin');
+    expect(logger.audit.mock.calls.map(([event]) => event))
+      .not.toContain(AUDIT_EVENTS.QURL_SETUP_ADMIN_CHANGED);
+  });
+
+  test('setGuildApiKey: audits a rebind of a configured row that lost configured_by', async () => {
+    ddbMock.on(UpdateCommand).resolves({ Attributes: { qurl_api_key: 'enc:v1:IV:TAG:deadbeef' } });
+    await store.setGuildApiKey('g-1', 'plain-key', 'new-admin');
+    expect(logger.audit).toHaveBeenCalledWith(AUDIT_EVENTS.QURL_SETUP_ADMIN_CHANGED, {
+      guild_id: 'g-1',
+      old_admin_id: null,
+      new_admin_id: 'new-admin',
+    });
+  });
+
+  test('setGuildApiKey: does not audit when the write rejects', async () => {
+    ddbMock.on(UpdateCommand).rejects(new Error('ddb down'));
+    await expect(store.setGuildApiKey('g-1', 'plain-key', 'new-admin')).rejects.toThrow('ddb down');
+    expect(logger.audit).not.toHaveBeenCalled();
   });
 
   test('getGuildApiKey: decrypts round-trip', async () => {
@@ -77,6 +141,34 @@ describe('guild configs', () => {
     });
     const result = await store.getGuildApiKey('g-1');
     expect(result).toBe('plain-key');
+  });
+
+  test('external binding credentials persist and read as one guild record', async () => {
+    ddbMock.on(UpdateCommand).resolves({});
+    await store.setGuildApiKey('g-1', 'plain-key', 'configurer', {
+      keyId: 'key_A1b2C3d4E5f6',
+      bindingId: 'eib_A1b2C3d4E5f',
+    });
+    const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
+    expect(input.ExpressionAttributeValues).toMatchObject({
+      ':kid': 'key_A1b2C3d4E5f6',
+      ':bid': 'eib_A1b2C3d4E5f',
+    });
+    expect(input.ExpressionAttributeValues[':k']).not.toContain('plain-key');
+    expect(input.UpdateExpression).not.toContain(' REMOVE ');
+    expect(input.ConditionExpression).toBeUndefined();
+
+    ddbMock.reset();
+    ddbMock.on(GetCommand).resolves({ Item: {
+      qurl_api_key: `enc:v1:IV:TAG:${Buffer.from('plain-key').toString('hex')}`,
+      qurl_api_key_id: 'key_A1b2C3d4E5f6',
+      qurl_binding_id: 'eib_A1b2C3d4E5f',
+    } });
+    await expect(store.getGuildQurlCredential('g-1')).resolves.toEqual({
+      apiKey: 'plain-key',
+      keyId: 'key_A1b2C3d4E5f6',
+      bindingId: 'eib_A1b2C3d4E5f',
+    });
   });
 
   test('getGuildConfig: strips qurl_api_key from returned object', async () => {
@@ -88,7 +180,11 @@ describe('guild configs', () => {
     expect(result).toMatchObject({ guild_id: 'g-1', configured_by: 'admin' });
   });
 
-  test('propagateGuildWebhookSubscription: swallows ConditionalCheckFailedException as benign', async () => {
+  test('propagateGuildWebhookSubscription: counts an owner-only conversion race as skipped', async () => {
+    // Scenario: between listGuildSubscriptionsByOwner returning the
+    // sibling row and the UpdateCommand executing, another path converted the
+    // sibling to an owner-only default mapping. DDB evaluates the full CAS
+    // against that live state and rejects with CCFE, so the conversion survives.
     ddbMock.on(ScanCommand).resolves({ Items: [
       { guild_id: 'g_sibling', webhook_id: 'wh_x', webhook_owner_id: 'usr_o' },
     ] });
@@ -98,7 +194,15 @@ describe('guild configs', () => {
     const result = await store.propagateGuildWebhookSubscription('usr_o', {
       webhookId: 'wh_new', webhookSecret: 'sec_new',
     });
-    expect(result).toEqual({ updated: 0, failed: 0 });
+    expect(result).toEqual({ updated: 0, failed: 0, skipped: 1 });
+    const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
+    expect(input.ConditionExpression).toBe(
+      'webhook_owner_id = :expectedOwner AND webhook_id = :expectedWebhookId',
+    );
+    expect(input.ExpressionAttributeValues).toMatchObject({
+      ':expectedOwner': 'usr_o',
+      ':expectedWebhookId': 'wh_x',
+    });
   });
 
   test('propagateGuildWebhookSubscription: non-CCFE errors are counted as failed', async () => {
@@ -109,7 +213,7 @@ describe('guild configs', () => {
     const result = await store.propagateGuildWebhookSubscription('usr_o', {
       webhookId: 'wh_new', webhookSecret: 'sec_new',
     });
-    expect(result).toEqual({ updated: 0, failed: 1 });
+    expect(result).toEqual({ updated: 0, failed: 1, skipped: 0 });
   });
 
   test('setGuildWebhookSubscription: rejects with CCFE when qurl_api_key row does not exist (orphan guard)', async () => {
@@ -127,6 +231,349 @@ describe('guild configs', () => {
       .toMatch(/attribute_exists\(qurl_api_key\)/);
   });
 
+  test('setGuildDefaultWebhookOwner: records only the owner when a copied secret matches the default', async () => {
+    const storedDefaultSecret = mockCiphertext('whsec_default');
+    ddbMock.on(GetCommand).resolves({
+      Item: {
+        guild_id: 'g_default',
+        qurl_api_key: mockCiphertext('lv_default_alias'),
+        webhook_owner_id: 'usr_default',
+        webhook_id: 'wh_default',
+        webhook_secret: storedDefaultSecret,
+      },
+    });
+    ddbMock.on(UpdateCommand).resolves({});
+
+    await store.setGuildDefaultWebhookOwner('g_default', defaultOwnerArgs());
+
+    const getInput = ddbMock.commandCalls(GetCommand)[0].args[0].input;
+    expect(getInput).toMatchObject({
+      Key: { guild_id: 'g_default' },
+      ConsistentRead: true,
+    });
+    const calls = ddbMock.commandCalls(UpdateCommand);
+    expect(calls).toHaveLength(1);
+    const input = calls[0].args[0].input;
+    expect(input.Key).toEqual({ guild_id: 'g_default' });
+    expect(input.ConditionExpression).toBe(
+      'qurl_api_key = :storedApiKey AND webhook_secret = :storedSecret AND webhook_id = :storedWebhookId AND webhook_owner_id = :storedOwner',
+    );
+    expect(input.UpdateExpression).toBe(
+      'REMOVE webhook_id, webhook_secret SET webhook_owner_id = :woid, updated_at = :u',
+    );
+    expect(input.ExpressionAttributeValues).toMatchObject({
+      ':woid': 'usr_default',
+      ':u': expect.any(String),
+      ':storedSecret': storedDefaultSecret,
+      ':storedOwner': 'usr_default',
+      ':storedApiKey': mockCiphertext('lv_default_alias'),
+      ':storedWebhookId': 'wh_default',
+    });
+    expect(Object.values(input.ExpressionAttributeValues)).not.toContain('whsec_default');
+  });
+
+  test('setGuildDefaultWebhookOwner: leaves a mismatched legacy secret untouched', async () => {
+    ddbMock.on(GetCommand).resolves({
+      Item: {
+        guild_id: 'g_default',
+        qurl_api_key: mockCiphertext('lv_default_alias'),
+        webhook_owner_id: 'usr_default',
+        webhook_id: 'wh_default',
+        webhook_secret: mockCiphertext('whsec_active_rotation'),
+      },
+    });
+
+    await expect(store.setGuildDefaultWebhookOwner('g_default', defaultOwnerArgs()))
+      .rejects.toMatchObject({
+        code: 'DEFAULT_WEBHOOK_SECRET_CONFLICT',
+        message: expect.stringMatching(/does not match QURL_WEBHOOK_SECRET/),
+      });
+    expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
+  });
+
+  test('setGuildDefaultWebhookOwner: records the owner on a first-link API-key row', async () => {
+    const storedApiKey = mockCiphertext('lv_default_alias');
+    ddbMock.on(GetCommand).resolves({
+      Item: { guild_id: 'g_default', qurl_api_key: storedApiKey },
+    });
+    ddbMock.on(UpdateCommand).resolves({});
+
+    await store.setGuildDefaultWebhookOwner('g_default', defaultOwnerArgs());
+
+    const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
+    expect(input.ConditionExpression).toBe(
+      'qurl_api_key = :storedApiKey AND attribute_not_exists(webhook_secret) AND attribute_not_exists(webhook_id) AND attribute_not_exists(webhook_owner_id)',
+    );
+    expect(input.ExpressionAttributeValues).toMatchObject({
+      ':storedApiKey': storedApiKey,
+      ':woid': 'usr_default',
+    });
+  });
+
+  test('setGuildDefaultWebhookOwner: rejects malformed ownerless secret state', async () => {
+    ddbMock.on(GetCommand).resolves({
+      Item: {
+        guild_id: 'g_default',
+        qurl_api_key: mockCiphertext('lv_default_alias'),
+        webhook_secret: mockCiphertext('whsec_default'),
+      },
+    });
+
+    await expect(store.setGuildDefaultWebhookOwner('g_default', defaultOwnerArgs()))
+      .rejects.toMatchObject({
+        code: 'DEFAULT_WEBHOOK_OWNER_MISSING',
+        message: expect.stringMatching(/stored webhook secret has no owner/),
+      });
+    expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
+  });
+
+  test('setGuildDefaultWebhookOwner: normalizes malformed same-owner secret errors', async () => {
+    ddbMock.on(GetCommand).resolves({
+      Item: {
+        guild_id: 'g_default',
+        qurl_api_key: mockCiphertext('lv_default_alias'),
+        webhook_owner_id: 'usr_default',
+        webhook_secret: 'enc:v1:malformed',
+      },
+    });
+
+    await expect(store.setGuildDefaultWebhookOwner('g_default', defaultOwnerArgs()))
+      .rejects.toMatchObject({
+        code: 'DEFAULT_WEBHOOK_SECRET_CONFLICT',
+        message: expect.stringMatching(/could not be decrypted/),
+      });
+    expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
+  });
+
+  test.each([
+    ['guildId', '', defaultOwnerArgs()],
+    ['webhookOwnerId', 'g_default', defaultOwnerArgs({ webhookOwnerId: '' })],
+    ['expectedDefaultWebhookSecret', 'g_default', defaultOwnerArgs({ expectedDefaultWebhookSecret: '' })],
+    ['expectedApiKey', 'g_default', defaultOwnerArgs({ expectedApiKey: '' })],
+  ])('setGuildDefaultWebhookOwner validates %s', async (_field, guildId, args) => {
+    await expect(store.setGuildDefaultWebhookOwner(guildId, args))
+      .rejects.toThrow(/required/);
+    expect(ddbMock.commandCalls(GetCommand)).toHaveLength(0);
+    expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
+  });
+
+  test('setGuildDefaultWebhookOwner: leaves a concurrently re-keyed guild untouched', async () => {
+    ddbMock.on(GetCommand).resolves({
+      Item: {
+        guild_id: 'g_default',
+        qurl_api_key: mockCiphertext('lv_new_owner'),
+      },
+    });
+
+    await expect(store.setGuildDefaultWebhookOwner(
+      'g_default', defaultOwnerArgs({ expectedApiKey: 'lv_old_default_alias' }),
+    )).rejects.toMatchObject({
+      code: 'DEFAULT_WEBHOOK_OWNER_KEY_CHANGED',
+      message: expect.stringMatching(/API key changed during owner resolution/),
+    });
+    expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
+  });
+
+  test('setGuildDefaultWebhookOwner: codes a missing guild row as a key change', async () => {
+    ddbMock.on(GetCommand).resolves({});
+
+    await expect(store.setGuildDefaultWebhookOwner('g_default', defaultOwnerArgs()))
+      .rejects.toMatchObject({ code: 'DEFAULT_WEBHOOK_OWNER_KEY_CHANGED' });
+    expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
+  });
+
+  test('setGuildDefaultWebhookOwner: codes an undecryptable guild API key', async () => {
+    ddbMock.on(GetCommand).resolves({
+      Item: { guild_id: 'g_default', qurl_api_key: 'enc:v1:malformed' },
+    });
+
+    await expect(store.setGuildDefaultWebhookOwner('g_default', defaultOwnerArgs()))
+      .rejects.toMatchObject({
+        code: 'DEFAULT_WEBHOOK_OWNER_KEY_INVALID',
+        message: expect.stringMatching(/could not be decrypted/),
+      });
+    expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
+  });
+
+  test('setGuildDefaultWebhookOwner: replaces superseded state from a different owner', async () => {
+    const storedOtherSecret = 'enc:v1:malformed';
+    const storedApiKey = mockCiphertext('lv_default_alias');
+    ddbMock.on(GetCommand).resolves({
+      Item: {
+        guild_id: 'g_default',
+        qurl_api_key: storedApiKey,
+        webhook_owner_id: 'usr_other',
+        webhook_id: 'wh_other',
+        webhook_secret: storedOtherSecret,
+      },
+    });
+    ddbMock.on(UpdateCommand).resolves({});
+
+    await store.setGuildDefaultWebhookOwner('g_default', defaultOwnerArgs());
+
+    const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
+    expect(input.ExpressionAttributeValues).toMatchObject({
+      ':storedApiKey': storedApiKey,
+      ':storedOwner': 'usr_other',
+      ':storedSecret': storedOtherSecret,
+      ':woid': 'usr_default',
+    });
+  });
+
+  test('setGuildDefaultWebhookOwner: retries only the ciphertext after same-key re-encryption', async () => {
+    const first = mockCiphertext('lv_default_alias');
+    const latest = first.replace(':IV:', ':OTHER_IV:');
+    ddbMock.on(GetCommand)
+      .resolvesOnce({ Item: { guild_id: 'g_default', qurl_api_key: first } })
+      .resolvesOnce({ Item: { guild_id: 'g_default', qurl_api_key: latest } });
+    ddbMock.on(UpdateCommand)
+      .rejectsOnce(Object.assign(new Error('raced'), { name: 'ConditionalCheckFailedException' }))
+      .resolvesOnce({});
+    await expect(store.setGuildDefaultWebhookOwner('g_default', defaultOwnerArgs()))
+      .resolves.toBeUndefined();
+    const updates = ddbMock.commandCalls(UpdateCommand).map(call => call.args[0].input);
+    expect(updates).toHaveLength(2);
+    expect(updates[1]).toEqual({
+      ...updates[0],
+      ExpressionAttributeValues: { ...updates[0].ExpressionAttributeValues, ':storedApiKey': latest },
+    });
+  });
+
+  test('setGuildDefaultWebhookOwner: accepts a concurrent identical conversion', async () => {
+    const storedApiKey = mockCiphertext('lv_default_alias');
+    ddbMock.on(GetCommand)
+      .resolvesOnce({
+        Item: {
+          guild_id: 'g_default',
+          qurl_api_key: storedApiKey,
+          webhook_owner_id: 'usr_default',
+          webhook_id: 'wh_default',
+          webhook_secret: mockCiphertext('whsec_default'),
+        },
+      })
+      .resolvesOnce({
+        Item: {
+          guild_id: 'g_default',
+          qurl_api_key: storedApiKey,
+          webhook_owner_id: 'usr_default',
+        },
+      });
+    const ccfe = Object.assign(new Error('raced'), { name: 'ConditionalCheckFailedException' });
+    ddbMock.on(UpdateCommand).rejects(ccfe);
+
+    await expect(store.setGuildDefaultWebhookOwner('g_default', defaultOwnerArgs()))
+      .resolves.toBeUndefined();
+    expect(ddbMock.commandCalls(GetCommand)).toHaveLength(2);
+  });
+
+  test.each([
+    ['owner changed', { webhook_owner_id: 'usr_new_owner' }],
+    ['webhook ID remains', { webhook_owner_id: 'usr_default', webhook_id: 'wh_leftover' }],
+    ['webhook secret remains', {
+      webhook_owner_id: 'usr_default',
+      webhook_secret: mockCiphertext('whsec_leftover'),
+    }],
+    ['an empty webhook attribute remains', { webhook_owner_id: 'usr_default', webhook_id: '' }],
+  ])('setGuildDefaultWebhookOwner: rejects a CAS race when %s', async (_case, latestState) => {
+    const storedApiKey = mockCiphertext('lv_default_alias');
+    ddbMock.on(GetCommand)
+      .resolvesOnce({
+        Item: { guild_id: 'g_default', qurl_api_key: storedApiKey },
+      })
+      .resolvesOnce({
+        Item: {
+          guild_id: 'g_default',
+          qurl_api_key: storedApiKey,
+          ...latestState,
+        },
+      });
+    const ccfe = Object.assign(new Error('raced'), { name: 'ConditionalCheckFailedException' });
+    ddbMock.on(UpdateCommand).rejects(ccfe);
+
+    await expect(store.setGuildDefaultWebhookOwner('g_default', defaultOwnerArgs()))
+      .rejects.toBe(ccfe);
+    const secondGet = ddbMock.commandCalls(GetCommand)[1].args[0].input;
+    expect(secondGet.ConsistentRead).toBe(true);
+  });
+
+  test('setGuildDefaultWebhookOwner: codes a concurrent re-key after the first read', async () => {
+    const storedApiKey = mockCiphertext('lv_default_alias');
+    ddbMock.on(GetCommand)
+      .resolvesOnce({ Item: { guild_id: 'g_default', qurl_api_key: storedApiKey } })
+      .resolvesOnce({
+        Item: {
+          guild_id: 'g_default',
+          qurl_api_key: mockCiphertext('lv_new_owner'),
+          webhook_owner_id: 'usr_default',
+        },
+      });
+    ddbMock.on(UpdateCommand).rejects(Object.assign(new Error('raced'), {
+      name: 'ConditionalCheckFailedException',
+    }));
+
+    await expect(store.setGuildDefaultWebhookOwner('g_default', defaultOwnerArgs()))
+      .rejects.toMatchObject({ code: 'DEFAULT_WEBHOOK_OWNER_KEY_CHANGED' });
+  });
+
+  test('setGuildDefaultWebhookOwner: codes malformed key state from the CAS re-read', async () => {
+    const storedApiKey = mockCiphertext('lv_default_alias');
+    ddbMock.on(GetCommand)
+      .resolvesOnce({ Item: { guild_id: 'g_default', qurl_api_key: storedApiKey } })
+      .resolvesOnce({
+        Item: {
+          guild_id: 'g_default',
+          qurl_api_key: 'enc:v1:malformed',
+          webhook_owner_id: 'usr_default',
+        },
+      });
+    ddbMock.on(UpdateCommand).rejects(Object.assign(new Error('raced'), {
+      name: 'ConditionalCheckFailedException',
+    }));
+
+    await expect(store.setGuildDefaultWebhookOwner('g_default', defaultOwnerArgs()))
+      .rejects.toMatchObject({ code: 'DEFAULT_WEBHOOK_OWNER_KEY_INVALID' });
+  });
+
+  test('setGuildDefaultWebhookOwner: passes through non-conditional update failures', async () => {
+    const storedApiKey = mockCiphertext('lv_default_alias');
+    ddbMock.on(GetCommand).resolves({
+      Item: { guild_id: 'g_default', qurl_api_key: storedApiKey },
+    });
+    const throttled = new Error('DDB throttled');
+    ddbMock.on(UpdateCommand).rejects(throttled);
+
+    await expect(store.setGuildDefaultWebhookOwner('g_default', defaultOwnerArgs()))
+      .rejects.toBe(throttled);
+    expect(ddbMock.commandCalls(GetCommand)).toHaveLength(1);
+  });
+
+  test('subscription readers exclude owner-only default mappings', async () => {
+    const ownerOnly = {
+      guild_id: 'g_default',
+      qurl_api_key: mockCiphertext('lv_default_alias'),
+      webhook_owner_id: 'usr_default',
+    };
+    const complete = {
+      guild_id: 'g_complete',
+      webhook_id: 'wh_complete',
+      webhook_secret: mockCiphertext('whsec_complete'),
+      webhook_owner_id: 'usr_default',
+      updated_at: '2026-09-04T00:00:00.000Z',
+    };
+    ddbMock.on(ScanCommand).resolves({ Items: [ownerOnly, complete] });
+
+    await expect(store.scanGuildSubscriptions()).resolves.toEqual([{
+      guildId: 'g_complete',
+      webhookId: 'wh_complete',
+      webhookSecret: 'whsec_complete',
+      webhookOwnerId: 'usr_default',
+      updatedAt: '2026-09-04T00:00:00.000Z',
+    }]);
+    await expect(store.listGuildSubscriptionsByOwner('usr_default')).resolves.toEqual([{
+      guildId: 'g_complete', webhookId: 'wh_complete',
+    }]);
+  });
+
   test('propagateGuildWebhookSubscription: excludes the just-written primary guild', async () => {
     ddbMock.on(ScanCommand).resolves({ Items: [
       { guild_id: 'g_primary', webhook_id: 'wh_p', webhook_owner_id: 'usr_admin' },
@@ -134,7 +581,9 @@ describe('guild configs', () => {
     const result = await store.propagateGuildWebhookSubscription('usr_admin', {
       webhookId: 'wh_p', webhookSecret: 'sec_p', excludeGuildId: 'g_primary',
     });
-    expect(result).toEqual({ updated: 0, failed: 0 });
+    expect(result).toEqual({ updated: 0, failed: 0, skipped: 0 });
+    // Short-circuit: no UpdateCommand fired for an "only excluded"
+    // result set.
     expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
   });
 });
@@ -1398,9 +1847,35 @@ describe('qurl sends', () => {
     const items = await store.getSendItems('s1', 'owner', { consistentRead: true });
     const query = ddbMock.commandCalls(QueryCommand)[0].args[0].input;
     expect(query.ConsistentRead).toBe(true);
+    // This is a base-table query with no ProjectionExpression, so DynamoDB
+    // returns every stored attribute, including the sparse qurl_id. Pin both
+    // properties: a future GSI/projection optimization must not silently drop
+    // the connector-child identity needed by revokeAllLinks.
+    expect(query.IndexName).toBeUndefined();
+    expect(query.ProjectionExpression).toBeUndefined();
     expect(items).toEqual([expect.objectContaining({
       resource_id: 'res-1', recipient_discord_id: 'r1', qurl_id: 'q_aaaaaaaaaa1',
     })]);
+  });
+
+  test('recordQURLSendBatch qurl_id round-trips through getSendItems for revoke', async () => {
+    ddbMock.on(BatchWriteCommand).resolves({});
+    await store.recordQURLSendBatch([{
+      sendId: 's1', senderDiscordId: 'owner', recipientDiscordId: 'r1',
+      resourceId: 'res-1', resourceType: 'file', qurlLink: 'https://…',
+      qurlId: 'q_aaaaaaaaaa1', expiresIn: '24h', channelId: 'ch', targetType: 'user',
+    }]);
+    const stored = ddbMock.commandCalls(BatchWriteCommand)[0]
+      .args[0].input.RequestItems['test-prefix-qurl-sends'][0].PutRequest.Item;
+    ddbMock.on(QueryCommand).resolves({ Items: [stored] });
+
+    await expect(store.getSendItems('s1', 'owner', { consistentRead: true }))
+      .resolves.toEqual([expect.objectContaining({
+        resource_id: 'res-1', recipient_discord_id: 'r1', qurl_id: 'q_aaaaaaaaaa1',
+      })]);
+    const query = ddbMock.commandCalls(QueryCommand)[0].args[0].input;
+    expect(query.IndexName).toBeUndefined();
+    expect(query.ProjectionExpression).toBeUndefined();
   });
 
   test('getSendItems: defaults to eventual consistency outside the revoke barrier path', async () => {
