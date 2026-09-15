@@ -31,6 +31,8 @@ func versionCmd(version string) *cobra.Command {
 				if strings.TrimSpace(os.Getenv(qurl.EnvDeploymentPath)) != "" {
 					return fmt.Errorf("release verification requires %s to be unset", qurl.EnvDeploymentPath)
 				}
+				// TODO(upstream-contract): qurl-go EnterPortal must resolve default
+				// trust before parsing; recheck this ordering when updating the SDK.
 				// An empty link reaches parsing only after default trust loads.
 				// It cannot request access or fetch content.
 				if _, err := qurl.EnterPortal(cmd.Context(), ""); !errors.Is(err, qurl.ErrFragment) {

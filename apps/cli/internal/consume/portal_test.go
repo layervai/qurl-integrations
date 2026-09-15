@@ -105,11 +105,11 @@ func envMap(env map[string]string) func(string) (string, bool) {
 }
 
 // The shipped production configuration must reach link validation with no
-// deployment override. An empty link fails before any network operation.
+// deployment override. The malformed fixture fails before any network operation.
 func TestGrantWithoutSettingsUsesProductionTrust(t *testing.T) {
 	t.Setenv(qurl.EnvDeploymentPath, "")
 	opener := &AccessOpener{LookupEnv: envMap(nil)}
-	_, err := opener.Grant(context.Background(), "")
+	_, err := opener.Grant(context.Background(), portalLink)
 	if !errors.Is(err, ErrLinkVerification) {
 		t.Fatalf("err = %v, want link validation after loading production trust", err)
 	}
