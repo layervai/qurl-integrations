@@ -849,6 +849,12 @@ jobs:
           brew install --cask "$token"
           installed="$(command -v qurl)"
           [[ -x "$installed" ]]
+          # CI may relax Gatekeeper, so a successful run alone is insufficient.
+          attributes=$(xattr "$(realpath "$installed")")
+          if grep -Fxq com.apple.quarantine <<<"$attributes"; then
+            echo "::error::Homebrew postflight left quarantine on the staged CLI" >&2
+            exit 1
+          fi
           # GoReleaser injects its v-stripped .Version into native archives.
           reported_version=$("$installed" version | awk 'NR == 1 { print $3 }')
           [[ "$reported_version" == "$release_version" ]] || {
