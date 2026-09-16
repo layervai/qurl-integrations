@@ -30,7 +30,7 @@ ever deletes shares whose Connector ID it minted.
 4. Fetches a sample end to end with `qurl get <CRID> --file -` (all N when
    N ≤ 100, otherwise 100 seeded-random plus the first and last 10). Each
    fetch must return this origin's nonce, a `request_id` the origin actually
-   logged for that `Host`, and a `Host` of `<connector routing id>.qurl.site.…`
+   logged for that `Host`, and a `Host` of `<connector routing id>.qurl.site` (with an environment suffix in sandbox)
    taken from the local registry. It also records the daemon's RSS, threads,
    open FDs, TCP sessions by remote port, and the machine's established TCP
    count.
@@ -68,7 +68,7 @@ share. It is **safe to interrupt**: Ctrl-C still writes the report (exit 130).
   is set. Sandbox still needs its own settings.
 - A `get`-capable binary for `--consume-qurl` (default: same as `--qurl`).
   The consume path only mints links and downloads; it never touches the
-  daemon, so a from-source build is safe there when the installed release
+  daemon, so a from-source build with `QURL_DEPLOYMENT` set is safe there when the installed release
   cannot mint links against the target environment.
 
 ## Run

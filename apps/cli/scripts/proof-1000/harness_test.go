@@ -335,6 +335,16 @@ func TestEnvironmentChildEnvAndPreflight(t *testing.T) {
 	if err := fake.preflight(context.Background(), &options{}); err != nil {
 		t.Fatalf("embedded release trust must permit native fetches: %v", err)
 	}
+	sandbox := fakeEnvironment(t, []fakeRule{
+		{Match: "version --verify-release-native-trust", Exit: 98},
+		{Match: "version", Stdout: "qurl version test"},
+		{Match: "whoami", Stdout: "owner"},
+		{Match: "list", Stdout: `{"resources":[],"has_more":false}`},
+	})
+	sandbox.DeploymentSet = true
+	if err := sandbox.preflight(context.Background(), &options{}); err != nil {
+		t.Fatalf("sandbox override must bypass embedded trust check: %v", err)
+	}
 	unauth := fakeEnvironment(t, []fakeRule{{Match: "version", Stdout: "qurl version 1\n"}, {Match: "whoami", Stderr: "Error: no credential\n", Exit: 4}})
 	if err := unauth.preflight(context.Background(), &options{skipVerify: true}); err == nil || !strings.Contains(err.Error(), "whoami") {
 		t.Fatalf("unauthenticated preflight = %v", err)
@@ -496,6 +506,13 @@ func TestFetchShareVerifiesOriginAnswer(t *testing.T) {
 	ok := fetchShare(context.Background(), env, o, &shareRecord{ID: "a", CRID: "crid-good", RoutingID: "c-1"})
 	if !ok.OK || !ok.HostChecked || !ok.HostOK || ok.APICalls != 1 {
 		t.Fatalf("good fetch = %+v", ok)
+	}
+	sandboxReq := httptest.NewRequest(http.MethodGet, "http://c-1.qurl.site.example/", http.NoBody)
+	sandboxResponse := httptest.NewRecorder()
+	o.ServeHTTP(sandboxResponse, sandboxReq)
+	sandboxEnv := fakeEnvironment(t, []fakeRule{{Match: "get crid-env", Stdout: sandboxResponse.Body.String()}})
+	if got := fetchShare(context.Background(), sandboxEnv, o, &shareRecord{ID: "env", CRID: "crid-env", RoutingID: "c-1"}); !got.OK {
+		t.Fatalf("environment routing host rejected: %+v", got)
 	}
 	stale := fetchShare(context.Background(), env, o, &shareRecord{ID: "b", CRID: "crid-stale", RoutingID: "c-2"})
 	if stale.OK || stale.NonceOK || stale.RequestSeen || stale.HostOK || stale.Diagnosis == nil || !strings.Contains(stale.Diagnosis.Detail, "mint failed") {
