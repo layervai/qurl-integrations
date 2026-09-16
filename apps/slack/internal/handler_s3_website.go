@@ -73,6 +73,7 @@ var (
 )
 
 type s3WebsiteInstallArgs struct {
+	Hub           TunnelHub
 	Slug          string
 	Alias         string
 	Environment   tunnelInstallEnvironment
@@ -606,6 +607,12 @@ func (h *Handler) buildS3WebsiteInstall(ctx context.Context, log *slog.Logger, t
 }
 
 func (h *Handler) prepareS3WebsiteInstallMessage(args *s3WebsiteInstallArgs) (preparedS3WebsiteInstallMessage, error) {
+	if err := h.cfg.TunnelHub.Validate(); err != nil {
+		return preparedS3WebsiteInstallMessage{}, err
+	}
+	copyArgs := *args
+	copyArgs.Hub = h.cfg.TunnelHub
+	args = &copyArgs
 	connectorImage := strings.TrimSpace(h.cfg.TunnelImage)
 	usingDefaultConnectorImage := connectorImage == ""
 	if usingDefaultConnectorImage {
@@ -852,7 +859,7 @@ docker run -d \
   %s daemon run \
     --state-dir /var/lib/qurl \
     --headless-config /etc/qurl/share.yaml \
-    --enrollment-token-file /run/secrets/qurl/enrollment-token`, renderPortablePipefailShell(), renderSudoDetectionShell(), shellSingleQuote(args.Slug), shellSingleQuote(args.Bucket), shellSingleQuote(args.Region), shellSingleQuote(args.Prefix), shellSingleQuote(args.IndexDocument), configYAML, renderBootstrapKeyPromptShell(), renderBootstrapKeyFileInstallShell(`"$SECRET_DIR/enrollment-token"`), shellSingleQuote(originImage), shellSingleQuote(endpoint), shellSingleQuote(connectorImage))
+    --enrollment-token-file /run/secrets/qurl/enrollment-token%s`, renderPortablePipefailShell(), renderSudoDetectionShell(), shellSingleQuote(args.Slug), shellSingleQuote(args.Bucket), shellSingleQuote(args.Region), shellSingleQuote(args.Prefix), shellSingleQuote(args.IndexDocument), configYAML, renderBootstrapKeyPromptShell(), renderBootstrapKeyFileInstallShell(`"$SECRET_DIR/enrollment-token"`), shellSingleQuote(originImage), shellSingleQuote(endpoint), shellSingleQuote(connectorImage), args.Hub.quotedFlags(" "))
 
 	block, err := slackCodeBlock(docker)
 	if err != nil {
@@ -945,7 +952,7 @@ services:
     security_opt:
       - 'no-new-privileges:true'
     entrypoint: ['/usr/local/bin/qurl']
-    command: ['daemon', 'run', '--state-dir', '/var/lib/qurl', '--headless-config', '/etc/qurl/share.yaml', '--enrollment-token-file', '/run/secrets/qurl/enrollment-token']
+    command: ['daemon', 'run', '--state-dir', '/var/lib/qurl', '--headless-config', '/etc/qurl/share.yaml', '--enrollment-token-file', '/run/secrets/qurl/enrollment-token'%s]
     network_mode: "service:${ORIGIN_SERVICE_NAME}"
     depends_on:
       %s:
@@ -958,7 +965,7 @@ services:
       QURL_ENDPOINT: ${QURL_ENDPOINT_YAML}
 QURL_COMPOSE_YAML_EOF
 
-docker compose -f "$QURL_COMPOSE_FILE" up -d`, renderPortablePipefailShell(), renderSudoDetectionShell(), shellSingleQuote(args.Slug), shellSingleQuote(quotedAPIURL), shellSingleQuote(originServiceName), configYAML, renderBootstrapKeyPromptShell(), renderBootstrapKeyFileInstallShell(`"$SECRET_DIR/enrollment-token"`), quotedOriginService, quotedOriginImage, quotedBucket, quotedRegion, quotedPrefix, quotedIndex, quotedSlug, quotedConnectorService, quotedConnectorImage, quotedOriginService)
+docker compose -f "$QURL_COMPOSE_FILE" up -d`, renderPortablePipefailShell(), renderSudoDetectionShell(), shellSingleQuote(args.Slug), shellSingleQuote(quotedAPIURL), shellSingleQuote(originServiceName), configYAML, renderBootstrapKeyPromptShell(), renderBootstrapKeyFileInstallShell(`"$SECRET_DIR/enrollment-token"`), quotedOriginService, quotedOriginImage, quotedBucket, quotedRegion, quotedPrefix, quotedIndex, quotedSlug, quotedConnectorService, quotedConnectorImage, args.Hub.quotedFlags(", "), quotedOriginService)
 
 	block, err := slackCodeBlock(compose)
 	if err != nil {
@@ -1032,7 +1039,7 @@ func renderS3WebsiteECSContainerJSON(args *s3WebsiteInstallArgs, connectorImage,
 			Name:                   connectorContainerName,
 			Image:                  connectorImage,
 			EntryPoint:             []string{"/usr/local/bin/qurl"},
-			Command:                []string{"daemon", "run", "--state-dir", "/var/lib/qurl-volume/state", "--headless-config", "/etc/qurl/share.yaml", "--enrollment-token-file", "/run/secrets/qurl/enrollment-token"},
+			Command:                append([]string{"daemon", "run", "--state-dir", "/var/lib/qurl-volume/state", "--headless-config", "/etc/qurl/share.yaml", "--enrollment-token-file", "/run/secrets/qurl/enrollment-token"}, args.Hub.flags()...),
 			User:                   ecsConnectorUser,
 			Essential:              true,
 			ReadonlyRootFilesystem: true,
@@ -1127,6 +1134,7 @@ QURL_K8S_YAML_EOF`, renderPortablePipefailShell(), shellSingleQuote(names.secret
         value: %s`, s3WebsiteOriginContainerName, quotedOriginImage, quotedBucket, quotedRegion, quotedPrefix, quotedIndex, quotedSlug)
 	patch := renderKubernetesConnectorPodSpec(&kubernetesConnectorPodSpecArgs{
 		precedingContainers: originContainer,
+		hubFlags:            args.Hub.quotedFlags(", "),
 		imageYAML:           quotedConnectorImage,
 		slugYAML:            quotedSlug,
 		endpointYAML:        quotedEndpoint,
