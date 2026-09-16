@@ -3547,11 +3547,12 @@ func TestRestartWithTargetMovesShareAtTheReturnedEpoch(t *testing.T) {
 
 func TestRestartRejectsNonLoopbackTargetBeforeAnyRequest(t *testing.T) {
 	for name, target := range map[string]string{
-		"remote host": "http://192.0.2.1:4000",
-		"https":       "https://127.0.0.1:4000",
-		"path":        "http://127.0.0.1:4000/app",
-		"credentials": "http://me:secret@127.0.0.1:4000",
-		"empty":       "",
+		"remote host":  "http://192.0.2.1:4000",
+		"remote query": "https://example.test/?token=private-retarget-token",
+		"https":        "https://127.0.0.1:4000",
+		"path":         "http://127.0.0.1:4000/app",
+		"credentials":  "http://me:secret@127.0.0.1:4000",
+		"empty":        "",
 	} {
 		t.Run(name, func(t *testing.T) {
 			srv := apitest.NewServer(t)
@@ -3584,6 +3585,9 @@ func TestRestartRejectsNonLoopbackTargetBeforeAnyRequest(t *testing.T) {
 			})
 			if res.code != exitcode.Usage || !strings.Contains(res.stderr.String(), "invalid target URL") {
 				t.Fatalf("exit=%d stderr=%q, want usage error", res.code, res.stderr.String())
+			}
+			if strings.Contains(res.stderr.String(), "private-retarget-token") {
+				t.Fatal("rejected target leaked its query")
 			}
 			if len(srv.Requests()) != 0 || preflights != 0 || daemon.ensures != 0 || daemon.reloads != 0 {
 				t.Fatalf("rejected target reached requests/preflight/daemon = %#v/%d/%+v", srv.Requests(), preflights, daemon)
@@ -3798,5 +3802,93 @@ func TestRestartWithTargetEqualToTheStoredTargetStillMovesTheRow(t *testing.T) {
 	}
 	if daemon.ensures != 1 || daemon.reloads != 0 {
 		t.Fatalf("daemon ensures/reloads = %d/%d, want 1/0", daemon.ensures, daemon.reloads)
+	}
+}
+
+func TestRestartRetargetServesNewOriginThroughRealConnector(t *testing.T) {
+	if testing.Short() {
+		t.Skip("real FRP daemon journey")
+	}
+	origin := func(body string) *httptest.Server {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, body) }))
+		t.Cleanup(server.Close)
+		return server
+	}
+	oldOrigin, newOrigin := origin("old-origin"), origin("new-origin")
+	srv := apitest.NewServer(t)
+	stateDir := connectorStateTestDir(t)
+	if err := connectorstate.EstablishExternalRuntimeMode(context.Background(), stateDir); err != nil {
+		t.Fatal(err)
+	}
+	registry, err := openOwnedTestShareRegistry(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seed := localShareFixture(srv)
+	target, err := restartTarget(oldOrigin.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seed.TargetURL, seed.LocalIP, seed.LocalPort = target.canonicalOrigin, target.localIP, target.localPort
+	seed.DesiredState = "on"
+	if err := registry.Put(context.Background(), &seed); err != nil {
+		t.Fatal(err)
+	}
+	frpsPort, vhostPort := reserveCmdTCPPort(t), reserveCmdTCPPort(t)
+	recorder := newCmdProxyRecorder(t)
+	startCmdFRPS(t, frpsPort, vhostPort, "hermetic.test", recorder.server.URL)
+	daemon := &journeyDaemon{registry: registry, admitter: &journeyAdmitter{host: "localhost:" + strconv.Itoa(frpsPort), serving: make(chan struct{})}, version: "test"}
+	t.Cleanup(daemon.close)
+	controller := startExternalJourneyDaemon(t, daemon, stateDir, srv.URL)
+	if err := controller.Ensure(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	expectBody := func(want string) {
+		t.Helper()
+		client := &http.Client{Timeout: 300 * time.Millisecond}
+		deadline := time.Now().Add(10 * time.Second)
+		var got string
+		for time.Now().Before(deadline) {
+			req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "http://127.0.0.1:"+strconv.Itoa(vhostPort)+"/", http.NoBody)
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Host = seed.ConnectorRoutingID + ".hermetic.test"
+			if response, err := client.Do(req); err == nil {
+				body, readErr := io.ReadAll(response.Body)
+				_ = response.Body.Close()
+				got = string(body)
+				if readErr == nil && response.StatusCode == http.StatusOK && got == want {
+					return
+				}
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		t.Fatalf("Connector response = %q, want %q", got, want)
+	}
+	expectBody("old-origin")
+	oldOrigin.Close()
+	path := "/v1/resources/" + srv.Key.CRID + "/sharing"
+	srv.Script(http.MethodGet, path, sharingResponse(t, srv, "on", seed.ServingEpoch, "serving"), sharingResponse(t, srv, "on", seed.ServingEpoch+1, "serving"))
+	srv.Script(http.MethodPost, path+"/restart", sharingResponse(t, srv, "on", seed.ServingEpoch+1, "connecting"))
+	res := runCLI(t, &runOpts{
+		args:          []string{"--endpoint", srv.URL, "restart", srv.Key.CRID, "--target", newOrigin.URL},
+		env:           map[string]string{"QURL_API_KEY": testAPIKey, connectorstate.EnvRuntimeSupervision: "external"},
+		shareRegistry: registry, shareDaemon: controller, shareStateDir: stateDir, sharingWaitLimit: 10 * time.Second,
+	})
+	if res.code != 0 {
+		t.Fatalf("restart exit=%d stderr=%s", res.code, res.stderr.String())
+	}
+	expectBody("new-origin")
+	stored, err := registry.Get(context.Background(), seed.CRID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.CRID != seed.CRID || stored.ResourceID != seed.ResourceID || stored.ConnectorID != seed.ConnectorID || stored.ConnectorRoutingID != seed.ConnectorRoutingID || stored.ServingEpoch != seed.ServingEpoch+1 || stored.TargetURL != newOrigin.URL {
+		t.Fatalf("retarget changed identity or did not persist the new target: %+v", stored)
+	}
+	requests := srv.Requests()
+	if len(requests) != 3 || requests[0].Method != http.MethodGet || requests[1].Method != http.MethodPost || requests[2].Method != http.MethodGet {
+		t.Fatalf("unexpected resource creation or API requests: %#v", requests)
 	}
 }

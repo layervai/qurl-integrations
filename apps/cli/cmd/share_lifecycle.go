@@ -104,7 +104,7 @@ func restartTarget(raw string) (*publishTarget, error) {
 		return nil, err
 	}
 	if target.kind != publishTargetLocal {
-		return nil, invalidPublishTarget(fmt.Errorf("a local share can only move to a loopback HTTP origin such as http://127.0.0.1:4000, not %q", raw))
+		return nil, invalidPublishTarget(errors.New("a local share can only move to a loopback HTTP origin such as http://127.0.0.1:4000"))
 	}
 	return target, nil
 }
@@ -254,9 +254,6 @@ func changeShareState(ctx context.Context, opts *globalOpts, id, action string, 
 				fmt.Errorf("restart answered desired state %q for a target move, want on", sharing.DesiredState),
 				compensateOff, client, registry, local, sharing)
 		}
-		// TODO(upstream-contract): SessionGroupRunner.SetRoutes must reconcile a
-		// changed LocalIP/LocalPort for an existing RouteID (qurl-connector's
-		// TestSessionGroupRunnerSetRoutesChangesProxiesWithoutReadmission pins it).
 		updated, updateErr = registry.Retarget(ctx, local.ResourceID,
 			connectorstate.LocalTarget{URL: target.canonicalOrigin, IP: target.localIP, Port: target.localPort}, sharing.ServingEpoch)
 	} else {

@@ -527,19 +527,9 @@ func (m *Manager) recordDesired(desired []connectorstate.LocalShare) ([]restartE
 			// Target changes may recover a refused route. Header changes do
 			// not change its platform authorization and must retain backoff.
 			//
-			// TODO(upstream-contract): a changed LocalIP/LocalPort keeps the same
-			// RouteID and reaches the live group through SetRoutes below, so
-			// SessionGroupRunner.SetRoutes must reconcile a definition change for
-			// an existing RouteID (qurl-connector's
-			// TestSessionGroupRunnerSetRoutesChangesProxiesWithoutReadmission pins
-			// it). If it ever diffs by RouteID alone the move is silent and this
-			// repo cannot see it: the cloud advances the epoch, the CLI prints the
-			// new target and exits 0, no OnRouteServing fires for the unchanged
-			// RouteID, and the user keeps reaching the old port. The local symptom
-			// to pull on is a diagnostic stuck on starting with no retry scheduled.
-			// A local guard is not available here: RouteStates reports the live
-			// session's routes, which lag a SetRoutes return, so comparing them
-			// right after a push would fail every ordinary move.
+			// SetRoutes replaces the existing route definition in Connector.
+			// TestRestartRetargetServesNewOriginThroughRealConnector exercises
+			// that contract through the CLI and a live local FRP server.
 			next.retryAt = time.Time{}
 		}
 		m.tracked[share.ResourceID] = next
