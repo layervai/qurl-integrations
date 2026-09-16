@@ -22,6 +22,7 @@ const {
   createGatewayWsShim,
   MAX_IDENTIFY_ATTEMPTS,
   DEFAULT_CONNECT_TIMEOUT_MS,
+  MAX_USER_GUILDS_PAGES,
   VERIFIED_DJS_WS_VERSION,
 } = require('../src/gateway-ws-shim');
 const {
@@ -83,7 +84,7 @@ function makeFakeIdentifyThrottlerCtor() {
 function makeFakeRESTCtor() {
   const instances = [];
   function FakeREST() {
-    const inst = { token: null, setToken: jest.fn() };
+    const inst = { token: null, setToken: jest.fn(), get: jest.fn() };
     inst.setToken.mockImplementation((t) => {
       inst.token = t;
       return inst;
@@ -276,6 +277,363 @@ describe('Pillar 3 manager contract — connect() + connection state', () => {
     expect(typeof shim.connect).toBe('function');
     expect(typeof shim.isConnected).toBe('function');
     expect(typeof shim.isRecovering).toBe('function');
+    expect(typeof shim.getGatewayHeartbeatState).toBe('function');
+    expect(typeof shim.getActiveGuildCount).toBe('function');
+  });
+
+  it('mirrors manager HeartbeatComplete state for the positive-signal alarm', async () => {
+    const { shim, managerInstances } = makeShim();
+    await shim.start({ connect: false });
+    const manager = managerInstances[0];
+
+    expect(shim.getGatewayHeartbeatState()).toBe(null);
+
+    manager.emit(WebSocketShardEvents.Ready, { data: {}, shardId: 0 });
+    manager.emit(WebSocketShardEvents.Dispatch, {
+      data: { t: 'READY', d: { application: { id: 'app-1' } } },
+      shardId: 0,
+    });
+    manager.emit(WebSocketShardEvents.HeartbeatComplete, {
+      ackAt: 1_700_000_005_000,
+      heartbeatAt: 1_700_000_004_950,
+      latency: 50,
+      shardId: 0,
+    });
+
+    expect(shim.getGatewayHeartbeatState()).toEqual({
+      isReady: true,
+      pingMs: 50,
+      lastHeartbeatAckAt: 1_700_000_005_000,
+    });
+
+    manager.emit(WebSocketShardEvents.Closed, { code: 1006, shardId: 0 });
+    expect(shim.getGatewayHeartbeatState()).toBe(null);
+
+    manager.emit(WebSocketShardEvents.Resumed, { shardId: 0 });
+    expect(shim.getGatewayHeartbeatState()).toBe(null);
+  });
+
+  it('ignores a missing HeartbeatComplete payload without crashing the manager', async () => {
+    const { shim, managerInstances } = makeShim();
+    await shim.start({ connect: false });
+    const manager = managerInstances[0];
+
+    expect(() => manager.emit(WebSocketShardEvents.HeartbeatComplete)).not.toThrow();
+    expect(() => manager.emit(WebSocketShardEvents.HeartbeatComplete, null)).not.toThrow();
+    expect(shim.getGatewayHeartbeatState()).toBe(null);
+  });
+
+  it('treats a partial HeartbeatComplete payload as no opinion, not unhealthy', async () => {
+    const { shim, managerInstances } = makeShim();
+    await shim.start({ connect: false });
+    const manager = managerInstances[0];
+    manager.emit(WebSocketShardEvents.Ready, { data: {}, shardId: 0 });
+
+    // A fresh ackAt without latency must not pair with the -1 sentinel.
+    manager.emit(WebSocketShardEvents.HeartbeatComplete, { ackAt: 1_700_000_005_000, shardId: 0 });
+    expect(shim.getGatewayHeartbeatState()).toBe(null);
+    manager.emit(WebSocketShardEvents.HeartbeatComplete, { ackAt: 1_700_000_005_000, latency: -1, shardId: 0 });
+    expect(shim.getGatewayHeartbeatState()).toBe(null);
+  });
+
+  it('leaves guild state unknown when READY omits the guilds array', async () => {
+    const { shim, managerInstances, restInstances } = makeShim();
+    await shim.start({ connect: false });
+    const manager = managerInstances[0];
+    restInstances[0].get.mockResolvedValueOnce([{ id: 'g1' }, { id: 'g2' }]);
+    manager.emit(WebSocketShardEvents.Ready, { data: {}, shardId: 0 });
+    manager.emit(WebSocketShardEvents.Dispatch, {
+      data: { t: 'READY', d: { application: { id: 'app-1' } } }, shardId: 0,
+    });
+
+    // Malformed READY must not publish a fabricated 0; the REST seed answers.
+    expect(await shim.getActiveGuildCount()).toBe(2);
+    expect(restInstances[0].get).toHaveBeenCalledTimes(1);
+  });
+
+  it('tracks an exact active-guild count from READY and later guild lifecycle dispatches', async () => {
+    const { shim, managerInstances, restInstances } = makeShim();
+    const dispatchHandler = jest.fn();
+    shim.onDispatch(dispatchHandler);
+    await shim.start({ connect: false });
+    const manager = managerInstances[0];
+    manager.emit(WebSocketShardEvents.Ready, { data: {}, shardId: 0 });
+    manager.emit(WebSocketShardEvents.Dispatch, {
+      data: {
+        t: 'READY',
+        d: { application: { id: 'app-1' }, guilds: [{ id: 'g1' }, { id: 'g2' }] },
+      },
+      shardId: 0,
+    });
+
+    expect(await shim.getActiveGuildCount()).toBe(2);
+    expect(restInstances[0].get).not.toHaveBeenCalled();
+
+    manager.emit(WebSocketShardEvents.Dispatch, {
+      data: { t: 'GUILD_CREATE', d: { id: 'g3' } }, shardId: 0,
+    });
+    manager.emit(WebSocketShardEvents.Dispatch, {
+      data: { t: 'GUILD_DELETE', d: { id: 'g1', unavailable: false } }, shardId: 0,
+    });
+    manager.emit(WebSocketShardEvents.Dispatch, {
+      data: { t: 'GUILD_DELETE', d: { id: 'g2', unavailable: true } }, shardId: 0,
+    });
+    // Real "bot removed from guild" payloads omit `unavailable` entirely.
+    manager.emit(WebSocketShardEvents.Dispatch, {
+      data: { t: 'GUILD_DELETE', d: { id: 'g3' } }, shardId: 0,
+    });
+
+    expect(await shim.getActiveGuildCount()).toBe(1);
+    expect(dispatchHandler.mock.calls.map(([payload]) => payload.data.t)).toEqual([
+      'READY', 'GUILD_CREATE', 'GUILD_DELETE', 'GUILD_DELETE', 'GUILD_DELETE',
+    ]);
+  });
+
+  it('prefers a READY snapshot that lands while a pure-RESUME REST seed is in flight', async () => {
+    let resolvePage;
+    const page = new Promise((resolve) => { resolvePage = resolve; });
+    const { shim, managerInstances, restInstances } = makeShim();
+    await shim.start({ connect: false });
+    const manager = managerInstances[0];
+    restInstances[0].get.mockReturnValueOnce(page);
+    manager.emit(WebSocketShardEvents.Resumed, 0);
+    manager.emit(WebSocketShardEvents.Dispatch, {
+      data: { t: 'RESUMED', d: {} }, shardId: 0,
+    });
+
+    const countPromise = shim.getActiveGuildCount();
+    manager.emit(WebSocketShardEvents.Dispatch, {
+      data: { t: 'READY', d: { application: { id: 'app-1' }, guilds: [{ id: 'g1' }, { id: 'g2' }, { id: 'g3' }] } },
+      shardId: 0,
+    });
+    resolvePage([{ id: 'g-stale' }]);
+
+    expect(await countPromise).toBe(3);
+    expect(await shim.getActiveGuildCount()).toBe(3);
+  });
+
+  it('seeds active-guild count from REST after a pure RESUME and paginates past 200', async () => {
+    const { shim, managerInstances, restInstances } = makeShim();
+    await shim.start({ connect: false });
+    const manager = managerInstances[0];
+    const firstPage = Array.from({ length: 200 }, (_, i) => ({ id: `g${String(i).padStart(3, '0')}` }));
+    restInstances[0].get
+      .mockResolvedValueOnce(firstPage)
+      .mockResolvedValueOnce([{ id: 'g200' }, { id: 'g201' }]);
+
+    manager.emit(WebSocketShardEvents.Resumed, 0);
+    manager.emit(WebSocketShardEvents.Dispatch, {
+      data: { t: 'RESUMED', d: {} }, shardId: 0,
+    });
+
+    expect(await shim.getActiveGuildCount()).toBe(202);
+    expect(restInstances[0].get).toHaveBeenCalledTimes(2);
+    expect(restInstances[0].get.mock.calls[0][0]).toBe('/users/@me/guilds');
+    expect(restInstances[0].get.mock.calls[1][1].query.get('after')).toBe('g199');
+    expect(await shim.getActiveGuildCount()).toBe(202);
+    expect(restInstances[0].get).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not query or report a guild count from a disconnected hot standby', async () => {
+    const { shim, restInstances } = makeShim();
+    await shim.start({ connect: false });
+
+    expect(await shim.getActiveGuildCount()).toBe(null);
+    expect(restInstances[0].get).not.toHaveBeenCalled();
+  });
+
+  it('returns no metric opinion after stop even if the shim previously connected', async () => {
+    const { shim, managerInstances } = makeShim();
+    await shim.start({ connect: false });
+    const manager = managerInstances[0];
+    manager.emit(WebSocketShardEvents.Ready, { shardId: 0 });
+    manager.emit(WebSocketShardEvents.Dispatch, {
+      data: { t: 'READY', d: { application: { id: 'app-1' }, guilds: [{ id: 'g1' }] } },
+      shardId: 0,
+    });
+    await shim.stop({ flushFinal: false });
+
+    expect(shim.getGatewayHeartbeatState()).toBe(null);
+    await expect(shim.getActiveGuildCount()).resolves.toBe(null);
+  });
+
+  it('returns no guild metric after a failed start nulls REST during a late-ready race', async () => {
+    const { SlowFakeManager, instances } = makeSlowManagerCtor();
+    const { shim } = makeShim({ WebSocketManagerCtor: SlowFakeManager });
+    const startPromise = shim.start({ timeoutMs: 5 });
+    await Promise.resolve();
+    const manager = instances[0];
+    manager.emit(WebSocketShardEvents.Ready, { shardId: 0 });
+    manager.emit(WebSocketShardEvents.Dispatch, {
+      data: { t: 'READY', d: { application: { id: 'app-1' } } },
+      shardId: 0,
+    });
+
+    await expect(startPromise).rejects.toThrow(/timed out/);
+    await expect(shim.getActiveGuildCount()).resolves.toBe(null);
+  });
+
+  it('folds guild lifecycle dispatches into an in-flight pure-RESUME REST seed', async () => {
+    let resolvePage;
+    const page = new Promise((resolve) => { resolvePage = resolve; });
+    const { shim, managerInstances, restInstances } = makeShim();
+    await shim.start({ connect: false });
+    const manager = managerInstances[0];
+    restInstances[0].get.mockReturnValueOnce(page);
+    manager.emit(WebSocketShardEvents.Resumed, 0);
+    manager.emit(WebSocketShardEvents.Dispatch, {
+      data: { t: 'RESUMED', d: {} }, shardId: 0,
+    });
+
+    const countPromise = shim.getActiveGuildCount();
+    manager.emit(WebSocketShardEvents.Dispatch, {
+      data: { t: 'GUILD_DELETE', d: { id: 'g-old', unavailable: false } }, shardId: 0,
+    });
+    manager.emit(WebSocketShardEvents.Dispatch, {
+      data: { t: 'GUILD_CREATE', d: { id: 'g-new' } }, shardId: 0,
+    });
+    resolvePage([{ id: 'g-old' }]);
+
+    expect(await countPromise).toBe(1);
+    expect(await shim.getActiveGuildCount()).toBe(1);
+  });
+
+  it('retries the pure-RESUME REST seed after a transient request failure', async () => {
+    const { shim, managerInstances, restInstances } = makeShim();
+    await shim.start({ connect: false });
+    const manager = managerInstances[0];
+    restInstances[0].get
+      .mockRejectedValueOnce(new Error('Discord unavailable'))
+      .mockResolvedValueOnce([{ id: 'g1' }]);
+    manager.emit(WebSocketShardEvents.Resumed, 0);
+    manager.emit(WebSocketShardEvents.Dispatch, {
+      data: { t: 'RESUMED', d: {} }, shardId: 0,
+    });
+
+    await expect(shim.getActiveGuildCount()).rejects.toThrow('Discord unavailable');
+    await expect(shim.getActiveGuildCount()).resolves.toBe(1);
+    expect(restInstances[0].get).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    ['a non-array response', [{ data: [] }], 'was not an array'],
+    // Two full pages whose last id never moves: the guard, not the page
+    // bound, must be what stops the walk.
+    ['a full page that does not advance', [
+      Array.from({ length: 200 }, (_, i) => ({ id: `g${i}` })),
+      Array.from({ length: 200 }, () => ({ id: 'g199' })),
+    ], 'did not advance'],
+  ])('rejects a pure-RESUME REST seed on %s', async (_label, pages, expectedError) => {
+    const { shim, managerInstances, restInstances } = makeShim();
+    await shim.start({ connect: false });
+    const manager = managerInstances[0];
+    for (const page of pages) restInstances[0].get.mockResolvedValueOnce(page);
+    manager.emit(WebSocketShardEvents.Resumed, 0);
+    manager.emit(WebSocketShardEvents.Dispatch, {
+      data: { t: 'RESUMED', d: {} }, shardId: 0,
+    });
+
+    await expect(shim.getActiveGuildCount()).rejects.toThrow(expectedError);
+    expect(restInstances[0].get).toHaveBeenCalledTimes(pages.length);
+  });
+
+  it('clears earlier seed failures after a successful guild snapshot', async () => {
+    const { shim, managerInstances, restInstances } = makeShim();
+    await shim.start({ connect: false });
+    const manager = managerInstances[0];
+    manager.emit(WebSocketShardEvents.Resumed, 0);
+    manager.emit(WebSocketShardEvents.Dispatch, {
+      data: { t: 'RESUMED', d: {} }, shardId: 0,
+    });
+    restInstances[0].get
+      .mockRejectedValueOnce(new Error('unavailable'))
+      .mockRejectedValueOnce(new Error('unavailable'))
+      .mockResolvedValueOnce([{ id: 'g1' }])
+      .mockResolvedValueOnce([{ id: 'g1' }, { id: 'g2' }]);
+    await expect(shim.getActiveGuildCount()).rejects.toThrow('unavailable');
+    await expect(shim.getActiveGuildCount()).rejects.toThrow('unavailable');
+    await expect(shim.getActiveGuildCount()).resolves.toBe(1);
+    manager.emit(WebSocketShardEvents.Dispatch, {
+      data: { t: 'READY', d: {} }, shardId: 0,
+    });
+    await expect(shim.getActiveGuildCount()).resolves.toBe(2);
+    expect(restInstances[0].get).toHaveBeenCalledTimes(4);
+  });
+
+  it('clears exhausted seed cooldown when READY supplies a guild snapshot', async () => {
+    const { shim, managerInstances, restInstances } = makeShim();
+    await shim.start({ connect: false });
+    const manager = managerInstances[0];
+    manager.emit(WebSocketShardEvents.Resumed, 0);
+    manager.emit(WebSocketShardEvents.Dispatch, {
+      data: { t: 'RESUMED', d: {} }, shardId: 0,
+    });
+    restInstances[0].get.mockRejectedValue(new Error('unavailable'));
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      await expect(shim.getActiveGuildCount()).rejects.toThrow('unavailable');
+    }
+    manager.emit(WebSocketShardEvents.Dispatch, {
+      data: { t: 'READY', d: { guilds: [{ id: 'g1' }] } }, shardId: 0,
+    });
+    await expect(shim.getActiveGuildCount()).resolves.toBe(1);
+    manager.emit(WebSocketShardEvents.Dispatch, {
+      data: { t: 'READY', d: {} }, shardId: 0,
+    });
+    restInstances[0].get.mockResolvedValueOnce([{ id: 'g1' }, { id: 'g2' }]);
+    await expect(shim.getActiveGuildCount()).resolves.toBe(2);
+    expect(restInstances[0].get).toHaveBeenCalledTimes(4);
+  });
+
+  it('cools down failed guild seed walks and recovers without a READY', async () => {
+    const { shim, logger, managerInstances, restInstances } = makeShim();
+    await shim.start({ connect: false });
+    const manager = managerInstances[0];
+    manager.emit(WebSocketShardEvents.Resumed, 0);
+    manager.emit(WebSocketShardEvents.Dispatch, {
+      data: { t: 'RESUMED', d: {} }, shardId: 0,
+    });
+    const now = jest.spyOn(Date, 'now').mockReturnValue(1_700_000_000_000);
+    restInstances[0].get.mockRejectedValue(new Error('Discord unavailable'));
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      await expect(shim.getActiveGuildCount()).rejects.toThrow('Discord unavailable');
+    }
+    await expect(shim.getActiveGuildCount()).resolves.toBe(null);
+    expect(restInstances[0].get).toHaveBeenCalledTimes(3);
+    expect(logger.warn).toHaveBeenCalledWith(
+      'gateway-ws-shim: guild seed cooldown engaged',
+      { retry_at: '2023-11-14T23:13:20.000Z' },
+    );
+    now.mockReturnValue(1_700_003_600_000);
+    restInstances[0].get.mockResolvedValueOnce([{ id: 'g1' }]);
+    await expect(shim.getActiveGuildCount()).resolves.toBe(1);
+    expect(restInstances[0].get).toHaveBeenCalledTimes(4);
+    now.mockRestore();
+  });
+
+  it('bounds a pathological pure-RESUME guild pagination walk', async () => {
+    const expectedPageBound = 25;
+    expect(MAX_USER_GUILDS_PAGES).toBe(expectedPageBound);
+    const { shim, managerInstances, restInstances } = makeShim();
+    await shim.start({ connect: false });
+    const manager = managerInstances[0];
+    let pageIndex = 0;
+    restInstances[0].get.mockImplementation(() => {
+      if (pageIndex >= expectedPageBound) {
+        return Promise.reject(new Error('test exceeded page bound'));
+      }
+      const offset = pageIndex * 200;
+      pageIndex += 1;
+      return Promise.resolve(Array.from({ length: 200 }, (_, index) => ({
+        id: `g${offset + index}`,
+      })));
+    });
+    manager.emit(WebSocketShardEvents.Resumed, 0);
+    manager.emit(WebSocketShardEvents.Dispatch, {
+      data: { t: 'RESUMED', d: {} }, shardId: 0,
+    });
+
+    await expect(shim.getActiveGuildCount()).rejects.toThrow(/page limit/);
+    expect(restInstances[0].get).toHaveBeenCalledTimes(expectedPageBound);
   });
 
   it('connect() throws before start() (no manager yet)', async () => {
@@ -425,10 +783,12 @@ describe('Pillar 3 manager contract — connect() + connection state', () => {
     expect(managerInstances[0].listenerCount(WebSocketShardEvents.Closed)).toBe(1);
     expect(managerInstances[0].listenerCount(WebSocketShardEvents.Ready)).toBe(1);
     expect(managerInstances[0].listenerCount(WebSocketShardEvents.Resumed)).toBe(1);
+    expect(managerInstances[0].listenerCount(WebSocketShardEvents.HeartbeatComplete)).toBe(1);
     await shim.stop({ flushFinal: false });
     expect(managerInstances[0].listenerCount(WebSocketShardEvents.Closed)).toBe(0);
     expect(managerInstances[0].listenerCount(WebSocketShardEvents.Ready)).toBe(0);
     expect(managerInstances[0].listenerCount(WebSocketShardEvents.Resumed)).toBe(0);
+    expect(managerInstances[0].listenerCount(WebSocketShardEvents.HeartbeatComplete)).toBe(0);
   });
 
   it('shard event listeners no-op after a failed start() (stopped guard)', async () => {
@@ -1454,11 +1814,9 @@ describe('constants are pinned', () => {
     expect(DEFAULT_CONNECT_TIMEOUT_MS).toBe(30_000);
   });
 
-  it('VERIFIED_DJS_WS_VERSION matches the exact installed @discordjs/ws version', () => {
-    // The wsConnected mirror depends on WebSocketShard.onMessage emitting
-    // Ready/Resumed before Dispatch. The identify guard also depends on the
-    // v1.2.3 custom-throttler catch falling through to IDENTIFY, so any upgrade
-    // must re-read both upstream paths before changing the pinned version.
+  it('pins the exact installed ws version and heartbeat payload fields', () => {
+    // Ready/Resumed ordering, heartbeat fields, and the identify throttler
+    // all depend on this exact upstream version.
     // @discordjs/ws's exports field blocks require('.../package.json'),
     // so locate the install via require.resolve (works regardless of
     // whether the dep landed in apps/discord/node_modules or got
@@ -1478,6 +1836,12 @@ describe('constants are pinned', () => {
     const djsWsVersion = JSON.parse(fs.readFileSync(path.join(wsRoot, 'package.json'), 'utf8')).version;
     expect(djsWsVersion).toBe(VERIFIED_DJS_WS_VERSION);
     expect(require('../package.json').dependencies['@discordjs/ws']).toBe(VERIFIED_DJS_WS_VERSION);
+    const typeDeclarations = fs.readFileSync(path.join(wsRoot, 'dist', 'index.d.mts'), 'utf8');
+    // If this trips on a dependency bump, re-read the matching upstream event
+    // emitter before updating the declaration regex and version contract.
+    expect(typeDeclarations).toMatch(
+      /\[WebSocketShardEvents\.HeartbeatComplete\]:\s*\[payload:\s*\{\s*ackAt:\s*number;\s*heartbeatAt:\s*number;\s*latency:\s*number;/,
+    );
   });
 
   it('pins the upstream rejection behavior that requires a blocking budget guard', async () => {
