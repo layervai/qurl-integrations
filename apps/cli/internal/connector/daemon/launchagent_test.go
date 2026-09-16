@@ -729,3 +729,26 @@ func TestJobControllerRejectsPermissiveRuntimeDirWithoutChangingIt(t *testing.T)
 		t.Fatalf("installed jobs = %d, want none", len(manager.jobs))
 	}
 }
+
+// TestSessionGroupsDocMatchesTheJobProtocolVersion ties the prose to the
+// constant. docs/session-groups.md spells out the job-version string, and it
+// has already drifted twice behind daemonJobProtocolVersion; a doc that
+// states a wire format has to fail when that format moves.
+func TestSessionGroupsDocMatchesTheJobProtocolVersion(t *testing.T) {
+	path := filepath.Join("..", "..", "..", "..", "..", "docs", "session-groups.md")
+	doc, err := os.ReadFile(path) // #nosec G304 -- a fixed in-repo documentation path.
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, suffix := range []string{"/<version>", "/<version>/per-share"} {
+		want := "`" + daemonJobProtocolVersion + suffix + "`"
+		if !strings.Contains(string(doc), want) {
+			t.Fatalf("%s does not state the current job version %s", path, want)
+		}
+	}
+	for _, token := range strings.Split(string(doc), "`") {
+		if strings.Contains(token, "/<version>") && token != daemonJobProtocolVersion+"/<version>" && token != daemonJobProtocolVersion+"/<version>/per-share" {
+			t.Fatalf("%s states an unexpected job version %s", path, token)
+		}
+	}
+}
