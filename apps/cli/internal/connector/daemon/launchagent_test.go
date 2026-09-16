@@ -616,6 +616,9 @@ func TestJobControllerIncompatibleStatusRequiresNativeOwnership(t *testing.T) {
 			if (err == nil) != wantReplace || (len(manager.replaced) == 1) != wantReplace || len(manager.jobs) != 0 {
 				t.Fatalf("Ensure error=%v replacements=%d installs=%d, want replace=%t", err, len(manager.replaced), len(manager.jobs), wantReplace)
 			}
+			if !wantReplace && !errors.Is(err, errIPCStatusIncompatible) {
+				t.Fatalf("Ensure error = %v, want the incompatible status cause", err)
+			}
 			if tc.supervision == connectorstate.RuntimeSupervisionExternal && manager.statusCalls != 0 {
 				t.Fatal("external supervision queried native ownership")
 			}

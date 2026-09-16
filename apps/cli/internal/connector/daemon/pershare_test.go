@@ -862,3 +862,22 @@ func TestNewShareManagerPropagatesDeferredFirstReconcile(t *testing.T) {
 		t.Fatalf("NewShareManager(single) = %T, want a Manager that reconciles immediately", built)
 	}
 }
+
+func TestPerShareManagerDeferredFirstReconcileStopsOnCancellation(t *testing.T) {
+	registry := &memoryRegistry{shares: map[string]connectorstate.LocalShare{"a": daemonShare("a", 1, "on")}}
+	factory := newFakeGroupFactory()
+	manager, err := NewPerShareManager(registry, factory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.DeferFirstReconcile = true
+	manager.firstReconcileBound = time.Hour
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := manager.Run(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run = %v, want cancellation", err)
+	}
+	if factory.startCount() != 0 || len(manager.Running()) != 0 {
+		t.Fatal("canceled deferred manager started a group")
+	}
+}

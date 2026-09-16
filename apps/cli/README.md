@@ -315,7 +315,8 @@ directory with the same setting (flag `--supervision`, environment
 Use a dedicated, fresh state directory rather than the native default. For
 account-key enrollment, the first daemon invocation establishes the marker and
 is expected to exit with `no durable account owner`. Then log in, and start
-the daemon again:
+the daemon again. Complete the first invocation before running any other
+command against this directory:
 
 ```bash
 export QURL_CONNECTOR_STATE_DIR="$STATE_DIR"
@@ -344,7 +345,9 @@ External supervision changes three things:
   refuse a state directory whose mark does not match their `--supervision`
   setting (exit code 3). A plain `qurl` command therefore never installs a
   background job over a supervised daemon, and a supervised command never
-  adopts a natively managed directory. Read-only commands work either way.
+  adopts a natively managed directory. This check applies to the namespace,
+  including commands for remote resources. Read-only sharing commands work
+  either way, but can still enroll a device and write authentication state.
 
 On every process start, including a warm restart or headless start, an
 externally supervised daemon waits up to 30 seconds for its supervisor's

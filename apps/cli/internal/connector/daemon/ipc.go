@@ -122,7 +122,8 @@ type IPCClient struct {
 // IPCStatus is the daemon version handshake and active resource set, encoded
 // by the server and decoded by the client. Pid is the daemon's own process
 // ID, so an external supervisor can stop a daemon it adopted rather than
-// spawned; a daemon older than this field leaves it zero.
+// spawned; a daemon older than this field leaves it zero. Zero means unknown
+// and must never be used as a signal target.
 type IPCStatus struct {
 	JobVersion string                        `json:"job_version"`
 	Pid        int                           `json:"pid"`

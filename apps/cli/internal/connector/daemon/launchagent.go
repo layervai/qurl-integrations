@@ -72,13 +72,13 @@ func (c *JobController) Ensure(ctx context.Context) error {
 	if err := c.validateController(); err != nil {
 		return err
 	}
-	status, running, err := c.ProbeStatus(ctx)
-	if err != nil {
-		if !running || !errors.Is(err, errIPCStatusIncompatible) {
-			return err
+	status, running, statusErr := c.ProbeStatus(ctx)
+	if statusErr != nil {
+		if !running || !errors.Is(statusErr, errIPCStatusIncompatible) {
+			return statusErr
 		}
 		if c.Supervision == connectorstate.RuntimeSupervisionExternal {
-			return fmt.Errorf("restart the externally supervised daemon and retry: %w", err)
+			return fmt.Errorf("restart the externally supervised daemon and retry: %w", statusErr)
 		}
 		// The native ownership check below must succeed before replacement.
 		status = IPCStatus{}
@@ -118,10 +118,7 @@ func (c *JobController) Ensure(ctx context.Context) error {
 			return fmt.Errorf("inspect native background ownership before replacing incompatible share daemon: %w", err)
 		}
 		if !managed.Installed || !managed.Running {
-			return fmt.Errorf(
-				"share daemon job version %q does not match this qURL job version %q; stop the foreground or externally managed daemon and retry",
-				status.JobVersion, expectedJobVersion,
-			)
+			return unmanagedDaemonMismatch(status, expectedJobVersion, statusErr)
 		}
 	}
 	hub, err := c.validatedDeployment()
@@ -143,6 +140,16 @@ func (c *JobController) Ensure(ctx context.Context) error {
 	// Native assignment recovery can legitimately outlive a CLI readiness
 	// deadline, so serving convergence is observed through the control plane.
 	return c.Manager.Ensure(job)
+}
+
+func unmanagedDaemonMismatch(status IPCStatus, expectedJobVersion string, statusErr error) error {
+	if statusErr != nil {
+		return fmt.Errorf("stop the foreground or externally managed daemon and retry: %w", statusErr)
+	}
+	return fmt.Errorf(
+		"share daemon job version %q does not match this qURL job version %q; stop the foreground or externally managed daemon and retry",
+		status.JobVersion, expectedJobVersion,
+	)
 }
 
 func (c *JobController) validateController() error {

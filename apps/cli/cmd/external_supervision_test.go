@@ -159,7 +159,7 @@ func TestExternalCommandRefusesNativeNamespace(t *testing.T) {
 		preflightTarget: func(context.Context, string, int) error { return nil },
 		localResource:   resolvedLocalResource(srv, true),
 	})
-	const wantMessage = `runtime supervision is "native", not "external"; run this command with --supervision native`
+	const wantMessage = `runtime supervision is "native", not "external"; initialize a dedicated empty state directory with qurl daemon run --supervision external before login`
 	if res.code != 3 || !strings.Contains(res.stderr.String(), wantMessage) {
 		t.Fatalf("external publish against a native namespace = exit %d stderr %q, want exit 3 with %q", res.code, res.stderr.String(), wantMessage)
 	}
@@ -307,5 +307,16 @@ func TestExternalLifecycleCommandsRollBackWhenTheDaemonIsAbsent(t *testing.T) {
 				t.Fatalf("%s local row after the rollback = %+v err=%v, want off at the compensated epoch", tc.name, local, err)
 			}
 		})
+	}
+}
+
+func TestCorruptSupervisionMarkerIsAStateFailure(t *testing.T) {
+	stateDir := connectorStateTestDir(t)
+	if err := os.WriteFile(filepath.Join(stateDir, connectorstate.RuntimeModeFile), []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	res := runCLI(t, &runOpts{args: []string{"login", "--supervision", "external"}, shareStateDir: stateDir})
+	if res.code != 1 || !strings.Contains(res.stderr.String(), "runtime supervision policy") {
+		t.Fatalf("corrupt supervision marker = exit %d stderr %q, want state failure", res.code, res.stderr.String())
 	}
 }

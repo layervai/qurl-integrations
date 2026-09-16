@@ -52,6 +52,8 @@ const DefaultRuntimeSupervision = RuntimeSupervisionNative
 // ErrRuntimeSupervision is the identity of a command whose supervision
 // setting does not match the namespace it addresses. The remedy is the
 // --supervision setting, so it is configuration in the exit-code sense.
+// An unreadable or corrupt marker is a state-integrity error instead: changing
+// the setting cannot repair it, so it retains the generic failure exit code.
 var ErrRuntimeSupervision = errors.New("runtime supervision")
 
 // RuntimeSupervisionValues lists every accepted mode, default first.
@@ -100,6 +102,9 @@ func RequireRuntimeSupervision(dir string, expected RuntimeSupervision) error {
 		return err
 	}
 	if actual != expected {
+		if expected == RuntimeSupervisionExternal {
+			return fmt.Errorf("%w is %q, not %q; initialize a dedicated empty state directory with qurl daemon run --supervision external before login", ErrRuntimeSupervision, actual, expected)
+		}
 		return fmt.Errorf("%w is %q, not %q; run this command with --supervision %s", ErrRuntimeSupervision, actual, expected, actual)
 	}
 	return nil
@@ -108,8 +113,8 @@ func RequireRuntimeSupervision(dir string, expected RuntimeSupervision) error {
 // EstablishExternalRuntimeMode commits the external policy for dir, creating
 // the owner-only directory when needed. It is idempotent once the marker
 // exists and refuses a namespace that already holds native lifecycle state,
-// so a natively managed namespace can never be relabelled underneath its
-// background job.
+// provided no other process initializes native state concurrently. The caller
+// must establish the policy before handing the directory to other commands.
 func EstablishExternalRuntimeMode(ctx context.Context, dir string) (retErr error) {
 	dir = strings.TrimSpace(dir)
 	if dir == "" {
@@ -136,7 +141,7 @@ func EstablishExternalRuntimeMode(ctx context.Context, dir string) (retErr error
 		_, err := os.Lstat(filepath.Join(dir, name))
 		switch {
 		case err == nil:
-			return fmt.Errorf("state directory is not a fresh external namespace: %s already exists", name)
+			return fmt.Errorf("state directory is not a fresh external namespace: %s already exists; use a dedicated empty state directory", name)
 		case errors.Is(err, os.ErrNotExist):
 		default:
 			return fmt.Errorf("inspect external namespace: %w", err)

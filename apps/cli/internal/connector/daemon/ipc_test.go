@@ -389,6 +389,10 @@ func TestWaitReadyClosesNonSuccessProbeBodies(t *testing.T) {
 }
 
 func TestDecodeIPCStatusRejectsAmbiguousShapes(t *testing.T) {
+	if got, err := decodeIPCStatus(strings.NewReader(`{"job_version":"1/test","running":{},"resources":{}}`)); err != nil || got.Pid != 0 {
+		t.Fatalf("status without pid = %+v, %v; want zero pid and no error", got, err)
+	}
+
 	for name, input := range map[string]string{
 		"empty version":     `{"job_version":"","running":{},"resources":{}}`,
 		"missing map":       `{"job_version":"1/test"}`,
