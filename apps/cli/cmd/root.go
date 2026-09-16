@@ -884,13 +884,17 @@ func requireExternalOwnerScopedAgentState(ctx context.Context, store qurl.AgentS
 	// path expects bootstrap in practice. If that mapping changes, external
 	// login starts refusing valid devices with exit 4 and nothing else fails
 	// loudly.
-	switch kind := qurl.RegistrationKeyKind(strings.TrimSpace(persisted.EnrollmentCredentialKind)); kind {
+	kind := qurl.RegistrationKeyKind(strings.TrimSpace(persisted.EnrollmentCredentialKind))
+	switch kind {
 	case qurl.RegistrationKeyKindAccount, qurl.RegistrationKeyKindBootstrap:
 		return nil
+	case qurl.RegistrationKeyKindConnectorBootstrap, qurl.RegistrationKeyKindAgent:
+		// Connector-scoped: exactly what native session operations refuse.
 	default:
-		return fmt.Errorf("%w: enrolled with credential kind %q, want the owner-scoped %q or %q; move the state directory aside and enroll again with a token minted for target agent",
-			auth.ErrDeviceEnrollmentScope, kind, qurl.RegistrationKeyKindAccount, qurl.RegistrationKeyKindBootstrap)
+		// Empty or unrecognized: fail closed rather than guess.
 	}
+	return fmt.Errorf("%w: enrolled with credential kind %q, want the owner-scoped %q or %q; move the state directory aside and enroll again with a token minted for target agent",
+		auth.ErrDeviceEnrollmentScope, kind, qurl.RegistrationKeyKindAccount, qurl.RegistrationKeyKindBootstrap)
 }
 
 // openRegisteredDeviceClient builds the narrow REST client around the durable
