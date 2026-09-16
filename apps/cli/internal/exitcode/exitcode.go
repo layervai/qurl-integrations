@@ -202,6 +202,17 @@ func FromError(err error) int {
 		return InvalidInput
 	case isNetworkError(err):
 		return Unavailable
+	case errors.Is(err, state.ErrAgentStateEnvelope):
+		// Deliberately the last row before the default, and outside
+		// connectorSentinelCode: Open's sealed branch wraps this sentinel around
+		// every failure, including ones qurl-go classifies itself - a loose
+		// directory mode is Auth on the plaintext branch and must stay Auth on
+		// the sealed one. Reaching here means nothing more specific matched, so
+		// the cause is what the sentinel names: the envelope does not match the
+		// selected key provider, whose remedy is LAYERV_KEY_PROVIDER /
+		// LAYERV_LOCAL_KEY_FD or a different state directory, never the command
+		// line.
+		return Config
 	default:
 		return General
 	}
