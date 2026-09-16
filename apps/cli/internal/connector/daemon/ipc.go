@@ -49,9 +49,12 @@ var errIPCSocketRestrictionPending = errors.New("share daemon socket restriction
 // IPCServer exposes daemon status, reconciliation, and the runtime
 // request-header overlay over an owner-only socket.
 type IPCServer struct {
-	SocketPath string
-	Manager    ShareManager
-	JobVersion string
+	// RequestHeadersEnabled is set only after the daemon validates its tunnel
+	// trust configuration. The Connector also checks transport safety per route.
+	RequestHeadersEnabled bool
+	SocketPath            string
+	Manager               ShareManager
+	JobVersion            string
 }
 
 // Run serves IPC and the share manager until ctx ends.
@@ -101,6 +104,14 @@ func (s *IPCServer) Run(ctx context.Context) (retErr error) {
 			}
 			http.Error(w, message, http.StatusBadRequest)
 			return
+		}
+		if !s.RequestHeadersEnabled {
+			for _, headers := range overlay {
+				if len(headers) > 0 {
+					http.Error(w, "runtime origin headers require a daemon configured with --tunnel-ca-file and a verified tunnel server", http.StatusConflict)
+					return
+				}
+			}
 		}
 		s.Manager.SetOverlay(overlay)
 		w.WriteHeader(http.StatusNoContent)

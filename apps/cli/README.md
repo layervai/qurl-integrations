@@ -298,6 +298,52 @@ is the only authoritative validator. Sending a **test-environment CRID to
 the production endpoint** is refused unless `--yes` is given; a production
 CRID aimed at a non-production endpoint warns and proceeds.
 
+#### Optional origin authentication
+
+An integration can supply temporary request headers when its local HTTP origin
+requires authentication. Ordinary shares need no added headers or tunnel-trust
+settings. This capability is not specific to a desktop application.
+
+Credential-bearing routes require a tunnel server with a verifiable TLS
+certificate. For a deployment that already provides that server certificate,
+configure its service-managed daemon with:
+
+```bash
+qurl daemon run --tunnel-ca-file /etc/qurl/tunnel-ca.pem
+```
+
+The PEM file must use an absolute path and contain the CA certificates trusted
+for that tunnel server. The certificate is checked against the admitted server
+host. Use `--tunnel-server-name <name>` only when the deployment requires a
+specific certificate identity, such as a server reached by IP address. Invalid
+trust configuration fails before enrollment. These options configure the
+client; they do not provision a server certificate. The default per-user daemon
+does not enable runtime credentials.
+
+The integration sends `PUT /overlay` through the daemon's owner-only local IPC
+channel, with this JSON shape:
+
+```json
+{"route_request_headers":{"connector-id":{"Authorization":"Bearer <runtime-token>"}}}
+```
+
+Each request replaces the entire overlay. Omitted routes lose their headers;
+`{"route_request_headers":{}}` clears it. The response is 204 when accepted,
+400 for invalid input, or 409 if headers are supplied without configured tunnel
+trust. Acceptance schedules a route update; it does not mean the route is
+already serving. The body limit is 64 KiB and 2,000 routes, with up to 16 headers
+and 1,024 combined name/value bytes per route. All limits apply together.
+
+Headers stay in process memory and are excluded from saved state and status.
+An integration must restore them after daemon restart. It can supply headers
+before publishing a route; stopping the share retains them until the next
+overlay replacement. Only the matching route receives each header set.
+
+The origin must reject missing or invalid credentials. Updating headers can
+interrupt that route, and retiring sessions may use old headers until they
+finish draining. Revoke a compromised token at the origin; an overlay update is
+not immediate revocation. Other routes retain their existing credentials.
+
 ### qurl publish
 
 `qurl publish` handles both local apps and remote URLs:

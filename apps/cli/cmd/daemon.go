@@ -269,6 +269,8 @@ another service manager owns the process.`,
 			return runShareDaemonWithDeployment(cmd.Context(), opts, stateDir, jobVersion, headlessConfig, enrollmentTokenFile, hubOverride)
 		},
 	}
+	run.Flags().StringVar(&opts.tunnelCAFile, "tunnel-ca-file", "", "absolute path to trusted tunnel CA certificates (PEM), required for runtime origin headers")
+	run.Flags().StringVar(&opts.tunnelServerName, "tunnel-server-name", "", "expected tunnel certificate name (default: admitted host)")
 	run.Flags().StringVar(&stateDir, "state-dir", "", "qURL share daemon state directory")
 	run.Flags().StringVar(&jobVersion, "job-version", "", "qURL share daemon job definition version")
 	run.Flags().StringVar(&headlessConfig, "headless-config", "", "read-only version 2 YAML for one headless share")
@@ -338,6 +340,10 @@ func runShareDaemonWithBootstrap(ctx context.Context, opts *globalOpts, stateDir
 }
 
 func runShareDaemonWithDeployment(ctx context.Context, opts *globalOpts, stateDirOverride, jobVersion, headlessConfigPath, enrollmentTokenPath string, hubOverride *qurl.HubBootstrap) (retErr error) {
+	common, err := connectordaemon.ConfiguredFRPCommon(10, 60, opts.tunnelCAFile, opts.tunnelServerName)
+	if err != nil {
+		return err
+	}
 	stateDir, err := opts.resolveShareStateDir(stateDirOverride)
 	if err != nil {
 		return err
@@ -375,10 +381,6 @@ func runShareDaemonWithDeployment(ctx context.Context, opts *globalOpts, stateDi
 	hostname, err := os.Hostname()
 	if err != nil {
 		return fmt.Errorf("read local hostname: %w", err)
-	}
-	common, err := connectordaemon.DefaultFRPCommon(10, 60)
-	if err != nil {
-		return err
 	}
 	configured := configuredHeadlessShare(headless)
 	openFactory := func(initCtx context.Context) (connectordaemon.GroupFactory, error) {
@@ -433,8 +435,9 @@ func runShareDaemonWithDeployment(ctx context.Context, opts *globalOpts, stateDi
 	}
 	opts.redirectFRPLogs()
 	server := &connectordaemon.IPCServer{
-		SocketPath: connectordaemon.StateSocketPath(stateDir),
-		Manager:    manager, JobVersion: jobVersion,
+		RequestHeadersEnabled: common.Transport.TLS.TrustedCaFile != "",
+		SocketPath:            connectordaemon.StateSocketPath(stateDir),
+		Manager:               manager, JobVersion: jobVersion,
 	}
 	return server.Run(ctx)
 }
