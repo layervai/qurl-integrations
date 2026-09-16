@@ -214,7 +214,8 @@ describe('webhook-registrar Lambda — cold bootstrap (no existing sub, no SSM s
 });
 
 describe('webhook-registrar Lambda — steady-state (existing sub + SSM secret present)', () => {
-  it('rotates and persists when SSM still holds the terraform seed sentinel', async () => {
+  it.each(['whsec_rotated_server_generated', ' server-key-bytes\n'])(
+    'rotates the public seed and preserves response bytes through storage and config: %p', async (secret) => {
     ssmMock
       .on(GetParameterCommand, { Name: '/test/QURL_API_KEY' })
       .resolves({ Parameter: { Value: 'lv_test_key' } })
@@ -229,7 +230,7 @@ describe('webhook-registrar Lambda — steady-state (existing sub + SSM secret p
         events: ['qurl.accessed', 'qurl.expired'],
       }] } }),
       'POST /v1/webhooks/wh_existing/secret': () => ({
-        body: { data: { webhook_id: 'wh_existing', secret: 'whsec_rotated_server_generated' } },
+        body: { data: { webhook_id: 'wh_existing', secret } },
       }),
     });
 
@@ -237,7 +238,14 @@ describe('webhook-registrar Lambda — steady-state (existing sub + SSM secret p
     expect(result).toEqual({ webhookId: 'wh_existing', action: 'rotated' });
     const putCalls = ssmMock.commandCalls(PutParameterCommand);
     expect(putCalls).toHaveLength(1);
-    expect(putCalls[0].args[0].input.Value).toBe('whsec_rotated_server_generated');
+    const persisted = putCalls[0].args[0].input.Value;
+    expect(persisted).toBe(secret);
+    const { captureFreshConfig } = require('../../helpers/fresh-config');
+    const { createHmac } = require('crypto');
+    captureFreshConfig({ QURL_WEBHOOK_SECRET: persisted }, (cfg) => {
+      const sign = (key) => createHmac('sha256', key).update('webhook payload').digest('hex');
+      expect(sign(cfg.QURL_WEBHOOK_SECRET)).toBe(sign(secret));
+    });
   });
 
   it('reuses the existing subscription without rotating', async () => {
@@ -266,7 +274,7 @@ describe('webhook-registrar Lambda — steady-state (existing sub + SSM secret p
     expect(rotateHit).toBe(false); // critical: no rotate, single-source-of-truth secret stays
   });
 
-  it('trims a padded SSM secret so it is reused without a format-drift warning', async () => {
+  it('preserves a padded SSM secret on reuse and warns about its format', async () => {
     ssmMock
       .on(GetParameterCommand, { Name: '/test/QURL_API_KEY' })
       .resolves({ Parameter: { Value: 'lv_test_key' } })
@@ -287,7 +295,7 @@ describe('webhook-registrar Lambda — steady-state (existing sub + SSM secret p
       const result = await handler(BASE_EVENT, CONTEXT);
       expect(result).toEqual({ webhookId: 'wh_existing', action: 'reused' });
       expect(ssmMock.commandCalls(PutParameterCommand)).toHaveLength(0);
-      expect(warnSpy).not.toHaveBeenCalled();
+      expect(warnSpy).toHaveBeenCalled();
     } finally {
       warnSpy.mockRestore();
     }

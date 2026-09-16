@@ -46,9 +46,9 @@ describe('qURL webhook secret trust boundary', () => {
   });
 
   it.each([
-    ['padded server secret', ' whsec_1234567890abcdef\n', 'whsec_1234567890abcdef'],
+    ['padded server secret', ' whsec_1234567890abcdef\n', ' whsec_1234567890abcdef\n'],
     ['whitespace-only', '   ', ''],
-  ])('trims outer whitespace on config read — %s', (_label, raw, expected) => {
+  ])('preserves nonblank key bytes on config read — %s', (_label, raw, expected) => {
     captureFreshConfig({ QURL_WEBHOOK_SECRET: raw }, (cfg) => {
       expect(cfg.QURL_WEBHOOK_SECRET).toBe(expected);
     });

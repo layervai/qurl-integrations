@@ -49,8 +49,8 @@ function isUsableSecret(value) {
   return typeof value === 'string' && value.trim().length > 0 && !isInfraSeedSentinel(value);
 }
 
-// config.js trims outer whitespace on read; beyond that, preserve the exact
-// server bytes across persistence and restart. Usability is not proof that an
+// Preserve the exact server bytes across persistence and restart.
+// Usability is not proof that an
 // operator-supplied key matches upstream.
 function assertConfiguredWebhookSecret(value) {
   if (value === undefined || value === null || value === '') return false;

@@ -241,9 +241,8 @@ exports.handler = async (event, context) => {
   // synchronous Lambda invocation, so tasks resolve this parameter only
   // after any created/rotated value has been strictly persisted below.
   // TODO(upstream-contract): qurl-integrations-infra/qurl-bot-discord/terraform/http_rehome_v2.tf
-  // Trimmed to match config.js's read of the same parameter, so an `echo`'d
-  // SSM put classifies identically on both tiers and never persists padding.
-  const initialSecret = (await readSsmSecureString({ ssmClient, name: input.ssmParamName }))?.trim() ?? null;
+  // Preserve the server's signing key bytes, including outer whitespace.
+  const initialSecret = await readSsmSecureString({ ssmClient, name: input.ssmParamName });
 
   // Lambda STRICT-persist path: do NOT pass `persistSecret` into
   // `ensureWebhookSubscription` (its `bestEffortPersist` swallows

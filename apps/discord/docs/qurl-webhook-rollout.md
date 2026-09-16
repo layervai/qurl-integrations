@@ -112,8 +112,8 @@ finds the existing sub, sees the SSM secret matches, returns `reused`).
   This does not validate arbitrary manual SSM edits: HMAC mismatches still
   reject deliveries. Restore the registrar-persisted secret, or clear SSM and
   re-invoke the Lambda (same recovery as the empty-secret case below).
-- **Bot reads empty `QURL_WEBHOOK_SECRET`** (outer whitespace is trimmed on
-  read, so a whitespace-only value lands here too)**.** Means the Lambda never
+- **Bot reads empty `QURL_WEBHOOK_SECRET`** (a whitespace-only value also
+  reads as empty; nonblank signing keys retain their exact bytes)**.** Means the Lambda never
   ran successfully OR ran but SSM `PutParameter` failed (IAM, network).
   Receiver returns 503 (qurl-service retries). Recover by running the
   Lambda manually and verifying CloudWatch logs for the persist call.
