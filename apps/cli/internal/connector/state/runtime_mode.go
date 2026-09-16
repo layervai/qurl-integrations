@@ -97,6 +97,18 @@ func RequireRuntimeSupervision(dir string, expected RuntimeSupervision) error {
 	if _, err := ParseRuntimeSupervision(string(expected)); err != nil {
 		return err
 	}
+	// A sealed namespace can only be served by a daemon its supervisor runs:
+	// the background job qurl installs natively carries no environment, and an
+	// inherited key descriptor cannot survive into a launchd, systemd, or Task
+	// Scheduler process. Refuse here, which every mutating command reaches
+	// before it writes, rather than at the install: a sealed envelope written
+	// under native supervision cannot afterwards be adopted by
+	// EstablishExternalRuntimeMode, which requires a fresh namespace.
+	if expected == RuntimeSupervisionNative && SealedProviderSelected() {
+		return fmt.Errorf(
+			"%w: %s seals this namespace, which only an external supervisor can serve; run every command with --supervision external against a dedicated state directory that has held no state before",
+			ErrAgentStateEnvelope, connectoragentstate.EnvKeyProvider)
+	}
 	actual, err := ReadRuntimeSupervision(dir)
 	if err != nil {
 		return err

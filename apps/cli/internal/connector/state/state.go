@@ -104,20 +104,17 @@ func ConfiguredAgentID() string {
 // qurl.ErrAgentStateContinuity so callers fail closed on errors.Is.
 var errStoreNotOpen = fmt.Errorf("%w: Connector state store is not open", qurl.ErrAgentStateContinuity)
 
-// sealedProviderSelected reports whether LAYERV_KEY_PROVIDER names a key
-// provider other than the plaintext file default. The connector validates the
-// name and the provider's own environment when the sealed store opens.
+// SealedProviderSelected reports whether LAYERV_KEY_PROVIDER names a key
+// provider other than the plaintext file default, and so whether this
+// process's environment selects a sealed agent state envelope. The connector
+// validates the name and the provider's own environment when the sealed store
+// opens. RequireRuntimeSupervision also consults it: a sealed namespace can
+// only be served by an external supervisor.
 //
 // TODO(upstream-contract): mirrors qurl-connector pkg/agentstate
 // selectedKeyProviderName (trimmed, case-folded, empty means file). If the
 // connector adds a provider that still writes the plaintext envelope, route
 // it here too or the plaintext guard in Open is skipped for it.
-func sealedProviderSelected() bool { return SealedProviderSelected() }
-
-// SealedProviderSelected reports whether this process's environment selects a
-// sealed agent state envelope. The daemon job builder consults it: a natively
-// installed background job inherits neither the provider variables nor a key
-// descriptor, so it could never open the namespace the calling CLI sealed.
 func SealedProviderSelected() bool {
 	name := strings.ToLower(strings.TrimSpace(os.Getenv(connectoragentstate.EnvKeyProvider)))
 	return name != "" && name != connectoragentstate.KeyProviderFile
@@ -140,16 +137,8 @@ type Store struct {
 // stateOwner is the process-lifetime owner of one qurl-go agent state
 // envelope. Handoff returns qurl-go's exact concrete store so its setup-lock
 // and operation-lease contracts stay active; *connectoragentstate.SDKStore
-// satisfies this directly.
-//
-// Handoff must validate continuity before it returns the store, so both
-// branches of Store.Handoff keep that guarantee.
-//
-// TODO(upstream-contract): mirrors qurl-connector pkg/agentstate
-// (*SDKStore).Handoff, which calls validateContinuityLocked before returning
-// its state. If that stops being true the sealed branch silently loses a
-// check the plaintext branch keeps, and fileStateOwner's explicit
-// ValidateContinuity must move up into Store.Handoff.
+// satisfies this directly. Continuity is Store.Handoff's job, so an
+// implementation here need not repeat it.
 type stateOwner interface {
 	Handoff() (qurl.AgentStateStore, error)
 	ValidateContinuity() error
@@ -162,14 +151,9 @@ type fileStateOwner struct {
 	store *qurl.FileAgentStateStore
 }
 
-// Handoff validates the retained state capability and returns the plaintext
-// store itself.
-func (o fileStateOwner) Handoff() (qurl.AgentStateStore, error) {
-	if err := o.store.ValidateContinuity(); err != nil {
-		return nil, err
-	}
-	return o.store, nil
-}
+// Handoff returns the plaintext store itself. Store.Handoff validates
+// continuity for both branches.
+func (o fileStateOwner) Handoff() (qurl.AgentStateStore, error) { return o.store, nil }
 
 // ValidateContinuity checks the retained plaintext state capability.
 func (o fileStateOwner) ValidateContinuity() error { return o.store.ValidateContinuity() }
@@ -190,7 +174,7 @@ func Open(dir string) (*Store, error) {
 	if err := EnsureDirMode(dir); err != nil {
 		return nil, fmt.Errorf("prepare native agent state directory: %w", err)
 	}
-	if sealedProviderSelected() {
+	if SealedProviderSelected() {
 		sealed, err := connectoragentstate.NewSDKStore(dir, ConfiguredAgentID())
 		if err != nil {
 			return nil, fmt.Errorf("%w: initialize sealed agent state: %w", ErrAgentStateEnvelope, err)
@@ -212,7 +196,11 @@ func Open(dir string) (*Store, error) {
 	// file qurl writes into this directory may take one of those names.
 	// The window between this Lstat and OpenFileAgentState is benign: a sealed
 	// envelope that appears inside it leaves a directory holding both, which
-	// the connector refuses on its next open.
+	// the connector refuses on its next open. Keying on the envelope filename
+	// rather than on a namespace marker is deliberate and complete: the
+	// connector's own preparation is pinnedfs.EnsurePrivate, which creates only
+	// the 0700 directory, so a sealed open that failed before its first save
+	// leaves a namespace that is genuinely fresh.
 	if _, err := os.Lstat(filepath.Join(dir, connectoragentstate.SealedAgentStateFile)); err == nil {
 		return nil, fmt.Errorf("%w: state directory holds a sealed agent state envelope (%s); set %s and %s to open it, or use a different state directory",
 			ErrAgentStateEnvelope, connectoragentstate.SealedAgentStateFile, connectoragentstate.EnvKeyProvider, connectoragentstate.EnvLocalKeyFD)
@@ -246,6 +234,13 @@ func (s *Store) Handoff() (qurl.AgentStateStore, error) {
 	defer s.mu.RUnlock()
 	if s.owner == nil {
 		return nil, errStoreNotOpen
+	}
+	// Validate here rather than trusting each owner to do it: the sealed owner
+	// is another repository's type, and a silent upstream change would
+	// otherwise cost the sealed branch a check the plaintext branch keeps. The
+	// sealed store repeats the check, which costs one path-capability stat.
+	if err := s.owner.ValidateContinuity(); err != nil {
+		return nil, err
 	}
 	return s.owner.Handoff()
 }
