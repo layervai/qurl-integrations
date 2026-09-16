@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -219,6 +220,7 @@ func (d *journeyDaemon) ReloadIfRunning(context.Context) (bool, error) {
 func (d *journeyDaemon) close() {
 	d.mu.Lock()
 	cancel, done := d.cancel, d.done
+	d.cancel = nil
 	d.mu.Unlock()
 	if cancel != nil {
 		cancel()
@@ -529,11 +531,11 @@ func TestWaitForSharingIncludesRedactedDaemonRootCause(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	server := &connectordaemon.IPCServer{
-		SocketPath: connectordaemon.StateSocketPath(stateDir), Manager: manager, JobVersion: "1/test",
+		SocketPath: stateSocketPath(t, stateDir), Manager: manager, JobVersion: "1/test",
 	}
 	go func() { done <- server.Run(ctx) }()
 	readyCtx, readyCancel := context.WithTimeout(context.Background(), time.Second)
-	if err := (connectordaemon.IPCClient{SocketPath: connectordaemon.StateSocketPath(stateDir)}).WaitReady(readyCtx); err != nil {
+	if err := (connectordaemon.IPCClient{SocketPath: stateSocketPath(t, stateDir)}).WaitReady(readyCtx); err != nil {
 		readyCancel()
 		cancel()
 		t.Fatal(err)
@@ -542,8 +544,8 @@ func TestWaitForSharingIncludesRedactedDaemonRootCause(t *testing.T) {
 	waitCmdCondition(t, func() bool {
 		return manager.Diagnostics()["resource-a"].RetryAttempt == 3
 	}, "route reaches retry attempt 3")
-	_, err = waitForSharingWithDiagnostics(context.Background(), sharingErrorClient{err: errors.New("temporary poll failure")},
-		&local, stateDir, 1, 10*time.Millisecond)
+	_, err = waitForSharingWithDiagnostics(context.Background(), &globalOpts{},
+		sharingErrorClient{err: errors.New("temporary poll failure")}, &local, stateDir, 1, 10*time.Millisecond)
 	for _, want := range []string{"failure category platform_denied", "failure code 52005", "retry attempt 3"} {
 		if err == nil || !strings.Contains(err.Error(), want) {
 			cancel()
@@ -588,18 +590,18 @@ func TestWaitForSharingSettlesStartingDiagnosticIntoRetryCause(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	server := &connectordaemon.IPCServer{
-		SocketPath: connectordaemon.StateSocketPath(stateDir), Manager: manager, JobVersion: "1/test",
+		SocketPath: stateSocketPath(t, stateDir), Manager: manager, JobVersion: "1/test",
 	}
 	go func() { done <- server.Run(ctx) }()
 	readyCtx, readyCancel := context.WithTimeout(context.Background(), time.Second)
-	if err := (connectordaemon.IPCClient{SocketPath: connectordaemon.StateSocketPath(stateDir)}).WaitReady(readyCtx); err != nil {
+	if err := (connectordaemon.IPCClient{SocketPath: stateSocketPath(t, stateDir)}).WaitReady(readyCtx); err != nil {
 		readyCancel()
 		cancel()
 		t.Fatal(err)
 	}
 	readyCancel()
-	_, err = waitForSharingWithDiagnostics(context.Background(), sharingErrorClient{err: errors.New("temporary poll failure")},
-		&local, stateDir, 1, 10*time.Millisecond)
+	_, err = waitForSharingWithDiagnostics(context.Background(), &globalOpts{},
+		sharingErrorClient{err: errors.New("temporary poll failure")}, &local, stateDir, 1, 10*time.Millisecond)
 	if err == nil || !strings.Contains(err.Error(), "failure category platform_denied") ||
 		!strings.Contains(err.Error(), "failure code 52029") || !strings.Contains(err.Error(), "retry attempt 1") {
 		cancel()
@@ -620,19 +622,19 @@ func TestWaitForSharingReportsMissingDaemonResourceDiagnostic(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	server := &connectordaemon.IPCServer{
-		SocketPath: connectordaemon.StateSocketPath(stateDir), Manager: manager, JobVersion: "1/test",
+		SocketPath: stateSocketPath(t, stateDir), Manager: manager, JobVersion: "1/test",
 	}
 	go func() { done <- server.Run(ctx) }()
 	readyCtx, readyCancel := context.WithTimeout(context.Background(), time.Second)
-	if err := (connectordaemon.IPCClient{SocketPath: connectordaemon.StateSocketPath(stateDir)}).WaitReady(readyCtx); err != nil {
+	if err := (connectordaemon.IPCClient{SocketPath: stateSocketPath(t, stateDir)}).WaitReady(readyCtx); err != nil {
 		readyCancel()
 		cancel()
 		t.Fatal(err)
 	}
 	readyCancel()
 	local := &connectorstate.LocalShare{ResourceID: "resource-a", CRID: "crid-a", ServingEpoch: 1}
-	_, err = waitForSharingWithDiagnostics(context.Background(), sharingErrorClient{err: errors.New("temporary poll failure")},
-		local, stateDir, 1, 10*time.Millisecond)
+	_, err = waitForSharingWithDiagnostics(context.Background(), &globalOpts{},
+		sharingErrorClient{err: errors.New("temporary poll failure")}, local, stateDir, 1, 10*time.Millisecond)
 	if err == nil || !strings.Contains(err.Error(), "daemon running, resource diagnostic absent") ||
 		!strings.Contains(err.Error(), "temporary poll failure") {
 		cancel()
@@ -661,9 +663,8 @@ func TestWaitForSharingWithDiagnosticsPreservesCallerCancellation(t *testing.T) 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	pollErr := errors.New("poll interrupted")
-	_, err := waitForSharingWithDiagnostics(ctx, sharingErrorClient{err: pollErr}, &connectorstate.LocalShare{
-		ResourceID: "resource-a", CRID: "crid-a",
-	}, connectorStateTestDir(t), 1, time.Minute)
+	_, err := waitForSharingWithDiagnostics(ctx, &globalOpts{}, sharingErrorClient{err: pollErr},
+		&connectorstate.LocalShare{ResourceID: "resource-a", CRID: "crid-a"}, connectorStateTestDir(t), 1, time.Minute)
 	if !errors.Is(err, context.Canceled) || !errors.Is(err, pollErr) || strings.Contains(err.Error(), "daemon state") {
 		t.Fatalf("canceled diagnosed wait error = %v, want the unmodified caller cancellation", err)
 	}
@@ -1261,11 +1262,11 @@ func TestShareInspectKeepsAuthoritativeStoppedStateOverStaleDaemonDiagnostic(t *
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	server := &connectordaemon.IPCServer{
-		SocketPath: connectordaemon.StateSocketPath(stateDir), Manager: manager, JobVersion: "1/test",
+		SocketPath: stateSocketPath(t, stateDir), Manager: manager, JobVersion: "1/test",
 	}
 	go func() { done <- server.Run(ctx) }()
 	readyCtx, readyCancel := context.WithTimeout(context.Background(), time.Second)
-	if err := (connectordaemon.IPCClient{SocketPath: connectordaemon.StateSocketPath(stateDir)}).WaitReady(readyCtx); err != nil {
+	if err := (connectordaemon.IPCClient{SocketPath: stateSocketPath(t, stateDir)}).WaitReady(readyCtx); err != nil {
 		readyCancel()
 		cancel()
 		t.Fatal(err)
@@ -2608,6 +2609,15 @@ func TestLocalPublishWarmRuntimeFailureEmitsNoIdentityOrManagementMutation(t *te
 }
 
 func TestPublishDaemonLifecycleServesRealHTTPAndStopsCleanly(t *testing.T) {
+	runPublishDaemonLifecycle(t, false)
+}
+
+func TestExternalPublishDaemonLifecycleServesRealHTTPAndStopsCleanly(t *testing.T) {
+	runPublishDaemonLifecycle(t, true)
+}
+
+func runPublishDaemonLifecycle(t *testing.T, external bool) {
+	t.Helper()
 	if testing.Short() {
 		t.Skip("real FRP daemon journey")
 	}
@@ -2626,6 +2636,13 @@ func TestPublishDaemonLifecycleServesRealHTTPAndStopsCleanly(t *testing.T) {
 
 	srv := apitest.NewServer(t)
 	stateDir := connectorStateTestDir(t)
+	env := map[string]string{"QURL_API_KEY": testAPIKey}
+	if external {
+		if err := connectorstate.EstablishExternalRuntimeMode(context.Background(), stateDir); err != nil {
+			t.Fatal(err)
+		}
+		env[connectorstate.EnvRuntimeSupervision] = "external"
+	}
 	registry, err := openOwnedTestShareRegistry(stateDir)
 	if err != nil {
 		t.Fatal(err)
@@ -2645,6 +2662,10 @@ func TestPublishDaemonLifecycleServesRealHTTPAndStopsCleanly(t *testing.T) {
 	}
 	daemon := &journeyDaemon{registry: registry, admitter: admitter, version: "test"}
 	t.Cleanup(daemon.close)
+	var controller shareDaemonController = daemon
+	if external {
+		controller = startExternalJourneyDaemon(t, daemon, stateDir, srv.URL)
+	}
 
 	sharingPath := "/v1/resources/" + srv.Key.CRID + "/sharing"
 	srv.Script(http.MethodGet, sharingPath, func(w http.ResponseWriter, _ *http.Request) {
@@ -2727,8 +2748,8 @@ func TestPublishDaemonLifecycleServesRealHTTPAndStopsCleanly(t *testing.T) {
 	}
 	res := runCLI(t, &runOpts{
 		args:          []string{"--endpoint", srv.URL, "--quiet", "publish", echo.URL, "--id", connectorID},
-		env:           map[string]string{"QURL_API_KEY": testAPIKey},
-		shareRegistry: registry, shareDaemon: daemon, shareStateDir: stateDir,
+		env:           env,
+		shareRegistry: registry, shareDaemon: controller, shareStateDir: stateDir,
 		localResource: resolver, sharingWaitLimit: 10 * time.Second,
 	})
 	if res.code != 0 || res.stdout.String() != srv.Key.CRID+"\n" {
@@ -2851,6 +2872,27 @@ func TestPublishDaemonLifecycleServesRealHTTPAndStopsCleanly(t *testing.T) {
 		t.Fatalf("old proxy %q was not unregistered after drain: %#v", oldProxyName, recorder.snapshot())
 	}
 
+	if external {
+		// A supervisor restart keeps durable intent and resumes the same route
+		// only after the replacement process receives its first reload.
+		daemon.close()
+		stored, err := registry.Get(context.Background(), srv.Key.CRID)
+		if err != nil || stored.DesiredState != "on" || stored.ServingEpoch != 1 {
+			t.Fatalf("supervisor stop changed durable sharing: %+v, %v", stored, err)
+		}
+		controller = startExternalJourneyDaemon(t, daemon, stateDir, srv.URL)
+		if err := controller.Ensure(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		deadline = time.Now().Add(5 * time.Second)
+		for !requestRoute() {
+			if time.Now().After(deadline) {
+				t.Fatal("external restart did not resume the stored route")
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+
 	srv.Script(http.MethodPut, sharingPath, func(w http.ResponseWriter, _ *http.Request) {
 		apitest.WriteEnvelope(t, w, http.StatusOK, map[string]any{
 			"resource_id": srv.Key.ResourceID, "crid": srv.Key.CRID,
@@ -2859,8 +2901,8 @@ func TestPublishDaemonLifecycleServesRealHTTPAndStopsCleanly(t *testing.T) {
 	})
 	stop := runCLI(t, &runOpts{
 		args:          []string{"--endpoint", srv.URL, "stop", srv.Key.CRID},
-		env:           map[string]string{"QURL_API_KEY": testAPIKey},
-		shareRegistry: registry, shareDaemon: daemon, shareStateDir: stateDir,
+		env:           env,
+		shareRegistry: registry, shareDaemon: controller, shareStateDir: stateDir,
 	})
 	if stop.code != 0 {
 		t.Fatalf("stop result code=%d stderr=%s", stop.code, stop.stderr.String())
@@ -2877,8 +2919,8 @@ func TestPublishDaemonLifecycleServesRealHTTPAndStopsCleanly(t *testing.T) {
 		t.Helper()
 		deleted := runCLI(t, &runOpts{
 			args:          []string{"--endpoint", srv.URL, "delete", crid, "--yes"},
-			env:           map[string]string{"QURL_API_KEY": testAPIKey},
-			shareRegistry: registry, shareDaemon: daemon, shareStateDir: stateDir,
+			env:           env,
+			shareRegistry: registry, shareDaemon: controller, shareStateDir: stateDir,
 		})
 		if deleted.code != 0 {
 			t.Fatalf("delete result code=%d stderr=%s", deleted.code, deleted.stderr.String())
@@ -2909,8 +2951,8 @@ func TestPublishDaemonLifecycleServesRealHTTPAndStopsCleanly(t *testing.T) {
 	for range 2 {
 		republished := runCLI(t, &runOpts{
 			args:          []string{"--endpoint", srv.URL, "--quiet", "publish", echo.URL, "--id", connectorID},
-			env:           map[string]string{"QURL_API_KEY": testAPIKey},
-			shareRegistry: registry, shareDaemon: daemon, shareStateDir: stateDir,
+			env:           env,
+			shareRegistry: registry, shareDaemon: controller, shareStateDir: stateDir,
 			localResource: resolver, sharingWaitLimit: 10 * time.Second,
 		})
 		if republished.code != 0 || republished.stdout.String() != resourceKey.CRID+"\n" {
@@ -3203,7 +3245,7 @@ func resolvedLocalResource(srv *apitest.Server, found bool) localResourceResolve
 }
 
 func foregroundIPCTestDaemon(started, stopped chan struct{}) func(context.Context, *globalOpts, string, string) error {
-	return func(ctx context.Context, _ *globalOpts, stateDir, jobVersion string) error {
+	return func(ctx context.Context, opts *globalOpts, stateDir, jobVersion string) error {
 		defer close(stopped)
 		manager, err := connectordaemon.NewManager(emptyForegroundRegistry{}, emptyForegroundFactory{})
 		if err != nil {
@@ -3211,7 +3253,10 @@ func foregroundIPCTestDaemon(started, stopped chan struct{}) func(context.Contex
 		}
 		runCtx, cancelRun := context.WithCancel(ctx)
 		defer cancelRun()
-		path := connectordaemon.StateSocketPath(stateDir)
+		path, err := connectordaemon.SocketPathForStateDir(stateDir, opts.lookupEnv)
+		if err != nil {
+			return err
+		}
 		done := make(chan error, 1)
 		go func() {
 			done <- (&connectordaemon.IPCServer{
@@ -3311,5 +3356,96 @@ func assertLocalConnectorResourceRetired(t *testing.T, stateDir, connectorID str
 	_, retired, found, err := store.ConnectorResourceBinding(context.Background(), connectorID)
 	if err != nil || !found || !retired {
 		t.Fatalf("deleted Connector binding found=%t retired=%t err=%v", found, retired, err)
+	}
+}
+
+// startExternalJourneyDaemon uses the production controller and IPC with real
+// Connector sessions. Only cloud admission is supplied by the local fixture.
+func startExternalJourneyDaemon(t *testing.T, daemon *journeyDaemon, stateDir, endpoint string) shareDaemonController {
+	t.Helper()
+	common, err := connectordaemon.DefaultFRPCommon(2, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	factory, err := connectordaemon.NewNativeGroupFactory(daemon.admitter, common, daemon.version)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager, err := connectordaemon.NewManager(daemon.registry, factory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.DeferFirstReconcile = true
+	admissionsBefore := daemon.admitter.admissions()
+	ctx, cancel := context.WithCancel(context.Background())
+	daemon.manager, daemon.cancel, daemon.done = manager, cancel, make(chan error, 1)
+	version, err := connectordaemon.JobVersion(daemon.version, connectordaemon.GroupModeSingle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &connectordaemon.IPCServer{SocketPath: stateSocketPath(t, stateDir), Manager: manager, JobVersion: version}
+	go func() { daemon.done <- server.Run(ctx) }()
+	controller, err := connectordaemon.NewJobController(stateDir, t.TempDir(), daemon.version, endpoint, connectordaemon.GroupModeSingle, connectorstate.RuntimeSupervisionExternal, func() (qurl.HubBootstrap, error) {
+		t.Error("external lifecycle resolved native job deployment")
+		return qurl.HubBootstrap{}, errors.New("unexpected native job deployment")
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ready, stop := context.WithTimeout(ctx, 5*time.Second)
+	defer stop()
+	if err := controller.IPC.WaitReady(ready); err != nil {
+		t.Fatal(err)
+	}
+	if daemon.admitter.admissions() != admissionsBefore {
+		t.Fatal("external daemon admitted a session before reload")
+	}
+	return controller
+}
+
+// TestInspectDegradesWhenTheRuntimeDirCannotResolve pins that an unresolvable
+// QURL_CONNECTOR_RUNTIME_DIR does not silence inspect. That misconfiguration
+// is exactly what someone runs inspect to diagnose, so the resource and
+// target facts must still print, with the daemon reported unavailable.
+func TestInspectDegradesWhenTheRuntimeDirCannotResolve(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// Windows named pipes discard the runtime directory, so there is no
+		// unresolvable value to degrade over.
+		t.Skip("QURL_CONNECTOR_RUNTIME_DIR does not reach the Windows pipe address")
+	}
+	srv := apitest.NewServer(t)
+	stateDir := connectorStateTestDir(t)
+	registry, err := openOwnedTestShareRegistry(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seed := localShareFixture(srv)
+	seed.DesiredState = "on"
+	if err := registry.Put(context.Background(), &seed); err != nil {
+		t.Fatal(err)
+	}
+	srv.Script(http.MethodGet, "/v1/resources/"+srv.Key.CRID+"/sharing",
+		sharingResponse(t, srv, "on", seed.ServingEpoch, "serving"))
+	res := runCLI(t, &runOpts{
+		args: []string{"--endpoint", srv.URL, "inspect", srv.Key.CRID, "-o", "json"},
+		env: map[string]string{
+			"QURL_API_KEY": testAPIKey, "QURL_CONNECTOR_STATE_DIR": stateDir,
+			connectordaemon.RuntimeDirEnv: "relative/runtime",
+		},
+		shareRegistry: registry, shareStateDir: stateDir,
+		preflightTarget: func(context.Context, string, int) error { return nil },
+	})
+	if res.code != 0 {
+		t.Fatalf("inspect exit=%d stderr=%q, want the degraded document", res.code, res.stderr.String())
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(res.stdout.Bytes(), &doc); err != nil {
+		t.Fatalf("inspect stdout is not JSON: %v (%q)", err, res.stdout.String())
+	}
+	if doc["daemon_state"] != "unavailable" || doc["failure_category"] != "local_daemon" {
+		t.Fatalf("degraded document = %v, want an unavailable local_daemon", doc)
+	}
+	if doc["target_url"] != seed.TargetURL {
+		t.Fatalf("degraded document lost the target: %v", doc)
 	}
 }

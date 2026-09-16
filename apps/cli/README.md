@@ -86,8 +86,10 @@ change. Run `qurl stop <CRID>` to turn it off and `qurl start <CRID>` to turn it
 back on. Publishing the same target later reuses the same CRID.
 
 Background lifecycle management is available on Linux, macOS, and Windows.
-Linux uses the native systemd user manager. Use `--foreground` for CI,
-debugging, or a process that another service manager owns.
+Linux uses the native systemd user manager. Use `--foreground` for CI or
+debugging. When another program owns the daemon process, run it with
+`qurl daemon run --supervision external` instead — see
+[External supervision](#external-supervision).
 
 ### 4. Open or share it
 
@@ -234,6 +236,7 @@ command-line flag > environment variable > profile/config file > built-in defaul
 | Color | `--color` | `QURL_COLOR` | `color` | `auto` |
 | Connector ID | `--id` | `QURL_CONNECTOR_ID` | `connector_id` | Stable opaque ID for local `publish` |
 | Session group mode | `--share-group-mode` (`daemon run`) | `QURL_SHARE_GROUP_MODE` | `share_group_mode` | `single` — see [Session group modes](#session-group-modes) |
+| Daemon supervision | `--supervision` | `QURL_DAEMON_SUPERVISION` | `daemon_supervision` | `native` — see [External supervision](#external-supervision) |
 
 Config files are YAML. The default file is `~/.config/qurl/config.yaml`; a
 named profile lives at `~/.config/qurl/profiles/<name>.yaml` and is
@@ -241,11 +244,30 @@ selected with `--profile` or `QURL_PROFILE`. A missing file simply means
 defaults apply. **Config files never hold secrets** — a file carrying an
 `api_key` entry is rejected outright rather than silently honored.
 
-Also honored: `QURL_DEPLOYMENT` (the settings-file path used to verify share
-and access links; environment-only, with no profile override), `NO_COLOR` (disables color while `--color` is `auto`), and
+Also honored: `QURL_DEPLOYMENT` (a sandbox or custom deployment settings file;
+production settings are included in releases; environment-only, with no profile override), `NO_COLOR` (disables color while `--color` is `auto`), and
 `QURL_BROWSER` / `BROWSER` (which browser `qurl get` opens). Pointing the
 CLI at a plain-`http` endpoint on a non-local address warns that the key
 would travel unencrypted; loopback endpoints are exempt.
+
+`LAYERV_KEY_PROVIDER` seals the local agent state under a key provider
+instead of the plaintext default (`file`); with `local-key`, the 32-byte
+wrapping key arrives on the inherited descriptor named by
+`LAYERV_LOCAL_KEY_FD`, on macOS and Linux. There is deliberately no flag: the
+supervisor that owns the key (for example qURL Desktop) sets the environment.
+A sealed namespace requires `--supervision external`: the background job
+`qurl` installs under native supervision carries no environment and cannot
+inherit a key descriptor. Every command that checks the namespace's
+supervision policy - `publish`, `start`, `stop`, `restart`, `delete`, `login`
+and `daemon run` - therefore refuses a sealed namespace under native
+supervision (exit code 3), not only the ones that would install a job.
+Read-only commands do not run that check and open the sealed envelope
+normally.
+
+A state directory holds exactly one
+envelope, so qurl refuses to open a sealed directory without these variables,
+or a plaintext one with them (also exit code 3); use a different state
+directory rather than switching in place.
 
 ## Commands
 
@@ -270,11 +292,20 @@ would travel unencrypted; loopback endpoints are exempt.
 Run `qurl <command> --help` for the full help text; installed man pages
 cover the same surface (`man qurl`, `man qurl-publish`, …).
 
+Commands that take a CRID assess it locally first: a likely typo (bad
+checksum, wrong alphabet) is warned about and still forwarded — the server
+is the only authoritative validator. Sending a **test-environment CRID to
+the production endpoint** is refused unless `--yes` is given; a production
+CRID aimed at a non-production endpoint warns and proceeds.
+
 ### qurl daemon run
 
-`qurl daemon run` lets another service manager own the long-running process.
+`qurl daemon run` runs the long-running sharing process in the foreground for
+a headless deployment or for a program that supervises the daemon itself.
 With no headless flags, it serves the local shares already stored under
 `--state-dir`.
+
+#### Headless deployments
 
 Generated Docker, Kubernetes, and other headless deployment instructions can
 also supply `--headless-config <share.yaml>`. This is a non-secret, read-only
@@ -292,11 +323,113 @@ the secret recoverable. Verify that the warm start connects, then remove the
 secret mount and delete the one-time secret. A complete warm start does not read
 or require that file.
 
-Commands that take a CRID assess it locally first: a likely typo (bad
-checksum, wrong alphabet) is warned about and still forwarded — the server
-is the only authoritative validator. Sending a **test-environment CRID to
-the production endpoint** is refused unless `--yes` is given; a production
-CRID aimed at a non-production endpoint warns and proceeds.
+#### External supervision
+
+When another program — a desktop app, a service manager — owns the daemon
+process instead of qURL's per-user background job, start the daemon with
+`--supervision external` and run every lifecycle command against that state
+directory with the same setting (flag `--supervision`, environment
+`QURL_DAEMON_SUPERVISION`, config key `daemon_supervision`).
+
+Use a dedicated, fresh state directory rather than the native default. For
+account-key enrollment, the first daemon invocation establishes the marker and
+is expected to exit with `no durable account owner`. Then log in, and start
+the daemon again. Complete the first invocation before running any other
+command against this directory:
+
+```bash
+export QURL_CONNECTOR_STATE_DIR="$STATE_DIR"
+export QURL_DAEMON_SUPERVISION=external
+qurl daemon run # first invocation marks the namespace, then exits 1
+qurl login
+qurl daemon run # keep running under the supervisor
+```
+
+Once the daemon is running, lifecycle commands in another process use the same
+two environment settings. A dedicated state directory avoids marking the native
+default namespace by accident; use a different directory to return to native
+supervision instead of deleting a marker beside durable credentials.
+
+External supervision changes three things:
+
+- The first `daemon run --supervision external` marks the state directory as
+  externally supervised (`runtime_mode.json`). It accepts only a directory
+  that holds no natively managed state, and the mark is permanent.
+- `publish`, `start`, and `restart` reload the running daemon and never
+  install or replace a background job. When the daemon is not running they
+  fail with exit code 11 and roll their own cloud change back, so the
+  supervisor can start the daemon, wait for `GET /status` to return 200,
+  and retry. Wait for that readiness response before publishing a share.
+- `publish`, `start`, `restart`, `stop`, `delete`, `login`, and `daemon run`
+  refuse a state directory whose mark does not match their `--supervision`
+  setting (exit code 3). A plain `qurl` command therefore never installs a
+  background job over a supervised daemon, and a supervised command never
+  adopts a natively managed directory. This check applies to the namespace,
+  including commands for remote resources. Read-only sharing commands work
+  either way, but can still enroll a device and write authentication state.
+
+On every process start, including a warm restart or headless start, an
+externally supervised daemon waits up to 30 seconds for its supervisor's
+first reload (every lifecycle command sends one) before serving the stored
+shares on its own. The supervisor should send `POST /reload` after IPC is
+ready and all runtime state has been restored to avoid that delay.
+
+Stopping the daemon is a local act: it changes no sharing state, so the shares
+resume on the next start. Before downgrading to a CLI released before external
+supervision, stop the current daemon. Older clients cannot decode its `pid`
+status field.
+
+#### Optional origin authentication
+
+An integration can supply temporary request headers when its local HTTP origin
+requires authentication. Ordinary shares need no added headers or tunnel-trust
+settings. This capability is not specific to a desktop application.
+
+Credential-bearing routes require a tunnel server with a verifiable TLS
+certificate. For a deployment that already provides that server certificate,
+configure its service-managed daemon with:
+
+```bash
+qurl daemon run --tunnel-ca-file /etc/qurl/tunnel-ca.pem
+```
+
+The PEM file must use an absolute path and contain the CA certificates trusted
+for that tunnel server. The certificate is checked against the admitted server
+host. Use `--tunnel-server-name <name>` only when the deployment requires a
+specific certificate identity, such as a server reached by IP address. Invalid
+trust configuration fails before enrollment. These options configure the
+client; they do not provision a server certificate. The default per-user daemon
+does not enable runtime credentials. Configured tunnel trust applies to every
+route on that daemon, including routes without added headers.
+
+The integration sends `PUT /overlay` through the daemon's owner-only local IPC
+channel, with this JSON shape:
+
+```json
+{"route_request_headers":{"connector-id":{"Authorization":"Bearer <runtime-token>"}}}
+```
+
+Each request replaces the entire overlay. Omitted routes lose their headers;
+`{"route_request_headers":{}}` clears it. The response is 204 when accepted,
+400 for invalid input, or 409 if headers are supplied without configured tunnel
+trust. Acceptance schedules a route update; it does not mean the route is
+already serving. The body limit is 64 KiB and 2,000 routes, with up to 16 headers
+and 1,024 combined name/value bytes per route. All limits apply together.
+<!-- TODO(upstream-contract): Limits mirror qurl-connector MaxGroupRoutes and ValidateRequestHeaders. -->
+
+Headers are sent over verified TLS to the tunnel server, which adds them to
+origin requests. The tunnel operator must therefore be trusted with these
+credentials. The daemon keeps headers in memory, outside saved state and status.
+An integration must restore them after daemon restart. It can supply headers
+before publishing a route; stopping the share retains them until the next
+overlay replacement. Republishing the same Connector ID reuses those retained
+headers; replace or clear them before reusing the ID with different credentials.
+Only the matching route receives each header set.
+
+The origin must reject missing or invalid credentials. Updating headers can
+interrupt that route, and retiring sessions may use old headers until they
+finish draining. Revoke a compromised token at the origin; an overlay update is
+not immediate revocation. Other routes retain their existing credentials.
 
 ### qurl publish
 
@@ -381,7 +514,8 @@ from a script, use `qurl get <CRID> --file <path>`.
 | `--ttl <duration>` | Requested link lifetime in whole seconds (e.g. `5m`, `1h`). The service may grant less; a shorter grant is reported on stderr, never silent. Sub-second or negative values are refused rather than rounded. |
 | `--yes` | Proceed without confirmation, including sending a test CRID to production |
 
-Share needs the deployment verification settings described under `qurl get`.
+Production share verification needs no extra settings. Sandbox and custom
+deployments use the settings described under `qurl get`.
 Before anything is printed, the CLI verifies the signed link against
 the CRID you asked for; a mismatched answer is discarded and the command
 exits with code 12 without printing a link.
@@ -416,10 +550,9 @@ or use `qurl share` if you only need the link. With `-o json`, get is a
 machine asking for data, so browser mode and `--file -` are refused
 loudly; `--file <path> -o json` downloads and emits the outcome document.
 
-Both `share` and `get` need deployment settings to check that the signed link
-belongs to the CRID you supplied. Set `QURL_DEPLOYMENT` to the path of your
-deployment's settings file (ask whoever runs the deployment for it), unless
-your build includes those settings. Without usable settings, the command
+Releases include the production settings used by `share` and `get` to verify
+the signed link and its CRID. Production needs no deployment file. For sandbox
+or a custom deployment, set `QURL_DEPLOYMENT` to that deployment's settings file. Without usable settings, the command
 fails with exit code 3 before printing a link, opening a browser, or downloading.
 Direct or pre-signed URLs in share responses are rejected because they cannot
 be checked against the advertised CRID.

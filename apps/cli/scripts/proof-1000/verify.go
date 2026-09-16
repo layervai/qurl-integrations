@@ -17,7 +17,7 @@ const (
 	autoSampleEdges    = 10
 	fetchArgFile       = "--file"
 	fetchArgStdout     = "-"
-	hostSuffixQURLSite = ".qurl.site."
+	hostSuffixQURLSite = ".qurl.site"
 )
 
 // fetchResult is one end-to-end fetch through the platform: the consume CLI
@@ -126,7 +126,8 @@ func fetchShare(ctx context.Context, env *environment, o *origin, rec *shareReco
 	}
 	if rec.RoutingID != "" {
 		result.HostChecked = true
-		result.HostOK = strings.HasPrefix(body.Host, rec.RoutingID+".") && strings.Contains(body.Host, hostSuffixQURLSite)
+		expectedHost := rec.RoutingID + hostSuffixQURLSite
+		result.HostOK = body.Host == expectedHost || strings.HasPrefix(body.Host, expectedHost+".")
 	}
 	result.OK = result.NonceOK && result.RequestSeen && (!result.HostChecked || result.HostOK)
 	if !result.OK {

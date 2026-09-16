@@ -143,6 +143,7 @@ func TestReleaseBuildEmbedsOnlyProductionHubTrust(t *testing.T) {
 }
 
 func TestReleaseLinkerTargetProducesRunnableNativeTrustPin(t *testing.T) {
+	t.Setenv("QURL_DEPLOYMENT", "")
 	scalar := bytes.Repeat([]byte{0x42}, curve25519.ScalarSize)
 	public, err := curve25519.X25519(scalar, curve25519.Basepoint)
 	if err != nil {
