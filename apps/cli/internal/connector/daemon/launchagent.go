@@ -96,19 +96,8 @@ func NewJobController(stateDir, logDir, binaryVersion, endpoint string, mode Gro
 
 // Ensure reloads a compatible live daemon or installs the current job definition.
 func (c *JobController) Ensure(ctx context.Context) error {
-	if err := c.validateController(); err != nil {
+	if err := c.prepare(); err != nil {
 		return err
-	}
-	// Under native supervision qurl owns the daemon's runtime directory, so
-	// secure a pinned one before probing: the client's parent-directory check
-	// requires 0700, and a directory the operator created with a normal umask
-	// would otherwise fail every command before the job install that fixes it.
-	// Skipped when the socket lives in the state directory (always so on
-	// Windows) - the daemon's own startup secures that one.
-	if c.Supervision == connectorstate.RuntimeSupervisionNative && c.RuntimeDir != c.StateDir {
-		if err := connectorstate.EnsureDirMode(c.RuntimeDir); err != nil {
-			return err
-		}
 	}
 	status, running, statusErr := c.ProbeStatus(ctx)
 	if statusErr != nil {
@@ -188,6 +177,23 @@ func unmanagedDaemonMismatch(status IPCStatus, expectedJobVersion string, status
 		"share daemon job version %q does not match this qURL job version %q; stop the foreground or externally managed daemon and retry",
 		status.JobVersion, expectedJobVersion,
 	)
+}
+
+// prepare validates the controller and secures the daemon's runtime
+// directory. Under native supervision qurl owns that directory, so a pinned
+// one is secured before the first probe: the client's parent-directory check
+// requires 0700, and a directory the operator created with a normal umask
+// would otherwise fail every command before the job install that fixes it.
+// Skipped when the socket lives in the state directory (always so on
+// Windows) - the daemon's own startup secures that one.
+func (c *JobController) prepare() error {
+	if err := c.validateController(); err != nil {
+		return err
+	}
+	if c.Supervision != connectorstate.RuntimeSupervisionNative || c.RuntimeDir == c.StateDir {
+		return nil
+	}
+	return connectorstate.EnsureDirMode(c.RuntimeDir)
 }
 
 func (c *JobController) validateController() error {
