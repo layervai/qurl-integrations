@@ -153,7 +153,7 @@ func (c IPCClient) Status(ctx context.Context) (IPCStatus, bool, error) {
 		return IPCStatus{}, true, fmt.Errorf("read share daemon status: %w", err)
 	}
 	if len(body) > maxIPCStatusBytes {
-		return IPCStatus{}, true, fmt.Errorf("%w: status exceeds %d bytes", errIPCStatusIncompatible, maxIPCStatusBytes)
+		return IPCStatus{}, true, fmt.Errorf("share daemon status exceeds %d bytes", maxIPCStatusBytes)
 	}
 	status, err := decodeIPCStatus(bytes.NewReader(body))
 	if err != nil {

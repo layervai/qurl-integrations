@@ -110,6 +110,7 @@ func TestNativeCommandRefusesExternalNamespace(t *testing.T) {
 	const wantMessage = `runtime supervision is "external", not "native"; run this command with --supervision external`
 	for _, args := range [][]string{
 		{"publish", "http://127.0.0.1:3000"},
+		{"publish", "https://example.com/reports"},
 		{"start", srv.Key.CRID},
 		{"restart", srv.Key.CRID},
 		{"stop", srv.Key.CRID},

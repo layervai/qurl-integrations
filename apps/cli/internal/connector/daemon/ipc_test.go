@@ -5,6 +5,7 @@ package daemon
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -448,27 +449,35 @@ func emptyManager(t *testing.T) *Manager {
 	return manager
 }
 
-func TestIPCTruncatedStatusDoesNotReplaceNativeDaemon(t *testing.T) {
-	dir := shortTempDir(t)
-	path := filepath.Join(dir, SocketFile)
-	listener, cleanup, err := listenDaemonIPC(context.Background(), path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	server := &http.Server{ReadHeaderTimeout: time.Second, Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Length", "1000")
-		_, _ = io.WriteString(w, `{"job_version":`)
-	})}
-	go func() { _ = server.Serve(listener) }()
-	t.Cleanup(func() { _ = server.Close(); _ = cleanup() })
-	manager := &recordingJobManager{}
-	controller := NewJobController(dir, dir, "test", "https://api.example.com", GroupModeSingle, connectorstate.RuntimeSupervisionNative, testHubResolver)
-	controller.Manager = manager
-	err = controller.Ensure(context.Background())
-	if !errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, errIPCStatusIncompatible) {
-		t.Fatalf("truncated status = %v, want transport failure without incompatibility", err)
-	}
-	if manager.statusCalls != 0 || len(manager.jobs) != 0 || len(manager.replaced) != 0 {
-		t.Fatal("truncated status reached native job management")
+func TestIPCReadFailureDoesNotReplaceNativeDaemon(t *testing.T) {
+	for _, oversized := range []bool{false, true} {
+		t.Run(fmt.Sprintf("oversized=%t", oversized), func(t *testing.T) {
+			dir := shortTempDir(t)
+			path := filepath.Join(dir, SocketFile)
+			listener, cleanup, err := listenDaemonIPC(context.Background(), path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			server := &http.Server{ReadHeaderTimeout: time.Second, Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				if oversized {
+					_, _ = io.WriteString(w, strings.Repeat(" ", maxIPCStatusBytes+1))
+					return
+				}
+				w.Header().Set("Content-Length", "1000")
+				_, _ = io.WriteString(w, `{"job_version":`)
+			})}
+			go func() { _ = server.Serve(listener) }()
+			t.Cleanup(func() { _ = server.Close(); _ = cleanup() })
+			manager := &recordingJobManager{}
+			controller := NewJobController(dir, dir, "test", "https://api.example.com", GroupModeSingle, connectorstate.RuntimeSupervisionNative, testHubResolver)
+			controller.Manager = manager
+			err = controller.Ensure(context.Background())
+			if err == nil || errors.Is(err, errIPCStatusIncompatible) || (!oversized && !errors.Is(err, io.ErrUnexpectedEOF)) {
+				t.Fatalf("failed status read = %v, want transport failure without incompatibility", err)
+			}
+			if manager.statusCalls != 0 || len(manager.jobs) != 0 || len(manager.replaced) != 0 {
+				t.Fatal("failed status read reached native job management")
+			}
+		})
 	}
 }

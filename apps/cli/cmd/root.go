@@ -239,7 +239,7 @@ QURL_API_KEY for the same one-time bootstrap.`,
 	flags.StringVar(&opts.colorMode, "color", "", "colorize output: auto, always, or never (default auto)")
 	flags.BoolVarP(&opts.verbose, "verbose", "v", false, "print request diagnostics on stderr")
 	flags.StringVar(&opts.profile, "profile", "", "configuration profile name")
-	flags.StringVar(&opts.supervision, "supervision", "", "who runs the sharing daemon: native (qurl manages a background job) or external (another program runs qurl daemon run) (default native)")
+	flags.StringVar(&opts.supervision, "supervision", "", "who runs the sharing daemon: native (qURL manages a background job) or external (another program runs qurl daemon run) (default native)")
 
 	cmd.SetOut(streams.Out)
 	cmd.SetErr(streams.Err)

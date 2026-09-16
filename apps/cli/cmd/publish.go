@@ -79,6 +79,9 @@ share and turns it off when it exits.`,
 			if cmd.Flags().Changed("foreground") {
 				return exitcode.UsageError(errors.New("--foreground applies only when publishing a loopback HTTP origin"))
 			}
+			if err := opts.requireRuntimeSupervisionIfNamespace(); err != nil {
+				return err
+			}
 			client, err := opts.newClient(cmd.Context())
 			if err != nil {
 				return err
