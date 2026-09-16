@@ -879,11 +879,6 @@ op read op://team/qurl/key | qurl login
 qurl whoami -o json
 ```
 
-<<<<<<< HEAD
-`qurl login --enrollment-token-file <path> --supervision external` enrolls
-from a supervisor's one-time enrollment token file instead of an account key;
-see [Supervised installs](#supervised-installs).
-=======
 A supervisor such as qURL Desktop can instead run
 `qurl login --enrollment-token-file /absolute/path/to/token --supervision external -o json`.
 It must supply a one-time token minted for `target=agent`, set
@@ -905,7 +900,6 @@ account-key authority: preserve the old state directory and enroll a new
 namespace with a fresh token. Login JSON includes
 `owner_id`, `auth_type`, `device_enrolled`, and `device_key_id` when the
 service supplies a key ID.
->>>>>>> pr1428
 
 ### qurl completion
 
