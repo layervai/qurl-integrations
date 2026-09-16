@@ -282,6 +282,14 @@ func cliSentinelCode(err error) (int, bool) {
 		// namespace; the supervisor rotates the state directory and enrolls
 		// again, the same remedy as a rejected credential.
 		return Auth, true
+	case errors.Is(err, auth.ErrEnrollmentTokenFile):
+		// The one-time credential the supervisor wrote is unusable. Claimed
+		// here, in cliSentinelCode, so it wins over the envelope fallback that
+		// the token-file login path wraps around every runtime-open failure -
+		// a mis-permissioned token file is not an envelope problem, and its
+		// remedy is a new token, not the environment or another state
+		// directory.
+		return Auth, true
 	case errors.Is(err, auth.ErrCredentialConflict), errors.Is(err, auth.ErrDeviceAccountConflict):
 		return Conflict, true
 	case errors.Is(err, config.ErrInvalidProfileName),

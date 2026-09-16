@@ -40,6 +40,13 @@ var (
 	// ErrDeviceEnrollmentScope rejects a registered device whose enrollment is
 	// not the owner-scoped agent kind that native session operations require.
 	ErrDeviceEnrollmentScope = errors.New("cli: registered device enrollment is not owner-scoped")
+	// ErrEnrollmentTokenFile reports a supervisor's one-time token file that is
+	// unusable at read time: the wrong mode or owner, hard-linked, a symlink,
+	// empty, oversize, or not one clean token. The path-shape checks run before
+	// the namespace exists and are usage errors; these are raised inside the
+	// runtime open, after it, so the remedy is to mint a new token file rather
+	// than to retype the command.
+	ErrEnrollmentTokenFile = errors.New("cli: external enrollment token file is unusable")
 )
 
 // Source names where a resolved credential came from.
