@@ -1536,6 +1536,69 @@ func TestDeleteResource(t *testing.T) {
 	}
 }
 
+func TestGetResourceDecodesDetailEnvelope(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/resources/r_abc123test" {
+			t.Errorf("request = %s %s, want GET /v1/resources/r_abc123test", r.Method, r.URL.Path)
+			http.Error(w, "unexpected request", http.StatusInternalServerError)
+			return
+		}
+		// Mirrors qurl-service ResourceDetailResponse: resource beside a qurls preview.
+		apiEnvelope(t, w, map[string]any{
+			"resource": map[string]any{"resource_id": "r_abc123test", "type": "tunnel", "status": "active"},
+			"qurls":    []any{},
+		})
+	}))
+	defer srv.Close()
+
+	c := testClient(srv.URL, "test-key")
+	got, err := c.GetResource(context.Background(), "r_abc123test")
+	if err != nil {
+		t.Fatalf("GetResource: %v", err)
+	}
+	if got.ResourceID != "r_abc123test" || got.Type != ResourceTypeTunnel {
+		t.Fatalf("GetResource = %+v, want tunnel r_abc123test", got)
+	}
+}
+
+func TestGetResourceRejectsMissingOrMismatchedResource(t *testing.T) {
+	t.Parallel()
+
+	for name, tc := range map[string]struct {
+		body    string
+		wantErr string
+	}{
+		"absent data": {`{"meta":{}}`, "has no resource"},
+		"null data":   {`{"data":null}`, "has no resource"},
+		"missing":     {`{"data":{"qurls":[]}}`, "has no resource"},
+		// The pre-fix client decoded this flat shape; the service never sends it.
+		"legacy flat": {`{"data":{"resource_id":"r_abc123test","type":"tunnel"}}`, "has no resource"},
+		"blank type":  {`{"data":{"resource":{"resource_id":"r_abc123test","type":" "}}}`, "has no type"},
+		"mismatch":    {`{"data":{"resource":{"resource_id":"r_other","type":"tunnel"}}}`, "identity does not match"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+
+			_, err := testClient(srv.URL, "test-key").GetResource(context.Background(), "r_abc123test")
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("GetResource err = %v, want %q", err, tc.wantErr)
+			}
+			// Callers route *APIError to status-specific replies; drift must not look like one.
+			var apiErr *APIError
+			if errors.As(err, &apiErr) {
+				t.Errorf("GetResource err = %v is an *APIError, want a plain contract error", err)
+			}
+		})
+	}
+}
+
 func TestDeleteResourceReturnsAPIErrorOnFailure(t *testing.T) {
 	t.Parallel()
 

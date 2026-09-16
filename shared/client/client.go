@@ -893,6 +893,8 @@ func (c *Client) CreateResource(ctx context.Context, input *CreateResourceInput)
 }
 
 // GetResource retrieves one resource by its public resource identity.
+// resourceID must be the resource_id (the public key); the service also accepts
+// a CRID on this path, but the response identity check here rejects it.
 func (c *Client) GetResource(ctx context.Context, resourceID string) (*Resource, error) {
 	resourceID = strings.TrimSpace(resourceID)
 	if resourceID == "" {
@@ -902,14 +904,26 @@ func (c *Client) GetResource(ctx context.Context, resourceID string) (*Resource,
 	if err != nil {
 		return nil, fmt.Errorf("build request: %w", err)
 	}
-	var out Resource
+	// TODO(upstream-contract): qurl-service ResourceDetailResponse nests the
+	// resource under data.resource beside a qurls preview; mirrored by
+	// (*client).Resource in apps/cli/internal/api/rest.go (which also accepts
+	// CRIDs). The flat pre-#161 shape is rejected so contract drift fails loudly.
+	var out struct {
+		Resource *Resource `json:"resource"`
+	}
 	if _, err := c.do(req, &out, "GET /v1/resources/:id"); err != nil {
 		return nil, err
 	}
-	if out.ResourceID != resourceID {
-		return nil, errors.New("get resource response identity does not match request")
+	if out.Resource == nil {
+		return nil, errors.New("get resource response has no resource (data or data.resource absent)")
 	}
-	return &out, nil
+	if out.Resource.ResourceID != resourceID {
+		return nil, fmt.Errorf("get resource response identity does not match request (want %q, got %q)", resourceID, out.Resource.ResourceID)
+	}
+	if strings.TrimSpace(out.Resource.Type) == "" {
+		return nil, errors.New("get resource response has no type")
+	}
+	return out.Resource, nil
 }
 
 // Identity is the account identity behind the client credential (GET /v1/me).
