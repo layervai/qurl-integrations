@@ -165,7 +165,7 @@ func TestExternalCommandRefusesNativeNamespace(t *testing.T) {
 		preflightTarget: func(context.Context, string, int) error { return nil },
 		localResource:   resolvedLocalResource(srv, true),
 	})
-	const wantMessage = `runtime supervision is "native", not "external"; initialize a dedicated empty state directory with qurl daemon run --supervision external before login`
+	const wantMessage = `runtime supervision is "native", not "external"; enroll a dedicated empty state directory first with qurl login --enrollment-token-file <path> --supervision external`
 	if res.code != 3 || !strings.Contains(res.stderr.String(), wantMessage) {
 		t.Fatalf("external publish against a native namespace = exit %d stderr %q, want exit 3 with %q", res.code, res.stderr.String(), wantMessage)
 	}
