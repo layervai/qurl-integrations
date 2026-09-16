@@ -104,6 +104,12 @@ func RequireRuntimeSupervision(dir string, expected RuntimeSupervision) error {
 	// before it writes, rather than at the install: a sealed envelope written
 	// under native supervision cannot afterwards be adopted by
 	// EstablishExternalRuntimeMode, which requires a fresh namespace.
+	// The sentinel is ErrAgentStateEnvelope, not ErrRuntimeSupervision: both
+	// map to Config, and the cause really is the envelope the environment
+	// selects, not a marker this directory carries. It also runs before
+	// ReadRuntimeSupervision, so a sealed namespace addressed natively gets
+	// this message rather than "is external, not native" - the more
+	// actionable of the two.
 	if expected == RuntimeSupervisionNative && SealedProviderSelected() {
 		// Name the value: any non-empty name but file selects a sealed envelope,
 		// so a typo lands here too and its author needs to see what was read.
