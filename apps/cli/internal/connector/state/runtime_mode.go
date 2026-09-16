@@ -141,7 +141,7 @@ func EstablishExternalRuntimeMode(ctx context.Context, dir string) (retErr error
 		_, err := os.Lstat(filepath.Join(dir, name))
 		switch {
 		case err == nil:
-			return fmt.Errorf("state directory is not a fresh external namespace: %s already exists; use a dedicated empty state directory", name)
+			return fmt.Errorf("%w: state directory is not a fresh external namespace: %s already exists; use a dedicated empty state directory", ErrRuntimeSupervision, name)
 		case errors.Is(err, os.ErrNotExist):
 		default:
 			return fmt.Errorf("inspect external namespace: %w", err)

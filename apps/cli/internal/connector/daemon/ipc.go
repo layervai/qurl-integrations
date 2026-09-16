@@ -2,6 +2,7 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -145,7 +146,16 @@ func (c IPCClient) Status(ctx context.Context) (IPCStatus, bool, error) {
 		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
 		return IPCStatus{}, true, fmt.Errorf("share daemon status returned HTTP %d", response.StatusCode)
 	}
-	status, err := decodeIPCStatus(io.LimitReader(response.Body, maxIPCStatusBytes))
+	// Read failures do not establish a protocol mismatch. In particular, a
+	// timeout or truncated transfer must not authorize replacing a native job.
+	body, err := io.ReadAll(io.LimitReader(response.Body, maxIPCStatusBytes+1))
+	if err != nil {
+		return IPCStatus{}, true, fmt.Errorf("read share daemon status: %w", err)
+	}
+	if len(body) > maxIPCStatusBytes {
+		return IPCStatus{}, true, fmt.Errorf("%w: status exceeds %d bytes", errIPCStatusIncompatible, maxIPCStatusBytes)
+	}
+	status, err := decodeIPCStatus(bytes.NewReader(body))
 	if err != nil {
 		return IPCStatus{}, true, fmt.Errorf("%w: %w", errIPCStatusIncompatible, err)
 	}

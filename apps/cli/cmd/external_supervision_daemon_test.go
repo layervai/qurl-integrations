@@ -143,7 +143,7 @@ func TestDaemonRunExternalRefusesNativeNamespace(t *testing.T) {
 		args:          append([]string{"daemon", "run", "--supervision", "external", "--state-dir", stateDir}, daemonRunHubArgs...),
 		shareStateDir: stateDir,
 	})
-	if res.code == 0 || res.code == 130 || !strings.Contains(res.stderr.String(), "not a fresh external namespace") {
+	if res.code != 3 || !strings.Contains(res.stderr.String(), "not a fresh external namespace") {
 		t.Fatalf("external daemon over a native namespace = exit %d stderr %q, want a refusal to relabel it", res.code, res.stderr.String())
 	}
 	if _, err := os.Lstat(filepath.Join(stateDir, connectorstate.RuntimeModeFile)); !errors.Is(err, os.ErrNotExist) {

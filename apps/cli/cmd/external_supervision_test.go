@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"os"
@@ -166,7 +167,7 @@ func TestExternalCommandRefusesNativeNamespace(t *testing.T) {
 	if daemon.ensures != 0 || len(srv.Requests()) != 0 {
 		t.Fatalf("mismatched publish reached the daemon (%+v) or the service (%d requests)", daemon, len(srv.Requests()))
 	}
-	if _, err := os.Lstat(filepath.Join(stateDir, connectorstate.RuntimeModeFile)); !os.IsNotExist(err) {
+	if _, err := os.Lstat(filepath.Join(stateDir, connectorstate.RuntimeModeFile)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("a lifecycle command established the external policy marker: %v", err)
 	}
 }
