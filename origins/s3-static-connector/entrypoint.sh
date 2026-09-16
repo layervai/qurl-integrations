@@ -61,6 +61,86 @@ trap shutdown TERM INT
   --log-format '{"layer":"envoy","level":"%l","name":"%n","message":"%j"}' &
 envoy_pid=$!
 
+# Diagnose the index request through the actual signer before serving. HTTP
+# rejection can reflect IAM propagation or credential refresh, so it must not
+# exhaust the container restart budget. nginx retains its viewer error masking.
+preflight_key="${S3_PREFIX_NORMALIZED}/${INDEX_DOCUMENT}"
+preflight_remediation="Verify the credentials/provider chain, IAM permissions (s3:GetObject on the served keys and s3:ListBucket on the bucket), AWS_REGION, bucket/endpoint, and signed-request configuration for s3://${S3_BUCKET}${preflight_key}."
+
+# Status line of a HEAD sent through the signer; exit 2 while it is not
+# listening yet, exit 1 once it is but the S3 hop produced no response.
+probe_signer() {
+  (
+    exec 3<>"/dev/tcp/${ENVOY_LISTEN_HOST}/${ENVOY_LISTEN_PORT}" || exit 2
+    printf 'HEAD %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n' \
+      "$preflight_key" "$S3_HOST" >&3 || exit 1
+    IFS= read -r -t 10 status_line <&3 || exit 1
+    printf '%s\n' "$status_line"
+  ) 2>/dev/null
+}
+
+preflight_line=""
+preflight_rc=0
+preflight_status=""
+preflight_deadline=$((SECONDS + 15))
+while :; do
+  preflight_rc=0
+  preflight_line="$(probe_signer)" || preflight_rc=$?
+  [ "$preflight_rc" -eq 0 ] || preflight_line=""
+  preflight_status="${preflight_line#* }"
+  preflight_status="${preflight_status%% *}"
+  # A status line with no reason phrase ends at the code with the CR still
+  # attached; strip it so a real rejection cannot fail open to "no response".
+  preflight_status="${preflight_status%$'\r'}"
+  case "$preflight_status" in
+    [0-9][0-9][0-9]) ;;
+    *) preflight_status="" ;;
+  esac
+  # Wait only for the local signer to bind. Upstream errors are diagnostic;
+  # subsequent viewer requests can recover as soon as S3 accepts them.
+  if [ "$preflight_rc" -ne 2 ] || ! kill -0 "$envoy_pid" 2>/dev/null ||
+    [ "$SECONDS" -ge "$preflight_deadline" ]; then
+    break
+  fi
+  sleep 0.5
+done
+
+# S3_BUCKET, S3_PREFIX, and INDEX_DOCUMENT are already restricted by render.sh
+# to characters that need no JSON escaping, so these values interpolate as-is.
+preflight_log() {
+  if [ -n "$preflight_status" ]; then
+    printf '{"layer":"origin","msg":"%s","status":%s,"key":"%s","detail":"%s"}\n' \
+      "$1" "$preflight_status" "$preflight_key" "$2"
+  else
+    printf '{"layer":"origin","msg":"%s","key":"%s","detail":"%s"}\n' \
+      "$1" "$preflight_key" "$2"
+  fi
+}
+
+case "$preflight_status" in
+  2??|304)
+    preflight_log preflight_ok "S3 request succeeded."
+    ;;
+  404)
+    preflight_log preflight_object_missing "S3 returned 404 for the requested index object. It may not be synced yet; this status does not prove which identity or permissions handled the request. Serving anyway." >&2
+    ;;
+  429|5??)
+    preflight_log preflight_upstream_error "S3 returned a transient throttle or server error. Serving anyway; requests fail 502 while it lasts." >&2
+    ;;
+  3??|4??)
+    # Status alone cannot distinguish credentials from IAM, wrong region,
+    # endpoint, or other request configuration. It does establish that S3
+    # rejected the probe, which nginx masks to a viewer 404.
+    preflight_log preflight_request_rejected "S3 rejected the request. $preflight_remediation Serving with existing viewer error masking so temporary failures can recover." >&2
+    ;;
+  "")
+    preflight_log preflight_no_response "Could not reach the signer or S3 before the deadline. Serving anyway; requests will fail 502 while it stays unreachable." >&2
+    ;;
+  *)
+    preflight_log preflight_upstream_error "Unexpected status from the S3 hop. Serving anyway; inspect the upstream status and origin logs." >&2
+    ;;
+esac
+
 /usr/sbin/nginx -c "${RENDER_DIR}/nginx.conf" -g 'daemon off;' &
 nginx_pid=$!
 

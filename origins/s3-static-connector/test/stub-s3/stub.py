@@ -7,6 +7,10 @@ the expected canonical path/Host, which is what proves nginx's rewrite + query
 strip + signing-after-rewrite wiring. Cryptographic verification against real S3
 happens during the staging soak.
 
+An unsigned request gets 403 like a private bucket does, whatever the key: that
+is what an empty AWS provider chain produces, and the origin's startup preflight
+exists to catch it.
+
 Known keys return fixture bodies + headers. `badrequest*` -> 400, `forbidden*`
 -> 403 (auth/signing failure), `wrongregion*` -> 301 (the PermanentRedirect a
 mistyped region produces, body naming the real bucket + region), `throttle*` ->
@@ -82,6 +86,16 @@ class Handler(BaseHTTPRequestHandler):
 
     def _serve(self, head_only=False):
         key = self._key()
+        # A private bucket answers an unsigned request with 403 AccessDenied.
+        # Name the identity state on stderr for the HEAD preflight assertion.
+        if not self.headers.get("Authorization"):
+            self.log_message("authorization absent %s", self.path)
+            return self._send(403, b"<Error><Code>AccessDenied</Code></Error>",
+                              ctype="application/xml", head_only=head_only)
+        if key == "startup-denied/index.html":
+            # Simulate IAM propagation completing after the startup HEAD.
+            return self._send(403 if head_only else 200, b"recovered",
+                              ctype="text/plain", head_only=head_only)
         if "badrequest" in key:
             return self._send(400, b"<Error><Code>InvalidRequest</Code></Error>",
                               ctype="application/xml", head_only=head_only)
