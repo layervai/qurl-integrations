@@ -28,7 +28,9 @@ const SocketFile = "daemon.sock"
 // socket. A host whose state path cannot fit sockaddr_un, such as an App
 // Sandbox container, sets it to a short owner-only directory so every daemon
 // and client resolves exactly <dir>/daemon.sock. This directory must be
-// dedicated to one state namespace; startup enforces owner-only 0700 mode.
+// dedicated to one state namespace. Daemon startup *changes* its mode to
+// owner-only 0700, so name a directory qURL owns rather than one that is
+// also used for something else.
 const RuntimeDirEnv = "QURL_CONNECTOR_RUNTIME_DIR"
 
 // SocketPathForStateDir returns the platform IPC address for one state
@@ -49,6 +51,11 @@ func SocketPathForStateDir(stateDir string, lookupEnv func(string) (string, bool
 			runtimeDir = filepath.Clean(strings.TrimSpace(raw))
 			if !filepath.IsAbs(runtimeDir) {
 				return "", fmt.Errorf("%s must be an absolute path", RuntimeDirEnv)
+			}
+			// Daemon startup sets this directory to 0700, so the filesystem
+			// root is never an acceptable answer.
+			if runtimeDir == string(filepath.Separator) {
+				return "", fmt.Errorf("%s must name a directory, not the filesystem root", RuntimeDirEnv)
 			}
 		}
 	}

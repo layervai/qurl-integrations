@@ -28,6 +28,11 @@ var ErrExternalDaemonNotRunning = errors.New("share daemon is externally supervi
 // daemonJobProtocolVersion identifies the persisted service-manager argument
 // contract. Increment it for each incompatible shape; do not reuse an earlier
 // value even when a later shape resembles it.
+//
+// 4 absorbs both --supervision and --runtime-dir: no released qurl ever
+// installed a job at 4 (2.5.4 shipped at 3), so no user's job definition can
+// carry the earlier 4 shape. A shape change after the next release must go
+// to 5.
 const daemonJobProtocolVersion = "4"
 
 // JobController installs, upgrades, and signals the per-user daemon job.

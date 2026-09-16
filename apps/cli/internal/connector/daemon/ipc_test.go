@@ -33,7 +33,6 @@ func TestIPCServerReadinessReloadAndShutdown(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-	t.Setenv("TMPDIR", dir)
 	// Exercise the derived runtime path, not only its string contract: this
 	// state namespace is intentionally too long for sockaddr_un.
 	path, err := SocketPathForStateDir(filepath.Join(dir, strings.Repeat("state-segment-", 8)), nil)

@@ -13,9 +13,10 @@ import (
 	"time"
 )
 
-// shortTempRoot pins TMPDIR to a short /tmp directory for one test. Hosted
-// macOS temp roots are long enough that a host-dependent root would decide
-// whether a derived socket path fits sockaddr_un.
+// shortTempRoot returns a short directory below /tmp. It anchors on /tmp
+// rather than t.TempDir() because a hosted macOS temp root is long enough
+// that a host-dependent root would decide whether the socket path below it
+// fits sockaddr_un.
 func shortTempRoot(t *testing.T) string {
 	t.Helper()
 	root, err := os.MkdirTemp("/tmp", "qurl-tmp-")
@@ -23,7 +24,6 @@ func shortTempRoot(t *testing.T) string {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(root) })
-	t.Setenv("TMPDIR", root)
 	return root
 }
 
@@ -162,5 +162,17 @@ func TestIPCServerAndClientAgreeOnRuntimeDirSocket(t *testing.T) {
 	cancel()
 	if err := <-done; !errors.Is(err, context.Canceled) {
 		t.Fatalf("server error = %v, want context cancellation", err)
+	}
+}
+
+// TestSocketPathRejectsTheFilesystemRootAsRuntimeDir pins that the daemon
+// never accepts "/" as its runtime directory: startup sets that directory to
+// owner-only 0700, and the root is not a directory qURL may own.
+func TestSocketPathRejectsTheFilesystemRootAsRuntimeDir(t *testing.T) {
+	for _, raw := range []string{"/", "//", "/."} {
+		got, err := SocketPathForStateDir("/tmp/state", lookupEnvFrom(map[string]string{RuntimeDirEnv: raw}))
+		if err == nil || !strings.Contains(err.Error(), "not the filesystem root") {
+			t.Fatalf("%s=%q resolved to %q err=%v, want the filesystem-root rejection", RuntimeDirEnv, raw, got, err)
+		}
 	}
 }

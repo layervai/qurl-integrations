@@ -98,7 +98,7 @@ func validatePlatformIPCPath(path string) error {
 
 // platformSocketPath places the socket in runtimeDir when one is pinned,
 // below a state directory that fits sockaddr_un otherwise, and in a bounded
-// owner-only per-user directory below the temp root as the last resort.
+// owner-only per-user directory below /tmp as the last resort.
 func platformSocketPath(stateDir, runtimeDir string) (string, error) {
 	if runtimeDir != "" {
 		path := filepath.Join(runtimeDir, SocketFile)
@@ -114,15 +114,19 @@ func platformSocketPath(stateDir, runtimeDir string) (string, error) {
 	digest := sha256.Sum256([]byte(path))
 	// IPCServer.Run passes this predictable directory through EnsureDirMode
 	// before listen. That helper rejects a symlink or a directory owned by any
-	// other user before it changes permissions, so a pre-creation below the
-	// shared temp root can only make startup fail closed. The fixed root makes
-	// foreground daemons and clients agree even when their TMPDIR differs.
+	// other user before it changes permissions, so a pre-creation below /tmp
+	// can only make startup fail closed. The root is the literal /tmp, not
+	// os.TempDir(), so foreground daemons and clients agree even when their
+	// TMPDIR differs.
 	const runtimeRoot = "/tmp"
 	path = filepath.Join(
 		runtimeRoot,
 		"qurl-"+strconv.Itoa(os.Geteuid())+"-"+hex.EncodeToString(digest[:8]),
 		SocketFile,
 	)
+	// Unreachable with today's shape (/tmp/qurl-<uid>-<16 hex>/daemon.sock is
+	// at most 49 bytes, and a uid cannot exceed 10 digits), but kept so a
+	// later change to the derived name cannot silently exceed the limit.
 	if len(path) > maxUnixSocketPathBytes {
 		return "", fmt.Errorf("share daemon socket path is too long below both the state and temp directories; set %s to a short owner-only directory", RuntimeDirEnv)
 	}
