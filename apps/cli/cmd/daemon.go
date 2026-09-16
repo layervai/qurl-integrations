@@ -399,7 +399,7 @@ func resolveDaemonPaths(ctx context.Context, opts *globalOpts, stateDirOverride,
 	// runtime directory behind; that is a control-socket location, not durable
 	// state, and the next start reuses it.
 	if dir := filepath.Dir(socketPath); dir != stateDir {
-		if err := connectorstate.EnsureDirMode(dir); err != nil {
+		if err := connectordaemon.EnsureIPCDir(dir); err != nil {
 			return "", "", err
 		}
 	}
