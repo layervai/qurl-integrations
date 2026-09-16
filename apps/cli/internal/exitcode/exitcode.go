@@ -303,11 +303,6 @@ func connectorSentinelCode(err error) (int, bool) { //nolint:gocyclo // Keep the
 		return Config, true
 	case errors.Is(err, state.ErrNoDefaultStateDir):
 		return Config, true
-	case errors.Is(err, state.ErrAgentStateEnvelope):
-		// The state directory's envelope does not match the selected key
-		// provider. The remedy is LAYERV_KEY_PROVIDER / LAYERV_LOCAL_KEY_FD or
-		// a different state directory, never the command line.
-		return Config, true
 	case errors.Is(err, hub.ErrConfig):
 		// The QURL_CONNECTOR_HUB_* trust triple (or a dark build missing its
 		// production pin) is configuration in the §16.5 sense even though it
@@ -413,6 +408,15 @@ func connectorSentinelCode(err error) (int, bool) { //nolint:gocyclo // Keep the
 		// ErrAssignmentLeaseExpired is matched here, before the invalid
 		// response below, because Validate wraps an expired lease with both.
 		return Unavailable, true
+	case errors.Is(err, state.ErrAgentStateEnvelope):
+		// Last of the connector rows on purpose. Opening a sealed envelope can
+		// fail for reasons qurl-go already classifies - a loose directory mode,
+		// lock contention, a continuity break - and those must keep the code
+		// the plaintext branch would have given them. This row is the fallback
+		// for what is left: the envelope does not match the selected key
+		// provider, whose remedy is LAYERV_KEY_PROVIDER / LAYERV_LOCAL_KEY_FD
+		// or a different state directory, never the command line.
+		return Config, true
 	case errors.Is(err, qurl.ErrAssignmentInvalidResponse):
 		// An authenticated producer-contract violation is the service
 		// "answered outside its contract" — the ServerError row, and terminal

@@ -105,9 +105,14 @@ func RequireRuntimeSupervision(dir string, expected RuntimeSupervision) error {
 	// under native supervision cannot afterwards be adopted by
 	// EstablishExternalRuntimeMode, which requires a fresh namespace.
 	if expected == RuntimeSupervisionNative && SealedProviderSelected() {
+		// Name the value: any non-empty name but file selects a sealed envelope,
+		// so a typo lands here too and its author needs to see what was read.
+		// Offer both exits, because the variable leaking into an interactive
+		// shell over a plaintext namespace is as likely as a real sealed one.
 		return fmt.Errorf(
-			"%w: %s seals this namespace, which only an external supervisor can serve; run every command with --supervision external against a dedicated state directory that has held no state before",
-			ErrAgentStateEnvelope, connectoragentstate.EnvKeyProvider)
+			"%w: %s=%q selects a sealed agent state envelope, which only an external supervisor can serve; run every command with --supervision external against a dedicated state directory that has held no state before, or unset %s for the plaintext default",
+			ErrAgentStateEnvelope, connectoragentstate.EnvKeyProvider,
+			strings.TrimSpace(os.Getenv(connectoragentstate.EnvKeyProvider)), connectoragentstate.EnvKeyProvider)
 	}
 	actual, err := ReadRuntimeSupervision(dir)
 	if err != nil {
