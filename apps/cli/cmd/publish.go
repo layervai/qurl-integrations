@@ -79,6 +79,9 @@ share and turns it off when it exits.`,
 			if cmd.Flags().Changed("foreground") {
 				return exitcode.UsageError(errors.New("--foreground applies only when publishing a loopback HTTP origin"))
 			}
+			if err := opts.requireRuntimeSupervisionIfNamespace(); err != nil {
+				return err
+			}
 			client, err := opts.newClient(cmd.Context())
 			if err != nil {
 				return err
@@ -114,6 +117,9 @@ func runLocalPublish(ctx context.Context, opts *globalOpts, target *publishTarge
 	}
 	stateDir, err := opts.resolveShareStateDir("")
 	if err != nil {
+		return err
+	}
+	if err := opts.requireRuntimeSupervision(stateDir); err != nil {
 		return err
 	}
 	registry, err := opts.openShareRegistry(stateDir)

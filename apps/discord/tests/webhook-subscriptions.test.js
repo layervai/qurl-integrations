@@ -16,7 +16,7 @@ jest.mock('../src/logger', () => ({
 
 process.env.QURL_API_KEY = 'lv_test_abc';
 process.env.QURL_ENDPOINT = 'https://qurl.layerv.ai';
-process.env.QURL_WEBHOOK_SECRET = 'default-key-secret';
+process.env.QURL_WEBHOOK_SECRET = 'whsec_default_key_secret_value';
 process.env.BASE_URL = 'http://localhost:3000';
 process.env.AWS_REGION = 'us-east-2';
 process.env.DDB_TABLE_PREFIX = 'qurl-bot-discord-test-';
@@ -56,7 +56,9 @@ describe('webhook-subscriptions registry — priming + lookup', () => {
     mockScan.mockResolvedValueOnce([]);
     await subs.scanOnce();
     expect(subs.isPrimed()).toBe(true);
-    expect(subs.getSecretForOwner('usr_default')).toBe('default-key-secret');
+    // discoverDefaultOwnerId returned usr_default + QURL_WEBHOOK_SECRET
+    // env is wired as the default secret.
+    expect(subs.getSecretForOwner('usr_default')).toBe('whsec_default_key_secret_value');
   });
 
   it('rebuilds (not merges) on each scan — a removed row drops from the cache', async () => {

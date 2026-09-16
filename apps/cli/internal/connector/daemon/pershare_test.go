@@ -142,7 +142,7 @@ func TestPerShareManagerSpendsOneAdmissionAndOneSessionPerShare(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		done <- (&IPCServer{SocketPath: socket, Manager: manager, JobVersion: "3/test/per-share"}).Run(ctx)
+		done <- (&IPCServer{SocketPath: socket, Manager: manager, JobVersion: "4/test/per-share"}).Run(ctx)
 	}()
 	t.Cleanup(func() {
 		cancel()
@@ -187,7 +187,7 @@ func TestPerShareManagerSpendsOneAdmissionAndOneSessionPerShare(t *testing.T) {
 		t.Fatal(err)
 	}
 	status := ipcStatus(t, client)
-	if status.JobVersion != "3/test/per-share" || len(status.Running) != 3 || len(status.Resources) != 3 {
+	if status.JobVersion != "4/test/per-share" || len(status.Running) != 3 || len(status.Resources) != 3 {
 		t.Fatalf("/status = %+v, want the job version and every share once", status)
 	}
 	for _, id := range []string{"a", "b", "c"} {
@@ -205,7 +205,7 @@ func TestNewShareManagerSingleModeStillSpendsOneAdmissionForEveryShare(t *testin
 	}}
 	admitter := &fakeAdmitter{}
 	sessions := &fakeSessionGroupFactory{}
-	manager, err := NewShareManager(registry, &NativeGroupFactory{admitter: admitter, sessions: sessions}, GroupModeSingle)
+	manager, err := NewShareManager(registry, &NativeGroupFactory{admitter: admitter, sessions: sessions}, GroupModeSingle, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -232,17 +232,17 @@ func TestNewShareManagerSingleModeStillSpendsOneAdmissionForEveryShare(t *testin
 
 func TestNewShareManagerBuildsPerShareAndRejectsUnknownModes(t *testing.T) {
 	registry := &memoryRegistry{shares: map[string]connectorstate.LocalShare{}}
-	manager, err := NewShareManager(registry, newFakeGroupFactory(), GroupModePerShare)
+	manager, err := NewShareManager(registry, newFakeGroupFactory(), GroupModePerShare, false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := manager.(*PerShareManager); !ok {
 		t.Fatalf("per-share mode built %T, want PerShareManager", manager)
 	}
-	if _, err := NewShareManager(registry, newFakeGroupFactory(), GroupMode("both")); err == nil {
+	if _, err := NewShareManager(registry, newFakeGroupFactory(), GroupMode("both"), false); err == nil {
 		t.Fatal("unknown mode built a manager")
 	}
-	if _, err := NewShareManager(nil, newFakeGroupFactory(), GroupModePerShare); err == nil {
+	if _, err := NewShareManager(nil, newFakeGroupFactory(), GroupModePerShare, false); err == nil {
 		t.Fatal("nil registry built a manager")
 	}
 }
@@ -808,5 +808,173 @@ func TestPerShareManagerListFailureStopsEveryGroup(t *testing.T) {
 	}
 	if got := manager.Running(); len(got) != 0 {
 		t.Fatalf("running set after failure = %v, want every group stopped", got)
+	}
+}
+
+// TestPerShareManagerFansOutOverlay pins that an overlay set on the per-share
+// manager reaches every live group — each pushed once, with only its own
+// route and its own headers — and seeds a group started after it, while an
+// unchanged sibling costs no push.
+func TestPerShareManagerFansOutOverlay(t *testing.T) {
+	registry := &memoryRegistry{shares: map[string]connectorstate.LocalShare{
+		"a": perShareRow("a", 1, "on"),
+		"b": perShareRow("b", 1, "on"),
+	}}
+	factory := newFakeGroupFactory()
+	manager := newRunningPerShareManager(t, registry, factory)
+	waitPerShareServing(t, manager, "a", "b")
+	manager.SetOverlay(map[string]map[string]string{
+		"connector-a": {overlayHeader: "ta"},
+		"connector-b": {overlayHeader: "tb"},
+		"connector-c": {overlayHeader: "tc"},
+	})
+	for _, id := range []string{"a", "b"} {
+		runner := runnerFor(t, factory, id)
+		waitManagerCondition(t, func() bool { return len(runner.pushedRoutes()) == 1 }, "one push on group "+id)
+		pushed := runner.pushedRoutes()[0]
+		if len(pushed) != 1 || pushed[0].RouteID != "connector-"+id || pushed[0].RequestHeaders[overlayHeader] != "t"+id {
+			t.Fatalf("group %s pushed %v, want only its own route with its own headers", id, pushed)
+		}
+	}
+	waitPerShareServing(t, manager, "a", "b")
+	if got := factory.startCount(); got != 2 {
+		t.Fatalf("group starts after the overlay = %d, want no new admission", got)
+	}
+	// A share published after the overlay starts with its headers attached,
+	// and its siblings' unchanged rows cost them no push.
+	third := perShareRow("c", 1, "on")
+	registry.setShare(&third)
+	manager.Trigger()
+	waitPerShareServing(t, manager, "c")
+	cfg := groupConfigs(factory)[2]
+	if cfg.ResourceID != "c" || len(cfg.Routes) != 1 || cfg.Routes[0].RequestHeaders[overlayHeader] != "tc" {
+		t.Fatalf("group for c started as %+v, want its route seeded with the overlay's headers", cfg)
+	}
+	time.Sleep(50 * time.Millisecond)
+	for _, id := range []string{"a", "b"} {
+		if got := len(runnerFor(t, factory, id).pushedRoutes()); got != 1 {
+			t.Fatalf("group %s pushes after c published = %d, want still one", id, got)
+		}
+	}
+	for _, group := range manager.snapshotGroups() {
+		group.manager.mu.Lock()
+		count := len(group.manager.overlay)
+		group.manager.mu.Unlock()
+		if count != 1 {
+			t.Fatalf("group retains %d overlay entries, want only its own", count)
+		}
+	}
+	manager.SetOverlay(nil)
+	for _, id := range []string{"a", "b", "c"} {
+		runner := runnerFor(t, factory, id)
+		waitManagerCondition(t, func() bool {
+			pushes := runner.pushedRoutes()
+			return len(pushes) > 0 && pushes[len(pushes)-1][0].RequestHeaders == nil
+		}, "group "+id+" pushed its route headerless after the overlay was cleared")
+	}
+	waitPerShareServing(t, manager, "a", "b", "c")
+}
+
+// TestPerShareManagerOverlaySkipsUnchangedGroups pins that rotating one
+// route's headers pushes only that route's group.
+func TestPerShareManagerOverlaySkipsUnchangedGroups(t *testing.T) {
+	registry := &memoryRegistry{shares: map[string]connectorstate.LocalShare{
+		"a": perShareRow("a", 1, "on"),
+		"b": perShareRow("b", 1, "on"),
+		"c": perShareRow("c", 1, "on"),
+	}}
+	factory := newFakeGroupFactory()
+	manager := newRunningPerShareManager(t, registry, factory)
+	waitPerShareServing(t, manager, "a", "b", "c")
+	overlay := map[string]map[string]string{
+		"connector-a": {overlayHeader: "ta"},
+		"connector-b": {overlayHeader: "tb"},
+		"connector-c": {overlayHeader: "tc"},
+	}
+	manager.SetOverlay(overlay)
+	for _, id := range []string{"a", "b", "c"} {
+		runner := runnerFor(t, factory, id)
+		waitManagerCondition(t, func() bool { return len(runner.pushedRoutes()) == 1 }, "one push on group "+id)
+	}
+	overlay["connector-b"] = map[string]string{overlayHeader: "tb2"}
+	manager.SetOverlay(overlay)
+	b := runnerFor(t, factory, "b")
+	waitManagerCondition(t, func() bool { return len(b.pushedRoutes()) == 2 }, "rotated group b pushed again")
+	time.Sleep(50 * time.Millisecond)
+	for _, id := range []string{"a", "c"} {
+		if got := len(runnerFor(t, factory, id).pushedRoutes()); got != 1 {
+			t.Fatalf("group %s pushes after only b rotated = %d, want still one", id, got)
+		}
+	}
+}
+
+func TestPerShareManagerDefersFirstReconcileUntilTrigger(t *testing.T) {
+	registry := &memoryRegistry{shares: map[string]connectorstate.LocalShare{"a": daemonShare("a", 1, "on")}}
+	factory := newFakeGroupFactory()
+	built, err := NewShareManager(registry, factory, GroupModePerShare, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager, ok := built.(*PerShareManager)
+	if !ok || !manager.DeferFirstReconcile {
+		t.Fatalf("NewShareManager(per-share, defer) = %T deferring=%v, want a deferring PerShareManager", built, ok && manager.DeferFirstReconcile)
+	}
+	manager.firstReconcileBound = time.Hour
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- manager.Run(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("manager did not stop")
+		}
+	})
+	time.Sleep(50 * time.Millisecond)
+	if factory.startCount() != 0 {
+		t.Fatalf("deferred per-share manager built %d groups before its first trigger", factory.startCount())
+	}
+	manager.Trigger()
+	waitPerShareServing(t, manager, "a")
+	if factory.startCount() != 1 {
+		t.Fatalf("groups after the first trigger = %d, want 1", factory.startCount())
+	}
+}
+
+func TestNewShareManagerPropagatesDeferredFirstReconcile(t *testing.T) {
+	registry := &memoryRegistry{shares: map[string]connectorstate.LocalShare{}}
+	built, err := NewShareManager(registry, newFakeGroupFactory(), GroupModeSingle, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manager, ok := built.(*Manager); !ok || !manager.DeferFirstReconcile {
+		t.Fatalf("NewShareManager(single, defer) = %T, want a deferring Manager", built)
+	}
+	built, err = NewShareManager(registry, newFakeGroupFactory(), GroupModeSingle, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manager, ok := built.(*Manager); !ok || manager.DeferFirstReconcile {
+		t.Fatalf("NewShareManager(single) = %T, want a Manager that reconciles immediately", built)
+	}
+}
+
+func TestPerShareManagerDeferredFirstReconcileStopsOnCancellation(t *testing.T) {
+	registry := &memoryRegistry{shares: map[string]connectorstate.LocalShare{"a": daemonShare("a", 1, "on")}}
+	factory := newFakeGroupFactory()
+	manager, err := NewPerShareManager(registry, factory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.DeferFirstReconcile = true
+	manager.firstReconcileBound = time.Hour
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := manager.Run(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run = %v, want cancellation", err)
+	}
+	if factory.startCount() != 0 || len(manager.Running()) != 0 {
+		t.Fatal("canceled deferred manager started a group")
 	}
 }
