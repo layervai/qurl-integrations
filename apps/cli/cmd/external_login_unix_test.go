@@ -206,7 +206,8 @@ func TestExternalLoginRejectsNonOwnerScopedState(t *testing.T) {
 			s.EnrollmentCredentialKind = string(qurl.RegistrationKeyKindConnectorBootstrap)
 		},
 		"agent":                func(s *qurl.AgentState) { s.EnrollmentCredentialKind = string(qurl.RegistrationKeyKindAgent) },
-		"unknown kind":         func(s *qurl.AgentState) { s.EnrollmentCredentialKind = "" },
+		"empty kind":           func(s *qurl.AgentState) { s.EnrollmentCredentialKind = "" },
+		"unknown kind":         func(s *qurl.AgentState) { s.EnrollmentCredentialKind = "future_kind" },
 		"no device credential": func(s *qurl.AgentState) { s.DeviceAPIKey = "" },
 		"unregistered":         func(s *qurl.AgentState) { s.RegisteredAt = nil },
 	}
@@ -250,30 +251,42 @@ func TestExternalLoginRejectsNonOwnerScopedState(t *testing.T) {
 }
 
 func TestExternalLoginEnrollmentFailureLeavesAResumableNamespaceAndRedactsTheToken(t *testing.T) {
-	srv := apitest.NewServer(t)
-	stateDir := filepath.Join(t.TempDir(), "state")
-	res := runCLI(t, &runOpts{
-		args:          []string{"--endpoint", srv.URL, "--supervision", "external", "login", "--enrollment-token-file", writeExternalLoginToken(t)},
-		env:           externalLoginEnv(),
-		shareStateDir: stateDir,
-		openNativeRuntime: func(ctx context.Context, cfg connectorshare.NativeRuntimeConfig) (registeredNativeRuntime, error) {
-			credential, err := cfg.EnrollmentCredentialProvider(ctx, qurl.AgentEnrollmentCredentialRequest{AgentID: "agent-durable-01"})
-			if err != nil || credential != testExternalEnrollmentToken {
-				t.Fatalf("enrollment provider = (%d bytes, %v)", len(credential), err)
+	for _, tc := range []struct {
+		name string
+		err  error
+		code int
+	}{
+		{"rejected token", qurl.ErrKeyRejected, 4},
+		{"unreachable endpoint", qurl.ErrEndpointNoReply, 11},
+		{"timeout", context.DeadlineExceeded, 11},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := apitest.NewServer(t)
+			stateDir := filepath.Join(t.TempDir(), "state")
+			res := runCLI(t, &runOpts{
+				args:          []string{"--endpoint", srv.URL, "--supervision", "external", "login", "--enrollment-token-file", writeExternalLoginToken(t)},
+				env:           externalLoginEnv(),
+				shareStateDir: stateDir,
+				openNativeRuntime: func(ctx context.Context, cfg connectorshare.NativeRuntimeConfig) (registeredNativeRuntime, error) {
+					credential, err := cfg.EnrollmentCredentialProvider(ctx, qurl.AgentEnrollmentCredentialRequest{AgentID: "agent-durable-01"})
+					if err != nil || credential != testExternalEnrollmentToken {
+						t.Fatalf("enrollment provider = (%d bytes, %v)", len(credential), err)
+					}
+					return nil, tc.err
+				},
+			})
+			if res.code != tc.code || strings.Contains(res.stderr.String(), "agent state envelope") {
+				t.Fatalf("runtime error exit=%d stderr=%q, want exit %d without envelope label", res.code, res.stderr.String(), tc.code)
 			}
-			return nil, errors.New("enrollment credential rejected")
-		},
-	})
-	if res.code == 0 {
-		t.Fatal("failed enrollment reported success")
-	}
-	mustEmptyStdout(t, res)
-	mustNotLeakEnrollmentToken(t, srv, res)
-	if err := connectorstate.RequireRuntimeSupervision(stateDir, connectorstate.RuntimeSupervisionExternal); err != nil {
-		t.Fatalf("failed enrollment lost the resumable policy marker: %v", err)
-	}
-	if _, err := os.Lstat(filepath.Join(stateDir, connectorstate.LocalSharesFile)); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("failed enrollment bound an owner: %v", err)
+			mustEmptyStdout(t, res)
+			mustNotLeakEnrollmentToken(t, srv, res)
+			if err := connectorstate.RequireRuntimeSupervision(stateDir, connectorstate.RuntimeSupervisionExternal); err != nil {
+				t.Fatalf("failed enrollment lost the resumable policy marker: %v", err)
+			}
+			if _, err := os.Lstat(filepath.Join(stateDir, connectorstate.LocalSharesFile)); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("failed enrollment bound an owner: %v", err)
+			}
+		})
 	}
 }
 
@@ -334,8 +347,8 @@ func TestOneShotEnrollmentTokenReplaysItsFirstOutcome(t *testing.T) {
 func TestOneShotEnrollmentTokenReplaysItsFirstFailure(t *testing.T) {
 	provider := oneShotEnrollmentToken(filepath.Join(t.TempDir(), "absent"))
 	_, first := provider(context.Background(), qurl.AgentEnrollmentCredentialRequest{})
-	if first == nil {
-		t.Fatal("reading an absent token file succeeded")
+	if first == nil || !strings.Contains(first.Error(), "does not exist") {
+		t.Fatalf("absent token error = %v, want missing-file diagnostic", first)
 	}
 	if _, second := provider(context.Background(), qurl.AgentEnrollmentCredentialRequest{}); second == nil || second.Error() != first.Error() {
 		t.Fatalf("second failure = %v, want the first one replayed (%v)", second, first)
