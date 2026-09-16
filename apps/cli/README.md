@@ -262,6 +262,10 @@ is therefore a fresh namespace, not an in-place migration. There is no flag for 
 sets the environment. The token-file reader and the inherited-descriptor key
 transport are available on macOS and Linux.
 
+An unusable token file also returns exit code 4. Correct the file and retry
+with the same state directory; this error does not require a new namespace.
+Use the error message to distinguish it from a wrong-kind device below.
+
 The enrolled device must be owner-scoped. A token minted for target
 `connector` enrolls a credential that native session operations refuse, so
 `login` fails with exit code 4. By then the directory is already marked

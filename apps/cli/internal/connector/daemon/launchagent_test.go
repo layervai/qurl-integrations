@@ -740,13 +740,15 @@ func TestSessionGroupsDocMatchesTheJobProtocolVersion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "`" + daemonJobProtocolVersion + "/<version>`"
-	if !strings.Contains(string(doc), want) {
-		t.Fatalf("%s does not state the current job version %s; update the prose with the constant", path, want)
+	for _, suffix := range []string{"/<version>", "/<version>/per-share"} {
+		want := "`" + daemonJobProtocolVersion + suffix + "`"
+		if !strings.Contains(string(doc), want) {
+			t.Fatalf("%s does not state the current job version %s", path, want)
+		}
 	}
-	for _, stale := range []string{"`3/<version>`", "`4/<version>`"} {
-		if strings.Contains(string(doc), stale) {
-			t.Fatalf("%s still states the retired job version %s", path, stale)
+	for _, token := range strings.Split(string(doc), "`") {
+		if strings.Contains(token, "/<version>") && token != daemonJobProtocolVersion+"/<version>" && token != daemonJobProtocolVersion+"/<version>/per-share" {
+			t.Fatalf("%s states an unexpected job version %s", path, token)
 		}
 	}
 }
