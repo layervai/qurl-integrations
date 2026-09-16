@@ -527,7 +527,7 @@ func (m *Manager) recordDesired(desired []connectorstate.LocalShare) ([]restartE
 			// Target changes may recover a refused route. Header changes do
 			// not change its platform authorization and must retain backoff.
 			//
-			// SetRoutes replaces the existing route definition in Connector.
+			// TODO(upstream-contract): SetRoutes must replace the existing route definition in Connector.
 			// TestRestartRetargetServesNewOriginThroughRealConnector exercises
 			// that contract through the CLI and a live local FRP server.
 			next.retryAt = time.Time{}

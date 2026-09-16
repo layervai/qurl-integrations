@@ -40,6 +40,10 @@ func classifyPublishTarget(raw string) (*publishTarget, error) {
 	}
 	u, err := url.Parse(raw)
 	if err != nil {
+		var parseErr *url.Error
+		if errors.As(err, &parseErr) {
+			err = parseErr.Err
+		}
 		return nil, invalidPublishTarget(fmt.Errorf("parse target URL: %w", err))
 	}
 	if u.Scheme != httpURLScheme && u.Scheme != httpsURLScheme {
