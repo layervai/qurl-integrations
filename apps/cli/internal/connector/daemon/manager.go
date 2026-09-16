@@ -480,6 +480,13 @@ func (m *Manager) applyDesired(ctx context.Context, desired []connectorstate.Loc
 // restart-only ones (a serving-epoch advance with an unchanged target), which
 // it returns so applyDesired can advance their epoch only after RestartRoute
 // succeeds. It returns the restart entries and the live runner.
+//
+// A target move is deliberately not a restart entry: it commits the new
+// definition before SetRoutes is attempted, where a restart defers its epoch
+// commit until RestartRoute succeeds. That asymmetry converges because
+// eligibleRoutes rebuilds the pushed set from the desired rows rather than
+// from tracked, and a failed push schedules a bounded reconcile, so a move is
+// retried rather than stranded.
 func (m *Manager) recordDesired(desired []connectorstate.LocalShare) ([]restartEntry, GroupRunner) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -503,9 +510,23 @@ func (m *Manager) recordDesired(desired []connectorstate.LocalShare) ([]restartE
 		next := trackedShare{share: share, route: route, retryAt: previous.retryAt}
 		previousTarget, nextTarget := previous.route, route
 		previousTarget.RequestHeaders, nextTarget.RequestHeaders = nil, nil
-		if !previousTarget.Equal(nextTarget) {
+		if existed && !previousTarget.Equal(nextTarget) {
+			// Clear the retired target's diagnostic before attempting its
+			// replacement, but preserve a pending group failure's cause.
+			// Callbacks use RouteID, so a late old-generation serving callback
+			// can still overwrite this until the group reports the new route.
+			now := time.Now()
+			if previous.retryAt.After(now) || !now.Before(m.groupRetryAt) {
+				m.seedStartingLocked(share.ResourceID)
+			}
+			// Keep retry counters: a new port does not restore platform
+			// authorization or group health. OnRouteServing resets them.
 			// Target changes may recover a refused route. Header changes do
 			// not change its platform authorization and must retain backoff.
+			//
+			// TODO(upstream-contract): SetRoutes must replace the existing route definition in Connector.
+			// TestRestartRetargetServesNewOriginThroughRealConnector exercises
+			// that contract through the CLI and a live local FRP server.
 			next.retryAt = time.Time{}
 		}
 		m.tracked[share.ResourceID] = next
