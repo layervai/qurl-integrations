@@ -142,7 +142,7 @@ func TestPerShareManagerSpendsOneAdmissionAndOneSessionPerShare(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		done <- (&IPCServer{SocketPath: socket, Manager: manager, JobVersion: "3/test/per-share"}).Run(ctx)
+		done <- (&IPCServer{SocketPath: socket, Manager: manager, JobVersion: "4/test/per-share"}).Run(ctx)
 	}()
 	t.Cleanup(func() {
 		cancel()
@@ -187,7 +187,7 @@ func TestPerShareManagerSpendsOneAdmissionAndOneSessionPerShare(t *testing.T) {
 		t.Fatal(err)
 	}
 	status := ipcStatus(t, client)
-	if status.JobVersion != "3/test/per-share" || len(status.Running) != 3 || len(status.Resources) != 3 {
+	if status.JobVersion != "4/test/per-share" || len(status.Running) != 3 || len(status.Resources) != 3 {
 		t.Fatalf("/status = %+v, want the job version and every share once", status)
 	}
 	for _, id := range []string{"a", "b", "c"} {
@@ -205,7 +205,7 @@ func TestNewShareManagerSingleModeStillSpendsOneAdmissionForEveryShare(t *testin
 	}}
 	admitter := &fakeAdmitter{}
 	sessions := &fakeSessionGroupFactory{}
-	manager, err := NewShareManager(registry, &NativeGroupFactory{admitter: admitter, sessions: sessions}, GroupModeSingle)
+	manager, err := NewShareManager(registry, &NativeGroupFactory{admitter: admitter, sessions: sessions}, GroupModeSingle, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -232,17 +232,17 @@ func TestNewShareManagerSingleModeStillSpendsOneAdmissionForEveryShare(t *testin
 
 func TestNewShareManagerBuildsPerShareAndRejectsUnknownModes(t *testing.T) {
 	registry := &memoryRegistry{shares: map[string]connectorstate.LocalShare{}}
-	manager, err := NewShareManager(registry, newFakeGroupFactory(), GroupModePerShare)
+	manager, err := NewShareManager(registry, newFakeGroupFactory(), GroupModePerShare, false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := manager.(*PerShareManager); !ok {
 		t.Fatalf("per-share mode built %T, want PerShareManager", manager)
 	}
-	if _, err := NewShareManager(registry, newFakeGroupFactory(), GroupMode("both")); err == nil {
+	if _, err := NewShareManager(registry, newFakeGroupFactory(), GroupMode("both"), false); err == nil {
 		t.Fatal("unknown mode built a manager")
 	}
-	if _, err := NewShareManager(nil, newFakeGroupFactory(), GroupModePerShare); err == nil {
+	if _, err := NewShareManager(nil, newFakeGroupFactory(), GroupModePerShare, false); err == nil {
 		t.Fatal("nil registry built a manager")
 	}
 }
@@ -905,5 +905,76 @@ func TestPerShareManagerOverlaySkipsUnchangedGroups(t *testing.T) {
 		if got := len(runnerFor(t, factory, id).pushedRoutes()); got != 1 {
 			t.Fatalf("group %s pushes after only b rotated = %d, want still one", id, got)
 		}
+	}
+}
+
+func TestPerShareManagerDefersFirstReconcileUntilTrigger(t *testing.T) {
+	registry := &memoryRegistry{shares: map[string]connectorstate.LocalShare{"a": daemonShare("a", 1, "on")}}
+	factory := newFakeGroupFactory()
+	built, err := NewShareManager(registry, factory, GroupModePerShare, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager, ok := built.(*PerShareManager)
+	if !ok || !manager.DeferFirstReconcile {
+		t.Fatalf("NewShareManager(per-share, defer) = %T deferring=%v, want a deferring PerShareManager", built, ok && manager.DeferFirstReconcile)
+	}
+	manager.firstReconcileBound = time.Hour
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- manager.Run(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("manager did not stop")
+		}
+	})
+	time.Sleep(50 * time.Millisecond)
+	if factory.startCount() != 0 {
+		t.Fatalf("deferred per-share manager built %d groups before its first trigger", factory.startCount())
+	}
+	manager.Trigger()
+	waitPerShareServing(t, manager, "a")
+	if factory.startCount() != 1 {
+		t.Fatalf("groups after the first trigger = %d, want 1", factory.startCount())
+	}
+}
+
+func TestNewShareManagerPropagatesDeferredFirstReconcile(t *testing.T) {
+	registry := &memoryRegistry{shares: map[string]connectorstate.LocalShare{}}
+	built, err := NewShareManager(registry, newFakeGroupFactory(), GroupModeSingle, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manager, ok := built.(*Manager); !ok || !manager.DeferFirstReconcile {
+		t.Fatalf("NewShareManager(single, defer) = %T, want a deferring Manager", built)
+	}
+	built, err = NewShareManager(registry, newFakeGroupFactory(), GroupModeSingle, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manager, ok := built.(*Manager); !ok || manager.DeferFirstReconcile {
+		t.Fatalf("NewShareManager(single) = %T, want a Manager that reconciles immediately", built)
+	}
+}
+
+func TestPerShareManagerDeferredFirstReconcileStopsOnCancellation(t *testing.T) {
+	registry := &memoryRegistry{shares: map[string]connectorstate.LocalShare{"a": daemonShare("a", 1, "on")}}
+	factory := newFakeGroupFactory()
+	manager, err := NewPerShareManager(registry, factory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.DeferFirstReconcile = true
+	manager.firstReconcileBound = time.Hour
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := manager.Run(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run = %v, want cancellation", err)
+	}
+	if factory.startCount() != 0 || len(manager.Running()) != 0 {
+		t.Fatal("canceled deferred manager started a group")
 	}
 }

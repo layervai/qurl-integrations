@@ -236,3 +236,26 @@ func TestShareGroupModeConfigValueIsValidatedAsAFileSetting(t *testing.T) {
 		t.Fatalf("invalid share_group_mode err = %v, want ErrConfigFile naming the setting", err)
 	}
 }
+
+func TestDaemonSupervisionConfigValueIsValidatedAsAFileSetting(t *testing.T) {
+	if got := DaemonSupervisions(); !slices.Equal(got, validDaemonSupervisions) || &got[0] == &validDaemonSupervisions[0] {
+		t.Fatalf("DaemonSupervisions() = %v, want a copy of %v", got, validDaemonSupervisions)
+	}
+	dir := t.TempDir()
+	for _, mode := range validDaemonSupervisions {
+		if err := os.WriteFile(Path(dir), []byte("daemon_supervision: "+mode+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := Load(dir)
+		if err != nil || cfg.DaemonSupervision != mode {
+			t.Fatalf("daemon_supervision %q = (%+v, %v), want it loaded", mode, cfg, err)
+		}
+	}
+	if err := os.WriteFile(Path(dir), []byte("daemon_supervision: desktop\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Load(dir)
+	if !errors.Is(err, ErrConfigFile) || !strings.Contains(err.Error(), "daemon_supervision") {
+		t.Fatalf("invalid daemon_supervision err = %v, want ErrConfigFile naming the setting", err)
+	}
+}

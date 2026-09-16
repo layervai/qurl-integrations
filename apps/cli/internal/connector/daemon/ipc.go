@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -87,11 +88,9 @@ func (s *IPCServer) Run(ctx context.Context) (retErr error) {
 	})
 	mux.HandleFunc("GET /status", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(struct {
-			JobVersion string                        `json:"job_version"`
-			Running    map[string]string             `json:"running"`
-			Resources  map[string]ResourceDiagnostic `json:"resources"`
-		}{JobVersion: s.JobVersion, Running: s.Manager.Running(), Resources: s.Manager.Diagnostics()})
+		_ = json.NewEncoder(w).Encode(IPCStatus{
+			JobVersion: s.JobVersion, Pid: os.Getpid(), Running: s.Manager.Running(), Resources: s.Manager.Diagnostics(),
+		})
 	})
 	mux.HandleFunc("PUT /overlay", func(w http.ResponseWriter, r *http.Request) {
 		overlay, err := decodeIPCOverlay(http.MaxBytesReader(w, r.Body, maxIPCOverlayBytes))
@@ -214,12 +213,20 @@ type IPCClient struct {
 	requestTimeout time.Duration
 }
 
-// IPCStatus is the daemon version handshake and active resource set.
+// IPCStatus is the daemon version handshake and active resource set, encoded
+// by the server and decoded by the client. Pid is the daemon's own process
+// ID, so an external supervisor can stop a daemon it adopted rather than
+// spawned; a daemon older than this field leaves it zero. Zero means unknown
+// and must never be used as a signal target.
 type IPCStatus struct {
 	JobVersion string                        `json:"job_version"`
+	Pid        int                           `json:"pid"`
 	Running    map[string]string             `json:"running"`
 	Resources  map[string]ResourceDiagnostic `json:"resources"`
 }
+
+// errIPCStatusIncompatible identifies a responding owner with an unsupported status shape.
+var errIPCStatusIncompatible = errors.New("share daemon status is incompatible")
 
 // Status reads the daemon handshake without starting it.
 func (c IPCClient) Status(ctx context.Context) (IPCStatus, bool, error) {
@@ -232,9 +239,18 @@ func (c IPCClient) Status(ctx context.Context) (IPCStatus, bool, error) {
 		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
 		return IPCStatus{}, true, fmt.Errorf("share daemon status returned HTTP %d", response.StatusCode)
 	}
-	status, err := decodeIPCStatus(io.LimitReader(response.Body, maxIPCStatusBytes))
+	// Read failures do not establish a protocol mismatch. In particular, a
+	// timeout or truncated transfer must not authorize replacing a native job.
+	body, err := io.ReadAll(io.LimitReader(response.Body, maxIPCStatusBytes+1))
 	if err != nil {
-		return IPCStatus{}, true, err
+		return IPCStatus{}, true, fmt.Errorf("read share daemon status: %w", err)
+	}
+	if len(body) > maxIPCStatusBytes {
+		return IPCStatus{}, true, fmt.Errorf("share daemon status exceeds %d bytes", maxIPCStatusBytes)
+	}
+	status, err := decodeIPCStatus(bytes.NewReader(body))
+	if err != nil {
+		return IPCStatus{}, true, fmt.Errorf("%w: %w", errIPCStatusIncompatible, err)
 	}
 	return status, true, nil
 }
@@ -255,6 +271,9 @@ func decodeIPCStatus(reader io.Reader) (IPCStatus, error) {
 	}
 	if strings.TrimSpace(status.JobVersion) == "" || status.JobVersion != strings.TrimSpace(status.JobVersion) {
 		return IPCStatus{}, errors.New("decode share daemon status: job_version is missing or invalid")
+	}
+	if status.Pid < 0 {
+		return IPCStatus{}, errors.New("decode share daemon status: pid is invalid")
 	}
 	if status.Running == nil {
 		return IPCStatus{}, errors.New("decode share daemon status: running map is missing")
