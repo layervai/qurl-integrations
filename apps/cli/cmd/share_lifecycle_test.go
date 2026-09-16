@@ -3731,3 +3731,125 @@ func TestRestartTargetPreflightFailureLeavesEpochUntouched(t *testing.T) {
 		t.Fatalf("preflight changed registry: %+v -> %+v (%v)", before, after, err)
 	}
 }
+
+// TestRestartWithTargetCompensatesAfterTheMoveIsWritten pins the one
+// post-write compensation shape the refused-move test cannot reach: the
+// registry already holds the new target at the new epoch when daemon.Ensure
+// fails, so the compensation has to turn that row off in place rather than
+// restore the old target.
+func TestRestartWithTargetCompensatesAfterTheMoveIsWritten(t *testing.T) {
+	srv := apitest.NewServer(t)
+	stateDir := connectorStateTestDir(t)
+	registry, err := openOwnedTestShareRegistry(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seed := localShareFixture(srv)
+	seed.DesiredState = "on"
+	if err := registry.Put(context.Background(), &seed); err != nil {
+		t.Fatal(err)
+	}
+	setupErr := errors.New("daemon handoff failed after the move")
+	path := "/v1/resources/" + srv.Key.CRID + "/sharing"
+	srv.Script(http.MethodGet, path, sharingResponse(t, srv, "on", seed.ServingEpoch, "serving"))
+	srv.Script(http.MethodPost, path+"/restart", sharingResponse(t, srv, "on", seed.ServingEpoch+1, "connecting"))
+	srv.Script(http.MethodPut, path, sharingResponse(t, srv, "off", seed.ServingEpoch+2, "stopped"))
+	daemon := &recordingShareDaemon{ensureErr: setupErr}
+	res := runCLI(t, &runOpts{
+		args: []string{"--endpoint", srv.URL, "restart", srv.Key.CRID, "--target", "http://127.0.0.1:4000"},
+		env: map[string]string{
+			"QURL_API_KEY": testAPIKey, "QURL_CONNECTOR_STATE_DIR": stateDir,
+		},
+		shareRegistry: registry, shareDaemon: daemon, shareStateDir: stateDir,
+		preflightTarget: func(context.Context, string, int) error { return nil },
+	})
+	if res.code == 0 || !strings.Contains(res.stderr.String(), setupErr.Error()) {
+		t.Fatalf("result code=%d stderr=%s", res.code, res.stderr.String())
+	}
+	if daemon.ensures != 1 {
+		t.Fatalf("daemon ensures = %d, want the one failing handoff", daemon.ensures)
+	}
+	local, err := registry.Get(context.Background(), srv.Key.CRID)
+	if err != nil || local.DesiredState != "off" || local.ServingEpoch != seed.ServingEpoch+2 {
+		t.Fatalf("compensated local state = %+v err=%v, want off at epoch %d", local, err, seed.ServingEpoch+2)
+	}
+	if local.TargetURL != "http://127.0.0.1:4000" || local.LocalPort != 4000 {
+		t.Fatalf("compensated row = %+v, want the already-written new target turned off in place", local)
+	}
+}
+
+// TestRestartWithTargetWithoutALocalRowNeverReachesTheNetwork pins the
+// ordering: a CRID this machine does not share locally is refused by
+// controllableLocalShare before the preflight dial and before any request.
+func TestRestartWithTargetWithoutALocalRowNeverReachesTheNetwork(t *testing.T) {
+	srv := apitest.NewServer(t)
+	stateDir := connectorStateTestDir(t)
+	registry, err := openOwnedTestShareRegistry(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	daemon := &recordingShareDaemon{}
+	res := runCLI(t, &runOpts{
+		args: []string{"--endpoint", srv.URL, "restart", srv.Key.CRID, "--target", "http://127.0.0.1:4000"},
+		env: map[string]string{
+			"QURL_API_KEY": testAPIKey, "QURL_CONNECTOR_STATE_DIR": stateDir,
+		},
+		shareRegistry: registry, shareDaemon: daemon, shareStateDir: stateDir,
+		preflightTarget: func(context.Context, string, int) error {
+			t.Fatal("preflight dialed a target for a CRID with no local row")
+			return nil
+		},
+	})
+	if res.code == 0 {
+		t.Fatalf("restart --target without a local row succeeded: %s", res.stdout.String())
+	}
+	if requests := srv.Requests(); len(requests) != 0 {
+		t.Fatalf("requests = %#v, want none before the local-row check", requests)
+	}
+	if daemon.ensures != 0 || daemon.reloads != 0 {
+		t.Fatalf("missing local row reached daemon handoff: %+v", daemon)
+	}
+}
+
+// TestRestartWithTargetEqualToTheStoredTargetStillMovesTheRow pins which
+// branch a redundant --target takes: it is still a Retarget write (same
+// origin, newer epoch), so the daemon sees an unchanged route definition and
+// its ordinary restart path handles it.
+func TestRestartWithTargetEqualToTheStoredTargetStillMovesTheRow(t *testing.T) {
+	srv := apitest.NewServer(t)
+	stateDir := connectorStateTestDir(t)
+	registry, err := openOwnedTestShareRegistry(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seed := localShareFixture(srv)
+	seed.DesiredState = "on"
+	if err := registry.Put(context.Background(), &seed); err != nil {
+		t.Fatal(err)
+	}
+	path := "/v1/resources/" + srv.Key.CRID + "/sharing"
+	srv.Script(http.MethodGet, path,
+		sharingResponse(t, srv, "on", seed.ServingEpoch, "serving"),
+		sharingResponse(t, srv, "on", seed.ServingEpoch+1, "serving"),
+	)
+	srv.Script(http.MethodPost, path+"/restart", sharingResponse(t, srv, "on", seed.ServingEpoch+1, "connecting"))
+	daemon := &recordingShareDaemon{}
+	res := runCLI(t, &runOpts{
+		args: []string{"--endpoint", srv.URL, "restart", srv.Key.CRID, "--target", seed.TargetURL},
+		env: map[string]string{
+			"QURL_API_KEY": testAPIKey, "QURL_CONNECTOR_STATE_DIR": stateDir,
+		},
+		shareRegistry: registry, shareDaemon: daemon, shareStateDir: stateDir,
+		preflightTarget: func(context.Context, string, int) error { return nil },
+	})
+	if res.code != 0 || res.stderr.Len() != 0 {
+		t.Fatalf("exit=%d stderr=%q", res.code, res.stderr.String())
+	}
+	local, err := registry.Get(context.Background(), srv.Key.CRID)
+	if err != nil || local.TargetURL != seed.TargetURL || local.ServingEpoch != seed.ServingEpoch+1 || local.DesiredState != "on" {
+		t.Fatalf("redundant move = %+v err=%v, want the same target on the advanced epoch", local, err)
+	}
+	if daemon.ensures != 1 || daemon.reloads != 0 {
+		t.Fatalf("daemon ensures/reloads = %d/%d, want 1/0", daemon.ensures, daemon.reloads)
+	}
+}

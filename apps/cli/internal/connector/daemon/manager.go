@@ -506,6 +506,15 @@ func (m *Manager) recordDesired(desired []connectorstate.LocalShare) ([]restartE
 		if !previousTarget.Equal(nextTarget) {
 			// Target changes may recover a refused route. Header changes do
 			// not change its platform authorization and must retain backoff.
+			//
+			// TODO(upstream-contract): a changed LocalIP/LocalPort keeps the same
+			// RouteID and reaches the live group through SetRoutes below, so
+			// SessionGroupRunner.SetRoutes must reconcile a definition change for
+			// an existing RouteID (qurl-connector's
+			// TestSessionGroupRunnerSetRoutesChangesProxiesWithoutReadmission pins
+			// it). If it ever diffs by RouteID alone the move is silent: the cloud
+			// advances the epoch, the CLI prints the new target, and the user keeps
+			// reaching the old port.
 			next.retryAt = time.Time{}
 		}
 		m.tracked[share.ResourceID] = next

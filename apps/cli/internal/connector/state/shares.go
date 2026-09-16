@@ -231,7 +231,10 @@ func (r *LocalShareRegistry) SetDesired(ctx context.Context, id, desired string,
 // the new epoch or the new target with the old one. A restart is
 // authoritative desired-on, so the row turns on. The same-epoch guard mirrors
 // Put: a target change at the current epoch would let the session that
-// admitted the old target keep serving under the new one.
+// admitted the old target keep serving under the new one. Note this is
+// deliberately stricter than SetDesired, which treats the current epoch as a
+// no-op: here an already-at-this-epoch row is a conflict, so the caller
+// compensates the share off rather than shrugging.
 func (r *LocalShareRegistry) Retarget(ctx context.Context, id, target string, epoch uint64) (*LocalShare, error) {
 	var updated LocalShare
 	err := r.update(ctx, func(state *localSharesState) error {
