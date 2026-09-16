@@ -354,7 +354,7 @@ func runShareDaemonWithBootstrap(ctx context.Context, opts *globalOpts, stateDir
 // every later CLI invocation look.
 // Errors from the resolved directory name RuntimeDirEnv, which is the setting
 // a supervisor configures; --runtime-dir is hidden and machine-supplied, and
-// daemonRuntimeDirError restates it for anyone who passed the flag by hand.
+// resolveDaemonPaths prefixes the flag for anyone who passed it by hand.
 func runtimeDirLookup(runtimeDir string, lookupEnv func(string) (string, bool)) func(string) (string, bool) {
 	if strings.TrimSpace(runtimeDir) == "" {
 		return lookupEnv
