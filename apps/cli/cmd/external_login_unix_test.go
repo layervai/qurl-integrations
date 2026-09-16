@@ -9,11 +9,14 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
+	connectoragentstate "github.com/layervai/qurl-connector/pkg/agentstate"
 	connectorshare "github.com/layervai/qurl-connector/pkg/share"
 	qurl "github.com/layervai/qurl-go/qurl"
+	"golang.org/x/sys/unix"
 
 	"github.com/layervai/qurl-integrations/apps/cli/internal/apitest"
 	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
@@ -336,5 +339,77 @@ func TestOneShotEnrollmentTokenReplaysItsFirstFailure(t *testing.T) {
 	}
 	if _, second := provider(context.Background(), qurl.AgentEnrollmentCredentialRequest{}); second == nil || second.Error() != first.Error() {
 		t.Fatalf("second failure = %v, want the first one replayed (%v)", second, first)
+	}
+}
+
+// Exercise the real Connector runtime and sealed store on the warm path. Cold
+// enrollment is a separate network journey; this test seeds a completed device.
+func TestExternalLoginWarmRealRuntimeOpensSealedStateWithoutToken(t *testing.T) {
+	var fds [2]int
+	if err := unix.Pipe(fds[:]); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := unix.Write(fds[1], bytes.Repeat([]byte{0x7a}, 32)); err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Close(fds[1]); err != nil {
+		t.Fatal(err)
+	}
+	fd, err := unix.FcntlInt(uintptr(fds[0]), unix.F_DUPFD_CLOEXEC, 512)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Close(fds[0]); err != nil {
+		t.Fatal(err)
+	}
+	// Connector reads and closes this inherited descriptor, then caches the key
+	// for repeated store opens in this process. Do not close the reused fd here.
+	env := externalLoginEnv(connectoragentstate.EnvLocalKeyFD, strconv.Itoa(fd))
+	for key, value := range env {
+		t.Setenv(key, value)
+	}
+	srv := apitest.NewServer(t)
+	stateDir, err := filepath.EvalSymlinks(connectorStateTestDir(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := connectorstate.EstablishExternalRuntimeMode(ctx, stateDir); err != nil {
+		t.Fatal(err)
+	}
+	store, err := connectoragentstate.NewSDKStore(stateDir, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := bootstrapRegisteredState(t)
+	sdk, err := store.Handoff()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sdk.SaveAgentState(ctx, state); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	res := runCLI(t, &runOpts{
+		args: []string{"--endpoint", srv.URL, "--supervision", "external", "login", "--enrollment-token-file", filepath.Join(stateDir, "absent-token")},
+		env:  env, shareStateDir: stateDir,
+		openNativeRuntime: func(ctx context.Context, cfg connectorshare.NativeRuntimeConfig) (registeredNativeRuntime, error) {
+			return connectorshare.OpenNativeRuntime(ctx, cfg)
+		},
+	})
+	if res.code != 0 {
+		t.Fatalf("real warm login exit=%d stderr=%s", res.code, res.stderr.String())
+	}
+	requests := srv.Requests()
+	if len(requests) != 1 || requests[0].Header.Get("Authorization") != "Bearer "+state.DeviceAPIKey {
+		t.Fatal("warm login did not use the saved device credential")
+	}
+	if _, err := os.Stat(filepath.Join(stateDir, connectoragentstate.AgentStateFile)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("plaintext agent state exists: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(stateDir, connectoragentstate.SealedAgentStateFile)); err != nil {
+		t.Fatal(err)
 	}
 }
