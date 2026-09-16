@@ -5,7 +5,7 @@
 // boot in prod with missing secrets OR die on a spurious false-positive.
 
 const { MIN_STATE_SECRET_LENGTH } = require('./utils/oauth-state');
-const { INFRA_SEED_SENTINEL } = require('./utils/webhook-secret');
+const { INFRA_SEED_SENTINEL, isInfraSeedSentinel } = require('./utils/webhook-secret');
 const {
   IPV4_LITERAL_RE,
   parseIPv4Octets,
@@ -493,7 +493,7 @@ const GOOGLE_MAPS_API_KEY_PLACEHOLDER_SENTINEL = INFRA_SEED_SENTINEL;
 function missingMapCommandKeys(cfg) {
   if (!cfg.MAP_COMMAND_ENABLED) return [];
   const key = cfg.GOOGLE_MAPS_API_KEY;
-  if (!key || key === GOOGLE_MAPS_API_KEY_PLACEHOLDER_SENTINEL) {
+  if (!key || isInfraSeedSentinel(key)) {
     return ['GOOGLE_MAPS_API_KEY'];
   }
   return [];

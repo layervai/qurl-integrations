@@ -104,16 +104,16 @@ finds the existing sub, sees the SSM secret matches, returns `reused`).
 - **Bot reads the seed sentinel.** The
   receiver tier (`PROCESS_ROLE=http` or `combined`) fails in `startServer()`
   before listening: health, OAuth, and webhook delivery are unavailable on that
-  tier. Gateway-only tasks never verify webhook signatures and keep serving
-  commands. Run the registrar and verify its SSM persist succeeded before
+  tier. Gateway-only tasks keep serving commands. A combined task also
+  loses its gateway; validation runs before it connects to Discord. Run the registrar and verify its SSM persist succeeded before
   starting replacement tasks.
 - **Secret format drift.** The registrar and bot warn without logging secret
   material, preserve the exact returned bytes, and reuse them on restart.
   This does not validate arbitrary manual SSM edits: HMAC mismatches still
   reject deliveries. Restore the registrar-persisted secret, or clear SSM and
   re-invoke the Lambda (same recovery as the empty-secret case below).
-- **Bot reads empty `QURL_WEBHOOK_SECRET`** (a whitespace-only value also
-  reads as empty; nonblank signing keys retain their exact bytes)**.** Means the Lambda never
+- **Bot reads empty `QURL_WEBHOOK_SECRET`.** A whitespace-only value also
+  reads as empty; nonblank signing keys retain their exact bytes. The Lambda never
   ran successfully OR ran but SSM `PutParameter` failed (IAM, network).
   Receiver returns 503 (qurl-service retries). Recover by running the
   Lambda manually and verifying CloudWatch logs for the persist call.
