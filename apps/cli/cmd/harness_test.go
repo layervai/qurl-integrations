@@ -35,9 +35,18 @@ func rootCmd(version string) *cobra.Command {
 const testAPIKey = "lv_test_abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG"
 
 // stateSocketPath resolves the daemon socket the way a CLI run under the
-// harness's injected environment does: no runtime directory is pinned.
-func stateSocketPath(t *testing.T, stateDir string) string {
+// harness's injected environment does: no runtime directory is pinned. The
+// nil lookup is the invariant, not a shortcut - a test that pins
+// QURL_CONNECTOR_RUNTIME_DIR through runOpts.env must resolve its own socket
+// with that env instead, or the two sides would silently disagree and the
+// test would hang rather than fail.
+func stateSocketPath(t *testing.T, stateDir string, env ...map[string]string) string {
 	t.Helper()
+	for _, e := range env {
+		if raw, ok := e[connectordaemon.RuntimeDirEnv]; ok && raw != "" {
+			t.Fatalf("stateSocketPath: the harness env pins %s=%q; resolve the socket with that env", connectordaemon.RuntimeDirEnv, raw)
+		}
+	}
 	path, err := connectordaemon.SocketPathForStateDir(stateDir, nil)
 	if err != nil {
 		t.Fatal(err)

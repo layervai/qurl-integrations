@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"math/big"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -380,6 +381,17 @@ func resolveDaemonPaths(ctx context.Context, opts *globalOpts, stateDirOverride,
 	socketPath, err = connectordaemon.SocketPathForStateDir(stateDir, runtimeDirLookup(runtimeDirOverride, opts.lookupEnv))
 	if err != nil {
 		return "", "", err
+	}
+	// A pinned runtime directory is user-supplied, so its semantic failures (a
+	// symlink, another user's directory, a regular file, an unwritable parent)
+	// must also be refused before the policy marker. Skip it when the socket
+	// lives in the state directory: securing that is the supervision step's
+	// job, and doing it here would create the namespace a refused start must
+	// leave absent.
+	if dir := filepath.Dir(socketPath); dir != stateDir {
+		if err := connectorstate.EnsureDirMode(dir); err != nil {
+			return "", "", err
+		}
 	}
 	if err := applyRuntimeSupervision(ctx, opts, stateDir); err != nil {
 		return "", "", err

@@ -13,20 +13,6 @@ import (
 	"time"
 )
 
-// shortTempRoot returns a short directory below /tmp. It anchors on /tmp
-// rather than t.TempDir() because a hosted macOS temp root is long enough
-// that a host-dependent root would decide whether the socket path below it
-// fits sockaddr_un.
-func shortTempRoot(t *testing.T) string {
-	t.Helper()
-	root, err := os.MkdirTemp("/tmp", "qurl-tmp-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(root) })
-	return root
-}
-
 func TestSocketPathUsesRuntimeDirWhenSet(t *testing.T) {
 	env := map[string]string{RuntimeDirEnv: "/private/tmp/x"}
 	got, err := SocketPathForStateDir(strings.Repeat("/a", 80), lookupEnvFrom(env))

@@ -29,11 +29,21 @@ var ErrExternalDaemonNotRunning = errors.New("share daemon is externally supervi
 // contract. Increment it for each incompatible shape; do not reuse an earlier
 // value even when a later shape resembles it.
 //
-// 4 absorbs both --supervision and --runtime-dir: no released qurl ever
-// installed a job at 4 (2.5.4 shipped at 3), so no user's job definition can
-// carry the earlier 4 shape. A shape change after the next release must go
-// to 5.
-const daemonJobProtocolVersion = "4"
+// 5 adds --runtime-dir. 4 (--supervision, #1426) is not reused even though it
+// is unreleased today: whether it stays unreleased depends on when
+// release-please cuts apps/cli, which this branch does not control, and a
+// resident 4-shape daemon on a matching binary version would otherwise be
+// reloaded rather than replaced.
+const daemonJobProtocolVersion = "5"
+
+// TODO(upstream-contract): relocating the socket relies on
+// connectorservice.UserJobManager.Ensure treating a changed argument list as a
+// definition change and booting the old job out. Verified against
+// qurl-connector v0.14.0 (userjob_darwin.go / userjob_linux.go: the rendered
+// definition is compared byte for byte and the loaded job is removed before
+// the replacement is written). If Ensure ever becomes a no-op for an
+// installed-and-running label, an upgrade would leave the old daemon serving
+// the old address while the new CLI reports convergence at the new one.
 
 // JobController installs, upgrades, and signals the per-user daemon job.
 type JobController struct {
@@ -88,6 +98,17 @@ func NewJobController(stateDir, logDir, binaryVersion, endpoint string, mode Gro
 func (c *JobController) Ensure(ctx context.Context) error {
 	if err := c.validateController(); err != nil {
 		return err
+	}
+	// Under native supervision qurl owns the daemon's runtime directory, so
+	// secure a pinned one before probing: the client's parent-directory check
+	// requires 0700, and a directory the operator created with a normal umask
+	// would otherwise fail every command before the job install that fixes it.
+	// Skipped when the socket lives in the state directory (always so on
+	// Windows) - the daemon's own startup secures that one.
+	if c.Supervision == connectorstate.RuntimeSupervisionNative && c.RuntimeDir != c.StateDir {
+		if err := connectorstate.EnsureDirMode(c.RuntimeDir); err != nil {
+			return err
+		}
 	}
 	status, running, statusErr := c.ProbeStatus(ctx)
 	if statusErr != nil {

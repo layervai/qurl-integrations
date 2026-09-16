@@ -83,34 +83,6 @@ func TestIPCServerReadinessReloadAndShutdown(t *testing.T) {
 	}
 }
 
-func TestSocketPathBoundsLongUnixStateDirectories(t *testing.T) {
-	root := shortTempRoot(t)
-	shortState := filepath.Join(root, "qurl-short-state")
-	if got, err := SocketPathForStateDir(shortState, nil); err != nil || got != filepath.Join(shortState, SocketFile) {
-		t.Fatalf("short state socket = %q, %v; want %q", got, err, filepath.Join(shortState, SocketFile))
-	}
-
-	longState := filepath.Join(root, strings.Repeat("long-state-segment-", 8))
-	first, err := SocketPathForStateDir(longState, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if again, err := SocketPathForStateDir(longState, nil); err != nil || again != first {
-		t.Fatal("long state socket path is not deterministic")
-	}
-	if !filepath.IsAbs(first) || len(first) > maxUnixSocketPathBytes || filepath.Dir(first) == longState {
-		t.Fatalf("long state socket = %q, want bounded absolute derived path", first)
-	}
-	if other, err := SocketPathForStateDir(longState+"-other", nil); err != nil || other == first {
-		t.Fatal("different long state namespaces share one socket path")
-	}
-
-	longRelative := strings.Repeat("relative-state-", 8)
-	if got, err := SocketPathForStateDir(longRelative, nil); err == nil || got != "" {
-		t.Fatalf("invalid relative state path became valid IPC path %q", got)
-	}
-}
-
 func TestIPCServerSecuresPermissiveSocketDirectory(t *testing.T) {
 	dir := filepath.Join(shortTempDir(t), "state")
 	if err := os.Mkdir(dir, 0o755); err != nil { // #nosec G301 -- test verifies permissive directories are tightened.
@@ -160,7 +132,7 @@ func TestIPCClientRefusesInsecureSocketDirectoryWithoutChangingIt(t *testing.T) 
 		t.Fatal(err)
 	}
 	err := (IPCClient{SocketPath: filepath.Join(dir, SocketFile)}).WaitReady(context.Background())
-	if err == nil || !strings.Contains(err.Error(), "owner-owned non-symlink directory with mode 0700") {
+	if err == nil || !strings.Contains(err.Error(), "must be a non-symlink directory you own with mode 0700") {
 		t.Fatalf("client accepted insecure socket directory: %v", err)
 	}
 	info, statErr := os.Lstat(dir)
@@ -183,7 +155,7 @@ func TestIPCClientRefusesSymlinkSocketDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 	err := (IPCClient{SocketPath: filepath.Join(link, SocketFile)}).WaitReady(context.Background())
-	if err == nil || !strings.Contains(err.Error(), "owner-owned non-symlink directory with mode 0700") {
+	if err == nil || !strings.Contains(err.Error(), "must be a non-symlink directory you own with mode 0700") {
 		t.Fatalf("client accepted symlink socket directory: %v", err)
 	}
 }

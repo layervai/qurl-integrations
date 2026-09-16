@@ -452,7 +452,7 @@ func finishLocalPublish(
 	if err := daemon.Ensure(ctx); err != nil {
 		return compensate(err)
 	}
-	if _, err := waitForSharingWithDiagnostics(ctx, opts, client, local, stateDir, local.ServingEpoch); err != nil {
+	if _, err := waitForSharingWithDiagnostics(ctx, opts, client, local, stateDir, local.ServingEpoch, opts.sharingWaitLimit); err != nil {
 		return err
 	}
 	return printLocalPublishServing(opts, resolved, local)
@@ -527,7 +527,7 @@ func runForegroundLocalPublish(
 	if err != nil {
 		return err
 	}
-	if _, err := waitForSharingWithDiagnostics(ctx, opts, client, local, stateDir, local.ServingEpoch); err != nil {
+	if _, err := waitForSharingWithDiagnostics(ctx, opts, client, local, stateDir, local.ServingEpoch, opts.sharingWaitLimit); err != nil {
 		return err
 	}
 	if err := printLocalPublishServing(opts, resolved, local); err != nil {

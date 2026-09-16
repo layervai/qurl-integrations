@@ -205,7 +205,7 @@ func changeShareState(ctx context.Context, opts *globalOpts, id, action string) 
 	if err := daemon.Ensure(ctx); err != nil {
 		return compensateShareChange(err, compensateOff, client, registry, local, sharing)
 	}
-	sharing, err = waitForSharingWithDiagnostics(ctx, opts, client, local, stateDir, sharing.ServingEpoch)
+	sharing, err = waitForSharingWithDiagnostics(ctx, opts, client, local, stateDir, sharing.ServingEpoch, opts.sharingWaitLimit)
 	if err != nil {
 		return err
 	}
@@ -600,9 +600,9 @@ func inspectLocalSharing(ctx context.Context, opts *globalOpts, local *connector
 }
 
 func waitForSharingWithDiagnostics(ctx context.Context, opts *globalOpts, client qurlapi.Client,
-	local *connectorstate.LocalShare, stateDir string, epoch uint64,
+	local *connectorstate.LocalShare, stateDir string, epoch uint64, limit time.Duration,
 ) (*qurlapi.Sharing, error) {
-	sharing, err := waitForSharing(ctx, client, local, epoch, opts.sharingWaitLimit)
+	sharing, err := waitForSharing(ctx, client, local, epoch, limit)
 	if err == nil || local == nil || stateDir == "" {
 		return sharing, err
 	}

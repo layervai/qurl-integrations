@@ -543,8 +543,8 @@ func TestWaitForSharingIncludesRedactedDaemonRootCause(t *testing.T) {
 	waitCmdCondition(t, func() bool {
 		return manager.Diagnostics()["resource-a"].RetryAttempt == 3
 	}, "route reaches retry attempt 3")
-	_, err = waitForSharingWithDiagnostics(context.Background(), &globalOpts{sharingWaitLimit: 10 * time.Millisecond},
-		sharingErrorClient{err: errors.New("temporary poll failure")}, &local, stateDir, 1)
+	_, err = waitForSharingWithDiagnostics(context.Background(), &globalOpts{},
+		sharingErrorClient{err: errors.New("temporary poll failure")}, &local, stateDir, 1, 10*time.Millisecond)
 	for _, want := range []string{"failure category platform_denied", "failure code 52005", "retry attempt 3"} {
 		if err == nil || !strings.Contains(err.Error(), want) {
 			cancel()
@@ -599,8 +599,8 @@ func TestWaitForSharingSettlesStartingDiagnosticIntoRetryCause(t *testing.T) {
 		t.Fatal(err)
 	}
 	readyCancel()
-	_, err = waitForSharingWithDiagnostics(context.Background(), &globalOpts{sharingWaitLimit: 10 * time.Millisecond},
-		sharingErrorClient{err: errors.New("temporary poll failure")}, &local, stateDir, 1)
+	_, err = waitForSharingWithDiagnostics(context.Background(), &globalOpts{},
+		sharingErrorClient{err: errors.New("temporary poll failure")}, &local, stateDir, 1, 10*time.Millisecond)
 	if err == nil || !strings.Contains(err.Error(), "failure category platform_denied") ||
 		!strings.Contains(err.Error(), "failure code 52029") || !strings.Contains(err.Error(), "retry attempt 1") {
 		cancel()
@@ -632,8 +632,8 @@ func TestWaitForSharingReportsMissingDaemonResourceDiagnostic(t *testing.T) {
 	}
 	readyCancel()
 	local := &connectorstate.LocalShare{ResourceID: "resource-a", CRID: "crid-a", ServingEpoch: 1}
-	_, err = waitForSharingWithDiagnostics(context.Background(), &globalOpts{sharingWaitLimit: 10 * time.Millisecond},
-		sharingErrorClient{err: errors.New("temporary poll failure")}, local, stateDir, 1)
+	_, err = waitForSharingWithDiagnostics(context.Background(), &globalOpts{},
+		sharingErrorClient{err: errors.New("temporary poll failure")}, local, stateDir, 1, 10*time.Millisecond)
 	if err == nil || !strings.Contains(err.Error(), "daemon running, resource diagnostic absent") ||
 		!strings.Contains(err.Error(), "temporary poll failure") {
 		cancel()
@@ -662,8 +662,8 @@ func TestWaitForSharingWithDiagnosticsPreservesCallerCancellation(t *testing.T) 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	pollErr := errors.New("poll interrupted")
-	_, err := waitForSharingWithDiagnostics(ctx, &globalOpts{sharingWaitLimit: time.Minute}, sharingErrorClient{err: pollErr},
-		&connectorstate.LocalShare{ResourceID: "resource-a", CRID: "crid-a"}, connectorStateTestDir(t), 1)
+	_, err := waitForSharingWithDiagnostics(ctx, &globalOpts{}, sharingErrorClient{err: pollErr},
+		&connectorstate.LocalShare{ResourceID: "resource-a", CRID: "crid-a"}, connectorStateTestDir(t), 1, time.Minute)
 	if !errors.Is(err, context.Canceled) || !errors.Is(err, pollErr) || strings.Contains(err.Error(), "daemon state") {
 		t.Fatalf("canceled diagnosed wait error = %v, want the unmodified caller cancellation", err)
 	}

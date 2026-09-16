@@ -82,7 +82,7 @@ func TestJobControllerAbsentOwnerPersistsStableInstalledCommandPath(t *testing.T
 		wantArguments := make([]string, 0, 20)
 		wantArguments = append(wantArguments,
 			"--endpoint", "https://api.sandbox.layerv.xyz", "daemon", "run", "--state-dir", filepath.Join(dir, "state"),
-			"--runtime-dir", filepath.Dir(controller.IPC.SocketPath), "--job-version", "4/2.4.0", "--share-group-mode", "single",
+			"--runtime-dir", filepath.Dir(controller.IPC.SocketPath), "--job-version", "5/2.4.0", "--share-group-mode", "single",
 			"--hub-host", "hub.sandbox.layerv.xyz", "--hub-port", "443",
 			"--hub-server-public-key-b64", testHubKey,
 			"--supervision", "native",
@@ -209,7 +209,7 @@ func TestJobControllerCompatibleForegroundOwnerReloadsWithoutNativeManager(t *te
 		return "", nil
 	}
 	controller.ProbeStatus = func(context.Context) (IPCStatus, bool, error) {
-		return IPCStatus{JobVersion: "4/2.4.0"}, true, nil
+		return IPCStatus{JobVersion: "5/2.4.0"}, true, nil
 	}
 	reloads := 0
 	controller.Reload = func(context.Context) (bool, error) {
@@ -233,7 +233,7 @@ func TestJobControllerInstallsWhenCompatibleOwnerExitsBeforeReload(t *testing.T)
 	controller.InvocationPath = "qurl"
 	controller.LookPath = func(string) (string, error) { return binaryPath, nil }
 	controller.ProbeStatus = func(context.Context) (IPCStatus, bool, error) {
-		return IPCStatus{JobVersion: "4/2.4.0"}, true, nil
+		return IPCStatus{JobVersion: "5/2.4.0"}, true, nil
 	}
 	reloads := 0
 	controller.Reload = func(context.Context) (bool, error) {
@@ -257,7 +257,7 @@ func TestJobControllerVersionChangeReloadsDefinitionInsteadOfLiveIPC(t *testing.
 	controller.InvocationPath = "qurl"
 	controller.LookPath = func(string) (string, error) { return binaryPath, nil }
 	controller.ProbeStatus = func(context.Context) (IPCStatus, bool, error) {
-		return IPCStatus{JobVersion: "4/2.4.0"}, true, nil
+		return IPCStatus{JobVersion: "5/2.4.0"}, true, nil
 	}
 	reloads := 0
 	controller.Reload = func(context.Context) (bool, error) { reloads++; return true, nil }
@@ -270,8 +270,8 @@ func TestJobControllerVersionChangeReloadsDefinitionInsteadOfLiveIPC(t *testing.
 	if manager.statusCalls != 1 {
 		t.Fatalf("native ownership status calls = %d, want 1", manager.statusCalls)
 	}
-	if got := manager.replaced[0].Arguments[9]; got != "4/2.5.0" {
-		t.Fatalf("job version argument = %q, want 4/2.5.0", got)
+	if got := manager.replaced[0].Arguments[9]; got != "5/2.5.0" {
+		t.Fatalf("job version argument = %q, want 5/2.5.0", got)
 	}
 }
 
@@ -289,7 +289,7 @@ func TestJobControllerRejectsIncompatibleForegroundOwnerWithoutStartingSecondDae
 		return "", nil
 	}
 	controller.ProbeStatus = func(context.Context) (IPCStatus, bool, error) {
-		return IPCStatus{JobVersion: "4/2.4.0"}, true, nil
+		return IPCStatus{JobVersion: "5/2.4.0"}, true, nil
 	}
 	controller.Reload = func(context.Context) (bool, error) {
 		t.Fatal("reload ran for an incompatible foreground owner")
@@ -373,11 +373,11 @@ func TestJobControllerRejectsSecretBearingOrMalformedDeploymentState(t *testing.
 func TestJobVersionFoldsOnlyANonDefaultModeIntoTheDefinition(t *testing.T) {
 	// single is the pre-mode string byte for byte, so an unchanged single-mode
 	// daemon is still compatible with its job across this change.
-	if got, err := JobVersion("2.4.0", GroupModeSingle); err != nil || got != "4/2.4.0" {
-		t.Fatalf("single-mode job version = (%q, %v), want 4/2.4.0", got, err)
+	if got, err := JobVersion("2.4.0", GroupModeSingle); err != nil || got != "5/2.4.0" {
+		t.Fatalf("single-mode job version = (%q, %v), want 5/2.4.0", got, err)
 	}
-	if got, err := JobVersion("2.4.0", GroupModePerShare); err != nil || got != "4/2.4.0/per-share" {
-		t.Fatalf("per-share job version = (%q, %v), want 4/2.4.0/per-share", got, err)
+	if got, err := JobVersion("2.4.0", GroupModePerShare); err != nil || got != "5/2.4.0/per-share" {
+		t.Fatalf("per-share job version = (%q, %v), want 5/2.4.0/per-share", got, err)
 	}
 	if _, err := JobVersion("2.4.0", GroupMode("")); err == nil || !strings.Contains(err.Error(), "invalid share group mode") {
 		t.Fatalf("empty mode error = %v, want an invalid-mode rejection", err)
@@ -401,7 +401,7 @@ func TestJobControllerModeChangeReplacesResidentDaemonLikeAVersionChange(t *test
 	controller.LookPath = func(string) (string, error) { return binaryPath, nil }
 	controller.ProbeStatus = func(context.Context) (IPCStatus, bool, error) {
 		// Same binary, resident in the default mode.
-		return IPCStatus{JobVersion: "4/2.4.0"}, true, nil
+		return IPCStatus{JobVersion: "5/2.4.0"}, true, nil
 	}
 	reloads := 0
 	controller.Reload = func(context.Context) (bool, error) { reloads++; return true, nil }
@@ -412,8 +412,8 @@ func TestJobControllerModeChangeReplacesResidentDaemonLikeAVersionChange(t *test
 		t.Fatalf("definition loads/replacements/live reloads/status = %d/%d/%d/%d, want a forced replacement", len(manager.jobs), len(manager.replaced), reloads, manager.statusCalls)
 	}
 	arguments := manager.replaced[0].Arguments
-	if got := arguments[9]; got != "4/2.4.0/per-share" {
-		t.Fatalf("job version argument = %q, want 4/2.4.0/per-share", got)
+	if got := arguments[9]; got != "5/2.4.0/per-share" {
+		t.Fatalf("job version argument = %q, want 5/2.4.0/per-share", got)
 	}
 	if arguments[10] != "--share-group-mode" || arguments[11] != "per-share" {
 		t.Fatalf("job arguments = %#v, want an explicit --share-group-mode per-share", arguments)
@@ -425,7 +425,7 @@ func TestJobControllerModeChangeReplacesResidentDaemonLikeAVersionChange(t *test
 	back.InvocationPath = "qurl"
 	back.LookPath = func(string) (string, error) { return binaryPath, nil }
 	back.ProbeStatus = func(context.Context) (IPCStatus, bool, error) {
-		return IPCStatus{JobVersion: "4/2.4.0/per-share"}, true, nil
+		return IPCStatus{JobVersion: "5/2.4.0/per-share"}, true, nil
 	}
 	back.Reload = func(context.Context) (bool, error) { reloads++; return true, nil }
 	if err := back.Ensure(context.Background()); err != nil {
@@ -434,7 +434,7 @@ func TestJobControllerModeChangeReplacesResidentDaemonLikeAVersionChange(t *test
 	if len(manager.replaced) != 2 || reloads != 0 {
 		t.Fatalf("switching back replaced/reloaded = %d/%d, want 2/0", len(manager.replaced), reloads)
 	}
-	if got := manager.replaced[1].Arguments; got[9] != "4/2.4.0" || got[10] != "--share-group-mode" || got[11] != "single" {
+	if got := manager.replaced[1].Arguments; got[9] != "5/2.4.0" || got[10] != "--share-group-mode" || got[11] != "single" {
 		t.Fatalf("single-mode job arguments = %#v", got)
 	}
 }
@@ -452,7 +452,7 @@ func TestJobControllerSameModeResidentDaemonReloadsLive(t *testing.T) {
 		return "", nil
 	}
 	controller.ProbeStatus = func(context.Context) (IPCStatus, bool, error) {
-		return IPCStatus{JobVersion: "4/2.4.0/per-share"}, true, nil
+		return IPCStatus{JobVersion: "5/2.4.0/per-share"}, true, nil
 	}
 	reloads := 0
 	controller.Reload = func(context.Context) (bool, error) { reloads++; return true, nil }
@@ -491,7 +491,7 @@ func newTestJobController(t *testing.T, stateDir, logDir, binaryVersion, endpoin
 }
 
 func TestJobControllerCarriesTheResolvedRuntimeDir(t *testing.T) {
-	base := filepath.Dir(shortTempDir(t))
+	base := shortTempRoot(t)
 	stateDir, runtimeDir := filepath.Join(base, "state"), filepath.Join(base, "rt")
 	controller, err := NewJobController(stateDir, filepath.Join(base, "logs"), "2.4.0", "https://api.example.test",
 		GroupModeSingle, connectorstate.RuntimeSupervisionNative, testHubResolver, lookupEnvFrom(map[string]string{RuntimeDirEnv: runtimeDir}))
@@ -558,7 +558,7 @@ func TestEnsureExternalReloadsMatchedDaemon(t *testing.T) {
 	manager := &recordingJobManager{statusErr: errors.New("native job manager consulted under external supervision")}
 	controller := externalTestController(t, manager)
 	controller.ProbeStatus = func(context.Context) (IPCStatus, bool, error) {
-		return IPCStatus{JobVersion: "4/2.5.0", Pid: 4242}, true, nil
+		return IPCStatus{JobVersion: "5/2.5.0", Pid: 4242}, true, nil
 	}
 	reloads := 0
 	controller.Reload = func(context.Context) (bool, error) { reloads++; return true, nil }
@@ -597,7 +597,7 @@ func TestEnsureExternalCompatibleOwnerExitingBeforeReloadIsNotRunning(t *testing
 	manager := &recordingJobManager{}
 	controller := externalTestController(t, manager)
 	controller.ProbeStatus = func(context.Context) (IPCStatus, bool, error) {
-		return IPCStatus{JobVersion: "4/2.5.0"}, true, nil
+		return IPCStatus{JobVersion: "5/2.5.0"}, true, nil
 	}
 	controller.Reload = func(context.Context) (bool, error) { return false, nil }
 	if err := controller.Ensure(context.Background()); !errors.Is(err, ErrExternalDaemonNotRunning) {
@@ -612,7 +612,7 @@ func TestEnsureExternalMismatchedDaemonIsReportedNotReplaced(t *testing.T) {
 	manager := &recordingJobManager{statusErr: errors.New("native job manager consulted under external supervision")}
 	controller := externalTestController(t, manager)
 	controller.ProbeStatus = func(context.Context) (IPCStatus, bool, error) {
-		return IPCStatus{JobVersion: "4/2.4.0"}, true, nil
+		return IPCStatus{JobVersion: "5/2.4.0"}, true, nil
 	}
 	controller.Reload = func(context.Context) (bool, error) {
 		t.Fatal("reload ran for a daemon on another job definition")
@@ -683,5 +683,48 @@ func TestJobControllerIncompatibleStatusRequiresNativeOwnership(t *testing.T) {
 				t.Fatal("external supervision queried native ownership")
 			}
 		})
+	}
+}
+
+// TestJobControllerSecuresAPreExistingRuntimeDirBeforeProbing pins the
+// client-first case: an operator creates the runtime directory with a normal
+// umask, so it is 0755 when a qurl command reaches it before any daemon has
+// run. Under native supervision qurl owns that directory, so Ensure secures
+// it instead of failing the probe on a directory the job install would have
+// fixed.
+func TestJobControllerSecuresAPreExistingRuntimeDirBeforeProbing(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows named pipes have no socket directory")
+	}
+	base := shortTempRoot(t)
+	stateDir, runtimeDir := filepath.Join(base, "state"), filepath.Join(base, "rt")
+	if err := os.Mkdir(runtimeDir, 0o755); err != nil { // #nosec G301 -- the point of the test is a permissive pre-existing directory.
+		t.Fatal(err)
+	}
+	if err := os.Chmod(runtimeDir, 0o755); err != nil { // #nosec G302 -- pin the mode despite umask.
+		t.Fatal(err)
+	}
+	controller, err := NewJobController(stateDir, filepath.Join(base, "logs"), "2.4.0", "https://api.example.test",
+		GroupModeSingle, connectorstate.RuntimeSupervisionNative, testHubResolver,
+		lookupEnvFrom(map[string]string{RuntimeDirEnv: runtimeDir}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := &recordingJobManager{}
+	controller.Manager = manager
+	controller.InvocationPath = "qurl"
+	controller.LookPath = func(string) (string, error) { return filepath.Join(base, "bin", "qurl"), nil }
+	// The production probe, so the parent-directory check actually runs.
+	controller.ProbeStatus = controller.IPC.Status
+	controller.Reload = controller.IPC.ReloadIfRunning
+	if err := controller.Ensure(context.Background()); err != nil {
+		t.Fatalf("Ensure over a 0755 runtime dir = %v, want the directory secured and the job installed", err)
+	}
+	info, err := os.Lstat(runtimeDir)
+	if err != nil || info.Mode().Perm() != 0o700 {
+		t.Fatalf("runtime dir mode = %v err=%v, want 0700", info.Mode().Perm(), err)
+	}
+	if len(manager.jobs) != 1 {
+		t.Fatalf("installed jobs = %d, want the install the probe failure used to block", len(manager.jobs))
 	}
 }

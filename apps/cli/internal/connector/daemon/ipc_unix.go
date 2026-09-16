@@ -65,7 +65,9 @@ func validateUnixIPCParent(path string) error {
 		return fmt.Errorf("inspect share daemon socket directory: %w", err)
 	}
 	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() || !unixIPCPathOwnerOK(info) || info.Mode().Perm() != 0o700 {
-		return errors.New("share daemon socket directory must be an owner-owned non-symlink directory with mode 0700")
+		return fmt.Errorf(
+			"share daemon socket directory %s must be a non-symlink directory you own with mode 0700 (it is %s); run: chmod 700 %s",
+			dir, info.Mode(), dir)
 	}
 	return nil
 }
@@ -121,12 +123,13 @@ func platformSocketPath(stateDir, runtimeDir string) (string, error) {
 	const runtimeRoot = "/tmp"
 	path = filepath.Join(
 		runtimeRoot,
-		"qurl-"+strconv.Itoa(os.Geteuid())+"-"+hex.EncodeToString(digest[:8]),
+		"qurl-"+strconv.Itoa(os.Geteuid())+"-"+hex.EncodeToString(digest[:16]),
 		SocketFile,
 	)
-	// Unreachable with today's shape (/tmp/qurl-<uid>-<16 hex>/daemon.sock is
-	// at most 49 bytes, and a uid cannot exceed 10 digits), but kept so a
-	// later change to the derived name cannot silently exceed the limit.
+	// Unreachable with today's shape (/tmp/qurl-<uid>-<32 hex>/daemon.sock is
+	// at most 65 bytes against the 100-byte budget, and a uid cannot exceed 10
+	// digits), but kept so a later change to the derived name cannot silently
+	// exceed the limit.
 	if len(path) > maxUnixSocketPathBytes {
 		return "", fmt.Errorf("share daemon socket path is too long below both the state and temp directories; set %s to a short owner-only directory", RuntimeDirEnv)
 	}
