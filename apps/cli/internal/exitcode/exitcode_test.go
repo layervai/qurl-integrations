@@ -70,6 +70,7 @@ var cliSentinels = map[string]struct {
 	// and the supervisor (not qurl) is what brings it back.
 	"daemon.ErrExternalDaemonNotRunning": {connectordaemon.ErrExternalDaemonNotRunning, Unavailable},
 	"state.ErrNoDefaultStateDir":         {state.ErrNoDefaultStateDir, Config},
+	"state.ErrAgentStateEnvelope":        {state.ErrAgentStateEnvelope, Config},
 	// A supervision mismatch is remedied by the --supervision setting, the
 	// same remedy class as the Hub triple: configuration, not the command line.
 	"state.ErrRuntimeSupervision":           {state.ErrRuntimeSupervision, Config},
@@ -404,5 +405,31 @@ func TestProcessLevelMappings(t *testing.T) {
 	}
 	if got := FromError(errors.New("mystery")); got != General {
 		t.Errorf("default = %d, want %d", got, General)
+	}
+}
+
+// TestSealedOpenKeepsTheCauseQurlGoClassifies pins the reason
+// state.ErrAgentStateEnvelope is checked last: Open's sealed branch wraps it
+// around every NewSDKStore failure, so a cause qurl-go classifies itself must
+// keep the code the plaintext branch would have given it.
+func TestSealedOpenKeepsTheCauseQurlGoClassifies(t *testing.T) {
+	for name, test := range map[string]struct {
+		cause error
+		want  int
+	}{
+		"loose directory mode": {qurl.ErrInsecureCredentialStatePermissions, Auth},
+		"state not found":      {qurl.ErrCredentialStateNotFound, Auth},
+		"setup lock":           {qurl.ErrAgentSetupLock, General},
+		"envelope mismatch":    {nil, Config},
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := fmt.Errorf("%w: initialize sealed agent state", state.ErrAgentStateEnvelope)
+			if test.cause != nil {
+				err = fmt.Errorf("%w: initialize sealed agent state: %w", state.ErrAgentStateEnvelope, test.cause)
+			}
+			if got := FromError(err); got != test.want {
+				t.Fatalf("FromError = %d, want %d", got, test.want)
+			}
+		})
 	}
 }

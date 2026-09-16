@@ -97,6 +97,33 @@ func RequireRuntimeSupervision(dir string, expected RuntimeSupervision) error {
 	if _, err := ParseRuntimeSupervision(string(expected)); err != nil {
 		return err
 	}
+	// A sealed namespace can only be served by a daemon its supervisor runs:
+	// the background job qurl installs natively carries no environment, and an
+	// inherited key descriptor cannot survive into a launchd, systemd, or Task
+	// Scheduler process. Refuse here, which every mutating command reaches
+	// before it writes, rather than at the install: a sealed envelope written
+	// under native supervision cannot afterwards be adopted by
+	// EstablishExternalRuntimeMode, which requires a fresh namespace.
+	// The sentinel is ErrAgentStateEnvelope, not ErrRuntimeSupervision: both
+	// map to Config, and the cause really is the envelope the environment
+	// selects, not a marker this directory carries. It also runs before
+	// ReadRuntimeSupervision, so a sealed namespace addressed natively gets
+	// this message rather than "is external, not native" - the more
+	// actionable of the two.
+	if provider, sealed := SelectedKeyProvider(); expected == RuntimeSupervisionNative && sealed {
+		// Name the value: any non-empty name but file selects a sealed envelope,
+		// so a typo lands here too and its author needs to see what was read.
+		//
+		// The primary instruction is the supervision flag, which is right for an
+		// established sealed namespace as well as a new one. The fresh-directory
+		// clause is scoped to creating a new namespace: an operator whose shell
+		// merely inherited the variable must not read this as "abandon your
+		// enrollment and start over". Unsetting is the other exit, because the
+		// leak over a plaintext namespace is as likely as a real sealed one.
+		return fmt.Errorf(
+			"%w: %s=%q selects a sealed agent state envelope, which only an external supervisor can serve; run every command with --supervision external, or unset %s for the plaintext default. A new sealed namespace must be a state directory that has held no state before",
+			ErrAgentStateEnvelope, connectoragentstate.EnvKeyProvider, provider, connectoragentstate.EnvKeyProvider)
+	}
 	actual, err := ReadRuntimeSupervision(dir)
 	if err != nil {
 		return err
