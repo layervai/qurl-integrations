@@ -260,3 +260,43 @@ func TestPlainLoginDoesNotEstablishExternalPolicy(t *testing.T) {
 	}
 	mustNoExternalPolicy(t, stateDir)
 }
+
+// TestLoginsProviderGateImpliesTheNamespaceIsSealed closes the seam between
+// login's env check and the sealing decision. login reads
+// LAYERV_KEY_PROVIDER through opts.lookupEnv and checks only the name, while
+// connectorstate.SealedProviderSelected reads the process environment and
+// decides whether Open takes the sealed branch. They coincide in production
+// because newRoot sets lookupEnv = os.LookupEnv, but nothing forced them to
+// agree: a provider name login accepted and SealedProviderSelected treated as
+// the plaintext default would enroll an external device into a plaintext
+// namespace, which is the divergence sealedProviderSelected's
+// TODO(upstream-contract) warns about.
+func TestLoginsProviderGateImpliesTheNamespaceIsSealed(t *testing.T) {
+	for _, provider := range []string{
+		connectoragentstate.KeyProviderLocalKey,
+		strings.ToUpper(connectoragentstate.KeyProviderLocalKey),
+		" " + connectoragentstate.KeyProviderLocalKey + " ",
+	} {
+		t.Run(provider, func(t *testing.T) {
+			env := map[string]string{
+				connectoragentstate.EnvKeyProvider: provider,
+				connectoragentstate.EnvLocalKeyFD:  "3",
+			}
+			if err := requireLocalKeyProvider(func(k string) (string, bool) { v, ok := env[k]; return v, ok }); err != nil {
+				t.Fatalf("login refused %q: %v", provider, err)
+			}
+			t.Setenv(connectoragentstate.EnvKeyProvider, provider)
+			if !connectorstate.SealedProviderSelected() {
+				t.Fatalf("login accepted %q but the namespace would open plaintext", provider)
+			}
+		})
+	}
+	// And the other direction: the plaintext default must never pass login.
+	env := map[string]string{
+		connectoragentstate.EnvKeyProvider: connectoragentstate.KeyProviderFile,
+		connectoragentstate.EnvLocalKeyFD:  "3",
+	}
+	if err := requireLocalKeyProvider(func(k string) (string, bool) { v, ok := env[k]; return v, ok }); err == nil {
+		t.Fatal("login accepted the plaintext file provider for a token-file enrollment")
+	}
+}

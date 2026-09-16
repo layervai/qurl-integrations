@@ -23,7 +23,10 @@ func openExternalEnrollmentTokenNoFollow(path string) (*os.File, error) {
 	return file, nil
 }
 
-func validateOpenExternalEnrollmentToken(_ *os.File, info os.FileInfo) error {
+// validateOpenExternalEnrollmentToken checks what only the opened file can
+// tell us. os.File.Stat gives the caller the FileInfo of the descriptor it
+// already holds, so the descriptor itself is not needed a second time.
+func validateOpenExternalEnrollmentToken(info os.FileInfo) error {
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if !ok || stat.Uid != uint32(os.Geteuid()) || stat.Nlink != 1 {
 		return errors.New("external enrollment token must be owned by the current user with exactly one link")
