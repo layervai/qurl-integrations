@@ -343,7 +343,7 @@ async function runPushHandoffShutdown({
   scheduleHardExit = setTimeout,
   clearHardExit = clearTimeout,
 }) {
-  logger.info('Hot-standby shutdown initiated; attempting pushHandoff');
+  logBestEffort(logger, 'info', 'Hot-standby shutdown initiated; attempting pushHandoff');
   let exited = false;
   const exitOnce = (exitCode) => {
     if (exited) return;
@@ -353,19 +353,19 @@ async function runPushHandoffShutdown({
   if (connectionWatchdog) {
     try {
       Promise.resolve(connectionWatchdog.stop()).catch((err) => {
-        logger.warn('connection-watchdog stop failed', {
+        logBestEffort(logger, 'warn', 'connection-watchdog stop failed', {
           error: err?.message ?? String(err), stack: err?.stack,
         });
       });
     } catch (err) {
-      logger.warn('connection-watchdog stop failed', {
+      logBestEffort(logger, 'warn', 'connection-watchdog stop failed', {
         error: err?.message ?? String(err), stack: err?.stack,
       });
     }
   }
   const hardExit = scheduleHardExit(() => {
     try {
-      logger.error('PushHandoff shutdown timed out, forcing exit');
+      logBestEffort(logger, 'error', 'PushHandoff shutdown timed out, forcing exit');
     } finally {
       exitOnce(forcedExitCode);
     }
@@ -395,7 +395,7 @@ async function runPushHandoffShutdown({
   let handoffThrew = false;
   try {
     const result = await gatewayLeader.pushHandoff();
-    logger.info('pushHandoff complete', {
+    logBestEffort(logger, 'info', 'pushHandoff complete', {
       transferred: result?.transferred,
       pushAcked: result?.pushAcked,
       reason: result?.reason,
@@ -403,7 +403,7 @@ async function runPushHandoffShutdown({
     });
   } catch (err) {
     handoffThrew = true;
-    logger.error('pushHandoff threw — exiting anyway so the standby can cold-acquire', {
+    logBestEffort(logger, 'error', 'pushHandoff threw — exiting anyway so the standby can cold-acquire', {
       error: err?.message ?? String(err),
     });
   }

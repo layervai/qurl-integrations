@@ -771,6 +771,20 @@ describe('runPushHandoffShutdown', () => {
     };
   }
 
+  it.each([false, true])('completes handoff shutdown when logging throws (handoff failure: %s)', async (fails) => {
+    const brokenLog = jest.fn(() => { throw new Error('logger failed'); });
+    const deps = makeDeps({
+      logger: { info: brokenLog, warn: brokenLog, error: brokenLog },
+      connectionWatchdog: { stop: jest.fn().mockRejectedValue(new Error('watchdog failed')) },
+    });
+    if (fails) deps.gatewayLeader.pushHandoff.mockRejectedValue(new Error('handoff failed'));
+    await expect(runPushHandoffShutdown({ code: 0, ...deps })).resolves.toBeUndefined();
+    expect(deps.scheduleHardExit).toHaveBeenCalledTimes(1);
+    expect(deps.gatewayLeader.pushHandoff).toHaveBeenCalledTimes(1);
+    expect(deps.exit).toHaveBeenCalledWith(fails ? 1 : 0);
+    expect(deps.clearHardExit).toHaveBeenCalledTimes(1);
+  });
+
   it('on a successful pushHandoff, exits with the incoming code', async () => {
     const deps = makeDeps();
     await runPushHandoffShutdown({ code: 0, ...deps });
@@ -947,7 +961,7 @@ describe('runPushHandoffShutdown', () => {
     const shutdown = runPushHandoffShutdown({ code: 0, ...deps });
     await new Promise((resolve) => { setImmediate(resolve); });
 
-    expect(() => deps.scheduleHardExit.timers[0].cb()).toThrow('logger-failure');
+    expect(() => deps.scheduleHardExit.timers[0].cb()).not.toThrow();
     expect(deps.exit).toHaveBeenCalledWith(1);
 
     handoffResolvers.resolve({ transferred: true, pushAcked: true });
