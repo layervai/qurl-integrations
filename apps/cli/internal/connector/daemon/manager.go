@@ -511,19 +511,16 @@ func (m *Manager) recordDesired(desired []connectorstate.LocalShare) ([]restartE
 		previousTarget, nextTarget := previous.route, route
 		previousTarget.RequestHeaders, nextTarget.RequestHeaders = nil, nil
 		if existed && !previousTarget.Equal(nextTarget) {
-			// A move is a fresh definition for this route, so it must not
-			// inherit the old address's diagnostic or its backoff history:
-			// without this, /status keeps saying "serving" about a port the
-			// group is no longer asked to proxy, and a later refusal reports a
-			// retry attempt carried over from the previous target.
-			//
-			// This narrows the stale window; it does not close it. Callbacks
-			// resolve through routeToRes, which is keyed by RouteID alone and a
-			// move does not change it, so a late OnRouteServing for the retired
-			// proxy generation still re-asserts serving.
-			m.seedStartingLocked(share.ResourceID)
-			delete(m.retry, share.ResourceID)
-			delete(m.refusals, share.ResourceID)
+			// Clear the retired target's diagnostic before attempting its
+			// replacement, but preserve a pending group failure's cause.
+			// Callbacks use RouteID, so a late old-generation serving callback
+			// can still overwrite this until the group reports the new route.
+			now := time.Now()
+			if previous.retryAt.After(now) || !now.Before(m.groupRetryAt) {
+				m.seedStartingLocked(share.ResourceID)
+			}
+			// Keep retry counters: a new port does not restore platform
+			// authorization or group health. OnRouteServing resets them.
 			// Target changes may recover a refused route. Header changes do
 			// not change its platform authorization and must retain backoff.
 			//

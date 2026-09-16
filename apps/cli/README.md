@@ -502,6 +502,11 @@ Use `qurl restart <CRID> --target http://127.0.0.1:4000` to move an existing
 local share to a new loopback HTTP origin. The destination must be reachable;
 the old origin can already be stopped. The CRID and Connector ID stay the same.
 
+If the command fails after saving the new target, it keeps that target.
+A failed daemon handoff attempts to stop the share; a readiness timeout leaves
+it trying to start. Use `qurl inspect <CRID>` to check its state and target
+before taking further action. A later `qurl start <CRID>` uses the saved target.
+
 For a share published without `--id`, the default Connector ID remains based
 on its original origin. Publishing that original origin again reuses the same
 resource. Publishing the new origin without an explicit ID uses a different

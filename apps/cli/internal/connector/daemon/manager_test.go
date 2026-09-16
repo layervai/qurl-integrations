@@ -1737,3 +1737,73 @@ func TestManagerResetsTheDiagnosticOfAMovedRoute(t *testing.T) {
 	runner.serve("connector-b")
 	waitManagerCondition(t, func() bool { return manager.Diagnostics()["b"].State == "serving" }, "moved route serving again")
 }
+
+func TestManagerMovePreservesGroupRetryDiagnostic(t *testing.T) {
+	registry := &memoryRegistry{shares: map[string]connectorstate.LocalShare{"a": daemonShare("a", 1, "on")}}
+	factory := newFakeGroupFactory()
+	factory.errs = []error{errors.New("native transport unavailable")}
+	manager, err := NewManager(registry, factory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.retryDelay = func(int) time.Duration { return time.Hour }
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := manager.Reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+	before := manager.Diagnostics()["a"]
+	if before.State != "retrying" || before.NextRetryAt == nil {
+		t.Fatalf("missing retry diagnostic: %+v", before)
+	}
+	moved := daemonShare("a", 2, "on")
+	moved.TargetURL, moved.LocalPort = "http://127.0.0.1:4000", 4000
+	registry.setShare(&moved)
+	if err := manager.Reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+	after := manager.Diagnostics()["a"]
+	if after.State != before.State || after.FailureCategory != before.FailureCategory || after.FailureCode != before.FailureCode || after.NextRetryAt == nil || !after.NextRetryAt.Equal(*before.NextRetryAt) || factory.startCount() != 1 {
+		t.Fatalf("move lost group retry cause or bypassed backoff: before=%+v after=%+v starts=%d", before, after, factory.startCount())
+	}
+	manager.recordGroupFailure(ctx, errors.New("native transport still unavailable"))
+	if got := manager.Diagnostics()["a"].RetryAttempt; got != before.RetryAttempt+1 {
+		t.Fatalf("move reset group retry attempt: got %d, previous %d", got, before.RetryAttempt)
+	}
+}
+
+func TestManagerMoveClearsOldRouteRefusalDuringGroupBackoff(t *testing.T) {
+	share := daemonShare("a", 1, "on")
+	registry := &memoryRegistry{shares: map[string]connectorstate.LocalShare{"a": share}}
+	factory := newFakeGroupFactory()
+	manager, err := NewManager(registry, factory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	manager.lifetime = ctx
+	manager.retryDelay = func(int) time.Duration { return time.Hour }
+	manager.refusalDelay = func(int) time.Duration { return 2 * time.Hour }
+	manager.recordDesired([]connectorstate.LocalShare{share})
+	manager.onRouteFailed("connector-a", ErrResourceGone)
+	manager.recordGroupFailure(ctx, errors.New("group transport unavailable"))
+	if got := manager.Diagnostics()["a"]; got.FailureCategory != diagnosticFailurePlatformDenied {
+		t.Fatalf("missing old route refusal: %+v", got)
+	}
+	groupDeadline := manager.groupRetryAt
+	moved := daemonShare("a", 2, "on")
+	moved.TargetURL, moved.LocalPort = "http://127.0.0.1:4000", 4000
+	registry.setShare(&moved)
+	if err := manager.Reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+	got := manager.Diagnostics()["a"]
+	if got.State != diagnosticStateStarting || got.FailureCategory != "" || got.NextRetryAt != nil || !manager.groupRetryAt.Equal(groupDeadline) || factory.startCount() != 0 {
+		t.Fatalf("move retained old route refusal or bypassed group backoff: %+v", got)
+	}
+	manager.onRouteFailed("connector-a", ErrResourceGone)
+	if got := manager.Diagnostics()["a"].RetryAttempt; got != 2 {
+		t.Fatalf("move reset platform refusal escalation: got %d, want 2", got)
+	}
+}
