@@ -51,6 +51,9 @@ type globalOpts struct {
 	// shareGroupMode is bound by `daemon run --share-group-mode`; every other
 	// command resolves the mode from the environment, profile, or default.
 	shareGroupMode string
+	// Optional trust settings for an explicitly managed daemon process.
+	tunnelCAFile     string
+	tunnelServerName string
 	// supervision is the persistent --supervision flag: who owns the sharing
 	// daemon's process for the state namespace a command addresses.
 	supervision string
