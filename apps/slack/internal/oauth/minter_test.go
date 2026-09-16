@@ -110,7 +110,8 @@ func TestHTTPAPIKeyMinterMintWorkspaceHappyPath(t *testing.T) {
 		gotPath           string
 		gotAuth           string
 		gotIdempotencyKey string
-		gotBody           struct {
+		// Independent tags catch a misspelled production JSON field.
+		gotBody struct {
 			Provider       string `json:"provider"`
 			ExternalID     string `json:"external_id"`
 			DisplayName    string `json:"display_name"`

@@ -655,7 +655,8 @@ func drainAndCloseResponse(resp *http.Response) {
 func bindingIdempotencyKey(teamID string) string {
 	// qurl-service requires a 32+ character idempotency key. Slack team IDs
 	// are shorter, so hash to a stable fixed-width key with a readable prefix.
-	// v2 separates rotate_existing=true from the old request body hash.
+	// qurl-service hashes request bodies; v2 keeps this changed body out
+	// of the prior v1 replay namespace.
 	sum := sha256.Sum256([]byte(teamID))
 	return "slack-workspace-binding-v2-" + hex.EncodeToString(sum[:])
 }
