@@ -492,27 +492,32 @@ func TestLocalShareRegistryRetargetRequiresNewerEpochAndLoopbackTarget(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	if moved, err := registry.Retarget(context.Background(), share.ResourceID, "http://127.0.0.1:4000", 4); err == nil || moved != nil || !strings.Contains(err.Error(), "newer serving epoch") {
+	if moved, err := registry.Retarget(context.Background(), share.ResourceID, LocalTarget{URL: "http://127.0.0.1:4000", IP: "127.0.0.1", Port: 4000}, 4); err == nil || moved != nil || !strings.Contains(err.Error(), "newer serving epoch") {
 		t.Fatalf("same-epoch Retarget = %+v, %v; want nil row and a newer-epoch refusal", moved, err)
 	}
+	// Targets a caller outside cmd could hand in. The IP and port are the
+	// caller's claim; validateLocalShare cross-checks them against the URL, so
+	// a mismatch is refused even when each field is individually plausible.
 	for name, test := range map[string]struct {
-		target string
+		target LocalTarget
 		epoch  uint64
 	}{
-		"older epoch":  {target: "http://127.0.0.1:4000", epoch: 3},
-		"remote host":  {target: "http://192.0.2.1:4000", epoch: 5},
-		"https":        {target: "https://127.0.0.1:4000", epoch: 5},
-		"path":         {target: "http://127.0.0.1:4000/app", epoch: 5},
-		"credentials":  {target: "http://me:secret@127.0.0.1:4000", epoch: 5},
-		"hostname":     {target: "http://localhost:4000", epoch: 5},
-		"missing port": {target: "http://127.0.0.1", epoch: 5},
-		"not a url":    {target: "::not-a-url", epoch: 5},
+		"older epoch":   {target: LocalTarget{URL: "http://127.0.0.1:4000", IP: "127.0.0.1", Port: 4000}, epoch: 3},
+		"remote host":   {target: LocalTarget{URL: "http://192.0.2.1:4000", IP: "192.0.2.1", Port: 4000}, epoch: 5},
+		"https":         {target: LocalTarget{URL: "https://127.0.0.1:4000", IP: "127.0.0.1", Port: 4000}, epoch: 5},
+		"path":          {target: LocalTarget{URL: "http://127.0.0.1:4000/app", IP: "127.0.0.1", Port: 4000}, epoch: 5},
+		"credentials":   {target: LocalTarget{URL: "http://me:secret@127.0.0.1:4000", IP: "127.0.0.1", Port: 4000}, epoch: 5},
+		"hostname":      {target: LocalTarget{URL: "http://localhost:4000", IP: "127.0.0.1", Port: 4000}, epoch: 5},
+		"missing port":  {target: LocalTarget{URL: "http://127.0.0.1", IP: "127.0.0.1", Port: 4000}, epoch: 5},
+		"not a url":     {target: LocalTarget{URL: "::not-a-url", IP: "127.0.0.1", Port: 4000}, epoch: 5},
+		"port mismatch": {target: LocalTarget{URL: "http://127.0.0.1:4000", IP: "127.0.0.1", Port: 5000}, epoch: 5},
+		"ip mismatch":   {target: LocalTarget{URL: "http://127.0.0.1:4000", IP: "127.0.0.2", Port: 4000}, epoch: 5},
 	} {
 		if moved, err := registry.Retarget(context.Background(), share.ResourceID, test.target, test.epoch); err == nil || moved != nil {
 			t.Fatalf("%s: Retarget = %+v, %v; want nil row and an error", name, moved, err)
 		}
 	}
-	if _, err := registry.Retarget(context.Background(), "missing", "http://127.0.0.1:4000", 5); !errors.Is(err, os.ErrNotExist) {
+	if _, err := registry.Retarget(context.Background(), "missing", LocalTarget{URL: "http://127.0.0.1:4000", IP: "127.0.0.1", Port: 4000}, 5); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("Retarget of an unknown share = %v, want os.ErrNotExist", err)
 	}
 	unchanged, err := registry.Get(context.Background(), share.ResourceID)
@@ -521,7 +526,7 @@ func TestLocalShareRegistryRetargetRequiresNewerEpochAndLoopbackTarget(t *testin
 		t.Fatalf("refused Retarget changed the row: %+v -> %+v, %v", stored, unchanged, err)
 	}
 
-	moved, err := registry.Retarget(context.Background(), share.CRID, "http://[::1]:4000", 5)
+	moved, err := registry.Retarget(context.Background(), share.CRID, LocalTarget{URL: "http://[::1]:4000", IP: "::1", Port: 4000}, 5)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -540,7 +545,7 @@ func TestLocalShareRegistryRetargetRequiresNewerEpochAndLoopbackTarget(t *testin
 	if _, err := registry.DisableAtCurrentEpoch(context.Background(), share.ResourceID, 5); err != nil {
 		t.Fatal(err)
 	}
-	reenabled, err := registry.Retarget(context.Background(), share.ResourceID, "http://127.0.0.1:5000", 6)
+	reenabled, err := registry.Retarget(context.Background(), share.ResourceID, LocalTarget{URL: "http://127.0.0.1:5000", IP: "127.0.0.1", Port: 5000}, 6)
 	if err != nil || reenabled.DesiredState != "on" || reenabled.ServingEpoch != 6 || reenabled.LocalPort != 5000 {
 		t.Fatalf("Retarget after local disable = %+v, %v", reenabled, err)
 	}

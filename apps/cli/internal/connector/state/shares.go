@@ -225,6 +225,17 @@ func (r *LocalShareRegistry) SetDesired(ctx context.Context, id, desired string,
 	return &updated, nil
 }
 
+// LocalTarget is one loopback destination, already classified by the caller.
+// Retarget takes the three fields rather than re-deriving the address from
+// the URL: the caller holds them, and re-parsing would swallow the errors
+// that say what is actually wrong. validateLocalShare still cross-checks them
+// against the URL, so a caller outside this package cannot store a mismatch.
+type LocalTarget struct {
+	URL  string
+	IP   string
+	Port int
+}
+
 // Retarget moves one row to a new loopback target under the newer serving
 // epoch the platform returned when the share was restarted. The target and
 // epoch land in one write, so no durable row ever pairs the old target with
@@ -235,7 +246,12 @@ func (r *LocalShareRegistry) SetDesired(ctx context.Context, id, desired string,
 // deliberately stricter than SetDesired, which treats the current epoch as a
 // no-op: here an already-at-this-epoch row is a conflict, so the caller
 // compensates the share off rather than shrugging.
-func (r *LocalShareRegistry) Retarget(ctx context.Context, id, target string, epoch uint64) (*LocalShare, error) {
+//
+// Put encodes the same "may this row move at this epoch?" rule for the
+// publish path and deliberately differs in two places: it accepts an
+// unchanged target at the current epoch, and it takes the desired state from
+// its caller instead of forcing on. Change one rule and check the other.
+func (r *LocalShareRegistry) Retarget(ctx context.Context, id string, target LocalTarget, epoch uint64) (*LocalShare, error) {
 	var updated LocalShare
 	err := r.update(ctx, func(state *localSharesState) error {
 		key, share, ok := findLocalShare(state.Shares, id)
@@ -245,13 +261,7 @@ func (r *LocalShareRegistry) Retarget(ctx context.Context, id, target string, ep
 		if epoch <= share.ServingEpoch {
 			return fmt.Errorf("refuse local target change without a newer serving epoch than %d", share.ServingEpoch)
 		}
-		share.TargetURL, share.LocalIP, share.LocalPort = target, "", 0
-		if parsed, err := url.Parse(target); err == nil {
-			// validateLocalShare rejects anything but a literal loopback IP
-			// and a valid port; an unparsable port stays 0 and fails there.
-			share.LocalIP = parsed.Hostname()
-			share.LocalPort, _ = strconv.Atoi(parsed.Port())
-		}
+		share.TargetURL, share.LocalIP, share.LocalPort = target.URL, target.IP, target.Port
 		share.DesiredState = desiredStateOn
 		share.ServingEpoch = epoch
 		share.UpdatedAt = time.Now().UTC()

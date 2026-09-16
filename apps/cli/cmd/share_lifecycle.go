@@ -29,7 +29,7 @@ type localShareRegistry interface {
 	Get(context.Context, string) (*connectorstate.LocalShare, error)
 	Put(context.Context, *connectorstate.LocalShare) error
 	SetDesired(context.Context, string, string, uint64) (*connectorstate.LocalShare, error)
-	Retarget(context.Context, string, string, uint64) (*connectorstate.LocalShare, error)
+	Retarget(context.Context, string, connectorstate.LocalTarget, uint64) (*connectorstate.LocalShare, error)
 	DisableAtCurrentEpoch(context.Context, string, uint64) (*connectorstate.LocalShare, error)
 	Delete(context.Context, string) error
 }
@@ -238,13 +238,16 @@ func changeShareState(ctx context.Context, opts *globalOpts, id, action string, 
 	if err := validateLocalSharing(local, sharing); err != nil {
 		return compensateShareChange(err, compensateOff, client, registry, local, sharing)
 	}
-	var updated *connectorstate.LocalShare
-	var updateErr error
+	var (
+		updated   *connectorstate.LocalShare
+		updateErr error
+	)
 	if target != nil {
 		// Retarget writes the row desired-on. validateRestartAdvance above
-		// refuses any restart result that is not authoritatively on, so the two
-		// agree - but the coupling lives in another function, so assert it here
-		// rather than let a future contract change write "on" over an "off".
+		// refuses any restart result that is not authoritatively on, so this is
+		// unreachable by construction today and no test can reach it. It stays
+		// because the coupling lives in another function: a future restart
+		// contract that can answer "off" would otherwise write "on" over it.
 		if sharing.DesiredState != qurlapi.DesiredStateOn {
 			return compensateShareChange(
 				fmt.Errorf("restart answered desired state %q for a target move, want on", sharing.DesiredState),
@@ -253,7 +256,8 @@ func changeShareState(ctx context.Context, opts *globalOpts, id, action string, 
 		// TODO(upstream-contract): SessionGroupRunner.SetRoutes must reconcile a
 		// changed LocalIP/LocalPort for an existing RouteID (qurl-connector's
 		// TestSessionGroupRunnerSetRoutesChangesProxiesWithoutReadmission pins it).
-		updated, updateErr = registry.Retarget(ctx, local.ResourceID, target.canonicalOrigin, sharing.ServingEpoch)
+		updated, updateErr = registry.Retarget(ctx, local.ResourceID,
+			connectorstate.LocalTarget{URL: target.canonicalOrigin, IP: target.localIP, Port: target.localPort}, sharing.ServingEpoch)
 	} else {
 		updated, updateErr = registry.SetDesired(ctx, local.ResourceID, string(sharing.DesiredState), sharing.ServingEpoch)
 	}
