@@ -96,7 +96,7 @@ services:
     security_opt:
       - 'no-new-privileges:true'
     entrypoint: ['/usr/local/bin/qurl']
-    command: ['daemon', 'run', '--state-dir', '/var/lib/qurl', '--headless-config', '/etc/qurl/share.yaml', '--enrollment-token-file', '/run/secrets/qurl/enrollment-token']
+    command: ['daemon', 'run', '--state-dir', '/var/lib/qurl', '--headless-config', '/etc/qurl/share.yaml', '--enrollment-token-file', '/run/secrets/qurl/enrollment-token'%s]
     network_mode: "service:${WEB_SERVICE}"
     depends_on:
       ${WEB_SERVICE}:
@@ -109,7 +109,7 @@ services:
       QURL_ENDPOINT: ${QURL_ENDPOINT_YAML}
 QURL_COMPOSE_YAML_EOF
 
-docker compose -f "$APP_COMPOSE_FILE" -f "$QURL_COMPOSE_FILE" up -d "$CONNECTOR_SERVICE"`, renderPortablePipefailShell(), renderSudoDetectionShell(), webService, renderRequiredShellNameGuard("WEB_SERVICE", "YOUR_COMPOSE_SERVICE_NAME", "the Compose service name for your local HTTP server", "A-Za-z0-9_-", "letters, numbers, underscores, and hyphens"), shellSingleQuote(args.Slug), tunnelService, quotedEndpointShell, configYAML, renderBootstrapKeyPromptShell(), renderBootstrapKeyFileInstallShell(`"$SECRET_DIR/enrollment-token"`), quotedTunnelServiceName, quotedImage)
+docker compose -f "$APP_COMPOSE_FILE" -f "$QURL_COMPOSE_FILE" up -d "$CONNECTOR_SERVICE"`, renderPortablePipefailShell(), renderSudoDetectionShell(), webService, renderRequiredShellNameGuard("WEB_SERVICE", "YOUR_COMPOSE_SERVICE_NAME", "the Compose service name for your local HTTP server", "A-Za-z0-9_-", "letters, numbers, underscores, and hyphens"), shellSingleQuote(args.Slug), tunnelService, quotedEndpointShell, configYAML, renderBootstrapKeyPromptShell(), renderBootstrapKeyFileInstallShell(`"$SECRET_DIR/enrollment-token"`), quotedTunnelServiceName, quotedImage, args.Hub.quotedFlags(", "))
 
 	block, err := slackCodeBlock(compose)
 	if err != nil {
