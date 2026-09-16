@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.6](https://github.com/layervai/qurl-integrations/compare/discord-v0.2.5...discord-v0.2.6) (2026-09-11)
+
+
+### Bug Fixes
+
+* **discord:** sign the guild path for watermark detection ([#1436](https://github.com/layervai/qurl-integrations/issues/1436)) ([915254d](https://github.com/layervai/qurl-integrations/commit/915254d3b311b1f92d7377ccd3fa8f590e5b4bbc))
+
 ## [0.2.5](https://github.com/layervai/qurl-integrations/compare/discord-v0.2.4...discord-v0.2.5) (2026-09-07)
 
 
