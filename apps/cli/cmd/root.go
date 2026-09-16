@@ -888,13 +888,13 @@ func (o *globalOpts) bindDeviceOwner(ctx context.Context, stateDir string, devic
 	return bindRegisteredDeviceOwner(ctx, registry, stateDir, identityKeyID(deviceIdentity), deviceIdentity.OwnerID)
 }
 
-// identityKeyID is the non-secret identifier of the credential behind id.
 // oneShotEnrollmentToken reads the supervisor's token file at most once per
-// enrollment and replays that first outcome. The file is one-shot and the
-// supervisor deletes it on every exit path, so a second provider call after a
-// transient enrollment failure would otherwise re-open a path that is gone
-// and report a file-shape error instead of the truth: this credential is
-// spent and the supervisor must mint another.
+// enrollment and replays that outcome for every later call. The file is
+// one-shot and the supervisor deletes it on every exit path, so re-opening it
+// on a retry would report a file-shape error about a path that is gone. The
+// cache is what prevents that; a repeated call gets the same token and lets
+// the platform be the one to reject a genuinely spent credential, the way the
+// account-key provider's cached idempotency key does.
 func oneShotEnrollmentToken(path string) func(context.Context, qurl.AgentEnrollmentCredentialRequest) (string, error) {
 	var (
 		once  sync.Once
@@ -902,17 +902,12 @@ func oneShotEnrollmentToken(path string) func(context.Context, qurl.AgentEnrollm
 		err   error
 	)
 	return func(context.Context, qurl.AgentEnrollmentCredentialRequest) (string, error) {
-		first := false
-		once.Do(func() {
-			first = true
-			token, err = auth.ReadExternalEnrollmentTokenFile(path)
-		})
-		if first || err != nil {
-			return token, err
-		}
-		return "", errors.New("the one-time enrollment token was already used for this enrollment; mint a new token file and run qurl login again")
+		once.Do(func() { token, err = auth.ReadExternalEnrollmentTokenFile(path) })
+		return token, err
 	}
 }
+
+// identityKeyID is the non-secret identifier of the credential behind id.
 
 func identityKeyID(id *qurlapi.Identity) string {
 	if id == nil || id.Key == nil {

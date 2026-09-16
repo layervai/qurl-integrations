@@ -18,10 +18,22 @@ var statExternalEnrollmentTokenPath = os.Lstat
 // ReadExternalEnrollmentTokenFile reads the qURL Desktop one-shot credential from
 // one exact private file. It is intentionally stricter than the headless
 // projected-secret reader: symlinks and group access are never accepted.
+//
+// What the guarantee is and is not: O_NOFOLLOW protects the final component
+// only, and ValidateExternalEnrollmentTokenPath is a string check, so an
+// intermediate directory symlink is still followed. The euid-ownership,
+// single-link and 0400/0600 checks mean a substitution within the caller's own
+// account is refused rather than read, and the path is supervisor-supplied,
+// so the guarantee is "this exact private file, or an error" - not "no part of
+// this path was ever redirected".
 func ReadExternalEnrollmentTokenFile(path string) (string, error) { //nolint:gocyclo // One descriptor-pinning security decision stays together.
 	if err := ValidateExternalEnrollmentTokenPath(path); err != nil {
 		return "", err
 	}
+	// before and after use os.Lstat while the mid-read check uses the
+	// injectable statExternalEnrollmentTokenPath: that seam is what lets the
+	// tests drive a swap between the checks. The opened descriptor's own Stat
+	// is what both are compared against, which is the part nothing can redirect.
 	before, err := os.Lstat(path)
 	if err != nil || !validExternalEnrollmentTokenInfo(before) {
 		return "", errors.New("external enrollment token must be one owner-readable private regular file")

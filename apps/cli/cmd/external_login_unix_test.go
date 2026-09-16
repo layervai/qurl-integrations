@@ -304,9 +304,10 @@ func TestExternalLoginJSONPrintsTheDeviceIdentityOnly(t *testing.T) {
 
 // TestOneShotEnrollmentTokenReplaysItsFirstOutcome pins that the credential
 // provider reads the supervisor's file exactly once. The file is one-shot and
-// the supervisor deletes it on every exit path, so a second call after a
-// transient enrollment failure must say the token is spent rather than
-// re-open a path that is gone and report a file-shape error.
+// the supervisor deletes it on every exit path, so a second call must replay
+// the cached token rather than re-open a path that is gone and report a
+// file-shape error. Letting the platform reject a genuinely spent credential
+// keeps a transient enrollment failure retryable.
 func TestOneShotEnrollmentTokenReplaysItsFirstOutcome(t *testing.T) {
 	path := writeExternalLoginToken(t)
 	provider := oneShotEnrollmentToken(path)
@@ -319,8 +320,8 @@ func TestOneShotEnrollmentTokenReplaysItsFirstOutcome(t *testing.T) {
 		t.Fatal(err)
 	}
 	again, err := provider(context.Background(), qurl.AgentEnrollmentCredentialRequest{})
-	if again != "" || err == nil || !strings.Contains(err.Error(), "already used") {
-		t.Fatalf("second read = %q, %v; want the spent-credential refusal", again, err)
+	if err != nil || again != testExternalEnrollmentToken {
+		t.Fatalf("second read = %q, %v; want the cached token replayed", again, err)
 	}
 }
 
