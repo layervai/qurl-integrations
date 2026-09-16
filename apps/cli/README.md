@@ -250,11 +250,15 @@ production settings are included in releases; environment-only, with no profile 
 `LAYERV_KEY_PROVIDER` seals the local agent state under a key provider
 instead of the plaintext default (`file`); with `local-key`, the 32-byte
 wrapping key arrives on the inherited descriptor named by
-`LAYERV_LOCAL_KEY_FD`. There is deliberately no flag: the supervisor that
-owns the key (for example qURL Desktop) sets the environment. A state
-directory holds exactly one envelope, so qurl refuses to open a sealed
-directory without these variables, or a plaintext one with them; use a
-different state directory rather than switching in place. Pointing the
+`LAYERV_LOCAL_KEY_FD`, on macOS and Linux. There is deliberately no flag: the
+supervisor that owns the key (for example qURL Desktop) sets the environment.
+A sealed namespace requires `--supervision external`: the background job
+`qurl` installs under native supervision carries no environment and cannot
+inherit a key descriptor, so a command that would install one refuses a
+sealed namespace outright (exit code 3). A state directory holds exactly one
+envelope, so qurl refuses to open a sealed directory without these variables,
+or a plaintext one with them (also exit code 3); use a different state
+directory rather than switching in place. Pointing the
 CLI at a plain-`http` endpoint on a non-local address warns that the key
 would travel unencrypted; loopback endpoints are exempt.
 
