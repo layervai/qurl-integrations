@@ -383,7 +383,9 @@ func resolveDaemonPaths(ctx context.Context, opts *globalOpts, stateDirOverride,
 	// namespace untouched.
 	socketPath, err = connectordaemon.SocketPathForStateDir(stateDir, runtimeDirLookup(runtimeDirOverride, opts.lookupEnv))
 	if err != nil {
-		if strings.TrimSpace(runtimeDirOverride) != "" {
+		// Only restate the flag for errors about the runtime directory: a state
+		// directory rejection is about --state-dir and must not be relabelled.
+		if strings.TrimSpace(runtimeDirOverride) != "" && strings.Contains(err.Error(), connectordaemon.RuntimeDirEnv) {
 			return "", "", fmt.Errorf("--runtime-dir: %w", err)
 		}
 		return "", "", err
