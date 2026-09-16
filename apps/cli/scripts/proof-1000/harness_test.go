@@ -317,6 +317,8 @@ func TestEnvironmentChildEnvAndPreflight(t *testing.T) {
 	}
 
 	fake := fakeEnvironment(t, []fakeRule{
+		{Match: "version --verify-release-native-trust", Exit: 2, Times: 1, Stderr: "missing embedded trust"},
+		{Match: "version --verify-release-native-trust", Stdout: "verified fingerprint"},
 		{Match: "version", Stdout: "qurl version 9.9.9 (test/test)\n"},
 		{Match: "whoami", Stdout: "owner\n"},
 		{Match: "list", Stdout: `{"resources":[],"has_more":false}`},
@@ -329,6 +331,9 @@ func TestEnvironmentChildEnvAndPreflight(t *testing.T) {
 	}
 	if err := fake.preflight(context.Background(), &options{}); err == nil || !strings.Contains(err.Error(), "QURL_DEPLOYMENT") {
 		t.Fatalf("preflight without deployment settings should explain itself: %v", err)
+	}
+	if err := fake.preflight(context.Background(), &options{}); err != nil {
+		t.Fatalf("embedded release trust must permit native fetches: %v", err)
 	}
 	unauth := fakeEnvironment(t, []fakeRule{{Match: "version", Stdout: "qurl version 1\n"}, {Match: "whoami", Stderr: "Error: no credential\n", Exit: 4}})
 	if err := unauth.preflight(context.Background(), &options{skipVerify: true}); err == nil || !strings.Contains(err.Error(), "whoami") {

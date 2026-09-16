@@ -62,9 +62,10 @@ share. It is **safe to interrupt**: Ctrl-C still writes the report (exit 130).
   build without a pinned production Hub key needs that triple for every
   foreground command; the harness's preflight (`version`, `whoami`, `list`,
   daemon `/status`) fails before publishing anything if it is still missing.
-- `QURL_DEPLOYMENT` pointing at the deployment settings file for the target
-  environment (issuer keys plus relay allowlist), or `--skip-verify`. The
-  SDK ships no issuers, so `qurl get --file` cannot run without it.
+- A release CLI with verified embedded production trust, or `QURL_DEPLOYMENT`
+  pointing at deployment settings for the target environment (issuer keys
+  plus relay allowlist). Preflight verifies embedded trust when no override
+  is set. Sandbox still needs its own settings.
 - A `get`-capable binary for `--consume-qurl` (default: same as `--qurl`).
   The consume path only mints links and downloads; it never touches the
   daemon, so a from-source build is safe there when the installed release
