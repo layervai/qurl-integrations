@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"reflect"
@@ -30,6 +31,9 @@ func TestCLIUsesReleasedDirectDependencies(t *testing.T) {
 	raw, err := os.ReadFile(goModPath)
 	if err != nil {
 		t.Fatalf("read %s: %v", goModPath, err)
+	}
+	if err := checkFirstPartyReplacements(goModPath, raw); err != nil {
+		t.Fatal(err)
 	}
 	for _, modulePath := range []string{connectorModule, qurlGoModule} {
 		if err := checkReleasedDirectRequirement(goModPath, raw, modulePath); err != nil {
@@ -72,6 +76,23 @@ func TestCLIConnectorRuntimeHasNoSessionRelaySurface(t *testing.T) {
 	if !slices.Equal(got, want) {
 		t.Fatalf("qurl-connector NativeRuntimeConfig exported surface = %v, want %v; review any change for a forbidden session-relay path", got, want)
 	}
+}
+
+// checkFirstPartyReplacements requires every replacement pointing at a
+// first-party fork to name a tagged release, so the CLI never ships an
+// unreviewed fork commit.
+func checkFirstPartyReplacements(path string, raw []byte) error {
+	parsed, err := modfile.Parse(path, raw, nil)
+	if err != nil {
+		return fmt.Errorf("parse %s: %w", path, err)
+	}
+	for _, replacement := range parsed.Replace {
+		if strings.HasPrefix(replacement.New.Path, "github.com/layervai/") &&
+			(!semver.IsValid(replacement.New.Version) || module.IsPseudoVersion(replacement.New.Version)) {
+			return fmt.Errorf("%s: %s replacement must use a tagged semantic version", path, replacement.New.Path)
+		}
+	}
+	return nil
 }
 
 func checkReleasedDirectRequirement(path string, raw []byte, modulePath string) error {
@@ -135,9 +156,26 @@ func TestCheckReleasedDirectRequirement(t *testing.T) {
 			wantErr: "must not be replaced",
 		},
 		{
+			name: "requirement replaced by an untagged first-party fork",
+			goMod: "module example.com/cli\n\nrequire " + connectorModule + " v0.8.6\n" +
+				"replace " + connectorModule + " => github.com/layervai/qurl-connector v0.8.7-0.20260829010203-abcdefabcdef\n",
+			wantErr: "must not be replaced",
+		},
+		{
 			name:    "pseudo version",
 			goMod:   "module example.com/cli\n\nrequire " + connectorModule + " v0.8.7-0.20260829010203-abcdefabcdef\n",
 			wantErr: "want a tagged semantic version",
+		},
+		{
+			name: "tagged first-party replacement",
+			goMod: "module example.com/cli\n\nrequire " + connectorModule + " v0.8.6\n" +
+				"replace github.com/fatedier/frp => github.com/layervai/frp v1.0.1\n",
+		},
+		{
+			name: "untagged first-party replacement",
+			goMod: "module example.com/cli\n\nrequire " + connectorModule + " v0.8.6\n" +
+				"replace github.com/fatedier/frp => github.com/layervai/frp v1.0.1-0.20260906231730-9a0e4ee61964\n",
+			wantErr: "replacement must use a tagged semantic version",
 		},
 		{
 			name:    "malformed go.mod",
@@ -147,7 +185,10 @@ func TestCheckReleasedDirectRequirement(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
-			err := checkReleasedDirectRequirement("synthetic.mod", []byte(test.goMod), connectorModule)
+			err := errors.Join(
+				checkFirstPartyReplacements("synthetic.mod", []byte(test.goMod)),
+				checkReleasedDirectRequirement("synthetic.mod", []byte(test.goMod), connectorModule),
+			)
 			if test.wantErr == "" {
 				if err != nil {
 					t.Fatal(err)
