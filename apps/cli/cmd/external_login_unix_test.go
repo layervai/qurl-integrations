@@ -432,6 +432,9 @@ func TestExternalLoginUnusableTokenFileExitsAuth(t *testing.T) {
 	if err := os.WriteFile(path, []byte(testExternalEnrollmentToken+"\n"), 0o644); err != nil { // #nosec G306 -- the point of the test.
 		t.Fatal(err)
 	}
+	if err := os.Chmod(path, 0o644); err != nil { // #nosec G302 -- keep the unsafe fixture independent of the process umask.
+		t.Fatal(err)
+	}
 	res := runCLI(t, &runOpts{
 		args:          []string{"--endpoint", srv.URL, "--supervision", "external", "login", "--enrollment-token-file", path},
 		env:           externalLoginEnv(),

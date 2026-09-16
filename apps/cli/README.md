@@ -754,6 +754,24 @@ op read op://team/qurl/key | qurl login
 qurl whoami -o json
 ```
 
+A supervisor such as qURL Desktop can instead run
+`qurl login --enrollment-token-file /absolute/path/to/token --supervision external -o json`.
+It must supply a one-time token minted for `target=agent`, set
+`LAYERV_KEY_PROVIDER=local-key`, and pass the 32-byte wrapping key through the
+inherited descriptor named by `LAYERV_LOCAL_KEY_FD`. Do not set `QURL_API_KEY`
+or `QURL_API_KEY_FILE` for this form. Token-file login is supported on macOS
+and Linux; Windows rejects it before changing local state.
+
+The token file must be an owner-owned regular file with one hard link and
+mode `0400` or `0600`. The CLI reads it only when enrollment needs it. The
+supervisor must remove it after the command exits, including on failure.
+An enrolled device can log in again with the same path after the file is
+removed. Invalid command options return exit code 2; an unusable token file
+returns 4; incompatible encrypted-state settings return 3. Correct a token
+file error and retry with the same state directory. Login JSON includes
+`owner_id`, `auth_type`, `device_enrolled`, and `device_key_id` when the
+service supplies a key ID.
+
 ### qurl completion
 
 `qurl completion <shell>` writes a completion script to stdout for
