@@ -404,7 +404,7 @@ type restartEntry struct {
 // applyDesired pushes the desired route set to the live group and restarts any
 // route whose serving epoch advanced without a target change.
 func (m *Manager) applyDesired(ctx context.Context, desired []connectorstate.LocalShare) error {
-	restart, runner := m.recordDesired(desired)
+	restart, moved, runner := m.recordDesired(desired)
 	if runner == nil {
 		return nil
 	}
@@ -431,7 +431,11 @@ func (m *Manager) applyDesired(ctx context.Context, desired []connectorstate.Loc
 		}
 	}
 	restart = kept
-	if err := m.pushRoutes(ctx, runner, routes); err != nil {
+	pushErr := m.pushRoutes(ctx, runner, routes)
+	if pushErr == nil {
+		m.verifyMovedRoutes(ctx, runner, desired, moved)
+	}
+	if err := pushErr; err != nil {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -487,10 +491,11 @@ func (m *Manager) applyDesired(ctx context.Context, desired []connectorstate.Loc
 // eligibleRoutes rebuilds the pushed set from the desired rows rather than
 // from tracked, and a failed push schedules a bounded reconcile, so a move is
 // retried rather than stranded.
-func (m *Manager) recordDesired(desired []connectorstate.LocalShare) ([]restartEntry, GroupRunner) {
+func (m *Manager) recordDesired(desired []connectorstate.LocalShare) ([]restartEntry, []string, GroupRunner) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	var restart []restartEntry
+	var moved []string
 	for i := range desired {
 		share := desired[i]
 		route := m.shareRouteLocked(&share)
@@ -510,13 +515,21 @@ func (m *Manager) recordDesired(desired []connectorstate.LocalShare) ([]restartE
 		next := trackedShare{share: share, route: route, retryAt: previous.retryAt}
 		previousTarget, nextTarget := previous.route, route
 		previousTarget.RequestHeaders, nextTarget.RequestHeaders = nil, nil
-		if !previousTarget.Equal(nextTarget) {
-			// The moved route is not serving its new address yet, and its
-			// RouteID did not change, so the old address's diagnostic would
-			// otherwise stand - and a late callback for the retired proxy
-			// generation would re-assert it. Reseed so /status, inspect, and the
-			// readiness wait's failure detail describe a move that did not take.
+		if existed && !previousTarget.Equal(nextTarget) {
+			moved = append(moved, share.ResourceID)
+			// A move is a fresh definition for this route, so it must not
+			// inherit the old address's diagnostic or its backoff history:
+			// without this, /status keeps saying "serving" about a port the
+			// group is no longer asked to proxy, and a later refusal reports a
+			// retry attempt carried over from the previous target.
+			//
+			// This narrows the stale window; it does not close it. Callbacks
+			// resolve through routeToRes, which is keyed by RouteID alone and a
+			// move does not change it, so a late OnRouteServing for the retired
+			// proxy generation still re-asserts serving.
 			m.seedStartingLocked(share.ResourceID)
+			delete(m.retry, share.ResourceID)
+			delete(m.refusals, share.ResourceID)
 			// Target changes may recover a refused route. Header changes do
 			// not change its platform authorization and must retain backoff.
 			//
@@ -534,7 +547,7 @@ func (m *Manager) recordDesired(desired []connectorstate.LocalShare) ([]restartE
 		m.routeToRes[route.RouteID] = share.ResourceID
 	}
 	sort.Slice(restart, func(i, j int) bool { return restart[i].routeID < restart[j].routeID })
-	return restart, m.runner
+	return restart, moved, m.runner
 }
 
 // commitRestart advances the tracked definition for a route after its restart
@@ -582,6 +595,58 @@ func (m *Manager) pushRoutes(ctx context.Context, runner GroupRunner, routes []c
 	return runner.SetRoutes(pushCtx, routes)
 }
 
+// verifyMovedRoutes checks that the live group actually took each moved
+// route's new address. The whole move relies on SetRoutes reconciling a
+// changed LocalIP/LocalPort under an unchanged RouteID: if it ever diffed by
+// RouteID alone the cloud epoch would still advance, the CLI would print the
+// new target and exit 0, no OnRouteServing would fire, and the user's traffic
+// would keep reaching the old port with only a diagnostic stuck on starting
+// to show for it. Rather than trust the upstream test to stay green, mark the
+// divergence so qurl inspect says so and a retry is scheduled.
+//
+// TODO(upstream-contract): mirrors qurl-connector's
+// TestSessionGroupRunnerSetRoutesChangesProxiesWithoutReadmission. Delete this
+// check only together with that contract.
+func (m *Manager) verifyMovedRoutes(ctx context.Context, runner GroupRunner, desired []connectorstate.LocalShare, moved []string) {
+	if len(moved) == 0 {
+		return
+	}
+	want := make(map[string]*connectorstate.LocalShare, len(moved))
+	for _, resourceID := range moved {
+		for i := range desired {
+			if desired[i].ResourceID == resourceID {
+				want[resourceID] = &desired[i]
+				break
+			}
+		}
+	}
+	states := runner.RouteStates()
+	for resourceID, share := range want {
+		state, ok := states[share.ConnectorID]
+		if !ok {
+			continue
+		}
+		if state.Route.LocalIP == share.LocalIP && state.Route.LocalPort == share.LocalPort {
+			continue
+		}
+		slog.ErrorContext(ctx, "share daemon moved a route but the session group kept the old address",
+			"resource_id", resourceID)
+		m.recordMoveDivergence(ctx, resourceID)
+	}
+}
+
+// recordMoveDivergence reports a move the group did not take and schedules a
+// retry, so the condition is visible and self-healing rather than silent.
+func (m *Manager) recordMoveDivergence(ctx context.Context, resourceID string) {
+	m.mu.Lock()
+	m.diagnostics[resourceID] = ResourceDiagnostic{
+		State: diagnosticStateRetrying, LastTransition: time.Now().UTC(),
+		FailureCategory: "local_daemon",
+	}
+	m.mu.Unlock()
+	m.scheduleGroupRetry(ctx, m.retryDelay(1))
+}
+
 func (m *Manager) restartRoute(ctx context.Context, runner GroupRunner, routeID string) error {
 	pushCtx, cancel := context.WithTimeout(ctx, m.routePushTimeout)
 	defer cancel()
@@ -604,7 +669,9 @@ func (m *Manager) startGroup(ctx context.Context, desired []connectorstate.Local
 	// group start subsumes any per-route restart accumulated during downtime —
 	// the new admission already retires the stale session — so commit those
 	// epochs now rather than issuing a spurious RestartRoute on a later cycle.
-	restart, _ := m.recordDesired(desired)
+	// A fresh group start registers every route from scratch, so there is no
+	// moved-route divergence to verify.
+	restart, _, _ := m.recordDesired(desired)
 	m.commitRestarts(restart)
 	if wait := m.groupRestartWait(); wait > 0 {
 		m.scheduleGroupRetry(ctx, wait)

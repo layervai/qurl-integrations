@@ -76,7 +76,8 @@ func shareRestartCmd(opts *globalOpts) *cobra.Command {
 Rotates the share on a fresh serving epoch so no stale session keeps serving
 it. With --target the share also moves to a different loopback origin on this
 machine; the CRID and Connector identity stay the same, so every link already
-handed out keeps working.`,
+handed out keeps working — and now resolves to whatever serves the new
+origin.`,
 		Example: "  qurl restart lv1_...\n  qurl restart lv1_... --target http://127.0.0.1:4000",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			var destination *publishTarget
