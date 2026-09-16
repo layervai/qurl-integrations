@@ -635,7 +635,7 @@ else
   # 304, 404, or 429 means S3 rejected the request, but status alone does
   # not distinguish credentials from IAM, region, endpoint, or other request
   # configuration. nginx masks the rejection to a viewer 404, so the origin
-  # refuses to serve until the operator fixes it.
+  # logs the cause while retaining automatic recovery after IAM propagation.
   origin_running() {
     docker inspect -f '{{.State.Running}}' "$ORIGIN" 2>/dev/null || echo false
   }
@@ -653,26 +653,17 @@ else
       -e S3_TLS=false -e S3_ENDPOINT_ADDR="$STUB" -e S3_ENDPOINT_PORT=9000 \
       $preflight_credentials \
       "$IMG" >/dev/null
-    # The reject class is retried to a 15s deadline before the verdict, so this
-    # has to outlast a full retry budget plus container start.
+    # Allow the signer startup deadline plus container launch time.
     for _ in $(seq 1 90); do
       docker_logs_contain "$ORIGIN" '"msg":"preflight_' && break
       sleep 0.5
     done
-    # A fatal verdict tears the container down right after logging it; settle
-    # before the caller inspects container state.
-    for _ in $(seq 1 20); do
-      docker_logs_contain "$ORIGIN" '"msg":"preflight_request_rejected"' || break
-      [ "$(origin_running)" = "false" ] && break
-      sleep 0.5
-    done
+
   }
 
   for prefix in wrongregion forbidden badrequest; do
     preflight_case "$prefix"
-    expect_eq "preflight refuses to serve on upstream $prefix" "$(origin_running)" "false"
-    expect_eq "preflight exits non-zero on upstream $prefix" \
-      "$(docker inspect -f '{{.State.ExitCode}}' "$ORIGIN")" "1"
+    expect_eq "preflight preserves recovery on upstream $prefix" "$(origin_running)" "true"
     expect_origin_log "preflight names the rejected request for upstream $prefix" \
       '"msg":"preflight_request_rejected"'
     expect_origin_log "preflight rejection covers credentials and IAM for upstream $prefix" \
@@ -686,9 +677,7 @@ else
   # would mask that to a viewer 404 on every request forever.
   stub_mark="$(stub_log_mark)"
   preflight_case "" unsigned
-  expect_eq "preflight refuses to serve with an empty credential chain" "$(origin_running)" "false"
-  expect_eq "preflight exits non-zero with an empty credential chain" \
-    "$(docker inspect -f '{{.State.ExitCode}}' "$ORIGIN")" "1"
+  expect_eq "preflight preserves credential refresh recovery" "$(origin_running)" "true"
   expect_origin_log "preflight names the rejected request with no credentials" \
     '"msg":"preflight_request_rejected"'
   unsigned_probes="$(stub_get_count_since "$stub_mark" 'authorization absent ')"
@@ -697,14 +686,18 @@ else
   else
     no "unsigned preflight reaches S3 with no Authorization header"
   fi
-  # Credential acquisition fails transiently often enough — IMDS throttled in a
-  # host boot storm, an STS hiccup, IAM propagation — that one probe would spend
-  # the whole `restart: on-failure:5` budget on a condition that clears itself.
-  if [ "$unsigned_probes" -ge 2 ]; then
-    ok "preflight retries the rejected request before failing closed"
-  else
-    no "preflight retries the rejected request before failing closed (probes $unsigned_probes)"
-  fi
+  preflight_case startup-denied
+  expect_origin_log "startup rejection is diagnosed before recovery" \
+    '"msg":"preflight_request_rejected"'
+  base="$(origin_base_url)"
+  for _ in $(seq 1 40); do
+    recovered="$(curl -s "$base/")"
+    [ "$recovered" = "recovered" ] && break
+    sleep 0.5
+  done
+  expect_eq "same origin recovers after startup rejection without restart" "$recovered" "recovered"
+  expect_eq "startup rejection did not restart the origin" \
+    "$(docker inspect -f '{{.RestartCount}}' "$ORIGIN")" "0"
 
   for prefix in throttle boom; do
     preflight_case "$prefix"

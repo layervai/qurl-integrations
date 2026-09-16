@@ -161,29 +161,20 @@ Envoy signer before nginx starts, and reports the verdict as
 | Upstream | `msg` | Outcome |
 | --- | --- | --- |
 | `2xx` / `304` | `preflight_ok` | serves |
-| `3xx` / `4xx` except `304`, `404`, `429` | `preflight_request_rejected` | **exits 1 without serving**; remediation covers credentials/provider chain, IAM, region, endpoint, and signed-request configuration |
+| `3xx` / `4xx` except `304`, `404`, `429` | `preflight_request_rejected` | serves with existing viewer error masking; remediation covers credentials/provider chain, IAM, region, endpoint, and signed-request configuration |
 | `404` | `preflight_object_missing` | serves — the object may not be synced yet; this status does not prove which identity or permissions handled the request |
 | `429` / `5xx` | `preflight_upstream_error` | serves; throttle and server failures are treated as transient |
 | other statuses | `preflight_upstream_error` | serves and asks the operator to inspect the status and logs |
 | no response | `preflight_no_response` | serves |
 
-Any deterministic non-transient `3xx`/`4xx` rejection is fatal except `304`
-(success), `404` (ambiguous missing-object signal), and `429` (transient
-throttle). The HTTP status alone does not identify the cause: credentials, IAM,
+The HTTP status alone does not identify the cause: credentials, IAM,
 `AWS_REGION`, endpoint selection, or other request configuration can all be
-responsible. It does identify a startup condition that nginx would mask as a
-viewer `404`, so serving would send the operator toward the object key instead.
-No-response, `429`, and `5xx` outcomes can resolve on their own; failing on those
-would spend the orchestrator's restart budget on a transient S3 blip.
-
-The fatal class is retried on a 5s backoff until a 15s deadline (shared with the
-wait for the signer to bind) before the verdict is logged, because credential
-acquisition also surfaces there as a `403`: IMDS throttled during a host boot
-storm, an STS/web-identity hiccup, IAM or bucket-policy propagation, or a session
-token mid-refresh. Those clear on their own, and the rendered installs run the
-origin under `restart: on-failure:5`, so exiting on the first probe would leave
-the origin down after five boots. A genuinely wrong bucket, region, or IAM policy
-still fails closed — just one deadline later.
+responsible. The log identifies the condition that nginx masks as a viewer
+`404`. Startup rejection does not stop the origin or consume its restart budget:
+IAM propagation and credential refresh can exceed a fixed startup deadline.
+Subsequent requests recover when S3 accepts them, without a container restart.
+The preflight waits up to 15 seconds for the local signer to bind; each response
+read has a 10-second timeout. It does not delay serving to retry upstream errors.
 
 The preflight covers startup only. A request that S3 rejects with `400` or `403`
 later is caught at runtime by the `s3_request_rejected` log line — see

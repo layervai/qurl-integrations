@@ -33,7 +33,7 @@ const (
 	// origins/s3-static-connector/entrypoint.sh. The origin masks rejected S3
 	// requests as viewer 404s on purpose, so every environment's instructions
 	// must say where the operator-side cause is investigated instead.
-	s3WebsitePreflightNotice = "If S3 rejects the startup probe, the origin exits with a preflight_request_rejected log covering credentials, IAM, region, endpoint, and request configuration. A preflight 404 is nonfatal and does not prove credentials work."
+	s3WebsitePreflightNotice = "If S3 rejects the startup probe, the origin logs preflight_request_rejected with credential, IAM, region, endpoint, and request guidance; it stays running so temporary failures can recover. A preflight 404 is nonfatal and does not prove credentials work."
 )
 
 // S3OriginImageDigestRequired is the shared operator-facing remediation for

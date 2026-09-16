@@ -87,15 +87,15 @@ class Handler(BaseHTTPRequestHandler):
     def _serve(self, head_only=False):
         key = self._key()
         # A private bucket answers an unsigned request with 403 AccessDenied.
-        # The echo header cannot reach the preflight test — the origin exits
-        # before nginx starts — so name the identity state on stderr too.
+        # Name the identity state on stderr for the HEAD preflight assertion.
         if not self.headers.get("Authorization"):
             self.log_message("authorization absent %s", self.path)
             return self._send(403, b"<Error><Code>AccessDenied</Code></Error>",
                               ctype="application/xml", head_only=head_only)
-        if "wrongregion" in key:
-            return self._send(301, b"", head_only=head_only,
-                              extra={"x-amz-bucket-region": "us-west-2"})
+        if key == "startup-denied/index.html":
+            # Simulate IAM propagation completing after the startup HEAD.
+            return self._send(403 if head_only else 200, b"recovered",
+                              ctype="text/plain", head_only=head_only)
         if "badrequest" in key:
             return self._send(400, b"<Error><Code>InvalidRequest</Code></Error>",
                               ctype="application/xml", head_only=head_only)
