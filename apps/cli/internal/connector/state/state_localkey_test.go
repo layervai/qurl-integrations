@@ -143,6 +143,10 @@ func TestOpenLocalKeyRefusesPlaintextEnvelope(t *testing.T) {
 		_ = store.Close()
 		t.Fatal("Open() accepted local-key over an existing plaintext envelope")
 	}
+	// TODO(upstream-contract): this asserts on qurl-connector's own message
+	// from validateSDKStoreLayoutInNamespace ("provider changes are not an
+	// in-place migration"). It is a cross-repo error string, not a constant, so
+	// a reword upstream fails here.
 	if !strings.Contains(err.Error(), connectoragentstate.EnvKeyProvider) || !strings.Contains(err.Error(), AgentStateFile) {
 		t.Fatalf("Open() error = %v, want the connector's envelope-conflict refusal naming %s and %s", err, connectoragentstate.EnvKeyProvider, AgentStateFile)
 	}
@@ -263,5 +267,37 @@ func TestSealedStoreFailsClosedAfterClose(t *testing.T) {
 	}
 	if err := store.ValidateContinuity(); !errors.Is(err, qurl.ErrAgentStateContinuity) {
 		t.Fatalf("ValidateContinuity() after Close = %v, want state-continuity error", err)
+	}
+}
+
+// TestOpenLocalKeyOverAPopulatedNamespace pins the second and later runs: a
+// sealed namespace in service also holds qurl's own registries, and the
+// connector's legacy-artifact reject list must not claim any of their names.
+// The Open comment states that invariant; this test enforces it, so an
+// upstream reject-list change fails in CI rather than in the field.
+func TestOpenLocalKeyOverAPopulatedNamespace(t *testing.T) {
+	clearStateEnv(t)
+	dir := secureStateTestDir(t)
+	useLocalKey(t, 'p')
+	store, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	saveTestAgentState(t, store)
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{LocalSharesFile, ConnectorResourcesFile, RuntimeModeFile} {
+		if err := replaceConnectorResources(dir, filepath.Join(dir, name), []byte("{}")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	reopened, err := Open(dir)
+	if err != nil {
+		t.Fatalf("sealed Open over a populated namespace = %v, want the registries to be ordinary neighbors", err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	if present, err := reopened.AgentStatePresent(); err != nil || !present {
+		t.Fatalf("AgentStatePresent() = (%t, %v), want the saved sealed envelope", present, err)
 	}
 }

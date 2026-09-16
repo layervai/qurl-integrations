@@ -10,7 +10,6 @@ import (
 	"testing"
 	"time"
 
-	connectoragentstate "github.com/layervai/qurl-connector/pkg/agentstate"
 	connectorservice "github.com/layervai/qurl-connector/pkg/service"
 	qurl "github.com/layervai/qurl-go/qurl"
 
@@ -624,28 +623,5 @@ func TestJobControllerIncompatibleStatusRequiresNativeOwnership(t *testing.T) {
 				t.Fatal("external supervision queried native ownership")
 			}
 		})
-	}
-}
-
-// TestJobControllerRefusesToInstallForASealedNamespace pins that a native
-// install never starts for a namespace a key provider sealed: the job
-// definition carries no environment and a launchd or systemd process cannot
-// inherit a key descriptor, so the installed daemon could only crash-loop.
-func TestJobControllerRefusesToInstallForASealedNamespace(t *testing.T) {
-	t.Setenv(connectoragentstate.EnvKeyProvider, connectoragentstate.KeyProviderLocalKey)
-	dir := t.TempDir()
-	manager := &recordingJobManager{}
-	controller := NewJobController(filepath.Join(dir, "state"), filepath.Join(dir, "logs"),
-		"2.5.0", "https://api.sandbox.layerv.xyz", GroupModeSingle, connectorstate.RuntimeSupervisionNative, testHubResolver)
-	controller.Manager = manager
-	controller.LookPath = func(string) (string, error) { return filepath.Join(dir, "bin", "qurl"), nil }
-	controller.ProbeStatus = func(context.Context) (IPCStatus, bool, error) { return IPCStatus{}, false, nil }
-	controller.Reload = func(context.Context) (bool, error) { t.Fatal("unexpected reload"); return false, nil }
-	err := controller.Ensure(context.Background())
-	if !errors.Is(err, connectorstate.ErrAgentStateEnvelope) {
-		t.Fatalf("Ensure error = %v, want ErrAgentStateEnvelope", err)
-	}
-	if len(manager.jobs) != 0 || len(manager.replaced) != 0 {
-		t.Fatalf("sealed namespace installed jobs: ensure=%d replace=%d", len(manager.jobs), len(manager.replaced))
 	}
 }

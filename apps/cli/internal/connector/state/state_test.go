@@ -1,6 +1,7 @@
 package state
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -271,5 +272,56 @@ func TestOpenLocalKeyWithoutDescriptorFailsClosed(t *testing.T) {
 		if _, err := os.Lstat(filepath.Join(dir, name)); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("%s created without a key: %v", name, err)
 		}
+	}
+}
+
+// TestSealedProviderSelectedMirrorsTheConnectorsProviderName pins the
+// trim-and-case-fold rule two packages now depend on: Open picks the sealed
+// branch with it, and RequireRuntimeSupervision refuses native supervision
+// with it.
+func TestSealedProviderSelectedMirrorsTheConnectorsProviderName(t *testing.T) {
+	for raw, want := range map[string]bool{
+		"":                                      false,
+		"   ":                                   false,
+		connectoragentstate.KeyProviderFile:     false,
+		" FILE ":                                false,
+		"File":                                  false,
+		connectoragentstate.KeyProviderLocalKey: true,
+		" LOCAL-KEY ":                           true,
+		" not-a-provider ":                      true,
+	} {
+		t.Run(raw, func(t *testing.T) {
+			t.Setenv(connectoragentstate.EnvKeyProvider, raw)
+			if got := SealedProviderSelected(); got != want {
+				t.Fatalf("SealedProviderSelected() with %q = %t, want %t", raw, got, want)
+			}
+		})
+	}
+}
+
+// TestRequireRuntimeSupervisionRefusesASealedNamespaceUnderNative pins that a
+// sealed namespace is refused before anything is written. A sealed envelope
+// created under native supervision could never be adopted afterwards -
+// EstablishExternalRuntimeMode requires a fresh namespace - so this guard is
+// what keeps the dead end unreachable.
+func TestRequireRuntimeSupervisionRefusesASealedNamespaceUnderNative(t *testing.T) {
+	clearStateEnv(t)
+	dir := secureStateTestDir(t)
+	if err := RequireRuntimeSupervision(dir, RuntimeSupervisionNative); err != nil {
+		t.Fatalf("plaintext native namespace = %v, want accepted", err)
+	}
+	t.Setenv(connectoragentstate.EnvKeyProvider, connectoragentstate.KeyProviderLocalKey)
+	err := RequireRuntimeSupervision(dir, RuntimeSupervisionNative)
+	if !errors.Is(err, ErrAgentStateEnvelope) {
+		t.Fatalf("sealed native namespace = %v, want ErrAgentStateEnvelope", err)
+	}
+	if !strings.Contains(err.Error(), "--supervision external") || !strings.Contains(err.Error(), "held no state before") {
+		t.Fatalf("refusal = %v, want the whole remedy: external supervision in a directory that has held no state", err)
+	}
+	if err := EstablishExternalRuntimeMode(context.Background(), dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := RequireRuntimeSupervision(dir, RuntimeSupervisionExternal); err != nil {
+		t.Fatalf("sealed external namespace = %v, want accepted", err)
 	}
 }
