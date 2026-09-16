@@ -40,6 +40,10 @@ func classifyPublishTarget(raw string) (*publishTarget, error) {
 	}
 	u, err := url.Parse(raw)
 	if err != nil {
+		var parseErr *url.Error
+		if errors.As(err, &parseErr) {
+			err = parseErr.Err
+		}
 		return nil, invalidPublishTarget(fmt.Errorf("parse target URL: %w", err))
 	}
 	if u.Scheme != httpURLScheme && u.Scheme != httpsURLScheme {
@@ -68,18 +72,21 @@ func classifyPublishTarget(raw string) (*publishTarget, error) {
 	return classifyLocalPublishTarget(raw, u, host, ip, isLocalhost)
 }
 
+// classifyLocalPublishTarget applies the local-target grammar. Both `publish`
+// and `restart --target` reach it, so its messages name the target rather
+// than the act of publishing.
 func classifyLocalPublishTarget(raw string, u *url.URL, host string, ip net.IP, isLocalhost bool) (*publishTarget, error) {
 	if u.Scheme != httpURLScheme {
-		return nil, invalidPublishTarget(errors.New("local publishing currently supports cleartext http origins only"))
+		return nil, invalidPublishTarget(errors.New("a local share target must be a cleartext http origin"))
 	}
 	if u.Path != "" && u.Path != "/" {
-		return nil, invalidPublishTarget(errors.New("local publishing accepts an origin only, without a path"))
+		return nil, invalidPublishTarget(errors.New("a local share target is an origin only, without a path"))
 	}
 	if u.RawQuery != "" || u.ForceQuery {
-		return nil, invalidPublishTarget(errors.New("local publishing accepts an origin only, without a query"))
+		return nil, invalidPublishTarget(errors.New("a local share target is an origin only, without a query"))
 	}
 	if u.Fragment != "" || strings.HasSuffix(raw, "#") {
-		return nil, invalidPublishTarget(errors.New("local publishing accepts an origin only, without a fragment"))
+		return nil, invalidPublishTarget(errors.New("a local share target is an origin only, without a fragment"))
 	}
 
 	port, _ := targetPort(u)
