@@ -233,6 +233,31 @@ func TestStoreFailsClosedAfterClose(t *testing.T) {
 	}
 }
 
+func saveTestAgentState(t *testing.T, store *Store) qurl.AgentStateStore {
+	t.Helper()
+	sdkStore, err := store.Handoff()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sdkStore.SaveAgentState(context.Background(), &qurl.AgentState{AgentID: "a"}); err != nil {
+		t.Fatal(err)
+	}
+	return sdkStore
+}
+
+func TestOpenFileProviderStaysPlaintext(t *testing.T) {
+	clearStateEnv(t)
+	t.Setenv(connectoragentstate.EnvKeyProvider, " File ")
+	store := openTestStore(t)
+	sdkStore := saveTestAgentState(t, store)
+	if _, ok := sdkStore.(*qurl.FileAgentStateStore); !ok {
+		t.Fatalf("Handoff() returned %T, want the plaintext *qurl.FileAgentStateStore", sdkStore)
+	}
+	if _, err := os.Stat(filepath.Join(store.Dir(), AgentStateFile)); err != nil {
+		t.Fatalf("plaintext envelope missing under the explicit file provider: %v", err)
+	}
+}
+
 func TestOpenUnknownKeyProviderFailsClosed(t *testing.T) {
 	clearStateEnv(t)
 	t.Setenv(connectoragentstate.EnvKeyProvider, "not-a-provider")
@@ -279,6 +304,16 @@ func TestOpenLocalKeyWithoutDescriptorFailsClosed(t *testing.T) {
 			t.Fatalf("%s created without a key: %v", name, err)
 		}
 	}
+	// And the namespace the refused sealed open leaves behind is genuinely
+	// fresh, which is what lets Open's plaintext guard key on the envelope
+	// filename rather than on a marker. If a future connector writes a
+	// durability artifact at prepare time, this is where that stops being true.
+	clearStateEnv(t)
+	plaintext, err := Open(dir)
+	if err != nil {
+		t.Fatalf("plaintext Open after a refused sealed open = %v, want the directory treated as fresh", err)
+	}
+	t.Cleanup(func() { _ = plaintext.Close() })
 }
 
 // TestSealedProviderSelectedMirrorsTheConnectorsProviderName pins the
