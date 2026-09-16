@@ -2058,6 +2058,16 @@ func TestS3WebsiteStaticAWSCredentialGateShell(t *testing.T) {
 			t.Fatalf("%s instructions missing credential gate end:\n%s", renderer.name, block)
 		}
 		gate := block[start : start+end+len("\nesac")]
+		t.Run(renderer.name+"/unexported credentials reach child", func(t *testing.T) {
+			script := "QURL_S3_FORWARD_AWS_CREDENTIALS=true\nAWS_ACCESS_KEY_ID=key\nAWS_SECRET_ACCESS_KEY=secret\nAWS_SESSION_TOKEN=token\n" + gate + "\nsh -c 'test \"$AWS_ACCESS_KEY_ID:$AWS_SECRET_ACCESS_KEY:$AWS_SESSION_TOKEN\" = key:secret:token'"
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, sh, "-c", script) //nolint:gosec // Test executes a generated gate with fixed dummy credentials.
+			cmd.Env = baseEnv
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("credential export failed: %v: %s", err, out)
+			}
+		})
 		gate += "\nprintf '%s' \"$" + renderer.resultName + "\"\n"
 
 		for _, tc := range cases {

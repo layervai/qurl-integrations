@@ -264,6 +264,15 @@ status_json=$(docker exec \
 expect_contains "runtime status escapes connector metadata" "$status_json" '"connector_id":"stats\"quoted\\slash"'
 expect_contains "runtime status escapes replica metadata" "$status_json" '"replica_id":"origin-a\tline\nnext\bback\fpage\u0007bel\rcr"'
 
+if [ "$waive_security_contract" != "true" ]; then
+  expect_origin_log "healthy start reports a successful preflight" '"msg":"preflight_ok"'
+  if docker_logs_contain "$ORIGIN" '"msg":"preflight_no_response"'; then
+    no "healthy startup must not report no response"
+  else
+    ok "healthy startup must not report no response"
+  fi
+fi
+
 # 1. root -> index
 code=$(curl -s -o "$B" -w '%{http_code}' "$base/"); expect_eq "GET / status" "$code" 200
 expect_eq "GET / body" "$(cat "$B")" "index"
@@ -738,6 +747,8 @@ else
     sleep 0.5
   done
   expect_eq "runtime request rejection logged once, missing key logs none" "$auth_lines" 1
+  expect_origin_log "runtime rejection status is a JSON number" '"status":403'
+  expect_origin_log "runtime rejection includes the S3 key" '"key":"/not-synced-yet/forbidden.json"'
 fi
 
 echo "-------------------------------------------"

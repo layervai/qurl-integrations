@@ -174,7 +174,8 @@ responsible. The log identifies the condition that nginx masks as a viewer
 IAM propagation and credential refresh can exceed a fixed startup deadline.
 Subsequent requests recover when S3 accepts them, without a container restart.
 The preflight waits up to 15 seconds for the local signer to bind; each response
-read has a 10-second timeout. It does not delay serving to retry upstream errors.
+read has a 10-second timeout, so total startup delay can reach about 25 seconds.
+It does not delay serving to retry upstream errors.
 
 The preflight covers startup only. A request that S3 rejects with `400` or `403`
 later is caught at runtime by the `s3_request_rejected` log line — see
@@ -274,8 +275,8 @@ stream stays filterable:
   line with the request-preflight verdict — see
   [Startup preflight](#startup-preflight).
 - Envoy emits `{"layer":"origin","msg":"s3_request_rejected","status":<num>,"key":"<key>"}`
-  for each request S3 rejects with `400` or `403`, and nothing for any other
-  status. It is tagged `origin` rather than `envoy` so it groups with the other
+  for requests Envoy answers with `400` or `403`, normally passed through
+  from S3. Locally generated Envoy errors can also produce these statuses. It is tagged `origin` rather than `envoy` so it groups with the other
   operator-facing `msg` events instead of with Envoy's own `level`/`name` lines.
   It is the runtime counterpart to the startup preflight and deliberately does
   not infer a credential or IAM cause from status alone.
@@ -358,8 +359,8 @@ intentionally uses bash >= 5.1 for PID-scoped `wait -n`.
   plus non-EC2 credential sources, are in
   [AWS credentials](#aws-credentials).
 - IMDSv2 from inside a container requires **hop-limit 2** on the host. Hosts
-  with no instance role must supply credentials explicitly; the origin refuses
-  to start when S3 rejects the startup request.
+  with no instance role must supply credentials explicitly; check the
+  `preflight_request_rejected` log if S3 rejects the startup request.
 - Passing `AWS_REGION` explicitly is the deployment path. The image does not
   probe IMDS for region discovery; `AWS_DEFAULT_REGION` is copied into
   `AWS_REGION` only when `AWS_REGION` is unset.
