@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	v1 "github.com/fatedier/frp/pkg/config/v1"
 	"github.com/fatedier/frp/pkg/transport"
 	connectorshare "github.com/layervai/qurl-connector/pkg/share"
 )
@@ -50,6 +51,13 @@ func TestRuntimeHeadersRequireConfiguredTunnelTrust(t *testing.T) {
 				t.Fatalf("header route validation = %v, configured = %t", err, configured)
 			}
 			if !configured {
+				bare := &v1.ClientCommonConfig{}
+				if err := bare.Complete(); err != nil {
+					t.Fatal(err)
+				}
+				if common.Transport.TLS.TrustedCaFile != "" || common.Transport.TLS.ServerName != "" || *common.Transport.TLS.Enable != *bare.Transport.TLS.Enable {
+					t.Fatal("ordinary daemon transport diverged from the FRP default")
+				}
 				return
 			}
 			// Check the actual FRP TLS builder, not just the Connector guard.

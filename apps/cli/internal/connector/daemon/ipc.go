@@ -118,7 +118,7 @@ func (s *IPCServer) Run(ctx context.Context) (retErr error) {
 	})
 	// ReadTimeout bounds a stalled PUT /overlay body, which MaxBytesReader
 	// caps only in size.
-	server := &http.Server{Handler: mux, ReadHeaderTimeout: 2 * time.Second, ReadTimeout: 10 * time.Second}
+	server := &http.Server{Handler: mux, ReadHeaderTimeout: 2 * time.Second, ReadTimeout: 10 * time.Second, IdleTimeout: 10 * time.Second}
 	serveDone := make(chan error, 1)
 	go func() { serveDone <- server.Serve(listener) }()
 	managerDone := make(chan error, 1)

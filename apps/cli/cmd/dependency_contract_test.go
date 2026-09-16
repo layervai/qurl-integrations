@@ -1,7 +1,6 @@
 package main
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"reflect"
@@ -87,6 +86,9 @@ func checkFirstPartyReplacements(path string, raw []byte) error {
 		return fmt.Errorf("parse %s: %w", path, err)
 	}
 	for _, replacement := range parsed.Replace {
+		if replacement.New.Version == "" {
+			return fmt.Errorf("%s: %s must not be replaced by a filesystem path", path, replacement.Old.Path)
+		}
 		if strings.HasPrefix(replacement.New.Path, "github.com/layervai/") &&
 			(!semver.IsValid(replacement.New.Version) || module.IsPseudoVersion(replacement.New.Version)) {
 			return fmt.Errorf("%s: %s replacement must use a tagged semantic version", path, replacement.New.Path)
@@ -127,9 +129,10 @@ func checkReleasedDirectRequirement(path string, raw []byte, modulePath string) 
 func TestCheckReleasedDirectRequirement(t *testing.T) {
 	t.Parallel()
 	for _, test := range []struct {
-		name    string
-		goMod   string
-		wantErr string
+		name        string
+		goMod       string
+		wantErr     string
+		replacement bool
 	}{
 		{
 			name:  "direct requirement",
@@ -167,14 +170,26 @@ func TestCheckReleasedDirectRequirement(t *testing.T) {
 			wantErr: "want a tagged semantic version",
 		},
 		{
-			name: "tagged first-party replacement",
+			name:        "tagged first-party replacement",
+			replacement: true,
 			goMod: "module example.com/cli\n\nrequire " + connectorModule + " v0.8.6\n" +
 				"replace github.com/fatedier/frp => github.com/layervai/frp v1.0.1\n",
 		},
 		{
-			name: "untagged first-party replacement",
+			name:        "untagged first-party replacement",
+			replacement: true,
 			goMod: "module example.com/cli\n\nrequire " + connectorModule + " v0.8.6\n" +
 				"replace github.com/fatedier/frp => github.com/layervai/frp v1.0.1-0.20260906231730-9a0e4ee61964\n",
+			wantErr: "replacement must use a tagged semantic version",
+		},
+		{
+			name: "filesystem FRP replacement", replacement: true,
+			goMod:   "module example.com/cli\nreplace github.com/fatedier/frp => ../frp\n",
+			wantErr: "must not be replaced by a filesystem path",
+		},
+		{
+			name: "replacement checker rejects connector pseudo version", replacement: true,
+			goMod:   "module example.com/cli\nreplace " + connectorModule + " => " + connectorModule + " v0.8.7-0.20260829010203-abcdefabcdef\n",
 			wantErr: "replacement must use a tagged semantic version",
 		},
 		{
@@ -185,10 +200,12 @@ func TestCheckReleasedDirectRequirement(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
-			err := errors.Join(
-				checkFirstPartyReplacements("synthetic.mod", []byte(test.goMod)),
-				checkReleasedDirectRequirement("synthetic.mod", []byte(test.goMod), connectorModule),
-			)
+			var err error
+			if test.replacement {
+				err = checkFirstPartyReplacements("synthetic.mod", []byte(test.goMod))
+			} else {
+				err = checkReleasedDirectRequirement("synthetic.mod", []byte(test.goMod), connectorModule)
+			}
 			if test.wantErr == "" {
 				if err != nil {
 					t.Fatal(err)

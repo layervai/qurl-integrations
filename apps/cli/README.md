@@ -318,7 +318,8 @@ host. Use `--tunnel-server-name <name>` only when the deployment requires a
 specific certificate identity, such as a server reached by IP address. Invalid
 trust configuration fails before enrollment. These options configure the
 client; they do not provision a server certificate. The default per-user daemon
-does not enable runtime credentials.
+does not enable runtime credentials. Configured tunnel trust applies to every
+route on that daemon, including routes without added headers.
 
 The integration sends `PUT /overlay` through the daemon's owner-only local IPC
 channel, with this JSON shape:
@@ -333,8 +334,11 @@ Each request replaces the entire overlay. Omitted routes lose their headers;
 trust. Acceptance schedules a route update; it does not mean the route is
 already serving. The body limit is 64 KiB and 2,000 routes, with up to 16 headers
 and 1,024 combined name/value bytes per route. All limits apply together.
+<!-- TODO(upstream-contract): Limits mirror qurl-connector MaxGroupRoutes and ValidateRequestHeaders. -->
 
-Headers stay in process memory and are excluded from saved state and status.
+Headers are sent over verified TLS to the tunnel server, which adds them to
+origin requests. The tunnel operator must therefore be trusted with these
+credentials. The daemon keeps headers in memory, outside saved state and status.
 An integration must restore them after daemon restart. It can supply headers
 before publishing a route; stopping the share retains them until the next
 overlay replacement. Only the matching route receives each header set.
