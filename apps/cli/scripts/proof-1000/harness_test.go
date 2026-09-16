@@ -482,7 +482,7 @@ func TestFetchShareVerifiesOriginAnswer(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = o.close() }()
-	req := httptest.NewRequest(http.MethodGet, "http://c-1.qurl.site.example/", http.NoBody)
+	req := httptest.NewRequest(http.MethodGet, "http://c-1.qurl.site/", http.NoBody)
 	rec := httptest.NewRecorder()
 	o.ServeHTTP(rec, req)
 	good := strings.TrimSpace(rec.Body.String())
