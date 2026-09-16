@@ -70,8 +70,9 @@ function readGatewayHealth(client, now = Date.now) {
   const ping = shimState ? shimState.pingMs : client.ws?.ping;
   const ping_ms = typeof ping === 'number' ? ping : -1;
 
-  // discord.js v14 stores the most recent HEARTBEAT_ACK timestamp on
-  // each WebSocketShard as `lastPingTimestamp` (-1 pre-first-ack).
+  // TODO(upstream-contract): discord.js v14 sets lastPingTimestamp to the
+  // acknowledged heartbeat send time (-1 before the first ACK). The shim
+  // uses ACK receive time, so legacy age includes one additional RTT.
   // Iterate so a future sharding flip is automatic; oldest across
   // shards is the worst-case heartbeat age.
   let oldestAck = typeof shimState?.lastHeartbeatAckAt === 'number'

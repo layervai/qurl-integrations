@@ -741,6 +741,8 @@ function createGatewayWsShim({
             pendingGuildAdds.clear();
             pendingGuildRemoves.clear();
           }
+          guildSeedAttempts = 0;
+          guildSeedRetryAt = 0;
           return activeGuildIds.size;
         })().finally(() => {
           // On failure the next metric tick may retry, subject to cooldown.
