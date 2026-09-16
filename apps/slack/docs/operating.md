@@ -130,10 +130,13 @@ at the OAuth-callback bind layer.
   unless its own `QURL_BINDING_IDEMPOTENCY_TTL_CONTRACT` environment variable is
   set to a canonical positive whole-hour duration such as `24h` at startup.
   qURL can replay the setup key during that window. After the window expires,
-  if the stored Slack key is lost/revoked, or if the admin abandons setup, use
-  qURL account/API-key management or operator tooling to revoke the unused
-  workspace key before retrying; binding-level transfer/recovery for rows
-  without stored key metadata is tracked in layervai/qurl-service#910.
+  rerun setup with the same account: if Slack has no usable stored key,
+  the binding endpoint rotates the prior key and returns a new one. A healthy
+  stored key is reused. An invalid key with stored identity still requires
+  `--rotate` or `--repoint`; plain setup does not bypass that safeguard.
+  If the admin abandons setup, use the owner-authenticated binding DELETE route
+  to revoke its key and release the reservation. Deleting only the API key does
+  not release the binding.
   Rerunning setup without `--rotate`/`--repoint` is intentionally not a
   healthy-key rotation or qURL-account switch command.
   Every setup path — first install, `--rotate`, and `--repoint` — sends Auth0
@@ -557,7 +560,10 @@ reports them is what lets that caveat be dropped.
 `event="setup_binding_backed_persist_failure"` means qURL provisioned a
 binding-backed workspace key, but the Slack app failed to store it locally. Treat
 every event as actionable: the admin can recover by rerunning `/qurl setup
-<email>` with the same qURL account only during the binding replay window. The
+<email>` with the same qURL account. During the binding replay window, qURL
+returns the original key; after expiry, it rotates the same-owner binding when
+Slack has no usable stored key. A 409 means the service refused recovery, for
+example because another account owns the binding. The
 emitted `retry_window_hours` reports that window, and the event timestamp starts
 the operator clock. The emitted window comes from the Slack task's
 `QURL_BINDING_IDEMPOTENCY_TTL_CONTRACT` runtime override when set, otherwise it
@@ -565,10 +571,9 @@ uses the 24-hour qurl-service default mirror. Invalid override values fail
 startup; accepted values use the canonical `Nh` form such as `24h` or `48h`
 with no leading zero.
 
-`cleanup_after_window_hours` is intentionally coincident with the same threshold
-today; prefer retry at the exact boundary and treat rows older than the emitted
-cleanup window as cleanup candidates until qurl-service exposes a separate
-cleanup TTL.
+`cleanup_after_window_hours` retains the replay-window value for existing log
+queries. It is not a deadline for recovery or an instruction to revoke a key.
+The operator action is `rerun_setup_same_owner_replays_or_rotates`.
 
 Run this CloudWatch Logs Insights query against the Slack app log group with the
 time range set to the current replay window:
@@ -581,13 +586,13 @@ fields @timestamp, team_id, key_id, retry_window_hours, error
 ```
 
 Threshold: any result opens an on-call ticket to help the workspace admin rerun
-setup before the replay window expires. For automated alerting, use a metric
+setup with the same account. For automated alerting, use a metric
 filter (or scheduled Logs Insights query that publishes a metric) matching this
 event and alarm on `count >= 1` in a 5-minute evaluation period; the query lists
 rows for triage instead of returning `stats count()`. If the admin reruns setup
 and the Slack storage write succeeds, close the ticket.
 
-For post-window cleanup, run the same event query over the older incident window
+For unresolved post-window recovery, run the same event query over the older incident window
 (for example, a multi-day range whose end time is older than the emitted cleanup
 window):
 
@@ -599,11 +604,15 @@ fields @timestamp, team_id, key_id, cleanup_after_window_hours, error
 ```
 
 Threshold: any unresolved row older than its emitted `cleanup_after_window_hours`
-is a cleanup candidate. Use qURL account/API-key management or operator tooling
-to revoke or recover the unused workspace key before asking the admin to retry.
-Customer self-service recovery for revoked or stale external-identity bindings is
-tracked in
-[layervai/qurl-service#910](https://github.com/layervai/qurl-service/issues/910).
+still needs attention. First retry setup with the same account. If setup is
+abandoned, use `DELETE /v1/external-identity-bindings/{binding_id}` with the
+binding owner's JWT to revoke the bound key and remove its reservation/replay.
+Do not delete binding rows directly or treat API-key deletion as binding cleanup.
+Deploy qurl-service #1344 before this Slack version. Rolling back to a schema
+that rejects `rotate_existing` breaks setup with HTTP 422; restore the compatible
+service or redeploy the prior Slack version. Removing the binding route entirely
+also reactivates the existing route-missing legacy fallback, so it is not a safe
+rollback for an environment that has active bindings.
 The setup-binding rollout notes live in
 [qurl-integrations PR #703](https://github.com/layervai/qurl-integrations/pull/703),
 paired with [qurl-service PR #904](https://github.com/layervai/qurl-service/pull/904).
@@ -682,14 +691,12 @@ ownership out of band):
    of workspace ownership.
 2. Revoke the `current_qurl_account_id` key for the workspace and free the
    `(slack, <team_id>)` external-identity binding so the destination account can
-   mint a fresh binding-backed key. **There is no operator-guarded surface for
-   this yet** — qurl-service exposes only `POST /v1/external-identity-bindings`
-   (which refuses reassignment) and `DELETE /v1/api-keys/{key_id}` (owner-scoped),
-   with no binding delete/transfer route. So today this is a manual,
-   high-care step: revoke the key through qURL account/API-key management and
-   free the binding row via internal datastore tooling. The guarded reassign
-   surface that makes this safe and auditable is tracked in
-   layervai/qurl-service#956 — prefer it once it ships.
+   mint a fresh binding-backed key. The current owner must call
+   `DELETE /v1/external-identity-bindings/{binding_id}` with their JWT. This
+   atomically revokes the key and removes the binding and its replay record.
+   Deleting only `/v1/api-keys/{key_id}` leaves the reservation in place.
+   Do not modify the binding datastore directly. If the current owner cannot
+   authenticate, stop and use the approved account-recovery process.
 3. Tell the owner to rerun `/qurl setup <email>` (plain) signed in as the
    destination account; with the binding freed this mints and stores the new
    account's key normally.

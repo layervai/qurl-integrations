@@ -65,7 +65,7 @@ const (
 	dmTimeout                                = 5 * time.Second
 	auth0TokenBodyLimit                      = 8 << 10 // 8 KiB — Auth0's /oauth/token response is ~2 KiB; tighter than the previous 64 KiB.
 	setupBindingPersistFailureEvent          = "setup_binding_backed_persist_failure"
-	setupBindingPersistFailureOperatorAction = "rerun_setup_within_retry_window_then_cleanup_after_window"
+	setupBindingPersistFailureOperatorAction = "rerun_setup_same_owner_replays_or_rotates"
 	// DefaultSetupBindingReplayWindowHours mirrors qurl-service's
 	// QURL_BINDING_IDEMPOTENCY_TTL_CONTRACT default. Production config can
 	// override this at startup when qurl-service changes before the Slack app
