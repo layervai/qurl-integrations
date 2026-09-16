@@ -3654,7 +3654,7 @@ type failRetargetRegistry struct {
 	err error
 }
 
-func (r *failRetargetRegistry) Retarget(context.Context, string, string, uint64) (*connectorstate.LocalShare, error) {
+func (r *failRetargetRegistry) Retarget(context.Context, string, connectorstate.LocalTarget, uint64) (*connectorstate.LocalShare, error) {
 	return nil, r.err
 }
 

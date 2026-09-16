@@ -1655,3 +1655,55 @@ func TestManagerDeferredFirstReconcileHonorsAnEarlierTrigger(t *testing.T) {
 		t.Fatalf("groups after the early trigger = %d, want 1", factory.startCount())
 	}
 }
+
+// TestManagerMovesARouteThroughSetRoutesWithoutARestart pins the daemon half
+// of `restart --target`: a desired-on share whose LocalIP/LocalPort changed at
+// a newer epoch keeps its RouteID, so it must reach the live group as a new
+// definition through SetRoutes and must never take the RestartRoute path -
+// which would re-register the old address.
+func TestManagerMovesARouteThroughSetRoutesWithoutARestart(t *testing.T) {
+	registry := &memoryRegistry{shares: map[string]connectorstate.LocalShare{
+		"a": daemonShare("a", 1, "on"),
+		"b": daemonShare("b", 1, "on"),
+	}}
+	factory := newFakeGroupFactory()
+	manager, _ := newRunningManager(t, registry, factory)
+	waitServing(t, manager, "a")
+	waitServing(t, manager, "b")
+
+	moved := daemonShare("b", 2, "on")
+	moved.TargetURL, moved.LocalPort = "http://127.0.0.1:4000", 4000
+	registry.setShare(&moved)
+	manager.Trigger()
+
+	runner := factory.runner(1)
+	movedRoute := func() (connectorshare.LocalHTTPRoute, bool) {
+		pushes := runner.pushedRoutes()
+		if len(pushes) == 0 {
+			return connectorshare.LocalHTTPRoute{}, false
+		}
+		for _, route := range pushes[len(pushes)-1] {
+			if route.RouteID == "connector-b" {
+				return route, route.LocalPort == 4000
+			}
+		}
+		return connectorshare.LocalHTTPRoute{}, false
+	}
+	waitManagerCondition(t, func() bool { _, ok := movedRoute(); return ok }, "route b pushed at its new port")
+
+	route, _ := movedRoute()
+	if route.LocalIP != "127.0.0.1" || route.LocalPort != 4000 {
+		t.Fatalf("pushed route = %s:%d, want the moved address 127.0.0.1:4000", route.LocalIP, route.LocalPort)
+	}
+	if got := runner.restartedRoutes(); len(got) != 0 {
+		t.Fatalf("restarted routes = %v, want the move to go through SetRoutes only", got)
+	}
+	for _, other := range runner.pushedRoutes()[len(runner.pushedRoutes())-1] {
+		if other.RouteID == "connector-a" && other.LocalPort != 3000 {
+			t.Fatalf("sibling a moved too: %s:%d", other.LocalIP, other.LocalPort)
+		}
+	}
+	if factory.startCount() != 1 {
+		t.Fatalf("the move opened a new admission: starts=%d", factory.startCount())
+	}
+}
