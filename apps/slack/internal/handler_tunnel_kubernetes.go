@@ -71,6 +71,7 @@ QURL_K8S_YAML_EOF`, renderPortablePipefailShell(), shellSingleQuote(names.secret
 
 	patch := renderKubernetesConnectorPodSpec(&kubernetesConnectorPodSpecArgs{
 		imageYAML:     quotedImage,
+		hubFlags:      args.Hub.quotedFlags(", "),
 		slugYAML:      quotedSlug,
 		endpointYAML:  quotedEndpoint,
 		agentPVCYAML:  quotedAgentPVC,
@@ -97,6 +98,7 @@ QURL_K8S_YAML_EOF`, renderPortablePipefailShell(), shellSingleQuote(names.secret
 }
 
 type kubernetesConnectorPodSpecArgs struct {
+	hubFlags            string
 	precedingContainers string
 	imageYAML           string
 	slugYAML            string
@@ -118,7 +120,7 @@ containers:
 %s  - name: qurl
     image: %s
     command: ['/usr/local/bin/qurl']
-    args: ['daemon', 'run', '--state-dir', '/var/lib/qurl-volume/state', '--headless-config', '/etc/qurl/share.yaml', '--enrollment-token-file', '/run/secrets/qurl/enrollment-token']
+    args: ['daemon', 'run', '--state-dir', '/var/lib/qurl-volume/state', '--headless-config', '/etc/qurl/share.yaml', '--enrollment-token-file', '/run/secrets/qurl/enrollment-token'%s]
     securityContext:
       runAsUser: 65532
       runAsGroup: 65532
@@ -157,7 +159,7 @@ volumes:
       defaultMode: 0440
   - name: qurl-proxy
     configMap:
-      name: %s`, precedingContainers, args.imageYAML, args.endpointYAML, args.agentPVCYAML, args.secretYAML, args.configMapYAML)
+      name: %s`, precedingContainers, args.imageYAML, args.hubFlags, args.endpointYAML, args.agentPVCYAML, args.secretYAML, args.configMapYAML)
 }
 
 type kubernetesTunnelNames struct {
