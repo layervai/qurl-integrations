@@ -1707,3 +1707,33 @@ func TestManagerMovesARouteThroughSetRoutesWithoutARestart(t *testing.T) {
 		t.Fatalf("the move opened a new admission: starts=%d", factory.startCount())
 	}
 }
+
+// TestManagerResetsTheDiagnosticOfAMovedRoute pins the observability half of
+// a target move. The RouteID does not change, so without a reseed the old
+// address's "serving" diagnostic would stand while the group is still
+// proxying the old port - and a late callback for the retired proxy
+// generation would re-assert it.
+func TestManagerResetsTheDiagnosticOfAMovedRoute(t *testing.T) {
+	registry := &memoryRegistry{shares: map[string]connectorstate.LocalShare{"b": daemonShare("b", 1, "on")}}
+	factory := &fakeGroupFactory{autoServe: false}
+	manager, _ := newRunningManager(t, registry, factory)
+	waitManagerCondition(t, func() bool { return factory.startCount() == 1 }, "group started")
+	runner := factory.runner(1)
+	runner.serve("connector-b")
+	waitManagerCondition(t, func() bool { return manager.Diagnostics()["b"].State == "serving" }, "route b serving")
+
+	moved := daemonShare("b", 2, "on")
+	moved.TargetURL, moved.LocalPort = "http://127.0.0.1:4000", 4000
+	registry.setShare(&moved)
+	manager.Trigger()
+
+	waitManagerCondition(t, func() bool { return manager.Diagnostics()["b"].State == diagnosticStateStarting }, "moved route back to starting")
+	if got := manager.Diagnostics()["b"].State; got != diagnosticStateStarting {
+		t.Fatalf("moved route diagnostic = %q, want %q", got, diagnosticStateStarting)
+	}
+	// A late callback for the retired proxy generation resolves to the same
+	// resource and re-asserts serving, which is exactly why the reseed has to
+	// happen at the move rather than being left to the group's next report.
+	runner.serve("connector-b")
+	waitManagerCondition(t, func() bool { return manager.Diagnostics()["b"].State == "serving" }, "moved route serving again")
+}

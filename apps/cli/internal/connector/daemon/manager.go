@@ -480,6 +480,13 @@ func (m *Manager) applyDesired(ctx context.Context, desired []connectorstate.Loc
 // restart-only ones (a serving-epoch advance with an unchanged target), which
 // it returns so applyDesired can advance their epoch only after RestartRoute
 // succeeds. It returns the restart entries and the live runner.
+//
+// A target move is deliberately not a restart entry: it commits the new
+// definition before SetRoutes is attempted, where a restart defers its epoch
+// commit until RestartRoute succeeds. That asymmetry converges because
+// eligibleRoutes rebuilds the pushed set from the desired rows rather than
+// from tracked, and a failed push schedules a bounded reconcile, so a move is
+// retried rather than stranded.
 func (m *Manager) recordDesired(desired []connectorstate.LocalShare) ([]restartEntry, GroupRunner) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -504,6 +511,12 @@ func (m *Manager) recordDesired(desired []connectorstate.LocalShare) ([]restartE
 		previousTarget, nextTarget := previous.route, route
 		previousTarget.RequestHeaders, nextTarget.RequestHeaders = nil, nil
 		if !previousTarget.Equal(nextTarget) {
+			// The moved route is not serving its new address yet, and its
+			// RouteID did not change, so the old address's diagnostic would
+			// otherwise stand - and a late callback for the retired proxy
+			// generation would re-assert it. Reseed so /status, inspect, and the
+			// readiness wait's failure detail describe a move that did not take.
+			m.seedStartingLocked(share.ResourceID)
 			// Target changes may recover a refused route. Header changes do
 			// not change its platform authorization and must retain backoff.
 			//
