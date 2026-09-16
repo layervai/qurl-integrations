@@ -153,8 +153,8 @@ func (h *Handler) requireUninstallAdminOrOwnerForClick(ctx context.Context, log 
 		_ = h.postResponse(log, responseURL, ":warning: missing team_id or user_id in the Slack interaction payload")
 		return false
 	}
-	if h.cfg.AdminStore == nil {
-		log.Error("uninstall confirm: owner gate unavailable")
+	if !h.canAdvertiseUninstall() {
+		log.Error("uninstall confirm: disconnect is unavailable")
 		_ = h.postResponse(log, responseURL, ":warning: qURL uninstall is not available on this Secure Access Agent deployment.")
 		return false
 	}

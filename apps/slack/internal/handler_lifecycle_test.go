@@ -945,6 +945,48 @@ func TestUninstallConfirmClickRequiresAdmin(t *testing.T) {
 	}
 }
 
+// Old cards can be clicked after a deployment disables credential deletion.
+func TestUninstallConfirmClickRechecksAvailability(t *testing.T) {
+	for _, mode := range []string{"missing provider", "read-only provider", "missing admin store"} {
+		t.Run(mode, func(t *testing.T) {
+			h, provider, _ := newLifecycleTestHandler(t)
+			value, ok := uninstallConfirmButtonValue(t, h, testAdminTeamID, testAdminUserID, uninstallGridContext{})
+			if !ok {
+				t.Fatal("confirmation card missing")
+			}
+			switch mode {
+			case "missing provider":
+				h.cfg.AuthProvider = nil
+			case "read-only provider":
+				provider.deleteUnsupported = true
+			case "missing admin store":
+				h.cfg.AdminStore = nil
+			}
+			captured := &capturedResponseURL{}
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				b, _ := io.ReadAll(r.Body)
+				captured.record(b)
+				w.WriteHeader(http.StatusOK)
+			}))
+			t.Cleanup(srv.Close)
+			body := exposeBlockActionsBodyWithEnterprise(t, testAdminTeamID, "", testAdminUserID, testExposeChannel, srv.URL, uninstallConfirmActionID, value)
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, newSignedRequest(t, pathSlackInteractions, body, body))
+			if w.Code != http.StatusOK {
+				t.Fatalf("click ack = %d", w.Code)
+			}
+			got := parseSlackText(t, captured.waitForBody(t, 2*time.Second))
+			h.Wait()
+			if !strings.Contains(got, "not available") {
+				t.Fatalf("reply = %q, want unavailable", got)
+			}
+			if provider.deleteCalls != 0 || provider.deleteStateCalls != 0 {
+				t.Fatal("unavailable disconnect deleted workspace data")
+			}
+		})
+	}
+}
+
 // TestUninstallPurgeIDsForClickRejectsForeignPartitions pins the validation on
 // the echoed button value: a card can only ever purge partitions the clicking
 // interaction is itself authenticated for.

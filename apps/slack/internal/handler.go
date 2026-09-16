@@ -1866,9 +1866,10 @@ func (h *Handler) handleUninstall(w http.ResponseWriter, values url.Values) {
 	// Render the confirmation instead of disconnecting now. The click →
 	// handleUninstallConfirmClick re-gates and performs the teardown, so the
 	// destructive step always sits behind Slack's own confirm dialog. The purge
-	// partitions are resolved HERE, from the signed slash payload, because a
-	// block_actions payload carries no is_enterprise_install flag; the click
-	// re-validates them against its own team/enterprise ids before using them.
+	// partitions are resolved from the signed slash payload to retain the scope
+	// shown by this card. Slack defines is_enterprise_install as optional on
+	// block_actions; the click intersects the stored scope with its authenticated
+	// team/enterprise ids rather than widening it from a later install context.
 	command := values.Get(fieldCommand)
 	if command == "" {
 		command = commandUser
