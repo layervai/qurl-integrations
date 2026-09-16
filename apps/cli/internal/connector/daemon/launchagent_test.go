@@ -526,7 +526,14 @@ func TestJobControllerCarriesTheResolvedRuntimeDir(t *testing.T) {
 
 	_, err = NewJobController(stateDir, filepath.Join(base, "logs"), "2.4.0", "https://api.example.test",
 		GroupModeSingle, connectorstate.RuntimeSupervisionNative, testHubResolver, lookupEnvFrom(map[string]string{RuntimeDirEnv: "relative"}))
-	if err == nil {
+	if runtime.GOOS == "windows" {
+		// The pipe address discards the runtime directory, so an unusable value
+		// left in the environment has no effect there rather than failing every
+		// command about a setting that does nothing.
+		if err != nil {
+			t.Fatalf("relative runtime dir = %v, want it ignored on Windows", err)
+		}
+	} else if err == nil {
 		t.Fatal("relative runtime dir built a job controller")
 	}
 }

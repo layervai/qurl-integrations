@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -3407,6 +3408,11 @@ func startExternalJourneyDaemon(t *testing.T, daemon *journeyDaemon, stateDir, e
 // is exactly what someone runs inspect to diagnose, so the resource and
 // target facts must still print, with the daemon reported unavailable.
 func TestInspectDegradesWhenTheRuntimeDirCannotResolve(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// Windows named pipes discard the runtime directory, so there is no
+		// unresolvable value to degrade over.
+		t.Skip("QURL_CONNECTOR_RUNTIME_DIR does not reach the Windows pipe address")
+	}
 	srv := apitest.NewServer(t)
 	stateDir := connectorStateTestDir(t)
 	registry, err := openOwnedTestShareRegistry(stateDir)
