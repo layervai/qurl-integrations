@@ -419,13 +419,13 @@ if [ "$waive_security_contract" != "true" ]; then
     *) ok "wrong-region 301 body discloses no bucket or region" ;;
   esac
   expect_eq "wrong-region 301 hides x-amz-bucket-region" "$(hval x-amz-bucket-region)" ""
-  if docker logs "$ORIGIN" 2>&1 | grep -q '"upstream_status":"301"'; then ok "wrong-region logged upstream_status 301"; else no "wrong-region not logged as upstream 301"; fi
+  expect_origin_log "wrong-region logged upstream_status 301" '"upstream_status":"301"'
 
   # 501 sits outside every status family the intercept list used to name.
   fetch "$base/notimplemented.html"
   expect_eq "notimplemented status" "$(status_code)" 502
   expect_eq "notimplemented body" "$(cat "$B")" "Bad Gateway"
-  if docker logs "$ORIGIN" 2>&1 | grep -q '"upstream_status":"501"'; then ok "notimplemented logged upstream_status 501"; else no "notimplemented not logged as upstream 501"; fi
+  expect_origin_log "notimplemented logged upstream_status 501" '"upstream_status":"501"'
 
   # 9e. A real object hit must not fingerprint the origin as S3 behind Envoy.
   # X-Stub-Path is the control: upstream headers do reach the viewer unless
@@ -504,7 +504,7 @@ if [ "$waive_security_contract" != "true" ]; then
   # $s3_target is initialized above the guard, so a rejected request must not
   # also emit a per-request "uninitialized variable" warning — that would turn a
   # control-char flood into an error_log flood.
-  if docker logs "$ORIGIN" 2>&1 | tail -n +"$((warn_mark + 1))" | grep -q 'uninitialized "s3_target"'; then
+  if docker logs "$ORIGIN" 2>&1 | tail -n +"$((warn_mark + 1))" | grep -F 'uninitialized "s3_target"' >/dev/null; then
     no "control-char rejection emits no uninitialized s3_target warning"
   else
     ok "control-char rejection emits no uninitialized s3_target warning"
