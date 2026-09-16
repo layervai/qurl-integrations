@@ -64,10 +64,17 @@ func validateUnixIPCParent(path string) error {
 	if err != nil {
 		return fmt.Errorf("inspect share daemon socket directory: %w", err)
 	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() || !unixIPCPathOwnerOK(info) || info.Mode().Perm() != 0o700 {
+	switch {
+	case info.Mode()&os.ModeSymlink != 0 || !info.IsDir():
+		return fmt.Errorf("share daemon socket directory %s must be a directory, not a symlink or a file (it is %s)", dir, info.Mode())
+	case !unixIPCPathOwnerOK(info):
+		// Do not suggest chmod here: it would fail, and the real answer is a
+		// directory this user owns.
+		return fmt.Errorf("share daemon socket directory %s must be owned by the user running qurl", dir)
+	case info.Mode().Perm() != 0o700:
 		return fmt.Errorf(
-			"share daemon socket directory %s must be a non-symlink directory you own with mode 0700 (it is %s); run: chmod 700 %s",
-			dir, info.Mode(), dir)
+			"share daemon socket directory %s must have mode 0700 (it is %s); run: chmod 700 %s",
+			dir, info.Mode().Perm(), dir)
 	}
 	return nil
 }
@@ -103,6 +110,14 @@ func validatePlatformIPCPath(path string) error {
 // owner-only per-user directory below /tmp as the last resort.
 func platformSocketPath(stateDir, runtimeDir string) (string, error) {
 	if runtimeDir != "" {
+		if !filepath.IsAbs(runtimeDir) {
+			return "", fmt.Errorf("%s must be an absolute path", RuntimeDirEnv)
+		}
+		// Daemon startup sets this directory to 0700, so the filesystem root is
+		// never an acceptable answer.
+		if runtimeDir == string(filepath.Separator) {
+			return "", fmt.Errorf("%s must name a directory, not the filesystem root", RuntimeDirEnv)
+		}
 		path := filepath.Join(runtimeDir, SocketFile)
 		if len(path) > maxUnixSocketPathBytes {
 			return "", fmt.Errorf("%s socket path is too long: %d bytes exceeds the %d-byte socket limit", RuntimeDirEnv, len(path), maxUnixSocketPathBytes)

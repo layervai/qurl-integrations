@@ -190,7 +190,14 @@ func (c *JobController) prepare() error {
 	if err := c.validateController(); err != nil {
 		return err
 	}
-	if c.Supervision != connectorstate.RuntimeSupervisionNative || c.RuntimeDir == c.StateDir {
+	return c.secureRuntimeDir()
+}
+
+// secureRuntimeDir is prepare's half that a reload needs too: it takes no
+// view on whether the rest of the controller is complete.
+func (c *JobController) secureRuntimeDir() error {
+	if c == nil || c.Supervision != connectorstate.RuntimeSupervisionNative ||
+		c.RuntimeDir == "" || c.RuntimeDir == c.StateDir {
 		return nil
 	}
 	return connectorstate.EnsureDirMode(c.RuntimeDir)
@@ -315,6 +322,15 @@ func JobVersion(binaryVersion string, mode GroupMode) (string, error) {
 
 // ReloadIfRunning reconciles an existing daemon without starting one.
 func (c *JobController) ReloadIfRunning(ctx context.Context) (bool, error) {
+	// Same preparation as Ensure. Without it a permissive runtime directory
+	// (a supervisor recreating it under a default umask before any daemon has
+	// run) fails the client's parent check here, where the caller is already
+	// past its cloud mutation - delete and the stopped-share convergence both
+	// reload after changing remote state. It is inert under external
+	// supervision and when the socket lives in the state directory.
+	if err := c.secureRuntimeDir(); err != nil {
+		return false, err
+	}
 	return c.IPC.ReloadIfRunning(ctx)
 }
 

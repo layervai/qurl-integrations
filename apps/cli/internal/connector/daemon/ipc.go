@@ -49,16 +49,11 @@ func SocketPathForStateDir(stateDir string, lookupEnv func(string) (string, bool
 	if lookupEnv != nil {
 		if raw, ok := lookupEnv(RuntimeDirEnv); ok && strings.TrimSpace(raw) != "" {
 			runtimeDir = filepath.Clean(strings.TrimSpace(raw))
-			if !filepath.IsAbs(runtimeDir) {
-				return "", fmt.Errorf("%s must be an absolute path", RuntimeDirEnv)
-			}
-			// Daemon startup sets this directory to 0700, so the filesystem
-			// root is never an acceptable answer.
-			if runtimeDir == string(filepath.Separator) {
-				return "", fmt.Errorf("%s must name a directory, not the filesystem root", RuntimeDirEnv)
-			}
 		}
 	}
+	// The runtime directory is validated by the platform that honors it.
+	// Windows discards it, so a stale value there must not fail every command
+	// about a setting that provably has no effect.
 	return platformSocketPath(stateDir, runtimeDir)
 }
 

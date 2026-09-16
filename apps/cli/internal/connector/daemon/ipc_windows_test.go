@@ -166,3 +166,18 @@ func TestWindowsSocketPathIgnoresRuntimeDirAndRejectsRelativeStateDir(t *testing
 		t.Fatalf("relative state dir resolved to %q, want an error", got)
 	}
 }
+
+// TestWindowsSocketPathIgnoresAnUnusableRuntimeDir pins that Windows does not
+// fail a command over a setting its named-pipe address provably discards. A
+// relative or root QURL_CONNECTOR_RUNTIME_DIR left in an environment is a
+// unix concern only.
+func TestWindowsSocketPathIgnoresAnUnusableRuntimeDir(t *testing.T) {
+	stateDir := `C:\ProgramData\qurl\state`
+	want := filepath.Join(stateDir, SocketFile)
+	for _, raw := range []string{"rt", `\`, "/", `relative\runtime`} {
+		got, err := SocketPathForStateDir(stateDir, lookupEnvFrom(map[string]string{RuntimeDirEnv: raw}))
+		if err != nil || got != want {
+			t.Fatalf("%s=%q resolved to (%q, %v), want (%q, nil)", RuntimeDirEnv, raw, got, err, want)
+		}
+	}
+}

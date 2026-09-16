@@ -352,6 +352,9 @@ func runShareDaemonWithBootstrap(ctx context.Context, opts *globalOpts, stateDir
 // installing CLI resolved, so a daemon under launchd or systemd, whose
 // environment is not the user's shell, listens exactly where that CLI and
 // every later CLI invocation look.
+// Errors from the resolved directory name RuntimeDirEnv, which is the setting
+// a supervisor configures; --runtime-dir is hidden and machine-supplied, and
+// daemonRuntimeDirError restates it for anyone who passed the flag by hand.
 func runtimeDirLookup(runtimeDir string, lookupEnv func(string) (string, bool)) func(string) (string, bool) {
 	if strings.TrimSpace(runtimeDir) == "" {
 		return lookupEnv
@@ -380,6 +383,9 @@ func resolveDaemonPaths(ctx context.Context, opts *globalOpts, stateDirOverride,
 	// namespace untouched.
 	socketPath, err = connectordaemon.SocketPathForStateDir(stateDir, runtimeDirLookup(runtimeDirOverride, opts.lookupEnv))
 	if err != nil {
+		if strings.TrimSpace(runtimeDirOverride) != "" {
+			return "", "", fmt.Errorf("--runtime-dir: %w", err)
+		}
 		return "", "", err
 	}
 	// A pinned runtime directory is user-supplied, so its semantic failures (a
@@ -387,7 +393,9 @@ func resolveDaemonPaths(ctx context.Context, opts *globalOpts, stateDirOverride,
 	// must also be refused before the policy marker. Skip it when the socket
 	// lives in the state directory: securing that is the supervision step's
 	// job, and doing it here would create the namespace a refused start must
-	// leave absent.
+	// leave absent. A start the policy then refuses can leave an empty 0700
+	// runtime directory behind; that is a control-socket location, not durable
+	// state, and the next start reuses it.
 	if dir := filepath.Dir(socketPath); dir != stateDir {
 		if err := connectorstate.EnsureDirMode(dir); err != nil {
 			return "", "", err

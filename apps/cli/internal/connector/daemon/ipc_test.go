@@ -132,7 +132,7 @@ func TestIPCClientRefusesInsecureSocketDirectoryWithoutChangingIt(t *testing.T) 
 		t.Fatal(err)
 	}
 	err := (IPCClient{SocketPath: filepath.Join(dir, SocketFile)}).WaitReady(context.Background())
-	if err == nil || !strings.Contains(err.Error(), "must be a non-symlink directory you own with mode 0700") {
+	if err == nil || !strings.Contains(err.Error(), "must have mode 0700") || !strings.Contains(err.Error(), "chmod 700") {
 		t.Fatalf("client accepted insecure socket directory: %v", err)
 	}
 	info, statErr := os.Lstat(dir)
@@ -155,7 +155,8 @@ func TestIPCClientRefusesSymlinkSocketDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 	err := (IPCClient{SocketPath: filepath.Join(link, SocketFile)}).WaitReady(context.Background())
-	if err == nil || !strings.Contains(err.Error(), "must be a non-symlink directory you own with mode 0700") {
+	// A symlink must not be told to chmod: the advice would be wrong.
+	if err == nil || !strings.Contains(err.Error(), "not a symlink or a file") || strings.Contains(err.Error(), "chmod") {
 		t.Fatalf("client accepted symlink socket directory: %v", err)
 	}
 }
