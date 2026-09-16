@@ -183,6 +183,17 @@ func (c *JobController) validatedDeployment() (qurl.HubBootstrap, error) {
 }
 
 func (c *JobController) jobDefinition(hub qurl.HubBootstrap, jobVersion string) (connectorservice.UserJob, error) {
+	// Only the native branch of Ensure reaches this. A sealed namespace cannot
+	// be served by a job we install: the job definition carries no environment,
+	// and an inherited key descriptor cannot survive into a process launchd,
+	// systemd, or Task Scheduler starts. Refuse here, where the remedy is still
+	// obvious, rather than letting the installed job crash-loop on
+	// "state directory holds a sealed agent state envelope".
+	if connectorstate.SealedProviderSelected() {
+		return connectorservice.UserJob{}, fmt.Errorf(
+			"%w: this namespace is sealed by a key provider, which a natively supervised daemon cannot open; run the daemon yourself and pass --supervision external to every command",
+			connectorstate.ErrAgentStateEnvelope)
+	}
 	binary, err := c.currentExecutablePath()
 	if err != nil {
 		return connectorservice.UserJob{}, err

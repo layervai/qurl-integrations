@@ -23,6 +23,12 @@ import (
 // closes the descriptor once it has read the key, so the next pipe would
 // inherit both the number and the cached key. Re-homing every pipe above each
 // number used so far keeps distinct keys distinct.
+//
+// Package-level mutable state is safe here only because every test that
+// reaches it goes through useLocalKey, which calls t.Setenv and therefore
+// forbids t.Parallel. Do not parallelize these tests without making this a
+// synchronized counter: the race would be on descriptor identity, not just
+// on the integer.
 var nextLocalKeyFD = 64
 
 // localKeyFD writes key to an anonymous pipe and returns the read end's
@@ -48,6 +54,9 @@ func localKeyFD(t *testing.T, key []byte) string {
 		t.Fatal(err)
 	}
 	nextLocalKeyFD = fd + 1
+	// The dup'd read end is deliberately not closed on cleanup: the connector
+	// closes it once it has read the key, so a t.Cleanup close would be a
+	// double close on a number the runtime may have handed out again.
 	return strconv.Itoa(fd)
 }
 
@@ -225,5 +234,34 @@ func TestOpenWithLocalKeyReopensWithinOneProcess(t *testing.T) {
 	defer func() { _ = third.Close() }()
 	if err := loadThrough(third); err != nil {
 		t.Fatalf("third store: %v", err)
+	}
+}
+
+// TestSealedStoreFailsClosedAfterClose runs the plaintext branch's
+// close contract against the sealed one: Close is idempotent and every later
+// use is a continuity error. Close and ValidateContinuity route through the
+// stateOwner interface, so both implementations need the pin.
+func TestSealedStoreFailsClosedAfterClose(t *testing.T) {
+	clearStateEnv(t)
+	dir := secureStateTestDir(t)
+	useLocalKey(t, 'k')
+	store, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if present, err := store.AgentStatePresent(); err != nil || present {
+		t.Fatalf("fresh sealed AgentStatePresent() = (%t, %v), want (false, nil)", present, err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("second Close() = %v, want idempotent nil", err)
+	}
+	if _, err := store.Handoff(); !errors.Is(err, qurl.ErrAgentStateContinuity) {
+		t.Fatalf("Handoff() after Close = %v, want state-continuity error", err)
+	}
+	if err := store.ValidateContinuity(); !errors.Is(err, qurl.ErrAgentStateContinuity) {
+		t.Fatalf("ValidateContinuity() after Close = %v, want state-continuity error", err)
 	}
 }

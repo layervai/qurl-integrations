@@ -14,8 +14,7 @@ import (
 // plaintext provider must never write agent_state.json beside a sealed
 // envelope that another owner established with a key provider.
 func TestOpenPlaintextRefusesSealedEnvelope(t *testing.T) {
-	t.Setenv(connectoragentstate.EnvKeyProvider, "")
-	t.Setenv(connectoragentstate.EnvLocalKeyFD, "")
+	clearStateEnv(t)
 	// The directory must already carry the owner-only ACL on Windows, otherwise
 	// the directory capability refuses it before the envelope guard runs.
 	dir := secureStateTestDir(t)
@@ -27,6 +26,9 @@ func TestOpenPlaintextRefusesSealedEnvelope(t *testing.T) {
 	if err == nil {
 		_ = store.Close()
 		t.Fatal("expected Open to refuse a directory that holds a sealed envelope")
+	}
+	if !errors.Is(err, ErrAgentStateEnvelope) {
+		t.Fatalf("Open error = %v, want ErrAgentStateEnvelope so exitcode maps it to Config", err)
 	}
 	if !strings.Contains(err.Error(), connectoragentstate.SealedAgentStateFile) || !strings.Contains(err.Error(), connectoragentstate.EnvKeyProvider) {
 		t.Fatalf("error must name the sealed envelope and the provider env: %v", err)

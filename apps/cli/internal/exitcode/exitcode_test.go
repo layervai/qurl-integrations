@@ -70,6 +70,7 @@ var cliSentinels = map[string]struct {
 	// and the supervisor (not qurl) is what brings it back.
 	"daemon.ErrExternalDaemonNotRunning": {connectordaemon.ErrExternalDaemonNotRunning, Unavailable},
 	"state.ErrNoDefaultStateDir":         {state.ErrNoDefaultStateDir, Config},
+	"state.ErrAgentStateEnvelope":        {state.ErrAgentStateEnvelope, Config},
 	// A supervision mismatch is remedied by the --supervision setting, the
 	// same remedy class as the Hub triple: configuration, not the command line.
 	"state.ErrRuntimeSupervision":           {state.ErrRuntimeSupervision, Config},

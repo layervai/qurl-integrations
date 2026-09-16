@@ -303,6 +303,11 @@ func connectorSentinelCode(err error) (int, bool) { //nolint:gocyclo // Keep the
 		return Config, true
 	case errors.Is(err, state.ErrNoDefaultStateDir):
 		return Config, true
+	case errors.Is(err, state.ErrAgentStateEnvelope):
+		// The state directory's envelope does not match the selected key
+		// provider. The remedy is LAYERV_KEY_PROVIDER / LAYERV_LOCAL_KEY_FD or
+		// a different state directory, never the command line.
+		return Config, true
 	case errors.Is(err, hub.ErrConfig):
 		// The QURL_CONNECTOR_HUB_* trust triple (or a dark build missing its
 		// production pin) is configuration in the §16.5 sense even though it

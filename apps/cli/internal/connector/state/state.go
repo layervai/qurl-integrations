@@ -50,6 +50,13 @@ const (
 // absent local share namespace; commands that create local state surface it.
 var ErrNoDefaultStateDir = errors.New("no default qurl sharing state directory")
 
+// ErrAgentStateEnvelope means the state directory's envelope does not match
+// the selected key provider: a sealed envelope without LAYERV_KEY_PROVIDER,
+// or a provider the connector does not accept. The remedy is the environment
+// or a different state directory, never the command line, so exitcode maps it
+// to Config.
+var ErrAgentStateEnvelope = errors.New("agent state envelope")
+
 // ResolveDir resolves the native-agent state directory. Resolution order,
 // most specific first:
 //
@@ -105,7 +112,13 @@ var errStoreNotOpen = fmt.Errorf("%w: Connector state store is not open", qurl.E
 // selectedKeyProviderName (trimmed, case-folded, empty means file). If the
 // connector adds a provider that still writes the plaintext envelope, route
 // it here too or the plaintext guard in Open is skipped for it.
-func sealedProviderSelected() bool {
+func sealedProviderSelected() bool { return SealedProviderSelected() }
+
+// SealedProviderSelected reports whether this process's environment selects a
+// sealed agent state envelope. The daemon job builder consults it: a natively
+// installed background job inherits neither the provider variables nor a key
+// descriptor, so it could never open the namespace the calling CLI sealed.
+func SealedProviderSelected() bool {
 	name := strings.ToLower(strings.TrimSpace(os.Getenv(connectoragentstate.EnvKeyProvider)))
 	return name != "" && name != connectoragentstate.KeyProviderFile
 }
@@ -128,6 +141,15 @@ type Store struct {
 // envelope. Handoff returns qurl-go's exact concrete store so its setup-lock
 // and operation-lease contracts stay active; *connectoragentstate.SDKStore
 // satisfies this directly.
+//
+// Handoff must validate continuity before it returns the store, so both
+// branches of Store.Handoff keep that guarantee.
+//
+// TODO(upstream-contract): mirrors qurl-connector pkg/agentstate
+// (*SDKStore).Handoff, which calls validateContinuityLocked before returning
+// its state. If that stops being true the sealed branch silently loses a
+// check the plaintext branch keeps, and fileStateOwner's explicit
+// ValidateContinuity must move up into Store.Handoff.
 type stateOwner interface {
 	Handoff() (qurl.AgentStateStore, error)
 	ValidateContinuity() error
@@ -171,7 +193,7 @@ func Open(dir string) (*Store, error) {
 	if sealedProviderSelected() {
 		sealed, err := connectoragentstate.NewSDKStore(dir, ConfiguredAgentID())
 		if err != nil {
-			return nil, fmt.Errorf("initialize sealed agent state: %w", err)
+			return nil, fmt.Errorf("%w: initialize sealed agent state: %w", ErrAgentStateEnvelope, err)
 		}
 		return &Store{dir: dir, envelope: connectoragentstate.SealedAgentStateFile, owner: sealed}, nil
 	}
@@ -188,9 +210,12 @@ func Open(dir string) (*Store, error) {
 	// The sealed branch also inherits the connector's legacy-artifact reject
 	// list (agent_id, private_key, registration_refresh, etc/, ...), so no
 	// file qurl writes into this directory may take one of those names.
+	// The window between this Lstat and OpenFileAgentState is benign: a sealed
+	// envelope that appears inside it leaves a directory holding both, which
+	// the connector refuses on its next open.
 	if _, err := os.Lstat(filepath.Join(dir, connectoragentstate.SealedAgentStateFile)); err == nil {
-		return nil, fmt.Errorf("state directory holds a sealed agent state envelope (%s); set %s and %s to open it, or use a different state directory",
-			connectoragentstate.SealedAgentStateFile, connectoragentstate.EnvKeyProvider, connectoragentstate.EnvLocalKeyFD)
+		return nil, fmt.Errorf("%w: state directory holds a sealed agent state envelope (%s); set %s and %s to open it, or use a different state directory",
+			ErrAgentStateEnvelope, connectoragentstate.SealedAgentStateFile, connectoragentstate.EnvKeyProvider, connectoragentstate.EnvLocalKeyFD)
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return nil, fmt.Errorf("inspect native agent state directory: %w", err)
 	}
