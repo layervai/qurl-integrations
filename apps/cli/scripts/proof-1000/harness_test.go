@@ -630,3 +630,15 @@ func TestRerenderScrubsAnUnredactedReport(t *testing.T) {
 		}
 	}
 }
+
+func TestExpiredHoldDoesNotCountCanceledStatusAsDegradation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	opts := fakeOptions(t, "expired", 1)
+	opts.skipVerify = true
+	env := fakeEnvironment(t, nil)
+	result := holdSteady(ctx, opts, env, nil, nil, []string{"resource"}, nil, time.Now(), nil)
+	if result.Samples != 0 || result.DegradedSamples != 0 {
+		t.Fatalf("canceled status counted as platform degradation: %+v", result)
+	}
+}
