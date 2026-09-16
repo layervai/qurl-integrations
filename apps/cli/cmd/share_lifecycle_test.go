@@ -3401,3 +3401,45 @@ func startExternalJourneyDaemon(t *testing.T, daemon *journeyDaemon, stateDir, e
 	}
 	return controller
 }
+
+// TestInspectDegradesWhenTheRuntimeDirCannotResolve pins that an unresolvable
+// QURL_CONNECTOR_RUNTIME_DIR does not silence inspect. That misconfiguration
+// is exactly what someone runs inspect to diagnose, so the resource and
+// target facts must still print, with the daemon reported unavailable.
+func TestInspectDegradesWhenTheRuntimeDirCannotResolve(t *testing.T) {
+	srv := apitest.NewServer(t)
+	stateDir := connectorStateTestDir(t)
+	registry, err := openOwnedTestShareRegistry(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seed := localShareFixture(srv)
+	seed.DesiredState = "on"
+	if err := registry.Put(context.Background(), &seed); err != nil {
+		t.Fatal(err)
+	}
+	srv.Script(http.MethodGet, "/v1/resources/"+srv.Key.CRID+"/sharing",
+		sharingResponse(t, srv, "on", seed.ServingEpoch, "serving"))
+	res := runCLI(t, &runOpts{
+		args: []string{"--endpoint", srv.URL, "inspect", srv.Key.CRID, "-o", "json"},
+		env: map[string]string{
+			"QURL_API_KEY": testAPIKey, "QURL_CONNECTOR_STATE_DIR": stateDir,
+			connectordaemon.RuntimeDirEnv: "relative/runtime",
+		},
+		shareRegistry: registry, shareStateDir: stateDir,
+		preflightTarget: func(context.Context, string, int) error { return nil },
+	})
+	if res.code != 0 {
+		t.Fatalf("inspect exit=%d stderr=%q, want the degraded document", res.code, res.stderr.String())
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(res.stdout.Bytes(), &doc); err != nil {
+		t.Fatalf("inspect stdout is not JSON: %v (%q)", err, res.stdout.String())
+	}
+	if doc["daemon_state"] != "unavailable" || doc["failure_category"] != "local_daemon" {
+		t.Fatalf("degraded document = %v, want an unavailable local_daemon", doc)
+	}
+	if doc["target_url"] != seed.TargetURL {
+		t.Fatalf("degraded document lost the target: %v", doc)
+	}
+}

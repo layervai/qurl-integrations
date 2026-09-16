@@ -114,6 +114,14 @@ func platformSocketPath(stateDir, runtimeDir string) (string, error) {
 		return path, nil
 	}
 	digest := sha256.Sum256([]byte(path))
+	// This replaced a shared /tmp/layerv-qurl-<uid>/<hash>.sock: a directory
+	// per namespace is what makes the 0700 EnsureDirMode below meaningful. The
+	// old directory is orphaned rather than cleaned up, and an externally
+	// supervised daemon started by a pre-2.6 qurl keeps listening on the old
+	// address, so its supervisor must restart it after the upgrade - a native
+	// job recovers on its own because the binary version is part of the job
+	// version.
+	//
 	// IPCServer.Run passes this predictable directory through EnsureDirMode
 	// before listen. That helper rejects a symlink or a directory owned by any
 	// other user before it changes permissions, so a pre-creation below /tmp

@@ -522,6 +522,14 @@ func openShareControl(opts *globalOpts) (localShareRegistry, shareDaemonControll
 	return registry, daemon, stateDir, nil
 }
 
+// daemonStateUnavailable is the inspection's "this machine's daemon could not
+// answer" state; the failure category says which side could not.
+const (
+	daemonStateUnavailable  = "unavailable"
+	failureCategoryDaemon   = "local_daemon"
+	failureCategoryLocalRow = "local_state"
+)
+
 func inspectLocalSharing(ctx context.Context, opts *globalOpts, local *connectorstate.LocalShare, stateDir string,
 	localStateErr error, sharing *qurlapi.Sharing,
 ) error {
@@ -529,8 +537,8 @@ func inspectLocalSharing(ctx context.Context, opts *globalOpts, local *connector
 		State: sharing, DaemonState: "not_registered", TargetHealth: "not_available",
 	}
 	if localStateErr != nil {
-		inspection.DaemonState = "unavailable"
-		inspection.FailureCategory = "local_state"
+		inspection.DaemonState = daemonStateUnavailable
+		inspection.FailureCategory = failureCategoryLocalRow
 		return opts.printer().InspectSharing(&inspection)
 	}
 	if local == nil {
@@ -563,15 +571,21 @@ func inspectLocalSharing(ctx context.Context, opts *globalOpts, local *connector
 	}
 	socketPath, err := connectordaemon.SocketPathForStateDir(stateDir, opts.lookupEnv)
 	if err != nil {
-		return err
+		// A runtime directory this command cannot resolve is exactly the
+		// misconfiguration someone runs inspect to diagnose, so degrade the way
+		// every other unreachable-daemon branch here does and still print the
+		// resource and target facts.
+		inspection.DaemonState = daemonStateUnavailable
+		inspection.FailureCategory = failureCategoryDaemon
+		return opts.printer().InspectSharing(&inspection)
 	}
 	statusCtx, cancelStatus := context.WithTimeout(ctx, time.Second)
 	status, running, statusErr := (connectordaemon.IPCClient{SocketPath: socketPath}).Status(statusCtx)
 	cancelStatus()
 	if statusErr != nil {
 		if running {
-			inspection.DaemonState = "unavailable"
-			inspection.FailureCategory = "local_daemon"
+			inspection.DaemonState = daemonStateUnavailable
+			inspection.FailureCategory = failureCategoryDaemon
 		}
 		return opts.printer().InspectSharing(&inspection)
 	}
