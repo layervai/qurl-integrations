@@ -1266,7 +1266,7 @@ func replaceConnectorResources(dir, path string, data []byte) (retErr error) {
 	if _, err := io.ReadFull(rand.Reader, suffix); err != nil {
 		return fmt.Errorf("generate Connector resource state temporary name: %w", err)
 	}
-	tmpPath := filepath.Join(dir, "."+ConnectorResourcesFile+".tmp-"+hex.EncodeToString(suffix))
+	tmpPath := filepath.Join(dir, "."+filepath.Base(path)+".tmp-"+hex.EncodeToString(suffix))
 	tmp, err := createConnectorResourceTemp(tmpPath)
 	if err != nil {
 		return fmt.Errorf("create Connector resource state temporary file: %w", err)

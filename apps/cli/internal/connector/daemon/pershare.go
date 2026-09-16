@@ -26,20 +26,24 @@ type ShareManager interface {
 // group factory. GroupModeSingle is the one-group Manager. GroupModePerShare is
 // a PerShareManager that runs one such Manager per desired-on share: the
 // factory — and the native admitter behind it — stays shared, while every
-// share spends an admission of its own.
-func NewShareManager(registry Registry, factory GroupFactory, mode GroupMode) (ShareManager, error) {
+// share spends an admission of its own. deferFirstReconcile holds the first
+// reconcile for an external supervisor's first reload (see
+// Manager.DeferFirstReconcile).
+func NewShareManager(registry Registry, factory GroupFactory, mode GroupMode, deferFirstReconcile bool) (ShareManager, error) {
 	switch mode {
 	case GroupModeSingle:
 		manager, err := NewManager(registry, factory)
 		if err != nil {
 			return nil, err
 		}
+		manager.DeferFirstReconcile = deferFirstReconcile
 		return manager, nil
 	case GroupModePerShare:
 		manager, err := NewPerShareManager(registry, factory)
 		if err != nil {
 			return nil, err
 		}
+		manager.DeferFirstReconcile = deferFirstReconcile
 		return manager, nil
 	default:
 		if _, err := ParseGroupMode(string(mode)); err != nil {
@@ -74,6 +78,11 @@ const PerShareSoftCap = 300
 type PerShareManager struct {
 	registry Registry
 	factory  GroupFactory
+
+	// DeferFirstReconcile and firstReconcileBound mirror Manager's: no group
+	// is started until the supervisor's first Trigger or the bound.
+	DeferFirstReconcile bool
+	firstReconcileBound time.Duration
 
 	mu     sync.Mutex
 	groups map[string]*shareGroup // resource ID -> its group
@@ -124,7 +133,8 @@ func NewPerShareManager(registry Registry, factory GroupFactory) (*PerShareManag
 		registry: registry, factory: factory,
 		groups: map[string]*shareGroup{}, retiring: map[string]*shareGroup{},
 		trigger: make(chan struct{}, 1), failed: make(chan error, 1),
-		groupStopTimeout: defaultRunnerStopTimeout, retiringRecheck: time.Second,
+		firstReconcileBound: defaultFirstReconcileBound,
+		groupStopTimeout:    defaultRunnerStopTimeout, retiringRecheck: time.Second,
 		softCap: PerShareSoftCap,
 	}, nil
 }
@@ -147,6 +157,11 @@ func (m *PerShareManager) Run(ctx context.Context) (retErr error) {
 	defer func() {
 		retErr = errors.Join(retErr, m.stopAllGroups())
 	}()
+	if m.DeferFirstReconcile {
+		if err := awaitFirstReconcile(ctx, m.trigger, m.firstReconcileBound); err != nil {
+			return err
+		}
+	}
 	if err := m.Reconcile(ctx); err != nil {
 		return err
 	}

@@ -5,6 +5,7 @@ package daemon
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -389,6 +390,10 @@ func TestWaitReadyClosesNonSuccessProbeBodies(t *testing.T) {
 }
 
 func TestDecodeIPCStatusRejectsAmbiguousShapes(t *testing.T) {
+	if got, err := decodeIPCStatus(strings.NewReader(`{"job_version":"1/test","running":{},"resources":{}}`)); err != nil || got.Pid != 0 {
+		t.Fatalf("status without pid = %+v, %v; want zero pid and no error", got, err)
+	}
+
 	for name, input := range map[string]string{
 		"empty version":     `{"job_version":"","running":{},"resources":{}}`,
 		"missing map":       `{"job_version":"1/test"}`,
@@ -397,6 +402,7 @@ func TestDecodeIPCStatusRejectsAmbiguousShapes(t *testing.T) {
 		"trailing value":    `{"job_version":"1/test","running":{},"resources":{}} {}`,
 		"blank resource id": `{"job_version":"1/test","running":{"":"crid"},"resources":{}}`,
 		"blank crid":        `{"job_version":"1/test","running":{"resource":""},"resources":{}}`,
+		"negative pid":      `{"job_version":"1/test","pid":-1,"running":{},"resources":{}}`,
 		"unsafe category":   `{"job_version":"1/test","running":{},"resources":{"resource":{"state":"failed","last_transition":"2026-08-30T15:00:00Z","failure_category":"internal_topology","retry_attempt":0}}}`,
 		"unsafe code":       `{"job_version":"1/test","running":{},"resources":{"resource":{"state":"failed","last_transition":"2026-08-30T15:00:00Z","failure_category":"platform_denied","failure_code":"secret","retry_attempt":0}}}`,
 	} {
@@ -406,8 +412,8 @@ func TestDecodeIPCStatusRejectsAmbiguousShapes(t *testing.T) {
 			}
 		})
 	}
-	got, err := decodeIPCStatus(strings.NewReader(`{"job_version":"1/test","running":{"resource":"crid"},"resources":{"resource":{"state":"retrying","last_transition":"2026-08-30T15:00:00Z","failure_category":"platform_denied","failure_code":"52005","retry_attempt":2,"next_retry_at":"2026-08-30T15:00:02Z"}}}`))
-	if err != nil || got.JobVersion != "1/test" || got.Running["resource"] != "crid" ||
+	got, err := decodeIPCStatus(strings.NewReader(`{"job_version":"1/test","pid":4242,"running":{"resource":"crid"},"resources":{"resource":{"state":"retrying","last_transition":"2026-08-30T15:00:00Z","failure_category":"platform_denied","failure_code":"52005","retry_attempt":2,"next_retry_at":"2026-08-30T15:00:02Z"}}}`))
+	if err != nil || got.JobVersion != "1/test" || got.Pid != 4242 || got.Running["resource"] != "crid" ||
 		got.Resources["resource"].FailureCode != "52005" {
 		t.Fatalf("valid status = %+v, %v", got, err)
 	}
@@ -441,4 +447,37 @@ func emptyManager(t *testing.T) *Manager {
 		t.Fatal(err)
 	}
 	return manager
+}
+
+func TestIPCReadFailureDoesNotReplaceNativeDaemon(t *testing.T) {
+	for _, oversized := range []bool{false, true} {
+		t.Run(fmt.Sprintf("oversized=%t", oversized), func(t *testing.T) {
+			dir := shortTempDir(t)
+			path := filepath.Join(dir, SocketFile)
+			listener, cleanup, err := listenDaemonIPC(context.Background(), path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			server := &http.Server{ReadHeaderTimeout: time.Second, Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				if oversized {
+					_, _ = io.WriteString(w, strings.Repeat(" ", maxIPCStatusBytes+1))
+					return
+				}
+				w.Header().Set("Content-Length", "1000")
+				_, _ = io.WriteString(w, `{"job_version":`)
+			})}
+			go func() { _ = server.Serve(listener) }()
+			t.Cleanup(func() { _ = server.Close(); _ = cleanup() })
+			manager := &recordingJobManager{}
+			controller := NewJobController(dir, dir, "test", "https://api.example.com", GroupModeSingle, connectorstate.RuntimeSupervisionNative, testHubResolver)
+			controller.Manager = manager
+			err = controller.Ensure(context.Background())
+			if err == nil || errors.Is(err, errIPCStatusIncompatible) || (!oversized && !errors.Is(err, io.ErrUnexpectedEOF)) {
+				t.Fatalf("failed status read = %v, want transport failure without incompatibility", err)
+			}
+			if manager.statusCalls != 0 || len(manager.jobs) != 0 || len(manager.replaced) != 0 {
+				t.Fatal("failed status read reached native job management")
+			}
+		})
+	}
 }

@@ -15,15 +15,20 @@ import (
 
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/agent"
 	connectorhub "github.com/layervai/qurl-integrations/apps/cli/internal/connector/hub"
+	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 )
 
 // DaemonJobLabel is the stable per-user background-job identifier.
 const DaemonJobLabel = "ai.layerv.qurl.share-daemon"
 
+// ErrExternalDaemonNotRunning reports a lifecycle command under external
+// supervision whose daemon is absent. The supervisor, not qurl, starts it.
+var ErrExternalDaemonNotRunning = errors.New("share daemon is externally supervised and is not running; start it with 'qurl daemon run --supervision external' and retry")
+
 // daemonJobProtocolVersion identifies the persisted service-manager argument
 // contract. Increment it for each incompatible shape; do not reuse an earlier
 // value even when a later shape resembles it.
-const daemonJobProtocolVersion = "3"
+const daemonJobProtocolVersion = "4"
 
 // JobController installs, upgrades, and signals the per-user daemon job.
 type JobController struct {
@@ -38,19 +43,24 @@ type JobController struct {
 	// exactly the mode its job carries, and a changed mode is a definition
 	// change that replaces the daemon just as a binary-version change does.
 	ShareGroupMode GroupMode
-	ResolveHub     func() (qurl.HubBootstrap, error)
-	LookPath       func(string) (string, error)
-	ProbeStatus    func(context.Context) (IPCStatus, bool, error)
-	Reload         func(context.Context) (bool, error)
+	// Supervision selects who owns the daemon process. Native installs and
+	// replaces the per-user job; external only reloads a live daemon and never
+	// touches the native job manager.
+	Supervision connectorstate.RuntimeSupervision
+	ResolveHub  func() (qurl.HubBootstrap, error)
+	LookPath    func(string) (string, error)
+	ProbeStatus func(context.Context) (IPCStatus, bool, error)
+	Reload      func(context.Context) (bool, error)
 }
 
 // NewJobController builds the production native per-user job controller.
-func NewJobController(stateDir, logDir, binaryVersion, endpoint string, mode GroupMode, resolveHub func() (qurl.HubBootstrap, error)) *JobController {
+func NewJobController(stateDir, logDir, binaryVersion, endpoint string, mode GroupMode, supervision connectorstate.RuntimeSupervision, resolveHub func() (qurl.HubBootstrap, error)) *JobController {
 	controller := &JobController{
 		Manager:  connectorservice.NewUserJobManager(),
 		IPC:      IPCClient{SocketPath: StateSocketPath(stateDir)},
 		StateDir: stateDir, LogDir: logDir, BinaryVersion: strings.TrimSpace(binaryVersion),
-		InvocationPath: os.Args[0], Endpoint: endpoint, ShareGroupMode: mode, ResolveHub: resolveHub, LookPath: exec.LookPath,
+		InvocationPath: os.Args[0], Endpoint: endpoint, ShareGroupMode: mode, Supervision: supervision,
+		ResolveHub: resolveHub, LookPath: exec.LookPath,
 	}
 	controller.ProbeStatus = controller.IPC.Status
 	controller.Reload = controller.IPC.ReloadIfRunning
@@ -62,9 +72,16 @@ func (c *JobController) Ensure(ctx context.Context) error {
 	if err := c.validateController(); err != nil {
 		return err
 	}
-	status, running, err := c.ProbeStatus(ctx)
-	if err != nil {
-		return err
+	status, running, statusErr := c.ProbeStatus(ctx)
+	if statusErr != nil {
+		if !running || !errors.Is(statusErr, errIPCStatusIncompatible) {
+			return statusErr
+		}
+		if c.Supervision == connectorstate.RuntimeSupervisionExternal {
+			return fmt.Errorf("restart the externally supervised daemon and retry: %w", statusErr)
+		}
+		// The native ownership check below must succeed before replacement.
+		status = IPCStatus{}
 	}
 	expectedJobVersion, err := JobVersion(c.BinaryVersion, c.ShareGroupMode)
 	if err != nil {
@@ -82,16 +99,26 @@ func (c *JobController) Ensure(ctx context.Context) error {
 		// Continue as an absent owner instead of reporting false convergence.
 		running = false
 	}
+	if c.Supervision == connectorstate.RuntimeSupervisionExternal {
+		// The supervisor owns the process: never install, replace, or inspect
+		// a native job on its behalf. A live daemon on another definition is
+		// the supervisor's to restart; an absent one is reported so the caller
+		// can start it and roll its cloud change back meanwhile.
+		if running {
+			return fmt.Errorf(
+				"share daemon job version %q does not match this qURL job version %q; restart the externally supervised daemon and retry",
+				status.JobVersion, expectedJobVersion,
+			)
+		}
+		return ErrExternalDaemonNotRunning
+	}
 	if running {
 		managed, err := c.Manager.Status(DaemonJobLabel)
 		if err != nil {
 			return fmt.Errorf("inspect native background ownership before replacing incompatible share daemon: %w", err)
 		}
 		if !managed.Installed || !managed.Running {
-			return fmt.Errorf(
-				"share daemon job version %q does not match this qURL job version %q; stop the foreground or externally managed daemon and retry",
-				status.JobVersion, expectedJobVersion,
-			)
+			return unmanagedDaemonMismatch(status, expectedJobVersion, statusErr)
 		}
 	}
 	hub, err := c.validatedDeployment()
@@ -115,11 +142,24 @@ func (c *JobController) Ensure(ctx context.Context) error {
 	return c.Manager.Ensure(job)
 }
 
+func unmanagedDaemonMismatch(status IPCStatus, expectedJobVersion string, statusErr error) error {
+	if statusErr != nil {
+		return fmt.Errorf("stop the foreground or externally managed daemon and retry: %w", statusErr)
+	}
+	return fmt.Errorf(
+		"share daemon job version %q does not match this qURL job version %q; stop the foreground or externally managed daemon and retry",
+		status.JobVersion, expectedJobVersion,
+	)
+}
+
 func (c *JobController) validateController() error {
 	if c == nil || c.Manager == nil || c.LookPath == nil || c.ProbeStatus == nil || c.Reload == nil || c.ResolveHub == nil {
 		return errors.New("share daemon job controller is incomplete")
 	}
-	return nil
+	// The zero supervision is rejected like the zero GroupMode: a construction
+	// path that never resolved it must fail loudly, not install natively.
+	_, err := connectorstate.ParseRuntimeSupervision(string(c.Supervision))
+	return err
 }
 
 func (c *JobController) validatedDeployment() (qurl.HubBootstrap, error) {
@@ -162,6 +202,8 @@ func (c *JobController) jobDefinition(hub qurl.HubBootstrap, jobVersion string) 
 		"--share-group-mode", string(c.ShareGroupMode),
 		"--hub-host", hub.Host, "--hub-port", strconv.Itoa(hub.Port),
 		"--hub-server-public-key-b64", hub.ServerPublicKeyB64,
+		// Pin native ownership even if the user later selects external in their profile.
+		"--supervision", string(connectorstate.RuntimeSupervisionNative),
 	)
 	arguments = append(arguments, daemonJobLogArguments(stdoutPath, stderrPath)...)
 	return connectorservice.UserJob{
