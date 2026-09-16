@@ -28,7 +28,7 @@ var ErrExternalDaemonNotRunning = errors.New("share daemon is externally supervi
 // daemonJobProtocolVersion identifies the persisted service-manager argument
 // contract. Increment it for each incompatible shape; do not reuse an earlier
 // value even when a later shape resembles it.
-const daemonJobProtocolVersion = "3"
+const daemonJobProtocolVersion = "4"
 
 // JobController installs, upgrades, and signals the per-user daemon job.
 type JobController struct {
@@ -74,7 +74,14 @@ func (c *JobController) Ensure(ctx context.Context) error {
 	}
 	status, running, err := c.ProbeStatus(ctx)
 	if err != nil {
-		return err
+		if !running || !errors.Is(err, errIPCStatusIncompatible) {
+			return err
+		}
+		if c.Supervision == connectorstate.RuntimeSupervisionExternal {
+			return fmt.Errorf("restart the externally supervised daemon and retry: %w", err)
+		}
+		// The native ownership check below must succeed before replacement.
+		status = IPCStatus{}
 	}
 	expectedJobVersion, err := JobVersion(c.BinaryVersion, c.ShareGroupMode)
 	if err != nil {

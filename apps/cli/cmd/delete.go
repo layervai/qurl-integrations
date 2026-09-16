@@ -36,6 +36,10 @@ scripts and pipelines must pass --yes.`,
 			if err != nil {
 				return err
 			}
+			// Check ownership before asking the user to confirm deletion.
+			if err := opts.requireRuntimeSupervisionIfNamespace(); err != nil {
+				return err
+			}
 			printer := opts.printer()
 			if err := applyCRIDGuards(printer, assessment, opts.productionEndpoint(), yes); err != nil {
 				return err
@@ -52,11 +56,6 @@ scripts and pipelines must pass --yes.`,
 				}
 			}
 
-			// Deletion is committed remotely first; check the namespace's
-			// supervision before it so a mismatch never half-applies.
-			if err := opts.requireRuntimeSupervisionIfNamespace(); err != nil {
-				return err
-			}
 			client, err := opts.newClient(cmd.Context())
 			if err != nil {
 				return err

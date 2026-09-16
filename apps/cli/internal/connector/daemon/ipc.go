@@ -130,6 +130,9 @@ type IPCStatus struct {
 	Resources  map[string]ResourceDiagnostic `json:"resources"`
 }
 
+// errIPCStatusIncompatible identifies a responding owner with an unsupported status shape.
+var errIPCStatusIncompatible = errors.New("share daemon status is incompatible")
+
 // Status reads the daemon handshake without starting it.
 func (c IPCClient) Status(ctx context.Context) (IPCStatus, bool, error) {
 	response, running, err := c.do(ctx, http.MethodGet, "/status")
@@ -143,7 +146,7 @@ func (c IPCClient) Status(ctx context.Context) (IPCStatus, bool, error) {
 	}
 	status, err := decodeIPCStatus(io.LimitReader(response.Body, maxIPCStatusBytes))
 	if err != nil {
-		return IPCStatus{}, true, err
+		return IPCStatus{}, true, fmt.Errorf("%w: %w", errIPCStatusIncompatible, err)
 	}
 	return status, true, nil
 }

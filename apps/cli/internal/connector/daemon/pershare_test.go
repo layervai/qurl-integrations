@@ -142,7 +142,7 @@ func TestPerShareManagerSpendsOneAdmissionAndOneSessionPerShare(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		done <- (&IPCServer{SocketPath: socket, Manager: manager, JobVersion: "3/test/per-share"}).Run(ctx)
+		done <- (&IPCServer{SocketPath: socket, Manager: manager, JobVersion: "4/test/per-share"}).Run(ctx)
 	}()
 	t.Cleanup(func() {
 		cancel()
@@ -187,7 +187,7 @@ func TestPerShareManagerSpendsOneAdmissionAndOneSessionPerShare(t *testing.T) {
 		t.Fatal(err)
 	}
 	status := ipcStatus(t, client)
-	if status.JobVersion != "3/test/per-share" || len(status.Running) != 3 || len(status.Resources) != 3 {
+	if status.JobVersion != "4/test/per-share" || len(status.Running) != 3 || len(status.Resources) != 3 {
 		t.Fatalf("/status = %+v, want the job version and every share once", status)
 	}
 	for _, id := range []string{"a", "b", "c"} {

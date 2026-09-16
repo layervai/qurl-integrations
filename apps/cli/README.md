@@ -310,7 +310,7 @@ When another program — a desktop app, a service manager — owns the daemon
 process instead of qURL's per-user background job, start the daemon with
 `--supervision external` and run every lifecycle command against that state
 directory with the same setting (flag `--supervision`, environment
-`QURL_DAEMON_SUPERVISION`, config key `daemon_supervision`):
+`QURL_DAEMON_SUPERVISION`, config key `daemon_supervision`).
 
 Use a dedicated, fresh state directory rather than the native default. For
 account-key enrollment, the first daemon invocation establishes the marker and
@@ -338,7 +338,8 @@ External supervision changes three things:
 - `publish`, `start`, and `restart` reload the running daemon and never
   install or replace a background job. When the daemon is not running they
   fail with exit code 11 and roll their own cloud change back, so the
-  supervisor can start the daemon and retry.
+  supervisor can start the daemon, wait for `GET /status` to return 200,
+  and retry. Wait for that readiness response before publishing a share.
 - `publish`, `start`, `restart`, `stop`, `delete`, `login`, and `daemon run`
   refuse a state directory whose mark does not match their `--supervision`
   setting (exit code 3). A plain `qurl` command therefore never installs a
@@ -349,8 +350,12 @@ On every process start, including a warm restart or headless start, an
 externally supervised daemon waits up to 30 seconds for its supervisor's
 first reload (every lifecycle command sends one) before serving the stored
 shares on its own. The supervisor should send `POST /reload` after IPC is
-ready and all runtime state has been restored to avoid that delay. Stopping the daemon is a local act: it changes no sharing
-state, so the shares resume on the next start.
+ready and all runtime state has been restored to avoid that delay.
+
+Stopping the daemon is a local act: it changes no sharing state, so the shares
+resume on the next start. Before downgrading to a CLI released before external
+supervision, stop the current daemon. Older clients cannot decode its `pid`
+status field.
 
 ### qurl publish
 
