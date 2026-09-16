@@ -814,17 +814,10 @@ func (o *globalOpts) openNativeExternalRegisteredClient(
 		RefreshMode:                  connectorRefreshModeAuto,
 	})
 	if err != nil {
-		// This path opens the connector's SDK store directly rather than through
-		// state.Open, so an envelope-versus-provider refusal would otherwise
-		// reach exitcode unwrapped and exit 1, against the documented 3.
-		//
-		// It is a fallback, not a blanket label. The failure this command
-		// introduces is the token file itself, raised inside this call by the
-		// credential provider, and an unusable token is not an envelope problem:
-		// wrapping it would prefix "agent state envelope" onto the most common
-		// failure and point the supervisor at the environment or another state
-		// directory instead of at the token it just wrote.
-		if !errors.Is(err, auth.ErrEnrollmentTokenFile) {
+		// Connector provider/envelope failures have no typed sentinel. Keep the
+		// Config fallback for unclassified errors, without relabeling known
+		// credential, network, or cancellation failures as state problems.
+		if exitcode.FromError(err) == exitcode.General {
 			err = fmt.Errorf("%w: %w", connectorstate.ErrAgentStateEnvelope, err)
 		}
 		return nil, nil, err
@@ -925,7 +918,8 @@ func (o *globalOpts) bindDeviceOwner(ctx context.Context, stateDir string, devic
 // on a retry would report a file-shape error about a path that is gone. The
 // cache is what prevents that; a repeated call gets the same token and lets
 // the platform be the one to reject a genuinely spent credential, the way the
-// account-key provider's cached idempotency key does.
+// account-key provider's cached idempotency key does. The returned token stays
+// in memory for this enrollment; clearing the reader's buffer does not erase it.
 func oneShotEnrollmentToken(path string) func(context.Context, qurl.AgentEnrollmentCredentialRequest) (string, error) {
 	var (
 		once  sync.Once

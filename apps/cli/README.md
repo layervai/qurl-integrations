@@ -607,6 +607,22 @@ Use `qurl restart <CRID> --target http://127.0.0.1:4000` to move an existing
 local share to a new loopback HTTP origin. The destination must be reachable;
 the old origin can already be stopped. The CRID and Connector ID stay the same.
 
+| Flag | Description |
+|------|-------------|
+| `--target <url>` | Move the share to this loopback HTTP origin, e.g. `http://127.0.0.1:4000` |
+
+The destination follows the [local publish rules](#local-apps) — a loopback
+HTTP origin without path, query, fragment, or credentials; anything else is a
+usage error (exit code 2) before any request is made — and it is the
+destination that is preflighted, not the stored origin, which may already be
+gone. The platform restart runs as usual, then the new target is stored
+together with the serving epoch it returned in one registry write, so no
+durable state pairs the old target with the new epoch or the new target with
+the old one. The text and JSON documents (`target_url`) report the new target,
+and `list` and `status` show the new `Target:` against the unchanged CRID.
+`--target` also turns the share back on if it was off, the same way a plain
+`restart` does. Without `--target`, `restart` is unchanged.
+
 If the command fails after saving the new target, it keeps that target.
 A failed daemon handoff attempts to stop the share; a readiness timeout leaves
 it trying to start. Use `qurl inspect <CRID>` to check its state and target
@@ -763,31 +779,8 @@ session cannot keep serving it; the other shares are not disturbed. `status`
 and `inspect` use the same authoritative view. Both work for remote resources
 and include the local target only when this machine owns one.
 
-`restart` can also move a share to a new loopback origin:
-
-```bash
-qurl restart <CRID> --target http://127.0.0.1:4000
-```
-
-| Flag | Description |
-|------|-------------|
-| `--target <url>` | Move the share to this loopback HTTP origin, e.g. `http://127.0.0.1:4000` |
-
-The CRID and Connector identity stay the same, so an app that now listens on
-another port keeps its links. The destination follows the
-[local publish rules](#local-apps) — a loopback HTTP origin without path,
-query, fragment, or credentials; anything else is a usage error (exit code 2)
-before any request is made — and is preflighted in place of the stored origin,
-which may already be gone. The platform restart runs as usual, then the new
-target is stored together with the serving epoch it returned in one registry
-write, so no durable state pairs the old target with the new epoch or the new
-target with the old one. The text and JSON documents (`target_url`) report the
-new target, and `list` and `status` show the new `Target:` against the
-unchanged CRID. Without `--target`, `restart` is unchanged.
-
-`--target` also turns a share back on if it was off, the same way a plain
-`restart` does. For what a move leaves behind when it fails part-way, and for
-why the share keeps the Connector ID derived from its original origin, see
+`restart --target <origin>` additionally moves the share to a different
+loopback origin on this machine, keeping its CRID and links; see
 [Move a local share](#move-a-local-share).
 
 Custom deployments must support the current CLI resource-status API. The CLI
@@ -886,9 +879,33 @@ op read op://team/qurl/key | qurl login
 qurl whoami -o json
 ```
 
+<<<<<<< HEAD
 `qurl login --enrollment-token-file <path> --supervision external` enrolls
 from a supervisor's one-time enrollment token file instead of an account key;
 see [Supervised installs](#supervised-installs).
+=======
+A supervisor such as qURL Desktop can instead run
+`qurl login --enrollment-token-file /absolute/path/to/token --supervision external -o json`.
+It must supply a one-time token minted for `target=agent`, set
+`LAYERV_KEY_PROVIDER=local-key`, and pass the 32-byte wrapping key through the
+inherited descriptor named by `LAYERV_LOCAL_KEY_FD`. Do not set `QURL_API_KEY`
+or `QURL_API_KEY_FILE` for this form. Token-file login is tested on macOS and
+Linux. Non-Unix platforms, including Windows, reject it before changing local state.
+
+The token file must be an owner-owned regular file with one hard link and
+mode `0400` or `0600`. The CLI reads it only when enrollment needs it. The
+supervisor must remove it after the command exits, including on failure.
+An enrolled device can log in again with the same path after the file is
+removed. Invalid command options return exit code 2; an unusable token file
+returns 4; incompatible encrypted-state settings return 3. Correct a token
+file error and retry with the same state directory. A namespace with a different
+supervision mode returns 3; one bound to another account returns 7.
+If the stored device credential is revoked, this form cannot recover it with
+account-key authority: preserve the old state directory and enroll a new
+namespace with a fresh token. Login JSON includes
+`owner_id`, `auth_type`, `device_enrolled`, and `device_key_id` when the
+service supplies a key ID.
+>>>>>>> pr1428
 
 ### qurl completion
 

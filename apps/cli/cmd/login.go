@@ -34,7 +34,7 @@ func loginCmd(opts *globalOpts) *cobra.Command {
 	var enrollmentTokenFile string
 	cmd := &cobra.Command{
 		Use:   "login",
-		Short: "Enroll this machine with a qURL account API key",
+		Short: "Enroll this machine with a qURL account key or enrollment token",
 		Long: `Enroll this machine for future qURL commands.
 
 The key is read from standard input when piped, or typed at a hidden prompt
@@ -156,7 +156,7 @@ func requireLocalKeyProvider(lookup func(string) (string, bool)) error {
 		return fmt.Errorf("--enrollment-token-file requires %s=%s", connectoragentstate.EnvKeyProvider, connectoragentstate.KeyProviderLocalKey)
 	}
 	if fd, _ := lookup(connectoragentstate.EnvLocalKeyFD); !validLocalKeyDescriptor(fd) {
-		return fmt.Errorf("--enrollment-token-file requires %s to name an inherited descriptor (3 or higher)", connectoragentstate.EnvLocalKeyFD)
+		return fmt.Errorf("--enrollment-token-file requires %s to name an inherited descriptor in bare decimal form (3 through %d, no leading zeros)", connectoragentstate.EnvLocalKeyFD, maxLocalKeyDescriptor)
 	}
 	return nil
 }

@@ -13,7 +13,7 @@ import (
 
 const externalEnrollmentTokenMaxBytes = 16 << 10
 
-var statExternalEnrollmentTokenPath = os.Lstat
+var statExternalEnrollmentTokenPath = os.Lstat // Tests that replace this must not run in parallel.
 
 // ReadExternalEnrollmentTokenFile reads the qURL Desktop one-shot credential from
 // one exact private file. It is intentionally stricter than the headless
@@ -35,7 +35,13 @@ func ReadExternalEnrollmentTokenFile(path string) (string, error) { //nolint:goc
 	// tests drive a swap between the checks. The opened descriptor's own Stat
 	// is what both are compared against, which is the part nothing can redirect.
 	before, err := os.Lstat(path)
-	if err != nil || !validExternalEnrollmentTokenInfo(before) {
+	if errors.Is(err, os.ErrNotExist) {
+		return "", errors.New("external enrollment token file does not exist")
+	}
+	if err != nil {
+		return "", errors.New("cannot inspect external enrollment token file metadata")
+	}
+	if !validExternalEnrollmentTokenInfo(before) {
 		return "", errors.New("external enrollment token must be one owner-readable private regular file")
 	}
 	if before.Size() <= 0 || before.Size() > externalEnrollmentTokenMaxBytes {
