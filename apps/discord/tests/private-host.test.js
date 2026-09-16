@@ -1,13 +1,3 @@
-/**
- * Unit tests for src/utils/private-host.js — the shared syntactic
- * private/loopback/link-local range table.
- *
- * Two callers with different postures compose from this module (see its
- * header), so these tests pin BOTH the fail-closed SSRF predicate that
- * qurl.js re-exports and the building blocks a public-origin boot check
- * composes from. The point of the shared table is that the two can't drift;
- * these tests are what makes that stick.
- */
 
 const {
   IPV4_LITERAL_RE,
@@ -25,19 +15,11 @@ describe('private-host module is dependency-free', () => {
     const src = fs.readFileSync(
       path.join(__dirname, '../src/utils/private-host.js'), 'utf8'
     );
-    // Deliberately broad: a const/let/var-bound require is the likely form,
-    // but a bare side-effecting `require('x')` or `module.exports =
-    // require(...)` would break the boot-path guarantee just as thoroughly.
-    // The module has no legitimate `require(` at all, so match them all.
     expect(src).not.toMatch(/\brequire\s*\(/);
   });
 });
 
 describe('unwrapIPv4Mapped — every IPv4-in-IPv6 embedding (#1043)', () => {
-  // Each notation carries an IPv4 in the low 32 bits, so each is another way
-  // to spell a private IPv4. Decoding beats prefix-rejection: only the mapped
-  // form routes on a stock host, but an IPv6-only subnet with DNS64/NAT64 (a
-  // supported AWS VPC config) makes 64:ff9b:: route for real.
   it.each([
     ['::ffff:7f00:1', '127.0.0.1', 'IPv4-mapped, hex'],
     ['::ffff:127.0.0.1', '127.0.0.1', 'IPv4-mapped, dotted'],
@@ -51,8 +33,6 @@ describe('unwrapIPv4Mapped — every IPv4-in-IPv6 embedding (#1043)', () => {
   });
 
   it('decodes rather than blanket-rejecting, so NAT64 to a public IP survives', () => {
-    // 64:ff9b::808:808 is NAT64 reaching 8.8.8.8. Rejecting the prefix
-    // outright would break a legitimately reachable target.
     expect(isPrivateHost('64:ff9b::808:808')).toBe(false);
     expect(isPrivateHost('64:ff9b::cb00:710a')).toBe(false);  // 203.0.113.10
     expect(isPrivateHost('::808:808')).toBe(false);
@@ -65,9 +45,6 @@ describe('unwrapIPv4Mapped — every IPv4-in-IPv6 embedding (#1043)', () => {
 });
 
 describe('unwrapIPv4Mapped — issue #1035 (SSRF bypass)', () => {
-  // new URL() re-serializes ::ffff:127.0.0.1 to the hex form ::ffff:7f00:1,
-  // so the hex tail is the form callers actually pass. Screening only the
-  // dotted tail let the IMDS address through as "public".
   it('unwraps the hex tail that callers actually pass', () => {
     expect(unwrapIPv4Mapped('::ffff:7f00:1')).toBe('127.0.0.1');
     expect(unwrapIPv4Mapped('::ffff:a00:1')).toBe('10.0.0.1');
@@ -81,10 +58,6 @@ describe('unwrapIPv4Mapped — issue #1035 (SSRF bypass)', () => {
   });
 
   it('normalizes case itself rather than trusting the caller', () => {
-    // The hex tail is matched with [0-9a-f], so a composer who forgot to
-    // lowercase would get a wrong null — fail-OPEN for the SSRF caller. Both
-    // current callers do lowercase, but the shared table does not depend on
-    // that, since it is meant to be composed from again.
     expect(unwrapIPv4Mapped('::FFFF:7F00:1')).toBe('127.0.0.1');
     expect(unwrapIPv4Mapped('::ffff:7f00:1')).toBe('127.0.0.1');
     expect(ipv6LocalScope('FE80::1')).toBe('link-local');
@@ -100,11 +73,6 @@ describe('unwrapIPv4Mapped — issue #1035 (SSRF bypass)', () => {
   });
 
   it('reads an all-digit lone hextet as decimal, which is harmless', () => {
-    // `::1` hits the dotted branch and decodes to "1", not null — the same
-    // behavior as the inline guard this table replaced. Safe either way: the
-    // decimal and hex readings of a lone hextet both land in 0.0.0.0/8 or
-    // 255.255.0.0/16, never a sensitive range, and isPrivateHost short-circuits
-    // `::1` as loopback before it ever reaches the decode.
     expect(unwrapIPv4Mapped('::1')).toBe('1');
     expect(isPrivateHost('::1')).toBe(true);
     expect(isPrivateHost('1')).toBe(true); //  decimal 1 -> 0.0.0.1, in 0/8
@@ -135,9 +103,6 @@ describe('isPrivateHost — issue #1035 regression pins', () => {
 
 describe('parseIPv4Octets', () => {
   it('rejects labels Number() accepts but the URL spec does not', () => {
-    // Number('1e2') is 100: without the digits-only shape these public hosts
-    // would read as private literals. On the boot path that crash-loops a
-    // valid deploy; on the SSRF path it blocks a legitimate target.
     for (const mode of [{ allowLeadingZeros: false }, { allowLeadingZeros: true }]) {
       expect(parseIPv4Octets('10.2.3.1e2', mode)).toBeNull();
       expect(parseIPv4Octets('192.168.0.1e1', mode)).toBeNull();
@@ -152,9 +117,6 @@ describe('parseIPv4Octets', () => {
   });
 
   it('differs on leading zeros — strict is URL-canonicalized input only', () => {
-    // WHATWG canonicalizes 010.0.0.1 to 8.0.0.1 before the boot path ever
-    // sees it, so a leading zero there is an operator typo. The SSRF path
-    // screens raw input, where 0.0.0.01 must still read as 0.0.0.1.
     expect(parseIPv4Octets('0.0.0.01')).toBeNull();
     expect(parseIPv4Octets('0.0.0.01', { allowLeadingZeros: true })).toEqual([0, 0, 0, 1]);
   });
@@ -201,8 +163,6 @@ describe('ipv4LocalScope — opt-in ranges keep the two postures apart', () => {
   });
 
   it('screens CGNAT only under the SSRF posture', () => {
-    // A CGNAT address can front a legitimately reachable origin, so a
-    // public-origin check must NOT reject it — that would fail a valid deploy.
     expect(ipv4LocalScope([100, 64, 0, 1], ssrf)).toBe('cgnat');
     expect(ipv4LocalScope([100, 64, 0, 1], boot)).toBeNull();
     expect(ipv4LocalScope([100, 63, 255, 255], ssrf)).toBeNull();
@@ -239,8 +199,6 @@ describe('ipv6LocalScope', () => {
   });
 
   it('does not treat a short first hextet as in-range', () => {
-    // fc::1 is 0x00fc, NOT inside fc00::/7. The mask is correct here; the
-    // SSRF caller widens on top of it deliberately (see isPrivateHost).
     expect(ipv6LocalScope('fc::1')).toBeNull();
     expect(ipv6LocalScope('fdd::1')).toBeNull();
     expect(ipv6LocalScope('fe8::1')).toBeNull();
@@ -262,8 +220,6 @@ describe('isPrivateHost — fail-closed SSRF posture', () => {
   });
 
   it('widens past the fc00::/7 mask for short hextets', () => {
-    // Over-rejecting a malformed literal is the safe direction for an SSRF
-    // guard. A public-origin check must not copy this.
     expect(isPrivateHost('fc::1')).toBe(true);
     expect(isPrivateHost('fdd::1')).toBe(true);
   });

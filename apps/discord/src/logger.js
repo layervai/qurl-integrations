@@ -22,6 +22,10 @@ function formatTimestamp() {
 // See REDACT_EXACT_KEYS below for the exact-match alternative.
 const REDACT_SUBSTRINGS = [
   'token', 'secret', 'password', 'authorization', 'apikey', 'api_key',
+  // A qURL access link embeds its live bearer credential in the fragment.
+  // Cover both normalized camelCase and raw SDK/storage snake_case fields,
+  // including decorated names such as qurlLinkUrl / qurl_link_url.
+  'qurllink', 'qurl_link',
 ];
 
 // Exact-match keys (not substring) — content-hash names where substring
@@ -48,13 +52,25 @@ function shouldRedact(key) {
   return REDACT_SUBSTRINGS.some(s => k.includes(s));
 }
 
+const QURL_LINK_SUBSTRINGS = REDACT_SUBSTRINGS.filter(s => s.startsWith('qurl'));
+
+function isQurlAccessLinkKey(key) {
+  const k = String(key).toLowerCase();
+  return QURL_LINK_SUBSTRINGS.some(s => k.includes(s));
+}
+
+function isNonEmptyContainer(value) {
+  if (Array.isArray(value)) return value.length > 0;
+  return value != null && typeof value === 'object' && Object.keys(value).length > 0;
+}
+
 // Exact key names that audit() refuses to emit silently — these are the
 // classic secret-bearers a caller is most likely to leak by accident.
-// Exact-match (not substring) so legitimate audit dimensions like
-// `tokens_minted` or `token_count` don't trigger false-positive warns.
-// REDACT_SUBSTRINGS is too aggressive for audit metadata: the bypass
-// exists precisely because legitimate dimensions can contain those
-// substrings.
+// Exact-match for general secret names so legitimate audit dimensions like
+// `tokens_minted` or `token_count` don't trigger false-positive warns. qURL
+// access-link fields get a narrow substring rule in redactAuditSecrets so
+// decorated link-bearing keys are also covered without blanking numeric
+// dimensions such as qurl_link_count.
 const AUDIT_SECRET_KEYS = new Set([
   'token', 'secret', 'password', 'authorization', 'apikey', 'api_key',
   'auth_token', 'access_token', 'refresh_token', 'bearer_token',
@@ -68,6 +84,11 @@ const AUDIT_SECRET_KEYS = new Set([
   // info/warn/debug path's substring redactor catches it; this closes the
   // audit serializer too.
   'interaction_token',
+  // Keep canonical qURL link shapes explicit for documentation and so a
+  // scalar under one of these names still emits the secret-shaped-key warning;
+  // redactAuditSecrets additionally covers decorated string/container fields.
+  'qurllink', 'qurl_link', 'qurllinkurl', 'qurl_link_url',
+  'qurllinks', 'qurl_links',
   // Content-derived hash names — see REDACT_EXACT_KEYS above for rationale.
   // Kept in sync by hand today; consolidation tracked in #221.
   'hash', 'md5', 'sha1', 'sha256', 'sha512',
@@ -87,11 +108,13 @@ function isAuditSecretKey(key) {
 // the warn line — partial reporting would let a caller fix one key
 // and re-run only to discover another the next time.
 //
-// Exact-match (not substring) so legitimate audit dimensions like
-// `tokens_minted` survive — these are the canonical secret-bearer names
-// (auth_token, api_key, password, ...) that are safe to redact-by-value
-// without corrupting metrics. Recurses into matched-key non-null
-// object/array values (depth-5 cap inherited from the function body).
+// General secrets use exact-match so legitimate dimensions like
+// `tokens_minted` survive. qURL access-link strings/containers additionally
+// use isQurlAccessLinkKey so decorated field names cannot bypass audit
+// redaction; non-string scalar dimensions still survive. Recurses into most
+// matched-key non-null object/array values (depth-5 cap inherited from the
+// function body); qURL access-link containers are suppressed as a unit because
+// bare strings inside them have no inner key to match.
 function redactAuditSecrets(value, depth = 0, secretKeys = []) {
   if (depth > 5 || value == null || typeof value !== 'object') {
     return { value, secretKeys };
@@ -102,14 +125,23 @@ function redactAuditSecrets(value, depth = 0, secretKeys = []) {
   }
   const out = {};
   for (const [k, v] of Object.entries(value)) {
-    if (isAuditSecretKey(k)) {
+    const decoratedQurlLinkValue = isQurlAccessLinkKey(k)
+      && ((typeof v === 'string' && v.length > 0) || isNonEmptyContainer(v));
+    if (isAuditSecretKey(k) || decoratedQurlLinkValue) {
       // Blank non-empty strings; recurse into non-null objects/arrays so a
       // `{ auth_token: { ... } }` accident still has its inner sensitive
-      // keys examined. Recursion uses exact-match — legit audit dimensions
-      // like `tokens_minted` survive (pinned by test). Push outer key
-      // BEFORE recursing for parent-first warn-line order.
+      // keys examined. General-secret recursion uses exact-match — legit audit
+      // dimensions like `tokens_minted` survive (pinned by test). Push outer key
+      // BEFORE recursing for parent-first warn-line order. qURL link
+      // containers are the exception and are suppressed as a unit below.
       if (!secretKeys.includes(k)) secretKeys.push(k);
       if (typeof v === 'string' && v.length > 0) {
+        out[k] = '[REDACTED]';
+      } else if (isQurlAccessLinkKey(k) && isNonEmptyContainer(v)) {
+        // A qurlLinks container semantically consists of live bearer links;
+        // inner keys are not guaranteed to describe bearer values (for
+        // example, a user-id-to-link map), so suppress the whole non-empty
+        // container instead of risking a leak. Empty containers are safe.
         out[k] = '[REDACTED]';
       } else if (v != null && typeof v === 'object') {
         out[k] = redactAuditSecrets(v, depth + 1, secretKeys).value;
@@ -132,10 +164,14 @@ function redact(value, depth = 0) {
     if (shouldRedact(k)) {
       // Blank non-empty strings; recurse into non-null objects/arrays so
       // a `{ hash: { token: 'real' } }` accident still has its inner keys
-      // examined. Other primitives pass through.
+      // examined. qURL link containers are suppressed as a unit; other
+      // primitives pass through.
       // Asymmetry note: see redactAuditSecrets() — this recursion uses the
-      // wider substring rule; the audit pathway uses exact-match.
+      // wider substring rule; the audit pathway uses exact-match except for
+      // narrowly identified qURL access-link values.
       if (typeof v === 'string' && v.length > 0) {
+        out[k] = '[REDACTED]';
+      } else if (isQurlAccessLinkKey(k) && isNonEmptyContainer(v)) {
         out[k] = '[REDACTED]';
       } else if (v != null && typeof v === 'object') {
         out[k] = redact(v, depth + 1);
@@ -204,9 +240,10 @@ const logger = {
   // canonical: "discord" | "slack" | "teams" | "cli" | "web" | "api".
   //
   // Audit lines bypass currentLevel — they're observability, not
-  // debug noise. They also bypass redact() (which uses substring) in
-  // favor of redactAuditSecrets() (exact-match) so legitimate dimensions
-  // like `tokens_minted` survive. The AUDIT_EVENTS allowlist in
+  // debug noise. They also bypass redact()'s broad substring policy in
+  // favor of redactAuditSecrets()'s exact general-secret keys plus narrow
+  // qURL-link matching, so legitimate dimensions like `tokens_minted` survive.
+  // The AUDIT_EVENTS allowlist in
   // constants.js documents the canonical vocabulary.
   audit(event, meta = {}) {
     // Default param only fires for `undefined`. A caller passing `null`

@@ -126,8 +126,9 @@
  *   a ledger the operator is trying to clean up. Reclaim resolves its host
  *   from the ambient QURL_ENDPOINT, so each ledger line records the endpoint
  *   it was written against and a sweep refuses to run against a different one.
- *   Re-running is safe: revoked ids are pruned and an already-gone resource
- *   counts as reclaimed.
+ *   Re-running is safe: revoked ids are pruned, and only an explicit terminal
+ *   response counts an already-gone resource as reclaimed. Ambiguous 404s
+ *   remain in the ledger for manual verification.
  *
  *   Two windows this cannot close, both leaking exactly the resource in hand:
  *   a create that succeeds server-side whose response is then lost, and a
@@ -163,6 +164,12 @@ if (require.main === module && fs.existsSync(envFile)) {
 const config = require('../src/config');
 const { mintLinks, reUploadBuffer } = require('../src/connector');
 const { createOneTimeLink, deleteLink } = require('../src/qurl');
+const {
+  hasSafeResourceIdShape,
+  LEGACY_RESOURCE_ID_PREFIX,
+  maskResourceIdPath,
+} = require('../src/utils/resource-id');
+const { isGoneQurlApiError, qurlApiErrorStatus } = require('../src/utils/qurl-errors');
 
 // The same pool depth the send pipeline batches against — imported, not
 // copied, so a change to the cap reaches this script instead of silently
@@ -959,34 +966,13 @@ async function trackCreate(fn) {
 // deleting the parent file resource revokes every qURL minted against it
 // (shared/client/client.go documents the cascade).
 function recordResource(resourceId, kind) {
-  // The same charset guard deleteLink applies bot-side (validateResourceId,
-  // src/qurl.js), not a stricter one. A revision of this check also required
-  // qurl-service's `r_` prefix, on the reasoning that an id passing charset
-  // but failing the SDK's semantic check would be swept as a failure forever.
-  // That reasoning is sound but the check was wrong here: `validateResourceId`
-  // is charset-only *by design*, deferring the prefix to the SDK, and `res-1`
-  // is this repo's fixture convention for a resource id across eight test
-  // files. Being stricter than the codebase's own guard rejected ids the rest
-  // of it treats as valid, and warned on ordinary fixtures.
-  //
-  // The residual risk is accepted: a charset-clean non-`r_` id can only come
-  // from the server, which does not produce one, and if it ever did the
-  // repeated failure is visible in the sweep's cause tally.
-  if (!resourceId || typeof resourceId !== 'string' || !/^[\w-]+$/.test(resourceId)) {
-    // Loud, but deliberately NOT fatal to the run.
-    //
-    // An earlier revision set `stopping` here, on the reasoning that whatever
-    // produced one unusable id produces another every round. The reasoning
-    // holds; the mechanism does not. It couples a diagnostic to destructive
-    // control flow — one malformed id silently truncates the round mid-batch —
-    // and `res-1` is this repo's fixture convention for a resource id across
-    // eight test files, so any caller or suite that stubs an upload trips it.
-    // Merging #1173's re-upload leg surfaced exactly that: nine accounting
-    // tests failed because the round stopped after its first batch.
-    //
-    // In production the id is always `r_`-shaped, so this branch is
-    // effectively unreachable and stopping bought nothing real. The warning is
-    // what carries the diagnostic.
+  // Share deleteLink's transport guard so every recorded ID is sweepable and
+  // a malformed service response cannot persist a bearer token in the ledger.
+  // Warn rather than stopping: a malformed upload response is worth surfacing,
+  // but must not silently truncate the rest of a load-test round. `res-1` is
+  // the repo-wide resource-ID fixture convention; making this warning fatal
+  // previously stopped ordinary fixture-backed rounds after their first batch.
+  if (!hasSafeResourceIdShape(resourceId)) {
     console.error(`WARNING: ${kind} response carried no usable resource_id — that resource cannot be reclaimed.`);
     return;
   }
@@ -1109,8 +1095,8 @@ function pruneLedger(ledgerPath, remainingIds) {
 }
 
 // Revoke everything recorded in the ledger. Returns { missing, revoked, failed }.
-// Safe to re-run: successfully revoked ids are pruned, and an already-gone
-// resource counts as revoked rather than failed.
+// Safe to re-run: successfully revoked ids are pruned, and only an explicit
+// terminal response counts an already-gone resource as revoked.
 async function reclaim(ledgerPath) {
   stopping = true;
 
@@ -1156,6 +1142,9 @@ async function reclaim(ledgerPath) {
   const outstanding = new Set();
   const causes = new Map();
   let revoked = 0;
+  let legacyRejected = 0;
+  let ambiguousNotFound = 0;
+  let invalidLedgerIds = 0;
 
   // Drain rather than sweep once. An in-flight round can append after the
   // snapshot is taken, so keep passing until a pass finds nothing new.
@@ -1192,26 +1181,30 @@ async function reclaim(ledgerPath) {
         revoked++;
         outstanding.delete(id);
       } catch (e) {
-        // An already-gone resource is the successful end state for a reclaim.
-        // callQurl collapses API errors to a status-only string, so matching
-        // the status is all that is available.
+        // An explicitly gone resource is the successful end state for a
+        // reclaim. callQurl preserves the HTTP status structurally; an exact
+        // formatted message fallback covers serialized errors that lost it.
         //
-        // TODO(upstream-contract): 404 and 410 are the statuses qurl-service
-        // uses for a resource that no longer exists. If it adopts another,
-        // nothing here fails loudly — a re-run would simply sweep the same
-        // ids forever, reporting them as failures.
-        if (/\((404|410)\)/.test(e.message)) {
+        // TODO(upstream-contract): DELETE /resources returns 204 for a known
+        // revoked row. A 404 is ambiguous (absent, wrong owner/key, or public-ID
+        // resolution miss) and stays retryable; only 410 proves a gone state.
+        // If that changes, re-runs retain the row and report a visible failure.
+        if (isGoneQurlApiError(e)) {
           revoked++;
           outstanding.delete(id);
         } else {
           outstanding.add(id);
-          // Keyed on the cause, not the raw message. callQurl embeds the
-          // request path — and therefore the resource id — in every message,
-          // so keying on it verbatim gives one bucket per failing id: a
-          // uniform 401 across 5,000 ids would print 5,000 lines of "1x"
-          // instead of "5000x", defeating the tally and flooding the very
-          // scrollback the heartbeat is trying to keep readable.
-          const cause = e.message.replace(/\/qurls\/\S+/, '/qurls/<id>');
+          const status = qurlApiErrorStatus(e);
+          // TODO(upstream-contract): qurl-service public routes reject the
+          // retired private r_ identifier cohort with 400. Those rows cannot
+          // drain automatically, so distinguish them from transient failures.
+          if (!hasSafeResourceIdShape(id)) invalidLedgerIds++;
+          else if (id.startsWith(LEGACY_RESOURCE_ID_PREFIX) && status === 400) legacyRejected++;
+          else if (status === 404) ambiguousNotFound++;
+          // Keyed on a scrubbed cause. callQurl uses a static route label, but
+          // this also protects aggregation from foreign/serialized errors that
+          // still contain a concrete resource path.
+          const cause = maskResourceIdPath(e?.message ?? e);
           causes.set(cause, (causes.get(cause) || 0) + 1);
         }
       }
@@ -1242,8 +1235,18 @@ async function reclaim(ledgerPath) {
   for (const [message, n] of [...causes.entries()].sort((a, b) => b[1] - a[1])) {
     console.error(`  ${n}x ${message}`);
   }
-  if (failed > 0) {
-    console.error(`Reclaim: ${failed} resource(s) still on the tenancy — re-run with --reclaim ${ledgerPath}`);
+  if (legacyRejected > 0) {
+    console.error(`Reclaim: ${legacyRejected} legacy resource ID(s) were rejected with 400 and cannot be reclaimed automatically; remove them only after confirming their links expired.`);
+  }
+  if (ambiguousNotFound > 0) {
+    console.error(`Reclaim: ${ambiguousNotFound} resource(s) returned 404 and remain in the ledger; verify the owner/key and absence manually before pruning.`);
+  }
+  if (invalidLedgerIds > 0) {
+    console.error(`Reclaim: ${invalidLedgerIds} invalid ledger resource ID(s) cannot be reclaimed automatically; correct or remove them only after manual verification.`);
+  }
+  const retryable = failed - legacyRejected - ambiguousNotFound - invalidLedgerIds;
+  if (retryable > 0) {
+    console.error(`Reclaim: ${retryable} other resource(s) failed with potentially retryable errors — re-run with --reclaim ${ledgerPath}`);
   }
   return { missing: false, revoked, failed };
 }

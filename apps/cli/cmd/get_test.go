@@ -5,30 +5,33 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/layervai/qurl-integrations/apps/cli/internal/apitest"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/consume"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/exitcode"
 )
 
 // T3/T4 tests for `qurl get`: the real command tree against the mock qURL
 // API and its link-host route, plus the harness contracts (no hangs, no
 // browser off a terminal, binary-clean stdout).
 
-// resolveRoute is the mock's resolve path for the fixture CRID.
-func resolveRoute(srv *apitest.Server) string {
-	return "/v1/resources/" + srv.Key.CRID + "/resolve"
+// shareRoute is the mock's share path for the fixture CRID.
+func shareRoute(srv *apitest.Server) string {
+	return "/v1/resources/" + srv.Key.CRID + "/share"
 }
 
-// downloadServer returns a mock whose resolve answers point at its own
+// downloadServer returns a mock whose share answers point at its own
 // link-host route, so downloads stay in-process.
 func downloadServer(t *testing.T) *apitest.Server {
 	t.Helper()
 	srv := apitest.NewServer(t)
-	srv.SetResolveQURL(srv.URL + apitest.DownloadPath)
+	srv.SetShareQURL(srv.URL + apitest.DownloadPath)
 	return srv
 }
 
@@ -60,18 +63,18 @@ func TestGetDownloadEndToEnd(t *testing.T) {
 
 	requests := srv.Requests()
 	if len(requests) != 2 {
-		t.Fatalf("requests = %d, want resolve then download", len(requests))
+		t.Fatalf("requests = %d, want share then download", len(requests))
 	}
-	if requests[0].Method != http.MethodPost || requests[0].Path != resolveRoute(srv) {
-		t.Errorf("first request = %s %s, want the resolve", requests[0].Method, requests[0].Path)
+	if requests[0].Method != http.MethodPost || requests[0].Path != shareRoute(srv) {
+		t.Errorf("first request = %s %s, want the share", requests[0].Method, requests[0].Path)
 	}
 	if requests[1].Method != http.MethodGet || requests[1].Path != apitest.DownloadPath {
 		t.Errorf("second request = %s %s, want the download GET", requests[1].Method, requests[1].Path)
 	}
-	// The API credential authenticates the resolve and must never follow
+	// The API credential authenticates the share and must never follow
 	// the minted link to the download host.
 	if auth := requests[0].Header.Get("Authorization"); auth == "" {
-		t.Error("resolve request lost its Authorization header")
+		t.Error("share request lost its Authorization header")
 	}
 	if auth := requests[1].Header.Get("Authorization"); auth != "" {
 		t.Errorf("download request carried Authorization (%d bytes); the key must never reach the link host", len(auth))
@@ -79,7 +82,7 @@ func TestGetDownloadEndToEnd(t *testing.T) {
 }
 
 // TestGetExpiryRetrySequence pins the T3 retry contract end to end: first
-// GET 410 → re-resolve → second GET succeeds.
+// GET 410 → fresh share → second GET succeeds.
 func TestGetExpiryRetrySequence(t *testing.T) {
 	srv := downloadServer(t)
 	srv.Script(http.MethodGet, apitest.DownloadPath, handlerGone)
@@ -103,9 +106,9 @@ func TestGetExpiryRetrySequence(t *testing.T) {
 		sequence = append(sequence, req.Method+" "+req.Path)
 	}
 	want := []string{
-		http.MethodPost + " " + resolveRoute(srv),
+		http.MethodPost + " " + shareRoute(srv),
 		http.MethodGet + " " + apitest.DownloadPath,
-		http.MethodPost + " " + resolveRoute(srv),
+		http.MethodPost + " " + shareRoute(srv),
 		http.MethodGet + " " + apitest.DownloadPath,
 	}
 	if strings.Join(sequence, "\n") != strings.Join(want, "\n") {
@@ -116,7 +119,7 @@ func TestGetExpiryRetrySequence(t *testing.T) {
 	}
 }
 
-// TestGetRetryReverifiesFreshAnswer pins that the mid-download re-resolve
+// TestGetRetryReverifiesFreshAnswer pins that the mid-download fresh share
 // goes through the same fail-closed verification: a substituted answer on
 // the retry aborts with exit 12 and no file.
 func TestGetRetryReverifiesFreshAnswer(t *testing.T) {
@@ -134,7 +137,7 @@ func TestGetRetryReverifiesFreshAnswer(t *testing.T) {
 			}, nil)
 		}
 	}
-	srv.Script(http.MethodPost, resolveRoute(srv), mintAnswer(srv.Key.CRID), mintAnswer(otherCRID))
+	srv.Script(http.MethodPost, shareRoute(srv), mintAnswer(srv.Key.CRID), mintAnswer(otherCRID))
 	srv.Script(http.MethodGet, apitest.DownloadPath, handlerGone)
 	dest := filepath.Join(t.TempDir(), "out.bin")
 
@@ -203,11 +206,11 @@ func TestGetBrowserFailureStillLeavesTheLink(t *testing.T) {
 }
 
 // TestGetVerifyMismatchNeverActs pins fail-closed ordering: a mismatched
-// resolve answer means no browser, no bytes, exit 12.
+// share answer means no browser, no bytes, exit 12.
 func TestGetVerifyMismatchNeverActs(t *testing.T) {
 	srv := apitest.NewServer(t)
 	other := apitest.GenerateResourceKey(t)
-	srv.SetResolveCRID(other.CRID)
+	srv.SetShareCRID(other.CRID)
 	browser := &fakeBrowser{}
 
 	res := runCLI(t, &runOpts{
@@ -238,7 +241,7 @@ func TestGetPipedWithoutFileRefusedBeforeNetwork(t *testing.T) {
 		t.Fatalf("exit = %d, want 2; stderr: %s", res.code, res.stderr.String())
 	}
 	mustEmptyStdout(t, res)
-	for _, remedy := range []string{"--file", "qurl resolve"} {
+	for _, remedy := range []string{"--file", "qurl share"} {
 		if !strings.Contains(res.stderr.String(), remedy) {
 			t.Errorf("refusal must point at %s, got %q", remedy, res.stderr.String())
 		}
@@ -333,7 +336,7 @@ func TestGetUsageRefusals(t *testing.T) {
 }
 
 // TestGetTestCRIDOnProductionRefusedWithoutYes pins the same environment
-// guard resolve and delete carry, on the same exit code, before any
+// guard share and delete carry, on the same exit code, before any
 // request — and that no browser starts either.
 func TestGetTestCRIDOnProductionRefusedWithoutYes(t *testing.T) {
 	srv := apitest.NewServer(t) // never contacted
@@ -426,7 +429,7 @@ func mustNotExistCmd(t *testing.T, path string) {
 	}
 }
 
-// portalServer returns a mock whose resolve answers mint a
+// portalServer returns a mock whose share answers mint a
 // fragment-credential link at the mock's own in-browser page route, plus
 // that link. A plain GET of it can only ever fetch the page (the fragment
 // never leaves the client), which is exactly what the tests below must
@@ -435,7 +438,7 @@ func portalServer(t *testing.T) (srv *apitest.Server, link string) {
 	t.Helper()
 	srv = apitest.NewServer(t)
 	link = srv.URL + apitest.PortalPath + "#qv2t1.1.1.1.claims.secret.sig"
-	srv.SetResolveQURL(link)
+	srv.SetShareQURL(link)
 	return srv, link
 }
 
@@ -463,9 +466,13 @@ func TestGetDownloadFetchesGrantedContentNotPortalPage(t *testing.T) {
 
 	res := runCLI(t, &runOpts{
 		args: []string{"--endpoint", srv.URL, "get", srv.Key.CRID, "--file", dest},
-		enterPortal: func(_ context.Context, got string) (string, error) {
+		enterPortalGrant: func(_ context.Context, got string) (consume.AccessGrant, error) {
 			granted = append(granted, got)
-			return srv.URL + apitest.DownloadPath, nil
+			return consume.AccessGrant{
+				ContentURL:              srv.URL + apitest.DownloadPath,
+				OpenSeconds:             300,
+				AuthorizeContentRequest: func(*http.Request) error { return nil },
+			}, nil
 		},
 	})
 	if res.code != 0 {
@@ -495,8 +502,8 @@ func TestGetPortalLinkNotConfiguredFailsLoudly(t *testing.T) {
 
 	res := runCLI(t, &runOpts{
 		args: []string{"--endpoint", srv.URL, "get", srv.Key.CRID, "--file", dest},
-		enterPortal: func(context.Context, string) (string, error) {
-			return "", consume.ErrAccessNotConfigured
+		enterPortalGrant: func(context.Context, string) (consume.AccessGrant, error) {
+			return consume.AccessGrant{}, consume.ErrAccessNotConfigured
 		},
 	})
 	if res.code != 3 {
@@ -518,15 +525,15 @@ func TestGetPortalLinkNotConfiguredFailsLoudly(t *testing.T) {
 func TestGetRetiredQv2LinkFailsThroughAccessFlow(t *testing.T) {
 	srv := apitest.NewServer(t)
 	link := srv.URL + apitest.PortalPath + "#qv2.claims.secret.sig"
-	srv.SetResolveQURL(link)
+	srv.SetShareQURL(link)
 	dest := filepath.Join(t.TempDir(), "out.bin")
 	var opened []string
 
 	res := runCLI(t, &runOpts{
 		args: []string{"--endpoint", srv.URL, "get", srv.Key.CRID, "--file", dest},
-		enterPortal: func(_ context.Context, got string) (string, error) {
+		enterPortalGrant: func(_ context.Context, got string) (consume.AccessGrant, error) {
 			opened = append(opened, got)
-			return "", consume.ErrLinkVerification
+			return consume.AccessGrant{}, consume.ErrLinkVerification
 		},
 	})
 	if res.code != 12 {
@@ -551,9 +558,9 @@ func TestGetDirectLinkDownloadsWithoutAccessRequest(t *testing.T) {
 
 	res := runCLI(t, &runOpts{
 		args: []string{"--endpoint", srv.URL, "get", srv.Key.CRID, "--file", dest},
-		enterPortal: func(context.Context, string) (string, error) {
+		enterPortalGrant: func(context.Context, string) (consume.AccessGrant, error) {
 			calls++
-			return "", errors.New("the direct path must not request access")
+			return consume.AccessGrant{}, errors.New("the direct path must not request access")
 		},
 	})
 	if res.code != 0 {
@@ -567,10 +574,44 @@ func TestGetDirectLinkDownloadsWithoutAccessRequest(t *testing.T) {
 	}
 }
 
-// TestGetExpiryRetryRepeatsAccessRequest extends the T3 retry contract to
-// the access flow: a 410 on the granted content URL re-resolves, re-runs
-// verification, and asks for access again — never reuses the stale grant.
-func TestGetExpiryRetryRepeatsAccessRequest(t *testing.T) {
+func TestGetLiveGrantRetriesWithoutSecondAccessRequest(t *testing.T) {
+	srv, link := portalServer(t)
+	srv.Script(http.MethodGet, apitest.DownloadPath, handlerGone)
+	dest := filepath.Join(t.TempDir(), "out.bin")
+	var granted []string
+	var authorized atomic.Int32
+
+	res := runCLI(t, &runOpts{
+		args: []string{"--endpoint", srv.URL, "get", srv.Key.CRID, "--file", dest},
+		enterPortalGrant: func(_ context.Context, got string) (consume.AccessGrant, error) {
+			granted = append(granted, got)
+			return consume.AccessGrant{
+				ContentURL: srv.URL + apitest.DownloadPath, OpenSeconds: 300,
+				AuthorizeContentRequest: func(*http.Request) error {
+					authorized.Add(1)
+					return nil
+				},
+			}, nil
+		},
+	})
+	if res.code != 0 {
+		t.Fatalf("exit = %d, stderr: %s", res.code, res.stderr.String())
+	}
+	if len(granted) != 1 || granted[0] != link {
+		t.Fatalf("access requests = %q, want the minted link exactly once", granted)
+	}
+	if authorized.Load() != 2 {
+		t.Fatalf("grant authorizer calls = %d, want 2 (initial request and same-grant retry)", authorized.Load())
+	}
+	if got := readTestFile(t, dest); string(got) != apitest.DefaultDownloadPayload {
+		t.Errorf("downloaded file = %q, want the granted content payload", got)
+	}
+	mustNeverFetchPortalPage(t, srv)
+}
+
+// A grant with no retained lifetime is expired for retry purposes. A 410 then
+// gets exactly one fresh verified share and access request.
+func TestGetExpiredGrantRepeatsAccessRequest(t *testing.T) {
 	srv, link := portalServer(t)
 	srv.Script(http.MethodGet, apitest.DownloadPath, handlerGone)
 	dest := filepath.Join(t.TempDir(), "out.bin")
@@ -578,9 +619,9 @@ func TestGetExpiryRetryRepeatsAccessRequest(t *testing.T) {
 
 	res := runCLI(t, &runOpts{
 		args: []string{"--endpoint", srv.URL, "get", srv.Key.CRID, "--file", dest},
-		enterPortal: func(_ context.Context, got string) (string, error) {
+		enterPortalGrant: func(_ context.Context, got string) (consume.AccessGrant, error) {
 			granted = append(granted, got)
-			return srv.URL + apitest.DownloadPath, nil
+			return consume.AccessGrant{ContentURL: srv.URL + apitest.DownloadPath}, nil
 		},
 	})
 	if res.code != 0 {
@@ -593,6 +634,45 @@ func TestGetExpiryRetryRepeatsAccessRequest(t *testing.T) {
 		t.Errorf("downloaded file = %q, want the granted content payload", got)
 	}
 	mustNeverFetchPortalPage(t, srv)
+}
+
+func TestGetDownloadErrorDoesNotExposeGrantedURL(t *testing.T) {
+	srv, _ := portalServer(t)
+	const capability = "capability-secret"
+	secretURL := srv.URL + "/" + capability + "\n"
+
+	res := runCLI(t, &runOpts{
+		args: []string{"--endpoint", srv.URL, "get", srv.Key.CRID, "--file", filepath.Join(t.TempDir(), "out.bin")},
+		enterPortalGrant: func(context.Context, string) (consume.AccessGrant, error) {
+			return consume.AccessGrant{ContentURL: secretURL, OpenSeconds: 300}, nil
+		},
+	})
+	if res.code != exitcode.ServerError {
+		t.Fatalf("exit = %d, want %d; stderr: %s", res.code, exitcode.ServerError, res.stderr.String())
+	}
+	if strings.Contains(res.stderr.String(), secretURL) || strings.Contains(res.stderr.String(), capability) {
+		t.Fatalf("rendered error exposed granted authority: %q", res.stderr.String())
+	}
+}
+
+func TestGetDownloadTransportErrorIsRedactedAndUnavailable(t *testing.T) {
+	srv, _ := portalServer(t)
+	closed := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	secretURL := closed.URL + "/capability-secret"
+	closed.Close()
+
+	res := runCLI(t, &runOpts{
+		args: []string{"--endpoint", srv.URL, "get", srv.Key.CRID, "--file", filepath.Join(t.TempDir(), "out.bin")},
+		enterPortalGrant: func(context.Context, string) (consume.AccessGrant, error) {
+			return consume.AccessGrant{ContentURL: secretURL, OpenSeconds: 300}, nil
+		},
+	})
+	if res.code != exitcode.Unavailable {
+		t.Fatalf("exit = %d, want %d; stderr: %s", res.code, exitcode.Unavailable, res.stderr.String())
+	}
+	if strings.Contains(res.stderr.String(), secretURL) || strings.Contains(res.stderr.String(), "capability-secret") {
+		t.Fatalf("rendered transport error exposed granted authority: %q", res.stderr.String())
+	}
 }
 
 // TestGetBrowserPathNeverRequestsAccess pins that browser mode carries the
@@ -608,9 +688,9 @@ func TestGetBrowserPathNeverRequestsAccess(t *testing.T) {
 		args:    []string{"--endpoint", srv.URL, "get", srv.Key.CRID},
 		tty:     true,
 		browser: browser,
-		enterPortal: func(context.Context, string) (string, error) {
+		enterPortalGrant: func(context.Context, string) (consume.AccessGrant, error) {
 			calls++
-			return "", errors.New("browser mode must not request access")
+			return consume.AccessGrant{}, errors.New("browser mode must not request access")
 		},
 	})
 	if res.code != 0 {

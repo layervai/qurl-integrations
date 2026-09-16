@@ -186,6 +186,40 @@ func (h *Handler) revokeResourceResult(ctx context.Context, log *slog.Logger, te
 		log.Error("revoke: failed to get API key", "error", err, "team_id", teamID, "user_id", userID)
 		return newActionCoreResult(false, authErrorMessage(err), "Workspace API key was not available.")
 	}
+	resource, err := c.GetResource(ctx, resourceID)
+	if err != nil {
+		var apiErr *client.APIError
+		if errors.As(err, &apiErr) {
+			switch apiErr.StatusCode {
+			case http.StatusNotFound, http.StatusGone:
+				log.Info("revoke: resource not found before lifecycle teardown", "team_id", teamID, "user_id", userID, "resource_id", resourceID)
+				h.purgeResourceBindings(ctx, log, teamID, resourceID)
+				return newActionCoreResult(false, fmt.Sprintf("`$%s` not found — already revoked, or check the id.", escapeMrkdwnCode(displayToken)), "Resource was not found or was already revoked.")
+			case http.StatusUnauthorized, http.StatusForbidden:
+				log.Warn("revoke: upstream auth rejected", "status", apiErr.StatusCode, "team_id", teamID, "user_id", userID, "resource_id", resourceID)
+				return newActionCoreResult(false, "This workspace's API key was rejected by the qURL service — re-run `/qurl setup <email>` to reconnect.", "Workspace API key was rejected.")
+			}
+		}
+		log.Error("read resource before revoke failed", "error", err, "team_id", teamID, "user_id", userID, "resource_id", resourceID)
+		return newActionCoreResult(false, ":warning: "+sanitizeAPIError(err, fmt.Sprintf("Failed to inspect `$%s` before revoke", escapeMrkdwnCode(displayToken))), "Resource could not be inspected before revoke.")
+	}
+	switch resource.Type {
+	case client.ResourceTypeTunnel:
+		if _, err := c.SetSharing(ctx, resourceID, "off"); err != nil {
+			var apiErr *client.APIError
+			if !errors.As(err, &apiErr) || (apiErr.StatusCode != http.StatusNotFound && apiErr.StatusCode != http.StatusGone) {
+				log.Error("stop tunnel sharing before revoke failed", "error", err, "team_id", teamID, "user_id", userID, "resource_id", resourceID)
+				return newActionCoreResult(false, ":warning: "+sanitizeAPIError(err, fmt.Sprintf("Failed to stop sharing `$%s` before revoke", escapeMrkdwnCode(displayToken))), "Sharing could not be stopped before revoke.")
+			}
+			// A concurrent delete already achieved the desired fail-closed state;
+			// continue into idempotent DELETE so cleanup/reply behavior converges.
+		}
+	case client.ResourceTypeURL:
+		// URL resources have no Connector lifecycle state.
+	default:
+		log.Error("revoke: resource response has unknown type", "type", resource.Type, "team_id", teamID, "user_id", userID, "resource_id", resourceID)
+		return newActionCoreResult(false, ":warning: Failed to revoke the resource because its type was not recognized.", "Resource type was not recognized.")
+	}
 	if err := c.DeleteResource(ctx, resourceID); err != nil {
 		var apiErr *client.APIError
 		if errors.As(err, &apiErr) {

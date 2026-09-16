@@ -1765,6 +1765,7 @@ func TestCallbackExplicitRotationOnLegacyRowMintsWithoutRevoke(t *testing.T) {
 	store.mu.Unlock()
 	if setArgs == nil {
 		t.Fatal("replacement key must be persisted so the workspace keeps working")
+		return
 	}
 	// The rotation must record key identity, so this workspace takes the normal
 	// revoke-then-replace path next time instead of orphaning a second key.

@@ -5,6 +5,7 @@
 // boot in prod with missing secrets OR die on a spurious false-positive.
 
 const { MIN_STATE_SECRET_LENGTH } = require('./utils/oauth-state');
+const { INFRA_SEED_SENTINEL, isInfraSeedSentinel } = require('./utils/webhook-secret');
 const {
   IPV4_LITERAL_RE,
   parseIPv4Octets,
@@ -244,50 +245,8 @@ function missingEventShipperKeys(cfg) {
   return cfg.QURL_BOT_EVENTS_QUEUE_URL ? [] : ['QURL_BOT_EVENTS_QUEUE_URL'];
 }
 
-// View-update push (feat #60). Mirrors missingEventShipperKeys: when
-// ENABLE_VIEW_UPDATE_PUSH=true, QURL_BOT_VIEW_UPDATES_QUEUE_URL is
-// required. A misconfigured deploy would otherwise drop every view
-// event silently (publisher) or throw at start() (consumer); the
-// uniform boot-time check makes the failure mode loud and consistent
-// with the existing event-shipper gate.
-//
-// Intentionally no combined-mode rejector (no analog of
-// unsupportedRoleShipperCombo). The registry's silent-drop-on-miss +
-// status==='opened' idempotency guard make combined-mode safe: a
-// duplicate dispatch within one process is a no-op at the handler
-// layer. Pinned by tests/boot-requirements.test.js's absence
-// assertion — a copy-paste-from-shipper refactor that adds a
-// rejector would fail that test.
-function missingViewUpdatePushKeys(cfg) {
-  if (!cfg.ENABLE_VIEW_UPDATE_PUSH) return [];
-  return cfg.QURL_BOT_VIEW_UPDATES_QUEUE_URL ? [] : ['QURL_BOT_VIEW_UPDATES_QUEUE_URL'];
-}
-
-// PROCESS_ROLE=combined paired with ENABLE_EVENT_SHIPPER=true is
-// unsupported and rejected at boot. In combined mode both `isGateway`
-// and `isHttp` evaluate true, which derives `isWorker=true`, which
-// would arm both the gateway-side publish hook AND the worker-side
-// consumer in one process. Every interaction would land twice: once
-// via the in-process gateway WS frame, once via the SQS round-trip.
-// Side effects (DM fan-out, flow-state writes) double; telemetry
-// reports two dispatches per real interaction. The listener gate
-// alone can't close this — discord.js's InteractionCreate action
-// fires synchronously on the gateway WS frame regardless of whether
-// the local listener is registered, so even gating the worker-side
-// dispatcher leaves the gateway publish path firing alongside the
-// consumer.
-//
-// The supported flag-on shape is the two-process split: a separate
-// PROCESS_ROLE=gateway (singleton) publishing to SQS, and one or
-// more PROCESS_ROLE=http replicas consuming. Combined mode stays
-// supported for sandbox / local-dev / pre-split deployments —
-// just with the flag off, running the legacy in-process path.
-//
-// Returns the operator-facing message on rejection or null on
-// success. Kept as a string-or-null rather than throwing so the
-// caller in index.js logs the message + exits via the same pattern
-// as missingBootKeys (one log + process.exit) rather than handling
-// a thrown error specially.
+// Combined mode would dispatch each interaction both in-process and through
+// SQS. Keep the flag for the supported split gateway and HTTP processes.
 function unsupportedRoleShipperCombo(role, eventShipperEnabled) {
   if (role === 'combined' && eventShipperEnabled) {
     return (
@@ -302,7 +261,7 @@ function unsupportedRoleShipperCombo(role, eventShipperEnabled) {
 }
 
 // Parallel to unsupportedRoleShipperCombo for ENABLE_GATEWAY_RESUME.
-// Three unsupported shapes:
+// Two unsupported shapes:
 //
 //   1. resume=true with role=combined — combined mode runs both
 //      tiers in one process, which the legacy discord.js Client
@@ -314,19 +273,9 @@ function unsupportedRoleShipperCombo(role, eventShipperEnabled) {
 //      `client.on('interactionCreate')` emitter to attach to. The
 //      flag-on path is only coherent when the shipper has already
 //      moved dispatch to SQS.
-//   3. resume=true with storeType!=ddb — the resume guarantee only
-//      holds when session state is persisted across processes.
-//      A non-ddb backend (none supported today; this branch is a
-//      defense-in-depth canary for a future backend addition)
-//      would lack the cross-process visibility the resume path
-//      needs, and a resume against the previous sequence would
-//      fail every restart. Rejecting at boot is preferable to a
-//      silent IDENTIFY-every-restart degradation that mimics
-//      flag-off behavior.
-//
 // Returns the operator-facing message on rejection or null on
 // success. Same string-or-null shape as unsupportedRoleShipperCombo.
-function unsupportedRoleResumeCombo(role, resumeEnabled, eventShipperEnabled, storeType) {
+function unsupportedRoleResumeCombo(role, resumeEnabled, eventShipperEnabled) {
   if (!resumeEnabled) return null;
   if (role === 'combined') {
     return (
@@ -352,30 +301,12 @@ function unsupportedRoleResumeCombo(role, resumeEnabled, eventShipperEnabled, st
       'the shipper first, or leave ENABLE_GATEWAY_RESUME unset.'
     );
   }
-  // Defense-in-depth canary: `store/index.js` already rejects every
-  // non-ddb STORE_TYPE at module load with a listing-of-valid-backends
-  // error, so in practice the bot can't reach this function with a
-  // non-ddb value. This branch survives so that if a future PR adds a
-  // second backend to `VALID_BACKENDS` without thinking through the
-  // RESUME cross-process semantics, the bot still refuses to boot the
-  // unsupported combo instead of silently IDENTIFYing every restart.
-  if (storeType !== 'ddb') {
-    return (
-      `ENABLE_GATEWAY_RESUME=true requires STORE_TYPE=ddb (got '${storeType}'). ` +
-      'Cross-process RESUME persists session state to the gateway-session DDB ' +
-      'table; any non-ddb backend lacks the cross-process visibility the next ' +
-      'process needs. Set STORE_TYPE=ddb (or leave unset to take the default) ' +
-      'in the deployment template, or leave ENABLE_GATEWAY_RESUME unset.'
-    );
-  }
   return null;
 }
 
 // Parallel to unsupportedRoleResumeCombo for ENABLE_GATEWAY_HOT_STANDBY.
 // Caller guarantees the upstream resume combo check has already run
-// (resumeEnabled=true → shipper+ddb already validated upstream), so
-// the 3-arg signature here is sufficient — no need to re-check
-// shipper/storeType.
+// (resumeEnabled=true means the shipper was validated upstream).
 //
 // Two unsupported shapes:
 //
@@ -556,21 +487,13 @@ function invalidStateSecretValues(cfg) {
 
 // PLACEHOLDER is treated as missing because the SSM parameter
 // ships with that literal sentinel value; remediation ("seed a
-// real key") is identical to the empty-key case.
-//
-// TODO(infra-sentinel-sync): the literal "PLACEHOLDER" is also
-// the seed value for `aws_ssm_parameter.bot` in
-// qurl-integrations-infra/qurl-bot-discord/terraform/main.tf
-// (search that repo for `value = "PLACEHOLDER"`). If infra ever
-// renames the sentinel (e.g., "REPLACE_ME"), update here in
-// lockstep — otherwise the boot check silently regresses to
-// "non-empty value passes" and the original incident class
-// returns. `git grep TODO(infra-sentinel-sync)` finds the marker.
-const GOOGLE_MAPS_API_KEY_PLACEHOLDER_SENTINEL = 'PLACEHOLDER';
+// real key") is identical to the empty-key case. The literal and its
+// TODO(infra-sentinel-sync) lockstep marker live in utils/webhook-secret.js.
+const GOOGLE_MAPS_API_KEY_PLACEHOLDER_SENTINEL = INFRA_SEED_SENTINEL;
 function missingMapCommandKeys(cfg) {
   if (!cfg.MAP_COMMAND_ENABLED) return [];
   const key = cfg.GOOGLE_MAPS_API_KEY;
-  if (!key || key === GOOGLE_MAPS_API_KEY_PLACEHOLDER_SENTINEL) {
+  if (!key || isInfraSeedSentinel(key)) {
     return ['GOOGLE_MAPS_API_KEY'];
   }
   return [];
@@ -651,7 +574,6 @@ module.exports = {
   missingKekRequiredKeys,
   baseUrlHttpsProblem,
   missingEventShipperKeys,
-  missingViewUpdatePushKeys,
   unsupportedRoleShipperCombo,
   unsupportedRoleResumeCombo,
   unsupportedRoleHotStandbyCombo,

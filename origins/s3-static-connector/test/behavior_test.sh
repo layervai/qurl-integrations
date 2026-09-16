@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # Behavior test: build the image and run it against a local stub S3, asserting
 # the runtime contract — clean URLs, the exact security headers (on
-# 200/404/405/5xx), query-string-tolerant caching, 403->404 / 5xx->502 error mapping,
-# Content-Type/Cache-Control passthrough, Range + HEAD, and that Envoy attaches
-# a SigV4 Authorization header over the correctly-canonicalized path.
+# 200/404/405/5xx), query-string-tolerant caching, the error mapping that masks
+# every upstream status but a 2xx object hit, the scrubbing of the x-amz-*/Envoy
+# headers that would fingerprint the origin, Content-Type/Cache-Control
+# passthrough, Range + HEAD, and that Envoy attaches a SigV4 Authorization
+# header over the correctly-canonicalized path.
 #
 # The stub does not verify signatures (no shared secret); real SigV4 crypto is
 # validated against S3 during the staging soak. See test/sigv4_fixtures.txt.
@@ -391,6 +393,50 @@ expect_eq "throttle status" "$(status_code)" 502
 expect_eq "throttle body" "$(cat "$B")" "Bad Gateway"
 expect_origin_log "throttle logged upstream_status 429" '"upstream_status":"429"'
 
+# 9d. Every other upstream status is masked too, not just the handful the
+# intercept list used to enumerate. The pinned pre-fix digest passes S3's 3xx
+# and 501 responses straight through, so these ride the same waiver as the
+# control-char contract below.
+if [ "$waive_security_contract" != "true" ]; then
+  # Slack only validates the shape of the region an admin types, so a mistyped
+  # region reaches S3 as a wrong-region request and S3 answers 301
+  # PermanentRedirect — a body naming the private bucket and its true region.
+  fetch "$base/wrongregion.html"
+  expect_eq "wrong-region 301 status" "$(status_code)" 404
+  expect_eq "wrong-region 301 body" "$(cat "$B")" "Not Found"
+  case "$(cat "$B")" in
+    *example-private-site*|*eu-west-1*|*PermanentRedirect*)
+      no "wrong-region 301 body discloses bucket or region" ;;
+    *) ok "wrong-region 301 body discloses no bucket or region" ;;
+  esac
+  expect_eq "wrong-region 301 hides x-amz-bucket-region" "$(hval x-amz-bucket-region)" ""
+  if docker logs "$ORIGIN" 2>&1 | grep -q '"upstream_status":"301"'; then ok "wrong-region logged upstream_status 301"; else no "wrong-region not logged as upstream 301"; fi
+
+  # 501 sits outside every status family the intercept list used to name.
+  fetch "$base/notimplemented.html"
+  expect_eq "notimplemented status" "$(status_code)" 502
+  expect_eq "notimplemented body" "$(cat "$B")" "Bad Gateway"
+  if docker logs "$ORIGIN" 2>&1 | grep -q '"upstream_status":"501"'; then ok "notimplemented logged upstream_status 501"; else no "notimplemented not logged as upstream 501"; fi
+
+  # 9e. A real object hit must not fingerprint the origin as S3 behind Envoy.
+  # X-Stub-Path is the control: upstream headers do reach the viewer unless
+  # they are explicitly hidden.
+  fetch "$base/metrics.json"
+  expect_eq "object hit forwards unhidden upstream headers" "$(hval X-Stub-Path)" "/metrics.json"
+  for header in x-amz-request-id x-amz-id-2 x-amz-meta-internal-project \
+                x-amz-server-side-encryption \
+                x-amz-server-side-encryption-aws-kms-key-id x-amz-version-id \
+                x-amz-website-redirect-location \
+                x-envoy-upstream-service-time; do
+    expect_eq "object hit hides $header" "$(hval "$header")" ""
+  done
+
+  # The method guard answers with its own body without consulting error_page;
+  # upstream 405 remains in the intercept list and is masked to 404.
+  fetch -X POST "$base/"
+  expect_eq "POST / body is the origin's own text" "$(cat "$B")" "Method Not Allowed"
+fi
+
 # 10. upstream 5xx -> 502 Bad Gateway
 fetch "$base/boom.json"
 expect_eq "boom status" "$(status_code)" 502
@@ -407,6 +453,11 @@ hb=$(curl -s -I "$base/metrics.json" | tr -d '\r')
 expect_eq "HEAD metrics status" "$(printf '%s' "$hb" | awk 'NR==1{print $2}')" 200
 expect_eq "HEAD metrics Content-Type" "$(printf '%s\n' "$hb" | awk -F': ' 'tolower($1)=="content-type"{print $2}')" "application/json"
 
+# 12b. The origin still answers a viewer's conditional GET itself: 304 is
+# deliberately absent from the intercept list, so client caching keeps working.
+expect_eq "conditional GET -> 304" \
+  "$(curl -s -o /dev/null -w '%{http_code}' -H 'If-Modified-Since: Wed, 21 Oct 2026 07:28:00 GMT' "$base/metrics.json")" 304
+
 # 13. Range. Viewer Range is not forwarded to S3, so nginx serves 206 while
 # fetching the full 200 from S3 once; subsequent ranges are served from cache.
 mark="$(stub_log_mark)"
@@ -419,6 +470,10 @@ code=$(curl -s -o "$B" -w '%{http_code}' -H 'Range: bytes=4-6' "$base/range.bin"
 expect_eq "Range status (cached different slice)" "$code" 206
 expect_eq "Range body (cached different slice)" "$(cat "$B")" "456"
 expect_stub_gets_since "Range upstream GETs after cached range" "$mark" 'GET /range.bin ' 0
+# 416 is nginx's own range-filter response — S3 never sees the viewer's Range —
+# so it is deliberately absent from the intercept list and must stay a 416.
+expect_eq "unsatisfiable Range -> 416" \
+  "$(curl -s -o /dev/null -w '%{http_code}' -H 'Range: bytes=9999-' "$base/range.bin")" 416
 
 # 13b. Control bytes are rejected in the default (no S3_PREFIX) config too —
 # the common deployment shape — and the rejection path keeps the security

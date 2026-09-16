@@ -13,9 +13,9 @@ import (
 )
 
 // EnvKnockResourceID is an advanced custom-deployment override for the
-// placement-neutral knock resource returned by the platform. The name is the
-// qURL Connector operator contract shared with the standalone Connector.
-const EnvKnockResourceID = "LAYERV_KNOCK_RESOURCE_ID"
+// placement-neutral knock resource returned by the platform. A headless
+// deployment must record this effective value in its read-only share config.
+const EnvKnockResourceID = "QURL_CONNECTOR_KNOCK_RESOURCE_ID"
 
 // ResolvedResource carries the selected Connector resource plus the creation
 // provenance authenticated by the assigned cell.
@@ -40,7 +40,26 @@ func ResolveResourceWithResult(
 	connectorID string,
 	udpOpts ...qurl.AgentRuntimeUDPOption,
 ) (resolved *ResolvedResource, retErr error) {
-	return resolveResourceWithRequestObserver(ctx, binding, store, connectorID, nil, udpOpts...)
+	return resolveResourceWithRequestObserver(ctx, binding, store, connectorID, nil, nil, udpOpts...)
+}
+
+// ResolveConfiguredResourceWithResult reauthorizes one deployment-supplied
+// binding through the registered runtime's assigned cell. Every configured
+// identity is a continuity claim and must match the authenticated response.
+func ResolveConfiguredResourceWithResult(
+	ctx context.Context,
+	binding *qurl.AgentRuntimeBinding,
+	store *state.Store,
+	configured *state.ConnectorResourceBinding,
+	udpOpts ...qurl.AgentRuntimeUDPOption,
+) (resolved *ResolvedResource, retErr error) {
+	if configured == nil {
+		return nil, fmt.Errorf("%w: configured Connector resource binding is nil", state.ErrConnectorResourceVerification)
+	}
+	if explicit := strings.TrimSpace(os.Getenv(EnvKnockResourceID)); explicit != "" && explicit != configured.KnockResourceID {
+		return nil, configuredKnockMismatchError()
+	}
+	return resolveResourceWithRequestObserver(ctx, binding, store, configured.ConnectorID, configured, nil, udpOpts...)
 }
 
 type connectorResourceRequestObserver func(qurl.NativeConnectorResourceRequest) error
@@ -50,6 +69,7 @@ func resolveResourceWithRequestObserver(
 	binding *qurl.AgentRuntimeBinding,
 	store *state.Store,
 	connectorID string,
+	configured *state.ConnectorResourceBinding,
 	observer connectorResourceRequestObserver,
 	udpOpts ...qurl.AgentRuntimeUDPOption,
 ) (resolved *ResolvedResource, retErr error) {
@@ -59,7 +79,13 @@ func resolveResourceWithRequestObserver(
 	if store == nil {
 		return nil, errors.New("registered device state store is nil")
 	}
-	tx, err := store.BeginConnectorResource(ctx, connectorID)
+	var tx *state.ConnectorResourceTransaction
+	var err error
+	if configured == nil {
+		tx, err = store.BeginConnectorResource(ctx, connectorID)
+	} else {
+		tx, err = store.BeginConfiguredConnectorResource(ctx, configured)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("connector %q: prepare native resource request: %w", connectorID, err)
 	}
@@ -98,20 +124,56 @@ func resolveResourceWithRequestObserver(
 		// response taxonomy: success means the SDK completed authentication, and
 		// Commit atomically discards the completed request while accepting no
 		// identity.
-		return nil, fmt.Errorf("connector %q: verify authenticated resource binding: %w", connectorID, tx.Commit(nil))
+		commitErr := tx.Commit(nil)
+		if commitErr == nil {
+			commitErr = errors.New("connector resource transaction accepted an absent binding")
+		}
+		return nil, fmt.Errorf("connector %q: verify authenticated resource binding: %w", connectorID, commitErr)
 	}
 	resource := resolution.Resource
-	if err := tx.Commit(&state.ConnectorResourceBinding{
+	resourceBinding := &state.ConnectorResourceBinding{
 		ConnectorID:        resource.Slug,
-		ResourceID:         resource.ResourceID,
+		ResourceID:         resource.ResourcePublicKey,
 		CRID:               resource.CRID,
 		ConnectorRoutingID: resource.ConnectorRoutingID,
 		KnockResourceID:    resource.KnockResourceID,
-	}); err != nil {
-		return nil, fmt.Errorf("connector %q: verify and persist authenticated resource binding: %w", connectorID, err)
+	}
+	var commitErr error
+	if configured == nil {
+		commitErr = tx.Commit(resourceBinding)
+	} else {
+		effectiveKnockResourceID, knockErr := KnockResourceID(resource)
+		if knockErr != nil {
+			return nil, errors.Join(
+				fmt.Errorf("connector %q: resolve effective knock resource: %w", connectorID, errors.Join(state.ErrConnectorResourceVerification, knockErr)),
+				tx.ClearPending(),
+			)
+		}
+		if sameConfiguredPlatformIdentities(resourceBinding, configured) && effectiveKnockResourceID != configured.KnockResourceID {
+			return nil, errors.Join(
+				fmt.Errorf("connector %q: %w", connectorID, configuredKnockMismatchError()),
+				tx.ClearPending(),
+			)
+		}
+		commitErr = tx.CommitConfigured(resourceBinding, effectiveKnockResourceID)
+	}
+	if commitErr != nil {
+		return nil, fmt.Errorf("connector %q: verify and persist authenticated resource binding: %w", connectorID, commitErr)
 	}
 	found := resolution.FoundExisting
 	return &ResolvedResource{Resource: resource, FoundExisting: &found}, nil
+}
+
+func configuredKnockMismatchError() error {
+	return fmt.Errorf("%w: configured knock resource ID does not match the effective operand; check the headless config and %s", state.ErrConnectorResourceVerification, EnvKnockResourceID)
+}
+
+func sameConfiguredPlatformIdentities(actual, configured *state.ConnectorResourceBinding) bool {
+	return actual != nil && configured != nil &&
+		actual.ConnectorID == configured.ConnectorID &&
+		actual.ResourceID == configured.ResourceID &&
+		actual.CRID == configured.CRID &&
+		actual.ConnectorRoutingID == configured.ConnectorRoutingID
 }
 
 // terminalConnectorResourceDenial is the closed set of authenticated outcomes
@@ -129,8 +191,18 @@ func terminalConnectorResourceDenial(err error) bool {
 		errors.Is(err, qurl.ErrConnectorResourceRequestRejected)
 }
 
+// IsPermanentResourceResolveError reports authenticated denials and local
+// continuity failures that cannot recover by retrying the same deployment.
+func IsPermanentResourceResolveError(err error) bool {
+	return terminalConnectorResourceDenial(err) ||
+		errors.Is(err, state.ErrConnectorResourceStateConflict) ||
+		errors.Is(err, state.ErrConnectorResourceVerification) ||
+		errors.Is(err, state.ErrConnectorResourceRetired) ||
+		errors.Is(err, state.ErrConnectorResourceState)
+}
+
 // KnockResourceID resolves the NHP knock operand for a resolved resource: the
-// LAYERV_KNOCK_RESOURCE_ID override when set (trimmed), else the
+// QURL_CONNECTOR_KNOCK_RESOURCE_ID override when set (trimmed), else the
 // platform-assigned knock resource. An empty result is a configuration error
 // the caller must fail closed on.
 func KnockResourceID(resource *qurl.ConnectorResource) (string, error) {

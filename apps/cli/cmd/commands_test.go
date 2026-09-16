@@ -2,10 +2,14 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	qurl "github.com/layervai/qurl-go/qurl"
 
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/apitest"
@@ -40,6 +44,23 @@ func TestVersionOutputShape(t *testing.T) {
 	}
 }
 
+func TestReleaseNativeTrustVerifierIsHiddenAndFailsClosedInDarkBuild(t *testing.T) {
+	t.Setenv(qurl.EnvDeploymentPath, "")
+	help := runCLI(t, &runOpts{args: []string{"version", "--help"}})
+	if help.code != 0 || strings.Contains(help.stdout.String(), "verify-release-native-trust") {
+		t.Fatalf("version help exposed the release verifier: code=%d stdout=%q stderr=%q", help.code, help.stdout.String(), help.stderr.String())
+	}
+	result := runCLI(t, &runOpts{args: []string{"version", "--verify-release-native-trust"}})
+	if result.code == 0 || result.stdout.Len() != 0 || !strings.Contains(result.stderr.String(), "missing required built-in connection settings") {
+		t.Fatalf("dark release verifier = code=%d stdout=%q stderr=%q", result.code, result.stdout.String(), result.stderr.String())
+	}
+	for _, forbidden := range []string{"Hub", "QURL_CONNECTOR_HUB_", "server public key"} {
+		if strings.Contains(result.stderr.String(), forbidden) {
+			t.Fatalf("dark release verifier exposed %q: stderr=%q", forbidden, result.stderr.String())
+		}
+	}
+}
+
 // TestHelpLeadsWithTheOneCommandLocalJourney protects the first-run UX. The
 // command reference can stay precise without making a new user read Connector
 // internals before seeing the ordinary localhost path.
@@ -70,15 +91,32 @@ func TestHelpLeadsWithTheOneCommandLocalJourney(t *testing.T) {
 	if local < 0 || remote < 0 || local >= remote {
 		t.Errorf("publish help must explain the local path first:\n%s", publishHelp)
 	}
-	for _, want := range []string{"keeps serving until Ctrl-C", "qurl get <CRID>", "identifies the resource but grants no access"} {
+	for _, want := range []string{"On Linux, macOS, and Windows", "background daemon", "--foreground", "prints the CRID, and exits", "qurl get <CRID>", "identifies the resource but grants no access"} {
 		if !strings.Contains(publishHelp, want) {
 			t.Errorf("publish help missing %q:\n%s", want, publishHelp)
 		}
+	}
+	if strings.Contains(publishHelp, "outside macOS and Linux") {
+		t.Errorf("publish help still says Windows is unsupported:\n%s", publishHelp)
 	}
 	for _, jargon := range []string{"FRP", "proxy registration", "one-shot enrollment", "native device identity"} {
 		if strings.Contains(publishHelp, jargon) {
 			t.Errorf("publish help exposes implementation jargon %q:\n%s", jargon, publishHelp)
 		}
+	}
+}
+
+func TestLegacyConnectorCommandIsRemoved(t *testing.T) {
+	root := runCLI(t, &runOpts{args: []string{"--help"}})
+	if root.code != 0 {
+		t.Fatalf("root help exit = %d, stderr: %s", root.code, root.stderr.String())
+	}
+	if strings.Contains(root.stdout.String(), "  connector ") {
+		t.Fatalf("root help still exposes the removed connector command:\n%s", root.stdout.String())
+	}
+	legacy := runCLI(t, &runOpts{args: []string{"connector"}})
+	if legacy.code != 2 || !strings.Contains(legacy.stderr.String(), `unknown command "connector"`) {
+		t.Fatalf("removed connector command = exit %d, stderr %q; want usage error", legacy.code, legacy.stderr.String())
 	}
 }
 
@@ -100,13 +138,13 @@ func TestREADMECarriesACompleteLocalQuickstart(t *testing.T) {
 		"## Publish localhost in 60 seconds",
 		"brew install layervai/tap/qurl",
 		"qurl version",
-		"1.6.0 or newer",
+		"2.0.0 or newer",
 		"https://layerv.ai/qurl/dashboard/keys/",
 		"qurl login",
 		"python3 -m http.server 3000 --bind 127.0.0.1",
 		"qurl publish http://127.0.0.1:3000",
 		"Status:  serving",
-		"Press Ctrl-C",
+		"qurl stop <CRID>",
 		"qurl get <CRID>",
 	}
 	previous := -1
@@ -121,7 +159,20 @@ func TestREADMECarriesACompleteLocalQuickstart(t *testing.T) {
 		previous = at
 	}
 	if !strings.Contains(readme, "only HTTPS URLs are allowed") || !strings.Contains(readme, "brew upgrade qurl") {
-		t.Fatal("CLI README must explain how a pre-1.6.0 install recovers from the legacy HTTPS-only error")
+		t.Fatal("CLI README must explain how a legacy install recovers to the lifecycle release")
+	}
+}
+
+func TestREADMEAPIKeyFileRecipeMatchesUnixSecurityContract(t *testing.T) {
+	readme := readCLIREADME(t)
+	for _, want := range []string{
+		"have mode `0400` or `0600`",
+		"exactly one hard link",
+		`(umask 077; printf '%s\n' "$QURL_API_KEY" > "$path")`,
+	} {
+		if !strings.Contains(readme, want) {
+			t.Errorf("CLI README API-key file recipe missing %q", want)
+		}
 	}
 }
 
@@ -153,6 +204,18 @@ func TestREADMEQuickstartOutputMatchesPrinter(t *testing.T) {
 	}
 }
 
+func TestREADMEHeadlessEnrollmentRecoveryContract(t *testing.T) {
+	readme := strings.Join(strings.Fields(readCLIREADME(t)), " ")
+	for _, want := range []string{
+		"If bootstrap stops before registration finishes, retry with the same still-valid one-time credential.",
+		"A complete warm start does not read or require that file.",
+	} {
+		if !strings.Contains(readme, want) {
+			t.Fatalf("CLI README lost interrupted-enrollment guidance %q", want)
+		}
+	}
+}
+
 // readCLIREADME makes repository checkout line endings irrelevant to semantic
 // documentation assertions. GitHub's Windows runners can materialize Markdown
 // with CRLF even though the formatter intentionally emits LF.
@@ -177,23 +240,102 @@ func TestNormalizeDocumentationNewlines(t *testing.T) {
 	}
 }
 
-func TestLocalPublishRefreshRecoveryStaysActionable(t *testing.T) {
+func TestLocalPublishRecoveryIsAutomatic(t *testing.T) {
 	publish := runCLI(t, &runOpts{args: []string{"publish", "--help"}})
 	if publish.code != 0 {
 		t.Fatalf("publish help exit = %d, stderr: %s", publish.code, publish.stderr.String())
 	}
 	publishHelp := publish.stdout.String()
-	if !strings.Contains(publishHelp, "--refresh-mode") || !strings.Contains(publishHelp, "manual, auto, or disabled") {
-		t.Fatalf("publish help does not expose the one-start assignment-refresh approval:\n%s", publishHelp)
-	}
-	readme := readCLIREADME(t)
-	for _, want := range []string{
-		"Update to qURL CLI 1.6.1 or newer",
-		"rerun the same publish command once with `--refresh-mode auto`",
-	} {
-		if !strings.Contains(readme, want) {
-			t.Fatalf("CLI README does not carry the shipped local-publish refresh remedy %q", want)
+	for _, forbidden := range []string{"--refresh-mode", "explicit approval", "manual, auto, or disabled"} {
+		if strings.Contains(publishHelp, forbidden) {
+			t.Fatalf("publish help exposes removed manual recovery %q:\n%s", forbidden, publishHelp)
 		}
+	}
+	for _, want := range []string{"background daemon", "sleep, wake, and network changes"} {
+		if !strings.Contains(publishHelp, want) {
+			t.Fatalf("publish help missing automatic recovery behavior %q", want)
+		}
+	}
+}
+
+func TestBackgroundSharePlatformContract(t *testing.T) {
+	if err := requireBackgroundShareSupport("darwin"); err != nil {
+		t.Fatalf("darwin background share support: %v", err)
+	}
+	if err := requireBackgroundShareSupport("windows"); err != nil {
+		t.Fatalf("windows background share support: %v", err)
+	}
+	if err := requireBackgroundShareSupport("linux"); err != nil {
+		t.Fatalf("linux background share support: %v", err)
+	}
+	err := requireBackgroundShareSupport("plan9")
+	if err == nil || !strings.Contains(err.Error(), "local app sharing is supported on macOS, Linux, and Windows only") {
+		t.Fatalf("unsupported background share error = %v", err)
+	}
+}
+
+func TestLocalSharePlatformContractFailsBeforeStateOrNetwork(t *testing.T) {
+	for _, goos := range []string{"darwin", "linux", "windows"} {
+		if err := requireLocalShareSupport(goos); err != nil {
+			t.Fatalf("%s local share support: %v", goos, err)
+		}
+	}
+	for _, args := range [][]string{
+		{"publish", "http://127.0.0.1:3000", "--foreground"},
+		{"start", exampleCRID},
+		{"restart", exampleCRID},
+		{"daemon", "run"},
+	} {
+		res := runCLI(t, &runOpts{args: args, platformGOOS: "plan9"})
+		if res.code != 1 || !strings.Contains(res.stderr.String(), "local app sharing is supported on macOS, Linux, and Windows only") {
+			t.Fatalf("unsupported platform %v = exit %d stderr %q", args, res.code, res.stderr.String())
+		}
+	}
+}
+
+func TestWindowsLocalShareCommandsReachRuntimeSeams(t *testing.T) {
+	seamErr := errors.New("Windows runtime seam reached")
+	for _, args := range [][]string{
+		{"publish", "http://127.0.0.1:3000", "--foreground"},
+		{"start", exampleCRID},
+		{"restart", exampleCRID},
+		{"daemon", "run"},
+	} {
+		res := runCLI(t, &runOpts{
+			args: args, platformGOOS: "windows", shareStateDirErr: seamErr,
+			preflightTarget: func(context.Context, string, int) error { return nil },
+		})
+		if res.code != 1 || !strings.Contains(res.stderr.String(), seamErr.Error()) {
+			t.Fatalf("Windows %v did not reach the state/runtime seam: exit %d stderr %q", args, res.code, res.stderr.String())
+		}
+	}
+}
+
+func TestDaemonHubOverrideIsExactAndAllOrNone(t *testing.T) {
+	const key = "CQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+	if got, present, err := exactDaemonHubOverride("", 0, ""); err != nil || present || got != (qurl.HubBootstrap{}) {
+		t.Fatalf("empty daemon Hub override = (%#v, %t, %v), want absent", got, present, err)
+	}
+	for _, test := range []struct {
+		host string
+		port int
+		key  string
+	}{
+		{host: "hub.sandbox.layerv.xyz"},
+		{port: 443},
+		{key: key},
+		{host: "hub.sandbox.layerv.xyz", port: 443},
+	} {
+		if _, _, err := exactDaemonHubOverride(test.host, test.port, test.key); err == nil || !strings.Contains(err.Error(), "must be set together") {
+			t.Fatalf("partial daemon Hub override %#v error = %v", test, err)
+		}
+	}
+	got, present, err := exactDaemonHubOverride("hub.sandbox.layerv.xyz", 443, key)
+	if err != nil || !present || got.Host != "hub.sandbox.layerv.xyz" || got.Port != 443 || got.ServerPublicKeyB64 != key {
+		t.Fatalf("exact daemon Hub override = (%#v, %t, %v)", got, present, err)
+	}
+	if _, _, err := exactDaemonHubOverride("127.0.0.1", 443, key); err == nil {
+		t.Fatal("daemon Hub override accepted an untrusted IP endpoint")
 	}
 }
 
@@ -232,8 +374,8 @@ func TestDocsGeneratesManPagesAndMarkdown(t *testing.T) {
 	if res.code != 0 {
 		t.Fatalf("docs markdown exit = %d", res.code)
 	}
-	if _, err := os.Stat(filepath.Join(mdDir, "qurl_resolve.md")); err != nil {
-		t.Errorf("expected qurl_resolve.md: %v", err)
+	if _, err := os.Stat(filepath.Join(mdDir, "qurl_share.md")); err != nil {
+		t.Errorf("expected qurl_share.md: %v", err)
 	}
 }
 
@@ -243,7 +385,7 @@ func TestUsageErrorsExitTwo(t *testing.T) {
 		"unknown flag":    {"list", "--no-such-flag"},
 		"bad output":      {"-o", "yaml", "list"},
 		"bad color":       {"--color", "sometimes", "list"},
-		"missing operand": {"resolve"},
+		"missing operand": {"share"},
 		"extra operand":   {"whoami", "extra"},
 	}
 	for name, args := range cases {
@@ -257,11 +399,33 @@ func TestUsageErrorsExitTwo(t *testing.T) {
 }
 
 func TestUnusableOperandExitEight(t *testing.T) {
-	res := runCLI(t, &runOpts{args: []string{"resolve", "not a CRID at all!"}})
+	res := runCLI(t, &runOpts{args: []string{"share", "not a CRID at all!"}})
 	if res.code != 8 {
 		t.Fatalf("exit = %d, want 8; stderr: %s", res.code, res.stderr.String())
 	}
 	mustEmptyStdout(t, res)
+}
+
+// TestResolveIsNoLongerACommand pins the hard cutover from `qurl resolve`
+// to `qurl share`: the old name is not an alias, so it takes cobra's
+// unknown-command path — usage exit, nothing on stdout, and no request
+// ever leaves the process.
+func TestResolveIsNoLongerACommand(t *testing.T) {
+	srv := apitest.NewServer(t) // never contacted
+	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "resolve", srv.Key.CRID}})
+	if res.code != 2 {
+		t.Fatalf("exit = %d, want 2 (usage); stderr: %s", res.code, res.stderr.String())
+	}
+	mustEmptyStdout(t, res)
+	if !strings.Contains(res.stderr.String(), `unknown command "resolve"`) {
+		t.Errorf("stderr = %q, want the unknown-command error", res.stderr.String())
+	}
+	if !strings.Contains(res.stderr.String(), "share") {
+		t.Errorf("stderr = %q, want the error to name the share command", res.stderr.String())
+	}
+	if len(srv.Requests()) != 0 {
+		t.Errorf("an unknown command must not reach the service, saw %d request(s)", len(srv.Requests()))
+	}
 }
 
 // TestEndpointPrecedence pins flag > env > profile for the endpoint setting
@@ -392,9 +556,21 @@ func TestWhoamiListedInHelp(t *testing.T) {
 	if res.code != 0 {
 		t.Fatalf("help exit = %d", res.code)
 	}
-	for _, name := range []string{"publish", "resolve", "get", "list", "delete", "connector", "login", "logout", "whoami", "version", "completion"} {
+	for _, name := range []string{"publish", "share", "get", "list", "start", "stop", "restart", "status", "inspect", "daemon", "delete", "login", "whoami", "version", "completion"} {
 		if !strings.Contains(res.stdout.String(), name) {
 			t.Errorf("help does not list %q", name)
 		}
+	}
+	daemon := runCLI(t, &runOpts{args: []string{"daemon", "--help"}})
+	if daemon.code != 0 || !strings.Contains(daemon.stdout.String(), "run") || !strings.Contains(daemon.stdout.String(), "headless") {
+		t.Errorf("daemon help does not expose its run mode:\n%s\n%s", daemon.stdout.String(), daemon.stderr.String())
+	}
+}
+
+func TestReleaseTrustVerifierRejectsDeploymentOverride(t *testing.T) {
+	t.Setenv(qurl.EnvDeploymentPath, filepath.Join(t.TempDir(), "deployment.json"))
+	result := runCLI(t, &runOpts{args: []string{"version", "--verify-release-native-trust"}})
+	if result.code == 0 || result.stdout.Len() != 0 || !strings.Contains(result.stderr.String(), "requires QURL_DEPLOYMENT to be unset") {
+		t.Fatalf("override verification = code %d, stderr %q", result.code, result.stderr.String())
 	}
 }

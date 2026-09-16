@@ -97,7 +97,7 @@ async function ensureGmailContentScript(tab) {
     return;
   } catch (_err) {
     // Reinject on any ping failure. The content script has a double-injection guard,
-    // so this avoids brittle Chrome error-string matching.
+    // so this avoids brittle browser error-string matching.
   }
 
   await chrome.scripting.executeScript({

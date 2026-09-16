@@ -1,0 +1,333 @@
+package daemon
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
+
+	connectorservice "github.com/layervai/qurl-connector/pkg/service"
+	qurl "github.com/layervai/qurl-go/qurl"
+
+	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/agent"
+	connectorhub "github.com/layervai/qurl-integrations/apps/cli/internal/connector/hub"
+	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
+)
+
+// DaemonJobLabel is the stable per-user background-job identifier.
+const DaemonJobLabel = "ai.layerv.qurl.share-daemon"
+
+// ErrExternalDaemonNotRunning reports a lifecycle command under external
+// supervision whose daemon is absent. The supervisor, not qurl, starts it.
+var ErrExternalDaemonNotRunning = errors.New("share daemon is externally supervised and is not running; start it with 'qurl daemon run --supervision external' and retry")
+
+// daemonJobProtocolVersion identifies the persisted service-manager argument
+// contract. Increment it for each incompatible shape; do not reuse an earlier
+// value even when a later shape resembles it.
+//
+// 5 adds --runtime-dir. 4 (--supervision, #1426) is not reused even though it
+// is unreleased today: whether it stays unreleased depends on when
+// release-please cuts apps/cli, which this branch does not control, and a
+// resident 4-shape daemon on a matching binary version would otherwise be
+// reloaded rather than replaced.
+const daemonJobProtocolVersion = "5"
+
+// TODO(upstream-contract): relocating the socket relies on
+// connectorservice.UserJobManager.Ensure treating a changed argument list as a
+// definition change and booting the old job out. Verified against
+// qurl-connector v0.14.0 (userjob_darwin.go / userjob_linux.go: the rendered
+// definition is compared byte for byte and the loaded job is removed before
+// the replacement is written). If Ensure ever becomes a no-op for an
+// installed-and-running label, an upgrade would leave the old daemon serving
+// the old address while the new CLI reports convergence at the new one.
+
+// JobController installs, upgrades, and signals the per-user daemon job.
+type JobController struct {
+	Manager connectorservice.UserJobManager
+	IPC     IPCClient
+	// RuntimeDir holds the daemon's control socket. The job passes it
+	// explicitly: a daemon under launchd or systemd does not run in the user's
+	// shell environment, so it must listen exactly where the CLI that installed
+	// it, and every later CLI invocation, resolve the socket.
+	RuntimeDir     string
+	StateDir       string
+	LogDir         string
+	BinaryVersion  string
+	InvocationPath string
+	Endpoint       string
+	// ShareGroupMode is part of the job definition: a resident daemon runs in
+	// exactly the mode its job carries, and a changed mode is a definition
+	// change that replaces the daemon just as a binary-version change does.
+	ShareGroupMode GroupMode
+	// Supervision selects who owns the daemon process. Native installs and
+	// replaces the per-user job; external only reloads a live daemon and never
+	// touches the native job manager.
+	Supervision connectorstate.RuntimeSupervision
+	ResolveHub  func() (qurl.HubBootstrap, error)
+	LookPath    func(string) (string, error)
+	ProbeStatus func(context.Context) (IPCStatus, bool, error)
+	Reload      func(context.Context) (bool, error)
+}
+
+// NewJobController builds the production native per-user job controller.
+// lookupEnv resolves the socket address the controller probes and the job
+// carries; see SocketPathForStateDir.
+func NewJobController(stateDir, logDir, binaryVersion, endpoint string, mode GroupMode, supervision connectorstate.RuntimeSupervision, resolveHub func() (qurl.HubBootstrap, error), lookupEnv func(string) (string, bool)) (*JobController, error) {
+	socket, err := SocketPathForStateDir(stateDir, lookupEnv)
+	if err != nil {
+		return nil, err
+	}
+	controller := &JobController{
+		Manager:    connectorservice.NewUserJobManager(),
+		IPC:        IPCClient{SocketPath: socket},
+		RuntimeDir: filepath.Dir(socket),
+		StateDir:   stateDir, LogDir: logDir, BinaryVersion: strings.TrimSpace(binaryVersion),
+		InvocationPath: os.Args[0], Endpoint: endpoint, ShareGroupMode: mode, Supervision: supervision,
+		ResolveHub: resolveHub, LookPath: exec.LookPath,
+	}
+	controller.ProbeStatus = controller.IPC.Status
+	controller.Reload = controller.IPC.ReloadIfRunning
+	return controller, nil
+}
+
+// Ensure reloads a compatible live daemon or installs the current job definition.
+func (c *JobController) Ensure(ctx context.Context) error {
+	if err := c.prepare(); err != nil {
+		return err
+	}
+	status, running, statusErr := c.ProbeStatus(ctx)
+	if statusErr != nil {
+		if !running || !errors.Is(statusErr, errIPCStatusIncompatible) {
+			return statusErr
+		}
+		if c.Supervision == connectorstate.RuntimeSupervisionExternal {
+			return fmt.Errorf("restart the externally supervised daemon and retry: %w", statusErr)
+		}
+		// The native ownership check below must succeed before replacement.
+		status = IPCStatus{}
+	}
+	expectedJobVersion, err := JobVersion(c.BinaryVersion, c.ShareGroupMode)
+	if err != nil {
+		return err
+	}
+	if running && status.JobVersion == expectedJobVersion {
+		reloaded, err := c.Reload(ctx)
+		if err != nil {
+			return err
+		}
+		if reloaded {
+			return nil
+		}
+		// The compatible owner exited between the status and reload calls.
+		// Continue as an absent owner instead of reporting false convergence.
+		running = false
+	}
+	if c.Supervision == connectorstate.RuntimeSupervisionExternal {
+		// The supervisor owns the process: never install, replace, or inspect
+		// a native job on its behalf. A live daemon on another definition is
+		// the supervisor's to restart; an absent one is reported so the caller
+		// can start it and roll its cloud change back meanwhile.
+		if running {
+			return fmt.Errorf(
+				"share daemon job version %q does not match this qURL job version %q; restart the externally supervised daemon and retry",
+				status.JobVersion, expectedJobVersion,
+			)
+		}
+		return ErrExternalDaemonNotRunning
+	}
+	if running {
+		managed, err := c.Manager.Status(DaemonJobLabel)
+		if err != nil {
+			return fmt.Errorf("inspect native background ownership before replacing incompatible share daemon: %w", err)
+		}
+		if !managed.Installed || !managed.Running {
+			return unmanagedDaemonMismatch(status, expectedJobVersion, statusErr)
+		}
+	}
+	hub, err := c.validatedDeployment()
+	if err != nil {
+		return err
+	}
+	job, err := c.jobDefinition(hub, expectedJobVersion)
+	if err != nil {
+		return err
+	}
+	if running {
+		// IPC proved a resident daemon is on an incompatible protocol/binary
+		// version and the native manager proved that it owns that process. Force
+		// replacement even if an interrupted upgrade already wrote the current
+		// job definition around the old process.
+		return c.Manager.Replace(job)
+	}
+	// A successful native job install transfers ownership to the durable daemon.
+	// Native assignment recovery can legitimately outlive a CLI readiness
+	// deadline, so serving convergence is observed through the control plane.
+	return c.Manager.Ensure(job)
+}
+
+func unmanagedDaemonMismatch(status IPCStatus, expectedJobVersion string, statusErr error) error {
+	if statusErr != nil {
+		return fmt.Errorf("stop the foreground or externally managed daemon and retry: %w", statusErr)
+	}
+	return fmt.Errorf(
+		"share daemon job version %q does not match this qURL job version %q; stop the foreground or externally managed daemon and retry",
+		status.JobVersion, expectedJobVersion,
+	)
+}
+
+// prepare validates the controller and secures the daemon's runtime
+// directory. Under native supervision qurl owns that directory, so a pinned
+// one is secured before the first probe: the client's parent-directory check
+// requires 0700, and a directory the operator created with a normal umask
+// would otherwise fail every command before the job install that fixes it.
+// Skipped when the socket lives in the state directory (always so on
+// Windows) - the daemon's own startup secures that one.
+func (c *JobController) prepare() error {
+	if err := c.validateController(); err != nil {
+		return err
+	}
+	return c.secureRuntimeDir()
+}
+
+// secureRuntimeDir prepares a private socket directory before native startup.
+func (c *JobController) secureRuntimeDir() error {
+	if c == nil || c.Supervision != connectorstate.RuntimeSupervisionNative ||
+		c.RuntimeDir == "" || c.RuntimeDir == c.StateDir {
+		return nil
+	}
+	return EnsureIPCDir(c.RuntimeDir)
+}
+
+func (c *JobController) validateController() error {
+	if c == nil || c.Manager == nil || c.LookPath == nil || c.ProbeStatus == nil || c.Reload == nil || c.ResolveHub == nil ||
+		c.RuntimeDir == "" {
+		return errors.New("share daemon job controller is incomplete")
+	}
+	// The zero supervision is rejected like the zero GroupMode: a construction
+	// path that never resolved it must fail loudly, not install natively.
+	_, err := connectorstate.ParseRuntimeSupervision(string(c.Supervision))
+	return err
+}
+
+func (c *JobController) validatedDeployment() (qurl.HubBootstrap, error) {
+	if c.Endpoint == "" || c.Endpoint != strings.TrimSpace(c.Endpoint) {
+		return qurl.HubBootstrap{}, errors.New("share daemon API endpoint is empty or non-canonical")
+	}
+	// The endpoint is persisted in an owner-readable plist. Reuse the native
+	// resource origin validator so userinfo, query, and fragment data can never
+	// turn that durable non-secret job definition into a credential store.
+	if _, err := agent.ResourceSDKOrigin(c.Endpoint); err != nil {
+		return qurl.HubBootstrap{}, err
+	}
+	hub, err := c.ResolveHub()
+	if err != nil {
+		return qurl.HubBootstrap{}, err
+	}
+	if err := connectorhub.ValidateBootstrap(hub); err != nil {
+		return qurl.HubBootstrap{}, err
+	}
+	return hub, nil
+}
+
+func (c *JobController) jobDefinition(hub qurl.HubBootstrap, jobVersion string) (connectorservice.UserJob, error) {
+	binary, err := c.currentExecutablePath()
+	if err != nil {
+		return connectorservice.UserJob{}, err
+	}
+	if err := prepareDaemonLogDir(c.LogDir); err != nil {
+		return connectorservice.UserJob{}, err
+	}
+	stdoutPath := filepath.Join(c.LogDir, "share-daemon.log")
+	stderrPath := filepath.Join(c.LogDir, "share-daemon.err.log")
+	arguments := make([]string, 0, 20)
+	arguments = append(arguments,
+		"--endpoint", c.Endpoint,
+		"daemon", "run", "--state-dir", c.StateDir, "--runtime-dir", c.RuntimeDir, "--job-version", jobVersion,
+		// The mode is always explicit so the daemon runs in the mode this job
+		// version was computed for, whatever its own environment or config file
+		// would resolve to.
+		"--share-group-mode", string(c.ShareGroupMode),
+		"--hub-host", hub.Host, "--hub-port", strconv.Itoa(hub.Port),
+		"--hub-server-public-key-b64", hub.ServerPublicKeyB64,
+		// Pin native ownership even if the user later selects external in their profile.
+		"--supervision", string(connectorstate.RuntimeSupervisionNative),
+	)
+	arguments = append(arguments, daemonJobLogArguments(stdoutPath, stderrPath)...)
+	return connectorservice.UserJob{
+		Label: DaemonJobLabel, BinaryPath: binary,
+		Arguments: arguments, StandardOut: stdoutPath, StandardErr: stderrPath,
+		ExitTimeout: 15, Umask: 0o077, RunAtLoad: true, KeepAlive: true,
+	}, nil
+}
+
+// currentExecutablePath returns the command path that launched this process,
+// not another qurl binary that happens to appear first on PATH. A path-bearing
+// invocation is made absolute without resolving symlinks, so a stable Homebrew
+// or package-manager link remains stable across upgrades. A bare invocation is
+// resolved by its exact name through PATH for the same reason.
+func (c *JobController) currentExecutablePath() (string, error) {
+	invocation := c.InvocationPath
+	if invocation == "" || invocation != strings.TrimSpace(invocation) {
+		return "", errors.New("qURL invocation path is empty or non-canonical")
+	}
+	if filepath.IsAbs(invocation) {
+		return filepath.Clean(invocation), nil
+	}
+	if filepath.Dir(invocation) != "." {
+		binary, err := filepath.Abs(invocation)
+		if err != nil {
+			return "", fmt.Errorf("resolve current qURL command path: %w", err)
+		}
+		return binary, nil
+	}
+	binary, err := c.LookPath(invocation)
+	if err != nil {
+		return "", fmt.Errorf("find current qURL command %q: %w", invocation, err)
+	}
+	if !filepath.IsAbs(binary) {
+		binary, err = filepath.Abs(binary)
+		if err != nil {
+			return "", fmt.Errorf("resolve current qURL command path: %w", err)
+		}
+	}
+	return filepath.Clean(binary), nil
+}
+
+// JobVersion combines the IPC protocol version, the installed qurl binary
+// version, and the session group mode into the job definition version a
+// resident daemon reports over IPC. The default mode is elided, so a
+// single-mode job version is exactly the pre-mode string; any other mode is a
+// definition change that replaces the resident daemon. The zero GroupMode is
+// rejected rather than defaulted, so a construction path that never resolved
+// the mode fails loudly instead of silently installing single.
+func JobVersion(binaryVersion string, mode GroupMode) (string, error) {
+	binaryVersion = strings.TrimSpace(binaryVersion)
+	if binaryVersion == "" {
+		return "", errors.New("qURL binary version is empty")
+	}
+	if _, err := ParseGroupMode(string(mode)); err != nil {
+		return "", err
+	}
+	version := daemonJobProtocolVersion + "/" + binaryVersion
+	if mode != DefaultGroupMode {
+		version += "/" + string(mode)
+	}
+	return version, nil
+}
+
+// ReloadIfRunning reconciles an existing daemon without starting one.
+func (c *JobController) ReloadIfRunning(ctx context.Context) (bool, error) {
+	return c.IPC.ReloadIfRunning(ctx)
+}
+
+// Status returns the native per-user job's installed and running state.
+func (c *JobController) Status() (connectorservice.ServiceStatus, error) {
+	if c == nil || c.Manager == nil {
+		return connectorservice.ServiceStatus{}, errors.New("share daemon job controller is incomplete")
+	}
+	return c.Manager.Status(DaemonJobLabel)
+}

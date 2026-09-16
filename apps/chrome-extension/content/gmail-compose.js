@@ -12,7 +12,7 @@
   // isolated world — page scripts cannot observe or tamper with this property.
   //
   // The guard flag and the onMessage listener share this isolated-world context's lifetime: if
-  // Chrome tears the context down (the case a reinject is meant to recover), the flag is gone too,
+  // the browser tears the context down (the case a reinject is meant to recover), the flag is gone too,
   // so the reinjected run falls through and re-registers the listener. The only gap is the rare
   // case where the message port is severed but the JS context survives — then a reinject early-
   // returns here without re-registering, and the popup may still see "no response from content

@@ -74,6 +74,7 @@ func TestOAuthCallbackRefusesNonOwnerRebindWithRealWorkspaceStore(t *testing.T) 
 	stateCookie := oauthRebindStateCookie(startResult.Cookies(), oauthBasePath)
 	if stateCookie == nil {
 		t.Fatal("start response did not include the OAuth state cookie")
+		return
 	}
 	callbackReq := httptest.NewRequestWithContext(context.Background(), http.MethodGet, oauthBasePath+"/callback?code=abc&state="+url.QueryEscape(state), http.NoBody)
 	for _, c := range startResult.Cookies() {

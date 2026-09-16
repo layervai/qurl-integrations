@@ -1,5 +1,40 @@
 # Changelog
 
+## [0.5.1](https://github.com/layervai/qurl-integrations/compare/slack-v0.5.0...slack-v0.5.1) (2026-09-11)
+
+
+### Bug Fixes
+
+* **slack:** explain connector protection quota failures ([#1422](https://github.com/layervai/qurl-integrations/issues/1422)) ([2babd69](https://github.com/layervai/qurl-integrations/commit/2babd69652a03fbcf324919d1b4278a6aadaa63b))
+* **slack:** use CRID terminology in help and errors ([#1423](https://github.com/layervai/qurl-integrations/issues/1423)) ([5c6fe45](https://github.com/layervai/qurl-integrations/commit/5c6fe45201925e1e346f70c724ec41e47a2b7eed))
+
+## [0.5.0](https://github.com/layervai/qurl-integrations/compare/slack-v0.4.0...slack-v0.5.0) (2026-09-02)
+
+
+### ⚠ BREAKING CHANGES
+
+* **cli:** rename the resolve command to share (hard cutover) ([#1323](https://github.com/layervai/qurl-integrations/issues/1323))
+
+### Features
+
+* **cli:** rename the resolve command to share (hard cutover) ([#1323](https://github.com/layervai/qurl-integrations/issues/1323)) ([ae6a567](https://github.com/layervai/qurl-integrations/commit/ae6a567a4828da75bf3332fae39d31fb908eaddb))
+
+
+### Bug Fixes
+
+* **slack:** mint agent-target enrollment tokens and emit v2 headless config ([#1321](https://github.com/layervai/qurl-integrations/issues/1321)) ([5170fb4](https://github.com/layervai/qurl-integrations/commit/5170fb453172ecec64a8f49a8944d1e23f9401f9))
+
+## [0.4.0](https://github.com/layervai/qurl-integrations/compare/slack-v0.3.1...slack-v0.4.0) (2026-08-26)
+
+
+### ⚠ BREAKING CHANGES
+
+* **cli:** ship CRID lifecycle commands ([#1266](https://github.com/layervai/qurl-integrations/issues/1266))
+
+### Features
+
+* **cli:** ship CRID lifecycle commands ([#1266](https://github.com/layervai/qurl-integrations/issues/1266)) ([16916c9](https://github.com/layervai/qurl-integrations/commit/16916c94937b36a63a8022946d64e7ce47053016))
+
 ## [0.3.1](https://github.com/layervai/qurl-integrations/compare/slack-v0.3.0...slack-v0.3.1) (2026-08-20)
 
 

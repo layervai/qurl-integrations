@@ -8,7 +8,6 @@ import (
 	"time"
 
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
-	"github.com/layervai/qurl-integrations/apps/cli/internal/auth"
 )
 
 func fixtureIdentity() *qurlapi.Identity {
@@ -107,37 +106,26 @@ func TestWhoAmIProjections(t *testing.T) {
 // TestLoginProjections pins login's split streams: the human confirmation is
 // stderr; JSON and --quiet are stdout.
 func TestLoginProjections(t *testing.T) {
-	t.Run("text goes to stderr with the backend label", func(t *testing.T) {
+	t.Run("text confirms device enrollment and key disposal", func(t *testing.T) {
 		var out, errBuf bytes.Buffer
 		p := newTestPrinter(&out, &errBuf, FormatText, false, false, false)
-		if err := p.Login(fixtureIdentity(), auth.BackendKeyring); err != nil {
+		if err := p.Login(fixtureIdentity()); err != nil {
 			t.Fatal(err)
 		}
 		if out.Len() != 0 {
 			t.Errorf("login text is a status message; stdout must stay empty, got %q", out.String())
 		}
-		for _, want := range []string{"Logged in as own_output_test.", "OS keyring"} {
+		for _, want := range []string{"Enrolled this device for own_output_test.", "Account key:", "consumed, not stored"} {
 			if !strings.Contains(errBuf.String(), want) {
 				t.Errorf("confirmation missing %q:\n%s", want, errBuf.String())
 			}
 		}
 	})
 
-	t.Run("file backend label", func(t *testing.T) {
-		var out, errBuf bytes.Buffer
-		p := newTestPrinter(&out, &errBuf, FormatText, false, false, false)
-		if err := p.Login(fixtureIdentity(), auth.BackendFile); err != nil {
-			t.Fatal(err)
-		}
-		if !strings.Contains(errBuf.String(), "credential file") {
-			t.Errorf("fallback save must name the credential file:\n%s", errBuf.String())
-		}
-	})
-
 	t.Run("quiet prints the owner id", func(t *testing.T) {
 		var out, errBuf bytes.Buffer
 		p := newTestPrinter(&out, &errBuf, FormatText, true, false, false)
-		if err := p.Login(fixtureIdentity(), auth.BackendKeyring); err != nil {
+		if err := p.Login(fixtureIdentity()); err != nil {
 			t.Fatal(err)
 		}
 		if out.String() != "own_output_test\n" || errBuf.Len() != 0 {
@@ -145,71 +133,20 @@ func TestLoginProjections(t *testing.T) {
 		}
 	})
 
-	t.Run("json carries the machine-stable backend", func(t *testing.T) {
+	t.Run("json confirms device enrollment", func(t *testing.T) {
 		var out, errBuf bytes.Buffer
 		p := newTestPrinter(&out, &errBuf, FormatJSON, false, false, false)
-		if err := p.Login(fixtureIdentity(), auth.BackendKeyring); err != nil {
+		if err := p.Login(fixtureIdentity()); err != nil {
 			t.Fatal(err)
 		}
 		var doc struct {
-			Stored string `json:"stored"`
+			DeviceEnrolled bool `json:"device_enrolled"`
 		}
 		if err := json.Unmarshal(out.Bytes(), &doc); err != nil {
 			t.Fatal(err)
 		}
-		if doc.Stored != "keyring" {
-			t.Errorf("stored = %q, want the Backend value", doc.Stored)
-		}
-	})
-}
-
-// TestLogoutProjections pins logout's renderings, including the idempotent
-// empty case and the always-emitted removed array in JSON.
-func TestLogoutProjections(t *testing.T) {
-	t.Run("both backends", func(t *testing.T) {
-		var out, errBuf bytes.Buffer
-		p := newTestPrinter(&out, &errBuf, FormatText, false, false, false)
-		if err := p.Logout([]auth.Backend{auth.BackendKeyring, auth.BackendFile}); err != nil {
-			t.Fatal(err)
-		}
-		if !strings.Contains(errBuf.String(), "OS keyring and credential file") {
-			t.Errorf("both backends must be listed:\n%s", errBuf.String())
-		}
-		if out.Len() != 0 {
-			t.Errorf("logout text must not touch stdout, got %q", out.String())
-		}
-	})
-
-	t.Run("nothing stored", func(t *testing.T) {
-		var out, errBuf bytes.Buffer
-		p := newTestPrinter(&out, &errBuf, FormatText, false, false, false)
-		if err := p.Logout(nil); err != nil {
-			t.Fatal(err)
-		}
-		if !strings.Contains(errBuf.String(), "nothing to remove") {
-			t.Errorf("idempotent logout must say so:\n%s", errBuf.String())
-		}
-	})
-
-	t.Run("quiet is silent", func(t *testing.T) {
-		var out, errBuf bytes.Buffer
-		p := newTestPrinter(&out, &errBuf, FormatText, true, false, false)
-		if err := p.Logout([]auth.Backend{auth.BackendKeyring}); err != nil {
-			t.Fatal(err)
-		}
-		if out.Len() != 0 || errBuf.Len() != 0 {
-			t.Errorf("quiet logout must print nothing, got stdout %q stderr %q", out.String(), errBuf.String())
-		}
-	})
-
-	t.Run("json empty removal is an empty array", func(t *testing.T) {
-		var out, errBuf bytes.Buffer
-		p := newTestPrinter(&out, &errBuf, FormatJSON, false, false, false)
-		if err := p.Logout(nil); err != nil {
-			t.Fatal(err)
-		}
-		if got := out.String(); !strings.Contains(got, `"removed": []`) {
-			t.Errorf("empty removal = %s, want an explicit empty array", got)
+		if !doc.DeviceEnrolled {
+			t.Error("device_enrolled = false, want true")
 		}
 	})
 }

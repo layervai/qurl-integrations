@@ -1,7 +1,3 @@
-// Each test uses jest.isolateModules with `os` mocked BEFORE config
-// is required — config caches the derived values into the exported
-// object at require-time, so a fresh module graph is required per
-// test to exercise different `os` shapes.
 
 const { withFreshConfigMockingOs: withFreshConfig } = require('./helpers/fresh-config');
 describe('INSTANCE_ID derivation', () => {
@@ -24,10 +20,6 @@ describe('INSTANCE_ID derivation', () => {
   });
 
   it('returns null when both env override and os.hostname() are empty', () => {
-    // Pins the `|| null` branch in deriveInstanceId: rare chroot or
-    // misconfigured-init-ns where os.hostname() returns ''. Without
-    // the null normalization, callers branching on `=== null` would
-    // see an empty string instead.
     withFreshConfig(
       { env: {}, hostname: '' },
       (config) => {
@@ -122,10 +114,6 @@ describe('INSTANCE_IP derivation', () => {
   });
 
   it('accepts numeric addr.family (defensive against historical Node 18 regression)', () => {
-    // Node 18.0.0 briefly returned `family: 4`/`6` before that was
-    // reverted to the string form. Pinning both shapes here so a
-    // future Node major regressing back to numeric doesn't return
-    // null on every Fargate boot.
     withFreshConfig(
       {
         env: {},
@@ -140,10 +128,6 @@ describe('INSTANCE_IP derivation', () => {
   });
 
   it('falls back to non-eth0 when eth0 has only internal IPv4 addresses', () => {
-    // The branch the previous tests missed: eth0 exists and has IPv4
-    // addresses, but all are internal (e.g., loopback aliased). The
-    // first-pass eth0 loop must walk through without returning, then
-    // the fallback must pick up the non-internal address on en0.
     withFreshConfig(
       {
         env: {},
@@ -189,16 +173,9 @@ describe('INSTANCE_IP derivation', () => {
   });
 
   it('passes a bad env override through to invalidHotStandbyValues (contract end-to-end)', () => {
-    // Env override wins over derivation, so a malformed value
-    // (10.0.0.999 — non-IPv4) lands in config.INSTANCE_IP unmodified.
-    // The boot-time validator must then catch it. Locks the contract
-    // that override-path values still flow through the shape gate.
     withFreshConfig(
       { env: { INSTANCE_IP: '10.0.0.999' } },
       (config) => {
-        // Require inside isolateModules so boot-requirements sees the
-        // same module graph as config — future-proofs against a graph
-        // dependency on the `os` mock.
         const { invalidHotStandbyValues } = require('../src/boot-requirements');
         expect(config.INSTANCE_IP).toBe('10.0.0.999');
         const problems = invalidHotStandbyValues({
@@ -211,9 +188,6 @@ describe('INSTANCE_IP derivation', () => {
   });
 
   it('skips internal IPv4 addresses on eth0 (loopback aliased)', () => {
-    // Eth0 has both an internal address (127.0.0.1 — a misconfigured
-    // alias) AND the real non-internal IP. Without the `!addr.internal`
-    // guard this would return 127.0.0.1 because it appears first.
     withFreshConfig(
       {
         env: {},
@@ -231,14 +205,6 @@ describe('INSTANCE_IP derivation', () => {
   });
 
   it('skips link-local 169.254.0.0/16 addresses on eth0 (Fargate platform 1.4+)', () => {
-    // Pillar 3 push-handoff regression pin: under Fargate platform
-    // 1.4+, eth0 has 169.254.172.2 (the task metadata endpoint) bound
-    // alongside the real ENI IP, with the link-local listed first.
-    // `addr.internal` is false for link-local (node only sets that
-    // for loopback), so the prior naive `!internal && family==IPv4`
-    // filter picked 169.254.172.2 and the heartbeat row stored an
-    // unroutable address. Pin the post-fix behavior so a future edit
-    // can't quietly re-introduce the bug.
     withFreshConfig(
       {
         env: {},
@@ -256,10 +222,6 @@ describe('INSTANCE_IP derivation', () => {
   });
 
   it('falls through to non-eth0 when eth0 has only link-local IPv4', () => {
-    // Defense in depth: if a future Fargate platform ships an even
-    // weirder eth0 (only link-local, real IP on a different name),
-    // the second-pass interface scan must also reject link-local
-    // before reaching the real address elsewhere.
     withFreshConfig(
       {
         env: {},

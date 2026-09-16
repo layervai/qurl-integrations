@@ -35,6 +35,10 @@ const { buildFlowId } = require('./flow-id');
 const { loadFlow } = require('./flow-state');
 const { SHARD_ID } = require('./config');
 const logger = require('./logger');
+const {
+  isUnsupportedQurlContext,
+  UNSUPPORTED_CONTEXT_MSG,
+} = require('./interaction-context');
 
 // Module-state routing table. Registered at the bottom of commands.js
 // (and future setup/send handler modules) via `registerFlow`. Module-
@@ -120,12 +124,9 @@ function siblingMessageForStage(stage) {
 // Single source of truth — if these two callsites computed flow_id
 // differently the OCC contract would silently fail.
 //
-// DM context: interaction.guildId is null. Namespace DM flows under
-// `dm:<user_id>` so they can't collide with a real guild snowflake
-// (which are pure numerics — the `dm:` prefix is unambiguous). The
-// channel_id is still the DM channel ID, so two parallel DM flows for
-// the same user in different channels (theoretically possible if the
-// user opens a group DM) get distinct flow_ids.
+// DM context is rejected by handleFlowInteraction's guild-install boundary.
+// Keep this defensive namespace for direct helper callers and legacy rows so a
+// missing guild can never collide with a real guild snowflake.
 function flowIdForInteraction(interaction) {
   const guild_id = interaction.guildId ?? `dm:${interaction.user.id}`;
   return buildFlowId({
@@ -166,6 +167,18 @@ async function handleFlowInteraction(interaction) {
     // user's interaction will time out client-side with Discord's
     // generic "interaction failed" notice.
     logger.debug('flow-dispatch: unknown customId, dropping', { customId });
+    return;
+  }
+
+  // Components and modal submits can outlive the slash-command deploy that
+  // created them. Apply the same guild-install boundary here before touching
+  // flow state so a stale DM/user-install flow cannot resume after rollout.
+  if (isUnsupportedQurlContext(interaction)) {
+    logger.debug('flow-dispatch: unsupported interaction context, rejecting', {
+      customId,
+      has_guild: Boolean(interaction.guildId),
+    });
+    await supersededRoutingFailureReply(interaction, UNSUPPORTED_CONTEXT_MSG);
     return;
   }
 
@@ -254,14 +267,14 @@ async function handleFlowInteraction(interaction) {
 //     the user dismissed the source ephemeral between rendering and
 //     clicking; the interaction token is still live so a fresh reply
 //     is the right recovery.
-async function supersededRoutingFailureReply(interaction) {
+async function supersededRoutingFailureReply(interaction, message = SUPERSEDED_MSG) {
   // `isMessageComponent` is guaranteed to exist — `index.js` only
   // routes here when `isMessageComponent() || isModalSubmit()` is
   // true (interactionCreate listener), and discord.js declares both
   // methods on the base Interaction class.
   if (interaction.isMessageComponent() && !interaction.replied && !interaction.deferred) {
     try {
-      await interaction.update({ content: SUPERSEDED_MSG, components: [] });
+      await interaction.update({ content: message, components: [] });
       return;
     } catch (err) {
       logger.warn('flow-dispatch: update failed on routing failure, falling back to reply', {
@@ -273,7 +286,7 @@ async function supersededRoutingFailureReply(interaction) {
       // reply still has a valid token to spend.
     }
   }
-  await safeReply(interaction, SUPERSEDED_MSG);
+  await safeReply(interaction, message);
 }
 
 // Best-effort reply that swallows Discord errors. The dispatcher may

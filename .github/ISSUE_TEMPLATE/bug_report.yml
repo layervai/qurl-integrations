@@ -67,7 +67,6 @@ body:
         - teams
         - discord
         - cli
-        - zapier
         - chrome-extension
         - edge-extension
         - origins
@@ -103,7 +102,7 @@ body:
         - **Slack app** (Lambda): CloudWatch group `/aws/lambda/<app-name>`.
         - **Discord app** (containerised): container / hosting-platform logs (ECS / Railway / Fly / local Docker).
         - **CLI**: stderr from the failing command.
-        - **Teams / Zapier**: deploy stories not yet finalised — paste whatever log surface you have.
+        - **Teams**: the deploy story is not finalised — paste whatever log surface you have.
         Include correlation IDs and timestamps if available.
         **Redact before pasting:** bearer tokens, Slack/Discord bot tokens (`xoxb-…`, `Bot …`), API keys, and customer identifiers.
       # No `render:` — `render: shell` shell-highlights content, which

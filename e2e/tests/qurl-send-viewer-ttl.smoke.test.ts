@@ -18,11 +18,9 @@
  * view-window (Traefik), or the UI countdown.
  */
 
-import * as dotenv from 'dotenv';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-dotenv.config({ path: path.resolve(__dirname, '..', '.env') });
 
 import { trackedQurlResources } from '../helpers/cleanup';
 import { loadEnv } from '../helpers/env';

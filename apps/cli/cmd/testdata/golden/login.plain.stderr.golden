@@ -1,5 +1,4 @@
-Logged in as own_cli_fixture.
+Enrolled this device for own_cli_fixture.
 
-  Key:     key_fixturecli01 (lv_test_abcd)
-  Scopes:  qurl:read, qurl:resolve, qurl:write
-  Stored:  OS keyring
+  Auth:         api_key
+  Account key:  consumed, not stored

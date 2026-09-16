@@ -12,7 +12,7 @@ import (
 
 func TestResolveResourceRequestObserverIsDurableAndPreDispatch(t *testing.T) {
 	store := openResourceTestStore(t)
-	resource := testNativeResource(t, "proof-api")
+	resource := testNativeResource(t, "smoke-api")
 	dispatched := false
 	installResourceResolver(t, func(_ context.Context, _ *qurl.AgentRuntimeBinding, _ *qurl.NativeConnectorResourceRequest, _ ...qurl.AgentRuntimeUDPOption) (*qurl.ConnectorResourceResolution, error) {
 		dispatched = true
@@ -20,7 +20,7 @@ func TestResolveResourceRequestObserverIsDurableAndPreDispatch(t *testing.T) {
 	})
 
 	observed := false
-	_, err := ResolveResourceWithRequestObserver(context.Background(), &qurl.AgentRuntimeBinding{}, store, "proof-api", func(request qurl.NativeConnectorResourceRequest) error {
+	_, err := ResolveResourceWithRequestObserver(context.Background(), &qurl.AgentRuntimeBinding{}, store, "smoke-api", func(request qurl.NativeConnectorResourceRequest) error {
 		if dispatched {
 			return errors.New("observer ran after dispatch")
 		}
@@ -46,8 +46,8 @@ func TestResolveResourceRequestObserverCanStopBeforeDispatch(t *testing.T) {
 		dispatched = true
 		return nil, errors.New("unexpected dispatch")
 	})
-	sentinel := errors.New("observer stopped proof")
-	_, err := ResolveResourceWithRequestObserver(context.Background(), &qurl.AgentRuntimeBinding{}, store, "proof-api", func(request qurl.NativeConnectorResourceRequest) error {
+	sentinel := errors.New("observer stopped dispatch")
+	_, err := ResolveResourceWithRequestObserver(context.Background(), &qurl.AgentRuntimeBinding{}, store, "smoke-api", func(request qurl.NativeConnectorResourceRequest) error {
 		if pendingRequestFromDisk(t, store, request.ConnectorID) == nil {
 			t.Fatal("observer ran before pending state was durable")
 		}
@@ -59,7 +59,7 @@ func TestResolveResourceRequestObserverCanStopBeforeDispatch(t *testing.T) {
 	if dispatched {
 		t.Fatal("observer failure still dispatched the request")
 	}
-	if pendingRequestFromDisk(t, store, "proof-api") == nil {
+	if pendingRequestFromDisk(t, store, "smoke-api") == nil {
 		t.Fatal("observer failure cleared the replayable pending request")
 	}
 }

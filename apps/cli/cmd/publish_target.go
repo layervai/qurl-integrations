@@ -11,10 +11,9 @@ import (
 	"strconv"
 	"strings"
 
+	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/exitcode"
 )
-
-const localPublishIDDomain = "qurl-cli-local-publish-v1"
 
 type publishTargetKind uint8
 
@@ -134,18 +133,31 @@ func generatedLocalConnectorID(agentID, canonicalOrigin string) (string, error) 
 	if agentID == "" || canonicalOrigin == "" {
 		return "", errors.New("cannot derive a local Connector ID without the native agent identity and canonical origin")
 	}
-	digest := sha256.Sum256([]byte(localPublishIDDomain + "\x00id\x00" + agentID + "\x00" + canonicalOrigin))
+	digest := sha256.Sum256([]byte(connectorstate.LocalPublishIDDomain + "\x00id\x00" + agentID + "\x00" + canonicalOrigin))
 	suffix := strings.ToLower(base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(digest[:10]))
 	return "local-" + suffix, nil
 }
 
-func localEnrollmentIdempotencyKey(agentID, connectorID string) (string, error) {
+const localEnrollmentEntropyBytes = 32
+
+// localEnrollmentIdempotencyKey binds one random, process-local enrollment
+// attempt to its Agent and Connector identities. The same attempt reuses the
+// key for safe transport retry. A later process must use new entropy because
+// the service can retain a successful one-shot credential response for at
+// least as long as that credential is valid.
+func localEnrollmentIdempotencyKey(agentID, connectorID string, entropy []byte) (string, error) {
 	agentID = strings.TrimSpace(agentID)
 	connectorID = strings.TrimSpace(connectorID)
 	if agentID == "" || connectorID == "" {
 		return "", errors.New("cannot derive enrollment idempotency without the native agent and Connector identities")
 	}
-	digest := sha256.Sum256([]byte(localPublishIDDomain + "\x00enrollment\x00" + agentID + "\x00" + connectorID))
+	if len(entropy) != localEnrollmentEntropyBytes {
+		return "", errors.New("qURL Connector enrollment idempotency requires 32 bytes of attempt entropy")
+	}
+	payload := make([]byte, 0, len(connectorstate.LocalPublishIDDomain)+len("\x00enrollment\x00")+len(agentID)+len(connectorID)+len(entropy)+2)
+	payload = append(payload, connectorstate.LocalPublishIDDomain+"\x00enrollment\x00"+agentID+"\x00"+connectorID+"\x00"...)
+	payload = append(payload, entropy...)
+	digest := sha256.Sum256(payload)
 	return "qurl-cli-local-publish-" + hex.EncodeToString(digest[:]), nil
 }
 

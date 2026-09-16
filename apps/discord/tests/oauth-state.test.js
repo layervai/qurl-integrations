@@ -1,20 +1,3 @@
-// Tests for src/utils/oauth-state.js — the shared secret-resolution +
-// HMAC signer behind the qURL OAuth setup state
-// (utils/qurl-oauth-state.js). Covers the contract that flow relies on:
-//   1. precedence — first truthy secretConfigKeys entry wins, then
-//      the jest-only random fallback
-//   2. MIN_STATE_SECRET_LENGTH — whichever key wins the resolution is
-//      rejected under 32 chars.
-//   3. sign/verify — round-trip, tamper rejection, and no-throw on
-//      malformed signature input
-//   4. test-harness gating — outside jest/CI the resolver throws
-//      instead of silently minting with the random fallback
-//
-// The signer reads secrets from the config snapshot lazily on every
-// sign/verify (a documented affordance for exactly this mock shape),
-// so the suite mutates a plain config mock per test — no
-// process.env fiddling or module isolation needed except in the
-// harness-gate test, which exercises the one live-env read.
 
 jest.mock('../src/config', () => ({}));
 jest.mock('../src/logger', () => ({
@@ -26,8 +9,6 @@ const config = require('../src/config');
 const logger = require('../src/logger');
 const { createStateSigner, MIN_STATE_SECRET_LENGTH } = require('../src/utils/oauth-state');
 
-// Fresh signer per test: warn-once state and the random test-fallback
-// secret are per-signer, so nothing leaks across tests.
 function makeSigner(overrides = {}) {
   return createStateSigner({
     flowLabel: 'test OAuth state',
@@ -51,9 +32,6 @@ describe('oauth-state createStateSigner', () => {
   });
 
   it('rejects missing or empty secretConfigKeys at construction', () => {
-    // An empty list would leave nothing to resolve, so every
-    // sign/verify would fall through to the throw (or, inside jest, to
-    // the random test fallback) instead of failing at construction.
     expect(() => createStateSigner({ flowLabel: 'x' })).toThrow(/secretConfigKeys/);
     expect(() => createStateSigner({ flowLabel: 'x', secretConfigKeys: [] })).toThrow(/secretConfigKeys/);
   });
@@ -165,9 +143,6 @@ describe('oauth-state createStateSigner', () => {
 
     it('throws outside the jest/CI harness instead of minting with the fallback', () => {
       const signer = makeSigner();
-      // The harness gate reads the live env at call time (unlike the
-      // secrets, which come through config) — simulate a deployed
-      // process that merely has NODE_ENV=test by accident.
       const savedWorker = process.env.JEST_WORKER_ID;
       const savedCI = process.env.CI;
       delete process.env.JEST_WORKER_ID;

@@ -3,7 +3,8 @@ name: Main CI Notifications
 # Deploy workflows already notify once a build reaches qurl-integrations-infra.
 # This source-repo notifier covers the earlier failure mode: post-merge CI fails
 # before `trigger-deploy` can dispatch, leaving sandbox on the previous image
-# with no deploy notification to explain why.
+# with no deploy notification to explain why. It also closes an alert when the
+# same workflow run recovers on a later attempt.
 #
 # GitHub only runs workflow_run handlers from the default branch's copy of this
 # file, so this cannot notify for main-branch CI failures that happen before the
@@ -13,8 +14,7 @@ on:
     workflows:
       - "slack: Build and Test"
       - "discord: Build and Test"
-      - "chrome-extension: Build and Test"
-      - "edge-extension: Build and Test"
+      - "browser-extensions: Build and Test"
       - "teams: Build and Test"
       - "cli: Build and Test"
       - "cli: Nightly"
@@ -25,6 +25,7 @@ on:
       - "Secrets Scan"
       - "Release Please"
       - "Validate issue templates"
+      - "qURL CLI Soak Freshness Watchdog"
     types: [completed]
 
 # The notifier reads only the originating workflow's run history. That is what
@@ -41,11 +42,22 @@ jobs:
     # so a burst of merges to main routinely cancels intermediate runs by
     # supersession (#1022). Keep cancelled runs in scope: the step below proves
     # whether a newer run carries the commit and renders that benign case grey;
-    # a cancellation without a verified successor remains an amber alert.
+    # a cancellation without a verified successor remains an amber alert. A
+    # successful rerun is admitted only so the step can verify that the directly
+    # preceding attempt was one of the outcomes that this workflow notified.
+    # A cancelled attempt can have produced a grey supersession notice instead
+    # of an amber alert. We accept a rare green follow-up after that grey notice
+    # because the later workflow_run event does not retain the Slack outcome.
     if: >-
       github.event.workflow_run.head_branch == github.event.repository.default_branch &&
       contains(fromJson('["push","schedule"]'), github.event.workflow_run.event) &&
-      contains(fromJson('["failure","timed_out","cancelled"]'), github.event.workflow_run.conclusion)
+      (
+        contains(fromJson('["failure","timed_out","cancelled"]'), github.event.workflow_run.conclusion) ||
+        (
+          github.event.workflow_run.conclusion == 'success' &&
+          github.event.workflow_run.run_attempt > 1
+        )
+      )
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -56,10 +68,13 @@ jobs:
           REPOSITORY: ${{ github.repository }}
           REPOSITORY_URL: ${{ github.server_url }}/${{ github.repository }}
           WORKFLOW_NAME: ${{ github.event.workflow_run.name }}
+          WORKFLOW_PATH: ${{ github.event.workflow_run.path }}
           WORKFLOW_ID: ${{ github.event.workflow_run.workflow_id }}
           EVENT: ${{ github.event.workflow_run.event }}
           CONCLUSION: ${{ github.event.workflow_run.conclusion }}
           HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
           RUN_NUMBER: ${{ github.event.workflow_run.run_number }}
           RUN_URL: ${{ github.event.workflow_run.html_url }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
@@ -71,8 +86,52 @@ jobs:
           # Fail red instead of no-oping: if this secret is missing, the main
           # CI notification surface is broken and needs operator attention.
           if [[ -z "${SLACK_WEBHOOK_URL}" ]]; then
-            echo "::error::SLACK_WEBHOOK_URL is required for main CI failure notifications."
+            echo "::error::SLACK_WEBHOOK_URL is required for main CI notifications."
             exit 1
+          fi
+
+          # cli.yml sets run-name, so workflow_run.name is the per-run label.
+          if [[ "$WORKFLOW_PATH" == ".github/workflows/cli.yml" ]]; then
+            WORKFLOW_NAME="cli: Build and Test"
+          fi
+
+          recovered_from=""
+          previous_attempt=""
+          if [[ "$CONCLUSION" == "success" ]]; then
+            # `required` contains every schedule-reachable job except the
+            # dedicated soak sender. A scheduled re-run can recover only that
+            # sender, which posts its own green result before this event.
+            if [[ "$EVENT" == schedule && "$WORKFLOW_NAME" == "cli: Build and Test" ]]; then
+              echo "The dedicated soak notifier owns the scheduled CLI success message."
+              exit 0
+            fi
+            if [[ ! "$RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]] || (( RUN_ATTEMPT <= 1 )); then
+              echo "::error::successful recovery notification requires run attempt 2 or later"
+              exit 1
+            fi
+            previous_attempt="$((RUN_ATTEMPT - 1))"
+            if ! recovered_from="$(gh api --method GET \
+              "repos/${REPOSITORY}/actions/runs/${RUN_ID}/attempts/${previous_attempt}" \
+              --jq '.conclusion // empty')"; then
+              # An alert can degrade safely when its lookup fails, but an
+              # all-clear must never be sent without evidence.
+              echo "::error::could not verify the preceding workflow attempt"
+              exit 1
+            fi
+            # TODO(upstream-contract): Keep this exhaustive partition in sync
+            # with GitHub's workflow-run conclusion values and the job gate.
+            case "$recovered_from" in
+              failure|timed_out|cancelled)
+                ;;
+              success|action_required|neutral|skipped|stale|startup_failure)
+                echo "Attempt ${previous_attempt} concluded ${recovered_from}; no recovery notification is required."
+                exit 0
+                ;;
+              *)
+                echo "::error::preceding workflow attempt returned an unknown conclusion"
+                exit 1
+                ;;
+            esac
           fi
 
           short_sha="${HEAD_SHA:0:7}"
@@ -121,17 +180,18 @@ jobs:
             "discord: Build and Test")
               impact="Discord bot deploy dispatch did not run. No new image was sent to qurl-integrations-infra, so sandbox remains on the prior Discord bot image; prod promotion will fail its sandbox gate. See <${REPOSITORY_URL}/pull/204|#204> for the hotfix pattern."
               ;;
-            "chrome-extension: Build and Test")
-              impact="Chrome extension build, tests, or release packaging did not complete successfully. Nothing auto-deploys from this workflow, so treat the packaged bundle from this SHA as unshippable to the Chrome Web Store until the run is repaired."
-              ;;
-            "edge-extension: Build and Test")
-              impact="Edge extension build, tests, or release packaging did not complete successfully. Nothing auto-deploys from this workflow, so treat the packaged bundle from this SHA as unshippable to Microsoft Edge Add-ons until the run is repaired."
+            "browser-extensions: Build and Test")
+              impact="The browser extension tests or release packaging did not complete successfully. Treat both Chrome Web Store and Microsoft Edge Add-ons bundles from this SHA as unshippable until the run is repaired."
               ;;
             "teams: Build and Test")
               impact="Teams app typecheck, lint, tests, or build did not complete successfully. The Teams integration has no deploy dispatch yet, so no sandbox environment regressed — but this SHA is an unsound base for further Teams work until the run is fixed."
               ;;
             "cli: Build and Test")
-              impact="qURL CLI quality gates did not complete successfully on main. Nothing deploys from this workflow and released binaries are unaffected — CLI artifacts ship only when Release Please tags a release — but treat this SHA as an unsound base for the next CLI release until the run is repaired."
+              if [[ "$EVENT" == schedule ]]; then
+                impact="The scheduled qURL CLI workflow failed during or after validation. A required package, journey, cleanup, or Slack result-delivery gate did not pass. Review and repair the run before the next scheduled validation."
+              else
+                impact="qURL CLI quality gates did not complete successfully on main. Nothing deploys from this workflow and released binaries are unaffected — CLI artifacts ship only when Release Please tags a release — but treat this SHA as an unsound base for the next CLI release until the run is repaired."
+              fi
               ;;
             "cli: Nightly")
               impact="The nightly CLI deep pass (fuzz, extended sandbox e2e, GoReleaser snapshot, release smoke) did not complete successfully. If the failing job is *release smoke*, the shipped release customers install today may be broken — its log names the broken chain link (tap, cask, quarantine postflight, binary, release machinery, release assets, signature, manifest, archive, tap pin). Otherwise no artifact is affected. Triage whether this is a real regression or harness flake before the next CLI release."
@@ -155,15 +215,26 @@ jobs:
             "Validate issue templates")
               impact="Issue-template validation did not complete successfully on main. GitHub issue forms may be broken until the run succeeds."
               ;;
+            "qURL CLI Soak Freshness Watchdog")
+              impact="The qURL CLI freshness watchdog or its protected Slack alert delivery failed. Open this run to distinguish a GitHub status lookup failure from an alert-delivery failure."
+              ;;
             *)
               impact="Main CI did not complete successfully before the repository reached a clean post-merge state. Review the run and repair or re-run it against this SHA."
               ;;
           esac
 
-          # Match the shared qurl-service/NHP notification vocabulary: red for
-          # an actionable failure, amber when execution stopped without a proven
-          # successor, and neutral grey for a verified supersession.
+          # Match the shared qurl-service/NHP notification vocabulary: green for
+          # a verified recovery, red for an actionable failure, amber when
+          # execution stopped without a proven successor, and neutral grey for
+          # a verified supersession.
           case "$CONCLUSION" in
+            success)
+              color="#28a745"
+              emoji="white_check_mark"
+              result_emoji=":white_check_mark:"
+              status_text="recovered on attempt ${RUN_ATTEMPT}"
+              impact="*Recovered — no action needed.* Attempt ${RUN_ATTEMPT} passed after attempt ${previous_attempt} concluded ${recovered_from}. This workflow is green for this SHA."
+              ;;
             failure)
               color="#dc3545"
               emoji="x"
@@ -196,7 +267,7 @@ jobs:
               fi
               ;;
             *)
-              # The job-level gate admits only the three conclusions above.
+              # The job-level gate admits only the four conclusions above.
               # Keep a loud fallback in case that gate is widened independently.
               color="#ffc107"
               emoji="warning"

@@ -23,7 +23,7 @@ once the published image has soaked in the target environment.
 The origin's Connector-facing contract is intentionally small: plain HTTP on
 `127.0.0.1:8080`, with both containers running as UID/GID `65532`. Connector
 enrollment is independent of the origin and uses the current native UDP
-lifecycle: a one-shot, resource-bound enrollment token is consumed on the
+lifecycle: a one-shot, owner-scoped, resource-bound enrollment token is consumed on the
 first start, and the Connector persists the resulting device credential.
 
 Slack validates the complete server-issued `resource_id`,
@@ -231,21 +231,36 @@ replaces; viewer TLS is terminated before traffic reaches nginx.
 
 | Condition | Client status | Body | Observability |
 | --- | ---: | --- | --- |
-| S3 `404` | 404 | `Not Found` | access log `upstream_status:404`, and no `s3_request_rejected` line; does not by itself validate credentials |
-| S3 request rejected with `403` | 404 | `Not Found` | access log `upstream_status:403` **plus** an `s3_request_rejected` line; inspect credentials, IAM, region, endpoint, and request configuration |
-| Other expected non-throttle S3 `4xx` responses (`400`, `401`, `409`, `411`, `412`) | 404 | `Not Found` | access log preserves the exact `upstream_status`; `400` also emits `s3_request_rejected` without assigning a cause |
+| Missing key (S3 `404`) | 404 | `Not Found` | access log `upstream_status:404` |
+| S3 request rejected (`403`) | 404 | `Not Found` | access log `upstream_status:403` (drives the SigV4-denied alarm) |
+| Wrong-region bucket (S3 `301 PermanentRedirect`) | 404 | `Not Found` | access log `upstream_status:301` |
+| Any other S3 `3xx`/`4xx` response | 404 | `Not Found` | access log preserves the exact `upstream_status` |
 | S3 throttle (`429`) | 502 | `Bad Gateway` | access log `upstream_status:429` |
-| Upstream 5xx / Envoy down | 502 | `Bad Gateway` | access log `status:502` (drives the origin-5xx alarm) |
-| Method other than GET/HEAD | 405 | (nginx default) | access log only |
+| Any S3 `5xx` / Envoy down / credential-chain failure | 502 | `Bad Gateway` | access log `status:502` (drives the origin-5xx alarm) |
+| Method other than GET/HEAD | 405 | `Method Not Allowed` | access log only |
 
-S3 error bodies and the 403-vs-404 distinction are never leaked to clients; the
-distinction is preserved operator-side for alarming. A rejected S3 request can
-therefore look like a normal 404 to viewers. The origin surfaces the rejection
-through `upstream_status`, the `s3_request_rejected` line described under
-[Logging](#logging), and — at startup only — the
-`preflight_request_rejected` refusal. These signals intentionally say only what
-the statuses establish; diagnose the credential/provider chain, IAM policy,
-region, endpoint, and signed-request configuration before assigning a cause.
+Only a `2xx` object hit reaches the viewer. Every other upstream status is
+intercepted, so a status S3 starts returning in future is masked by default
+rather than passed through. Upstream `405` is included in that mapping; nginx's
+local method guard returns its own `405` body without consulting the upstream
+error mapping. The other exceptions are responses nginx produces itself: `304`
+for a viewer's conditional GET and `416` for an unsatisfiable range.
+
+S3 error bodies, `x-amz-*` response headers, and the 403-vs-404 distinction are
+never leaked to clients; the distinction is preserved in the access log for
+alarming. Envoy strips the complete `x-amz-*` namespace, including user-defined
+`x-amz-meta-*` values, KMS key IDs, and website redirect metadata, while nginx
+strips Envoy's `x-envoy-upstream-service-time`. Standard HTTP object metadata
+such as `Content-Type`, `Cache-Control`, `Content-Encoding`, `ETag`,
+`Last-Modified`, `Expires`, and range headers still passes through. Production
+deployments must wire the SigV4-denied alarm on `upstream_status:403` before
+relying on this image, because a rejected request intentionally looks like
+a normal 404 to viewers.
+
+A rejected S3 request can look like a normal 404 to viewers. The origin also
+emits `s3_request_rejected` and, at startup, `preflight_request_rejected`.
+These statuses alone do not establish the cause: check the credential/provider
+chain, IAM policy, region, endpoint and signed-request configuration.
 
 Range serving is intended for uncompressed objects. nginx gzip takes precedence
 for compressible content types such as CSS, JS, JSON, SVG, and XML, so text

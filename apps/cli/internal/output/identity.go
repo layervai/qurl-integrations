@@ -7,7 +7,6 @@ import (
 	"time"
 
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
-	"github.com/layervai/qurl-integrations/apps/cli/internal/auth"
 )
 
 // Identity renderings for whoami and login. The identity is who the
@@ -30,18 +29,9 @@ type whoamiJSON struct {
 }
 
 type loginJSON struct {
-	OwnerID  string           `json:"owner_id"`
-	AuthType string           `json:"auth_type"`
-	APIKey   *identityKeyJSON `json:"api_key,omitempty"`
-	// Stored names the backend that took the key: "keyring" or "file".
-	Stored string `json:"stored"`
-}
-
-type logoutJSON struct {
-	// Removed lists the backends a key was removed from ("keyring", "file");
-	// empty when nothing was stored. Always emitted so scripts can tell the
-	// idempotent no-op from the real removal.
-	Removed []string `json:"removed"`
+	OwnerID        string `json:"owner_id"`
+	AuthType       string `json:"auth_type"`
+	DeviceEnrolled bool   `json:"device_enrolled"`
 }
 
 func identityKey(id *qurlapi.Identity) *identityKeyJSON {
@@ -55,15 +45,6 @@ func identityKey(id *qurlapi.Identity) *identityKeyJSON {
 		KeyPrefix: id.Key.KeyPrefix,
 		ExpiresAt: id.Key.ExpiresAt,
 	}
-}
-
-// backendLabel maps a storage backend to its prose name; JSON carries the
-// machine-stable Backend value itself.
-func backendLabel(b auth.Backend) string {
-	if b == auth.BackendKeyring {
-		return labelKeyring
-	}
-	return labelCredentialFile
 }
 
 // WhoAmI renders the identity behind the configured credential. Identity is
@@ -111,60 +92,31 @@ func (p *Printer) keyExpiry(t *time.Time) string {
 	return p.formatExpiry(*t)
 }
 
-// Login renders a successful login: who the key is and where it was stored.
+// Login renders a successful registered-device enrollment.
 // The confirmation is a status message for humans and goes to stderr; JSON
-// emits the identity-plus-storage document on stdout; --quiet prints the
-// owner id so scripts get the same primary value whoami would give them.
-func (p *Printer) Login(id *qurlapi.Identity, stored auth.Backend) error {
+// emits the device identity document on stdout; --quiet prints the owner id
+// so scripts get the same primary value whoami would give them.
+func (p *Printer) Login(id *qurlapi.Identity) error {
 	switch {
 	case p.format == FormatJSON:
-		return p.writeJSON(loginJSON{OwnerID: id.OwnerID, AuthType: id.AuthType, APIKey: identityKey(id), Stored: string(stored)})
+		return p.writeJSON(loginJSON{OwnerID: id.OwnerID, AuthType: id.AuthType, DeviceEnrolled: true})
 	case p.quiet:
 		_, err := fmt.Fprintln(p.out, id.OwnerID)
 		return err
 	default:
-		return p.loginText(id, stored)
+		return p.loginText(id)
 	}
 }
 
-func (p *Printer) loginText(id *qurlapi.Identity, stored auth.Backend) error {
+func (p *Printer) loginText(id *qurlapi.Identity) error {
 	ew := &errWriter{w: p.err}
-	ew.printf("%s\n\n", fmt.Sprintf(msgLoggedInAs, p.bold(id.OwnerID)))
+	ew.printf("%s\n\n", fmt.Sprintf(msgDeviceEnrolled, p.bold(id.OwnerID)))
 	if ew.err != nil {
 		return ew.err
 	}
 	tw := tabwriter.NewWriter(p.err, 0, 0, 2, ' ', 0)
 	twe := &errWriter{w: tw}
-	if k := id.Key; k != nil {
-		twe.printf("  %s\t%s\n", p.bold("Key:"), keyLine(k))
-		twe.printf("  %s\t%s\n", p.bold("Scopes:"), strings.Join(k.Scopes, ", "))
-	}
-	twe.printf("  %s\t%s\n", p.bold("Stored:"), backendLabel(stored))
+	twe.printf("  %s\t%s\n", p.bold("Auth:"), id.AuthType)
+	twe.printf("  %s\t%s\n", p.bold("Account key:"), "consumed, not stored")
 	return twe.flush(tw)
-}
-
-// Logout renders a logout outcome. The confirmation goes to stderr; JSON
-// reports the removed backends on stdout; --quiet prints nothing (the exit
-// code is the outcome). An empty removed set is the idempotent no-op.
-func (p *Printer) Logout(removed []auth.Backend) error {
-	switch {
-	case p.format == FormatJSON:
-		names := make([]string, 0, len(removed))
-		for _, b := range removed {
-			names = append(names, string(b))
-		}
-		return p.writeJSON(logoutJSON{Removed: names})
-	case p.quiet:
-		return nil
-	case len(removed) == 0:
-		_, err := fmt.Fprintf(p.err, "%s\n", msgNothingStored)
-		return err
-	default:
-		labels := make([]string, 0, len(removed))
-		for _, b := range removed {
-			labels = append(labels, backendLabel(b))
-		}
-		_, err := fmt.Fprintf(p.err, msgLoggedOut+"\n", strings.Join(labels, " and "))
-		return err
-	}
 }

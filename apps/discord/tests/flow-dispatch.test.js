@@ -1,19 +1,3 @@
-/**
- * Unit tests for src/flow-dispatch.js — the customId → handler
- * routing layer that replaces in-process `awaitMessageComponent` for
- * component / modal interactions.
- *
- * Trust-model surface: flow_id is derived from interaction context
- * (user.id + channelId + shard), NEVER from customId. Tests pin that
- * a hostile customId cannot reach a sibling user's flow row even if
- * the routing prefix matches.
- *
- * Stage-mismatch surface: the dispatcher's primary guard is
- * `row.stage === expectedStage`. A flow that has advanced past its
- * registered stage (e.g. PR 6's setup modal having already moved to
- * `awaiting_complete`) must yield the same "superseded" reply as a
- * missing row — both signal "this customId can't act now."
- */
 
 jest.mock('../src/logger', () => ({
   info: jest.fn(),
@@ -32,6 +16,7 @@ jest.mock('../src/config', () => ({
 }));
 
 const { loadFlow } = require('../src/flow-state');
+const logger = require('../src/logger');
 const {
   registerFlow,
   siblingMessageForStage,
@@ -39,13 +24,9 @@ const {
   handleFlowInteraction,
   SUPERSEDED_MSG,
 } = require('../src/flow-dispatch');
+const { UNSUPPORTED_CONTEXT_MSG } = require('../src/interaction-context');
 
 function makeInteraction(overrides = {}) {
-  // Default to MessageComponent shape — that's the dominant routing
-  // source (button + select clicks). Modal-submit tests override with
-  // `isMessageComponent: () => false`. `isMessageComponent` is the
-  // discriminator the dispatcher reads to choose update-source-card
-  // vs. reply-ephemeral on a routing-failure recovery.
   return {
     customId: 'test_prefix',
     user: { id: 'user-123' },
@@ -73,11 +54,6 @@ describe('flowIdForInteraction', () => {
   });
 
   it('uses interaction.user.id, NOT anything from customId', () => {
-    // Security pin: a hostile customId encoding "user-VICTIM" must
-    // not affect routing — the trusted identity is the interaction
-    // context. (This is implicit since flowIdForInteraction doesn't
-    // read customId at all, but pin it so a future refactor that
-    // adds customId-derived disambiguation surfaces in review.)
     const flow_id = flowIdForInteraction(makeInteraction({
       customId: 'qurl_revoke_select:user-VICTIM',
       user: { id: 'user-ATTACKER' },
@@ -88,9 +64,6 @@ describe('flowIdForInteraction', () => {
 });
 
 describe('registerFlow', () => {
-  // registerFlow mutates module-private state, which leaks across
-  // tests in this describe. Use unique prefixes per case so we don't
-  // need a reset hook.
   it('rejects duplicate registration', () => {
     registerFlow('dup_prefix', { expectedStage: 's', handler: jest.fn() });
     expect(() => registerFlow('dup_prefix', { expectedStage: 's', handler: jest.fn() }))
@@ -122,10 +95,6 @@ describe('registerFlow', () => {
   });
 
   it('rejects re-registering a stage with a DIFFERENT siblingMessage', () => {
-    // Two customIds registering the same stage MUST agree on the
-    // sibling message — otherwise the lookup behavior would flip
-    // depending on registration order, which is registration-order
-    // dependent magic.
     registerFlow('sm_first_prefix', {
       expectedStage: 'sm_consistent_stage',
       handler: jest.fn(),
@@ -163,10 +132,6 @@ describe('siblingMessageForStage', () => {
   });
 
   it('returns null for non-string input (defensive against caller bugs)', () => {
-    // The caller's typical input is `surviving?.stage` where
-    // surviving may be null — guard against the resulting
-    // undefined / non-string defensively rather than relying on
-    // every caller to optional-chain.
     expect(siblingMessageForStage(undefined)).toBeNull();
     expect(siblingMessageForStage(null)).toBeNull();
     expect(siblingMessageForStage(42)).toBeNull();
@@ -175,11 +140,50 @@ describe('siblingMessageForStage', () => {
 });
 
 describe('handleFlowInteraction', () => {
-  // Tests use a per-test prefix to avoid the global registry leaking
-  // state between describe blocks. Each test registers its own
-  // unique prefix.
   beforeEach(() => {
     jest.clearAllMocks();
+  });
+
+  it('rejects a component resumed from a DM before loading flow state', async () => {
+    const handler = jest.fn();
+    registerFlow('route_dm_component', { expectedStage: 'awaiting', handler });
+    const interaction = makeInteraction({
+      customId: 'route_dm_component',
+      guildId: null,
+    });
+
+    await handleFlowInteraction(interaction);
+
+    expect(loadFlow).not.toHaveBeenCalled();
+    expect(handler).not.toHaveBeenCalled();
+    expect(logger.debug).toHaveBeenCalledWith(
+      'flow-dispatch: unsupported interaction context, rejecting',
+      { customId: 'route_dm_component', has_guild: false },
+    );
+    expect(interaction.update).toHaveBeenCalledWith({
+      content: UNSUPPORTED_CONTEXT_MSG,
+      components: [],
+    });
+  });
+
+  it('rejects a modal resumed from a user-only install inside a guild', async () => {
+    const handler = jest.fn();
+    registerFlow('route_user_install_modal', { expectedStage: 'awaiting', handler });
+    const interaction = makeInteraction({
+      customId: 'route_user_install_modal',
+      authorizingIntegrationOwners: { 1: 'user-123' },
+      isMessageComponent: () => false,
+    });
+
+    await handleFlowInteraction(interaction);
+
+    expect(loadFlow).not.toHaveBeenCalled();
+    expect(handler).not.toHaveBeenCalled();
+    expect(interaction.update).not.toHaveBeenCalled();
+    expect(interaction.reply).toHaveBeenCalledWith({
+      content: UNSUPPORTED_CONTEXT_MSG,
+      ephemeral: true,
+    });
   });
 
   it('routes to the registered handler when stage matches', async () => {
@@ -207,13 +211,25 @@ describe('handleFlowInteraction', () => {
     expect(ctx.row.stage).toBe('awaiting');
   });
 
+  it('allows a dual install when the guild authorized the resumed flow', async () => {
+    const handler = jest.fn().mockResolvedValue(undefined);
+    registerFlow('route_dual_install', { expectedStage: 'awaiting', handler });
+    loadFlow.mockResolvedValue({ stage: 'awaiting', version: 1 });
+    const interaction = makeInteraction({
+      customId: 'route_dual_install',
+      authorizingIntegrationOwners: {
+        0: 'guild-789',
+        1: 'user-123',
+      },
+    });
+
+    await handleFlowInteraction(interaction);
+
+    expect(loadFlow).toHaveBeenCalledWith('0:1#guild-789#channel-456#user-123');
+    expect(handler).toHaveBeenCalledTimes(1);
+  });
+
   it('updates the source card when row is missing (component path)', async () => {
-    // Clears the stale card's buttons in place so the user can't keep
-    // clicking. Repro for the cancel-on-expired-card stacking bug:
-    // each repeated reply() left the card's Cancel button live, so
-    // every click added another ephemeral with a reply-quote of the
-    // card. Editing the source message via `update` is what kills the
-    // stack.
     const handler = jest.fn();
     registerFlow('route_missing', { expectedStage: 'awaiting', handler });
     loadFlow.mockResolvedValue(null);
@@ -250,9 +266,6 @@ describe('handleFlowInteraction', () => {
   });
 
   it('replies (does not update) for modal submits with no source card', async () => {
-    // Modal-submit interactions don't carry the source-card contract
-    // the update path relies on — fall back to the ephemeral reply
-    // shape that worked before this change.
     const handler = jest.fn();
     registerFlow('route_modal_missing', { expectedStage: 'awaiting', handler });
     loadFlow.mockResolvedValue(null);
@@ -272,10 +285,6 @@ describe('handleFlowInteraction', () => {
   });
 
   it('falls back to reply when update fails (e.g. source ephemeral dismissed)', async () => {
-    // If the user dismissed the source ephemeral between render and
-    // click, `update` rejects with Unknown Message. The interaction
-    // token is still live, so a fresh ephemeral is the right recovery
-    // — don't silently swallow the SUPERSEDED hint.
     const handler = jest.fn();
     registerFlow('route_update_fails', { expectedStage: 'awaiting', handler });
     loadFlow.mockResolvedValue(null);
@@ -330,8 +339,6 @@ describe('handleFlowInteraction', () => {
   });
 
   it('uses followUp when interaction is already acked (no source-card update)', async () => {
-    // An already-replied interaction has no live `update` slot; fall
-    // back to followUp so the recovery surfaces.
     const handler = jest.fn();
     registerFlow('route_followup', { expectedStage: 'awaiting', handler });
     loadFlow.mockResolvedValue(null);
@@ -351,11 +358,6 @@ describe('handleFlowInteraction', () => {
   });
 
   it('swallows reply failures so a stale interaction does not throw', async () => {
-    // Both `update` AND the fallback `reply` reject — a fully dead
-    // interaction (token expired, source ephemeral deleted). The
-    // dispatcher's contract is silent-swallow + warn log, NOT throw,
-    // because the caller (index.js interactionCreate listener) has no
-    // meaningful retry path.
     registerFlow('route_reply_throws', {
       expectedStage: 'awaiting',
       handler: jest.fn(),
@@ -367,15 +369,10 @@ describe('handleFlowInteraction', () => {
       reply: jest.fn().mockRejectedValue(new Error('Unknown interaction')),
     });
 
-    // Must not throw — silent swallow with a warn log is the contract.
     await expect(handleFlowInteraction(interaction)).resolves.toBeUndefined();
   });
 
   it('catches handler throws and replies a generic error', async () => {
-    // Safety-net pin: a handler that throws after committing an
-    // irreversible flow_state side effect (e.g. the deleteFlow-first
-    // ordering in handleRevokeSelect) must not produce an
-    // unhandledRejection. The user gets a recoverable message.
     const handler = jest.fn().mockRejectedValue(new Error('downstream API died'));
     registerFlow('route_throws', { expectedStage: 'awaiting', handler });
     loadFlow.mockResolvedValue({
@@ -396,9 +393,6 @@ describe('handleFlowInteraction', () => {
   });
 
   it('flow_id passed to handler is derived from interaction context', async () => {
-    // Anti-spoofing pin: even if the customId contained user/channel
-    // hints, the handler receives the flow_id built from
-    // interaction.user.id + interaction.channelId.
     const handler = jest.fn().mockResolvedValue(undefined);
     registerFlow('route_spoof_check', { expectedStage: 's', handler });
     loadFlow.mockResolvedValue({ flow_id: '0:1#g#c#actual-user', stage: 's', version: 1 });

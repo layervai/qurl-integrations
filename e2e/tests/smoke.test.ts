@@ -11,10 +11,6 @@
  * helpers/cleanup.ts.
  */
 
-import * as dotenv from 'dotenv';
-import * as path from 'path';
-dotenv.config({ path: path.resolve(__dirname, '..', '.env') });
-
 import { trackedDiscordMessages, trackedQurlResources, withRunNonce } from '../helpers/cleanup';
 import { loadEnv } from '../helpers/env';
 import * as discord from '../helpers/discord-api';

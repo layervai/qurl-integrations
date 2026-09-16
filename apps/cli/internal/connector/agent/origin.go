@@ -1,3 +1,4 @@
+// Package agent owns local Connector resource identity and native resolution.
 package agent
 
 import (

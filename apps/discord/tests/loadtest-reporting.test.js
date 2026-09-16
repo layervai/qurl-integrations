@@ -1,21 +1,3 @@
-/**
- * Tests for the run reporting in scripts/loadtest-standalone.js.
- *
- * Every assertion here exists because the reporting was inverted: it was at
- * its quietest exactly when the run was at its worst. A file leg that issued
- * zero successful mint requests (#1168) printed no failure counts, printed a
- * latency block anyway, and exited 0 — so the bug survived the file's entire
- * lifetime without a single run looking wrong.
- *
- * That makes these tests the only signal on this code. main() and runRound()
- * cannot be called from a suite (they run the load test), and scripts/ is
- * outside jest's collectCoverageFrom, so an untested reporting decision is
- * reported by nothing at all. The decisions are pure functions for that
- * reason, matching targetGuardReport.
- *
- * Requiring the script does NOT run the load test: its CLI entry point is
- * behind `require.main === module`.
- */
 
 const fs = require('fs');
 const path = require('path');
@@ -37,7 +19,6 @@ const {
   DEFAULT_MAX_FAIL_RATE_PCT,
 } = require('../scripts/loadtest-standalone');
 
-/** A round's counters, defaulted to a round that did nothing. */
 const round = (over = {}) => ({
   fileLinks: 0, fileFail: 0, locLinks: 0, locFail: 0,
   uploadMs: 0, mintMs: 0, locMs: 0, totalMs: 0, ...over,
@@ -50,9 +31,6 @@ const tally = (pairs) => {
 };
 
 describe('roundReportLine — the round line is gated on attempts, not successes', () => {
-  // The regression that matters. Under the old `if (results.fileLinks > 0)`
-  // gate this exact round printed `[30s] Round 1: total=0.3s` and nothing
-  // else: 100 failed mints rendered as a fast, quiet round.
   it('prints the file segment when every file mint failed', () => {
     const line = roundReportLine({
       elapsed: '30',
@@ -71,9 +49,6 @@ describe('roundReportLine — the round line is gated on attempts, not successes
     })).toBe('[60s] Round 2: location(900ms ok=0 fail=40) total=1.0s');
   });
 
-  // Partial failure was always visible — it is total failure that vanished.
-  // Asserted so a "fix" that merely reworded the partial case is not mistaken
-  // for one that inverted the gate.
   it('prints partial failure, as it always did', () => {
     expect(roundReportLine({
       elapsed: '30',
@@ -93,8 +68,6 @@ describe('roundReportLine — the round line is gated on attempts, not successes
     })).toBe('[90s] Round 3: file(upload=100ms mint=5ms ok=0 fail=50) location(800ms ok=50 fail=0) total=1.0s');
   });
 
-  // The gate still has to stay silent about a leg that never ran, or a
-  // location-only run grows a permanent `file(... ok=0 fail=0)` segment.
   it('omits a leg that attempted nothing', () => {
     const line = roundReportLine({
       elapsed: '10',
@@ -107,10 +80,6 @@ describe('roundReportLine — the round line is gated on attempts, not successes
 });
 
 describe('errorTallyLines — failures are deduped by message, not by count', () => {
-  // The old `if (results.fileFail === 0) console.error(...)` printed the first
-  // message of a round and dropped every later one. A round mixing a systemic
-  // bug with transient throttling reported whichever arrived first, hiding the
-  // distinction an operator is actually trying to draw.
   it('reports every distinct message in a round', () => {
     const lines = errorTallyLines(
       tally([['mintLinks is not a function', 40], ['HTTP 429', 1], ['HTTP 429', 1]]),
@@ -129,8 +98,6 @@ describe('errorTallyLines — failures are deduped by message, not by count', ()
     ]);
   });
 
-  // Weighting by batch size is what lets the tally be read against the round
-  // line: these counts sum to that line's `fail=`.
   it('weights a file batch by the mints it took down', () => {
     const map = tally([['boom', 10], ['boom', 10], ['boom', 5]]);
     expect(map.get('boom')).toBe(25);
@@ -140,9 +107,6 @@ describe('errorTallyLines — failures are deduped by message, not by count', ()
     expect(errorTallyLines(new Map(), 'File mint')).toEqual([]);
   });
 
-  // An error message carrying a unique id makes every failure its own key.
-  // Uncapped, a 200-recipient round prints 200 stderr lines; the omitted
-  // volume still has to be named rather than silently dropped.
   it('caps distinct messages and accounts for the remainder', () => {
     const many = Array.from({ length: ERROR_TALLY_LIMIT + 3 }, (_, i) => [`request ${i} failed`, 1]);
     const lines = errorTallyLines(tally(many), 'Location mint');
@@ -160,15 +124,6 @@ describe('errorTallyLines — failures are deduped by message, not by count', ()
 });
 
 describe('--max-fail-rate — the flag that decides the exit code, end to end', () => {
-  // Pins the WIRING, not either half. readFlag's own mechanics — both
-  // spellings, last-wins, prefix non-matching, refusing a dropped value — are
-  // covered against --file in tests/loadtest-silent-failure.test.js. What only
-  // this flag can lose is the connection between them: it is the one whose
-  // value decides an exit code two hours after the run, so a value that never
-  // reached parseMaxFailRate would surface as a green run at the strict
-  // default, with nothing in the log naming the threshold that applied.
-  //
-  // Mirrors main()'s two steps in order, so a reordering there shows up here.
   const resolve = (argv) => {
     const { value, error } = readFlag(argv, 'max-fail-rate', String(DEFAULT_MAX_FAIL_RATE_PCT));
     return error ? { error } : parseMaxFailRate(value);
@@ -179,8 +134,6 @@ describe('--max-fail-rate — the flag that decides the exit code, end to end', 
     ['the space form', ['--max-fail-rate', '100'], 1],
     ['a fractional threshold', ['--max-fail-rate=0.5'], 0.005],
   ])('resolves %s', (_label, argv, rate) => {
-    // `=100` is the waiver spelling an operator reaches for to turn the check
-    // off; it used to miss the reader entirely and run at the strict default.
     expect(resolve(argv)).toEqual({ rate });
   });
 
@@ -196,11 +149,6 @@ describe('--max-fail-rate — the flag that decides the exit code, end to end', 
     ['the value is an empty token', ['--max-fail-rate', '', '--location']],
     ['the value is whitespace', ['--max-fail-rate', '   ']],
   ])('refuses a threshold when %s', (_label, argv) => {
-    // Refused by parseMaxFailRate rather than by the reader: readFlag hands an
-    // empty inline value on deliberately, leaving "what counts as empty" to
-    // the caller. Whitespace is the one that matters most — Number('   ') is
-    // 0, so a blank value would otherwise become the STRICTEST possible
-    // threshold rather than an error.
     const { rate, error } = resolve(argv);
     expect(rate).toBeUndefined();
     expect(error).toContain('--max-fail-rate must be a percentage');
@@ -212,10 +160,6 @@ describe('--max-fail-rate — the flag that decides the exit code, end to end', 
   });
 
   it('refuses a following flag rather than swallowing it as the value', () => {
-    // Changed with the #1174 merge and worth pinning at the new answer: the
-    // old reader took '--location' as the value and let parseMaxFailRate
-    // reject it by name, which reported a threshold fault for what was really
-    // a forgotten value — and consumed a real flag on the way.
     const { error } = resolve(['--max-fail-rate', '--location']);
     expect(error).toBe('--max-fail-rate was given no value — the next argument is the flag --location (omit it to use the default of 10)');
   });
@@ -227,9 +171,6 @@ describe('--max-fail-rate — the flag that decides the exit code, end to end', 
 });
 
 describe('formatRatePair — a breach never prints as "X% exceeds X%"', () => {
-  // 1001/10000 is 10.01%: over a 10% threshold, but identical to it at one
-  // decimal place. Printed that way the line reads as a bug in the tool
-  // rather than a finding about the run.
   it('widens both until they differ', () => {
     expect(formatRatePair(1001 / 10000, 0.1)).toEqual(['10.01%', '10.00%']);
   });
@@ -240,9 +181,6 @@ describe('formatRatePair — a breach never prints as "X% exceeds X%"', () => {
 });
 
 describe('formatThresholdPct — the echo shows the threshold that was set', () => {
-  // At a fixed one decimal the confirmation line rounds away exactly the
-  // values an operator would double-check: 0.05% reads as 0.1%, twice what
-  // was asked for, and 0.01% reads as 0.0%, which is not a threshold at all.
   it.each([
     ['a whole percentage', 0.1, '10.0%'],
     ['one decimal', 0.025, '2.5%'],
@@ -260,10 +198,6 @@ describe('formatThresholdPct — the echo shows the threshold that was set', () 
     expect(formatThresholdPct(0.0001)).not.toBe('0.0%');
   });
 
-  // Past the display bound the two cases diverge, and conflating them would
-  // reintroduce the defect this function exists to fix: a value too fine to
-  // show must not read as no threshold, and a value that is merely
-  // long-running must not read as too fine to show.
   it('reports a threshold below the display bound as below it', () => {
     expect(formatThresholdPct(1e-9)).toBe('<0.000001%');
   });
@@ -272,11 +206,6 @@ describe('formatThresholdPct — the echo shows the threshold that was set', () 
     expect(formatThresholdPct(0.333333333333)).toBe('33.333333%');
   });
 
-  // A percentage does not survive the round trip through a fraction:
-  // `0.23 / 100 * 100` is 0.22999999999999998. Comparing the widened text
-  // against that finds no width that matches, so these echoed as `0.230000%`
-  // — accurate, but not the value as it was typed, which is the one thing
-  // this line owes the operator.
   it.each([['0.23', 0.0023, '0.23%'], ['0.45', 0.0045, '0.45%'], ['0.85', 0.0085, '0.85%']])(
     'echoes %s%% as typed despite the float round trip',
     (_label, rate, expected) => {
@@ -284,9 +213,6 @@ describe('formatThresholdPct — the echo shows the threshold that was set', () 
     },
   );
 
-  // The sweep the three cases above were found by. Every threshold an
-  // operator can type in hundredths renders as typed — no trailing-zero
-  // padding, and none mistaken for below the display bound.
   it('renders every hundredth from 0.01% to 100.00% as typed', () => {
     const wrong = [];
     for (let i = 1; i <= 10000; i++) {
@@ -308,12 +234,6 @@ describe('parseMaxFailRate — a malformed threshold fails closed', () => {
     expect(parseMaxFailRate(raw)).toEqual({ rate: expected });
   });
 
-  // Each of these is NaN or out of range under a bare `Number`, and NaN
-  // compares false against every rate — so an unvalidated parse would disable
-  // the threshold silently and report the run as a pass.
-  // Whitespace is the sharp one: `Number('   ')` is 0, so an unguarded parse
-  // turns a blank value into the strictest possible threshold rather than an
-  // error — silently failing runs the operator meant to be lenient about.
   it.each([
     ['not a number', 'ten'], ['a percent sign', '10%'], ['negative', '-1'],
     ['over 100', '101'], ['whitespace', '   '], ['empty', ''],
@@ -331,11 +251,6 @@ describe('runReport — the summary and the exit code', () => {
   const report = (allResults, roundsAttempted = allResults.length, maxFailRate = 0.1) =>
     runReport({ allResults, roundsAttempted, maxFailRate });
 
-  // The second half of #1168's invisibility. `allResults[0].uploadMs > 0` is
-  // set before the first mint is attempted, so it held while every mint
-  // failed and the summary reported how long the failures took as though it
-  // were how long the successes took — a fast failure reading as a fast
-  // success, which is the shape of a headline result.
   it('refuses to report a mint latency when no qURL was minted', () => {
     const lines = report([round({ fileFail: 100, uploadMs: 250, mintMs: 1, totalMs: 300 })]).lines;
     expect(lines).toContain('Avg upload: 250ms, avg mint/round: n/a — all 100 mint attempt(s) failed');
@@ -347,10 +262,6 @@ describe('runReport — the summary and the exit code', () => {
       .toContain('Avg upload: 250ms, avg mint/round: 400ms');
   });
 
-  // The same blend one granularity down. A round whose every mint failed
-  // times only failures, which are far faster than a real mint, so averaging
-  // it in reports a latency neither the healthy nor the dead rounds ever saw
-  // — here 201ms, from a 400ms round and a 2ms one.
   it('averages mint latency over the rounds that actually minted', () => {
     const lines = report([
       round({ fileLinks: 100, uploadMs: 250, mintMs: 400, totalMs: 700 }),
@@ -373,17 +284,10 @@ describe('runReport — the summary and the exit code', () => {
       'Failure threshold: 10.0% (--max-fail-rate)',
       'Avg round time: 0.6s',
       'Avg upload: 200ms, avg mint/round: 300ms',
-      // One upload per round and no re-uploads: these rounds are built with
-      // --count at or below a pool's depth, so the plan is a single batch.
-      // The line prints anyway — uploads-per-round is how a reader judges
-      // whether the run reproduced a real send's load, and it is exactly as
-      // informative when the answer is "no re-uploads were needed".
       'Uploads: 2 ok (2 initial + 0 re-upload)',
     ]);
   });
 
-  // The threshold that decided the exit code is echoed on every run, so a
-  // typo'd flag that silently took the default is visible in the log.
   it('states the threshold it judged against, even when passing', () => {
     expect(report([round({ fileLinks: 10, uploadMs: 1, mintMs: 1, totalMs: 2 })], 1, 0.25).lines)
       .toContain('Failure threshold: 25.0% (--max-fail-rate)');
@@ -401,14 +305,6 @@ describe('runReport — the summary and the exit code', () => {
     );
   });
 
-  // Rounds ran, nothing was attempted. Both rates are 0/0, so without this
-  // the run reads as clean while having measured nothing.
-  //
-  // Defensive rather than live since #1171 merged in — `--count 0` was the
-  // way in and parsePositiveInt refuses zero at preflight now. Kept, and
-  // exercised through runReport directly, because the guarantee it rests on
-  // lives in a different function: the branch has to survive that one
-  // changing. See the reachability note in runReport.
   it('fails a run that attempted no qURL, and does not call it a failure', () => {
     const result = report([round({ uploadMs: 200, totalMs: 300 })]);
     expect(result.failed).toBe(true);
@@ -431,16 +327,11 @@ describe('runReport — the summary and the exit code', () => {
     expect(result.lines.join('\n')).not.toContain('FAILED');
   });
 
-  // Every round threw before recording anything. allResults is empty, so
-  // without roundsAttempted this printed `Rounds: 0` and exited 0 — the
-  // per-round line's invisibility one level up, and the worst version of it.
   it('fails, and says so, when no round completed', () => {
     const result = report([], 5);
     expect(result.failed).toBe(true);
     expect(result.lines[0]).toBe('Rounds: 0 completed, 5 failed');
     expect(result.lines).toContain('FAILED: no round completed');
-    // One condition, one finding: a zero-completed run always has a 100%
-    // round rate, so naming both would report it twice.
     expect(result.lines.filter((l) => l.startsWith('FAILED:'))).toHaveLength(1);
   });
 
@@ -450,9 +341,6 @@ describe('runReport — the summary and the exit code', () => {
     expect(result.lines).toContain('FAILED: no round completed');
   });
 
-  // The two rates are judged separately because they dilute each other: the
-  // rounds that survive here mint everything they attempt, so a single blended
-  // rate would be 0% and the run would pass with four rounds dead.
   it('fails on round failures even when every completed round was perfect', () => {
     const result = report([round({ fileLinks: 100, uploadMs: 200, mintMs: 300, totalMs: 600 })], 5);
     expect(result.failed).toBe(true);
@@ -467,9 +355,6 @@ describe('runReport — the summary and the exit code', () => {
     expect(result.lines.filter((l) => l.startsWith('FAILED:'))).toHaveLength(2);
   });
 
-  // --max-fail-rate 100 is the documented escape hatch — the comparison is
-  // strict, so a 100% rate does not exceed it. A run that measured nothing is
-  // still a failure: there is no rate to be lenient about.
   it('lets --max-fail-rate 100 waive the rates but not an unmeasured run', () => {
     expect(report([round({ fileFail: 100, uploadMs: 250, mintMs: 1, totalMs: 300 })], 1, 1).failed)
       .toBe(false);

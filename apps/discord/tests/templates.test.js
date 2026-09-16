@@ -1,6 +1,3 @@
-/**
- * Tests for src/templates/page.js
- */
 
 jest.mock('../src/constants', () => ({
   COLORS: {
@@ -9,12 +6,8 @@ jest.mock('../src/constants', () => ({
     WARNING: 0xF39C12,
     ERROR: 0xE74C3C,
   },
-  // Required by qurl-webhook-registrar (transitively loaded via
-  // qurl-webhook route → server.js). Keep the wire literal exact —
-  // qurl-service rejects any other event-type string.
   QURL_WEBHOOK_EVENTS: { ACCESSED: 'qurl.accessed', EXPIRED: 'qurl.expired' },
   DM_STATUS: { SENT: 'sent' },
-  // Required by qurl-webhook route — receiver-side audit-event keys.
   AUDIT_EVENTS: {
     QURL_WEBHOOK_RATE_LIMITED: 'qurl_webhook_rate_limited',
     QURL_WEBHOOK_SIGNATURE_INVALID: 'qurl_webhook_signature_invalid',

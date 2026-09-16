@@ -64,7 +64,7 @@ type Launcher struct {
 // service replied outside its contract.
 func (l *Launcher) Open(ctx context.Context, link string) error {
 	u, err := url.Parse(link)
-	if err != nil || (u.Scheme != "https" && u.Scheme != "http") {
+	if err != nil || (u.Scheme != webSchemeHTTPS && u.Scheme != webSchemeHTTP) {
 		return fmt.Errorf("%w: the resolved link is not a web URL", ErrUnopenableLink)
 	}
 	argv := append(BrowserCommand(l.LookupEnv, l.GOOS), link)

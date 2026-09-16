@@ -1,0 +1,314 @@
+name: "qURL CLI Customer Cleanup"
+
+# Credential provisioning and rotation: docs/ci-api-keys.md.
+# The primary workflow reconciles all lanes with one automation key. This
+# trusted fallback runs only when that cleanup did not pass, including after a
+# cancellation. The protected manual entry accepts only verified prior trusted
+# journey runs and exists for bounded recovery of older leaks.
+on:
+  workflow_dispatch:
+    inputs:
+      source_runs:
+        description: "Up to 3 comma-separated trusted journey run_id:identity_attempt values to reconcile exactly"
+        required: true
+        type: string
+  workflow_run:
+    # Release journeys also run trusted workflow code from main. PR and tag
+    # completions cannot mint these credentials and must not wake cleanup.
+    workflows: ["cli: Build and Test"]
+    branches: [main]
+    types: [completed]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.event_name == 'workflow_dispatch' && 'qurl-cli-customer-cleanup-manual' || format('qurl-cli-customer-cleanup-{0}-{1}', github.event.workflow_run.id, github.event.workflow_run.run_attempt) }}
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    name: Resolve cleanup requirement
+    # Main pushes run only hermetic tests and cannot mint journey credentials.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.head_branch == 'main' &&
+       github.event.workflow_run.event != 'push')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      required: ${{ steps.source.outputs.required }}
+      source_runs: ${{ steps.source.outputs.source_runs }}
+      include_soak: ${{ steps.source.outputs.include_soak }}
+    steps:
+      - id: source
+        name: Require an exact trusted journey run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          SOURCE_EVENT: ${{ github.event.workflow_run.event }}
+          SOURCE_REPOSITORY: ${{ github.event.workflow_run.head_repository.full_name }}
+          SOURCE_RUN_ID: ${{ github.event.workflow_run.id }}
+          SOURCE_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+          SOURCE_WORKFLOW_PATH: ${{ github.event.workflow_run.path }}
+          REQUESTED_SOURCE_RUNS: ${{ inputs.source_runs }}
+          WORKFLOW_REPOSITORY: ${{ github.event.workflow_run.repository.full_name }}
+        run: |
+          set -euo pipefail
+          include_soak=false
+          case "$GITHUB_EVENT_NAME" in
+            workflow_run)
+              # cli.yml sets run-name; its exact path is the stable identity.
+              [[ "$SOURCE_BRANCH" == main && \
+                "$SOURCE_REPOSITORY" == "$GITHUB_REPOSITORY" && \
+                "$WORKFLOW_REPOSITORY" == "$GITHUB_REPOSITORY" && \
+                "$SOURCE_WORKFLOW_PATH" == .github/workflows/cli.yml ]] || {
+                echo "::error::cleanup accepts only an exact trusted same-repository CLI workflow" >&2
+                exit 1
+              }
+              case "$SOURCE_EVENT" in
+                schedule|workflow_dispatch) include_soak=true ;;
+                *)
+                  echo "::error::cleanup source event is not an approved CLI trigger" >&2
+                  exit 1
+                  ;;
+              esac
+              [[ "$SOURCE_RUN_ID" =~ ^[1-9][0-9]{0,18}$ ]] || {
+                echo "::error::cleanup source run id is not a positive integer" >&2
+                exit 1
+              }
+              if [[ ! "$SOURCE_RUN_ATTEMPT" =~ ^[1-9][0-9]?$ ]] ||
+                (( 10#$SOURCE_RUN_ATTEMPT > 30 )); then
+                echo "::error::cleanup source run attempt is outside the 1-30 automatic recovery bound" >&2
+                {
+                  echo "## CLI cleanup needs manual action"
+                  echo
+                  echo "Run qurl-cli-customer-cleanup.yml from main with source_runs=$SOURCE_RUN_ID:$SOURCE_RUN_ATTEMPT."
+                } >>"$GITHUB_STEP_SUMMARY"
+                exit 1
+              fi
+              source_runs="$SOURCE_RUN_ID:$SOURCE_RUN_ATTEMPT"
+              ;;
+            workflow_dispatch)
+              [[ "$GITHUB_REF" == refs/heads/main ]] || {
+                echo "::error::manual cleanup must run from main" >&2
+                exit 1
+              }
+              source_runs="$REQUESTED_SOURCE_RUNS"
+              ;;
+            *) exit 1 ;;
+          esac
+          [[ "$source_runs" =~ ^[1-9][0-9]{0,18}:[1-9][0-9]{0,18}(,[1-9][0-9]{0,18}:[1-9][0-9]{0,18}){0,2}$ ]] || {
+            echo "::error::cleanup source runs are malformed or exceed the 3-run limit" >&2
+            exit 1
+          }
+          IFS=, read -ra run_specs <<<"$source_runs"
+          declare -A seen=()
+          declare -A seen_resolved=()
+          resolved_runs=()
+          for run_spec in "${run_specs[@]}"; do
+            [[ -z "${seen[$run_spec]:-}" ]] || {
+              echo "::error::cleanup source runs contain a duplicate" >&2
+              exit 1
+            }
+            seen[$run_spec]=1
+            IFS=: read -r run_id run_attempt <<<"$run_spec"
+            job_attempt_ceiling=$run_attempt
+            if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
+              # Manual input names remote state, not necessarily the latest
+              # workflow attempt. This also recovers legacy artifact-keyed runs.
+              run=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id")
+              jq -e --arg repository "$GITHUB_REPOSITORY" --argjson identity_attempt "$run_attempt" '
+                .status == "completed" and
+                (.event == "push" or .event == "schedule" or .event == "workflow_dispatch") and
+                .head_branch == "main" and
+                .head_repository.full_name == $repository and
+                .path == ".github/workflows/cli.yml" and
+                (.run_attempt | type) == "number" and
+                .run_attempt >= $identity_attempt
+              ' <<<"$run" >/dev/null || {
+                echo "::error::cleanup source is not one exact trusted same-repository CLI workflow" >&2
+                exit 1
+              }
+              job_attempt_ceiling=$(jq -r '.run_attempt' <<<"$run")
+              # This flag is request-wide. One scheduled or manual source adds
+              # lane 4 to every selected run; extra reconciliation is a safe
+              # no-op and is included in the 12-operation timeout budget.
+              if [[ "$(jq -r '.event' <<<"$run")" != push ]]; then
+                include_soak=true
+              fi
+            fi
+            # GitHub records the attempt that created each job. Read all
+            # attempts once and select each journey execution at or before the
+            # source attempt that has no successful same-attempt cleanup.
+            # TODO(upstream-contract): job.run_attempt is the GitHub REST
+            # identity binding for rerun jobs; fail closed if it disappears.
+            all_jobs=$(gh api --paginate --slurp \
+              "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/jobs?filter=all&per_page=100")
+            jq -e '
+              if type != "array" or length == 0 then
+                error("all-attempt source jobs are malformed")
+              else .[0].total_count as $total |
+                if ($total | type) != "number" or $total < 0 or $total > 3000 or
+                  any(.[];
+                    .total_count != $total or
+                    (.jobs | type) != "array" or
+                    (.jobs | length) > 100) or
+                  ([.[].jobs[]] | length) != $total or
+                  any(.[].jobs[];
+                    (.name | type) != "string" or
+                    (.run_attempt | type) != "number" or
+                    .run_attempt < 1)
+                then error("all-attempt source jobs are malformed or truncated")
+                else .
+                end
+              end
+            ' <<<"$all_jobs" >/dev/null
+            eligible_jobs=$(jq -c --argjson source_attempt "$job_attempt_ceiling" '
+              [.[].jobs[] | select(.run_attempt <= $source_attempt)]
+            ' <<<"$all_jobs")
+            # A completed workflow event can briefly precede its final job
+            # conclusion. Only explicit skipped suppresses idempotent cleanup.
+            # This broad gate decides whether automatic recovery is needed.
+            # Manual recovery validates its exact identity attempt below.
+            journey_ran=$(jq -r '
+              any(.[];
+                (.name == "cli / customer journey" or
+                  (.name | startswith("cli / customer journey ("))) and
+                .conclusion != "skipped")
+            ' <<<"$eligible_jobs")
+            [[ "$journey_ran" == true ]] || {
+              if [[ "$GITHUB_EVENT_NAME" == workflow_run ]]; then
+                echo "required=false" >>"$GITHUB_OUTPUT"
+                exit 0
+              fi
+              echo "::error::cleanup source did not run the customer journey" >&2
+              exit 1
+            }
+            if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
+              exact_identity=$(jq -r --argjson identity_attempt "$run_attempt" '
+                any(.[];
+                  .run_attempt == $identity_attempt and
+                  (((.name == "cli / customer journey" or
+                    (.name | startswith("cli / customer journey ("))) and
+                    .conclusion != "skipped") or
+                    (.name == "cli / customer journey artifacts" and
+                      .conclusion == "success")))
+              ' <<<"$eligible_jobs")
+              [[ "$exact_identity" == true ]] || {
+                echo "::error::cleanup identity attempt did not produce a journey or artifact" >&2
+                exit 1
+              }
+              journey_attempts=$run_attempt
+            else
+              journey_attempts=$(jq -r '
+                [.[] | select(
+                  .name == "cli / customer journey cleanup" and
+                  .conclusion == "success") | .run_attempt] as $reconciled |
+                [.[] | select(
+                  (.name == "cli / customer journey" or
+                    (.name | startswith("cli / customer journey ("))) and
+                  .conclusion != "skipped") | .run_attempt] |
+                unique | map(select(IN($reconciled[]) | not))[]
+              ' <<<"$eligible_jobs")
+            fi
+            while read -r journey_attempt; do
+              [[ -n "$journey_attempt" ]] || continue
+              resolved_spec="$run_id:$journey_attempt"
+              if [[ -z "${seen_resolved[$resolved_spec]:-}" ]]; then
+                seen_resolved[$resolved_spec]=1
+                resolved_runs+=("$resolved_spec")
+              fi
+            done <<<"$journey_attempts"
+          done
+          if (( ${#resolved_runs[@]} == 0 )); then
+            echo "required=false" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+          cleanup_cap=3
+          if (( ${#resolved_runs[@]} > cleanup_cap )); then
+            dropped_count=$((${#resolved_runs[@]} - cleanup_cap))
+            echo "::warning::automatic cleanup is limited to the newest $cleanup_cap unreconciled journey attempts" >&2
+            # Each completion gives its current attempt one fallback pass.
+            # Prefer newest because older fallback successes are not recorded.
+            {
+              echo "## CLI cleanup needs manual follow-up"
+              echo
+              for dropped_run in "${resolved_runs[@]:0:$dropped_count}"; do
+                echo "Run qurl-cli-customer-cleanup.yml from main with source_runs=$dropped_run."
+              done
+            } >>"$GITHUB_STEP_SUMMARY"
+            resolved_runs=("${resolved_runs[@]: -cleanup_cap}")
+          fi
+          source_runs=$(IFS=,; echo "${resolved_runs[*]}")
+          {
+            echo "required=true"
+            echo "source_runs=$source_runs"
+            echo "include_soak=$include_soak"
+          } >>"$GITHUB_OUTPUT"
+
+  cleanup:
+    name: Reconcile cancelled customer journeys
+    needs: resolve
+    if: needs.resolve.outputs.required == 'true'
+    runs-on: ubuntu-latest
+    # Manual recovery accepts at most three exact run attempts. Automatic
+    # recovery also keeps at most three unresolved attempts. A scheduled/manual
+    # source adds the fourth lane, for at most 12 reconciliations under one
+    # automation key and one two-minute owner inventory. The 40-minute operation
+    # work budget plus five minutes for runner cleanup matches the job timeout;
+    # identity validation happens after runner setup.
+    timeout-minutes: 45
+    environment: cli-customer-journey-cleanup
+    permissions:
+      contents: read
+    env:
+      QURL_ENDPOINT: ${{ secrets.QURL_JOURNEY_ENDPOINT }}
+      QURL_JOURNEY_OWNER_ID: ${{ secrets.QURL_JOURNEY_OWNER_ID }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Manual recovery runs trusted current-main code. The deterministic
+          # run, agent, and resource ID formulas are therefore a recovery
+          # contract for prior journeys and need a migration if they change.
+          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
+          persist-credentials: false
+
+      - name: Revoke exact-run resources and credentials
+        env:
+          AUTOMATION_API_KEY: ${{ secrets.QURL_JOURNEY_API_KEY }}
+          INCLUDE_SOAK: ${{ needs.resolve.outputs.include_soak }}
+          SOURCE_RUNS: ${{ needs.resolve.outputs.source_runs }}
+        run: |
+          set -euo pipefail
+          {
+            echo "## CLI cleanup batch"
+            echo
+            echo "If this job does not complete, run qurl-cli-customer-cleanup.yml from main with source_runs=$SOURCE_RUNS."
+          } >>"$GITHUB_STEP_SUMMARY"
+          client_dir=$RUNNER_TEMP/qurl-journey-auth
+          cleanup() { scripts/remove-sensitive-tree.sh "$client_dir"; }
+          trap cleanup EXIT
+          mkdir -m 0700 "$client_dir"
+          (umask 077; printf %s "$AUTOMATION_API_KEY" >"$client_dir/api-key")
+          unset AUTOMATION_API_KEY
+          batch_args=()
+          IFS=, read -ra run_specs <<<"$SOURCE_RUNS"
+          for run_spec in "${run_specs[@]}"; do
+            IFS=: read -r source_run_id source_run_attempt <<<"$run_spec"
+            lane_specs=(linux:1:full macos:2:full windows:3:full)
+            if [[ "$INCLUDE_SOAK" == true ]]; then
+              lane_specs+=(linux:4:soak)
+            fi
+            for lane_spec in "${lane_specs[@]}"; do
+              IFS=: read -r lane lane_id profile <<<"$lane_spec"
+              batch_args+=(--run-spec "${source_run_id}${lane_id}:${source_run_attempt}:${lane}:host:${profile}")
+            done
+          done
+          python3 scripts/qurl-cli-ci-credentials.py reconcile-batch \
+            --qurl-endpoint "$QURL_ENDPOINT" --api-key-file "$client_dir/api-key" \
+            --owner-id "$QURL_JOURNEY_OWNER_ID" \
+            --operation-budget-seconds 2400 "${batch_args[@]}"
