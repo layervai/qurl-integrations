@@ -110,7 +110,12 @@ func TestHTTPAPIKeyMinterMintWorkspaceHappyPath(t *testing.T) {
 		gotPath           string
 		gotAuth           string
 		gotIdempotencyKey string
-		gotBody           bindingRequest
+		gotBody           struct {
+			Provider       string `json:"provider"`
+			ExternalID     string `json:"external_id"`
+			DisplayName    string `json:"display_name"`
+			RotateExisting bool   `json:"rotate_existing"`
+		}
 	)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotMethod = r.Method
@@ -667,6 +672,23 @@ func TestHTTPAPIKeyMinterMintWorkspaceDoesNotFallbackOnTransient503(t *testing.T
 	}
 	if !strings.Contains(err.Error(), "503") {
 		t.Errorf("expected status code in error, got %q", err.Error())
+	}
+}
+
+// A schema rejection must not bypass binding ownership through legacy minting.
+func TestHTTPAPIKeyMinterMintWorkspaceDoesNotFallbackOnSchemaRejection(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != testBindingPath {
+			t.Errorf("unexpected fallback path %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		_, _ = io.WriteString(w, `{"error":{"code":"validation_failed","detail":"Unknown field rotate_existing"}}`)
+	}))
+	t.Cleanup(srv.Close)
+	m := &HTTPAPIKeyMinter{BaseURL: srv.URL, HTTPClient: srv.Client()}
+	if err := mintWorkspaceOnlyErr(m); err == nil || !strings.Contains(err.Error(), "422") {
+		t.Fatalf("expected schema rejection, got %v", err)
 	}
 }
 

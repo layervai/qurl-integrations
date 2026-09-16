@@ -51,8 +51,8 @@ const (
 	ErrorCodeQuotaExceeded = "quota_exceeded"
 
 	// errCodeAlreadyExists must pair with HTTP 409. It means qurl-service has
-	// already bound the workspace identity and the Slack app should show the
-	// administrator recovery path instead of minting a second legacy key.
+	// refused recovery of an existing workspace binding (for example, another
+	// owner holds it). Show administrator recovery; never mint a legacy key.
 	errCodeAlreadyExists = "already_exists"
 	// errCodeBindingsDisabled must pair with HTTP 503. It is the stable dark-
 	// launch signal that allows Slack setup to fall back to the legacy API-key
@@ -191,10 +191,12 @@ type mintRequest struct {
 }
 
 type bindingRequest struct {
-	Provider       string `json:"provider"`
-	ExternalID     string `json:"external_id"`
-	DisplayName    string `json:"display_name"`
-	RotateExisting bool   `json:"rotate_existing"`
+	Provider    string `json:"provider"`
+	ExternalID  string `json:"external_id"`
+	DisplayName string `json:"display_name"`
+	// TODO(upstream-contract): requires qurl-service #1344 on every serving
+	// instance. Older strict schemas reject this field; deploy service first.
+	RotateExisting bool `json:"rotate_existing"`
 }
 
 type mintResponse struct {
@@ -303,9 +305,10 @@ func (m *HTTPAPIKeyMinter) ValidateAPIKey(ctx context.Context, apiKey string) er
 // qurl-service also assigns provider scopes server-side; Slack bindings are
 // pinned to the same qurl:read/qurl:write/qurl:agent set requested by the legacy
 // fallback.
-// A setup callback reaches this method only when Slack cannot reuse a valid
-// local key, so it explicitly permits rotation to recover a prior lost commit
-// after that replay window.
+// Contract: call only through mintAndPersist after the setup callback has
+// established that no usable local key exists. Transient read or validation failures
+// must not reach this method. Rotation recovers a failed local persist after
+// the replay window; qurl-service must reject bindings held by another owner.
 func (m *HTTPAPIKeyMinter) MintWorkspaceAPIKey(ctx context.Context, accessToken, teamID string) (WorkspaceAPIKeyMint, error) {
 	teamID = strings.TrimSpace(teamID)
 	if teamID == "" {
@@ -418,7 +421,8 @@ func bindingMintFromResponse(body []byte) (WorkspaceAPIKeyMint, error) {
 // limit, so route new rotation callers through replaceWorkspaceAPIKey rather
 // than calling this directly.
 // It deliberately does not hit the external binding create endpoint: a healthy
-// existing binding owns first-setup replay and returns already_exists here.
+// existing binding owns first-setup replay and may replay an earlier key.
+// Explicit rotation instead uses the old-key-specific replacement namespace.
 // qURL request authorization only checks the API key and scopes, so this
 // standalone qurl:read/write/agent key is a valid workspace credential after
 // Slack stores it.
