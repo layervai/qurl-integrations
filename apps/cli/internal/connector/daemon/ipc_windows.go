@@ -13,8 +13,9 @@ import (
 	"strings"
 
 	"github.com/Microsoft/go-winio"
-	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 	"golang.org/x/sys/windows"
+
+	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 )
 
 const windowsDaemonPipePrefix = `\\.\pipe\layerv-qurl-share-daemon-`
