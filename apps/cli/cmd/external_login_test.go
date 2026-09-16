@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -298,5 +299,33 @@ func TestLoginsProviderGateImpliesTheNamespaceIsSealed(t *testing.T) {
 	}
 	if err := requireLocalKeyProvider(func(k string) (string, bool) { v, ok := env[k]; return v, ok }); err == nil {
 		t.Fatal("login accepted the plaintext file provider for a token-file enrollment")
+	}
+}
+
+// TestExternalLoginEnvelopeConflictExitsConfig pins the exit code the README
+// promises for both envelope directions. This path opens the connector's SDK
+// store directly rather than through state.Open, so without the sentinel an
+// envelope-versus-provider refusal reaches exitcode unwrapped and exits 1
+// (General) instead of 3 (Config) - and a supervisor cannot tell "fix the
+// environment or use another state directory" from a generic failure.
+//
+// The namespace must be fresh, or EstablishExternalRuntimeMode refuses before
+// the runtime is ever opened and the assertion would pass for the wrong
+// reason.
+func TestExternalLoginEnvelopeConflictExitsConfig(t *testing.T) {
+	srv := apitest.NewServer(t)
+	tokenPath := writeExternalLoginToken(t)
+	stateDir := filepath.Join(t.TempDir(), "state")
+	res := runCLI(t, &runOpts{
+		args:          []string{"--endpoint", srv.URL, "--supervision", "external", "login", "--enrollment-token-file", tokenPath},
+		env:           externalLoginEnv(),
+		shareStateDir: stateDir,
+		openNativeRuntime: func(context.Context, connectorshare.NativeRuntimeConfig) (registeredNativeRuntime, error) {
+			return nil, fmt.Errorf("%s=%s conflicts with existing %s; provider changes are not an in-place migration",
+				connectoragentstate.EnvKeyProvider, connectoragentstate.KeyProviderLocalKey, connectorstate.AgentStateFile)
+		},
+	})
+	if res.code != 3 {
+		t.Fatalf("envelope conflict exit = %d stderr = %q, want 3 (Config)", res.code, res.stderr.String())
 	}
 }

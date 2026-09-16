@@ -814,7 +814,15 @@ func (o *globalOpts) openNativeExternalRegisteredClient(
 		RefreshMode:                  connectorRefreshModeAuto,
 	})
 	if err != nil {
-		return nil, nil, err
+		// This path opens the connector's SDK store directly rather than through
+		// state.Open, so an envelope-versus-provider refusal would otherwise
+		// reach exitcode unwrapped and exit 1, against the documented 3. The
+		// wrap is unconditional because runExternalLogin is the only caller and
+		// requireLocalKeyProvider has already established that this is a sealed
+		// flow - testing the environment again here would consult the process
+		// environment while login consulted the injected one. The sentinel's row
+		// is checked last, so a cause qurl-go classifies keeps its own code.
+		return nil, nil, fmt.Errorf("%w: %w", connectorstate.ErrAgentStateEnvelope, err)
 	}
 	defer func() {
 		if retErr != nil {
@@ -908,7 +916,6 @@ func oneShotEnrollmentToken(path string) func(context.Context, qurl.AgentEnrollm
 }
 
 // identityKeyID is the non-secret identifier of the credential behind id.
-
 func identityKeyID(id *qurlapi.Identity) string {
 	if id == nil || id.Key == nil {
 		return ""
