@@ -141,4 +141,4 @@ replace github.com/hashicorp/yamux => github.com/fatedier/yamux v0.0.0-202508250
 // TODO(upstream-contract): keep both replacements aligned with qurl-connector;
 // Go does not inherit dependency replacements. This reviewed FRP revision adds
 // proxy-phase and service startup/shutdown race fixes and retains InitialRunID.
-replace github.com/fatedier/frp => github.com/layervai/frp v1.0.2-0.20260916023636-e7f34141c368
+replace github.com/fatedier/frp => github.com/layervai/frp v1.0.2-0.20260916024338-1a3b5509d23d
