@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -36,7 +37,8 @@ func ConfiguredFRPCommon(dialTimeoutSeconds, keepaliveSeconds int64, caFile, ser
 	if serverName != "" && caFile == "" {
 		return nil, errors.New("qURL tunnel server name requires a trusted CA file")
 	}
-	if serverName != strings.TrimSpace(serverName) || strings.ContainsAny(serverName, "/\\ \t\r\n") {
+	if serverName != strings.TrimSpace(serverName) || strings.ContainsAny(serverName, "/\\ \t\r\n") ||
+		(net.ParseIP(serverName) == nil && strings.ContainsAny(serverName, ":*")) {
 		return nil, errors.New("qURL tunnel server name must be a certificate hostname or IP address")
 	}
 	if caFile != "" {

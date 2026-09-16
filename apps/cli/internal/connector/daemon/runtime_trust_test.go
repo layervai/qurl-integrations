@@ -83,6 +83,8 @@ func TestConfiguredTunnelRejectsInvalidTrust(t *testing.T) {
 		{"missing file", filepath.Join(t.TempDir(), "missing.pem"), "example.com"},
 		{"invalid PEM", badPEM, "example.com"},
 		{"URL instead of name", testTunnelCA(t), "https://example.com"},
+		{"port in name", testTunnelCA(t), "example.com:7000"},
+		{"wildcard name", testTunnelCA(t), "*.example.com"},
 		{"whitespace name", testTunnelCA(t), "example.com\t"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -90,5 +92,14 @@ func TestConfiguredTunnelRejectsInvalidTrust(t *testing.T) {
 				t.Fatal("invalid trust configuration was accepted")
 			}
 		})
+	}
+}
+
+func TestConfiguredTunnelAcceptsIPAddressIdentity(t *testing.T) {
+	ca := testTunnelCA(t)
+	for _, name := range []string{"127.0.0.1", "2001:db8::1"} {
+		if _, err := ConfiguredFRPCommon(1, 1, ca, name); err != nil {
+			t.Fatalf("IP identity %s: %v", name, err)
+		}
 	}
 }

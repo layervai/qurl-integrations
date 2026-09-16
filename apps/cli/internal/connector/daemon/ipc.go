@@ -149,9 +149,9 @@ const maxIPCOverlayBytes = 64 * 1024
 
 // ipcOverlayRejected is the whole body of a refused overlay update. It is
 // fixed text: no header name or value from the request is ever echoed.
-// TODO(upstream-contract): 2,000/16/1,024 mirror qurl-connector MaxGroupRoutes
-// and ValidateRequestHeaders limits; update this text if those limits move.
-const ipcOverlayRejected = `share daemon overlay was rejected: send JSON {"route_request_headers":{"<connector_id>":{"Name":"value"}}} under 64 KiB with no unknown fields, at most 2,000 routes, 16 valid non-reserved request headers and 1,024 name and value bytes per route; all limits apply together, so larger entries allow fewer routes`
+// TODO(upstream-contract): 16/1,024 mirror qurl-connector
+// ValidateRequestHeaders limits; update this text if those limits move.
+var ipcOverlayRejected = fmt.Sprintf(`share daemon overlay was rejected: send JSON {"route_request_headers":{"<connector_id>":{"Name":"value"}}} under %d bytes with no unknown fields, at most %d routes, 16 valid non-reserved request headers and 1,024 name and value bytes per route; all limits apply together, so larger entries allow fewer routes`, maxIPCOverlayBytes, connectorshare.MaxGroupRoutes)
 
 // ipcOverlay is the PUT /overlay body: runtime request headers keyed by the
 // Connector ID of the share they ride on. Each request replaces the whole
@@ -195,12 +195,9 @@ func decodeIPCOverlay(reader io.Reader) (map[string]map[string]string, error) {
 		if connectorID == "" || connectorID != strings.TrimSpace(connectorID) {
 			return nil, errIPCOverlayMalformed
 		}
-		// TODO(upstream-contract): ValidateRequestHeaders' errors are fixed
-		// strings naming no header (qurl-connector pkg/share); that is what
-		// lets the daemon log the reason. TestOverlayIPCRejectsOversizedAndUnknownFields
-		// pins it from this side.
+		// Never log an upstream error that might include credential material.
 		if err := connectorshare.ValidateRequestHeaders(headers); err != nil {
-			return nil, fmt.Errorf("validate overlay request headers: %w", err)
+			return nil, errors.New("overlay request headers are invalid")
 		}
 	}
 	return body.RouteRequestHeaders, nil

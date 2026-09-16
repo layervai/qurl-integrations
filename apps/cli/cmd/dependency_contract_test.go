@@ -78,8 +78,8 @@ func TestCLIConnectorRuntimeHasNoSessionRelaySurface(t *testing.T) {
 }
 
 // checkFirstPartyReplacements requires every replacement pointing at a
-// first-party fork to name a tagged release, so the CLI never ships an
-// unreviewed fork commit.
+// first-party fork to name a tagged release, and rejects filesystem paths.
+// Checksums pin module contents; review remains a separate requirement.
 func checkFirstPartyReplacements(path string, raw []byte) error {
 	parsed, err := modfile.Parse(path, raw, nil)
 	if err != nil {

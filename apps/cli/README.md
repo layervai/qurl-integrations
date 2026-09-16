@@ -341,7 +341,9 @@ origin requests. The tunnel operator must therefore be trusted with these
 credentials. The daemon keeps headers in memory, outside saved state and status.
 An integration must restore them after daemon restart. It can supply headers
 before publishing a route; stopping the share retains them until the next
-overlay replacement. Only the matching route receives each header set.
+overlay replacement. Republishing the same Connector ID reuses those retained
+headers; replace or clear them before reusing the ID with different credentials.
+Only the matching route receives each header set.
 
 The origin must reject missing or invalid credentials. Updating headers can
 interrupt that route, and retiring sessions may use old headers until they
