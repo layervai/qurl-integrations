@@ -256,6 +256,12 @@ func TestOpenUnknownKeyProviderFailsClosed(t *testing.T) {
 // missing-descriptor refusal comes after the connector has validated the
 // state directory, so it also proves the connector accepts a directory the
 // CLI prepared (including its Windows owner-only DACL).
+//
+// TODO(upstream-contract): the message names LAYERV_LOCAL_KEY_FD on Windows
+// too because qurl-connector's newLocalKeyProviderFromEnv checks the variable
+// is set before it reaches the platform-specific descriptor read, which is
+// what reports "unsupported on this platform". If that order ever flips, this
+// assertion becomes unix-only.
 func TestOpenLocalKeyWithoutDescriptorFailsClosed(t *testing.T) {
 	clearStateEnv(t)
 	t.Setenv(connectoragentstate.EnvKeyProvider, connectoragentstate.KeyProviderLocalKey)

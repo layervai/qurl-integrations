@@ -407,3 +407,29 @@ func TestProcessLevelMappings(t *testing.T) {
 		t.Errorf("default = %d, want %d", got, General)
 	}
 }
+
+// TestSealedOpenKeepsTheCauseQurlGoClassifies pins the reason
+// state.ErrAgentStateEnvelope is checked last: Open's sealed branch wraps it
+// around every NewSDKStore failure, so a cause qurl-go classifies itself must
+// keep the code the plaintext branch would have given it.
+func TestSealedOpenKeepsTheCauseQurlGoClassifies(t *testing.T) {
+	for name, test := range map[string]struct {
+		cause error
+		want  int
+	}{
+		"loose directory mode": {qurl.ErrInsecureCredentialStatePermissions, Auth},
+		"state not found":      {qurl.ErrCredentialStateNotFound, Auth},
+		"setup lock":           {qurl.ErrAgentSetupLock, General},
+		"envelope mismatch":    {nil, Config},
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := fmt.Errorf("%w: initialize sealed agent state", state.ErrAgentStateEnvelope)
+			if test.cause != nil {
+				err = fmt.Errorf("%w: initialize sealed agent state: %w", state.ErrAgentStateEnvelope, test.cause)
+			}
+			if got := FromError(err); got != test.want {
+				t.Fatalf("FromError = %d, want %d", got, test.want)
+			}
+		})
+	}
+}

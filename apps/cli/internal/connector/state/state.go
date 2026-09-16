@@ -57,9 +57,10 @@ var ErrNoDefaultStateDir = errors.New("no default qurl sharing state directory")
 // line, so exitcode maps it to Config.
 //
 // A sealed open also wraps it around failures qurl-go classifies itself, such
-// as a loose directory mode or a continuity break. exitcode's row is last of
-// the connector rows for that reason: the specific cause keeps the code it
-// would have had on the plaintext branch, and this sentinel is the fallback.
+// as a loose directory mode or a continuity break. exitcode therefore checks
+// it last of all, after every qurl-go row: the specific cause keeps the code
+// it would have had on the plaintext branch, and this sentinel is the
+// fallback for what is left.
 var ErrAgentStateEnvelope = errors.New("agent state envelope")
 
 // ResolveDir resolves the native-agent state directory. Resolution order,

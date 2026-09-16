@@ -151,6 +151,9 @@ func TestOpenLocalKeyRefusesPlaintextEnvelope(t *testing.T) {
 	// loose - it checks only that the message names the variable and the
 	// envelope, not its wording - so an upstream reword that keeps naming both
 	// stays green.
+	if !errors.Is(err, ErrAgentStateEnvelope) {
+		t.Fatalf("Open error = %v, want ErrAgentStateEnvelope so exitcode maps it to Config in this direction too", err)
+	}
 	if !strings.Contains(err.Error(), connectoragentstate.EnvKeyProvider) || !strings.Contains(err.Error(), AgentStateFile) {
 		t.Fatalf("Open() error = %v, want the connector's envelope-conflict refusal naming %s and %s", err, connectoragentstate.EnvKeyProvider, AgentStateFile)
 	}
@@ -305,8 +308,58 @@ func TestOpenLocalKeyOverAPopulatedNamespace(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sealed Open over a populated namespace = %v, want the registries to be ordinary neighbors", err)
 	}
-	t.Cleanup(func() { _ = reopened.Close() })
 	if present, err := reopened.AgentStatePresent(); err != nil || !present {
 		t.Fatalf("AgentStatePresent() = (%t, %v), want the saved sealed envelope", present, err)
+	}
+}
+
+// TestOpenLocalKeyPinsTheEnvelopeToTheConfiguredAgentID covers the one input
+// to NewSDKStore no other sealed test varies. Open passes ConfiguredAgentID
+// through and the sealed envelope is pinned to it, so a reopen under the same
+// ID round-trips, and a store configured for a different ID cannot write to
+// it.
+func TestOpenLocalKeyPinsTheEnvelopeToTheConfiguredAgentID(t *testing.T) {
+	clearStateEnv(t)
+	t.Setenv(EnvAgentID, "a")
+	dir := secureStateTestDir(t)
+	useLocalKey(t, 'i')
+	store, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	saveTestAgentState(t, store)
+	if store.envelope != connectoragentstate.SealedAgentStateFile {
+		t.Fatalf("envelope = %q, want the sealed one", store.envelope)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(dir)
+	if err != nil {
+		t.Fatalf("reopen under the same agent ID = %v", err)
+	}
+	if present, err := reopened.AgentStatePresent(); err != nil || !present {
+		t.Fatalf("AgentStatePresent() = (%t, %v), want the saved envelope", present, err)
+	}
+	if err := reopened.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// The pin is enforced on the write, not on the open: a store configured
+	// for a different agent may read the envelope but may not save an
+	// AgentState that disagrees with its configured expectation.
+	t.Setenv(EnvAgentID, "another-agent")
+	useLocalKey(t, 'i')
+	other, err := Open(dir)
+	if err != nil {
+		t.Fatalf("open under another agent ID = %v", err)
+	}
+	t.Cleanup(func() { _ = other.Close() })
+	sdkStore, err := other.Handoff()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sdkStore.SaveAgentState(context.Background(), &qurl.AgentState{AgentID: "a"}); err == nil {
+		t.Fatal("a store configured for another agent saved this envelope's state")
 	}
 }
