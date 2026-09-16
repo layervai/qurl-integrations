@@ -34,11 +34,16 @@ const { verifyHmacSha256 } = require('./webhook-hardening');
 // to whichever key in the resolution order wins (a manual/placeholder
 // env on a misconfigured dev box would otherwise slip past).
 const MIN_STATE_SECRET_LENGTH = 32;
+const EMPTY_HKDF_SALT = Buffer.alloc(0);
 
-// Build a signer for one OAuth state flow. Returns { sign, verify }
+// Build a signer for one OAuth state flow. Returns { sign, signDerived, verify }
 // closures over the flow's secret resolution:
 //
 //   sign(data)           → hex HMAC-SHA256 signature over `data`.
+//   signDerived(info,
+//     data)              → signature under an HKDF-derived subkey, so
+//                          published auxiliary tags do not expose
+//                          known-plaintext pairs for the state-signing key.
 //   verify(data, sigHex) → timing-safe boolean; false (never throws)
 //                          when sigHex is malformed hex or wrong length
 //                          — but only once the secret resolves. NOT
@@ -116,6 +121,22 @@ function createStateSigner({ flowLabel, secretConfigKeys }) {
       .digest('hex');
   }
 
+  function signDerived(info, data) {
+    if (typeof info !== 'string' || !info) {
+      throw new TypeError('signDerived: info must be a non-empty string');
+    }
+    const derivedKey = crypto.hkdfSync(
+      'sha256',
+      stateSecret(),
+      EMPTY_HKDF_SALT,
+      info,
+      32,
+    );
+    return crypto.createHmac('sha256', derivedKey)
+      .update(data)
+      .digest('hex');
+  }
+
   // Delegates the constant-time compare to the shared webhook helper
   // (third hand-rolled copy avoided; see webhook-hardening.js's header
   // on why these drift). Two semantics inherited from it, both
@@ -129,7 +150,7 @@ function createStateSigner({ flowLabel, secretConfigKeys }) {
     return verifyHmacSha256(data, stateSecret(), sigHex);
   }
 
-  return { sign, verify };
+  return { sign, signDerived, verify };
 }
 
 module.exports = {
