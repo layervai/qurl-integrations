@@ -816,13 +816,18 @@ func (o *globalOpts) openNativeExternalRegisteredClient(
 	if err != nil {
 		// This path opens the connector's SDK store directly rather than through
 		// state.Open, so an envelope-versus-provider refusal would otherwise
-		// reach exitcode unwrapped and exit 1, against the documented 3. The
-		// wrap is unconditional because runExternalLogin is the only caller and
-		// requireLocalKeyProvider has already established that this is a sealed
-		// flow - testing the environment again here would consult the process
-		// environment while login consulted the injected one. The sentinel's row
-		// is checked last, so a cause qurl-go classifies keeps its own code.
-		return nil, nil, fmt.Errorf("%w: %w", connectorstate.ErrAgentStateEnvelope, err)
+		// reach exitcode unwrapped and exit 1, against the documented 3.
+		//
+		// It is a fallback, not a blanket label. The failure this command
+		// introduces is the token file itself, raised inside this call by the
+		// credential provider, and an unusable token is not an envelope problem:
+		// wrapping it would prefix "agent state envelope" onto the most common
+		// failure and point the supervisor at the environment or another state
+		// directory instead of at the token it just wrote.
+		if !errors.Is(err, auth.ErrEnrollmentTokenFile) {
+			err = fmt.Errorf("%w: %w", connectorstate.ErrAgentStateEnvelope, err)
+		}
+		return nil, nil, err
 	}
 	defer func() {
 		if retErr != nil {
@@ -910,7 +915,15 @@ func oneShotEnrollmentToken(path string) func(context.Context, qurl.AgentEnrollm
 		err   error
 	)
 	return func(context.Context, qurl.AgentEnrollmentCredentialRequest) (string, error) {
-		once.Do(func() { token, err = auth.ReadExternalEnrollmentTokenFile(path) })
+		once.Do(func() {
+			token, err = auth.ReadExternalEnrollmentTokenFile(path)
+			if err != nil {
+				// Claim the failure before it reaches the caller's envelope wrap:
+				// every file-shape check runs here, inside the runtime open, and
+				// none of them is an agent-state-envelope problem.
+				err = fmt.Errorf("%w: %w", auth.ErrEnrollmentTokenFile, err)
+			}
+		})
 		return token, err
 	}
 }

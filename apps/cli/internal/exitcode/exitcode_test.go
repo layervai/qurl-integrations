@@ -39,6 +39,7 @@ var cliSentinels = map[string]struct {
 	"auth.ErrNoCredential":          {auth.ErrNoCredential, Auth},
 	"auth.ErrInvalidKey":            {auth.ErrInvalidKey, Auth},
 	"auth.ErrDeviceEnrollmentScope": {auth.ErrDeviceEnrollmentScope, Auth},
+	"auth.ErrEnrollmentTokenFile":   {auth.ErrEnrollmentTokenFile, Auth},
 	"auth.ErrCredentialConflict":    {auth.ErrCredentialConflict, Conflict},
 	"auth.ErrDeviceAccountConflict": {auth.ErrDeviceAccountConflict, Conflict},
 	"config.ErrInvalidProfileName":  {config.ErrInvalidProfileName, Config},

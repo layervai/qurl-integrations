@@ -413,3 +413,41 @@ func TestExternalLoginWarmRealRuntimeOpensSealedStateWithoutToken(t *testing.T) 
 		t.Fatal(err)
 	}
 }
+
+// TestExternalLoginUnusableTokenFileExitsAuth pins the exit code for a token
+// file that only fails at read time. The path-shape checks run before the
+// namespace exists and are usage errors (exit 2); a wrong mode is raised
+// inside the runtime open, after the namespace is labeled, so the remedy is a
+// newly minted token rather than a retyped command. Without the token
+// reader's own sentinel this lands on the caller's envelope fallback and
+// reports exit 3 with an "agent state envelope" prefix, whose documented
+// remedy is the environment or another state directory - all wrong here.
+//
+// The injected runtime calls the credential provider the way the real one
+// does, so the assertion covers the whole chain rather than the wrap alone.
+func TestExternalLoginUnusableTokenFileExitsAuth(t *testing.T) {
+	srv := apitest.NewServer(t)
+	path := filepath.Join(t.TempDir(), "enrollment-token")
+	// A plain umask slip: readable by the group and the world.
+	if err := os.WriteFile(path, []byte(testExternalEnrollmentToken+"\n"), 0o644); err != nil { // #nosec G306 -- the point of the test.
+		t.Fatal(err)
+	}
+	res := runCLI(t, &runOpts{
+		args:          []string{"--endpoint", srv.URL, "--supervision", "external", "login", "--enrollment-token-file", path},
+		env:           externalLoginEnv(),
+		shareStateDir: filepath.Join(t.TempDir(), "state"),
+		openNativeRuntime: func(ctx context.Context, cfg connectorshare.NativeRuntimeConfig) (registeredNativeRuntime, error) {
+			_, err := cfg.EnrollmentCredentialProvider(ctx, qurl.AgentEnrollmentCredentialRequest{})
+			return nil, err
+		},
+	})
+	if res.code != 4 {
+		t.Fatalf("unusable token file exit = %d stderr = %q, want 4 (Auth)", res.code, res.stderr.String())
+	}
+	if strings.Contains(res.stderr.String(), "agent state envelope") {
+		t.Fatalf("token-file failure reported as an envelope problem: %q", res.stderr.String())
+	}
+	if strings.Contains(res.stderr.String(), testExternalEnrollmentToken) {
+		t.Fatal("rejected token file echoed the token")
+	}
+}
