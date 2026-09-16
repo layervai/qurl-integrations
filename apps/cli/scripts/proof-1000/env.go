@@ -145,7 +145,7 @@ func (e *environment) buildChildEnv(opts *options, agent *launchAgent) error {
 			return fmt.Errorf("endpoint %s does not match the resident daemon's %s; every share would be published to a service the daemon does not talk to", effective, agent.endpoint)
 		}
 	}
-	_, e.DeploymentSet = os.LookupEnv(qurl.EnvDeploymentPath)
+	e.DeploymentSet = strings.TrimSpace(os.Getenv(qurl.EnvDeploymentPath)) != ""
 	child := make([]string, 0, len(base)+len(set))
 	for _, kv := range base {
 		key, _, _ := strings.Cut(kv, "=")
@@ -306,7 +306,10 @@ func (e *environment) preflight(ctx context.Context, opts *options) error {
 		e.DaemonJobVersion = status.JobVersion
 	}
 	if (!opts.skipVerify || opts.probe != "") && !opts.teardown && !e.DeploymentSet {
-		return fmt.Errorf("end-to-end fetches need %s (a deployment settings file with the sandbox issuer keys); set it, or pass --skip-verify", qurl.EnvDeploymentPath)
+		trust := runCLI(ctx, e.ConsumeBin, e.childEnv, preflightTimeout, "version", "--verify-release-native-trust")
+		if trust.ExitCode != cliExitOK {
+			return fmt.Errorf("end-to-end fetches need embedded release trust or %s: %s", qurl.EnvDeploymentPath, e.redactor.apply(lastErrorLine(trust.Stderr)))
+		}
 	}
 	return nil
 }

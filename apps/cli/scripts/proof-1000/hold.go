@@ -87,6 +87,10 @@ func holdSteady(ctx context.Context, opts *options, env *environment, o *origin,
 	)
 	takeSample := func() {
 		s := takeStatusSample(holdCtx, resourceIDs, env.SocketPath, start)
+		// The hold deadline cancels IPC too; that is not platform degradation.
+		if holdCtx.Err() != nil && s.Err != "" {
+			return
+		}
 		summary.Samples++
 		if s.degraded() {
 			summary.DegradedSamples++
