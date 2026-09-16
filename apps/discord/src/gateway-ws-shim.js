@@ -358,6 +358,10 @@ function createGatewayWsShim({
           activeGuildIds = Array.isArray(data?.d?.guilds)
             ? new Set(data.d.guilds.map((guild) => guild?.id).filter((id) => typeof id === 'string'))
             : null;
+          if (activeGuildIds) {
+            guildSeedAttempts = 0;
+            guildSeedRetryAt = 0;
+          }
           pendingGuildAdds.clear();
           pendingGuildRemoves.clear();
           logger.info('gateway-ws-shim: READY received', {

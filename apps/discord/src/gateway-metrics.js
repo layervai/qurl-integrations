@@ -17,7 +17,9 @@
  * remaining gateway_heartbeat_unhealthy trigger is a still-connected shard
  * whose ACK went stale. Disconnects surface as metric silence (the
  * missing-data alarm) plus the shim's `shard closed` log, not as an
- * unhealthy event.
+ * unhealthy event. The library normally closes a missed-ACK connection
+ * before the stale-ACK threshold; missing-data detection is the primary
+ * outage signal on the shim path.
  * Why: discord.js's `client.on('raw', ...)` fires on op-0 dispatched
  * events only — HEARTBEAT_ACK and other control packets never trigger
  * it. So an idle bot (no chat traffic) and a wedged bot (no ACKs)

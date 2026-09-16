@@ -496,6 +496,30 @@ describe('Pillar 3 manager contract — connect() + connection state', () => {
     expect(restInstances[0].get).toHaveBeenCalledTimes(4);
   });
 
+  it('clears exhausted seed cooldown when READY supplies a guild snapshot', async () => {
+    const { shim, managerInstances, restInstances } = makeShim();
+    await shim.start({ connect: false });
+    const manager = managerInstances[0];
+    manager.emit(WebSocketShardEvents.Resumed, 0);
+    manager.emit(WebSocketShardEvents.Dispatch, {
+      data: { t: 'RESUMED', d: {} }, shardId: 0,
+    });
+    restInstances[0].get.mockRejectedValue(new Error('unavailable'));
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      await expect(shim.getActiveGuildCount()).rejects.toThrow('unavailable');
+    }
+    manager.emit(WebSocketShardEvents.Dispatch, {
+      data: { t: 'READY', d: { guilds: [{ id: 'g1' }] } }, shardId: 0,
+    });
+    await expect(shim.getActiveGuildCount()).resolves.toBe(1);
+    manager.emit(WebSocketShardEvents.Dispatch, {
+      data: { t: 'READY', d: {} }, shardId: 0,
+    });
+    restInstances[0].get.mockResolvedValueOnce([{ id: 'g1' }, { id: 'g2' }]);
+    await expect(shim.getActiveGuildCount()).resolves.toBe(2);
+    expect(restInstances[0].get).toHaveBeenCalledTimes(4);
+  });
+
   it('cools down failed guild seed walks and recovers without a READY', async () => {
     const { shim, logger, managerInstances, restInstances } = makeShim();
     await shim.start({ connect: false });
