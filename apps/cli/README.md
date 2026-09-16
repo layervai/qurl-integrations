@@ -496,6 +496,22 @@ JSON reports a known outcome as `found_existing: true` or `false`; if recovery
 cannot prove which happened, it omits the field rather than guessing. Delete
 the resource first if you intentionally want a new CRID.
 
+### Move a local share
+
+Use `qurl restart <CRID> --target http://127.0.0.1:4000` to move an existing
+local share to a new loopback HTTP origin. The destination must be reachable;
+the old origin can already be stopped. The CRID and Connector ID stay the same.
+
+If the command fails after saving the new target, it keeps that target.
+A failed daemon handoff attempts to stop the share; a readiness timeout leaves
+it trying to start. Use `qurl inspect <CRID>` to check its state and target
+before taking further action. A later `qurl start <CRID>` uses the saved target.
+
+For a share published without `--id`, the default Connector ID remains based
+on its original origin. Publishing that original origin again reuses the same
+resource. Publishing the new origin without an explicit ID uses a different
+identity. Use the share's existing `--id` when publishing it again by ID.
+
 ### qurl share
 
 `qurl share <CRID>` mints a short-lived share link for the resource the
