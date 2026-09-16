@@ -1766,6 +1766,10 @@ func TestManagerMovePreservesGroupRetryDiagnostic(t *testing.T) {
 	if after.State != before.State || after.FailureCategory != before.FailureCategory || after.FailureCode != before.FailureCode || after.NextRetryAt == nil || !after.NextRetryAt.Equal(*before.NextRetryAt) || factory.startCount() != 1 {
 		t.Fatalf("move lost group retry cause or bypassed backoff: before=%+v after=%+v starts=%d", before, after, factory.startCount())
 	}
+	manager.recordGroupFailure(ctx, errors.New("native transport still unavailable"))
+	if got := manager.Diagnostics()["a"].RetryAttempt; got != before.RetryAttempt+1 {
+		t.Fatalf("move reset group retry attempt: got %d, previous %d", got, before.RetryAttempt)
+	}
 }
 
 func TestManagerMoveClearsOldRouteRefusalDuringGroupBackoff(t *testing.T) {
@@ -1797,5 +1801,9 @@ func TestManagerMoveClearsOldRouteRefusalDuringGroupBackoff(t *testing.T) {
 	got := manager.Diagnostics()["a"]
 	if got.State != diagnosticStateStarting || got.FailureCategory != "" || got.NextRetryAt != nil || !manager.groupRetryAt.Equal(groupDeadline) || factory.startCount() != 0 {
 		t.Fatalf("move retained old route refusal or bypassed group backoff: %+v", got)
+	}
+	manager.onRouteFailed("connector-a", ErrResourceGone)
+	if got := manager.Diagnostics()["a"].RetryAttempt; got != 2 {
+		t.Fatalf("move reset platform refusal escalation: got %d, want 2", got)
 	}
 }
