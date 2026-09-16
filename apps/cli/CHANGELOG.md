@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.5.4](https://github.com/layervai/qurl-integrations/compare/v2.5.3...v2.5.4) (2026-09-15)
+
+
+### Bug Fixes
+
+* **cli:** include production share verification settings ([#1463](https://github.com/layervai/qurl-integrations/issues/1463)) ([d6626c1](https://github.com/layervai/qurl-integrations/commit/d6626c164c4e30a8e2b447b2018cf271de89d1ca))
+
 ## [2.5.3](https://github.com/layervai/qurl-integrations/compare/v2.5.2...v2.5.3) (2026-09-15)
 
 
