@@ -521,7 +521,11 @@ func (m *Manager) recordDesired(desired []connectorstate.LocalShare) ([]restartE
 			// resolve through routeToRes, which is keyed by RouteID alone and a
 			// move does not change it, so a late OnRouteServing for the retired
 			// proxy generation still re-asserts serving.
-			m.seedStartingLocked(share.ResourceID)
+			// A target change cannot repair a failed group admission. Keep
+			// its cause and retry deadline while the whole group backs off.
+			if !time.Now().Before(m.groupRetryAt) {
+				m.seedStartingLocked(share.ResourceID)
+			}
 			delete(m.retry, share.ResourceID)
 			delete(m.refusals, share.ResourceID)
 			// Target changes may recover a refused route. Header changes do
