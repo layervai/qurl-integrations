@@ -295,7 +295,7 @@ describe('startGatewayHeartbeat', () => {
     expect(shimBranch).toMatch(/gatewayHeartbeatTimer\s*=\s*startGatewayHeartbeat\(\s*gatewayShim\s*\)/);
     expect(shimBranch).toMatch(/activeGuildCountTimer\s*=\s*startActiveGuildCount\(\s*gatewayShim\s*\)/);
 
-    const shutdownStart = source.indexOf('async function gracefulShutdown(code = 0) {');
+    const shutdownStart = source.search(/async function gracefulShutdown(?:Teardown)?\(/);
     const shutdownEnd = source.indexOf('async function start() {', shutdownStart);
     expect(shutdownStart).toBeGreaterThanOrEqual(0);
     expect(shutdownEnd).toBeGreaterThan(shutdownStart);
