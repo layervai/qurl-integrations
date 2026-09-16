@@ -71,6 +71,13 @@ func shareRestartCmd(opts *globalOpts) *cobra.Command {
 	var target string
 	cmd := &cobra.Command{
 		Use: "restart <CRID>", Short: "Restart sharing a local app", Args: exactArgs(1),
+		Long: `Restart sharing a local app.
+
+Rotates the share on a fresh serving epoch so no stale session keeps serving
+it. With --target the share also moves to a different loopback origin on this
+machine; the CRID and Connector identity stay the same, so every link already
+handed out keeps working.`,
+		Example: "  qurl restart lv1_...\n  qurl restart lv1_... --target http://127.0.0.1:4000",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			var destination *publishTarget
 			if cmd.Flags().Changed("target") {
@@ -234,6 +241,15 @@ func changeShareState(ctx context.Context, opts *globalOpts, id, action string, 
 	var updated *connectorstate.LocalShare
 	var updateErr error
 	if target != nil {
+		// Retarget writes the row desired-on. validateRestartAdvance above
+		// refuses any restart result that is not authoritatively on, so the two
+		// agree - but the coupling lives in another function, so assert it here
+		// rather than let a future contract change write "on" over an "off".
+		if sharing.DesiredState != qurlapi.DesiredStateOn {
+			return compensateShareChange(
+				fmt.Errorf("restart answered desired state %q for a target move, want on", sharing.DesiredState),
+				compensateOff, client, registry, local, sharing)
+		}
 		// TODO(upstream-contract): SessionGroupRunner.SetRoutes must reconcile a
 		// changed LocalIP/LocalPort for an existing RouteID (qurl-connector's
 		// TestSessionGroupRunnerSetRoutesChangesProxiesWithoutReadmission pins it).
