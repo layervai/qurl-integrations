@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/Microsoft/go-winio"
+	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 	"golang.org/x/sys/windows"
 )
 
@@ -153,3 +154,6 @@ func windowsNamedPipeCollision(err error) bool {
 		errors.Is(err, windows.ERROR_ALREADY_EXISTS) ||
 		errors.Is(err, windows.ERROR_PIPE_BUSY)
 }
+
+// EnsureIPCDir preserves the state-directory ACL contract for named pipes.
+func EnsureIPCDir(dir string) error { return connectorstate.EnsureDirMode(dir) }

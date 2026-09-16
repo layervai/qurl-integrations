@@ -17,8 +17,6 @@ import (
 	"time"
 
 	connectorshare "github.com/layervai/qurl-connector/pkg/share"
-
-	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 )
 
 // SocketFile is the fixed IPC socket name below the runtime directory.
@@ -28,9 +26,9 @@ const SocketFile = "daemon.sock"
 // socket. A host whose state path cannot fit sockaddr_un, such as an App
 // Sandbox container, sets it to a short owner-only directory so every daemon
 // and client resolves exactly <dir>/daemon.sock. This directory must be
-// dedicated to one state namespace. Daemon startup *changes* its mode to
-// owner-only 0700, so name a directory qURL owns rather than one that is
-// also used for something else.
+// dedicated to one state namespace. Existing directories must already have
+// mode 0700; startup creates missing directories but never changes the mode
+// of an existing runtime directory.
 const RuntimeDirEnv = "QURL_CONNECTOR_RUNTIME_DIR"
 
 // SocketPathForStateDir returns the platform IPC address for one state
@@ -89,7 +87,7 @@ func (s *IPCServer) Run(ctx context.Context) (retErr error) {
 	if err != nil {
 		return err
 	}
-	if err := connectorstate.EnsureDirMode(filepath.Dir(path)); err != nil {
+	if err := EnsureIPCDir(filepath.Dir(path)); err != nil {
 		return fmt.Errorf("secure share daemon socket directory: %w", err)
 	}
 	listener, cleanup, err := listenDaemonIPC(ctx, path)

@@ -83,26 +83,26 @@ func TestIPCServerReadinessReloadAndShutdown(t *testing.T) {
 	}
 }
 
-func TestIPCServerSecuresPermissiveSocketDirectory(t *testing.T) {
+func TestIPCServerRejectsPermissiveSocketDirectoryWithoutChangingIt(t *testing.T) {
 	dir := filepath.Join(shortTempDir(t), "state")
-	if err := os.Mkdir(dir, 0o755); err != nil { // #nosec G301 -- test verifies permissive directories are tightened.
+	if err := os.Mkdir(dir, 0o755); err != nil { // #nosec G301 -- test verifies permissive directories are unchanged.
 		t.Fatal(err)
 	}
-	if err := os.Chmod(dir, 0o755); err != nil { // #nosec G302 -- test verifies permissive directories are tightened.
+	if err := os.Chmod(dir, 0o755); err != nil { // #nosec G302 -- test verifies permissive directories are unchanged.
 		t.Fatal(err)
 	}
 	manager := emptyManager(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if err := (&IPCServer{SocketPath: filepath.Join(dir, SocketFile), Manager: manager}).Run(ctx); !errors.Is(err, context.Canceled) {
-		t.Fatalf("Run() = %v, want canceled after setup", err)
+	if err := (&IPCServer{SocketPath: filepath.Join(dir, SocketFile), Manager: manager}).Run(ctx); err == nil || !strings.Contains(err.Error(), "must have mode 0700") {
+		t.Fatalf("Run() = %v, want insecure directory rejection", err)
 	}
 	info, err := os.Lstat(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm() != 0o700 {
-		t.Fatalf("socket directory mode = %#o, want 0700", info.Mode().Perm())
+	if info.Mode().Perm() != 0o755 {
+		t.Fatalf("socket directory mode = %#o, want unchanged 0755", info.Mode().Perm())
 	}
 }
 
@@ -689,5 +689,16 @@ func TestIPCReadFailureDoesNotReplaceNativeDaemon(t *testing.T) {
 				t.Fatal("failed status read reached native job management")
 			}
 		})
+	}
+}
+
+func TestJobControllerReloadDoesNotCreateRuntimeDirectory(t *testing.T) {
+	runtimeDir := filepath.Join(shortTempDir(t), "missing")
+	controller := &JobController{RuntimeDir: runtimeDir, IPC: IPCClient{SocketPath: filepath.Join(runtimeDir, SocketFile)}}
+	if running, err := controller.ReloadIfRunning(context.Background()); err != nil || running {
+		t.Fatalf("reload running=%v err=%v", running, err)
+	}
+	if _, err := os.Lstat(runtimeDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("runtime directory created by reload: %v", err)
 	}
 }

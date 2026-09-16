@@ -58,6 +58,15 @@ func dialDaemonIPC(ctx context.Context, path string) (net.Conn, error) {
 	return conn, nil
 }
 
+// EnsureIPCDir creates a private socket directory without changing permissions
+// on an existing directory, which may also be used by other processes.
+func EnsureIPCDir(dir string) error {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("create share daemon socket directory: %w", err)
+	}
+	return validateUnixIPCParent(filepath.Join(dir, SocketFile))
+}
+
 func validateUnixIPCParent(path string) error {
 	dir := filepath.Dir(path)
 	info, err := os.Lstat(dir)
@@ -113,7 +122,7 @@ func platformSocketPath(stateDir, runtimeDir string) (string, error) {
 		if !filepath.IsAbs(runtimeDir) {
 			return "", fmt.Errorf("%s must be an absolute path", RuntimeDirEnv)
 		}
-		// Daemon startup sets this directory to 0700, so the filesystem root is
+		// The socket needs a private directory, so the filesystem root is
 		// never an acceptable answer.
 		if runtimeDir == string(filepath.Separator) {
 			return "", fmt.Errorf("%s must name a directory, not the filesystem root", RuntimeDirEnv)
@@ -130,16 +139,16 @@ func platformSocketPath(stateDir, runtimeDir string) (string, error) {
 	}
 	digest := sha256.Sum256([]byte(path))
 	// This replaced a shared /tmp/layerv-qurl-<uid>/<hash>.sock: a directory
-	// per namespace is what makes the 0700 EnsureDirMode below meaningful. The
+	// per namespace is what makes the 0700 directory check below meaningful. The
 	// old directory is orphaned rather than cleaned up, and an externally
 	// supervised daemon started by a pre-2.6 qurl keeps listening on the old
 	// address, so its supervisor must restart it after the upgrade - a native
 	// job recovers on its own because the binary version is part of the job
 	// version.
 	//
-	// IPCServer.Run passes this predictable directory through EnsureDirMode
-	// before listen. That helper rejects a symlink or a directory owned by any
-	// other user before it changes permissions, so a pre-creation below /tmp
+	// IPCServer.Run validates this predictable directory with EnsureIPCDir
+	// before listen. That helper rejects symlinks, foreign owners and loose
+	// permissions without changing existing directories, so pre-creation below /tmp
 	// can only make startup fail closed. The root is the literal /tmp, not
 	// os.TempDir(), so foreground daemons and clients agree even when their
 	// TMPDIR differs.

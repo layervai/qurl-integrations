@@ -693,13 +693,7 @@ func TestJobControllerIncompatibleStatusRequiresNativeOwnership(t *testing.T) {
 	}
 }
 
-// TestJobControllerSecuresAPreExistingRuntimeDirBeforeProbing pins the
-// client-first case: an operator creates the runtime directory with a normal
-// umask, so it is 0755 when a qurl command reaches it before any daemon has
-// run. Under native supervision qurl owns that directory, so Ensure secures
-// it instead of failing the probe on a directory the job install would have
-// fixed.
-func TestJobControllerSecuresAPreExistingRuntimeDirBeforeProbing(t *testing.T) {
+func TestJobControllerRejectsPermissiveRuntimeDirWithoutChangingIt(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Windows named pipes have no socket directory")
 	}
@@ -724,14 +718,14 @@ func TestJobControllerSecuresAPreExistingRuntimeDirBeforeProbing(t *testing.T) {
 	// The production probe, so the parent-directory check actually runs.
 	controller.ProbeStatus = controller.IPC.Status
 	controller.Reload = controller.IPC.ReloadIfRunning
-	if err := controller.Ensure(context.Background()); err != nil {
-		t.Fatalf("Ensure over a 0755 runtime dir = %v, want the directory secured and the job installed", err)
+	if err := controller.Ensure(context.Background()); err == nil {
+		t.Fatal("Ensure accepted a shared 0755 runtime directory")
 	}
 	info, err := os.Lstat(runtimeDir)
-	if err != nil || info.Mode().Perm() != 0o700 {
-		t.Fatalf("runtime dir mode = %v err=%v, want 0700", info.Mode().Perm(), err)
+	if err != nil || info.Mode().Perm() != 0o755 {
+		t.Fatalf("runtime dir mode = %v err=%v, want unchanged 0755", info.Mode().Perm(), err)
 	}
-	if len(manager.jobs) != 1 {
-		t.Fatalf("installed jobs = %d, want the install the probe failure used to block", len(manager.jobs))
+	if len(manager.jobs) != 0 {
+		t.Fatalf("installed jobs = %d, want none", len(manager.jobs))
 	}
 }
