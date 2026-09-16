@@ -14,6 +14,8 @@ import (
 
 	"github.com/Microsoft/go-winio"
 	"golang.org/x/sys/windows"
+
+	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 )
 
 const windowsDaemonPipePrefix = `\\.\pipe\layerv-qurl-share-daemon-`
@@ -74,7 +76,14 @@ func dialDaemonIPC(ctx context.Context, path string) (net.Conn, error) {
 
 func validatePlatformIPCPath(string) error { return nil }
 
-func platformStateSocketPath(path string) string { return path }
+// platformSocketPath returns the logical path windowsDaemonPipeName hashes
+// into the named-pipe address. runtimeDir is ignored: a named pipe has no
+// path-length bound, and the Windows EnsureDirMode anchors its ACL on the
+// agent-state file inside the state directory, so a separate runtime directory
+// would only create a stray state envelope.
+func platformSocketPath(stateDir, _ string) (string, error) {
+	return filepath.Join(stateDir, SocketFile), nil
+}
 
 func isUnavailableIPCError(err error) bool {
 	return errors.Is(err, windows.ERROR_FILE_NOT_FOUND) || errors.Is(err, windows.ERROR_PATH_NOT_FOUND)
@@ -146,3 +155,6 @@ func windowsNamedPipeCollision(err error) bool {
 		errors.Is(err, windows.ERROR_ALREADY_EXISTS) ||
 		errors.Is(err, windows.ERROR_PIPE_BUSY)
 }
+
+// EnsureIPCDir preserves the state-directory ACL contract for named pipes.
+func EnsureIPCDir(dir string) error { return connectorstate.EnsureDirMode(dir) }

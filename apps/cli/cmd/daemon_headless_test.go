@@ -407,7 +407,7 @@ func TestHeadlessDaemonRetriesTransientBootstrapInProcessThenServes(t *testing.T
 	case <-time.After(2 * time.Second):
 		t.Fatal("headless daemon did not recover from transient bootstrap failures")
 	}
-	client := connectordaemon.IPCClient{SocketPath: connectordaemon.StateSocketPath(stateDir)}
+	client := connectordaemon.IPCClient{SocketPath: stateSocketPath(t, stateDir)}
 	if accepted, err := client.SetOverlay(ctx, map[string]map[string]string{"headless-app": {"X-Origin-Token": "runtime-test-token"}}); err != nil || !accepted {
 		t.Fatalf("configured daemon refused runtime headers: accepted=%v error=%v", accepted, err)
 	}
