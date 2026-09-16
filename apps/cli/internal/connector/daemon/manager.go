@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"os"
 	"sort"
 	"sync"
@@ -45,6 +46,12 @@ const (
 // group to retire its admission, both when the group empties and on Run's own
 // shutdown path.
 const defaultRunnerStopTimeout = 10 * time.Second
+
+// defaultFirstReconcileBound caps a deferred first reconcile. An external
+// supervisor that died between spawning the daemon and its first reload must
+// not leave the daemon idle forever; after the bound the daemon serves its
+// durable state as it would have without the deferral.
+const defaultFirstReconcileBound = 30 * time.Second
 
 const (
 	diagnosticStateStarting = "starting"
@@ -127,6 +134,13 @@ type Manager struct {
 	registry Registry
 	factory  GroupFactory
 
+	// DeferFirstReconcile holds the first reconcile until Trigger releases it
+	// or firstReconcileBound elapses. An external supervisor sets it so the
+	// process-memory state it pushes over IPC is in place before any route is
+	// served. Set before Run.
+	DeferFirstReconcile bool
+	firstReconcileBound time.Duration
+
 	mu          sync.Mutex
 	tracked     map[string]trackedShare       // resource ID -> applied definition
 	routeToRes  map[string]string             // group route ID -> resource ID
@@ -134,6 +148,16 @@ type Manager struct {
 	retry       map[string]int                // resource ID -> transient failure count
 	refusals    map[string]int                // resource ID -> platform refusals of its proxy registration
 	persisting  map[string]struct{}           // resource ID -> resource-gone persistence in flight
+	// overlay holds runtime request headers by Connector ID (the group route
+	// ID), pushed by an external supervisor over IPC. It lives in process
+	// memory only: never persisted, never reported by /status, never logged.
+	// SetOverlay replaces it whole with a deep copy and no code path mutates
+	// its maps, so a route handed to the group may share one. Entries are
+	// not pruned to the desired set: a supervisor pushes a route's headers
+	// before publishing it, so an entry lives until the next replacement.
+	// TODO(upstream-contract): qurl-connector copies RequestHeaders rather
+	// than mutating a caller-owned route map.
+	overlay map[string]map[string]string
 
 	runner        GroupRunner
 	runnerCancel  context.CancelFunc
@@ -202,6 +226,7 @@ func NewManager(registry Registry, factory GroupFactory) (*Manager, error) {
 		diagnostics: map[string]ResourceDiagnostic{}, retry: map[string]int{}, refusals: map[string]int{},
 		persisting:                 map[string]struct{}{},
 		trigger:                    make(chan struct{}, 1),
+		firstReconcileBound:        defaultFirstReconcileBound,
 		resourceGonePersistTimeout: 5 * time.Second,
 		runnerStopTimeout:          defaultRunnerStopTimeout,
 		routePushTimeout:           10 * time.Second,
@@ -218,6 +243,39 @@ func (m *Manager) Trigger() {
 	}
 }
 
+// SetOverlay replaces the runtime request-header overlay with a deep copy of
+// overlay (Connector ID to header set) and requests a reconcile, so a route
+// whose header set changed is re-registered. The copy lets the
+// caller reuse or mutate its own maps afterward. Re-registration can interrupt
+// in-flight requests. During session rotation the retiring session may retain
+// old headers until replacement promotion and drain; this is not revocation.
+func (m *Manager) SetOverlay(overlay map[string]map[string]string) {
+	m.storeOverlay(overlay)
+	m.Trigger()
+}
+
+// storeOverlay installs a deep copy of overlay without reconciling; a
+// per-share parent seeds a group it is starting through it.
+func (m *Manager) storeOverlay(overlay map[string]map[string]string) {
+	copied := cloneOverlay(overlay)
+	m.mu.Lock()
+	m.overlay = copied
+	m.mu.Unlock()
+}
+
+// cloneOverlay deep-copies an overlay, dropping headerless entries so absence
+// and emptiness are one state.
+func cloneOverlay(overlay map[string]map[string]string) map[string]map[string]string {
+	copied := make(map[string]map[string]string, len(overlay))
+	for routeID, headers := range overlay {
+		if len(headers) == 0 {
+			continue
+		}
+		copied[routeID] = maps.Clone(headers)
+	}
+	return copied
+}
+
 // Run reconciles until ctx ends. Every exit path stops the session group so a
 // registry or reconciliation failure cannot bypass exact admission retirement.
 func (m *Manager) Run(ctx context.Context) (retErr error) {
@@ -229,6 +287,11 @@ func (m *Manager) Run(ctx context.Context) (retErr error) {
 		defer cancel()
 		retErr = errors.Join(retErr, m.stopRunner(stopCtx))
 	}()
+	if m.DeferFirstReconcile {
+		if err := awaitFirstReconcile(ctx, m.trigger, m.firstReconcileBound); err != nil {
+			return err
+		}
+	}
 	if err := m.Reconcile(ctx); err != nil {
 		return err
 	}
@@ -242,6 +305,21 @@ func (m *Manager) Run(ctx context.Context) (retErr error) {
 			}
 		}
 	}
+}
+
+// awaitFirstReconcile blocks a deferred first reconcile until the supervisor's
+// first Trigger, the bound, or cancellation. A Trigger that arrived before Run
+// started is already buffered and releases it immediately.
+func awaitFirstReconcile(ctx context.Context, trigger <-chan struct{}, bound time.Duration) error {
+	timer := time.NewTimer(bound)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-trigger:
+	case <-timer.C:
+	}
+	return nil
 }
 
 // Reconcile applies one crash-safe desired-state snapshot. It computes the
@@ -282,10 +360,14 @@ func desiredShares(shares []connectorstate.LocalShare) []connectorstate.LocalSha
 	return desired
 }
 
-func shareRoute(share *connectorstate.LocalShare) connectorshare.LocalHTTPRoute {
+// shareRouteLocked renders share's group route, attaching the request headers
+// the overlay holds for its Connector ID (nil when it holds none). The caller
+// holds m.mu.
+func (m *Manager) shareRouteLocked(share *connectorstate.LocalShare) connectorshare.LocalHTTPRoute {
 	return connectorshare.LocalHTTPRoute{
 		RouteID: share.ConnectorID, LocalIP: share.LocalIP, LocalPort: share.LocalPort,
 		ResourcePublicKey: share.ResourceID, ConnectorRoutingID: share.ConnectorRoutingID,
+		RequestHeaders: m.overlay[share.ConnectorID],
 	}
 }
 
@@ -404,12 +486,12 @@ func (m *Manager) recordDesired(desired []connectorstate.LocalShare) ([]restartE
 	var restart []restartEntry
 	for i := range desired {
 		share := desired[i]
-		route := shareRoute(&share)
+		route := m.shareRouteLocked(&share)
 		previous, existed := m.tracked[share.ResourceID]
 		switch {
 		case !existed:
 			m.seedStartingLocked(share.ResourceID)
-		case previous.route == route && share.ServingEpoch > previous.share.ServingEpoch:
+		case previous.route.Equal(route) && share.ServingEpoch > previous.share.ServingEpoch:
 			// Restart: defer the epoch commit until RestartRoute succeeds.
 			restart = append(restart, restartEntry{routeID: route.RouteID, share: share})
 			continue
@@ -419,9 +501,11 @@ func (m *Manager) recordDesired(desired []connectorstate.LocalShare) ([]restartE
 			delete(m.routeToRes, previous.route.RouteID)
 		}
 		next := trackedShare{share: share, route: route, retryAt: previous.retryAt}
-		if previous.route != route {
-			// A route re-registering under a changed target joins the group
-			// afresh with no pending backoff (a brand-new route carries none).
+		previousTarget, nextTarget := previous.route, route
+		previousTarget.RequestHeaders, nextTarget.RequestHeaders = nil, nil
+		if !previousTarget.Equal(nextTarget) {
+			// Target changes may recover a refused route. Header changes do
+			// not change its platform authorization and must retain backoff.
 			next.retryAt = time.Time{}
 		}
 		m.tracked[share.ResourceID] = next
@@ -434,8 +518,8 @@ func (m *Manager) recordDesired(desired []connectorstate.LocalShare) ([]restartE
 // commitRestart advances the tracked definition for a route after its restart
 // has been accepted by the live group.
 func (m *Manager) commitRestart(share *connectorstate.LocalShare) {
-	route := shareRoute(share)
 	m.mu.Lock()
+	route := m.shareRouteLocked(share)
 	previous := m.tracked[share.ResourceID]
 	m.tracked[share.ResourceID] = trackedShare{share: *share, route: route, retryAt: previous.retryAt}
 	m.routeToRes[route.RouteID] = share.ResourceID
@@ -461,7 +545,7 @@ func (m *Manager) eligibleRoutes(desired []connectorstate.LocalShare) ([]connect
 			}
 			continue
 		}
-		routes = append(routes, shareRoute(&desired[i]))
+		routes = append(routes, m.shareRouteLocked(&desired[i]))
 	}
 	return routes, withheld, nextDue
 }

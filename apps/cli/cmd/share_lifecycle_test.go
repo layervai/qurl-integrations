@@ -219,6 +219,7 @@ func (d *journeyDaemon) ReloadIfRunning(context.Context) (bool, error) {
 func (d *journeyDaemon) close() {
 	d.mu.Lock()
 	cancel, done := d.cancel, d.done
+	d.cancel = nil
 	d.mu.Unlock()
 	if cancel != nil {
 		cancel()
@@ -2608,6 +2609,15 @@ func TestLocalPublishWarmRuntimeFailureEmitsNoIdentityOrManagementMutation(t *te
 }
 
 func TestPublishDaemonLifecycleServesRealHTTPAndStopsCleanly(t *testing.T) {
+	runPublishDaemonLifecycle(t, false)
+}
+
+func TestExternalPublishDaemonLifecycleServesRealHTTPAndStopsCleanly(t *testing.T) {
+	runPublishDaemonLifecycle(t, true)
+}
+
+func runPublishDaemonLifecycle(t *testing.T, external bool) {
+	t.Helper()
 	if testing.Short() {
 		t.Skip("real FRP daemon journey")
 	}
@@ -2626,6 +2636,13 @@ func TestPublishDaemonLifecycleServesRealHTTPAndStopsCleanly(t *testing.T) {
 
 	srv := apitest.NewServer(t)
 	stateDir := connectorStateTestDir(t)
+	env := map[string]string{"QURL_API_KEY": testAPIKey}
+	if external {
+		if err := connectorstate.EstablishExternalRuntimeMode(context.Background(), stateDir); err != nil {
+			t.Fatal(err)
+		}
+		env[connectorstate.EnvRuntimeSupervision] = "external"
+	}
 	registry, err := openOwnedTestShareRegistry(stateDir)
 	if err != nil {
 		t.Fatal(err)
@@ -2645,6 +2662,10 @@ func TestPublishDaemonLifecycleServesRealHTTPAndStopsCleanly(t *testing.T) {
 	}
 	daemon := &journeyDaemon{registry: registry, admitter: admitter, version: "test"}
 	t.Cleanup(daemon.close)
+	var controller shareDaemonController = daemon
+	if external {
+		controller = startExternalJourneyDaemon(t, daemon, stateDir, srv.URL)
+	}
 
 	sharingPath := "/v1/resources/" + srv.Key.CRID + "/sharing"
 	srv.Script(http.MethodGet, sharingPath, func(w http.ResponseWriter, _ *http.Request) {
@@ -2727,8 +2748,8 @@ func TestPublishDaemonLifecycleServesRealHTTPAndStopsCleanly(t *testing.T) {
 	}
 	res := runCLI(t, &runOpts{
 		args:          []string{"--endpoint", srv.URL, "--quiet", "publish", echo.URL, "--id", connectorID},
-		env:           map[string]string{"QURL_API_KEY": testAPIKey},
-		shareRegistry: registry, shareDaemon: daemon, shareStateDir: stateDir,
+		env:           env,
+		shareRegistry: registry, shareDaemon: controller, shareStateDir: stateDir,
 		localResource: resolver, sharingWaitLimit: 10 * time.Second,
 	})
 	if res.code != 0 || res.stdout.String() != srv.Key.CRID+"\n" {
@@ -2851,6 +2872,27 @@ func TestPublishDaemonLifecycleServesRealHTTPAndStopsCleanly(t *testing.T) {
 		t.Fatalf("old proxy %q was not unregistered after drain: %#v", oldProxyName, recorder.snapshot())
 	}
 
+	if external {
+		// A supervisor restart keeps durable intent and resumes the same route
+		// only after the replacement process receives its first reload.
+		daemon.close()
+		stored, err := registry.Get(context.Background(), srv.Key.CRID)
+		if err != nil || stored.DesiredState != "on" || stored.ServingEpoch != 1 {
+			t.Fatalf("supervisor stop changed durable sharing: %+v, %v", stored, err)
+		}
+		controller = startExternalJourneyDaemon(t, daemon, stateDir, srv.URL)
+		if err := controller.Ensure(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		deadline = time.Now().Add(5 * time.Second)
+		for !requestRoute() {
+			if time.Now().After(deadline) {
+				t.Fatal("external restart did not resume the stored route")
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+
 	srv.Script(http.MethodPut, sharingPath, func(w http.ResponseWriter, _ *http.Request) {
 		apitest.WriteEnvelope(t, w, http.StatusOK, map[string]any{
 			"resource_id": srv.Key.ResourceID, "crid": srv.Key.CRID,
@@ -2859,8 +2901,8 @@ func TestPublishDaemonLifecycleServesRealHTTPAndStopsCleanly(t *testing.T) {
 	})
 	stop := runCLI(t, &runOpts{
 		args:          []string{"--endpoint", srv.URL, "stop", srv.Key.CRID},
-		env:           map[string]string{"QURL_API_KEY": testAPIKey},
-		shareRegistry: registry, shareDaemon: daemon, shareStateDir: stateDir,
+		env:           env,
+		shareRegistry: registry, shareDaemon: controller, shareStateDir: stateDir,
 	})
 	if stop.code != 0 {
 		t.Fatalf("stop result code=%d stderr=%s", stop.code, stop.stderr.String())
@@ -2877,8 +2919,8 @@ func TestPublishDaemonLifecycleServesRealHTTPAndStopsCleanly(t *testing.T) {
 		t.Helper()
 		deleted := runCLI(t, &runOpts{
 			args:          []string{"--endpoint", srv.URL, "delete", crid, "--yes"},
-			env:           map[string]string{"QURL_API_KEY": testAPIKey},
-			shareRegistry: registry, shareDaemon: daemon, shareStateDir: stateDir,
+			env:           env,
+			shareRegistry: registry, shareDaemon: controller, shareStateDir: stateDir,
 		})
 		if deleted.code != 0 {
 			t.Fatalf("delete result code=%d stderr=%s", deleted.code, deleted.stderr.String())
@@ -2909,8 +2951,8 @@ func TestPublishDaemonLifecycleServesRealHTTPAndStopsCleanly(t *testing.T) {
 	for range 2 {
 		republished := runCLI(t, &runOpts{
 			args:          []string{"--endpoint", srv.URL, "--quiet", "publish", echo.URL, "--id", connectorID},
-			env:           map[string]string{"QURL_API_KEY": testAPIKey},
-			shareRegistry: registry, shareDaemon: daemon, shareStateDir: stateDir,
+			env:           env,
+			shareRegistry: registry, shareDaemon: controller, shareStateDir: stateDir,
 			localResource: resolver, sharingWaitLimit: 10 * time.Second,
 		})
 		if republished.code != 0 || republished.stdout.String() != resourceKey.CRID+"\n" {
@@ -3312,4 +3354,45 @@ func assertLocalConnectorResourceRetired(t *testing.T, stateDir, connectorID str
 	if err != nil || !found || !retired {
 		t.Fatalf("deleted Connector binding found=%t retired=%t err=%v", found, retired, err)
 	}
+}
+
+// startExternalJourneyDaemon uses the production controller and IPC with real
+// Connector sessions. Only cloud admission is supplied by the local fixture.
+func startExternalJourneyDaemon(t *testing.T, daemon *journeyDaemon, stateDir, endpoint string) shareDaemonController {
+	t.Helper()
+	common, err := connectordaemon.DefaultFRPCommon(2, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	factory, err := connectordaemon.NewNativeGroupFactory(daemon.admitter, common, daemon.version)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager, err := connectordaemon.NewManager(daemon.registry, factory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.DeferFirstReconcile = true
+	admissionsBefore := daemon.admitter.admissions()
+	ctx, cancel := context.WithCancel(context.Background())
+	daemon.manager, daemon.cancel, daemon.done = manager, cancel, make(chan error, 1)
+	version, err := connectordaemon.JobVersion(daemon.version, connectordaemon.GroupModeSingle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &connectordaemon.IPCServer{SocketPath: connectordaemon.StateSocketPath(stateDir), Manager: manager, JobVersion: version}
+	go func() { daemon.done <- server.Run(ctx) }()
+	controller := connectordaemon.NewJobController(stateDir, t.TempDir(), daemon.version, endpoint, connectordaemon.GroupModeSingle, connectorstate.RuntimeSupervisionExternal, func() (qurl.HubBootstrap, error) {
+		t.Error("external lifecycle resolved native job deployment")
+		return qurl.HubBootstrap{}, errors.New("unexpected native job deployment")
+	})
+	ready, stop := context.WithTimeout(ctx, 5*time.Second)
+	defer stop()
+	if err := controller.IPC.WaitReady(ready); err != nil {
+		t.Fatal(err)
+	}
+	if daemon.admitter.admissions() != admissionsBefore {
+		t.Fatal("external daemon admitted a session before reload")
+	}
+	return controller
 }
