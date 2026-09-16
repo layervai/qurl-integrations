@@ -184,6 +184,10 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	tunnelHub := internal.TunnelHub{Host: os.Getenv("QURL_CONNECTOR_HUB_HOST"), Port: os.Getenv("QURL_CONNECTOR_HUB_PORT"), PublicKey: os.Getenv("QURL_CONNECTOR_HUB_SERVER_PUBLIC_KEY_B64")}
+	if err := tunnelHub.Validate(); err != nil {
+		return err
+	}
 	s3OriginImage, err := readS3OriginImageConfig()
 	if err != nil {
 		return err
@@ -353,6 +357,7 @@ func run() error {
 		SlackUserLookup:                slackUserLookup,
 		OpenView:                       openView,
 		TunnelImage:                    tunnelImage,
+		TunnelHub:                      tunnelHub,
 		S3OriginImage:                  s3OriginImage,
 		ConnectorAPIURL:                connectorAPIURL,
 		PostFeedback:                   postFeedback,
