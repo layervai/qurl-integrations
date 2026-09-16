@@ -110,15 +110,19 @@ func RequireRuntimeSupervision(dir string, expected RuntimeSupervision) error {
 	// ReadRuntimeSupervision, so a sealed namespace addressed natively gets
 	// this message rather than "is external, not native" - the more
 	// actionable of the two.
-	if expected == RuntimeSupervisionNative && SealedProviderSelected() {
+	if provider, sealed := SelectedKeyProvider(); expected == RuntimeSupervisionNative && sealed {
 		// Name the value: any non-empty name but file selects a sealed envelope,
 		// so a typo lands here too and its author needs to see what was read.
-		// Offer both exits, because the variable leaking into an interactive
-		// shell over a plaintext namespace is as likely as a real sealed one.
+		//
+		// The primary instruction is the supervision flag, which is right for an
+		// established sealed namespace as well as a new one. The fresh-directory
+		// clause is scoped to creating a new namespace: an operator whose shell
+		// merely inherited the variable must not read this as "abandon your
+		// enrollment and start over". Unsetting is the other exit, because the
+		// leak over a plaintext namespace is as likely as a real sealed one.
 		return fmt.Errorf(
-			"%w: %s=%q selects a sealed agent state envelope, which only an external supervisor can serve; run every command with --supervision external against a dedicated state directory that has held no state before, or unset %s for the plaintext default",
-			ErrAgentStateEnvelope, connectoragentstate.EnvKeyProvider,
-			strings.TrimSpace(os.Getenv(connectoragentstate.EnvKeyProvider)), connectoragentstate.EnvKeyProvider)
+			"%w: %s=%q selects a sealed agent state envelope, which only an external supervisor can serve; run every command with --supervision external, or unset %s for the plaintext default. A new sealed namespace must be a state directory that has held no state before",
+			ErrAgentStateEnvelope, connectoragentstate.EnvKeyProvider, provider, connectoragentstate.EnvKeyProvider)
 	}
 	actual, err := ReadRuntimeSupervision(dir)
 	if err != nil {

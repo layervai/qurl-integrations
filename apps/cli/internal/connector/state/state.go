@@ -122,8 +122,18 @@ var errStoreNotOpen = fmt.Errorf("%w: Connector state store is not open", qurl.E
 // connector adds a provider that still writes the plaintext envelope, route
 // it here too or the plaintext guard in Open is skipped for it.
 func SealedProviderSelected() bool {
-	name := strings.ToLower(strings.TrimSpace(os.Getenv(connectoragentstate.EnvKeyProvider)))
-	return name != "" && name != connectoragentstate.KeyProviderFile
+	_, sealed := SelectedKeyProvider()
+	return sealed
+}
+
+// SelectedKeyProvider returns LAYERV_KEY_PROVIDER as this process reads it and
+// whether it selects a sealed envelope. Callers that need to name the value in
+// an error take it from here rather than reading the environment a second time
+// with different trimming.
+func SelectedKeyProvider() (string, bool) {
+	raw := strings.TrimSpace(os.Getenv(connectoragentstate.EnvKeyProvider))
+	name := strings.ToLower(raw)
+	return raw, name != "" && name != connectoragentstate.KeyProviderFile
 }
 
 // Store owns the qurl-go agent state envelope for the process lifetime: the
@@ -208,7 +218,7 @@ func Open(dir string) (*Store, error) {
 	// the 0700 directory, so a sealed open that failed before its first save
 	// leaves a namespace that is genuinely fresh.
 	if _, err := os.Lstat(filepath.Join(dir, connectoragentstate.SealedAgentStateFile)); err == nil {
-		return nil, fmt.Errorf("%w: state directory holds a sealed agent state envelope (%s); set %s and %s to open it, or use a different state directory",
+		return nil, fmt.Errorf("%w: this state directory holds %s; set %s and %s to open it, or use a different state directory",
 			ErrAgentStateEnvelope, connectoragentstate.SealedAgentStateFile, connectoragentstate.EnvKeyProvider, connectoragentstate.EnvLocalKeyFD)
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return nil, fmt.Errorf("inspect native agent state directory: %w", err)

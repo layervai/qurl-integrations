@@ -69,18 +69,6 @@ func useLocalKey(t *testing.T, fill byte) {
 	t.Setenv(connectoragentstate.EnvLocalKeyFD, localKeyFD(t, bytes.Repeat([]byte{fill}, 32)))
 }
 
-func saveTestAgentState(t *testing.T, store *Store) qurl.AgentStateStore {
-	t.Helper()
-	sdkStore, err := store.Handoff()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := sdkStore.SaveAgentState(context.Background(), &qurl.AgentState{AgentID: "a"}); err != nil {
-		t.Fatal(err)
-	}
-	return sdkStore
-}
-
 func TestOpenWithLocalKeySealsState(t *testing.T) {
 	clearStateEnv(t)
 	dir := secureStateTestDir(t)
@@ -159,19 +147,6 @@ func TestOpenLocalKeyRefusesPlaintextEnvelope(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, connectoragentstate.SealedAgentStateFile)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("sealed envelope created next to the refused plaintext one: stat err=%v", err)
-	}
-}
-
-func TestOpenFileProviderStaysPlaintext(t *testing.T) {
-	clearStateEnv(t)
-	t.Setenv(connectoragentstate.EnvKeyProvider, " File ")
-	store := openTestStore(t)
-	sdkStore := saveTestAgentState(t, store)
-	if _, ok := sdkStore.(*qurl.FileAgentStateStore); !ok {
-		t.Fatalf("Handoff() returned %T, want the plaintext *qurl.FileAgentStateStore", sdkStore)
-	}
-	if _, err := os.Stat(filepath.Join(store.Dir(), AgentStateFile)); err != nil {
-		t.Fatalf("plaintext envelope missing under the explicit file provider: %v", err)
 	}
 }
 

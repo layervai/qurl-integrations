@@ -257,8 +257,14 @@ wrapping key arrives on the inherited descriptor named by
 supervisor that owns the key (for example qURL Desktop) sets the environment.
 A sealed namespace requires `--supervision external`: the background job
 `qurl` installs under native supervision carries no environment and cannot
-inherit a key descriptor, so a command that would install one refuses a
-sealed namespace outright (exit code 3). A state directory holds exactly one
+inherit a key descriptor. Every command that checks the namespace's
+supervision policy - `publish`, `start`, `stop`, `restart`, `delete`, `login`
+and `daemon run` - therefore refuses a sealed namespace under native
+supervision (exit code 3), not only the ones that would install a job.
+Read-only commands do not run that check and open the sealed envelope
+normally.
+
+A state directory holds exactly one
 envelope, so qurl refuses to open a sealed directory without these variables,
 or a plaintext one with them (also exit code 3); use a different state
 directory rather than switching in place.
