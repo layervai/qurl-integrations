@@ -154,3 +154,17 @@ func TestLoginProjections(t *testing.T) {
 		}
 	})
 }
+
+// TestLoginJSONOmitsAnAbsentDeviceKeyID pins that a supervisor reading the
+// login document cannot mistake an absent key for an empty id: /v1/me without
+// a key object drops the field rather than emitting "".
+func TestLoginJSONOmitsAnAbsentDeviceKeyID(t *testing.T) {
+	var out, errBuf bytes.Buffer
+	p := newTestPrinter(&out, &errBuf, FormatJSON, false, false, false)
+	if err := p.Login(&qurlapi.Identity{OwnerID: "own_output_test", AuthType: "api_key"}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out.String(), "device_key_id") {
+		t.Fatalf("login JSON = %s, want no device_key_id when /v1/me reports no key", out.String())
+	}
+}

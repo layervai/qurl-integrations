@@ -32,8 +32,10 @@ type loginJSON struct {
 	OwnerID  string `json:"owner_id"`
 	AuthType string `json:"auth_type"`
 	// DeviceKeyID is the enrolled device credential's public identifier, the
-	// value a supervising app records next to the owner id.
-	DeviceKeyID    string `json:"device_key_id"`
+	// value a supervising app records next to the owner id. It is omitted
+	// rather than empty when /v1/me reports no key object, so a supervisor
+	// cannot persist "" as if it were an id.
+	DeviceKeyID    string `json:"device_key_id,omitempty"`
 	DeviceEnrolled bool   `json:"device_enrolled"`
 }
 

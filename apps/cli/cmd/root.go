@@ -13,6 +13,7 @@ import (
 	"os/signal"
 	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -803,16 +804,14 @@ func (o *globalOpts) openNativeExternalRegisteredClient(
 		return nil, nil, err
 	}
 	nativeRuntime, err := o.openNativeRuntime(ctx, connectorshare.NativeRuntimeConfig{
-		StateDir:      stateDir,
-		AgentID:       connectorstate.ConfiguredAgentID(),
-		Hub:           hubBootstrap,
-		Hostname:      hostname,
-		Version:       o.version,
-		ClientBaseURL: origin,
-		EnrollmentCredentialProvider: func(context.Context, qurl.AgentEnrollmentCredentialRequest) (string, error) {
-			return auth.ReadExternalEnrollmentTokenFile(tokenPath)
-		},
-		RefreshMode: connectorRefreshModeAuto,
+		StateDir:                     stateDir,
+		AgentID:                      connectorstate.ConfiguredAgentID(),
+		Hub:                          hubBootstrap,
+		Hostname:                     hostname,
+		Version:                      o.version,
+		ClientBaseURL:                origin,
+		EnrollmentCredentialProvider: oneShotEnrollmentToken(tokenPath),
+		RefreshMode:                  connectorRefreshModeAuto,
 	})
 	if err != nil {
 		return nil, nil, err
@@ -890,8 +889,33 @@ func (o *globalOpts) bindDeviceOwner(ctx context.Context, stateDir string, devic
 }
 
 // identityKeyID is the non-secret identifier of the credential behind id.
+// oneShotEnrollmentToken reads the supervisor's token file at most once per
+// enrollment and replays that first outcome. The file is one-shot and the
+// supervisor deletes it on every exit path, so a second provider call after a
+// transient enrollment failure would otherwise re-open a path that is gone
+// and report a file-shape error instead of the truth: this credential is
+// spent and the supervisor must mint another.
+func oneShotEnrollmentToken(path string) func(context.Context, qurl.AgentEnrollmentCredentialRequest) (string, error) {
+	var (
+		once  sync.Once
+		token string
+		err   error
+	)
+	return func(context.Context, qurl.AgentEnrollmentCredentialRequest) (string, error) {
+		first := false
+		once.Do(func() {
+			first = true
+			token, err = auth.ReadExternalEnrollmentTokenFile(path)
+		})
+		if first || err != nil {
+			return token, err
+		}
+		return "", errors.New("the one-time enrollment token was already used for this enrollment; mint a new token file and run qurl login again")
+	}
+}
+
 func identityKeyID(id *qurlapi.Identity) string {
-	if id.Key == nil {
+	if id == nil || id.Key == nil {
 		return ""
 	}
 	return id.Key.KeyID

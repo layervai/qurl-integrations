@@ -111,6 +111,12 @@ func TestExternalLoginEnrollsFreshNamespaceFromTheTokenFile(t *testing.T) {
 	if owner, bound, err := registry.OwnerID(context.Background()); err != nil || !bound || owner != apitest.MeOwnerID {
 		t.Fatalf("registry owner = (%q, %t, %v), want %q bound", owner, bound, err, apitest.MeOwnerID)
 	}
+	// This is a negative-space check, not sealing coverage: the harness injects
+	// the environment through opts.lookupEnv, while state.Open and
+	// SealedProviderSelected read the process environment so they agree with
+	// what qurl-connector will see. The sealed branch is therefore never taken
+	// here and the fake runtime writes no state at all. Real sealing is covered
+	// by the state package's t.Setenv tests.
 	if _, err := os.Lstat(filepath.Join(stateDir, connectorstate.AgentStateFile)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("external login wrote a plaintext agent state envelope: %v", err)
 	}
@@ -294,4 +300,40 @@ func TestExternalLoginJSONPrintsTheDeviceIdentityOnly(t *testing.T) {
 		t.Fatalf("external login -o json wrote to stderr: %q", res.stderr.String())
 	}
 	mustNotLeakEnrollmentToken(t, srv, res)
+}
+
+// TestOneShotEnrollmentTokenReplaysItsFirstOutcome pins that the credential
+// provider reads the supervisor's file exactly once. The file is one-shot and
+// the supervisor deletes it on every exit path, so a second call after a
+// transient enrollment failure must say the token is spent rather than
+// re-open a path that is gone and report a file-shape error.
+func TestOneShotEnrollmentTokenReplaysItsFirstOutcome(t *testing.T) {
+	path := writeExternalLoginToken(t)
+	provider := oneShotEnrollmentToken(path)
+	token, err := provider(context.Background(), qurl.AgentEnrollmentCredentialRequest{})
+	if err != nil || token != testExternalEnrollmentToken {
+		t.Fatalf("first read = %q, %v; want the token", token, err)
+	}
+	// The supervisor deletes the consumed file, as the enrollment test models.
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	again, err := provider(context.Background(), qurl.AgentEnrollmentCredentialRequest{})
+	if again != "" || err == nil || !strings.Contains(err.Error(), "already used") {
+		t.Fatalf("second read = %q, %v; want the spent-credential refusal", again, err)
+	}
+}
+
+// TestOneShotEnrollmentTokenReplaysItsFirstFailure pins the other half: a
+// first read that failed is replayed verbatim, so the caller sees why the
+// token was rejected rather than a different error on every retry.
+func TestOneShotEnrollmentTokenReplaysItsFirstFailure(t *testing.T) {
+	provider := oneShotEnrollmentToken(filepath.Join(t.TempDir(), "absent"))
+	_, first := provider(context.Background(), qurl.AgentEnrollmentCredentialRequest{})
+	if first == nil {
+		t.Fatal("reading an absent token file succeeded")
+	}
+	if _, second := provider(context.Background(), qurl.AgentEnrollmentCredentialRequest{}); second == nil || second.Error() != first.Error() {
+		t.Fatalf("second failure = %v, want the first one replayed (%v)", second, first)
+	}
 }

@@ -15,7 +15,7 @@ const externalEnrollmentTokenMaxBytes = 16 << 10
 
 var statExternalEnrollmentTokenPath = os.Lstat
 
-// ReadExternalEnrollmentTokenFile reads the Desktop one-shot credential from
+// ReadExternalEnrollmentTokenFile reads the qURL Desktop one-shot credential from
 // one exact private file. It is intentionally stricter than the headless
 // projected-secret reader: symlinks and group access are never accepted.
 func ReadExternalEnrollmentTokenFile(path string) (string, error) { //nolint:gocyclo // One descriptor-pinning security decision stays together.

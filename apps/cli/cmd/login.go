@@ -167,9 +167,21 @@ func validLocalKeyDescriptor(raw string) bool {
 	if raw == "" || strings.IndexFunc(raw, func(r rune) bool { return r < '0' || r > '9' }) >= 0 {
 		return false
 	}
+	// The point of this gate is a crisp usage error before the namespace is
+	// touched, so it rejects what cannot be an inherited descriptor: a padded
+	// number ("0003") and one past any plausible rlimit. 0, 1 and 2 are the
+	// standard streams, which a supervisor must not hand over as the key.
+	if len(raw) > 1 && raw[0] == '0' {
+		return false
+	}
 	fd, err := strconv.Atoi(raw)
-	return err == nil && fd >= 3
+	return err == nil && fd >= 3 && fd <= maxLocalKeyDescriptor
 }
+
+// maxLocalKeyDescriptor bounds the accepted LAYERV_LOCAL_KEY_FD. It is well
+// above any per-process descriptor limit a supervisor runs under and well
+// below the values a typo produces.
+const maxLocalKeyDescriptor = 1 << 20
 
 // readSecret reads a secret from piped stdin or an interactive hidden
 // prompt. It never echoes and never hangs: piped-but-empty input is an

@@ -129,6 +129,10 @@ func TestExternalLoginRequiresTheLocalKeyProviderContract(t *testing.T) {
 		"malformed descriptor": externalLoginEnv(connectoragentstate.EnvLocalKeyFD, malformedDescriptor),
 		"padded descriptor":    externalLoginEnv(connectoragentstate.EnvLocalKeyFD, " 3"),
 		"signed descriptor":    externalLoginEnv(connectoragentstate.EnvLocalKeyFD, "+3"),
+		// A descriptor no process can hold must fail here, where the message
+		// names the variable, not one layer down inside the connector.
+		"zero padded descriptor": externalLoginEnv(connectoragentstate.EnvLocalKeyFD, "0003"),
+		"absurd descriptor":      externalLoginEnv(connectoragentstate.EnvLocalKeyFD, "9999999999"),
 	}
 	for name, env := range cases {
 		t.Run(name, func(t *testing.T) {
