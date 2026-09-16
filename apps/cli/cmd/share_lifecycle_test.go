@@ -3476,7 +3476,7 @@ func TestRestartWithTargetMovesShareAtTheReturnedEpoch(t *testing.T) {
 					t.Fatal(err)
 				}
 				seed := localShareFixture(srv)
-				seed.DesiredState = "on"
+				seed.DesiredState = "off" // A successful retarget also restores a locally disabled share.
 				if err := registry.Put(context.Background(), &seed); err != nil {
 					t.Fatal(err)
 				}
@@ -3547,12 +3547,13 @@ func TestRestartWithTargetMovesShareAtTheReturnedEpoch(t *testing.T) {
 
 func TestRestartRejectsNonLoopbackTargetBeforeAnyRequest(t *testing.T) {
 	for name, target := range map[string]string{
-		"remote host":  "http://192.0.2.1:4000",
-		"remote query": "https://example.test/?token=private-retarget-token",
-		"https":        "https://127.0.0.1:4000",
-		"path":         "http://127.0.0.1:4000/app",
-		"credentials":  "http://me:secret@127.0.0.1:4000",
-		"empty":        "",
+		"remote host":            "http://192.0.2.1:4000",
+		"remote query":           "https://example.test/?token=private-retarget-token",
+		"malformed remote query": "https://example.test/?token=private-retarget-token\n",
+		"https":                  "https://127.0.0.1:4000",
+		"path":                   "http://127.0.0.1:4000/app",
+		"credentials":            "http://me:secret@127.0.0.1:4000",
+		"empty":                  "",
 	} {
 		t.Run(name, func(t *testing.T) {
 			srv := apitest.NewServer(t)

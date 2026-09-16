@@ -187,7 +187,7 @@ func isPotentialNonConnectorSharingError(err error) bool {
 		apiErr.Code == "invalid_input"
 }
 
-// changeShareState drives start and restart. A non-nil target is a restart
+// changeShareState drives start, stop, and restart. A non-nil target is a restart
 // that moves the share: the destination is preflighted instead of the stored
 // origin, which may already be gone, and it is stored with the epoch the
 // platform fenced the restart with.
