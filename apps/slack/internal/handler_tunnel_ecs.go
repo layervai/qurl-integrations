@@ -121,7 +121,7 @@ func renderECSSidecarContainerJSON(args *tunnelInstallArgs, image string) (strin
 		Name:                   connectorContainerName,
 		Image:                  image,
 		EntryPoint:             []string{"/usr/local/bin/qurl"},
-		Command:                []string{"daemon", "run", "--state-dir", "/var/lib/qurl-volume/state", "--headless-config", "/etc/qurl/share.yaml", "--enrollment-token-file", "/run/secrets/qurl/enrollment-token"},
+		Command:                append([]string{"daemon", "run", "--state-dir", "/var/lib/qurl-volume/state", "--headless-config", "/etc/qurl/share.yaml", "--enrollment-token-file", "/run/secrets/qurl/enrollment-token"}, args.Hub.flags()...),
 		User:                   ecsConnectorUser,
 		Essential:              false,
 		ReadonlyRootFilesystem: true,
