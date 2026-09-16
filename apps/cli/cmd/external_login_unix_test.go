@@ -19,6 +19,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/layervai/qurl-integrations/apps/cli/internal/apitest"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/auth"
 	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 )
 
@@ -205,7 +206,6 @@ func TestExternalLoginRejectsNonOwnerScopedState(t *testing.T) {
 			s.EnrollmentCredentialKind = string(qurl.RegistrationKeyKindConnectorBootstrap)
 		},
 		"agent":                func(s *qurl.AgentState) { s.EnrollmentCredentialKind = string(qurl.RegistrationKeyKindAgent) },
-		"account":              func(s *qurl.AgentState) { s.EnrollmentCredentialKind = string(qurl.RegistrationKeyKindAccount) },
 		"unknown kind":         func(s *qurl.AgentState) { s.EnrollmentCredentialKind = "" },
 		"no device credential": func(s *qurl.AgentState) { s.DeviceAPIKey = "" },
 		"unregistered":         func(s *qurl.AgentState) { s.RegisteredAt = nil },
@@ -449,5 +449,39 @@ func TestExternalLoginUnusableTokenFileExitsAuth(t *testing.T) {
 	}
 	if strings.Contains(res.stderr.String(), testExternalEnrollmentToken) {
 		t.Fatal("rejected token file echoed the token")
+	}
+}
+
+// TestExternalLoginAcceptsBothOwnerScopedKinds pins that this gate agrees
+// with validateSandboxDeviceIdentity on what "owner-scoped" means. Both
+// account and bootstrap are owner-scoped; only the connector-scoped kinds are
+// refused by native session operations. Narrowing this to bootstrap alone
+// would tell a supervisor to move aside a state directory whose device is
+// perfectly usable, which the operator cannot undo.
+func TestExternalLoginAcceptsBothOwnerScopedKinds(t *testing.T) {
+	for _, kind := range []qurl.RegistrationKeyKind{
+		qurl.RegistrationKeyKindAccount,
+		qurl.RegistrationKeyKindBootstrap,
+	} {
+		t.Run(string(kind), func(t *testing.T) {
+			state := bootstrapRegisteredState(t)
+			state.EnrollmentCredentialKind = string(kind)
+			if err := requireExternalOwnerScopedAgentState(context.Background(), &staticAgentStateStore{state: state}); err != nil {
+				t.Fatalf("owner-scoped kind %q rejected: %v", kind, err)
+			}
+		})
+	}
+	for _, kind := range []qurl.RegistrationKeyKind{
+		qurl.RegistrationKeyKindConnectorBootstrap,
+		qurl.RegistrationKeyKindAgent,
+	} {
+		t.Run(string(kind), func(t *testing.T) {
+			state := bootstrapRegisteredState(t)
+			state.EnrollmentCredentialKind = string(kind)
+			err := requireExternalOwnerScopedAgentState(context.Background(), &staticAgentStateStore{state: state})
+			if !errors.Is(err, auth.ErrDeviceEnrollmentScope) {
+				t.Fatalf("connector-scoped kind %q accepted: %v", kind, err)
+			}
+		})
 	}
 }

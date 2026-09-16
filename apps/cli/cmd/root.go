@@ -872,11 +872,25 @@ func requireExternalOwnerScopedAgentState(ctx context.Context, store qurl.AgentS
 	if persisted == nil || persisted.RegisteredAt == nil || strings.TrimSpace(persisted.DeviceAPIKey) == "" {
 		return fmt.Errorf("%w: device registration is incomplete", auth.ErrDeviceEnrollmentScope)
 	}
-	if kind := qurl.RegistrationKeyKind(strings.TrimSpace(persisted.EnrollmentCredentialKind)); kind != qurl.RegistrationKeyKindBootstrap {
-		return fmt.Errorf("%w: enrolled with credential kind %q, not %q; move the state directory aside and enroll again with a token minted for target agent",
-			auth.ErrDeviceEnrollmentScope, kind, qurl.RegistrationKeyKindBootstrap)
+	// Both account and bootstrap are owner-scoped; only the connector-scoped
+	// kinds are refused by native session operations. This mirrors
+	// validateSandboxDeviceIdentity rather than narrowing past it - rejecting
+	// an account-enrolled device here would tell a supervisor to move aside a
+	// state directory whose device is perfectly usable, and that is not
+	// reversible by the operator.
+	//
+	// TODO(upstream-contract): a token minted for target=agent is recorded by
+	// the platform as RegistrationKeyKindBootstrap, which is why the external
+	// path expects bootstrap in practice. If that mapping changes, external
+	// login starts refusing valid devices with exit 4 and nothing else fails
+	// loudly.
+	switch kind := qurl.RegistrationKeyKind(strings.TrimSpace(persisted.EnrollmentCredentialKind)); kind {
+	case qurl.RegistrationKeyKindAccount, qurl.RegistrationKeyKindBootstrap:
+		return nil
+	default:
+		return fmt.Errorf("%w: enrolled with credential kind %q, want the owner-scoped %q or %q; move the state directory aside and enroll again with a token minted for target agent",
+			auth.ErrDeviceEnrollmentScope, kind, qurl.RegistrationKeyKindAccount, qurl.RegistrationKeyKindBootstrap)
 	}
-	return nil
 }
 
 // openRegisteredDeviceClient builds the narrow REST client around the durable
