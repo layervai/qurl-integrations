@@ -246,7 +246,10 @@ defaults apply. **Config files never hold secrets** — a file carrying an
 
 Also honored: `QURL_DEPLOYMENT` (a sandbox or custom deployment settings file;
 production settings are included in releases; environment-only, with no profile override), `NO_COLOR` (disables color while `--color` is `auto`), and
-`QURL_BROWSER` / `BROWSER` (which browser `qurl get` opens).
+`QURL_BROWSER` / `BROWSER` (which browser `qurl get` opens). Pointing the
+CLI at a plain-`http` endpoint on a non-local address warns that the key
+would travel unencrypted; loopback endpoints are exempt.
+
 `LAYERV_KEY_PROVIDER` seals the local agent state under a key provider
 instead of the plaintext default (`file`); with `local-key`, the 32-byte
 wrapping key arrives on the inherited descriptor named by
@@ -258,9 +261,7 @@ inherit a key descriptor, so a command that would install one refuses a
 sealed namespace outright (exit code 3). A state directory holds exactly one
 envelope, so qurl refuses to open a sealed directory without these variables,
 or a plaintext one with them (also exit code 3); use a different state
-directory rather than switching in place. Pointing the
-CLI at a plain-`http` endpoint on a non-local address warns that the key
-would travel unencrypted; loopback endpoints are exempt.
+directory rather than switching in place.
 
 ## Commands
 

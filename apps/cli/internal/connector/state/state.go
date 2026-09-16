@@ -51,10 +51,15 @@ const (
 var ErrNoDefaultStateDir = errors.New("no default qurl sharing state directory")
 
 // ErrAgentStateEnvelope means the state directory's envelope does not match
-// the selected key provider: a sealed envelope without LAYERV_KEY_PROVIDER,
-// or a provider the connector does not accept. The remedy is the environment
-// or a different state directory, never the command line, so exitcode maps it
-// to Config.
+// the selected key provider: a sealed envelope without LAYERV_KEY_PROVIDER, a
+// plaintext one with it, or a provider the connector does not accept. The
+// remedy is the environment or a different state directory, never the command
+// line, so exitcode maps it to Config.
+//
+// A sealed open also wraps it around failures qurl-go classifies itself, such
+// as a loose directory mode or a continuity break. exitcode's row is last of
+// the connector rows for that reason: the specific cause keeps the code it
+// would have had on the plaintext branch, and this sentinel is the fallback.
 var ErrAgentStateEnvelope = errors.New("agent state envelope")
 
 // ResolveDir resolves the native-agent state directory. Resolution order,
@@ -238,7 +243,9 @@ func (s *Store) Handoff() (qurl.AgentStateStore, error) {
 	// Validate here rather than trusting each owner to do it: the sealed owner
 	// is another repository's type, and a silent upstream change would
 	// otherwise cost the sealed branch a check the plaintext branch keeps. The
-	// sealed store repeats the check, which costs one path-capability stat.
+	// sealed store repeats the check, so a sealed handoff spends its namespace
+	// and SDK continuity validations twice. They are stats on a path already
+	// held open, and a handoff is a lifecycle boundary, not a hot path.
 	if err := s.owner.ValidateContinuity(); err != nil {
 		return nil, err
 	}

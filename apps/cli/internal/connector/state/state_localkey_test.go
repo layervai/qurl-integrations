@@ -56,7 +56,10 @@ func localKeyFD(t *testing.T, key []byte) string {
 	nextLocalKeyFD = fd + 1
 	// The dup'd read end is deliberately not closed on cleanup: the connector
 	// closes it once it has read the key, so a t.Cleanup close would be a
-	// double close on a number the runtime may have handed out again.
+	// double close on a number the runtime may have handed out again. A test
+	// whose Open is refused before the provider is constructed leaks its
+	// descriptor for the life of the test binary, which nextLocalKeyFD's
+	// re-homing makes harmless.
 	return strconv.Itoa(fd)
 }
 
@@ -143,10 +146,11 @@ func TestOpenLocalKeyRefusesPlaintextEnvelope(t *testing.T) {
 		_ = store.Close()
 		t.Fatal("Open() accepted local-key over an existing plaintext envelope")
 	}
-	// TODO(upstream-contract): this asserts on qurl-connector's own message
-	// from validateSDKStoreLayoutInNamespace ("provider changes are not an
-	// in-place migration"). It is a cross-repo error string, not a constant, so
-	// a reword upstream fails here.
+	// TODO(upstream-contract): this asserts on qurl-connector's own refusal
+	// from validateSDKStoreLayoutInNamespace. The assertion is deliberately
+	// loose - it checks only that the message names the variable and the
+	// envelope, not its wording - so an upstream reword that keeps naming both
+	// stays green.
 	if !strings.Contains(err.Error(), connectoragentstate.EnvKeyProvider) || !strings.Contains(err.Error(), AgentStateFile) {
 		t.Fatalf("Open() error = %v, want the connector's envelope-conflict refusal naming %s and %s", err, connectoragentstate.EnvKeyProvider, AgentStateFile)
 	}
@@ -183,6 +187,10 @@ func TestOpenWithLocalKeyReopensWithinOneProcess(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first open: %v", err)
 	}
+	// Closed explicitly below to prove a reopen works after every store is
+	// gone; the cleanups keep an intermediate t.Fatal from leaking a pinned
+	// namespace capability, and a second Close is a no-op.
+	t.Cleanup(func() { _ = first.Close() })
 	saveTestAgentState(t, first)
 
 	loadThrough := func(store *Store) error {
@@ -203,6 +211,7 @@ func TestOpenWithLocalKeyReopensWithinOneProcess(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second open beside the first: %v", err)
 	}
+	t.Cleanup(func() { _ = second.Close() })
 	if err := loadThrough(second); err != nil {
 		t.Fatalf("second store: %v", err)
 	}
@@ -287,7 +296,7 @@ func TestOpenLocalKeyOverAPopulatedNamespace(t *testing.T) {
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{LocalSharesFile, ConnectorResourcesFile, RuntimeModeFile} {
+	for _, name := range []string{LocalSharesFile, ConnectorResourcesFile, RuntimeModeFile, connectorResourcesLock} {
 		if err := replaceConnectorResources(dir, filepath.Join(dir, name), []byte("{}")); err != nil {
 			t.Fatal(err)
 		}
