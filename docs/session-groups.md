@@ -121,10 +121,10 @@ limits, route re-registration, and session rotation/drain semantics. -->
 An external supervisor (see the CLI README's
 [External supervision](../apps/cli/README.md#external-supervision)) can attach
 request headers to routes at runtime with `PUT /overlay` on the daemon's
-control socket: a JSON object keyed by Connector ID, each entry the headers
-the daemon adds to every request it forwards to that share's local origin —
-for example a process-random token the origin requires before it serves
-anything. The overlay lives in process memory only. It is never written to
+control socket: a JSON object keyed by Connector ID. The daemon sends each
+entry over verified TLS to the tunnel server, which adds those headers to
+requests for that share's local origin. The tunnel operator must be trusted
+with these credentials, and the origin must reject missing or invalid ones. The overlay lives in process memory only. It is never written to
 the registry or any other file, never part of `/status`, `qurl inspect`, or a
 log line, and a restarted daemon starts without one, so the supervisor pushes
 it before it releases the daemon's deferred first reconcile. Each `PUT`
@@ -133,7 +133,9 @@ desired route set to the live session; the session compares each route's
 definition, headers included, and re-registers only the routes that changed,
 under a fresh proxy name, with no new knock and no effect on their siblings —
 the same per-route isolation `restart` has. In `per-share` mode each group
-receives only its own overlay entry. An overlay has at most 2,000 routes.
+receives only its own overlay entry. Stopping a share retains its entry;
+replace or clear it before reusing the Connector ID with different credentials.
+An overlay has at most 2,000 routes and a 64 KiB request-body limit.
 A route carries at most 16 headers and 1,024 aggregate
 name-and-value bytes. Re-registration may interrupt in-flight requests. During
 session rotation the retiring session retains old headers until replacement

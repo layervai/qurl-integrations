@@ -463,8 +463,10 @@ would exceed the platform limit are all rejected — and the daemon and every
 `qurl` command resolve exactly `<dir>/daemon.sock`, which is what a host whose
 state path is long, an app container for example, needs.
 
-Name a directory qURL owns. Startup does not merely check the mode, it
-*changes* it: the directory is set to owner-only `0700`. Use a separate
+Name a directory qURL owns. Startup creates missing directories with mode
+`0700`. An existing directory must be owned by the caller, must not be a
+symlink, and must already have mode `0700`; startup rejects it otherwise
+without changing its permissions. Use a separate
 dedicated directory for each state namespace; the socket address is the
 directory alone, so two namespaces sharing one runtime directory resolve to
 the same socket and lifecycle commands for one will address the other's
@@ -511,9 +513,10 @@ limits, route re-registration, and session rotation/drain semantics. -->
 `PUT /overlay` attaches request headers to routes at runtime. The body is
 `{"route_request_headers": {"<connector_id>": {"Header-Name": "value"}}}`,
 keyed by each share's Connector ID — a supervisor should publish with an
-explicit `--id` so it knows this key. The daemon adds those headers to every
-request it forwards to that share's local origin, for example a process-random
-token the origin requires before it serves anything. Each request replaces
+explicit `--id` so it knows this key. The daemon sends the headers over verified TLS to the tunnel server, which
+adds them to requests for that share's local origin. The tunnel operator must
+therefore be trusted with these credentials. The origin must reject missing
+or invalid credentials. Each request replaces
 the whole overlay: a route the body does not name loses its headers, and `{"route_request_headers": {}}` clears
 it. A valid body is answered with 204. A body over 64 KiB, with unknown
 fields, with more than 2,000 routes, with more than 16 headers or 1,024
@@ -529,7 +532,9 @@ shell arguments or history.
 The overlay lives in process memory only: it is never written to disk, never
 reported by `/status` or `qurl inspect`, never logged, and a restarted daemon
 starts with an empty one — which is why step 2 pushes it before the first
-reconcile. Changing a route's headers re-registers only that route on the
+reconcile. Stopping a share retains its headers until the next overlay
+replacement. Republishing the same Connector ID reuses them; replace or clear
+the entry before reusing that ID with different credentials. Changing a route's headers re-registers only that route on the
 live session; its siblings are untouched. Re-registration may interrupt
 in-flight requests. During session rotation the retiring session can retain
 old headers until replacement promotion and drain, so an update is not
