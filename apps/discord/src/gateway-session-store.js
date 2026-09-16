@@ -97,6 +97,7 @@ function createGatewaySessionStore({
   // throttle anchor. `pendingFlush` is the deferred-write timer
   // handle, cleared by every immediate-write path AND by stop().
   let mirror = null;
+  let geometryMismatchLogged = false;
   let lastWrittenSessionId = null;
   let lastWriteAt = 0;
   let pendingFlush = null;
@@ -252,10 +253,14 @@ function createGatewaySessionStore({
       // session must not be served back to @discordjs/ws, claim a write
       // that never happened, or poison flushFinal's last-known-good row.
       if (info.shardId !== configuredShard.shardId || info.shardCount !== configuredShard.shardCount) {
-        logger.warn('gateway-session-store: ignoring session with mismatched shard geometry', {
-          shardId: info.shardId,
-          shardCount: info.shardCount,
-        });
+        // Updates arrive on every dispatch; report persistent drift only once.
+        if (!geometryMismatchLogged) {
+          geometryMismatchLogged = true;
+          logger.warn('gateway-session-store: ignoring session with mismatched shard geometry', {
+            shardId: info.shardId,
+            shardCount: info.shardCount,
+          });
+        }
         return;
       }
 

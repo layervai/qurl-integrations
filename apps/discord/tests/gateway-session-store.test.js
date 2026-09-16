@@ -220,6 +220,8 @@ describe('persisted session geometry', () => {
   ])('does not write, mirror, or advance the cursor for unsupported geometry %p', async (geometry) => {
     const { store, ddbMock, logger } = makeStore();
     store.updateSessionInfo('0:1', { ...sessionInfo(), ...geometry });
+    store.updateSessionInfo('0:1', { ...sessionInfo(), ...geometry });
+    expect(logger.warn).toHaveBeenCalledTimes(1);
     await new Promise(resolve => setImmediate(resolve));
     expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
     expect(logger.warn).toHaveBeenCalledWith(
