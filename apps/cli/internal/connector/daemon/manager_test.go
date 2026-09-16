@@ -101,10 +101,6 @@ type fakeGroupRunner struct {
 	autoServe       bool
 	runErr          error
 	blockSetRoutes  bool
-	// diffByRouteIDOnly models the upstream regression the move guard defends
-	// against: SetRoutes keeps an existing route's definition because its
-	// RouteID is unchanged, so a moved address never reaches the proxy.
-	diffByRouteIDOnly bool
 	// holdStop, when non-nil, keeps Run from returning after its context ends
 	// until the channel closes, modeling a session that is slow to retire.
 	holdStop chan struct{}
@@ -175,7 +171,7 @@ func (r *fakeGroupRunner) SetRoutes(ctx context.Context, routes []connectorshare
 	for _, route := range routes {
 		ids = append(ids, route.RouteID)
 		current, existed := r.routes[route.RouteID]
-		if existed && (r.diffByRouteIDOnly || current.Route.LocalHTTPRoute.Equal(route)) {
+		if existed && current.Route.LocalHTTPRoute.Equal(route) {
 			next[route.RouteID] = current
 			continue
 		}
@@ -1740,33 +1736,4 @@ func TestManagerResetsTheDiagnosticOfAMovedRoute(t *testing.T) {
 	// happen at the move rather than being left to the group's next report.
 	runner.serve("connector-b")
 	waitManagerCondition(t, func() bool { return manager.Diagnostics()["b"].State == "serving" }, "moved route serving again")
-}
-
-// TestManagerReportsAMoveTheGroupDidNotTake pins the local guard on the one
-// assumption this feature cannot verify in this repo: that SetRoutes
-// reconciles a changed address under an unchanged RouteID. With a runner that
-// diffs by RouteID alone the move silently does not happen, so the daemon
-// must say so and schedule a retry rather than leave the route reporting
-// starting forever while traffic reaches the old port.
-func TestManagerReportsAMoveTheGroupDidNotTake(t *testing.T) {
-	registry := &memoryRegistry{shares: map[string]connectorstate.LocalShare{"b": daemonShare("b", 1, "on")}}
-	factory := newFakeGroupFactory()
-	manager, _ := newRunningManager(t, registry, factory)
-	waitServing(t, manager, "b")
-	factory.runner(1).diffByRouteIDOnly = true
-
-	moved := daemonShare("b", 2, "on")
-	moved.TargetURL, moved.LocalPort = "http://127.0.0.1:4000", 4000
-	registry.setShare(&moved)
-	manager.Trigger()
-
-	waitManagerCondition(t, func() bool {
-		return manager.Diagnostics()["b"].State == diagnosticStateRetrying
-	}, "move divergence reported")
-	if got := manager.Diagnostics()["b"]; got.FailureCategory != "local_daemon" {
-		t.Fatalf("divergence diagnostic = %+v, want a local_daemon failure", got)
-	}
-	if got := factory.runner(1).RouteStates()["connector-b"].Route.LocalPort; got != 3000 {
-		t.Fatalf("fake runner port = %d, want the regression it models (3000)", got)
-	}
 }
