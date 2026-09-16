@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"math/big"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -239,7 +240,7 @@ here and to every qurl command it runs against the same state directory; those
 commands then reload this daemon and never install a background job.`,
 		Args: noArgs,
 	}
-	var stateDir, jobVersion, headlessConfig, enrollmentTokenFile string
+	var stateDir, runtimeDir, jobVersion, headlessConfig, enrollmentTokenFile string
 	var hubHost, hubServerPublicKeyB64 string
 	var hubPort int
 	run := &cobra.Command{
@@ -272,12 +273,13 @@ commands then reload this daemon and never install a background job.`,
 			// runtime-only state; a foreground publish owns its share and
 			// reconciles at once.
 			deferFirstReconcile := opts.resolvedSupervision == connectorstate.RuntimeSupervisionExternal
-			return runShareDaemonWithDeployment(cmd.Context(), opts, stateDir, jobVersion, headlessConfig, enrollmentTokenFile, hubOverride, deferFirstReconcile)
+			return runShareDaemonWithDeployment(cmd.Context(), opts, stateDir, runtimeDir, jobVersion, headlessConfig, enrollmentTokenFile, hubOverride, deferFirstReconcile)
 		},
 	}
 	run.Flags().StringVar(&opts.tunnelCAFile, "tunnel-ca-file", "", "absolute path to trusted tunnel CA certificates (PEM), required for runtime origin headers")
 	run.Flags().StringVar(&opts.tunnelServerName, "tunnel-server-name", "", "expected tunnel certificate name (default: admitted host)")
 	run.Flags().StringVar(&stateDir, "state-dir", "", "qURL share daemon state directory")
+	run.Flags().StringVar(&runtimeDir, "runtime-dir", "", "dedicated per-namespace directory for the qURL share daemon control socket (enforced mode 0700)")
 	run.Flags().StringVar(&jobVersion, "job-version", "", "qURL share daemon job definition version")
 	run.Flags().StringVar(&headlessConfig, "headless-config", "", "read-only version 2 YAML for one headless share")
 	run.Flags().StringVar(&enrollmentTokenFile, "enrollment-token-file", "", "one-time enrollment credential file for first headless bootstrap")
@@ -293,7 +295,7 @@ commands then reload this daemon and never install a background job.`,
 	run.Flags().StringVar(&hubHost, "hub-host", "", "pinned share-daemon Hub host")
 	run.Flags().IntVar(&hubPort, "hub-port", 0, "pinned share-daemon Hub port")
 	run.Flags().StringVar(&hubServerPublicKeyB64, "hub-server-public-key-b64", "", "pinned share-daemon Hub server public key")
-	for _, name := range []string{"hub-host", "hub-port", "hub-server-public-key-b64", "job-version", "job-stdout-log", "job-stderr-log"} {
+	for _, name := range []string{"hub-host", "hub-port", "hub-server-public-key-b64", "job-version", "job-stdout-log", "job-stderr-log", "runtime-dir"} {
 		_ = run.Flags().MarkHidden(name)
 	}
 	validateTestCRID := &cobra.Command{
@@ -342,15 +344,77 @@ func runShareDaemon(ctx context.Context, opts *globalOpts, stateDirOverride, job
 }
 
 func runShareDaemonWithBootstrap(ctx context.Context, opts *globalOpts, stateDirOverride, jobVersion, headlessConfigPath, enrollmentTokenPath string) (retErr error) {
-	return runShareDaemonWithDeployment(ctx, opts, stateDirOverride, jobVersion, headlessConfigPath, enrollmentTokenPath, nil, false)
+	return runShareDaemonWithDeployment(ctx, opts, stateDirOverride, "", jobVersion, headlessConfigPath, enrollmentTokenPath, nil, false)
 }
 
-func runShareDaemonWithDeployment(ctx context.Context, opts *globalOpts, stateDirOverride, jobVersion, headlessConfigPath, enrollmentTokenPath string, hubOverride *qurl.HubBootstrap, deferFirstReconcile bool) (retErr error) {
+// runtimeDirLookup lets an explicit --runtime-dir stand in for
+// QURL_CONNECTOR_RUNTIME_DIR. The native job passes the directory the
+// installing CLI resolved, so a daemon under launchd or systemd, whose
+// environment is not the user's shell, listens exactly where that CLI and
+// every later CLI invocation look.
+// Errors from the resolved directory name RuntimeDirEnv, which is the setting
+// a supervisor configures; --runtime-dir is hidden and machine-supplied, and
+// resolveDaemonPaths prefixes the flag for anyone who passed it by hand.
+func runtimeDirLookup(runtimeDir string, lookupEnv func(string) (string, bool)) func(string) (string, bool) {
+	if strings.TrimSpace(runtimeDir) == "" {
+		return lookupEnv
+	}
+	return func(key string) (string, bool) {
+		if key == connectordaemon.RuntimeDirEnv {
+			return runtimeDir, true
+		}
+		if lookupEnv == nil {
+			return "", false
+		}
+		return lookupEnv(key)
+	}
+}
+
+// resolveDaemonPaths resolves the state directory and the control socket
+// before any durable write, so a bad runtime directory fails a start without
+// binding an owner or a share.
+func resolveDaemonPaths(ctx context.Context, opts *globalOpts, stateDirOverride, runtimeDirOverride string) (stateDir, socketPath string, err error) {
+	stateDir, err = opts.resolveShareStateDir(stateDirOverride)
+	if err != nil {
+		return "", "", err
+	}
+	// Resolve the socket before the supervision policy can write anything
+	// durable: a runtime directory the daemon cannot use leaves a fresh
+	// namespace untouched.
+	socketPath, err = connectordaemon.SocketPathForStateDir(stateDir, runtimeDirLookup(runtimeDirOverride, opts.lookupEnv))
+	if err != nil {
+		// Only restate the flag for errors about the runtime directory: a state
+		// directory rejection is about --state-dir and must not be relabelled.
+		if strings.TrimSpace(runtimeDirOverride) != "" && strings.Contains(err.Error(), connectordaemon.RuntimeDirEnv) {
+			return "", "", fmt.Errorf("--runtime-dir: %w", err)
+		}
+		return "", "", err
+	}
+	// A pinned runtime directory is user-supplied, so its semantic failures (a
+	// symlink, another user's directory, a regular file, an unwritable parent)
+	// must also be refused before the policy marker. Skip it when the socket
+	// lives in the state directory: securing that is the supervision step's
+	// job, and doing it here would create the namespace a refused start must
+	// leave absent. A start the policy then refuses can leave an empty 0700
+	// runtime directory behind; that is a control-socket location, not durable
+	// state, and the next start reuses it.
+	if dir := filepath.Dir(socketPath); dir != stateDir {
+		if err := connectordaemon.EnsureIPCDir(dir); err != nil {
+			return "", "", err
+		}
+	}
+	if err := applyRuntimeSupervision(ctx, opts, stateDir); err != nil {
+		return "", "", err
+	}
+	return stateDir, socketPath, nil
+}
+
+func runShareDaemonWithDeployment(ctx context.Context, opts *globalOpts, stateDirOverride, runtimeDirOverride, jobVersion, headlessConfigPath, enrollmentTokenPath string, hubOverride *qurl.HubBootstrap, deferFirstReconcile bool) (retErr error) {
 	common, err := connectordaemon.ConfiguredFRPCommon(10, 60, opts.tunnelCAFile, opts.tunnelServerName)
 	if err != nil {
 		return err
 	}
-	stateDir, err := supervisedShareStateDir(ctx, opts, stateDirOverride)
+	stateDir, socketPath, err := resolveDaemonPaths(ctx, opts, stateDirOverride, runtimeDirOverride)
 	if err != nil {
 		return err
 	}
@@ -442,32 +506,21 @@ func runShareDaemonWithDeployment(ctx context.Context, opts *globalOpts, stateDi
 	opts.redirectFRPLogs()
 	server := &connectordaemon.IPCServer{
 		RequestHeadersEnabled: common.Transport.TLS.TrustedCaFile != "",
-		SocketPath:            connectordaemon.StateSocketPath(stateDir),
+		SocketPath:            socketPath,
 		Manager:               manager, JobVersion: jobVersion,
 	}
 	return server.Run(ctx)
 }
 
-// supervisedShareStateDir resolves the daemon's state directory and commits
-// or verifies its supervision policy: an external start marks the namespace
-// (idempotently, refusing a natively managed one) and a native start requires
-// an unmarked one, so no daemon serves a namespace under the wrong lifecycle
-// contract.
-func supervisedShareStateDir(ctx context.Context, opts *globalOpts, override string) (string, error) {
-	stateDir, err := opts.resolveShareStateDir(override)
-	if err != nil {
-		return "", err
-	}
+// applyRuntimeSupervision commits or verifies the resolved state directory's
+// supervision policy: an external start marks the namespace (idempotently,
+// refusing a natively managed one) and a native start requires an unmarked
+// one, so no daemon serves a namespace under the wrong lifecycle contract.
+func applyRuntimeSupervision(ctx context.Context, opts *globalOpts, stateDir string) error {
 	if opts.resolvedSupervision == connectorstate.RuntimeSupervisionExternal {
-		if err := connectorstate.EstablishExternalRuntimeMode(ctx, stateDir); err != nil {
-			return "", err
-		}
-		return stateDir, nil
+		return connectorstate.EstablishExternalRuntimeMode(ctx, stateDir)
 	}
-	if err := connectorstate.RequireRuntimeSupervision(stateDir, opts.resolvedSupervision); err != nil {
-		return "", err
-	}
-	return stateDir, nil
+	return connectorstate.RequireRuntimeSupervision(stateDir, opts.resolvedSupervision)
 }
 
 func configuredHeadlessShare(headless *connectorstate.HeadlessConfig) *connectorstate.LocalShare {

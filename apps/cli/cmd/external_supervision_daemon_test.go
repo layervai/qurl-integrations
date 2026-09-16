@@ -37,7 +37,7 @@ func runDaemonUntilReady(t *testing.T, stateDir string, args ...string) (*runRes
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	client := connectordaemon.IPCClient{SocketPath: connectordaemon.StateSocketPath(stateDir)}
+	client := connectordaemon.IPCClient{SocketPath: stateSocketPath(t, stateDir)}
 	statuses := make(chan connectordaemon.IPCStatus, 1)
 	go func() {
 		defer cancel()
@@ -99,8 +99,8 @@ func TestDaemonRunExternalEstablishesMarker(t *testing.T) {
 	if second.code != 130 {
 		t.Fatalf("supervised daemon stop = exit %d stderr %s, want the cancellation exit", second.code, second.stderr.String())
 	}
-	if status.JobVersion != "4/test" || status.Pid != os.Getpid() {
-		t.Fatalf("external daemon status = %+v, want job version 4/test and pid %d", status, os.Getpid())
+	if status.JobVersion != "5/test" || status.Pid != os.Getpid() {
+		t.Fatalf("external daemon status = %+v, want job version 5/test and pid %d", status, os.Getpid())
 	}
 	after, err := os.Stat(markerPath)
 	if err != nil || !os.SameFile(before, after) {
@@ -253,5 +253,27 @@ func TestDaemonRunExternalStopDuringDeferredFirstReconcileTouchesNothing(t *test
 	stored, err := registry.Get(context.Background(), local.ResourceID)
 	if err != nil || stored.DesiredState != "on" || stored.ServingEpoch != local.ServingEpoch {
 		t.Fatalf("local share after the deferred stop = %+v err=%v, want it still desired-on at epoch %d", stored, err, local.ServingEpoch)
+	}
+}
+
+// TestDaemonRunExternalResolvesTheSocketBeforeAnyDurableWrite pins the order
+// of the daemon's start-up: a runtime directory it cannot use is refused
+// before the external policy marker is committed, so a misconfigured
+// supervisor leaves a fresh namespace fresh.
+func TestDaemonRunExternalResolvesTheSocketBeforeAnyDurableWrite(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), "external")
+	res := runCLI(t, &runOpts{
+		args:          append([]string{"daemon", "run", "--supervision", "external", "--state-dir", stateDir}, daemonRunHubArgs...),
+		env:           map[string]string{connectordaemon.RuntimeDirEnv: "relative/runtime"},
+		shareStateDir: stateDir,
+	})
+	if res.code != 1 || !strings.Contains(res.stderr.String(), connectordaemon.RuntimeDirEnv+" must be an absolute path") {
+		t.Fatalf("daemon run with a relative runtime dir = exit %d stderr %q, want the runtime-dir rejection", res.code, res.stderr.String())
+	}
+	if _, err := os.Lstat(filepath.Join(stateDir, connectorstate.RuntimeModeFile)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a refused start committed the policy marker: %v", err)
+	}
+	if _, err := os.Lstat(stateDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a refused start created the state directory: %v", err)
 	}
 }

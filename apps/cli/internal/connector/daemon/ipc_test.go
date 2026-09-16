@@ -35,7 +35,10 @@ func TestIPCServerReadinessReloadAndShutdown(t *testing.T) {
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	// Exercise the derived runtime path, not only its string contract: this
 	// state namespace is intentionally too long for sockaddr_un.
-	path := StateSocketPath(filepath.Join(dir, strings.Repeat("state-segment-", 8)))
+	path, err := SocketPathForStateDir(filepath.Join(dir, strings.Repeat("state-segment-", 8)), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
@@ -80,50 +83,26 @@ func TestIPCServerReadinessReloadAndShutdown(t *testing.T) {
 	}
 }
 
-func TestStateSocketPathBoundsLongUnixStateDirectories(t *testing.T) {
-	shortState := filepath.Join(unixIPCRuntimeRoot, "qurl-short-state")
-	if got, want := StateSocketPath(shortState), filepath.Join(shortState, SocketFile); got != want {
-		t.Fatalf("short state socket = %q, want %q", got, want)
-	}
-
-	longState := filepath.Join(unixIPCRuntimeRoot, strings.Repeat("long-state-segment-", 8))
-	first := StateSocketPath(longState)
-	if first != StateSocketPath(longState) {
-		t.Fatal("long state socket path is not deterministic")
-	}
-	if !filepath.IsAbs(first) || len(first) > maxUnixSocketPathBytes || filepath.Base(first) == SocketFile {
-		t.Fatalf("long state socket = %q, want bounded absolute derived path", first)
-	}
-	if first == StateSocketPath(longState+"-other") {
-		t.Fatal("different long state namespaces share one socket path")
-	}
-
-	longRelative := strings.Repeat("relative-state-", 8)
-	if got := StateSocketPath(longRelative); filepath.IsAbs(got) {
-		t.Fatalf("invalid relative state path became valid IPC path %q", got)
-	}
-}
-
-func TestIPCServerSecuresPermissiveSocketDirectory(t *testing.T) {
+func TestIPCServerRejectsPermissiveSocketDirectoryWithoutChangingIt(t *testing.T) {
 	dir := filepath.Join(shortTempDir(t), "state")
-	if err := os.Mkdir(dir, 0o755); err != nil { // #nosec G301 -- test verifies permissive directories are tightened.
+	if err := os.Mkdir(dir, 0o755); err != nil { // #nosec G301 -- test verifies permissive directories are unchanged.
 		t.Fatal(err)
 	}
-	if err := os.Chmod(dir, 0o755); err != nil { // #nosec G302 -- test verifies permissive directories are tightened.
+	if err := os.Chmod(dir, 0o755); err != nil { // #nosec G302 -- test verifies permissive directories are unchanged.
 		t.Fatal(err)
 	}
 	manager := emptyManager(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if err := (&IPCServer{SocketPath: filepath.Join(dir, SocketFile), Manager: manager}).Run(ctx); !errors.Is(err, context.Canceled) {
-		t.Fatalf("Run() = %v, want canceled after setup", err)
+	if err := (&IPCServer{SocketPath: filepath.Join(dir, SocketFile), Manager: manager}).Run(ctx); err == nil || !strings.Contains(err.Error(), "must have mode 0700") {
+		t.Fatalf("Run() = %v, want insecure directory rejection", err)
 	}
 	info, err := os.Lstat(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm() != 0o700 {
-		t.Fatalf("socket directory mode = %#o, want 0700", info.Mode().Perm())
+	if info.Mode().Perm() != 0o755 {
+		t.Fatalf("socket directory mode = %#o, want unchanged 0755", info.Mode().Perm())
 	}
 }
 
@@ -153,7 +132,7 @@ func TestIPCClientRefusesInsecureSocketDirectoryWithoutChangingIt(t *testing.T) 
 		t.Fatal(err)
 	}
 	err := (IPCClient{SocketPath: filepath.Join(dir, SocketFile)}).WaitReady(context.Background())
-	if err == nil || !strings.Contains(err.Error(), "owner-owned non-symlink directory with mode 0700") {
+	if err == nil || !strings.Contains(err.Error(), "must have mode 0700") || !strings.Contains(err.Error(), "chmod 700") {
 		t.Fatalf("client accepted insecure socket directory: %v", err)
 	}
 	info, statErr := os.Lstat(dir)
@@ -176,7 +155,8 @@ func TestIPCClientRefusesSymlinkSocketDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 	err := (IPCClient{SocketPath: filepath.Join(link, SocketFile)}).WaitReady(context.Background())
-	if err == nil || !strings.Contains(err.Error(), "owner-owned non-symlink directory with mode 0700") {
+	// A symlink must not be told to chmod: the advice would be wrong.
+	if err == nil || !strings.Contains(err.Error(), "not a symlink or a file") || strings.Contains(err.Error(), "chmod") {
 		t.Fatalf("client accepted symlink socket directory: %v", err)
 	}
 }
@@ -699,7 +679,7 @@ func TestIPCReadFailureDoesNotReplaceNativeDaemon(t *testing.T) {
 			go func() { _ = server.Serve(listener) }()
 			t.Cleanup(func() { _ = server.Close(); _ = cleanup() })
 			manager := &recordingJobManager{}
-			controller := NewJobController(dir, dir, "test", "https://api.example.com", GroupModeSingle, connectorstate.RuntimeSupervisionNative, testHubResolver)
+			controller := newTestJobController(t, dir, dir, "test", "https://api.example.com", GroupModeSingle, testHubResolver)
 			controller.Manager = manager
 			err = controller.Ensure(context.Background())
 			if err == nil || errors.Is(err, errIPCStatusIncompatible) || (!oversized && !errors.Is(err, io.ErrUnexpectedEOF)) {
@@ -709,5 +689,16 @@ func TestIPCReadFailureDoesNotReplaceNativeDaemon(t *testing.T) {
 				t.Fatal("failed status read reached native job management")
 			}
 		})
+	}
+}
+
+func TestJobControllerReloadDoesNotCreateRuntimeDirectory(t *testing.T) {
+	runtimeDir := filepath.Join(shortTempDir(t), "missing")
+	controller := &JobController{RuntimeDir: runtimeDir, IPC: IPCClient{SocketPath: filepath.Join(runtimeDir, SocketFile)}}
+	if running, err := controller.ReloadIfRunning(context.Background()); err != nil || running {
+		t.Fatalf("reload running=%v err=%v", running, err)
+	}
+	if _, err := os.Lstat(runtimeDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("runtime directory created by reload: %v", err)
 	}
 }

@@ -17,22 +17,42 @@ import (
 	"time"
 
 	connectorshare "github.com/layervai/qurl-connector/pkg/share"
-
-	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 )
 
-// SocketFile is the fixed logical IPC socket name. Unix uses it directly below
-// short state directories and includes it in the identity of a bounded path
-// for long state directories.
+// SocketFile is the fixed IPC socket name below the runtime directory.
 const SocketFile = "daemon.sock"
 
-// StateSocketPath returns the stable platform IPC address for one state
-// namespace. Unix keeps the socket below short state paths and uses a bounded,
-// owner-only per-user runtime path when the state path cannot fit sockaddr_un.
-// Windows hashes this path into its named-pipe address as before.
-func StateSocketPath(stateDir string) string {
-	path := filepath.Join(strings.TrimSpace(stateDir), SocketFile)
-	return platformStateSocketPath(path)
+// RuntimeDirEnv pins the directory that holds the share daemon's control
+// socket. A host whose state path cannot fit sockaddr_un, such as an App
+// Sandbox container, sets it to a short owner-only directory so every daemon
+// and client resolves exactly <dir>/daemon.sock. This directory must be
+// dedicated to one state namespace. Existing directories must already have
+// mode 0700; startup creates missing directories but never changes the mode
+// of an existing runtime directory.
+const RuntimeDirEnv = "QURL_CONNECTOR_RUNTIME_DIR"
+
+// SocketPathForStateDir returns the platform IPC address for one state
+// namespace. Every daemon and client resolves the socket through this one
+// function so they always agree. lookupEnv supplies RuntimeDirEnv; nil
+// consults no environment. Unix keeps the socket below a short state
+// directory and derives a bounded owner-only per-user directory below
+// /tmp when the state path cannot fit sockaddr_un. Windows hashes the
+// returned path into its named-pipe address and ignores RuntimeDirEnv.
+func SocketPathForStateDir(stateDir string, lookupEnv func(string) (string, bool)) (string, error) {
+	stateDir = filepath.Clean(strings.TrimSpace(stateDir))
+	if !filepath.IsAbs(stateDir) {
+		return "", errors.New("share daemon state directory must be absolute")
+	}
+	runtimeDir := ""
+	if lookupEnv != nil {
+		if raw, ok := lookupEnv(RuntimeDirEnv); ok && strings.TrimSpace(raw) != "" {
+			runtimeDir = filepath.Clean(strings.TrimSpace(raw))
+		}
+	}
+	// The runtime directory is validated by the platform that honors it.
+	// Windows discards it, so a stale value there must not fail every command
+	// about a setting that provably has no effect.
+	return platformSocketPath(stateDir, runtimeDir)
 }
 
 // ErrAlreadyRunning reports a live or ambiguously stale daemon socket.
@@ -67,7 +87,7 @@ func (s *IPCServer) Run(ctx context.Context) (retErr error) {
 	if err != nil {
 		return err
 	}
-	if err := connectorstate.EnsureDirMode(filepath.Dir(path)); err != nil {
+	if err := EnsureIPCDir(filepath.Dir(path)); err != nil {
 		return fmt.Errorf("secure share daemon socket directory: %w", err)
 	}
 	listener, cleanup, err := listenDaemonIPC(ctx, path)

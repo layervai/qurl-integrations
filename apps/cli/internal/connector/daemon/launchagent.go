@@ -28,12 +28,32 @@ var ErrExternalDaemonNotRunning = errors.New("share daemon is externally supervi
 // daemonJobProtocolVersion identifies the persisted service-manager argument
 // contract. Increment it for each incompatible shape; do not reuse an earlier
 // value even when a later shape resembles it.
-const daemonJobProtocolVersion = "4"
+//
+// 5 adds --runtime-dir. 4 (--supervision, #1426) is not reused even though it
+// is unreleased today: whether it stays unreleased depends on when
+// release-please cuts apps/cli, which this branch does not control, and a
+// resident 4-shape daemon on a matching binary version would otherwise be
+// reloaded rather than replaced.
+const daemonJobProtocolVersion = "5"
+
+// TODO(upstream-contract): relocating the socket relies on
+// connectorservice.UserJobManager.Ensure treating a changed argument list as a
+// definition change and booting the old job out. Verified against
+// qurl-connector v0.14.0 (userjob_darwin.go / userjob_linux.go: the rendered
+// definition is compared byte for byte and the loaded job is removed before
+// the replacement is written). If Ensure ever becomes a no-op for an
+// installed-and-running label, an upgrade would leave the old daemon serving
+// the old address while the new CLI reports convergence at the new one.
 
 // JobController installs, upgrades, and signals the per-user daemon job.
 type JobController struct {
-	Manager        connectorservice.UserJobManager
-	IPC            IPCClient
+	Manager connectorservice.UserJobManager
+	IPC     IPCClient
+	// RuntimeDir holds the daemon's control socket. The job passes it
+	// explicitly: a daemon under launchd or systemd does not run in the user's
+	// shell environment, so it must listen exactly where the CLI that installed
+	// it, and every later CLI invocation, resolve the socket.
+	RuntimeDir     string
 	StateDir       string
 	LogDir         string
 	BinaryVersion  string
@@ -54,22 +74,29 @@ type JobController struct {
 }
 
 // NewJobController builds the production native per-user job controller.
-func NewJobController(stateDir, logDir, binaryVersion, endpoint string, mode GroupMode, supervision connectorstate.RuntimeSupervision, resolveHub func() (qurl.HubBootstrap, error)) *JobController {
+// lookupEnv resolves the socket address the controller probes and the job
+// carries; see SocketPathForStateDir.
+func NewJobController(stateDir, logDir, binaryVersion, endpoint string, mode GroupMode, supervision connectorstate.RuntimeSupervision, resolveHub func() (qurl.HubBootstrap, error), lookupEnv func(string) (string, bool)) (*JobController, error) {
+	socket, err := SocketPathForStateDir(stateDir, lookupEnv)
+	if err != nil {
+		return nil, err
+	}
 	controller := &JobController{
-		Manager:  connectorservice.NewUserJobManager(),
-		IPC:      IPCClient{SocketPath: StateSocketPath(stateDir)},
-		StateDir: stateDir, LogDir: logDir, BinaryVersion: strings.TrimSpace(binaryVersion),
+		Manager:    connectorservice.NewUserJobManager(),
+		IPC:        IPCClient{SocketPath: socket},
+		RuntimeDir: filepath.Dir(socket),
+		StateDir:   stateDir, LogDir: logDir, BinaryVersion: strings.TrimSpace(binaryVersion),
 		InvocationPath: os.Args[0], Endpoint: endpoint, ShareGroupMode: mode, Supervision: supervision,
 		ResolveHub: resolveHub, LookPath: exec.LookPath,
 	}
 	controller.ProbeStatus = controller.IPC.Status
 	controller.Reload = controller.IPC.ReloadIfRunning
-	return controller
+	return controller, nil
 }
 
 // Ensure reloads a compatible live daemon or installs the current job definition.
 func (c *JobController) Ensure(ctx context.Context) error {
-	if err := c.validateController(); err != nil {
+	if err := c.prepare(); err != nil {
 		return err
 	}
 	status, running, statusErr := c.ProbeStatus(ctx)
@@ -152,8 +179,32 @@ func unmanagedDaemonMismatch(status IPCStatus, expectedJobVersion string, status
 	)
 }
 
+// prepare validates the controller and secures the daemon's runtime
+// directory. Under native supervision qurl owns that directory, so a pinned
+// one is secured before the first probe: the client's parent-directory check
+// requires 0700, and a directory the operator created with a normal umask
+// would otherwise fail every command before the job install that fixes it.
+// Skipped when the socket lives in the state directory (always so on
+// Windows) - the daemon's own startup secures that one.
+func (c *JobController) prepare() error {
+	if err := c.validateController(); err != nil {
+		return err
+	}
+	return c.secureRuntimeDir()
+}
+
+// secureRuntimeDir prepares a private socket directory before native startup.
+func (c *JobController) secureRuntimeDir() error {
+	if c == nil || c.Supervision != connectorstate.RuntimeSupervisionNative ||
+		c.RuntimeDir == "" || c.RuntimeDir == c.StateDir {
+		return nil
+	}
+	return EnsureIPCDir(c.RuntimeDir)
+}
+
 func (c *JobController) validateController() error {
-	if c == nil || c.Manager == nil || c.LookPath == nil || c.ProbeStatus == nil || c.Reload == nil || c.ResolveHub == nil {
+	if c == nil || c.Manager == nil || c.LookPath == nil || c.ProbeStatus == nil || c.Reload == nil || c.ResolveHub == nil ||
+		c.RuntimeDir == "" {
 		return errors.New("share daemon job controller is incomplete")
 	}
 	// The zero supervision is rejected like the zero GroupMode: a construction
@@ -195,7 +246,7 @@ func (c *JobController) jobDefinition(hub qurl.HubBootstrap, jobVersion string) 
 	arguments := make([]string, 0, 20)
 	arguments = append(arguments,
 		"--endpoint", c.Endpoint,
-		"daemon", "run", "--state-dir", c.StateDir, "--job-version", jobVersion,
+		"daemon", "run", "--state-dir", c.StateDir, "--runtime-dir", c.RuntimeDir, "--job-version", jobVersion,
 		// The mode is always explicit so the daemon runs in the mode this job
 		// version was computed for, whatever its own environment or config file
 		// would resolve to.
