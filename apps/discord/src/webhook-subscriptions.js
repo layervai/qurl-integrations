@@ -241,6 +241,8 @@ async function discoverOwnerId(apiKey, { subject = 'DEFAULT', skipMalformedRows 
     // repeat it, while other guild owners keep their own early warning.
     const budgetKey = `${subject}:${ownerId}`;
     if (page === 25 && !pageBudgetWarned.has(budgetKey)) {
+      // ponytail: coarse bound, forgets all keys at 1000 distinct owners.
+      if (pageBudgetWarned.size >= 1000) pageBudgetWarned.clear();
       pageBudgetWarned.add(budgetKey);
       logger.warn('qURL webhook owner discovery passed half its page budget', {
         event: LOG_EVENTS.QURL_WEBHOOK_OWNER_DISCOVERY_PAGE_BUDGET, subject, pagesFetched: page,
@@ -254,9 +256,9 @@ async function discoverOwnerId(apiKey, { subject = 'DEFAULT', skipMalformedRows 
       apiKey,
     };
     // A page GET is side-effect free: retry it once on a transient failure
-    // (network, timeout, 5xx) rather than failing the whole walk. 4xx stays final.
+    // (network, timeout, 429, 5xx) rather than failing the whole walk. Other 4xx stay final.
     const body = await callQurlService(request).catch(async (err) => {
-      if (typeof err?.status === 'number' && err.status < 500) throw err;
+      if (typeof err?.status === 'number' && err.status < 500 && err.status !== 429) throw err;
       await sleep(PAGE_RETRY_DELAY_MS);
       return callQurlService(request);
     });

@@ -80,6 +80,7 @@ const router = express.Router();
 // Require OAuth2 Code Grant setting determines whether the bot is already
 // installed, so offer both safe recovery paths. Configuration failures use
 // renderNotConfiguredPage instead because no callback retry can repair them.
+// Callers MUST pass literal headline/detail strings, never provider or query text.
 function renderError(res, statusCode, headline, detail) {
   return res.status(statusCode).send(res.renderPage({
     title: 'Discord Install Failed',
