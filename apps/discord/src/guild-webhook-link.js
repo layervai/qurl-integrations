@@ -240,8 +240,9 @@ async function linkGuildWebhookSubscription({ guildId, apiKey, descriptionContex
 // KNOWN QUIRK (tracked in issue #487): SIGTERM mid-link drops the
 // in-flight work; the operator runs /qurl setup again or the
 // backfill script catches it. Polling fallback covers correctness.
+// Returns the settled promise for tests; production callers ignore it.
 function fireAndForgetLinkGuildWebhookSubscription({ guildId, apiKey, via, configuredBy }) {
-  linkGuildWebhookSubscription({
+  return linkGuildWebhookSubscription({
     guildId,
     apiKey,
     // Same normalization as the setup audit, so both record the same door.

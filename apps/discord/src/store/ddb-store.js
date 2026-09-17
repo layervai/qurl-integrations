@@ -1560,7 +1560,8 @@ async function setGuildApiKey(guildId, apiKey, configuredBy, via) {
     // qurl_api_key because it is touched by this update; leave it
     // unread so the audit payload never carries key material. prior
     // configured_at relies on UPDATED_OLD also covering the if_not_exists
-    // no-op on a re-key; mocks cannot pin that, so the sandbox rebind gate does.
+    // no-op on a re-key. TODO(upstream-contract): DynamoDB behavior we do not
+    // control; mocks cannot pin it, so the sandbox rebind gate does.
     ReturnValues: 'UPDATED_OLD',
   }));
   const prior = res?.Attributes ?? {};
@@ -1569,14 +1570,15 @@ async function setGuildApiKey(guildId, apiKey, configuredBy, via) {
   // hand edit or partial rollback dropped the other. Unlike shouldPromptConsent
   // (guild-config-state.js), which treats a row without configured_by as a
   // first install, the alarm biases toward paging; a missing admin reports null.
-  if ((prior.qurl_api_key || oldAdminId !== null) && oldAdminId !== configuredBy) {
+  const newAdminId = configuredBy ?? null;
+  if ((prior.qurl_api_key || oldAdminId !== null) && oldAdminId !== newAdminId) {
     // The write has landed: an audit failure must not surface as a write
     // failure, or qurl-oauth.js would revoke the key it just stored.
     try {
       logger.audit(AUDIT_EVENTS.QURL_SETUP_ADMIN_CHANGED, {
         guild_id: guildId,
         old_admin_id: oldAdminId,
-        new_admin_id: configuredBy ?? null,
+        new_admin_id: newAdminId,
         // Separates a damaged configured row (key, no configured_by) from a
         // healthy rebind when old_admin_id or prior_configured_at is null.
         prior_had_key: Boolean(prior.qurl_api_key),

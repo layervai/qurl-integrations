@@ -270,9 +270,7 @@ describe('fireAndForgetLinkGuildWebhookSubscription — door normalization', () 
     ['OAuth', 'unknown'],
     [undefined, 'unknown'],
   ])('records door %p as via=%s, like the setup audit', async (via, expected) => {
-    fireAndForgetLinkGuildWebhookSubscription({ guildId: 'g_ff', apiKey: 'lv_x', via, configuredBy: 'u-1' });
-    // Let the fire-and-forget chain settle so no late calls leak into the next test.
-    for (let i = 0; i < 10; i += 1) await new Promise(setImmediate);
+    await fireAndForgetLinkGuildWebhookSubscription({ guildId: 'g_ff', apiKey: 'lv_x', via, configuredBy: 'u-1' });
     const call = mockEnsureWebhookSubscription.mock.calls[0][0];
     expect(call.description).toBe(`Discord bot view counter (guild=g_ff, via=${expected}, configuredBy=u-1)`);
   });
