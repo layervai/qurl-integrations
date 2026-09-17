@@ -196,7 +196,7 @@ describe('recordResource', () => {
     const before = fs.existsSync(LEDGER_PATH) ? fs.readFileSync(LEDGER_PATH, 'utf8') : '';
     recordResource(value, 'upload');
     expect(console.error).toHaveBeenCalledWith(
-      expect.stringContaining('carried no usable resource_id'),
+      expect.stringContaining('carried no usable resource_id or crid'),
     );
     const after = fs.existsSync(LEDGER_PATH) ? fs.readFileSync(LEDGER_PATH, 'utf8') : '';
     expect(after).toBe(before);
@@ -407,8 +407,25 @@ describe('reclaim', () => {
     );
   });
 
+  it('releases a connector upload row the SDK cannot address instead of failing it', async () => {
+    const ledger = tempLedger(`${line(PUBLIC_KEY_RESOURCE_ID, { kind: 'upload' })}${line(CRID_RESOURCE_ID, { kind: 'upload' })}`);
+    deleteLink.mockImplementation(async (id) => {
+      if (id === PUBLIC_KEY_RESOURCE_ID) {
+        throw new Error(qurlApiErrorMessage('DELETE', '/resources/:resourceId', ERROR_CODE_CLIENT_VALIDATION));
+      }
+    });
+
+    const result = await reclaim(ledger);
+
+    expect(result).toMatchObject({ revoked: 1, failed: 0 });
+    expect(readLedger(ledger)).toEqual([]);
+    // eslint-disable-next-line no-console -- asserting the script's own progress output
+    expect(console.log).toHaveBeenCalledWith(expect.stringContaining('released 1 connector upload parent(s)'));
+    expect(console.error).not.toHaveBeenCalledWith(expect.stringContaining('re-run with --reclaim'));
+  });
+
   it.each([
-    ['a connector upload public key', PUBLIC_KEY_RESOURCE_ID],
+    ['a non-upload public key', PUBLIC_KEY_RESOURCE_ID],
     ['a retired r_ ID', 'r_legacy42'],
   ])('keeps %s the SDK rejects as a non-CRID for manual verification', async (_kind, id) => {
     const ledger = tempLedger(line(id));

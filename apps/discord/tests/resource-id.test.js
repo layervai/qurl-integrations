@@ -24,6 +24,8 @@ describe('resource ID transport guard', () => {
   it('accepts the real public resource ID shapes', () => {
     expect(hasSafeResourceIdShape(PUBLIC_KEY_RESOURCE_ID)).toBe(true);
     expect(hasSafeResourceIdShape(CRID_RESOURCE_ID)).toBe(true);
+    // The access-token guard matches `at_` only, not public IDs that begin "at".
+    expect(hasSafeResourceIdShape(`at${'a'.repeat(105)}`)).toBe(true);
   });
 
   it.each([

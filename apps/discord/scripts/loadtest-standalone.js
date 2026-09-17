@@ -128,9 +128,9 @@
  *   it was written against and a sweep refuses to run against a different one.
  *   Re-running is safe: revoked ids are pruned, and only an explicit terminal
  *   response counts an already-gone resource as reclaimed. Ambiguous 404s
- *   remain in the ledger for manual verification, as do connector upload
- *   parents: SDK 2.x cannot delete them by the public key the upload returns,
- *   so they must age out on their own.
+ *   remain in the ledger for manual verification. Connector upload parents
+ *   are released instead: SDK 2.x cannot delete them by the public key the
+ *   upload returns, so they and their links age out on their own.
  *
  *   Two windows this cannot close, both leaking exactly the resource in hand:
  *   a create that succeeds server-side whose response is then lost, and a
@@ -968,8 +968,10 @@ async function trackCreate(fn) {
 // run's resources; the ledger is exact.
 //
 // Recipient links from mintLinks are deliberately not recorded individually:
-// they share the upload's expiry. The upload parent itself is recorded by
-// public key and needs manual verification under SDK 2.x (see reclaim).
+// deleting a parent revokes every qURL minted against it
+// (shared/client/client.go documents the cascade). SDK 2.x cannot address an
+// upload parent by the public key the connector returns, so reclaim releases
+// those rows and their links expire on their own.
 function recordResource(resourceId, kind) {
   // Share deleteLink's transport guard so every recorded ID is sweepable and
   // a malformed service response cannot persist a bearer token in the ledger.
@@ -978,7 +980,7 @@ function recordResource(resourceId, kind) {
   // the repo-wide resource-ID fixture convention; making this warning fatal
   // previously stopped ordinary fixture-backed rounds after their first batch.
   if (!hasSafeResourceIdShape(resourceId)) {
-    console.error(`WARNING: ${kind} response carried no usable resource_id — that resource cannot be reclaimed.`);
+    console.error(`WARNING: ${kind} response carried no usable resource_id or crid — that resource cannot be reclaimed.`);
     return;
   }
   try {
@@ -1069,6 +1071,22 @@ function ledgerEndpoints(ledgerPath) {
   return endpoints;
 }
 
+// Ids recorded as connector upload parents. SDK 2.x cannot delete those by the
+// public key the upload returns (layervai/qurl-integrations-infra#1627), so
+// reclaim releases them rather than reporting a failure no re-run can fix.
+function ledgerUploadIds(ledgerPath) {
+  const ids = new Set();
+  try {
+    for (const line of fs.readFileSync(ledgerPath, 'utf8').split('\n')) {
+      try {
+        const { resource_id: id, kind } = JSON.parse(line);
+        if (id && kind === 'upload') ids.add(id);
+      } catch { /* blank or torn line — readLedger already reports it */ }
+    }
+  } catch { /* unreadable ledger — readLedger already returned null */ }
+  return ids;
+}
+
 // Rewrite the ledger with only what is still outstanding, so a re-run sweeps
 // the remainder instead of re-revoking everything. Truncated rather than
 // deleted on a clean sweep: an empty ledger reads as "nothing outstanding",
@@ -1148,6 +1166,7 @@ async function reclaim(ledgerPath) {
   const causes = new Map();
   let revoked = 0;
   let nonCridRows = 0;
+  let releasedUploads = 0;
   let ambiguousNotFound = 0;
   let invalidLedgerIds = 0;
 
@@ -1176,6 +1195,7 @@ async function reclaim(ledgerPath) {
     // heartbeat exists to prevent.
     const seconds = Math.max(1, Math.round(pending.length * 0.05));
     console.log(`Reclaim: revoking ${pending.length} resource(s) from ${ledgerPath} (at least ${seconds}s, likely longer)...`);
+    const uploadIds = ledgerUploadIds(ledgerPath);
     let done = 0;
     // Serial with a short gap. The tenancy is shared and rate-limited per
     // account, and a burst of hundreds of deletes is what trips it.
@@ -1197,15 +1217,17 @@ async function reclaim(ledgerPath) {
         if (isGoneQurlApiError(e)) {
           revoked++;
           outstanding.delete(id);
+        } else if (uploadIds.has(id) && isClientValidationQurlApiError(e)) {
+          // Not addressable by the API: its recipient links expire with it.
+          releasedUploads++;
+          outstanding.delete(id);
         } else {
           outstanding.add(id);
           const status = qurlApiErrorStatus(e);
           // SDK 2.x deletes only by CRID and rejects any other identifier before
-          // a request. Connector upload rows hold a public key (the upload
-          // response has no CRID, and transit uploads are unlisted), and older
-          // ledgers may hold retired r_ IDs; none can drain automatically.
-          // deleteLink sends only the ID, so every client-side rejection is an
-          // identifier rejection and cannot succeed on a re-run.
+          // a request, so older ledgers' retired r_ IDs cannot drain
+          // automatically. deleteLink sends only the ID, so every client-side
+          // rejection is an identifier rejection that no re-run can fix.
           if (!hasSafeResourceIdShape(id)) invalidLedgerIds++;
           else if (isClientValidationQurlApiError(e)) nonCridRows++;
           else if (status === 404) ambiguousNotFound++;
@@ -1244,7 +1266,10 @@ async function reclaim(ledgerPath) {
     console.error(`  ${n}x ${message}`);
   }
   if (nonCridRows > 0) {
-    console.error(`Reclaim: ${nonCridRows} resource ID(s) are not CRIDs (connector uploads or retired r_ IDs) and cannot be revoked through the qURL API; remove them only after confirming their links expired.`);
+    console.error(`Reclaim: ${nonCridRows} resource ID(s) are not CRIDs and cannot be revoked through the qURL API; remove them only after confirming their links expired.`);
+  }
+  if (releasedUploads > 0) {
+    console.log(`Reclaim: released ${releasedUploads} connector upload parent(s) from the ledger; the qURL API cannot revoke them by public key, and their links expire on their own.`);
   }
   if (ambiguousNotFound > 0) {
     console.error(`Reclaim: ${ambiguousNotFound} resource(s) returned 404 and remain in the ledger; verify the owner/key and absence manually before pruning.`);
@@ -2234,9 +2259,9 @@ async function runRound(roundNum) {
         uploadName,
         'application/octet-stream',
       );
-      // Recorded before anything is minted against it, so a reclaim reports
-      // it. SDK 2.x cannot delete it by this public key, so reclaim flags it
-      // for manual verification; its recipient links expire on their own.
+      // Recorded before anything is minted against it. SDK 2.x cannot delete
+      // it by this public key, so reclaim releases the row (see
+      // ledgerUploadIds); its recipient links expire on their own.
       recordResource(parsed.resource_id, 'upload');
       return parsed;
     });
