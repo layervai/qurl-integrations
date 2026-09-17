@@ -284,12 +284,14 @@ function canRetainSecureInstallCookie(baseUrl) {
   try {
     const parsed = new URL(baseUrl);
     if (parsed.protocol === 'https:') return true;
-    // Browsers treat localhost as a trustworthy development origin even over
+    // Browsers treat localhost and loopback literals as trustworthy development
+    // origins even over
     // HTTP. Keep the documented local smoke-test path while rejecting staging
     // and preview HTTP origins that silently discard the __Host- cookie.
     const hostname = parsed.hostname.toLowerCase().replace(/\.$/, '');
     return parsed.protocol === 'http:'
-      && (hostname === 'localhost' || hostname.endsWith('.localhost'));
+      && (hostname === 'localhost' || hostname.endsWith('.localhost')
+        || hostname === '127.0.0.1' || hostname === '[::1]');
   } catch {
     return false;
   }
@@ -477,7 +479,10 @@ module.exports = {
   BASE_URL: normalizedBaseUrl,
 
   // Rate limiting
-  RATE_LIMIT_WINDOW_MS: intEnv('RATE_LIMIT_WINDOW_MS', 60000), // 1 minute
+  // 0 or a negative window would silently disable every OAuth rate limit.
+  RATE_LIMIT_WINDOW_MS: intEnv('RATE_LIMIT_WINDOW_MS', 60000, { // 1 minute
+    minPositive: true, strictInteger: true,
+  }),
   // 0 or a negative value would 429 every OAuth callback.
   RATE_LIMIT_MAX_REQUESTS: intEnv('RATE_LIMIT_MAX_REQUESTS', 30, {
     minPositive: true, strictInteger: true,

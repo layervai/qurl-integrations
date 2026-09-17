@@ -125,6 +125,7 @@ function rateLimitForBucket(bucket, req, res, next) {
         const sinceLastWarningMs = hardCapWarnedAt ? now - hardCapWarnedAt : null;
         hardCapWarnedAt = now;
         logger.warn('Rate limit store at hard cap, rejecting new IP', {
+          sampleIp: ip,
           size: rateLimitStore.size,
           shedByBucketSinceLastWarning: hardCapShedCounts,
           sinceLastWarningMs,
