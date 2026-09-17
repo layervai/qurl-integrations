@@ -645,7 +645,8 @@ const GATEWAY_DISPATCH_TYPES = Object.freeze({
   INTERACTION_CREATE: 'INTERACTION_CREATE',
 });
 
-// Setup door recorded on qurl_setup_admin_changed. An enum so a typo cannot
+// Setup door recorded on qurl_setup_admin_changed; setGuildApiKey maps any other
+// value to UNKNOWN. An enum so a typo cannot
 // silently split a Logs Insights grouping.
 const SETUP_VIA = Object.freeze({
   OAUTH: 'oauth',

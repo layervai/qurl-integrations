@@ -1566,13 +1566,16 @@ async function setGuildApiKey(guildId, apiKey, configuredBy, via = SETUP_VIA.UNK
         guild_id: guildId,
         old_admin_id: oldAdminId,
         new_admin_id: configuredBy,
-        via,
+        // Unknown strings collapse to UNKNOWN so a caller typo cannot split a grouping.
+        via: Object.values(SETUP_VIA).includes(via) ? via : SETUP_VIA.UNKNOWN,
         prior_updated_at: prior.updated_at ?? null,
       });
     } catch (err) {
-      logger.error('Failed to emit setup admin-change audit after a landed write', {
-        error: err?.message, guildId,
-      });
+      try {
+        logger.error('Failed to emit setup admin-change audit after a landed write', {
+          error: err?.message, guildId,
+        });
+      } catch { /* observability must never fail a landed write */ }
     }
   }
 }

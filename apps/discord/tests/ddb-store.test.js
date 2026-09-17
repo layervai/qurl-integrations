@@ -49,6 +49,7 @@ const { AUDIT_EVENTS, SETUP_VIA } = require('../src/constants');
 
 beforeEach(() => {
   logger.audit.mockReset();
+  logger.error.mockReset();
   ddbMock.reset();
   mockEncryptStrict.mockReset();
   mockEncryptStrict.mockImplementation((v) => `enc:v1:IV:TAG:${Buffer.from(v || '').toString('hex')}`);
@@ -106,6 +107,28 @@ describe('guild configs', () => {
     await store.setGuildApiKey('g-1', 'plain-key', 'new-admin');
     expect(logger.audit).toHaveBeenCalledWith(AUDIT_EVENTS.QURL_SETUP_ADMIN_CHANGED,
       expect.objectContaining({ via: 'unknown' }));
+  });
+
+  test('setGuildApiKey: collapses an unrecognized setup door to unknown', async () => {
+    ddbMock.on(UpdateCommand).resolves({ Attributes: { configured_by: 'old-admin', qurl_api_key: 'enc:v1:IV:TAG:deadbeef' } });
+    await store.setGuildApiKey('g-1', 'plain-key', 'new-admin', 'OAuth');
+    expect(logger.audit).toHaveBeenCalledWith(AUDIT_EVENTS.QURL_SETUP_ADMIN_CHANGED,
+      expect.objectContaining({ via: SETUP_VIA.UNKNOWN }));
+    expect(Object.isFrozen(SETUP_VIA)).toBe(true);
+  });
+
+  test('setGuildApiKey: does not audit a prior row with neither key nor admin', async () => {
+    ddbMock.on(UpdateCommand).resolves({ Attributes: { updated_at: '2026-09-10T00:00:00Z' } });
+    await store.setGuildApiKey('g-1', 'plain-key', 'new-admin', SETUP_VIA.OAUTH);
+    expect(logger.audit.mock.calls.map(([event]) => event))
+      .not.toContain(AUDIT_EVENTS.QURL_SETUP_ADMIN_CHANGED);
+  });
+
+  test('setGuildApiKey: resolves even when the audit failure log also throws', async () => {
+    ddbMock.on(UpdateCommand).resolves({ Attributes: { configured_by: 'old-admin', qurl_api_key: 'enc:v1:IV:TAG:deadbeef' } });
+    logger.audit.mockImplementationOnce(() => { throw new Error('EPIPE'); });
+    logger.error.mockImplementationOnce(() => { throw new Error('EPIPE'); });
+    await expect(store.setGuildApiKey('g-1', 'plain-key', 'new-admin', SETUP_VIA.OAUTH)).resolves.toBeUndefined();
   });
 
   test('setGuildApiKey: audits a rebind of a configured row that lost configured_by', async () => {
