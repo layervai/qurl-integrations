@@ -295,13 +295,12 @@ func nativeRecoveryHubReply(
 			return nil, fmt.Errorf("Hub assignment reply has no list object: %v", body["list"])
 		}
 		list["agent_id"] = connectorIntegrationAgentID
-		// Distinct generations let the test tell the persisted refresh result
-		// from the recover result; they do not prove the recover assignment was
-		// applied before the refresh replaced it. Request field checks run after
-		// the exchange so a mismatch fails the test instead of stalling the
-		// connector.
-		// Any other mode gets the refresh shape; the post-exchange mode check
-		// reports it instead of stalling the connector on a missing reply.
+		// Distinct generations let the test tell the persisted refresh result from
+		// the recover result; they do not prove the recover assignment was applied
+		// before the refresh replaced it. Mode and credential fields are checked
+		// after the exchange (any other mode gets the refresh shape), because an
+		// error here sends no reply and stalls the connector. The query check
+		// above stays: no reply shape exists for an unknown query.
 		generation := connectorIntegrationRefreshGeneration
 		if parsed.Mode == "recover" {
 			generation = connectorIntegrationRecoverGeneration
@@ -328,7 +327,7 @@ func setNativeRecoveryAssignment(value any, generation int, cellPublicKeyB64 str
 	}
 	assignment["cell_id"] = "cell-test"
 	assignment["assignment_generation"] = float64(generation)
-	assignment["endpoint_revision"] = float64(2)
+	assignment["endpoint_revision"] = float64(generation)
 	assignment["lease_expires_at"] = now.Add(time.Hour).Format(time.RFC3339)
 	endpoint["host"] = connectorIntegrationCellHost
 	endpoint["port"] = float64(443)
@@ -482,7 +481,8 @@ func TestOpenNativeRegisteredClient_ExplicitLoginUsesRealConnectorRecovery(t *te
 		t.Fatalf("registered identity requests = %d, want initial rejection and one retry", len(requests))
 	}
 	if got := strings.TrimPrefix(requests[0].Header.Get("Authorization"), "Bearer "); got != oldDeviceKey {
-		t.Fatalf("initial registered-device key changed: %q", got) // Public conformance fixture.
+		t.Fatalf("initial registered-device key changed (empty: %t, is account key: %t, len: %d)",
+			got == "", got == validatedAccountKey, len(got))
 	}
 	replacementKey := strings.TrimPrefix(requests[1].Header.Get("Authorization"), "Bearer ")
 	if replacementKey == "" || replacementKey == oldDeviceKey || replacementKey == validatedAccountKey ||
