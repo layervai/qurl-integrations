@@ -418,7 +418,7 @@ describe('qURL client — revokeOrdinaryLinks', () => {
     expect(globalThis.fetch).not.toHaveBeenCalled();
   });
 
-  it('stops at a mid-batch DELETE failure and converges when the retry repeats revoked children', async () => {
+  it('attempts every child after a mid-batch DELETE failure and converges when the retry repeats revoked children', async () => {
     const parent = apiOk(200, { resource_id: PUBLIC_KEY_RESOURCE_ID, crid: CRID_RESOURCE_ID, qurls: [] });
     const ids = ['q_aaaaaaaaaa1', 'q_aaaaaaaaaa2', 'q_aaaaaaaaaa3'];
     globalThis.fetch = jest.fn()
@@ -428,7 +428,7 @@ describe('qURL client — revokeOrdinaryLinks', () => {
 
     await expect(qurl.revokeOrdinaryLinks(PUBLIC_KEY_RESOURCE_ID, ids, 'guild-key'))
       .rejects.toThrow('failed (400)');
-    expect(globalThis.fetch).toHaveBeenCalledTimes(3);
+    expect(globalThis.fetch).toHaveBeenCalledTimes(4);
 
     // Retry: the retained index still resolves the revoked first child and
     // repeated child DELETEs return 204.
@@ -513,6 +513,21 @@ describe('qURL client — revokeOrdinaryLinks', () => {
     await expect(qurl.revokeOrdinaryLinks(PUBLIC_KEY_RESOURCE_ID, ids, 'guild-key'))
       .rejects.toThrow('Invalid qURL revoke token list');
     expect(globalThis.fetch).not.toHaveBeenCalled();
+  });
+
+  it('still revokes live siblings after one child DELETE fails, then fails closed', async () => {
+    globalThis.fetch = jest.fn()
+      .mockResolvedValueOnce(apiError(404, { code: 'not_found' }))
+      .mockResolvedValueOnce(apiOk(200, { resource_id: PUBLIC_KEY_RESOURCE_ID, crid: CRID_RESOURCE_ID, qurls: [] }))
+      .mockResolvedValueOnce(apiError(404, { code: 'not_found' }))
+      .mockResolvedValueOnce(apiOk(204));
+
+    await expect(qurl.revokeOrdinaryLinks(PUBLIC_KEY_RESOURCE_ID, ['q_aaaaaaaaaa1', 'q_aaaaaaaaaa2'], 'guild-key'))
+      .rejects.toThrow('qURL API DELETE /resources/:resourceId/qurls/:qurlId failed (404)');
+    expect(globalThis.fetch.mock.calls.map(([url, init]) => [init?.method || 'GET', String(url)]).slice(2)).toEqual([
+      ['DELETE', `https://api.test.local/v1/resources/${CRID_RESOURCE_ID}/qurls/q_aaaaaaaaaa1`],
+      ['DELETE', `https://api.test.local/v1/resources/${CRID_RESOURCE_ID}/qurls/q_aaaaaaaaaa2`],
+    ]);
   });
 
   it('refuses to DELETE under a malformed parent crid', async () => {

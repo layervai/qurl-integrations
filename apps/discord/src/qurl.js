@@ -60,7 +60,8 @@ const RESOURCE_QURL_LOG_PATH = '/resources/:resourceId/qurls/:qurlId';
 // DELETE per child). The signal is the real bound: extra parent GETs after a
 // 404 share the same budget, so a full ten-child batch never exceeds 275s,
 // well inside Discord's 15-minute window.
-const ORDINARY_REVOKE_MAX_IDS = 10;
+// Shared with connector.js's revoke_links chunk size, which must never exceed it.
+const REVOKE_BATCH_MAX_IDS = 10;
 const ORDINARY_REVOKE_ATTEMPT_TIMEOUT_MS = 10_000;
 const ORDINARY_REVOKE_MAX_RETRIES = 1;
 const ORDINARY_REVOKE_BUDGET_PER_CALL_MS = 25_000;
@@ -371,7 +372,7 @@ async function deleteLink(resourceId, apiKey) {
 // partial failure converges.
 async function revokeOrdinaryLinks(resourceId, qurlIds, apiKey) {
   validateResourceId(resourceId);
-  if (!Array.isArray(qurlIds) || qurlIds.length > ORDINARY_REVOKE_MAX_IDS) {
+  if (!Array.isArray(qurlIds) || qurlIds.length > REVOKE_BATCH_MAX_IDS) {
     throw new Error('Invalid qURL revoke token list');
   }
   if (!qurlIds.every(hasPersistableQurlIdShape)) throw new Error('Invalid qURL revoke token identity');
@@ -399,10 +400,17 @@ async function revokeOrdinaryLinks(resourceId, qurlIds, apiKey) {
   }
   validateResourceId(parent.crid);
   // Sequential: callers already fan out across resources, and each SDK call
-  // retries 429s, so a parallel burst here would amplify rate limiting.
+  // retries 429s, so a parallel burst here would amplify rate limiting. Attempt
+  // every child before failing so one stale child cannot shield live siblings.
+  let firstFailure;
   for (const qurlId of qurlIds) {
-    await callQurl('DELETE', RESOURCE_QURL_LOG_PATH, () => client.revokeResourceQurl(parent.crid, qurlId));
+    try {
+      await callQurl('DELETE', RESOURCE_QURL_LOG_PATH, () => client.revokeResourceQurl(parent.crid, qurlId));
+    } catch (err) {
+      firstFailure ??= err;
+    }
   }
+  if (firstFailure) throw firstFailure;
 }
 
 async function getResourceStatus(resourceId, apiKey) {
@@ -424,6 +432,7 @@ module.exports = {
   createOneTimeLink,
   deleteLink,
   revokeOrdinaryLinks,
+  REVOKE_BATCH_MAX_IDS,
   getIdentity,
   getResourceStatus,
   isPrivateHost,

@@ -1033,6 +1033,26 @@ describe('revokeMintedLinks — #1551 fail-closed contract', () => {
     expect(logger.error).not.toHaveBeenCalled();
   });
 
+  it('caps untrusted partial ids at the requested link count', async () => {
+    globalThis.fetch = jest.fn()
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 502,
+        text: async () => JSON.stringify({
+          success: false,
+          links: Array.from({ length: 1000 }, (_, i) => ({ qurl_id: `q_${i}` })),
+        }),
+      })
+      .mockResolvedValueOnce(revoked('q_0', 'q_1'));
+
+    await expect(connector.mintLinks('res-1', { expiresAt: '2026-01-01T00:00:00Z', n: 2 }))
+      .rejects.toMatchObject({ partialQurlIds: ['q_0', 'q_1'] });
+    expect(globalThis.fetch).toHaveBeenCalledTimes(2);
+    expect(logger.warn).toHaveBeenCalledWith('Connector mint_link returned partial links on non-2xx', expect.objectContaining({
+      partial_link_count: 2, unidentified_qurl_count: 998,
+    }));
+  });
+
   it('counts partial children whose id cannot be revoked in the warning', async () => {
     globalThis.fetch = jest.fn().mockResolvedValueOnce({
       ok: false,

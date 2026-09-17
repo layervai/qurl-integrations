@@ -10,7 +10,7 @@ const { qurlIdForCleanup } = require('./utils/qurl-id');
 // could drift out of sync. resolveDetectTarget() self-mints the ephemeral
 // detect qURL via the @layervai/qurl SDK (the standardized client), not qurl.js.
 // qurl.js has no connector.js dependency, so this require introduces no cycle.
-const { isPrivateHost, revokeOrdinaryLinks } = require('./qurl');
+const { isPrivateHost, revokeOrdinaryLinks, REVOKE_BATCH_MAX_IDS } = require('./qurl');
 
 const { sanitizeFilename } = require('./utils/sanitize');
 const { formatSessionDurationSeconds, isPositiveFinite } = require('./utils/time');
@@ -21,9 +21,10 @@ const MAX_CDN_REDIRECTS = 3;
 // processes at most 10 unique ids under one 55s handler deadline. Leave 10s for
 // response transport so the caller, not an accidental race, owns the bound.
 // The endpoint rejects larger requests atomically, so chunk rather than couple
-// to commands.js's independently tunable TOKENS_PER_RESOURCE.
+// to commands.js's independently tunable TOKENS_PER_RESOURCE. The same chunk
+// feeds the SDK fallback, so reuse its cap rather than a second constant.
 const REVOKE_LINKS_TIMEOUT_MS = 65_000;
-const REVOKE_LINKS_MAX_IDS = 10;
+const REVOKE_LINKS_MAX_IDS = REVOKE_BATCH_MAX_IDS;
 // Terminal per-id outcomes. not_connector_managed is not itself a revoke: it
 // hands an ordinary child back to the SDK below.
 const REVOKE_TERMINAL_STATUSES = new Set(['revoked', 'already_gone', 'not_connector_managed']);
@@ -96,12 +97,14 @@ function parseConnectorBody(bodyText) {
   return { parsed, apiCode, apiDetail };
 }
 
-// One identity rule for the thrown error and cleanup: only bounded q_ ids that
-// the revoke endpoint accepts. The dropped count stays visible in the warning
-// so an upstream id-shape change cannot strand children without a log line.
-function partialQurlIdsFromLinks(links) {
+// One identity rule for the thrown error and cleanup: only bounded ids that
+// the revoke endpoint accepts. The body is untrusted and cannot prove more than
+// the `n` links requested, so the list is capped at `n` to bound compensation.
+// The dropped count stays visible in the warning so an upstream id-shape
+// change cannot strand children without a log line.
+function partialQurlIdsFromLinks(links, n) {
   if (!Array.isArray(links)) return { partialQurlIds: [], droppedCount: 0 };
-  const partialQurlIds = links.map(link => qurlIdForCleanup(link?.qurl_id)).filter(id => id !== null);
+  const partialQurlIds = links.map(link => qurlIdForCleanup(link?.qurl_id)).filter(id => id !== null).slice(0, n);
   return { partialQurlIds, droppedCount: links.length - partialQurlIds.length };
 }
 
@@ -450,7 +453,7 @@ async function mintLinks(resourceId, { expiresAt, n, apiKey, selfDestructSeconds
       bodyText = await response.text();
     } catch { /* network read failed, fall through with empty body */ }
     const { parsed, apiCode, apiDetail } = parseConnectorBody(bodyText);
-    const { partialQurlIds, droppedCount } = partialQurlIdsFromLinks(parsed?.links);
+    const { partialQurlIds, droppedCount } = partialQurlIdsFromLinks(parsed?.links, n);
     if (partialQurlIds.length > 0 || droppedCount > 0) {
       // TODO(upstream-contract): Best-effort reconciliation signal; connector
       // error bodies must only include qurl_ids for links that were actually minted.
