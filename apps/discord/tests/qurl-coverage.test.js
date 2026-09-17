@@ -452,10 +452,10 @@ describe('qURL client — revokeOrdinaryLinks', () => {
     expect(globalThis.fetch).toHaveBeenCalledTimes(4);
   });
 
-  it('bounds the whole batch, retries included, by one budget', async () => {
+  it('bounds the whole batch, retries included, by one size-scaled budget', async () => {
     const budget = new AbortController();
     const timeoutSpy = jest.spyOn(AbortSignal, 'timeout').mockImplementation(ms => (
-      ms === 60_000 ? budget.signal : new AbortController().signal
+      ms === 30_000 ? budget.signal : new AbortController().signal
     ));
     const signals = [];
     globalThis.fetch = jest.fn().mockImplementation(async (_url, init) => {
@@ -466,13 +466,45 @@ describe('qURL client — revokeOrdinaryLinks', () => {
     });
     try {
       await qurl.revokeOrdinaryLinks(PUBLIC_KEY_RESOURCE_ID, ['q_aaaaaaaaaa1'], 'guild-key');
-      expect(timeoutSpy).toHaveBeenCalledWith(60_000);
+      expect(timeoutSpy).toHaveBeenCalledWith(30_000);
       expect(signals).toHaveLength(2);
       budget.abort();
       expect(signals.every(signal => signal.aborted)).toBe(true);
     } finally {
       timeoutSpy.mockRestore();
     }
+  });
+
+  it('stops mid-batch once the budget expires', async () => {
+    const budget = new AbortController();
+    const timeoutSpy = jest.spyOn(AbortSignal, 'timeout').mockImplementation(ms => (
+      ms === 45_000 ? budget.signal : new AbortController().signal
+    ));
+    globalThis.fetch = jest.fn().mockImplementation(async (_url, init) => {
+      if (init.signal.aborted) throw init.signal.reason;
+      if (globalThis.fetch.mock.calls.length === 1) {
+        return apiOk(200, { resource_id: PUBLIC_KEY_RESOURCE_ID, crid: CRID_RESOURCE_ID, qurls: [] });
+      }
+      budget.abort(new DOMException('budget', 'TimeoutError'));
+      return apiOk(204);
+    });
+    try {
+      await expect(qurl.revokeOrdinaryLinks(PUBLIC_KEY_RESOURCE_ID, ['q_aaaaaaaaaa1', 'q_aaaaaaaaaa2'], 'guild-key'))
+        .rejects.toThrow();
+      expect(globalThis.fetch).toHaveBeenCalledTimes(3);
+    } finally {
+      timeoutSpy.mockRestore();
+    }
+  });
+
+  it('surfaces the service rejection when a batch child belongs to another parent', async () => {
+    globalThis.fetch = jest.fn()
+      .mockResolvedValueOnce(apiOk(200, { resource_id: PUBLIC_KEY_RESOURCE_ID, crid: CRID_RESOURCE_ID, qurls: [] }))
+      .mockResolvedValueOnce(apiOk(204))
+      .mockResolvedValueOnce(apiError(404, { code: 'not_found' }));
+
+    await expect(qurl.revokeOrdinaryLinks(PUBLIC_KEY_RESOURCE_ID, ['q_aaaaaaaaaa1', 'q_bbbbbbbbbb1'], 'guild-key'))
+      .rejects.toThrow('qURL API DELETE /resources/:resourceId/qurls/:qurlId failed (404)');
   });
 
   it('rejects a non-array token list before network work', async () => {

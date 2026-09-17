@@ -101,7 +101,7 @@ function parseConnectorBody(bodyText) {
 // so an upstream id-shape change cannot strand children without a log line.
 function partialQurlIdsFromLinks(links) {
   if (!Array.isArray(links)) return { partialQurlIds: [], droppedCount: 0 };
-  const partialQurlIds = links.map(link => qurlIdForCleanup(link?.qurl_id)).filter(Boolean);
+  const partialQurlIds = links.map(link => qurlIdForCleanup(link?.qurl_id)).filter(id => id !== null);
   return { partialQurlIds, droppedCount: links.length - partialQurlIds.length };
 }
 
@@ -586,7 +586,7 @@ async function revokeMintedLinks(resourceId, qurlIds, apiKey) {
     }
   }
   // route_absent tells rollout verification whether #1551 is live here.
-  logger.info('Confirmed minted link revoke', {
+  logger.info('Revoked minted links', {
     resource_ref: resourceIdLogRef(resourceId),
     count: ids.length,
     route_absent: routeAbsent,

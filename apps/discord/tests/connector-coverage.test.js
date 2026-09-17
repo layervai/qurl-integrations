@@ -803,7 +803,7 @@ describe('revokeMintedLinks — #1551 fail-closed contract', () => {
       }),
     );
     expect(revokeOrdinaryLinks).not.toHaveBeenCalled();
-    expect(logger.info).toHaveBeenCalledWith('Confirmed minted link revoke', {
+    expect(logger.info).toHaveBeenCalledWith('Revoked minted links', {
       resource_ref: expect.stringMatching(/^sha256:/), count: 2, route_absent: false,
     });
   });
@@ -831,7 +831,7 @@ describe('revokeMintedLinks — #1551 fail-closed contract', () => {
     await connector.revokeMintedLinks('res-1', ids, 'guild-key');
 
     expect(globalThis.fetch).toHaveBeenCalledTimes(2);
-    expect(logger.info).toHaveBeenCalledWith('Confirmed minted link revoke', {
+    expect(logger.info).toHaveBeenCalledWith('Revoked minted links', {
       resource_ref: expect.stringMatching(/^sha256:/), count: 11, route_absent: false,
     });
   });
@@ -847,7 +847,7 @@ describe('revokeMintedLinks — #1551 fail-closed contract', () => {
       ['res-1', ids.slice(0, 10), 'guild-key'],
       ['res-1', ids.slice(10), 'guild-key'],
     ]);
-    expect(logger.info).toHaveBeenCalledWith('Confirmed minted link revoke', expect.objectContaining({
+    expect(logger.info).toHaveBeenCalledWith('Revoked minted links', expect.objectContaining({
       route_absent: true,
     }));
   });
@@ -979,7 +979,7 @@ describe('revokeMintedLinks — #1551 fail-closed contract', () => {
     revokeOrdinaryLinks.mockRejectedValueOnce(new Error('qURL API DELETE failed (503)'));
 
     await expect(connector.revokeMintedLinks('res-1', ids, 'guild-key')).rejects.toThrow('failed (503)');
-    expect(logger.info).not.toHaveBeenCalledWith('Confirmed minted link revoke', expect.anything());
+    expect(logger.info).not.toHaveBeenCalledWith('Revoked minted links', expect.anything());
   });
 
   it('rejects malformed JSON', async () => {

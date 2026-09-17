@@ -54,10 +54,11 @@ const USER_AGENT = 'qurl-discord-bot/1.0';
 const QURL_ID_LOG_PATH = '/qurls/:resourceId';
 const RESOURCE_ID_LOG_PATH = '/resources/:resourceId';
 const RESOURCE_QURL_LOG_PATH = '/resources/:resourceId/qurls/:qurlId';
-// Total budget for one ordinary-child revoke batch (parent GET plus sequential
-// DELETEs, retries included), so a degraded qurl-service cannot hold a
-// deferred /qurl revoke past Discord's 15-minute interaction window.
-const ORDINARY_REVOKE_BUDGET_MS = 60_000;
+// Budget per call in one ordinary-child revoke batch (parent GET plus each
+// sequential DELETE, retries included). Scaling by batch size lets one
+// invocation finish a full batch under brief 429s, while a degraded
+// qurl-service still cannot hold /qurl revoke past Discord's 15-minute window.
+const ORDINARY_REVOKE_BUDGET_PER_CALL_MS = 15_000;
 const UNKNOWN_STATUS0_CODE = 'unknown_error';
 
 // status-0 SDK error codes whose message the SDK synthesizes itself (no server
@@ -358,7 +359,8 @@ async function deleteLink(resourceId, apiKey) {
 // an identified child and require it to match the recorded source first.
 // TODO(upstream-contract): qurl-service checks that each child belongs to the
 // CRID in the DELETE path, so every child in one call must share the recorded
-// source. Callers pass one bounded batch (at most ten ids). A retry after a
+// source: callers MUST pass siblings of `resourceId`, in one bounded batch (at
+// most ten ids). A retry after a
 // partial failure converges: GET /v1/qurls/{id} still resolves a revoked child
 // through the retained qURL index, and the child DELETE documents that
 // repeated revocation succeeds (204).
@@ -368,7 +370,9 @@ async function revokeOrdinaryLinks(resourceId, qurlIds, apiKey) {
     throw new Error('Invalid qURL revoke token identity');
   }
   if (qurlIds.length === 0) return;
-  const client = makeClient(apiKey, { signal: AbortSignal.timeout(ORDINARY_REVOKE_BUDGET_MS) });
+  const client = makeClient(apiKey, {
+    signal: AbortSignal.timeout(ORDINARY_REVOKE_BUDGET_PER_CALL_MS * (qurlIds.length + 1)),
+  });
   // Resolve the parent from the first child the service still indexes, so one
   // unexpectedly unindexed child cannot block a retry of its siblings. That
   // parent must match the recorded source; qurl-service then enforces that

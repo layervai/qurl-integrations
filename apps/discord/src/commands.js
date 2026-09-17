@@ -3737,12 +3737,11 @@ async function handleRevokeSelect(interaction, { flow_id }) {
 
   const sendId = interaction.values[0];
   // Child revoke can outlast the 3s component-response window (up to 65s per
-  // connector chunk of ten children, plus a 60s SDK fallback budget), so
-  // acknowledge first and edit the original message when the revoke settles.
-  // A failed ack still revokes: the user asked for it and the barrier makes a
-  // repeat safe; only the result message is lost.
-  await interaction.deferUpdate().catch(logIgnoredDiscordErr);
-  await interaction.editReply({ content: 'Revoking links...', components: [] }).catch(logIgnoredDiscordErr);
+  // connector chunk of ten children, plus the SDK fallback budget), so
+  // acknowledge with a progress update and edit the message when the revoke
+  // settles. A failed ack still revokes: the user asked for it and the barrier
+  // makes a repeat safe; only the result message is lost.
+  await interaction.update({ content: 'Revoking links...', components: [] }).catch(logIgnoredDiscordErr);
   const revoked = await revokeAllLinks(sendId, interaction.user.id, apiKey, resolveSenderAlias(interaction));
 
   if (!revoked.barrierEstablished) {

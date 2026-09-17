@@ -972,17 +972,20 @@ describe('handleRevokeSelect (dispatcher path)', () => {
   const { handleRevokeSelect } = require('../src/commands');
 
   function makeSelectInteraction(overrides = {}) {
-    return {
+    const interaction = {
       values: ['send-1'],
       user: { id: 'user-1' },
       guildId: 'guild-1',
       channelId: 'ch-1',
-      update: jest.fn().mockResolvedValue(undefined),
-      deferUpdate: jest.fn().mockResolvedValue(undefined),
+      // Real discord.js rejects a second acknowledgement; so does this double.
+      update: jest.fn(async () => {
+        if (interaction.update.mock.calls.length > 1) throw new Error('InteractionAlreadyReplied');
+      }),
       editReply: jest.fn().mockResolvedValue(undefined),
       reply: jest.fn().mockResolvedValue(undefined),
       ...overrides,
     };
+    return interaction;
   }
 
   beforeEach(() => {
@@ -1005,10 +1008,10 @@ describe('handleRevokeSelect (dispatcher path)', () => {
       { stage: 'awaiting_revoke_select', reason: 'terminal' },
     );
     expect(mockRevokeMintedLinks).toHaveBeenCalledTimes(3);
-    expect(interaction.deferUpdate.mock.invocationCallOrder[0])
+    expect(interaction.update).toHaveBeenCalledTimes(1);
+    expect(interaction.update).toHaveBeenCalledWith({ content: 'Revoking links...', components: [] });
+    expect(interaction.update.mock.invocationCallOrder[0])
       .toBeLessThan(mockRevokeMintedLinks.mock.invocationCallOrder[0]);
-    expect(interaction.editReply).toHaveBeenCalledWith({ content: 'Revoking links...', components: [] });
-    expect(interaction.update).not.toHaveBeenCalled();
     expect(interaction.editReply).toHaveBeenCalledWith(
       expect.objectContaining({ content: expect.stringContaining('3/3') }),
     );
@@ -1020,7 +1023,7 @@ describe('handleRevokeSelect (dispatcher path)', () => {
     ]);
     mockRevokeMintedLinks.mockResolvedValue(undefined);
     const interaction = makeSelectInteraction({
-      deferUpdate: jest.fn().mockRejectedValue(new Error('Unknown interaction')),
+      update: jest.fn().mockRejectedValue(new Error('Unknown interaction')),
       editReply: jest.fn().mockRejectedValue(new Error('Unknown interaction')),
     });
 
