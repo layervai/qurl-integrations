@@ -1009,7 +1009,7 @@ describe('handleRevokeSelect (dispatcher path)', () => {
     );
     expect(mockRevokeMintedLinks).toHaveBeenCalledTimes(3);
     expect(interaction.update).toHaveBeenCalledTimes(1);
-    expect(interaction.update).toHaveBeenCalledWith({ content: 'Revoking links...', components: [] });
+    expect(interaction.update).toHaveBeenCalledWith({ content: 'Revoking links... If this message does not update, run `/qurl revoke` again to check.', components: [] });
     expect(interaction.update.mock.invocationCallOrder[0])
       .toBeLessThan(mockRevokeMintedLinks.mock.invocationCallOrder[0]);
     expect(interaction.editReply).toHaveBeenCalledWith(
@@ -1027,7 +1027,7 @@ describe('handleRevokeSelect (dispatcher path)', () => {
       sendId: 'send-1', error: 'DDB unavailable',
     });
 
-    expect(interaction.update).toHaveBeenCalledWith({ content: 'Revoking links...', components: [] });
+    expect(interaction.update).toHaveBeenCalledWith({ content: 'Revoking links... If this message does not update, run `/qurl revoke` again to check.', components: [] });
     expect(interaction.editReply).toHaveBeenCalledWith({
       content: 'Could not complete revocation. Run `/qurl revoke` to retry.',
       components: [],

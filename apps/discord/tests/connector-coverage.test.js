@@ -941,7 +941,7 @@ describe('revokeMintedLinks — #1551 fail-closed contract', () => {
       .rejects.toMatchObject({ message: `Connector revoke_links failed (${status})`, status, apiCode: null });
     expect(revokeOrdinaryLinks).not.toHaveBeenCalled();
     expect(logger.warn).toHaveBeenCalledWith('Connector revoke_links refused', {
-      resource_ref: expect.stringMatching(/^sha256:/), status, api_code: null, count: 1,
+      resource_ref: expect.stringMatching(/^sha256:/), status, api_code: null, count: 1, will_fallback: false,
     });
   });
 
@@ -970,6 +970,17 @@ describe('revokeMintedLinks — #1551 fail-closed contract', () => {
     it('waits 1s when a 429 has no Retry-After header', async () => {
       globalThis.fetch = jest.fn()
         .mockResolvedValueOnce(refusal(429, {}, new Headers()))
+        .mockResolvedValueOnce(revoked('q_one'));
+
+      const pending = connector.revokeMintedLinks('res-1', ['q_one'], 'guild-key');
+      await jest.advanceTimersByTimeAsync(999);
+      expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+      await expect(settle(pending, 1)).resolves.toBe('resolved');
+    });
+
+    it('floors Retry-After: 0 to a 1s wait', async () => {
+      globalThis.fetch = jest.fn()
+        .mockResolvedValueOnce(refusal(429, {}, new Headers({ 'Retry-After': '0' })))
         .mockResolvedValueOnce(revoked('q_one'));
 
       const pending = connector.revokeMintedLinks('res-1', ['q_one'], 'guild-key');
@@ -1059,7 +1070,7 @@ describe('revokeMintedLinks — #1551 fail-closed contract', () => {
 
     expect(revokeOrdinaryLinks).toHaveBeenCalledWith('res-1', ['q_one'], 'guild-key');
     expect(logger.warn).toHaveBeenCalledWith('Connector revoke_links refused', {
-      resource_ref: expect.stringMatching(/^sha256:/), status, api_code: apiCode, count: 1,
+      resource_ref: expect.stringMatching(/^sha256:/), status, api_code: apiCode, count: 1, will_fallback: true,
     });
     expect(logger.info).toHaveBeenCalledWith('Revoked minted links', expect.objectContaining({
       route_absent: false, fallback_count: 1,
@@ -1072,7 +1083,7 @@ describe('revokeMintedLinks — #1551 fail-closed contract', () => {
     revokeOrdinaryLinks.mockRejectedValueOnce(fallbackError);
 
     await expect(connector.revokeMintedLinks('res-1', ['q_one'], 'guild-key'))
-      .rejects.toMatchObject({ status: 503, apiCode: 'revoke_not_available', cause: fallbackError, failedCount: 7 });
+      .rejects.toMatchObject({ status: 503, apiCode: 'revoke_not_available', fallbackError, failedCount: 7 });
   });
 
   it.each([
@@ -1204,6 +1215,7 @@ describe('revokeMintedLinks — #1551 fail-closed contract', () => {
     expect(globalThis.fetch).toHaveBeenCalledTimes(4);
     expect(logger.error).toHaveBeenCalledWith('Connector mint_link returned more partial links than requested', {
       resource_ref: expect.stringMatching(/^sha256:/), requested: 2, over_minted_count: 998, capped_qurl_count: 978,
+      unrevoked_overflow_qurl_ids: ids.slice(22, 42),
     });
   });
 

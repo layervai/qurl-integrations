@@ -914,6 +914,7 @@ describe('revokeAllLinks', () => {
       resource_ref: resourceIdLogRef(sensitiveResourceId),
       error: failure.message,
       failed_child_count: null,
+      fallback_error: null,
     });
     expect(JSON.stringify(logger.error.mock.calls)).not.toContain(sensitiveResourceId);
     expect(logger.audit).toHaveBeenCalledWith('revoke_failed', {

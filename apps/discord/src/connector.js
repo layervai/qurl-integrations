@@ -116,7 +116,9 @@ function parseConnectorBody(bodyText) {
 // contract, so live children may be left) are counted separately; the cap
 // bounds compensation work driven by an untrusted body.
 function partialQurlIdsFromLinks(links, n) {
-  if (!Array.isArray(links)) return { partialQurlIds: [], unidentifiedCount: 0, overMintedCount: 0, cappedCount: 0 };
+  if (!Array.isArray(links)) {
+    return { partialQurlIds: [], unrevokedQurlIds: [], unidentifiedCount: 0, overMintedCount: 0, cappedCount: 0 };
+  }
   // This runs while reporting a failed mint: never let a bad `n` replace that
   // error. Skip cleanup instead and let the capped count below surface it.
   const cap = Number.isInteger(n) && n > 0 ? n + MAX_OVERFLOW_REVOKE_IDS : 0;
@@ -124,6 +126,8 @@ function partialQurlIdsFromLinks(links, n) {
   const identified = [...new Set(normalized.filter(id => id !== null))];
   return {
     partialQurlIds: identified.slice(0, cap),
+    // Bounded, non-secret slice of ids left for hand reconciliation.
+    unrevokedQurlIds: identified.slice(cap, cap + MAX_OVERFLOW_REVOKE_IDS),
     unidentifiedCount: normalized.filter(id => id === null).length,
     overMintedCount: cap ? Math.max(0, identified.length - n) : 0,
     cappedCount: Math.max(0, identified.length - cap),
@@ -475,7 +479,9 @@ async function mintLinks(resourceId, { expiresAt, n, apiKey, selfDestructSeconds
       bodyText = await response.text();
     } catch { /* network read failed, fall through with empty body */ }
     const { parsed, apiCode, apiDetail } = parseConnectorBody(bodyText);
-    const { partialQurlIds, unidentifiedCount, overMintedCount, cappedCount } = partialQurlIdsFromLinks(parsed?.links, n);
+    const {
+      partialQurlIds, unrevokedQurlIds, unidentifiedCount, overMintedCount, cappedCount,
+    } = partialQurlIdsFromLinks(parsed?.links, n);
     if (overMintedCount > 0 || cappedCount > 0) {
       // Over-minted children up to MAX_OVERFLOW_REVOKE_IDS are revoked below;
       // capped_qurl_count is what is left for hand reconciliation.
@@ -484,6 +490,7 @@ async function mintLinks(resourceId, { expiresAt, n, apiKey, selfDestructSeconds
         requested: n,
         over_minted_count: overMintedCount,
         capped_qurl_count: cappedCount,
+        unrevoked_overflow_qurl_ids: unrevokedQurlIds,
       });
     }
     if (partialQurlIds.length > 0 || unidentifiedCount > 0) {
@@ -565,16 +572,15 @@ async function postRevokeLinks(resourceId, batchIds, apiKey) {
   if (response.status !== 429) return response;
   const retryAfter = response.headers?.get?.('retry-after');
   const trimmedRetryAfter = retryAfter?.trim() ?? '';
-  // RFC 9110 delta-seconds only; any other form (HTTP-date, 1e0, 0x2, 1.5, -1) is NaN.
+  // Only RFC 9110 delta-seconds is waited on; the regex turns every other form
+  // (HTTP-date, 1e0, 0x2, 1.5, -1) into NaN, which fails closed below instead
+  // of adding load after a wait the connector did not ask for. An absent or
+  // empty header defaults to 1s, and 0 is floored to 1s so the retry never
+  // lands immediately on an overloaded connector.
   const retryAfterSeconds = trimmedRetryAfter === '' ? 1 : (/^\d{1,3}$/.test(trimmedRetryAfter) ? Number(trimmedRetryAfter) : NaN);
-  // A connector asking for longer than the cap, or in a form we do not wait on
-  // (an HTTP-date, a negative or fractional value), fails closed now instead
-  // of adding load after a wait it did not ask for. Only an absent header
-  // defaults to 1s.
-  if (!Number.isInteger(retryAfterSeconds) || retryAfterSeconds < 0
-      || retryAfterSeconds > REVOKE_RETRY_AFTER_MAX_SECONDS) return response;
+  if (!Number.isInteger(retryAfterSeconds) || retryAfterSeconds > REVOKE_RETRY_AFTER_MAX_SECONDS) return response;
   await discardBody(response);
-  const waitMs = retryAfterSeconds * 1000;
+  const waitMs = Math.max(1, retryAfterSeconds) * 1000;
   await new Promise(resolve => setTimeout(resolve, waitMs));
   return post();
 }
@@ -627,7 +633,8 @@ async function revokeMintedLinks(resourceId, qurlIds, apiKey) {
     } catch (fallbackError) {
       // Keep the connector error (and its api_code) as the verdict, but carry
       // the fallback's diagnosis so failed_child_count survives.
-      connectorError.cause ??= fallbackError;
+      // A dedicated field: transport errors already carry their own `cause`.
+      connectorError.fallbackError = fallbackError;
       if (fallbackError?.failedCount !== undefined) connectorError.failedCount ??= fallbackError.failedCount;
       throw connectorError;
     }
@@ -686,6 +693,8 @@ async function revokeMintedLinks(resourceId, qurlIds, apiKey) {
           status: response.status,
           api_code: apiCode,
           count: batchIds.length,
+          // 5xx means the connector could not answer and the SDK fallback runs.
+          will_fallback: response.status >= 500,
         });
         let connectorError;
         try {

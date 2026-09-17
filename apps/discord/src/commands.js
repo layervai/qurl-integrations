@@ -1651,6 +1651,9 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
 // inside Discord's 15-minute interaction window. Hitting it is expected while
 // the SDK fallback is slow, so it logs a warning with the ids, not an error.
 const CLEANUP_WAIT_BUDGET_MS = 120_000;
+// Progress copy for the /qurl revoke select; it stays actionable if the process
+// restarts before the result edit lands.
+const REVOKE_SELECT_PROGRESS_MSG = 'Revoking links... If this message does not update, run `/qurl revoke` again to check.';
 // /qurl revoke result budget: 13 minutes leaves room to edit the result before
 // the 15-minute interaction token expires.
 const REVOKE_SELECT_RESULT_WAIT_MS = 13 * 60 * 1000;
@@ -3807,7 +3810,7 @@ async function handleRevokeSelect(interaction, { flow_id }) {
   // acknowledge with a progress update and edit the message when the revoke
   // settles. A failed ack still revokes: the user asked for it and the barrier
   // makes a repeat safe; only the result message is lost.
-  await interaction.update({ content: 'Revoking links...', components: [] }).catch((err) => {
+  await interaction.update({ content: REVOKE_SELECT_PROGRESS_MSG, components: [] }).catch((err) => {
     logger.warn('Revoke select acknowledgement failed; revoking without a result message', {
       sendId, error: err?.message,
     });
@@ -8575,6 +8578,7 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
         resource_ref: resourceIdLogRef(resourceId),
         error: results[i].reason?.message,
         failed_child_count: results[i].reason?.failedCount ?? null,
+        fallback_error: results[i].reason?.fallbackError?.message ?? null,
       });
     }
   }
