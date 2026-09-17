@@ -404,7 +404,7 @@ describe('qurl-oauth routes', () => {
       expect(res.text).toContain('qURL is connected');
       expect(res.text).toContain('/qurl send is ready');
       expect(res.text).not.toContain('/qurl map');
-      expect(db.setGuildApiKey).toHaveBeenCalledWith('guild-1', 'lv_live_abc123', 'admin-2');
+      expect(db.setGuildApiKey).toHaveBeenCalledWith('guild-1', 'lv_live_abc123', 'admin-2', 'oauth');
       expect(discord.sendDM).toHaveBeenCalledTimes(1);
       expect(discord.sendDM.mock.calls[0][0]).toBe('admin-2');
       expect(discord.sendDM.mock.calls[0][1]).toContain('qURL is connected');

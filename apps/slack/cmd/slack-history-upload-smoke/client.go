@@ -14,7 +14,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/layervai/qurl-integrations/apps/slack/internal/slacksmoke"
+	"github.com/layervai/qurl-integrations/apps/slack/internal/httpbody"
 )
 
 type slackResponseStatus struct {
@@ -110,11 +110,11 @@ func (c *slackClient) getOnce(ctx context.Context, method string, params url.Val
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode == http.StatusTooManyRequests {
-		slacksmoke.DrainResponseBody(resp.Body, maxSlackResponseBytes)
+		httpbody.DrainResponseBody(resp.Body, maxSlackResponseBytes)
 		return retryAfterDelay(resp.Header.Get("Retry-After")), fmt.Errorf("%s: rate limited", method)
 	}
 	if resp.StatusCode >= 300 {
-		slacksmoke.DrainResponseBody(resp.Body, maxSlackResponseBytes)
+		httpbody.DrainResponseBody(resp.Body, maxSlackResponseBytes)
 		// Location is carried for 3xx because redirects are surfaced rather than followed
 		// (see slacksmoke.NewHTTPClient), and "returned HTTP 302" alone hides an SSO portal.
 		if location := sanitizeReportText(resp.Header.Get("Location")); location != "" {
@@ -122,7 +122,7 @@ func (c *slackClient) getOnce(ctx context.Context, method string, params url.Val
 		}
 		return 0, fmt.Errorf("%s returned HTTP %d", method, resp.StatusCode)
 	}
-	raw, err := slacksmoke.ReadResponseBody(method, resp.Body, maxSlackResponseBytes)
+	raw, err := httpbody.ReadResponseBody(method, resp.Body, maxSlackResponseBytes)
 	if err != nil {
 		return 0, err
 	}

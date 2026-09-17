@@ -35,6 +35,7 @@ const {
   DISCORD_MEMBERS_PAGE_SIZE,
   PREWARM_MAX_PAGES,
   AUDIT_EVENTS,
+  SETUP_VIA,
   TRUST,
   ddbSendConfigGuardActionCount,
   ddbSendConfigGuardFitsTransaction,
@@ -4165,13 +4166,13 @@ async function handleSetupModal(interaction, { flow_id }) {
     });
   }
 
-  await db.setGuildApiKey(interaction.guildId, submittedKey, interaction.user.id);
+  await db.setGuildApiKey(interaction.guildId, submittedKey, interaction.user.id, SETUP_VIA.PASTE);
   logger.info('Guild API key configured', logFields);
 
   fireAndForgetLinkGuildWebhookSubscription({
     guildId: interaction.guildId,
     apiKey: submittedKey,
-    via: 'paste',
+    via: SETUP_VIA.PASTE,
     configuredBy: interaction.user.id,
   });
 
