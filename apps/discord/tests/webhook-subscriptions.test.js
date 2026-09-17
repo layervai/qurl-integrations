@@ -607,6 +607,11 @@ describe('webhook-subscriptions registry — default-key discovery', () => {
         message: expect.stringMatching(/pagination cap hit/),
       });
     expect(global.fetch).toHaveBeenCalledTimes(50);
+    // eslint-disable-next-line global-require
+    expect(require('../src/logger').warn).toHaveBeenCalledWith(
+      'qURL webhook owner discovery passed half its page budget',
+      { subject: 'DEFAULT', pages: 25 },
+    );
   });
 
   // When GET /v1/webhooks returns an empty list (Lambda hasn't run

@@ -231,6 +231,11 @@ async function discoverOwnerId(apiKey, { subject = 'DEFAULT', skipMalformedRows 
   const targetUrl = requiredUrl ? canonicalUrl(requiredUrl) : null;
   let targetFound = false;
   for (let page = 0; page < 50; page++) {
+    // Early warning while there is still headroom before the permanent
+    // *_PAGE_CAP failure (orphaned subscriptions only accumulate; see #1380).
+    if (page === 25) {
+      logger.warn('qURL webhook owner discovery passed half its page budget', { subject, pages: page });
+    }
     const qs = cursor ? `?cursor=${encodeURIComponent(cursor)}&limit=100` : '?limit=100';
     const body = await callQurlService({
       method: 'GET',

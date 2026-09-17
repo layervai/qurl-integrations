@@ -61,7 +61,8 @@ const logger = require('../src/logger');
 const { clearedCookieHeader, cookieValue } = require('./helpers/cookies');
 
 const originalFetch = globalThis.fetch;
-const DISCORD_INSTALL_STATE = 'a'.repeat(43);
+// Far-future expiry: the route enforces `<expiry>.<random>` server-side.
+const DISCORD_INSTALL_STATE = `9999999999.${'a'.repeat(43)}`;
 const REQUIRED_DISCORD_PERMISSION_BITS = [10n, 11n, 14n, 31n];
 const REQUIRED_DISCORD_PERMISSIONS = REQUIRED_DISCORD_PERMISSION_BITS
   .reduce((permissions, bit) => permissions | (1n << bit), 0n)
@@ -135,7 +136,10 @@ describe('Discord install callback', () => {
         new Set(['identify', 'bot', 'applications.commands']),
       );
       const state = loc.searchParams.get('state');
-      expect(state).toMatch(/^[A-Za-z0-9_-]{43}$/);
+      const [expiry, random] = state.split('.');
+      expect(random).toMatch(/^[A-Za-z0-9_-]{43}$/);
+      expect(Number(expiry) - Math.floor(Date.now() / 1000)).toBeGreaterThan(29 * 60);
+      expect(Number(expiry) - Math.floor(Date.now() / 1000)).toBeLessThanOrEqual(30 * 60);
       expect(cookieValue(res.headers['set-cookie'], DISCORD_INSTALL_SESSION_COOKIE)).toBe(state);
       const cookieHeader = Array.isArray(res.headers['set-cookie'])
         ? res.headers['set-cookie'].join('\n')
@@ -273,6 +277,26 @@ describe('Discord install callback', () => {
       }
       expect(missing.text).toContain('same browser');
       expect(mismatch.text).not.toContain('same browser');
+      expect(globalThis.fetch).not.toHaveBeenCalled();
+    });
+
+    it('rejects an expired or malformed state even when the cookie still matches', async () => {
+      globalThis.fetch = jest.fn();
+      const past = `${Math.floor(Date.now() / 1000) - 1}.${'a'.repeat(43)}`;
+      const warn = jest.spyOn(logger, 'warn').mockImplementation(() => {});
+      for (const state of [past, 'a'.repeat(43)]) {
+        // eslint-disable-next-line no-await-in-loop
+        const res = await request(app)
+          .get(`/oauth/discord/callback?code=ok-code&state=${state}`)
+          .set('Cookie', `${DISCORD_INSTALL_SESSION_COOKIE}=${state}`);
+        expect(res.status).toBe(400);
+        expect(res.text).toContain('invalid or expired');
+        expect(res.text).not.toContain('same browser');
+      }
+      expect(warn).toHaveBeenCalledWith(
+        'Discord install callback rejected invalid session state',
+        expect.objectContaining({ hasCookie: true, matchedButExpired: true }),
+      );
       expect(globalThis.fetch).not.toHaveBeenCalled();
     });
 

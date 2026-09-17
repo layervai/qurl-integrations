@@ -47,6 +47,7 @@ const {
   setQurlOAuthPkceCookie,
   setDiscordInstallSessionCookie,
   clearDiscordInstallSessionCookie,
+  DISCORD_INSTALL_COOKIE_TTL_SECONDS,
 } = require('../utils/oauth-cookies');
 const { readCookie, timingSafeStringEqual } = require('../utils/cookies');
 const { singleStringParam } = require('../utils/query-params');
@@ -89,16 +90,33 @@ function renderError(res, statusCode, headline, detail) {
   }));
 }
 
+// State is `<expiry epoch seconds>.<32 random bytes, base64url>`. The expiry
+// needs no signature: it is only honoured when the browser also presents the
+// identical __Host- cookie, which an attacker cannot plant, so the server
+// enforces the same TTL as the cookie's Max-Age instead of trusting the browser.
+const INSTALL_STATE_RE = /^(\d{1,12})\.[A-Za-z0-9_-]{43}$/;
+
+function mintInstallState() {
+  const expirySec = Math.floor(Date.now() / 1000) + DISCORD_INSTALL_COOKIE_TTL_SECONDS;
+  return `${expirySec}.${crypto.randomBytes(32).toString('base64url')}`;
+}
+
 function inspectInstallState(req, state) {
   const cookieState = readCookie(req, DISCORD_INSTALL_SESSION_COOKIE);
+  const matches = Boolean(cookieState && state && timingSafeStringEqual(cookieState, state));
+  const expirySec = matches ? Number(INSTALL_STATE_RE.exec(state)?.[1]) : NaN;
   return {
     hasCookie: Boolean(cookieState),
-    matches: Boolean(cookieState && state && timingSafeStringEqual(cookieState, state)),
+    matches,
+    valid: matches && expirySec > Math.floor(Date.now() / 1000),
   };
 }
 
 router.get('/install', installRateLimit, (req, res) => {
+  // Every refusal also clears any earlier install session so none survives a
+  // failed gate.
   if (!config.isDiscordInstallConfigured) {
+    clearDiscordInstallSessionCookie(res);
     return renderNotConfiguredPage(res, 'discord-install-entry', config.discordInstallNotConfiguredReason);
   }
   // Refuse before Discord installs the bot: without the encryption key, the
@@ -107,10 +125,11 @@ router.get('/install', installRateLimit, (req, res) => {
   // production boot already fails loud on a missing key when OAuth is
   // configured (boot-requirements.js), so this is a non-prod safety net.
   if (!process.env.KEY_ENCRYPTION_KEY) {
+    clearDiscordInstallSessionCookie(res);
     return renderNotConfiguredPage(res, 'discord-install-entry', 'KEY_ENCRYPTION_KEY unset');
   }
 
-  const state = crypto.randomBytes(32).toString('base64url');
+  const state = mintInstallState();
   setDiscordInstallSessionCookie(res, state);
   const authorizeUrl = new URL('https://discord.com/oauth2/authorize');
   authorizeUrl.searchParams.set('client_id', config.DISCORD_CLIENT_ID);
@@ -131,14 +150,16 @@ router.get('/callback', rateLimit, async (req, res) => {
   if (!config.isDiscordInstallConfigured) {
     // Single sanitized log line lives in renderNotConfiguredPage; config
     // centralizes the ordered fail-closed reason for both install routes.
+    clearDiscordInstallSessionCookie(res);
     return renderNotConfiguredPage(res, 'discord-install', config.discordInstallNotConfiguredReason);
   }
   const installState = singleStringParam(req.query.state);
   const stateInspection = inspectInstallState(req, installState);
-  if (!stateInspection.matches) {
+  if (!stateInspection.valid) {
     logger.warn('Discord install callback rejected invalid session state', {
       ip: req.ip,
       hasCookie: stateInspection.hasCookie,
+      matchedButExpired: stateInspection.matches,
     });
     // No cookie at all is the mobile in-app-browser handoff signature: the
     // callback landed in a different browser context than /install.

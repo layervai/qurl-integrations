@@ -446,9 +446,16 @@ describe('guild configs', () => {
     ddbMock.on(UpdateCommand).rejects(ccfe);
 
     await expect(store.setGuildDefaultWebhookOwner('g_default', defaultOwnerArgs()))
-      .rejects.toBe(ccfe);
+      .rejects.toMatchObject({ code: 'DEFAULT_WEBHOOK_OWNER_KEY_CHANGED' });
     const secondGet = ddbMock.commandCalls(GetCommand)[1].args[0].input;
     expect(secondGet.ConsistentRead).toBe(true);
+  });
+
+  test('setGuildDefaultWebhookOwner: codes a missing row as KEY_CHANGED', async () => {
+    ddbMock.on(GetCommand).resolves({});
+    await expect(store.setGuildDefaultWebhookOwner('g_default', defaultOwnerArgs()))
+      .rejects.toMatchObject({ code: 'DEFAULT_WEBHOOK_OWNER_KEY_CHANGED' });
+    expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
   });
 
   test('setGuildDefaultWebhookOwner: codes a concurrent re-key after the first read', async () => {

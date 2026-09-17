@@ -1633,6 +1633,13 @@ function decryptDefaultOwnerGuildApiKey(ciphertext) {
   }
 }
 
+// Webhook attributes the default-owner conversion must see unchanged.
+const DEFAULT_OWNER_CAS_FIELDS = [
+  ['webhook_secret', ':storedSecret'],
+  ['webhook_id', ':storedWebhookId'],
+  ['webhook_owner_id', ':storedOwner'],
+];
+
 function defaultOwnerKeyChangedError() {
   const err = new Error('setGuildDefaultWebhookOwner: guild API key changed during owner resolution');
   err.code = 'DEFAULT_WEBHOOK_OWNER_KEY_CHANGED';
@@ -1662,13 +1669,10 @@ async function setGuildDefaultWebhookOwner(
     ConsistentRead: true,
   }));
   const row = current.Item;
-  const currentApiKey = decryptDefaultOwnerGuildApiKey(row?.qurl_api_key);
-  if (currentApiKey !== expectedApiKey) {
+  if (!row || decryptDefaultOwnerGuildApiKey(row.qurl_api_key) !== expectedApiKey) {
     throw defaultOwnerKeyChangedError();
   }
   const hasStoredSecret = Object.hasOwn(row, 'webhook_secret');
-  const hasStoredWebhookId = Object.hasOwn(row, 'webhook_id');
-  const hasStoredOwner = Object.hasOwn(row, 'webhook_owner_id');
   if (hasStoredSecret && !row.webhook_owner_id) {
     const err = new Error('setGuildDefaultWebhookOwner: stored webhook secret has no owner');
     err.code = 'DEFAULT_WEBHOOK_OWNER_MISSING';
@@ -1700,31 +1704,21 @@ async function setGuildDefaultWebhookOwner(
     ':u': nowIso(),
     ':storedApiKey': row.qurl_api_key,
   };
-  if (hasStoredSecret) {
-    conditions.push('webhook_secret = :storedSecret');
-    values[':storedSecret'] = row.webhook_secret;
-  } else {
-    conditions.push('attribute_not_exists(webhook_secret)');
-  }
-  if (hasStoredWebhookId) {
-    conditions.push('webhook_id = :storedWebhookId');
-    values[':storedWebhookId'] = row.webhook_id;
-  } else {
-    conditions.push('attribute_not_exists(webhook_id)');
-  }
-  if (hasStoredOwner) {
-    conditions.push('webhook_owner_id = :storedOwner');
-    values[':storedOwner'] = row.webhook_owner_id;
-  } else {
-    conditions.push('attribute_not_exists(webhook_owner_id)');
+  for (const [field, placeholder] of DEFAULT_OWNER_CAS_FIELDS) {
+    if (Object.hasOwn(row, field)) {
+      conditions.push(`${field} = ${placeholder}`);
+      values[placeholder] = row[field];
+    } else {
+      conditions.push(`attribute_not_exists(${field})`);
+    }
   }
 
   const update = {
-      TableName: TABLES.guild_configs,
-      Key: { guild_id: guildId },
-      ConditionExpression: conditions.join(' AND '),
-      UpdateExpression: 'REMOVE webhook_id, webhook_secret SET webhook_owner_id = :woid, updated_at = :u',
-      ExpressionAttributeValues: values,
+    TableName: TABLES.guild_configs,
+    Key: { guild_id: guildId },
+    ConditionExpression: conditions.join(' AND '),
+    UpdateExpression: 'REMOVE webhook_id, webhook_secret SET webhook_owner_id = :woid, updated_at = :u',
+    ExpressionAttributeValues: values,
   };
   try {
     await ddb.send(new UpdateCommand(update));
@@ -1747,10 +1741,11 @@ async function setGuildDefaultWebhookOwner(
       && !Object.hasOwn(latestRow, 'webhook_secret');
     if (achieved) return;
     const onlyKeyReencrypted = latestRow.qurl_api_key !== row.qurl_api_key
-      && ['webhook_owner_id', 'webhook_id', 'webhook_secret'].every(field =>
+      && DEFAULT_OWNER_CAS_FIELDS.every(([field]) =>
         Object.hasOwn(latestRow, field) === Object.hasOwn(row, field)
         && latestRow[field] === row[field]);
-    if (!onlyKeyReencrypted) throw err;
+    // Any other concurrent change maps to the documented KEY_CHANGED recovery.
+    if (!onlyKeyReencrypted) throw defaultOwnerKeyChangedError();
     // Retry once for unchanged plaintext with new encryption randomness. Keep
     // every webhook CAS predicate; a second concurrent mutation still fails,
     // under the documented KEY_CHANGED code (recovery: re-run /qurl setup).
