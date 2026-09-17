@@ -193,9 +193,9 @@ router.get('/callback', rateLimit, async (req, res) => {
   // Discord code on a token exchange + a /users/@me round-trip + an Auth0
   // round-trip before failing at the qURL callback's persist-time guard.
   if (!process.env.KEY_ENCRYPTION_KEY) {
-    // Unlike /install's gates, keep the session cookie: the Discord code was
-    // not redeemed, so reloading this callback within the code's lifetime
-    // after the operator fixes the key can still succeed.
+    // Unlike /install's gates, keep the session cookie: nothing was redeemed,
+    // so there is nothing to invalidate. (Fixing the key needs a task restart,
+    // which usually outlives Discord's code, so recovery restarts at /install.)
     // An admin may already have completed Discord consent here, so keep an
     // error-level signal beside the shared info-level not-configured line.
     logger.error('Refusing /oauth/discord/callback: KEY_ENCRYPTION_KEY is not set');

@@ -242,8 +242,10 @@ async function discoverOwnerId(apiKey, { subject = 'DEFAULT', skipMalformedRows 
     // repeat it, while other guild keys keep their own early warning.
     // Keyed by a short key digest (never the raw key) so empty early pages
     // (no owner yet) still warn once per distinct key.
-    const budgetKey = `${subject}:${crypto.createHash('sha256').update(apiKey).digest('hex').slice(0, 16)}`;
-    if (page === 25 && !pageBudgetWarned.has(budgetKey)) {
+    const budgetKey = page === 25
+      ? `${subject}:${crypto.createHash('sha256').update(apiKey).digest('hex').slice(0, 16)}`
+      : null;
+    if (budgetKey && !pageBudgetWarned.has(budgetKey)) {
       // ponytail: coarse bound, forgets all keys at 1000 distinct owners.
       if (pageBudgetWarned.size >= 1000) pageBudgetWarned.clear();
       pageBudgetWarned.add(budgetKey);
@@ -259,9 +261,13 @@ async function discoverOwnerId(apiKey, { subject = 'DEFAULT', skipMalformedRows 
       apiKey,
     };
     // A page GET is side-effect free: retry it once on a transient failure
-    // (network, timeout, 429, 5xx) rather than failing the whole walk. Other 4xx stay final.
+    // (network, timeout, 429, 5xx) rather than failing the whole walk. Other 4xx
+    // and string-coded application errors stay final.
     const body = await callQurlService(request).catch(async (err) => {
-      if (typeof err?.status === 'number' && err.status < 500 && err.status !== 429) throw err;
+      const transient = typeof err?.status === 'number'
+        ? err.status >= 500 || err.status === 429
+        : typeof err?.code !== 'string';
+      if (!transient) throw err;
       await sleep(PAGE_RETRY_DELAY_MS);
       return callQurlService(request);
     });

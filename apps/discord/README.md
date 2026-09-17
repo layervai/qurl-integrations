@@ -112,7 +112,7 @@ setup) means required to use that feature.
 | `DISCORD_TOKEN` | Yes | Discord bot token |
 | `DISCORD_CLIENT_ID` | Customer install | Numeric Discord application ID for the one-click Add to Discord flow; `PLACEHOLDER` or a malformed value disables that flow |
 | `DISCORD_CLIENT_SECRET` | Customer install | Discord OAuth2 client secret for the one-click Add to Discord flow |
-| `QURL_API_KEY` | `/qurl detect` | Requires `qurl:read` and `qurl:write` for detect; also the fallback for send operations without a server key from `/qurl setup`. |
+| `QURL_API_KEY` | `/qurl detect`; Production when `QURL_WEBHOOK_SECRET` is set | Requires `qurl:read` and `qurl:write` for detect; also the fallback for send operations without a server key from `/qurl setup`. |
 | `QURL_ENDPOINT` | No | qURL API base URL (defaults to production; localhost in dev) |
 | `QURL_WEBHOOK_SECRET` | Default webhook | Shared HMAC secret written by the registrar Lambda; required in every process that links guild webhooks when a default subscription exists. |
 | `QURL_WEBHOOK_PURE_BYOK` | No | Set to `true` only when the deployment intentionally has no default webhook subscription. |

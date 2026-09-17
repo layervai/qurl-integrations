@@ -603,6 +603,10 @@ describe('webhook-subscriptions registry — default-key discovery', () => {
       expect(global.fetch).toHaveBeenCalledTimes(2);
     }
 
+    global.fetch = jest.fn().mockRejectedValue(Object.assign(new Error('bad payload'), { code: 'ERR_APP' }));
+    await expect(subs.resolveDefaultOwnerForApiKey('lv_test_abc')).rejects.toBeTruthy();
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+
     global.fetch = jest.fn().mockResolvedValue(failure(401));
     await expect(subs.resolveDefaultOwnerForApiKey('lv_test_abc')).rejects.toMatchObject({ status: 401 });
     expect(global.fetch).toHaveBeenCalledTimes(1);
