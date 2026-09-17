@@ -239,7 +239,21 @@ export async function accessLinkNoRedirect(url: string): Promise<LinkAccessResul
   };
 }
 
-/** Revoke a qURL link by resource_id (revokes entire resource) */
+/** Revoke a qURL link by resource_id (revokes entire resource).
+ *
+ * Goes through the shared bounded retry — DELETE is idempotent and already in
+ * that helper's retryable-method set. It matters beyond the usual drain-gap:
+ * on an NHP-protected resource (every connector upload) qurl-service COMMITS
+ * the revocation and then answers 503 + `Retry-After: 30` ("Revocation
+ * committed; protection update is pending. Retry to confirm.") until the
+ * protection update lands, so a single-shot DELETE reported a false failure
+ * for a revocation that had already happened.
+ *
+ * Budget: ONE confirm retry, waiting out the server's own directive (35s
+ * ceiling). The retry only CONFIRMS an already-committed revocation, so that
+ * one window is the whole contract — a second wait buys no confidence and
+ * would push two revokes past jest's 120s default. Still pending afterward is
+ * a real convergence regression the smoke should report, not wait out. */
 export async function revokeLink(
   baseUrl: string,
   apiKey: string,
@@ -249,22 +263,10 @@ export async function revokeLink(
   const parsed = new URL(baseUrl);
   parsed.pathname = `/v1/resources/${encodeURIComponent(resourceId)}`;
   const url = parsed.toString();
-  // DELETE is idempotent, so this goes through the shared bounded retry. It
-  // matters beyond the usual drain-gap: on an NHP-protected resource (every
-  // connector upload) qurl-service commits the revocation and answers 503 +
-  // `Retry-After: 30` until the protection update lands, so a single-shot
-  // DELETE reports a false failure for a revocation that already happened.
-  //
-  // maxAttempts 2 (ONE retry), not the shared default 3: the retry only
-  // CONFIRMS an already-committed revocation, so the server's own 30s
-  // directive is the whole contract — a second 30s wait adds no more
-  // confidence and would put two revokes (file-revoke's idempotency test)
-  // past jest's 120s default. Still pending after that window is a real
-  // convergence regression the smoke should report, not wait out.
   const res = await fetchWithTransientRetry(url, {
     method: 'DELETE',
     headers: { Authorization: `Bearer ${apiKey}` },
-  }, { maxAttempts: 2 });
+  }, { maxAttempts: 2, maxRetryAfterMs: 35_000 });
   return res.ok;
 }
 

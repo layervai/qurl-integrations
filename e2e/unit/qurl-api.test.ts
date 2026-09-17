@@ -381,6 +381,28 @@ test('revokeLink retries the revocation-pending 503 and honors Retry-After', asy
   }
 });
 
+// The waiting is OPT-IN, and this is why: qurl-service also answers 503 +
+// `Retry-After: 60` for deployment state (the "dark 503"), which no client
+// should wait out — it reflects a standing condition, not a transient one.
+// A caller that hasn't asked for the wait keeps the 1s local backoff.
+test('a caller that does not opt in ignores Retry-After', async () => {
+  jest.useFakeTimers();
+  try {
+    fetchMock
+      .mockResolvedValueOnce(
+        new Response(null, { status: 503, headers: { 'Retry-After': '60' } }),
+      )
+      .mockResolvedValueOnce(jsonResponse({ data: { resource_id: publicResourceId, status: 'active' } }));
+
+    const pending = qurl.getResourceStatus(mintUrl, apiKey, publicResourceId);
+    await jest.advanceTimersByTimeAsync(1_000);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    await expect(pending).resolves.toMatchObject({ status: 'active' });
+  } finally {
+    jest.useRealTimers();
+  }
+});
+
 test('revokeLink reports a sustained revocation failure', async () => {
   jest.useFakeTimers();
   try {
@@ -388,9 +410,10 @@ test('revokeLink reports a sustained revocation failure', async () => {
       new Response(null, { status: 503, headers: { 'Retry-After': '30' } }),
     );
     const pending = qurl.revokeLink(mintUrl, apiKey, publicResourceId);
-    await jest.advanceTimersByTimeAsync(120_000);
+    // Past the 35s ceiling, so the budget — not the clock — is what stops it.
+    await jest.advanceTimersByTimeAsync(60_000);
     await expect(pending).resolves.toBe(false);
-    // Bounded at ONE confirm retry — a still-pending revocation after the
+    // Bounded at ONE confirm retry: a still-pending revocation after the
     // server's own window is a convergence regression to report, not wait out,
     // and the file-revoke suite's timeouts are sized on this budget.
     expect(fetchMock).toHaveBeenCalledTimes(2);
