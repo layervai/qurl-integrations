@@ -43,7 +43,7 @@ const (
 	//
 	// TODO(upstream-contract): these values and the recover-mode fields added
 	// in nativeRecoveryHubReply mirror the private agent-credential-recovery
-	// vectors. Nothing here fails when that platform contract moves.
+	// vectors. Nothing here fails when that platform contract moves (#1483).
 	connectorIntegrationRecoveryCredential = "lv_live_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"
 	connectorIntegrationRecoveryGrant      = "qrg1.integration-recovery-grant-0001"
 	connectorIntegrationRecoveredKeyID     = "key_RcV8mP3qTn5W"
