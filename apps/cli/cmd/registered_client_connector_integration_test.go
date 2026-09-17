@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -43,8 +44,8 @@ const (
 	// recovery grant is test-local; only its qrg1. prefix is contract.
 	//
 	// TODO(upstream-contract): these values, the recover-mode fields added in
-	// nativeRecoveryHubReply, and the usrData.recovery_grant request field read
-	// by nativeRecoveryUserData mirror the private agent-credential-recovery
+	// nativeRecoveryHubReply, and the usrData.recovery_grant and
+	// usrData.credential request fields read by nativeRecoveryUserData mirror the private agent-credential-recovery
 	// vectors. Nothing here fails when that platform contract moves (#1483).
 	connectorIntegrationRecoveryCredential = "lv_live_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"
 	connectorIntegrationRecoveryGrant      = "qrg1.integration-recovery-grant-0001"
@@ -254,6 +255,7 @@ type nativeRecoveryUserData struct {
 	Query         string `json:"query"`
 	Mode          string `json:"mode"`
 	RecoveryGrant string `json:"recovery_grant"`
+	Credential    string `json:"credential"`
 }
 
 func parseNativeRecoveryRequest(body []byte) (nativeRecoveryUserData, error) {
@@ -296,6 +298,9 @@ func nativeRecoveryHubReply(
 		var generation int
 		switch parsed.Mode {
 		case "recover":
+			if parsed.Credential != connectorIntegrationRecoveryCredential {
+				return nil, errors.New("Hub recover request did not carry the account recovery credential")
+			}
 			generation = connectorIntegrationRecoverGeneration
 		case "refresh":
 			generation = connectorIntegrationRefreshGeneration
@@ -353,8 +358,9 @@ func nativeRecoveryCellReply(request []byte) ([]byte, error) {
 // KeyProviderFile, which the connector runtime under test also reads.
 func withNativeRecoveryStateStore(t *testing.T, stateDir string, fn func(qurl.AgentStateStore)) {
 	t.Helper()
-	if os.Getenv(connectorstateowner.EnvKeyProvider) != connectorstateowner.KeyProviderFile {
-		t.Fatal("set EnvKeyProvider to KeyProviderFile before opening connector state")
+	if got := os.Getenv(connectorstateowner.EnvKeyProvider); got != connectorstateowner.KeyProviderFile {
+		t.Fatalf("%s = %q, want %q before opening connector state",
+			connectorstateowner.EnvKeyProvider, got, connectorstateowner.KeyProviderFile)
 	}
 	owner, err := connectorstateowner.NewSDKStore(stateDir, connectorIntegrationAgentID)
 	if err != nil {
@@ -472,6 +478,8 @@ func TestOpenNativeRegisteredClient_ExplicitLoginUsesRealConnectorRecovery(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
+	// closeAPIClient is idempotent, so this only matters when a later check fails.
+	t.Cleanup(func() { _ = opts.closeAPIClient() })
 	if client == nil || identity == nil || identity.OwnerID != apitest.MeOwnerID {
 		t.Fatalf("recovered identity = %#v", identity)
 	}
@@ -492,8 +500,12 @@ func TestOpenNativeRegisteredClient_ExplicitLoginUsesRealConnectorRecovery(t *te
 		t.Fatalf("real connector Hub exchanges = %d, want recovery and required post-recovery refresh", got)
 	}
 	for i, want := range []string{"recover", "refresh"} {
-		if parsed, err := parseNativeRecoveryRequest(hubRequests[i]); err != nil || parsed.Mode != want {
-			t.Fatalf("Hub exchange %d mode = %q (%v), want %q", i, parsed.Mode, err, want)
+		parsed, err := parseNativeRecoveryRequest(hubRequests[i])
+		if err != nil {
+			t.Fatalf("Hub exchange %d: parse request: %v", i, err)
+		}
+		if parsed.Mode != want {
+			t.Fatalf("Hub exchange %d mode = %q, want %q", i, parsed.Mode, want)
 		}
 	}
 	if got := len(cell.snapshot()); got != 1 {
@@ -517,7 +529,7 @@ func TestOpenNativeRegisteredClient_ExplicitLoginUsesRealConnectorRecovery(t *te
 			t.Fatal("persisted connector agent state is missing")
 		}
 		if recovered.DeviceAPIKeyID != connectorIntegrationRecoveredKeyID {
-			t.Fatalf("recovered device API key ID = %q, want the cell-issued ID", recovered.DeviceAPIKeyID)
+			t.Fatalf("recovered device API key ID = %q, want %q", recovered.DeviceAPIKeyID, connectorIntegrationRecoveredKeyID)
 		}
 		if recovered.DeviceAPIKey != replacementKey {
 			// Deliberately value-free: keep credential material out of test output.
