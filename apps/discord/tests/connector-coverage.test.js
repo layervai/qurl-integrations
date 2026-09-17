@@ -427,7 +427,7 @@ describe('Connector client — coverage boost', () => {
       expect(logger.warn).toHaveBeenCalledWith(
         'Connector mint_link returned partial links on non-2xx',
         expect.objectContaining({
-          resource_id: 'res-1',
+          resource_ref: expect.stringMatching(/^sha256:/),
           status: 502,
           bodyLen: expect.any(Number),
           partial_link_count: 2,
@@ -801,9 +801,9 @@ describe('revokeMintedLinks — #1551 fail-closed contract', () => {
         body: JSON.stringify({ resource_id: 'res-1', qurl_ids: ['q_one', 'q_two'] }),
       }),
     );
-    expect(revokeOrdinaryLinks).toHaveBeenCalledWith('res-1', [], 'guild-key');
+    expect(revokeOrdinaryLinks).not.toHaveBeenCalled();
     expect(logger.info).toHaveBeenCalledWith('Confirmed minted link revoke', {
-      resource_ref: expect.stringMatching(/^sha256:/), count: 2,
+      resource_ref: expect.stringMatching(/^sha256:/), count: 2, route_absent: false,
     });
   });
 
@@ -831,7 +831,7 @@ describe('revokeMintedLinks — #1551 fail-closed contract', () => {
 
     expect(globalThis.fetch).toHaveBeenCalledTimes(2);
     expect(logger.info).toHaveBeenCalledWith('Confirmed minted link revoke', {
-      resource_ref: expect.stringMatching(/^sha256:/), count: 11,
+      resource_ref: expect.stringMatching(/^sha256:/), count: 11, route_absent: false,
     });
   });
 
@@ -846,6 +846,9 @@ describe('revokeMintedLinks — #1551 fail-closed contract', () => {
       ['res-1', ids.slice(0, 10), 'guild-key'],
       ['res-1', ids.slice(10), 'guild-key'],
     ]);
+    expect(logger.info).toHaveBeenCalledWith('Confirmed minted link revoke', expect.objectContaining({
+      route_absent: true,
+    }));
   });
 
   it('revokes not_connector_managed children through the SDK, never the parent', async () => {

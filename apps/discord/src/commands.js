@@ -2954,18 +2954,24 @@ async function cleanupFreshAddRecipientResources(batchSends, apiKey, sendId, opt
   // transaction failure is ambiguous enough that revoking freshly minted qURLs
   // is the fail-closed outcome (no DMs have been sent yet).
   const qurlIdsByResource = new Map();
+  let unidentifiedCount = 0;
   for (const s of batchSends) {
     if (typeof s.resourceId !== 'string' || s.resourceId.length === 0) continue;
+    const qurlId = qurlIdForCleanup(s.qurlId);
+    // Mint output is validated, so this is defensive: revoke identifiable
+    // siblings instead of letting one bad id skip the whole resource.
+    if (qurlId === null) {
+      unidentifiedCount++;
+      continue;
+    }
     const ids = qurlIdsByResource.get(s.resourceId) || [];
-    ids.push(s.qurlId);
+    ids.push(qurlId);
     qurlIdsByResource.set(s.resourceId, ids);
   }
   const resourceIds = [...qurlIdsByResource.keys()];
-  if (resourceIds.length === 0) return;
+  if (resourceIds.length === 0 && unidentifiedCount === 0) return;
 
   const results = await batchSettled(resourceIds, async (resourceId) => {
-    // Mint output was validated, so every id is canonical; revokeMintedLinks
-    // still throws on an invalid one, keeping cleanup fail-closed.
     await revokeMintedLinks(resourceId, qurlIdsByResource.get(resourceId), apiKey);
     return resourceId;
   }, 5);
@@ -2978,12 +2984,13 @@ async function cleanupFreshAddRecipientResources(batchSends, apiKey, sendId, opt
       });
     }
   });
-  if (failed.length > 0) {
+  if (failed.length > 0 || unidentifiedCount > 0) {
     logger.error('Failed to clean up freshly minted Add Recipients qURL resources', {
       sendId,
       reason: cleanupReason,
       failed_count: failed.length,
       total: resourceIds.length,
+      unidentified_count: unidentifiedCount,
       failures: failed,
     });
   } else {
@@ -9866,6 +9873,9 @@ module.exports = {
       renderViewCounter,
       REVOKE_TRUNC_LIMIT,
       mintLinksInBatches,
+      // Fresh-mint cleanup's defensive unidentified-id branch is unreachable
+      // through validated mint output, so pin it directly.
+      cleanupFreshAddRecipientResources,
       activeMonitors,
       // The top-level back-half driver. Exported here so PR 7b's
       // tests (and the follow-up direct unit spec in #278) can pin

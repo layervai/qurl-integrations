@@ -186,6 +186,7 @@ const {
   buildDeliveryEmbed,
   packBulkDeliveryComponents,
   mintLinksInBatches,
+  cleanupFreshAddRecipientResources,
   activeMonitors,
   executeSendPipeline,
   persistDispatchResult,
@@ -2834,6 +2835,19 @@ describe('handleAddRecipients — DB failure mid-flow', () => {
     expect(mockDb.recordQURLSendBatch).not.toHaveBeenCalled();
     expect(mockSendDM).not.toHaveBeenCalled();
     expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-new', ['q_aaaaaaaaaa1'], 'apikey');
+  });
+
+  it('still revokes identifiable fresh children when one cleanup row lacks an id', async () => {
+    await cleanupFreshAddRecipientResources([
+      { resourceId: 'res-new', qurlId: 'q_aaaaaaaaaa1' },
+      { resourceId: 'res-new', qurlId: undefined },
+    ], 'apikey', 'send-1', { rowsMayHavePersisted: false });
+
+    expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-new', ['q_aaaaaaaaaa1'], 'apikey');
+    expect(logger.error).toHaveBeenCalledWith(
+      'Failed to clean up freshly minted Add Recipients qURL resources',
+      expect.objectContaining({ failed_count: 0, unidentified_count: 1 }),
+    );
   });
 
   it('reports revoked when recordQURLSendBatch loses the revoked_at condition race', async () => {

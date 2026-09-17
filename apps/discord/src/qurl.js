@@ -347,7 +347,10 @@ async function deleteLink(resourceId, apiKey) {
 // an identified child and require it to match the recorded source first.
 // TODO(upstream-contract): qurl-service checks that each child belongs to the
 // CRID in the DELETE path, so every child in one call must share the recorded
-// source. Callers pass one bounded batch (at most ten ids).
+// source. Callers pass one bounded batch (at most ten ids). A retry after a
+// partial failure converges: GET /v1/qurls/{id} still resolves a revoked child
+// through the retained qURL index, and the child DELETE documents that
+// repeated revocation succeeds (204).
 async function revokeOrdinaryLinks(resourceId, qurlIds, apiKey) {
   validateResourceId(resourceId);
   if (!qurlIds.every(hasPersistableQurlIdShape)) {

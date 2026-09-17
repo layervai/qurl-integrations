@@ -418,6 +418,25 @@ describe('qURL client — revokeOrdinaryLinks', () => {
     expect(globalThis.fetch).not.toHaveBeenCalled();
   });
 
+  it('stops at a mid-batch DELETE failure and converges when the retry repeats revoked children', async () => {
+    const parent = apiOk(200, { resource_id: PUBLIC_KEY_RESOURCE_ID, crid: CRID_RESOURCE_ID, qurls: [] });
+    const ids = ['q_aaaaaaaaaa1', 'q_aaaaaaaaaa2', 'q_aaaaaaaaaa3'];
+    globalThis.fetch = jest.fn()
+      .mockResolvedValueOnce(parent)
+      .mockResolvedValueOnce(apiOk(204))
+      .mockResolvedValue(apiError(400, { code: 'bad_request' }));
+
+    await expect(qurl.revokeOrdinaryLinks(PUBLIC_KEY_RESOURCE_ID, ids, 'guild-key'))
+      .rejects.toThrow('failed (400)');
+    expect(globalThis.fetch).toHaveBeenCalledTimes(3);
+
+    // Retry: the retained index still resolves the revoked first child and
+    // repeated child DELETEs return 204.
+    globalThis.fetch = jest.fn().mockResolvedValueOnce(parent).mockResolvedValue(apiOk(204));
+    await qurl.revokeOrdinaryLinks(PUBLIC_KEY_RESOURCE_ID, ids, 'guild-key');
+    expect(globalThis.fetch).toHaveBeenCalledTimes(4);
+  });
+
   it('refuses to revoke children whose parent is not the recorded source', async () => {
     globalThis.fetch = jest.fn().mockResolvedValueOnce(apiOk(200, {
       resource_id: 'other-resource', crid: 'other-crid', qurls: [],

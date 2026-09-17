@@ -453,7 +453,7 @@ async function mintLinks(resourceId, { expiresAt, n, apiKey, selfDestructSeconds
       // TODO(upstream-contract): Best-effort reconciliation signal; connector
       // error bodies must only include qurl_ids for links that were actually minted.
       logger.warn('Connector mint_link returned partial links on non-2xx', {
-        resource_id: resourceId,
+        resource_ref: resourceIdLogRef(resourceId),
         status: response.status,
         apiCode,
         bodyLen: bodyText.length,
@@ -507,7 +507,8 @@ async function mintLinks(resourceId, { expiresAt, n, apiKey, selfDestructSeconds
  * classifies `not_connector_managed` are ordinary tokens the SDK revokes here.
  *
  * TODO(upstream-contract): qurl-integrations-infra#1551 keeps the route
- * default-off, so a 404 means it is not registered, never that a child is gone.
+ * default-off, so a 404 means it is not registered (the registered route never
+ * returns 404; it denies with 401/403), never that a child is gone.
  * Fall back to the SDK, which succeeds only for ordinary children of this exact
  * source; a watermarked child fails closed until the route is enabled. Every
  * other non-2xx the endpoint returns (401/403/413, 429 with Retry-After: 1,
@@ -570,15 +571,16 @@ async function revokeMintedLinks(resourceId, qurlIds, apiKey) {
     if (results.length !== batchIds.length || statuses.size !== batchIds.length) {
       throw new Error('Connector revoke_links did not confirm every requested link');
     }
-    await revokeOrdinaryLinks(
-      resourceId,
-      batchIds.filter(id => statuses.get(id) === 'not_connector_managed'),
-      apiKey,
-    );
+    const ordinaryIds = batchIds.filter(id => statuses.get(id) === 'not_connector_managed');
+    if (ordinaryIds.length > 0) {
+      await revokeOrdinaryLinks(resourceId, ordinaryIds, apiKey);
+    }
   }
+  // route_absent tells rollout verification whether #1551 is live here.
   logger.info('Confirmed minted link revoke', {
     resource_ref: resourceIdLogRef(resourceId),
     count: ids.length,
+    route_absent: routeAbsent,
   });
 }
 
