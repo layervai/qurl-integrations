@@ -241,6 +241,26 @@ describe('settlesWithin', () => {
     await expect(settlesWithin(Promise.reject(new Error('x')), 1000)).resolves.toBe(true);
   });
 
+  it('never surfaces a late rejection after the budget elapsed', async () => {
+    jest.useFakeTimers();
+    const unhandled = jest.fn();
+    process.on('unhandledRejection', unhandled);
+    try {
+      let reject;
+      const work = new Promise((_, r) => { reject = r; });
+      const result = settlesWithin(work, 1000);
+      await jest.advanceTimersByTimeAsync(1000);
+      await expect(result).resolves.toBe(false);
+      reject(new Error('late cleanup failure'));
+      await jest.advanceTimersByTimeAsync(0);
+      await Promise.resolve();
+      expect(unhandled).not.toHaveBeenCalled();
+    } finally {
+      process.off('unhandledRejection', unhandled);
+      jest.useRealTimers();
+    }
+  });
+
   it('reports false once the wait budget elapses', async () => {
     jest.useFakeTimers();
     try {

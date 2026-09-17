@@ -581,7 +581,13 @@ async function postRevokeLinks(resourceId, batchIds, apiKey) {
   if (!Number.isInteger(retryAfterSeconds) || retryAfterSeconds > REVOKE_RETRY_AFTER_MAX_SECONDS) return response;
   await discardBody(response);
   const waitMs = Math.max(1, retryAfterSeconds) * 1000;
-  await new Promise(resolve => setTimeout(resolve, waitMs));
+  await new Promise((resolve) => {
+    const timer = setTimeout(resolve, waitMs);
+    timer.unref?.();
+  });
+  // The retry shares the request budget; if it lapsed while waiting, return the
+  // 429 (fail closed) rather than issue a request that aborts immediately.
+  if (signal.aborted) return response;
   return post();
 }
 
@@ -641,9 +647,9 @@ async function revokeMintedLinks(resourceId, qurlIds, apiKey) {
     fallbackCount += batchIds.length;
   };
   let confirmedCount = 0;
-  // Ids the connector itself confirmed, counted before any SDK handoff, so a
-  // failed handoff still shows the connector's partial progress.
-  let connectorConfirmedCount = 0;
+  // Ids the connector itself confirmed on a 200 (not via any SDK fallback),
+  // counted before any handoff so a failed handoff still shows its progress.
+  let connectorDirectCount = 0;
   try {
     for (let offset = 0; offset < ids.length; offset += CONNECTOR_REVOKE_MAX_IDS) {
       const batchIds = ids.slice(offset, offset + CONNECTOR_REVOKE_MAX_IDS);
@@ -739,7 +745,7 @@ async function revokeMintedLinks(resourceId, qurlIds, apiKey) {
         throw new Error('Connector revoke_links did not confirm every requested link');
       }
       const ordinaryIds = batchIds.filter(id => statuses.get(id) === 'not_connector_managed');
-      connectorConfirmedCount += batchIds.length - ordinaryIds.length;
+      connectorDirectCount += batchIds.length - ordinaryIds.length;
       if (ordinaryIds.length > 0) {
         await revokeOrdinaryLinks(resourceId, ordinaryIds, apiKey);
         fallbackCount += ordinaryIds.length;
@@ -766,7 +772,7 @@ async function revokeMintedLinks(resourceId, qurlIds, apiKey) {
       logger.warn('Minted link revoke incomplete', {
         ...summary,
         confirmed_count: confirmedCount,
-        connector_confirmed_count: connectorConfirmedCount,
+        connector_direct_count: connectorDirectCount,
       });
     }
   }

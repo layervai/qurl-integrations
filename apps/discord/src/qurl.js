@@ -380,8 +380,9 @@ async function deleteLink(resourceId, apiKey) {
 // only 404 skips to the next parent candidate; 401/403 mean the key itself
 // cannot read.
 //
-// Throws the first failure with `failedCount` (children not confirmed revoked,
-// including any skipped after an auth failure).
+// Throws the first failure with `failedCount`: children not confirmed revoked,
+// including any skipped after an auth failure or a budget abort, so it is an
+// upper bound on still-live children rather than a measurement.
 async function revokeOrdinaryLinks(resourceId, rawQurlIds, apiKey) {
   validateResourceId(resourceId);
   if (!Array.isArray(rawQurlIds) || rawQurlIds.length > REVOKE_BATCH_MAX_IDS) {

@@ -1149,7 +1149,7 @@ describe('revokeMintedLinks — #1551 fail-closed contract', () => {
     await expect(connector.revokeMintedLinks('res-1', ids, 'guild-key')).rejects.toThrow('failed (503)');
     expect(logger.info).not.toHaveBeenCalledWith('Revoked minted links', expect.anything());
     expect(logger.warn).toHaveBeenCalledWith('Minted link revoke incomplete', expect.objectContaining({
-      outcomes: { revoked: 10 }, confirmed_count: 10, connector_confirmed_count: 10, fallback_count: 0,
+      outcomes: { revoked: 10 }, confirmed_count: 10, connector_direct_count: 10, fallback_count: 0,
     }));
   });
 
@@ -1330,6 +1330,11 @@ describe('revokeMintedLinks — real SDK fallback seam', () => {
     expect(urls[0]).toBe('https://connector.test.local/api/revoke_links');
     expect(urls[1]).toBe(`https://api.test.local/v1/qurls/${ids[0]}`);
     expect(urls.slice(2)).toEqual(ids.map(id => `https://api.test.local/v1/resources/${CRID_RESOURCE_ID}/qurls/${id}`));
+    // The regression this consumer exists to prevent: never a whole-resource DELETE.
+    const resourceDeletes = globalThis.fetch.mock.calls.filter(([url, init]) => (
+      (init?.method || 'GET') === 'DELETE' && /\/v1\/resources\/[^/]+$/.test(String(url))
+    ));
+    expect(resourceDeletes).toEqual([]);
   });
 });
 

@@ -1009,7 +1009,7 @@ describe('handleRevokeSelect (dispatcher path)', () => {
     );
     expect(mockRevokeMintedLinks).toHaveBeenCalledTimes(3);
     expect(interaction.update).toHaveBeenCalledTimes(1);
-    expect(interaction.update).toHaveBeenCalledWith({ content: 'Revoking links... If this message does not update, run `/qurl revoke` again to check.', components: [] });
+    expect(interaction.update).toHaveBeenCalledWith({ content: "Revoking links... this can take a few minutes. If this message hasn't updated in 15 minutes, run `/qurl revoke` again.", components: [] });
     expect(interaction.update.mock.invocationCallOrder[0])
       .toBeLessThan(mockRevokeMintedLinks.mock.invocationCallOrder[0]);
     expect(interaction.editReply).toHaveBeenCalledWith(
@@ -1023,11 +1023,11 @@ describe('handleRevokeSelect (dispatcher path)', () => {
     const interaction = makeSelectInteraction();
 
     await expect(handleRevokeSelect(interaction, { flow_id: '0:1#guild-1#ch-1#user-1' })).resolves.toBeUndefined();
-    expect(require('../src/logger').error).toHaveBeenCalledWith('Revoke select failed before fan-out', {
+    expect(require('../src/logger').error).toHaveBeenCalledWith('Revoke select failed', {
       sendId: 'send-1', error: 'DDB unavailable',
     });
 
-    expect(interaction.update).toHaveBeenCalledWith({ content: 'Revoking links... If this message does not update, run `/qurl revoke` again to check.', components: [] });
+    expect(interaction.update).toHaveBeenCalledWith({ content: "Revoking links... this can take a few minutes. If this message hasn't updated in 15 minutes, run `/qurl revoke` again.", components: [] });
     expect(interaction.editReply).toHaveBeenCalledWith({
       content: 'Could not complete revocation. Run `/qurl revoke` to retry.',
       components: [],

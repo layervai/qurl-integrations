@@ -1653,7 +1653,7 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
 const CLEANUP_WAIT_BUDGET_MS = 120_000;
 // Progress copy for the /qurl revoke select; it stays actionable if the process
 // restarts before the result edit lands.
-const REVOKE_SELECT_PROGRESS_MSG = 'Revoking links... If this message does not update, run `/qurl revoke` again to check.';
+const REVOKE_SELECT_PROGRESS_MSG = "Revoking links... this can take a few minutes. If this message hasn't updated in 15 minutes, run `/qurl revoke` again.";
 // /qurl revoke result budget: 13 minutes leaves room to edit the result before
 // the 15-minute interaction token expires.
 const REVOKE_SELECT_RESULT_WAIT_MS = 13 * 60 * 1000;
@@ -3832,7 +3832,7 @@ async function handleRevokeSelect(interaction, { flow_id }) {
   } catch (err) {
     // The select menu is already gone; replace the progress text with one
     // actionable message and stop here so the dispatcher does not post twice.
-    logger.error('Revoke select failed before fan-out', { sendId, error: err?.message });
+    logger.error('Revoke select failed', { sendId, error: err?.message });
     await interaction.editReply({
       content: 'Could not complete revocation. Run `/qurl revoke` to retry.',
       components: [],
