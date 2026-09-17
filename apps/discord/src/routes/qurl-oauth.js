@@ -8,6 +8,7 @@ const express = require('express');
 const config = require('../config');
 const db = require('../store');
 const logger = require('../logger');
+const { SETUP_VIA } = require('../constants');
 const { sendDM } = require('../discord');
 const { verifyQurlOAuthState } = require('../utils/qurl-oauth-state');
 const { rateLimit } = require('../utils/oauth-rate-limit');
@@ -438,7 +439,7 @@ router.get('/callback', rateLimit, async (req, res) => {
   //    previous key (if any) remains valid on qurl-service until the
   //    admin manually revokes it via layerv.ai.
   try {
-    await db.setGuildApiKey(guildId, apiKey, discordUserId, 'oauth');
+    await db.setGuildApiKey(guildId, apiKey, discordUserId, SETUP_VIA.OAUTH);
   } catch (err) {
     logger.error('Failed to persist guild API key after successful mint', {
       error: err?.message, guildId, discordUserId, keyId,
@@ -477,7 +478,7 @@ router.get('/callback', rateLimit, async (req, res) => {
   // 3a. Register a per-guild qurl.accessed webhook subscription (BYOK
   //     view counter). Fire-and-forget via the centralized helper.
   fireAndForgetLinkGuildWebhookSubscription({
-    guildId, apiKey, via: 'oauth', configuredBy: discordUserId,
+    guildId, apiKey, via: SETUP_VIA.OAUTH, configuredBy: discordUserId,
   });
 
   // 4. DM the admin so they have a confirmation that doesn't depend on the

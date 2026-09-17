@@ -43,6 +43,7 @@ const logger = require('../logger');
 const {
   DM_STATUS,
   AUDIT_EVENTS,
+  SETUP_VIA,
   DDB_TRANSACTION_MAX_ACTIONS,
   ddbSendConfigGuardActionCount,
   ddbSendConfigGuardFitsTransaction,
@@ -1524,8 +1525,8 @@ async function getGuildApiKey(guildId) {
   return res.Item ? decrypt(res.Item.qurl_api_key) : null;
 }
 
-// `via` ('oauth' | 'paste') names the setup door for the admin-change audit.
-async function setGuildApiKey(guildId, apiKey, configuredBy, via = 'unknown') {
+// `via` (a SETUP_VIA value) names the setup door for the admin-change audit.
+async function setGuildApiKey(guildId, apiKey, configuredBy, via = SETUP_VIA.UNKNOWN) {
   const now = nowIso();
   // SQLite's `ON CONFLICT(guild_id) DO UPDATE SET qurl_api_key=…,
   // configured_by=…, updated_at=…` deliberately preserved
@@ -1553,12 +1554,11 @@ async function setGuildApiKey(guildId, apiKey, configuredBy, via = 'unknown') {
   }));
   const prior = res?.Attributes;
   const oldAdminId = prior?.configured_by ?? null;
-  // A prior qurl_api_key means the guild was already configured even when the
-  // row has no configured_by (hand edit or partial rollback). Unlike
-  // shouldPromptConsent (guild-config-state.js), which treats that row as a
-  // first install, the alarm biases toward paging: key the guard on the old
-  // key's presence and report the missing admin as null.
-  if (prior?.qurl_api_key && oldAdminId !== configuredBy) {
+  // Either prior attribute means the guild was already configured, even when a
+  // hand edit or partial rollback dropped the other. Unlike shouldPromptConsent
+  // (guild-config-state.js), which treats a row without configured_by as a
+  // first install, the alarm biases toward paging; a missing admin reports null.
+  if ((prior?.qurl_api_key || oldAdminId !== null) && oldAdminId !== configuredBy) {
     // The write has landed: an audit failure must not surface as a write
     // failure, or qurl-oauth.js would revoke the key it just stored.
     try {

@@ -645,6 +645,14 @@ const GATEWAY_DISPATCH_TYPES = Object.freeze({
   INTERACTION_CREATE: 'INTERACTION_CREATE',
 });
 
+// Setup door recorded on qurl_setup_admin_changed. An enum so a typo cannot
+// silently split a Logs Insights grouping.
+const SETUP_VIA = Object.freeze({
+  OAUTH: 'oauth',
+  PASTE: 'paste',
+  UNKNOWN: 'unknown',
+});
+
 // Use one tag for gateway and worker rejection alerts.
 const LOG_KINDS = Object.freeze({
   UNHANDLED_REJECTION: 'unhandledRejection',
@@ -669,6 +677,7 @@ module.exports = {
   GITHUB_ACTIONS,
   GOOD_FIRST_ISSUE_PATTERNS,
   AUDIT_EVENTS,
+  SETUP_VIA,
   QURL_WEBHOOK_EVENTS,
   TRUST,
   GATEWAY_DISPATCH_TYPES,

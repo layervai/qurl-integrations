@@ -45,10 +45,10 @@ process.env.AWS_REGION = 'us-east-2';
 
 const store = require('../src/store/ddb-store');
 const logger = require('../src/logger');
-const { AUDIT_EVENTS } = require('../src/constants');
+const { AUDIT_EVENTS, SETUP_VIA } = require('../src/constants');
 
 beforeEach(() => {
-  logger.audit.mockClear();
+  logger.audit.mockReset();
   ddbMock.reset();
   mockEncryptStrict.mockReset();
   mockEncryptStrict.mockImplementation((v) => `enc:v1:IV:TAG:${Buffer.from(v || '').toString('hex')}`);
@@ -120,11 +120,16 @@ describe('guild configs', () => {
     });
   });
 
-  test('setGuildApiKey: does not audit a keyless prior row (cleared, then set up)', async () => {
+  test('setGuildApiKey: audits a keyless prior row that names a different admin', async () => {
     ddbMock.on(UpdateCommand).resolves({ Attributes: { configured_by: 'old-admin' } });
-    await store.setGuildApiKey('g-1', 'plain-key', 'new-admin');
-    expect(logger.audit.mock.calls.map(([event]) => event))
-      .not.toContain(AUDIT_EVENTS.QURL_SETUP_ADMIN_CHANGED);
+    await store.setGuildApiKey('g-1', 'plain-key', 'new-admin', SETUP_VIA.PASTE);
+    expect(logger.audit).toHaveBeenCalledWith(AUDIT_EVENTS.QURL_SETUP_ADMIN_CHANGED, {
+      guild_id: 'g-1',
+      old_admin_id: 'old-admin',
+      new_admin_id: 'new-admin',
+      via: 'paste',
+      prior_updated_at: null,
+    });
   });
 
   test('setGuildApiKey: resolves when the audit logger throws after the write lands', async () => {
