@@ -22,9 +22,35 @@
 
 const db = require('./store');
 const config = require('./config');
+const crypto = require('crypto');
+const { setTimeout: sleep } = require('node:timers/promises');
 const logger = require('./logger');
-const { AUDIT_EVENTS } = require('./constants');
-const { callQurlService } = require('./qurl-webhook-registrar');
+const { AUDIT_EVENTS, LOG_EVENTS } = require('./constants');
+const { callQurlService, canonicalUrl } = require('./qurl-webhook-registrar');
+
+const PAGE_RETRY_DELAY_MS = 250;
+const MAX_OWNER_DISCOVERY_PAGES = 50;
+const OWNER_DISCOVERY_WARN_PAGE = Math.floor(MAX_OWNER_DISCOVERY_PAGES / 2);
+// Wall-clock budget for one discovery walk, so a degraded qurl-service fails
+// fast with its own code instead of parking work for tens of minutes.
+const OWNER_DISCOVERY_BUDGET_MS = 60_000;
+const QURL_PER_REQUEST_TIMEOUT_MS = 10_000;
+// Node/undici network error codes that are transient despite carrying a code.
+const TRANSIENT_NETWORK_CODE_RE = /^(E(CONNRESET|CONNREFUSED|TIMEDOUT|NOTFOUND|AI_AGAIN|PIPE)|UND_ERR_)/;
+const pageBudgetWarned = new Set();
+// Every error_code produced by the discovery walk, enumerable for runbooks and
+// alarms (resolution config codes and store codes are documented separately).
+// Unknown subjects/kinds throw instead of minting an undocumented code.
+const OWNER_ERROR_CODES = Object.freeze(Object.fromEntries(['DEFAULT', 'CANDIDATE'].map((subject) => [
+  subject,
+  Object.freeze(Object.fromEntries(['CONTRACT', 'CONFLICT', 'URL_MISMATCH', 'PAGE_CAP', 'BUDGET']
+    .map((kind) => [kind, `${subject}_WEBHOOK_OWNER_${kind}`]))),
+])));
+function ownerErrorCode(subject, kind) {
+  const code = OWNER_ERROR_CODES[subject]?.[kind];
+  if (!code) throw new Error(`ownerErrorCode: unknown ${subject}/${kind}`);
+  return code;
+}
 
 const REFRESH_INTERVAL_MS = 30_000;
 // After this many consecutive refresh failures we escalate via audit
@@ -90,6 +116,14 @@ const SIBLING_LAG_GRACE_MS = 5_000;
 // here since the receiver never compares webhookId for equality.
 const DEFAULT_KEY_SENTINEL = '__default-key__';
 
+function defaultOwnerEntry() {
+  return {
+    guildIds: new Set([DEFAULT_KEY_SENTINEL]),
+    webhookSecret: config.QURL_WEBHOOK_SECRET,
+    webhookId: DEFAULT_KEY_SENTINEL,
+  };
+}
+
 function getSecretForOwner(ownerId) {
   if (!ownerId) return null;
   const entry = subscriptions.get(ownerId);
@@ -132,6 +166,37 @@ function upsertGuild({ guildId, ownerId, webhookId, webhookSecret }) {
   upsertsDuringScan.add(ownerId);
 }
 
+// Ensure the already-discovered default owner has a safe cache entry. Before
+// the first scan this intentionally leaves the cache untouched so DDB can
+// establish legacy-secret precedence. Unlike upsertGuild, it never overrides
+// an in-flight scan: no rotation occurred, so a complete DDB row may still
+// contain the only secret that matches qurl-service.
+function ensureDefaultOwnerCacheEntry(ownerId) {
+  if (typeof ownerId !== 'string' || ownerId !== defaultOwnerId) {
+    throw new Error('ensureDefaultOwnerCacheEntry: the discovered default owner is required');
+  }
+  if (typeof config.QURL_WEBHOOK_SECRET !== 'string' || !config.QURL_WEBHOOK_SECRET.length) {
+    throw new Error('ensureDefaultOwnerCacheEntry: QURL_WEBHOOK_SECRET is required');
+  }
+
+  const entry = subscriptions.get(ownerId);
+  if (!entry) {
+    if (!isPrimed()) return;
+    subscriptions.set(ownerId, defaultOwnerEntry());
+    return;
+  }
+
+  // A legacy row may contain the active post-rotation secret while the
+  // environment still has the pre-rotation value. The store performs the
+  // same guard against persisted state; keep this local check so linking
+  // another guild cannot switch the receiver to a stale environment secret.
+  if (entry.webhookSecret !== config.QURL_WEBHOOK_SECRET) {
+    const err = new Error('ensureDefaultOwnerCacheEntry: cached webhook secret does not match QURL_WEBHOOK_SECRET');
+    err.code = 'DEFAULT_WEBHOOK_SECRET_CONFLICT';
+    throw err;
+  }
+}
+
 // Removes guildId from its owner's entry; if the entry is now empty
 // (no sibling guilds + not the default-key owner), drops it. Default-
 // key entry is never dropped from removeGuild — it's owned by the
@@ -161,46 +226,183 @@ function removeGuild({ guildId, ownerId }) {
   }
 }
 
-// Fetches the default key's owner_id by listing its own webhooks.
-// Returns null if the list is empty (Lambda hasn't run yet on a
-// fresh deploy) — the tick will retry next cycle, and inbound events
-// in the gap are 503'd via the unprimed-cache code path. Network /
-// HTTP errors are surfaced to the caller (scanOnce) so the tick's
-// failure counter increments correctly.
+// Fetches an API key's owner_id by listing its own webhooks.
+// Returns null if the list is empty. For default-key discovery (Lambda
+// hasn't run yet on a fresh deploy), the tick retries next cycle and
+// inbound events in the gap are 503'd via the unprimed-cache code path.
+// For a guild key, null means no subscription exists yet and the caller
+// proceeds through the registrar's create path. Network / HTTP errors are
+// surfaced so each caller can apply its existing failure policy.
 //
-// ASSUMPTION: owner_id is identical across every webhook owned by a
+// TODO(upstream-contract): owner_id is identical across every webhook owned by a
 // single API key in qurl-service. True today by qurl-service's auth0
 // owner-binding contract. If qurl-service ever multi-tenants a key
-// (rare but plausible for partner-shared identities), this loop
-// returns whichever owner_id came first — the bot's default-key
-// subscription is then a coin flip. The same assumption underlies
-// BYOK row population via setGuildApiKey, so any change there needs
-// a coordinated rework here.
-async function discoverDefaultOwnerId() {
-  if (!config.QURL_API_KEY || !config.QURL_ENDPOINT) return null;
-  // limit=100 (was limit=10): owner_id is identical across all subs
-  // this key owns, so we only need one valid row. Bumped to 100 so
-  // a contract drift that drops owner_id from rows 1..N silently
-  // doesn't fail discovery — a bot key with 50+ subs is plausible
-  // at scale; 100 stays under the typical page-size cap with no
-  // pagination needed for the read-side.
-  // Go through callQurlService for consistency with the rest of the
-  // registrar surface — same QurlServiceError shape, same op-tagged
-  // network-error handling, same 10s timeout default. The receiver
-  // shouldn't grow a second bespoke fetch path.
-  const body = await callQurlService({
-    method: 'GET',
-    path: '/v1/webhooks?limit=100',
-    apiEndpoint: config.QURL_ENDPOINT,
-    apiKey: config.QURL_API_KEY,
-  });
-  // Local name `webhooks` (not `subs`) so it doesn't shadow the
-  // module convention everyone else uses for the registry import.
-  const webhooks = Array.isArray(body?.data) ? body.data : [];
-  for (const w of webhooks) {
-    if (typeof w?.owner_id === 'string' && w.owner_id.length > 0) return w.owner_id;
+// (rare but plausible for partner-shared identities), discovery fails
+// closed rather than choosing an owner based on response order. The same
+// assumption underlies BYOK row population via setGuildApiKey, so any change
+// there needs a coordinated rework here.
+//
+// `requiredUrl`: when set, an owner is only returned if at least one of its
+// subscriptions targets that URL (registrar canonicalization). The linker
+// passes its bridge URL so "reuse the default subscription" is never claimed
+// for a subscription that delivers somewhere else (a shared qURL account
+// across environments).
+async function discoverOwnerId(apiKey, { subject = 'DEFAULT', skipMalformedRows = false, requiredUrl = null } = {}) {
+  if (!apiKey || !config.QURL_ENDPOINT) return null;
+  // Walk the same bounded surface the registrar can select from. Validating
+  // only page 1 would let it mutate a malformed default subscription on a
+  // later page after discovery inferred the owner from a sibling.
+  let ownerId = null;
+  let cursor = '';
+  const targetUrl = requiredUrl ? canonicalUrl(requiredUrl) : null;
+  let targetFound = false;
+  const deadline = Date.now() + OWNER_DISCOVERY_BUDGET_MS;
+  // Each request gets the smaller of its normal timeout and the remaining
+  // budget; an exhausted budget throws *_BUDGET instead of issuing another GET.
+  const fetchPage = (request) => {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
+      const err = new Error(`discoverOwnerId: ${OWNER_DISCOVERY_BUDGET_MS}ms discovery budget exhausted`);
+      err.code = ownerErrorCode(subject, 'BUDGET');
+      return Promise.reject(err);
+    }
+    return callQurlService({ ...request, timeoutMs: Math.min(QURL_PER_REQUEST_TIMEOUT_MS, remaining) });
+  };
+  for (let page = 0; page < MAX_OWNER_DISCOVERY_PAGES; page++) {
+    // Early warning while there is still headroom before the permanent
+    // *_PAGE_CAP failure (orphaned subscriptions only accumulate; see #1380).
+    // Once per subject+key per process: the refresh tick would otherwise
+    // repeat it, while other guild keys keep their own early warning.
+    // Keyed by a short key digest (never the raw key) so empty early pages
+    // (no owner yet) still warn once per distinct key.
+    const budgetKey = page === OWNER_DISCOVERY_WARN_PAGE
+      ? `${subject}:${crypto.createHash('sha256').update(apiKey).digest('hex').slice(0, 16)}`
+      : null;
+    if (budgetKey && !pageBudgetWarned.has(budgetKey)) {
+      // Coarse bound: forgets all entries at 1000 distinct subject+key pairs.
+      if (pageBudgetWarned.size >= 1000) pageBudgetWarned.clear();
+      pageBudgetWarned.add(budgetKey);
+      logger.warn('qURL webhook owner discovery passed half its page budget', {
+        event: LOG_EVENTS.QURL_WEBHOOK_OWNER_DISCOVERY_PAGE_BUDGET, subject, pagesFetched: page,
+      });
+    }
+    const qs = cursor ? `?cursor=${encodeURIComponent(cursor)}&limit=100` : '?limit=100';
+    const request = {
+      method: 'GET',
+      path: `/v1/webhooks${qs}`,
+      apiEndpoint: config.QURL_ENDPOINT,
+      apiKey,
+    };
+    // A page GET is side-effect free: retry it once on a transient failure
+    // (network, timeout, 429, 5xx) rather than failing the whole walk. Other 4xx
+    // and string-coded application errors stay final.
+    const body = await fetchPage(request).catch(async (err) => {
+      const transient = typeof err?.status === 'number'
+        ? err.status >= 500 || err.status === 429
+        : typeof err?.code !== 'string' || TRANSIENT_NETWORK_CODE_RE.test(err.code);
+      if (!transient) throw err;
+      await sleep(PAGE_RETRY_DELAY_MS);
+      return fetchPage(request);
+    });
+    if (!Array.isArray(body?.data)) {
+      const err = new Error('discoverOwnerId: qurl-service response data must be an array');
+      err.code = ownerErrorCode(subject, 'CONTRACT');
+      throw err;
+    }
+    for (const webhook of body.data) {
+      // Strict per row: skipping a malformed subscription could let the
+      // registrar rotate that row using an owner inferred from a valid sibling.
+      if (typeof webhook?.owner_id !== 'string' || !webhook.owner_id.length) {
+        // Receiver priming performs no mutation; a valid sibling may still
+        // identify the default owner. Linking must reject every malformed row.
+        if (skipMalformedRows) continue;
+        const err = new Error('discoverOwnerId: non-empty qurl-service response omitted owner_id');
+        err.code = ownerErrorCode(subject, 'CONTRACT');
+        throw err;
+      }
+      if (ownerId && webhook.owner_id !== ownerId) {
+        const err = new Error('discoverOwnerId: qurl-service response contained conflicting owner_id values');
+        err.code = ownerErrorCode(subject, 'CONFLICT');
+        throw err;
+      }
+      ownerId = webhook.owner_id;
+      if (targetUrl && canonicalUrl(webhook.url) === targetUrl) targetFound = true;
+    }
+    // TODO(upstream-contract): qurl-service paginates GET /v1/webhooks via
+    // `meta.next_cursor` (same shape findExistingSubscriptions walks).
+    const next = body?.meta?.next_cursor;
+    if (!next) {
+      if (ownerId && targetUrl && !targetFound) {
+        const err = new Error('discoverOwnerId: no subscription for this owner targets the bridge URL');
+        err.code = ownerErrorCode(subject, 'URL_MISMATCH');
+        throw err;
+      }
+      return ownerId;
+    }
+    cursor = next;
   }
-  return null;
+  const err = new Error(`discoverOwnerId: pagination cap hit (${MAX_OWNER_DISCOVERY_PAGES} pages, ~${MAX_OWNER_DISCOVERY_PAGES * 100} subscriptions)`);
+  // Distinct from *_CONTRACT: this one is permanent, so it needs its own alarm.
+  err.code = ownerErrorCode(subject, 'PAGE_CAP');
+  throw err;
+}
+
+async function discoverDefaultOwnerId(options) {
+  return discoverOwnerId(config.QURL_API_KEY, options);
+}
+
+// Resolve whether a guild API key belongs to the bot's default owner. This is
+// lazy because gateway-only processes and the one-shot backfill never start
+// the HTTP receiver's registry scan. When a default subscription is expected
+// but cannot be discovered, throw rather than falling through to the
+// per-guild registrar and risking a rotation of the shared default secret.
+// This deliberately blocks every guild link during the fresh-deploy gap or a
+// persistent registrar/configuration failure: without the default owner, an
+// unrelated key cannot be distinguished safely from an alias of the default
+// key. Owner identity is disclosed only by existing subscriptions, so an empty
+// candidate list cannot prove whether it shares an owner whose default
+// subscription disappeared. Creating in that state could move the
+// environment-managed account onto a guild-secret path and break Lambda
+// recovery.
+//
+// `bridgeUrl`: the linker's receiver URL. The default owner is rejected
+// (`DEFAULT_WEBHOOK_OWNER_URL_MISMATCH`) when none of its subscriptions
+// targets it — the BYOK path gets the same guarantee from the registrar's
+// URL match, and skipping it here would report `reused` for a subscription
+// that delivers to another deployment.
+async function resolveDefaultOwnerForApiKey(apiKey, { bridgeUrl } = {}) {
+  if (!config.QURL_WEBHOOK_SECRET) {
+    if (config.QURL_WEBHOOK_PURE_BYOK) return null;
+    const err = new Error('resolveDefaultOwnerForApiKey: QURL_WEBHOOK_SECRET is required unless QURL_WEBHOOK_PURE_BYOK=true');
+    err.code = 'DEFAULT_WEBHOOK_OWNER_CONFIG';
+    throw err;
+  }
+  if (!config.QURL_API_KEY || !config.QURL_ENDPOINT) {
+    const err = new Error('resolveDefaultOwnerForApiKey: default subscription discovery config is incomplete');
+    err.code = 'DEFAULT_WEBHOOK_OWNER_CONFIG';
+    throw err;
+  }
+
+  // Re-list on every link even when the registry cached the owner. The owner is
+  // stable, but its last subscription can be deleted out of band; accepting a
+  // stale cache would let the per-guild registrar recreate the default path
+  // with a guild-owned secret.
+  const ownerId = await discoverDefaultOwnerId({ requiredUrl: bridgeUrl });
+  if (!ownerId) {
+    const err = new Error('resolveDefaultOwnerForApiKey: default subscription owner could not be discovered');
+    err.code = 'DEFAULT_WEBHOOK_OWNER_UNDISCOVERED';
+    throw err;
+  }
+  // Cache the owner for the receiver, but leave the refresh tick's failure
+  // counter to the tick so link traffic cannot defer its escalation. A scan
+  // already in flight with failed discovery can overwrite the follow-up cache
+  // entry; the next tick restores it (bounded, self-healing).
+  defaultOwnerId = ownerId;
+
+  const candidateOwnerId = apiKey === config.QURL_API_KEY
+    ? ownerId
+    : await discoverOwnerId(apiKey, { subject: 'CANDIDATE' });
+  return candidateOwnerId === ownerId ? ownerId : null;
 }
 
 // One refresh pass. Rebuilds the per-owner map from `guild_configs`
@@ -252,7 +454,7 @@ async function scanOnce() {
     // retries); BYOK guilds resolve from the DDB rows normally.
     const needsDefaultDiscovery = !!config.QURL_WEBHOOK_SECRET && !defaultOwnerId;
     const discoveryPromise = needsDefaultDiscovery
-      ? discoverDefaultOwnerId().then(
+      ? discoverDefaultOwnerId({ skipMalformedRows: true }).then(
         (owner) => ({ ok: true, owner, fired: true }),
         (err) => ({ ok: false, error: err, fired: true }),
       )
@@ -316,20 +518,15 @@ async function scanOnce() {
       // Collision case: a BYOK guild that linked using the bot's OWN
       // default API key has webhook_owner_id === discoveredOwner. The
       // BYOK row already populated `next`; don't clobber its guildIds
-      // / webhookId with the synthetic default-key shape. The
-      // secret is identical in this case (both came from the same
-      // qurl-service subscription), so leaving the BYOK entry in
-      // place is observationally correct.
+      // / webhookId with the synthetic default-key shape. A legacy row's
+      // secret may be the only value matching qurl-service after the old
+      // link path rotated it, so the complete DDB entry remains authoritative.
       if (config.QURL_WEBHOOK_SECRET && !next.has(discoveredOwner)) {
         // String sentinel — receiver only reads webhookSecret, never
         // compares webhookId. Bracketed underscores can't collide
         // with `wh_...` qurl-service IDs or decimal Discord
         // snowflakes (the only legal guildIds values).
-        next.set(discoveredOwner, {
-          guildIds: new Set([DEFAULT_KEY_SENTINEL]),
-          webhookSecret: config.QURL_WEBHOOK_SECRET,
-          webhookId: DEFAULT_KEY_SENTINEL,
-        });
+        next.set(discoveredOwner, defaultOwnerEntry());
       }
     } else if (config.QURL_WEBHOOK_SECRET) {
       // Only warn when we WANTED a default entry (secret is set) but
@@ -468,6 +665,7 @@ function _setLastScanCompletedAtForTesting(ts) {
 // the ddb-store.js pattern for _TABLES_FOR_TESTING.
 function _resetForTesting() {
   subscriptions.clear();
+  pageBudgetWarned.clear();
   consecutiveFailures = 0;
   discoveryConsecutiveFailures = 0;
   defaultOwnerId = null;
@@ -484,9 +682,11 @@ module.exports = {
   start,
   stop,
   getSecretForOwner,
+  resolveDefaultOwnerForApiKey,
   isPrimed,
   isWithinSiblingLagWindow,
   upsertGuild,
+  ensureDefaultOwnerCacheEntry,
   removeGuild,
   // Test-only: production callers should let the 30s ticker drive
   // refresh. Exposed because the test suite needs to drive scans
