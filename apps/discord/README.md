@@ -83,7 +83,9 @@ native state store; the bot does not use producer state.
 Deploy and validate the connector revoke endpoint before deploying this
 consumer. Until that endpoint is enabled, ordinary children use the SDK
 fallback. Watermarked children cannot be confirmed through that fallback;
-the send stays available for retry. A repeated connector 429 fails closed
+the send stays available for retry. Legacy send rows with no usable `qurl_id`
+also remain unconfirmed after endpoint activation; deleting their shared parent
+is not a safe recovery. A repeated connector 429 fails closed
 after one bounded retry, without an SDK fallback.
 
 Before deployment, configure alarms for `Connector mint_link returned a link

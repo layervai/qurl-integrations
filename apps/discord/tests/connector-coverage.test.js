@@ -1031,6 +1031,28 @@ describe('revokeMintedLinks — #1551 fail-closed contract', () => {
       expect(globalThis.fetch.mock.calls[1][1].signal).toBe(globalThis.fetch.mock.calls[0][1].signal);
     });
 
+    it('does not cancel the refusal body when the budget expires before retry', async () => {
+      const controller = new AbortController();
+      const timeout = jest.spyOn(AbortSignal, 'timeout').mockReturnValue(controller.signal);
+      const response = new Response(JSON.stringify({ code: 'request_rate_limited' }), {
+        status: 429, headers: { 'Retry-After': '1' },
+      });
+      const cancel = jest.spyOn(response.body, 'cancel');
+      globalThis.fetch = jest.fn().mockResolvedValue(response);
+      try {
+        const pending = connector.revokeMintedLinks('res-1', ['q_one'], 'guild-key');
+        await jest.advanceTimersByTimeAsync(500);
+        controller.abort();
+        const outcome = await settle(pending, 500);
+        expect(outcome).toMatchObject({ status: 429, apiCode: 'request_rate_limited' });
+        expect(cancel).not.toHaveBeenCalled();
+        expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+        expect(revokeOrdinaryLinks).not.toHaveBeenCalled();
+      } finally {
+        timeout.mockRestore();
+      }
+    });
+
     it('falls back to the SDK when the retry itself fails in transport', async () => {
       globalThis.fetch = jest.fn()
         .mockResolvedValueOnce(refusal(429, {}, new Headers({ 'Retry-After': '1' })))

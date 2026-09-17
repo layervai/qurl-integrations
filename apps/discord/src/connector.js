@@ -579,7 +579,6 @@ async function postRevokeLinks(resourceId, batchIds, apiKey) {
   // lands immediately on an overloaded connector.
   const retryAfterSeconds = trimmedRetryAfter === '' ? 1 : (/^\d{1,3}$/.test(trimmedRetryAfter) ? Number(trimmedRetryAfter) : NaN);
   if (!Number.isInteger(retryAfterSeconds) || retryAfterSeconds > REVOKE_RETRY_AFTER_MAX_SECONDS) return response;
-  await discardBody(response);
   const waitMs = Math.max(1, retryAfterSeconds) * 1000;
   await new Promise((resolve) => {
     const timer = setTimeout(resolve, waitMs);
@@ -588,6 +587,7 @@ async function postRevokeLinks(resourceId, batchIds, apiKey) {
   // The retry shares the request budget; if it lapsed while waiting, return the
   // 429 (fail closed) rather than issue a request that aborts immediately.
   if (signal.aborted) return response;
+  await discardBody(response);
   return post();
 }
 
