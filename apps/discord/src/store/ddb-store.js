@@ -1527,6 +1527,12 @@ async function getGuildApiKey(guildId) {
 
 // `via` (a SETUP_VIA value) names the setup door for the admin-change audit.
 async function setGuildApiKey(guildId, apiKey, configuredBy, via) {
+  const door = normalizeSetupVia(via);
+  // Validate on every call so caller drift shows up on first setups too;
+  // omitted and unrecognized doors both audit as unknown.
+  if (via !== undefined && door !== via) {
+    logger.warn('Unrecognized setup door; auditing as unknown', { via });
+  }
   const now = nowIso();
   // SQLite's `ON CONFLICT(guild_id) DO UPDATE SET qurl_api_key=…,
   // configured_by=…, updated_at=…` deliberately preserved
@@ -1564,11 +1570,6 @@ async function setGuildApiKey(guildId, apiKey, configuredBy, via) {
     // The write has landed: an audit failure must not surface as a write
     // failure, or qurl-oauth.js would revoke the key it just stored.
     try {
-      const door = normalizeSetupVia(via);
-      // Separate caller drift from an omitted argument; both audit as unknown.
-      if (via !== undefined && door !== via) {
-        logger.warn('Unrecognized setup door; auditing as unknown', { via });
-      }
       logger.audit(AUDIT_EVENTS.QURL_SETUP_ADMIN_CHANGED, {
         guild_id: guildId,
         old_admin_id: oldAdminId,

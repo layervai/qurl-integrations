@@ -647,10 +647,11 @@ const GATEWAY_DISPATCH_TYPES = Object.freeze({
   INTERACTION_CREATE: 'INTERACTION_CREATE',
 });
 
-// Setup door. Two external consumers: the qurl_setup_admin_changed audit
-// (CloudWatch/Logs Insights) and, via guild-webhook-link.js, the persisted
-// qurl-service subscription description (`via=<value>`). Renaming a value forks
-// both. An enum so a typo cannot silently split a grouping. OAUTH deliberately covers both
+// Setup door recorded on the qurl_setup_admin_changed audit (CloudWatch/Logs
+// Insights). The same strings also appear in guild-webhook-link.js's persisted
+// qurl-service subscription description (`via=<value>`), whose vocabulary
+// additionally includes the backfill script's `backfill-script`; renaming a
+// value forks both. An enum so a typo cannot silently split a grouping. OAUTH deliberately covers both
 // /oauth/qurl/callback entries (`/qurl setup` and the install link): the signed
 // state carries no stage marker.
 const SETUP_VIA = Object.freeze({

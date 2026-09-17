@@ -120,6 +120,14 @@ describe('guild configs', () => {
     expect(logger.warn).toHaveBeenCalledWith('Unrecognized setup door; auditing as unknown', { via: 'OAuth' });
   });
 
+  test('setGuildApiKey: warns on an unrecognized door even without a rebind', async () => {
+    ddbMock.on(UpdateCommand).resolves({});
+    await store.setGuildApiKey('g-1', 'plain-key', 'admin', 'OAuth');
+    expect(logger.warn).toHaveBeenCalledWith('Unrecognized setup door; auditing as unknown', { via: 'OAuth' });
+    expect(logger.audit.mock.calls.map(([event]) => event))
+      .not.toContain(AUDIT_EVENTS.QURL_SETUP_ADMIN_CHANGED);
+  });
+
   test('setGuildApiKey: does not audit a prior row with neither key nor admin', async () => {
     ddbMock.on(UpdateCommand).resolves({ Attributes: { updated_at: '2026-09-10T00:00:00Z' } });
     await store.setGuildApiKey('g-1', 'plain-key', 'new-admin', SETUP_VIA.OAUTH);
