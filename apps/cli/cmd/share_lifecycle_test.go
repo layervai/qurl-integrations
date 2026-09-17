@@ -2634,8 +2634,8 @@ func runPublishDaemonLifecycle(t *testing.T, external bool) {
 		_, _ = io.WriteString(w, echoBody)
 	}))
 	t.Cleanup(echo.Close)
-	// Release the handler before closing the server, including on Fatal paths.
-	t.Cleanup(unblockSlow)
+	// Release the handler before any test cleanup, including on Fatal paths.
+	defer unblockSlow()
 
 	srv := apitest.NewServer(t)
 	stateDir := connectorStateTestDir(t)
@@ -2780,9 +2780,8 @@ func runPublishDaemonLifecycle(t *testing.T, external bool) {
 		body, err := requestPath(routingID, "/", 300*time.Millisecond)
 		return err == nil && body == echoBody
 	}
-	// Keep real traffic flowing across two short NHP admission rotations. A
-	// request may retry within one bounded in-flight TCP window; a route gap
-	// beyond that fails the journey.
+	// Retry brief rotation failures within one TCP window. Each attempt also
+	// has its own request timeout.
 	requestAcrossRotation := func() bool {
 		retryUntil := time.Now().Add(300 * time.Millisecond)
 		for {
