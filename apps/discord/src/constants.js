@@ -443,6 +443,28 @@ const AUDIT_EVENTS = {
   // matter until someone tries to use it.
   DEPENDENCY_AUTH_FAILURE: 'dependency_auth_failure',
 
+  // Emitted by setGuildApiKey when a successful guild setup (OAuth callback or
+  // `/qurl setup` paste) rebinds an existing guild to a different configured_by
+  // admin. TODO(upstream-contract): keep qurl-integrations-infra's
+  // qurl_setup_admin_changed CloudWatch filter/alarm in sync with this string
+  // (pinned literally in ddb-store.test.js). Scope: an administrator change
+  // only; a same-admin key replacement (e.g. a compromised admin session
+  // swapping in another key) is not covered (see #1455). Best-effort, with
+  // three known blind spots: (1) deleting the configuration first (a whole-row
+  // delete, _removeGuildApiKeyRaw, with no production caller today) leaves no
+  // prior administrator to compare (#1455); (2) a retried or double-submitted
+  // write that already landed reads the new admin back as the old one, and the
+  // SDK's own retries on throttling or dropped connections make this
+  // infrastructure-driven, not only user-driven; (3) a damaged row that lost
+  // configured_by, rebound by a caller that also omits configuredBy, compares
+  // null to null and stays silent. Guild/admin IDs are forensic fields, never
+  // CloudWatch metric dimensions. Only human setup flows may call
+  // setGuildApiKey: a backfill or admin tool writing a synthetic configured_by
+  // would page on every already-configured guild. Extension point: such a
+  // writer should get its own non-auditing SETUP_VIA door that
+  // auditSetupAdminChange skips.
+  QURL_SETUP_ADMIN_CHANGED: 'qurl_setup_admin_changed',
+
   // qURL webhook receiver — feeds CloudWatch metric filters +
   // alarms managed in the deploying organization's infrastructure
   // (separate from this repo). Flat counters only: do NOT promote
@@ -633,6 +655,32 @@ const GATEWAY_DISPATCH_TYPES = Object.freeze({
   INTERACTION_CREATE: 'INTERACTION_CREATE',
 });
 
+// Setup door recorded on the qurl_setup_admin_changed audit (CloudWatch/Logs
+// Insights) and, normalized the same way, in guild-webhook-link.js's persisted
+// qurl-service subscription description (`via=<value>`; the backfill script
+// writes its own `via=backfill-script`). Renaming a value forks both. An enum
+// so a typo cannot silently split a grouping. OAUTH deliberately covers both
+// /oauth/qurl/callback entries (`/qurl setup` and the install link): the signed
+// state carries no stage marker.
+const SETUP_VIA = Object.freeze({
+  OAUTH: 'oauth',
+  PASTE: 'paste',
+  UNKNOWN: 'unknown',
+});
+// UNKNOWN is an output sentinel, not a door a caller may pass.
+const SETUP_VIA_DOORS = new Set(Object.values(SETUP_VIA).filter((v) => v !== SETUP_VIA.UNKNOWN));
+// Omitted, unrecognized or sentinel doors collapse to UNKNOWN.
+function normalizeSetupVia(via) {
+  return SETUP_VIA_DOORS.has(via) ? via : SETUP_VIA.UNKNOWN;
+}
+// Log-safe description of an unrecognized door: echo only short, letter-led
+// slugs (well below secret length, case kept so a case typo is visible), so a
+// misplaced argument such as an API key or token never reaches the logs.
+function describeSetupVia(via) {
+  const text = String(via);
+  return { via: /^[A-Za-z][A-Za-z0-9_-]{0,15}$/.test(text) ? text : '[unrecognized]', via_type: typeof via };
+}
+
 // Use one tag for gateway and worker rejection alerts.
 const LOG_KINDS = Object.freeze({
   UNHANDLED_REJECTION: 'unhandledRejection',
@@ -657,6 +705,9 @@ module.exports = {
   GITHUB_ACTIONS,
   GOOD_FIRST_ISSUE_PATTERNS,
   AUDIT_EVENTS,
+  SETUP_VIA,
+  normalizeSetupVia,
+  describeSetupVia,
   QURL_WEBHOOK_EVENTS,
   TRUST,
   GATEWAY_DISPATCH_TYPES,

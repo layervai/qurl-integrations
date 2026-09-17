@@ -136,8 +136,9 @@ router.get('/callback', rateLimit, async (req, res) => {
   // log field, but with prompt=consent unconditional that helper's
   // bias-toward-true semantics were wrong for an informational
   // metric. If we ever want the first-install vs re-install signal,
-  // pull it from setGuildApiKey's audit log or call getGuildConfig
-  // directly with a try/catch that distinguishes hit/miss/error.
+  // call getGuildConfig directly with a try/catch that distinguishes
+  // hit/miss/error. setGuildApiKey's qurl_setup_admin_changed audit
+  // cannot serve it: it is silent on first setup and same-admin re-key.
   // Round-9.6 item #3.
 
   // 1. Exchange code at Discord for an access_token. The token itself

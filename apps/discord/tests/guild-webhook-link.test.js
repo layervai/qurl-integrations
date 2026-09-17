@@ -50,9 +50,9 @@ process.env.AWS_REGION = 'us-east-2';
 process.env.DDB_TABLE_PREFIX = 'qurl-bot-discord-test-';
 
 const {
-  linkGuildWebhookSubscription, LINK_RESULTS,
+  linkGuildWebhookSubscription, fireAndForgetLinkGuildWebhookSubscription, LINK_RESULTS,
 } = require('../src/guild-webhook-link');
-const { AUDIT_EVENTS } = require('../src/constants');
+const { AUDIT_EVENTS, SETUP_VIA } = require('../src/constants');
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -261,5 +261,40 @@ describe('linkGuildWebhookSubscription — bestEffortDeleteSubscription failure'
       AUDIT_EVENTS.QURL_WEBHOOK_SUBSCRIPTION_DELETE_FAILED,
       expect.any(Object),
     );
+  });
+});
+
+describe('fireAndForgetLinkGuildWebhookSubscription — door normalization', () => {
+  const logger = require('../src/logger');
+
+  it.each([
+    [SETUP_VIA.PASTE, 'paste'],
+    ['OAuth', 'unknown'],
+    [undefined, 'unknown'],
+    ['oauth), configuredBy=attacker', 'unknown'],
+  ])('records door %p as via=%s, like the setup audit', async (via, expected) => {
+    await fireAndForgetLinkGuildWebhookSubscription({ guildId: 'g_ff', apiKey: 'lv_x', via, configuredBy: 'u-1' });
+    const call = mockEnsureWebhookSubscription.mock.calls[0][0];
+    expect(call.description).toBe(`Discord bot view counter (guild=g_ff, via=${expected}, configuredBy=u-1)`);
+  });
+
+  it('warns once when the wrapper records an unrecognized door', async () => {
+    await fireAndForgetLinkGuildWebhookSubscription({ guildId: 'g_ff', apiKey: 'lv_x', via: 'OAuth', configuredBy: 'u-1' });
+    expect(logger.warn).toHaveBeenCalledWith(
+      'Unrecognized setup door in subscription description; recording via=unknown',
+      { via: 'OAuth', via_type: 'string', guildId: 'g_ff' },
+    );
+    expect(logger.warn.mock.calls.filter(([msg]) => msg.startsWith('Unrecognized setup door'))).toHaveLength(1);
+  });
+
+  it('still links when the door warning throws', async () => {
+    logger.warn.mockImplementationOnce(() => { throw new Error('EPIPE'); });
+    await fireAndForgetLinkGuildWebhookSubscription({ guildId: 'g_ff', apiKey: 'lv_x', via: 'OAuth', configuredBy: 'u-1' });
+    expect(mockEnsureWebhookSubscription).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not warn for a known door', async () => {
+    await fireAndForgetLinkGuildWebhookSubscription({ guildId: 'g_ff', apiKey: 'lv_x', via: SETUP_VIA.OAUTH, configuredBy: 'u-1' });
+    expect(logger.warn.mock.calls.filter(([msg]) => msg.startsWith('Unrecognized setup door'))).toHaveLength(0);
   });
 });

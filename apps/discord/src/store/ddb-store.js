@@ -43,6 +43,9 @@ const logger = require('../logger');
 const {
   DM_STATUS,
   AUDIT_EVENTS,
+  SETUP_VIA,
+  normalizeSetupVia,
+  describeSetupVia,
   DDB_TRANSACTION_MAX_ACTIONS,
   ddbSendConfigGuardActionCount,
   ddbSendConfigGuardFitsTransaction,
@@ -1524,7 +1527,60 @@ async function getGuildApiKey(guildId) {
   return res.Item ? decrypt(res.Item.qurl_api_key) : null;
 }
 
-async function setGuildApiKey(guildId, apiKey, configuredBy) {
+// Observability around a key write must never fail that write, before or
+// after it lands.
+function bestEffortLog(emit) {
+  try { emit(); } catch { /* observability must never fail the key write */ }
+}
+
+// Emits qurl_setup_admin_changed when a landed setGuildApiKey write rebinds an
+// already-configured guild. `prior` holds only non-secret fields derived from
+// the write's UPDATED_OLD attributes. It never throws.
+function auditSetupAdminChange(prior, { guildId, configuredBy, door }) {
+  // The write has landed: nothing here may surface as a write failure (or
+  // qurl-oauth.js would revoke the key it just stored), and any failure,
+  // including an ID coercion, leaves an error line instead of vanishing.
+  try {
+    // String() keeps a numeric or BigInt caller ID from paging on every re-key.
+    // A falsy ID (missing or hand-edited to '') reports null, the documented damaged-row value.
+    const oldAdminId = prior.configuredBy ? String(prior.configuredBy) : null;
+    const newAdminId = configuredBy ? String(configuredBy) : null;
+    const priorHadKey = prior.hadKey;
+    // Either prior attribute means the guild was already configured, even when a
+    // hand edit or partial rollback dropped the other. Unlike shouldPromptConsent
+    // (guild-config-state.js), which treats a row without configured_by as a
+    // first install, the alarm biases toward paging; a missing admin reports null.
+    if (!(priorHadKey || oldAdminId !== null) || oldAdminId === newAdminId) return;
+    logger.audit(AUDIT_EVENTS.QURL_SETUP_ADMIN_CHANGED, {
+      guild_id: guildId,
+      old_admin_id: oldAdminId,
+      new_admin_id: newAdminId,
+      // Separates a damaged configured row (key, no configured_by) from a
+      // healthy rebind when old_admin_id or prior_configured_at is null.
+      prior_had_key: priorHadKey,
+      via: door,
+      // configured_at is the guild's stable first-setup time. updated_at is the
+      // last write of any kind (webhook writes stamp it too), not the binding's
+      // age; it is a control: always overwritten here, so non-null with a null
+      // prior_configured_at shows UPDATED_OLD elided the if_not_exists no-op.
+      prior_configured_at: prior.configuredAt ?? null,
+      prior_updated_at: prior.updatedAt ?? null,
+    });
+  } catch (err) {
+    bestEffortLog(() => logger.error('Failed to emit setup admin-change audit after a landed write', {
+      error: err?.message, guildId,
+    }));
+  }
+}
+
+// `via` (a SETUP_VIA value) names the setup door for the admin-change audit.
+async function setGuildApiKey(guildId, apiKey, configuredBy, via) {
+  const door = normalizeSetupVia(via);
+  // Validate on every call so caller drift (including a forgotten argument)
+  // shows up on first setups too; such doors audit as unknown.
+  if (door === SETUP_VIA.UNKNOWN) {
+    bestEffortLog(() => logger.warn('Unrecognized setup door; any admin-change audit for this write records via=unknown', { ...describeSetupVia(via), guildId }));
+  }
   const now = nowIso();
   // SQLite's `ON CONFLICT(guild_id) DO UPDATE SET qurl_api_key=…,
   // configured_by=…, updated_at=…` deliberately preserved
@@ -1534,7 +1590,7 @@ async function setGuildApiKey(guildId, apiKey, configuredBy) {
   // row, including resetting configured_at. Mirror createLink's
   // shape: UpdateCommand with `if_not_exists(configured_at, :u)`
   // so first-write sets it and re-keys leave it alone.
-  await ddb.send(new UpdateCommand({
+  const res = await ddb.send(new UpdateCommand({
     TableName: TABLES.guild_configs,
     Key: { guild_id: guildId },
     UpdateExpression: 'SET qurl_api_key = :k, configured_by = :b, updated_at = :u, configured_at = if_not_exists(configured_at, :u)',
@@ -1543,7 +1599,25 @@ async function setGuildApiKey(guildId, apiKey, configuredBy) {
       ':b': configuredBy,
       ':u': now,
     },
+    // Return old values for touched attrs: keeps the old configured_by
+    // read atomic with the re-key without returning the entire previous
+    // guild_configs row. DynamoDB also returns the old encrypted
+    // qurl_api_key because it is touched by this update; leave it
+    // unread so the audit payload never carries key material. prior
+    // configured_at relies on UPDATED_OLD also covering the if_not_exists
+    // no-op on a re-key. scripts/smoke-setup-audit.js checks this with real
+    // writes (DynamoDB Local in CI; --aws for a disposable sandbox table).
+    ReturnValues: 'UPDATED_OLD',
   }));
+  // Hand the helper only the non-secret prior fields: the old encrypted key is
+  // reduced to a presence flag here, so it is structurally out of reach.
+  const prior = res?.Attributes ?? {};
+  auditSetupAdminChange({
+    configuredBy: prior.configured_by,
+    configuredAt: prior.configured_at,
+    updatedAt: prior.updated_at,
+    hadKey: 'qurl_api_key' in prior,
+  }, { guildId, configuredBy, door });
 }
 
 // Raw delete. No qurl-service subscription teardown. Today there is
