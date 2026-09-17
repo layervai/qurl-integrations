@@ -367,6 +367,67 @@ describe('qURL client — getResourceStatus', () => {
   });
 });
 
+describe('qURL client — revokeOrdinaryLinks', () => {
+  let qurl;
+
+  beforeEach(() => {
+    jest.resetModules();
+    jest.mock('../src/config', () => ({
+      QURL_API_KEY: 'test-api-key',
+      QURL_ENDPOINT: 'https://api.test.local',
+    }));
+    qurl = require('../src/qurl');
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  it('skips the network for an empty batch', async () => {
+    globalThis.fetch = jest.fn();
+    await qurl.revokeOrdinaryLinks(PUBLIC_KEY_RESOURCE_ID, [], 'guild-key');
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['public key', PUBLIC_KEY_RESOURCE_ID],
+    ['CRID', CRID_RESOURCE_ID],
+  ])('revokes each child on the verified %s parent CRID without deleting the parent', async (_, recorded) => {
+    globalThis.fetch = jest.fn()
+      .mockResolvedValueOnce(apiOk(200, {
+        resource_id: PUBLIC_KEY_RESOURCE_ID, crid: CRID_RESOURCE_ID, qurls: [],
+      }))
+      .mockResolvedValue(apiOk(204));
+
+    await qurl.revokeOrdinaryLinks(recorded, ['q_aaaaaaaaaa1', 'q_aaaaaaaaaa2'], 'guild-key');
+
+    const calls = globalThis.fetch.mock.calls.map(([url, init]) => [init?.method || 'GET', String(url)]);
+    expect(calls).toEqual([
+      ['GET', 'https://api.test.local/v1/qurls/q_aaaaaaaaaa1'],
+      ['DELETE', `https://api.test.local/v1/resources/${CRID_RESOURCE_ID}/qurls/q_aaaaaaaaaa1`],
+      ['DELETE', `https://api.test.local/v1/resources/${CRID_RESOURCE_ID}/qurls/q_aaaaaaaaaa2`],
+    ]);
+  });
+
+  it('refuses to revoke children whose parent is not the recorded source', async () => {
+    globalThis.fetch = jest.fn().mockResolvedValueOnce(apiOk(200, {
+      resource_id: 'other-resource', crid: 'other-crid', qurls: [],
+    }));
+
+    await expect(qurl.revokeOrdinaryLinks(PUBLIC_KEY_RESOURCE_ID, ['q_aaaaaaaaaa1'], 'guild-key'))
+      .rejects.toThrow('qURL revoke parent does not match the recorded source');
+    expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('fails closed when the caller cannot see the child (a watermarked child)', async () => {
+    globalThis.fetch = jest.fn().mockResolvedValue(apiError(404, { code: 'not_found' }));
+
+    await expect(qurl.revokeOrdinaryLinks(PUBLIC_KEY_RESOURCE_ID, ['q_aaaaaaaaaa1'], 'guild-key'))
+      .rejects.toThrow('qURL API GET /qurls/:resourceId failed (404)');
+    expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('qURL client — retry + audit behavior', () => {
   let qurl;
   beforeEach(() => {

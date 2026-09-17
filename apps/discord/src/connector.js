@@ -2,20 +2,29 @@ const { QURLClient } = require('@layervai/qurl');
 
 const config = require('./config');
 const logger = require('./logger');
-const { validateResourceId } = require('./utils/resource-id');
+const { validateResourceId, resourceIdLogRef } = require('./utils/resource-id');
+const { qurlIdForCleanup } = require('./utils/qurl-id');
 
 // Reuse the security-critical, syntactic private/loopback/link-local IP guard
 // from qurl.js rather than duplicating ~50 lines of IP-literal parsing that
 // could drift out of sync. resolveDetectTarget() self-mints the ephemeral
 // detect qURL via the @layervai/qurl SDK (the standardized client), not qurl.js.
 // qurl.js has no connector.js dependency, so this require introduces no cycle.
-const { isPrivateHost } = require('./qurl');
+const { isPrivateHost, revokeOrdinaryLinks } = require('./qurl');
 
 const { sanitizeFilename } = require('./utils/sanitize');
 const { formatSessionDurationSeconds, isPositiveFinite } = require('./utils/time');
 
 const { MAX_FILE_SIZE } = require('./constants');
 const MAX_CDN_REDIRECTS = 3;
+// TODO(upstream-contract): qurl-integrations-infra#1551's POST /api/revoke_links
+// processes at most 10 unique ids under one 55s handler deadline. Leave 10s for
+// response transport so the caller, not an accidental race, owns the bound.
+// The endpoint rejects larger requests atomically, so chunk rather than couple
+// to commands.js's independently tunable TOKENS_PER_RESOURCE.
+const REVOKE_LINKS_TIMEOUT_MS = 65_000;
+const REVOKE_LINKS_MAX_IDS = 10;
+const REVOKE_CONFIRMED_STATUSES = new Set(['revoked', 'already_gone', 'not_connector_managed']);
 
 // Truncate the connector's MD5 of an uploaded file before logging. The full
 // hash is treated as sensitive in our broader infrastructure; see internal
@@ -457,6 +466,22 @@ async function mintLinks(resourceId, { expiresAt, n, apiKey, selfDestructSeconds
         partial_qurl_ids: partialQurlIds,
       });
     }
+    // TODO(upstream-contract): qurl-integrations-infra#1551 returns id-only
+    // compensation entries for children whose view write failed, and callers
+    // must revoke them. Revoke every returned child before rethrowing so a
+    // failed mint never strands a live shared-tunnel token; a cleanup failure
+    // is logged and never masks the mint error.
+    const cleanupIds = partialQurlIds.map(qurlIdForCleanup).filter(Boolean);
+    if (cleanupIds.length > 0) {
+      await revokeMintedLinks(resourceId, cleanupIds, apiKey).catch(cleanupError => {
+        logger.error('Connector partial mint cleanup failed', {
+          resource_ref: resourceIdLogRef(resourceId),
+          partial_link_count: cleanupIds.length,
+          cleanup_status: cleanupError?.status,
+          error: cleanupError?.message,
+        });
+      });
+    }
     return throwConnectorErrorFromBody('Connector mint_link', response, {
       bodyText,
       apiCode,
@@ -475,6 +500,84 @@ async function mintLinks(resourceId, { expiresAt, n, apiKey, selfDestructSeconds
 
   logger.info('Minted links', { resource_id: resourceId, count: result.links.length });
   return result.links;
+}
+
+/**
+ * Revoke the recipient links minted from an uploaded resource, never the
+ * resource itself (upload deduplication can share it with other sends).
+ *
+ * Watermarked views are minted on the connector's shared fileviewer tunnel, not
+ * on the resource the guild owns, so a qURL resource revoke cannot reach them
+ * (qurl-integrations-infra#1552). The connector revokes them on our behalf after
+ * proving `apiKey` owns `resourceId` and each child maps to it; children it
+ * classifies `not_connector_managed` are ordinary tokens the SDK revokes here.
+ *
+ * TODO(upstream-contract): qurl-integrations-infra#1551 keeps the route
+ * default-off, so a 404 means it is not registered, never that a child is gone.
+ * Fall back to the SDK, which succeeds only for ordinary children of this exact
+ * source; a watermarked child fails closed until the route is enabled. Every
+ * other non-2xx (401/403/413, 429 with Retry-After, 502/503) and anything short
+ * of one confirmed outcome per requested id throws, so callers keep the send
+ * and its parent resource as retry anchors.
+ *
+ * @throws when any requested link may still be live.
+ */
+async function revokeMintedLinks(resourceId, qurlIds, apiKey) {
+  validateResourceId(resourceId);
+  if (!Array.isArray(qurlIds)) throw new Error('Invalid connector revoke token list');
+  const normalizedIds = qurlIds.map(qurlIdForCleanup);
+  if (normalizedIds.includes(null)) throw new Error('Invalid connector revoke token identity');
+  const ids = [...new Set(normalizedIds)];
+
+  for (let offset = 0; offset < ids.length; offset += REVOKE_LINKS_MAX_IDS) {
+    const batchIds = ids.slice(offset, offset + REVOKE_LINKS_MAX_IDS);
+    const response = await fetch(`${config.CONNECTOR_URL}/api/revoke_links`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...connectorAuthHeaders(apiKey) },
+      body: JSON.stringify({ resource_id: resourceId, qurl_ids: batchIds }),
+      redirect: 'error',
+      signal: AbortSignal.timeout(REVOKE_LINKS_TIMEOUT_MS),
+    });
+
+    if (response.status === 404) {
+      await response.body?.cancel();
+      await revokeOrdinaryLinks(resourceId, batchIds, apiKey);
+      continue;
+    }
+    if (!response.ok) {
+      await throwConnectorError('Connector revoke_links', response);
+    }
+
+    let parsed;
+    try {
+      parsed = await response.json();
+    } catch {
+      throw new Error('Connector revoke_links returned invalid JSON');
+    }
+
+    // Results are unordered: require exactly one confirmed outcome per
+    // requested id. An empty, short, duplicate or foreign result set fails.
+    const statuses = new Map();
+    const results = parsed?.success === true && Array.isArray(parsed.results) ? parsed.results : [];
+    for (const result of results) {
+      if (batchIds.includes(result?.qurl_id) && REVOKE_CONFIRMED_STATUSES.has(result.status)
+          && !statuses.has(result.qurl_id)) {
+        statuses.set(result.qurl_id, result.status);
+      }
+    }
+    if (results.length !== batchIds.length || statuses.size !== batchIds.length) {
+      throw new Error('Connector revoke_links did not confirm every requested link');
+    }
+    await revokeOrdinaryLinks(
+      resourceId,
+      batchIds.filter(id => statuses.get(id) === 'not_connector_managed'),
+      apiKey,
+    );
+  }
+  logger.info('Confirmed minted link revoke', {
+    resource_ref: resourceIdLogRef(resourceId),
+    count: ids.length,
+  });
 }
 
 const DETECT_TARGET_PATH = '/api/detect';
@@ -947,4 +1050,4 @@ async function uploadJsonToConnector(jsonPayload, filename, apiKey, viewerTtlSec
   return result;
 }
 
-module.exports = { uploadToConnector, downloadAndUpload, reUploadBuffer, mintLinks, detectWatermark, uploadJsonToConnector, isAllowedSourceUrl, detectTunnelHostSuffixesForEndpoint };
+module.exports = { uploadToConnector, downloadAndUpload, reUploadBuffer, mintLinks, revokeMintedLinks, detectWatermark, uploadJsonToConnector, isAllowedSourceUrl, detectTunnelHostSuffixesForEndpoint };

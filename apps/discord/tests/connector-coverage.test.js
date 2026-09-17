@@ -750,3 +750,222 @@ describe('detectTunnelHostSuffixesForEndpoint — env-extendable non-prod allowl
       .toEqual(['.qurl.site', '.qurl.site.layerv.xyz', '.qurl.site.layerv.ai']);
   });
 });
+
+describe('revokeMintedLinks — #1551 fail-closed contract', () => {
+  let connector;
+  let logger;
+  let revokeOrdinaryLinks;
+
+  const okJson = (body) => ({ ok: true, status: 200, json: async () => body });
+  const revoked = (...ids) => okJson({
+    success: true,
+    results: ids.map(qurl_id => ({ qurl_id, status: 'revoked' })),
+  });
+
+  beforeEach(() => {
+    jest.resetModules();
+    jest.doMock('../src/config', () => ({
+      CONNECTOR_URL: 'https://connector.test.local',
+      QURL_API_KEY: 'test-key-for-connector',
+    }));
+    jest.doMock('../src/qurl', () => ({
+      ...jest.requireActual('../src/qurl'),
+      revokeOrdinaryLinks: jest.fn().mockResolvedValue(undefined),
+    }));
+    connector = require('../src/connector');
+    logger = require('../src/logger');
+    ({ revokeOrdinaryLinks } = require('../src/qurl'));
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  it('sends the caller credential and accepts reordered exact coverage', async () => {
+    globalThis.fetch = jest.fn().mockResolvedValue(okJson({
+      success: true,
+      results: [
+        { qurl_id: 'q_two', status: 'already_gone' },
+        { qurl_id: 'q_one', status: 'revoked' },
+      ],
+    }));
+
+    await connector.revokeMintedLinks('res-1', ['q_one', ' q_two ', 'q_one'], 'guild-key');
+
+    expect(globalThis.fetch).toHaveBeenCalledWith(
+      'https://connector.test.local/api/revoke_links',
+      expect.objectContaining({
+        method: 'POST',
+        redirect: 'error',
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer guild-key' },
+        body: JSON.stringify({ resource_id: 'res-1', qurl_ids: ['q_one', 'q_two'] }),
+      }),
+    );
+    expect(revokeOrdinaryLinks).toHaveBeenCalledWith('res-1', [], 'guild-key');
+    expect(logger.info).toHaveBeenCalledWith('Confirmed minted link revoke', {
+      resource_ref: expect.stringMatching(/^sha256:/), count: 2,
+    });
+  });
+
+  it('skips the network when no token ids were recorded', async () => {
+    globalThis.fetch = jest.fn();
+    await connector.revokeMintedLinks('res-1', [], 'guild-key');
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+  });
+
+  it('revokes not_connector_managed children through the SDK, never the parent', async () => {
+    globalThis.fetch = jest.fn().mockResolvedValue(okJson({
+      success: true,
+      results: [
+        { qurl_id: 'q_one', status: 'not_connector_managed' },
+        { qurl_id: 'q_two', status: 'revoked' },
+      ],
+    }));
+
+    await connector.revokeMintedLinks('res-1', ['q_one', 'q_two'], 'guild-key');
+
+    expect(revokeOrdinaryLinks).toHaveBeenCalledWith('res-1', ['q_one'], 'guild-key');
+  });
+
+  it('falls back to exact SDK child revoke when the default-off route is not registered', async () => {
+    const cancel = jest.fn();
+    globalThis.fetch = jest.fn().mockResolvedValue({ ok: false, status: 404, body: { cancel } });
+
+    await connector.revokeMintedLinks('res-1', ['q_one'], 'guild-key');
+
+    expect(cancel).toHaveBeenCalled();
+    expect(revokeOrdinaryLinks).toHaveBeenCalledWith('res-1', ['q_one'], 'guild-key');
+  });
+
+  it('propagates an SDK fallback failure so a watermarked child stays retryable', async () => {
+    globalThis.fetch = jest.fn().mockResolvedValue({ ok: false, status: 404 });
+    revokeOrdinaryLinks.mockRejectedValueOnce(new Error('qURL API request failed (404)'));
+
+    await expect(connector.revokeMintedLinks('res-1', ['q_one'], 'guild-key'))
+      .rejects.toThrow('qURL API request failed (404)');
+  });
+
+  it('chunks to ten ids and requires every chunk to confirm', async () => {
+    const ids = Array.from({ length: 11 }, (_, i) => `q_${i + 1}`);
+    globalThis.fetch = jest.fn()
+      .mockResolvedValueOnce(revoked(...ids.slice(0, 10)))
+      .mockResolvedValueOnce(okJson({ success: true, results: [] }));
+
+    await expect(connector.revokeMintedLinks('res-1', ids, 'guild-key'))
+      .rejects.toThrow('Connector revoke_links did not confirm every requested link');
+
+    expect(globalThis.fetch.mock.calls.map(([, opts]) => JSON.parse(opts.body).qurl_ids))
+      .toEqual([ids.slice(0, 10), ids.slice(10)]);
+  });
+
+  it('bounds each request by the handler deadline plus transport slack', async () => {
+    const timeoutSpy = jest.spyOn(AbortSignal, 'timeout');
+    globalThis.fetch = jest.fn().mockResolvedValue(revoked('q_one'));
+    try {
+      await connector.revokeMintedLinks('res-1', ['q_one'], 'guild-key');
+      expect(timeoutSpy).toHaveBeenCalledWith(65_000);
+    } finally {
+      timeoutSpy.mockRestore();
+    }
+  });
+
+  it.each([
+    [401, {}],
+    [403, {}],
+    [413, {}],
+    [429, { code: 'capacity' }],
+    [502, { results: [{ qurl_id: 'q_one', status: 'failed' }] }],
+    [503, { code: 'revoke_not_available' }],
+  ])('fails closed on connector HTTP %i', async (status, body) => {
+    globalThis.fetch = jest.fn().mockResolvedValue({
+      ok: false,
+      status,
+      headers: new Headers({ 'Retry-After': '1' }),
+      text: async () => JSON.stringify({ success: false, results: [], ...body }),
+    });
+
+    await expect(connector.revokeMintedLinks('res-1', ['q_one'], 'guild-key'))
+      .rejects.toMatchObject({ message: `Connector revoke_links failed (${status})`, status });
+    expect(revokeOrdinaryLinks).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['an omitted outcome', { success: true, results: [{ qurl_id: 'q_one', status: 'revoked' }] }],
+    ['a foreign outcome', { success: true, results: [{ qurl_id: 'q_one', status: 'revoked' }, { qurl_id: 'q_other', status: 'revoked' }] }],
+    ['a duplicate outcome', { success: true, results: [{ qurl_id: 'q_one', status: 'revoked' }, { qurl_id: 'q_one', status: 'revoked' }] }],
+    ['an extra outcome', { success: true, results: [{ qurl_id: 'q_one', status: 'revoked' }, { qurl_id: 'q_two', status: 'revoked' }, { qurl_id: 'q_x', status: 'revoked' }] }],
+    ['success false', { success: false, results: [{ qurl_id: 'q_one', status: 'revoked' }, { qurl_id: 'q_two', status: 'revoked' }] }],
+    ['malformed results', { success: true, results: {} }],
+    ['an unknown status', { success: true, results: [{ qurl_id: 'q_one', status: 'revoked' }, { qurl_id: 'q_two', status: 'refused' }] }],
+  ])('rejects a 200 with %s', async (_label, body) => {
+    globalThis.fetch = jest.fn().mockResolvedValue(okJson(body));
+
+    await expect(connector.revokeMintedLinks('res-1', ['q_one', 'q_two'], 'guild-key'))
+      .rejects.toThrow('Connector revoke_links did not confirm every requested link');
+    expect(revokeOrdinaryLinks).not.toHaveBeenCalled();
+  });
+
+  it('rejects malformed JSON', async () => {
+    globalThis.fetch = jest.fn().mockResolvedValue({
+      ok: true, status: 200, json: async () => { throw new SyntaxError('bad'); },
+    });
+    await expect(connector.revokeMintedLinks('res-1', ['q_one'], 'guild-key'))
+      .rejects.toThrow('Connector revoke_links returned invalid JSON');
+  });
+
+  it.each([42, '   ', 'bad/id', 'at_bearer_like', `q_${'a'.repeat(63)}`])(
+    'rejects invalid token id %p before fetch',
+    async (qurlId) => {
+      globalThis.fetch = jest.fn();
+      await expect(connector.revokeMintedLinks('res-1', [qurlId], 'guild-key'))
+        .rejects.toThrow('Invalid connector revoke token identity');
+      expect(globalThis.fetch).not.toHaveBeenCalled();
+    },
+  );
+
+  it('rejects a non-array token list before fetch', async () => {
+    globalThis.fetch = jest.fn();
+    await expect(connector.revokeMintedLinks('res-1', 'q_one', 'guild-key'))
+      .rejects.toThrow('Invalid connector revoke token list');
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+  });
+
+  it('revokes id-only partial mint children before rethrowing the mint error', async () => {
+    globalThis.fetch = jest.fn()
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 502,
+        text: async () => JSON.stringify({
+          success: false,
+          links: [{ qurl_id: 'q_partial_one', qurl_link: 'https://qurl.link/#at_secret' }, { qurl_id: 'q_partial_two' }],
+        }),
+      })
+      .mockResolvedValueOnce(revoked('q_partial_one', 'q_partial_two'));
+
+    await expect(connector.mintLinks('res-1', { expiresAt: '2026-01-01T00:00:00Z', n: 2 }))
+      .rejects.toMatchObject({ status: 502, partialQurlIds: ['q_partial_one', 'q_partial_two'] });
+    expect(JSON.parse(globalThis.fetch.mock.calls[1][1].body)).toEqual({
+      resource_id: 'res-1', qurl_ids: ['q_partial_one', 'q_partial_two'],
+    });
+    expect(logger.error).not.toHaveBeenCalled();
+  });
+
+  it('keeps the original mint error and logs when partial cleanup fails', async () => {
+    globalThis.fetch = jest.fn()
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 502,
+        text: async () => JSON.stringify({ success: false, links: [{ qurl_id: 'q_partial_one' }] }),
+      })
+      .mockRejectedValueOnce(new TypeError('fetch failed'));
+
+    await expect(connector.mintLinks('res-1', { expiresAt: '2026-01-01T00:00:00Z', n: 1 }))
+      .rejects.toThrow('Connector mint_link failed (502)');
+    expect(logger.error).toHaveBeenCalledWith('Connector partial mint cleanup failed', expect.objectContaining({
+      resource_ref: expect.stringMatching(/^sha256:/),
+      partial_link_count: 1,
+      error: 'fetch failed',
+    }));
+    expect(JSON.stringify(logger.error.mock.calls)).not.toContain('res-1');
+  });
+});

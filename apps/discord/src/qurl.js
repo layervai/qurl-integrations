@@ -52,6 +52,7 @@ const USER_AGENT = 'qurl-discord-bot/1.0';
 // cross-wired credential from reaching logs or audit events.
 const QURL_ID_LOG_PATH = '/qurls/:resourceId';
 const RESOURCE_ID_LOG_PATH = '/resources/:resourceId';
+const RESOURCE_QURL_LOG_PATH = '/resources/:resourceId/qurls/:qurlId';
 const UNKNOWN_STATUS0_CODE = 'unknown_error';
 
 // status-0 SDK error codes whose message the SDK synthesizes itself (no server
@@ -336,6 +337,26 @@ async function deleteLink(resourceId, apiKey) {
   logger.info('Revoked qURL resource', { resource_id: resourceId });
 }
 
+// Revoke ordinary (non-connector-managed) children one by one, never their
+// parent: connector upload deduplication can share one parent across sends.
+// Old send rows record a public resource key, so resolve the parent CRID from
+// an identified child and require it to match the recorded source first.
+// TODO(upstream-contract): qurl-service checks that each child belongs to the
+// CRID in the DELETE path. Callers pass one bounded batch (at most ten ids).
+async function revokeOrdinaryLinks(resourceId, qurlIds, apiKey) {
+  if (qurlIds.length === 0) return;
+  const client = makeClient(apiKey);
+  const parent = await callQurl('GET', QURL_ID_LOG_PATH, () => client.get(qurlIds[0]));
+  if (!parent?.crid || (parent.resource_id !== resourceId && parent.crid !== resourceId)) {
+    throw new Error('qURL revoke parent does not match the recorded source');
+  }
+  await Promise.all(qurlIds.map(qurlId => callQurl(
+    'DELETE',
+    RESOURCE_QURL_LOG_PATH,
+    () => client.revokeResourceQurl(parent.crid, qurlId),
+  )));
+}
+
 async function getResourceStatus(resourceId, apiKey) {
   qurlPath(resourceId);
   const client = makeClient(apiKey);
@@ -354,6 +375,7 @@ async function getResourceStatus(resourceId, apiKey) {
 module.exports = {
   createOneTimeLink,
   deleteLink,
+  revokeOrdinaryLinks,
   getIdentity,
   getResourceStatus,
   isPrivateHost,
