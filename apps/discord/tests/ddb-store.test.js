@@ -149,6 +149,10 @@ describe('guild configs', () => {
   test('setGuildApiKey: resolves when the audit observation itself throws', async () => {
     ddbMock.on(UpdateCommand).resolves({ Attributes: { configured_by: 'old-admin', qurl_api_key: 'enc:v1:IV:TAG:deadbeef' } });
     await expect(store.setGuildApiKey('g-1', 'plain-key', Object.create(null), SETUP_VIA.OAUTH)).resolves.toBeUndefined();
+    expect(logger.error).toHaveBeenCalledWith(
+      'Failed to emit setup admin-change audit after a landed write',
+      expect.objectContaining({ guildId: 'g-1' }),
+    );
   });
 
   test('setGuildApiKey: warns when a caller passes the UNKNOWN sentinel as a door', async () => {

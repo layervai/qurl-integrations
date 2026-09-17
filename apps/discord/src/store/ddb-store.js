@@ -1536,18 +1536,19 @@ function bestEffortLog(emit) {
 // Emits qurl_setup_admin_changed when a landed setGuildApiKey write rebinds an
 // already-configured guild. `prior` is the write's UPDATED_OLD attributes.
 function auditSetupAdminChange(prior, { guildId, configuredBy, door }) {
-  // String() keeps a numeric or BigInt caller ID from paging on every re-key.
-  const oldAdminId = prior.configured_by == null ? null : String(prior.configured_by);
-  const newAdminId = configuredBy == null ? null : String(configuredBy);
-  const priorHadKey = 'qurl_api_key' in prior;
-  // Either prior attribute means the guild was already configured, even when a
-  // hand edit or partial rollback dropped the other. Unlike shouldPromptConsent
-  // (guild-config-state.js), which treats a row without configured_by as a
-  // first install, the alarm biases toward paging; a missing admin reports null.
-  if (!(priorHadKey || oldAdminId !== null) || oldAdminId === newAdminId) return;
-  // The write has landed: an audit failure must not surface as a write
-  // failure, or qurl-oauth.js would revoke the key it just stored.
+  // The write has landed: nothing here may surface as a write failure (or
+  // qurl-oauth.js would revoke the key it just stored), and any failure,
+  // including an ID coercion, leaves an error line instead of vanishing.
   try {
+    // String() keeps a numeric or BigInt caller ID from paging on every re-key.
+    const oldAdminId = prior.configured_by == null ? null : String(prior.configured_by);
+    const newAdminId = configuredBy == null ? null : String(configuredBy);
+    const priorHadKey = 'qurl_api_key' in prior;
+    // Either prior attribute means the guild was already configured, even when a
+    // hand edit or partial rollback dropped the other. Unlike shouldPromptConsent
+    // (guild-config-state.js), which treats a row without configured_by as a
+    // first install, the alarm biases toward paging; a missing admin reports null.
+    if (!(priorHadKey || oldAdminId !== null) || oldAdminId === newAdminId) return;
     logger.audit(AUDIT_EVENTS.QURL_SETUP_ADMIN_CHANGED, {
       guild_id: guildId,
       old_admin_id: oldAdminId,
@@ -1556,10 +1557,10 @@ function auditSetupAdminChange(prior, { guildId, configuredBy, door }) {
       // healthy rebind when old_admin_id or prior_configured_at is null.
       prior_had_key: priorHadKey,
       via: door,
-      // configured_at is the guild's stable first-setup time (webhook writes
-      // also stamp updated_at). updated_at is always overwritten here, so a
-      // non-null prior_updated_at with a null prior_configured_at shows
-      // UPDATED_OLD elided the if_not_exists no-op rather than a damaged row.
+      // configured_at is the guild's stable first-setup time. updated_at is the
+      // last write of any kind (webhook writes stamp it too), not the binding's
+      // age; it is a control: always overwritten here, so non-null with a null
+      // prior_configured_at shows UPDATED_OLD elided the if_not_exists no-op.
       prior_configured_at: prior.configured_at ?? null,
       prior_updated_at: prior.updated_at ?? null,
     });
