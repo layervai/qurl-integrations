@@ -62,6 +62,12 @@ const env = loadEnv();
 // through tracked.revoke so the assertion stays while the ledger syncs.
 const tracked = trackedQurlResources(env);
 
+// Reading a failure here: `expect(revoked).toBe(true)` going red while the
+// getResourceStatus assertion below would have said `revoked` does NOT mean the
+// revocation failed. It means the NHP protection update was still pending after
+// the one server-directed window revokeLink waits out — a convergence
+// regression, not a revoke regression. #1506 tracks asserting the terminal
+// state instead, which would make these tests immune to that window.
 afterAll(() => tracked.revokeAll());
 
 // Valid 1x1 transparent PNG (standard test fixture — widely used, CRC/zlib
@@ -262,7 +268,9 @@ describe('File Revoke', () => {
     const revoked = await tracked.revoke(upload.resource_id);
     expect(revoked).toBe(true);
     // Generous timeout: upload + connector mint + one served cold-chromium
-    // knock + one negative knock that waits out its full 20s budget + revoke.
+    // knock + one negative knock that waits out its full 20s budget + a revoke
+    // that may spend ~31s confirming through the protection-update 503
+    // (~110s worst case).
   }, 150_000);
 
   test('double revoke on file is idempotent', async () => {

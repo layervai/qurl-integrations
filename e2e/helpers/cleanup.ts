@@ -97,8 +97,13 @@ export function trackedQurlResources(env: {
   // sweep only needs "did it stick", and charging it ~30s plus a second round
   // trip per straggler would blow the very hook budget that keeps it from
   // leaking (60 resources would need ~35min). Options object, not a positional
-  // boolean: the interface below declares one parameter, so `ids.map(revoke)`
-  // would type-check while passing the array index as the flag.
+  // boolean: consumers reach this through QurlResourceTracker below, whose
+  // `revoke` declares ONE parameter, so `ids.map(tracked.revoke)` type-checks
+  // against that signature and hands the array index to the second argument at
+  // runtime. As a boolean that silently turns confirmation OFF for element 0
+  // (index 0 is falsy); destructuring a number just yields the defaults.
+  // (Passing the raw local const to .map is rejected either way — it is the
+  // interface-typed spelling that compiles.)
   const revoke = async (
     resourceId: string,
     { confirmPending = true }: { confirmPending?: boolean } = {},

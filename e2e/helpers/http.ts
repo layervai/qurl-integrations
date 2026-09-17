@@ -103,7 +103,10 @@ function isRetryableStatus(status: number, method: string): boolean {
  *   (transient) and its deployment-state "dark 503" 60 (standing — waiting only
  *   makes a permanent failure slower to report). Nothing in the response
  *   separates them, so only the call site can. Everyone else keeps the 1s/2s
- *   backoff. The ceiling also caps a hostile or absurd directive.
+ *   backoff. The ceiling also caps a hostile or absurd directive — PER ATTEMPT,
+ *   so an opted-in caller's worst case is `(maxAttempts - 1) x ceiling` and it
+ *   owns both numbers together (`revokeLink` pins `maxAttempts: 2` for exactly
+ *   this reason; inheriting the default 3 would mean ~70s).
  *
  *   Scoped to 503 even when opted in: a 429 directive on this stack means "you
  *   burst", and honoring it would let one shed DELETE cost 35s inside the

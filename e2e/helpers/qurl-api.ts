@@ -266,8 +266,11 @@ export async function accessLinkNoRedirect(url: string): Promise<LinkAccessResul
  * `confirmPending: false` drops the confirm attempt entirely — one request,
  * exactly as before this helper gained a retry — for best-effort bulk cleanup:
  * the 503 already said the write is committed, so a sweep only needs "did it
- * stick", and neither the ~30s wait nor a second round trip should be charged
- * to the hook budgets that keep a sweep from leaking (cleanup.ts's revokeAll).
+ * stick". Dropping the retry as well as the wait is about the BOUNDED worst
+ * case, not the cost of one round trip: a service-wide shed has every one of
+ * cleanup.ts's ~60 stragglers retrying, ~+120s on a sweep already budgeted at
+ * ~130s against a 180s hook — so the sweep would time out and leak the
+ * resources it exists to reclaim. A single straggler retrying would be fine.
  *
  * TODO(upstream-contract): mirrors qurl-service's protected-resource revoke
  * contract — that a 503 here means the revocation is COMMITTED (not rejected),

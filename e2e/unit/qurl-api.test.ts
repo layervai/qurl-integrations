@@ -374,13 +374,13 @@ describe('revokeLink retry path', () => {
           }),
         )
         .mockResolvedValueOnce(new Response(null, { status: 204 }));
-  
+
       const pending = qurl.revokeLink(mintUrl, apiKey, publicResourceId);
       // The retry must wait out the server's directive, not the 1s local backoff.
       await jest.advanceTimersByTimeAsync(1_000);
       expect(fetchMock).toHaveBeenCalledTimes(1);
       await jest.advanceTimersByTimeAsync(29_000);
-  
+
       await expect(pending).resolves.toBe(true);
       expect(fetchMock).toHaveBeenCalledTimes(2);
       expect(fetchMock.mock.calls[1][1]).toMatchObject({ method: 'DELETE' });
@@ -388,7 +388,7 @@ describe('revokeLink retry path', () => {
       jest.useRealTimers();
     }
   });
-  
+
   // Bulk cleanup opts out entirely: the 503 already said the write is
   // committed, so the afterAll sweep only needs "did it stick". It stays ONE
   // request — no 30s wait and no second round trip — because cleanup.ts's
@@ -410,38 +410,28 @@ describe('revokeLink retry path', () => {
       jest.useRealTimers();
     }
   });
-  
+
   // A 404 is a resource that never existed, which negative-paths.test.ts asserts
   // returns false — and it must stay false however the retry budget changes.
+  test.each([
+    ['the confirming default', undefined],
+    ['the non-confirming sweep budget', { confirmPending: false }],
+  ])('revokeLink returns true on a plain 204 under %s', async (_d, opts) => {
+    fetchMock.mockImplementationOnce(() => new Response(null, { status: 204 }));
+
+    await expect(
+      qurl.revokeLink(mintUrl, apiKey, publicResourceId, opts),
+    ).resolves.toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(1); // no 503, so no confirm retry
+  });
+
   test('revokeLink reports a 404 as failure', async () => {
     fetchMock.mockImplementationOnce(() => new Response(null, { status: 404 }));
-  
+
     await expect(qurl.revokeLink(mintUrl, apiKey, publicResourceId)).resolves.toBe(false);
     expect(fetchMock).toHaveBeenCalledTimes(1); // 404 is not retryable
   });
-  
-  // The waiting is OPT-IN, and this is why: qurl-service also answers 503 +
-  // `Retry-After: 60` for deployment state (the "dark 503"), which no client
-  // should wait out — it reflects a standing condition, not a transient one.
-  // A caller that hasn't asked for the wait keeps the 1s local backoff.
-  test('a caller that does not opt in ignores Retry-After', async () => {
-    jest.useFakeTimers();
-    try {
-      fetchMock
-        .mockResolvedValueOnce(
-          new Response(null, { status: 503, headers: { 'Retry-After': '60' } }),
-        )
-        .mockResolvedValueOnce(jsonResponse({ data: { resource_id: publicResourceId, status: 'active' } }));
-  
-      const pending = qurl.getResourceStatus(mintUrl, apiKey, publicResourceId);
-      await jest.advanceTimersByTimeAsync(1_000);
-      expect(fetchMock).toHaveBeenCalledTimes(2);
-      await expect(pending).resolves.toMatchObject({ status: 'active' });
-    } finally {
-      jest.useRealTimers();
-    }
-  });
-  
+
   test('revokeLink reports a sustained revocation failure', async () => {
     jest.useFakeTimers();
     try {
@@ -463,4 +453,26 @@ describe('revokeLink retry path', () => {
       jest.useRealTimers();
     }
   });
+});
+
+// The waiting is OPT-IN, and this is why: qurl-service also answers 503 +
+// `Retry-After: 60` for deployment state (the "dark 503"), which no client
+// should wait out — it reflects a standing condition, not a transient one.
+// A caller that hasn't asked for the wait keeps the 1s local backoff.
+test('getResourceStatus does not opt in, so it ignores Retry-After', async () => {
+  jest.useFakeTimers();
+  try {
+    fetchMock
+      .mockResolvedValueOnce(
+        new Response(null, { status: 503, headers: { 'Retry-After': '60' } }),
+      )
+      .mockResolvedValueOnce(jsonResponse({ data: { resource_id: publicResourceId, status: 'active' } }));
+
+    const pending = qurl.getResourceStatus(mintUrl, apiKey, publicResourceId);
+    await jest.advanceTimersByTimeAsync(1_000);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    await expect(pending).resolves.toMatchObject({ status: 'active' });
+  } finally {
+    jest.useRealTimers();
+  }
 });
