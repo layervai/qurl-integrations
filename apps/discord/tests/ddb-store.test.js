@@ -91,6 +91,7 @@ describe('guild configs', () => {
       prior_had_key: true,
       via: 'oauth',
       prior_configured_at: '2026-09-10T00:00:00Z',
+      prior_updated_at: '2026-09-12T00:00:00Z',
     });
   });
 
@@ -143,6 +144,13 @@ describe('guild configs', () => {
       .not.toContain(AUDIT_EVENTS.QURL_SETUP_ADMIN_CHANGED);
   });
 
+  test('setGuildApiKey: reports a null new admin when a caller omits configuredBy', async () => {
+    ddbMock.on(UpdateCommand).resolves({ Attributes: { configured_by: 'old-admin', qurl_api_key: 'enc:v1:IV:TAG:deadbeef' } });
+    await store.setGuildApiKey('g-1', 'plain-key', undefined, SETUP_VIA.PASTE);
+    expect(logger.audit).toHaveBeenCalledWith(AUDIT_EVENTS.QURL_SETUP_ADMIN_CHANGED,
+      expect.objectContaining({ old_admin_id: 'old-admin', new_admin_id: null }));
+  });
+
   test('setGuildApiKey: does not audit a prior row with neither key nor admin', async () => {
     ddbMock.on(UpdateCommand).resolves({ Attributes: { updated_at: '2026-09-10T00:00:00Z' } });
     await store.setGuildApiKey('g-1', 'plain-key', 'new-admin', SETUP_VIA.OAUTH);
@@ -167,6 +175,7 @@ describe('guild configs', () => {
       prior_had_key: true,
       via: 'paste',
       prior_configured_at: null,
+      prior_updated_at: null,
     });
   });
 
@@ -180,6 +189,7 @@ describe('guild configs', () => {
       prior_had_key: false,
       via: 'paste',
       prior_configured_at: null,
+      prior_updated_at: null,
     });
   });
 

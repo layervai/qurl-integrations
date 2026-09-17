@@ -312,14 +312,14 @@ describe('logger', () => {
 
       logger.audit('qurl_setup_admin_changed', {
         guild_id: 'g-1', old_admin_id: 'a-1', new_admin_id: 'a-2', via: 'oauth',
-        prior_configured_at: '2026-09-10T00:00:00Z', qurl_api_key: 'enc:v1:IV:TAG:deadbeef',
+        prior_configured_at: '2026-09-10T00:00:00Z', prior_updated_at: '2026-09-12T00:00:00Z', qurl_api_key: 'enc:v1:IV:TAG:deadbeef',
       });
 
       expect(consoleSpy.error.mock.calls[0][0]).toContain('qurl_api_key');
       const parsed = JSON.parse(consoleSpy.log.mock.calls[0][0]);
       expect(parsed.audit).toMatchObject({
         guild_id: 'g-1', old_admin_id: 'a-1', new_admin_id: 'a-2', via: 'oauth',
-        prior_configured_at: '2026-09-10T00:00:00Z', qurl_api_key: '[REDACTED]',
+        prior_configured_at: '2026-09-10T00:00:00Z', prior_updated_at: '2026-09-12T00:00:00Z', qurl_api_key: '[REDACTED]',
       });
       expect(JSON.stringify(parsed)).not.toContain('deadbeef');
     });

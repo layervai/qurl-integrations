@@ -1583,9 +1583,12 @@ async function setGuildApiKey(guildId, apiKey, configuredBy, via) {
         // healthy rebind when old_admin_id or prior_configured_at is null.
         prior_had_key: Boolean(prior.qurl_api_key),
         via: door,
-        // configured_at, not updated_at: webhook-subscription writes also stamp
-        // updated_at, while configured_at is the guild's stable first-setup time.
+        // configured_at is the guild's stable first-setup time (webhook writes
+        // also stamp updated_at). updated_at is always overwritten here, so a
+        // non-null prior_updated_at with a null prior_configured_at shows
+        // UPDATED_OLD elided the if_not_exists no-op rather than a damaged row.
         prior_configured_at: prior.configured_at ?? null,
+        prior_updated_at: prior.updated_at ?? null,
       });
     } catch (err) {
       try {

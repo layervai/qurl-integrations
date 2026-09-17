@@ -662,7 +662,7 @@ const SETUP_VIA = Object.freeze({
   UNKNOWN: 'unknown',
 });
 // UNKNOWN is an output sentinel, not a door a caller may pass.
-const SETUP_VIA_DOORS = new Set([SETUP_VIA.OAUTH, SETUP_VIA.PASTE]);
+const SETUP_VIA_DOORS = new Set(Object.values(SETUP_VIA).filter((v) => v !== SETUP_VIA.UNKNOWN));
 // Omitted, unrecognized or sentinel doors collapse to UNKNOWN.
 function normalizeSetupVia(via) {
   return SETUP_VIA_DOORS.has(via) ? via : SETUP_VIA.UNKNOWN;
