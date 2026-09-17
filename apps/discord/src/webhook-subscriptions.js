@@ -23,7 +23,7 @@
 const db = require('./store');
 const config = require('./config');
 const logger = require('./logger');
-const { AUDIT_EVENTS } = require('./constants');
+const { AUDIT_EVENTS, LOG_EVENTS } = require('./constants');
 const { callQurlService, canonicalUrl } = require('./qurl-webhook-registrar');
 
 const REFRESH_INTERVAL_MS = 30_000;
@@ -234,7 +234,9 @@ async function discoverOwnerId(apiKey, { subject = 'DEFAULT', skipMalformedRows 
     // Early warning while there is still headroom before the permanent
     // *_PAGE_CAP failure (orphaned subscriptions only accumulate; see #1380).
     if (page === 25) {
-      logger.warn('qURL webhook owner discovery passed half its page budget', { subject, pagesFetched: page });
+      logger.warn('qURL webhook owner discovery passed half its page budget', {
+        event: LOG_EVENTS.QURL_WEBHOOK_OWNER_DISCOVERY_PAGE_BUDGET, subject, pagesFetched: page,
+      });
     }
     const qs = cursor ? `?cursor=${encodeURIComponent(cursor)}&limit=100` : '?limit=100';
     const body = await callQurlService({

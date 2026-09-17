@@ -610,7 +610,7 @@ describe('webhook-subscriptions registry — default-key discovery', () => {
     // eslint-disable-next-line global-require
     expect(require('../src/logger').warn).toHaveBeenCalledWith(
       'qURL webhook owner discovery passed half its page budget',
-      { subject: 'DEFAULT', pagesFetched: 25 },
+      { event: 'qurl_webhook_owner_discovery_page_budget', subject: 'DEFAULT', pagesFetched: 25 },
     );
   });
 

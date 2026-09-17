@@ -9122,16 +9122,19 @@ const commands = [
         // Pre-OAuth this hardcoded `setup api_key:lv_live_your_key_here`,
         // which never matched the modal flow either; fixed in round-9.6
         // alongside the OAuth-redirect path documentation.
-        const notConfiguredCopy = config.isAuth0EmailConnectionRejected
-          ? SETUP_AUTH_POLICY_UNAVAILABLE_MSG
-          : config.isQurlSetupAvailable
-          ? '❌ **qURL is not configured for this server.**\n\n'
+        let notConfiguredCopy;
+        if (config.isAuth0EmailConnectionRejected) {
+          notConfiguredCopy = SETUP_AUTH_POLICY_UNAVAILABLE_MSG;
+        } else if (config.isQurlSetupAvailable) {
+          notConfiguredCopy = '❌ **qURL is not configured for this server.**\n\n'
             + 'Run `/qurl setup` to connect — you\'ll be redirected to layerv.ai to authorize, '
-            + 'and the bot will mint an API key bound to your server. Only server administrators can run setup.'
-          : '❌ **qURL is not configured for this server.**\n\n'
+            + 'and the bot will mint an API key bound to your server. Only server administrators can run setup.';
+        } else {
+          notConfiguredCopy = '❌ **qURL is not configured for this server.**\n\n'
             + '1. Sign up at **https://layerv.ai** to get your API key\n'
             + '2. Run `/qurl setup` and paste the key into the modal\n\n'
             + 'Only server administrators can run setup.';
+        }
         return interaction.editReply({
           content: notConfiguredCopy,
         });

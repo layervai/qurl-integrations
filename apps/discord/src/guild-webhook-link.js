@@ -29,6 +29,15 @@ const LINK_RESULTS = Object.freeze({
   PERSIST_FAILED: 'persist-failed',
 });
 
+// Owner resolution is a side-effect-free read, so one quick retry absorbs a
+// transient qurl-service blip (5xx, timeout, network). Coded config/contract
+// failures and 4xx responses are deterministic and are never retried.
+const OWNER_RESOLUTION_RETRY_DELAY_MS = 250;
+function isTransientOwnerResolutionError(err) {
+  if (err?.code) return false;
+  return typeof err?.status !== 'number' || err.status >= 500;
+}
+
 function bridgeUrl() {
   // BASE_URL is validated upstream; multi-slash strip is defense
   // against future config-drift.
@@ -122,7 +131,13 @@ async function linkGuildWebhookSubscription({ guildId, apiKey, descriptionContex
   // neither of which starts the HTTP registry scan.
   let matchedDefaultOwnerId;
   try {
-    matchedDefaultOwnerId = await subs.resolveDefaultOwnerForApiKey(apiKey, { bridgeUrl: bridgeUrl() });
+    try {
+      matchedDefaultOwnerId = await subs.resolveDefaultOwnerForApiKey(apiKey, { bridgeUrl: bridgeUrl() });
+    } catch (err) {
+      if (!isTransientOwnerResolutionError(err)) throw err;
+      await new Promise((resolve) => { setTimeout(resolve, OWNER_RESOLUTION_RETRY_DELAY_MS); });
+      matchedDefaultOwnerId = await subs.resolveDefaultOwnerForApiKey(apiKey, { bridgeUrl: bridgeUrl() });
+    }
   } catch (err) {
     logger.warn('Per-guild webhook owner resolution failed', {
       error: err?.message, guildId,

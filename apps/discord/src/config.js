@@ -410,8 +410,8 @@ module.exports = {
   // operations — only by the OAuth2 token exchange when an admin
   // installs the bot via the install link. Omit it to disable the customer
   // install flow: both /oauth/discord/install and its callback return a
-  // documented 503 until an operator sets the secret. The seed sentinel
-  // normalizes to null (like the client ID) so no caller can use it.
+  // documented 503 until an operator sets the secret. The seed sentinel maps
+  // to null so no caller can use it; unset/empty stay falsy as read.
   DISCORD_CLIENT_SECRET: isInfraSeedSentinel(normalizedDiscordClientSecret)
     ? null
     : normalizedDiscordClientSecret,

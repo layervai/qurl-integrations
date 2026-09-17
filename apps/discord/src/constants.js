@@ -153,6 +153,7 @@ const GOOD_FIRST_ISSUE_PATTERNS = [
 // but are not audit events or CloudWatch metrics.
 const LOG_EVENTS = Object.freeze({
   QURL_OAUTH_AUTH0_CONNECTION_POLICY: 'qurl_oauth_auth0_connection_policy',
+  QURL_WEBHOOK_OWNER_DISCOVERY_PAGE_BUDGET: 'qurl_webhook_owner_discovery_page_budget',
 });
 
 // Canonical event names emitted via logger.audit(). The CloudWatch metric
