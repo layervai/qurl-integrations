@@ -989,7 +989,7 @@ describe('revokeMintedLinks — #1551 fail-closed contract', () => {
       await expect(settle(pending, 1)).resolves.toBe('resolved');
     });
 
-    it.each(['Wed, 21 Oct 2026 07:28:00 GMT', '-1', '1.5'])('fails closed without retrying on Retry-After %p', async (value) => {
+    it.each(['Wed, 21 Oct 2026 07:28:00 GMT', '-1', '1.5', '1e0', '0x2'])('fails closed without retrying on Retry-After %p', async (value) => {
       globalThis.fetch = jest.fn().mockResolvedValue(refusal(429, {}, new Headers({ 'Retry-After': value })));
 
       await expect(connector.revokeMintedLinks('res-1', ['q_one'], 'guild-key')).rejects.toMatchObject({ status: 429 });
@@ -1138,7 +1138,7 @@ describe('revokeMintedLinks — #1551 fail-closed contract', () => {
     await expect(connector.revokeMintedLinks('res-1', ids, 'guild-key')).rejects.toThrow('failed (503)');
     expect(logger.info).not.toHaveBeenCalledWith('Revoked minted links', expect.anything());
     expect(logger.warn).toHaveBeenCalledWith('Minted link revoke incomplete', expect.objectContaining({
-      outcomes: { revoked: 10 }, confirmed_count: 10, fallback_count: 0,
+      outcomes: { revoked: 10 }, confirmed_count: 10, connector_confirmed_count: 10, fallback_count: 0,
     }));
   });
 
@@ -1321,10 +1321,25 @@ describe('revokeMintedLinks — real SDK fallback seam', () => {
   });
 });
 
-describe('revoke cap invariant', () => {
-  it('lets the SDK fallback take a whole connector chunk', () => {
-    const { REVOKE_BATCH_MAX_IDS } = jest.requireActual('../src/qurl');
-    // CONNECTOR_REVOKE_MAX_IDS in connector.js is #1551's 10-id request cap.
-    expect(REVOKE_BATCH_MAX_IDS).toBeGreaterThanOrEqual(10);
+describe('revoke chunk size', () => {
+  afterEach(() => {
+    jest.dontMock('../src/qurl');
+    jest.resetModules();
+  });
+
+  it('never hands the SDK fallback a chunk larger than its cap', async () => {
+    jest.resetModules();
+    const revokeOrdinaryLinks = jest.fn().mockResolvedValue(undefined);
+    jest.doMock('../src/config', () => ({ CONNECTOR_URL: 'https://connector.test.local', QURL_API_KEY: 'k' }));
+    jest.doMock('../src/qurl', () => ({ ...jest.requireActual('../src/qurl'), revokeOrdinaryLinks, REVOKE_BATCH_MAX_IDS: 4 }));
+    const connector = require('../src/connector');
+    const ids = Array.from({ length: 9 }, (_, i) => `q_${i}`);
+    globalThis.fetch = jest.fn().mockResolvedValue({ ok: false, status: 404 });
+    try {
+      await connector.revokeMintedLinks('res-1', ids, 'guild-key');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+    expect(revokeOrdinaryLinks.mock.calls.map(([, batch]) => batch.length)).toEqual([4, 4, 1]);
   });
 });

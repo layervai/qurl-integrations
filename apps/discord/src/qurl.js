@@ -390,7 +390,8 @@ async function revokeOrdinaryLinks(resourceId, rawQurlIds, apiKey) {
   const normalizedIds = rawQurlIds.map(qurlIdForCleanup);
   if (normalizedIds.includes(null)) throw new Error('Invalid qURL revoke token identity');
   const qurlIds = [...new Set(normalizedIds)];
-  if (qurlIds.length === 0) return;
+  // An empty list would "succeed" for every recipient a caller maps onto it.
+  if (qurlIds.length === 0) throw new Error('No qURL revoke token ids to revoke');
   const client = makeClient(apiKey, {
     signal: AbortSignal.timeout(ORDINARY_REVOKE_BUDGET_PER_CALL_MS * (qurlIds.length + 1)),
     timeout: ORDINARY_REVOKE_ATTEMPT_TIMEOUT_MS,

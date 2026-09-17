@@ -30,6 +30,7 @@ const {
   DM_STATUS,
   MAX_FILE_SIZE,
   TOKENS_PER_RESOURCE,
+  MAX_OVERFLOW_REVOKE_IDS,
   MAX_CONCURRENT_MONITORS,
   DISCORD_MEMBERS_PAGE_SIZE,
   PREWARM_MAX_PAGES,
@@ -1653,9 +1654,6 @@ const CLEANUP_WAIT_BUDGET_MS = 120_000;
 // /qurl revoke result budget: 13 minutes leaves room to edit the result before
 // the 15-minute interaction token expires.
 const REVOKE_SELECT_RESULT_WAIT_MS = 13 * 60 * 1000;
-// Over-minted children beyond the request that compensation still revokes (and
-// the bound on further overflow ids logged for hand reconciliation).
-const MAX_OVERFLOW_REVOKE_IDS = 20;
 
 /**
  * Mint one-time links across a stream of connector resources, each capped at

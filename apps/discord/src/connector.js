@@ -10,12 +10,12 @@ const { qurlIdForCleanup } = require('./utils/qurl-id');
 // could drift out of sync. resolveDetectTarget() self-mints the ephemeral
 // detect qURL via the @layervai/qurl SDK (the standardized client), not qurl.js.
 // qurl.js has no connector.js dependency, so this require introduces no cycle.
-const { isPrivateHost, revokeOrdinaryLinks } = require('./qurl');
+const { isPrivateHost, revokeOrdinaryLinks, REVOKE_BATCH_MAX_IDS } = require('./qurl');
 
 const { sanitizeFilename } = require('./utils/sanitize');
 const { formatSessionDurationSeconds, isPositiveFinite, settlesWithin } = require('./utils/time');
 
-const { MAX_FILE_SIZE } = require('./constants');
+const { MAX_FILE_SIZE, MAX_OVERFLOW_REVOKE_IDS } = require('./constants');
 const MAX_CDN_REDIRECTS = 3;
 // TODO(upstream-contract): qurl-integrations-infra#1551's POST /api/revoke_links
 // processes at most 10 unique ids under one 55s handler deadline. Leave 10s for
@@ -26,18 +26,15 @@ const MAX_CDN_REDIRECTS = 3;
 // is remembered only within one call, so each resource re-probes the route on
 // purpose: a process-wide negative cache would hide the route once enabled.
 const REVOKE_LINKS_TIMEOUT_MS = 65_000;
-// #1551's 10-id request cap. Every chunk may be handed whole to the SDK
-// fallback, so qurl.js's REVOKE_BATCH_MAX_IDS must stay >= this; the
-// connector-coverage suite pins that invariant (a violation fails closed with
-// 'Invalid qURL revoke token list', never a false success).
-const CONNECTOR_REVOKE_MAX_IDS = 10;
-// Beyond the requested count, revoke up to this many extra ids from an
-// untrusted over-full mint body: small over-mints self-heal, while the bound
-// keeps the body from driving unbounded work.
-const MAX_OVERFLOW_REVOKE_IDS = 20;
+// Chunk size: #1551's 10-id request cap, bounded by construction by the SDK
+// fallback's per-call cap because every chunk may be handed to it whole. (A
+// missing import yields NaN, which the coverage check in revokeMintedLinks
+// turns into a throw, never a false success.)
+const CONNECTOR_REVOKE_MAX_IDS = Math.min(10, REVOKE_BATCH_MAX_IDS);
 const REVOKE_RETRY_AFTER_MAX_SECONDS = 2;
 // Waiting budget for inline partial-mint cleanup before the mint error is
-// rethrown: one connector revoke request plus slack. The revoke keeps running
+// rethrown: one connector revoke chunk plus slack. Larger partial sets (up to
+// n + MAX_OVERFLOW_REVOKE_IDS ids, several chunks) routinely outlast it. The revoke keeps running
 // and a timeout (expected while the SDK fallback is slow) is logged as a warning
 // with the ids for reconciliation.
 const PARTIAL_MINT_CLEANUP_WAIT_MS = 70_000;
@@ -567,7 +564,9 @@ async function postRevokeLinks(resourceId, batchIds, apiKey) {
   const response = await post();
   if (response.status !== 429) return response;
   const retryAfter = response.headers?.get?.('retry-after');
-  const retryAfterSeconds = retryAfter == null || retryAfter.trim() === '' ? 1 : Number(retryAfter);
+  const trimmedRetryAfter = retryAfter?.trim() ?? '';
+  // RFC 9110 delta-seconds only; any other form (HTTP-date, 1e0, 0x2, 1.5, -1) is NaN.
+  const retryAfterSeconds = trimmedRetryAfter === '' ? 1 : (/^\d{1,3}$/.test(trimmedRetryAfter) ? Number(trimmedRetryAfter) : NaN);
   // A connector asking for longer than the cap, or in a form we do not wait on
   // (an HTTP-date, a negative or fractional value), fails closed now instead
   // of adding load after a wait it did not ask for. Only an absent header
@@ -635,6 +634,9 @@ async function revokeMintedLinks(resourceId, qurlIds, apiKey) {
     fallbackCount += batchIds.length;
   };
   let confirmedCount = 0;
+  // Ids the connector itself confirmed, counted before any SDK handoff, so a
+  // failed handoff still shows the connector's partial progress.
+  let connectorConfirmedCount = 0;
   try {
     for (let offset = 0; offset < ids.length; offset += CONNECTOR_REVOKE_MAX_IDS) {
       const batchIds = ids.slice(offset, offset + CONNECTOR_REVOKE_MAX_IDS);
@@ -728,6 +730,7 @@ async function revokeMintedLinks(resourceId, qurlIds, apiKey) {
         throw new Error('Connector revoke_links did not confirm every requested link');
       }
       const ordinaryIds = batchIds.filter(id => statuses.get(id) === 'not_connector_managed');
+      connectorConfirmedCount += batchIds.length - ordinaryIds.length;
       if (ordinaryIds.length > 0) {
         await revokeOrdinaryLinks(resourceId, ordinaryIds, apiKey);
         fallbackCount += ordinaryIds.length;
@@ -751,7 +754,11 @@ async function revokeMintedLinks(resourceId, qurlIds, apiKey) {
     if (confirmedCount === ids.length) {
       logger.info('Revoked minted links', summary);
     } else {
-      logger.warn('Minted link revoke incomplete', { ...summary, confirmed_count: confirmedCount });
+      logger.warn('Minted link revoke incomplete', {
+        ...summary,
+        confirmed_count: confirmedCount,
+        connector_confirmed_count: connectorConfirmedCount,
+      });
     }
   }
 }

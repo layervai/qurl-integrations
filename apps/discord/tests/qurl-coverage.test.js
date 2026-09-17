@@ -383,11 +383,13 @@ describe('qURL client — revokeOrdinaryLinks', () => {
     globalThis.fetch = originalFetch;
   });
 
-  it('skips the network for an empty batch', async () => {
+  it('refuses an empty batch instead of reporting a vacuous success', async () => {
     globalThis.fetch = jest.fn();
-    await qurl.revokeOrdinaryLinks(PUBLIC_KEY_RESOURCE_ID, [], 'guild-key');
+    await expect(qurl.revokeOrdinaryLinks(PUBLIC_KEY_RESOURCE_ID, [], 'guild-key'))
+      .rejects.toThrow('No qURL revoke token ids to revoke');
     expect(globalThis.fetch).not.toHaveBeenCalled();
   });
+
 
   it.each([
     ['public key', PUBLIC_KEY_RESOURCE_ID],
