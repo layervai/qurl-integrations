@@ -1749,15 +1749,12 @@ async function setGuildDefaultWebhookOwner(
     // Retry once for unchanged plaintext with new encryption randomness. Keep
     // every webhook CAS predicate; a second concurrent mutation still fails,
     // under the documented KEY_CHANGED code (recovery: re-run /qurl setup).
-    try {
-      await ddb.send(new UpdateCommand({
-        ...update,
-        ExpressionAttributeValues: { ...values, ':storedApiKey': latestRow.qurl_api_key },
-      }));
-    } catch (retryErr) {
-      if (retryErr?.name === 'ConditionalCheckFailedException') throw defaultOwnerKeyChangedError();
-      throw retryErr;
-    }
+    await ddb.send(new UpdateCommand({
+      ...update,
+      ExpressionAttributeValues: { ...values, ':storedApiKey': latestRow.qurl_api_key },
+    })).catch((retryErr) => {
+      throw retryErr?.name === 'ConditionalCheckFailedException' ? defaultOwnerKeyChangedError() : retryErr;
+    });
   }
 }
 

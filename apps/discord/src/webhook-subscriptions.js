@@ -22,7 +22,11 @@
 
 const db = require('./store');
 const config = require('./config');
+const { setTimeout: sleep } = require('node:timers/promises');
 const logger = require('./logger');
+
+const PAGE_RETRY_DELAY_MS = 250;
+const pageBudgetWarned = new Set();
 const { AUDIT_EVENTS, LOG_EVENTS } = require('./constants');
 const { callQurlService, canonicalUrl } = require('./qurl-webhook-registrar');
 
@@ -233,17 +237,26 @@ async function discoverOwnerId(apiKey, { subject = 'DEFAULT', skipMalformedRows 
   for (let page = 0; page < 50; page++) {
     // Early warning while there is still headroom before the permanent
     // *_PAGE_CAP failure (orphaned subscriptions only accumulate; see #1380).
-    if (page === 25) {
+    // Once per subject per process: the refresh tick would otherwise repeat it.
+    if (page === 25 && !pageBudgetWarned.has(subject)) {
+      pageBudgetWarned.add(subject);
       logger.warn('qURL webhook owner discovery passed half its page budget', {
         event: LOG_EVENTS.QURL_WEBHOOK_OWNER_DISCOVERY_PAGE_BUDGET, subject, pagesFetched: page,
       });
     }
     const qs = cursor ? `?cursor=${encodeURIComponent(cursor)}&limit=100` : '?limit=100';
-    const body = await callQurlService({
+    const request = {
       method: 'GET',
       path: `/v1/webhooks${qs}`,
       apiEndpoint: config.QURL_ENDPOINT,
       apiKey,
+    };
+    // A page GET is side-effect free: retry it once on a transient failure
+    // (network, timeout, 5xx) rather than failing the whole walk. 4xx stays final.
+    const body = await callQurlService(request).catch(async (err) => {
+      if (typeof err?.status === 'number' && err.status < 500) throw err;
+      await sleep(PAGE_RETRY_DELAY_MS);
+      return callQurlService(request);
     });
     if (!Array.isArray(body?.data)) {
       const err = new Error('discoverOwnerId: qurl-service response data must be an array');
@@ -606,6 +619,7 @@ function _setLastScanCompletedAtForTesting(ts) {
 // the ddb-store.js pattern for _TABLES_FOR_TESTING.
 function _resetForTesting() {
   subscriptions.clear();
+  pageBudgetWarned.clear();
   consecutiveFailures = 0;
   discoveryConsecutiveFailures = 0;
   defaultOwnerId = null;

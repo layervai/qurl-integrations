@@ -591,6 +591,20 @@ describe('webhook-subscriptions registry — default-key discovery', () => {
       .resolves.toBe('usr_default');
   });
 
+  it('retries a transient owner-discovery page failure once, but not a 4xx', async () => {
+    const page = { ok: true, status: 200, text: async () => JSON.stringify({ data: [{ owner_id: 'usr_default' }] }) };
+    const failure = (status) => ({ ok: false, status, text: async () => 'nope' });
+    global.fetch = jest.fn()
+      .mockResolvedValueOnce(failure(503))
+      .mockResolvedValueOnce(page);
+    await expect(subs.resolveDefaultOwnerForApiKey('lv_test_abc')).resolves.toBe('usr_default');
+    expect(global.fetch).toHaveBeenCalledTimes(2);
+
+    global.fetch = jest.fn().mockResolvedValue(failure(401));
+    await expect(subs.resolveDefaultOwnerForApiKey('lv_test_abc')).rejects.toMatchObject({ status: 401 });
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+  });
+
   it('fails closed at the webhook discovery pagination cap', async () => {
     global.fetch = jest.fn(async () => ({
       ok: true,
@@ -612,6 +626,12 @@ describe('webhook-subscriptions registry — default-key discovery', () => {
       'qURL webhook owner discovery passed half its page budget',
       { event: 'qurl_webhook_owner_discovery_page_budget', subject: 'DEFAULT', pagesFetched: 25 },
     );
+    // eslint-disable-next-line global-require
+    const warnCalls = require('../src/logger').warn.mock.calls.length;
+    await expect(subs.resolveDefaultOwnerForApiKey('lv_alias')).rejects.toBeTruthy();
+    // eslint-disable-next-line global-require
+    expect(require('../src/logger').warn.mock.calls.slice(warnCalls).map(([msg]) => msg))
+      .not.toContain('qURL webhook owner discovery passed half its page budget');
   });
 
   // When GET /v1/webhooks returns an empty list (Lambda hasn't run

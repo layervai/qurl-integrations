@@ -111,7 +111,6 @@ function stopIntervals() {
   clearInterval(sweepHandle);
 }
 
-
 // Hard ceiling on total Map size. Under a distributed attack from many
 // unique IPs, new-IP requests get 429 once the store reaches this size
 // until the next sweep reclaims space — better to shed load than OOM.
@@ -170,11 +169,14 @@ function rateLimitForBucket(bucket, req, res, next) {
   requests.push(now);
   // The rejection above runs before this push, which is what bounds each
   // bucket at its maxRequests; keep that ordering.
-  // Carry only other buckets with in-window activity so an expired callback
-  // bucket cannot keep an install-only IP out of the eviction index.
-  const liveBuckets = Object.fromEntries(Object.entries(buckets)
-    .filter(([name, times]) => name !== bucket && times.some(time => time > windowStart)));
-  rateLimitStore.set(ip, { ...liveBuckets, [bucket]: requests });
+  const updated = { ...buckets, [bucket]: requests };
+  // An expired callback bucket would keep an install-only IP out of the
+  // eviction index until the next sweep; drop it on the install path only.
+  if (bucket === INSTALL_ENTRY_BUCKET
+    && updated[CALLBACK_BUCKET]?.every(time => time <= windowStart)) {
+    delete updated[CALLBACK_BUCKET];
+  }
+  rateLimitStore.set(ip, updated);
   return next();
 }
 

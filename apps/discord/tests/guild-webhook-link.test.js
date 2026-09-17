@@ -147,29 +147,6 @@ describe('linkGuildWebhookSubscription — partial-failure rollback', () => {
 });
 
 describe('linkGuildWebhookSubscription — default-owner failures', () => {
-  it('retries owner resolution once after a transient qurl-service failure', async () => {
-    mockResolveDefaultOwnerForApiKey
-      .mockRejectedValueOnce(Object.assign(new Error('qurl-service 503'), { status: 503 }))
-      .mockResolvedValueOnce('usr_default');
-
-    const result = await linkGuildWebhookSubscription({ guildId: 'g_retry', apiKey: 'lv_x' });
-
-    expect(result).toEqual({ ok: true, action: 'reused' });
-    expect(mockResolveDefaultOwnerForApiKey).toHaveBeenCalledTimes(2);
-  });
-
-  it.each([
-    ['a coded contract error', { code: 'DEFAULT_WEBHOOK_OWNER_CONFLICT' }],
-    ['a 4xx response', { status: 401 }],
-  ])('does not retry owner resolution after %s', async (_label, fields) => {
-    mockResolveDefaultOwnerForApiKey.mockRejectedValueOnce(Object.assign(new Error('nope'), fields));
-
-    const result = await linkGuildWebhookSubscription({ guildId: 'g_no_retry', apiKey: 'lv_x' });
-
-    expect(result).toEqual({ ok: false, reason: LINK_RESULTS.REGISTER_FAILED });
-    expect(mockResolveDefaultOwnerForApiKey).toHaveBeenCalledTimes(1);
-  });
-
   it('fails closed when owner resolution throws', async () => {
     const resolutionError = Object.assign(new Error('qurl-service 502'), {
       code: 'DEFAULT_WEBHOOK_OWNER_UNDISCOVERED',

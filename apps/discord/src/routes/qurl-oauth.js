@@ -23,7 +23,10 @@ const {
   qurlOAuthCallbackUrl,
 } = require('../utils/auth0-authorize-url');
 const { singleStringParam } = require('../utils/query-params');
-const { renderNotConfiguredPage } = require('../utils/oauth-not-configured');
+const {
+  renderNotConfiguredPage,
+  QURL_SETUP_AUTH_POLICY_REJECTED,
+} = require('../utils/oauth-not-configured');
 const { fireAndForgetLinkGuildWebhookSubscription } = require('../guild-webhook-link');
 
 // Network-call timeouts. Centralized so a future tuning of "qurl-service
@@ -68,7 +71,9 @@ const {
 // utils/oauth-not-configured.js (single source of truth for the
 // wire-vs-log split per PR #177 / C.4).
 function renderNotConfigured(res) {
-  return renderNotConfiguredPage(res, 'qurl-setup');
+  return renderNotConfiguredPage(res, 'qurl-setup', config.isAuth0EmailConnectionRejected
+    ? QURL_SETUP_AUTH_POLICY_REJECTED
+    : 'AUTH0_* unset');
 }
 
 // Success page surfaces the guild ID, key prefix, and qURL account email

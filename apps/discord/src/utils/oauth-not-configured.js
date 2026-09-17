@@ -7,7 +7,6 @@
 // would tell a probing attacker which secret an operator hasn't
 // shipped yet. This module is the single source of truth for the
 // wire-vs-log split so the two routers can't drift on it.
-const config = require('../config');
 const logger = require('../logger');
 
 /**
@@ -20,6 +19,9 @@ const logger = require('../logger');
  * @param {'qurl-setup'|'discord-install'|'discord-install-entry'} surface
  * @param {string} [reason] - logged-only env-var hint; do NOT render
  */
+// Logged reason that selects the operator-must-fix copy on the qURL surface.
+const QURL_SETUP_AUTH_POLICY_REJECTED = 'AUTH0_EMAIL_CONNECTION rejected';
+
 function renderNotConfiguredPage(res, surface, reason) {
   // Belt-and-suspenders: pin the log shape so on-call has a uniform
   // grep target across both routers (`/qurl-setup not configured`
@@ -33,7 +35,7 @@ function renderNotConfiguredPage(res, surface, reason) {
     message = 'Nothing was installed. Try Add to Discord again after your layerv.ai operator finishes provisioning, or contact them out of band.';
   } else if (surface === 'discord-install') {
     message = 'The bot may already be in your server. If it is, run /qurl setup after your layerv.ai operator finishes provisioning. Otherwise, try Add to Discord again then, or contact them out of band.';
-  } else if (config.isAuth0EmailConnectionRejected) {
+  } else if (reason === QURL_SETUP_AUTH_POLICY_REJECTED) {
     // Retrying cannot help until an operator edits the deployment value.
     message = 'The bot operator must correct an invalid authentication setting in the deployment before qURL setup can finish. '
       + 'Contact your layerv.ai admin.';
@@ -53,4 +55,4 @@ function renderNotConfiguredPage(res, surface, reason) {
   }));
 }
 
-module.exports = { renderNotConfiguredPage };
+module.exports = { renderNotConfiguredPage, QURL_SETUP_AUTH_POLICY_REJECTED };
