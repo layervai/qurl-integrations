@@ -94,8 +94,12 @@ function sweepRateLimitStore() {
     if (Object.keys(recentBuckets).length === 0) rateLimitStore.delete(ip);
     else rateLimitStore.replaceAfterSweep(ip, recentBuckets);
   }
-  // Saturation ended: unreported counts belong to that episode, not the next.
-  if (rateLimitStore.size < MAX_RATE_LIMIT_STORE_SIZE) hardCapShedCounts = {};
+  // Saturation ended: unreported counts belong to that episode, and the next
+  // episode's first shed must warn even inside the previous warning's window.
+  if (rateLimitStore.size < MAX_RATE_LIMIT_STORE_SIZE) {
+    hardCapShedCounts = {};
+    hardCapWarnedAt = 0;
+  }
 }
 
 const sweepHandle = setInterval(sweepRateLimitStore, 30 * 1000);

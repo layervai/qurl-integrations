@@ -72,6 +72,13 @@ function missingProdKeys(env) {
 // pin is rejected, so independent encryption-at-rest diagnostics are not
 // hidden behind the first deployment error. Taking both keeps this helper
 // pure and avoids a second, drifting copy of that derivation.
+// Guild webhook linking fails closed without the shared default secret unless
+// the deployment explicitly opts into pure BYOK. Production refuses to boot on
+// that shape rather than let /qurl setup succeed while view counts stop.
+function missingWebhookSecretKeys(cfg) {
+  return cfg.QURL_WEBHOOK_SECRET || cfg.QURL_WEBHOOK_PURE_BYOK ? [] : ['QURL_WEBHOOK_SECRET'];
+}
+
 function missingKekRequiredKeys(env, isQurlOAuthConfigured) {
   if (!isQurlOAuthConfigured) return [];
   return env.KEY_ENCRYPTION_KEY ? [] : ['KEY_ENCRYPTION_KEY'];
@@ -589,6 +596,7 @@ module.exports = {
   invalidStateSecretValues,
   shouldRegisterInteractionListener,
   missingMapCommandKeys,
+  missingWebhookSecretKeys,
   GOOGLE_MAPS_API_KEY_PLACEHOLDER_SENTINEL,
   VALID_PROCESS_ROLES,
   resolveProcessRole,

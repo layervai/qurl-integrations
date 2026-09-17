@@ -15,6 +15,7 @@ const {
   invalidStateSecretValues,
   shouldRegisterInteractionListener,
   missingMapCommandKeys,
+  missingWebhookSecretKeys,
   GOOGLE_MAPS_API_KEY_PLACEHOLDER_SENTINEL,
   VALID_PROCESS_ROLES,
   resolveProcessRole,
@@ -355,6 +356,15 @@ describe('shouldRegisterInteractionListener', () => {
     const first = shouldRegisterInteractionListener(args);
     const second = shouldRegisterInteractionListener(args);
     expect(first).toBe(second);
+  });
+});
+
+describe('missingWebhookSecretKeys', () => {
+  it('requires the default secret unless pure BYOK is explicit', () => {
+    expect(missingWebhookSecretKeys({})).toEqual(['QURL_WEBHOOK_SECRET']);
+    expect(missingWebhookSecretKeys({ QURL_WEBHOOK_SECRET: '' })).toEqual(['QURL_WEBHOOK_SECRET']);
+    expect(missingWebhookSecretKeys({ QURL_WEBHOOK_SECRET: 'whsec_x' })).toEqual([]);
+    expect(missingWebhookSecretKeys({ QURL_WEBHOOK_PURE_BYOK: true })).toEqual([]);
   });
 });
 

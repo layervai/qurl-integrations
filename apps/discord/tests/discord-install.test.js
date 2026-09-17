@@ -295,7 +295,7 @@ describe('Discord install callback', () => {
       }
       expect(warn).toHaveBeenCalledWith(
         'Discord install callback rejected invalid session state',
-        expect.objectContaining({ hasCookie: true, matchedButExpired: true }),
+        expect.objectContaining({ hasCookie: true, stateMatched: true }),
       );
       expect(globalThis.fetch).not.toHaveBeenCalled();
     });

@@ -278,29 +278,44 @@ describe('OAuth rate-limit store', () => {
     );
   });
 
-  it('drops unreported shed counts once a sweep ends the saturation episode', () => {
-    const fill = (at) => {
+  it('starts a new saturation episode with a fresh warning after a sweep drains the store', () => {
+    const W = config.RATE_LIMIT_WINDOW_MS;
+    const episodeOne = now + W * 10;
+    const fillStale = () => {
       for (let i = 0; i < MAX_RATE_LIMIT_STORE_SIZE; i += 1) {
-        rateLimitStore.set(`callback-${i}`, { callback: [at] });
+        rateLimitStore.set(`callback-${i}`, { callback: [episodeOne - W * 3] });
       }
     };
     const warn = jest.spyOn(logger, 'warn').mockImplementation(() => {});
     const shed = (ip) => installRateLimit({ ip, path: '/oauth/discord/install' }, response(), jest.fn());
-    const episodeOne = now + config.RATE_LIMIT_WINDOW_MS * 10;
     Date.now.mockReturnValue(episodeOne);
-    fill(episodeOne);
+    fillStale();
     shed('episode-1-warned');
     shed('episode-1-unreported');
+    expect(warn).toHaveBeenCalledTimes(1);
 
-    Date.now.mockReturnValue(episodeOne + config.RATE_LIMIT_WINDOW_MS * 3);
+    Date.now.mockReturnValue(episodeOne + 1);
     sweepRateLimitStore();
     expect(rateLimitStore.size).toBe(0);
 
-    fill(Date.now());
+    // Still inside episode one's warning window.
+    fillStale();
+    Date.now.mockReturnValue(episodeOne + 2);
     shed('episode-2');
+    expect(warn).toHaveBeenCalledTimes(2);
     expect(warn).toHaveBeenLastCalledWith(
       'Rate limit store at hard cap, rejecting new IP',
-      expect.objectContaining({ shedByBucketSinceLastWarning: { 'discord-install-entry': 1 } }),
+      expect.objectContaining({
+        shedByBucketSinceLastWarning: { 'discord-install-entry': 1 },
+        sinceLastWarningMs: null,
+      }),
     );
+  });
+
+  it('stops the sweep interval on shutdown', () => {
+    const clear = jest.spyOn(global, 'clearInterval');
+    // eslint-disable-next-line global-require
+    require('../src/utils/oauth-rate-limit').stopIntervals();
+    expect(clear).toHaveBeenCalledTimes(1);
   });
 });

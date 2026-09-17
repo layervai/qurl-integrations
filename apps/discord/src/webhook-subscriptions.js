@@ -234,7 +234,7 @@ async function discoverOwnerId(apiKey, { subject = 'DEFAULT', skipMalformedRows 
     // Early warning while there is still headroom before the permanent
     // *_PAGE_CAP failure (orphaned subscriptions only accumulate; see #1380).
     if (page === 25) {
-      logger.warn('qURL webhook owner discovery passed half its page budget', { subject, pages: page });
+      logger.warn('qURL webhook owner discovery passed half its page budget', { subject, pagesFetched: page });
     }
     const qs = cursor ? `?cursor=${encodeURIComponent(cursor)}&limit=100` : '?limit=100';
     const body = await callQurlService({
@@ -333,7 +333,9 @@ async function resolveDefaultOwnerForApiKey(apiKey, { bridgeUrl } = {}) {
     throw err;
   }
   // Cache the owner for the receiver, but leave the refresh tick's failure
-  // counter to the tick so link traffic cannot defer its escalation.
+  // counter to the tick so link traffic cannot defer its escalation. A scan
+  // already in flight with failed discovery can overwrite the follow-up cache
+  // entry; the next tick restores it (bounded, self-healing).
   defaultOwnerId = ownerId;
 
   const candidateOwnerId = apiKey === config.QURL_API_KEY

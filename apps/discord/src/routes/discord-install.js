@@ -159,7 +159,7 @@ router.get('/callback', rateLimit, async (req, res) => {
     logger.warn('Discord install callback rejected invalid session state', {
       ip: req.ip,
       hasCookie: stateInspection.hasCookie,
-      matchedButExpired: stateInspection.matches,
+      stateMatched: stateInspection.matches,
     });
     // No cookie at all is the mobile in-app-browser handoff signature: the
     // callback landed in a different browser context than /install.
@@ -175,6 +175,8 @@ router.get('/callback', rateLimit, async (req, res) => {
   // Discord code on a token exchange + a /users/@me round-trip + an Auth0
   // round-trip before failing at the qURL callback's persist-time guard.
   if (!process.env.KEY_ENCRYPTION_KEY) {
+    // Unlike /install's gates, keep the session cookie: the Discord code was
+    // not redeemed, so a retry after the operator fixes the key can succeed.
     // An admin may already have completed Discord consent here, so keep an
     // error-level signal beside the shared info-level not-configured line.
     logger.error('Refusing /oauth/discord/callback: KEY_ENCRYPTION_KEY is not set');
