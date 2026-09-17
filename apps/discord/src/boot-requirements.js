@@ -81,8 +81,11 @@ function missingKekRequiredKeys(env, isQurlOAuthConfigured) {
 // the deployment explicitly opts into pure BYOK. Production refuses to boot on
 // that shape rather than let /qurl setup succeed while view counts stop.
 // Takes the derived config object (not raw env): PURE_BYOK is a parsed boolean.
+// With the secret set, default-owner discovery also needs QURL_API_KEY (same
+// rule as scripts/provision-guild-subscriptions.js).
 function missingWebhookSecretKeys(cfg) {
-  return cfg.QURL_WEBHOOK_SECRET || cfg.QURL_WEBHOOK_PURE_BYOK ? [] : ['QURL_WEBHOOK_SECRET'];
+  if (cfg.QURL_WEBHOOK_SECRET) return cfg.QURL_API_KEY ? [] : ['QURL_API_KEY'];
+  return cfg.QURL_WEBHOOK_PURE_BYOK ? [] : ['QURL_WEBHOOK_SECRET'];
 }
 
 // The syntactic range table lives in utils/private-host.js so this boot-path

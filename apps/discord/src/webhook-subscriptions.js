@@ -237,9 +237,11 @@ async function discoverOwnerId(apiKey, { subject = 'DEFAULT', skipMalformedRows 
   for (let page = 0; page < 50; page++) {
     // Early warning while there is still headroom before the permanent
     // *_PAGE_CAP failure (orphaned subscriptions only accumulate; see #1380).
-    // Once per subject per process: the refresh tick would otherwise repeat it.
-    if (page === 25 && !pageBudgetWarned.has(subject)) {
-      pageBudgetWarned.add(subject);
+    // Once per subject+owner per process: the refresh tick would otherwise
+    // repeat it, while other guild owners keep their own early warning.
+    const budgetKey = `${subject}:${ownerId}`;
+    if (page === 25 && !pageBudgetWarned.has(budgetKey)) {
+      pageBudgetWarned.add(budgetKey);
       logger.warn('qURL webhook owner discovery passed half its page budget', {
         event: LOG_EVENTS.QURL_WEBHOOK_OWNER_DISCOVERY_PAGE_BUDGET, subject, pagesFetched: page,
       });

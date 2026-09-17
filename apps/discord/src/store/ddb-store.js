@@ -1814,9 +1814,8 @@ async function propagateGuildWebhookSubscription(
   if (excludeGuildId && allMatches.length === 1 && allMatches[0].guildId === excludeGuildId) {
     return { updated: 0, failed: 0, skipped: 0 };
   }
-  const siblings = excludeGuildId
-    ? allMatches.filter(s => s.guildId !== excludeGuildId)
-    : allMatches;
+  // webhookId feeds the CAS below; a row without one has nothing to propagate.
+  const siblings = allMatches.filter(s => s.webhookId && s.guildId !== excludeGuildId);
   if (siblings.length === 0) return { updated: 0, failed: 0, skipped: 0 };
 
   const updatedAt = nowIso();

@@ -363,7 +363,8 @@ describe('missingWebhookSecretKeys', () => {
   it('requires the default secret unless pure BYOK is explicit', () => {
     expect(missingWebhookSecretKeys({})).toEqual(['QURL_WEBHOOK_SECRET']);
     expect(missingWebhookSecretKeys({ QURL_WEBHOOK_SECRET: '' })).toEqual(['QURL_WEBHOOK_SECRET']);
-    expect(missingWebhookSecretKeys({ QURL_WEBHOOK_SECRET: 'whsec_x' })).toEqual([]);
+    expect(missingWebhookSecretKeys({ QURL_WEBHOOK_SECRET: 'whsec_x', QURL_API_KEY: 'lv_x' })).toEqual([]);
+    expect(missingWebhookSecretKeys({ QURL_WEBHOOK_SECRET: 'whsec_x' })).toEqual(['QURL_API_KEY']);
     expect(missingWebhookSecretKeys({ QURL_WEBHOOK_PURE_BYOK: true })).toEqual([]);
   });
 });
