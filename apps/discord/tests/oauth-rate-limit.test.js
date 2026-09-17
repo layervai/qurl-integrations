@@ -1,5 +1,6 @@
 const config = require('../src/config');
 const logger = require('../src/logger');
+const { AUDIT_EVENTS } = require('../src/constants');
 const {
   MAX_RATE_LIMIT_STORE_SIZE,
   installRateLimit,
@@ -23,6 +24,7 @@ describe('OAuth rate-limit store', () => {
     jest.clearAllMocks();
     rateLimitStore.clear();
     jest.spyOn(Date, 'now').mockReturnValue(now);
+    jest.spyOn(logger, 'audit').mockImplementation(() => {});
   });
 
   afterEach(() => {
@@ -223,6 +225,8 @@ describe('OAuth rate-limit store', () => {
     expect(next).not.toHaveBeenCalled();
     expect(res.status).toHaveBeenCalledWith(429);
     expect(rateLimitStore.has('new-install')).toBe(false);
+    // Stable audit name is the cross-repository CloudWatch filter contract.
+    expect(AUDIT_EVENTS.OAUTH_RATE_LIMIT_HARD_CAP).toBe('oauth_rate_limit_hard_cap');
     expect(rateLimitStore.size).toBe(MAX_RATE_LIMIT_STORE_SIZE);
   });
 
@@ -269,6 +273,12 @@ describe('OAuth rate-limit store', () => {
     Date.now.mockReturnValue(now + config.RATE_LIMIT_WINDOW_MS * 2);
     shed('shed-3');
     expect(warn).toHaveBeenCalledTimes(2);
+    expect(logger.audit).toHaveBeenCalledTimes(2);
+    expect(logger.audit).toHaveBeenLastCalledWith(AUDIT_EVENTS.OAUTH_RATE_LIMIT_HARD_CAP, {
+      size: MAX_RATE_LIMIT_STORE_SIZE,
+      shed_by_bucket: { 'discord-install-entry': 2, callback: 1 },
+      since_last_warning_ms: config.RATE_LIMIT_WINDOW_MS,
+    });
     expect(warn).toHaveBeenLastCalledWith(
       'Rate limit store at hard cap, rejecting new IP',
       expect.objectContaining({
@@ -303,6 +313,12 @@ describe('OAuth rate-limit store', () => {
     Date.now.mockReturnValue(episodeOne + 2);
     shed('episode-2');
     expect(warn).toHaveBeenCalledTimes(2);
+    expect(logger.audit).toHaveBeenCalledTimes(2);
+    expect(logger.audit).toHaveBeenLastCalledWith(AUDIT_EVENTS.OAUTH_RATE_LIMIT_HARD_CAP, {
+      size: MAX_RATE_LIMIT_STORE_SIZE,
+      shed_by_bucket: { 'discord-install-entry': 1 },
+      since_last_warning_ms: null,
+    });
     expect(warn).toHaveBeenLastCalledWith(
       'Rate limit store at hard cap, rejecting new IP',
       expect.objectContaining({

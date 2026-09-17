@@ -24,6 +24,7 @@
 // callback entry.
 const config = require('../config');
 const logger = require('../logger');
+const { AUDIT_EVENTS } = require('../constants');
 
 const INSTALL_ENTRY_BUCKET = 'discord-install-entry';
 const CALLBACK_BUCKET = 'callback';
@@ -140,6 +141,11 @@ function rateLimitForBucket(bucket, req, res, next) {
           size: rateLimitStore.size,
           shedByBucketSinceLastWarning: hardCapShedCounts,
           sinceLastWarningMs,
+        });
+        logger.audit(AUDIT_EVENTS.OAUTH_RATE_LIMIT_HARD_CAP, {
+          size: rateLimitStore.size,
+          shed_by_bucket: hardCapShedCounts,
+          since_last_warning_ms: sinceLastWarningMs,
         });
         hardCapShedCounts = {};
       }
