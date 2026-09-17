@@ -40,6 +40,14 @@ function captureServerLogs(connection, auth0Env = AUTH0_ENV) {
 }
 
 describe('server Auth0 connection policy log', () => {
+  it('reports an insecure non-local setup origin outside production', () => {
+    expect(captureServerLogs(undefined, {
+      ...AUTH0_ENV, NODE_ENV: 'staging', BASE_URL: 'http://bot.internal:3000',
+    }).error).toContainEqual([
+      'BASE_URL cannot retain Secure OAuth cookies — use HTTPS or localhost before attempting qURL setup',
+    ]);
+  });
+
   it('logs missing default-owner credentials outside production', () => {
     expect(captureServerLogs(undefined, {
       NODE_ENV: 'development',

@@ -425,6 +425,7 @@ module.exports = {
   isMultiTenant,
   isQurlOAuthConfigured,
   isQurlSetupAvailable,
+  canRetainSecureOAuthCookies: canRetainSecureInstallCookie(normalizedBaseUrl),
   isDiscordInstallConfigured,
   discordInstallNotConfiguredReason,
 

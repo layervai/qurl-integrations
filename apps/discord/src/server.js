@@ -193,6 +193,10 @@ app.get('/metrics', metricsRateLimit, async (req, res) => {
 // receiver matches each inbound event against the per-guild secret
 // the linking flow registered.
 app.use('/webhooks', qurlWebhookRouter);
+if (config.isQurlOAuthConfigured && !config.canRetainSecureOAuthCookies) {
+  logger.error('BASE_URL cannot retain Secure OAuth cookies — use HTTPS or localhost before attempting qURL setup');
+}
+
 if (config.QURL_WEBHOOK_SECRET && !config.QURL_API_KEY) {
   logger.error('QURL_API_KEY unset with QURL_WEBHOOK_SECRET configured — guild webhook linking will fail closed');
 }
