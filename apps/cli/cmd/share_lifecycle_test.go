@@ -2624,6 +2624,7 @@ func runPublishDaemonLifecycle(t *testing.T, external bool) {
 	const echoBody = "daemon-lifecycle-roundtrip"
 	slowStarted := make(chan struct{})
 	releaseSlow := make(chan struct{})
+	unblockSlow := sync.OnceFunc(func() { close(releaseSlow) })
 	var slowOnce sync.Once
 	echo := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/slow" {
@@ -2633,6 +2634,8 @@ func runPublishDaemonLifecycle(t *testing.T, external bool) {
 		_, _ = io.WriteString(w, echoBody)
 	}))
 	t.Cleanup(echo.Close)
+	// Release the handler before any test cleanup, including on Fatal paths.
+	defer unblockSlow()
 
 	srv := apitest.NewServer(t)
 	stateDir := connectorStateTestDir(t)
@@ -2777,6 +2780,20 @@ func runPublishDaemonLifecycle(t *testing.T, external bool) {
 		body, err := requestPath(routingID, "/", 300*time.Millisecond)
 		return err == nil && body == echoBody
 	}
+	// Retry brief rotation failures within one TCP window. Each attempt also
+	// has its own request timeout.
+	requestAcrossRotation := func() bool {
+		retryUntil := time.Now().Add(300 * time.Millisecond)
+		for {
+			if requestRoute() {
+				return true
+			}
+			if time.Now().After(retryUntil) {
+				return false
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
 	deadline := time.Now().Add(5 * time.Second)
 	for !requestRoute() {
 		if time.Now().After(deadline) {
@@ -2804,8 +2821,8 @@ func runPublishDaemonLifecycle(t *testing.T, external bool) {
 		t.Fatal("in-flight request never reached the old proxy")
 	}
 
-	// Wait for the replacement's authoritative NewProxy admission while the
-	// original request remains in flight on the old session.
+	// NewProxy is observed before FRPS installs the route. Wait for the
+	// replacement attempt, then check traffic within the same rotation budget.
 	replacementDeadline := time.Now().Add(3 * time.Second)
 	for {
 		newProxies := 0
@@ -2822,10 +2839,10 @@ func runPublishDaemonLifecycle(t *testing.T, external bool) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	if !requestRoute() {
+	if !requestAcrossRotation() {
 		t.Fatal("new request did not route through the serving replacement")
 	}
-	close(releaseSlow)
+	unblockSlow()
 	select {
 	case result := <-slowDone:
 		if result.err != nil || result.body != echoBody {
@@ -2835,21 +2852,6 @@ func runPublishDaemonLifecycle(t *testing.T, external bool) {
 		t.Fatal("in-flight old-session request did not complete during drain")
 	}
 
-	// Keep real traffic flowing across two short NHP admission rotations. A
-	// request may retry within one bounded in-flight TCP window; a route gap
-	// beyond that fails the journey.
-	requestAcrossRotation := func() bool {
-		retryUntil := time.Now().Add(300 * time.Millisecond)
-		for {
-			if requestRoute() {
-				return true
-			}
-			if time.Now().After(retryUntil) {
-				return false
-			}
-			time.Sleep(20 * time.Millisecond)
-		}
-	}
 	rotationDeadline := time.Now().Add(6 * time.Second)
 	for admitter.admissions() < 3 {
 		if requestAcrossRotation() {
