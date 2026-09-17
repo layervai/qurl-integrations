@@ -1,6 +1,5 @@
 const {
   hasSafeResourceIdShape,
-  LEGACY_RESOURCE_ID_PREFIX,
   maskResourceIdPath,
   qurlPath,
   resourceIdLogRef,
@@ -13,10 +12,6 @@ const {
 } = require('./helpers/qurl-fixtures');
 
 describe('resource ID transport guard', () => {
-  it('pins the retired private-ID prefix used by reclaim diagnostics', () => {
-    expect(LEGACY_RESOURCE_ID_PREFIX).toBe('r_');
-  });
-
   it.each([undefined, null, '', 12345, '../qurls/x'])('rejects an unsafe shape: %p', (resourceId) => {
     expect(hasSafeResourceIdShape(resourceId)).toBe(false);
   });
@@ -29,6 +24,8 @@ describe('resource ID transport guard', () => {
   it('accepts the real public resource ID shapes', () => {
     expect(hasSafeResourceIdShape(PUBLIC_KEY_RESOURCE_ID)).toBe(true);
     expect(hasSafeResourceIdShape(CRID_RESOURCE_ID)).toBe(true);
+    // The access-token guard matches `at_` only, not public IDs that begin "at".
+    expect(hasSafeResourceIdShape(`at${'a'.repeat(105)}`)).toBe(true);
   });
 
   it.each([

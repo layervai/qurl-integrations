@@ -9,7 +9,6 @@ const { createHash } = require('crypto');
 
 const RESOURCE_ID_CHARACTER_CLASS = '[\\w-]';
 const RESOURCE_ID_CHARACTERS = new RegExp(`^${RESOURCE_ID_CHARACTER_CLASS}+$`);
-const LEGACY_RESOURCE_ID_PREFIX = 'r_';
 // TODO(upstream-contract): qurl-service owns this lowercase bearer-token
 // prefix. Reject it before building an HTTP path so a cross-wired qURL fragment
 // cannot reach intermediary access logs. Matching is deliberately case-exact:
@@ -91,7 +90,6 @@ function maskResourceIdPath(message) {
 
 module.exports = {
   hasSafeResourceIdShape,
-  LEGACY_RESOURCE_ID_PREFIX,
   maskResourceIdPath,
   QURL_ACCESS_TOKEN_PREFIX,
   qurlPath,

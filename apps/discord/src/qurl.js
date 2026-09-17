@@ -338,7 +338,7 @@ async function createOneTimeLink(targetUrl, expiresIn, label, apiKey) {
     }),
   );
 
-  logger.info('Created one-time qURL', { resource_id: result.resource_id, expires_in: expiresIn });
+  logger.info('Created one-time qURL', { resource_id: result.resource_id, crid: result.crid, expires_in: expiresIn });
   return result;
 }
 
@@ -350,11 +350,9 @@ async function deleteLink(resourceId, apiKey) {
   const client = makeClient(apiKey);
   // Revoke at the resource level: every link minted on the resource stops
   // resolving. Repeats against an existing revoked row are idempotent 204;
-  // a never-existent public ID remains 404, so a corrupt send-row ID cannot
-  // report false success. SDK 0.3.x's delete() rejects current public IDs using
-  // a retired `r_` prefix check before any request is sent.
-  // qurl-typescript#244 fixes that older SDK method for other consumers; keep
-  // deleteResource() here because it directly names this whole-resource action.
+  // a never-existent CRID remains 404, so a corrupt send-row ID cannot report
+  // false success. SDK 2.x deleteResource() accepts only a CRID and rejects a
+  // public-key resource_id before any request (surfaced as client_validation).
   await callQurl(
     'DELETE',
     RESOURCE_ID_LOG_PATH,
@@ -450,8 +448,8 @@ async function revokeOrdinaryLinks(resourceId, rawQurlIds, apiKey) {
 async function getResourceStatus(resourceId, apiKey) {
   qurlPath(resourceId);
   const client = makeClient(apiKey);
-  // SDK 0.3.x's get() applies only its non-empty-ID guard; unlike delete(), it
-  // does not impose the retired `r_` prefix before making this request.
+  // SDK 2.x get() accepts a CRID or `q_` display ID and rejects a public-key
+  // resource_id before making this request.
   // Returns the SDK's QURL shape — access tokens are under `access_tokens`
   // (the SDK renames the API's wire-format `qurls` field).
   return callQurl(
