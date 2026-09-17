@@ -36,6 +36,10 @@ const (
 	// qurl-conformance v0.16.0 moved the credential-recovery vectors to a
 	// private platform module, so this test keeps the synthetic, secret-free
 	// public exchange values it needs from the last public vector file.
+	//
+	// TODO(upstream-contract): these values and the recover-mode fields added
+	// in nativeRecoveryHubReply mirror the private agent-credential-recovery
+	// vectors. Nothing here fails when that platform contract moves.
 	connectorIntegrationRecoveryCredential = "lv_live_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"
 	connectorIntegrationRecoveryCellReply  = `{"errCode":"0","list":{"query":"agent_credential_recovery","version":1,"device_api_key_id":"key_RcV8mP3qTn5W"}}`
 )
@@ -247,12 +251,10 @@ func nativeRecoveryQuery(body []byte) (query, mode string, err error) {
 }
 
 func nativeRecoveryHubReply(
-	t *testing.T,
 	assignment *conformance.AgentAssignmentFile,
 	cellPublicKeyB64 string,
 	now time.Time,
 ) func([]byte) ([]byte, error) {
-	t.Helper()
 	return func(request []byte) ([]byte, error) {
 		query, mode, err := nativeRecoveryQuery(request)
 		if err != nil || query != "cell_assignment" {
@@ -261,15 +263,21 @@ func nativeRecoveryHubReply(
 		if mode != "recover" && mode != "refresh" {
 			return nil, fmt.Errorf("unexpected Hub assignment mode %q", mode)
 		}
-		// The public refresh reply has the recover reply's shape minus the
-		// recovery grant, so both modes start from it.
+		// The recover reply is the public refresh reply plus the recovery grant,
+		// so both modes start from it. Recover mode is locally assembled, not
+		// vector-backed; see TODO(upstream-contract) above.
 		var body map[string]any
 		if err := json.Unmarshal([]byte(assignment.RefreshAssignment.Result.BodyJSON), &body); err != nil {
 			return nil, err
 		}
-		list := body["list"].(map[string]any)
+		list, ok := body["list"].(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("refresh golden has no list object: %v", body["list"])
+		}
 		list["agent_id"] = connectorIntegrationAgentID
-		setNativeRecoveryAssignment(list["assignment"].(map[string]any), cellPublicKeyB64, now)
+		if err := setNativeRecoveryAssignment(list["assignment"], cellPublicKeyB64, now); err != nil {
+			return nil, err
+		}
 		if mode == "recover" {
 			list["mode"] = "recover"
 			list["recovery_grant"] = "qrg1.integration-recovery-grant-0001"
@@ -280,15 +288,23 @@ func nativeRecoveryHubReply(
 	}
 }
 
-func setNativeRecoveryAssignment(assignment map[string]any, cellPublicKeyB64 string, now time.Time) {
+func setNativeRecoveryAssignment(value any, cellPublicKeyB64 string, now time.Time) error {
+	assignment, ok := value.(map[string]any)
+	if !ok {
+		return fmt.Errorf("refresh golden has no assignment object: %v", value)
+	}
+	endpoint, ok := assignment["nhp_udp_endpoint"].(map[string]any)
+	if !ok {
+		return fmt.Errorf("refresh golden has no nhp_udp_endpoint object: %v", assignment["nhp_udp_endpoint"])
+	}
 	assignment["cell_id"] = "cell-test"
 	assignment["assignment_generation"] = float64(2)
 	assignment["endpoint_revision"] = float64(2)
 	assignment["lease_expires_at"] = now.Add(time.Hour).Format(time.RFC3339)
-	endpoint := assignment["nhp_udp_endpoint"].(map[string]any)
 	endpoint["host"] = connectorIntegrationCellHost
 	endpoint["port"] = float64(443)
 	endpoint["server_public_key_b64"] = cellPublicKeyB64
+	return nil
 }
 
 func nativeRecoveryCellReply(request []byte) ([]byte, error) {
@@ -314,7 +330,7 @@ func TestOpenNativeRegisteredClient_ExplicitLoginUsesRealConnectorRecovery(t *te
 	now := time.Now().UTC().Round(time.Second)
 
 	hub := newNativeRecoveryUDPServer(t, hubPrivate, agentPublic, true,
-		nativeRecoveryHubReply(t, assignment, cellPublicB64, now))
+		nativeRecoveryHubReply(assignment, cellPublicB64, now))
 	cell := newNativeRecoveryUDPServer(t, cellPrivate, agentPublic, false, nativeRecoveryCellReply)
 	// The native transport rejects special-purpose IP ranges before dialing.
 	// The injected dialer maps these synthetic route labels to local
@@ -422,8 +438,14 @@ func TestOpenNativeRegisteredClient_ExplicitLoginUsesRealConnectorRecovery(t *te
 	if replacementKey == "" || replacementKey == oldDeviceKey || !strings.HasPrefix(replacementKey, "lv_live_") {
 		t.Fatalf("retry did not use the connector-promoted replacement credential")
 	}
-	if got := len(hub.snapshot()); got != 2 {
+	hubRequests := hub.snapshot()
+	if got := len(hubRequests); got != 2 {
 		t.Fatalf("real connector Hub exchanges = %d, want recovery and required post-recovery refresh", got)
+	}
+	for i, want := range []string{"recover", "refresh"} {
+		if _, mode, err := nativeRecoveryQuery(hubRequests[i]); err != nil || mode != want {
+			t.Fatalf("Hub exchange %d mode = %q (%v), want %q", i, mode, err, want)
+		}
 	}
 	if got := len(cell.snapshot()); got != 1 {
 		t.Fatalf("real connector cell exchanges = %d, want one recovery completion", got)
