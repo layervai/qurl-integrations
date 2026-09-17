@@ -365,6 +365,19 @@ describe('guild configs', () => {
     });
   });
 
+  test('setGuildDefaultWebhookOwner: maps a second concurrent mutation on retry to KEY_CHANGED', async () => {
+    const first = mockCiphertext('lv_default_alias');
+    const latest = first.replace(':IV:', ':OTHER_IV:');
+    ddbMock.on(GetCommand)
+      .resolvesOnce({ Item: { guild_id: 'g_default', qurl_api_key: first } })
+      .resolvesOnce({ Item: { guild_id: 'g_default', qurl_api_key: latest } });
+    const ccfe = Object.assign(new Error('raced'), { name: 'ConditionalCheckFailedException' });
+    ddbMock.on(UpdateCommand).rejects(ccfe);
+    await expect(store.setGuildDefaultWebhookOwner('g_default', defaultOwnerArgs()))
+      .rejects.toMatchObject({ code: 'DEFAULT_WEBHOOK_OWNER_KEY_CHANGED' });
+    expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(2);
+  });
+
   test('setGuildDefaultWebhookOwner: accepts a concurrent identical conversion', async () => {
     const storedApiKey = mockCiphertext('lv_default_alias');
     ddbMock.on(GetCommand)
