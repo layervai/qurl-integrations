@@ -29,6 +29,10 @@ const REVOKE_LINKS_TIMEOUT_MS = 65_000;
 // The connector chunk must satisfy both #1551's 10-id request cap and the SDK
 // fallback's per-call cap, so a change to either cannot turn chunks into 413s.
 const CONNECTOR_REVOKE_MAX_IDS = Math.min(10, REVOKE_BATCH_MAX_IDS);
+if (!Number.isInteger(CONNECTOR_REVOKE_MAX_IDS) || CONNECTOR_REVOKE_MAX_IDS < 1) {
+  // A NaN chunk size would skip the revoke loop and report success.
+  throw new Error('Connector revoke chunk size is invalid');
+}
 const REVOKE_RETRY_AFTER_MAX_SECONDS = 2;
 // Waiting budget for inline partial-mint cleanup before the mint error is
 // rethrown: one connector revoke request plus slack. The revoke keeps running
@@ -554,10 +558,11 @@ async function postRevokeLinks(resourceId, batchIds, apiKey) {
   const response = await post();
   if (response.status !== 429) return response;
   const retryAfterSeconds = Number(response.headers?.get?.('retry-after'));
+  // A connector asking for longer than the cap is under real pressure: fail
+  // closed now instead of adding load after a wait it did not ask for.
+  if (Number.isFinite(retryAfterSeconds) && retryAfterSeconds > REVOKE_RETRY_AFTER_MAX_SECONDS) return response;
   await discardBody(response);
-  const waitMs = Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0
-    ? Math.min(retryAfterSeconds, REVOKE_RETRY_AFTER_MAX_SECONDS) * 1000
-    : 1000;
+  const waitMs = Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0 ? retryAfterSeconds * 1000 : 1000;
   await new Promise(resolve => setTimeout(resolve, waitMs));
   return post();
 }
@@ -606,109 +611,131 @@ async function revokeMintedLinks(resourceId, qurlIds, apiKey) {
   const fallbackOrThrow = async (batchIds, connectorError) => {
     try {
       await revokeOrdinaryLinks(resourceId, batchIds, apiKey);
-    } catch {
+    } catch (fallbackError) {
+      // Keep the connector error (and its api_code) as the verdict, but carry
+      // the fallback's diagnosis so failed_child_count survives.
+      connectorError.cause ??= fallbackError;
+      connectorError.failedCount ??= fallbackError?.failedCount;
       throw connectorError;
     }
     fallbackCount += batchIds.length;
   };
-  for (let offset = 0; offset < ids.length; offset += CONNECTOR_REVOKE_MAX_IDS) {
-    const batchIds = ids.slice(offset, offset + CONNECTOR_REVOKE_MAX_IDS);
-    // An empty chunk (a broken cap) would confirm vacuously; never let it.
-    if (batchIds.length === 0) throw new Error('Connector revoke chunk is empty');
-    if (routeAbsent) {
-      await revokeOrdinaryLinks(resourceId, batchIds, apiKey);
-      fallbackCount += batchIds.length;
-      continue;
-    }
-    let response;
-    try {
-      response = await postRevokeLinks(resourceId, batchIds, apiKey);
-    } catch (transportError) {
-      logger.warn('Connector revoke_links unreachable', {
-        resource_ref: resourceIdLogRef(resourceId),
-        error_name: transportError?.name,
-        count: batchIds.length,
-      });
-      await fallbackOrThrow(batchIds, transportError);
-      continue;
-    }
-
-    if (response.status === 404) {
-      routeAbsent = true;
-      await discardBody(response);
-      await revokeOrdinaryLinks(resourceId, batchIds, apiKey);
-      fallbackCount += batchIds.length;
-      continue;
-    }
-    if (!response.ok) {
-      let bodyText = '';
-      try {
-        bodyText = await response.text();
-      } catch { /* network read failed, fall through with empty body */ }
-      const { parsed } = parseConnectorBody(bodyText);
-      // TODO(upstream-contract): #1551's revoke route puts its enum in a top-level
-      // `code` (revoke_not_available, request_rate_limited), unlike mint/upload's
-      // `error` string. Surface only that enum; the rest of the body stays out.
-      const apiCode = typeof parsed?.code === 'string' && /^[a-z_]{1,64}$/.test(parsed.code) ? parsed.code : null;
-      // The durable "route is live but refusing" signal during enablement.
-      logger.warn('Connector revoke_links refused', {
-        resource_ref: resourceIdLogRef(resourceId),
-        status: response.status,
-        api_code: apiCode,
-        count: batchIds.length,
-      });
-      let connectorError;
-      try {
-        throwConnectorErrorFromBody('Connector revoke_links', response, { bodyText, apiCode });
-      } catch (err) {
-        connectorError = err;
+  let confirmedCount = 0;
+  try {
+    for (let offset = 0; offset < ids.length; offset += CONNECTOR_REVOKE_MAX_IDS) {
+      const batchIds = ids.slice(offset, offset + CONNECTOR_REVOKE_MAX_IDS);
+      // An empty chunk (a broken cap) would confirm vacuously; never let it.
+      if (batchIds.length === 0) throw new Error('Connector revoke chunk is empty');
+      if (routeAbsent) {
+        await revokeOrdinaryLinks(resourceId, batchIds, apiKey);
+        fallbackCount += batchIds.length;
+        confirmedCount += batchIds.length;
+        continue;
       }
-      // 401/403/413/429 mean this request is wrong or must slow down; only a
-      // connector that cannot answer (5xx) falls back.
-      if (response.status < 500) throw connectorError;
-      await fallbackOrThrow(batchIds, connectorError);
-      continue;
-    }
-
-    let parsed;
-    try {
-      parsed = await response.json();
-    } catch {
-      throw new Error('Connector revoke_links returned invalid JSON');
-    }
-
-    // Results are unordered: require exactly one confirmed outcome per
-    // requested id. An empty, short, duplicate or foreign result set fails.
-    if (parsed?.success !== true) {
-      throw new Error('Connector revoke_links returned success: false');
-    }
-    const requested = new Set(batchIds);
-    const statuses = new Map();
-    const results = Array.isArray(parsed.results) ? parsed.results : [];
-    for (const result of results) {
-      if (requested.has(result?.qurl_id) && REVOKE_TERMINAL_STATUSES.has(result.status)
-          && !statuses.has(result.qurl_id)) {
-        statuses.set(result.qurl_id, result.status);
+      let response;
+      try {
+        response = await postRevokeLinks(resourceId, batchIds, apiKey);
+      } catch (transportError) {
+        logger.warn('Connector revoke_links unreachable', {
+          resource_ref: resourceIdLogRef(resourceId),
+          error_name: transportError?.name,
+          count: batchIds.length,
+        });
+        await fallbackOrThrow(batchIds, transportError);
+        confirmedCount += batchIds.length;
+        continue;
       }
+
+      if (response.status === 404) {
+        routeAbsent = true;
+        await discardBody(response);
+        await revokeOrdinaryLinks(resourceId, batchIds, apiKey);
+        fallbackCount += batchIds.length;
+        confirmedCount += batchIds.length;
+        continue;
+      }
+      if (!response.ok) {
+        let bodyText = '';
+        try {
+          bodyText = await response.text();
+        } catch { /* network read failed, fall through with empty body */ }
+        const { parsed } = parseConnectorBody(bodyText);
+        // TODO(upstream-contract): #1551's revoke route puts its enum in a top-level
+        // `code` (revoke_not_available, request_rate_limited), unlike mint/upload's
+        // `error` string. Surface only that enum; the rest of the body stays out.
+        const apiCode = typeof parsed?.code === 'string' && /^[a-z_]{1,64}$/.test(parsed.code) ? parsed.code : null;
+        // The durable "route is live but refusing" signal during enablement.
+        logger.warn('Connector revoke_links refused', {
+          resource_ref: resourceIdLogRef(resourceId),
+          status: response.status,
+          api_code: apiCode,
+          count: batchIds.length,
+        });
+        let connectorError;
+        try {
+          throwConnectorErrorFromBody('Connector revoke_links', response, { bodyText, apiCode });
+        } catch (err) {
+          connectorError = err;
+        }
+        // 401/403/413/429 mean this request is wrong or must slow down; only a
+        // connector that cannot answer (5xx) falls back.
+        connectorError ??= new Error(`Connector revoke_links failed (${response.status})`);
+        if (response.status < 500) throw connectorError;
+        await fallbackOrThrow(batchIds, connectorError);
+        confirmedCount += batchIds.length;
+        continue;
+      }
+
+      let parsed;
+      try {
+        parsed = await response.json();
+      } catch {
+        throw new Error('Connector revoke_links returned invalid JSON');
+      }
+
+      // Results are unordered: require exactly one confirmed outcome per
+      // requested id. An empty, short, duplicate or foreign result set fails.
+      if (parsed?.success !== true) {
+        throw new Error('Connector revoke_links returned success: false');
+      }
+      const requested = new Set(batchIds);
+      const statuses = new Map();
+      const results = Array.isArray(parsed.results) ? parsed.results : [];
+      for (const result of results) {
+        if (requested.has(result?.qurl_id) && REVOKE_TERMINAL_STATUSES.has(result.status)
+            && !statuses.has(result.qurl_id)) {
+          statuses.set(result.qurl_id, result.status);
+        }
+      }
+      if (results.length !== batchIds.length || statuses.size !== batchIds.length) {
+        throw new Error('Connector revoke_links did not confirm every requested link');
+      }
+      for (const status of statuses.values()) outcomes[status] = (outcomes[status] || 0) + 1;
+      const ordinaryIds = batchIds.filter(id => statuses.get(id) === 'not_connector_managed');
+      if (ordinaryIds.length > 0) {
+        await revokeOrdinaryLinks(resourceId, ordinaryIds, apiKey);
+        fallbackCount += ordinaryIds.length;
+      }
+      confirmedCount += batchIds.length;
     }
-    if (results.length !== batchIds.length || statuses.size !== batchIds.length) {
-      throw new Error('Connector revoke_links did not confirm every requested link');
-    }
-    for (const status of statuses.values()) outcomes[status] = (outcomes[status] || 0) + 1;
-    const ordinaryIds = batchIds.filter(id => statuses.get(id) === 'not_connector_managed');
-    fallbackCount += ordinaryIds.length;
-    if (ordinaryIds.length > 0) {
-      await revokeOrdinaryLinks(resourceId, ordinaryIds, apiKey);
+    // Belt and braces for the chunk loop: never report success short of every id.
+    if (confirmedCount !== ids.length) throw new Error('Connector revoke did not cover every requested link');
+  } finally {
+    // route_absent tells rollout verification whether #1551 is live here; the
+    // tally is logged on failure too so partial progress stays visible.
+    const summary = {
+      resource_ref: resourceIdLogRef(resourceId),
+      count: ids.length,
+      route_absent: routeAbsent,
+      outcomes,
+      fallback_count: fallbackCount,
+    };
+    if (confirmedCount === ids.length) {
+      logger.info('Revoked minted links', summary);
+    } else {
+      logger.warn('Minted link revoke incomplete', { ...summary, confirmed_count: confirmedCount });
     }
   }
-  // route_absent tells rollout verification whether #1551 is live here.
-  logger.info('Revoked minted links', {
-    resource_ref: resourceIdLogRef(resourceId),
-    count: ids.length,
-    route_absent: routeAbsent,
-    outcomes,
-    fallback_count: fallbackCount,
-  });
 }
 
 const DETECT_TARGET_PATH = '/api/detect';

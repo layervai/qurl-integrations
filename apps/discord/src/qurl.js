@@ -24,8 +24,9 @@ const { isPrivateHost } = require('./utils/private-host');
  * single command-side client (issue #830); the detect path in connector.js uses
  * the same SDK. Create and status use `/qurls`; ordinary-child revoke uses
  * `/resources/{crid}/qurls/{id}` (revokeOrdinaryLinks); whole-resource revoke
- * (`/resources`) remains only for the load-test sweep. The small GET /v1/me shim below uses fetch because SDK 0.3.x
- * has no identity method — replace it when the SDK exposes that route.
+ * (`/resources`) remains only for the load-test sweep. The small GET /v1/me
+ * shim below uses fetch because the SDK has no identity method — replace it
+ * when the SDK exposes that route.
  *
  * This module adds only the concerns the SDK doesn't own:
  *   - the DEPENDENCY_AUTH_FAILURE audit emit on 401/403 (emit-once) and
