@@ -1,15 +1,5 @@
 # Changelog
 
-## [0.2.7](https://github.com/layervai/qurl-integrations/compare/discord-v0.2.6...discord-v0.2.7) (2026-09-17)
-
-
-### Bug Fixes
-
-* **discord:** enforce identify budget at send boundary ([#1345](https://github.com/layervai/qurl-integrations/issues/1345)) ([1028c5c](https://github.com/layervai/qurl-integrations/commit/1028c5cecf8d8b6c07355084389b8247075279af))
-* **discord:** never reuse the seed sentinel as a webhook secret ([#1353](https://github.com/layervai/qurl-integrations/issues/1353)) ([1eac407](https://github.com/layervai/qurl-integrations/commit/1eac407f108b861c6197b792e8c2461462a55ad4))
-* **discord:** restore shim gateway metrics ([#1342](https://github.com/layervai/qurl-integrations/issues/1342)) ([fa6578f](https://github.com/layervai/qurl-integrations/commit/fa6578f89dbb10a5bca5714d2df609aae67daf55))
-* **discord:** verify the stored key with GET /v1/me in /qurl status ([#1367](https://github.com/layervai/qurl-integrations/issues/1367)) ([82c6d3d](https://github.com/layervai/qurl-integrations/commit/82c6d3d2efcbaa46f3b3f96b7727604612093123))
-
 ## [0.2.6](https://github.com/layervai/qurl-integrations/compare/discord-v0.2.5...discord-v0.2.6) (2026-09-11)
 
 
