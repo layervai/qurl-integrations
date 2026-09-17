@@ -1653,8 +1653,9 @@ const CLEANUP_WAIT_BUDGET_MS = 120_000;
 // /qurl revoke result budget: 13 minutes leaves room to edit the result before
 // the 15-minute interaction token expires.
 const REVOKE_SELECT_RESULT_WAIT_MS = 13 * 60 * 1000;
-// Bound on over-minted overflow ids included in the reconciliation log.
-const MAX_LOGGED_OVERFLOW_IDS = 20;
+// Over-minted children beyond the request that compensation still revokes (and
+// the bound on further overflow ids logged for hand reconciliation).
+const MAX_OVERFLOW_REVOKE_IDS = 20;
 
 /**
  * Mint one-time links across a stream of connector resources, each capped at
@@ -1711,9 +1712,10 @@ async function mintLinksInBatches({ initialResourceId, reuploadFn, expiresAt, re
         selfDestructSeconds,
         guildId,
       });
-      // An untrusted over-count cannot drive unbounded compensation: push at
-      // most the requested links (the overflow is thrown on below).
-      for (const link of minted.slice(0, batchSize)) {
+      // An untrusted over-count cannot drive unbounded compensation: push the
+      // requested links plus a bounded overflow so small over-mints self-heal
+      // in the catch below (the over-count is thrown on after this loop).
+      for (const link of minted.slice(0, batchSize + MAX_OVERFLOW_REVOKE_IDS)) {
         allLinks.push({ qurl_link: link?.qurl_link, qurl_id: link?.qurl_id, resourceId: currentResourceId });
       }
       // Validate only after every entry is pushed: the catch below revokes the
@@ -1722,14 +1724,15 @@ async function mintLinksInBatches({ initialResourceId, reuploadFn, expiresAt, re
       // "Only N of M"; links carry no recipient identity, so a short batch
       // cannot misroute access.
       if (minted.length > batchSize) {
-        // The overflow beyond batchSize is not compensated (an untrusted count
-        // must not drive unbounded work); log a bounded slice of its non-secret
-        // ids so an operator can reconcile those children by hand.
-        logger.error('Connector mint_link over-minted; overflow children not revoked', {
+        // Up to MAX_OVERFLOW_REVOKE_IDS extra children are revoked by the catch;
+        // anything beyond is left for hand reconciliation, so log a bounded
+        // slice of those non-secret ids.
+        logger.error('Connector mint_link over-minted', {
           resource_ref: resourceIdLogRef(currentResourceId),
           requested: batchSize,
           returned: minted.length,
-          overflow_qurl_ids: minted.slice(batchSize, batchSize + MAX_LOGGED_OVERFLOW_IDS)
+          unrevoked_overflow_qurl_ids: minted
+            .slice(batchSize + MAX_OVERFLOW_REVOKE_IDS, batchSize + 2 * MAX_OVERFLOW_REVOKE_IDS)
             .map(link => qurlIdForCleanup(link?.qurl_id)).filter(id => id !== null),
         });
         throw new Error(`Connector mint_link returned ${minted.length} links for a ${batchSize}-link batch`);
@@ -3826,13 +3829,14 @@ async function handleRevokeSelect(interaction, { flow_id }) {
     }
     revoked = await revoking;
   } catch (err) {
-    // The select menu is already gone; replace the progress text so the user
-    // is not left on "Revoking links..." before the dispatcher's follow-up.
+    // The select menu is already gone; replace the progress text with one
+    // actionable message and stop here so the dispatcher does not post twice.
+    logger.error('Revoke select failed before fan-out', { sendId, error: err?.message });
     await interaction.editReply({
       content: 'Could not complete revocation. Run `/qurl revoke` to retry.',
       components: [],
     }).catch(logIgnoredDiscordErr);
-    throw err;
+    return;
   }
 
   if (!revoked.barrierEstablished) {

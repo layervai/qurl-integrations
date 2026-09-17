@@ -10,7 +10,7 @@ const { qurlIdForCleanup } = require('./utils/qurl-id');
 // could drift out of sync. resolveDetectTarget() self-mints the ephemeral
 // detect qURL via the @layervai/qurl SDK (the standardized client), not qurl.js.
 // qurl.js has no connector.js dependency, so this require introduces no cycle.
-const { isPrivateHost, revokeOrdinaryLinks, REVOKE_BATCH_MAX_IDS } = require('./qurl');
+const { isPrivateHost, revokeOrdinaryLinks } = require('./qurl');
 
 const { sanitizeFilename } = require('./utils/sanitize');
 const { formatSessionDurationSeconds, isPositiveFinite, settlesWithin } = require('./utils/time');
@@ -26,15 +26,15 @@ const MAX_CDN_REDIRECTS = 3;
 // is remembered only within one call, so each resource re-probes the route on
 // purpose: a process-wide negative cache would hide the route once enabled.
 const REVOKE_LINKS_TIMEOUT_MS = 65_000;
-// The connector chunk must satisfy both #1551's 10-id request cap and the SDK
-// fallback's per-call cap, so a change to either cannot turn chunks into 413s.
+// #1551's 10-id request cap. Every chunk may be handed whole to the SDK
+// fallback, so qurl.js's REVOKE_BATCH_MAX_IDS must stay >= this; the
+// connector-coverage suite pins that invariant (a violation fails closed with
+// 'Invalid qURL revoke token list', never a false success).
 const CONNECTOR_REVOKE_MAX_IDS = 10;
-if (!Number.isInteger(REVOKE_BATCH_MAX_IDS) || REVOKE_BATCH_MAX_IDS < CONNECTOR_REVOKE_MAX_IDS) {
-  // Every connector chunk may be handed to the SDK fallback whole. A test that
-  // mocks ./qurl must keep this export (spread jest.requireActual) or this
-  // module fails to load with this message.
-  throw new Error('SDK revoke batch cap must cover a connector revoke chunk (tests mocking ./qurl must spread jest.requireActual)');
-}
+// Beyond the requested count, revoke up to this many extra ids from an
+// untrusted over-full mint body: small over-mints self-heal, while the bound
+// keeps the body from driving unbounded work.
+const MAX_OVERFLOW_REVOKE_IDS = 20;
 const REVOKE_RETRY_AFTER_MAX_SECONDS = 2;
 // Waiting budget for inline partial-mint cleanup before the mint error is
 // rethrown: one connector revoke request plus slack. The revoke keeps running
@@ -119,15 +119,16 @@ function parseConnectorBody(bodyText) {
 // contract, so live children may be left) are counted separately; the cap
 // bounds compensation work driven by an untrusted body.
 function partialQurlIdsFromLinks(links, n) {
-  if (!Array.isArray(links)) return { partialQurlIds: [], unidentifiedCount: 0, cappedCount: 0 };
+  if (!Array.isArray(links)) return { partialQurlIds: [], unidentifiedCount: 0, overMintedCount: 0, cappedCount: 0 };
   // This runs while reporting a failed mint: never let a bad `n` replace that
   // error. Skip cleanup instead and let the capped count below surface it.
-  const cap = Number.isInteger(n) && n > 0 ? n : 0;
+  const cap = Number.isInteger(n) && n > 0 ? n + MAX_OVERFLOW_REVOKE_IDS : 0;
   const normalized = links.map(link => qurlIdForCleanup(link?.qurl_id));
   const identified = [...new Set(normalized.filter(id => id !== null))];
   return {
     partialQurlIds: identified.slice(0, cap),
     unidentifiedCount: normalized.filter(id => id === null).length,
+    overMintedCount: cap ? Math.max(0, identified.length - n) : 0,
     cappedCount: Math.max(0, identified.length - cap),
   };
 }
@@ -477,11 +478,14 @@ async function mintLinks(resourceId, { expiresAt, n, apiKey, selfDestructSeconds
       bodyText = await response.text();
     } catch { /* network read failed, fall through with empty body */ }
     const { parsed, apiCode, apiDetail } = parseConnectorBody(bodyText);
-    const { partialQurlIds, unidentifiedCount, cappedCount } = partialQurlIdsFromLinks(parsed?.links, n);
-    if (cappedCount > 0) {
+    const { partialQurlIds, unidentifiedCount, overMintedCount, cappedCount } = partialQurlIdsFromLinks(parsed?.links, n);
+    if (overMintedCount > 0 || cappedCount > 0) {
+      // Over-minted children up to MAX_OVERFLOW_REVOKE_IDS are revoked below;
+      // capped_qurl_count is what is left for hand reconciliation.
       logger.error('Connector mint_link returned more partial links than requested', {
         resource_ref: resourceIdLogRef(resourceId),
         requested: n,
+        over_minted_count: overMintedCount,
         capped_qurl_count: cappedCount,
       });
     }

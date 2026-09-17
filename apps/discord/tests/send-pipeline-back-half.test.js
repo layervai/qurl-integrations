@@ -3264,11 +3264,9 @@ describe('mintLinksInBatches', () => {
     }
   });
 
-  it('rejects a batch with more links than requested and revokes them', async () => {
-    mockMintLinks.mockResolvedValueOnce([
-      { qurl_id: 'q_x1', qurl_link: 'https://q.test/x1' },
-      { qurl_id: 'q_x2', qurl_link: 'https://q.test/x2' },
-    ]);
+  it('revokes a bounded over-mint and logs only the unrevoked overflow', async () => {
+    const minted = Array.from({ length: 1 + 20 + 3 }, (_, i) => ({ qurl_id: `q_x${i}`, qurl_link: `https://q.test/x${i}` }));
+    mockMintLinks.mockResolvedValueOnce(minted);
 
     await expect(mintLinksInBatches({
       initialResourceId: 'res-1',
@@ -3276,13 +3274,15 @@ describe('mintLinksInBatches', () => {
       expiresAt: new Date().toISOString(),
       recipientCount: 1,
       apiKey: 'apikey',
-    })).rejects.toThrow('Connector mint_link returned 2 links for a 1-link batch');
-    // Compensation is bounded by the request, not the untrusted response size.
-    expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-1', ['q_x1'], 'apikey');
-    expect(logger.error).toHaveBeenCalledWith('Connector mint_link over-minted; overflow children not revoked', {
-      resource_ref: resourceIdLogRef('res-1'), requested: 1, returned: 2, overflow_qurl_ids: ['q_x2'],
+    })).rejects.toThrow('Connector mint_link returned 24 links for a 1-link batch');
+    // Compensation covers the request plus 20 overflow ids, not the whole untrusted body.
+    expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-1', minted.slice(0, 21).map(l => l.qurl_id), 'apikey');
+    expect(logger.error).toHaveBeenCalledWith('Connector mint_link over-minted', {
+      resource_ref: resourceIdLogRef('res-1'), requested: 1, returned: 24,
+      unrevoked_overflow_qurl_ids: ['q_x21', 'q_x22', 'q_x23'],
     });
   });
+
 
   it('returns empty array when recipientCount = 0', async () => {
     const result = await mintLinksInBatches({

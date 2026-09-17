@@ -1187,28 +1187,26 @@ describe('revokeMintedLinks — #1551 fail-closed contract', () => {
     expect(logger.error).not.toHaveBeenCalled();
   });
 
-  it('caps untrusted partial ids at the requested link count', async () => {
+  it('caps untrusted partial ids at the requested count plus a bounded overflow', async () => {
+    const ids = Array.from({ length: 1000 }, (_, i) => `q_${i}`);
     globalThis.fetch = jest.fn()
       .mockResolvedValueOnce({
         ok: false,
         status: 502,
-        text: async () => JSON.stringify({
-          success: false,
-          links: Array.from({ length: 1000 }, (_, i) => ({ qurl_id: `q_${i}` })),
-        }),
+        text: async () => JSON.stringify({ success: false, links: ids.map(qurl_id => ({ qurl_id })) }),
       })
-      .mockResolvedValueOnce(revoked('q_0', 'q_1'));
+      .mockResolvedValueOnce(revoked(...ids.slice(0, 10)))
+      .mockResolvedValueOnce(revoked(...ids.slice(10, 20)))
+      .mockResolvedValueOnce(revoked(...ids.slice(20, 22)));
 
     await expect(connector.mintLinks('res-1', { expiresAt: '2026-01-01T00:00:00Z', n: 2 }))
-      .rejects.toMatchObject({ partialQurlIds: ['q_0', 'q_1'] });
-    expect(globalThis.fetch).toHaveBeenCalledTimes(2);
-    expect(logger.warn).toHaveBeenCalledWith('Connector mint_link returned partial links on non-2xx', expect.objectContaining({
-      partial_link_count: 2, unidentified_qurl_count: 0,
-    }));
+      .rejects.toMatchObject({ partialQurlIds: ids.slice(0, 22) });
+    expect(globalThis.fetch).toHaveBeenCalledTimes(4);
     expect(logger.error).toHaveBeenCalledWith('Connector mint_link returned more partial links than requested', {
-      resource_ref: expect.stringMatching(/^sha256:/), requested: 2, capped_qurl_count: 998,
+      resource_ref: expect.stringMatching(/^sha256:/), requested: 2, over_minted_count: 998, capped_qurl_count: 978,
     });
   });
+
 
   it('does not count duplicate identified partial ids as unidentified', async () => {
     globalThis.fetch = jest.fn()
@@ -1323,15 +1321,10 @@ describe('revokeMintedLinks — real SDK fallback seam', () => {
   });
 });
 
-describe('connector.js load-time revoke cap invariant', () => {
-  afterEach(() => {
-    jest.dontMock('../src/qurl');
-    jest.resetModules();
-  });
-
-  it('refuses to load when the SDK fallback cap cannot hold a connector chunk', () => {
-    jest.resetModules();
-    jest.doMock('../src/qurl', () => ({ ...jest.requireActual('../src/qurl'), REVOKE_BATCH_MAX_IDS: 5 }));
-    expect(() => require('../src/connector')).toThrow('SDK revoke batch cap must cover a connector revoke chunk');
+describe('revoke cap invariant', () => {
+  it('lets the SDK fallback take a whole connector chunk', () => {
+    const { REVOKE_BATCH_MAX_IDS } = jest.requireActual('../src/qurl');
+    // CONNECTOR_REVOKE_MAX_IDS in connector.js is #1551's 10-id request cap.
+    expect(REVOKE_BATCH_MAX_IDS).toBeGreaterThanOrEqual(10);
   });
 });

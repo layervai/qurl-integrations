@@ -1017,12 +1017,15 @@ describe('handleRevokeSelect (dispatcher path)', () => {
     );
   });
 
-  it('replaces the progress message and rethrows when revoke fails before fan-out', async () => {
+  it('replaces the progress message once when revoke fails before fan-out', async () => {
     const failure = new Error('DDB unavailable');
     mockDb.markSendRevoking.mockRejectedValueOnce(failure);
     const interaction = makeSelectInteraction();
 
-    await expect(handleRevokeSelect(interaction, { flow_id: '0:1#guild-1#ch-1#user-1' })).rejects.toBe(failure);
+    await expect(handleRevokeSelect(interaction, { flow_id: '0:1#guild-1#ch-1#user-1' })).resolves.toBeUndefined();
+    expect(require('../src/logger').error).toHaveBeenCalledWith('Revoke select failed before fan-out', {
+      sendId: 'send-1', error: 'DDB unavailable',
+    });
 
     expect(interaction.update).toHaveBeenCalledWith({ content: 'Revoking links...', components: [] });
     expect(interaction.editReply).toHaveBeenCalledWith({
