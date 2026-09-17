@@ -23,6 +23,7 @@ func TestParse_HappyPaths(t *testing.T) {
 		wantSub    Subcommand
 		wantAdmin  AdminAction
 		wantAlias  string
+		wantCRID   string
 		wantTarget string
 		wantUserID string
 		wantFlags  map[string]string
@@ -30,6 +31,7 @@ func TestParse_HappyPaths(t *testing.T) {
 		{name: "empty -> help", text: "", wantSub: SubcmdHelp, wantFlags: map[string]string{}},
 		{name: "help literal", text: "help", wantSub: SubcmdHelp, wantFlags: map[string]string{}},
 		{name: "get alias", text: "get $prod-db", wantSub: SubcmdGet, wantAlias: "prod-db", wantFlags: map[string]string{}},
+		{name: "crid", text: "crid " + testTunnelCRID, wantSub: SubcmdCRID, wantCRID: testTunnelCRID, wantFlags: map[string]string{}},
 		{name: "get with dm flag", text: "get $prod-db dm:true", wantSub: SubcmdGet, wantAlias: "prod-db", wantFlags: map[string]string{"dm": "true"}},
 		{name: "get with reason flag", text: `get $prod-db reason:"on call"`, wantSub: SubcmdGet, wantAlias: "prod-db", wantFlags: map[string]string{"reason": "on call"}},
 		{name: "get with both flags", text: `get $prod-db dm:true reason:"audit"`, wantSub: SubcmdGet, wantAlias: "prod-db", wantFlags: map[string]string{"dm": "true", "reason": "audit"}},
@@ -90,6 +92,9 @@ func TestParse_HappyPaths(t *testing.T) {
 			}
 			if cmd.Alias != tc.wantAlias {
 				t.Errorf("Alias = %q, want %q", cmd.Alias, tc.wantAlias)
+			}
+			if cmd.CRID != tc.wantCRID {
+				t.Errorf("CRID = %q, want %q", cmd.CRID, tc.wantCRID)
 			}
 			if cmd.Target != tc.wantTarget {
 				t.Errorf("Target = %q, want %q", cmd.Target, tc.wantTarget)
@@ -163,6 +168,9 @@ func TestParse_ErrorPaths(t *testing.T) {
 	}{
 		{name: "unknown subcommand", text: "delete $foo", wantErr: ErrUnknownSubcommand},
 		{name: "get without alias", text: "get", wantErr: ErrEmptyResource},
+		{name: "crid without identifier", text: "crid", wantErr: ErrInvalidCRID},
+		{name: "crid malformed identifier", text: "crid qnot-a-crid", wantErr: ErrInvalidCRID},
+		{name: "crid with extra positional", text: "crid " + testTunnelCRID + " extra", wantErr: ErrUnexpectedArgument},
 		{name: "get without sigil", text: "get prod-db", wantErr: ErrMissingSigil},
 		{name: "get bare sigil", text: "get $", wantErr: ErrEmptyResource},
 		{name: "get https URL rejected", text: "get https://example.com", wantErr: ErrURLNotSupportedGet},

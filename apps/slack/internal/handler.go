@@ -322,6 +322,10 @@ type Config struct {
 	AuthProvider       auth.Provider
 	SlackSigningSecret string
 	NewClient          func(apiKey string) *client.Client
+	// QURLEndpoint is the qurl-service base URL used by the CRID share SDK.
+	// NewClient remains the narrow client for Slack's resource-id APIs; the
+	// SDK owns the distinct CRID /share endpoint and response contract.
+	QURLEndpoint string
 	// ConnectorAPIURL is the qURL platform API base including /v1. Guided
 	// tunnel setup writes it into every rendered runtime definition so sandbox
 	// installs never silently fall back to production.
@@ -1271,7 +1275,7 @@ var adminVerbs = []string{string(SubcmdAdmin), adminVerbProtect, adminVerbProtec
 // redirect a user who typed a user verb on `/qurl-admin`. `setup` is a
 // user verb (first-come-claims; see handleSetup), so `/qurl-admin setup`
 // redirects here to `/qurl setup`. Immutable like adminVerbs (see above).
-var userVerbs = []string{"get", "list", string(SubcmdAliases), "create", setupVerb, uninstallVerb, "feedback"}
+var userVerbs = []string{"get", string(SubcmdCRID), "list", string(SubcmdAliases), "create", setupVerb, uninstallVerb, "feedback"}
 
 // isAdminVerb reports whether text's leading verb is an admin verb.
 func isAdminVerb(text string) bool {
@@ -1492,6 +1496,8 @@ func (h *Handler) dispatchUserCommand(w http.ResponseWriter, command, text strin
 		// routing here. The parser then produces ErrEmptyResource
 		// for a bare `get`.
 		h.handleGet(w, values)
+	case slashSubcommand(text, string(SubcmdCRID)):
+		h.handleCRID(w, values)
 	case text == string(SubcmdAliases):
 		h.handleAliases(w, values)
 	case slashSubcommand(text, "feedback"):
@@ -2554,6 +2560,17 @@ func (h *Handler) userHelpMessage(command string) string {
 	lines = append(lines, setupLine)
 	if h.canAdvertiseUninstall() {
 		lines = append(lines, "• `/qurl uninstall` — Disconnect qURL from this Slack workspace")
+	}
+	// CRID sharing is intentionally independent of channel alias storage: a
+	// CRID is the resource's permanent identifier and the SDK's /share endpoint
+	// authorizes it with the workspace key. Advertise it whenever that direct
+	// path is configured, even in deployments without AdminStore.
+	if h.cfg.AuthProvider != nil && strings.TrimSpace(h.cfg.QURLEndpoint) != "" {
+		lines = append(lines, "• `/qurl crid <CRID>` — Create a qURL directly from a resource's permanent CRID")
+		if h.cfg.PostDMBlocks != nil {
+			lines = append(lines, "• `/qurl crid <CRID> dm:true` — DM the CRID's qURL to you instead of posting it in-channel")
+		}
+		lines = append(lines, "• `/qurl crid <CRID> reason:\"…\"` — Create a qURL, recording a reason in the audit log")
 	}
 	if h.cfg.AdminStore != nil {
 		// Glossary so the `$slug` / `$alias` tokens in the verbs and in

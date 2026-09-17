@@ -57,6 +57,9 @@ personal data out of the repository.
 | `/qurl get <$id\|$alias>` | Mint a one-time qURL link for a resource in this channel. |
 | `/qurl get <$id\|$alias> dm:true` | Mint the link and DM it to you instead of posting it in the channel. |
 | `/qurl get <$id\|$alias> reason:"…"` | Mint the link and record a reason in the audit log. |
+| `/qurl crid <CRID>` | Mint a one-time qURL link directly from a resource's permanent CRID. |
+| `/qurl crid <CRID> dm:true` | Mint the CRID's link and DM it to you instead of posting it in the channel. |
+| `/qurl crid <CRID> reason:"…"` | Mint the CRID's link and record a reason in the audit log. |
 | `/qurl list` | List the resources available to you in this channel. |
 | `/qurl aliases` | List this channel's aliases and the resource each one points to. |
 | `/qurl uninstall` | Owner/admin-gated: disconnects qURL from this workspace's Slack commands. This is a **local-only disconnect** — it does **not** revoke the workspace's qURL API key outside Slack (an API key can't revoke itself), so if you're disconnecting because the key may be exposed, revoke it through qURL key management or your operator. |
@@ -157,6 +160,10 @@ current channel (pass a resource `$id` or a channel `$alias`). The reply
 includes how long the link stays valid. Every link is single-use: it burns on
 first open. Add `dm:true` to receive the link privately, or `reason:"…"` to
 note why you minted it in the audit log.
+
+`/qurl crid <CRID>` uses the same one-time link and Slack rendering flow, but
+shares directly from a resource's permanent CRID without resolving a channel
+`$id` or `$alias`.
 
 ## FAQ
 

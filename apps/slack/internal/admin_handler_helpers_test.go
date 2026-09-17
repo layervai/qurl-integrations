@@ -95,7 +95,8 @@ func newAdminTestHandler(t *testing.T, ts *adminTestServers) *Handler {
 		NewClient: func(apiKey string) *client.Client {
 			return client.New(ts.customerServer.URL, apiKey, client.WithRetry(0))
 		},
-		AdminStore: store,
+		QURLEndpoint: ts.customerServer.URL,
+		AdminStore:   store,
 	})
 	h.now = func() time.Time { return fixedNow }
 	// httptest URLs are http://127.0.0.1:NNNNN — the production

@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+
+	"github.com/layervai/qurl-go/crid"
 )
 
 // Subcommand is a recognized verb after the `/qurl` slash command.
@@ -25,6 +27,9 @@ const (
 	// channel-scoped `$alias`. Raw URLs and `$r_<id>` resource IDs are
 	// rejected — get is slug/alias-only.
 	SubcmdGet Subcommand = "get"
+	// SubcmdCRID mints a short-lived qURL directly from a cryptographic
+	// resource identifier. Unlike get, it does not resolve a channel alias.
+	SubcmdCRID Subcommand = "crid"
 	// SubcmdSetAlias binds an alias to a target. The parser accepts a
 	// URL, resource ID, or tunnel slug shape, but the handler
 	// ([Handler.handleSetAlias] / parseAliasArgs) now enforces
@@ -111,6 +116,9 @@ type Command struct {
 	// slug or a channel alias; the alias-mutating verbs treat it as the
 	// alias name.
 	Alias string
+	// CRID is the cryptographic resource identifier supplied to `crid`.
+	// It remains exactly as entered: CRIDs are case-sensitive canonical values.
+	CRID string
 	// Target is the trailing positional arg used by `setalias` (parser
 	// accepts a URL, raw resource_id, or `$slug` shape — the handler then
 	// enforces tunnels-only). `revoke` carries its `$<id|alias>` in Alias
@@ -168,6 +176,11 @@ var ErrUnknownSubcommand = errors.New("unknown subcommand")
 // ErrMissingTarget is returned when `setalias` is invoked without its
 // trailing target positional argument.
 var ErrMissingTarget = errors.New("missing target argument")
+
+// ErrInvalidCRID is returned when `crid` is not a structurally valid CRID.
+// The SDK and service independently validate it before minting as well; this
+// parser gate avoids sending a permanent typo over the network.
+var ErrInvalidCRID = errors.New("invalid CRID")
 
 // ErrURLNotSupportedGet is returned when `/qurl get` is handed a raw
 // URL. The Slack bot only mints links for tunnel resources now, reached
@@ -307,6 +320,9 @@ func Parse(text string) (*Command, error) {
 	case SubcmdGet:
 		cmd.Subcommand = SubcmdGet
 		return parseGet(cmd, rest)
+	case SubcmdCRID:
+		cmd.Subcommand = SubcmdCRID
+		return parseCRID(cmd, rest)
 	case SubcmdSetAlias:
 		cmd.Subcommand = SubcmdSetAlias
 		return parseSetAlias(cmd, rest)
@@ -482,6 +498,28 @@ func parseGet(cmd *Command, rest []string) (*Command, error) {
 		// applyFlag would otherwise report "invalid flag: \"junk\"
 		// (expected key:value)" — accurate to applyFlag but confusing
 		// to a user who didn't intend to type a flag at all.
+		if !looksLikeFlag(tok) {
+			return nil, fmt.Errorf("%w: %q", ErrUnexpectedArgument, tok)
+		}
+		if err := applyFlag(cmd, tok); err != nil {
+			return nil, err
+		}
+	}
+	return cmd, nil
+}
+
+// parseCRID extracts one strict CRID positional argument and the same optional
+// delivery/audit flags supported by `get`. CRIDs deliberately are not trimmed
+// or case-folded: crid.Validate accepts only their canonical spelling.
+func parseCRID(cmd *Command, rest []string) (*Command, error) {
+	if len(rest) == 0 {
+		return nil, ErrInvalidCRID
+	}
+	if err := crid.Validate(rest[0]); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidCRID, err)
+	}
+	cmd.CRID = rest[0]
+	for _, tok := range rest[1:] {
 		if !looksLikeFlag(tok) {
 			return nil, fmt.Errorf("%w: %q", ErrUnexpectedArgument, tok)
 		}
