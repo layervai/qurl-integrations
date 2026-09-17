@@ -21,6 +21,10 @@ ORIGIN="s3-static-connector-app"
 STUB_IMG="python:3.12-slim@sha256:d764629ce0ddd8c71fd371e9901efb324a95789d2315a47db7e4d27e78f1b0e9"
 arch="$(uname -m)"; case "$arch" in x86_64) arch=amd64 ;; aarch64|arm64) arch=arm64 ;; *) ;; esac
 PLATFORM="${PLATFORM:-linux/$arch}"
+# One waiver for every assertion set the pinned immutable origin predates —
+# control-char, upstream-response, and request-preflight. They share a digest
+# and a lifecycle, so the single pin-rotation PR that bumps the digest retires
+# all of them at once.
 waive_security_contract=false
 if [ -n "$S3_ORIGIN_SECURITY_WAIVER_IMAGE" ]; then
   if [[ ! "$S3_ORIGIN_SECURITY_WAIVER_IMAGE" =~ ^ghcr\.io/layervai/qurl-integrations/s3-static-connector@sha256:[0-9a-f]{64}$ ]]; then
@@ -178,6 +182,21 @@ expect_security_headers() {
   expect_eq "Referrer-Policy ($label)" "$(hval Referrer-Policy)" "no-referrer"
   expect_eq "X-Robots-Tag ($label)" "$(hval X-Robots-Tag)" "noindex, nofollow, noarchive, nosnippet, noimageindex"
 }
+# nginx writes its access line after the response reaches the client, and the
+# container log pipeline adds its own lag, so a bare grep right after curl races
+# the writer — it flaked on emulated arm64. Poll like expect_stub_gets_since.
+docker_logs_contain() {
+  # grep -q closes the pipe on its first match; under pipefail that can turn a
+  # successful probe into SIGPIPE from docker logs. Consume the full stream.
+  docker logs "$1" 2>&1 | grep -F "$2" >/dev/null
+}
+expect_origin_log() {
+  for _ in $(seq 1 20); do
+    if docker_logs_contain "$ORIGIN" "$2"; then ok "$1"; return; fi
+    sleep 0.25
+  done
+  no "$1"
+}
 expect_stub_gets_since() {
   label="$1"
   mark="$2"
@@ -244,6 +263,15 @@ status_json=$(docker exec \
   "$ORIGIN" qurl-origin-cachectl status)
 expect_contains "runtime status escapes connector metadata" "$status_json" '"connector_id":"stats\"quoted\\slash"'
 expect_contains "runtime status escapes replica metadata" "$status_json" '"replica_id":"origin-a\tline\nnext\bback\fpage\u0007bel\rcr"'
+
+if [ "$waive_security_contract" != "true" ]; then
+  expect_origin_log "healthy start reports a successful preflight" '"msg":"preflight_ok"'
+  if docker_logs_contain "$ORIGIN" '"msg":"preflight_no_response"'; then
+    no "healthy startup must not report no response"
+  else
+    ok "healthy startup must not report no response"
+  fi
+fi
 
 # 1. root -> index
 code=$(curl -s -o "$B" -w '%{http_code}' "$base/"); expect_eq "GET / status" "$code" 200
@@ -358,21 +386,21 @@ expect_eq "missing body" "$(cat "$B")" "Not Found"
 # 9. upstream 403 -> client 404 (no leak), but logged as upstream_status 403
 code=$(curl -s -o /dev/null -w '%{http_code}' "$base/forbidden.json")
 expect_eq "forbidden client status" "$code" 404
-if docker logs "$ORIGIN" 2>&1 | grep -q '"upstream_status":"403"'; then ok "forbidden logged upstream_status 403"; else no "forbidden not logged as upstream 403"; fi
+expect_origin_log "forbidden logged upstream_status 403" '"upstream_status":"403"'
 
 # 9b. other S3-side 4xx responses are also masked; clients must never see XML
 # error bodies or distinguish malformed/denied/missing object states.
 fetch "$base/badrequest.json"
 expect_eq "badrequest client status" "$(status_code)" 404
 expect_eq "badrequest body" "$(cat "$B")" "Not Found"
-if docker logs "$ORIGIN" 2>&1 | grep -q '"upstream_status":"400"'; then ok "badrequest logged upstream_status 400"; else no "badrequest not logged as upstream 400"; fi
+expect_origin_log "badrequest logged upstream_status 400" '"upstream_status":"400"'
 
 # 9c. throttle-class responses are retryable upstream failures, not missing
 # objects, and still never leak S3 XML.
 fetch "$base/throttle.json"
 expect_eq "throttle status" "$(status_code)" 502
 expect_eq "throttle body" "$(cat "$B")" "Bad Gateway"
-if docker logs "$ORIGIN" 2>&1 | grep -q '"upstream_status":"429"'; then ok "throttle logged upstream_status 429"; else no "throttle not logged as upstream 429"; fi
+expect_origin_log "throttle logged upstream_status 429" '"upstream_status":"429"'
 
 # 9d. Every other upstream status is masked too, not just the handful the
 # intercept list used to enumerate. The pinned pre-fix digest passes S3's 3xx
@@ -391,13 +419,13 @@ if [ "$waive_security_contract" != "true" ]; then
     *) ok "wrong-region 301 body discloses no bucket or region" ;;
   esac
   expect_eq "wrong-region 301 hides x-amz-bucket-region" "$(hval x-amz-bucket-region)" ""
-  if docker logs "$ORIGIN" 2>&1 | grep -q '"upstream_status":"301"'; then ok "wrong-region logged upstream_status 301"; else no "wrong-region not logged as upstream 301"; fi
+  expect_origin_log "wrong-region logged upstream_status 301" '"upstream_status":"301"'
 
   # 501 sits outside every status family the intercept list used to name.
   fetch "$base/notimplemented.html"
   expect_eq "notimplemented status" "$(status_code)" 502
   expect_eq "notimplemented body" "$(cat "$B")" "Bad Gateway"
-  if docker logs "$ORIGIN" 2>&1 | grep -q '"upstream_status":"501"'; then ok "notimplemented logged upstream_status 501"; else no "notimplemented not logged as upstream 501"; fi
+  expect_origin_log "notimplemented logged upstream_status 501" '"upstream_status":"501"'
 
   # 9e. A real object hit must not fingerprint the origin as S3 behind Envoy.
   # X-Stub-Path is the control: upstream headers do reach the viewer unless
@@ -476,7 +504,7 @@ if [ "$waive_security_contract" != "true" ]; then
   # $s3_target is initialized above the guard, so a rejected request must not
   # also emit a per-request "uninitialized variable" warning — that would turn a
   # control-char flood into an error_log flood.
-  if docker logs "$ORIGIN" 2>&1 | tail -n +"$((warn_mark + 1))" | grep -q 'uninitialized "s3_target"'; then
+  if docker logs "$ORIGIN" 2>&1 | tail -n +"$((warn_mark + 1))" | grep -F 'uninitialized "s3_target"' >/dev/null; then
     no "control-char rejection emits no uninitialized s3_target warning"
   else
     ok "control-char rejection emits no uninitialized s3_target warning"
@@ -516,7 +544,7 @@ curl -s -o /dev/null "$base/website"
 expect_stub_gets_since "CACHE_DEFAULT_TTL caches metadata-less object" "$mark" 'GET /site/website/index.html ' 0
 
 if [ "$waive_security_contract" = "true" ]; then
-  message="Known pre-fix S3 origin digest remains pinned by Slack; the control-char and upstream-response assertions are waived only for this exact immutable image. Rotate the pin after PRs #1158 and #1231 publish, then remove S3_ORIGIN_SECURITY_WAIVER_IMAGE."
+  message="Known pre-fix S3 origin digest remains pinned by Slack; the control-char, upstream-response, and request-preflight assertions are waived only for this exact immutable image. Rotate the pin after the producer changes publish, then remove S3_ORIGIN_SECURITY_WAIVER_IMAGE."
   if [ "${GITHUB_ACTIONS:-false}" = "true" ]; then
     printf '::warning title=S3 origin security pin pending rotation::%s\n' "$message"
   else
@@ -603,6 +631,125 @@ for child in envoy nginx; do
     no "supervisor exits non-zero after $child crash"
   fi
 done
+
+if [ "$waive_security_contract" = "true" ]; then
+  message="Known pre-preflight S3 origin digest remains pinned by Slack; the request-preflight assertions ride the same waiver as the sets above. Viewer-facing 403 masking stays covered by the unwaived checks above."
+  if [ "${GITHUB_ACTIONS:-false}" = "true" ]; then
+    printf '::warning title=S3 origin request preflight pending pin rotation::%s\n' "$message"
+  else
+    printf 'WARNING: %s\n' "$message" >&2
+  fi
+else
+  # 16. Startup request preflight. A deterministic 3xx/4xx response other than
+  # 304, 404, or 429 means S3 rejected the request, but status alone does
+  # not distinguish credentials from IAM, region, endpoint, or other request
+  # configuration. nginx masks the rejection to a viewer 404, so the origin
+  # logs the cause while retaining automatic recovery after IAM propagation.
+  origin_running() {
+    docker inspect -f '{{.State.Running}}' "$ORIGIN" 2>/dev/null || echo false
+  }
+  # $1 is S3_PREFIX; pass "unsigned" as $2 to run with an empty AWS provider
+  # chain, which is how a credential failure actually reaches S3.
+  preflight_case() {
+    preflight_credentials="-e AWS_ACCESS_KEY_ID=test -e AWS_SECRET_ACCESS_KEY=test"
+    if [ "${2:-}" = "unsigned" ]; then preflight_credentials=""; fi
+    docker rm -f "$ORIGIN" >/dev/null 2>&1
+    # shellcheck disable=SC2086 # deliberate word split of the -e flag list
+    docker run -d --name "$ORIGIN" --network "$NET" -p 127.0.0.1::8080 \
+      -e S3_BUCKET=example-bucket -e AWS_REGION=us-east-1 -e S3_PREFIX="$1" \
+      -e LISTEN_ADDR=0.0.0.0:8080 -e ALLOW_NON_LOOPBACK_LISTEN=true \
+      -e ALLOW_PLAINTEXT_S3=true \
+      -e S3_TLS=false -e S3_ENDPOINT_ADDR="$STUB" -e S3_ENDPOINT_PORT=9000 \
+      $preflight_credentials \
+      "$IMG" >/dev/null
+    # Allow the signer startup deadline plus container launch time.
+    for _ in $(seq 1 90); do
+      docker_logs_contain "$ORIGIN" '"msg":"preflight_' && break
+      sleep 0.5
+    done
+
+  }
+
+  for prefix in wrongregion forbidden badrequest; do
+    preflight_case "$prefix"
+    expect_eq "preflight preserves recovery on upstream $prefix" "$(origin_running)" "true"
+    expect_origin_log "preflight names the rejected request for upstream $prefix" \
+      '"msg":"preflight_request_rejected"'
+    expect_origin_log "preflight rejection covers credentials and IAM for upstream $prefix" \
+      'credentials/provider chain, IAM permissions'
+    expect_origin_log "preflight rejection covers region and request config for upstream $prefix" \
+      'AWS_REGION, bucket/endpoint, and signed-request configuration'
+  done
+
+  # The headline defect: with nothing in the AWS provider chain Envoy forwards
+  # the S3 hop with no Authorization header at all, S3 answers 403, and nginx
+  # would mask that to a viewer 404 on every request forever.
+  stub_mark="$(stub_log_mark)"
+  preflight_case "" unsigned
+  expect_eq "preflight preserves credential refresh recovery" "$(origin_running)" "true"
+  expect_origin_log "preflight names the rejected request with no credentials" \
+    '"msg":"preflight_request_rejected"'
+  unsigned_probes="$(stub_get_count_since "$stub_mark" 'authorization absent ')"
+  if [ "$unsigned_probes" -ge 1 ]; then
+    ok "unsigned preflight reaches S3 with no Authorization header"
+  else
+    no "unsigned preflight reaches S3 with no Authorization header"
+  fi
+  preflight_case startup-denied
+  expect_origin_log "startup rejection is diagnosed before recovery" \
+    '"msg":"preflight_request_rejected"'
+  base="$(origin_base_url)"
+  for _ in $(seq 1 40); do
+    recovered="$(curl -s "$base/")"
+    [ "$recovered" = "recovered" ] && break
+    sleep 0.5
+  done
+  expect_eq "same origin recovers after startup rejection without restart" "$recovered" "recovered"
+  expect_eq "startup rejection did not restart the origin" \
+    "$(docker inspect -f '{{.RestartCount}}' "$ORIGIN")" "0"
+
+  for prefix in throttle boom; do
+    preflight_case "$prefix"
+    expect_eq "preflight serves through transient upstream $prefix" "$(origin_running)" "true"
+    expect_origin_log "preflight labels transient upstream $prefix" \
+      '"msg":"preflight_upstream_error"'
+  done
+
+  # A 404 is nonfatal so a deploy that starts before object sync can recover,
+  # but the status does not prove the active credentials are valid.
+  preflight_case not-synced-yet
+  expect_eq "preflight serves when only the index object is missing" "$(origin_running)" "true"
+  expect_origin_log "preflight distinguishes a 404 from a rejected request" \
+    '"msg":"preflight_object_missing"'
+  if docker_logs_contain "$ORIGIN" 'Credentials work'; then
+    no "preflight avoids claiming that a 404 proves credentials work"
+  else
+    ok "preflight avoids claiming that a 404 proves credentials work"
+  fi
+
+  # 17. Runtime request rejections stay masked to a viewer 404 but must be
+  # greppable without assigning a cause that status alone cannot establish.
+  # The origin above still serves under S3_PREFIX=not-synced-yet, so the stub sees
+  # /not-synced-yet/forbidden.json (403) and /not-synced-yet/definitely-missing/
+  # index.html (404) — a rejected request and a miss, both masked to a 404.
+  base="$(origin_base_url)"
+  for _ in $(seq 1 40); do
+    [ "$(curl -s -o /dev/null -w '%{http_code}' "$base/")" != "000" ] && break
+    sleep 0.5
+  done
+  expect_eq "runtime request rejection still returns viewer 404" \
+    "$(curl -s -o /dev/null -w '%{http_code}' "$base/forbidden.json")" 404
+  curl -s -o /dev/null "$base/definitely-missing"
+  auth_lines=0
+  for _ in $(seq 1 10); do
+    auth_lines="$(docker logs "$ORIGIN" 2>&1 | grep -c '"msg":"s3_request_rejected"')"
+    [ "$auth_lines" = "1" ] && break
+    sleep 0.5
+  done
+  expect_eq "runtime request rejection logged once, missing key logs none" "$auth_lines" 1
+  expect_origin_log "runtime rejection status is a JSON number" '"status":403'
+  expect_origin_log "runtime rejection includes the S3 key" '"key":"/not-synced-yet/forbidden.json"'
+fi
 
 echo "-------------------------------------------"
 echo "behavior: $pass passed, $fail failed"

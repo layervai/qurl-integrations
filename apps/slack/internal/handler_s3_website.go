@@ -29,6 +29,11 @@ const (
 	s3WebsiteUnexpectedFailureNotice = "S3 website qURL Connector setup stopped unexpectedly before install instructions were confirmed. If you received an enrollment-token DM from this attempt, discard it and run `/qurl-admin protect` again."
 	s3WebsiteECSLogGroup             = "/ecs/qurl-s3-website"
 	s3WebsiteOriginContainerName     = "s3-static-origin"
+	// TODO(upstream-contract): mirrors the startup request preflight in
+	// origins/s3-static-connector/entrypoint.sh. The origin masks rejected S3
+	// requests as viewer 404s on purpose, so every environment's instructions
+	// must say where the operator-side cause is investigated instead.
+	s3WebsitePreflightNotice = "If S3 rejects the startup probe, the origin logs preflight_request_rejected with credential, IAM, region, endpoint, and request guidance; it stays running so temporary failures can recover. A preflight 404 is nonfatal and does not prove credentials work."
 )
 
 // S3OriginImageDigestRequired is the shared operator-facing remediation for
@@ -73,6 +78,7 @@ var (
 )
 
 type s3WebsiteInstallArgs struct {
+	Hub           TunnelHub
 	Slug          string
 	Alias         string
 	Environment   tunnelInstallEnvironment
@@ -606,6 +612,12 @@ func (h *Handler) buildS3WebsiteInstall(ctx context.Context, log *slog.Logger, t
 }
 
 func (h *Handler) prepareS3WebsiteInstallMessage(args *s3WebsiteInstallArgs) (preparedS3WebsiteInstallMessage, error) {
+	if err := h.cfg.TunnelHub.Validate(); err != nil {
+		return preparedS3WebsiteInstallMessage{}, err
+	}
+	copyArgs := *args
+	copyArgs.Hub = h.cfg.TunnelHub
+	args = &copyArgs
 	connectorImage := strings.TrimSpace(h.cfg.TunnelImage)
 	usingDefaultConnectorImage := connectorImage == ""
 	if usingDefaultConnectorImage {
@@ -804,6 +816,35 @@ SECRET_DIR="/run/secrets/qurl/${QURL_CONNECTOR_ID}"
 AGENT_STATE_DIR="/var/lib/layerv/qurl/${QURL_CONNECTOR_ID}"
 CONFIG_FILE="$PWD/qurl-share-${QURL_CONNECTOR_ID}.yaml"
 
+S3_ORIGIN_CREDENTIAL_ARGS=
+case "${QURL_S3_FORWARD_AWS_CREDENTIALS:-false}" in
+  false) ;;
+  true)
+    if [ -n "${AWS_SESSION_TOKEN:-}" ] && { [ -z "${AWS_ACCESS_KEY_ID:-}" ] || [ -z "${AWS_SECRET_ACCESS_KEY:-}" ]; }; then
+      echo "AWS_SESSION_TOKEN requires AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY." >&2
+      exit 1
+    fi
+    if { [ -n "${AWS_ACCESS_KEY_ID:-}" ] && [ -z "${AWS_SECRET_ACCESS_KEY:-}" ]; } ||
+      { [ -z "${AWS_ACCESS_KEY_ID:-}" ] && [ -n "${AWS_SECRET_ACCESS_KEY:-}" ]; }; then
+      echo "AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY must both be set." >&2
+      exit 1
+    fi
+    if [ -z "${AWS_ACCESS_KEY_ID:-}" ]; then
+      echo "QURL_S3_FORWARD_AWS_CREDENTIALS=true requires AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY." >&2
+      exit 1
+    fi
+    export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
+    S3_ORIGIN_CREDENTIAL_ARGS='-e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY'
+    if [ -n "${AWS_SESSION_TOKEN:-}" ]; then
+      S3_ORIGIN_CREDENTIAL_ARGS="$S3_ORIGIN_CREDENTIAL_ARGS -e AWS_SESSION_TOKEN"
+    fi
+    ;;
+  *)
+    echo "QURL_S3_FORWARD_AWS_CREDENTIALS must be true or false." >&2
+    exit 1
+    ;;
+esac
+
 cat > "$CONFIG_FILE" <<'QURL_PROXY_YAML_EOF'
 %s
 QURL_PROXY_YAML_EOF
@@ -832,6 +873,7 @@ docker run -d \
   -e S3_PREFIX="$S3_PREFIX" \
   -e INDEX_DOCUMENT="$INDEX_DOCUMENT" \
   -e CACHE_CONNECTOR_ID="$QURL_CONNECTOR_ID" \
+  $S3_ORIGIN_CREDENTIAL_ARGS \
   %s
 
 docker run -d \
@@ -852,14 +894,14 @@ docker run -d \
   %s daemon run \
     --state-dir /var/lib/qurl \
     --headless-config /etc/qurl/share.yaml \
-    --enrollment-token-file /run/secrets/qurl/enrollment-token`, renderPortablePipefailShell(), renderSudoDetectionShell(), shellSingleQuote(args.Slug), shellSingleQuote(args.Bucket), shellSingleQuote(args.Region), shellSingleQuote(args.Prefix), shellSingleQuote(args.IndexDocument), configYAML, renderBootstrapKeyPromptShell(), renderBootstrapKeyFileInstallShell(`"$SECRET_DIR/enrollment-token"`), shellSingleQuote(originImage), shellSingleQuote(endpoint), shellSingleQuote(connectorImage))
+    --enrollment-token-file /run/secrets/qurl/enrollment-token%s`, renderPortablePipefailShell(), renderSudoDetectionShell(), shellSingleQuote(args.Slug), shellSingleQuote(args.Bucket), shellSingleQuote(args.Region), shellSingleQuote(args.Prefix), shellSingleQuote(args.IndexDocument), configYAML, renderBootstrapKeyPromptShell(), renderBootstrapKeyFileInstallShell(`"$SECRET_DIR/enrollment-token"`), shellSingleQuote(originImage), shellSingleQuote(endpoint), shellSingleQuote(connectorImage), args.Hub.quotedFlags(" "))
 
 	block, err := slackCodeBlock(docker)
 	if err != nil {
 		return "", err
 	}
-	intro := "Run this whole block on the Linux Docker host that has IAM access to the private S3 bucket. The host or container runtime must provide AWS credentials with s3:GetObject on the objects and s3:ListBucket on the bucket; on EC2 Docker hosts using instance roles, IMDSv2 needs hop-limit 2 for container credential access. No static AWS key is needed in the generated qURL Connector setup. The block prompts for the enrollment token so the secret does not land in shell history."
-	return intro + "\n\n" + block + "\n\nVerify with `docker logs -f qurl-" + args.Slug + "` and `docker logs -f qurl-s3-origin-" + args.Slug + "`; after qURL connects, delete the enrollment-token file. If you recreate the S3 origin container or Docker auto-restarts it after a crash, recreate or restart qURL too because it shares the origin container's network namespace.", nil
+	intro := "Run this whole block on the Linux Docker host that has IAM access to the private S3 bucket. Prefer an EC2 role (IMDSv2 hop-limit 2), ECS/EKS role, or read-only credentials-file mount. Environment credentials have highest provider-chain precedence and override those sources, so the block ignores ambient AWS variables unless you explicitly export QURL_S3_FORWARD_AWS_CREDENTIALS=true with an AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY pair and optional AWS_SESSION_TOKEN. No value is sent through Slack or written into the generated block, but Docker stores forwarded environment values in the container config where daemon/API access and `docker inspect` can reveal them; rerun this whole block without the opt-in to recreate the origin without them. " + s3WebsitePreflightNotice + " The block prompts for the enrollment token so the secret does not land in shell history."
+	return intro + "\n\n" + block + "\n\nVerify with `docker logs -f qurl-" + args.Slug + "` and `docker logs -f qurl-s3-origin-" + args.Slug + "`; after qURL connects, delete the enrollment-token file. If you recreate the S3 origin container or Docker auto-restarts it after a crash, recreate or restart qURL too because it shares the origin container's network namespace. After a Docker daemon restart, verify both containers are running.", nil
 }
 
 func renderDockerComposeS3WebsiteInstructions(args *s3WebsiteInstallArgs, connectorImage, originImage string) (string, error) {
@@ -906,6 +948,37 @@ AGENT_STATE_DIR="/var/lib/layerv/qurl/${QURL_CONNECTOR_ID}"
 CONFIG_FILE="$PWD/qurl-share-${QURL_CONNECTOR_ID}.yaml"
 QURL_COMPOSE_FILE="$PWD/qurl-s3-website-${QURL_CONNECTOR_ID}.compose.yaml"
 
+S3_ORIGIN_CREDENTIAL_ENVIRONMENT=
+case "${QURL_S3_FORWARD_AWS_CREDENTIALS:-false}" in
+  false) ;;
+  true)
+    if [ -n "${AWS_SESSION_TOKEN:-}" ] && { [ -z "${AWS_ACCESS_KEY_ID:-}" ] || [ -z "${AWS_SECRET_ACCESS_KEY:-}" ]; }; then
+      echo "AWS_SESSION_TOKEN requires AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY." >&2
+      exit 1
+    fi
+    if { [ -n "${AWS_ACCESS_KEY_ID:-}" ] && [ -z "${AWS_SECRET_ACCESS_KEY:-}" ]; } ||
+      { [ -z "${AWS_ACCESS_KEY_ID:-}" ] && [ -n "${AWS_SECRET_ACCESS_KEY:-}" ]; }; then
+      echo "AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY must both be set." >&2
+      exit 1
+    fi
+    if [ -z "${AWS_ACCESS_KEY_ID:-}" ]; then
+      echo "QURL_S3_FORWARD_AWS_CREDENTIALS=true requires AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY." >&2
+      exit 1
+    fi
+    export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
+    S3_ORIGIN_CREDENTIAL_ENVIRONMENT='      AWS_ACCESS_KEY_ID:
+      AWS_SECRET_ACCESS_KEY:'
+    if [ -n "${AWS_SESSION_TOKEN:-}" ]; then
+      S3_ORIGIN_CREDENTIAL_ENVIRONMENT="$S3_ORIGIN_CREDENTIAL_ENVIRONMENT
+      AWS_SESSION_TOKEN:"
+    fi
+    ;;
+  *)
+    echo "QURL_S3_FORWARD_AWS_CREDENTIALS must be true or false." >&2
+    exit 1
+    ;;
+esac
+
 cat > "$CONFIG_FILE" <<'QURL_PROXY_YAML_EOF'
 %s
 QURL_PROXY_YAML_EOF
@@ -932,6 +1005,7 @@ services:
       S3_PREFIX: %s
       INDEX_DOCUMENT: %s
       CACHE_CONNECTOR_ID: %s
+${S3_ORIGIN_CREDENTIAL_ENVIRONMENT}
   %s:
     image: %s
     user: "65532:65532"
@@ -945,7 +1019,7 @@ services:
     security_opt:
       - 'no-new-privileges:true'
     entrypoint: ['/usr/local/bin/qurl']
-    command: ['daemon', 'run', '--state-dir', '/var/lib/qurl', '--headless-config', '/etc/qurl/share.yaml', '--enrollment-token-file', '/run/secrets/qurl/enrollment-token']
+    command: ['daemon', 'run', '--state-dir', '/var/lib/qurl', '--headless-config', '/etc/qurl/share.yaml', '--enrollment-token-file', '/run/secrets/qurl/enrollment-token'%s]
     network_mode: "service:${ORIGIN_SERVICE_NAME}"
     depends_on:
       %s:
@@ -958,14 +1032,14 @@ services:
       QURL_ENDPOINT: ${QURL_ENDPOINT_YAML}
 QURL_COMPOSE_YAML_EOF
 
-docker compose -f "$QURL_COMPOSE_FILE" up -d`, renderPortablePipefailShell(), renderSudoDetectionShell(), shellSingleQuote(args.Slug), shellSingleQuote(quotedAPIURL), shellSingleQuote(originServiceName), configYAML, renderBootstrapKeyPromptShell(), renderBootstrapKeyFileInstallShell(`"$SECRET_DIR/enrollment-token"`), quotedOriginService, quotedOriginImage, quotedBucket, quotedRegion, quotedPrefix, quotedIndex, quotedSlug, quotedConnectorService, quotedConnectorImage, quotedOriginService)
+docker compose -f "$QURL_COMPOSE_FILE" up -d`, renderPortablePipefailShell(), renderSudoDetectionShell(), shellSingleQuote(args.Slug), shellSingleQuote(quotedAPIURL), shellSingleQuote(originServiceName), configYAML, renderBootstrapKeyPromptShell(), renderBootstrapKeyFileInstallShell(`"$SECRET_DIR/enrollment-token"`), quotedOriginService, quotedOriginImage, quotedBucket, quotedRegion, quotedPrefix, quotedIndex, quotedSlug, quotedConnectorService, quotedConnectorImage, args.Hub.quotedFlags(", "), quotedOriginService)
 
 	block, err := slackCodeBlock(compose)
 	if err != nil {
 		return "", err
 	}
-	intro := "Run this from the Docker Compose project directory on a Linux host that has IAM access to the private S3 bucket. On EC2 Docker hosts using instance roles, IMDSv2 needs hop-limit 2 for container credential access. It writes a standalone Compose file for the private S3 origin plus qURL Connector, and prompts for the enrollment token so the secret does not land in shell history."
-	return intro + "\n\n" + block + "\n\nVerify with `docker compose -f qurl-s3-website-" + args.Slug + ".compose.yaml logs -f qurl-" + args.Slug + "`; after qURL connects, delete the enrollment-token file. If the S3 origin service is recreated, restart qURL too because it shares the origin network namespace.", nil
+	intro := "Run this from the Docker Compose project directory on a Linux host that has IAM access to the private S3 bucket. Prefer an EC2 role (IMDSv2 hop-limit 2), ECS/EKS role, or read-only credentials-file mount. Environment credentials have highest provider-chain precedence and override those sources, so the block ignores ambient AWS variables unless you explicitly export QURL_S3_FORWARD_AWS_CREDENTIALS=true with an AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY pair and optional AWS_SESSION_TOKEN. No value is sent through Slack or written into the generated Compose file, but Docker stores forwarded environment values in the container config where daemon/API access and `docker inspect` can reveal them. To remove them, rerun this generated block without the opt-in; it rewrites the Compose file before recreating the origin, whereas a plain `docker compose up` against the old file retains the valueless credential keys. " + s3WebsitePreflightNotice + " It writes a standalone Compose file for the private S3 origin plus qURL Connector, and prompts for the enrollment token so the secret does not land in shell history."
+	return intro + "\n\n" + block + "\n\nVerify with `docker compose -f qurl-s3-website-" + args.Slug + ".compose.yaml logs -f qurl-" + args.Slug + "`; after qURL connects, delete the enrollment-token file. If you recreate, rename, or Docker auto-restarts the S3 origin service after a crash, restart qURL too because it shares the origin network namespace. After a Docker daemon restart, verify both services are running.", nil
 }
 
 func renderECSS3WebsiteInstructions(args *s3WebsiteInstallArgs, connectorImage, originImage string) (string, error) {
@@ -992,6 +1066,7 @@ func renderECSS3WebsiteInstructions(args *s3WebsiteInstallArgs, connectorImage, 
 		"Both containers are essential, so a failure of either one restarts the whole task.",
 		"The START dependency orders container launch only, so the qURL Connector may log local connection errors until the origin is listening.",
 		"The task role needs s3:GetObject on the objects and s3:ListBucket on the bucket.",
+		s3WebsitePreflightNotice,
 		"Configure qurl-agent-state for POSIX UID/GID `65532:65532`, and mount qurl-config and qurl-bootstrap read-only. Do not share qurl-agent-state across concurrently running sidecars.",
 		"Both generated containers drop every Linux capability.",
 	}, " ")
@@ -1032,7 +1107,7 @@ func renderS3WebsiteECSContainerJSON(args *s3WebsiteInstallArgs, connectorImage,
 			Name:                   connectorContainerName,
 			Image:                  connectorImage,
 			EntryPoint:             []string{"/usr/local/bin/qurl"},
-			Command:                []string{"daemon", "run", "--state-dir", "/var/lib/qurl-volume/state", "--headless-config", "/etc/qurl/share.yaml", "--enrollment-token-file", "/run/secrets/qurl/enrollment-token"},
+			Command:                append([]string{"daemon", "run", "--state-dir", "/var/lib/qurl-volume/state", "--headless-config", "/etc/qurl/share.yaml", "--enrollment-token-file", "/run/secrets/qurl/enrollment-token"}, args.Hub.flags()...),
 			User:                   ecsConnectorUser,
 			Essential:              true,
 			ReadonlyRootFilesystem: true,
@@ -1127,6 +1202,7 @@ QURL_K8S_YAML_EOF`, renderPortablePipefailShell(), shellSingleQuote(names.secret
         value: %s`, s3WebsiteOriginContainerName, quotedOriginImage, quotedBucket, quotedRegion, quotedPrefix, quotedIndex, quotedSlug)
 	patch := renderKubernetesConnectorPodSpec(&kubernetesConnectorPodSpecArgs{
 		precedingContainers: originContainer,
+		hubFlags:            args.Hub.quotedFlags(", "),
 		imageYAML:           quotedConnectorImage,
 		slugYAML:            quotedSlug,
 		endpointYAML:        quotedEndpoint,
@@ -1146,6 +1222,7 @@ QURL_K8S_YAML_EOF`, renderPortablePipefailShell(), shellSingleQuote(names.secret
 	intro := strings.Join([]string{
 		"Run this once in the target namespace, then deploy the S3 origin and qurl containers in the same pod so `127.0.0.1:" + strconv.Itoa(s3WebsiteOriginPort) + "` reaches the private S3 origin.",
 		"The pod identity or node role needs s3:GetObject on the objects and s3:ListBucket on the bucket.",
+		s3WebsitePreflightNotice,
 		"The pod-level fsGroup makes the PVC mount root writable; qURL creates its nested owner-only state directory as UID 65532.",
 		"The enrollment token is streamed through your local shell into `kubectl`; do not run this from a shared, recorded, or command-traced terminal session.",
 		"After the pod connects, roll out a warm-start revision without `--enrollment-token-file` or its Secret mount. Verify reconnect, then delete the enrollment-token Secret.",

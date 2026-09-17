@@ -29,6 +29,7 @@ type localShareRegistry interface {
 	Get(context.Context, string) (*connectorstate.LocalShare, error)
 	Put(context.Context, *connectorstate.LocalShare) error
 	SetDesired(context.Context, string, string, uint64) (*connectorstate.LocalShare, error)
+	Retarget(context.Context, string, connectorstate.LocalTarget, uint64) (*connectorstate.LocalShare, error)
 	DisableAtCurrentEpoch(context.Context, string, uint64) (*connectorstate.LocalShare, error)
 	Delete(context.Context, string) error
 }
@@ -52,7 +53,7 @@ func shareStartCmd(opts *globalOpts) *cobra.Command {
 	return &cobra.Command{
 		Use: "start <CRID>", Short: "Start sharing a local app", Args: exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return changeShareState(cmd.Context(), opts, args[0], "start")
+			return changeShareState(cmd.Context(), opts, args[0], "start", nil)
 		},
 	}
 }
@@ -61,18 +62,51 @@ func shareStopCmd(opts *globalOpts) *cobra.Command {
 	return &cobra.Command{
 		Use: "stop <CRID>", Short: "Stop sharing a local app", Args: exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return changeShareState(cmd.Context(), opts, args[0], "stop")
+			return changeShareState(cmd.Context(), opts, args[0], "stop", nil)
 		},
 	}
 }
 
 func shareRestartCmd(opts *globalOpts) *cobra.Command {
-	return &cobra.Command{
+	var target string
+	cmd := &cobra.Command{
 		Use: "restart <CRID>", Short: "Restart sharing a local app", Args: exactArgs(1),
+		Long: `Restart sharing a local app.
+
+Rotates the share on a fresh serving epoch so no stale session keeps serving
+it. With --target the share also moves to a different loopback origin on this
+machine; the CRID and Connector identity stay the same, so every link already
+handed out keeps working — and now resolves to whatever serves the new
+origin.`,
+		Example: "  qurl restart lv1_...\n  qurl restart lv1_... --target http://127.0.0.1:4000",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return changeShareState(cmd.Context(), opts, args[0], "restart")
+			var destination *publishTarget
+			if cmd.Flags().Changed("target") {
+				var err error
+				if destination, err = restartTarget(target); err != nil {
+					return err
+				}
+			}
+			return changeShareState(cmd.Context(), opts, args[0], "restart", destination)
 		},
 	}
+	cmd.Flags().StringVar(&target, "target", "", "move the share to this loopback HTTP origin, e.g. http://127.0.0.1:4000")
+	return cmd
+}
+
+// restartTarget validates a restart --target with the local publish rules
+// before the command touches local state or the network. A share's target is
+// what the daemon proxies to on this machine, so only a loopback origin can
+// be a destination.
+func restartTarget(raw string) (*publishTarget, error) {
+	target, err := classifyPublishTarget(raw)
+	if err != nil {
+		return nil, err
+	}
+	if target.kind != publishTargetLocal {
+		return nil, invalidPublishTarget(errors.New("a local share can only move to a loopback HTTP origin such as http://127.0.0.1:4000"))
+	}
+	return target, nil
 }
 
 func shareStatusCmd(opts *globalOpts) *cobra.Command {
@@ -153,7 +187,11 @@ func isPotentialNonConnectorSharingError(err error) bool {
 		apiErr.Code == "invalid_input"
 }
 
-func changeShareState(ctx context.Context, opts *globalOpts, id, action string) error {
+// changeShareState drives start, stop, and restart. A non-nil target is a restart
+// that moves the share: the destination is preflighted instead of the stored
+// origin, which may already be gone, and it is stored with the epoch the
+// platform fenced the restart with.
+func changeShareState(ctx context.Context, opts *globalOpts, id, action string, target *publishTarget) error {
 	if action == "stop" {
 		return stopShare(ctx, opts, id)
 	}
@@ -168,7 +206,11 @@ func changeShareState(ctx context.Context, opts *globalOpts, id, action string) 
 	if err != nil {
 		return err
 	}
-	if err := opts.preflightTarget(ctx, local.LocalIP, local.LocalPort); err != nil {
+	preflightIP, preflightPort := local.LocalIP, local.LocalPort
+	if target != nil {
+		preflightIP, preflightPort = target.localIP, target.localPort
+	}
+	if err := opts.preflightTarget(ctx, preflightIP, preflightPort); err != nil {
 		return err
 	}
 	client, err := opts.newClient(ctx)
@@ -197,7 +239,26 @@ func changeShareState(ctx context.Context, opts *globalOpts, id, action string) 
 	if err := validateLocalSharing(local, sharing); err != nil {
 		return compensateShareChange(err, compensateOff, client, registry, local, sharing)
 	}
-	updated, updateErr := registry.SetDesired(ctx, local.ResourceID, string(sharing.DesiredState), sharing.ServingEpoch)
+	var (
+		updated   *connectorstate.LocalShare
+		updateErr error
+	)
+	if target != nil {
+		// Retarget writes the row desired-on. validateRestartAdvance above
+		// refuses any restart result that is not authoritatively on, so this is
+		// unreachable by construction today and no test can reach it. It stays
+		// because the coupling lives in another function: a future restart
+		// contract that can answer "off" would otherwise write "on" over it.
+		if sharing.DesiredState != qurlapi.DesiredStateOn {
+			return compensateShareChange(
+				fmt.Errorf("restart answered desired state %q for a target move, want on", sharing.DesiredState),
+				compensateOff, client, registry, local, sharing)
+		}
+		updated, updateErr = registry.Retarget(ctx, local.ResourceID,
+			connectorstate.LocalTarget{URL: target.canonicalOrigin, IP: target.localIP, Port: target.localPort}, sharing.ServingEpoch)
+	} else {
+		updated, updateErr = registry.SetDesired(ctx, local.ResourceID, string(sharing.DesiredState), sharing.ServingEpoch)
+	}
 	if updateErr != nil {
 		return compensateShareChange(updateErr, compensateOff, client, registry, local, sharing)
 	}
@@ -205,7 +266,7 @@ func changeShareState(ctx context.Context, opts *globalOpts, id, action string) 
 	if err := daemon.Ensure(ctx); err != nil {
 		return compensateShareChange(err, compensateOff, client, registry, local, sharing)
 	}
-	sharing, err = waitForSharingWithDiagnostics(ctx, client, local, stateDir, sharing.ServingEpoch, opts.sharingWaitLimit)
+	sharing, err = waitForSharingWithDiagnostics(ctx, opts, client, local, stateDir, sharing.ServingEpoch, opts.sharingWaitLimit)
 	if err != nil {
 		return err
 	}
@@ -362,6 +423,9 @@ func validateRestartAdvance(prior, result *qurlapi.Sharing) error {
 // needs no matching local share, log path, or daemon controller. Registered
 // device state and its owner-bound registry are still required for authentication.
 func stopShare(ctx context.Context, opts *globalOpts, id string) error {
+	if err := opts.requireRuntimeSupervisionIfNamespace(); err != nil {
+		return err
+	}
 	localLookup := lookupLocalShare(ctx, opts, id)
 	if err := rejectLocalConnectorIDFromShare(localLookup.share, id, "stop"); err != nil {
 		return err
@@ -409,7 +473,11 @@ func convergeStoppedLocalShare(ctx context.Context, opts *globalOpts, lookup loc
 		if logErr != nil {
 			return "", errors.Join(lookup.err, logErr)
 		}
-		_, reloadErr := opts.newShareDaemon(lookup.stateDir, logDir).ReloadIfRunning(ctx)
+		daemon, daemonErr := opts.newShareDaemon(lookup.stateDir, logDir)
+		if daemonErr != nil {
+			return "", errors.Join(lookup.err, daemonErr)
+		}
+		_, reloadErr := daemon.ReloadIfRunning(ctx)
 		return "", errors.Join(lookup.err, reloadErr)
 	}
 	local, stateDir := lookup.share, lookup.stateDir
@@ -436,7 +504,11 @@ func convergeStoppedLocalShare(ctx context.Context, opts *globalOpts, lookup loc
 	if err != nil {
 		return target, err
 	}
-	if _, err := opts.newShareDaemon(stateDir, logDir).ReloadIfRunning(ctx); err != nil {
+	daemon, err := opts.newShareDaemon(stateDir, logDir)
+	if err != nil {
+		return target, err
+	}
+	if _, err := daemon.ReloadIfRunning(ctx); err != nil {
 		return target, err
 	}
 	return target, nil
@@ -493,6 +565,9 @@ func openShareControl(opts *globalOpts) (localShareRegistry, shareDaemonControll
 	if err != nil {
 		return nil, nil, "", err
 	}
+	if err := opts.requireRuntimeSupervision(stateDir); err != nil {
+		return nil, nil, "", err
+	}
 	registry, err := opts.openShareRegistry(stateDir)
 	if err != nil {
 		return nil, nil, "", err
@@ -501,8 +576,20 @@ func openShareControl(opts *globalOpts) (localShareRegistry, shareDaemonControll
 	if err != nil {
 		return nil, nil, "", err
 	}
-	return registry, opts.newShareDaemon(stateDir, logDir), stateDir, nil
+	daemon, err := opts.newShareDaemon(stateDir, logDir)
+	if err != nil {
+		return nil, nil, "", err
+	}
+	return registry, daemon, stateDir, nil
 }
+
+// daemonStateUnavailable is the inspection's "this machine's daemon could not
+// answer" state; the failure category says which side could not.
+const (
+	daemonStateUnavailable  = "unavailable"
+	failureCategoryDaemon   = "local_daemon"
+	failureCategoryLocalRow = "local_state"
+)
 
 func inspectLocalSharing(ctx context.Context, opts *globalOpts, local *connectorstate.LocalShare, stateDir string,
 	localStateErr error, sharing *qurlapi.Sharing,
@@ -511,8 +598,8 @@ func inspectLocalSharing(ctx context.Context, opts *globalOpts, local *connector
 		State: sharing, DaemonState: "not_registered", TargetHealth: "not_available",
 	}
 	if localStateErr != nil {
-		inspection.DaemonState = "unavailable"
-		inspection.FailureCategory = "local_state"
+		inspection.DaemonState = daemonStateUnavailable
+		inspection.FailureCategory = failureCategoryLocalRow
 		return opts.printer().InspectSharing(&inspection)
 	}
 	if local == nil {
@@ -543,15 +630,23 @@ func inspectLocalSharing(ctx context.Context, opts *globalOpts, local *connector
 	if stateDir == "" {
 		return opts.printer().InspectSharing(&inspection)
 	}
+	socketPath, err := connectordaemon.SocketPathForStateDir(stateDir, opts.lookupEnv)
+	if err != nil {
+		// A runtime directory this command cannot resolve is exactly the
+		// misconfiguration someone runs inspect to diagnose, so degrade the way
+		// every other unreachable-daemon branch here does and still print the
+		// resource and target facts.
+		inspection.DaemonState = daemonStateUnavailable
+		inspection.FailureCategory = failureCategoryDaemon
+		return opts.printer().InspectSharing(&inspection)
+	}
 	statusCtx, cancelStatus := context.WithTimeout(ctx, time.Second)
-	status, running, statusErr := (connectordaemon.IPCClient{
-		SocketPath: connectordaemon.StateSocketPath(stateDir),
-	}).Status(statusCtx)
+	status, running, statusErr := (connectordaemon.IPCClient{SocketPath: socketPath}).Status(statusCtx)
 	cancelStatus()
 	if statusErr != nil {
 		if running {
-			inspection.DaemonState = "unavailable"
-			inspection.FailureCategory = "local_daemon"
+			inspection.DaemonState = daemonStateUnavailable
+			inspection.FailureCategory = failureCategoryDaemon
 		}
 		return opts.printer().InspectSharing(&inspection)
 	}
@@ -579,8 +674,8 @@ func inspectLocalSharing(ctx context.Context, opts *globalOpts, local *connector
 	return opts.printer().InspectSharing(&inspection)
 }
 
-func waitForSharingWithDiagnostics(ctx context.Context, client qurlapi.Client, local *connectorstate.LocalShare,
-	stateDir string, epoch uint64, limit time.Duration,
+func waitForSharingWithDiagnostics(ctx context.Context, opts *globalOpts, client qurlapi.Client,
+	local *connectorstate.LocalShare, stateDir string, epoch uint64, limit time.Duration,
 ) (*qurlapi.Sharing, error) {
 	sharing, err := waitForSharing(ctx, client, local, epoch, limit)
 	if err == nil || local == nil || stateDir == "" {
@@ -589,7 +684,11 @@ func waitForSharingWithDiagnostics(ctx context.Context, client qurlapi.Client, l
 	if ctx.Err() != nil {
 		return nil, err
 	}
-	status, running, statusErr := settledSharingDaemonStatus(ctx, stateDir, local.ResourceID)
+	socketPath, socketErr := connectordaemon.SocketPathForStateDir(stateDir, opts.lookupEnv)
+	if socketErr != nil {
+		return nil, fmt.Errorf("qURL share did not become ready (daemon socket unresolved: %w): %w", socketErr, err)
+	}
+	status, running, statusErr := settledSharingDaemonStatus(ctx, socketPath, local.ResourceID)
 	if statusErr != nil {
 		return nil, fmt.Errorf("qURL share did not become ready (daemon state unavailable): %w", err)
 	}
@@ -622,10 +721,10 @@ func waitForSharingWithDiagnostics(ctx context.Context, client qurlapi.Client, l
 // deadline expires. A single IPC sample can therefore see only "starting".
 // This poll never extends recovery, and a terminal or already-diagnostic state
 // returns immediately.
-func settledSharingDaemonStatus(ctx context.Context, stateDir, resourceID string) (connectordaemon.IPCStatus, bool, error) {
+func settledSharingDaemonStatus(ctx context.Context, socketPath, resourceID string) (connectordaemon.IPCStatus, bool, error) {
 	settleCtx, cancel := context.WithTimeout(ctx, sharingDiagnosticSettleLimit)
 	defer cancel()
-	client := connectordaemon.IPCClient{SocketPath: connectordaemon.StateSocketPath(stateDir)}
+	client := connectordaemon.IPCClient{SocketPath: socketPath}
 	var lastStatus connectordaemon.IPCStatus
 	var lastRunning bool
 	var lastErr error

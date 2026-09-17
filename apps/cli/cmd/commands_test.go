@@ -45,6 +45,7 @@ func TestVersionOutputShape(t *testing.T) {
 }
 
 func TestReleaseNativeTrustVerifierIsHiddenAndFailsClosedInDarkBuild(t *testing.T) {
+	t.Setenv(qurl.EnvDeploymentPath, "")
 	help := runCLI(t, &runOpts{args: []string{"version", "--help"}})
 	if help.code != 0 || strings.Contains(help.stdout.String(), "verify-release-native-trust") {
 		t.Fatalf("version help exposed the release verifier: code=%d stdout=%q stderr=%q", help.code, help.stdout.String(), help.stderr.String())
@@ -563,5 +564,13 @@ func TestWhoamiListedInHelp(t *testing.T) {
 	daemon := runCLI(t, &runOpts{args: []string{"daemon", "--help"}})
 	if daemon.code != 0 || !strings.Contains(daemon.stdout.String(), "run") || !strings.Contains(daemon.stdout.String(), "headless") {
 		t.Errorf("daemon help does not expose its run mode:\n%s\n%s", daemon.stdout.String(), daemon.stderr.String())
+	}
+}
+
+func TestReleaseTrustVerifierRejectsDeploymentOverride(t *testing.T) {
+	t.Setenv(qurl.EnvDeploymentPath, filepath.Join(t.TempDir(), "deployment.json"))
+	result := runCLI(t, &runOpts{args: []string{"version", "--verify-release-native-trust"}})
+	if result.code == 0 || result.stdout.Len() != 0 || !strings.Contains(result.stderr.String(), "requires QURL_DEPLOYMENT to be unset") {
+		t.Fatalf("override verification = code %d, stderr %q", result.code, result.stderr.String())
 	}
 }

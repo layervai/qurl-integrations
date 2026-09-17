@@ -308,10 +308,10 @@ func TestHeadlessNativeOpenFailureDoesNotCommitShareOrExposeCredential(t *testin
 	}
 	opts := &globalOpts{
 		version: "test", resolvedEndpoint: "https://api.example.com", redirectFRPLogs: func() {},
-		resolvedShareGroupMode: connectordaemon.GroupModeSingle,
-		resolveShareStateDir:   func(string) (string, error) { return stateDir, nil },
-		resolveHubBootstrap:    func() (qurl.HubBootstrap, error) { return qurl.HubBootstrap{}, nil },
-		resolveSessionConfig:   testNativeSessionConfig,
+		resolvedShareGroupMode: connectordaemon.GroupModeSingle, resolvedSupervision: connectorstate.RuntimeSupervisionNative,
+		resolveShareStateDir: func(string) (string, error) { return stateDir, nil },
+		resolveHubBootstrap:  func() (qurl.HubBootstrap, error) { return qurl.HubBootstrap{}, nil },
+		resolveSessionConfig: testNativeSessionConfig,
 	}
 	err := runShareDaemonWithBootstrap(context.Background(), opts, stateDir, "test-job", configPath, tokenPath)
 	if err == nil || !strings.Contains(err.Error(), "native bootstrap rejected") {
@@ -351,7 +351,11 @@ func TestHeadlessDaemonRetriesTransientBootstrapInProcessThenServes(t *testing.T
 	})
 	factory := &headlessTestFactory{started: make(chan struct{})}
 	var attempts atomic.Int32
-	buildNativeSessionFactory = func(_ context.Context, cfg connectorshare.NativeRuntimeConfig, _ *v1.ClientCommonConfig, apiConfig *qurlapi.Config, verifyOwner bool, configured *connectorstate.LocalShare) (connectordaemon.GroupFactory, error) {
+	ca := testDaemonTunnelCA(t)
+	buildNativeSessionFactory = func(_ context.Context, cfg connectorshare.NativeRuntimeConfig, common *v1.ClientCommonConfig, apiConfig *qurlapi.Config, verifyOwner bool, configured *connectorstate.LocalShare) (connectordaemon.GroupFactory, error) {
+		if common.Transport.TLS.TrustedCaFile != ca || common.Transport.TLS.ServerName != "example.com" {
+			t.Fatal("daemon did not pass configured trust to the native factory")
+		}
 		if !verifyOwner {
 			t.Fatal("first headless bootstrap did not request authenticated owner verification")
 		}
@@ -379,13 +383,21 @@ func TestHeadlessDaemonRetriesTransientBootstrapInProcessThenServes(t *testing.T
 	waitHeadlessNativeRetry = func(ctx context.Context, _ time.Duration) error { return ctx.Err() }
 	opts := &globalOpts{
 		version: "test", resolvedEndpoint: "https://api.example.com", redirectFRPLogs: func() {}, verbose: true,
-		resolvedShareGroupMode: connectordaemon.GroupModeSingle,
-		sleep:                  func(time.Duration) {}, newRequestID: func() string { return "headless-test-request" },
+		resolvedShareGroupMode: connectordaemon.GroupModeSingle, resolvedSupervision: connectorstate.RuntimeSupervisionNative,
+		sleep: func(time.Duration) {}, newRequestID: func() string { return "headless-test-request" },
 		resolveShareStateDir: func(string) (string, error) { return stateDir, nil },
 		resolveHubBootstrap:  func() (qurl.HubBootstrap, error) { return qurl.HubBootstrap{}, nil },
 		resolveSessionConfig: testNativeSessionConfig,
 	}
+	run, _, err := daemonCmd(opts).Find([]string{"run"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := run.ParseFlags([]string{"--tunnel-ca-file", ca, "--tunnel-server-name", "example.com"}); err != nil {
+		t.Fatal(err)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	done := make(chan error, 1)
 	go func() { done <- runShareDaemonWithBootstrap(ctx, opts, stateDir, "test-job", configPath, tokenPath) }()
 	select {
@@ -394,6 +406,10 @@ func TestHeadlessDaemonRetriesTransientBootstrapInProcessThenServes(t *testing.T
 		t.Fatalf("headless daemon exited before serving: %v", err)
 	case <-time.After(2 * time.Second):
 		t.Fatal("headless daemon did not recover from transient bootstrap failures")
+	}
+	client := connectordaemon.IPCClient{SocketPath: stateSocketPath(t, stateDir)}
+	if accepted, err := client.SetOverlay(ctx, map[string]map[string]string{"headless-app": {"X-Origin-Token": "runtime-test-token"}}); err != nil || !accepted {
+		t.Fatalf("configured daemon refused runtime headers: accepted=%v error=%v", accepted, err)
 	}
 	if attempts.Load() != 3 {
 		t.Fatalf("native bootstrap attempts=%d, want 3 in one process", attempts.Load())
@@ -582,10 +598,10 @@ func TestHeadlessWarmRestartOwnsExactlyThePersistedShare(t *testing.T) {
 	}
 	opts := &globalOpts{
 		version: "test", resolvedEndpoint: "https://api.example.com", redirectFRPLogs: func() {},
-		resolvedShareGroupMode: connectordaemon.GroupModeSingle,
-		resolveShareStateDir:   func(string) (string, error) { return stateDir, nil },
-		resolveHubBootstrap:    func() (qurl.HubBootstrap, error) { return qurl.HubBootstrap{}, nil },
-		resolveSessionConfig:   testNativeSessionConfig,
+		resolvedShareGroupMode: connectordaemon.GroupModeSingle, resolvedSupervision: connectorstate.RuntimeSupervisionNative,
+		resolveShareStateDir: func(string) (string, error) { return stateDir, nil },
+		resolveHubBootstrap:  func() (qurl.HubBootstrap, error) { return qurl.HubBootstrap{}, nil },
+		resolveSessionConfig: testNativeSessionConfig,
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -651,10 +667,10 @@ func TestHeadlessBootstrapRejectsChangedOrAdditionalPersistedResources(t *testin
 			}
 			opts := &globalOpts{
 				version: "test", resolvedEndpoint: "https://api.example.com", redirectFRPLogs: func() {},
-				resolvedShareGroupMode: connectordaemon.GroupModeSingle,
-				resolveShareStateDir:   func(string) (string, error) { return stateDir, nil },
-				resolveHubBootstrap:    func() (qurl.HubBootstrap, error) { return qurl.HubBootstrap{}, nil },
-				resolveSessionConfig:   testNativeSessionConfig,
+				resolvedShareGroupMode: connectordaemon.GroupModeSingle, resolvedSupervision: connectorstate.RuntimeSupervisionNative,
+				resolveShareStateDir: func(string) (string, error) { return stateDir, nil },
+				resolveHubBootstrap:  func() (qurl.HubBootstrap, error) { return qurl.HubBootstrap{}, nil },
+				resolveSessionConfig: testNativeSessionConfig,
 			}
 			err = runShareDaemonWithBootstrap(context.Background(), opts, stateDir, "test-job", configPath, "")
 			if err == nil || !strings.Contains(err.Error(), "dedicated state volume") {

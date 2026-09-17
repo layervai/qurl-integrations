@@ -110,7 +110,13 @@ func TestHTTPAPIKeyMinterMintWorkspaceHappyPath(t *testing.T) {
 		gotPath           string
 		gotAuth           string
 		gotIdempotencyKey string
-		gotBody           bindingRequest
+		// Independent tags catch a misspelled production JSON field.
+		gotBody struct {
+			Provider       string `json:"provider"`
+			ExternalID     string `json:"external_id"`
+			DisplayName    string `json:"display_name"`
+			RotateExisting bool   `json:"rotate_existing"`
+		}
 	)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotMethod = r.Method
@@ -147,11 +153,17 @@ func TestHTTPAPIKeyMinterMintWorkspaceHappyPath(t *testing.T) {
 	if gotIdempotencyKey != bindingIdempotencyKey(testTeamID) || len(gotIdempotencyKey) < 32 {
 		t.Errorf("Idempotency-Key = %q, want stable 32+ char key", gotIdempotencyKey)
 	}
+	if !strings.HasPrefix(gotIdempotencyKey, "slack-workspace-binding-v2-") {
+		t.Errorf("Idempotency-Key = %q, want v2 request-body namespace", gotIdempotencyKey)
+	}
 	if gotBody.Provider != "slack" || gotBody.ExternalID != testTeamID {
 		t.Errorf("binding body = %+v, want slack/%s", gotBody, testTeamID)
 	}
 	if gotBody.DisplayName != "Slack workspace "+testTeamID {
 		t.Errorf("display_name = %q", gotBody.DisplayName)
+	}
+	if !gotBody.RotateExisting {
+		t.Error("binding setup must allow lost-commit credential rotation")
 	}
 }
 
@@ -661,6 +673,23 @@ func TestHTTPAPIKeyMinterMintWorkspaceDoesNotFallbackOnTransient503(t *testing.T
 	}
 	if !strings.Contains(err.Error(), "503") {
 		t.Errorf("expected status code in error, got %q", err.Error())
+	}
+}
+
+// A schema rejection must not bypass binding ownership through legacy minting.
+func TestHTTPAPIKeyMinterMintWorkspaceDoesNotFallbackOnSchemaRejection(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != testBindingPath {
+			t.Errorf("unexpected fallback path %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		_, _ = io.WriteString(w, `{"error":{"code":"validation_failed","detail":"Unknown field rotate_existing"}}`)
+	}))
+	t.Cleanup(srv.Close)
+	m := &HTTPAPIKeyMinter{BaseURL: srv.URL, HTTPClient: srv.Client()}
+	if err := mintWorkspaceOnlyErr(m); err == nil || !strings.Contains(err.Error(), "422") {
+		t.Fatalf("expected schema rejection, got %v", err)
 	}
 }
 
