@@ -114,7 +114,7 @@ describe('utils/oauth-cookies', () => {
   });
 
   describe('Discord install session cookie', () => {
-    it('uses a ten-minute __Host- session with Secure and Path=/', () => {
+    it('uses a thirty-minute __Host- session with Secure and Path=/', () => {
       const res = fakeRes();
 
       setDiscordInstallSessionCookie(res, 'install-state');
@@ -126,7 +126,7 @@ describe('utils/oauth-cookies', () => {
           httpOnly: true,
           secure: true,
           sameSite: 'lax',
-          maxAge: 10 * 60 * 1000,
+          maxAge: 30 * 60 * 1000,
           path: DISCORD_INSTALL_COOKIE_PATH,
         },
       }]);

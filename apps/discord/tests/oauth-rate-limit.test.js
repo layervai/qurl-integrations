@@ -242,7 +242,7 @@ describe('OAuth rate-limit store', () => {
     expect(rateLimitStore.size).toBe(MAX_RATE_LIMIT_STORE_SIZE);
   });
 
-  it('warns once per rate-limit window at the hard cap with the shed count', () => {
+  it('warns once per rate-limit window at the hard cap with per-bucket shed counts', () => {
     for (let i = 0; i < MAX_RATE_LIMIT_STORE_SIZE; i += 1) {
       rateLimitStore.set(`callback-${i}`, { callback: [now] });
     }
@@ -253,6 +253,7 @@ describe('OAuth rate-limit store', () => {
 
     shed('shed-1');
     shed('shed-2');
+    rateLimit({ ip: 'shed-callback', path: '/oauth/qurl/callback' }, response(), jest.fn());
     expect(warn).toHaveBeenCalledTimes(1);
 
     Date.now.mockReturnValue(now + config.RATE_LIMIT_WINDOW_MS * 2);
@@ -260,7 +261,10 @@ describe('OAuth rate-limit store', () => {
     expect(warn).toHaveBeenCalledTimes(2);
     expect(warn).toHaveBeenLastCalledWith(
       'Rate limit store at hard cap, rejecting new IP',
-      expect.objectContaining({ ip: 'shed-3', shed: 2 }),
+      expect.objectContaining({
+        ip: 'shed-3',
+        shedByBucket: { 'discord-install-entry': 2, callback: 1 },
+      }),
     );
   });
 });

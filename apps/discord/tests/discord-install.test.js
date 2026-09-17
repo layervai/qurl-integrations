@@ -142,7 +142,7 @@ describe('Discord install callback', () => {
         : res.headers['set-cookie'];
       expect(cookieHeader).toMatch(/HttpOnly/i);
       expect(cookieHeader).toMatch(/SameSite=Lax/i);
-      expect(cookieHeader).toMatch(/Max-Age=600/i);
+      expect(cookieHeader).toMatch(/Max-Age=1800/i);
       expect(DISCORD_INSTALL_SESSION_COOKIE).toMatch(/^__Host-/);
       expect(cookieHeader).toMatch(/Secure/i);
       expect(cookieHeader).toMatch(/Path=\/(?:;|\s|$)/);

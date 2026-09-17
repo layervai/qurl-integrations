@@ -67,8 +67,10 @@ const DISCORD_BOT_PERMISSIONS = DISCORD_BOT_PERMISSION_VALUE.toString();
 const DISCORD_PERMISSION_VALUE_RE = /^\d{1,100}$/;
 const DISCORD_INSTALL_SCOPES = 'identify bot applications.commands';
 // Discord requires the authorize request and token exchange to use a
-// byte-for-byte identical redirect URI. Keep one value for both legs.
-const DISCORD_REDIRECT_URI = `${config.BASE_URL}/oauth/discord/callback`;
+// byte-for-byte identical redirect URI. Keep one builder for both legs.
+function discordRedirectUri() {
+  return `${config.BASE_URL}/oauth/discord/callback`;
+}
 
 const router = express.Router();
 
@@ -118,7 +120,7 @@ router.get('/install', installRateLimit, (req, res) => {
   // for GET /users/@me so it can bind setup to the installing Discord admin.
   authorizeUrl.searchParams.set('scope', DISCORD_INSTALL_SCOPES);
   authorizeUrl.searchParams.set('response_type', 'code');
-  authorizeUrl.searchParams.set('redirect_uri', DISCORD_REDIRECT_URI);
+  authorizeUrl.searchParams.set('redirect_uri', discordRedirectUri());
   authorizeUrl.searchParams.set('state', state);
   return res.redirect(302, authorizeUrl.toString());
 });
@@ -217,7 +219,7 @@ router.get('/callback', rateLimit, async (req, res) => {
         client_secret: config.DISCORD_CLIENT_SECRET,
         grant_type: 'authorization_code',
         code,
-        redirect_uri: DISCORD_REDIRECT_URI,
+        redirect_uri: discordRedirectUri(),
       }),
       signal: AbortSignal.timeout(DISCORD_TIMEOUT_MS),
     });

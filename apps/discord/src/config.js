@@ -407,8 +407,11 @@ module.exports = {
   // operations — only by the OAuth2 token exchange when an admin
   // installs the bot via the install link. Omit it to disable the customer
   // install flow: both /oauth/discord/install and its callback return a
-  // documented 503 until an operator sets the secret.
-  DISCORD_CLIENT_SECRET: normalizedDiscordClientSecret,
+  // documented 503 until an operator sets the secret. The seed sentinel
+  // normalizes to null (like the client ID) so no caller can use it.
+  DISCORD_CLIENT_SECRET: isInfraSeedSentinel(normalizedDiscordClientSecret)
+    ? null
+    : normalizedDiscordClientSecret,
   GUILD_ID: normalizedGuildId,
   isMultiTenant,
   isQurlOAuthConfigured,
@@ -478,6 +481,10 @@ module.exports = {
   RATE_LIMIT_MAX_REQUESTS: intEnv('RATE_LIMIT_MAX_REQUESTS', 30),
   // The public /oauth/discord/install page is a pure redirect that many
   // unrelated admins can reach from one NAT egress, so it gets its own ceiling.
+  // Completion is still bounded by RATE_LIMIT_MAX_REQUESTS: each finished
+  // install spends two callback-bucket slots (/oauth/discord/callback, then
+  // /oauth/qurl/callback), so the default end-to-end ceiling is 15 installs
+  // per IP per window. Raise RATE_LIMIT_MAX_REQUESTS if a shared egress needs more.
   // 0 or a negative value would 429 every /install request as "heavy load".
   RATE_LIMIT_INSTALL_MAX_REQUESTS: intEnv('RATE_LIMIT_INSTALL_MAX_REQUESTS', 120, {
     minPositive: true, strictInteger: true,

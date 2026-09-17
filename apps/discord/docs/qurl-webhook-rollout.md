@@ -150,6 +150,12 @@ finds the existing sub, sees the SSM secret matches, returns `reused`).
   cannot be decrypted; `DEFAULT_WEBHOOK_OWNER_KEY_CHANGED` means a concurrent
   re-key won or the guild row was removed mid-link. HTTP failures commonly use
   `error_code=Error`; network and timeout failures use their runtime error name.
+  Recovery differs by row state: a first link (API key saved, no webhook
+  attributes) is picked up by `scripts/provision-guild-subscriptions.js`, but a
+  failed re-key leaves the previous key's `webhook_id` / `webhook_owner_id` /
+  `webhook_secret` on the row, so the backfill skips it and the receiver keeps
+  the old owner and secret. After fixing the cause, re-run `/qurl setup` for
+  each re-keyed guild that logged the failure.
 - **Guild links fail with `error_code=DEFAULT_WEBHOOK_SECRET_CONFLICT`.** A
   complete legacy DDB row may contain the only secret that still matches the
   default subscription after the old guild-link path rotated it. Do not clear

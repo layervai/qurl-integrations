@@ -22,9 +22,10 @@ const QURL_OAUTH_COOKIE_TTL_SECONDS = 5 * 60;
 const DISCORD_INSTALL_SESSION_COOKIE = '__Host-qurl_discord_install_session';
 const DISCORD_INSTALL_COOKIE_PATH = '/';
 // Discord's authorization-code callback is interactive and can include a
-// server picker, so its browser binding gets ten minutes rather than the
-// five-minute qURL setup window.
-const DISCORD_INSTALL_COOKIE_TTL_SECONDS = 10 * 60;
+// server picker (or server creation and app switches on mobile), so its
+// browser binding gets thirty minutes rather than the five-minute qURL setup
+// window. Discord's single-use code still bounds replay.
+const DISCORD_INSTALL_COOKIE_TTL_SECONDS = 30 * 60;
 
 // Single shape for the OAuth double-submit CSRF cookies.
 // `secure: req.protocol === 'https'` requires `trust proxy` to be on
