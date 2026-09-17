@@ -293,7 +293,9 @@ function canRetainSecureInstallCookie(baseUrl) {
     // origins even over
     // HTTP. Keep the documented local smoke-test path while rejecting staging
     // and preview HTTP origins that silently discard the __Host- cookie.
-    const hostname = parsed.hostname.toLowerCase().replace(/\.$/, '');
+    // No trailing-dot normalization: browsers treat `localhost.` as an ordinary
+    // domain and would drop the Secure cookie.
+    const hostname = parsed.hostname.toLowerCase();
     return parsed.protocol === 'http:'
       && (hostname === 'localhost' || hostname.endsWith('.localhost')
         || hostname === '127.0.0.1' || hostname === '[::1]');
@@ -489,8 +491,9 @@ module.exports = {
     minPositive: true, strictInteger: true,
   }),
   // 0 or a negative value would 429 every OAuth callback.
+  // The max keeps worst-case limiter memory (20k IPs x both ceilings) bounded.
   RATE_LIMIT_MAX_REQUESTS: intEnv('RATE_LIMIT_MAX_REQUESTS', 30, {
-    minPositive: true, strictInteger: true,
+    minPositive: true, strictInteger: true, max: 1000,
   }),
   // The public /oauth/discord/install page is a pure redirect that many
   // unrelated admins can reach from one NAT egress, so it gets its own ceiling.
@@ -500,7 +503,7 @@ module.exports = {
   // per IP per window. Raise RATE_LIMIT_MAX_REQUESTS if a shared egress needs more.
   // 0 or a negative value would 429 every /install request as "heavy load".
   RATE_LIMIT_INSTALL_MAX_REQUESTS: intEnv('RATE_LIMIT_INSTALL_MAX_REQUESTS', 120, {
-    minPositive: true, strictInteger: true,
+    minPositive: true, strictInteger: true, max: 1000,
   }),
 
   // qURL. In production we fall back to the real endpoints; in dev we fall

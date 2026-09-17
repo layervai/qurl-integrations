@@ -139,12 +139,14 @@ finds the existing sub, sees the SSM secret matches, returns `reused`).
   sibling row has an owner); `DEFAULT_WEBHOOK_OWNER_PAGE_CAP` means the 50-page
   listing cap was hit — unlike the others it is permanent, not transient (the
   key owns more subscriptions than discovery will walk), so alarm on it
-  separately; `DEFAULT_WEBHOOK_OWNER_CONFLICT` means one key
+  separately; `DEFAULT_WEBHOOK_OWNER_BUDGET` means one discovery walk exceeded its
+  60-second wall-clock budget (a degraded or very slow qurl-service; transient); `DEFAULT_WEBHOOK_OWNER_CONFLICT` means one key
   listed multiple owners; `DEFAULT_WEBHOOK_OWNER_URL_MISMATCH` means the
   default owner has subscriptions but none targets this deployment's
   `BASE_URL/webhooks/qurl` (typically a qURL account shared across
   environments) — invoke the registrar Lambda for this environment. The
-  `CANDIDATE_WEBHOOK_OWNER_CONTRACT`, `CANDIDATE_WEBHOOK_OWNER_PAGE_CAP`, and
+  `CANDIDATE_WEBHOOK_OWNER_CONTRACT`, `CANDIDATE_WEBHOOK_OWNER_PAGE_CAP`,
+  `CANDIDATE_WEBHOOK_OWNER_BUDGET`, and
   `CANDIDATE_WEBHOOK_OWNER_CONFLICT` variants refer to the linking guild key, so inspect that account's
   subscriptions instead of rerunning the default registrar. The candidate walk is
   deliberately as strict as the default one: a row it cannot read could hide an

@@ -620,6 +620,12 @@ describe('webhook-subscriptions registry — default-key discovery', () => {
     await expect(subs.resolveDefaultOwnerForApiKey('lv_test_abc')).resolves.toBe('usr_default');
     expect(global.fetch).toHaveBeenCalledTimes(2);
 
+    global.fetch = jest.fn()
+      .mockRejectedValueOnce(Object.assign(new Error('dns'), { code: 'ENOTFOUND' }))
+      .mockResolvedValueOnce(page);
+    await expect(subs.resolveDefaultOwnerForApiKey('lv_test_abc')).resolves.toBe('usr_default');
+    expect(global.fetch).toHaveBeenCalledTimes(2);
+
     global.fetch = jest.fn().mockRejectedValue(Object.assign(new Error('bad payload'), { code: 'ERR_APP' }));
     await expect(subs.resolveDefaultOwnerForApiKey('lv_test_abc')).rejects.toBeTruthy();
     expect(global.fetch).toHaveBeenCalledTimes(1);
@@ -627,6 +633,26 @@ describe('webhook-subscriptions registry — default-key discovery', () => {
     global.fetch = jest.fn().mockResolvedValue(failure(401));
     await expect(subs.resolveDefaultOwnerForApiKey('lv_test_abc')).rejects.toMatchObject({ status: 401 });
     expect(global.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('fails with *_BUDGET once a discovery walk exceeds its wall-clock budget', async () => {
+    let clock = 1_000_000;
+    const nowSpy = jest.spyOn(Date, 'now').mockImplementation(() => clock);
+    try {
+      global.fetch = jest.fn(async () => {
+        clock += 61_000;
+        return {
+          ok: true,
+          status: 200,
+          text: async () => JSON.stringify({ data: [{ owner_id: 'usr_default' }], meta: { next_cursor: 'more' } }),
+        };
+      });
+      await expect(subs.resolveDefaultOwnerForApiKey('lv_alias'))
+        .rejects.toMatchObject({ code: 'DEFAULT_WEBHOOK_OWNER_BUDGET' });
+      expect(global.fetch).toHaveBeenCalledTimes(1);
+    } finally {
+      nowSpy.mockRestore();
+    }
   });
 
   it('fails closed at the webhook discovery pagination cap', async () => {

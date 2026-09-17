@@ -109,6 +109,7 @@ sweepHandle.unref();
 // that keeps serving after this call would stop sweeping the store.
 function stopIntervals() {
   clearInterval(sweepHandle);
+  rateLimitStore.clear();
 }
 
 // Hard ceiling on total Map size. Under a distributed attack from many

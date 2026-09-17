@@ -40,7 +40,7 @@ describe('Discord install readiness derivation', () => {
 
   it.each([
     ['http://x.localhost', null],
-    ['http://localhost.', null],
+    ['http://localhost.', 'BASE_URL cannot retain the Secure install cookie'],
     ['http://127.0.0.1:3000', null],
     ['http://[::1]:3000', null],
     ['http://127.0.0.2', 'BASE_URL cannot retain the Secure install cookie'],

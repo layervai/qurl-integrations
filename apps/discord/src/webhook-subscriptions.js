@@ -31,12 +31,18 @@ const { callQurlService, canonicalUrl } = require('./qurl-webhook-registrar');
 const PAGE_RETRY_DELAY_MS = 250;
 const MAX_OWNER_DISCOVERY_PAGES = 50;
 const OWNER_DISCOVERY_WARN_PAGE = Math.floor(MAX_OWNER_DISCOVERY_PAGES / 2);
+// Wall-clock budget for one discovery walk, so a degraded qurl-service fails
+// fast with its own code instead of parking work for tens of minutes.
+const OWNER_DISCOVERY_BUDGET_MS = 60_000;
+const QURL_PER_REQUEST_TIMEOUT_MS = 10_000;
+// Node/undici network error codes that are transient despite carrying a code.
+const TRANSIENT_NETWORK_CODE_RE = /^(E(CONNRESET|CONNREFUSED|TIMEDOUT|NOTFOUND|AI_AGAIN|PIPE)|UND_ERR_)/;
 const pageBudgetWarned = new Set();
 // Every owner-discovery error_code, enumerable for runbooks and alarms.
 // Unknown subjects/kinds throw instead of minting an undocumented code.
 const OWNER_ERROR_CODES = Object.freeze(Object.fromEntries(['DEFAULT', 'CANDIDATE'].map((subject) => [
   subject,
-  Object.freeze(Object.fromEntries(['CONTRACT', 'CONFLICT', 'URL_MISMATCH', 'PAGE_CAP']
+  Object.freeze(Object.fromEntries(['CONTRACT', 'CONFLICT', 'URL_MISMATCH', 'PAGE_CAP', 'BUDGET']
     .map((kind) => [kind, `${subject}_WEBHOOK_OWNER_${kind}`]))),
 ])));
 function ownerErrorCode(subject, kind) {
@@ -249,6 +255,18 @@ async function discoverOwnerId(apiKey, { subject = 'DEFAULT', skipMalformedRows 
   let cursor = '';
   const targetUrl = requiredUrl ? canonicalUrl(requiredUrl) : null;
   let targetFound = false;
+  const deadline = Date.now() + OWNER_DISCOVERY_BUDGET_MS;
+  // Each request gets the smaller of its normal timeout and the remaining
+  // budget; an exhausted budget throws *_BUDGET instead of issuing another GET.
+  const fetchPage = (request) => {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
+      const err = new Error(`discoverOwnerId: ${OWNER_DISCOVERY_BUDGET_MS}ms discovery budget exhausted`);
+      err.code = ownerErrorCode(subject, 'BUDGET');
+      return Promise.reject(err);
+    }
+    return callQurlService({ ...request, timeoutMs: Math.min(QURL_PER_REQUEST_TIMEOUT_MS, remaining) });
+  };
   for (let page = 0; page < MAX_OWNER_DISCOVERY_PAGES; page++) {
     // Early warning while there is still headroom before the permanent
     // *_PAGE_CAP failure (orphaned subscriptions only accumulate; see #1380).
@@ -277,13 +295,13 @@ async function discoverOwnerId(apiKey, { subject = 'DEFAULT', skipMalformedRows 
     // A page GET is side-effect free: retry it once on a transient failure
     // (network, timeout, 429, 5xx) rather than failing the whole walk. Other 4xx
     // and string-coded application errors stay final.
-    const body = await callQurlService(request).catch(async (err) => {
+    const body = await fetchPage(request).catch(async (err) => {
       const transient = typeof err?.status === 'number'
         ? err.status >= 500 || err.status === 429
-        : typeof err?.code !== 'string';
+        : typeof err?.code !== 'string' || TRANSIENT_NETWORK_CODE_RE.test(err.code);
       if (!transient) throw err;
       await sleep(PAGE_RETRY_DELAY_MS);
-      return callQurlService(request);
+      return fetchPage(request);
     });
     if (!Array.isArray(body?.data)) {
       const err = new Error('discoverOwnerId: qurl-service response data must be an array');
