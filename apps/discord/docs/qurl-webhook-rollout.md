@@ -71,7 +71,9 @@ Every process that can call the guild webhook linker must receive
 `QURL_WEBHOOK_SECRET` in a default-subscription deployment, including gateway
 tasks that serve `/qurl setup`. The one-shot backfill enforces this at startup;
 `QURL_WEBHOOK_PURE_BYOK=true` is the explicit opt-out for deployments with no
-default subscription.
+default subscription. The flag has no effect while `QURL_WEBHOOK_SECRET` is
+set. It is not a rollback switch for a deployment with a managed default
+subscription: keep its secret configured and redeploy the previous image.
 
 ## Rotation
 
