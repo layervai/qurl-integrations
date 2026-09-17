@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -36,7 +37,8 @@ const (
 	// qurl-conformance v0.16.0 moved the credential-recovery vectors to a
 	// private platform module, so this test keeps the values it needs from
 	// v0.15.0 agent_credential_recovery_v1_vectors.json: the credential is
-	// Fixtures.RecoveryCredential (base64url of bytes 0x00-0x1f, synthetic) and
+	// Fixtures.RecoveryCredential (base64url of bytes 0x00-0x1f, synthetic; used
+	// here as the account credential that authorizes recovery) and
 	// the cell reply is the assigned-cell PublicExchanges SuccessBodyJSON. The
 	// recovery grant is test-local; only its qrg1. prefix is contract.
 	//
@@ -277,9 +279,6 @@ func nativeRecoveryHubReply(
 		if parsed.Query != "cell_assignment" {
 			return nil, fmt.Errorf("unexpected Hub request %q/%q", parsed.Query, parsed.Mode)
 		}
-		if parsed.Mode != "recover" && parsed.Mode != "refresh" {
-			return nil, fmt.Errorf("unexpected Hub assignment mode %q", parsed.Mode)
-		}
 		// The recover reply is the public refresh reply plus the recovery grant,
 		// so both modes start from it. Recover mode is locally assembled, not
 		// vector-backed; see TODO(upstream-contract) above.
@@ -300,6 +299,8 @@ func nativeRecoveryHubReply(
 			generation = connectorIntegrationRecoverGeneration
 		case "refresh":
 			generation = connectorIntegrationRefreshGeneration
+		default:
+			return nil, fmt.Errorf("unexpected Hub assignment mode %q", parsed.Mode)
 		}
 		if err := setNativeRecoveryAssignment(list["assignment"], generation, cellPublicKeyB64, now); err != nil {
 			return nil, err
@@ -342,7 +343,7 @@ func nativeRecoveryCellReply(request []byte) ([]byte, error) {
 		return nil, fmt.Errorf("unexpected cell request %q", parsed.Query)
 	}
 	if parsed.RecoveryGrant != connectorIntegrationRecoveryGrant {
-		return nil, fmt.Errorf("cell request recovery grant = %q, want the Hub-issued grant", parsed.RecoveryGrant)
+		return nil, fmt.Errorf("cell request recovery grant = %q, want %q", parsed.RecoveryGrant, connectorIntegrationRecoveryGrant)
 	}
 	return []byte(connectorIntegrationRecoveryCellReply), nil
 }
@@ -352,6 +353,9 @@ func nativeRecoveryCellReply(request []byte) ([]byte, error) {
 // KeyProviderFile, which the connector runtime under test also reads.
 func withNativeRecoveryStateStore(t *testing.T, stateDir string, fn func(qurl.AgentStateStore)) {
 	t.Helper()
+	if os.Getenv(connectorstateowner.EnvKeyProvider) != connectorstateowner.KeyProviderFile {
+		t.Fatal("set EnvKeyProvider to KeyProviderFile before opening connector state")
+	}
 	owner, err := connectorstateowner.NewSDKStore(stateDir, connectorIntegrationAgentID)
 	if err != nil {
 		t.Fatal(err)
@@ -498,6 +502,12 @@ func TestOpenNativeRegisteredClient_ExplicitLoginUsesRealConnectorRecovery(t *te
 	if err := opts.closeAPIClient(); err != nil {
 		t.Fatal(err)
 	}
+	if registry.bindCalls != 1 {
+		t.Fatalf("owner bindings = %d, want one after the successful retry", registry.bindCalls)
+	}
+	if got := connectorstate.ConfiguredAgentID(); got != "" {
+		t.Fatalf("test unexpectedly changed the configured connector identity: %q", got)
+	}
 	withNativeRecoveryStateStore(t, stateDir, func(store qurl.AgentStateStore) {
 		recovered, err := store.LoadAgentState(context.Background())
 		if err != nil {
@@ -510,6 +520,7 @@ func TestOpenNativeRegisteredClient_ExplicitLoginUsesRealConnectorRecovery(t *te
 			t.Fatalf("recovered device API key ID = %q, want the cell-issued ID", recovered.DeviceAPIKeyID)
 		}
 		if recovered.DeviceAPIKey != replacementKey {
+			// Deliberately value-free: keep credential material out of test output.
 			t.Fatal("persisted device credential did not match the one that authorized the retry")
 		}
 		if recovered.Assignment == nil || recovered.Assignment.AssignmentGeneration != connectorIntegrationRefreshGeneration {
@@ -517,10 +528,4 @@ func TestOpenNativeRegisteredClient_ExplicitLoginUsesRealConnectorRecovery(t *te
 				recovered.Assignment, connectorIntegrationRefreshGeneration)
 		}
 	})
-	if registry.bindCalls != 1 {
-		t.Fatalf("owner bindings = %d, want one after the successful retry", registry.bindCalls)
-	}
-	if got := connectorstate.ConfiguredAgentID(); got != "" {
-		t.Fatalf("test unexpectedly changed the configured connector identity: %q", got)
-	}
 }
