@@ -6,7 +6,6 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -41,8 +40,9 @@ const (
 	// the cell reply is the assigned-cell PublicExchanges SuccessBodyJSON. The
 	// recovery grant is test-local; only its qrg1. prefix is contract.
 	//
-	// TODO(upstream-contract): these values and the recover-mode fields added
-	// in nativeRecoveryHubReply mirror the private agent-credential-recovery
+	// TODO(upstream-contract): these values, the recover-mode fields added in
+	// nativeRecoveryHubReply, and the usrData.recovery_grant request field read
+	// by nativeRecoveryUserData mirror the private agent-credential-recovery
 	// vectors. Nothing here fails when that platform contract moves (#1483).
 	connectorIntegrationRecoveryCredential = "lv_live_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"
 	connectorIntegrationRecoveryGrant      = "qrg1.integration-recovery-grant-0001"
@@ -244,18 +244,22 @@ func nativeRecoveryFixtureKey(t *testing.T, raw string) []byte {
 	return decoded
 }
 
+// nativeRecoveryUserData reads the recovery request fields. RecoveryGrant is a
+// mirrored private-contract request field; see TODO(upstream-contract) above.
 type nativeRecoveryUserData struct {
 	Query         string `json:"query"`
 	Mode          string `json:"mode"`
 	RecoveryGrant string `json:"recovery_grant"`
 }
 
-func nativeRecoveryQuery(body []byte) (nativeRecoveryUserData, error) {
+func parseNativeRecoveryRequest(body []byte) (nativeRecoveryUserData, error) {
 	var request struct {
 		UserData nativeRecoveryUserData `json:"usrData"`
 	}
-	err := json.Unmarshal(body, &request)
-	return request.UserData, err
+	if err := json.Unmarshal(body, &request); err != nil {
+		return nativeRecoveryUserData{}, err
+	}
+	return request.UserData, nil
 }
 
 func nativeRecoveryHubReply(
@@ -264,16 +268,15 @@ func nativeRecoveryHubReply(
 	now time.Time,
 ) func([]byte) ([]byte, error) {
 	return func(request []byte) ([]byte, error) {
-		parsed, err := nativeRecoveryQuery(request)
+		parsed, err := parseNativeRecoveryRequest(request)
 		if err != nil {
 			return nil, fmt.Errorf("parse Hub request: %w", err)
 		}
-		query, mode := parsed.Query, parsed.Mode
-		if query != "cell_assignment" {
-			return nil, fmt.Errorf("unexpected Hub request %q/%q", query, mode)
+		if parsed.Query != "cell_assignment" {
+			return nil, fmt.Errorf("unexpected Hub request %q/%q", parsed.Query, parsed.Mode)
 		}
-		if mode != "recover" && mode != "refresh" {
-			return nil, fmt.Errorf("unexpected Hub assignment mode %q", mode)
+		if parsed.Mode != "recover" && parsed.Mode != "refresh" {
+			return nil, fmt.Errorf("unexpected Hub assignment mode %q", parsed.Mode)
 		}
 		// The recover reply is the public refresh reply plus the recovery grant,
 		// so both modes start from it. Recover mode is locally assembled, not
@@ -290,7 +293,7 @@ func nativeRecoveryHubReply(
 		if err := setNativeRecoveryAssignment(list["assignment"], cellPublicKeyB64, now); err != nil {
 			return nil, err
 		}
-		if mode == "recover" {
+		if parsed.Mode == "recover" {
 			list["mode"] = "recover"
 			list["recovery_grant"] = connectorIntegrationRecoveryGrant
 			list["recovery_grant_issued_at"] = now.Add(-time.Minute).Format(time.RFC3339)
@@ -320,7 +323,7 @@ func setNativeRecoveryAssignment(value any, cellPublicKeyB64 string, now time.Ti
 }
 
 func nativeRecoveryCellReply(request []byte) ([]byte, error) {
-	parsed, err := nativeRecoveryQuery(request)
+	parsed, err := parseNativeRecoveryRequest(request)
 	if err != nil {
 		return nil, fmt.Errorf("parse cell request: %w", err)
 	}
@@ -328,7 +331,7 @@ func nativeRecoveryCellReply(request []byte) ([]byte, error) {
 		return nil, fmt.Errorf("unexpected cell request %q", parsed.Query)
 	}
 	if parsed.RecoveryGrant != connectorIntegrationRecoveryGrant {
-		return nil, errors.New("cell request did not carry the Hub recovery grant")
+		return nil, fmt.Errorf("cell request recovery grant = %q, want the Hub-issued grant", parsed.RecoveryGrant)
 	}
 	return []byte(connectorIntegrationRecoveryCellReply), nil
 }
@@ -461,7 +464,7 @@ func TestOpenNativeRegisteredClient_ExplicitLoginUsesRealConnectorRecovery(t *te
 		t.Fatalf("real connector Hub exchanges = %d, want recovery and required post-recovery refresh", got)
 	}
 	for i, want := range []string{"recover", "refresh"} {
-		if parsed, err := nativeRecoveryQuery(hubRequests[i]); err != nil || parsed.Mode != want {
+		if parsed, err := parseNativeRecoveryRequest(hubRequests[i]); err != nil || parsed.Mode != want {
 			t.Fatalf("Hub exchange %d mode = %q (%v), want %q", i, parsed.Mode, err, want)
 		}
 	}
@@ -471,23 +474,15 @@ func TestOpenNativeRegisteredClient_ExplicitLoginUsesRealConnectorRecovery(t *te
 	if err := opts.closeAPIClient(); err != nil {
 		t.Fatal(err)
 	}
-	stateOwner, err = connectorstateowner.NewSDKStore(stateDir, connectorIntegrationAgentID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	stateStore, err = stateOwner.Handoff()
-	if err != nil {
-		t.Fatal(err)
-	}
-	recoveredState, err := stateStore.LoadAgentState(context.Background())
-	if closeErr := stateOwner.Close(); closeErr != nil {
-		t.Fatal(closeErr)
-	}
-	if err != nil {
-		t.Fatal(err)
-	}
+	recoveredState := loadPersistedAgentState(t, stateDir)
 	if recoveredState.DeviceAPIKeyID != connectorIntegrationRecoveredKeyID {
 		t.Fatalf("recovered device API key ID = %q, want the cell-issued ID", recoveredState.DeviceAPIKeyID)
+	}
+	if recoveredState.DeviceAPIKey != replacementKey {
+		t.Fatalf("persisted device credential did not match the one that authorized the retry")
+	}
+	if recoveredState.Assignment == nil || recoveredState.Assignment.AssignmentGeneration != 2 {
+		t.Fatalf("persisted assignment = %#v, want the refreshed generation 2", recoveredState.Assignment)
 	}
 	if registry.bindCalls != 1 {
 		t.Fatalf("owner bindings = %d, want one after the successful retry", registry.bindCalls)
@@ -495,4 +490,29 @@ func TestOpenNativeRegisteredClient_ExplicitLoginUsesRealConnectorRecovery(t *te
 	if got := connectorstate.ConfiguredAgentID(); got != "" {
 		t.Fatalf("test unexpectedly changed the configured connector identity: %q", got)
 	}
+}
+
+func loadPersistedAgentState(t *testing.T, stateDir string) *qurl.AgentState {
+	t.Helper()
+	owner, err := connectorstateowner.NewSDKStore(stateDir, connectorIntegrationAgentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if closeErr := owner.Close(); closeErr != nil {
+			t.Error(closeErr)
+		}
+	}()
+	store, err := owner.Handoff()
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err := store.LoadAgentState(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state == nil {
+		t.Fatal("persisted connector agent state is missing")
+	}
+	return state
 }
