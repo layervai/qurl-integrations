@@ -913,6 +913,7 @@ describe('revokeAllLinks', () => {
     expect(logger.error).toHaveBeenCalledWith('Failed to revoke QURL', {
       resource_ref: resourceIdLogRef(sensitiveResourceId),
       error: failure.message,
+      failed_child_count: null,
     });
     expect(JSON.stringify(logger.error.mock.calls)).not.toContain(sensitiveResourceId);
     expect(logger.audit).toHaveBeenCalledWith('revoke_failed', {

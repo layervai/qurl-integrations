@@ -22,7 +22,9 @@ const MAX_CDN_REDIRECTS = 3;
 // response transport so the caller, not an accidental race, owns the bound.
 // The endpoint rejects larger requests atomically, so chunk rather than couple
 // to commands.js's independently tunable TOKENS_PER_RESOURCE. The same chunk
-// feeds the SDK fallback, so it uses the fallback's REVOKE_BATCH_MAX_IDS.
+// feeds the SDK fallback, so it uses the fallback's REVOKE_BATCH_MAX_IDS. A 404
+// is remembered only within one call, so each resource re-probes the route on
+// purpose: a process-wide negative cache would hide the route once enabled.
 const REVOKE_LINKS_TIMEOUT_MS = 65_000;
 // Waiting budget for inline partial-mint cleanup before the mint error is
 // rethrown; the revoke keeps running and a timeout is logged for reconciliation.

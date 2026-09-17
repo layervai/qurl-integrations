@@ -1644,6 +1644,11 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
 // should NOT re-flag this file's length — the split will land in its
 // own PR against a stable baseline.
 
+// Wait budget for cross-batch compensation after a mint failure. With the mint
+// call (30s) and inline partial cleanup (60s) this keeps the error inside
+// Discord's 15-minute interaction window.
+const MINT_COMPENSATION_WAIT_MS = 120_000;
+
 /**
  * Mint one-time links across a stream of connector resources, each capped at
  * TOKENS_PER_RESOURCE tokens. When a resource is exhausted, the caller's
@@ -1673,11 +1678,6 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
  *   Optional/back-compat — omitting it leaves the mint body unchanged.
  * @returns {Array<{qurl_link: string, qurl_id: string, resourceId: string}>}
  */
-// Wait budget for cross-batch compensation after a mint failure. With mint
-// (65s) and inline partial cleanup (60s) this keeps the error inside Discord's
-// 15-minute interaction window.
-const MINT_COMPENSATION_WAIT_MS = 120_000;
-
 async function mintLinksInBatches({ initialResourceId, reuploadFn, expiresAt, recipientCount, apiKey, selfDestructSeconds = null, guildId }) {
   const allLinks = [];
   let currentResourceId = initialResourceId;
@@ -1707,17 +1707,20 @@ async function mintLinksInBatches({ initialResourceId, reuploadFn, expiresAt, re
       for (const link of minted) {
         allLinks.push({ qurl_link: link?.qurl_link, qurl_id: link?.qurl_id, resourceId: currentResourceId });
       }
-      // qurl_id is the only durable child-revoke identity (and the join key
-      // against qurl.accessed webhooks). Never persist or deliver a link
-      // without one; the catch below revokes every identified sibling.
-      if (minted.some(link => !hasPersistableQurlIdShape(link?.qurl_id))) {
-        throw new Error('Connector mint_link returned a link without a valid qurl_id');
-      }
-      // qurl_link is the write-once delivery credential; an id-only 2xx entry
-      // can be neither delivered nor rebuilt, so revoke it rather than persist.
-      if (minted.some(link => typeof link?.qurl_link !== 'string' || link.qurl_link.length === 0)) {
-        throw new Error('Connector mint_link returned a link without a qurl_link');
-      }
+      // Validate only after every entry is pushed: the catch below revokes the
+      // identified siblings of a bad entry.
+      minted.forEach((link, i) => {
+        // qurl_id is the only durable child-revoke identity (and the join key
+        // against qurl.accessed webhooks). Never persist or deliver without it.
+        if (!hasPersistableQurlIdShape(link?.qurl_id)) {
+          throw new Error(`Connector mint_link returned a link without a valid qurl_id (entry ${i})`);
+        }
+        // qurl_link is the write-once delivery credential; an id-only 2xx entry
+        // can be neither delivered nor rebuilt, so revoke it rather than persist.
+        if (typeof link.qurl_link !== 'string' || link.qurl_link.length === 0) {
+          throw new Error(`Connector mint_link returned a link without a qurl_link (entry ${i})`);
+        }
+      });
       tokensUsed += batchSize;
     }
   } catch (error) {
@@ -8502,7 +8505,7 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
       logger.error('Failed to revoke QURL', {
         resource_ref: resourceIdLogRef(resourceId),
         error: results[i].reason?.message,
-        failed_child_count: results[i].reason?.failedCount,
+        failed_child_count: results[i].reason?.failedCount ?? null,
       });
     }
   }

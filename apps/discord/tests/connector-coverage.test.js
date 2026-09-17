@@ -1075,6 +1075,29 @@ describe('revokeMintedLinks — #1551 fail-closed contract', () => {
     }));
   });
 
+  it('stops waiting on a hung partial cleanup and still throws the mint error', async () => {
+    jest.useFakeTimers();
+    try {
+      globalThis.fetch = jest.fn()
+        .mockResolvedValueOnce({
+          ok: false,
+          status: 502,
+          text: async () => JSON.stringify({ success: false, links: [{ qurl_id: 'q_partial_one' }] }),
+        })
+        .mockImplementationOnce(() => new Promise(() => {}));
+
+      const pending = connector.mintLinks('res-1', { expiresAt: '2026-01-01T00:00:00Z', n: 1 });
+      const assertion = expect(pending).rejects.toThrow('Connector mint_link failed (502)');
+      await jest.advanceTimersByTimeAsync(60_000);
+      await assertion;
+      expect(logger.error).toHaveBeenCalledWith('Connector partial mint cleanup still running at its wait budget', {
+        resource_ref: expect.stringMatching(/^sha256:/), partial_qurl_ids: ['q_partial_one'],
+      });
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   it('keeps the original mint error and logs when partial cleanup fails', async () => {
     globalThis.fetch = jest.fn()
       .mockResolvedValueOnce({

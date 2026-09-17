@@ -6,6 +6,9 @@ const { QURL_ACCESS_TOKEN_PREFIX } = require('./resource-id');
 // rejects the whole request with 400 when any qurl_id exceeds 64 characters or
 // uses anything but letters, digits, `_` and `-`. Matching that cap keeps one
 // corrupt stored value from failing every retry of an otherwise valid batch.
+// This revoke-transport cap intentionally also gates mint (an unrevocable
+// delivered link is worse than a failed send): if upstream ids grow, raise the
+// endpoint's limit and this together rather than loosening only one side.
 const MAX_QURL_ID_LENGTH = 64;
 // Current upstream IDs are q_ + 11 lowercase hex chars, but only the endpoint's
 // charset is required so a future id prefix cannot fail every send. Access
