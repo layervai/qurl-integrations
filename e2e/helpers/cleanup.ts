@@ -92,11 +92,17 @@ export function trackedQurlResources(env: {
   // test-time or cleanup-time — drops the id from the ledger.
   // `confirmPending` is what separates the two callers: a revoke-under-test
   // asserts on the boolean, so it waits out qurl-service's protection-update
-  // 503 to answer truthfully; the afterAll sweep passes false. That 503 says
-  // the write is already COMMITTED, so a sweep only needs "did it stick", and
-  // at ~30s per straggler a service-wide 503 would blow the very hook budgets
-  // that keep a sweep from leaking — 60 resources here would need ~35min.
-  const revoke = async (resourceId: string, confirmPending = true): Promise<boolean> => {
+  // 503 to answer truthfully (see revokeLink); the afterAll sweep passes false
+  // and stays a single request, exactly as costly as before this PR — the
+  // sweep only needs "did it stick", and charging it ~30s plus a second round
+  // trip per straggler would blow the very hook budget that keeps it from
+  // leaking (60 resources would need ~35min). Options object, not a positional
+  // boolean: the interface below declares one parameter, so `ids.map(revoke)`
+  // would type-check while passing the array index as the flag.
+  const revoke = async (
+    resourceId: string,
+    { confirmPending = true }: { confirmPending?: boolean } = {},
+  ): Promise<boolean> => {
     const ok = await qurl.revokeLink(
       env.MINT_API_URL, env.QURL_API_KEY, resourceId, { confirmPending },
     );
@@ -126,7 +132,7 @@ export function trackedQurlResources(env: {
         if (!first) await new Promise((r) => setTimeout(r, 250));
         first = false;
         try {
-          const ok = await revoke(id, false);
+          const ok = await revoke(id, { confirmPending: false });
           if (!ok) console.warn(`afterAll: best-effort revoke of ${id} returned not-ok`);
         } catch (err) {
           console.warn(`afterAll: best-effort revoke of ${id} threw: ${String(err)}`);

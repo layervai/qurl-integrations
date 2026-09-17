@@ -257,19 +257,17 @@ export async function accessLinkNoRedirect(url: string): Promise<LinkAccessResul
  *
  * A 404 on the confirm retry is deliberately NOT treated as success, even
  * though link-lifecycle.test.ts pins "404 or 200 both acceptable" for a second
- * revoke. Accepting it would require knowing the first 503 was the committed
- * one, and nothing in the response says so: the deployment-state "dark 503"
- * carries the same `service_unavailable` code AND a `Retry-After`, so status
- * and header presence can't separate them. Trusting it would let a revoke that
- * never happened report success on a resource that never existed
- * (negative-paths.test.ts) — the one thing this helper must not do. The live
- * repro only ever showed 503 -> 204, so the 404 case is unobserved; #1505
- * tracks it with the body-discriminating fix if it ever shows up.
+ * revoke: accepting it needs to know the first 503 was the committed one, and
+ * nothing in the response says so (see http.ts's `maxRetryAfterMs`). Trusting
+ * it would let a revoke that never happened report success on a resource that
+ * never existed (negative-paths.test.ts). Unobserved anyway — the live repro
+ * only showed 503 -> 204. #1505 has the body-discriminating fix if it appears.
  *
- * `confirmPending: false` skips the wait entirely, for best-effort bulk
- * cleanup: the 503 already said the write is committed, so a sweep only needs
- * "did it stick", and paying ~30s per straggler would blow the very hook
- * budgets that keep a sweep from leaking (see cleanup.ts's revokeAll).
+ * `confirmPending: false` drops the confirm attempt entirely — one request,
+ * exactly as before this helper gained a retry — for best-effort bulk cleanup:
+ * the 503 already said the write is committed, so a sweep only needs "did it
+ * stick", and neither the ~30s wait nor a second round trip should be charged
+ * to the hook budgets that keep a sweep from leaking (cleanup.ts's revokeAll).
  *
  * TODO(upstream-contract): mirrors qurl-service's protected-resource revoke
  * contract — that a 503 here means the revocation is COMMITTED (not rejected),
@@ -289,7 +287,9 @@ export async function revokeLink(
   const res = await fetchWithTransientRetry(url, {
     method: 'DELETE',
     headers: { Authorization: `Bearer ${apiKey}` },
-  }, { maxAttempts: 2, maxRetryAfterMs: confirmPending ? 35_000 : 0 });
+  }, confirmPending
+    ? { maxAttempts: 2, maxRetryAfterMs: 35_000 }
+    : { maxAttempts: 1 });
   return res.ok;
 }
 

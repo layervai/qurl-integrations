@@ -44,13 +44,10 @@
  *     propagate immediately so a genuine outage fails fast.
  *   - Keeps the attempt budget bounded, so even a SUSTAINED 5xx eventually
  *     surfaces: the final Response is returned for the caller's own `!ok` throw.
- *   - Does NOT honor `Retry-After` by default. A directive is only worth waiting
- *     out when the condition behind it is CONTINGENT, and this stack emits both
- *     kinds under the same 503: qurl-service's revocation-pending 30 (transient,
- *     worth waiting) and its deployment-state "dark 503" 60 (standing — waiting
- *     only makes a permanent failure slower to report). The helper can't tell
- *     them apart from the status alone, so the caller opts in with its own
- *     `maxRetryAfterMs` budget; see that param below.
+ *   - Does NOT honor `Retry-After` by default: a caller opts in with its own
+ *     `maxRetryAfterMs` budget. The reasoning for that — which 503s are worth
+ *     waiting out and why only a call site can tell — is stated once on that
+ *     param below, and is the canonical copy.
  */
 
 // Retryable on ANY method — the request provably did not reach/complete at the
@@ -107,6 +104,12 @@ function isRetryableStatus(status: number, method: string): boolean {
  *   makes a permanent failure slower to report). Nothing in the response
  *   separates them, so only the call site can. Everyone else keeps the 1s/2s
  *   backoff. The ceiling also caps a hostile or absurd directive.
+ *
+ *   Scoped to 503 even when opted in: a 429 directive on this stack means "you
+ *   burst", and honoring it would let one shed DELETE cost 35s inside the
+ *   serial cleanup sweeps that budget ~2s each (concurrency.test.ts's 180s
+ *   afterAll over ~60 resources). The local backoff plus each sweep's own
+ *   pacing already covers those.
  */
 export async function fetchWithTransientRetry(
   input: string | URL,
@@ -123,11 +126,7 @@ export async function fetchWithTransientRetry(
   ) {
     // `Retry-After` wins only when it asks for LONGER than the local backoff —
     // a server asking us to slow down is authoritative, one asking us to hurry
-    // is not. Scoped to 503 because that is the only status an opted-in caller
-    // has reasoned about: a 429 directive on this stack means "you burst", and
-    // honoring it would let one shed DELETE cost 35s inside cleanup sweeps that
-    // budget ~2s each (concurrency.test.ts's 180s afterAll over ~60 resources).
-    // The local backoff plus each sweep's own pacing already covers those.
+    // is not. 503-only and opt-in: see `maxRetryAfterMs` above.
     // TODO(upstream-contract): qurl-service emits the delta-seconds form only.
     // Anything non-numeric (including the HTTP-date form RFC 9110 also allows)
     // falls through to the linear backoff rather than producing a NaN delay.

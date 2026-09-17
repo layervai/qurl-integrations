@@ -63,6 +63,20 @@ test('clamps an absurd Retry-After to the caller ceiling', async () => {
   expect(await waitsBefore({ maxAttempts: 2, maxRetryAfterMs: 35_000 })).toEqual([35_000]);
 });
 
+test('honors a directive that fits under the ceiling as-is', async () => {
+  // The production case: qurl-service's 30s against revokeLink's 35s ceiling.
+  // The clamp must not round it down and the backoff must not shorten it.
+  fetchMock.mockImplementation(respond(503, { 'Retry-After': '30' }));
+  const pending = fetchWithTransientRetry(
+    url, { method: 'DELETE' }, { maxAttempts: 2, maxRetryAfterMs: 35_000 },
+  );
+  await jest.advanceTimersByTimeAsync(29_999);
+  expect(fetchMock).toHaveBeenCalledTimes(1);
+  await jest.advanceTimersByTimeAsync(1);
+  await pending;
+  expect(fetchMock).toHaveBeenCalledTimes(2);
+});
+
 test('ignores Retry-After entirely when the caller does not opt in', async () => {
   // The dark-503 guard: same status, same header, no opt-in -> 1s local backoff.
   expect(await waitsBefore({ maxAttempts: 2 })).toEqual([1_000]);

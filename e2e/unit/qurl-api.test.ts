@@ -15,19 +15,9 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
-let warnSpy: jest.SpyInstance;
-
 beforeEach(() => {
   fetchMock.mockReset();
   global.fetch = fetchMock as typeof fetch;
-  // fetchWithTransientRetry warns on every retry by design; the retry-path
-  // tests below would otherwise spray `[fetchWithTransientRetry] …` through
-  // the suite output. Same reason as unit/http.test.ts.
-  warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
-});
-
-afterEach(() => {
-  warnSpy.mockRestore();
 });
 
 afterAll(() => {
@@ -360,106 +350,117 @@ test('polling returns the last observation when its predicate never matches', as
   expect(fetchMock).toHaveBeenCalledTimes(1);
 });
 
-// qurl-service commits the revocation, then answers 503 + `Retry-After: 30`
-// until the NHP protection update lands ("Revocation committed; protection
-// update is pending. Retry to confirm."). Every connector upload is protected,
-// so a single-shot DELETE reported a false failure and red-flagged four
-// file-revoke smoke tests on a revocation that had already happened.
-test('revokeLink retries the revocation-pending 503 and honors Retry-After', async () => {
-  jest.useFakeTimers();
-  try {
-    fetchMock
-      .mockResolvedValueOnce(
-        new Response(JSON.stringify({ error: { code: 'service_unavailable' } }), {
-          status: 503,
-          headers: { 'Content-Type': 'application/json', 'Retry-After': '30' },
-        }),
-      )
-      .mockResolvedValueOnce(new Response(null, { status: 204 }));
+describe('revokeLink retry path', () => {
+  // Only this group drives a retry, so the console.warn suppression is scoped
+  // here rather than file-wide: fetchWithTransientRetry warns on every retry by
+  // design, and the other ~30 tests in this file should keep their warnings.
+  let warnSpy: jest.SpyInstance;
+  beforeEach(() => { warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {}); });
+  afterEach(() => { warnSpy.mockRestore(); });
 
-    const pending = qurl.revokeLink(mintUrl, apiKey, publicResourceId);
-    // The retry must wait out the server's directive, not the 1s local backoff.
-    await jest.advanceTimersByTimeAsync(1_000);
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    await jest.advanceTimersByTimeAsync(29_000);
-
-    await expect(pending).resolves.toBe(true);
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(fetchMock.mock.calls[1][1]).toMatchObject({ method: 'DELETE' });
-  } finally {
-    jest.useRealTimers();
-  }
-});
-
-// Bulk cleanup opts out: the 503 already said the write is committed, so the
-// afterAll sweep only needs "did it stick". Paying ~30s per straggler would
-// blow the hook budgets that keep a sweep from leaking (cleanup.ts).
-test('confirmPending: false skips the protection-update wait', async () => {
-  jest.useFakeTimers();
-  try {
-    fetchMock.mockImplementation(
-      () => new Response(null, { status: 503, headers: { 'Retry-After': '30' } }),
-    );
-    const pending = qurl.revokeLink(mintUrl, apiKey, publicResourceId, {
-      confirmPending: false,
-    });
-    await jest.advanceTimersByTimeAsync(1_000);
-    expect(fetchMock).toHaveBeenCalledTimes(2); // local backoff, not the 30s
-    await expect(pending).resolves.toBe(false);
-  } finally {
-    jest.useRealTimers();
-  }
-});
-
-// A 404 is a resource that never existed, which negative-paths.test.ts asserts
-// returns false — and it must stay false however the retry budget changes.
-test('revokeLink reports a 404 as failure', async () => {
-  fetchMock.mockImplementationOnce(() => new Response(null, { status: 404 }));
-
-  await expect(qurl.revokeLink(mintUrl, apiKey, publicResourceId)).resolves.toBe(false);
-  expect(fetchMock).toHaveBeenCalledTimes(1); // 404 is not retryable
-});
-
-// The waiting is OPT-IN, and this is why: qurl-service also answers 503 +
-// `Retry-After: 60` for deployment state (the "dark 503"), which no client
-// should wait out — it reflects a standing condition, not a transient one.
-// A caller that hasn't asked for the wait keeps the 1s local backoff.
-test('a caller that does not opt in ignores Retry-After', async () => {
-  jest.useFakeTimers();
-  try {
-    fetchMock
-      .mockResolvedValueOnce(
-        new Response(null, { status: 503, headers: { 'Retry-After': '60' } }),
-      )
-      .mockResolvedValueOnce(jsonResponse({ data: { resource_id: publicResourceId, status: 'active' } }));
-
-    const pending = qurl.getResourceStatus(mintUrl, apiKey, publicResourceId);
-    await jest.advanceTimersByTimeAsync(1_000);
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-    await expect(pending).resolves.toMatchObject({ status: 'active' });
-  } finally {
-    jest.useRealTimers();
-  }
-});
-
-test('revokeLink reports a sustained revocation failure', async () => {
-  jest.useFakeTimers();
-  try {
-    // A fresh Response per attempt: the helper cancels the body of each one it
-    // discards, so a single shared instance would not stay honest if anyone
-    // gave these a body.
-    fetchMock.mockImplementation(
-      () => new Response(null, { status: 503, headers: { 'Retry-After': '30' } }),
-    );
-    const pending = qurl.revokeLink(mintUrl, apiKey, publicResourceId);
-    // Past the 35s ceiling, so the budget — not the clock — is what stops it.
-    await jest.advanceTimersByTimeAsync(60_000);
-    await expect(pending).resolves.toBe(false);
-    // Bounded at ONE confirm retry: a still-pending revocation after the
-    // server's own window is a convergence regression to report, not wait out,
-    // and the file-revoke suite's timeouts are sized on this budget.
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-  } finally {
-    jest.useRealTimers();
-  }
+  // qurl-service commits the revocation, then answers 503 + `Retry-After: 30`
+  // until the NHP protection update lands ("Revocation committed; protection
+  // update is pending. Retry to confirm."). Every connector upload is protected,
+  // so a single-shot DELETE reported a false failure and red-flagged four
+  // file-revoke smoke tests on a revocation that had already happened.
+  test('revokeLink retries the revocation-pending 503 and honors Retry-After', async () => {
+    jest.useFakeTimers();
+    try {
+      fetchMock
+        .mockResolvedValueOnce(
+          new Response(JSON.stringify({ error: { code: 'service_unavailable' } }), {
+            status: 503,
+            headers: { 'Content-Type': 'application/json', 'Retry-After': '30' },
+          }),
+        )
+        .mockResolvedValueOnce(new Response(null, { status: 204 }));
+  
+      const pending = qurl.revokeLink(mintUrl, apiKey, publicResourceId);
+      // The retry must wait out the server's directive, not the 1s local backoff.
+      await jest.advanceTimersByTimeAsync(1_000);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      await jest.advanceTimersByTimeAsync(29_000);
+  
+      await expect(pending).resolves.toBe(true);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(fetchMock.mock.calls[1][1]).toMatchObject({ method: 'DELETE' });
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+  
+  // Bulk cleanup opts out entirely: the 503 already said the write is
+  // committed, so the afterAll sweep only needs "did it stick". It stays ONE
+  // request — no 30s wait and no second round trip — because cleanup.ts's
+  // serial sweep budgets ~2s per id, and both costs would blow the hook that
+  // keeps ~60 resources from leaking.
+  test('confirmPending: false makes it a single request', async () => {
+    jest.useFakeTimers();
+    try {
+      fetchMock.mockImplementation(
+        () => new Response(null, { status: 503, headers: { 'Retry-After': '30' } }),
+      );
+      const pending = qurl.revokeLink(mintUrl, apiKey, publicResourceId, {
+        confirmPending: false,
+      });
+      await jest.advanceTimersByTimeAsync(60_000);
+      await expect(pending).resolves.toBe(false);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+  
+  // A 404 is a resource that never existed, which negative-paths.test.ts asserts
+  // returns false — and it must stay false however the retry budget changes.
+  test('revokeLink reports a 404 as failure', async () => {
+    fetchMock.mockImplementationOnce(() => new Response(null, { status: 404 }));
+  
+    await expect(qurl.revokeLink(mintUrl, apiKey, publicResourceId)).resolves.toBe(false);
+    expect(fetchMock).toHaveBeenCalledTimes(1); // 404 is not retryable
+  });
+  
+  // The waiting is OPT-IN, and this is why: qurl-service also answers 503 +
+  // `Retry-After: 60` for deployment state (the "dark 503"), which no client
+  // should wait out — it reflects a standing condition, not a transient one.
+  // A caller that hasn't asked for the wait keeps the 1s local backoff.
+  test('a caller that does not opt in ignores Retry-After', async () => {
+    jest.useFakeTimers();
+    try {
+      fetchMock
+        .mockResolvedValueOnce(
+          new Response(null, { status: 503, headers: { 'Retry-After': '60' } }),
+        )
+        .mockResolvedValueOnce(jsonResponse({ data: { resource_id: publicResourceId, status: 'active' } }));
+  
+      const pending = qurl.getResourceStatus(mintUrl, apiKey, publicResourceId);
+      await jest.advanceTimersByTimeAsync(1_000);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      await expect(pending).resolves.toMatchObject({ status: 'active' });
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+  
+  test('revokeLink reports a sustained revocation failure', async () => {
+    jest.useFakeTimers();
+    try {
+      // A fresh Response per attempt: the helper cancels the body of each one it
+      // discards, so a single shared instance would not stay honest if anyone
+      // gave these a body.
+      fetchMock.mockImplementation(
+        () => new Response(null, { status: 503, headers: { 'Retry-After': '30' } }),
+      );
+      const pending = qurl.revokeLink(mintUrl, apiKey, publicResourceId);
+      // Past the 35s ceiling, so the budget — not the clock — is what stops it.
+      await jest.advanceTimersByTimeAsync(60_000);
+      await expect(pending).resolves.toBe(false);
+      // Bounded at ONE confirm retry: a still-pending revocation after the
+      // server's own window is a convergence regression to report, not wait out,
+      // and the file-revoke suite's timeouts are sized on this budget.
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
 });
