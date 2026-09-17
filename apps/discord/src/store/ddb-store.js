@@ -1525,7 +1525,7 @@ async function getGuildApiKey(guildId) {
 }
 
 // `via` ('oauth' | 'paste') names the setup door for the admin-change audit.
-async function setGuildApiKey(guildId, apiKey, configuredBy, via) {
+async function setGuildApiKey(guildId, apiKey, configuredBy, via = 'unknown') {
   const now = nowIso();
   // SQLite's `ON CONFLICT(guild_id) DO UPDATE SET qurl_api_key=…,
   // configured_by=…, updated_at=…` deliberately preserved
@@ -1569,7 +1569,11 @@ async function setGuildApiKey(guildId, apiKey, configuredBy, via) {
         via,
         prior_updated_at: prior.updated_at ?? null,
       });
-    } catch { /* audit must never fail a landed write */ }
+    } catch (err) {
+      logger.error('Failed to emit setup admin-change audit after a landed write', {
+        error: err?.message, guildId,
+      });
+    }
   }
 }
 

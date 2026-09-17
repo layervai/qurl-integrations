@@ -101,6 +101,13 @@ describe('guild configs', () => {
       .not.toContain(AUDIT_EVENTS.QURL_SETUP_ADMIN_CHANGED);
   });
 
+  test('setGuildApiKey: marks an omitted setup door as unknown', async () => {
+    ddbMock.on(UpdateCommand).resolves({ Attributes: { configured_by: 'old-admin', qurl_api_key: 'enc:v1:IV:TAG:deadbeef' } });
+    await store.setGuildApiKey('g-1', 'plain-key', 'new-admin');
+    expect(logger.audit).toHaveBeenCalledWith(AUDIT_EVENTS.QURL_SETUP_ADMIN_CHANGED,
+      expect.objectContaining({ via: 'unknown' }));
+  });
+
   test('setGuildApiKey: audits a rebind of a configured row that lost configured_by', async () => {
     ddbMock.on(UpdateCommand).resolves({ Attributes: { qurl_api_key: 'enc:v1:IV:TAG:deadbeef' } });
     await store.setGuildApiKey('g-1', 'plain-key', 'new-admin', 'paste');
@@ -124,7 +131,10 @@ describe('guild configs', () => {
     ddbMock.on(UpdateCommand).resolves({ Attributes: { configured_by: 'old-admin', qurl_api_key: 'enc:v1:IV:TAG:deadbeef' } });
     logger.audit.mockImplementationOnce(() => { throw new Error('EPIPE'); });
     await expect(store.setGuildApiKey('g-1', 'plain-key', 'new-admin', 'oauth')).resolves.toBeUndefined();
-    expect(logger.audit).toHaveBeenCalledTimes(1);
+    expect(logger.error).toHaveBeenCalledWith(
+      'Failed to emit setup admin-change audit after a landed write',
+      { error: 'EPIPE', guildId: 'g-1' },
+    );
   });
 
   test('setGuildApiKey: audit event string matches the infra CloudWatch filter', () => {
