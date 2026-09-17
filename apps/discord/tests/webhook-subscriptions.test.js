@@ -16,7 +16,7 @@ jest.mock('../src/logger', () => ({
 
 process.env.QURL_API_KEY = 'lv_test_abc';
 process.env.QURL_ENDPOINT = 'https://qurl.layerv.ai';
-process.env.QURL_WEBHOOK_SECRET = 'default-key-secret';
+process.env.QURL_WEBHOOK_SECRET = 'whsec_default_key_secret_value';
 process.env.BASE_URL = 'http://localhost:3000';
 process.env.AWS_REGION = 'us-east-2';
 process.env.DDB_TABLE_PREFIX = 'qurl-bot-discord-test-';
@@ -56,7 +56,9 @@ describe('webhook-subscriptions registry — priming + lookup', () => {
     mockScan.mockResolvedValueOnce([]);
     await subs.scanOnce();
     expect(subs.isPrimed()).toBe(true);
-    expect(subs.getSecretForOwner('usr_default')).toBe('default-key-secret');
+    // discoverDefaultOwnerId returned usr_default + QURL_WEBHOOK_SECRET
+    // env is wired as the default secret.
+    expect(subs.getSecretForOwner('usr_default')).toBe('whsec_default_key_secret_value');
   });
 
   it('rebuilds (not merges) on each scan — a removed row drops from the cache', async () => {
@@ -199,7 +201,7 @@ describe('webhook-subscriptions registry — concurrent upsert during scan', () 
   it('keeps a complete legacy row authoritative during a later default-owner upsert', async () => {
     mockScan.mockResolvedValueOnce([]);
     await subs.scanOnce();
-    expect(subs.getSecretForOwner('usr_default')).toBe('default-key-secret');
+    expect(subs.getSecretForOwner('usr_default')).toBe('whsec_default_key_secret_value');
 
     let resolveScan;
     mockScan.mockImplementationOnce(() => new Promise((resolve) => { resolveScan = resolve; }));
@@ -474,7 +476,7 @@ describe('webhook-subscriptions registry — default-key discovery', () => {
       text: async () => JSON.stringify({ data: [{}, { owner_id: 'usr_default' }] }),
     }));
     await subs.scanOnce();
-    expect(subs.getSecretForOwner('usr_default')).toBe('default-key-secret');
+    expect(subs.getSecretForOwner('usr_default')).toBe('whsec_default_key_secret_value');
     await expect(subs.resolveDefaultOwnerForApiKey('lv_alias'))
       .rejects.toMatchObject({ code: 'DEFAULT_WEBHOOK_OWNER_CONTRACT' });
   });
@@ -675,7 +677,7 @@ describe('webhook-subscriptions registry — first-scan-failure semantics', () =
     const ownerId = await subs.resolveDefaultOwnerForApiKey('lv_test_abc');
     subs.ensureDefaultOwnerCacheEntry(ownerId);
 
-    expect(subs.getSecretForOwner('usr_default')).toBe('default-key-secret');
+    expect(subs.getSecretForOwner('usr_default')).toBe('whsec_default_key_secret_value');
   });
 
   it('consecutiveFailures survives a "skipped" scan (long-running outage must still escalate)', async () => {

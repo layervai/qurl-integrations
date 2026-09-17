@@ -16,10 +16,7 @@ import (
 	"time"
 )
 
-const (
-	maxUnixSocketPathBytes = 100
-	unixIPCRuntimeRoot     = "/tmp"
-)
+const maxUnixSocketPathBytes = 100
 
 var dialUnixSocket = func(path string, timeout time.Duration) (net.Conn, error) {
 	return net.DialTimeout("unix", path, timeout)
@@ -61,14 +58,32 @@ func dialDaemonIPC(ctx context.Context, path string) (net.Conn, error) {
 	return conn, nil
 }
 
+// EnsureIPCDir creates a private socket directory without changing permissions
+// on an existing directory, which may also be used by other processes.
+func EnsureIPCDir(dir string) error {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("create share daemon socket directory: %w", err)
+	}
+	return validateUnixIPCParent(filepath.Join(dir, SocketFile))
+}
+
 func validateUnixIPCParent(path string) error {
 	dir := filepath.Dir(path)
 	info, err := os.Lstat(dir)
 	if err != nil {
 		return fmt.Errorf("inspect share daemon socket directory: %w", err)
 	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() || !unixIPCPathOwnerOK(info) || info.Mode().Perm() != 0o700 {
-		return errors.New("share daemon socket directory must be an owner-owned non-symlink directory with mode 0700")
+	switch {
+	case info.Mode()&os.ModeSymlink != 0 || !info.IsDir():
+		return fmt.Errorf("share daemon socket directory %s must be a directory, not a symlink or a file (it is %s)", dir, info.Mode())
+	case !unixIPCPathOwnerOK(info):
+		// Do not suggest chmod here: it would fail, and the real answer is a
+		// directory this user owns.
+		return fmt.Errorf("share daemon socket directory %s must be owned by the user running qurl", dir)
+	case info.Mode().Perm() != 0o700:
+		return fmt.Errorf(
+			"share daemon socket directory %s must have mode 0700 (it is %s); run: chmod 700 %s",
+			dir, info.Mode().Perm(), dir)
 	}
 	return nil
 }
@@ -99,21 +114,58 @@ func validatePlatformIPCPath(path string) error {
 	return nil
 }
 
-func platformStateSocketPath(path string) string {
-	path = filepath.Clean(path)
-	if !filepath.IsAbs(path) || len(path) <= maxUnixSocketPathBytes {
-		return path
+// platformSocketPath places the socket in runtimeDir when one is pinned,
+// below a state directory that fits sockaddr_un otherwise, and in a bounded
+// owner-only per-user directory below /tmp as the last resort.
+func platformSocketPath(stateDir, runtimeDir string) (string, error) {
+	if runtimeDir != "" {
+		if !filepath.IsAbs(runtimeDir) {
+			return "", fmt.Errorf("%s must be an absolute path", RuntimeDirEnv)
+		}
+		// The socket needs a private directory, so the filesystem root is
+		// never an acceptable answer.
+		if runtimeDir == string(filepath.Separator) {
+			return "", fmt.Errorf("%s must name a directory, not the filesystem root", RuntimeDirEnv)
+		}
+		path := filepath.Join(runtimeDir, SocketFile)
+		if len(path) > maxUnixSocketPathBytes {
+			return "", fmt.Errorf("%s socket path is too long: %d bytes exceeds the %d-byte socket limit", RuntimeDirEnv, len(path), maxUnixSocketPathBytes)
+		}
+		return path, nil
+	}
+	path := filepath.Join(stateDir, SocketFile)
+	if len(path) <= maxUnixSocketPathBytes {
+		return path, nil
 	}
 	digest := sha256.Sum256([]byte(path))
-	// IPCServer.Run passes this predictable directory through EnsureDirMode
-	// before listen. That helper rejects a symlink or a directory owned by any
-	// other user before it changes permissions, so a /tmp pre-creation can only
-	// make startup fail closed.
-	return filepath.Join(
-		unixIPCRuntimeRoot,
-		"layerv-qurl-"+strconv.Itoa(os.Geteuid()),
-		hex.EncodeToString(digest[:16])+".sock",
+	// This replaced a shared /tmp/layerv-qurl-<uid>/<hash>.sock: a directory
+	// per namespace is what makes the 0700 directory check below meaningful. The
+	// old directory is orphaned rather than cleaned up, and an externally
+	// supervised daemon started by a pre-2.6 qurl keeps listening on the old
+	// address, so its supervisor must restart it after the upgrade - a native
+	// job recovers on its own because the binary version is part of the job
+	// version.
+	//
+	// IPCServer.Run validates this predictable directory with EnsureIPCDir
+	// before listen. That helper rejects symlinks, foreign owners and loose
+	// permissions without changing existing directories, so pre-creation below /tmp
+	// can only make startup fail closed. The root is the literal /tmp, not
+	// os.TempDir(), so foreground daemons and clients agree even when their
+	// TMPDIR differs.
+	const runtimeRoot = "/tmp"
+	path = filepath.Join(
+		runtimeRoot,
+		"qurl-"+strconv.Itoa(os.Geteuid())+"-"+hex.EncodeToString(digest[:16]),
+		SocketFile,
 	)
+	// Unreachable with today's shape (/tmp/qurl-<uid>-<32 hex>/daemon.sock is
+	// at most 65 bytes against the 100-byte budget, and a uid cannot exceed 10
+	// digits), but kept so a later change to the derived name cannot silently
+	// exceed the limit.
+	if len(path) > maxUnixSocketPathBytes {
+		return "", fmt.Errorf("share daemon socket path is too long below both the state and temp directories; set %s to a short owner-only directory", RuntimeDirEnv)
+	}
+	return path, nil
 }
 
 func prepareSocket(path string) error {

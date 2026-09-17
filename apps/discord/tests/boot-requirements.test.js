@@ -15,11 +15,11 @@ const {
   invalidStateSecretValues,
   shouldRegisterInteractionListener,
   missingMapCommandKeys,
+  GOOGLE_MAPS_API_KEY_PLACEHOLDER_SENTINEL,
   VALID_PROCESS_ROLES,
   resolveProcessRole,
 } = require('../src/boot-requirements');
 const { MIN_STATE_SECRET_LENGTH } = require('../src/utils/oauth-state');
-const { SSM_PLACEHOLDER_SENTINEL } = require('../src/utils/ssm-placeholder');
 
 describe('bootRequired', () => {
   it('demands only the bot token for normal bot operation', () => {
@@ -368,7 +368,7 @@ describe('missingMapCommandKeys', () => {
     expect(
       missingMapCommandKeys({
         MAP_COMMAND_ENABLED: false,
-        GOOGLE_MAPS_API_KEY: SSM_PLACEHOLDER_SENTINEL,
+        GOOGLE_MAPS_API_KEY: GOOGLE_MAPS_API_KEY_PLACEHOLDER_SENTINEL,
       }),
     ).toEqual([]);
   });
@@ -382,11 +382,12 @@ describe('missingMapCommandKeys', () => {
     ).toEqual(['GOOGLE_MAPS_API_KEY']);
   });
 
-  it('flags GOOGLE_MAPS_API_KEY when toggle is on but the key is still the PLACEHOLDER sentinel', () => {
+  it.each([GOOGLE_MAPS_API_KEY_PLACEHOLDER_SENTINEL, ' placeholder\n'])(
+    'rejects the Maps seed when enabled: %p', (key) => {
     expect(
       missingMapCommandKeys({
         MAP_COMMAND_ENABLED: true,
-        GOOGLE_MAPS_API_KEY: SSM_PLACEHOLDER_SENTINEL,
+        GOOGLE_MAPS_API_KEY: key,
       }),
     ).toEqual(['GOOGLE_MAPS_API_KEY']);
   });

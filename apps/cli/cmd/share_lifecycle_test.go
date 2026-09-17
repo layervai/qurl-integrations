@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -219,6 +220,7 @@ func (d *journeyDaemon) ReloadIfRunning(context.Context) (bool, error) {
 func (d *journeyDaemon) close() {
 	d.mu.Lock()
 	cancel, done := d.cancel, d.done
+	d.cancel = nil
 	d.mu.Unlock()
 	if cancel != nil {
 		cancel()
@@ -529,11 +531,11 @@ func TestWaitForSharingIncludesRedactedDaemonRootCause(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	server := &connectordaemon.IPCServer{
-		SocketPath: connectordaemon.StateSocketPath(stateDir), Manager: manager, JobVersion: "1/test",
+		SocketPath: stateSocketPath(t, stateDir), Manager: manager, JobVersion: "1/test",
 	}
 	go func() { done <- server.Run(ctx) }()
 	readyCtx, readyCancel := context.WithTimeout(context.Background(), time.Second)
-	if err := (connectordaemon.IPCClient{SocketPath: connectordaemon.StateSocketPath(stateDir)}).WaitReady(readyCtx); err != nil {
+	if err := (connectordaemon.IPCClient{SocketPath: stateSocketPath(t, stateDir)}).WaitReady(readyCtx); err != nil {
 		readyCancel()
 		cancel()
 		t.Fatal(err)
@@ -542,8 +544,8 @@ func TestWaitForSharingIncludesRedactedDaemonRootCause(t *testing.T) {
 	waitCmdCondition(t, func() bool {
 		return manager.Diagnostics()["resource-a"].RetryAttempt == 3
 	}, "route reaches retry attempt 3")
-	_, err = waitForSharingWithDiagnostics(context.Background(), sharingErrorClient{err: errors.New("temporary poll failure")},
-		&local, stateDir, 1, 10*time.Millisecond)
+	_, err = waitForSharingWithDiagnostics(context.Background(), &globalOpts{},
+		sharingErrorClient{err: errors.New("temporary poll failure")}, &local, stateDir, 1, 10*time.Millisecond)
 	for _, want := range []string{"failure category platform_denied", "failure code 52005", "retry attempt 3"} {
 		if err == nil || !strings.Contains(err.Error(), want) {
 			cancel()
@@ -588,18 +590,18 @@ func TestWaitForSharingSettlesStartingDiagnosticIntoRetryCause(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	server := &connectordaemon.IPCServer{
-		SocketPath: connectordaemon.StateSocketPath(stateDir), Manager: manager, JobVersion: "1/test",
+		SocketPath: stateSocketPath(t, stateDir), Manager: manager, JobVersion: "1/test",
 	}
 	go func() { done <- server.Run(ctx) }()
 	readyCtx, readyCancel := context.WithTimeout(context.Background(), time.Second)
-	if err := (connectordaemon.IPCClient{SocketPath: connectordaemon.StateSocketPath(stateDir)}).WaitReady(readyCtx); err != nil {
+	if err := (connectordaemon.IPCClient{SocketPath: stateSocketPath(t, stateDir)}).WaitReady(readyCtx); err != nil {
 		readyCancel()
 		cancel()
 		t.Fatal(err)
 	}
 	readyCancel()
-	_, err = waitForSharingWithDiagnostics(context.Background(), sharingErrorClient{err: errors.New("temporary poll failure")},
-		&local, stateDir, 1, 10*time.Millisecond)
+	_, err = waitForSharingWithDiagnostics(context.Background(), &globalOpts{},
+		sharingErrorClient{err: errors.New("temporary poll failure")}, &local, stateDir, 1, 10*time.Millisecond)
 	if err == nil || !strings.Contains(err.Error(), "failure category platform_denied") ||
 		!strings.Contains(err.Error(), "failure code 52029") || !strings.Contains(err.Error(), "retry attempt 1") {
 		cancel()
@@ -620,19 +622,19 @@ func TestWaitForSharingReportsMissingDaemonResourceDiagnostic(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	server := &connectordaemon.IPCServer{
-		SocketPath: connectordaemon.StateSocketPath(stateDir), Manager: manager, JobVersion: "1/test",
+		SocketPath: stateSocketPath(t, stateDir), Manager: manager, JobVersion: "1/test",
 	}
 	go func() { done <- server.Run(ctx) }()
 	readyCtx, readyCancel := context.WithTimeout(context.Background(), time.Second)
-	if err := (connectordaemon.IPCClient{SocketPath: connectordaemon.StateSocketPath(stateDir)}).WaitReady(readyCtx); err != nil {
+	if err := (connectordaemon.IPCClient{SocketPath: stateSocketPath(t, stateDir)}).WaitReady(readyCtx); err != nil {
 		readyCancel()
 		cancel()
 		t.Fatal(err)
 	}
 	readyCancel()
 	local := &connectorstate.LocalShare{ResourceID: "resource-a", CRID: "crid-a", ServingEpoch: 1}
-	_, err = waitForSharingWithDiagnostics(context.Background(), sharingErrorClient{err: errors.New("temporary poll failure")},
-		local, stateDir, 1, 10*time.Millisecond)
+	_, err = waitForSharingWithDiagnostics(context.Background(), &globalOpts{},
+		sharingErrorClient{err: errors.New("temporary poll failure")}, local, stateDir, 1, 10*time.Millisecond)
 	if err == nil || !strings.Contains(err.Error(), "daemon running, resource diagnostic absent") ||
 		!strings.Contains(err.Error(), "temporary poll failure") {
 		cancel()
@@ -661,9 +663,8 @@ func TestWaitForSharingWithDiagnosticsPreservesCallerCancellation(t *testing.T) 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	pollErr := errors.New("poll interrupted")
-	_, err := waitForSharingWithDiagnostics(ctx, sharingErrorClient{err: pollErr}, &connectorstate.LocalShare{
-		ResourceID: "resource-a", CRID: "crid-a",
-	}, connectorStateTestDir(t), 1, time.Minute)
+	_, err := waitForSharingWithDiagnostics(ctx, &globalOpts{}, sharingErrorClient{err: pollErr},
+		&connectorstate.LocalShare{ResourceID: "resource-a", CRID: "crid-a"}, connectorStateTestDir(t), 1, time.Minute)
 	if !errors.Is(err, context.Canceled) || !errors.Is(err, pollErr) || strings.Contains(err.Error(), "daemon state") {
 		t.Fatalf("canceled diagnosed wait error = %v, want the unmodified caller cancellation", err)
 	}
@@ -1261,11 +1262,11 @@ func TestShareInspectKeepsAuthoritativeStoppedStateOverStaleDaemonDiagnostic(t *
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	server := &connectordaemon.IPCServer{
-		SocketPath: connectordaemon.StateSocketPath(stateDir), Manager: manager, JobVersion: "1/test",
+		SocketPath: stateSocketPath(t, stateDir), Manager: manager, JobVersion: "1/test",
 	}
 	go func() { done <- server.Run(ctx) }()
 	readyCtx, readyCancel := context.WithTimeout(context.Background(), time.Second)
-	if err := (connectordaemon.IPCClient{SocketPath: connectordaemon.StateSocketPath(stateDir)}).WaitReady(readyCtx); err != nil {
+	if err := (connectordaemon.IPCClient{SocketPath: stateSocketPath(t, stateDir)}).WaitReady(readyCtx); err != nil {
 		readyCancel()
 		cancel()
 		t.Fatal(err)
@@ -2608,6 +2609,15 @@ func TestLocalPublishWarmRuntimeFailureEmitsNoIdentityOrManagementMutation(t *te
 }
 
 func TestPublishDaemonLifecycleServesRealHTTPAndStopsCleanly(t *testing.T) {
+	runPublishDaemonLifecycle(t, false)
+}
+
+func TestExternalPublishDaemonLifecycleServesRealHTTPAndStopsCleanly(t *testing.T) {
+	runPublishDaemonLifecycle(t, true)
+}
+
+func runPublishDaemonLifecycle(t *testing.T, external bool) {
+	t.Helper()
 	if testing.Short() {
 		t.Skip("real FRP daemon journey")
 	}
@@ -2626,6 +2636,13 @@ func TestPublishDaemonLifecycleServesRealHTTPAndStopsCleanly(t *testing.T) {
 
 	srv := apitest.NewServer(t)
 	stateDir := connectorStateTestDir(t)
+	env := map[string]string{"QURL_API_KEY": testAPIKey}
+	if external {
+		if err := connectorstate.EstablishExternalRuntimeMode(context.Background(), stateDir); err != nil {
+			t.Fatal(err)
+		}
+		env[connectorstate.EnvRuntimeSupervision] = "external"
+	}
 	registry, err := openOwnedTestShareRegistry(stateDir)
 	if err != nil {
 		t.Fatal(err)
@@ -2645,6 +2662,10 @@ func TestPublishDaemonLifecycleServesRealHTTPAndStopsCleanly(t *testing.T) {
 	}
 	daemon := &journeyDaemon{registry: registry, admitter: admitter, version: "test"}
 	t.Cleanup(daemon.close)
+	var controller shareDaemonController = daemon
+	if external {
+		controller = startExternalJourneyDaemon(t, daemon, stateDir, srv.URL)
+	}
 
 	sharingPath := "/v1/resources/" + srv.Key.CRID + "/sharing"
 	srv.Script(http.MethodGet, sharingPath, func(w http.ResponseWriter, _ *http.Request) {
@@ -2727,8 +2748,8 @@ func TestPublishDaemonLifecycleServesRealHTTPAndStopsCleanly(t *testing.T) {
 	}
 	res := runCLI(t, &runOpts{
 		args:          []string{"--endpoint", srv.URL, "--quiet", "publish", echo.URL, "--id", connectorID},
-		env:           map[string]string{"QURL_API_KEY": testAPIKey},
-		shareRegistry: registry, shareDaemon: daemon, shareStateDir: stateDir,
+		env:           env,
+		shareRegistry: registry, shareDaemon: controller, shareStateDir: stateDir,
 		localResource: resolver, sharingWaitLimit: 10 * time.Second,
 	})
 	if res.code != 0 || res.stdout.String() != srv.Key.CRID+"\n" {
@@ -2851,6 +2872,27 @@ func TestPublishDaemonLifecycleServesRealHTTPAndStopsCleanly(t *testing.T) {
 		t.Fatalf("old proxy %q was not unregistered after drain: %#v", oldProxyName, recorder.snapshot())
 	}
 
+	if external {
+		// A supervisor restart keeps durable intent and resumes the same route
+		// only after the replacement process receives its first reload.
+		daemon.close()
+		stored, err := registry.Get(context.Background(), srv.Key.CRID)
+		if err != nil || stored.DesiredState != "on" || stored.ServingEpoch != 1 {
+			t.Fatalf("supervisor stop changed durable sharing: %+v, %v", stored, err)
+		}
+		controller = startExternalJourneyDaemon(t, daemon, stateDir, srv.URL)
+		if err := controller.Ensure(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		deadline = time.Now().Add(5 * time.Second)
+		for !requestRoute() {
+			if time.Now().After(deadline) {
+				t.Fatal("external restart did not resume the stored route")
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+
 	srv.Script(http.MethodPut, sharingPath, func(w http.ResponseWriter, _ *http.Request) {
 		apitest.WriteEnvelope(t, w, http.StatusOK, map[string]any{
 			"resource_id": srv.Key.ResourceID, "crid": srv.Key.CRID,
@@ -2859,8 +2901,8 @@ func TestPublishDaemonLifecycleServesRealHTTPAndStopsCleanly(t *testing.T) {
 	})
 	stop := runCLI(t, &runOpts{
 		args:          []string{"--endpoint", srv.URL, "stop", srv.Key.CRID},
-		env:           map[string]string{"QURL_API_KEY": testAPIKey},
-		shareRegistry: registry, shareDaemon: daemon, shareStateDir: stateDir,
+		env:           env,
+		shareRegistry: registry, shareDaemon: controller, shareStateDir: stateDir,
 	})
 	if stop.code != 0 {
 		t.Fatalf("stop result code=%d stderr=%s", stop.code, stop.stderr.String())
@@ -2877,8 +2919,8 @@ func TestPublishDaemonLifecycleServesRealHTTPAndStopsCleanly(t *testing.T) {
 		t.Helper()
 		deleted := runCLI(t, &runOpts{
 			args:          []string{"--endpoint", srv.URL, "delete", crid, "--yes"},
-			env:           map[string]string{"QURL_API_KEY": testAPIKey},
-			shareRegistry: registry, shareDaemon: daemon, shareStateDir: stateDir,
+			env:           env,
+			shareRegistry: registry, shareDaemon: controller, shareStateDir: stateDir,
 		})
 		if deleted.code != 0 {
 			t.Fatalf("delete result code=%d stderr=%s", deleted.code, deleted.stderr.String())
@@ -2909,8 +2951,8 @@ func TestPublishDaemonLifecycleServesRealHTTPAndStopsCleanly(t *testing.T) {
 	for range 2 {
 		republished := runCLI(t, &runOpts{
 			args:          []string{"--endpoint", srv.URL, "--quiet", "publish", echo.URL, "--id", connectorID},
-			env:           map[string]string{"QURL_API_KEY": testAPIKey},
-			shareRegistry: registry, shareDaemon: daemon, shareStateDir: stateDir,
+			env:           env,
+			shareRegistry: registry, shareDaemon: controller, shareStateDir: stateDir,
 			localResource: resolver, sharingWaitLimit: 10 * time.Second,
 		})
 		if republished.code != 0 || republished.stdout.String() != resourceKey.CRID+"\n" {
@@ -3203,7 +3245,7 @@ func resolvedLocalResource(srv *apitest.Server, found bool) localResourceResolve
 }
 
 func foregroundIPCTestDaemon(started, stopped chan struct{}) func(context.Context, *globalOpts, string, string) error {
-	return func(ctx context.Context, _ *globalOpts, stateDir, jobVersion string) error {
+	return func(ctx context.Context, opts *globalOpts, stateDir, jobVersion string) error {
 		defer close(stopped)
 		manager, err := connectordaemon.NewManager(emptyForegroundRegistry{}, emptyForegroundFactory{})
 		if err != nil {
@@ -3211,7 +3253,10 @@ func foregroundIPCTestDaemon(started, stopped chan struct{}) func(context.Contex
 		}
 		runCtx, cancelRun := context.WithCancel(ctx)
 		defer cancelRun()
-		path := connectordaemon.StateSocketPath(stateDir)
+		path, err := connectordaemon.SocketPathForStateDir(stateDir, opts.lookupEnv)
+		if err != nil {
+			return err
+		}
 		done := make(chan error, 1)
 		go func() {
 			done <- (&connectordaemon.IPCServer{
@@ -3311,5 +3356,593 @@ func assertLocalConnectorResourceRetired(t *testing.T, stateDir, connectorID str
 	_, retired, found, err := store.ConnectorResourceBinding(context.Background(), connectorID)
 	if err != nil || !found || !retired {
 		t.Fatalf("deleted Connector binding found=%t retired=%t err=%v", found, retired, err)
+	}
+}
+
+// startExternalJourneyDaemon uses the production controller and IPC with real
+// Connector sessions. Only cloud admission is supplied by the local fixture.
+func startExternalJourneyDaemon(t *testing.T, daemon *journeyDaemon, stateDir, endpoint string) shareDaemonController {
+	t.Helper()
+	common, err := connectordaemon.DefaultFRPCommon(2, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	factory, err := connectordaemon.NewNativeGroupFactory(daemon.admitter, common, daemon.version)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager, err := connectordaemon.NewManager(daemon.registry, factory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.DeferFirstReconcile = true
+	admissionsBefore := daemon.admitter.admissions()
+	ctx, cancel := context.WithCancel(context.Background())
+	daemon.manager, daemon.cancel, daemon.done = manager, cancel, make(chan error, 1)
+	version, err := connectordaemon.JobVersion(daemon.version, connectordaemon.GroupModeSingle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &connectordaemon.IPCServer{SocketPath: stateSocketPath(t, stateDir), Manager: manager, JobVersion: version}
+	go func() { daemon.done <- server.Run(ctx) }()
+	controller, err := connectordaemon.NewJobController(stateDir, t.TempDir(), daemon.version, endpoint, connectordaemon.GroupModeSingle, connectorstate.RuntimeSupervisionExternal, func() (qurl.HubBootstrap, error) {
+		t.Error("external lifecycle resolved native job deployment")
+		return qurl.HubBootstrap{}, errors.New("unexpected native job deployment")
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ready, stop := context.WithTimeout(ctx, 5*time.Second)
+	defer stop()
+	if err := controller.IPC.WaitReady(ready); err != nil {
+		t.Fatal(err)
+	}
+	if daemon.admitter.admissions() != admissionsBefore {
+		t.Fatal("external daemon admitted a session before reload")
+	}
+	return controller
+}
+
+// TestInspectDegradesWhenTheRuntimeDirCannotResolve pins that an unresolvable
+// QURL_CONNECTOR_RUNTIME_DIR does not silence inspect. That misconfiguration
+// is exactly what someone runs inspect to diagnose, so the resource and
+// target facts must still print, with the daemon reported unavailable.
+func TestInspectDegradesWhenTheRuntimeDirCannotResolve(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// Windows named pipes discard the runtime directory, so there is no
+		// unresolvable value to degrade over.
+		t.Skip("QURL_CONNECTOR_RUNTIME_DIR does not reach the Windows pipe address")
+	}
+	srv := apitest.NewServer(t)
+	stateDir := connectorStateTestDir(t)
+	registry, err := openOwnedTestShareRegistry(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seed := localShareFixture(srv)
+	seed.DesiredState = "on"
+	if err := registry.Put(context.Background(), &seed); err != nil {
+		t.Fatal(err)
+	}
+	srv.Script(http.MethodGet, "/v1/resources/"+srv.Key.CRID+"/sharing",
+		sharingResponse(t, srv, "on", seed.ServingEpoch, "serving"))
+	res := runCLI(t, &runOpts{
+		args: []string{"--endpoint", srv.URL, "inspect", srv.Key.CRID, "-o", "json"},
+		env: map[string]string{
+			"QURL_API_KEY": testAPIKey, "QURL_CONNECTOR_STATE_DIR": stateDir,
+			connectordaemon.RuntimeDirEnv: "relative/runtime",
+		},
+		shareRegistry: registry, shareStateDir: stateDir,
+		preflightTarget: func(context.Context, string, int) error { return nil },
+	})
+	if res.code != 0 {
+		t.Fatalf("inspect exit=%d stderr=%q, want the degraded document", res.code, res.stderr.String())
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(res.stdout.Bytes(), &doc); err != nil {
+		t.Fatalf("inspect stdout is not JSON: %v (%q)", err, res.stdout.String())
+	}
+	if doc["daemon_state"] != "unavailable" || doc["failure_category"] != "local_daemon" {
+		t.Fatalf("degraded document = %v, want an unavailable local_daemon", doc)
+	}
+	if doc["target_url"] != seed.TargetURL {
+		t.Fatalf("degraded document lost the target: %v", doc)
+	}
+}
+
+// TestRestartWithoutTargetKeepsTodaysOutput pins the plain-restart documents
+// byte for byte: a restart that does not move the share must print exactly
+// what it printed before --target existed.
+func TestRestartWithoutTargetKeepsTodaysOutput(t *testing.T) {
+	for _, format := range []string{"text", "json"} {
+		t.Run(format, func(t *testing.T) {
+			srv := apitest.NewServer(t)
+			stateDir := connectorStateTestDir(t)
+			registry, err := openOwnedTestShareRegistry(stateDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			seed := localShareFixture(srv)
+			seed.DesiredState = "on"
+			if err := registry.Put(context.Background(), &seed); err != nil {
+				t.Fatal(err)
+			}
+			path := "/v1/resources/" + srv.Key.CRID + "/sharing"
+			srv.Script(http.MethodGet, path,
+				sharingResponse(t, srv, "on", seed.ServingEpoch, "serving"),
+				sharingResponse(t, srv, "on", seed.ServingEpoch+1, "serving"),
+			)
+			srv.Script(http.MethodPost, path+"/restart", sharingResponse(t, srv, "on", seed.ServingEpoch+1, "connecting"))
+			args := []string{"--endpoint", srv.URL, "restart", srv.Key.CRID}
+			want := "CRID:           " + srv.Key.CRID + "\n" +
+				"Target:         http://127.0.0.1:3000\n" +
+				"Desired:        on\n" +
+				"Observed:       serving\n" +
+				"Serving epoch:  5\n"
+			if format == "json" {
+				args = append(args, "-o", "json")
+				want = "{\n" +
+					"  \"crid\": \"" + srv.Key.CRID + "\",\n" +
+					"  \"resource_id\": \"" + srv.Key.ResourceID + "\",\n" +
+					"  \"target_url\": \"http://127.0.0.1:3000\",\n" +
+					"  \"desired_state\": \"on\",\n" +
+					"  \"connection_state\": \"serving\",\n" +
+					"  \"serving_epoch\": 5\n" +
+					"}\n"
+			}
+			daemon := &recordingShareDaemon{}
+			res := runCLI(t, &runOpts{
+				args: args,
+				env: map[string]string{
+					"QURL_API_KEY": testAPIKey, "QURL_CONNECTOR_STATE_DIR": stateDir,
+				},
+				shareRegistry: registry, shareDaemon: daemon, shareStateDir: stateDir,
+				preflightTarget: func(context.Context, string, int) error { return nil },
+			})
+			if res.code != 0 || res.stderr.Len() != 0 {
+				t.Fatalf("exit=%d stderr=%q", res.code, res.stderr.String())
+			}
+			if got := res.stdout.String(); got != want {
+				t.Fatalf("restart stdout changed:\n got: %q\nwant: %q", got, want)
+			}
+			if daemon.ensures != 1 || daemon.reloads != 0 {
+				t.Fatalf("daemon ensures/reloads = %d/%d, want 1/0", daemon.ensures, daemon.reloads)
+			}
+		})
+	}
+}
+
+func TestRestartWithTargetMovesShareAtTheReturnedEpoch(t *testing.T) {
+	// The destination follows the local publish rules, so a name resolves to
+	// its canonical loopback origin and an IPv6 loopback literal is kept as one.
+	targets := []struct{ name, target, canonical, ip, preflight string }{
+		{"localhost", "http://localhost:4000", "http://127.0.0.1:4000", "127.0.0.1", "127.0.0.1:4000"},
+		{"ipv6 loopback", "http://[::1]:4000", "http://[::1]:4000", "::1", "[::1]:4000"},
+	}
+	for _, format := range []string{"text", "json"} {
+		for _, target := range targets {
+			t.Run(format+"/"+target.name, func(t *testing.T) {
+				srv := apitest.NewServer(t)
+				stateDir := connectorStateTestDir(t)
+				registry, err := openOwnedTestShareRegistry(stateDir)
+				if err != nil {
+					t.Fatal(err)
+				}
+				seed := localShareFixture(srv)
+				seed.DesiredState = "off" // A successful retarget also restores a locally disabled share.
+				if err := registry.Put(context.Background(), &seed); err != nil {
+					t.Fatal(err)
+				}
+				path := "/v1/resources/" + srv.Key.CRID + "/sharing"
+				srv.Script(http.MethodGet, path,
+					sharingResponse(t, srv, "on", seed.ServingEpoch, "serving"),
+					sharingResponse(t, srv, "on", seed.ServingEpoch+1, "serving"),
+				)
+				srv.Script(http.MethodPost, path+"/restart", sharingResponse(t, srv, "on", seed.ServingEpoch+1, "connecting"))
+				args := []string{"--endpoint", srv.URL, "restart", srv.Key.CRID, "--target", target.target}
+				if format == "json" {
+					args = append(args, "-o", "json")
+				}
+				var preflights []string
+				daemon := &recordingShareDaemon{}
+				res := runCLI(t, &runOpts{
+					args: args,
+					env: map[string]string{
+						"QURL_API_KEY": testAPIKey, "QURL_CONNECTOR_STATE_DIR": stateDir,
+					},
+					shareRegistry: registry, shareDaemon: daemon, shareStateDir: stateDir,
+					preflightTarget: func(_ context.Context, ip string, port int) error {
+						preflights = append(preflights, net.JoinHostPort(ip, strconv.Itoa(port)))
+						return nil
+					},
+				})
+				if res.code != 0 || res.stderr.Len() != 0 {
+					t.Fatalf("exit=%d stderr=%q", res.code, res.stderr.String())
+				}
+				if len(preflights) != 1 || preflights[0] != target.preflight {
+					t.Fatalf("preflighted %v, want only the destination %s", preflights, target.preflight)
+				}
+				requests := srv.Requests()
+				if len(requests) != 3 || requests[0].Method != http.MethodGet || requests[1].Method != http.MethodPost || requests[2].Method != http.MethodGet {
+					t.Fatalf("requests = %#v, want GET, restart POST, readiness GET", requests)
+				}
+				if daemon.ensures != 1 || daemon.reloads != 0 {
+					t.Fatalf("daemon ensures/reloads = %d/%d, want 1/0", daemon.ensures, daemon.reloads)
+				}
+				stored, err := registry.Get(context.Background(), srv.Key.CRID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if stored.TargetURL != target.canonical || stored.LocalIP != target.ip || stored.LocalPort != 4000 ||
+					stored.DesiredState != "on" || stored.ServingEpoch != seed.ServingEpoch+1 {
+					t.Fatalf("moved local state = %+v, want %s at epoch %d", stored, target.canonical, seed.ServingEpoch+1)
+				}
+				if format == "json" {
+					var doc struct {
+						TargetURL    string `json:"target_url"`
+						ServingEpoch uint64 `json:"serving_epoch"`
+					}
+					if err := json.Unmarshal(res.stdout.Bytes(), &doc); err != nil {
+						t.Fatalf("decode restart json: %v\n%s", err, res.stdout.String())
+					}
+					if doc.TargetURL != target.canonical || doc.ServingEpoch != seed.ServingEpoch+1 {
+						t.Fatalf("restart json = %+v", doc)
+					}
+					return
+				}
+				if !strings.Contains(res.stdout.String(), "Target:         "+target.canonical+"\n") || strings.Contains(res.stdout.String(), seed.TargetURL) {
+					t.Fatalf("stdout does not report the destination alone:\n%s", res.stdout.String())
+				}
+			})
+		}
+	}
+}
+
+func TestRestartRejectsNonLoopbackTargetBeforeAnyRequest(t *testing.T) {
+	for name, target := range map[string]string{
+		"remote host":            "http://192.0.2.1:4000",
+		"remote query":           "https://example.test/?token=private-retarget-token",
+		"malformed remote query": "https://example.test/?token=private-retarget-token\n",
+		"https":                  "https://127.0.0.1:4000",
+		"path":                   "http://127.0.0.1:4000/app",
+		"credentials":            "http://me:secret@127.0.0.1:4000",
+		"empty":                  "",
+	} {
+		t.Run(name, func(t *testing.T) {
+			srv := apitest.NewServer(t)
+			stateDir := connectorStateTestDir(t)
+			registry, err := openOwnedTestShareRegistry(stateDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			seed := localShareFixture(srv)
+			seed.DesiredState = "on"
+			if err := registry.Put(context.Background(), &seed); err != nil {
+				t.Fatal(err)
+			}
+			before, err := registry.Get(context.Background(), srv.Key.CRID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			preflights := 0
+			daemon := &recordingShareDaemon{}
+			res := runCLI(t, &runOpts{
+				args: []string{"--endpoint", srv.URL, "restart", srv.Key.CRID, "--target", target},
+				env: map[string]string{
+					"QURL_API_KEY": testAPIKey, "QURL_CONNECTOR_STATE_DIR": stateDir,
+				},
+				shareRegistry: registry, shareDaemon: daemon, shareStateDir: stateDir,
+				preflightTarget: func(context.Context, string, int) error {
+					preflights++
+					return nil
+				},
+			})
+			if res.code != exitcode.Usage || !strings.Contains(res.stderr.String(), "invalid target URL") {
+				t.Fatalf("exit=%d stderr=%q, want usage error", res.code, res.stderr.String())
+			}
+			if strings.Contains(res.stderr.String(), "private-retarget-token") {
+				t.Fatal("rejected target leaked its query")
+			}
+			if len(srv.Requests()) != 0 || preflights != 0 || daemon.ensures != 0 || daemon.reloads != 0 {
+				t.Fatalf("rejected target reached requests/preflight/daemon = %#v/%d/%+v", srv.Requests(), preflights, daemon)
+			}
+			after, err := registry.Get(context.Background(), srv.Key.CRID)
+			if err != nil || after.TargetURL != before.TargetURL || after.ServingEpoch != before.ServingEpoch || !after.UpdatedAt.Equal(before.UpdatedAt) {
+				t.Fatalf("rejected target changed local state: %+v -> %+v, %v", before, after, err)
+			}
+		})
+	}
+}
+
+type failRetargetRegistry struct {
+	localShareRegistry
+	err error
+}
+
+func (r *failRetargetRegistry) Retarget(context.Context, string, connectorstate.LocalTarget, uint64) (*connectorstate.LocalShare, error) {
+	return nil, r.err
+}
+
+func TestRestartWithTargetCompensatesWhenRegistryRefusesTheMove(t *testing.T) {
+	srv := apitest.NewServer(t)
+	stateDir := connectorStateTestDir(t)
+	baseRegistry, err := openOwnedTestShareRegistry(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seed := localShareFixture(srv)
+	seed.DesiredState = "on"
+	if err := baseRegistry.Put(context.Background(), &seed); err != nil {
+		t.Fatal(err)
+	}
+	moveErr := errors.New("registry refused the move")
+	path := "/v1/resources/" + srv.Key.CRID + "/sharing"
+	srv.Script(http.MethodGet, path, sharingResponse(t, srv, "on", seed.ServingEpoch, "serving"))
+	srv.Script(http.MethodPost, path+"/restart", sharingResponse(t, srv, "on", seed.ServingEpoch+1, "connecting"))
+	srv.Script(http.MethodPut, path, sharingResponse(t, srv, "off", seed.ServingEpoch+2, "stopped"))
+	daemon := &recordingShareDaemon{}
+	res := runCLI(t, &runOpts{
+		args: []string{"--endpoint", srv.URL, "restart", srv.Key.CRID, "--target", "http://127.0.0.1:4000"},
+		env: map[string]string{
+			"QURL_API_KEY": testAPIKey, "QURL_CONNECTOR_STATE_DIR": stateDir,
+		},
+		shareRegistry: &failRetargetRegistry{localShareRegistry: baseRegistry, err: moveErr},
+		shareDaemon:   daemon, shareStateDir: stateDir,
+		preflightTarget: func(context.Context, string, int) error { return nil },
+	})
+	if res.code == 0 || !strings.Contains(res.stderr.String(), moveErr.Error()) {
+		t.Fatalf("result code=%d stderr=%s", res.code, res.stderr.String())
+	}
+	requests := srv.Requests()
+	if len(requests) != 3 || requests[0].Method != http.MethodGet || requests[1].Method != http.MethodPost || requests[2].Method != http.MethodPut {
+		t.Fatalf("requests = %#v, want GET, restart POST, compensating off PUT", requests)
+	}
+	if daemon.ensures != 0 || daemon.reloads != 0 {
+		t.Fatalf("refused move reached daemon handoff: %+v", daemon)
+	}
+	local, err := baseRegistry.Get(context.Background(), srv.Key.CRID)
+	if err != nil || local.DesiredState != "off" || local.ServingEpoch != seed.ServingEpoch+2 || local.TargetURL != seed.TargetURL {
+		t.Fatalf("compensated local state = %+v err=%v", local, err)
+	}
+}
+
+func TestRestartTargetPreflightFailureLeavesEpochUntouched(t *testing.T) {
+	srv := apitest.NewServer(t)
+	stateDir := connectorStateTestDir(t)
+	registry, err := openOwnedTestShareRegistry(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seed := localShareFixture(srv)
+	if err := registry.Put(context.Background(), &seed); err != nil {
+		t.Fatal(err)
+	}
+	before, err := registry.Get(context.Background(), srv.Key.CRID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	daemon := &recordingShareDaemon{}
+	res := runCLI(t, &runOpts{
+		args:          []string{"--endpoint", srv.URL, "restart", srv.Key.CRID, "--target", "http://127.0.0.1:4000"},
+		env:           map[string]string{"QURL_API_KEY": testAPIKey, "QURL_CONNECTOR_STATE_DIR": stateDir},
+		shareRegistry: registry, shareDaemon: daemon, shareStateDir: stateDir,
+		preflightTarget: func(context.Context, string, int) error { return errors.New("destination unavailable") },
+	})
+	if res.code == 0 || len(srv.Requests()) != 0 || daemon.ensures != 0 || daemon.reloads != 0 {
+		t.Fatalf("preflight reached authority or daemon: exit=%d requests=%v daemon=%+v", res.code, srv.Requests(), daemon)
+	}
+	after, err := registry.Get(context.Background(), srv.Key.CRID)
+	if err != nil || after.TargetURL != before.TargetURL || after.ServingEpoch != before.ServingEpoch || !after.UpdatedAt.Equal(before.UpdatedAt) {
+		t.Fatalf("preflight changed registry: %+v -> %+v (%v)", before, after, err)
+	}
+}
+
+// TestRestartWithTargetCompensatesAfterTheMoveIsWritten pins the one
+// post-write compensation shape the refused-move test cannot reach: the
+// registry already holds the new target at the new epoch when daemon.Ensure
+// fails, so the compensation has to turn that row off in place rather than
+// restore the old target.
+func TestRestartWithTargetCompensatesAfterTheMoveIsWritten(t *testing.T) {
+	srv := apitest.NewServer(t)
+	stateDir := connectorStateTestDir(t)
+	registry, err := openOwnedTestShareRegistry(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seed := localShareFixture(srv)
+	seed.DesiredState = "on"
+	if err := registry.Put(context.Background(), &seed); err != nil {
+		t.Fatal(err)
+	}
+	setupErr := errors.New("daemon handoff failed after the move")
+	path := "/v1/resources/" + srv.Key.CRID + "/sharing"
+	srv.Script(http.MethodGet, path, sharingResponse(t, srv, "on", seed.ServingEpoch, "serving"))
+	srv.Script(http.MethodPost, path+"/restart", sharingResponse(t, srv, "on", seed.ServingEpoch+1, "connecting"))
+	srv.Script(http.MethodPut, path, sharingResponse(t, srv, "off", seed.ServingEpoch+2, "stopped"))
+	daemon := &recordingShareDaemon{ensureErr: setupErr}
+	res := runCLI(t, &runOpts{
+		args: []string{"--endpoint", srv.URL, "restart", srv.Key.CRID, "--target", "http://127.0.0.1:4000"},
+		env: map[string]string{
+			"QURL_API_KEY": testAPIKey, "QURL_CONNECTOR_STATE_DIR": stateDir,
+		},
+		shareRegistry: registry, shareDaemon: daemon, shareStateDir: stateDir,
+		preflightTarget: func(context.Context, string, int) error { return nil },
+	})
+	if res.code == 0 || !strings.Contains(res.stderr.String(), setupErr.Error()) {
+		t.Fatalf("result code=%d stderr=%s", res.code, res.stderr.String())
+	}
+	if daemon.ensures != 1 {
+		t.Fatalf("daemon ensures = %d, want the one failing handoff", daemon.ensures)
+	}
+	local, err := registry.Get(context.Background(), srv.Key.CRID)
+	if err != nil || local.DesiredState != "off" || local.ServingEpoch != seed.ServingEpoch+2 {
+		t.Fatalf("compensated local state = %+v err=%v, want off at epoch %d", local, err, seed.ServingEpoch+2)
+	}
+	if local.TargetURL != "http://127.0.0.1:4000" || local.LocalPort != 4000 {
+		t.Fatalf("compensated row = %+v, want the already-written new target turned off in place", local)
+	}
+}
+
+// TestRestartWithTargetWithoutALocalRowNeverReachesTheNetwork pins the
+// ordering: a CRID this machine does not share locally is refused by
+// controllableLocalShare before the preflight dial and before any request.
+func TestRestartWithTargetWithoutALocalRowNeverReachesTheNetwork(t *testing.T) {
+	srv := apitest.NewServer(t)
+	stateDir := connectorStateTestDir(t)
+	registry, err := openOwnedTestShareRegistry(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	daemon := &recordingShareDaemon{}
+	res := runCLI(t, &runOpts{
+		args: []string{"--endpoint", srv.URL, "restart", srv.Key.CRID, "--target", "http://127.0.0.1:4000"},
+		env: map[string]string{
+			"QURL_API_KEY": testAPIKey, "QURL_CONNECTOR_STATE_DIR": stateDir,
+		},
+		shareRegistry: registry, shareDaemon: daemon, shareStateDir: stateDir,
+		preflightTarget: func(context.Context, string, int) error {
+			t.Fatal("preflight dialed a target for a CRID with no local row")
+			return nil
+		},
+	})
+	if res.code == 0 {
+		t.Fatalf("restart --target without a local row succeeded: %s", res.stdout.String())
+	}
+	if requests := srv.Requests(); len(requests) != 0 {
+		t.Fatalf("requests = %#v, want none before the local-row check", requests)
+	}
+	if daemon.ensures != 0 || daemon.reloads != 0 {
+		t.Fatalf("missing local row reached daemon handoff: %+v", daemon)
+	}
+}
+
+// TestRestartWithTargetEqualToTheStoredTargetStillMovesTheRow pins which
+// branch a redundant --target takes: it is still a Retarget write (same
+// origin, newer epoch), so the daemon sees an unchanged route definition and
+// its ordinary restart path handles it.
+func TestRestartWithTargetEqualToTheStoredTargetStillMovesTheRow(t *testing.T) {
+	srv := apitest.NewServer(t)
+	stateDir := connectorStateTestDir(t)
+	registry, err := openOwnedTestShareRegistry(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seed := localShareFixture(srv)
+	seed.DesiredState = "on"
+	if err := registry.Put(context.Background(), &seed); err != nil {
+		t.Fatal(err)
+	}
+	path := "/v1/resources/" + srv.Key.CRID + "/sharing"
+	srv.Script(http.MethodGet, path,
+		sharingResponse(t, srv, "on", seed.ServingEpoch, "serving"),
+		sharingResponse(t, srv, "on", seed.ServingEpoch+1, "serving"),
+	)
+	srv.Script(http.MethodPost, path+"/restart", sharingResponse(t, srv, "on", seed.ServingEpoch+1, "connecting"))
+	daemon := &recordingShareDaemon{}
+	res := runCLI(t, &runOpts{
+		args: []string{"--endpoint", srv.URL, "restart", srv.Key.CRID, "--target", seed.TargetURL},
+		env: map[string]string{
+			"QURL_API_KEY": testAPIKey, "QURL_CONNECTOR_STATE_DIR": stateDir,
+		},
+		shareRegistry: registry, shareDaemon: daemon, shareStateDir: stateDir,
+		preflightTarget: func(context.Context, string, int) error { return nil },
+	})
+	if res.code != 0 || res.stderr.Len() != 0 {
+		t.Fatalf("exit=%d stderr=%q", res.code, res.stderr.String())
+	}
+	local, err := registry.Get(context.Background(), srv.Key.CRID)
+	if err != nil || local.TargetURL != seed.TargetURL || local.ServingEpoch != seed.ServingEpoch+1 || local.DesiredState != "on" {
+		t.Fatalf("redundant move = %+v err=%v, want the same target on the advanced epoch", local, err)
+	}
+	if daemon.ensures != 1 || daemon.reloads != 0 {
+		t.Fatalf("daemon ensures/reloads = %d/%d, want 1/0", daemon.ensures, daemon.reloads)
+	}
+}
+
+func TestRestartRetargetServesNewOriginThroughRealConnector(t *testing.T) {
+	if testing.Short() {
+		t.Skip("real FRP daemon journey")
+	}
+	origin := func(body string) *httptest.Server {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, body) }))
+		t.Cleanup(server.Close)
+		return server
+	}
+	oldOrigin, newOrigin := origin("old-origin"), origin("new-origin")
+	srv := apitest.NewServer(t)
+	stateDir := connectorStateTestDir(t)
+	if err := connectorstate.EstablishExternalRuntimeMode(context.Background(), stateDir); err != nil {
+		t.Fatal(err)
+	}
+	registry, err := openOwnedTestShareRegistry(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seed := localShareFixture(srv)
+	target, err := restartTarget(oldOrigin.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seed.TargetURL, seed.LocalIP, seed.LocalPort = target.canonicalOrigin, target.localIP, target.localPort
+	seed.DesiredState = "on"
+	if err := registry.Put(context.Background(), &seed); err != nil {
+		t.Fatal(err)
+	}
+	frpsPort, vhostPort := reserveCmdTCPPort(t), reserveCmdTCPPort(t)
+	recorder := newCmdProxyRecorder(t)
+	startCmdFRPS(t, frpsPort, vhostPort, "hermetic.test", recorder.server.URL)
+	daemon := &journeyDaemon{registry: registry, admitter: &journeyAdmitter{host: "localhost:" + strconv.Itoa(frpsPort), serving: make(chan struct{})}, version: "test"}
+	t.Cleanup(daemon.close)
+	controller := startExternalJourneyDaemon(t, daemon, stateDir, srv.URL)
+	if err := controller.Ensure(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	expectBody := func(want string) {
+		t.Helper()
+		client := &http.Client{Timeout: 300 * time.Millisecond}
+		deadline := time.Now().Add(10 * time.Second)
+		var got string
+		for time.Now().Before(deadline) {
+			req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "http://127.0.0.1:"+strconv.Itoa(vhostPort)+"/", http.NoBody)
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Host = seed.ConnectorRoutingID + ".hermetic.test"
+			if response, err := client.Do(req); err == nil {
+				body, readErr := io.ReadAll(response.Body)
+				_ = response.Body.Close()
+				got = string(body)
+				if readErr == nil && response.StatusCode == http.StatusOK && got == want {
+					return
+				}
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		t.Fatalf("Connector response = %q, want %q", got, want)
+	}
+	expectBody("old-origin")
+	oldOrigin.Close()
+	path := "/v1/resources/" + srv.Key.CRID + "/sharing"
+	srv.Script(http.MethodGet, path, sharingResponse(t, srv, "on", seed.ServingEpoch, "serving"), sharingResponse(t, srv, "on", seed.ServingEpoch+1, "serving"))
+	srv.Script(http.MethodPost, path+"/restart", sharingResponse(t, srv, "on", seed.ServingEpoch+1, "connecting"))
+	res := runCLI(t, &runOpts{
+		args:          []string{"--endpoint", srv.URL, "restart", srv.Key.CRID, "--target", newOrigin.URL},
+		env:           map[string]string{"QURL_API_KEY": testAPIKey, connectorstate.EnvRuntimeSupervision: "external"},
+		shareRegistry: registry, shareDaemon: controller, shareStateDir: stateDir, sharingWaitLimit: 10 * time.Second,
+	})
+	if res.code != 0 {
+		t.Fatalf("restart exit=%d stderr=%s", res.code, res.stderr.String())
+	}
+	expectBody("new-origin")
+	stored, err := registry.Get(context.Background(), seed.CRID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.CRID != seed.CRID || stored.ResourceID != seed.ResourceID || stored.ConnectorID != seed.ConnectorID || stored.ConnectorRoutingID != seed.ConnectorRoutingID || stored.ServingEpoch != seed.ServingEpoch+1 || stored.TargetURL != newOrigin.URL {
+		t.Fatalf("retarget changed identity or did not persist the new target: %+v", stored)
+	}
+	requests := srv.Requests()
+	if len(requests) != 3 || requests[0].Method != http.MethodGet || requests[1].Method != http.MethodPost || requests[2].Method != http.MethodGet {
+		t.Fatalf("unexpected resource creation or API requests: %#v", requests)
 	}
 }

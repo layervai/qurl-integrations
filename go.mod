@@ -13,8 +13,8 @@ require (
 	github.com/fatedier/frp v0.71.0
 	github.com/fatedier/golib v0.8.2
 	github.com/layervai/qurl-conformance v0.14.0
-	github.com/layervai/qurl-connector v0.13.2
-	github.com/layervai/qurl-go v0.15.0
+	github.com/layervai/qurl-connector v0.14.0
+	github.com/layervai/qurl-go v0.17.0
 	github.com/lestrrat-go/jwx/v2 v2.1.7
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.0.10
@@ -122,7 +122,7 @@ require (
 	google.golang.org/genproto v0.0.0-20260715232425-e75dac1f907d // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20260715232425-e75dac1f907d // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260715232425-e75dac1f907d // indirect
-	google.golang.org/grpc v1.83.1 // indirect
+	google.golang.org/grpc v1.83.2 // indirect
 	google.golang.org/protobuf v1.36.12 // indirect
 	gopkg.in/ini.v1 v1.67.0 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
@@ -140,5 +140,5 @@ replace github.com/hashicorp/yamux => github.com/fatedier/yamux v0.0.0-202508250
 
 // TODO(upstream-contract): keep both replacements aligned with qurl-connector;
 // Go does not inherit dependency replacements. This reviewed FRP revision adds
-// proxy-phase race fixes to v1.0.0 and retains its InitialRunID hook.
-replace github.com/fatedier/frp => github.com/layervai/frp v1.0.1-0.20260906231730-9a0e4ee61964
+// proxy-phase and service startup/shutdown race fixes and retains InitialRunID.
+replace github.com/fatedier/frp => github.com/layervai/frp v1.0.2-0.20260916024338-1a3b5509d23d

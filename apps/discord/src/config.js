@@ -1,6 +1,6 @@
 // QURL_DEPLOYMENT is consumed and strictly validated by @layervai/qurl/node.
 const os = require('os');
-const { SSM_PLACEHOLDER_SENTINEL } = require('./utils/ssm-placeholder');
+const { INFRA_SEED_SENTINEL } = require('./utils/webhook-secret');
 
 // Prod safety guard: refuse to boot with DDB_TEST_ENDPOINT set under
 // NODE_ENV=production. `DDB_TEST_ENDPOINT` is a local-dev / mock-test
@@ -232,7 +232,7 @@ function isValidAuth0DomainShape(d) {
 function parseAuth0EmailConnection(raw) {
   const value = (raw || '').trim();
   if (!value) return { value: '', state: 'unset' };
-  const isPlaceholder = value === SSM_PLACEHOLDER_SENTINEL;
+  const isPlaceholder = value === INFRA_SEED_SENTINEL;
   if (isPlaceholder) {
     // Infra seeds optional SSM values before their consumers are enabled.
     // Treat that rollout state exactly like unset so adding the task-env
@@ -315,13 +315,13 @@ if (!isQurlOAuthConfigured) {
   discordInstallNotConfiguredReason = 'AUTH0_EMAIL_CONNECTION rejected';
 } else if (!normalizedDiscordClientId) {
   discordInstallNotConfiguredReason = 'DISCORD_CLIENT_ID unset';
-} else if (normalizedDiscordClientId === SSM_PLACEHOLDER_SENTINEL) {
+} else if (normalizedDiscordClientId === INFRA_SEED_SENTINEL) {
   discordInstallNotConfiguredReason = 'DISCORD_CLIENT_ID is the SSM placeholder';
 } else if (!isDiscordSnowflake(normalizedDiscordClientId)) {
   discordInstallNotConfiguredReason = 'DISCORD_CLIENT_ID is not a valid Discord snowflake';
 } else if (!normalizedDiscordClientSecret) {
   discordInstallNotConfiguredReason = 'DISCORD_CLIENT_SECRET unset';
-} else if (normalizedDiscordClientSecret === SSM_PLACEHOLDER_SENTINEL) {
+} else if (normalizedDiscordClientSecret === INFRA_SEED_SENTINEL) {
   discordInstallNotConfiguredReason = 'DISCORD_CLIENT_SECRET is the SSM placeholder';
 } else if (!canRetainSecureInstallCookie(normalizedBaseUrl)) {
   discordInstallNotConfiguredReason = 'BASE_URL cannot retain the Secure install cookie';
@@ -430,8 +430,10 @@ module.exports = {
   // qURL webhook receiver HMAC. Written to SSM by the webhook-registrar
   // Lambda (apps/discord/lambda/webhook-registrar/) on each deploy
   // invocation, then injected into the bot's task env. The bot reads
-  // it here and never modifies it — Lambda is the sole writer.
-  QURL_WEBHOOK_SECRET: process.env.QURL_WEBHOOK_SECRET,
+  // it here without changing the signing key bytes — Lambda is the sole
+  // writer. A whitespace-only value reads as unset.
+  QURL_WEBHOOK_SECRET: process.env.QURL_WEBHOOK_SECRET?.trim() === ''
+    ? '' : process.env.QURL_WEBHOOK_SECRET,
   // Explicit opt-out for deployments with no Lambda-managed default
   // subscription. Without this flag, a missing shared secret makes guild
   // webhook linking fail closed instead of silently taking the rotation path.

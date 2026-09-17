@@ -115,7 +115,7 @@ describe('webhook-registrar Lambda — input validation', () => {
           },
         ] } }),
         'DELETE /v1/webhooks/wh_orphan': () => { deleted = true; return { status: 204, body: '' }; },
-        'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new' } } }),
+        'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new_server_generated' } } }),
       });
       await handler({ ...BASE_EVENT }, CONTEXT);
       expect(deleted).toBe(true); // sweep ran — `=0` does NOT disable
@@ -150,7 +150,7 @@ describe('webhook-registrar Lambda — input validation', () => {
           },
         ] } }),
         'DELETE /v1/webhooks/wh_orphan': () => { deleted = true; return { status: 204, body: '' }; },
-        'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new' } } }),
+        'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new_server_generated' } } }),
       });
       const result = await handler({ ...BASE_EVENT }, CONTEXT);
       expect(deleted).toBe(false); // hard guard wins despite confirmed-orphan-shaped row
@@ -173,7 +173,7 @@ describe('webhook-registrar Lambda — input validation', () => {
       .resolves({});
     mockQurlService({
       'GET /v1/webhooks': () => ({ body: { data: [] } }),
-      'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_ok', secret: 'whsec_x' } } }),
+      'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_ok', secret: 'whsec_x_server_generated' } } }),
     });
     const result = await handler({ ...BASE_EVENT, description: 'Discord bot view counter' }, CONTEXT);
     expect(result.action).toBe('created');
@@ -193,7 +193,7 @@ describe('webhook-registrar Lambda — cold bootstrap (no existing sub, no SSM s
       'GET /v1/webhooks': () => ({ body: { data: [] } }),
       'POST /v1/webhooks': () => ({ status: 201, body: { data: {
         webhook_id: 'wh_lambda_created',
-        secret: 'whsec_from_lambda',
+        secret: 'whsec_from_lambda_server_generated',
         url: BASE_EVENT.bridgeUrl,
         events: ['qurl.accessed', 'qurl.expired'],
       } } }),
@@ -207,19 +207,53 @@ describe('webhook-registrar Lambda — cold bootstrap (no existing sub, no SSM s
     expect(putCalls[0].args[0].input).toEqual(expect.objectContaining({
       Name: '/test/QURL_WEBHOOK_SECRET',
       Type: 'SecureString',
-      Value: 'whsec_from_lambda',
+      Value: 'whsec_from_lambda_server_generated',
       Overwrite: true,
     }));
   });
 });
 
 describe('webhook-registrar Lambda — steady-state (existing sub + SSM secret present)', () => {
+  it.each(['whsec_rotated_server_generated', ' server-key-bytes\n'])(
+    'rotates the public seed and preserves response bytes through storage and config: %p', async (secret) => {
+    ssmMock
+      .on(GetParameterCommand, { Name: '/test/QURL_API_KEY' })
+      .resolves({ Parameter: { Value: 'lv_test_key' } })
+      .on(GetParameterCommand, { Name: '/test/QURL_WEBHOOK_SECRET' })
+      .resolves({ Parameter: { Value: 'PLACEHOLDER' } })
+      .on(PutParameterCommand)
+      .resolves({});
+    mockQurlService({
+      'GET /v1/webhooks': () => ({ body: { data: [{
+        webhook_id: 'wh_existing',
+        url: BASE_EVENT.bridgeUrl,
+        events: ['qurl.accessed', 'qurl.expired'],
+      }] } }),
+      'POST /v1/webhooks/wh_existing/secret': () => ({
+        body: { data: { webhook_id: 'wh_existing', secret } },
+      }),
+    });
+
+    const result = await handler(BASE_EVENT, CONTEXT);
+    expect(result).toEqual({ webhookId: 'wh_existing', action: 'rotated' });
+    const putCalls = ssmMock.commandCalls(PutParameterCommand);
+    expect(putCalls).toHaveLength(1);
+    const persisted = putCalls[0].args[0].input.Value;
+    expect(persisted).toBe(secret);
+    const { captureFreshConfig } = require('../../helpers/fresh-config');
+    const { createHmac } = require('crypto');
+    captureFreshConfig({ QURL_WEBHOOK_SECRET: persisted }, (cfg) => {
+      const sign = (key) => createHmac('sha256', key).update('webhook payload').digest('hex');
+      expect(sign(cfg.QURL_WEBHOOK_SECRET)).toBe(sign(secret));
+    });
+  });
+
   it('reuses the existing subscription without rotating', async () => {
     ssmMock
       .on(GetParameterCommand, { Name: '/test/QURL_API_KEY' })
       .resolves({ Parameter: { Value: 'lv_test_key' } })
       .on(GetParameterCommand, { Name: '/test/QURL_WEBHOOK_SECRET' })
-      .resolves({ Parameter: { Value: 'whsec_existing' } })
+      .resolves({ Parameter: { Value: 'whsec_existing_server_generated' } })
       .on(PutParameterCommand)
       .resolves({});
     let rotateHit = false;
@@ -231,13 +265,40 @@ describe('webhook-registrar Lambda — steady-state (existing sub + SSM secret p
       }] } }),
       'POST /v1/webhooks/wh_existing/secret': () => {
         rotateHit = true;
-        return { body: { data: { webhook_id: 'wh_existing', secret: 'whsec_rotated' } } };
+        return { body: { data: { webhook_id: 'wh_existing', secret: 'whsec_rotated_server_generated' } } };
       },
     });
     
     const result = await handler(BASE_EVENT, CONTEXT);
     expect(result).toEqual({ webhookId: 'wh_existing', action: 'reused' });
     expect(rotateHit).toBe(false); // critical: no rotate, single-source-of-truth secret stays
+  });
+
+  it('preserves a padded SSM secret on reuse and warns about its format', async () => {
+    ssmMock
+      .on(GetParameterCommand, { Name: '/test/QURL_API_KEY' })
+      .resolves({ Parameter: { Value: 'lv_test_key' } })
+      .on(GetParameterCommand, { Name: '/test/QURL_WEBHOOK_SECRET' })
+      .resolves({ Parameter: { Value: ' whsec_existing_server_generated\n' } })
+      .on(PutParameterCommand)
+      .resolves({});
+    mockQurlService({
+      'GET /v1/webhooks': () => ({ body: { data: [{
+        webhook_id: 'wh_existing',
+        url: BASE_EVENT.bridgeUrl,
+        events: ['qurl.accessed', 'qurl.expired'],
+      }] } }),
+    });
+    const logger = require('../../../src/logger');
+    const warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => {});
+    try {
+      const result = await handler(BASE_EVENT, CONTEXT);
+      expect(result).toEqual({ webhookId: 'wh_existing', action: 'reused' });
+      expect(ssmMock.commandCalls(PutParameterCommand)).toHaveLength(0);
+      expect(warnSpy).toHaveBeenCalled();
+    } finally {
+      warnSpy.mockRestore();
+    }
   });
 });
 
@@ -255,13 +316,13 @@ describe('webhook-registrar Lambda — secret never echoes in handler response (
         webhook_id: 'wh_existing', url: BASE_EVENT.bridgeUrl, events: ['qurl.accessed', 'qurl.expired'],
       }] } }),
       'POST /v1/webhooks/wh_existing/secret': () => ({
-        body: { data: { webhook_id: 'wh_existing', secret: 'whsec_secret_to_hide' } },
+        body: { data: { webhook_id: 'wh_existing', secret: 'whsec_secret_to_hide_server_generated' } },
       }),
     });
     const result = await handler(BASE_EVENT, CONTEXT);
     expect(result.action).toBe('rotated');
     expect(result).not.toHaveProperty('secret');
-    expect(JSON.stringify(result)).not.toContain('whsec_secret_to_hide');
+    expect(JSON.stringify(result)).not.toContain('whsec_secret_to_hide_server_generated');
   });
 
   it('does not return secret on the reused action', async () => {
@@ -325,7 +386,7 @@ describe('webhook-registrar Lambda — bridgeUrl normalization', () => {
       'GET /v1/webhooks': () => ({ body: { data: [] } }),
       'POST /v1/webhooks': (opts) => {
         createBody = JSON.parse(opts.body);
-        return { status: 201, body: { data: { webhook_id: 'wh', secret: 'whsec_' } } };
+        return { status: 201, body: { data: { webhook_id: 'wh', secret: 'whsec_x_server_generated' } } };
       },
     });
     await handler({ ...BASE_EVENT, bridgeUrl: 'https://bot.test.example/webhooks/qurl/' }, CONTEXT);
@@ -371,7 +432,7 @@ describe('webhook-registrar Lambda — failure surfacing', () => {
     mockQurlService({
       'GET /v1/webhooks': () => ({ body: { data: [] } }),
       'POST /v1/webhooks': () => ({ status: 201, body: { data: {
-        webhook_id: 'wh_orphaned', secret: 'whsec_lost_to_ssm',
+        webhook_id: 'wh_orphaned', secret: 'whsec_lost_to_ssm_server_generated',
       } } }),
     });
     await expect(handler(BASE_EVENT, CONTEXT)).rejects.toThrow(/Rate exceeded|ThrottlingException/);
@@ -382,7 +443,7 @@ describe('webhook-registrar Lambda — failure surfacing', () => {
       .on(GetParameterCommand, { Name: '/test/QURL_API_KEY' })
       .resolves({ Parameter: { Value: 'lv_test_key' } })
       .on(GetParameterCommand, { Name: '/test/QURL_WEBHOOK_SECRET' })
-      .resolves({ Parameter: { Value: 'whsec_existing' } })
+      .resolves({ Parameter: { Value: 'whsec_existing_server_generated' } })
       .on(PutParameterCommand)
       .resolves({});
     mockQurlService({

@@ -130,8 +130,8 @@ describe('config.AUTH0_EMAIL_CONNECTION', () => {
 
   it('uses the exact shared SSM placeholder sentinel', () => {
     withFreshEnv({ AUTH0_EMAIL_CONNECTION: 'unset' }, () => {
-      jest.doMock('../src/utils/ssm-placeholder', () => ({
-        SSM_PLACEHOLDER_SENTINEL: 'UNSET',
+      jest.doMock('../src/utils/webhook-secret', () => ({
+        INFRA_SEED_SENTINEL: 'UNSET',
       }));
       try {
         const config = require('../src/config');
@@ -139,7 +139,7 @@ describe('config.AUTH0_EMAIL_CONNECTION', () => {
         expect(config.isAuth0EmailConnectionRejected).toBe(false);
         expect(config.auth0EmailConnectionState).toBe('pinned');
       } finally {
-        jest.dontMock('../src/utils/ssm-placeholder');
+        jest.dontMock('../src/utils/webhook-secret');
       }
     });
   });

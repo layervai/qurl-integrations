@@ -47,7 +47,7 @@ jest.mock('../src/logger', () => ({
 
 process.env.QURL_API_KEY = 'lv_test_link';
 process.env.QURL_ENDPOINT = 'https://qurl.example';
-process.env.QURL_WEBHOOK_SECRET = 'wsec_test';
+process.env.QURL_WEBHOOK_SECRET = 'whsec_guild_link_test_secret';
 process.env.BASE_URL = 'http://localhost:3000';
 process.env.AWS_REGION = 'us-east-2';
 process.env.DDB_TABLE_PREFIX = 'qurl-bot-discord-test-';
@@ -194,7 +194,7 @@ describe('linkGuildWebhookSubscription — default-owner failures', () => {
     expect(mockSetGuildDefaultWebhookOwner).toHaveBeenCalledWith(
       'g_persist', {
         webhookOwnerId: 'usr_default',
-        expectedDefaultWebhookSecret: 'wsec_test',
+        expectedDefaultWebhookSecret: 'whsec_guild_link_test_secret',
         expectedApiKey: 'lv_x',
       },
     );
