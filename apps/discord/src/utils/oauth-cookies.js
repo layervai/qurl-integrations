@@ -24,7 +24,8 @@ const DISCORD_INSTALL_COOKIE_PATH = '/';
 // Discord's authorization-code callback is interactive and can include a
 // server picker (or server creation and app switches on mobile), so its
 // browser binding gets thirty minutes rather than the five-minute qURL setup
-// window. Discord's single-use code still bounds replay.
+// window. The TTL is browser-enforced (Max-Age) only, not checked server-side;
+// Discord's single-use, short-lived code is what bounds replay.
 const DISCORD_INSTALL_COOKIE_TTL_SECONDS = 30 * 60;
 
 // Single shape for the OAuth double-submit CSRF cookies.

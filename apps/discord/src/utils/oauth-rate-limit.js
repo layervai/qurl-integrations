@@ -72,6 +72,13 @@ class IndexedRateLimitStore extends Map {
 }
 const rateLimitStore = new IndexedRateLimitStore();
 
+// At saturation the hard-cap branch fires at the full inbound rate, so the
+// alert signal is one warning per rate-limit window carrying the number of
+// IPs shed since the previous warning (per bucket, with the elapsed interval so
+// residual counts from an earlier saturation are not read as this window's).
+let hardCapWarnedAt = 0;
+let hardCapShedCounts = {};
+
 // Evict stale entries on a 30-second timer (was 5 minutes). Under a burst
 // from many unique IPs, a longer sweep interval lets the Map grow much
 // larger between sweeps. The hard ceiling below bounds bursts, while 30s is
@@ -87,6 +94,8 @@ function sweepRateLimitStore() {
     if (Object.keys(recentBuckets).length === 0) rateLimitStore.delete(ip);
     else rateLimitStore.replaceAfterSweep(ip, recentBuckets);
   }
+  // Saturation ended: unreported counts belong to that episode, not the next.
+  if (rateLimitStore.size < MAX_RATE_LIMIT_STORE_SIZE) hardCapShedCounts = {};
 }
 
 const sweepHandle = setInterval(sweepRateLimitStore, 30 * 1000);
@@ -96,12 +105,6 @@ function stopIntervals() {
   clearInterval(sweepHandle);
 }
 
-// At saturation the hard-cap branch fires at the full inbound rate, so the
-// alert signal is one warning per rate-limit window carrying the number of
-// IPs shed since the previous warning (per bucket, with the elapsed interval so
-// residual counts from an earlier saturation are not read as this window's).
-let hardCapWarnedAt = 0;
-let hardCapShedCounts = {};
 
 // Hard ceiling on total Map size. Under a distributed attack from many
 // unique IPs, new-IP requests get 429 once the store reaches this size
@@ -161,7 +164,11 @@ function rateLimitForBucket(bucket, req, res, next) {
   requests.push(now);
   // The rejection above runs before this push, which is what bounds each
   // bucket at its maxRequests; keep that ordering.
-  rateLimitStore.set(ip, { ...buckets, [bucket]: requests });
+  // Carry only other buckets with in-window activity so an expired callback
+  // bucket cannot keep an install-only IP out of the eviction index.
+  const liveBuckets = Object.fromEntries(Object.entries(buckets)
+    .filter(([name, times]) => name !== bucket && times.some(time => time > windowStart)));
+  rateLimitStore.set(ip, { ...liveBuckets, [bucket]: requests });
   return next();
 }
 

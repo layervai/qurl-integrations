@@ -284,7 +284,8 @@ function canRetainSecureInstallCookie(baseUrl) {
   try {
     const parsed = new URL(baseUrl);
     if (parsed.protocol === 'https:') return true;
-    // Browsers treat localhost and loopback literals as trustworthy development
+    // Browsers treat localhost and the canonical loopback literals (127.0.0.1,
+    // [::1]; the rest of 127/8 stays rejected) as trustworthy development
     // origins even over
     // HTTP. Keep the documented local smoke-test path while rejecting staging
     // and preview HTTP origins that silently discard the __Host- cookie.

@@ -37,10 +37,11 @@ jest.mock('../src/webhook-subscriptions', () => ({
 const mockAudit = jest.fn();
 const mockWarn = jest.fn();
 const mockInfo = jest.fn();
+const mockError = jest.fn();
 jest.mock('../src/logger', () => ({
   info: mockInfo,
   warn: mockWarn,
-  error: jest.fn(),
+  error: mockError,
   debug: jest.fn(),
   audit: mockAudit,
 }));
@@ -217,23 +218,30 @@ describe('linkGuildWebhookSubscription — default-owner failures', () => {
     );
   });
 
-  it('keeps a successful owner-only write when the local cache update rejects', async () => {
+  it('keeps the owner-only write but reports a failed link when the local cache update rejects', async () => {
     mockResolveDefaultOwnerForApiKey.mockResolvedValueOnce('usr_default');
-    mockEnsureDefaultOwnerCacheEntry.mockImplementationOnce(() => { throw new Error('cache rejected'); });
+    mockEnsureDefaultOwnerCacheEntry.mockImplementationOnce(() => {
+      const err = new Error('cache rejected');
+      err.code = 'DEFAULT_WEBHOOK_SECRET_CONFLICT';
+      throw err;
+    });
 
     const result = await linkGuildWebhookSubscription({ guildId: 'g_cache', apiKey: 'lv_x' });
 
-    expect(result).toEqual({ ok: true, action: 'reused' });
-    expect(mockWarn).toHaveBeenCalledWith(
+    expect(result).toEqual({ ok: false, reason: 'register-failed' });
+    expect(mockSetGuildDefaultWebhookOwner).toHaveBeenCalled();
+    expect(mockError).toHaveBeenCalledWith(
       'subs.ensureDefaultOwnerCacheEntry rejected (existing cache retained; registry scan remains authoritative)',
       expect.objectContaining({ guildId: 'g_cache', error: 'cache rejected' }),
     );
     expect(mockAudit).toHaveBeenCalledWith(
-      AUDIT_EVENTS.QURL_WEBHOOK_SUBSCRIPTION_REGISTERED,
-      { guild_id: 'g_cache', action: 'reused', default_owner: true },
+      AUDIT_EVENTS.QURL_WEBHOOK_SUBSCRIPTION_REGISTER_FAILED,
+      expect.objectContaining({
+        guild_id: 'g_cache', stage: 'default-owner-cache', error_code: 'DEFAULT_WEBHOOK_SECRET_CONFLICT',
+      }),
     );
     expect(mockAudit).not.toHaveBeenCalledWith(
-      AUDIT_EVENTS.QURL_WEBHOOK_SUBSCRIPTION_REGISTER_FAILED,
+      AUDIT_EVENTS.QURL_WEBHOOK_SUBSCRIPTION_REGISTERED,
       expect.anything(),
     );
   });

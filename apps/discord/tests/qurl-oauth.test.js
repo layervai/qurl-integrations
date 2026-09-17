@@ -702,11 +702,11 @@ describe('qurl-oauth — not configured', () => {
       AUTH0_CLIENT_SECRET: undefined,
       AUTH0_AUDIENCE: undefined,
       AUTH0_EMAIL_CONNECTION: undefined,
-    }],
+    }, /has not been registered yet/],
     ['AUTH0_EMAIL_CONNECTION is rejected', {
       AUTH0_EMAIL_CONNECTION: 'email!',
-    }],
-  ])('returns 503 from /start and /callback when %s', async (_label, overrides) => {
+    }, /must correct an invalid authentication setting/],
+  ])('returns 503 from /start and /callback when %s', async (_label, overrides, remediation) => {
     const saved = {
       AUTH0_DOMAIN: process.env.AUTH0_DOMAIN,
       AUTH0_CLIENT_ID: process.env.AUTH0_CLIENT_ID,
@@ -751,6 +751,7 @@ describe('qurl-oauth — not configured', () => {
           .set('Cookie', cookieFor('anything'));
         expect(callback.status).toBe(503);
         expect(callback.text).toMatch(/not configured/i);
+        expect(callback.text).toMatch(remediation);
         expectQurlOAuthCookiesCleared(callback);
         expect(start.text).not.toMatch(/AUTH0_[A-Z_]+/);
         expect(start.text).not.toMatch(/DISCORD_CLIENT_SECRET/);

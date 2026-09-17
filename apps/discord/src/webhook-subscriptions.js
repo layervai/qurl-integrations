@@ -165,7 +165,9 @@ function ensureDefaultOwnerCacheEntry(ownerId) {
   // same guard against persisted state; keep this local check so linking
   // another guild cannot switch the receiver to a stale environment secret.
   if (entry.webhookSecret !== config.QURL_WEBHOOK_SECRET) {
-    throw new Error('ensureDefaultOwnerCacheEntry: cached webhook secret does not match QURL_WEBHOOK_SECRET');
+    const err = new Error('ensureDefaultOwnerCacheEntry: cached webhook secret does not match QURL_WEBHOOK_SECRET');
+    err.code = 'DEFAULT_WEBHOOK_SECRET_CONFLICT';
+    throw err;
   }
 }
 
@@ -274,7 +276,8 @@ async function discoverOwnerId(apiKey, { subject = 'DEFAULT', skipMalformedRows 
     cursor = next;
   }
   const err = new Error('discoverOwnerId: pagination cap hit (50 pages, ~5000 subscriptions)');
-  err.code = `${subject}_WEBHOOK_OWNER_CONTRACT`;
+  // Distinct from *_CONTRACT: this one is permanent, so it needs its own alarm.
+  err.code = `${subject}_WEBHOOK_OWNER_PAGE_CAP`;
   throw err;
 }
 

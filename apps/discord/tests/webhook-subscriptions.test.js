@@ -603,7 +603,7 @@ describe('webhook-subscriptions registry — default-key discovery', () => {
 
     await expect(subs.resolveDefaultOwnerForApiKey('lv_alias'))
       .rejects.toMatchObject({
-        code: 'DEFAULT_WEBHOOK_OWNER_CONTRACT',
+        code: 'DEFAULT_WEBHOOK_OWNER_PAGE_CAP',
         message: expect.stringMatching(/pagination cap hit/),
       });
     expect(global.fetch).toHaveBeenCalledTimes(50);

@@ -74,6 +74,16 @@ describe('OAuth rate-limit store', () => {
     expect(installRes.status).not.toHaveBeenCalled();
   });
 
+  it('drops an expired callback bucket on refresh so the IP becomes evictable install-only traffic', () => {
+    rateLimitStore.set('stale-callback', { callback: [now - config.RATE_LIMIT_WINDOW_MS - 1] });
+
+    installRateLimit({ ip: 'stale-callback', path: '/oauth/discord/install' }, response(), jest.fn());
+
+    expect(rateLimitStore.get('stale-callback')).toEqual({ 'discord-install-entry': [now] });
+    expect(rateLimitStore.evictInstallOnlyEntry()).toBe(true);
+    expect(rateLimitStore.has('stale-callback')).toBe(false);
+  });
+
   it('evicts install-only traffic so the shared hard cap cannot starve a callback', () => {
     for (let i = 0; i < MAX_RATE_LIMIT_STORE_SIZE; i += 1) {
       rateLimitStore.set(`install-${i}`, { 'discord-install-entry': [now] });
@@ -265,6 +275,32 @@ describe('OAuth rate-limit store', () => {
         shedByBucketSinceLastWarning: { 'discord-install-entry': 2, callback: 1 },
         sinceLastWarningMs: config.RATE_LIMIT_WINDOW_MS,
       }),
+    );
+  });
+
+  it('drops unreported shed counts once a sweep ends the saturation episode', () => {
+    const fill = (at) => {
+      for (let i = 0; i < MAX_RATE_LIMIT_STORE_SIZE; i += 1) {
+        rateLimitStore.set(`callback-${i}`, { callback: [at] });
+      }
+    };
+    const warn = jest.spyOn(logger, 'warn').mockImplementation(() => {});
+    const shed = (ip) => installRateLimit({ ip, path: '/oauth/discord/install' }, response(), jest.fn());
+    const episodeOne = now + config.RATE_LIMIT_WINDOW_MS * 10;
+    Date.now.mockReturnValue(episodeOne);
+    fill(episodeOne);
+    shed('episode-1-warned');
+    shed('episode-1-unreported');
+
+    Date.now.mockReturnValue(episodeOne + config.RATE_LIMIT_WINDOW_MS * 3);
+    sweepRateLimitStore();
+    expect(rateLimitStore.size).toBe(0);
+
+    fill(Date.now());
+    shed('episode-2');
+    expect(warn).toHaveBeenLastCalledWith(
+      'Rate limit store at hard cap, rejecting new IP',
+      expect.objectContaining({ shedByBucketSinceLastWarning: { 'discord-install-entry': 1 } }),
     );
   });
 });
