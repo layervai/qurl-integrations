@@ -20,6 +20,7 @@ describe('SETUP_VIA', () => {
 
   test('describeSetupVia echoes only short slug-shaped values', () => {
     expect(describeSetupVia('install-link')).toEqual({ via: 'install-link', via_type: 'string' });
+    expect(describeSetupVia('OAuth')).toEqual({ via: 'OAuth', via_type: 'string' });
     expect(describeSetupVia('lv_live_abcdefghijklmnopqrstuvwxyz0123456789')).toEqual({ via: '[unrecognized]', via_type: 'string' });
     expect(describeSetupVia({ a: 1 })).toEqual({ via: '[unrecognized]', via_type: 'object' });
     expect(describeSetupVia('0123456789abcdef0123456789abcdef')).toEqual({ via: '[unrecognized]', via_type: 'string' });

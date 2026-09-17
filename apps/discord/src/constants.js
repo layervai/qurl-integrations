@@ -674,11 +674,11 @@ function normalizeSetupVia(via) {
   return SETUP_VIA_DOORS.has(via) ? via : SETUP_VIA.UNKNOWN;
 }
 // Log-safe description of an unrecognized door: echo only short, letter-led
-// slugs (well below secret length), so a misplaced argument such as an API key
-// or token never reaches the logs.
+// slugs (well below secret length, case kept so a case typo is visible), so a
+// misplaced argument such as an API key or token never reaches the logs.
 function describeSetupVia(via) {
   const text = String(via);
-  return { via: /^[a-z][a-z0-9_-]{0,15}$/.test(text) ? text : '[unrecognized]', via_type: typeof via };
+  return { via: /^[A-Za-z][A-Za-z0-9_-]{0,15}$/.test(text) ? text : '[unrecognized]', via_type: typeof via };
 }
 
 // Use one tag for gateway and worker rejection alerts.

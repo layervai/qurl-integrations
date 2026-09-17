@@ -282,7 +282,7 @@ describe('fireAndForgetLinkGuildWebhookSubscription — door normalization', () 
     await fireAndForgetLinkGuildWebhookSubscription({ guildId: 'g_ff', apiKey: 'lv_x', via: 'OAuth', configuredBy: 'u-1' });
     expect(logger.warn).toHaveBeenCalledWith(
       'Unrecognized setup door in subscription description; recording via=unknown',
-      { via: '[unrecognized]', via_type: 'string', guildId: 'g_ff' },
+      { via: 'OAuth', via_type: 'string', guildId: 'g_ff' },
     );
     expect(logger.warn.mock.calls.filter(([msg]) => msg.startsWith('Unrecognized setup door'))).toHaveLength(1);
   });

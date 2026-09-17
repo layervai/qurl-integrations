@@ -1534,16 +1534,18 @@ function bestEffortLog(emit) {
 }
 
 // Emits qurl_setup_admin_changed when a landed setGuildApiKey write rebinds an
-// already-configured guild. `prior` is the write's UPDATED_OLD attributes.
+// already-configured guild. `prior` holds only non-secret fields derived from
+// the write's UPDATED_OLD attributes. It never throws.
 function auditSetupAdminChange(prior, { guildId, configuredBy, door }) {
   // The write has landed: nothing here may surface as a write failure (or
   // qurl-oauth.js would revoke the key it just stored), and any failure,
   // including an ID coercion, leaves an error line instead of vanishing.
   try {
     // String() keeps a numeric or BigInt caller ID from paging on every re-key.
-    const oldAdminId = prior.configured_by == null ? null : String(prior.configured_by);
-    const newAdminId = configuredBy == null ? null : String(configuredBy);
-    const priorHadKey = 'qurl_api_key' in prior;
+    // A falsy ID (missing or hand-edited to '') reports null, the documented damaged-row value.
+    const oldAdminId = prior.configuredBy ? String(prior.configuredBy) : null;
+    const newAdminId = configuredBy ? String(configuredBy) : null;
+    const priorHadKey = prior.hadKey;
     // Either prior attribute means the guild was already configured, even when a
     // hand edit or partial rollback dropped the other. Unlike shouldPromptConsent
     // (guild-config-state.js), which treats a row without configured_by as a
@@ -1561,8 +1563,8 @@ function auditSetupAdminChange(prior, { guildId, configuredBy, door }) {
       // last write of any kind (webhook writes stamp it too), not the binding's
       // age; it is a control: always overwritten here, so non-null with a null
       // prior_configured_at shows UPDATED_OLD elided the if_not_exists no-op.
-      prior_configured_at: prior.configured_at ?? null,
-      prior_updated_at: prior.updated_at ?? null,
+      prior_configured_at: prior.configuredAt ?? null,
+      prior_updated_at: prior.updatedAt ?? null,
     });
   } catch (err) {
     bestEffortLog(() => logger.error('Failed to emit setup admin-change audit after a landed write', {
@@ -1607,9 +1609,15 @@ async function setGuildApiKey(guildId, apiKey, configuredBy, via) {
     // control; mocks cannot pin it, so the sandbox rebind gate does.
     ReturnValues: 'UPDATED_OLD',
   }));
-  // The whole observation is best-effort: a throw anywhere in it, not just in
-  // logger.audit, must not reject a write that already landed.
-  bestEffortLog(() => auditSetupAdminChange(res?.Attributes ?? {}, { guildId, configuredBy, door }));
+  // Hand the helper only the non-secret prior fields: the old encrypted key is
+  // reduced to a presence flag here, so it is structurally out of reach.
+  const prior = res?.Attributes ?? {};
+  auditSetupAdminChange({
+    configuredBy: prior.configured_by,
+    configuredAt: prior.configured_at,
+    updatedAt: prior.updated_at,
+    hadKey: 'qurl_api_key' in prior,
+  }, { guildId, configuredBy, door });
 }
 
 // Raw delete. No qurl-service subscription teardown. Today there is

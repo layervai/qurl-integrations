@@ -129,7 +129,7 @@ describe('guild configs', () => {
     await store.setGuildApiKey('g-1', 'plain-key', 'new-admin', 'OAuth');
     expect(logger.audit).toHaveBeenCalledWith(AUDIT_EVENTS.QURL_SETUP_ADMIN_CHANGED,
       expect.objectContaining({ via: SETUP_VIA.UNKNOWN }));
-    expect(logger.warn).toHaveBeenCalledWith(DOOR_WARN, { via: '[unrecognized]', via_type: 'string', guildId: 'g-1' });
+    expect(logger.warn).toHaveBeenCalledWith(DOOR_WARN, { via: 'OAuth', via_type: 'string', guildId: 'g-1' });
   });
 
   test('setGuildApiKey: never echoes a key-shaped misplaced door into the warning', async () => {
@@ -155,6 +155,13 @@ describe('guild configs', () => {
     );
   });
 
+  test('setGuildApiKey: reports an empty prior configured_by as null', async () => {
+    ddbMock.on(UpdateCommand).resolves({ Attributes: { configured_by: '', qurl_api_key: 'enc:v1:IV:TAG:deadbeef' } });
+    await store.setGuildApiKey('g-1', 'plain-key', 'new-admin', SETUP_VIA.PASTE);
+    expect(logger.audit).toHaveBeenCalledWith(AUDIT_EVENTS.QURL_SETUP_ADMIN_CHANGED,
+      expect.objectContaining({ old_admin_id: null, prior_had_key: true }));
+  });
+
   test('setGuildApiKey: warns when a caller passes the UNKNOWN sentinel as a door', async () => {
     ddbMock.on(UpdateCommand).resolves({});
     await store.setGuildApiKey('g-1', 'plain-key', 'admin', SETUP_VIA.UNKNOWN);
@@ -164,7 +171,7 @@ describe('guild configs', () => {
   test('setGuildApiKey: warns on an unrecognized door even without a rebind', async () => {
     ddbMock.on(UpdateCommand).resolves({});
     await store.setGuildApiKey('g-1', 'plain-key', 'admin', 'OAuth');
-    expect(logger.warn).toHaveBeenCalledWith(DOOR_WARN, { via: '[unrecognized]', via_type: 'string', guildId: 'g-1' });
+    expect(logger.warn).toHaveBeenCalledWith(DOOR_WARN, { via: 'OAuth', via_type: 'string', guildId: 'g-1' });
     expect(logger.audit.mock.calls.map(([event]) => event))
       .not.toContain(AUDIT_EVENTS.QURL_SETUP_ADMIN_CHANGED);
   });
