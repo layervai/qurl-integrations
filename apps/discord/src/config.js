@@ -136,7 +136,7 @@ function normalizeBaseUrl(raw) {
 //
 // Returns defaultVal on any rejection, with a console.warn for every
 // rejected path (visible at boot regardless of LOG_LEVEL or logger
-// transport state — logger isn't loaded this early in config import).
+// transport state — config stays on console so boot warnings never depend on logger setup).
 function intEnv(key, defaultVal, opts = {}) {
   const { minPositive = false, strictInteger = false, min, max } = opts;
   const raw = process.env[key];
@@ -185,7 +185,7 @@ if (rawGuildId) {
   if (isDiscordSnowflake(trimmed)) {
     normalizedGuildId = trimmed;
   } else {
-    // logger isn't loaded this early in config import — use console directly.
+    // Use console directly so this boot warning never depends on logger setup.
     console.warn(`[config] GUILD_ID=${JSON.stringify(rawGuildId)} is not a valid Discord snowflake (17-20 digits); starting in multi-tenant mode. To run in single-guild mode, set GUILD_ID to a real guild ID.`);
   }
 }
@@ -478,7 +478,10 @@ module.exports = {
 
   // Rate limiting
   RATE_LIMIT_WINDOW_MS: intEnv('RATE_LIMIT_WINDOW_MS', 60000), // 1 minute
-  RATE_LIMIT_MAX_REQUESTS: intEnv('RATE_LIMIT_MAX_REQUESTS', 30),
+  // 0 or a negative value would 429 every OAuth callback.
+  RATE_LIMIT_MAX_REQUESTS: intEnv('RATE_LIMIT_MAX_REQUESTS', 30, {
+    minPositive: true, strictInteger: true,
+  }),
   // The public /oauth/discord/install page is a pure redirect that many
   // unrelated admins can reach from one NAT egress, so it gets its own ceiling.
   // Completion is still bounded by RATE_LIMIT_MAX_REQUESTS: each finished

@@ -98,7 +98,8 @@ function stopIntervals() {
 
 // At saturation the hard-cap branch fires at the full inbound rate, so the
 // alert signal is one warning per rate-limit window carrying the number of
-// IPs shed since the previous warning, per bucket so the source is attributable.
+// IPs shed since the previous warning (per bucket, with the elapsed interval so
+// residual counts from an earlier saturation are not read as this window's).
 let hardCapWarnedAt = 0;
 let hardCapShedCounts = {};
 
@@ -121,9 +122,12 @@ function rateLimitForBucket(bucket, req, res, next) {
       // This warning is the operational signal for shared OAuth saturation;
       // alert on it because every unseen callback IP is shed until a sweep.
       if (now - hardCapWarnedAt >= config.RATE_LIMIT_WINDOW_MS) {
+        const sinceLastWarningMs = hardCapWarnedAt ? now - hardCapWarnedAt : null;
         hardCapWarnedAt = now;
         logger.warn('Rate limit store at hard cap, rejecting new IP', {
-          ip, size: rateLimitStore.size, shedByBucket: hardCapShedCounts,
+          size: rateLimitStore.size,
+          shedByBucketSinceLastWarning: hardCapShedCounts,
+          sinceLastWarningMs,
         });
         hardCapShedCounts = {};
       }

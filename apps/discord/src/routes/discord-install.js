@@ -103,7 +103,9 @@ router.get('/install', installRateLimit, (req, res) => {
   }
   // Refuse before Discord installs the bot: without the encryption key, the
   // chained qURL authorization cannot persist the new guild credential.
-  // renderNotConfiguredPage owns the single sanitized log line.
+  // renderNotConfiguredPage owns the single sanitized (info-level) log line;
+  // production boot already fails loud on a missing key when OAuth is
+  // configured (boot-requirements.js), so this is a non-prod safety net.
   if (!process.env.KEY_ENCRYPTION_KEY) {
     return renderNotConfiguredPage(res, 'discord-install-entry', 'KEY_ENCRYPTION_KEY unset');
   }

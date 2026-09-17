@@ -262,8 +262,8 @@ describe('OAuth rate-limit store', () => {
     expect(warn).toHaveBeenLastCalledWith(
       'Rate limit store at hard cap, rejecting new IP',
       expect.objectContaining({
-        ip: 'shed-3',
-        shedByBucket: { 'discord-install-entry': 2, callback: 1 },
+        shedByBucketSinceLastWarning: { 'discord-install-entry': 2, callback: 1 },
+        sinceLastWarningMs: config.RATE_LIMIT_WINDOW_MS,
       }),
     );
   });

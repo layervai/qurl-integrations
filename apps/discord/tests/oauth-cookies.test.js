@@ -5,6 +5,7 @@ const {
   QURL_OAUTH_COOKIE_PATH,
   DISCORD_INSTALL_SESSION_COOKIE,
   DISCORD_INSTALL_COOKIE_PATH,
+  DISCORD_INSTALL_COOKIE_TTL_SECONDS,
   setCookie,
   setQurlOAuthCookie,
   setQurlOAuthPkceCookie,
@@ -114,7 +115,7 @@ describe('utils/oauth-cookies', () => {
   });
 
   describe('Discord install session cookie', () => {
-    it('uses a thirty-minute __Host- session with Secure and Path=/', () => {
+    it('uses the install-session TTL on a __Host- cookie with Secure and Path=/', () => {
       const res = fakeRes();
 
       setDiscordInstallSessionCookie(res, 'install-state');
@@ -126,7 +127,7 @@ describe('utils/oauth-cookies', () => {
           httpOnly: true,
           secure: true,
           sameSite: 'lax',
-          maxAge: 30 * 60 * 1000,
+          maxAge: DISCORD_INSTALL_COOKIE_TTL_SECONDS * 1000,
           path: DISCORD_INSTALL_COOKIE_PATH,
         },
       }]);

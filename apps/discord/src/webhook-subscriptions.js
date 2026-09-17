@@ -324,8 +324,9 @@ async function resolveDefaultOwnerForApiKey(apiKey, { bridgeUrl } = {}) {
     err.code = 'DEFAULT_WEBHOOK_OWNER_UNDISCOVERED';
     throw err;
   }
+  // Cache the owner for the receiver, but leave the refresh tick's failure
+  // counter to the tick so link traffic cannot defer its escalation.
   defaultOwnerId = ownerId;
-  discoveryConsecutiveFailures = 0;
 
   const candidateOwnerId = apiKey === config.QURL_API_KEY
     ? ownerId
