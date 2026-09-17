@@ -1,4 +1,4 @@
-// Package consume turns a verified resolve answer into the thing the user
+// Package consume turns a verified share answer into the thing the user
 // asked for: the resource open in their browser, or its bytes on disk.
 //
 // The action decision (Decide) is local and runs before any network traffic:
@@ -6,26 +6,23 @@
 // no --file is refused outright — the CLI never launches a browser nobody
 // can see (§16.2).
 //
-// Phase-1 downloads fetch the verified resolved link directly over HTTP(S).
-// The SDK's programmatic opener (qurl.EnterPortal) was studied first and
-// deliberately not used: opening a qv2 link that way requires deployment
-// trust configuration — issuer keys plus a relay allowlist or cell catalog —
-// and qurl-go v0.5.3 ships its embedded deployment.json empty ({"issuers":
-// [], "cells": [], "relay_allowlist": []}), with no LayerV-published
-// deployment file to point QURL_DEPLOYMENT at. Every EnterPortal call would
-// therefore refuse (ErrNotConfigured wrapping ErrNoDeployment) before
-// reaching the network, for every link, on every machine. When the SDK
-// ships real deployment trust material, Downloader.fetch is the seam to
-// revisit. Until then the browser path — which carries the full link,
-// fragment included — is the primary qv2 consumption surface, and --file
-// serves the resolved URL's bytes as delivered.
+// Downloads split by link shape (NeedsAccessGrant). A qURL credential link
+// carries its credential in the URL fragment, which HTTP clients never transmit
+// — a plain GET of it can only ever fetch the in-browser page that consumes the
+// fragment, never the content — so those links are opened through the SDK's
+// programmatic opener first (AccessOpener over qurl.EnterPortalWith) and the
+// Downloader fetches the granted content URL it returns. A link without an
+// in-link credential is rejected by the CLI before download; plain URLs
+// remain supported only by the lower-level Downloader. The browser path carries the full link, fragment included, because
+// the in-browser page is exactly what a browser needs.
 //
-// Nothing here talks to the qURL API and nothing here carries the API
-// credential: the download client is a plain HTTP client, so the bearer key
-// can never leak to the link host. Every link this package acts on has
-// already passed the CLI's CRID verification (cmd.verifyResolved), and the
-// re-resolve a mid-download retry performs goes through the same verifying
-// closure.
+// Nothing here carries the qURL API key. An access-granted download does carry
+// one opaque, short-lived application bearer, but the Downloader applies it
+// only to the exact granted HTTPS origin and removes it before any cross-origin
+// redirect. Every link this package acts on has already passed the CLI's CRID
+// verification (the share response and signed-link checks), and the fresh share link a mid-download
+// retry mints goes through the same verifying closure — the platform access
+// request included.
 package consume
 
 import "errors"
@@ -51,7 +48,7 @@ const (
 // same values; the CLI-wide jargon gate asserts over CustomerMessages.
 const (
 	// MsgPipedNeedsFile is the §16.2 refusal: no browser without a terminal.
-	MsgPipedNeedsFile = "this output is piped, and a browser is only opened on a terminal. Add --file <path> to download the file (--file - streams the raw bytes), or use `qurl resolve` to print an access link"
+	MsgPipedNeedsFile = "this output is piped, and a browser is only opened on a terminal. Add --file <path> to download the file (--file - streams the raw bytes), or use `qurl share` to print an access link"
 
 	// MsgFileExists is the overwrite refusal; wraps add the path and remedy.
 	MsgFileExists = "the destination already exists"
@@ -64,7 +61,11 @@ const (
 	// wraps add the HTTP status.
 	MsgLinkFetch = "the download failed"
 
-	// MsgUnopenableLink frames a resolved link the browser must not open.
+	// MsgLinkUnavailable reports a request or transport failure without
+	// retaining the granted URL carried by the underlying error.
+	MsgLinkUnavailable = "the download host could not be reached"
+
+	// MsgUnopenableLink frames a share link the browser must not open.
 	MsgUnopenableLink = "the service answered with a link this command won't open"
 
 	// The fixed fragments wraps append to MsgFileExists.
@@ -87,7 +88,10 @@ var (
 	// ErrLinkFetch reports a link host answer outside the download contract
 	// (server error).
 	ErrLinkFetch = errors.New(MsgLinkFetch)
-	// ErrUnopenableLink reports a verified resolve answer whose link is not
+	// ErrLinkUnavailable reports a URL-free request or transport failure
+	// (temporarily unavailable).
+	ErrLinkUnavailable = errors.New(MsgLinkUnavailable)
+	// ErrUnopenableLink reports a verified share answer whose link is not
 	// a web URL — outside the service's contract (server error).
 	ErrUnopenableLink = errors.New(MsgUnopenableLink)
 )
@@ -115,7 +119,15 @@ func CustomerMessages() []string {
 		MsgFileExists,
 		MsgLinkExpired,
 		MsgLinkFetch,
+		MsgLinkUnavailable,
+		MsgUnopenableLink,
 		msgForceRemedy,
 		msgDirectoryDest,
+		MsgAccessNotConfigured,
+		MsgAccessSettingsMismatch,
+		MsgUnsupportedCRIDVersion,
+		MsgLinkVerification,
+		MsgAccessDenied,
+		MsgAccessBusy,
 	}
 }

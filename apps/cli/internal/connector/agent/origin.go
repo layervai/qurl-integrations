@@ -1,3 +1,4 @@
+// Package agent owns local Connector resource identity and native resolution.
 package agent
 
 import (
@@ -7,8 +8,9 @@ import (
 	"strings"
 )
 
-// ResourceSDKOrigin derives the origin the qurl-go resource client should use
-// from a versioned qURL API base URL (for example https://api.example.layerv.ai/v1
+// ResourceSDKOrigin derives the origin qurl-go uses to construct the returned
+// explicit-management client handle from a versioned qURL API base URL (for
+// example https://api.example.layerv.ai/v1
 // becomes https://api.example.layerv.ai). The SDK appends its own versioned
 // paths, so handing it the versioned base would double the version segment.
 // Userinfo, query, and fragment components are rejected rather than silently

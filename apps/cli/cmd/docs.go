@@ -11,6 +11,14 @@ import (
 	"github.com/layervai/qurl-integrations/apps/cli/internal/exitcode"
 )
 
+// docsFormatMan and docsFormatMarkdown are the two accepted `qurl docs` output
+// formats; named so the validity check, the switch, ValidArgs and the usage
+// error stay in step. `qurl docs man` is a distribution contract (see docsCmd).
+const (
+	docsFormatMan      = "man"
+	docsFormatMarkdown = "markdown"
+)
+
 // docsCmd generates man pages and markdown docs from the command tree. It is
 // load-bearing for releases: .goreleaser.yml runs `qurl docs man -d manpages`
 // in its before hook and ships the result in every archive, so the command
@@ -25,8 +33,8 @@ func docsCmd() *cobra.Command {
 		Args:   exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			mode := args[0]
-			if mode != "man" && mode != "markdown" {
-				return exitcode.UsageError(fmt.Errorf("docs mode must be \"man\" or \"markdown\", got %q", mode))
+			if mode != docsFormatMan && mode != docsFormatMarkdown {
+				return exitcode.UsageError(fmt.Errorf("docs mode must be %q or %q, got %q", docsFormatMan, docsFormatMarkdown, mode))
 			}
 
 			dir := filepath.Clean(outDir)
@@ -37,7 +45,7 @@ func docsCmd() *cobra.Command {
 			root := cmd.Root()
 
 			switch mode {
-			case "man":
+			case docsFormatMan:
 				// Man-page section headers are conventionally uppercase
 				// (CURL(1), GIT(1), etc.). Keep "QURL" here even though the
 				// brand is "qURL" — system references follow the convention,
@@ -52,7 +60,7 @@ func docsCmd() *cobra.Command {
 				return doc.GenMarkdownTree(root, dir)
 			}
 		},
-		ValidArgs: []string{"man", "markdown"},
+		ValidArgs: []string{docsFormatMan, docsFormatMarkdown},
 	}
 
 	cmd.Flags().StringVarP(&outDir, "output-dir", "d", ".", "Output directory for generated docs")

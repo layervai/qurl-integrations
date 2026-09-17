@@ -1,6 +1,3 @@
-/**
- * Tests for the Phase 1 gateway-side periodic metric emitters.
- */
 const logger = require('../src/logger');
 const {
   startGatewayHeartbeat,
@@ -20,8 +17,6 @@ jest.mock('../src/logger', () => ({
 }));
 
 function fakeClient({ isReady = true, ping = 42, ackedAgo = 5_000, guildCount = 3 } = {}) {
-  // Mirror discord.js v14 shape: WebSocketShard.lastPingTimestamp is
-  // a numeric ms epoch (-1 pre-first-ack).
   const lastPingTimestamp = ackedAgo === null ? -1 : Date.now() - ackedAgo;
   const shards = new Map([[0, { lastPingTimestamp }]]);
   return {
@@ -47,6 +42,55 @@ describe('readGatewayHealth', () => {
     expect(snap.is_ready).toBe(true);
   });
 
+  test('reads the @discordjs/ws shim heartbeat snapshot without a discord.js client.ws', () => {
+    const now = 1_700_000_010_000;
+    const shim = {
+      getGatewayHeartbeatState: () => ({
+        isReady: true,
+        pingMs: 37,
+        lastHeartbeatAckAt: now - 5_000,
+      }),
+    };
+
+    const snap = readGatewayHealth(shim, () => now);
+
+    expect(snap).toMatchObject({
+      healthy: true,
+      is_ready: true,
+      ping_ms: 37,
+      ack_age_ms: 5_000,
+    });
+  });
+
+  test('returns no opinion for a hot standby that has never connected', () => {
+    const shim = { getGatewayHeartbeatState: () => null };
+
+    expect(readGatewayHealth(shim)).toBe(null);
+  });
+
+  test('treats a connected ready shim with a stale ACK as unhealthy', () => {
+    const now = 1_700_000_100_000;
+    const shim = {
+      getGatewayHeartbeatState: () => ({
+        isReady: true, pingMs: 50, lastHeartbeatAckAt: now - 61_000,
+      }),
+    };
+    expect(readGatewayHealth(shim, () => now).healthy).toBe(false);
+  });
+
+  test('treats a disconnected shim as unhealthy even when its last ACK is recent', () => {
+    const now = 1_700_000_010_000;
+    const shim = {
+      getGatewayHeartbeatState: () => ({
+        isReady: false,
+        pingMs: 37,
+        lastHeartbeatAckAt: now - 1_000,
+      }),
+    };
+
+    expect(readGatewayHealth(shim, () => now).healthy).toBe(false);
+  });
+
   test('unhealthy when not ready', () => {
     const snap = readGatewayHealth(fakeClient({ isReady: false }));
     expect(snap.healthy).toBe(false);
@@ -59,6 +103,11 @@ describe('readGatewayHealth', () => {
     expect(snap.ping_ms).toBe(-1);
   });
 
+  test('accepts a fresh zero-millisecond heartbeat latency', () => {
+    const snap = readGatewayHealth(fakeClient({ ping: 0, ackedAgo: 5_000 }));
+    expect(snap.healthy).toBe(true);
+  });
+
   test('unhealthy when last ack > 60s old (zombie)', () => {
     const snap = readGatewayHealth(fakeClient({ ackedAgo: 90_000 }));
     expect(snap.healthy).toBe(false);
@@ -66,10 +115,6 @@ describe('readGatewayHealth', () => {
   });
 
   test('unhealthy when no shards have completed a heartbeat round-trip yet (-1 sentinel)', () => {
-    // discord.js v14 initializes lastPingTimestamp to -1 until the
-    // first HEARTBEAT_ACK lands. The composite check must reject this
-    // pre-first-ack state so the alarm doesn't go OK during a boot
-    // window where the gateway hasn't actually ack'd yet.
     const client = {
       isReady: () => true,
       ws: { ping: 42, shards: new Map([[0, { lastPingTimestamp: -1 }]]) },
@@ -115,22 +160,13 @@ describe('readGatewayHealth', () => {
   });
 
   test('activity_age_ms reports null before the first gateway frame', () => {
-    // Pre-first-frame: lastGatewayActivityAt = 0 sentinel. The metric
-    // payload must be null (not 0 or a giant number from the epoch),
-    // so dashboards don't render a misleading value.
     gatewayMetricsTest._resetGatewayActivity();
     const snap = readGatewayHealth(fakeClient({ ackedAgo: 5_000 }));
     expect(snap.activity_age_ms).toBe(null);
-    // Health is gated only on ack_age_ms, so a fresh boot with a recent
-    // ack and no dispatched event yet is still healthy.
     expect(snap.healthy).toBe(true);
   });
 
   test('healthy regardless of activity_age_ms (idle bot is healthy)', () => {
-    // The pre-#210 design required activity_age_ms < 60s for healthy,
-    // which false-positived in idle environments where dispatched
-    // events (interactions, messages) don't arrive for long stretches.
-    // Health now depends only on ack_age_ms; activity is metric-only.
     gatewayMetricsTest._resetGatewayActivity();
     noteGatewayActivity(() => Date.now() - 5 * 60_000); // 5 min idle
     const snap = readGatewayHealth(fakeClient({ ackedAgo: 5_000 }));
@@ -143,17 +179,10 @@ describe('readGatewayHealth', () => {
     noteGatewayActivity(() => Date.now() + 10_000);
     const snap = readGatewayHealth(fakeClient({ ackedAgo: 5_000 }));
     expect(snap.activity_age_ms).toBe(0);
-    // Parity with the ack_age_ms NTP test: clamp must not flip
-    // healthy. activity_age_ms doesn't gate health post-#210, but
-    // pinning it here prevents a future regression where clamp +
-    // gating drift apart.
     expect(snap.healthy).toBe(true);
   });
 
   test('noteGatewayActivity treats non-function arg as Date.now (production caller shape)', () => {
-    // discord.js's `raw` event passes a packet object as the first
-    // arg, not a clock function. The defensive `typeof === 'function'`
-    // fallback must keep the timestamp updating in that case.
     gatewayMetricsTest._resetGatewayActivity();
     const fakePacket = { op: 0, t: 'INTERACTION_CREATE', s: 1, d: {} };
     const before = Date.now();
@@ -198,10 +227,15 @@ describe('startGatewayHeartbeat', () => {
     );
   });
 
+  test('emits neither heartbeat event from a never-connected hot standby', () => {
+    const shim = { getGatewayHeartbeatState: () => null };
+    startGatewayHeartbeat(shim, { intervalMs: 1_000 });
+    jest.advanceTimersByTime(3_500);
+
+    expect(logger.audit).not.toHaveBeenCalled();
+  });
+
   test('emits gateway_heartbeat_unhealthy carrying activity_age_ms when unhealthy', () => {
-    // Pin the contract that the unhealthy companion event always
-    // carries activity_age_ms — terraform's metric filter extracts
-    // that field directly.
     const client = fakeClient({ isReady: false });
     startGatewayHeartbeat(client, { intervalMs: 1_000 });
     jest.advanceTimersByTime(1_000);
@@ -217,7 +251,6 @@ describe('startGatewayHeartbeat', () => {
   test('emits on every interval tick when healthy', () => {
     const client = fakeClient({ ackedAgo: 5_000 });
     startGatewayHeartbeat(client, { intervalMs: 1_000 });
-    // 1 immediate runOnce + 3 interval ticks at t=1000/2000/3000 = 4
     jest.advanceTimersByTime(3_500);
     expect(logger.audit).toHaveBeenCalledTimes(4);
     expect(logger.audit).toHaveBeenCalledWith(
@@ -246,6 +279,29 @@ describe('startGatewayHeartbeat', () => {
     expect(timer).toBeDefined();
     expect(typeof timer.unref).toBe('function');
     clearInterval(timer);
+  });
+
+  test('index starts both metric timers on the gateway shim boot path', () => {
+    const fs = require('node:fs');
+    const path = require('node:path');
+    const source = fs.readFileSync(path.resolve(__dirname, '../src/index.js'), 'utf8');
+    const startMarker = 'await gatewayShim.start({ connect: !config.ENABLE_GATEWAY_HOT_STANDBY });';
+    const branchStart = source.indexOf(startMarker);
+    expect(branchStart).toBeGreaterThanOrEqual(0);
+    const branchEnd = source.indexOf('} else if (isGateway) {', branchStart);
+    expect(branchEnd).toBeGreaterThan(branchStart);
+    const shimBranch = source.slice(branchStart, branchEnd);
+
+    expect(shimBranch).toMatch(/gatewayHeartbeatTimer\s*=\s*startGatewayHeartbeat\(\s*gatewayShim\s*\)/);
+    expect(shimBranch).toMatch(/activeGuildCountTimer\s*=\s*startActiveGuildCount\(\s*gatewayShim\s*\)/);
+
+    const shutdownStart = source.search(/async function gracefulShutdown(?:Teardown)?\(/);
+    const shutdownEnd = source.indexOf('async function start() {', shutdownStart);
+    expect(shutdownStart).toBeGreaterThanOrEqual(0);
+    expect(shutdownEnd).toBeGreaterThan(shutdownStart);
+    const shutdownBranch = source.slice(shutdownStart, shutdownEnd);
+    expect(shutdownBranch).toContain('clearInterval(gatewayHeartbeatTimer);');
+    expect(shutdownBranch).toContain('clearInterval(activeGuildCountTimer);');
   });
 
   test('logs healthy → unhealthy transition exactly once (edge-triggered, not per-tick)', () => {
@@ -280,15 +336,6 @@ describe('startGatewayHeartbeat', () => {
   });
 
   test('idle bot stays healthy when activity_age_ms exceeds the legacy 60s threshold (regression: pre-#210 false-positive)', () => {
-    // Pin the #210 fix: with no dispatched events for a long stretch
-    // (idle sandbox / low-traffic prod), the bot must remain healthy
-    // as long as heartbeat ACKs keep landing. The pre-#210 design
-    // gated health on activity_age_ms < 60s, which silently failed
-    // every idle environment. We seed activity 10 minutes in the past
-    // (well past the 60s threshold) and freeze ack_age at 5s — the
-    // assertion is that healthy still holds. (Mock has a frozen
-    // lastPingTimestamp by design; pushing the test window past 60s
-    // would trip ack_age itself and fail for the wrong reason.)
     gatewayMetricsTest._resetGatewayActivity();
     noteGatewayActivity(() => Date.now() - 10 * 60_000); // 10 min idle
     const client = {
@@ -364,6 +411,77 @@ describe('startActiveGuildCount', () => {
     expect(logger.audit).toHaveBeenCalledWith(
       AUDIT_EVENTS.ACTIVE_GUILD_COUNT,
       { count: 5 },
+    );
+  });
+
+  test('emits active_guild_count from an async gateway-shim sampler', async () => {
+    const shim = {
+      getActiveGuildCount: jest.fn().mockResolvedValue(9),
+    };
+
+    startActiveGuildCount(shim, { intervalMs: 60_000 });
+    await jest.advanceTimersByTimeAsync(0);
+
+    expect(logger.audit).toHaveBeenCalledWith(
+      AUDIT_EVENTS.ACTIVE_GUILD_COUNT,
+      { count: 9 },
+    );
+  });
+
+  test('emits no gauge when an async gateway-shim sampler has no opinion', async () => {
+    const shim = {
+      getActiveGuildCount: jest.fn().mockResolvedValue(null),
+    };
+
+    startActiveGuildCount(shim, { intervalMs: 60_000 });
+    await jest.advanceTimersByTimeAsync(0);
+
+    expect(logger.audit).not.toHaveBeenCalled();
+  });
+
+  test('does not overlap async gateway-shim samples when a REST seed is still pending', async () => {
+    let resolveSample;
+    const pendingSample = new Promise((resolve) => { resolveSample = resolve; });
+    const shim = {
+      getActiveGuildCount: jest.fn().mockReturnValue(pendingSample),
+    };
+
+    startActiveGuildCount(shim, { intervalMs: 1_000 });
+    await jest.advanceTimersByTimeAsync(3_000);
+
+    expect(shim.getActiveGuildCount).toHaveBeenCalledTimes(1);
+    expect(logger.audit).not.toHaveBeenCalled();
+
+    resolveSample(4);
+    await jest.advanceTimersByTimeAsync(0);
+    await jest.advanceTimersByTimeAsync(1_000);
+
+    expect(shim.getActiveGuildCount).toHaveBeenCalledTimes(2);
+    expect(logger.audit).toHaveBeenCalledWith(
+      AUDIT_EVENTS.ACTIVE_GUILD_COUNT,
+      { count: 4 },
+    );
+  });
+
+  test('swallows async gateway-shim sampler failures and retries on the next tick', async () => {
+    const shim = {
+      getActiveGuildCount: jest.fn()
+        .mockRejectedValueOnce(new Error('Discord unavailable'))
+        .mockResolvedValueOnce(6),
+    };
+
+    startActiveGuildCount(shim, { intervalMs: 1_000 });
+    await jest.advanceTimersByTimeAsync(0);
+
+    expect(logger.warn).toHaveBeenCalledWith(
+      'Active-guild-count sampler threw',
+      { error: 'Discord unavailable' },
+    );
+
+    await jest.advanceTimersByTimeAsync(1_000);
+    expect(logger.audit).toHaveBeenCalledWith(
+      AUDIT_EVENTS.ACTIVE_GUILD_COUNT,
+      { count: 6 },
     );
   });
 

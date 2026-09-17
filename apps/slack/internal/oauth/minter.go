@@ -51,8 +51,8 @@ const (
 	ErrorCodeQuotaExceeded = "quota_exceeded"
 
 	// errCodeAlreadyExists must pair with HTTP 409. It means qurl-service has
-	// already bound the workspace identity and the Slack app should show the
-	// administrator recovery path instead of minting a second legacy key.
+	// refused recovery of an existing workspace binding (for example, another
+	// owner holds it). Show administrator recovery; never mint a legacy key.
 	errCodeAlreadyExists = "already_exists"
 	// errCodeBindingsDisabled must pair with HTTP 503. It is the stable dark-
 	// launch signal that allows Slack setup to fall back to the legacy API-key
@@ -194,6 +194,9 @@ type bindingRequest struct {
 	Provider    string `json:"provider"`
 	ExternalID  string `json:"external_id"`
 	DisplayName string `json:"display_name"`
+	// TODO(upstream-contract): requires qurl-service #1344 on every serving
+	// instance. Older strict schemas reject this field; deploy service first.
+	RotateExisting bool `json:"rotate_existing"`
 }
 
 type mintResponse struct {
@@ -302,8 +305,10 @@ func (m *HTTPAPIKeyMinter) ValidateAPIKey(ctx context.Context, apiKey string) er
 // qurl-service also assigns provider scopes server-side; Slack bindings are
 // pinned to the same qurl:read/qurl:write/qurl:agent set requested by the legacy
 // fallback.
-// After that replay window, the existing binding owns recovery: qurl-service
-// returns already_exists until the binding is rotated or revoked.
+// Contract: call only through mintAndPersist after the setup callback has
+// established that no usable local key exists. Transient read or validation failures
+// must not reach this method. Rotation recovers a failed local persist after
+// the replay window; qurl-service must reject bindings held by another owner.
 func (m *HTTPAPIKeyMinter) MintWorkspaceAPIKey(ctx context.Context, accessToken, teamID string) (WorkspaceAPIKeyMint, error) {
 	teamID = strings.TrimSpace(teamID)
 	if teamID == "" {
@@ -313,9 +318,10 @@ func (m *HTTPAPIKeyMinter) MintWorkspaceAPIKey(ctx context.Context, accessToken,
 	idempotencyKey := bindingIdempotencyKey(teamID)
 
 	body, err := json.Marshal(bindingRequest{
-		Provider:    "slack",
-		ExternalID:  teamID,
-		DisplayName: displayName,
+		Provider:       "slack",
+		ExternalID:     teamID,
+		DisplayName:    displayName,
+		RotateExisting: true,
 	})
 	if err != nil {
 		return WorkspaceAPIKeyMint{}, fmt.Errorf("marshal: %w", err)
@@ -402,9 +408,21 @@ func bindingMintFromResponse(body []byte) (WorkspaceAPIKeyMint, error) {
 }
 
 // MintWorkspaceReplacementAPIKey mints a fresh workspace key for an explicit
-// owner-requested rotation after the previous key has already been revoked.
+// owner-requested rotation — either after the previous key has been revoked,
+// or, when oldKeyID is empty, for a row that predates stored key identity and
+// therefore has no key to revoke.
+//
+// Contract: an empty oldKeyID asserts the CALLER has already decided there is
+// nothing to revoke. This method does not enforce that (it used to fail closed
+// on empty, which made legacy-row rotation impossible), and it cannot check it
+// — the revoke decision lives in replaceWorkspaceAPIKey, the only caller. A new
+// caller passing empty for a row that DOES have a recoverable key_id would
+// silently skip the revoke and leave two live keys against the account's plan
+// limit, so route new rotation callers through replaceWorkspaceAPIKey rather
+// than calling this directly.
 // It deliberately does not hit the external binding create endpoint: a healthy
-// existing binding owns first-setup replay and returns already_exists here.
+// existing binding owns first-setup replay and may replay an earlier key.
+// Explicit rotation instead uses the old-key-specific replacement namespace.
 // qURL request authorization only checks the API key and scopes, so this
 // standalone qurl:read/write/agent key is a valid workspace credential after
 // Slack stores it.
@@ -413,10 +431,15 @@ func (m *HTTPAPIKeyMinter) MintWorkspaceReplacementAPIKey(ctx context.Context, a
 	if teamID == "" {
 		return WorkspaceAPIKeyMint{}, errors.New("MintWorkspaceReplacementAPIKey: empty teamID")
 	}
+	// An empty oldKeyID is the legacy-row rotation: the workspace has a stored
+	// key whose qURL identity Slack never recorded, so there is nothing to
+	// revoke and the caller has already skipped the revoke step. Minting is
+	// still correct — the alternative for these rows is /qurl uninstall, which
+	// abandons the same un-revokable key AND discards the Slack bot token and
+	// workspace binding. replacementIdempotencyKey stays stable for the team,
+	// and this branch runs at most once per workspace because a successful
+	// rotation records the new key_id.
 	oldKeyID = strings.TrimSpace(oldKeyID)
-	if oldKeyID == "" {
-		return WorkspaceAPIKeyMint{}, errors.New("MintWorkspaceReplacementAPIKey: empty oldKeyID")
-	}
 	return m.mintLegacyAPIKey(ctx, accessToken, "Slack workspace "+teamID, apiKeyScopes(), replacementIdempotencyKey(teamID, oldKeyID))
 }
 
@@ -632,8 +655,10 @@ func drainAndCloseResponse(resp *http.Response) {
 func bindingIdempotencyKey(teamID string) string {
 	// qurl-service requires a 32+ character idempotency key. Slack team IDs
 	// are shorter, so hash to a stable fixed-width key with a readable prefix.
+	// qurl-service hashes request bodies; v2 keeps this changed body out
+	// of the prior v1 replay namespace.
 	sum := sha256.Sum256([]byte(teamID))
-	return "slack-workspace-binding-v1-" + hex.EncodeToString(sum[:])
+	return "slack-workspace-binding-v2-" + hex.EncodeToString(sum[:])
 }
 
 func replacementIdempotencyKey(teamID, oldKeyID string) string {

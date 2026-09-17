@@ -39,6 +39,11 @@ Optional variables gate extra suites, which skip themselves
 
 ## Run
 
+Run these package commands from `e2e/` (or use `npm --prefix e2e`); npm then
+resolves the optional `.env` file from this package directory.
+Use Node 24 as specified by `.nvmrc`; older Node releases can reject the
+`--env-file-if-exists` option before Jest starts.
+
 ```sh
 npm ci
 npm test                        # unit tests, then live E2E (needs .env)
@@ -67,7 +72,7 @@ Revocation is soft: the resource remains readable with `status=revoked`.
 Do not derive public resource-ID syntax from the internal `r_…` routing
 labels that can still appear in `qurl.site` hostnames.
 
-Live tests run serially (`maxWorkers: 1` in `jest.config.ts`) because they
+Live tests run serially (`maxWorkers: 1` in `jest.config.js`) because they
 share Discord channel state. Their config alone loads
 `helpers/discord-reporter.js`, so offline unit tests never appear in the
 sandbox-health embed. After each live run the reporter posts a per-file

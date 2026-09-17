@@ -1,8 +1,4 @@
-// store/ddb-store — DynamoDB backend
-//
-// Implements the Store contract (see `src/store/contract.js`) against
-// the 11 DynamoDB tables provisioned by `modules/qurl-bot-ddb/`
-// in the infra repo. Selected at boot when `STORE_TYPE=ddb`.
+// store/ddb-store — DynamoDB data layer
 //
 // Table naming: tables carry the env in their name
 // (`qurl-bot-discord-<env>-<kebab-name>`). The env prefix is
@@ -105,27 +101,14 @@ function transactionWriteRetryable(err) {
   return err.CancellationReasons.some(r => retryableReasonCodes.has(r?.Code));
 }
 
-// Table name mapping. Map keys (SQL-era snake_case names) match the
-// outputs.tf `table_names` shape in `modules/qurl-bot-ddb/` so
-// consumers look up by the same semantic key.
-//
-// DDB_TABLE_PREFIX is required (no default). See header comment for
-// the prod-footgun rationale. Whitespace-only values are treated as
-// unset to defend against buggy container templating that emits
-// `DDB_TABLE_PREFIX=` with no value — same shape as the STORE_TYPE
-// normalization in `store/index.js`.
+// Keys match the infra module's table_names output. No default prefix is
+// allowed because a local process with AWS credentials could otherwise use
+// production tables.
 const TABLE_PREFIX = (process.env.DDB_TABLE_PREFIX ?? '').trim();
 if (!TABLE_PREFIX) {
-  throw new Error('DDB_TABLE_PREFIX is required when STORE_TYPE=ddb. Set it to the env-specific prefix (e.g. `qurl-bot-discord-sandbox-` for sandbox, `qurl-bot-discord-prod-` for prod) in the deployment template.');
+  throw new Error('DDB_TABLE_PREFIX is required. Set it to the env-specific prefix (e.g. `qurl-bot-discord-sandbox-` for sandbox, `qurl-bot-discord-prod-` for prod) in the deployment template.');
 }
-// Trailing-dash check. The prefix is concatenated directly with each
-// table's kebab-case suffix (`${TABLE_PREFIX}qurl-sends`), so a
-// missing trailing dash silently produces malformed names like
-// `qurl-bot-discord-prodqurl-sends` and the bot's first DDB call
-// returns ResourceNotFoundException — clear at the first call but
-// confusing in CloudWatch logs (looks like a permission or naming
-// issue, not a config typo). Catch it at boot so the failure points
-// directly at the env var.
+// The prefix is concatenated directly with each table suffix.
 if (!TABLE_PREFIX.endsWith('-')) {
   throw new Error(`DDB_TABLE_PREFIX must end with '-' (got '${TABLE_PREFIX}'). The prefix is concatenated with kebab-case table suffixes; a missing dash produces malformed names like '${TABLE_PREFIX}qurl-sends'. Add the trailing '-' in the deployment template.`);
 }
@@ -136,37 +119,23 @@ const TABLES = Object.freeze({
   guild_configs: `${TABLE_PREFIX}guild-configs`,
 });
 
-// AWS_REGION is required (no fallback). Same shape of footgun the
-// DDB_TABLE_PREFIX guard above closes: a developer with stray AWS
-// creds + DDB_TABLE_PREFIX=qurl-bot-discord-prod- + unset
-// AWS_REGION would silently land in whichever region the SDK
-// defaults to (us-east-2 today via the prior `|| 'us-east-2'`
-// fallback), which is presumably the prod region. Catch at boot.
-// Whitespace-only treated as unset, mirroring the prefix guard.
+// No region fallback: a local process must not silently select a production
+// region from ambient AWS configuration.
 const AWS_REGION = (process.env.AWS_REGION ?? '').trim();
 if (!AWS_REGION) {
-  throw new Error('AWS_REGION is required when STORE_TYPE=ddb. Set it to the env-specific region (e.g. `us-east-2` for sandbox, the matching prod region for prod) in the deployment template.');
+  throw new Error('AWS_REGION is required. Set it to the env-specific region (e.g. `us-east-2` for sandbox, the matching prod region for prod) in the deployment template.');
 }
 
-// Allow tests + local-dev to inject a pre-configured endpoint via
-// `process.env.DDB_TEST_ENDPOINT` (DDB-Local at http://localhost:8000,
-// or aws-sdk-client-mock interception). Production path constructs
-// the real client once at module load. The prod-only refusal lives
-// in `config.js` (loaded first), so by the time this constructor
-// runs in production, DDB_TEST_ENDPOINT is guaranteed unset.
+// Tests and local development can opt into DynamoDB Local. Production rejects
+// DDB_TEST_ENDPOINT in config.js before this module loads.
 const rawClient = new DynamoDBClient({
   region: AWS_REGION,
   ...(process.env.DDB_TEST_ENDPOINT ? { endpoint: process.env.DDB_TEST_ENDPOINT } : {}),
 });
 const ddb = DynamoDBDocumentClient.from(rawClient, {
   marshallOptions: {
-    // Remove undefined values (default is to throw) so optional
-    // fields the bot doesn't always populate flow through as
-    // absent attributes rather than per-call errors.
+    // Optional fields must remain absent instead of failing each write.
     removeUndefinedValues: true,
-    // Preserve `""` as a distinct value (default behavior is
-    // fine — DDB v3 SDK handles this correctly). Noted for
-    // clarity.
   },
 });
 
@@ -371,9 +340,9 @@ async function recordQURLSendBatch(sends, options = {}) {
   }
 
   // Add Recipients uses one TransactWriteItems call so recipient-row Put(s)
-  // are atomically guarded by the send config row's revoked_at state. This
+  // are atomically guarded by the send config row's revoking/revoked state. This
   // keeps the extra transaction cost scoped to the path that has the post-read
-  // revoke race: if a revoke wins and sets revoked_at before this transaction
+  // revoke race: if a revoke wins and sets revoking_at before this transaction
   // commits, none of the newly minted recipient rows land. The Add Recipients
   // UI caps at Discord's 25-select limit today, so this should stay far below
   // the 100-action transaction cap. If a future caller exceeds the cap, fail
@@ -400,10 +369,10 @@ async function recordQURLSendBatch(sends, options = {}) {
       ConditionCheck: {
         TableName: TABLES.qurl_send_configs,
         Key: { send_id: sendId },
-        // Missing config rows, revoked rows, and sender mismatches all
+        // Missing config rows, revoking/revoked rows, and sender mismatches all
         // fail closed here. Add Recipients already read the config row; if
         // it disappears before persistence, do not create recipient rows.
-        ConditionExpression: 'sender_discord_id = :sender AND attribute_not_exists(revoked_at)',
+        ConditionExpression: 'sender_discord_id = :sender AND attribute_not_exists(revoking_at) AND attribute_not_exists(revoked_at)',
         ExpressionAttributeValues: { ':sender': senderMap.get(sendId) },
       },
     })),
@@ -716,10 +685,14 @@ async function clearConsumedDMEdited(sendId, recipientDiscordId) {
 // the door" — re-editing to "Closed N ago" would overwrite that copy
 // with a less-specific message and obscure the revoke signal.
 //
-// Reads qurl_send_configs (the table markSendRevoked writes to);
-// returns true iff revoked_at is set on the row. Falsy / missing row
-// returns false so a config-less legacy send (none exist today, but
-// the row insert in markSendRevoked is lazy) still gets the
+// Reads qurl_send_configs (the table the revoke state machine writes to).
+// Returns true only once revocation finishes. A revoking_at-only row means at
+// least one DELETE may have failed and the recipient link may still be live;
+// expiry/consumed events must therefore keep their normal DM-edit behavior.
+// On a partial revoke this may replace the stronger revoke copy for recipients
+// whose links did close. The state is send-level, so preserving truthful access
+// status for the unconfirmed recipients takes priority over that cosmetic loss.
+// Falsy / missing rows return false so config-less legacy sends still get the
 // expiry-edit treatment.
 async function isSendRevoked(sendId) {
   if (typeof sendId !== 'string' || sendId.length === 0) return false;
@@ -731,6 +704,12 @@ async function isSendRevoked(sendId) {
 }
 
 async function getRecentSends(senderDiscordId, limit = 10) {
+  if (!Number.isInteger(limit) || limit <= 0) {
+    throw new TypeError('getRecentSends: limit must be a positive integer');
+  }
+  // This is the revoke-menu query (handleRevoke is its only production
+  // caller). Its result deliberately prioritizes retryable revocations over
+  // global newest-first ordering, including when a one-slot caller is used.
   // SQL did a LEFT JOIN on qurl_send_configs + GROUP BY send_id to
   // produce one row per send with per-send metadata. DDB: query the
   // sender's recent send_ids via the GSI to build the UNIQUE set of
@@ -830,6 +809,11 @@ async function getRecentSends(senderDiscordId, limit = 10) {
     const meta = metaBySendId.get(sendId);
     const recipients = allRecipients[i] || [];
     const cfg = allConfigs[i].Item;
+    // revoking_at intentionally remains selectable: it means at least one
+    // prior DELETE failed and the operator must be able to retry. Only the
+    // fully finalized revoked_at state removes the send from the menu.
+    // TODO(#1376): add an audited operator-dismissed state for permanently
+    // unrecoverable rows so they do not occupy the bounded menu forever.
     if (cfg && cfg.revoked_at) continue;
     const recipientCount = recipients.length;
     const deliveredCount = recipients.filter(r => r.dm_status === 'sent').length;
@@ -845,10 +829,33 @@ async function getRecentSends(senderDiscordId, limit = 10) {
       attachment_name: cfg?.attachment_name,
       location_name: cfg?.location_name,
       personal_message: cfg?.personal_message,
+      revocation_pending: Boolean(cfg?.revoking_at),
     });
   }
-  rows.sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
-  return rows.slice(0, limit);
+  // Pending revocations are urgent, but permanently-unconfirmable rows must
+  // not dominate the bounded Discord menu. When both kinds exist, reserve at
+  // least half the slots for live sends. A one-slot caller keeps the pending
+  // send because it is the only path to retry the in-progress destructive
+  // operation. #1376 tracks an explicit audited dismissal path.
+  const newestFirst = (a, b) => (b.created_at || '').localeCompare(a.created_at || '');
+  const pending = rows.filter(row => row.revocation_pending).sort(newestFirst);
+  const live = rows.filter(row => !row.revocation_pending).sort(newestFirst);
+  if (pending.length === 0) return live.slice(0, limit);
+  if (live.length === 0) return pending.slice(0, limit);
+  if (limit === 1) return pending.slice(0, 1);
+  const pendingLimit = Math.max(1, Math.floor(limit / 2));
+  const selectedPending = pending.slice(0, pendingLimit);
+  const selectedLive = live.slice(0, limit - selectedPending.length);
+  const backfillCount = limit - selectedPending.length - selectedLive.length;
+  return [
+    ...selectedPending,
+    ...selectedLive,
+    ...pending.slice(selectedPending.length, selectedPending.length + backfillCount),
+  ];
+}
+
+function hasSenderIdentity(value) {
+  return typeof value === 'string' && value.trim().length > 0;
 }
 
 async function flipRevokedAt(sendId, senderDiscordId) {
@@ -860,36 +867,129 @@ async function flipRevokedAt(sendId, senderDiscordId) {
     await ddb.send(new UpdateCommand({
       TableName: TABLES.qurl_send_configs,
       Key: { send_id: sendId },
-      UpdateExpression: 'SET revoked_at = :t',
+      UpdateExpression: 'SET revoked_at = :t REMOVE revoking_at',
       ExpressionAttributeValues: {
         ':t': nowIso(),
         ':s': senderDiscordId,
       },
       ConditionExpression: 'sender_discord_id = :s AND attribute_not_exists(revoked_at)',
     }));
+    return true;
   } catch (err) {
-    // Swallow CCFE — either revoked_at is already set (idempotent
-    // success) or sender_discord_id doesn't match (ownership reject,
-    // matching the SQL `WHERE sender_discord_id = ?` filter). Any
-    // other error propagates.
     if (err.name !== 'ConditionalCheckFailedException') throw err;
+    // Distinguish an idempotent same-owner revoke from a rejected/missing
+    // row. Callers must never report finalization unless the durable state is
+    // positively confirmed.
+    const res = await ddb.send(new GetCommand({
+      TableName: TABLES.qurl_send_configs,
+      Key: { send_id: sendId },
+      ConsistentRead: true,
+    }));
+    return res.Item?.sender_discord_id === senderDiscordId && Boolean(res.Item.revoked_at);
+  }
+}
+
+async function flipRevokingAt(sendId, senderDiscordId) {
+  try {
+    await ddb.send(new UpdateCommand({
+      TableName: TABLES.qurl_send_configs,
+      Key: { send_id: sendId },
+      UpdateExpression: 'SET revoking_at = if_not_exists(revoking_at, :t)',
+      ExpressionAttributeValues: {
+        ':t': nowIso(),
+        ':s': senderDiscordId,
+      },
+      ConditionExpression: 'sender_discord_id = :s AND attribute_not_exists(revoked_at)',
+    }));
+    return true;
+  } catch (err) {
+    if (err.name !== 'ConditionalCheckFailedException') throw err;
+    // A concurrent writer may have finalized the send or inserted a
+    // different owner's config row. Verify the durable barrier instead of
+    // assuming the failed conditional write established it.
+    const res = await ddb.send(new GetCommand({
+      TableName: TABLES.qurl_send_configs,
+      Key: { send_id: sendId },
+      ConsistentRead: true,
+    }));
+    if (!res.Item) return false;
+    return res.Item.sender_discord_id === senderDiscordId
+      && Boolean(res.Item.revoking_at)
+      && !res.Item.revoked_at;
+  }
+}
+
+async function markSendRevoking(sendId, senderDiscordId) {
+  if (!hasSenderIdentity(senderDiscordId)) return false;
+  const cfgRes = await ddb.send(new GetCommand({
+    TableName: TABLES.qurl_send_configs,
+    Key: { send_id: sendId },
+    ConsistentRead: true,
+  }));
+  if (cfgRes.Item) {
+    if (!hasSenderIdentity(cfgRes.Item.sender_discord_id)) {
+      logger.warn('markSendRevoking rejected config without sender identity', { sendId });
+      return false;
+    }
+    if (cfgRes.Item.sender_discord_id !== senderDiscordId) return false;
+    if (cfgRes.Item.revoked_at) return false;
+    if (cfgRes.Item.revoking_at) return true;
+    return flipRevokingAt(sendId, senderDiscordId);
+  }
+
+  const legacyItems = await queryAll({
+    TableName: TABLES.qurl_sends,
+    ConsistentRead: true,
+    KeyConditionExpression: 'send_id = :sid',
+    FilterExpression: 'sender_discord_id = :s',
+    ExpressionAttributeValues: { ':sid': sendId, ':s': senderDiscordId },
+  });
+  if (legacyItems.length === 0) return false;
+  const legacy = legacyItems[0];
+  try {
+    await ddb.send(new PutCommand({
+      TableName: TABLES.qurl_send_configs,
+      Item: {
+        send_id: sendId,
+        sender_discord_id: senderDiscordId,
+        resource_type: legacy.resource_type,
+        expires_in: legacy.expires_in || '24h',
+        attachment_name: legacy.attachment_name,
+        location_name: legacy.location_name,
+        personal_message: legacy.personal_message,
+        revoking_at: nowIso(),
+        created_at: legacy.created_at || nowIso(),
+      },
+      ConditionExpression: 'attribute_not_exists(send_id)',
+    }));
+    return true;
+  } catch (err) {
+    if (err.name !== 'ConditionalCheckFailedException') throw err;
+    return flipRevokingAt(sendId, senderDiscordId);
   }
 }
 
 async function markSendRevoked(sendId, senderDiscordId) {
   // Two-branch logic:
   // (a) Normal path: config row exists — flip revoked_at.
-  // (b) Legacy path: config row doesn't exist — insert minimal row.
+  // (b) Legacy path: config row doesn't exist — insert minimal row. Current
+  // revokeAllLinks establishes markSendRevoking first, but keep this branch for
+  // direct store callers during mixed-version rollout/backward compatibility.
   // Scoped to senderDiscordId for defense-in-depth.
+  if (!hasSenderIdentity(senderDiscordId)) return false;
   const cfgRes = await ddb.send(new GetCommand({
     TableName: TABLES.qurl_send_configs,
     Key: { send_id: sendId },
+    ConsistentRead: true,
   }));
   if (cfgRes.Item) {
-    if (cfgRes.Item.sender_discord_id !== senderDiscordId) return; // ownership check
-    if (cfgRes.Item.revoked_at) return; // idempotent
-    await flipRevokedAt(sendId, senderDiscordId);
-    return;
+    if (!hasSenderIdentity(cfgRes.Item.sender_discord_id)) {
+      logger.warn('markSendRevoked rejected config without sender identity', { sendId });
+      return false;
+    }
+    if (cfgRes.Item.sender_discord_id !== senderDiscordId) return false; // ownership check
+    if (cfgRes.Item.revoked_at) return true; // idempotent, durable state confirmed
+    return flipRevokedAt(sendId, senderDiscordId);
   }
 
   // Legacy — look up qurl_sends row, insert minimal config with revoked_at.
@@ -901,17 +1001,17 @@ async function markSendRevoked(sendId, senderDiscordId) {
   // would be safe — but a future migration / manual repair / partial
   // write that violated the invariant would silently miss the
   // matching row and the revoke would no-op. Dropping the Limit makes
-  // the lookup robust regardless of the partition layout: the
-  // partition is bounded by recipient count anyway, and the match-
-  // first-then-stop happens client-side via the .find() below.
-  const legacyRes = await ddb.send(new QueryCommand({
+  // the lookup robust regardless of the partition layout. The partition is
+  // bounded by recipient count, and queryAll follows every filtered page.
+  const legacyItems = await queryAll({
     TableName: TABLES.qurl_sends,
+    ConsistentRead: true,
     KeyConditionExpression: 'send_id = :sid',
     FilterExpression: 'sender_discord_id = :s',
     ExpressionAttributeValues: { ':sid': sendId, ':s': senderDiscordId },
-  }));
-  if (!legacyRes.Items || legacyRes.Items.length === 0) return;
-  const legacy = legacyRes.Items[0];
+  });
+  if (legacyItems.length === 0) return false;
+  const legacy = legacyItems[0];
   try {
     await ddb.send(new PutCommand({
       TableName: TABLES.qurl_send_configs,
@@ -925,6 +1025,7 @@ async function markSendRevoked(sendId, senderDiscordId) {
       },
       ConditionExpression: 'attribute_not_exists(send_id)',
     }));
+    return true;
   } catch (err) {
     if (err.name !== 'ConditionalCheckFailedException') throw err;
     // Race: between the GetCommand at the top of this function
@@ -940,9 +1041,9 @@ async function markSendRevoked(sendId, senderDiscordId) {
     //     same owner-scoped + attribute_not_exists guard the
     //     primary path uses).
     //   - A racing markSendRevoked AND a non-revoke writer
-    //     interleave: flipRevokedAt's CCFE-swallow handles the
+    //     interleave: flipRevokedAt's CCFE re-read confirms the
     //     "already revoked" case idempotently.
-    await flipRevokedAt(sendId, senderDiscordId);
+    return flipRevokedAt(sendId, senderDiscordId);
   }
 }
 
@@ -1075,6 +1176,8 @@ async function getSendRenderState(sendId) {
     lastRenderedAt: row.last_rendered_at ?? 0,
     baseMsg: row.confirm_base_msg ?? undefined,
     qurlIds: Array.isArray(row.confirm_qurl_ids) ? row.confirm_qurl_ids : [],
+    // revoking_at is intent, not completion: a failed DELETE may leave links
+    // live, so view updates must continue until revoked_at is confirmed.
     terminal: Boolean(row.revoked_at) || row.confirm_terminal === true,
   };
 }
@@ -1378,9 +1481,15 @@ async function getSendResourceIds(sendId, senderDiscordId) {
 // recipient's DM to "closed the door". Legacy rows predating the
 // ref-capture wire-up have those fields unset — the revoke loop's
 // missing-refs guard skips the edit naturally.
-async function getSendItems(sendId, senderDiscordId) {
+async function getSendItems(sendId, senderDiscordId, { consistentRead = false } = {}) {
   const items = await queryAll({
     TableName: TABLES.qurl_sends,
+    // Revoke opts into a strongly consistent base-table query after writing
+    // revoking_at: every Add Recipients transaction committed before the
+    // barrier is visible, while later transactions fail the state guard.
+    // Webhook/render fallback callers do not require that ordering and retain
+    // the cheaper eventual-consistency default.
+    ConsistentRead: consistentRead,
     KeyConditionExpression: 'send_id = :sid',
     FilterExpression: 'sender_discord_id = :s',
     ExpressionAttributeValues: { ':sid': sendId, ':s': senderDiscordId },
@@ -1725,8 +1834,7 @@ async function healthCheck() {
 
 async function close() {
   // DDB client has no persistent connection to close; AWS SDK v3
-  // manages sockets internally via keep-alive. The method exists
-  // for Store contract parity (other backends may need real cleanup).
+  // manages sockets internally via keep-alive.
   logger.info('DDB store closed (no-op)');
 }
 
@@ -1735,7 +1843,7 @@ module.exports = {
   getStats,
   // QURL sends
   recordQURLSend, recordQURLSendBatch, updateSendDMStatus, markSendDMDelivered,
-  getRecentSends, markSendRevoked, isSendRevoked,
+  getRecentSends, markSendRevoking, markSendRevoked, isSendRevoked,
   saveSendConfig, getSendConfig, getSendResourceIds, getSendItems,
   findSendsByQurlId, markExpiredDMEdited, clearExpiredDMEdited,
   markConsumedDMEdited, clearConsumedDMEdited,
@@ -1754,8 +1862,8 @@ module.exports = {
   close, healthCheck,
   // Test-only: surface the prefixed table-name map so
   // `tests/provisioner-schema-parity.test.js` can pin parity with
-  // `scripts/provision-ddb-local.js`. NOT part of the Store contract
-  // — production callers must NOT reach into this; the leading
+  // `scripts/provision-ddb-local.js`. Production callers must NOT
+  // reach into this; the leading
   // underscore signals intent. If you find yourself depending on
   // this outside tests, add a real public API instead.
   _TABLES_FOR_TESTING: TABLES,

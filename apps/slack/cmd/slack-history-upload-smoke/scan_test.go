@@ -1160,42 +1160,6 @@ func TestRunScanSkipRepliesLeavesTheSurfaceUnmeasured(t *testing.T) {
 	}
 }
 
-// TestNewSlackHTTPClientDoesNotFollowRedirects pins a security control that otherwise
-// never executes. -base-url is operator-supplied and the bearer token rides on every
-// request; restoring Go's default redirect following would replay it down a chain this
-// command never inspected.
-func TestNewSlackHTTPClientDoesNotFollowRedirects(t *testing.T) {
-	t.Parallel()
-
-	var followed bool
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/elsewhere" {
-			followed = true
-			_, _ = w.Write([]byte(`{"ok":true}`))
-			return
-		}
-		http.Redirect(w, r, "/elsewhere", http.StatusFound)
-	}))
-	t.Cleanup(srv.Close)
-
-	client := slacksmoke.NewHTTPClient(time.Second)
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, srv.URL+"/conversations.history", http.NoBody)
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		t.Fatalf("do: %v", err)
-	}
-	t.Cleanup(func() { _ = resp.Body.Close() })
-	if followed {
-		t.Error("the client followed a redirect; the bearer token must not be replayed down an uninspected chain")
-	}
-	if resp.StatusCode != http.StatusFound {
-		t.Errorf("status = %d, want the 302 surfaced rather than followed", resp.StatusCode)
-	}
-}
-
 // TestRunScanCountsAThreadRootOnce pins the deduplication the tripwire rests on.
 // conversations.replies returns the thread parent as its first message and
 // conversations.history already returned it, so summing the two surfaces reports two
@@ -1414,8 +1378,8 @@ func TestGetOnceNamesARedirectTarget(t *testing.T) {
 }
 
 // TestGetOnceRejectsOversizeResponse pins the wiring the hoist left behind in this
-// caller: that getOnce hands slacksmoke.ReadResponseBody THIS command's ceiling and
-// propagates the refusal. The over-read and comparison are covered by slacksmoke's own
+// caller: that getOnce hands httpbody.ReadResponseBody THIS command's ceiling and
+// propagates the refusal. The over-read and comparison are covered by httpbody's own
 // tests; what only a caller test can catch is the constant going astray — swapping this
 // command's 4 MiB for the DM smoke's 64 KiB is exactly the hazard ReadResponseBody's doc
 // names as the reason limit is a parameter, and nothing here failed on it before.

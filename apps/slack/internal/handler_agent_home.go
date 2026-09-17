@@ -87,7 +87,7 @@ func buildAgentHomeView(entries []slackdata.AuditEntry) []any {
 		// the modal "subtext" pattern (contextBlock).
 		contextBlock(agentAIDisclosureShort),
 		contextBlock(agentHomeSupport),
-		map[string]any{"type": "divider"},
+		map[string]any{blockKitFieldType: "divider"},
 	)
 	if len(entries) == 0 {
 		return append(blocks, sectionBlock(agentHomeEmpty))

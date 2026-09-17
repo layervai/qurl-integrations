@@ -1,3 +1,3 @@
-Error: No qURL API key is configured.
+Error: This machine is not enrolled with qURL.
 
-  Hint: set QURL_API_KEY, or run `qurl login` to store a key on this machine.
+  Hint: run `qurl login`, or set QURL_API_KEY for one-time device enrollment.

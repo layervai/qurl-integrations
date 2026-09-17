@@ -2,27 +2,41 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
 	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
+	connectorshare "github.com/layervai/qurl-connector/pkg/share"
+	qurl "github.com/layervai/qurl-go/qurl"
 	"github.com/spf13/cobra"
 
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/auth"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/config"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/agent"
-	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/supervisor"
+	connectordaemon "github.com/layervai/qurl-integrations/apps/cli/internal/connector/daemon"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/hub"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/sessionconfig"
+	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/consume"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/exitcode"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/output"
+)
+
+const (
+	httpURLScheme  = "http"
+	httpsURLScheme = "https"
 )
 
 // globalOpts carries flag values, injected process context, and the settings
@@ -35,6 +49,15 @@ type globalOpts struct {
 	colorMode string
 	verbose   bool
 	profile   string
+	// shareGroupMode is bound by `daemon run --share-group-mode`; every other
+	// command resolves the mode from the environment, profile, or default.
+	shareGroupMode string
+	// Optional trust settings for an explicitly managed daemon process.
+	tunnelCAFile     string
+	tunnelServerName string
+	// supervision is the persistent --supervision flag: who owns the sharing
+	// daemon's process for the state namespace a command addresses.
+	supervision string
 
 	version string
 
@@ -45,28 +68,50 @@ type globalOpts struct {
 	now          func() time.Time
 	sleep        func(time.Duration)
 	newRequestID func() string
-	// newCredentialStore builds the storage chain; tests inject a fake
-	// keyring so unit tests never touch a developer's real one.
-	newCredentialStore func(dir string, onFileRead func()) *auth.Chain
 	// openBrowser launches the user's browser at an already-verified link;
 	// tests inject a recorder so no real browser ever starts under test.
 	openBrowser func(ctx context.Context, link string) error
+	// enterPortalGrant asks the qURL platform for direct access to an
+	// already-verified link and retains both its application authorization and
+	// acknowledged lifetime. Tests always inject (the harness refuses by
+	// default), so no hermetic test sends a real access request.
+	enterPortalGrant func(ctx context.Context, link string) (consume.AccessGrant, error)
+	verifyLink       func(ctx context.Context, link, expectedCRID string) error
 
-	// Connector seams. openConnectorRuntime walks the agent enroll/open
-	// ladder (production: agent.Open) and newConnectorKnocker builds the
-	// per-cycle platform client from the opened runtime (production:
-	// knock.NewNative over the runtime's binding); tests inject fakes so cmd
-	// tests never touch the real UDP wire. tuneConnectorSupervisor, when
-	// non-nil, adjusts the supervisor config before construction — test-only,
-	// mirroring the supervisor package's own timing seams.
-	openConnectorRuntime    func(ctx context.Context, cfg *agent.Config) (*agent.Runtime, error)
-	newConnectorKnocker     func(rt *agent.Runtime, knockResourceID string) (connectorKnocker, error)
-	tuneConnectorSupervisor func(cfg *supervisor.Config)
 	// redirectFRPLogs rebinds the FRP library's process-global logger to this
 	// invocation's stderr (production default). The cmd test binary injects a
 	// no-op and pins the global once in TestMain instead, because its
 	// in-process tunnel server logs through the same global concurrently.
-	redirectFRPLogs func()
+	redirectFRPLogs      func()
+	loadLocalShares      func(context.Context) ([]connectorstate.LocalShare, error)
+	readLocalShares      func(context.Context, string) ([]connectorstate.LocalShare, bool, error)
+	openShareRegistry    func(string) (localShareRegistry, error)
+	newShareDaemon       func(string, string) (shareDaemonController, error)
+	preflightTarget      func(context.Context, string, int) error
+	resolveShareStateDir func(string) (string, error)
+	resolveLocalResource localResourceResolver
+	resolveHubBootstrap  func() (qurl.HubBootstrap, error)
+	resolveSessionConfig func(string) (connectorshare.NativeSessionOperationAuthority, error)
+	runForegroundDaemon  func(context.Context, *globalOpts, string, string) error
+	sharingWaitLimit     time.Duration
+	// backgroundShareGOOS is the platform contract used by lifecycle commands.
+	// Production pins it to runtime.GOOS; hermetic tests inject darwin so they
+	// can exercise the daemon control plane on every CI runner without enabling
+	// unsupported production paths.
+	backgroundShareGOOS string
+
+	// openAPIClient is the hermetic command-test seam. Production leaves it
+	// nil and opens the persisted registered-device client below.
+	openAPIClient func(context.Context) (qurlapi.Client, error)
+	// openRegisteredClient is the login/bootstrap seam. Production uses the
+	// native NHP registration path; command tests inject a platform-only
+	// client because their mock server does not implement NHP.
+	openRegisteredClient func(context.Context, qurlapi.AccountClient, string, *qurlapi.Identity) (qurlapi.Client, *qurlapi.Identity, error)
+	openNativeRuntime    func(context.Context, connectorshare.NativeRuntimeConfig) (registeredNativeRuntime, error)
+	registeredClient     qurlapi.Client
+	registeredIdentity   *qurlapi.Identity
+	nativeRuntime        registeredNativeRuntime
+	warnedCleartextAuth  bool
 
 	// Resolved in PersistentPreRunE.
 	resolved           bool
@@ -76,21 +121,27 @@ type globalOpts struct {
 	errColorOn         bool
 	ascii              bool
 	profileConnectorID string
-	// profileConnectorSlug carries the deprecated v1.1.0 profile key
-	// (connector_slug), honored below profileConnectorID.
-	//
-	// Deprecated: remove at the next major.
-	profileConnectorSlug string
+	// resolvedShareGroupMode is the session group mode the daemon runs in and
+	// the per-user job definition carries.
+	resolvedShareGroupMode connectordaemon.GroupMode
+	// resolvedSupervision is the lifecycle contract every mutating command
+	// checks against the namespace's policy marker before it acts.
+	resolvedSupervision connectorstate.RuntimeSupervision
 }
 
 // rootOption is a test hook for injecting process context.
 type rootOption func(*globalOpts)
 
+type registeredNativeRuntime interface {
+	Handoff() (qurl.AgentStateStore, error)
+	RecoverCredentialAfterDeviceAuthorizationFailure(context.Context, int, string, func(context.Context) (string, error)) error
+	Close() error
+}
+
 // Main wires the real process context and runs the CLI. It returns the exit
-// code; main() is the only caller of os.Exit. SIGTERM joins the interrupt
-// set for the long-running serve command (`connector run` under an
-// orchestrator stops via SIGTERM); on Windows the extra signal is simply
-// never delivered.
+// code; main() is the only caller of os.Exit. SIGTERM joins the interrupt set
+// for the foreground daemon and supervised invocations; on Windows the extra
+// signal is simply never delivered.
 func Main(version string) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -101,12 +152,17 @@ func Main(version string) int {
 // run executes the tree, renders any error to stderr, and maps it to the one
 // exit code. A cancellation the user caused (Ctrl-C / SIGTERM) keeps the
 // Interrupted exit code but renders no error anatomy: the interrupt was the
-// user's own act, and commands that want a farewell print their own note
-// (connector run's msgConnectorStopped).
+// user's own act.
 func run(ctx context.Context, root *cobra.Command, opts *globalOpts) int {
 	err := root.ExecuteContext(ctx)
 	if err != nil && !errors.Is(err, context.Canceled) {
 		output.RenderError(opts.streams.Err, err, opts.errColor())
+	}
+	if closeErr := opts.closeAPIClient(); closeErr != nil {
+		// The command has already completed. Process exit releases remaining OS
+		// handles, so native-runtime teardown cannot reverse a successful remote
+		// or lifecycle operation. Keep the diagnostic without changing its exit.
+		opts.printer().Warnf("local native-state cleanup reported a problem: %v", closeErr)
 	}
 	return exitcode.FromError(err)
 }
@@ -114,51 +170,33 @@ func run(ctx context.Context, root *cobra.Command, opts *globalOpts) int {
 // newRoot builds the v2 command tree.
 func newRoot(version string, streams *output.Streams, options ...rootOption) (*cobra.Command, *globalOpts) {
 	opts := &globalOpts{
-		version:   version,
-		streams:   streams,
-		lookupEnv: os.LookupEnv,
-		now:       time.Now,
+		version:             version,
+		streams:             streams,
+		lookupEnv:           os.LookupEnv,
+		now:                 time.Now,
+		backgroundShareGOOS: runtime.GOOS,
 	}
 	for _, opt := range options {
 		opt(opts)
 	}
-	if opts.configDir == "" {
-		opts.configDir = config.DefaultDir()
-	}
-	if opts.newCredentialStore == nil {
-		opts.newCredentialStore = auth.NewStore
-	}
-	if opts.openBrowser == nil {
-		// The launcher reads the override variables through the same
-		// injected environment the rest of the CLI uses.
-		launcher := &consume.Launcher{LookupEnv: opts.lookupEnv, GOOS: runtime.GOOS}
-		opts.openBrowser = launcher.Open
-	}
-	if opts.openConnectorRuntime == nil {
-		opts.openConnectorRuntime = agent.Open
-	}
-	if opts.newConnectorKnocker == nil {
-		opts.newConnectorKnocker = newNativeConnectorKnocker
-	}
-	if opts.redirectFRPLogs == nil {
-		opts.redirectFRPLogs = func() { redirectFRPLogsToStderr(opts) }
-	}
+	opts.applyDefaults()
 
 	cmd := &cobra.Command{
 		Use:   "qurl",
-		Short: "Publish, resolve, and manage qURL resources by CRID",
-		Long: `The qURL CLI publishes URLs as protected resources and turns their CRIDs
-back into working access links.
+		Short: "Publish, share, and manage qURL resources by CRID",
+		Long: `Publish a local app or remote URL as a protected qURL resource, then use
+its CRID to open it when access is authorized.
 
-A CRID is a resource's permanent, verifiable ID. Publish once, share the
-CRID anywhere, and anyone authorized can resolve it into a short-lived
-access link when they need one.
+A CRID is a permanent, shareable resource ID — it contains no secret and grants
+no access by itself. Authorized users turn it into a short-lived access link
+with "qurl get" or "qurl share".
 
-Authentication: set QURL_API_KEY (recommended for scripts and CI), or use
-` + "`qurl login`" + ` to store a key on this machine.`,
-		Example: "  qurl publish https://api.example.com/reports\n" +
-			"  qurl resolve " + exampleCRID + "\n" +
-			"  qurl list",
+Authentication: use ` + "`qurl login`" + ` to enroll this machine. The account API key is
+used only for enrollment and is not stored by qurl. Scripts and CI can set
+QURL_API_KEY for the same one-time bootstrap.`,
+		Example: "  qurl publish http://127.0.0.1:3000\n" +
+			"  qurl get " + exampleCRID + "\n" +
+			"  qurl publish https://api.example.com/reports",
 		Version:       version,
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -167,9 +205,30 @@ Authentication: set QURL_API_KEY (recommended for scripts and CI), or use
 			if len(args) == 0 {
 				return cmd.Help()
 			}
+			// A retired verb that a command declares in SuggestFor (or a close
+			// misspelling) names its replacement instead of the generic hint.
+			if suggestions := cmd.SuggestionsFor(args[0]); len(suggestions) > 0 {
+				return exitcode.UsageError(fmt.Errorf("unknown command %q — did you mean `qurl %s`?", args[0], suggestions[0]))
+			}
 			return exitcode.UsageError(fmt.Errorf("unknown command %q — run `qurl --help` for the command list", args[0]))
 		},
 		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
+			// Task Scheduler starts `daemon run` directly. Redirect before
+			// settings resolution so a malformed profile or environment value is
+			// present in the durable log on the first background start.
+			if cmd.Name() == "run" && cmd.Parent() != nil && cmd.Parent().Name() == "daemon" {
+				stdoutPath, err := cmd.Flags().GetString("job-stdout-log")
+				if err != nil {
+					return err
+				}
+				stderrPath, err := cmd.Flags().GetString("job-stderr-log")
+				if err != nil {
+					return err
+				}
+				if err := redirectDaemonJobOutput(stdoutPath, stderrPath, opts.streams); err != nil {
+					return err
+				}
+			}
 			if skipsSettings(cmd) {
 				return nil
 			}
@@ -184,6 +243,7 @@ Authentication: set QURL_API_KEY (recommended for scripts and CI), or use
 	flags.StringVar(&opts.colorMode, "color", "", "colorize output: auto, always, or never (default auto)")
 	flags.BoolVarP(&opts.verbose, "verbose", "v", false, "print request diagnostics on stderr")
 	flags.StringVar(&opts.profile, "profile", "", "configuration profile name")
+	flags.StringVar(&opts.supervision, "supervision", "", "who runs the sharing daemon: native (qURL manages a background job) or external (another program runs qurl daemon run) (default native)")
 
 	cmd.SetOut(streams.Out)
 	cmd.SetErr(streams.Err)
@@ -194,13 +254,17 @@ Authentication: set QURL_API_KEY (recommended for scripts and CI), or use
 
 	cmd.AddCommand(
 		publishCmd(opts),
-		resolveCmd(opts),
+		shareCmd(opts),
 		getCmd(opts),
 		listCmd(opts),
+		shareStartCmd(opts),
+		shareStopCmd(opts),
+		shareRestartCmd(opts),
+		shareStatusCmd(opts),
+		shareInspectCmd(opts),
 		deleteCmd(opts),
-		connectorCmd(opts),
+		daemonCmd(opts),
 		loginCmd(opts),
-		logoutCmd(opts),
 		whoamiCmd(opts),
 		versionCmd(version),
 		completionCmd(),
@@ -208,6 +272,89 @@ Authentication: set QURL_API_KEY (recommended for scripts and CI), or use
 	)
 
 	return cmd, opts
+}
+
+// nativeShareDaemon builds the production per-user background-job controller
+// for one state directory.
+func (o *globalOpts) nativeShareDaemon(stateDir, logDir string) (shareDaemonController, error) {
+	controller, err := connectordaemon.NewJobController(
+		stateDir, logDir, o.version, o.resolvedEndpoint, o.resolvedShareGroupMode, o.resolvedSupervision, o.resolveHubBootstrap, o.lookupEnv,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return controller, nil
+}
+
+func (o *globalOpts) applyDefaults() {
+	if o.configDir == "" {
+		o.configDir = config.DefaultDir()
+	}
+	if o.openBrowser == nil {
+		launcher := &consume.Launcher{LookupEnv: o.lookupEnv, GOOS: runtime.GOOS}
+		o.openBrowser = launcher.Open
+	}
+	if o.verifyLink == nil {
+		opener := &consume.AccessOpener{LookupEnv: o.lookupEnv}
+		o.verifyLink = opener.Verify
+	}
+	if o.enterPortalGrant == nil {
+		opener := &consume.AccessOpener{LookupEnv: o.lookupEnv}
+		o.enterPortalGrant = opener.Grant
+	}
+	if o.redirectFRPLogs == nil {
+		o.redirectFRPLogs = func() { redirectFRPLogsToStderr(o) }
+	}
+	if o.runForegroundDaemon == nil {
+		o.runForegroundDaemon = runShareDaemon
+	}
+	if o.resolveShareStateDir == nil {
+		o.resolveShareStateDir = connectorstate.ResolveDir
+	}
+	if o.loadLocalShares == nil {
+		o.loadLocalShares = func(ctx context.Context) ([]connectorstate.LocalShare, error) {
+			dir, err := o.resolveShareStateDir("")
+			if err != nil {
+				return nil, err
+			}
+			shares, _, err := connectorstate.ReadLocalSharesIfPresent(ctx, dir)
+			return shares, err
+		}
+	}
+	if o.readLocalShares == nil {
+		o.readLocalShares = connectorstate.ReadLocalSharesIfPresent
+	}
+	if o.openShareRegistry == nil {
+		o.openShareRegistry = func(dir string) (localShareRegistry, error) {
+			return connectorstate.OpenLocalShareRegistry(dir)
+		}
+	}
+	if o.newShareDaemon == nil {
+		o.newShareDaemon = o.nativeShareDaemon
+	}
+	if o.preflightTarget == nil {
+		o.preflightTarget = preflightLocalTarget
+	}
+	if o.resolveLocalResource == nil {
+		o.resolveLocalResource = resolveLocalPublishResource
+	}
+	if o.resolveHubBootstrap == nil {
+		o.resolveHubBootstrap = hub.Bootstrap
+	}
+	if o.resolveSessionConfig == nil {
+		o.resolveSessionConfig = sessionconfig.Resolve
+	}
+	if o.sharingWaitLimit <= 0 {
+		o.sharingWaitLimit = 30 * time.Second
+	}
+	if o.openRegisteredClient == nil {
+		o.openRegisteredClient = o.openNativeRegisteredClient
+	}
+	if o.openNativeRuntime == nil {
+		o.openNativeRuntime = func(ctx context.Context, cfg connectorshare.NativeRuntimeConfig) (registeredNativeRuntime, error) {
+			return connectorshare.OpenNativeRuntime(ctx, cfg)
+		}
+	}
 }
 
 // resolveSettings applies the precedence chain (flag > env > profile >
@@ -239,13 +386,45 @@ func (o *globalOpts) resolveSettings() error {
 	o.outColor = output.ResolveColor(colorMode, o.lookupEnv, o.streams.OutIsTTY)
 	o.errColorOn = output.ResolveColor(colorMode, o.lookupEnv, o.streams.ErrIsTTY)
 	o.ascii = output.ResolveASCII(o.lookupEnv)
-	// Free-form profile settings the connector command resolves flag-first at
-	// its own run time (config.Resolve needs the flag value, which only the
-	// command has).
 	o.profileConnectorID = cfg.ConnectorID
-	o.profileConnectorSlug = cfg.ConnectorSlug //nolint:staticcheck // deliberate compatibility read of the deprecated v1.1.0 key; dies with it at the next major
+
+	shareGroupMode := config.Resolve(o.shareGroupMode, connectordaemon.GroupModeEnv, o.lookupEnv, cfg.ShareGroupMode, string(connectordaemon.DefaultGroupMode))
+	groupMode, err := connectordaemon.ParseGroupMode(shareGroupMode)
+	if err != nil {
+		return exitcode.UsageError(err)
+	}
+	o.resolvedShareGroupMode = groupMode
+
+	supervision := config.Resolve(o.supervision, connectorstate.EnvRuntimeSupervision, o.lookupEnv, cfg.DaemonSupervision, string(connectorstate.DefaultRuntimeSupervision))
+	mode, err := connectorstate.ParseRuntimeSupervision(supervision)
+	if err != nil {
+		return exitcode.UsageError(err)
+	}
+	o.resolvedSupervision = mode
 	o.resolved = true
 	return nil
+}
+
+// requireRuntimeSupervision refuses to mutate a namespace whose supervision
+// policy does not match this invocation's setting, so a native qurl never
+// installs a job over an external supervisor's daemon and an external one
+// never adopts a natively managed namespace.
+func (o *globalOpts) requireRuntimeSupervision(stateDir string) error {
+	return connectorstate.RequireRuntimeSupervision(stateDir, o.resolvedSupervision)
+}
+
+// requireRuntimeSupervisionIfNamespace applies requireRuntimeSupervision to
+// the default namespace and tolerates a host without one: a command that
+// only changes cloud state must still work there.
+func (o *globalOpts) requireRuntimeSupervisionIfNamespace() error {
+	stateDir, err := o.resolveShareStateDir("")
+	if errors.Is(err, connectorstate.ErrNoDefaultStateDir) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return o.requireRuntimeSupervision(stateDir)
 }
 
 // printer builds the per-invocation Printer from the resolved settings.
@@ -253,24 +432,39 @@ func (o *globalOpts) printer() *output.Printer {
 	return output.New(o.streams, o.resolvedFormat, o.quiet, o.outColor, o.ascii, o.now)
 }
 
-// insecureEndpointWarning returns a warning when the endpoint would carry
-// the bearer credential over cleartext http to a non-loopback host. Loopback
+// insecureEndpointWarning returns a warning when the endpoint would carry an
+// authorization credential over cleartext http to a non-loopback host. Loopback
 // is exempt: local mocks and harnesses are legitimately plain http. The
 // transport already refuses redirects so the credential cannot follow a
 // Location elsewhere; this closes the sibling misconfiguration.
 func insecureEndpointWarning(endpoint string) string {
 	u, err := url.Parse(endpoint)
-	if err != nil || u.Scheme != "http" {
+	if err != nil || u.Scheme != httpURLScheme {
 		return ""
 	}
 	host := u.Hostname()
-	if host == "localhost" || strings.HasSuffix(host, ".localhost") {
+	if strings.EqualFold(host, "localhost") {
 		return ""
 	}
 	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
 		return ""
 	}
 	return fmt.Sprintf(msgInsecureEndpoint, endpoint)
+}
+
+// warnInsecureEndpoint emits at most one warning per CLI invocation. Both the
+// one-time account bootstrap and the steady-state registered-device client
+// call it, and recovery can use both paths during one invocation.
+func (o *globalOpts) warnInsecureEndpoint() {
+	if o.warnedCleartextAuth {
+		return
+	}
+	warning := insecureEndpointWarning(o.resolvedEndpoint)
+	if warning == "" {
+		return
+	}
+	o.warnedCleartextAuth = true
+	o.printer().Warnf("%s", warning)
 }
 
 // skipsSettings reports whether cmd (or an ancestor) must answer without
@@ -282,7 +476,7 @@ func insecureEndpointWarning(endpoint string) string {
 func skipsSettings(cmd *cobra.Command) bool {
 	for c := cmd; c != nil; c = c.Parent() {
 		switch c.Name() {
-		case "version", "completion", "docs", "help":
+		case "version", "completion", "docs", "help", "validate-test-resource":
 			return true
 		}
 		if strings.HasPrefix(c.Name(), "__complete") {
@@ -301,39 +495,52 @@ func (o *globalOpts) errColor() bool {
 	return output.ResolveColor(output.ColorAuto, o.lookupEnv, o.streams.ErrIsTTY)
 }
 
-// credentialStore builds this invocation's storage chain, wired so any read
-// served from the file fallback warns (once) that the OS keyring is
-// unavailable and the key sits in a mode-0600 file.
-func (o *globalOpts) credentialStore() *auth.Chain {
-	return o.newCredentialStore(o.configDir, func() {
-		o.printer().Warnf("%s", msgKeyringUnavailable)
-	})
-}
-
-// newClient resolves the credential and builds the one API client. There is
-// deliberately no --api-key flag: argv leaks into shell history and process
-// lists, so the key comes from QURL_API_KEY (hermetic — the credential store
-// is bypassed entirely) or from the store `qurl login` manages (the OS
-// keyring, falling back to the 0600 credential file where no keyring is
-// available).
-func (o *globalOpts) newClient() (qurlapi.Client, error) {
-	key, _, err := auth.Resolve(o.lookupEnv, o.credentialStore())
+// newClient opens the persisted registered-device identity. The account key
+// is consulted only when the native state is missing or the Hub explicitly
+// rejects the stored device credential. A warm command does not read it.
+func (o *globalOpts) newClient(ctx context.Context) (qurlapi.Client, error) {
+	o.warnInsecureEndpoint()
+	if o.registeredClient != nil {
+		return o.registeredClient, nil
+	}
+	if o.openAPIClient != nil {
+		client, err := o.openAPIClient(ctx)
+		if err != nil {
+			return nil, err
+		}
+		o.registeredClient = client
+		return client, nil
+	}
+	client, identity, err := o.openRegisteredClient(ctx, nil, "", nil)
 	if err != nil {
 		return nil, err
 	}
-	if err := auth.ValidateKeyShape(key); err != nil {
-		return nil, err
+	o.registeredClient = client
+	o.registeredIdentity = identity
+	return client, nil
+}
+
+// apiCredential resolves one account credential from the current process
+// environment without retaining it. Native Connector recovery calls this
+// lazily only after the pinned Hub has rejected a persisted device credential;
+// ordinary warm starts do not read it or pass it into the background daemon.
+// v2 has no stored-account-key compatibility path.
+func (o *globalOpts) apiCredential() (string, error) {
+	key, _, err := auth.Resolve(o.lookupEnv)
+	if err != nil {
+		return "", err
 	}
-	return o.apiClient(key)
+	if err := auth.ValidateKeyShape(key); err != nil {
+		return "", err
+	}
+	return key, nil
 }
 
 // apiClient builds the API client around one explicit key. login uses it
 // directly (the key it validates is the one just typed, never a stored one);
 // everything else goes through newClient.
-func (o *globalOpts) apiClient(key string) (qurlapi.Client, error) {
-	if warning := insecureEndpointWarning(o.resolvedEndpoint); warning != "" {
-		o.printer().Warnf("%s", warning)
-	}
+func (o *globalOpts) apiClient(key string) (qurlapi.AccountClient, error) {
+	o.warnInsecureEndpoint()
 	return qurlapi.New(&qurlapi.Config{
 		BaseURL:      o.resolvedEndpoint,
 		APIKey:       key,
@@ -342,6 +549,446 @@ func (o *globalOpts) apiClient(key string) (qurlapi.Client, error) {
 		Sleep:        o.sleep,
 		NewRequestID: o.newRequestID,
 	})
+}
+
+// registeredAccountBootstrap owns the account-key capability only during one
+// registration or recovery attempt. It loads the key lazily unless login
+// supplies it explicitly.
+type registeredAccountBootstrap struct {
+	opts                              *globalOpts
+	client                            qurlapi.AccountClient
+	key                               string
+	identity                          *qurlapi.Identity
+	explicitValidatedAccountAuthority bool
+	enrollmentIdempotencyKey          string
+}
+
+type deviceAccountConflictError struct {
+	stateDir       string
+	deviceKeyID    string
+	currentOwner   string
+	requestedOwner string
+}
+
+func (e *deviceAccountConflictError) Error() string {
+	device := "the registered device"
+	if e.deviceKeyID != "" {
+		device = fmt.Sprintf("registered device key %q", e.deviceKeyID)
+	}
+	return fmt.Sprintf(
+		"%s in %q belongs to account %q, not %q; to switch accounts, first revoke that device key in the qURL dashboard, then move or remove the complete state directory and run `qurl login` again; do not edit individual state files",
+		device, e.stateDir, e.currentOwner, e.requestedOwner,
+	)
+}
+
+func (*deviceAccountConflictError) Unwrap() error { return auth.ErrDeviceAccountConflict }
+
+func bindRegisteredDeviceOwner(
+	ctx context.Context,
+	registry localShareRegistry,
+	stateDir, deviceKeyID, deviceOwner string,
+) error {
+	boundOwner, bound, err := registry.OwnerID(ctx)
+	if err != nil {
+		return err
+	}
+	if bound && boundOwner != deviceOwner {
+		return &deviceAccountConflictError{
+			stateDir: stateDir, deviceKeyID: deviceKeyID,
+			currentOwner: boundOwner, requestedOwner: deviceOwner,
+		}
+	}
+	if bound {
+		return nil
+	}
+	if err := registry.BindOwner(ctx, deviceOwner); err != nil {
+		if !errors.Is(err, connectorstate.ErrLocalShareOwnerConflict) {
+			return err
+		}
+		// Another process can bind the registry between OwnerID and
+		// BindOwner. Re-read it so the recovery message identifies the
+		// account that actually won the durable race.
+		if latestOwner, present, readErr := registry.OwnerID(ctx); readErr == nil && present {
+			boundOwner = latestOwner
+		}
+		return &deviceAccountConflictError{
+			stateDir: stateDir, deviceKeyID: deviceKeyID,
+			currentOwner: boundOwner, requestedOwner: deviceOwner,
+		}
+	}
+	return nil
+}
+
+func newRegisteredAccountBootstrap(opts *globalOpts, client qurlapi.AccountClient, key string, identity *qurlapi.Identity) *registeredAccountBootstrap {
+	return &registeredAccountBootstrap{
+		opts: opts, client: client, key: key, identity: identity,
+		explicitValidatedAccountAuthority: client != nil && identity != nil && strings.TrimSpace(key) != "",
+	}
+}
+
+func (b *registeredAccountBootstrap) load(ctx context.Context) (qurlapi.AccountClient, string, *qurlapi.Identity, error) {
+	if b.client == nil {
+		key, err := b.opts.apiCredential()
+		if err != nil {
+			return nil, "", nil, err
+		}
+		client, err := b.opts.apiClient(key)
+		if err != nil {
+			return nil, "", nil, err
+		}
+		b.client, b.key = client, key
+	}
+	if b.identity == nil {
+		identity, err := b.client.Me(ctx)
+		if err != nil {
+			return nil, "", nil, err
+		}
+		b.identity = identity
+	}
+	return b.client, b.key, b.identity, nil
+}
+
+func (b *registeredAccountBootstrap) enrollmentCredential(ctx context.Context, request qurl.AgentEnrollmentCredentialRequest) (string, error) {
+	if strings.TrimSpace(request.AgentID) == "" {
+		return "", errors.New("registered-device enrollment has no durable agent ID")
+	}
+	client, _, _, err := b.load(ctx)
+	if err != nil {
+		return "", err
+	}
+	if b.enrollmentIdempotencyKey == "" {
+		var nonce [32]byte
+		if _, err := rand.Read(nonce[:]); err != nil {
+			return "", fmt.Errorf("create device enrollment request identity: %w", err)
+		}
+		// Scope the key to this enrollment attempt. Repeated provider calls and
+		// HTTP retries reuse it, but a new process can never receive a cached,
+		// expired one-shot token solely because an operator pinned the agent ID.
+		b.enrollmentIdempotencyKey = hex.EncodeToString(nonce[:])
+	}
+	token, err := client.MintAgentEnrollmentToken(ctx, qurlapi.MintAgentEnrollmentTokenOptions{
+		IdempotencyKey: b.enrollmentIdempotencyKey,
+	})
+	if err != nil {
+		return "", err
+	}
+	if token == nil || strings.TrimSpace(token.Token) == "" {
+		return "", errors.New("qURL service returned an empty device enrollment credential")
+	}
+	return token.Token, nil
+}
+
+func (b *registeredAccountBootstrap) recoveryCredential(ctx context.Context) (string, error) {
+	_, key, _, err := b.load(ctx)
+	return key, err
+}
+
+// openNativeRegisteredClient opens or creates the machine identity through
+// NHP, then builds the narrow REST client from the durable device credential.
+// account is non-nil only for an explicit login. Otherwise the enrollment and
+// recovery callbacks resolve an account key lazily, after the Hub proves one
+// is needed.
+func (o *globalOpts) openNativeRegisteredClient(
+	ctx context.Context,
+	account qurlapi.AccountClient,
+	accountKey string,
+	accountIdentity *qurlapi.Identity,
+) (_ qurlapi.Client, _ *qurlapi.Identity, retErr error) {
+	if o.nativeRuntime != nil {
+		return nil, nil, errors.New("registered-device runtime is already open")
+	}
+	stateDir, err := o.resolveShareStateDir("")
+	if err != nil {
+		return nil, nil, err
+	}
+	hubBootstrap, err := o.resolveHubBootstrap()
+	if err != nil {
+		return nil, nil, err
+	}
+	origin, err := agent.ResourceSDKOrigin(o.resolvedEndpoint)
+	if err != nil {
+		return nil, nil, err
+	}
+	hostname, err := os.Hostname()
+	if err != nil {
+		return nil, nil, fmt.Errorf("read local hostname: %w", err)
+	}
+
+	bootstrap := newRegisteredAccountBootstrap(o, account, accountKey, accountIdentity)
+
+	nativeRuntime, err := o.openNativeRuntime(ctx, connectorshare.NativeRuntimeConfig{
+		StateDir:                     stateDir,
+		AgentID:                      connectorstate.ConfiguredAgentID(),
+		Hub:                          hubBootstrap,
+		Hostname:                     hostname,
+		Version:                      o.version,
+		ClientBaseURL:                origin,
+		EnrollmentCredentialProvider: bootstrap.enrollmentCredential,
+		RecoveryCredentialProvider:   bootstrap.recoveryCredential,
+		RefreshMode:                  connectorRefreshModeAuto,
+		// This runtime only establishes the device credential used by the
+		// registered REST client. It never starts or changes a local share, so
+		// the owner-bound SessionOperations authority is intentionally absent.
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	defer func() {
+		if retErr != nil {
+			retErr = errors.Join(retErr, nativeRuntime.Close())
+		}
+	}()
+	openDeviceClient := func() (qurlapi.Client, error) {
+		store, handoffErr := nativeRuntime.Handoff()
+		if handoffErr != nil {
+			return nil, handoffErr
+		}
+		return o.openRegisteredDeviceClient(ctx, origin, store)
+	}
+	client, err := openDeviceClient()
+	if err != nil {
+		return nil, nil, err
+	}
+	deviceIdentity, err := client.Me(ctx)
+	client, deviceIdentity, err = repairExplicitLoginDeviceAuthorization(
+		ctx, nativeRuntime, bootstrap, openDeviceClient, client, deviceIdentity, err,
+	)
+	if err != nil {
+		return nil, nil, err
+	}
+	if deviceIdentity == nil {
+		return nil, nil, errors.New("qURL account identity response is empty")
+	}
+	if bootstrap.identity != nil && bootstrap.identity.OwnerID != deviceIdentity.OwnerID {
+		return nil, nil, &deviceAccountConflictError{
+			stateDir: stateDir, deviceKeyID: identityKeyID(deviceIdentity),
+			currentOwner: deviceIdentity.OwnerID, requestedOwner: bootstrap.identity.OwnerID,
+		}
+	}
+	if err := o.bindDeviceOwner(ctx, stateDir, deviceIdentity); err != nil {
+		return nil, nil, err
+	}
+	o.nativeRuntime = nativeRuntime
+	return client, deviceIdentity, nil
+}
+
+// openNativeExternalRegisteredClient enrolls this machine from a supervisor's
+// one-time token file into an externally supervised namespace, or opens the
+// identity already there. Establishing the external policy is part of the
+// operation: a fresh directory is labeled before anything is written into
+// it, and an already external namespace is accepted as is. The token stays
+// behind the runtime's lazy enrollment provider, so a warm namespace never
+// reads the file, and there is no recovery provider because a one-time token
+// can never become recovery authority.
+func (o *globalOpts) openNativeExternalRegisteredClient(
+	ctx context.Context,
+	tokenPath, stateDir string,
+) (_ qurlapi.Client, _ *qurlapi.Identity, retErr error) {
+	o.warnInsecureEndpoint()
+	if o.nativeRuntime != nil {
+		return nil, nil, errors.New("registered-device runtime is already open")
+	}
+	hubBootstrap, err := o.resolveHubBootstrap()
+	if err != nil {
+		return nil, nil, err
+	}
+	origin, err := agent.ResourceSDKOrigin(o.resolvedEndpoint)
+	if err != nil {
+		return nil, nil, err
+	}
+	hostname, err := os.Hostname()
+	if err != nil {
+		return nil, nil, fmt.Errorf("read local hostname: %w", err)
+	}
+	if err := connectorstate.EstablishExternalRuntimeMode(ctx, stateDir); err != nil {
+		return nil, nil, err
+	}
+	nativeRuntime, err := o.openNativeRuntime(ctx, connectorshare.NativeRuntimeConfig{
+		StateDir:                     stateDir,
+		AgentID:                      connectorstate.ConfiguredAgentID(),
+		Hub:                          hubBootstrap,
+		Hostname:                     hostname,
+		Version:                      o.version,
+		ClientBaseURL:                origin,
+		EnrollmentCredentialProvider: oneShotEnrollmentToken(tokenPath),
+		RefreshMode:                  connectorRefreshModeAuto,
+	})
+	if err != nil {
+		// Connector provider/envelope failures have no typed sentinel. Keep the
+		// Config fallback for unclassified errors, without relabeling known
+		// credential, network, or cancellation failures as state problems.
+		if exitcode.FromError(err) == exitcode.General {
+			err = fmt.Errorf("%w: %w", connectorstate.ErrAgentStateEnvelope, err)
+		}
+		return nil, nil, err
+	}
+	defer func() {
+		if retErr != nil {
+			retErr = errors.Join(retErr, nativeRuntime.Close())
+		}
+	}()
+	store, err := nativeRuntime.Handoff()
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := requireExternalOwnerScopedAgentState(ctx, store); err != nil {
+		return nil, nil, err
+	}
+	client, err := o.openRegisteredDeviceClient(ctx, origin, store)
+	if err != nil {
+		return nil, nil, err
+	}
+	deviceIdentity, err := client.Me(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	if deviceIdentity == nil {
+		return nil, nil, errors.New("qURL account identity response is empty")
+	}
+	if err := o.bindDeviceOwner(ctx, stateDir, deviceIdentity); err != nil {
+		return nil, nil, err
+	}
+	o.nativeRuntime = nativeRuntime
+	return client, deviceIdentity, nil
+}
+
+// requireExternalOwnerScopedAgentState refuses a device a supervisor cannot
+// use: native session operations accept only the owner-scoped agent
+// enrollment kind, and a token minted for target connector yields a
+// credential qurl-go refuses for them forever. The namespace is left as it is
+// for the supervisor to rotate.
+func requireExternalOwnerScopedAgentState(ctx context.Context, store qurl.AgentStateStore) error {
+	persisted, err := store.LoadAgentState(ctx)
+	if err != nil {
+		return err
+	}
+	if persisted == nil || persisted.RegisteredAt == nil || strings.TrimSpace(persisted.DeviceAPIKey) == "" {
+		return fmt.Errorf("%w: device registration is incomplete", auth.ErrDeviceEnrollmentScope)
+	}
+	// Both account and bootstrap are owner-scoped; only the connector-scoped
+	// kinds are refused by native session operations. This mirrors
+	// validateSandboxDeviceIdentity rather than narrowing past it - rejecting
+	// an account-enrolled device here would tell a supervisor to move aside a
+	// state directory whose device is perfectly usable, and that is not
+	// reversible by the operator.
+	//
+	// TODO(upstream-contract): a token minted for target=agent is recorded by
+	// the platform as RegistrationKeyKindBootstrap, which is why the external
+	// path expects bootstrap in practice. If that mapping changes, external
+	// login starts refusing valid devices with exit 4 and nothing else fails
+	// loudly.
+	kind := qurl.RegistrationKeyKind(strings.TrimSpace(persisted.EnrollmentCredentialKind))
+	switch kind {
+	case qurl.RegistrationKeyKindAccount, qurl.RegistrationKeyKindBootstrap:
+		return nil
+	case qurl.RegistrationKeyKindConnectorBootstrap, qurl.RegistrationKeyKindAgent:
+		// Connector-scoped: exactly what native session operations refuse.
+	default:
+		// Empty or unrecognized: fail closed rather than guess.
+	}
+	return fmt.Errorf("%w: enrolled with credential kind %q, want the owner-scoped %q or %q; move the state directory aside and enroll again with a token minted for target agent",
+		auth.ErrDeviceEnrollmentScope, kind, qurl.RegistrationKeyKindAccount, qurl.RegistrationKeyKindBootstrap)
+}
+
+// openRegisteredDeviceClient builds the narrow REST client around the durable
+// device credential held in store.
+func (o *globalOpts) openRegisteredDeviceClient(ctx context.Context, origin string, store qurl.AgentStateStore) (qurlapi.Client, error) {
+	return qurlapi.NewRegistered(ctx, &qurlapi.Config{
+		BaseURL:      origin,
+		Version:      o.version,
+		Verbose:      o.verboseLogger(),
+		Sleep:        o.sleep,
+		NewRequestID: o.newRequestID,
+	}, store)
+}
+
+// bindDeviceOwner records the authenticated owner in the namespace's registry,
+// refusing a namespace that belongs to another account.
+func (o *globalOpts) bindDeviceOwner(ctx context.Context, stateDir string, deviceIdentity *qurlapi.Identity) error {
+	registry, err := o.openShareRegistry(stateDir)
+	if err != nil {
+		return err
+	}
+	return bindRegisteredDeviceOwner(ctx, registry, stateDir, identityKeyID(deviceIdentity), deviceIdentity.OwnerID)
+}
+
+// oneShotEnrollmentToken reads the supervisor's token file at most once per
+// enrollment and replays that outcome for every later call. The file is
+// one-shot and the supervisor deletes it on every exit path, so re-opening it
+// on a retry would report a file-shape error about a path that is gone. The
+// cache is what prevents that; a repeated call gets the same token and lets
+// the platform be the one to reject a genuinely spent credential, the way the
+// account-key provider's cached idempotency key does. The returned token stays
+// in memory for this enrollment; clearing the reader's buffer does not erase it.
+func oneShotEnrollmentToken(path string) func(context.Context, qurl.AgentEnrollmentCredentialRequest) (string, error) {
+	var (
+		once  sync.Once
+		token string
+		err   error
+	)
+	return func(context.Context, qurl.AgentEnrollmentCredentialRequest) (string, error) {
+		once.Do(func() {
+			token, err = auth.ReadExternalEnrollmentTokenFile(path)
+			if err != nil {
+				// Claim the failure before it reaches the caller's envelope wrap:
+				// every file-shape check runs here, inside the runtime open, and
+				// none of them is an agent-state-envelope problem.
+				err = fmt.Errorf("%w: %w", auth.ErrEnrollmentTokenFile, err)
+			}
+		})
+		return token, err
+	}
+}
+
+// identityKeyID is the non-secret identifier of the credential behind id.
+func identityKeyID(id *qurlapi.Identity) string {
+	if id == nil || id.Key == nil {
+		return ""
+	}
+	return id.Key.KeyID
+}
+
+func repairExplicitLoginDeviceAuthorization(
+	ctx context.Context,
+	nativeRuntime registeredNativeRuntime,
+	bootstrap *registeredAccountBootstrap,
+	openDeviceClient func() (qurlapi.Client, error),
+	client qurlapi.Client,
+	deviceIdentity *qurlapi.Identity,
+	requestErr error,
+) (qurlapi.Client, *qurlapi.Identity, error) {
+	// Explicit login already validated this exact account key. If a warm native
+	// open then exposes the exact registered-device invalid-key response, allow
+	// the connector to spend that authority once and retry this request once.
+	// Ordinary warm commands never enter this branch, even if Hub recovery had
+	// to load bootstrap authority while opening the native runtime.
+	var apiErr *qurlapi.Error
+	if requestErr != nil && bootstrap.explicitValidatedAccountAuthority && errors.As(requestErr, &apiErr) &&
+		apiErr.StatusCode == http.StatusUnauthorized && apiErr.Code == "api_key_invalid" {
+		if repairErr := nativeRuntime.RecoverCredentialAfterDeviceAuthorizationFailure(
+			ctx, apiErr.StatusCode, apiErr.Code, bootstrap.recoveryCredential,
+		); repairErr != nil {
+			return nil, nil, repairErr
+		}
+		repairedClient, openErr := openDeviceClient()
+		if openErr != nil {
+			return nil, nil, openErr
+		}
+		repairedIdentity, retryErr := repairedClient.Me(ctx)
+		return repairedClient, repairedIdentity, retryErr
+	}
+	return client, deviceIdentity, requestErr
+}
+
+func (o *globalOpts) closeAPIClient() error {
+	if o.nativeRuntime == nil {
+		return nil
+	}
+	err := o.nativeRuntime.Close()
+	o.nativeRuntime = nil
+	o.registeredClient = nil
+	o.registeredIdentity = nil
+	return err
 }
 
 func (o *globalOpts) verboseLogger() func(string, ...any) {

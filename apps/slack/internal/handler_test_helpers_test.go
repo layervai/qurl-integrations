@@ -2,6 +2,7 @@ package internal
 
 import (
 	"bytes"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"strings"
@@ -72,6 +73,34 @@ func (c *capturedLogs) contains(substr string) bool {
 	return strings.Contains(c.buf.String(), substr)
 }
 
+func (c *capturedLogs) String() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.buf.String()
+}
+
+// findAuditRecord returns the "audit" group of the first captured JSON log
+// record carrying the given event, or nil when none does. Non-JSON lines are
+// skipped rather than fatal: the captured sink sees every record the test
+// happens to produce, not only the one under assertion.
+func findAuditRecord(logs *capturedLogs, event string) map[string]any {
+	for _, line := range strings.Split(strings.TrimSpace(logs.String()), "\n") {
+		if line == "" {
+			continue
+		}
+		var record struct {
+			Audit map[string]any `json:"audit"`
+		}
+		if err := json.Unmarshal([]byte(line), &record); err != nil {
+			continue
+		}
+		if record.Audit != nil && record.Audit["event"] == event {
+			return record.Audit
+		}
+	}
+	return nil
+}
+
 // captureDefaultSlog redirects the default slog logger for one test and
 // restores it on cleanup. Async install work logs through slog.With off the
 // default logger, so this is the only seam that sees those records.
@@ -91,40 +120,39 @@ func captureDefaultSlog(t *testing.T) *capturedLogs {
 // it. Shared so the fires/silent assertions cannot drift apart.
 const kindFirstRejection = "tunnel install: minted credential did not confirm the kind-first contract"
 
-// assertConnectorEnrollmentKind pins the kind/target pair that makes the
-// minted credential a Connector-bound enrollment token rather than an ordinary
-// key. Callers with extra per-path expectations (an expires_in, say) assert
-// those separately.
-func assertConnectorEnrollmentKind(t *testing.T, body map[string]any) {
+// assertAgentEnrollmentKind pins the decoded POST /v1/api-keys body to an
+// agent-target enrollment token (owner-scoped session-control enrollment).
+func assertAgentEnrollmentKind(t *testing.T, body map[string]any) {
 	t.Helper()
-	if body["kind"] != client.CredentialKindEnrollmentToken || body["target"] != client.CredentialTargetConnector {
+	if body["kind"] != client.CredentialKindEnrollmentToken || body["target"] != client.CredentialTargetAgent {
 		t.Errorf("api key body = %+v, want kind=%q target=%q",
-			body, client.CredentialKindEnrollmentToken, client.CredentialTargetConnector)
+			body, client.CredentialKindEnrollmentToken, client.CredentialTargetAgent)
 	}
 }
 
-// assertSingleConnectorClaim pins the decoded `POST /v1/api-keys` body to
-// exactly one Connector claim bound to slug. Every step is type-checked so a
-// wrong-shaped body reports a readable failure instead of panicking the test
-// binary on a bad assertion.
+// assertSingleConnectorClaim pins the decoded POST /v1/api-keys body to a
+// bound agent token: exactly one connector claim naming this install's slug.
 func assertSingleConnectorClaim(t *testing.T, body map[string]any, slug string) {
 	t.Helper()
-	raw, ok := body["claims"].([]any)
+	claims, ok := body["claims"].([]any)
 	if !ok {
-		t.Errorf("api key body claims = %v, want a JSON array; body=%+v", body["claims"], body)
+		t.Errorf("api key claims = %v (%T), want a claims array; body=%+v", body["claims"], body["claims"], body)
 		return
 	}
-	if len(raw) != 1 {
-		t.Errorf("api key body has %d claims, want exactly 1; body=%+v", len(raw), body)
+	if len(claims) != 1 {
+		t.Errorf("api key claims = %d entries, want exactly one connector claim; body=%+v", len(claims), body)
 		return
 	}
-	claim, ok := raw[0].(map[string]any)
+	claim, ok := claims[0].(map[string]any)
 	if !ok {
-		t.Errorf("api key body claims[0] = %v, want a JSON object; body=%+v", raw[0], body)
+		t.Errorf("api key claim = %v, want an object; body=%+v", claims[0], body)
 		return
 	}
-	if claim[testKeyType] != client.CredentialClaimTypeConnector || claim["id"] != slug {
-		t.Errorf("api key body claim = %+v, want {type:%q, id:%q}", claim, client.CredentialClaimTypeConnector, slug)
+	if claim[testKeyType] != client.CredentialClaimTypeConnector {
+		t.Errorf("api key claim type = %v, want %q; body=%+v", claim[testKeyType], client.CredentialClaimTypeConnector, body)
+	}
+	if claim["id"] != slug {
+		t.Errorf("api key claim id = %v, want %q; body=%+v", claim["id"], slug, body)
 	}
 }
 

@@ -711,7 +711,7 @@ function showPermissionConfirmation(details) {
   pendingPermissionRequest = details;
   permissionConfirmText.textContent = getMessage(
     'permission_request_confirm',
-    'Allow the extension to access $1 for qURL uploads? Chrome will show a permission prompt next.',
+    'Allow the extension to access $1 for qURL uploads? Your browser will show a permission prompt next.',
     [details.origin]
   );
   permissionConfirmPanel.classList.remove('hidden');

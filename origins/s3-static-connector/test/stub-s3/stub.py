@@ -7,10 +7,18 @@ the expected canonical path/Host, which is what proves nginx's rewrite + query
 strip + signing-after-rewrite wiring. Cryptographic verification against real S3
 happens during the staging soak.
 
+An unsigned request gets 403 like a private bucket does, whatever the key: that
+is what an empty AWS provider chain produces, and the origin's startup preflight
+exists to catch it.
+
 Known keys return fixture bodies + headers. `badrequest*` -> 400, `forbidden*`
--> 403 (auth/signing failure), `throttle*` -> 429, `boom*` -> 500 (upstream
-5xx), unknown -> 404. The received request line is echoed to stderr (docker
-logs) so the test can assert cache behavior by counting upstream hits.
+-> 403 (auth/signing failure), `wrongregion*` -> 301 (the PermanentRedirect a
+mistyped region produces, body naming the real bucket + region), `throttle*` ->
+429, `notimplemented*` -> 501, `boom*` -> 500 (upstream 5xx), unknown -> 404.
+Every response carries the `x-amz-*` headers real S3 attaches, so the origin's
+header scrubbing is exercised on success as well as on error paths. The received
+request line is echoed to stderr (docker logs) so the test can assert cache
+behavior by counting upstream hits.
 """
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -57,6 +65,9 @@ class Handler(BaseHTTPRequestHandler):
             "X-Stub-Client-Amz-Meta",
             self.headers.get("x-amz-meta-client", "absent"),
         )
+        # S3 stamps these on every response, success or error.
+        self.send_header("x-amz-request-id", "QWERTY123")
+        self.send_header("x-amz-id-2", "stub-extended-request-id")
 
     def _send(self, status, body=b"", ctype=None, cache=None, head_only=False,
               extra=None):
@@ -75,11 +86,40 @@ class Handler(BaseHTTPRequestHandler):
 
     def _serve(self, head_only=False):
         key = self._key()
+        # A private bucket answers an unsigned request with 403 AccessDenied.
+        # Name the identity state on stderr for the HEAD preflight assertion.
+        if not self.headers.get("Authorization"):
+            self.log_message("authorization absent %s", self.path)
+            return self._send(403, b"<Error><Code>AccessDenied</Code></Error>",
+                              ctype="application/xml", head_only=head_only)
+        if key == "startup-denied/index.html":
+            # Simulate IAM propagation completing after the startup HEAD.
+            return self._send(403 if head_only else 200, b"recovered",
+                              ctype="text/plain", head_only=head_only)
         if "badrequest" in key:
             return self._send(400, b"<Error><Code>InvalidRequest</Code></Error>",
                               ctype="application/xml", head_only=head_only)
         if "forbidden" in key:
             return self._send(403, b"", head_only=head_only)
+        if "wrongregion" in key:
+            # A mistyped bucket region: S3 answers 301 with the bucket's real
+            # name and region in the body plus x-amz-bucket-region.
+            return self._send(
+                301,
+                b'<?xml version="1.0" encoding="UTF-8"?>\n'
+                b"<Error><Code>PermanentRedirect</Code><Message>The bucket you "
+                b"are attempting to access must be addressed using the "
+                b"specified endpoint. Please send all future requests to this "
+                b"endpoint.</Message>"
+                b"<Endpoint>example-private-site.s3.eu-west-1.amazonaws.com"
+                b"</Endpoint><Bucket>example-private-site</Bucket>"
+                b"<RequestId>QWERTY123</RequestId></Error>",
+                ctype="application/xml", head_only=head_only,
+                extra={"x-amz-bucket-region": "eu-west-1"})
+        if "notimplemented" in key:
+            return self._send(
+                501, b"<Error><Code>NotImplemented</Code></Error>",
+                ctype="application/xml", head_only=head_only)
         if "throttle" in key:
             return self._send(429, b"<Error><Code>SlowDown</Code></Error>",
                               ctype="application/xml", head_only=head_only)
@@ -105,7 +145,17 @@ class Handler(BaseHTTPRequestHandler):
                 206, chunk, ctype=ctype, cache=cache, head_only=head_only,
                 extra={"Content-Range": f"bytes {start}-{end}/{len(body)}",
                        "Accept-Ranges": "bytes"})
-        self._send(200, body, ctype=ctype, cache=cache, head_only=head_only)
+        # Last-Modified lets the origin answer a viewer's conditional GET with
+        # its own 304, which the status-intercept list must keep working.
+        self._send(200, body, ctype=ctype, cache=cache, head_only=head_only,
+                   extra={"Last-Modified": "Wed, 21 Oct 2026 07:28:00 GMT",
+                          "x-amz-meta-internal-project": "private-site",
+                          "x-amz-server-side-encryption": "aws:kms",
+                          "x-amz-server-side-encryption-aws-kms-key-id":
+                              "arn:aws:kms:us-east-1:123456789012:key/stub-key",
+                          "x-amz-version-id": "3HL4kqtJlcpXroDTDmjVBH40Nrjfkd",
+                          "x-amz-website-redirect-location":
+                              "/internal-destination"})
 
     def do_GET(self):
         self._serve(head_only=False)

@@ -9,6 +9,11 @@
  * `retrieveSessionInfo` callback.
  *
  * This script is NOT production code. It's a runnable validation harness.
+ * Its phase-2 `retrieveSessionInfo` counter is a historical harness heuristic,
+ * not the production IDENTIFY guard: @discordjs/ws can read session state for
+ * non-IDENTIFY work. Production enforces its cap at `waitForIdentify`, so an
+ * exit-3 result here must be confirmed against Discord Gateway logs before it
+ * is treated as token contention.
  * Production code lands in `src/gateway-shipper/` in a later PR; this script
  * exists so a reviewer can verify the mechanism end-to-end before we sink
  * weeks into the rest of the architecture.

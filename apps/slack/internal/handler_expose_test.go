@@ -1033,6 +1033,7 @@ func TestParseExposeURLCreateModalArgs(t *testing.T) {
 			}
 			if got == nil {
 				t.Fatal("args = nil, want parsed args")
+				return
 			}
 			if got.TargetURL != tc.wantTarget || got.ChannelAlias != tc.wantAlias {
 				t.Fatalf("got (target=%q alias=%q), want (target=%q alias=%q)", got.TargetURL, got.ChannelAlias, tc.wantTarget, tc.wantAlias)

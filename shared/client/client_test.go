@@ -23,7 +23,13 @@ const (
 	testResourceIDAlt = "r_dev_dash01"
 	testTargetURL     = "https://internal.example.com"
 	testTunnelSlug    = "prod-dashboard"
+	testSharingID     = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE155W1ele0q0AK_YFZnQqzfhJLxqLgHaG3B5rXzPO87WZlnYa5TWlrbIO2C6ALvLxT7zaFWm9fc8PCklq1v4arg"
+	testSharingCRID   = "qhtpthw4qt7wkw7khghr6x3z4hsfyn4zbuyhnee4i6bi67yu6yytgvwdbb4q"
 )
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
 
 // testClient creates a client with retries disabled for fast unit tests.
 func testClient(url, key string) *Client {
@@ -51,6 +57,106 @@ func apiEnvelope(t *testing.T, w http.ResponseWriter, data any) {
 	}
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
 		t.Fatalf("encode response: %v", err)
+	}
+}
+
+func TestRestartSharingSendsBodylessSinglePost(t *testing.T) {
+	t.Parallel()
+	var attempts atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts.Add(1)
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/resources/"+testSharingID+"/sharing/restart" {
+			t.Errorf("request = %s %s", r.Method, r.URL.Path)
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(body) != 0 || r.ContentLength != 0 || (r.Header.Get("Content-Length") != "" && r.Header.Get("Content-Length") != "0") {
+			t.Errorf("restart body=%q contentLength=%d header=%q, want no body", body, r.ContentLength, r.Header.Get("Content-Length"))
+		}
+		apiEnvelope(t, w, map[string]any{
+			"resource_id": testSharingID, "crid": testSharingCRID,
+			"desired_state": "on", "serving_epoch": 2, "connection_state": "connecting",
+		})
+	}))
+	defer srv.Close()
+
+	got, err := New(srv.URL, "key", WithRetry(3), withDelaysForTest()).RestartSharing(context.Background(), testSharingID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if attempts.Load() != 1 || got.ServingEpoch != 2 {
+		t.Fatalf("attempts=%d response=%+v", attempts.Load(), got)
+	}
+}
+
+func TestRestartSharingNeverReplaysAmbiguousFailure(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name      string
+		transport roundTripFunc
+	}{
+		{
+			name: "transport error",
+			transport: func(*http.Request) (*http.Response, error) {
+				return nil, errors.New("response lost")
+			},
+		},
+		{
+			name: "retryable status",
+			transport: func(*http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusServiceUnavailable,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(strings.NewReader(`{"error":{"title":"unavailable","status":503}}`)),
+				}, nil
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var attempts atomic.Int32
+			transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				attempts.Add(1)
+				return tc.transport(req)
+			})
+			c := New("https://api.invalid", "key",
+				WithHTTPClient(&http.Client{Transport: transport}), WithRetry(3), withDelaysForTest())
+			if _, err := c.RestartSharing(context.Background(), testSharingID); err == nil {
+				t.Fatal("RestartSharing unexpectedly succeeded")
+			}
+			if attempts.Load() != 1 {
+				t.Fatalf("restart attempts=%d, want exactly one", attempts.Load())
+			}
+		})
+	}
+}
+
+func TestSharingStateRequiresCanonicalServingEpoch(t *testing.T) {
+	t.Parallel()
+	tests := map[string]string{
+		"missing":   `{"resource_id":"` + testSharingID + `","crid":"` + testSharingCRID + `","desired_state":"off","connection_state":"stopped"}`,
+		"null":      `{"resource_id":"` + testSharingID + `","crid":"` + testSharingCRID + `","desired_state":"off","serving_epoch":null,"connection_state":"stopped"}`,
+		"string":    `{"resource_id":"` + testSharingID + `","crid":"` + testSharingCRID + `","desired_state":"off","serving_epoch":"0","connection_state":"stopped"}`,
+		"fraction":  `{"resource_id":"` + testSharingID + `","crid":"` + testSharingCRID + `","desired_state":"off","serving_epoch":0.0,"connection_state":"stopped"}`,
+		"exponent":  `{"resource_id":"` + testSharingID + `","crid":"` + testSharingCRID + `","desired_state":"off","serving_epoch":0e0,"connection_state":"stopped"}`,
+		"negative":  `{"resource_id":"` + testSharingID + `","crid":"` + testSharingCRID + `","desired_state":"off","serving_epoch":-1,"connection_state":"stopped"}`,
+		"overflow":  `{"resource_id":"` + testSharingID + `","crid":"` + testSharingCRID + `","desired_state":"off","serving_epoch":18446744073709551616,"connection_state":"stopped"}`,
+		"duplicate": `{"resource_id":"` + testSharingID + `","crid":"` + testSharingCRID + `","desired_state":"off","serving_epoch":0,"serving_epoch":0,"connection_state":"stopped"}`,
+	}
+	for name, body := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"data":`+body+`}`)
+			}))
+			defer srv.Close()
+			if _, err := testClient(srv.URL, "key").GetSharing(context.Background(), testSharingID); err == nil {
+				t.Fatalf("GetSharing accepted %s serving_epoch", name)
+			}
+		})
 	}
 }
 
@@ -1430,6 +1536,69 @@ func TestDeleteResource(t *testing.T) {
 	}
 }
 
+func TestGetResourceDecodesDetailEnvelope(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/resources/r_abc123test" {
+			t.Errorf("request = %s %s, want GET /v1/resources/r_abc123test", r.Method, r.URL.Path)
+			http.Error(w, "unexpected request", http.StatusInternalServerError)
+			return
+		}
+		// Mirrors qurl-service ResourceDetailResponse: resource beside a qurls preview.
+		apiEnvelope(t, w, map[string]any{
+			"resource": map[string]any{"resource_id": "r_abc123test", "type": "tunnel", "status": "active"},
+			"qurls":    []any{},
+		})
+	}))
+	defer srv.Close()
+
+	c := testClient(srv.URL, "test-key")
+	got, err := c.GetResource(context.Background(), "r_abc123test")
+	if err != nil {
+		t.Fatalf("GetResource: %v", err)
+	}
+	if got.ResourceID != "r_abc123test" || got.Type != ResourceTypeTunnel {
+		t.Fatalf("GetResource = %+v, want tunnel r_abc123test", got)
+	}
+}
+
+func TestGetResourceRejectsMissingOrMismatchedResource(t *testing.T) {
+	t.Parallel()
+
+	for name, tc := range map[string]struct {
+		body    string
+		wantErr string
+	}{
+		"absent data": {`{"meta":{}}`, "has no resource"},
+		"null data":   {`{"data":null}`, "has no resource"},
+		"missing":     {`{"data":{"qurls":[]}}`, "has no resource"},
+		// The pre-fix client decoded this flat shape; the service never sends it.
+		"legacy flat": {`{"data":{"resource_id":"r_abc123test","type":"tunnel"}}`, "has no resource"},
+		"blank type":  {`{"data":{"resource":{"resource_id":"r_abc123test","type":" "}}}`, "has no type"},
+		"mismatch":    {`{"data":{"resource":{"resource_id":"r_other","type":"tunnel"}}}`, "identity does not match"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+
+			_, err := testClient(srv.URL, "test-key").GetResource(context.Background(), "r_abc123test")
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("GetResource err = %v, want %q", err, tc.wantErr)
+			}
+			// Callers route *APIError to status-specific replies; drift must not look like one.
+			var apiErr *APIError
+			if errors.As(err, &apiErr) {
+				t.Errorf("GetResource err = %v is an *APIError, want a plain contract error", err)
+			}
+		})
+	}
+}
+
 func TestDeleteResourceReturnsAPIErrorOnFailure(t *testing.T) {
 	t.Parallel()
 
@@ -1612,6 +1781,23 @@ func TestUpdateResourceNoFieldsSetRejected(t *testing.T) {
 	}
 }
 
+func TestUpdateResourceInputMarshalAliasWire(t *testing.T) {
+	alias, description := "newalias", "description"
+	for _, tc := range []struct {
+		input UpdateResourceInput
+		want  string
+	}{
+		{UpdateResourceInput{Description: &description}, `{"description":"description"}`},
+		{UpdateResourceInput{ClearAlias: true}, `{"alias":null}`},
+		{UpdateResourceInput{Alias: &alias}, `{"alias":"newalias"}`},
+	} {
+		got, err := json.Marshal(tc.input)
+		if err != nil || string(got) != tc.want {
+			t.Fatalf("marshal = %s, %v; want %s", got, err, tc.want)
+		}
+	}
+}
+
 // TestHasAnyFieldSetCoversAllFields walks UpdateResourceInput's struct
 // fields via reflection and asserts that setting *each one alone* makes
 // hasAnyFieldSet return true. Catches the failure mode where a future
@@ -1623,8 +1809,7 @@ func TestUpdateResourceNoFieldsSetRejected(t *testing.T) {
 // pointer to a zero value of the target type; bool fields flip to true.
 // Skip the test (with a t.Skip) for any field whose type isn't covered;
 // adding such a field here is a nudge to extend the helper. Today's
-// surface (5 fields: Description, Alias, ClearAlias, CustomDomain,
-// AccessPolicy) is fully covered.
+// surface (4 fields: Description, Alias, ClearAlias, CustomDomain) is fully covered.
 func TestHasAnyFieldSetCoversAllFields(t *testing.T) {
 	emptyStr := ""
 	cases := []struct {
@@ -1635,7 +1820,6 @@ func TestHasAnyFieldSetCoversAllFields(t *testing.T) {
 		{"Alias", UpdateResourceInput{Alias: &emptyStr}},
 		{"ClearAlias", UpdateResourceInput{ClearAlias: true}},
 		{"CustomDomain", UpdateResourceInput{CustomDomain: &emptyStr}},
-		{"AccessPolicy", UpdateResourceInput{AccessPolicy: &AccessPolicy{}}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1657,15 +1841,12 @@ func TestHasAnyFieldSetCoversAllFields(t *testing.T) {
 	// Set-equality (not just count) catches the duplicate-case copy-
 	// paste mistake too — two cases named "Alias" and a missing case
 	// for a new field would slip past a count-only check.
-	// Filters out fields with `json:"-"` so future request-decoration
-	// fields (e.g. IdempotencyKey per #148) don't trip the check.
+	// ClearAlias is an input field even though its wire key is alias.
 	expected := make(map[string]bool)
 	tt := reflect.TypeOf(UpdateResourceInput{})
 	for i := range tt.NumField() {
 		f := tt.Field(i)
-		if f.Tag.Get("json") != "-" {
-			expected[f.Name] = true
-		}
+		expected[f.Name] = true
 	}
 	got := make(map[string]bool)
 	for _, tc := range cases {
@@ -1769,13 +1950,11 @@ func TestUpdateResourceClearAlias(t *testing.T) {
 	if err := json.Unmarshal(gotBody, &raw); err != nil {
 		t.Fatalf("unmarshal body: %v", err)
 	}
-	if got, ok := raw["clear_alias"]; !ok || got != true {
-		t.Errorf("clear_alias: want true, got %v (ok=%v); body=%s", got, ok, gotBody)
+	if got, ok := raw["alias"]; !ok || got != nil {
+		t.Errorf("alias: want explicit null, got %v (ok=%v); body=%s", got, ok, gotBody)
 	}
-	// Symmetric pin: clearing must NOT also send a stale `alias` key.
-	// Mirror of the assertion in TestUpdateResourceSetAlias.
-	if _, ok := raw["alias"]; ok {
-		t.Errorf("alias must elide when ClearAlias=true; body=%s", gotBody)
+	if _, ok := raw["clear_alias"]; ok {
+		t.Errorf("unsupported clear_alias must not be sent; body=%s", gotBody)
 	}
 }
 
@@ -1903,51 +2082,6 @@ func TestUpdateResourceClearCustomDomainByEmptyString(t *testing.T) {
 	}
 	if got != "" {
 		t.Errorf("custom_domain: got %v, want \"\"", got)
-	}
-}
-
-// TestUpdateResourceClearAccessPolicyByEmptyStruct pins the documented
-// `&AccessPolicy{}` clear convention. AccessPolicy has no sentinel
-// because it's a struct (not a scalar), so passing an all-zero pointer
-// is the clear signal. The wire shape must round-trip as
-// `"access_policy": {}` — if a future contributor adds a non-omitempty
-// field to AccessPolicy, the empty literal would no longer marshal as
-// `{}` and the clear contract would silently break; this test catches
-// that.
-func TestUpdateResourceClearAccessPolicyByEmptyStruct(t *testing.T) {
-	var gotBody []byte
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var err error
-		gotBody, err = io.ReadAll(r.Body)
-		if err != nil {
-			t.Fatalf("read body: %v", err)
-		}
-		apiEnvelope(t, w, map[string]any{
-			"resource_id": testResourceID,
-		})
-	}))
-	defer srv.Close()
-
-	c := testClient(srv.URL, "test-key")
-	if _, err := c.UpdateResource(context.Background(), testResourceID, &UpdateResourceInput{
-		AccessPolicy: &AccessPolicy{},
-	}); err != nil {
-		t.Fatalf("UpdateResource: %v", err)
-	}
-	var raw map[string]any
-	if err := json.Unmarshal(gotBody, &raw); err != nil {
-		t.Fatalf("unmarshal body: %v", err)
-	}
-	got, ok := raw["access_policy"]
-	if !ok {
-		t.Fatalf("access_policy must be present (the &AccessPolicy{} clear semantic); body=%s", gotBody)
-	}
-	policy, ok := got.(map[string]any)
-	if !ok {
-		t.Fatalf("access_policy should decode as object; got %T (%v)", got, got)
-	}
-	if len(policy) != 0 {
-		t.Errorf("access_policy should marshal as `{}`; got %v", policy)
 	}
 }
 
@@ -2250,5 +2384,186 @@ func TestListResourcesCursorEscaping(t *testing.T) {
 	c := testClient(srv.URL, "test-key")
 	if _, err := c.ListResources(context.Background(), ListResourcesInput{Cursor: cursor}); err != nil {
 		t.Fatalf("ListResources: %v", err)
+	}
+}
+
+// mintAllowedKeys is the wire contract for the two mint endpoints, transcribed
+// from qurl-service's api/openapi.yaml — deliberately NOT derived from the body
+// structs in this package, so a field added there cannot also grant itself
+// permission to ship. qurl-service#1402 sets `additionalProperties: false` on
+// both schemas, so anything outside these sets is a 400, not the silent drop it
+// used to be.
+var mintAllowedKeys = map[string][]string{
+	// CreateQurlRequest
+	"POST /v1/qurls": {
+		"type", "target_url", "expires_in", "one_time_use",
+		"max_sessions", "session_duration", "access_policy", "label",
+		"custom_domain",
+	},
+	// CreateQurlForResourceRequest — no target_url or resource_id (the id rides
+	// in the path), and no target_path (that is MintLinkRequest's field).
+	"POST /v1/resources/{id}/qurls": {
+		"expires_in", "one_time_use", "max_sessions", "session_duration",
+		"access_policy", "label",
+	},
+}
+
+// fullyPopulatedCreateInput returns a CreateInput with every marshalable field
+// set to a non-zero value. That is what gives
+// TestMintBodiesCarryOnlyDeclaredFields its teeth: a field that is left at its
+// zero value would be dropped by omitempty and sail past the key check, so the
+// completeness assertion below refuses to let this fixture rot.
+func fullyPopulatedCreateInput() CreateInput {
+	return CreateInput{
+		TargetURL:       testTargetURL,
+		ResourceID:      testResourceID,
+		Label:           "for Alice",
+		ExpiresIn:       "7d",
+		OneTimeUse:      true,
+		MaxSessions:     3,
+		SessionDuration: "1h",
+		AccessPolicy:    &AccessPolicy{IPAllowlist: []string{"10.0.0.1"}},
+		IdempotencyKey:  "idem-key-1",
+	}
+}
+
+// TestCreateInputFixtureIsComplete fails when CreateInput grows a field that
+// fullyPopulatedCreateInput doesn't set. Without this, adding a field and
+// forgetting the fixture would silently weaken the key guard below to a
+// no-op for that field rather than failing.
+func TestCreateInputFixtureIsComplete(t *testing.T) {
+	t.Parallel()
+	v := reflect.ValueOf(fullyPopulatedCreateInput())
+	typ := v.Type()
+	for i := range typ.NumField() {
+		field := typ.Field(i)
+		if !field.IsExported() {
+			continue
+		}
+		if v.Field(i).IsZero() {
+			t.Errorf("CreateInput.%s is zero in fullyPopulatedCreateInput — set it, "+
+				"or the mint-body key guard silently stops covering it", field.Name)
+		}
+	}
+}
+
+// TestMintBodiesCarryOnlyDeclaredFields is the regression gate for
+// qurl-service#1402: every key a mint body carries must be a property of that
+// endpoint's request schema. It drives the real Create path with a
+// fully-populated input and reads the body off the wire, so it covers whatever
+// Create actually serializes rather than whatever a body struct claims.
+//
+// This is the guard that `reason` (Slack) and `target_path` (Discord) needed
+// and didn't have: both were declared client-side, marshaled, dropped
+// server-side, and invisible until the schema tightened.
+func TestMintBodiesCarryOnlyDeclaredFields(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name     string
+		endpoint string
+		// mutate adapts the shared fixture to the form under test.
+		// TargetURL and ResourceID are mutually exclusive on the wire, and
+		// which one is set is what routes Create to each endpoint.
+		mutate func(*CreateInput)
+	}{
+		{
+			name:     "target-URL form",
+			endpoint: "POST /v1/qurls",
+			mutate:   func(in *CreateInput) { in.ResourceID = "" },
+		},
+		{
+			name:     "resource form",
+			endpoint: "POST /v1/resources/{id}/qurls",
+			mutate:   func(in *CreateInput) { in.TargetURL = "" },
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var captured []byte
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				captured, _ = io.ReadAll(r.Body)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"data":{"resource_id":"r_1","qurl_link":"https://qurl.link/#at_x"}}`))
+			}))
+			defer srv.Close()
+
+			input := fullyPopulatedCreateInput()
+			tc.mutate(&input)
+			if _, err := testClient(srv.URL, "k").Create(context.Background(), input); err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+
+			var body map[string]json.RawMessage
+			if err := json.Unmarshal(captured, &body); err != nil {
+				t.Fatalf("unmarshal captured body: %v body=%s", err, captured)
+			}
+			allowed := make(map[string]bool, len(mintAllowedKeys[tc.endpoint]))
+			for _, k := range mintAllowedKeys[tc.endpoint] {
+				allowed[k] = true
+			}
+			for key := range body {
+				if !allowed[key] {
+					t.Errorf("%s body carries %q, which is not a property of its request schema "+
+						"(qurl-service rejects unknown fields since #1402); allowed: %v",
+						tc.endpoint, key, mintAllowedKeys[tc.endpoint])
+				}
+			}
+			if len(body) == 0 {
+				t.Errorf("%s body was empty — the fixture stopped reaching the wire, so this "+
+					"guard would pass vacuously; body=%s", tc.endpoint, captured)
+			}
+		})
+	}
+}
+
+func TestMe(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name       string
+		status     int
+		body       string
+		want       string
+		wantErr    string
+		wantNoKey  bool
+		wantAnyErr bool
+	}{
+		{name: "owner resolved", status: http.StatusOK, body: `{"data":{"owner_id":"email|abc","api_key":{"key_id":"key_1"}}}`, want: "email|abc"},
+		{name: "padded owner id trimmed", status: http.StatusOK, body: `{"data":{"owner_id":" email|abc ","api_key":{"key_id":"key_1"}}}`, want: "email|abc"},
+		{name: "owner_id missing", status: http.StatusOK, body: `{"data":{"api_key":{"key_id":"key_1"}}}`, wantErr: "missing owner_id"},
+		{name: "empty body", status: http.StatusOK, body: ``, wantAnyErr: true},
+		{name: "empty api_key object is not a principal", status: http.StatusOK, body: `{"data":{"owner_id":"email|abc","api_key":{}}}`, want: "email|abc", wantNoKey: true},
+		{name: "http error propagates", status: http.StatusInternalServerError, body: `{"error":{"code":"internal","message":"boom"}}`, wantErr: "500"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodGet || r.URL.Path != "/v1/me" {
+					t.Errorf("request = %s %s, want GET /v1/me", r.Method, r.URL.Path)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+			got, err := New(srv.URL, "key").Me(context.Background())
+			if tc.wantAnyErr {
+				if err == nil {
+					t.Fatal("malformed 200 body must not yield an identity")
+				}
+				return
+			}
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("Me error = %v, want containing %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil || got.OwnerID != tc.want {
+				t.Fatalf("Me = %+v, %v; want owner %q", got, err, tc.want)
+			}
+			if tc.wantNoKey && got.APIKey != nil {
+				t.Fatalf("Me = %+v; an empty api_key object must not count as a principal", got)
+			}
+		})
 	}
 }

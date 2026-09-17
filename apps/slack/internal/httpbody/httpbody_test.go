@@ -50,7 +50,7 @@ func TestReadResponseBodyRejectsOneByteOverLimit(t *testing.T) {
 
 // TestReadResponseBodyDrainsOversizeBody pins the two reads an oversize response costs:
 // limit+1 to detect it, then DrainResponseBody's own limit+1. Returning the refusal
-// without the drain leaves the connection unreusable, which is what that function is for.
+// without the drain skips the bounded attempt at HTTP/1 connection reuse.
 func TestReadResponseBodyDrainsOversizeBody(t *testing.T) {
 	const (
 		limit = 16

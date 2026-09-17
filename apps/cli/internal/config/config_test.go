@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/layervai/qurl-integrations/apps/cli/internal/output"
@@ -210,5 +211,51 @@ func TestIsProductionEndpoint(t *testing.T) {
 		if got := IsProductionEndpoint(endpoint); got != want {
 			t.Errorf("IsProductionEndpoint(%q) = %v, want %v", endpoint, got, want)
 		}
+	}
+}
+
+func TestShareGroupModeConfigValueIsValidatedAsAFileSetting(t *testing.T) {
+	if got := ShareGroupModes(); !slices.Equal(got, validShareGroupModes) || &got[0] == &validShareGroupModes[0] {
+		t.Fatalf("ShareGroupModes() = %v, want a copy of %v", got, validShareGroupModes)
+	}
+	dir := t.TempDir()
+	for _, mode := range validShareGroupModes {
+		if err := os.WriteFile(Path(dir), []byte("share_group_mode: "+mode+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := Load(dir)
+		if err != nil || cfg.ShareGroupMode != mode {
+			t.Fatalf("share_group_mode %q = (%+v, %v), want it loaded", mode, cfg, err)
+		}
+	}
+	if err := os.WriteFile(Path(dir), []byte("share_group_mode: both\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Load(dir)
+	if !errors.Is(err, ErrConfigFile) || !strings.Contains(err.Error(), "share_group_mode") {
+		t.Fatalf("invalid share_group_mode err = %v, want ErrConfigFile naming the setting", err)
+	}
+}
+
+func TestDaemonSupervisionConfigValueIsValidatedAsAFileSetting(t *testing.T) {
+	if got := DaemonSupervisions(); !slices.Equal(got, validDaemonSupervisions) || &got[0] == &validDaemonSupervisions[0] {
+		t.Fatalf("DaemonSupervisions() = %v, want a copy of %v", got, validDaemonSupervisions)
+	}
+	dir := t.TempDir()
+	for _, mode := range validDaemonSupervisions {
+		if err := os.WriteFile(Path(dir), []byte("daemon_supervision: "+mode+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := Load(dir)
+		if err != nil || cfg.DaemonSupervision != mode {
+			t.Fatalf("daemon_supervision %q = (%+v, %v), want it loaded", mode, cfg, err)
+		}
+	}
+	if err := os.WriteFile(Path(dir), []byte("daemon_supervision: desktop\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Load(dir)
+	if !errors.Is(err, ErrConfigFile) || !strings.Contains(err.Error(), "daemon_supervision") {
+		t.Fatalf("invalid daemon_supervision err = %v, want ErrConfigFile naming the setting", err)
 	}
 }

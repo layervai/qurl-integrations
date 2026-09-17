@@ -3,6 +3,7 @@ const crypto = require('crypto');
 const express = require('express');
 const helmet = require('helmet');
 const config = require('./config');
+const { assertConfiguredWebhookSecret } = require('./utils/webhook-secret');
 const db = require('./store');
 const logger = require('./logger');
 const { renderPage } = require('./templates/page');
@@ -245,6 +246,14 @@ app.use((err, req, res, next) => {
 
 // Start server
 function startServer() {
+  // Only the receiver tier (http/combined) verifies webhook HMACs, and only
+  // index.js's isHttp branch calls this — before webhookSubscriptions.start()
+  // wires the default-key secret and before the listener binds. Gateway-only
+  // tasks never reach it, so a bad seed cannot crashloop the whole service.
+  // Unset supports pure-BYOK mode; configured values must be usable and never
+  // the public seed. Unknown formats warn and preserve the registrar-persisted
+  // bytes rather than discarding a committed rotation.
+  assertConfiguredWebhookSecret(config.QURL_WEBHOOK_SECRET);
   const server = app.listen(config.PORT, () => {
     logger.info(`Web server listening on port ${config.PORT}`);
     logger.info(`Metrics URL: ${config.BASE_URL}/metrics`);
@@ -254,8 +263,9 @@ function startServer() {
 
 function stopIntervals() {
   clearInterval(metricsSweepInterval);
-  // The qURL webhook router owns a per-IP bad-sig sweep; stop it on
-  // graceful shutdown so the interval doesn't outlive the server.
+  // The qURL webhook router owns bad-signature/unknown-owner sweeps plus
+  // sender-counter caches and trailing-flush timers. Its stop hook clears all
+  // of them so shutdown and same-process test teardown cannot retain state.
   if (typeof qurlWebhookRouter.stopIntervals === 'function') qurlWebhookRouter.stopIntervals();
   // 30s subscription-registry refresh ticker (per-guild webhook
   // secrets cache). No-op on the gateway tier where the registry was

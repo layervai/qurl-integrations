@@ -233,6 +233,8 @@ func TestRedactingJSONHandlerRedactsSubstringKeys(t *testing.T) {
 		"authorization",
 		"apikey",
 		"api_key",
+		"qurllink",
+		"qurl_link_url",
 	} {
 		t.Run(key, func(t *testing.T) {
 			t.Parallel()
@@ -782,6 +784,169 @@ func TestRedactingJSONHandlerWalksMatchedStringSlicesByInnerNames(t *testing.T) 
 	token := fields["token"].([]interface{})
 	if got := token[0]; got != testRealToken {
 		t.Fatalf("token[0] = %#v, want %q; line=%s", got, testRealToken, line)
+	}
+}
+
+func TestRedactingJSONHandlerRedactsQurlLinkStringSlicesAsAUnit(t *testing.T) {
+	t.Parallel()
+
+	for _, key := range []string{"qurlLinks", "qurl_links"} {
+		t.Run(key, func(t *testing.T) {
+			t.Parallel()
+
+			var buf bytes.Buffer
+			logger := slog.New(NewRedactingJSONHandler(&buf, nil))
+			logger.Info("minted", slog.Any(key, []string{"https://qurl.link/#at_live_bearer"}))
+
+			line := buf.String()
+			if bytes.Contains(buf.Bytes(), []byte("at_live_bearer")) {
+				t.Fatalf("log line leaked qURL access token: %s", line)
+			}
+
+			fields := decodeLogLine(t, line)
+			if got := fields[key]; got != redactedLogValue {
+				t.Fatalf("field %q = %#v, want %q; line=%s", key, got, redactedLogValue, line)
+			}
+		})
+	}
+}
+
+func TestRedactingJSONHandlerRedactsQurlLinkGroupsAsAUnit(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	logger := slog.New(NewRedactingJSONHandler(&buf, nil))
+	logger.Info("minted", slog.Group("qurl_links",
+		slog.String("first", "https://qurl.link/#at_live_bearer"),
+	))
+
+	line := buf.String()
+	if bytes.Contains(buf.Bytes(), []byte("at_live_bearer")) {
+		t.Fatalf("log line leaked qURL access token: %s", line)
+	}
+	fields := decodeLogLine(t, line)
+	if got := fields["qurl_links"]; got != redactedLogValue {
+		t.Fatalf("qurl_links = %#v, want %q; line=%s", got, redactedLogValue, line)
+	}
+}
+
+func TestRedactingJSONHandlerPreservesEmptyQurlLinkContainers(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	logger := slog.New(NewRedactingJSONHandler(&buf, nil))
+	logger.Info("minted",
+		slog.Any("qurl_links", []string{}),
+		slog.Any("qurl_link_map", map[string]string{}),
+		slog.Group("qurl_link_group"),
+	)
+
+	fields := decodeLogLine(t, buf.String())
+	if got := fields["qurl_links"].([]interface{}); len(got) != 0 {
+		t.Fatalf("qurl_links = %#v, want empty array", got)
+	}
+	if got := fields["qurl_link_map"].(map[string]interface{}); len(got) != 0 {
+		t.Fatalf("qurl_link_map = %#v, want empty object", got)
+	}
+	if _, ok := fields["qurl_link_group"]; ok {
+		t.Fatalf("empty qurl_link_group should be omitted: %#v", fields)
+	}
+}
+
+func TestIsSuppressibleContainer(t *testing.T) {
+	t.Parallel()
+
+	type payload struct{ Link string }
+	slice := []string{"value"}
+	var interfacePointer any = &slice
+	var nilSlicePointer *[]string
+
+	tests := map[string]struct {
+		value any
+		want  bool
+	}{
+		"slice":             {value: slice, want: true},
+		"pointer to slice":  {value: &slice, want: true},
+		"interface pointer": {value: interfacePointer, want: true},
+		"map":               {value: map[string]string{"key": "value"}, want: true},
+		"empty map":         {value: map[string]string{}, want: false},
+		"struct":            {value: payload{Link: "value"}, want: true},
+		"empty slice":       {value: []string{}, want: false},
+		"nil pointer":       {value: nilSlicePointer, want: false},
+		"nil":               {value: nil, want: false},
+		"string":            {value: "value", want: false},
+		"integer":           {value: 1, want: false},
+	}
+
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			if got := isSuppressibleContainer(test.value); got != test.want {
+				t.Fatalf("isSuppressibleContainer(%T) = %t, want %t", test.value, got, test.want)
+			}
+		})
+	}
+}
+
+func TestRedactingJSONHandlerRedactsNestedQurlLinkContainers(t *testing.T) {
+	t.Parallel()
+
+	type payload struct {
+		QurlLinks []string `json:"qurl_links"`
+		Count     int      `json:"qurl_link_count"`
+	}
+
+	for name, value := range map[string]any{
+		"map": map[string]any{
+			"qurl_links":      []string{"https://qurl.link/#at_live_bearer"},
+			"qurl_link_count": 3,
+		},
+		"struct": payload{
+			QurlLinks: []string{"https://qurl.link/#at_live_bearer"},
+			Count:     3,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			var buf bytes.Buffer
+			logger := slog.New(NewRedactingJSONHandler(&buf, nil))
+			logger.Info("minted", slog.Any("payload", value))
+
+			line := buf.String()
+			if bytes.Contains(buf.Bytes(), []byte("at_live_bearer")) {
+				t.Fatalf("log line leaked nested qURL access token: %s", line)
+			}
+			fields := decodeLogLine(t, line)
+			nested := fields["payload"].(map[string]interface{})
+			if got := nested["qurl_links"]; got != redactedLogValue {
+				t.Fatalf("payload.qurl_links = %#v, want %q; line=%s", got, redactedLogValue, line)
+			}
+			if got := nested["qurl_link_count"]; got != float64(3) {
+				t.Fatalf("payload.qurl_link_count = %#v, want 3; line=%s", got, line)
+			}
+		})
+	}
+}
+
+func TestRedactingJSONHandlerPreservesQurlLinkNamedScalars(t *testing.T) {
+	t.Parallel()
+
+	type linkVersion int
+	var buf bytes.Buffer
+	logger := slog.New(NewRedactingJSONHandler(&buf, nil))
+	logger.Info(
+		"metadata",
+		slog.Any("qurl_link_version", linkVersion(3)),
+		slog.Any("qurl_link", nil),
+	)
+
+	fields := decodeLogLine(t, buf.String())
+	if got := fields["qurl_link_version"]; got != float64(3) {
+		t.Fatalf("qurl_link_version = %#v, want 3", got)
+	}
+	if got := fields["qurl_link"]; got != nil {
+		t.Fatalf("qurl_link = %#v, want nil", got)
 	}
 }
 

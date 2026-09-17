@@ -20,10 +20,6 @@
  * guarantees uniqueness.
  */
 
-import * as dotenv from 'dotenv';
-import * as path from 'path';
-dotenv.config({ path: path.resolve(__dirname, '..', '.env') });
-
 import { trackedQurlResources, withRunNonce } from '../helpers/cleanup';
 import { loadEnv } from '../helpers/env';
 import * as qurl from '../helpers/qurl-api';
@@ -67,7 +63,7 @@ describe('Location Variants', () => {
     const result = await qurl.mintLink(env.MINT_API_URL, env.QURL_API_KEY, {
       target_url: withRunNonce(url),
       expires_in: '1h',
-      description: `E2E location variant: ${id}`,
+      label: `E2E location variant: ${id}`,
     });
     // Track before the assertions so a successfully-minted resource is always
     // revoked in afterAll even if an expect() below throws — otherwise it leaks

@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,6 +16,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/layervai/qurl-go/crid"
 )
 
 const (
@@ -22,6 +25,8 @@ const (
 	defaultMaxRetries = 3
 	defaultBaseDelay  = 500 * time.Millisecond
 	defaultMaxDelay   = 30 * time.Second
+	desiredStateOn    = "on"
+	desiredStateOff   = "off"
 )
 
 // HeaderIdempotencyKey is the request header the qURL API reads to dedupe
@@ -117,6 +122,13 @@ var ErrRevokeAPIKeyEmptyID = errors.New("revoke api key: key_id is empty")
 // is empty.
 var ErrDeleteResourceEmptyID = errors.New("delete resource: resource_id is empty")
 
+// ErrGetResourceEmptyID is returned when a resource lookup has no identity.
+var ErrGetResourceEmptyID = errors.New("get resource: resource_id is empty")
+
+// ErrSharingResourceEmptyID is returned when a sharing lifecycle call has no
+// public resource identity.
+var ErrSharingResourceEmptyID = errors.New("sharing: resource_id is empty")
+
 // ErrUpdateResourceEmptyID is returned by UpdateResource when resourceID
 // is the empty string.
 var ErrUpdateResourceEmptyID = errors.New("update resource: resource_id is empty")
@@ -176,6 +188,11 @@ const (
 	// CredentialTargetConnector constrains an enrollment token to Connector
 	// enrollment.
 	CredentialTargetConnector = "connector"
+	// CredentialTargetAgent constrains an enrollment token to registered-device
+	// (agent) enrollment: the owner-scoped credential a headless Connector
+	// daemon needs for native session control. Connector-target tokens are
+	// connector-scoped and cannot open native sessions.
+	CredentialTargetAgent = "agent"
 	// CredentialClaimTypeConnector binds an enrollment token to one Connector
 	// resource identifier. Sharing the literal "connector" with
 	// CredentialTargetConnector is deliberate: `target` and `claims[].type`
@@ -275,12 +292,6 @@ type ResponseMeta struct {
 // --- qURL types (match API schema) ---
 
 // AccessPolicy defines access restrictions for a qURL.
-//
-// All subfields MUST keep `omitempty` — `&AccessPolicy{}` is the
-// documented "clear policy" signal in [UpdateResourceInput], and that
-// contract relies on every field eliding from the JSON payload when
-// zero. Adding a non-omitempty field (or one that doesn't elide on
-// zero, like a non-pointer time) silently breaks the clear convention.
 type AccessPolicy struct {
 	IPAllowlist  []string `json:"ip_allowlist,omitempty"`
 	IPDenylist   []string `json:"ip_denylist,omitempty"`
@@ -298,6 +309,13 @@ type AccessPolicy struct {
 // rather than serializing the zero value `""`, which would otherwise trip the
 // server's exclusivity check.
 type CreateInput struct {
+	// The json tags below document each field's wire NAME; CreateInput
+	// itself is never marshaled. Both endpoints serialize a declared body
+	// ([createQurlBody] / [createForResourceBody]) instead, because the
+	// service rejects unknown fields (qurl-service#1402) — so a field added
+	// here for client-side use cannot reach the wire just by existing.
+	// Adding a wire field means adding it to the matching body struct and
+	// to TestMintBodiesCarryOnlyDeclaredFields's allowed set.
 	TargetURL string `json:"target_url,omitempty"`
 	// ResourceID, when set, mints a qURL bound to an existing resource
 	// (e.g. an existing tunnel resource). Mutually exclusive with
@@ -319,12 +337,6 @@ type CreateInput struct {
 	// stays off the wire and inherits the server/plan default.
 	SessionDuration string        `json:"session_duration,omitempty"`
 	AccessPolicy    *AccessPolicy `json:"access_policy,omitempty"`
-	// Reason is forwarded to the audit log when set (e.g. an
-	// operator-supplied "for incident #123" annotation from the
-	// `/qurl get $alias reason:"…"` slash-command flag). The server
-	// writes this to the audit row only; it is not persisted on the
-	// resulting qURL.
-	Reason string `json:"reason,omitempty"`
 
 	// IdempotencyKey, when non-empty, is sent as the Idempotency-Key
 	// request header so the API dedupes retried writes. See
@@ -394,7 +406,7 @@ func validateIdempotencyKey(key string) error {
 // [Client.UpdateResource]) take *Input pointers, which is the going-forward
 // idiom. Pointer migration tracked at #146.
 //
-//nolint:gocritic // hugeParam: CreateInput is 104 bytes; *CreateInput migration tracked at #146.
+//nolint:gocritic // hugeParam: CreateInput is 120 bytes; *CreateInput migration tracked at #146.
 func (c *Client) Create(ctx context.Context, input CreateInput) (*CreateOutput, error) {
 	if input.TargetURL == "" && input.ResourceID == "" {
 		return nil, ErrCreateRequiresTarget
@@ -415,9 +427,6 @@ func (c *Client) Create(ctx context.Context, input CreateInput) (*CreateOutput, 
 	if input.ResourceID != "" {
 		// /v1/resources/{id}/qurls — id rides in the path; the body
 		// drops target_url + resource_id and ships the policy subset.
-		// Reason ships in the body too (silently dropped by the server
-		// if not in its schema; harmless either way and matches the
-		// URL-form posture).
 		endpoint = c.baseURL + "/v1/resources/" + url.PathEscape(input.ResourceID) + "/qurls"
 		logLabel = http.MethodPost + " " + CreateForResourcePathLabel
 		body, err = json.Marshal(createForResourceBody{
@@ -427,12 +436,19 @@ func (c *Client) Create(ctx context.Context, input CreateInput) (*CreateOutput, 
 			MaxSessions:     input.MaxSessions,
 			SessionDuration: input.SessionDuration,
 			AccessPolicy:    input.AccessPolicy,
-			Reason:          input.Reason,
 		})
 	} else {
 		endpoint = c.baseURL + "/v1/qurls"
 		logLabel = "POST /v1/qurls"
-		body, err = json.Marshal(input)
+		body, err = json.Marshal(createQurlBody{
+			TargetURL:       input.TargetURL,
+			Label:           input.Label,
+			ExpiresIn:       input.ExpiresIn,
+			OneTimeUse:      input.OneTimeUse,
+			MaxSessions:     input.MaxSessions,
+			SessionDuration: input.SessionDuration,
+			AccessPolicy:    input.AccessPolicy,
+		})
 	}
 	if err != nil {
 		return nil, fmt.Errorf("marshal create input: %w", err)
@@ -457,6 +473,26 @@ func (c *Client) Create(ctx context.Context, input CreateInput) (*CreateOutput, 
 	return &out, nil
 }
 
+// createQurlBody is the wire shape for `POST /v1/qurls`. Mirrors the qURL
+// service's `CreateQurlRequest` schema.
+//
+// This is a DECLARED body rather than a marshal of [CreateInput] itself:
+// the service rejects unknown fields (qurl-service#1402 adds
+// `additionalProperties: false` to both create schemas), so a field added
+// to CreateInput for client-side use must not reach the wire just by
+// existing. Anything sent here has to be a property of CreateQurlRequest —
+// TestMintBodiesCarryOnlyDeclaredFields is the guard.
+type createQurlBody struct {
+	TargetURL string `json:"target_url,omitempty"`
+	// `label` per CreateQurlRequest (not `description`).
+	Label           string        `json:"label,omitempty"`
+	ExpiresIn       string        `json:"expires_in,omitempty"`
+	OneTimeUse      bool          `json:"one_time_use,omitempty"`
+	MaxSessions     int           `json:"max_sessions,omitempty"`
+	SessionDuration string        `json:"session_duration,omitempty"`
+	AccessPolicy    *AccessPolicy `json:"access_policy,omitempty"`
+}
+
 // createForResourceBody is the wire shape for `POST
 // /v1/resources/{id}/qurls`. Mirrors the qURL service's
 // `CreateQurlForResourceRequest` schema (resource id rides in the URL
@@ -470,14 +506,13 @@ type createForResourceBody struct {
 	MaxSessions     int           `json:"max_sessions,omitempty"`
 	SessionDuration string        `json:"session_duration,omitempty"`
 	AccessPolicy    *AccessPolicy `json:"access_policy,omitempty"`
-	Reason          string        `json:"reason,omitempty"`
 }
 
 // --- Resources ---
 //
 // These methods target the resource surface in qurl-service: alias
 // fields on `Resource`, the `GET /v1/resources/{id}` lookup, and
-// `clear_alias` on `PATCH /v1/resources/{id}`. That schema has shipped;
+// nullable `alias` on `PATCH /v1/resources/{id}`. That schema has shipped;
 // the Slack `setalias`/`get`/`aliases` flows call against it.
 
 // Resource represents a qURL resource (the durable object behind a qURL link).
@@ -528,6 +563,113 @@ type Resource struct {
 	// distinct from the public-key ResourceID and must be passed to connectors
 	// verbatim rather than derived client-side.
 	ConnectorRoutingID string `json:"connector_routing_id,omitempty"`
+}
+
+// SharingState is the account-authorized lifecycle state for one tunnel.
+// NHP admission remains resource/session bound; this HTTP surface controls
+// customer intent and provides the serving observation used by guided setup.
+type SharingState struct {
+	ResourceID      string `json:"resource_id"`
+	CRID            string `json:"crid"`
+	DesiredState    string `json:"desired_state"`
+	ServingEpoch    uint64 `json:"serving_epoch"`
+	ConnectionState string `json:"connection_state"`
+}
+
+// UnmarshalJSON requires the lifecycle fence to be present even for an off
+// resource. A missing or null epoch must not silently become zero because
+// Slack uses the prior epoch to determine whether an ambiguous restart was
+// accepted exactly once.
+func (s *SharingState) UnmarshalJSON(data []byte) error {
+	if s == nil {
+		return errors.New("sharing state is nil")
+	}
+	seen, err := validateSharingStateFields(data)
+	if err != nil {
+		return err
+	}
+	type sharingStateWire struct {
+		ResourceID      string          `json:"resource_id"`
+		CRID            string          `json:"crid"`
+		DesiredState    string          `json:"desired_state"`
+		ServingEpoch    json.RawMessage `json:"serving_epoch"`
+		ConnectionState string          `json:"connection_state"`
+	}
+	var wire sharingStateWire
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+	if !seen["serving_epoch"] {
+		return errors.New("sharing response is missing serving_epoch")
+	}
+	encodedEpoch := strings.TrimSpace(string(wire.ServingEpoch))
+	if encodedEpoch == "" || strings.IndexFunc(encodedEpoch, func(r rune) bool { return r < '0' || r > '9' }) >= 0 {
+		return errors.New("sharing response serving_epoch must be an unsigned decimal integer")
+	}
+	servingEpoch, err := strconv.ParseUint(encodedEpoch, 10, 64)
+	if err != nil {
+		return fmt.Errorf("sharing response serving_epoch: %w", err)
+	}
+	*s = SharingState{
+		ResourceID: wire.ResourceID, CRID: wire.CRID, DesiredState: wire.DesiredState,
+		ServingEpoch: servingEpoch, ConnectionState: wire.ConnectionState,
+	}
+	return nil
+}
+
+func validateSharingStateFields(data []byte) (map[string]bool, error) {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	first, err := decoder.Token()
+	if err != nil {
+		return nil, err
+	}
+	if delimiter, ok := first.(json.Delim); !ok || delimiter != '{' {
+		return nil, errors.New("sharing response must be an object")
+	}
+	known := map[string]bool{
+		"resource_id": true, "crid": true, "desired_state": true,
+		"serving_epoch": true, "connection_state": true,
+	}
+	seen := make(map[string]bool, len(known))
+	for decoder.More() {
+		field, err := decoder.Token()
+		if err != nil {
+			return nil, err
+		}
+		name, ok := field.(string)
+		if !ok {
+			return nil, errors.New("sharing response field name is invalid")
+		}
+		var value json.RawMessage
+		if err := decoder.Decode(&value); err != nil {
+			return nil, err
+		}
+		if !known[name] {
+			continue
+		}
+		if seen[name] {
+			return nil, fmt.Errorf("sharing response has duplicate %s", name)
+		}
+		seen[name] = true
+	}
+	last, err := decoder.Token()
+	if err != nil {
+		return nil, err
+	}
+	if delimiter, ok := last.(json.Delim); !ok || delimiter != '}' {
+		return nil, errors.New("sharing response object is incomplete")
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return nil, errors.New("sharing response has trailing JSON")
+		}
+		return nil, err
+	}
+	return seen, nil
+}
+
+type sharingUpdate struct {
+	DesiredState string `json:"desired_state"`
 }
 
 // CreateResourceInput is the input for `POST /v1/resources`. Idempotent on
@@ -626,9 +768,6 @@ type APIKey struct {
 //     `^[a-z][a-z0-9-]{1,62}[a-z0-9]$` rejects `""`, so the empty-string
 //     pointer is reserved as a footgun guard ([Client.UpdateResource]
 //     fails fast with [ErrUpdateResourceAliasEmpty]).
-//   - AccessPolicy — pass `&AccessPolicy{}` (all zero subfields) to
-//     clear; pass nil to leave unchanged. There is no sentinel-clear
-//     because AccessPolicy is a struct, not a scalar.
 //
 // Setting Alias and ClearAlias together is invalid and rejected
 // client-side ([ErrUpdateResourceAliasClearExclusive]). An entirely
@@ -658,20 +797,30 @@ type UpdateResourceInput struct {
 	// regex `^[a-z][a-z0-9-]{1,62}[a-z0-9]$` would 400 on `""` anyway —
 	// the client raises a clearer error than the server's generic message.
 	Alias *string `json:"alias,omitempty"`
-	// ClearAlias=true sends `clear_alias: true` to the server, removing
+	// ClearAlias=true sends `alias: null` to the server, removing
 	// any existing alias. Mutually exclusive with a non-nil Alias.
 	// Alias is the only field with a sentinel-clear; Description and
 	// CustomDomain use the `&""` convention because their server-side
 	// validators accept the empty string as a clear signal.
-	ClearAlias bool `json:"clear_alias,omitempty"`
+	ClearAlias bool `json:"-"`
 	// CustomDomain: pass `&""` to clear the custom domain mapping (same
 	// convention as Description). Pass nil to leave unchanged. NOT
 	// trimmed by the client (consistent with Description).
 	CustomDomain *string `json:"custom_domain,omitempty"`
-	// AccessPolicy: pass a non-nil pointer to update the policy in
-	// place. The server treats `&AccessPolicy{}` (all zero subfields)
-	// as a clear; pass nil to leave the existing policy unchanged.
-	AccessPolicy *AccessPolicy `json:"access_policy,omitempty"`
+}
+
+// MarshalJSON translates the client clear flag to the API's nullable alias.
+// TODO(upstream-contract): keep null/omission aligned with UpdateResourceRequest.
+func (in UpdateResourceInput) MarshalJSON() ([]byte, error) {
+	type wireInput UpdateResourceInput
+	var alias any
+	if in.Alias != nil || in.ClearAlias {
+		alias = in.Alias // A typed nil pointer encodes explicit JSON null.
+	}
+	return json.Marshal(struct {
+		wireInput
+		Alias any `json:"alias,omitempty"`
+	}{wireInput: wireInput(in), Alias: alias})
 }
 
 // hasAnyFieldSet reports whether the input has at least one mutable
@@ -681,13 +830,12 @@ type UpdateResourceInput struct {
 // Keep in sync with [UpdateResourceInput] fields — adding a new
 // mutable field without updating this method silently allows a no-op
 // PATCH that exercises only the new field. (No reflection: the
-// 5-field surface doesn't justify it.)
+// 4-field surface doesn't justify it.)
 func (in *UpdateResourceInput) hasAnyFieldSet() bool {
 	return in.Description != nil ||
 		in.Alias != nil ||
 		in.ClearAlias ||
-		in.CustomDomain != nil ||
-		in.AccessPolicy != nil
+		in.CustomDomain != nil
 }
 
 // CreateResource creates a (or returns the existing) qURL resource.
@@ -742,6 +890,173 @@ func (c *Client) CreateResource(ctx context.Context, input *CreateResourceInput)
 		return nil, err
 	}
 	return &out, nil
+}
+
+// GetResource retrieves one resource by its public resource identity.
+// resourceID must be the resource_id (the public key); the service also accepts
+// a CRID on this path, but the response identity check here rejects it.
+func (c *Client) GetResource(ctx context.Context, resourceID string) (*Resource, error) {
+	resourceID = strings.TrimSpace(resourceID)
+	if resourceID == "" {
+		return nil, ErrGetResourceEmptyID
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/v1/resources/"+url.PathEscape(resourceID), http.NoBody)
+	if err != nil {
+		return nil, fmt.Errorf("build request: %w", err)
+	}
+	// TODO(upstream-contract): qurl-service ResourceDetailResponse nests the
+	// resource under data.resource beside a qurls preview; mirrored by
+	// (*client).Resource in apps/cli/internal/api/rest.go (which also accepts
+	// CRIDs). The flat pre-#161 shape is rejected so contract drift fails loudly.
+	var out struct {
+		Resource *Resource `json:"resource"`
+	}
+	if _, err := c.do(req, &out, "GET /v1/resources/:id"); err != nil {
+		return nil, err
+	}
+	if out.Resource == nil {
+		return nil, errors.New("get resource response has no resource (data or data.resource absent)")
+	}
+	if out.Resource.ResourceID != resourceID {
+		return nil, fmt.Errorf("get resource response identity does not match request (want %q, got %q)", resourceID, out.Resource.ResourceID)
+	}
+	if strings.TrimSpace(out.Resource.Type) == "" {
+		return nil, errors.New("get resource response has no type")
+	}
+	return out.Resource, nil
+}
+
+// Identity is the account identity behind the client credential (GET /v1/me).
+//
+// TODO(upstream-contract): mirrors qurl-service `GET /v1/me` (`owner_id`,
+// `api_key` present only for API-key principals).
+type Identity struct {
+	// OwnerID is the principal behind the credential: the account owner for
+	// an API key, the calling user for a delegated credential. Callers that
+	// need the account owner must check APIKey != nil.
+	OwnerID string `json:"owner_id"`
+	// APIKey is present only when the request was authenticated by an API key.
+	APIKey *IdentityAPIKey `json:"api_key,omitempty"`
+}
+
+// IdentityAPIKey identifies the API key behind an Identity.
+type IdentityAPIKey struct {
+	KeyID string `json:"key_id,omitempty"`
+}
+
+// Me returns the account identity behind the client credential (GET /v1/me).
+// OwnerID is the durable account owner the headless share config must name.
+func (c *Client) Me(ctx context.Context) (*Identity, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/v1/me", http.NoBody)
+	if err != nil {
+		return nil, fmt.Errorf("build request: %w", err)
+	}
+	var out Identity
+	if _, err := c.do(req, &out, "GET /v1/me"); err != nil {
+		return nil, err
+	}
+	out.OwnerID = strings.TrimSpace(out.OwnerID)
+	if out.OwnerID == "" {
+		return nil, errors.New("identity response missing owner_id")
+	}
+	if out.APIKey != nil && strings.TrimSpace(out.APIKey.KeyID) == "" {
+		// An api_key object without key_id is not proof of an API-key principal.
+		out.APIKey = nil
+	}
+	return &out, nil
+}
+
+// GetSharing retrieves authoritative desired and observed sharing state.
+func (c *Client) GetSharing(ctx context.Context, resourceID string) (*SharingState, error) {
+	return c.doSharing(ctx, http.MethodGet, resourceID, nil, "GET /v1/resources/:id/sharing", true)
+}
+
+// SetSharing changes authoritative sharing intent to on or off.
+func (c *Client) SetSharing(ctx context.Context, resourceID, desired string) (*SharingState, error) {
+	if desired != desiredStateOn && desired != desiredStateOff {
+		return nil, fmt.Errorf("sharing desired_state %q must be on or off", desired)
+	}
+	return c.doSharing(ctx, http.MethodPut, resourceID, &sharingUpdate{DesiredState: desired}, "PUT /v1/resources/:id/sharing", true)
+}
+
+// RestartSharing always turns sharing on and advances the serving epoch.
+func (c *Client) RestartSharing(ctx context.Context, resourceID string) (*SharingState, error) {
+	// Restart is deliberately not replayed: every accepted POST advances the
+	// serving epoch, and the service does not yet expose an idempotency key for
+	// this route. A lost response is reconciled by the guided-install caller
+	// with an authoritative GET instead of silently sending a second POST.
+	return c.doSharing(ctx, http.MethodPost, resourceID, nil, "POST /v1/resources/:id/sharing/restart", false)
+}
+
+func (c *Client) doSharing(ctx context.Context, method, resourceID string, input any, label string, allowRetry bool) (*SharingState, error) {
+	resourceID = strings.TrimSpace(resourceID)
+	if resourceID == "" {
+		return nil, ErrSharingResourceEmptyID
+	}
+	path := c.baseURL + "/v1/resources/" + url.PathEscape(resourceID) + "/sharing"
+	if method == http.MethodPost {
+		path += "/restart"
+	}
+	var body io.Reader = http.NoBody
+	if input != nil {
+		encoded, err := json.Marshal(input)
+		if err != nil {
+			return nil, fmt.Errorf("marshal sharing input: %w", err)
+		}
+		body = bytes.NewReader(encoded)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, path, body)
+	if err != nil {
+		return nil, fmt.Errorf("build request: %w", err)
+	}
+	var out SharingState
+	request := c.do
+	if !allowRetry {
+		request = c.doOnce
+	}
+	if _, err := request(req, &out, label); err != nil {
+		return nil, err
+	}
+	if err := validateSharingState(resourceID, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func validateSharingState(requestResourceID string, sharing *SharingState) error {
+	if sharing == nil || sharing.ResourceID != requestResourceID {
+		return errors.New("sharing response identity does not match request")
+	}
+	if sharing.CRID == "" {
+		return errors.New("sharing response CRID is missing")
+	}
+	der, err := base64.RawURLEncoding.Strict().DecodeString(sharing.ResourceID)
+	if err != nil {
+		return errors.New("sharing response resource identity is invalid")
+	}
+	matched, err := crid.KeyMatches(sharing.CRID, der)
+	if err != nil || !matched {
+		return errors.New("sharing response CRID does not match resource identity")
+	}
+	switch sharing.DesiredState {
+	case desiredStateOff:
+		if sharing.ConnectionState != "stopped" {
+			return errors.New("sharing response off state must be stopped")
+		}
+	case desiredStateOn:
+		if sharing.ServingEpoch == 0 {
+			return errors.New("sharing response on state requires a positive serving epoch")
+		}
+		if sharing.ConnectionState != "connecting" && sharing.ConnectionState != "serving" {
+			return errors.New("sharing response on state must be connecting or serving")
+		}
+	default:
+		return errors.New("sharing response desired state is invalid")
+	}
+	if sharing.ConnectionState == "stopped" && sharing.DesiredState != desiredStateOff {
+		return errors.New("sharing response stopped state requires desired off")
+	}
+	return nil
 }
 
 // CreateAPIKey creates a qURL credential. Slack onboarding uses it to mint a
@@ -832,7 +1147,7 @@ func (c *Client) DeleteResource(ctx context.Context, resourceID string) error {
 // Retry semantics: do() retries 5xx/429 with the buffered body, so a
 // successfully-applied PATCH that returns 502 will be re-applied on retry.
 // All currently-supported PATCH fields (alias, description, custom_domain,
-// access_policy) are field-idempotent — the second apply is a no-op.
+// alias clearing) are field-idempotent — the second apply is a no-op.
 // Adding a non-idempotent field (a counter, an append, etc.) would break
 // this contract; callers should plumb Idempotency-Key (tracked at #148)
 // before that happens. Until #148 lands, callers needing at-least-once
@@ -860,7 +1175,7 @@ func (c *Client) UpdateResource(ctx context.Context, resourceID string, input *U
 	// then re-point Alias at the trimmed value. The trimmed string is
 	// what hits the wire and what the empty-pointer guard below sees.
 	//
-	// Note: this is a shallow copy — pointer fields like AccessPolicy
+	// Note: this is a shallow copy — pointer fields like Description
 	// still alias the caller's data. Today only Alias gets retargeted;
 	// adding more normalization (e.g. trimming Description/CustomDomain)
 	// would need either a deeper copy or per-field copy-on-mutate.
@@ -1057,6 +1372,14 @@ type apiErrorDetail struct {
 // --- HTTP plumbing ---
 
 func (c *Client) do(req *http.Request, out any, endpoint string) (*ResponseMeta, error) {
+	return c.doWithRetryLimit(req, out, endpoint, c.maxRetries)
+}
+
+func (c *Client) doOnce(req *http.Request, out any, endpoint string) (*ResponseMeta, error) {
+	return c.doWithRetryLimit(req, out, endpoint, 0)
+}
+
+func (c *Client) doWithRetryLimit(req *http.Request, out any, endpoint string, maxRetries int) (*ResponseMeta, error) {
 	req.Header.Set("Content-Type", "application/json")
 	// NOTE: If you add header logging, redact the Authorization value to avoid leaking API keys.
 	req.Header.Set("Authorization", "Bearer "+c.apiKey)
@@ -1077,7 +1400,7 @@ func (c *Client) do(req *http.Request, out any, endpoint string) (*ResponseMeta,
 	}
 
 	var lastErr error
-	for attempt := 0; attempt <= c.maxRetries; attempt++ {
+	for attempt := 0; attempt <= maxRetries; attempt++ {
 		if attempt > 0 {
 			if err := c.waitForRetry(req.Context(), attempt, lastErr); err != nil {
 				return nil, err
@@ -1093,7 +1416,7 @@ func (c *Client) do(req *http.Request, out any, endpoint string) (*ResponseMeta,
 		resp, err := c.httpClient.Do(req)
 		if err != nil {
 			lastErr = fmt.Errorf("http request: %w", err)
-			if attempt < c.maxRetries {
+			if attempt < maxRetries {
 				continue
 			}
 			return nil, lastErr
@@ -1109,7 +1432,7 @@ func (c *Client) do(req *http.Request, out any, endpoint string) (*ResponseMeta,
 
 		if resp.StatusCode >= 400 {
 			apiErr := c.parseError(resp, respBody)
-			if isRetryable(resp.StatusCode) && attempt < c.maxRetries {
+			if isRetryable(resp.StatusCode) && attempt < maxRetries {
 				lastErr = apiErr
 				continue
 			}

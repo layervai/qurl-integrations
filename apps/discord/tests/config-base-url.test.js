@@ -8,10 +8,6 @@ describe('config.BASE_URL normalization', () => {
   });
 
   it('treats a whitespace-only value as unset, not as an empty BASE_URL', () => {
-    // The default has to be applied AFTER trimming: an operator who
-    // parameterized the SSM value but seeded it with spaces must land on the
-    // localhost default, so boot-requirements.js's "BASE_URL is always
-    // truthy" invariant holds and the boot error can quote a real value.
     withFreshConfig({ BASE_URL: '   ' }, (config) => {
       expect(config.BASE_URL).toBe('http://localhost:3000');
     });
@@ -30,12 +26,6 @@ describe('config.BASE_URL normalization', () => {
   });
 
   it('feeds the normalized value through the boot guardrail end to end', () => {
-    // config.js normalizes and boot-requirements.js validates; each is tested
-    // in isolation above, but the handoff is what production runs. A trailing
-    // slash must survive normalization into a value the guardrail accepts —
-    // if normalizeBaseUrl ever stopped stripping it, `pathname === '/'` would
-    // still pass and this would keep working, but the redirect would carry a
-    // double slash. Assert the normalized form too, so both halves are pinned.
     const { baseUrlHttpsProblem } = require('../src/boot-requirements');
     withFreshConfig({ BASE_URL: 'https://discord.connector.layerv.ai/' }, (config) => {
       expect(config.BASE_URL).toBe('https://discord.connector.layerv.ai');

@@ -381,10 +381,10 @@ func (s *Store) PurgeResourceFromChannel(ctx context.Context, teamID, channelID,
 	// keys are name-aliased.
 	now := s.nowOrDefault()
 	nowISO := now.UTC().Format(time.RFC3339)
-	expr := "SET #updated_at = " + exprNow + ", #updated_at_nano = " + exprNowNano
+	expr := "SET #updated_at = " + exprNow + ", " + exprUpdatedAtNano + " = " + exprNowNano
 	names := map[string]string{
-		"#updated_at":      attrUpdatedAt,
-		"#updated_at_nano": attrUpdatedAtNano,
+		"#updated_at":     attrUpdatedAt,
+		exprUpdatedAtNano: attrUpdatedAtNano,
 	}
 	if len(aliasKeys) > 0 {
 		names[exprAliasBindings] = attrAliasBindings
@@ -564,10 +564,10 @@ func (s *Store) purgeTeamChannelPolicies(ctx context.Context, teamID string, cut
 			if !cutoff.IsZero() {
 				deleteInput.ConditionExpression = aws.String(purgeCutoffCondition)
 				deleteInput.ExpressionAttributeNames = map[string]string{
-					"#updated_at_nano": attrUpdatedAtNano,
+					exprUpdatedAtNano: attrUpdatedAtNano,
 				}
 				deleteInput.ExpressionAttributeValues = map[string]ddbtypes.AttributeValue{
-					":purge_cutoff_nano": unixNanoAttr(cutoff),
+					exprPurgeCutoffNano: unixNanoAttr(cutoff),
 				}
 			}
 			if _, err := s.Client.DeleteItem(ctx, deleteInput); err != nil {

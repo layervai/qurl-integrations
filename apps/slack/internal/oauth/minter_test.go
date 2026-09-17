@@ -110,7 +110,13 @@ func TestHTTPAPIKeyMinterMintWorkspaceHappyPath(t *testing.T) {
 		gotPath           string
 		gotAuth           string
 		gotIdempotencyKey string
-		gotBody           bindingRequest
+		// Independent tags catch a misspelled production JSON field.
+		gotBody struct {
+			Provider       string `json:"provider"`
+			ExternalID     string `json:"external_id"`
+			DisplayName    string `json:"display_name"`
+			RotateExisting bool   `json:"rotate_existing"`
+		}
 	)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotMethod = r.Method
@@ -147,11 +153,17 @@ func TestHTTPAPIKeyMinterMintWorkspaceHappyPath(t *testing.T) {
 	if gotIdempotencyKey != bindingIdempotencyKey(testTeamID) || len(gotIdempotencyKey) < 32 {
 		t.Errorf("Idempotency-Key = %q, want stable 32+ char key", gotIdempotencyKey)
 	}
+	if !strings.HasPrefix(gotIdempotencyKey, "slack-workspace-binding-v2-") {
+		t.Errorf("Idempotency-Key = %q, want v2 request-body namespace", gotIdempotencyKey)
+	}
 	if gotBody.Provider != "slack" || gotBody.ExternalID != testTeamID {
 		t.Errorf("binding body = %+v, want slack/%s", gotBody, testTeamID)
 	}
 	if gotBody.DisplayName != "Slack workspace "+testTeamID {
 		t.Errorf("display_name = %q", gotBody.DisplayName)
+	}
+	if !gotBody.RotateExisting {
+		t.Error("binding setup must allow lost-commit credential rotation")
 	}
 }
 
@@ -661,6 +673,23 @@ func TestHTTPAPIKeyMinterMintWorkspaceDoesNotFallbackOnTransient503(t *testing.T
 	}
 	if !strings.Contains(err.Error(), "503") {
 		t.Errorf("expected status code in error, got %q", err.Error())
+	}
+}
+
+// A schema rejection must not bypass binding ownership through legacy minting.
+func TestHTTPAPIKeyMinterMintWorkspaceDoesNotFallbackOnSchemaRejection(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != testBindingPath {
+			t.Errorf("unexpected fallback path %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		_, _ = io.WriteString(w, `{"error":{"code":"validation_failed","detail":"Unknown field rotate_existing"}}`)
+	}))
+	t.Cleanup(srv.Close)
+	m := &HTTPAPIKeyMinter{BaseURL: srv.URL, HTTPClient: srv.Client()}
+	if err := mintWorkspaceOnlyErr(m); err == nil || !strings.Contains(err.Error(), "422") {
+		t.Fatalf("expected schema rejection, got %v", err)
 	}
 }
 
@@ -1318,5 +1347,47 @@ func TestHTTPAPIKeyMinterMintWorkspaceParseFailure(t *testing.T) {
 	var syntaxErr *json.SyntaxError
 	if !errors.As(err, &syntaxErr) {
 		t.Errorf("expected json.SyntaxError in chain, got %v", err)
+	}
+}
+
+// TestMintWorkspaceReplacementAPIKeyAcceptsEmptyOldKeyID locks the legacy-row
+// rotation at the unit boundary. This used to return an "empty oldKeyID" error,
+// which made --rotate unusable for exactly the rows that most needed it. The
+// idempotency key must still be header-safe and stable: it is what lets a
+// persist-failure retry recover the same replacement instead of spending
+// another key against the account's plan limit.
+func TestMintWorkspaceReplacementAPIKeyAcceptsEmptyOldKeyID(t *testing.T) {
+	var gotIdempotencyKey string
+	var gotScopes []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotIdempotencyKey = r.Header.Get("Idempotency-Key")
+		var body mintRequest
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		gotScopes = body.Scopes
+		writeLegacyMintSuccess(t, w)
+	}))
+	t.Cleanup(srv.Close)
+
+	m := &HTTPAPIKeyMinter{BaseURL: srv.URL, HTTPClient: srv.Client()}
+	minted, err := m.MintWorkspaceReplacementAPIKey(context.Background(), "tok", testTeamID, "")
+	if err != nil {
+		t.Fatalf("MintWorkspaceReplacementAPIKey with empty oldKeyID: %v", err)
+	}
+	if minted.APIKey != testAPIKey || minted.KeyID != testKeyID {
+		t.Errorf("unexpected fields: %+v", minted)
+	}
+	if want := replacementIdempotencyKey(testTeamID, ""); gotIdempotencyKey != want {
+		t.Errorf("Idempotency-Key = %q, want %q", gotIdempotencyKey, want)
+	}
+	// qurl-service rejects headers outside 32-256 chars; the constant prefix
+	// carries this even with an empty key id, but assert it rather than assume.
+	if len(gotIdempotencyKey) < 32 || len(gotIdempotencyKey) > 256 || strings.ContainsAny(gotIdempotencyKey, " \t\r\n") {
+		t.Errorf("Idempotency-Key = %q (len %d), want header-safe 32-256 chars", gotIdempotencyKey, len(gotIdempotencyKey))
+	}
+	// The whole reason a legacy row rotates is to pick up qurl:agent.
+	if strings.Join(gotScopes, ",") != strings.Join(apiKeyScopes(), ",") {
+		t.Errorf("scopes = %v, want %v", gotScopes, apiKeyScopes())
 	}
 }

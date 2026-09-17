@@ -46,6 +46,7 @@ func TestBuildAgentStoreWiredWhenTableSet(t *testing.T) {
 	store := buildAgentStore(context.Background())
 	if store == nil {
 		t.Fatal("buildAgentStore() = nil, want a store when table is set")
+		return
 	}
 	if store.TableName != "qurl-agent-state-test" {
 		t.Fatalf("store.TableName = %q, want qurl-agent-state-test", store.TableName)

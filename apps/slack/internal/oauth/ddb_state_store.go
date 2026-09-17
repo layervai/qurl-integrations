@@ -29,6 +29,10 @@ const (
 	oauthStateAttrExpiresAt = "oauth_expires_at"
 	oauthStateAttrStartedAt = "oauth_started_at"
 	oauthStateAttrTTL       = "ttl"
+
+	// workspaceStatePKName is the ExpressionAttributeNames alias for the
+	// partition key. Lifted to a constant to satisfy goconst.
+	workspaceStatePKName = "#pk"
 )
 
 // DDBStateStore stores short-lived OAuth state in the existing workspace_state
@@ -98,9 +102,9 @@ func (s *DDBStateStore) PutState(ctx context.Context, handle string, state Store
 			oauthStateAttrExpiresAt: &ddbtypes.AttributeValueMemberN{Value: strconv.FormatInt(state.ExpiresAt.Unix(), 10)},
 			oauthStateAttrTTL:       &ddbtypes.AttributeValueMemberN{Value: strconv.FormatInt(state.ExpiresAt.Unix(), 10)},
 		},
-		ConditionExpression: aws.String("attribute_not_exists(#pk)"),
+		ConditionExpression: aws.String("attribute_not_exists(" + workspaceStatePKName + ")"),
 		ExpressionAttributeNames: map[string]string{
-			"#pk": workspaceStatePKAttr,
+			workspaceStatePKName: workspaceStatePKAttr,
 		},
 	})
 	if err != nil {
@@ -141,9 +145,9 @@ func (s *DDBStateStore) ConsumeState(ctx context.Context, handle string, now tim
 			"attribute_exists(#pk) AND attribute_exists(#started_at) AND #expires_at > :now_epoch",
 		),
 		ExpressionAttributeNames: map[string]string{
-			"#pk":         workspaceStatePKAttr,
-			"#started_at": oauthStateAttrStartedAt,
-			"#expires_at": oauthStateAttrExpiresAt,
+			workspaceStatePKName: workspaceStatePKAttr,
+			"#started_at":        oauthStateAttrStartedAt,
+			"#expires_at":        oauthStateAttrExpiresAt,
 		},
 		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
 			":now_epoch": &ddbtypes.AttributeValueMemberN{Value: strconv.FormatInt(now.Unix(), 10)},
@@ -178,9 +182,9 @@ func (s *DDBStateStore) updateAndReadState(ctx context.Context, handle string, n
 		return VerifiedState{}, errStateMalformed
 	}
 	names := map[string]string{
-		"#pk":         workspaceStatePKAttr,
-		"#mark":       markAttr,
-		"#expires_at": oauthStateAttrExpiresAt,
+		workspaceStatePKName: workspaceStatePKAttr,
+		"#mark":              markAttr,
+		"#expires_at":        oauthStateAttrExpiresAt,
 	}
 	out, err := s.Client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		TableName: aws.String(s.TableName),

@@ -1,20 +1,120 @@
 # qURL CLI
 
-Publish URLs as protected resources and turn their **CRIDs** back into
-working access links — from your terminal or a script.
-
-A **qURL™** resource is a protected target with a permanent, verifiable ID:
-its CRID. Publish once, share the CRID anywhere (it contains no secrets),
-and anyone authorized can resolve it into a short-lived access link when
-they need one. Links expire on their own; the CRID does not.
+Publish an app running on your machine with one command:
 
 ```bash
-# Publish a URL and get its CRID
-qurl publish https://api.example.com/reports
-
-# Turn a CRID into a working access link (composes with anything)
-curl "$(qurl resolve <CRID>)"
+qurl publish http://127.0.0.1:3000
 ```
+
+qURL™ gives the app a permanent **CRID** you can safely paste into chat,
+documentation, or an agent prompt. A CRID identifies the protected resource;
+it does not grant access. Authorized users turn it into a short-lived access
+link only when they need one.
+
+[Publish localhost in 60 seconds](#publish-localhost-in-60-seconds) ·
+[Command reference](#commands) · [Scripting](#scripting-contract)
+
+## Publish localhost in 60 seconds
+
+### 1. Install the CLI
+
+On macOS with Homebrew:
+
+```bash
+brew install layervai/tap/qurl
+qurl version
+```
+
+On Windows, download the Windows `.zip` from the
+[latest release](https://github.com/layervai/qurl-integrations/releases),
+extract `qurl.exe`, add its directory to your user `PATH`, and run
+`qurl version` in PowerShell.
+
+Local lifecycle commands require qURL CLI 2.0.0 or newer. If the version is older,
+update the tap and upgrade the CLI before continuing:
+
+```bash
+brew update
+brew upgrade qurl
+```
+
+Using another package format? See [Install](#install).
+
+### 2. Sign in
+
+[Create or copy an API key in the qURL dashboard](https://layerv.ai/qurl/dashboard/keys/).
+Select `qurl:agent` to publish the local app and `qurl:resolve` (the scope
+that allows sharing resources by CRID) to open it in step 4. Then run:
+
+```bash
+qurl login
+```
+
+Paste the key at the hidden prompt. The CLI validates it, enrolls this machine,
+and then discards it. qurl stores the restricted device identity in its
+owner-only native state; it does not store the account API key.
+
+### 3. Start your app, then publish it
+
+Keep your app running in one terminal. If you only want to try the flow, start
+Python's built-in web server:
+
+```bash
+python3 -m http.server 3000 --bind 127.0.0.1
+```
+
+In a second terminal:
+
+```bash
+qurl publish http://127.0.0.1:3000
+```
+
+When the route is ready, qURL prints:
+
+```text
+Published
+
+  Target:  http://127.0.0.1:3000
+  Status:  serving
+
+CRID: <CRID>
+```
+
+The command exits after the route is serving. A per-user background daemon
+keeps the share available and resumes it after login, sleep, wake, or a network
+change. Run `qurl stop <CRID>` to turn it off and `qurl start <CRID>` to turn it
+back on. Publishing the same target later reuses the same CRID.
+
+Background lifecycle management is available on Linux, macOS, and Windows.
+Linux uses the native systemd user manager. Use `--foreground` for CI or
+debugging. When another program owns the daemon process, run it with
+`qurl daemon run --supervision external` instead — see
+[External supervision](#external-supervision).
+
+### 4. Open or share it
+
+The CRID is safe to share. An authorized user can open the app with:
+
+```bash
+qurl get <CRID>
+```
+
+Your app still listens only on your machine. The CLI connects outward to qURL;
+you do not need public DNS, a public IP, or custom Connector configuration.
+
+Publishing a remote URL instead? `qurl publish https://api.example.com/reports`
+prints its CRID and exits immediately.
+
+### If the first run fails
+
+| What you see | What to do |
+|--------------|------------|
+| `only HTTPS URLs are allowed` or no `start`, `stop`, `restart`, and `status` commands | You have the legacy CLI. Run `brew update`, `brew upgrade qurl`, and confirm `qurl version` reports 2.0.0 or newer. |
+| No API key is configured | Run `qurl login` |
+| The key lacks `qurl:agent` | Add that scope in the dashboard, then log in with the updated key |
+| The local app cannot be reached | Check it with `curl http://127.0.0.1:3000` and use the same URL with `qurl publish` |
+| `This Connector needs its qURL platform assignment refreshed` | Upgrade qURL. Current releases refresh stale assignments automatically with bounded backoff; no approval flag is required. |
+| The route is rejected or times out | Run the command once more; if it repeats, contact LayerV support |
 
 ## Install
 
@@ -27,9 +127,19 @@ brew install layervai/tap/qurl
 Homebrew also installs the man pages and the bash/zsh/fish completions
 shipped in the release archive.
 
+The CLI supports remote and local background qURL commands on macOS, Windows,
+and Linux. Linux uses the native systemd user manager and reports a clear error
+when that manager is unavailable.
+
 **Debian / RPM** — download the `.deb` or `.rpm` for your architecture from
 the [latest release](https://github.com/layervai/qurl-integrations/releases)
 and install it with `dpkg -i` / `rpm -i`.
+
+**Windows** — download the Windows `.zip` for your architecture from the
+[latest release](https://github.com/layervai/qurl-integrations/releases),
+extract `qurl.exe`, and put its directory on your user `PATH`. The first local
+`publish` or `start` installs an owner-only per-user Task Scheduler job. It
+does not require administrator access or store an account API key.
 
 **Prebuilt binaries** — download the archive for your OS and architecture
 (`linux`, `darwin`, `windows` × `amd64`, `arm64`) from the
@@ -45,26 +155,127 @@ qurl version
 
 ## Authentication
 
-Every command talks to the qURL API with an API key (`lv_live_…` for
-production, `lv_test_…` for test). There is deliberately no `--api-key`
-flag — command-line arguments leak into shell history and process lists.
-The CLI looks for the key in this order:
+The CLI uses a registered device identity for ordinary commands. To enroll the
+device, create an account API key (`lv_live_…` for production, `lv_test_…` for
+test) in the [qURL dashboard](https://layerv.ai/qurl/dashboard/keys/) with the
+`qurl:agent` scope, then run `qurl login`.
 
-1. `QURL_API_KEY` environment variable — recommended for scripts and CI.
-   When set, nothing on disk is read or written.
-2. The key `qurl login` stored: in your OS keyring (Keychain on macOS,
-   Credential Manager on Windows, the freedesktop Secret Service on Linux),
-   or — only where no keyring is available — in `~/.config/qurl/token`, a
-   file readable by your user alone. Commands warn when the key is served
-   from that file. Other LayerV tools (the SDK, the Connector) read only
-   that file, never the keyring — so on keyring machines, give them the
-   key via `QURL_API_KEY` rather than expecting them to see `qurl login`'s.
+There is deliberately no `--api-key` flag — command-line arguments leak into
+shell history and process lists. `qurl login` reads it from a hidden prompt or
+piped standard input. Scripts and CI can set `QURL_API_KEY` or
+`QURL_API_KEY_FILE` for the same first bootstrap or for an explicit recovery.
 
-`qurl login` checks the key against the qURL service before storing it, so
-a mistyped key fails loudly instead of breaking every later command.
-`qurl logout` removes the stored key from every place it may sit, and
-`qurl whoami` shows which account and key identity the configured
-credential maps to.
+`QURL_API_KEY_FILE` must be an exact absolute path. Its contents must be the
+key bytes followed by one LF or CRLF line ending, with no BOM, spaces, or
+second newline.
+On Unix, the file must be owned by you, have mode `0400` or `0600`, and have
+exactly one hard link. Create it with
+`(umask 077; printf '%s\n' "$QURL_API_KEY" > "$path")`.
+
+On Windows, `QURL_API_KEY_FILE` must name a file that is owned by the current
+user and has a protected, owner-only ACL. PowerShell's normal CRLF line ending
+is accepted. To write UTF-8 without a BOM:
+
+```powershell
+[IO.File]::WriteAllText($path, $key + "`n", [Text.UTF8Encoding]::new($false))
+```
+
+Create the file inside an owner-only temporary directory, remove ACL
+inheritance from the file, and remove the file immediately after `qurl login`.
+The CLI rejects an inherited or broadly readable ACL with the exact failing
+ACL condition. For most Windows CI jobs, use the one-command `QURL_API_KEY`
+environment value instead; qurl consumes it only for enrollment and does not
+store it.
+
+The CLI validates the account key and uses it once to enroll a restricted
+device identity. Only that device identity and its restricted credential enter
+the owner-only local state directory. The account API key and one-time
+enrollment credential remain in memory and are not stored by qurl. A warm
+command reuses the device identity and does not read `QURL_API_KEY`.
+
+If enrollment stops before it completes, run `qurl login` again with a key for
+the same account. The CLI resumes enrollment with the saved device identity.
+Keep the local state directory unchanged for this retry.
+
+`qurl whoami` checks the registered device and shows its account.
+
+Authenticated commands need the owner-only local state directory to remain
+writable. `QURL_API_KEY` can bootstrap missing or explicitly rejected device
+credentials, but it is not a steady-state bypass for that durable identity.
+Each authenticated command verifies the saved device identity with the qURL
+platform before it calls the resource API. If the platform cannot verify that
+identity, read-only commands such as `qurl list` are unavailable too. An
+account API key does not bypass this boundary.
+
+One native state directory belongs to one account. To switch accounts, first
+revoke the registered device key in the qURL dashboard. Then move or remove the
+complete state directory and run `qurl login` with the other account. Do not
+edit or delete individual state files; qurl rejects cross-account reuse and
+prints the exact directory and device-key ID needed for this recovery.
+
+This release requires CRID continuity and version 3 of the Connector resource
+journal. It does not convert old journals or use the old protocol. Preserve
+old state and finish unresolved operations with its matching binary before
+replacing that environment. To start fresh, stop the daemon, revoke its device
+key in the dashboard, move the complete state directory aside, then run
+`qurl login` and publish again. Fresh publication creates new CRIDs. Do not
+copy individual bindings or pending requests into the new state.
+
+### Supervised installs
+
+A program that runs the daemon itself (see
+[External supervision](#external-supervision)) never hands qurl an account API
+key. From its own signed-in session it mints a one-time enrollment token for
+target `agent` through the qURL API — the same kind of token `qurl login`
+mints for itself from an account key — writes it to a private file, and runs:
+
+```bash
+qurl login --enrollment-token-file /abs/path/to/token --supervision external
+```
+
+The command reads the file once, only while enrolling; a warm namespace never
+opens it. It reads no account key from anywhere and refuses to run while
+`QURL_API_KEY` or `QURL_API_KEY_FILE` holds a non-empty value (exit code 2).
+Create the file in an owner-only directory and delete it on every exit path,
+including failures. The path must be absolute and clean, and the file must be
+a regular file — never a symlink — that you own, with exactly one hard link
+and mode `0400` or `0600`, holding one non-empty token without whitespace, at
+most 16 KiB, and at most one trailing line ending. This reader is stricter than the
+projected-secret reader behind `qurl daemon run --enrollment-token-file` in
+[headless deployments](#headless-deployments): links and group access are
+never accepted.
+
+A supervised install keeps its daemon state sealed rather than in plaintext.
+The command requires `LAYERV_KEY_PROVIDER=local-key` and `LAYERV_LOCAL_KEY_FD`
+naming an inherited descriptor (3 or higher): a pipe or connected local stream
+socket that delivers exactly 32 key bytes and closes, so the wrapping key never
+appears in arguments, the environment, or a file. Every `qurl` process the
+supervisor runs against that state directory — `daemon run` and the lifecycle
+commands included — inherits the same two settings, each with a descriptor of
+its own. The sealed envelope (`agent_state.sealed.json`) and the plaintext one
+(`agent_state.json`) never share a directory: with the provider set, a
+directory that already holds plaintext state is refused, and without it, a
+directory that holds a sealed envelope is refused with the two variable names
+to set. Omitting the provider is an error for token-file login; plaintext
+state remains available to native account-key enrollment. Switching providers
+is therefore a fresh namespace, not an in-place migration. There is no flag for the provider; the supervisor that owns the key
+sets the environment. The token-file reader and the inherited-descriptor key
+transport are available on macOS and Linux.
+
+An unusable token file also returns exit code 4. Correct the file and retry
+with the same state directory; this error does not require a new namespace.
+Use the error message to distinguish it from a wrong-kind device below.
+
+The enrolled device must be owner-scoped. A token minted for target
+`connector` enrolls a credential that native session operations refuse, so
+`login` fails with exit code 4. By then the directory is already marked
+externally supervised and holds a sealed envelope with the wrong-kind
+credential, so it is left resumable but unusable: move it aside and enroll
+into a fresh one. Retrying in place with a corrected token does not work. On
+success the usual login document is printed; with `-o json` it carries
+`device_key_id` next to `owner_id`, the two values a supervisor records.
+`device_key_id` is omitted rather than empty when the account API reports no
+key object.
 
 ## Configuration
 
@@ -79,7 +290,9 @@ command-line flag > environment variable > profile/config file > built-in defaul
 | API endpoint | `--endpoint` | `QURL_ENDPOINT` | `endpoint` | `https://api.layerv.ai` |
 | Output format | `-o, --output` | `QURL_OUTPUT` | `output` | `text` |
 | Color | `--color` | `QURL_COLOR` | `color` | `auto` |
-| Connector ID | `--id` | `QURL_CONNECTOR_ID` | `connector_id` | — (required by `connector run`) |
+| Connector ID | `--id` | `QURL_CONNECTOR_ID` | `connector_id` | Stable opaque ID for local `publish` |
+| Session group mode | `--share-group-mode` (`daemon run`) | `QURL_SHARE_GROUP_MODE` | `share_group_mode` | `single` — see [Session group modes](#session-group-modes) |
+| Daemon supervision | `--supervision` | `QURL_DAEMON_SUPERVISION` | `daemon_supervision` | `native` — see [External supervision](#external-supervision) |
 
 Config files are YAML. The default file is `~/.config/qurl/config.yaml`; a
 named profile lives at `~/.config/qurl/profiles/<name>.yaml` and is
@@ -87,23 +300,53 @@ selected with `--profile` or `QURL_PROFILE`. A missing file simply means
 defaults apply. **Config files never hold secrets** — a file carrying an
 `api_key` entry is rejected outright rather than silently honored.
 
-Also honored: `NO_COLOR` (disables color while `--color` is `auto`), and
+`QURL_CONNECTOR_STATE_DIR` selects the durable state namespace for all
+commands and `QURL_CONNECTOR_RUNTIME_DIR` (environment-only) selects the
+directory that holds its control socket; see
+[External supervision](#external-supervision).
+
+Also honored: `QURL_DEPLOYMENT` (a sandbox or custom deployment settings file;
+production settings are included in releases; environment-only, with no profile override), `NO_COLOR` (disables color while `--color` is `auto`), and
 `QURL_BROWSER` / `BROWSER` (which browser `qurl get` opens). Pointing the
 CLI at a plain-`http` endpoint on a non-local address warns that the key
 would travel unencrypted; loopback endpoints are exempt.
+
+`LAYERV_KEY_PROVIDER` seals the local agent state under a key provider
+instead of the plaintext default (`file`); with `local-key`, the 32-byte
+wrapping key arrives on the inherited descriptor named by
+`LAYERV_LOCAL_KEY_FD`, on macOS and Linux. There is deliberately no flag: the
+supervisor that owns the key (for example qURL Desktop) sets the environment.
+A sealed namespace requires `--supervision external`: the background job
+`qurl` installs under native supervision carries no environment and cannot
+inherit a key descriptor. Every command that checks the namespace's
+supervision policy - `publish`, `start`, `stop`, `restart`, `delete`, `login`
+and `daemon run` - therefore refuses a sealed namespace under native
+supervision (exit code 3), not only the ones that would install a job.
+Read-only commands do not run that check and open the sealed envelope
+normally.
+
+A state directory holds exactly one
+envelope, so qurl refuses to open a sealed directory without these variables,
+or a plaintext one with them (also exit code 3); use a different state
+directory rather than switching in place.
 
 ## Commands
 
 | Command | Description |
 |---------|-------------|
-| `qurl publish <target-url>` | Publish a URL as a protected resource and get its CRID |
-| `qurl resolve <CRID>` | Turn a CRID into a short-lived access link |
+| `qurl publish <target-url>` | Publish a remote URL or serve a loopback HTTP app, and get its CRID |
+| `qurl share <CRID>` | Share a CRID as a short-lived access link |
 | `qurl get <CRID>` | Fetch what a CRID points to: browser on a terminal, or download with `--file` |
 | `qurl list` | List your published resources |
+| `qurl start <CRID>` | Turn on a previously published local share |
+| `qurl stop <CRID>` | Turn off a local share without deleting it |
+| `qurl restart <CRID>` | Rotate and restart a local share, or move it to a new loopback target with `--target` |
+| `qurl status <CRID>` | Show desired and platform-observed sharing state |
+| `qurl inspect <CRID>` | Inspect the same authoritative resource or sharing state |
+| `qurl daemon run` | Run the local sharing daemon directly for headless or supervised use |
 | `qurl delete <CRID>` | Delete a published resource |
-| `qurl connector run` | Serve a local app through the qURL platform, outbound-only |
-| `qurl login` / `qurl logout` | Store your API key (validated first, OS keyring preferred) / remove it everywhere |
-| `qurl whoami` | Show which account and key identity your credential maps to |
+| `qurl login` | Enroll this device with a one-time account key, or from a supervisor's enrollment token file |
+| `qurl whoami` | Show which account this registered device belongs to |
 | `qurl completion <shell>` | Generate shell completions (`bash`, `zsh`, `fish`, `powershell`) |
 | `qurl version` | Print version information |
 
@@ -116,51 +359,328 @@ is the only authoritative validator. Sending a **test-environment CRID to
 the production endpoint** is refused unless `--yes` is given; a production
 CRID aimed at a non-production endpoint warns and proceeds.
 
+### qurl daemon run
+
+`qurl daemon run` runs the long-running sharing process in the foreground for
+a headless deployment or for a program that supervises the daemon itself.
+With no headless flags, it serves the local shares already stored under
+`--state-dir`.
+
+#### Headless deployments
+
+Generated Docker, Kubernetes, and other headless deployment instructions can
+also supply `--headless-config <share.yaml>`. This is a non-secret, read-only
+version 2 YAML file for exactly one share. Use the generated file as-is; its
+identifiers bind the deployment to that share.
+
+The first start of a new state volume also requires
+`--enrollment-token-file <path>`. This file contains a one-time enrollment
+credential, not an account API key. It must be a read-only regular file or a
+Kubernetes projected-secret link, and only its owner or the process's dedicated
+group can read it. Keep the same file available until the first start finishes.
+If bootstrap stops before registration finishes, retry with the same still-valid
+one-time credential. In the next deployment revision, remove the flag but keep
+the secret recoverable. Verify that the warm start connects, then remove the
+secret mount and delete the one-time secret. A complete warm start does not read
+or require that file.
+
+#### External supervision
+
+When another program — a desktop app, a service manager — owns the daemon
+process instead of qURL's per-user background job, start the daemon with
+`--supervision external` and run every lifecycle command against that state
+directory with the same setting (flag `--supervision`, environment
+`QURL_DAEMON_SUPERVISION`, config key `daemon_supervision`):
+
+Use a dedicated, fresh state directory rather than the native default. Enroll
+with the one-shot token file described in [Supervised installs](#supervised-installs),
+then start the daemon. For each command below, the supervising process must
+attach a fresh inherited key descriptor and set `LAYERV_KEY_PROVIDER` and
+`LAYERV_LOCAL_KEY_FD` as described above. Exporting a descriptor number alone
+does not supply the wrapping key:
+
+```bash
+# Each command also needs the provider settings and a fresh inherited key fd.
+export QURL_CONNECTOR_STATE_DIR="$STATE_DIR"
+export QURL_DAEMON_SUPERVISION=external
+qurl login --enrollment-token-file "$TOKEN_FILE"
+qurl daemon run # keep running under the supervisor
+```
+
+Once the daemon is running, lifecycle commands in another process use the same
+state, supervision, and key-provider settings. A dedicated state directory
+avoids marking the native default namespace by accident; use a different
+directory to return to native supervision instead of deleting a marker beside durable credentials.
+
+External supervision changes three things:
+
+- Token-file login (or the first external daemon invocation) marks the
+  state directory as externally supervised (`runtime_mode.json`). It accepts
+  only a directory that holds no natively managed state, and the mark is
+  permanent. Starting the daemon before enrollment exits nonzero with
+  `no durable account owner`; enroll first rather than retrying that startup.
+- `publish`, `start`, and `restart` reload the running daemon and never
+  install or replace a background job. When the daemon is not running they
+  fail with exit code 11 and roll their own cloud change back, so the
+  supervisor can start the daemon and retry.
+- `publish`, `start`, `restart`, `stop`, `delete`, `login`, and `daemon run`
+  refuse a state directory whose mark does not match their `--supervision`
+  setting (exit code 3). A plain `qurl` command therefore never installs a
+  background job over a supervised daemon, and a supervised command never
+  adopts a natively managed directory. This check applies to the namespace,
+  including commands for remote resources. Read-only sharing commands work
+  either way, but can still enroll a device and write authentication state.
+
+A supervisor enrolls the device once per state directory with the token-file
+form of `qurl login` (see [Supervised installs](#supervised-installs)) and
+then follows one lifecycle:
+
+1. Start `qurl daemon run --state-dir "$STATE_DIR" --supervision external`
+   and keep the process. On every process start, including warm and headless
+   starts, the daemon holds its first reconcile for up to 30 seconds so that
+   runtime state is restored before any route is served. After that bound
+   it serves the stored shares on its own.
+2. Release the first reconcile with `PUT /overlay` (below) or `POST /reload`
+   on the control socket. Every lifecycle command sends a reload as well.
+3. Poll `GET /status`. The document carries `job_version`, `pid`, `running`
+   (resource ID to CRID for every route the session group manages, one
+   waiting out a retry included), and `resources`, the same redacted
+   per-share diagnostics `qurl inspect` shows; a route is serving only when
+   its `resources` entry says so. `pid` is the daemon's
+   own process ID, so a daemon the supervisor found running can be stopped
+   like one it spawned. Older daemons can report `pid: 0`; treat zero as
+   absent and never pass it to `kill`.
+4. Stop the daemon with SIGTERM (or SIGINT). It stops its Connector session
+   and exits with code 130. Stopping the daemon is a local act: it changes no
+   sharing state, so the shares resume on the next start. `qurl stop <CRID>`
+   is the opposite: it is cloud-first, turns the share off on the qURL
+   platform, and the share stays off until `qurl start <CRID>`. Use it to turn
+   a share off, never to pause the daemon.
+
+The control socket is `<state dir>/daemon.sock` when that path fits the
+platform's socket-address limit, otherwise an owner-only per-user directory
+below `/tmp`.
+
+The environment-only `QURL_CONNECTOR_RUNTIME_DIR` pins it: set to a short
+absolute path — a relative path, the filesystem root, and a path whose socket
+would exceed the platform limit are all rejected — and the daemon and every
+`qurl` command resolve exactly `<dir>/daemon.sock`, which is what a host whose
+state path is long, an app container for example, needs.
+
+Name a directory qURL owns. Startup creates missing directories with mode
+`0700`. An existing directory must be owned by the caller, must not be a
+symlink, and must already have mode `0700`; startup rejects it otherwise
+without changing its permissions. Use a separate
+dedicated directory for each state namespace; the socket address is the
+directory alone, so two namespaces sharing one runtime directory resolve to
+the same socket and lifecycle commands for one will address the other's
+daemon. Set the variable identically for the daemon and for every command that
+addresses the same state directory — a command run without it resolves a
+different address and reports the daemon absent.
+
+Windows named pipes have no length limit, so the pipe address ignores this
+variable entirely: a value left in the environment there has no effect and is
+not an error.
+
+Upgrading from a release before 2.6 moves the derived fallback socket
+(`/tmp/layerv-qurl-<uid>/<hash>.sock` becomes
+`/tmp/qurl-<uid>-<hash>/daemon.sock`) and adds `pid` to the status document.
+Stop the running daemon across an upgrade or a downgrade over that boundary:
+a native background job replaces itself, but an externally supervised daemon
+keeps listening on the old address until its supervisor restarts it, and a
+client released before external supervision cannot decode `pid`. The old
+`/tmp/layerv-qurl-<uid>/` directory is left behind and can be removed by hand.
+
+The socket speaks HTTP. When it is in the state directory:
+
+```bash
+curl --unix-socket "$STATE_DIR/daemon.sock" http://localhost/status
+curl --unix-socket "$STATE_DIR/daemon.sock" -X POST http://localhost/reload
+```
+
+Credential-bearing routes require a tunnel server with a verifiable TLS
+certificate. For a deployment that already provides that server certificate,
+configure its daemon with `qurl daemon run --tunnel-ca-file
+/etc/qurl/tunnel-ca.pem`. The PEM file must use an absolute path and contain
+the CA certificates trusted for that tunnel server. The certificate is checked
+against the admitted server host. Use `--tunnel-server-name <name>` only when
+the deployment requires a specific certificate identity, such as a server
+reached by IP address. Invalid trust configuration fails before enrollment.
+These options configure the client; they do not provision a server
+certificate. The default per-user daemon does not enable runtime credentials,
+and configured tunnel trust applies to every route on that daemon, including
+routes without added headers.
+
+<!-- TODO(upstream-contract): qurl-connector MaxGroupRoutes, header validation
+limits, route re-registration, and session rotation/drain semantics. -->
+
+`PUT /overlay` attaches request headers to routes at runtime. The body is
+`{"route_request_headers": {"<connector_id>": {"Header-Name": "value"}}}`,
+keyed by each share's Connector ID — a supervisor should publish with an
+explicit `--id` so it knows this key. The daemon sends the headers over verified TLS to the tunnel server, which
+adds them to requests for that share's local origin. The tunnel operator must
+therefore be trusted with these credentials. The origin must reject missing
+or invalid credentials. Each request replaces
+the whole overlay: a route the body does not name loses its headers, and `{"route_request_headers": {}}` clears
+it. A valid body is answered with 204. A body over 64 KiB, with unknown
+fields, with more than 2,000 routes, with more than 16 headers or 1,024
+name-and-value bytes for one route, or with an invalid, reserved, or
+case-variant duplicate header name or an invalid value is answered with 400
+and a fixed message that never echoes a header. Headers supplied without
+configured tunnel trust are answered with 409. All limits apply together;
+larger route entries reduce the number that fits within 64 KiB.
+
+Send secret overlay values from the supervisor process; do not put them in
+shell arguments or history.
+
+The overlay lives in process memory only: it is never written to disk, never
+reported by `/status` or `qurl inspect`, never logged, and a restarted daemon
+starts with an empty one — which is why step 2 pushes it before the first
+reconcile. Stopping a share retains its headers until the next overlay
+replacement. Republishing the same Connector ID reuses them; replace or clear
+the entry before reusing that ID with different credentials. Changing a route's headers re-registers only that route on the
+live session; its siblings are untouched. Re-registration may interrupt
+in-flight requests. During session rotation the retiring session can retain
+old headers until replacement promotion and drain, so an update is not
+immediate revocation. See
+[docs/session-groups.md](../../docs/session-groups.md#runtime-request-headers).
+
 ### qurl publish
 
-`qurl publish <target-url>` registers the target and prints its CRID —
-last and alone on its line in text mode, so it is the easiest thing to
-select and copy; `--quiet` prints only the CRID.
+`qurl publish` handles both local apps and remote URLs:
+
+| Target | What happens |
+|--------|--------------|
+| `http://127.0.0.1:3000` | qURL starts the background share, waits for serving, prints its CRID, and exits |
+| `https://api.example.com/reports` | qURL registers the remote URL, prints its CRID, and exits |
+
+#### Local apps
+
+```bash
+qurl publish http://127.0.0.1:3000
+```
+
+The CRID appears only after the route is ready. Once the daemon owns the
+durable local share, temporary assignment, sleep/wake, and network failures
+recover automatically without a customer approval step.
+
+Restarting the same app on the same machine reuses its resource and CRID. Use
+`--id` only when you want to choose the Connector ID yourself.
+After `qurl delete`, you can reuse that ID to create a new resource with a new CRID.
+Old links remain invalid. This also applies to IDs set through `QURL_CONNECTOR_ID`
+or the profile's `connector_id`.
+
+If publishing reports an identity conflict after deletion, repeat
+`qurl delete <CRID> --yes` with the deleted resource's CRID, then publish again.
+This retries the service's name release.
+If you no longer have the deleted resource's CRID, publish with a different `--id`.
+
+Local publishing accepts `http://localhost:<port>` and IPv4 or IPv6 loopback
+addresses. It intentionally rejects HTTPS, paths, queries, fragments,
+credentials, wildcard listeners, and localhost subdomains. These restrictions
+keep the one-command path unambiguous. `--foreground` runs the same production
+daemon engine in the current process for CI and debugging. Scripts can use
+`--quiet` to read only the full CRID.
+
+#### Remote URLs
+
+```bash
+qurl publish https://api.example.com/reports
+```
+
+Remote targets must use HTTP or HTTPS, include a host and valid port, and must
+not contain embedded credentials. The CLI validates them before reading your
+credential or making a network request.
 
 | Flag | Description |
 |------|-------------|
 | `--description <text>` | Human-readable description stored with the resource |
 | `--tag <tag>` | Tag stored with the resource (repeatable) |
 | `--alias <name>` | Memorable handle stored with the resource |
+| `--id <id>` | Connector ID for a local publish; local-only |
 
-Publishing is not idempotent: the same URL published twice normally
-creates two independent resources with two CRIDs. When the service
-instead answers with an already-existing resource, the CLI says so on
-stderr (and sets `found_existing` in JSON output).
+Description, tags, and alias apply only to remote resources. `--id` applies
+only to a local publish. Mixing those options fails loudly instead of being
+silently ignored.
 
-### qurl resolve
+In either mode, the CRID is last and alone on its line; `--quiet` prints only
+the CRID. Publishing the same target again does not create a duplicate while
+its resource is active: the existing CRID is returned and the output says so.
+JSON reports a known outcome as `found_existing: true` or `false`; if recovery
+cannot prove which happened, it omits the field rather than guessing. Delete
+the resource first if you intentionally want a new CRID.
 
-`qurl resolve <CRID>` mints a temporary access link for the resource the
-CRID names. The link expires on its own; resolve again whenever you need
-a fresh one. When stdout is not a terminal the command prints the bare
-link and nothing else, so it composes: `curl "$(qurl resolve <CRID>)"`.
+### Move a local share
+
+Use `qurl restart <CRID> --target http://127.0.0.1:4000` to move an existing
+local share to a new loopback HTTP origin. The destination must be reachable;
+the old origin can already be stopped. The CRID and Connector ID stay the same.
+
+| Flag | Description |
+|------|-------------|
+| `--target <url>` | Move the share to this loopback HTTP origin, e.g. `http://127.0.0.1:4000` |
+
+The destination follows the [local publish rules](#local-apps) — a loopback
+HTTP origin without path, query, fragment, or credentials; anything else is a
+usage error (exit code 2) before any request is made — and it is the
+destination that is preflighted, not the stored origin, which may already be
+gone. The platform restart runs as usual, then the new target is stored
+together with the serving epoch it returned in one registry write, so no
+durable state pairs the old target with the new epoch or the new target with
+the old one. The text and JSON documents (`target_url`) report the new target,
+and `list` and `status` show the new `Target:` against the unchanged CRID.
+`--target` also turns the share back on if it was off, the same way a plain
+`restart` does. Without `--target`, `restart` is unchanged.
+
+If the command fails after saving the new target, it keeps that target.
+A failed daemon handoff attempts to stop the share; a readiness timeout leaves
+it trying to start. Use `qurl inspect <CRID>` to check its state and target
+before taking further action. A later `qurl start <CRID>` uses the saved target.
+
+For a share published without `--id`, the default Connector ID remains based
+on its original origin. Publishing that original origin again reuses the same
+resource. Publishing the new origin without an explicit ID uses a different
+identity. Use the share's existing `--id` when publishing it again by ID.
+
+### qurl share
+
+`qurl share <CRID>` mints a short-lived share link for the resource the
+CRID names. A CRID is safe to paste anywhere — it grants nothing by
+itself; the share link is what turns it into access, so treat the link as
+a secret. The link expires on its own; share again whenever you need a
+fresh one. When stdout is not a terminal the command prints the bare link
+and nothing else, ready to hand out or open.
+
+The link opens in a browser. Passing it to a tool like curl fetches the
+page that opens the link, not the content itself — to download content
+from a script, use `qurl get <CRID> --file <path>`.
 
 | Flag | Description |
 |------|-------------|
 | `--ttl <duration>` | Requested link lifetime in whole seconds (e.g. `5m`, `1h`). The service may grant less; a shorter grant is reported on stderr, never silent. Sub-second or negative values are refused rather than rounded. |
 | `--yes` | Proceed without confirmation, including sending a test CRID to production |
 
-Before anything is printed, the CLI verifies the service's answer against
+Production share verification needs no extra settings. Sandbox and custom
+deployments use the settings described under `qurl get`.
+Before anything is printed, the CLI verifies the signed link against
 the CRID you asked for; a mismatched answer is discarded and the command
 exits with code 12 without printing a link.
 
 ### qurl get
 
-`qurl get <CRID>` resolves and verifies exactly like `qurl resolve`, then
-acts on the verified link — nothing is ever acted on unverified:
+`qurl get <CRID>` mints a share link exactly like `qurl share`, verifies
+it, then opens or downloads — nothing is ever acted on unverified:
 
 - **On a terminal**, get prints the link, then opens it in your browser
   (set `QURL_BROWSER` or `BROWSER` to choose which one).
-- **With `--file <path>`** it downloads to that path instead. The download
-  is atomic: bytes arrive in `<path>.part`, which becomes `<path>` only
-  when the download completes. Existing files are never replaced unless
-  `--force` is given, and an access link that expires mid-download is
-  refreshed and retried once automatically.
+- **With `--file <path>`** it downloads to that path instead. For links
+  that need a browser to open, get asks the qURL platform for direct
+  access and downloads the granted content — it never saves the
+  in-browser page in place of your file. The download is atomic: bytes
+  arrive in `<path>.part`, which becomes `<path>` only when the download
+  completes. Existing files are never replaced unless `--force` is given,
+  and an access link that expires mid-download is refreshed and retried
+  once automatically.
 - **With `--file -`** the raw bytes stream to stdout, clean for piping —
   gate pipelines on the exit status, since a mid-stream failure leaves
   already-written bytes behind.
@@ -172,15 +692,22 @@ acts on the verified link — nothing is ever acted on unverified:
 | `--yes` | Proceed without confirmation, including sending a test CRID to production |
 
 When stdout is not a terminal, get never opens a browser: pass `--file`,
-or use `qurl resolve` if you only need the link. With `-o json`, get is a
+or use `qurl share` if you only need the link. With `-o json`, get is a
 machine asking for data, so browser mode and `--file -` are refused
 loudly; `--file <path> -o json` downloads and emits the outcome document.
 
+Releases include the production settings used by `share` and `get` to verify
+the signed link and its CRID. Production needs no deployment file. For sandbox
+or a custom deployment, set `QURL_DEPLOYMENT` to that deployment's settings file. Without usable settings, the command
+fails with exit code 3 before printing a link, opening a browser, or downloading.
+Direct or pre-signed URLs in share responses are rejected because they cannot
+be checked against the advertised CRID.
+
 ### qurl list
 
-`qurl list` prints one row per resource published under your account. The
-text table shortens each CRID from the middle so rows stay readable; JSON
-output and `--quiet` always carry the full CRID.
+`qurl list` prints one row per resource published under your account. Text,
+JSON, and `--quiet` all carry the full CRID. The text table can be wide because
+it does not shorten identifiers or local targets.
 
 | Flag | Description |
 |------|-------------|
@@ -193,11 +720,44 @@ When more results exist, text mode says so on stderr with the `--cursor`
 value to pass next. See [JSON output](#json-output--o-json) for the
 pagination contract scripts should follow.
 
+`-o json` additionally carries each row's `type` and its publish-time
+`description` and `tags` — the metadata `qurl publish --description` and
+`--tag` set. Tunnel rows also carry `desired_state` and an explicit
+`serving_epoch`, including epoch zero. The text table keeps publish metadata
+out of its six operational columns. Scripts that recognize resources by the
+label their publisher gave them read the JSON document:
+
+```bash
+cursor=""
+while :; do
+  if [ -n "$cursor" ]; then
+    page=$(qurl list --status active -o json --cursor "$cursor")
+  else
+    page=$(qurl list --status active -o json)
+  fi
+  jq -r '.resources[] | select((.description // "") | test("safe to delete")) | .crid' <<<"$page"
+  jq -e '.has_more' <<<"$page" >/dev/null || break
+  cursor=$(jq -r '.next_cursor // empty' <<<"$page")
+  [ -n "$cursor" ] || break
+done
+```
+
+The loop is the point: a single `qurl list` call returns one page, so a
+sweeper that reads only `.resources[]` from one invocation silently misses
+everything behind `has_more`. `(.description // "")` matters too — the key is
+absent on rows that carry no description, and `null | test(...)` is a jq
+error, not a non-match.
+
+`--status active` matters for a different reason: deleting a resource flips
+its status rather than removing the row, so an unfiltered listing keeps
+returning resources you have already deleted. Pass it on anything that walks
+the whole listing.
+
 ### qurl delete
 
 `qurl delete <CRID>` deletes a published resource. Deletion cannot be
-undone: the CRID stops resolving, and republishing the same target later
-mints a different CRID.
+undone: the CRID can no longer be shared, and republishing the same target
+later mints a different CRID.
 
 | Flag | Description |
 |------|-------------|
@@ -208,61 +768,147 @@ without a terminal the command refuses rather than hanging. Deleting an
 already-deleted resource succeeds idempotently and says so (JSON sets
 `already_gone`).
 
-### qurl connector run
+### qurl start / stop / restart / status / inspect
 
-`qurl connector run --id <id> --target <host:port>` serves an app
-running on your machine through the qURL platform. Your app keeps
-listening on localhost and the Connector connects outward — your machine
-never opens a listening port to the internet — while the platform
-verifies each caller and grants access before any request is forwarded.
+Local shares are durable desired state, managed by their full CRID:
 
-| Flag | Description |
-|------|-------------|
-| `--id` | Which Connector to run: its ID in qURL — the route name your app serves under (or `connector_id` in your profile) |
-| `--target` | The local app, as `host:port`; `:8080` means `127.0.0.1:8080` |
-| `--state-dir` | Where this machine's Connector identity lives (default: your user state directory) |
-| `--refresh-mode` | Self-healing gate after sustained failures: `manual` (default), `auto`, or `disabled` |
+```bash
+qurl stop <CRID>
+qurl start <CRID>
+qurl restart <CRID>
+qurl status <CRID>
+qurl inspect <CRID>
+```
 
-The Connector ID is the same identity the standalone qurl-connector
-configures as `QURL_CONNECTOR_ID` (YAML `id:`), so one setting covers a
-machine that moves between the two tools. The names v1.1.0 briefly
-shipped still work, deprecated: `--slug` as a hidden alias of `--id`
-(passing both with different values is refused), and
-`QURL_CONNECTOR_SLUG` / `connector_slug` at lower precedence than their
-`id`-named counterparts. All three will be removed in the next major
-release.
+`stop` disables the cloud route first and then tells an already-running local
+daemon to reconcile; it never starts the daemon. `start` is idempotent and
+requires the saved local target to be reachable. `restart` re-registers just
+that share on the Connector session under a fresh serving epoch, so a stale
+session cannot keep serving it; the other shares are not disturbed. `status`
+and `inspect` use the same authoritative view. Both work for remote resources
+and include the local target only when this machine owns one.
 
-The first start enrolls this machine and needs a one-time enrollment
-token from the qURL console, supplied **only** via `QURL_CONNECTOR_TOKEN`
-or `QURL_CONNECTOR_TOKEN_FILE` — there is deliberately no token flag,
-because arguments leak into shell history and process lists. The token is
-used once and never stored; later starts reuse the saved identity.
+`restart --target <origin>` additionally moves the share to a different
+loopback origin on this machine, keeping its CRID and links; see
+[Move a local share](#move-a-local-share).
 
-If the platform stays unreachable long enough, the command exits with
-code 11 instead of retrying forever. The next start may then need its
-platform assignment refreshed: with the default `--refresh-mode manual`
-it stops and asks for approval (exit 2) — approve by running once with
-`--refresh-mode auto`. Automatic restarts are deliberately not treated
-as approval. Stop serving with Ctrl-C or SIGTERM; teardown gets a short
-grace period and the command exits 130.
+Custom deployments must support the current CLI resource-status API. The CLI
+does not scan the full account inventory when one resource-status request
+fails.
 
-### qurl login / logout / whoami
+One daemon serves every local share on **one Connector session**: it knocks,
+logs in, and holds one heartbeat stream once for the whole machine, then serves
+each share as its own route on that session. A share can fail, restart, or be
+added or removed on its own without touching the others, and the daemon still
+recovers assignment, sleep/wake, and network failures automatically with
+persisted bounded backoff — customers never need a refresh approval flag. One
+machine serves up to 2000 local shares (see [Scale](#scale)). On macOS the
+first local `publish` or `start` installs an owner-only LaunchAgent. On Windows
+it installs a least-privilege per-user Task Scheduler job. The installed `qurl`
+path survives normal upgrades, and a binary-version change reloads the resident
+daemon deliberately. On macOS, replacement waits for the prior daemon to finish
+its configured shutdown before it retries startup. If that shutdown times out,
+retry the command to restore the background job.
+Ordinary lifecycle commands reload desired state over an
+owner-only local control channel without restarting healthy sibling shares.
 
-`qurl login` reads the key from piped stdin or a hidden interactive
-prompt — never as an argument — validates its shape, checks it against
-the qURL service, and only then stores it (OS keyring preferred, the
-`~/.config/qurl/token` fallback where no keyring exists — see
-[Authentication](#authentication)). `qurl logout` removes the stored key
-from every backend that holds it; it does not touch `QURL_API_KEY` in
-your environment. `qurl whoami` shows the account and the key's own
-identity (id, kind, scopes, expiry) — identity only, no plan or usage
-data, so it is cheap enough for scripts and shell prompts (`--quiet`
-prints just the owner id).
+<!-- TODO(upstream-contract): the grace mirrors qurl-connector groupControlRecoveryGrace. -->
+If the tunnel control connection cannot restore its proxy table within 25
+seconds, the daemon retires that session and requests fresh admission. Brief
+connection losses can recover with the existing session.
+
+### Scale
+
+A single machine can publish up to 2000 local shares under one account. Every
+share is one route on the daemon's single Connector session rather than its own
+session, so the whole set costs one knock, one login, one authorization stream,
+and one heartbeat stream — not one of each per share. Publishing, starting,
+stopping, or restarting a share reconciles the live session in place: a new
+share joins without a second knock, a stopped or deleted share is dropped, and
+a restart re-registers only that share's route. See
+[docs/session-groups.md](../../docs/session-groups.md) for the model and its
+per-share failure isolation.
+
+`qurl list` prints every full CRID. For locally registered tunnel rows it also
+prints the canonical loopback target and durable desired state. The paged list
+does not make one live API request per row, so its observed column is
+`unknown`; use `qurl status <CRID>` for the authoritative `stopped`,
+`connecting`, or `serving` observation. If the owner-only local registry is
+unavailable, list omits local targets and emits one warning.
+
+### Session group modes
+
+The daemon has two ways of mapping local shares onto Connector sessions,
+selected by the `QURL_SHARE_GROUP_MODE` setting (flag `--share-group-mode` on
+`qurl daemon run`, config key `share_group_mode`):
+
+| Mode | What it does | When to use it |
+|------|--------------|----------------|
+| `single` (default) | Every share is one route on **one** session: one knock, one login, one heartbeat stream for the whole machine. | The target model; use it whenever the platform authorizes every route of a Connector on one session. |
+| `per-share` | Every share runs on **its own** session: one knock, one login, and one journal per share, rotated per share. | The compatibility mode for a platform that admits a session's routes only for the one resource that session was signed for. In `single` mode against such a platform, every share beyond the first is refused and shows as `retrying` / `platform_denied` in `qurl inspect`. |
+
+Both modes keep the same lifecycle semantics — `publish` adds a share, `stop`
+removes it, `restart` re-registers only that share, and a refused or
+permanently denied share never disturbs its siblings — and the same `qurl
+status` / `qurl inspect` output. `per-share` simply pays the per-session cost
+for each share, so the per-owner platform budgets for sessions and heartbeat
+streams cap it well below the [2000-share scale](#scale) of `single`; above
+300 shares the daemon logs a warning so a retrying excess can be attributed
+to that budget. Start-up in `per-share` mode admits the shares one after
+another on the same shared admission path, so a large fleet takes roughly one
+knock round-trip per share to come fully up.
+
+The mode is part of the daemon's job definition. To switch a machine that is
+already sharing, set the mode durably and run any command that installs the
+job — `qurl start <CRID>`, `qurl restart <CRID>`, or `qurl publish` — which
+replaces the resident daemon in the new mode, exactly as a version upgrade
+would:
+
+```bash
+printf 'share_group_mode: per-share\n' >> ~/.config/qurl/config.yaml
+qurl start <CRID>
+```
+
+Setting only the environment variable works the same way but lasts one
+command: the next lifecycle command run without it resolves `single` again and
+switches the daemon back. Put the setting in the config file for anything
+durable. A headless `qurl daemon run` reads the same setting, or takes
+`--share-group-mode` directly.
+
+### qurl login / whoami
+
+`qurl login` reads the account key from piped stdin or a hidden interactive
+prompt — never as an argument — validates it, enrolls the registered device,
+checks that the device belongs to the same account, and discards the account
+key. `qurl whoami` checks the registered device and shows its account identity
+only, with no plan or usage data. `--quiet` prints just the owner id.
 
 ```bash
 op read op://team/qurl/key | qurl login
 qurl whoami -o json
 ```
+
+A supervisor such as qURL Desktop can instead run
+`qurl login --enrollment-token-file /absolute/path/to/token --supervision external -o json`.
+It must supply a one-time token minted for `target=agent`, set
+`LAYERV_KEY_PROVIDER=local-key`, and pass the 32-byte wrapping key through the
+inherited descriptor named by `LAYERV_LOCAL_KEY_FD`. Do not set `QURL_API_KEY`
+or `QURL_API_KEY_FILE` for this form. Token-file login is tested on macOS and
+Linux. Non-Unix platforms, including Windows, reject it before changing local state.
+
+The token file must be an owner-owned regular file with one hard link and
+mode `0400` or `0600`. The CLI reads it only when enrollment needs it. The
+supervisor must remove it after the command exits, including on failure.
+An enrolled device can log in again with the same path after the file is
+removed. Invalid command options return exit code 2; an unusable token file
+returns 4; incompatible encrypted-state settings return 3. Correct a token
+file error and retry with the same state directory. A namespace with a different
+supervision mode returns 3; one bound to another account returns 7.
+If the stored device credential is revoked, this form cannot recover it with
+account-key authority: preserve the old state directory and enroll a new
+namespace with a fresh token. Login JSON includes
+`owner_id`, `auth_type`, `device_enrolled`, and `device_key_id` when the
+service supplies a key ID.
 
 ### qurl completion
 
@@ -302,17 +948,18 @@ in every archive.
 | `--endpoint <url>` | qURL API endpoint |
 | `--profile <name>` | Configuration profile |
 | `-v, --verbose` | Request diagnostics on stderr (credentials always redacted) |
+| `--supervision native\|external` | Who runs the sharing daemon: qurl's per-user background job, or another program running `qurl daemon run` — see [External supervision](#external-supervision) |
 
 ## Scripting contract
 
-- **stdout carries data, stderr carries everything else.** `qurl resolve`
+- **stdout carries data, stderr carries everything else.** `qurl share`
   piped into another command prints the bare link and nothing more;
   notes, warnings, and confirmation prompts go to stderr.
 - **`--quiet` prints only the primary value**, one per line: the CRID for
-  `publish`, the link for `resolve`, full CRIDs for `list`, the
+  `publish`, the link for `share`, full CRIDs for `list`, the
   destination path for a `get --file` download, the owner id for
   `whoami` and `login`.
-- **Verification is built in:** before printing anything, `qurl resolve`
+- **Verification is built in:** before printing anything, `qurl share`
   and `qurl get` check the service's answer against the CRID you asked
   for and discard mismatches (exit 12).
 
@@ -326,7 +973,7 @@ exit-code authority in code (`apps/cli/internal/exitcode`):
 | 0 | success | The command did what was asked. |
 | 1 | general | An unclassified failure, including features not yet available in this build. |
 | 2 | usage | The command line itself was wrong: flags, arguments, or missing confirmation. |
-| 3 | configuration | Configuration files or profiles are invalid. |
+| 3 | configuration | Settings or profiles are invalid, or this CRID needs a newer CLI. |
 | 4 | authentication | No credential, an implausible credential, or the service rejected the credential. |
 | 5 | not found | The resource does not exist or is retired — revoked and tombstoned resources included; the stderr message distinguishes them. |
 | 6 | permission | The credential lacks permission for this operation. |
@@ -336,14 +983,14 @@ exit-code authority in code (`apps/cli/internal/exitcode`):
 | 10 | server error | The service failed or answered outside its contract. |
 | 11 | unavailable | The service cannot be reached or is not serving this surface: HTTP 503, network failures, timeouts. |
 | 12 | verification failed | The response failed CRID-anchored verification. Nothing was printed — treat it as tampering, not transience. |
-| 130 | interrupted | The run was canceled (Ctrl-C or SIGTERM), including a graceful `connector run` stop. |
+| 130 | interrupted | The foreground daemon or another command was canceled with Ctrl-C or SIGTERM. |
 
 ### JSON output (`-o json`)
 
 Every command's `-o json` document uses field names owned by this repo —
 a stable contract independent of upstream renames. Fields that only
-sometimes apply (`found_existing`, `already_gone`, a missing `crid` on
-older deployments) are omitted rather than emitted empty.
+sometimes apply (`found_existing`, `already_gone`) are omitted rather than
+emitted empty. Every resource result requires a verified `crid`.
 
 For `qurl list`, **`has_more` — not `next_cursor` presence — is the
 pagination terminator.** The service legitimately serves short and even

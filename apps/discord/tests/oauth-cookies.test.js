@@ -1,11 +1,3 @@
-// Unit tests for src/utils/oauth-cookies.js — locks the path-must-
-// match invariant on clearQurlOAuthCookie so a refactor that drops
-// the path arg silently bypasses cookie clearing in the browser.
-//
-// The happy-path /oauth/qurl/callback test in qurl-oauth.test.js
-// already pins this end-to-end via header inspection; this file
-// adds a unit-level regression fence so the helper itself can't
-// drift.
 
 const {
   QURL_OAUTH_SESSION_COOKIE,
@@ -69,10 +61,6 @@ describe('utils/oauth-cookies', () => {
 
   describe('clearQurlOAuthCookie', () => {
     it('always passes Path=/oauth/qurl so the browser actually forgets the cookie', () => {
-      // Path-mismatch on clearCookie is silently a no-op — the browser
-      // keeps the cookie alive until TTL. Pinning the path arg here
-      // prevents a refactor that drops it from breaking one-shot
-      // binding semantics.
       const res = fakeRes();
       clearQurlOAuthCookie(res);
       expect(res.clearCookieCalls).toHaveLength(1);

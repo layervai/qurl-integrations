@@ -75,9 +75,31 @@ at the OAuth-callback bind layer.
     same-account by intent) and records the account for next time, which is how an
     owner self-heals a legacy row so future `--repoint` works.
   Rotation failure modes to expect:
-  - If the stored row predates key metadata, or if the signed-in account cannot
-    revoke the current key, rotation fails closed before any replacement is
-    minted.
+  - If the signed-in account cannot revoke the current key, rotation fails
+    closed before any replacement is minted.
+  - A stored row that predates key metadata (no `key_id`) rotates **without
+    revoking**, because Slack cannot identify the predecessor to revoke it.
+    For an on-call operator, the parts that matter:
+    - **What is left behind.** One live qURL key that Slack no longer
+      references, logged as `setup_rotate_legacy_row_orphaned_key` with the
+      owning `team_id`. Revoke it in qURL API-key management; until then it
+      counts against the account's API-key plan limit.
+    - **How often.** Once per workspace. The rotation records the new `key_id`
+      and the signed-in `qurl_account_id`, so the next rotation takes the
+      normal revoke-then-replace route and `--repoint` becomes possible. The
+      bound is one orphaned *key*, not one log line — concurrent rotations mint
+      idempotently but can each emit the event, so dedupe by `team_id`.
+    - **When it refuses.** A rotation with no verified qURL account fails
+      closed rather than storing empty provenance. `--repoint` never takes this
+      path at all; mint-without-revoke is scoped to `--rotate`.
+    - **At the plan limit.** Because nothing is revoked the rotation is net +1
+      key, so an account already at its limit fails the mint and sees a page
+      saying the previous key could not be identified and is still active —
+      not the normal rotation's "previous key was revoked".
+    - **Why not just refuse.** Refusing these rows (the previous behavior)
+      protected nothing: the only remaining route was `/qurl uninstall`, which
+      abandons the same key and also discards the Slack bot token and workspace
+      binding, so a customer following that path leaked one key per cycle.
   - Missing or revoked legacy stored keys without key identity ask qURL to
     provision the Slack workspace key; if qURL reports that the workspace is
     already connected but the stored key cannot be recovered, setup stops with
@@ -108,10 +130,13 @@ at the OAuth-callback bind layer.
   unless its own `QURL_BINDING_IDEMPOTENCY_TTL_CONTRACT` environment variable is
   set to a canonical positive whole-hour duration such as `24h` at startup.
   qURL can replay the setup key during that window. After the window expires,
-  if the stored Slack key is lost/revoked, or if the admin abandons setup, use
-  qURL account/API-key management or operator tooling to revoke the unused
-  workspace key before retrying; binding-level transfer/recovery for rows
-  without stored key metadata is tracked in layervai/qurl-service#910.
+  rerun setup with the same account: if Slack has no usable stored key,
+  the binding endpoint rotates the prior key and returns a new one. A healthy
+  stored key is reused. An invalid key with stored identity still requires
+  `--rotate` or `--repoint`; plain setup does not bypass that safeguard.
+  If the admin abandons setup, use the owner-authenticated binding DELETE route
+  to revoke its key and release the reservation. Deleting only the API key does
+  not release the binding.
   Rerunning setup without `--rotate`/`--repoint` is intentionally not a
   healthy-key rotation or qURL-account switch command.
   Every setup path — first install, `--rotate`, and `--repoint` — sends Auth0
@@ -196,44 +221,40 @@ at the OAuth-callback bind layer.
     validity window reuses the same enrollment-token idempotency bucket.
     Retrying after that window can mint a new token, so operators should run the
     newest Slack install block and discard older enrollment-token messages.
-  - **Output** — persists `resource_id` and `connector_routing_id` plus
-    `QURL_API_URL`, and is tailored to the selected environment. The Connector
-    rehydrates `knock_resource_id` from the authenticated resource response on
-    every start; the installer does not set the advanced
-    `LAYERV_KNOCK_RESOURCE_ID` override:
-    - **Docker / Docker Compose** — guarded pasteable shell blocks that write
-      `qurl-proxy.yaml`, create an enrollment-token file, create/chown
-      per-connector durable agent state and audit directories, pass
-      `QURL_API_KEY_FILE`, `QURL_AUDIT_FILE`, and `QURL_CONNECTOR_ID=<id>`,
-      and run the Connector with a read-only root filesystem, bounded `/tmp`,
-      all capabilities dropped, no-new-privileges, and a 512-process limit.
-    - **ECS/Fargate / Kubernetes** — the same contract as deployment snippets:
-      co-locate the sidecar with the target container, mount durable
-      per-instance state at `/var/lib/layerv/agent`, persist audit records
-      separately under `/var/log/layerv`, and run the Connector with a
-      read-only root filesystem. ECS renders `user: 65532:65532`; its state,
-      audit, and config EFS access points use POSIX UID/GID `65532:65532` with
-      root modes 0700, 0750, and 0755 respectively. Kubernetes prepares exact
-      state/audit ownership with a digest-pinned init image; do not replace it
-      with pod-level `fsGroup`, because qurl-go rejects group-writable identity
-      state.
+  - **Output** — persists `resource_id` and `connector_routing_id`, renders a
+    strict one-route `share.yaml`, and is tailored to the selected environment.
+    Every customer workload runs the same `ghcr.io/layervai/qurl` image and
+    hidden `qurl daemon run` entrypoint; qurl-connector remains a Go runtime
+    module and is not a second binary or image.
+    - **Docker / Docker Compose** — guarded pasteable shell blocks write
+      `share.yaml`, install the one-time enrollment token as an owner-only file,
+      create/chown the per-share durable state directory, and run qurl with a
+      read-only root filesystem, bounded `/tmp`, all capabilities dropped,
+      no-new-privileges, a 512-process limit, and `unless-stopped` recovery.
+    - **ECS/Fargate / Kubernetes** — co-locate qurl with the target container,
+      mount durable state plus read-only config/token projections, and run as
+      UID/GID `65532:65532` with a read-only root filesystem. ECS keeps qurl
+      non-essential so an access-path failure cannot stop the customer app and
+      enables the platform container restart policy. Kubernetes uses
+      `runAsNonRoot` plus `fsGroup: 65532`; qurl creates its nested owner-only
+      identity directory inside the writable volume.
   - **Warm-start transition** — after first registration, remove the
     enrollment-token reference from the workload definition and prove a
     replacement task/pod starts from durable agent state before deleting the
     platform secret. Deleting an ECS Secrets Manager secret or Kubernetes
     Secret while the active workload definition still references it prevents
     replacement workloads from starting.
-  - **Key delivery** — ECS/Fargate uses the client's supported `QURL_API_KEY`
-    fallback because AWS injects task secrets as environment variables; Docker,
-    Docker Compose, and Kubernetes prefer `QURL_API_KEY_FILE`.
-    Non-interactive operators should inject `QURL_BOOTSTRAP_KEY` from their
-    secret manager before running a pasted block; interactive runs prompt for
-    the enrollment token with terminal echo disabled when possible.
+  - **Token delivery** — the one-time enrollment token is never rendered in
+    argv or an environment variable. Docker and Compose prompt locally and
+    install an owner-only file; Kubernetes and ECS mount a read-only projected
+    secret file. The daemon consumes the token during first native enrollment,
+    never persists it, and warm starts use only the durable native state.
   - **Constraint** — do not share one agent state volume across concurrently
     running sidecars.
-  - **Promotion gate** — use an immutable qurl-connector release containing the
-    native qurl-go UDP lifecycle tracked by qurl-connector #421 before promoting
-    this Slack build. Public HTTPS registration/knock bridges are not supported.
+  - **Promotion gate** — set `QURL_IMAGE` to the immutable digest published as
+    `qurl-image.txt` by the matching CLI release before promoting this Slack
+    build. Native NHP admission remains inside the qurl-connector runtime module;
+    public HTTPS registration/knock bridges are not supported.
     As a fail-closed rollout guard, the Slack renderer rejects a legacy internal
     `r_` resource label before minting an enrollment token; do not treat that guard
     as a substitute for verifying the complete producer identity triple in
@@ -539,7 +560,10 @@ reports them is what lets that caveat be dropped.
 `event="setup_binding_backed_persist_failure"` means qURL provisioned a
 binding-backed workspace key, but the Slack app failed to store it locally. Treat
 every event as actionable: the admin can recover by rerunning `/qurl setup
-<email>` with the same qURL account only during the binding replay window. The
+<email>` with the same qURL account. During the binding replay window, qURL
+returns the original key; after expiry, it rotates the same-owner binding when
+Slack has no usable stored key. A 409 means the service refused recovery, for
+example because another account owns the binding. The
 emitted `retry_window_hours` reports that window, and the event timestamp starts
 the operator clock. The emitted window comes from the Slack task's
 `QURL_BINDING_IDEMPOTENCY_TTL_CONTRACT` runtime override when set, otherwise it
@@ -547,10 +571,9 @@ uses the 24-hour qurl-service default mirror. Invalid override values fail
 startup; accepted values use the canonical `Nh` form such as `24h` or `48h`
 with no leading zero.
 
-`cleanup_after_window_hours` is intentionally coincident with the same threshold
-today; prefer retry at the exact boundary and treat rows older than the emitted
-cleanup window as cleanup candidates until qurl-service exposes a separate
-cleanup TTL.
+`cleanup_after_window_hours` retains the replay-window value for existing log
+queries. It is not a deadline for recovery or an instruction to revoke a key.
+The operator action is `rerun_setup_same_owner_replays_or_rotates`.
 
 Run this CloudWatch Logs Insights query against the Slack app log group with the
 time range set to the current replay window:
@@ -563,13 +586,13 @@ fields @timestamp, team_id, key_id, retry_window_hours, error
 ```
 
 Threshold: any result opens an on-call ticket to help the workspace admin rerun
-setup before the replay window expires. For automated alerting, use a metric
+setup with the same account. For automated alerting, use a metric
 filter (or scheduled Logs Insights query that publishes a metric) matching this
 event and alarm on `count >= 1` in a 5-minute evaluation period; the query lists
 rows for triage instead of returning `stats count()`. If the admin reruns setup
 and the Slack storage write succeeds, close the ticket.
 
-For post-window cleanup, run the same event query over the older incident window
+For unresolved post-window recovery, run the same event query over the older incident window
 (for example, a multi-day range whose end time is older than the emitted cleanup
 window):
 
@@ -581,11 +604,15 @@ fields @timestamp, team_id, key_id, cleanup_after_window_hours, error
 ```
 
 Threshold: any unresolved row older than its emitted `cleanup_after_window_hours`
-is a cleanup candidate. Use qURL account/API-key management or operator tooling
-to revoke or recover the unused workspace key before asking the admin to retry.
-Customer self-service recovery for revoked or stale external-identity bindings is
-tracked in
-[layervai/qurl-service#910](https://github.com/layervai/qurl-service/issues/910).
+still needs attention. First retry setup with the same account. If setup is
+abandoned, use `DELETE /v1/external-identity-bindings/{binding_id}` with the
+binding owner's JWT to revoke the bound key and remove its reservation/replay.
+Do not delete binding rows directly or treat API-key deletion as binding cleanup.
+Deploy qurl-service #1344 before this Slack version. Rolling back to a schema
+that rejects `rotate_existing` breaks setup with HTTP 422; restore the compatible
+service or redeploy the prior Slack version. Removing the binding route entirely
+also reactivates the existing route-missing legacy fallback, so it is not a safe
+rollback for an environment that has active bindings.
 The setup-binding rollout notes live in
 [qurl-integrations PR #703](https://github.com/layervai/qurl-integrations/pull/703),
 paired with [qurl-service PR #904](https://github.com/layervai/qurl-service/pull/904).
@@ -664,14 +691,12 @@ ownership out of band):
    of workspace ownership.
 2. Revoke the `current_qurl_account_id` key for the workspace and free the
    `(slack, <team_id>)` external-identity binding so the destination account can
-   mint a fresh binding-backed key. **There is no operator-guarded surface for
-   this yet** — qurl-service exposes only `POST /v1/external-identity-bindings`
-   (which refuses reassignment) and `DELETE /v1/api-keys/{key_id}` (owner-scoped),
-   with no binding delete/transfer route. So today this is a manual,
-   high-care step: revoke the key through qURL account/API-key management and
-   free the binding row via internal datastore tooling. The guarded reassign
-   surface that makes this safe and auditable is tracked in
-   layervai/qurl-service#956 — prefer it once it ships.
+   mint a fresh binding-backed key. The current owner must call
+   `DELETE /v1/external-identity-bindings/{binding_id}` with their JWT. This
+   atomically revokes the key and removes the binding and its replay record.
+   Deleting only `/v1/api-keys/{key_id}` leaves the reservation in place.
+   Do not modify the binding datastore directly. If the current owner cannot
+   authenticate, stop and use the approved account-recovery process.
 3. Tell the owner to rerun `/qurl setup <email>` (plain) signed in as the
    destination account; with the binding freed this mints and stores the new
    account's key normally.
@@ -842,7 +867,7 @@ SLACK_SIGNING_SECRET=... \
 SLACK_CLIENT_ID=... \
 SLACK_CLIENT_SECRET=... \
 QURL_ENDPOINT=https://api.layerv.ai \
-QURL_CONNECTOR_IMAGE_FALLBACK=dev-sandbox \
+QURL_IMAGE_FALLBACK=dev-sandbox \
 AUTH0_DOMAIN=layerv.us.auth0.com \
 AUTH0_CLIENT_ID=... \
 AUTH0_CLIENT_SECRET=... \
@@ -1011,9 +1036,10 @@ that accidentally carried a numeric value.
 | `OAUTH_STATE_SECRET` | OAuth | HMAC-SHA256 key for state-token signing. Must be ≥32 bytes. |
 | `QURL_BINDING_IDEMPOTENCY_TTL_CONTRACT` | No | Runtime mirror of qurl-service's external-binding replay window for setup persist-failure logs. Empty uses the current 24-hour default from layervai/qurl-service#904. Set only when qurl-service changes the binding idempotency TTL before this Slack app redeploys; value must use the canonical positive whole-hour `Nh` form such as `24h`, otherwise startup fails. |
 | `QURL_API_KEY_MINT_IDEMPOTENCY_TTL_CONTRACT` | No | Runtime mirror of qurl-service's API-key mint replay window for rotation persist-failure logs. Empty uses the current 24-hour qurl-service default mirror. Set only when qurl-service changes the API-key mint idempotency TTL before this Slack app redeploys; value must use the canonical positive whole-hour `Nh` form such as `24h`, otherwise startup fails. |
-| `QURL_CONNECTOR_IMAGE` | Yes in production | Container image reference rendered by `/qurl-admin protect-connector`. Pin an immutable release containing the server-issued `resource_id` / `connector_routing_id` / `knock_resource_id` runtime contract and the native qurl-go UDP lifecycle tracked by qurl-connector #421. The rendered YAML persists only `resource_id` and `connector_routing_id`; the Connector rehydrates `knock_resource_id` at runtime. Public HTTPS registration/knock bridge images are unsupported. Production must use a specific non-latest tag or lowercase SHA-256 digest, for example `ghcr.io/layervai/qurl-connector@sha256:<digest>`. Empty values, omitted tags, `:latest` in any case, uppercase registry/repository paths, malformed digests, or characters outside the narrow image-reference allowlist fail startup validation. |
-| `QURL_CONNECTOR_IMAGE_FALLBACK` | No | Set `dev-sandbox` (case-insensitive) to allow an empty `QURL_CONNECTOR_IMAGE` to render the `ghcr.io/layervai/qurl-connector:latest` fallback in local or sandbox deployments. Leave unset in production; production should fail startup unless `QURL_CONNECTOR_IMAGE` is pinned. |
-| `QURL_S3_ORIGIN_IMAGE` | No | Optional S3 website origin image rendered by the guided `/qurl-admin protect` → **Protect qURL Connector** → **S3 static website** flow. Unlike `QURL_CONNECTOR_IMAGE`, an override must use a lowercase SHA-256 digest (tags are rejected), for example `ghcr.io/layervai/qurl-integrations/s3-static-connector@sha256:<digest>`. Empty uses the tested digest-pinned default. |
+| `QURL_IMAGE` | Yes in production | Immutable `ghcr.io/layervai/qurl` image rendered by guided sharing setup. The image contains only `/usr/local/bin/qurl`; its hidden headless daemon uses the same local registry and qurl-connector Go runtime module as the desktop CLI. Production must use the lowercase SHA-256 digest from the matching CLI release's `qurl-image.txt`, for example `ghcr.io/layervai/qurl@sha256:<digest>`; tags are rejected. |
+| `QURL_CONNECTOR_HUB_HOST`, `QURL_CONNECTOR_HUB_PORT`, `QURL_CONNECTOR_HUB_SERVER_PUBLIC_KEY_B64` | Required together for sandbox | Explicit native Hub trust copied into every Docker, Compose, Kubernetes and ECS install, including S3 websites. Supports LayerV-operated Hubs on port `443` with a padded base64 32-byte public key. Partial/invalid configuration stops startup. With all three absent, generated installs use the published CLI’s production Hub default; `QURL_ENDPOINT` alone does not select a sandbox Hub. |
+| `QURL_IMAGE_FALLBACK` | No | Set `dev-sandbox` (case-insensitive) to allow an empty `QURL_IMAGE` to render the `ghcr.io/layervai/qurl:latest` fallback in local or sandbox deployments. Leave unset in production; production fails startup unless the qurl image is digest-pinned. |
+| `QURL_S3_ORIGIN_IMAGE` | No | Optional S3 website origin image rendered by the guided `/qurl-admin protect` → **Protect qURL Connector** → **S3 static website** flow. An override must use a lowercase SHA-256 digest, for example `ghcr.io/layervai/qurl-integrations/s3-static-connector@sha256:<digest>`. Empty uses the tested digest-pinned default. |
 | `QURL_SLACK_RATE_LIMIT_ENABLED` | No | Set `true` to enable the DDB-backed in-bot per-user gate for `/qurl get` and `/qurl aliases`. Empty or malformed values leave the gate off for sandbox/open-gate deployments. |
 | `QURL_SLACK_BOT_TOKEN_ROTATION_ENABLED` | No | Set `true` only if Slack bot-token rotation is enabled for the app. When true, `tokens_revoked` bot-token callbacks are acknowledged but not treated as uninstall teardowns; `app_uninstalled` still purges workspace data. Empty preserves the current Marketplace cleanup behavior. Malformed values fail startup because silently choosing either mode can suppress cleanup or make routine token rotation destructive. |
 | `QURL_SLACK_MAX_CONCURRENT_ASYNC` | No | Pool cap for in-flight async slash-command workers. Empty/0 uses the built-in default (50). Tune up if a workspace's load shape sustains `:warning: Secure Access Agent is busy` acks; tune down if memory pressure during retry storms is observed. |
@@ -1035,8 +1061,8 @@ semaphores and upstream service limits rather than a smaller local connection po
 required at startup — the Secure Access Agent needs DynamoDB + KMS for per-workspace key
 lookups even on `/qurl get` / `/qurl list`.
 
-Before promoting a build with the `QURL_CONNECTOR_IMAGE` startup check, verify
-the deployment manifest or task definition injects a pinned connector image; the
+Before promoting a build with the `QURL_IMAGE` startup check, verify
+the deployment manifest or task definition injects the matching CLI image digest; the
 production manifest is intentionally managed outside this public repository.
 
 The `Slack install` group is required for low-friction customer onboarding.

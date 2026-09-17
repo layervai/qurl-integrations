@@ -108,7 +108,7 @@ func TestBootstrapRejectsNoncanonicalPortSpellings(t *testing.T) {
 	}{
 		{port: "0443", wantErr: "canonical decimal form"},
 		{port: "+443", wantErr: "canonical decimal form"},
-		{port: " 443 "},
+		{port: " 443 ", wantErr: "surrounding whitespace"},
 		{port: "65536", wantErr: "standard NHP UDP port"},
 		{port: "0", wantErr: "standard NHP UDP port"},
 	}
@@ -126,7 +126,27 @@ func TestBootstrapRejectsNoncanonicalPortSpellings(t *testing.T) {
 				return
 			}
 			if err != nil || got.Port != DefaultPort {
-				t.Fatalf("Bootstrap(%q) = (%#v, %v), want trimmed canonical port %d", tt.port, got, err, DefaultPort)
+				t.Fatalf("Bootstrap(%q) = (%#v, %v), want canonical port %d", tt.port, got, err, DefaultPort)
+			}
+		})
+	}
+}
+
+func TestBootstrapRejectsWhitespaceAroundEveryCustomValue(t *testing.T) {
+	for _, name := range []string{EnvHost, EnvPort, EnvServerPublicKey} {
+		t.Run(name, func(t *testing.T) {
+			clearOverrideEnv(t)
+			values := map[string]string{
+				EnvHost:            "hub.test.nhp.layerv.ai",
+				EnvPort:            "443",
+				EnvServerPublicKey: validTestPublicKeyB64,
+			}
+			values[name] = " " + values[name]
+			for envName, value := range values {
+				t.Setenv(envName, value)
+			}
+			if _, err := Bootstrap(); err == nil || !strings.Contains(err.Error(), name) || !strings.Contains(err.Error(), "surrounding whitespace") {
+				t.Fatalf("Bootstrap error = %v, want whitespace rejection naming %s", err, name)
 			}
 		})
 	}
@@ -152,6 +172,17 @@ func provisionedDefaultPinForTest(t *testing.T) string {
 func TestBootstrapUsesProvisionedDefaultPin(t *testing.T) {
 	clearOverrideEnv(t)
 	keyB64 := provisionedDefaultPinForTest(t)
+	fingerprint, err := EmbeddedProductionPinFingerprint()
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := DecodeServerPublicKeyB64(keyB64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := FingerprintSHA256Hex(key); fingerprint != want {
+		t.Fatalf("embedded production pin fingerprint = %q, want %q", fingerprint, want)
+	}
 	got, err := Bootstrap()
 	if err != nil {
 		t.Fatal(err)
@@ -194,6 +225,9 @@ func TestBootstrapProductionDefaultFailsClosedUntilProvisioned(t *testing.T) {
 	t.Cleanup(func() { defaultServerPublicKeyB64 = old })
 	if _, err := Bootstrap(); err == nil || !strings.Contains(err.Error(), "no pinned production Hub key") {
 		t.Fatalf("Bootstrap error = %v", err)
+	}
+	if _, err := EmbeddedProductionPinFingerprint(); err == nil || !strings.Contains(err.Error(), "no pinned production Hub key") {
+		t.Fatalf("EmbeddedProductionPinFingerprint error = %v", err)
 	}
 }
 

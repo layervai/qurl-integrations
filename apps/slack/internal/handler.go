@@ -303,6 +303,13 @@ const maxRequestBodyBytes = 1 << 20
 // of a richer payload fails (unreachable for current callers).
 const internalErrorEnvelope = `{"error":"internal"}`
 
+// errEnvelopeKey is the single JSON key of this handler's OWN HTTP error
+// envelope — the 400/401/404/405/413 replies on the non-Slack surfaces. It is
+// deliberately not one of the respField* Slack slash-command response keys
+// further down. internalErrorEnvelope above spells the same key literally
+// because it is pre-marshaled for the path where marshaling itself failed.
+const errEnvelopeKey = "error"
+
 // Config carries the runtime wiring for [NewHandler]. Every field is
 // captured by value into [Handler.cfg] once and then read on the
 // request hot path without synchronization — callers MUST NOT mutate
@@ -315,7 +322,7 @@ type Config struct {
 	AuthProvider       auth.Provider
 	SlackSigningSecret string
 	NewClient          func(apiKey string) *client.Client
-	// ConnectorAPIURL is the qurl-connector API base including /v1. Guided
+	// ConnectorAPIURL is the qURL platform API base including /v1. Guided
 	// tunnel setup writes it into every rendered runtime definition so sandbox
 	// installs never silently fall back to production.
 	ConnectorAPIURL string
@@ -394,7 +401,7 @@ type Config struct {
 	PostDM PostDMFunc
 
 	// TunnelImage is the Docker image shown by `/qurl-admin protect-connector`.
-	// The public env var is QURL_CONNECTOR_IMAGE; this field keeps the
+	// The public env var is QURL_IMAGE; this field keeps the
 	// historical tunnel naming used by the install-rendering code.
 	// Empty falls back to the public client image with the `latest` tag only for
 	// explicit dev/sandbox installs; production cmd/main.go fails closed unless
@@ -403,6 +410,7 @@ type Config struct {
 	// that construct Config directly must pass a pinned image unless they
 	// intentionally exercise the dev/sandbox fallback path.
 	TunnelImage string
+	TunnelHub   TunnelHub
 
 	// S3OriginImage is the private S3 website origin image shown by the
 	// `/qurl-admin protect` S3 website flow. Empty falls back to this package's
@@ -1115,16 +1123,16 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// /slack/commands); logging each would be noise. Slack and
 		// health paths are the only legitimate surface and they get
 		// their own log lines.
-		respondJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+		respondJSON(w, http.StatusNotFound, map[string]string{errEnvelopeKey: "not found"})
 		return
 	}
 
-	slog.Info("received request", "path", r.URL.Path, "method", r.Method) //nolint:gosec // G706: slog's JSON handler escapes control chars in attribute values, so tainted paths can't inject log lines.
+	slog.Info("received request", "path", r.URL.Path, "method", r.Method)
 
 	// Honest oversize declarations get rejected before allocation.
 	// MaxBytesReader still catches dishonest senders during the read.
 	if r.ContentLength > maxRequestBodyBytes {
-		slog.Info("oversize body rejected", "path", r.URL.Path, "reason", "content_length_pre_check", "declared", r.ContentLength) //nolint:gosec // G706: see ServeHTTP — slog escapes tainted attribute values.
+		slog.Info("oversize body rejected", "path", r.URL.Path, "reason", "content_length_pre_check", "declared", r.ContentLength)
 		respondPayloadTooLarge(w)
 		return
 	}
@@ -1135,17 +1143,17 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// above; bucket them together so dashboards see one 413 stream.
 		var mbErr *http.MaxBytesError
 		if errors.As(err, &mbErr) {
-			slog.Info("oversize body rejected", "path", r.URL.Path, "reason", "max_bytes_during_read") //nolint:gosec // G706: see ServeHTTP — slog escapes tainted attribute values.
+			slog.Info("oversize body rejected", "path", r.URL.Path, "reason", "max_bytes_during_read")
 			respondPayloadTooLarge(w)
 			return
 		}
-		slog.Warn("failed to read request body", "error", err, "path", r.URL.Path) //nolint:gosec // G706: see ServeHTTP — slog escapes tainted attribute values.
-		respondJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid body"})
+		slog.Warn("failed to read request body", "error", err, "path", r.URL.Path)
+		respondJSON(w, http.StatusBadRequest, map[string]string{errEnvelopeKey: "invalid body"})
 		return
 	}
 
 	if err := h.verifySlackRequest(r, body); err != nil {
-		respondJSON(w, http.StatusUnauthorized, map[string]string{"error": "signature verification failed"})
+		respondJSON(w, http.StatusUnauthorized, map[string]string{errEnvelopeKey: "signature verification failed"})
 		return
 	}
 
@@ -1186,9 +1194,9 @@ func (h *Handler) verifySlackRequest(r *http.Request, body []byte) error {
 		// Empty secret means the deployment is effectively open — page on
 		// it distinctly from ordinary 401 noise.
 		if errors.Is(err, errSlackSigningSecretEmpty) {
-			slog.Error("slack signature verification failed — signing secret is empty (deployment is open)", attrs...) //nolint:gosec // G706: attrs carries r.URL.Path which slog escapes.
+			slog.Error("slack signature verification failed — signing secret is empty (deployment is open)", attrs...)
 		} else {
-			slog.Warn("slack signature verification failed", attrs...) //nolint:gosec // G706: attrs carries r.URL.Path which slog escapes.
+			slog.Warn("slack signature verification failed", attrs...)
 		}
 	}
 	return err
@@ -1264,7 +1272,7 @@ var adminVerbs = []string{string(SubcmdAdmin), adminVerbProtect, adminVerbProtec
 // redirect a user who typed a user verb on `/qurl-admin`. `setup` is a
 // user verb (first-come-claims; see handleSetup), so `/qurl-admin setup`
 // redirects here to `/qurl setup`. Immutable like adminVerbs (see above).
-var userVerbs = []string{"get", "list", "aliases", "create", "setup", uninstallVerb, "feedback"}
+var userVerbs = []string{"get", "list", string(SubcmdAliases), "create", setupVerb, uninstallVerb, "feedback"}
 
 // isAdminVerb reports whether text's leading verb is an admin verb.
 func isAdminVerb(text string) bool {
@@ -1373,7 +1381,7 @@ func stripUnsetDisplayNamePrefix(text string) string {
 func (h *Handler) handleSlashCommand(w http.ResponseWriter, body []byte) {
 	values, err := url.ParseQuery(string(body))
 	if err != nil {
-		respondJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid form body"})
+		respondJSON(w, http.StatusBadRequest, map[string]string{errEnvelopeKey: "invalid form body"})
 		return
 	}
 
@@ -1485,7 +1493,7 @@ func (h *Handler) dispatchUserCommand(w http.ResponseWriter, command, text strin
 		// routing here. The parser then produces ErrEmptyResource
 		// for a bare `get`.
 		h.handleGet(w, values)
-	case text == "aliases":
+	case text == string(SubcmdAliases):
 		h.handleAliases(w, values)
 	case slashSubcommand(text, "feedback"):
 		// feedback is a user verb available to any workspace member — no
@@ -1851,11 +1859,23 @@ func (h *Handler) handleSetup(w http.ResponseWriter, values url.Values, setupCmd
 }
 
 func (h *Handler) handleUninstall(w http.ResponseWriter, values url.Values) {
-	teamID, userID, ok := h.requireUninstallAvailableAndAuthorized(w, values)
+	teamID, _, ok := h.requireUninstallAvailableAndAuthorized(w, values)
 	if !ok {
 		return
 	}
-	h.deleteWorkspaceAPIKey(w, teamID, userID, slashUninstallPurgeWorkspaceIDs(values, teamID))
+	// Render the confirmation instead of disconnecting now. The click →
+	// handleUninstallConfirmClick re-gates and performs the teardown, so the
+	// destructive step always sits behind Slack's own confirm dialog. The purge
+	// partitions are resolved from the signed slash payload to retain the scope
+	// shown by this card. Slack defines is_enterprise_install as optional on
+	// block_actions; the click intersects the stored scope with its authenticated
+	// team/enterprise ids rather than widening it from a later install context.
+	command := values.Get(fieldCommand)
+	if command == "" {
+		command = commandUser
+	}
+	purgeIDs := slashUninstallPurgeWorkspaceIDs(values, teamID)
+	respondSlackBlocks(w, uninstallConfirmFallbackText, uninstallConfirmBlocks(command, purgeIDs))
 }
 
 func slashUninstallPurgeWorkspaceIDs(values url.Values, teamID string) []string {
@@ -1936,16 +1956,19 @@ var _ workspaceStateIdentityDeleter = (*auth.DDBProvider)(nil)
 // workspace_state rows.
 var _ workspaceStateBeforeIdentityDeleter = (*auth.DDBProvider)(nil)
 
-func (h *Handler) deleteWorkspaceAPIKey(w http.ResponseWriter, teamID, userID string, purgeWorkspaceIDs []string) {
-	// Reuse the sync admin-verb budget (1.2s): after the owner/admin gate, the
-	// optional upstream revoke plus the DeleteAPIKey write stay inside Slack's 3s
-	// ack window. The revoke is best-effort within this ctx — the qURL client may
-	// retry a flapping upstream (WithRetry), but the ctx bound makes a retry storm
-	// abort (key_id preserved) rather than miss the ack.
-	ctx, cancel := context.WithTimeout(h.baseCtx, adminSyncVerbBudget)
-	defer cancel()
-
-	const localSlackDataPurgeScheduledReply = "Local Slack app data for this workspace is being cleared; Slack features stay disconnected until the recorded workspace owner runs `/qurl setup <email>`."
+// uninstallWorkspaceReply performs the disconnect and RETURNS the reply text
+// rather than writing it, so the confirmation button and any future surface
+// converge on one teardown path instead of forking the revoke/delete/purge
+// ordering. The bool reports whether local purge was scheduled.
+// The caller owns delivery (response_url) and the context budget.
+func (h *Handler) uninstallWorkspaceReply(ctx context.Context, teamID, userID string, purgeWorkspaceIDs []string) (string, bool) {
+	// The trailing sentence is the honest boundary of what this command does. It
+	// clears qURL's per-workspace data but deliberately leaves the Slack app —
+	// and the bot token Slack issued to it — in place, because only a fresh Slack
+	// app authorization can ever re-issue that token (see purgeScopeDisconnect).
+	// An admin who wants the token gone too has to remove the app in Slack, which
+	// fires app_uninstalled and runs the full purge.
+	const localSlackDataPurgeScheduledReply = "Local Slack app data for this workspace is being cleared; Slack features stay disconnected until the recorded workspace owner runs `/qurl setup <email>`. The qURL Slack app itself stays installed — to remove it and the Slack token it was granted, remove qURL from your workspace's Slack app management page."
 
 	// Shown only on the revoked=true paths (204/404), which are unreachable for a
 	// self-revoke (see classifyUninstallRevokeError) — defensive for #806. The
@@ -1986,7 +2009,7 @@ func (h *Handler) deleteWorkspaceAPIKey(w http.ResponseWriter, teamID, userID st
 			}
 			for _, workspaceID := range ids {
 				purgeCtx, purgeCancel := context.WithTimeout(baseCtx, lifecyclePurgeTimeout)
-				h.purgeWorkspaceWithRetry(purgeCtx, purgeLog.With("workspace_id", workspaceID), workspaceID, purgeCutoff)
+				h.purgeWorkspaceWithRetry(purgeCtx, purgeLog.With("workspace_id", workspaceID), workspaceID, purgeCutoff, purgeScopeDisconnect)
 				purgeCancel()
 			}
 		})
@@ -2000,8 +2023,7 @@ func (h *Handler) deleteWorkspaceAPIKey(w http.ResponseWriter, teamID, userID st
 		// Covers all abort arms — a failed revoke, but also the key_id read and
 		// client-build (KMS) failures where no revoke was even attempted — so the
 		// copy says "disconnect", not "revoke".
-		respondSlack(w, ":warning: Couldn't disconnect qURL right now. Nothing was disconnected — try again in a moment, and contact your qURL operator if it keeps failing.")
-		return
+		return ":warning: Couldn't disconnect qURL right now. Nothing was disconnected — try again in a moment, and contact your qURL operator if it keeps failing.", false
 	}
 
 	if err := h.cfg.AuthProvider.DeleteAPIKey(ctx, teamID); err != nil {
@@ -2013,28 +2035,23 @@ func (h *Handler) deleteWorkspaceAPIKey(w http.ResponseWriter, teamID, userID st
 				// success, not the contradictory "isn't currently connected".
 				slog.Info("/qurl uninstall: upstream key revoked; local row already cleared", "team_id", teamID, "caller_user_id", userID)
 				schedulePurge("qurl_key_already_cleared_after_revoke")
-				respondSlack(w, revokedReply)
-				return
+				return revokedReply, true
 			}
 			schedulePurge("qurl_key_not_configured")
-			respondSlack(w, "qURL isn't currently connected to this workspace.\n\n"+localSlackDataPurgeScheduledReply+"\n\nContact your qURL operator if the owner is unavailable.")
-			return
+			return "qURL isn't currently connected to this workspace.\n\n" + localSlackDataPurgeScheduledReply + "\n\nContact your qURL operator if the owner is unavailable.", true
 		case errors.Is(err, auth.ErrWorkspaceAPIKeyDeleteUnsupported):
-			respondUninstallUnsupported(w)
-			return
+			return uninstallUnsupportedMessage, false
 		default:
 			slog.Error("/qurl uninstall: DeleteAPIKey failed", "error", err, "team_id", teamID, "caller_user_id", userID)
-			respondSlack(w, ":warning: could not disconnect qURL from this workspace. Try again in a moment.")
-			return
+			return ":warning: could not disconnect qURL from this workspace. Try again in a moment.", false
 		}
 	}
 	schedulePurge("delete_api_key_succeeded")
 	slog.Info("/qurl uninstall: disconnected workspace Slack commands", "team_id", teamID, "caller_user_id", userID, "upstream_revoked", revoked)
 	if revoked {
-		respondSlack(w, revokedReply)
-		return
+		return revokedReply, true
 	}
-	respondSlack(w, "qURL has been disconnected from this workspace's Slack commands.\n\n"+localSlackDataPurgeScheduledReply+"\n\nThis does not revoke the qURL API key outside Slack; contact the operator if you're disconnecting because the key may be exposed.")
+	return "qURL has been disconnected from this workspace's Slack commands.\n\n" + localSlackDataPurgeScheduledReply + "\n\nThis does not revoke the qURL API key outside Slack; contact the operator if you're disconnecting because the key may be exposed.", true
 }
 
 func workspaceStatePurgeCutoff(provider auth.Provider, fallbackNow func() time.Time) time.Time {
@@ -2173,8 +2190,12 @@ func classifyUninstallRevokeError(revokeErr error, teamID, userID, keyID string)
 	return false, revokeErr
 }
 
+// uninstallUnsupportedMessage is shared by the sync gate (which writes it) and
+// the teardown (which returns it), so both surfaces say the same thing.
+var uninstallUnsupportedMessage = "`/qurl uninstall` isn't supported on this Secure Access Agent deployment. Contact qURL support at " + qurlContactURL + "."
+
 func respondUninstallUnsupported(w http.ResponseWriter) {
-	respondSlack(w, "`/qurl uninstall` isn't supported on this Secure Access Agent deployment. Contact qURL support at "+qurlContactURL+".")
+	respondSlack(w, uninstallUnsupportedMessage)
 }
 
 type uninstallUnavailableReason int
@@ -2556,7 +2577,7 @@ func (h *Handler) userHelpMessage(command string) string {
 		lines = append(lines,
 			"• `/qurl setup <email> --rotate` — Replace the workspace qURL key on the same qURL account",
 			"• `/qurl setup <email> --repoint` — Move the workspace to a different qURL account (cross-account moves route to an operator)",
-			"_`$id` identifies a resource. A `$alias` is an alternate name for a resource in a channel — several aliases can point to one ID. Use either with `/qurl get`._",
+			"_A CRID is a resource's permanent identifier. In Slack, use a listed `$id` or `$alias` with `/qurl get`. Several aliases can point to one resource._",
 			"",
 			"• `/qurl get <$id|$alias>` — Create a qURL for a resource `$id` or a `$alias` configured in this channel",
 		)
@@ -2738,14 +2759,14 @@ func (h *Handler) adminHelpMessage(command string) string {
 // from "missing path" (404) and "auth-gated" (401).
 func respondMethodNotAllowed(w http.ResponseWriter, allow string) {
 	w.Header().Set("Allow", allow)
-	respondJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+	respondJSON(w, http.StatusMethodNotAllowed, map[string]string{errEnvelopeKey: "method not allowed"})
 }
 
 // respondPayloadTooLarge writes 413 for both the Content-Length pre-check
 // and the MaxBytesReader-during-read paths. Centralizing keeps the wire
 // envelope identical so operator dashboards bucket them together.
 func respondPayloadTooLarge(w http.ResponseWriter) {
-	respondJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "body too large"})
+	respondJSON(w, http.StatusRequestEntityTooLarge, map[string]string{errEnvelopeKey: "body too large"})
 }
 
 func respondJSON(w http.ResponseWriter, status int, body any) {

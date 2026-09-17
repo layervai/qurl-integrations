@@ -1,0 +1,578 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"net"
+	"net/http"
+	"net/netip"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	conformance "github.com/layervai/qurl-conformance"
+	connectorstateowner "github.com/layervai/qurl-connector/pkg/agentstate"
+	connectorshare "github.com/layervai/qurl-connector/pkg/share"
+	qurl "github.com/layervai/qurl-go/qurl"
+	"github.com/layervai/qurl-go/relayknock"
+	"github.com/layervai/qurl-go/relayknock/relayknocktest"
+
+	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/apitest"
+	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
+)
+
+const (
+	connectorIntegrationAgentID  = "agent-cli-integration"
+	connectorIntegrationHubHost  = "a.test.layerv.xyz"
+	connectorIntegrationCellHost = "b.test.layerv.xyz"
+
+	// qurl-conformance v0.16.0 moved the credential-recovery vectors to a
+	// private platform module, so this test keeps the values it needs from
+	// v0.15.0 agent_credential_recovery_v1_vectors.json: the credential is
+	// Fixtures.RecoveryCredential (base64url of bytes 0x00-0x1f, synthetic; used
+	// here as the account credential that authorizes recovery) and
+	// the cell reply is the assigned-cell PublicExchanges SuccessBodyJSON. The
+	// recovery grant is test-local; only its qrg1. prefix is contract.
+	//
+	// TODO(upstream-contract): these values, the recover-mode fields added in
+	// nativeRecoveryHubReply, and the usrData.recovery_grant and
+	// usrData.credential request fields read by nativeRecoveryUserData mirror
+	// the private agent-credential-recovery vectors, as do the assumptions that a
+	// refresh reply may advance assignment_generation past the recover reply and
+	// that the native runtime releases agent state synchronously on Close, which
+	// lets this test reopen the store in-process.
+	// Nothing here fails when that platform contract moves (#1483).
+	connectorIntegrationRecoveryCredential = "lv_live_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"
+	connectorIntegrationRecoveryGrant      = "qrg1.integration-recovery-grant-0001"
+	connectorIntegrationRecoveredKeyID     = "key_RcV8mP3qTn5W"
+	connectorIntegrationRecoverGeneration  = 2
+	connectorIntegrationRefreshGeneration  = 3
+	connectorIntegrationRecoveryCellReply  = `{"errCode":"0","list":{"query":"agent_credential_recovery","version":1,"device_api_key_id":"` +
+		connectorIntegrationRecoveredKeyID + `"}}`
+)
+
+// nativeRecoveryRoute keeps the real qurl-go encrypted transport in this
+// cross-repository test while routing only its synthetic hosts to local UDP
+// sockets. No production endpoint or credential is used.
+type nativeRecoveryRoute struct {
+	hosts   map[string]netip.Addr
+	targets map[string]string
+}
+
+func (r nativeRecoveryRoute) LookupNetIP(_ context.Context, network, host string) ([]netip.Addr, error) {
+	if network != "ip" {
+		return nil, fmt.Errorf("unexpected resolver network %q", network)
+	}
+	address, ok := r.hosts[host]
+	if !ok {
+		return nil, fmt.Errorf("unexpected synthetic native host %q", host)
+	}
+	return []netip.Addr{address}, nil
+}
+
+func (r nativeRecoveryRoute) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return nil, err
+	}
+	target, ok := r.targets[host]
+	if !ok {
+		return nil, fmt.Errorf("unexpected synthetic native address %q", host)
+	}
+	return (&net.Dialer{}).DialContext(ctx, network, target)
+}
+
+type nativeRecoveryUDPServer struct {
+	t          *testing.T
+	conn       *net.UDPConn
+	serverPriv []byte
+	agentPub   []byte
+	hub        bool
+	replies    func([]byte) ([]byte, error)
+	done       chan struct{}
+
+	mu       sync.Mutex
+	requests [][]byte
+}
+
+func newNativeRecoveryUDPServer(
+	t *testing.T,
+	serverPriv, agentPub []byte,
+	hub bool,
+	replies func([]byte) ([]byte, error),
+) *nativeRecoveryUDPServer {
+	t.Helper()
+	conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &nativeRecoveryUDPServer{
+		t: t, conn: conn, serverPriv: bytes.Clone(serverPriv), agentPub: bytes.Clone(agentPub),
+		hub: hub, replies: replies, done: make(chan struct{}),
+	}
+	go server.serve()
+	t.Cleanup(func() {
+		_ = conn.Close()
+		select {
+		case <-server.done:
+		case <-time.After(5 * time.Second):
+			t.Error("synthetic native UDP server did not stop")
+		}
+	})
+	return server
+}
+
+func (s *nativeRecoveryUDPServer) serve() {
+	defer close(s.done)
+	buffer := make([]byte, 4096)
+	var proofBody, proofCookie []byte
+	sequence := 0
+	for {
+		n, remote, err := s.conn.ReadFromUDP(buffer)
+		if err != nil {
+			return
+		}
+		packet := bytes.Clone(buffer[:n])
+		if proofCookie != nil {
+			opened, openErr := relayknocktest.OpenHubLSTCookieProofMessage(
+				s.serverPriv, s.agentPub, proofCookie, packet,
+			)
+			if openErr != nil {
+				s.t.Errorf("open synthetic Hub proof: %v", openErr)
+				continue
+			}
+			if !bytes.Equal(opened.Body, proofBody) {
+				s.t.Errorf("synthetic Hub proof changed its request body")
+				continue
+			}
+			proofCookie = nil
+			s.record(opened.Body)
+			body, replyErr := s.replies(opened.Body)
+			if replyErr != nil {
+				s.t.Errorf("build synthetic Hub result: %v", replyErr)
+				continue
+			}
+			if writeErr := s.writeReply(remote, relayknock.TypeListResult, opened.Counter, body, sequence); writeErr != nil {
+				s.t.Errorf("write synthetic Hub result: %v", writeErr)
+			}
+			sequence++
+			continue
+		}
+
+		opened, openErr := relayknocktest.OpenInitiatorMessage(s.serverPriv, s.agentPub, packet)
+		if openErr != nil {
+			s.t.Errorf("open synthetic native request: %v", openErr)
+			continue
+		}
+		if s.hub {
+			cookie := bytes.Repeat([]byte{0x5a}, 32)
+			challenge, marshalErr := json.Marshal(map[string]any{
+				"trxId":  opened.Counter,
+				"cookie": base64.StdEncoding.EncodeToString(cookie),
+			})
+			if marshalErr != nil {
+				s.t.Errorf("marshal synthetic Hub challenge: %v", marshalErr)
+				continue
+			}
+			if writeErr := s.writeReply(remote, relayknock.TypeCookieChallenge, opened.Counter+99, challenge, sequence); writeErr != nil {
+				s.t.Errorf("write synthetic Hub challenge: %v", writeErr)
+				continue
+			}
+			proofBody, proofCookie = bytes.Clone(opened.Body), cookie
+			sequence++
+			continue
+		}
+
+		s.record(opened.Body)
+		body, replyErr := s.replies(opened.Body)
+		if replyErr != nil {
+			s.t.Errorf("build synthetic cell result: %v", replyErr)
+			continue
+		}
+		if writeErr := s.writeReply(remote, relayknock.TypeListResult, opened.Counter, body, sequence); writeErr != nil {
+			s.t.Errorf("write synthetic cell result: %v", writeErr)
+		}
+		sequence++
+	}
+}
+
+func (s *nativeRecoveryUDPServer) record(body []byte) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.requests = append(s.requests, bytes.Clone(body))
+}
+
+func (s *nativeRecoveryUDPServer) snapshot() [][]byte {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	result := make([][]byte, len(s.requests))
+	for i := range s.requests {
+		result[i] = bytes.Clone(s.requests[i])
+	}
+	return result
+}
+
+func (s *nativeRecoveryUDPServer) writeReply(
+	remote *net.UDPAddr,
+	replyType int,
+	counter uint64,
+	body []byte,
+	sequence int,
+) error {
+	packet, err := relayknocktest.BuildReply(replyType, &relayknock.KnockInputs{
+		DeviceStaticPriv: s.serverPriv,
+		ServerStaticPub:  s.agentPub,
+		EphemeralPriv:    bytes.Repeat([]byte{byte(0x40 + sequence)}, 32),
+		TimestampNanos:   uint64(time.Now().UnixNano()),
+		Counter:          counter,
+		Preamble:         uint32(0x50607080 + sequence),
+		Body:             body,
+	})
+	if err != nil {
+		return err
+	}
+	_, err = s.conn.WriteToUDP(packet, remote)
+	return err
+}
+
+func nativeRecoveryFixtureKey(t *testing.T, raw string) []byte {
+	t.Helper()
+	decoded, err := hex.DecodeString(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return decoded
+}
+
+// nativeRecoveryUserData holds the recovery request fields this test asserts
+// on. RecoveryGrant and Credential are mirrored private-contract request
+// fields; see TODO(upstream-contract) above.
+type nativeRecoveryUserData struct {
+	Query         string `json:"query"`
+	Mode          string `json:"mode"`
+	RecoveryGrant string `json:"recovery_grant"`
+	Credential    string `json:"credential"`
+}
+
+func parseNativeRecoveryRequest(body []byte) (nativeRecoveryUserData, error) {
+	var request struct {
+		UserData nativeRecoveryUserData `json:"usrData"`
+	}
+	if err := json.Unmarshal(body, &request); err != nil {
+		return nativeRecoveryUserData{}, err
+	}
+	return request.UserData, nil
+}
+
+func nativeRecoveryHubReply(
+	assignment *conformance.AgentAssignmentFile,
+	cellPublicKeyB64 string,
+	now time.Time,
+) func([]byte) ([]byte, error) {
+	return func(request []byte) ([]byte, error) {
+		parsed, err := parseNativeRecoveryRequest(request)
+		if err != nil {
+			return nil, fmt.Errorf("parse Hub request: %w", err)
+		}
+		if parsed.Query != "cell_assignment" {
+			return nil, fmt.Errorf("unexpected Hub request %q/%q", parsed.Query, parsed.Mode)
+		}
+		// The recover reply is the public refresh reply plus the recovery grant,
+		// so both modes start from it. Recover mode is locally assembled, not
+		// vector-backed; see TODO(upstream-contract) above.
+		var body map[string]any
+		if err := json.Unmarshal([]byte(assignment.RefreshAssignment.Result.BodyJSON), &body); err != nil {
+			return nil, err
+		}
+		list, ok := body["list"].(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("Hub assignment reply has no list object: %v", body["list"])
+		}
+		list["agent_id"] = connectorIntegrationAgentID
+		// Distinct generations let the test tell the persisted refresh result from
+		// the recover result; they do not prove the recover assignment was applied
+		// before the refresh replaced it. Mode and credential fields are checked
+		// after the exchange (any other mode gets the refresh shape), because an
+		// error here sends no reply and stalls the connector. The query check
+		// above stays: no reply shape exists for an unknown query.
+		generation := connectorIntegrationRefreshGeneration
+		if parsed.Mode == "recover" {
+			generation = connectorIntegrationRecoverGeneration
+			list["mode"] = "recover"
+			list["recovery_grant"] = connectorIntegrationRecoveryGrant
+			list["recovery_grant_issued_at"] = now.Add(-time.Minute).Format(time.RFC3339)
+			list["recovery_grant_expires_at"] = now.Add(14 * time.Minute).Format(time.RFC3339)
+		}
+		if err := setNativeRecoveryAssignment(list["assignment"], generation, cellPublicKeyB64, now); err != nil {
+			return nil, err
+		}
+		return json.Marshal(body)
+	}
+}
+
+func setNativeRecoveryAssignment(value any, generation int, cellPublicKeyB64 string, now time.Time) error {
+	assignment, ok := value.(map[string]any)
+	if !ok {
+		return fmt.Errorf("Hub assignment reply has no assignment object: %v", value)
+	}
+	endpoint, ok := assignment["nhp_udp_endpoint"].(map[string]any)
+	if !ok {
+		return fmt.Errorf("Hub assignment reply has no nhp_udp_endpoint object: %v", assignment["nhp_udp_endpoint"])
+	}
+	assignment["cell_id"] = "cell-test"
+	assignment["assignment_generation"] = float64(generation)
+	assignment["endpoint_revision"] = float64(generation)
+	assignment["lease_expires_at"] = now.Add(time.Hour).Format(time.RFC3339)
+	endpoint["host"] = connectorIntegrationCellHost
+	endpoint["port"] = float64(443)
+	endpoint["server_public_key_b64"] = cellPublicKeyB64
+	return nil
+}
+
+func nativeRecoveryCellReply(request []byte) ([]byte, error) {
+	parsed, err := parseNativeRecoveryRequest(request)
+	if err != nil {
+		return nil, fmt.Errorf("parse cell request: %w", err)
+	}
+	if parsed.Query != "agent_credential_recovery" {
+		return nil, fmt.Errorf("unexpected cell request %q", parsed.Query)
+	}
+	return []byte(connectorIntegrationRecoveryCellReply), nil
+}
+
+// withNativeRecoveryStateStore opens the connector state owner for fn and closes
+// it afterwards. The caller must already have set EnvKeyProvider to
+// KeyProviderFile, which the connector runtime under test also reads.
+func withNativeRecoveryStateStore(t *testing.T, stateDir string, fn func(qurl.AgentStateStore)) {
+	t.Helper()
+	if got := os.Getenv(connectorstateowner.EnvKeyProvider); got != connectorstateowner.KeyProviderFile {
+		t.Fatalf("%s = %q, want %q before opening connector state",
+			connectorstateowner.EnvKeyProvider, got, connectorstateowner.KeyProviderFile)
+	}
+	owner, err := connectorstateowner.NewSDKStore(stateDir, connectorIntegrationAgentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if closeErr := owner.Close(); closeErr != nil {
+			t.Fatal(closeErr)
+		}
+	}()
+	store, err := owner.Handoff()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fn(store)
+}
+
+func TestOpenNativeRegisteredClient_ExplicitLoginUsesRealConnectorRecovery(t *testing.T) {
+	assignment, err := conformance.AgentAssignmentGolden()
+	if err != nil {
+		t.Fatal(err)
+	}
+	agentPrivate := nativeRecoveryFixtureKey(t, assignment.Keys.Agent.StaticPrivHex)
+	agentPublic := nativeRecoveryFixtureKey(t, assignment.Keys.Agent.StaticPubHex)
+	hubPrivate := nativeRecoveryFixtureKey(t, assignment.Keys.Hub.StaticPrivHex)
+	hubPublic := nativeRecoveryFixtureKey(t, assignment.Keys.Hub.StaticPubHex)
+	cellPrivate := nativeRecoveryFixtureKey(t, assignment.Keys.AssignedCell.StaticPrivHex)
+	cellPublic := nativeRecoveryFixtureKey(t, assignment.Keys.AssignedCell.StaticPubHex)
+	cellPublicB64 := base64.StdEncoding.EncodeToString(cellPublic)
+	now := time.Now().UTC().Round(time.Second)
+
+	hub := newNativeRecoveryUDPServer(t, hubPrivate, agentPublic, true,
+		nativeRecoveryHubReply(assignment, cellPublicB64, now))
+	cell := newNativeRecoveryUDPServer(t, cellPrivate, agentPublic, false, nativeRecoveryCellReply)
+	// The native transport rejects special-purpose IP ranges before dialing.
+	// The injected dialer maps these synthetic route labels to local
+	// sockets, so the test sends no packet to either public address.
+	hubAddress := netip.MustParseAddr("8.8.4.4")
+	cellAddress := netip.MustParseAddr("9.9.9.9")
+	route := nativeRecoveryRoute{
+		hosts: map[string]netip.Addr{
+			connectorIntegrationHubHost:  hubAddress,
+			connectorIntegrationCellHost: cellAddress,
+		},
+		targets: map[string]string{
+			hubAddress.String():  hub.conn.LocalAddr().String(),
+			cellAddress.String(): cell.conn.LocalAddr().String(),
+		},
+	}
+
+	stateDir, err := filepath.EvalSymlinks(connectorStateTestDir(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(connectorstateowner.EnvKeyProvider, connectorstateowner.KeyProviderFile)
+	registeredAt := now.Add(-time.Hour)
+	oldDeviceKey := conformance.AgentAssignmentDeviceAPIKeyFixture
+	withNativeRecoveryStateStore(t, stateDir, func(store qurl.AgentStateStore) {
+		if err := store.SaveAgentState(context.Background(), &qurl.AgentState{
+			AgentID:                  connectorIntegrationAgentID,
+			PrivateKeyB64:            base64.StdEncoding.EncodeToString(agentPrivate),
+			PublicKeyB64:             base64.StdEncoding.EncodeToString(agentPublic),
+			SchemaVersion:            8,
+			RegisteredAt:             &registeredAt,
+			DeviceAPIKey:             oldDeviceKey,
+			DeviceAPIKeyID:           "key_OldCli123456",
+			EnrollmentCredentialKind: "bootstrap",
+			Assignment: &qurl.AgentAssignment{
+				CellID: "cell-test", AssignmentGeneration: 1, EndpointRevision: 1,
+				LeaseExpiresAt: now.Add(time.Hour),
+				Endpoint: qurl.NHPUDPEndpoint{
+					Host: connectorIntegrationCellHost, Port: 443, ServerPublicKeyB64: cellPublicB64,
+				},
+			},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	srv := apitest.NewServer(t)
+	srv.Script(http.MethodGet, "/v1/me", apitest.HandlerAPIKeyInvalid401(t))
+	registry := &ownerOnlyTestShareRegistry{}
+	opts := &globalOpts{
+		resolvedEndpoint: srv.URL,
+		version:          "real-connector-recovery-test",
+		lookupEnv: func(string) (string, bool) {
+			t.Fatal("explicit connector recovery unexpectedly read ambient account authority")
+			return "", false
+		},
+		resolveShareStateDir: func(string) (string, error) { return stateDir, nil },
+		resolveHubBootstrap: func() (qurl.HubBootstrap, error) {
+			return qurl.HubBootstrap{
+				Host: connectorIntegrationHubHost, Port: 443,
+				ServerPublicKeyB64: base64.StdEncoding.EncodeToString(hubPublic),
+			}, nil
+		},
+		openShareRegistry: func(string) (localShareRegistry, error) { return registry, nil },
+		openNativeRuntime: func(ctx context.Context, cfg connectorshare.NativeRuntimeConfig) (registeredNativeRuntime, error) {
+			cfg.UDPOptions = []qurl.AgentRuntimeUDPOption{
+				qurl.WithAgentRuntimeUDPResolver(route),
+				qurl.WithAgentRuntimeUDPDialer(route),
+				qurl.WithAgentRuntimeUDPBounds(5*time.Second, 1),
+			}
+			return connectorshare.OpenNativeRuntime(ctx, cfg)
+		},
+	}
+	validatedAccountKey := connectorIntegrationRecoveryCredential
+	account, err := opts.apiClient(validatedAccountKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, identity, err := opts.openNativeRegisteredClient(
+		context.Background(), account, validatedAccountKey, &qurlapi.Identity{OwnerID: apitest.MeOwnerID},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// closeAPIClient is idempotent, so this only matters when a later check fails.
+	t.Cleanup(func() { _ = opts.closeAPIClient() })
+	if client == nil || identity == nil || identity.OwnerID != apitest.MeOwnerID {
+		t.Fatalf("recovered identity = %#v", identity)
+	}
+	requests := srv.Requests()
+	if len(requests) != 2 {
+		t.Fatalf("registered identity requests = %d, want initial rejection and one retry", len(requests))
+	}
+	if got := strings.TrimPrefix(requests[0].Header.Get("Authorization"), "Bearer "); got != oldDeviceKey {
+		t.Fatalf("initial registered-device key changed (empty: %t, is account key: %t, len: %d)",
+			got == "", got == validatedAccountKey, len(got))
+	}
+	replacementKey := strings.TrimPrefix(requests[1].Header.Get("Authorization"), "Bearer ")
+	if replacementKey == "" || replacementKey == oldDeviceKey || replacementKey == validatedAccountKey ||
+		!strings.HasPrefix(replacementKey, "lv_live_") {
+		t.Fatal("retry did not use the connector-promoted replacement credential")
+	}
+	hubRequests := hub.snapshot()
+	if got := len(hubRequests); got != 2 {
+		t.Fatalf("real connector Hub exchanges = %d, want recovery and required post-recovery refresh", got)
+	}
+	// Credential checks are value-free: the credential is account authority in
+	// the real protocol. The recover row needs the usrData.credential tag to
+	// bind; the refresh row checks the raw request so a renamed field cannot
+	// hide the credential.
+	for i, exchange := range []struct {
+		mode                    string
+		carriesAccountAuthority bool
+	}{
+		{"recover", true},
+		{"refresh", false},
+	} {
+		parsed, err := parseNativeRecoveryRequest(hubRequests[i])
+		if err != nil {
+			t.Fatalf("Hub exchange %d: parse request: %v", i, err)
+		}
+		if parsed.Mode != exchange.mode {
+			t.Fatalf("Hub exchange %d mode = %q, want %q", i, parsed.Mode, exchange.mode)
+		}
+		if exchange.carriesAccountAuthority && parsed.Credential != validatedAccountKey {
+			t.Fatalf("Hub %s request account credential mismatch (empty: %t, is old device key: %t, len: %d)",
+				exchange.mode, parsed.Credential == "", parsed.Credential == oldDeviceKey, len(parsed.Credential))
+		}
+		if !exchange.carriesAccountAuthority && bytes.Contains(hubRequests[i], []byte(validatedAccountKey)) {
+			t.Fatalf("Hub %s request unexpectedly carried account authority", exchange.mode)
+		}
+	}
+	cellRequests := cell.snapshot()
+	if got := len(cellRequests); got != 1 {
+		t.Fatalf("real connector cell exchanges = %d, want one recovery completion", got)
+	}
+	cellRequest, err := parseNativeRecoveryRequest(cellRequests[0])
+	if err != nil {
+		t.Fatalf("cell exchange: parse request: %v", err)
+	}
+	// Check for account authority first so the grant message below cannot print it.
+	if bytes.Contains(cellRequests[0], []byte(validatedAccountKey)) {
+		t.Fatal("cell recovery completion unexpectedly carried account authority")
+	}
+	if cellRequest.RecoveryGrant != connectorIntegrationRecoveryGrant {
+		t.Fatalf("cell request recovery grant = %q, want %q", cellRequest.RecoveryGrant, connectorIntegrationRecoveryGrant)
+	}
+	if err := opts.closeAPIClient(); err != nil {
+		t.Fatal(err)
+	}
+	if registry.bindCalls != 1 {
+		t.Fatalf("owner bindings = %d, want one after the successful retry", registry.bindCalls)
+	}
+	if got := connectorstate.ConfiguredAgentID(); got != "" {
+		t.Fatalf("test unexpectedly changed the configured connector identity: %q", got)
+	}
+	// Read back only after closeAPIClient above: the refresh result is not
+	// guaranteed on disk until the native runtime is closed.
+	withNativeRecoveryStateStore(t, stateDir, func(store qurl.AgentStateStore) {
+		recovered, err := store.LoadAgentState(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if recovered == nil {
+			t.Fatal("persisted connector agent state is missing")
+		}
+		if recovered.DeviceAPIKeyID != connectorIntegrationRecoveredKeyID {
+			t.Fatalf("recovered device API key ID = %q, want %q", recovered.DeviceAPIKeyID, connectorIntegrationRecoveredKeyID)
+		}
+		if recovered.DeviceAPIKey != replacementKey {
+			// Value-free, unlike the synthetic grant: keep credential material out
+			// of test output.
+			t.Fatal("persisted device credential did not match the one that authorized the retry")
+		}
+		if recovered.Assignment == nil {
+			t.Fatal("persisted connector assignment is missing")
+		}
+		if got := recovered.Assignment.AssignmentGeneration; got != connectorIntegrationRefreshGeneration {
+			t.Fatalf("persisted assignment generation = %d, want the post-recovery refresh generation %d",
+				got, connectorIntegrationRefreshGeneration)
+		}
+		if got := recovered.Assignment.EndpointRevision; got != connectorIntegrationRefreshGeneration {
+			t.Fatalf("persisted endpoint revision = %d, want the post-recovery refresh revision %d",
+				got, connectorIntegrationRefreshGeneration)
+		}
+	})
+}

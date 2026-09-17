@@ -12,7 +12,11 @@ module.exports = {
   // accumulated call counts). Spike-style tests that want spy restoration
   // use an explicit `afterEach(() => jest.restoreAllMocks())` at the top
   // of the test file — see gateway-resume-spike.test.js for the pattern.
-  collectCoverageFrom: ['src/**/*.js', '!src/index.js'],
+  collectCoverageFrom: [
+    'src/**/*.js',
+    '!src/index.js',
+    'scripts/audit-production-dependencies.js',
+  ],
   coverageDirectory: 'coverage',
   coverageThreshold: {
     // 78/68/78/78 floors. Current commands.js coverage: 81.23/77.27/

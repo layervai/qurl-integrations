@@ -26,20 +26,21 @@ type Server struct {
 	t *testing.T
 
 	// Key backs the default happy-path responses; DER, resource id, and
-	// CRID are mutually consistent, so default resolves verify cleanly.
+	// CRID are mutually consistent, so default share answers verify cleanly.
 	Key *ResourceKey
 
 	mu                   sync.Mutex
 	requests             []RecordedRequest
 	scripts              map[string][]http.HandlerFunc
-	resolveCRID          string
-	resolveQURL          string
+	shareCRID            string
+	shareQURL            string
 	downloadPayload      []byte
-	publishFoundExisting bool
+	publishFoundExisting *bool
+	publishOmitCRID      bool
 }
 
-// DownloadPath is the mock's link-host route: SetResolveQURL(srv.URL +
-// DownloadPath) makes resolve answers point at the mock itself, so download
+// DownloadPath is the mock's link-host route: SetShareQURL(srv.URL +
+// DownloadPath) makes share answers point at the mock itself, so download
 // tests never leave the process.
 const DownloadPath = "/file"
 
@@ -47,8 +48,47 @@ const DownloadPath = "/file"
 // SetDownloadPayload overrides it. Fixed so goldens can pin byte counts.
 const DefaultDownloadPayload = "qURL mock file payload\n"
 
+// PortalPath is the mock's in-browser page route. A share answer of the
+// form srv.URL + PortalPath + "#qv2t1.…" mimics a real fragment-credential
+// link: the fragment stays client-side, so any plain HTTP GET of the link
+// lands here and receives the page — never the content bytes. Tests use it
+// to prove the CLI fetches granted content instead of this page.
+const PortalPath = "/portal"
+
+// InterstitialTitle is the page title the mock's PortalPath route serves,
+// shared with the live sandbox journey so both tiers reject the same page.
+//
+// TODO(upstream-contract): this is the <title> of the real in-browser
+// verification page qurl-service serves for fragment-credential links. If
+// the platform retitles that page, update this marker in lockstep.
+const InterstitialTitle = "qURL - Private Links That Expire"
+
+// Field names and fixture values repeated across the mock's JSON payloads.
+// Lifted to constants so the builders and the route handlers cannot drift.
+const (
+	// fieldStatus and fieldCRID are keys of the *resource* payloads this file
+	// serves. builders.go's RFC7807 problem document has its own "status" (an
+	// int echo of the HTTP status) and deliberately does not share this one.
+	fieldStatus = "status"
+	fieldCRID   = "crid"
+	// fieldType is the `type` key of the resource and share payloads. The
+	// two objects give the key different value spaces (url|tunnel for a
+	// resource, the link type for a share), but it is one wire field name
+	// and must not drift between them. builders.go's RFC7807 problem
+	// document has its own "type" (a URI derived from code) and deliberately
+	// does not share this one, same as "status" above.
+	fieldType = "type"
+	// fixtureCreatedAt is the mock's fixed resource created_at. The apps/cli
+	// goldens pin it (mutating it reddens them), so it must not drift. It is
+	// not shared with builders.go's tombstone closed_at, which no golden pins.
+	fixtureCreatedAt = "2026-03-01T00:00:00Z"
+	// authTypeAPIKey is the auth_type/kind *value* — distinct from the
+	// "api_key" JSON field name that carries the key object.
+	authTypeAPIKey = "api_key"
+)
+
 // NewServer starts a mock with consistent happy-path handlers for publish,
-// resolve, list, and delete. Close it via t.Cleanup automatically.
+// share, list, and delete. Close it via t.Cleanup automatically.
 func NewServer(t *testing.T) *Server {
 	t.Helper()
 	return NewServerWithKey(t, GenerateResourceKey(t))
@@ -58,10 +98,12 @@ func NewServer(t *testing.T) *Server {
 // golden tests pass FixedResourceKey for deterministic identifiers.
 func NewServerWithKey(t *testing.T, key *ResourceKey) *Server {
 	t.Helper()
+	foundExisting := false
 	s := &Server{
-		t:       t,
-		Key:     key,
-		scripts: map[string][]http.HandlerFunc{},
+		t:                    t,
+		Key:                  key,
+		scripts:              map[string][]http.HandlerFunc{},
+		publishFoundExisting: &foundExisting,
 	}
 	s.Server = httptest.NewServer(http.HandlerFunc(s.handle))
 	t.Cleanup(s.Close)
@@ -85,12 +127,12 @@ func (s *Server) ScriptRepeat(method, path string, n int, handler http.HandlerFu
 	}
 }
 
-// SetResolveCRID overrides the crid field of resolve responses — the
+// SetShareCRID overrides the crid field of share responses — the
 // wrong-key mode used to exercise fail-closed verification.
-func (s *Server) SetResolveCRID(value string) {
+func (s *Server) SetShareCRID(value string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.resolveCRID = value
+	s.shareCRID = value
 }
 
 // SetPublishFoundExisting makes publish responses report the
@@ -98,15 +140,31 @@ func (s *Server) SetResolveCRID(value string) {
 func (s *Server) SetPublishFoundExisting(v bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.publishFoundExisting = v
+	s.publishFoundExisting = &v
 }
 
-// SetResolveQURL overrides the qurl field of resolve responses; download
-// tests point it at the mock's own DownloadPath.
-func (s *Server) SetResolveQURL(u string) {
+// OmitPublishFoundExisting makes publish responses omit the optional
+// meta.found_existing field, which means the creation provenance is unknown.
+func (s *Server) OmitPublishFoundExisting() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.resolveQURL = u
+	s.publishFoundExisting = nil
+}
+
+// SetPublishOmitCRID makes publish return a malformed success response so
+// callers can prove the CLI rejects a result without its required CRID.
+func (s *Server) SetPublishOmitCRID(v bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.publishOmitCRID = v
+}
+
+// SetShareQURL overrides the qurl field of share responses; download
+// tests point it at the mock's own DownloadPath.
+func (s *Server) SetShareQURL(u string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.shareQURL = u
 }
 
 // SetDownloadPayload overrides the bytes the DownloadPath route serves —
@@ -157,16 +215,24 @@ func (s *Server) defaultHandler(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodGet && r.URL.Path == "/v1/me":
 		s.handleMe(w, r)
 
-	case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/resolve"):
-		s.handleResolve(w, r)
+	case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/share"):
+		s.handleShare(w, r)
 
 	case r.Method == http.MethodGet && r.URL.Path == "/v1/resources":
+		// A fully populated list row: the publish-time metadata (type,
+		// description, tags) rides every real list row and the CLI projects
+		// it into `-o json`, so the default row carries it or the goldens
+		// would pin a shape no deployment serves. Like fixtureCreatedAt,
+		// these values are pinned by the apps/cli goldens.
 		WriteEnvelope(s.t, w, http.StatusOK, []map[string]any{{
 			"resource_id": s.Key.ResourceID,
-			"crid":        s.Key.CRID,
+			fieldCRID:     s.Key.CRID,
 			"target_url":  "https://example.com/data",
-			"status":      "active",
-			"created_at":  "2026-03-01T00:00:00Z",
+			fieldType:     "url",
+			fieldStatus:   "active",
+			"description": "example data drop",
+			"tags":        []string{"demo", "fixture"},
+			"created_at":  fixtureCreatedAt,
 		}}, map[string]any{"has_more": false})
 
 	case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/v1/resources/"):
@@ -174,6 +240,9 @@ func (s *Server) defaultHandler(w http.ResponseWriter, r *http.Request) {
 
 	case r.Method == http.MethodGet && r.URL.Path == DownloadPath:
 		s.handleDownload(w)
+
+	case r.Method == http.MethodGet && r.URL.Path == PortalPath:
+		s.handlePortalPage(w)
 
 	default:
 		WriteProblem(s.t, w, http.StatusNotFound, "not_found", "Not Found", "no such route in the mock qURL API")
@@ -205,17 +274,22 @@ func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
 	}
 	meta := map[string]any{}
 	s.mu.Lock()
-	if s.publishFoundExisting {
-		meta["found_existing"] = true
+	if s.publishFoundExisting != nil {
+		meta["found_existing"] = *s.publishFoundExisting
 	}
+	omitCRID := s.publishOmitCRID
 	s.mu.Unlock()
-	WriteEnvelope(s.t, w, http.StatusCreated, map[string]any{
+	data := map[string]any{
 		"resource_id": s.Key.ResourceID,
-		"crid":        s.Key.CRID,
+		fieldCRID:     s.Key.CRID,
 		"target_url":  body.TargetURL,
-		"status":      "active",
-		"created_at":  "2026-03-01T00:00:00Z",
-	}, meta)
+		fieldStatus:   "active",
+		"created_at":  fixtureCreatedAt,
+	}
+	if omitCRID {
+		delete(data, fieldCRID)
+	}
+	WriteEnvelope(s.t, w, http.StatusCreated, data, meta)
 }
 
 // Fixed identity fixtures for the default GET /v1/me answer, stable so
@@ -238,7 +312,7 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	}
 	apiKey := map[string]any{
 		"key_id": MeKeyID,
-		"kind":   "api_key",
+		"kind":   authTypeAPIKey,
 		"scopes": []string{"qurl:read", "qurl:resolve", "qurl:write"},
 	}
 	if len(bearer) >= 12 {
@@ -246,32 +320,33 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	}
 	WriteEnvelope(s.t, w, http.StatusOK, map[string]any{
 		"owner_id":  MeOwnerID,
-		"auth_type": "api_key",
+		"auth_type": authTypeAPIKey,
 		"api_key":   apiKey,
 	}, nil)
 }
 
-// handleResolve enforces the pinned resolve bind rule — the body must be
-// JSON (`{}` at minimum); a literal empty body is a 400 — then answers a
-// consistent minted link.
-func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
+// handleShare serves the CRID share operator (POST /v1/resources/{id}/share).
+// It enforces the pinned bind rule — the body must be JSON (`{}` at
+// minimum); a literal empty body is a 400 — then answers a consistent
+// minted share link.
+func (s *Server) handleShare(w http.ResponseWriter, r *http.Request) {
 	raw, err := io.ReadAll(r.Body)
 	if err != nil || len(raw) == 0 || !json.Valid(raw) {
 		WriteProblem(s.t, w, http.StatusBadRequest, "invalid_request", "Bad Request",
 			"request body must be a JSON object")
 		return
 	}
-	id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v1/resources/"), "/resolve")
+	id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v1/resources/"), "/share")
 	s.mu.Lock()
-	qurlLink := s.resolveQURL
+	qurlLink := s.shareQURL
 	s.mu.Unlock()
 	if qurlLink == "" {
-		qurlLink = "https://qurl.link/#qv2.test.link"
+		qurlLink = "https://qurl.link/#qv2t1.1.1.1.AQ.AQ.AQ"
 	}
 	WriteEnvelope(s.t, w, http.StatusOK, map[string]any{
 		"qurl":               qurlLink,
-		"crid":               s.cridFor(id),
-		"type":               "qv2",
+		fieldCRID:            s.cridFor(id),
+		fieldType:            "qv2",
 		"expires_at":         "2026-03-01T00:05:00Z",
 		"expires_in_seconds": 300,
 		"single_use":         true,
@@ -287,20 +362,31 @@ func (s *Server) handleDownload(w http.ResponseWriter) {
 		payload = []byte(DefaultDownloadPayload)
 	}
 	w.Header().Set("Content-Type", "application/octet-stream")
-	// #nosec G705 -- the mock link host echoes the test's own payload bytes
-	// as an octet-stream download; no browser or HTML context exists here.
 	if _, err := w.Write(payload); err != nil {
 		s.t.Errorf("write download payload: %v", err)
 	}
 }
 
-// cridFor answers the crid field for a resolve: the override when scripted,
-// the requested CRID echoed back when the caller resolved by CRID, or the
-// CRID derived from the requested key when the caller resolved by resource
+// handlePortalPage serves the stand-in for the platform's in-browser
+// verification page: an HTML document, never content bytes. Any download
+// that lands here fetched the link instead of the granted content — the
+// exact defect the PortalPath tests exist to catch.
+func (s *Server) handlePortalPage(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	page := "<!doctype html><html><head><title>" + InterstitialTitle +
+		"</title></head><body>This page needs a browser to open the link.</body></html>"
+	if _, err := io.WriteString(w, page); err != nil {
+		s.t.Errorf("write portal page: %v", err)
+	}
+}
+
+// cridFor answers the crid field for a share: the override when scripted,
+// the requested CRID echoed back when the caller shared by CRID, or the
+// CRID derived from the requested key when the caller shared by resource
 // id — i.e. a consistent server by default.
 func (s *Server) cridFor(requestedID string) string {
 	s.mu.Lock()
-	override := s.resolveCRID
+	override := s.shareCRID
 	s.mu.Unlock()
 	if override != "" {
 		return override

@@ -3,7 +3,7 @@
 # Stage 1: pinned Envoy (Ubuntu base, BoringSSL). We copy only the
 # /usr/local/bin/envoy binary out, so base-image bumps must keep the runtime
 # behavior contract green on both arches to catch glibc/library drift.
-FROM envoyproxy/envoy:v1.39.0@sha256:d59f7f5fa10cff6d5892b6c5e7df5c9297ddfb2c3683e33fbfb82da24de4fa66 AS envoy
+FROM envoyproxy/envoy:v1.39.1@sha256:57e14a549d7bd43c8d3f6d03e8cfa653e037d4b38e133acd9b54f38c524401b4 AS envoy
 
 # Stage 2: pinned nginx-unprivileged (Debian bookworm / glibc) runtime base.
 FROM nginxinc/nginx-unprivileged:1.31.3@sha256:79f1cd903210f98ffc1c8b5e08e90e650d2fadaa9f516a0866197471cb5f75b5
@@ -29,7 +29,7 @@ ENV LISTEN_ADDR=127.0.0.1:8080 \
 # CACHE_DEFAULT_TTL is intentionally unset: cache per the object's Cache-Control
 # (nginx default). Set it only to force a fallback TTL for metadata-less objects.
 
-# Unprivileged uid matches the qurl-connector sidecar (65532). Both listeners
+# Unprivileged uid matches the qurl sidecar (65532). Both listeners
 # bind loopback only (set in the rendered configs); no ports are EXPOSEd —
 # the connector reaches nginx over the shared network namespace.
 # No Docker HEALTHCHECK: the connector/orchestrator owns liveness and this image
