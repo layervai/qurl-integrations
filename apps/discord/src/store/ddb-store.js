@@ -1526,45 +1526,9 @@ async function getGuildApiKey(guildId) {
   return res.Item ? decrypt(res.Item.qurl_api_key) : null;
 }
 
-// `via` (a SETUP_VIA value) names the setup door for the admin-change audit.
-async function setGuildApiKey(guildId, apiKey, configuredBy, via) {
-  const door = normalizeSetupVia(via);
-  // Validate on every call so caller drift (including a forgotten argument)
-  // shows up on first setups too; such doors audit as unknown.
-  if (door === SETUP_VIA.UNKNOWN) {
-    try {
-      logger.warn('Unrecognized setup door; auditing as unknown', { via: String(via).slice(0, 64), guildId });
-    } catch { /* a bad door must not fail the key write */ }
-  }
-  const now = nowIso();
-  // SQLite's `ON CONFLICT(guild_id) DO UPDATE SET qurl_api_key=…,
-  // configured_by=…, updated_at=…` deliberately preserved
-  // `configured_at` across re-keys — the field tracks "when was
-  // this guild FIRST configured" and downstream cohort analytics
-  // depend on that semantic. A naive PutItem rewrites the whole
-  // row, including resetting configured_at. Mirror createLink's
-  // shape: UpdateCommand with `if_not_exists(configured_at, :u)`
-  // so first-write sets it and re-keys leave it alone.
-  const res = await ddb.send(new UpdateCommand({
-    TableName: TABLES.guild_configs,
-    Key: { guild_id: guildId },
-    UpdateExpression: 'SET qurl_api_key = :k, configured_by = :b, updated_at = :u, configured_at = if_not_exists(configured_at, :u)',
-    ExpressionAttributeValues: {
-      ':k': encrypt(apiKey),
-      ':b': configuredBy,
-      ':u': now,
-    },
-    // Return old values for touched attrs: keeps the old configured_by
-    // read atomic with the re-key without returning the entire previous
-    // guild_configs row. DynamoDB also returns the old encrypted
-    // qurl_api_key because it is touched by this update; leave it
-    // unread so the audit payload never carries key material. prior
-    // configured_at relies on UPDATED_OLD also covering the if_not_exists
-    // no-op on a re-key. TODO(upstream-contract): DynamoDB behavior we do not
-    // control; mocks cannot pin it, so the sandbox rebind gate does.
-    ReturnValues: 'UPDATED_OLD',
-  }));
-  const prior = res?.Attributes ?? {};
+// Emits qurl_setup_admin_changed when a landed setGuildApiKey write rebinds an
+// already-configured guild. `prior` is the write's UPDATED_OLD attributes.
+function auditSetupAdminChange(prior, { guildId, configuredBy, door }) {
   const oldAdminId = prior.configured_by ?? null;
   // Either prior attribute means the guild was already configured, even when a
   // hand edit or partial rollback dropped the other. Unlike shouldPromptConsent
@@ -1599,6 +1563,47 @@ async function setGuildApiKey(guildId, apiKey, configuredBy, via) {
       } catch { /* observability must never fail a landed write */ }
     }
   }
+}
+
+// `via` (a SETUP_VIA value) names the setup door for the admin-change audit.
+async function setGuildApiKey(guildId, apiKey, configuredBy, via) {
+  const door = normalizeSetupVia(via);
+  // Validate on every call so caller drift (including a forgotten argument)
+  // shows up on first setups too; such doors audit as unknown.
+  if (door === SETUP_VIA.UNKNOWN) {
+    try {
+      logger.warn('Unrecognized setup door; any admin-change audit for this write records via=unknown', { via: String(via).slice(0, 64), guildId });
+    } catch { /* a bad door must not fail the key write */ }
+  }
+  const now = nowIso();
+  // SQLite's `ON CONFLICT(guild_id) DO UPDATE SET qurl_api_key=…,
+  // configured_by=…, updated_at=…` deliberately preserved
+  // `configured_at` across re-keys — the field tracks "when was
+  // this guild FIRST configured" and downstream cohort analytics
+  // depend on that semantic. A naive PutItem rewrites the whole
+  // row, including resetting configured_at. Mirror createLink's
+  // shape: UpdateCommand with `if_not_exists(configured_at, :u)`
+  // so first-write sets it and re-keys leave it alone.
+  const res = await ddb.send(new UpdateCommand({
+    TableName: TABLES.guild_configs,
+    Key: { guild_id: guildId },
+    UpdateExpression: 'SET qurl_api_key = :k, configured_by = :b, updated_at = :u, configured_at = if_not_exists(configured_at, :u)',
+    ExpressionAttributeValues: {
+      ':k': encrypt(apiKey),
+      ':b': configuredBy,
+      ':u': now,
+    },
+    // Return old values for touched attrs: keeps the old configured_by
+    // read atomic with the re-key without returning the entire previous
+    // guild_configs row. DynamoDB also returns the old encrypted
+    // qurl_api_key because it is touched by this update; leave it
+    // unread so the audit payload never carries key material. prior
+    // configured_at relies on UPDATED_OLD also covering the if_not_exists
+    // no-op on a re-key. TODO(upstream-contract): DynamoDB behavior we do not
+    // control; mocks cannot pin it, so the sandbox rebind gate does.
+    ReturnValues: 'UPDATED_OLD',
+  }));
+  auditSetupAdminChange(res?.Attributes ?? {}, { guildId, configuredBy, door });
 }
 
 // Raw delete. No qurl-service subscription teardown. Today there is

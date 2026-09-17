@@ -104,7 +104,7 @@ describe('guild configs', () => {
     await store.setGuildApiKey('g-1', 'plain-key-2', 'admin', SETUP_VIA.PASTE);
     expect(logger.audit.mock.calls.map(([event]) => event))
       .not.toContain(AUDIT_EVENTS.QURL_SETUP_ADMIN_CHANGED);
-    expect(logger.warn).not.toHaveBeenCalledWith('Unrecognized setup door; auditing as unknown', expect.anything());
+    expect(logger.warn).not.toHaveBeenCalledWith('Unrecognized setup door; any admin-change audit for this write records via=unknown', expect.anything());
   });
 
   test('setGuildApiKey: still writes when the unrecognized-door warning throws', async () => {
@@ -119,7 +119,7 @@ describe('guild configs', () => {
     await store.setGuildApiKey('g-1', 'plain-key', 'new-admin');
     expect(logger.audit).toHaveBeenCalledWith(AUDIT_EVENTS.QURL_SETUP_ADMIN_CHANGED,
       expect.objectContaining({ via: 'unknown' }));
-    expect(logger.warn).toHaveBeenCalledWith('Unrecognized setup door; auditing as unknown', { via: 'undefined', guildId: 'g-1' });
+    expect(logger.warn).toHaveBeenCalledWith('Unrecognized setup door; any admin-change audit for this write records via=unknown', { via: 'undefined', guildId: 'g-1' });
   });
 
   test('setGuildApiKey: collapses an unrecognized setup door to unknown', async () => {
@@ -127,19 +127,19 @@ describe('guild configs', () => {
     await store.setGuildApiKey('g-1', 'plain-key', 'new-admin', 'OAuth');
     expect(logger.audit).toHaveBeenCalledWith(AUDIT_EVENTS.QURL_SETUP_ADMIN_CHANGED,
       expect.objectContaining({ via: SETUP_VIA.UNKNOWN }));
-    expect(logger.warn).toHaveBeenCalledWith('Unrecognized setup door; auditing as unknown', { via: 'OAuth', guildId: 'g-1' });
+    expect(logger.warn).toHaveBeenCalledWith('Unrecognized setup door; any admin-change audit for this write records via=unknown', { via: 'OAuth', guildId: 'g-1' });
   });
 
   test('setGuildApiKey: warns when a caller passes the UNKNOWN sentinel as a door', async () => {
     ddbMock.on(UpdateCommand).resolves({});
     await store.setGuildApiKey('g-1', 'plain-key', 'admin', SETUP_VIA.UNKNOWN);
-    expect(logger.warn).toHaveBeenCalledWith('Unrecognized setup door; auditing as unknown', { via: 'unknown', guildId: 'g-1' });
+    expect(logger.warn).toHaveBeenCalledWith('Unrecognized setup door; any admin-change audit for this write records via=unknown', { via: 'unknown', guildId: 'g-1' });
   });
 
   test('setGuildApiKey: warns on an unrecognized door even without a rebind', async () => {
     ddbMock.on(UpdateCommand).resolves({});
     await store.setGuildApiKey('g-1', 'plain-key', 'admin', 'OAuth');
-    expect(logger.warn).toHaveBeenCalledWith('Unrecognized setup door; auditing as unknown', { via: 'OAuth', guildId: 'g-1' });
+    expect(logger.warn).toHaveBeenCalledWith('Unrecognized setup door; any admin-change audit for this write records via=unknown', { via: 'OAuth', guildId: 'g-1' });
     expect(logger.audit.mock.calls.map(([event]) => event))
       .not.toContain(AUDIT_EVENTS.QURL_SETUP_ADMIN_CHANGED);
   });

@@ -447,14 +447,16 @@ const AUDIT_EVENTS = {
   // `/qurl setup` paste) rebinds an existing guild to a different configured_by
   // admin. TODO(upstream-contract): keep qurl-integrations-infra's
   // qurl_setup_admin_changed CloudWatch filter/alarm in sync with this string
-  // (pinned literally in ddb-store.test.js). Best-effort, with two known blind
-  // spots: deleting the configuration first (a whole-row delete,
+  // (pinned literally in ddb-store.test.js). Best-effort, with three known
+  // blind spots: (1) deleting the configuration first (a whole-row delete,
   // _removeGuildApiKeyRaw, with no production caller today) leaves no prior
-  // administrator to compare (#1455), and a retried or double-submitted write
-  // that already landed reads the new admin back as the old one (the SDK's own
-  // retries on throttling or dropped connections make this
-  // infrastructure-driven, not only user-driven). Guild/admin IDs are forensic
-  // fields, never CloudWatch metric dimensions. Only human setup flows may call
+  // administrator to compare (#1455); (2) a retried or double-submitted write
+  // that already landed reads the new admin back as the old one, and the SDK's
+  // own retries on throttling or dropped connections make this
+  // infrastructure-driven, not only user-driven; (3) a damaged row that lost
+  // configured_by, rebound by a caller that also omits configuredBy, compares
+  // null to null and stays silent. Guild/admin IDs are forensic fields, never
+  // CloudWatch metric dimensions. Only human setup flows may call
   // setGuildApiKey: a backfill or admin tool writing a synthetic configured_by
   // would page on every already-configured guild.
   QURL_SETUP_ADMIN_CHANGED: 'qurl_setup_admin_changed',
