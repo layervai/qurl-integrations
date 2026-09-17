@@ -671,6 +671,12 @@ const SETUP_VIA_DOORS = new Set(Object.values(SETUP_VIA).filter((v) => v !== SET
 function normalizeSetupVia(via) {
   return SETUP_VIA_DOORS.has(via) ? via : SETUP_VIA.UNKNOWN;
 }
+// Log-safe description of an unrecognized door: echo only short slug-shaped
+// values, so a misplaced argument (e.g. an API key) never reaches the logs.
+function describeSetupVia(via) {
+  const text = String(via);
+  return { via: /^[a-z0-9_-]{1,32}$/.test(text) ? text : '[unrecognized]', via_type: typeof via };
+}
 
 // Use one tag for gateway and worker rejection alerts.
 const LOG_KINDS = Object.freeze({
@@ -698,6 +704,7 @@ module.exports = {
   AUDIT_EVENTS,
   SETUP_VIA,
   normalizeSetupVia,
+  describeSetupVia,
   QURL_WEBHOOK_EVENTS,
   TRUST,
   GATEWAY_DISPATCH_TYPES,

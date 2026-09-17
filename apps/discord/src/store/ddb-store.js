@@ -45,6 +45,7 @@ const {
   AUDIT_EVENTS,
   SETUP_VIA,
   normalizeSetupVia,
+  describeSetupVia,
   DDB_TRANSACTION_MAX_ACTIONS,
   ddbSendConfigGuardActionCount,
   ddbSendConfigGuardFitsTransaction,
@@ -1534,37 +1535,37 @@ function bestEffortLog(emit) {
 // Emits qurl_setup_admin_changed when a landed setGuildApiKey write rebinds an
 // already-configured guild. `prior` is the write's UPDATED_OLD attributes.
 function auditSetupAdminChange(prior, { guildId, configuredBy, door }) {
-  const oldAdminId = prior.configured_by ?? null;
+  // String() keeps a numeric or BigInt caller ID from paging on every re-key.
+  const oldAdminId = prior.configured_by == null ? null : String(prior.configured_by);
+  const newAdminId = configuredBy == null ? null : String(configuredBy);
+  const priorHadKey = 'qurl_api_key' in prior;
   // Either prior attribute means the guild was already configured, even when a
   // hand edit or partial rollback dropped the other. Unlike shouldPromptConsent
   // (guild-config-state.js), which treats a row without configured_by as a
   // first install, the alarm biases toward paging; a missing admin reports null.
-  const newAdminId = configuredBy ?? null;
-  const priorHadKey = 'qurl_api_key' in prior;
-  if ((priorHadKey || oldAdminId !== null) && oldAdminId !== newAdminId) {
-    // The write has landed: an audit failure must not surface as a write
-    // failure, or qurl-oauth.js would revoke the key it just stored.
-    try {
-      logger.audit(AUDIT_EVENTS.QURL_SETUP_ADMIN_CHANGED, {
-        guild_id: guildId,
-        old_admin_id: oldAdminId,
-        new_admin_id: newAdminId,
-        // Separates a damaged configured row (key, no configured_by) from a
-        // healthy rebind when old_admin_id or prior_configured_at is null.
-        prior_had_key: priorHadKey,
-        via: door,
-        // configured_at is the guild's stable first-setup time (webhook writes
-        // also stamp updated_at). updated_at is always overwritten here, so a
-        // non-null prior_updated_at with a null prior_configured_at shows
-        // UPDATED_OLD elided the if_not_exists no-op rather than a damaged row.
-        prior_configured_at: prior.configured_at ?? null,
-        prior_updated_at: prior.updated_at ?? null,
-      });
-    } catch (err) {
-      bestEffortLog(() => logger.error('Failed to emit setup admin-change audit after a landed write', {
-        error: err?.message, guildId,
-      }));
-    }
+  if (!(priorHadKey || oldAdminId !== null) || oldAdminId === newAdminId) return;
+  // The write has landed: an audit failure must not surface as a write
+  // failure, or qurl-oauth.js would revoke the key it just stored.
+  try {
+    logger.audit(AUDIT_EVENTS.QURL_SETUP_ADMIN_CHANGED, {
+      guild_id: guildId,
+      old_admin_id: oldAdminId,
+      new_admin_id: newAdminId,
+      // Separates a damaged configured row (key, no configured_by) from a
+      // healthy rebind when old_admin_id or prior_configured_at is null.
+      prior_had_key: priorHadKey,
+      via: door,
+      // configured_at is the guild's stable first-setup time (webhook writes
+      // also stamp updated_at). updated_at is always overwritten here, so a
+      // non-null prior_updated_at with a null prior_configured_at shows
+      // UPDATED_OLD elided the if_not_exists no-op rather than a damaged row.
+      prior_configured_at: prior.configured_at ?? null,
+      prior_updated_at: prior.updated_at ?? null,
+    });
+  } catch (err) {
+    bestEffortLog(() => logger.error('Failed to emit setup admin-change audit after a landed write', {
+      error: err?.message, guildId,
+    }));
   }
 }
 
@@ -1574,7 +1575,7 @@ async function setGuildApiKey(guildId, apiKey, configuredBy, via) {
   // Validate on every call so caller drift (including a forgotten argument)
   // shows up on first setups too; such doors audit as unknown.
   if (door === SETUP_VIA.UNKNOWN) {
-    bestEffortLog(() => logger.warn('Unrecognized setup door; any admin-change audit for this write records via=unknown', { via: String(via).slice(0, 64), guildId }));
+    bestEffortLog(() => logger.warn('Unrecognized setup door; any admin-change audit for this write records via=unknown', { ...describeSetupVia(via), guildId }));
   }
   const now = nowIso();
   // SQLite's `ON CONFLICT(guild_id) DO UPDATE SET qurl_api_key=…,

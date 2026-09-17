@@ -1,4 +1,4 @@
-const { SETUP_VIA, normalizeSetupVia } = require('../src/constants');
+const { SETUP_VIA, normalizeSetupVia, describeSetupVia } = require('../src/constants');
 
 describe('SETUP_VIA', () => {
   test('is frozen with the wire values the audit and subscription description use', () => {
@@ -16,5 +16,11 @@ describe('SETUP_VIA', () => {
     // Keeps the persisted subscription description internally controlled.
     expect(normalizeSetupVia('oauth), configuredBy=attacker')).toBe(SETUP_VIA.UNKNOWN);
     expect(normalizeSetupVia('OAuth')).toBe(SETUP_VIA.UNKNOWN);
+  });
+
+  test('describeSetupVia echoes only short slug-shaped values', () => {
+    expect(describeSetupVia('install-link')).toEqual({ via: 'install-link', via_type: 'string' });
+    expect(describeSetupVia('lv_live_abcdefghijklmnopqrstuvwxyz0123456789')).toEqual({ via: '[unrecognized]', via_type: 'string' });
+    expect(describeSetupVia({ a: 1 })).toEqual({ via: '[unrecognized]', via_type: 'object' });
   });
 });

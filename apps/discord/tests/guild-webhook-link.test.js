@@ -275,4 +275,12 @@ describe('fireAndForgetLinkGuildWebhookSubscription — door normalization', () 
     const call = mockEnsureWebhookSubscription.mock.calls[0][0];
     expect(call.description).toBe(`Discord bot view counter (guild=g_ff, via=${expected}, configuredBy=u-1)`);
   });
+  it('warns once when the wrapper records an unrecognized door', async () => {
+    const logger = require('../src/logger');
+    await fireAndForgetLinkGuildWebhookSubscription({ guildId: 'g_ff', apiKey: 'lv_x', via: 'OAuth', configuredBy: 'u-1' });
+    expect(logger.warn).toHaveBeenCalledWith(
+      'Unrecognized setup door in subscription description; recording via=unknown',
+      { via: '[unrecognized]', via_type: 'string', guildId: 'g_ff' },
+    );
+  });
 });
