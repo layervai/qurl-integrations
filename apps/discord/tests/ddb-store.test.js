@@ -146,6 +146,11 @@ describe('guild configs', () => {
       .not.toContain(AUDIT_EVENTS.QURL_SETUP_ADMIN_CHANGED);
   });
 
+  test('setGuildApiKey: resolves when the audit observation itself throws', async () => {
+    ddbMock.on(UpdateCommand).resolves({ Attributes: { configured_by: 'old-admin', qurl_api_key: 'enc:v1:IV:TAG:deadbeef' } });
+    await expect(store.setGuildApiKey('g-1', 'plain-key', Object.create(null), SETUP_VIA.OAUTH)).resolves.toBeUndefined();
+  });
+
   test('setGuildApiKey: warns when a caller passes the UNKNOWN sentinel as a door', async () => {
     ddbMock.on(UpdateCommand).resolves({});
     await store.setGuildApiKey('g-1', 'plain-key', 'admin', SETUP_VIA.UNKNOWN);

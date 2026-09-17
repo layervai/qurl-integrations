@@ -287,6 +287,12 @@ describe('fireAndForgetLinkGuildWebhookSubscription — door normalization', () 
     expect(logger.warn.mock.calls.filter(([msg]) => msg.startsWith('Unrecognized setup door'))).toHaveLength(1);
   });
 
+  it('still links when the door warning throws', async () => {
+    logger.warn.mockImplementationOnce(() => { throw new Error('EPIPE'); });
+    await fireAndForgetLinkGuildWebhookSubscription({ guildId: 'g_ff', apiKey: 'lv_x', via: 'OAuth', configuredBy: 'u-1' });
+    expect(mockEnsureWebhookSubscription).toHaveBeenCalledTimes(1);
+  });
+
   it('does not warn for a known door', async () => {
     await fireAndForgetLinkGuildWebhookSubscription({ guildId: 'g_ff', apiKey: 'lv_x', via: SETUP_VIA.OAUTH, configuredBy: 'u-1' });
     expect(logger.warn.mock.calls.filter(([msg]) => msg.startsWith('Unrecognized setup door'))).toHaveLength(0);

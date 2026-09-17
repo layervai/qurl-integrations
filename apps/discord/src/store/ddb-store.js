@@ -1606,7 +1606,9 @@ async function setGuildApiKey(guildId, apiKey, configuredBy, via) {
     // control; mocks cannot pin it, so the sandbox rebind gate does.
     ReturnValues: 'UPDATED_OLD',
   }));
-  auditSetupAdminChange(res?.Attributes ?? {}, { guildId, configuredBy, door });
+  // The whole observation is best-effort: a throw anywhere in it, not just in
+  // logger.audit, must not reject a write that already landed.
+  bestEffortLog(() => auditSetupAdminChange(res?.Attributes ?? {}, { guildId, configuredBy, door }));
 }
 
 // Raw delete. No qurl-service subscription teardown. Today there is
