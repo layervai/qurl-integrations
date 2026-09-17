@@ -237,7 +237,7 @@ describe('runRound ledgering', () => {
 
     expect(reUploadBuffer).toHaveBeenCalledTimes(3);
     expect(mod.readLedger(ledger)).toEqual(['res-1', 'res-2', 'res-3']);
-    // Reclaim releases unaddressable uploads by this kind (ledgerUploadIds).
+    // Preserve the resource kind for manual reconciliation.
     expect(fs.readFileSync(ledger, 'utf8').trim().split('\n').map(l => JSON.parse(l).kind))
       .toEqual(['upload', 'upload', 'upload']);
   });
@@ -420,11 +420,11 @@ describe('reclaim', () => {
 
     const result = await reclaim(ledger);
 
-    expect(result).toMatchObject({ revoked: 0, failed: 1, released: 0 });
+    expect(result).toMatchObject({ revoked: 0, failed: 1 });
     expect(readLedger(ledger)).toEqual([id]);
   });
 
-  it('releases a connector upload row the SDK cannot address instead of failing it', async () => {
+  it('retains an upload rejected by the SDK while pruning a successfully revoked sibling', async () => {
     const ledger = tempLedger(`${line(PUBLIC_KEY_RESOURCE_ID, { kind: 'upload' })}${line(CRID_RESOURCE_ID, { kind: 'upload' })}`);
     deleteLink.mockImplementation(async (id) => {
       if (id === PUBLIC_KEY_RESOURCE_ID) {
@@ -434,10 +434,9 @@ describe('reclaim', () => {
 
     const result = await reclaim(ledger);
 
-    expect(result).toMatchObject({ revoked: 1, failed: 0, released: 1 });
-    expect(readLedger(ledger)).toEqual([]);
-    // eslint-disable-next-line no-console -- asserting the script's own progress output
-    expect(console.log).toHaveBeenCalledWith(expect.stringContaining('released 1 connector upload parent(s)'));
+    expect(result).toMatchObject({ revoked: 1, failed: 1 });
+    expect(readLedger(ledger)).toEqual([PUBLIC_KEY_RESOURCE_ID]);
+    expect(console.error).toHaveBeenCalledWith(expect.stringContaining('remove them only after confirming their links expired'));
     expect(console.error).not.toHaveBeenCalledWith(expect.stringContaining('re-run with --reclaim'));
   });
 

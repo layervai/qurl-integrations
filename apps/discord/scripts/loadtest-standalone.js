@@ -129,8 +129,8 @@
  *   Re-running is safe: revoked ids are pruned, and only an explicit terminal
  *   response counts an already-gone resource as reclaimed. Ambiguous 404s
  *   remain in the ledger for manual verification. Connector upload parents
- *   are released instead: SDK 2.x cannot delete them by the public key the
- *   upload returns, so they and their links age out on their own.
+ *   that SDK 2.x cannot address stay in the ledger until their links are
+ *   confirmed expired or an operator completes cleanup.
  *
  *   Two windows this cannot close, both leaking exactly the resource in hand:
  *   a create that succeeds server-side whose response is then lost, and a
@@ -970,8 +970,8 @@ async function trackCreate(fn) {
 // Recipient links from mintLinks are deliberately not recorded individually:
 // deleting a parent revokes every qURL minted against it
 // (shared/client/client.go documents the cascade). SDK 2.x cannot address an
-// upload parent by the public key the connector returns, so reclaim releases
-// those rows and their links expire on their own.
+// upload parent by the public key the connector returns, so reclaim retains
+// those rows for manual cleanup or confirmed expiry.
 function recordResource(resourceId, kind) {
   // Share deleteLink's transport guard so every recorded ID is sweepable and
   // a malformed service response cannot persist a bearer token in the ledger.
@@ -1042,49 +1042,33 @@ function readLedger(ledgerPath, quiet = false) {
 // foreign to the tenancy guard rather than as an absence of evidence.
 const UNRECORDED_ENDPOINT = '(no endpoint recorded)';
 
-// Parsed ledger rows, skipping blank and torn lines (readLedger reports those).
-// Same stat guard as readLedger rather than existsSync: a directory path would
-// otherwise throw EISDIR here.
-function ledgerRows(ledgerPath) {
+// Endpoints recorded in a ledger, so a sweep can refuse to delete against a
+// tenancy other than the one the resources were created on.
+function ledgerEndpoints(ledgerPath) {
+  const endpoints = new Set();
+  // Same stat guard as readLedger rather than existsSync: a directory path
+  // would otherwise throw EISDIR here. Today reclaim returns before reaching
+  // this, but that ordering should not be what keeps it safe.
   try {
-    if (!fs.statSync(ledgerPath).isFile()) return [];
+    if (!fs.statSync(ledgerPath).isFile()) return endpoints;
   } catch {
-    return [];
+    return endpoints;
   }
-  const rows = [];
   for (const line of fs.readFileSync(ledgerPath, 'utf8').split('\n')) {
     const trimmed = line.trim();
     if (!trimmed) continue;
     try {
-      rows.push(JSON.parse(trimmed));
+      const { resource_id: id, endpoint } = JSON.parse(trimmed);
+      if (!id) continue;
+      // Fail closed. An entry with no recorded endpoint — an older or
+      // hand-edited ledger, or a run with QURL_ENDPOINT unset — would
+      // otherwise contribute nothing to the set and let the guard pass
+      // trivially, which is the opposite of what a safety rail should do
+      // when its input is missing.
+      endpoints.add(endpoint || UNRECORDED_ENDPOINT);
     } catch { /* torn line — readLedger already reports it */ }
   }
-  return rows;
-}
-
-// Endpoints recorded in a ledger, so a sweep can refuse to delete against a
-// tenancy other than the one the resources were created on.
-function ledgerEndpoints(ledgerPath) {
-  // Fail closed. An entry with no recorded endpoint — an older or hand-edited
-  // ledger, or a run with QURL_ENDPOINT unset — would otherwise contribute
-  // nothing to the set and let the guard pass trivially, which is the opposite
-  // of what a safety rail should do when its input is missing.
-  return new Set(ledgerRows(ledgerPath)
-    .filter(row => row?.resource_id)
-    .map(({ endpoint }) => endpoint || UNRECORDED_ENDPOINT));
-}
-
-// TODO(upstream-contract): qurl-service CRIDs are lowercase unpadded base32 of
-// 47 or 60 characters. Used only to keep reclaim from releasing a CRID row.
-const CRID_SHAPE = /^(?:[a-z2-7]{47}|[a-z2-7]{60})$/;
-
-// Ids recorded as connector upload parents. SDK 2.x cannot delete those by the
-// public key the upload returns (qurl-integrations-infra#1627), so
-// reclaim releases them rather than reporting a failure no re-run can fix.
-function ledgerUploadIds(ledgerPath) {
-  return new Set(ledgerRows(ledgerPath)
-    .filter(row => row?.resource_id && row.kind === 'upload')
-    .map(({ resource_id: id }) => id));
+  return endpoints;
 }
 
 // Rewrite the ledger with only what is still outstanding, so a re-run sweeps
@@ -1166,7 +1150,6 @@ async function reclaim(ledgerPath) {
   const causes = new Map();
   let revoked = 0;
   let nonCridRows = 0;
-  const releasedUploads = [];
   let ambiguousNotFound = 0;
   let invalidLedgerIds = 0;
 
@@ -1195,7 +1178,6 @@ async function reclaim(ledgerPath) {
     // heartbeat exists to prevent.
     const seconds = Math.max(1, Math.round(pending.length * 0.05));
     console.log(`Reclaim: revoking ${pending.length} resource(s) from ${ledgerPath} (at least ${seconds}s, likely longer)...`);
-    const uploadIds = ledgerUploadIds(ledgerPath);
     let done = 0;
     // Serial with a short gap. The tenancy is shared and rate-limited per
     // account, and a burst of hundreds of deletes is what trips it.
@@ -1216,12 +1198,6 @@ async function reclaim(ledgerPath) {
         // If that changes, re-runs retain the row and report a visible failure.
         if (isGoneQurlApiError(e)) {
           revoked++;
-          outstanding.delete(id);
-        } else if (uploadIds.has(id) && !CRID_SHAPE.test(id) && isClientValidationQurlApiError(e)) {
-          // Not addressable by the API: its recipient links expire with it.
-          // Released only for a non-CRID id, so a rejected CRID-shaped row (a
-          // symptom of something else) stays in the ledger.
-          releasedUploads.push(id);
           outstanding.delete(id);
         } else {
           outstanding.add(id);
@@ -1272,11 +1248,6 @@ async function reclaim(ledgerPath) {
   if (nonCridRows > 0) {
     console.error(`Reclaim: the SDK rejected ${nonCridRows} resource ID(s) before sending a request (not CRIDs, such as retired r_ IDs); remove them only after confirming their links expired. If every row failed this way, check QURL_ENDPOINT and the SDK version instead.`);
   }
-  if (releasedUploads.length > 0) {
-    // Public resource keys, not credentials: listed so the release stays auditable.
-    console.log(`Reclaim: released ${releasedUploads.length} connector upload parent(s) from the ledger; the qURL API cannot revoke them by public key, and their links expire on their own:`);
-    for (const id of releasedUploads) console.log(`  ${id}`);
-  }
   if (ambiguousNotFound > 0) {
     console.error(`Reclaim: ${ambiguousNotFound} resource(s) returned 404 and remain in the ledger; verify the owner/key and absence manually before pruning.`);
   }
@@ -1287,7 +1258,7 @@ async function reclaim(ledgerPath) {
   if (retryable > 0) {
     console.error(`Reclaim: ${retryable} other resource(s) failed with potentially retryable errors — re-run with --reclaim ${ledgerPath}`);
   }
-  return { missing: false, revoked, failed, released: releasedUploads.length };
+  return { missing: false, revoked, failed };
 }
 
 // Every reclaim path goes through here: the normal end of a run, a thrown
@@ -2266,8 +2237,8 @@ async function runRound(roundNum) {
         'application/octet-stream',
       );
       // Recorded before anything is minted against it. SDK 2.x cannot delete
-      // it by this public key, so reclaim releases the row (see
-      // ledgerUploadIds); its recipient links expire on their own.
+      // it by this public key, so reclaim retains the row until cleanup
+      // or expiry is confirmed.
       recordResource(parsed.resource_id, 'upload');
       return parsed;
     });

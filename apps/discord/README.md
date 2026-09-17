@@ -74,6 +74,33 @@ invalidate the links from any previous send.
 > Recipients must allow direct messages from server members to receive their
 > link.
 
+## Child revocation rollout
+
+This release upgrades `@layervai/qurl` from 0.6.x to 2.x. Detect uses CRIDs
+and binds the signed link to the expected CRID. The image omits the optional
+native state store; the bot does not use producer state.
+
+Deploy and validate the connector revoke endpoint before deploying this
+consumer. Until that endpoint is enabled, ordinary children use the SDK
+fallback. Watermarked children cannot be confirmed through that fallback;
+the send stays available for retry. A repeated connector 429 fails closed
+after one bounded retry, without an SDK fallback.
+
+Before deployment, configure alarms for `Connector mint_link returned a link
+without a valid qurl_id`, `Connector mint_link over-minted`, `Connector mint_link
+returned more partial links than requested`, `Minted link revoke incomplete`,
+and `Revoke select acknowledgement failed`. Update any filters or saved queries
+that use `Failed to revoke QURL`, `missing resource identity`, or the partial-mint
+`resource_id` field: these become `Failed to revoke qURL`, `missing resource or
+token identity`, and `resource_ref`. The load-test warning now says
+`carried no usable resource identifier`.
+
+Failed sends can take about 220 seconds to report while cleanup runs.
+Cleanup can continue after that reply; under degraded service a 30-child
+resource can take about 17 minutes. Check completion logs before manual cleanup.
+Load-test upload records rejected by SDK 2.x stay in the cleanup ledger;
+remove them only after cleanup or link expiry is confirmed.
+
 ## Configuration
 
 The bot is a Node.js service (**Node ≥ 22**) backed by DynamoDB. Copy
