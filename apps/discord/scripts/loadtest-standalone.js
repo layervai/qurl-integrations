@@ -166,17 +166,12 @@ const { mintLinks, reUploadBuffer } = require('../src/connector');
 const { createOneTimeLink, deleteLink } = require('../src/qurl');
 const {
   hasSafeResourceIdShape,
-  LEGACY_RESOURCE_ID_PREFIX,
   maskResourceIdPath,
 } = require('../src/utils/resource-id');
 const { isGoneQurlApiError, qurlApiErrorStatus } = require('../src/utils/qurl-errors');
 
-// TODO(upstream-contract): mirrors the public-key arm of qurl-service's
-// ResourceId schema (107..214 base64url characters, disjoint from CRIDs).
-// SDK 2.x deletes only by CRID, and connector upload responses carry only this
-// public key; transit uploads are also absent from GET /v1/resources, so no
-// CRID can be resolved for them.
-const isPublicKeyResourceId = id => typeof id === 'string' && /^[\w-]{107,214}$/.test(id);
+// callQurl's code-only message for an identifier the SDK rejects before a request.
+const CLIENT_VALIDATION_FAILURE = /failed \(client_validation\)$/;
 
 // The same pool depth the send pipeline batches against — imported, not
 // copied, so a change to the cap reaches this script instead of silently
@@ -1149,9 +1144,8 @@ async function reclaim(ledgerPath) {
   const outstanding = new Set();
   const causes = new Map();
   let revoked = 0;
-  let legacyRejected = 0;
+  let nonCridRows = 0;
   let ambiguousNotFound = 0;
-  let publicKeyRows = 0;
   let invalidLedgerIds = 0;
 
   // Drain rather than sweep once. An in-flight round can append after the
@@ -1184,13 +1178,6 @@ async function reclaim(ledgerPath) {
     // account, and a burst of hundreds of deletes is what trips it.
     for (const id of pending) {
       swept.add(id);
-      if (isPublicKeyResourceId(id)) {
-        // Connector upload rows: no API delete exists for them under SDK 2.x.
-        outstanding.add(id);
-        publicKeyRows++;
-        done++;
-        continue;
-      }
       try {
         await deleteLink(id);
         revoked++;
@@ -1201,8 +1188,8 @@ async function reclaim(ledgerPath) {
         // formatted message fallback covers serialized errors that lost it.
         //
         // TODO(upstream-contract): DELETE /resources returns 204 for a known
-        // revoked row. A 404 is ambiguous (absent, wrong owner/key, or public-ID
-        // resolution miss) and stays retryable; only 410 proves a gone state.
+        // revoked row. A 404 is ambiguous (absent or wrong owner/key) and stays
+        // retryable; only 410 proves a gone state.
         // If that changes, re-runs retain the row and report a visible failure.
         if (isGoneQurlApiError(e)) {
           revoked++;
@@ -1210,11 +1197,12 @@ async function reclaim(ledgerPath) {
         } else {
           outstanding.add(id);
           const status = qurlApiErrorStatus(e);
-          // TODO(upstream-contract): qurl-service public routes reject the
-          // retired private r_ identifier cohort with 400. Those rows cannot
-          // drain automatically, so distinguish them from transient failures.
+          // SDK 2.x deletes only by CRID and rejects any other identifier before
+          // a request. Connector upload rows hold a public key (the upload
+          // response has no CRID, and transit uploads are unlisted), and older
+          // ledgers may hold retired r_ IDs; none can drain automatically.
           if (!hasSafeResourceIdShape(id)) invalidLedgerIds++;
-          else if (id.startsWith(LEGACY_RESOURCE_ID_PREFIX) && status === 400) legacyRejected++;
+          else if (CLIENT_VALIDATION_FAILURE.test(e?.message)) nonCridRows++;
           else if (status === 404) ambiguousNotFound++;
           // Keyed on a scrubbed cause. callQurl uses a static route label, but
           // this also protects aggregation from foreign/serialized errors that
@@ -1250,8 +1238,8 @@ async function reclaim(ledgerPath) {
   for (const [message, n] of [...causes.entries()].sort((a, b) => b[1] - a[1])) {
     console.error(`  ${n}x ${message}`);
   }
-  if (legacyRejected > 0) {
-    console.error(`Reclaim: ${legacyRejected} legacy resource ID(s) were rejected with 400 and cannot be reclaimed automatically; remove them only after confirming their links expired.`);
+  if (nonCridRows > 0) {
+    console.error(`Reclaim: ${nonCridRows} resource ID(s) are not CRIDs (connector uploads or retired r_ IDs) and cannot be revoked through the qURL API; remove them only after confirming their links expired.`);
   }
   if (ambiguousNotFound > 0) {
     console.error(`Reclaim: ${ambiguousNotFound} resource(s) returned 404 and remain in the ledger; verify the owner/key and absence manually before pruning.`);
@@ -1259,10 +1247,7 @@ async function reclaim(ledgerPath) {
   if (invalidLedgerIds > 0) {
     console.error(`Reclaim: ${invalidLedgerIds} invalid ledger resource ID(s) cannot be reclaimed automatically; correct or remove them only after manual verification.`);
   }
-  if (publicKeyRows > 0) {
-    console.error(`Reclaim: ${publicKeyRows} connector upload(s) recorded by public key cannot be revoked through the qURL API; their links expire on their own, so remove them only after confirming that.`);
-  }
-  const retryable = failed - legacyRejected - ambiguousNotFound - invalidLedgerIds - publicKeyRows;
+  const retryable = failed - nonCridRows - ambiguousNotFound - invalidLedgerIds;
   if (retryable > 0) {
     console.error(`Reclaim: ${retryable} other resource(s) failed with potentially retryable errors — re-run with --reclaim ${ledgerPath}`);
   }
@@ -2245,8 +2230,8 @@ async function runRound(roundNum) {
         'application/octet-stream',
       );
       // Recorded before anything is minted against it, so a reclaim reports
-      // it. Its public key has no API delete under SDK 2.x (see
-      // isPublicKeyResourceId); its recipient links expire on their own.
+      // it. SDK 2.x cannot delete it by this public key, so reclaim flags it
+      // for manual verification; its recipient links expire on their own.
       recordResource(parsed.resource_id, 'upload');
       return parsed;
     });

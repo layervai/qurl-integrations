@@ -406,36 +406,25 @@ describe('reclaim', () => {
     );
   });
 
-  it('keeps a legacy-ID 400 visible for another reclaim attempt', async () => {
-    const ledger = tempLedger(line('r_legacy42'));
+  it.each([
+    ['a connector upload public key', PUBLIC_KEY_RESOURCE_ID],
+    ['a retired r_ ID', 'r_legacy42'],
+  ])('keeps %s the SDK rejects as a non-CRID for manual verification', async (_kind, id) => {
+    const ledger = tempLedger(line(id));
     deleteLink.mockRejectedValue(
-      new Error(qurlApiErrorMessage('DELETE', resourcePath('r_legacy42'), 400)),
+      new Error(qurlApiErrorMessage('DELETE', '/resources/:resourceId', 'client_validation')),
     );
 
     const result = await reclaim(ledger);
 
     expect(result).toMatchObject({ revoked: 0, failed: 1 });
-    expect(readLedger(ledger)).toEqual(['r_legacy42']);
+    expect(readLedger(ledger)).toEqual([id]);
     expect(console.error).toHaveBeenCalledWith(
-      expect.stringContaining('1 legacy resource ID(s) were rejected with 400'),
+      expect.stringContaining('1 resource ID(s) are not CRIDs'),
     );
     expect(console.error).not.toHaveBeenCalledWith(
       expect.stringContaining('re-run with --reclaim'),
     );
-  });
-
-  it('reports a public-key upload row for manual verification without a doomed delete', async () => {
-    const ledger = tempLedger(`${line(PUBLIC_KEY_RESOURCE_ID)}${line(CRID_RESOURCE_ID)}`);
-
-    const result = await reclaim(ledger);
-
-    expect(deleteLink.mock.calls.map(([id]) => id)).toEqual([CRID_RESOURCE_ID]);
-    expect(result).toMatchObject({ revoked: 1, failed: 1 });
-    expect(readLedger(ledger)).toEqual([PUBLIC_KEY_RESOURCE_ID]);
-    expect(console.error).toHaveBeenCalledWith(
-      expect.stringContaining('1 connector upload(s) recorded by public key cannot be revoked'),
-    );
-    expect(console.error).not.toHaveBeenCalledWith(expect.stringContaining('re-run with --reclaim'));
   });
 
   it('continues after an invalid non-string ledger ID and flags manual repair', async () => {
