@@ -237,6 +237,9 @@ describe('runRound ledgering', () => {
 
     expect(reUploadBuffer).toHaveBeenCalledTimes(3);
     expect(mod.readLedger(ledger)).toEqual(['res-1', 'res-2', 'res-3']);
+    // Reclaim releases unaddressable uploads by this kind (ledgerUploadIds).
+    expect(fs.readFileSync(ledger, 'utf8').trim().split('\n').map(l => JSON.parse(l).kind))
+      .toEqual(['upload', 'upload', 'upload']);
   });
 
   it('records the CRID, not the public key, for a location link', async () => {
@@ -417,7 +420,7 @@ describe('reclaim', () => {
 
     const result = await reclaim(ledger);
 
-    expect(result).toMatchObject({ revoked: 1, failed: 0 });
+    expect(result).toMatchObject({ revoked: 1, failed: 0, released: 1 });
     expect(readLedger(ledger)).toEqual([]);
     // eslint-disable-next-line no-console -- asserting the script's own progress output
     expect(console.log).toHaveBeenCalledWith(expect.stringContaining('released 1 connector upload parent(s)'));
@@ -438,7 +441,7 @@ describe('reclaim', () => {
     expect(result).toMatchObject({ revoked: 0, failed: 1 });
     expect(readLedger(ledger)).toEqual([id]);
     expect(console.error).toHaveBeenCalledWith(
-      expect.stringContaining('1 resource ID(s) are not CRIDs'),
+      expect.stringContaining('the SDK rejected 1 resource ID(s) before sending a request'),
     );
     expect(console.error).not.toHaveBeenCalledWith(
       expect.stringContaining('re-run with --reclaim'),

@@ -1075,7 +1075,7 @@ function ledgerEndpoints(ledgerPath) {
 }
 
 // Ids recorded as connector upload parents. SDK 2.x cannot delete those by the
-// public key the upload returns (layervai/qurl-integrations-infra#1627), so
+// public key the upload returns (qurl-integrations-infra#1627), so
 // reclaim releases them rather than reporting a failure no re-run can fix.
 function ledgerUploadIds(ledgerPath) {
   return new Set(ledgerRows(ledgerPath)
@@ -1264,7 +1264,7 @@ async function reclaim(ledgerPath) {
     console.error(`  ${n}x ${message}`);
   }
   if (nonCridRows > 0) {
-    console.error(`Reclaim: ${nonCridRows} resource ID(s) are not CRIDs and cannot be revoked through the qURL API; remove them only after confirming their links expired.`);
+    console.error(`Reclaim: the SDK rejected ${nonCridRows} resource ID(s) before sending a request (not CRIDs, such as retired r_ IDs); remove them only after confirming their links expired. If every row failed this way, check QURL_ENDPOINT and the SDK version instead.`);
   }
   if (releasedUploads.length > 0) {
     // Public resource keys, not credentials: listed so the release stays auditable.
@@ -1281,7 +1281,7 @@ async function reclaim(ledgerPath) {
   if (retryable > 0) {
     console.error(`Reclaim: ${retryable} other resource(s) failed with potentially retryable errors — re-run with --reclaim ${ledgerPath}`);
   }
-  return { missing: false, revoked, failed };
+  return { missing: false, revoked, failed, released: releasedUploads.length };
 }
 
 // Every reclaim path goes through here: the normal end of a run, a thrown
