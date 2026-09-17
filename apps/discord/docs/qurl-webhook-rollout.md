@@ -146,7 +146,11 @@ finds the existing sub, sees the SSM secret matches, returns `reused`).
   environments) — invoke the registrar Lambda for this environment. The
   `CANDIDATE_WEBHOOK_OWNER_CONTRACT`, `CANDIDATE_WEBHOOK_OWNER_PAGE_CAP`, and
   `CANDIDATE_WEBHOOK_OWNER_CONFLICT` variants refer to the linking guild key, so inspect that account's
-  subscriptions instead of rerunning the default registrar.
+  subscriptions instead of rerunning the default registrar. The candidate walk is
+  deliberately as strict as the default one: a row it cannot read could hide an
+  alias of the default owner, and guessing would risk rotating the shared secret.
+  The cost is that a customer's own malformed subscription state blocks that
+  guild's link (setup itself still succeeds) until the account is repaired.
   `DEFAULT_WEBHOOK_OWNER_KEY_INVALID` means the saved guild key ciphertext
   cannot be decrypted; `DEFAULT_WEBHOOK_OWNER_KEY_CHANGED` means a concurrent
   re-key or other row update won, or the guild row was removed mid-link

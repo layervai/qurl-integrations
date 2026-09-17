@@ -22,6 +22,7 @@
 
 const db = require('./store');
 const config = require('./config');
+const crypto = require('crypto');
 const { setTimeout: sleep } = require('node:timers/promises');
 const logger = require('./logger');
 
@@ -237,9 +238,11 @@ async function discoverOwnerId(apiKey, { subject = 'DEFAULT', skipMalformedRows 
   for (let page = 0; page < 50; page++) {
     // Early warning while there is still headroom before the permanent
     // *_PAGE_CAP failure (orphaned subscriptions only accumulate; see #1380).
-    // Once per subject+owner per process: the refresh tick would otherwise
-    // repeat it, while other guild owners keep their own early warning.
-    const budgetKey = `${subject}:${ownerId}`;
+    // Once per subject+key per process: the refresh tick would otherwise
+    // repeat it, while other guild keys keep their own early warning.
+    // Keyed by a short key digest (never the raw key) so empty early pages
+    // (no owner yet) still warn once per distinct key.
+    const budgetKey = `${subject}:${crypto.createHash('sha256').update(apiKey).digest('hex').slice(0, 16)}`;
     if (page === 25 && !pageBudgetWarned.has(budgetKey)) {
       // ponytail: coarse bound, forgets all keys at 1000 distinct owners.
       if (pageBudgetWarned.size >= 1000) pageBudgetWarned.clear();

@@ -169,24 +169,11 @@ router.get('/callback', rateLimit, async (req, res) => {
       : 'This install session is invalid or expired. No install session was found in this browser, so finish the install in the same browser you started it in.');
   }
 
-  // Fail-fast: same encryption-at-rest guard as /oauth/qurl/start. When
-  // Require OAuth2 Code Grant is enabled, Discord has not installed the bot
-  // yet at this point — but that Developer Portal setting is external to this
-  // service, so we cannot assume it. Without this guard we would burn the
-  // Discord code on a token exchange + a /users/@me round-trip + an Auth0
-  // round-trip before failing at the qURL callback's persist-time guard.
-  if (!process.env.KEY_ENCRYPTION_KEY) {
-    // Unlike /install's gates, keep the session cookie: the Discord code was
-    // not redeemed, so a retry after the operator fixes the key can succeed.
-    // An admin may already have completed Discord consent here, so keep an
-    // error-level signal beside the shared info-level not-configured line.
-    logger.error('Refusing /oauth/discord/callback: KEY_ENCRYPTION_KEY is not set');
-    return renderNotConfiguredPage(res, 'discord-install', 'KEY_ENCRYPTION_KEY unset');
-  }
   // State must authenticate the browser before we trust even the error
   // parameters. This deliberately means an expired/malformed decline returns
   // "Invalid install link" instead of reflecting an unauthenticated provider
-  // status as "Authorization declined".
+  // status as "Authorization declined". A decline redeems nothing, so it is
+  // reported before the encryption-key gate (no operator alarm on a Cancel).
   // Round-9 item #5: funnel through singleStringParam for symmetry.
   const errorParam = singleStringParam(req.query.error);
   if (errorParam) {
@@ -198,6 +185,21 @@ router.get('/callback', rateLimit, async (req, res) => {
       ip: req.ip,
     });
     return renderError(res, 400, 'Authorization declined', 'You declined consent or Discord returned an error.');
+  }
+  // Fail-fast: same encryption-at-rest guard as /oauth/qurl/start. When
+  // Require OAuth2 Code Grant is enabled, Discord has not installed the bot
+  // yet at this point — but that Developer Portal setting is external to this
+  // service, so we cannot assume it. Without this guard we would burn the
+  // Discord code on a token exchange + a /users/@me round-trip + an Auth0
+  // round-trip before failing at the qURL callback's persist-time guard.
+  if (!process.env.KEY_ENCRYPTION_KEY) {
+    // Unlike /install's gates, keep the session cookie: the Discord code was
+    // not redeemed, so reloading this callback within the code's lifetime
+    // after the operator fixes the key can still succeed.
+    // An admin may already have completed Discord consent here, so keep an
+    // error-level signal beside the shared info-level not-configured line.
+    logger.error('Refusing /oauth/discord/callback: KEY_ENCRYPTION_KEY is not set');
+    return renderNotConfiguredPage(res, 'discord-install', 'KEY_ENCRYPTION_KEY unset');
   }
   const code = singleStringParam(req.query.code);
   const guildHint = singleStringParam(req.query.guild_id);

@@ -346,6 +346,10 @@ describe('Discord install callback', () => {
       try {
         const invalid = await request(app)
           .get('/oauth/discord/callback?code=ok-code&guild_id=123456789012345678');
+        const declined = await discordCallback('/oauth/discord/callback?error=access_denied');
+        expect(declined.status).toBe(400);
+        expect(declined.text).toContain('Authorization declined');
+        expect(errorSpy).not.toHaveBeenCalled();
         const res = await discordCallback('/oauth/discord/callback?code=ok-code&guild_id=123456789012345678');
 
         expect(invalid.status).toBe(400);
