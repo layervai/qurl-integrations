@@ -963,6 +963,28 @@ describe('revokeMintedLinks — #1551 fail-closed contract', () => {
       expect(timeoutSpy).toHaveBeenCalledWith(expect.any(Function), 1000);
     });
 
+    it('waits 1s when a 429 has no usable Retry-After', async () => {
+      globalThis.fetch = jest.fn()
+        .mockResolvedValueOnce(refusal(429, {}, new Headers({ 'Retry-After': 'Wed, 21 Oct 2026 07:28:00 GMT' })))
+        .mockResolvedValueOnce(revoked('q_one'));
+
+      await connector.revokeMintedLinks('res-1', ['q_one'], 'guild-key');
+
+      expect(timeoutSpy).toHaveBeenCalledWith(expect.any(Function), 1000);
+    });
+
+    it('fails a later chunk that stays rate limited after an earlier chunk fell back', async () => {
+      const ids = Array.from({ length: 11 }, (_, i) => `q_${i + 1}`);
+      globalThis.fetch = jest.fn()
+        .mockResolvedValueOnce(okJson({ success: true, results: ids.slice(0, 10).map(qurl_id => ({ qurl_id, status: 'not_connector_managed' })) }))
+        .mockResolvedValue(refusal(429, { code: 'request_rate_limited' }));
+
+      await expect(connector.revokeMintedLinks('res-1', ids, 'guild-key'))
+        .rejects.toMatchObject({ status: 429 });
+      expect(revokeOrdinaryLinks.mock.calls).toEqual([['res-1', ids.slice(0, 10), 'guild-key']]);
+      expect(globalThis.fetch).toHaveBeenCalledTimes(3);
+    });
+
     it('fails closed on a second 429 without trying the SDK fallback', async () => {
       globalThis.fetch = jest.fn()
         .mockResolvedValue(refusal(429, { code: 'request_rate_limited' }, new Headers({ 'Retry-After': '30' })));

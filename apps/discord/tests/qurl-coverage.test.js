@@ -549,6 +549,16 @@ describe('qURL client — revokeOrdinaryLinks', () => {
     expect(logger.audit).toHaveBeenCalledTimes(1);
   });
 
+  it('counts skipped children by position even with duplicate ids', async () => {
+    globalThis.fetch = jest.fn()
+      .mockResolvedValueOnce(apiOk(200, { resource_id: PUBLIC_KEY_RESOURCE_ID, crid: CRID_RESOURCE_ID, qurls: [] }))
+      .mockResolvedValueOnce(apiOk(204))
+      .mockResolvedValue(apiError(403, { code: 'forbidden' }));
+
+    await expect(qurl.revokeOrdinaryLinks(PUBLIC_KEY_RESOURCE_ID, ['q_aaaaaaaaaa1', 'q_aaaaaaaaaa1', 'q_aaaaaaaaaa2'], 'guild-key'))
+      .rejects.toMatchObject({ status: 403, failedCount: 2 });
+  });
+
   it('refuses to DELETE under a malformed parent crid', async () => {
     globalThis.fetch = jest.fn().mockResolvedValueOnce(apiOk(200, {
       resource_id: PUBLIC_KEY_RESOURCE_ID, crid: 'at_not_a_crid', qurls: [],

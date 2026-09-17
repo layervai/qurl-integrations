@@ -1709,7 +1709,13 @@ async function mintLinksInBatches({ initialResourceId, reuploadFn, expiresAt, re
         allLinks.push({ qurl_link: link?.qurl_link, qurl_id: link?.qurl_id, resourceId: currentResourceId });
       }
       // Validate only after every entry is pushed: the catch below revokes the
-      // identified siblings of a bad entry.
+      // identified siblings of a bad entry. More links than requested breaks
+      // the mint contract. A short batch is still reported by callers as
+      // "Only N of M"; links carry no recipient identity, so a short batch
+      // cannot misroute access.
+      if (minted.length > batchSize) {
+        throw new Error(`Connector mint_link returned ${minted.length} links for a ${batchSize}-link batch`);
+      }
       minted.forEach((link, idx) => {
         // qurl_id is the only durable child-revoke identity (and the join key
         // against qurl.accessed webhooks). Never persist or deliver without it.
@@ -3766,7 +3772,11 @@ async function handleRevokeSelect(interaction, { flow_id }) {
   // acknowledge with a progress update and edit the message when the revoke
   // settles. A failed ack still revokes: the user asked for it and the barrier
   // makes a repeat safe; only the result message is lost.
-  await interaction.update({ content: 'Revoking links...', components: [] }).catch(logIgnoredDiscordErr);
+  await interaction.update({ content: 'Revoking links...', components: [] }).catch((err) => {
+    logger.warn('Revoke select acknowledgement failed; revoking without a result message', {
+      sendId, error: err?.message,
+    });
+  });
   let revoked;
   try {
     revoked = await revokeAllLinks(sendId, interaction.user.id, apiKey, resolveSenderAlias(interaction));

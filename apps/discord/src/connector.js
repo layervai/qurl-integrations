@@ -485,6 +485,8 @@ async function mintLinks(resourceId, { expiresAt, n, apiKey, selfDestructSeconds
         apiCode,
         bodyLen: bodyText.length,
         partial_link_count: partialQurlIds.length,
+        // qurl_ids are non-secret revoke handles (at_ tokens are rejected);
+        // log-redaction consistency is tracked in #1479.
         partial_qurl_ids: partialQurlIds,
         unidentified_qurl_count: unidentifiedCount,
       });
@@ -539,13 +541,15 @@ async function discardBody(response) {
 // POST one revoke chunk. A 429 from the connector's local admission gate
 // (Retry-After: 1) is retried once, so /qurl revoke's own 5-resource fan-out
 // does not fail itself; a second 429 is returned for the caller to fail closed.
+// Both attempts share one REVOKE_LINKS_TIMEOUT_MS budget.
 async function postRevokeLinks(resourceId, batchIds, apiKey) {
+  const signal = AbortSignal.timeout(REVOKE_LINKS_TIMEOUT_MS);
   const post = () => fetch(`${config.CONNECTOR_URL}/api/revoke_links`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...connectorAuthHeaders(apiKey) },
     body: JSON.stringify({ resource_id: resourceId, qurl_ids: batchIds }),
     redirect: 'error',
-    signal: AbortSignal.timeout(REVOKE_LINKS_TIMEOUT_MS),
+    signal,
   });
   const response = await post();
   if (response.status !== 429) return response;
@@ -609,6 +613,8 @@ async function revokeMintedLinks(resourceId, qurlIds, apiKey) {
   };
   for (let offset = 0; offset < ids.length; offset += CONNECTOR_REVOKE_MAX_IDS) {
     const batchIds = ids.slice(offset, offset + CONNECTOR_REVOKE_MAX_IDS);
+    // An empty chunk (a broken cap) would confirm vacuously; never let it.
+    if (batchIds.length === 0) throw new Error('Connector revoke chunk is empty');
     if (routeAbsent) {
       await revokeOrdinaryLinks(resourceId, batchIds, apiKey);
       fallbackCount += batchIds.length;

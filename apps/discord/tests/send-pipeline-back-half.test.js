@@ -3243,6 +3243,22 @@ describe('mintLinksInBatches', () => {
     }
   });
 
+  it('rejects a batch with more links than requested and revokes them', async () => {
+    mockMintLinks.mockResolvedValueOnce([
+      { qurl_id: 'q_x1', qurl_link: 'https://q.test/x1' },
+      { qurl_id: 'q_x2', qurl_link: 'https://q.test/x2' },
+    ]);
+
+    await expect(mintLinksInBatches({
+      initialResourceId: 'res-1',
+      reuploadFn: jest.fn(),
+      expiresAt: new Date().toISOString(),
+      recipientCount: 1,
+      apiKey: 'apikey',
+    })).rejects.toThrow('Connector mint_link returned 2 links for a 1-link batch');
+    expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-1', ['q_x1', 'q_x2'], 'apikey');
+  });
+
   it('returns empty array when recipientCount = 0', async () => {
     const result = await mintLinksInBatches({
       initialResourceId: 'res-1',

@@ -22,8 +22,9 @@ const { isPrivateHost } = require('./utils/private-host');
  * qURL API client for the bot's link create / status / revoke calls, backed by
  * the @layervai/qurl SDK where it exposes the required route. This is the bot's
  * single command-side client (issue #830); the detect path in connector.js uses
- * the same SDK. Create and status use `/qurls`; whole-resource revoke uses
- * `/resources`. The small GET /v1/me shim below uses fetch because SDK 0.3.x
+ * the same SDK. Create and status use `/qurls`; ordinary-child revoke uses
+ * `/resources/{crid}/qurls/{id}` (revokeOrdinaryLinks); whole-resource revoke
+ * (`/resources`) remains only for the load-test sweep. The small GET /v1/me shim below uses fetch because SDK 0.3.x
  * has no identity method — replace it when the SDK exposes that route.
  *
  * This module adds only the concerns the SDK doesn't own:
@@ -369,13 +370,18 @@ async function deleteLink(resourceId, apiKey) {
 // most ten per call. GET /v1/qurls/{id} documents that a qURL id returns its
 // parent (and a revoked child stays in the retained index), and the child
 // DELETE documents that repeated revocation succeeds, so a retry after a
-// partial failure converges.
-async function revokeOrdinaryLinks(resourceId, qurlIds, apiKey) {
+// partial failure converges. An invisible child answers 404 (qurl-service's
+// QurlId contract returns 404 for unknown or foreign ids), so only 404 skips to
+// the next parent candidate; 401/403 mean the key itself cannot read.
+//
+// Throws the first failure with `failedCount` (children not confirmed revoked,
+// including any skipped after an auth failure).
+async function revokeOrdinaryLinks(resourceId, rawQurlIds, apiKey) {
   validateResourceId(resourceId);
-  if (!Array.isArray(qurlIds) || qurlIds.length > REVOKE_BATCH_MAX_IDS) {
+  if (!Array.isArray(rawQurlIds) || rawQurlIds.length > REVOKE_BATCH_MAX_IDS) {
     throw new Error('Invalid qURL revoke token list');
   }
-  qurlIds = qurlIds.map(qurlIdForCleanup);
+  const qurlIds = rawQurlIds.map(qurlIdForCleanup);
   if (qurlIds.includes(null)) throw new Error('Invalid qURL revoke token identity');
   if (qurlIds.length === 0) return;
   const client = makeClient(apiKey, {
@@ -405,7 +411,7 @@ async function revokeOrdinaryLinks(resourceId, qurlIds, apiKey) {
   // every child before failing so one stale child cannot shield live siblings.
   let firstFailure;
   let failedCount = 0;
-  for (const qurlId of qurlIds) {
+  for (const [i, qurlId] of qurlIds.entries()) {
     try {
       await callQurl('DELETE', RESOURCE_QURL_LOG_PATH, () => client.revokeResourceQurl(parent.crid, qurlId));
     } catch (err) {
@@ -415,7 +421,7 @@ async function revokeOrdinaryLinks(resourceId, qurlIds, apiKey) {
       // not page DEPENDENCY_AUTH_FAILURE once per child, and count the children
       // never attempted as failed (still live).
       if (err?.status === 401 || err?.status === 403) {
-        failedCount += qurlIds.length - 1 - qurlIds.indexOf(qurlId);
+        failedCount += qurlIds.length - 1 - i;
         break;
       }
     }
