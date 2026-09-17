@@ -1123,6 +1123,8 @@ async function resolveDetectTarget(guildId) {
     // The native SDK verifies the issuer and cell against deployment trust,
     // and expectedCRID binds the signed resource key to the slug-resolved CRID.
     if (typeof minted?.qurl_link === 'string' && minted.qurl_link.split('#')[1]?.startsWith('qv2t1.')) {
+      // TODO(upstream-contract): POST /v1/resources/{crid}/qurls echoes the
+      // addressed CRID; a missing echo fails closed here like a mismatch.
       if (minted.crid !== crid) {
         const err = new Error('Detect mint returned a mismatched crid');
         clearResourceCache = true;

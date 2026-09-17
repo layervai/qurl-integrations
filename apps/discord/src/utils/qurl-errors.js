@@ -24,11 +24,22 @@ function qurlApiErrorStatus(error) {
   return match ? Number(match[1]) : null;
 }
 
+// callQurl re-wraps an SDK client-side rejection (status 0) as this code-only
+// message. The literal mirrors the SDK's ERROR_CODE_CLIENT_VALIDATION; a test
+// pins the two together.
+const CLIENT_VALIDATION_FAILURE = /failed \(client_validation\)$/;
+
+function isClientValidationQurlApiError(error) {
+  const message = typeof error === 'string' ? error : error?.message;
+  return typeof message === 'string' && CLIENT_VALIDATION_FAILURE.test(message);
+}
+
 function isGoneQurlApiError(error) {
   return qurlApiErrorStatus(error) === TERMINAL_RECLAIM_STATUS;
 }
 
 module.exports = {
+  isClientValidationQurlApiError,
   isGoneQurlApiError,
   qurlApiError,
   qurlApiErrorMessage,

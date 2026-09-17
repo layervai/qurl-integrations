@@ -14,6 +14,7 @@ jest.mock('../src/connector', () => ({
 }));
 
 const { deleteLink } = require('../src/qurl');
+const { ERROR_CODE_CLIENT_VALIDATION } = jest.requireActual('@layervai/qurl');
 const { CRID_RESOURCE_ID, PUBLIC_KEY_RESOURCE_ID } = require('./helpers/qurl-fixtures');
 const { resourcePath } = require('../src/utils/resource-id');
 const { qurlApiError, qurlApiErrorMessage } = require('../src/utils/qurl-errors');
@@ -412,7 +413,7 @@ describe('reclaim', () => {
   ])('keeps %s the SDK rejects as a non-CRID for manual verification', async (_kind, id) => {
     const ledger = tempLedger(line(id));
     deleteLink.mockRejectedValue(
-      new Error(qurlApiErrorMessage('DELETE', '/resources/:resourceId', 'client_validation')),
+      new Error(qurlApiErrorMessage('DELETE', '/resources/:resourceId', ERROR_CODE_CLIENT_VALIDATION)),
     );
 
     const result = await reclaim(ledger);

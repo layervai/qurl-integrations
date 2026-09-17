@@ -128,7 +128,9 @@
  *   it was written against and a sweep refuses to run against a different one.
  *   Re-running is safe: revoked ids are pruned, and only an explicit terminal
  *   response counts an already-gone resource as reclaimed. Ambiguous 404s
- *   remain in the ledger for manual verification.
+ *   remain in the ledger for manual verification, as do connector upload
+ *   parents: SDK 2.x cannot delete them by the public key the upload returns,
+ *   so they must age out on their own.
  *
  *   Two windows this cannot close, both leaking exactly the resource in hand:
  *   a create that succeeds server-side whose response is then lost, and a
@@ -168,10 +170,11 @@ const {
   hasSafeResourceIdShape,
   maskResourceIdPath,
 } = require('../src/utils/resource-id');
-const { isGoneQurlApiError, qurlApiErrorStatus } = require('../src/utils/qurl-errors');
-
-// callQurl's code-only message for an identifier the SDK rejects before a request.
-const CLIENT_VALIDATION_FAILURE = /failed \(client_validation\)$/;
+const {
+  isClientValidationQurlApiError,
+  isGoneQurlApiError,
+  qurlApiErrorStatus,
+} = require('../src/utils/qurl-errors');
 
 // The same pool depth the send pipeline batches against — imported, not
 // copied, so a change to the cap reaches this script instead of silently
@@ -965,8 +968,8 @@ async function trackCreate(fn) {
 // run's resources; the ledger is exact.
 //
 // Recipient links from mintLinks are deliberately not recorded individually:
-// they share the upload's expiry, and deleting a parent revokes every qURL
-// minted against it (shared/client/client.go documents the cascade).
+// they share the upload's expiry. The upload parent itself is recorded by
+// public key and needs manual verification under SDK 2.x (see reclaim).
 function recordResource(resourceId, kind) {
   // Share deleteLink's transport guard so every recorded ID is sweepable and
   // a malformed service response cannot persist a bearer token in the ledger.
@@ -1201,8 +1204,10 @@ async function reclaim(ledgerPath) {
           // a request. Connector upload rows hold a public key (the upload
           // response has no CRID, and transit uploads are unlisted), and older
           // ledgers may hold retired r_ IDs; none can drain automatically.
+          // deleteLink sends only the ID, so every client-side rejection is an
+          // identifier rejection and cannot succeed on a re-run.
           if (!hasSafeResourceIdShape(id)) invalidLedgerIds++;
-          else if (CLIENT_VALIDATION_FAILURE.test(e?.message)) nonCridRows++;
+          else if (isClientValidationQurlApiError(e)) nonCridRows++;
           else if (status === 404) ambiguousNotFound++;
           // Keyed on a scrubbed cause. callQurl uses a static route label, but
           // this also protects aggregation from foreign/serialized errors that
@@ -2333,6 +2338,8 @@ async function runRound(roundNum) {
       if (shouldStop()) { results.partial = true; break; }
       try {
         await trackCreate(async () => {
+          // TODO(upstream-contract): qurl-service's POST /v1/qurls response
+          // carries crid for every current resource; recordResource warns if not.
           const loc = await createOneTimeLink(TEST_LOCATION_URL, '24h', 'Load test location');
           recordResource(loc.crid, 'location');
         });
@@ -2434,7 +2441,7 @@ async function main() {
       recordResource(link.crid, 'smoke');
       return link;
     });
-    console.log(`Smoke test OK: ${r.resource_id}`);
+    console.log(`Smoke test OK: ${r.crid}`);
   } catch (e) {
     console.error(`FATAL: Smoke test failed — ${e.message}`);
     process.exit(1);

@@ -803,10 +803,11 @@ describe('qURL client — createOneTimeLink happy path', () => {
 
   it('creates a link for a public URL that passes DNS resolution', async () => {
     globalThis.fetch = jest.fn().mockResolvedValue(
-      apiOk(200, { resource_id: 'r1', qurl_link: 'https://q.link/abc' }),
+      apiOk(200, { resource_id: 'r1', crid: CRID_RESOURCE_ID, qurl_link: 'https://q.link/abc' }),
     );
     const result = await qurl.createOneTimeLink('https://example.com/file', '1h', 'label');
-    expect(result.resource_id).toBe('r1');
+    // The load-test ledger records this CRID; the SDK must pass it through.
+    expect(result).toMatchObject({ resource_id: 'r1', crid: CRID_RESOURCE_ID });
   });
 
   it('does NOT retry the create POST on a transient 503 (mutating-retry policy)', async () => {
