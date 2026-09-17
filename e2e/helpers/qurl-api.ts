@@ -249,7 +249,12 @@ export async function revokeLink(
   const parsed = new URL(baseUrl);
   parsed.pathname = `/v1/resources/${encodeURIComponent(resourceId)}`;
   const url = parsed.toString();
-  const res = await fetch(url, {
+  // DELETE is idempotent, so this goes through the shared bounded retry. It
+  // matters beyond the usual drain-gap: on an NHP-protected resource (every
+  // connector upload) qurl-service commits the revocation and answers 503 +
+  // `Retry-After: 30` until the protection update lands, so a single-shot
+  // DELETE reports a false failure for a revocation that already happened.
+  const res = await fetchWithTransientRetry(url, {
     method: 'DELETE',
     headers: { Authorization: `Bearer ${apiKey}` },
   });

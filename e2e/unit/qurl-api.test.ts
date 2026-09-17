@@ -349,3 +349,48 @@ test('polling returns the last observation when its predicate never matches', as
   )).resolves.toMatchObject({ status: 'active' });
   expect(fetchMock).toHaveBeenCalledTimes(1);
 });
+
+// qurl-service commits the revocation, then answers 503 + `Retry-After: 30`
+// until the NHP protection update lands ("Revocation committed; protection
+// update is pending. Retry to confirm."). Every connector upload is protected,
+// so a single-shot DELETE reported a false failure and red-flagged four
+// file-revoke smoke tests on a revocation that had already happened.
+test('revokeLink retries the revocation-pending 503 and honors Retry-After', async () => {
+  jest.useFakeTimers();
+  try {
+    fetchMock
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ error: { code: 'service_unavailable' } }), {
+          status: 503,
+          headers: { 'Content-Type': 'application/json', 'Retry-After': '30' },
+        }),
+      )
+      .mockResolvedValueOnce(new Response(null, { status: 204 }));
+
+    const pending = qurl.revokeLink(mintUrl, apiKey, publicResourceId);
+    // The retry must wait out the server's directive, not the 1s local backoff.
+    await jest.advanceTimersByTimeAsync(1_000);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await jest.advanceTimersByTimeAsync(29_000);
+
+    await expect(pending).resolves.toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls[1][1]).toMatchObject({ method: 'DELETE' });
+  } finally {
+    jest.useRealTimers();
+  }
+});
+
+test('revokeLink reports a sustained revocation failure', async () => {
+  jest.useFakeTimers();
+  try {
+    fetchMock.mockResolvedValue(
+      new Response(null, { status: 503, headers: { 'Retry-After': '30' } }),
+    );
+    const pending = qurl.revokeLink(mintUrl, apiKey, publicResourceId);
+    await jest.advanceTimersByTimeAsync(120_000);
+    await expect(pending).resolves.toBe(false);
+  } finally {
+    jest.useRealTimers();
+  }
+});

@@ -74,6 +74,11 @@ const IDEMPOTENT_METHODS: ReadonlySet<string> = new Set([
   'TRACE',
 ]);
 
+// Ceiling on a server-asserted `Retry-After` wait. qurl-service's revocation
+// pending directive is 30s; 35s keeps one such wait (plus the request itself)
+// inside the suite's per-test budget while refusing an absurd directive.
+const MAX_RETRY_AFTER_DELAY_MS = 35_000;
+
 function isRetryableStatus(status: number, method: string): boolean {
   if (RETRYABLE_ANY_METHOD.has(status)) return true;
   return IDEMPOTENT_METHODS.has(method) && RETRYABLE_IDEMPOTENT_ONLY.has(status);
@@ -103,7 +108,22 @@ export async function fetchWithTransientRetry(
     attempt < maxAttempts && !res.ok && isRetryableStatus(res.status, method);
     attempt++
   ) {
-    const delayMs = baseDelayMs * attempt;
+    // Honor a server-asserted `Retry-After` (delta-seconds) when it asks for
+    // LONGER than the local backoff: qurl-service answers DELETE
+    // /v1/resources/{id} on an NHP-protected resource with 503 +
+    // `Retry-After: 30` ("Revocation committed; protection update is pending.
+    // Retry to confirm.") — the revocation IS committed and the retry only
+    // confirms it. A 1s backoff re-asks before the fleet has converged and the
+    // caller sees a false failure. Clamped so a hostile/absurd value cannot
+    // stall the suite past its jest timeout; anything non-numeric (including
+    // the HTTP-date form, which this path never emits) falls back to the
+    // linear backoff.
+    const retryAfterRaw = res.headers.get('retry-after')?.trim() ?? '';
+    const retryAfterMs = /^\d{1,3}$/.test(retryAfterRaw) ? Number(retryAfterRaw) * 1000 : 0;
+    const delayMs = Math.min(
+      Math.max(baseDelayMs * attempt, retryAfterMs),
+      MAX_RETRY_AFTER_DELAY_MS,
+    );
     // Surface the retry in CI logs so a run that RECOVERED after a blip doesn't
     // look identical to one that never blipped — the drain-gap signal #1085 wants.
     // Log the ORIGIN only, not the full URL: the fileviewer `/view/<mint-id>` path
