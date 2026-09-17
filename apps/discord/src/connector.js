@@ -827,9 +827,9 @@ function detectTunnelHostSuffixesForEndpoint(endpoint) {
 // and tests that vary it use jest.resetModules() before requiring connector.js.
 const DETECT_TUNNEL_HOST_SUFFIXES = detectTunnelHostSuffixesForEndpoint(config.QURL_ENDPOINT);
 
-// Module-level cache for the detect tunnel's resource_id (resolved from
+// Module-level cache for the detect tunnel's CRID (resolved from
 // DETECT_TUNNEL_SLUG via the SDK's listAllResources auto-paginator). The
-// resource_id is a stable, NON-secret identifier, so caching it across calls is
+// CRID is a stable, NON-secret identifier, so caching it across calls is
 // safe and skips a slug lookup on every detect. CACHE ONLY THIS, NEVER the
 // minted access token or qurl_site: each detect mints a FRESH ephemeral qURL (a
 // short-lived credential — mint and session durations are both '5m') and the native opening/knock
@@ -1024,11 +1024,11 @@ async function resolveDetectTarget(guildId) {
   }
   assertDetectResourceFailureBackoffAllowed();
 
-  // Resolve the tunnel resource_id from the slug, cached across calls — it's a
+  // Resolve the tunnel CRID from the slug, cached across calls — it's a
   // stable, non-secret identifier. Assign the cache ONLY after a successful
-  // extract so a failed lookup doesn't poison it. The SDK owns pagination and
-  // response shaping: listAllResources yields resources from every page, and
-  // each resource carries `resource_id` (not `id`). There is intentionally no
+  // extract so a failed lookup doesn't poison it. The SDK owns pagination:
+  // listAllResources yields resources from every page. SDK 2.x resource item
+  // methods accept only the `crid`, never the public-key `resource_id`. There is intentionally no
   // in-flight dedup for concurrent cold-cache lookups; the failure backoff
   // bounds repeated hard failures.
   let resourceId = _detectResourceId;
@@ -1063,7 +1063,7 @@ async function resolveDetectTarget(guildId) {
       });
       throw err;
     }
-    resourceId = active[0]?.resource_id ? String(active[0].resource_id) : null;
+    resourceId = typeof active[0]?.crid === 'string' ? active[0].crid : null;
     if (!resourceId) {
       const err = new Error('Detect tunnel resource not found for slug');
       rememberDetectResourceFailure(err, { immediateBackoff: true });
@@ -1120,17 +1120,18 @@ async function resolveDetectTarget(guildId) {
   let clearResourceCache = false;
   try {
     // qv2t1 carries an offline credential, not an at_ API-resolve token.
-    // The native SDK verifies the issuer and cell against deployment trust.
+    // The native SDK verifies the issuer and cell against deployment trust,
+    // and expectedCRID binds the signed resource key to the slug-resolved CRID.
     if (typeof minted?.qurl_link === 'string' && minted.qurl_link.split('#')[1]?.startsWith('qv2t1.')) {
-      if (minted.resource_id !== resourceId) {
-        const err = new Error('Detect mint returned a mismatched resource_id');
+      if (minted.crid !== resourceId) {
+        const err = new Error('Detect mint returned a mismatched crid');
         clearResourceCache = true;
         throw err;
       }
       const { createPortalOpener } = require('@layervai/qurl/node');
-      const opener = createPortalOpener({ qurl: minted.qurl_link });
+      const opener = createPortalOpener({ qurl: minted.qurl_link, expectedCRID: resourceId });
       try {
-        // SDK 0.6 bounds native opening to 15 seconds and aborts it on close.
+        // SDK 2.x bounds native opening to 15 seconds and aborts it on close.
         await opener.start();
         clearDetectResourceFailureState();
         return { targetUrl, opener };
@@ -1171,7 +1172,7 @@ async function detectWatermark(imageBytes, { guildId, contentType } = {}) {
       // headroom the upload paths use rather than the 30s mint window.
       signal: AbortSignal.timeout(60000),
     };
-    // TODO(upstream-contract): SDK 0.6 fetch authenticates the signed target before this callback.
+    // TODO(upstream-contract): SDK 2.x fetch authenticates the signed target before this callback.
     const response = await opener.fetch((authenticatedTarget) => {
       // Check the signed ACK target before sending image bytes.
       if (authenticatedTarget.href !== targetUrl) {

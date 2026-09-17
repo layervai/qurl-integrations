@@ -123,7 +123,6 @@ Readable.fromWeb = jest.fn(() => new Readable({ read() { this.push(null); } }));
 
 const originalFetch = globalThis.fetch;
 const {
-  PUBLIC_KEY_RESOURCE_ID,
   CRID_RESOURCE_ID,
 } = require('./helpers/qurl-fixtures');
 
@@ -540,10 +539,8 @@ describe('qURL client', () => {
   });
 
   describe('deleteLink', () => {
-    it.each([
-      ['public-key resource ID', PUBLIC_KEY_RESOURCE_ID],
-      ['CRID', CRID_RESOURCE_ID],
-    ])('revokes a %s through DELETE /v1/resources/{id}', async (_kind, resourceId) => {
+    it('revokes a CRID through DELETE /v1/resources/{id}', async () => {
+      const resourceId = CRID_RESOURCE_ID;
       globalThis.fetch = jest.fn().mockImplementation(async () => new Response(null, { status: 204 }));
 
       await qurl.deleteLink(resourceId);
@@ -589,19 +586,11 @@ describe('qURL client', () => {
       );
     });
 
-    it('sends a legacy private ID to the service for its 400 rejection', async () => {
-      globalThis.fetch = jest.fn().mockResolvedValue({
-        ok: false,
-        status: 400,
-        headers: { get: () => null },
-        json: async () => ({ error: { status: 400, code: 'invalid_resource_id', title: 'HTTP 400' } }),
-      });
+    it('rejects a legacy private ID before network work', async () => {
+      globalThis.fetch = jest.fn();
 
-      await expect(qurl.deleteLink('r_legacy42')).rejects.toThrow(/qURL API DELETE.*failed.*400/);
-      expect(globalThis.fetch).toHaveBeenCalledTimes(1);
-      const [url, opts] = globalThis.fetch.mock.calls[0];
-      expect(url).toBe('https://api.test.local/v1/resources/r_legacy42');
-      expect(opts.method).toBe('DELETE');
+      await expect(qurl.deleteLink('r_legacy42')).rejects.toThrow(/qURL API DELETE.*failed \(client_validation\)/);
+      expect(globalThis.fetch).not.toHaveBeenCalled();
     });
 
     it.each([
