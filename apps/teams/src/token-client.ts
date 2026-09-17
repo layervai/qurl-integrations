@@ -18,6 +18,7 @@ export const AUTHORIZATION_SCOPES = Object.freeze([
   'email',
   'qurl:read',
   'qurl:write',
+  'qurl:agent',
 ] as const);
 export const AUTHORIZATION_SCOPE = AUTHORIZATION_SCOPES.join(' ');
 
@@ -171,6 +172,7 @@ export function createConfidentialTokenClient(options: ConfidentialTokenClientOp
       url.searchParams.set('redirect_uri', redirectUri.toString());
       url.searchParams.set('audience', options.audience);
       url.searchParams.set('scope', AUTHORIZATION_SCOPE);
+      url.searchParams.set('prompt', 'consent');
       url.searchParams.set('state', input.state);
       url.searchParams.set('code_challenge', input.codeChallenge);
       url.searchParams.set('code_challenge_method', 'S256');
