@@ -1716,8 +1716,16 @@ async function mintLinksInBatches({ initialResourceId, reuploadFn, expiresAt, re
       // "Only N of M"; links carry no recipient identity, so a short batch
       // cannot misroute access.
       if (minted.length > batchSize) {
-        // The overflow beyond batchSize is not compensated; the connector broke
-        // the mint contract, so name the counts for reconciliation.
+        // The overflow beyond batchSize is not compensated (an untrusted count
+        // must not drive unbounded work); log a bounded slice of its non-secret
+        // ids so an operator can reconcile those children by hand.
+        logger.error('Connector mint_link over-minted; overflow children not revoked', {
+          resource_ref: resourceIdLogRef(currentResourceId),
+          requested: batchSize,
+          returned: minted.length,
+          overflow_qurl_ids: minted.slice(batchSize, batchSize * 3)
+            .map(link => qurlIdForCleanup(link?.qurl_id)).filter(id => id !== null),
+        });
         throw new Error(`Connector mint_link returned ${minted.length} links for a ${batchSize}-link batch`);
       }
       minted.forEach((link, idx) => {
@@ -1761,6 +1769,7 @@ async function mintLinksInBatches({ initialResourceId, reuploadFn, expiresAt, re
     if (!await settlesWithin(compensation, MINT_COMPENSATION_WAIT_MS)) {
       logger.warn('Mint failure compensation still running at its wait budget', {
         resources: entries.map(([resourceId, ids]) => ({ resource_ref: resourceIdLogRef(resourceId), qurl_ids: ids })),
+        unidentified_count: unidentifiedCount,
       });
       throw error;
     }
@@ -3024,6 +3033,7 @@ async function cleanupFreshAddRecipientResources(batchSends, apiKey, sendId, opt
     logger.warn('Add Recipients cleanup still running at its wait budget', {
       sendId,
       reason: cleanupReason,
+      unidentified_count: unidentifiedCount,
       resources: resourceIds.map(resourceId => ({
         resource_ref: resourceIdLogRef(resourceId),
         qurl_ids: qurlIdsByResource.get(resourceId),
@@ -8542,7 +8552,7 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
       for (const id of recipientIds) seenSuccess.add(id);
     } else {
       for (const id of recipientIds) seenFailure.add(id);
-      logger.error('Failed to revoke QURL', {
+      logger.error('Failed to revoke qURL', {
         resource_ref: resourceIdLogRef(resourceId),
         error: results[i].reason?.message,
         failed_child_count: results[i].reason?.failedCount ?? null,

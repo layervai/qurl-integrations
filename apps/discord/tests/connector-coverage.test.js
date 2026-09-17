@@ -967,15 +967,22 @@ describe('revokeMintedLinks — #1551 fail-closed contract', () => {
       expect(globalThis.fetch).toHaveBeenCalledTimes(2);
     });
 
-    it('waits 1s when a 429 has no usable Retry-After', async () => {
+    it('waits 1s when a 429 has no Retry-After header', async () => {
       globalThis.fetch = jest.fn()
-        .mockResolvedValueOnce(refusal(429, {}, new Headers({ 'Retry-After': 'Wed, 21 Oct 2026 07:28:00 GMT' })))
+        .mockResolvedValueOnce(refusal(429, {}, new Headers()))
         .mockResolvedValueOnce(revoked('q_one'));
 
       const pending = connector.revokeMintedLinks('res-1', ['q_one'], 'guild-key');
       await jest.advanceTimersByTimeAsync(999);
       expect(globalThis.fetch).toHaveBeenCalledTimes(1);
       await expect(settle(pending, 1)).resolves.toBe('resolved');
+    });
+
+    it.each(['Wed, 21 Oct 2026 07:28:00 GMT', '-1'])('fails closed without retrying on Retry-After %p', async (value) => {
+      globalThis.fetch = jest.fn().mockResolvedValue(refusal(429, {}, new Headers({ 'Retry-After': value })));
+
+      await expect(connector.revokeMintedLinks('res-1', ['q_one'], 'guild-key')).rejects.toMatchObject({ status: 429 });
+      expect(globalThis.fetch).toHaveBeenCalledTimes(1);
     });
 
     it('fails a later chunk that stays rate limited after an earlier chunk fell back', async () => {
@@ -1296,5 +1303,18 @@ describe('revokeMintedLinks — real SDK fallback seam', () => {
     expect(urls[0]).toBe('https://connector.test.local/api/revoke_links');
     expect(urls[1]).toBe(`https://api.test.local/v1/qurls/${ids[0]}`);
     expect(urls.slice(2)).toEqual(ids.map(id => `https://api.test.local/v1/resources/${CRID_RESOURCE_ID}/qurls/${id}`));
+  });
+});
+
+describe('connector.js load-time revoke cap invariant', () => {
+  afterEach(() => {
+    jest.dontMock('../src/qurl');
+    jest.resetModules();
+  });
+
+  it('refuses to load when the SDK fallback cap cannot hold a connector chunk', () => {
+    jest.resetModules();
+    jest.doMock('../src/qurl', () => ({ ...jest.requireActual('../src/qurl'), REVOKE_BATCH_MAX_IDS: 5 }));
+    expect(() => require('../src/connector')).toThrow('SDK revoke batch cap must cover a connector revoke chunk');
   });
 });

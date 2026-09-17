@@ -910,7 +910,7 @@ describe('revokeAllLinks', () => {
     expect(result.total).toBe(2);
     expect(result.successUserIds).toEqual(['user-1']);
     expect(result.failureUserIds).toEqual(['user-2']);
-    expect(logger.error).toHaveBeenCalledWith('Failed to revoke QURL', {
+    expect(logger.error).toHaveBeenCalledWith('Failed to revoke qURL', {
       resource_ref: resourceIdLogRef(sensitiveResourceId),
       error: failure.message,
       failed_child_count: null,
@@ -2866,6 +2866,7 @@ describe('handleAddRecipients — DB failure mid-flow', () => {
       expect(logger.warn).toHaveBeenCalledWith('Add Recipients cleanup still running at its wait budget', {
         sendId: 'send-1',
         reason: 'pre_persistence',
+        unidentified_count: 0,
         resources: [{ resource_ref: resourceIdLogRef('res-new'), qurl_ids: ['q_aaaaaaaaaa1'] }],
       });
     } finally {
@@ -3256,6 +3257,7 @@ describe('mintLinksInBatches', () => {
       await assertion;
       expect(logger.warn).toHaveBeenCalledWith('Mint failure compensation still running at its wait budget', {
         resources: [{ resource_ref: resourceIdLogRef('res-1'), qurl_ids: Array.from({ length: 10 }, (_, i) => `q_${i}`) }],
+        unidentified_count: 0,
       });
     } finally {
       jest.useRealTimers();
@@ -3277,6 +3279,9 @@ describe('mintLinksInBatches', () => {
     })).rejects.toThrow('Connector mint_link returned 2 links for a 1-link batch');
     // Compensation is bounded by the request, not the untrusted response size.
     expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-1', ['q_x1'], 'apikey');
+    expect(logger.error).toHaveBeenCalledWith('Connector mint_link over-minted; overflow children not revoked', {
+      resource_ref: resourceIdLogRef('res-1'), requested: 1, returned: 2, overflow_qurl_ids: ['q_x2'],
+    });
   });
 
   it('returns empty array when recipientCount = 0', async () => {

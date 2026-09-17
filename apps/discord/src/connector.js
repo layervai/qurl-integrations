@@ -560,12 +560,15 @@ async function postRevokeLinks(resourceId, batchIds, apiKey) {
   });
   const response = await post();
   if (response.status !== 429) return response;
-  const retryAfterSeconds = Number(response.headers?.get?.('retry-after'));
-  // A connector asking for longer than the cap is under real pressure: fail
-  // closed now instead of adding load after a wait it did not ask for.
-  if (Number.isFinite(retryAfterSeconds) && retryAfterSeconds > REVOKE_RETRY_AFTER_MAX_SECONDS) return response;
+  const retryAfter = response.headers?.get?.('retry-after');
+  const retryAfterSeconds = retryAfter == null ? 1 : Number(retryAfter);
+  // A connector asking for longer than the cap, or in a form we do not wait on
+  // (an HTTP-date, a negative value), fails closed now instead of adding load
+  // after a wait it did not ask for. Only an absent header defaults to 1s.
+  if (!Number.isFinite(retryAfterSeconds) || retryAfterSeconds < 0
+      || retryAfterSeconds > REVOKE_RETRY_AFTER_MAX_SECONDS) return response;
   await discardBody(response);
-  const waitMs = Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0 ? retryAfterSeconds * 1000 : 1000;
+  const waitMs = retryAfterSeconds * 1000;
   await new Promise(resolve => setTimeout(resolve, waitMs));
   return post();
 }
