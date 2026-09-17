@@ -1031,6 +1031,28 @@ describe('handleRevokeSelect (dispatcher path)', () => {
     });
   });
 
+  it('tells the user revocation is still running when it outlasts the result budget', async () => {
+    jest.useFakeTimers();
+    try {
+      mockDb.getSendItems.mockReturnValue([
+        { resource_id: 'res-1', recipient_discord_id: 'u-1', qurl_id: 'q_u_1' },
+      ]);
+      mockRevokeMintedLinks.mockImplementationOnce(() => new Promise(() => {}));
+      const interaction = makeSelectInteraction();
+
+      const pending = handleRevokeSelect(interaction, { flow_id: '0:1#guild-1#ch-1#user-1' });
+      await jest.advanceTimersByTimeAsync(13 * 60 * 1000);
+      await expect(pending).resolves.toBeUndefined();
+
+      expect(interaction.editReply).toHaveBeenCalledWith({
+        content: 'Revocation is still running. Run `/qurl revoke` again in a few minutes to check the result.',
+        components: [],
+      });
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   it('still revokes when the component acknowledgement fails', async () => {
     mockDb.getSendItems.mockReturnValue([
       { resource_id: 'res-1', recipient_discord_id: 'u-1', qurl_id: 'q_u_1' },

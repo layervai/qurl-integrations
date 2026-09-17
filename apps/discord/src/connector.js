@@ -33,7 +33,7 @@ if (!Number.isInteger(REVOKE_BATCH_MAX_IDS) || REVOKE_BATCH_MAX_IDS < CONNECTOR_
   // Every connector chunk may be handed to the SDK fallback whole. A test that
   // mocks ./qurl must keep this export (spread jest.requireActual) or this
   // module fails to load with this message.
-  throw new Error('SDK revoke batch cap must cover a connector revoke chunk');
+  throw new Error('SDK revoke batch cap must cover a connector revoke chunk (tests mocking ./qurl must spread jest.requireActual)');
 }
 const REVOKE_RETRY_AFTER_MAX_SECONDS = 2;
 // Waiting budget for inline partial-mint cleanup before the mint error is
@@ -120,8 +120,9 @@ function parseConnectorBody(bodyText) {
 // bounds compensation work driven by an untrusted body.
 function partialQurlIdsFromLinks(links, n) {
   if (!Array.isArray(links)) return { partialQurlIds: [], unidentifiedCount: 0, cappedCount: 0 };
-  if (!Number.isInteger(n) || n < 1) throw new Error(`Invalid link count for partial mint cleanup: ${n}`);
-  const cap = n;
+  // This runs while reporting a failed mint: never let a bad `n` replace that
+  // error. Skip cleanup instead and let the capped count below surface it.
+  const cap = Number.isInteger(n) && n > 0 ? n : 0;
   const normalized = links.map(link => qurlIdForCleanup(link?.qurl_id));
   const identified = [...new Set(normalized.filter(id => id !== null))];
   return {
@@ -564,9 +565,10 @@ async function postRevokeLinks(resourceId, batchIds, apiKey) {
   const retryAfter = response.headers?.get?.('retry-after');
   const retryAfterSeconds = retryAfter == null || retryAfter.trim() === '' ? 1 : Number(retryAfter);
   // A connector asking for longer than the cap, or in a form we do not wait on
-  // (an HTTP-date, a negative value), fails closed now instead of adding load
-  // after a wait it did not ask for. Only an absent header defaults to 1s.
-  if (!Number.isFinite(retryAfterSeconds) || retryAfterSeconds < 0
+  // (an HTTP-date, a negative or fractional value), fails closed now instead
+  // of adding load after a wait it did not ask for. Only an absent header
+  // defaults to 1s.
+  if (!Number.isInteger(retryAfterSeconds) || retryAfterSeconds < 0
       || retryAfterSeconds > REVOKE_RETRY_AFTER_MAX_SECONDS) return response;
   await discardBody(response);
   const waitMs = retryAfterSeconds * 1000;
@@ -603,7 +605,8 @@ async function revokeMintedLinks(resourceId, qurlIds, apiKey) {
   const normalizedIds = qurlIds.map(qurlIdForCleanup);
   if (normalizedIds.includes(null)) throw new Error('Invalid connector revoke token identity');
   const ids = [...new Set(normalizedIds)];
-  if (ids.length === 0) return;
+  // An empty list would "succeed" for every recipient a caller maps onto it.
+  if (ids.length === 0) throw new Error('No connector revoke token ids to revoke');
 
   let routeAbsent = false;
   // Per-status tally so rollout can see revoked vs already_gone vs handed back.

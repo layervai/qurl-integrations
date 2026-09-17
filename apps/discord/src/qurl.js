@@ -372,13 +372,13 @@ async function deleteLink(resourceId, apiKey) {
 // CRID in the DELETE path (RevokeQurlToken looks the child up by owner and
 // resource, so a child of another resource, including a connector-owned
 // watermarked child, is a 404 rather than a 204), so callers MUST pass
-// siblings of `resourceId`, at
-// most ten per call. GET /v1/qurls/{id} documents that a qURL id returns its
-// parent (and a revoked child stays in the retained index), and the child
-// DELETE documents that repeated revocation succeeds, so a retry after a
-// partial failure converges. An invisible child answers 404 (qurl-service's
-// QurlId contract returns 404 for unknown or foreign ids), so only 404 skips to
-// the next parent candidate; 401/403 mean the key itself cannot read.
+// siblings of `resourceId`, at most ten per call. GET /v1/qurls/{id} documents
+// that a qURL id returns its parent (and a revoked child stays in the retained
+// index), and the child DELETE documents that repeated revocation succeeds, so
+// a retry after a partial failure converges. An invisible child answers 404
+// (qurl-service's QurlId contract returns 404 for unknown or foreign ids), so
+// only 404 skips to the next parent candidate; 401/403 mean the key itself
+// cannot read.
 //
 // Throws the first failure with `failedCount` (children not confirmed revoked,
 // including any skipped after an auth failure).

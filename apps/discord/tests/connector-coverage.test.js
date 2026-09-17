@@ -810,11 +810,11 @@ describe('revokeMintedLinks — #1551 fail-closed contract', () => {
     });
   });
 
-  it('skips the network and the confirmation log when no token ids were recorded', async () => {
+  it('refuses an empty id list instead of reporting a vacuous success', async () => {
     globalThis.fetch = jest.fn();
-    await connector.revokeMintedLinks('res-1', [], 'guild-key');
+    await expect(connector.revokeMintedLinks('res-1', [], 'guild-key'))
+      .rejects.toThrow('No connector revoke token ids to revoke');
     expect(globalThis.fetch).not.toHaveBeenCalled();
-    expect(revokeOrdinaryLinks).not.toHaveBeenCalled();
     expect(logger.info).not.toHaveBeenCalled();
   });
 
@@ -989,7 +989,7 @@ describe('revokeMintedLinks — #1551 fail-closed contract', () => {
       await expect(settle(pending, 1)).resolves.toBe('resolved');
     });
 
-    it.each(['Wed, 21 Oct 2026 07:28:00 GMT', '-1'])('fails closed without retrying on Retry-After %p', async (value) => {
+    it.each(['Wed, 21 Oct 2026 07:28:00 GMT', '-1', '1.5'])('fails closed without retrying on Retry-After %p', async (value) => {
       globalThis.fetch = jest.fn().mockResolvedValue(refusal(429, {}, new Headers({ 'Retry-After': value })));
 
       await expect(connector.revokeMintedLinks('res-1', ['q_one'], 'guild-key')).rejects.toMatchObject({ status: 429 });

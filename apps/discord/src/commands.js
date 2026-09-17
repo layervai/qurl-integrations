@@ -1644,11 +1644,17 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
 // should NOT re-flag this file's length — the split will land in its
 // own PR against a stable baseline.
 
-// Wait budget for cross-batch compensation after a mint failure. With the mint
-// call (30s) and inline partial cleanup (70s) this keeps the error inside
-// Discord's 15-minute interaction window. Hitting it is expected while the SDK
-// fallback is slow, so it logs a warning with the ids, not an error.
-const MINT_COMPENSATION_WAIT_MS = 120_000;
+// Wait budget for best-effort revoke cleanup that sits in front of a user
+// reply: mint-failure compensation (after the 30s mint call and 70s inline
+// partial cleanup) and Add Recipients fresh-mint cleanup. Keeps the reply
+// inside Discord's 15-minute interaction window. Hitting it is expected while
+// the SDK fallback is slow, so it logs a warning with the ids, not an error.
+const CLEANUP_WAIT_BUDGET_MS = 120_000;
+// /qurl revoke result budget: 13 minutes leaves room to edit the result before
+// the 15-minute interaction token expires.
+const REVOKE_SELECT_RESULT_WAIT_MS = 13 * 60 * 1000;
+// Bound on over-minted overflow ids included in the reconciliation log.
+const MAX_LOGGED_OVERFLOW_IDS = 20;
 
 /**
  * Mint one-time links across a stream of connector resources, each capped at
@@ -1723,7 +1729,7 @@ async function mintLinksInBatches({ initialResourceId, reuploadFn, expiresAt, re
           resource_ref: resourceIdLogRef(currentResourceId),
           requested: batchSize,
           returned: minted.length,
-          overflow_qurl_ids: minted.slice(batchSize, batchSize * 3)
+          overflow_qurl_ids: minted.slice(batchSize, batchSize + MAX_LOGGED_OVERFLOW_IDS)
             .map(link => qurlIdForCleanup(link?.qurl_id)).filter(id => id !== null),
         });
         throw new Error(`Connector mint_link returned ${minted.length} links for a ${batchSize}-link batch`);
@@ -1766,7 +1772,7 @@ async function mintLinksInBatches({ initialResourceId, reuploadFn, expiresAt, re
     // Stop waiting before the send's interaction token expires so the mint
     // error still reaches the user; nothing was delivered, and the ids are
     // logged for reconciliation while the revoke keeps running.
-    if (!await settlesWithin(compensation, MINT_COMPENSATION_WAIT_MS)) {
+    if (!await settlesWithin(compensation, CLEANUP_WAIT_BUDGET_MS)) {
       logger.warn('Mint failure compensation still running at its wait budget', {
         resources: entries.map(([resourceId, ids]) => ({ resource_ref: resourceIdLogRef(resourceId), qurl_ids: ids })),
         unidentified_count: unidentifiedCount,
@@ -3029,7 +3035,7 @@ async function cleanupFreshAddRecipientResources(batchSends, apiKey, sendId, opt
   }, 5);
   // Same bounded wait as mint-failure compensation: the Add Recipients reply
   // must not be held past its interaction window; the revoke keeps running.
-  if (!await settlesWithin(cleanup, MINT_COMPENSATION_WAIT_MS)) {
+  if (!await settlesWithin(cleanup, CLEANUP_WAIT_BUDGET_MS)) {
     logger.warn('Add Recipients cleanup still running at its wait budget', {
       sendId,
       reason: cleanupReason,
@@ -3807,7 +3813,18 @@ async function handleRevokeSelect(interaction, { flow_id }) {
   });
   let revoked;
   try {
-    revoked = await revokeAllLinks(sendId, interaction.user.id, apiKey, resolveSenderAlias(interaction));
+    const revoking = revokeAllLinks(sendId, interaction.user.id, apiKey, resolveSenderAlias(interaction));
+    // Leave the result edit inside Discord's 15-minute interaction window: a
+    // very large send can outlast it, so say so and let the revoke finish.
+    if (!await settlesWithin(revoking, REVOKE_SELECT_RESULT_WAIT_MS)) {
+      logger.warn('Revoke select still running at its result budget', { sendId });
+      await interaction.editReply({
+        content: 'Revocation is still running. Run `/qurl revoke` again in a few minutes to check the result.',
+        components: [],
+      }).catch(logIgnoredDiscordErr);
+      return;
+    }
+    revoked = await revoking;
   } catch (err) {
     // The select menu is already gone; replace the progress text so the user
     // is not left on "Revoking links..." before the dispatcher's follow-up.
