@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	neturl "net/url"
@@ -17,6 +16,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/layervai/qurl-integrations/apps/slack/internal"
+	"github.com/layervai/qurl-integrations/apps/slack/internal/httpbody"
 	"github.com/layervai/qurl-integrations/shared/auth"
 )
 
@@ -100,17 +100,9 @@ func newSlackOpenViewFuncWithTokenLookup(lookup slackBotTokenLookup, userAgent, 
 		}
 		defer func() { _ = resp.Body.Close() }()
 
-		raw, err := io.ReadAll(io.LimitReader(resp.Body, slackViewsOpenResponseBodyLimit+1))
+		raw, err := httpbody.ReadResponseBody("views.open", resp.Body, slackViewsOpenResponseBodyLimit)
 		if err != nil {
-			return fmt.Errorf("views.open response read: %w", err)
-		}
-		if len(raw) > slackViewsOpenResponseBodyLimit {
-			// LimitReader has already consumed limit+1 bytes from the original
-			// body. Drain any bytes after that point before Close so a
-			// keep-alive transport can still reuse the connection after an
-			// oversized response.
-			_, _ = io.Copy(io.Discard, resp.Body)
-			return fmt.Errorf("views.open response exceeded %d bytes", slackViewsOpenResponseBodyLimit)
+			return err
 		}
 		return slackOpenViewResponseError(resp.StatusCode, resp.Header, raw)
 	}
@@ -386,16 +378,9 @@ func (p *slackWebAPIPoster) postOnce(ctx context.Context, ownerID string, body [
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, slackWebAPIResponseBodyLimit+1))
+	raw, err := httpbody.ReadResponseBody(p.op, resp.Body, slackWebAPIResponseBodyLimit)
 	if err != nil {
-		return nil, fmt.Errorf("%s response read: %w", p.op, err)
-	}
-	if len(raw) > slackWebAPIResponseBodyLimit {
-		// LimitReader already consumed limit+1 bytes; drain the rest before Close so a
-		// keep-alive transport can reuse the connection after an oversized response
-		// (mirrors the views.open drain).
-		_, _ = io.Copy(io.Discard, resp.Body)
-		return nil, fmt.Errorf("%s response exceeded %d bytes", p.op, slackWebAPIResponseBodyLimit)
+		return nil, err
 	}
 	return raw, p.respErr(resp.StatusCode, resp.Header, raw)
 }
@@ -948,13 +933,9 @@ func newSlackResolveConversationInfoFuncWithTokenLookup(lookup slackBotTokenLook
 			return internal.ConversationInfo{}, fmt.Errorf("conversations.info request: %w", err)
 		}
 		defer func() { _ = resp.Body.Close() }()
-		raw, err := io.ReadAll(io.LimitReader(resp.Body, slackWebAPIResponseBodyLimit+1))
+		raw, err := httpbody.ReadResponseBody("conversations.info", resp.Body, slackWebAPIResponseBodyLimit)
 		if err != nil {
-			return internal.ConversationInfo{}, fmt.Errorf("conversations.info response read: %w", err)
-		}
-		if len(raw) > slackWebAPIResponseBodyLimit {
-			_, _ = io.Copy(io.Discard, resp.Body)
-			return internal.ConversationInfo{}, fmt.Errorf("conversations.info response exceeded %d bytes", slackWebAPIResponseBodyLimit)
+			return internal.ConversationInfo{}, err
 		}
 		var out struct {
 			OK      bool   `json:"ok"`
@@ -1071,16 +1052,10 @@ func fetchSlackAgentThreadHistoryPage(ctx context.Context, httpClient *http.Clie
 	if err != nil {
 		return slackAgentThreadHistoryPage{}, fmt.Errorf("conversations.replies request: %w", err)
 	}
-	raw, readErr := io.ReadAll(io.LimitReader(resp.Body, slackAgentThreadHistoryResponseBodyLimit+1))
-	if len(raw) > slackAgentThreadHistoryResponseBodyLimit {
-		_, _ = io.Copy(io.Discard, resp.Body)
-	}
+	raw, readErr := httpbody.ReadResponseBody("conversations.replies", resp.Body, slackAgentThreadHistoryResponseBodyLimit)
 	_ = resp.Body.Close()
 	if readErr != nil {
-		return slackAgentThreadHistoryPage{}, fmt.Errorf("conversations.replies response read: %w", readErr)
-	}
-	if len(raw) > slackAgentThreadHistoryResponseBodyLimit {
-		return slackAgentThreadHistoryPage{}, fmt.Errorf("conversations.replies response exceeded %d bytes", slackAgentThreadHistoryResponseBodyLimit)
+		return slackAgentThreadHistoryPage{}, readErr
 	}
 	if err := slackWebAPIResponseStatusError("conversations.replies", resp.StatusCode, resp.Header, raw); err != nil {
 		return slackAgentThreadHistoryPage{}, err
@@ -1150,12 +1125,9 @@ func fetchSlackUserInfo(ctx context.Context, httpClient *http.Client, baseURL, u
 		return slackUserInfo{}, false, fmt.Errorf("users.info request: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, slackWebAPIResponseBodyLimit+1))
+	raw, err := httpbody.ReadResponseBody("users.info", resp.Body, slackWebAPIResponseBodyLimit)
 	if err != nil {
-		return slackUserInfo{}, false, fmt.Errorf("users.info response read: %w", err)
-	}
-	if len(raw) > slackWebAPIResponseBodyLimit {
-		return slackUserInfo{}, false, fmt.Errorf("users.info response exceeded %d bytes", slackWebAPIResponseBodyLimit)
+		return slackUserInfo{}, false, err
 	}
 	if err := slackWebAPIResponseStatusError("users.info", resp.StatusCode, resp.Header, raw); err != nil {
 		return slackUserInfo{}, false, err
@@ -1269,13 +1241,9 @@ func fetchConversationsMembersPage(ctx context.Context, httpClient *http.Client,
 		return nil, "", fmt.Errorf("conversations.members request: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, slackWebAPIResponseBodyLimit+1))
+	raw, err := httpbody.ReadResponseBody("conversations.members", resp.Body, slackWebAPIResponseBodyLimit)
 	if err != nil {
-		return nil, "", fmt.Errorf("conversations.members response read: %w", err)
-	}
-	if len(raw) > slackWebAPIResponseBodyLimit {
-		_, _ = io.Copy(io.Discard, resp.Body) // drain so keep-alive can reuse the connection
-		return nil, "", fmt.Errorf("conversations.members response exceeded %d bytes", slackWebAPIResponseBodyLimit)
+		return nil, "", err
 	}
 	var out struct {
 		OK               bool     `json:"ok"`

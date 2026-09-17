@@ -33,6 +33,10 @@ updates:
       - "ci"
     commit-message:
       prefix: "chore(ci)"
+    groups:
+      codeql:
+        patterns:
+          - "github/codeql-action/*"
 
   # Docker — reusable private S3 static-site origin
   - package-ecosystem: "docker"
