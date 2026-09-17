@@ -244,17 +244,18 @@ func nativeRecoveryFixtureKey(t *testing.T, raw string) []byte {
 	return decoded
 }
 
-func nativeRecoveryQuery(body []byte) (query, mode string, err error) {
+type nativeRecoveryUserData struct {
+	Query         string `json:"query"`
+	Mode          string `json:"mode"`
+	RecoveryGrant string `json:"recovery_grant"`
+}
+
+func nativeRecoveryQuery(body []byte) (nativeRecoveryUserData, error) {
 	var request struct {
-		UserData struct {
-			Query string `json:"query"`
-			Mode  string `json:"mode"`
-		} `json:"usrData"`
+		UserData nativeRecoveryUserData `json:"usrData"`
 	}
-	if err := json.Unmarshal(body, &request); err != nil {
-		return "", "", err
-	}
-	return request.UserData.Query, request.UserData.Mode, nil
+	err := json.Unmarshal(body, &request)
+	return request.UserData, err
 }
 
 func nativeRecoveryHubReply(
@@ -263,10 +264,11 @@ func nativeRecoveryHubReply(
 	now time.Time,
 ) func([]byte) ([]byte, error) {
 	return func(request []byte) ([]byte, error) {
-		query, mode, err := nativeRecoveryQuery(request)
+		parsed, err := nativeRecoveryQuery(request)
 		if err != nil {
 			return nil, fmt.Errorf("parse Hub request: %w", err)
 		}
+		query, mode := parsed.Query, parsed.Mode
 		if query != "cell_assignment" {
 			return nil, fmt.Errorf("unexpected Hub request %q/%q", query, mode)
 		}
@@ -318,19 +320,14 @@ func setNativeRecoveryAssignment(value any, cellPublicKeyB64 string, now time.Ti
 }
 
 func nativeRecoveryCellReply(request []byte) ([]byte, error) {
-	var parsed struct {
-		UserData struct {
-			Query         string `json:"query"`
-			RecoveryGrant string `json:"recovery_grant"`
-		} `json:"usrData"`
-	}
-	if err := json.Unmarshal(request, &parsed); err != nil {
+	parsed, err := nativeRecoveryQuery(request)
+	if err != nil {
 		return nil, fmt.Errorf("parse cell request: %w", err)
 	}
-	if parsed.UserData.Query != "agent_credential_recovery" {
-		return nil, fmt.Errorf("unexpected cell request %q", parsed.UserData.Query)
+	if parsed.Query != "agent_credential_recovery" {
+		return nil, fmt.Errorf("unexpected cell request %q", parsed.Query)
 	}
-	if parsed.UserData.RecoveryGrant != connectorIntegrationRecoveryGrant {
+	if parsed.RecoveryGrant != connectorIntegrationRecoveryGrant {
 		return nil, errors.New("cell request did not carry the Hub recovery grant")
 	}
 	return []byte(connectorIntegrationRecoveryCellReply), nil
@@ -464,8 +461,8 @@ func TestOpenNativeRegisteredClient_ExplicitLoginUsesRealConnectorRecovery(t *te
 		t.Fatalf("real connector Hub exchanges = %d, want recovery and required post-recovery refresh", got)
 	}
 	for i, want := range []string{"recover", "refresh"} {
-		if _, mode, err := nativeRecoveryQuery(hubRequests[i]); err != nil || mode != want {
-			t.Fatalf("Hub exchange %d mode = %q (%v), want %q", i, mode, err, want)
+		if parsed, err := nativeRecoveryQuery(hubRequests[i]); err != nil || parsed.Mode != want {
+			t.Fatalf("Hub exchange %d mode = %q (%v), want %q", i, parsed.Mode, err, want)
 		}
 	}
 	if got := len(cell.snapshot()); got != 1 {
