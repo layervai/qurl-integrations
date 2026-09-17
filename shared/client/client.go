@@ -292,12 +292,6 @@ type ResponseMeta struct {
 // --- qURL types (match API schema) ---
 
 // AccessPolicy defines access restrictions for a qURL.
-//
-// All subfields MUST keep `omitempty` — `&AccessPolicy{}` is the
-// documented "clear policy" signal in [UpdateResourceInput], and that
-// contract relies on every field eliding from the JSON payload when
-// zero. Adding a non-omitempty field (or one that doesn't elide on
-// zero, like a non-pointer time) silently breaks the clear convention.
 type AccessPolicy struct {
 	IPAllowlist  []string `json:"ip_allowlist,omitempty"`
 	IPDenylist   []string `json:"ip_denylist,omitempty"`
@@ -518,7 +512,7 @@ type createForResourceBody struct {
 //
 // These methods target the resource surface in qurl-service: alias
 // fields on `Resource`, the `GET /v1/resources/{id}` lookup, and
-// `clear_alias` on `PATCH /v1/resources/{id}`. That schema has shipped;
+// nullable `alias` on `PATCH /v1/resources/{id}`. That schema has shipped;
 // the Slack `setalias`/`get`/`aliases` flows call against it.
 
 // Resource represents a qURL resource (the durable object behind a qURL link).
@@ -774,9 +768,6 @@ type APIKey struct {
 //     `^[a-z][a-z0-9-]{1,62}[a-z0-9]$` rejects `""`, so the empty-string
 //     pointer is reserved as a footgun guard ([Client.UpdateResource]
 //     fails fast with [ErrUpdateResourceAliasEmpty]).
-//   - AccessPolicy — pass `&AccessPolicy{}` (all zero subfields) to
-//     clear; pass nil to leave unchanged. There is no sentinel-clear
-//     because AccessPolicy is a struct, not a scalar.
 //
 // Setting Alias and ClearAlias together is invalid and rejected
 // client-side ([ErrUpdateResourceAliasClearExclusive]). An entirely
@@ -806,20 +797,29 @@ type UpdateResourceInput struct {
 	// regex `^[a-z][a-z0-9-]{1,62}[a-z0-9]$` would 400 on `""` anyway —
 	// the client raises a clearer error than the server's generic message.
 	Alias *string `json:"alias,omitempty"`
-	// ClearAlias=true sends `clear_alias: true` to the server, removing
+	// ClearAlias=true sends `alias: null` to the server, removing
 	// any existing alias. Mutually exclusive with a non-nil Alias.
 	// Alias is the only field with a sentinel-clear; Description and
 	// CustomDomain use the `&""` convention because their server-side
 	// validators accept the empty string as a clear signal.
-	ClearAlias bool `json:"clear_alias,omitempty"`
+	ClearAlias bool `json:"-"`
 	// CustomDomain: pass `&""` to clear the custom domain mapping (same
 	// convention as Description). Pass nil to leave unchanged. NOT
 	// trimmed by the client (consistent with Description).
 	CustomDomain *string `json:"custom_domain,omitempty"`
-	// AccessPolicy: pass a non-nil pointer to update the policy in
-	// place. The server treats `&AccessPolicy{}` (all zero subfields)
-	// as a clear; pass nil to leave the existing policy unchanged.
-	AccessPolicy *AccessPolicy `json:"access_policy,omitempty"`
+}
+
+// MarshalJSON translates the client clear flag to the API's nullable alias.
+func (in UpdateResourceInput) MarshalJSON() ([]byte, error) {
+	type wireInput UpdateResourceInput
+	var alias any
+	if in.Alias != nil || in.ClearAlias {
+		alias = in.Alias // A typed nil pointer encodes explicit JSON null.
+	}
+	return json.Marshal(struct {
+		wireInput
+		Alias any `json:"alias,omitempty"`
+	}{wireInput: wireInput(in), Alias: alias})
 }
 
 // hasAnyFieldSet reports whether the input has at least one mutable
@@ -829,13 +829,12 @@ type UpdateResourceInput struct {
 // Keep in sync with [UpdateResourceInput] fields — adding a new
 // mutable field without updating this method silently allows a no-op
 // PATCH that exercises only the new field. (No reflection: the
-// 5-field surface doesn't justify it.)
+// 4-field surface doesn't justify it.)
 func (in *UpdateResourceInput) hasAnyFieldSet() bool {
 	return in.Description != nil ||
 		in.Alias != nil ||
 		in.ClearAlias ||
-		in.CustomDomain != nil ||
-		in.AccessPolicy != nil
+		in.CustomDomain != nil
 }
 
 // CreateResource creates a (or returns the existing) qURL resource.
@@ -1147,7 +1146,7 @@ func (c *Client) DeleteResource(ctx context.Context, resourceID string) error {
 // Retry semantics: do() retries 5xx/429 with the buffered body, so a
 // successfully-applied PATCH that returns 502 will be re-applied on retry.
 // All currently-supported PATCH fields (alias, description, custom_domain,
-// access_policy) are field-idempotent — the second apply is a no-op.
+// alias clearing) are field-idempotent — the second apply is a no-op.
 // Adding a non-idempotent field (a counter, an append, etc.) would break
 // this contract; callers should plumb Idempotency-Key (tracked at #148)
 // before that happens. Until #148 lands, callers needing at-least-once
@@ -1175,7 +1174,7 @@ func (c *Client) UpdateResource(ctx context.Context, resourceID string, input *U
 	// then re-point Alias at the trimmed value. The trimmed string is
 	// what hits the wire and what the empty-pointer guard below sees.
 	//
-	// Note: this is a shallow copy — pointer fields like AccessPolicy
+	// Note: this is a shallow copy — pointer fields like Description
 	// still alias the caller's data. Today only Alias gets retargeted;
 	// adding more normalization (e.g. trimming Description/CustomDomain)
 	// would need either a deeper copy or per-field copy-on-mutate.
