@@ -273,8 +273,9 @@ router.get('/callback', rateLimit, async (req, res) => {
       signal: AbortSignal.timeout(AUTH0_TIMEOUT_MS),
     });
     if (!tokenResp.ok) {
-      const errBody = await tokenResp.text().catch(() => '');
-      logger.error('Auth0 token exchange failed', { status: tokenResp.status, body: errBody.slice(0, 500) });
+      // Drain for connection reuse; upstream errors can reflect OAuth credentials.
+      await tokenResp.text().catch(() => undefined);
+      logger.error('Auth0 token exchange failed', { status: tokenResp.status });
       return renderError(res, 502, 'Authorization failed', 'Could not complete the Auth0 handshake. Please run /qurl setup again.');
     }
     const tokenJson = await tokenResp.json();

@@ -22,7 +22,7 @@ const ddb = DynamoDBDocumentClient.from(client);
 const originalFetch = global.fetch;
 let reads = 0;
 global.fetch = (url, options) => {
-  assert.equal(options.method, 'GET', 'Linking the default owner must never mutate a qURL subscription');
+  assert.equal(options?.method, 'GET', 'Linking the default owner must never mutate a qURL subscription');
   reads++;
   return originalFetch(url, options);
 };

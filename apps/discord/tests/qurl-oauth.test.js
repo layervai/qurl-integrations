@@ -323,13 +323,15 @@ describe('qurl-oauth routes', () => {
       globalThis.fetch = jest.fn().mockResolvedValueOnce({
         ok: false,
         status: 401,
-        text: () => Promise.resolve('unauthorized client'),
+        text: () => Promise.resolve('unauthorized client: reflected-secret'),
       });
       const res = await request(app).get(
         `/oauth/qurl/callback?code=auth0-code&state=${encodeURIComponent(state)}`,
       ).set('Cookie', cookieFor(state));
       expect(res.status).toBe(502);
       expect(res.text).toContain('Authorization failed');
+      expect(logger.error).toHaveBeenCalledWith('Auth0 token exchange failed', { status: 401 });
+      expect(JSON.stringify(logger.error.mock.calls)).not.toContain('reflected-secret');
       expect(db.setGuildApiKey).not.toHaveBeenCalled();
     });
 
