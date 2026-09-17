@@ -171,6 +171,8 @@ async function linkGuildWebhookSubscription({ guildId, apiKey, descriptionContex
         stage: 'default-owner-cache',
         error_code: err?.code || err?.name || 'unknown',
       });
+      // The owner-only row IS persisted (the backfill skips it); recovery is
+      // the DEFAULT_WEBHOOK_SECRET_CONFLICT runbook, then re-run /qurl setup.
       return { ok: false, reason: LINK_RESULTS.REGISTER_FAILED };
     }
 

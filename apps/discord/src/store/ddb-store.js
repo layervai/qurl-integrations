@@ -1833,6 +1833,8 @@ async function propagateGuildWebhookSubscription(
     TableName: TABLES.guild_configs,
     Key: { guild_id: s.guildId },
     UpdateExpression: 'SET webhook_id = :wid, webhook_secret = :wsec, updated_at = :u',
+    // listGuildSubscriptionsByOwner drops rows without webhook_id (owner-only
+    // mappings), so :expectedWebhookId is always defined here.
     // Defense against a race where the row was cleared between
     // listGuildSubscriptionsByOwner and this write — never mint
     // subscription state on a row that opted out.

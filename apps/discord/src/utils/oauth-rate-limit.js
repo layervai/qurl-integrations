@@ -101,6 +101,8 @@ function sweepRateLimitStore() {
 const sweepHandle = setInterval(sweepRateLimitStore, 30 * 1000);
 sweepHandle.unref();
 
+// Terminal shutdown/test teardown only: there is no restart path, so a process
+// that keeps serving after this call would stop sweeping the store.
 function stopIntervals() {
   clearInterval(sweepHandle);
 }

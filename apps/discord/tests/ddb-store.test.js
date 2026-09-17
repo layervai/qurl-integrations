@@ -131,6 +131,22 @@ describe('guild configs', () => {
     });
   });
 
+  test('propagateGuildWebhookSubscription: skips owner-only siblings before building the CAS', async () => {
+    ddbMock.on(ScanCommand).resolves({ Items: [
+      { guild_id: 'g_complete', webhook_id: 'wh_x', webhook_owner_id: 'usr_o' },
+      { guild_id: 'g_owner_only', webhook_owner_id: 'usr_o' },
+    ] });
+    ddbMock.on(UpdateCommand).resolves({});
+    const result = await store.propagateGuildWebhookSubscription('usr_o', {
+      webhookId: 'wh_new', webhookSecret: 'sec_new',
+    });
+    expect(result).toEqual({ updated: 1, failed: 0, skipped: 0 });
+    const inputs = ddbMock.commandCalls(UpdateCommand).map(call => call.args[0].input);
+    expect(inputs).toHaveLength(1);
+    expect(inputs[0].Key).toEqual({ guild_id: 'g_complete' });
+    expect(inputs[0].ExpressionAttributeValues[':expectedWebhookId']).toBe('wh_x');
+  });
+
   test('propagateGuildWebhookSubscription: non-CCFE errors are counted as failed', async () => {
     ddbMock.on(ScanCommand).resolves({ Items: [
       { guild_id: 'g_sibling', webhook_id: 'wh_x', webhook_owner_id: 'usr_o' },
