@@ -38,14 +38,17 @@ const (
 	// private platform module, so this test keeps the values it needs from
 	// v0.15.0 agent_credential_recovery_v1_vectors.json: the credential is
 	// Fixtures.RecoveryCredential (base64url of bytes 0x00-0x1f, synthetic) and
-	// the cell reply is the assigned-cell PublicExchanges SuccessBodyJSON.
+	// the cell reply is the assigned-cell PublicExchanges SuccessBodyJSON. The
+	// recovery grant is test-local; only its qrg1. prefix is contract.
 	//
 	// TODO(upstream-contract): these values and the recover-mode fields added
 	// in nativeRecoveryHubReply mirror the private agent-credential-recovery
 	// vectors. Nothing here fails when that platform contract moves.
 	connectorIntegrationRecoveryCredential = "lv_live_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"
 	connectorIntegrationRecoveryGrant      = "qrg1.integration-recovery-grant-0001"
-	connectorIntegrationRecoveryCellReply  = `{"errCode":"0","list":{"query":"agent_credential_recovery","version":1,"device_api_key_id":"key_RcV8mP3qTn5W"}}`
+	connectorIntegrationRecoveredKeyID     = "key_RcV8mP3qTn5W"
+	connectorIntegrationRecoveryCellReply  = `{"errCode":"0","list":{"query":"agent_credential_recovery","version":1,"device_api_key_id":"` +
+		connectorIntegrationRecoveredKeyID + `"}}`
 )
 
 // nativeRecoveryRoute keeps the real qurl-go encrypted transport in this
@@ -315,14 +318,19 @@ func setNativeRecoveryAssignment(value any, cellPublicKeyB64 string, now time.Ti
 }
 
 func nativeRecoveryCellReply(request []byte) ([]byte, error) {
-	query, _, err := nativeRecoveryQuery(request)
-	if err != nil {
+	var parsed struct {
+		UserData struct {
+			Query         string `json:"query"`
+			RecoveryGrant string `json:"recovery_grant"`
+		} `json:"usrData"`
+	}
+	if err := json.Unmarshal(request, &parsed); err != nil {
 		return nil, fmt.Errorf("parse cell request: %w", err)
 	}
-	if query != "agent_credential_recovery" {
-		return nil, fmt.Errorf("unexpected cell request %q", query)
+	if parsed.UserData.Query != "agent_credential_recovery" {
+		return nil, fmt.Errorf("unexpected cell request %q", parsed.UserData.Query)
 	}
-	if !bytes.Contains(request, []byte(connectorIntegrationRecoveryGrant)) {
+	if parsed.UserData.RecoveryGrant != connectorIntegrationRecoveryGrant {
 		return nil, errors.New("cell request did not carry the Hub recovery grant")
 	}
 	return []byte(connectorIntegrationRecoveryCellReply), nil
@@ -465,6 +473,24 @@ func TestOpenNativeRegisteredClient_ExplicitLoginUsesRealConnectorRecovery(t *te
 	}
 	if err := opts.closeAPIClient(); err != nil {
 		t.Fatal(err)
+	}
+	stateOwner, err = connectorstateowner.NewSDKStore(stateDir, connectorIntegrationAgentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stateStore, err = stateOwner.Handoff()
+	if err != nil {
+		t.Fatal(err)
+	}
+	recoveredState, err := stateStore.LoadAgentState(context.Background())
+	if closeErr := stateOwner.Close(); closeErr != nil {
+		t.Fatal(closeErr)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recoveredState.DeviceAPIKeyID != connectorIntegrationRecoveredKeyID {
+		t.Fatalf("recovered device API key ID = %q, want the cell-issued ID", recoveredState.DeviceAPIKeyID)
 	}
 	if registry.bindCalls != 1 {
 		t.Fatalf("owner bindings = %d, want one after the successful retry", registry.bindCalls)
