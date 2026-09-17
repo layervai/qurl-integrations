@@ -207,7 +207,6 @@ describe('qURL client — getResourceStatus', () => {
   });
 
   it('sends a real-shaped CRID to GET /v1/qurls/:resourceId', async () => {
-    const resourceId = CRID_RESOURCE_ID;
     globalThis.fetch = jest.fn().mockResolvedValue(
       apiOk(200, {
         resource_id: PUBLIC_KEY_RESOURCE_ID,
@@ -215,11 +214,11 @@ describe('qURL client — getResourceStatus', () => {
       }),
     );
 
-    const result = await qurl.getResourceStatus(resourceId);
+    const result = await qurl.getResourceStatus(CRID_RESOURCE_ID);
 
     expect(globalThis.fetch).toHaveBeenCalledTimes(1);
     const [url, opts] = globalThis.fetch.mock.calls[0];
-    expect(url).toBe(`https://api.test.local/v1/qurls/${resourceId}`);
+    expect(url).toBe(`https://api.test.local/v1/qurls/${CRID_RESOURCE_ID}`);
     expect(opts.method).toBe('GET');
     expect(opts.headers.Authorization).toBe('Bearer test-api-key');
     expect(opts.headers['User-Agent']).toBe('qurl-discord-bot/1.0');
@@ -763,19 +762,18 @@ describe('qURL client — retry + audit behavior', () => {
     const logger = require('../src/logger');
     const { AUDIT_EVENTS } = require('../src/constants');
     const { resourceIdLogRef } = require('../src/utils/resource-id');
-    const resourceId = CRID_RESOURCE_ID;
     globalThis.fetch = jest.fn().mockResolvedValue(apiError(401));
 
-    const thrown = await qurl.deleteLink(resourceId).then(
+    const thrown = await qurl.deleteLink(CRID_RESOURCE_ID).then(
       () => { throw new Error('expected rejection'); },
       error => error,
     );
 
-    expect(thrown.message).not.toContain(resourceId);
-    expect(JSON.stringify(logger.debug.mock.calls)).not.toContain(resourceId);
+    expect(thrown.message).not.toContain(CRID_RESOURCE_ID);
+    expect(JSON.stringify(logger.debug.mock.calls)).not.toContain(CRID_RESOURCE_ID);
     expect(logger.debug).toHaveBeenCalledWith(
       'qURL API error',
-      expect.objectContaining({ resource_ref: resourceIdLogRef(resourceId) }),
+      expect.objectContaining({ resource_ref: resourceIdLogRef(CRID_RESOURCE_ID) }),
     );
     expect(logger.audit).toHaveBeenCalledWith(
       AUDIT_EVENTS.DEPENDENCY_AUTH_FAILURE,

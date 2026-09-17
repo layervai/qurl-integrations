@@ -171,6 +171,13 @@ const {
 } = require('../src/utils/resource-id');
 const { isGoneQurlApiError, qurlApiErrorStatus } = require('../src/utils/qurl-errors');
 
+// TODO(upstream-contract): mirrors the public-key arm of qurl-service's
+// ResourceId schema (107..214 base64url characters, disjoint from CRIDs).
+// SDK 2.x deletes only by CRID, and connector upload responses carry only this
+// public key; transit uploads are also absent from GET /v1/resources, so no
+// CRID can be resolved for them.
+const isPublicKeyResourceId = id => typeof id === 'string' && /^[\w-]{107,214}$/.test(id);
+
 // The same pool depth the send pipeline batches against — imported, not
 // copied, so a change to the cap reaches this script instead of silently
 // leaving it issuing a different number of uploads than a real send.
@@ -963,8 +970,8 @@ async function trackCreate(fn) {
 // run's resources; the ledger is exact.
 //
 // Recipient links from mintLinks are deliberately not recorded individually:
-// deleting the parent file resource revokes every qURL minted against it
-// (shared/client/client.go documents the cascade).
+// they share the upload's expiry, and deleting a parent revokes every qURL
+// minted against it (shared/client/client.go documents the cascade).
 function recordResource(resourceId, kind) {
   // Share deleteLink's transport guard so every recorded ID is sweepable and
   // a malformed service response cannot persist a bearer token in the ledger.
@@ -1144,6 +1151,7 @@ async function reclaim(ledgerPath) {
   let revoked = 0;
   let legacyRejected = 0;
   let ambiguousNotFound = 0;
+  let publicKeyRows = 0;
   let invalidLedgerIds = 0;
 
   // Drain rather than sweep once. An in-flight round can append after the
@@ -1176,6 +1184,13 @@ async function reclaim(ledgerPath) {
     // account, and a burst of hundreds of deletes is what trips it.
     for (const id of pending) {
       swept.add(id);
+      if (isPublicKeyResourceId(id)) {
+        // Connector upload rows: no API delete exists for them under SDK 2.x.
+        outstanding.add(id);
+        publicKeyRows++;
+        done++;
+        continue;
+      }
       try {
         await deleteLink(id);
         revoked++;
@@ -1244,7 +1259,10 @@ async function reclaim(ledgerPath) {
   if (invalidLedgerIds > 0) {
     console.error(`Reclaim: ${invalidLedgerIds} invalid ledger resource ID(s) cannot be reclaimed automatically; correct or remove them only after manual verification.`);
   }
-  const retryable = failed - legacyRejected - ambiguousNotFound - invalidLedgerIds;
+  if (publicKeyRows > 0) {
+    console.error(`Reclaim: ${publicKeyRows} connector upload(s) recorded by public key cannot be revoked through the qURL API; their links expire on their own, so remove them only after confirming that.`);
+  }
+  const retryable = failed - legacyRejected - ambiguousNotFound - invalidLedgerIds - publicKeyRows;
   if (retryable > 0) {
     console.error(`Reclaim: ${retryable} other resource(s) failed with potentially retryable errors — re-run with --reclaim ${ledgerPath}`);
   }
@@ -2226,8 +2244,9 @@ async function runRound(roundNum) {
         uploadName,
         'application/octet-stream',
       );
-      // Recorded before anything is minted against it. Reclaiming this parent
-      // is what reclaims the recipient links, so it has to be on disk first.
+      // Recorded before anything is minted against it, so a reclaim reports
+      // it. Its public key has no API delete under SDK 2.x (see
+      // isPublicKeyResourceId); its recipient links expire on their own.
       recordResource(parsed.resource_id, 'upload');
       return parsed;
     });
@@ -2330,7 +2349,7 @@ async function runRound(roundNum) {
       try {
         await trackCreate(async () => {
           const loc = await createOneTimeLink(TEST_LOCATION_URL, '24h', 'Load test location');
-          recordResource(loc.resource_id, 'location');
+          recordResource(loc.crid, 'location');
         });
         results.locLinks++;
       } catch (e) {
@@ -2427,7 +2446,7 @@ async function main() {
   try {
     const r = await trackCreate(async () => {
       const link = await createOneTimeLink('https://example.com', '24h', 'smoke test');
-      recordResource(link.resource_id, 'smoke');
+      recordResource(link.crid, 'smoke');
       return link;
     });
     console.log(`Smoke test OK: ${r.resource_id}`);

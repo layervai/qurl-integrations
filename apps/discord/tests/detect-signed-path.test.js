@@ -72,6 +72,13 @@ it('rejects mismatched resource identity', async () => {
   await expect(detect(Buffer.from('x'), { guildId })).rejects.toThrow(/mismatched crid/);
   expect(mockOpen).not.toHaveBeenCalled();
 });
+it('fails closed and keeps the cached CRID when the SDK rejects expectedCRID', async () => {
+  mockOpen.mockImplementationOnce(() => { throw new Error('native portal opener expectedCRID is invalid or unsupported'); });
+  await expect(detect(Buffer.from('x'), { guildId })).rejects.toThrow(/expectedCRID/);
+  expect(send).not.toHaveBeenCalled();
+  await expect(detect(Buffer.from('x'), { guildId })).resolves.toEqual(result);
+  expect(mockClient.listAllResources).toHaveBeenCalledTimes(1);
+});
 it('closes after native open failure and redacts credentials', async () => {
   opener.start.mockRejectedValue(new Error(`failed ${qurl}`));
   await expect(detect(Buffer.from('x'), { guildId })).rejects.toThrow(/qv2t1\.\[REDACTED\]/);
@@ -96,7 +103,7 @@ it('caches only resource identity and mints anew for each guild', async () => {
   expect(mockClient.listAllResources).toHaveBeenCalledTimes(1);
   expect(mockClient.createQurlForResource).toHaveBeenLastCalledWith(crid, { expires_in: '5m', session_duration: '5m', target_path: `/api/detect/discord/${otherGuild}` });
 });
-it.each([[[]], [[{ status: 'active', resource_id: publicKey, crid }, { status: 'active', resource_id: publicKey, crid }]]])('rejects absent or ambiguous resources', async resources => {
+it.each([[[]], [[{ status: 'active', resource_id: publicKey, crid }, { status: 'active', resource_id: `${publicKey}x`, crid: 'b'.repeat(60) }]]])('rejects absent or ambiguous resources', async resources => {
   mockClient.listAllResources.mockImplementation(async function* () { yield* resources; });
   await expect(detect(Buffer.from('x'), { guildId })).rejects.toThrow(/resource/);
   expect(mockClient.createQurlForResource).not.toHaveBeenCalled();

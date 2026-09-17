@@ -14,6 +14,7 @@ jest.mock('../src/connector', () => ({
 }));
 
 const { deleteLink } = require('../src/qurl');
+const { CRID_RESOURCE_ID, PUBLIC_KEY_RESOURCE_ID } = require('./helpers/qurl-fixtures');
 const { resourcePath } = require('../src/utils/resource-id');
 const { qurlApiError, qurlApiErrorMessage } = require('../src/utils/qurl-errors');
 const config = require('../src/config');
@@ -236,6 +237,19 @@ describe('runRound ledgering', () => {
     expect(reUploadBuffer).toHaveBeenCalledTimes(3);
     expect(mod.readLedger(ledger)).toEqual(['res-1', 'res-2', 'res-3']);
   });
+
+  it('records the CRID, not the public key, for a location link', async () => {
+    const ledger = path.join(os.tmpdir(), `loadtest-location-ledger-${process.pid}.jsonl`);
+    created.push(ledger);
+    const { createOneTimeLink } = require('../src/qurl');
+    createOneTimeLink.mockReset();
+    createOneTimeLink.mockResolvedValue({ resource_id: PUBLIC_KEY_RESOURCE_ID, crid: CRID_RESOURCE_ID });
+
+    const mod = loadWith(['--count', '1', '--location', '--ledger', ledger]);
+    await mod.runRound(1);
+
+    expect(mod.readLedger(ledger)).toEqual([CRID_RESOURCE_ID]);
+  });
 });
 
 describe('resolveLedgerArg', () => {
@@ -408,6 +422,20 @@ describe('reclaim', () => {
     expect(console.error).not.toHaveBeenCalledWith(
       expect.stringContaining('re-run with --reclaim'),
     );
+  });
+
+  it('reports a public-key upload row for manual verification without a doomed delete', async () => {
+    const ledger = tempLedger(`${line(PUBLIC_KEY_RESOURCE_ID)}${line(CRID_RESOURCE_ID)}`);
+
+    const result = await reclaim(ledger);
+
+    expect(deleteLink.mock.calls.map(([id]) => id)).toEqual([CRID_RESOURCE_ID]);
+    expect(result).toMatchObject({ revoked: 1, failed: 1 });
+    expect(readLedger(ledger)).toEqual([PUBLIC_KEY_RESOURCE_ID]);
+    expect(console.error).toHaveBeenCalledWith(
+      expect.stringContaining('1 connector upload(s) recorded by public key cannot be revoked'),
+    );
+    expect(console.error).not.toHaveBeenCalledWith(expect.stringContaining('re-run with --reclaim'));
   });
 
   it('continues after an invalid non-string ledger ID and flags manual repair', async () => {

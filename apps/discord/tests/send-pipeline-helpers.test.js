@@ -122,9 +122,7 @@ const originalFromWeb = Readable.fromWeb;
 Readable.fromWeb = jest.fn(() => new Readable({ read() { this.push(null); } }));
 
 const originalFetch = globalThis.fetch;
-const {
-  CRID_RESOURCE_ID,
-} = require('./helpers/qurl-fixtures');
+const { CRID_RESOURCE_ID } = require('./helpers/qurl-fixtures');
 
 const { _test } = require('../src/commands');
 const {
@@ -540,18 +538,17 @@ describe('qURL client', () => {
 
   describe('deleteLink', () => {
     it('revokes a CRID through DELETE /v1/resources/{id}', async () => {
-      const resourceId = CRID_RESOURCE_ID;
       globalThis.fetch = jest.fn().mockImplementation(async () => new Response(null, { status: 204 }));
 
-      await qurl.deleteLink(resourceId);
+      await qurl.deleteLink(CRID_RESOURCE_ID);
 
       expect(globalThis.fetch).toHaveBeenCalledTimes(1);
       const [url, opts] = globalThis.fetch.mock.calls[0];
-      expect(url).toBe(`https://api.test.local/v1/resources/${resourceId}`);
+      expect(url).toBe(`https://api.test.local/v1/resources/${CRID_RESOURCE_ID}`);
       expect(opts.method).toBe('DELETE');
       const logger = require('../src/logger');
       expect(logger.info).toHaveBeenCalledWith('Revoked qURL resource', {
-        resource_id: resourceId,
+        resource_id: CRID_RESOURCE_ID,
       });
     });
 

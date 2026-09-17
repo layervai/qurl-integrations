@@ -836,7 +836,7 @@ const DETECT_TUNNEL_HOST_SUFFIXES = detectTunnelHostSuffixesForEndpoint(config.Q
 // grants network access to the caller's CURRENT IP/knock-window. A stale token
 // would be a long-lived credential to leak; qurl_site is per-mint and must stay
 // paired with the fresh knock.
-let _detectResourceId = null;
+let _detectCrid = null;
 let _detectResourceRetryAfter = 0;
 let _detectResourcePreviousFailure = null;
 let _detectResourceConsecutiveFailures = 0;
@@ -856,7 +856,7 @@ function rememberDetectResourceFailure(error, { immediateBackoff = false, clearR
   // closed with a short process-wide backoff instead of granting one retry per
   // failure mode. Key this by slug/resource/kind if detect becomes multi-slug
   // or high-volume, or mint failures become guild-specific.
-  if (clearResourceCache) _detectResourceId = null;
+  if (clearResourceCache) _detectCrid = null;
   const now = Date.now();
   if (_detectResourcePreviousFailureAt && now - _detectResourcePreviousFailureAt > DETECT_RESOURCE_FAILURE_BACKOFF_MS) {
     _detectResourceConsecutiveFailures = 0;
@@ -893,7 +893,7 @@ function assertDetectResourceFailureBackoffAllowed() {
 //
 // Cache the client, never the minted qurl_site or access token — native opening
 // re-knocks per call (the full no-cache invariant + rationale live on
-// _detectResourceId above and in resolveDetectTarget's docstring).
+// _detectCrid above and in resolveDetectTarget's docstring).
 //
 // The bot credential owns the detect tunnel. Mint only the exact guild path
 // taken from the authenticated Discord interaction; the image request carries no API credential.
@@ -1031,8 +1031,8 @@ async function resolveDetectTarget(guildId) {
   // methods accept only the `crid`, never the public-key `resource_id`. There is intentionally no
   // in-flight dedup for concurrent cold-cache lookups; the failure backoff
   // bounds repeated hard failures.
-  let resourceId = _detectResourceId;
-  if (!resourceId) {
+  let crid = _detectCrid;
+  if (!crid) {
     // Breadcrumb a slug-lookup transport failure (message only — no token, no
     // URL), matching the mint/resolve legs, so a cold-boot activation failure
     // on the FIRST network call is diagnosable rather than an undistinguished
@@ -1063,13 +1063,13 @@ async function resolveDetectTarget(guildId) {
       });
       throw err;
     }
-    resourceId = typeof active[0]?.crid === 'string' ? active[0].crid : null;
-    if (!resourceId) {
+    crid = typeof active[0]?.crid === 'string' ? active[0].crid : null;
+    if (!crid) {
       const err = new Error('Detect tunnel resource not found for slug');
       rememberDetectResourceFailure(err, { immediateBackoff: true });
       throw err;
     }
-    _detectResourceId = resourceId;
+    _detectCrid = crid;
   }
 
   // Mint a fresh qURL and bound its access session separately. Expiring a
@@ -1078,13 +1078,13 @@ async function resolveDetectTarget(guildId) {
   let targetUrl;
   let minted;
   try {
-    minted = await getQurlClient().createQurlForResource(resourceId, {
+    minted = await getQurlClient().createQurlForResource(crid, {
       expires_in: DETECT_LINK_EXPIRES_IN,
       session_duration: DETECT_LINK_EXPIRES_IN,
       target_path: targetPath,
     });
   } catch (err) {
-    // Self-heal a stale resource_id: if the tunnel resource was deleted/
+    // Self-heal a stale CRID: if the tunnel resource was deleted/
     // recreated, the cached id would 404 every mint until process restart.
     // Drop the cache so a later detect re-resolves the slug. The first
     // mint transport/API failure gets one immediate self-heal retry; repeated
@@ -1102,7 +1102,7 @@ async function resolveDetectTarget(guildId) {
     targetUrl = buildDetectTargetUrl(minted?.qurl_site, targetPath);
   } catch (err) {
     // qurl_site hostname-pin failures happen after a successful slug
-    // lookup and mint, so keep the cached resource id and retry the mint after
+    // lookup and mint, so keep the cached CRID and retry the mint after
     // the short failure window instead of re-walking slug history. The mint
     // created an unredeemed 5m qURL, but failing before native opening is the safe
     // trade: no NHP knock and no image POST are issued to an untrusted host.
@@ -1123,13 +1123,13 @@ async function resolveDetectTarget(guildId) {
     // The native SDK verifies the issuer and cell against deployment trust,
     // and expectedCRID binds the signed resource key to the slug-resolved CRID.
     if (typeof minted?.qurl_link === 'string' && minted.qurl_link.split('#')[1]?.startsWith('qv2t1.')) {
-      if (minted.crid !== resourceId) {
+      if (minted.crid !== crid) {
         const err = new Error('Detect mint returned a mismatched crid');
         clearResourceCache = true;
         throw err;
       }
       const { createPortalOpener } = require('@layervai/qurl/node');
-      const opener = createPortalOpener({ qurl: minted.qurl_link, expectedCRID: resourceId });
+      const opener = createPortalOpener({ qurl: minted.qurl_link, expectedCRID: crid });
       try {
         // SDK 2.x bounds native opening to 15 seconds and aborts it on close.
         await opener.start();
@@ -1144,7 +1144,7 @@ async function resolveDetectTarget(guildId) {
     throw new Error('Detect requires a signed native qURL');
   } catch (err) {
     // A malformed qurl_link is a mint response-shape issue, not evidence that
-    // the cached resource_id is stale. Keep the resource cache and retry only
+    // the cached CRID is stale. Keep the resource cache and retry only
     // the mint after the short failure window.
     rememberDetectResourceFailure(err, { clearResourceCache });
     logger.warn('Detect native open or link validation failed', { error: redactAccessToken(err.message) });
