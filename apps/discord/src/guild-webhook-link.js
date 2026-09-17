@@ -7,7 +7,7 @@
 const config = require('./config');
 const db = require('./store');
 const logger = require('./logger');
-const { AUDIT_EVENTS } = require('./constants');
+const { AUDIT_EVENTS, normalizeSetupVia } = require('./constants');
 const {
   ensureWebhookSubscription,
   deleteSubscription,
@@ -244,7 +244,8 @@ function fireAndForgetLinkGuildWebhookSubscription({ guildId, apiKey, via, confi
   linkGuildWebhookSubscription({
     guildId,
     apiKey,
-    descriptionContext: `via=${via}, configuredBy=${configuredBy}`,
+    // Same normalization as the setup audit, so both record the same door.
+    descriptionContext: `via=${normalizeSetupVia(via)}, configuredBy=${configuredBy}`,
   }).catch((err) => logger.warn('linkGuildWebhookSubscription contract drift — threw unexpectedly', {
     error: err?.message, guildId,
   }));

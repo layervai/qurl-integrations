@@ -98,10 +98,18 @@ describe('guild configs', () => {
       .resolvesOnce({})
       // UPDATED_OLD returns only the touched non-key attributes, never guild_id.
       .resolvesOnce({ Attributes: { configured_by: 'admin', qurl_api_key: 'enc:v1:IV:TAG:deadbeef' } });
-    await store.setGuildApiKey('g-1', 'plain-key', 'admin');
-    await store.setGuildApiKey('g-1', 'plain-key-2', 'admin');
+    await store.setGuildApiKey('g-1', 'plain-key', 'admin', SETUP_VIA.OAUTH);
+    await store.setGuildApiKey('g-1', 'plain-key-2', 'admin', SETUP_VIA.PASTE);
     expect(logger.audit.mock.calls.map(([event]) => event))
       .not.toContain(AUDIT_EVENTS.QURL_SETUP_ADMIN_CHANGED);
+    expect(logger.warn).not.toHaveBeenCalledWith('Unrecognized setup door; auditing as unknown', expect.anything());
+  });
+
+  test('setGuildApiKey: still writes when the unrecognized-door warning throws', async () => {
+    ddbMock.on(UpdateCommand).resolves({});
+    logger.warn.mockImplementationOnce(() => { throw new TypeError('circular'); });
+    await expect(store.setGuildApiKey('g-1', 'plain-key', 'admin', 'OAuth')).resolves.toBeUndefined();
+    expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(1);
   });
 
   test('setGuildApiKey: marks an omitted setup door as unknown', async () => {
@@ -109,7 +117,7 @@ describe('guild configs', () => {
     await store.setGuildApiKey('g-1', 'plain-key', 'new-admin');
     expect(logger.audit).toHaveBeenCalledWith(AUDIT_EVENTS.QURL_SETUP_ADMIN_CHANGED,
       expect.objectContaining({ via: 'unknown' }));
-    expect(logger.warn).toHaveBeenCalledWith('Unrecognized setup door; auditing as unknown', { via: undefined });
+    expect(logger.warn).toHaveBeenCalledWith('Unrecognized setup door; auditing as unknown', { via: 'undefined' });
   });
 
   test('setGuildApiKey: collapses an unrecognized setup door to unknown', async () => {

@@ -1531,7 +1531,9 @@ async function setGuildApiKey(guildId, apiKey, configuredBy, via) {
   // Validate on every call so caller drift (including a forgotten argument)
   // shows up on first setups too; such doors audit as unknown.
   if (door !== via) {
-    logger.warn('Unrecognized setup door; auditing as unknown', { via });
+    try {
+      logger.warn('Unrecognized setup door; auditing as unknown', { via: String(via) });
+    } catch { /* a bad door must not fail the key write */ }
   }
   const now = nowIso();
   // SQLite's `ON CONFLICT(guild_id) DO UPDATE SET qurl_api_key=…,
@@ -1573,7 +1575,7 @@ async function setGuildApiKey(guildId, apiKey, configuredBy, via) {
       logger.audit(AUDIT_EVENTS.QURL_SETUP_ADMIN_CHANGED, {
         guild_id: guildId,
         old_admin_id: oldAdminId,
-        new_admin_id: configuredBy,
+        new_admin_id: configuredBy ?? null,
         via: door,
         // configured_at, not updated_at: webhook-subscription writes also stamp
         // updated_at, while configured_at is the guild's stable first-setup time.
