@@ -56,9 +56,11 @@ const CHILD_QURL_LOG_PATH = '/qurls/:qurlId';
 const RESOURCE_ID_LOG_PATH = '/resources/:resourceId';
 const RESOURCE_QURL_LOG_PATH = '/resources/:resourceId/qurls/:qurlId';
 // Ordinary-child revoke client: each call (parent GET or one DELETE) gets two
-// 10s attempts, and the batch gets 25s per call (two attempts plus backoff).
-// One invocation can therefore absorb a retry on every call, while a full
-// ten-child batch stays under 275s, well inside Discord's 15-minute window.
+// 10s attempts, and the batch gets 25s per expected call (one GET plus one
+// DELETE per child). The signal is the real bound: extra parent GETs after a
+// 404 share the same budget, so a full ten-child batch never exceeds 275s,
+// well inside Discord's 15-minute window.
+const ORDINARY_REVOKE_MAX_IDS = 10;
 const ORDINARY_REVOKE_ATTEMPT_TIMEOUT_MS = 10_000;
 const ORDINARY_REVOKE_MAX_RETRIES = 1;
 const ORDINARY_REVOKE_BUDGET_PER_CALL_MS = 25_000;
@@ -362,15 +364,16 @@ async function deleteLink(resourceId, apiKey) {
 // Old send rows record a public resource key, so resolve the parent CRID from
 // an identified child and require it to match the recorded source first.
 // TODO(upstream-contract): qurl-service checks that each child belongs to the
-// CRID in the DELETE path, so every child in one call must share the recorded
-// source: callers MUST pass siblings of `resourceId`, in one bounded batch (at
-// most ten ids). A retry after a
-// partial failure converges: GET /v1/qurls/{id} still resolves a revoked child
-// through the retained qURL index, and the child DELETE documents that
-// repeated revocation succeeds (204).
+// CRID in the DELETE path, so callers MUST pass siblings of `resourceId`, at
+// most ten per call. GET /v1/qurls/{id} documents that a qURL id returns its
+// parent (and a revoked child stays in the retained index), and the child
+// DELETE documents that repeated revocation succeeds, so a retry after a
+// partial failure converges.
 async function revokeOrdinaryLinks(resourceId, qurlIds, apiKey) {
   validateResourceId(resourceId);
-  if (!Array.isArray(qurlIds)) throw new Error('Invalid qURL revoke token list');
+  if (!Array.isArray(qurlIds) || qurlIds.length > ORDINARY_REVOKE_MAX_IDS) {
+    throw new Error('Invalid qURL revoke token list');
+  }
   if (!qurlIds.every(hasPersistableQurlIdShape)) throw new Error('Invalid qURL revoke token identity');
   if (qurlIds.length === 0) return;
   const client = makeClient(apiKey, {
@@ -394,6 +397,7 @@ async function revokeOrdinaryLinks(resourceId, qurlIds, apiKey) {
   if (!parent?.crid || (parent.resource_id !== resourceId && parent.crid !== resourceId)) {
     throw new Error('qURL revoke parent does not match the recorded source');
   }
+  validateResourceId(parent.crid);
   // Sequential: callers already fan out across resources, and each SDK call
   // retries 429s, so a parallel burst here would amplify rate limiting.
   for (const qurlId of qurlIds) {

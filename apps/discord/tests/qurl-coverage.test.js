@@ -507,6 +507,23 @@ describe('qURL client — revokeOrdinaryLinks', () => {
       .rejects.toThrow('qURL API DELETE /resources/:resourceId/qurls/:qurlId failed (404)');
   });
 
+  it('rejects a batch larger than ten children before network work', async () => {
+    globalThis.fetch = jest.fn();
+    const ids = Array.from({ length: 11 }, (_, i) => `q_${String(i).padStart(11, '0')}`);
+    await expect(qurl.revokeOrdinaryLinks(PUBLIC_KEY_RESOURCE_ID, ids, 'guild-key'))
+      .rejects.toThrow('Invalid qURL revoke token list');
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+  });
+
+  it('refuses to DELETE under a malformed parent crid', async () => {
+    globalThis.fetch = jest.fn().mockResolvedValueOnce(apiOk(200, {
+      resource_id: PUBLIC_KEY_RESOURCE_ID, crid: 'at_not_a_crid', qurls: [],
+    }));
+    await expect(qurl.revokeOrdinaryLinks(PUBLIC_KEY_RESOURCE_ID, ['q_aaaaaaaaaa1'], 'guild-key'))
+      .rejects.toThrow('Invalid resource ID format');
+    expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+  });
+
   it('rejects a non-array token list before network work', async () => {
     globalThis.fetch = jest.fn();
     await expect(qurl.revokeOrdinaryLinks(PUBLIC_KEY_RESOURCE_ID, 'q_aaaaaaaaaa1', 'guild-key'))

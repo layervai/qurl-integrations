@@ -1,20 +1,27 @@
 'use strict';
 
+const { QURL_ACCESS_TOKEN_PREFIX } = require('./resource-id');
+
 // TODO(upstream-contract): qurl-integrations-infra#1551's POST /api/revoke_links
 // rejects the whole request with 400 when any qurl_id exceeds 64 characters or
 // uses anything but letters, digits, `_` and `-`. Matching that cap keeps one
 // corrupt stored value from failing every retry of an otherwise valid batch.
 const MAX_QURL_ID_LENGTH = 64;
-// Current upstream IDs are q_ + 11 lowercase hex chars. Accept the endpoint's
-// whole charset behind the q_ prefix so a future id shape cannot fail sends,
-// while bearer-token prefixes and other stored data never reach the wire.
-const CLEANUP_QURL_ID_PATTERN = /^q_[A-Za-z0-9_-]+$/;
+// Current upstream IDs are q_ + 11 lowercase hex chars, but only the endpoint's
+// charset is required so a future id prefix cannot fail every send. Access
+// tokens (at_) share that charset and are bearer credentials, so they are
+// rejected explicitly and never reach the wire or the logs.
+const CLEANUP_QURL_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
 
 // Returns a bounded identity usable for best-effort child revoke, or null.
 function qurlIdForCleanup(value) {
   if (typeof value !== 'string') return null;
   const normalized = value.trim();
-  if (normalized.length > MAX_QURL_ID_LENGTH || !CLEANUP_QURL_ID_PATTERN.test(normalized)) return null;
+  if (
+    normalized.length > MAX_QURL_ID_LENGTH
+    || !CLEANUP_QURL_ID_PATTERN.test(normalized)
+    || normalized.startsWith(QURL_ACCESS_TOKEN_PREFIX)
+  ) return null;
   return normalized;
 }
 

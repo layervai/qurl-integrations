@@ -93,6 +93,7 @@ module.exports = {
   hasSafeResourceIdShape,
   LEGACY_RESOURCE_ID_PREFIX,
   maskResourceIdPath,
+  QURL_ACCESS_TOKEN_PREFIX,
   qurlPath,
   resourceIdLogRef,
   resourcePath,

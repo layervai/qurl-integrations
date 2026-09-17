@@ -18,7 +18,11 @@ describe('qURL child identity guards', () => {
     expect(qurlIdForCleanup(`${atCap}a`)).toBeNull();
   });
 
-  it.each([undefined, null, '', '   ', 42, {}, 'bad/id', 'at_bearer', 'q_'])('rejects %p', (value) => {
+  it('accepts a future id prefix within the endpoint charset', () => {
+    expect(qurlIdForCleanup('t_0123456789a')).toBe('t_0123456789a');
+  });
+
+  it.each([undefined, null, '', '   ', 42, {}, 'bad/id', 'q_a.b', 'at_bearer', ' at_bearer '])('rejects %p', (value) => {
     expect(qurlIdForCleanup(value)).toBeNull();
     expect(hasPersistableQurlIdShape(value)).toBe(false);
   });

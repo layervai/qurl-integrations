@@ -532,10 +532,14 @@ async function revokeMintedLinks(resourceId, qurlIds, apiKey) {
   let routeAbsent = false;
   // Per-status tally so rollout can see revoked vs already_gone vs handed back.
   const outcomes = {};
+  // Ids revoked through the SDK (route absent or not_connector_managed), so
+  // count reconciles with the outcomes tally.
+  let fallbackCount = 0;
   for (let offset = 0; offset < ids.length; offset += REVOKE_LINKS_MAX_IDS) {
     const batchIds = ids.slice(offset, offset + REVOKE_LINKS_MAX_IDS);
     if (routeAbsent) {
       await revokeOrdinaryLinks(resourceId, batchIds, apiKey);
+      fallbackCount += batchIds.length;
       continue;
     }
     const response = await fetch(`${config.CONNECTOR_URL}/api/revoke_links`, {
@@ -552,6 +556,7 @@ async function revokeMintedLinks(resourceId, qurlIds, apiKey) {
         await response.body?.cancel();
       } catch { /* discarding the body is best-effort */ }
       await revokeOrdinaryLinks(resourceId, batchIds, apiKey);
+      fallbackCount += batchIds.length;
       continue;
     }
     if (!response.ok) {
@@ -584,6 +589,7 @@ async function revokeMintedLinks(resourceId, qurlIds, apiKey) {
     }
     for (const status of statuses.values()) outcomes[status] = (outcomes[status] || 0) + 1;
     const ordinaryIds = batchIds.filter(id => statuses.get(id) === 'not_connector_managed');
+    fallbackCount += ordinaryIds.length;
     if (ordinaryIds.length > 0) {
       await revokeOrdinaryLinks(resourceId, ordinaryIds, apiKey);
     }
@@ -594,6 +600,7 @@ async function revokeMintedLinks(resourceId, qurlIds, apiKey) {
     count: ids.length,
     route_absent: routeAbsent,
     outcomes,
+    fallback_count: fallbackCount,
   });
 }
 
