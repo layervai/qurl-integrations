@@ -43,7 +43,7 @@ const logger = require('../logger');
 const {
   DM_STATUS,
   AUDIT_EVENTS,
-  SETUP_VIA,
+  normalizeSetupVia,
   DDB_TRANSACTION_MAX_ACTIONS,
   ddbSendConfigGuardActionCount,
   ddbSendConfigGuardFitsTransaction,
@@ -1526,7 +1526,7 @@ async function getGuildApiKey(guildId) {
 }
 
 // `via` (a SETUP_VIA value) names the setup door for the admin-change audit.
-async function setGuildApiKey(guildId, apiKey, configuredBy, via = SETUP_VIA.UNKNOWN) {
+async function setGuildApiKey(guildId, apiKey, configuredBy, via) {
   const now = nowIso();
   // SQLite's `ON CONFLICT(guild_id) DO UPDATE SET qurl_api_key=…,
   // configured_by=…, updated_at=…` deliberately preserved
@@ -1566,9 +1566,10 @@ async function setGuildApiKey(guildId, apiKey, configuredBy, via = SETUP_VIA.UNK
         guild_id: guildId,
         old_admin_id: oldAdminId,
         new_admin_id: configuredBy,
-        // Unknown strings collapse to UNKNOWN so a caller typo cannot split a grouping.
-        via: Object.values(SETUP_VIA).includes(via) ? via : SETUP_VIA.UNKNOWN,
-        prior_updated_at: prior.updated_at ?? null,
+        via: normalizeSetupVia(via),
+        // configured_at, not updated_at: webhook-subscription writes also stamp
+        // updated_at, while configured_at is the guild's stable first-setup time.
+        prior_configured_at: prior.configured_at ?? null,
       });
     } catch (err) {
       try {

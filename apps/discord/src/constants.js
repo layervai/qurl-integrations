@@ -452,7 +452,9 @@ const AUDIT_EVENTS = {
   // configuration first leaves no prior administrator to compare (#1455), and
   // a retried or double-submitted write that already landed reads the new
   // admin back as the old one. Guild/admin IDs are forensic fields, never
-  // CloudWatch metric dimensions.
+  // CloudWatch metric dimensions. Only human setup flows may call
+  // setGuildApiKey: a backfill or admin tool writing a synthetic configured_by
+  // would page on every already-configured guild.
   QURL_SETUP_ADMIN_CHANGED: 'qurl_setup_admin_changed',
 
   // qURL webhook receiver — feeds CloudWatch metric filters +
@@ -645,14 +647,20 @@ const GATEWAY_DISPATCH_TYPES = Object.freeze({
   INTERACTION_CREATE: 'INTERACTION_CREATE',
 });
 
-// Setup door recorded on qurl_setup_admin_changed; setGuildApiKey maps any other
-// value to UNKNOWN. An enum so a typo cannot
-// silently split a Logs Insights grouping.
+// Setup door recorded on qurl_setup_admin_changed. An enum so a typo cannot
+// silently split a Logs Insights grouping. OAUTH deliberately covers both
+// /oauth/qurl/callback entries (`/qurl setup` and the install link): the signed
+// state carries no stage marker.
 const SETUP_VIA = Object.freeze({
   OAUTH: 'oauth',
   PASTE: 'paste',
   UNKNOWN: 'unknown',
 });
+const SETUP_VIA_VALUES = new Set(Object.values(SETUP_VIA));
+// Omitted or unrecognized doors collapse to UNKNOWN.
+function normalizeSetupVia(via) {
+  return SETUP_VIA_VALUES.has(via) ? via : SETUP_VIA.UNKNOWN;
+}
 
 // Use one tag for gateway and worker rejection alerts.
 const LOG_KINDS = Object.freeze({
@@ -679,6 +687,7 @@ module.exports = {
   GOOD_FIRST_ISSUE_PATTERNS,
   AUDIT_EVENTS,
   SETUP_VIA,
+  normalizeSetupVia,
   QURL_WEBHOOK_EVENTS,
   TRUST,
   GATEWAY_DISPATCH_TYPES,
