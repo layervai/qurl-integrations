@@ -15,6 +15,7 @@ const {
   invalidStateSecretValues,
   shouldRegisterInteractionListener,
   missingMapCommandKeys,
+  missingWebhookSecretKeys,
   GOOGLE_MAPS_API_KEY_PLACEHOLDER_SENTINEL,
   VALID_PROCESS_ROLES,
   resolveProcessRole,
@@ -22,7 +23,7 @@ const {
 const { MIN_STATE_SECRET_LENGTH } = require('../src/utils/oauth-state');
 
 describe('bootRequired', () => {
-  it('demands only DISCORD_TOKEN (GUILD_ID and BASE_URL are enforced upstream)', () => {
+  it('demands only the bot token for normal bot operation', () => {
     expect(bootRequired()).toEqual(['DISCORD_TOKEN']);
   });
 });
@@ -37,19 +38,23 @@ describe('prodRequired', () => {
 
 describe('missingBootKeys', () => {
   it('returns empty when every boot key is present', () => {
-    expect(missingBootKeys({ DISCORD_TOKEN: 't', GUILD_ID: '123', BASE_URL: 'https://h' })).toEqual([]);
+    expect(missingBootKeys({ DISCORD_TOKEN: 't' })).toEqual([]);
   });
 
   it('surfaces the exact missing key (not just a count)', () => {
     expect(missingBootKeys({})).toEqual(['DISCORD_TOKEN']);
   });
 
-  it('does not flag GUILD_ID or BASE_URL as missing — both are optional here', () => {
-    expect(missingBootKeys({ DISCORD_TOKEN: 't' })).toEqual([]);
+  it('does not make customer-install config a global boot requirement', () => {
+    // Normal command registration gets the application ID from Discord's
+    // READY payload. A missing/invalid client ID must disable only the public
+    // install entrypoint, not crash-loop an otherwise usable bot deployment.
+    expect(missingBootKeys({ DISCORD_TOKEN: 't', DISCORD_CLIENT_ID: null })).toEqual([]);
   });
 
   it('treats empty strings as missing (not just undefined)', () => {
-    expect(missingBootKeys({ DISCORD_TOKEN: '' })).toEqual(['DISCORD_TOKEN']);
+    expect(missingBootKeys({ DISCORD_TOKEN: '', DISCORD_CLIENT_ID: '' }))
+      .toEqual(['DISCORD_TOKEN']);
   });
 });
 
@@ -351,6 +356,16 @@ describe('shouldRegisterInteractionListener', () => {
     const first = shouldRegisterInteractionListener(args);
     const second = shouldRegisterInteractionListener(args);
     expect(first).toBe(second);
+  });
+});
+
+describe('missingWebhookSecretKeys', () => {
+  it('requires the default secret unless pure BYOK is explicit', () => {
+    expect(missingWebhookSecretKeys({})).toEqual(['QURL_WEBHOOK_SECRET']);
+    expect(missingWebhookSecretKeys({ QURL_WEBHOOK_SECRET: '' })).toEqual(['QURL_WEBHOOK_SECRET']);
+    expect(missingWebhookSecretKeys({ QURL_WEBHOOK_SECRET: 'whsec_x', QURL_API_KEY: 'lv_x' })).toEqual([]);
+    expect(missingWebhookSecretKeys({ QURL_WEBHOOK_SECRET: 'whsec_x' })).toEqual(['QURL_API_KEY']);
+    expect(missingWebhookSecretKeys({ QURL_WEBHOOK_PURE_BYOK: true })).toEqual([]);
   });
 });
 

@@ -192,3 +192,35 @@ describe('config — QURL_VIEW_COUNTER_COALESCE_MS (sub-second only)', () => {
     });
   });
 });
+
+describe('config — OAuth rate-limit knobs (must be positive integers)', () => {
+  test.each([
+    ['RATE_LIMIT_INSTALL_MAX_REQUESTS', 120],
+    ['RATE_LIMIT_MAX_REQUESTS', 30],
+  ])('%s caps the per-IP ceiling at 1000 (falls back to %p)', (key, fallback) => {
+    captureFreshConfig({ [key]: '1001' }, (cfg, warns) => {
+      expect(cfg[key]).toBe(fallback);
+      expect(warns.some((w) => w.includes(key) && w.includes('out of range'))).toBe(true);
+    });
+  });
+
+  test.each([
+    ['RATE_LIMIT_INSTALL_MAX_REQUESTS', 120],
+    ['RATE_LIMIT_MAX_REQUESTS', 30],
+    ['RATE_LIMIT_WINDOW_MS', 60000],
+  ].flatMap(([key, fallback]) => ['0', '-5', '120abc', 'abc'].map((raw) => [key, raw, fallback])))(
+    '%s rejects %p and falls back to default %p with warn', (key, raw, fallback) => {
+      captureFreshConfig({ [key]: raw }, (cfg, warns) => {
+        expect(cfg[key]).toBe(fallback);
+        expect(warns.some((w) => w.includes(key) && w.includes('rejected'))).toBe(true);
+      });
+    },
+  );
+
+  test('accepts a positive integer override', () => {
+    captureFreshConfig({ RATE_LIMIT_INSTALL_MAX_REQUESTS: '50' }, (cfg, warns) => {
+      expect(cfg.RATE_LIMIT_INSTALL_MAX_REQUESTS).toBe(50);
+      expect(warns.filter((w) => w.includes('RATE_LIMIT_INSTALL_MAX_REQUESTS'))).toHaveLength(0);
+    });
+  });
+});

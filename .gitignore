@@ -46,6 +46,7 @@ apps/discord/scripts/*
 !apps/discord/scripts/provision-guild-subscriptions.js
 !apps/discord/scripts/smoke-detect.js
 !apps/discord/scripts/smoke-setup-audit.js
+!apps/discord/scripts/smoke-default-owner.js
 apps/discord/.github/
 apps/discord/railway.json
 
