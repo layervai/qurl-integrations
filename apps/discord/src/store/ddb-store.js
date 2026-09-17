@@ -43,6 +43,7 @@ const logger = require('../logger');
 const {
   DM_STATUS,
   AUDIT_EVENTS,
+  SETUP_VIA,
   normalizeSetupVia,
   DDB_TRANSACTION_MAX_ACTIONS,
   ddbSendConfigGuardActionCount,
@@ -1530,7 +1531,7 @@ async function setGuildApiKey(guildId, apiKey, configuredBy, via) {
   const door = normalizeSetupVia(via);
   // Validate on every call so caller drift (including a forgotten argument)
   // shows up on first setups too; such doors audit as unknown.
-  if (door !== via) {
+  if (door === SETUP_VIA.UNKNOWN) {
     try {
       logger.warn('Unrecognized setup door; auditing as unknown', { via: String(via), guildId });
     } catch { /* a bad door must not fail the key write */ }

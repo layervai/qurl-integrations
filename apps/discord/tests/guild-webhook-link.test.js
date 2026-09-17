@@ -187,7 +187,6 @@ describe('linkGuildWebhookSubscription — URL-migration sweep kill-switch (#827
     const call = mockEnsureWebhookSubscription.mock.calls[0][0];
     expect(call.description).toBe('Discord bot view counter (guild=g_desc, via=test)');
   });
-
 });
 
 describe('linkGuildWebhookSubscription — propagation parameter', () => {

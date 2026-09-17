@@ -129,6 +129,12 @@ describe('guild configs', () => {
     expect(logger.warn).toHaveBeenCalledWith('Unrecognized setup door; auditing as unknown', { via: 'OAuth', guildId: 'g-1' });
   });
 
+  test('setGuildApiKey: warns when a caller passes the UNKNOWN sentinel as a door', async () => {
+    ddbMock.on(UpdateCommand).resolves({});
+    await store.setGuildApiKey('g-1', 'plain-key', 'admin', SETUP_VIA.UNKNOWN);
+    expect(logger.warn).toHaveBeenCalledWith('Unrecognized setup door; auditing as unknown', { via: 'unknown', guildId: 'g-1' });
+  });
+
   test('setGuildApiKey: warns on an unrecognized door even without a rebind', async () => {
     ddbMock.on(UpdateCommand).resolves({});
     await store.setGuildApiKey('g-1', 'plain-key', 'admin', 'OAuth');

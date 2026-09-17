@@ -651,10 +651,10 @@ const GATEWAY_DISPATCH_TYPES = Object.freeze({
 // Setup door recorded on the qurl_setup_admin_changed audit (CloudWatch/Logs
 // Insights) and, normalized the same way, in guild-webhook-link.js's persisted
 // qurl-service subscription description (`via=<value>`; the backfill script
-// writes its own `via=backfill-script`). Renaming a value forks both. An enum so a typo cannot silently split a
-// grouping. OAUTH deliberately covers both /oauth/qurl/callback entries
-// (`/qurl setup` and the install link): the signed state carries no stage
-// marker.
+// writes its own `via=backfill-script`). Renaming a value forks both. An enum
+// so a typo cannot silently split a grouping. OAUTH deliberately covers both
+// /oauth/qurl/callback entries (`/qurl setup` and the install link): the signed
+// state carries no stage marker.
 const SETUP_VIA = Object.freeze({
   OAUTH: 'oauth',
   PASTE: 'paste',
