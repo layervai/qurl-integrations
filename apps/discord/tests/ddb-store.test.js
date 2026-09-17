@@ -109,6 +109,16 @@ describe('guild configs', () => {
     });
   });
 
+  test('setGuildApiKey: does not audit a keyless prior row (cleared, then set up)', async () => {
+    ddbMock.on(UpdateCommand).resolves({ Attributes: { configured_by: 'old-admin' } });
+    await store.setGuildApiKey('g-1', 'plain-key', 'new-admin');
+    expect(logger.audit).not.toHaveBeenCalled();
+  });
+
+  test('setGuildApiKey: audit event string matches the infra CloudWatch filter', () => {
+    expect(AUDIT_EVENTS.QURL_SETUP_ADMIN_CHANGED).toBe('qurl_setup_admin_changed');
+  });
+
   test('setGuildApiKey: does not audit when the write rejects', async () => {
     ddbMock.on(UpdateCommand).rejects(new Error('ddb down'));
     await expect(store.setGuildApiKey('g-1', 'plain-key', 'new-admin')).rejects.toThrow('ddb down');
