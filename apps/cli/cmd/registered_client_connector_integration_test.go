@@ -45,8 +45,10 @@ const (
 	// TODO(upstream-contract): these values, the recover-mode fields added in
 	// nativeRecoveryHubReply, and the usrData.recovery_grant and
 	// usrData.credential request fields read by nativeRecoveryUserData mirror
-	// the private agent-credential-recovery vectors, as does the assumption that
-	// a refresh reply may advance assignment_generation past the recover reply.
+	// the private agent-credential-recovery vectors, as do the assumptions that a
+	// refresh reply may advance assignment_generation past the recover reply and
+	// that the native runtime releases agent state synchronously on Close, which
+	// lets this test reopen the store in-process.
 	// Nothing here fails when that platform contract moves (#1483).
 	connectorIntegrationRecoveryCredential = "lv_live_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"
 	connectorIntegrationRecoveryGrant      = "qrg1.integration-recovery-grant-0001"
@@ -566,6 +568,10 @@ func TestOpenNativeRegisteredClient_ExplicitLoginUsesRealConnectorRecovery(t *te
 		}
 		if got := recovered.Assignment.AssignmentGeneration; got != connectorIntegrationRefreshGeneration {
 			t.Fatalf("persisted assignment generation = %d, want the post-recovery refresh generation %d",
+				got, connectorIntegrationRefreshGeneration)
+		}
+		if got := recovered.Assignment.EndpointRevision; got != connectorIntegrationRefreshGeneration {
+			t.Fatalf("persisted endpoint revision = %d, want the post-recovery refresh revision %d",
 				got, connectorIntegrationRefreshGeneration)
 		}
 	})
