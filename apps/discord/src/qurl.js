@@ -408,11 +408,17 @@ async function revokeOrdinaryLinks(resourceId, rawQurlIds, apiKey) {
       parent = await callQurl('GET', CHILD_QURL_LOG_PATH, () => client.get(candidate));
       break;
     } catch (err) {
-      if (err?.status !== 404 || i === qurlIds.length - 1) throw err;
+      if (err?.status !== 404 || i === qurlIds.length - 1) {
+        // No child was attempted, so every child is still unconfirmed.
+        err.failedCount = qurlIds.length;
+        throw err;
+      }
     }
   }
   if (!parent?.crid || (parent.resource_id !== resourceId && parent.crid !== resourceId)) {
-    throw new Error('qURL revoke parent does not match the recorded source');
+    throw Object.assign(new Error('qURL revoke parent does not match the recorded source'), {
+      failedCount: qurlIds.length,
+    });
   }
   validateResourceId(parent.crid);
   // Sequential: callers already fan out across resources, and each SDK call

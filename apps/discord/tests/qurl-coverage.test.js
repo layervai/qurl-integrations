@@ -584,7 +584,7 @@ describe('qURL client — revokeOrdinaryLinks', () => {
     }));
 
     await expect(qurl.revokeOrdinaryLinks(PUBLIC_KEY_RESOURCE_ID, ['q_aaaaaaaaaa1'], 'guild-key'))
-      .rejects.toThrow('qURL revoke parent does not match the recorded source');
+      .rejects.toMatchObject({ message: 'qURL revoke parent does not match the recorded source', failedCount: 1 });
     expect(globalThis.fetch).toHaveBeenCalledTimes(1);
   });
 
@@ -592,7 +592,7 @@ describe('qURL client — revokeOrdinaryLinks', () => {
     globalThis.fetch = jest.fn().mockResolvedValue(apiError(404, { code: 'not_found' }));
 
     await expect(qurl.revokeOrdinaryLinks(PUBLIC_KEY_RESOURCE_ID, ['q_aaaaaaaaaa1'], 'guild-key'))
-      .rejects.toThrow('qURL API GET /qurls/:qurlId failed (404)');
+      .rejects.toMatchObject({ message: 'qURL API GET /qurls/:qurlId failed (404)', failedCount: 1 });
     expect(globalThis.fetch).toHaveBeenCalledTimes(1);
   });
 });

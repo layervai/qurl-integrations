@@ -1647,15 +1647,16 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
 
 // Wait budget for best-effort revoke cleanup that sits in front of a user
 // reply: mint-failure compensation (after the 30s mint call and 70s inline
-// partial cleanup) and Add Recipients fresh-mint cleanup. Keeps the reply
-// inside Discord's 15-minute interaction window. Hitting it is expected while
+// partial cleanup) and Add Recipients fresh-mint cleanup.
+// TODO(upstream-contract): keeps the reply inside Discord's 15-minute
+// interaction-token window. Hitting it is expected while
 // the SDK fallback is slow, so it logs a warning with the ids, not an error.
 const CLEANUP_WAIT_BUDGET_MS = 120_000;
 // Progress copy for the /qurl revoke select; it stays actionable if the process
 // restarts before the result edit lands.
 const REVOKE_SELECT_PROGRESS_MSG = "Revoking links... this can take a few minutes. If this message hasn't updated in 15 minutes, run `/qurl revoke` again.";
-// /qurl revoke result budget: 13 minutes leaves room to edit the result before
-// the 15-minute interaction token expires.
+// TODO(upstream-contract): /qurl revoke result budget; 13 minutes leaves room
+// to edit the result before Discord's 15-minute interaction token expires.
 const REVOKE_SELECT_RESULT_WAIT_MS = 13 * 60 * 1000;
 
 /**

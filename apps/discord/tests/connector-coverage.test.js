@@ -1040,6 +1040,16 @@ describe('revokeMintedLinks — #1551 fail-closed contract', () => {
       expect(revokeOrdinaryLinks).toHaveBeenCalledWith('res-1', ['q_one'], 'guild-key');
     });
 
+    it('retries a throttled entitlement hop (429 upstream_rate_limited) and stays retryable if it persists', async () => {
+      globalThis.fetch = jest.fn()
+        .mockResolvedValue(refusal(429, { code: 'upstream_rate_limited' }, new Headers({ 'Retry-After': '1' })));
+
+      const outcome = await settle(connector.revokeMintedLinks('res-1', ['q_one'], 'guild-key'), 1000);
+      expect(outcome).toMatchObject({ status: 429, apiCode: 'upstream_rate_limited' });
+      expect(globalThis.fetch).toHaveBeenCalledTimes(2);
+      expect(revokeOrdinaryLinks).not.toHaveBeenCalled();
+    });
+
     it('fails closed on a second 429 without trying the SDK fallback', async () => {
       globalThis.fetch = jest.fn()
         .mockResolvedValue(refusal(429, { code: 'request_rate_limited' }, new Headers({ 'Retry-After': '1' })));
