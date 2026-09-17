@@ -1528,9 +1528,9 @@ async function getGuildApiKey(guildId) {
 // `via` (a SETUP_VIA value) names the setup door for the admin-change audit.
 async function setGuildApiKey(guildId, apiKey, configuredBy, via) {
   const door = normalizeSetupVia(via);
-  // Validate on every call so caller drift shows up on first setups too;
-  // omitted and unrecognized doors both audit as unknown.
-  if (via !== undefined && door !== via) {
+  // Validate on every call so caller drift (including a forgotten argument)
+  // shows up on first setups too; such doors audit as unknown.
+  if (door !== via) {
     logger.warn('Unrecognized setup door; auditing as unknown', { via });
   }
   const now = nowIso();
