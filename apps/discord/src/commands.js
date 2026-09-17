@@ -1699,7 +1699,7 @@ async function mintLinksInBatches({ initialResourceId, reuploadFn, expiresAt, re
         guildId,
       });
       for (const link of minted) {
-        allLinks.push({ qurl_link: link.qurl_link, qurl_id: link.qurl_id, resourceId: currentResourceId });
+        allLinks.push({ qurl_link: link?.qurl_link, qurl_id: link?.qurl_id, resourceId: currentResourceId });
       }
       // qurl_id is the only durable child-revoke identity (and the join key
       // against qurl.accessed webhooks). Never persist or deliver a link
@@ -3736,10 +3736,12 @@ async function handleRevokeSelect(interaction, { flow_id }) {
   }
 
   const sendId = interaction.values[0];
-  // Child revoke can outlast the 3s component-response window (one connector
-  // call of up to 65s per resource, plus the SDK fallback), so acknowledge
-  // first and edit the original message when the revoke settles.
-  await interaction.deferUpdate();
+  // Child revoke can outlast the 3s component-response window (up to 65s per
+  // connector chunk of ten children, plus a 60s SDK fallback budget), so
+  // acknowledge first and edit the original message when the revoke settles.
+  // A failed ack still revokes: the user asked for it and the barrier makes a
+  // repeat safe; only the result message is lost.
+  await interaction.deferUpdate().catch(logIgnoredDiscordErr);
   await interaction.editReply({ content: 'Revoking links...', components: [] }).catch(logIgnoredDiscordErr);
   const revoked = await revokeAllLinks(sendId, interaction.user.id, apiKey, resolveSenderAlias(interaction));
 
@@ -3747,7 +3749,7 @@ async function handleRevokeSelect(interaction, { flow_id }) {
     await interaction.editReply({
       content: 'Could not verify this send for revocation. It may already be revoked or unavailable; run `/qurl revoke` to refresh.',
       components: [],
-    });
+    }).catch(logIgnoredDiscordErr);
     return;
   }
 
@@ -3757,7 +3759,7 @@ async function handleRevokeSelect(interaction, { flow_id }) {
   await interaction.editReply({
     content: safeRevokeHeader(sendId, revoked.success, revoked.total, revoked.finalizationFailed),
     components: [],
-  });
+  }).catch(logIgnoredDiscordErr);
 }
 
 // /qurl setup — legacy modal-paste path conversion. See

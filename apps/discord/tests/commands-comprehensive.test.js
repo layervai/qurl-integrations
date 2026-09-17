@@ -1014,6 +1014,21 @@ describe('handleRevokeSelect (dispatcher path)', () => {
     );
   });
 
+  it('still revokes when the component acknowledgement fails', async () => {
+    mockDb.getSendItems.mockReturnValue([
+      { resource_id: 'res-1', recipient_discord_id: 'u-1', qurl_id: 'q_u_1' },
+    ]);
+    mockRevokeMintedLinks.mockResolvedValue(undefined);
+    const interaction = makeSelectInteraction({
+      deferUpdate: jest.fn().mockRejectedValue(new Error('Unknown interaction')),
+      editReply: jest.fn().mockRejectedValue(new Error('Unknown interaction')),
+    });
+
+    await expect(handleRevokeSelect(interaction, { flow_id: '0:1#guild-1#ch-1#user-1' })).resolves.toBeUndefined();
+
+    expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-1', ['q_u_1'], expect.anything());
+  });
+
   it('skips revoke when deleteFlow loses the race (deleted=false)', async () => {
     mockDeleteFlow.mockResolvedValueOnce({ deleted: false });
     const interaction = makeSelectInteraction();

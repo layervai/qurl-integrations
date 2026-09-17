@@ -876,6 +876,15 @@ describe('revokeMintedLinks — #1551 fail-closed contract', () => {
     expect(revokeOrdinaryLinks).toHaveBeenCalledWith('res-1', ['q_one'], 'guild-key');
   });
 
+  it('still falls back when discarding the 404 body fails', async () => {
+    const cancel = jest.fn().mockRejectedValue(new TypeError('stream locked'));
+    globalThis.fetch = jest.fn().mockResolvedValue({ ok: false, status: 404, body: { cancel } });
+
+    await connector.revokeMintedLinks('res-1', ['q_one'], 'guild-key');
+
+    expect(revokeOrdinaryLinks).toHaveBeenCalledWith('res-1', ['q_one'], 'guild-key');
+  });
+
   it('propagates an SDK fallback failure so a watermarked child stays retryable', async () => {
     globalThis.fetch = jest.fn().mockResolvedValue({ ok: false, status: 404 });
     revokeOrdinaryLinks.mockRejectedValueOnce(new Error('qURL API request failed (404)'));

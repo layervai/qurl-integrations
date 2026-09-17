@@ -54,6 +54,10 @@ const USER_AGENT = 'qurl-discord-bot/1.0';
 const QURL_ID_LOG_PATH = '/qurls/:resourceId';
 const RESOURCE_ID_LOG_PATH = '/resources/:resourceId';
 const RESOURCE_QURL_LOG_PATH = '/resources/:resourceId/qurls/:qurlId';
+// Total budget for one ordinary-child revoke batch (parent GET plus sequential
+// DELETEs, retries included), so a degraded qurl-service cannot hold a
+// deferred /qurl revoke past Discord's 15-minute interaction window.
+const ORDINARY_REVOKE_BUDGET_MS = 60_000;
 const UNKNOWN_STATUS0_CODE = 'unknown_error';
 
 // status-0 SDK error codes whose message the SDK synthesizes itself (no server
@@ -70,7 +74,8 @@ const SAFE_STATUS0_CODES = new Set([
 // control-plane calls, not a hot path; constructing here also means the client
 // binds the live globalThis.fetch at call time. baseUrl is the bare API origin
 // — the SDK prepends `/v1/...` itself.
-function makeClient(apiKey) {
+// `signal` bounds every attempt and retry of every call made with this client.
+function makeClient(apiKey, { signal } = {}) {
   const key = apiKey || config.QURL_API_KEY;
   if (!key) {
     throw new Error('QURL_API_KEY is not configured');
@@ -81,6 +86,12 @@ function makeClient(apiKey) {
     timeout: REQUEST_TIMEOUT_MS,
     maxRetries: MAX_RETRIES,
     userAgent: USER_AGENT,
+    ...(signal ? {
+      fetch: (url, init) => globalThis.fetch(url, {
+        ...init,
+        signal: init?.signal ? AbortSignal.any([signal, init.signal]) : signal,
+      }),
+    } : {}),
   });
 }
 
@@ -357,10 +368,11 @@ async function revokeOrdinaryLinks(resourceId, qurlIds, apiKey) {
     throw new Error('Invalid qURL revoke token identity');
   }
   if (qurlIds.length === 0) return;
-  const client = makeClient(apiKey);
+  const client = makeClient(apiKey, { signal: AbortSignal.timeout(ORDINARY_REVOKE_BUDGET_MS) });
   // Resolve the parent from the first child the service still indexes, so one
-  // unexpectedly unindexed child cannot block a retry of its siblings. Every
-  // candidate's parent is still matched against the recorded source.
+  // unexpectedly unindexed child cannot block a retry of its siblings. That
+  // parent must match the recorded source; qurl-service then enforces that
+  // each DELETEd child belongs to it.
   let parent;
   for (const [i, candidate] of qurlIds.entries()) {
     try {

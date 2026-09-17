@@ -452,6 +452,29 @@ describe('qURL client — revokeOrdinaryLinks', () => {
     expect(globalThis.fetch).toHaveBeenCalledTimes(4);
   });
 
+  it('bounds the whole batch, retries included, by one budget', async () => {
+    const budget = new AbortController();
+    const timeoutSpy = jest.spyOn(AbortSignal, 'timeout').mockImplementation(ms => (
+      ms === 60_000 ? budget.signal : new AbortController().signal
+    ));
+    const signals = [];
+    globalThis.fetch = jest.fn().mockImplementation(async (_url, init) => {
+      signals.push(init.signal);
+      return signals.length === 1
+        ? apiOk(200, { resource_id: PUBLIC_KEY_RESOURCE_ID, crid: CRID_RESOURCE_ID, qurls: [] })
+        : apiOk(204);
+    });
+    try {
+      await qurl.revokeOrdinaryLinks(PUBLIC_KEY_RESOURCE_ID, ['q_aaaaaaaaaa1'], 'guild-key');
+      expect(timeoutSpy).toHaveBeenCalledWith(60_000);
+      expect(signals).toHaveLength(2);
+      budget.abort();
+      expect(signals.every(signal => signal.aborted)).toBe(true);
+    } finally {
+      timeoutSpy.mockRestore();
+    }
+  });
+
   it('rejects a non-array token list before network work', async () => {
     globalThis.fetch = jest.fn();
     await expect(qurl.revokeOrdinaryLinks(PUBLIC_KEY_RESOURCE_ID, 'q_aaaaaaaaaa1', 'guild-key'))

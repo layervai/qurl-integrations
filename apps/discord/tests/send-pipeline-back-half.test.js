@@ -3186,6 +3186,19 @@ describe('mintLinksInBatches', () => {
     });
   });
 
+  it('surfaces the invalid-qurl_id error, not a TypeError, for a null mint entry', async () => {
+    mockMintLinks.mockResolvedValueOnce([{ qurl_id: 'q_ok', qurl_link: 'https://q.test/ok' }, null]);
+
+    await expect(mintLinksInBatches({
+      initialResourceId: 'res-1',
+      reuploadFn: jest.fn(),
+      expiresAt: new Date().toISOString(),
+      recipientCount: 2,
+      apiKey: 'apikey',
+    })).rejects.toThrow('Connector mint_link returned a link without a valid qurl_id');
+    expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-1', ['q_ok'], 'apikey');
+  });
+
   it('returns empty array when recipientCount = 0', async () => {
     const result = await mintLinksInBatches({
       initialResourceId: 'res-1',

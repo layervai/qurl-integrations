@@ -546,7 +546,9 @@ async function revokeMintedLinks(resourceId, qurlIds, apiKey) {
 
     if (response.status === 404) {
       routeAbsent = true;
-      await response.body?.cancel();
+      try {
+        await response.body?.cancel();
+      } catch { /* discarding the body is best-effort */ }
       await revokeOrdinaryLinks(resourceId, batchIds, apiKey);
       continue;
     }
@@ -566,10 +568,11 @@ async function revokeMintedLinks(resourceId, qurlIds, apiKey) {
     if (parsed?.success !== true) {
       throw new Error('Connector revoke_links returned success: false');
     }
+    const requested = new Set(batchIds);
     const statuses = new Map();
     const results = Array.isArray(parsed.results) ? parsed.results : [];
     for (const result of results) {
-      if (batchIds.includes(result?.qurl_id) && REVOKE_TERMINAL_STATUSES.has(result.status)
+      if (requested.has(result?.qurl_id) && REVOKE_TERMINAL_STATUSES.has(result.status)
           && !statuses.has(result.qurl_id)) {
         statuses.set(result.qurl_id, result.status);
       }
