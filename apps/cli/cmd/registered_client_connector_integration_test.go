@@ -244,7 +244,7 @@ func nativeRecoveryFixtureKey(t *testing.T, raw string) []byte {
 	return decoded
 }
 
-// nativeRecoveryUserData reads the recovery request fields. RecoveryGrant is a
+// nativeRecoveryUserData holds the recovery request fields this test asserts on. RecoveryGrant is a
 // mirrored private-contract request field; see TODO(upstream-contract) above.
 type nativeRecoveryUserData struct {
 	Query         string `json:"query"`
@@ -290,7 +290,13 @@ func nativeRecoveryHubReply(
 			return nil, fmt.Errorf("Hub assignment reply has no list object: %v", body["list"])
 		}
 		list["agent_id"] = connectorIntegrationAgentID
-		if err := setNativeRecoveryAssignment(list["assignment"], cellPublicKeyB64, now); err != nil {
+		// Distinct generations let the test tell the persisted refresh result
+		// from the recover result.
+		generation := float64(3)
+		if parsed.Mode == "recover" {
+			generation = 2
+		}
+		if err := setNativeRecoveryAssignment(list["assignment"], generation, cellPublicKeyB64, now); err != nil {
 			return nil, err
 		}
 		if parsed.Mode == "recover" {
@@ -303,7 +309,7 @@ func nativeRecoveryHubReply(
 	}
 }
 
-func setNativeRecoveryAssignment(value any, cellPublicKeyB64 string, now time.Time) error {
+func setNativeRecoveryAssignment(value any, generation float64, cellPublicKeyB64 string, now time.Time) error {
 	assignment, ok := value.(map[string]any)
 	if !ok {
 		return fmt.Errorf("Hub assignment reply has no assignment object: %v", value)
@@ -313,7 +319,7 @@ func setNativeRecoveryAssignment(value any, cellPublicKeyB64 string, now time.Ti
 		return fmt.Errorf("Hub assignment reply has no nhp_udp_endpoint object: %v", assignment["nhp_udp_endpoint"])
 	}
 	assignment["cell_id"] = "cell-test"
-	assignment["assignment_generation"] = float64(2)
+	assignment["assignment_generation"] = generation
 	assignment["endpoint_revision"] = float64(2)
 	assignment["lease_expires_at"] = now.Add(time.Hour).Format(time.RFC3339)
 	endpoint["host"] = connectorIntegrationCellHost
@@ -374,38 +380,29 @@ func TestOpenNativeRegisteredClient_ExplicitLoginUsesRealConnectorRecovery(t *te
 		t.Fatal(err)
 	}
 	t.Setenv(connectorstateowner.EnvKeyProvider, connectorstateowner.KeyProviderFile)
-	stateOwner, err := connectorstateowner.NewSDKStore(stateDir, connectorIntegrationAgentID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	stateStore, err := stateOwner.Handoff()
-	if err != nil {
-		t.Fatal(err)
-	}
 	registeredAt := now.Add(-time.Hour)
 	oldDeviceKey := conformance.AgentAssignmentDeviceAPIKeyFixture
-	if err := stateStore.SaveAgentState(context.Background(), &qurl.AgentState{
-		AgentID:                  connectorIntegrationAgentID,
-		PrivateKeyB64:            base64.StdEncoding.EncodeToString(agentPrivate),
-		PublicKeyB64:             base64.StdEncoding.EncodeToString(agentPublic),
-		SchemaVersion:            8,
-		RegisteredAt:             &registeredAt,
-		DeviceAPIKey:             oldDeviceKey,
-		DeviceAPIKeyID:           "key_OldCli123456",
-		EnrollmentCredentialKind: "bootstrap",
-		Assignment: &qurl.AgentAssignment{
-			CellID: "cell-test", AssignmentGeneration: 1, EndpointRevision: 1,
-			LeaseExpiresAt: now.Add(time.Hour),
-			Endpoint: qurl.NHPUDPEndpoint{
-				Host: connectorIntegrationCellHost, Port: 443, ServerPublicKeyB64: cellPublicB64,
+	withNativeRecoveryStateStore(t, stateDir, func(store qurl.AgentStateStore) {
+		if err := store.SaveAgentState(context.Background(), &qurl.AgentState{
+			AgentID:                  connectorIntegrationAgentID,
+			PrivateKeyB64:            base64.StdEncoding.EncodeToString(agentPrivate),
+			PublicKeyB64:             base64.StdEncoding.EncodeToString(agentPublic),
+			SchemaVersion:            8,
+			RegisteredAt:             &registeredAt,
+			DeviceAPIKey:             oldDeviceKey,
+			DeviceAPIKeyID:           "key_OldCli123456",
+			EnrollmentCredentialKind: "bootstrap",
+			Assignment: &qurl.AgentAssignment{
+				CellID: "cell-test", AssignmentGeneration: 1, EndpointRevision: 1,
+				LeaseExpiresAt: now.Add(time.Hour),
+				Endpoint: qurl.NHPUDPEndpoint{
+					Host: connectorIntegrationCellHost, Port: 443, ServerPublicKeyB64: cellPublicB64,
+				},
 			},
-		},
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if err := stateOwner.Close(); err != nil {
-		t.Fatal(err)
-	}
+		}); err != nil {
+			t.Fatal(err)
+		}
+	})
 
 	srv := apitest.NewServer(t)
 	srv.Script(http.MethodGet, "/v1/me", apitest.HandlerAPIKeyInvalid401(t))
@@ -474,15 +471,24 @@ func TestOpenNativeRegisteredClient_ExplicitLoginUsesRealConnectorRecovery(t *te
 	if err := opts.closeAPIClient(); err != nil {
 		t.Fatal(err)
 	}
-	recoveredState := loadPersistedAgentState(t, stateDir)
+	var recoveredState *qurl.AgentState
+	withNativeRecoveryStateStore(t, stateDir, func(store qurl.AgentStateStore) {
+		var err error
+		if recoveredState, err = store.LoadAgentState(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if recoveredState == nil {
+		t.Fatal("persisted connector agent state is missing")
+	}
 	if recoveredState.DeviceAPIKeyID != connectorIntegrationRecoveredKeyID {
 		t.Fatalf("recovered device API key ID = %q, want the cell-issued ID", recoveredState.DeviceAPIKeyID)
 	}
 	if recoveredState.DeviceAPIKey != replacementKey {
-		t.Fatalf("persisted device credential did not match the one that authorized the retry")
+		t.Fatal("persisted device credential did not match the one that authorized the retry")
 	}
-	if recoveredState.Assignment == nil || recoveredState.Assignment.AssignmentGeneration != 2 {
-		t.Fatalf("persisted assignment = %#v, want the refreshed generation 2", recoveredState.Assignment)
+	if recoveredState.Assignment == nil || recoveredState.Assignment.AssignmentGeneration != 3 {
+		t.Fatalf("persisted assignment = %#v, want the post-recovery refresh generation 3", recoveredState.Assignment)
 	}
 	if registry.bindCalls != 1 {
 		t.Fatalf("owner bindings = %d, want one after the successful retry", registry.bindCalls)
@@ -492,7 +498,10 @@ func TestOpenNativeRegisteredClient_ExplicitLoginUsesRealConnectorRecovery(t *te
 	}
 }
 
-func loadPersistedAgentState(t *testing.T, stateDir string) *qurl.AgentState {
+// withNativeRecoveryStateStore opens the connector state owner for fn and closes
+// it afterwards. The caller must already have set EnvKeyProvider to
+// KeyProviderFile, which the connector runtime under test also reads.
+func withNativeRecoveryStateStore(t *testing.T, stateDir string, fn func(qurl.AgentStateStore)) {
 	t.Helper()
 	owner, err := connectorstateowner.NewSDKStore(stateDir, connectorIntegrationAgentID)
 	if err != nil {
@@ -507,12 +516,5 @@ func loadPersistedAgentState(t *testing.T, stateDir string) *qurl.AgentState {
 	if err != nil {
 		t.Fatal(err)
 	}
-	state, err := store.LoadAgentState(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if state == nil {
-		t.Fatal("persisted connector agent state is missing")
-	}
-	return state
+	fn(store)
 }
