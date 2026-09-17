@@ -832,7 +832,7 @@ describe('revokeAllLinks', () => {
     ['whitespace', '   '],
     ['non-string', 42],
     ['overlong', `q_${'a'.repeat(200)}`],
-  ])('revokes identifiable siblings but stays unfinalized beside an %s stored token id', async (_label, qurlId) => {
+  ])('fails only the recipient with an %s stored token id; its sibling on the resource still revokes', async (_label, qurlId) => {
     mockDb.getSendItems.mockResolvedValueOnce([
       { resource_id: 'res-1', recipient_discord_id: 'user-1', qurl_id: 'q_good' },
       { resource_id: 'res-1', recipient_discord_id: 'user-2', qurl_id: qurlId },
@@ -840,30 +840,28 @@ describe('revokeAllLinks', () => {
 
     const result = await revokeAllLinks('send-1', 'sender-1', 'apikey');
 
+    expect(mockRevokeMintedLinks).toHaveBeenCalledTimes(1);
     expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-1', ['q_good'], 'apikey');
-    expect(result).toMatchObject({ success: 0, total: 2 });
+    expect(result).toMatchObject({
+      success: 1, total: 2, successUserIds: ['user-1'], failureUserIds: ['user-2'],
+    });
     expect(mockDb.markSendRevoked).not.toHaveBeenCalled();
     expect(logger.error).toHaveBeenCalledWith(
-      'Cannot fully revoke resource with missing or malformed stored token identity',
-      expect.objectContaining({ sendId: 'send-1', unidentified_token_count: 1 }),
+      'Cannot revoke send row with missing resource or token identity',
+      { sendId: 'send-1', affectedRecipients: 1 },
     );
   });
 
-  it('stays unfinalized when every stored token id is unusable', async () => {
+  it('revokes with a trimmed stored token id', async () => {
     mockDb.getSendItems.mockResolvedValueOnce([
-      { resource_id: 'res-1', recipient_discord_id: 'user-1' },
+      { resource_id: 'res-1', recipient_discord_id: 'user-1', qurl_id: ' q_good ' },
     ]);
 
     const result = await revokeAllLinks('send-1', 'sender-1', 'apikey');
 
-    expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-1', [], 'apikey');
-    expect(result.success).toBe(0);
-    expect(logger.error).toHaveBeenCalledWith(
-      'Cannot fully revoke resource with missing or malformed stored token identity',
-      expect.objectContaining({ unidentified_token_count: 1 }),
-    );
+    expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-1', ['q_good'], 'apikey');
+    expect(result.success).toBe(1);
   });
-
 
   it('records revocation intent before DELETEs and marks the send revoked only after every DELETE succeeds', async () => {
     mockDb.getSendItems.mockResolvedValueOnce(makeItems(3));
@@ -1202,7 +1200,7 @@ describe('revokeAllLinks', () => {
       send_id: 'send-malformed', success: 1, total: 1, unresolvable_recipients: 1,
     });
     expect(logger.error).toHaveBeenCalledWith(
-      'Cannot revoke send row with missing resource identity',
+      'Cannot revoke send row with missing resource or token identity',
       { sendId: 'send-malformed', affectedRecipients: 1 },
     );
   });
@@ -3163,7 +3161,7 @@ describe('mintLinksInBatches', () => {
       'res-1', Array.from({ length: 10 }, (_, i) => `q_${i}`), 'apikey',
     );
     expect(logger.error).toHaveBeenCalledWith('Failed to revoke links after a mint failure', {
-      failed_count: 1, total: 1,
+      failed_count: 1, total: 1, unidentified_count: 0,
     });
   });
 

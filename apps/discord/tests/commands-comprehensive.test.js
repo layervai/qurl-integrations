@@ -978,6 +978,8 @@ describe('handleRevokeSelect (dispatcher path)', () => {
       guildId: 'guild-1',
       channelId: 'ch-1',
       update: jest.fn().mockResolvedValue(undefined),
+      deferUpdate: jest.fn().mockResolvedValue(undefined),
+      editReply: jest.fn().mockResolvedValue(undefined),
       reply: jest.fn().mockResolvedValue(undefined),
       ...overrides,
     };
@@ -1003,7 +1005,10 @@ describe('handleRevokeSelect (dispatcher path)', () => {
       { stage: 'awaiting_revoke_select', reason: 'terminal' },
     );
     expect(mockRevokeMintedLinks).toHaveBeenCalledTimes(3);
-    expect(interaction.update).toHaveBeenCalledWith(
+    expect(interaction.deferUpdate.mock.invocationCallOrder[0])
+      .toBeLessThan(mockRevokeMintedLinks.mock.invocationCallOrder[0]);
+    expect(interaction.update).not.toHaveBeenCalled();
+    expect(interaction.editReply).toHaveBeenCalledWith(
       expect.objectContaining({ content: expect.stringContaining('3/3') }),
     );
   });
@@ -1056,7 +1061,7 @@ describe('handleRevokeSelect (dispatcher path)', () => {
     const interaction = makeSelectInteraction({ values: ['send-partial'] });
     await handleRevokeSelect(interaction, { flow_id: '0:1#guild-1#ch-1#user-1' });
 
-    expect(interaction.update).toHaveBeenCalledWith(
+    expect(interaction.editReply).toHaveBeenCalledWith(
       expect.objectContaining({ content: expect.stringContaining('1/2') }),
     );
   });
@@ -1071,11 +1076,11 @@ describe('handleRevokeSelect (dispatcher path)', () => {
     const interaction = makeSelectInteraction({ values: ['send-finalize-fail'] });
     await handleRevokeSelect(interaction, { flow_id: '0:1#guild-1#ch-1#user-1' });
 
-    expect(interaction.update).toHaveBeenCalledWith({
+    expect(interaction.editReply).toHaveBeenCalledWith({
       content: expect.stringContaining('Revoked 1/1 user.'),
       components: [],
     });
-    expect(interaction.update).toHaveBeenCalledWith({
+    expect(interaction.editReply).toHaveBeenCalledWith({
       content: expect.stringContaining('could not save the final revocation state'),
       components: [],
     });
@@ -1088,7 +1093,7 @@ describe('handleRevokeSelect (dispatcher path)', () => {
     await handleRevokeSelect(interaction, { flow_id: '0:1#guild-1#ch-1#user-1' });
 
     expect(mockRevokeMintedLinks).not.toHaveBeenCalled();
-    expect(interaction.update).toHaveBeenCalledWith({
+    expect(interaction.editReply).toHaveBeenCalledWith({
       content: 'Could not verify this send for revocation. It may already be revoked or unavailable; run `/qurl revoke` to refresh.',
       components: [],
     });
@@ -1107,14 +1112,14 @@ describe('handleRevokeSelect (dispatcher path)', () => {
 
     const first = makeSelectInteraction({ values: ['send-retry'] });
     await handleRevokeSelect(first, { flow_id: '0:1#guild-1#ch-1#user-1' });
-    expect(first.update).toHaveBeenCalledWith(expect.objectContaining({
+    expect(first.editReply).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringContaining('Could not confirm revocation for 1 user'),
     }));
     expect(mockDb.markSendRevoked).not.toHaveBeenCalled();
 
     const second = makeSelectInteraction({ values: ['send-retry'] });
     await handleRevokeSelect(second, { flow_id: '0:1#guild-1#ch-1#user-1' });
-    expect(second.update).toHaveBeenCalledWith(expect.objectContaining({
+    expect(second.editReply).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringContaining('Revoked 2/2 users.'),
     }));
     expect(mockRevokeMintedLinks).toHaveBeenCalledTimes(4);

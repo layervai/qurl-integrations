@@ -13,6 +13,7 @@ const {
   validateResourceId,
 } = require('./utils/resource-id');
 const { qurlApiError } = require('./utils/qurl-errors');
+const { hasPersistableQurlIdShape } = require('./utils/qurl-id');
 const dns = require('dns').promises;
 
 const { isPrivateHost } = require('./utils/private-host');
@@ -318,6 +319,9 @@ async function createOneTimeLink(targetUrl, expiresIn, label, apiKey) {
   return result;
 }
 
+// Whole-resource revoke. Retained for scripts/loadtest-standalone.js only: bot
+// revoke and cleanup must revoke children (connector.revokeMintedLinks),
+// because a shared parent delete never reaches watermarked children.
 async function deleteLink(resourceId, apiKey) {
   resourcePath(resourceId);
   const client = makeClient(apiKey);
@@ -342,19 +346,24 @@ async function deleteLink(resourceId, apiKey) {
 // Old send rows record a public resource key, so resolve the parent CRID from
 // an identified child and require it to match the recorded source first.
 // TODO(upstream-contract): qurl-service checks that each child belongs to the
-// CRID in the DELETE path. Callers pass one bounded batch (at most ten ids).
+// CRID in the DELETE path, so every child in one call must share the recorded
+// source. Callers pass one bounded batch (at most ten ids).
 async function revokeOrdinaryLinks(resourceId, qurlIds, apiKey) {
+  validateResourceId(resourceId);
+  if (!qurlIds.every(hasPersistableQurlIdShape)) {
+    throw new Error('Invalid qURL revoke token identity');
+  }
   if (qurlIds.length === 0) return;
   const client = makeClient(apiKey);
   const parent = await callQurl('GET', QURL_ID_LOG_PATH, () => client.get(qurlIds[0]));
   if (!parent?.crid || (parent.resource_id !== resourceId && parent.crid !== resourceId)) {
     throw new Error('qURL revoke parent does not match the recorded source');
   }
-  await Promise.all(qurlIds.map(qurlId => callQurl(
-    'DELETE',
-    RESOURCE_QURL_LOG_PATH,
-    () => client.revokeResourceQurl(parent.crid, qurlId),
-  )));
+  // Sequential: callers already fan out across resources, and each SDK call
+  // retries 429s, so a parallel burst here would amplify rate limiting.
+  for (const qurlId of qurlIds) {
+    await callQurl('DELETE', RESOURCE_QURL_LOG_PATH, () => client.revokeResourceQurl(parent.crid, qurlId));
+  }
 }
 
 async function getResourceStatus(resourceId, apiKey) {

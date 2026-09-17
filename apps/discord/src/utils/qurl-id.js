@@ -5,10 +5,10 @@
 // uses anything but letters, digits, `_` and `-`. Matching that cap keeps one
 // corrupt stored value from failing every retry of an otherwise valid batch.
 const MAX_QURL_ID_LENGTH = 64;
-// Current upstream IDs are q_ + 11 lowercase hex chars. Stay tolerant of older
-// q_-prefixed display handles, but never send separators, bearer-token
-// prefixes, or other arbitrary stored data to the endpoint.
-const CLEANUP_QURL_ID_PATTERN = /^q_[A-Za-z0-9_]+$/;
+// Current upstream IDs are q_ + 11 lowercase hex chars. Accept the endpoint's
+// whole charset behind the q_ prefix so a future id shape cannot fail sends,
+// while bearer-token prefixes and other stored data never reach the wire.
+const CLEANUP_QURL_ID_PATTERN = /^q_[A-Za-z0-9_-]+$/;
 
 // Returns a bounded identity usable for best-effort child revoke, or null.
 function qurlIdForCleanup(value) {

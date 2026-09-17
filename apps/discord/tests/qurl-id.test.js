@@ -1,8 +1,9 @@
 const { qurlIdForCleanup, hasPersistableQurlIdShape } = require('../src/utils/qurl-id');
 
 describe('qURL child identity guards', () => {
-  it('accepts a canonical id', () => {
+  it('accepts a canonical id and the endpoint charset', () => {
     expect(qurlIdForCleanup('q_0123456789a')).toBe('q_0123456789a');
+    expect(qurlIdForCleanup('q_a-b')).toBe('q_a-b');
     expect(hasPersistableQurlIdShape('q_0123456789a')).toBe(true);
   });
 
@@ -17,7 +18,7 @@ describe('qURL child identity guards', () => {
     expect(qurlIdForCleanup(`${atCap}a`)).toBeNull();
   });
 
-  it.each([undefined, null, '', '   ', 42, {}, 'bad/id', 'at_bearer', 'q_', 'q_a-b'])('rejects %p', (value) => {
+  it.each([undefined, null, '', '   ', 42, {}, 'bad/id', 'at_bearer', 'q_'])('rejects %p', (value) => {
     expect(qurlIdForCleanup(value)).toBeNull();
     expect(hasPersistableQurlIdShape(value)).toBe(false);
   });

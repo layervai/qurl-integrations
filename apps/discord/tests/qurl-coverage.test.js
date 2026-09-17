@@ -409,6 +409,15 @@ describe('qURL client — revokeOrdinaryLinks', () => {
     ]);
   });
 
+  it.each([
+    ['resource id', 'at_bearer_like', ['q_aaaaaaaaaa1'], 'Invalid resource ID format'],
+    ['token id', PUBLIC_KEY_RESOURCE_ID, ['at_bearer_like'], 'Invalid qURL revoke token identity'],
+  ])('rejects an invalid %s before network work', async (_, resourceId, qurlIds, message) => {
+    globalThis.fetch = jest.fn();
+    await expect(qurl.revokeOrdinaryLinks(resourceId, qurlIds, 'guild-key')).rejects.toThrow(message);
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+  });
+
   it('refuses to revoke children whose parent is not the recorded source', async () => {
     globalThis.fetch = jest.fn().mockResolvedValueOnce(apiOk(200, {
       resource_id: 'other-resource', crid: 'other-crid', qurls: [],

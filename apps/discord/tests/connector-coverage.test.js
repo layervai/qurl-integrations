@@ -807,10 +807,45 @@ describe('revokeMintedLinks — #1551 fail-closed contract', () => {
     });
   });
 
-  it('skips the network when no token ids were recorded', async () => {
+  it('skips the network and the confirmation log when no token ids were recorded', async () => {
     globalThis.fetch = jest.fn();
     await connector.revokeMintedLinks('res-1', [], 'guild-key');
     expect(globalThis.fetch).not.toHaveBeenCalled();
+    expect(revokeOrdinaryLinks).not.toHaveBeenCalled();
+    expect(logger.info).not.toHaveBeenCalled();
+  });
+
+  it('falls back to the bot credential when no guild key is supplied', async () => {
+    globalThis.fetch = jest.fn().mockResolvedValue(revoked('q_one'));
+    await connector.revokeMintedLinks('res-1', ['q_one']);
+    expect(globalThis.fetch.mock.calls[0][1].headers.Authorization).toBe('Bearer test-key-for-connector');
+  });
+
+  it('confirms a successful multi-chunk revoke', async () => {
+    const ids = Array.from({ length: 11 }, (_, i) => `q_${i + 1}`);
+    globalThis.fetch = jest.fn()
+      .mockResolvedValueOnce(revoked(...ids.slice(0, 10)))
+      .mockResolvedValueOnce(revoked(ids[10]));
+
+    await connector.revokeMintedLinks('res-1', ids, 'guild-key');
+
+    expect(globalThis.fetch).toHaveBeenCalledTimes(2);
+    expect(logger.info).toHaveBeenCalledWith('Confirmed minted link revoke', {
+      resource_ref: expect.stringMatching(/^sha256:/), count: 11,
+    });
+  });
+
+  it('does not re-probe an absent route for later chunks', async () => {
+    const ids = Array.from({ length: 11 }, (_, i) => `q_${i + 1}`);
+    globalThis.fetch = jest.fn().mockResolvedValue({ ok: false, status: 404 });
+
+    await connector.revokeMintedLinks('res-1', ids, 'guild-key');
+
+    expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+    expect(revokeOrdinaryLinks.mock.calls).toEqual([
+      ['res-1', ids.slice(0, 10), 'guild-key'],
+      ['res-1', ids.slice(10), 'guild-key'],
+    ]);
   });
 
   it('revokes not_connector_managed children through the SDK, never the parent', async () => {

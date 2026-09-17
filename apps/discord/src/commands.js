@@ -1715,9 +1715,13 @@ async function mintLinksInBatches({ initialResourceId, reuploadFn, expiresAt, re
     // not strand live children. mintLinks already revoked its own non-2xx
     // partial ids. Cleanup failures are logged, never mask the mint error.
     const idsByResource = new Map();
+    let unidentifiedCount = 0;
     for (const link of allLinks) {
       const qurlId = qurlIdForCleanup(link.qurl_id);
-      if (qurlId === null) continue;
+      if (qurlId === null) {
+        unidentifiedCount++;
+        continue;
+      }
       const ids = idsByResource.get(link.resourceId) || [];
       ids.push(qurlId);
       idsByResource.set(link.resourceId, ids);
@@ -1726,10 +1730,11 @@ async function mintLinksInBatches({ initialResourceId, reuploadFn, expiresAt, re
       revokeMintedLinks(resourceId, ids, apiKey)
     ), 5);
     const failedCount = results.filter(result => result.status === 'rejected').length;
-    if (failedCount > 0) {
+    if (failedCount > 0 || unidentifiedCount > 0) {
       logger.error('Failed to revoke links after a mint failure', {
         failed_count: failedCount,
         total: results.length,
+        unidentified_count: unidentifiedCount,
       });
     }
     throw error;
@@ -2928,29 +2933,6 @@ async function executeSendPipeline(interaction, {
   }
 }
 
-// Revoke one resource's recorded children, never the resource: connector
-// upload deduplication can share it with other sends, and
-// qurl-integrations-infra#1551 keeps it as the authorization anchor for a
-// retry. Every identifiable child is attempted, but an absent or malformed
-// stored identity cannot be proven revoked (a watermarked child lives on the
-// connector's tunnel, not this resource), so the call still throws and the
-// caller stays retryable.
-async function revokeResourceChildren(resourceId, storedQurlIds, apiKey, sendId) {
-  const qurlIds = storedQurlIds.map(qurlIdForCleanup).filter(Boolean);
-  const unidentified = storedQurlIds.filter(id => !hasPersistableQurlIdShape(id)).length;
-  if (unidentified > 0) {
-    logger.error('Cannot fully revoke resource with missing or malformed stored token identity', {
-      sendId,
-      resource_ref: resourceIdLogRef(resourceId),
-      unidentified_token_count: unidentified,
-    });
-  }
-  await revokeMintedLinks(resourceId, qurlIds, apiKey);
-  if (unidentified > 0) {
-    throw new Error('Cannot confirm revoke for a missing or malformed stored token identity');
-  }
-}
-
 async function cleanupFreshAddRecipientResources(batchSends, apiKey, sendId, options = {}) {
   const rowsMayHavePersisted = options.rowsMayHavePersisted !== false;
   const cleanupReason = options.reason || (rowsMayHavePersisted ? 'revoked_guard' : 'pre_persistence');
@@ -2982,7 +2964,9 @@ async function cleanupFreshAddRecipientResources(batchSends, apiKey, sendId, opt
   if (resourceIds.length === 0) return;
 
   const results = await batchSettled(resourceIds, async (resourceId) => {
-    await revokeResourceChildren(resourceId, qurlIdsByResource.get(resourceId), apiKey, sendId);
+    // Mint output was validated, so every id is canonical; revokeMintedLinks
+    // still throws on an invalid one, keeping cleanup fail-closed.
+    await revokeMintedLinks(resourceId, qurlIdsByResource.get(resourceId), apiKey);
     return resourceId;
   }, 5);
   const failed = [];
@@ -3737,10 +3721,14 @@ async function handleRevokeSelect(interaction, { flow_id }) {
   }
 
   const sendId = interaction.values[0];
+  // Child revoke can outlast the 3s component-response window (one connector
+  // call of up to 65s per resource, plus the SDK fallback), so acknowledge
+  // first and edit the original message when the revoke settles.
+  await interaction.deferUpdate();
   const revoked = await revokeAllLinks(sendId, interaction.user.id, apiKey, resolveSenderAlias(interaction));
 
   if (!revoked.barrierEstablished) {
-    await interaction.update({
+    await interaction.editReply({
       content: 'Could not verify this send for revocation. It may already be revoked or unavailable; run `/qurl revoke` to refresh.',
       components: [],
     });
@@ -3750,7 +3738,7 @@ async function handleRevokeSelect(interaction, { flow_id }) {
   // Slash-command path lacks the in-scope `recipients` array needed
   // to resolve names → no "Revoked for: …" line here. Operators
   // wanting names should use the inline button after a send.
-  await interaction.update({
+  await interaction.editReply({
     content: safeRevokeHeader(sendId, revoked.success, revoked.total, revoked.finalizationFailed),
     components: [],
   });
@@ -8426,15 +8414,20 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
   // Revoke each resource's children in one call per unique resource_id and
   // fan the result out to every recipient sharing it (mintLinksInBatches packs
   // up to TOKENS_PER_RESOURCE recipients per resource).
+  // A row without a usable qurl_id cannot be revoked: a watermarked child lives
+  // on the connector's tunnel, so deleting the shared parent would neither
+  // reach it nor be safe for other sends. Only that row's recipient fails;
+  // identifiable siblings on the same resource still revoke and succeed.
   const byResource = new Map();
   const invalidResourceRecipientIds = new Set();
   for (const item of items) {
-    if (typeof item.resource_id !== 'string' || item.resource_id.trim().length === 0) {
+    const qurlId = qurlIdForCleanup(item.qurl_id);
+    if (typeof item.resource_id !== 'string' || item.resource_id.trim().length === 0 || qurlId === null) {
       invalidResourceRecipientIds.add(item.recipient_discord_id);
       continue;
     }
     const list = byResource.get(item.resource_id) || [];
-    list.push(item);
+    list.push({ recipientId: item.recipient_discord_id, qurlId });
     byResource.set(item.resource_id, list);
   }
   const resourceEntries = [...byResource.entries()];
@@ -8443,8 +8436,8 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
   const successUserIds = [];
   const failureUserIds = [];
 
-  const results = await batchSettled(resourceEntries, async ([resourceId, resourceItems]) => {
-    await revokeResourceChildren(resourceId, resourceItems.map(it => it.qurl_id), apiKey, sendId);
+  const results = await batchSettled(resourceEntries, async ([resourceId, children]) => {
+    await revokeMintedLinks(resourceId, children.map(child => child.qurlId), apiKey);
     return resourceId;
   }, 5);
 
@@ -8456,14 +8449,14 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
   const seenSuccess = new Set();
   const seenFailure = new Set(invalidResourceRecipientIds);
   if (invalidResourceRecipientIds.size > 0) {
-    logger.error('Cannot revoke send row with missing resource identity', {
+    logger.error('Cannot revoke send row with missing resource or token identity', {
       sendId,
       affectedRecipients: invalidResourceRecipientIds.size,
     });
   }
   for (let i = 0; i < results.length; i++) {
-    const [resourceId, resourceItems] = resourceEntries[i];
-    const recipientIds = resourceItems.map(it => it.recipient_discord_id);
+    const [resourceId, children] = resourceEntries[i];
+    const recipientIds = children.map(child => child.recipientId);
     if (results[i].status === 'fulfilled') {
       for (const id of recipientIds) seenSuccess.add(id);
     } else {
@@ -8483,8 +8476,9 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
   const success = successUserIds.length;
   const total = totalUsers;
   // Audit success/total describe actual per-resource revoke confirmations.
-  // Malformed rows never fabricate a revoke denominator; report their affected recipients in
-  // a separate field while keeping finalization fail-closed.
+  // Malformed rows never fabricate a revoke denominator; report their
+  // affected recipients in a separate field while keeping finalization
+  // fail-closed.
   const auditTotal = byResource.size;
   const auditSuccess = results.filter(r => r.status === 'fulfilled').length;
   const unresolvableRecipients = invalidResourceRecipientIds.size;
