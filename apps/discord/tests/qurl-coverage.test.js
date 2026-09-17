@@ -437,6 +437,28 @@ describe('qURL client — revokeOrdinaryLinks', () => {
     expect(globalThis.fetch).toHaveBeenCalledTimes(4);
   });
 
+  it('resolves the parent from the next child when the first is no longer indexed', async () => {
+    globalThis.fetch = jest.fn()
+      .mockResolvedValueOnce(apiError(404, { code: 'not_found' }))
+      .mockResolvedValueOnce(apiOk(200, { resource_id: PUBLIC_KEY_RESOURCE_ID, crid: CRID_RESOURCE_ID, qurls: [] }))
+      .mockResolvedValue(apiOk(204));
+
+    await qurl.revokeOrdinaryLinks(PUBLIC_KEY_RESOURCE_ID, ['q_aaaaaaaaaa1', 'q_aaaaaaaaaa2'], 'guild-key');
+
+    expect(globalThis.fetch.mock.calls.map(([url]) => String(url)).slice(0, 2)).toEqual([
+      'https://api.test.local/v1/qurls/q_aaaaaaaaaa1',
+      'https://api.test.local/v1/qurls/q_aaaaaaaaaa2',
+    ]);
+    expect(globalThis.fetch).toHaveBeenCalledTimes(4);
+  });
+
+  it('rejects a non-array token list before network work', async () => {
+    globalThis.fetch = jest.fn();
+    await expect(qurl.revokeOrdinaryLinks(PUBLIC_KEY_RESOURCE_ID, 'q_aaaaaaaaaa1', 'guild-key'))
+      .rejects.toThrow('Invalid qURL revoke token identity');
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+  });
+
   it('refuses to revoke children whose parent is not the recorded source', async () => {
     globalThis.fetch = jest.fn().mockResolvedValueOnce(apiOk(200, {
       resource_id: 'other-resource', crid: 'other-crid', qurls: [],

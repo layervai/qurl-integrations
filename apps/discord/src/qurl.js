@@ -353,12 +353,23 @@ async function deleteLink(resourceId, apiKey) {
 // repeated revocation succeeds (204).
 async function revokeOrdinaryLinks(resourceId, qurlIds, apiKey) {
   validateResourceId(resourceId);
-  if (!qurlIds.every(hasPersistableQurlIdShape)) {
+  if (!Array.isArray(qurlIds) || !qurlIds.every(hasPersistableQurlIdShape)) {
     throw new Error('Invalid qURL revoke token identity');
   }
   if (qurlIds.length === 0) return;
   const client = makeClient(apiKey);
-  const parent = await callQurl('GET', QURL_ID_LOG_PATH, () => client.get(qurlIds[0]));
+  // Resolve the parent from the first child the service still indexes, so one
+  // unexpectedly unindexed child cannot block a retry of its siblings. Every
+  // candidate's parent is still matched against the recorded source.
+  let parent;
+  for (const [i, candidate] of qurlIds.entries()) {
+    try {
+      parent = await callQurl('GET', QURL_ID_LOG_PATH, () => client.get(candidate));
+      break;
+    } catch (err) {
+      if (err?.status !== 404 || i === qurlIds.length - 1) throw err;
+    }
+  }
   if (!parent?.crid || (parent.resource_id !== resourceId && parent.crid !== resourceId)) {
     throw new Error('qURL revoke parent does not match the recorded source');
   }

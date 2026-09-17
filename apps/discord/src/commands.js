@@ -1726,15 +1726,23 @@ async function mintLinksInBatches({ initialResourceId, reuploadFn, expiresAt, re
       ids.push(qurlId);
       idsByResource.set(link.resourceId, ids);
     }
-    const results = await batchSettled([...idsByResource], ([resourceId, ids]) => (
+    const entries = [...idsByResource];
+    const results = await batchSettled(entries, ([resourceId, ids]) => (
       revokeMintedLinks(resourceId, ids, apiKey)
     ), 5);
-    const failedCount = results.filter(result => result.status === 'rejected').length;
-    if (failedCount > 0 || unidentifiedCount > 0) {
+    // qurl_ids are non-secret revoke handles: log them so an operator can
+    // reconcile any child whose compensation failed.
+    const failures = results.flatMap((result, i) => (result.status === 'rejected' ? [{
+      resource_ref: resourceIdLogRef(entries[i][0]),
+      qurl_ids: entries[i][1],
+      error: result.reason?.message,
+    }] : []));
+    if (failures.length > 0 || unidentifiedCount > 0) {
       logger.error('Failed to revoke links after a mint failure', {
-        failed_count: failedCount,
+        failed_count: failures.length,
         total: results.length,
         unidentified_count: unidentifiedCount,
+        failures,
       });
     }
     throw error;
@@ -3732,6 +3740,7 @@ async function handleRevokeSelect(interaction, { flow_id }) {
   // call of up to 65s per resource, plus the SDK fallback), so acknowledge
   // first and edit the original message when the revoke settles.
   await interaction.deferUpdate();
+  await interaction.editReply({ content: 'Revoking links...', components: [] }).catch(logIgnoredDiscordErr);
   const revoked = await revokeAllLinks(sendId, interaction.user.id, apiKey, resolveSenderAlias(interaction));
 
   if (!revoked.barrierEstablished) {

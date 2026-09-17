@@ -1007,6 +1007,7 @@ describe('handleRevokeSelect (dispatcher path)', () => {
     expect(mockRevokeMintedLinks).toHaveBeenCalledTimes(3);
     expect(interaction.deferUpdate.mock.invocationCallOrder[0])
       .toBeLessThan(mockRevokeMintedLinks.mock.invocationCallOrder[0]);
+    expect(interaction.editReply).toHaveBeenCalledWith({ content: 'Revoking links...', components: [] });
     expect(interaction.update).not.toHaveBeenCalled();
     expect(interaction.editReply).toHaveBeenCalledWith(
       expect.objectContaining({ content: expect.stringContaining('3/3') }),

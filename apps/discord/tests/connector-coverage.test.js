@@ -442,7 +442,7 @@ describe('Connector client — coverage boost', () => {
       expect(serializedLogs).not.toContain('qurl.link');
     });
 
-    it('ignores malformed partial mint links and uses the generic debug path', async () => {
+    it('counts malformed partial mint links without revoking or surfacing them as ids', async () => {
       const logger = require('../src/logger');
       globalThis.fetch = jest.fn().mockResolvedValue({
         ok: false,
@@ -467,9 +467,10 @@ describe('Connector client — coverage boost', () => {
         expect(e.partialQurlIds).toBeUndefined();
       }
 
-      expect(logger.warn).not.toHaveBeenCalledWith(
+      expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+      expect(logger.warn).toHaveBeenCalledWith(
         'Connector mint_link returned partial links on non-2xx',
-        expect.anything(),
+        expect.objectContaining({ partial_qurl_ids: [], unidentified_qurl_count: 3 }),
       );
       expect(logger.debug).toHaveBeenCalledWith(
         'Connector mint_link error',
@@ -932,7 +933,6 @@ describe('revokeMintedLinks — #1551 fail-closed contract', () => {
     ['a foreign outcome', { success: true, results: [{ qurl_id: 'q_one', status: 'revoked' }, { qurl_id: 'q_other', status: 'revoked' }] }],
     ['a duplicate outcome', { success: true, results: [{ qurl_id: 'q_one', status: 'revoked' }, { qurl_id: 'q_one', status: 'revoked' }] }],
     ['an extra outcome', { success: true, results: [{ qurl_id: 'q_one', status: 'revoked' }, { qurl_id: 'q_two', status: 'revoked' }, { qurl_id: 'q_x', status: 'revoked' }] }],
-    ['success false', { success: false, results: [{ qurl_id: 'q_one', status: 'revoked' }, { qurl_id: 'q_two', status: 'revoked' }] }],
     ['malformed results', { success: true, results: {} }],
     ['an unknown status', { success: true, results: [{ qurl_id: 'q_one', status: 'revoked' }, { qurl_id: 'q_two', status: 'refused' }] }],
   ])('rejects a 200 with %s', async (_label, body) => {
@@ -941,6 +941,36 @@ describe('revokeMintedLinks — #1551 fail-closed contract', () => {
     await expect(connector.revokeMintedLinks('res-1', ['q_one', 'q_two'], 'guild-key'))
       .rejects.toThrow('Connector revoke_links did not confirm every requested link');
     expect(revokeOrdinaryLinks).not.toHaveBeenCalled();
+  });
+
+  it('reports success false distinctly even when every outcome looks terminal', async () => {
+    globalThis.fetch = jest.fn().mockResolvedValue(okJson({
+      success: false, results: [{ qurl_id: 'q_one', status: 'revoked' }],
+    }));
+    await expect(connector.revokeMintedLinks('res-1', ['q_one'], 'guild-key'))
+      .rejects.toThrow('Connector revoke_links returned success: false');
+  });
+
+  it('hands not_connector_managed children from a later chunk to the SDK', async () => {
+    const ids = Array.from({ length: 11 }, (_, i) => `q_${i + 1}`);
+    globalThis.fetch = jest.fn()
+      .mockResolvedValueOnce(revoked(...ids.slice(0, 10)))
+      .mockResolvedValueOnce(okJson({ success: true, results: [{ qurl_id: ids[10], status: 'not_connector_managed' }] }));
+
+    await connector.revokeMintedLinks('res-1', ids, 'guild-key');
+
+    expect(revokeOrdinaryLinks.mock.calls).toEqual([['res-1', [ids[10]], 'guild-key']]);
+  });
+
+  it('rejects the whole call when a later chunk fails after an earlier chunk confirmed', async () => {
+    const ids = Array.from({ length: 11 }, (_, i) => `q_${i + 1}`);
+    globalThis.fetch = jest.fn()
+      .mockResolvedValueOnce(revoked(...ids.slice(0, 10)))
+      .mockResolvedValueOnce(okJson({ success: true, results: [{ qurl_id: ids[10], status: 'not_connector_managed' }] }));
+    revokeOrdinaryLinks.mockRejectedValueOnce(new Error('qURL API DELETE failed (503)'));
+
+    await expect(connector.revokeMintedLinks('res-1', ids, 'guild-key')).rejects.toThrow('failed (503)');
+    expect(logger.info).not.toHaveBeenCalledWith('Confirmed minted link revoke', expect.anything());
   });
 
   it('rejects malformed JSON', async () => {
@@ -986,6 +1016,21 @@ describe('revokeMintedLinks — #1551 fail-closed contract', () => {
       resource_id: 'res-1', qurl_ids: ['q_partial_one', 'q_partial_two'],
     });
     expect(logger.error).not.toHaveBeenCalled();
+  });
+
+  it('counts partial children whose id cannot be revoked in the warning', async () => {
+    globalThis.fetch = jest.fn().mockResolvedValueOnce({
+      ok: false,
+      status: 502,
+      text: async () => JSON.stringify({ success: false, links: [{ qurl_id: `r_${'a'.repeat(80)}` }] }),
+    });
+
+    await expect(connector.mintLinks('res-1', { expiresAt: '2026-01-01T00:00:00Z', n: 1 }))
+      .rejects.toThrow('Connector mint_link failed (502)');
+    expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+    expect(logger.warn).toHaveBeenCalledWith('Connector mint_link returned partial links on non-2xx', expect.objectContaining({
+      partial_qurl_ids: [], unidentified_qurl_count: 1,
+    }));
   });
 
   it('keeps the original mint error and logs when partial cleanup fails', async () => {

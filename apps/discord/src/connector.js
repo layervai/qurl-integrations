@@ -96,11 +96,13 @@ function parseConnectorBody(bodyText) {
   return { parsed, apiCode, apiDetail };
 }
 
-// One identity rule for logging, the thrown error, and cleanup: only bounded
-// q_ ids that the revoke endpoint accepts.
+// One identity rule for the thrown error and cleanup: only bounded q_ ids that
+// the revoke endpoint accepts. The dropped count stays visible in the warning
+// so an upstream id-shape change cannot strand children without a log line.
 function partialQurlIdsFromLinks(links) {
-  if (!Array.isArray(links)) return [];
-  return links.map(link => qurlIdForCleanup(link?.qurl_id)).filter(Boolean);
+  if (!Array.isArray(links)) return { partialQurlIds: [], droppedCount: 0 };
+  const partialQurlIds = links.map(link => qurlIdForCleanup(link?.qurl_id)).filter(Boolean);
+  return { partialQurlIds, droppedCount: links.length - partialQurlIds.length };
 }
 
 function throwConnectorErrorFromBody(label, response, {
@@ -448,8 +450,8 @@ async function mintLinks(resourceId, { expiresAt, n, apiKey, selfDestructSeconds
       bodyText = await response.text();
     } catch { /* network read failed, fall through with empty body */ }
     const { parsed, apiCode, apiDetail } = parseConnectorBody(bodyText);
-    const partialQurlIds = partialQurlIdsFromLinks(parsed?.links);
-    if (partialQurlIds.length > 0) {
+    const { partialQurlIds, droppedCount } = partialQurlIdsFromLinks(parsed?.links);
+    if (partialQurlIds.length > 0 || droppedCount > 0) {
       // TODO(upstream-contract): Best-effort reconciliation signal; connector
       // error bodies must only include qurl_ids for links that were actually minted.
       logger.warn('Connector mint_link returned partial links on non-2xx', {
@@ -459,6 +461,7 @@ async function mintLinks(resourceId, { expiresAt, n, apiKey, selfDestructSeconds
         bodyLen: bodyText.length,
         partial_link_count: partialQurlIds.length,
         partial_qurl_ids: partialQurlIds,
+        unidentified_qurl_count: droppedCount,
       });
     }
     // TODO(upstream-contract): qurl-integrations-infra#1551 returns id-only
@@ -548,7 +551,7 @@ async function revokeMintedLinks(resourceId, qurlIds, apiKey) {
       continue;
     }
     if (!response.ok) {
-      await throwConnectorError('Connector revoke_links', response);
+      return throwConnectorError('Connector revoke_links', response);
     }
 
     let parsed;
@@ -560,8 +563,11 @@ async function revokeMintedLinks(resourceId, qurlIds, apiKey) {
 
     // Results are unordered: require exactly one confirmed outcome per
     // requested id. An empty, short, duplicate or foreign result set fails.
+    if (parsed?.success !== true) {
+      throw new Error('Connector revoke_links returned success: false');
+    }
     const statuses = new Map();
-    const results = parsed?.success === true && Array.isArray(parsed.results) ? parsed.results : [];
+    const results = Array.isArray(parsed.results) ? parsed.results : [];
     for (const result of results) {
       if (batchIds.includes(result?.qurl_id) && REVOKE_TERMINAL_STATUSES.has(result.status)
           && !statuses.has(result.qurl_id)) {

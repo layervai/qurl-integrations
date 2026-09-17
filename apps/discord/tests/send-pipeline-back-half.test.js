@@ -3175,7 +3175,14 @@ describe('mintLinksInBatches', () => {
       'res-1', Array.from({ length: 10 }, (_, i) => `q_${i}`), 'apikey',
     );
     expect(logger.error).toHaveBeenCalledWith('Failed to revoke links after a mint failure', {
-      failed_count: 1, total: 1, unidentified_count: 0,
+      failed_count: 1,
+      total: 1,
+      unidentified_count: 0,
+      failures: [{
+        resource_ref: resourceIdLogRef('res-1'),
+        qurl_ids: Array.from({ length: 10 }, (_, i) => `q_${i}`),
+        error: 'connector unavailable',
+      }],
     });
   });
 
