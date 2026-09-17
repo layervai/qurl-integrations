@@ -931,16 +931,20 @@ describe('revokeMintedLinks — #1551 fail-closed contract', () => {
     [502, { results: [{ qurl_id: 'q_one', status: 'failed' }] }],
     [503, { code: 'revoke_not_available' }],
   ])('fails closed on connector HTTP %i', async (status, body) => {
+    // Retry-After is deliberately ignored: callers retry on the next /qurl revoke.
     globalThis.fetch = jest.fn().mockResolvedValue({
       ok: false,
       status,
-      headers: new Headers({ 'Retry-After': '1' }),
       text: async () => JSON.stringify({ success: false, results: [], ...body }),
     });
+    const apiCode = body.code || null;
 
     await expect(connector.revokeMintedLinks('res-1', ['q_one'], 'guild-key'))
-      .rejects.toMatchObject({ message: `Connector revoke_links failed (${status})`, status });
+      .rejects.toMatchObject({ message: `Connector revoke_links failed (${status})`, status, apiCode });
     expect(revokeOrdinaryLinks).not.toHaveBeenCalled();
+    expect(logger.warn).toHaveBeenCalledWith('Connector revoke_links refused', {
+      resource_ref: expect.stringMatching(/^sha256:/), status, api_code: apiCode, count: 1,
+    });
   });
 
   it.each([
@@ -1049,8 +1053,11 @@ describe('revokeMintedLinks — #1551 fail-closed contract', () => {
       .rejects.toMatchObject({ partialQurlIds: ['q_0', 'q_1'] });
     expect(globalThis.fetch).toHaveBeenCalledTimes(2);
     expect(logger.warn).toHaveBeenCalledWith('Connector mint_link returned partial links on non-2xx', expect.objectContaining({
-      partial_link_count: 2, unidentified_qurl_count: 998,
+      partial_link_count: 2, unidentified_qurl_count: 0,
     }));
+    expect(logger.error).toHaveBeenCalledWith('Connector mint_link returned more partial links than requested', {
+      resource_ref: expect.stringMatching(/^sha256:/), requested: 2, capped_qurl_count: 998,
+    });
   });
 
   it('counts partial children whose id cannot be revoked in the warning', async () => {

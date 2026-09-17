@@ -523,7 +523,10 @@ describe('qURL client — revokeOrdinaryLinks', () => {
       .mockResolvedValueOnce(apiOk(204));
 
     await expect(qurl.revokeOrdinaryLinks(PUBLIC_KEY_RESOURCE_ID, ['q_aaaaaaaaaa1', 'q_aaaaaaaaaa2'], 'guild-key'))
-      .rejects.toThrow('qURL API DELETE /resources/:resourceId/qurls/:qurlId failed (404)');
+      .rejects.toMatchObject({
+        message: 'qURL API DELETE /resources/:resourceId/qurls/:qurlId failed (404)',
+        failedCount: 1,
+      });
     expect(globalThis.fetch.mock.calls.map(([url, init]) => [init?.method || 'GET', String(url)]).slice(2)).toEqual([
       ['DELETE', `https://api.test.local/v1/resources/${CRID_RESOURCE_ID}/qurls/q_aaaaaaaaaa1`],
       ['DELETE', `https://api.test.local/v1/resources/${CRID_RESOURCE_ID}/qurls/q_aaaaaaaaaa2`],

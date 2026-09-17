@@ -2969,11 +2969,11 @@ async function cleanupFreshAddRecipientResources(batchSends, apiKey, sendId, opt
   const qurlIdsByResource = new Map();
   let unidentifiedCount = 0;
   for (const s of batchSends) {
-    if (typeof s.resourceId !== 'string' || s.resourceId.length === 0) continue;
     const qurlId = qurlIdForCleanup(s.qurlId);
     // Mint output is validated, so this is defensive: revoke identifiable
-    // siblings instead of letting one bad id skip the whole resource.
-    if (qurlId === null) {
+    // siblings instead of letting one bad row skip the whole resource, and
+    // count a row missing either identity so the accounting is complete.
+    if (typeof s.resourceId !== 'string' || s.resourceId.length === 0 || qurlId === null) {
       unidentifiedCount++;
       continue;
     }

@@ -98,14 +98,18 @@ function parseConnectorBody(bodyText) {
 }
 
 // One identity rule for the thrown error and cleanup: only bounded ids that
-// the revoke endpoint accepts. The body is untrusted and cannot prove more than
-// the `n` links requested, so the list is capped at `n` to bound compensation.
-// The dropped count stays visible in the warning so an upstream id-shape
-// change cannot strand children without a log line.
+// the revoke endpoint accepts. Unidentified entries (an upstream id-shape
+// change) and ids beyond the `n` requested (the connector broke the mint
+// contract, so live children may be left) are counted separately; the cap
+// bounds compensation work driven by an untrusted body.
 function partialQurlIdsFromLinks(links, n) {
-  if (!Array.isArray(links)) return { partialQurlIds: [], droppedCount: 0 };
-  const partialQurlIds = links.map(link => qurlIdForCleanup(link?.qurl_id)).filter(id => id !== null).slice(0, n);
-  return { partialQurlIds, droppedCount: links.length - partialQurlIds.length };
+  if (!Array.isArray(links)) return { partialQurlIds: [], unidentifiedCount: 0, cappedCount: 0 };
+  const identified = links.map(link => qurlIdForCleanup(link?.qurl_id)).filter(id => id !== null);
+  return {
+    partialQurlIds: identified.slice(0, n),
+    unidentifiedCount: links.length - identified.length,
+    cappedCount: Math.max(0, identified.length - n),
+  };
 }
 
 function throwConnectorErrorFromBody(label, response, {
@@ -453,8 +457,15 @@ async function mintLinks(resourceId, { expiresAt, n, apiKey, selfDestructSeconds
       bodyText = await response.text();
     } catch { /* network read failed, fall through with empty body */ }
     const { parsed, apiCode, apiDetail } = parseConnectorBody(bodyText);
-    const { partialQurlIds, droppedCount } = partialQurlIdsFromLinks(parsed?.links, n);
-    if (partialQurlIds.length > 0 || droppedCount > 0) {
+    const { partialQurlIds, unidentifiedCount, cappedCount } = partialQurlIdsFromLinks(parsed?.links, n);
+    if (cappedCount > 0) {
+      logger.error('Connector mint_link returned more partial links than requested', {
+        resource_ref: resourceIdLogRef(resourceId),
+        requested: n,
+        capped_qurl_count: cappedCount,
+      });
+    }
+    if (partialQurlIds.length > 0 || unidentifiedCount > 0) {
       // TODO(upstream-contract): Best-effort reconciliation signal; connector
       // error bodies must only include qurl_ids for links that were actually minted.
       logger.warn('Connector mint_link returned partial links on non-2xx', {
@@ -464,7 +475,7 @@ async function mintLinks(resourceId, { expiresAt, n, apiKey, selfDestructSeconds
         bodyLen: bodyText.length,
         partial_link_count: partialQurlIds.length,
         partial_qurl_ids: partialQurlIds,
-        unidentified_qurl_count: droppedCount,
+        unidentified_qurl_count: unidentifiedCount,
       });
     }
     // TODO(upstream-contract): qurl-integrations-infra#1551 returns id-only
@@ -563,7 +574,22 @@ async function revokeMintedLinks(resourceId, qurlIds, apiKey) {
       continue;
     }
     if (!response.ok) {
-      return throwConnectorError('Connector revoke_links', response);
+      let bodyText = '';
+      try {
+        bodyText = await response.text();
+      } catch { /* network read failed, fall through with empty body */ }
+      const { parsed } = parseConnectorBody(bodyText);
+      // Surface only the connector's enum code (e.g. revoke_not_available);
+      // anything else in the body stays out of logs and errors.
+      const apiCode = typeof parsed?.code === 'string' && /^[a-z_]{1,64}$/.test(parsed.code) ? parsed.code : null;
+      // The durable "route is live but refusing" signal during enablement.
+      logger.warn('Connector revoke_links refused', {
+        resource_ref: resourceIdLogRef(resourceId),
+        status: response.status,
+        api_code: apiCode,
+        count: batchIds.length,
+      });
+      return throwConnectorErrorFromBody('Connector revoke_links', response, { bodyText, apiCode });
     }
 
     let parsed;

@@ -2842,12 +2842,14 @@ describe('handleAddRecipients — DB failure mid-flow', () => {
     await cleanupFreshAddRecipientResources([
       { resourceId: 'res-new', qurlId: 'q_aaaaaaaaaa1' },
       { resourceId: 'res-new', qurlId: undefined },
+      { resourceId: '', qurlId: 'q_aaaaaaaaaa2' },
     ], 'apikey', 'send-1', { rowsMayHavePersisted: false });
 
+    expect(mockRevokeMintedLinks).toHaveBeenCalledTimes(1);
     expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-new', ['q_aaaaaaaaaa1'], 'apikey');
     expect(logger.error).toHaveBeenCalledWith(
       'Failed to clean up freshly minted Add Recipients qURL resources',
-      expect.objectContaining({ failed_count: 0, unidentified_count: 1 }),
+      expect.objectContaining({ failed_count: 0, unidentified_count: 2 }),
     );
   });
 

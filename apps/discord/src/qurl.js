@@ -403,14 +403,19 @@ async function revokeOrdinaryLinks(resourceId, qurlIds, apiKey) {
   // retries 429s, so a parallel burst here would amplify rate limiting. Attempt
   // every child before failing so one stale child cannot shield live siblings.
   let firstFailure;
+  let failedCount = 0;
   for (const qurlId of qurlIds) {
     try {
       await callQurl('DELETE', RESOURCE_QURL_LOG_PATH, () => client.revokeResourceQurl(parent.crid, qurlId));
     } catch (err) {
+      failedCount++;
       firstFailure ??= err;
     }
   }
-  if (firstFailure) throw firstFailure;
+  if (firstFailure) {
+    firstFailure.failedCount = failedCount;
+    throw firstFailure;
+  }
 }
 
 async function getResourceStatus(resourceId, apiKey) {
