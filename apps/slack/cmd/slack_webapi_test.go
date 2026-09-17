@@ -1203,6 +1203,7 @@ func TestSlackReadResponseLimits(t *testing.T) {
 		}},
 	} {
 		t.Run(tc.method, func(t *testing.T) {
+			t.Parallel()
 			// Valid JSON at the ceiling must pass, and one extra byte must be refused.
 			response := `{"ok":true,"padding":"` + strings.Repeat("x", tc.limit-len(`{"ok":true,"padding":""}`)) + `"}`
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
