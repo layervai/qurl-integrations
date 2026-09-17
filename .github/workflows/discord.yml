@@ -98,6 +98,8 @@ jobs:
         # The next step is the sole dependency audit gate; do not duplicate its
         # registry request inside installation. Funding output stays enabled;
         # unlike the audit, it adds no registry request.
+        # Skip the optional producer state-store build; the bot does not use it.
+        # Keep optional packages installed for Jest's prebuilt native resolver.
         run: npm ci --ignore-scripts --no-audit
 
       - name: Audit dependencies

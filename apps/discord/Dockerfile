@@ -23,6 +23,7 @@ RUN chown node:node /app
 USER node
 COPY --chown=node:node package*.json ./
 RUN npm ci --omit=dev --omit=optional --ignore-scripts --no-audit \
+  && node -e "require('@layervai/qurl/node')" \
   && npm cache clean --force
 
 # Copy only what the runtime needs. A bare `COPY . .` invalidates the

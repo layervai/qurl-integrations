@@ -108,7 +108,10 @@ fallback. Watermarked children cannot be confirmed through that fallback;
 the send stays available for retry. Legacy send rows with no usable `qurl_id`
 also remain unconfirmed after endpoint activation; deleting their shared parent
 is not a safe recovery. A repeated connector 429 fails closed
-after one bounded retry, without an SDK fallback.
+after one bounded retry, without an SDK fallback. Revoke buttons and selects
+share a process-local guard for each sender and send. The guard remains active
+after the 13-minute result wait while revocation continues. Store checks still
+enforce ownership and prevent new recipients across processes.
 
 Before deployment, configure alarms for `Connector mint_link returned a link
 without a valid qurl_id`, `Connector mint_link over-minted`, `Connector mint_link

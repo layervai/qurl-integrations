@@ -572,9 +572,9 @@ function isAllowedFileType(contentType) {
 // collector instances (e.g. flow_state RESUME on a bot restart loading
 // unfinished sends).
 const addRecipientsLocks = new Set();
-// Same-process per-send Revoke lock. Collector-local `revokeInFlight`
+// Same-process per-sender/send Revoke lock. Collector-local `revokeInFlight`
 // handles duplicate clicks inside one management collector; this Set lets
-// another collector in the same process see a Revoke already mutating the
+// another collector or select handler in the same process see a Revoke mutating the
 // send. Cross-process safety relies on revoked_at plus the guarded
 // recordQURLSendBatch transaction.
 const revokingSendLocks = new Set();
@@ -1659,6 +1659,7 @@ const REVOKE_SELECT_PROGRESS_MSG = "Revoking links... this can take a few minute
 // TODO(upstream-contract): /qurl revoke result budget; 13 minutes leaves room
 // to edit the result before Discord's 15-minute interaction token expires.
 const REVOKE_SELECT_RESULT_WAIT_MS = 13 * 60 * 1000;
+const REVOKE_RUNNING_MSG = 'Revocation is still running. Run `/qurl revoke` again in a few minutes to check the result.';
 
 /**
  * Mint one-time links across a stream of connector resources, each capped at
@@ -2602,6 +2603,7 @@ async function executeSendPipeline(interaction, {
       return;
     }
 
+    const revokeLockKey = `${interaction.user.id}:${sendId}`;
     let showAllRecipients = false;
 
     // `revokeInFlight` dedups concurrent Revoke clicks. `revokeSucceeded`
@@ -2663,14 +2665,14 @@ async function executeSendPipeline(interaction, {
           revokeResultSuccess,
           revokeResultFinalizationFailed,
         );
-        await interaction.editReply(revokeReplyPayload(updated)).catch(logIgnoredDiscordErr);
+        await btnInteraction.editReply(revokeReplyPayload(updated)).catch(logIgnoredDiscordErr);
         return;
       }
 
       if (btnInteraction.customId === `qurl_revoke_${sendId}`) {
         // Sync dedup before any await (Node single-threaded).
         if (revokeInFlight) return btnInteraction.deferUpdate().catch(logIgnoredDiscordErr);
-        if (revokingSendLocks.has(sendId)) {
+        if (revokingSendLocks.has(revokeLockKey)) {
           await btnInteraction.reply({ content: ALREADY_REVOKING_SEND_MSG, ephemeral: true }).catch(logIgnoredDiscordErr);
           return;
         }
@@ -2679,7 +2681,7 @@ async function executeSendPipeline(interaction, {
           return;
         }
         revokeInFlight = true;
-        revokingSendLocks.add(sendId);
+        revokingSendLocks.add(revokeLockKey);
         // Keep this lock owned by the revoke work, not the collector lifetime:
         // if delete I/O hangs, Add stays blocked until that work settles (or
         // the process restarts) rather than minting while revoke may still run.
@@ -2687,6 +2689,7 @@ async function executeSendPipeline(interaction, {
         // overwrite the revoke-result message otherwise. Bare call
         // (no `if (monitor)`) — we're inside the `if (monitor) { ... }`
         // collector-setup block; the guard above already proved truthy.
+        let revoking;
         try {
           monitor.stop();
           await btnInteraction.deferUpdate().catch(logIgnoredDiscordErr);
@@ -2709,11 +2712,18 @@ async function executeSendPipeline(interaction, {
             // terminal gate for duplicate Revoke clicks; revokingSendLocks only
             // covers in-progress work across same-process collectors.
             revokeSucceeded = true;
-            await interaction.editReply({ content: 'Links for this send have already been revoked.', components: [] }).catch(logIgnoredDiscordErr);
+            await btnInteraction.editReply({ content: 'Links for this send have already been revoked.', components: [] }).catch(logIgnoredDiscordErr);
             return;
           }
-          await interaction.editReply({ content: 'Revoking links...', components: [] }).catch(logIgnoredDiscordErr);
-          const revoked = await revokeAllLinks(sendId, interaction.user.id, apiKey, resolveSenderAlias(interaction));
+          await btnInteraction.editReply({ content: 'Revoking links...', components: [] }).catch(logIgnoredDiscordErr);
+          revoking = revokeAllLinks(sendId, interaction.user.id, apiKey, resolveSenderAlias(interaction))
+            .finally(() => revokingSendLocks.delete(revokeLockKey));
+          if (!await settlesWithin(revoking, REVOKE_SELECT_RESULT_WAIT_MS)) {
+            logger.warn('Revoke button still running at its result budget', { sendId });
+            await btnInteraction.editReply({ content: REVOKE_RUNNING_MSG, components: [] }).catch(logIgnoredDiscordErr);
+            return;
+          }
+          const revoked = await revoking;
           if (!revoked.barrierEstablished) {
             revokeResultUserNames = [];
             revokeResultTotal = 0;
@@ -2725,7 +2735,7 @@ async function executeSendPipeline(interaction, {
             // intentionally hidden (unknown, foreign, or concurrently
             // finalized all share the store's fail-closed result).
             revokeSucceeded = true;
-            await interaction.editReply({
+            await btnInteraction.editReply({
               content: 'Could not verify this send for revocation. It may already be revoked or unavailable; run `/qurl revoke` to refresh.',
               components: [],
             }).catch(logIgnoredDiscordErr);
@@ -2752,7 +2762,7 @@ async function executeSendPipeline(interaction, {
             revokeResultSuccess,
             revokeResultFinalizationFailed,
           );
-          await interaction.editReply(revokeReplyPayload(initial)).catch(logIgnoredDiscordErr);
+          await btnInteraction.editReply(revokeReplyPayload(initial)).catch(logIgnoredDiscordErr);
           // Keep revokeInFlight true after success as the collector-local
           // terminal gate for duplicate Revoke clicks; revokingSendLocks only
           // covers in-progress work across same-process collectors.
@@ -2771,7 +2781,7 @@ async function executeSendPipeline(interaction, {
           });
         } catch (err) {
           logger.error('Revoke failed', { sendId, error: err.message });
-          await interaction.editReply({
+          await btnInteraction.editReply({
             content: 'Failed to revoke links. Try `/qurl revoke` instead.',
             components: [],
           }).catch(logIgnoredDiscordErr);
@@ -2779,7 +2789,7 @@ async function executeSendPipeline(interaction, {
           // keeps Add Recipients closed after a partial/external failure.
           revokeInFlight = false;
         } finally {
-          revokingSendLocks.delete(sendId);
+          if (!revoking) revokingSendLocks.delete(revokeLockKey);
         }
         // Collector keeps running for the post-revoke expand toggle;
         // its `time:` window auto-expires.
@@ -2796,7 +2806,7 @@ async function executeSendPipeline(interaction, {
         // FIRST (before any cap check), then verify remaining capacity and
         // release on rejection. That way a future refactor that adds an
         // `await` in the remaining check can't reopen a racy window.
-        if (revokingSendLocks.has(sendId) || revokeSucceeded) {
+        if (revokingSendLocks.has(revokeLockKey) || revokeSucceeded) {
           // Durable revoking_at/revoked_at state keeps stale Add clicks
           // disabled even after this collector-local lock is released.
           let content = ALREADY_REVOKING_SEND_MSG;
@@ -3807,6 +3817,12 @@ async function handleRevokeSelect(interaction, { flow_id }) {
   }
 
   const sendId = interaction.values[0];
+  const revokeLockKey = `${interaction.user.id}:${sendId}`;
+  if (revokingSendLocks.has(revokeLockKey)) {
+    return interaction.update({ content: ALREADY_REVOKING_SEND_MSG, components: [] }).catch(logIgnoredDiscordErr);
+  }
+  // Claim before acknowledging: another select/button must not start a fan-out.
+  revokingSendLocks.add(revokeLockKey);
   // Child revoke can outlast the 3s component-response window (up to 65s per
   // connector chunk of ten children, plus the SDK fallback budget), so
   // acknowledge with a progress update and edit the message when the revoke
@@ -3818,20 +3834,23 @@ async function handleRevokeSelect(interaction, { flow_id }) {
     });
   });
   let revoked;
+  let revoking;
   try {
-    const revoking = revokeAllLinks(sendId, interaction.user.id, apiKey, resolveSenderAlias(interaction));
+    revoking = revokeAllLinks(sendId, interaction.user.id, apiKey, resolveSenderAlias(interaction))
+      .finally(() => revokingSendLocks.delete(revokeLockKey));
     // Leave the result edit inside Discord's 15-minute interaction window: a
     // very large send can outlast it, so say so and let the revoke finish.
     if (!await settlesWithin(revoking, REVOKE_SELECT_RESULT_WAIT_MS)) {
       logger.warn('Revoke select still running at its result budget', { sendId });
       await interaction.editReply({
-        content: 'Revocation is still running. Run `/qurl revoke` again in a few minutes to check the result.',
+        content: REVOKE_RUNNING_MSG,
         components: [],
       }).catch(logIgnoredDiscordErr);
       return;
     }
     revoked = await revoking;
   } catch (err) {
+    if (!revoking) revokingSendLocks.delete(revokeLockKey);
     // The select menu is already gone; replace the progress text with one
     // actionable message and stop here so the dispatcher does not post twice.
     logger.error('Revoke select failed', { sendId, error: err?.message });

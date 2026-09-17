@@ -2424,7 +2424,7 @@ describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)'
     const makeClick = (action) => ({
       customId: `qurl_${action}_${sendId}`,
       deferUpdate: jest.fn().mockResolvedValue(undefined),
-      editReply: jest.fn().mockResolvedValue(undefined),
+      editReply: interaction.editReply,
       reply: jest.fn().mockResolvedValue(undefined),
     });
 
@@ -2437,6 +2437,33 @@ describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)'
       sendId,
     };
   }
+
+  it('bounds button result waiting and keeps the lock until background revoke finishes', async () => {
+    jest.useFakeTimers();
+    try {
+      const { collect, finishRevoke, interaction, makeClick, revokeStarted, sendId } = await setupRevocableSend();
+      interaction.editReply.mockClear().mockRejectedValue(new Error('Original interaction expired'));
+      const click = makeClick('revoke');
+      click.editReply = jest.fn().mockResolvedValue(undefined);
+      const pending = collect(click);
+      await revokeStarted.promise;
+      await jest.advanceTimersByTimeAsync(13 * 60 * 1000);
+      await pending;
+      expect(click.editReply).toHaveBeenCalledWith({
+        content: 'Revocation is still running. Run `/qurl revoke` again in a few minutes to check the result.',
+        components: [],
+      });
+      expect(interaction.editReply).not.toHaveBeenCalled();
+      expect(revokingSendLocks.has(`sender-1:${sendId}`)).toBe(true);
+      await collect(makeClick('revoke'));
+      expect(mockRevokeMintedLinks).toHaveBeenCalledTimes(1);
+      finishRevoke.resolve();
+      await jest.advanceTimersByTimeAsync(0);
+      expect(revokingSendLocks.has(`sender-1:${sendId}`)).toBe(false);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
 
   it('rejects Add Recipients while Revoke is in flight so post-revoke mints cannot survive', async () => {
     const {
@@ -2467,7 +2494,7 @@ describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)'
 
   it('rejects Add Recipients while another collector is revoking the same send', async () => {
     const { collect, makeClick, sendId } = await setupRevocableSend();
-    revokingSendLocks.add(sendId);
+    revokingSendLocks.add(`sender-1:${sendId}`);
 
     try {
       const addClick = makeClick('add');
@@ -2481,13 +2508,13 @@ describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)'
       expect(mockDb.recordQURLSendBatch).toHaveBeenCalledTimes(1);
       expect(mockRevokeMintedLinks).not.toHaveBeenCalled();
     } finally {
-      revokingSendLocks.delete(sendId);
+      revokingSendLocks.delete(`sender-1:${sendId}`);
     }
   });
 
   it('tells Revoke clicks when another collector is already revoking the send', async () => {
     const { collect, makeClick, sendId } = await setupRevocableSend();
-    revokingSendLocks.add(sendId);
+    revokingSendLocks.add(`sender-1:${sendId}`);
 
     try {
       const revokeClick = makeClick('revoke');
@@ -2500,7 +2527,7 @@ describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)'
       expect(revokeClick.deferUpdate).not.toHaveBeenCalled();
       expect(mockRevokeMintedLinks).not.toHaveBeenCalled();
     } finally {
-      revokingSendLocks.delete(sendId);
+      revokingSendLocks.delete(`sender-1:${sendId}`);
     }
   });
 
@@ -2608,7 +2635,7 @@ describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)'
     await revokeStarted.promise;
     finishRevoke.resolve();
     await revokePromise;
-    expect(revokingSendLocks.has(sendId)).toBe(false);
+    expect(revokingSendLocks.has(`sender-1:${sendId}`)).toBe(false);
 
     const addClick = makeClick('add');
     await collect(addClick);

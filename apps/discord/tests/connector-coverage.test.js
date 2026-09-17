@@ -305,6 +305,7 @@ describe('Connector client — coverage boost', () => {
         try {
           await connector.mintLinks('res-1', { expiresAt: '2099-01-01T00:00:00Z', n: 1 });
           expect(timeout).toHaveBeenCalledWith(65_000);
+          expect(globalThis.fetch.mock.calls[0][1].redirect).toBe('error');
           expect(timeout).toHaveBeenCalledWith(100_000);
           expect(globalThis.fetch.mock.calls[0][1].signal).toBeInstanceOf(AbortSignal);
         } finally {

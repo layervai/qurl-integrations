@@ -476,6 +476,7 @@ async function mintLinks(resourceId, { expiresAt, n, apiKey, selfDestructSeconds
   for (let attempt = 0; ; attempt++) {
     response = await fetch(`${config.CONNECTOR_URL}/api/mint_link/${resourceId}`, {
       method: 'POST',
+      redirect: 'error',
       headers: { 'Content-Type': 'application/json', ...connectorAuthHeaders(apiKey) },
       body: JSON.stringify(body),
       // The 55s handler deadline needs 10s for response transport.

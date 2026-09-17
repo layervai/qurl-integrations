@@ -1000,6 +1000,7 @@ describe('handleRevokeSelect (dispatcher path)', () => {
   }
 
   beforeEach(() => {
+    require('../src/commands')._test.revokingSendLocks.clear();
     mockDeleteFlow.mockResolvedValue({ deleted: true });
   });
 
@@ -1051,7 +1052,8 @@ describe('handleRevokeSelect (dispatcher path)', () => {
       mockDb.getSendItems.mockReturnValue([
         { resource_id: 'res-1', recipient_discord_id: 'u-1', qurl_id: 'q_u_1' },
       ]);
-      mockRevokeMintedLinks.mockImplementationOnce(() => new Promise(() => {}));
+      let finish;
+      mockRevokeMintedLinks.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
       const interaction = makeSelectInteraction();
 
       const pending = handleRevokeSelect(interaction, { flow_id: '0:1#guild-1#ch-1#user-1' });
@@ -1062,6 +1064,15 @@ describe('handleRevokeSelect (dispatcher path)', () => {
         content: 'Revocation is still running. Run `/qurl revoke` again in a few minutes to check the result.',
         components: [],
       });
+      const duplicate = makeSelectInteraction();
+      await handleRevokeSelect(duplicate, { flow_id: '0:2#guild-1#ch-1#user-1' });
+      expect(duplicate.update).toHaveBeenCalledWith({
+        content: 'Already revoking links for this send.', components: [],
+      });
+      expect(mockRevokeMintedLinks).toHaveBeenCalledTimes(1);
+      finish();
+      await jest.advanceTimersByTimeAsync(0);
+      expect(require('../src/commands')._test.revokingSendLocks.has('user-1:send-1')).toBe(false);
     } finally {
       jest.useRealTimers();
     }
