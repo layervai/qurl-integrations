@@ -32,6 +32,12 @@ const (
 	connectorIntegrationAgentID  = "agent-cli-integration"
 	connectorIntegrationHubHost  = "a.test.layerv.xyz"
 	connectorIntegrationCellHost = "b.test.layerv.xyz"
+
+	// qurl-conformance v0.16.0 moved the credential-recovery vectors to a
+	// private platform module, so this test keeps the synthetic, secret-free
+	// public exchange values it needs from the last public vector file.
+	connectorIntegrationRecoveryCredential = "lv_live_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"
+	connectorIntegrationRecoveryCellReply  = `{"errCode":"0","list":{"query":"agent_credential_recovery","version":1,"device_api_key_id":"key_RcV8mP3qTn5W"}}`
 )
 
 // nativeRecoveryRoute keeps the real qurl-go encrypted transport in this
@@ -242,7 +248,6 @@ func nativeRecoveryQuery(body []byte) (query, mode string, err error) {
 
 func nativeRecoveryHubReply(
 	t *testing.T,
-	recovery *conformance.AgentCredentialRecoveryFile,
 	assignment *conformance.AgentAssignmentFile,
 	cellPublicKeyB64 string,
 	now time.Time,
@@ -256,15 +261,16 @@ func nativeRecoveryHubReply(
 		var body map[string]any
 		switch mode {
 		case "recover":
-			if err := json.Unmarshal([]byte(recovery.PublicExchanges[conformance.AgentCredentialRecoveryHubPhase].SuccessBodyJSON), &body); err != nil {
-				return nil, err
-			}
-			list := body["list"].(map[string]any)
-			list["agent_id"] = connectorIntegrationAgentID
-			list["recovery_grant"] = "qrg1.integration-recovery-grant-0001"
-			list["recovery_grant_issued_at"] = now.Add(-time.Minute).Format(time.RFC3339)
-			list["recovery_grant_expires_at"] = now.Add(14 * time.Minute).Format(time.RFC3339)
-			setNativeRecoveryAssignment(list["assignment"].(map[string]any), cellPublicKeyB64, now)
+			recovered := map[string]any{"nhp_udp_endpoint": map[string]any{}}
+			setNativeRecoveryAssignment(recovered, cellPublicKeyB64, now)
+			body = map[string]any{"errCode": "0", "list": map[string]any{
+				"query": "cell_assignment", "version": 1, "mode": "recover",
+				"agent_id":                  connectorIntegrationAgentID,
+				"assignment":                recovered,
+				"recovery_grant":            "qrg1.integration-recovery-grant-0001",
+				"recovery_grant_issued_at":  now.Add(-time.Minute).Format(time.RFC3339),
+				"recovery_grant_expires_at": now.Add(14 * time.Minute).Format(time.RFC3339),
+			}}
 		case "refresh":
 			if err := json.Unmarshal([]byte(assignment.RefreshAssignment.Result.BodyJSON), &body); err != nil {
 				return nil, err
@@ -290,21 +296,17 @@ func setNativeRecoveryAssignment(assignment map[string]any, cellPublicKeyB64 str
 	endpoint["server_public_key_b64"] = cellPublicKeyB64
 }
 
-func nativeRecoveryCellReply(recovery *conformance.AgentCredentialRecoveryFile) func([]byte) ([]byte, error) {
+func nativeRecoveryCellReply() func([]byte) ([]byte, error) {
 	return func(request []byte) ([]byte, error) {
 		query, _, err := nativeRecoveryQuery(request)
 		if err != nil || query != "agent_credential_recovery" {
 			return nil, fmt.Errorf("unexpected cell request %q: %w", query, err)
 		}
-		return []byte(recovery.PublicExchanges[conformance.AgentCredentialRecoveryCellPhase].SuccessBodyJSON), nil
+		return []byte(connectorIntegrationRecoveryCellReply), nil
 	}
 }
 
 func TestOpenNativeRegisteredClient_ExplicitLoginUsesRealConnectorRecovery(t *testing.T) {
-	recovery, err := conformance.AgentCredentialRecovery()
-	if err != nil {
-		t.Fatal(err)
-	}
 	assignment, err := conformance.AgentAssignmentGolden()
 	if err != nil {
 		t.Fatal(err)
@@ -319,8 +321,8 @@ func TestOpenNativeRegisteredClient_ExplicitLoginUsesRealConnectorRecovery(t *te
 	now := time.Now().UTC().Round(time.Second)
 
 	hub := newNativeRecoveryUDPServer(t, hubPrivate, agentPublic, true,
-		nativeRecoveryHubReply(t, recovery, assignment, cellPublicB64, now))
-	cell := newNativeRecoveryUDPServer(t, cellPrivate, agentPublic, false, nativeRecoveryCellReply(recovery))
+		nativeRecoveryHubReply(t, assignment, cellPublicB64, now))
+	cell := newNativeRecoveryUDPServer(t, cellPrivate, agentPublic, false, nativeRecoveryCellReply())
 	// The native transport rejects special-purpose IP ranges before dialing.
 	// The injected dialer maps these synthetic route labels to local
 	// sockets, so the test sends no packet to either public address.
@@ -402,7 +404,7 @@ func TestOpenNativeRegisteredClient_ExplicitLoginUsesRealConnectorRecovery(t *te
 			return connectorshare.OpenNativeRuntime(ctx, cfg)
 		},
 	}
-	validatedAccountKey := recovery.Fixtures.RecoveryCredential
+	validatedAccountKey := connectorIntegrationRecoveryCredential
 	account, err := opts.apiClient(validatedAccountKey)
 	if err != nil {
 		t.Fatal(err)
