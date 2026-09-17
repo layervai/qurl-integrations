@@ -149,6 +149,7 @@ const (
 )
 
 type tunnelInstallArgs struct {
+	Hub         TunnelHub
 	Slug        string
 	Alias       string
 	LocalPort   int
@@ -1442,6 +1443,12 @@ func (h *Handler) renderTunnelInstallInstructions(args *tunnelInstallArgs, image
 	// prepareTunnelInstallMessage can preflight all environment-specific
 	// rendering before CreateAPIKey, and processTunnelInstall delivers the
 	// validated key through a separate DM.
+	if err := h.cfg.TunnelHub.Validate(); err != nil {
+		return "", err
+	}
+	copyArgs := *args
+	copyArgs.Hub = h.cfg.TunnelHub
+	args = &copyArgs
 	switch args.Environment {
 	case tunnelEnvECSFargate:
 		return renderECSFargateTunnelInstructions(args, image)

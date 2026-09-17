@@ -1,18 +1,21 @@
 package state
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	connectoragentstate "github.com/layervai/qurl-connector/pkg/agentstate"
 	qurl "github.com/layervai/qurl-go/qurl"
 )
 
 // clearStateEnv detaches the test from any ambient operator configuration.
 func clearStateEnv(t *testing.T) {
 	t.Helper()
-	for _, name := range []string{EnvStateDirPrimary, EnvAgentID, "XDG_STATE_HOME", "HOME", "LOCALAPPDATA"} {
+	for _, name := range []string{EnvStateDirPrimary, EnvAgentID, "XDG_STATE_HOME", "HOME", "LOCALAPPDATA", connectoragentstate.EnvKeyProvider, connectoragentstate.EnvLocalKeyFD} {
 		t.Setenv(name, "restore-after-test")
 		if err := os.Unsetenv(name); err != nil {
 			t.Fatal(err)
@@ -126,10 +129,16 @@ func isWindows(t *testing.T) bool {
 
 // secureStateTestDir creates the test namespace through the production state
 // setup path. This is required on Windows, where t.TempDir() correctly retains
-// an inherited ACL that the production store must reject.
+// an inherited ACL that the production store must reject. Symlink components
+// are resolved because the connector's sealed store refuses them, and on
+// macOS t.TempDir() lives below the /var alias.
 func secureStateTestDir(t *testing.T) string {
 	t.Helper()
-	dir := filepath.Join(t.TempDir(), "state")
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(base, "state")
 	if err := EnsureDirMode(dir); err != nil {
 		t.Fatal(err)
 	}
@@ -221,5 +230,139 @@ func TestStoreFailsClosedAfterClose(t *testing.T) {
 	}
 	if nilStore.Dir() != "" {
 		t.Fatal("nil Dir() should be empty")
+	}
+}
+
+func saveTestAgentState(t *testing.T, store *Store) qurl.AgentStateStore {
+	t.Helper()
+	sdkStore, err := store.Handoff()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sdkStore.SaveAgentState(context.Background(), &qurl.AgentState{AgentID: "a"}); err != nil {
+		t.Fatal(err)
+	}
+	return sdkStore
+}
+
+func TestOpenFileProviderStaysPlaintext(t *testing.T) {
+	clearStateEnv(t)
+	t.Setenv(connectoragentstate.EnvKeyProvider, " File ")
+	store := openTestStore(t)
+	sdkStore := saveTestAgentState(t, store)
+	if _, ok := sdkStore.(*qurl.FileAgentStateStore); !ok {
+		t.Fatalf("Handoff() returned %T, want the plaintext *qurl.FileAgentStateStore", sdkStore)
+	}
+	if _, err := os.Stat(filepath.Join(store.Dir(), AgentStateFile)); err != nil {
+		t.Fatalf("plaintext envelope missing under the explicit file provider: %v", err)
+	}
+}
+
+func TestOpenUnknownKeyProviderFailsClosed(t *testing.T) {
+	clearStateEnv(t)
+	t.Setenv(connectoragentstate.EnvKeyProvider, "not-a-provider")
+	dir := secureStateTestDir(t)
+	store, err := Open(dir)
+	if err == nil {
+		_ = store.Close()
+		t.Fatal("unknown key provider accepted")
+	}
+	// Naming the rejected value proves the provider check failed, not an
+	// earlier directory handshake.
+	if !strings.Contains(err.Error(), connectoragentstate.EnvKeyProvider) || !strings.Contains(err.Error(), "not-a-provider") {
+		t.Fatalf("Open() error = %v, want the provider-name refusal", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, AgentStateFile)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("plaintext envelope created: %v", err)
+	}
+}
+
+// TestOpenLocalKeyWithoutDescriptorFailsClosed runs on every platform: the
+// missing-descriptor refusal comes after the connector has validated the
+// state directory, so it also proves the connector accepts a directory the
+// CLI prepared (including its Windows owner-only DACL).
+//
+// TODO(upstream-contract): the message names LAYERV_LOCAL_KEY_FD on Windows
+// too because qurl-connector's newLocalKeyProviderFromEnv checks the variable
+// is set before it reaches the platform-specific descriptor read, which is
+// what reports "unsupported on this platform". If that order ever flips, this
+// assertion becomes unix-only.
+func TestOpenLocalKeyWithoutDescriptorFailsClosed(t *testing.T) {
+	clearStateEnv(t)
+	t.Setenv(connectoragentstate.EnvKeyProvider, connectoragentstate.KeyProviderLocalKey)
+	dir := secureStateTestDir(t)
+	store, err := Open(dir)
+	if err == nil {
+		_ = store.Close()
+		t.Fatal("local-key accepted without a key descriptor")
+	}
+	if !strings.Contains(err.Error(), connectoragentstate.EnvLocalKeyFD) {
+		t.Fatalf("Open() error = %v, want the refusal naming %s", err, connectoragentstate.EnvLocalKeyFD)
+	}
+	for _, name := range []string{AgentStateFile, connectoragentstate.SealedAgentStateFile} {
+		if _, err := os.Lstat(filepath.Join(dir, name)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("%s created without a key: %v", name, err)
+		}
+	}
+	// And the namespace the refused sealed open leaves behind is genuinely
+	// fresh, which is what lets Open's plaintext guard key on the envelope
+	// filename rather than on a marker. If a future connector writes a
+	// durability artifact at prepare time, this is where that stops being true.
+	clearStateEnv(t)
+	plaintext, err := Open(dir)
+	if err != nil {
+		t.Fatalf("plaintext Open after a refused sealed open = %v, want the directory treated as fresh", err)
+	}
+	t.Cleanup(func() { _ = plaintext.Close() })
+}
+
+// TestSealedProviderSelectedMirrorsTheConnectorsProviderName pins the
+// trim-and-case-fold rule two packages now depend on: Open picks the sealed
+// branch with it, and RequireRuntimeSupervision refuses native supervision
+// with it.
+func TestSealedProviderSelectedMirrorsTheConnectorsProviderName(t *testing.T) {
+	for raw, want := range map[string]bool{
+		"":                                      false,
+		"   ":                                   false,
+		connectoragentstate.KeyProviderFile:     false,
+		" FILE ":                                false,
+		"File":                                  false,
+		connectoragentstate.KeyProviderLocalKey: true,
+		" LOCAL-KEY ":                           true,
+		" not-a-provider ":                      true,
+	} {
+		t.Run(raw, func(t *testing.T) {
+			t.Setenv(connectoragentstate.EnvKeyProvider, raw)
+			if got := SealedProviderSelected(); got != want {
+				t.Fatalf("SealedProviderSelected() with %q = %t, want %t", raw, got, want)
+			}
+		})
+	}
+}
+
+// TestRequireRuntimeSupervisionRefusesASealedNamespaceUnderNative pins that a
+// sealed namespace is refused before anything is written. A sealed envelope
+// created under native supervision could never be adopted afterwards -
+// EstablishExternalRuntimeMode requires a fresh namespace - so this guard is
+// what keeps the dead end unreachable.
+func TestRequireRuntimeSupervisionRefusesASealedNamespaceUnderNative(t *testing.T) {
+	clearStateEnv(t)
+	dir := secureStateTestDir(t)
+	if err := RequireRuntimeSupervision(dir, RuntimeSupervisionNative); err != nil {
+		t.Fatalf("plaintext native namespace = %v, want accepted", err)
+	}
+	t.Setenv(connectoragentstate.EnvKeyProvider, connectoragentstate.KeyProviderLocalKey)
+	err := RequireRuntimeSupervision(dir, RuntimeSupervisionNative)
+	if !errors.Is(err, ErrAgentStateEnvelope) {
+		t.Fatalf("sealed native namespace = %v, want ErrAgentStateEnvelope", err)
+	}
+	if !strings.Contains(err.Error(), "--supervision external") || !strings.Contains(err.Error(), "held no state before") {
+		t.Fatalf("refusal = %v, want the whole remedy: external supervision in a directory that has held no state", err)
+	}
+	if err := EstablishExternalRuntimeMode(context.Background(), dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := RequireRuntimeSupervision(dir, RuntimeSupervisionExternal); err != nil {
+		t.Fatalf("sealed external namespace = %v, want accepted", err)
 	}
 }

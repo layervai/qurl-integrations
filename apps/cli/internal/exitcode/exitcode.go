@@ -202,6 +202,17 @@ func FromError(err error) int {
 		return InvalidInput
 	case isNetworkError(err):
 		return Unavailable
+	case errors.Is(err, state.ErrAgentStateEnvelope):
+		// Deliberately the last row before the default, and outside
+		// connectorSentinelCode: Open's sealed branch wraps this sentinel around
+		// every failure, including ones qurl-go classifies itself - a loose
+		// directory mode is Auth on the plaintext branch and must stay Auth on
+		// the sealed one. Reaching here means nothing more specific matched, so
+		// the cause is what the sentinel names: the envelope does not match the
+		// selected key provider, whose remedy is LAYERV_KEY_PROVIDER /
+		// LAYERV_LOCAL_KEY_FD or a different state directory, never the command
+		// line.
+		return Config
 	default:
 		return General
 	}
@@ -266,6 +277,14 @@ func cliSentinelCode(err error) (int, bool) {
 		return Unavailable, true
 	case errors.Is(err, auth.ErrNoCredential), errors.Is(err, auth.ErrInvalidKey):
 		return Auth, true
+	case errors.Is(err, auth.ErrDeviceEnrollmentScope):
+		// The device credential exists but is the wrong kind for its
+		// namespace; the supervisor rotates the state directory and enrolls
+		// again, the same remedy as a rejected credential.
+		return Auth, true
+	case errors.Is(err, auth.ErrEnrollmentTokenFile):
+		// Correct the supervisor's token file; preserve the device namespace.
+		return Auth, true
 	case errors.Is(err, auth.ErrCredentialConflict), errors.Is(err, auth.ErrDeviceAccountConflict):
 		return Conflict, true
 	case errors.Is(err, config.ErrInvalidProfileName),
@@ -289,6 +308,14 @@ func connectorSentinelCode(err error) (int, bool) { //nolint:gocyclo // Keep the
 		return Config, true
 	case errors.Is(err, connectordaemon.ErrResourceGone):
 		return NotFound, true
+	case errors.Is(err, connectordaemon.ErrExternalDaemonNotRunning):
+		// The local daemon is another supervisor's process and it is not
+		// serving: the Unavailable row, and the caller's cue to start it.
+		return Unavailable, true
+	case errors.Is(err, state.ErrRuntimeSupervision):
+		// The namespace is supervised the other way; the remedy is the
+		// --supervision setting, the Hub triple's configuration row.
+		return Config, true
 	case errors.Is(err, state.ErrLocalShareOwnerConflict):
 		return Conflict, true
 	case errors.Is(err, state.ErrLocalShareVersionUnsupported):

@@ -679,8 +679,13 @@ func sandboxFailureCleanedCRID(output string) (string, error) {
 }
 
 func waitSandboxFailureDaemonStopped(stateDir string, limit time.Duration) error {
+	// The child CLI inherits this process's environment, so resolve as it does.
+	socketPath, err := connectordaemon.SocketPathForStateDir(stateDir, os.LookupEnv)
+	if err != nil {
+		return err
+	}
 	deadline := time.Now().Add(limit)
-	client := connectordaemon.IPCClient{SocketPath: connectordaemon.StateSocketPath(stateDir)}
+	client := connectordaemon.IPCClient{SocketPath: socketPath}
 	var last error
 	for time.Now().Before(deadline) {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)

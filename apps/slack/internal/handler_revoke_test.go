@@ -2,6 +2,7 @@ package internal
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -101,6 +102,10 @@ func newRevokeHandlerWithDeleteStatus(t *testing.T, status int, body string) *Ha
 	t.Helper()
 	ts := newAdminTestServers(t)
 	addRevokeResourceRead(t, ts, testRevokeResourceID, client.ResourceTypeURL)
+	ts.addCustomer(http.MethodPut, "/v1/resources/"+testRevokeResourceID+"/sharing", func(w http.ResponseWriter, _ *http.Request) {
+		t.Error("URL resource revoke must not touch tunnel sharing")
+		w.WriteHeader(http.StatusInternalServerError)
+	})
 	ts.addCustomer(http.MethodDelete, "/v1/resources/"+testRevokeResourceID, func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(status)
 		if body != "" {
@@ -113,12 +118,44 @@ func newRevokeHandlerWithDeleteStatus(t *testing.T, status int, body string) *Ha
 func addRevokeResourceRead(t *testing.T, ts *adminTestServers, resourceID, resourceType string) {
 	t.Helper()
 	ts.addCustomer(http.MethodGet, "/v1/resources/"+resourceID, func(w http.ResponseWriter, _ *http.Request) {
-		respondQURLEnvelope(t, w, map[string]any{
+		respondQURLEnvelope(t, w, map[string]any{"resource": map[string]any{
 			"resource_id": resourceID,
 			"type":        resourceType,
 			"slug":        testRevokeAlias,
 			"status":      client.StatusActive,
-		})
+		}, "qurls": []any{}})
+	})
+}
+
+const (
+	revokeNotFoundBody     = `{"error":{"title":"Not Found","detail":"resource gone","code":"not_found","status":404}}`
+	revokeUnauthorizedBody = `{"error":{"title":"Unauthorized","detail":"bad key","code":"unauthorized","status":401}}`
+)
+
+// seedRevokeAlias seeds an admin workspace with testRevokeAlias bound to
+// testRevokeResourceID in C_test.
+func seedRevokeAlias(t *testing.T, ts *adminTestServers) {
+	t.Helper()
+	ts.seedAdmin(t)
+	ts.seedPolicyAliasBindings(t, testAdminTeamID, "C_test", map[string]string{testRevokeAlias: testRevokeResourceID})
+}
+
+// revokeAliasBound reports whether testRevokeAlias is still bound in C_test.
+func revokeAliasBound(t *testing.T, h *Handler) bool {
+	t.Helper()
+	_, found, err := h.cfg.AdminStore.LookupChannelAlias(context.Background(), testAdminTeamID, "C_test", testRevokeAlias)
+	if err != nil {
+		t.Fatalf("LookupChannelAlias: %v", err)
+	}
+	return found
+}
+
+// refuseRevokeDelete fails the test if DELETE /v1/resources/{resourceID} is reached.
+func refuseRevokeDelete(t *testing.T, ts *adminTestServers, resourceID, why string) {
+	t.Helper()
+	ts.addCustomer(http.MethodDelete, "/v1/resources/"+resourceID, func(w http.ResponseWriter, _ *http.Request) {
+		t.Error("DELETE issued " + why)
+		w.WriteHeader(http.StatusNoContent)
 	})
 }
 
@@ -127,6 +164,43 @@ func TestRevokeResource_Success(t *testing.T) {
 	msg := h.revokeResource(context.Background(), slog.Default(), testAdminTeamID, testAdminUserID, testRevokeResourceID, testRevokeAlias)
 	if !strings.Contains(msg, "Revoked") || !strings.Contains(msg, testRevokeAlias) {
 		t.Errorf("success message = %q, want revoke confirmation", msg)
+	}
+}
+
+// TestRevokeResource_TunnelStopsSharingFirst fences the tunnel branch: the
+// detail read must yield the tunnel type so sharing is turned off before DELETE.
+func TestRevokeResource_TunnelStopsSharingFirst(t *testing.T) {
+	ts := newAdminTestServers(t)
+	addRevokeResourceRead(t, ts, testTunnelResourceID, client.ResourceTypeTunnel)
+	var sharingOff, deletes atomic.Int32
+	ts.addCustomer(http.MethodPut, "/v1/resources/"+testTunnelResourceID+"/sharing", func(w http.ResponseWriter, r *http.Request) {
+		var in struct {
+			DesiredState string `json:"desired_state"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil || in.DesiredState != "off" {
+			t.Errorf("sharing update = %+v (err %v), want desired_state off", in, err)
+		}
+		sharingOff.Add(1)
+		respondQURLEnvelope(t, w, map[string]any{
+			"resource_id": testTunnelResourceID, "crid": testTunnelCRID,
+			"desired_state": "off", "serving_epoch": 1, "connection_state": "stopped",
+		})
+	})
+	ts.addCustomer(http.MethodDelete, "/v1/resources/"+testTunnelResourceID, func(w http.ResponseWriter, _ *http.Request) {
+		if sharingOff.Load() == 0 {
+			t.Error("DELETE issued before sharing was turned off")
+		}
+		deletes.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	})
+	h := newAdminTestHandler(t, ts)
+
+	msg := h.revokeResource(context.Background(), slog.Default(), testAdminTeamID, testAdminUserID, testTunnelResourceID, testRevokeAlias)
+	if !strings.Contains(msg, "Revoked") {
+		t.Fatalf("tunnel revoke message = %q, want success", msg)
+	}
+	if sharingOff.Load() != 1 || deletes.Load() != 1 {
+		t.Errorf("sharing off = %d, deletes = %d; want 1 each", sharingOff.Load(), deletes.Load())
 	}
 }
 
@@ -161,8 +235,8 @@ func TestRevokeResource_FailureRepliesOmitTeardownNote(t *testing.T) {
 		status int
 		body   string
 	}{
-		{"not found", http.StatusNotFound, `{"error":{"title":"Not Found","detail":"resource gone","code":"not_found","status":404}}`},
-		{"auth rejected", http.StatusUnauthorized, `{"error":{"title":"Unauthorized","detail":"bad key","code":"unauthorized","status":401}}`},
+		{"not found", http.StatusNotFound, revokeNotFoundBody},
+		{"auth rejected", http.StatusUnauthorized, revokeUnauthorizedBody},
 		{"upstream 5xx", http.StatusInternalServerError, `{"error":{"title":"Internal","detail":"boom","code":"internal","status":500}}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -178,7 +252,7 @@ func TestRevokeResource_FailureRepliesOmitTeardownNote(t *testing.T) {
 // TestRevokeResource_NotFound fences the 404/410 surface: an already-revoked or
 // stale id reads as a friendly "already revoked" hint, not a raw upstream error.
 func TestRevokeResource_NotFound(t *testing.T) {
-	h := newRevokeHandlerWithDeleteStatus(t, http.StatusNotFound, `{"error":{"title":"Not Found","detail":"resource gone","code":"not_found","status":404}}`)
+	h := newRevokeHandlerWithDeleteStatus(t, http.StatusNotFound, revokeNotFoundBody)
 	msg := h.revokeResource(context.Background(), slog.Default(), testAdminTeamID, testAdminUserID, testRevokeResourceID, testRevokeAlias)
 	if !strings.Contains(msg, "not found") || !strings.Contains(msg, "already revoked") {
 		t.Errorf("404 message = %q, want graceful already-revoked surface", msg)
@@ -189,7 +263,7 @@ func TestRevokeResource_NotFound(t *testing.T) {
 // key points the admin at /qurl setup rather than a generic error.
 func TestRevokeResource_AuthRejected(t *testing.T) {
 	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden} {
-		h := newRevokeHandlerWithDeleteStatus(t, status, `{"error":{"title":"Unauthorized","detail":"bad key","code":"unauthorized","status":401}}`)
+		h := newRevokeHandlerWithDeleteStatus(t, status, revokeUnauthorizedBody)
 		msg := h.revokeResource(context.Background(), slog.Default(), testAdminTeamID, testAdminUserID, testRevokeResourceID, testRevokeAlias)
 		if !strings.Contains(msg, "API key was rejected") || !strings.Contains(msg, "setup") {
 			t.Errorf("status %d message = %q, want setup guidance", status, msg)
@@ -544,6 +618,131 @@ func TestRevokeResource_PurgesChannelBindings(t *testing.T) {
 	}
 }
 
+// TestRevokeResource_PurgesOnReadGone fences the read-404 branch: when the
+// pre-delete GET already reports the resource gone, the orphaned alias is swept
+// and no DELETE is issued.
+func TestRevokeResource_PurgesOnReadGone(t *testing.T) {
+	ts := newAdminTestServers(t)
+	seedRevokeAlias(t, ts)
+	ts.addCustomer(http.MethodGet, "/v1/resources/"+testRevokeResourceID, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(revokeNotFoundBody))
+	})
+	refuseRevokeDelete(t, ts, testRevokeResourceID, "after the read reported the resource gone")
+	h := newAdminTestHandler(t, ts)
+
+	msg := h.revokeResource(context.Background(), slog.Default(), testAdminTeamID, testAdminUserID, testRevokeResourceID, testRevokeAlias)
+	if !strings.Contains(msg, "not found") {
+		t.Fatalf("revoke message = %q, want the already-revoked surface", msg)
+	}
+	if revokeAliasBound(t, h) {
+		t.Errorf("alias %q still bound after the read reported the resource gone", testRevokeAlias)
+	}
+}
+
+// TestRevokeResource_ReadAuthRejected fences the read-side 401/403 arm: setup
+// guidance, no DELETE, and bindings kept (auth failure proves nothing is gone).
+func TestRevokeResource_ReadAuthRejected(t *testing.T) {
+	ts := newAdminTestServers(t)
+	seedRevokeAlias(t, ts)
+	ts.addCustomer(http.MethodGet, "/v1/resources/"+testRevokeResourceID, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(revokeUnauthorizedBody))
+	})
+	refuseRevokeDelete(t, ts, testRevokeResourceID, "after the read was auth-rejected")
+	h := newAdminTestHandler(t, ts)
+
+	msg := h.revokeResource(context.Background(), slog.Default(), testAdminTeamID, testAdminUserID, testRevokeResourceID, testRevokeAlias)
+	if !strings.Contains(msg, "API key was rejected") {
+		t.Errorf("read 401 message = %q, want setup guidance", msg)
+	}
+	if !revokeAliasBound(t, h) {
+		t.Errorf("alias %q purged after an auth-rejected read", testRevokeAlias)
+	}
+}
+
+// TestRevokeResource_MalformedReadFailsClosed fences a 200 read with no
+// data.resource: the admin gets the generic inspect failure and no DELETE runs.
+func TestRevokeResource_MalformedReadFailsClosed(t *testing.T) {
+	ts := newAdminTestServers(t)
+	seedRevokeAlias(t, ts)
+	ts.addCustomer(http.MethodGet, "/v1/resources/"+testRevokeResourceID, func(w http.ResponseWriter, _ *http.Request) {
+		respondQURLEnvelope(t, w, map[string]any{"qurls": []any{}})
+	})
+	refuseRevokeDelete(t, ts, testRevokeResourceID, "after a malformed resource read")
+	h := newAdminTestHandler(t, ts)
+
+	msg := h.revokeResource(context.Background(), slog.Default(), testAdminTeamID, testAdminUserID, testRevokeResourceID, testRevokeAlias)
+	if !strings.Contains(msg, "Failed to inspect") {
+		t.Errorf("malformed read message = %q, want the inspect failure", msg)
+	}
+	if strings.Contains(msg, "data.resource") {
+		t.Errorf("malformed read message leaked the raw contract error: %q", msg)
+	}
+	// Unlike read-404, a malformed read proves nothing is gone, so bindings stay.
+	if !revokeAliasBound(t, h) {
+		t.Errorf("alias %q purged after a malformed read", testRevokeAlias)
+	}
+}
+
+// TestRevokeResource_UnknownTypeRefusesDelete pins the current default arm: an
+// unrecognized resource type refuses the revoke rather than guessing teardown.
+func TestRevokeResource_UnknownTypeRefusesDelete(t *testing.T) {
+	ts := newAdminTestServers(t)
+	seedRevokeAlias(t, ts)
+	addRevokeResourceRead(t, ts, testRevokeResourceID, "future_type")
+	refuseRevokeDelete(t, ts, testRevokeResourceID, "for an unrecognized resource type")
+	h := newAdminTestHandler(t, ts)
+
+	msg := h.revokeResource(context.Background(), slog.Default(), testAdminTeamID, testAdminUserID, testRevokeResourceID, testRevokeAlias)
+	if !strings.Contains(msg, "not recognized") {
+		t.Errorf("unknown type message = %q, want the unrecognized-type failure", msg)
+	}
+	if !revokeAliasBound(t, h) {
+		t.Errorf("alias %q purged after a refused revoke", testRevokeAlias)
+	}
+}
+
+// TestRevokeResource_TunnelSharingGoneStillDeletes fences the concurrent-delete
+// tolerance: a 404 from the sharing stop still proceeds into the DELETE.
+func TestRevokeResource_TunnelSharingGoneStillDeletes(t *testing.T) {
+	ts := newAdminTestServers(t)
+	addRevokeResourceRead(t, ts, testTunnelResourceID, client.ResourceTypeTunnel)
+	ts.addCustomer(http.MethodPut, "/v1/resources/"+testTunnelResourceID+"/sharing", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(revokeNotFoundBody))
+	})
+	var deletes atomic.Int32
+	ts.addCustomer(http.MethodDelete, "/v1/resources/"+testTunnelResourceID, func(w http.ResponseWriter, _ *http.Request) {
+		deletes.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	})
+	h := newAdminTestHandler(t, ts)
+
+	msg := h.revokeResource(context.Background(), slog.Default(), testAdminTeamID, testAdminUserID, testTunnelResourceID, testRevokeAlias)
+	if !strings.Contains(msg, "Revoked") || deletes.Load() != 1 {
+		t.Errorf("message = %q, deletes = %d; want Revoked after one DELETE", msg, deletes.Load())
+	}
+}
+
+// TestRevokeResource_TunnelSharingFailureRefusesDelete fences the abort arm: a
+// non-404 sharing-stop failure must not delete a resource that may still serve.
+func TestRevokeResource_TunnelSharingFailureRefusesDelete(t *testing.T) {
+	ts := newAdminTestServers(t)
+	addRevokeResourceRead(t, ts, testTunnelResourceID, client.ResourceTypeTunnel)
+	ts.addCustomer(http.MethodPut, "/v1/resources/"+testTunnelResourceID+"/sharing", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":{"title":"Internal","detail":"boom","code":"internal","status":500}}`))
+	})
+	refuseRevokeDelete(t, ts, testTunnelResourceID, "after sharing failed to stop")
+	h := newAdminTestHandler(t, ts)
+
+	msg := h.revokeResource(context.Background(), slog.Default(), testAdminTeamID, testAdminUserID, testTunnelResourceID, testRevokeAlias)
+	if !strings.Contains(msg, "Failed to stop sharing") {
+		t.Errorf("sharing failure message = %q, want the stop-sharing failure", msg)
+	}
+}
+
 // TestRevokeResource_PurgesOnAlreadyGone fences the out-of-band-delete case: when
 // the upstream DELETE returns 404/Gone (the resource was already removed by some
 // other surface — API/SDK/MCP/CLI/expiry — without sweeping the bot's policies),
@@ -551,11 +750,12 @@ func TestRevokeResource_PurgesChannelBindings(t *testing.T) {
 // that path, not only on the live-delete path.
 func TestRevokeResource_PurgesOnAlreadyGone(t *testing.T) {
 	ts := newAdminTestServers(t)
-	ts.seedAdmin(t)
-	ts.seedPolicyAliasBindings(t, testAdminTeamID, "C_test", map[string]string{testRevokeAlias: testRevokeResourceID})
+	seedRevokeAlias(t, ts)
+	// The read must succeed so the 404 comes from DELETE, the branch under test.
+	addRevokeResourceRead(t, ts, testRevokeResourceID, client.ResourceTypeURL)
 	ts.addCustomer(http.MethodDelete, "/v1/resources/"+testRevokeResourceID, func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
-		_, _ = w.Write([]byte(`{"error":{"title":"Not Found","detail":"resource gone","code":"not_found","status":404}}`))
+		_, _ = w.Write([]byte(revokeNotFoundBody))
 	})
 	h := newAdminTestHandler(t, ts)
 
