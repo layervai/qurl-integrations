@@ -296,19 +296,19 @@ func nativeRecoveryHubReply(
 		}
 		list["agent_id"] = connectorIntegrationAgentID
 		// Distinct generations let the test tell the persisted refresh result
-		// from the recover result. Request field checks run after the exchange so
-		// a mismatch fails the test directly instead of stalling the connector.
+		// from the recover result; they do not prove the recover assignment was
+		// applied before the refresh replaced it. Request field checks run after
+		// the exchange so a mismatch fails the test instead of stalling the
+		// connector.
+		// Any other mode gets the refresh shape; the post-exchange mode check
+		// reports it instead of stalling the connector on a missing reply.
 		generation := connectorIntegrationRefreshGeneration
-		switch parsed.Mode {
-		case "recover":
+		if parsed.Mode == "recover" {
 			generation = connectorIntegrationRecoverGeneration
 			list["mode"] = "recover"
 			list["recovery_grant"] = connectorIntegrationRecoveryGrant
 			list["recovery_grant_issued_at"] = now.Add(-time.Minute).Format(time.RFC3339)
 			list["recovery_grant_expires_at"] = now.Add(14 * time.Minute).Format(time.RFC3339)
-		case "refresh":
-		default:
-			return nil, fmt.Errorf("unexpected Hub assignment mode %q", parsed.Mode)
 		}
 		if err := setNativeRecoveryAssignment(list["assignment"], generation, cellPublicKeyB64, now); err != nil {
 			return nil, err
@@ -482,12 +482,12 @@ func TestOpenNativeRegisteredClient_ExplicitLoginUsesRealConnectorRecovery(t *te
 		t.Fatalf("registered identity requests = %d, want initial rejection and one retry", len(requests))
 	}
 	if got := strings.TrimPrefix(requests[0].Header.Get("Authorization"), "Bearer "); got != oldDeviceKey {
-		t.Fatal("initial registered-device key changed")
+		t.Fatalf("initial registered-device key changed: %q", got) // Public conformance fixture.
 	}
 	replacementKey := strings.TrimPrefix(requests[1].Header.Get("Authorization"), "Bearer ")
 	if replacementKey == "" || replacementKey == oldDeviceKey || replacementKey == validatedAccountKey ||
 		!strings.HasPrefix(replacementKey, "lv_live_") {
-		t.Fatalf("retry did not use the connector-promoted replacement credential")
+		t.Fatal("retry did not use the connector-promoted replacement credential")
 	}
 	hubRequests := hub.snapshot()
 	if got := len(hubRequests); got != 2 {
@@ -497,9 +497,9 @@ func TestOpenNativeRegisteredClient_ExplicitLoginUsesRealConnectorRecovery(t *te
 	// the real protocol. The recover row needs the usrData.credential tag to
 	// bind; the refresh row checks the raw request so a renamed field cannot
 	// hide the credential.
-	for i, want := range []struct {
-		mode        string
-		carriesAuth bool
+	for i, exchange := range []struct {
+		mode                    string
+		carriesAccountAuthority bool
 	}{
 		{"recover", true},
 		{"refresh", false},
@@ -508,15 +508,15 @@ func TestOpenNativeRegisteredClient_ExplicitLoginUsesRealConnectorRecovery(t *te
 		if err != nil {
 			t.Fatalf("Hub exchange %d: parse request: %v", i, err)
 		}
-		if parsed.Mode != want.mode {
-			t.Fatalf("Hub exchange %d mode = %q, want %q", i, parsed.Mode, want.mode)
+		if parsed.Mode != exchange.mode {
+			t.Fatalf("Hub exchange %d mode = %q, want %q", i, parsed.Mode, exchange.mode)
 		}
-		if want.carriesAuth && parsed.Credential != validatedAccountKey {
+		if exchange.carriesAccountAuthority && parsed.Credential != validatedAccountKey {
 			t.Fatalf("Hub %s request account credential mismatch (empty: %t, is old device key: %t, len: %d)",
-				want.mode, parsed.Credential == "", parsed.Credential == oldDeviceKey, len(parsed.Credential))
+				exchange.mode, parsed.Credential == "", parsed.Credential == oldDeviceKey, len(parsed.Credential))
 		}
-		if !want.carriesAuth && bytes.Contains(hubRequests[i], []byte(validatedAccountKey)) {
-			t.Fatalf("Hub %s request unexpectedly carried account authority", want.mode)
+		if !exchange.carriesAccountAuthority && bytes.Contains(hubRequests[i], []byte(validatedAccountKey)) {
+			t.Fatalf("Hub %s request unexpectedly carried account authority", exchange.mode)
 		}
 	}
 	cellRequests := cell.snapshot()
@@ -527,12 +527,12 @@ func TestOpenNativeRegisteredClient_ExplicitLoginUsesRealConnectorRecovery(t *te
 	if err != nil {
 		t.Fatalf("cell exchange: parse request: %v", err)
 	}
-	if cellRequest.RecoveryGrant != connectorIntegrationRecoveryGrant {
-		// The grant is a synthetic, test-local value, so printing it is safe.
-		t.Fatalf("cell request recovery grant = %q, want %q", cellRequest.RecoveryGrant, connectorIntegrationRecoveryGrant)
-	}
+	// Check for account authority first so the grant message below cannot print it.
 	if bytes.Contains(cellRequests[0], []byte(validatedAccountKey)) {
 		t.Fatal("cell recovery completion unexpectedly carried account authority")
+	}
+	if cellRequest.RecoveryGrant != connectorIntegrationRecoveryGrant {
+		t.Fatalf("cell request recovery grant = %q, want %q", cellRequest.RecoveryGrant, connectorIntegrationRecoveryGrant)
 	}
 	if err := opts.closeAPIClient(); err != nil {
 		t.Fatal(err)
