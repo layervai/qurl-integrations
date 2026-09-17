@@ -87,8 +87,16 @@ export function trackedQurlResources(env: {
   const ids = new Set<string>();
   // Shared by revoke() and revokeAll() so EVERY successful revoke —
   // test-time or cleanup-time — drops the id from the ledger.
-  const revoke = async (resourceId: string): Promise<boolean> => {
-    const ok = await qurl.revokeLink(env.MINT_API_URL, env.QURL_API_KEY, resourceId);
+  // `confirmPending` is what separates the two callers: a revoke-under-test
+  // asserts on the boolean, so it waits out qurl-service's protection-update
+  // 503 to answer truthfully; the afterAll sweep passes false. That 503 says
+  // the write is already COMMITTED, so a sweep only needs "did it stick", and
+  // at ~30s per straggler a service-wide 503 would blow the very hook budgets
+  // that keep a sweep from leaking — 60 resources here would need ~35min.
+  const revoke = async (resourceId: string, confirmPending = true): Promise<boolean> => {
+    const ok = await qurl.revokeLink(
+      env.MINT_API_URL, env.QURL_API_KEY, resourceId, { confirmPending },
+    );
     if (ok) ids.delete(resourceId);
     return ok;
   };
@@ -115,7 +123,7 @@ export function trackedQurlResources(env: {
         if (!first) await new Promise((r) => setTimeout(r, 250));
         first = false;
         try {
-          const ok = await revoke(id);
+          const ok = await revoke(id, false);
           if (!ok) console.warn(`afterAll: best-effort revoke of ${id} returned not-ok`);
         } catch (err) {
           console.warn(`afterAll: best-effort revoke of ${id} threw: ${String(err)}`);

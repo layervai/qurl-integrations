@@ -107,10 +107,12 @@ function isRetryableStatus(status: number, method: string): boolean {
  *   makes a permanent failure slower to report). Nothing in the response
  *   separates them, so only the call site can. Everyone else keeps the 1s/2s
  *   backoff. The ceiling also caps a hostile or absurd directive.
- * @param onRetry called with the status being retried, before the wait. Lets a
- *   caller that must distinguish its final status by HOW it got there see the
- *   attempt trace the returned `Response` cannot carry (`revokeLink`: a 404
- *   after a committed-503 is success, a first-attempt 404 is a real miss).
+ * @param onRetry called before each wait with the status being retried and the
+ *   `Retry-After` delay actually honored (0 when none was, which also tells the
+ *   caller the 503 carried no directive). Lets a caller that must distinguish
+ *   its final status by HOW it got there see the attempt trace the returned
+ *   `Response` cannot carry (`revokeLink`: a 404 after a directive-bearing 503
+ *   is success, a first-attempt 404 is a real miss).
  */
 export async function fetchWithTransientRetry(
   input: string | URL,
@@ -119,7 +121,7 @@ export async function fetchWithTransientRetry(
     maxAttempts?: number;
     baseDelayMs?: number;
     maxRetryAfterMs?: number;
-    onRetry?: (status: number) => void;
+    onRetry?: (status: number, honoredRetryAfterMs: number) => void;
   } = {},
 ): Promise<Response> {
   const method = (init?.method ?? 'GET').toUpperCase();
@@ -158,7 +160,7 @@ export async function fetchWithTransientRetry(
       `[fetchWithTransientRetry] ${method} ${origin} -> ${res.status}; ` +
         `retry ${attempt}/${maxAttempts - 1} in ${delayMs}ms`,
     );
-    onRetry?.(res.status);
+    onRetry?.(res.status, retryAfterMs);
     // Release the discarded response's body so its socket returns to the pool
     // instead of lingering until GC (the 5xx body is never read).
     await res.body?.cancel().catch(() => {});

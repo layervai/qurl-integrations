@@ -260,7 +260,14 @@ export async function accessLinkNoRedirect(url: string): Promise<LinkAccessResul
  * acceptable" for that (link-lifecycle.test.ts's double-revoke test). A 404 on
  * the FIRST attempt stays a failure — that is a resource that never existed
  * (negative-paths.test.ts). Only the attempt trace separates the two, hence
- * `onRetry`.
+ * `onRetry`. The trace is narrowed to a 503 that actually CARRIED a directive,
+ * so the ALB drain-gap 503 — which has no `Retry-After` — can't unlock the
+ * 404-as-success path for a resource that never existed.
+ *
+ * `confirmPending: false` skips the wait entirely, for best-effort bulk
+ * cleanup: the 503 already said the write is committed, so a sweep only needs
+ * "did it stick", and paying ~30s per straggler would blow the very hook
+ * budgets that keep a sweep from leaking (see cleanup.ts's revokeAll).
  *
  * TODO(upstream-contract): mirrors qurl-service's protected-resource revoke
  * contract — that a 503 here means the revocation is COMMITTED (not rejected),
@@ -271,19 +278,25 @@ export async function revokeLink(
   baseUrl: string,
   apiKey: string,
   resourceId: string,
+  { confirmPending = true }: { confirmPending?: boolean } = {},
 ): Promise<boolean> {
   // API: DELETE /v1/resources/{resource_id}
   const parsed = new URL(baseUrl);
   parsed.pathname = `/v1/resources/${encodeURIComponent(resourceId)}`;
   const url = parsed.toString();
+  // `||=`, not `=`: the flag must mean "a directive-bearing 503 happened at
+  // some point", not "the last retry was one", so raising maxAttempts later
+  // can't silently change what a trailing 404 means.
   let confirmedAfterPending = false;
   const res = await fetchWithTransientRetry(url, {
     method: 'DELETE',
     headers: { Authorization: `Bearer ${apiKey}` },
   }, {
     maxAttempts: 2,
-    maxRetryAfterMs: 35_000,
-    onRetry: (status) => { confirmedAfterPending = status === 503; },
+    maxRetryAfterMs: confirmPending ? 35_000 : 0,
+    onRetry: (status, honoredRetryAfterMs) => {
+      confirmedAfterPending ||= status === 503 && honoredRetryAfterMs > 0;
+    },
   });
   return res.ok || (res.status === 404 && confirmedAfterPending);
 }

@@ -15,9 +15,19 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
+let warnSpy: jest.SpyInstance;
+
 beforeEach(() => {
   fetchMock.mockReset();
   global.fetch = fetchMock as typeof fetch;
+  // fetchWithTransientRetry warns on every retry by design; the retry-path
+  // tests below would otherwise spray `[fetchWithTransientRetry] …` through
+  // the suite output. Same reason as unit/http.test.ts.
+  warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+});
+
+afterEach(() => {
+  warnSpy.mockRestore();
 });
 
 afterAll(() => {
@@ -399,6 +409,45 @@ test('revokeLink treats a 404 on the confirm retry as success', async () => {
     const pending = qurl.revokeLink(mintUrl, apiKey, publicResourceId);
     await jest.advanceTimersByTimeAsync(30_000);
     await expect(pending).resolves.toBe(true);
+  } finally {
+    jest.useRealTimers();
+  }
+});
+
+// The 404 acceptance is narrowed to a 503 that CARRIED a directive. The ALB
+// drain-gap 503 has none, so `drain-gap -> 404` on a resource that never
+// existed must still be false — otherwise a revoke that never happened could
+// report success, which is the one thing the retry helper must never do.
+test('revokeLink does not accept a 404 after a directive-less 503', async () => {
+  jest.useFakeTimers();
+  try {
+    fetchMock
+      .mockImplementationOnce(() => new Response(null, { status: 503 }))
+      .mockImplementationOnce(() => new Response(null, { status: 404 }));
+
+    const pending = qurl.revokeLink(mintUrl, apiKey, publicResourceId);
+    await jest.advanceTimersByTimeAsync(1_000);
+    await expect(pending).resolves.toBe(false);
+  } finally {
+    jest.useRealTimers();
+  }
+});
+
+// Bulk cleanup opts out: the 503 already said the write is committed, so the
+// afterAll sweep only needs "did it stick". Paying ~30s per straggler would
+// blow the hook budgets that keep a sweep from leaking (cleanup.ts).
+test('confirmPending: false skips the protection-update wait', async () => {
+  jest.useFakeTimers();
+  try {
+    fetchMock.mockImplementation(
+      () => new Response(null, { status: 503, headers: { 'Retry-After': '30' } }),
+    );
+    const pending = qurl.revokeLink(mintUrl, apiKey, publicResourceId, {
+      confirmPending: false,
+    });
+    await jest.advanceTimersByTimeAsync(1_000);
+    expect(fetchMock).toHaveBeenCalledTimes(2); // local backoff, not the 30s
+    await expect(pending).resolves.toBe(false);
   } finally {
     jest.useRealTimers();
   }

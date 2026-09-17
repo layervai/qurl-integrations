@@ -62,11 +62,7 @@ const env = loadEnv();
 // through tracked.revoke so the assertion stays while the ledger syncs.
 const tracked = trackedQurlResources(env);
 
-// Explicit hook budget: a revoke that meets the protection-update 503 waits out
-// the server's 30s directive once, so a run that failed mid-test can leave every
-// upload here to a ~30s cleanup revoke — past jest's 120s default hook timeout,
-// which would stack a misleading hook failure onto the real one.
-afterAll(() => tracked.revokeAll(), 180_000);
+afterAll(() => tracked.revokeAll());
 
 // Valid 1x1 transparent PNG (standard test fixture — widely used, CRC/zlib
 // checks pass). Exercises the image-upload path including the fileviewer's
@@ -131,8 +127,10 @@ describe('File Revoke', () => {
     expect(status.status).toBe('revoked');
     // Generous timeout: connector mint + headless-browser knock (cold chromium
     // launch + navigation + the helper's own 30s tunnel-view budget) on CI,
-    // plus the revoke's one ~30s wait when it meets the protection-update 503.
-  }, 120_000);
+    // plus the revoke's one ~35s wait when it meets the protection-update 503.
+    // Worst case ~95s (upload ~21s + mint ~3s + knock ~35s + poll 5s + revoke
+    // ~31s), so this is the thinnest margin in the file — 120s would leave ~25s.
+  }, 150_000);
 
   test('distinct-per-viewer watermark + `_` route-label SNI on the tunnel', async () => {
     // ONE upload → TWO minted recipient views. The whole point of render-at-mint:
@@ -292,9 +290,9 @@ describe('File Revoke', () => {
     expect(status.status).toBe('revoked');
     // Explicit, not jest.config.js's 120s default: this is the only test with
     // TWO sequential revokes, so it carries the most protection-update wait in
-    // the file (~35s x 2 worst case) on top of an upload that can spend ~21s in
-    // its own transient + app-level-429 backoff. That is ~91s against a 120s
-    // default — the tightest margin here, which is exactly why it gets a number
-    // instead of inheriting one.
+    // the file (~31s x 2 worst case) on top of an upload that can spend ~21s in
+    // its own transient + app-level-429 backoff — ~83s, which the 120s default
+    // covers but only just. Stated rather than inherited so the next person to
+    // add a revoke here can see what the budget is made of.
   }, 150_000);
 });

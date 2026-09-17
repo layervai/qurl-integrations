@@ -107,18 +107,44 @@ test('does not honor Retry-After on a 429 even when opted in', async () => {
   await pending;
 });
 
+test('treats Retry-After: 0 as no directive', async () => {
+  // Passes /^\d+$/ and yields 0, so the local backoff must still apply rather
+  // than the helper firing an immediate retry.
+  fetchMock.mockImplementation(respond(503, { 'Retry-After': '0' }));
+  const pending = fetchWithTransientRetry(
+    url, { method: 'DELETE' }, { maxAttempts: 2, maxRetryAfterMs: 35_000 },
+  );
+  await jest.advanceTimersByTimeAsync(999);
+  expect(fetchMock).toHaveBeenCalledTimes(1);
+  await jest.advanceTimersByTimeAsync(1);
+  await pending;
+  expect(fetchMock).toHaveBeenCalledTimes(2);
+});
+
+test('does not call onRetry when the first response is ok', async () => {
+  fetchMock.mockImplementation(respond(204));
+  const seen: number[] = [];
+  await fetchWithTransientRetry(
+    url, { method: 'DELETE' }, { maxAttempts: 2, onRetry: (s) => seen.push(s) },
+  );
+  expect(seen).toEqual([]);
+  expect(fetchMock).toHaveBeenCalledTimes(1);
+});
+
 test('reports each retried status to onRetry before waiting', async () => {
   fetchMock
     .mockImplementationOnce(respond(503, { 'Retry-After': '30' }))
     .mockImplementationOnce(respond(502))
     .mockImplementationOnce(respond(204));
-  const seen: number[] = [];
+  const seen: Array<[number, number]> = [];
   const pending = fetchWithTransientRetry(
     url,
     { method: 'DELETE' },
-    { maxAttempts: 3, maxRetryAfterMs: 35_000, onRetry: (s) => seen.push(s) },
+    { maxAttempts: 3, maxRetryAfterMs: 35_000, onRetry: (s, ms) => seen.push([s, ms]) },
   );
   await jest.advanceTimersByTimeAsync(60_000);
   await expect(pending).resolves.toMatchObject({ status: 204 });
-  expect(seen).toEqual([503, 502]);
+  // The honored delay rides along so a caller can tell a directive-bearing 503
+  // from a bare one (the ALB drain-gap carries no Retry-After).
+  expect(seen).toEqual([[503, 30_000], [502, 0]]);
 });
