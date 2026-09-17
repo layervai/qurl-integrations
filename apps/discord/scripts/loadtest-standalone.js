@@ -1074,6 +1074,10 @@ function ledgerEndpoints(ledgerPath) {
     .map(({ endpoint }) => endpoint || UNRECORDED_ENDPOINT));
 }
 
+// TODO(upstream-contract): qurl-service CRIDs are lowercase unpadded base32 of
+// 47 or 60 characters. Used only to keep reclaim from releasing a CRID row.
+const CRID_SHAPE = /^(?:[a-z2-7]{47}|[a-z2-7]{60})$/;
+
 // Ids recorded as connector upload parents. SDK 2.x cannot delete those by the
 // public key the upload returns (qurl-integrations-infra#1627), so
 // reclaim releases them rather than reporting a failure no re-run can fix.
@@ -1213,8 +1217,10 @@ async function reclaim(ledgerPath) {
         if (isGoneQurlApiError(e)) {
           revoked++;
           outstanding.delete(id);
-        } else if (uploadIds.has(id) && isClientValidationQurlApiError(e)) {
+        } else if (uploadIds.has(id) && !CRID_SHAPE.test(id) && isClientValidationQurlApiError(e)) {
           // Not addressable by the API: its recipient links expire with it.
+          // Released only for a non-CRID id, so a rejected CRID-shaped row (a
+          // symptom of something else) stays in the ledger.
           releasedUploads.push(id);
           outstanding.delete(id);
         } else {

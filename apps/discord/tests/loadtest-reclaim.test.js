@@ -410,6 +410,20 @@ describe('reclaim', () => {
     );
   });
 
+  it.each([
+    ['a transient failure', qurlApiErrorMessage('DELETE', '/resources/:resourceId', 503)],
+    ['a client rejection of a CRID-shaped id', qurlApiErrorMessage('DELETE', '/resources/:resourceId', 'client_validation')],
+  ])('keeps an upload row after %s', async (_label, message) => {
+    const id = message.endsWith('(503)') ? PUBLIC_KEY_RESOURCE_ID : CRID_RESOURCE_ID;
+    const ledger = tempLedger(line(id, { kind: 'upload' }));
+    deleteLink.mockRejectedValue(new Error(message));
+
+    const result = await reclaim(ledger);
+
+    expect(result).toMatchObject({ revoked: 0, failed: 1, released: 0 });
+    expect(readLedger(ledger)).toEqual([id]);
+  });
+
   it('releases a connector upload row the SDK cannot address instead of failing it', async () => {
     const ledger = tempLedger(`${line(PUBLIC_KEY_RESOURCE_ID, { kind: 'upload' })}${line(CRID_RESOURCE_ID, { kind: 'upload' })}`);
     deleteLink.mockImplementation(async (id) => {

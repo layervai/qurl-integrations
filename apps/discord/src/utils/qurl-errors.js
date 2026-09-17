@@ -25,7 +25,7 @@ function qurlApiError(method, path, statusOrCode) {
 function qurlApiErrorStatus(error) {
   if (Number.isInteger(error?.status) && error.status > 0) return error.status;
   const code = qurlApiErrorCode(error);
-  return /^\d{3}$/.test(code) ? Number(code) : null;
+  return code !== null && /^\d{3}$/.test(code) ? Number(code) : null;
 }
 
 // callQurl re-wraps an SDK client-side rejection (status 0) with this code.

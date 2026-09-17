@@ -103,7 +103,7 @@ it('caches only resource identity and mints anew for each guild', async () => {
   expect(mockClient.listAllResources).toHaveBeenCalledTimes(1);
   expect(mockClient.createQurlForResource).toHaveBeenLastCalledWith(crid, { expires_in: '5m', session_duration: '5m', target_path: `/api/detect/discord/${otherGuild}` });
 });
-it.each([[[]], [[{ status: 'active', resource_id: publicKey }]], [[{ status: 'active', resource_id: publicKey, crid }, { status: 'active', resource_id: `${publicKey}x`, crid: 'b'.repeat(60) }]]])('rejects absent or ambiguous resources', async resources => {
+it.each([[[]], [[{ status: 'active', resource_id: publicKey }]], [[{ status: 'active', resource_id: publicKey, crid }, { status: 'active', resource_id: publicKey, crid }]], [[{ status: 'active', resource_id: publicKey, crid }, { status: 'active', resource_id: `${publicKey}x`, crid: 'b'.repeat(60) }]]])('rejects absent or ambiguous resources', async resources => {
   mockClient.listAllResources.mockImplementation(async function* () { yield* resources; });
   await expect(detect(Buffer.from('x'), { guildId })).rejects.toThrow(/resource/);
   expect(mockClient.createQurlForResource).not.toHaveBeenCalled();
@@ -123,6 +123,14 @@ it('refreshes the resource after a failed mint and backs off repeated failures',
   expect(mockClient.createQurlForResource).toHaveBeenCalledTimes(2);
 });
 
+it('constructs the native opener without the optional native state store the image omits', async () => {
+  jest.doMock('@layervai/qurl-state-fs', () => { throw new Error('omitted from the image'); });
+  const { createPortalOpener } = jest.requireActual('@layervai/qurl/node');
+  const real = createPortalOpener({ qurl, expectedCRID: crid });
+  expect(typeof real.start).toBe('function');
+  await real.close();
+  jest.dontMock('@layervai/qurl-state-fs');
+});
 it('uses fetch supported by the installed native SDK', async () => {
   const { createPortalOpener } = jest.requireActual('@layervai/qurl/node');
   const real = createPortalOpener({ qurl, expectedCRID: crid });
