@@ -138,6 +138,21 @@ jobs:
         working-directory: apps/discord
         run: docker build -t discord-bot-test .
 
+      - name: Verify setup audit against DynamoDB Local
+        working-directory: apps/discord
+        run: |
+          docker compose up -d --wait dynamodb-local
+          docker run --rm --network host -e NODE_ENV=test \
+            -e DDB_TEST_ENDPOINT=http://127.0.0.1:8000 \
+            -e AWS_ACCESS_KEY_ID=local -e AWS_SECRET_ACCESS_KEY=local \
+            -v "$PWD/scripts/smoke-setup-audit.js:/app/scripts/smoke-setup-audit.js:ro" \
+            discord-bot-test node scripts/smoke-setup-audit.js
+
+      - name: Stop DynamoDB Local
+        if: always()
+        working-directory: apps/discord
+        run: docker compose down
+
   required:
     name: discord / required
     runs-on: ubuntu-latest

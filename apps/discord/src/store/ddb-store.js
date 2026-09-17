@@ -1605,8 +1605,8 @@ async function setGuildApiKey(guildId, apiKey, configuredBy, via) {
     // qurl_api_key because it is touched by this update; leave it
     // unread so the audit payload never carries key material. prior
     // configured_at relies on UPDATED_OLD also covering the if_not_exists
-    // no-op on a re-key. TODO(upstream-contract): DynamoDB behavior we do not
-    // control; mocks cannot pin it, so the sandbox rebind gate does.
+    // no-op on a re-key. scripts/smoke-setup-audit.js checks this with real
+    // writes (DynamoDB Local in CI; --aws for a disposable sandbox table).
     ReturnValues: 'UPDATED_OLD',
   }));
   // Hand the helper only the non-secret prior fields: the old encrypted key is
