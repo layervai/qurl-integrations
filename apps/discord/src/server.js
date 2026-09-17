@@ -236,7 +236,9 @@ if (!config.isQurlSetupAvailable) {
     : 'qURL OAuth routes mounted in not-configured mode because AUTH0_* settings are incomplete/invalid. /qurl setup will fall back to the legacy modal-paste path.');
   let inactiveConnectionMessage;
   if (config.isAuth0EmailConnectionRejected) {
-    inactiveConnectionMessage = 'AUTH0_EMAIL_CONNECTION was rejected and is inactive because qURL OAuth setup is disabled until the deployment value is corrected.';
+    inactiveConnectionMessage = config.isQurlOAuthConfigured
+      ? 'AUTH0_EMAIL_CONNECTION was rejected; every /qurl setup entry path is blocked until the deployment value is corrected.'
+      : 'qURL OAuth AUTH0_* settings are incomplete, and AUTH0_EMAIL_CONNECTION was rejected; every /qurl setup entry path (including legacy modal paste) is blocked until the connection value is corrected or unset.';
   } else if (auth0Connection) {
     inactiveConnectionMessage = `AUTH0_EMAIL_CONNECTION="${auth0Connection}" is set but inactive because qURL OAuth AUTH0_* settings are incomplete.`;
   } else {

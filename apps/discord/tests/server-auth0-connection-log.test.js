@@ -67,7 +67,7 @@ describe('server Auth0 connection policy log', () => {
   it('fails OAuth setup closed and distinguishes a rejected pin from an unset pin', () => {
     const logs = captureServerLogs('private invalid connection!');
     expect(logs.error).toContainEqual([
-      'AUTH0_EMAIL_CONNECTION was rejected and is inactive because qURL OAuth setup is disabled until the deployment value is corrected.',
+      'AUTH0_EMAIL_CONNECTION was rejected; every /qurl setup entry path is blocked until the deployment value is corrected.',
       {
         event: 'qurl_oauth_auth0_connection_policy',
         connection: null,
@@ -102,7 +102,7 @@ describe('server Auth0 connection policy log', () => {
       AUTH0_CLIENT_SECRET: undefined,
       AUTH0_AUDIENCE: undefined,
     }).error).toContainEqual([
-      'AUTH0_EMAIL_CONNECTION was rejected and is inactive because qURL OAuth setup is disabled until the deployment value is corrected.',
+      'qURL OAuth AUTH0_* settings are incomplete, and AUTH0_EMAIL_CONNECTION was rejected; every /qurl setup entry path (including legacy modal paste) is blocked until the connection value is corrected or unset.',
       {
         event: 'qurl_oauth_auth0_connection_policy',
         connection: null,

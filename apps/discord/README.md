@@ -114,6 +114,8 @@ setup) means required to use that feature.
 | `QURL_WEBHOOK_PURE_BYOK` | No | Set to `true` only when the deployment intentionally has no default webhook subscription. |
 | `CONNECTOR_URL` | No | qURL connector URL for file upload + serving |
 | `BASE_URL` | OAuth setup | Public `https://` origin of the bot; required to complete OAuth setup (defaults to `http://localhost:3000`). Local customer-install testing must use `localhost` or HTTPS because its `__Host-` session cookie is always `Secure`. |
+| `AUTH0_EMAIL_CONNECTION` | No | Auth0 connection pinned on setup/install authorize redirects (e.g. `email`). Unset or `PLACEHOLDER` sends no pin; a malformed value blocks every `/qurl setup` entry path until corrected. |
+| `RATE_LIMIT_INSTALL_MAX_REQUESTS` | No | Per-IP ceiling for the public `/oauth/discord/install` page per rate-limit window (default 120). Completed installs are still bounded by `RATE_LIMIT_MAX_REQUESTS` (two callback slots per install). |
 | `KEY_ENCRYPTION_KEY` | Production | 32 random bytes, base64 — encrypts stored keys at rest |
 | `METRICS_TOKEN` | Production | Bearer token guarding the `/metrics` endpoint |
 | `MAP_COMMAND_ENABLED` | No | Set to `true` to enable `/qurl map` (default off) |

@@ -154,6 +154,9 @@ router.get('/callback', rateLimit, async (req, res) => {
   // Discord code on a token exchange + a /users/@me round-trip + an Auth0
   // round-trip before failing at the qURL callback's persist-time guard.
   if (!process.env.KEY_ENCRYPTION_KEY) {
+    // An admin may already have completed Discord consent here, so keep an
+    // error-level signal beside the shared info-level not-configured line.
+    logger.error('Refusing /oauth/discord/callback: KEY_ENCRYPTION_KEY is not set');
     return renderNotConfiguredPage(res, 'discord-install', 'KEY_ENCRYPTION_KEY unset');
   }
   // State must authenticate the browser before we trust even the error

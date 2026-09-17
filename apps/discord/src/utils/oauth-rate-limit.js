@@ -159,7 +159,8 @@ function rateLimitForBucket(bucket, req, res, next) {
   }
 
   requests.push(now);
-  // The rejection above bounds each bucket at its maxRequests.
+  // The rejection above runs before this push, which is what bounds each
+  // bucket at its maxRequests; keep that ordering.
   rateLimitStore.set(ip, { ...buckets, [bucket]: requests });
   return next();
 }

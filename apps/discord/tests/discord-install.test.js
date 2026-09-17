@@ -338,7 +338,7 @@ describe('Discord install callback', () => {
         expect(infoSpy).toHaveBeenCalledWith('discord-install not configured', {
           surface: 'discord-install', reason: 'KEY_ENCRYPTION_KEY unset',
         });
-        expect(errorSpy).not.toHaveBeenCalled();
+        expect(errorSpy).toHaveBeenCalledWith('Refusing /oauth/discord/callback: KEY_ENCRYPTION_KEY is not set');
       } finally {
         process.env.KEY_ENCRYPTION_KEY = saved;
         errorSpy.mockRestore();

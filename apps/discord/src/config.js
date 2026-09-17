@@ -249,7 +249,7 @@ function parseAuth0EmailConnection(raw) {
     // Keep the rest of the bot available while failing only OAuth setup
     // closed. A malformed optional setting must not weaken account selection,
     // but it also must not take down /qurl send, webhooks, or the gateway.
-    console.warn(`[config] AUTH0_EMAIL_CONNECTION rejected (${rejectionReason}); disabling OAuth setup until corrected while other bot operations remain available.`);
+    console.warn(`[config] AUTH0_EMAIL_CONNECTION rejected (${rejectionReason}); blocking every /qurl setup entry path (OAuth and legacy modal paste) until corrected while other bot operations remain available.`);
     return { value: '', state: 'rejected' };
   }
   return { value, state: 'pinned' };
