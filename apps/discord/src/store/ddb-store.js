@@ -1524,7 +1524,8 @@ async function getGuildApiKey(guildId) {
   return res.Item ? decrypt(res.Item.qurl_api_key) : null;
 }
 
-async function setGuildApiKey(guildId, apiKey, configuredBy) {
+// `via` ('oauth' | 'paste') names the setup door for the admin-change audit.
+async function setGuildApiKey(guildId, apiKey, configuredBy, via) {
   const now = nowIso();
   // SQLite's `ON CONFLICT(guild_id) DO UPDATE SET qurl_api_key=…,
   // configured_by=…, updated_at=…` deliberately preserved
@@ -1553,15 +1554,22 @@ async function setGuildApiKey(guildId, apiKey, configuredBy) {
   const prior = res?.Attributes;
   const oldAdminId = prior?.configured_by ?? null;
   // A prior qurl_api_key means the guild was already configured even when the
-  // row has no configured_by (hand edit or partial rollback; see
-  // guild-config-state.js). That rebind must still page, so key the guard on
-  // the old key's presence and report the missing admin as null.
+  // row has no configured_by (hand edit or partial rollback). Unlike
+  // shouldPromptConsent (guild-config-state.js), which treats that row as a
+  // first install, the alarm biases toward paging: key the guard on the old
+  // key's presence and report the missing admin as null.
   if (prior?.qurl_api_key && oldAdminId !== configuredBy) {
-    logger.audit(AUDIT_EVENTS.QURL_SETUP_ADMIN_CHANGED, {
-      guild_id: guildId,
-      old_admin_id: oldAdminId,
-      new_admin_id: configuredBy,
-    });
+    // The write has landed: an audit failure must not surface as a write
+    // failure, or qurl-oauth.js would revoke the key it just stored.
+    try {
+      logger.audit(AUDIT_EVENTS.QURL_SETUP_ADMIN_CHANGED, {
+        guild_id: guildId,
+        old_admin_id: oldAdminId,
+        new_admin_id: configuredBy,
+        via,
+        prior_updated_at: prior.updated_at ?? null,
+      });
+    } catch { /* audit must never fail a landed write */ }
   }
 }
 

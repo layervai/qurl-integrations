@@ -80,11 +80,13 @@ describe('guild configs', () => {
       qurl_api_key: 'enc:v1:IV:TAG:deadbeef',
       updated_at: '2026-09-10T00:00:00Z',
     } });
-    await store.setGuildApiKey('g-1', 'plain-key', 'new-admin');
+    await store.setGuildApiKey('g-1', 'plain-key', 'new-admin', 'oauth');
     expect(logger.audit).toHaveBeenCalledWith(AUDIT_EVENTS.QURL_SETUP_ADMIN_CHANGED, {
       guild_id: 'g-1',
       old_admin_id: 'old-admin',
       new_admin_id: 'new-admin',
+      via: 'oauth',
+      prior_updated_at: '2026-09-10T00:00:00Z',
     });
   });
 
@@ -101,18 +103,28 @@ describe('guild configs', () => {
 
   test('setGuildApiKey: audits a rebind of a configured row that lost configured_by', async () => {
     ddbMock.on(UpdateCommand).resolves({ Attributes: { qurl_api_key: 'enc:v1:IV:TAG:deadbeef' } });
-    await store.setGuildApiKey('g-1', 'plain-key', 'new-admin');
+    await store.setGuildApiKey('g-1', 'plain-key', 'new-admin', 'paste');
     expect(logger.audit).toHaveBeenCalledWith(AUDIT_EVENTS.QURL_SETUP_ADMIN_CHANGED, {
       guild_id: 'g-1',
       old_admin_id: null,
       new_admin_id: 'new-admin',
+      via: 'paste',
+      prior_updated_at: null,
     });
   });
 
   test('setGuildApiKey: does not audit a keyless prior row (cleared, then set up)', async () => {
     ddbMock.on(UpdateCommand).resolves({ Attributes: { configured_by: 'old-admin' } });
     await store.setGuildApiKey('g-1', 'plain-key', 'new-admin');
-    expect(logger.audit).not.toHaveBeenCalled();
+    expect(logger.audit.mock.calls.map(([event]) => event))
+      .not.toContain(AUDIT_EVENTS.QURL_SETUP_ADMIN_CHANGED);
+  });
+
+  test('setGuildApiKey: resolves when the audit logger throws after the write lands', async () => {
+    ddbMock.on(UpdateCommand).resolves({ Attributes: { configured_by: 'old-admin', qurl_api_key: 'enc:v1:IV:TAG:deadbeef' } });
+    logger.audit.mockImplementationOnce(() => { throw new Error('EPIPE'); });
+    await expect(store.setGuildApiKey('g-1', 'plain-key', 'new-admin', 'oauth')).resolves.toBeUndefined();
+    expect(logger.audit).toHaveBeenCalledTimes(1);
   });
 
   test('setGuildApiKey: audit event string matches the infra CloudWatch filter', () => {
@@ -122,7 +134,8 @@ describe('guild configs', () => {
   test('setGuildApiKey: does not audit when the write rejects', async () => {
     ddbMock.on(UpdateCommand).rejects(new Error('ddb down'));
     await expect(store.setGuildApiKey('g-1', 'plain-key', 'new-admin')).rejects.toThrow('ddb down');
-    expect(logger.audit).not.toHaveBeenCalled();
+    expect(logger.audit.mock.calls.map(([event]) => event))
+      .not.toContain(AUDIT_EVENTS.QURL_SETUP_ADMIN_CHANGED);
   });
 
   test('getGuildApiKey: decrypts round-trip', async () => {

@@ -221,17 +221,6 @@ const AUDIT_EVENTS = {
   // dashboard from counting all-failed revokes as successes.
   REVOKE_SUCCESS: 'revoke_success',
   REVOKE_FAILED: 'revoke_failed',
-  // Emitted by setGuildApiKey when a successful guild setup (OAuth
-  // callback or `/qurl setup` paste) rebinds an existing guild to a
-  // different configured_by admin. TODO(upstream-contract): keep
-  // qurl-integrations-infra's qurl_setup_admin_changed CloudWatch
-  // filter/alarm in sync with this string (pinned literally in
-  // ddb-store.test.js). Best-effort, with two known blind spots: deleting the
-  // configuration first leaves no prior administrator to compare (#1455), and
-  // a retried or double-submitted write that already landed reads the new
-  // admin back as the old one. Guild/admin IDs are forensic fields, never
-  // CloudWatch metric dimensions.
-  QURL_SETUP_ADMIN_CHANGED: 'qurl_setup_admin_changed',
 
   // Emitted by gateway-health.js on every /health response that
   // returns 503. Carries `reason: 'not_ready' | 'sampler_threw'`
@@ -453,6 +442,18 @@ const AUDIT_EVENTS = {
   // stays zero — but for an idle bot the rotation also doesn't
   // matter until someone tries to use it.
   DEPENDENCY_AUTH_FAILURE: 'dependency_auth_failure',
+
+  // Emitted by setGuildApiKey when a successful guild setup (OAuth
+  // callback or `/qurl setup` paste) rebinds an existing guild to a
+  // different configured_by admin. TODO(upstream-contract): keep
+  // qurl-integrations-infra's qurl_setup_admin_changed CloudWatch
+  // filter/alarm in sync with this string (pinned literally in
+  // ddb-store.test.js). Best-effort, with two known blind spots: deleting the
+  // configuration first leaves no prior administrator to compare (#1455), and
+  // a retried or double-submitted write that already landed reads the new
+  // admin back as the old one. Guild/admin IDs are forensic fields, never
+  // CloudWatch metric dimensions.
+  QURL_SETUP_ADMIN_CHANGED: 'qurl_setup_admin_changed',
 
   // qURL webhook receiver — feeds CloudWatch metric filters +
   // alarms managed in the deploying organization's infrastructure

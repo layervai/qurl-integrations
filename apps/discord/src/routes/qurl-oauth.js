@@ -438,7 +438,7 @@ router.get('/callback', rateLimit, async (req, res) => {
   //    previous key (if any) remains valid on qurl-service until the
   //    admin manually revokes it via layerv.ai.
   try {
-    await db.setGuildApiKey(guildId, apiKey, discordUserId);
+    await db.setGuildApiKey(guildId, apiKey, discordUserId, 'oauth');
   } catch (err) {
     logger.error('Failed to persist guild API key after successful mint', {
       error: err?.message, guildId, discordUserId, keyId,
