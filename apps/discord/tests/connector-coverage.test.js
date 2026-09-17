@@ -193,6 +193,77 @@ describe('Connector client — coverage boost', () => {
       expect(ttlField.value).toBe('60');
     });
 
+    describe('mint admission retry', () => {
+      let wait;
+      beforeEach(() => {
+        wait = jest.spyOn(require('node:timers/promises'), 'setTimeout').mockResolvedValue();
+        jest.resetModules();
+        connector = require('../src/connector');
+      });
+      afterEach(() => wait.mockRestore());
+      const admission = { success: false, code: 'request_admission_rejected', links: [] };
+      const refused = (body = admission, status = 429, retryAfter = '1') => new Response(JSON.stringify(body), {
+        status, headers: { 'Retry-After': retryAfter },
+      });
+      const mint = () => connector.mintLinks('res-1', { expiresAt: '2099-01-01T00:00:00Z', n: 1 });
+
+      it('retries zero-side-effect admission refusals with bounded backoff', async () => {
+        globalThis.fetch = jest.fn().mockImplementation(() => refused());
+        await expect(mint()).rejects.toMatchObject({ status: 429 });
+        expect(globalThis.fetch).toHaveBeenCalledTimes(6);
+        expect(wait.mock.calls.map(args => args[0])).toEqual([1000, 2000, 4000, 8000, 16000]);
+        expect(wait.mock.calls.every(args => args[2].signal === wait.mock.calls[0][2].signal)).toBe(true);
+      });
+
+      it('honors Retry-After and returns the first admitted mint', async () => {
+        const links = [{ qurl_id: 'q_one', qurl_link: 'https://q.test/link' }];
+        globalThis.fetch = jest.fn().mockResolvedValueOnce(refused(admission, 429, '2'))
+          .mockResolvedValueOnce(new Response(JSON.stringify({ success: true, links })));
+        await expect(mint()).resolves.toEqual(links);
+        expect(wait).toHaveBeenCalledWith(2000, undefined, { signal: expect.any(AbortSignal) });
+        expect(globalThis.fetch).toHaveBeenCalledTimes(2);
+      });
+
+      it.each([
+        [{ ...admission, code: 'upstream_rate_limited' }, 429, '1'],
+        [{ ...admission, links: [{}] }, 429, '1'],
+        [{ ...admission, links: undefined }, 429, '1'],
+        [{ ...admission, success: true }, 429, '1'],
+        [admission, 502, '1'],
+        [admission, 429, '30'],
+        [admission, 429, '1e0'],
+        [admission, 429, ''],
+      ])('does not retry ambiguous or unsupported refusal %j / %s / %s', async (body, status, retryAfter) => {
+        globalThis.fetch = jest.fn().mockResolvedValue(refused(body, status, retryAfter));
+        await expect(mint()).rejects.toMatchObject({ status });
+        expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+        expect(wait).not.toHaveBeenCalled();
+      });
+
+      it('stops if the total budget aborts during backoff', async () => {
+        const controller = new AbortController();
+        const timeout = jest.spyOn(AbortSignal, 'timeout').mockReturnValue(controller.signal);
+        wait.mockImplementation(async (_ms, _value, { signal }) => {
+          controller.abort();
+          signal.throwIfAborted();
+        });
+        globalThis.fetch = jest.fn().mockResolvedValue(refused());
+        try {
+          await expect(mint()).rejects.toMatchObject({ name: 'AbortError' });
+          expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+        } finally {
+          timeout.mockRestore();
+        }
+      });
+
+      it('never retries a transport failure that could follow a mint', async () => {
+        globalThis.fetch = jest.fn().mockRejectedValue(new TypeError('fetch failed'));
+        await expect(mint()).rejects.toThrow('fetch failed');
+        expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+        expect(wait).not.toHaveBeenCalled();
+      });
+    });
+
     describe('mintLinks — session_duration forwarding', () => {
       function captureMintBody() {
         let bodyJSON = null;
@@ -234,7 +305,8 @@ describe('Connector client — coverage boost', () => {
         try {
           await connector.mintLinks('res-1', { expiresAt: '2099-01-01T00:00:00Z', n: 1 });
           expect(timeout).toHaveBeenCalledWith(65_000);
-          expect(globalThis.fetch.mock.calls[0][1].signal).toBe(timeout.mock.results[0].value);
+          expect(timeout).toHaveBeenCalledWith(100_000);
+          expect(globalThis.fetch.mock.calls[0][1].signal).toBeInstanceOf(AbortSignal);
         } finally {
           timeout.mockRestore();
         }

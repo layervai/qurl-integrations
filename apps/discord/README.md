@@ -120,8 +120,11 @@ token identity`, and `resource_ref`. The load-test warning now says
 `carried no usable resource identifier`.
 
 Each mint request allows 65 seconds for the connector’s 55-second deadline
-and response transport. Failed sends can take about 255 seconds to report
-while cleanup runs.
+and response transport. Only the connector’s `request_admission_rejected` 429
+with `success: false` and an empty `links` array is retried, up to five times,
+with bounded backoff and a 100-second total mint budget. Other errors and
+partial results are never retried. A failing mint and its cleanup can take
+up to 290 seconds before the error is reported; earlier batches add time.
 Cleanup can continue after that reply; under degraded service a 30-child
 resource can take about 17 minutes. Check completion logs before manual cleanup.
 Load-test upload records rejected by SDK 2.x stay in the cleanup ledger;

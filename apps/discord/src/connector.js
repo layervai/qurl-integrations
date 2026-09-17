@@ -1,3 +1,4 @@
+const { setTimeout: delay } = require('node:timers/promises');
 const { QURLClient } = require('@layervai/qurl');
 
 const config = require('./config');
@@ -466,20 +467,35 @@ async function mintLinks(resourceId, { expiresAt, n, apiKey, selfDestructSeconds
   if (guildId) {
     body.guild_id = guildId;
   }
-  const response = await fetch(`${config.CONNECTOR_URL}/api/mint_link/${resourceId}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...connectorAuthHeaders(apiKey) },
-    body: JSON.stringify(body),
-    // TODO(upstream-contract): #1551 permits 55s for minting. Keep 10s
-    // transport headroom so a valid response (including partial IDs) arrives.
-    signal: AbortSignal.timeout(65_000),
-  });
-
-  if (!response.ok) {
-    let bodyText = '';
+  // TODO(upstream-contract): #1551's local admission refusal has no side
+  // effects. Retry only that exact empty result; an ambiguous mint must never
+  // be repeated. Five backoffs total 31s; one 100s budget covers waits and I/O.
+  const budget = AbortSignal.timeout(100_000);
+  let response;
+  let bodyText = '';
+  for (let attempt = 0; ; attempt++) {
+    response = await fetch(`${config.CONNECTOR_URL}/api/mint_link/${resourceId}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...connectorAuthHeaders(apiKey) },
+      body: JSON.stringify(body),
+      // The 55s handler deadline needs 10s for response transport.
+      signal: AbortSignal.any([budget, AbortSignal.timeout(65_000)]),
+    });
+    if (response.ok) break;
+    bodyText = '';
     try {
       bodyText = await response.text();
     } catch { /* network read failed, fall through with empty body */ }
+    const { parsed } = parseConnectorBody(bodyText);
+    const retryAfter = response.headers?.get?.('retry-after')?.trim() ?? '';
+    if (response.status !== 429 || parsed?.success !== false
+        || parsed.code !== 'request_admission_rejected'
+        || !Array.isArray(parsed.links) || parsed.links.length !== 0
+        || !/^[0-2]$/.test(retryAfter) || attempt >= 5) break;
+    await delay(Math.max(Number(retryAfter), 2 ** attempt) * 1000, undefined, { signal: budget });
+  }
+
+  if (!response.ok) {
     const { parsed, apiCode, apiDetail } = parseConnectorBody(bodyText);
     const {
       partialQurlIds, unrevokedQurlIds, unidentifiedCount, overMintedCount, cappedCount,

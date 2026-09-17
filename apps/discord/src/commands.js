@@ -1647,7 +1647,7 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
 // own PR against a stable baseline.
 
 // Wait budget for best-effort revoke cleanup that sits in front of a user
-// reply: mint-failure compensation (after the 65s mint call and 70s inline
+// reply: mint-failure compensation (after the 100s mint budget and 70s inline
 // partial cleanup) and Add Recipients fresh-mint cleanup.
 // TODO(upstream-contract): keeps the reply inside Discord's 15-minute
 // interaction-token window. Hitting it is expected while
