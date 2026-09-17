@@ -15,7 +15,8 @@ var ErrResponseTooLarge = errors.New("response exceeded caller limit")
 
 // ReadResponseBody reads up to limit+1 bytes to detect oversized responses.
 // It returns the existing method-specific error text and wraps ErrResponseTooLarge
-// on overflow. An oversized body gets a bounded drain; callers must close it.
+// on overflow. Detection and draining read at most 2*(limit+1) bytes in total.
+// Callers must close the body.
 // Negative limits act as zero. Callers use fixed limits well below math.MaxInt64.
 func ReadResponseBody(method string, body io.Reader, limit int64) ([]byte, error) {
 	if limit < 0 {

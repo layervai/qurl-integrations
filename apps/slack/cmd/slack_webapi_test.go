@@ -252,14 +252,14 @@ func TestSlackUserLookupFuncWithTokenLookup(t *testing.T) {
 // false, which the assertion catches; the oversize error text alone would not.
 func TestSlackUserLookupDrainsOversizedResponse(t *testing.T) {
 	t.Parallel()
-	body := &trackingReadCloser{reader: strings.NewReader(strings.Repeat("x", slackWebAPIResponseBodyLimit+1024))}
+	body := &trackingReadCloser{reader: strings.NewReader(strings.Repeat("x", 65536+2))}
 	httpClient := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: body}, nil
 	})}
 
 	lookup := newSlackUserLookupFuncWithTokenLookup(staticTokenLookup("xoxb-test"), testSlackWebAPIUserAgent, "https://slack.test/users.info", httpClient)
 	if _, err := lookup(context.Background(), "T_lookup", "", "UHUGE"); err == nil ||
-		!strings.Contains(err.Error(), "users.info response exceeded") {
+		err.Error() != "users.info response exceeded 65536 bytes" {
 		t.Fatalf("SlackUserLookup oversized response error = %v, want response limit error", err)
 	}
 	if !body.sawEOF.Load() {
@@ -1179,4 +1179,48 @@ func (b *trackingReadCloser) Read(p []byte) (int, error) {
 func (b *trackingReadCloser) Close() error {
 	b.closed.Store(true)
 	return nil
+}
+
+// Literal limits catch a caller accidentally using another endpoint's budget.
+func TestSlackReadResponseLimits(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		method string
+		limit  int
+		call   func(context.Context, *http.Client, string) error
+	}{
+		{"conversations.info", 65536, func(ctx context.Context, client *http.Client, endpoint string) error {
+			_, err := newSlackResolveConversationInfoFuncWithTokenLookup(staticTokenLookup("xoxb-test"), testSlackWebAPIUserAgent, endpoint, client)(ctx, "T_test", "", "C_test")
+			return err
+		}},
+		{"conversations.replies", 524288, func(ctx context.Context, client *http.Client, endpoint string) error {
+			_, err := fetchSlackAgentThreadHistoryPage(ctx, client, endpoint, testSlackWebAPIUserAgent, "xoxb-test", "C_test", "1.0", "", "")
+			return err
+		}},
+		{"conversations.members", 65536, func(ctx context.Context, client *http.Client, endpoint string) error {
+			_, _, err := fetchConversationsMembersPage(ctx, client, endpoint, testSlackWebAPIUserAgent, "xoxb-test", "C_test", "")
+			return err
+		}},
+	} {
+		t.Run(tc.method, func(t *testing.T) {
+			// Valid JSON at the ceiling must pass, and one extra byte must be refused.
+			response := `{"ok":true,"padding":"` + strings.Repeat("x", tc.limit-len(`{"ok":true,"padding":""}`)) + `"}`
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				body := response
+				if r.URL.Path == "/oversize" {
+					body += " "
+				}
+				_, _ = w.Write([]byte(body))
+			}))
+			t.Cleanup(srv.Close)
+			if err := tc.call(context.Background(), srv.Client(), srv.URL); err != nil {
+				t.Fatalf("response at limit: %v", err)
+			}
+			err := tc.call(context.Background(), srv.Client(), srv.URL+"/oversize")
+			want := fmt.Sprintf("%s response exceeded %d bytes", tc.method, tc.limit)
+			if err == nil || err.Error() != want {
+				t.Fatalf("oversized response = %v, want %q", err, want)
+			}
+		})
+	}
 }
