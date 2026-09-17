@@ -107,7 +107,7 @@ describe('guild configs', () => {
   });
 
   test('propagateGuildWebhookSubscription: counts an owner-only conversion race as skipped', async () => {
-    // Scenario: between listGuildSubscriptionsByOwner returning the
+    // Scenario: between listCompleteGuildSubscriptionsByOwner returning the
     // sibling row and the UpdateCommand executing, another path converted the
     // sibling to an owner-only default mapping. DDB evaluates the full CAS
     // against that live state and rejects with CCFE, so the conversion survives.
@@ -531,7 +531,7 @@ describe('guild configs', () => {
       webhookOwnerId: 'usr_default',
       updatedAt: '2026-09-04T00:00:00.000Z',
     }]);
-    await expect(store.listGuildSubscriptionsByOwner('usr_default')).resolves.toEqual([{
+    await expect(store.listCompleteGuildSubscriptionsByOwner('usr_default')).resolves.toEqual([{
       guildId: 'g_complete', webhookId: 'wh_complete',
     }]);
   });

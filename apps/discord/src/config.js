@@ -249,7 +249,7 @@ function parseAuth0EmailConnection(raw) {
     // Keep the rest of the bot available while failing only OAuth setup
     // closed. A malformed optional setting must not weaken account selection,
     // but it also must not take down /qurl send, webhooks, or the gateway.
-    console.warn(`[config] AUTH0_EMAIL_CONNECTION rejected (${rejectionReason}); blocking every /qurl setup entry path (OAuth and legacy modal paste) until corrected while other bot operations remain available.`);
+    console.warn(`[config] AUTH0_EMAIL_CONNECTION rejected (${rejectionReason}); blocking every /qurl setup entry path (including legacy modal paste) while qURL OAuth is configured, until corrected; other bot operations remain available.`);
     return { value: '', state: 'rejected' };
   }
   return { value, state: 'pinned' };
@@ -260,7 +260,6 @@ const {
   value: auth0EmailConnection,
   state: auth0EmailConnectionState,
 } = parseAuth0EmailConnection(rawAuth0EmailConnection);
-const isAuth0EmailConnectionRejected = auth0EmailConnectionState === 'rejected';
 
 // True when all four required Auth0 env vars are present and AUTH0_DOMAIN is
 // a well-shaped hostname. Keep this independent from the optional connection
@@ -272,6 +271,11 @@ const isQurlOAuthConfigured = Boolean(
   && process.env.AUTH0_CLIENT_SECRET
   && process.env.AUTH0_AUDIENCE,
 );
+// A rejected pin blocks setup only while OAuth is configured, where it could
+// otherwise send an unpinned authorize redirect. Without AUTH0_* no redirect
+// is ever built, so the legacy paste path stays available.
+const isAuth0EmailConnectionRejected = auth0EmailConnectionState === 'rejected'
+  && isQurlOAuthConfigured;
 // The user-facing setup routes require both the core Auth0 configuration and
 // an accepted optional connection policy. A rejected policy blocks setup
 // without suppressing independent boot diagnostics or normal bot operation.

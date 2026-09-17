@@ -1785,7 +1785,7 @@ async function clearGuildWebhookSubscription(guildId) {
 // callback hits this via propagateGuildWebhookSubscription, so the
 // link-path cost is O(table_size) per call — same fix as the
 // 30s priming scan, single migration covers both.
-async function listGuildSubscriptionsByOwner(webhookOwnerId) {
+async function listCompleteGuildSubscriptionsByOwner(webhookOwnerId) {
   const rows = await scanAll(TABLES.guild_configs, { consistentRead: true });
   return rows
     .filter(r => r.webhook_owner_id === webhookOwnerId && r.webhook_id)
@@ -1808,7 +1808,7 @@ async function propagateGuildWebhookSubscription(
   if (!webhookOwnerId || !webhookId || !webhookSecret) {
     throw new Error('propagateGuildWebhookSubscription: webhookOwnerId, webhookId, webhookSecret all required');
   }
-  const allMatches = await listGuildSubscriptionsByOwner(webhookOwnerId);
+  const allMatches = await listCompleteGuildSubscriptionsByOwner(webhookOwnerId);
   // Common case for a first-time admin: only the just-written primary
   // row matches the owner. Short-circuit before the scan-filter pass.
   if (excludeGuildId && allMatches.length === 1 && allMatches[0].guildId === excludeGuildId) {
@@ -1824,10 +1824,10 @@ async function propagateGuildWebhookSubscription(
     TableName: TABLES.guild_configs,
     Key: { guild_id: s.guildId },
     UpdateExpression: 'SET webhook_id = :wid, webhook_secret = :wsec, updated_at = :u',
-    // listGuildSubscriptionsByOwner drops rows without webhook_id (owner-only
+    // listCompleteGuildSubscriptionsByOwner drops rows without webhook_id (owner-only
     // mappings), so :expectedWebhookId is always defined here.
     // Defense against a race where the row was cleared between
-    // listGuildSubscriptionsByOwner and this write — never mint
+    // listCompleteGuildSubscriptionsByOwner and this write — never mint
     // subscription state on a row that opted out.
     ConditionExpression: 'webhook_owner_id = :expectedOwner AND webhook_id = :expectedWebhookId',
     ExpressionAttributeValues: {
@@ -2001,7 +2001,7 @@ module.exports = {
   getGuildApiKey, setGuildApiKey, _removeGuildApiKeyRaw, getGuildConfig, getGuildConfigWithApiKey,
   // Per-guild webhook subscriptions (BYOK view counter)
   setGuildWebhookSubscription, setGuildDefaultWebhookOwner, clearGuildWebhookSubscription,
-  listGuildSubscriptionsByOwner, scanGuildSubscriptions, propagateGuildWebhookSubscription,
+  listCompleteGuildSubscriptionsByOwner, scanGuildSubscriptions, propagateGuildWebhookSubscription,
   // Lifecycle
   close, healthCheck,
   // Test-only: surface the prefixed table-name map so

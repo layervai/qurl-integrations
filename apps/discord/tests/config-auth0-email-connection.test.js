@@ -56,7 +56,9 @@ describe('config.AUTH0_EMAIL_CONNECTION', () => {
     (value) => {
       captureFreshConfig({ AUTH0_EMAIL_CONNECTION: value }, (config, warns) => {
         expect(config.AUTH0_EMAIL_CONNECTION).toBe('');
-        expect(config.isAuth0EmailConnectionRejected).toBe(true);
+        expect(config.auth0EmailConnectionState).toBe('rejected');
+        // Without AUTH0_* the pin is inert, so it does not block legacy setup.
+        expect(config.isAuth0EmailConnectionRejected).toBe(false);
         expect(warns).toContainEqual(expect.stringContaining('AUTH0_EMAIL_CONNECTION'));
       });
     },
@@ -102,7 +104,8 @@ describe('config.AUTH0_EMAIL_CONNECTION', () => {
 
   it('reports missing core AUTH0_* before a rejected connection pin', () => {
     withFreshConfig({ AUTH0_EMAIL_CONNECTION: 'email!' }, (config) => {
-      expect(config.isAuth0EmailConnectionRejected).toBe(true);
+      expect(config.auth0EmailConnectionState).toBe('rejected');
+      expect(config.isAuth0EmailConnectionRejected).toBe(false);
       expect(config.discordInstallNotConfiguredReason).toBe('AUTH0_* unset');
     });
   });

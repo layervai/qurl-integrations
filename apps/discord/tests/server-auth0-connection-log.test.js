@@ -102,7 +102,7 @@ describe('server Auth0 connection policy log', () => {
       AUTH0_CLIENT_SECRET: undefined,
       AUTH0_AUDIENCE: undefined,
     }).error).toContainEqual([
-      'qURL OAuth AUTH0_* settings are incomplete, and AUTH0_EMAIL_CONNECTION was rejected; every /qurl setup entry path (including legacy modal paste) is blocked until the connection value is corrected or unset.',
+      'AUTH0_EMAIL_CONNECTION was rejected and is inactive because qURL OAuth AUTH0_* settings are incomplete; legacy setup remains available, but correct or unset it before enabling OAuth.',
       {
         event: 'qurl_oauth_auth0_connection_policy',
         connection: null,
