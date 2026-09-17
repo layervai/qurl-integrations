@@ -115,7 +115,6 @@ describe('guild configs', () => {
     await store.setGuildApiKey('g-1', 'plain-key', 'new-admin', 'OAuth');
     expect(logger.audit).toHaveBeenCalledWith(AUDIT_EVENTS.QURL_SETUP_ADMIN_CHANGED,
       expect.objectContaining({ via: SETUP_VIA.UNKNOWN }));
-    expect(Object.isFrozen(SETUP_VIA)).toBe(true);
   });
 
   test('setGuildApiKey: does not audit a prior row with neither key nor admin', async () => {

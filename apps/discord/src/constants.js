@@ -647,8 +647,10 @@ const GATEWAY_DISPATCH_TYPES = Object.freeze({
   INTERACTION_CREATE: 'INTERACTION_CREATE',
 });
 
-// Setup door recorded on qurl_setup_admin_changed. An enum so a typo cannot
-// silently split a Logs Insights grouping. OAUTH deliberately covers both
+// Setup door. Two external consumers: the qurl_setup_admin_changed audit
+// (CloudWatch/Logs Insights) and, via guild-webhook-link.js, the persisted
+// qurl-service subscription description (`via=<value>`). Renaming a value forks
+// both. An enum so a typo cannot silently split a grouping. OAUTH deliberately covers both
 // /oauth/qurl/callback entries (`/qurl setup` and the install link): the signed
 // state carries no stage marker.
 const SETUP_VIA = Object.freeze({

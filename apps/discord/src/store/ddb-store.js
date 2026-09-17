@@ -1549,7 +1549,9 @@ async function setGuildApiKey(guildId, apiKey, configuredBy, via) {
     // read atomic with the re-key without returning the entire previous
     // guild_configs row. DynamoDB also returns the old encrypted
     // qurl_api_key because it is touched by this update; leave it
-    // unread so the audit payload never carries key material.
+    // unread so the audit payload never carries key material. prior
+    // configured_at relies on UPDATED_OLD also covering the if_not_exists
+    // no-op on a re-key; mocks cannot pin that, so the sandbox rebind gate does.
     ReturnValues: 'UPDATED_OLD',
   }));
   const prior = res?.Attributes;
