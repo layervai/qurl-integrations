@@ -120,7 +120,8 @@ function parseConnectorBody(bodyText) {
 // bounds compensation work driven by an untrusted body.
 function partialQurlIdsFromLinks(links, n) {
   if (!Array.isArray(links)) return { partialQurlIds: [], unidentifiedCount: 0, cappedCount: 0 };
-  const cap = Number.isInteger(n) && n > 0 ? n : 0;
+  if (!Number.isInteger(n) || n < 1) throw new Error(`Invalid link count for partial mint cleanup: ${n}`);
+  const cap = n;
   const normalized = links.map(link => qurlIdForCleanup(link?.qurl_id));
   const identified = [...new Set(normalized.filter(id => id !== null))];
   return {
@@ -561,7 +562,7 @@ async function postRevokeLinks(resourceId, batchIds, apiKey) {
   const response = await post();
   if (response.status !== 429) return response;
   const retryAfter = response.headers?.get?.('retry-after');
-  const retryAfterSeconds = retryAfter == null ? 1 : Number(retryAfter);
+  const retryAfterSeconds = retryAfter == null || retryAfter.trim() === '' ? 1 : Number(retryAfter);
   // A connector asking for longer than the cap, or in a form we do not wait on
   // (an HTTP-date, a negative value), fails closed now instead of adding load
   // after a wait it did not ask for. Only an absent header defaults to 1s.
@@ -719,12 +720,13 @@ async function revokeMintedLinks(resourceId, qurlIds, apiKey) {
       if (statuses.size !== batchIds.length) {
         throw new Error('Connector revoke_links did not confirm every requested link');
       }
-      for (const status of statuses.values()) outcomes[status] = (outcomes[status] || 0) + 1;
       const ordinaryIds = batchIds.filter(id => statuses.get(id) === 'not_connector_managed');
       if (ordinaryIds.length > 0) {
         await revokeOrdinaryLinks(resourceId, ordinaryIds, apiKey);
         fallbackCount += ordinaryIds.length;
       }
+      // Tally only once the chunk is confirmed, so outcomes stay exact on failure.
+      for (const status of statuses.values()) outcomes[status] = (outcomes[status] || 0) + 1;
       confirmedCount += batchIds.length;
     }
     // Belt and braces for the chunk loop: never report success short of every id.

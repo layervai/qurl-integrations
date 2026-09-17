@@ -54,6 +54,8 @@ const USER_AGENT = 'qurl-discord-bot/1.0';
 // influenced; keeping the value out of route labels prevents an accidentally
 // cross-wired credential from reaching logs or audit events.
 const QURL_ID_LOG_PATH = '/qurls/:resourceId';
+// Same wire route as QURL_ID_LOG_PATH, labelled separately so a child-to-parent
+// lookup is distinguishable from a resource status read in logs.
 const CHILD_QURL_LOG_PATH = '/qurls/:qurlId';
 const RESOURCE_ID_LOG_PATH = '/resources/:resourceId';
 const RESOURCE_QURL_LOG_PATH = '/resources/:resourceId/qurls/:qurlId';
@@ -367,7 +369,10 @@ async function deleteLink(resourceId, apiKey) {
 // Old send rows record a public resource key, so resolve the parent CRID from
 // an identified child and require it to match the recorded source first.
 // TODO(upstream-contract): qurl-service checks that each child belongs to the
-// CRID in the DELETE path, so callers MUST pass siblings of `resourceId`, at
+// CRID in the DELETE path (RevokeQurlToken looks the child up by owner and
+// resource, so a child of another resource, including a connector-owned
+// watermarked child, is a 404 rather than a 204), so callers MUST pass
+// siblings of `resourceId`, at
 // most ten per call. GET /v1/qurls/{id} documents that a qURL id returns its
 // parent (and a revoked child stays in the retained index), and the child
 // DELETE documents that repeated revocation succeeds, so a retry after a

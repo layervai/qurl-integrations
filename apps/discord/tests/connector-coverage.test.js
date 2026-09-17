@@ -978,6 +978,17 @@ describe('revokeMintedLinks — #1551 fail-closed contract', () => {
       await expect(settle(pending, 1)).resolves.toBe('resolved');
     });
 
+    it('treats an empty Retry-After like an absent one', async () => {
+      globalThis.fetch = jest.fn()
+        .mockResolvedValueOnce(refusal(429, {}, new Headers({ 'Retry-After': '' })))
+        .mockResolvedValueOnce(revoked('q_one'));
+
+      const pending = connector.revokeMintedLinks('res-1', ['q_one'], 'guild-key');
+      await jest.advanceTimersByTimeAsync(999);
+      expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+      await expect(settle(pending, 1)).resolves.toBe('resolved');
+    });
+
     it.each(['Wed, 21 Oct 2026 07:28:00 GMT', '-1'])('fails closed without retrying on Retry-After %p', async (value) => {
       globalThis.fetch = jest.fn().mockResolvedValue(refusal(429, {}, new Headers({ 'Retry-After': value })));
 
@@ -1065,19 +1076,22 @@ describe('revokeMintedLinks — #1551 fail-closed contract', () => {
   });
 
   it.each([
-    ['a rejected fetch', new TypeError('fetch failed')],
-    ['the request timeout', new DOMException('The operation was aborted due to timeout', 'TimeoutError')],
-  ])('falls back to the SDK on %s and rethrows it if the fallback fails', async (_label, transportError) => {
-    globalThis.fetch = jest.fn().mockRejectedValue(transportError);
+    ['a rejected fetch', () => new TypeError('fetch failed')],
+    ['the request timeout', () => new DOMException('The operation was aborted due to timeout', 'TimeoutError')],
+  ])('falls back to the SDK on %s and rethrows it if the fallback fails', async (_label, makeError) => {
+    const firstError = makeError();
+    globalThis.fetch = jest.fn().mockRejectedValueOnce(firstError);
 
     await connector.revokeMintedLinks('res-1', ['q_one'], 'guild-key');
     expect(revokeOrdinaryLinks).toHaveBeenCalledWith('res-1', ['q_one'], 'guild-key');
     expect(logger.warn).toHaveBeenCalledWith('Connector revoke_links unreachable', {
-      resource_ref: expect.stringMatching(/^sha256:/), error_name: transportError.name, count: 1,
+      resource_ref: expect.stringMatching(/^sha256:/), error_name: firstError.name, count: 1,
     });
 
+    const secondError = makeError();
+    globalThis.fetch = jest.fn().mockRejectedValueOnce(secondError);
     revokeOrdinaryLinks.mockRejectedValueOnce(new Error('qURL API GET /qurls/:qurlId failed (404)'));
-    await expect(connector.revokeMintedLinks('res-1', ['q_one'], 'guild-key')).rejects.toBe(transportError);
+    await expect(connector.revokeMintedLinks('res-1', ['q_one'], 'guild-key')).rejects.toBe(secondError);
   });
 
   it.each([
@@ -1123,6 +1137,9 @@ describe('revokeMintedLinks — #1551 fail-closed contract', () => {
 
     await expect(connector.revokeMintedLinks('res-1', ids, 'guild-key')).rejects.toThrow('failed (503)');
     expect(logger.info).not.toHaveBeenCalledWith('Revoked minted links', expect.anything());
+    expect(logger.warn).toHaveBeenCalledWith('Minted link revoke incomplete', expect.objectContaining({
+      outcomes: { revoked: 10 }, confirmed_count: 10, fallback_count: 0,
+    }));
   });
 
   it('rejects malformed JSON', async () => {
