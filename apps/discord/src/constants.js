@@ -458,7 +458,9 @@ const AUDIT_EVENTS = {
   // null to null and stays silent. Guild/admin IDs are forensic fields, never
   // CloudWatch metric dimensions. Only human setup flows may call
   // setGuildApiKey: a backfill or admin tool writing a synthetic configured_by
-  // would page on every already-configured guild.
+  // would page on every already-configured guild. Extension point: such a
+  // writer should get its own non-auditing SETUP_VIA door that
+  // auditSetupAdminChange skips.
   QURL_SETUP_ADMIN_CHANGED: 'qurl_setup_admin_changed',
 
   // qURL webhook receiver — feeds CloudWatch metric filters +

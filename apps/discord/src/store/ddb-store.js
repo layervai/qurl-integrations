@@ -1526,6 +1526,11 @@ async function getGuildApiKey(guildId) {
   return res.Item ? decrypt(res.Item.qurl_api_key) : null;
 }
 
+// Observability around a key write must never fail that write.
+function bestEffortLog(emit) {
+  try { emit(); } catch { /* observability must never fail a landed write */ }
+}
+
 // Emits qurl_setup_admin_changed when a landed setGuildApiKey write rebinds an
 // already-configured guild. `prior` is the write's UPDATED_OLD attributes.
 function auditSetupAdminChange(prior, { guildId, configuredBy, door }) {
@@ -1556,11 +1561,9 @@ function auditSetupAdminChange(prior, { guildId, configuredBy, door }) {
         prior_updated_at: prior.updated_at ?? null,
       });
     } catch (err) {
-      try {
-        logger.error('Failed to emit setup admin-change audit after a landed write', {
-          error: err?.message, guildId,
-        });
-      } catch { /* observability must never fail a landed write */ }
+      bestEffortLog(() => logger.error('Failed to emit setup admin-change audit after a landed write', {
+        error: err?.message, guildId,
+      }));
     }
   }
 }
@@ -1571,9 +1574,7 @@ async function setGuildApiKey(guildId, apiKey, configuredBy, via) {
   // Validate on every call so caller drift (including a forgotten argument)
   // shows up on first setups too; such doors audit as unknown.
   if (door === SETUP_VIA.UNKNOWN) {
-    try {
-      logger.warn('Unrecognized setup door; any admin-change audit for this write records via=unknown', { via: String(via).slice(0, 64), guildId });
-    } catch { /* a bad door must not fail the key write */ }
+    bestEffortLog(() => logger.warn('Unrecognized setup door; any admin-change audit for this write records via=unknown', { via: String(via).slice(0, 64), guildId }));
   }
   const now = nowIso();
   // SQLite's `ON CONFLICT(guild_id) DO UPDATE SET qurl_api_key=…,

@@ -269,6 +269,7 @@ describe('fireAndForgetLinkGuildWebhookSubscription — door normalization', () 
     [SETUP_VIA.PASTE, 'paste'],
     ['OAuth', 'unknown'],
     [undefined, 'unknown'],
+    ['oauth), configuredBy=attacker', 'unknown'],
   ])('records door %p as via=%s, like the setup audit', async (via, expected) => {
     await fireAndForgetLinkGuildWebhookSubscription({ guildId: 'g_ff', apiKey: 'lv_x', via, configuredBy: 'u-1' });
     const call = mockEnsureWebhookSubscription.mock.calls[0][0];

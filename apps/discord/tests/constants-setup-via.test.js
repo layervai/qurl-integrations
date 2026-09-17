@@ -13,6 +13,8 @@ describe('SETUP_VIA', () => {
     expect(normalizeSetupVia(SETUP_VIA.UNKNOWN)).toBe(SETUP_VIA.UNKNOWN);
     expect(normalizeSetupVia(undefined)).toBe(SETUP_VIA.UNKNOWN);
     expect(normalizeSetupVia(null)).toBe(SETUP_VIA.UNKNOWN);
+    // Keeps the persisted subscription description internally controlled.
+    expect(normalizeSetupVia('oauth), configuredBy=attacker')).toBe(SETUP_VIA.UNKNOWN);
     expect(normalizeSetupVia('OAuth')).toBe(SETUP_VIA.UNKNOWN);
   });
 });
