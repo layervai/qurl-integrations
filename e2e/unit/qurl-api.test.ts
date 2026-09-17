@@ -390,6 +390,10 @@ test('revokeLink reports a sustained revocation failure', async () => {
     const pending = qurl.revokeLink(mintUrl, apiKey, publicResourceId);
     await jest.advanceTimersByTimeAsync(120_000);
     await expect(pending).resolves.toBe(false);
+    // Bounded at ONE confirm retry — a still-pending revocation after the
+    // server's own window is a convergence regression to report, not wait out,
+    // and the file-revoke suite's timeouts are sized on this budget.
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   } finally {
     jest.useRealTimers();
   }

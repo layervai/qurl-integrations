@@ -74,9 +74,10 @@ const IDEMPOTENT_METHODS: ReadonlySet<string> = new Set([
   'TRACE',
 ]);
 
-// Ceiling on a server-asserted `Retry-After` wait. qurl-service's revocation
-// pending directive is 30s; 35s keeps one such wait (plus the request itself)
-// inside the suite's per-test budget while refusing an absurd directive.
+// Ceiling on a server-asserted `Retry-After` wait, so a misconfigured or
+// hostile directive can never stall a suite past its jest timeout. 35s clears
+// the only directive this stack emits (qurl-service's 30s revocation-pending)
+// with headroom; callers size their own attempt budget on top of it.
 const MAX_RETRY_AFTER_DELAY_MS = 35_000;
 
 function isRetryableStatus(status: number, method: string): boolean {

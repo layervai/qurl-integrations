@@ -254,10 +254,17 @@ export async function revokeLink(
   // connector upload) qurl-service commits the revocation and answers 503 +
   // `Retry-After: 30` until the protection update lands, so a single-shot
   // DELETE reports a false failure for a revocation that already happened.
+  //
+  // maxAttempts 2 (ONE retry), not the shared default 3: the retry only
+  // CONFIRMS an already-committed revocation, so the server's own 30s
+  // directive is the whole contract — a second 30s wait adds no more
+  // confidence and would put two revokes (file-revoke's idempotency test)
+  // past jest's 120s default. Still pending after that window is a real
+  // convergence regression the smoke should report, not wait out.
   const res = await fetchWithTransientRetry(url, {
     method: 'DELETE',
     headers: { Authorization: `Bearer ${apiKey}` },
-  });
+  }, { maxAttempts: 2 });
   return res.ok;
 }
 

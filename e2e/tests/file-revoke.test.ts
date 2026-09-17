@@ -62,7 +62,11 @@ const env = loadEnv();
 // through tracked.revoke so the assertion stays while the ledger syncs.
 const tracked = trackedQurlResources(env);
 
-afterAll(() => tracked.revokeAll());
+// Explicit hook budget: a revoke that meets the protection-update 503 waits out
+// the server's 30s directive once, so a run that failed mid-test can leave every
+// upload here to a ~30s cleanup revoke — past jest's 120s default hook timeout,
+// which would stack a misleading hook failure onto the real one.
+afterAll(() => tracked.revokeAll(), 180_000);
 
 // Valid 1x1 transparent PNG (standard test fixture — widely used, CRC/zlib
 // checks pass). Exercises the image-upload path including the fileviewer's
@@ -126,8 +130,9 @@ describe('File Revoke', () => {
     );
     expect(status.status).toBe('revoked');
     // Generous timeout: connector mint + headless-browser knock (cold chromium
-    // launch + navigation + the helper's own 30s tunnel-view budget) on CI.
-  }, 90_000);
+    // launch + navigation + the helper's own 30s tunnel-view budget) on CI,
+    // plus the revoke's one ~30s wait when it meets the protection-update 503.
+  }, 120_000);
 
   test('distinct-per-viewer watermark + `_` route-label SNI on the tunnel', async () => {
     // ONE upload → TWO minted recipient views. The whole point of render-at-mint:
