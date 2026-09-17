@@ -993,6 +993,24 @@ describe('revokeMintedLinks — #1551 fail-closed contract', () => {
       }));
     });
 
+    it('shares one request budget across the retry', async () => {
+      globalThis.fetch = jest.fn()
+        .mockResolvedValueOnce(refusal(429, {}, new Headers({ 'Retry-After': '1' })))
+        .mockResolvedValueOnce(revoked('q_one'));
+
+      await expect(settle(connector.revokeMintedLinks('res-1', ['q_one'], 'guild-key'), 1000)).resolves.toBe('resolved');
+      expect(globalThis.fetch.mock.calls[1][1].signal).toBe(globalThis.fetch.mock.calls[0][1].signal);
+    });
+
+    it('falls back to the SDK when the retry itself fails in transport', async () => {
+      globalThis.fetch = jest.fn()
+        .mockResolvedValueOnce(refusal(429, {}, new Headers({ 'Retry-After': '1' })))
+        .mockRejectedValueOnce(new TypeError('fetch failed'));
+
+      await expect(settle(connector.revokeMintedLinks('res-1', ['q_one'], 'guild-key'), 1000)).resolves.toBe('resolved');
+      expect(revokeOrdinaryLinks).toHaveBeenCalledWith('res-1', ['q_one'], 'guild-key');
+    });
+
     it('fails closed on a second 429 without trying the SDK fallback', async () => {
       globalThis.fetch = jest.fn()
         .mockResolvedValue(refusal(429, { code: 'request_rate_limited' }, new Headers({ 'Retry-After': '1' })));
@@ -1166,6 +1184,22 @@ describe('revokeMintedLinks — #1551 fail-closed contract', () => {
     expect(logger.error).toHaveBeenCalledWith('Connector mint_link returned more partial links than requested', {
       resource_ref: expect.stringMatching(/^sha256:/), requested: 2, capped_qurl_count: 998,
     });
+  });
+
+  it('does not count duplicate identified partial ids as unidentified', async () => {
+    globalThis.fetch = jest.fn()
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 502,
+        text: async () => JSON.stringify({ success: false, links: [{ qurl_id: 'q_dup' }, { qurl_id: 'q_dup' }] }),
+      })
+      .mockResolvedValueOnce(revoked('q_dup'));
+
+    await expect(connector.mintLinks('res-1', { expiresAt: '2026-01-01T00:00:00Z', n: 2 }))
+      .rejects.toMatchObject({ partialQurlIds: ['q_dup'] });
+    expect(logger.warn).toHaveBeenCalledWith('Connector mint_link returned partial links on non-2xx', expect.objectContaining({
+      unidentified_qurl_count: 0,
+    }));
   });
 
   it('counts partial children whose id cannot be revoked in the warning', async () => {

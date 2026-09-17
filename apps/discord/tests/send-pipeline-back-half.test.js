@@ -2854,6 +2854,25 @@ describe('handleAddRecipients — DB failure mid-flow', () => {
     );
   });
 
+  it('stops waiting on a hung Add Recipients cleanup at its budget and logs the ids', async () => {
+    jest.useFakeTimers();
+    try {
+      mockRevokeMintedLinks.mockImplementationOnce(() => new Promise(() => {}));
+      const pending = cleanupFreshAddRecipientResources([
+        { resourceId: 'res-new', qurlId: 'q_aaaaaaaaaa1' },
+      ], 'apikey', 'send-1', { rowsMayHavePersisted: false });
+      await jest.advanceTimersByTimeAsync(120_000);
+      await expect(pending).resolves.toBeUndefined();
+      expect(logger.warn).toHaveBeenCalledWith('Add Recipients cleanup still running at its wait budget', {
+        sendId: 'send-1',
+        reason: 'pre_persistence',
+        resources: [{ resource_ref: resourceIdLogRef('res-new'), qurl_ids: ['q_aaaaaaaaaa1'] }],
+      });
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   it('reports revoked when recordQURLSendBatch loses the revoked_at condition race', async () => {
     mockDb.getSendConfig.mockResolvedValueOnce({
       connector_resource_id: 'res-1', expires_in: '30m',

@@ -3014,10 +3014,24 @@ async function cleanupFreshAddRecipientResources(batchSends, apiKey, sendId, opt
   const resourceIds = [...qurlIdsByResource.keys()];
   if (resourceIds.length === 0 && unidentifiedCount === 0) return;
 
-  const results = await batchSettled(resourceIds, async (resourceId) => {
+  const cleanup = batchSettled(resourceIds, async (resourceId) => {
     await revokeMintedLinks(resourceId, qurlIdsByResource.get(resourceId), apiKey);
     return resourceId;
   }, 5);
+  // Same bounded wait as mint-failure compensation: the Add Recipients reply
+  // must not be held past its interaction window; the revoke keeps running.
+  if (!await settlesWithin(cleanup, MINT_COMPENSATION_WAIT_MS)) {
+    logger.warn('Add Recipients cleanup still running at its wait budget', {
+      sendId,
+      reason: cleanupReason,
+      resources: resourceIds.map(resourceId => ({
+        resource_ref: resourceIdLogRef(resourceId),
+        qurl_ids: qurlIdsByResource.get(resourceId),
+      })),
+    });
+    return;
+  }
+  const results = await cleanup;
   const failed = [];
   results.forEach((result, index) => {
     if (result.status === 'rejected') {

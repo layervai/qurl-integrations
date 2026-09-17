@@ -30,7 +30,9 @@ const REVOKE_LINKS_TIMEOUT_MS = 65_000;
 // fallback's per-call cap, so a change to either cannot turn chunks into 413s.
 const CONNECTOR_REVOKE_MAX_IDS = 10;
 if (!Number.isInteger(REVOKE_BATCH_MAX_IDS) || REVOKE_BATCH_MAX_IDS < CONNECTOR_REVOKE_MAX_IDS) {
-  // Every connector chunk may be handed to the SDK fallback whole.
+  // Every connector chunk may be handed to the SDK fallback whole. A test that
+  // mocks ./qurl must keep this export (spread jest.requireActual) or this
+  // module fails to load with this message.
   throw new Error('SDK revoke batch cap must cover a connector revoke chunk');
 }
 const REVOKE_RETRY_AFTER_MAX_SECONDS = 2;
@@ -119,10 +121,11 @@ function parseConnectorBody(bodyText) {
 function partialQurlIdsFromLinks(links, n) {
   if (!Array.isArray(links)) return { partialQurlIds: [], unidentifiedCount: 0, cappedCount: 0 };
   const cap = Number.isInteger(n) && n > 0 ? n : 0;
-  const identified = [...new Set(links.map(link => qurlIdForCleanup(link?.qurl_id)).filter(id => id !== null))];
+  const normalized = links.map(link => qurlIdForCleanup(link?.qurl_id));
+  const identified = [...new Set(normalized.filter(id => id !== null))];
   return {
     partialQurlIds: identified.slice(0, cap),
-    unidentifiedCount: links.length - identified.length,
+    unidentifiedCount: normalized.filter(id => id === null).length,
     cappedCount: Math.max(0, identified.length - cap),
   };
 }
@@ -615,7 +618,7 @@ async function revokeMintedLinks(resourceId, qurlIds, apiKey) {
       // Keep the connector error (and its api_code) as the verdict, but carry
       // the fallback's diagnosis so failed_child_count survives.
       connectorError.cause ??= fallbackError;
-      connectorError.failedCount ??= fallbackError?.failedCount;
+      if (fallbackError?.failedCount !== undefined) connectorError.failedCount ??= fallbackError.failedCount;
       throw connectorError;
     }
     fallbackCount += batchIds.length;
@@ -701,13 +704,16 @@ async function revokeMintedLinks(resourceId, qurlIds, apiKey) {
       const requested = new Set(batchIds);
       const statuses = new Map();
       const results = Array.isArray(parsed.results) ? parsed.results : [];
+      if (results.length !== batchIds.length) {
+        throw new Error('Connector revoke_links did not confirm every requested link');
+      }
       for (const result of results) {
         if (requested.has(result?.qurl_id) && REVOKE_TERMINAL_STATUSES.has(result.status)
             && !statuses.has(result.qurl_id)) {
           statuses.set(result.qurl_id, result.status);
         }
       }
-      if (results.length !== batchIds.length || statuses.size !== batchIds.length) {
+      if (statuses.size !== batchIds.length) {
         throw new Error('Connector revoke_links did not confirm every requested link');
       }
       for (const status of statuses.values()) outcomes[status] = (outcomes[status] || 0) + 1;
