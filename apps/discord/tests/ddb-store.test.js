@@ -88,6 +88,7 @@ describe('guild configs', () => {
       guild_id: 'g-1',
       old_admin_id: 'old-admin',
       new_admin_id: 'new-admin',
+      prior_had_key: true,
       via: 'oauth',
       prior_configured_at: '2026-09-10T00:00:00Z',
     });
@@ -157,6 +158,7 @@ describe('guild configs', () => {
       guild_id: 'g-1',
       old_admin_id: null,
       new_admin_id: 'new-admin',
+      prior_had_key: true,
       via: 'paste',
       prior_configured_at: null,
     });
@@ -169,6 +171,7 @@ describe('guild configs', () => {
       guild_id: 'g-1',
       old_admin_id: 'old-admin',
       new_admin_id: 'new-admin',
+      prior_had_key: false,
       via: 'paste',
       prior_configured_at: null,
     });

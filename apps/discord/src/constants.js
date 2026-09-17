@@ -660,10 +660,11 @@ const SETUP_VIA = Object.freeze({
   PASTE: 'paste',
   UNKNOWN: 'unknown',
 });
-const SETUP_VIA_VALUES = new Set(Object.values(SETUP_VIA));
-// Omitted or unrecognized doors collapse to UNKNOWN.
+// UNKNOWN is an output sentinel, not a door a caller may pass.
+const SETUP_VIA_DOORS = new Set([SETUP_VIA.OAUTH, SETUP_VIA.PASTE]);
+// Omitted, unrecognized or sentinel doors collapse to UNKNOWN.
 function normalizeSetupVia(via) {
-  return SETUP_VIA_VALUES.has(via) ? via : SETUP_VIA.UNKNOWN;
+  return SETUP_VIA_DOORS.has(via) ? via : SETUP_VIA.UNKNOWN;
 }
 
 // Use one tag for gateway and worker rejection alerts.

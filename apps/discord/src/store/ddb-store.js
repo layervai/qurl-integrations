@@ -1576,6 +1576,9 @@ async function setGuildApiKey(guildId, apiKey, configuredBy, via) {
         guild_id: guildId,
         old_admin_id: oldAdminId,
         new_admin_id: configuredBy ?? null,
+        // Separates a damaged configured row (key, no configured_by) from a
+        // healthy rebind when old_admin_id or prior_configured_at is null.
+        prior_had_key: Boolean(prior.qurl_api_key),
         via: door,
         // configured_at, not updated_at: webhook-subscription writes also stamp
         // updated_at, while configured_at is the guild's stable first-setup time.

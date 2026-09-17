@@ -7,7 +7,10 @@ describe('SETUP_VIA', () => {
   });
 
   test('normalizeSetupVia keeps known doors and collapses anything else to unknown', () => {
-    for (const via of Object.values(SETUP_VIA)) expect(normalizeSetupVia(via)).toBe(via);
+    expect(normalizeSetupVia(SETUP_VIA.OAUTH)).toBe(SETUP_VIA.OAUTH);
+    expect(normalizeSetupVia(SETUP_VIA.PASTE)).toBe(SETUP_VIA.PASTE);
+    // UNKNOWN is an output sentinel; passing it in is caller drift.
+    expect(normalizeSetupVia(SETUP_VIA.UNKNOWN)).toBe(SETUP_VIA.UNKNOWN);
     expect(normalizeSetupVia(undefined)).toBe(SETUP_VIA.UNKNOWN);
     expect(normalizeSetupVia(null)).toBe(SETUP_VIA.UNKNOWN);
     expect(normalizeSetupVia('OAuth')).toBe(SETUP_VIA.UNKNOWN);
