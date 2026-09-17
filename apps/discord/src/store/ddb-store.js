@@ -1532,7 +1532,7 @@ async function setGuildApiKey(guildId, apiKey, configuredBy, via) {
   // shows up on first setups too; such doors audit as unknown.
   if (door !== via) {
     try {
-      logger.warn('Unrecognized setup door; auditing as unknown', { via: String(via) });
+      logger.warn('Unrecognized setup door; auditing as unknown', { via: String(via), guildId });
     } catch { /* a bad door must not fail the key write */ }
   }
   const now = nowIso();

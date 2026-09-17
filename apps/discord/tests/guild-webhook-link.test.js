@@ -50,9 +50,9 @@ process.env.AWS_REGION = 'us-east-2';
 process.env.DDB_TABLE_PREFIX = 'qurl-bot-discord-test-';
 
 const {
-  linkGuildWebhookSubscription, LINK_RESULTS,
+  linkGuildWebhookSubscription, fireAndForgetLinkGuildWebhookSubscription, LINK_RESULTS,
 } = require('../src/guild-webhook-link');
-const { AUDIT_EVENTS } = require('../src/constants');
+const { AUDIT_EVENTS, SETUP_VIA } = require('../src/constants');
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -186,6 +186,16 @@ describe('linkGuildWebhookSubscription — URL-migration sweep kill-switch (#827
     await linkGuildWebhookSubscription({ guildId: 'g_desc', apiKey: 'lv_x', descriptionContext: 'via=test' });
     const call = mockEnsureWebhookSubscription.mock.calls[0][0];
     expect(call.description).toBe('Discord bot view counter (guild=g_desc, via=test)');
+  });
+
+  it.each([
+    [SETUP_VIA.PASTE, 'paste'],
+    ['OAuth', 'unknown'],
+  ])('fire-and-forget wrapper records door %p as via=%s, like the setup audit', async (via, expected) => {
+    fireAndForgetLinkGuildWebhookSubscription({ guildId: 'g_ff', apiKey: 'lv_x', via, configuredBy: 'u-1' });
+    await new Promise(setImmediate);
+    const call = mockEnsureWebhookSubscription.mock.calls[0][0];
+    expect(call.description).toBe(`Discord bot view counter (guild=g_ff, via=${expected}, configuredBy=u-1)`);
   });
 });
 
