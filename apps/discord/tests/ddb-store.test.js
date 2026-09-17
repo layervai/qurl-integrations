@@ -50,6 +50,7 @@ const { AUDIT_EVENTS, SETUP_VIA } = require('../src/constants');
 beforeEach(() => {
   logger.audit.mockReset();
   logger.error.mockReset();
+  logger.warn.mockClear();
   ddbMock.reset();
   mockEncryptStrict.mockReset();
   mockEncryptStrict.mockImplementation((v) => `enc:v1:IV:TAG:${Buffer.from(v || '').toString('hex')}`);
@@ -108,6 +109,7 @@ describe('guild configs', () => {
     await store.setGuildApiKey('g-1', 'plain-key', 'new-admin');
     expect(logger.audit).toHaveBeenCalledWith(AUDIT_EVENTS.QURL_SETUP_ADMIN_CHANGED,
       expect.objectContaining({ via: 'unknown' }));
+    expect(logger.warn).not.toHaveBeenCalled();
   });
 
   test('setGuildApiKey: collapses an unrecognized setup door to unknown', async () => {
@@ -115,6 +117,7 @@ describe('guild configs', () => {
     await store.setGuildApiKey('g-1', 'plain-key', 'new-admin', 'OAuth');
     expect(logger.audit).toHaveBeenCalledWith(AUDIT_EVENTS.QURL_SETUP_ADMIN_CHANGED,
       expect.objectContaining({ via: SETUP_VIA.UNKNOWN }));
+    expect(logger.warn).toHaveBeenCalledWith('Unrecognized setup door; auditing as unknown', { via: 'OAuth' });
   });
 
   test('setGuildApiKey: does not audit a prior row with neither key nor admin', async () => {

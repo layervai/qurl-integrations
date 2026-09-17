@@ -1554,21 +1554,26 @@ async function setGuildApiKey(guildId, apiKey, configuredBy, via) {
     // no-op on a re-key; mocks cannot pin that, so the sandbox rebind gate does.
     ReturnValues: 'UPDATED_OLD',
   }));
-  const prior = res?.Attributes;
-  const oldAdminId = prior?.configured_by ?? null;
+  const prior = res?.Attributes ?? {};
+  const oldAdminId = prior.configured_by ?? null;
   // Either prior attribute means the guild was already configured, even when a
   // hand edit or partial rollback dropped the other. Unlike shouldPromptConsent
   // (guild-config-state.js), which treats a row without configured_by as a
   // first install, the alarm biases toward paging; a missing admin reports null.
-  if ((prior?.qurl_api_key || oldAdminId !== null) && oldAdminId !== configuredBy) {
+  if ((prior.qurl_api_key || oldAdminId !== null) && oldAdminId !== configuredBy) {
     // The write has landed: an audit failure must not surface as a write
     // failure, or qurl-oauth.js would revoke the key it just stored.
     try {
+      const door = normalizeSetupVia(via);
+      // Separate caller drift from an omitted argument; both audit as unknown.
+      if (via !== undefined && door !== via) {
+        logger.warn('Unrecognized setup door; auditing as unknown', { via });
+      }
       logger.audit(AUDIT_EVENTS.QURL_SETUP_ADMIN_CHANGED, {
         guild_id: guildId,
         old_admin_id: oldAdminId,
         new_admin_id: configuredBy,
-        via: normalizeSetupVia(via),
+        via: door,
         // configured_at, not updated_at: webhook-subscription writes also stamp
         // updated_at, while configured_at is the guild's stable first-setup time.
         prior_configured_at: prior.configured_at ?? null,

@@ -85,7 +85,8 @@ const AUDIT_SECRET_KEYS = new Set([
   // audit serializer too.
   'interaction_token',
   // guild_configs' encrypted API key attribute; setGuildApiKey's UPDATED_OLD
-  // response carries it beside the admin-change audit fields.
+  // response carries it beside the admin-change audit fields. Audit path only:
+  // REDACT_SUBSTRINGS' `api_key` already covers it for info/warn/debug.
   'qurl_api_key',
   // Keep canonical qURL link shapes explicit for documentation and so a
   // scalar under one of these names still emits the secret-shaped-key warning;
