@@ -298,21 +298,20 @@ func nativeRecoveryHubReply(
 		// Distinct generations let the test tell the persisted refresh result
 		// from the recover result. Request field checks run after the exchange so
 		// a mismatch fails the test directly instead of stalling the connector.
+		generation := connectorIntegrationRefreshGeneration
 		switch parsed.Mode {
 		case "recover":
+			generation = connectorIntegrationRecoverGeneration
 			list["mode"] = "recover"
 			list["recovery_grant"] = connectorIntegrationRecoveryGrant
 			list["recovery_grant_issued_at"] = now.Add(-time.Minute).Format(time.RFC3339)
 			list["recovery_grant_expires_at"] = now.Add(14 * time.Minute).Format(time.RFC3339)
-			if err := setNativeRecoveryAssignment(list["assignment"], connectorIntegrationRecoverGeneration, cellPublicKeyB64, now); err != nil {
-				return nil, err
-			}
 		case "refresh":
-			if err := setNativeRecoveryAssignment(list["assignment"], connectorIntegrationRefreshGeneration, cellPublicKeyB64, now); err != nil {
-				return nil, err
-			}
 		default:
 			return nil, fmt.Errorf("unexpected Hub assignment mode %q", parsed.Mode)
+		}
+		if err := setNativeRecoveryAssignment(list["assignment"], generation, cellPublicKeyB64, now); err != nil {
+			return nil, err
 		}
 		return json.Marshal(body)
 	}
@@ -495,11 +494,15 @@ func TestOpenNativeRegisteredClient_ExplicitLoginUsesRealConnectorRecovery(t *te
 		t.Fatalf("real connector Hub exchanges = %d, want recovery and required post-recovery refresh", got)
 	}
 	// Credential checks are value-free: the credential is account authority in
-	// the real protocol. The empty-credential expectations only have teeth
-	// because the recover row proves the usrData.credential tag still binds.
-	for i, want := range []struct{ mode, credential string }{
-		{"recover", validatedAccountKey},
-		{"refresh", ""},
+	// the real protocol. The recover row needs the usrData.credential tag to
+	// bind; the refresh row checks the raw request so a renamed field cannot
+	// hide the credential.
+	for i, want := range []struct {
+		mode        string
+		carriesAuth bool
+	}{
+		{"recover", true},
+		{"refresh", false},
 	} {
 		parsed, err := parseNativeRecoveryRequest(hubRequests[i])
 		if err != nil {
@@ -508,8 +511,12 @@ func TestOpenNativeRegisteredClient_ExplicitLoginUsesRealConnectorRecovery(t *te
 		if parsed.Mode != want.mode {
 			t.Fatalf("Hub exchange %d mode = %q, want %q", i, parsed.Mode, want.mode)
 		}
-		if parsed.Credential != want.credential {
-			t.Fatalf("Hub %s request account credential mismatch (field empty: %t)", want.mode, parsed.Credential == "")
+		if want.carriesAuth && parsed.Credential != validatedAccountKey {
+			t.Fatalf("Hub %s request account credential mismatch (empty: %t, is old device key: %t, len: %d)",
+				want.mode, parsed.Credential == "", parsed.Credential == oldDeviceKey, len(parsed.Credential))
+		}
+		if !want.carriesAuth && bytes.Contains(hubRequests[i], []byte(validatedAccountKey)) {
+			t.Fatalf("Hub %s request unexpectedly carried account authority", want.mode)
 		}
 	}
 	cellRequests := cell.snapshot()
@@ -524,7 +531,7 @@ func TestOpenNativeRegisteredClient_ExplicitLoginUsesRealConnectorRecovery(t *te
 		// The grant is a synthetic, test-local value, so printing it is safe.
 		t.Fatalf("cell request recovery grant = %q, want %q", cellRequest.RecoveryGrant, connectorIntegrationRecoveryGrant)
 	}
-	if cellRequest.Credential != "" {
+	if bytes.Contains(cellRequests[0], []byte(validatedAccountKey)) {
 		t.Fatal("cell recovery completion unexpectedly carried account authority")
 	}
 	if err := opts.closeAPIClient(); err != nil {
@@ -536,6 +543,8 @@ func TestOpenNativeRegisteredClient_ExplicitLoginUsesRealConnectorRecovery(t *te
 	if got := connectorstate.ConfiguredAgentID(); got != "" {
 		t.Fatalf("test unexpectedly changed the configured connector identity: %q", got)
 	}
+	// Read back only after closeAPIClient above: the refresh result is not
+	// guaranteed on disk until the native runtime is closed.
 	withNativeRecoveryStateStore(t, stateDir, func(store qurl.AgentStateStore) {
 		recovered, err := store.LoadAgentState(context.Background())
 		if err != nil {
@@ -552,9 +561,12 @@ func TestOpenNativeRegisteredClient_ExplicitLoginUsesRealConnectorRecovery(t *te
 			// of test output.
 			t.Fatal("persisted device credential did not match the one that authorized the retry")
 		}
-		if recovered.Assignment == nil || recovered.Assignment.AssignmentGeneration != connectorIntegrationRefreshGeneration {
-			t.Fatalf("persisted assignment = %#v, want the post-recovery refresh generation %d",
-				recovered.Assignment, connectorIntegrationRefreshGeneration)
+		if recovered.Assignment == nil {
+			t.Fatal("persisted connector assignment is missing")
+		}
+		if got := recovered.Assignment.AssignmentGeneration; got != connectorIntegrationRefreshGeneration {
+			t.Fatalf("persisted assignment generation = %d, want the post-recovery refresh generation %d",
+				got, connectorIntegrationRefreshGeneration)
 		}
 	})
 }
