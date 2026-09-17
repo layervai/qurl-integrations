@@ -1527,9 +1527,10 @@ async function getGuildApiKey(guildId) {
   return res.Item ? decrypt(res.Item.qurl_api_key) : null;
 }
 
-// Observability around a key write must never fail that write.
+// Observability around a key write must never fail that write, before or
+// after it lands.
 function bestEffortLog(emit) {
-  try { emit(); } catch { /* observability must never fail a landed write */ }
+  try { emit(); } catch { /* observability must never fail the key write */ }
 }
 
 // Emits qurl_setup_admin_changed when a landed setGuildApiKey write rebinds an

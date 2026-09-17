@@ -447,12 +447,14 @@ const AUDIT_EVENTS = {
   // `/qurl setup` paste) rebinds an existing guild to a different configured_by
   // admin. TODO(upstream-contract): keep qurl-integrations-infra's
   // qurl_setup_admin_changed CloudWatch filter/alarm in sync with this string
-  // (pinned literally in ddb-store.test.js). Best-effort, with three known
-  // blind spots: (1) deleting the configuration first (a whole-row delete,
-  // _removeGuildApiKeyRaw, with no production caller today) leaves no prior
-  // administrator to compare (#1455); (2) a retried or double-submitted write
-  // that already landed reads the new admin back as the old one, and the SDK's
-  // own retries on throttling or dropped connections make this
+  // (pinned literally in ddb-store.test.js). Scope: an administrator change
+  // only; a same-admin key replacement (e.g. a compromised admin session
+  // swapping in another key) is not covered (see #1455). Best-effort, with
+  // three known blind spots: (1) deleting the configuration first (a whole-row
+  // delete, _removeGuildApiKeyRaw, with no production caller today) leaves no
+  // prior administrator to compare (#1455); (2) a retried or double-submitted
+  // write that already landed reads the new admin back as the old one, and the
+  // SDK's own retries on throttling or dropped connections make this
   // infrastructure-driven, not only user-driven; (3) a damaged row that lost
   // configured_by, rebound by a caller that also omits configuredBy, compares
   // null to null and stays silent. Guild/admin IDs are forensic fields, never
@@ -671,11 +673,12 @@ const SETUP_VIA_DOORS = new Set(Object.values(SETUP_VIA).filter((v) => v !== SET
 function normalizeSetupVia(via) {
   return SETUP_VIA_DOORS.has(via) ? via : SETUP_VIA.UNKNOWN;
 }
-// Log-safe description of an unrecognized door: echo only short slug-shaped
-// values, so a misplaced argument (e.g. an API key) never reaches the logs.
+// Log-safe description of an unrecognized door: echo only short, letter-led
+// slugs (well below secret length), so a misplaced argument such as an API key
+// or token never reaches the logs.
 function describeSetupVia(via) {
   const text = String(via);
-  return { via: /^[a-z0-9_-]{1,32}$/.test(text) ? text : '[unrecognized]', via_type: typeof via };
+  return { via: /^[a-z][a-z0-9_-]{0,15}$/.test(text) ? text : '[unrecognized]', via_type: typeof via };
 }
 
 // Use one tag for gateway and worker rejection alerts.

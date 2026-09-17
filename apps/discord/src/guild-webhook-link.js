@@ -248,6 +248,8 @@ function fireAndForgetLinkGuildWebhookSubscription({ guildId, apiKey, via, confi
     try {
       logger.warn('Unrecognized setup door in subscription description; recording via=unknown', { ...describeSetupVia(via), guildId });
     } catch { /* runs after the key write; logging must not fail setup */ }
+    // Setup callers also get the store's door warning; this one covers any
+    // future caller that links a subscription without writing the key.
   }
   return linkGuildWebhookSubscription({
     guildId,
