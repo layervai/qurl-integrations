@@ -530,6 +530,8 @@ async function revokeMintedLinks(resourceId, qurlIds, apiKey) {
   if (ids.length === 0) return;
 
   let routeAbsent = false;
+  // Per-status tally so rollout can see revoked vs already_gone vs handed back.
+  const outcomes = {};
   for (let offset = 0; offset < ids.length; offset += REVOKE_LINKS_MAX_IDS) {
     const batchIds = ids.slice(offset, offset + REVOKE_LINKS_MAX_IDS);
     if (routeAbsent) {
@@ -580,6 +582,7 @@ async function revokeMintedLinks(resourceId, qurlIds, apiKey) {
     if (results.length !== batchIds.length || statuses.size !== batchIds.length) {
       throw new Error('Connector revoke_links did not confirm every requested link');
     }
+    for (const status of statuses.values()) outcomes[status] = (outcomes[status] || 0) + 1;
     const ordinaryIds = batchIds.filter(id => statuses.get(id) === 'not_connector_managed');
     if (ordinaryIds.length > 0) {
       await revokeOrdinaryLinks(resourceId, ordinaryIds, apiKey);
@@ -590,6 +593,7 @@ async function revokeMintedLinks(resourceId, qurlIds, apiKey) {
     resource_ref: resourceIdLogRef(resourceId),
     count: ids.length,
     route_absent: routeAbsent,
+    outcomes,
   });
 }
 

@@ -455,7 +455,7 @@ describe('qURL client — revokeOrdinaryLinks', () => {
   it('bounds the whole batch, retries included, by one size-scaled budget', async () => {
     const budget = new AbortController();
     const timeoutSpy = jest.spyOn(AbortSignal, 'timeout').mockImplementation(ms => (
-      ms === 30_000 ? budget.signal : new AbortController().signal
+      ms === 50_000 ? budget.signal : new AbortController().signal
     ));
     const signals = [];
     globalThis.fetch = jest.fn().mockImplementation(async (_url, init) => {
@@ -466,7 +466,7 @@ describe('qURL client — revokeOrdinaryLinks', () => {
     });
     try {
       await qurl.revokeOrdinaryLinks(PUBLIC_KEY_RESOURCE_ID, ['q_aaaaaaaaaa1'], 'guild-key');
-      expect(timeoutSpy).toHaveBeenCalledWith(30_000);
+      expect(timeoutSpy).toHaveBeenCalledWith(50_000);
       expect(signals).toHaveLength(2);
       budget.abort();
       expect(signals.every(signal => signal.aborted)).toBe(true);
@@ -478,7 +478,7 @@ describe('qURL client — revokeOrdinaryLinks', () => {
   it('stops mid-batch once the budget expires', async () => {
     const budget = new AbortController();
     const timeoutSpy = jest.spyOn(AbortSignal, 'timeout').mockImplementation(ms => (
-      ms === 45_000 ? budget.signal : new AbortController().signal
+      ms === 75_000 ? budget.signal : new AbortController().signal
     ));
     globalThis.fetch = jest.fn().mockImplementation(async (_url, init) => {
       if (init.signal.aborted) throw init.signal.reason;
@@ -510,7 +510,7 @@ describe('qURL client — revokeOrdinaryLinks', () => {
   it('rejects a non-array token list before network work', async () => {
     globalThis.fetch = jest.fn();
     await expect(qurl.revokeOrdinaryLinks(PUBLIC_KEY_RESOURCE_ID, 'q_aaaaaaaaaa1', 'guild-key'))
-      .rejects.toThrow('Invalid qURL revoke token identity');
+      .rejects.toThrow('Invalid qURL revoke token list');
     expect(globalThis.fetch).not.toHaveBeenCalled();
   });
 
@@ -528,7 +528,7 @@ describe('qURL client — revokeOrdinaryLinks', () => {
     globalThis.fetch = jest.fn().mockResolvedValue(apiError(404, { code: 'not_found' }));
 
     await expect(qurl.revokeOrdinaryLinks(PUBLIC_KEY_RESOURCE_ID, ['q_aaaaaaaaaa1'], 'guild-key'))
-      .rejects.toThrow('qURL API GET /qurls/:resourceId failed (404)');
+      .rejects.toThrow('qURL API GET /qurls/:qurlId failed (404)');
     expect(globalThis.fetch).toHaveBeenCalledTimes(1);
   });
 });

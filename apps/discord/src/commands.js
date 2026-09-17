@@ -1707,6 +1707,11 @@ async function mintLinksInBatches({ initialResourceId, reuploadFn, expiresAt, re
       if (minted.some(link => !hasPersistableQurlIdShape(link?.qurl_id))) {
         throw new Error('Connector mint_link returned a link without a valid qurl_id');
       }
+      // qurl_link is the write-once delivery credential; an id-only 2xx entry
+      // can be neither delivered nor rebuilt, so revoke it rather than persist.
+      if (minted.some(link => typeof link.qurl_link !== 'string' || link.qurl_link.length === 0)) {
+        throw new Error('Connector mint_link returned a link without a qurl_link');
+      }
       tokensUsed += batchSize;
     }
   } catch (error) {

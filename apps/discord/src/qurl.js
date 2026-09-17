@@ -52,13 +52,16 @@ const USER_AGENT = 'qurl-discord-bot/1.0';
 // influenced; keeping the value out of route labels prevents an accidentally
 // cross-wired credential from reaching logs or audit events.
 const QURL_ID_LOG_PATH = '/qurls/:resourceId';
+const CHILD_QURL_LOG_PATH = '/qurls/:qurlId';
 const RESOURCE_ID_LOG_PATH = '/resources/:resourceId';
 const RESOURCE_QURL_LOG_PATH = '/resources/:resourceId/qurls/:qurlId';
-// Budget per call in one ordinary-child revoke batch (parent GET plus each
-// sequential DELETE, retries included). Scaling by batch size lets one
-// invocation finish a full batch under brief 429s, while a degraded
-// qurl-service still cannot hold /qurl revoke past Discord's 15-minute window.
-const ORDINARY_REVOKE_BUDGET_PER_CALL_MS = 15_000;
+// Ordinary-child revoke client: each call (parent GET or one DELETE) gets two
+// 10s attempts, and the batch gets 25s per call (two attempts plus backoff).
+// One invocation can therefore absorb a retry on every call, while a full
+// ten-child batch stays under 275s, well inside Discord's 15-minute window.
+const ORDINARY_REVOKE_ATTEMPT_TIMEOUT_MS = 10_000;
+const ORDINARY_REVOKE_MAX_RETRIES = 1;
+const ORDINARY_REVOKE_BUDGET_PER_CALL_MS = 25_000;
 const UNKNOWN_STATUS0_CODE = 'unknown_error';
 
 // status-0 SDK error codes whose message the SDK synthesizes itself (no server
@@ -75,8 +78,9 @@ const SAFE_STATUS0_CODES = new Set([
 // control-plane calls, not a hot path; constructing here also means the client
 // binds the live globalThis.fetch at call time. baseUrl is the bare API origin
 // — the SDK prepends `/v1/...` itself.
-// `signal` bounds every attempt and retry of every call made with this client.
-function makeClient(apiKey, { signal } = {}) {
+// `signal` bounds every attempt and retry of every call made with this client;
+// `timeout`/`maxRetries` override the per-attempt budget for that client only.
+function makeClient(apiKey, { signal, timeout = REQUEST_TIMEOUT_MS, maxRetries = MAX_RETRIES } = {}) {
   const key = apiKey || config.QURL_API_KEY;
   if (!key) {
     throw new Error('QURL_API_KEY is not configured');
@@ -84,8 +88,8 @@ function makeClient(apiKey, { signal } = {}) {
   return new QURLClient({
     apiKey: key,
     baseUrl: config.QURL_ENDPOINT,
-    timeout: REQUEST_TIMEOUT_MS,
-    maxRetries: MAX_RETRIES,
+    timeout,
+    maxRetries,
     userAgent: USER_AGENT,
     ...(signal ? {
       fetch: (url, init) => globalThis.fetch(url, {
@@ -366,12 +370,13 @@ async function deleteLink(resourceId, apiKey) {
 // repeated revocation succeeds (204).
 async function revokeOrdinaryLinks(resourceId, qurlIds, apiKey) {
   validateResourceId(resourceId);
-  if (!Array.isArray(qurlIds) || !qurlIds.every(hasPersistableQurlIdShape)) {
-    throw new Error('Invalid qURL revoke token identity');
-  }
+  if (!Array.isArray(qurlIds)) throw new Error('Invalid qURL revoke token list');
+  if (!qurlIds.every(hasPersistableQurlIdShape)) throw new Error('Invalid qURL revoke token identity');
   if (qurlIds.length === 0) return;
   const client = makeClient(apiKey, {
     signal: AbortSignal.timeout(ORDINARY_REVOKE_BUDGET_PER_CALL_MS * (qurlIds.length + 1)),
+    timeout: ORDINARY_REVOKE_ATTEMPT_TIMEOUT_MS,
+    maxRetries: ORDINARY_REVOKE_MAX_RETRIES,
   });
   // Resolve the parent from the first child the service still indexes, so one
   // unexpectedly unindexed child cannot block a retry of its siblings. That
@@ -380,7 +385,7 @@ async function revokeOrdinaryLinks(resourceId, qurlIds, apiKey) {
   let parent;
   for (const [i, candidate] of qurlIds.entries()) {
     try {
-      parent = await callQurl('GET', QURL_ID_LOG_PATH, () => client.get(candidate));
+      parent = await callQurl('GET', CHILD_QURL_LOG_PATH, () => client.get(candidate));
       break;
     } catch (err) {
       if (err?.status !== 404 || i === qurlIds.length - 1) throw err;

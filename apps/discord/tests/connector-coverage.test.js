@@ -805,6 +805,7 @@ describe('revokeMintedLinks — #1551 fail-closed contract', () => {
     expect(revokeOrdinaryLinks).not.toHaveBeenCalled();
     expect(logger.info).toHaveBeenCalledWith('Revoked minted links', {
       resource_ref: expect.stringMatching(/^sha256:/), count: 2, route_absent: false,
+      outcomes: { already_gone: 1, revoked: 1 },
     });
   });
 
@@ -833,6 +834,7 @@ describe('revokeMintedLinks — #1551 fail-closed contract', () => {
     expect(globalThis.fetch).toHaveBeenCalledTimes(2);
     expect(logger.info).toHaveBeenCalledWith('Revoked minted links', {
       resource_ref: expect.stringMatching(/^sha256:/), count: 11, route_absent: false,
+      outcomes: { revoked: 11 },
     });
   });
 

@@ -833,6 +833,7 @@ describe('revokeAllLinks', () => {
     ['whitespace', '   '],
     ['non-string', 42],
     ['overlong', `q_${'a'.repeat(200)}`],
+    ['bearer-shaped', 'at_secret_bearer'],
   ])('fails only the recipient with an %s stored token id; its sibling on the resource still revokes', async (_label, qurlId) => {
     mockDb.getSendItems.mockResolvedValueOnce([
       { resource_id: 'res-1', recipient_discord_id: 'user-1', qurl_id: 'q_good' },
@@ -3197,6 +3198,19 @@ describe('mintLinksInBatches', () => {
       apiKey: 'apikey',
     })).rejects.toThrow('Connector mint_link returned a link without a valid qurl_id');
     expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-1', ['q_ok'], 'apikey');
+  });
+
+  it('rejects an id-only 2xx mint entry and revokes it rather than persisting it', async () => {
+    mockMintLinks.mockResolvedValueOnce([{ qurl_id: 'q_idonly' }]);
+
+    await expect(mintLinksInBatches({
+      initialResourceId: 'res-1',
+      reuploadFn: jest.fn(),
+      expiresAt: new Date().toISOString(),
+      recipientCount: 1,
+      apiKey: 'apikey',
+    })).rejects.toThrow('Connector mint_link returned a link without a qurl_link');
+    expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-1', ['q_idonly'], 'apikey');
   });
 
   it('returns empty array when recipientCount = 0', async () => {
