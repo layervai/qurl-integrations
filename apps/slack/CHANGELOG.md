@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.6.0](https://github.com/layervai/qurl-integrations/compare/slack-v0.5.1...slack-v0.6.0) (2026-09-17)
+
+
+### ⚠ BREAKING CHANGES
+
+* **slack:** confirm `/qurl uninstall` with a Block Kit dialog ([#1136](https://github.com/layervai/qurl-integrations/issues/1136))
+
+### Bug Fixes
+
+* **origins:** add explicit S3 credentials and request preflight ([#1230](https://github.com/layervai/qurl-integrations/issues/1230)) ([83d003b](https://github.com/layervai/qurl-integrations/commit/83d003bdb6a42bf3260048c51632c831ce2ad280))
+* **shared:** decode GET /v1/resources/{id} detail envelope before Slack revoke ([#1440](https://github.com/layervai/qurl-integrations/issues/1440)) ([ef270e9](https://github.com/layervai/qurl-integrations/commit/ef270e9ffbab014061ef74642ae18aa4f4573f79))
+* **slack:** carry sandbox Hub trust into Connector installs ([#1464](https://github.com/layervai/qurl-integrations/issues/1464)) ([1f412b5](https://github.com/layervai/qurl-integrations/commit/1f412b51104c0fa4d2cd50213311e3fd5b56e1ed))
+* **slack:** confirm `/qurl uninstall` with a Block Kit dialog ([#1136](https://github.com/layervai/qurl-integrations/issues/1136)) ([b3cac91](https://github.com/layervai/qurl-integrations/commit/b3cac91bc8ca16e976dc5e69480e6c30cc856847))
+* **slack:** make external binding recovery explicit ([#1415](https://github.com/layervai/qurl-integrations/issues/1415)) ([04517b4](https://github.com/layervai/qurl-integrations/commit/04517b4ff7f82d2e310150c1feee40753b350c2b))
+
 ## [0.5.1](https://github.com/layervai/qurl-integrations/compare/slack-v0.5.0...slack-v0.5.1) (2026-09-11)
 
 
