@@ -561,6 +561,17 @@ describe('webhook-subscriptions registry — default-key discovery', () => {
       .rejects.toMatchObject({ code: 'CANDIDATE_WEBHOOK_OWNER_CONTRACT' });
   });
 
+  it('treats a default-owner row without a url as a bridge URL mismatch', async () => {
+    global.fetch = jest.fn(async () => ({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({ data: [{ owner_id: 'usr_default' }] }),
+    }));
+
+    await expect(subs.resolveDefaultOwnerForApiKey('lv_alias', { bridgeUrl: 'http://localhost:3000/webhooks/qurl' }))
+      .rejects.toMatchObject({ code: 'DEFAULT_WEBHOOK_OWNER_URL_MISMATCH' });
+  });
+
   it('rejects a default owner whose subscriptions do not target the bridge URL', async () => {
     global.fetch = jest.fn(async () => ({
       ok: true,
@@ -602,6 +613,12 @@ describe('webhook-subscriptions registry — default-key discovery', () => {
       await expect(subs.resolveDefaultOwnerForApiKey('lv_test_abc')).resolves.toBe('usr_default');
       expect(global.fetch).toHaveBeenCalledTimes(2);
     }
+
+    global.fetch = jest.fn()
+      .mockRejectedValueOnce(Object.assign(new Error('timed out'), { name: 'TimeoutError' }))
+      .mockResolvedValueOnce(page);
+    await expect(subs.resolveDefaultOwnerForApiKey('lv_test_abc')).resolves.toBe('usr_default');
+    expect(global.fetch).toHaveBeenCalledTimes(2);
 
     global.fetch = jest.fn().mockRejectedValue(Object.assign(new Error('bad payload'), { code: 'ERR_APP' }));
     await expect(subs.resolveDefaultOwnerForApiKey('lv_test_abc')).rejects.toBeTruthy();

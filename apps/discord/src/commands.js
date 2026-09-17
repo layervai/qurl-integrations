@@ -9233,15 +9233,18 @@ const commands = [
         // The Add to Discord entrypoint has an additional Discord client-
         // secret dependency, so advertise it only when the full customer
         // install flow is ready.
-        const oauthSetupSection = config.isAuth0EmailConnectionRejected
-          ? SETUP_AUTH_POLICY_UNAVAILABLE_MSG + '\n\n'
-          : config.isQurlSetupAvailable
-          ? '**Setting up (for Admins):**\n'
+        let oauthSetupSection;
+        if (config.isAuth0EmailConnectionRejected) {
+          oauthSetupSection = SETUP_AUTH_POLICY_UNAVAILABLE_MSG + '\n\n';
+        } else if (config.isQurlSetupAvailable) {
+          oauthSetupSection = '**Setting up (for Admins):**\n'
             + '  `/qurl setup` — connect qURL via OAuth (admin only). Click the link, sign in to layerv.ai, consent. No API key paste.\n'
-            + '  `/qurl status` — check if qURL is configured (admin only)\n\n'
-          : '**Setting up (for Admins):**\n'
+            + '  `/qurl status` — check if qURL is configured (admin only)\n\n';
+        } else {
+          oauthSetupSection = '**Setting up (for Admins):**\n'
             + '  `/qurl setup` — configure your API key (admin only)\n'
             + '  `/qurl status` — check if qURL is configured (admin only)\n\n';
+        }
         const discordInstallSection = config.isDiscordInstallConfigured
           ? '_Adding the bot to a new server?_ Use the "Add to Discord" link on **https://layerv.ai** — '
             + 'it walks you through server selection, permissions consent, and qURL connection in one click chain.\n\n'

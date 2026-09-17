@@ -150,7 +150,8 @@ const GOOD_FIRST_ISSUE_PATTERNS = [
 ];
 
 // Stable structured-log event names that are queryable operational signals,
-// but are not audit events or CloudWatch metrics.
+// but are not audit events or CloudWatch metrics. They ride on prefixed text
+// log lines, so query them as substrings; JSON field filters do not apply.
 const LOG_EVENTS = Object.freeze({
   QURL_OAUTH_AUTH0_CONNECTION_POLICY: 'qurl_oauth_auth0_connection_policy',
   QURL_WEBHOOK_OWNER_DISCOVERY_PAGE_BUDGET: 'qurl_webhook_owner_discovery_page_budget',

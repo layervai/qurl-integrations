@@ -25,11 +25,25 @@ const config = require('./config');
 const crypto = require('crypto');
 const { setTimeout: sleep } = require('node:timers/promises');
 const logger = require('./logger');
-
-const PAGE_RETRY_DELAY_MS = 250;
-const pageBudgetWarned = new Set();
 const { AUDIT_EVENTS, LOG_EVENTS } = require('./constants');
 const { callQurlService, canonicalUrl } = require('./qurl-webhook-registrar');
+
+const PAGE_RETRY_DELAY_MS = 250;
+const MAX_OWNER_DISCOVERY_PAGES = 50;
+const OWNER_DISCOVERY_WARN_PAGE = Math.floor(MAX_OWNER_DISCOVERY_PAGES / 2);
+const pageBudgetWarned = new Set();
+// Every owner-discovery error_code, enumerable for runbooks and alarms.
+// Unknown subjects/kinds throw instead of minting an undocumented code.
+const OWNER_ERROR_CODES = Object.freeze(Object.fromEntries(['DEFAULT', 'CANDIDATE'].map((subject) => [
+  subject,
+  Object.freeze(Object.fromEntries(['CONTRACT', 'CONFLICT', 'URL_MISMATCH', 'PAGE_CAP']
+    .map((kind) => [kind, `${subject}_WEBHOOK_OWNER_${kind}`]))),
+])));
+function ownerErrorCode(subject, kind) {
+  const code = OWNER_ERROR_CODES[subject]?.[kind];
+  if (!code) throw new Error(`ownerErrorCode: unknown ${subject}/${kind}`);
+  return code;
+}
 
 const REFRESH_INTERVAL_MS = 30_000;
 // After this many consecutive refresh failures we escalate via audit
@@ -235,18 +249,18 @@ async function discoverOwnerId(apiKey, { subject = 'DEFAULT', skipMalformedRows 
   let cursor = '';
   const targetUrl = requiredUrl ? canonicalUrl(requiredUrl) : null;
   let targetFound = false;
-  for (let page = 0; page < 50; page++) {
+  for (let page = 0; page < MAX_OWNER_DISCOVERY_PAGES; page++) {
     // Early warning while there is still headroom before the permanent
     // *_PAGE_CAP failure (orphaned subscriptions only accumulate; see #1380).
     // Once per subject+key per process: the refresh tick would otherwise
     // repeat it, while other guild keys keep their own early warning.
     // Keyed by a short key digest (never the raw key) so empty early pages
     // (no owner yet) still warn once per distinct key.
-    const budgetKey = page === 25
+    const budgetKey = page === OWNER_DISCOVERY_WARN_PAGE
       ? `${subject}:${crypto.createHash('sha256').update(apiKey).digest('hex').slice(0, 16)}`
       : null;
     if (budgetKey && !pageBudgetWarned.has(budgetKey)) {
-      // ponytail: coarse bound, forgets all keys at 1000 distinct owners.
+      // Coarse bound: forgets all entries at 1000 distinct subject+key pairs.
       if (pageBudgetWarned.size >= 1000) pageBudgetWarned.clear();
       pageBudgetWarned.add(budgetKey);
       logger.warn('qURL webhook owner discovery passed half its page budget', {
@@ -273,7 +287,7 @@ async function discoverOwnerId(apiKey, { subject = 'DEFAULT', skipMalformedRows 
     });
     if (!Array.isArray(body?.data)) {
       const err = new Error('discoverOwnerId: qurl-service response data must be an array');
-      err.code = `${subject}_WEBHOOK_OWNER_CONTRACT`;
+      err.code = ownerErrorCode(subject, 'CONTRACT');
       throw err;
     }
     for (const webhook of body.data) {
@@ -284,12 +298,12 @@ async function discoverOwnerId(apiKey, { subject = 'DEFAULT', skipMalformedRows 
         // identify the default owner. Linking must reject every malformed row.
         if (skipMalformedRows) continue;
         const err = new Error('discoverOwnerId: non-empty qurl-service response omitted owner_id');
-        err.code = `${subject}_WEBHOOK_OWNER_CONTRACT`;
+        err.code = ownerErrorCode(subject, 'CONTRACT');
         throw err;
       }
       if (ownerId && webhook.owner_id !== ownerId) {
         const err = new Error('discoverOwnerId: qurl-service response contained conflicting owner_id values');
-        err.code = `${subject}_WEBHOOK_OWNER_CONFLICT`;
+        err.code = ownerErrorCode(subject, 'CONFLICT');
         throw err;
       }
       ownerId = webhook.owner_id;
@@ -301,16 +315,16 @@ async function discoverOwnerId(apiKey, { subject = 'DEFAULT', skipMalformedRows 
     if (!next) {
       if (ownerId && targetUrl && !targetFound) {
         const err = new Error('discoverOwnerId: no subscription for this owner targets the bridge URL');
-        err.code = `${subject}_WEBHOOK_OWNER_URL_MISMATCH`;
+        err.code = ownerErrorCode(subject, 'URL_MISMATCH');
         throw err;
       }
       return ownerId;
     }
     cursor = next;
   }
-  const err = new Error('discoverOwnerId: pagination cap hit (50 pages, ~5000 subscriptions)');
+  const err = new Error(`discoverOwnerId: pagination cap hit (${MAX_OWNER_DISCOVERY_PAGES} pages, ~${MAX_OWNER_DISCOVERY_PAGES * 100} subscriptions)`);
   // Distinct from *_CONTRACT: this one is permanent, so it needs its own alarm.
-  err.code = `${subject}_WEBHOOK_OWNER_PAGE_CAP`;
+  err.code = ownerErrorCode(subject, 'PAGE_CAP');
   throw err;
 }
 
