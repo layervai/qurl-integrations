@@ -1533,7 +1533,7 @@ async function setGuildApiKey(guildId, apiKey, configuredBy, via) {
   // shows up on first setups too; such doors audit as unknown.
   if (door === SETUP_VIA.UNKNOWN) {
     try {
-      logger.warn('Unrecognized setup door; auditing as unknown', { via: String(via), guildId });
+      logger.warn('Unrecognized setup door; auditing as unknown', { via: String(via).slice(0, 64), guildId });
     } catch { /* a bad door must not fail the key write */ }
   }
   const now = nowIso();
@@ -1571,7 +1571,8 @@ async function setGuildApiKey(guildId, apiKey, configuredBy, via) {
   // (guild-config-state.js), which treats a row without configured_by as a
   // first install, the alarm biases toward paging; a missing admin reports null.
   const newAdminId = configuredBy ?? null;
-  if ((prior.qurl_api_key || oldAdminId !== null) && oldAdminId !== newAdminId) {
+  const priorHadKey = 'qurl_api_key' in prior;
+  if ((priorHadKey || oldAdminId !== null) && oldAdminId !== newAdminId) {
     // The write has landed: an audit failure must not surface as a write
     // failure, or qurl-oauth.js would revoke the key it just stored.
     try {
@@ -1581,7 +1582,7 @@ async function setGuildApiKey(guildId, apiKey, configuredBy, via) {
         new_admin_id: newAdminId,
         // Separates a damaged configured row (key, no configured_by) from a
         // healthy rebind when old_admin_id or prior_configured_at is null.
-        prior_had_key: Boolean(prior.qurl_api_key),
+        prior_had_key: priorHadKey,
         via: door,
         // configured_at is the guild's stable first-setup time (webhook writes
         // also stamp updated_at). updated_at is always overwritten here, so a
