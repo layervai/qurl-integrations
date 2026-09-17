@@ -1705,7 +1705,9 @@ async function mintLinksInBatches({ initialResourceId, reuploadFn, expiresAt, re
         selfDestructSeconds,
         guildId,
       });
-      for (const link of minted) {
+      // An untrusted over-count cannot drive unbounded compensation: push at
+      // most the requested links (the overflow is thrown on below).
+      for (const link of minted.slice(0, batchSize)) {
         allLinks.push({ qurl_link: link?.qurl_link, qurl_id: link?.qurl_id, resourceId: currentResourceId });
       }
       // Validate only after every entry is pushed: the catch below revokes the
@@ -1714,6 +1716,8 @@ async function mintLinksInBatches({ initialResourceId, reuploadFn, expiresAt, re
       // "Only N of M"; links carry no recipient identity, so a short batch
       // cannot misroute access.
       if (minted.length > batchSize) {
+        // The overflow beyond batchSize is not compensated; the connector broke
+        // the mint contract, so name the counts for reconciliation.
         throw new Error(`Connector mint_link returned ${minted.length} links for a ${batchSize}-link batch`);
       }
       minted.forEach((link, idx) => {

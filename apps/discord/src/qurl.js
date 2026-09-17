@@ -382,8 +382,9 @@ async function revokeOrdinaryLinks(resourceId, rawQurlIds, apiKey) {
   if (!Array.isArray(rawQurlIds) || rawQurlIds.length > REVOKE_BATCH_MAX_IDS) {
     throw new Error('Invalid qURL revoke token list');
   }
-  const qurlIds = rawQurlIds.map(qurlIdForCleanup);
-  if (qurlIds.includes(null)) throw new Error('Invalid qURL revoke token identity');
+  const normalizedIds = rawQurlIds.map(qurlIdForCleanup);
+  if (normalizedIds.includes(null)) throw new Error('Invalid qURL revoke token identity');
+  const qurlIds = [...new Set(normalizedIds)];
   if (qurlIds.length === 0) return;
   const client = makeClient(apiKey, {
     signal: AbortSignal.timeout(ORDINARY_REVOKE_BUDGET_PER_CALL_MS * (qurlIds.length + 1)),

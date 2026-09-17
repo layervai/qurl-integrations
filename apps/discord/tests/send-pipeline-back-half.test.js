@@ -3256,7 +3256,8 @@ describe('mintLinksInBatches', () => {
       recipientCount: 1,
       apiKey: 'apikey',
     })).rejects.toThrow('Connector mint_link returned 2 links for a 1-link batch');
-    expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-1', ['q_x1', 'q_x2'], 'apikey');
+    // Compensation is bounded by the request, not the untrusted response size.
+    expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-1', ['q_x1'], 'apikey');
   });
 
   it('returns empty array when recipientCount = 0', async () => {

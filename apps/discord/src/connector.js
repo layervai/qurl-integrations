@@ -28,10 +28,10 @@ const MAX_CDN_REDIRECTS = 3;
 const REVOKE_LINKS_TIMEOUT_MS = 65_000;
 // The connector chunk must satisfy both #1551's 10-id request cap and the SDK
 // fallback's per-call cap, so a change to either cannot turn chunks into 413s.
-const CONNECTOR_REVOKE_MAX_IDS = Math.min(10, REVOKE_BATCH_MAX_IDS);
-if (!Number.isInteger(CONNECTOR_REVOKE_MAX_IDS) || CONNECTOR_REVOKE_MAX_IDS < 1) {
-  // A NaN chunk size would skip the revoke loop and report success.
-  throw new Error('Connector revoke chunk size is invalid');
+const CONNECTOR_REVOKE_MAX_IDS = 10;
+if (!Number.isInteger(REVOKE_BATCH_MAX_IDS) || REVOKE_BATCH_MAX_IDS < CONNECTOR_REVOKE_MAX_IDS) {
+  // Every connector chunk may be handed to the SDK fallback whole.
+  throw new Error('SDK revoke batch cap must cover a connector revoke chunk');
 }
 const REVOKE_RETRY_AFTER_MAX_SECONDS = 2;
 // Waiting budget for inline partial-mint cleanup before the mint error is
@@ -119,7 +119,7 @@ function parseConnectorBody(bodyText) {
 function partialQurlIdsFromLinks(links, n) {
   if (!Array.isArray(links)) return { partialQurlIds: [], unidentifiedCount: 0, cappedCount: 0 };
   const cap = Number.isInteger(n) && n > 0 ? n : 0;
-  const identified = links.map(link => qurlIdForCleanup(link?.qurl_id)).filter(id => id !== null);
+  const identified = [...new Set(links.map(link => qurlIdForCleanup(link?.qurl_id)).filter(id => id !== null))];
   return {
     partialQurlIds: identified.slice(0, cap),
     unidentifiedCount: links.length - identified.length,
