@@ -13,7 +13,7 @@ const { qurlIdForCleanup } = require('./utils/qurl-id');
 const { isPrivateHost, revokeOrdinaryLinks, REVOKE_BATCH_MAX_IDS } = require('./qurl');
 
 const { sanitizeFilename } = require('./utils/sanitize');
-const { formatSessionDurationSeconds, isPositiveFinite } = require('./utils/time');
+const { formatSessionDurationSeconds, isPositiveFinite, settlesWithin } = require('./utils/time');
 
 const { MAX_FILE_SIZE } = require('./constants');
 const MAX_CDN_REDIRECTS = 3;
@@ -22,9 +22,11 @@ const MAX_CDN_REDIRECTS = 3;
 // response transport so the caller, not an accidental race, owns the bound.
 // The endpoint rejects larger requests atomically, so chunk rather than couple
 // to commands.js's independently tunable TOKENS_PER_RESOURCE. The same chunk
-// feeds the SDK fallback, so reuse its cap rather than a second constant.
+// feeds the SDK fallback, so it uses the fallback's REVOKE_BATCH_MAX_IDS.
 const REVOKE_LINKS_TIMEOUT_MS = 65_000;
-const REVOKE_LINKS_MAX_IDS = REVOKE_BATCH_MAX_IDS;
+// Waiting budget for inline partial-mint cleanup before the mint error is
+// rethrown; the revoke keeps running and a timeout is logged for reconciliation.
+const PARTIAL_MINT_CLEANUP_WAIT_MS = 60_000;
 // Terminal per-id outcomes. not_connector_managed is not itself a revoke: it
 // hands an ordinary child back to the SDK below.
 const REVOKE_TERMINAL_STATUSES = new Set(['revoked', 'already_gone', 'not_connector_managed']);
@@ -104,11 +106,12 @@ function parseConnectorBody(bodyText) {
 // bounds compensation work driven by an untrusted body.
 function partialQurlIdsFromLinks(links, n) {
   if (!Array.isArray(links)) return { partialQurlIds: [], unidentifiedCount: 0, cappedCount: 0 };
+  const cap = Number.isInteger(n) && n > 0 ? n : 0;
   const identified = links.map(link => qurlIdForCleanup(link?.qurl_id)).filter(id => id !== null);
   return {
-    partialQurlIds: identified.slice(0, n),
+    partialQurlIds: identified.slice(0, cap),
     unidentifiedCount: links.length - identified.length,
-    cappedCount: Math.max(0, identified.length - n),
+    cappedCount: Math.max(0, identified.length - cap),
   };
 }
 
@@ -484,7 +487,7 @@ async function mintLinks(resourceId, { expiresAt, n, apiKey, selfDestructSeconds
     // failed mint never strands a live shared-tunnel token; a cleanup failure
     // is logged and never masks the mint error.
     if (partialQurlIds.length > 0) {
-      await revokeMintedLinks(resourceId, partialQurlIds, apiKey).catch(cleanupError => {
+      const cleanup = revokeMintedLinks(resourceId, partialQurlIds, apiKey).catch(cleanupError => {
         logger.error('Connector partial mint cleanup failed', {
           resource_ref: resourceIdLogRef(resourceId),
           partial_link_count: partialQurlIds.length,
@@ -492,6 +495,12 @@ async function mintLinks(resourceId, { expiresAt, n, apiKey, selfDestructSeconds
           error: cleanupError?.message,
         });
       });
+      if (!await settlesWithin(cleanup, PARTIAL_MINT_CLEANUP_WAIT_MS)) {
+        logger.error('Connector partial mint cleanup still running at its wait budget', {
+          resource_ref: resourceIdLogRef(resourceId),
+          partial_qurl_ids: partialQurlIds,
+        });
+      }
     }
     return throwConnectorErrorFromBody('Connector mint_link', response, {
       bodyText,
@@ -549,8 +558,8 @@ async function revokeMintedLinks(resourceId, qurlIds, apiKey) {
   // Ids revoked through the SDK (route absent or not_connector_managed), so
   // count reconciles with the outcomes tally.
   let fallbackCount = 0;
-  for (let offset = 0; offset < ids.length; offset += REVOKE_LINKS_MAX_IDS) {
-    const batchIds = ids.slice(offset, offset + REVOKE_LINKS_MAX_IDS);
+  for (let offset = 0; offset < ids.length; offset += REVOKE_BATCH_MAX_IDS) {
+    const batchIds = ids.slice(offset, offset + REVOKE_BATCH_MAX_IDS);
     if (routeAbsent) {
       await revokeOrdinaryLinks(resourceId, batchIds, apiKey);
       fallbackCount += batchIds.length;

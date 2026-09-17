@@ -48,6 +48,7 @@ const {
   isLegitimateSelfDestructSelectValue,
   SELF_DESTRUCT_PRESETS,
   SELF_DESTRUCT_NO_TIMER_VALUE,
+  settlesWithin,
 } = require('./utils/time');
 const { signQurlOAuthState } = require('./utils/qurl-oauth-state');
 const { getIdentity } = require('./qurl');
@@ -1672,6 +1673,11 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
  *   Optional/back-compat — omitting it leaves the mint body unchanged.
  * @returns {Array<{qurl_link: string, qurl_id: string, resourceId: string}>}
  */
+// Wait budget for cross-batch compensation after a mint failure. With mint
+// (65s) and inline partial cleanup (60s) this keeps the error inside Discord's
+// 15-minute interaction window.
+const MINT_COMPENSATION_WAIT_MS = 120_000;
+
 async function mintLinksInBatches({ initialResourceId, reuploadFn, expiresAt, recipientCount, apiKey, selfDestructSeconds = null, guildId }) {
   const allLinks = [];
   let currentResourceId = initialResourceId;
@@ -1709,7 +1715,7 @@ async function mintLinksInBatches({ initialResourceId, reuploadFn, expiresAt, re
       }
       // qurl_link is the write-once delivery credential; an id-only 2xx entry
       // can be neither delivered nor rebuilt, so revoke it rather than persist.
-      if (minted.some(link => typeof link.qurl_link !== 'string' || link.qurl_link.length === 0)) {
+      if (minted.some(link => typeof link?.qurl_link !== 'string' || link.qurl_link.length === 0)) {
         throw new Error('Connector mint_link returned a link without a qurl_link');
       }
       tokensUsed += batchSize;
@@ -1732,9 +1738,19 @@ async function mintLinksInBatches({ initialResourceId, reuploadFn, expiresAt, re
       idsByResource.set(link.resourceId, ids);
     }
     const entries = [...idsByResource];
-    const results = await batchSettled(entries, ([resourceId, ids]) => (
+    const compensation = batchSettled(entries, ([resourceId, ids]) => (
       revokeMintedLinks(resourceId, ids, apiKey)
     ), 5);
+    // Stop waiting before the send's interaction token expires so the mint
+    // error still reaches the user; nothing was delivered, and the ids are
+    // logged for reconciliation while the revoke keeps running.
+    if (!await settlesWithin(compensation, MINT_COMPENSATION_WAIT_MS)) {
+      logger.error('Mint failure compensation still running at its wait budget', {
+        resources: entries.map(([resourceId, ids]) => ({ resource_ref: resourceIdLogRef(resourceId), qurl_ids: ids })),
+      });
+      throw error;
+    }
+    const results = await compensation;
     // qurl_ids are non-secret revoke handles: log them so an operator can
     // reconcile any child whose compensation failed.
     const failures = results.flatMap((result, i) => (result.status === 'rejected' ? [{
@@ -8486,6 +8502,7 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
       logger.error('Failed to revoke QURL', {
         resource_ref: resourceIdLogRef(resourceId),
         error: results[i].reason?.message,
+        failed_child_count: results[i].reason?.failedCount,
       });
     }
   }

@@ -3215,6 +3215,33 @@ describe('mintLinksInBatches', () => {
     expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-1', ['q_idonly'], 'apikey');
   });
 
+  it('stops waiting on compensation at its budget and still surfaces the mint error', async () => {
+    jest.useFakeTimers();
+    try {
+      const failure = new Error('Connector mint_link failed (502)');
+      mockMintLinks
+        .mockResolvedValueOnce(Array.from({ length: 10 }, (_, i) => ({ qurl_id: `q_${i}`, qurl_link: `https://q.test/${i}` })))
+        .mockRejectedValueOnce(failure);
+      mockRevokeMintedLinks.mockImplementationOnce(() => new Promise(() => {}));
+
+      const pending = mintLinksInBatches({
+        initialResourceId: 'res-1',
+        reuploadFn: jest.fn().mockResolvedValueOnce({ resource_id: 'res-2' }),
+        expiresAt: new Date().toISOString(),
+        recipientCount: 11,
+        apiKey: 'apikey',
+      });
+      const assertion = expect(pending).rejects.toBe(failure);
+      await jest.advanceTimersByTimeAsync(120_000);
+      await assertion;
+      expect(logger.error).toHaveBeenCalledWith('Mint failure compensation still running at its wait budget', {
+        resources: [{ resource_ref: resourceIdLogRef('res-1'), qurl_ids: Array.from({ length: 10 }, (_, i) => `q_${i}`) }],
+      });
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   it('returns empty array when recipientCount = 0', async () => {
     const result = await mintLinksInBatches({
       initialResourceId: 'res-1',

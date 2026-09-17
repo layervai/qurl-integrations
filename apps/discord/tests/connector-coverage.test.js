@@ -1094,3 +1094,41 @@ describe('revokeMintedLinks — #1551 fail-closed contract', () => {
     expect(JSON.stringify(logger.error.mock.calls)).not.toContain('res-1');
   });
 });
+
+describe('revokeMintedLinks — real SDK fallback seam', () => {
+  const { CRID_RESOURCE_ID, PUBLIC_KEY_RESOURCE_ID } = require('./helpers/qurl-fixtures');
+
+  beforeEach(() => {
+    jest.resetModules();
+    // The contract suite above doMocks qurl.js; exercise the real module here.
+    jest.dontMock('../src/qurl');
+    jest.doMock('../src/config', () => ({
+      CONNECTOR_URL: 'https://connector.test.local',
+      QURL_API_KEY: 'test-key-for-connector',
+      QURL_ENDPOINT: 'https://api.test.local',
+    }));
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  it('routes a full chunk through the absent route into exact SDK child revokes', async () => {
+    const connector = require('../src/connector');
+    const ids = Array.from({ length: 10 }, (_, i) => `q_aaaaaaaaa${String(i).padStart(2, '0')}`);
+    const json = (status, data) => ({
+      ok: status < 300, status, headers: { get: () => null }, json: async () => ({ data }),
+    });
+    globalThis.fetch = jest.fn()
+      .mockResolvedValueOnce({ ok: false, status: 404 })
+      .mockResolvedValueOnce(json(200, { resource_id: PUBLIC_KEY_RESOURCE_ID, crid: CRID_RESOURCE_ID, qurls: [] }))
+      .mockResolvedValue(json(204));
+
+    await connector.revokeMintedLinks(PUBLIC_KEY_RESOURCE_ID, ids, 'guild-key');
+
+    const urls = globalThis.fetch.mock.calls.map(([url]) => String(url));
+    expect(urls[0]).toBe('https://connector.test.local/api/revoke_links');
+    expect(urls[1]).toBe(`https://api.test.local/v1/qurls/${ids[0]}`);
+    expect(urls.slice(2)).toEqual(ids.map(id => `https://api.test.local/v1/resources/${CRID_RESOURCE_ID}/qurls/${id}`));
+  });
+});

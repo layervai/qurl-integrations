@@ -410,6 +410,9 @@ async function revokeOrdinaryLinks(resourceId, qurlIds, apiKey) {
     } catch (err) {
       failedCount++;
       firstFailure ??= err;
+      // Every sibling would fail the same auth check; stop so one bad key does
+      // not page DEPENDENCY_AUTH_FAILURE once per child.
+      if (err?.status === 401 || err?.status === 403) break;
     }
   }
   if (firstFailure) {

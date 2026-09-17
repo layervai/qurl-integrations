@@ -533,6 +533,18 @@ describe('qURL client — revokeOrdinaryLinks', () => {
     ]);
   });
 
+  it('stops after an auth failure instead of paging once per child', async () => {
+    const logger = require('../src/logger');
+    globalThis.fetch = jest.fn()
+      .mockResolvedValueOnce(apiOk(200, { resource_id: PUBLIC_KEY_RESOURCE_ID, crid: CRID_RESOURCE_ID, qurls: [] }))
+      .mockResolvedValue(apiError(403, { code: 'forbidden' }));
+
+    await expect(qurl.revokeOrdinaryLinks(PUBLIC_KEY_RESOURCE_ID, ['q_aaaaaaaaaa1', 'q_aaaaaaaaaa2', 'q_aaaaaaaaaa3'], 'guild-key'))
+      .rejects.toMatchObject({ status: 403, failedCount: 1 });
+    expect(globalThis.fetch).toHaveBeenCalledTimes(2);
+    expect(logger.audit).toHaveBeenCalledTimes(1);
+  });
+
   it('refuses to DELETE under a malformed parent crid', async () => {
     globalThis.fetch = jest.fn().mockResolvedValueOnce(apiOk(200, {
       resource_id: PUBLIC_KEY_RESOURCE_ID, crid: 'at_not_a_crid', qurls: [],
