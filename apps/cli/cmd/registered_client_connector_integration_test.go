@@ -45,8 +45,9 @@ const (
 	// TODO(upstream-contract): these values, the recover-mode fields added in
 	// nativeRecoveryHubReply, and the usrData.recovery_grant and
 	// usrData.credential request fields read by nativeRecoveryUserData mirror
-	// the private agent-credential-recovery vectors. Nothing here fails when
-	// that platform contract moves (#1483).
+	// the private agent-credential-recovery vectors, as does the assumption that
+	// a refresh reply may advance assignment_generation past the recover reply.
+	// Nothing here fails when that platform contract moves (#1483).
 	connectorIntegrationRecoveryCredential = "lv_live_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"
 	connectorIntegrationRecoveryGrant      = "qrg1.integration-recovery-grant-0001"
 	connectorIntegrationRecoveredKeyID     = "key_RcV8mP3qTn5W"
@@ -500,9 +501,13 @@ func TestOpenNativeRegisteredClient_ExplicitLoginUsesRealConnectorRecovery(t *te
 		if parsed.Mode != want {
 			t.Fatalf("Hub exchange %d mode = %q, want %q", i, parsed.Mode, want)
 		}
-		if want == "recover" && parsed.Credential != connectorIntegrationRecoveryCredential {
-			// Value-free: the credential is account authority in the real protocol.
-			t.Fatal("Hub recover request did not carry the account recovery credential")
+		// Value-free: the credential is account authority in the real protocol.
+		if want == "recover" && parsed.Credential != validatedAccountKey {
+			t.Fatalf("Hub recover request did not carry the account recovery credential (field empty: %t)",
+				parsed.Credential == "")
+		}
+		if want == "refresh" && parsed.Credential != "" {
+			t.Fatal("Hub refresh request unexpectedly carried account authority")
 		}
 	}
 	cellRequests := cell.snapshot()
