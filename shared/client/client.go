@@ -810,6 +810,7 @@ type UpdateResourceInput struct {
 }
 
 // MarshalJSON translates the client clear flag to the API's nullable alias.
+// TODO(upstream-contract): keep null/omission aligned with UpdateResourceRequest.
 func (in UpdateResourceInput) MarshalJSON() ([]byte, error) {
 	type wireInput UpdateResourceInput
 	var alias any

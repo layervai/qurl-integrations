@@ -1781,6 +1781,23 @@ func TestUpdateResourceNoFieldsSetRejected(t *testing.T) {
 	}
 }
 
+func TestUpdateResourceInputMarshalAliasWire(t *testing.T) {
+	alias, description := "newalias", "description"
+	for _, tc := range []struct {
+		input UpdateResourceInput
+		want  string
+	}{
+		{UpdateResourceInput{Description: &description}, `{"description":"description"}`},
+		{UpdateResourceInput{ClearAlias: true}, `{"alias":null}`},
+		{UpdateResourceInput{Alias: &alias}, `{"alias":"newalias"}`},
+	} {
+		got, err := json.Marshal(tc.input)
+		if err != nil || string(got) != tc.want {
+			t.Fatalf("marshal = %s, %v; want %s", got, err, tc.want)
+		}
+	}
+}
+
 // TestHasAnyFieldSetCoversAllFields walks UpdateResourceInput's struct
 // fields via reflection and asserts that setting *each one alone* makes
 // hasAnyFieldSet return true. Catches the failure mode where a future
