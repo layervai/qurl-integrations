@@ -630,7 +630,7 @@ describe('/qurl help subcommand', () => {
 
     expect(interaction.reply).toHaveBeenCalledWith(
       expect.objectContaining({
-        content: expect.stringContaining('qURL Bot'),
+        content: expect.stringContaining('qURL — Help'),
         ephemeral: true,
       }),
     );
@@ -1669,7 +1669,7 @@ describe('MAP_COMMAND_ENABLED=false (flag-off behavior)', () => {
     expect(replyArg).toBeDefined();
     expect(replyArg.content).not.toContain('/qurl map');
     expect(replyArg.content).toContain('/qurl send');
-    expect(replyArg.content).toContain('qURL Bot — Help');
+    expect(replyArg.content).toContain('qURL — Help');
     expect(replyArg.content).toContain('Share files securely');
     expect(replyArg.content).not.toContain('Share resources securely');
   });

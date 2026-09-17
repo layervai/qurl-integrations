@@ -7,6 +7,7 @@ data/
 *.log
 .DS_Store
 coverage/
+tests/.tmp-discord-metadata-mismatch.png
 # Private keys + npm auth tokens must never be committed.
 *.pem
 *.key

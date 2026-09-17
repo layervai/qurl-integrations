@@ -3638,7 +3638,7 @@ describe('handleConfirmSendClick', () => {
     sendCooldowns.set(SENDER_ID, Date.now());
     await handleConfirmSendClick(int, { flow_id: 'fid', row: { payload: validPayload, version: 1 } });
     expect(int.editReply).toHaveBeenCalledWith(expect.objectContaining({
-      content: expect.stringMatching(/bot is no longer in this server/i),
+      content: expect.stringMatching(/qURL is no longer in this server/i),
       components: [],
     }));
     expect(mockDeleteFlow).toHaveBeenCalledWith('fid', expect.objectContaining({
