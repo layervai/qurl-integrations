@@ -258,28 +258,23 @@ func nativeRecoveryHubReply(
 		if err != nil || query != "cell_assignment" {
 			return nil, fmt.Errorf("unexpected Hub request %q/%q: %w", query, mode, err)
 		}
-		var body map[string]any
-		switch mode {
-		case "recover":
-			recovered := map[string]any{"nhp_udp_endpoint": map[string]any{}}
-			setNativeRecoveryAssignment(recovered, cellPublicKeyB64, now)
-			body = map[string]any{"errCode": "0", "list": map[string]any{
-				"query": "cell_assignment", "version": 1, "mode": "recover",
-				"agent_id":                  connectorIntegrationAgentID,
-				"assignment":                recovered,
-				"recovery_grant":            "qrg1.integration-recovery-grant-0001",
-				"recovery_grant_issued_at":  now.Add(-time.Minute).Format(time.RFC3339),
-				"recovery_grant_expires_at": now.Add(14 * time.Minute).Format(time.RFC3339),
-			}}
-		case "refresh":
-			if err := json.Unmarshal([]byte(assignment.RefreshAssignment.Result.BodyJSON), &body); err != nil {
-				return nil, err
-			}
-			list := body["list"].(map[string]any)
-			list["agent_id"] = connectorIntegrationAgentID
-			setNativeRecoveryAssignment(list["assignment"].(map[string]any), cellPublicKeyB64, now)
-		default:
+		if mode != "recover" && mode != "refresh" {
 			return nil, fmt.Errorf("unexpected Hub assignment mode %q", mode)
+		}
+		// The public refresh reply has the recover reply's shape minus the
+		// recovery grant, so both modes start from it.
+		var body map[string]any
+		if err := json.Unmarshal([]byte(assignment.RefreshAssignment.Result.BodyJSON), &body); err != nil {
+			return nil, err
+		}
+		list := body["list"].(map[string]any)
+		list["agent_id"] = connectorIntegrationAgentID
+		setNativeRecoveryAssignment(list["assignment"].(map[string]any), cellPublicKeyB64, now)
+		if mode == "recover" {
+			list["mode"] = "recover"
+			list["recovery_grant"] = "qrg1.integration-recovery-grant-0001"
+			list["recovery_grant_issued_at"] = now.Add(-time.Minute).Format(time.RFC3339)
+			list["recovery_grant_expires_at"] = now.Add(14 * time.Minute).Format(time.RFC3339)
 		}
 		return json.Marshal(body)
 	}
@@ -296,14 +291,12 @@ func setNativeRecoveryAssignment(assignment map[string]any, cellPublicKeyB64 str
 	endpoint["server_public_key_b64"] = cellPublicKeyB64
 }
 
-func nativeRecoveryCellReply() func([]byte) ([]byte, error) {
-	return func(request []byte) ([]byte, error) {
-		query, _, err := nativeRecoveryQuery(request)
-		if err != nil || query != "agent_credential_recovery" {
-			return nil, fmt.Errorf("unexpected cell request %q: %w", query, err)
-		}
-		return []byte(connectorIntegrationRecoveryCellReply), nil
+func nativeRecoveryCellReply(request []byte) ([]byte, error) {
+	query, _, err := nativeRecoveryQuery(request)
+	if err != nil || query != "agent_credential_recovery" {
+		return nil, fmt.Errorf("unexpected cell request %q: %w", query, err)
 	}
+	return []byte(connectorIntegrationRecoveryCellReply), nil
 }
 
 func TestOpenNativeRegisteredClient_ExplicitLoginUsesRealConnectorRecovery(t *testing.T) {
@@ -322,7 +315,7 @@ func TestOpenNativeRegisteredClient_ExplicitLoginUsesRealConnectorRecovery(t *te
 
 	hub := newNativeRecoveryUDPServer(t, hubPrivate, agentPublic, true,
 		nativeRecoveryHubReply(t, assignment, cellPublicB64, now))
-	cell := newNativeRecoveryUDPServer(t, cellPrivate, agentPublic, false, nativeRecoveryCellReply())
+	cell := newNativeRecoveryUDPServer(t, cellPrivate, agentPublic, false, nativeRecoveryCellReply)
 	// The native transport rejects special-purpose IP ranges before dialing.
 	// The injected dialer maps these synthetic route labels to local
 	// sockets, so the test sends no packet to either public address.
