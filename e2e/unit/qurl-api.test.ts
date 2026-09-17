@@ -391,48 +391,6 @@ test('revokeLink retries the revocation-pending 503 and honors Retry-After', asy
   }
 });
 
-// The confirm retry is a SECOND DELETE on a resource the first call already
-// revoked, and this repo pins "404 or 200 both acceptable" for that
-// (link-lifecycle.test.ts). So the protection update landing during the wait
-// yields a 404 — which is the revocation succeeding, not failing. Without this
-// the fix would swap one false negative for another and the smoke would stay
-// red for the same reason.
-test('revokeLink treats a 404 on the confirm retry as success', async () => {
-  jest.useFakeTimers();
-  try {
-    fetchMock
-      .mockImplementationOnce(
-        () => new Response(null, { status: 503, headers: { 'Retry-After': '30' } }),
-      )
-      .mockImplementationOnce(() => new Response(null, { status: 404 }));
-
-    const pending = qurl.revokeLink(mintUrl, apiKey, publicResourceId);
-    await jest.advanceTimersByTimeAsync(30_000);
-    await expect(pending).resolves.toBe(true);
-  } finally {
-    jest.useRealTimers();
-  }
-});
-
-// The 404 acceptance is narrowed to a 503 that CARRIED a directive. The ALB
-// drain-gap 503 has none, so `drain-gap -> 404` on a resource that never
-// existed must still be false — otherwise a revoke that never happened could
-// report success, which is the one thing the retry helper must never do.
-test('revokeLink does not accept a 404 after a directive-less 503', async () => {
-  jest.useFakeTimers();
-  try {
-    fetchMock
-      .mockImplementationOnce(() => new Response(null, { status: 503 }))
-      .mockImplementationOnce(() => new Response(null, { status: 404 }));
-
-    const pending = qurl.revokeLink(mintUrl, apiKey, publicResourceId);
-    await jest.advanceTimersByTimeAsync(1_000);
-    await expect(pending).resolves.toBe(false);
-  } finally {
-    jest.useRealTimers();
-  }
-});
-
 // Bulk cleanup opts out: the 503 already said the write is committed, so the
 // afterAll sweep only needs "did it stick". Paying ~30s per straggler would
 // blow the hook budgets that keep a sweep from leaking (cleanup.ts).
@@ -453,10 +411,9 @@ test('confirmPending: false skips the protection-update wait', async () => {
   }
 });
 
-// ...but a FIRST-attempt 404 is a resource that never existed, which
-// negative-paths.test.ts asserts returns false. Only the attempt trace
-// separates the two, so pin both halves.
-test('revokeLink reports a first-attempt 404 as failure', async () => {
+// A 404 is a resource that never existed, which negative-paths.test.ts asserts
+// returns false — and it must stay false however the retry budget changes.
+test('revokeLink reports a 404 as failure', async () => {
   fetchMock.mockImplementationOnce(() => new Response(null, { status: 404 }));
 
   await expect(qurl.revokeLink(mintUrl, apiKey, publicResourceId)).resolves.toBe(false);

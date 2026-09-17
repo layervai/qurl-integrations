@@ -255,14 +255,16 @@ export async function accessLinkNoRedirect(url: string): Promise<LinkAccessResul
  * would push two revokes past jest's 120s default. Still pending afterward is
  * a real convergence regression the smoke should report, not wait out.
  *
- * A 404 on that confirm retry is SUCCESS: the retry is a second DELETE on a
- * resource the first call already revoked, and this repo pins "404 or 200 both
- * acceptable" for that (link-lifecycle.test.ts's double-revoke test). A 404 on
- * the FIRST attempt stays a failure — that is a resource that never existed
- * (negative-paths.test.ts). Only the attempt trace separates the two, hence
- * `onRetry`. The trace is narrowed to a 503 that actually CARRIED a directive,
- * so the ALB drain-gap 503 — which has no `Retry-After` — can't unlock the
- * 404-as-success path for a resource that never existed.
+ * A 404 on the confirm retry is deliberately NOT treated as success, even
+ * though link-lifecycle.test.ts pins "404 or 200 both acceptable" for a second
+ * revoke. Accepting it would require knowing the first 503 was the committed
+ * one, and nothing in the response says so: the deployment-state "dark 503"
+ * carries the same `service_unavailable` code AND a `Retry-After`, so status
+ * and header presence can't separate them. Trusting it would let a revoke that
+ * never happened report success on a resource that never existed
+ * (negative-paths.test.ts) — the one thing this helper must not do. The live
+ * repro only ever showed 503 -> 204, so the 404 case is unobserved; #1505
+ * tracks it with the body-discriminating fix if it ever shows up.
  *
  * `confirmPending: false` skips the wait entirely, for best-effort bulk
  * cleanup: the 503 already said the write is committed, so a sweep only needs
@@ -284,21 +286,11 @@ export async function revokeLink(
   const parsed = new URL(baseUrl);
   parsed.pathname = `/v1/resources/${encodeURIComponent(resourceId)}`;
   const url = parsed.toString();
-  // `||=`, not `=`: the flag must mean "a directive-bearing 503 happened at
-  // some point", not "the last retry was one", so raising maxAttempts later
-  // can't silently change what a trailing 404 means.
-  let confirmedAfterPending = false;
   const res = await fetchWithTransientRetry(url, {
     method: 'DELETE',
     headers: { Authorization: `Bearer ${apiKey}` },
-  }, {
-    maxAttempts: 2,
-    maxRetryAfterMs: confirmPending ? 35_000 : 0,
-    onRetry: (status, honoredRetryAfterMs) => {
-      confirmedAfterPending ||= status === 503 && honoredRetryAfterMs > 0;
-    },
-  });
-  return res.ok || (res.status === 404 && confirmedAfterPending);
+  }, { maxAttempts: 2, maxRetryAfterMs: confirmPending ? 35_000 : 0 });
+  return res.ok;
 }
 
 export interface LinkStatus {

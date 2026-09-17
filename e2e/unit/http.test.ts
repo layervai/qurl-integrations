@@ -5,8 +5,8 @@
  * qurl-api.test.ts; what lives here is the part with no caller-visible shape —
  * how long the helper waits, and which responses are allowed to influence that.
  * These are the promises the module header makes ("clamped", "opt-in",
- * "delta-seconds only"), so they get direct assertions rather than being
- * inferred from a revoke's boolean.
+ * "delta-seconds only", "503 only"), so they get direct assertions rather than
+ * being inferred from a revoke's boolean.
  */
 
 import { fetchWithTransientRetry } from '../helpers/http';
@@ -119,32 +119,4 @@ test('treats Retry-After: 0 as no directive', async () => {
   await jest.advanceTimersByTimeAsync(1);
   await pending;
   expect(fetchMock).toHaveBeenCalledTimes(2);
-});
-
-test('does not call onRetry when the first response is ok', async () => {
-  fetchMock.mockImplementation(respond(204));
-  const seen: number[] = [];
-  await fetchWithTransientRetry(
-    url, { method: 'DELETE' }, { maxAttempts: 2, onRetry: (s) => seen.push(s) },
-  );
-  expect(seen).toEqual([]);
-  expect(fetchMock).toHaveBeenCalledTimes(1);
-});
-
-test('reports each retried status to onRetry before waiting', async () => {
-  fetchMock
-    .mockImplementationOnce(respond(503, { 'Retry-After': '30' }))
-    .mockImplementationOnce(respond(502))
-    .mockImplementationOnce(respond(204));
-  const seen: Array<[number, number]> = [];
-  const pending = fetchWithTransientRetry(
-    url,
-    { method: 'DELETE' },
-    { maxAttempts: 3, maxRetryAfterMs: 35_000, onRetry: (s, ms) => seen.push([s, ms]) },
-  );
-  await jest.advanceTimersByTimeAsync(60_000);
-  await expect(pending).resolves.toMatchObject({ status: 204 });
-  // The honored delay rides along so a caller can tell a directive-bearing 503
-  // from a bare one (the ALB drain-gap carries no Retry-After).
-  expect(seen).toEqual([[503, 30_000], [502, 0]]);
 });
