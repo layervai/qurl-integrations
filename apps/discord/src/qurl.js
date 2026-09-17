@@ -13,7 +13,7 @@ const {
   validateResourceId,
 } = require('./utils/resource-id');
 const { qurlApiError } = require('./utils/qurl-errors');
-const { hasPersistableQurlIdShape } = require('./utils/qurl-id');
+const { qurlIdForCleanup } = require('./utils/qurl-id');
 const dns = require('dns').promises;
 
 const { isPrivateHost } = require('./utils/private-host');
@@ -375,7 +375,8 @@ async function revokeOrdinaryLinks(resourceId, qurlIds, apiKey) {
   if (!Array.isArray(qurlIds) || qurlIds.length > REVOKE_BATCH_MAX_IDS) {
     throw new Error('Invalid qURL revoke token list');
   }
-  if (!qurlIds.every(hasPersistableQurlIdShape)) throw new Error('Invalid qURL revoke token identity');
+  qurlIds = qurlIds.map(qurlIdForCleanup);
+  if (qurlIds.includes(null)) throw new Error('Invalid qURL revoke token identity');
   if (qurlIds.length === 0) return;
   const client = makeClient(apiKey, {
     signal: AbortSignal.timeout(ORDINARY_REVOKE_BUDGET_PER_CALL_MS * (qurlIds.length + 1)),
@@ -411,8 +412,12 @@ async function revokeOrdinaryLinks(resourceId, qurlIds, apiKey) {
       failedCount++;
       firstFailure ??= err;
       // Every sibling would fail the same auth check; stop so one bad key does
-      // not page DEPENDENCY_AUTH_FAILURE once per child.
-      if (err?.status === 401 || err?.status === 403) break;
+      // not page DEPENDENCY_AUTH_FAILURE once per child, and count the children
+      // never attempted as failed (still live).
+      if (err?.status === 401 || err?.status === 403) {
+        failedCount += qurlIds.length - 1 - qurlIds.indexOf(qurlId);
+        break;
+      }
     }
   }
   if (firstFailure) {

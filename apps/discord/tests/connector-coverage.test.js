@@ -923,28 +923,97 @@ describe('revokeMintedLinks — #1551 fail-closed contract', () => {
     }
   });
 
+  const refusal = (status, body = {}, headers) => ({
+    ok: false,
+    status,
+    headers,
+    text: async () => JSON.stringify({ success: false, results: [], ...body }),
+  });
+
   it.each([
     [401, {}],
     [403, {}],
     [413, {}],
-    [429, { code: 'capacity' }],
-    [502, { results: [{ qurl_id: 'q_one', status: 'failed' }] }],
-    [503, { code: 'revoke_not_available' }],
-  ])('fails closed on connector HTTP %i', async (status, body) => {
-    // Retry-After is deliberately ignored: callers retry on the next /qurl revoke.
-    globalThis.fetch = jest.fn().mockResolvedValue({
-      ok: false,
-      status,
-      text: async () => JSON.stringify({ success: false, results: [], ...body }),
-    });
-    const apiCode = body.code || null;
+  ])('fails closed on connector HTTP %i without trying the SDK fallback', async (status, body) => {
+    globalThis.fetch = jest.fn().mockResolvedValue(refusal(status, body));
 
     await expect(connector.revokeMintedLinks('res-1', ['q_one'], 'guild-key'))
-      .rejects.toMatchObject({ message: `Connector revoke_links failed (${status})`, status, apiCode });
+      .rejects.toMatchObject({ message: `Connector revoke_links failed (${status})`, status, apiCode: null });
     expect(revokeOrdinaryLinks).not.toHaveBeenCalled();
+    expect(logger.warn).toHaveBeenCalledWith('Connector revoke_links refused', {
+      resource_ref: expect.stringMatching(/^sha256:/), status, api_code: null, count: 1,
+    });
+  });
+
+  describe('429 admission retry', () => {
+    let timeoutSpy;
+    beforeEach(() => {
+      timeoutSpy = jest.spyOn(global, 'setTimeout').mockImplementation((cb) => { cb(); return 0; });
+    });
+    afterEach(() => timeoutSpy.mockRestore());
+
+    it('retries once after Retry-After and succeeds', async () => {
+      globalThis.fetch = jest.fn()
+        .mockResolvedValueOnce(refusal(429, { code: 'request_rate_limited' }, new Headers({ 'Retry-After': '1' })))
+        .mockResolvedValueOnce(revoked('q_one'));
+
+      await connector.revokeMintedLinks('res-1', ['q_one'], 'guild-key');
+
+      expect(globalThis.fetch).toHaveBeenCalledTimes(2);
+      expect(timeoutSpy).toHaveBeenCalledWith(expect.any(Function), 1000);
+    });
+
+    it('fails closed on a second 429 without trying the SDK fallback', async () => {
+      globalThis.fetch = jest.fn()
+        .mockResolvedValue(refusal(429, { code: 'request_rate_limited' }, new Headers({ 'Retry-After': '30' })));
+
+      await expect(connector.revokeMintedLinks('res-1', ['q_one'], 'guild-key'))
+        .rejects.toMatchObject({ status: 429, apiCode: 'request_rate_limited' });
+      expect(globalThis.fetch).toHaveBeenCalledTimes(2);
+      expect(timeoutSpy).toHaveBeenCalledWith(expect.any(Function), 2000);
+      expect(revokeOrdinaryLinks).not.toHaveBeenCalled();
+    });
+  });
+
+  it.each([
+    [502, { results: [{ qurl_id: 'q_one', status: 'failed' }] }, null],
+    [503, { code: 'revoke_not_available' }, 'revoke_not_available'],
+  ])('falls back to the SDK on connector HTTP %i', async (status, body, apiCode) => {
+    globalThis.fetch = jest.fn().mockResolvedValue(refusal(status, body));
+
+    await connector.revokeMintedLinks('res-1', ['q_one'], 'guild-key');
+
+    expect(revokeOrdinaryLinks).toHaveBeenCalledWith('res-1', ['q_one'], 'guild-key');
     expect(logger.warn).toHaveBeenCalledWith('Connector revoke_links refused', {
       resource_ref: expect.stringMatching(/^sha256:/), status, api_code: apiCode, count: 1,
     });
+    expect(logger.info).toHaveBeenCalledWith('Revoked minted links', expect.objectContaining({
+      route_absent: false, fallback_count: 1,
+    }));
+  });
+
+  it('rethrows the connector 5xx error when the SDK fallback also fails', async () => {
+    globalThis.fetch = jest.fn().mockResolvedValue(refusal(503, { code: 'revoke_not_available' }));
+    revokeOrdinaryLinks.mockRejectedValueOnce(new Error('qURL API GET /qurls/:qurlId failed (404)'));
+
+    await expect(connector.revokeMintedLinks('res-1', ['q_one'], 'guild-key'))
+      .rejects.toMatchObject({ status: 503, apiCode: 'revoke_not_available' });
+  });
+
+  it.each([
+    ['a rejected fetch', new TypeError('fetch failed')],
+    ['the request timeout', new DOMException('The operation was aborted due to timeout', 'TimeoutError')],
+  ])('falls back to the SDK on %s and rethrows it if the fallback fails', async (_label, transportError) => {
+    globalThis.fetch = jest.fn().mockRejectedValue(transportError);
+
+    await connector.revokeMintedLinks('res-1', ['q_one'], 'guild-key');
+    expect(revokeOrdinaryLinks).toHaveBeenCalledWith('res-1', ['q_one'], 'guild-key');
+    expect(logger.warn).toHaveBeenCalledWith('Connector revoke_links unreachable', {
+      resource_ref: expect.stringMatching(/^sha256:/), error_name: transportError.name, count: 1,
+    });
+
+    revokeOrdinaryLinks.mockRejectedValueOnce(new Error('qURL API GET /qurls/:qurlId failed (404)'));
+    await expect(connector.revokeMintedLinks('res-1', ['q_one'], 'guild-key')).rejects.toBe(transportError);
   });
 
   it.each([
@@ -1106,6 +1175,7 @@ describe('revokeMintedLinks — #1551 fail-closed contract', () => {
         text: async () => JSON.stringify({ success: false, links: [{ qurl_id: 'q_partial_one' }] }),
       })
       .mockRejectedValueOnce(new TypeError('fetch failed'));
+    revokeOrdinaryLinks.mockRejectedValueOnce(new Error('qURL API GET /qurls/:qurlId failed (404)'));
 
     await expect(connector.mintLinks('res-1', { expiresAt: '2026-01-01T00:00:00Z', n: 1 }))
       .rejects.toThrow('Connector mint_link failed (502)');

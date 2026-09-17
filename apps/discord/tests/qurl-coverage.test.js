@@ -544,7 +544,7 @@ describe('qURL client — revokeOrdinaryLinks', () => {
       .mockResolvedValue(apiError(403, { code: 'forbidden' }));
 
     await expect(qurl.revokeOrdinaryLinks(PUBLIC_KEY_RESOURCE_ID, ['q_aaaaaaaaaa1', 'q_aaaaaaaaaa2', 'q_aaaaaaaaaa3'], 'guild-key'))
-      .rejects.toMatchObject({ status: 403, failedCount: 1 });
+      .rejects.toMatchObject({ status: 403, failedCount: 3 });
     expect(globalThis.fetch).toHaveBeenCalledTimes(2);
     expect(logger.audit).toHaveBeenCalledTimes(1);
   });

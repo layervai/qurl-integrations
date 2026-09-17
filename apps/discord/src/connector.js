@@ -22,10 +22,14 @@ const MAX_CDN_REDIRECTS = 3;
 // response transport so the caller, not an accidental race, owns the bound.
 // The endpoint rejects larger requests atomically, so chunk rather than couple
 // to commands.js's independently tunable TOKENS_PER_RESOURCE. The same chunk
-// feeds the SDK fallback, so it uses the fallback's REVOKE_BATCH_MAX_IDS. A 404
+// feeds the SDK fallback, so its size is CONNECTOR_REVOKE_MAX_IDS below. A 404
 // is remembered only within one call, so each resource re-probes the route on
 // purpose: a process-wide negative cache would hide the route once enabled.
 const REVOKE_LINKS_TIMEOUT_MS = 65_000;
+// The connector chunk must satisfy both #1551's 10-id request cap and the SDK
+// fallback's per-call cap, so a change to either cannot turn chunks into 413s.
+const CONNECTOR_REVOKE_MAX_IDS = Math.min(10, REVOKE_BATCH_MAX_IDS);
+const REVOKE_RETRY_AFTER_MAX_SECONDS = 2;
 // Waiting budget for inline partial-mint cleanup before the mint error is
 // rethrown: one connector revoke request plus slack. The revoke keeps running
 // and a timeout (expected while the SDK fallback is slow) is logged as a warning
@@ -526,6 +530,34 @@ async function mintLinks(resourceId, { expiresAt, n, apiKey, selfDestructSeconds
   return result.links;
 }
 
+async function discardBody(response) {
+  try {
+    await response.body?.cancel();
+  } catch { /* discarding the body is best-effort */ }
+}
+
+// POST one revoke chunk. A 429 from the connector's local admission gate
+// (Retry-After: 1) is retried once, so /qurl revoke's own 5-resource fan-out
+// does not fail itself; a second 429 is returned for the caller to fail closed.
+async function postRevokeLinks(resourceId, batchIds, apiKey) {
+  const post = () => fetch(`${config.CONNECTOR_URL}/api/revoke_links`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...connectorAuthHeaders(apiKey) },
+    body: JSON.stringify({ resource_id: resourceId, qurl_ids: batchIds }),
+    redirect: 'error',
+    signal: AbortSignal.timeout(REVOKE_LINKS_TIMEOUT_MS),
+  });
+  const response = await post();
+  if (response.status !== 429) return response;
+  const retryAfterSeconds = Number(response.headers?.get?.('retry-after'));
+  await discardBody(response);
+  const waitMs = Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0
+    ? Math.min(retryAfterSeconds, REVOKE_RETRY_AFTER_MAX_SECONDS) * 1000
+    : 1000;
+  await new Promise(resolve => setTimeout(resolve, waitMs));
+  return post();
+}
+
 /**
  * Revoke the recipient links minted from an uploaded resource, never the
  * resource itself (upload deduplication can share it with other sends).
@@ -540,11 +572,12 @@ async function mintLinks(resourceId, { expiresAt, n, apiKey, selfDestructSeconds
  * default-off, so a 404 means it is not registered (the registered route never
  * returns 404; it denies with 401/403), never that a child is gone.
  * Fall back to the SDK, which succeeds only for ordinary children of this exact
- * source; a watermarked child fails closed until the route is enabled. Every
- * other non-2xx the endpoint returns (401/403/413, 429 with Retry-After: 1,
- * 502/503) and anything short of one terminal outcome per requested id throws;
- * callers keep the send and its parent resource as retry anchors and retry on
- * the user's next revoke rather than sleeping here.
+ * source; a watermarked child fails closed until the route is enabled. The same
+ * fallback runs when the connector cannot answer (transport failure, timeout,
+ * 5xx), rethrowing the connector error if it fails. A 429 (Retry-After: 1) is
+ * retried once; 401/403/413, a repeated 429, and anything short of one terminal
+ * outcome per requested id throw. Callers keep the send and its parent resource
+ * as retry anchors for the user's next revoke.
  *
  * @throws when any requested link may still be live.
  */
@@ -562,26 +595,41 @@ async function revokeMintedLinks(resourceId, qurlIds, apiKey) {
   // Ids revoked through the SDK (route absent or not_connector_managed), so
   // count reconciles with the outcomes tally.
   let fallbackCount = 0;
-  for (let offset = 0; offset < ids.length; offset += REVOKE_BATCH_MAX_IDS) {
-    const batchIds = ids.slice(offset, offset + REVOKE_BATCH_MAX_IDS);
+  // Connector outages must not block ordinary revokes that never needed it:
+  // on a transport failure or 5xx, try the SDK fallback, which is fail-closed
+  // on its own (it can only confirm children it DELETEs under the verified
+  // parent), and rethrow the connector error if that fallback fails too.
+  const fallbackOrThrow = async (batchIds, connectorError) => {
+    try {
+      await revokeOrdinaryLinks(resourceId, batchIds, apiKey);
+    } catch {
+      throw connectorError;
+    }
+    fallbackCount += batchIds.length;
+  };
+  for (let offset = 0; offset < ids.length; offset += CONNECTOR_REVOKE_MAX_IDS) {
+    const batchIds = ids.slice(offset, offset + CONNECTOR_REVOKE_MAX_IDS);
     if (routeAbsent) {
       await revokeOrdinaryLinks(resourceId, batchIds, apiKey);
       fallbackCount += batchIds.length;
       continue;
     }
-    const response = await fetch(`${config.CONNECTOR_URL}/api/revoke_links`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...connectorAuthHeaders(apiKey) },
-      body: JSON.stringify({ resource_id: resourceId, qurl_ids: batchIds }),
-      redirect: 'error',
-      signal: AbortSignal.timeout(REVOKE_LINKS_TIMEOUT_MS),
-    });
+    let response;
+    try {
+      response = await postRevokeLinks(resourceId, batchIds, apiKey);
+    } catch (transportError) {
+      logger.warn('Connector revoke_links unreachable', {
+        resource_ref: resourceIdLogRef(resourceId),
+        error_name: transportError?.name,
+        count: batchIds.length,
+      });
+      await fallbackOrThrow(batchIds, transportError);
+      continue;
+    }
 
     if (response.status === 404) {
       routeAbsent = true;
-      try {
-        await response.body?.cancel();
-      } catch { /* discarding the body is best-effort */ }
+      await discardBody(response);
       await revokeOrdinaryLinks(resourceId, batchIds, apiKey);
       fallbackCount += batchIds.length;
       continue;
@@ -603,7 +651,17 @@ async function revokeMintedLinks(resourceId, qurlIds, apiKey) {
         api_code: apiCode,
         count: batchIds.length,
       });
-      return throwConnectorErrorFromBody('Connector revoke_links', response, { bodyText, apiCode });
+      let connectorError;
+      try {
+        throwConnectorErrorFromBody('Connector revoke_links', response, { bodyText, apiCode });
+      } catch (err) {
+        connectorError = err;
+      }
+      // 401/403/413/429 mean this request is wrong or must slow down; only a
+      // connector that cannot answer (5xx) falls back.
+      if (response.status < 500) throw connectorError;
+      await fallbackOrThrow(batchIds, connectorError);
+      continue;
     }
 
     let parsed;
