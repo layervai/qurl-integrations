@@ -306,6 +306,24 @@ describe('logger', () => {
       expect(consoleSpy.error).not.toHaveBeenCalled();
     });
 
+    it('keeps admin-change forensic fields and redacts qurl_api_key in the audit path', () => {
+      process.env.LOG_LEVEL = 'info';
+      logger = require('../src/logger');
+
+      logger.audit('qurl_setup_admin_changed', {
+        guild_id: 'g-1', old_admin_id: 'a-1', new_admin_id: 'a-2', via: 'oauth',
+        prior_configured_at: '2026-09-10T00:00:00Z', prior_updated_at: '2026-09-12T00:00:00Z', qurl_api_key: 'enc:v1:IV:TAG:deadbeef',
+      });
+
+      expect(consoleSpy.error.mock.calls[0][0]).toContain('qurl_api_key');
+      const parsed = JSON.parse(consoleSpy.log.mock.calls[0][0]);
+      expect(parsed.audit).toMatchObject({
+        guild_id: 'g-1', old_admin_id: 'a-1', new_admin_id: 'a-2', via: 'oauth',
+        prior_configured_at: '2026-09-10T00:00:00Z', prior_updated_at: '2026-09-12T00:00:00Z', qurl_api_key: '[REDACTED]',
+      });
+      expect(JSON.stringify(parsed)).not.toContain('deadbeef');
+    });
+
     it('redacts interaction_token (the PR-B view-counter bearer cred) in the audit path', () => {
       process.env.LOG_LEVEL = 'info';
       logger = require('../src/logger');

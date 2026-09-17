@@ -8,7 +8,7 @@
 const config = require('./config');
 const db = require('./store');
 const logger = require('./logger');
-const { AUDIT_EVENTS } = require('./constants');
+const { AUDIT_EVENTS, SETUP_VIA, normalizeSetupVia, describeSetupVia } = require('./constants');
 const {
   ensureWebhookSubscription,
   deleteSubscription,
@@ -317,11 +317,21 @@ async function linkGuildWebhookSubscription({ guildId, apiKey, descriptionContex
 // KNOWN QUIRK (tracked in issue #487): SIGTERM mid-link drops the
 // in-flight work. The operator runs /qurl setup again; the backfill script
 // also catches first-time API-key-only rows. Polling fallback covers correctness.
+// Returns the settled promise for tests; production setup must not await it.
 function fireAndForgetLinkGuildWebhookSubscription({ guildId, apiKey, via, configuredBy }) {
-  linkGuildWebhookSubscription({
+  const door = normalizeSetupVia(via);
+  if (door === SETUP_VIA.UNKNOWN) {
+    try {
+      logger.warn('Unrecognized setup door in subscription description; recording via=unknown', { ...describeSetupVia(via), guildId });
+    } catch { /* runs after the key write; logging must not fail setup */ }
+    // Setup callers also get the store's door warning; this one covers any
+    // future caller that links a subscription without writing the key.
+  }
+  return linkGuildWebhookSubscription({
     guildId,
     apiKey,
-    descriptionContext: `via=${via}, configuredBy=${configuredBy}`,
+    // Same normalization as the setup audit, so both record the same door.
+    descriptionContext: `via=${door}, configuredBy=${configuredBy}`,
   }).catch((err) => logger.warn('linkGuildWebhookSubscription contract drift — threw unexpectedly', {
     error: err?.message, guildId,
   }));

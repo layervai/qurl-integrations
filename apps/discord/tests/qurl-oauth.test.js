@@ -455,7 +455,7 @@ describe('qurl-oauth routes', () => {
       expect(res.text).toContain('qURL is connected');
       expect(res.text).toContain('/qurl send is ready');
       expect(res.text).not.toContain('/qurl map');
-      expect(db.setGuildApiKey).toHaveBeenCalledWith('guild-1', 'lv_live_abc123', 'admin-2');
+      expect(db.setGuildApiKey).toHaveBeenCalledWith('guild-1', 'lv_live_abc123', 'admin-2', 'oauth');
       expect(logger.audit).toHaveBeenCalledWith(AUDIT_EVENTS.QURL_GUILD_KEY_CONFIGURED, {
         guild_id: 'guild-1',
         configured_by: 'admin-2',
@@ -522,6 +522,7 @@ describe('qurl-oauth routes', () => {
         'guild-1',
         'lv_live_abc',
         'admin-2',
+        'oauth',
       );
       expect(logger.audit).toHaveBeenCalledWith(
         AUDIT_EVENTS.QURL_GUILD_KEY_CONFIGURED,
@@ -559,7 +560,7 @@ describe('qurl-oauth routes', () => {
 
       expect(res.status).toBe(200);
       expect(res.text).toContain('qURL is connected');
-      expect(db.setGuildApiKey).toHaveBeenCalledWith('guild-1', 'lv_live_abc', 'admin-2');
+      expect(db.setGuildApiKey).toHaveBeenCalledWith('guild-1', 'lv_live_abc', 'admin-2', 'oauth');
       expect(discord.sendDM).toHaveBeenCalledWith(
         'admin-2', expect.stringContaining('qURL is connected'),
       );

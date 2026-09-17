@@ -54,6 +54,9 @@ process.env.AWS_REGION = 'us-east-2';
 
 const store = require('../src/store/ddb-store');
 const logger = require('../src/logger');
+const { AUDIT_EVENTS, SETUP_VIA } = require('../src/constants');
+
+const DOOR_WARN = 'Unrecognized setup door; any admin-change audit for this write records via=unknown';
 
 function defaultOwnerArgs(overrides = {}) {
   return {
@@ -65,6 +68,9 @@ function defaultOwnerArgs(overrides = {}) {
 }
 
 beforeEach(() => {
+  logger.audit.mockReset();
+  logger.error.mockReset();
+  logger.warn.mockReset();
   ddbMock.reset();
   mockEncryptStrict.mockReset();
   mockEncryptStrict.mockImplementation(mockCiphertext);
@@ -87,6 +93,175 @@ describe('guild configs', () => {
     expect(input.UpdateExpression).toMatch(/if_not_exists\(configured_at, :u\)/);
     expect(input.UpdateExpression).not.toMatch(/, configured_at = :u\b/);
     expect(input.UpdateExpression).not.toMatch(/^SET configured_at = :u\b/);
+    expect(input.ReturnValues).toBe('UPDATED_OLD');
+  });
+
+  test('setGuildApiKey: audits when configured_by changes on an existing guild', async () => {
+    ddbMock.on(UpdateCommand).resolves({ Attributes: {
+      configured_by: 'old-admin',
+      qurl_api_key: 'enc:v1:IV:TAG:deadbeef',
+      updated_at: '2026-09-12T00:00:00Z',
+      configured_at: '2026-09-10T00:00:00Z',
+    } });
+    await store.setGuildApiKey('g-1', 'plain-key', 'new-admin', 'oauth');
+    expect(logger.audit).toHaveBeenCalledWith(AUDIT_EVENTS.QURL_SETUP_ADMIN_CHANGED, {
+      guild_id: 'g-1',
+      old_admin_id: 'old-admin',
+      new_admin_id: 'new-admin',
+      prior_had_key: true,
+      via: 'oauth',
+      prior_configured_at: '2026-09-10T00:00:00Z',
+      prior_updated_at: '2026-09-12T00:00:00Z',
+    });
+  });
+
+  test('setGuildApiKey: does not audit first setup or same-admin re-key', async () => {
+    ddbMock.on(UpdateCommand)
+      .resolvesOnce({})
+      // UPDATED_OLD returns only the touched non-key attributes, never guild_id.
+      .resolvesOnce({ Attributes: { configured_by: 'admin', qurl_api_key: 'enc:v1:IV:TAG:deadbeef' } });
+    await store.setGuildApiKey('g-1', 'plain-key', 'admin', SETUP_VIA.OAUTH);
+    await store.setGuildApiKey('g-1', 'plain-key-2', 'admin', SETUP_VIA.PASTE);
+    expect(logger.audit.mock.calls.map(([event]) => event))
+      .not.toContain(AUDIT_EVENTS.QURL_SETUP_ADMIN_CHANGED);
+    expect(logger.warn).not.toHaveBeenCalledWith(DOOR_WARN, expect.anything());
+  });
+
+  test('setGuildApiKey: still writes when the unrecognized-door warning throws', async () => {
+    ddbMock.on(UpdateCommand).resolves({});
+    logger.warn.mockImplementationOnce(() => { throw new TypeError('circular'); });
+    await expect(store.setGuildApiKey('g-1', 'plain-key', 'admin', 'OAuth')).resolves.toBeUndefined();
+    expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(1);
+  });
+
+  test('setGuildApiKey: marks an omitted setup door as unknown', async () => {
+    ddbMock.on(UpdateCommand).resolves({ Attributes: { configured_by: 'old-admin', qurl_api_key: 'enc:v1:IV:TAG:deadbeef' } });
+    await store.setGuildApiKey('g-1', 'plain-key', 'new-admin');
+    expect(logger.audit).toHaveBeenCalledWith(AUDIT_EVENTS.QURL_SETUP_ADMIN_CHANGED,
+      expect.objectContaining({ via: 'unknown' }));
+    expect(logger.warn).toHaveBeenCalledWith(DOOR_WARN, { via: 'undefined', via_type: 'undefined', guildId: 'g-1' });
+  });
+
+  test('setGuildApiKey: collapses an unrecognized setup door to unknown', async () => {
+    ddbMock.on(UpdateCommand).resolves({ Attributes: { configured_by: 'old-admin', qurl_api_key: 'enc:v1:IV:TAG:deadbeef' } });
+    await store.setGuildApiKey('g-1', 'plain-key', 'new-admin', 'OAuth');
+    expect(logger.audit).toHaveBeenCalledWith(AUDIT_EVENTS.QURL_SETUP_ADMIN_CHANGED,
+      expect.objectContaining({ via: SETUP_VIA.UNKNOWN }));
+    expect(logger.warn).toHaveBeenCalledWith(DOOR_WARN, { via: 'OAuth', via_type: 'string', guildId: 'g-1' });
+  });
+
+  test('setGuildApiKey: never echoes a key-shaped misplaced door into the warning', async () => {
+    ddbMock.on(UpdateCommand).resolves({});
+    await store.setGuildApiKey('g-1', 'plain-key', 'admin', 'lv_live_abcdefghijklmnopqrstuvwxyz0123456789');
+    expect(logger.warn).toHaveBeenCalledWith(DOOR_WARN, { via: '[unrecognized]', via_type: 'string', guildId: 'g-1' });
+    expect(JSON.stringify(logger.warn.mock.calls)).not.toContain('lv_live_');
+  });
+
+  test('setGuildApiKey: compares admin IDs as strings so numeric IDs do not page on re-key', async () => {
+    ddbMock.on(UpdateCommand).resolves({ Attributes: { configured_by: '123', qurl_api_key: 'enc:v1:IV:TAG:deadbeef' } });
+    await store.setGuildApiKey('g-1', 'plain-key', 123, SETUP_VIA.PASTE);
+    expect(logger.audit.mock.calls.map(([event]) => event))
+      .not.toContain(AUDIT_EVENTS.QURL_SETUP_ADMIN_CHANGED);
+  });
+
+  test('setGuildApiKey: resolves when the audit observation itself throws', async () => {
+    ddbMock.on(UpdateCommand).resolves({ Attributes: { configured_by: 'old-admin', qurl_api_key: 'enc:v1:IV:TAG:deadbeef' } });
+    await expect(store.setGuildApiKey('g-1', 'plain-key', Object.create(null), SETUP_VIA.OAUTH)).resolves.toBeUndefined();
+    expect(logger.error).toHaveBeenCalledWith(
+      'Failed to emit setup admin-change audit after a landed write',
+      expect.objectContaining({ guildId: 'g-1' }),
+    );
+  });
+
+  test('setGuildApiKey: reports an empty prior configured_by as null', async () => {
+    ddbMock.on(UpdateCommand).resolves({ Attributes: { configured_by: '', qurl_api_key: 'enc:v1:IV:TAG:deadbeef' } });
+    await store.setGuildApiKey('g-1', 'plain-key', 'new-admin', SETUP_VIA.PASTE);
+    expect(logger.audit).toHaveBeenCalledWith(AUDIT_EVENTS.QURL_SETUP_ADMIN_CHANGED,
+      expect.objectContaining({ old_admin_id: null, prior_had_key: true }));
+  });
+
+  test('setGuildApiKey: warns when a caller passes the UNKNOWN sentinel as a door', async () => {
+    ddbMock.on(UpdateCommand).resolves({});
+    await store.setGuildApiKey('g-1', 'plain-key', 'admin', SETUP_VIA.UNKNOWN);
+    expect(logger.warn).toHaveBeenCalledWith(DOOR_WARN, { via: 'unknown', via_type: 'string', guildId: 'g-1' });
+  });
+
+  test('setGuildApiKey: warns on an unrecognized door even without a rebind', async () => {
+    ddbMock.on(UpdateCommand).resolves({});
+    await store.setGuildApiKey('g-1', 'plain-key', 'admin', 'OAuth');
+    expect(logger.warn).toHaveBeenCalledWith(DOOR_WARN, { via: 'OAuth', via_type: 'string', guildId: 'g-1' });
+    expect(logger.audit.mock.calls.map(([event]) => event))
+      .not.toContain(AUDIT_EVENTS.QURL_SETUP_ADMIN_CHANGED);
+  });
+
+  test('setGuildApiKey: null-coalesces a missing new admin in the audit helper (unreachable against real DynamoDB)', async () => {
+    ddbMock.on(UpdateCommand).resolves({ Attributes: { configured_by: 'old-admin', qurl_api_key: 'enc:v1:IV:TAG:deadbeef' } });
+    await store.setGuildApiKey('g-1', 'plain-key', undefined, SETUP_VIA.PASTE);
+    expect(logger.audit).toHaveBeenCalledWith(AUDIT_EVENTS.QURL_SETUP_ADMIN_CHANGED,
+      expect.objectContaining({ old_admin_id: 'old-admin', new_admin_id: null }));
+  });
+
+  test('setGuildApiKey: does not audit a prior row with neither key nor admin', async () => {
+    ddbMock.on(UpdateCommand).resolves({ Attributes: { updated_at: '2026-09-10T00:00:00Z' } });
+    await store.setGuildApiKey('g-1', 'plain-key', 'new-admin', SETUP_VIA.OAUTH);
+    expect(logger.audit.mock.calls.map(([event]) => event))
+      .not.toContain(AUDIT_EVENTS.QURL_SETUP_ADMIN_CHANGED);
+  });
+
+  test('setGuildApiKey: resolves even when the audit failure log also throws', async () => {
+    ddbMock.on(UpdateCommand).resolves({ Attributes: { configured_by: 'old-admin', qurl_api_key: 'enc:v1:IV:TAG:deadbeef' } });
+    logger.audit.mockImplementationOnce(() => { throw new Error('EPIPE'); });
+    logger.error.mockImplementationOnce(() => { throw new Error('EPIPE'); });
+    await expect(store.setGuildApiKey('g-1', 'plain-key', 'new-admin', SETUP_VIA.OAUTH)).resolves.toBeUndefined();
+  });
+
+  test('setGuildApiKey: audits a rebind of a configured row that lost configured_by', async () => {
+    ddbMock.on(UpdateCommand).resolves({ Attributes: { qurl_api_key: 'enc:v1:IV:TAG:deadbeef' } });
+    await store.setGuildApiKey('g-1', 'plain-key', 'new-admin', 'paste');
+    expect(logger.audit).toHaveBeenCalledWith(AUDIT_EVENTS.QURL_SETUP_ADMIN_CHANGED, {
+      guild_id: 'g-1',
+      old_admin_id: null,
+      new_admin_id: 'new-admin',
+      prior_had_key: true,
+      via: 'paste',
+      prior_configured_at: null,
+      prior_updated_at: null,
+    });
+  });
+
+  test('setGuildApiKey: audits a keyless prior row that names a different admin', async () => {
+    ddbMock.on(UpdateCommand).resolves({ Attributes: { configured_by: 'old-admin' } });
+    await store.setGuildApiKey('g-1', 'plain-key', 'new-admin', SETUP_VIA.PASTE);
+    expect(logger.audit).toHaveBeenCalledWith(AUDIT_EVENTS.QURL_SETUP_ADMIN_CHANGED, {
+      guild_id: 'g-1',
+      old_admin_id: 'old-admin',
+      new_admin_id: 'new-admin',
+      prior_had_key: false,
+      via: 'paste',
+      prior_configured_at: null,
+      prior_updated_at: null,
+    });
+  });
+
+  test('setGuildApiKey: resolves when the audit logger throws after the write lands', async () => {
+    ddbMock.on(UpdateCommand).resolves({ Attributes: { configured_by: 'old-admin', qurl_api_key: 'enc:v1:IV:TAG:deadbeef' } });
+    logger.audit.mockImplementationOnce(() => { throw new Error('EPIPE'); });
+    await expect(store.setGuildApiKey('g-1', 'plain-key', 'new-admin', 'oauth')).resolves.toBeUndefined();
+    expect(logger.error).toHaveBeenCalledWith(
+      'Failed to emit setup admin-change audit after a landed write',
+      { error: 'EPIPE', guildId: 'g-1' },
+    );
+  });
+
+  test('setGuildApiKey: audit event string matches the infra CloudWatch filter', () => {
+    expect(AUDIT_EVENTS.QURL_SETUP_ADMIN_CHANGED).toBe('qurl_setup_admin_changed');
+  });
+
+  test('setGuildApiKey: does not audit when the write rejects', async () => {
+    ddbMock.on(UpdateCommand).rejects(new Error('ddb down'));
+    await expect(store.setGuildApiKey('g-1', 'plain-key', 'new-admin')).rejects.toThrow('ddb down');
+    expect(logger.audit.mock.calls.map(([event]) => event))
+      .not.toContain(AUDIT_EVENTS.QURL_SETUP_ADMIN_CHANGED);
   });
 
   test('getGuildApiKey: decrypts round-trip', async () => {

@@ -7,7 +7,7 @@ const express = require('express');
 const config = require('../config');
 const db = require('../store');
 const logger = require('../logger');
-const { AUDIT_EVENTS } = require('../constants');
+const { AUDIT_EVENTS, SETUP_VIA } = require('../constants');
 const { sendDM } = require('../discord');
 const {
   verifyQurlOAuthState,
@@ -424,7 +424,7 @@ router.get('/callback', rateLimit, async (req, res) => {
   // TODO(#1366): persist the verified qURL owner identity and reject a
   // setup re-run that would silently repoint this guild to another owner.
   try {
-    await db.setGuildApiKey(guildId, apiKey, discordUserId);
+    await db.setGuildApiKey(guildId, apiKey, discordUserId, SETUP_VIA.OAUTH);
   } catch (err) {
     logger.error('Failed to persist guild API key after successful mint', {
       error: err?.message, guildId, discordUserId, keyId,
@@ -504,7 +504,7 @@ router.get('/callback', rateLimit, async (req, res) => {
   // 3a. Link webhook view counting: reuse the default owner or provision
   //     a BYOK subscription. Fire-and-forget via the centralized helper.
   fireAndForgetLinkGuildWebhookSubscription({
-    guildId, apiKey, via: 'oauth', configuredBy: discordUserId,
+    guildId, apiKey, via: SETUP_VIA.OAUTH, configuredBy: discordUserId,
   });
 
   // 4. DM the admin so they have a confirmation that doesn't depend on the
