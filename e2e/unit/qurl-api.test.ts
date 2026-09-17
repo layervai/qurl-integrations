@@ -381,6 +381,39 @@ test('revokeLink retries the revocation-pending 503 and honors Retry-After', asy
   }
 });
 
+// The confirm retry is a SECOND DELETE on a resource the first call already
+// revoked, and this repo pins "404 or 200 both acceptable" for that
+// (link-lifecycle.test.ts). So the protection update landing during the wait
+// yields a 404 — which is the revocation succeeding, not failing. Without this
+// the fix would swap one false negative for another and the smoke would stay
+// red for the same reason.
+test('revokeLink treats a 404 on the confirm retry as success', async () => {
+  jest.useFakeTimers();
+  try {
+    fetchMock
+      .mockImplementationOnce(
+        () => new Response(null, { status: 503, headers: { 'Retry-After': '30' } }),
+      )
+      .mockImplementationOnce(() => new Response(null, { status: 404 }));
+
+    const pending = qurl.revokeLink(mintUrl, apiKey, publicResourceId);
+    await jest.advanceTimersByTimeAsync(30_000);
+    await expect(pending).resolves.toBe(true);
+  } finally {
+    jest.useRealTimers();
+  }
+});
+
+// ...but a FIRST-attempt 404 is a resource that never existed, which
+// negative-paths.test.ts asserts returns false. Only the attempt trace
+// separates the two, so pin both halves.
+test('revokeLink reports a first-attempt 404 as failure', async () => {
+  fetchMock.mockImplementationOnce(() => new Response(null, { status: 404 }));
+
+  await expect(qurl.revokeLink(mintUrl, apiKey, publicResourceId)).resolves.toBe(false);
+  expect(fetchMock).toHaveBeenCalledTimes(1); // 404 is not retryable
+});
+
 // The waiting is OPT-IN, and this is why: qurl-service also answers 503 +
 // `Retry-After: 60` for deployment state (the "dark 503"), which no client
 // should wait out — it reflects a standing condition, not a transient one.
@@ -406,8 +439,11 @@ test('a caller that does not opt in ignores Retry-After', async () => {
 test('revokeLink reports a sustained revocation failure', async () => {
   jest.useFakeTimers();
   try {
-    fetchMock.mockResolvedValue(
-      new Response(null, { status: 503, headers: { 'Retry-After': '30' } }),
+    // A fresh Response per attempt: the helper cancels the body of each one it
+    // discards, so a single shared instance would not stay honest if anyone
+    // gave these a body.
+    fetchMock.mockImplementation(
+      () => new Response(null, { status: 503, headers: { 'Retry-After': '30' } }),
     );
     const pending = qurl.revokeLink(mintUrl, apiKey, publicResourceId);
     // Past the 35s ceiling, so the budget — not the clock — is what stops it.

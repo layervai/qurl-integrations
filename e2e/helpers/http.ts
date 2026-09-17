@@ -44,6 +44,13 @@
  *     propagate immediately so a genuine outage fails fast.
  *   - Keeps the attempt budget bounded, so even a SUSTAINED 5xx eventually
  *     surfaces: the final Response is returned for the caller's own `!ok` throw.
+ *   - Does NOT honor `Retry-After` by default. A directive is only worth waiting
+ *     out when the condition behind it is CONTINGENT, and this stack emits both
+ *     kinds under the same 503: qurl-service's revocation-pending 30 (transient,
+ *     worth waiting) and its deployment-state "dark 503" 60 (standing — waiting
+ *     only makes a permanent failure slower to report). The helper can't tell
+ *     them apart from the status alone, so the caller opts in with its own
+ *     `maxRetryAfterMs` budget; see that param below.
  */
 
 // Retryable on ANY method — the request provably did not reach/complete at the
@@ -90,20 +97,30 @@ function isRetryableStatus(status: number, method: string): boolean {
  * @param maxAttempts total attempts including the first (default 3)
  * @param baseDelayMs linear backoff base — waits `baseDelayMs * attempt` between
  *   tries, i.e. 1s then 2s at the default (well under jest's 120s timeout)
- * @param maxRetryAfterMs OPT-IN ceiling for honoring a server-asserted
- *   `Retry-After`; 0 (default) ignores the header entirely. Opt-in rather than
- *   always-on because a `Retry-After` is only worth waiting out when the
- *   condition is CONTINGENT — qurl-service also emits 503 + `Retry-After: 60`
- *   for deployment state (the "dark 503" in apps/cli/internal/apitest), where
- *   waiting just makes a permanent failure slower to report. Callers that know
- *   their 503 is transient pass their own budget; everyone else keeps the 1s/2s
+ * @param maxRetryAfterMs OPT-IN ceiling for honoring a 503's `Retry-After`; 0
+ *   (default) ignores the header entirely. It is both the enable flag and the
+ *   cap, so a small value means "cap there", not "off" — pass 0 to disable.
+ *   Opt-in rather than always-on because a `Retry-After` is only worth waiting
+ *   out when the condition is CONTINGENT, and this stack emits both kinds under
+ *   the SAME `service_unavailable` code: qurl-service's revocation-pending 30
+ *   (transient) and its deployment-state "dark 503" 60 (standing — waiting only
+ *   makes a permanent failure slower to report). Nothing in the response
+ *   separates them, so only the call site can. Everyone else keeps the 1s/2s
  *   backoff. The ceiling also caps a hostile or absurd directive.
+ * @param onRetry called with the status being retried, before the wait. Lets a
+ *   caller that must distinguish its final status by HOW it got there see the
+ *   attempt trace the returned `Response` cannot carry (`revokeLink`: a 404
+ *   after a committed-503 is success, a first-attempt 404 is a real miss).
  */
 export async function fetchWithTransientRetry(
   input: string | URL,
   init?: RequestInit,
-  { maxAttempts = 3, baseDelayMs = 1000, maxRetryAfterMs = 0 }:
-    { maxAttempts?: number; baseDelayMs?: number; maxRetryAfterMs?: number } = {},
+  { maxAttempts = 3, baseDelayMs = 1000, maxRetryAfterMs = 0, onRetry }: {
+    maxAttempts?: number;
+    baseDelayMs?: number;
+    maxRetryAfterMs?: number;
+    onRetry?: (status: number) => void;
+  } = {},
 ): Promise<Response> {
   const method = (init?.method ?? 'GET').toUpperCase();
   let res = await fetch(input, init);
@@ -114,9 +131,15 @@ export async function fetchWithTransientRetry(
   ) {
     // `Retry-After` wins only when it asks for LONGER than the local backoff —
     // a server asking us to slow down is authoritative, one asking us to hurry
-    // is not. Anything non-numeric (including the HTTP-date form, which this
-    // stack never emits) leaves the backoff alone.
-    const retryAfterRaw = res.headers.get('retry-after')?.trim() ?? '';
+    // is not. Scoped to 503 because that is the only status an opted-in caller
+    // has reasoned about: a 429 directive on this stack means "you burst", and
+    // honoring it would let one shed DELETE cost 35s inside cleanup sweeps that
+    // budget ~2s each (concurrency.test.ts's 180s afterAll over ~60 resources).
+    // The local backoff plus each sweep's own pacing already covers those.
+    // TODO(upstream-contract): qurl-service emits the delta-seconds form only.
+    // Anything non-numeric (including the HTTP-date form RFC 9110 also allows)
+    // falls through to the linear backoff rather than producing a NaN delay.
+    const retryAfterRaw = res.status === 503 ? res.headers.get('retry-after')?.trim() ?? '' : '';
     const retryAfterMs = /^\d+$/.test(retryAfterRaw)
       ? Math.min(Number(retryAfterRaw) * 1000, maxRetryAfterMs)
       : 0;
@@ -135,6 +158,7 @@ export async function fetchWithTransientRetry(
       `[fetchWithTransientRetry] ${method} ${origin} -> ${res.status}; ` +
         `retry ${attempt}/${maxAttempts - 1} in ${delayMs}ms`,
     );
+    onRetry?.(res.status);
     // Release the discarded response's body so its socket returns to the pool
     // instead of lingering until GC (the 5xx body is never read).
     await res.body?.cancel().catch(() => {});

@@ -253,7 +253,20 @@ export async function accessLinkNoRedirect(url: string): Promise<LinkAccessResul
  * ceiling). The retry only CONFIRMS an already-committed revocation, so that
  * one window is the whole contract — a second wait buys no confidence and
  * would push two revokes past jest's 120s default. Still pending afterward is
- * a real convergence regression the smoke should report, not wait out. */
+ * a real convergence regression the smoke should report, not wait out.
+ *
+ * A 404 on that confirm retry is SUCCESS: the retry is a second DELETE on a
+ * resource the first call already revoked, and this repo pins "404 or 200 both
+ * acceptable" for that (link-lifecycle.test.ts's double-revoke test). A 404 on
+ * the FIRST attempt stays a failure — that is a resource that never existed
+ * (negative-paths.test.ts). Only the attempt trace separates the two, hence
+ * `onRetry`.
+ *
+ * TODO(upstream-contract): mirrors qurl-service's protected-resource revoke
+ * contract — that a 503 here means the revocation is COMMITTED (not rejected),
+ * and that its convergence window is the 30s the `Retry-After` asserts, which
+ * the 35s ceiling is sized on. If the service widens that window, raise the
+ * ceiling and the file-revoke.test.ts budgets sized on it together. */
 export async function revokeLink(
   baseUrl: string,
   apiKey: string,
@@ -263,11 +276,16 @@ export async function revokeLink(
   const parsed = new URL(baseUrl);
   parsed.pathname = `/v1/resources/${encodeURIComponent(resourceId)}`;
   const url = parsed.toString();
+  let confirmedAfterPending = false;
   const res = await fetchWithTransientRetry(url, {
     method: 'DELETE',
     headers: { Authorization: `Bearer ${apiKey}` },
-  }, { maxAttempts: 2, maxRetryAfterMs: 35_000 });
-  return res.ok;
+  }, {
+    maxAttempts: 2,
+    maxRetryAfterMs: 35_000,
+    onRetry: (status) => { confirmedAfterPending = status === 503; },
+  });
+  return res.ok || (res.status === 404 && confirmedAfterPending);
 }
 
 export interface LinkStatus {

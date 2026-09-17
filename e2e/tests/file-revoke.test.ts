@@ -290,5 +290,11 @@ describe('File Revoke', () => {
       env.MINT_API_URL, env.QURL_API_KEY, upload.resource_id,
     );
     expect(status.status).toBe('revoked');
-  });
+    // Explicit, not jest.config.js's 120s default: this is the only test with
+    // TWO sequential revokes, so it carries the most protection-update wait in
+    // the file (~35s x 2 worst case) on top of an upload that can spend ~21s in
+    // its own transient + app-level-429 backoff. That is ~91s against a 120s
+    // default — the tightest margin here, which is exactly why it gets a number
+    // instead of inheriting one.
+  }, 150_000);
 });
