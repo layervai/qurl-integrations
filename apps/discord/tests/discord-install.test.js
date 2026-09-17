@@ -685,7 +685,7 @@ describe('Discord install callback', () => {
       expect(cookieHeader).toMatch(new RegExp(`${QURL_OAUTH_PKCE_COOKIE}=`));
       expect(cookieHeader).toMatch(/HttpOnly/i);
       expect(cookieHeader).toMatch(/SameSite=Lax/i);
-      expect(cookieHeader).toMatch(/Path=\/oauth\/qurl(?:;|\s|$)/);
+      expect(cookieHeader).toMatch(/Path=\/(?:;|\s|$)/);
       expect(cookieHeader).toContain(encodeURIComponent(state));
     });
 

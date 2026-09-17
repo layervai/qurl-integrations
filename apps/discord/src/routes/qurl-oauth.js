@@ -153,8 +153,8 @@ router.get('/start', rateLimit, async (req, res) => {
   // Double-submit CSRF cookie: value is the same state token the URL
   // carries to Auth0. /callback re-checks cookie === query.state.
   // Same-browser flows pass; leaked URLs in other browsers fail.
-  // Cookie shape (path=/oauth/qurl, HttpOnly, SameSite=Lax,
-  // Secure-when-HTTPS) lives in utils/oauth-cookies.js.
+  // Cookie shape (__Host- prefix, Path=/, HttpOnly, SameSite=Lax,
+  // Secure) lives in utils/oauth-cookies.js.
   const { codeVerifier, codeChallenge } = createPkcePair();
   setQurlOAuthCookie(res, req, state);
   setQurlOAuthPkceCookie(res, req, codeVerifier);

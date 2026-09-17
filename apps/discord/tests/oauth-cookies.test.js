@@ -1,8 +1,5 @@
 
 const {
-  QURL_OAUTH_SESSION_COOKIE,
-  QURL_OAUTH_PKCE_COOKIE,
-  QURL_OAUTH_COOKIE_PATH,
   DISCORD_INSTALL_SESSION_COOKIE,
   DISCORD_INSTALL_COOKIE_PATH,
   DISCORD_INSTALL_COOKIE_TTL_SECONDS,
@@ -55,19 +52,19 @@ describe('utils/oauth-cookies', () => {
   });
 
   describe('setQurlOAuthCookie', () => {
-    it('sets the canonical cookie shape (HttpOnly, SameSite=Lax, Secure-when-HTTPS, path=/oauth/qurl)', () => {
+    it('sets the canonical cookie shape (HttpOnly, SameSite=Lax, Secure, Path=/)', () => {
       const res = fakeRes();
       setQurlOAuthCookie(res, { protocol: 'https' }, 'state-token-abc');
       expect(res.cookieCalls).toHaveLength(1);
       const call = res.cookieCalls[0];
-      expect(call.name).toBe(QURL_OAUTH_SESSION_COOKIE);
+      expect(call.name).toBe('__Host-qurl_setup_session');
       expect(call.value).toBe('state-token-abc');
       expect(call.opts).toEqual({
         httpOnly: true,
         secure: true,
         sameSite: 'lax',
         maxAge: 15 * 60 * 1000,
-        path: QURL_OAUTH_COOKIE_PATH,
+        path: '/',
       });
     });
 
@@ -76,32 +73,32 @@ describe('utils/oauth-cookies', () => {
       setQurlOAuthPkceCookie(res, { protocol: 'https' }, 'verifier-abc');
       expect(res.cookieCalls).toHaveLength(1);
       const call = res.cookieCalls[0];
-      expect(call.name).toBe(QURL_OAUTH_PKCE_COOKIE);
+      expect(call.name).toBe('__Host-qurl_setup_pkce');
       expect(call.value).toBe('verifier-abc');
       expect(call.opts).toEqual({
         httpOnly: true,
         secure: true,
         sameSite: 'lax',
         maxAge: 15 * 60 * 1000,
-        path: QURL_OAUTH_COOKIE_PATH,
+        path: '/',
       });
     });
 
-    it('sets secure=false when behind plain HTTP (dev)', () => {
+    it('keeps host cookies Secure behind plain HTTP and TLS-terminating proxies', () => {
       const res = fakeRes();
       setQurlOAuthCookie(res, { protocol: 'http' }, 'state-token-abc');
-      expect(res.cookieCalls[0].opts.secure).toBe(false);
+      expect(res.cookieCalls[0].opts.secure).toBe(true);
     });
   });
 
   describe('clearQurlOAuthCookie', () => {
-    it('always passes Path=/oauth/qurl so the browser actually forgets the cookie', () => {
+    it('always passes Secure and Path=/ so the browser actually forgets the cookie', () => {
       const res = fakeRes();
       clearQurlOAuthCookie(res);
       expect(res.clearCookieCalls).toHaveLength(1);
       const call = res.clearCookieCalls[0];
-      expect(call.name).toBe(QURL_OAUTH_SESSION_COOKIE);
-      expect(call.opts).toEqual({ path: QURL_OAUTH_COOKIE_PATH });
+      expect(call.name).toBe('__Host-qurl_setup_session');
+      expect(call.opts).toEqual({ path: '/', secure: true });
     });
 
     it('clears the PKCE verifier cookie with the same path', () => {
@@ -109,8 +106,8 @@ describe('utils/oauth-cookies', () => {
       clearQurlOAuthPkceCookie(res);
       expect(res.clearCookieCalls).toHaveLength(1);
       const call = res.clearCookieCalls[0];
-      expect(call.name).toBe(QURL_OAUTH_PKCE_COOKIE);
-      expect(call.opts).toEqual({ path: QURL_OAUTH_COOKIE_PATH });
+      expect(call.name).toBe('__Host-qurl_setup_pkce');
+      expect(call.opts).toEqual({ path: '/', secure: true });
     });
   });
 

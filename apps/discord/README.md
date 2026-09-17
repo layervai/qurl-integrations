@@ -254,3 +254,8 @@ Commands** permission.
 ## License
 
 [MIT](../../LICENSE) — Copyright (c) 2025-present LayerV, Inc.
+
+Setup and install cookies use `__Host-` names with `Secure`, `HttpOnly`,
+`SameSite=Lax`, and `Path=/`. Use HTTPS (or browser-supported localhost) for
+local setup tests. Deploying this change invalidates older setup cookies;
+admins with an in-flight setup must start again.

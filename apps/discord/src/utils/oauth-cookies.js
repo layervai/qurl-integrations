@@ -4,17 +4,12 @@
 // MUST match exactly or the qurl-oauth callback's cookie/state CSRF
 // check 400s. PR #177 follow-up C.1.
 //
-// Path is `/oauth/qurl` (NOT the broader `/oauth`). The only reader
-// is the qurl-oauth callback at `/oauth/qurl/callback`; both Stage-1
-// (/oauth/qurl/start) and Stage-2 (/oauth/discord/callback) only
-// SET the cookie, so the Set-Cookie request URL doesn't constrain
-// the path attribute (the browser stores the cookie either way).
-// Narrow scope means a future router under `/oauth/...` (Slack link
-// proxy, Teams, etc.) won't silently inherit this cookie. Per
-// Justin's PR #177 round-9 item #2.
-const QURL_OAUTH_SESSION_COOKIE = 'qurl_setup_session';
-const QURL_OAUTH_PKCE_COOKIE = 'qurl_setup_pkce';
-const QURL_OAUTH_COOKIE_PATH = '/oauth/qurl';
+// Host prefixes prevent sibling subdomains from planting setup state or PKCE
+// cookies. Secure and Path=/ are required for setting and clearing them.
+// Old unprefixed cookies are not accepted; in-flight setups restart once.
+const QURL_OAUTH_SESSION_COOKIE = '__Host-qurl_setup_session';
+const QURL_OAUTH_PKCE_COOKIE = '__Host-qurl_setup_pkce';
+const QURL_OAUTH_COOKIE_PATH = '/';
 // Matches STATE_TTL_SECONDS in qurl-oauth-state.js.
 const QURL_OAUTH_COOKIE_TTL_SECONDS = 15 * 60;
 // The install flow accepts a Discord guild binding, so prevent sibling
@@ -29,11 +24,7 @@ const DISCORD_INSTALL_COOKIE_PATH = '/';
 // embedded in the state (routes/discord-install.js).
 const DISCORD_INSTALL_COOKIE_TTL_SECONDS = 30 * 60;
 
-// Single shape for the OAuth double-submit CSRF cookies.
-// `secure: req.protocol === 'https'` requires `trust proxy` to be on
-// in server.js so req.protocol reflects X-Forwarded-Proto from the ALB
-// — flipping that off would silently downgrade prod cookies. Keeping
-// the cookie shape in one place makes Stage-1/Stage-2 drift impossible.
+// Shared setter; every setup/install caller explicitly requires Secure.
 function setCookie(res, req, name, value, options = {}) {
   const { path, ttlSeconds } = options;
   const hasExplicitSecureFlag = Object.hasOwn(options, 'secure');
@@ -63,6 +54,7 @@ function setQurlOAuthCookie(res, req, value) {
   setCookie(res, req, QURL_OAUTH_SESSION_COOKIE, value, {
     path: QURL_OAUTH_COOKIE_PATH,
     ttlSeconds: QURL_OAUTH_COOKIE_TTL_SECONDS,
+    secure: true,
   });
 }
 
@@ -72,6 +64,7 @@ function setQurlOAuthPkceCookie(res, req, codeVerifier) {
   setCookie(res, req, QURL_OAUTH_PKCE_COOKIE, codeVerifier, {
     path: QURL_OAUTH_COOKIE_PATH,
     ttlSeconds: QURL_OAUTH_COOKIE_TTL_SECONDS,
+    secure: true,
   });
 }
 
@@ -87,11 +80,11 @@ function setDiscordInstallSessionCookie(res, state) {
 // Path MUST match the Set-Cookie path or the browser keeps the cookie
 // alive until TTL — locking the path here removes that footgun.
 function clearQurlOAuthCookie(res) {
-  res.clearCookie(QURL_OAUTH_SESSION_COOKIE, { path: QURL_OAUTH_COOKIE_PATH });
+  res.clearCookie(QURL_OAUTH_SESSION_COOKIE, { path: QURL_OAUTH_COOKIE_PATH, secure: true });
 }
 
 function clearQurlOAuthPkceCookie(res) {
-  res.clearCookie(QURL_OAUTH_PKCE_COOKIE, { path: QURL_OAUTH_COOKIE_PATH });
+  res.clearCookie(QURL_OAUTH_PKCE_COOKIE, { path: QURL_OAUTH_COOKIE_PATH, secure: true });
 }
 
 function clearDiscordInstallSessionCookie(res) {

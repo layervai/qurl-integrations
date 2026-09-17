@@ -94,7 +94,7 @@ function expectQurlOAuthCookiesCleared(res) {
   for (const name of [QURL_OAUTH_SESSION_COOKIE, QURL_OAUTH_PKCE_COOKIE]) {
     const clearCookie = clearedCookieHeader(res.headers['set-cookie'], name);
     expect(clearCookie).toBeDefined();
-    expect(clearCookie).toMatch(/Path=\/oauth\/qurl(?:;|$)/);
+    expect(clearCookie).toMatch(/Path=\/(?:;|$)/);
   }
 }
 
@@ -162,7 +162,7 @@ describe('qurl-oauth routes', () => {
       expect(cookieHeader).toMatch(/qurl_setup_session=/);
       expect(cookieHeader).toMatch(/HttpOnly/i);
       expect(cookieHeader).toMatch(/SameSite=Lax/i);
-      expect(cookieHeader).toMatch(/Path=\/oauth\/qurl(?:;|\s|$)/);
+      expect(cookieHeader).toMatch(/Path=\/(?:;|\s|$)/);
       expect(cookieHeader).toContain(encodeURIComponent(state));
     });
 
@@ -277,6 +277,15 @@ describe('qurl-oauth routes', () => {
       );
       expect(res.status).toBe(400);
       expect(res.text).toMatch(/same browser tab/i);
+      expectQurlOAuthCookiesCleared(res);
+    });
+
+    it('rejects unprefixed cookies that a sibling domain could plant', async () => {
+      const state = signQurlOAuthState('guild-1', 'admin-2');
+      const res = await request(app)
+        .get(`/oauth/qurl/callback?code=auth0-code&state=${encodeURIComponent(state)}`)
+        .set('Cookie', `qurl_setup_session=${encodeURIComponent(state)}; qurl_setup_pkce=${TEST_PKCE_VERIFIER}`);
+      expect(res.status).toBe(400);
       expectQurlOAuthCookiesCleared(res);
     });
 

@@ -325,8 +325,7 @@ router.get('/callback', rateLimit, async (req, res) => {
   // chain shares the cookie with the qurl-oauth callback. Together with
   // the host-prefixed install-session cookie checked above, both OAuth legs
   // remain bound to the browser that began the first-party install flow.
-  // The existing qURL cookies are not host-prefixed; their residual sibling-
-  // subdomain shadowing posture is unchanged by this install entrypoint.
+  // Both setup cookies also use host prefixes to reject sibling-domain cookies.
   setQurlOAuthCookie(res, req, qurlState);
   setQurlOAuthPkceCookie(res, req, codeVerifier);
   const authorizeUrl = buildAuth0AuthorizeUrl({ state: qurlState, codeChallenge });

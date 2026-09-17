@@ -55,10 +55,6 @@ if (process.env.TRUST_PROXY) {
 } else if (process.env.NODE_ENV === 'production') {
   // Default for production if nothing configured. Numeric, NEVER boolean.
   app.set('trust proxy', 1);
-} else if (/^https:/i.test(config.BASE_URL) && config.isQurlSetupAvailable) {
-  // Behind a TLS-terminating proxy, req.protocol reads http without trust
-  // proxy, so the qURL setup cookies would silently drop Secure.
-  logger.warn('BASE_URL is https but TRUST_PROXY is unset outside production; qURL setup cookies will not be marked Secure behind a TLS-terminating proxy');
 }
 
 // helmet covers HSTS, X-Content-Type-Options, X-Frame-Options, Referrer-
@@ -197,6 +193,9 @@ app.get('/metrics', metricsRateLimit, async (req, res) => {
 // receiver matches each inbound event against the per-guild secret
 // the linking flow registered.
 app.use('/webhooks', qurlWebhookRouter);
+if (config.QURL_WEBHOOK_SECRET && !config.QURL_API_KEY) {
+  logger.error('QURL_API_KEY unset with QURL_WEBHOOK_SECRET configured — guild webhook linking will fail closed');
+}
 if (!config.QURL_WEBHOOK_SECRET) {
   if (config.QURL_WEBHOOK_PURE_BYOK) {
     logger.warn('QURL_WEBHOOK_SECRET unset with QURL_WEBHOOK_PURE_BYOK=true — running without a default-key subscription');

@@ -40,6 +40,16 @@ function captureServerLogs(connection, auth0Env = AUTH0_ENV) {
 }
 
 describe('server Auth0 connection policy log', () => {
+  it('logs missing default-owner credentials outside production', () => {
+    expect(captureServerLogs(undefined, {
+      NODE_ENV: 'development',
+      QURL_WEBHOOK_SECRET: 'whsec_test',
+      QURL_API_KEY: undefined,
+    }).error).toContainEqual([
+      'QURL_API_KEY unset with QURL_WEBHOOK_SECRET configured — guild webhook linking will fail closed',
+    ]);
+  });
+
   it('names the pinned connection in the message and metadata', () => {
     expect(captureServerLogs('email').info).toContainEqual([
       'qURL OAuth authorize redirects pin Auth0 connection "email"; the Auth0 application must enable it.',
