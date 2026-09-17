@@ -228,6 +228,18 @@ describe('Connector client — coverage boost', () => {
         ])).not.toContain(accessToken);
       });
 
+      it('allows the connector 55s mint deadline plus response transport', async () => {
+        captureMintBody();
+        const timeout = jest.spyOn(AbortSignal, 'timeout');
+        try {
+          await connector.mintLinks('res-1', { expiresAt: '2099-01-01T00:00:00Z', n: 1 });
+          expect(timeout).toHaveBeenCalledWith(65_000);
+          expect(globalThis.fetch.mock.calls[0][1].signal).toBe(timeout.mock.results[0].value);
+        } finally {
+          timeout.mockRestore();
+        }
+      });
+
       it('sends session_duration when selfDestructSeconds provided', async () => {
         const getBody = captureMintBody();
         await connector.mintLinks('r_xyz', { expiresAt: '2099-01-01T00:00:00Z', n: 1, selfDestructSeconds: 30 });

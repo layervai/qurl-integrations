@@ -470,7 +470,9 @@ async function mintLinks(resourceId, { expiresAt, n, apiKey, selfDestructSeconds
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...connectorAuthHeaders(apiKey) },
     body: JSON.stringify(body),
-    signal: AbortSignal.timeout(30000),
+    // TODO(upstream-contract): #1551 permits 55s for minting. Keep 10s
+    // transport headroom so a valid response (including partial IDs) arrives.
+    signal: AbortSignal.timeout(65_000),
   });
 
   if (!response.ok) {
@@ -1177,7 +1179,7 @@ async function detectWatermark(imageBytes, { guildId, contentType } = {}) {
       },
       body: imageBytes,
       // Neural-net inference is the slow leg here; give it the same 60s
-      // headroom the upload paths use rather than the 30s mint window.
+      // headroom the upload paths use.
       signal: AbortSignal.timeout(60000),
     };
     // TODO(upstream-contract): SDK 2.x fetch authenticates the signed target before this callback.

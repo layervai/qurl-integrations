@@ -97,7 +97,9 @@ that use `Failed to revoke QURL`, `missing resource identity`, or the partial-mi
 token identity`, and `resource_ref`. The load-test warning now says
 `carried no usable resource identifier`.
 
-Failed sends can take about 220 seconds to report while cleanup runs.
+Each mint request allows 65 seconds for the connector’s 55-second deadline
+and response transport. Failed sends can take about 255 seconds to report
+while cleanup runs.
 Cleanup can continue after that reply; under degraded service a 30-child
 resource can take about 17 minutes. Check completion logs before manual cleanup.
 Load-test upload records rejected by SDK 2.x stay in the cleanup ledger;
