@@ -1082,7 +1082,6 @@ module.exports = {
   // bridge URL with the registrar's own canonicalization.
   canonicalUrl,
   _internals: {
-    canonicalUrl,
     pickSurvivor,
     redactSecret,
     QurlServiceError,

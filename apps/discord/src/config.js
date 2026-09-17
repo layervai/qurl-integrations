@@ -1,6 +1,6 @@
 // QURL_DEPLOYMENT is consumed and strictly validated by @layervai/qurl/node.
 const os = require('os');
-const { INFRA_SEED_SENTINEL } = require('./utils/webhook-secret');
+const { isInfraSeedSentinel } = require('./utils/webhook-secret');
 
 // Prod safety guard: refuse to boot with DDB_TEST_ENDPOINT set under
 // NODE_ENV=production. `DDB_TEST_ENDPOINT` is a local-dev / mock-test
@@ -232,8 +232,7 @@ function isValidAuth0DomainShape(d) {
 function parseAuth0EmailConnection(raw) {
   const value = (raw || '').trim();
   if (!value) return { value: '', state: 'unset' };
-  const isPlaceholder = value === INFRA_SEED_SENTINEL;
-  if (isPlaceholder) {
+  if (isInfraSeedSentinel(value)) {
     // Infra seeds optional SSM values before their consumers are enabled.
     // Treat that rollout state exactly like unset so adding the task-env
     // plumbing cannot take customer install offline between deploys.
@@ -315,13 +314,13 @@ if (!isQurlOAuthConfigured) {
   discordInstallNotConfiguredReason = 'AUTH0_EMAIL_CONNECTION rejected';
 } else if (!normalizedDiscordClientId) {
   discordInstallNotConfiguredReason = 'DISCORD_CLIENT_ID unset';
-} else if (normalizedDiscordClientId === INFRA_SEED_SENTINEL) {
+} else if (isInfraSeedSentinel(normalizedDiscordClientId)) {
   discordInstallNotConfiguredReason = 'DISCORD_CLIENT_ID is the SSM placeholder';
 } else if (!isDiscordSnowflake(normalizedDiscordClientId)) {
   discordInstallNotConfiguredReason = 'DISCORD_CLIENT_ID is not a valid Discord snowflake';
 } else if (!normalizedDiscordClientSecret) {
   discordInstallNotConfiguredReason = 'DISCORD_CLIENT_SECRET unset';
-} else if (normalizedDiscordClientSecret === INFRA_SEED_SENTINEL) {
+} else if (isInfraSeedSentinel(normalizedDiscordClientSecret)) {
   discordInstallNotConfiguredReason = 'DISCORD_CLIENT_SECRET is the SSM placeholder';
 } else if (!canRetainSecureInstallCookie(normalizedBaseUrl)) {
   discordInstallNotConfiguredReason = 'BASE_URL cannot retain the Secure install cookie';

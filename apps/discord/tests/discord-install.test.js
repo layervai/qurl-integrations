@@ -1009,7 +1009,7 @@ describe('discord-install — not configured', () => {
     }
   });
 
-  it.each(['PLACEHOLDER', ' PLACEHOLDER ', 'PLACEHOLDER\n'])(
+  it.each(['PLACEHOLDER', ' PLACEHOLDER ', 'PLACEHOLDER\n', 'placeholder'])(
     'returns 503 while DISCORD_CLIENT_SECRET is the infrastructure placeholder (%j)',
     async (placeholder) => {
       const saved = process.env.DISCORD_CLIENT_SECRET;
@@ -1113,6 +1113,7 @@ describe('discord-install — not configured', () => {
     ['PLACEHOLDER', 'DISCORD_CLIENT_ID is the SSM placeholder'],
     [' PLACEHOLDER ', 'DISCORD_CLIENT_ID is the SSM placeholder'],
     ['PLACEHOLDER\n', 'DISCORD_CLIENT_ID is the SSM placeholder'],
+    ['placeholder', 'DISCORD_CLIENT_ID is the SSM placeholder'],
     ['test-discord-client-id', 'DISCORD_CLIENT_ID is not a valid Discord snowflake'],
   ])(
     'returns 503 while DISCORD_CLIENT_ID is invalid (%j)',
