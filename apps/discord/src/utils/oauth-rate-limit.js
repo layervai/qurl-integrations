@@ -110,6 +110,8 @@ sweepHandle.unref();
 function stopIntervals() {
   clearInterval(sweepHandle);
   rateLimitStore.clear();
+  hardCapWarnedAt = 0;
+  hardCapShedCounts = {};
 }
 
 // Hard ceiling on total Map size. Under a distributed attack from many

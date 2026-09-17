@@ -180,7 +180,7 @@ describe('linkGuildWebhookSubscription — default-owner failures', () => {
     );
   });
 
-  it('reports persistence failure without applying the guild cache association', async () => {
+  it('reports persistence failure after the pre-persist cache check', async () => {
     mockResolveDefaultOwnerForApiKey.mockResolvedValueOnce('usr_default');
     const persistenceError = Object.assign(new Error('default secret conflict'), {
       code: 'DEFAULT_WEBHOOK_SECRET_CONFLICT',
@@ -191,7 +191,7 @@ describe('linkGuildWebhookSubscription — default-owner failures', () => {
 
     expect(result).toEqual({ ok: false, reason: LINK_RESULTS.PERSIST_FAILED });
     expect(mockEnsureWebhookSubscription).not.toHaveBeenCalled();
-    expect(mockEnsureDefaultOwnerCacheEntry).not.toHaveBeenCalled();
+    expect(mockEnsureDefaultOwnerCacheEntry).toHaveBeenCalledWith('usr_default');
     expect(mockSetGuildDefaultWebhookOwner).toHaveBeenCalledWith(
       'g_persist', {
         webhookOwnerId: 'usr_default',
@@ -218,7 +218,7 @@ describe('linkGuildWebhookSubscription — default-owner failures', () => {
     );
   });
 
-  it('keeps the owner-only write but reports a failed link when the local cache update rejects', async () => {
+  it('reports a failed link without converting the row when the local cache check rejects', async () => {
     mockResolveDefaultOwnerForApiKey.mockResolvedValueOnce('usr_default');
     mockEnsureDefaultOwnerCacheEntry.mockImplementationOnce(() => {
       const err = new Error('cache rejected');
@@ -229,7 +229,7 @@ describe('linkGuildWebhookSubscription — default-owner failures', () => {
     const result = await linkGuildWebhookSubscription({ guildId: 'g_cache', apiKey: 'lv_x' });
 
     expect(result).toEqual({ ok: false, reason: 'register-failed' });
-    expect(mockSetGuildDefaultWebhookOwner).toHaveBeenCalled();
+    expect(mockSetGuildDefaultWebhookOwner).not.toHaveBeenCalled();
     expect(mockError).toHaveBeenCalledWith(
       'subs.ensureDefaultOwnerCacheEntry rejected (existing cache retained; registry scan remains authoritative)',
       expect.objectContaining({ guildId: 'g_cache', error: 'cache rejected' }),

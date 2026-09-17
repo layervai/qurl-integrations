@@ -66,7 +66,7 @@ describe('utils/oauth-cookies', () => {
         httpOnly: true,
         secure: true,
         sameSite: 'lax',
-        maxAge: 5 * 60 * 1000,
+        maxAge: 15 * 60 * 1000,
         path: QURL_OAUTH_COOKIE_PATH,
       });
     });
@@ -82,7 +82,7 @@ describe('utils/oauth-cookies', () => {
         httpOnly: true,
         secure: true,
         sameSite: 'lax',
-        maxAge: 5 * 60 * 1000,
+        maxAge: 15 * 60 * 1000,
         path: QURL_OAUTH_COOKIE_PATH,
       });
     });

@@ -8853,7 +8853,7 @@ const commands = [
           return interaction.reply({
             content: '🔐 **Connect qURL to this server**\n\n'
               + `**[Click here to authorize qURL](${startUrl})**\n\n`
-              + '_Open in this browser; the link expires in 5 minutes._',
+              + '_Open in this browser; the link expires in 15 minutes._',
             ephemeral: true,
           });
         }

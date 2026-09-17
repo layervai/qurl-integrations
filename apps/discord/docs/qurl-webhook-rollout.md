@@ -169,8 +169,9 @@ finds the existing sub, sees the SSM secret matches, returns `reused`).
   the old owner and secret. After fixing the cause, re-run `/qurl setup` for
   each re-keyed guild that logged the failure.
 - **Guild links fail with `error_code=DEFAULT_WEBHOOK_SECRET_CONFLICT`** (at
-  `stage=default-owner-persist`, or `stage=default-owner-cache` when only the
-  receiver cache holds the conflicting legacy secret). A
+  `stage=default-owner-persist`, or `stage=default-owner-cache` when the
+  receiver cache holds the conflicting legacy secret; that check runs before the
+  row is converted, so the guild row is left unchanged). A
   complete legacy DDB row may contain the only secret that still matches the
   default subscription after the old guild-link path rotated it. Do not clear
   that row before recovery. During a maintenance window: remove the

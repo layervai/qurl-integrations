@@ -15,7 +15,8 @@
 const QURL_OAUTH_SESSION_COOKIE = 'qurl_setup_session';
 const QURL_OAUTH_PKCE_COOKIE = 'qurl_setup_pkce';
 const QURL_OAUTH_COOKIE_PATH = '/oauth/qurl';
-const QURL_OAUTH_COOKIE_TTL_SECONDS = 5 * 60;
+// Matches STATE_TTL_SECONDS in qurl-oauth-state.js.
+const QURL_OAUTH_COOKIE_TTL_SECONDS = 15 * 60;
 // The install flow accepts a Discord guild binding, so prevent sibling
 // subdomains from shadowing this cookie. __Host- requires Secure, Path=/,
 // and no Domain attribute.
@@ -23,7 +24,7 @@ const DISCORD_INSTALL_SESSION_COOKIE = '__Host-qurl_discord_install_session';
 const DISCORD_INSTALL_COOKIE_PATH = '/';
 // Discord's authorization-code callback is interactive and can include a
 // server picker (or server creation and app switches on mobile), so its
-// browser binding gets thirty minutes rather than the five-minute qURL setup
+// browser binding gets thirty minutes rather than the fifteen-minute qURL setup
 // window. The callback also enforces this TTL server-side from the expiry
 // embedded in the state (routes/discord-install.js).
 const DISCORD_INSTALL_COOKIE_TTL_SECONDS = 30 * 60;

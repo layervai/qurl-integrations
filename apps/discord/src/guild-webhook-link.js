@@ -135,6 +135,27 @@ async function linkGuildWebhookSubscription({ guildId, apiKey, descriptionContex
   }
 
   if (matchedDefaultOwnerId) {
+    // Check the local cache BEFORE the destructive owner-only conversion: a
+    // secret conflict (a legacy row holds the post-rotation secret) is the
+    // documented DEFAULT_WEBHOOK_SECRET_CONFLICT recovery state, so fail
+    // without mutating the row. Seeding the entry ahead of a persist that then
+    // fails is harmless: the scan synthesizes the same env-secret entry.
+    // The CAS does not return a prior owner, so this replica may retain a stale
+    // old-owner guildIds membership until the next scan; guildIds is not used
+    // for authorization or routing.
+    try {
+      subs.ensureDefaultOwnerCacheEntry(matchedDefaultOwnerId);
+    } catch (err) {
+      logger.error('subs.ensureDefaultOwnerCacheEntry rejected (existing cache retained; registry scan remains authoritative)', {
+        error: err?.message, guildId,
+      });
+      auditLinkFailure(guildId, LINK_RESULTS.REGISTER_FAILED, {
+        stage: 'default-owner-cache',
+        error_code: err?.code || err?.name || 'unknown',
+      });
+      return { ok: false, reason: LINK_RESULTS.REGISTER_FAILED };
+    }
+
     try {
       // Store the ownership relationship only. Copying the environment
       // secret into this row would make the DDB-backed cache entry shadow
@@ -153,27 +174,6 @@ async function linkGuildWebhookSubscription({ guildId, apiKey, descriptionContex
         error_code: err?.code || err?.name || 'unknown',
       });
       return { ok: false, reason: LINK_RESULTS.PERSIST_FAILED };
-    }
-
-    // The CAS does not return a prior owner, so this replica may retain a stale
-    // old-owner guildIds membership until the next scan. guildIds is not used
-    // for authorization or routing; the authoritative owner secret stays safe.
-    // A rejection keeps the (correct) owner-only row but is not a clean link:
-    // a secret conflict is the documented DEFAULT_WEBHOOK_SECRET_CONFLICT
-    // recovery state, so surface it on the alarmed failure event.
-    try {
-      subs.ensureDefaultOwnerCacheEntry(matchedDefaultOwnerId);
-    } catch (err) {
-      logger.error('subs.ensureDefaultOwnerCacheEntry rejected (existing cache retained; registry scan remains authoritative)', {
-        error: err?.message, guildId,
-      });
-      auditLinkFailure(guildId, LINK_RESULTS.REGISTER_FAILED, {
-        stage: 'default-owner-cache',
-        error_code: err?.code || err?.name || 'unknown',
-      });
-      // The owner-only row IS persisted (the backfill skips it); recovery is
-      // the DEFAULT_WEBHOOK_SECRET_CONFLICT runbook, then re-run /qurl setup.
-      return { ok: false, reason: LINK_RESULTS.REGISTER_FAILED };
     }
 
     logger.audit(AUDIT_EVENTS.QURL_WEBHOOK_SUBSCRIPTION_REGISTERED, {

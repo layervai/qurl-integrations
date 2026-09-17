@@ -13,11 +13,11 @@
 //                           n: nonce, e: expirySec})) + '.' + sigHex
 //   sig   = HMAC-SHA256(state secret, payload).hex
 //
-// 5-minute TTL. After Auth0 redirects back, the callback re-verifies the
+// 15-minute TTL. After Auth0 redirects back, the callback re-verifies the
 // signature, parses the payload, checks `kind === 'qurl-oauth'`, and asserts
 // expiry. Tampering across the boundary fails.
 //
-// Replay protection note: within the 5-minute TTL the same signed state
+// Replay protection note: within the 15-minute TTL the same signed state
 // CAN be presented to /callback multiple times by the same browser
 // session — there's no consumed-nonce store. The practical impact is
 // bounded because Auth0's `code` parameter is single-use and short-lived
@@ -29,7 +29,10 @@ const crypto = require('crypto');
 const { createStateSigner } = require('./oauth-state');
 
 const STATE_KIND = 'qurl-oauth';
-const STATE_TTL_SECONDS = 5 * 60;
+// 15 minutes: every setup now forces a fresh sign-in (often a passwordless
+// email round-trip), and this clock starts at the Auth0 redirect, before Auth0
+// even issues its code. The browser-bound cookie still limits a leaked link.
+const STATE_TTL_SECONDS = 15 * 60;
 const ACCOUNT_FINGERPRINT_CONTEXT = 'qurl-account-fingerprint:v1';
 
 // Secret precedence (highest first): QURL_OAUTH_STATE_SECRET — the

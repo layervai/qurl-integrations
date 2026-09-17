@@ -38,7 +38,8 @@ const QURL_PER_REQUEST_TIMEOUT_MS = 10_000;
 // Node/undici network error codes that are transient despite carrying a code.
 const TRANSIENT_NETWORK_CODE_RE = /^(E(CONNRESET|CONNREFUSED|TIMEDOUT|NOTFOUND|AI_AGAIN|PIPE)|UND_ERR_)/;
 const pageBudgetWarned = new Set();
-// Every owner-discovery error_code, enumerable for runbooks and alarms.
+// Every error_code produced by the discovery walk, enumerable for runbooks and
+// alarms (resolution config codes and store codes are documented separately).
 // Unknown subjects/kinds throw instead of minting an undocumented code.
 const OWNER_ERROR_CODES = Object.freeze(Object.fromEntries(['DEFAULT', 'CANDIDATE'].map((subject) => [
   subject,

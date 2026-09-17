@@ -43,9 +43,9 @@
 // the `guild_configs` DDB table. Does not touch any other table.
 //
 // DURATION: a healthy run is roughly a few seconds per row (1 page per key).
-// Owner discovery has per-request timeouts but no overall deadline yet (#1480),
-// so a row that stays silent after its `candidate` line for minutes indicates
-// a degraded qurl-service rather than normal progress.
+// Each owner-discovery walk fails with *_WEBHOOK_OWNER_BUDGET after 60s, so a
+// row silent for over ~2 minutes after its `candidate` line (default + candidate
+// walks) indicates a degraded qurl-service rather than normal progress.
 //
 // PERFORMANCE NOTE: each different-owner link revalidates the default owner,
 // resolves the candidate owner, then lets the registrar perform its own bounded

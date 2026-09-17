@@ -50,8 +50,8 @@ const readyCommandsMarkdown = config.MAP_COMMAND_ENABLED
 // pattern). /start sets a HttpOnly cookie holding a random 16-byte token;
 // /callback re-checks it. If a leaked /qurl setup ephemeral URL is opened
 // in a different browser, the cookie won't match and the callback rejects
-// before reaching Auth0 — narrows the leaked-URL window from "5 minutes
-// to anyone with a layerv.ai login" to "5 minutes AND the same browser
+// before reaching Auth0 — narrows the leaked-URL window from "the state TTL
+// to anyone with a layerv.ai login" to "the state TTL AND the same browser
 // that opened the link."
 //
 // Cookie name + setter shape live in utils/oauth-cookies.js so the
@@ -148,7 +148,7 @@ router.get('/start', rateLimit, async (req, res) => {
   const verified = verifyQurlOAuthState(state);
   if (!verified.ok) {
     logger.warn('qURL OAuth start rejected invalid state', { reason: verified.reason });
-    return renderError(res, 400, 'Invalid setup link', 'This setup link is invalid or has expired (links last 5 minutes).');
+    return renderError(res, 400, 'Invalid setup link', 'This setup link is invalid or has expired (links last 15 minutes). Run /qurl setup again, or start again from Add to Discord.');
   }
   // Double-submit CSRF cookie: value is the same state token the URL
   // carries to Auth0. /callback re-checks cookie === query.state.
@@ -233,7 +233,7 @@ router.get('/callback', rateLimit, async (req, res) => {
   // Shape check keeps malformed cookies out of Auth0; Auth0's stored
   // challenge/verifier match is the PKCE security boundary. Pre-PKCE
   // in-flight redirects without this cookie fail here; state TTL bounds
-  // that deploy cutover to 5 minutes.
+  // that deploy cutover to the state TTL.
   if (!isPkceVerifier(codeVerifier)) {
     logger.warn('qURL OAuth callback missing or invalid PKCE verifier cookie', { ip: req.ip });
     clearQurlOAuthCookies(res);
