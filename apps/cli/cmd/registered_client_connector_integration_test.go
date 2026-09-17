@@ -304,14 +304,15 @@ func nativeRecoveryHubReply(
 			list["recovery_grant"] = connectorIntegrationRecoveryGrant
 			list["recovery_grant_issued_at"] = now.Add(-time.Minute).Format(time.RFC3339)
 			list["recovery_grant_expires_at"] = now.Add(14 * time.Minute).Format(time.RFC3339)
-			err = setNativeRecoveryAssignment(list["assignment"], connectorIntegrationRecoverGeneration, cellPublicKeyB64, now)
+			if err := setNativeRecoveryAssignment(list["assignment"], connectorIntegrationRecoverGeneration, cellPublicKeyB64, now); err != nil {
+				return nil, err
+			}
 		case "refresh":
-			err = setNativeRecoveryAssignment(list["assignment"], connectorIntegrationRefreshGeneration, cellPublicKeyB64, now)
+			if err := setNativeRecoveryAssignment(list["assignment"], connectorIntegrationRefreshGeneration, cellPublicKeyB64, now); err != nil {
+				return nil, err
+			}
 		default:
 			return nil, fmt.Errorf("unexpected Hub assignment mode %q", parsed.Mode)
-		}
-		if err != nil {
-			return nil, err
 		}
 		return json.Marshal(body)
 	}
@@ -482,7 +483,7 @@ func TestOpenNativeRegisteredClient_ExplicitLoginUsesRealConnectorRecovery(t *te
 		t.Fatalf("registered identity requests = %d, want initial rejection and one retry", len(requests))
 	}
 	if got := strings.TrimPrefix(requests[0].Header.Get("Authorization"), "Bearer "); got != oldDeviceKey {
-		t.Fatalf("initial registered-device key changed: %q", got)
+		t.Fatal("initial registered-device key changed")
 	}
 	replacementKey := strings.TrimPrefix(requests[1].Header.Get("Authorization"), "Bearer ")
 	if replacementKey == "" || replacementKey == oldDeviceKey || replacementKey == validatedAccountKey ||
@@ -493,21 +494,22 @@ func TestOpenNativeRegisteredClient_ExplicitLoginUsesRealConnectorRecovery(t *te
 	if got := len(hubRequests); got != 2 {
 		t.Fatalf("real connector Hub exchanges = %d, want recovery and required post-recovery refresh", got)
 	}
-	for i, want := range []string{"recover", "refresh"} {
+	// Credential checks are value-free: the credential is account authority in
+	// the real protocol. The empty-credential expectations only have teeth
+	// because the recover row proves the usrData.credential tag still binds.
+	for i, want := range []struct{ mode, credential string }{
+		{"recover", validatedAccountKey},
+		{"refresh", ""},
+	} {
 		parsed, err := parseNativeRecoveryRequest(hubRequests[i])
 		if err != nil {
 			t.Fatalf("Hub exchange %d: parse request: %v", i, err)
 		}
-		if parsed.Mode != want {
-			t.Fatalf("Hub exchange %d mode = %q, want %q", i, parsed.Mode, want)
+		if parsed.Mode != want.mode {
+			t.Fatalf("Hub exchange %d mode = %q, want %q", i, parsed.Mode, want.mode)
 		}
-		// Value-free: the credential is account authority in the real protocol.
-		if want == "recover" && parsed.Credential != validatedAccountKey {
-			t.Fatalf("Hub recover request did not carry the account recovery credential (field empty: %t)",
-				parsed.Credential == "")
-		}
-		if want == "refresh" && parsed.Credential != "" {
-			t.Fatal("Hub refresh request unexpectedly carried account authority")
+		if parsed.Credential != want.credential {
+			t.Fatalf("Hub %s request account credential mismatch (field empty: %t)", want.mode, parsed.Credential == "")
 		}
 	}
 	cellRequests := cell.snapshot()
@@ -521,6 +523,9 @@ func TestOpenNativeRegisteredClient_ExplicitLoginUsesRealConnectorRecovery(t *te
 	if cellRequest.RecoveryGrant != connectorIntegrationRecoveryGrant {
 		// The grant is a synthetic, test-local value, so printing it is safe.
 		t.Fatalf("cell request recovery grant = %q, want %q", cellRequest.RecoveryGrant, connectorIntegrationRecoveryGrant)
+	}
+	if cellRequest.Credential != "" {
+		t.Fatal("cell recovery completion unexpectedly carried account authority")
 	}
 	if err := opts.closeAPIClient(); err != nil {
 		t.Fatal(err)
