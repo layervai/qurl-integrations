@@ -196,7 +196,7 @@ describe('recordResource', () => {
     const before = fs.existsSync(LEDGER_PATH) ? fs.readFileSync(LEDGER_PATH, 'utf8') : '';
     recordResource(value, 'upload');
     expect(console.error).toHaveBeenCalledWith(
-      expect.stringContaining('carried no usable resource_id or crid'),
+      expect.stringContaining('carried no usable resource identifier'),
     );
     const after = fs.existsSync(LEDGER_PATH) ? fs.readFileSync(LEDGER_PATH, 'utf8') : '';
     expect(after).toBe(before);

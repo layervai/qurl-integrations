@@ -13,14 +13,16 @@ ENV NODE_ENV=production
 # (better-sqlite3) is gone. Neither a build-stage chown nor a post-install
 # chown -R is needed. `--omit=dev` keeps jest + aws-sdk-client-mock out of the
 # runtime image; `--ignore-scripts` is safe because every remaining dependency
-# is pure JS with no postinstall steps; `--no-audit` skips npm's advisory-only
+# is pure JS with no postinstall steps; `--omit=optional` drops the qURL SDK's
+# native state store (@layervai/qurl-state-fs), which only producer state uses
+# and the bot never loads; `--no-audit` skips npm's advisory-only
 # registry request; `npm cache clean --force` shaves the ~/.npm cache layer
 # (the prior two-stage build dropped this incidentally via the
 # `COPY --from=build node_modules` carry-over).
 RUN chown node:node /app
 USER node
 COPY --chown=node:node package*.json ./
-RUN npm ci --omit=dev --ignore-scripts --no-audit \
+RUN npm ci --omit=dev --omit=optional --ignore-scripts --no-audit \
   && npm cache clean --force
 
 # Copy only what the runtime needs. A bare `COPY . .` invalidates the

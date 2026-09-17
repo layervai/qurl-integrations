@@ -1028,9 +1028,9 @@ async function resolveDetectTarget(guildId) {
   // stable, non-secret identifier. Assign the cache ONLY after a successful
   // extract so a failed lookup doesn't poison it. The SDK owns pagination:
   // listAllResources yields resources from every page. SDK 2.x resource item
-  // methods accept only the `crid`, never the public-key `resource_id`. There is intentionally no
-  // in-flight dedup for concurrent cold-cache lookups; the failure backoff
-  // bounds repeated hard failures.
+  // methods accept only the `crid`, never the public-key `resource_id`. There
+  // is intentionally no in-flight dedup for concurrent cold-cache lookups; the
+  // failure backoff bounds repeated hard failures.
   let crid = _detectCrid;
   if (!crid) {
     // Breadcrumb a slug-lookup transport failure (message only — no token, no
@@ -1063,9 +1063,15 @@ async function resolveDetectTarget(guildId) {
       });
       throw err;
     }
-    crid = typeof active[0]?.crid === 'string' ? active[0].crid : null;
-    if (!crid) {
+    if (!active[0]) {
       const err = new Error('Detect tunnel resource not found for slug');
+      rememberDetectResourceFailure(err, { immediateBackoff: true });
+      throw err;
+    }
+    // TODO(upstream-contract): GET /v1/resources items carry `crid`.
+    crid = typeof active[0].crid === 'string' ? active[0].crid : null;
+    if (!crid) {
+      const err = new Error('Detect tunnel resource listing returned no crid');
       rememberDetectResourceFailure(err, { immediateBackoff: true });
       throw err;
     }

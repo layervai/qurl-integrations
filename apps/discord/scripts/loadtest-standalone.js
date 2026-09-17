@@ -980,7 +980,7 @@ function recordResource(resourceId, kind) {
   // the repo-wide resource-ID fixture convention; making this warning fatal
   // previously stopped ordinary fixture-backed rounds after their first batch.
   if (!hasSafeResourceIdShape(resourceId)) {
-    console.error(`WARNING: ${kind} response carried no usable resource_id or crid — that resource cannot be reclaimed.`);
+    console.error(`WARNING: ${kind} response carried no usable resource identifier — that resource cannot be reclaimed.`);
     return;
   }
   try {
@@ -1042,49 +1042,45 @@ function readLedger(ledgerPath, quiet = false) {
 // foreign to the tenancy guard rather than as an absence of evidence.
 const UNRECORDED_ENDPOINT = '(no endpoint recorded)';
 
-// Endpoints recorded in a ledger, so a sweep can refuse to delete against a
-// tenancy other than the one the resources were created on.
-function ledgerEndpoints(ledgerPath) {
-  const endpoints = new Set();
-  // Same stat guard as readLedger rather than existsSync: a directory path
-  // would otherwise throw EISDIR here. Today reclaim returns before reaching
-  // this, but that ordering should not be what keeps it safe.
+// Parsed ledger rows, skipping blank and torn lines (readLedger reports those).
+// Same stat guard as readLedger rather than existsSync: a directory path would
+// otherwise throw EISDIR here.
+function ledgerRows(ledgerPath) {
   try {
-    if (!fs.statSync(ledgerPath).isFile()) return endpoints;
+    if (!fs.statSync(ledgerPath).isFile()) return [];
   } catch {
-    return endpoints;
+    return [];
   }
+  const rows = [];
   for (const line of fs.readFileSync(ledgerPath, 'utf8').split('\n')) {
     const trimmed = line.trim();
     if (!trimmed) continue;
     try {
-      const { resource_id: id, endpoint } = JSON.parse(trimmed);
-      if (!id) continue;
-      // Fail closed. An entry with no recorded endpoint — an older or
-      // hand-edited ledger, or a run with QURL_ENDPOINT unset — would
-      // otherwise contribute nothing to the set and let the guard pass
-      // trivially, which is the opposite of what a safety rail should do
-      // when its input is missing.
-      endpoints.add(endpoint || UNRECORDED_ENDPOINT);
+      rows.push(JSON.parse(trimmed));
     } catch { /* torn line — readLedger already reports it */ }
   }
-  return endpoints;
+  return rows;
+}
+
+// Endpoints recorded in a ledger, so a sweep can refuse to delete against a
+// tenancy other than the one the resources were created on.
+function ledgerEndpoints(ledgerPath) {
+  // Fail closed. An entry with no recorded endpoint — an older or hand-edited
+  // ledger, or a run with QURL_ENDPOINT unset — would otherwise contribute
+  // nothing to the set and let the guard pass trivially, which is the opposite
+  // of what a safety rail should do when its input is missing.
+  return new Set(ledgerRows(ledgerPath)
+    .filter(row => row?.resource_id)
+    .map(({ endpoint }) => endpoint || UNRECORDED_ENDPOINT));
 }
 
 // Ids recorded as connector upload parents. SDK 2.x cannot delete those by the
 // public key the upload returns (layervai/qurl-integrations-infra#1627), so
 // reclaim releases them rather than reporting a failure no re-run can fix.
 function ledgerUploadIds(ledgerPath) {
-  const ids = new Set();
-  try {
-    for (const line of fs.readFileSync(ledgerPath, 'utf8').split('\n')) {
-      try {
-        const { resource_id: id, kind } = JSON.parse(line);
-        if (id && kind === 'upload') ids.add(id);
-      } catch { /* blank or torn line — readLedger already reports it */ }
-    }
-  } catch { /* unreadable ledger — readLedger already returned null */ }
-  return ids;
+  return new Set(ledgerRows(ledgerPath)
+    .filter(row => row?.resource_id && row.kind === 'upload')
+    .map(({ resource_id: id }) => id));
 }
 
 // Rewrite the ledger with only what is still outstanding, so a re-run sweeps
@@ -1166,7 +1162,7 @@ async function reclaim(ledgerPath) {
   const causes = new Map();
   let revoked = 0;
   let nonCridRows = 0;
-  let releasedUploads = 0;
+  const releasedUploads = [];
   let ambiguousNotFound = 0;
   let invalidLedgerIds = 0;
 
@@ -1219,15 +1215,17 @@ async function reclaim(ledgerPath) {
           outstanding.delete(id);
         } else if (uploadIds.has(id) && isClientValidationQurlApiError(e)) {
           // Not addressable by the API: its recipient links expire with it.
-          releasedUploads++;
+          releasedUploads.push(id);
           outstanding.delete(id);
         } else {
           outstanding.add(id);
           const status = qurlApiErrorStatus(e);
           // SDK 2.x deletes only by CRID and rejects any other identifier before
           // a request, so older ledgers' retired r_ IDs cannot drain
-          // automatically. deleteLink sends only the ID, so every client-side
-          // rejection is an identifier rejection that no re-run can fix.
+          // automatically. deleteLink sends only the ID, so a client-side
+          // rejection is an identifier rejection that no re-run can fix. If the
+          // SDK ever rejected client configuration this way instead, every row
+          // would land here at once, which reads plainly in the summary.
           if (!hasSafeResourceIdShape(id)) invalidLedgerIds++;
           else if (isClientValidationQurlApiError(e)) nonCridRows++;
           else if (status === 404) ambiguousNotFound++;
@@ -1268,8 +1266,10 @@ async function reclaim(ledgerPath) {
   if (nonCridRows > 0) {
     console.error(`Reclaim: ${nonCridRows} resource ID(s) are not CRIDs and cannot be revoked through the qURL API; remove them only after confirming their links expired.`);
   }
-  if (releasedUploads > 0) {
-    console.log(`Reclaim: released ${releasedUploads} connector upload parent(s) from the ledger; the qURL API cannot revoke them by public key, and their links expire on their own.`);
+  if (releasedUploads.length > 0) {
+    // Public resource keys, not credentials: listed so the release stays auditable.
+    console.log(`Reclaim: released ${releasedUploads.length} connector upload parent(s) from the ledger; the qURL API cannot revoke them by public key, and their links expire on their own:`);
+    for (const id of releasedUploads) console.log(`  ${id}`);
   }
   if (ambiguousNotFound > 0) {
     console.error(`Reclaim: ${ambiguousNotFound} resource(s) returned 404 and remain in the ledger; verify the owner/key and absence manually before pruning.`);
@@ -2463,6 +2463,8 @@ async function main() {
   try {
     const r = await trackCreate(async () => {
       const link = await createOneTimeLink('https://example.com', '24h', 'smoke test');
+      // Fail here rather than after N rounds of unreclaimable location links.
+      if (typeof link?.crid !== 'string') throw new Error('create response carried no crid');
       recordResource(link.crid, 'smoke');
       return link;
     });
