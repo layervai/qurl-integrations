@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -34,13 +35,16 @@ const (
 	connectorIntegrationCellHost = "b.test.layerv.xyz"
 
 	// qurl-conformance v0.16.0 moved the credential-recovery vectors to a
-	// private platform module, so this test keeps the synthetic, secret-free
-	// public exchange values it needs from the last public vector file.
+	// private platform module, so this test keeps the values it needs from
+	// v0.15.0 agent_credential_recovery_v1_vectors.json: the credential is
+	// Fixtures.RecoveryCredential (base64url of bytes 0x00-0x1f, synthetic) and
+	// the cell reply is the assigned-cell PublicExchanges SuccessBodyJSON.
 	//
 	// TODO(upstream-contract): these values and the recover-mode fields added
 	// in nativeRecoveryHubReply mirror the private agent-credential-recovery
 	// vectors. Nothing here fails when that platform contract moves.
 	connectorIntegrationRecoveryCredential = "lv_live_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"
+	connectorIntegrationRecoveryGrant      = "qrg1.integration-recovery-grant-0001"
 	connectorIntegrationRecoveryCellReply  = `{"errCode":"0","list":{"query":"agent_credential_recovery","version":1,"device_api_key_id":"key_RcV8mP3qTn5W"}}`
 )
 
@@ -257,8 +261,11 @@ func nativeRecoveryHubReply(
 ) func([]byte) ([]byte, error) {
 	return func(request []byte) ([]byte, error) {
 		query, mode, err := nativeRecoveryQuery(request)
-		if err != nil || query != "cell_assignment" {
-			return nil, fmt.Errorf("unexpected Hub request %q/%q: %w", query, mode, err)
+		if err != nil {
+			return nil, fmt.Errorf("parse Hub request: %w", err)
+		}
+		if query != "cell_assignment" {
+			return nil, fmt.Errorf("unexpected Hub request %q/%q", query, mode)
 		}
 		if mode != "recover" && mode != "refresh" {
 			return nil, fmt.Errorf("unexpected Hub assignment mode %q", mode)
@@ -272,7 +279,7 @@ func nativeRecoveryHubReply(
 		}
 		list, ok := body["list"].(map[string]any)
 		if !ok {
-			return nil, fmt.Errorf("refresh golden has no list object: %v", body["list"])
+			return nil, fmt.Errorf("Hub assignment reply has no list object: %v", body["list"])
 		}
 		list["agent_id"] = connectorIntegrationAgentID
 		if err := setNativeRecoveryAssignment(list["assignment"], cellPublicKeyB64, now); err != nil {
@@ -280,7 +287,7 @@ func nativeRecoveryHubReply(
 		}
 		if mode == "recover" {
 			list["mode"] = "recover"
-			list["recovery_grant"] = "qrg1.integration-recovery-grant-0001"
+			list["recovery_grant"] = connectorIntegrationRecoveryGrant
 			list["recovery_grant_issued_at"] = now.Add(-time.Minute).Format(time.RFC3339)
 			list["recovery_grant_expires_at"] = now.Add(14 * time.Minute).Format(time.RFC3339)
 		}
@@ -291,11 +298,11 @@ func nativeRecoveryHubReply(
 func setNativeRecoveryAssignment(value any, cellPublicKeyB64 string, now time.Time) error {
 	assignment, ok := value.(map[string]any)
 	if !ok {
-		return fmt.Errorf("refresh golden has no assignment object: %v", value)
+		return fmt.Errorf("Hub assignment reply has no assignment object: %v", value)
 	}
 	endpoint, ok := assignment["nhp_udp_endpoint"].(map[string]any)
 	if !ok {
-		return fmt.Errorf("refresh golden has no nhp_udp_endpoint object: %v", assignment["nhp_udp_endpoint"])
+		return fmt.Errorf("Hub assignment reply has no nhp_udp_endpoint object: %v", assignment["nhp_udp_endpoint"])
 	}
 	assignment["cell_id"] = "cell-test"
 	assignment["assignment_generation"] = float64(2)
@@ -309,8 +316,14 @@ func setNativeRecoveryAssignment(value any, cellPublicKeyB64 string, now time.Ti
 
 func nativeRecoveryCellReply(request []byte) ([]byte, error) {
 	query, _, err := nativeRecoveryQuery(request)
-	if err != nil || query != "agent_credential_recovery" {
-		return nil, fmt.Errorf("unexpected cell request %q: %w", query, err)
+	if err != nil {
+		return nil, fmt.Errorf("parse cell request: %w", err)
+	}
+	if query != "agent_credential_recovery" {
+		return nil, fmt.Errorf("unexpected cell request %q", query)
+	}
+	if !bytes.Contains(request, []byte(connectorIntegrationRecoveryGrant)) {
+		return nil, errors.New("cell request did not carry the Hub recovery grant")
 	}
 	return []byte(connectorIntegrationRecoveryCellReply), nil
 }
