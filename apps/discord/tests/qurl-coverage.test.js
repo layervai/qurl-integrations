@@ -489,8 +489,12 @@ describe('qURL client — revokeOrdinaryLinks', () => {
       return apiOk(204);
     });
     try {
-      await expect(qurl.revokeOrdinaryLinks(PUBLIC_KEY_RESOURCE_ID, ['q_aaaaaaaaaa1', 'q_aaaaaaaaaa2'], 'guild-key'))
-        .rejects.toThrow();
+      const err = await qurl.revokeOrdinaryLinks(PUBLIC_KEY_RESOURCE_ID, ['q_aaaaaaaaaa1', 'q_aaaaaaaaaa2'], 'guild-key').catch(e => e);
+      // Budget exhaustion surfaces as a body-free SDK network/timeout error,
+      // not the redacted unknown_error, so operators can tell it apart.
+      const { ERROR_CODE_NETWORK, ERROR_CODE_TIMEOUT } = require('@layervai/qurl');
+      expect([ERROR_CODE_NETWORK, ERROR_CODE_TIMEOUT]).toContain(err.code);
+      expect(err.message).not.toContain('unknown_error');
       expect(globalThis.fetch).toHaveBeenCalledTimes(3);
     } finally {
       timeoutSpy.mockRestore();

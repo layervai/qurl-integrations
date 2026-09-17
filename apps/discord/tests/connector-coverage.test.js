@@ -1088,9 +1088,9 @@ describe('revokeMintedLinks — #1551 fail-closed contract', () => {
 
       const pending = connector.mintLinks('res-1', { expiresAt: '2026-01-01T00:00:00Z', n: 1 });
       const assertion = expect(pending).rejects.toThrow('Connector mint_link failed (502)');
-      await jest.advanceTimersByTimeAsync(60_000);
+      await jest.advanceTimersByTimeAsync(70_000);
       await assertion;
-      expect(logger.error).toHaveBeenCalledWith('Connector partial mint cleanup still running at its wait budget', {
+      expect(logger.warn).toHaveBeenCalledWith('Connector partial mint cleanup still running at its wait budget', {
         resource_ref: expect.stringMatching(/^sha256:/), partial_qurl_ids: ['q_partial_one'],
       });
     } finally {

@@ -3235,7 +3235,7 @@ describe('mintLinksInBatches', () => {
       const assertion = expect(pending).rejects.toBe(failure);
       await jest.advanceTimersByTimeAsync(120_000);
       await assertion;
-      expect(logger.error).toHaveBeenCalledWith('Mint failure compensation still running at its wait budget', {
+      expect(logger.warn).toHaveBeenCalledWith('Mint failure compensation still running at its wait budget', {
         resources: [{ resource_ref: resourceIdLogRef('res-1'), qurl_ids: Array.from({ length: 10 }, (_, i) => `q_${i}`) }],
       });
     } finally {

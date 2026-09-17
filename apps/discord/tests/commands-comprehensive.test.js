@@ -1017,6 +1017,20 @@ describe('handleRevokeSelect (dispatcher path)', () => {
     );
   });
 
+  it('replaces the progress message and rethrows when revoke fails before fan-out', async () => {
+    const failure = new Error('DDB unavailable');
+    mockDb.markSendRevoking.mockRejectedValueOnce(failure);
+    const interaction = makeSelectInteraction();
+
+    await expect(handleRevokeSelect(interaction, { flow_id: '0:1#guild-1#ch-1#user-1' })).rejects.toBe(failure);
+
+    expect(interaction.update).toHaveBeenCalledWith({ content: 'Revoking links...', components: [] });
+    expect(interaction.editReply).toHaveBeenCalledWith({
+      content: 'Could not complete revocation. Run `/qurl revoke` to retry.',
+      components: [],
+    });
+  });
+
   it('still revokes when the component acknowledgement fails', async () => {
     mockDb.getSendItems.mockReturnValue([
       { resource_id: 'res-1', recipient_discord_id: 'u-1', qurl_id: 'q_u_1' },

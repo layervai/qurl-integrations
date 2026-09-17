@@ -27,8 +27,10 @@ const MAX_CDN_REDIRECTS = 3;
 // purpose: a process-wide negative cache would hide the route once enabled.
 const REVOKE_LINKS_TIMEOUT_MS = 65_000;
 // Waiting budget for inline partial-mint cleanup before the mint error is
-// rethrown; the revoke keeps running and a timeout is logged for reconciliation.
-const PARTIAL_MINT_CLEANUP_WAIT_MS = 60_000;
+// rethrown: one connector revoke request plus slack. The revoke keeps running
+// and a timeout (expected while the SDK fallback is slow) is logged as a warning
+// with the ids for reconciliation.
+const PARTIAL_MINT_CLEANUP_WAIT_MS = 70_000;
 // Terminal per-id outcomes. not_connector_managed is not itself a revoke: it
 // hands an ordinary child back to the SDK below.
 const REVOKE_TERMINAL_STATUSES = new Set(['revoked', 'already_gone', 'not_connector_managed']);
@@ -498,7 +500,7 @@ async function mintLinks(resourceId, { expiresAt, n, apiKey, selfDestructSeconds
         });
       });
       if (!await settlesWithin(cleanup, PARTIAL_MINT_CLEANUP_WAIT_MS)) {
-        logger.error('Connector partial mint cleanup still running at its wait budget', {
+        logger.warn('Connector partial mint cleanup still running at its wait budget', {
           resource_ref: resourceIdLogRef(resourceId),
           partial_qurl_ids: partialQurlIds,
         });
@@ -590,8 +592,9 @@ async function revokeMintedLinks(resourceId, qurlIds, apiKey) {
         bodyText = await response.text();
       } catch { /* network read failed, fall through with empty body */ }
       const { parsed } = parseConnectorBody(bodyText);
-      // Surface only the connector's enum code (e.g. revoke_not_available);
-      // anything else in the body stays out of logs and errors.
+      // TODO(upstream-contract): #1551's revoke route puts its enum in a top-level
+      // `code` (revoke_not_available, request_rate_limited), unlike mint/upload's
+      // `error` string. Surface only that enum; the rest of the body stays out.
       const apiCode = typeof parsed?.code === 'string' && /^[a-z_]{1,64}$/.test(parsed.code) ? parsed.code : null;
       // The durable "route is live but refusing" signal during enablement.
       logger.warn('Connector revoke_links refused', {

@@ -1645,8 +1645,9 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
 // own PR against a stable baseline.
 
 // Wait budget for cross-batch compensation after a mint failure. With the mint
-// call (30s) and inline partial cleanup (60s) this keeps the error inside
-// Discord's 15-minute interaction window.
+// call (30s) and inline partial cleanup (70s) this keeps the error inside
+// Discord's 15-minute interaction window. Hitting it is expected while the SDK
+// fallback is slow, so it logs a warning with the ids, not an error.
 const MINT_COMPENSATION_WAIT_MS = 120_000;
 
 /**
@@ -1709,16 +1710,16 @@ async function mintLinksInBatches({ initialResourceId, reuploadFn, expiresAt, re
       }
       // Validate only after every entry is pushed: the catch below revokes the
       // identified siblings of a bad entry.
-      minted.forEach((link, i) => {
+      minted.forEach((link, idx) => {
         // qurl_id is the only durable child-revoke identity (and the join key
         // against qurl.accessed webhooks). Never persist or deliver without it.
         if (!hasPersistableQurlIdShape(link?.qurl_id)) {
-          throw new Error(`Connector mint_link returned a link without a valid qurl_id (entry ${i})`);
+          throw new Error(`Connector mint_link returned a link without a valid qurl_id (entry ${i + idx})`);
         }
         // qurl_link is the write-once delivery credential; an id-only 2xx entry
         // can be neither delivered nor rebuilt, so revoke it rather than persist.
         if (typeof link.qurl_link !== 'string' || link.qurl_link.length === 0) {
-          throw new Error(`Connector mint_link returned a link without a qurl_link (entry ${i})`);
+          throw new Error(`Connector mint_link returned a link without a qurl_link (entry ${i + idx})`);
         }
       });
       tokensUsed += batchSize;
@@ -1748,7 +1749,7 @@ async function mintLinksInBatches({ initialResourceId, reuploadFn, expiresAt, re
     // error still reaches the user; nothing was delivered, and the ids are
     // logged for reconciliation while the revoke keeps running.
     if (!await settlesWithin(compensation, MINT_COMPENSATION_WAIT_MS)) {
-      logger.error('Mint failure compensation still running at its wait budget', {
+      logger.warn('Mint failure compensation still running at its wait budget', {
         resources: entries.map(([resourceId, ids]) => ({ resource_ref: resourceIdLogRef(resourceId), qurl_ids: ids })),
       });
       throw error;
@@ -3766,7 +3767,18 @@ async function handleRevokeSelect(interaction, { flow_id }) {
   // settles. A failed ack still revokes: the user asked for it and the barrier
   // makes a repeat safe; only the result message is lost.
   await interaction.update({ content: 'Revoking links...', components: [] }).catch(logIgnoredDiscordErr);
-  const revoked = await revokeAllLinks(sendId, interaction.user.id, apiKey, resolveSenderAlias(interaction));
+  let revoked;
+  try {
+    revoked = await revokeAllLinks(sendId, interaction.user.id, apiKey, resolveSenderAlias(interaction));
+  } catch (err) {
+    // The select menu is already gone; replace the progress text so the user
+    // is not left on "Revoking links..." before the dispatcher's follow-up.
+    await interaction.editReply({
+      content: 'Could not complete revocation. Run `/qurl revoke` to retry.',
+      components: [],
+    }).catch(logIgnoredDiscordErr);
+    throw err;
+  }
 
   if (!revoked.barrierEstablished) {
     await interaction.editReply({
