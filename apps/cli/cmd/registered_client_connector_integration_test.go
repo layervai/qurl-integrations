@@ -6,7 +6,6 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -45,8 +44,9 @@ const (
 	//
 	// TODO(upstream-contract): these values, the recover-mode fields added in
 	// nativeRecoveryHubReply, and the usrData.recovery_grant and
-	// usrData.credential request fields read by nativeRecoveryUserData mirror the private agent-credential-recovery
-	// vectors. Nothing here fails when that platform contract moves (#1483).
+	// usrData.credential request fields read by nativeRecoveryUserData mirror
+	// the private agent-credential-recovery vectors. Nothing here fails when
+	// that platform contract moves (#1483).
 	connectorIntegrationRecoveryCredential = "lv_live_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"
 	connectorIntegrationRecoveryGrant      = "qrg1.integration-recovery-grant-0001"
 	connectorIntegrationRecoveredKeyID     = "key_RcV8mP3qTn5W"
@@ -249,8 +249,9 @@ func nativeRecoveryFixtureKey(t *testing.T, raw string) []byte {
 	return decoded
 }
 
-// nativeRecoveryUserData holds the recovery request fields this test asserts on. RecoveryGrant is a
-// mirrored private-contract request field; see TODO(upstream-contract) above.
+// nativeRecoveryUserData holds the recovery request fields this test asserts
+// on. RecoveryGrant and Credential are mirrored private-contract request
+// fields; see TODO(upstream-contract) above.
 type nativeRecoveryUserData struct {
 	Query         string `json:"query"`
 	Mode          string `json:"mode"`
@@ -294,27 +295,22 @@ func nativeRecoveryHubReply(
 		}
 		list["agent_id"] = connectorIntegrationAgentID
 		// Distinct generations let the test tell the persisted refresh result
-		// from the recover result.
-		var generation int
+		// from the recover result. Request field checks run after the exchange so
+		// a mismatch fails the test directly instead of stalling the connector.
 		switch parsed.Mode {
 		case "recover":
-			if parsed.Credential != connectorIntegrationRecoveryCredential {
-				return nil, errors.New("Hub recover request did not carry the account recovery credential")
-			}
-			generation = connectorIntegrationRecoverGeneration
-		case "refresh":
-			generation = connectorIntegrationRefreshGeneration
-		default:
-			return nil, fmt.Errorf("unexpected Hub assignment mode %q", parsed.Mode)
-		}
-		if err := setNativeRecoveryAssignment(list["assignment"], generation, cellPublicKeyB64, now); err != nil {
-			return nil, err
-		}
-		if parsed.Mode == "recover" {
 			list["mode"] = "recover"
 			list["recovery_grant"] = connectorIntegrationRecoveryGrant
 			list["recovery_grant_issued_at"] = now.Add(-time.Minute).Format(time.RFC3339)
 			list["recovery_grant_expires_at"] = now.Add(14 * time.Minute).Format(time.RFC3339)
+			err = setNativeRecoveryAssignment(list["assignment"], connectorIntegrationRecoverGeneration, cellPublicKeyB64, now)
+		case "refresh":
+			err = setNativeRecoveryAssignment(list["assignment"], connectorIntegrationRefreshGeneration, cellPublicKeyB64, now)
+		default:
+			return nil, fmt.Errorf("unexpected Hub assignment mode %q", parsed.Mode)
+		}
+		if err != nil {
+			return nil, err
 		}
 		return json.Marshal(body)
 	}
@@ -347,9 +343,6 @@ func nativeRecoveryCellReply(request []byte) ([]byte, error) {
 	if parsed.Query != "agent_credential_recovery" {
 		return nil, fmt.Errorf("unexpected cell request %q", parsed.Query)
 	}
-	if parsed.RecoveryGrant != connectorIntegrationRecoveryGrant {
-		return nil, fmt.Errorf("cell request recovery grant = %q, want %q", parsed.RecoveryGrant, connectorIntegrationRecoveryGrant)
-	}
 	return []byte(connectorIntegrationRecoveryCellReply), nil
 }
 
@@ -368,7 +361,7 @@ func withNativeRecoveryStateStore(t *testing.T, stateDir string, fn func(qurl.Ag
 	}
 	defer func() {
 		if closeErr := owner.Close(); closeErr != nil {
-			t.Error(closeErr)
+			t.Fatal(closeErr)
 		}
 	}()
 	store, err := owner.Handoff()
@@ -507,9 +500,22 @@ func TestOpenNativeRegisteredClient_ExplicitLoginUsesRealConnectorRecovery(t *te
 		if parsed.Mode != want {
 			t.Fatalf("Hub exchange %d mode = %q, want %q", i, parsed.Mode, want)
 		}
+		if want == "recover" && parsed.Credential != connectorIntegrationRecoveryCredential {
+			// Value-free: the credential is account authority in the real protocol.
+			t.Fatal("Hub recover request did not carry the account recovery credential")
+		}
 	}
-	if got := len(cell.snapshot()); got != 1 {
+	cellRequests := cell.snapshot()
+	if got := len(cellRequests); got != 1 {
 		t.Fatalf("real connector cell exchanges = %d, want one recovery completion", got)
+	}
+	cellRequest, err := parseNativeRecoveryRequest(cellRequests[0])
+	if err != nil {
+		t.Fatalf("cell exchange: parse request: %v", err)
+	}
+	if cellRequest.RecoveryGrant != connectorIntegrationRecoveryGrant {
+		// The grant is a synthetic, test-local value, so printing it is safe.
+		t.Fatalf("cell request recovery grant = %q, want %q", cellRequest.RecoveryGrant, connectorIntegrationRecoveryGrant)
 	}
 	if err := opts.closeAPIClient(); err != nil {
 		t.Fatal(err)
@@ -532,7 +538,8 @@ func TestOpenNativeRegisteredClient_ExplicitLoginUsesRealConnectorRecovery(t *te
 			t.Fatalf("recovered device API key ID = %q, want %q", recovered.DeviceAPIKeyID, connectorIntegrationRecoveredKeyID)
 		}
 		if recovered.DeviceAPIKey != replacementKey {
-			// Deliberately value-free: keep credential material out of test output.
+			// Value-free, unlike the synthetic grant: keep credential material out
+			// of test output.
 			t.Fatal("persisted device credential did not match the one that authorized the retry")
 		}
 		if recovered.Assignment == nil || recovered.Assignment.AssignmentGeneration != connectorIntegrationRefreshGeneration {
