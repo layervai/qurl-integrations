@@ -149,7 +149,7 @@ func TestHandleCRID_ReasonAuditsResourceID(t *testing.T) {
 	if audit == nil {
 		t.Fatalf("no %s audit record; logs=%s", slackaudit.QURLMintReason, logs.String())
 	}
-	if audit["resource_id"] != testTunnelResourceID || audit["reason"] != "incident #9" {
+	if audit["resource_id"] != testTunnelResourceID || audit["reason"] != "incident #9" || audit["addressed_by"] != "crid" {
 		t.Errorf("audit = %#v, want resource_id %q and the reason", audit, testTunnelResourceID)
 	}
 }
@@ -165,10 +165,10 @@ func TestResourceIDForCRID(t *testing.T) {
 		t.Errorf("resourceIDForCRID = %q, want %q", got, testTunnelResourceID)
 	}
 	delete(allowed, testTunnelResourceID)
-	// testResourceIDFix and "r_legacy" decode as base64url (candidates);
-	// the URL does not.
-	if got, candidates := resourceIDForCRID(allowed, testTunnelCRID); got != "" || candidates != 2 {
-		t.Errorf("resourceIDForCRID = %q, %d candidates; want miss with 2 candidates", got, candidates)
+	// Only testResourceIDFix decodes to a public key; "r_legacy" decodes as
+	// base64url but is not DER, and the URL does not decode at all.
+	if got, candidates := resourceIDForCRID(allowed, testTunnelCRID); got != "" || candidates != 1 {
+		t.Errorf("resourceIDForCRID = %q, %d candidates; want miss with 1 candidate", got, candidates)
 	}
 }
 
@@ -207,5 +207,32 @@ func TestHandleCRID_DMDelivers(t *testing.T) {
 	}
 	if !strings.Contains(async, ":incoming_envelope:") || strings.Contains(async, "https://qurl.link/crid-dm") {
 		t.Errorf("async = %q, want DM confirmation without the link", async)
+	}
+}
+
+// TestHandleGet_DMGuardRunsAfterResolution pins the get ordering this PR
+// introduced: an unknown alias reports the alias miss even with dm:true in a
+// workspace without DM delivery, while a valid alias reports the DM refusal
+// before any mint.
+func TestHandleGet_DMGuardRunsAfterResolution(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedPolicySet(t, testAdminTeamID, "C_test", "prod-db", []string{testResourceIDFix})
+	var mintHits atomic.Int32
+	ts.addCustomerPrefix(http.MethodPost, "/v1/resources/", func(w http.ResponseWriter, _ *http.Request) {
+		mintHits.Add(1)
+		writeCreateFixture(t, w, "https://qurl.link/must-not", testResourceIDFix)
+	})
+	ts.addCustomer(http.MethodGet, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		writeResourceListFixture(t, w, []map[string]any{}, "", false)
+	})
+	h := newAdminTestHandler(t, ts) // PostDMBlocks is nil by default.
+
+	_, _, typo := newAdminSlashInvoker(t, h).invokeAdminAsync("get $typo dm:true", testAdminTeamID, testAdminUserID)
+	if !strings.Contains(typo, "`$typo` is not configured for this channel") {
+		t.Errorf("unknown alias + dm:true = %q, want alias-miss copy", typo)
+	}
+	_, _, valid := newAdminSlashInvoker(t, h).invokeAdminAsync("get $prod-db dm:true", testAdminTeamID, testAdminUserID)
+	if !strings.Contains(valid, errDMNotConfigured.msg) || mintHits.Load() != 0 {
+		t.Errorf("valid alias + dm:true = %q (mints = %d), want DM refusal before mint", valid, mintHits.Load())
 	}
 }

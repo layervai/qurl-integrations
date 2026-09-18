@@ -574,10 +574,12 @@ func (h *Handler) mintForResource(ctx context.Context, log *slog.Logger, args *g
 	// [slackaudit.QURLMintReason] for why the mint body was never the record
 	// it was documented to be.
 	if reason := strings.TrimSpace(args.cmd.Reason()); reason != "" {
-		slackaudit.LogQURLMintReason(log, slackaudit.QURLMintReasonAttrs(
+		// addressed_by separates a channel `$id`/`$alias` mint (get) from one
+		// addressed by a permanent CRID obtained outside Slack (crid).
+		slackaudit.LogQURLMintReason(log, append(slackaudit.QURLMintReasonAttrs(
 			args.teamID, args.channelID, args.userID, input.ResourceID,
 			truncateRunes(reason, getReasonAuditMaxRunes),
-		)...)
+		), slog.String("addressed_by", string(args.cmd.Subcommand)))...)
 	}
 	// Defensive: an empty OR non-https qurl_link is a server contract surprise (mints
 	// return absolute https qurl.link URLs). The Enter Portal render puts the link in a

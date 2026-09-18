@@ -2,6 +2,7 @@ package internal
 
 import (
 	"context"
+	"crypto/x509"
 	"encoding/base64"
 	"errors"
 	"log/slog"
@@ -18,7 +19,7 @@ const cridUsageMessage = "Usage: `/qurl crid <CRID>` to create a qURL directly f
 // invalidCRIDMessage names the likely fix for a value that fails the local
 // CRID gate (checksum, length, charset): a typo, truncated paste, or
 // auto-capitalization — CRIDs are never trimmed or case-folded.
-const invalidCRIDMessage = "That isn't a valid CRID. Check for a typo, a truncated paste, or capital letters — CRIDs use only lowercase letters and the digits 2–7, with no spaces."
+const invalidCRIDMessage = "That isn't a valid CRID. Check for a typo, a truncated paste, or capital letters — CRIDs use only lowercase letters and the digits 2–7, with no spaces or `$` prefix."
 
 // cridNotInChannelMessage mirrors [noResourceForAliasMessage]: a CRID that is
 // unknown and one that is protected only in another channel get the same copy,
@@ -83,11 +84,14 @@ func resourceIDForCRID(allowed map[string]struct{}, cridValue string) (resourceI
 		if err != nil {
 			continue
 		}
+		if _, err := x509.ParsePKIXPublicKey(der); err != nil {
+			continue
+		}
 		keyCandidates++
 		// The CRID already passed crid.Validate at parse time, so an error
 		// here is impossible by invariant; treating it as a miss fails closed.
 		if matched, err := crid.KeyMatches(cridValue, der); err == nil && matched {
-			return id, keyCandidates
+			return id, 0
 		}
 	}
 	return "", keyCandidates
