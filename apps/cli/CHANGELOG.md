@@ -1,5 +1,22 @@
 # Changelog
 
+## [2.6.0](https://github.com/layervai/qurl-integrations/compare/v2.5.4...v2.6.0) (2026-09-17)
+
+
+### Features
+
+* **cli:** accept a runtime request-header overlay on the share daemon socket ([#1429](https://github.com/layervai/qurl-integrations/issues/1429)) ([a1146b6](https://github.com/layervai/qurl-integrations/commit/a1146b66b03549d1dac73c79022083f50ae164bf))
+* **cli:** add external supervision mode for the share daemon ([#1426](https://github.com/layervai/qurl-integrations/issues/1426)) ([8a3c48f](https://github.com/layervai/qurl-integrations/commit/8a3c48f2a615d246d6819cef83115cf699d97bd4))
+* **cli:** enroll a device from a one-shot token file under external supervision ([#1428](https://github.com/layervai/qurl-integrations/issues/1428)) ([9a98181](https://github.com/layervai/qurl-integrations/commit/9a98181293e2f896ec6aeac0b493365e51503461))
+* **cli:** let restart move a local share to a new loopback target ([#1424](https://github.com/layervai/qurl-integrations/issues/1424)) ([5e6057c](https://github.com/layervai/qurl-integrations/commit/5e6057c1290ccda7ed9b732567ac9381827a9627))
+* **cli:** open sealed agent state when LAYERV_KEY_PROVIDER selects a key provider ([#1425](https://github.com/layervai/qurl-integrations/issues/1425)) ([a291950](https://github.com/layervai/qurl-integrations/commit/a29195022677214a7f13cdfea5e1a5e116e789b4))
+
+
+### Bug Fixes
+
+* **cli:** resolve the share daemon socket under a configurable runtime dir ([#1427](https://github.com/layervai/qurl-integrations/issues/1427)) ([2badde7](https://github.com/layervai/qurl-integrations/commit/2badde7f013f139fd1d0a85f8fcefa09835245b7))
+* **cli:** use released production trust and hosts in capacity harness ([#1469](https://github.com/layervai/qurl-integrations/issues/1469)) ([bd44f9e](https://github.com/layervai/qurl-integrations/commit/bd44f9ef7f79765d05bb935a666941c35a78091c))
+
 ## [2.5.4](https://github.com/layervai/qurl-integrations/compare/v2.5.3...v2.5.4) (2026-09-15)
 
 

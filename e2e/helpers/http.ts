@@ -44,6 +44,10 @@
  *     propagate immediately so a genuine outage fails fast.
  *   - Keeps the attempt budget bounded, so even a SUSTAINED 5xx eventually
  *     surfaces: the final Response is returned for the caller's own `!ok` throw.
+ *   - Does NOT honor `Retry-After` by default: a caller opts in with its own
+ *     `maxRetryAfterMs` budget. The reasoning for that — which 503s are worth
+ *     waiting out and why only a call site can tell — is stated once on that
+ *     param below, and is the canonical copy.
  */
 
 // Retryable on ANY method — the request provably did not reach/complete at the
@@ -74,6 +78,11 @@ const IDEMPOTENT_METHODS: ReadonlySet<string> = new Set([
   'TRACE',
 ]);
 
+/** Pad added to an honored `Retry-After` so the retry lands just past the
+ * server's estimate rather than exactly on it. Small enough to stay inside any
+ * sane ceiling; the caller's ceiling still caps the total. */
+const DIRECTIVE_PAD_MS = 2_000;
+
 function isRetryableStatus(status: number, method: string): boolean {
   if (RETRYABLE_ANY_METHOD.has(status)) return true;
   return IDEMPOTENT_METHODS.has(method) && RETRYABLE_IDEMPOTENT_ONLY.has(status);
@@ -90,12 +99,19 @@ function isRetryableStatus(status: number, method: string): boolean {
  * @param maxAttempts total attempts including the first (default 3)
  * @param baseDelayMs linear backoff base — waits `baseDelayMs * attempt` between
  *   tries, i.e. 1s then 2s at the default (well under jest's 120s timeout)
+ * @param maxRetryAfterMs opt-in limit for a 503's Retry-After, per attempt.
+ *   Default 0 keeps existing callers on local backoff. Directives above the
+ *   limit are declined; valid shorter directives cannot shorten local backoff.
+ *   Other statuses keep local backoff when another attempt is allowed.
  */
 export async function fetchWithTransientRetry(
   input: string | URL,
   init?: RequestInit,
-  { maxAttempts = 3, baseDelayMs = 1000 }: { maxAttempts?: number; baseDelayMs?: number } = {},
+  { maxAttempts = 3, baseDelayMs = 1000, maxRetryAfterMs = 0 }:
+    { maxAttempts?: number; baseDelayMs?: number; maxRetryAfterMs?: number } = {},
 ): Promise<Response> {
+  // Clamp once here so the loop never has to defend against a negative ceiling.
+  const retryAfterCeilingMs = Math.max(0, maxRetryAfterMs);
   const method = (init?.method ?? 'GET').toUpperCase();
   let res = await fetch(input, init);
   for (
@@ -103,20 +119,32 @@ export async function fetchWithTransientRetry(
     attempt < maxAttempts && !res.ok && isRetryableStatus(res.status, method);
     attempt++
   ) {
-    const delayMs = baseDelayMs * attempt;
-    // Surface the retry in CI logs so a run that RECOVERED after a blip doesn't
-    // look identical to one that never blipped — the drain-gap signal #1085 wants.
-    // Log the ORIGIN only, not the full URL: the fileviewer `/view/<mint-id>` path
-    // carries the capability mint-id, which must not land in CI logs.
+    // TODO(upstream-contract): qurl-service uses delta-seconds, not HTTP dates.
+    const retryAfterRaw = res.status === 503 ? res.headers.get('retry-after') ?? '' : '';
+    const honorsDirective = retryAfterCeilingMs > 0 && /^\d+$/.test(retryAfterRaw);
+    const directiveMs = honorsDirective ? Number(retryAfterRaw) * 1000 : 0;
+    // Capability paths must not enter CI logs.
     let origin: string;
     try {
       origin = new URL(input).origin;
     } catch {
       origin = '<url>'; // non-absolute input: don't throw, don't leak
     }
+    const overCeiling = directiveMs > retryAfterCeilingMs;
+    const degraded = retryAfterCeilingMs > 0 && res.status === 503 && !honorsDirective;
+    // A zero directive means retry now; do not add the estimate pad to it.
+    const directiveDelayMs = directiveMs > 0 && !overCeiling
+      ? Math.min(directiveMs + DIRECTIVE_PAD_MS, retryAfterCeilingMs)
+      : 0;
+    const delayMs = Math.max(baseDelayMs * attempt, directiveDelayMs);
+    const directiveNote = overCeiling
+      ? ` (declined Retry-After: ${retryAfterRaw.slice(0, 64)} = ${directiveMs}ms, over the ${retryAfterCeilingMs}ms ceiling)`
+      : degraded
+        ? ` (no usable Retry-After: ${JSON.stringify(retryAfterRaw.slice(0, 64))}; local backoff only)`
+        : '';
     console.warn(
       `[fetchWithTransientRetry] ${method} ${origin} -> ${res.status}; ` +
-        `retry ${attempt}/${maxAttempts - 1} in ${delayMs}ms`,
+        `retry ${attempt}/${maxAttempts - 1} in ${delayMs}ms${directiveNote}`,
     );
     // Release the discarded response's body so its socket returns to the pool
     // instead of lingering until GC (the 5xx body is never read).

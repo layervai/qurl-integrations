@@ -138,6 +138,21 @@ jobs:
         working-directory: apps/discord
         run: docker build -t discord-bot-test .
 
+      - name: Verify setup audit against DynamoDB Local
+        working-directory: apps/discord
+        run: |
+          docker compose up -d --wait dynamodb-local
+          docker run --rm --network host -e NODE_ENV=test \
+            -e DDB_TEST_ENDPOINT=http://127.0.0.1:8000 \
+            -e AWS_ACCESS_KEY_ID=local -e AWS_SECRET_ACCESS_KEY=local \
+            -v "$PWD/scripts/smoke-setup-audit.js:/app/scripts/smoke-setup-audit.js:ro" \
+            discord-bot-test node scripts/smoke-setup-audit.js
+
+      - name: Stop DynamoDB Local
+        if: always()
+        working-directory: apps/discord
+        run: docker compose down
+
   required:
     name: discord / required
     runs-on: ubuntu-latest
@@ -211,7 +226,7 @@ jobs:
     # The reusable authenticates via App secrets; the caller's GITHUB_TOKEN
     # isn't read by any step, so deny everything.
     permissions: {}
-    uses: layervai/ops-routines-workflows/.github/workflows/dispatch-deploy.yml@d07fa2fe3a103907ff2b1a1a71509a6dcd8e9d32 # v0.13.0
+    uses: layervai/ops-routines-workflows/.github/workflows/dispatch-deploy.yml@88b48c5ab3e1262018f44bbe5f4a03b94a3e39aa # v0.14.0
     with:
       target_repo: qurl-integrations-infra
       # `event_type` must match the receiver's `repository_dispatch.types` at

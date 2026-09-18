@@ -34,6 +34,7 @@ const {
   DISCORD_MEMBERS_PAGE_SIZE,
   PREWARM_MAX_PAGES,
   AUDIT_EVENTS,
+  SETUP_VIA,
   TRUST,
   ddbSendConfigGuardActionCount,
   ddbSendConfigGuardFitsTransaction,
@@ -3720,6 +3721,19 @@ const SETUP_STAGE_AWAITING_MODAL = 'awaiting_setup_modal';
 const SETUP_BUTTON_CUSTOM_ID = 'qurl_setup_button';
 const SETUP_MODAL_CUSTOM_ID = 'qurl_setup_modal';
 const SETUP_MODAL_FIELD_API_KEY = 'api_key';
+const SETUP_AUTH_POLICY_UNAVAILABLE_MSG =
+  '❌ **qURL setup is temporarily unavailable.**\n\n'
+  + 'The bot operator must correct an invalid authentication setting in the deployment.';
+
+function rejectSetupForInvalidAuthPolicy(interaction) {
+  // warn, not error: server.js already raised the one actionable error-level
+  // signal at boot; this fires per user interaction while the deploy is broken.
+  logger.warn('Refusing /qurl setup: AUTH0_EMAIL_CONNECTION was rejected at boot');
+  return interaction.reply({
+    content: SETUP_AUTH_POLICY_UNAVAILABLE_MSG,
+    ephemeral: true,
+  });
+}
 
 // Two-stage TTL budget. The button-stage window covers "click the
 // button" — short enough that an abandoned button is naturally
@@ -3777,6 +3791,10 @@ const SETUP_SUCCESS_MSG =
 // flag on the FLOW_TRANSITION event — correct: the deadline really
 // was extended.
 async function handleSetupButton(interaction, { flow_id, row }) {
+  if (config.isAuth0EmailConnectionRejected) {
+    return rejectSetupForInvalidAuthPolicy(interaction);
+  }
+
   const result = await transitionFlow(flow_id, row.version, {
     stage_to: SETUP_STAGE_AWAITING_MODAL,
     terminal: false,
@@ -3909,6 +3927,10 @@ async function handleSetupButton(interaction, { flow_id, row }) {
 // without burning a qURL API key validation call. Same ordering
 // rationale as handleRevokeSelect.
 async function handleSetupModal(interaction, { flow_id }) {
+  if (config.isAuth0EmailConnectionRejected) {
+    return rejectSetupForInvalidAuthPolicy(interaction);
+  }
+
   // Modal-stage flow_state delete is terminal — the user committed
   // the form, the flow has lifecycled out.
   const { deleted } = await deleteFlow(flow_id, {
@@ -4008,13 +4030,13 @@ async function handleSetupModal(interaction, { flow_id }) {
     });
   }
 
-  await db.setGuildApiKey(interaction.guildId, submittedKey, interaction.user.id);
+  await db.setGuildApiKey(interaction.guildId, submittedKey, interaction.user.id, SETUP_VIA.PASTE);
   logger.info('Guild API key configured', logFields);
 
   fireAndForgetLinkGuildWebhookSubscription({
     guildId: interaction.guildId,
     apiKey: submittedKey,
-    via: 'paste',
+    via: SETUP_VIA.PASTE,
     configuredBy: interaction.user.id,
   });
 
@@ -8801,8 +8823,18 @@ const commands = [
           return interaction.reply({ content: 'Only server administrators can configure qURL.', ephemeral: true });
         }
 
-        // OAuth path — preferred when configured.
-        if (config.isQurlOAuthConfigured) {
+        // A malformed explicit connection policy must not silently downgrade
+        // account binding to the legacy API-key paste flow. Keep unrelated
+        // gateway/send operations available, but make setup fail closed until
+        // the operator corrects the deployment value.
+        if (config.isAuth0EmailConnectionRejected) {
+          return rejectSetupForInvalidAuthPolicy(interaction);
+        }
+
+        // OAuth path — preferred when configured. After the rejected-policy
+        // return above this equals isQurlOAuthConfigured; it stays the
+        // setup-availability flag so the two cannot be split by a later edit.
+        if (config.isQurlSetupAvailable) {
           // Fail-fast on encryption-at-rest BEFORE minting the OAuth
           // setup link — otherwise the admin clicks through, completes
           // the full Auth0 dance, and only then sees the 503 from
@@ -8822,7 +8854,7 @@ const commands = [
           return interaction.reply({
             content: '🔐 **Connect qURL to this server**\n\n'
               + `**[Click here to authorize qURL](${startUrl})**\n\n`
-              + '_Open in this browser; the link expires in 5 minutes._',
+              + '_Open in this browser; the link expires in 15 minutes._',
             ephemeral: true,
           });
         }
@@ -9091,14 +9123,19 @@ const commands = [
         // Pre-OAuth this hardcoded `setup api_key:lv_live_your_key_here`,
         // which never matched the modal flow either; fixed in round-9.6
         // alongside the OAuth-redirect path documentation.
-        const notConfiguredCopy = config.isQurlOAuthConfigured
-          ? '❌ **qURL is not configured for this server.**\n\n'
+        let notConfiguredCopy;
+        if (config.isAuth0EmailConnectionRejected) {
+          notConfiguredCopy = SETUP_AUTH_POLICY_UNAVAILABLE_MSG;
+        } else if (config.isQurlSetupAvailable) {
+          notConfiguredCopy = '❌ **qURL is not configured for this server.**\n\n'
             + 'Run `/qurl setup` to connect — you\'ll be redirected to layerv.ai to authorize, '
-            + 'and the bot will mint an API key bound to your server. Only server administrators can run setup.'
-          : '❌ **qURL is not configured for this server.**\n\n'
+            + 'and the bot will mint an API key bound to your server. Only server administrators can run setup.';
+        } else {
+          notConfiguredCopy = '❌ **qURL is not configured for this server.**\n\n'
             + '1. Sign up at **https://layerv.ai** to get your API key\n'
             + '2. Run `/qurl setup` and paste the key into the modal\n\n'
             + 'Only server administrators can run setup.';
+        }
         return interaction.editReply({
           content: notConfiguredCopy,
         });
@@ -9197,13 +9234,18 @@ const commands = [
         // The Add to Discord entrypoint has an additional Discord client-
         // secret dependency, so advertise it only when the full customer
         // install flow is ready.
-        const oauthSetupSection = config.isQurlOAuthConfigured
-          ? '**Setting up (for Admins):**\n'
+        let oauthSetupSection;
+        if (config.isAuth0EmailConnectionRejected) {
+          oauthSetupSection = SETUP_AUTH_POLICY_UNAVAILABLE_MSG + '\n\n';
+        } else if (config.isQurlSetupAvailable) {
+          oauthSetupSection = '**Setting up (for Admins):**\n'
             + '  `/qurl setup` — connect qURL via OAuth (admin only). Click the link, sign in to layerv.ai, consent. No API key paste.\n'
-            + '  `/qurl status` — check if qURL is configured (admin only)\n\n'
-          : '**Setting up (for Admins):**\n'
+            + '  `/qurl status` — check if qURL is configured (admin only)\n\n';
+        } else {
+          oauthSetupSection = '**Setting up (for Admins):**\n'
             + '  `/qurl setup` — configure your API key (admin only)\n'
             + '  `/qurl status` — check if qURL is configured (admin only)\n\n';
+        }
         const discordInstallSection = config.isDiscordInstallConfigured
           ? '_Adding the bot to a new server?_ Use the "Add to Discord" link on **https://layerv.ai** — '
             + 'it walks you through server selection, permissions consent, and qURL connection in one click chain.\n\n'

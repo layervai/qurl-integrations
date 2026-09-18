@@ -37,6 +37,7 @@ const {
   baseUrlHttpsProblem,
   missingEventShipperKeys,
   missingMapCommandKeys,
+  missingWebhookSecretKeys,
   unsupportedRoleShipperCombo,
   unsupportedRoleResumeCombo,
   unsupportedRoleHotStandbyCombo,
@@ -257,6 +258,15 @@ if (process.env.NODE_ENV === 'production') {
   }
   if (!process.env.CONNECTOR_URL) {
     logger.error('CONNECTOR_URL must be explicitly set in production');
+    process.exit(1);
+  }
+  const webhookSecretMissing = missingWebhookSecretKeys(config);
+  if (webhookSecretMissing.includes('QURL_WEBHOOK_SECRET')) {
+    logger.error('QURL_WEBHOOK_SECRET must be set in production (run the webhook-registrar Lambda), or set QURL_WEBHOOK_PURE_BYOK=true for a deployment with no default subscription');
+    process.exit(1);
+  }
+  if (webhookSecretMissing.includes('QURL_API_KEY')) {
+    logger.error('QURL_API_KEY must be set in production when QURL_WEBHOOK_SECRET is configured (default webhook owner discovery uses it)');
     process.exit(1);
   }
 }

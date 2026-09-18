@@ -239,20 +239,33 @@ export async function accessLinkNoRedirect(url: string): Promise<LinkAccessResul
   };
 }
 
-/** Revoke a qURL link by resource_id (revokes entire resource) */
+// TODO(upstream-contract): qurl-service's nhpRevocationPending returns
+// Retry-After: 30. Allow one confirmation retry, with room for the 2s pad.
+// This bounds waiting, not request time. A still-pending update must fail.
+export const REVOKE_CONFIRM_WAIT_MS = 35_000;
+
+/** Revoke the resource. A successful DELETE confirms the protection update.
+ * Repeated DELETEs retry the same committed epoch (qurl-service RevokeQurl).
+ * A management status of `revoked` alone does not confirm that update.
+ * Cleanup skips the retry so a bulk sweep keeps its existing time budget. */
 export async function revokeLink(
   baseUrl: string,
   apiKey: string,
   resourceId: string,
+  { confirmPending = true }: { confirmPending?: boolean } = {},
 ): Promise<boolean> {
-  // API: DELETE /v1/resources/{resource_id}
-  const parsed = new URL(baseUrl);
-  parsed.pathname = `/v1/resources/${encodeURIComponent(resourceId)}`;
-  const url = parsed.toString();
-  const res = await fetch(url, {
+  const url = new URL(baseUrl);
+  url.pathname = `/v1/resources/${encodeURIComponent(resourceId)}`;
+  const res = await fetchWithTransientRetry(url, {
     method: 'DELETE',
     headers: { Authorization: `Bearer ${apiKey}` },
-  });
+  }, confirmPending
+    ? { maxAttempts: 2, maxRetryAfterMs: REVOKE_CONFIRM_WAIT_MS }
+    : { maxAttempts: 1 });
+  await res.body?.cancel().catch(() => {});
+  if (!res.ok && confirmPending) {
+    console.warn(`[revokeLink] DELETE returned ${res.status}; protection update not confirmed`);
+  }
   return res.ok;
 }
 

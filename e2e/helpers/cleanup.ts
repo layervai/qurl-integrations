@@ -67,7 +67,11 @@ export interface QurlResourceTracker {
    * drop it from the afterAll ledger on success (so cleanup doesn't
    * re-revoke it and warn about the expected not-ok); on failure it
    * stays tracked for the afterAll retry. Returns revokeLink's boolean
-   * so revoke-under-test call sites assert on it directly. Negative
+   * so revoke-under-test call sites assert on it directly — which is why this
+   * path CONFIRMS: on an NHP-protected resource it waits out qurl-service's
+   * protection-update 503, costing up to REVOKE_CONFIRM_WAIT_MS. Size a test
+   * budget off that export. revokeAll skips the wait via an option deliberately
+   * NOT exposed here: opting out is cleanup's call, not a caller's. Negative
    * revoke tests (wrong key, nonexistent id) should keep calling
    * qurl.revokeLink directly — those must not touch the ledger. */
   revoke(resourceId: string): Promise<boolean>;
@@ -87,8 +91,14 @@ export function trackedQurlResources(env: {
   const ids = new Set<string>();
   // Shared by revoke() and revokeAll() so EVERY successful revoke —
   // test-time or cleanup-time — drops the id from the ledger.
-  const revoke = async (resourceId: string): Promise<boolean> => {
-    const ok = await qurl.revokeLink(env.MINT_API_URL, env.QURL_API_KEY, resourceId);
+  // Cleanup uses one DELETE per resource; test-time revokes confirm the update.
+  const revoke = async (
+    resourceId: string,
+    { confirmPending = true }: { confirmPending?: boolean } = {},
+  ): Promise<boolean> => {
+    const ok = await qurl.revokeLink(
+      env.MINT_API_URL, env.QURL_API_KEY, resourceId, { confirmPending },
+    );
     if (ok) ids.delete(resourceId);
     return ok;
   };
@@ -98,9 +108,6 @@ export function trackedQurlResources(env: {
     },
     revoke,
     async revokeAll() {
-      // revokeLink returns res.ok (false on a 4xx, NO throw) and only
-      // throws on a network error, so surface BOTH paths — the
-      // systematic-403 one is the dangerous one (see module header).
       // Deliberately serial WITH a short pause between requests
       // (symmetric with deleteAll): this is the best-effort path, and a
       // burst — even a serial back-to-back one, ~50-60 DELETEs after the
@@ -115,8 +122,11 @@ export function trackedQurlResources(env: {
         if (!first) await new Promise((r) => setTimeout(r, 250));
         first = false;
         try {
-          const ok = await revoke(id);
-          if (!ok) console.warn(`afterAll: best-effort revoke of ${id} returned not-ok`);
+          const ok = await revoke(id, { confirmPending: false });
+          // HTTP failures return false; network failures throw. Report both.
+          if (!ok) {
+            console.warn(`afterAll: best-effort revoke of ${id} did not confirm revocation`);
+          }
         } catch (err) {
           console.warn(`afterAll: best-effort revoke of ${id} threw: ${String(err)}`);
         }

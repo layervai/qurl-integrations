@@ -2,29 +2,30 @@
 const mockEnsureWebhookSubscription = jest.fn();
 const mockDeleteSubscription = jest.fn();
 jest.mock('../src/qurl-webhook-registrar', () => ({
+  ...jest.requireActual('../src/qurl-webhook-registrar'),
   ensureWebhookSubscription: mockEnsureWebhookSubscription,
   deleteSubscription: mockDeleteSubscription,
-  DISCORD_BOT_VIEW_COUNTER_DESCRIPTION_PREFIX: 'Discord bot view counter',
-  isTruthyEnvFlag: (v) => {
-    if (typeof v !== 'string' || v.length === 0) return false;
-    const n = v.trim().toLowerCase();
-    return n === '1' || n === 'true' || n === 'yes' || n === 'on';
-  },
 }));
 
 const mockSetGuildWebhookSubscription = jest.fn();
+const mockSetGuildDefaultWebhookOwner = jest.fn();
 const mockPropagateGuildWebhookSubscription = jest.fn();
 jest.mock('../src/store', () => ({
   setGuildWebhookSubscription: mockSetGuildWebhookSubscription,
+  setGuildDefaultWebhookOwner: mockSetGuildDefaultWebhookOwner,
   propagateGuildWebhookSubscription: mockPropagateGuildWebhookSubscription,
   healthCheck: jest.fn(),
 }));
 
 const mockUpsertGuild = jest.fn();
+const mockEnsureDefaultOwnerCacheEntry = jest.fn();
 const mockRemoveGuild = jest.fn();
+const mockResolveDefaultOwnerForApiKey = jest.fn();
 jest.mock('../src/webhook-subscriptions', () => ({
   upsertGuild: mockUpsertGuild,
+  ensureDefaultOwnerCacheEntry: mockEnsureDefaultOwnerCacheEntry,
   removeGuild: mockRemoveGuild,
+  resolveDefaultOwnerForApiKey: mockResolveDefaultOwnerForApiKey,
   isPrimed: () => true,
   getSecretForOwner: () => null,
   start: jest.fn(),
@@ -34,10 +35,13 @@ jest.mock('../src/webhook-subscriptions', () => ({
 }));
 
 const mockAudit = jest.fn();
+const mockWarn = jest.fn();
+const mockInfo = jest.fn();
+const mockError = jest.fn();
 jest.mock('../src/logger', () => ({
-  info: jest.fn(),
-  warn: jest.fn(),
-  error: jest.fn(),
+  info: mockInfo,
+  warn: mockWarn,
+  error: mockError,
   debug: jest.fn(),
   audit: mockAudit,
 }));
@@ -50,9 +54,9 @@ process.env.AWS_REGION = 'us-east-2';
 process.env.DDB_TABLE_PREFIX = 'qurl-bot-discord-test-';
 
 const {
-  linkGuildWebhookSubscription, LINK_RESULTS,
+  linkGuildWebhookSubscription, fireAndForgetLinkGuildWebhookSubscription, LINK_RESULTS,
 } = require('../src/guild-webhook-link');
-const { AUDIT_EVENTS } = require('../src/constants');
+const { AUDIT_EVENTS, SETUP_VIA } = require('../src/constants');
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -63,8 +67,10 @@ beforeEach(() => {
     ownerId: 'usr_ok',
   });
   mockSetGuildWebhookSubscription.mockResolvedValue();
-  mockPropagateGuildWebhookSubscription.mockResolvedValue({ updated: 0, failed: 0 });
+  mockSetGuildDefaultWebhookOwner.mockResolvedValue();
+  mockPropagateGuildWebhookSubscription.mockResolvedValue({ updated: 0, failed: 0, skipped: 0 });
   mockDeleteSubscription.mockResolvedValue();
+  mockResolveDefaultOwnerForApiKey.mockResolvedValue(null);
 });
 
 describe('linkGuildWebhookSubscription — partial-failure rollback', () => {
@@ -113,17 +119,130 @@ describe('linkGuildWebhookSubscription — partial-failure rollback', () => {
     );
   });
 
-  it('happy path emits SUBSCRIPTION_REGISTERED audit and upserts the cache', async () => {
+  it('keeps a different owner on the per-guild path and publishes the result', async () => {
     const result = await linkGuildWebhookSubscription({
       guildId: 'g_happy', apiKey: 'lv_guild_happy',
     });
     expect(result).toEqual({ ok: true, action: 'created' });
+    expect(mockResolveDefaultOwnerForApiKey).toHaveBeenCalledWith(
+      'lv_guild_happy', { bridgeUrl: 'http://localhost:3000/webhooks/qurl' },
+    );
+    expect(mockEnsureWebhookSubscription).toHaveBeenCalledTimes(1);
+    expect(mockEnsureWebhookSubscription).toHaveBeenCalledWith(
+      expect.objectContaining({ apiKey: 'lv_guild_happy' }),
+    );
+    expect(mockSetGuildWebhookSubscription).toHaveBeenCalledWith('g_happy', {
+      webhookId: 'wh_ok', webhookSecret: 'sec_ok', webhookOwnerId: 'usr_ok',
+    });
+    expect(mockSetGuildDefaultWebhookOwner).not.toHaveBeenCalled();
     expect(mockUpsertGuild).toHaveBeenCalledWith({
       guildId: 'g_happy', ownerId: 'usr_ok', webhookId: 'wh_ok', webhookSecret: 'sec_ok',
     });
+    expect(mockEnsureDefaultOwnerCacheEntry).not.toHaveBeenCalled();
     expect(mockAudit).toHaveBeenCalledWith(
       AUDIT_EVENTS.QURL_WEBHOOK_SUBSCRIPTION_REGISTERED,
       expect.objectContaining({ guild_id: 'g_happy', action: 'created' }),
+    );
+  });
+});
+
+describe('linkGuildWebhookSubscription — default-owner failures', () => {
+  it('fails closed when owner resolution throws', async () => {
+    const resolutionError = Object.assign(new Error('qurl-service 502'), {
+      code: 'DEFAULT_WEBHOOK_OWNER_UNDISCOVERED',
+    });
+    mockResolveDefaultOwnerForApiKey.mockRejectedValueOnce(resolutionError);
+
+    const result = await linkGuildWebhookSubscription({ guildId: 'g_resolve', apiKey: 'lv_x' });
+
+    expect(result).toEqual({ ok: false, reason: LINK_RESULTS.REGISTER_FAILED });
+    expect(mockEnsureWebhookSubscription).not.toHaveBeenCalled();
+    expect(mockSetGuildDefaultWebhookOwner).not.toHaveBeenCalled();
+    expect(mockSetGuildWebhookSubscription).not.toHaveBeenCalled();
+    expect(mockEnsureDefaultOwnerCacheEntry).not.toHaveBeenCalled();
+    expect(mockUpsertGuild).not.toHaveBeenCalled();
+    expect(mockAudit).toHaveBeenCalledWith(
+      AUDIT_EVENTS.QURL_WEBHOOK_SUBSCRIPTION_REGISTER_FAILED,
+      expect.objectContaining({
+        guild_id: 'g_resolve',
+        reason: LINK_RESULTS.REGISTER_FAILED,
+        stage: 'owner-resolution',
+        error_code: 'DEFAULT_WEBHOOK_OWNER_UNDISCOVERED',
+      }),
+    );
+    expect(mockAudit).not.toHaveBeenCalledWith(
+      AUDIT_EVENTS.QURL_WEBHOOK_SUBSCRIPTION_REGISTERED,
+      expect.anything(),
+    );
+    expect(mockWarn).toHaveBeenCalledWith(
+      'Per-guild webhook owner resolution failed',
+      { error: 'qurl-service 502', guildId: 'g_resolve' },
+    );
+  });
+
+  it('reports persistence failure after the pre-persist cache check', async () => {
+    mockResolveDefaultOwnerForApiKey.mockResolvedValueOnce('usr_default');
+    const persistenceError = Object.assign(new Error('default secret conflict'), {
+      code: 'DEFAULT_WEBHOOK_SECRET_CONFLICT',
+    });
+    mockSetGuildDefaultWebhookOwner.mockRejectedValueOnce(persistenceError);
+
+    const result = await linkGuildWebhookSubscription({ guildId: 'g_persist', apiKey: 'lv_x' });
+
+    expect(result).toEqual({ ok: false, reason: LINK_RESULTS.PERSIST_FAILED });
+    expect(mockEnsureWebhookSubscription).not.toHaveBeenCalled();
+    expect(mockEnsureDefaultOwnerCacheEntry).toHaveBeenCalledWith('usr_default');
+    expect(mockSetGuildDefaultWebhookOwner).toHaveBeenCalledWith(
+      'g_persist', {
+        webhookOwnerId: 'usr_default',
+        expectedDefaultWebhookSecret: 'whsec_guild_link_test_secret',
+        expectedApiKey: 'lv_x',
+      },
+    );
+    expect(mockAudit).toHaveBeenCalledWith(
+      AUDIT_EVENTS.QURL_WEBHOOK_SUBSCRIPTION_REGISTER_FAILED,
+      expect.objectContaining({
+        guild_id: 'g_persist',
+        reason: LINK_RESULTS.PERSIST_FAILED,
+        stage: 'default-owner-persist',
+        error_code: 'DEFAULT_WEBHOOK_SECRET_CONFLICT',
+      }),
+    );
+    expect(mockAudit).not.toHaveBeenCalledWith(
+      AUDIT_EVENTS.QURL_WEBHOOK_SUBSCRIPTION_REGISTERED,
+      expect.anything(),
+    );
+    expect(mockWarn).toHaveBeenCalledWith(
+      'Default webhook owner mapping persist failed',
+      { error: 'default secret conflict', guildId: 'g_persist' },
+    );
+  });
+
+  it('reports a failed link without converting the row when the local cache check rejects', async () => {
+    mockResolveDefaultOwnerForApiKey.mockResolvedValueOnce('usr_default');
+    mockEnsureDefaultOwnerCacheEntry.mockImplementationOnce(() => {
+      const err = new Error('cache rejected');
+      err.code = 'DEFAULT_WEBHOOK_SECRET_CONFLICT';
+      throw err;
+    });
+
+    const result = await linkGuildWebhookSubscription({ guildId: 'g_cache', apiKey: 'lv_x' });
+
+    expect(result).toEqual({ ok: false, reason: 'register-failed' });
+    expect(mockSetGuildDefaultWebhookOwner).not.toHaveBeenCalled();
+    expect(mockError).toHaveBeenCalledWith(
+      'subs.ensureDefaultOwnerCacheEntry rejected (existing cache retained; registry scan remains authoritative)',
+      expect.objectContaining({ guildId: 'g_cache', error: 'cache rejected' }),
+    );
+    expect(mockAudit).toHaveBeenCalledWith(
+      AUDIT_EVENTS.QURL_WEBHOOK_SUBSCRIPTION_REGISTER_FAILED,
+      expect.objectContaining({
+        guild_id: 'g_cache', stage: 'default-owner-cache', error_code: 'DEFAULT_WEBHOOK_SECRET_CONFLICT',
+      }),
+    );
+    expect(mockAudit).not.toHaveBeenCalledWith(
+      AUDIT_EVENTS.QURL_WEBHOOK_SUBSCRIPTION_REGISTERED,
+      expect.anything(),
     );
   });
 });
@@ -201,7 +320,7 @@ describe('linkGuildWebhookSubscription — propagation parameter', () => {
   });
 
   it('emits PROPAGATE_PARTIAL audit (NOT REGISTER_FAILED) when propagate.failed > 0', async () => {
-    mockPropagateGuildWebhookSubscription.mockResolvedValueOnce({ updated: 1, failed: 2 });
+    mockPropagateGuildWebhookSubscription.mockResolvedValueOnce({ updated: 1, failed: 2, skipped: 3 });
     const result = await linkGuildWebhookSubscription({
       guildId: 'g_partial', apiKey: 'lv_x',
     });
@@ -209,13 +328,33 @@ describe('linkGuildWebhookSubscription — propagation parameter', () => {
     expect(mockAudit).toHaveBeenCalledWith(
       AUDIT_EVENTS.QURL_WEBHOOK_PROPAGATE_PARTIAL,
       expect.objectContaining({
-        guild_id: 'g_partial', failed: 2, updated: 1,
+        guild_id: 'g_partial', failed: 2, updated: 1, skipped: 3,
       }),
     );
     const registerFailedCalls = mockAudit.mock.calls.filter(
       ([event]) => event === AUDIT_EVENTS.QURL_WEBHOOK_SUBSCRIPTION_REGISTER_FAILED,
     );
     expect(registerFailedCalls).toHaveLength(0);
+  });
+
+  it('logs CAS-skipped siblings without emitting a partial-failure audit', async () => {
+    mockPropagateGuildWebhookSubscription.mockResolvedValueOnce({ updated: 0, failed: 0, skipped: 1 });
+
+    const result = await linkGuildWebhookSubscription({ guildId: 'g_raced', apiKey: 'lv_x' });
+
+    expect(result).toEqual({ ok: true, action: 'created' });
+    expect(mockInfo).toHaveBeenCalledWith(
+      'Per-guild webhook secret propagation skipped concurrently changed siblings',
+      expect.objectContaining({ guildId: 'g_raced', skipped: 1 }),
+    );
+    expect(mockAudit).not.toHaveBeenCalledWith(
+      AUDIT_EVENTS.QURL_WEBHOOK_PROPAGATE_PARTIAL,
+      expect.anything(),
+    );
+    expect(mockAudit).not.toHaveBeenCalledWith(
+      AUDIT_EVENTS.QURL_WEBHOOK_SUBSCRIPTION_REGISTER_FAILED,
+      expect.anything(),
+    );
   });
 });
 
@@ -261,5 +400,40 @@ describe('linkGuildWebhookSubscription — bestEffortDeleteSubscription failure'
       AUDIT_EVENTS.QURL_WEBHOOK_SUBSCRIPTION_DELETE_FAILED,
       expect.any(Object),
     );
+  });
+});
+
+describe('fireAndForgetLinkGuildWebhookSubscription — door normalization', () => {
+  const logger = require('../src/logger');
+
+  it.each([
+    [SETUP_VIA.PASTE, 'paste'],
+    ['OAuth', 'unknown'],
+    [undefined, 'unknown'],
+    ['oauth), configuredBy=attacker', 'unknown'],
+  ])('records door %p as via=%s, like the setup audit', async (via, expected) => {
+    await fireAndForgetLinkGuildWebhookSubscription({ guildId: 'g_ff', apiKey: 'lv_x', via, configuredBy: 'u-1' });
+    const call = mockEnsureWebhookSubscription.mock.calls[0][0];
+    expect(call.description).toBe(`Discord bot view counter (guild=g_ff, via=${expected}, configuredBy=u-1)`);
+  });
+
+  it('warns once when the wrapper records an unrecognized door', async () => {
+    await fireAndForgetLinkGuildWebhookSubscription({ guildId: 'g_ff', apiKey: 'lv_x', via: 'OAuth', configuredBy: 'u-1' });
+    expect(logger.warn).toHaveBeenCalledWith(
+      'Unrecognized setup door in subscription description; recording via=unknown',
+      { via: 'OAuth', via_type: 'string', guildId: 'g_ff' },
+    );
+    expect(logger.warn.mock.calls.filter(([msg]) => msg.startsWith('Unrecognized setup door'))).toHaveLength(1);
+  });
+
+  it('still links when the door warning throws', async () => {
+    logger.warn.mockImplementationOnce(() => { throw new Error('EPIPE'); });
+    await fireAndForgetLinkGuildWebhookSubscription({ guildId: 'g_ff', apiKey: 'lv_x', via: 'OAuth', configuredBy: 'u-1' });
+    expect(mockEnsureWebhookSubscription).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not warn for a known door', async () => {
+    await fireAndForgetLinkGuildWebhookSubscription({ guildId: 'g_ff', apiKey: 'lv_x', via: SETUP_VIA.OAUTH, configuredBy: 'u-1' });
+    expect(logger.warn.mock.calls.filter(([msg]) => msg.startsWith('Unrecognized setup door'))).toHaveLength(0);
   });
 });
