@@ -157,14 +157,10 @@ export async function fetchWithTransientRetry(
     } catch {
       origin = '<url>'; // non-absolute input: don't throw, don't leak
     }
-    // A directive LONGER than the caller's ceiling is DECLINED, not clamped down
-    // to the ceiling: re-asking at 35s when the server said 60s would draw the
-    // same response, just later. Declining falls back to the ordinary local
-    // backoff rather than dropping the retry, so opting in never costs a caller
-    // the drain-gap retry it would have had by default — the 1s re-ask this
-    // helper already treats as correct for everyone who didn't opt in.
-    // `directiveMs > 0` keeps a caller that passed no (or a nonsensical
-    // negative) ceiling from logging a decline for a directive it never read.
+    // Over the ceiling: decline the directive and fall back to the local
+    // backoff — never drop the retry. See `maxRetryAfterMs` above for why.
+    // `directiveMs > 0` keeps a caller that never opted in (or passed a
+    // nonsensical negative ceiling) from logging a decline it never read.
     const overCeiling = directiveMs > 0 && directiveMs > maxRetryAfterMs;
     const delayMs = overCeiling
       ? baseDelayMs * attempt

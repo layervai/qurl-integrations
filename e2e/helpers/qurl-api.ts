@@ -239,6 +239,13 @@ export async function accessLinkNoRedirect(url: string): Promise<LinkAccessResul
   };
 }
 
+/** Ceiling for the revocation-pending `Retry-After` revokeLink will honor.
+ * Sized to sit ABOVE qurl-service's 30s pending directive and BELOW the
+ * deployment-state "dark 503"'s 60s — that inequality is what separates the two
+ * at this call site, so it is a policy choice, not a spare number. See
+ * revokeLink's TODO(upstream-contract) before moving it. */
+const PENDING_REVOKE_CEILING_MS = 35_000;
+
 /** Revoke a qURL link by resource_id (revokes entire resource).
  *
  * On an NHP-protected resource (every connector upload) qurl-service COMMITS
@@ -269,9 +276,13 @@ export async function accessLinkNoRedirect(url: string): Promise<LinkAccessResul
  * that it CARRIES a `Retry-After` at all (without one the confirm retry fires
  * on the 1s local backoff, well inside the convergence window, and the original
  * red returns with nothing saying the mechanism was bypassed), and that its
- * value is the 30s the 35s ceiling is sized on. That ceiling is what actually
- * separates the two 503s here (30 <= 35 < the dark 503's 60), so BOTH
- * directions matter: if the pending window widens past 35s, raise it and the
+ * value is the 30s PENDING_REVOKE_CEILING_MS is sized on; and that the confirm
+ * DELETE answers 2xx — NOT 404/409/410 — once the update lands, which is what
+ * the returned boolean actually rests on (#1505 is the escape hatch if that
+ * changes; all four file-revoke cases would red with this PR's exact symptom).
+ * The ceiling is what actually separates the two 503s here
+ * (30 <= 35 < the dark 503's 60), so BOTH directions matter: if the pending
+ * window widens past 35s, raise it and the
  * file-revoke.test.ts budgets sized on it together; if the DARK 503's directive
  * ever narrows to <= the ceiling, this call site would start waiting out
  * deployment 503s and needs #1505's body discrimination instead. */
@@ -289,7 +300,7 @@ export async function revokeLink(
     method: 'DELETE',
     headers: { Authorization: `Bearer ${apiKey}` },
   }, confirmPending
-    ? { maxAttempts: 2, maxRetryAfterMs: 35_000 }
+    ? { maxAttempts: 2, maxRetryAfterMs: PENDING_REVOKE_CEILING_MS }
     : { maxAttempts: 1 });
   // Nothing reads this body — the caller gets a boolean — so release it rather
   // than holding an undici socket until GC, once per straggler on a sweep.

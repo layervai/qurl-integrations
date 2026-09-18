@@ -133,10 +133,10 @@ describe('File Revoke', () => {
     expect(status.status).toBe('revoked');
     // Generous timeout: connector mint + headless-browser knock (cold chromium
     // launch + navigation + the helper's own 30s tunnel-view budget) on CI,
-    // plus the revoke's one ~35s wait when it meets the protection-update 503.
-    // Worst case ~95s (upload ~21s + mint ~3s + knock ~35s + poll 5s + revoke
-    // ~31s) — the thinnest margin in the file, which is why 90s no longer fits
-    // and why it is the one that got raised furthest.
+    // plus the revoke's one ~30s wait (the server's directive; 35s is only the
+    // ceiling) when it meets the protection-update 503. Worst case ~95s
+    // (upload ~21s + mint ~3s + knock ~35s + poll 5s + revoke ~31s) — the
+    // thinnest margin in the file, which is why 90s no longer fits.
   }, 150_000);
 
   test('distinct-per-viewer watermark + `_` route-label SNI on the tunnel', async () => {
@@ -269,8 +269,8 @@ describe('File Revoke', () => {
     expect(revoked).toBe(true);
     // Generous timeout: upload + connector mint + one served cold-chromium
     // knock + one negative knock that waits out its full 20s budget + a revoke
-    // that may spend ~31s confirming through the protection-update 503
-    // (~110s worst case).
+    // that may spend ~30s confirming through the protection-update 503 (the
+    // server's directive; 35s is only the ceiling) — ~110s worst case.
   }, 150_000);
 
   test('double revoke on file is idempotent', async () => {

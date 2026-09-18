@@ -98,6 +98,23 @@ test.each([
   }
 });
 
+test('honors a directive exactly AT the ceiling', async () => {
+  // The inequality is `>`, and the dark-503 discrimination is documented as
+  // inclusive (30 <= 35 < 60). Without this the suite only brackets the
+  // threshold into (30, 600], so flipping `>` to `>=` — the likely result of a
+  // well-meaning "clamp" refactor — would survive every other test here.
+  fetchMock.mockImplementation(respond(503, { 'Retry-After': '35' }));
+  const pending = fetchWithTransientRetry(
+    url, { method: 'DELETE' }, { maxAttempts: 2, maxRetryAfterMs: 35_000 },
+  );
+  await jest.advanceTimersByTimeAsync(34_999);
+  expect(fetchMock).toHaveBeenCalledTimes(1); // honored, not declined at 1s
+  await jest.advanceTimersByTimeAsync(1);
+  await pending;
+  expect(fetchMock).toHaveBeenCalledTimes(2);
+  expect(warnSpy).not.toHaveBeenCalledWith(expect.stringContaining('declined'));
+});
+
 test('a negative ceiling cannot stop a loop the caller never opted into', async () => {
   fetchMock.mockImplementation(respond(503, { 'Retry-After': '30' }));
   const pending = fetchWithTransientRetry(
