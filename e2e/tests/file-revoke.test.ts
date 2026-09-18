@@ -142,7 +142,12 @@ describe('File Revoke', () => {
     // directive — a directive in the 31-35s tail is honored, and a budget
     // computed at 30s would turn that tail into a jest timeout with no
     // assertion and no cause, which is the one diagnosis worse than a red.
-  }, 110_000 + qurl.REVOKE_CONFIRM_WORST_CASE_MS);
+    // The literal is the stated worst case plus modest rounding, NOT extra
+    // slack: these four ceilings sum against a `timeout-minutes: 10` smoke job
+    // (qurl-integrations-infra e2e-smoke.yml) that also pays npm ci, SSM reads
+    // and a cold Playwright install, and a job-level timeout is the same
+    // no-assertion-no-cause outcome the sizing above exists to avoid.
+  }, 75_000 + qurl.REVOKE_CONFIRM_WORST_CASE_MS);
 
   test('distinct-per-viewer watermark + `_` route-label SNI on the tunnel', async () => {
     // ONE upload → TWO minted recipient views. The whole point of render-at-mint:
@@ -234,7 +239,7 @@ describe('File Revoke', () => {
     // + 2 knocks ~70s + status ~1s) plus the revoke's own budget — this test
     // revokes a connector upload too, so it carries the same confirm cost as
     // its siblings and its margin had quietly dropped from ~80s to ~12s.
-  }, 170_000 + qurl.REVOKE_CONFIRM_WORST_CASE_MS);
+  }, 105_000 + qurl.REVOKE_CONFIRM_WORST_CASE_MS);
 
   test('a consumed one-time link does not serve a second knock (single-use enforced)', async () => {
     // THE knock-driven enforcement guard for one-time links. The URL-mint
@@ -281,7 +286,7 @@ describe('File Revoke', () => {
     // confirming revoke. ~79s of non-revoke worst case plus the revoke's own
     // budget; at a flat 150s the ceiling case landed within ~1s of the timeout,
     // which would have reported a jest timeout instead of the assertion.
-  }, 140_000 + qurl.REVOKE_CONFIRM_WORST_CASE_MS);
+  }, 90_000 + qurl.REVOKE_CONFIRM_WORST_CASE_MS);
 
   test('double revoke on file is idempotent', async () => {
     const upload = await qurl.uploadFile(
@@ -316,5 +321,5 @@ describe('File Revoke', () => {
     // out — so this is ~24s of upload and status reads plus one revoke budget.
     // Stated rather than inherited because the 120s default covers it only
     // while that opt-out holds.
-  }, 80_000 + qurl.REVOKE_CONFIRM_WORST_CASE_MS);
+  }, 35_000 + qurl.REVOKE_CONFIRM_WORST_CASE_MS);
 });

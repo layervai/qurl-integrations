@@ -401,16 +401,26 @@ describe('revokeLink retry path', () => {
     try {
       // The ceiling case, not the 30s usually observed: 35s is the longest
       // directive this call site honors, and both windows can take it.
-      fetchMock.mockImplementation(
-        () => new Response(null, { status: 503, headers: { 'Retry-After': '35' } }),
-      );
+      // The elapsed times are recorded INSIDE the mock, so they are what the
+      // helper did — `Date.now()` measured around the await would just return
+      // however far the test advanced the fake clock, and would pass at any
+      // budget at all.
       const startedAt = Date.now();
+      const firedAt: number[] = [];
+      fetchMock.mockImplementation(() => {
+        firedAt.push(Date.now() - startedAt);
+        return Promise.resolve(
+          new Response(null, { status: 503, headers: { 'Retry-After': '35' } }),
+        );
+      });
       const pending = qurl.revokeLink(mintUrl, apiKey, publicResourceId);
       await jest.advanceTimersByTimeAsync(qurl.REVOKE_CONFIRM_WORST_CASE_MS);
 
       await expect(pending).resolves.toBe(false);
-      expect(Date.now() - startedAt).toBeLessThanOrEqual(qurl.REVOKE_CONFIRM_WORST_CASE_MS);
-      expect(fetchMock).toHaveBeenCalledTimes(3);
+      // Two confirm windows at the ceiling, and the last attempt starts exactly
+      // at the exported budget — so the export IS the worst case, not a number
+      // that happens to sit near it.
+      expect(firedAt).toEqual([0, 35_000, qurl.REVOKE_CONFIRM_WORST_CASE_MS]);
     } finally {
       jest.useRealTimers();
     }
@@ -466,6 +476,10 @@ describe('revokeLink retry path', () => {
       expect(fetchMock).toHaveBeenCalledTimes(2); // retried, not abandoned
       await jest.advanceTimersByTimeAsync(2_000);
       await expect(pending).resolves.toBe(false);
+      // The cost the docstring weighs against fail-fast: a deploy window gets
+      // the full attempt budget on the local backoff, ~3s apart, not one
+      // request. Pinned so that trade is a number rather than prose.
+      expect(fetchMock).toHaveBeenCalledTimes(3);
     } finally {
       jest.useRealTimers();
     }

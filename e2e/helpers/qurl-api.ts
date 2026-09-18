@@ -283,9 +283,10 @@ export const REVOKE_CONFIRM_WORST_CASE_MS =
  * red — trading a deterministic false failure for a timing-sensitive one. The
  * second window costs nothing in the normal case (a converged retry answers
  * 2xx and the loop ends) and only spends its ~30s on the tail this is meant to
- * absorb. Budgets fit: the two 150s tests land ~125-140s and the untimed
- * double-revoke ~85s, since only its first revoke confirms. Still pending after
- * both windows is a convergence regression to report, not wait out.
+ * absorb. Deliberately no budget numbers here: the live tests own theirs and
+ * compute them as `<non-revoke worst case> + REVOKE_CONFIRM_WORST_CASE_MS`,
+ * which is what that export is for. Still pending after both windows is a
+ * convergence regression to report, not wait out.
  *
  * Worth being explicit about what this buys, since file-revoke.test.ts asserts
  * `status === 'revoked'` two lines later and that read is strictly stronger for

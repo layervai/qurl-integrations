@@ -171,8 +171,9 @@ export async function fetchWithTransientRetry(
         // Folded into the same line rather than emitted as a second warn: the
         // module's logging contract is one grep-able line per retry decision.
         (overCeiling
-          ? ` (declined Retry-After ${directiveMs}ms, over the ` +
-            `${retryAfterCeilingMs}ms ceiling)`
+          // Echo the raw header value too, so the CI line matches the wire.
+          ? ` (declined Retry-After: ${retryAfterRaw} = ${directiveMs}ms, ` +
+            `over the ${retryAfterCeilingMs}ms ceiling)`
           : ''),
     );
     // Release the discarded response's body so its socket returns to the pool

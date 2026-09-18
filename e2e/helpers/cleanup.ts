@@ -100,7 +100,12 @@ export function trackedQurlResources(env: {
   // and stays a single request, exactly as costly as before this PR — the
   // sweep only needs "did it stick", and charging it ~30s plus a second round
   // trip per straggler would blow the very hook budget that keeps it from
-  // leaking (60 resources would need ~35min). Options object, not a positional
+  // leaking (60 resources would need ~35min). It gives up the drain-gap retry
+  // to do so, which is a real cost — but even the cheap version
+  // (`maxAttempts: 2, maxRetryAfterMs: 0`, ~1s per straggler) is ~+60s over 60
+  // ids on top of a sweep already budgeted at ~130s against concurrency.test's
+  // 180s hook. A 429 straggler therefore lapses to its TTL, which is why the
+  // warn legend below names that case rather than hiding it. Options object, not a positional
   // boolean, so a stray `.map` index degrades to the defaults instead of
   // silently turning confirmation off.
   const revoke = async (

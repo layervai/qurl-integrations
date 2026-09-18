@@ -75,7 +75,8 @@ test('declines a directive above the ceiling but keeps the local retry', async (
   const [line] = warnSpy.mock.calls[0] as [string];
   expect(line).toContain('retry 1/1 in 1000ms');
   expect(line).toContain('declined');
-  expect(line).toContain('600000');
+  expect(line).toContain('600');     // the raw header value, as the wire sent it
+  expect(line).toContain('600000');  // and the ms the helper compared
 });
 
 // The module treats "log the ORIGIN only, never the full URL" as a security
