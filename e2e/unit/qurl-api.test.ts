@@ -411,8 +411,6 @@ describe('revokeLink retry path', () => {
     }
   });
 
-  // A 404 is a resource that never existed, which negative-paths.test.ts asserts
-  // returns false — and it must stay false however the retry budget changes.
   test.each([
     ['the confirming default', undefined],
     ['the non-confirming sweep budget', { confirmPending: false }],
@@ -425,6 +423,27 @@ describe('revokeLink retry path', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1); // no 503, so no confirm retry
   });
 
+  // The dark-503 guard at the call site the PR leans on hardest: revokeLink's
+  // 35s ceiling is BELOW the deployment-state 503's 60s directive, so that one
+  // stops the loop instead of being waited out. Asserted here rather than left
+  // to coincide with http.test.ts's numbers.
+  test('revokeLink does not wait out a directive above its ceiling', async () => {
+    jest.useFakeTimers();
+    try {
+      fetchMock.mockImplementation(
+        () => new Response(null, { status: 503, headers: { 'Retry-After': '60' } }),
+      );
+      const pending = qurl.revokeLink(mintUrl, apiKey, publicResourceId);
+      await jest.advanceTimersByTimeAsync(120_000);
+      await expect(pending).resolves.toBe(false);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  // A 404 is a resource that never existed, which negative-paths.test.ts asserts
+  // returns false — and it must stay false however the retry budget changes.
   test('revokeLink reports a 404 as failure', async () => {
     fetchMock.mockImplementationOnce(() => new Response(null, { status: 404 }));
 
@@ -461,6 +480,9 @@ describe('revokeLink retry path', () => {
 // A caller that hasn't asked for the wait keeps the 1s local backoff.
 test('getResourceStatus does not opt in, so it ignores Retry-After', async () => {
   jest.useFakeTimers();
+  // Its own spy: this one lives outside the describe above but still drives a
+  // retry, so it would otherwise print a [fetchWithTransientRetry] line.
+  const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
   try {
     fetchMock
       .mockResolvedValueOnce(
@@ -474,5 +496,6 @@ test('getResourceStatus does not opt in, so it ignores Retry-After', async () =>
     await expect(pending).resolves.toMatchObject({ status: 'active' });
   } finally {
     jest.useRealTimers();
+    warnSpy.mockRestore();
   }
 });

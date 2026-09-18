@@ -70,7 +70,9 @@ export interface QurlResourceTracker {
    * so revoke-under-test call sites assert on it directly — which is why
    * this path CONFIRMS: on an NHP-protected resource it waits out
    * qurl-service's protection-update 503 (up to ~35s) so the boolean is
-   * true when the revocation happened. revokeAll skips that wait. Negative
+   * true when the revocation happened. revokeAll skips that wait via an
+   * option deliberately NOT exposed here — opting out is cleanup's call to
+   * make, not a caller's. Negative
    * revoke tests (wrong key, nonexistent id) should keep calling
    * qurl.revokeLink directly — those must not touch the ledger. */
   revoke(resourceId: string): Promise<boolean>;
@@ -136,14 +138,19 @@ export function trackedQurlResources(env: {
           if (!ok) {
             // Say what not-ok can mean, so a reader doesn't chase a revoke that
             // actually happened: the sweep doesn't confirm, so a protected
-            // resource's committed-but-pending 503 lands here too. Deliberately
+            // resource's committed-but-pending 503 lands here too. Phrased as
+            // both possibilities, NOT as an explanation: revokeLink returns a
+            // bare boolean so this line can't tell which it was, and the
+            // systematic-403 case the module header calls dangerous must not
+            // read as benign. Deliberately
             // NOT treated as success — the deployment-state 503 is
             // indistinguishable, and dropping the id on that one would leak the
             // resource silently, which is the opposite of this channel's job.
             // A straggler left tracked still lapses on its own expiry.
             console.warn(
               `afterAll: best-effort revoke of ${id} returned not-ok ` +
-                '(a 503 here is the expected committed-but-pending answer for a protected resource)',
+                '(503 = expected committed-but-pending on a protected resource; ' +
+                '401/403 = a real cleanup regression)',
             );
           }
         } catch (err) {

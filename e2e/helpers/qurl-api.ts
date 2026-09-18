@@ -275,8 +275,12 @@ export async function accessLinkNoRedirect(url: string): Promise<LinkAccessResul
  * TODO(upstream-contract): mirrors qurl-service's protected-resource revoke
  * contract — that a 503 here means the revocation is COMMITTED (not rejected),
  * and that its convergence window is the 30s the `Retry-After` asserts, which
- * the 35s ceiling is sized on. If the service widens that window, raise the
- * ceiling and the file-revoke.test.ts budgets sized on it together. */
+ * the 35s ceiling is sized on. Note the ceiling is what actually separates the
+ * two 503s at this call site (30 <= 35 < the dark 503's 60), so BOTH directions
+ * matter: if the pending window widens past 35s, raise the ceiling and the
+ * file-revoke.test.ts budgets sized on it together; if the DARK 503's directive
+ * ever narrows to <= the ceiling, this call site would start waiting out
+ * deployment 503s and needs #1505's body discrimination instead. */
 export async function revokeLink(
   baseUrl: string,
   apiKey: string,

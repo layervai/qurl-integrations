@@ -52,7 +52,9 @@ async function waitsBefore(
   });
   const pending = fetchWithTransientRetry(url, { method: 'DELETE' }, options);
   await jest.advanceTimersByTimeAsync(10 * 60_000);
-  await pending;
+  // However the budget ends, the caller must get a real Response back for its
+  // own `!res.ok` error — never a thrown or swallowed one.
+  expect((await pending).status).toBe(503);
   return waits;
 }
 
@@ -63,6 +65,18 @@ test('stops rather than retrying early when the directive exceeds the ceiling', 
   // retrying. So the budget ends: one request, no wait.
   expect(await waitsBefore({ maxAttempts: 2, maxRetryAfterMs: 35_000 })).toEqual([]);
   expect(fetchMock).toHaveBeenCalledTimes(1);
+  // ...and says so, rather than reporting a red with no cause in the logs.
+  expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('not retrying'));
+});
+
+test('a negative ceiling cannot stop a loop the caller never opted into', async () => {
+  fetchMock.mockImplementation(respond(503, { 'Retry-After': '30' }));
+  const pending = fetchWithTransientRetry(
+    url, { method: 'DELETE' }, { maxAttempts: 2, maxRetryAfterMs: -1 },
+  );
+  await jest.advanceTimersByTimeAsync(1_000);
+  expect(fetchMock).toHaveBeenCalledTimes(2); // ordinary local backoff
+  await pending;
 });
 
 test('a 503 with no Retry-After at all still uses the local backoff', async () => {

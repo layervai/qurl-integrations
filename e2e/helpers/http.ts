@@ -101,11 +101,15 @@ function isRetryableStatus(status: number, method: string): boolean {
  *   out when the condition is CONTINGENT, and this stack emits both kinds under
  *   the SAME `service_unavailable` code: qurl-service's revocation-pending 30
  *   (transient) and its deployment-state "dark 503" 60 (standing — waiting only
- *   makes a permanent failure slower to report). Nothing in the response
- *   separates them, so only the call site can. Everyone else keeps the 1s/2s
- *   backoff. It is the longest directive the caller will honor, PER ATTEMPT: a
+ *   makes a permanent failure slower to report). Nothing THIS HELPER INSPECTS
+ *   separates them — their bodies do differ, but parsing one is #1505's job —
+ *   so only the call site can. Everyone else keeps the 1s/2s backoff. It is the longest directive the caller will honor, PER ATTEMPT: a
  *   longer one ends the retry loop rather than being clamped down to it, so a
  *   hostile or absurd value fails fast instead of buying a futile early retry.
+ *   NOTE that makes a small positive ceiling LESS resilient than not opting in
+ *   at all — `5_000` against a 30s directive means zero retries, not a 5s one
+ *   and not the 1s local-backoff retry the default would have taken. Pick a
+ *   ceiling above the directive you mean to wait out, or pass 0.
  *   The opted-in worst case is therefore `(maxAttempts - 1) x ceiling`, and the
  *   caller owns both numbers together (`revokeLink` pins `maxAttempts: 2` for
  *   exactly this reason; inheriting the default 3 would mean ~70s).
@@ -139,22 +143,31 @@ export async function fetchWithTransientRetry(
     const directiveMs = maxRetryAfterMs > 0 && /^\d+$/.test(retryAfterRaw)
       ? Number(retryAfterRaw) * 1000
       : 0;
-    // A directive LONGER than the caller's ceiling means stop, not retry early.
-    // Clamping down would re-ask inside the window the server just told us to
-    // skip, draw the same response, and report failure later than no retry at
-    // all — inverting the "slow down is authoritative" rule this block runs on.
-    if (directiveMs > maxRetryAfterMs) break;
-    const delayMs = Math.max(baseDelayMs * attempt, directiveMs);
-    // Surface the retry in CI logs so a run that RECOVERED after a blip doesn't
-    // look identical to one that never blipped — the drain-gap signal #1085 wants.
-    // Log the ORIGIN only, not the full URL: the fileviewer `/view/<mint-id>` path
-    // carries the capability mint-id, which must not land in CI logs.
+    // Surface every retry decision in CI logs so a run that RECOVERED after a
+    // blip doesn't look identical to one that never blipped — the drain-gap
+    // signal #1085 wants — and so a run that STOPPED says why. Log the ORIGIN
+    // only, not the full URL: the fileviewer `/view/<mint-id>` path carries the
+    // capability mint-id, which must not land in CI logs.
     let origin: string;
     try {
       origin = new URL(input).origin;
     } catch {
       origin = '<url>'; // non-absolute input: don't throw, don't leak
     }
+    // A directive LONGER than the caller's ceiling means stop, not retry early.
+    // Clamping down would re-ask inside the window the server just told us to
+    // skip, draw the same response, and report failure later than no retry at
+    // all — inverting the "slow down is authoritative" rule this block runs on.
+    // `directiveMs > 0` guards the comparison so a caller that passed no (or a
+    // nonsensical negative) ceiling can never stop the loop it never opted into.
+    if (directiveMs > 0 && directiveMs > maxRetryAfterMs) {
+      console.warn(
+        `[fetchWithTransientRetry] ${method} ${origin} -> ${res.status}; ` +
+          `Retry-After ${directiveMs}ms exceeds the ${maxRetryAfterMs}ms ceiling — not retrying`,
+      );
+      break;
+    }
+    const delayMs = Math.max(baseDelayMs * attempt, directiveMs);
     console.warn(
       `[fetchWithTransientRetry] ${method} ${origin} -> ${res.status}; ` +
         `retry ${attempt}/${maxAttempts - 1} in ${delayMs}ms`,
