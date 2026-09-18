@@ -148,8 +148,12 @@ describe('Link Lifecycle: Revocation', () => {
     // revokeLink here since the resource already left the ledger. (The
     // previous `expect(typeof second).toBe('boolean')` could never fail:
     // revokeLink is typed Promise<boolean>.)
+    // confirmPending: false — the boolean is DISCARDED here, so the confirm
+    // wait would buy nothing (same reasoning as file-revoke's double-revoke).
     await expect(
-      qurl.revokeLink(env.MINT_API_URL, env.QURL_API_KEY, result.resource_id),
+      qurl.revokeLink(env.MINT_API_URL, env.QURL_API_KEY, result.resource_id, {
+        confirmPending: false,
+      }),
     ).resolves.not.toThrow();
 
     // And the resource is still revoked after the redundant call.

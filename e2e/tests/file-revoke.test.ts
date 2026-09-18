@@ -1,5 +1,5 @@
 /**
- * File upload → revoke → status-404 E2E flow.
+ * File upload → revoke → revoked status E2E flow.
  *
  * Covers the revoke path for actual file resources (images/PDFs/etc.) — the
  * other revoke tests (smoke.test.ts, link-lifecycle.test.ts) only exercise
@@ -125,9 +125,8 @@ describe('File Revoke', () => {
       env.MINT_API_URL, env.QURL_API_KEY, upload.resource_id,
     );
     expect(status.status).toBe('revoked');
-    // Generous timeout: connector mint + headless-browser knock (cold chromium
-    // launch + navigation + the helper's own 30s tunnel-view budget) on CI.
-  }, 90_000);
+    // Preserve the 90s upload/browser budget and add one confirmation wait.
+  }, 90_000 + qurl.REVOKE_CONFIRM_WAIT_MS);
 
   test('distinct-per-viewer watermark + `_` route-label SNI on the tunnel', async () => {
     // ONE upload → TWO minted recipient views. The whole point of render-at-mint:
@@ -213,9 +212,9 @@ describe('File Revoke', () => {
       env.MINT_API_URL, env.QURL_API_KEY, upload.resource_id,
     );
     expect(status.status).toBe('revoked');
-    // Generous timeout: two connector mints + TWO sequential cold-chromium knocks
-    // (each with the helper's own 30s tunnel-view budget) + revoke, on CI.
-  }, 180_000);
+    // Keep the 180s total for two browser views; spend 35s of existing margin
+    // on confirmation. This case took 10.3s in the final sandbox run.
+  }, 145_000 + qurl.REVOKE_CONFIRM_WAIT_MS);
 
   test('a consumed one-time link does not serve a second knock (single-use enforced)', async () => {
     // THE knock-driven enforcement guard for one-time links. The URL-mint
@@ -257,9 +256,14 @@ describe('File Revoke', () => {
     // Cleanup as assertion (tracked.revoke also syncs the afterAll ledger).
     const revoked = await tracked.revoke(upload.resource_id);
     expect(revoked).toBe(true);
-    // Generous timeout: upload + connector mint + one served cold-chromium
-    // knock + one negative knock that waits out its full 20s budget + revoke.
-  }, 150_000);
+    // Check retained resource state after the confirmed protection update.
+    const status = await qurl.getResourceStatus(
+      env.MINT_API_URL, env.QURL_API_KEY, upload.resource_id,
+    );
+    expect(status.status).toBe('revoked');
+    // Keep the 150s total for one view plus a 20s negative knock and revoke.
+    // The confirmation wait uses existing margin; measured work took 34.9s.
+  }, 115_000 + qurl.REVOKE_CONFIRM_WAIT_MS);
 
   test('double revoke on file is idempotent', async () => {
     const upload = await qurl.uploadFile(
@@ -276,8 +280,14 @@ describe('File Revoke', () => {
     // and the smoke/link-lifecycle sibling test uses the same "does not
     // throw" contract. Covered by `resolves.not.toThrow()` for the
     // explicit contract expression.
+    // confirmPending: false — this call's boolean is DISCARDED (the contract
+    // pinned here is "does not reject"), so waiting out a protection-update
+    // directive would spend up to REVOKE_CONFIRM_WAIT_MS computing a value
+    // nobody reads.
     await expect(
-      qurl.revokeLink(env.MINT_API_URL, env.QURL_API_KEY, upload.resource_id),
+      qurl.revokeLink(env.MINT_API_URL, env.QURL_API_KEY, upload.resource_id, {
+        confirmPending: false,
+      }),
     ).resolves.not.toThrow();
 
     // Resource is still revoked after the redundant call.
@@ -285,5 +295,7 @@ describe('File Revoke', () => {
       env.MINT_API_URL, env.QURL_API_KEY, upload.resource_id,
     );
     expect(status.status).toBe('revoked');
-  });
+    // Keep the 120s total for upload and two DELETEs; only the first confirms.
+    // Measured 9.8s without a retry, 48.0s with a retry in the earlier run.
+  }, 85_000 + qurl.REVOKE_CONFIRM_WAIT_MS);
 });

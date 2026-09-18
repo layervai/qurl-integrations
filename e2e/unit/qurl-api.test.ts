@@ -349,3 +349,104 @@ test('polling returns the last observation when its predicate never matches', as
   )).resolves.toMatchObject({ status: 'active' });
   expect(fetchMock).toHaveBeenCalledTimes(1);
 });
+
+describe('revokeLink retry path', () => {
+  let warnSpy: jest.SpyInstance;
+  beforeEach(() => {
+    warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    jest.useFakeTimers();
+  });
+  afterEach(() => {
+    jest.useRealTimers();
+    warnSpy.mockRestore();
+  });
+
+  const pending503 = () => new Response('protection update pending', {
+    status: 503, headers: { 'Retry-After': '30' },
+  });
+
+  test('confirms a pending revoke after the server delay', async () => {
+    fetchMock.mockImplementationOnce(pending503)
+      .mockImplementationOnce(() => new Response(null, { status: 204 }));
+    const pending = qurl.revokeLink(mintUrl, apiKey, publicResourceId);
+    await jest.advanceTimersByTimeAsync(31_999);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await jest.advanceTimersByTimeAsync(1);
+    await expect(pending).resolves.toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(String(fetchMock.mock.calls[0][0])).toBe(
+      `https://api.example.com/v1/resources/${encodeURIComponent(publicResourceId)}`,
+    );
+    expect(String(fetchMock.mock.calls[1][0])).toBe(String(fetchMock.mock.calls[0][0]));
+    expect(fetchMock.mock.calls[1][1]).toMatchObject({
+      method: 'DELETE', headers: { Authorization: `Bearer ${apiKey}` },
+    });
+  });
+
+  test.each([400, 401, 403, 404, 409, 410, 429, 500, 502, 503, 504])(
+    'does not accept a failed confirmation (%s) or substitute a management read', async (status) => {
+      fetchMock.mockImplementationOnce(pending503)
+        .mockImplementation(() => new Response(null, { status }));
+      const pending = qurl.revokeLink(mintUrl, apiKey, publicResourceId);
+      await jest.advanceTimersByTimeAsync(qurl.REVOKE_CONFIRM_WAIT_MS);
+      await expect(pending).resolves.toBe(false);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`DELETE returned ${status}; protection update not confirmed`),
+      );
+    },
+  );
+
+  test.each([true, false])('accepts an immediate 204 (confirmPending=%s)', async (confirmPending) => {
+    fetchMock.mockImplementation(() => new Response(null, { status: 204 }));
+    await expect(qurl.revokeLink(mintUrl, apiKey, publicResourceId, { confirmPending })).resolves.toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  test('cleanup sends only one DELETE during an outage', async () => {
+    fetchMock.mockImplementation(pending503);
+    await expect(qurl.revokeLink(mintUrl, apiKey, publicResourceId, {
+      confirmPending: false,
+    })).resolves.toBe(false);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+
+  test('the confirmation delay stays within the exported budget', async () => {
+    const startedAt = Date.now();
+    const firedAt: number[] = [];
+    fetchMock.mockImplementation(() => {
+      firedAt.push(Date.now() - startedAt);
+      return new Response(null, { status: 503, headers: { 'Retry-After': '35' } });
+    });
+    const pending = qurl.revokeLink(mintUrl, apiKey, publicResourceId);
+    await jest.advanceTimersByTimeAsync(qurl.REVOKE_CONFIRM_WAIT_MS);
+    await expect(pending).resolves.toBe(false);
+    expect(firedAt).toEqual([0, qurl.REVOKE_CONFIRM_WAIT_MS]);
+  });
+});
+
+// The dark-503 guard, from the other side: a caller that never asked for the
+// wait keeps its 1s local backoff even when handed a directive. (Why the wait
+// is opt-in at all is on http.ts's `maxRetryAfterMs`.)
+test('getResourceStatus does not opt in, so it ignores Retry-After', async () => {
+  jest.useFakeTimers();
+  // Its own spy: this one lives outside the describe above but still drives a
+  // retry, so it would otherwise print a [fetchWithTransientRetry] line.
+  const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+  try {
+    fetchMock
+      .mockResolvedValueOnce(
+        new Response(null, { status: 503, headers: { 'Retry-After': '60' } }),
+      )
+      .mockResolvedValueOnce(jsonResponse({ data: { resource_id: publicResourceId, status: 'active' } }));
+
+    const pending = qurl.getResourceStatus(mintUrl, apiKey, publicResourceId);
+    await jest.advanceTimersByTimeAsync(1_000);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    await expect(pending).resolves.toMatchObject({ status: 'active' });
+  } finally {
+    jest.useRealTimers();
+    warnSpy.mockRestore();
+  }
+});
