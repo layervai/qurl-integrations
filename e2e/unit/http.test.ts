@@ -105,7 +105,7 @@ test.each([
   }
 });
 
-test('honors a directive exactly AT the ceiling', async () => {
+test('honors a directive exactly AT the ceiling, with the pad capped', async () => {
   // The inequality is `>`, and the dark-503 discrimination is documented as
   // inclusive (30 <= 35 < 60). Without this the suite only brackets the
   // threshold into (30, 600], so flipping `>` to `>=` — the likely result of a
@@ -169,7 +169,7 @@ test('a padded Retry-After is honored', async () => {
   const pending = fetchWithTransientRetry(
     url, { method: 'DELETE' }, { maxAttempts: 2, maxRetryAfterMs: 35_000 },
   );
-  await jest.advanceTimersByTimeAsync(29_999);
+  await jest.advanceTimersByTimeAsync(31_999);
   expect(fetchMock).toHaveBeenCalledTimes(1); // honored, not treated as garbage
   await jest.advanceTimersByTimeAsync(1);
   await pending;
@@ -183,7 +183,7 @@ test('a non-absolute input logs the placeholder, never the path', async () => {
   const pending = fetchWithTransientRetry(
     '/v1/resources/abc', { method: 'DELETE' }, { maxAttempts: 2, maxRetryAfterMs: 35_000 },
   );
-  await jest.advanceTimersByTimeAsync(30_000);
+  await jest.advanceTimersByTimeAsync(32_000);
   await pending;
 
   const [line] = warnSpy.mock.calls[0] as [string];
@@ -199,21 +199,23 @@ test('the ceiling is per attempt, not a total budget', async () => {
   const pending = fetchWithTransientRetry(
     url, { method: 'DELETE' }, { maxAttempts: 3, maxRetryAfterMs: 35_000 },
   );
-  await jest.advanceTimersByTimeAsync(30_000);
+  await jest.advanceTimersByTimeAsync(32_000);
   expect(fetchMock).toHaveBeenCalledTimes(2);
-  await jest.advanceTimersByTimeAsync(30_000);
-  expect(fetchMock).toHaveBeenCalledTimes(3); // 60s total, not 35s
+  await jest.advanceTimersByTimeAsync(32_000);
+  expect(fetchMock).toHaveBeenCalledTimes(3); // two waits, not one
   await pending;
 });
 
-test('honors a directive that fits under the ceiling as-is', async () => {
+test('honors a directive under the ceiling, plus the pad', async () => {
   // The production case: qurl-service's 30s against revokeLink's 35s ceiling.
-  // The clamp must not round it down and the backoff must not shorten it.
+  // The retry lands just PAST the estimate (30s + 2s pad), because a
+  // convergence a few hundred ms late must not fail — and the pad fits inside
+  // the ceiling, so nothing is clamped down and the backoff can't shorten it.
   fetchMock.mockImplementation(respond(503, { 'Retry-After': '30' }));
   const pending = fetchWithTransientRetry(
     url, { method: 'DELETE' }, { maxAttempts: 2, maxRetryAfterMs: 35_000 },
   );
-  await jest.advanceTimersByTimeAsync(29_999);
+  await jest.advanceTimersByTimeAsync(31_999);
   expect(fetchMock).toHaveBeenCalledTimes(1);
   await jest.advanceTimersByTimeAsync(1);
   await pending;

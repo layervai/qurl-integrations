@@ -406,7 +406,9 @@ export async function revokeLink(
   const parsed = new URL(baseUrl);
   // Enforced rather than documented: an origin-only caller would get a working
   // DELETE (the pathname is overwritten below) and a silently 404ing fallback
-  // read, which is the false negative this function exists to remove.
+  // read, which is the false negative this function exists to remove. A SHAPE
+  // check, not validation — `<origin>/v1` still passes and still breaks the
+  // fallback; it catches the one mistake `.env.example` used to invite.
   if (stripTrailingSlashes(parsed.pathname) === '') {
     throw new TypeError(
       'revokeLink requires the management collection url, not a bare origin',

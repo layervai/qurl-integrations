@@ -419,7 +419,7 @@ describe('revokeLink retry path', () => {
       // depend on it settling in-tick.
       await jest.advanceTimersByTimeAsync(1_000);
       expect(fetchMock).toHaveBeenCalledTimes(1);
-      await jest.advanceTimersByTimeAsync(30_000);
+      await jest.advanceTimersByTimeAsync(32_000);
 
       await expect(promise).resolves.toBe(true);
       expect(fetchMock).toHaveBeenCalledTimes(2); // no management read needed
@@ -446,7 +446,7 @@ describe('revokeLink retry path', () => {
         .mockImplementationOnce(() => new Response(null, { status }));
 
       const promise = qurl.revokeLink(mintUrl, apiKey, publicResourceId);
-      await jest.advanceTimersByTimeAsync(30_000);
+      await jest.advanceTimersByTimeAsync(32_000);
       await expect(promise).resolves.toBe(true);
       expect(fetchMock).toHaveBeenCalledTimes(2);
     } finally {
@@ -472,7 +472,7 @@ describe('revokeLink retry path', () => {
         .mockImplementationOnce(statusRead('revoked'));
 
       const promise = qurl.revokeLink(mintUrl, apiKey, publicResourceId);
-      await jest.advanceTimersByTimeAsync(30_000);
+      await jest.advanceTimersByTimeAsync(32_000);
 
       await expect(promise).resolves.toBe(true);
       expect(fetchMock).toHaveBeenCalledTimes(3);
@@ -496,7 +496,7 @@ describe('revokeLink retry path', () => {
         .mockImplementationOnce(statusRead('active'));
 
       const promise = qurl.revokeLink(mintUrl, apiKey, publicResourceId);
-      await jest.advanceTimersByTimeAsync(30_000);
+      await jest.advanceTimersByTimeAsync(32_000);
       await expect(promise).resolves.toBe(false);
     } finally {
       jest.useRealTimers();
@@ -535,7 +535,7 @@ describe('revokeLink retry path', () => {
         .mockImplementation(() => new Response(null, { status: 503 }));
 
       const promise = qurl.revokeLink(mintUrl, apiKey, publicResourceId);
-      await jest.advanceTimersByTimeAsync(30_000);
+      await jest.advanceTimersByTimeAsync(32_000);
       await expect(promise).resolves.toBe(false);
       // One DELETE + one read. Unbounded it would be one + three.
       expect(fetchMock).toHaveBeenCalledTimes(2);

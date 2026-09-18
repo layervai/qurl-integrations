@@ -78,6 +78,11 @@ const IDEMPOTENT_METHODS: ReadonlySet<string> = new Set([
   'TRACE',
 ]);
 
+/** Pad added to an honored `Retry-After` so the retry lands just past the
+ * server's estimate rather than exactly on it. Small enough to stay inside any
+ * sane ceiling; the caller's ceiling still caps the total. */
+const DIRECTIVE_PAD_MS = 2_000;
+
 function isRetryableStatus(status: number, method: string): boolean {
   if (RETRYABLE_ANY_METHOD.has(status)) return true;
   return IDEMPOTENT_METHODS.has(method) && RETRYABLE_IDEMPOTENT_ONLY.has(status);
@@ -175,9 +180,20 @@ export async function fetchWithTransientRetry(
     // logged text says only what is true (no usable directive, local backoff
     // only) and leaves the cause to the reader.
     const degraded = retryAfterCeilingMs > 0 && res.status === 503 && !honorsDirective;
+    // A honored directive gets a small pad. `Retry-After` is an ESTIMATE, not a
+    // bound, so re-asking at exactly t=directive means a convergence landing a
+    // few hundred ms late still fails — and fails with the same message as the
+    // false negative this retry exists to remove. The ceiling already reserves
+    // room for this (35s against an observed 30s); it just wasn't being spent.
     const delayMs = overCeiling
       ? baseDelayMs * attempt
-      : Math.max(baseDelayMs * attempt, directiveMs);
+      : Math.max(
+        baseDelayMs * attempt,
+        // Capped at the ceiling, so the pad is spent only where there is room
+        // for it — a directive already AT the ceiling waits exactly the
+        // ceiling, which keeps the 30 <= 35 < 60 inequality intact.
+        directiveMs && Math.min(directiveMs + DIRECTIVE_PAD_MS, retryAfterCeilingMs),
+      );
     // One level for every retry decision, with a grep-able token instead of an
     // escalation: the degraded predicate also matches the ALB drain-gap 503 —
     // no `Retry-After`, and this module's founding scenario — so raising its
