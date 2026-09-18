@@ -168,7 +168,8 @@ func TestParse_ErrorPaths(t *testing.T) {
 	}{
 		{name: "unknown subcommand", text: "delete $foo", wantErr: ErrUnknownSubcommand},
 		{name: "get without alias", text: "get", wantErr: ErrEmptyResource},
-		{name: "crid without identifier", text: "crid", wantErr: ErrInvalidCRID},
+		{name: "crid without identifier", text: "crid", wantErr: ErrEmptyCRID},
+		{name: "get with CRID redirects", text: "get " + testTunnelCRID, wantErr: ErrCRIDNotSupportedGet},
 		{name: "crid malformed identifier", text: "crid qnot-a-crid", wantErr: ErrInvalidCRID},
 		{name: "crid with extra positional", text: "crid " + testTunnelCRID + " extra", wantErr: ErrUnexpectedArgument},
 		{name: "get without sigil", text: "get prod-db", wantErr: ErrMissingSigil},

@@ -182,6 +182,9 @@ var ErrMissingTarget = errors.New("missing target argument")
 // parser gate avoids sending a permanent typo over the network.
 var ErrInvalidCRID = errors.New("invalid CRID")
 
+// ErrEmptyCRID is returned for a bare `crid` with no identifier.
+var ErrEmptyCRID = errors.New("missing CRID argument")
+
 // ErrURLNotSupportedGet is returned when `/qurl get` is handed a raw
 // URL. The Slack bot only mints links for tunnel resources now, reached
 // by their `$slug` or a channel `$alias` — never an arbitrary URL.
@@ -201,6 +204,12 @@ var ErrURLNotSupportedGet = errors.New("raw URL not supported by get")
 // rather than reporting the generic alias-charset rule the `_` would trip.
 // Same terse-sentinel / rich-handler-copy split as [ErrURLNotSupportedGet].
 var ErrResourceIDNotSupportedGet = errors.New("resource id not supported by get")
+
+// ErrCRIDNotSupportedGet is returned when `/qurl get` is handed a CRID-shaped
+// token, so the handler can redirect to `/qurl crid` instead of reporting a
+// missing `$` sigil. Same terse-sentinel / rich-handler-copy split as
+// [ErrURLNotSupportedGet].
+var ErrCRIDNotSupportedGet = errors.New("CRID not supported by get")
 
 // ErrMissingUserMention is returned when `/qurl-admin add`, `remove`, or
 // `transfer-ownership` are invoked without a `<@U…>` Slack user mention.
@@ -477,6 +486,11 @@ func parseGet(cmd *Command, rest []string) (*Command, error) {
 		// tunnel `$slug` or a channel `$alias` only.
 		return nil, ErrURLNotSupportedGet
 	}
+	if crid.MatchesShape(rest[0]) {
+		// A CRID pasted into get. A `$`-less token is never a valid alias,
+		// so this only replaces the misleading missing-sigil error.
+		return nil, ErrCRIDNotSupportedGet
+	}
 	if strings.HasPrefix(rest[0], "$r_") {
 		// A `$r_<id>` paste: the resource-id get form is gone. Redirect to
 		// the `$slug` rather than falling through to the generic
@@ -519,10 +533,10 @@ func applyMintFlags(cmd *Command, toks []string) (*Command, error) {
 // or case-folded: crid.Validate accepts only their canonical spelling.
 func parseCRID(cmd *Command, rest []string) (*Command, error) {
 	if len(rest) == 0 {
-		return nil, ErrInvalidCRID
+		return nil, ErrEmptyCRID
 	}
-	if crid.Validate(rest[0]) != nil {
-		return nil, ErrInvalidCRID
+	if err := crid.Validate(rest[0]); err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrInvalidCRID, err)
 	}
 	cmd.CRID = rest[0]
 	return applyMintFlags(cmd, rest[1:])

@@ -91,6 +91,10 @@ const (
 // still mintable by their listed `$alias`; only ad hoc raw URL input is refused.
 const urlNotSupportedGetMessage = "`/qurl get` works with a listed `$id` or `$alias` — raw URLs aren't supported. Run `/qurl list` and copy the URL resource's alias."
 
+// cridNotSupportedGetMessage redirects a CRID pasted into `/qurl get`
+// ([ErrCRIDNotSupportedGet]) to `/qurl crid`.
+const cridNotSupportedGetMessage = "That looks like a CRID. Use `/qurl crid <CRID>` to create a qURL from it."
+
 // resourceIDNotSupportedGetMessage is the user-facing copy for a `$r_<id>`
 // `/qurl get` (the resource-id form is gone). Same terse-sentinel
 // ([ErrResourceIDNotSupportedGet]) → rich-handler-copy split as the URL case.
@@ -248,6 +252,10 @@ func (h *Handler) handleGet(w http.ResponseWriter, values url.Values) {
 		}
 		if errors.Is(err, ErrResourceIDNotSupportedGet) {
 			respondSlack(w, ":warning: "+resourceIDNotSupportedGetMessage)
+			return
+		}
+		if errors.Is(err, ErrCRIDNotSupportedGet) {
+			respondSlack(w, ":warning: "+cridNotSupportedGetMessage)
 			return
 		}
 		// Bare `get` (no token) parses to ErrEmptyResource. Surface the

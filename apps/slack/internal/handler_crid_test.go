@@ -43,15 +43,19 @@ func TestHandleCRID_HappyPath(t *testing.T) {
 // valid CRID for a resource not in this channel's allow-set (or a channel with
 // no policy, e.g. a DM) never reaches the mint.
 func TestHandleCRID_NotInChannelFailsClosed(t *testing.T) {
-	for name, seed := range map[string]func(*adminTestServers){
-		"other resource allowed": func(ts *adminTestServers) {
+	for name, seed := range map[string]func(*testing.T, *adminTestServers){
+		"other resource allowed": func(t *testing.T, ts *adminTestServers) {
 			ts.seedPolicySet(t, testAdminTeamID, "C_test", "prod-db", []string{testResourceIDFix})
 		},
-		"cold channel": func(ts *adminTestServers) { ts.seedNonAdmin(t) },
+		"allowed only in another channel": func(t *testing.T, ts *adminTestServers) {
+			ts.seedPolicySet(t, testAdminTeamID, "C_test", "prod-db", []string{testResourceIDFix})
+			ts.seedPolicySet(t, testAdminTeamID, "C_other", "tunnel", []string{testTunnelResourceID})
+		},
+		"cold channel": func(t *testing.T, ts *adminTestServers) { ts.seedNonAdmin(t) },
 	} {
 		t.Run(name, func(t *testing.T) {
 			ts := newAdminTestServers(t)
-			seed(ts)
+			seed(t, ts)
 			var mintHits atomic.Int32
 			ts.addCustomerPrefix(http.MethodPost, "/v1/resources/", func(w http.ResponseWriter, _ *http.Request) {
 				mintHits.Add(1)
@@ -67,6 +71,49 @@ func TestHandleCRID_NotInChannelFailsClosed(t *testing.T) {
 				t.Errorf("mint reached for a CRID outside the channel allow-set (hits = %d)", mintHits.Load())
 			}
 		})
+	}
+}
+
+// TestHandleCRID_SyncParseReplies pins the synchronous replies for a bare and
+// a malformed CRID, and the `/qurl get <CRID>` redirect.
+func TestHandleCRID_SyncParseReplies(t *testing.T) {
+	h := newAdminTestHandler(t, newAdminTestServers(t))
+	for text, want := range map[string]string{
+		"crid":                        cridUsageMessage,
+		"crid " + testTunnelCRID[:40]: invalidCRIDMessage,
+		"crid " + strings.ToUpper(testTunnelCRID): invalidCRIDMessage,
+		"get " + testTunnelCRID:                   cridNotSupportedGetMessage,
+	} {
+		_, ack := newAdminSlashInvoker(t, h).invokeAdmin(text, testAdminTeamID, testAdminUserID)
+		if !strings.Contains(ack, want) {
+			t.Errorf("%q ack = %q, want %q", text, ack, want)
+		}
+	}
+}
+
+// TestHandleCRID_SharesGetRateLimit pins that crid and get draw on one in-bot
+// mint quota, so alternating verbs cannot double a user's budget.
+func TestHandleCRID_SharesGetRateLimit(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	ts.seedPolicySet(t, testAdminTeamID, "C_test", "prod-db", []string{testResourceIDFix, testTunnelResourceID})
+	ts.addCustomer(http.MethodPost, mintByTestResourcePath, func(w http.ResponseWriter, _ *http.Request) {
+		writeCreateFixture(t, w, "https://qurl.link/get", testResourceIDFix)
+	})
+	var cridMints atomic.Int32
+	ts.addCustomer(http.MethodPost, mintByTestTunnelPath, func(w http.ResponseWriter, _ *http.Request) {
+		cridMints.Add(1)
+		writeCreateFixture(t, w, "https://qurl.link/crid", testTunnelResourceID)
+	})
+	h := newAdminTestHandler(t, ts)
+	enableAdminStoreRateLimit(t, h, 1)
+
+	if _, _, first := newAdminSlashInvoker(t, h).invokeAdminAsync("get $prod-db", testAdminTeamID, testAdminUserID); !strings.Contains(first, "https://qurl.link/get") {
+		t.Fatalf("get did not mint: %q", first)
+	}
+	_, _, second := newAdminSlashInvoker(t, h).invokeAdminAsync("crid "+testTunnelCRID, testAdminTeamID, testAdminUserID)
+	if !strings.Contains(second, "Rate limit hit") || cridMints.Load() != 0 {
+		t.Errorf("crid after exhausted get quota = %q (mints = %d), want in-bot rate limit", second, cridMints.Load())
 	}
 }
 
