@@ -91,20 +91,7 @@ export function trackedQurlResources(env: {
   const ids = new Set<string>();
   // Shared by revoke() and revokeAll() so EVERY successful revoke —
   // test-time or cleanup-time — drops the id from the ledger.
-  // `confirmPending` is what separates the two callers: a revoke-under-test
-  // asserts on the boolean, so it waits out qurl-service's protection-update
-  // 503 to answer truthfully (see revokeLink); the afterAll sweep passes false
-  // and stays a single request, exactly as costly as before this PR — the
-  // sweep only needs "did it stick", and charging it REVOKE_CONFIRM_WAIT_MS
-  // plus a second round trip per straggler would blow the very hook budget that
-  // keeps it from leaking. It drops the transient retry with
-  // it: in a service-wide shed — the case that actually threatens the hook —
-  // all ~60 stragglers would retry and nothing is reclaimed either way, so the
-  // retry only converts an outage into a hook timeout. A single straggler would
-  // be reclaimed for ~1s, so revisit if that leak is ever observed.
-  //
-  // Options object, not a positional boolean, so a stray `.map` index
-  // degrades to the defaults instead of silently turning confirmation off.
+  // Cleanup uses one DELETE per resource; test-time revokes confirm the update.
   const revoke = async (
     resourceId: string,
     { confirmPending = true }: { confirmPending?: boolean } = {},
@@ -121,11 +108,6 @@ export function trackedQurlResources(env: {
     },
     revoke,
     async revokeAll() {
-      // On this path (confirmPending: false) revokeLink returns res.ok —
-      // false on a 4xx, NO throw — and only throws on a network error. (The
-      // confirming path differs: it can return true for a non-ok DELETE via
-      // the management read.) So surface BOTH paths — the
-      // systematic-403 one is the dangerous one (see module header).
       // Deliberately serial WITH a short pause between requests
       // (symmetric with deleteAll): this is the best-effort path, and a
       // burst — even a serial back-to-back one, ~50-60 DELETEs after the
@@ -142,18 +124,7 @@ export function trackedQurlResources(env: {
         try {
           const ok = await revoke(id, { confirmPending: false });
           if (!ok) {
-            // A legend, not a diagnosis: revokeLink returns a bare boolean, so
-            // this line can't tell which cause it hit, and the systematic-403
-            // case the module header calls dangerous must never read as benign.
-            // None of these drop the id — a committed-but-pending 503 is
-            // indistinguishable from the deployment-state one, and dropping on
-            // that would leak silently. A straggler still lapses on its expiry.
-            console.warn(
-              `afterAll: best-effort revoke of ${id} returned not-ok ` +
-                '(503 = expected committed-but-pending on a protected resource; ' +
-                '429 = sweep outran the limiter; 404 = never existed or already purged; ' +
-                '401/403 = a real cleanup regression)',
-            );
+            console.warn(`afterAll: best-effort revoke of ${id} returned not-ok`);
           }
         } catch (err) {
           console.warn(`afterAll: best-effort revoke of ${id} threw: ${String(err)}`);

@@ -77,12 +77,8 @@ describe('Negative: Invalid Access', () => {
 
 describe('Negative: Invalid Revocation', () => {
   test('revoke non-existent resource returns false', async () => {
-    // confirmPending: false — this asserts `false` and reads no convergence
-    // signal, so the confirm wait has nothing to add. Single-shot by
-    // construction rather than by luck of the status code being non-retryable.
     const result = await qurl.revokeLink(
       env.MINT_API_URL, env.QURL_API_KEY, nonExistentPublicResourceId,
-      { confirmPending: false },
     );
     expect(result).toBe(false);
   });
@@ -94,11 +90,7 @@ describe('Negative: Invalid Revocation', () => {
     // Track before the bad-key attempt: that revoke MUST NOT delete the
     // resource, so afterAll (with the valid key) owns the real cleanup.
     tracked.track(minted.resource_id);
-    // Same reason as above, plus: during a deploy window a confirming retry
-    // would re-send a deliberately invalid key for nothing.
-    const result = await qurl.revokeLink(
-      env.MINT_API_URL, 'invalid-key', minted.resource_id, { confirmPending: false },
-    );
+    const result = await qurl.revokeLink(env.MINT_API_URL, 'invalid-key', minted.resource_id);
     expect(result).toBe(false);
   });
 });

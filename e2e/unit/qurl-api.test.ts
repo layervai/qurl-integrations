@@ -351,370 +351,73 @@ test('polling returns the last observation when its predicate never matches', as
 });
 
 describe('revokeLink retry path', () => {
-  // Only this group drives a retry, so the console.warn suppression is scoped
-  // here rather than file-wide: fetchWithTransientRetry warns on every retry by
-  // design, and the other ~30 tests in this file should keep their warnings.
   let warnSpy: jest.SpyInstance;
-  beforeEach(() => { warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {}); });
-  afterEach(() => { warnSpy.mockRestore(); });
-
-  /** A management read answering with the given resource status. */
-  const statusRead = (status: string) => () =>
-    new Response(JSON.stringify({ data: { resource_id: publicResourceId, status } }), {
-      status: 200,
-      headers: { 'Content-Type': 'application/json' },
-    });
-  /** WITH a body, so the helper's `res.body?.cancel()` on a discarded response
-   * is actually exercised — every other fixture here is null-bodied, which
-   * leaves that line unrun in both http.ts and revokeLink. */
-  const pending503 = () =>
-    new Response(JSON.stringify({ error: { code: 'service_unavailable' } }), {
-      status: 503,
-      headers: { 'Content-Type': 'application/json', 'Retry-After': '30' },
-    });
-
-  // The hazard the guard makes unrepresentable: a bare origin gets a working
-  // DELETE (the pathname is overwritten) and a fallback read of `<origin>/{id}`
-  // that 404s — the exact false negative revokeLink exists to remove, silently.
-  test('rejects a bare origin rather than silently breaking the fallback', async () => {
-    await expect(
-      qurl.revokeLink('https://api.example.com', apiKey, publicResourceId),
-    ).rejects.toThrow(/management collection url/);
-    expect(fetchMock).not.toHaveBeenCalled();
+  beforeEach(() => {
+    warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    jest.useFakeTimers();
+  });
+  afterEach(() => {
+    jest.useRealTimers();
+    warnSpy.mockRestore();
   });
 
-  // The ordinary case, and the one every URL mint in smoke/link-lifecycle/
-  // concurrency takes: unprotected resource, first DELETE answers 204. One
-  // request, no wait, NO fallback read — a regression making the fallback
-  // unconditional would otherwise slip through, since every other test here
-  // starts from a non-2xx.
-  test.each([
-    ['the confirming default', undefined],
-    ['the non-confirming sweep budget', { confirmPending: false }],
-  ])('a first-attempt 204 returns true in one request under %s', async (_d, opts) => {
-    fetchMock.mockImplementationOnce(() => new Response(null, { status: 204 }));
+  const pending503 = () => new Response('protection update pending', {
+    status: 503, headers: { 'Retry-After': '30' },
+  });
 
-    await expect(
-      qurl.revokeLink(mintUrl, apiKey, publicResourceId, opts),
-    ).resolves.toBe(true);
+  test('confirms a pending revoke after the server delay', async () => {
+    fetchMock.mockImplementationOnce(pending503)
+      .mockImplementationOnce(() => new Response(null, { status: 204 }));
+    const pending = qurl.revokeLink(mintUrl, apiKey, publicResourceId);
+    await jest.advanceTimersByTimeAsync(31_999);
     expect(fetchMock).toHaveBeenCalledTimes(1);
+    await jest.advanceTimersByTimeAsync(1);
+    await expect(pending).resolves.toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls[1][1]).toMatchObject({
+      method: 'DELETE', headers: { Authorization: `Bearer ${apiKey}` },
+    });
   });
 
-  // qurl-service commits the revocation, then answers 503 + `Retry-After: 30`
-  // until the NHP protection update lands. Every connector upload is protected,
-  // so a single-shot DELETE reported a false failure and red-flagged four
-  // file-revoke smoke tests on a revocation that had already happened.
-  test('retries the revocation-pending 503 and honors Retry-After', async () => {
-    jest.useFakeTimers();
-    try {
-      fetchMock
-        .mockImplementationOnce(pending503)
-        .mockImplementationOnce(() => new Response(null, { status: 204 }));
-
-      const promise = qurl.revokeLink(mintUrl, apiKey, publicResourceId);
-      // The retry must wait out the server's directive, not the 1s local
-      // backoff. Advance a full 30s after that check rather than the exact
-      // remaining 29s: the fixture carries a body, so the helper's body-cancel
-      // sits between the response and the timer and exact arithmetic would
-      // depend on it settling in-tick.
-      await jest.advanceTimersByTimeAsync(1_000);
-      expect(fetchMock).toHaveBeenCalledTimes(1);
-      await jest.advanceTimersByTimeAsync(32_000);
-
-      await expect(promise).resolves.toBe(true);
-      expect(fetchMock).toHaveBeenCalledTimes(2); // no management read needed
-      // The retry reuses `init`, so it carries the same method AND credential.
-      expect(fetchMock.mock.calls[1][1]).toMatchObject({
-        method: 'DELETE',
-        headers: { Authorization: `Bearer ${apiKey}` },
-      });
-    } finally {
-      jest.useRealTimers();
-    }
-  });
-
-  // 2xx on the confirm retry is the assumption the fix would otherwise rest on
-  // (the repro never observed it). Pin both shapes the service could send.
-  test.each([
-    ['204 No Content', 204],
-    ['200 OK', 200],
-  ])('accepts %s on the confirm retry without a management read', async (_d, status) => {
-    jest.useFakeTimers();
-    try {
-      fetchMock
-        .mockImplementationOnce(pending503)
-        .mockImplementationOnce(() => new Response(null, { status }));
-
-      const promise = qurl.revokeLink(mintUrl, apiKey, publicResourceId);
-      await jest.advanceTimersByTimeAsync(32_000);
-      await expect(promise).resolves.toBe(true);
-      expect(fetchMock).toHaveBeenCalledTimes(2);
-    } finally {
-      jest.useRealTimers();
-    }
-  });
-
-  // THE reason the fix no longer depends on an unobserved status code. If the
-  // service answers 404 once the update lands — which link-lifecycle pins as a
-  // legitimate second-revoke answer — the management read still says `revoked`,
-  // so a committed revocation is not reported as a failure. The confirm DELETE
-  // is the strong (convergence) signal; this is the correct-but-weaker one.
-  test.each([
-    ['404 Not Found', 404],
-    ['409 Conflict', 409],
-    ['410 Gone', 410],
-  ])('falls back to the management read when the confirm answers %s', async (_d, status) => {
-    jest.useFakeTimers();
-    try {
-      fetchMock
-        .mockImplementationOnce(pending503)
-        .mockImplementationOnce(() => new Response(null, { status }))
-        .mockImplementationOnce(statusRead('revoked'));
-
-      const promise = qurl.revokeLink(mintUrl, apiKey, publicResourceId);
-      await jest.advanceTimersByTimeAsync(32_000);
-
-      await expect(promise).resolves.toBe(true);
-      expect(fetchMock).toHaveBeenCalledTimes(3);
-      // Convergence is unconfirmed, so it says so rather than passing silently.
-      expect(warnSpy).toHaveBeenCalledWith(
-        expect.stringContaining('convergence unconfirmed'),
-      );
-    } finally {
-      jest.useRealTimers();
-    }
-  });
-
-  // ...and the fallback cannot manufacture the false positive that ruled out
-  // trusting a bare 404: a resource that never existed does not read `revoked`.
-  test('does not fall back into success when the resource is not revoked', async () => {
-    jest.useFakeTimers();
-    try {
-      fetchMock
-        .mockImplementationOnce(pending503)
-        .mockImplementationOnce(() => new Response(null, { status: 404 }))
-        .mockImplementationOnce(statusRead('active'));
-
-      const promise = qurl.revokeLink(mintUrl, apiKey, publicResourceId);
-      await jest.advanceTimersByTimeAsync(32_000);
-      await expect(promise).resolves.toBe(false);
-    } finally {
-      jest.useRealTimers();
-    }
-  });
-
-  // THE property that makes the boolean worth its wait: a still-pending 503
-  // after the window is the convergence regression, so it must stay false EVEN
-  // THOUGH the resource already reads `revoked` — it was committed at the first
-  // 503. Falling back here would pass an unconverged protection update and
-  // reduce the whole confirm to a log line nobody greps.
-  test('a sustained pending 503 stays false even though the resource reads revoked', async () => {
-    jest.useFakeTimers();
-    try {
-      fetchMock.mockImplementation(pending503);
-
-      const promise = qurl.revokeLink(mintUrl, apiKey, publicResourceId);
-      await jest.advanceTimersByTimeAsync(120_000);
-
-      await expect(promise).resolves.toBe(false);
-      expect(fetchMock).toHaveBeenCalledTimes(2); // no fallback read attempted
-    } finally {
-      jest.useRealTimers();
-    }
-  });
-
-  // The fallback read is bounded to ONE attempt: its answer is binary, the
-  // DELETE just spent the transient budget on the same origin, and its backoff
-  // is time REVOKE_CONFIRM_WAIT_MS does not account for — which matters most
-  // on the degraded-API path where the fallback actually runs.
-  test('bounds the fallback read to a single attempt', async () => {
-    jest.useFakeTimers();
-    try {
-      fetchMock
-        .mockImplementationOnce(() => new Response(null, { status: 410 }))
-        .mockImplementation(() => new Response(null, { status: 503 }));
-
-      const promise = qurl.revokeLink(mintUrl, apiKey, publicResourceId);
-      await jest.advanceTimersByTimeAsync(32_000);
-      await expect(promise).resolves.toBe(false);
-      // One DELETE + one read. Unbounded it would be one + three.
-      expect(fetchMock).toHaveBeenCalledTimes(2);
-    } finally {
-      jest.useRealTimers();
-    }
-  });
-
-  // When the fallback DOES run and the read itself fails, say why: this path
-  // ends in a red, and the assertion it fails aborts before the status check
-  // that would have shown the cause.
-  test('says why when the fallback management read fails', async () => {
-    fetchMock
-      .mockImplementationOnce(() => new Response(null, { status: 410 }))
-      .mockImplementationOnce(() => new Response(null, { status: 500 }));
-
-    await expect(qurl.revokeLink(mintUrl, apiKey, publicResourceId)).resolves.toBe(false);
-    expect(warnSpy).toHaveBeenCalledWith(
-      expect.stringContaining('fallback management read failed'),
-    );
-  });
-
-  // A first-attempt 404 is not retryable, so the DELETE is single-shot — but
-  // the fallback still runs, and negative-paths' nonexistent resource reads
-  // nothing, so it stays false.
-  test('reports a 404 on a resource that never existed as failure', async () => {
-    fetchMock
-      .mockImplementationOnce(() => new Response(null, { status: 404 }))
-      .mockImplementationOnce(() => new Response(null, { status: 404 }));
-
-    await expect(qurl.revokeLink(mintUrl, apiKey, publicResourceId)).resolves.toBe(false);
-    expect(fetchMock).toHaveBeenCalledTimes(2); // one DELETE, one read
-    // Quietly: a 404 read is the DEFINITIVE "no such resource", so it must not
-    // spend the loud channel reserved for inconclusive reads.
-    expect(warnSpy).not.toHaveBeenCalledWith(
-      expect.stringContaining('fallback management read failed'),
-    );
-  });
-
-  // The deliberate widening: because DELETE is idempotent, a confirming revoke
-  // also retries the non-503 transient statuses — once, on the local backoff.
-  test('retries a 502 exactly once', async () => {
-    jest.useFakeTimers();
-    try {
-      fetchMock.mockImplementation(
-        () => new Response(null, { status: 502, headers: { 'Retry-After': '30' } }),
-      );
-
-      const promise = qurl.revokeLink(mintUrl, apiKey, publicResourceId);
-      await jest.advanceTimersByTimeAsync(1_000); // local backoff, not the 30s
-      await expect(promise).resolves.toBe(false);
-      // Two DELETEs and no fallback read: 502 is not a status the service
-      // answers once the update lands, so it is outside the allowlist.
-      expect(fetchMock).toHaveBeenCalledTimes(2);
-    } finally {
-      jest.useRealTimers();
-    }
-  });
-
-  // The fallback is skipped where the read would use the same credential and
-  // fail the same way — so a systematic auth regression costs one request per
-  // call site, not two.
-  test.each([
-    ['401 Unauthorized', 401],
-    ['403 Forbidden', 403],
-  ])('skips the management read on %s', async (_d, status) => {
-    fetchMock.mockImplementationOnce(() => new Response(null, { status }));
-
-    await expect(qurl.revokeLink(mintUrl, apiKey, publicResourceId)).resolves.toBe(false);
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-  });
-
-  // The allowlist, from the outside: an app-level failure must never reach the
-  // fallback, or a 500 on a resource that already reads `revoked` would report
-  // a successful revoke — contradicting this stack's rule that a 500 is a real
-  // failure. A denylist would have let these through.
-  test.each([
-    ['500 Internal Server Error', 500],
-    ['400 Bad Request', 400],
-    ['429 Too Many Requests', 429],
-  ])('never falls back on %s', async (_d, status) => {
-    fetchMock.mockImplementation(() => new Response(null, { status }));
-
-    await expect(qurl.revokeLink(mintUrl, apiKey, publicResourceId)).resolves.toBe(false);
-    // 500/400 are not retryable; 429 is, hence at most the attempt budget —
-    // but never a management read on top.
-    expect(fetchMock.mock.calls.length).toBeLessThanOrEqual(2);
-  });
-
-  // The dark-503 guard at the call site the PR leans on hardest: revokeLink's
-  // ceiling is BELOW the deployment-state 503's 60s directive, so that one is
-  // declined rather than waited out — a deploy window costs ~1s, not ~35s.
-  test('declines a directive above its ceiling', async () => {
-    jest.useFakeTimers();
-    try {
-      fetchMock.mockImplementation(
-        () => new Response(null, { status: 503, headers: { 'Retry-After': '60' } }),
-      );
-
-      const promise = qurl.revokeLink(mintUrl, apiKey, publicResourceId);
-      await jest.advanceTimersByTimeAsync(10_000);
-      await expect(promise).resolves.toBe(false);
-      // Two DELETEs a second apart — retried, not abandoned — and no fallback
-      // read, since a 503 is the pending signal rather than a lost answer. The
-      // cost the docstring weighs against fail-fast, pinned as a number.
-      expect(fetchMock).toHaveBeenCalledTimes(2);
-    } finally {
-      jest.useRealTimers();
-    }
-  });
-
-  // The way this fix could silently revert to the original red, end to end —
-  // the hazard revokeLink's TODO(upstream-contract) names.
-  test('a pending 503 without a directive reverts to the local backoff', async () => {
-    jest.useFakeTimers();
-    try {
-      fetchMock.mockImplementation(() => new Response(null, { status: 503 }));
-
-      const promise = qurl.revokeLink(mintUrl, apiKey, publicResourceId);
-      // 999ms: the DELETE retry has NOT fired yet, so this pins the 1s local
-      // backoff rather than the 30s window it should have waited.
-      await jest.advanceTimersByTimeAsync(999);
-      expect(fetchMock).toHaveBeenCalledTimes(1);
-      await jest.advanceTimersByTimeAsync(10_000); // retry + the fallback read
-      await expect(promise).resolves.toBe(false);
-      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('no usable Retry-After'));
-    } finally {
-      jest.useRealTimers();
-    }
-  });
-
-  // Bulk cleanup opts out entirely: ONE request, no confirm wait, no fallback
-  // read — cleanup.ts's serial sweep budgets ~2s per id.
-  test('confirmPending: false makes it a single request', async () => {
-    jest.useFakeTimers();
-    try {
-      fetchMock.mockImplementation(pending503);
-
-      const promise = qurl.revokeLink(mintUrl, apiKey, publicResourceId, {
-        confirmPending: false,
-      });
-      await jest.advanceTimersByTimeAsync(60_000);
-      await expect(promise).resolves.toBe(false);
-      expect(fetchMock).toHaveBeenCalledTimes(1);
-    } finally {
-      jest.useRealTimers();
-    }
-  });
-
-  // The exported budget must match what a confirming revoke can actually spend.
-  test('REVOKE_CONFIRM_WAIT_MS bounds a real confirming revoke', async () => {
-    jest.useFakeTimers();
-    try {
-      // The ceiling case, not the 30s usually observed. Elapsed times are
-      // recorded INSIDE the mock: `Date.now()` measured around the await would
-      // return however far the test advanced the clock, and would pass at any
-      // budget at all.
-      const startedAt = Date.now();
-      const firedAt: number[] = [];
-      fetchMock.mockImplementation(() => {
-        firedAt.push(Date.now() - startedAt);
-        return Promise.resolve(
-          new Response(null, { status: 503, headers: { 'Retry-After': '35' } }),
-        );
-      });
-      const promise = qurl.revokeLink(mintUrl, apiKey, publicResourceId);
+  test.each([400, 401, 403, 404, 409, 410, 429, 500, 502, 503, 504])(
+    'does not accept a failed confirmation (%s) or substitute a management read', async (status) => {
+      fetchMock.mockImplementationOnce(pending503)
+        .mockImplementation(() => new Response(null, { status }));
+      const pending = qurl.revokeLink(mintUrl, apiKey, publicResourceId);
       await jest.advanceTimersByTimeAsync(qurl.REVOKE_CONFIRM_WAIT_MS);
-      await jest.advanceTimersByTimeAsync(10_000); // the fallback read's own budget
+      await expect(pending).resolves.toBe(false);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`DELETE returned ${status}; protection update not confirmed`),
+      );
+    },
+  );
 
-      await expect(promise).resolves.toBe(false);
-      // The last DELETE starts exactly at the exported budget, so the export
-      // IS the worst case rather than a number near it. Exact on purpose:
-      // raising PENDING_REVOKE_ATTEMPTS doubles the EXPECTED side to
-      // [0, 70_000] while the observed stays [0, 35_000], so this fails — the
-      // forcing function the revoke docstring relies on.
-      expect(firedAt.slice(0, 2)).toEqual([0, qurl.REVOKE_CONFIRM_WAIT_MS]);
-    } finally {
-      jest.useRealTimers();
-    }
+  test.each([true, false])('accepts an immediate 204 (confirmPending=%s)', async (confirmPending) => {
+    fetchMock.mockImplementation(() => new Response(null, { status: 204 }));
+    await expect(qurl.revokeLink(mintUrl, apiKey, publicResourceId, { confirmPending })).resolves.toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  test('cleanup sends only one DELETE during an outage', async () => {
+    fetchMock.mockImplementation(pending503);
+    await expect(qurl.revokeLink(mintUrl, apiKey, publicResourceId, {
+      confirmPending: false,
+    })).resolves.toBe(false);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  test('the confirmation delay stays within the exported budget', async () => {
+    const startedAt = Date.now();
+    const firedAt: number[] = [];
+    fetchMock.mockImplementation(() => {
+      firedAt.push(Date.now() - startedAt);
+      return new Response(null, { status: 503, headers: { 'Retry-After': '35' } });
+    });
+    const pending = qurl.revokeLink(mintUrl, apiKey, publicResourceId);
+    await jest.advanceTimersByTimeAsync(qurl.REVOKE_CONFIRM_WAIT_MS);
+    await expect(pending).resolves.toBe(false);
+    expect(firedAt).toEqual([0, qurl.REVOKE_CONFIRM_WAIT_MS]);
   });
 });
 

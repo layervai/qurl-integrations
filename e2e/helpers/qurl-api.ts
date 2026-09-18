@@ -239,242 +239,33 @@ export async function accessLinkNoRedirect(url: string): Promise<LinkAccessResul
   };
 }
 
-/** The `Retry-After` qurl-service is OBSERVED to send with a committed-but-
- * pending revocation. Mirrored here only so the inequality below is checkable;
- * nothing reads it at runtime.
- * TODO(upstream-contract): if qurl-service changes this directive, the
- * inequality test will keep passing once someone updates this constant — so the
- * real check is whether PENDING_REVOKE_CEILING_MS still sits between the two. */
-export const OBSERVED_PENDING_DIRECTIVE_MS = 30_000;
+// TODO(upstream-contract): qurl-service's nhpRevocationPending returns
+// Retry-After: 30. Allow one confirmation retry, with room for the 2s pad.
+export const REVOKE_CONFIRM_WAIT_MS = 35_000;
 
-/** The `Retry-After` on the deployment-state "dark 503" that clients must NOT
- * wait out. Same purpose — and note it is an EXTRAPOLATION: the fixture models
- * the CLI's temporary-access-link route in a dark environment, not
- * `DELETE /v1/resources/{id}`, so 60s is what a revoke would plausibly see
- * rather than what one has been observed to see.
- * TODO(upstream-contract): mirrors HandlerDark503 in
- * apps/cli/internal/apitest/builders.go. If that directive ever NARROWS toward
- * the ceiling, this call site starts waiting out deployment 503s — updating
- * this constant to make the inequality test green would hide exactly that. */
-export const DARK_503_DIRECTIVE_MS = 60_000;
-
-/** Ceiling for the revocation-pending `Retry-After` revokeLink will honor, per
- * attempt. Sized to sit strictly between the two constants above — that
- * inequality is what separates a pending 503 from a dark 503 at this call site
- * BY WAIT COST, so it is a policy choice, not a spare number, and a unit test
- * pins it. It is not a complete taxonomy: this stack also emits standing 503s
- * with no directive at all (HandlerConnectorStopped503), which land in the
- * `degraded` branch instead. The management-read fallback in revokeLink is what
- * makes all three end at the resource's real state rather than at a guess.
- * See revokeLink's TODO(upstream-contract) before moving it. */
-export const PENDING_REVOKE_CEILING_MS = 35_000;
-
-/** fetchWithTransientRetry's default linear-backoff base, mirrored so the
- * budget below is computed rather than assumed. */
-const HELPER_BASE_DELAY_MS = 1_000;
-
-/** Total attempts for a confirming revoke, so `PENDING_REVOKE_ATTEMPTS - 1`
- * confirm windows. See revokeLink for why one rather than two. */
-const PENDING_REVOKE_ATTEMPTS = 2;
-
-/** The longest a confirming `revokeLink` can spend WAITING — it excludes the
- * confirm DELETE's own round trip, which is why the live budgets add it to a
- * non-revoke worst case that already accounts for request time. EXPORTED so the
- * live suites size their jest budgets off it by arithmetic rather than
- * restating it, which is what keeps the per-test timeouts honest. Note it
- * is derived from the CEILING, not from the 30s directive observed in practice:
- * a directive anywhere in the 31-35s tail is honored, and a budget computed at
- * 30s turns that tail into a jest timeout (no assertion, no cause) instead of a
- * legible assertion failure. */
-export const REVOKE_CONFIRM_WAIT_MS = Array.from(
-  { length: PENDING_REVOKE_ATTEMPTS - 1 },
-  // Each wait is `max(local backoff, honored directive)` — see http.ts. Summed
-  // rather than assumed to be `(attempts - 1) x ceiling`, which only holds
-  // while the linear backoff stays under the ceiling. True at today's numbers
-  // (1s vs 35s), and this keeps it true if the attempt count ever rises.
-  (_, i) => Math.max(HELPER_BASE_DELAY_MS * (i + 1), PENDING_REVOKE_CEILING_MS),
-).reduce((a, b) => a + b, 0);
-
-/** Revoke a qURL link by resource_id (revokes entire resource).
- *
- * Two numbers appear below and are easy to conflate: 30s is the directive
- * qurl-service is OBSERVED to send, 35s is the ceiling this call site will
- * honor up to. The gap between them is deliberate — see the TODO at the end.
- *
- * On an NHP-protected resource (every connector upload) qurl-service COMMITS
- * the revocation and then answers 503 + `Retry-After: 30` ("Revocation
- * committed; protection update is pending. Retry to confirm.") until the
- * protection update lands, so a single-shot DELETE reported a false failure for
- * a revocation that had already happened. Hence confirm retries that wait out
- * the server's own directive (35s ceiling — see http.ts's `maxRetryAfterMs`
- * for why honoring it is opt-in and why the ceiling matters). Note a DECLINED
- * directive (the dark 503's 60s) still costs the full attempt budget on the
- * local backoff — two DELETEs a second apart during a deploy window. Note the
- * same applies to a 429: this path declines its directive (see http.ts) and
- * then retries a second later anyway, which adds load during a shed. Left as
- * is because that is the helper's long-standing behaviour for every idempotent
- * caller rather than new policy here, and four confirming revokes is a small
- * contribution — but it is the one combination worth being deliberate about.
- * Deliberate:
- * fail-fast on any over-ceiling directive would also abandon a transient
- * drain-gap 503 that merely carries a long one, which is the retry this helper
- * exists for.
- *
- * ONE confirm window, deliberately. `Retry-After` is the server's ESTIMATE of
- * convergence rather than a bound, so a 31s convergence still reds; a second
- * window would absorb that tail, but the tail is UNOBSERVED (as is the whole
- * contract below) and four confirming revokes in file-revoke.test.ts pay for it
- * out of a job budget a timeout would blow less legibly than any per-test
- * failure. If a real
- * 31-35s tail shows up, widen PENDING_REVOKE_ATTEMPTS to 3 — every live budget
- * derives from REVOKE_CONFIRM_WAIT_MS, so they follow automatically. They
- * follow it OVER the job budget, though: doubling the wait pushes file-revoke's
- * four ceilings past SMOKE_JOB_BUDGET_MS (helpers/smoke-budgets.ts, which owns
- * that number and its TODO(upstream-contract) marker). Its drift-detector test
- * fails when that happens, so widening is "raise the attempts AND raise
- * timeout-minutes", never one line — and no figure is restated here to go
- * stale.
- * Still pending after the window is a convergence regression to report.
- *
- * Worth being explicit about what this buys, since file-revoke.test.ts asserts
- * `status === 'revoked'` two lines later and that read is strictly stronger for
- * the REVOCATION: a 2xx confirm asserts that the NHP protection update
- * CONVERGED, which the management read cannot see. That is the security-
- * relevant property on a revocation smoke, and it is why the fallback below is
- * closed for a sustained 503 — leaving it open there would pass an unconverged
- * update, since the resource reads `revoked` from the first 503 onward, and the
- * wait would buy a log line instead of a signal.
- *
- * A non-2xx confirm is NOT trusted on its status code — not even a 404, which
- * link-lifecycle.test.ts pins as a legitimate second-revoke answer. Accepting
- * one would need to know the preceding 503 was the committed kind, and trusting
- * it blind would let a revoke that never happened report success on a resource
- * that never existed (negative-paths.test.ts).
- *
- * Instead it falls back to the management read, which cannot be wrong about
- * whether the revocation happened. That matters because the repro behind this
- * fix observed 503 on a PROTECTED resource and 204 on a different UNPROTECTED
- * one — it never observed a protected 503 -> retry -> 2xx. The fallback is what
- * keeps the fix from depending on that unobserved answer: 404, 409 and 410 end
- * with the resource's actual state deciding. A still-pending 503 deliberately
- * does NOT — that is the convergence regression the wait exists to surface, and
- * since the resource reads `revoked` from the moment of the first 503, falling
- * back there would return true for an unconverged update and reduce the whole
- * confirm to a log line.
- *
- * The consequence to know before writing a new revoke test: a CONFIRMING revoke
- * reports the RESOURCE'S STATE, so it cannot distinguish a fresh revocation
- * from one that already happened — call it twice and both return true.
- * Idempotency assertions must pass `confirmPending: false` (both double-revoke
- * tests and both negative-paths cases do), which short-circuits before the
- * fallback and restores "did THIS call revoke it".
- *
- * `confirmPending: false` drops the confirm attempt entirely — one request, as
- * before this helper gained a retry — for cleanup.ts's best-effort sweep. It
- * drops the retry and not just the wait because of the BOUNDED worst case of a
- * service-wide shed across a ~60-resource sweep; cleanup.ts carries that
- * arithmetic and owns the decision.
- *
- * TODO(upstream-contract): mirrors qurl-service's protected-resource revoke
- * contract — that a 503 here means the revocation is COMMITTED (not rejected),
- * that it CARRIES a `Retry-After` at all (without one the confirm retry fires
- * on the 1s local backoff, well inside the convergence window, and the original
- * red returns with nothing saying the mechanism was bypassed), and that its
- * value is the 30s PENDING_REVOKE_CEILING_MS is sized on. What the confirm
- * DELETE answers once the update lands is NOT mirrored here, deliberately: the
- * management-read fallback above makes the boolean independent of it.
- * The ceiling is what actually separates the two 503s here
- * (30 <= 35 < the dark 503's 60), so BOTH directions matter: if the pending
- * window widens past 35s, raise it and the
- * file-revoke.test.ts budgets sized on it together; if the DARK 503's directive
- * ever narrows to <= the ceiling, this call site would start waiting out
- * deployment 503s and needs #1505's body discrimination instead. */
+/** Revoke the resource. A successful DELETE confirms the protection update.
+ * Repeated DELETEs retry the same committed epoch (qurl-service RevokeQurl).
+ * A management status of `revoked` alone does not confirm that update.
+ * Cleanup skips the retry so a bulk sweep keeps its existing time budget. */
 export async function revokeLink(
-  /** The management COLLECTION url, e.g. `<origin>/v1/qurls` — not a bare
-   * origin. The DELETE only needs the origin (it overwrites the pathname with
-   * `/v1/resources/{id}`), but the fallback read below appends `/{id}` to this
-   * value as given, so an origin-only caller would get a working DELETE and a
-   * silently 404ing fallback — reintroducing the exact false negative this
-   * function exists to remove. Every caller passes env.MINT_API_URL, which is
-   * also what the live suites hand to getResourceStatus directly. */
   baseUrl: string,
   apiKey: string,
   resourceId: string,
   { confirmPending = true }: { confirmPending?: boolean } = {},
 ): Promise<boolean> {
-  // API: DELETE /v1/resources/{resource_id}
-  const parsed = new URL(baseUrl);
-  // Enforced rather than documented: an origin-only caller would get a working
-  // DELETE (the pathname is overwritten below) and a silently 404ing fallback
-  // read, which is the false negative this function exists to remove. A SHAPE
-  // check, not validation — `<origin>/v1` still passes and still breaks the
-  // fallback; it catches the one mistake `.env.example` used to invite. CI is
-  // unaffected: qurl-integrations-infra's `mint_api_url` output is
-  // `"${var.qurl_endpoint}/v1/qurls"` (qurl-bot-discord/terraform/outputs.tf),
-  // i.e. already the collection form.
-  if (stripTrailingSlashes(parsed.pathname) === '') {
-    throw new TypeError(
-      'revokeLink requires the management collection url, not a bare origin',
-    );
-  }
-  parsed.pathname = `/v1/resources/${encodeURIComponent(resourceId)}`;
-  const url = parsed.toString();
+  const url = new URL(baseUrl);
+  url.pathname = `/v1/resources/${encodeURIComponent(resourceId)}`;
   const res = await fetchWithTransientRetry(url, {
     method: 'DELETE',
     headers: { Authorization: `Bearer ${apiKey}` },
   }, confirmPending
-    ? { maxAttempts: PENDING_REVOKE_ATTEMPTS, maxRetryAfterMs: PENDING_REVOKE_CEILING_MS }
+    ? { maxAttempts: 2, maxRetryAfterMs: REVOKE_CONFIRM_WAIT_MS }
     : { maxAttempts: 1 });
-  // Nothing reads this body — the caller gets a boolean — so release it rather
-  // than holding an undici socket until GC, once per straggler on a sweep.
   await res.body?.cancel().catch(() => {});
-  if (res.ok) return true; // convergence proven: the strong signal
-
-  // Non-ok after the confirm window: ask the read that CANNOT be wrong about
-  // whether the revocation happened. This is what keeps the fix from depending
-  // on the confirm DELETE's status code, which was never observed — if the
-  // service answers 404/409/410 once the update lands, or is still pending past
-  // the window, the management state still says so.
-  //
-  // It cannot produce the false positive that ruled out trusting a bare 404: a
-  // resource that never existed does not read `revoked` (negative-paths), and
-  // neither does one behind a dark 503 — that read fails and we stay false.
-  // What is lost is only the CONVERGENCE signal, so it warns rather than
-  // passing silently. Gated on confirmPending, so the sweep and the negative
-  // call sites stay at exactly one request.
-  if (!confirmPending) return false;
-  // An ALLOWLIST of the statuses the service might plausibly answer once the
-  // update lands — not the status-code trust the paragraph above rejects, since
-  // a status test used to gate the read can forgo a true positive but never
-  // manufacture a false one. A denylist would let 500 through, contradicting
-  // this stack's own rule that an app-level error is a real failure (see
-  // http.ts's header), and would let a 503 pass an unconverged update.
-  if (res.status !== 404 && res.status !== 409 && res.status !== 410) return false;
-  try {
-    const status = await getResourceStatus(baseUrl, apiKey, resourceId, { maxAttempts: 1 });
-    if (status.status !== 'revoked') return false;
-    console.warn(
-      `[revokeLink] DELETE ${resourceId} answered ${res.status}, but the resource ` +
-        'reads revoked — revocation confirmed, NHP protection-update convergence unconfirmed',
-    );
-    return true;
-  } catch (err) {
-    // A 404 read is the DEFINITIVE "no such resource", not an ambiguous
-    // failure — it is what negative-paths' nonexistent id produces — so it
-    // keeps the loud channel free for the reads that really are inconclusive.
-    if (err instanceof StatusCheckError && err.status === 404) return false;
-    // The one path here that ends in a red, so it must not be the silent one:
-    // the assertion that fails is `expect(revoked).toBe(true)`, which aborts
-    // before the getResourceStatus check two lines later that would have shown
-    // the cause — i.e. it reads exactly like the pre-PR failure it replaces.
-    // This also catches malformed management shapes, which this file elsewhere
-    // insists must red the gate loudly rather than degrade to a bare boolean.
-    console.warn(
-      `[revokeLink] DELETE ${resourceId} answered ${res.status} and the ` +
-        `fallback management read failed: ${String(err)}`,
-    );
-    return false;
+  if (!res.ok && confirmPending) {
+    console.warn(`[revokeLink] DELETE returned ${res.status}; protection update not confirmed`);
   }
+  return res.ok;
 }
 
 export interface LinkStatus {
@@ -611,12 +402,11 @@ async function getQurlResource(
   managementUrl: string,
   apiKey: string,
   id: string,
-  retry?: { maxAttempts?: number },
 ): Promise<ResourceStatus> {
   const base = stripTrailingSlashes(managementUrl);
   const res = await fetchWithTransientRetry(`${base}/${encodeURIComponent(id)}`, {
     headers: { Authorization: `Bearer ${apiKey}` },
-  }, retry);
+  });
   if (!res.ok) throw new StatusCheckError(res.status);
 
   const body = await res.json() as unknown;
@@ -655,14 +445,8 @@ export async function getResourceStatus(
   managementUrl: string,
   apiKey: string,
   resourceId: string,
-  /** Bounds the read's own transient retry. Defaults to the shared helper's
-   * budget; revokeLink passes `{ maxAttempts: 1 }` because its fallback is a
-   * binary confirmation whose DELETE just spent that budget on the same origin,
-   * and because the read's backoff is time REVOKE_CONFIRM_WAIT_MS does not
-   * account for. */
-  retry?: { maxAttempts?: number },
 ): Promise<ResourceStatus> {
-  const resource = await getQurlResource(managementUrl, apiKey, resourceId, retry);
+  const resource = await getQurlResource(managementUrl, apiKey, resourceId);
   // Resource-level callers pass the canonical public resource_id, never a qURL
   // display ID; require the management response to echo that encoding exactly.
   if (resource.resource_id !== resourceId) {

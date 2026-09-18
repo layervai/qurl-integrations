@@ -99,36 +99,10 @@ function isRetryableStatus(status: number, method: string): boolean {
  * @param maxAttempts total attempts including the first (default 3)
  * @param baseDelayMs linear backoff base — waits `baseDelayMs * attempt` between
  *   tries, i.e. 1s then 2s at the default (well under jest's 120s timeout)
- * @param maxRetryAfterMs OPT-IN ceiling for honoring a 503's `Retry-After`; 0
- *   (default) ignores the header entirely. It is both the enable flag and the
- *   cap, so a small value means "cap there", not "off" — pass 0 to disable.
- *   Opt-in rather than always-on because a `Retry-After` is only worth waiting
- *   out when the condition is CONTINGENT, and this stack emits both kinds under
- *   the SAME `service_unavailable` code: qurl-service's revocation-pending 30
- *   (transient) and its deployment-state "dark 503" 60 (standing — waiting only
- *   makes a permanent failure slower to report). Nothing THIS HELPER INSPECTS
- *   separates them — their bodies do differ, but parsing one is #1505's job —
- *   so only the call site can. Everyone else keeps the 1s/2s backoff.
- *
- *   The ceiling is the longest directive the caller will honor, PER ATTEMPT, so
- *   the opted-in worst case is `(maxAttempts - 1) x ceiling` — assuming every
- *   retried response carries a directive AT the ceiling; a shorter one, or a
- *   declined one costs less. The caller owns both numbers together;
- *   `revokeLink` sets both and exports their product so the live budgets derive
- *   from it rather than restating it.
- *
- *   A LONGER directive is DECLINED rather than clamped to the ceiling —
- *   re-asking early would
- *   draw the same response, just later — and that attempt falls back to the
- *   ordinary local backoff. So opting in never costs a caller a retry it would
- *   have had at the default; too small a ceiling only stops directives being
- *   honored, it does not reduce resilience below the default.
- *
- *   Scoped to 503 even when opted in: a 429 directive on this stack means "you
- *   burst", and honoring it would let one shed DELETE cost 35s inside the
- *   serial cleanup sweeps that budget ~2s each (concurrency.test.ts's 180s
- *   afterAll over ~60 resources). The local backoff plus each sweep's own
- *   pacing already covers those.
+ * @param maxRetryAfterMs opt-in limit for a 503's Retry-After, per attempt.
+ *   Default 0 keeps existing callers on local backoff. Directives above the
+ *   limit are declined; valid shorter directives cannot shorten local backoff.
+ *   Other statuses keep local backoff, including 429 during bulk cleanup.
  */
 export async function fetchWithTransientRetry(
   input: string | URL,
@@ -145,81 +119,31 @@ export async function fetchWithTransientRetry(
     attempt < maxAttempts && !res.ok && isRetryableStatus(res.status, method);
     attempt++
   ) {
-    // `Retry-After` wins only when it asks for LONGER than the local backoff —
-    // a server asking us to slow down is authoritative, one asking us to hurry
-    // is not. 503-only and opt-in: see `maxRetryAfterMs` above.
-    // TODO(upstream-contract): qurl-service emits the delta-seconds form only.
-    // Anything non-numeric (including the HTTP-date form RFC 9110 also allows)
-    // falls through to the linear backoff rather than producing a NaN delay.
-    // No `.trim()`: the Headers API normalizes leading/trailing whitespace, so
-    // `get()` never returns a padded value. The padded-directive test in
-    // unit/http.test.ts exercises the Headers CONSTRUCTOR; on the wire llhttp
-    // strips OWS before it gets here, so both paths are covered but only the
-    // former is pinned.
+    // TODO(upstream-contract): qurl-service uses delta-seconds, not HTTP dates.
     const retryAfterRaw = res.status === 503 ? res.headers.get('retry-after') ?? '' : '';
     const honorsDirective = retryAfterCeilingMs > 0 && /^\d+$/.test(retryAfterRaw);
     const directiveMs = honorsDirective ? Number(retryAfterRaw) * 1000 : 0;
-    // Surface every retry decision in CI logs so a run that RECOVERED after a
-    // blip doesn't look identical to one that never blipped — the drain-gap
-    // signal #1085 wants — and so a run that STOPPED says why. Log the ORIGIN
-    // only, not the full URL: the fileviewer `/view/<mint-id>` path carries the
-    // capability mint-id, which must not land in CI logs.
+    // Capability paths must not enter CI logs.
     let origin: string;
     try {
       origin = new URL(input).origin;
     } catch {
       origin = '<url>'; // non-absolute input: don't throw, don't leak
     }
-    // Over the ceiling: decline the directive and fall back to the local
-    // backoff — never drop the retry. See `maxRetryAfterMs` above for why.
     const overCeiling = directiveMs > retryAfterCeilingMs;
-    // Opted in, got a 503, and no directive to honor — so this attempt falls
-    // back to the local backoff. Note this is BROADER than "the confirm window
-    // was skipped": a gateway 503 in front of the service carries no
-    // `Retry-After` either, and has nothing to do with a protection update. The
-    // logged text says only what is true (no usable directive, local backoff
-    // only) and leaves the cause to the reader.
     const degraded = retryAfterCeilingMs > 0 && res.status === 503 && !honorsDirective;
-    // A honored directive gets a small pad. `Retry-After` is an ESTIMATE, not a
-    // bound, so re-asking at exactly t=directive means a convergence landing a
-    // few hundred ms late still fails — and fails with the same message as the
-    // false negative this retry exists to remove. The ceiling already reserves
-    // room for this (35s against an observed 30s); it just wasn't being spent.
-    const delayMs = overCeiling
-      ? baseDelayMs * attempt
-      : Math.max(
-        baseDelayMs * attempt,
-        // Capped at the ceiling, so the pad is spent only where there is room
-        // for it — a directive already AT the ceiling waits exactly the
-        // ceiling, which keeps the 30 <= 35 < 60 inequality intact.
-        directiveMs && Math.min(directiveMs + DIRECTIVE_PAD_MS, retryAfterCeilingMs),
-      );
-    // One level for every retry decision, with a grep-able token instead of an
-    // escalation: the degraded predicate also matches the ALB drain-gap 503 —
-    // no `Retry-After`, and this module's founding scenario — so raising its
-    // level would fire on the benign case and erode the signal.
+    const directiveDelayMs = directiveMs > 0 && !overCeiling
+      ? Math.min(directiveMs + DIRECTIVE_PAD_MS, retryAfterCeilingMs)
+      : 0;
+    const delayMs = Math.max(baseDelayMs * attempt, directiveDelayMs);
+    const directiveNote = overCeiling
+      ? ` (declined Retry-After: ${retryAfterRaw.slice(0, 64)} = ${directiveMs}ms, over the ${retryAfterCeilingMs}ms ceiling)`
+      : degraded
+        ? ` (no usable Retry-After: ${JSON.stringify(retryAfterRaw.slice(0, 64))}; local backoff only)`
+        : '';
     console.warn(
       `[fetchWithTransientRetry] ${method} ${origin} -> ${res.status}; ` +
-        `retry ${attempt}/${maxAttempts - 1} in ${delayMs}ms` +
-        // Folded into the same line rather than emitted as a second warn: the
-        // module's logging contract is one grep-able line per retry decision.
-        // The no-directive note matters as much as the declined one: a caller
-        // that opted in and got a 503 WITHOUT a usable `Retry-After` silently
-        // falls back to the 1s backoff, retries well inside the window it meant
-        // to wait out, and reds with a line identical to an ordinary drain-gap
-        // retry. Saying so is what makes that degradation visible in CI.
-        (overCeiling
-          // Echo the raw header value too, so the CI line matches the wire.
-          ? ` (declined Retry-After: ${retryAfterRaw.slice(0, 64)} = ${directiveMs}ms, ` +
-            `over the ${retryAfterCeilingMs}ms ceiling)`
-          : degraded
-            // Bounded + quoted: unlike the declined branch this value never
-            // passed /^\d+$/, so it is arbitrary header bytes landing in
-            // retained CI logs. Headers can't carry CR/LF, but they can carry
-            // kilobytes of control characters.
-            ? ` (no usable Retry-After${retryAfterRaw ? `: ${JSON.stringify(retryAfterRaw.slice(0, 64))}` : ''}` +
-              '; local backoff only)'
-            : ''),
+        `retry ${attempt}/${maxAttempts - 1} in ${delayMs}ms${directiveNote}`,
     );
     // Release the discarded response's body so its socket returns to the pool
     // instead of lingering until GC (the 5xx body is never read).
