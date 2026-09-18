@@ -373,6 +373,16 @@ describe('revokeLink retry path', () => {
       headers: { 'Content-Type': 'application/json', 'Retry-After': '30' },
     });
 
+  // The hazard the guard makes unrepresentable: a bare origin gets a working
+  // DELETE (the pathname is overwritten) and a fallback read of `<origin>/{id}`
+  // that 404s — the exact false negative revokeLink exists to remove, silently.
+  test('rejects a bare origin rather than silently breaking the fallback', async () => {
+    await expect(
+      qurl.revokeLink('https://api.example.com', apiKey, publicResourceId),
+    ).rejects.toThrow(/management collection url/);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   // The ordinary case, and the one every URL mint in smoke/link-lifecycle/
   // concurrency takes: unprotected resource, first DELETE answers 204. One
   // request, no wait, NO fallback read — a regression making the fallback
@@ -493,25 +503,38 @@ describe('revokeLink retry path', () => {
     }
   });
 
-  // A dark 503 fails the management read too, so the fallback stays closed.
-  test('stays false when the management read also fails', async () => {
+  // THE property that makes the boolean worth its wait: a still-pending 503
+  // after the window is the convergence regression, so it must stay false EVEN
+  // THOUGH the resource already reads `revoked` — it was committed at the first
+  // 503. Falling back here would pass an unconverged protection update and
+  // reduce the whole confirm to a log line nobody greps.
+  test('a sustained pending 503 stays false even though the resource reads revoked', async () => {
     jest.useFakeTimers();
     try {
-      fetchMock.mockImplementation(() => new Response(null, { status: 503 }));
+      fetchMock.mockImplementation(pending503);
 
       const promise = qurl.revokeLink(mintUrl, apiKey, publicResourceId);
       await jest.advanceTimersByTimeAsync(120_000);
+
       await expect(promise).resolves.toBe(false);
-      // ...and says why. This is the path that ends in a red, and the
-      // assertion it fails aborts before the status check that would have
-      // shown the cause — so without this line it reads exactly like the
-      // pre-PR failure it replaces.
-      expect(warnSpy).toHaveBeenCalledWith(
-        expect.stringContaining('fallback management read failed'),
-      );
+      expect(fetchMock).toHaveBeenCalledTimes(2); // no fallback read attempted
     } finally {
       jest.useRealTimers();
     }
+  });
+
+  // When the fallback DOES run and the read itself fails, say why: this path
+  // ends in a red, and the assertion it fails aborts before the status check
+  // that would have shown the cause.
+  test('says why when the fallback management read fails', async () => {
+    fetchMock
+      .mockImplementationOnce(() => new Response(null, { status: 410 }))
+      .mockImplementationOnce(() => new Response(null, { status: 500 }));
+
+    await expect(qurl.revokeLink(mintUrl, apiKey, publicResourceId)).resolves.toBe(false);
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining('fallback management read failed'),
+    );
   });
 
   // A first-attempt 404 is not retryable, so the DELETE is single-shot — but
@@ -569,12 +592,12 @@ describe('revokeLink retry path', () => {
       );
 
       const promise = qurl.revokeLink(mintUrl, apiKey, publicResourceId);
-      await jest.advanceTimersByTimeAsync(10_000); // 1s backoff + the read's own
+      await jest.advanceTimersByTimeAsync(10_000);
       await expect(promise).resolves.toBe(false);
-      // Two DELETEs a second apart — retried, not abandoned — plus the fallback
-      // read's own bounded attempts. The cost the docstring weighs against
-      // fail-fast, pinned as a number rather than prose.
-      expect(fetchMock.mock.calls.length).toBeGreaterThanOrEqual(3);
+      // Two DELETEs a second apart — retried, not abandoned — and no fallback
+      // read, since a 503 is the pending signal rather than a lost answer. The
+      // cost the docstring weighs against fail-fast, pinned as a number.
+      expect(fetchMock).toHaveBeenCalledTimes(2);
     } finally {
       jest.useRealTimers();
     }

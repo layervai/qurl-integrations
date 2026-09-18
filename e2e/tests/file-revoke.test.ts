@@ -67,10 +67,14 @@ const tracked = trackedQurlResources(env);
 // getResourceStatus assertion below would have said `revoked` does NOT mean the
 // revocation failed. It means the NHP protection update was still pending after
 // the server-directed window revokeLink waits out — a convergence regression,
-// not a revoke regression. That distinction is the point: the boolean asserts
-// the protection update CONVERGED, which the management read cannot see.
-// #1506 tracks dropping it, which would trade that signal for immunity to the
-// window and most of this file's confirm wall clock.
+// not a revoke regression.
+//
+// That distinction is the whole point of the wait, and it is why revokeLink
+// refuses to fall back to the management read on a sustained 503 (it does fall
+// back on 404/409/410): the resource reads `revoked` from the moment of the
+// first 503, so a fallback there would pass an unconverged update and turn the
+// signal into a log line. #1506 tracks dropping the boolean, which would trade
+// that signal for immunity to the window and most of this file's wall clock.
 afterAll(() => tracked.revokeAll());
 
 // Valid 1x1 transparent PNG (standard test fixture — widely used, CRC/zlib

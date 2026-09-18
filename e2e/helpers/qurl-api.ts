@@ -338,10 +338,12 @@ export const REVOKE_CONFIRM_WAIT_MS = Array.from(
  *
  * Worth being explicit about what this buys, since file-revoke.test.ts asserts
  * `status === 'revoked'` two lines later and that read is strictly stronger for
- * the REVOCATION: waiting for the confirm DELETE to answer 2xx asserts that the
- * NHP protection update CONVERGED, which the management read cannot see. On a
- * revocation smoke that is the security-relevant property, and it is why the
- * wait is worth its wall clock rather than merely making a boolean truthful.
+ * the REVOCATION: a 2xx confirm asserts that the NHP protection update
+ * CONVERGED, which the management read cannot see. That is the security-
+ * relevant property on a revocation smoke, and it is why the fallback below is
+ * closed for a sustained 503 — leaving it open there would pass an unconverged
+ * update, since the resource reads `revoked` from the first 503 onward, and the
+ * wait would buy a log line instead of a signal.
  *
  * A non-2xx confirm is NOT trusted on its status code — not even a 404, which
  * link-lifecycle.test.ts pins as a legitimate second-revoke answer. Accepting
@@ -353,8 +355,12 @@ export const REVOKE_CONFIRM_WAIT_MS = Array.from(
  * whether the revocation happened. That matters because the repro behind this
  * fix observed 503 on a PROTECTED resource and 204 on a different UNPROTECTED
  * one — it never observed a protected 503 -> retry -> 2xx. The fallback is what
- * keeps the fix from depending on that unobserved answer: 404, 409, 410 or a
- * still-pending 503 all end with the resource's actual state deciding.
+ * keeps the fix from depending on that unobserved answer: 404, 409 and 410 end
+ * with the resource's actual state deciding. A still-pending 503 deliberately
+ * does NOT — that is the convergence regression the wait exists to surface, and
+ * since the resource reads `revoked` from the moment of the first 503, falling
+ * back there would return true for an unconverged update and reduce the whole
+ * confirm to a log line.
  *
  * The consequence to know before writing a new revoke test: a CONFIRMING revoke
  * reports the RESOURCE'S STATE, so it cannot distinguish a fresh revocation
@@ -398,6 +404,14 @@ export async function revokeLink(
 ): Promise<boolean> {
   // API: DELETE /v1/resources/{resource_id}
   const parsed = new URL(baseUrl);
+  // Enforced rather than documented: an origin-only caller would get a working
+  // DELETE (the pathname is overwritten below) and a silently 404ing fallback
+  // read, which is the false negative this function exists to remove.
+  if (stripTrailingSlashes(parsed.pathname) === '') {
+    throw new TypeError(
+      'revokeLink requires the management collection url, not a bare origin',
+    );
+  }
   parsed.pathname = `/v1/resources/${encodeURIComponent(resourceId)}`;
   const url = parsed.toString();
   const res = await fetchWithTransientRetry(url, {
@@ -424,13 +438,19 @@ export async function revokeLink(
   // passing silently. Gated on confirmPending, so the sweep and the negative
   // call sites stay at exactly one request.
   if (!confirmPending) return false;
-  // Skipped for auth failures, where the read uses the same credential and can
-  // only fail the same way — so it would double every confirming call site's
-  // request volume during a systematic cleanup regression (the case
-  // cleanup.ts's header calls dangerous) while buying no diagnosis. This is NOT
-  // the status-code trust the paragraph above rejects: a status test used to
-  // SKIP the read can forgo a true positive, never manufacture a false one.
-  if (res.status === 401 || res.status === 403) return false;
+  // Skipped for the statuses where a read would be wrong or useless. This is
+  // NOT the status-code trust the paragraph above rejects: a status test used
+  // to SKIP the read can forgo a true positive, never manufacture a false one.
+  //
+  //   503 — still pending after the window IS the convergence regression this
+  //     boolean exists to report. The resource already reads `revoked` (the
+  //     write committed at the first 503), so falling back here would return
+  //     true for an unconverged protection update and turn the signal into a
+  //     console.warn nobody greps. The wait would then buy nothing.
+  //   401/403 — the read uses the same credential and can only fail the same
+  //     way, so it would double every confirming call site's request volume
+  //     during a systematic cleanup regression for no diagnosis.
+  if (res.status === 503 || res.status === 401 || res.status === 403) return false;
   try {
     const status = await getResourceStatus(baseUrl, apiKey, resourceId);
     if (status.status !== 'revoked') return false;

@@ -269,6 +269,24 @@ test.each([
   await pending;
 });
 
+test('bounds and quotes an abusive Retry-After before it reaches the log', async () => {
+  // The degraded branch echoes a value that never passed /^\d+$/, so it is
+  // arbitrary header bytes landing in retained CI logs. Headers can't carry
+  // CR/LF, but they can carry kilobytes of control characters.
+  const abusive = `x\u0007${'A'.repeat(5_000)}`;
+  fetchMock.mockImplementation(respond(503, { 'Retry-After': abusive }));
+  const pending = fetchWithTransientRetry(
+    url, { method: 'DELETE' }, { maxAttempts: 2, maxRetryAfterMs: 35_000 },
+  );
+  await jest.advanceTimersByTimeAsync(1_000);
+  await pending;
+
+  const [line] = warnSpy.mock.calls[0] as [string];
+  expect(line).toContain('no usable Retry-After');
+  expect(line.length).toBeLessThan(400); // bounded, not the 5KB header
+  expect(line).not.toContain('\u0007'); // JSON.stringify escaped the control char
+});
+
 test('treats Retry-After: 0 as an honored directive of zero', async () => {
   // Passes /^\d+$/ and yields 0, so the local backoff must still apply rather
   // than the helper firing an immediate retry — and it must NOT be reported as

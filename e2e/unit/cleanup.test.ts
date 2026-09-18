@@ -37,7 +37,12 @@ test('the tracker interface does not expose the opt-out', async () => {
   const tracked = trackedQurlResources(env);
   // @ts-expect-error revoke(resourceId) takes exactly one argument.
   await tracked.revoke('res-1', { confirmPending: false });
-  expect(revokeLinkMock).toHaveBeenCalled();
+  // The runtime half: the argument DOES reach the implementation, which is why
+  // the options-object shape matters — a stray value degrades to the defaults
+  // rather than silently disabling confirmation.
+  expect(revokeLinkMock).toHaveBeenCalledWith(
+    env.MINT_API_URL, env.QURL_API_KEY, 'res-1', { confirmPending: false },
+  );
 });
 
 test('a revoke under test confirms the protection update', async () => {

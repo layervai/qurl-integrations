@@ -121,8 +121,10 @@ export function trackedQurlResources(env: {
     },
     revoke,
     async revokeAll() {
-      // revokeLink returns res.ok (false on a 4xx, NO throw) and only
-      // throws on a network error, so surface BOTH paths — the
+      // On this path (confirmPending: false) revokeLink returns res.ok —
+      // false on a 4xx, NO throw — and only throws on a network error. (The
+      // confirming path differs: it can return true for a non-ok DELETE via
+      // the management read.) So surface BOTH paths — the
       // systematic-403 one is the dangerous one (see module header).
       // Deliberately serial WITH a short pause between requests
       // (symmetric with deleteAll): this is the best-effort path, and a
