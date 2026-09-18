@@ -142,9 +142,10 @@ export async function fetchWithTransientRetry(
     // TODO(upstream-contract): qurl-service emits the delta-seconds form only.
     // Anything non-numeric (including the HTTP-date form RFC 9110 also allows)
     // falls through to the linear backoff rather than producing a NaN delay.
-    const retryAfterRaw = res.status === 503
-      ? res.headers.get('retry-after')?.trim() ?? ''
-      : '';
+    // No `.trim()`: the Headers API normalizes leading/trailing whitespace on
+    // the way in, so `get()` never returns a padded value (pinned by the
+    // padded-directive test in unit/http.test.ts).
+    const retryAfterRaw = res.status === 503 ? res.headers.get('retry-after') ?? '' : '';
     const directiveMs = retryAfterCeilingMs > 0 && /^\d+$/.test(retryAfterRaw)
       ? Number(retryAfterRaw) * 1000
       : 0;
@@ -170,11 +171,19 @@ export async function fetchWithTransientRetry(
         `retry ${attempt}/${maxAttempts - 1} in ${delayMs}ms` +
         // Folded into the same line rather than emitted as a second warn: the
         // module's logging contract is one grep-able line per retry decision.
+        // The no-directive note matters as much as the declined one: a caller
+        // that opted in and got a 503 WITHOUT a usable `Retry-After` silently
+        // falls back to the 1s backoff, retries well inside the window it meant
+        // to wait out, and reds with a line identical to an ordinary drain-gap
+        // retry. Saying so is what makes that degradation visible in CI.
         (overCeiling
           // Echo the raw header value too, so the CI line matches the wire.
           ? ` (declined Retry-After: ${retryAfterRaw} = ${directiveMs}ms, ` +
             `over the ${retryAfterCeilingMs}ms ceiling)`
-          : ''),
+          : retryAfterCeilingMs > 0 && res.status === 503 && directiveMs === 0
+            ? ` (no usable Retry-After${retryAfterRaw ? `: "${retryAfterRaw}"` : ''}` +
+              '; local backoff only)'
+            : ''),
     );
     // Release the discarded response's body so its socket returns to the pool
     // instead of lingering until GC (the 5xx body is never read).

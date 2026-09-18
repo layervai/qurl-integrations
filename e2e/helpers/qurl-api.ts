@@ -247,8 +247,8 @@ export async function accessLinkNoRedirect(url: string): Promise<LinkAccessResul
 const PENDING_REVOKE_CEILING_MS = 35_000;
 
 /** Total attempts for a confirming revoke, so `PENDING_REVOKE_ATTEMPTS - 1`
- * confirm windows. See revokeLink for why two rather than one. */
-const PENDING_REVOKE_ATTEMPTS = 3;
+ * confirm windows. See revokeLink for why one rather than two. */
+const PENDING_REVOKE_ATTEMPTS = 2;
 
 /** The longest a confirming `revokeLink` can spend waiting. EXPORTED so the
  * live suites size their jest budgets off it by arithmetic instead of restating
@@ -278,15 +278,17 @@ export const REVOKE_CONFIRM_WORST_CASE_MS =
  * to carry a long directive, which is the retry this helper exists for. Three
  * requests from one test is the cheaper side of that trade.
  *
- * TWO confirms, not one: `Retry-After` is the server's ESTIMATE of convergence,
- * not a bound, so a single window at exactly 30s turns a 31s convergence into a
- * red — trading a deterministic false failure for a timing-sensitive one. The
- * second window costs nothing in the normal case (a converged retry answers
- * 2xx and the loop ends) and only spends its ~30s on the tail this is meant to
- * absorb. Deliberately no budget numbers here: the live tests own theirs and
- * compute them as `<non-revoke worst case> + REVOKE_CONFIRM_WORST_CASE_MS`,
- * which is what that export is for. Still pending after both windows is a
- * convergence regression to report, not wait out.
+ * ONE confirm window, deliberately, even though `Retry-After` is the server's
+ * ESTIMATE of convergence rather than a bound — so a 31s convergence still
+ * reds. A second window would absorb that tail, but the tail is UNOBSERVED (as
+ * is the whole contract below), and it is not free: four connector revokes in
+ * file-revoke.test.ts confirm, and their ceilings sum against a
+ * `timeout-minutes: 10` smoke job. A job-level timeout is strictly less
+ * legible than the per-test failure this sizing protects, so paying for a
+ * hypothetical tail with measured headroom is the wrong trade. If a real
+ * 31-35s tail shows up, widen PENDING_REVOKE_ATTEMPTS to 3 — every live budget
+ * derives from REVOKE_CONFIRM_WORST_CASE_MS, so that is a one-line change.
+ * Still pending after the window is a convergence regression to report.
  *
  * Worth being explicit about what this buys, since file-revoke.test.ts asserts
  * `status === 'revoked'` two lines later and that read is strictly stronger for
@@ -298,8 +300,13 @@ export const REVOKE_CONFIRM_WORST_CASE_MS =
  * A 404 is NOT success, even on the confirm retry where
  * link-lifecycle.test.ts pins "404 or 200 both acceptable": accepting it needs
  * to know the first 503 was the committed one, which nothing in the response
- * says, and trusting it would let a revoke that never happened report success
- * on a resource that never existed (negative-paths.test.ts). NOTE the repro
+ * says AS THE HELPER REPORTS IT, and trusting it would let a revoke that never
+ * happened report success on a resource that never existed
+ * (negative-paths.test.ts). The signal does exist — the dark 503's 60s
+ * directive is DECLINED by the 35s ceiling, so "the preceding 503 carried a
+ * directive we honored" would discriminate with no body parsing — but
+ * fetchWithTransientRetry doesn't surface that today, so it is deferred to
+ * #1505 rather than impossible. NOTE the repro
  * behind this fix observed 503 on a PROTECTED resource and 204 on a different
  * UNPROTECTED one — it never observed a protected 503 -> retry -> 2xx, so what
  * the confirm retry answers is assumed, not measured. #1505 has the fix if it

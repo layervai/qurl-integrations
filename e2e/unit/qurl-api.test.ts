@@ -417,10 +417,9 @@ describe('revokeLink retry path', () => {
       await jest.advanceTimersByTimeAsync(qurl.REVOKE_CONFIRM_WORST_CASE_MS);
 
       await expect(pending).resolves.toBe(false);
-      // Two confirm windows at the ceiling, and the last attempt starts exactly
-      // at the exported budget — so the export IS the worst case, not a number
-      // that happens to sit near it.
-      expect(firedAt).toEqual([0, 35_000, qurl.REVOKE_CONFIRM_WORST_CASE_MS]);
+      // The last attempt starts exactly at the exported budget — so the export
+      // IS the worst case, not a number that happens to sit near it.
+      expect(firedAt).toEqual([0, qurl.REVOKE_CONFIRM_WORST_CASE_MS]);
     } finally {
       jest.useRealTimers();
     }
@@ -460,6 +459,29 @@ describe('revokeLink retry path', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1); // no 503, so no confirm retry
   });
 
+  // 2xx on the confirm retry is THE assumption this whole change rests on (the
+  // repro never observed it — see revokeLink's TODO). Pin both shapes the
+  // service could plausibly send, so the assumption is executable, not prose.
+  test.each([
+    ['204 No Content', 204],
+    ['200 OK', 200],
+  ])('revokeLink accepts %s on the confirm retry', async (_d, status) => {
+    jest.useFakeTimers();
+    try {
+      fetchMock
+        .mockImplementationOnce(
+          () => new Response(null, { status: 503, headers: { 'Retry-After': '30' } }),
+        )
+        .mockImplementationOnce(() => new Response(null, { status }));
+
+      const pending = qurl.revokeLink(mintUrl, apiKey, publicResourceId);
+      await jest.advanceTimersByTimeAsync(30_000);
+      await expect(pending).resolves.toBe(true);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   // The dark-503 guard at the call site the PR leans on hardest: revokeLink's
   // 35s ceiling is BELOW the deployment-state 503's 60s directive, so that one
   // is declined rather than waited out — the retry still happens, on the 1s
@@ -474,12 +496,11 @@ describe('revokeLink retry path', () => {
       const pending = qurl.revokeLink(mintUrl, apiKey, publicResourceId);
       await jest.advanceTimersByTimeAsync(1_000);
       expect(fetchMock).toHaveBeenCalledTimes(2); // retried, not abandoned
-      await jest.advanceTimersByTimeAsync(2_000);
       await expect(pending).resolves.toBe(false);
       // The cost the docstring weighs against fail-fast: a deploy window gets
-      // the full attempt budget on the local backoff, ~3s apart, not one
-      // request. Pinned so that trade is a number rather than prose.
-      expect(fetchMock).toHaveBeenCalledTimes(3);
+      // the full attempt budget on the local backoff, not one request. Pinned
+      // so that trade is a number rather than prose.
+      expect(fetchMock).toHaveBeenCalledTimes(2);
     } finally {
       jest.useRealTimers();
     }
@@ -504,14 +525,14 @@ describe('revokeLink retry path', () => {
         () => new Response(null, { status: 503, headers: { 'Retry-After': '30' } }),
       );
       const pending = qurl.revokeLink(mintUrl, apiKey, publicResourceId);
-      // Well past three 30s directives, so the attempt budget — not the clock —
+      // Well past two 30s directives, so the attempt budget — not the clock —
       // is what stops it. (The 35s ceiling itself is covered in http.test.ts.)
       await jest.advanceTimersByTimeAsync(120_000);
       await expect(pending).resolves.toBe(false);
-      // Bounded at TWO confirm retries: still pending after both of the
-      // server's own windows is a convergence regression to report, not wait
-      // out, and file-revoke's timeouts are sized on exactly this budget.
-      expect(fetchMock).toHaveBeenCalledTimes(3);
+      // Bounded at ONE confirm retry: still pending after the server's own
+      // window is a convergence regression to report, not wait out, and
+      // file-revoke's timeouts are sized on exactly this budget.
+      expect(fetchMock).toHaveBeenCalledTimes(2);
     } finally {
       jest.useRealTimers();
     }

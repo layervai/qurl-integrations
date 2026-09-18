@@ -138,6 +138,51 @@ test('a 503 with no Retry-After at all still uses the local backoff', async () =
   await jest.advanceTimersByTimeAsync(1_000);
   expect(fetchMock).toHaveBeenCalledTimes(2);
   await pending;
+  // ...and SAYS it degraded. Without this the line is indistinguishable from an
+  // ordinary drain-gap retry, so a red gives no hint the confirm mechanism was
+  // bypassed — the hazard revokeLink's TODO(upstream-contract) names.
+  expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('no usable Retry-After'));
+});
+
+test('a non-opted-in 503 does not claim a degraded directive', async () => {
+  // The same shape without the opt-in is just a normal retry, so the note must
+  // not fire — it would be noise on every drain-gap retry in the suite.
+  fetchMock.mockImplementation(respond(503));
+  const pending = fetchWithTransientRetry(url, { method: 'DELETE' }, { maxAttempts: 2 });
+  await jest.advanceTimersByTimeAsync(1_000);
+  await pending;
+  expect(warnSpy).not.toHaveBeenCalledWith(expect.stringContaining('no usable Retry-After'));
+});
+
+test('a padded Retry-After is honored', async () => {
+  // This is why the parse needs no `.trim()`: the Headers API normalizes
+  // leading/trailing whitespace when the value is set, so a padded directive
+  // reaches the regex already clean. Verified rather than assumed — removing
+  // the trim was only safe because of it.
+  fetchMock.mockImplementation(respond(503, { 'Retry-After': '  30  ' }));
+  const pending = fetchWithTransientRetry(
+    url, { method: 'DELETE' }, { maxAttempts: 2, maxRetryAfterMs: 35_000 },
+  );
+  await jest.advanceTimersByTimeAsync(29_999);
+  expect(fetchMock).toHaveBeenCalledTimes(1); // honored, not treated as garbage
+  await jest.advanceTimersByTimeAsync(1);
+  await pending;
+  expect(fetchMock).toHaveBeenCalledTimes(2);
+});
+
+test('a non-absolute input logs the placeholder, never the path', async () => {
+  // The `catch { origin = '<url>' }` arm. Redaction is a security invariant
+  // here, so the fallback gets the same assertion as the happy path.
+  fetchMock.mockImplementation(respond(503, { 'Retry-After': '30' }));
+  const pending = fetchWithTransientRetry(
+    '/v1/resources/abc', { method: 'DELETE' }, { maxAttempts: 2, maxRetryAfterMs: 35_000 },
+  );
+  await jest.advanceTimersByTimeAsync(30_000);
+  await pending;
+
+  const [line] = warnSpy.mock.calls[0] as [string];
+  expect(line).toContain('<url>');
+  expect(line).not.toContain('/v1/resources/abc');
 });
 
 test('the ceiling is per attempt, not a total budget', async () => {
