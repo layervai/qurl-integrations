@@ -67,14 +67,11 @@ export interface QurlResourceTracker {
    * drop it from the afterAll ledger on success (so cleanup doesn't
    * re-revoke it and warn about the expected not-ok); on failure it
    * stays tracked for the afterAll retry. Returns revokeLink's boolean
-   * so revoke-under-test call sites assert on it directly — which is why
-   * this path CONFIRMS: on an NHP-protected resource it waits out
-   * qurl-service's protection-update 503 (up to ~35s) so the boolean is
-   * true when the revocation happened: it confirms the protection update, which
-   * costs up to REVOKE_CONFIRM_WAIT_MS — size a test budget off that export,
-   * not off the directive usually observed. revokeAll skips
-   * it via an option deliberately NOT
-   * exposed here: opting out is cleanup's call, not a caller's. Negative
+   * so revoke-under-test call sites assert on it directly — which is why this
+   * path CONFIRMS: on an NHP-protected resource it waits out qurl-service's
+   * protection-update 503, costing up to REVOKE_CONFIRM_WAIT_MS. Size a test
+   * budget off that export. revokeAll skips the wait via an option deliberately
+   * NOT exposed here: opting out is cleanup's call, not a caller's. Negative
    * revoke tests (wrong key, nonexistent id) should keep calling
    * qurl.revokeLink directly — those must not touch the ledger. */
   revoke(resourceId: string): Promise<boolean>;

@@ -300,7 +300,13 @@ export const REVOKE_CONFIRM_WAIT_MS =
  * the server's own directive (35s ceiling — see http.ts's `maxRetryAfterMs`
  * for why honoring it is opt-in and why the ceiling matters). Note a DECLINED
  * directive (the dark 503's 60s) still costs the full attempt budget on the
- * local backoff — two DELETEs a second apart during a deploy window. Deliberate:
+ * local backoff — two DELETEs a second apart during a deploy window. Note the
+ * same applies to a 429: this path declines its directive (see http.ts) and
+ * then retries a second later anyway, which adds load during a shed. Left as
+ * is because that is the helper's long-standing behaviour for every idempotent
+ * caller rather than new policy here, and four confirming revokes is a small
+ * contribution — but it is the one combination worth being deliberate about.
+ * Deliberate:
  * fail-fast on any over-ceiling directive would also abandon a transient
  * drain-gap 503 that merely carries a long one, which is the retry this helper
  * exists for.
@@ -341,6 +347,13 @@ export const REVOKE_CONFIRM_WAIT_MS =
  * keeps the fix from depending on that unobserved answer: 404, 409, 410 or a
  * still-pending 503 all end with the resource's actual state deciding.
  *
+ * The consequence to know before writing a new revoke test: a CONFIRMING revoke
+ * reports the RESOURCE'S STATE, so it cannot distinguish a fresh revocation
+ * from one that already happened — call it twice and both return true.
+ * Idempotency assertions must pass `confirmPending: false` (both double-revoke
+ * tests and both negative-paths cases do), which short-circuits before the
+ * fallback and restores "did THIS call revoke it".
+ *
  * `confirmPending: false` drops the confirm attempt entirely — one request, as
  * before this helper gained a retry — for cleanup.ts's best-effort sweep. It
  * drops the retry and not just the wait because of the BOUNDED worst case of a
@@ -362,6 +375,13 @@ export const REVOKE_CONFIRM_WAIT_MS =
  * ever narrows to <= the ceiling, this call site would start waiting out
  * deployment 503s and needs #1505's body discrimination instead. */
 export async function revokeLink(
+  /** The management COLLECTION url, e.g. `<origin>/v1/qurls` — not a bare
+   * origin. The DELETE only needs the origin (it overwrites the pathname with
+   * `/v1/resources/{id}`), but the fallback read below appends `/{id}` to this
+   * value as given, so an origin-only caller would get a working DELETE and a
+   * silently 404ing fallback — reintroducing the exact false negative this
+   * function exists to remove. Every caller passes env.MINT_API_URL, which is
+   * also what the live suites hand to getResourceStatus directly. */
   baseUrl: string,
   apiKey: string,
   resourceId: string,

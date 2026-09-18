@@ -16,7 +16,10 @@ import * as qurl from '../helpers/qurl-api';
 jest.mock('../helpers/qurl-api');
 
 const revokeLinkMock = qurl.revokeLink as jest.MockedFunction<typeof qurl.revokeLink>;
-const env = { MINT_API_URL: 'https://api.example.com/v1/resources', QURL_API_KEY: 'test-key' };
+// Same shape as qurl-api.test.ts's mintUrl and as env.MINT_API_URL in the live
+// suites: the management COLLECTION url. revokeLink's fallback read appends
+// `/{id}` to it, so the shape is part of its contract.
+const env = { MINT_API_URL: 'https://api.example.com/v1/qurls', QURL_API_KEY: 'test-key' };
 
 beforeEach(() => {
   revokeLinkMock.mockReset();

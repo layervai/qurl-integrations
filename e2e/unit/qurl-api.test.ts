@@ -367,6 +367,23 @@ describe('revokeLink retry path', () => {
   const pending503 = () =>
     new Response(null, { status: 503, headers: { 'Retry-After': '30' } });
 
+  // The ordinary case, and the one every URL mint in smoke/link-lifecycle/
+  // concurrency takes: unprotected resource, first DELETE answers 204. One
+  // request, no wait, NO fallback read — a regression making the fallback
+  // unconditional would otherwise slip through, since every other test here
+  // starts from a non-2xx.
+  test.each([
+    ['the confirming default', undefined],
+    ['the non-confirming sweep budget', { confirmPending: false }],
+  ])('a first-attempt 204 returns true in one request under %s', async (_d, opts) => {
+    fetchMock.mockImplementationOnce(() => new Response(null, { status: 204 }));
+
+    await expect(
+      qurl.revokeLink(mintUrl, apiKey, publicResourceId, opts),
+    ).resolves.toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   // qurl-service commits the revocation, then answers 503 + `Retry-After: 30`
   // until the NHP protection update lands. Every connector upload is protected,
   // so a single-shot DELETE reported a false failure and red-flagged four
