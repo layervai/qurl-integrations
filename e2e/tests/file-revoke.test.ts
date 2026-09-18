@@ -288,8 +288,13 @@ describe('File Revoke', () => {
     // and the smoke/link-lifecycle sibling test uses the same "does not
     // throw" contract. Covered by `resolves.not.toThrow()` for the
     // explicit contract expression.
+    // confirmPending: false — this call's boolean is DISCARDED (the contract
+    // pinned here is "does not reject"), so waiting out a protection-update
+    // directive would spend ~31s computing a value nobody reads.
     await expect(
-      qurl.revokeLink(env.MINT_API_URL, env.QURL_API_KEY, upload.resource_id),
+      qurl.revokeLink(env.MINT_API_URL, env.QURL_API_KEY, upload.resource_id, {
+        confirmPending: false,
+      }),
     ).resolves.not.toThrow();
 
     // Resource is still revoked after the redundant call.
@@ -297,11 +302,7 @@ describe('File Revoke', () => {
       env.MINT_API_URL, env.QURL_API_KEY, upload.resource_id,
     );
     expect(status.status).toBe('revoked');
-    // Explicit, not jest.config.js's 120s default: this is the only test with
-    // TWO sequential revokes, so it carries the most protection-update WAIT in
-    // the file (~31s x 2 worst case) on top of an upload that can spend ~21s in
-    // its own transient + app-level-429 backoff — ~83s. The default would cover
-    // that, but a budget made of two waits should say so rather than inherit a
-    // number; test 1 above is the one with the thinner margin.
-  }, 150_000);
+    // No explicit budget: only the FIRST revoke confirms (~31s worst case), the
+    // second opts out, so ~56s sits well inside jest.config.js's 120s default.
+  });
 });

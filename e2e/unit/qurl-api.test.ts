@@ -376,10 +376,15 @@ describe('revokeLink retry path', () => {
         .mockResolvedValueOnce(new Response(null, { status: 204 }));
 
       const pending = qurl.revokeLink(mintUrl, apiKey, publicResourceId);
-      // The retry must wait out the server's directive, not the 1s local backoff.
+      // The retry must wait out the server's directive, not the 1s local
+      // backoff. Advance a full 30s after that check rather than the exact
+      // remaining 29s: this is the only 503 fixture here with a real body, so
+      // it is the only one where the helper's `await res.body?.cancel()` sits
+      // between the first response and the timer being registered. Exact
+      // arithmetic would depend on that settling within the same tick.
       await jest.advanceTimersByTimeAsync(1_000);
       expect(fetchMock).toHaveBeenCalledTimes(1);
-      await jest.advanceTimersByTimeAsync(29_000);
+      await jest.advanceTimersByTimeAsync(30_000);
 
       await expect(pending).resolves.toBe(true);
       expect(fetchMock).toHaveBeenCalledTimes(2);
@@ -475,10 +480,9 @@ describe('revokeLink retry path', () => {
   });
 });
 
-// The waiting is OPT-IN, and this is why: qurl-service also answers 503 +
-// `Retry-After: 60` for deployment state (the "dark 503"), which no client
-// should wait out — it reflects a standing condition, not a transient one.
-// A caller that hasn't asked for the wait keeps the 1s local backoff.
+// The dark-503 guard, from the other side: a caller that never asked for the
+// wait keeps its 1s local backoff even when handed a directive. (Why the wait
+// is opt-in at all is on http.ts's `maxRetryAfterMs`.)
 test('getResourceStatus does not opt in, so it ignores Retry-After', async () => {
   jest.useFakeTimers();
   // Its own spy: this one lives outside the describe above but still drives a

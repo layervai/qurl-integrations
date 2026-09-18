@@ -145,7 +145,7 @@ export function trackedQurlResources(env: {
             console.warn(
               `afterAll: best-effort revoke of ${id} returned not-ok ` +
                 '(503 = expected committed-but-pending on a protected resource; ' +
-                '404 = already lapsed to its expiry; 429 = sweep outran the limiter; ' +
+                '429 = sweep outran the limiter; 404 = never existed or already purged; ' +
                 '401/403 = a real cleanup regression)',
             );
           }

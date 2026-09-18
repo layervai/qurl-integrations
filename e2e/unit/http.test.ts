@@ -180,10 +180,23 @@ test.each([
 });
 
 test('does not honor Retry-After on a 429 even when opted in', async () => {
-  // Scoped to 503 on purpose: a 429 directive means "you burst", and letting
-  // one shed DELETE cost 35s would blow the serial cleanup sweeps that budget
-  // ~2s each (concurrency.test.ts's 180s afterAll over ~60 resources).
+  // Scoped to 503 on purpose — see http.ts's `maxRetryAfterMs` for why.
   fetchMock.mockImplementation(respond(429, { 'Retry-After': '30' }));
+  const pending = fetchWithTransientRetry(
+    url, { method: 'DELETE' }, { maxAttempts: 2, maxRetryAfterMs: 35_000 },
+  );
+  await jest.advanceTimersByTimeAsync(1_000);
+  expect(fetchMock).toHaveBeenCalledTimes(2);
+  await pending;
+});
+
+test.each([
+  ['502', 502],
+  ['504', 504],
+])('does not honor Retry-After on a %s either', async (_description, status) => {
+  // Retryable for an idempotent method, but not a status this stack attaches a
+  // meaningful directive to — only 503 is. Rounds out the scoping matrix.
+  fetchMock.mockImplementation(respond(status, { 'Retry-After': '30' }));
   const pending = fetchWithTransientRetry(
     url, { method: 'DELETE' }, { maxAttempts: 2, maxRetryAfterMs: 35_000 },
   );
