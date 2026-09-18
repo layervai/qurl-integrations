@@ -277,21 +277,17 @@ export const REVOKE_CONFIRM_WAIT_MS =
  * the server's own directive (35s ceiling — see http.ts's `maxRetryAfterMs`
  * for why honoring it is opt-in and why the ceiling matters). Note a DECLINED
  * directive (the dark 503's 60s) still costs the full attempt budget on the
- * local backoff — two DELETEs a second apart during a deploy window. That is in
- * tension with the dark 503's "clients must not auto-retry", and it is
- * deliberate: the alternative rule, fail-fast whenever a directive is over the
- * ceiling, would also abandon a transient drain-gap 503 that merely happens to
- * carry a long directive, which is the retry this helper exists for. One extra
- * request from one test is the cheaper side of that trade.
+ * local backoff — two DELETEs a second apart during a deploy window. Deliberate:
+ * fail-fast on any over-ceiling directive would also abandon a transient
+ * drain-gap 503 that merely carries a long one, which is the retry this helper
+ * exists for.
  *
- * ONE confirm window, deliberately, even though `Retry-After` is the server's
- * ESTIMATE of convergence rather than a bound — so a 31s convergence still
- * reds. A second window would absorb that tail, but the tail is UNOBSERVED (as
- * is the whole contract below), and it is not free: four connector revokes in
- * file-revoke.test.ts confirm, and their ceilings sum against a
- * `timeout-minutes: 10` smoke job. A job-level timeout is strictly less
- * legible than the per-test failure this sizing protects, so paying for a
- * hypothetical tail with measured headroom is the wrong trade. If a real
+ * ONE confirm window, deliberately. `Retry-After` is the server's ESTIMATE of
+ * convergence rather than a bound, so a 31s convergence still reds; a second
+ * window would absorb that tail, but the tail is UNOBSERVED (as is the whole
+ * contract below) and four confirming revokes in file-revoke.test.ts pay for it
+ * out of a job budget a timeout would blow less legibly than any per-test
+ * failure. If a real
  * 31-35s tail shows up, widen PENDING_REVOKE_ATTEMPTS to 3 — every live budget
  * derives from REVOKE_CONFIRM_WAIT_MS, so they follow automatically. They
  * follow it OVER the job budget, though: doubling the wait pushes file-revoke's

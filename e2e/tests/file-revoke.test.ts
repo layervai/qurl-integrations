@@ -317,7 +317,8 @@ describe('File Revoke', () => {
     // explicit contract expression.
     // confirmPending: false — this call's boolean is DISCARDED (the contract
     // pinned here is "does not reject"), so waiting out a protection-update
-    // directive would spend ~31s computing a value nobody reads.
+    // directive would spend up to REVOKE_CONFIRM_WAIT_MS computing a value
+    // nobody reads.
     await expect(
       qurl.revokeLink(env.MINT_API_URL, env.QURL_API_KEY, upload.resource_id, {
         confirmPending: false,

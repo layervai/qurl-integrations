@@ -44,7 +44,12 @@ export const FILE_REVOKE_BASE_MS = {
   doubleRevoke: 85_000,
 } as const;
 
-/** What each case is actually given, and what the unit test sums. */
-export const FILE_REVOKE_TIMEOUTS_MS = Object.fromEntries(
-  Object.entries(FILE_REVOKE_BASE_MS).map(([k, v]) => [k, v + REVOKE_CONFIRM_WAIT_MS]),
-) as Record<keyof typeof FILE_REVOKE_BASE_MS, number>;
+/** What each case is actually given, and what the unit test sums. Written out
+ * rather than mapped: `Object.entries` widens the key type, so the mapped form
+ * needed a cast that would have hidden a typo'd or dropped key. */
+export const FILE_REVOKE_TIMEOUTS_MS = {
+  uploadViewRevoke: FILE_REVOKE_BASE_MS.uploadViewRevoke + REVOKE_CONFIRM_WAIT_MS,
+  distinctWatermark: FILE_REVOKE_BASE_MS.distinctWatermark + REVOKE_CONFIRM_WAIT_MS,
+  singleUseKnock: FILE_REVOKE_BASE_MS.singleUseKnock + REVOKE_CONFIRM_WAIT_MS,
+  doubleRevoke: FILE_REVOKE_BASE_MS.doubleRevoke + REVOKE_CONFIRM_WAIT_MS,
+};

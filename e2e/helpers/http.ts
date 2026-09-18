@@ -176,13 +176,13 @@ export async function fetchWithTransientRetry(
     const delayMs = overCeiling
       ? baseDelayMs * attempt
       : Math.max(baseDelayMs * attempt, directiveMs);
-    // console.ERROR for the degraded case, warn otherwise. A bypassed confirm
-    // mechanism is not a retry notice: it means the caller waited 1s where it
-    // meant to wait out a convergence window, so the red that follows will look
-    // like a convergence regression rather than a missing header. On a verbose
-    // live run nobody greps warnings on a green day; an error stands out.
-    const log = degraded ? console.error : console.warn;
-    log(
+    // One level for every retry decision, with a grep-able token instead.
+    // Escalating the degraded case to console.error was tried and reverted: the
+    // predicate also matches the ALB drain-gap 503, which carries no
+    // `Retry-After` and is this module's FOUNDING scenario, so the benign case
+    // would have raised errors on green runs and eroded the signal it was meant
+    // to buy. `no usable Retry-After` is distinctive enough for CI to key on.
+    console.warn(
       `[fetchWithTransientRetry] ${method} ${origin} -> ${res.status}; ` +
         `retry ${attempt}/${maxAttempts - 1} in ${delayMs}ms` +
         // Folded into the same line rather than emitted as a second warn: the

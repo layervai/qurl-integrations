@@ -100,14 +100,11 @@ export function trackedQurlResources(env: {
   // and stays a single request, exactly as costly as before this PR — the
   // sweep only needs "did it stick", and charging it ~30s plus a second round
   // trip per straggler would blow the very hook budget that keeps it from
-  // leaking (60 resources would need ~35min). It also drops the transient
-  // retry, which is the un-taken part: in the COMMON case (one straggler on a
-  // drain-gap 503) a bare `maxAttempts: 2, maxRetryAfterMs: 0` would cost ~1s
-  // and reclaim a resource that now lapses to TTL. The reason it isn't taken is
-  // narrower than "unaffordable": in the case that actually threatens the hook
-  // — a service-wide shed where all ~60 stragglers retry — nothing is reclaimed
-  // either way, so the retry converts an outage into a hook timeout and buys
-  // nothing. Worth revisiting if a single-straggler leak is ever observed.
+  // leaking (60 resources would need ~35min). It drops the transient retry with
+  // it: in a service-wide shed — the case that actually threatens the hook —
+  // all ~60 stragglers would retry and nothing is reclaimed either way, so the
+  // retry only converts an outage into a hook timeout. A single straggler would
+  // be reclaimed for ~1s, so revisit if that leak is ever observed.
   //
   // Options object, not a positional boolean, so a stray `.map` index
   // degrades to the defaults instead of silently turning confirmation off.
