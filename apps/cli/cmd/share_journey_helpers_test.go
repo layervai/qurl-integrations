@@ -156,6 +156,8 @@ func reserveCmdTCPPort(t *testing.T) int {
 	return port
 }
 
+// startCmdFRPS returns the test CA file. Go's httptest certificate uses
+// example.com; callers set that expected name when dialing localhost.
 func startCmdFRPS(t *testing.T, bindPort, vhostPort int, subDomainHost, pluginURL string) string {
 	t.Helper()
 	cfg := &v1.ServerConfig{
@@ -164,9 +166,6 @@ func startCmdFRPS(t *testing.T, bindPort, vhostPort int, subDomainHost, pluginUR
 		HTTPPlugins: []v1.HTTPPluginOptions{{
 			Name: "proxy-lifecycle-recorder", Addr: pluginURL, Path: "/", Ops: []string{"NewProxy", "CloseProxy"},
 		}},
-	}
-	if err := cfg.Complete(); err != nil {
-		t.Fatalf("complete journey server config: %v", err)
 	}
 	certificate := httptest.NewTLSServer(http.NotFoundHandler())
 	pair := certificate.TLS.Certificates[0]
@@ -186,6 +185,10 @@ func startCmdFRPS(t *testing.T, bindPort, vhostPort int, subDomainHost, pluginUR
 			t.Fatal(err)
 		}
 	}
+	if err := cfg.Complete(); err != nil {
+		t.Fatalf("complete journey server config: %v", err)
+	}
+	// NewService loads the key pair before the test removes its temp directory.
 	service, err := frpserver.NewService(cfg)
 	if err != nil {
 		t.Fatalf("construct journey server on 127.0.0.1:%d: %v", bindPort, err)

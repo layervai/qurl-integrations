@@ -24,11 +24,6 @@ import (
 // would split the source address used for admission from the Connector route.
 var ErrDirectEgressRequired = errors.New("qURL local sharing requires direct egress")
 
-// DefaultFRPCommon verifies tunnel certificates with the system trust store.
-func DefaultFRPCommon(dialTimeoutSeconds, keepaliveSeconds int64) (*v1.ClientCommonConfig, error) {
-	return ConfiguredFRPCommon(dialTimeoutSeconds, keepaliveSeconds, "", "")
-}
-
 // ConfiguredFRPCommon enables authenticated TLS with system roots or a custom CA file.
 // The optional server name overrides the admitted host only for certificate verification.
 // It validates trust before enrollment or starting any routes; no insecure fallback is allowed.

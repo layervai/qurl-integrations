@@ -505,9 +505,8 @@ func runShareDaemonWithDeployment(ctx context.Context, opts *globalOpts, stateDi
 	}
 	opts.redirectFRPLogs()
 	server := &connectordaemon.IPCServer{
-		RequestHeadersEnabled: common.Transport.TLS.VerifyServerCertificate,
-		SocketPath:            socketPath,
-		Manager:               manager, JobVersion: jobVersion,
+		SocketPath: socketPath,
+		Manager:    manager, JobVersion: jobVersion,
 	}
 	return server.Run(ctx)
 }

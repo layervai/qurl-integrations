@@ -499,9 +499,12 @@ curl --unix-socket "$STATE_DIR/daemon.sock" -X POST http://localhost/reload
 ```
 
 All daemon routes verify the tunnel server certificate with the system trust
-store and the admitted hostname: `connect.layerv.ai` in production or
-`connect.layerv.xyz` in sandbox. Certificate and key renewal does not require
-client updates. Runtime origin headers use this verified connection.
+store and the hostname from authenticated NHP admission. The hosted deployment
+uses `connect.layerv.ai` in production and `connect.layerv.xyz` in sandbox.
+Certificate and key renewal does not require client updates. Runtime origin
+headers are now available on the default per-user daemon without a CA file.
+
+<!-- TODO(upstream-contract): NHP infra owns the hosted tunnel domain names. -->
 
 For a private CA, use `qurl daemon run --tunnel-ca-file
 /etc/qurl/tunnel-ca.pem`. The PEM file must use an absolute path. Use

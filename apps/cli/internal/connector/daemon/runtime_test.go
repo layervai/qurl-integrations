@@ -50,7 +50,7 @@ func (*failingResourceAdmitter) Retire(context.Context, connectorshare.Admission
 func (*failingResourceAdmitter) MarkServingHealthy() error                              { return nil }
 func (*failingResourceAdmitter) Close() error                                           { return nil }
 
-func TestDefaultFRPCommonCannotUseEnvironmentProxy(t *testing.T) {
+func TestConfiguredFRPCommonCannotUseEnvironmentProxy(t *testing.T) {
 	const proxy = "http://user:secret@private-proxy.example:8080"
 	t.Setenv("http_proxy", proxy)
 	inherited := &v1.ClientCommonConfig{}
@@ -60,7 +60,7 @@ func TestDefaultFRPCommonCannotUseEnvironmentProxy(t *testing.T) {
 	if inherited.Transport.ProxyURL == "" {
 		t.Fatal("test no longer exercises FRP's environment-proxy default")
 	}
-	common, err := DefaultFRPCommon(1, 1)
+	common, err := ConfiguredFRPCommon(1, 1, "", "")
 	if common != nil || !errors.Is(err, ErrDirectEgressRequired) {
 		t.Fatalf("proxy configuration = %#v, %v; want actionable rejection", common, err)
 	}
@@ -81,7 +81,7 @@ func TestNativeGroupRetryLogsClassifiedRetryWithoutStoppingDaemon(t *testing.T) 
 	attemptErr := errors.Join(errors.New("classified native attempt failure from Bearer "+secret),
 		&qurl.ServerDenyError{ErrCode: "52005"})
 	admitter := &failingResourceAdmitter{err: attemptErr}
-	common, err := DefaultFRPCommon(1, 1)
+	common, err := ConfiguredFRPCommon(1, 1, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
