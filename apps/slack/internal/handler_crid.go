@@ -2,7 +2,6 @@ package internal
 
 import (
 	"context"
-	"crypto/x509"
 	"encoding/base64"
 	"errors"
 	"log/slog"
@@ -84,14 +83,11 @@ func resourceIDForCRID(allowed map[string]struct{}, cridValue string) (resourceI
 		if err != nil {
 			continue
 		}
-		if _, err := x509.ParsePKIXPublicKey(der); err != nil {
-			continue
-		}
 		keyCandidates++
 		// The CRID already passed crid.Validate at parse time, so an error
 		// here is impossible by invariant; treating it as a miss fails closed.
 		if matched, err := crid.KeyMatches(cridValue, der); err == nil && matched {
-			return id, 0
+			return id, keyCandidates
 		}
 	}
 	return "", keyCandidates

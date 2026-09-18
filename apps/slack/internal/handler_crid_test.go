@@ -165,10 +165,10 @@ func TestResourceIDForCRID(t *testing.T) {
 		t.Errorf("resourceIDForCRID = %q, want %q", got, testTunnelResourceID)
 	}
 	delete(allowed, testTunnelResourceID)
-	// Only testResourceIDFix decodes to a public key; "r_legacy" decodes as
-	// base64url but is not DER, and the URL does not decode at all.
-	if got, candidates := resourceIDForCRID(allowed, testTunnelCRID); got != "" || candidates != 1 {
-		t.Errorf("resourceIDForCRID = %q, %d candidates; want miss with 1 candidate", got, candidates)
+	// testResourceIDFix and "r_legacy" decode as base64url (candidates whose
+	// digest cannot match); the URL does not decode at all.
+	if got, candidates := resourceIDForCRID(allowed, testTunnelCRID); got != "" || candidates != 2 {
+		t.Errorf("resourceIDForCRID = %q, %d candidates; want miss with 2 candidates", got, candidates)
 	}
 }
 
