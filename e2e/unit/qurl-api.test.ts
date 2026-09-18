@@ -1,5 +1,7 @@
 import * as qurl from '../helpers/qurl-api';
-import { FILE_REVOKE_TIMEOUTS_MS, SMOKE_JOB_BUDGET_MS } from '../helpers/smoke-budgets';
+import {
+  FILE_REVOKE_TIMEOUTS_MS, SMOKE_JOB_BUDGET_MS, SMOKE_JOB_RESERVE_MS,
+} from '../helpers/smoke-budgets';
 
 const mintUrl = 'https://api.example.com/v1/qurls';
 const apiKey = 'test-key';
@@ -389,7 +391,11 @@ describe('revokeLink retry path', () => {
 
       await expect(pending).resolves.toBe(true);
       expect(fetchMock).toHaveBeenCalledTimes(2);
-      expect(fetchMock.mock.calls[1][1]).toMatchObject({ method: 'DELETE' });
+      // The retry reuses `init`, so it must carry the same method AND credential.
+    expect(fetchMock.mock.calls[1][1]).toMatchObject({
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${apiKey}` },
+    });
     } finally {
       jest.useRealTimers();
     }
@@ -629,7 +635,17 @@ test('the file-revoke ceilings leave the job reserve intact', () => {
   // sums FILE-REVOKE only — smoke, link-lifecycle and concurrency also gained
   // worst-case cost from the confirming default and are not counted, which is
   // why the name says "reserve intact" rather than "the job fits".
-  expect(total).toBeLessThanOrEqual(SMOKE_JOB_BUDGET_MS - 30_000);
+  expect(total).toBeLessThanOrEqual(SMOKE_JOB_BUDGET_MS - SMOKE_JOB_RESERVE_MS);
+});
+
+// The inequality the dark-503 discrimination rests on, promoted out of prose.
+// PENDING_REVOKE_CEILING_MS sitting strictly between the observed pending
+// directive and the deployment-state one is the ONLY thing separating a
+// committed-but-pending 503 from a dark 503 at revokeLink's call site — and an
+// edit to the ceiling can cross either bound with nothing else failing.
+test('the revoke ceiling separates the pending 503 from the dark 503', () => {
+  expect(qurl.OBSERVED_PENDING_DIRECTIVE_MS).toBeLessThanOrEqual(qurl.PENDING_REVOKE_CEILING_MS);
+  expect(qurl.PENDING_REVOKE_CEILING_MS).toBeLessThan(qurl.DARK_503_DIRECTIVE_MS);
 });
 
 // The sum alone would let two budgets be swapped for free — and swapping the
@@ -643,7 +659,10 @@ test('the highest-variance cases keep the roomiest ceilings', () => {
   // the ordering the variance argument rests on.
   expect(t.distinctWatermark).toBeGreaterThan(t.singleUseKnock); // 2 cold knocks > 1
   expect(t.singleUseKnock).toBeGreaterThan(t.uploadViewRevoke); // + 20s negative arm
-  expect(t.uploadViewRevoke).toBeGreaterThan(t.doubleRevoke - 35_000); // knock > none
+  // No third comparison: doubleRevoke (no knock) has a LARGER ceiling than
+  // uploadViewRevoke, because its base was back-derived from jest's 120s
+  // default rather than from its ~24s of work. The two above are the ordering
+  // the variance argument actually rests on.
 
   // Known limit: these keys are free-form, so deleting a file-revoke case
   // leaves its budget in the sum above with nothing consuming it. Tying them to

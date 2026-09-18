@@ -239,12 +239,21 @@ export async function accessLinkNoRedirect(url: string): Promise<LinkAccessResul
   };
 }
 
+/** The `Retry-After` qurl-service is OBSERVED to send with a committed-but-
+ * pending revocation. Mirrored here only so the inequality below is checkable;
+ * nothing reads it at runtime. */
+export const OBSERVED_PENDING_DIRECTIVE_MS = 30_000;
+
+/** The `Retry-After` on the deployment-state "dark 503" that clients must NOT
+ * wait out (fixture: apps/cli/internal/apitest/builders.go). Same purpose. */
+export const DARK_503_DIRECTIVE_MS = 60_000;
+
 /** Ceiling for the revocation-pending `Retry-After` revokeLink will honor, per
- * attempt. Sized to sit ABOVE qurl-service's 30s pending directive and BELOW
- * the deployment-state "dark 503"'s 60s — that inequality is what separates the
- * two at this call site, so it is a policy choice, not a spare number. See
- * revokeLink's TODO(upstream-contract) before moving it. */
-const PENDING_REVOKE_CEILING_MS = 35_000;
+ * attempt. Sized to sit strictly between the two constants above — that
+ * inequality is the ONLY thing separating a pending 503 from a dark 503 at this
+ * call site, so it is a policy choice, not a spare number, and a unit test
+ * pins it. See revokeLink's TODO(upstream-contract) before moving it. */
+export const PENDING_REVOKE_CEILING_MS = 35_000;
 
 /** Total attempts for a confirming revoke, so `PENDING_REVOKE_ATTEMPTS - 1`
  * confirm windows. See revokeLink for why one rather than two. */
@@ -322,10 +331,9 @@ export const REVOKE_CONFIRM_WAIT_MS =
  *
  * `confirmPending: false` drops the confirm attempt entirely — one request, as
  * before this helper gained a retry — for cleanup.ts's best-effort sweep. It
- * drops the retry and not just the wait because of the BOUNDED worst case: a
- * service-wide shed retries all ~60 stragglers, and even at the 1s local
- * backoff that is ~+60s on a sweep already at ~130s against a 180s hook, so it
- * would time out and leak. (cleanup.ts carries the same arithmetic.)
+ * drops the retry and not just the wait because of the BOUNDED worst case of a
+ * service-wide shed across a ~60-resource sweep; cleanup.ts carries that
+ * arithmetic and owns the decision.
  *
  * TODO(upstream-contract): mirrors qurl-service's protected-resource revoke
  * contract — that a 503 here means the revocation is COMMITTED (not rejected),

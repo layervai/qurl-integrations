@@ -146,9 +146,11 @@ export async function fetchWithTransientRetry(
     // TODO(upstream-contract): qurl-service emits the delta-seconds form only.
     // Anything non-numeric (including the HTTP-date form RFC 9110 also allows)
     // falls through to the linear backoff rather than producing a NaN delay.
-    // No `.trim()`: the Headers API normalizes leading/trailing whitespace on
-    // the way in, so `get()` never returns a padded value (pinned by the
-    // padded-directive test in unit/http.test.ts).
+    // No `.trim()`: the Headers API normalizes leading/trailing whitespace, so
+    // `get()` never returns a padded value. The padded-directive test in
+    // unit/http.test.ts exercises the Headers CONSTRUCTOR; on the wire llhttp
+    // strips OWS before it gets here, so both paths are covered but only the
+    // former is pinned.
     const retryAfterRaw = res.status === 503 ? res.headers.get('retry-after') ?? '' : '';
     const honorsDirective = retryAfterCeilingMs > 0 && /^\d+$/.test(retryAfterRaw);
     const directiveMs = honorsDirective ? Number(retryAfterRaw) * 1000 : 0;

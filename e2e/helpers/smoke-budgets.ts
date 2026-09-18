@@ -25,6 +25,14 @@ import { REVOKE_CONFIRM_WAIT_MS } from './qurl-api';
  */
 export const SMOKE_JOB_BUDGET_MS = 10 * 60_000;
 
+/** How much of the job budget the file-revoke ceilings must leave alone. It is
+ * a TRIPWIRE, not an allowance: the real fixed overhead (npm ci, SSM reads, a
+ * cold Playwright install) plus four other live suites exceeds it. Named here
+ * rather than inline in the test so that raising it — the path of least
+ * resistance when the tripwire fires — happens in the file that explains why it
+ * matters, and shows up as a deliberate edit rather than a test tweak. */
+export const SMOKE_JOB_RESERVE_MS = 30_000;
+
 /** Each `file-revoke.test.ts` case's budget EXCLUDING the revoke confirm wait —
  * not a worst-case estimate. Only `uploadViewRevoke` is close to its stated
  * ~64s of work; the other three are the pre-PR ceilings minus one confirm wait,

@@ -4,11 +4,10 @@
  *
  * `qurl-api.test.ts` pins what `revokeLink({ confirmPending: false })` costs.
  * What it cannot pin is that `revokeAll` actually passes it — and that wiring is
- * load-bearing. Drop the argument and the default `true` takes over, so
- * concurrency.test.ts's ~60-resource sweep goes from ~60 requests to ~60 waits
- * of up to 35s each: the 180s hook times out mid-sweep and the resources the
- * sweep exists to reclaim leak to their TTL. That is the exact failure this
- * module was written to prevent, so it gets a test rather than a comment.
+ * load-bearing: drop the argument and the default `true` takes over, which
+ * turns concurrency.test.ts's ~60-resource sweep into a hook timeout that leaks
+ * the resources the sweep exists to reclaim (cleanup.ts carries the
+ * arithmetic). That failure gets a test rather than a comment.
  */
 
 import { trackedQurlResources } from '../helpers/cleanup';
