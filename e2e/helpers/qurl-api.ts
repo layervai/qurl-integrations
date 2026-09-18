@@ -321,20 +321,18 @@ export const REVOKE_CONFIRM_WAIT_MS =
  * revocation smoke that is the security-relevant property, and it is why the
  * wait is worth its wall clock rather than merely making a boolean truthful.
  *
- * A 404 is NOT success, even on the confirm retry where
- * link-lifecycle.test.ts pins "404 or 200 both acceptable": accepting it needs
- * to know the first 503 was the committed one, which nothing in the response
- * says AS THE HELPER REPORTS IT, and trusting it would let a revoke that never
- * happened report success on a resource that never existed
- * (negative-paths.test.ts). The signal does exist — the dark 503's 60s
- * directive is DECLINED by the 35s ceiling, so "the preceding 503 carried a
- * directive we honored" would discriminate with no body parsing — but
- * fetchWithTransientRetry doesn't surface that today, so it is deferred to
- * #1505 rather than impossible. NOTE the repro
- * behind this fix observed 503 on a PROTECTED resource and 204 on a different
- * UNPROTECTED one — it never observed a protected 503 -> retry -> 2xx, so what
- * the confirm retry answers is assumed, not measured. #1505 has the fix if it
- * turns out to be 404.
+ * A non-2xx confirm is NOT trusted on its status code — not even a 404, which
+ * link-lifecycle.test.ts pins as a legitimate second-revoke answer. Accepting
+ * one would need to know the preceding 503 was the committed kind, and trusting
+ * it blind would let a revoke that never happened report success on a resource
+ * that never existed (negative-paths.test.ts).
+ *
+ * Instead it falls back to the management read, which cannot be wrong about
+ * whether the revocation happened. That matters because the repro behind this
+ * fix observed 503 on a PROTECTED resource and 204 on a different UNPROTECTED
+ * one — it never observed a protected 503 -> retry -> 2xx. The fallback is what
+ * keeps the fix from depending on that unobserved answer: 404, 409, 410 or a
+ * still-pending 503 all end with the resource's actual state deciding.
  *
  * `confirmPending: false` drops the confirm attempt entirely — one request, as
  * before this helper gained a retry — for cleanup.ts's best-effort sweep. It
@@ -347,10 +345,9 @@ export const REVOKE_CONFIRM_WAIT_MS =
  * that it CARRIES a `Retry-After` at all (without one the confirm retry fires
  * on the 1s local backoff, well inside the convergence window, and the original
  * red returns with nothing saying the mechanism was bypassed), and that its
- * value is the 30s PENDING_REVOKE_CEILING_MS is sized on; and that the confirm
- * DELETE answers 2xx — NOT 404/409/410 — once the update lands, which is what
- * the returned boolean actually rests on (#1505 is the escape hatch if that
- * changes; all four file-revoke cases would red with this PR's exact symptom).
+ * value is the 30s PENDING_REVOKE_CEILING_MS is sized on. What the confirm
+ * DELETE answers once the update lands is NOT mirrored here, deliberately: the
+ * management-read fallback above makes the boolean independent of it.
  * The ceiling is what actually separates the two 503s here
  * (30 <= 35 < the dark 503's 60), so BOTH directions matter: if the pending
  * window widens past 35s, raise it and the
@@ -376,7 +373,32 @@ export async function revokeLink(
   // Nothing reads this body — the caller gets a boolean — so release it rather
   // than holding an undici socket until GC, once per straggler on a sweep.
   await res.body?.cancel().catch(() => {});
-  return res.ok;
+  if (res.ok) return true; // convergence proven: the strong signal
+
+  // Non-ok after the confirm window: ask the read that CANNOT be wrong about
+  // whether the revocation happened. This is what keeps the fix from depending
+  // on the confirm DELETE's status code, which was never observed — if the
+  // service answers 404/409/410 once the update lands, or is still pending past
+  // the window, the management state still says so.
+  //
+  // It cannot produce the false positive that ruled out trusting a bare 404: a
+  // resource that never existed does not read `revoked` (negative-paths), and
+  // neither does one behind a dark 503 — that read fails and we stay false.
+  // What is lost is only the CONVERGENCE signal, so it warns rather than
+  // passing silently. Gated on confirmPending, so the sweep and the negative
+  // call sites stay at exactly one request.
+  if (!confirmPending) return false;
+  try {
+    const status = await getResourceStatus(baseUrl, apiKey, resourceId);
+    if (status.status !== 'revoked') return false;
+    console.warn(
+      `[revokeLink] DELETE ${resourceId} answered ${res.status}, but the resource ` +
+        'reads revoked — revocation confirmed, NHP protection-update convergence unconfirmed',
+    );
+    return true;
+  } catch {
+    return false; // the read failed too: report the revoke as unconfirmed
+  }
 }
 
 export interface LinkStatus {
