@@ -486,9 +486,7 @@ func parseGet(cmd *Command, rest []string) (*Command, error) {
 		// tunnel `$slug` or a channel `$alias` only.
 		return nil, ErrURLNotSupportedGet
 	}
-	if crid.MatchesShape(rest[0]) {
-		// A CRID pasted into get. A `$`-less token is never a valid alias,
-		// so this only replaces the misleading missing-sigil error.
+	if looksLikeCRIDForGet(rest[0]) {
 		return nil, ErrCRIDNotSupportedGet
 	}
 	if strings.HasPrefix(rest[0], "$r_") {
@@ -526,6 +524,17 @@ func applyMintFlags(cmd *Command, toks []string) (*Command, error) {
 		}
 	}
 	return cmd, nil
+}
+
+// looksLikeCRIDForGet reports whether a `/qurl get` token is a pasted CRID.
+// Without a `$` the token could never be an alias, so shape suffices. With a
+// `$`, a 47/60-char base32 token is also a valid alias (aliasMaxLen is 64), so
+// require the CRID checksum to pass before shadowing alias resolution.
+func looksLikeCRIDForGet(tok string) bool {
+	if bare, ok := strings.CutPrefix(tok, "$"); ok {
+		return crid.Validate(bare) == nil
+	}
+	return crid.MatchesShape(tok)
 }
 
 // parseCRID extracts one strict CRID positional argument and the same optional

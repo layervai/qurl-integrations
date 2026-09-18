@@ -18,12 +18,12 @@ const cridUsageMessage = "Usage: `/qurl crid <CRID>` to create a qURL directly f
 // invalidCRIDMessage names the likely fix for a value that fails the local
 // CRID gate (checksum, length, charset): a typo, truncated paste, or
 // auto-capitalization — CRIDs are never trimmed or case-folded.
-const invalidCRIDMessage = "That isn't a valid CRID. Check for a typo, a truncated paste, or capital letters — CRIDs are lowercase letters and digits with no spaces."
+const invalidCRIDMessage = "That isn't a valid CRID. Check for a typo, a truncated paste, or capital letters — CRIDs use only lowercase letters and the digits 2–7, with no spaces."
 
 // cridNotInChannelMessage mirrors [noResourceForAliasMessage]: a CRID that is
 // unknown and one that is protected only in another channel get the same copy,
 // so the reply never discloses where else a resource is exposed.
-const cridNotInChannelMessage = "That CRID is not configured for this channel. Run `/qurl list` to see what's available here, or contact your Slack admin to add it."
+const cridNotInChannelMessage = "That CRID is not configured for this channel. Ask your Slack admin to make its resource available here."
 
 // handleCRID implements `/qurl crid <CRID>`. It is `/qurl get` addressed by a
 // resource's permanent CRID instead of a channel `$id`/`$alias`: the CRID is
@@ -40,7 +40,7 @@ func (h *Handler) handleCRID(w http.ResponseWriter, values url.Values) {
 			respondSlack(w, ":warning: "+invalidCRIDMessage)
 			return
 		}
-		respondSlack(w, ":warning: "+err.Error())
+		respondSlack(w, ":warning: "+err.Error()+"\n"+cridUsageMessage)
 		return
 	}
 	h.runAsync(w, string(SubcmdCRID), values, func(ctx context.Context, log *slog.Logger) {
@@ -56,13 +56,14 @@ func (h *Handler) cridWork(ctx context.Context, log *slog.Logger, args *getWorkA
 	if err != nil {
 		return getResult{}, err
 	}
-	resourceID, ok := resourceIDForCRID(allowed, args.cmd.CRID)
-	if !ok {
+	resourceID, keyCandidates := resourceIDForCRID(allowed, args.cmd.CRID)
+	if resourceID == "" {
 		// A CRID is a permanent, global identifier, so a miss here means the
 		// caller holds an identifier for a resource not exposed in this
 		// channel — worth an operator-visible line, unlike an alias typo.
-		// allow_set_size also separates "empty channel" from a real miss.
-		log.Warn("crid: CRID not in channel allow-set", "team_id", args.teamID, "channel_id", args.channelID, "user_id", args.userID, "crid", args.cmd.CRID, "allow_set_size", len(allowed))
+		// allow_set_size vs key_candidates separates an empty channel, a
+		// real miss, and resource_id encoding drift (candidates == 0).
+		log.Warn("crid: CRID not in channel allow-set", "team_id", args.teamID, "channel_id", args.channelID, "user_id", args.userID, "allow_set_size", len(allowed), "key_candidates", keyCandidates)
 		return getResult{}, &userError{msg: cridNotInChannelMessage}
 	}
 	return h.mintForResource(ctx, log, args, resourceID)
@@ -76,17 +77,18 @@ func (h *Handler) cridWork(ctx context.Context, log *slog.Logger, args *getWorkA
 //
 // TODO(upstream-contract): mirrors qurl-service's unpadded base64url
 // resource_id encoding (same decode as shared/client validateSharingState).
-func resourceIDForCRID(allowed map[string]struct{}, cridValue string) (string, bool) {
+func resourceIDForCRID(allowed map[string]struct{}, cridValue string) (resourceID string, keyCandidates int) {
 	for id := range allowed {
 		der, err := base64.RawURLEncoding.Strict().DecodeString(id)
 		if err != nil {
 			continue
 		}
+		keyCandidates++
 		// The CRID already passed crid.Validate at parse time, so an error
 		// here is impossible by invariant; treating it as a miss fails closed.
 		if matched, err := crid.KeyMatches(cridValue, der); err == nil && matched {
-			return id, true
+			return id, keyCandidates
 		}
 	}
-	return "", false
+	return "", keyCandidates
 }

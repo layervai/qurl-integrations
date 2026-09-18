@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -82,12 +83,15 @@ func TestHandleCRID_SyncParseReplies(t *testing.T) {
 		"crid":                        cridUsageMessage,
 		"crid " + testTunnelCRID[:40]: invalidCRIDMessage,
 		"crid " + strings.ToUpper(testTunnelCRID): invalidCRIDMessage,
+		"crid " + testTunnelCRID + " junk":        cridUsageMessage,
 		"get " + testTunnelCRID:                   cridNotSupportedGetMessage,
 	} {
-		_, ack := newAdminSlashInvoker(t, h).invokeAdmin(text, testAdminTeamID, testAdminUserID)
-		if !strings.Contains(ack, want) {
-			t.Errorf("%q ack = %q, want %q", text, ack, want)
-		}
+		t.Run(text, func(t *testing.T) {
+			_, ack := newAdminSlashInvoker(t, h).invokeAdmin(text, testAdminTeamID, testAdminUserID)
+			if !strings.Contains(ack, want) {
+				t.Errorf("ack = %q, want %q", ack, want)
+			}
+		})
 	}
 }
 
@@ -157,12 +161,14 @@ func TestResourceIDForCRID(t *testing.T) {
 		"https://legacy.example/": {},
 		testTunnelResourceID:      {},
 	}
-	if got, ok := resourceIDForCRID(allowed, testTunnelCRID); !ok || got != testTunnelResourceID {
-		t.Errorf("resourceIDForCRID = %q, %v; want %q, true", got, ok, testTunnelResourceID)
+	if got, _ := resourceIDForCRID(allowed, testTunnelCRID); got != testTunnelResourceID {
+		t.Errorf("resourceIDForCRID = %q, want %q", got, testTunnelResourceID)
 	}
 	delete(allowed, testTunnelResourceID)
-	if got, ok := resourceIDForCRID(allowed, testTunnelCRID); ok {
-		t.Errorf("resourceIDForCRID matched %q without the CRID's resource in the set", got)
+	// testResourceIDFix and "r_legacy" decode as base64url (candidates);
+	// the URL does not.
+	if got, candidates := resourceIDForCRID(allowed, testTunnelCRID); got != "" || candidates != 2 {
+		t.Errorf("resourceIDForCRID = %q, %d candidates; want miss with 2 candidates", got, candidates)
 	}
 }
 
@@ -179,5 +185,27 @@ func TestHandleCRID_DMRefusedWhenPostDMBlocksNil(t *testing.T) {
 	_, _, async := newAdminSlashInvoker(t, h).invokeAdminAsync("crid "+testTunnelCRID+" dm:true", testAdminTeamID, testAdminUserID)
 	if !strings.Contains(async, errDMNotConfigured.msg) || mintHits.Load() != 0 {
 		t.Errorf("async = %q, mint hits = %d; want DM refusal before any mint", async, mintHits.Load())
+	}
+}
+
+func TestHandleCRID_DMDelivers(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedPolicySet(t, testAdminTeamID, "C_test", "tunnel", []string{testTunnelResourceID})
+	ts.addCustomer(http.MethodPost, mintByTestTunnelPath, func(w http.ResponseWriter, _ *http.Request) {
+		writeCreateFixture(t, w, "https://qurl.link/crid-dm", testTunnelResourceID)
+	})
+	h := newAdminTestHandler(t, ts)
+	var dmText string
+	h.cfg.PostDMBlocks = func(_ context.Context, _, _, _ string, _ []any, fallbackText string) error {
+		dmText = fallbackText
+		return nil
+	}
+
+	_, _, async := newAdminSlashInvoker(t, h).invokeAdminAsync("crid "+testTunnelCRID+" dm:true", testAdminTeamID, testAdminUserID)
+	if !strings.Contains(dmText, "https://qurl.link/crid-dm") {
+		t.Errorf("DM text = %q, want the minted link", dmText)
+	}
+	if !strings.Contains(async, ":incoming_envelope:") || strings.Contains(async, "https://qurl.link/crid-dm") {
+		t.Errorf("async = %q, want DM confirmation without the link", async)
 	}
 }
