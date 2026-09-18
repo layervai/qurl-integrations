@@ -507,7 +507,8 @@ headers are now available on the default per-user daemon without a CA file.
 <!-- TODO(upstream-contract): NHP infra owns the hosted tunnel domain names. -->
 
 For a private CA, use `qurl daemon run --tunnel-ca-file
-/etc/qurl/tunnel-ca.pem`. The PEM file must use an absolute path. Use
+/etc/qurl/tunnel-ca.pem`. The PEM file must use an absolute path and replaces
+the system CA certificates for that daemon. Use
 `--tunnel-server-name <name>` only when the deployment requires a different
 certificate identity, such as a server reached by IP address. Invalid trust
 configuration fails before enrollment. These options do not provision a server

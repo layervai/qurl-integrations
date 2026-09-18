@@ -158,6 +158,8 @@ func reserveCmdTCPPort(t *testing.T) int {
 
 // startCmdFRPS returns the test CA file. Go's httptest certificate uses
 // example.com; callers set that expected name when dialing localhost.
+// Register client cleanup after this call so clients stop before the CA file
+// is removed; reconnects read the file again.
 func startCmdFRPS(t *testing.T, bindPort, vhostPort int, subDomainHost, pluginURL string) string {
 	t.Helper()
 	cfg := &v1.ServerConfig{

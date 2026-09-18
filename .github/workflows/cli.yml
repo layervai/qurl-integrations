@@ -243,6 +243,8 @@ jobs:
       # TODO(upstream-contract): these regression names belong to qurl-connector.
       # Use the CLI's FRP pin. New upstream test imports must fit this module's
       # dependency graph; readonly mode makes a changed requirement fail here.
+      # RuntimeHeadersReachOnlyTheirOrigin first rejects an unknown issuer with
+      # no CA file and a wrong hostname, then checks verified HTTP forwarding.
       - name: Verify Connector recovery and TLS with the CLI dependency versions
         shell: bash
         run: |
