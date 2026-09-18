@@ -61,6 +61,49 @@ test('a confirmed revoke drops the id so the sweep does not re-revoke it', async
   expect(revokeLinkMock).not.toHaveBeenCalled();
 });
 
+// The warn-but-never-throw channel itself. The module header calls a
+// systematically-failing cleanup the dangerous case, so the sweep must keep
+// going after one id fails AND leave a line per failure — best-effort means
+// "does not fail the run", not "does not tell you".
+test('the sweep warns and continues after an id returns not-ok', async () => {
+  const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+  try {
+    revokeLinkMock.mockResolvedValueOnce(false).mockResolvedValue(true);
+    const tracked = trackedQurlResources(env);
+    tracked.track('res-1');
+    tracked.track('res-2');
+
+    await tracked.revokeAll();
+
+    expect(revokeLinkMock).toHaveBeenCalledTimes(2); // did not stop at the failure
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('res-1'));
+    // The legend, not an explanation: a reader must be able to tell a committed
+    // 503 from the systematic-403 regression this channel exists to surface.
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('401/403'));
+  } finally {
+    warnSpy.mockRestore();
+  }
+});
+
+test('the sweep warns and continues after an id throws', async () => {
+  const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+  try {
+    revokeLinkMock.mockRejectedValueOnce(new Error('boom')).mockResolvedValue(true);
+    const tracked = trackedQurlResources(env);
+    tracked.track('res-1');
+    tracked.track('res-2');
+
+    // Never throws out of the hook — a cleanup failure must not mask the real
+    // test failure that stranded the resource in the first place.
+    await expect(tracked.revokeAll()).resolves.toBeUndefined();
+
+    expect(revokeLinkMock).toHaveBeenCalledTimes(2);
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('boom'));
+  } finally {
+    warnSpy.mockRestore();
+  }
+});
+
 test('a failed revoke stays tracked for the sweep to retry', async () => {
   revokeLinkMock.mockResolvedValue(false);
   const tracked = trackedQurlResources(env);

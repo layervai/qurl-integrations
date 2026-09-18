@@ -58,15 +58,39 @@ async function waitsBefore(
   return waits;
 }
 
-test('stops rather than retrying early when the directive exceeds the ceiling', async () => {
+test('declines a directive above the ceiling but keeps the local retry', async () => {
   // `Retry-After: 600` against a 35s ceiling. Waiting it out is a 10min stall,
   // past every jest timeout here; clamping DOWN to 35s would re-ask inside the
-  // window the server just told us to skip and fail 35s later than not
-  // retrying. So the budget ends: one request, no wait.
-  expect(await waitsBefore({ maxAttempts: 2, maxRetryAfterMs: 35_000 })).toEqual([]);
-  expect(fetchMock).toHaveBeenCalledTimes(1);
-  // ...and says so, rather than reporting a red with no cause in the logs.
-  expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('not retrying'));
+  // window the server just told us to skip and fail 35s later for nothing. So
+  // the directive is declined — but the ordinary 1s backoff retry still runs,
+  // because opting in must never cost a caller the drain-gap retry it would
+  // have had by default.
+  expect(await waitsBefore({ maxAttempts: 2, maxRetryAfterMs: 35_000 })).toEqual([1_000]);
+  expect(fetchMock).toHaveBeenCalledTimes(2);
+  // ...and says so, rather than leaving a red with no cause in the logs.
+  expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('falling back to the local backoff'));
+});
+
+// The module treats "log the ORIGIN only, never the full URL" as a security
+// invariant: the fileviewer `/view/<mint-id>` path carries a capability. There
+// are now TWO warn sites, so pin the redaction on both — swapping `origin` for
+// `input` in either would otherwise leave this whole suite green.
+test.each([
+  ['the retrying path', '30'],
+  ['the declined-directive path', '600'],
+])('logs the origin only, never the path (%s)', async (_description, retryAfter) => {
+  fetchMock.mockImplementation(respond(503, { 'Retry-After': retryAfter }));
+  const pending = fetchWithTransientRetry(
+    url, { method: 'DELETE' }, { maxAttempts: 2, maxRetryAfterMs: 35_000 },
+  );
+  await jest.advanceTimersByTimeAsync(35_000);
+  await pending;
+
+  expect(warnSpy).toHaveBeenCalled();
+  for (const [line] of warnSpy.mock.calls) {
+    expect(line).toContain('https://api.example.com');
+    expect(line).not.toContain('/v1/resources/abc');
+  }
 });
 
 test('a negative ceiling cannot stop a loop the caller never opted into', async () => {

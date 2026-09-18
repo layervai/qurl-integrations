@@ -70,9 +70,9 @@ export interface QurlResourceTracker {
    * so revoke-under-test call sites assert on it directly — which is why
    * this path CONFIRMS: on an NHP-protected resource it waits out
    * qurl-service's protection-update 503 (up to ~35s) so the boolean is
-   * true when the revocation happened. revokeAll skips that wait via an
-   * option deliberately NOT exposed here — opting out is cleanup's call to
-   * make, not a caller's. Negative
+   * true when the revocation happened (it confirms the protection update —
+   * see revokeLink). revokeAll skips that wait via an option deliberately NOT
+   * exposed here: opting out is cleanup's call, not a caller's. Negative
    * revoke tests (wrong key, nonexistent id) should keep calling
    * qurl.revokeLink directly — those must not touch the ledger. */
   revoke(resourceId: string): Promise<boolean>;
@@ -139,9 +139,9 @@ export function trackedQurlResources(env: {
             // Say what not-ok can mean, so a reader doesn't chase a revoke that
             // actually happened: the sweep doesn't confirm, so a protected
             // resource's committed-but-pending 503 lands here too. Phrased as
-            // both possibilities, NOT as an explanation: revokeLink returns a
-            // bare boolean so this line can't tell which it was, and the
-            // systematic-403 case the module header calls dangerous must not
+            // a legend, NOT an explanation: revokeLink returns a bare boolean,
+            // so this line cannot tell which cause it hit, and the
+            // systematic-403 case the module header calls dangerous must never
             // read as benign. Deliberately
             // NOT treated as success — the deployment-state 503 is
             // indistinguishable, and dropping the id on that one would leak the
@@ -150,6 +150,7 @@ export function trackedQurlResources(env: {
             console.warn(
               `afterAll: best-effort revoke of ${id} returned not-ok ` +
                 '(503 = expected committed-but-pending on a protected resource; ' +
+                '404 = already lapsed to its expiry; 429 = sweep outran the limiter; ' +
                 '401/403 = a real cleanup regression)',
             );
           }

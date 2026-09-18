@@ -425,18 +425,19 @@ describe('revokeLink retry path', () => {
 
   // The dark-503 guard at the call site the PR leans on hardest: revokeLink's
   // 35s ceiling is BELOW the deployment-state 503's 60s directive, so that one
-  // stops the loop instead of being waited out. Asserted here rather than left
-  // to coincide with http.test.ts's numbers.
-  test('revokeLink does not wait out a directive above its ceiling', async () => {
+  // is declined rather than waited out — the retry still happens, on the 1s
+  // local backoff, so a deploy window costs ~1s instead of ~35s. Asserted here
+  // rather than left to coincide with http.test.ts's numbers.
+  test('revokeLink declines a directive above its ceiling', async () => {
     jest.useFakeTimers();
     try {
       fetchMock.mockImplementation(
         () => new Response(null, { status: 503, headers: { 'Retry-After': '60' } }),
       );
       const pending = qurl.revokeLink(mintUrl, apiKey, publicResourceId);
-      await jest.advanceTimersByTimeAsync(120_000);
+      await jest.advanceTimersByTimeAsync(1_000);
+      expect(fetchMock).toHaveBeenCalledTimes(2); // retried, not abandoned
       await expect(pending).resolves.toBe(false);
-      expect(fetchMock).toHaveBeenCalledTimes(1);
     } finally {
       jest.useRealTimers();
     }

@@ -274,7 +274,9 @@ export async function accessLinkNoRedirect(url: string): Promise<LinkAccessResul
  *
  * TODO(upstream-contract): mirrors qurl-service's protected-resource revoke
  * contract — that a 503 here means the revocation is COMMITTED (not rejected),
- * and that its convergence window is the 30s the `Retry-After` asserts, which
+ * that it CARRIES a `Retry-After` at all (without one the confirm retry fires
+ * on the 1s local backoff, well inside the convergence window, and the original
+ * red returns with nothing saying the mechanism was bypassed), and that its
  * the 35s ceiling is sized on. Note the ceiling is what actually separates the
  * two 503s at this call site (30 <= 35 < the dark 503's 60), so BOTH directions
  * matter: if the pending window widens past 35s, raise the ceiling and the

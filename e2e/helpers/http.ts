@@ -103,16 +103,17 @@ function isRetryableStatus(status: number, method: string): boolean {
  *   (transient) and its deployment-state "dark 503" 60 (standing — waiting only
  *   makes a permanent failure slower to report). Nothing THIS HELPER INSPECTS
  *   separates them — their bodies do differ, but parsing one is #1505's job —
- *   so only the call site can. Everyone else keeps the 1s/2s backoff. It is the longest directive the caller will honor, PER ATTEMPT: a
- *   longer one ends the retry loop rather than being clamped down to it, so a
- *   hostile or absurd value fails fast instead of buying a futile early retry.
- *   NOTE that makes a small positive ceiling LESS resilient than not opting in
- *   at all — `5_000` against a 30s directive means zero retries, not a 5s one
- *   and not the 1s local-backoff retry the default would have taken. Pick a
- *   ceiling above the directive you mean to wait out, or pass 0.
- *   The opted-in worst case is therefore `(maxAttempts - 1) x ceiling`, and the
- *   caller owns both numbers together (`revokeLink` pins `maxAttempts: 2` for
- *   exactly this reason; inheriting the default 3 would mean ~70s).
+ *   so only the call site can. Everyone else keeps the 1s/2s backoff.
+ *
+ *   The ceiling is the longest directive the caller will honor, PER ATTEMPT, so
+ *   the opted-in worst case is `(maxAttempts - 1) x ceiling` and the caller owns
+ *   both numbers together (`revokeLink` pins `maxAttempts: 2` for exactly this
+ *   reason; inheriting the default 3 would mean ~70s). A LONGER directive is
+ *   DECLINED rather than clamped down to the ceiling — re-asking early would
+ *   draw the same response, just later — and that attempt falls back to the
+ *   ordinary local backoff. So opting in never costs a caller a retry it would
+ *   have had at the default; too small a ceiling only stops directives being
+ *   honored, it does not reduce resilience below the default.
  *
  *   Scoped to 503 even when opted in: a 429 directive on this stack means "you
  *   burst", and honoring it would let one shed DELETE cost 35s inside the
@@ -139,7 +140,9 @@ export async function fetchWithTransientRetry(
     // TODO(upstream-contract): qurl-service emits the delta-seconds form only.
     // Anything non-numeric (including the HTTP-date form RFC 9110 also allows)
     // falls through to the linear backoff rather than producing a NaN delay.
-    const retryAfterRaw = res.status === 503 ? res.headers.get('retry-after')?.trim() ?? '' : '';
+    const retryAfterRaw = res.status === 503
+      ? res.headers.get('retry-after')?.trim() ?? ''
+      : '';
     const directiveMs = maxRetryAfterMs > 0 && /^\d+$/.test(retryAfterRaw)
       ? Number(retryAfterRaw) * 1000
       : 0;
@@ -154,20 +157,25 @@ export async function fetchWithTransientRetry(
     } catch {
       origin = '<url>'; // non-absolute input: don't throw, don't leak
     }
-    // A directive LONGER than the caller's ceiling means stop, not retry early.
-    // Clamping down would re-ask inside the window the server just told us to
-    // skip, draw the same response, and report failure later than no retry at
-    // all — inverting the "slow down is authoritative" rule this block runs on.
-    // `directiveMs > 0` guards the comparison so a caller that passed no (or a
-    // nonsensical negative) ceiling can never stop the loop it never opted into.
-    if (directiveMs > 0 && directiveMs > maxRetryAfterMs) {
+    // A directive LONGER than the caller's ceiling is DECLINED, not clamped down
+    // to the ceiling: re-asking at 35s when the server said 60s would draw the
+    // same response, just later. Declining falls back to the ordinary local
+    // backoff rather than dropping the retry, so opting in never costs a caller
+    // the drain-gap retry it would have had by default — the 1s re-ask this
+    // helper already treats as correct for everyone who didn't opt in.
+    // `directiveMs > 0` keeps a caller that passed no (or a nonsensical
+    // negative) ceiling from logging a decline for a directive it never read.
+    const overCeiling = directiveMs > 0 && directiveMs > maxRetryAfterMs;
+    if (overCeiling) {
       console.warn(
         `[fetchWithTransientRetry] ${method} ${origin} -> ${res.status}; ` +
-          `Retry-After ${directiveMs}ms exceeds the ${maxRetryAfterMs}ms ceiling — not retrying`,
+          `Retry-After ${directiveMs}ms exceeds the ${maxRetryAfterMs}ms ceiling — ` +
+          'falling back to the local backoff',
       );
-      break;
     }
-    const delayMs = Math.max(baseDelayMs * attempt, directiveMs);
+    const delayMs = overCeiling
+      ? baseDelayMs * attempt
+      : Math.max(baseDelayMs * attempt, directiveMs);
     console.warn(
       `[fetchWithTransientRetry] ${method} ${origin} -> ${res.status}; ` +
         `retry ${attempt}/${maxAttempts - 1} in ${delayMs}ms`,
