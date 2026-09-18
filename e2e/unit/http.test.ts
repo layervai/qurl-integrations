@@ -68,7 +68,12 @@ test('declines a directive above the ceiling but keeps the local retry', async (
   expect(await waitsBefore({ maxAttempts: 2, maxRetryAfterMs: 35_000 })).toEqual([1_000]);
   expect(fetchMock).toHaveBeenCalledTimes(2);
   // ...and says so, rather than leaving a red with no cause in the logs.
-  expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('falling back to the local backoff'));
+  // Said on the SAME line as the retry it explains — one grep-able line per
+  // retry decision, not two.
+  expect(warnSpy).toHaveBeenCalledTimes(1);
+  expect(warnSpy).toHaveBeenCalledWith(
+    expect.stringContaining('retry 1/1 in 1000ms (declined Retry-After 600000ms, over the 35000ms ceiling)'),
+  );
 });
 
 // The module treats "log the ORIGIN only, never the full URL" as a security

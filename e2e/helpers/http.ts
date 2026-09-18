@@ -166,19 +166,18 @@ export async function fetchWithTransientRetry(
     // `directiveMs > 0` keeps a caller that passed no (or a nonsensical
     // negative) ceiling from logging a decline for a directive it never read.
     const overCeiling = directiveMs > 0 && directiveMs > maxRetryAfterMs;
-    if (overCeiling) {
-      console.warn(
-        `[fetchWithTransientRetry] ${method} ${origin} -> ${res.status}; ` +
-          `Retry-After ${directiveMs}ms exceeds the ${maxRetryAfterMs}ms ceiling — ` +
-          'falling back to the local backoff',
-      );
-    }
     const delayMs = overCeiling
       ? baseDelayMs * attempt
       : Math.max(baseDelayMs * attempt, directiveMs);
     console.warn(
       `[fetchWithTransientRetry] ${method} ${origin} -> ${res.status}; ` +
-        `retry ${attempt}/${maxAttempts - 1} in ${delayMs}ms`,
+        `retry ${attempt}/${maxAttempts - 1} in ${delayMs}ms` +
+        // Folded into the same line rather than emitted as a second warn: the
+        // module's logging contract is one grep-able line per retry decision.
+        (overCeiling
+          ? ` (declined Retry-After ${directiveMs}ms, over the ` +
+            `${maxRetryAfterMs}ms ceiling)`
+          : ''),
     );
     // Release the discarded response's body so its socket returns to the pool
     // instead of lingering until GC (the 5xx body is never read).

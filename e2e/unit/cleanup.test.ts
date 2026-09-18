@@ -104,6 +104,32 @@ test('the sweep warns and continues after an id throws', async () => {
   }
 });
 
+// The sweep's other load-bearing property, equally invisible from the live
+// suites: it paces itself. A back-to-back burst of ~60 DELETEs after the
+// concurrency stress test invites the 429s that would leave stragglers leaked
+// until TTL, which is what the serial-plus-pause shape exists to avoid.
+test('the sweep paces itself between ids', async () => {
+  jest.useFakeTimers();
+  try {
+    const tracked = trackedQurlResources(env);
+    tracked.track('res-1');
+    tracked.track('res-2');
+
+    const pending = tracked.revokeAll();
+    await jest.advanceTimersByTimeAsync(0);
+    expect(revokeLinkMock).toHaveBeenCalledTimes(1); // no pause before the first
+
+    await jest.advanceTimersByTimeAsync(249);
+    expect(revokeLinkMock).toHaveBeenCalledTimes(1); // still waiting
+    await jest.advanceTimersByTimeAsync(1);
+    expect(revokeLinkMock).toHaveBeenCalledTimes(2);
+
+    await pending;
+  } finally {
+    jest.useRealTimers();
+  }
+});
+
 test('a failed revoke stays tracked for the sweep to retry', async () => {
   revokeLinkMock.mockResolvedValue(false);
   const tracked = trackedQurlResources(env);

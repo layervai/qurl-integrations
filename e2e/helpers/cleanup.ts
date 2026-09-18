@@ -136,17 +136,12 @@ export function trackedQurlResources(env: {
         try {
           const ok = await revoke(id, { confirmPending: false });
           if (!ok) {
-            // Say what not-ok can mean, so a reader doesn't chase a revoke that
-            // actually happened: the sweep doesn't confirm, so a protected
-            // resource's committed-but-pending 503 lands here too. Phrased as
-            // a legend, NOT an explanation: revokeLink returns a bare boolean,
-            // so this line cannot tell which cause it hit, and the
-            // systematic-403 case the module header calls dangerous must never
-            // read as benign. Deliberately
-            // NOT treated as success — the deployment-state 503 is
-            // indistinguishable, and dropping the id on that one would leak the
-            // resource silently, which is the opposite of this channel's job.
-            // A straggler left tracked still lapses on its own expiry.
+            // A legend, not a diagnosis: revokeLink returns a bare boolean, so
+            // this line can't tell which cause it hit, and the systematic-403
+            // case the module header calls dangerous must never read as benign.
+            // None of these drop the id — a committed-but-pending 503 is
+            // indistinguishable from the deployment-state one, and dropping on
+            // that would leak silently. A straggler still lapses on its expiry.
             console.warn(
               `afterAll: best-effort revoke of ${id} returned not-ok ` +
                 '(503 = expected committed-but-pending on a protected resource; ' +

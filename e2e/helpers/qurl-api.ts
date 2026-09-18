@@ -241,45 +241,37 @@ export async function accessLinkNoRedirect(url: string): Promise<LinkAccessResul
 
 /** Revoke a qURL link by resource_id (revokes entire resource).
  *
- * Goes through the shared bounded retry — DELETE is idempotent and already in
- * that helper's retryable-method set. It matters beyond the usual drain-gap:
- * on an NHP-protected resource (every connector upload) qurl-service COMMITS
+ * On an NHP-protected resource (every connector upload) qurl-service COMMITS
  * the revocation and then answers 503 + `Retry-After: 30` ("Revocation
  * committed; protection update is pending. Retry to confirm.") until the
- * protection update lands, so a single-shot DELETE reported a false failure
- * for a revocation that had already happened.
+ * protection update lands, so a single-shot DELETE reported a false failure for
+ * a revocation that had already happened. Hence ONE confirm retry that waits
+ * out the server's own directive (35s ceiling — see http.ts's
+ * `maxRetryAfterMs` for why honoring it is opt-in and why the ceiling matters).
+ * A second wait would buy no confidence and push two revokes past jest's 120s
+ * default; still pending afterward is a convergence regression to report.
  *
- * Budget: ONE confirm retry, waiting out the server's own directive (35s
- * ceiling). The retry only CONFIRMS an already-committed revocation, so that
- * one window is the whole contract — a second wait buys no confidence and
- * would push two revokes past jest's 120s default. Still pending afterward is
- * a real convergence regression the smoke should report, not wait out.
+ * A 404 is NOT success, even on the confirm retry where
+ * link-lifecycle.test.ts pins "404 or 200 both acceptable": accepting it needs
+ * to know the first 503 was the committed one, which nothing in the response
+ * says, and trusting it would let a revoke that never happened report success
+ * on a resource that never existed (negative-paths.test.ts). Unobserved anyway
+ * — the live repro only showed 503 -> 204. #1505 has the fix if it appears.
  *
- * A 404 on the confirm retry is deliberately NOT treated as success, even
- * though link-lifecycle.test.ts pins "404 or 200 both acceptable" for a second
- * revoke: accepting it needs to know the first 503 was the committed one, and
- * nothing in the response says so (see http.ts's `maxRetryAfterMs`). Trusting
- * it would let a revoke that never happened report success on a resource that
- * never existed (negative-paths.test.ts). Unobserved anyway — the live repro
- * only showed 503 -> 204. #1505 has the body-discriminating fix if it appears.
- *
- * `confirmPending: false` drops the confirm attempt entirely — one request,
- * exactly as before this helper gained a retry — for best-effort bulk cleanup:
- * the 503 already said the write is committed, so a sweep only needs "did it
- * stick". Dropping the retry as well as the wait is about the BOUNDED worst
- * case, not the cost of one round trip: a service-wide shed has every one of
- * cleanup.ts's ~60 stragglers retrying, ~+120s on a sweep already budgeted at
- * ~130s against a 180s hook — so the sweep would time out and leak the
- * resources it exists to reclaim. A single straggler retrying would be fine.
+ * `confirmPending: false` drops the confirm attempt entirely — one request, as
+ * before this helper gained a retry — for cleanup.ts's best-effort sweep. It
+ * drops the retry and not just the wait because of the BOUNDED worst case: a
+ * service-wide shed retries all ~60 stragglers, ~+120s on a sweep already at
+ * ~130s against a 180s hook, so it would time out and leak.
  *
  * TODO(upstream-contract): mirrors qurl-service's protected-resource revoke
  * contract — that a 503 here means the revocation is COMMITTED (not rejected),
  * that it CARRIES a `Retry-After` at all (without one the confirm retry fires
  * on the 1s local backoff, well inside the convergence window, and the original
  * red returns with nothing saying the mechanism was bypassed), and that its
- * the 35s ceiling is sized on. Note the ceiling is what actually separates the
- * two 503s at this call site (30 <= 35 < the dark 503's 60), so BOTH directions
- * matter: if the pending window widens past 35s, raise the ceiling and the
+ * value is the 30s the 35s ceiling is sized on. That ceiling is what actually
+ * separates the two 503s here (30 <= 35 < the dark 503's 60), so BOTH
+ * directions matter: if the pending window widens past 35s, raise it and the
  * file-revoke.test.ts budgets sized on it together; if the DARK 503's directive
  * ever narrows to <= the ceiling, this call site would start waiting out
  * deployment 503s and needs #1505's body discrimination instead. */
@@ -299,6 +291,9 @@ export async function revokeLink(
   }, confirmPending
     ? { maxAttempts: 2, maxRetryAfterMs: 35_000 }
     : { maxAttempts: 1 });
+  // Nothing reads this body — the caller gets a boolean — so release it rather
+  // than holding an undici socket until GC, once per straggler on a sweep.
+  await res.body?.cancel().catch(() => {});
   return res.ok;
 }
 
