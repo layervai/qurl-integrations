@@ -160,6 +160,11 @@ const agentTurnRateCounterFailOpenMsg = "agent: turn-rate counter failed; allowi
 // agentTurnRateCounterFailOpenMsg), so splitting sent-from-suppressed across two
 // strings would also make total demand require summing two filters. Both problems
 // go away by keeping one msg and putting the outcome in notice_posted.
+// TODO(upstream-contract): infra#1388 freezes this exact msg together with
+// boolean files_field_present and numeric files_visible. The deployed CloudWatch
+// filter matches files_field_present IS TRUE and files_visible = 0. Update the
+// filter and its positive/negative AWS match checks if any name, type, or meaning
+// changes: https://github.com/layervai/qurl-integrations-infra/pull/1388.
 const agentUnsupportedMediaMsg = "agent: unsupported media"
 
 // agentAckReaction is the glanceable "working on it" emoji the agent adds to the
