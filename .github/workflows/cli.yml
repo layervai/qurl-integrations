@@ -246,14 +246,16 @@ jobs:
       - name: Verify Connector recovery and TLS with the CLI dependency versions
         shell: bash
         run: |
+          tests=(TestHermeticSessionGroupRecoversLostControlOnFreshAdmission TestHermeticRuntimeHeadersReachOnlyTheirOrigin)
+          pattern=$(IFS='|'; echo "^(${tests[*]})$")
           go test -mod=readonly -race -count=1 -timeout=3m -json \
-            -run '^TestHermetic(SessionGroupRecoversLostControlOnFreshAdmission|RuntimeHeadersReachOnlyTheirOrigin)$' \
+            -run "$pattern" \
             github.com/layervai/qurl-connector/pkg/share \
-            | tee "$RUNNER_TEMP/connector-recovery.jsonl" \
+            | tee "$RUNNER_TEMP/connector-regressions.jsonl" \
             | jq -j 'select(.Action == "output") | .Output'
-          for test in TestHermeticSessionGroupRecoversLostControlOnFreshAdmission TestHermeticRuntimeHeadersReachOnlyTheirOrigin; do
+          for test in "${tests[@]}"; do
             jq -se --arg test "$test" 'any(.[]; .Action == "pass" and .Test == $test)' \
-              "$RUNNER_TEMP/connector-recovery.jsonl" >/dev/null || {
+              "$RUNNER_TEMP/connector-regressions.jsonl" >/dev/null || {
                 echo "::error::Connector regression $test did not pass: the named test is missing or skipped."
                 exit 1
               }

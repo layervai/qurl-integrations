@@ -528,8 +528,7 @@ it. A valid body is answered with 204. A body over 64 KiB, with unknown
 fields, with more than 2,000 routes, with more than 16 headers or 1,024
 name-and-value bytes for one route, or with an invalid, reserved, or
 case-variant duplicate header name or an invalid value is answered with 400
-and a fixed message that never echoes a header. Headers supplied without
-configured tunnel trust are answered with 409. All limits apply together;
+and a fixed message that never echoes a header. All limits apply together;
 larger route entries reduce the number that fits within 64 KiB.
 
 Send secret overlay values from the supervisor process; do not put them in
