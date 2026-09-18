@@ -58,6 +58,9 @@ minted from a channel where it isn't allowed:
 - `/qurl get` requires channel context and accepts only the tokens and aliases
   that `/qurl list` and `/qurl aliases` surface — never an internal resource
   identifier.
+- `/qurl crid <CRID>` is matched against the same channel allow-set before
+  minting. Knowing a resource's permanent CRID grants nothing in a channel
+  where that resource isn't available.
 
 So disclosure (what `/qurl list` reveals) and capability (what `/qurl get` will
 mint) are governed by the *same* per-channel allow-set, and capability is

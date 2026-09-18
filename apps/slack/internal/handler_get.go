@@ -212,6 +212,10 @@ func (e *userError) Error() string { return e.msg }
 // completed the install.
 var errAdminStoreNotConfigured = &userError{msg: "qURL admin features are not yet configured for this workspace. Ask the workspace owner who connected qURL, or contact qURL support at " + qurlContactURL + "."}
 
+// errDMNotConfigured refuses `dm:true` when PostDMBlocks is not wired; see
+// [Handler.mintForResource].
+var errDMNotConfigured = &userError{msg: "DM delivery is not configured for this workspace. Re-run the command without `dm:true` to receive the link in-channel."}
+
 // handleGet implements `/qurl get <$id|$alias>`:
 //  1. Parse the slash-command text → [Command]. The positional arg is a
 //     listed resource ID/alias token: a tunnel `$slug`, a channel-scoped
@@ -277,7 +281,7 @@ func (h *Handler) handleGet(w http.ResponseWriter, values url.Values) {
 	})
 }
 
-// processGet is the async-worker body for /qurl get. Builds the
+// processGet is the async-worker body for /qurl get and /qurl crid. Builds the
 // reply text and POSTs it via response_url. Errors from the inner
 // pipeline reach the user as a friendly `:warning:` message.
 func (h *Handler) processGet(ctx context.Context, log *slog.Logger, values url.Values, cmd *Command) {
@@ -296,7 +300,11 @@ func (h *Handler) processGet(ctx context.Context, log *slog.Logger, values url.V
 		return
 	}
 
-	res, err := h.getWork(ctx, log, &getWorkArgs{
+	work := h.getWork
+	if cmd.Subcommand == SubcmdCRID {
+		work = h.cridWork
+	}
+	res, err := work(ctx, log, &getWorkArgs{
 		cmd:          cmd,
 		teamID:       teamID,
 		enterpriseID: enterpriseID,
@@ -311,8 +319,8 @@ func (h *Handler) processGet(ctx context.Context, log *slog.Logger, values url.V
 // ephemeral: the Enter Portal link render on success, or the [*userError]
 // message (prefixed with `:warning:`) on failure. A non-userError leak is a
 // programmer mistake — log it loud and surface the generic catch-all so
-// internals never reach Slack. Shared by the `/qurl get` slash path
-// ([Handler.processGet]) and the `/qurl list` "Create qURL" button
+// internals never reach Slack. Shared by the `/qurl get` and `/qurl crid`
+// slash paths ([Handler.processGet]) and the `/qurl list` "Create qURL" button
 // ([Handler.processButtonGet]) so both render identical replies.
 func (h *Handler) finishGet(log *slog.Logger, responseURL string, res getResult, err error) {
 	if err != nil {
@@ -468,16 +476,6 @@ func isLegacyDirectURLBinding(s string) bool {
 func (h *Handler) getWork(ctx context.Context, log *slog.Logger, args *getWorkArgs) (getResult, error) {
 	alias := args.cmd.Alias
 
-	// Refuse `dm:true` early when PostDMBlocks is not wired — the user's
-	// intent is "do not leak the link in channel history", and a
-	// silent channel-fallback violates that intent. Fail-fast here
-	// avoids burning a mint quota on a request that can't be
-	// delivered the way the user asked. (deliverGetDM delivers the Enter
-	// Portal render via PostDMBlocks, so that is the seam to guard on.)
-	if args.cmd.DM() && h.cfg.PostDMBlocks == nil {
-		return getResult{}, &userError{msg: "DM delivery is not configured for this workspace. Re-run the command without `dm:true` to receive the link in-channel."}
-	}
-
 	if alias == "" {
 		// Defensive: parseGet guarantees a non-empty alias-shaped token
 		// (raw URLs and `$r_<id>` are rejected at parse time). This only
@@ -504,10 +502,27 @@ func (h *Handler) getWork(ctx context.Context, log *slog.Logger, args *getWorkAr
 		// `/qurl get $typo` never burns the user's quota.
 		return getResult{}, err
 	}
+	return h.mintForResource(ctx, log, args, boundResourceID)
+}
+
+// mintForResource runs the rate-limit→mint→render tail shared by `/qurl get`
+// and `/qurl crid` once the caller has resolved a channel-authorized
+// resource_id. Every mint surface therefore pins the same link policy,
+// idempotency key, error mapping, and reason audit.
+func (h *Handler) mintForResource(ctx context.Context, log *slog.Logger, args *getWorkArgs, resourceID string) (getResult, error) {
+	// Refuse `dm:true` when PostDMBlocks is not wired — the user's intent
+	// is "do not leak the link in channel history", and a silent
+	// channel-fallback violates that intent. Checked before the rate limit
+	// so a request that can't be delivered the way the user asked never
+	// burns mint quota. (deliverGetDM delivers the Enter Portal render via
+	// PostDMBlocks, so that is the seam to guard on.)
+	if args.cmd.DM() && h.cfg.PostDMBlocks == nil {
+		return getResult{}, errDMNotConfigured
+	}
 
 	// Rate-limit AFTER a successful resolution: only a request that resolved to a
 	// real, channel-authorized resource — i.e. an actual mint attempt — counts
-	// against the user's quota. The dm:true delivery guard above stays earliest
+	// against the user's quota. The dm:true delivery guard above runs first
 	// so an undeliverable privacy request consumes nothing either. (Resolution
 	// work for unknown aliases is instead bounded by Slack's own per-user
 	// slash-command throttle, not by spending the user's mint quota on typos.)
@@ -529,7 +544,7 @@ func (h *Handler) getWork(ctx context.Context, log *slog.Logger, args *getWorkAr
 		SessionDuration: resourceSessionDuration,
 		MaxSessions:     resourceMaxSessions,
 		IdempotencyKey:  IdempotencyKey(args.teamID, args.channelID, args.userID, args.triggerID),
-		ResourceID:      boundResourceID,
+		ResourceID:      resourceID,
 	}
 
 	c, err := h.authenticatedClient(ctx, args.teamID)
@@ -825,7 +840,7 @@ func (h *Handler) allowedResourceIDsForGet(ctx context.Context, log *slog.Logger
 // DM via PostDMBlocks; the response_url ephemeral confirms (without leaking the
 // link in channel history).
 //
-// PostDMBlocks-nil is rejected earlier in getWork — the dm:true contract is
+// PostDMBlocks-nil is rejected earlier in mintForResource — the dm:true contract is
 // privacy ("do not leak the link in channel history") and a silent
 // channel-fallback violates that. If PostDMBlocks is wired but the call itself
 // fails, we surface the failure without re-posting the link (the user can retry

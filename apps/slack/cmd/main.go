@@ -371,7 +371,6 @@ func run() error {
 				client.WithRetry(2),
 			)
 		},
-		QURLEndpoint:                qurlEndpoint,
 		AgentLLM:                    agentLLM,
 		AgentStore:                  agentStore,
 		AgentThreadHistory:          agentThreadHistory,

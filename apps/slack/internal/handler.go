@@ -322,10 +322,6 @@ type Config struct {
 	AuthProvider       auth.Provider
 	SlackSigningSecret string
 	NewClient          func(apiKey string) *client.Client
-	// QURLEndpoint is the qurl-service base URL used by the CRID share SDK.
-	// NewClient remains the narrow client for Slack's resource-id APIs; the
-	// SDK owns the distinct CRID /share endpoint and response contract.
-	QURLEndpoint string
 	// ConnectorAPIURL is the qURL platform API base including /v1. Guided
 	// tunnel setup writes it into every rendered runtime definition so sandbox
 	// installs never silently fall back to production.
@@ -2569,17 +2565,6 @@ func (h *Handler) userHelpMessage(command string) string {
 	if h.canAdvertiseUninstall() {
 		lines = append(lines, "• `/qurl uninstall` — Disconnect qURL from this Slack workspace")
 	}
-	// CRID sharing is intentionally independent of channel alias storage: a
-	// CRID is the resource's permanent identifier and the SDK's /share endpoint
-	// authorizes it with the workspace key. Advertise it whenever that direct
-	// path is configured, even in deployments without AdminStore.
-	if h.cfg.AuthProvider != nil && strings.TrimSpace(h.cfg.QURLEndpoint) != "" {
-		lines = append(lines, "• `/qurl crid <CRID>` — Create a qURL directly from a resource's permanent CRID")
-		if h.cfg.PostDMBlocks != nil {
-			lines = append(lines, "• `/qurl crid <CRID> dm:true` — DM the CRID's qURL to you instead of posting it in-channel")
-		}
-		lines = append(lines, "• `/qurl crid <CRID> reason:\"…\"` — Create a qURL, recording a reason in the audit log")
-	}
 	if h.cfg.AdminStore != nil {
 		// Glossary so the `$slug` / `$alias` tokens in the verbs and in
 		// `/qurl list` aren't unexplained. Only shown when AdminStore is
@@ -2594,7 +2579,7 @@ func (h *Handler) userHelpMessage(command string) string {
 		lines = append(lines,
 			"• `/qurl setup <email> --rotate` — Replace the workspace qURL key on the same qURL account",
 			"• `/qurl setup <email> --repoint` — Move the workspace to a different qURL account (cross-account moves route to an operator)",
-			"_A CRID is a resource's permanent identifier. In Slack, use a listed `$id` or `$alias` with `/qurl get`. Several aliases can point to one resource._",
+			"_A CRID is a resource's permanent identifier. Use a listed `$id` or `$alias` with `/qurl get`, or the CRID with `/qurl crid`. Several aliases can point to one resource._",
 			"",
 			"• `/qurl get <$id|$alias>` — Create a qURL for a resource `$id` or a `$alias` configured in this channel",
 		)
@@ -2606,6 +2591,7 @@ func (h *Handler) userHelpMessage(command string) string {
 		}
 		lines = append(lines,
 			"• `/qurl get <$id|$alias> reason:\"…\"` — Create a qURL, recording a reason in the audit log",
+			"• `/qurl crid <CRID>` — Create a qURL for a resource in this channel by its CRID (same flags as `/qurl get`)",
 		)
 	}
 	lines = append(lines,

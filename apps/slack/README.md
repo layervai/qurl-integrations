@@ -57,7 +57,7 @@ personal data out of the repository.
 | `/qurl get <$id\|$alias>` | Mint a one-time qURL link for a resource in this channel. |
 | `/qurl get <$id\|$alias> dm:true` | Mint the link and DM it to you instead of posting it in the channel. |
 | `/qurl get <$id\|$alias> reason:"…"` | Mint the link and record a reason in the audit log. |
-| `/qurl crid <CRID>` | Mint a one-time qURL link directly from a resource's permanent CRID. |
+| `/qurl crid <CRID>` | Mint a one-time qURL link for a resource in this channel, by its permanent CRID. |
 | `/qurl crid <CRID> dm:true` | Mint the CRID's link and DM it to you instead of posting it in the channel. |
 | `/qurl crid <CRID> reason:"…"` | Mint the CRID's link and record a reason in the audit log. |
 | `/qurl list` | List the resources available to you in this channel. |
@@ -161,9 +161,9 @@ includes how long the link stays valid. Every link is single-use: it burns on
 first open. Add `dm:true` to receive the link privately, or `reason:"…"` to
 note why you minted it in the audit log.
 
-`/qurl crid <CRID>` uses the same one-time link and Slack rendering flow, but
-shares directly from a resource's permanent CRID without resolving a channel
-`$id` or `$alias`.
+`/qurl crid <CRID>` is the same command addressed by a resource's permanent
+CRID instead of a `$id` or `$alias`. It is channel-scoped exactly like
+`/qurl get`: a CRID mints only in a channel where its resource is available.
 
 ## FAQ
 

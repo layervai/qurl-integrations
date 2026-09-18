@@ -27,8 +27,8 @@ const (
 	// channel-scoped `$alias`. Raw URLs and `$r_<id>` resource IDs are
 	// rejected — get is slug/alias-only.
 	SubcmdGet Subcommand = "get"
-	// SubcmdCRID mints a short-lived qURL directly from a cryptographic
-	// resource identifier. Unlike get, it does not resolve a channel alias.
+	// SubcmdCRID is get addressed by a resource's CRID instead of a
+	// `$slug`/`$alias`; it is authorized against the same channel allow-set.
 	SubcmdCRID Subcommand = "crid"
 	// SubcmdSetAlias binds an alias to a target. The parser accepts a
 	// URL, resource ID, or tunnel slug shape, but the handler
@@ -491,7 +491,13 @@ func parseGet(cmd *Command, rest []string) (*Command, error) {
 		return nil, err
 	}
 	cmd.Alias = alias
-	for _, tok := range rest[1:] {
+	return applyMintFlags(cmd, rest[1:])
+}
+
+// applyMintFlags applies the trailing `dm:` / `reason:` flags shared by `get`
+// and `crid`.
+func applyMintFlags(cmd *Command, toks []string) (*Command, error) {
+	for _, tok := range toks {
 		// Surface non-flag-shaped tokens as ErrUnexpectedArgument so
 		// `get $alias junk` reads as a typo (matches the strict
 		// posture taken on `aliases`, `list`, `admin policies`, etc.).
@@ -515,19 +521,11 @@ func parseCRID(cmd *Command, rest []string) (*Command, error) {
 	if len(rest) == 0 {
 		return nil, ErrInvalidCRID
 	}
-	if err := crid.Validate(rest[0]); err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrInvalidCRID, err)
+	if crid.Validate(rest[0]) != nil {
+		return nil, ErrInvalidCRID
 	}
 	cmd.CRID = rest[0]
-	for _, tok := range rest[1:] {
-		if !looksLikeFlag(tok) {
-			return nil, fmt.Errorf("%w: %q", ErrUnexpectedArgument, tok)
-		}
-		if err := applyFlag(cmd, tok); err != nil {
-			return nil, err
-		}
-	}
-	return cmd, nil
+	return applyMintFlags(cmd, rest[1:])
 }
 
 // parseSetAlias extracts `$alias <target>`. At the parser layer Target
