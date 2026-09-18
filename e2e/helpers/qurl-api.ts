@@ -248,7 +248,10 @@ export async function accessLinkNoRedirect(url: string): Promise<LinkAccessResul
 export const OBSERVED_PENDING_DIRECTIVE_MS = 30_000;
 
 /** The `Retry-After` on the deployment-state "dark 503" that clients must NOT
- * wait out. Same purpose.
+ * wait out. Same purpose — and note it is an EXTRAPOLATION: the fixture models
+ * the CLI's temporary-access-link route in a dark environment, not
+ * `DELETE /v1/resources/{id}`, so 60s is what a revoke would plausibly see
+ * rather than what one has been observed to see.
  * TODO(upstream-contract): mirrors HandlerDark503 in
  * apps/cli/internal/apitest/builders.go. If that directive ever NARROWS toward
  * the ceiling, this call site starts waiting out deployment 503s — updating
@@ -257,9 +260,13 @@ export const DARK_503_DIRECTIVE_MS = 60_000;
 
 /** Ceiling for the revocation-pending `Retry-After` revokeLink will honor, per
  * attempt. Sized to sit strictly between the two constants above — that
- * inequality is the ONLY thing separating a pending 503 from a dark 503 at this
- * call site, so it is a policy choice, not a spare number, and a unit test
- * pins it. See revokeLink's TODO(upstream-contract) before moving it. */
+ * inequality is what separates a pending 503 from a dark 503 at this call site
+ * BY WAIT COST, so it is a policy choice, not a spare number, and a unit test
+ * pins it. It is not a complete taxonomy: this stack also emits standing 503s
+ * with no directive at all (HandlerConnectorStopped503), which land in the
+ * `degraded` branch instead. The management-read fallback in revokeLink is what
+ * makes all three end at the resource's real state rather than at a guess.
+ * See revokeLink's TODO(upstream-contract) before moving it. */
 export const PENDING_REVOKE_CEILING_MS = 35_000;
 
 /** Total attempts for a confirming revoke, so `PENDING_REVOKE_ATTEMPTS - 1`

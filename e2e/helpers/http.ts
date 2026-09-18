@@ -178,12 +178,10 @@ export async function fetchWithTransientRetry(
     const delayMs = overCeiling
       ? baseDelayMs * attempt
       : Math.max(baseDelayMs * attempt, directiveMs);
-    // One level for every retry decision, with a grep-able token instead.
-    // Escalating the degraded case to console.error was tried and reverted: the
-    // predicate also matches the ALB drain-gap 503, which carries no
-    // `Retry-After` and is this module's FOUNDING scenario, so the benign case
-    // would have raised errors on green runs and eroded the signal it was meant
-    // to buy. `no usable Retry-After` is distinctive enough for CI to key on.
+    // One level for every retry decision, with a grep-able token instead of an
+    // escalation: the degraded predicate also matches the ALB drain-gap 503 —
+    // no `Retry-After`, and this module's founding scenario — so raising its
+    // level would fire on the benign case and erode the signal.
     console.warn(
       `[fetchWithTransientRetry] ${method} ${origin} -> ${res.status}; ` +
         `retry ${attempt}/${maxAttempts - 1} in ${delayMs}ms` +

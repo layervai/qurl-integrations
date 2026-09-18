@@ -251,23 +251,15 @@ test.each([
   await pending;
 });
 
-test('does not honor Retry-After on a 429 even when opted in', async () => {
-  // Scoped to 503 on purpose — see http.ts's `maxRetryAfterMs` for why.
-  fetchMock.mockImplementation(respond(429, { 'Retry-After': '30' }));
-  const pending = fetchWithTransientRetry(
-    url, { method: 'DELETE' }, { maxAttempts: 2, maxRetryAfterMs: 35_000 },
-  );
-  await jest.advanceTimersByTimeAsync(1_000);
-  expect(fetchMock).toHaveBeenCalledTimes(2);
-  await pending;
-});
-
 test.each([
-  ['502', 502],
-  ['504', 504],
-])('does not honor Retry-After on a %s either', async (_description, status) => {
-  // Retryable for an idempotent method, but not a status this stack attaches a
-  // meaningful directive to — only 503 is. Rounds out the scoping matrix.
+  ['408 Request Timeout', 408],
+  ['425 Too Early', 425],
+  ['429 Too Many Requests', 429],
+  ['502 Bad Gateway', 502],
+  ['504 Gateway Timeout', 504],
+])('does not honor Retry-After on a %s even when opted in', async (_d, status) => {
+  // The whole non-503 retryable set, so "only 503 influences the delay" is a
+  // closed matrix rather than a sample — see http.ts's `maxRetryAfterMs` for why.
   fetchMock.mockImplementation(respond(status, { 'Retry-After': '30' }));
   const pending = fetchWithTransientRetry(
     url, { method: 'DELETE' }, { maxAttempts: 2, maxRetryAfterMs: 35_000 },

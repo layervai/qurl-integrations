@@ -19,15 +19,12 @@ import {
   SMOKE_JOB_RESERVE_MS,
 } from '../helpers/smoke-budgets';
 
-// A DRIFT DETECTOR, not a proof the job fits. Being precise about that, because
-// the thing this replaced was a comment that overstated itself three times:
-// these are per-test CEILINGS reached only pathologically, the job timeout is
-// wall clock, and four other live suites plus npm ci, SSM reads and a cold
-// Playwright install come out of the same 10 minutes — a cold browser install
-// alone can exceed the reserve below. So this cannot prove the job fits, and
-// does not claim to. What it does is fail when someone raises a per-test
-// ceiling without weighing it against the job, which is exactly how these
-// numbers drifted during review.
+// A DRIFT DETECTOR, not a proof the job fits: these are per-test CEILINGS
+// reached only pathologically, the job timeout is wall clock, and four other
+// live suites plus npm ci, SSM reads and a cold Playwright install come out of
+// the same 10 minutes — a cold browser install alone can exceed the reserve.
+// What it does is fail when someone raises a per-test ceiling without weighing
+// it against the job.
 //
 // It also makes the revoke docstring's "widening means raising timeout-minutes
 // too, never one line" enforced instead of advisory: at PENDING_REVOKE_ATTEMPTS

@@ -1,8 +1,8 @@
 /**
  * Per-test time budgets for the connector-stack smoke, kept here rather than as
  * literals in the test file so their SUM can be checked by a unit test instead
- * of asserted in a comment: a hand-written total drifts from the literals it
- * describes, and nothing fails when it does.
+ * of asserted in a comment, which drifts from the literals it describes with
+ * nothing failing when it does.
  *
  * A GREEN `npm run test:unit` is not evidence the smoke job fits: the check
  * below compares file-revoke's ceilings against a nominal reserve, and the real
