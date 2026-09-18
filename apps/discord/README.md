@@ -96,6 +96,43 @@ invalidate the links from any previous send.
 > Recipients must allow direct messages from server members to receive their
 > link.
 
+## Child revocation rollout
+
+This release upgrades `@layervai/qurl` from 0.6.x to 2.x. Detect uses CRIDs
+and binds the signed link to the expected CRID. The image omits the optional
+native state store; the bot does not use producer state.
+
+Deploy and validate the connector revoke endpoint before deploying this
+consumer. Until that endpoint is enabled, ordinary children use the SDK
+fallback. Watermarked children cannot be confirmed through that fallback;
+the send stays available for retry. Legacy send rows with no usable `qurl_id`
+also remain unconfirmed after endpoint activation; deleting their shared parent
+is not a safe recovery. A repeated connector 429 fails closed
+after one bounded retry, without an SDK fallback. Revoke buttons and selects
+share a process-local guard for each sender and send. The guard remains active
+after the 13-minute result wait while revocation continues. Store checks still
+enforce ownership and prevent new recipients across processes.
+
+Before deployment, configure alarms for `Connector mint_link returned a link
+without a valid qurl_id`, `Connector mint_link over-minted`, `Connector mint_link
+returned more partial links than requested`, `Minted link revoke incomplete`,
+and `Revoke select acknowledgement failed`. Update any filters or saved queries
+that use `Failed to revoke QURL`, `missing resource identity`, or the partial-mint
+`resource_id` field: these become `Failed to revoke qURL`, `missing resource or
+token identity`, and `resource_ref`. The load-test warning now says
+`carried no usable resource identifier`.
+
+Each mint request allows 65 seconds for the connector’s 55-second deadline
+and response transport. Only the connector’s `request_admission_rejected` 429
+with `success: false` and an empty `links` array is retried, up to five times,
+with bounded backoff and a 100-second total mint budget. Other errors and
+partial results are never retried. A failing mint and its cleanup can take
+up to 290 seconds before the error is reported; earlier batches add time.
+Cleanup can continue after that reply; under degraded service a 30-child
+resource can take about 17 minutes. Check completion logs before manual cleanup.
+Load-test upload records rejected by SDK 2.x stay in the cleanup ledger;
+remove them only after cleanup or link expiry is confirmed.
+
 ## Configuration
 
 The bot is a Node.js service (**Node ≥ 22**) backed by DynamoDB. Copy

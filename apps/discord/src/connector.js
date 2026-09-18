@@ -1,21 +1,47 @@
+const { setTimeout: delay } = require('node:timers/promises');
 const { QURLClient } = require('@layervai/qurl');
 
 const config = require('./config');
 const logger = require('./logger');
-const { validateResourceId } = require('./utils/resource-id');
+const { validateResourceId, resourceIdLogRef } = require('./utils/resource-id');
+const { qurlIdForCleanup } = require('./utils/qurl-id');
 
 // Reuse the security-critical, syntactic private/loopback/link-local IP guard
 // from qurl.js rather than duplicating ~50 lines of IP-literal parsing that
 // could drift out of sync. resolveDetectTarget() self-mints the ephemeral
 // detect qURL via the @layervai/qurl SDK (the standardized client), not qurl.js.
 // qurl.js has no connector.js dependency, so this require introduces no cycle.
-const { isPrivateHost } = require('./qurl');
+const { isPrivateHost, revokeOrdinaryLinks, REVOKE_BATCH_MAX_IDS } = require('./qurl');
 
 const { sanitizeFilename } = require('./utils/sanitize');
-const { formatSessionDurationSeconds, isPositiveFinite } = require('./utils/time');
+const { formatSessionDurationSeconds, isPositiveFinite, settlesWithin } = require('./utils/time');
 
-const { MAX_FILE_SIZE } = require('./constants');
+const { MAX_FILE_SIZE, MAX_OVERFLOW_REVOKE_IDS } = require('./constants');
 const MAX_CDN_REDIRECTS = 3;
+// TODO(upstream-contract): qurl-integrations-infra#1551's POST /api/revoke_links
+// processes at most 10 unique ids under one 55s handler deadline. Leave 10s for
+// response transport so the caller, not an accidental race, owns the bound.
+// The endpoint rejects larger requests atomically, so chunk rather than couple
+// to commands.js's independently tunable TOKENS_PER_RESOURCE. The same chunk
+// feeds the SDK fallback, so its size is CONNECTOR_REVOKE_MAX_IDS below. A 404
+// is remembered only within one call, so each resource re-probes the route on
+// purpose: a process-wide negative cache would hide the route once enabled.
+const REVOKE_LINKS_TIMEOUT_MS = 65_000;
+// Chunk size: #1551's 10-id request cap, bounded by construction by the SDK
+// fallback's per-call cap because every chunk may be handed to it whole. (A
+// missing import yields NaN, which the coverage check in revokeMintedLinks
+// turns into a throw, never a false success.)
+const CONNECTOR_REVOKE_MAX_IDS = Math.min(10, REVOKE_BATCH_MAX_IDS);
+const REVOKE_RETRY_AFTER_MAX_SECONDS = 2;
+// Waiting budget for inline partial-mint cleanup before the mint error is
+// rethrown: one connector revoke chunk plus slack. Larger partial sets (up to
+// n + MAX_OVERFLOW_REVOKE_IDS ids, several chunks) routinely outlast it. The revoke keeps running
+// and a timeout (expected while the SDK fallback is slow) is logged as a warning
+// with the ids for reconciliation.
+const PARTIAL_MINT_CLEANUP_WAIT_MS = 70_000;
+// Terminal per-id outcomes. not_connector_managed is not itself a revoke: it
+// hands an ordinary child back to the SDK below.
+const REVOKE_TERMINAL_STATUSES = new Set(['revoked', 'already_gone', 'not_connector_managed']);
 
 // Truncate the connector's MD5 of an uploaded file before logging. The full
 // hash is treated as sensitive in our broader infrastructure; see internal
@@ -85,18 +111,28 @@ function parseConnectorBody(bodyText) {
   return { parsed, apiCode, apiDetail };
 }
 
-function mintedLinksWithId(links) {
-  if (!Array.isArray(links)) return [];
-  return links.filter(link => (
-    link
-    && typeof link === 'object'
-    && typeof link.qurl_id === 'string'
-    && link.qurl_id.length > 0
-  ));
-}
-
-function qurlIdsFromLinks(links) {
-  return links.map(link => link.qurl_id);
+// One identity rule for the thrown error and cleanup: only bounded ids that
+// the revoke endpoint accepts. Unidentified entries (an upstream id-shape
+// change) and ids beyond the `n` requested (the connector broke the mint
+// contract, so live children may be left) are counted separately; the cap
+// bounds compensation work driven by an untrusted body.
+function partialQurlIdsFromLinks(links, n) {
+  if (!Array.isArray(links)) {
+    return { partialQurlIds: [], unrevokedQurlIds: [], unidentifiedCount: 0, overMintedCount: 0, cappedCount: 0 };
+  }
+  // This runs while reporting a failed mint: never let a bad `n` replace that
+  // error. Skip cleanup instead and let the capped count below surface it.
+  const cap = Number.isInteger(n) && n > 0 ? n + MAX_OVERFLOW_REVOKE_IDS : 0;
+  const normalized = links.map(link => qurlIdForCleanup(link?.qurl_id));
+  const identified = [...new Set(normalized.filter(id => id !== null))];
+  return {
+    partialQurlIds: identified.slice(0, cap),
+    // Bounded, non-secret slice of ids left for hand reconciliation.
+    unrevokedQurlIds: identified.slice(cap, cap + MAX_OVERFLOW_REVOKE_IDS),
+    unidentifiedCount: normalized.filter(id => id === null).length,
+    overMintedCount: cap ? Math.max(0, identified.length - n) : 0,
+    cappedCount: Math.max(0, identified.length - cap),
+  };
 }
 
 function throwConnectorErrorFromBody(label, response, {
@@ -431,31 +467,86 @@ async function mintLinks(resourceId, { expiresAt, n, apiKey, selfDestructSeconds
   if (guildId) {
     body.guild_id = guildId;
   }
-  const response = await fetch(`${config.CONNECTOR_URL}/api/mint_link/${resourceId}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...connectorAuthHeaders(apiKey) },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(30000),
-  });
-
-  if (!response.ok) {
-    let bodyText = '';
+  // TODO(upstream-contract): #1551's local admission refusal has no side
+  // effects. Retry only that exact empty result; an ambiguous mint must never
+  // be repeated. Five backoffs total 31s; one 100s budget covers waits and I/O.
+  const budget = AbortSignal.timeout(100_000);
+  let response;
+  let bodyText = '';
+  for (let attempt = 0; ; attempt++) {
+    response = await fetch(`${config.CONNECTOR_URL}/api/mint_link/${resourceId}`, {
+      method: 'POST',
+      redirect: 'error',
+      headers: { 'Content-Type': 'application/json', ...connectorAuthHeaders(apiKey) },
+      body: JSON.stringify(body),
+      // The 55s handler deadline needs 10s for response transport.
+      signal: AbortSignal.any([budget, AbortSignal.timeout(65_000)]),
+    });
+    if (response.ok) break;
+    bodyText = '';
     try {
       bodyText = await response.text();
     } catch { /* network read failed, fall through with empty body */ }
+    const { parsed } = parseConnectorBody(bodyText);
+    const retryAfter = response.headers?.get?.('retry-after')?.trim() ?? '';
+    if (response.status !== 429 || parsed?.success !== false
+        || parsed.code !== 'request_admission_rejected'
+        || !Array.isArray(parsed.links) || parsed.links.length !== 0
+        || !/^[0-2]$/.test(retryAfter) || attempt >= 5) break;
+    await delay(Math.max(Number(retryAfter), 2 ** attempt) * 1000, undefined, { signal: budget });
+  }
+
+  if (!response.ok) {
     const { parsed, apiCode, apiDetail } = parseConnectorBody(bodyText);
-    const partialQurlIds = qurlIdsFromLinks(mintedLinksWithId(parsed?.links));
-    if (partialQurlIds.length > 0) {
+    const {
+      partialQurlIds, unrevokedQurlIds, unidentifiedCount, overMintedCount, cappedCount,
+    } = partialQurlIdsFromLinks(parsed?.links, n);
+    if (overMintedCount > 0 || cappedCount > 0) {
+      // Over-minted children up to MAX_OVERFLOW_REVOKE_IDS are revoked below;
+      // capped_qurl_count is what is left for hand reconciliation.
+      logger.error('Connector mint_link returned more partial links than requested', {
+        resource_ref: resourceIdLogRef(resourceId),
+        requested: n,
+        over_minted_count: overMintedCount,
+        capped_qurl_count: cappedCount,
+        unrevoked_overflow_qurl_ids: unrevokedQurlIds,
+      });
+    }
+    if (partialQurlIds.length > 0 || unidentifiedCount > 0) {
       // TODO(upstream-contract): Best-effort reconciliation signal; connector
       // error bodies must only include qurl_ids for links that were actually minted.
       logger.warn('Connector mint_link returned partial links on non-2xx', {
-        resource_id: resourceId,
+        resource_ref: resourceIdLogRef(resourceId),
         status: response.status,
         apiCode,
         bodyLen: bodyText.length,
         partial_link_count: partialQurlIds.length,
+        // qurl_ids are non-secret revoke handles (at_ tokens are rejected);
+        // log-redaction consistency is tracked in #1479.
         partial_qurl_ids: partialQurlIds,
+        unidentified_qurl_count: unidentifiedCount,
       });
+    }
+    // TODO(upstream-contract): qurl-integrations-infra#1551 returns id-only
+    // compensation entries for children whose view write failed, and callers
+    // must revoke them. Revoke every returned child before rethrowing so a
+    // failed mint never strands a live shared-tunnel token; a cleanup failure
+    // is logged and never masks the mint error.
+    if (partialQurlIds.length > 0) {
+      const cleanup = revokeMintedLinks(resourceId, partialQurlIds, apiKey).catch(cleanupError => {
+        logger.error('Connector partial mint cleanup failed', {
+          resource_ref: resourceIdLogRef(resourceId),
+          partial_link_count: partialQurlIds.length,
+          cleanup_status: cleanupError?.status,
+          error: cleanupError?.message,
+        });
+      });
+      if (!await settlesWithin(cleanup, PARTIAL_MINT_CLEANUP_WAIT_MS)) {
+        logger.warn('Connector partial mint cleanup still running at its wait budget', {
+          resource_ref: resourceIdLogRef(resourceId),
+          partial_qurl_ids: partialQurlIds,
+        });
+      }
     }
     return throwConnectorErrorFromBody('Connector mint_link', response, {
       bodyText,
@@ -475,6 +566,235 @@ async function mintLinks(resourceId, { expiresAt, n, apiKey, selfDestructSeconds
 
   logger.info('Minted links', { resource_id: resourceId, count: result.links.length });
   return result.links;
+}
+
+async function discardBody(response) {
+  try {
+    await response.body?.cancel();
+  } catch { /* discarding the body is best-effort */ }
+}
+
+// POST one revoke chunk. A 429 from the connector's local admission gate
+// (Retry-After: 1) is retried once, so /qurl revoke's own 5-resource fan-out
+// does not fail itself; a second 429 is returned for the caller to fail closed.
+// Both attempts share one REVOKE_LINKS_TIMEOUT_MS budget.
+async function postRevokeLinks(resourceId, batchIds, apiKey) {
+  const signal = AbortSignal.timeout(REVOKE_LINKS_TIMEOUT_MS);
+  const post = () => fetch(`${config.CONNECTOR_URL}/api/revoke_links`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...connectorAuthHeaders(apiKey) },
+    body: JSON.stringify({ resource_id: resourceId, qurl_ids: batchIds }),
+    redirect: 'error',
+    signal,
+  });
+  const response = await post();
+  if (response.status !== 429) return response;
+  const retryAfter = response.headers?.get?.('retry-after');
+  const trimmedRetryAfter = retryAfter?.trim() ?? '';
+  // Only RFC 9110 delta-seconds is waited on; the regex turns every other form
+  // (HTTP-date, 1e0, 0x2, 1.5, -1) into NaN, which fails closed below instead
+  // of adding load after a wait the connector did not ask for. An absent or
+  // empty header defaults to 1s, and 0 is floored to 1s so the retry never
+  // lands immediately on an overloaded connector.
+  const retryAfterSeconds = trimmedRetryAfter === '' ? 1 : (/^\d{1,3}$/.test(trimmedRetryAfter) ? Number(trimmedRetryAfter) : NaN);
+  if (!Number.isInteger(retryAfterSeconds) || retryAfterSeconds > REVOKE_RETRY_AFTER_MAX_SECONDS) return response;
+  const waitMs = Math.max(1, retryAfterSeconds) * 1000;
+  await new Promise((resolve) => {
+    const timer = setTimeout(resolve, waitMs);
+    timer.unref?.();
+  });
+  // The retry shares the request budget; if it lapsed while waiting, return the
+  // 429 (fail closed) rather than issue a request that aborts immediately.
+  if (signal.aborted) return response;
+  await discardBody(response);
+  return post();
+}
+
+/**
+ * Revoke the recipient links minted from an uploaded resource, never the
+ * resource itself (upload deduplication can share it with other sends).
+ *
+ * Watermarked views are minted on the connector's shared fileviewer tunnel, not
+ * on the resource the guild owns, so a qURL resource revoke cannot reach them
+ * (qurl-integrations-infra#1552). The connector revokes them on our behalf after
+ * proving `apiKey` owns `resourceId` and each child maps to it; children it
+ * classifies `not_connector_managed` are ordinary tokens the SDK revokes here.
+ *
+ * TODO(upstream-contract): qurl-integrations-infra#1551 keeps the route
+ * default-off, so a 404 means it is not registered (the registered route never
+ * returns 404; it denies with 401/403), never that a child is gone.
+ * Fall back to the SDK, which succeeds only for ordinary children of this exact
+ * source; a watermarked child fails closed until the route is enabled. The same
+ * fallback runs when the connector cannot answer (transport failure, timeout,
+ * 5xx), rethrowing the connector error if it fails. A 429 (Retry-After: 1) is
+ * retried once; 401/403/413, a repeated 429, and anything short of one terminal
+ * outcome per requested id throw. Callers keep the send and its parent resource
+ * as retry anchors for the user's next revoke.
+ *
+ * @throws when any requested link may still be live.
+ */
+async function revokeMintedLinks(resourceId, qurlIds, apiKey) {
+  validateResourceId(resourceId);
+  if (!Array.isArray(qurlIds)) throw new Error('Invalid connector revoke token list');
+  const normalizedIds = qurlIds.map(qurlIdForCleanup);
+  if (normalizedIds.includes(null)) throw new Error('Invalid connector revoke token identity');
+  const ids = [...new Set(normalizedIds)];
+  // An empty list would "succeed" for every recipient a caller maps onto it.
+  if (ids.length === 0) throw new Error('No connector revoke token ids to revoke');
+
+  let routeAbsent = false;
+  // Per-status tally so rollout can see revoked vs already_gone vs handed back.
+  const outcomes = {};
+  // Ids revoked through the SDK (route absent or not_connector_managed), so
+  // count reconciles with the outcomes tally.
+  let fallbackCount = 0;
+  // Connector outages must not block ordinary revokes that never needed it:
+  // on a transport failure or 5xx, try the SDK fallback, which is fail-closed
+  // on its own (it can only confirm children it DELETEs under the verified
+  // parent), and rethrow the connector error if that fallback fails too.
+  const fallbackOrThrow = async (batchIds, connectorError) => {
+    try {
+      await revokeOrdinaryLinks(resourceId, batchIds, apiKey);
+    } catch (fallbackError) {
+      // Keep the connector error (and its api_code) as the verdict, but carry
+      // the fallback's diagnosis so failed_child_count survives.
+      // A dedicated field: transport errors already carry their own `cause`.
+      connectorError.fallbackError = fallbackError;
+      if (fallbackError?.failedCount !== undefined) connectorError.failedCount ??= fallbackError.failedCount;
+      throw connectorError;
+    }
+    fallbackCount += batchIds.length;
+  };
+  let confirmedCount = 0;
+  // Ids the connector itself confirmed on a 200 (not via any SDK fallback),
+  // counted before any handoff so a failed handoff still shows its progress.
+  let connectorDirectCount = 0;
+  try {
+    for (let offset = 0; offset < ids.length; offset += CONNECTOR_REVOKE_MAX_IDS) {
+      const batchIds = ids.slice(offset, offset + CONNECTOR_REVOKE_MAX_IDS);
+      // An empty chunk (a broken cap) would confirm vacuously; never let it.
+      if (batchIds.length === 0) throw new Error('Connector revoke chunk is empty');
+      if (routeAbsent) {
+        await revokeOrdinaryLinks(resourceId, batchIds, apiKey);
+        fallbackCount += batchIds.length;
+        confirmedCount += batchIds.length;
+        continue;
+      }
+      let response;
+      try {
+        response = await postRevokeLinks(resourceId, batchIds, apiKey);
+      } catch (transportError) {
+        logger.warn('Connector revoke_links unreachable', {
+          resource_ref: resourceIdLogRef(resourceId),
+          error_name: transportError?.name,
+          count: batchIds.length,
+        });
+        await fallbackOrThrow(batchIds, transportError);
+        confirmedCount += batchIds.length;
+        continue;
+      }
+
+      if (response.status === 404) {
+        routeAbsent = true;
+        await discardBody(response);
+        await revokeOrdinaryLinks(resourceId, batchIds, apiKey);
+        fallbackCount += batchIds.length;
+        confirmedCount += batchIds.length;
+        continue;
+      }
+      if (!response.ok) {
+        let bodyText = '';
+        try {
+          bodyText = await response.text();
+        } catch { /* network read failed, fall through with empty body */ }
+        const { parsed } = parseConnectorBody(bodyText);
+        // TODO(upstream-contract): #1551's revoke route puts its enum in a top-level
+        // `code` (revoke_not_available, request_rate_limited), unlike mint/upload's
+        // `error` string. Surface only that enum; the rest of the body stays out.
+        const apiCode = typeof parsed?.code === 'string' && /^[a-z_]{1,64}$/.test(parsed.code) ? parsed.code : null;
+        // The durable "route is live but refusing" signal during enablement.
+        logger.warn('Connector revoke_links refused', {
+          resource_ref: resourceIdLogRef(resourceId),
+          status: response.status,
+          api_code: apiCode,
+          count: batchIds.length,
+          // 5xx means the connector could not answer and the SDK fallback runs.
+          will_fallback: response.status >= 500,
+        });
+        let connectorError;
+        try {
+          throwConnectorErrorFromBody('Connector revoke_links', response, { bodyText, apiCode });
+        } catch (err) {
+          connectorError = err;
+        }
+        // 401/403/413/429 mean this request is wrong or must slow down; only a
+        // connector that cannot answer (5xx) falls back.
+        connectorError ??= new Error(`Connector revoke_links failed (${response.status})`);
+        if (response.status < 500) throw connectorError;
+        await fallbackOrThrow(batchIds, connectorError);
+        confirmedCount += batchIds.length;
+        continue;
+      }
+
+      let parsed;
+      try {
+        parsed = await response.json();
+      } catch {
+        throw new Error('Connector revoke_links returned invalid JSON');
+      }
+
+      // Results are unordered: require exactly one confirmed outcome per
+      // requested id. An empty, short, duplicate or foreign result set fails.
+      if (parsed?.success !== true) {
+        throw new Error('Connector revoke_links returned success: false');
+      }
+      const requested = new Set(batchIds);
+      const statuses = new Map();
+      const results = Array.isArray(parsed.results) ? parsed.results : [];
+      if (results.length !== batchIds.length) {
+        throw new Error('Connector revoke_links did not confirm every requested link');
+      }
+      for (const result of results) {
+        if (requested.has(result?.qurl_id) && REVOKE_TERMINAL_STATUSES.has(result.status)
+            && !statuses.has(result.qurl_id)) {
+          statuses.set(result.qurl_id, result.status);
+        }
+      }
+      if (statuses.size !== batchIds.length) {
+        throw new Error('Connector revoke_links did not confirm every requested link');
+      }
+      const ordinaryIds = batchIds.filter(id => statuses.get(id) === 'not_connector_managed');
+      connectorDirectCount += batchIds.length - ordinaryIds.length;
+      if (ordinaryIds.length > 0) {
+        await revokeOrdinaryLinks(resourceId, ordinaryIds, apiKey);
+        fallbackCount += ordinaryIds.length;
+      }
+      // Tally only once the chunk is confirmed, so outcomes stay exact on failure.
+      for (const status of statuses.values()) outcomes[status] = (outcomes[status] || 0) + 1;
+      confirmedCount += batchIds.length;
+    }
+    // Belt and braces for the chunk loop: never report success short of every id.
+    if (confirmedCount !== ids.length) throw new Error('Connector revoke did not cover every requested link');
+  } finally {
+    // route_absent tells rollout verification whether #1551 is live here; the
+    // tally is logged on failure too so partial progress stays visible.
+    const summary = {
+      resource_ref: resourceIdLogRef(resourceId),
+      count: ids.length,
+      route_absent: routeAbsent,
+      outcomes,
+      fallback_count: fallbackCount,
+    };
+    if (confirmedCount === ids.length) {
+      logger.info('Revoked minted links', summary);
+    } else {
+      logger.warn('Minted link revoke incomplete', {
+        ...summary,
+        confirmed_count: confirmedCount,
+        connector_direct_count: connectorDirectCount,
+      });
+    }
+  }
 }
 
 const DETECT_TARGET_PATH = '/api/detect';
@@ -526,16 +846,16 @@ function detectTunnelHostSuffixesForEndpoint(endpoint) {
 // and tests that vary it use jest.resetModules() before requiring connector.js.
 const DETECT_TUNNEL_HOST_SUFFIXES = detectTunnelHostSuffixesForEndpoint(config.QURL_ENDPOINT);
 
-// Module-level cache for the detect tunnel's resource_id (resolved from
+// Module-level cache for the detect tunnel's CRID (resolved from
 // DETECT_TUNNEL_SLUG via the SDK's listAllResources auto-paginator). The
-// resource_id is a stable, NON-secret identifier, so caching it across calls is
+// CRID is a stable, NON-secret identifier, so caching it across calls is
 // safe and skips a slug lookup on every detect. CACHE ONLY THIS, NEVER the
 // minted access token or qurl_site: each detect mints a FRESH ephemeral qURL (a
 // short-lived credential — mint and session durations are both '5m') and the native opening/knock
 // grants network access to the caller's CURRENT IP/knock-window. A stale token
 // would be a long-lived credential to leak; qurl_site is per-mint and must stay
 // paired with the fresh knock.
-let _detectResourceId = null;
+let _detectCrid = null;
 let _detectResourceRetryAfter = 0;
 let _detectResourcePreviousFailure = null;
 let _detectResourceConsecutiveFailures = 0;
@@ -555,7 +875,7 @@ function rememberDetectResourceFailure(error, { immediateBackoff = false, clearR
   // closed with a short process-wide backoff instead of granting one retry per
   // failure mode. Key this by slug/resource/kind if detect becomes multi-slug
   // or high-volume, or mint failures become guild-specific.
-  if (clearResourceCache) _detectResourceId = null;
+  if (clearResourceCache) _detectCrid = null;
   const now = Date.now();
   if (_detectResourcePreviousFailureAt && now - _detectResourcePreviousFailureAt > DETECT_RESOURCE_FAILURE_BACKOFF_MS) {
     _detectResourceConsecutiveFailures = 0;
@@ -592,7 +912,7 @@ function assertDetectResourceFailureBackoffAllowed() {
 //
 // Cache the client, never the minted qurl_site or access token — native opening
 // re-knocks per call (the full no-cache invariant + rationale live on
-// _detectResourceId above and in resolveDetectTarget's docstring).
+// _detectCrid above and in resolveDetectTarget's docstring).
 //
 // The bot credential owns the detect tunnel. Mint only the exact guild path
 // taken from the authenticated Discord interaction; the image request carries no API credential.
@@ -723,15 +1043,15 @@ async function resolveDetectTarget(guildId) {
   }
   assertDetectResourceFailureBackoffAllowed();
 
-  // Resolve the tunnel resource_id from the slug, cached across calls — it's a
+  // Resolve the tunnel CRID from the slug, cached across calls — it's a
   // stable, non-secret identifier. Assign the cache ONLY after a successful
-  // extract so a failed lookup doesn't poison it. The SDK owns pagination and
-  // response shaping: listAllResources yields resources from every page, and
-  // each resource carries `resource_id` (not `id`). There is intentionally no
-  // in-flight dedup for concurrent cold-cache lookups; the failure backoff
-  // bounds repeated hard failures.
-  let resourceId = _detectResourceId;
-  if (!resourceId) {
+  // extract so a failed lookup doesn't poison it. The SDK owns pagination:
+  // listAllResources yields resources from every page. SDK 2.x resource item
+  // methods accept only the `crid`, never the public-key `resource_id`. There
+  // is intentionally no in-flight dedup for concurrent cold-cache lookups; the
+  // failure backoff bounds repeated hard failures.
+  let crid = _detectCrid;
+  if (!crid) {
     // Breadcrumb a slug-lookup transport failure (message only — no token, no
     // URL), matching the mint/resolve legs, so a cold-boot activation failure
     // on the FIRST network call is diagnosable rather than an undistinguished
@@ -762,13 +1082,19 @@ async function resolveDetectTarget(guildId) {
       });
       throw err;
     }
-    resourceId = active[0]?.resource_id ? String(active[0].resource_id) : null;
-    if (!resourceId) {
+    if (!active[0]) {
       const err = new Error('Detect tunnel resource not found for slug');
       rememberDetectResourceFailure(err, { immediateBackoff: true });
       throw err;
     }
-    _detectResourceId = resourceId;
+    // TODO(upstream-contract): GET /v1/resources items carry `crid`.
+    crid = typeof active[0].crid === 'string' ? active[0].crid : null;
+    if (!crid) {
+      const err = new Error('Detect tunnel resource listing returned no crid');
+      rememberDetectResourceFailure(err, { immediateBackoff: true });
+      throw err;
+    }
+    _detectCrid = crid;
   }
 
   // Mint a fresh qURL and bound its access session separately. Expiring a
@@ -777,13 +1103,13 @@ async function resolveDetectTarget(guildId) {
   let targetUrl;
   let minted;
   try {
-    minted = await getQurlClient().createQurlForResource(resourceId, {
+    minted = await getQurlClient().createQurlForResource(crid, {
       expires_in: DETECT_LINK_EXPIRES_IN,
       session_duration: DETECT_LINK_EXPIRES_IN,
       target_path: targetPath,
     });
   } catch (err) {
-    // Self-heal a stale resource_id: if the tunnel resource was deleted/
+    // Self-heal a stale CRID: if the tunnel resource was deleted/
     // recreated, the cached id would 404 every mint until process restart.
     // Drop the cache so a later detect re-resolves the slug. The first
     // mint transport/API failure gets one immediate self-heal retry; repeated
@@ -801,7 +1127,7 @@ async function resolveDetectTarget(guildId) {
     targetUrl = buildDetectTargetUrl(minted?.qurl_site, targetPath);
   } catch (err) {
     // qurl_site hostname-pin failures happen after a successful slug
-    // lookup and mint, so keep the cached resource id and retry the mint after
+    // lookup and mint, so keep the cached CRID and retry the mint after
     // the short failure window instead of re-walking slug history. The mint
     // created an unredeemed 5m qURL, but failing before native opening is the safe
     // trade: no NHP knock and no image POST are issued to an untrusted host.
@@ -819,17 +1145,20 @@ async function resolveDetectTarget(guildId) {
   let clearResourceCache = false;
   try {
     // qv2t1 carries an offline credential, not an at_ API-resolve token.
-    // The native SDK verifies the issuer and cell against deployment trust.
+    // The native SDK verifies the issuer and cell against deployment trust,
+    // and expectedCRID binds the signed resource key to the slug-resolved CRID.
     if (typeof minted?.qurl_link === 'string' && minted.qurl_link.split('#')[1]?.startsWith('qv2t1.')) {
-      if (minted.resource_id !== resourceId) {
-        const err = new Error('Detect mint returned a mismatched resource_id');
+      // TODO(upstream-contract): POST /v1/resources/{crid}/qurls echoes the
+      // addressed CRID; a missing echo fails closed here like a mismatch.
+      if (minted.crid !== crid) {
+        const err = new Error('Detect mint returned a mismatched crid');
         clearResourceCache = true;
         throw err;
       }
       const { createPortalOpener } = require('@layervai/qurl/node');
-      const opener = createPortalOpener({ qurl: minted.qurl_link });
+      const opener = createPortalOpener({ qurl: minted.qurl_link, expectedCRID: crid });
       try {
-        // SDK 0.6 bounds native opening to 15 seconds and aborts it on close.
+        // SDK 2.x bounds native opening to 15 seconds and aborts it on close.
         await opener.start();
         clearDetectResourceFailureState();
         return { targetUrl, opener };
@@ -842,7 +1171,7 @@ async function resolveDetectTarget(guildId) {
     throw new Error('Detect requires a signed native qURL');
   } catch (err) {
     // A malformed qurl_link is a mint response-shape issue, not evidence that
-    // the cached resource_id is stale. Keep the resource cache and retry only
+    // the cached CRID is stale. Keep the resource cache and retry only
     // the mint after the short failure window.
     rememberDetectResourceFailure(err, { clearResourceCache });
     logger.warn('Detect native open or link validation failed', { error: redactAccessToken(err.message) });
@@ -867,10 +1196,10 @@ async function detectWatermark(imageBytes, { guildId, contentType } = {}) {
       },
       body: imageBytes,
       // Neural-net inference is the slow leg here; give it the same 60s
-      // headroom the upload paths use rather than the 30s mint window.
+      // headroom the upload paths use.
       signal: AbortSignal.timeout(60000),
     };
-    // TODO(upstream-contract): SDK 0.6 fetch authenticates the signed target before this callback.
+    // TODO(upstream-contract): SDK 2.x fetch authenticates the signed target before this callback.
     const response = await opener.fetch((authenticatedTarget) => {
       // Check the signed ACK target before sending image bytes.
       if (authenticatedTarget.href !== targetUrl) {
@@ -947,4 +1276,4 @@ async function uploadJsonToConnector(jsonPayload, filename, apiKey, viewerTtlSec
   return result;
 }
 
-module.exports = { uploadToConnector, downloadAndUpload, reUploadBuffer, mintLinks, detectWatermark, uploadJsonToConnector, isAllowedSourceUrl, detectTunnelHostSuffixesForEndpoint };
+module.exports = { uploadToConnector, downloadAndUpload, reUploadBuffer, mintLinks, revokeMintedLinks, detectWatermark, uploadJsonToConnector, isAllowedSourceUrl, detectTunnelHostSuffixesForEndpoint };

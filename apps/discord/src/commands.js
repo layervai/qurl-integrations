@@ -30,6 +30,7 @@ const {
   DM_STATUS,
   MAX_FILE_SIZE,
   TOKENS_PER_RESOURCE,
+  MAX_OVERFLOW_REVOKE_IDS,
   MAX_CONCURRENT_MONITORS,
   DISCORD_MEMBERS_PAGE_SIZE,
   PREWARM_MAX_PAGES,
@@ -49,12 +50,14 @@ const {
   isLegitimateSelfDestructSelectValue,
   SELF_DESTRUCT_PRESETS,
   SELF_DESTRUCT_NO_TIMER_VALUE,
+  settlesWithin,
 } = require('./utils/time');
 const { signQurlOAuthState } = require('./utils/qurl-oauth-state');
-const { deleteLink, getIdentity } = require('./qurl');
+const { getIdentity } = require('./qurl');
 const { resourceIdLogRef } = require('./utils/resource-id');
 const { qurlApiErrorStatus } = require('./utils/qurl-errors');
-const { downloadAndUpload, reUploadBuffer, mintLinks, detectWatermark, uploadJsonToConnector, isAllowedSourceUrl } = require('./connector');
+const { downloadAndUpload, reUploadBuffer, mintLinks, detectWatermark, uploadJsonToConnector, isAllowedSourceUrl, revokeMintedLinks } = require('./connector');
+const { qurlIdForCleanup, hasPersistableQurlIdShape } = require('./utils/qurl-id');
 const { deleteFlow, transitionFlow, supersedeOrCreate } = require('./flow-state');
 const { fireAndForgetLinkGuildWebhookSubscription } = require('./guild-webhook-link');
 const {
@@ -569,9 +572,9 @@ function isAllowedFileType(contentType) {
 // collector instances (e.g. flow_state RESUME on a bot restart loading
 // unfinished sends).
 const addRecipientsLocks = new Set();
-// Same-process per-send Revoke lock. Collector-local `revokeInFlight`
+// Same-process per-sender/send Revoke lock. Collector-local `revokeInFlight`
 // handles duplicate clicks inside one management collector; this Set lets
-// another collector in the same process see a Revoke already mutating the
+// another collector or select handler in the same process see a Revoke mutating the
 // send. Cross-process safety relies on revoked_at plus the guarded
 // recordQURLSendBatch transaction.
 const revokingSendLocks = new Set();
@@ -1643,6 +1646,21 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
 // should NOT re-flag this file's length — the split will land in its
 // own PR against a stable baseline.
 
+// Wait budget for best-effort revoke cleanup that sits in front of a user
+// reply: mint-failure compensation (after the 100s mint budget and 70s inline
+// partial cleanup) and Add Recipients fresh-mint cleanup.
+// TODO(upstream-contract): keeps the reply inside Discord's 15-minute
+// interaction-token window. Hitting it is expected while
+// the SDK fallback is slow, so it logs a warning with the ids, not an error.
+const CLEANUP_WAIT_BUDGET_MS = 120_000;
+// Progress copy for the /qurl revoke select; it stays actionable if the process
+// restarts before the result edit lands.
+const REVOKE_SELECT_PROGRESS_MSG = "Revoking links... this can take a few minutes. If this message hasn't updated in 15 minutes, run `/qurl revoke` again.";
+// TODO(upstream-contract): /qurl revoke result budget; 13 minutes leaves room
+// to edit the result before Discord's 15-minute interaction token expires.
+const REVOKE_SELECT_RESULT_WAIT_MS = 13 * 60 * 1000;
+const REVOKE_RUNNING_MSG = 'Revocation is still running. Run `/qurl revoke` again in a few minutes to check the result.';
+
 /**
  * Mint one-time links across a stream of connector resources, each capped at
  * TOKENS_PER_RESOURCE tokens. When a resource is exhausted, the caller's
@@ -1683,26 +1701,108 @@ async function mintLinksInBatches({ initialResourceId, reuploadFn, expiresAt, re
   // loop as an oracle and diffs the shapes. If the guard, the increment or the
   // batchSize formula below changes, update that oracle in the same PR or the
   // load test keeps measuring the old shape while staying green.
-  for (let i = 0; i < recipientCount; i += TOKENS_PER_RESOURCE) {
-    if (tokensUsed >= TOKENS_PER_RESOURCE && i > 0) {
-      const re = await reuploadFn();
-      currentResourceId = re.resource_id;
-      tokensUsed = 0;
+  try {
+    for (let i = 0; i < recipientCount; i += TOKENS_PER_RESOURCE) {
+      if (tokensUsed >= TOKENS_PER_RESOURCE && i > 0) {
+        const re = await reuploadFn();
+        currentResourceId = re.resource_id;
+        tokensUsed = 0;
+      }
+      const batchSize = Math.min(TOKENS_PER_RESOURCE, recipientCount - i);
+      const minted = await mintLinks(currentResourceId, {
+        expiresAt,
+        n: batchSize,
+        apiKey,
+        selfDestructSeconds,
+        guildId,
+      });
+      // An untrusted over-count cannot drive unbounded compensation: push the
+      // requested links plus a bounded overflow so small over-mints self-heal
+      // in the catch below (the over-count is thrown on after this loop).
+      for (const link of minted.slice(0, batchSize + MAX_OVERFLOW_REVOKE_IDS)) {
+        allLinks.push({ qurl_link: link?.qurl_link, qurl_id: link?.qurl_id, resourceId: currentResourceId });
+      }
+      // Validate only after every entry is pushed: the catch below revokes the
+      // identified siblings of a bad entry. More links than requested breaks
+      // the mint contract. A short batch is still reported by callers as
+      // "Only N of M"; links carry no recipient identity, so a short batch
+      // cannot misroute access.
+      if (minted.length > batchSize) {
+        // Up to MAX_OVERFLOW_REVOKE_IDS extra children are revoked by the catch;
+        // anything beyond is left for hand reconciliation, so log a bounded
+        // slice of those non-secret ids.
+        logger.error('Connector mint_link over-minted', {
+          resource_ref: resourceIdLogRef(currentResourceId),
+          requested: batchSize,
+          returned: minted.length,
+          unrevoked_overflow_qurl_ids: minted
+            .slice(batchSize + MAX_OVERFLOW_REVOKE_IDS, batchSize + 2 * MAX_OVERFLOW_REVOKE_IDS)
+            .map(link => qurlIdForCleanup(link?.qurl_id)).filter(id => id !== null),
+        });
+        throw new Error(`Connector mint_link returned ${minted.length} links for a ${batchSize}-link batch`);
+      }
+      minted.forEach((link, idx) => {
+        // qurl_id is the only durable child-revoke identity (and the join key
+        // against qurl.accessed webhooks). Never persist or deliver without it.
+        if (!hasPersistableQurlIdShape(link?.qurl_id)) {
+          throw new Error(`Connector mint_link returned a link without a valid qurl_id (entry ${i + idx})`);
+        }
+        // qurl_link is the write-once delivery credential; an id-only 2xx entry
+        // can be neither delivered nor rebuilt, so revoke it rather than persist.
+        if (typeof link.qurl_link !== 'string' || link.qurl_link.length === 0) {
+          throw new Error(`Connector mint_link returned a link without a qurl_link (entry ${i + idx})`);
+        }
+      });
+      tokensUsed += batchSize;
     }
-    const batchSize = Math.min(TOKENS_PER_RESOURCE, recipientCount - i);
-    const minted = await mintLinks(currentResourceId, {
-      expiresAt,
-      n: batchSize,
-      apiKey,
-      selfDestructSeconds,
-      guildId,
-    });
-    for (const link of minted) {
-      // qurl_id is the join key against qurl.accessed webhooks; empty
-      // string degrades the whole monitor to bare base-msg.
-      allLinks.push({ qurl_link: link.qurl_link, qurl_id: link.qurl_id || '', resourceId: currentResourceId });
+  } catch (error) {
+    // Earlier batches' links were never delivered; revoke them (and the
+    // identified part of this batch) before rethrowing so a failed mint does
+    // not strand live children. mintLinks already revoked its own non-2xx
+    // partial ids. Cleanup failures are logged, never mask the mint error.
+    const idsByResource = new Map();
+    let unidentifiedCount = 0;
+    for (const link of allLinks) {
+      const qurlId = qurlIdForCleanup(link.qurl_id);
+      if (qurlId === null) {
+        unidentifiedCount++;
+        continue;
+      }
+      const ids = idsByResource.get(link.resourceId) || [];
+      ids.push(qurlId);
+      idsByResource.set(link.resourceId, ids);
     }
-    tokensUsed += batchSize;
+    const entries = [...idsByResource];
+    const compensation = batchSettled(entries, ([resourceId, ids]) => (
+      revokeMintedLinks(resourceId, ids, apiKey)
+    ), 5);
+    // Stop waiting before the send's interaction token expires so the mint
+    // error still reaches the user; nothing was delivered, and the ids are
+    // logged for reconciliation while the revoke keeps running.
+    if (!await settlesWithin(compensation, CLEANUP_WAIT_BUDGET_MS)) {
+      logger.warn('Mint failure compensation still running at its wait budget', {
+        resources: entries.map(([resourceId, ids]) => ({ resource_ref: resourceIdLogRef(resourceId), qurl_ids: ids })),
+        unidentified_count: unidentifiedCount,
+      });
+      throw error;
+    }
+    const results = await compensation;
+    // qurl_ids are non-secret revoke handles: log them so an operator can
+    // reconcile any child whose compensation failed.
+    const failures = results.flatMap((result, i) => (result.status === 'rejected' ? [{
+      resource_ref: resourceIdLogRef(entries[i][0]),
+      qurl_ids: entries[i][1],
+      error: result.reason?.message,
+    }] : []));
+    if (failures.length > 0 || unidentifiedCount > 0) {
+      logger.error('Failed to revoke links after a mint failure', {
+        failed_count: failures.length,
+        total: results.length,
+        unidentified_count: unidentifiedCount,
+        failures,
+      });
+    }
+    throw error;
   }
   return allLinks;
 }
@@ -2185,10 +2285,8 @@ async function executeSendPipeline(interaction, {
   } catch (err) {
     // Log only non-secret identifiers so an operator can manually revoke the
     // orphaned qURLs. qurlLink carries its live access token in the fragment
-    // and must never reach logs. resourceId drives the same whole-resource
-    // cleanup used by this bot (DELETE /v1/qurls/{resourceId}); qurlId lets an
-    // operator correlate each orphaned token in that resource.
-    // TODO(upstream-contract): qurl-service owns the whole-resource DELETE.
+    // and must never reach logs. resourceId + qurlId are the identities the
+    // bot's child revoke (revokeMintedLinks) needs to reconcile each orphan.
     // Scrub err.message even for AWS service exceptions: validation messages
     // can echo offending request values, but contain useful failure details.
     logger.error('recordQURLSendBatch failed; aborting send to keep state consistent', {
@@ -2505,6 +2603,7 @@ async function executeSendPipeline(interaction, {
       return;
     }
 
+    const revokeLockKey = `${interaction.user.id}:${sendId}`;
     let showAllRecipients = false;
 
     // `revokeInFlight` dedups concurrent Revoke clicks. `revokeSucceeded`
@@ -2566,14 +2665,14 @@ async function executeSendPipeline(interaction, {
           revokeResultSuccess,
           revokeResultFinalizationFailed,
         );
-        await interaction.editReply(revokeReplyPayload(updated)).catch(logIgnoredDiscordErr);
+        await btnInteraction.editReply(revokeReplyPayload(updated)).catch(logIgnoredDiscordErr);
         return;
       }
 
       if (btnInteraction.customId === `qurl_revoke_${sendId}`) {
         // Sync dedup before any await (Node single-threaded).
         if (revokeInFlight) return btnInteraction.deferUpdate().catch(logIgnoredDiscordErr);
-        if (revokingSendLocks.has(sendId)) {
+        if (revokingSendLocks.has(revokeLockKey)) {
           await btnInteraction.reply({ content: ALREADY_REVOKING_SEND_MSG, ephemeral: true }).catch(logIgnoredDiscordErr);
           return;
         }
@@ -2582,7 +2681,7 @@ async function executeSendPipeline(interaction, {
           return;
         }
         revokeInFlight = true;
-        revokingSendLocks.add(sendId);
+        revokingSendLocks.add(revokeLockKey);
         // Keep this lock owned by the revoke work, not the collector lifetime:
         // if delete I/O hangs, Add stays blocked until that work settles (or
         // the process restarts) rather than minting while revoke may still run.
@@ -2590,6 +2689,7 @@ async function executeSendPipeline(interaction, {
         // overwrite the revoke-result message otherwise. Bare call
         // (no `if (monitor)`) — we're inside the `if (monitor) { ... }`
         // collector-setup block; the guard above already proved truthy.
+        let revoking;
         try {
           monitor.stop();
           await btnInteraction.deferUpdate().catch(logIgnoredDiscordErr);
@@ -2612,11 +2712,18 @@ async function executeSendPipeline(interaction, {
             // terminal gate for duplicate Revoke clicks; revokingSendLocks only
             // covers in-progress work across same-process collectors.
             revokeSucceeded = true;
-            await interaction.editReply({ content: 'Links for this send have already been revoked.', components: [] }).catch(logIgnoredDiscordErr);
+            await btnInteraction.editReply({ content: 'Links for this send have already been revoked.', components: [] }).catch(logIgnoredDiscordErr);
             return;
           }
-          await interaction.editReply({ content: 'Revoking links...', components: [] }).catch(logIgnoredDiscordErr);
-          const revoked = await revokeAllLinks(sendId, interaction.user.id, apiKey, resolveSenderAlias(interaction));
+          await btnInteraction.editReply({ content: 'Revoking links...', components: [] }).catch(logIgnoredDiscordErr);
+          revoking = revokeAllLinks(sendId, interaction.user.id, apiKey, resolveSenderAlias(interaction))
+            .finally(() => revokingSendLocks.delete(revokeLockKey));
+          if (!await settlesWithin(revoking, REVOKE_SELECT_RESULT_WAIT_MS)) {
+            logger.warn('Revoke button still running at its result budget', { sendId });
+            await btnInteraction.editReply({ content: REVOKE_RUNNING_MSG, components: [] }).catch(logIgnoredDiscordErr);
+            return;
+          }
+          const revoked = await revoking;
           if (!revoked.barrierEstablished) {
             revokeResultUserNames = [];
             revokeResultTotal = 0;
@@ -2628,7 +2735,7 @@ async function executeSendPipeline(interaction, {
             // intentionally hidden (unknown, foreign, or concurrently
             // finalized all share the store's fail-closed result).
             revokeSucceeded = true;
-            await interaction.editReply({
+            await btnInteraction.editReply({
               content: 'Could not verify this send for revocation. It may already be revoked or unavailable; run `/qurl revoke` to refresh.',
               components: [],
             }).catch(logIgnoredDiscordErr);
@@ -2655,7 +2762,7 @@ async function executeSendPipeline(interaction, {
             revokeResultSuccess,
             revokeResultFinalizationFailed,
           );
-          await interaction.editReply(revokeReplyPayload(initial)).catch(logIgnoredDiscordErr);
+          await btnInteraction.editReply(revokeReplyPayload(initial)).catch(logIgnoredDiscordErr);
           // Keep revokeInFlight true after success as the collector-local
           // terminal gate for duplicate Revoke clicks; revokingSendLocks only
           // covers in-progress work across same-process collectors.
@@ -2674,7 +2781,7 @@ async function executeSendPipeline(interaction, {
           });
         } catch (err) {
           logger.error('Revoke failed', { sendId, error: err.message });
-          await interaction.editReply({
+          await btnInteraction.editReply({
             content: 'Failed to revoke links. Try `/qurl revoke` instead.',
             components: [],
           }).catch(logIgnoredDiscordErr);
@@ -2682,7 +2789,7 @@ async function executeSendPipeline(interaction, {
           // keeps Add Recipients closed after a partial/external failure.
           revokeInFlight = false;
         } finally {
-          revokingSendLocks.delete(sendId);
+          if (!revoking) revokingSendLocks.delete(revokeLockKey);
         }
         // Collector keeps running for the post-revoke expand toggle;
         // its `time:` window auto-expires.
@@ -2699,7 +2806,7 @@ async function executeSendPipeline(interaction, {
         // FIRST (before any cap check), then verify remaining capacity and
         // release on rejection. That way a future refactor that adds an
         // `await` in the remaining check can't reopen a racy window.
-        if (revokingSendLocks.has(sendId) || revokeSucceeded) {
+        if (revokingSendLocks.has(revokeLockKey) || revokeSucceeded) {
           // Durable revoking_at/revoked_at state keeps stale Add clicks
           // disabled even after this collector-local lock is released.
           let content = ALREADY_REVOKING_SEND_MSG;
@@ -2908,7 +3015,7 @@ async function cleanupFreshAddRecipientResources(batchSends, apiKey, sendId, opt
     // Unreachable by construction for today's Add Recipients flow: oversized
     // batches fail before DDB, and revoked errors only come from a single
     // transaction. If a future caller violates that invariant, still revoke
-    // the freshly minted qURLs; rows may point at deleted resources, but no DMs
+    // the freshly minted qURLs; rows may point at revoked links, but no DMs
     // have been sent and the grants fail closed.
     logger.error('Cleaning up oversized Add Recipients batch after possible persistence', {
       sendId,
@@ -2918,19 +3025,45 @@ async function cleanupFreshAddRecipientResources(batchSends, apiKey, sendId, opt
   }
 
   // Called when no recipient rows landed, or when a terminal guarded
-  // transaction failure is ambiguous enough that deleting freshly minted qURLs
+  // transaction failure is ambiguous enough that revoking freshly minted qURLs
   // is the fail-closed outcome (no DMs have been sent yet).
-  const resourceIds = [...new Set(
-    batchSends
-      .map(s => s.resourceId)
-      .filter(id => typeof id === 'string' && id.length > 0),
-  )];
-  if (resourceIds.length === 0) return;
+  const qurlIdsByResource = new Map();
+  let unidentifiedCount = 0;
+  for (const s of batchSends) {
+    const qurlId = qurlIdForCleanup(s.qurlId);
+    // Mint output is validated, so this is defensive: revoke identifiable
+    // siblings instead of letting one bad row skip the whole resource, and
+    // count a row missing either identity so the accounting is complete.
+    if (typeof s.resourceId !== 'string' || s.resourceId.length === 0 || qurlId === null) {
+      unidentifiedCount++;
+      continue;
+    }
+    const ids = qurlIdsByResource.get(s.resourceId) || [];
+    ids.push(qurlId);
+    qurlIdsByResource.set(s.resourceId, ids);
+  }
+  const resourceIds = [...qurlIdsByResource.keys()];
+  if (resourceIds.length === 0 && unidentifiedCount === 0) return;
 
-  const results = await batchSettled(resourceIds, async (resourceId) => {
-    await deleteLink(resourceId, apiKey);
+  const cleanup = batchSettled(resourceIds, async (resourceId) => {
+    await revokeMintedLinks(resourceId, qurlIdsByResource.get(resourceId), apiKey);
     return resourceId;
   }, 5);
+  // Same bounded wait as mint-failure compensation: the Add Recipients reply
+  // must not be held past its interaction window; the revoke keeps running.
+  if (!await settlesWithin(cleanup, CLEANUP_WAIT_BUDGET_MS)) {
+    logger.warn('Add Recipients cleanup still running at its wait budget', {
+      sendId,
+      reason: cleanupReason,
+      unidentified_count: unidentifiedCount,
+      resources: resourceIds.map(resourceId => ({
+        resource_ref: resourceIdLogRef(resourceId),
+        qurl_ids: qurlIdsByResource.get(resourceId),
+      })),
+    });
+    return;
+  }
+  const results = await cleanup;
   const failed = [];
   results.forEach((result, index) => {
     if (result.status === 'rejected') {
@@ -2940,12 +3073,13 @@ async function cleanupFreshAddRecipientResources(batchSends, apiKey, sendId, opt
       });
     }
   });
-  if (failed.length > 0) {
+  if (failed.length > 0 || unidentifiedCount > 0) {
     logger.error('Failed to clean up freshly minted Add Recipients qURL resources', {
       sendId,
       reason: cleanupReason,
       failed_count: failed.length,
       total: resourceIds.length,
+      unidentified_count: unidentifiedCount,
       failures: failed,
     });
   } else {
@@ -3683,23 +3817,65 @@ async function handleRevokeSelect(interaction, { flow_id }) {
   }
 
   const sendId = interaction.values[0];
-  const revoked = await revokeAllLinks(sendId, interaction.user.id, apiKey, resolveSenderAlias(interaction));
+  const revokeLockKey = `${interaction.user.id}:${sendId}`;
+  if (revokingSendLocks.has(revokeLockKey)) {
+    return interaction.update({ content: ALREADY_REVOKING_SEND_MSG, components: [] }).catch(logIgnoredDiscordErr);
+  }
+  // Claim before acknowledging: another select/button must not start a fan-out.
+  revokingSendLocks.add(revokeLockKey);
+  // Child revoke can outlast the 3s component-response window (up to 65s per
+  // connector chunk of ten children, plus the SDK fallback budget), so
+  // acknowledge with a progress update and edit the message when the revoke
+  // settles. A failed ack still revokes: the user asked for it and the barrier
+  // makes a repeat safe; only the result message is lost.
+  await interaction.update({ content: REVOKE_SELECT_PROGRESS_MSG, components: [] }).catch((err) => {
+    logger.warn('Revoke select acknowledgement failed; revoking without a result message', {
+      sendId, error: err?.message,
+    });
+  });
+  let revoked;
+  let revoking;
+  try {
+    revoking = revokeAllLinks(sendId, interaction.user.id, apiKey, resolveSenderAlias(interaction))
+      .finally(() => revokingSendLocks.delete(revokeLockKey));
+    // Leave the result edit inside Discord's 15-minute interaction window: a
+    // very large send can outlast it, so say so and let the revoke finish.
+    if (!await settlesWithin(revoking, REVOKE_SELECT_RESULT_WAIT_MS)) {
+      logger.warn('Revoke select still running at its result budget', { sendId });
+      await interaction.editReply({
+        content: REVOKE_RUNNING_MSG,
+        components: [],
+      }).catch(logIgnoredDiscordErr);
+      return;
+    }
+    revoked = await revoking;
+  } catch (err) {
+    if (!revoking) revokingSendLocks.delete(revokeLockKey);
+    // The select menu is already gone; replace the progress text with one
+    // actionable message and stop here so the dispatcher does not post twice.
+    logger.error('Revoke select failed', { sendId, error: err?.message });
+    await interaction.editReply({
+      content: 'Could not complete revocation. Run `/qurl revoke` to retry.',
+      components: [],
+    }).catch(logIgnoredDiscordErr);
+    return;
+  }
 
   if (!revoked.barrierEstablished) {
-    await interaction.update({
+    await interaction.editReply({
       content: 'Could not verify this send for revocation. It may already be revoked or unavailable; run `/qurl revoke` to refresh.',
       components: [],
-    });
+    }).catch(logIgnoredDiscordErr);
     return;
   }
 
   // Slash-command path lacks the in-scope `recipients` array needed
   // to resolve names → no "Revoked for: …" line here. Operators
   // wanting names should use the inline button after a send.
-  await interaction.update({
+  await interaction.editReply({
     content: safeRevokeHeader(sendId, revoked.success, revoked.total, revoked.finalizationFailed),
     components: [],
-  });
+  }).catch(logIgnoredDiscordErr);
 }
 
 // /qurl setup — legacy modal-paste path conversion. See
@@ -8390,19 +8566,23 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
   // step skips them.
   const items = await db.getSendItems(sendId, senderDiscordId, { consistentRead: true });
 
-  // deleteLink deletes the whole resource; one DELETE per unique
-  // resource_id, fan result out to every recipient sharing it.
-  // Required because mintLinksInBatches packs up to TOKENS_PER_RESOURCE
-  // recipients per resource, so the same resource_id is shared.
+  // Revoke each resource's children in one call per unique resource_id and
+  // fan the result out to every recipient sharing it (mintLinksInBatches packs
+  // up to TOKENS_PER_RESOURCE recipients per resource).
+  // A row without a usable qurl_id cannot be revoked: a watermarked child lives
+  // on the connector's tunnel, so deleting the shared parent would neither
+  // reach it nor be safe for other sends. Only that row's recipient fails;
+  // identifiable siblings on the same resource still revoke and succeed.
   const byResource = new Map();
   const invalidResourceRecipientIds = new Set();
   for (const item of items) {
-    if (typeof item.resource_id !== 'string' || item.resource_id.trim().length === 0) {
+    const qurlId = qurlIdForCleanup(item.qurl_id);
+    if (typeof item.resource_id !== 'string' || item.resource_id.trim().length === 0 || qurlId === null) {
       invalidResourceRecipientIds.add(item.recipient_discord_id);
       continue;
     }
     const list = byResource.get(item.resource_id) || [];
-    list.push(item.recipient_discord_id);
+    list.push({ recipientId: item.recipient_discord_id, qurlId });
     byResource.set(item.resource_id, list);
   }
   const resourceEntries = [...byResource.entries()];
@@ -8411,8 +8591,8 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
   const successUserIds = [];
   const failureUserIds = [];
 
-  const results = await batchSettled(resourceEntries, async ([resourceId]) => {
-    await deleteLink(resourceId, apiKey);
+  const results = await batchSettled(resourceEntries, async ([resourceId, children]) => {
+    await revokeMintedLinks(resourceId, children.map(child => child.qurlId), apiKey);
     return resourceId;
   }, 5);
 
@@ -8424,20 +8604,23 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
   const seenSuccess = new Set();
   const seenFailure = new Set(invalidResourceRecipientIds);
   if (invalidResourceRecipientIds.size > 0) {
-    logger.error('Cannot revoke send row with missing resource identity', {
+    logger.error('Cannot revoke send row with missing resource or token identity', {
       sendId,
       affectedRecipients: invalidResourceRecipientIds.size,
     });
   }
   for (let i = 0; i < results.length; i++) {
-    const [resourceId, recipientIds] = resourceEntries[i];
+    const [resourceId, children] = resourceEntries[i];
+    const recipientIds = children.map(child => child.recipientId);
     if (results[i].status === 'fulfilled') {
       for (const id of recipientIds) seenSuccess.add(id);
     } else {
       for (const id of recipientIds) seenFailure.add(id);
-      logger.error('Failed to revoke QURL', {
+      logger.error('Failed to revoke qURL', {
         resource_ref: resourceIdLogRef(resourceId),
         error: results[i].reason?.message,
+        failed_child_count: results[i].reason?.failedCount ?? null,
+        fallback_error: results[i].reason?.fallbackError?.message ?? null,
       });
     }
   }
@@ -8449,9 +8632,10 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
 
   const success = successUserIds.length;
   const total = totalUsers;
-  // Audit success/total describe actual DELETE confirmations. Malformed rows
-  // never fabricate a DELETE denominator; report their affected recipients in
-  // a separate field while keeping finalization fail-closed.
+  // Audit success/total describe actual per-resource revoke confirmations.
+  // Malformed rows never fabricate a revoke denominator; report their
+  // affected recipients in a separate field while keeping finalization
+  // fail-closed.
   const auditTotal = byResource.size;
   const auditSuccess = results.filter(r => r.status === 'fulfilled').length;
   const unresolvableRecipients = invalidResourceRecipientIds.size;
@@ -8470,7 +8654,7 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
     });
   }
 
-  // Top-level `success/total` are per-resource DELETE confirmations; the
+  // Top-level `success/total` are per-resource revoke confirmations; the
   // nested `users` tally is the operator-facing per-recipient result.
   logger.info('Revoked send', {
     sendId,
@@ -9859,6 +10043,9 @@ module.exports = {
       renderViewCounter,
       REVOKE_TRUNC_LIMIT,
       mintLinksInBatches,
+      // Fresh-mint cleanup's defensive unidentified-id branch is unreachable
+      // through validated mint output, so pin it directly.
+      cleanupFreshAddRecipientResources,
       activeMonitors,
       // The top-level back-half driver. Exported here so PR 7b's
       // tests (and the follow-up direct unit spec in #278) can pin
