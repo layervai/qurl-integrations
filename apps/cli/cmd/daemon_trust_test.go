@@ -13,7 +13,7 @@ import (
 func TestDaemonRejectsInvalidTunnelTrustBeforeEnrollment(t *testing.T) {
 	for _, args := range [][]string{
 		{"--tunnel-ca-file", filepath.Join(t.TempDir(), "missing.pem")},
-		{"--tunnel-server-name", "tunnel.example.com"},
+		{"--tunnel-server-name", "https://tunnel.example.com"},
 	} {
 		stateDir := filepath.Join(t.TempDir(), "new-state")
 		command := append([]string{"daemon", "run", "--state-dir", stateDir}, args...)

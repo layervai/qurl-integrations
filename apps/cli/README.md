@@ -498,18 +498,17 @@ curl --unix-socket "$STATE_DIR/daemon.sock" http://localhost/status
 curl --unix-socket "$STATE_DIR/daemon.sock" -X POST http://localhost/reload
 ```
 
-Credential-bearing routes require a tunnel server with a verifiable TLS
-certificate. For a deployment that already provides that server certificate,
-configure its daemon with `qurl daemon run --tunnel-ca-file
-/etc/qurl/tunnel-ca.pem`. The PEM file must use an absolute path and contain
-the CA certificates trusted for that tunnel server. The certificate is checked
-against the admitted server host. Use `--tunnel-server-name <name>` only when
-the deployment requires a specific certificate identity, such as a server
-reached by IP address. Invalid trust configuration fails before enrollment.
-These options configure the client; they do not provision a server
-certificate. The default per-user daemon does not enable runtime credentials,
-and configured tunnel trust applies to every route on that daemon, including
-routes without added headers.
+All daemon routes verify the tunnel server certificate with the system trust
+store and the admitted hostname: `connect.layerv.ai` in production or
+`connect.layerv.xyz` in sandbox. Certificate and key renewal does not require
+client updates. Runtime origin headers use this verified connection.
+
+For a private CA, use `qurl daemon run --tunnel-ca-file
+/etc/qurl/tunnel-ca.pem`. The PEM file must use an absolute path. Use
+`--tunnel-server-name <name>` only when the deployment requires a different
+certificate identity, such as a server reached by IP address. Invalid trust
+configuration fails before enrollment. These options do not provision a server
+certificate.
 
 <!-- TODO(upstream-contract): qurl-connector MaxGroupRoutes, header validation
 limits, route re-registration, and session rotation/drain semantics. -->

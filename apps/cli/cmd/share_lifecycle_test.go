@@ -171,6 +171,7 @@ type journeyDaemon struct {
 	registry *connectorstate.LocalShareRegistry
 	admitter *journeyAdmitter
 	version  string
+	caFile   string
 
 	mu      sync.Mutex
 	manager *connectordaemon.Manager
@@ -181,7 +182,7 @@ type journeyDaemon struct {
 func (d *journeyDaemon) Ensure(ctx context.Context) error {
 	d.mu.Lock()
 	if d.manager == nil {
-		common, err := connectordaemon.DefaultFRPCommon(2, 5)
+		common, err := connectordaemon.ConfiguredFRPCommon(2, 5, d.caFile, "example.com")
 		if err != nil {
 			d.mu.Unlock()
 			return err
@@ -2658,12 +2659,12 @@ func runPublishDaemonLifecycle(t *testing.T, external bool) {
 	frpsPort := reserveCmdTCPPort(t)
 	vhostPort := reserveCmdTCPPort(t)
 	recorder := newCmdProxyRecorder(t)
-	startCmdFRPS(t, frpsPort, vhostPort, "hermetic.test", recorder.server.URL)
+	caFile := startCmdFRPS(t, frpsPort, vhostPort, "hermetic.test", recorder.server.URL)
 	admitter := &journeyAdmitter{
 		host: "localhost:" + strconv.Itoa(frpsPort), openTime: 2 * time.Second,
 		serving: make(chan struct{}),
 	}
-	daemon := &journeyDaemon{registry: registry, admitter: admitter, version: "test"}
+	daemon := &journeyDaemon{caFile: caFile, registry: registry, admitter: admitter, version: "test"}
 	t.Cleanup(daemon.close)
 	var controller shareDaemonController = daemon
 	if external {
@@ -3025,9 +3026,9 @@ func TestDaemonServesTwoResourcesAndStopsOneIndependently(t *testing.T) {
 	frpsPort := reserveCmdTCPPort(t)
 	vhostPort := reserveCmdTCPPort(t)
 	recorder := newCmdProxyRecorder(t)
-	startCmdFRPS(t, frpsPort, vhostPort, "hermetic.test", recorder.server.URL)
+	caFile := startCmdFRPS(t, frpsPort, vhostPort, "hermetic.test", recorder.server.URL)
 	admitter := &journeyAdmitter{host: "localhost:" + strconv.Itoa(frpsPort), serving: make(chan struct{})}
-	common, err := connectordaemon.DefaultFRPCommon(2, 5)
+	common, err := connectordaemon.ConfiguredFRPCommon(2, 5, caFile, "example.com")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3365,7 +3366,7 @@ func assertLocalConnectorResourceRetired(t *testing.T, stateDir, connectorID str
 // Connector sessions. Only cloud admission is supplied by the local fixture.
 func startExternalJourneyDaemon(t *testing.T, daemon *journeyDaemon, stateDir, endpoint string) shareDaemonController {
 	t.Helper()
-	common, err := connectordaemon.DefaultFRPCommon(2, 5)
+	common, err := connectordaemon.ConfiguredFRPCommon(2, 5, daemon.caFile, "example.com")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3892,8 +3893,8 @@ func TestRestartRetargetServesNewOriginThroughRealConnector(t *testing.T) {
 	}
 	frpsPort, vhostPort := reserveCmdTCPPort(t), reserveCmdTCPPort(t)
 	recorder := newCmdProxyRecorder(t)
-	startCmdFRPS(t, frpsPort, vhostPort, "hermetic.test", recorder.server.URL)
-	daemon := &journeyDaemon{registry: registry, admitter: &journeyAdmitter{host: "localhost:" + strconv.Itoa(frpsPort), serving: make(chan struct{})}, version: "test"}
+	caFile := startCmdFRPS(t, frpsPort, vhostPort, "hermetic.test", recorder.server.URL)
+	daemon := &journeyDaemon{caFile: caFile, registry: registry, admitter: &journeyAdmitter{host: "localhost:" + strconv.Itoa(frpsPort), serving: make(chan struct{})}, version: "test"}
 	t.Cleanup(daemon.close)
 	controller := startExternalJourneyDaemon(t, daemon, stateDir, srv.URL)
 	if err := controller.Ensure(context.Background()); err != nil {

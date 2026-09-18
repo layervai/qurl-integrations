@@ -127,7 +127,7 @@ func (s *IPCServer) Run(ctx context.Context) (retErr error) {
 		if !s.RequestHeadersEnabled {
 			for _, headers := range overlay {
 				if len(headers) > 0 {
-					http.Error(w, "runtime origin headers require a daemon configured with --tunnel-ca-file and a verified tunnel server", http.StatusConflict)
+					http.Error(w, "runtime origin headers require a daemon with a verified tunnel server", http.StatusConflict)
 					return
 				}
 			}
