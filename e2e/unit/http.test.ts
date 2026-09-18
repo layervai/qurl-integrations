@@ -15,6 +15,7 @@ const url = 'https://api.example.com/v1/resources/abc';
 const originalFetch = global.fetch;
 const fetchMock = jest.fn();
 let warnSpy: jest.SpyInstance;
+let errorSpy: jest.SpyInstance;
 
 /** A fresh Response per call: `mockResolvedValue` would hand the same instance
  * to every attempt, and the helper cancels the body of each one it discards. */
@@ -27,12 +28,14 @@ beforeEach(() => {
   global.fetch = fetchMock as typeof fetch;
   // The helper warns on every retry by design; keep the suite output readable.
   warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+  errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
   jest.useFakeTimers();
 });
 
 afterEach(() => {
   jest.useRealTimers();
   warnSpy.mockRestore();
+  errorSpy.mockRestore();
 });
 
 afterAll(() => {
@@ -75,8 +78,10 @@ test('declines a directive above the ceiling but keeps the local retry', async (
   const [line] = warnSpy.mock.calls[0] as [string];
   expect(line).toContain('retry 1/1 in 1000ms');
   expect(line).toContain('declined');
-  expect(line).toContain('600');     // the raw header value, as the wire sent it
-  expect(line).toContain('600000');  // and the ms the helper compared
+  // `toContain('600')` would be vacuous next to '600000'; pin the raw echo in
+  // a form only the raw echo satisfies.
+  expect(line).toContain('Retry-After: 600 =');
+  expect(line).toContain('600000ms');
 });
 
 // The module treats "log the ORIGIN only, never the full URL" as a security
@@ -138,10 +143,13 @@ test('a 503 with no Retry-After at all still uses the local backoff', async () =
   await jest.advanceTimersByTimeAsync(1_000);
   expect(fetchMock).toHaveBeenCalledTimes(2);
   await pending;
-  // ...and SAYS it degraded. Without this the line is indistinguishable from an
-  // ordinary drain-gap retry, so a red gives no hint the confirm mechanism was
-  // bypassed — the hazard revokeLink's TODO(upstream-contract) names.
-  expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('no usable Retry-After'));
+  // ...and SAYS it degraded, at ERROR level. Without this the line is
+  // indistinguishable from an ordinary drain-gap retry, so a red gives no hint
+  // the confirm mechanism was bypassed — the hazard revokeLink's
+  // TODO(upstream-contract) names — and a warning on a verbose live run is not
+  // something anyone greps on a green day.
+  expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('no usable Retry-After'));
+  expect(warnSpy).not.toHaveBeenCalled();
 });
 
 test('a non-opted-in 503 does not claim a degraded directive', async () => {
@@ -151,7 +159,8 @@ test('a non-opted-in 503 does not claim a degraded directive', async () => {
   const pending = fetchWithTransientRetry(url, { method: 'DELETE' }, { maxAttempts: 2 });
   await jest.advanceTimersByTimeAsync(1_000);
   await pending;
-  expect(warnSpy).not.toHaveBeenCalledWith(expect.stringContaining('no usable Retry-After'));
+  expect(errorSpy).not.toHaveBeenCalled();
+  expect(warnSpy).toHaveBeenCalledTimes(1); // an ordinary retry notice, nothing more
 });
 
 test('a padded Retry-After is honored', async () => {

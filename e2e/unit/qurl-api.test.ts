@@ -396,7 +396,7 @@ describe('revokeLink retry path', () => {
 
   // The exported budget the live timeouts are computed from must match what a
   // confirming revoke can actually spend, or the derivation is decorative.
-  test('REVOKE_CONFIRM_WORST_CASE_MS bounds a real confirming revoke', async () => {
+  test('REVOKE_CONFIRM_WAIT_MS bounds a real confirming revoke', async () => {
     jest.useFakeTimers();
     try {
       // The ceiling case, not the 30s usually observed: 35s is the longest
@@ -414,12 +414,12 @@ describe('revokeLink retry path', () => {
         );
       });
       const pending = qurl.revokeLink(mintUrl, apiKey, publicResourceId);
-      await jest.advanceTimersByTimeAsync(qurl.REVOKE_CONFIRM_WORST_CASE_MS);
+      await jest.advanceTimersByTimeAsync(qurl.REVOKE_CONFIRM_WAIT_MS);
 
       await expect(pending).resolves.toBe(false);
       // The last attempt starts exactly at the exported budget — so the export
       // IS the worst case, not a number that happens to sit near it.
-      expect(firedAt).toEqual([0, qurl.REVOKE_CONFIRM_WORST_CASE_MS]);
+      expect(firedAt).toEqual([0, qurl.REVOKE_CONFIRM_WAIT_MS]);
     } finally {
       jest.useRealTimers();
     }

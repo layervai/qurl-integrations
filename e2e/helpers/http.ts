@@ -163,10 +163,19 @@ export async function fetchWithTransientRetry(
     // Over the ceiling: decline the directive and fall back to the local
     // backoff — never drop the retry. See `maxRetryAfterMs` above for why.
     const overCeiling = directiveMs > retryAfterCeilingMs;
+    // Opted in, got the status the opt-in is FOR, and still has no usable
+    // directive: the confirm mechanism silently did not engage.
+    const degraded = retryAfterCeilingMs > 0 && res.status === 503 && directiveMs === 0;
     const delayMs = overCeiling
       ? baseDelayMs * attempt
       : Math.max(baseDelayMs * attempt, directiveMs);
-    console.warn(
+    // console.ERROR for the degraded case, warn otherwise. A bypassed confirm
+    // mechanism is not a retry notice: it means the caller waited 1s where it
+    // meant to wait out a convergence window, so the red that follows will look
+    // like a convergence regression rather than a missing header. On a verbose
+    // live run nobody greps warnings on a green day; an error stands out.
+    const log = degraded ? console.error : console.warn;
+    log(
       `[fetchWithTransientRetry] ${method} ${origin} -> ${res.status}; ` +
         `retry ${attempt}/${maxAttempts - 1} in ${delayMs}ms` +
         // Folded into the same line rather than emitted as a second warn: the
@@ -180,7 +189,7 @@ export async function fetchWithTransientRetry(
           // Echo the raw header value too, so the CI line matches the wire.
           ? ` (declined Retry-After: ${retryAfterRaw} = ${directiveMs}ms, ` +
             `over the ${retryAfterCeilingMs}ms ceiling)`
-          : retryAfterCeilingMs > 0 && res.status === 503 && directiveMs === 0
+          : degraded
             ? ` (no usable Retry-After${retryAfterRaw ? `: "${retryAfterRaw}"` : ''}` +
               '; local backoff only)'
             : ''),

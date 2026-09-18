@@ -250,7 +250,9 @@ const PENDING_REVOKE_CEILING_MS = 35_000;
  * confirm windows. See revokeLink for why one rather than two. */
 const PENDING_REVOKE_ATTEMPTS = 2;
 
-/** The longest a confirming `revokeLink` can spend waiting. EXPORTED so the
+/** The longest a confirming `revokeLink` can spend WAITING — it excludes the
+ * confirm DELETE's own round trip, which is why the live budgets add it to a
+ * non-revoke worst case that already accounts for request time. EXPORTED so the
  * live suites size their jest budgets off it by arithmetic instead of restating
  * it in prose — the numbers above drifted out of sync with their own comments
  * once already, and the per-test timeouts are what that drift breaks. Note it
@@ -258,7 +260,7 @@ const PENDING_REVOKE_ATTEMPTS = 2;
  * a directive anywhere in the 31-35s tail is honored, and a budget computed at
  * 30s turns that tail into a jest timeout (no assertion, no cause) instead of a
  * legible assertion failure. */
-export const REVOKE_CONFIRM_WORST_CASE_MS =
+export const REVOKE_CONFIRM_WAIT_MS =
   (PENDING_REVOKE_ATTEMPTS - 1) * PENDING_REVOKE_CEILING_MS;
 
 /** Revoke a qURL link by resource_id (revokes entire resource).
@@ -271,12 +273,12 @@ export const REVOKE_CONFIRM_WORST_CASE_MS =
  * the server's own directive (35s ceiling — see http.ts's `maxRetryAfterMs`
  * for why honoring it is opt-in and why the ceiling matters). Note a DECLINED
  * directive (the dark 503's 60s) still costs the full attempt budget on the
- * local backoff — three DELETEs a few seconds apart during a deploy window.
- * That is in tension with the dark 503's "clients must not auto-retry", and it
- * is deliberate: the alternative rule, fail-fast whenever a directive is over
- * the ceiling, would also abandon a transient drain-gap 503 that merely happens
- * to carry a long directive, which is the retry this helper exists for. Three
- * requests from one test is the cheaper side of that trade.
+ * local backoff — two DELETEs a second apart during a deploy window. That is in
+ * tension with the dark 503's "clients must not auto-retry", and it is
+ * deliberate: the alternative rule, fail-fast whenever a directive is over the
+ * ceiling, would also abandon a transient drain-gap 503 that merely happens to
+ * carry a long directive, which is the retry this helper exists for. One extra
+ * request from one test is the cheaper side of that trade.
  *
  * ONE confirm window, deliberately, even though `Retry-After` is the server's
  * ESTIMATE of convergence rather than a bound — so a 31s convergence still
@@ -287,7 +289,10 @@ export const REVOKE_CONFIRM_WORST_CASE_MS =
  * legible than the per-test failure this sizing protects, so paying for a
  * hypothetical tail with measured headroom is the wrong trade. If a real
  * 31-35s tail shows up, widen PENDING_REVOKE_ATTEMPTS to 3 — every live budget
- * derives from REVOKE_CONFIRM_WORST_CASE_MS, so that is a one-line change.
+ * derives from REVOKE_CONFIRM_WAIT_MS, so they follow automatically. They
+ * follow it PAST the job budget, though: doubling the wait takes file-revoke's
+ * four ceilings from 445s to 585s against `timeout-minutes: 10`, so the honest
+ * escape hatch is "raise the attempts AND raise timeout-minutes", not one line.
  * Still pending after the window is a convergence regression to report.
  *
  * Worth being explicit about what this buys, since file-revoke.test.ts asserts
@@ -315,8 +320,9 @@ export const REVOKE_CONFIRM_WORST_CASE_MS =
  * `confirmPending: false` drops the confirm attempt entirely — one request, as
  * before this helper gained a retry — for cleanup.ts's best-effort sweep. It
  * drops the retry and not just the wait because of the BOUNDED worst case: a
- * service-wide shed retries all ~60 stragglers, ~+120s on a sweep already at
- * ~130s against a 180s hook, so it would time out and leak.
+ * service-wide shed retries all ~60 stragglers, and even at the 1s local
+ * backoff that is ~+60s on a sweep already at ~130s against a 180s hook, so it
+ * would time out and leak. (cleanup.ts carries the same arithmetic.)
  *
  * TODO(upstream-contract): mirrors qurl-service's protected-resource revoke
  * contract — that a 503 here means the revocation is COMMITTED (not rejected),

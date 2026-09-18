@@ -65,11 +65,11 @@ const tracked = trackedQurlResources(env);
 // Reading a failure here: `expect(revoked).toBe(true)` going red while the
 // getResourceStatus assertion below would have said `revoked` does NOT mean the
 // revocation failed. It means the NHP protection update was still pending after
-// BOTH server-directed windows revokeLink waits out — a convergence regression,
+// the server-directed window revokeLink waits out — a convergence regression,
 // not a revoke regression. That distinction is the point: the boolean asserts
 // the protection update CONVERGED, which the management read cannot see.
 // #1506 tracks dropping it, which would trade that signal for immunity to the
-// window (and ~90s of smoke wall clock).
+// window (and ~120s of smoke wall clock across this file's four confirms).
 afterAll(() => tracked.revokeAll());
 
 // Valid 1x1 transparent PNG (standard test fixture — widely used, CRC/zlib
@@ -147,7 +147,7 @@ describe('File Revoke', () => {
     // (qurl-integrations-infra e2e-smoke.yml) that also pays npm ci, SSM reads
     // and a cold Playwright install, and a job-level timeout is the same
     // no-assertion-no-cause outcome the sizing above exists to avoid.
-  }, 75_000 + qurl.REVOKE_CONFIRM_WORST_CASE_MS);
+  }, 75_000 + qurl.REVOKE_CONFIRM_WAIT_MS);
 
   test('distinct-per-viewer watermark + `_` route-label SNI on the tunnel', async () => {
     // ONE upload → TWO minted recipient views. The whole point of render-at-mint:
@@ -238,8 +238,14 @@ describe('File Revoke', () => {
     // revoke, on CI. ~98s of non-revoke worst case (upload ~21s + 2 mints ~6s
     // + 2 knocks ~70s + status ~1s) plus the revoke's own budget — this test
     // revokes a connector upload too, so it carries the same confirm cost as
-    // its siblings and its margin had quietly dropped from ~80s to ~12s.
-  }, 105_000 + qurl.REVOKE_CONFIRM_WORST_CASE_MS);
+    // its siblings, and its margin had quietly dropped by a confirm budget.
+    // Kept at the base 180s rather than trimmed to the stated ~133s worst case:
+    // this is the highest-variance test in the file — its ~98s charges 35s per
+    // knock for a COLD chromium launch plus tunnelView's own 30s navigation
+    // budget, and a slow runner pushes that to ~108s, which a tight ceiling
+    // would turn into a jest timeout with no assertion. The job budget still
+    // holds at 485s total, under the ~540s this suite carried before.
+  }, 145_000 + qurl.REVOKE_CONFIRM_WAIT_MS);
 
   test('a consumed one-time link does not serve a second knock (single-use enforced)', async () => {
     // THE knock-driven enforcement guard for one-time links. The URL-mint
@@ -286,7 +292,7 @@ describe('File Revoke', () => {
     // confirming revoke. ~79s of non-revoke worst case plus the revoke's own
     // budget; at a flat 150s the ceiling case landed within ~1s of the timeout,
     // which would have reported a jest timeout instead of the assertion.
-  }, 90_000 + qurl.REVOKE_CONFIRM_WORST_CASE_MS);
+  }, 90_000 + qurl.REVOKE_CONFIRM_WAIT_MS);
 
   test('double revoke on file is idempotent', async () => {
     const upload = await qurl.uploadFile(
@@ -321,5 +327,5 @@ describe('File Revoke', () => {
     // out — so this is ~24s of upload and status reads plus one revoke budget.
     // Stated rather than inherited because the 120s default covers it only
     // while that opt-out holds.
-  }, 35_000 + qurl.REVOKE_CONFIRM_WORST_CASE_MS);
+  }, 35_000 + qurl.REVOKE_CONFIRM_WAIT_MS);
 });
