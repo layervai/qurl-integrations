@@ -502,6 +502,13 @@ describe('revokeLink retry path', () => {
       const promise = qurl.revokeLink(mintUrl, apiKey, publicResourceId);
       await jest.advanceTimersByTimeAsync(120_000);
       await expect(promise).resolves.toBe(false);
+      // ...and says why. This is the path that ends in a red, and the
+      // assertion it fails aborts before the status check that would have
+      // shown the cause — so without this line it reads exactly like the
+      // pre-PR failure it replaces.
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('fallback management read failed'),
+      );
     } finally {
       jest.useRealTimers();
     }

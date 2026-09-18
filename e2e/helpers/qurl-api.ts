@@ -269,6 +269,10 @@ export const DARK_503_DIRECTIVE_MS = 60_000;
  * See revokeLink's TODO(upstream-contract) before moving it. */
 export const PENDING_REVOKE_CEILING_MS = 35_000;
 
+/** fetchWithTransientRetry's default linear-backoff base, mirrored so the
+ * budget below is computed rather than assumed. */
+const HELPER_BASE_DELAY_MS = 1_000;
+
 /** Total attempts for a confirming revoke, so `PENDING_REVOKE_ATTEMPTS - 1`
  * confirm windows. See revokeLink for why one rather than two. */
 const PENDING_REVOKE_ATTEMPTS = 2;
@@ -282,8 +286,14 @@ const PENDING_REVOKE_ATTEMPTS = 2;
  * a directive anywhere in the 31-35s tail is honored, and a budget computed at
  * 30s turns that tail into a jest timeout (no assertion, no cause) instead of a
  * legible assertion failure. */
-export const REVOKE_CONFIRM_WAIT_MS =
-  (PENDING_REVOKE_ATTEMPTS - 1) * PENDING_REVOKE_CEILING_MS;
+export const REVOKE_CONFIRM_WAIT_MS = Array.from(
+  { length: PENDING_REVOKE_ATTEMPTS - 1 },
+  // Each wait is `max(local backoff, honored directive)` — see http.ts. Summed
+  // rather than assumed to be `(attempts - 1) x ceiling`, which only holds
+  // while the linear backoff stays under the ceiling. True at today's numbers
+  // (1s vs 35s), and this keeps it true if the attempt count ever rises.
+  (_, i) => Math.max(HELPER_BASE_DELAY_MS * (i + 1), PENDING_REVOKE_CEILING_MS),
+).reduce((a, b) => a + b, 0);
 
 /** Revoke a qURL link by resource_id (revokes entire resource).
  *
@@ -429,8 +439,18 @@ export async function revokeLink(
         'reads revoked — revocation confirmed, NHP protection-update convergence unconfirmed',
     );
     return true;
-  } catch {
-    return false; // the read failed too: report the revoke as unconfirmed
+  } catch (err) {
+    // The one path here that ends in a red, so it must not be the silent one:
+    // the assertion that fails is `expect(revoked).toBe(true)`, which aborts
+    // before the getResourceStatus check two lines later that would have shown
+    // the cause — i.e. it reads exactly like the pre-PR failure it replaces.
+    // This also catches malformed management shapes, which this file elsewhere
+    // insists must red the gate loudly rather than degrade to a bare boolean.
+    console.warn(
+      `[revokeLink] DELETE ${resourceId} answered ${res.status} and the ` +
+        `fallback management read failed: ${String(err)}`,
+    );
+    return false;
   }
 }
 
