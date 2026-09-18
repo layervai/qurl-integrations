@@ -523,6 +523,27 @@ describe('revokeLink retry path', () => {
     }
   });
 
+  // The fallback read is bounded to ONE attempt: its answer is binary, the
+  // DELETE just spent the transient budget on the same origin, and its backoff
+  // is time REVOKE_CONFIRM_WAIT_MS does not account for — which matters most
+  // on the degraded-API path where the fallback actually runs.
+  test('bounds the fallback read to a single attempt', async () => {
+    jest.useFakeTimers();
+    try {
+      fetchMock
+        .mockImplementationOnce(() => new Response(null, { status: 410 }))
+        .mockImplementation(() => new Response(null, { status: 503 }));
+
+      const promise = qurl.revokeLink(mintUrl, apiKey, publicResourceId);
+      await jest.advanceTimersByTimeAsync(30_000);
+      await expect(promise).resolves.toBe(false);
+      // One DELETE + one read. Unbounded it would be one + three.
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   // When the fallback DOES run and the read itself fails, say why: this path
   // ends in a red, and the assertion it fails aborts before the status check
   // that would have shown the cause.
@@ -554,15 +575,16 @@ describe('revokeLink retry path', () => {
   test('retries a 502 exactly once', async () => {
     jest.useFakeTimers();
     try {
-      fetchMock
-        .mockImplementationOnce(() => new Response(null, { status: 502, headers: { 'Retry-After': '30' } }))
-        .mockImplementationOnce(() => new Response(null, { status: 502 }))
-        .mockImplementationOnce(statusRead('active'));
+      fetchMock.mockImplementation(
+        () => new Response(null, { status: 502, headers: { 'Retry-After': '30' } }),
+      );
 
       const promise = qurl.revokeLink(mintUrl, apiKey, publicResourceId);
       await jest.advanceTimersByTimeAsync(1_000); // local backoff, not the 30s
       await expect(promise).resolves.toBe(false);
-      expect(fetchMock).toHaveBeenCalledTimes(3); // 2 DELETEs + the read
+      // Two DELETEs and no fallback read: 502 is not a status the service
+      // answers once the update lands, so it is outside the allowlist.
+      expect(fetchMock).toHaveBeenCalledTimes(2);
     } finally {
       jest.useRealTimers();
     }
@@ -579,6 +601,23 @@ describe('revokeLink retry path', () => {
 
     await expect(qurl.revokeLink(mintUrl, apiKey, publicResourceId)).resolves.toBe(false);
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  // The allowlist, from the outside: an app-level failure must never reach the
+  // fallback, or a 500 on a resource that already reads `revoked` would report
+  // a successful revoke — contradicting this stack's rule that a 500 is a real
+  // failure. A denylist would have let these through.
+  test.each([
+    ['500 Internal Server Error', 500],
+    ['400 Bad Request', 400],
+    ['429 Too Many Requests', 429],
+  ])('never falls back on %s', async (_d, status) => {
+    fetchMock.mockImplementation(() => new Response(null, { status }));
+
+    await expect(qurl.revokeLink(mintUrl, apiKey, publicResourceId)).resolves.toBe(false);
+    // 500/400 are not retryable; 429 is, hence at most the attempt budget —
+    // but never a management read on top.
+    expect(fetchMock.mock.calls.length).toBeLessThanOrEqual(2);
   });
 
   // The dark-503 guard at the call site the PR leans on hardest: revokeLink's

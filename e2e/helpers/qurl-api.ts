@@ -438,21 +438,15 @@ export async function revokeLink(
   // passing silently. Gated on confirmPending, so the sweep and the negative
   // call sites stay at exactly one request.
   if (!confirmPending) return false;
-  // Skipped for the statuses where a read would be wrong or useless. This is
-  // NOT the status-code trust the paragraph above rejects: a status test used
-  // to SKIP the read can forgo a true positive, never manufacture a false one.
-  //
-  //   503 — still pending after the window IS the convergence regression this
-  //     boolean exists to report. The resource already reads `revoked` (the
-  //     write committed at the first 503), so falling back here would return
-  //     true for an unconverged protection update and turn the signal into a
-  //     console.warn nobody greps. The wait would then buy nothing.
-  //   401/403 — the read uses the same credential and can only fail the same
-  //     way, so it would double every confirming call site's request volume
-  //     during a systematic cleanup regression for no diagnosis.
-  if (res.status === 503 || res.status === 401 || res.status === 403) return false;
+  // An ALLOWLIST of the statuses the service might plausibly answer once the
+  // update lands — not the status-code trust the paragraph above rejects, since
+  // a status test used to gate the read can forgo a true positive but never
+  // manufacture a false one. A denylist would let 500 through, contradicting
+  // this stack's own rule that an app-level error is a real failure (see
+  // http.ts's header), and would let a 503 pass an unconverged update.
+  if (res.status !== 404 && res.status !== 409 && res.status !== 410) return false;
   try {
-    const status = await getResourceStatus(baseUrl, apiKey, resourceId);
+    const status = await getResourceStatus(baseUrl, apiKey, resourceId, { maxAttempts: 1 });
     if (status.status !== 'revoked') return false;
     console.warn(
       `[revokeLink] DELETE ${resourceId} answered ${res.status}, but the resource ` +
@@ -608,11 +602,12 @@ async function getQurlResource(
   managementUrl: string,
   apiKey: string,
   id: string,
+  retry?: { maxAttempts?: number },
 ): Promise<ResourceStatus> {
   const base = stripTrailingSlashes(managementUrl);
   const res = await fetchWithTransientRetry(`${base}/${encodeURIComponent(id)}`, {
     headers: { Authorization: `Bearer ${apiKey}` },
-  });
+  }, retry);
   if (!res.ok) throw new StatusCheckError(res.status);
 
   const body = await res.json() as unknown;
@@ -651,8 +646,14 @@ export async function getResourceStatus(
   managementUrl: string,
   apiKey: string,
   resourceId: string,
+  /** Bounds the read's own transient retry. Defaults to the shared helper's
+   * budget; revokeLink passes `{ maxAttempts: 1 }` because its fallback is a
+   * binary confirmation whose DELETE just spent that budget on the same origin,
+   * and because the read's backoff is time REVOKE_CONFIRM_WAIT_MS does not
+   * account for. */
+  retry?: { maxAttempts?: number },
 ): Promise<ResourceStatus> {
-  const resource = await getQurlResource(managementUrl, apiKey, resourceId);
+  const resource = await getQurlResource(managementUrl, apiKey, resourceId, retry);
   // Resource-level callers pass the canonical public resource_id, never a qURL
   // display ID; require the management response to echo that encoding exactly.
   if (resource.resource_id !== resourceId) {

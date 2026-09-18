@@ -294,6 +294,13 @@ describe('File Revoke', () => {
     // Cleanup as assertion (tracked.revoke also syncs the afterAll ledger).
     const revoked = await tracked.revoke(upload.resource_id);
     expect(revoked).toBe(true);
+    // Same status read as its three siblings, so this test's red is
+    // diagnosable from its own output: without it a convergence regression and
+    // a real revoke regression fail identically on the bare boolean above.
+    const status = await qurl.getResourceStatus(
+      env.MINT_API_URL, env.QURL_API_KEY, upload.resource_id,
+    );
+    expect(status.status).toBe('revoked');
     // Generous timeout: upload + connector mint + one served cold-chromium
     // knock + one negative knock that waits out its full 20s budget + a
     // confirming revoke. ~79s of non-revoke worst case plus the revoke's own
