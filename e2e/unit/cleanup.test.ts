@@ -26,6 +26,20 @@ beforeEach(() => {
   revokeLinkMock.mockResolvedValue(true);
 });
 
+// The interface deliberately hides `confirmPending` so opting out stays
+// cleanup's call. The real guard is the `@ts-expect-error` below: `tsc
+// --noEmit` fails if the directive stops being needed, i.e. if the interface
+// ever widens to accept it. Note the block is COMPILE-time only — the argument
+// does reach the implementation at runtime, which is the other half of why the
+// options-object shape matters (a stray value degrades to the defaults rather
+// than silently disabling confirmation).
+test('the tracker interface does not expose the opt-out', async () => {
+  const tracked = trackedQurlResources(env);
+  // @ts-expect-error revoke(resourceId) takes exactly one argument.
+  await tracked.revoke('res-1', { confirmPending: false });
+  expect(revokeLinkMock).toHaveBeenCalled();
+});
+
 test('a revoke under test confirms the protection update', async () => {
   const tracked = trackedQurlResources(env);
   tracked.track('res-1');

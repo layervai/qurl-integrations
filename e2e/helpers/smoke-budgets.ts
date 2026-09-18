@@ -1,8 +1,7 @@
 /**
  * Per-test time budgets for the connector-stack smoke, kept here rather than as
- * literals in the test file so their SUM can be checked by a unit test instead
- * of asserted in a comment, which drifts from the literals it describes with
- * nothing failing when it does.
+ * literals in the test file so their SUM can be checked by a unit test rather
+ * than asserted in a comment, which drifts with nothing failing when it does.
  *
  * A GREEN `npm run test:unit` is not evidence the smoke job fits: the check
  * below compares file-revoke's ceilings against a nominal reserve, and the real
@@ -11,7 +10,7 @@
  * The check is a drift detector, not a proof the job fits — these are ceilings
  * reached only pathologically, and four other live suites share the same
  * wall clock. It fails when a per-test ceiling is raised without weighing it
- * against the job, which is the mistake that actually happened.
+ * against the job.
  *
  * Each value below is a case's budget MINUS the revoke confirm wait.
  * `file-revoke.test.ts` adds `REVOKE_CONFIRM_WAIT_MS` back, so a change to the
@@ -71,4 +70,4 @@ export const FILE_REVOKE_TIMEOUTS_MS = {
   distinctWatermark: FILE_REVOKE_BASE_MS.distinctWatermark + REVOKE_CONFIRM_WAIT_MS,
   singleUseKnock: FILE_REVOKE_BASE_MS.singleUseKnock + REVOKE_CONFIRM_WAIT_MS,
   doubleRevoke: FILE_REVOKE_BASE_MS.doubleRevoke + REVOKE_CONFIRM_WAIT_MS,
-};
+} as const;

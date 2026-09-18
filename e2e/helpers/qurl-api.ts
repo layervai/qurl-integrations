@@ -276,9 +276,8 @@ const PENDING_REVOKE_ATTEMPTS = 2;
 /** The longest a confirming `revokeLink` can spend WAITING — it excludes the
  * confirm DELETE's own round trip, which is why the live budgets add it to a
  * non-revoke worst case that already accounts for request time. EXPORTED so the
- * live suites size their jest budgets off it by arithmetic instead of restating
- * it in prose — the numbers above drifted out of sync with their own comments
- * once already, and the per-test timeouts are what that drift breaks. Note it
+ * live suites size their jest budgets off it by arithmetic rather than
+ * restating it, which is what keeps the per-test timeouts honest. Note it
  * is derived from the CEILING, not from the 30s directive observed in practice:
  * a directive anywhere in the 31-35s tail is honored, and a budget computed at
  * 30s turns that tail into a jest timeout (no assertion, no cause) instead of a

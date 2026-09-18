@@ -23,8 +23,8 @@ import {
 // reached only pathologically, the job timeout is wall clock, and four other
 // live suites plus npm ci, SSM reads and a cold Playwright install come out of
 // the same 10 minutes — a cold browser install alone can exceed the reserve.
-// What it does is fail when someone raises a per-test ceiling without weighing
-// it against the job.
+// What it does is fail when a per-test ceiling is raised without being weighed
+// against the job.
 //
 // It also makes the revoke docstring's "widening means raising timeout-minutes
 // too, never one line" enforced instead of advisory: at PENDING_REVOKE_ATTEMPTS
@@ -62,11 +62,16 @@ test('the revoke ceiling separates the pending 503 from the dark 503', () => {
 // watermark case (two cold chromium launches) with the double-revoke case
 // (neither) would halve the margin on the file's highest-variance test while
 // keeping the total identical. Pin the ordering the variance argument rests on.
-test('the highest-variance cases keep the roomiest ceilings', () => {
+test('the knock-bearing cases keep the roomier ceilings', () => {
   const t = FILE_REVOKE_TIMEOUTS_MS;
 
-  // Strict, not `toBe(Math.max(...))`: a tie would satisfy that while flattening
-  // the ordering the variance argument rests on.
+  // Every ceiling carries the same +REVOKE_CONFIRM_WAIT_MS, so this is really a
+  // comparison of the bases — which is the point: it catches a swap that keeps
+  // the sum intact. Strict, not `toBe(Math.max(...))`, since a tie would
+  // satisfy that while flattening the ordering. Note it covers only the two
+  // knock-bearing cases: doubleRevoke (no knock) outranks uploadViewRevoke
+  // because its base came from jest's default, so there is no total order to
+  // assert here.
   expect(t.distinctWatermark).toBeGreaterThan(t.singleUseKnock); // 2 cold knocks > 1
   expect(t.singleUseKnock).toBeGreaterThan(t.uploadViewRevoke); // + 20s negative arm
   // No third comparison: doubleRevoke (no knock) has a LARGER ceiling than

@@ -364,8 +364,14 @@ describe('revokeLink retry path', () => {
       status: 200,
       headers: { 'Content-Type': 'application/json' },
     });
+  /** WITH a body, so the helper's `res.body?.cancel()` on a discarded response
+   * is actually exercised — every other fixture here is null-bodied, which
+   * leaves that line unrun in both http.ts and revokeLink. */
   const pending503 = () =>
-    new Response(null, { status: 503, headers: { 'Retry-After': '30' } });
+    new Response(JSON.stringify({ error: { code: 'service_unavailable' } }), {
+      status: 503,
+      headers: { 'Content-Type': 'application/json', 'Retry-After': '30' },
+    });
 
   // The ordinary case, and the one every URL mint in smoke/link-lifecycle/
   // concurrency takes: unprotected resource, first DELETE answers 204. One
@@ -398,8 +404,9 @@ describe('revokeLink retry path', () => {
       const promise = qurl.revokeLink(mintUrl, apiKey, publicResourceId);
       // The retry must wait out the server's directive, not the 1s local
       // backoff. Advance a full 30s after that check rather than the exact
-      // remaining 29s: this is the only 503 fixture here with a real body, so
-      // exact arithmetic would depend on the body cancel settling in-tick.
+      // remaining 29s: the fixture carries a body, so the helper's body-cancel
+      // sits between the response and the timer and exact arithmetic would
+      // depend on it settling in-tick.
       await jest.advanceTimersByTimeAsync(1_000);
       expect(fetchMock).toHaveBeenCalledTimes(1);
       await jest.advanceTimersByTimeAsync(30_000);
@@ -625,11 +632,11 @@ describe('revokeLink retry path', () => {
       await jest.advanceTimersByTimeAsync(10_000); // the fallback read's own budget
 
       await expect(promise).resolves.toBe(false);
-      // The last DELETE starts exactly at the exported budget — so the export
-      // IS the worst case, not a number that happens to sit near it. Exact on
-      // purpose: raising PENDING_REVOKE_ATTEMPTS doubles the EXPECTED side to
+      // The last DELETE starts exactly at the exported budget, so the export
+      // IS the worst case rather than a number near it. Exact on purpose:
+      // raising PENDING_REVOKE_ATTEMPTS doubles the EXPECTED side to
       // [0, 70_000] while the observed stays [0, 35_000], so this fails — the
-      // forcing function the revoke docstring relies on. Do not loosen it.
+      // forcing function the revoke docstring relies on.
       expect(firedAt.slice(0, 2)).toEqual([0, qurl.REVOKE_CONFIRM_WAIT_MS]);
     } finally {
       jest.useRealTimers();
