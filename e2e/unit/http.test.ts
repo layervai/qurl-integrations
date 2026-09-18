@@ -56,11 +56,39 @@ async function waitsBefore(
   return waits;
 }
 
-test('clamps an absurd Retry-After to the caller ceiling', async () => {
-  // `Retry-After: 600` against a 35s ceiling — the "hostile or absurd
-  // directive" the option promises to cap. Without the clamp this is a 10min
-  // stall, well past every jest timeout in the suite.
-  expect(await waitsBefore({ maxAttempts: 2, maxRetryAfterMs: 35_000 })).toEqual([35_000]);
+test('stops rather than retrying early when the directive exceeds the ceiling', async () => {
+  // `Retry-After: 600` against a 35s ceiling. Waiting it out is a 10min stall,
+  // past every jest timeout here; clamping DOWN to 35s would re-ask inside the
+  // window the server just told us to skip and fail 35s later than not
+  // retrying. So the budget ends: one request, no wait.
+  expect(await waitsBefore({ maxAttempts: 2, maxRetryAfterMs: 35_000 })).toEqual([]);
+  expect(fetchMock).toHaveBeenCalledTimes(1);
+});
+
+test('a 503 with no Retry-After at all still uses the local backoff', async () => {
+  // The missing-header branch, distinct from the malformed-value one below:
+  // opting in must not make a directive-less 503 behave differently.
+  fetchMock.mockImplementation(respond(503));
+  const pending = fetchWithTransientRetry(
+    url, { method: 'DELETE' }, { maxAttempts: 2, maxRetryAfterMs: 35_000 },
+  );
+  await jest.advanceTimersByTimeAsync(1_000);
+  expect(fetchMock).toHaveBeenCalledTimes(2);
+  await pending;
+});
+
+test('the ceiling is per attempt, not a total budget', async () => {
+  // What file-revoke.test.ts's timeouts are sized on: at maxAttempts 3 an
+  // opted-in caller waits the directive TWICE. This is why revokeLink pins 2.
+  fetchMock.mockImplementation(respond(503, { 'Retry-After': '30' }));
+  const pending = fetchWithTransientRetry(
+    url, { method: 'DELETE' }, { maxAttempts: 3, maxRetryAfterMs: 35_000 },
+  );
+  await jest.advanceTimersByTimeAsync(30_000);
+  expect(fetchMock).toHaveBeenCalledTimes(2);
+  await jest.advanceTimersByTimeAsync(30_000);
+  expect(fetchMock).toHaveBeenCalledTimes(3); // 60s total, not 35s
+  await pending;
 });
 
 test('honors a directive that fits under the ceiling as-is', async () => {

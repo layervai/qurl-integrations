@@ -103,10 +103,12 @@ function isRetryableStatus(status: number, method: string): boolean {
  *   (transient) and its deployment-state "dark 503" 60 (standing — waiting only
  *   makes a permanent failure slower to report). Nothing in the response
  *   separates them, so only the call site can. Everyone else keeps the 1s/2s
- *   backoff. The ceiling also caps a hostile or absurd directive — PER ATTEMPT,
- *   so an opted-in caller's worst case is `(maxAttempts - 1) x ceiling` and it
- *   owns both numbers together (`revokeLink` pins `maxAttempts: 2` for exactly
- *   this reason; inheriting the default 3 would mean ~70s).
+ *   backoff. It is the longest directive the caller will honor, PER ATTEMPT: a
+ *   longer one ends the retry loop rather than being clamped down to it, so a
+ *   hostile or absurd value fails fast instead of buying a futile early retry.
+ *   The opted-in worst case is therefore `(maxAttempts - 1) x ceiling`, and the
+ *   caller owns both numbers together (`revokeLink` pins `maxAttempts: 2` for
+ *   exactly this reason; inheriting the default 3 would mean ~70s).
  *
  *   Scoped to 503 even when opted in: a 429 directive on this stack means "you
  *   burst", and honoring it would let one shed DELETE cost 35s inside the
@@ -134,10 +136,15 @@ export async function fetchWithTransientRetry(
     // Anything non-numeric (including the HTTP-date form RFC 9110 also allows)
     // falls through to the linear backoff rather than producing a NaN delay.
     const retryAfterRaw = res.status === 503 ? res.headers.get('retry-after')?.trim() ?? '' : '';
-    const retryAfterMs = /^\d+$/.test(retryAfterRaw)
-      ? Math.min(Number(retryAfterRaw) * 1000, maxRetryAfterMs)
+    const directiveMs = maxRetryAfterMs > 0 && /^\d+$/.test(retryAfterRaw)
+      ? Number(retryAfterRaw) * 1000
       : 0;
-    const delayMs = Math.max(baseDelayMs * attempt, retryAfterMs);
+    // A directive LONGER than the caller's ceiling means stop, not retry early.
+    // Clamping down would re-ask inside the window the server just told us to
+    // skip, draw the same response, and report failure later than no retry at
+    // all — inverting the "slow down is authoritative" rule this block runs on.
+    if (directiveMs > maxRetryAfterMs) break;
+    const delayMs = Math.max(baseDelayMs * attempt, directiveMs);
     // Surface the retry in CI logs so a run that RECOVERED after a blip doesn't
     // look identical to one that never blipped — the drain-gap signal #1085 wants.
     // Log the ORIGIN only, not the full URL: the fileviewer `/view/<mint-id>` path

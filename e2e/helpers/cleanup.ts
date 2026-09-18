@@ -97,13 +97,8 @@ export function trackedQurlResources(env: {
   // sweep only needs "did it stick", and charging it ~30s plus a second round
   // trip per straggler would blow the very hook budget that keeps it from
   // leaking (60 resources would need ~35min). Options object, not a positional
-  // boolean: consumers reach this through QurlResourceTracker below, whose
-  // `revoke` declares ONE parameter, so `ids.map(tracked.revoke)` type-checks
-  // against that signature and hands the array index to the second argument at
-  // runtime. As a boolean that silently turns confirmation OFF for element 0
-  // (index 0 is falsy); destructuring a number just yields the defaults.
-  // (Passing the raw local const to .map is rejected either way — it is the
-  // interface-typed spelling that compiles.)
+  // boolean, so a stray `.map` index degrades to the defaults instead of
+  // silently turning confirmation off.
   const revoke = async (
     resourceId: string,
     { confirmPending = true }: { confirmPending?: boolean } = {},
@@ -138,7 +133,19 @@ export function trackedQurlResources(env: {
         first = false;
         try {
           const ok = await revoke(id, { confirmPending: false });
-          if (!ok) console.warn(`afterAll: best-effort revoke of ${id} returned not-ok`);
+          if (!ok) {
+            // Say what not-ok can mean, so a reader doesn't chase a revoke that
+            // actually happened: the sweep doesn't confirm, so a protected
+            // resource's committed-but-pending 503 lands here too. Deliberately
+            // NOT treated as success — the deployment-state 503 is
+            // indistinguishable, and dropping the id on that one would leak the
+            // resource silently, which is the opposite of this channel's job.
+            // A straggler left tracked still lapses on its own expiry.
+            console.warn(
+              `afterAll: best-effort revoke of ${id} returned not-ok ` +
+                '(a 503 here is the expected committed-but-pending answer for a protected resource)',
+            );
+          }
         } catch (err) {
           console.warn(`afterAll: best-effort revoke of ${id} threw: ${String(err)}`);
         }
