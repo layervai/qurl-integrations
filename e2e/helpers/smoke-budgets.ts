@@ -38,8 +38,11 @@ export const SMOKE_JOB_BUDGET_MS = 10 * 60_000;
 export const SMOKE_JOB_RESERVE_MS = 30_000;
 
 /** Each `file-revoke.test.ts` case's budget EXCLUDING the revoke confirm wait —
- * not a worst-case estimate. Only `uploadViewRevoke` is close to its stated
- * ~64s of work; the other three are the pre-PR ceilings minus one confirm wait.
+ * not a worst-case estimate — and it covers the revoke's OWN request time,
+ * which REVOKE_CONFIRM_WAIT_MS excludes: two DELETE round trips plus, on the
+ * failure path, the fallback management read's own bounded attempts. That is
+ * why `uploadViewRevoke` is 75s against ~64s of stated work rather than being
+ * trimmed to it. Only `uploadViewRevoke` is close to its stated work; the other three are the pre-PR ceilings minus one confirm wait.
  * That holds the CEILING constant and spends ~35s of the former variance margin
  * on the confirm — `distinctWatermark` goes from ~82s of margin to ~47s,
  * `singleUseKnock` from ~71s to ~36s. The margin is NOT preserved; the ceiling

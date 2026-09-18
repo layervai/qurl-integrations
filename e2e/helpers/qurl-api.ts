@@ -395,6 +395,13 @@ export async function revokeLink(
   // passing silently. Gated on confirmPending, so the sweep and the negative
   // call sites stay at exactly one request.
   if (!confirmPending) return false;
+  // Skipped for auth failures, where the read uses the same credential and can
+  // only fail the same way — so it would double every confirming call site's
+  // request volume during a systematic cleanup regression (the case
+  // cleanup.ts's header calls dangerous) while buying no diagnosis. This is NOT
+  // the status-code trust the paragraph above rejects: a status test used to
+  // SKIP the read can forgo a true positive, never manufacture a false one.
+  if (res.status === 401 || res.status === 403) return false;
   try {
     const status = await getResourceStatus(baseUrl, apiKey, resourceId);
     if (status.status !== 'revoked') return false;

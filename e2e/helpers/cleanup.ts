@@ -72,7 +72,7 @@ export interface QurlResourceTracker {
    * qurl-service's protection-update 503 (up to ~35s) so the boolean is
    * true when the revocation happened: it confirms the protection update, which
    * costs up to REVOKE_CONFIRM_WAIT_MS — size a test budget off that export,
-   * not off the ~30s directive usually observed. revokeAll skips
+   * not off the directive usually observed. revokeAll skips
    * it via an option deliberately NOT
    * exposed here: opting out is cleanup's call, not a caller's. Negative
    * revoke tests (wrong key, nonexistent id) should keep calling
@@ -98,9 +98,9 @@ export function trackedQurlResources(env: {
   // asserts on the boolean, so it waits out qurl-service's protection-update
   // 503 to answer truthfully (see revokeLink); the afterAll sweep passes false
   // and stays a single request, exactly as costly as before this PR — the
-  // sweep only needs "did it stick", and charging it ~30s plus a second round
-  // trip per straggler would blow the very hook budget that keeps it from
-  // leaking (60 resources would need ~35min). It drops the transient retry with
+  // sweep only needs "did it stick", and charging it REVOKE_CONFIRM_WAIT_MS
+  // plus a second round trip per straggler would blow the very hook budget that
+  // keeps it from leaking. It drops the transient retry with
   // it: in a service-wide shed — the case that actually threatens the hook —
   // all ~60 stragglers would retry and nothing is reclaimed either way, so the
   // retry only converts an outage into a hook timeout. A single straggler would

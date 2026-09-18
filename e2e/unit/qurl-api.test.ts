@@ -514,6 +514,19 @@ describe('revokeLink retry path', () => {
     }
   });
 
+  // The fallback is skipped where the read would use the same credential and
+  // fail the same way — so a systematic auth regression costs one request per
+  // call site, not two.
+  test.each([
+    ['401 Unauthorized', 401],
+    ['403 Forbidden', 403],
+  ])('skips the management read on %s', async (_d, status) => {
+    fetchMock.mockImplementationOnce(() => new Response(null, { status }));
+
+    await expect(qurl.revokeLink(mintUrl, apiKey, publicResourceId)).resolves.toBe(false);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   // The dark-503 guard at the call site the PR leans on hardest: revokeLink's
   // ceiling is BELOW the deployment-state 503's 60s directive, so that one is
   // declined rather than waited out — a deploy window costs ~1s, not ~35s.
@@ -596,10 +609,10 @@ describe('revokeLink retry path', () => {
 
       await expect(promise).resolves.toBe(false);
       // The last DELETE starts exactly at the exported budget — so the export
-      // IS the worst case, not a number that happens to sit near it. An exact
-      // match on purpose: raising PENDING_REVOKE_ATTEMPTS makes this
-      // [0, 35_000, 70_000] and fails, which is the forcing function the revoke
-      // docstring relies on. Do not loosen the matcher to "fix" that.
+      // IS the worst case, not a number that happens to sit near it. Exact on
+      // purpose: raising PENDING_REVOKE_ATTEMPTS doubles the EXPECTED side to
+      // [0, 70_000] while the observed stays [0, 35_000], so this fails — the
+      // forcing function the revoke docstring relies on. Do not loosen it.
       expect(firedAt.slice(0, 2)).toEqual([0, qurl.REVOKE_CONFIRM_WAIT_MS]);
     } finally {
       jest.useRealTimers();

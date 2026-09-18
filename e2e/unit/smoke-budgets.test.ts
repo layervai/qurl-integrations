@@ -32,10 +32,19 @@ import {
 test('the file-revoke ceilings leave the job reserve intact', () => {
   const total = Object.values(FILE_REVOKE_TIMEOUTS_MS).reduce((a, b) => a + b, 0);
 
-  // The reserve is a tripwire, not an allowance for the costs above. Note this
-  // sums FILE-REVOKE only — smoke, link-lifecycle and concurrency also gained
-  // worst-case cost from the confirming default and are not counted, which is
-  // why the name says "reserve intact" rather than "the job fits".
+  // The reserve is a tripwire, not an allowance for the costs above, and this
+  // sums FILE-REVOKE only — which is why the name says "reserve intact" rather
+  // than "the job fits".
+  //
+  // Deliberately unguarded, listed so the next person raising the attempt count
+  // knows which literals to check rather than which suites: every in-test
+  // `tracked.revoke` now confirms, so concurrency.test.ts's 'revoke immediately
+  // after mint' and 'parallel mint and revoke of different resources',
+  // link-lifecycle.test.ts's three revoke cases, and smoke.test.ts's 'mint link
+  // then revoke' all inherit jest.config.js's bare 120_000 default with no
+  // REVOKE_CONFIRM_WAIT_MS term in it. They fit today (the parallel case runs
+  // its five concurrently, so ~35s not ~175s); they are not derived, so nothing
+  // fails if that stops being true.
   expect(total).toBeLessThanOrEqual(SMOKE_JOB_BUDGET_MS - SMOKE_JOB_RESERVE_MS);
 });
 
