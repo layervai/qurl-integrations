@@ -106,8 +106,9 @@ function isRetryableStatus(status: number, method: string): boolean {
  *   so only the call site can. Everyone else keeps the 1s/2s backoff.
  *
  *   The ceiling is the longest directive the caller will honor, PER ATTEMPT, so
- *   the opted-in worst case is `(maxAttempts - 1) x ceiling` and the caller owns
- *   both numbers together — `revokeLink` sets both deliberately and exports the
+ *   the opted-in worst case is `(maxAttempts - 1) x ceiling` — assuming every
+ *   retried response carries a directive AT the ceiling; a shorter one, or a
+ *   declined one, costs less — and the caller owns both numbers together — `revokeLink` sets both deliberately and exports the
  *   product, so the live budgets sized on it can't drift from it. A LONGER directive is
  *   DECLINED rather than clamped down to the ceiling — re-asking early would
  *   draw the same response, just later — and that attempt falls back to the
@@ -146,9 +147,8 @@ export async function fetchWithTransientRetry(
     // the way in, so `get()` never returns a padded value (pinned by the
     // padded-directive test in unit/http.test.ts).
     const retryAfterRaw = res.status === 503 ? res.headers.get('retry-after') ?? '' : '';
-    const directiveMs = retryAfterCeilingMs > 0 && /^\d+$/.test(retryAfterRaw)
-      ? Number(retryAfterRaw) * 1000
-      : 0;
+    const hasDirective = retryAfterCeilingMs > 0 && /^\d+$/.test(retryAfterRaw);
+    const directiveMs = hasDirective ? Number(retryAfterRaw) * 1000 : 0;
     // Surface every retry decision in CI logs so a run that RECOVERED after a
     // blip doesn't look identical to one that never blipped — the drain-gap
     // signal #1085 wants — and so a run that STOPPED says why. Log the ORIGIN
@@ -163,9 +163,12 @@ export async function fetchWithTransientRetry(
     // Over the ceiling: decline the directive and fall back to the local
     // backoff — never drop the retry. See `maxRetryAfterMs` above for why.
     const overCeiling = directiveMs > retryAfterCeilingMs;
-    // Opted in, got the status the opt-in is FOR, and still has no usable
-    // directive: the confirm mechanism silently did not engage.
-    const degraded = retryAfterCeilingMs > 0 && res.status === 503 && directiveMs === 0;
+    // Opted in, got the status the opt-in is FOR, and the response carried no
+    // PARSEABLE directive: the confirm mechanism silently did not engage.
+    // Keyed on `hasDirective`, not on `directiveMs === 0` — `Retry-After: 0`
+    // parses fine and means "retry now", so the mechanism DID engage and the
+    // local backoff applying is the correct outcome, not a degradation.
+    const degraded = retryAfterCeilingMs > 0 && res.status === 503 && !hasDirective;
     const delayMs = overCeiling
       ? baseDelayMs * attempt
       : Math.max(baseDelayMs * attempt, directiveMs);

@@ -280,9 +280,11 @@ test.each([
   await pending;
 });
 
-test('treats Retry-After: 0 as no directive', async () => {
+test('treats Retry-After: 0 as an honored directive of zero', async () => {
   // Passes /^\d+$/ and yields 0, so the local backoff must still apply rather
-  // than the helper firing an immediate retry.
+  // than the helper firing an immediate retry — and it must NOT be reported as
+  // a bypassed confirm mechanism: a parsed 0 means "retry now", which is the
+  // mechanism working, not degrading.
   fetchMock.mockImplementation(respond(503, { 'Retry-After': '0' }));
   const pending = fetchWithTransientRetry(
     url, { method: 'DELETE' }, { maxAttempts: 2, maxRetryAfterMs: 35_000 },
@@ -292,4 +294,5 @@ test('treats Retry-After: 0 as no directive', async () => {
   await jest.advanceTimersByTimeAsync(1);
   await pending;
   expect(fetchMock).toHaveBeenCalledTimes(2);
+  expect(errorSpy).not.toHaveBeenCalled();
 });

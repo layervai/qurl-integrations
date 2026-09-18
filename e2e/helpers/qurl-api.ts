@@ -265,6 +265,10 @@ export const REVOKE_CONFIRM_WAIT_MS =
 
 /** Revoke a qURL link by resource_id (revokes entire resource).
  *
+ * Two numbers appear below and are easy to conflate: 30s is the directive
+ * qurl-service is OBSERVED to send, 35s is the ceiling this call site will
+ * honor up to. The gap between them is deliberate — see the TODO at the end.
+ *
  * On an NHP-protected resource (every connector upload) qurl-service COMMITS
  * the revocation and then answers 503 + `Retry-After: 30` ("Revocation
  * committed; protection update is pending. Retry to confirm.") until the
@@ -290,9 +294,13 @@ export const REVOKE_CONFIRM_WAIT_MS =
  * hypothetical tail with measured headroom is the wrong trade. If a real
  * 31-35s tail shows up, widen PENDING_REVOKE_ATTEMPTS to 3 — every live budget
  * derives from REVOKE_CONFIRM_WAIT_MS, so they follow automatically. They
- * follow it PAST the job budget, though: doubling the wait takes file-revoke's
- * four ceilings from 445s to 585s against `timeout-minutes: 10`, so the honest
- * escape hatch is "raise the attempts AND raise timeout-minutes", not one line.
+ * follow it OVER the job budget, though: doubling the wait takes file-revoke's
+ * four ceilings from 560s to 700s against a 600s job, so widening is "raise the
+ * attempts AND raise timeout-minutes", never one line.
+ * TODO(upstream-contract): that 600s is `timeout-minutes: 10` on the E2E Smoke
+ * job in qurl-integrations-infra (.github/workflows/e2e-smoke.yml), which also
+ * pays npm ci, SSM reads and a cold Playwright install out of it. Nothing here
+ * fails loudly if infra moves it — this is the lockstep site.
  * Still pending after the window is a convergence regression to report.
  *
  * Worth being explicit about what this buys, since file-revoke.test.ts asserts

@@ -290,9 +290,11 @@ describe('File Revoke', () => {
     // Generous timeout: upload + connector mint + one served cold-chromium
     // knock + one negative knock that waits out its full 20s budget + a
     // confirming revoke. ~79s of non-revoke worst case plus the revoke's own
-    // budget; at a flat 150s the ceiling case landed within ~1s of the timeout,
-    // which would have reported a jest timeout instead of the assertion.
-  }, 90_000 + qurl.REVOKE_CONFIRM_WAIT_MS);
+    // budget = ~114s, so the base 150s is KEPT rather than trimmed to fit: like
+    // test 2 this charges a cold chromium launch plus a full 20s negative-knock
+    // arm, and that variance profile is the wrong one to squeeze — an 11s
+    // margin turns a slow runner into a jest timeout with no assertion.
+  }, 115_000 + qurl.REVOKE_CONFIRM_WAIT_MS);
 
   test('double revoke on file is idempotent', async () => {
     const upload = await qurl.uploadFile(
@@ -326,6 +328,9 @@ describe('File Revoke', () => {
     // Only the FIRST revoke confirms — the second discards its boolean and opts
     // out — so this is ~24s of upload and status reads plus one revoke budget.
     // Stated rather than inherited because the 120s default covers it only
-    // while that opt-out holds.
-  }, 35_000 + qurl.REVOKE_CONFIRM_WAIT_MS);
+    // while that opt-out holds — so the number is the default, written down and
+    // derived, not a tightening. ~24s of non-revoke work plus one confirm
+    // leaves comfortable margin for the second DELETE's round trip and
+    // getResourceStatus's own 3-attempt backoff.
+  }, 85_000 + qurl.REVOKE_CONFIRM_WAIT_MS);
 });

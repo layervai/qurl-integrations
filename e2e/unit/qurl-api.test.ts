@@ -495,11 +495,10 @@ describe('revokeLink retry path', () => {
       );
       const pending = qurl.revokeLink(mintUrl, apiKey, publicResourceId);
       await jest.advanceTimersByTimeAsync(1_000);
-      expect(fetchMock).toHaveBeenCalledTimes(2); // retried, not abandoned
       await expect(pending).resolves.toBe(false);
-      // The cost the docstring weighs against fail-fast: a deploy window gets
-      // the full attempt budget on the local backoff, not one request. Pinned
-      // so that trade is a number rather than prose.
+      // Retried on the local backoff, not abandoned — and exactly the full
+      // attempt budget, which is the cost the docstring weighs against
+      // fail-fast. Pinned so that trade is a number rather than prose.
       expect(fetchMock).toHaveBeenCalledTimes(2);
     } finally {
       jest.useRealTimers();
