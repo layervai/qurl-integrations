@@ -108,9 +108,12 @@ function isRetryableStatus(status: number, method: string): boolean {
  *   The ceiling is the longest directive the caller will honor, PER ATTEMPT, so
  *   the opted-in worst case is `(maxAttempts - 1) x ceiling` — assuming every
  *   retried response carries a directive AT the ceiling; a shorter one, or a
- *   declined one, costs less — and the caller owns both numbers together — `revokeLink` sets both deliberately and exports the
- *   product, so the live budgets sized on it can't drift from it. A LONGER directive is
- *   DECLINED rather than clamped down to the ceiling — re-asking early would
+ *   declined one costs less. The caller owns both numbers together;
+ *   `revokeLink` sets both and exports their product so the live budgets derive
+ *   from it rather than restating it.
+ *
+ *   A LONGER directive is DECLINED rather than clamped to the ceiling —
+ *   re-asking early would
  *   draw the same response, just later — and that attempt falls back to the
  *   ordinary local backoff. So opting in never costs a caller a retry it would
  *   have had at the default; too small a ceiling only stops directives being
@@ -147,8 +150,8 @@ export async function fetchWithTransientRetry(
     // the way in, so `get()` never returns a padded value (pinned by the
     // padded-directive test in unit/http.test.ts).
     const retryAfterRaw = res.status === 503 ? res.headers.get('retry-after') ?? '' : '';
-    const hasDirective = retryAfterCeilingMs > 0 && /^\d+$/.test(retryAfterRaw);
-    const directiveMs = hasDirective ? Number(retryAfterRaw) * 1000 : 0;
+    const honorsDirective = retryAfterCeilingMs > 0 && /^\d+$/.test(retryAfterRaw);
+    const directiveMs = honorsDirective ? Number(retryAfterRaw) * 1000 : 0;
     // Surface every retry decision in CI logs so a run that RECOVERED after a
     // blip doesn't look identical to one that never blipped — the drain-gap
     // signal #1085 wants — and so a run that STOPPED says why. Log the ORIGIN
@@ -163,12 +166,13 @@ export async function fetchWithTransientRetry(
     // Over the ceiling: decline the directive and fall back to the local
     // backoff — never drop the retry. See `maxRetryAfterMs` above for why.
     const overCeiling = directiveMs > retryAfterCeilingMs;
-    // Opted in, got the status the opt-in is FOR, and the response carried no
-    // PARSEABLE directive: the confirm mechanism silently did not engage.
-    // Keyed on `hasDirective`, not on `directiveMs === 0` — `Retry-After: 0`
-    // parses fine and means "retry now", so the mechanism DID engage and the
-    // local backoff applying is the correct outcome, not a degradation.
-    const degraded = retryAfterCeilingMs > 0 && res.status === 503 && !hasDirective;
+    // Opted in, got a 503, and no directive to honor — so this attempt falls
+    // back to the local backoff. Note this is BROADER than "the confirm window
+    // was skipped": a gateway 503 in front of the service carries no
+    // `Retry-After` either, and has nothing to do with a protection update. The
+    // logged text says only what is true (no usable directive, local backoff
+    // only) and leaves the cause to the reader.
+    const degraded = retryAfterCeilingMs > 0 && res.status === 503 && !honorsDirective;
     const delayMs = overCeiling
       ? baseDelayMs * attempt
       : Math.max(baseDelayMs * attempt, directiveMs);
@@ -190,7 +194,7 @@ export async function fetchWithTransientRetry(
         // retry. Saying so is what makes that degradation visible in CI.
         (overCeiling
           // Echo the raw header value too, so the CI line matches the wire.
-          ? ` (declined Retry-After: ${retryAfterRaw} = ${directiveMs}ms, ` +
+          ? ` (declined Retry-After: ${retryAfterRaw.slice(0, 64)} = ${directiveMs}ms, ` +
             `over the ${retryAfterCeilingMs}ms ceiling)`
           : degraded
             // Bounded + quoted: unlike the declined branch this value never

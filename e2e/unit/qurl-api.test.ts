@@ -1,5 +1,5 @@
-import { FILE_REVOKE_TIMEOUTS_MS, SMOKE_JOB_BUDGET_MS } from '../helpers/smoke-budgets';
 import * as qurl from '../helpers/qurl-api';
+import { FILE_REVOKE_TIMEOUTS_MS, SMOKE_JOB_BUDGET_MS } from '../helpers/smoke-budgets';
 
 const mintUrl = 'https://api.example.com/v1/qurls';
 const apiKey = 'test-key';
@@ -508,6 +508,28 @@ describe('revokeLink retry path', () => {
     }
   });
 
+  // The way this fix silently reverts to the original red, end to end — the
+  // hazard revokeLink's TODO(upstream-contract) names. http.test.ts pins the
+  // helper branch; this pins what a person diagnosing a red smoke would see:
+  // revokeLink resolves false after ~1s, not after the convergence window, and
+  // says so at error level.
+  test('a pending 503 without a directive reverts to the local backoff', async () => {
+    jest.useFakeTimers();
+    const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      fetchMock.mockImplementation(() => new Response(null, { status: 503 }));
+
+      const pending = qurl.revokeLink(mintUrl, apiKey, publicResourceId);
+      await jest.advanceTimersByTimeAsync(1_000);
+      expect(fetchMock).toHaveBeenCalledTimes(2); // 1s, not the 30s window
+      await expect(pending).resolves.toBe(false);
+      expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('no usable Retry-After'));
+    } finally {
+      errorSpy.mockRestore();
+      jest.useRealTimers();
+    }
+  });
+
   // The dark-503 guard at the call site the PR leans on hardest: revokeLink's
   // 35s ceiling is BELOW the deployment-state 503's 60s directive, so that one
   // is declined rather than waited out — the retry still happens, on the 1s
@@ -607,4 +629,19 @@ test('the file-revoke ceilings stay within the smoke job budget', () => {
 
   // The reserve is a tripwire, not an allowance for the costs above.
   expect(total).toBeLessThanOrEqual(SMOKE_JOB_BUDGET_MS - 30_000);
+});
+
+// The sum alone would let two budgets be swapped for free — and swapping the
+// watermark case (two cold chromium launches) with the double-revoke case
+// (neither) would halve the margin on the file's highest-variance test while
+// keeping the total identical. Pin the ordering the variance argument rests on.
+test('the highest-variance cases keep the roomiest ceilings', () => {
+  const t = FILE_REVOKE_TIMEOUTS_MS;
+
+  // Two cold chromium launches: the roomiest budget in the file, by argument.
+  expect(t.distinctWatermark).toBe(Math.max(...Object.values(t)));
+  // One knock plus the 20s negative arm > one knock alone.
+  expect(t.singleUseKnock).toBeGreaterThan(t.uploadViewRevoke);
+  // No knock at all, so it needs no knock-variance margin.
+  expect(t.doubleRevoke).toBeLessThan(t.singleUseKnock);
 });

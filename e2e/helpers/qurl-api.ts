@@ -294,12 +294,12 @@ export const REVOKE_CONFIRM_WAIT_MS =
  * hypothetical tail with measured headroom is the wrong trade. If a real
  * 31-35s tail shows up, widen PENDING_REVOKE_ATTEMPTS to 3 — every live budget
  * derives from REVOKE_CONFIRM_WAIT_MS, so they follow automatically. They
- * follow it OVER the job budget, though: doubling the wait takes file-revoke's
- * four ceilings from 560s to 700s against a 600s job, so widening is "raise the
- * attempts AND raise timeout-minutes", never one line. That 600s is
- * SMOKE_JOB_BUDGET_MS in helpers/smoke-budgets.ts, which holds the executable
- * copy and the TODO(upstream-contract) marker for it — one lockstep site, not
- * two, so a grep lands somewhere that can actually fail.
+ * follow it OVER the job budget, though: doubling the wait pushes file-revoke's
+ * four ceilings past SMOKE_JOB_BUDGET_MS (helpers/smoke-budgets.ts, which owns
+ * that number and its TODO(upstream-contract) marker). Its drift-detector test
+ * fails when that happens, so widening is "raise the attempts AND raise
+ * timeout-minutes", never one line — and no figure is restated here to go
+ * stale.
  * Still pending after the window is a convergence regression to report.
  *
  * Worth being explicit about what this buys, since file-revoke.test.ts asserts

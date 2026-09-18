@@ -1,9 +1,8 @@
 /**
  * Per-test time budgets for the connector-stack smoke, kept here rather than as
  * literals in the test file so their SUM can be checked by a unit test instead
- * of asserted in a comment. Three times during qurl-integrations#1502 a
- * hand-written job-total drifted from the literals it described, twice
- * justifying a conclusion the arithmetic didn't support.
+ * of asserted in a comment: a hand-written total drifts from the literals it
+ * describes, and nothing fails when it does.
  *
  * The check is a drift detector, not a proof the job fits — these are ceilings
  * reached only pathologically, and four other live suites share the same

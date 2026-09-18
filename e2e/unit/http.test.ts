@@ -18,7 +18,9 @@ let warnSpy: jest.SpyInstance;
 let errorSpy: jest.SpyInstance;
 
 /** A fresh Response per call: `mockResolvedValue` would hand the same instance
- * to every attempt, and the helper cancels the body of each one it discards. */
+ * to every attempt. These fixtures are null-bodied so nothing is actually
+ * cancelled today, but the helper does cancel each discarded body — so a shared
+ * instance would stop being honest the moment anyone gives one a body. */
 function respond(status: number, headers: Record<string, string> = {}) {
   return () => new Response(null, { status, headers });
 }

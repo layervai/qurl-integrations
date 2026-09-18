@@ -240,14 +240,14 @@ describe('File Revoke', () => {
     // + 2 knocks ~70s + status ~1s) plus the revoke's own budget — this test
     // revokes a connector upload too, so it carries the same confirm cost as
     // its siblings, and its margin had quietly dropped by a confirm budget.
-    // Kept at the base 180s rather than trimmed to the stated ~133s worst case:
+    // Kept at its original 180s ceiling rather than trimmed to the stated ~133s
+    // worst case:
     // this is the highest-variance test in the file — its ~98s charges 35s per
     // knock for a COLD chromium launch plus tunnelView's own 30s navigation
     // budget, and a slow runner pushes that to ~108s, which a tight ceiling
-    // would turn into a jest timeout with no assertion. The four ceilings sum
-    // to 560s against a 600s job (540s before this PR) — asserted in
-    // unit/qurl-api.test.ts rather than trusted to this comment, because this
-    // exact number has drifted from the literals twice already.
+    // would turn into a jest timeout with no assertion. Whether the four
+    // ceilings still fit the CI job is asserted in unit/qurl-api.test.ts
+    // against SMOKE_JOB_BUDGET_MS, not restated here where it would go stale.
   }, FILE_REVOKE_TIMEOUTS_MS.distinctWatermark);
 
   test('a consumed one-time link does not serve a second knock (single-use enforced)', async () => {
@@ -293,7 +293,8 @@ describe('File Revoke', () => {
     // Generous timeout: upload + connector mint + one served cold-chromium
     // knock + one negative knock that waits out its full 20s budget + a
     // confirming revoke. ~79s of non-revoke worst case plus the revoke's own
-    // budget = ~114s, so the base 150s is KEPT rather than trimmed to fit: like
+    // budget = ~114s, so the original 150s ceiling is KEPT rather than trimmed
+    // to fit: like
     // test 2 this charges a cold chromium launch plus a full 20s negative-knock
     // arm, and that variance profile is the wrong one to squeeze — an 11s
     // margin turns a slow runner into a jest timeout with no assertion.

@@ -107,9 +107,10 @@ export function trackedQurlResources(env: {
   // narrower than "unaffordable": in the case that actually threatens the hook
   // — a service-wide shed where all ~60 stragglers retry — nothing is reclaimed
   // either way, so the retry converts an outage into a hook timeout and buys
-  // nothing. Worth revisiting if a single-straggler leak is ever observed. Options object, not a positional
-  // boolean, so a stray `.map` index degrades to the defaults instead of
-  // silently turning confirmation off.
+  // nothing. Worth revisiting if a single-straggler leak is ever observed.
+  //
+  // Options object, not a positional boolean, so a stray `.map` index
+  // degrades to the defaults instead of silently turning confirmation off.
   const revoke = async (
     resourceId: string,
     { confirmPending = true }: { confirmPending?: boolean } = {},
