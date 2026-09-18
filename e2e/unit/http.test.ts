@@ -141,7 +141,8 @@ test('a 503 with no Retry-After at all still uses the local backoff', async () =
 
 test('the ceiling is per attempt, not a total budget', async () => {
   // What file-revoke.test.ts's timeouts are sized on: at maxAttempts 3 an
-  // opted-in caller waits the directive TWICE. This is why revokeLink pins 2.
+  // opted-in caller waits the directive TWICE, which is why revokeLink exports
+  // the product rather than leaving each budget to restate it.
   fetchMock.mockImplementation(respond(503, { 'Retry-After': '30' }));
   const pending = fetchWithTransientRetry(
     url, { method: 'DELETE' }, { maxAttempts: 3, maxRetryAfterMs: 35_000 },

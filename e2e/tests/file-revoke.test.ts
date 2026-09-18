@@ -135,11 +135,14 @@ describe('File Revoke', () => {
     expect(status.status).toBe('revoked');
     // Generous timeout: connector mint + headless-browser knock (cold chromium
     // launch + navigation + the helper's own 30s tunnel-view budget) on CI,
-    // plus the revoke's confirm waits on the protection-update 503 (the
-    // server's ~30s directive, up to twice; 35s is only the ceiling). Worst
-    // case ~125s (upload ~21s + mint ~3s + knock ~35s + poll 5s + revoke ~61s)
-    // — the thinnest margin in the file, which is why 90s no longer fits.
-  }, 150_000);
+    // plus the revoke's confirm waits. That part is ADDED rather than folded
+    // into a literal, so the budget tracks the helper: upload ~21s + mint ~3s
+    // + knock ~35s + poll 5s = ~64s of non-revoke worst case, and the rest is
+    // whatever a confirming revoke can cost. Sized on the CEILING, not the 30s
+    // directive — a directive in the 31-35s tail is honored, and a budget
+    // computed at 30s would turn that tail into a jest timeout with no
+    // assertion and no cause, which is the one diagnosis worse than a red.
+  }, 110_000 + qurl.REVOKE_CONFIRM_WORST_CASE_MS);
 
   test('distinct-per-viewer watermark + `_` route-label SNI on the tunnel', async () => {
     // ONE upload → TWO minted recipient views. The whole point of render-at-mint:
@@ -225,9 +228,13 @@ describe('File Revoke', () => {
       env.MINT_API_URL, env.QURL_API_KEY, upload.resource_id,
     );
     expect(status.status).toBe('revoked');
-    // Generous timeout: two connector mints + TWO sequential cold-chromium knocks
-    // (each with the helper's own 30s tunnel-view budget) + revoke, on CI.
-  }, 180_000);
+    // Generous timeout: two connector mints + TWO sequential cold-chromium
+    // knocks (each with the helper's own 30s tunnel-view budget) + a confirming
+    // revoke, on CI. ~98s of non-revoke worst case (upload ~21s + 2 mints ~6s
+    // + 2 knocks ~70s + status ~1s) plus the revoke's own budget — this test
+    // revokes a connector upload too, so it carries the same confirm cost as
+    // its siblings and its margin had quietly dropped from ~80s to ~12s.
+  }, 170_000 + qurl.REVOKE_CONFIRM_WORST_CASE_MS);
 
   test('a consumed one-time link does not serve a second knock (single-use enforced)', async () => {
     // THE knock-driven enforcement guard for one-time links. The URL-mint
@@ -270,10 +277,11 @@ describe('File Revoke', () => {
     const revoked = await tracked.revoke(upload.resource_id);
     expect(revoked).toBe(true);
     // Generous timeout: upload + connector mint + one served cold-chromium
-    // knock + one negative knock that waits out its full 20s budget + a revoke
-    // that may spend up to ~61s confirming through the protection-update 503
-    // (the server's ~30s directive, up to twice) — ~140s worst case.
-  }, 150_000);
+    // knock + one negative knock that waits out its full 20s budget + a
+    // confirming revoke. ~79s of non-revoke worst case plus the revoke's own
+    // budget; at a flat 150s the ceiling case landed within ~1s of the timeout,
+    // which would have reported a jest timeout instead of the assertion.
+  }, 140_000 + qurl.REVOKE_CONFIRM_WORST_CASE_MS);
 
   test('double revoke on file is idempotent', async () => {
     const upload = await qurl.uploadFile(
@@ -304,7 +312,9 @@ describe('File Revoke', () => {
       env.MINT_API_URL, env.QURL_API_KEY, upload.resource_id,
     );
     expect(status.status).toBe('revoked');
-    // No explicit budget: only the FIRST revoke confirms (~61s worst case, two
-    // windows), the second opts out, so ~86s still sits inside the 120s default.
-  });
+    // Only the FIRST revoke confirms — the second discards its boolean and opts
+    // out — so this is ~24s of upload and status reads plus one revoke budget.
+    // Stated rather than inherited because the 120s default covers it only
+    // while that opt-out holds.
+  }, 80_000 + qurl.REVOKE_CONFIRM_WORST_CASE_MS);
 });

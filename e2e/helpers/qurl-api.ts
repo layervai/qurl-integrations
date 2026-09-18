@@ -239,12 +239,27 @@ export async function accessLinkNoRedirect(url: string): Promise<LinkAccessResul
   };
 }
 
-/** Ceiling for the revocation-pending `Retry-After` revokeLink will honor.
- * Sized to sit ABOVE qurl-service's 30s pending directive and BELOW the
- * deployment-state "dark 503"'s 60s — that inequality is what separates the two
- * at this call site, so it is a policy choice, not a spare number. See
+/** Ceiling for the revocation-pending `Retry-After` revokeLink will honor, per
+ * attempt. Sized to sit ABOVE qurl-service's 30s pending directive and BELOW
+ * the deployment-state "dark 503"'s 60s — that inequality is what separates the
+ * two at this call site, so it is a policy choice, not a spare number. See
  * revokeLink's TODO(upstream-contract) before moving it. */
 const PENDING_REVOKE_CEILING_MS = 35_000;
+
+/** Total attempts for a confirming revoke, so `PENDING_REVOKE_ATTEMPTS - 1`
+ * confirm windows. See revokeLink for why two rather than one. */
+const PENDING_REVOKE_ATTEMPTS = 3;
+
+/** The longest a confirming `revokeLink` can spend waiting. EXPORTED so the
+ * live suites size their jest budgets off it by arithmetic instead of restating
+ * it in prose — the numbers above drifted out of sync with their own comments
+ * once already, and the per-test timeouts are what that drift breaks. Note it
+ * is derived from the CEILING, not from the 30s directive observed in practice:
+ * a directive anywhere in the 31-35s tail is honored, and a budget computed at
+ * 30s turns that tail into a jest timeout (no assertion, no cause) instead of a
+ * legible assertion failure. */
+export const REVOKE_CONFIRM_WORST_CASE_MS =
+  (PENDING_REVOKE_ATTEMPTS - 1) * PENDING_REVOKE_CEILING_MS;
 
 /** Revoke a qURL link by resource_id (revokes entire resource).
  *
@@ -254,7 +269,14 @@ const PENDING_REVOKE_CEILING_MS = 35_000;
  * protection update lands, so a single-shot DELETE reported a false failure for
  * a revocation that had already happened. Hence confirm retries that wait out
  * the server's own directive (35s ceiling — see http.ts's `maxRetryAfterMs`
- * for why honoring it is opt-in and why the ceiling matters).
+ * for why honoring it is opt-in and why the ceiling matters). Note a DECLINED
+ * directive (the dark 503's 60s) still costs the full attempt budget on the
+ * local backoff — three DELETEs a few seconds apart during a deploy window.
+ * That is in tension with the dark 503's "clients must not auto-retry", and it
+ * is deliberate: the alternative rule, fail-fast whenever a directive is over
+ * the ceiling, would also abandon a transient drain-gap 503 that merely happens
+ * to carry a long directive, which is the retry this helper exists for. Three
+ * requests from one test is the cheaper side of that trade.
  *
  * TWO confirms, not one: `Retry-After` is the server's ESTIMATE of convergence,
  * not a bound, so a single window at exactly 30s turns a 31s convergence into a
@@ -317,7 +339,7 @@ export async function revokeLink(
     method: 'DELETE',
     headers: { Authorization: `Bearer ${apiKey}` },
   }, confirmPending
-    ? { maxAttempts: 3, maxRetryAfterMs: PENDING_REVOKE_CEILING_MS }
+    ? { maxAttempts: PENDING_REVOKE_ATTEMPTS, maxRetryAfterMs: PENDING_REVOKE_CEILING_MS }
     : { maxAttempts: 1 });
   // Nothing reads this body — the caller gets a boolean — so release it rather
   // than holding an undici socket until GC, once per straggler on a sweep.

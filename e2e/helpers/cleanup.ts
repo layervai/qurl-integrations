@@ -70,9 +70,10 @@ export interface QurlResourceTracker {
    * so revoke-under-test call sites assert on it directly — which is why
    * this path CONFIRMS: on an NHP-protected resource it waits out
    * qurl-service's protection-update 503 (up to ~35s) so the boolean is
-   * true when the revocation happened (it confirms the protection update —
-   * ~30s, the server's directive; see revokeLink). revokeAll skips that via an
-   * option deliberately NOT
+   * true when the revocation happened: it confirms the protection update, which
+   * costs up to REVOKE_CONFIRM_WORST_CASE_MS (~70s) — size a test budget off
+   * that export, not off the ~30s directive usually observed. revokeAll skips
+   * it via an option deliberately NOT
    * exposed here: opting out is cleanup's call, not a caller's. Negative
    * revoke tests (wrong key, nonexistent id) should keep calling
    * qurl.revokeLink directly — those must not touch the ledger. */

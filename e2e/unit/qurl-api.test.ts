@@ -394,6 +394,28 @@ describe('revokeLink retry path', () => {
     }
   });
 
+  // The exported budget the live timeouts are computed from must match what a
+  // confirming revoke can actually spend, or the derivation is decorative.
+  test('REVOKE_CONFIRM_WORST_CASE_MS bounds a real confirming revoke', async () => {
+    jest.useFakeTimers();
+    try {
+      // The ceiling case, not the 30s usually observed: 35s is the longest
+      // directive this call site honors, and both windows can take it.
+      fetchMock.mockImplementation(
+        () => new Response(null, { status: 503, headers: { 'Retry-After': '35' } }),
+      );
+      const startedAt = Date.now();
+      const pending = qurl.revokeLink(mintUrl, apiKey, publicResourceId);
+      await jest.advanceTimersByTimeAsync(qurl.REVOKE_CONFIRM_WORST_CASE_MS);
+
+      await expect(pending).resolves.toBe(false);
+      expect(Date.now() - startedAt).toBeLessThanOrEqual(qurl.REVOKE_CONFIRM_WORST_CASE_MS);
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   // Bulk cleanup opts out entirely: the 503 already said the write is
   // committed, so the afterAll sweep only needs "did it stick". It stays ONE
   // request — no 30s wait and no second round trip — because cleanup.ts's

@@ -107,8 +107,8 @@ function isRetryableStatus(status: number, method: string): boolean {
  *
  *   The ceiling is the longest directive the caller will honor, PER ATTEMPT, so
  *   the opted-in worst case is `(maxAttempts - 1) x ceiling` and the caller owns
- *   both numbers together (`revokeLink` pins `maxAttempts: 2` for exactly this
- *   reason; inheriting the default 3 would mean ~70s). A LONGER directive is
+ *   both numbers together — `revokeLink` sets both deliberately and exports the
+ *   product, so the live budgets sized on it can't drift from it. A LONGER directive is
  *   DECLINED rather than clamped down to the ceiling — re-asking early would
  *   draw the same response, just later — and that attempt falls back to the
  *   ordinary local backoff. So opting in never costs a caller a retry it would
