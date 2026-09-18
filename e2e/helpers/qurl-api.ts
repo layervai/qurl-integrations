@@ -408,7 +408,10 @@ export async function revokeLink(
   // DELETE (the pathname is overwritten below) and a silently 404ing fallback
   // read, which is the false negative this function exists to remove. A SHAPE
   // check, not validation — `<origin>/v1` still passes and still breaks the
-  // fallback; it catches the one mistake `.env.example` used to invite.
+  // fallback; it catches the one mistake `.env.example` used to invite. CI is
+  // unaffected: qurl-integrations-infra's `mint_api_url` output is
+  // `"${var.qurl_endpoint}/v1/qurls"` (qurl-bot-discord/terraform/outputs.tf),
+  // i.e. already the collection form.
   if (stripTrailingSlashes(parsed.pathname) === '') {
     throw new TypeError(
       'revokeLink requires the management collection url, not a bare origin',
@@ -456,6 +459,10 @@ export async function revokeLink(
     );
     return true;
   } catch (err) {
+    // A 404 read is the DEFINITIVE "no such resource", not an ambiguous
+    // failure — it is what negative-paths' nonexistent id produces — so it
+    // keeps the loud channel free for the reads that really are inconclusive.
+    if (err instanceof StatusCheckError && err.status === 404) return false;
     // The one path here that ends in a red, so it must not be the silent one:
     // the assertion that fails is `expect(revoked).toBe(true)`, which aborts
     // before the getResourceStatus check two lines later that would have shown

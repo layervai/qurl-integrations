@@ -568,6 +568,11 @@ describe('revokeLink retry path', () => {
 
     await expect(qurl.revokeLink(mintUrl, apiKey, publicResourceId)).resolves.toBe(false);
     expect(fetchMock).toHaveBeenCalledTimes(2); // one DELETE, one read
+    // Quietly: a 404 read is the DEFINITIVE "no such resource", so it must not
+    // spend the loud channel reserved for inconclusive reads.
+    expect(warnSpy).not.toHaveBeenCalledWith(
+      expect.stringContaining('fallback management read failed'),
+    );
   });
 
   // The deliberate widening: because DELETE is idempotent, a confirming revoke
