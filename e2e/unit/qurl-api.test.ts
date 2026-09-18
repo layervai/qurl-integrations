@@ -374,6 +374,10 @@ describe('revokeLink retry path', () => {
     await jest.advanceTimersByTimeAsync(1);
     await expect(pending).resolves.toBe(true);
     expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(String(fetchMock.mock.calls[0][0])).toBe(
+      `https://api.example.com/v1/resources/${encodeURIComponent(publicResourceId)}`,
+    );
+    expect(String(fetchMock.mock.calls[1][0])).toBe(String(fetchMock.mock.calls[0][0]));
     expect(fetchMock.mock.calls[1][1]).toMatchObject({
       method: 'DELETE', headers: { Authorization: `Bearer ${apiKey}` },
     });
@@ -405,6 +409,7 @@ describe('revokeLink retry path', () => {
       confirmPending: false,
     })).resolves.toBe(false);
     expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(warnSpy).not.toHaveBeenCalled();
   });
 
   test('the confirmation delay stays within the exported budget', async () => {

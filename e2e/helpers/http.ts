@@ -102,7 +102,7 @@ function isRetryableStatus(status: number, method: string): boolean {
  * @param maxRetryAfterMs opt-in limit for a 503's Retry-After, per attempt.
  *   Default 0 keeps existing callers on local backoff. Directives above the
  *   limit are declined; valid shorter directives cannot shorten local backoff.
- *   Other statuses keep local backoff, including 429 during bulk cleanup.
+ *   Other statuses keep local backoff when another attempt is allowed.
  */
 export async function fetchWithTransientRetry(
   input: string | URL,
@@ -132,6 +132,7 @@ export async function fetchWithTransientRetry(
     }
     const overCeiling = directiveMs > retryAfterCeilingMs;
     const degraded = retryAfterCeilingMs > 0 && res.status === 503 && !honorsDirective;
+    // A zero directive means retry now; do not add the estimate pad to it.
     const directiveDelayMs = directiveMs > 0 && !overCeiling
       ? Math.min(directiveMs + DIRECTIVE_PAD_MS, retryAfterCeilingMs)
       : 0;

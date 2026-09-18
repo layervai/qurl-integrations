@@ -241,6 +241,7 @@ export async function accessLinkNoRedirect(url: string): Promise<LinkAccessResul
 
 // TODO(upstream-contract): qurl-service's nhpRevocationPending returns
 // Retry-After: 30. Allow one confirmation retry, with room for the 2s pad.
+// This bounds waiting, not request time. A still-pending update must fail.
 export const REVOKE_CONFIRM_WAIT_MS = 35_000;
 
 /** Revoke the resource. A successful DELETE confirms the protection update.

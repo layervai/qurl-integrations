@@ -123,8 +123,9 @@ export function trackedQurlResources(env: {
         first = false;
         try {
           const ok = await revoke(id, { confirmPending: false });
+          // HTTP failures return false; network failures throw. Report both.
           if (!ok) {
-            console.warn(`afterAll: best-effort revoke of ${id} returned not-ok`);
+            console.warn(`afterAll: best-effort revoke of ${id} did not confirm revocation`);
           }
         } catch (err) {
           console.warn(`afterAll: best-effort revoke of ${id} threw: ${String(err)}`);

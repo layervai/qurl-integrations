@@ -10,7 +10,7 @@ beforeEach(() => {
   revokeLinkMock.mockReset();
   revokeLinkMock.mockResolvedValue(true);
 });
-test('the tracker interface does not expose the opt-out', async () => {
+test('the tracker hides the opt-out from TypeScript callers', async () => {
   const tracked = trackedQurlResources(env);
   // @ts-expect-error cleanup alone owns the confirmation opt-out
   await tracked.revoke('res-1', { confirmPending: false });
@@ -64,7 +64,7 @@ test('the sweep warns and continues after an id returns not-ok', async () => {
 
     expect(revokeLinkMock).toHaveBeenCalledTimes(2); // did not stop at the failure
     expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('res-1'));
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('returned not-ok'));
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('did not confirm revocation'));
   } finally {
     warnSpy.mockRestore();
   }

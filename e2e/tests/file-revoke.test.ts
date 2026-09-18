@@ -62,9 +62,6 @@ const env = loadEnv();
 // through tracked.revoke so the assertion stays while the ledger syncs.
 const tracked = trackedQurlResources(env);
 
-// Add one confirmation wait to each test's existing work budget. These are
-// per-test limits; measure the live suite separately against CI's job limit.
-
 afterAll(() => tracked.revokeAll());
 
 // Valid 1x1 transparent PNG (standard test fixture — widely used, CRC/zlib
@@ -128,6 +125,7 @@ describe('File Revoke', () => {
       env.MINT_API_URL, env.QURL_API_KEY, upload.resource_id,
     );
     expect(status.status).toBe('revoked');
+    // Preserve the 90s upload/browser budget and add one confirmation wait.
   }, 90_000 + qurl.REVOKE_CONFIRM_WAIT_MS);
 
   test('distinct-per-viewer watermark + `_` route-label SNI on the tunnel', async () => {
@@ -214,6 +212,8 @@ describe('File Revoke', () => {
       env.MINT_API_URL, env.QURL_API_KEY, upload.resource_id,
     );
     expect(status.status).toBe('revoked');
+    // Keep the 180s total for two browser views; spend 35s of existing margin
+    // on confirmation. This case took 10.3s in the final sandbox run.
   }, 145_000 + qurl.REVOKE_CONFIRM_WAIT_MS);
 
   test('a consumed one-time link does not serve a second knock (single-use enforced)', async () => {
@@ -256,13 +256,13 @@ describe('File Revoke', () => {
     // Cleanup as assertion (tracked.revoke also syncs the afterAll ledger).
     const revoked = await tracked.revoke(upload.resource_id);
     expect(revoked).toBe(true);
-    // Same status read as its three siblings, so this test's red is
-    // diagnosable from its own output: without it a convergence regression and
-    // a real revoke regression fail identically on the bare boolean above.
+    // Check retained resource state after the confirmed protection update.
     const status = await qurl.getResourceStatus(
       env.MINT_API_URL, env.QURL_API_KEY, upload.resource_id,
     );
     expect(status.status).toBe('revoked');
+    // Keep the 150s total for one view plus a 20s negative knock and revoke.
+    // The confirmation wait uses existing margin; measured work took 34.9s.
   }, 115_000 + qurl.REVOKE_CONFIRM_WAIT_MS);
 
   test('double revoke on file is idempotent', async () => {
@@ -295,5 +295,7 @@ describe('File Revoke', () => {
       env.MINT_API_URL, env.QURL_API_KEY, upload.resource_id,
     );
     expect(status.status).toBe('revoked');
+    // Keep the 120s total for upload and two DELETEs; only the first confirms.
+    // Measured 9.8s without a retry, 48.0s with a retry in the earlier run.
   }, 85_000 + qurl.REVOKE_CONFIRM_WAIT_MS);
 });
