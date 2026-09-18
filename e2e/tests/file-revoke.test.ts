@@ -50,8 +50,8 @@ import * as path from 'path';
 
 import { trackedQurlResources } from '../helpers/cleanup';
 import { loadEnv } from '../helpers/env';
-import { FILE_REVOKE_TIMEOUTS_MS } from '../helpers/smoke-budgets';
 import * as qurl from '../helpers/qurl-api';
+import { FILE_REVOKE_TIMEOUTS_MS } from '../helpers/smoke-budgets';
 import { mintIdFromTunnelViewUrl, viewViaQurlLink } from '../helpers/tunnelView';
 
 const env = loadEnv();

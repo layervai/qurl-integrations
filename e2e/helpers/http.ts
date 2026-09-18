@@ -193,7 +193,11 @@ export async function fetchWithTransientRetry(
           ? ` (declined Retry-After: ${retryAfterRaw} = ${directiveMs}ms, ` +
             `over the ${retryAfterCeilingMs}ms ceiling)`
           : degraded
-            ? ` (no usable Retry-After${retryAfterRaw ? `: "${retryAfterRaw}"` : ''}` +
+            // Bounded + quoted: unlike the declined branch this value never
+            // passed /^\d+$/, so it is arbitrary header bytes landing in
+            // retained CI logs. Headers can't carry CR/LF, but they can carry
+            // kilobytes of control characters.
+            ? ` (no usable Retry-After${retryAfterRaw ? `: ${JSON.stringify(retryAfterRaw.slice(0, 64))}` : ''}` +
               '; local backoff only)'
             : ''),
     );

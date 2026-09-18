@@ -1,16 +1,18 @@
 /**
  * Per-test time budgets for the connector-stack smoke, kept here rather than as
- * literals in the test file so the one claim nothing else can check — that they
- * FIT the CI job — is enforced by a unit test instead of asserted in a comment.
+ * literals in the test file so their SUM can be checked by a unit test instead
+ * of asserted in a comment. Three times during qurl-integrations#1502 a
+ * hand-written job-total drifted from the literals it described, twice
+ * justifying a conclusion the arithmetic didn't support.
  *
- * Twice during qurl-integrations#1502 a hand-written job-total drifted from the
- * literals it described, once justifying a ceiling that was too tight. The
- * per-test timeouts were already derived (`<non-revoke worst case> +
- * REVOKE_CONFIRM_WAIT_MS`); this closes the same gap for their sum.
+ * The check is a drift detector, not a proof the job fits — these are ceilings
+ * reached only pathologically, and four other live suites share the same
+ * wall clock. It fails when a per-test ceiling is raised without weighing it
+ * against the job, which is the mistake that actually happened.
  *
- * Each value below is the NON-REVOKE worst case — upload, mints, knocks, status
- * reads. `file-revoke.test.ts` adds `REVOKE_CONFIRM_WAIT_MS` to each, so a
- * change to the revoke budget moves every ceiling without touching this file.
+ * Each value below is a case's budget MINUS the revoke confirm wait.
+ * `file-revoke.test.ts` adds `REVOKE_CONFIRM_WAIT_MS` back, so a change to the
+ * revoke budget moves every ceiling without touching this file.
  */
 
 import { REVOKE_CONFIRM_WAIT_MS } from './qurl-api';
@@ -24,12 +26,19 @@ import { REVOKE_CONFIRM_WAIT_MS } from './qurl-api';
  */
 export const SMOKE_JOB_BUDGET_MS = 10 * 60_000;
 
-/** Non-revoke worst case per `file-revoke.test.ts` case, in declaration order.
- * The two highest-variance cases (a cold chromium launch each, and a full 20s
- * negative-knock arm for the third) deliberately keep the roomier budgets they
- * had before the confirm wait existed — a tight ceiling there turns a slow
- * runner into a jest timeout with no assertion and no cause. */
-export const FILE_REVOKE_NON_REVOKE_MS = {
+/** Each `file-revoke.test.ts` case's budget EXCLUDING the revoke confirm wait —
+ * not a worst-case estimate. Only `uploadViewRevoke` is close to its stated
+ * ~64s of work; the other three are the pre-PR ceilings minus one confirm wait,
+ * deliberately keeping the variance margin they already had. A cold chromium
+ * launch (two of them for `distinctWatermark`) and the 20s negative-knock arm
+ * are the variance in question, and a ceiling trimmed to the estimate turns a
+ * slow runner into a jest timeout with no assertion and no cause.
+ *
+ * The margin being folded in rather than separate is worth knowing if
+ * PENDING_REVOKE_ATTEMPTS ever rises: each of those three would then grow by
+ * another wait on top of padding that already absorbs one, which is part of why
+ * the 3-attempt sum reaches 700s. */
+export const FILE_REVOKE_BASE_MS = {
   uploadViewRevoke: 75_000,
   distinctWatermark: 145_000,
   singleUseKnock: 115_000,
@@ -38,5 +47,5 @@ export const FILE_REVOKE_NON_REVOKE_MS = {
 
 /** What each case is actually given, and what the unit test sums. */
 export const FILE_REVOKE_TIMEOUTS_MS = Object.fromEntries(
-  Object.entries(FILE_REVOKE_NON_REVOKE_MS).map(([k, v]) => [k, v + REVOKE_CONFIRM_WAIT_MS]),
-) as Record<keyof typeof FILE_REVOKE_NON_REVOKE_MS, number>;
+  Object.entries(FILE_REVOKE_BASE_MS).map(([k, v]) => [k, v + REVOKE_CONFIRM_WAIT_MS]),
+) as Record<keyof typeof FILE_REVOKE_BASE_MS, number>;

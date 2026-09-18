@@ -419,7 +419,10 @@ describe('revokeLink retry path', () => {
 
       await expect(pending).resolves.toBe(false);
       // The last attempt starts exactly at the exported budget — so the export
-      // IS the worst case, not a number that happens to sit near it.
+      // IS the worst case, not a number that happens to sit near it. An exact
+      // match on purpose: raising PENDING_REVOKE_ATTEMPTS makes this
+      // [0, 35_000, 70_000] and fails, which is the forcing function the revoke
+      // docstring relies on. Do not loosen the matcher to "fix" that.
       expect(firedAt).toEqual([0, qurl.REVOKE_CONFIRM_WAIT_MS]);
     } finally {
       jest.useRealTimers();
@@ -478,6 +481,28 @@ describe('revokeLink retry path', () => {
       const pending = qurl.revokeLink(mintUrl, apiKey, publicResourceId);
       await jest.advanceTimersByTimeAsync(30_000);
       await expect(pending).resolves.toBe(true);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  // The shape that occurs if the assumption above is WRONG. Not a wish: it
+  // makes the failure mode executable, so a post-merge red is diagnosed as
+  // "the service 404s the confirm" in one grep rather than mistaken for the
+  // original bug. #1505 is the fix if this is what the service does.
+  test('a 404 on the confirm retry is still a failure (#1505)', async () => {
+    jest.useFakeTimers();
+    try {
+      fetchMock
+        .mockImplementationOnce(
+          () => new Response(null, { status: 503, headers: { 'Retry-After': '30' } }),
+        )
+        .mockImplementationOnce(() => new Response(null, { status: 404 }));
+
+      const pending = qurl.revokeLink(mintUrl, apiKey, publicResourceId);
+      await jest.advanceTimersByTimeAsync(30_000);
+      await expect(pending).resolves.toBe(false);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
     } finally {
       jest.useRealTimers();
     }
@@ -564,21 +589,22 @@ test('getResourceStatus does not opt in, so it ignores Retry-After', async () =>
   }
 });
 
-// The one claim about these budgets that no per-test timeout can check: that
-// together they fit the CI job. Asserted rather than written in a comment
-// because that number drifted from its literals twice during this change, once
-// justifying a ceiling that was too tight.
+// A DRIFT DETECTOR, not a proof the job fits. Being precise about that, because
+// the thing this replaced was a comment that overstated itself three times:
+// these are per-test CEILINGS reached only pathologically, the job timeout is
+// wall clock, and four other live suites plus npm ci, SSM reads and a cold
+// Playwright install come out of the same 10 minutes — a cold browser install
+// alone can exceed the reserve below. So this cannot prove the job fits, and
+// does not claim to. What it does is fail when someone raises a per-test
+// ceiling without weighing it against the job, which is exactly how these
+// numbers drifted during review.
 //
-// It is also what makes the revoke docstring's "widening means raising
-// timeout-minutes too, never one line" enforced instead of advisory: at
-// PENDING_REVOKE_ATTEMPTS 3 the sum reaches 700s and this fails.
-test('the file-revoke ceilings fit the smoke job budget', () => {
-  const ceilings = Object.values(FILE_REVOKE_TIMEOUTS_MS);
-  const total = ceilings.reduce((a, b) => a + b, 0);
+// It also makes the revoke docstring's "widening means raising timeout-minutes
+// too, never one line" enforced instead of advisory: at PENDING_REVOKE_ATTEMPTS
+// 3 the sum reaches 700s and this fails.
+test('the file-revoke ceilings stay within the smoke job budget', () => {
+  const total = Object.values(FILE_REVOKE_TIMEOUTS_MS).reduce((a, b) => a + b, 0);
 
-  expect(total).toBeLessThanOrEqual(SMOKE_JOB_BUDGET_MS);
-  // And leave room for what else the job pays for out of the same 10 minutes:
-  // npm ci, three SSM reads, a cold Playwright install, and four other live
-  // suites. Fitting exactly is not fitting.
+  // The reserve is a tripwire, not an allowance for the costs above.
   expect(total).toBeLessThanOrEqual(SMOKE_JOB_BUDGET_MS - 30_000);
 });

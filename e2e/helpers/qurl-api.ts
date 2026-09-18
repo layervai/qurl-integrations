@@ -296,11 +296,10 @@ export const REVOKE_CONFIRM_WAIT_MS =
  * derives from REVOKE_CONFIRM_WAIT_MS, so they follow automatically. They
  * follow it OVER the job budget, though: doubling the wait takes file-revoke's
  * four ceilings from 560s to 700s against a 600s job, so widening is "raise the
- * attempts AND raise timeout-minutes", never one line.
- * TODO(upstream-contract): that 600s is `timeout-minutes: 10` on the E2E Smoke
- * job in qurl-integrations-infra (.github/workflows/e2e-smoke.yml), which also
- * pays npm ci, SSM reads and a cold Playwright install out of it. Nothing here
- * fails loudly if infra moves it — this is the lockstep site.
+ * attempts AND raise timeout-minutes", never one line. That 600s is
+ * SMOKE_JOB_BUDGET_MS in helpers/smoke-budgets.ts, which holds the executable
+ * copy and the TODO(upstream-contract) marker for it — one lockstep site, not
+ * two, so a grep lands somewhere that can actually fail.
  * Still pending after the window is a convergence regression to report.
  *
  * Worth being explicit about what this buys, since file-revoke.test.ts asserts
