@@ -50,6 +50,7 @@ import * as path from 'path';
 
 import { trackedQurlResources } from '../helpers/cleanup';
 import { loadEnv } from '../helpers/env';
+import { FILE_REVOKE_TIMEOUTS_MS } from '../helpers/smoke-budgets';
 import * as qurl from '../helpers/qurl-api';
 import { mintIdFromTunnelViewUrl, viewViaQurlLink } from '../helpers/tunnelView';
 
@@ -147,7 +148,7 @@ describe('File Revoke', () => {
     // (qurl-integrations-infra e2e-smoke.yml) that also pays npm ci, SSM reads
     // and a cold Playwright install, and a job-level timeout is the same
     // no-assertion-no-cause outcome the sizing above exists to avoid.
-  }, 75_000 + qurl.REVOKE_CONFIRM_WAIT_MS);
+  }, FILE_REVOKE_TIMEOUTS_MS.uploadViewRevoke);
 
   test('distinct-per-viewer watermark + `_` route-label SNI on the tunnel', async () => {
     // ONE upload → TWO minted recipient views. The whole point of render-at-mint:
@@ -243,9 +244,11 @@ describe('File Revoke', () => {
     // this is the highest-variance test in the file — its ~98s charges 35s per
     // knock for a COLD chromium launch plus tunnelView's own 30s navigation
     // budget, and a slow runner pushes that to ~108s, which a tight ceiling
-    // would turn into a jest timeout with no assertion. The job budget still
-    // holds at 485s total, under the ~540s this suite carried before.
-  }, 145_000 + qurl.REVOKE_CONFIRM_WAIT_MS);
+    // would turn into a jest timeout with no assertion. The four ceilings sum
+    // to 560s against a 600s job (540s before this PR) — asserted in
+    // unit/qurl-api.test.ts rather than trusted to this comment, because this
+    // exact number has drifted from the literals twice already.
+  }, FILE_REVOKE_TIMEOUTS_MS.distinctWatermark);
 
   test('a consumed one-time link does not serve a second knock (single-use enforced)', async () => {
     // THE knock-driven enforcement guard for one-time links. The URL-mint
@@ -294,7 +297,7 @@ describe('File Revoke', () => {
     // test 2 this charges a cold chromium launch plus a full 20s negative-knock
     // arm, and that variance profile is the wrong one to squeeze — an 11s
     // margin turns a slow runner into a jest timeout with no assertion.
-  }, 115_000 + qurl.REVOKE_CONFIRM_WAIT_MS);
+  }, FILE_REVOKE_TIMEOUTS_MS.singleUseKnock);
 
   test('double revoke on file is idempotent', async () => {
     const upload = await qurl.uploadFile(
@@ -332,5 +335,5 @@ describe('File Revoke', () => {
     // derived, not a tightening. ~24s of non-revoke work plus one confirm
     // leaves comfortable margin for the second DELETE's round trip and
     // getResourceStatus's own 3-attempt backoff.
-  }, 85_000 + qurl.REVOKE_CONFIRM_WAIT_MS);
+  }, FILE_REVOKE_TIMEOUTS_MS.doubleRevoke);
 });

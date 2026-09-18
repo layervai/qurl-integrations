@@ -1,3 +1,4 @@
+import { FILE_REVOKE_TIMEOUTS_MS, SMOKE_JOB_BUDGET_MS } from '../helpers/smoke-budgets';
 import * as qurl from '../helpers/qurl-api';
 
 const mintUrl = 'https://api.example.com/v1/qurls';
@@ -561,4 +562,23 @@ test('getResourceStatus does not opt in, so it ignores Retry-After', async () =>
     jest.useRealTimers();
     warnSpy.mockRestore();
   }
+});
+
+// The one claim about these budgets that no per-test timeout can check: that
+// together they fit the CI job. Asserted rather than written in a comment
+// because that number drifted from its literals twice during this change, once
+// justifying a ceiling that was too tight.
+//
+// It is also what makes the revoke docstring's "widening means raising
+// timeout-minutes too, never one line" enforced instead of advisory: at
+// PENDING_REVOKE_ATTEMPTS 3 the sum reaches 700s and this fails.
+test('the file-revoke ceilings fit the smoke job budget', () => {
+  const ceilings = Object.values(FILE_REVOKE_TIMEOUTS_MS);
+  const total = ceilings.reduce((a, b) => a + b, 0);
+
+  expect(total).toBeLessThanOrEqual(SMOKE_JOB_BUDGET_MS);
+  // And leave room for what else the job pays for out of the same 10 minutes:
+  // npm ci, three SSM reads, a cold Playwright install, and four other live
+  // suites. Fitting exactly is not fitting.
+  expect(total).toBeLessThanOrEqual(SMOKE_JOB_BUDGET_MS - 30_000);
 });
