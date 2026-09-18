@@ -131,13 +131,19 @@ test('the sweep paces itself between ids', async () => {
 });
 
 test('a failed revoke stays tracked for the sweep to retry', async () => {
-  revokeLinkMock.mockResolvedValue(false);
-  const tracked = trackedQurlResources(env);
-  tracked.track('res-1');
+  // Suppressed like its siblings: revokeAll warns on the not-ok it will hit.
+  const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+  try {
+    revokeLinkMock.mockResolvedValue(false);
+    const tracked = trackedQurlResources(env);
+    tracked.track('res-1');
 
-  await expect(tracked.revoke('res-1')).resolves.toBe(false);
-  revokeLinkMock.mockClear();
-  await tracked.revokeAll();
+    await expect(tracked.revoke('res-1')).resolves.toBe(false);
+    revokeLinkMock.mockClear();
+    await tracked.revokeAll();
 
-  expect(revokeLinkMock).toHaveBeenCalledTimes(1);
+    expect(revokeLinkMock).toHaveBeenCalledTimes(1);
+  } finally {
+    warnSpy.mockRestore();
+  }
 });

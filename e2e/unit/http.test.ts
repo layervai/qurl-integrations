@@ -69,11 +69,13 @@ test('declines a directive above the ceiling but keeps the local retry', async (
   expect(fetchMock).toHaveBeenCalledTimes(2);
   // ...and says so, rather than leaving a red with no cause in the logs.
   // Said on the SAME line as the retry it explains — one grep-able line per
-  // retry decision, not two.
+  // retry decision, not two. Asserted by its parts rather than verbatim, so
+  // rewording the prose doesn't fail the suite but dropping either half does.
   expect(warnSpy).toHaveBeenCalledTimes(1);
-  expect(warnSpy).toHaveBeenCalledWith(
-    expect.stringContaining('retry 1/1 in 1000ms (declined Retry-After 600000ms, over the 35000ms ceiling)'),
-  );
+  const [line] = warnSpy.mock.calls[0] as [string];
+  expect(line).toContain('retry 1/1 in 1000ms');
+  expect(line).toContain('declined');
+  expect(line).toContain('600000');
 });
 
 // The module treats "log the ORIGIN only, never the full URL" as a security

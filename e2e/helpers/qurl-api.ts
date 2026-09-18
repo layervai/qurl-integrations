@@ -252,18 +252,35 @@ const PENDING_REVOKE_CEILING_MS = 35_000;
  * the revocation and then answers 503 + `Retry-After: 30` ("Revocation
  * committed; protection update is pending. Retry to confirm.") until the
  * protection update lands, so a single-shot DELETE reported a false failure for
- * a revocation that had already happened. Hence ONE confirm retry that waits
- * out the server's own directive (35s ceiling — see http.ts's
- * `maxRetryAfterMs` for why honoring it is opt-in and why the ceiling matters).
- * A second wait would buy no confidence and push two revokes past jest's 120s
- * default; still pending afterward is a convergence regression to report.
+ * a revocation that had already happened. Hence confirm retries that wait out
+ * the server's own directive (35s ceiling — see http.ts's `maxRetryAfterMs`
+ * for why honoring it is opt-in and why the ceiling matters).
+ *
+ * TWO confirms, not one: `Retry-After` is the server's ESTIMATE of convergence,
+ * not a bound, so a single window at exactly 30s turns a 31s convergence into a
+ * red — trading a deterministic false failure for a timing-sensitive one. The
+ * second window costs nothing in the normal case (a converged retry answers
+ * 2xx and the loop ends) and only spends its ~30s on the tail this is meant to
+ * absorb. Budgets fit: the two 150s tests land ~125-140s and the untimed
+ * double-revoke ~85s, since only its first revoke confirms. Still pending after
+ * both windows is a convergence regression to report, not wait out.
+ *
+ * Worth being explicit about what this buys, since file-revoke.test.ts asserts
+ * `status === 'revoked'` two lines later and that read is strictly stronger for
+ * the REVOCATION: waiting for the confirm DELETE to answer 2xx asserts that the
+ * NHP protection update CONVERGED, which the management read cannot see. On a
+ * revocation smoke that is the security-relevant property, and it is why the
+ * wait is worth its wall clock rather than merely making a boolean truthful.
  *
  * A 404 is NOT success, even on the confirm retry where
  * link-lifecycle.test.ts pins "404 or 200 both acceptable": accepting it needs
  * to know the first 503 was the committed one, which nothing in the response
  * says, and trusting it would let a revoke that never happened report success
- * on a resource that never existed (negative-paths.test.ts). Unobserved anyway
- * — the live repro only showed 503 -> 204. #1505 has the fix if it appears.
+ * on a resource that never existed (negative-paths.test.ts). NOTE the repro
+ * behind this fix observed 503 on a PROTECTED resource and 204 on a different
+ * UNPROTECTED one — it never observed a protected 503 -> retry -> 2xx, so what
+ * the confirm retry answers is assumed, not measured. #1505 has the fix if it
+ * turns out to be 404.
  *
  * `confirmPending: false` drops the confirm attempt entirely — one request, as
  * before this helper gained a retry — for cleanup.ts's best-effort sweep. It
@@ -300,7 +317,7 @@ export async function revokeLink(
     method: 'DELETE',
     headers: { Authorization: `Bearer ${apiKey}` },
   }, confirmPending
-    ? { maxAttempts: 2, maxRetryAfterMs: PENDING_REVOKE_CEILING_MS }
+    ? { maxAttempts: 3, maxRetryAfterMs: PENDING_REVOKE_CEILING_MS }
     : { maxAttempts: 1 });
   // Nothing reads this body — the caller gets a boolean — so release it rather
   // than holding an undici socket until GC, once per straggler on a sweep.

@@ -442,6 +442,7 @@ describe('revokeLink retry path', () => {
       const pending = qurl.revokeLink(mintUrl, apiKey, publicResourceId);
       await jest.advanceTimersByTimeAsync(1_000);
       expect(fetchMock).toHaveBeenCalledTimes(2); // retried, not abandoned
+      await jest.advanceTimersByTimeAsync(2_000);
       await expect(pending).resolves.toBe(false);
     } finally {
       jest.useRealTimers();
@@ -467,13 +468,14 @@ describe('revokeLink retry path', () => {
         () => new Response(null, { status: 503, headers: { 'Retry-After': '30' } }),
       );
       const pending = qurl.revokeLink(mintUrl, apiKey, publicResourceId);
-      // Past the 35s ceiling, so the budget — not the clock — is what stops it.
-      await jest.advanceTimersByTimeAsync(60_000);
+      // Well past three 30s directives, so the attempt budget — not the clock —
+      // is what stops it. (The 35s ceiling itself is covered in http.test.ts.)
+      await jest.advanceTimersByTimeAsync(120_000);
       await expect(pending).resolves.toBe(false);
-      // Bounded at ONE confirm retry: a still-pending revocation after the
-      // server's own window is a convergence regression to report, not wait out,
-      // and the file-revoke suite's timeouts are sized on this budget.
-      expect(fetchMock).toHaveBeenCalledTimes(2);
+      // Bounded at TWO confirm retries: still pending after both of the
+      // server's own windows is a convergence regression to report, not wait
+      // out, and file-revoke's timeouts are sized on exactly this budget.
+      expect(fetchMock).toHaveBeenCalledTimes(3);
     } finally {
       jest.useRealTimers();
     }

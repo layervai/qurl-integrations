@@ -127,6 +127,8 @@ export async function fetchWithTransientRetry(
   { maxAttempts = 3, baseDelayMs = 1000, maxRetryAfterMs = 0 }:
     { maxAttempts?: number; baseDelayMs?: number; maxRetryAfterMs?: number } = {},
 ): Promise<Response> {
+  // Clamp once here so the loop never has to defend against a negative ceiling.
+  const retryAfterCeilingMs = Math.max(0, maxRetryAfterMs);
   const method = (init?.method ?? 'GET').toUpperCase();
   let res = await fetch(input, init);
   for (
@@ -143,7 +145,7 @@ export async function fetchWithTransientRetry(
     const retryAfterRaw = res.status === 503
       ? res.headers.get('retry-after')?.trim() ?? ''
       : '';
-    const directiveMs = maxRetryAfterMs > 0 && /^\d+$/.test(retryAfterRaw)
+    const directiveMs = retryAfterCeilingMs > 0 && /^\d+$/.test(retryAfterRaw)
       ? Number(retryAfterRaw) * 1000
       : 0;
     // Surface every retry decision in CI logs so a run that RECOVERED after a
@@ -159,9 +161,7 @@ export async function fetchWithTransientRetry(
     }
     // Over the ceiling: decline the directive and fall back to the local
     // backoff — never drop the retry. See `maxRetryAfterMs` above for why.
-    // `directiveMs > 0` keeps a caller that never opted in (or passed a
-    // nonsensical negative ceiling) from logging a decline it never read.
-    const overCeiling = directiveMs > 0 && directiveMs > maxRetryAfterMs;
+    const overCeiling = directiveMs > retryAfterCeilingMs;
     const delayMs = overCeiling
       ? baseDelayMs * attempt
       : Math.max(baseDelayMs * attempt, directiveMs);
@@ -172,7 +172,7 @@ export async function fetchWithTransientRetry(
         // module's logging contract is one grep-able line per retry decision.
         (overCeiling
           ? ` (declined Retry-After ${directiveMs}ms, over the ` +
-            `${maxRetryAfterMs}ms ceiling)`
+            `${retryAfterCeilingMs}ms ceiling)`
           : ''),
     );
     // Release the discarded response's body so its socket returns to the pool

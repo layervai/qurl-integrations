@@ -65,9 +65,11 @@ const tracked = trackedQurlResources(env);
 // Reading a failure here: `expect(revoked).toBe(true)` going red while the
 // getResourceStatus assertion below would have said `revoked` does NOT mean the
 // revocation failed. It means the NHP protection update was still pending after
-// the one server-directed window revokeLink waits out — a convergence
-// regression, not a revoke regression. #1506 tracks asserting the terminal
-// state instead, which would make these tests immune to that window.
+// BOTH server-directed windows revokeLink waits out — a convergence regression,
+// not a revoke regression. That distinction is the point: the boolean asserts
+// the protection update CONVERGED, which the management read cannot see.
+// #1506 tracks dropping it, which would trade that signal for immunity to the
+// window (and ~90s of smoke wall clock).
 afterAll(() => tracked.revokeAll());
 
 // Valid 1x1 transparent PNG (standard test fixture — widely used, CRC/zlib
@@ -133,10 +135,10 @@ describe('File Revoke', () => {
     expect(status.status).toBe('revoked');
     // Generous timeout: connector mint + headless-browser knock (cold chromium
     // launch + navigation + the helper's own 30s tunnel-view budget) on CI,
-    // plus the revoke's one ~30s wait (the server's directive; 35s is only the
-    // ceiling) when it meets the protection-update 503. Worst case ~95s
-    // (upload ~21s + mint ~3s + knock ~35s + poll 5s + revoke ~31s) — the
-    // thinnest margin in the file, which is why 90s no longer fits.
+    // plus the revoke's confirm waits on the protection-update 503 (the
+    // server's ~30s directive, up to twice; 35s is only the ceiling). Worst
+    // case ~125s (upload ~21s + mint ~3s + knock ~35s + poll 5s + revoke ~61s)
+    // — the thinnest margin in the file, which is why 90s no longer fits.
   }, 150_000);
 
   test('distinct-per-viewer watermark + `_` route-label SNI on the tunnel', async () => {
@@ -269,8 +271,8 @@ describe('File Revoke', () => {
     expect(revoked).toBe(true);
     // Generous timeout: upload + connector mint + one served cold-chromium
     // knock + one negative knock that waits out its full 20s budget + a revoke
-    // that may spend ~30s confirming through the protection-update 503 (the
-    // server's directive; 35s is only the ceiling) — ~110s worst case.
+    // that may spend up to ~61s confirming through the protection-update 503
+    // (the server's ~30s directive, up to twice) — ~140s worst case.
   }, 150_000);
 
   test('double revoke on file is idempotent', async () => {
@@ -302,7 +304,7 @@ describe('File Revoke', () => {
       env.MINT_API_URL, env.QURL_API_KEY, upload.resource_id,
     );
     expect(status.status).toBe('revoked');
-    // No explicit budget: only the FIRST revoke confirms (~31s worst case), the
-    // second opts out, so ~56s sits well inside jest.config.js's 120s default.
+    // No explicit budget: only the FIRST revoke confirms (~61s worst case, two
+    // windows), the second opts out, so ~86s still sits inside the 120s default.
   });
 });
