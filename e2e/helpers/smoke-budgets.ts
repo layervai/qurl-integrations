@@ -4,6 +4,10 @@
  * of asserted in a comment: a hand-written total drifts from the literals it
  * describes, and nothing fails when it does.
  *
+ * A GREEN `npm run test:unit` is not evidence the smoke job fits: the check
+ * below compares file-revoke's ceilings against a nominal reserve, and the real
+ * fixed overhead plus four other live suites exceeds that reserve.
+ *
  * The check is a drift detector, not a proof the job fits — these are ceilings
  * reached only pathologically, and four other live suites share the same
  * wall clock. It fails when a per-test ceiling is raised without weighing it
@@ -35,11 +39,15 @@ export const SMOKE_JOB_RESERVE_MS = 30_000;
 
 /** Each `file-revoke.test.ts` case's budget EXCLUDING the revoke confirm wait —
  * not a worst-case estimate. Only `uploadViewRevoke` is close to its stated
- * ~64s of work; the other three are the pre-PR ceilings minus one confirm wait,
- * deliberately keeping the variance margin they already had. A cold chromium
- * launch (two of them for `distinctWatermark`) and the 20s negative-knock arm
- * are the variance in question, and a ceiling trimmed to the estimate turns a
- * slow runner into a jest timeout with no assertion and no cause.
+ * ~64s of work; the other three are the pre-PR ceilings minus one confirm wait.
+ * That holds the CEILING constant and spends ~35s of the former variance margin
+ * on the confirm — `distinctWatermark` goes from ~82s of margin to ~47s,
+ * `singleUseKnock` from ~71s to ~36s. The margin is NOT preserved; the ceiling
+ * is. Accepted because trimming those ceilings instead would leave ~10s on the
+ * two highest-variance cases (a cold chromium launch each, two for
+ * `distinctWatermark`, plus a 20s negative-knock arm), where a slow runner then
+ * produces a jest timeout with no assertion and no cause. If the live smoke
+ * starts flaking, those two are the first suspects.
  *
  * The margin being folded in rather than separate is worth knowing if
  * PENDING_REVOKE_ATTEMPTS ever rises: each of those three would then grow by

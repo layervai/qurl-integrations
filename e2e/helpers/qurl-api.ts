@@ -241,11 +241,18 @@ export async function accessLinkNoRedirect(url: string): Promise<LinkAccessResul
 
 /** The `Retry-After` qurl-service is OBSERVED to send with a committed-but-
  * pending revocation. Mirrored here only so the inequality below is checkable;
- * nothing reads it at runtime. */
+ * nothing reads it at runtime.
+ * TODO(upstream-contract): if qurl-service changes this directive, the
+ * inequality test will keep passing once someone updates this constant — so the
+ * real check is whether PENDING_REVOKE_CEILING_MS still sits between the two. */
 export const OBSERVED_PENDING_DIRECTIVE_MS = 30_000;
 
 /** The `Retry-After` on the deployment-state "dark 503" that clients must NOT
- * wait out (fixture: apps/cli/internal/apitest/builders.go). Same purpose. */
+ * wait out. Same purpose.
+ * TODO(upstream-contract): mirrors HandlerDark503 in
+ * apps/cli/internal/apitest/builders.go. If that directive ever NARROWS toward
+ * the ceiling, this call site starts waiting out deployment 503s — updating
+ * this constant to make the inequality test green would hide exactly that. */
 export const DARK_503_DIRECTIVE_MS = 60_000;
 
 /** Ceiling for the revocation-pending `Retry-After` revokeLink will honor, per

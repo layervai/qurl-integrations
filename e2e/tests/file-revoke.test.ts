@@ -246,7 +246,7 @@ describe('File Revoke', () => {
     // knock for a COLD chromium launch plus tunnelView's own 30s navigation
     // budget, and a slow runner pushes that to ~108s, which a tight ceiling
     // would turn into a jest timeout with no assertion. Whether the four
-    // ceilings still fit the CI job is asserted in unit/qurl-api.test.ts
+    // ceilings still fit the CI job is asserted in unit/smoke-budgets.test.ts
     // against SMOKE_JOB_BUDGET_MS, not restated here where it would go stale.
   }, FILE_REVOKE_TIMEOUTS_MS.distinctWatermark);
 

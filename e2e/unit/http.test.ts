@@ -15,7 +15,6 @@ const url = 'https://api.example.com/v1/resources/abc';
 const originalFetch = global.fetch;
 const fetchMock = jest.fn();
 let warnSpy: jest.SpyInstance;
-let errorSpy: jest.SpyInstance;
 
 /** A fresh Response per call: `mockResolvedValue` would hand the same instance
  * to every attempt. These fixtures are null-bodied so nothing is actually
@@ -30,14 +29,12 @@ beforeEach(() => {
   global.fetch = fetchMock as typeof fetch;
   // The helper warns on every retry by design; keep the suite output readable.
   warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
-  errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
   jest.useFakeTimers();
 });
 
 afterEach(() => {
   jest.useRealTimers();
   warnSpy.mockRestore();
-  errorSpy.mockRestore();
 });
 
 afterAll(() => {
@@ -150,7 +147,6 @@ test('a 503 with no Retry-After at all still uses the local backoff', async () =
   // the confirm mechanism was bypassed — the hazard revokeLink's
   // TODO(upstream-contract) names.
   expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('no usable Retry-After'));
-  expect(errorSpy).not.toHaveBeenCalled(); // not escalated: see http.ts
 });
 
 test('a non-opted-in 503 does not claim a degraded directive', async () => {
@@ -295,5 +291,9 @@ test('treats Retry-After: 0 as an honored directive of zero', async () => {
   await jest.advanceTimersByTimeAsync(1);
   await pending;
   expect(fetchMock).toHaveBeenCalledTimes(2);
-  expect(errorSpy).not.toHaveBeenCalled();
+  // The property that actually lives in `degraded`: a parsed 0 is the mechanism
+  // working, so it must not be reported as a bypass. Asserted on the warn line
+  // it would appear in — nothing calls console.error, so an errorSpy assertion
+  // here would pass no matter which branch `'0'` fell into.
+  expect(warnSpy).not.toHaveBeenCalledWith(expect.stringContaining('no usable Retry-After'));
 });

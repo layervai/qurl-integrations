@@ -103,6 +103,35 @@ test('the sweep warns and continues after an id throws', async () => {
   }
 });
 
+// The arithmetic the opt-out is justified on, end to end: under a SUSTAINED
+// 503 the sweep must still send one request per id. cleanup.test pins that
+// revokeAll asks for confirmPending: false and qurl-api.test pins what that
+// costs; this is the composition, which is where ~60 ids x 35s vs a 180s hook
+// would actually bite.
+test('the sweep sends one request per id even under a sustained 503', async () => {
+  const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+  const realRevokeLink = jest.requireActual<typeof qurl>('../helpers/qurl-api').revokeLink;
+  const originalFetch = global.fetch;
+  const fetchMock = jest.fn(
+    () => Promise.resolve(new Response(null, { status: 503, headers: { 'Retry-After': '30' } })),
+  );
+  global.fetch = fetchMock as typeof fetch;
+  revokeLinkMock.mockImplementation(realRevokeLink);
+  try {
+    const tracked = trackedQurlResources(env);
+    tracked.track('res-1');
+    tracked.track('res-2');
+
+    await tracked.revokeAll();
+
+    // Two ids, two requests — no confirm wait and no transient retry.
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  } finally {
+    global.fetch = originalFetch;
+    warnSpy.mockRestore();
+  }
+});
+
 // The sweep's other load-bearing property, equally invisible from the live
 // suites: it paces itself. A back-to-back burst of ~60 DELETEs after the
 // concurrency stress test invites the 429s that would leave stragglers leaked
