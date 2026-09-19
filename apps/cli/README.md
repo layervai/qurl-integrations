@@ -504,6 +504,10 @@ uses `connect.layerv.ai` in production and `connect.layerv.xyz` in sandbox.
 Certificate and key renewal does not require client updates. Runtime origin
 headers are now available on the default per-user daemon without a CA file.
 
+Upgrade note: deployments that previously accepted a self-signed or private-CA
+tunnel certificate must now provide `--tunnel-ca-file`. Container images must
+include system CA certificates unless a custom CA file is supplied.
+
 <!-- TODO(upstream-contract): NHP infra owns the hosted tunnel domain names. -->
 
 For a private CA, use `qurl daemon run --tunnel-ca-file
