@@ -191,9 +191,9 @@ A CRID is a permanent, shareable resource ID — it contains no secret and grant
 no access by itself. Authorized users turn it into a short-lived access link
 with "qurl get" or "qurl share".
 
-Authentication: use ` + "`qurl login`" + ` to enroll this machine. The account API key is
-used only for enrollment and is not stored by qurl. Scripts and CI can set
-QURL_API_KEY for the same one-time bootstrap.`,
+Publish without an account or API key. qurl creates and stores a device identity
+automatically. Use "qurl account setup" to enable recovery and other devices.
+Existing accounts can still use "qurl login" or QURL_API_KEY for enrollment.`,
 		Example: "  qurl publish http://127.0.0.1:3000\n" +
 			"  qurl get " + exampleCRID + "\n" +
 			"  qurl publish https://api.example.com/reports",
