@@ -67,7 +67,7 @@ func (h *Handler) cridWork(ctx context.Context, log *slog.Logger, args *getWorkA
 		// real miss, and resource_id encoding drift (candidates == 0).
 		// Hash the attempt for correlation without logging the supplied identifier.
 		attempt := sha256.Sum256([]byte(args.cmd.CRID))
-		log.Warn("crid: CRID not in channel allow-set", "team_id", args.teamID, "channel_id", args.channelID, "user_id", args.userID, "crid_fingerprint", hex.EncodeToString(attempt[:8]), "allow_set_size", len(allowed), "key_candidates", keyCandidates)
+		log.Warn("crid: CRID not in channel allow-set", "team_id", sanitizeLogValue(args.teamID), "channel_id", sanitizeLogValue(args.channelID), "user_id", sanitizeLogValue(args.userID), "crid_fingerprint", hex.EncodeToString(attempt[:8]), "allow_set_size", len(allowed), "key_candidates", keyCandidates)
 		return getResult{}, &userError{msg: cridNotInChannelMessage}
 	}
 	return h.mintForResource(ctx, log, args, resourceID)

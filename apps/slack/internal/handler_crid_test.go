@@ -319,3 +319,43 @@ func TestHandleCRID_PolicyReadFailure(t *testing.T) {
 		t.Fatalf("policy failure did not fail closed: mints=%d reply=%q", mints.Load(), reply)
 	}
 }
+
+func TestMintResponseIdentityMismatchNeverDelivers(t *testing.T) {
+	for _, command := range []string{"get $tunnel", "crid " + testTunnelCRID} {
+		t.Run(command, func(t *testing.T) {
+			ts := newAdminTestServers(t)
+			ts.seedPolicySet(t, testAdminTeamID, "C_test", "tunnel", []string{testTunnelResourceID})
+			ts.addCustomer(http.MethodPost, mintByTestTunnelPath, func(w http.ResponseWriter, _ *http.Request) {
+				writeCreateFixture(t, w, "https://qurl.link/must-not", testResourceIDFix)
+			})
+			h := newAdminTestHandler(t, ts)
+			_, _, reply := newAdminSlashInvoker(t, h).invokeAdminAsync(command, testAdminTeamID, testAdminUserID)
+			if !strings.Contains(reply, commonGetMintFailedMessage) || strings.Contains(reply, "https://qurl.link/must-not") {
+				t.Fatalf("mismatched mint response delivered: %q", reply)
+			}
+		})
+	}
+}
+
+func TestHandleCRID_DenialSanitizesLogIDs(t *testing.T) {
+	logs := captureDefaultSlog(t)
+	h := newAdminTestHandler(t, newAdminTestServers(t))
+	newAdminSlashInvokerOnChannel(t, h, "C\nforged").invokeAdminAsync("crid "+testTunnelCRID, "T\rforged", "U\nforged")
+	decoder := json.NewDecoder(strings.NewReader(logs.String()))
+	for {
+		var record map[string]any
+		if err := decoder.Decode(&record); err != nil {
+			t.Fatalf("denial log not found: %v", err)
+		}
+		if record["msg"] != "crid: CRID not in channel allow-set" {
+			continue
+		}
+		for _, key := range []string{"team_id", "channel_id", "user_id"} {
+			value, ok := record[key].(string)
+			if !ok || strings.ContainsAny(value, "\r\n") {
+				t.Errorf("unsanitized %s: %#v", key, record[key])
+			}
+		}
+		return
+	}
+}

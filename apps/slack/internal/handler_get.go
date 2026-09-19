@@ -592,6 +592,13 @@ func (h *Handler) mintForResource(ctx context.Context, log *slog.Logger, args *g
 	if args.cmd.Subcommand == SubcmdCRID {
 		slackaudit.LogQURLMintCRID(log, args.teamID, args.channelID, args.userID, input.ResourceID)
 	}
+	// Never deliver a mint response naming a different resource from the
+	// one authorized in this channel. This checks the API response identity;
+	// recipients still verify the signed link before granting network access.
+	if out.ResourceID != input.ResourceID {
+		log.Error("get: mint response resource identity mismatch")
+		return getResult{}, &userError{msg: commonGetMintFailedMessage}
+	}
 	// Defensive: an empty OR non-https qurl_link is a server contract surprise (mints
 	// return absolute https qurl.link URLs). The Enter Portal render puts the link in a
 	// Block Kit button `url`, and Slack rejects the WHOLE message if that url is
