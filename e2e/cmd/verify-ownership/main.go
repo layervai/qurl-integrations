@@ -52,7 +52,7 @@ type publicConfig struct {
 }
 
 // TODO(upstream-contract): NHP terraform/modules/qurl-link/frontend/index.html
-// declares these exact public literals. Never evaluate HTML or JavaScript.
+// declares issuerTrustStore with this exact shape. Never evaluate HTML or JavaScript.
 func parsePublicConfig(html string) (publicConfig, error) {
 	var config publicConfig
 	blocks := regexp.MustCompile(`(?s)const QURL_LINK_CONFIG = \{(.*?)\n {6}\};`).FindAllStringSubmatch(html, -1)
@@ -125,7 +125,8 @@ func verifiedPublicIdentity(link string, config publicConfig) (map[string]string
 	if err != nil || len(cellKey) != 32 {
 		return nil, errors.New("invalid public cell identity")
 	}
-	// qv2 binds the cell through its signed key; cell_id is optional.
+	// TODO(upstream-contract): qurl-go qv2 claims make cell_id optional.
+	// Receipts retain an empty ID for independent catalog binding by signed key.
 	// The browser serverStaticPubB64 setting belongs to the legacy qv1 path.
 	return map[string]string{"agent_public_key": base64.StdEncoding.EncodeToString(agent), "resource_public_key_b64": frag.Claims.ResourcePublicKeyB64, "cell_public_key_b64": base64.StdEncoding.EncodeToString(cellKey), "cell_id": frag.Claims.CellID, "signed_jti": frag.Claims.Jti, "signed_expiry_unix": strconv.FormatInt(frag.Claims.Exp, 10)}, nil
 }

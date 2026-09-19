@@ -45,6 +45,10 @@ func TestVerifiedPublicOwnership(t *testing.T) {
 			if _, err := verifiedPublicIdentity(link+"tampered", config); err == nil {
 				t.Fatal("tampered signature accepted")
 			}
+			untrusted := publicConfig{Issuers: map[string]string{"other-issuer": base64.RawURLEncoding.EncodeToString(der)}}
+			if _, err := verifiedPublicIdentity(link, untrusted); err == nil {
+				t.Fatal("untrusted issuer accepted")
+			}
 			if got["signed_jti"] != "test-owned-qurl" || got["signed_expiry_unix"] != "1781910300" {
 				t.Fatal("signed claim identity missing")
 			}
