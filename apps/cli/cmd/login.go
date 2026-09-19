@@ -32,6 +32,7 @@ import (
 // the namespace is labeled externally supervised as part of the enrollment.
 func loginCmd(opts *globalOpts) *cobra.Command {
 	var enrollmentTokenFile string
+	var anonymous bool
 	cmd := &cobra.Command{
 		Use:   "login",
 		Short: "Enroll this machine with a qURL account key or enrollment token",
@@ -61,6 +62,12 @@ wrapping key on the inherited LAYERV_LOCAL_KEY_FD descriptor.`,
   qurl login --enrollment-token-file /path/to/enrollment-token --supervision external`,
 		Args: noArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if anonymous {
+				if cmd.Flags().Changed("enrollment-token-file") {
+					return exitcode.UsageError(errors.New("--anonymous cannot be combined with --enrollment-token-file"))
+				}
+				return runAnonymousExternalLogin(cmd.Context(), opts)
+			}
 			// An explicit token file, even an empty value, selects the
 			// external form: it must never fall through to the key prompt.
 			if cmd.Flags().Changed("enrollment-token-file") {
@@ -100,6 +107,7 @@ wrapping key on the inherited LAYERV_LOCAL_KEY_FD descriptor.`,
 			return opts.printer().Login(deviceIdentity)
 		},
 	}
+	cmd.Flags().BoolVar(&anonymous, "anonymous", false, "enroll without an account in a sealed externally supervised namespace")
 	cmd.Flags().StringVar(&enrollmentTokenFile, "enrollment-token-file", "", "enroll from a one-time enrollment token file written by a supervising app (requires --supervision external)")
 	return cmd
 }
@@ -220,4 +228,31 @@ func readSecret(opts *globalOpts, prompt string) (string, error) {
 		return "", exitcode.UsageError(errors.New(msgNoKeyProvided))
 	}
 	return secret, nil
+}
+
+// runAnonymousExternalLogin commits the supervision policy before native
+// enrollment; an existing external identity is reopened, never replaced.
+func runAnonymousExternalLogin(ctx context.Context, opts *globalOpts) error {
+	if opts.resolvedSupervision != connectorstate.RuntimeSupervisionExternal {
+		return exitcode.UsageError(errors.New("--anonymous requires --supervision external"))
+	}
+	if accountKeyConfigured(opts.lookupEnv) {
+		return exitcode.UsageError(errors.New("--anonymous cannot be combined with account API key configuration"))
+	}
+	if err := requireLocalKeyProvider(opts.lookupEnv); err != nil {
+		return exitcode.UsageError(err)
+	}
+	stateDir, err := opts.resolveShareStateDir("")
+	if err != nil {
+		return err
+	}
+	if err := connectorstate.EstablishExternalRuntimeMode(ctx, stateDir); err != nil {
+		return err
+	}
+	client, identity, err := opts.openNativeRegisteredClient(ctx, nil, "", nil)
+	if err != nil {
+		return err
+	}
+	opts.registeredClient, opts.registeredIdentity = client, identity
+	return opts.printer().Login(identity)
 }

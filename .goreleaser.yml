@@ -137,6 +137,7 @@ homebrew_casks:
       - manpages/qurl-account-recover.1
       - manpages/qurl-login.1
       - manpages/qurl-publish.1
+      - manpages/qurl-request.1
       - manpages/qurl-restart.1
       - manpages/qurl-share.1
       - manpages/qurl-start.1
