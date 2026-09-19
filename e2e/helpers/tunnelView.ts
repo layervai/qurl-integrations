@@ -164,6 +164,8 @@ export async function recordAdmissionAttempt(link: string, child: ViewViaQurlLin
     qurl_id: child.qurl_id, expires_at: child.expires_at, observed_at: now.toISOString(),
     attempt_deadline: new Date(now.getTime() + timeoutMs).toISOString(),
     public_identity: identity, catalog_binding: 'pending_independent_readback',
+    child_binding: 'pending_independent_readback',
+    // TODO(upstream-contract): NHP sessionControlAgentSessionPK hashes the standard-base64 STRING.
     agent_membership_pk: 'AGENT#' + createHash('sha256').update(identity.agent_public_key).digest('hex'),
   }) + '\n', { mode: 0o600 });
 }

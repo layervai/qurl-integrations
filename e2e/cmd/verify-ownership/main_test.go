@@ -44,7 +44,10 @@ func TestVerifiedPublicOwnership(t *testing.T) {
 	if _, err := verifiedPublicIdentity(link, mismatch); err == nil {
 		t.Fatal("signed cell mismatch accepted")
 	}
-	if len(got) != 4 {
+	if got["signed_jti"] != "test-owned-qurl" || got["signed_expiry_unix"] != "1781910300" {
+		t.Fatal("signed claim identity missing")
+	}
+	if len(got) != 6 {
 		t.Fatal("unexpected receipt fields")
 	}
 }
