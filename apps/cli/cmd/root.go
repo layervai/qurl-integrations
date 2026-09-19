@@ -700,7 +700,10 @@ func (b *registeredAccountBootstrap) enrollmentCredential(ctx context.Context, r
 func (b *registeredAccountBootstrap) recoveryCredential(ctx context.Context) (string, error) {
 	_, key, _, err := b.load(ctx)
 	if err == nil && key == "" {
-		return "", fmt.Errorf("%w: %s", auth.ErrNoCredential, msgAccountNewState)
+		return "", auth.ErrAccountRecoveryState
+	}
+	if errors.Is(err, auth.ErrNoCredential) {
+		return "", auth.ErrAnonymousRecovery
 	}
 	return key, err
 }

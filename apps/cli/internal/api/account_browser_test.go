@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -45,6 +46,9 @@ func TestAccountBrowserPKCEAndState(t *testing.T) {
 			return err
 		}
 		authQuery = u.Query()
+		if authQuery.Get("prompt") != "login consent" {
+			t.Fatal("permanent account link must require visible sign-in and consent")
+		}
 		for _, state := range []string{"attacker-state", authQuery.Get("state")} {
 			req, err := http.NewRequestWithContext(ctx, http.MethodGet, accountCallback+"?"+url.Values{"state": {state}, "code": {"verified-code"}}.Encode(), http.NoBody)
 			if err != nil {
@@ -84,6 +88,24 @@ func TestAccountCallbackDenial(t *testing.T) {
 			}
 		default:
 			t.Fatal("denial did not end sign-in")
+		}
+	}
+}
+
+func TestAccountBrowserPreservesCancellation(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]string{"domain": "auth.example.test", "client_id": "native-client", "audience": "qurl-api"})
+	}))
+	defer server.Close()
+	for _, before := range []bool{true, false} {
+		ctx, cancel := context.WithCancel(context.Background())
+		if before {
+			cancel()
+		}
+		_, err := SignInAccount(ctx, &Config{BaseURL: server.URL}, func(context.Context, string) error { cancel(); return nil })
+		cancel()
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("cancel before browser=%v: %v", before, err)
 		}
 	}
 }

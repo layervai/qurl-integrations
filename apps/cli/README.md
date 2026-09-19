@@ -156,7 +156,8 @@ qurl account setup
 
 Sign in through the browser to link the current resources to your account.
 Existing resource IDs and links stay unchanged. On a new device, run
-`qurl account recover` to regain management access. If the account has several
+`QURL_CONNECTOR_STATE_DIR=~/.qurl-recovered qurl account recover` to regain management access.
+Use an unused directory and keep existing device state intact. If the account has several
 resource owners, select the owner with `--owner`. Recovery does not copy local
 files or restart apps from the previous device. Keep the device state until
 account linking completes; an unlinked device cannot be recovered from an email.
@@ -231,9 +232,7 @@ All commands that open device state, including `list`, `whoami`, and `get`, must
 use the state's supervision mode. For an externally supervised namespace, set
 `QURL_DAEMON_SUPERVISION=external` or pass `--supervision external`. A fresh
 externally supervised namespace must first use the existing enrollment-token
-login flow. `account recover` needs a new device state directory; keep existing
-state intact when choosing that directory.
-
+login flow.
 
 A program that runs the daemon itself (see
 [External supervision](#external-supervision)) never hands qurl an account API

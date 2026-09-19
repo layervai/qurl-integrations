@@ -23,9 +23,14 @@ const accountCallback = "http://" + accountCallbackAddress + "/callback"
 
 // SignInAccount runs authorization-code + PKCE only after explicit account
 // setup. No account token is written to disk or passed to the browser launcher.
-func SignInAccount(ctx context.Context, cfg *Config, openBrowser func(context.Context, string) error) (string, error) {
+func SignInAccount(ctx context.Context, cfg *Config, openBrowser func(context.Context, string) error) (_ string, retErr error) {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
+	defer func() {
+		if retErr != nil && errors.Is(ctx.Err(), context.Canceled) {
+			retErr = context.Canceled
+		}
+	}()
 	if err := validateAccountEndpoint(cfg.BaseURL); err != nil {
 		return "", err
 	}
@@ -73,7 +78,7 @@ func SignInAccount(ctx context.Context, cfg *Config, openBrowser func(context.Co
 		_ = server.Close()
 	}()
 	go func() { _ = server.Serve(listener) }()
-	query := url.Values{"response_type": {"code"}, "client_id": {settings.ClientID}, "redirect_uri": {accountCallback}, "audience": {settings.Audience}, "scope": {"openid email qurl:read qurl:write qurl:agent"}, "state": {state}, "code_challenge": {base64.RawURLEncoding.EncodeToString(challenge[:])}, "code_challenge_method": {"S256"}}
+	query := url.Values{"response_type": {"code"}, "prompt": {"login consent"}, "client_id": {settings.ClientID}, "redirect_uri": {accountCallback}, "audience": {settings.Audience}, "scope": {"openid email qurl:read qurl:write qurl:agent"}, "state": {state}, "code_challenge": {base64.RawURLEncoding.EncodeToString(challenge[:])}, "code_challenge_method": {"S256"}}
 	if err := openBrowser(ctx, "https://"+settings.Domain+"/authorize?"+query.Encode()); err != nil {
 		return "", fmt.Errorf(msgAccountBrowserFailed, err)
 	}

@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -39,8 +40,20 @@ func TestBrowserRecoveryCannotReturnEmptyCredential(t *testing.T) {
 	}
 	b := newRegisteredAccountBootstrap(&globalOpts{}, account, "", &qurlapi.Identity{OwnerID: "device:test"})
 	key, err := b.recoveryCredential(context.Background())
-	if key != "" || !errors.Is(err, auth.ErrNoCredential) {
+	if key != "" || !errors.Is(err, auth.ErrAccountRecoveryState) {
 		t.Fatalf("recovery = %q, %v", key, err)
+	}
+	var rendered bytes.Buffer
+	output.RenderError(&rendered, fmt.Errorf("runtime recovery: %w", err), false)
+	if !strings.Contains(rendered.String(), "QURL_CONNECTOR_STATE_DIR") || strings.Contains(rendered.String(), "qurl login") {
+		t.Fatalf("browser recovery guidance = %q", rendered.String())
+	}
+	b = newRegisteredAccountBootstrap(&globalOpts{lookupEnv: func(string) (string, bool) { return "", false }}, nil, "", nil)
+	_, err = b.recoveryCredential(context.Background())
+	rendered.Reset()
+	output.RenderError(&rendered, fmt.Errorf("runtime recovery: %w", err), false)
+	if !errors.Is(err, auth.ErrAnonymousRecovery) || !strings.Contains(rendered.String(), "saved copy") || strings.Contains(rendered.String(), "qurl login") {
+		t.Fatalf("anonymous recovery guidance = %q", rendered.String())
 	}
 }
 

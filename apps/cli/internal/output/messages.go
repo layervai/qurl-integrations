@@ -14,7 +14,12 @@ const (
 	msgConnectorStopped  = "This qURL Connector is stopped."
 	hintConnectorStopped = "Hint: run `qurl start <CRID>`, then try again."
 
-	// msgNoCredential renders the missing registered-device bootstrap condition.
+	// Recovery messages preserve the state and distinguish optional account access.
+	msgAccountRecoveryState  = "Account recovery needs a new device state directory."
+	hintAccountRecoveryState = "Hint: keep existing state intact. Run `QURL_CONNECTOR_STATE_DIR=~/.qurl-recovered qurl account recover` with an unused directory."
+	msgAnonymousRecovery     = "This device cannot recover access with its current credential."
+	hintAnonymousRecovery    = "Hint: keep existing state intact. If you linked an account, run `qurl account recover` with a new QURL_CONNECTOR_STATE_DIR. Otherwise restore a saved copy of this device state; a new identity cannot recover these resources."
+	// msgNoCredential renders the explicit account-key bootstrap condition.
 	msgNoCredential = "This machine is not enrolled with qURL."
 
 	hintNoCredential  = "Hint: run `qurl login`, or set QURL_API_KEY for one-time device enrollment."
@@ -259,6 +264,7 @@ func CustomerMessages() []string {
 		msgLinksUnavailable,
 		msgConnectorStopped,
 		hintConnectorStopped,
+		msgAccountRecoveryState, hintAccountRecoveryState, msgAnonymousRecovery, hintAnonymousRecovery,
 		msgNoCredential,
 		hintNoCredential,
 		hintUnauthorized,

@@ -36,6 +36,8 @@ var cliSentinels = map[string]struct {
 	err  error
 	code int
 }{
+	"auth.ErrAccountRecoveryState":  {auth.ErrAccountRecoveryState, Auth},
+	"auth.ErrAnonymousRecovery":     {auth.ErrAnonymousRecovery, Auth},
 	"auth.ErrNoCredential":          {auth.ErrNoCredential, Auth},
 	"auth.ErrInvalidKey":            {auth.ErrInvalidKey, Auth},
 	"auth.ErrDeviceEnrollmentScope": {auth.ErrDeviceEnrollmentScope, Auth},

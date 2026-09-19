@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Publish without an account or API key; optionally link an account for recovery.
+- All commands that open device state, including `list`, `whoami`, and `get`, now require `--supervision external` or `QURL_DAEMON_SUPERVISION=external` when that state belongs to an external supervisor. Set the mode before upgrading these installations.
+
 ## [2.6.0](https://github.com/layervai/qurl-integrations/compare/v2.5.4...v2.6.0) (2026-09-17)
 
 
