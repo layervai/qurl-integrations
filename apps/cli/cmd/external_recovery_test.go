@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	connectoragentstate "github.com/layervai/qurl-connector/pkg/agentstate"
 	connectorshare "github.com/layervai/qurl-connector/pkg/share"
@@ -154,5 +155,85 @@ func TestExternalRecoveryRejectsMixedAuthority(t *testing.T) {
 				t.Fatal("mixed recovery authority was accepted")
 			}
 		})
+	}
+}
+
+// The Connector contract resumes pending recovery during OpenNativeRuntime,
+// before Handoff. Exercise the CLI seam with real persisted cleared-key state;
+// never satisfy the owner guard with a credential that existed before open.
+func TestExternalRecoveryResumesClearedCredentialBeforeOwnerValidation(t *testing.T) {
+	t.Setenv(connectoragentstate.EnvKeyProvider, "")
+	dir, err := filepath.EvalSymlinks(connectorStateTestDir(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := connectorstate.EstablishExternalRuntimeMode(context.Background(), dir); err != nil {
+		t.Fatal(err)
+	}
+	store, err := connectoragentstate.NewSDKStore(dir, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sdk, err := store.Handoff()
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := bootstrapRegisteredState(t)
+	now := state.RegisteredAt.UTC()
+	state.PendingCredentialRecovery = &qurl.PendingAgentCredentialRecovery{
+		RecoveryGrant: "qrg1.test-grant", RecoveryGrantIssuedAt: now,
+		RecoveryGrantExpiresAt: now.Add(15 * time.Minute), RecoveryAnchorGrantExpiresAt: now.Add(15 * time.Minute),
+		RecoveryExpiresAt: now.Add(15*time.Minute + 90*24*time.Hour), DeviceAPIKey: state.DeviceAPIKey, Assignment: *state.Assignment,
+	}
+	state.DeviceAPIKey, state.DeviceAPIKeyID = "", ""
+	if err := sdk.SaveAgentState(context.Background(), state); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	const secret = "lv_test_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"
+	tokenPath := filepath.Join(t.TempDir(), "recovery-token")
+	if err := os.WriteFile(tokenPath, []byte(secret), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	srv := apitest.NewServer(t)
+	opened := false
+	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "login", "--recovery-token-file", tokenPath, "--supervision", "external", "-o", "json"}, env: externalLoginEnv(), shareStateDir: dir,
+		openNativeRuntime: func(ctx context.Context, cfg connectorshare.NativeRuntimeConfig) (registeredNativeRuntime, error) {
+			opened = true
+			reader, err := connectoragentstate.OpenSDKStateReader(cfg.StateDir, "")
+			if err != nil {
+				return nil, err
+			}
+			pending, err := reader.LoadAgentState(ctx)
+			closeErr := reader.Close()
+			if err != nil || closeErr != nil {
+				return nil, errors.Join(err, closeErr)
+			}
+			if pending.DeviceAPIKey != "" || pending.DeviceAPIKeyID != "" || pending.PendingCredentialRecovery == nil {
+				t.Fatal("runtime did not receive the actual cleared-key pending namespace")
+			}
+			if cfg.EnrollmentCredentialProvider != nil || cfg.RecoveryCredentialProvider == nil {
+				t.Fatal("resume received wrong authority")
+			}
+			authority, err := cfg.RecoveryCredentialProvider(ctx)
+			if err != nil || authority != secret {
+				t.Fatal("resume lost persisted capability")
+			}
+			pending.DeviceAPIKey = pending.PendingCredentialRecovery.DeviceAPIKey
+			pending.DeviceAPIKeyID = "key_Resume123456"
+			pending.PendingCredentialRecovery = nil
+			return &bootstrapNativeRuntime{store: &bootstrapAgentStateStore{state: pending}, recoverDeviceAuthorizationFailure: func(context.Context, int, string, func(context.Context) (string, error)) error {
+				t.Fatal("completed resume started a second recovery")
+				return nil
+			}}, nil
+		},
+	})
+	if res.code != 0 || !opened || len(srv.Requests()) != 1 {
+		t.Fatalf("pending resume failed before owner validation: exit=%d opened=%v REST=%d stderr=%s", res.code, opened, len(srv.Requests()), res.stderr.String())
+	}
+	if strings.Contains(res.stdout.String()+res.stderr.String(), secret) {
+		t.Fatal("resume disclosed capability")
 	}
 }
