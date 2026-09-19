@@ -190,3 +190,18 @@ func TestLocalIdentityTextIncludesIssuePending(t *testing.T) {
 		t.Fatalf("local identity text=%q", out.String())
 	}
 }
+
+func TestRecoveredJSONReportsCurrentRegisteredIdentity(t *testing.T) {
+	var out, errOut bytes.Buffer
+	printer := newTestPrinter(&out, &errOut, FormatJSON, false, false, false)
+	if err := printer.Recovered(fixtureIdentity()); err != nil {
+		t.Fatal(err)
+	}
+	var got loginJSON
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if !got.DeviceEnrolled || got.OwnerID != "own_output_test" || got.DeviceKeyID != "key_outputtest01" || errOut.Len() != 0 {
+		t.Fatalf("recovered identity=%+v stderr=%q", got, errOut.String())
+	}
+}

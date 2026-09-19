@@ -88,7 +88,9 @@ func readLocalDeviceIdentity(ctx context.Context, dir string) (identity output.L
 	identity.RecoveryIssuePending = state.PendingCredentialRecoveryIssue != nil
 	identity.RecoveryPending = identity.RecoveryIssuePending || state.PendingCredentialRecovery != nil || state.CredentialRecoveryRefreshRequired
 	if state.DeviceAPIKeyID != "" {
-		identity.DeviceKeyID = &state.DeviceAPIKeyID
+		// Copy public metadata without retaining the secret-bearing AgentState.
+		keyID := state.DeviceAPIKeyID
+		identity.DeviceKeyID = &keyID
 	} else if !identity.RecoveryPending {
 		return identity, errors.New("local device credential is incomplete")
 	}

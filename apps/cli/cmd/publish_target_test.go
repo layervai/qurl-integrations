@@ -131,7 +131,10 @@ func TestValidateConnectorID(t *testing.T) {
 
 func TestClassifyUnixPublishTarget(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		t.Skip("Unix origins are unsupported on Windows")
+		if _, err := classifyPublishTarget("http+unix:///tmp/private.sock"); err == nil {
+			t.Fatal("Windows accepted a private Unix origin")
+		}
+		return
 	}
 	target, err := classifyPublishTarget("http+unix:///tmp/private%20origin.sock")
 	if err != nil {

@@ -35,8 +35,10 @@ type loginJSON struct {
 	// value a supervising app records next to the owner id. It is omitted
 	// rather than empty when /v1/me reports no key object, so a supervisor
 	// cannot persist "" as if it were an id.
-	DeviceKeyID    string `json:"device_key_id,omitempty"`
-	DeviceEnrolled bool   `json:"device_enrolled"`
+	DeviceKeyID string `json:"device_key_id,omitempty"`
+	// DeviceEnrolled describes current registration state, including after recovery;
+	// it is not a claim that this command created a new enrollment.
+	DeviceEnrolled bool `json:"device_enrolled"`
 }
 
 func identityKey(id *qurlapi.Identity) *identityKeyJSON {

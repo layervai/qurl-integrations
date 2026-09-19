@@ -309,8 +309,9 @@ func ValidateLocalRetargetSelector(owner, prefix string) error {
 	return nil
 }
 
-// RetargetStoppedToUnix changes only local transport fields while no daemon can
-// use this namespace. External supervisors preserve resource authority, desired
+// RetargetStoppedToUnix excludes lease-aware daemons while changing local targets.
+// Callers must also reserve the configured IPC endpoint to exclude older daemons,
+// as daemon retarget-local does. External supervisors preserve resource authority, desired
 // state and serving epochs; ordinary live Retarget still requires a newer epoch.
 func (r *LocalShareRegistry) RetargetStoppedToUnix(ctx context.Context, owner, prefix, origin string) (changed int, retErr error) {
 	target, err := ParseUnixTarget(origin)
