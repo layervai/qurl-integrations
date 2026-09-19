@@ -114,7 +114,7 @@ export async function mintConnectorView(
   resourceId: string,
   apiKey: string,
   opts: { expiresAt: string; oneTimeUse?: boolean },
-): Promise<{ qurl_link: string }> {
+): Promise<{ qurl_link: string; qurl_id: string; expires_at: string }> {
   const res = await fetchWithTransientRetry(`${uploadUrl}/mint_link/${encodeURIComponent(resourceId)}`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
@@ -129,12 +129,10 @@ export async function mintConnectorView(
   // (`!res.ok`), and a 200 always carries `links[]`, so a present `qurl_link` is
   // the authoritative signal (mirrors uploadFile keying on `resource_id`).
   const link = data.links?.[0];
-  if (!link?.qurl_link) {
-    throw new Error(`mint_link returned no link: ${JSON.stringify(data)}`);
+  if (!link?.qurl_link || !link.qurl_id || !Number.isFinite(Date.parse(link.expires_at))) {
+    throw new Error("mint_link returned incomplete child identity");
   }
-  // Return only the field this helper guarantees (and the caller uses); the
-  // response also carries qurl_id/expires_at, but only qurl_link is guard-checked.
-  return { qurl_link: link.qurl_link };
+  return { qurl_link: link.qurl_link, qurl_id: link.qurl_id, expires_at: link.expires_at };
 }
 
 /** Every field `CreateQurlRequest` declares, per qurl-service's openapi.yaml.

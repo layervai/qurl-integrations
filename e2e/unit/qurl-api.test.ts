@@ -450,3 +450,11 @@ test('getResourceStatus does not opt in, so it ignores Retry-After', async () =>
     warnSpy.mockRestore();
   }
 });
+
+ test('connector mint retains child cleanup identity and rejects incomplete receipts', async () => {
+  const link = { qurl_link: 'https://qurl.link/#private', qurl_id: 'child', expires_at: '2026-09-20T00:00:00Z' };
+  fetchMock.mockResolvedValueOnce(jsonResponse({ links: [link] }));
+  await expect(qurl.mintConnectorView('https://upload.example.com', 'source', apiKey, { expiresAt: link.expires_at })).resolves.toEqual(link);
+  fetchMock.mockResolvedValueOnce(jsonResponse({ links: [{ qurl_link: link.qurl_link }] }));
+  await expect(qurl.mintConnectorView('https://upload.example.com', 'source', apiKey, { expiresAt: link.expires_at })).rejects.toThrow('incomplete child identity');
+ });

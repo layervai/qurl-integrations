@@ -7,7 +7,7 @@
  * directly. The flow is entirely JS-driven:
  *
  *   1. The recipient opens the minted `qurl_link`. The capability lives in the
- *      URL FRAGMENT (`#at_<token>`), which the server never sees — only the SPA's
+ *      signed URL FRAGMENT (`#qv2t1.…`), which the server never sees — only the SPA's
  *      JS reads it.
  *   2. The SPA POSTs the token to the resolve endpoint — the NHP "knock" — which
  *      `302`s the browser to the per-recipient tunnel view at
@@ -28,6 +28,10 @@
  */
 
 import { chromium, type Browser } from 'playwright';
+import { spawnSync } from 'node:child_process';
+import { appendFileSync, accessSync, constants } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { fetchWithTransientRetry } from './http';
 
 /** Matches the tunnel view URL on ANY environment:
  *   https://r_<id>.qurl.site<.layerv.xyz|.layerv.ai|…>/views/<mint-id>
@@ -57,6 +61,7 @@ export interface ViewViaQurlLinkOptions {
   /** Browser launch headless? Defaults to true; set `PLAYWRIGHT_HEADED=1`
    *  (or `HEADLESS=0`) in the env to watch it run locally for debugging. */
   headless?: boolean;
+  ownership: { resource_id: string; qurl_id: string; expires_at: string };
   /** Wall-clock budget for navigation + knock + the tunnel-view response, in ms.
    *  Default 30_000. */
   timeoutMs?: number;
@@ -92,7 +97,7 @@ function resolveHeadless(opt?: boolean): boolean {
  */
 export async function viewViaQurlLink(
   qurlLink: string,
-  opts: ViewViaQurlLinkOptions = {},
+  opts: ViewViaQurlLinkOptions,
 ): Promise<ViewViaQurlLinkResult> {
   const timeoutMs = opts.timeoutMs ?? 30_000;
   let browser: Browser | undefined;
@@ -108,10 +113,16 @@ export async function viewViaQurlLink(
     // NOT networkidle: the tunnel keepalive means networkidle never fires. The
     // predicate is URL-only — status is checked after, so a non-200 view throws
     // "returned N", not "no response".
+    await recordAdmissionAttempt(qurlLink, opts.ownership, timeoutMs);
     const tunnelResponse = page
       .waitForResponse((r) => TUNNEL_VIEW_RE.test(r.url()), { timeout: timeoutMs })
       .catch(() => undefined);
-    await page.goto(qurlLink, { waitUntil: 'domcontentloaded', timeout: timeoutMs });
+    try {
+      await page.goto(qurlLink, { waitUntil: 'domcontentloaded', timeout: timeoutMs });
+    } catch {
+      // Playwright errors can include the capability fragment in the URL.
+      throw new Error('viewViaQurlLink: navigation failed');
+    }
 
     const resp = await tunnelResponse;
     if (!resp) {
@@ -128,4 +139,53 @@ export async function viewViaQurlLink(
     // Always tear the browser down — a leaked chromium would hang jest's worker exit.
     await browser?.close();
   }
+}
+
+/** Persist before navigation, including attempts with no reply. This is ownership
+ * evidence for the existing bounded collector, not proof of admission or CLOSED. */
+export async function recordAdmissionAttempt(link: string, child: ViewViaQurlLinkOptions['ownership'], timeoutMs: number): Promise<void> {
+  const verifier = process.env.QURL_OWNERSHIP_VERIFIER;
+  const path = process.env.QURL_OWNERSHIP_RECEIPTS;
+  const api = process.env.MINT_API_URL;
+  const key = process.env.QURL_API_KEY;
+  if (!verifier || !path || !api || !key || !child.resource_id || !child.qurl_id || !Number.isFinite(Date.parse(child.expires_at))) {
+    throw new Error('owned admission receipt configuration is incomplete');
+  }
+  const result = spawnSync(verifier, [], { input: link, encoding: 'utf8', timeout: 10_000, maxBuffer: 16_384 });
+  if (result.error || result.status !== 0) throw new Error('signed ownership verification failed');
+  const identity = JSON.parse(result.stdout) as Record<string, string>;
+  if (!identity.agent_public_key || !identity.resource_public_key_b64 || !identity.cell_public_key_b64 || !identity.cell_id) {
+    throw new Error('verified public identity is incomplete');
+  }
+  const owner = await readOwner();
+  const now = new Date();
+  appendFileSync(path, JSON.stringify({
+    event: 'owned_admission_attempt', owner_id: owner, resource_id: child.resource_id,
+    qurl_id: child.qurl_id, expires_at: child.expires_at, observed_at: now.toISOString(),
+    attempt_deadline: new Date(now.getTime() + timeoutMs).toISOString(),
+    public_identity: identity, catalog_binding: 'pending_independent_readback',
+    agent_membership_pk: 'AGENT#' + createHash('sha256').update(identity.agent_public_key).digest('hex'),
+  }) + '\n', { mode: 0o600 });
+}
+
+async function readOwner(): Promise<string> {
+  const meURL = new URL('/v1/me', process.env.MINT_API_URL!);
+  const response = await fetchWithTransientRetry(meURL.toString(), { headers: { Authorization: `Bearer ${process.env.QURL_API_KEY}` } });
+  if (!response.ok) throw new Error(`ownership identity read failed: ${response.status}`);
+  const me = await response.json() as { data?: { owner_id?: string } };
+  const owner = me.data?.owner_id;
+  if (!owner?.trim()) throw new Error('ownership identity missing owner_id');
+  return owner;
+}
+
+/** Fail before fixture creation if runner wiring, public trust or identity is unavailable. */
+export async function checkOwnershipConfig(): Promise<void> {
+  for (const name of ['QURL_OWNERSHIP_VERIFIER', 'QURL_OWNERSHIP_RECEIPTS', 'QURL_PUBLIC_CONFIG_URL', 'MINT_API_URL', 'QURL_API_KEY']) {
+    if (!process.env[name]) throw new Error(`required ownership receipt configuration missing: ${name}`);
+  }
+  accessSync(process.env.QURL_OWNERSHIP_VERIFIER!, constants.X_OK);
+  appendFileSync(process.env.QURL_OWNERSHIP_RECEIPTS!, '', { mode: 0o600 });
+  const result = spawnSync(process.env.QURL_OWNERSHIP_VERIFIER!, ['--check-config'], { encoding: 'utf8', timeout: 10_000, maxBuffer: 16_384 });
+  if (result.error || result.status !== 0) throw new Error('public ownership configuration failed');
+  await readOwner();
 }

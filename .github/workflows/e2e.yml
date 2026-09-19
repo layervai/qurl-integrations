@@ -107,6 +107,15 @@ jobs:
           cache: 'npm'
           cache-dependency-path: e2e/package-lock.json
 
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Check public ownership verifier
+        working-directory: .
+        run: go test -race ./e2e/cmd/verify-ownership
+
       - name: Install dependencies
         run: npm ci
 
