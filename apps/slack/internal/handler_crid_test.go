@@ -323,13 +323,17 @@ func TestHandleCRID_PolicyReadFailure(t *testing.T) {
 func TestMintResponseIdentityMismatchNeverDelivers(t *testing.T) {
 	for _, command := range []string{"get $tunnel", "crid " + testTunnelCRID} {
 		t.Run(command, func(t *testing.T) {
+			logs := captureDefaultSlog(t)
 			ts := newAdminTestServers(t)
 			ts.seedPolicySet(t, testAdminTeamID, "C_test", "tunnel", []string{testTunnelResourceID})
 			ts.addCustomer(http.MethodPost, mintByTestTunnelPath, func(w http.ResponseWriter, _ *http.Request) {
 				writeCreateFixture(t, w, "https://qurl.link/must-not", testResourceIDFix)
 			})
 			h := newAdminTestHandler(t, ts)
-			_, _, reply := newAdminSlashInvoker(t, h).invokeAdminAsync(command, testAdminTeamID, testAdminUserID)
+			_, _, reply := newAdminSlashInvoker(t, h).invokeAdminAsync(command+` reason:"incident"`, testAdminTeamID, testAdminUserID)
+			if findAuditRecord(logs, slackaudit.QURLMintCRID) != nil || findAuditRecord(logs, slackaudit.QURLMintReason) != nil {
+				t.Error("mismatched response recorded as successful mint")
+			}
 			if !strings.Contains(reply, commonGetMintFailedMessage) || strings.Contains(reply, "https://qurl.link/must-not") {
 				t.Fatalf("mismatched mint response delivered: %q", reply)
 			}

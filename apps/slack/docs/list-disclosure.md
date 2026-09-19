@@ -66,6 +66,10 @@ So disclosure (what `/qurl list` reveals) and capability (what `/qurl get` will
 mint) are governed by the *same* per-channel allow-set, and capability is
 re-checked at mint time regardless of how a token was obtained.
 
+CRID mints always emit a local audit event. Alias mints keep the existing
+behavior: a local mint audit event is emitted when `reason:` is supplied.
+Neither audit policy changes channel authorization.
+
 ## Why this matters for operators
 
 Because `/qurl list` is channel-scoped, the set of resource names, descriptions,

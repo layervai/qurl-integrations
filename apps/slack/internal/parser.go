@@ -486,11 +486,16 @@ func parseGet(cmd *Command, rest []string) (*Command, error) {
 		// tunnel `$slug` or a channel `$alias` only.
 		return nil, ErrURLNotSupportedGet
 	}
-	if looksLikeCRIDForGet(rest[0]) {
-		if crid.Validate(strings.TrimPrefix(rest[0], "$")) != nil {
+	// A valid CRID redirects even with a sigil. A CRID-shaped alias with a
+	// bad checksum remains an alias; only a bare malformed CRID is rejected.
+	bare, hadSigil := strings.CutPrefix(rest[0], "$")
+	if crid.MatchesShape(bare) {
+		if crid.Validate(bare) == nil {
+			return nil, ErrCRIDNotSupportedGet
+		}
+		if !hadSigil {
 			return nil, ErrInvalidCRID
 		}
-		return nil, ErrCRIDNotSupportedGet
 	}
 	if strings.HasPrefix(rest[0], "$r_") {
 		// A `$r_<id>` paste: the resource-id get form is gone. Redirect to
@@ -527,17 +532,6 @@ func applyMintFlags(cmd *Command, toks []string) (*Command, error) {
 		}
 	}
 	return cmd, nil
-}
-
-// looksLikeCRIDForGet reports whether a `/qurl get` token is a pasted CRID.
-// Without a `$` the token could never be an alias, so shape suffices. With a
-// `$`, a 47/60-char base32 token is also a valid alias (aliasMaxLen is 64), so
-// require the CRID checksum to pass before shadowing alias resolution.
-func looksLikeCRIDForGet(tok string) bool {
-	if bare, ok := strings.CutPrefix(tok, "$"); ok {
-		return crid.Validate(bare) == nil
-	}
-	return crid.MatchesShape(tok)
 }
 
 // parseCRID extracts one strict CRID positional argument and the same optional
@@ -833,7 +827,7 @@ func applyFlag(cmd *Command, tok string) error {
 		// but with a transitional hint instead of the generic
 		// "unknown flag", since some users have `once:true` in saved
 		// slash-command recipes and deserve to know it's now redundant.
-		return fmt.Errorf("%w: `once` is no longer needed — every `/qurl get` link is one-time use by default", ErrInvalidFlag)
+		return fmt.Errorf("%w: `once` is no longer needed — every `/qurl get` or `/qurl crid` link is one-time use by default", ErrInvalidFlag)
 	default:
 		return fmt.Errorf("%w: unknown flag `%s`", ErrInvalidFlag, truncateForError(key))
 	}

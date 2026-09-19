@@ -254,7 +254,7 @@ func (h *Handler) handleGet(w http.ResponseWriter, values url.Values) {
 			return
 		}
 		if errors.Is(err, ErrInvalidCRID) {
-			respondSlack(w, ":warning: "+invalidCRIDMessage)
+			respondSlack(w, ":warning: "+invalidCRIDMessage+" For an alias, use `/qurl get $alias`.")
 			return
 		}
 		if errors.Is(err, ErrCRIDNotSupportedGet) {
@@ -526,6 +526,7 @@ func (h *Handler) getWork(ctx context.Context, log *slog.Logger, args *getWorkAr
 // resource_id. Every mint surface therefore pins the same link policy,
 // idempotency key, error mapping, and reason audit.
 func (h *Handler) mintForResource(ctx context.Context, log *slog.Logger, args *getWorkArgs, resourceID string) (getResult, error) {
+	// Keep this guard for callers that bypass processGet (buttons and agent actions).
 	// Refuse `dm:true` when PostDMBlocks is not wired — the user's intent
 	// is "do not leak the link in channel history", and a silent
 	// channel-fallback violates that intent. Checked before the rate limit
@@ -573,7 +574,16 @@ func (h *Handler) mintForResource(ctx context.Context, log *slog.Logger, args *g
 	if err != nil {
 		return getResult{}, mapMintError(log, err)
 	}
-	// Record the operator's reason against the mint that just happened.
+	// Never deliver a mint response naming a different resource from the
+	// one authorized in this channel. This checks the API response identity;
+	// recipients still verify the signed link before granting network access.
+	if out.ResourceID != input.ResourceID {
+		log.Error("get: mint response resource identity mismatch",
+			"expected_resource_id", sanitizeLogValue(input.ResourceID),
+			"returned_resource_id", sanitizeLogValue(out.ResourceID))
+		return getResult{}, &userError{msg: commonGetMintFailedMessage}
+	}
+	// Record the operator's reason after validating the minted resource identity.
 	//
 	// This is deliberately AFTER the mint and BEFORE the delivery guards
 	// below: the mint has already burned the user's quota at this point, so
@@ -591,13 +601,6 @@ func (h *Handler) mintForResource(ctx context.Context, log *slog.Logger, args *g
 	}
 	if args.cmd.Subcommand == SubcmdCRID {
 		slackaudit.LogQURLMintCRID(log, args.teamID, args.channelID, args.userID, input.ResourceID)
-	}
-	// Never deliver a mint response naming a different resource from the
-	// one authorized in this channel. This checks the API response identity;
-	// recipients still verify the signed link before granting network access.
-	if out.ResourceID != input.ResourceID {
-		log.Error("get: mint response resource identity mismatch")
-		return getResult{}, &userError{msg: commonGetMintFailedMessage}
 	}
 	// Defensive: an empty OR non-https qurl_link is a server contract surprise (mints
 	// return absolute https qurl.link URLs). The Enter Portal render puts the link in a
@@ -868,7 +871,7 @@ func (h *Handler) allowedResourceIDsForGet(ctx context.Context, log *slog.Logger
 // DM via PostDMBlocks; the response_url ephemeral confirms (without leaking the
 // link in channel history).
 //
-// PostDMBlocks-nil is rejected earlier in mintForResource — the dm:true contract is
+// PostDMBlocks-nil is rejected in processGet and, defensively, mintForResource — the dm:true contract is
 // privacy ("do not leak the link in channel history") and a silent
 // channel-fallback violates that. If PostDMBlocks is wired but the call itself
 // fails, we surface the failure without re-posting the link (the user can retry
