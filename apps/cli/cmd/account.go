@@ -18,7 +18,7 @@ func accountCmd(opts *globalOpts) *cobra.Command {
 		if err != nil {
 			return err
 		}
-		_, _ = fmt.Fprintln(cmd.OutOrStdout(), "This device controls your qURL resources.\n\nLink an account to recover access and manage resources from other devices.\nYour existing links will keep working.\n\nContinue in your browser.")
+		_, _ = fmt.Fprintln(cmd.OutOrStdout(), "This device controls your qURL resources.\n\nLink an account to recover access and manage resources from other devices.\nYour existing links will keep working.\nLinking is permanent. Check the account you choose in the browser.\n\nContinue in your browser.")
 		opts.warnInsecureEndpoint()
 		token, err := qurlapi.SignInAccount(cmd.Context(), opts.accountConfig("", ""), opts.openBrowser)
 		if err != nil {
