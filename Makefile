@@ -1,4 +1,4 @@
-.PHONY: all fmt lint vet test test-race coverage build-slack build-cli docs man vendor release-snapshot security check check-actions-pins test-actions-pins test-install-script check-release-please-sync test-release-please-sync test-cli-release-verifier check-notification-payload test-validated-base check-cli check-discord test-discord check-chrome-extension check-edge-extension check-teams check-e2e check-node pre-commit-install pre-commit-run clean
+.PHONY: all fmt lint vet test test-race coverage build-slack build-cli docs man vendor release-snapshot security check check-actions-pins test-actions-pins test-install-script check-release-please-sync test-release-please-sync test-cli-release-verifier check-notification-payload test-validated-base check-cli check-discord test-discord check-chrome-extension check-edge-extension check-teams check-teams-docker check-e2e check-node pre-commit-install pre-commit-run clean
 
 VERSION ?= dev
 
@@ -213,6 +213,12 @@ check-teams:
 	cd apps/teams && npm run lint
 	cd apps/teams && npm test
 	cd apps/teams && npm run build
+
+# teams.yml's image gate. Requires Docker/Buildx with linux/arm64 support.
+# The image smoke disables external networking and uses synthetic config.
+check-teams-docker:
+	docker buildx build --platform linux/arm64 --load --provenance=false -t qurl-teams:ci -f apps/teams/Dockerfile apps/teams
+	bash apps/teams/scripts/docker-smoke.sh qurl-teams:ci
 
 # e2e.yml's build-and-test in full. Offline subset only: `npm test` there also
 # runs the live suite, which mints real qURL resources and posts real Discord

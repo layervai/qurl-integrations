@@ -36,6 +36,11 @@ export class InMemoryStatePersistence implements OAuthStatePersistence {
     return { status: 'created' };
   }
 
+  async read(stateKey: string): Promise<StoredOAuthState | undefined> {
+    const state = this.records.get(stateKey);
+    return state === undefined ? undefined : structuredClone(state);
+  }
+
   async conditionalConsume(stateKey: string, nowEpochSeconds: number): Promise<ConditionalConsumeResult> {
     const state = this.records.get(stateKey);
     if (state === undefined) {
@@ -48,4 +53,3 @@ export class InMemoryStatePersistence implements OAuthStatePersistence {
     return { status: 'consumed', state: structuredClone(state) };
   }
 }
-

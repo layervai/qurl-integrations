@@ -49,11 +49,10 @@ func main() {
 
 type publicConfig struct {
 	Issuers map[string]string
-	CellKey string
 }
 
 // TODO(upstream-contract): NHP terraform/modules/qurl-link/frontend/index.html
-// declares these exact public literals. Never evaluate HTML or JavaScript.
+// declares issuerTrustStore with this exact shape. Never evaluate HTML or JavaScript.
 func parsePublicConfig(html string) (publicConfig, error) {
 	var config publicConfig
 	blocks := regexp.MustCompile(`(?s)const QURL_LINK_CONFIG = \{(.*?)\n {6}\};`).FindAllStringSubmatch(html, -1)
@@ -61,19 +60,11 @@ func parsePublicConfig(html string) (publicConfig, error) {
 		return config, errors.New("missing or duplicate public config")
 	}
 	issuers := regexp.MustCompile(`(?m)^ {8}issuerTrustStore: (\{[^\r\n]*\}),$`).FindAllStringSubmatch(blocks[0][1], -1)
-	cell := regexp.MustCompile(`(?m)^ {8}serverStaticPubB64: ("[^"\r\n]*"),$`).FindAllStringSubmatch(blocks[0][1], -1)
-	if len(issuers) != 1 || len(cell) != 1 {
+	if len(issuers) != 1 {
 		return config, errors.New("invalid public config shape")
 	}
 	if err := json.Unmarshal([]byte(issuers[0][1]), &config.Issuers); err != nil || len(config.Issuers) == 0 {
 		return config, errors.New("invalid issuer config")
-	}
-	if err := json.Unmarshal([]byte(cell[0][1]), &config.CellKey); err != nil {
-		return config, errors.New("invalid cell config")
-	}
-	key, err := base64.StdEncoding.DecodeString(config.CellKey)
-	if err != nil || len(key) != 32 {
-		return config, errors.New("invalid cell public key")
 	}
 	return config, nil
 }
@@ -134,9 +125,8 @@ func verifiedPublicIdentity(link string, config publicConfig) (map[string]string
 	if err != nil || len(cellKey) != 32 {
 		return nil, errors.New("invalid public cell identity")
 	}
-	cellID := frag.Claims.CellID
-	if cellID == "" || config.CellKey != base64.StdEncoding.EncodeToString(cellKey) {
-		return nil, errors.New("browser cell identity mismatch")
-	}
-	return map[string]string{"agent_public_key": base64.StdEncoding.EncodeToString(agent), "resource_public_key_b64": frag.Claims.ResourcePublicKeyB64, "cell_public_key_b64": base64.StdEncoding.EncodeToString(cellKey), "cell_id": cellID, "signed_jti": frag.Claims.Jti, "signed_expiry_unix": strconv.FormatInt(frag.Claims.Exp, 10)}, nil
+	// TODO(upstream-contract): qurl-go qv2 claims make cell_id optional.
+	// Receipts retain an empty ID for independent catalog binding by signed key.
+	// The browser serverStaticPubB64 setting belongs to the legacy qv1 path.
+	return map[string]string{"agent_public_key": base64.StdEncoding.EncodeToString(agent), "resource_public_key_b64": frag.Claims.ResourcePublicKeyB64, "cell_public_key_b64": base64.StdEncoding.EncodeToString(cellKey), "cell_id": frag.Claims.CellID, "signed_jti": frag.Claims.Jti, "signed_expiry_unix": strconv.FormatInt(frag.Claims.Exp, 10)}, nil
 }

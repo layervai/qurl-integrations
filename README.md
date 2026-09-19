@@ -17,7 +17,7 @@ apps/                Per-integration apps (released apps get independent release
   chrome-extension/  Shared Chrome and Edge extension source (MV3)
   edge-extension/    Edge release metadata and store documents
   cli/               CLI — publish, share, and manage qURL resources by CRID (Go)
-  teams/             Microsoft Teams OAuth security core — no routes/SDK yet (TypeScript)
+  teams/             Microsoft Teams Bot and OAuth integration (TypeScript)
 origins/             Reusable origin images for qURL Connector-protected resources
   s3-static-connector/  Private S3 static site origin behind qURL Connector
 shared/              Shared Go libraries used by the Go apps

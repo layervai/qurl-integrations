@@ -54,9 +54,10 @@ describe('confidential token client', () => {
 
     expect(url.origin).toBe('https://auth.example.com');
     expect(url.pathname).toBe('/authorize');
-    expect(url.searchParams.get('scope')).toBe('openid email qurl:read qurl:write');
+    expect(url.searchParams.get('scope')).toBe('openid email qurl:read qurl:write qurl:agent');
+    expect(url.searchParams.get('prompt')).toBe('consent');
     expect(url.searchParams.get('scope')?.split(' ')).toEqual([
-      'openid', 'email', 'qurl:read', 'qurl:write',
+      'openid', 'email', 'qurl:read', 'qurl:write', 'qurl:agent',
     ]);
     expect(url.search).not.toContain('offline_access');
     expect(url.searchParams.get('code_challenge_method')).toBe('S256');
