@@ -54,6 +54,10 @@ describe('confidential token client', () => {
 
     expect(url.origin).toBe('https://auth.example.com');
     expect(url.pathname).toBe('/authorize');
+    expect(url.searchParams.get('response_type')).toBe('code');
+    expect(url.searchParams.get('client_id')).toBe('synthetic-teams-client');
+    expect(url.searchParams.get('audience')).toBe('https://api.example.com/');
+    expect(url.searchParams.get('redirect_uri')).toBe('https://teams-bot.example.com/oauth/qurl/callback');
     expect(url.searchParams.get('scope')).toBe('openid email qurl:read qurl:write qurl:agent');
     expect(url.searchParams.get('prompt')).toBe('consent');
     expect(url.searchParams.get('scope')?.split(' ')).toEqual([

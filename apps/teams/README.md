@@ -305,6 +305,30 @@ The managed sandbox's API audience matches its API origin; the private runtime
 checks the seeded audience against that reviewed expectation. Custom deployments
 can supply a different expected audience or leave the optional check unset.
 
+### Auth0 application setup
+
+Reuse the environment's Teams application if it exists. For sandbox, name it
+`qURL Teams (sandbox)` and select **Regular Web Application**.
+
+1. Set **Allowed Callback URLs** to the deployed `TEAMS_BASE_URL` followed by
+   `/oauth/qurl/callback`. Use the exact HTTPS URL, without a trailing slash.
+2. Keep **Authorization Code** enabled. **Client Credentials** is not needed.
+   Set token endpoint authentication to **Post** and ID-token signing to **RS256**.
+3. Authorize the qURL API whose identifier matches `AUTH0_AUDIENCE`, with
+   `qurl:read`, `qurl:write`, and `qurl:agent` for user access. Do not enable
+   machine-to-machine access for this user sign-in flow.
+4. Enable the passwordless **email** connection on the application. Use the same
+   identity connection as the qURL dashboard so the owner subject matches.
+5. Store the application's domain, client ID, and client secret in the target
+   environment's `AUTH0_DOMAIN`, `AUTH0_CLIENT_ID`, and `AUTH0_CLIENT_SECRET`
+   secret parameters. Set `AUTH0_AUDIENCE` to the API identifier, and configure
+   the API's trusted Teams client ID to match this application.
+
+The runtime builds the callback from `TEAMS_BASE_URL` and requests
+`openid email qurl:read qurl:write qurl:agent`. No source change is needed for a
+new environment. Keep real environment URLs and credentials in the private
+deployment configuration.
+
 Setup uses a stable per-tenant idempotency key, as Slack does. A new setup can
 recover a failed local credential save within the service's 24-hour replay
 window. Every returned or reused API key is checked through `/v1/me` against
