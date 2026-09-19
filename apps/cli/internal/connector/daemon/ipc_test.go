@@ -60,16 +60,15 @@ func TestIPCServerReadinessReloadAndShutdown(t *testing.T) {
 	if running, err := client.ReloadIfRunning(context.Background()); err != nil || !running {
 		t.Fatalf("reload running=%v err=%v", running, err)
 	}
-	// An ordinary daemon must reject credentials synchronously, rather than
-	// accept them and fail a route later. Clearing the overlay stays harmless.
-	if _, err := client.SetOverlay(context.Background(), map[string]map[string]string{"a": {"X-Origin-Token": "private-value"}}); err == nil || !strings.Contains(err.Error(), "HTTP 409") || strings.Contains(err.Error(), "private-value") {
-		t.Fatalf("unconfigured overlay result = %v, want a fixed trust rejection", err)
+	// The default daemon accepts runtime headers over its verified tunnel.
+	if _, err := client.SetOverlay(context.Background(), map[string]map[string]string{"a": {"X-Origin-Token": "private-value"}}); err != nil {
+		t.Fatalf("default daemon refused runtime headers: %v", err)
 	}
-	if len(storedOverlay(manager)) != 0 {
-		t.Fatal("unconfigured daemon retained rejected credentials")
+	if storedOverlay(manager)["a"]["X-Origin-Token"] != "private-value" {
+		t.Fatal("daemon did not retain runtime headers")
 	}
 	if _, err := client.SetOverlay(context.Background(), nil); err != nil {
-		t.Fatalf("empty overlay refused without trust: %v", err)
+		t.Fatalf("empty overlay refused: %v", err)
 	}
 	cancel()
 	if err := <-done; !errors.Is(err, context.Canceled) {
@@ -478,7 +477,7 @@ func TestOverlayIPCRejectsOversizedAndUnknownFields(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		done <- (&IPCServer{RequestHeadersEnabled: true, SocketPath: path, Manager: manager, JobVersion: "1/test"}).Run(ctx)
+		done <- (&IPCServer{SocketPath: path, Manager: manager, JobVersion: "1/test"}).Run(ctx)
 	}()
 	t.Cleanup(func() {
 		cancel()

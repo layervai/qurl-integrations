@@ -1004,7 +1004,7 @@ func newRefusingGroupHarness(t *testing.T, refuse func(*connectorshare.GroupRout
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		done <- (&IPCServer{RequestHeadersEnabled: true, SocketPath: socket, Manager: manager, JobVersion: "1/test"}).Run(ctx)
+		done <- (&IPCServer{SocketPath: socket, Manager: manager, JobVersion: "1/test"}).Run(ctx)
 	}()
 	t.Cleanup(func() {
 		cancel()

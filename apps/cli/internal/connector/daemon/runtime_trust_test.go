@@ -24,7 +24,7 @@ func testTunnelCA(t *testing.T) string {
 	return path
 }
 
-func TestRuntimeHeadersRequireConfiguredTunnelTrust(t *testing.T) {
+func TestRuntimeHeadersUseVerifiedTunnel(t *testing.T) {
 	ca := testTunnelCA(t)
 	for _, configured := range []bool{false, true} {
 		name := "ordinary daemon"
@@ -47,7 +47,7 @@ func TestRuntimeHeadersRequireConfiguredTunnelTrust(t *testing.T) {
 			}
 			route.RequestHeaders = map[string]string{"X-Origin-Token": "test-value"}
 			err = factory.ValidateRoutes([]connectorshare.LocalHTTPRoute{route})
-			if (err == nil) != configured {
+			if err != nil {
 				t.Fatalf("header route validation = %v, configured = %t", err, configured)
 			}
 			if !configured {
@@ -55,8 +55,8 @@ func TestRuntimeHeadersRequireConfiguredTunnelTrust(t *testing.T) {
 				if err := bare.Complete(); err != nil {
 					t.Fatal(err)
 				}
-				if common.Transport.TLS.TrustedCaFile != "" || common.Transport.TLS.ServerName != "" || *common.Transport.TLS.Enable != *bare.Transport.TLS.Enable {
-					t.Fatal("ordinary daemon transport diverged from the FRP default")
+				if !common.Transport.TLS.VerifyServerCertificate || common.Transport.TLS.TrustedCaFile != "" || common.Transport.TLS.ServerName != "" || *common.Transport.TLS.Enable != *bare.Transport.TLS.Enable {
+					t.Fatal("default daemon transport lost certificate verification or changed TLS defaults")
 				}
 				return
 			}
@@ -78,7 +78,6 @@ func TestConfiguredTunnelRejectsInvalidTrust(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, tc := range []struct{ name, ca, server string }{
-		{"name without trust", "", "example.com"},
 		{"relative path", "ca.pem", "example.com"},
 		{"missing file", filepath.Join(t.TempDir(), "missing.pem"), "example.com"},
 		{"invalid PEM", badPEM, "example.com"},
@@ -101,5 +100,15 @@ func TestConfiguredTunnelAcceptsIPAddressIdentity(t *testing.T) {
 		if _, err := ConfiguredFRPCommon(1, 1, ca, name); err != nil {
 			t.Fatalf("IP identity %s: %v", name, err)
 		}
+	}
+}
+
+func TestConfiguredTunnelUsesSystemRootsWithExplicitName(t *testing.T) {
+	common, err := ConfiguredFRPCommon(1, 1, "", "connect.example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !common.Transport.TLS.VerifyServerCertificate || common.Transport.TLS.TrustedCaFile != "" || common.Transport.TLS.ServerName != "connect.example.test" {
+		t.Fatal("system certificate verification or expected hostname was lost")
 	}
 }
