@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -11,9 +12,11 @@ import (
 
 	connectoragentstate "github.com/layervai/qurl-connector/pkg/agentstate"
 	connectorshare "github.com/layervai/qurl-connector/pkg/share"
+	"github.com/layervai/qurl-go/qurl"
 
 	"github.com/layervai/qurl-integrations/apps/cli/internal/apitest"
 	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/exitcode"
 )
 
 func TestExternalRecoveryRefusesMissingStateBeforeOpeningRuntime(t *testing.T) {
@@ -37,14 +40,19 @@ func TestExternalRecoveryRepairsOnlyExactDeviceAuthorizationFailure(t *testing.T
 	// The injected runtime isolates network recovery and observes its authority.
 	t.Setenv(connectoragentstate.EnvKeyProvider, "")
 	for _, tc := range []struct {
-		name    string
-		status  int
-		code    string
-		recover bool
+		name        string
+		status      int
+		code        string
+		recover     bool
+		nativeError error
+		wantExit    int
 	}{
-		{"revoked", 401, "api_key_invalid", true},
-		{"forbidden", 403, "api_key_invalid", false},
-		{"other unauthorized", 401, "token_expired", false},
+		{"revoked", 401, "api_key_invalid", true, nil, exitcode.Success},
+		{"expired or used capability", 401, "api_key_invalid", true, qurl.ErrRecoveryCredentialRejected, exitcode.Auth},
+		{"expired episode", 401, "api_key_invalid", true, qurl.ErrCredentialRecoveryExpired, exitcode.Auth},
+		{"rejected grant", 401, "api_key_invalid", true, qurl.ErrCredentialRecoveryGrantRejected, exitcode.Unavailable},
+		{"forbidden", 403, "api_key_invalid", false, nil, exitcode.Forbidden},
+		{"other unauthorized", 401, "token_expired", false, nil, exitcode.Auth},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir, err := filepath.EvalSymlinks(connectorStateTestDir(t))
@@ -89,6 +97,9 @@ func TestExternalRecoveryRepairsOnlyExactDeviceAuthorizationFailure(t *testing.T
 				if err != nil || got != secret {
 					t.Fatal("recovery provider lost the explicit capability")
 				}
+				if tc.nativeError != nil {
+					return fmt.Errorf("native recovery: %w", tc.nativeError)
+				}
 				state.DeviceAPIKey = "lv_live_MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY"
 				state.DeviceAPIKeyID = "key_NewDvK123456"
 				return nil
@@ -104,6 +115,12 @@ func TestExternalRecoveryRepairsOnlyExactDeviceAuthorizationFailure(t *testing.T
 			calls := len(srv.Requests())
 			if strings.Contains(res.stdout.String()+res.stderr.String(), secret) {
 				t.Fatal("recovery disclosed its capability")
+			}
+			if tc.nativeError != nil {
+				if res.code != tc.wantExit || repaired != 1 || calls != 1 {
+					t.Fatalf("wrapped recovery exit=%d want=%d attempts=%d calls=%d", res.code, tc.wantExit, repaired, calls)
+				}
+				return
 			}
 			if tc.recover {
 				if res.code != 0 || repaired != 1 || calls != 2 {
