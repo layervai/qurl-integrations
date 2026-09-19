@@ -378,15 +378,6 @@ export class TeamsDataStore {
     }
   }
 
-  async purgeResourceFromScope(tenantId: string, scopeId: string, resourceId: string, aliases: readonly string[] = []): Promise<void> {
-    assertPresent(tenantId, scopeId, resourceId);
-    await this.#delete(this.#channelPoliciesTable, policyDdbKey(tenantId, resourcePolicyKey(scopeId, resourceId)));
-    for (const alias of aliases) {
-      assertPresent(alias);
-      await this.#delete(this.#channelPoliciesTable, policyDdbKey(tenantId, aliasPolicyKey(scopeId, alias)));
-    }
-  }
-
   #policyItem(tenantId: string, scopeId: string, itemType: 'resource' | 'alias', value: string, resourceId: string): Record<string, unknown> {
     return {
       teams_tenant_id: tenantId,

@@ -7,7 +7,7 @@ import { idempotencyKey, QurlHttpError } from './qurl-client.js';
 import type { QurlApiKey, QurlClient, QurlResource } from './qurl-client.js';
 import { parseCommand } from './parser.js';
 import type { TeamsCommand } from './parser.js';
-import { ScopeAliasConflictError, TenantOwnerAlreadyAdminError, TenantOwnerRemovalError, type TeamsDataStore } from './teams-data.js';
+import { ScopeAliasConflictError, TenantOwnerAlreadyAdminError, TenantOwnerRemovalError, type TenantCredential, type TeamsDataStore } from './teams-data.js';
 import type { TeamsSetupLinkBuilder } from './setup-link.js';
 import { normalizeTunnelEnvironment, renderTunnelBootstrapSecretMessage, renderTunnelInstallMessage, validateTunnelSlug, type TunnelHub } from './tunnel.js';
 import { isUserFacingError, UserFacingError } from './user-facing-error.js';
@@ -36,15 +36,15 @@ export interface TeamsBotOptions {
 }
 
 export interface QurlClientFactory {
-  forTenant(tenantId: string): Promise<QurlClient>;
+  forTenant(tenantId: string, credential?: TenantCredential): Promise<QurlClient>;
 }
 
 export class TeamsBot {
   readonly #options: TeamsBotOptions;
   constructor(options: TeamsBotOptions) { this.#options = options; }
 
-  async #qurl(tenantId: string): Promise<QurlClient> {
-    if (this.#options.qurlForTenant) return this.#options.qurlForTenant.forTenant(tenantId);
+  async #qurl(tenantId: string, credential?: TenantCredential): Promise<QurlClient> {
+    if (this.#options.qurlForTenant) return this.#options.qurlForTenant.forTenant(tenantId, credential);
     if (this.#options.qurl) return this.#options.qurl;
     throw new Error('qURL client is not configured');
   }
@@ -149,6 +149,7 @@ export class TeamsBot {
       await this.#options.feedback({ tenantId, actorId, message: command.text ?? '' }); return 'Thanks. The qURL team received your feedback.';
     }
     const admin = ADMIN_COMMANDS.has(command.verb) ? await this.#options.data.checkAdmin(tenantId, actorId) : undefined;
+    if (admin && !admin.isAdmin && admin.ownerId === undefined) throw new UserFacingError('This Teams tenant is not connected to qURL yet. Run `qurl setup <your-email>` in a personal chat with the bot.');
     if (admin && !admin.isAdmin) throw new UserFacingError('This command is limited to the tenant owner and qURL admins.');
     if (command.verb === 'admins') {
       const admins = await this.#options.data.listAdmins(tenantId);
@@ -179,7 +180,7 @@ export class TeamsBot {
       let upstreamRevocationPending = credential !== undefined && credential.keyId === undefined;
       if (credential?.keyId) {
         try {
-          const qurl = await this.#qurl(tenantId);
+          const qurl = await this.#qurl(tenantId, credential);
           await qurl.revokeApiKey(credential.keyId, signal);
         } catch (error) {
           if (!(error instanceof QurlHttpError) || (error.status !== 401 && error.status !== 403)) throw error;
@@ -334,7 +335,18 @@ export class TeamsBot {
     ]);
     // A bound channel alias already names the resource, as in Slack. The API
     // validates its live status at mint; only unbound tokens need discovery.
-    const resourceId = aliasResourceId ?? this.resolve((await this.resources(qurl, signal)).filter(item => allowed.has(item.resourceId)), token).resourceId;
+    let resourceId = aliasResourceId;
+    if (!resourceId && /^([a-z2-7]{47}|[a-z2-7]{60})$/.test(token)) {
+      try {
+        const resource = await qurl.getResource(token, signal);
+        if (resource.status === 'revoked') throw new UserFacingError('Resource not found.');
+        resourceId = resource.resourceId;
+      } catch (error) {
+        if (error instanceof QurlHttpError && (error.status === 404 || error.status === 410)) throw new UserFacingError('Resource not found.');
+        throw error;
+      }
+    }
+    resourceId ??= allowed.has(token) ? token : this.resolve((await this.resources(qurl, signal)).filter(item => allowed.has(item.resourceId)), token).resourceId;
     if (!allowed.has(resourceId)) throw new UserFacingError('Resource not found.');
     const wantsDm = command.flags.dm === 'true';
     const dmActor = activity.from?.aadObjectId?.trim().toLowerCase() ?? '';

@@ -116,6 +116,8 @@ export function toTeamsActivity(value: unknown): TeamsActivity | undefined {
 export function normalizeActivityText(activity: TeamsActivity): string {
   let text = activity.text ?? '';
   const replacements: Array<{ readonly start: number; readonly end: number; readonly value: string }> = [];
+  // Bound mention processing before its overlap and fallback scans.
+  if ((activity.entities?.length ?? 0) > 256) throw new UserFacingError('This message has too many mentions. Send a shorter command.');
   const entities = [...(activity.entities ?? [])];
   const validEntities = entities
     .map((entity, index) => ({ entity, index }))

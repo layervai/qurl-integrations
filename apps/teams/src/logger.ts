@@ -157,7 +157,7 @@ export function jsonConsoleSink(target: Pick<Console, 'debug' | 'info' | 'warn' 
     (message: string, context?: LogContext): void => {
       // The context is already redacted by RedactingLogger before it reaches a
       // sink; this only serializes.
-      const line: Record<string, unknown> = { level, message, ...(context ?? {}) };
+      const line: Record<string, unknown> = { ...(context ?? {}), level, message };
       if (line.error !== null && typeof line.error === 'object') line.error = JSON.stringify(line.error);
       target[method](JSON.stringify(line));
     };

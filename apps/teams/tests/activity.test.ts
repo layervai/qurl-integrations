@@ -31,6 +31,12 @@ describe('Teams activity text normalization', () => {
     })).toBe('list');
   });
 
+  it('rejects excessive mention work before scanning text', () => {
+    const entity = { type: 'mention', text: '<at>qURL</at>', mentioned: { id: 'bot' } };
+    expect(() => normalizeActivityText({ text: 'list', entities: Array.from({ length: 257 }, () => entity) })).toThrow('too many mentions');
+    expect(normalizeActivityText({ text: 'list', entities: Array.from({ length: 256 }, () => entity) })).toBe('list');
+  });
+
   it('scrubs residual Teams mention tags', () => {
     expect(normalizeActivityText({ text: '<at>unmodeled</at> list' })).toBe('list');
   });

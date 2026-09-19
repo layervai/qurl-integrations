@@ -135,7 +135,7 @@ describe('json console sink', () => {
     const logger = new RedactingLogger(jsonConsoleSink(target));
 
     logger.error('qurl call failed', { error: 'http request: context deadline exceeded', tenantId: 't1' });
-    logger.info('started', undefined);
+    logger.info('started', { level: 'ERROR', message: 'overwritten' });
 
     const failure = JSON.parse(lines[0] ?? '{}');
     // `level` upper-case and `error` are the keys app_alarms.tf filters on.
@@ -143,7 +143,7 @@ describe('json console sink', () => {
     expect(failure.message).toBe('qurl call failed');
     expect(failure.error).toContain('context deadline exceeded');
     expect(failure.tenantId).toBe('t1');
-    expect(JSON.parse(lines[1] ?? '{}').level).toBe('INFO');
+    expect(JSON.parse(lines[1] ?? '{}')).toMatchObject({ level: 'INFO', message: 'started' });
   });
 
   it('still redacts before serializing', () => {

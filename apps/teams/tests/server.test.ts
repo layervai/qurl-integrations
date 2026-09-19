@@ -1,3 +1,5 @@
+import { TeamsDataStore } from '../src/teams-data.js';
+import { HttpQurlClient } from '../src/qurl-client.js';
 import { mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import type { ServerResponse } from 'node:http';
 import { tmpdir } from 'node:os';
@@ -360,6 +362,25 @@ describe('Teams production message handling', () => {
     expect(JSON.parse(String(errors.mock.calls[0]?.[0]))).toMatchObject({
       level: 'ERROR', error: expect.stringContaining('tenant credential ciphertext is malformed'),
     });
+  });
+
+  it('reuses the credential read for uninstall through the production factory', async () => {
+    configureEnvironment();
+    const credential = { apiKey: 'synthetic-key', keyId: 'key-id' };
+    const read = vi.spyOn(TeamsDataStore.prototype, 'tenantCredential').mockResolvedValueOnce(credential)
+      .mockRejectedValue(new Error('second credential read must not happen'));
+    vi.spyOn(TeamsDataStore.prototype, 'checkAdmin').mockResolvedValue({ isAdmin: true, ownerId: 'owner', installationId: 'install' });
+    const remove = vi.spyOn(TeamsDataStore.prototype, 'deleteWorkspace').mockResolvedValue();
+    const revoke = vi.spyOn(HttpQurlClient.prototype, 'revokeApiKey').mockResolvedValue();
+    const replies: string[] = [];
+    vi.spyOn(TeamsSdkMessagePoster.prototype, 'reply').mockImplementation(async (_activity, text) => { replies.push(text); });
+    const runtime = await createProductionTeamsConfig();
+    await runtime.app.onActivity({ body: { ...activity, text: 'qurl uninstall' }, token: { serviceUrl: activity.serviceUrl } } as never);
+    await vi.waitFor(() => expect(replies).toHaveLength(1));
+    expect(replies[0]).toContain('Disconnected qURL');
+    expect(read).toHaveBeenCalledTimes(1);
+    expect(revoke).toHaveBeenCalledWith('key-id', expect.any(AbortSignal));
+    expect(remove).toHaveBeenCalledWith(activity.channelData.tenant.id, 'install', expect.any(AbortSignal));
   });
 
   it('bounds concurrent message work and rejects overload until accepted final replies finish', async () => {

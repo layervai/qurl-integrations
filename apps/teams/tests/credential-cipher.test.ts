@@ -33,6 +33,14 @@ describe('KMS credential cipher', () => {
     await expect(cipher.decrypt('tenant-a', parts.join('.'))).rejects.toThrow();
   });
 
+  it('decrypts the stored v2 format independently of current encryption code', async () => {
+    const client = { send: async () => ({ Plaintext: Buffer.alloc(32, 7) }) } as unknown as KMSClient;
+    const cipher = new KmsCredentialCipher({ keyId: 'key', region: 'us-east-1', client });
+    const stored = 'kms:v2:d3JhcHBlZC10ZXN0LWtleQ.AwMDAwMDAwMDAwMD.GaViTQlTam8Zs8PlzEsy9Q.VpvAcT9ccyMKKW43ji4';
+    await expect(cipher.decrypt('tenant-a', stored)).resolves.toBe('secret-api-key');
+    await expect(cipher.decrypt('tenant-b', stored)).rejects.toThrow();
+  });
+
   it('rejects plaintext or malformed stored credentials', async () => {
     const client = { send: async () => ({ Plaintext: new Uint8Array([1]) }) } as unknown as KMSClient;
     const cipher = new KmsCredentialCipher({ keyId: 'key', region: 'us-east-1', client });

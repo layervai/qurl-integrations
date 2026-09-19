@@ -5,7 +5,7 @@ import { realpathSync } from 'node:fs';
 import { createServer, type Server, type ServerResponse } from 'node:http';
 import { pathToFileURL } from 'node:url';
 import express from 'express';
-import type { Application, Request } from 'express';
+import type { Application, Request, ErrorRequestHandler } from 'express';
 import { App, ExpressAdapter } from '@microsoft/teams.apps';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
@@ -19,7 +19,7 @@ import { OAuthStateManager } from './state.js';
 import { DynamoOAuthStatePersistence } from './oauth-state-store.js';
 import { HttpProviderBinder } from './provider-binder.js';
 import { HttpQurlClient } from './qurl-client.js';
-import { createDynamoClient, TeamsDataStore } from './teams-data.js';
+import { createDynamoClient, TeamsDataStore, type TenantCredential } from './teams-data.js';
 import { KmsCredentialCipher } from './credential-cipher.js';
 import { TeamsBot } from './bot.js';
 import { TeamsSdkMessagePoster, validateTeamsServiceUrl } from './teams-sdk.js';
@@ -166,6 +166,14 @@ export async function createTeamsServer(options: TeamsServerOptions): Promise<Se
   options.expressApp.use(express.json({ limit: options.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES }));
   installOAuthRoutes(options);
   await options.app.initialize();
+  const handleError: ErrorRequestHandler = (error: unknown, _request, response, next) => {
+    if (response.headersSent) { next(error); return; }
+    const status = error && typeof error === 'object' && 'status' in error ? error.status : undefined;
+    const code = typeof status === 'number' && Number.isInteger(status) && status >= 400 && status < 600 ? status : 500;
+    if (code >= 500) options.logger?.error('Teams HTTP request failed', { error });
+    response.sendStatus(code);
+  };
+  options.expressApp.use(handleError);
   return createServer(options.expressApp);
 }
 
@@ -247,8 +255,8 @@ class TenantQurlClientFactory {
   readonly #endpoint: string;
   readonly #logger: Logger;
   constructor(data: TeamsDataStore, endpoint: string, logger: Logger) { this.#data = data; this.#endpoint = endpoint; this.#logger = logger; }
-  async forTenant(tenantId: string): Promise<HttpQurlClient> {
-    const credential = await this.#data.tenantCredential(tenantId).catch((error: unknown) => {
+  async forTenant(tenantId: string, existingCredential?: TenantCredential): Promise<HttpQurlClient> {
+    const credential = existingCredential ?? await this.#data.tenantCredential(tenantId).catch((error: unknown) => {
       this.#logger.error('Tenant credentials could not be read', { tenantId, error });
       throw new UserFacingError('The saved qURL credentials could not be read. Ask your qURL operator to restore credential access or complete recovery.');
     });
@@ -333,7 +341,7 @@ export async function createProductionTeamsConfig(): Promise<TeamsProductionConf
   // next() enters the message handler synchronously, and its HTTP response is
   // written after that handler returns. Admission and shutdown depend on this.
   // Reject excess work before acknowledging it or starting any bot side effect.
-  app.use(({ activity, next }) => activity.type === 'message' && activeActivities.size >= MAX_ACTIVE_MESSAGES
+  app.use(({ activity, next }) => activity.type.toLowerCase() === 'message' && activeActivities.size >= MAX_ACTIVE_MESSAGES
     ? { status: 503 }
     : next());
   app.on('message', ({ activity }) => {

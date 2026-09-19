@@ -143,7 +143,7 @@ describe('Teams bot primitives', () => {
     const replies: string[] = [];
     const bot = new TeamsBot({
       qurl: {} as QurlClient,
-      data: { checkAdmin: async () => ({ isAdmin: false }) } as unknown as TeamsDataStore,
+      data: { checkAdmin: async () => ({ isAdmin: false, ownerId: 'owner' }) } as unknown as TeamsDataStore,
       messages: {} as never,
       qurlEndpoint: 'https://api.sandbox.example',
     });
@@ -153,6 +153,15 @@ describe('Teams bot primitives', () => {
       conversation: { id: 'conversation', conversationType: 'channel' },
     }, undefined, async text => { replies.push(text); });
     expect(replies).toEqual(['This command is limited to the tenant owner and qURL admins.']);
+  });
+
+  it('directs an unconnected tenant to setup before admin work', async () => {
+    const bot = new TeamsBot({
+      data: { checkAdmin: async () => ({ isAdmin: false }) } as unknown as TeamsDataStore,
+      messages: {} as never, qurlEndpoint: 'https://qurl.example',
+    });
+    await expect(bot.execute({ from: { aadObjectId: 'actor' } }, 'tenant', 'channel', true,
+      parseCommand('protect-connector docs'))).rejects.toThrow('not connected to qURL yet');
   });
 
   it('rejects every mutating admin command for non-admins', async () => {
@@ -170,7 +179,7 @@ describe('Teams bot primitives', () => {
     ];
     const bot = new TeamsBot({
       qurl: {} as QurlClient,
-      data: { checkAdmin: async () => ({ isAdmin: false }) } as unknown as TeamsDataStore,
+      data: { checkAdmin: async () => ({ isAdmin: false, ownerId: 'owner' }) } as unknown as TeamsDataStore,
       messages: {} as never,
       qurlEndpoint: 'https://api.sandbox.example',
     });

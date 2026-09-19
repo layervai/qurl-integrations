@@ -168,13 +168,6 @@ describe('Teams DynamoDB data paths', () => {
     expect(client.requests[0]?.input.TableName).toBe('conversations');
   });
 
-  it('purges normalized resource rows without an empty expression-name map', async () => {
-    const client = new RecordingDynamo();
-    await new TeamsDataStore({ client, tenantPrincipalsTable: 'principals', channelPoliciesTable: 'policy', personalConversationsTable: 'conversations', tenantCredentialsTable: 'credentials' }).purgeResourceFromScope('tenant', 'channel', 'resource');
-    expect(client.requests[0]?.operation).toBe('delete');
-    expect(client.requests[0]?.input).not.toHaveProperty('ExpressionAttributeNames');
-  });
-
   it('continues tenant queries across DynamoDB pages', async () => {
     const client = new PagedDynamo();
     const store = new TeamsDataStore({ client, tenantPrincipalsTable: 'principals', channelPoliciesTable: 'policy', personalConversationsTable: 'conversations', tenantCredentialsTable: 'credentials' });

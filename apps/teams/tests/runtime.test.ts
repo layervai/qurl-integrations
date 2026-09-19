@@ -22,7 +22,7 @@ class RecordingDynamo implements DynamoClient {
 describe('Teams runtime adapters', () => {
   afterEach(() => { vi.unstubAllEnvs(); });
 
-  it('mounts the real SDK on the external listener with authentication and the body limit intact', async () => {
+  it.each(['production', 'development'])('mounts the real SDK with safe HTTP errors in %s', async nodeEnv => {
     const environment = {
       TEAMS_BASE_URL: 'https://teams.example.com', QURL_ENDPOINT: 'https://qurl.example.com', AWS_REGION: 'us-east-1',
       TEAMS_APP_ID: 'a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d', TEAMS_APP_PASSWORD: 'synthetic-bot-secret',
@@ -34,7 +34,7 @@ describe('Teams runtime adapters', () => {
       AUTH0_DOMAIN: 'https://auth.example.com/', AUTH0_CLIENT_ID: 'synthetic-client',
       AUTH0_CLIENT_SECRET: 'synthetic-secret', AUTH0_AUDIENCE: 'https://qurl.example.com',
       QURL_CONNECTOR_HUB_HOST: '', QURL_CONNECTOR_HUB_PORT: '', QURL_CONNECTOR_HUB_SERVER_PUBLIC_KEY_B64: '',
-      HOST: '127.0.0.1', PORT: '3000', NODE_ENV: 'production', AWS_EC2_METADATA_DISABLED: 'true',
+      HOST: '127.0.0.1', PORT: '3000', NODE_ENV: nodeEnv, AWS_EC2_METADATA_DISABLED: 'true',
     };
     for (const [key, value] of Object.entries(environment)) vi.stubEnv(key, value);
     const { server } = await createProductionTeamsConfig();

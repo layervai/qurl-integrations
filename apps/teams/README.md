@@ -38,8 +38,6 @@ objects; doing so would violate this tenant-isolation trust boundary.
 channel, so `list` still shows it and `get $<crid>` still mints links
 there. That is deliberate — the alias is a shortcut, not the grant. Today the
 only way to remove a resource's channel visibility is the tenant-wide `revoke`.
-`TeamsDataStore.purgeResourceFromScope` exists for a future `unprotect`/`hide`
-verb and is currently exercised only by tests.
 
 Use the **CRID** returned by `list` to identify a protected resource, or use its
 channel alias. A CRID is permanent and does not grant access by itself; a qURL

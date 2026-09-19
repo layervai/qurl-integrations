@@ -66,7 +66,10 @@ describe('CRIDs at the Teams command boundary', () => {
     const list = await execute('list');
     expect(list).toContain(`$${CRID}`);
     expect(list).not.toContain(PUBLIC_KEY);
+    requests.length = 0;
     await expect(execute(`get $${CRID}`)).resolves.toContain('https://qurl.example/one');
+    expect(requests).toHaveLength(2);
+    expect(requests[0]?.url).toBe(`https://api.example.test/v1/resources/${CRID}`);
     expect(requests.at(-1)?.url).toBe(`https://api.example.test/v1/resources/${PUBLIC_KEY}/qurls`);
   });
 
@@ -130,6 +133,22 @@ describe('CRIDs at the Teams command boundary', () => {
     await expect(execute(`revoke $${CRID}`)).rejects.toThrow('channel alias');
     expect(purges).toEqual([]);
     expect(requests.every(request => request.method === 'GET')).toBe(true);
+  });
+
+  it.each([404, 410])('hides unavailable CRIDs without scanning the catalogue (%s)', async detailStatus => {
+    const { execute, requests } = fixture({ detailStatus });
+    await expect(execute(`get $${CRID}`)).rejects.toThrow('Resource not found.');
+    expect(requests).toHaveLength(1);
+  });
+
+  it('does not mint a revoked CRID returned by detail', async () => {
+    const { execute, allowed, requests } = fixture();
+    await execute(`revoke $${CRID}`);
+    allowed.add(PUBLIC_KEY);
+    requests.length = 0;
+    await expect(execute(`get $${CRID}`)).rejects.toThrow('Resource not found.');
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.method).toBe('GET');
   });
 
   it('keeps older resources without CRIDs usable by their public keys', async () => {
