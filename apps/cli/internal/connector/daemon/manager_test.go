@@ -1807,3 +1807,33 @@ func TestManagerMoveClearsOldRouteRefusalDuringGroupBackoff(t *testing.T) {
 		t.Fatalf("move reset platform refusal escalation: got %d, want 2", got)
 	}
 }
+
+// A converted row reaches the Connector as an exclusive Unix route while the
+// ordinary app sibling retains its TCP target and resource identity.
+func TestManagerServesConvertedUnixOriginAlongsideTCP(t *testing.T) {
+	unix := daemonShare("a", 7, "on")
+	unix.TargetURL, unix.LocalIP, unix.LocalPort, unix.LocalSocketPath = "http+unix:///tmp/private.sock", "", 0, "/tmp/private.sock"
+	registry := &memoryRegistry{shares: map[string]connectorstate.LocalShare{"a": unix, "b": daemonShare("b", 1, "on")}}
+	factory := newFakeGroupFactory()
+	manager, _ := newRunningManager(t, registry, factory)
+	waitServing(t, manager, "a")
+	waitServing(t, manager, "b")
+	routes := factory.lastConfig().Routes
+	if len(routes) != 2 {
+		t.Fatal("expected exactly the converted origin and its TCP sibling")
+	}
+	for _, route := range routes {
+		switch route.RouteID {
+		case "connector-a":
+			if route.LocalSocketPath != unix.LocalSocketPath || route.LocalIP != "" || route.LocalPort != 0 {
+				t.Fatal("converted origin lost its exclusive Unix target")
+			}
+		case "connector-b":
+			if route.LocalSocketPath != "" || route.LocalIP != "127.0.0.1" || route.LocalPort != 3000 {
+				t.Fatal("TCP sibling changed")
+			}
+		default:
+			t.Fatal("unexpected route")
+		}
+	}
+}

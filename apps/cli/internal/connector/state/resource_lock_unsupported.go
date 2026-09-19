@@ -13,3 +13,7 @@ func acquireConnectorResourcesLock(context.Context, string) (func() error, error
 }
 
 func connectorResourceOwnerOK(os.FileInfo) bool { return false }
+
+func acquireNamedStateLock(context.Context, string, string) (func() error, error) {
+	return nil, errors.New("exclusive daemon ownership is unsupported on this platform")
+}

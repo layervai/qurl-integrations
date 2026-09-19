@@ -185,7 +185,7 @@ func validateLocalPublishRequest(ctx context.Context, opts *globalOpts, target *
 			return "", err
 		}
 	}
-	if err := opts.preflightTarget(ctx, target.localIP, target.localPort); err != nil {
+	if err := preflightShareTarget(ctx, opts, target.localTarget()); err != nil {
 		return "", err
 	}
 	return requestedID, nil
@@ -382,7 +382,7 @@ func activateLocalPublish(
 	}
 	localMissing := errors.Is(err, os.ErrNotExist)
 	localPresent := err == nil
-	targetChanged := localPresent && (existing.TargetURL != target.canonicalOrigin || existing.LocalIP != target.localIP || existing.LocalPort != target.localPort)
+	targetChanged := localPresent && (existing.Target() != target.localTarget())
 	prior, err := client.Sharing(ctx, resource.CRID)
 	if err != nil {
 		return nil, nil, false, err
@@ -405,7 +405,7 @@ func activateLocalPublish(
 	local := &connectorstate.LocalShare{
 		CRID: resource.CRID, ResourceID: resource.ResourcePublicKey, ConnectorID: resource.Slug,
 		ConnectorRoutingID: resource.ConnectorRoutingID, KnockResourceID: knockResourceID,
-		TargetURL: target.canonicalOrigin, LocalIP: target.localIP, LocalPort: target.localPort,
+		TargetURL: target.canonicalOrigin, LocalIP: target.localIP, LocalPort: target.localPort, LocalSocketPath: target.localSocketPath,
 		DesiredState: string(sharing.DesiredState), ServingEpoch: sharing.ServingEpoch,
 	}
 	return local, sharing, compensateOff, nil

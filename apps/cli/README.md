@@ -431,6 +431,29 @@ External supervision changes three things:
   including commands for remote resources. Read-only sharing commands work
   either way, but can still enroll a device and write authentication state.
 
+Private file origins can use a canonical `http+unix:///absolute/socket/path`
+target on macOS and Linux. The path must fit within 100 bytes; Windows has no
+TCP fallback for this transport. Request-header overlays still require a
+trusted TLS tunnel connection.
+
+To convert existing supervised file shares, first stop and verify the daemon
+has exited, bind the private origin, then run:
+
+```sh
+qurl daemon retarget-local --supervision external -o json <<'JSON'
+{"owner_id":"<account-owner>","connector_id_prefix":"qurl-file-","target":"http+unix:///absolute/socket/path"}
+JSON
+```
+
+The command uses the normal profile/state-directory settings. It requires an
+existing externally supervised namespace and matching durable owner, reserves
+the daemon IPC endpoint and lifetime lock, and atomically retargets every saved
+row matching the prefix, including stopped shares. It preserves resource IDs,
+qURLs, desired state and serving epochs, makes no network requests, and returns
+`{"changed":N}` (`0` on an unchanged retry). A live or ambiguous daemon blocks
+conversion. Start the daemon only after conversion succeeds. New daemon binaries
+hold the lifetime lock before loading credentials, closing the startup race.
+
 A supervisor enrolls the device once per state directory with the token-file
 form of `qurl login` (see [Supervised installs](#supervised-installs)) and
 then follows one lifecycle:

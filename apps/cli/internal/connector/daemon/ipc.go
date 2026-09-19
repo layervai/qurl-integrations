@@ -75,6 +75,25 @@ type IPCServer struct {
 	JobVersion string
 }
 
+// WithStoppedDaemon reserves the canonical IPC endpoint during an offline
+// operation. It refuses live or ambiguously stale listeners, including older
+// daemons that do not hold the state-directory lifetime lease.
+func WithStoppedDaemon(ctx context.Context, socketPath string, update func() error) (retErr error) {
+	path, err := validateSocketPath(socketPath)
+	if err != nil {
+		return err
+	}
+	if err := EnsureIPCDir(filepath.Dir(path)); err != nil {
+		return err
+	}
+	listener, cleanup, err := listenDaemonIPC(ctx, path)
+	if err != nil {
+		return err
+	}
+	defer func() { retErr = errors.Join(retErr, listener.Close(), cleanup()) }()
+	return update()
+}
+
 // Run serves IPC and the share manager until ctx ends.
 func (s *IPCServer) Run(ctx context.Context) (retErr error) {
 	if s == nil || s.Manager == nil {

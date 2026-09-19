@@ -206,11 +206,11 @@ func changeShareState(ctx context.Context, opts *globalOpts, id, action string, 
 	if err != nil {
 		return err
 	}
-	preflightIP, preflightPort := local.LocalIP, local.LocalPort
+	preflight := local.Target()
 	if target != nil {
-		preflightIP, preflightPort = target.localIP, target.localPort
+		preflight = target.localTarget()
 	}
-	if err := opts.preflightTarget(ctx, preflightIP, preflightPort); err != nil {
+	if err := preflightShareTarget(ctx, opts, preflight); err != nil {
 		return err
 	}
 	client, err := opts.newClient(ctx)
@@ -255,7 +255,7 @@ func changeShareState(ctx context.Context, opts *globalOpts, id, action string, 
 				compensateOff, client, registry, local, sharing)
 		}
 		updated, updateErr = registry.Retarget(ctx, local.ResourceID,
-			connectorstate.LocalTarget{URL: target.canonicalOrigin, IP: target.localIP, Port: target.localPort}, sharing.ServingEpoch)
+			target.localTarget(), sharing.ServingEpoch)
 	} else {
 		updated, updateErr = registry.SetDesired(ctx, local.ResourceID, string(sharing.DesiredState), sharing.ServingEpoch)
 	}
@@ -609,7 +609,7 @@ func inspectLocalSharing(ctx context.Context, opts *globalOpts, local *connector
 	lastTransition := local.UpdatedAt.UTC()
 	inspection.LastTransition = &lastTransition
 	healthCtx, cancelHealth := context.WithTimeout(ctx, 2*time.Second)
-	healthErr := opts.preflightTarget(healthCtx, local.LocalIP, local.LocalPort)
+	healthErr := preflightShareTarget(healthCtx, opts, local.Target())
 	cancelHealth()
 	if healthErr == nil {
 		inspection.TargetHealth = "healthy"
@@ -911,6 +911,23 @@ func preflightLocalTarget(ctx context.Context, ip string, port int) error {
 	conn, err := (&net.Dialer{}).DialContext(dialCtx, "tcp", address)
 	if err != nil {
 		return fmt.Errorf("local app is not accepting TCP connections at %s: start it, then try again: %w", address, err)
+	}
+	return conn.Close()
+}
+
+func preflightShareTarget(ctx context.Context, opts *globalOpts, target connectorstate.LocalTarget) error {
+	if target.SocketPath == "" {
+		return opts.preflightTarget(ctx, target.IP, target.Port)
+	}
+	checked, err := connectorstate.ParseUnixTarget(target.URL)
+	if err != nil || checked != target {
+		return errors.New("local Unix target is invalid")
+	}
+	dialCtx, cancel := context.WithTimeout(ctx, 1500*time.Millisecond)
+	defer cancel()
+	conn, err := (&net.Dialer{}).DialContext(dialCtx, "unix", target.SocketPath)
+	if err != nil {
+		return errors.New("local Unix origin is not accepting connections; start it and retry")
 	}
 	return conn.Close()
 }

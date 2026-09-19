@@ -1,12 +1,19 @@
 package state
 
 import (
+	"bufio"
+	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"reflect"
+	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -549,4 +556,212 @@ func TestLocalShareRegistryRetargetRequiresNewerEpochAndLoopbackTarget(t *testin
 	if err != nil || reenabled.DesiredState != "on" || reenabled.ServingEpoch != 6 || reenabled.LocalPort != 5000 {
 		t.Fatalf("Retarget after local disable = %+v, %v", reenabled, err)
 	}
+}
+
+func TestStoppedFileTargetConversionPreservesEveryRegistryRow(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix origins are unsupported on Windows")
+	}
+	ctx := context.Background()
+	dir := secureStateTestDir(t)
+	if err := EstablishExternalRuntimeMode(ctx, dir); err != nil {
+		t.Fatal(err)
+	}
+	registry, err := openOwnedLocalShareRegistry(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index, id := range []string{"qurl-file-first", "qurl-file-orphan", "local-app"} {
+		binding := testResourceBinding(t, id)
+		binding.CRID = testBindingCRID(t, &binding, apitest.VersionTest)
+		desired := "on"
+		if index == 1 {
+			desired = "off"
+		}
+		row := LocalShare{CRID: binding.CRID, ResourceID: binding.ResourceID, ConnectorID: binding.ConnectorID, ConnectorRoutingID: binding.ConnectorRoutingID, KnockResourceID: binding.KnockResourceID, TargetURL: "http://127.0.0.1:3000", LocalIP: "127.0.0.1", LocalPort: 3000, DesiredState: desired, ServingEpoch: 7}
+		if err := registry.Put(ctx, &row); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before, err := registry.List(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	converter, ok := any(registry).(interface {
+		RetargetStoppedToUnix(context.Context, string, string, string) (int, error)
+	})
+	if !ok {
+		t.Fatal("registry cannot atomically convert stopped Unix targets")
+	}
+	unlock, err := AcquireDaemonLease(ctx, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := converter.RetargetStoppedToUnix(ctx, "owner-test", "qurl-file-", "http+unix:///tmp/private.sock"); err == nil {
+		t.Fatal("conversion bypassed a live daemon lease")
+	}
+	if err := unlock(); err != nil {
+		t.Fatal(err)
+	}
+	changed, err := converter.RetargetStoppedToUnix(ctx, "owner-test", "qurl-file-", "http+unix:///tmp/private.sock")
+	if err != nil || changed != 2 {
+		t.Fatalf("conversion = %d, %v", changed, err)
+	}
+	after, err := registry.List(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	slices.SortFunc(before, func(a, b LocalShare) int { return cmp.Compare(a.ResourceID, b.ResourceID) })
+	slices.SortFunc(after, func(a, b LocalShare) int { return cmp.Compare(a.ResourceID, b.ResourceID) })
+	for i := range after {
+		expected := before[i]
+		if strings.HasPrefix(expected.ConnectorID, "qurl-file-") {
+			expected.TargetURL, expected.LocalIP, expected.LocalPort = "http+unix:///tmp/private.sock", "", 0
+			expected.LocalSocketPath = "/tmp/private.sock"
+			expected.UpdatedAt = after[i].UpdatedAt
+		}
+		if !reflect.DeepEqual(expected, after[i]) {
+			t.Fatal("conversion changed identity, preference, epoch or a sibling app")
+		}
+	}
+	changed, err = converter.RetargetStoppedToUnix(ctx, "owner-test", "qurl-file-", "http+unix:///tmp/private.sock")
+	if err != nil || changed != 0 {
+		t.Fatalf("idempotent conversion = %d, %v", changed, err)
+	}
+	snapshot, err := os.ReadFile(filepath.Join(dir, LocalSharesFile)) // #nosec G304 -- private test registry fixture.
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][3]string{{"other-owner", "qurl-file-", "http+unix:///tmp/new.sock"}, {"owner-test", "", "http+unix:///tmp/new.sock"}, {"owner-test", "qurl-file-", "http://127.0.0.1:4000"}} {
+		if _, err := converter.RetargetStoppedToUnix(ctx, args[0], args[1], args[2]); err == nil {
+			t.Fatal("invalid conversion was accepted")
+		}
+		current, err := os.ReadFile(filepath.Join(dir, LocalSharesFile)) // #nosec G304 -- private test registry fixture.
+		if err != nil || !bytes.Equal(current, snapshot) {
+			t.Fatal("failed conversion mutated registry")
+		}
+	}
+}
+
+func TestRetargetStoppedCrashBoundaries(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix origins are unsupported on Windows")
+	}
+	for _, beforeCommit := range []bool{true, false} {
+		t.Run(fmt.Sprintf("before_commit_%t", beforeCommit), func(t *testing.T) {
+			ctx := context.Background()
+			dir := secureStateTestDir(t)
+			if err := EstablishExternalRuntimeMode(ctx, dir); err != nil {
+				t.Fatal(err)
+			}
+			registry, err := openOwnedLocalShareRegistry(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, id := range []string{"qurl-file-first", "qurl-file-orphan"} {
+				binding := testResourceBinding(t, id)
+				binding.CRID = testBindingCRID(t, &binding, apitest.VersionTest)
+				row := LocalShare{CRID: binding.CRID, ResourceID: binding.ResourceID, ConnectorID: binding.ConnectorID, ConnectorRoutingID: binding.ConnectorRoutingID, KnockResourceID: binding.KnockResourceID, TargetURL: "http://127.0.0.1:3000", LocalIP: "127.0.0.1", LocalPort: 3000, DesiredState: "on", ServingEpoch: 7}
+				if err := registry.Put(ctx, &row); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before, err := registry.List(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var release func() error
+			if beforeCommit {
+				release, err = acquireConnectorResourcesLock(ctx, dir)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			childCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			defer cancel()
+			testBinary, err := os.Executable()
+			if err != nil {
+				t.Fatal(err)
+			}
+			child := exec.CommandContext(childCtx, testBinary, "-test.run=^TestRetargetStoppedCrashHelper$") // #nosec G204 -- rerun this test binary for the crash-boundary fixture.
+			child.Env = append(os.Environ(), "QURL_TEST_RETARGET_STATE="+dir)
+			stdout, err := child.StdoutPipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := child.Start(); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = child.Process.Kill() })
+			if beforeCommit {
+				deadline := time.Now().Add(5 * time.Second)
+				owned := false
+				for time.Now().Before(deadline) {
+					unlock, err := AcquireDaemonLease(ctx, dir)
+					if err != nil {
+						owned = true
+						break
+					}
+					if err := unlock(); err != nil {
+						t.Fatal(err)
+					}
+					time.Sleep(10 * time.Millisecond)
+				}
+				if !owned {
+					t.Fatal("child never acquired the stopped-daemon lease")
+				}
+			} else {
+				line, err := bufio.NewReader(stdout).ReadString('\n')
+				if err != nil || line != "converted\n" {
+					t.Fatalf("child did not commit: %q %v", line, err)
+				}
+			}
+			if err := child.Process.Kill(); err != nil {
+				t.Fatal(err)
+			}
+			if err := child.Wait(); err == nil {
+				t.Fatal("child unexpectedly exited without being killed")
+			}
+			if release != nil {
+				if err := release(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			after, err := registry.List(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			slices.SortFunc(before, func(a, b LocalShare) int { return cmp.Compare(a.ResourceID, b.ResourceID) })
+			slices.SortFunc(after, func(a, b LocalShare) int { return cmp.Compare(a.ResourceID, b.ResourceID) })
+			for i := range after {
+				expected := before[i]
+				if !beforeCommit {
+					expected.TargetURL, expected.LocalIP, expected.LocalPort, expected.LocalSocketPath = "http+unix:///tmp/private.sock", "", 0, "/tmp/private.sock"
+					expected.UpdatedAt = after[i].UpdatedAt
+				}
+				if !reflect.DeepEqual(after[i], expected) {
+					t.Fatal("process death left a partial conversion or changed resource identity")
+				}
+			}
+			if _, err := registry.RetargetStoppedToUnix(ctx, "owner-test", "qurl-file-", "http+unix:///tmp/private.sock"); err != nil {
+				t.Fatalf("restart could not resume: %v", err)
+			}
+		})
+	}
+}
+
+func TestRetargetStoppedCrashHelper(t *testing.T) {
+	dir := os.Getenv("QURL_TEST_RETARGET_STATE")
+	if dir == "" {
+		return
+	}
+	registry, err := OpenLocalShareRegistry(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := registry.RetargetStoppedToUnix(context.Background(), "owner-test", "qurl-file-", "http+unix:///tmp/private.sock"); err != nil {
+		t.Fatal(err)
+	}
+	fmt.Println("converted")
+	<-time.After(time.Hour)
 }

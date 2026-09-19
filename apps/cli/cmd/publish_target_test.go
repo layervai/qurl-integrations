@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -124,6 +125,24 @@ func TestValidateConnectorID(t *testing.T) {
 		}
 		if got := exitcode.FromError(err); got != exitcode.Usage {
 			t.Errorf("validateConnectorID(%q) exit code = %d, want %d", invalid, got, exitcode.Usage)
+		}
+	}
+}
+
+func TestClassifyUnixPublishTarget(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix origins are unsupported on Windows")
+	}
+	target, err := classifyPublishTarget("http+unix:///tmp/private%20origin.sock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target.kind != publishTargetLocal || target.localIP != "" || target.localPort != 0 || target.canonicalOrigin != "http+unix:///tmp/private%20origin.sock" {
+		t.Fatalf("Unix origin was not classified locally: %#v", target)
+	}
+	for _, raw := range []string{"http+unix://remote/tmp/f.sock", "http+unix:relative.sock", "http+unix:///tmp/../f.sock", "http+unix:///tmp/f.sock?", "http+unix:///tmp/f.sock#", "http+unix:///tmp/%00.sock"} {
+		if _, err := classifyPublishTarget(raw); err == nil {
+			t.Fatalf("accepted malformed Unix origin %q", raw)
 		}
 	}
 }

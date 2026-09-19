@@ -365,7 +365,7 @@ func desiredShares(shares []connectorstate.LocalShare) []connectorstate.LocalSha
 // holds m.mu.
 func (m *Manager) shareRouteLocked(share *connectorstate.LocalShare) connectorshare.LocalHTTPRoute {
 	return connectorshare.LocalHTTPRoute{
-		RouteID: share.ConnectorID, LocalIP: share.LocalIP, LocalPort: share.LocalPort,
+		RouteID: share.ConnectorID, LocalIP: share.LocalIP, LocalPort: share.LocalPort, LocalSocketPath: share.LocalSocketPath,
 		ResourcePublicKey: share.ResourceID, ConnectorRoutingID: share.ConnectorRoutingID,
 		RequestHeaders: m.overlay[share.ConnectorID],
 	}

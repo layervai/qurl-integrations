@@ -139,7 +139,7 @@ func reconcileReauthorizedHeadlessShare(ctx context.Context, runtime *connectors
 	if err != nil {
 		return err
 	}
-	sameTarget := existing.TargetURL == configured.TargetURL && existing.LocalIP == configured.LocalIP && existing.LocalPort == configured.LocalPort
+	sameTarget := existing.Target() == configured.Target()
 	if !sameTarget {
 		return nil
 	}
@@ -309,7 +309,7 @@ commands then reload this daemon and never install a background job.`,
 			return nil
 		},
 	}
-	cmd.AddCommand(run, validateTestCRID)
+	cmd.AddCommand(run, validateTestCRID, daemonRetargetLocalCmd(opts))
 	return cmd
 }
 
@@ -414,10 +414,11 @@ func runShareDaemonWithDeployment(ctx context.Context, opts *globalOpts, stateDi
 	if err != nil {
 		return err
 	}
-	stateDir, socketPath, err := resolveDaemonPaths(ctx, opts, stateDirOverride, runtimeDirOverride)
+	stateDir, socketPath, unlock, err := lockDaemonPaths(ctx, opts, stateDirOverride, runtimeDirOverride)
 	if err != nil {
 		return err
 	}
+	defer func() { retErr = errors.Join(retErr, unlock()) }()
 	headless, enrollmentCredential, err := loadHeadlessBootstrap(ctx, stateDir, headlessConfigPath, enrollmentTokenPath)
 	if err != nil {
 		return err
@@ -509,6 +510,17 @@ func runShareDaemonWithDeployment(ctx context.Context, opts *globalOpts, stateDi
 		Manager:    manager, JobVersion: jobVersion,
 	}
 	return server.Run(ctx)
+}
+
+// lockDaemonPaths excludes offline retargeting for the complete daemon lifetime,
+// including startup before its IPC listener exists.
+func lockDaemonPaths(ctx context.Context, opts *globalOpts, stateDirOverride, runtimeDirOverride string) (stateDir, socketPath string, unlock func() error, err error) {
+	stateDir, socketPath, err = resolveDaemonPaths(ctx, opts, stateDirOverride, runtimeDirOverride)
+	if err != nil {
+		return "", "", nil, err
+	}
+	unlock, err = connectorstate.AcquireDaemonLease(ctx, stateDir)
+	return stateDir, socketPath, unlock, err
 }
 
 // applyRuntimeSupervision commits or verifies the resolved state directory's
