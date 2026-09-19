@@ -44,7 +44,8 @@ Using another package format? See [Install](#install).
 
 No account, API key, or browser sign-in is required. The first command creates
 and registers a device identity automatically. Keep its local state to keep
-control of your resources. Anonymous devices can publish up to three active
+control of your resources. <!-- TODO(upstream-contract): qurl-service owns the anonymous resource and link caps. -->
+Anonymous devices can publish up to three active
 resources with links valid for at most 24 hours.
 
 Keep your app running in one terminal. If you only want to try the flow, start
@@ -348,6 +349,8 @@ directory rather than switching in place.
 | `qurl inspect <CRID>` | Inspect the same authoritative resource or sharing state |
 | `qurl daemon run` | Run the local sharing daemon directly for headless or supervised use |
 | `qurl delete <CRID>` | Delete a published resource |
+| `qurl account setup` | Link this device to an account for recovery and other devices |
+| `qurl account recover` | Restore account resource access on a new device |
 | `qurl login` | Enroll this device with a one-time account key, or from a supervisor's enrollment token file |
 | `qurl whoami` | Show which account this registered device belongs to |
 | `qurl completion <shell>` | Generate shell completions (`bash`, `zsh`, `fish`, `powershell`) |

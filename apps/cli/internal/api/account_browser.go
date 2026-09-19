@@ -17,8 +17,9 @@ import (
 	"time"
 )
 
-// Auth0 requires this exact registered callback URI.
-const accountCallback = "http://127.0.0.1:8765/callback"
+// TODO(upstream-contract): Auth0 requires this exact registered callback URI.
+const accountCallbackAddress = "127.0.0.1:8765"
+const accountCallback = "http://" + accountCallbackAddress + "/callback"
 
 // SignInAccount runs authorization-code + PKCE only after explicit account
 // setup. No account token is written to disk or passed to the browser launcher.
@@ -36,6 +37,7 @@ func SignInAccount(ctx context.Context, cfg *Config, openBrowser func(context.Co
 	httpClient.Timeout = 30 * time.Second
 	browserConfig := *cfg
 	browserConfig.APIKey = ""
+	browserConfig.OwnerID = ""
 	browserConfig.HTTPClient = &httpClient
 	client := newTransport(&browserConfig)
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, trimBaseURL(cfg.BaseURL)+"/v1/account/auth", http.NoBody)
@@ -44,7 +46,7 @@ func SignInAccount(ctx context.Context, cfg *Config, openBrowser func(context.Co
 	}
 	response, err := client.DoOnce(request)
 	if err != nil {
-		return "", errors.New("cannot load account sign-in settings")
+		return "", errors.New(msgAccountLoadFailed)
 	}
 	var settings struct {
 		Domain   string `json:"domain"`
@@ -54,7 +56,7 @@ func SignInAccount(ctx context.Context, cfg *Config, openBrowser func(context.Co
 	decodeErr := json.NewDecoder(io.LimitReader(response.Body, 16384)).Decode(&settings)
 	_ = response.Body.Close()
 	if response.StatusCode != http.StatusOK || decodeErr != nil || settings.ClientID == "" || settings.Audience == "" || settings.Domain == "" || strings.ContainsAny(settings.Domain, "/@?#\\") {
-		return "", errors.New("account sign-in is temporarily unavailable")
+		return "", errors.New(msgAccountUnavailable)
 	}
 	nonce := make([]byte, 64)
 	if _, err := rand.Read(nonce); err != nil {
@@ -63,9 +65,9 @@ func SignInAccount(ctx context.Context, cfg *Config, openBrowser func(context.Co
 	verifier := base64.RawURLEncoding.EncodeToString(nonce[:32])
 	state := base64.RawURLEncoding.EncodeToString(nonce[32:])
 	challenge := sha256.Sum256([]byte(verifier))
-	listener, err := (&net.ListenConfig{}).Listen(ctx, "tcp4", "127.0.0.1:8765")
+	listener, err := (&net.ListenConfig{}).Listen(ctx, "tcp4", accountCallbackAddress)
 	if err != nil {
-		return "", errors.New("account sign-in needs local port 8765; close the other sign-in and retry")
+		return "", errors.New(msgAccountPortBusy)
 	}
 	defer func() { _ = listener.Close() }()
 	codes := make(chan string, 1)
@@ -75,16 +77,16 @@ func SignInAccount(ctx context.Context, cfg *Config, openBrowser func(context.Co
 	go func() { _ = server.Serve(listener) }()
 	query := url.Values{"response_type": {"code"}, "client_id": {settings.ClientID}, "redirect_uri": {accountCallback}, "audience": {settings.Audience}, "scope": {"openid email qurl:read qurl:write qurl:agent"}, "state": {state}, "code_challenge": {base64.RawURLEncoding.EncodeToString(challenge[:])}, "code_challenge_method": {"S256"}}
 	if err := openBrowser(ctx, "https://"+settings.Domain+"/authorize?"+query.Encode()); err != nil {
-		return "", fmt.Errorf("open account sign-in: %w", err)
+		return "", fmt.Errorf(msgAccountBrowserFailed, err)
 	}
 	var code string
 	select {
 	case code = <-codes:
 	case <-ctx.Done():
-		return "", errors.New("account sign-in timed out or was canceled; run the command again")
+		return "", errors.New(msgAccountTimedOut)
 	}
 	if code == "" {
-		return "", errors.New("account sign-in was canceled")
+		return "", errors.New(msgAccountCanceled)
 	}
 	return exchangeAccountCode(ctx, client, settings.Domain, settings.ClientID, code, verifier)
 }
@@ -98,7 +100,7 @@ func exchangeAccountCode(ctx context.Context, client *transport, domain, clientI
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	response, err := client.DoOnce(request)
 	if err != nil {
-		return "", errors.New("account sign-in could not complete; run the command again")
+		return "", errors.New(msgAccountExchangeFailed)
 	}
 	defer func() { _ = response.Body.Close() }()
 	var token struct {
@@ -106,7 +108,7 @@ func exchangeAccountCode(ctx context.Context, client *transport, domain, clientI
 		TokenType   string `json:"token_type"`
 	}
 	if response.StatusCode != http.StatusOK || json.NewDecoder(io.LimitReader(response.Body, 32768)).Decode(&token) != nil || token.AccessToken == "" || !strings.EqualFold(token.TokenType, "Bearer") {
-		return "", errors.New("account sign-in could not complete; run the command again")
+		return "", errors.New(msgAccountExchangeFailed)
 	}
 	return token.AccessToken, nil
 }
@@ -117,20 +119,20 @@ func accountCallbackHandler(state string, codes chan<- string) http.Handler {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		if r.Method != http.MethodGet || r.Host != "127.0.0.1:8765" || subtle.ConstantTimeCompare([]byte(r.URL.Query().Get("state")), []byte(state)) != 1 {
-			http.Error(w, "Invalid sign-in response.", http.StatusBadRequest)
+		if r.Method != http.MethodGet || r.Host != accountCallbackAddress || subtle.ConstantTimeCompare([]byte(r.URL.Query().Get("state")), []byte(state)) != 1 {
+			http.Error(w, msgAccountCallbackInvalid, http.StatusBadRequest)
 			return
 		}
 		code := r.URL.Query().Get("code")
 		if len(code) > 4096 {
-			http.Error(w, "Invalid sign-in response.", 400)
+			http.Error(w, msgAccountCallbackInvalid, 400)
 			return
 		}
 		select {
 		case codes <- code:
 		default:
 		}
-		_, _ = io.WriteString(w, "Return to qURL to finish account setup. You can close this tab.")
+		_, _ = io.WriteString(w, msgAccountCallbackComplete)
 	})
 	return mux
 }
@@ -138,7 +140,7 @@ func accountCallbackHandler(state string, codes chan<- string) http.Handler {
 func validateAccountEndpoint(endpoint string) error {
 	base, err := url.Parse(endpoint)
 	if err != nil || base.Host == "" || (base.Scheme != "https" && (base.Scheme != "http" || (base.Hostname() != "localhost" && !net.ParseIP(base.Hostname()).IsLoopback()))) {
-		return errors.New("account sign-in requires a trusted HTTPS endpoint")
+		return errors.New(msgAccountHTTPSRequired)
 	}
 	return nil
 }

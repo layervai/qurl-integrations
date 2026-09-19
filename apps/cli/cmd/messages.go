@@ -62,6 +62,12 @@ const (
 // package can emit, for the jargon gate.
 func customerMessages() []string {
 	return []string{
+		msgAccountSetup,
+		msgAccountLinked,
+		msgAccountRecovered,
+		msgAnonymousDevice,
+		msgAccountChooseOwner,
+		msgAccountOwnerDenied,
 		msgVerifyMismatch,
 		msgVerifyMissing,
 		msgNeedsYes,
@@ -76,3 +82,12 @@ func customerMessages() []string {
 		msgBrowserJSON,
 	}
 }
+
+const (
+	msgAccountSetup       = "This device controls your qURL resources.\n\nLink an account to recover access and manage resources from other devices.\nYour existing links will keep working.\nLinking is permanent. Check the account you choose in the browser.\n\nContinue in your browser."
+	msgAccountLinked      = "Account linked. Your existing links are unchanged."
+	msgAccountRecovered   = "Resource access recovered on this device. Existing links are unchanged."
+	msgAnonymousDevice    = "Using a new device identity. Keep its local state, or run qurl account setup to enable recovery."
+	msgAccountChooseOwner = "choose resources to recover with --owner; available owners: %s"
+	msgAccountOwnerDenied = "this account does not own the selected resources"
+)

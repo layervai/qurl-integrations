@@ -486,7 +486,9 @@ func TestConfigFileWithSecretRefusedExitThree(t *testing.T) {
 	}
 }
 
-func TestMissingCredentialExitFour(t *testing.T) {
+// The legacy injected account client still requires its explicit credential.
+// TestPublishDefaultsToDeviceEnrollment covers the production default.
+func TestInjectedAccountClientMissingCredentialExitFour(t *testing.T) {
 	res := runCLI(t, &runOpts{args: []string{"list"}, env: map[string]string{}})
 	if res.code != 4 {
 		t.Fatalf("exit = %d, want 4; stderr: %s", res.code, res.stderr.String())

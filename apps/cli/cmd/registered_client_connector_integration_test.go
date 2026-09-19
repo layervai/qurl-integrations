@@ -439,8 +439,9 @@ func TestOpenNativeRegisteredClient_ExplicitLoginUsesRealConnectorRecovery(t *te
 	srv.Script(http.MethodGet, "/v1/me", apitest.HandlerAPIKeyInvalid401(t))
 	registry := &ownerOnlyTestShareRegistry{}
 	opts := &globalOpts{
-		resolvedEndpoint: srv.URL,
-		version:          "real-connector-recovery-test",
+		resolvedEndpoint:    srv.URL,
+		resolvedSupervision: connectorstate.RuntimeSupervisionNative,
+		version:             "real-connector-recovery-test",
 		lookupEnv: func(string) (string, bool) {
 			t.Fatal("explicit connector recovery unexpectedly read ambient account authority")
 			return "", false

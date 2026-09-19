@@ -18,7 +18,7 @@ func accountCmd(opts *globalOpts) *cobra.Command {
 		if err != nil {
 			return err
 		}
-		_, _ = fmt.Fprintln(cmd.OutOrStdout(), "This device controls your qURL resources.\n\nLink an account to recover access and manage resources from other devices.\nYour existing links will keep working.\nLinking is permanent. Check the account you choose in the browser.\n\nContinue in your browser.")
+		_, _ = fmt.Fprintln(cmd.OutOrStdout(), msgAccountSetup)
 		opts.warnInsecureEndpoint()
 		token, err := qurlapi.SignInAccount(cmd.Context(), opts.accountConfig("", ""), opts.openBrowser)
 		if err != nil {
@@ -27,7 +27,7 @@ func accountCmd(opts *globalOpts) *cobra.Command {
 		if err := client.LinkAccount(cmd.Context(), token); err != nil {
 			return err
 		}
-		_, err = fmt.Fprintln(cmd.OutOrStdout(), "Account linked. Your existing links are unchanged.")
+		_, err = fmt.Fprintln(cmd.OutOrStdout(), msgAccountLinked)
 		return err
 	}})
 	command.AddCommand(accountRecoverCmd(opts))
@@ -66,7 +66,7 @@ func accountRecoverCmd(opts *globalOpts) *cobra.Command {
 			return err
 		}
 		opts.registeredClient, opts.registeredIdentity = client, deviceIdentity
-		_, err = fmt.Fprintln(cmd.OutOrStdout(), "Resource access recovered on this device. Existing links are unchanged.")
+		_, err = fmt.Fprintln(cmd.OutOrStdout(), msgAccountRecovered)
 		return err
 	}}
 	recoverCmd.Flags().StringVar(&selectedOwner, "owner", "", "resource owner to recover when the account has several devices")
@@ -81,14 +81,17 @@ func selectAccountOwner(owners []string, requested string) (string, error) {
 		for _, owner := range owners {
 			if strings.HasPrefix(owner, "device:") {
 				if requested != "" {
-					return "", fmt.Errorf("choose resources to recover with --owner; available owners: %s", strings.Join(owners, ", "))
+					return "", fmt.Errorf(msgAccountChooseOwner, strings.Join(owners, ", "))
 				}
 				requested = owner
 			}
 		}
 	}
+	if requested == "" {
+		return "", fmt.Errorf(msgAccountChooseOwner, strings.Join(owners, ", "))
+	}
 	if !slices.Contains(owners, requested) {
-		return "", errors.New("this account does not own the selected resources")
+		return "", errors.New(msgAccountOwnerDenied)
 	}
 	return requested, nil
 }

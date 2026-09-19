@@ -45,6 +45,7 @@ func TestSelectAccountOwner(t *testing.T) {
 		requested, want string
 	}{
 		{[]string{"auth0|one"}, "", "auth0|one"},
+		{[]string{"auth0|one", "auth0|two"}, "", ""},
 		{[]string{"auth0|one", "device:one"}, "", "device:one"},
 		{[]string{"auth0|one", "device:one", "device:two"}, "", ""},
 		{[]string{"auth0|one", "device:one", "device:two"}, "device:two", "device:two"},

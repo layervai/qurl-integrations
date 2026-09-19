@@ -661,7 +661,7 @@ func (b *registeredAccountBootstrap) enrollmentCredential(ctx context.Context, r
 	if b.client == nil {
 		if _, _, err := auth.Resolve(b.opts.lookupEnv); errors.Is(err, auth.ErrNoCredential) {
 			if b.opts.streams != nil && b.opts.streams.Err != nil && !b.opts.quiet {
-				_, _ = fmt.Fprintln(b.opts.streams.Err, "Using a new device identity. Keep its local state, or run qurl account setup to enable recovery.")
+				_, _ = fmt.Fprintln(b.opts.streams.Err, msgAnonymousDevice)
 			}
 			return qurl.AnonymousEnrollmentCredential(ctx, request)
 		}
@@ -716,6 +716,9 @@ func (o *globalOpts) openNativeRegisteredClient(
 	}
 	stateDir, err := o.resolveShareStateDir("")
 	if err != nil {
+		return nil, nil, err
+	}
+	if err := o.requireRuntimeSupervision(stateDir); err != nil {
 		return nil, nil, err
 	}
 	hubBootstrap, err := o.resolveHubBootstrap()
