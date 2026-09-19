@@ -238,7 +238,6 @@ externally supervised namespace must first enroll with `login --anonymous` or
 the enrollment-token login flow. Both require the sealed key-provider settings
 below and preserve an existing external identity.
 
-
 For account-free enrollment, invoke `qurl login --anonymous --supervision external
 -o json` with the same sealed key provider and inherited descriptor. This form
 refuses account API-key environment variables and `--enrollment-token-file`.
@@ -255,12 +254,15 @@ exit zero; local and transport failures exit nonzero. Requests make one attempt.
 Pass a stable `--idempotency-key` when retrying mutations (32–256 ASCII letters,
 digits, hyphens or underscores). Bodies are limited to 1 MiB; GET and DELETE
 accept no body. Absolute URLs, caller-selected headers and routes outside the
-SDK's registered-device allowlist are refused.
+SDK's registered-device allowlist are refused. Queries are supported only for
+`GET /v1/resources`; the SDK rejects queries on other routes. Response bodies
+also have a 1 MiB cap; exceeding it returns a nonzero exit.
 
 For example, account linking uses `POST /v1/account/link` with
 `{"account_token":"<account access token>"}` on stdin. Keep that token out of
 argv, environment variables, logs and durable files. The device credential
-stays inside the CLI. Sessions, individual-link revocation, quota and usage
+stays inside the CLI. Before recording success, verify the returned `owner_id`
+matches this device and `account_id` matches the intended account. Sessions, individual-link revocation, quota and usage
 remain outside this device transport's authority.
 
 A program that runs the daemon itself (see

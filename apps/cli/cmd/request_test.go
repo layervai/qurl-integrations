@@ -56,7 +56,7 @@ func TestRequestRejectsInputBeforeOpeningDevice(t *testing.T) {
 		{[]string{"GET", "/v1/me"}, "{}"},
 		{[]string{"POST", "/v1/account/link"}, `{"account_token":"private-token"} garbage`},
 		{[]string{"POST", "/v1/account/link"}, "{}" + strings.Repeat(" ", 1<<20)},
-		{[]string{"GET", "/v1/me", "--idempotency-key", "bad\r\nheader"}, ""},
+		{[]string{"GET", "/v1/me", "--idempotency-key", strings.Repeat("a", 32) + "\r\nheader"}, ""},
 	} {
 		res := runCLI(t, &runOpts{args: append([]string{"request", "-o", "json"}, tc.args...), stdin: strings.NewReader(tc.body), openAPIClient: func(context.Context) (qurlapi.Client, error) {
 			t.Error("opened device for invalid input")

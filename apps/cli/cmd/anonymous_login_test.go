@@ -80,3 +80,31 @@ func TestAnonymousLoginPreservesFailedExternalNamespace(t *testing.T) {
 		}
 	}
 }
+
+func TestAnonymousLoginNamesItsOwnFlag(t *testing.T) {
+	res := runCLI(t, &runOpts{args: []string{"login", "--anonymous", "--supervision", "external"}, env: map[string]string{}})
+	if !strings.Contains(res.stderr.String(), "--anonymous requires LAYERV_KEY_PROVIDER") {
+		t.Fatalf("wrong flag: %s", res.stderr.String())
+	}
+}
+
+func TestAnonymousLoginWarnsBeforeCleartextEnrollment(t *testing.T) {
+	res := runCLI(t, &runOpts{args: []string{"login", "--anonymous", "--supervision", "external", "--endpoint", "http://api.example.test"}, env: map[string]string{"LAYERV_KEY_PROVIDER": "local-key", "LAYERV_LOCAL_KEY_FD": "3"}, openNativeRuntime: func(context.Context, connectorshare.NativeRuntimeConfig) (registeredNativeRuntime, error) {
+		return nil, errors.New("stop before network")
+	}})
+	if strings.Count(res.stderr.String(), "authorization credential would travel unencrypted") != 1 {
+		t.Fatalf("missing warning: %s", res.stderr.String())
+	}
+}
+
+func TestAnonymousLoginRejectsConnectorScopedState(t *testing.T) {
+	srv := apitest.NewServer(t)
+	state := bootstrapRegisteredState(t)
+	state.EnrollmentCredentialKind = string(qurl.RegistrationKeyKindConnectorBootstrap)
+	res := runCLI(t, &runOpts{args: []string{"login", "--anonymous", "--supervision", "external", "--endpoint", srv.URL}, env: map[string]string{"LAYERV_KEY_PROVIDER": "local-key", "LAYERV_LOCAL_KEY_FD": "3"}, openNativeRuntime: func(context.Context, connectorshare.NativeRuntimeConfig) (registeredNativeRuntime, error) {
+		return &bootstrapNativeRuntime{store: &bootstrapAgentStateStore{state: state}}, nil
+	}})
+	if res.code == 0 {
+		t.Fatal("connector-scoped identity reported successful enrollment")
+	}
+}

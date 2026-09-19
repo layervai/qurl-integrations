@@ -126,7 +126,7 @@ func runExternalLogin(ctx context.Context, opts *globalOpts, tokenPath string) e
 	if accountKeyConfigured(opts.lookupEnv) {
 		return exitcode.UsageError(fmt.Errorf("--enrollment-token-file cannot be combined with %s or %s", auth.EnvAPIKey, auth.EnvAPIKeyFile))
 	}
-	if err := requireLocalKeyProvider(opts.lookupEnv); err != nil {
+	if err := requireLocalKeyProvider(opts.lookupEnv, "--enrollment-token-file"); err != nil {
 		return exitcode.UsageError(err)
 	}
 	stateDir, err := opts.resolveShareStateDir("")
@@ -158,13 +158,13 @@ func accountKeyConfigured(lookup func(string) (string, bool)) bool {
 // only: the provider name and a plausible inherited descriptor number. The
 // key bytes are read by the connector's provider, never here, and the
 // descriptor value is never echoed.
-func requireLocalKeyProvider(lookup func(string) (string, bool)) error {
+func requireLocalKeyProvider(lookup func(string) (string, bool), flag string) error {
 	provider, _ := lookup(connectoragentstate.EnvKeyProvider)
 	if strings.ToLower(strings.TrimSpace(provider)) != connectoragentstate.KeyProviderLocalKey {
-		return fmt.Errorf("--enrollment-token-file requires %s=%s", connectoragentstate.EnvKeyProvider, connectoragentstate.KeyProviderLocalKey)
+		return fmt.Errorf("%s requires %s=%s", flag, connectoragentstate.EnvKeyProvider, connectoragentstate.KeyProviderLocalKey)
 	}
 	if fd, _ := lookup(connectoragentstate.EnvLocalKeyFD); !validLocalKeyDescriptor(fd) {
-		return fmt.Errorf("--enrollment-token-file requires %s to name an inherited descriptor in bare decimal form (3 through %d, no leading zeros)", connectoragentstate.EnvLocalKeyFD, maxLocalKeyDescriptor)
+		return fmt.Errorf("%s requires %s to name an inherited descriptor in bare decimal form (3 through %d, no leading zeros)", flag, connectoragentstate.EnvLocalKeyFD, maxLocalKeyDescriptor)
 	}
 	return nil
 }
@@ -239,7 +239,7 @@ func runAnonymousExternalLogin(ctx context.Context, opts *globalOpts) error {
 	if accountKeyConfigured(opts.lookupEnv) {
 		return exitcode.UsageError(errors.New("--anonymous cannot be combined with account API key configuration"))
 	}
-	if err := requireLocalKeyProvider(opts.lookupEnv); err != nil {
+	if err := requireLocalKeyProvider(opts.lookupEnv, "--anonymous"); err != nil {
 		return exitcode.UsageError(err)
 	}
 	stateDir, err := opts.resolveShareStateDir("")
@@ -249,8 +249,16 @@ func runAnonymousExternalLogin(ctx context.Context, opts *globalOpts) error {
 	if err := connectorstate.EstablishExternalRuntimeMode(ctx, stateDir); err != nil {
 		return err
 	}
+	opts.warnInsecureEndpoint()
 	client, identity, err := opts.openNativeRegisteredClient(ctx, nil, "", nil)
 	if err != nil {
+		return err
+	}
+	store, err := opts.nativeRuntime.Handoff()
+	if err != nil {
+		return err
+	}
+	if err := requireExternalOwnerScopedAgentState(ctx, store); err != nil {
 		return err
 	}
 	opts.registeredClient, opts.registeredIdentity = client, identity
