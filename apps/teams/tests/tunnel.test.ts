@@ -58,7 +58,7 @@ describe('connector tunnel rendering', () => {
     expect(yaml).toContain("connector_routing_id: 'routing_abc123'");
     expect(yaml).toContain("knock_resource_id: 'knock_abc123'");
     expect(yaml).toContain("target_url: 'http://127.0.0.1:8080'");
-    expect(yaml).toContain('desired_state: on');
+    expect(yaml).toContain("desired_state: 'on'");
     expect(yaml).toContain('serving_epoch: 7');
   });
 
@@ -214,10 +214,11 @@ describe('connector tunnel rendering', () => {
     expect(text).toContain('up -d');
     expect(text).toContain('services:');
     const script = text.slice(text.indexOf('cat > "$COMPOSE_FILE"'), text.indexOf('\n```', text.indexOf('cat > "$COMPOSE_FILE"')));
-    const output = execFileSync('bash', ['-eu', '-c', `docker() { cat "$COMPOSE_FILE"; printf '%s\\n' "$@"; }; COMPOSE_FILE=$(mktemp); trap 'rm -f "$COMPOSE_FILE"' EXIT; APP_COMPOSE_FILE=compose.yaml; WEB_SERVICE=web; AGENT_STATE_DIR=/state; SECRET_DIR=/secret; QURL_CONNECTOR_ID=prod; QURL_ENDPOINT_YAML='"https://api.sandbox.example"'; ${script}`], { encoding: 'utf8' });
+    const output = execFileSync('bash', ['-eu', '-c', `docker() { cat "$COMPOSE_FILE"; printf '%s\\n' "$@"; }; COMPOSE_FILE=$(mktemp); trap 'rm -f "$COMPOSE_FILE"' EXIT; APP_COMPOSE_FILE=compose.yaml; WEB_SERVICE=web; AGENT_STATE_DIR=/state; SECRET_DIR=/secret; CONFIG_FILE=/different/project/share.yaml; QURL_CONNECTOR_ID=prod; QURL_ENDPOINT_YAML='"https://api.sandbox.example"'; ${script}`], { encoding: 'utf8' });
     expect(output).toContain('network_mode: service:web');
     expect(output).toContain('/state:/var/lib/qurl');
     expect(output).toContain('/secret:/run/secrets/qurl:ro');
+    expect(output).toContain('/different/project/share.yaml:/etc/qurl/share.yaml:ro');
     expect(output).toContain('QURL_ENDPOINT: "https://api.sandbox.example"');
     expect(output).toContain('up\n-d\nqurl-prod');
   });

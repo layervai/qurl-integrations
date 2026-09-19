@@ -258,7 +258,7 @@ class TenantQurlClientFactory {
   async forTenant(tenantId: string, existingCredential?: TenantCredential): Promise<HttpQurlClient> {
     const credential = existingCredential ?? await this.#data.tenantCredential(tenantId).catch((error: unknown) => {
       this.#logger.error('Tenant credentials could not be read', { tenantId, error });
-      throw new UserFacingError('The saved qURL credentials could not be read. Ask your qURL operator to restore credential access or complete recovery.');
+      throw new UserFacingError('The saved qURL credentials could not be read. Please try again in a moment. If this keeps happening, ask your qURL operator to restore credential access or complete recovery.');
     });
     // Deliberately per-activity: a ConsistentRead GetItem plus a KMS Decrypt on
     // every command. No cache, so `uninstall` and credential rotation take

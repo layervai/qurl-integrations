@@ -149,7 +149,13 @@ export function normalizeActivityText(activity: TeamsActivity): string {
     const end = start === undefined || length === undefined ? -1 : start + length;
     if (typeof start === 'number' && Number.isInteger(start) && start >= 0 && typeof length === 'number' && Number.isInteger(length) && length > 0 && end <= text.length && text.slice(start, end) === entity.text) continue;
     let fallbackStart = text.indexOf(entity.text);
-    while (fallbackStart >= 0 && overlaps(fallbackStart, fallbackStart + entity.text.length)) fallbackStart = text.indexOf(entity.text, fallbackStart + 1);
+    while (fallbackStart >= 0) {
+      const overlap = usedRanges.find(range => fallbackStart < range.end && fallbackStart + entity.text!.length > range.start);
+      if (!overlap) break;
+      // Every start before this range ends overlaps it. Skip the whole range
+      // instead of scanning each character in a potentially large mention.
+      fallbackStart = text.indexOf(entity.text, overlap.end);
+    }
     if (fallbackStart >= 0) addReplacement(entity, fallbackStart, fallbackStart + entity.text.length);
   }
   for (const replacement of replacements.sort((left, right) => right.start - left.start)) {

@@ -352,7 +352,7 @@ describe('Teams production message handling', () => {
     await runtime.app.onActivity({ body: { ...activity, text: 'qurl list' }, token: { serviceUrl: activity.serviceUrl } } as never);
     await vi.waitFor(() => expect(responses).toHaveLength(1));
     expect(responses[0]).toContain('saved qURL credentials could not be read');
-    expect(responses[0]).toContain('Ask your qURL operator');
+    expect(responses[0]).toContain('ask your qURL operator');
     expect(responses[0]).not.toMatch(/command syntax|kms:v2/);
     expect(send).toHaveBeenCalledTimes(1);
     expect(send.mock.calls[0]?.[0]).toMatchObject({ input: {

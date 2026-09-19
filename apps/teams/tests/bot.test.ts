@@ -492,7 +492,8 @@ describe('Teams bot primitives', () => {
     const targets: string[] = [];
     const bot = new TeamsBot({
       qurl: {
-        listResources: async () => ({ resources: [{ resourceId: 'a', type: 'url', slug: 'payroll' }, { resourceId: 'b', type: 'url', slug: 'docs' }] }),
+        listResources: async () => { throw new Error('alias mutations must not enumerate the account'); },
+        getResource: async (resourceId: string) => ({ resourceId, type: 'url', slug: 'payroll' }),
         create: async ({ resourceId }: { resourceId: string }) => { targets.push(resourceId); return { resourceId, qurlLink: 'https://qurl.example/one' }; },
         deleteResource: async (id: string) => { targets.push(id); },
         updateResource: async (id: string) => { targets.push(id); },

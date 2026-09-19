@@ -241,14 +241,12 @@ export class TeamsBot {
       await this.#options.data.purgeResourceFromTenant(tenantId, resourceId, signal);
       return `Resource \`$${resource.crid ?? token}\` is revoked or already unavailable to this account.`;
     }
-    const resources = command.verb === 'protect-url' && command.args[0]?.toLowerCase().startsWith('url:')
-      ? [] : await this.resources(qurl, signal);
-    if (command.verb === 'list') return this.list(tenantId, scopeId, resources);
-    if (command.verb === 'protect-url') return this.protectUrl(qurl, activity, tenantId, scopeId, resources, command, signal);
-    if (command.verb === 'set-alias') return this.setAlias(qurl, tenantId, scopeId, resources, command, signal);
+    if (command.verb === 'list') return this.list(tenantId, scopeId, await this.resources(qurl, signal));
+    if (command.verb === 'protect-url') return this.protectUrl(qurl, activity, tenantId, scopeId, command, signal);
+    if (command.verb === 'set-alias') return this.setAlias(qurl, tenantId, scopeId, command, signal);
     if (command.verb === 'set-display-name' || command.verb === 'unset-display-name') {
       const setting = command.verb === 'set-display-name';
-      const resource = await this.resolveInScope(tenantId, scopeId, resources, command.resource ?? '');
+      const resource = await this.resolveInScope(qurl, tenantId, scopeId, command.resource ?? '', signal);
       await qurl.updateResource(resource.resourceId, setting ? command.text ?? '' : '', signal);
       return `${setting ? 'Updated' : 'Reset'} display name for \`$${resource.crid ?? resource.resourceId}\`.`;
     }
@@ -322,9 +320,18 @@ export class TeamsBot {
     return resource;
   }
 
-  async resolveInScope(tenantId: string, scopeId: string, resources: readonly QurlResource[], token: string): Promise<QurlResource> {
-    const resourceId = await this.#options.data.lookupScopeAlias(tenantId, scopeId, token);
-    return this.resolve(resources, resourceId ?? token);
+  async resolveInScope(qurl: QurlClient, tenantId: string, scopeId: string, token: string, signal?: AbortSignal): Promise<QurlResource> {
+    const aliasResourceId = await this.#options.data.lookupScopeAlias(tenantId, scopeId, token);
+    const resourceId = aliasResourceId ?? (/^([a-z2-7]{47}|[a-z2-7]{60}|[A-Za-z0-9_-]{107,214})$/.test(token) ? token : undefined);
+    if (!resourceId) return this.resolve(await this.resources(qurl, signal), token);
+    try {
+      const resource = await qurl.getResource(resourceId, signal);
+      if (resource.status === 'revoked') throw new UserFacingError('Resource not found.');
+      return resource;
+    } catch (error) {
+      if (error instanceof QurlHttpError && (error.status === 404 || error.status === 410)) throw new UserFacingError('Resource not found.');
+      throw error;
+    }
   }
 
   async get(qurl: QurlClient, activity: TeamsActivity, tenantId: string, scopeId: string, command: TeamsCommand, signal?: AbortSignal): Promise<string> {
@@ -388,7 +395,7 @@ export class TeamsBot {
     return message;
   }
 
-  async protectUrl(qurl: QurlClient, activity: TeamsActivity, tenantId: string, scopeId: string, resources: readonly QurlResource[], command: TeamsCommand, signal?: AbortSignal): Promise<string> {
+  async protectUrl(qurl: QurlClient, activity: TeamsActivity, tenantId: string, scopeId: string, command: TeamsCommand, signal?: AbortSignal): Promise<string> {
     const value = command.args[0] ?? '';
     const creating = value.toLowerCase().startsWith('url:');
     const resource = creating
@@ -397,7 +404,7 @@ export class TeamsBot {
         type: 'url',
         idempotencyKey: idempotencyKey(tenantId, scopeId, activity.from?.id ?? '', value, this.#activityIdempotencyField(activity)),
       }, signal)
-      : await this.resolveInScope(tenantId, scopeId, resources, value.replace(/^\$/, ''));
+      : await this.resolveInScope(qurl, tenantId, scopeId, value.replace(/^\$/, ''), signal);
     if (!creating && resource.type !== 'url') throw new UserFacingError('Only URL resources can be protected with protect-url');
     const resolvedAlias = command.flags.as ?? this.#channelAliasFor(resource);
     await this.#bindAlias(tenantId, scopeId, resolvedAlias, resource).catch((error: unknown) => {
@@ -429,8 +436,8 @@ export class TeamsBot {
     return candidate;
   }
 
-  async setAlias(_qurl: QurlClient, tenantId: string, scopeId: string, resources: readonly QurlResource[], command: TeamsCommand, _signal?: AbortSignal): Promise<string> {
-    const resource = await this.resolveInScope(tenantId, scopeId, resources, command.target ?? '');
+  async setAlias(qurl: QurlClient, tenantId: string, scopeId: string, command: TeamsCommand, signal?: AbortSignal): Promise<string> {
+    const resource = await this.resolveInScope(qurl, tenantId, scopeId, command.target ?? '', signal);
     const alias = command.alias ?? '';
     await this.#bindAlias(tenantId, scopeId, alias, resource);
     await this.#options.data.exposeResource(tenantId, scopeId, resource.resourceId);

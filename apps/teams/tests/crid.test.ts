@@ -29,7 +29,7 @@ function fixture(options: { legacy?: boolean; backfill?: boolean; detailStatus?:
       if (request.method === 'GET' && path === '/v1/resources') {
         return Response.json({ data: [resource()], meta: { has_more: false } });
       }
-      if (request.method === 'GET' && path === `/v1/resources/${CRID}`) {
+      if (request.method === 'GET' && [ `/v1/resources/${CRID}`, `/v1/resources/${PUBLIC_KEY}` ].includes(path)) {
         return options.detailStatus
           ? Response.json({ error: { code: 'resource_not_found' } }, { status: options.detailStatus })
           : Response.json({ data: { resource: resource(), qurls: [] } });
@@ -99,6 +99,7 @@ describe('CRIDs at the Teams command boundary', () => {
     const reply = await execute(`${prefix} $${CRID}${suffix}`);
     expect(reply).toContain(`$${CRID}`);
     expect(reply).not.toContain(PUBLIC_KEY);
+    expect(requests.filter(request => request.method === 'GET').map(request => new URL(request.url).pathname)).toEqual([`/v1/resources/${CRID}`]);
     if (prefix.includes('display-name')) {
       const request = requests.at(-1)!;
       expect(request.method).toBe('PATCH');

@@ -145,7 +145,7 @@ shares:
     target_url: ${targetUrl}
     local_ip: 127.0.0.1
     local_port: ${args.port}
-    desired_state: on
+    desired_state: 'on'
     serving_epoch: ${args.servingEpoch}`;
 }
 
@@ -292,7 +292,7 @@ services:
     volumes:
       - \${AGENT_STATE_DIR}:/var/lib/qurl
       - \${SECRET_DIR}:/run/secrets/qurl:ro
-      - ./qurl-share-${args.slug}.yaml:/etc/qurl/share.yaml:ro
+      - \${CONFIG_FILE}:/etc/qurl/share.yaml:ro
     entrypoint: /usr/local/bin/qurl
     command:
       - daemon
