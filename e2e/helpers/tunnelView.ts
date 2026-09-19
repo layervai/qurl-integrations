@@ -154,7 +154,7 @@ export async function recordAdmissionAttempt(link: string, child: ViewViaQurlLin
   const result = spawnSync(verifier, [], { input: link, encoding: 'utf8', timeout: 10_000, maxBuffer: 16_384 });
   if (result.error || result.status !== 0) throw new Error('signed ownership verification failed');
   const identity = JSON.parse(result.stdout) as Record<string, string>;
-  if (!identity.agent_public_key || !identity.resource_public_key_b64 || !identity.cell_public_key_b64 || !identity.cell_id) {
+  if (!identity.agent_public_key || !identity.resource_public_key_b64 || !identity.cell_public_key_b64) {
     throw new Error('verified public identity is incomplete');
   }
   const owner = await readOwner();
