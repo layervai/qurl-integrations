@@ -43,6 +43,9 @@ const logger = require('../logger');
 const {
   DM_STATUS,
   AUDIT_EVENTS,
+  SETUP_VIA,
+  normalizeSetupVia,
+  describeSetupVia,
   DDB_TRANSACTION_MAX_ACTIONS,
   ddbSendConfigGuardActionCount,
   ddbSendConfigGuardFitsTransaction,
@@ -1524,7 +1527,60 @@ async function getGuildApiKey(guildId) {
   return res.Item ? decrypt(res.Item.qurl_api_key) : null;
 }
 
-async function setGuildApiKey(guildId, apiKey, configuredBy) {
+// Observability around a key write must never fail that write, before or
+// after it lands.
+function bestEffortLog(emit) {
+  try { emit(); } catch { /* observability must never fail the key write */ }
+}
+
+// Emits qurl_setup_admin_changed when a landed setGuildApiKey write rebinds an
+// already-configured guild. `prior` holds only non-secret fields derived from
+// the write's UPDATED_OLD attributes. It never throws.
+function auditSetupAdminChange(prior, { guildId, configuredBy, door }) {
+  // The write has landed: nothing here may surface as a write failure (or
+  // qurl-oauth.js would revoke the key it just stored), and any failure,
+  // including an ID coercion, leaves an error line instead of vanishing.
+  try {
+    // String() keeps a numeric or BigInt caller ID from paging on every re-key.
+    // A falsy ID (missing or hand-edited to '') reports null, the documented damaged-row value.
+    const oldAdminId = prior.configuredBy ? String(prior.configuredBy) : null;
+    const newAdminId = configuredBy ? String(configuredBy) : null;
+    const priorHadKey = prior.hadKey;
+    // Either prior attribute means the guild was already configured, even when a
+    // hand edit or partial rollback dropped the other. Unlike shouldPromptConsent
+    // (guild-config-state.js), which treats a row without configured_by as a
+    // first install, the alarm biases toward paging; a missing admin reports null.
+    if (!(priorHadKey || oldAdminId !== null) || oldAdminId === newAdminId) return;
+    logger.audit(AUDIT_EVENTS.QURL_SETUP_ADMIN_CHANGED, {
+      guild_id: guildId,
+      old_admin_id: oldAdminId,
+      new_admin_id: newAdminId,
+      // Separates a damaged configured row (key, no configured_by) from a
+      // healthy rebind when old_admin_id or prior_configured_at is null.
+      prior_had_key: priorHadKey,
+      via: door,
+      // configured_at is the guild's stable first-setup time. updated_at is the
+      // last write of any kind (webhook writes stamp it too), not the binding's
+      // age; it is a control: always overwritten here, so non-null with a null
+      // prior_configured_at shows UPDATED_OLD elided the if_not_exists no-op.
+      prior_configured_at: prior.configuredAt ?? null,
+      prior_updated_at: prior.updatedAt ?? null,
+    });
+  } catch (err) {
+    bestEffortLog(() => logger.error('Failed to emit setup admin-change audit after a landed write', {
+      error: err?.message, guildId,
+    }));
+  }
+}
+
+// `via` (a SETUP_VIA value) names the setup door for the admin-change audit.
+async function setGuildApiKey(guildId, apiKey, configuredBy, via) {
+  const door = normalizeSetupVia(via);
+  // Validate on every call so caller drift (including a forgotten argument)
+  // shows up on first setups too; such doors audit as unknown.
+  if (door === SETUP_VIA.UNKNOWN) {
+    bestEffortLog(() => logger.warn('Unrecognized setup door; any admin-change audit for this write records via=unknown', { ...describeSetupVia(via), guildId }));
+  }
   const now = nowIso();
   // SQLite's `ON CONFLICT(guild_id) DO UPDATE SET qurl_api_key=…,
   // configured_by=…, updated_at=…` deliberately preserved
@@ -1534,7 +1590,7 @@ async function setGuildApiKey(guildId, apiKey, configuredBy) {
   // row, including resetting configured_at. Mirror createLink's
   // shape: UpdateCommand with `if_not_exists(configured_at, :u)`
   // so first-write sets it and re-keys leave it alone.
-  await ddb.send(new UpdateCommand({
+  const res = await ddb.send(new UpdateCommand({
     TableName: TABLES.guild_configs,
     Key: { guild_id: guildId },
     UpdateExpression: 'SET qurl_api_key = :k, configured_by = :b, updated_at = :u, configured_at = if_not_exists(configured_at, :u)',
@@ -1543,13 +1599,32 @@ async function setGuildApiKey(guildId, apiKey, configuredBy) {
       ':b': configuredBy,
       ':u': now,
     },
+    // Return old values for touched attrs: keeps the old configured_by
+    // read atomic with the re-key without returning the entire previous
+    // guild_configs row. DynamoDB also returns the old encrypted
+    // qurl_api_key because it is touched by this update; leave it
+    // unread so the audit payload never carries key material. prior
+    // configured_at relies on UPDATED_OLD also covering the if_not_exists
+    // no-op on a re-key. scripts/smoke-setup-audit.js checks this with real
+    // writes (DynamoDB Local in CI; --aws for a disposable sandbox table).
+    ReturnValues: 'UPDATED_OLD',
   }));
+  // Hand the helper only the non-secret prior fields: the old encrypted key is
+  // reduced to a presence flag here, so it is structurally out of reach.
+  const prior = res?.Attributes ?? {};
+  auditSetupAdminChange({
+    configuredBy: prior.configured_by,
+    configuredAt: prior.configured_at,
+    updatedAt: prior.updated_at,
+    hadKey: 'qurl_api_key' in prior,
+  }, { guildId, configuredBy, door });
 }
 
-// Raw delete. No qurl-service subscription teardown. Today there is
-// no production caller; a future /qurl unlink admin command MUST
-// add an orchestrator that issues DELETE /v1/webhooks/{id} BEFORE
-// calling this, or it'll orphan the subscription on qurl-service.
+// Raw delete. No qurl-service subscription teardown. Today there is no
+// production caller; a future /qurl unlink orchestrator must perform
+// reference-aware cleanup before calling this, or explicitly record the orphan
+// for later reconciliation. Unconditional deletion can break sibling guilds
+// that share the subscription; see #1380.
 async function _removeGuildApiKeyRaw(guildId) {
   const res = await ddb.send(new DeleteCommand({
     TableName: TABLES.guild_configs,
@@ -1585,7 +1660,7 @@ async function getGuildConfigWithApiKey(guildId) {
   return { ...row, qurl_api_key: row.qurl_api_key ? decrypt(row.qurl_api_key) : row.qurl_api_key };
 }
 
-// ── Per-guild qurl-service webhook subscriptions (BYOK view counter) ──
+// ── Guild webhook linkage (default-owner mapping + BYOK subscriptions) ──
 
 // webhook_secret stored encrypted (same envelope as qurl_api_key).
 // webhook_id + webhook_owner_id stored plain — neither is a credential
@@ -1619,10 +1694,147 @@ async function setGuildWebhookSubscription(guildId, { webhookId, webhookSecret, 
   }));
 }
 
+function decryptDefaultOwnerGuildApiKey(ciphertext) {
+  // A missing row / key also lands on DEFAULT_WEBHOOK_OWNER_KEY_CHANGED: the
+  // caller's setGuildApiKey write must precede this, so the row was removed.
+  if (!ciphertext) return null;
+  try {
+    return decrypt(ciphertext);
+  } catch (cause) {
+    const err = new Error('setGuildDefaultWebhookOwner: stored guild API key could not be decrypted', { cause });
+    err.code = 'DEFAULT_WEBHOOK_OWNER_KEY_INVALID';
+    throw err;
+  }
+}
+
+// Webhook attributes the default-owner conversion must see unchanged.
+const DEFAULT_OWNER_CAS_FIELDS = [
+  ['webhook_secret', ':storedSecret'],
+  ['webhook_id', ':storedWebhookId'],
+  ['webhook_owner_id', ':storedOwner'],
+];
+
+function defaultOwnerKeyChangedError() {
+  const err = new Error('setGuildDefaultWebhookOwner: guild API key changed during owner resolution');
+  err.code = 'DEFAULT_WEBHOOK_OWNER_KEY_CHANGED';
+  return err;
+}
+
+// Associate a guild with the bot's default-key owner without copying the
+// default subscription's secret into the guild row. Removing any prior
+// webhook_id / webhook_secret is load-bearing: scanGuildSubscriptions prefers
+// complete DDB rows over the synthetic QURL_WEBHOOK_SECRET entry, so leaving a
+// stale per-guild secret here would shadow the default secret after a re-link.
+async function setGuildDefaultWebhookOwner(
+  guildId, { webhookOwnerId, expectedDefaultWebhookSecret, expectedApiKey },
+) {
+  if (!guildId || !webhookOwnerId || !expectedDefaultWebhookSecret || !expectedApiKey) {
+    throw new Error('setGuildDefaultWebhookOwner: guildId, webhookOwnerId, expectedDefaultWebhookSecret, and expectedApiKey required');
+  }
+
+  // A same-owner row produced by the old link path may hold the only secret
+  // that still matches qurl-service after it rotated the default subscription.
+  // Never delete that working recovery value unless it agrees with the
+  // environment secret the owner-only registry entry will use. State from a
+  // different owner is superseded by the already-persisted API-key re-link.
+  const current = await ddb.send(new GetCommand({
+    TableName: TABLES.guild_configs,
+    Key: { guild_id: guildId },
+    ConsistentRead: true,
+  }));
+  const row = current.Item;
+  if (!row || decryptDefaultOwnerGuildApiKey(row.qurl_api_key) !== expectedApiKey) {
+    throw defaultOwnerKeyChangedError();
+  }
+  const hasStoredSecret = Object.hasOwn(row, 'webhook_secret');
+  if (hasStoredSecret && !row.webhook_owner_id) {
+    const err = new Error('setGuildDefaultWebhookOwner: stored webhook secret has no owner');
+    err.code = 'DEFAULT_WEBHOOK_OWNER_MISSING';
+    throw err;
+  }
+  if (hasStoredSecret && row.webhook_owner_id === webhookOwnerId) {
+    let storedSecret;
+    try {
+      storedSecret = decrypt(row.webhook_secret);
+    } catch (cause) {
+      const err = new Error('setGuildDefaultWebhookOwner: stored webhook secret could not be decrypted', { cause });
+      err.code = 'DEFAULT_WEBHOOK_SECRET_CONFLICT';
+      throw err;
+    }
+    if (storedSecret !== expectedDefaultWebhookSecret) {
+      const err = new Error('setGuildDefaultWebhookOwner: stored webhook secret does not match QURL_WEBHOOK_SECRET');
+      err.code = 'DEFAULT_WEBHOOK_SECRET_CONFLICT';
+      throw err;
+    }
+  }
+
+  // A different-owner subscription is not deleted here: the new key cannot
+  // authorize deletion for the prior owner, and sibling guilds may still share
+  // it. A reference-aware reconciler is tracked in #1380.
+
+  const conditions = ['qurl_api_key = :storedApiKey'];
+  const values = {
+    ':woid': webhookOwnerId,
+    ':u': nowIso(),
+    ':storedApiKey': row.qurl_api_key,
+  };
+  for (const [field, placeholder] of DEFAULT_OWNER_CAS_FIELDS) {
+    if (Object.hasOwn(row, field)) {
+      conditions.push(`${field} = ${placeholder}`);
+      values[placeholder] = row[field];
+    } else {
+      conditions.push(`attribute_not_exists(${field})`);
+    }
+  }
+
+  const update = {
+    TableName: TABLES.guild_configs,
+    Key: { guild_id: guildId },
+    ConditionExpression: conditions.join(' AND '),
+    UpdateExpression: 'REMOVE webhook_id, webhook_secret SET webhook_owner_id = :woid, updated_at = :u',
+    ExpressionAttributeValues: values,
+  };
+  try {
+    await ddb.send(new UpdateCommand(update));
+  } catch (err) {
+    if (err?.name !== 'ConditionalCheckFailedException') throw err;
+
+    // Two identical links can race after reading the same old row. Treat the
+    // condition failure as success only when a strong re-read proves the
+    // desired owner-only state already won; every other race still fails.
+    const latest = await ddb.send(new GetCommand({
+      TableName: TABLES.guild_configs,
+      Key: { guild_id: guildId },
+      ConsistentRead: true,
+    }));
+    const latestRow = latest.Item;
+    const latestApiKey = decryptDefaultOwnerGuildApiKey(latestRow?.qurl_api_key);
+    if (latestApiKey !== expectedApiKey) throw defaultOwnerKeyChangedError();
+    const achieved = latestRow.webhook_owner_id === webhookOwnerId
+      && !Object.hasOwn(latestRow, 'webhook_id')
+      && !Object.hasOwn(latestRow, 'webhook_secret');
+    if (achieved) return;
+    const onlyKeyReencrypted = latestRow.qurl_api_key !== row.qurl_api_key
+      && DEFAULT_OWNER_CAS_FIELDS.every(([field]) =>
+        Object.hasOwn(latestRow, field) === Object.hasOwn(row, field)
+        && latestRow[field] === row[field]);
+    // Any other concurrent change maps to the documented KEY_CHANGED recovery.
+    if (!onlyKeyReencrypted) throw defaultOwnerKeyChangedError();
+    // Retry once for unchanged plaintext with new encryption randomness. Keep
+    // every webhook CAS predicate; a second concurrent mutation still fails,
+    // under the documented KEY_CHANGED code (recovery: re-run /qurl setup).
+    await ddb.send(new UpdateCommand({
+      ...update,
+      ExpressionAttributeValues: { ...values, ':storedApiKey': latestRow.qurl_api_key },
+    })).catch((retryErr) => {
+      throw retryErr?.name === 'ConditionalCheckFailedException' ? defaultOwnerKeyChangedError() : retryErr;
+    });
+  }
+}
+
 // REMOVE the three webhook_* attributes; leaves the API key row intact.
-// Used when a guild rotates to a key whose owner_id differs from the
-// previous one and the caller has already DELETE'd the old subscription
-// (or accepted the orphan).
+// A future caller must first prove no sibling references the old subscription
+// before deleting it, or explicitly record/accept the orphan; see #1380.
 async function clearGuildWebhookSubscription(guildId) {
   await ddb.send(new UpdateCommand({
     TableName: TABLES.guild_configs,
@@ -1632,11 +1844,9 @@ async function clearGuildWebhookSubscription(guildId) {
   }));
 }
 
-// Reference-counting helper for the unlink path. Returns all guild_ids
-// (including the caller's guild_id, if any) currently associated with
-// the given webhook_owner_id. The caller decides whether to issue
-// DELETE on qurl-service based on the count (don't kill sibling guilds
-// that share the same auth0 admin's API key).
+// Returns complete DDB-backed subscription rows for one webhook owner.
+// Owner-only default mappings are excluded because they have no subscription
+// state to propagate; this is not a reference-counting API for unlink cleanup.
 //
 // ConsistentRead because the link-time caller (propagateGuildWebhookSubscription)
 // runs IMMEDIATELY after a setGuildWebhookSubscription write — an
@@ -1649,7 +1859,7 @@ async function clearGuildWebhookSubscription(guildId) {
 // callback hits this via propagateGuildWebhookSubscription, so the
 // link-path cost is O(table_size) per call — same fix as the
 // 30s priming scan, single migration covers both.
-async function listGuildSubscriptionsByOwner(webhookOwnerId) {
+async function listCompleteGuildSubscriptionsByOwner(webhookOwnerId) {
   const rows = await scanAll(TABLES.guild_configs, { consistentRead: true });
   return rows
     .filter(r => r.webhook_owner_id === webhookOwnerId && r.webhook_id)
@@ -1663,8 +1873,8 @@ async function listGuildSubscriptionsByOwner(webhookOwnerId) {
 // deterministically pick on Scan-order tiebreak.
 //
 // `excludeGuildId` (optional): skip this guild — the caller has
-// already persisted it. Returns counts of rows updated/failed (the
-// excluded guild is not counted).
+// already persisted it. Returns counts of rows updated/failed/skipped (the
+// excluded guild is not counted; CAS races are skipped).
 async function propagateGuildWebhookSubscription(
   webhookOwnerId,
   { webhookId, webhookSecret, excludeGuildId },
@@ -1672,16 +1882,15 @@ async function propagateGuildWebhookSubscription(
   if (!webhookOwnerId || !webhookId || !webhookSecret) {
     throw new Error('propagateGuildWebhookSubscription: webhookOwnerId, webhookId, webhookSecret all required');
   }
-  const allMatches = await listGuildSubscriptionsByOwner(webhookOwnerId);
+  const allMatches = await listCompleteGuildSubscriptionsByOwner(webhookOwnerId);
   // Common case for a first-time admin: only the just-written primary
   // row matches the owner. Short-circuit before the scan-filter pass.
   if (excludeGuildId && allMatches.length === 1 && allMatches[0].guildId === excludeGuildId) {
-    return { updated: 0, failed: 0 };
+    return { updated: 0, failed: 0, skipped: 0 };
   }
-  const siblings = excludeGuildId
-    ? allMatches.filter(s => s.guildId !== excludeGuildId)
-    : allMatches;
-  if (siblings.length === 0) return { updated: 0, failed: 0 };
+  // webhookId feeds the CAS below; a row without one has nothing to propagate.
+  const siblings = allMatches.filter(s => s.webhookId && s.guildId !== excludeGuildId);
+  if (siblings.length === 0) return { updated: 0, failed: 0, skipped: 0 };
 
   const updatedAt = nowIso();
   const encryptedSecret = encrypt(webhookSecret);
@@ -1689,27 +1898,33 @@ async function propagateGuildWebhookSubscription(
     TableName: TABLES.guild_configs,
     Key: { guild_id: s.guildId },
     UpdateExpression: 'SET webhook_id = :wid, webhook_secret = :wsec, updated_at = :u',
+    // listCompleteGuildSubscriptionsByOwner drops rows without webhook_id (owner-only
+    // mappings), so :expectedWebhookId is always defined here.
     // Defense against a race where the row was cleared between
-    // listGuildSubscriptionsByOwner and this write — never mint
+    // listCompleteGuildSubscriptionsByOwner and this write — never mint
     // subscription state on a row that opted out.
-    ConditionExpression: 'attribute_exists(webhook_owner_id)',
+    ConditionExpression: 'webhook_owner_id = :expectedOwner AND webhook_id = :expectedWebhookId',
     ExpressionAttributeValues: {
       ':wid': webhookId,
       ':wsec': encryptedSecret,
       ':u': updatedAt,
+      ':expectedOwner': webhookOwnerId,
+      ':expectedWebhookId': s.webhookId,
     },
   }))));
 
   let updated = 0;
   let failed = 0;
+  let skipped = 0;
   for (const r of results) {
     if (r.status === 'fulfilled') { updated += 1; continue; }
-    // ConditionalCheckFailedException = sibling cleared between
-    // list and write; benign, not a failure.
-    if (r.reason?.name === 'ConditionalCheckFailedException') continue;
+    // ConditionalCheckFailedException = sibling cleared, converted to an
+    // owner-only mapping, or re-linked between list and write. The winning
+    // concurrent state is authoritative; count it separately from failures.
+    if (r.reason?.name === 'ConditionalCheckFailedException') { skipped += 1; continue; }
     failed += 1;
   }
-  return { updated, failed };
+  return { updated, failed, skipped };
 }
 
 // Returns every guild_configs row with a provisioned webhook
@@ -1737,6 +1952,9 @@ async function scanGuildSubscriptions() {
   let provisionedCount = 0;
   let decryptFailCount = 0;
   for (const r of rows) {
+    // Owner-only default mappings are relationship records, not secret-bearing
+    // cache entries. Omitting them lets scanOnce synthesize the default entry
+    // from QURL_WEBHOOK_SECRET.
     if (!r.webhook_id || !r.webhook_secret || !r.webhook_owner_id) continue;
     provisionedCount += 1;
     let webhookSecret;
@@ -1856,8 +2074,8 @@ module.exports = {
   // Guild configs
   getGuildApiKey, setGuildApiKey, _removeGuildApiKeyRaw, getGuildConfig, getGuildConfigWithApiKey,
   // Per-guild webhook subscriptions (BYOK view counter)
-  setGuildWebhookSubscription, clearGuildWebhookSubscription,
-  listGuildSubscriptionsByOwner, scanGuildSubscriptions, propagateGuildWebhookSubscription,
+  setGuildWebhookSubscription, setGuildDefaultWebhookOwner, clearGuildWebhookSubscription,
+  listCompleteGuildSubscriptionsByOwner, scanGuildSubscriptions, propagateGuildWebhookSubscription,
   // Lifecycle
   close, healthCheck,
   // Test-only: surface the prefixed table-name map so

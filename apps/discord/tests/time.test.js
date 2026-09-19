@@ -18,6 +18,7 @@ const {
   isLegitimateSelfDestructSelectValue,
   SELF_DESTRUCT_PRESETS,
   SELF_DESTRUCT_NO_TIMER_VALUE,
+  settlesWithin,
 } = require('../src/utils/time');
 
 describe('utils/time', () => {
@@ -231,5 +232,43 @@ describe('utils/time', () => {
       expect(() => expiryToISO('not-a-duration')).not.toThrow();
       expect(() => expiryToISO(null)).not.toThrow();
     });
+  });
+});
+
+describe('settlesWithin', () => {
+  it('reports true when the work settles (resolve or reject) in time', async () => {
+    await expect(settlesWithin(Promise.resolve('x'), 1000)).resolves.toBe(true);
+    await expect(settlesWithin(Promise.reject(new Error('x')), 1000)).resolves.toBe(true);
+  });
+
+  it('never surfaces a late rejection after the budget elapsed', async () => {
+    jest.useFakeTimers();
+    const unhandled = jest.fn();
+    process.on('unhandledRejection', unhandled);
+    try {
+      let reject;
+      const work = new Promise((_, r) => { reject = r; });
+      const result = settlesWithin(work, 1000);
+      await jest.advanceTimersByTimeAsync(1000);
+      await expect(result).resolves.toBe(false);
+      reject(new Error('late cleanup failure'));
+      await jest.advanceTimersByTimeAsync(0);
+      await Promise.resolve();
+      expect(unhandled).not.toHaveBeenCalled();
+    } finally {
+      process.off('unhandledRejection', unhandled);
+      jest.useRealTimers();
+    }
+  });
+
+  it('reports false once the wait budget elapses', async () => {
+    jest.useFakeTimers();
+    try {
+      const result = settlesWithin(new Promise(() => {}), 1000);
+      await jest.advanceTimersByTimeAsync(1000);
+      await expect(result).resolves.toBe(false);
+    } finally {
+      jest.useRealTimers();
+    }
   });
 });

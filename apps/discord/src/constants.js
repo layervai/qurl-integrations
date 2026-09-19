@@ -110,6 +110,10 @@ const MAX_FILE_SIZE = 25 * 1024 * 1024;
 // without DDB_TABLE_PREFIX), and a copy in the script had no way to notice
 // this one moving.
 const TOKENS_PER_RESOURCE = 10;
+// Over-minted children beyond the requested count that mint-failure
+// compensation still revokes (commands.js 2xx path and connector.js non-2xx
+// partial path); further overflow ids are only logged for reconciliation.
+const MAX_OVERFLOW_REVOKE_IDS = 20;
 
 // Cap on concurrent link-status monitors. Each monitor fires setInterval
 // up to 1 hour; a burst of sends could otherwise stack dozens of timers.
@@ -149,13 +153,22 @@ const GOOD_FIRST_ISSUE_PATTERNS = [
   'help wanted',
 ];
 
+// Stable structured-log event names that are queryable operational signals,
+// but are not audit events or CloudWatch metrics. They ride on prefixed text
+// log lines, so query them as substrings; JSON field filters do not apply.
+const LOG_EVENTS = Object.freeze({
+  QURL_OAUTH_AUTH0_CONNECTION_POLICY: 'qurl_oauth_auth0_connection_policy',
+  QURL_WEBHOOK_OWNER_DISCOVERY_PAGE_BUDGET: 'qurl_webhook_owner_discovery_page_budget',
+});
+
 // Canonical event names emitted via logger.audit(). The CloudWatch metric
 // filters at qurl-integrations-infra/qurl-bot-discord/terraform/main.tf
 // pattern-match these strings, so a typo at a call site silently disables
 // the metric. Always import from here rather than passing literal strings.
-// Adding a new event: add the constant here, the call site, AND the
+// Adding a new metric event: add the constant here, the call site, AND the
 // terraform filter (in the same merge train, since the filter is a no-op
-// without the emission and vice versa).
+// without the emission and vice versa). A query-only forensic event may omit
+// the filter when its entry documents that exception explicitly.
 //
 // Scope: this set covers events the qURL service cannot see — transport-
 // layer (DM dispatch), bulk-revoke outcomes (per-link API calls happen
@@ -221,6 +234,17 @@ const AUDIT_EVENTS = {
   // dashboard from counting all-failed revokes as successes.
   REVOKE_SUCCESS: 'revoke_success',
   REVOKE_FAILED: 'revoke_failed',
+
+  // Emitted after an OAuth-minted guild key is persisted. This is a forensic
+  // Logs Insights trail while #1366 is outstanding, not a metric; no Terraform
+  // filter is paired intentionally. The Auth0 subject is represented by a
+  // keyed, pseudonymous fingerprint that changes when its HMAC key rotates.
+  // The low-cardinality key-epoch tag makes that boundary observable; compare
+  // fingerprints only within one epoch. #1366 owns durable identity and
+  // rotation semantics. The other payload fields (guild_id, configured_by,
+  // and the fingerprint) are high cardinality and MUST NOT be promoted to
+  // CloudWatch metric dimensions.
+  QURL_GUILD_KEY_CONFIGURED: 'qurl_guild_key_configured',
 
   // Emitted by gateway-health.js on every /health response that
   // returns 503. Carries `reason: 'not_ready' | 'sampler_threw'`
@@ -443,6 +467,28 @@ const AUDIT_EVENTS = {
   // matter until someone tries to use it.
   DEPENDENCY_AUTH_FAILURE: 'dependency_auth_failure',
 
+  // Emitted by setGuildApiKey when a successful guild setup (OAuth callback or
+  // `/qurl setup` paste) rebinds an existing guild to a different configured_by
+  // admin. TODO(upstream-contract): keep qurl-integrations-infra's
+  // qurl_setup_admin_changed CloudWatch filter/alarm in sync with this string
+  // (pinned literally in ddb-store.test.js). Scope: an administrator change
+  // only; a same-admin key replacement (e.g. a compromised admin session
+  // swapping in another key) is not covered (see #1455). Best-effort, with
+  // three known blind spots: (1) deleting the configuration first (a whole-row
+  // delete, _removeGuildApiKeyRaw, with no production caller today) leaves no
+  // prior administrator to compare (#1455); (2) a retried or double-submitted
+  // write that already landed reads the new admin back as the old one, and the
+  // SDK's own retries on throttling or dropped connections make this
+  // infrastructure-driven, not only user-driven; (3) a damaged row that lost
+  // configured_by, rebound by a caller that also omits configuredBy, compares
+  // null to null and stays silent. Guild/admin IDs are forensic fields, never
+  // CloudWatch metric dimensions. Only human setup flows may call
+  // setGuildApiKey: a backfill or admin tool writing a synthetic configured_by
+  // would page on every already-configured guild. Extension point: such a
+  // writer should get its own non-auditing SETUP_VIA door that
+  // auditSetupAdminChange skips.
+  QURL_SETUP_ADMIN_CHANGED: 'qurl_setup_admin_changed',
+
   // qURL webhook receiver — feeds CloudWatch metric filters +
   // alarms managed in the deploying organization's infrastructure
   // (separate from this repo). Flat counters only: do NOT promote
@@ -482,6 +528,8 @@ const AUDIT_EVENTS = {
   // binary (success has its own event below).
   QURL_WEBHOOK_SUBSCRIPTION_REGISTERED: 'qurl_webhook_subscription_registered',
   QURL_WEBHOOK_SUBSCRIPTION_REGISTER_FAILED: 'qurl_webhook_subscription_register_failed',
+  // Peer: qurl-integrations-infra install_monitoring.tf.
+  OAUTH_RATE_LIMIT_HARD_CAP: 'oauth_rate_limit_hard_cap',
   QURL_WEBHOOK_SUBSCRIPTION_DELETE_FAILED: 'qurl_webhook_subscription_delete_failed',
   // Per-row decrypt failure during scanGuildSubscriptions. Sustained
   // rate = KMS key rotation drift, partial migration, or manual DDB
@@ -633,6 +681,32 @@ const GATEWAY_DISPATCH_TYPES = Object.freeze({
   INTERACTION_CREATE: 'INTERACTION_CREATE',
 });
 
+// Setup door recorded on the qurl_setup_admin_changed audit (CloudWatch/Logs
+// Insights) and, normalized the same way, in guild-webhook-link.js's persisted
+// qurl-service subscription description (`via=<value>`; the backfill script
+// writes its own `via=backfill-script`). Renaming a value forks both. An enum
+// so a typo cannot silently split a grouping. OAUTH deliberately covers both
+// /oauth/qurl/callback entries (`/qurl setup` and the install link): the signed
+// state carries no stage marker.
+const SETUP_VIA = Object.freeze({
+  OAUTH: 'oauth',
+  PASTE: 'paste',
+  UNKNOWN: 'unknown',
+});
+// UNKNOWN is an output sentinel, not a door a caller may pass.
+const SETUP_VIA_DOORS = new Set(Object.values(SETUP_VIA).filter((v) => v !== SETUP_VIA.UNKNOWN));
+// Omitted, unrecognized or sentinel doors collapse to UNKNOWN.
+function normalizeSetupVia(via) {
+  return SETUP_VIA_DOORS.has(via) ? via : SETUP_VIA.UNKNOWN;
+}
+// Log-safe description of an unrecognized door: echo only short, letter-led
+// slugs (well below secret length, case kept so a case typo is visible), so a
+// misplaced argument such as an API key or token never reaches the logs.
+function describeSetupVia(via) {
+  const text = String(via);
+  return { via: /^[A-Za-z][A-Za-z0-9_-]{0,15}$/.test(text) ? text : '[unrecognized]', via_type: typeof via };
+}
+
 // Use one tag for gateway and worker rejection alerts.
 const LOG_KINDS = Object.freeze({
   UNHANDLED_REJECTION: 'unhandledRejection',
@@ -650,13 +724,18 @@ module.exports = {
   ddbSendConfigGuardFitsTransaction,
   MAX_FILE_SIZE,
   TOKENS_PER_RESOURCE,
+  MAX_OVERFLOW_REVOKE_IDS,
   MAX_CONCURRENT_MONITORS,
   DISCORD_MEMBERS_PAGE_SIZE,
   PREWARM_MAX_PAGES,
   UNLINKED_CACHE_COMPLETENESS_THRESHOLD,
   GITHUB_ACTIONS,
   GOOD_FIRST_ISSUE_PATTERNS,
+  LOG_EVENTS,
   AUDIT_EVENTS,
+  SETUP_VIA,
+  normalizeSetupVia,
+  describeSetupVia,
   QURL_WEBHOOK_EVENTS,
   TRUST,
   GATEWAY_DISPATCH_TYPES,

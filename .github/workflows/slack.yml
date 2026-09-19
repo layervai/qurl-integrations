@@ -161,8 +161,8 @@ jobs:
       # lockstep with qurl-integrations-infra's QURL_IMAGE pin.
       QURL_IMAGE: ghcr.io/layervai/qurl@sha256:5de963d335cca0a6e9a030978d7f3de6587ae1e26f369a38afbf168c04ee220a
       QURL_RELEASE_IMAGE_REQUIRED: "true"
-      # PRs #1158 and #1231 add security assertions the currently pinned
-      # immutable origin predates. Waive only that exact digest so the producer
+      # The control-char, upstream-response and request-preflight assertions
+      # postdate this immutable origin. Waive only that exact digest so the producer
       # fixes can merge and publish; behavior_test.sh rejects a malformed or
       # mismatched waiver. The pin-rotation PR must remove this line.
       S3_ORIGIN_SECURITY_WAIVER_IMAGE: "ghcr.io/layervai/qurl-integrations/s3-static-connector@sha256:808620eb60fcb128cda086f4af80f69d876bc5bef5092dfedde3d94902e1c7c3"
@@ -299,7 +299,7 @@ jobs:
     # The reusable authenticates via App secrets; the caller's GITHUB_TOKEN
     # isn't read by any step, so deny everything.
     permissions: {}
-    uses: layervai/ops-routines-workflows/.github/workflows/dispatch-deploy.yml@d07fa2fe3a103907ff2b1a1a71509a6dcd8e9d32 # v0.13.0
+    uses: layervai/ops-routines-workflows/.github/workflows/dispatch-deploy.yml@88b48c5ab3e1262018f44bbe5f4a03b94a3e39aa # v0.14.0
     with:
       target_repo: qurl-integrations-infra
       # An off-allowlist value hard-fails in the reusable; an allowlisted

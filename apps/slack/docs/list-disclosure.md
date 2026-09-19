@@ -58,10 +58,26 @@ minted from a channel where it isn't allowed:
 - `/qurl get` requires channel context and accepts only the tokens and aliases
   that `/qurl list` and `/qurl aliases` surface — never an internal resource
   identifier.
+- `/qurl crid <CRID>` is matched against the same channel allow-set before
+  minting. Knowing a resource's permanent CRID grants nothing in a channel
+  where that resource isn't available.
 
 So disclosure (what `/qurl list` reveals) and capability (what `/qurl get` will
 mint) are governed by the *same* per-channel allow-set, and capability is
 re-checked at mint time regardless of how a token was obtained.
+
+The shared boundary is the stored channel policy, not equality with the rows
+on a particular list page. A bound channel alias resolves directly from that
+policy without an upstream listing or active-resource check. CRID matching
+uses its `allowed_resource_ids` and alias-binding values; `/qurl list` uses
+the same set to filter its upstream results. Pagination or missing display
+tokens can hide an authorized resource from a list page. The shared service
+mint endpoint remains responsible for resource existence and mint eligibility.
+
+CRID mints always emit `qurl_mint_crid`. With `reason:`, they also emit
+`qurl_mint_reason`; do not sum both event types to count mints. Alias mints
+keep the existing behavior: `qurl_mint_reason` is emitted only when a reason
+is supplied. Neither audit policy changes channel authorization.
 
 ## Why this matters for operators
 

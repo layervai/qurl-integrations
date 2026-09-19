@@ -12,19 +12,20 @@ const origin = 'https://detect-test.qurl.site';
 const path = `/api/detect/discord/${guildId}`;
 const target = origin + path;
 const qurl = 'https://qurl.link/#qv2t1.test-credential';
-// Existing SDK 0.6 resource identity contract.
-const resourceId = 'MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE2ifzReg5Fb3RadAQRn_oYpEYDKDXp0InOyQpO8Wo392Hmm92wvsORreNjzdi18er8WjAQzqP3KUgkYJxjO0ZpQ';
+// SDK 2.x resource item routes take the CRID; `resource_id` stays the public key.
+const { PUBLIC_KEY_RESOURCE_ID: publicKey, CRID_RESOURCE_ID: crid } = require('./helpers/qurl-fixtures');
+const minted = (overrides = {}) => ({
+  resource_id: publicKey, crid, qurl_link: qurl, qurl_site: origin, target_path: path, ...overrides,
+});
 let detect, opener, send;
 const result = { detected: false, qurl_id: null, match_pct: null, confidence: 0 };
 beforeEach(() => {
   jest.resetModules();
   jest.clearAllMocks();
   mockClient.listAllResources.mockImplementation(async function* () {
-    yield { resource_id: resourceId, status: 'active' };
+    yield { resource_id: publicKey, crid, status: 'active' };
   });
-  mockClient.createQurlForResource.mockReset().mockResolvedValue({
-    resource_id: resourceId, qurl_link: qurl, qurl_site: origin, target_path: path,
-  });
+  mockClient.createQurlForResource.mockReset().mockResolvedValue(minted());
   send = jest.fn().mockResolvedValue({ ok: true, json: async () => result });
   opener = {
     start: jest.fn().mockResolvedValue(), close: jest.fn().mockResolvedValue(),
@@ -35,8 +36,8 @@ beforeEach(() => {
 });
 it('mints the exact guild path and sends no API key or guild header', async () => {
   await expect(detect(Buffer.from('image'), { guildId, contentType: 'image/png' })).resolves.toEqual(result);
-  expect(mockClient.createQurlForResource).toHaveBeenCalledWith(resourceId, { expires_in: '5m', session_duration: '5m', target_path: path });
-  expect(mockOpen).toHaveBeenCalledWith({ qurl });
+  expect(mockClient.createQurlForResource).toHaveBeenCalledWith(crid, { expires_in: '5m', session_duration: '5m', target_path: path });
+  expect(mockOpen).toHaveBeenCalledWith({ qurl, expectedCRID: crid });
   expect(send).toHaveBeenCalledWith(expect.objectContaining({ method: 'POST', headers: { 'Content-Type': 'image/png' } }));
   expect(opener.fetch).toHaveBeenCalledWith(expect.any(Function), { redirects: 'error' });
   expect(opener.close).toHaveBeenCalledTimes(1);
@@ -50,7 +51,7 @@ it.each([
   'https://localhost', 'https://127.0.0.1', 'http://detect-test.qurl.site',
   'https://evil.example', 'https://user:secret@detect-test.qurl.site',
 ])('rejects an untrusted minted target %s before opening', async (site) => {
-  mockClient.createQurlForResource.mockResolvedValue({ resource_id: resourceId, qurl_link: qurl, qurl_site: site, target_path: path });
+  mockClient.createQurlForResource.mockResolvedValue(minted({ qurl_site: site }));
   await expect(detect(Buffer.from('x'), { guildId })).rejects.toThrow();
   expect(mockOpen).not.toHaveBeenCalled();
   expect(send).not.toHaveBeenCalled();
@@ -62,14 +63,21 @@ it('rejects a signed ACK for another guild before sending bytes', async () => {
   expect(opener.close).toHaveBeenCalledTimes(1);
 });
 it.each(['https://qurl.link/#at_legacy', '', undefined])('rejects unsigned or missing credentials', async link => {
-  mockClient.createQurlForResource.mockResolvedValue({ resource_id: resourceId, qurl_link: link, qurl_site: origin, target_path: path });
+  mockClient.createQurlForResource.mockResolvedValue(minted({ qurl_link: link }));
   await expect(detect(Buffer.from('x'), { guildId })).rejects.toThrow(/signed native/);
   expect(send).not.toHaveBeenCalled();
 });
 it('rejects mismatched resource identity', async () => {
-  mockClient.createQurlForResource.mockResolvedValue({ resource_id: 'other', qurl_link: qurl, qurl_site: origin, target_path: path });
-  await expect(detect(Buffer.from('x'), { guildId })).rejects.toThrow(/resource_id/);
+  mockClient.createQurlForResource.mockResolvedValue(minted({ crid: 'other' }));
+  await expect(detect(Buffer.from('x'), { guildId })).rejects.toThrow(/mismatched crid/);
   expect(mockOpen).not.toHaveBeenCalled();
+});
+it('fails closed and keeps the cached CRID when the SDK rejects expectedCRID', async () => {
+  mockOpen.mockImplementationOnce(() => { throw new Error('native portal opener expectedCRID is invalid or unsupported'); });
+  await expect(detect(Buffer.from('x'), { guildId })).rejects.toThrow(/expectedCRID/);
+  expect(send).not.toHaveBeenCalled();
+  await expect(detect(Buffer.from('x'), { guildId })).resolves.toEqual(result);
+  expect(mockClient.listAllResources).toHaveBeenCalledTimes(1);
 });
 it('closes after native open failure and redacts credentials', async () => {
   opener.start.mockRejectedValue(new Error(`failed ${qurl}`));
@@ -89,20 +97,20 @@ it('keeps attribution identity from a successful response', async () => {
 it('caches only resource identity and mints anew for each guild', async () => {
   await detect(Buffer.from('x'), { guildId });
   const otherTarget = `${origin}/api/detect/discord/${otherGuild}`;
-  mockClient.createQurlForResource.mockResolvedValue({ resource_id: resourceId, qurl_link: qurl, qurl_site: origin, target_path: `/api/detect/discord/${otherGuild}` });
+  mockClient.createQurlForResource.mockResolvedValue(minted({ target_path: `/api/detect/discord/${otherGuild}` }));
   opener.fetch.mockImplementation(async build => send(build(new URL(otherTarget))));
   await detect(Buffer.from('x'), { guildId: otherGuild });
   expect(mockClient.listAllResources).toHaveBeenCalledTimes(1);
-  expect(mockClient.createQurlForResource).toHaveBeenLastCalledWith(resourceId, { expires_in: '5m', session_duration: '5m', target_path: `/api/detect/discord/${otherGuild}` });
+  expect(mockClient.createQurlForResource).toHaveBeenLastCalledWith(crid, { expires_in: '5m', session_duration: '5m', target_path: `/api/detect/discord/${otherGuild}` });
 });
-it.each([[[]], [[{ status: 'active', resource_id: resourceId }, { status: 'active', resource_id: resourceId }]]])('rejects absent or ambiguous resources', async resources => {
+it.each([[[]], [[{ status: 'active', resource_id: publicKey }]], [[{ status: 'active', resource_id: publicKey, crid }, { status: 'active', resource_id: publicKey, crid }]], [[{ status: 'active', resource_id: publicKey, crid }, { status: 'active', resource_id: `${publicKey}x`, crid: 'b'.repeat(60) }]]])('rejects absent or ambiguous resources', async resources => {
   mockClient.listAllResources.mockImplementation(async function* () { yield* resources; });
   await expect(detect(Buffer.from('x'), { guildId })).rejects.toThrow(/resource/);
   expect(mockClient.createQurlForResource).not.toHaveBeenCalled();
 });
 
 it.each([undefined, '/api/detect', `/api/detect/discord/${otherGuild}`, path + '/'])('rejects a mismatched path echo %s', async target_path => {
-  mockClient.createQurlForResource.mockResolvedValue({ resource_id: resourceId, qurl_link: qurl, qurl_site: origin, target_path });
+  mockClient.createQurlForResource.mockResolvedValue(minted({ target_path }));
   await expect(detect(Buffer.from('x'), { guildId })).rejects.toThrow(/mismatched guild path/);
   expect(mockOpen).not.toHaveBeenCalled();
 });
@@ -115,11 +123,38 @@ it('refreshes the resource after a failed mint and backs off repeated failures',
   expect(mockClient.createQurlForResource).toHaveBeenCalledTimes(2);
 });
 
+it('constructs the native opener without the optional native state store the image omits', async () => {
+  jest.doMock('@layervai/qurl-state-fs', () => { throw new Error('omitted from the image'); });
+  const { createPortalOpener } = jest.requireActual('@layervai/qurl/node');
+  const real = createPortalOpener({ qurl, expectedCRID: crid });
+  expect(typeof real.start).toBe('function');
+  await real.close();
+  jest.dontMock('@layervai/qurl-state-fs');
+});
 it('uses fetch supported by the installed native SDK', async () => {
   const { createPortalOpener } = jest.requireActual('@layervai/qurl/node');
-  const real = createPortalOpener({ qurl });
+  const real = createPortalOpener({ qurl, expectedCRID: crid });
   expect(typeof real.fetch).toBe('function');
   await real.close();
+});
+
+it('addresses the real SDK mint by CRID, not the public-key resource_id', async () => {
+  const { QURLClient: RealQURLClient } = jest.requireActual('@layervai/qurl');
+  const requests = [];
+  const json = data => new Response(JSON.stringify({ data, meta: { request_id: 'req_test' } }), {
+    status: 200, headers: { 'Content-Type': 'application/json' },
+  });
+  require('@layervai/qurl').QURLClient.mockImplementation(options => new RealQURLClient({
+    ...options,
+    fetch: async (url, init) => {
+      requests.push(`${init.method} ${new URL(url).pathname}`);
+      return init.method === 'GET'
+        ? json([{ resource_id: publicKey, crid, status: 'active' }])
+        : json(minted());
+    },
+  }));
+  await expect(detect(Buffer.from('x'), { guildId })).resolves.toEqual(result);
+  expect(requests).toEqual(['GET /v1/resources', `POST /v1/resources/${crid}/qurls`]);
 });
 
 it.each(['QURL_API_KEY', 'DETECT_TUNNEL_SLUG'])('rejects missing %s before network access', async key => {
@@ -140,7 +175,7 @@ it('accepts the configured sandbox tunnel suffix through the complete request', 
   require('../src/config').DETECT_EXTRA_NON_PROD_QURL_ENDPOINT_HOSTS = ['api.layerv.xyz'];
   detect = require('../src/connector').detectWatermark;
   const site = 'https://detect-test.qurl.site.layerv.xyz';
-  mockClient.createQurlForResource.mockResolvedValue({ resource_id: resourceId, qurl_link: qurl, qurl_site: site, target_path: path });
+  mockClient.createQurlForResource.mockResolvedValue(minted({ qurl_site: site }));
   opener.fetch.mockImplementation(async build => send(build(new URL(site + path))));
   await expect(detect(Buffer.from('x'), { guildId })).resolves.toEqual(result);
   expect(send).toHaveBeenCalledTimes(1);

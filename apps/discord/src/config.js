@@ -1,5 +1,6 @@
 // QURL_DEPLOYMENT is consumed and strictly validated by @layervai/qurl/node.
 const os = require('os');
+const { isInfraSeedSentinel } = require('./utils/webhook-secret');
 
 // Prod safety guard: refuse to boot with DDB_TEST_ENDPOINT set under
 // NODE_ENV=production. `DDB_TEST_ENDPOINT` is a local-dev / mock-test
@@ -135,7 +136,7 @@ function normalizeBaseUrl(raw) {
 //
 // Returns defaultVal on any rejection, with a console.warn for every
 // rejected path (visible at boot regardless of LOG_LEVEL or logger
-// transport state — logger isn't loaded this early in config import).
+// transport state — config stays on console so boot warnings never depend on logger setup).
 function intEnv(key, defaultVal, opts = {}) {
   const { minPositive = false, strictInteger = false, min, max } = opts;
   const raw = process.env[key];
@@ -165,6 +166,12 @@ function intEnv(key, defaultVal, opts = {}) {
   return v;
 }
 
+const DISCORD_SNOWFLAKE_RE = /^\d{17,20}$/;
+
+function isDiscordSnowflake(value) {
+  return typeof value === 'string' && DISCORD_SNOWFLAKE_RE.test(value);
+}
+
 // Normalize GUILD_ID: accept only a valid Discord snowflake (17–20 digits).
 // Any other value — including an unset env, the literal string "PLACEHOLDER"
 // that SSM-seeded params carry, or a whitespace-only value — normalizes to
@@ -175,10 +182,10 @@ const rawGuildId = process.env.GUILD_ID;
 let normalizedGuildId = null;
 if (rawGuildId) {
   const trimmed = rawGuildId.trim();
-  if (/^\d{17,20}$/.test(trimmed)) {
+  if (isDiscordSnowflake(trimmed)) {
     normalizedGuildId = trimmed;
   } else {
-    // logger isn't loaded this early in config import — use console directly.
+    // Use console directly so this boot warning never depends on logger setup.
     console.warn(`[config] GUILD_ID=${JSON.stringify(rawGuildId)} is not a valid Discord snowflake (17-20 digits); starting in multi-tenant mode. To run in single-guild mode, set GUILD_ID to a real guild ID.`);
   }
 }
@@ -222,29 +229,112 @@ function isValidAuth0DomainShape(d) {
   return /^[a-z0-9][a-z0-9.-]+\.[a-z]{2,}$/i.test(d);
 }
 
-// True when all four Auth0 env vars are present AND AUTH0_DOMAIN is a
-// well-shaped hostname — `/qurl setup` then uses the OAuth-redirect
-// flow. False = degrade to the legacy modal-paste flow (kept until
-// Justin registers the Auth0 app + sets prod SSM secrets). Single
-// derivation point so commands.js + routes/qurl-oauth.js + server.js
-// agree on what "configured" means.
+function parseAuth0EmailConnection(raw) {
+  const value = (raw || '').trim();
+  if (!value) return { value: '', state: 'unset' };
+  if (isInfraSeedSentinel(value)) {
+    // Infra seeds optional SSM values before their consumers are enabled.
+    // Treat that rollout state exactly like unset so adding the task-env
+    // plumbing cannot take customer install offline between deploys.
+    console.warn('[config] AUTH0_EMAIL_CONNECTION matches the reserved SSM placeholder; treating the connection pin as unset.');
+    return { value: '', state: 'unset' };
+  }
+  let rejectionReason = null;
+  if (value.length > 128) {
+    rejectionReason = `received ${value.length} trimmed characters, which exceeds the 128-character limit`;
+  } else if (!/^[A-Za-z0-9]([A-Za-z0-9_-]*[A-Za-z0-9])?$/.test(value)) {
+    rejectionReason = 'contains characters outside the required [A-Za-z0-9_-] shape or does not begin and end with a letter or digit';
+  }
+  if (rejectionReason) {
+    // Keep the rest of the bot available while failing only OAuth setup
+    // closed. A malformed optional setting must not weaken account selection,
+    // but it also must not take down /qurl send, webhooks, or the gateway.
+    console.warn(`[config] AUTH0_EMAIL_CONNECTION rejected (${rejectionReason}); blocking every /qurl setup entry path (including legacy modal paste) while qURL OAuth is configured, until corrected; other bot operations remain available.`);
+    return { value: '', state: 'rejected' };
+  }
+  return { value, state: 'pinned' };
+}
+
+const rawAuth0EmailConnection = process.env.AUTH0_EMAIL_CONNECTION;
+const {
+  value: auth0EmailConnection,
+  state: auth0EmailConnectionState,
+} = parseAuth0EmailConnection(rawAuth0EmailConnection);
+
+// True when all four required Auth0 env vars are present and AUTH0_DOMAIN is
+// a well-shaped hostname. Keep this independent from the optional connection
+// pin: production boot checks still need to validate BASE_URL, encryption,
+// and state signing when the pin itself is malformed.
 const isQurlOAuthConfigured = Boolean(
   isValidAuth0DomainShape(process.env.AUTH0_DOMAIN)
   && process.env.AUTH0_CLIENT_ID
   && process.env.AUTH0_CLIENT_SECRET
   && process.env.AUTH0_AUDIENCE,
 );
+// A rejected pin blocks setup only while OAuth is configured, where it could
+// otherwise send an unpinned authorize redirect. Without AUTH0_* no redirect
+// is ever built, so the legacy paste path stays available.
+const isAuth0EmailConnectionRejected = auth0EmailConnectionState === 'rejected'
+  && isQurlOAuthConfigured;
+// The user-facing setup routes require both the core Auth0 configuration and
+// an accepted optional connection policy. A rejected policy blocks setup
+// without suppressing independent boot diagnostics or normal bot operation.
+const isQurlSetupAvailable = isQurlOAuthConfigured
+  && !isAuth0EmailConnectionRejected;
+
+const normalizedBaseUrl = normalizeBaseUrl(process.env.BASE_URL);
+
+function canRetainSecureInstallCookie(baseUrl) {
+  try {
+    const parsed = new URL(baseUrl);
+    if (parsed.protocol === 'https:') return true;
+    // Browsers treat localhost and the canonical loopback literals (127.0.0.1,
+    // [::1]; the rest of 127/8 stays rejected) as trustworthy development
+    // origins even over
+    // HTTP. Keep the documented local smoke-test path while rejecting staging
+    // and preview HTTP origins that silently discard the __Host- cookie.
+    // No trailing-dot normalization: browsers treat `localhost.` as an ordinary
+    // domain and would drop the Secure cookie.
+    const hostname = parsed.hostname.toLowerCase();
+    return parsed.protocol === 'http:'
+      && (hostname === 'localhost' || hostname.endsWith('.localhost')
+        || hostname === '127.0.0.1' || hostname === '[::1]');
+  } catch {
+    return false;
+  }
+}
 
 // True when the Stage-2 "Add to Discord, select server" install flow can
 // run end-to-end: needs the bot's Discord OAuth2 client secret (separate
 // from the bot token used for normal operations) on top of qURL OAuth.
-// The /oauth/discord/callback route gates on this; it returns 503 with a
-// "not configured" page when false, so the install link still completes
-// (bot lands in the server) but the chained Auth0 leg won't run until
-// Justin sets DISCORD_CLIENT_SECRET in SSM.
-const isDiscordInstallConfigured = Boolean(
-  isQurlOAuthConfigured && process.env.DISCORD_CLIENT_SECRET,
-);
+// The /oauth/discord/install and /callback routes gate on this; both return
+// a generic 503 page when false, so the first-party customer flow cannot
+// begin until every required Auth0 and Discord credential is configured.
+const discordClientId = process.env.DISCORD_CLIENT_ID;
+const discordClientSecret = process.env.DISCORD_CLIENT_SECRET;
+const normalizedDiscordClientId = discordClientId?.trim();
+const normalizedDiscordClientSecret = discordClientSecret?.trim();
+let discordInstallNotConfiguredReason = null;
+// Core config first so a deploy missing AUTH0_* is told that before an
+// optional-pin rejection it would only discover after the next redeploy.
+if (!isQurlOAuthConfigured) {
+  discordInstallNotConfiguredReason = 'AUTH0_* unset';
+} else if (isAuth0EmailConnectionRejected) {
+  discordInstallNotConfiguredReason = 'AUTH0_EMAIL_CONNECTION rejected';
+} else if (!normalizedDiscordClientId) {
+  discordInstallNotConfiguredReason = 'DISCORD_CLIENT_ID unset';
+} else if (isInfraSeedSentinel(normalizedDiscordClientId)) {
+  discordInstallNotConfiguredReason = 'DISCORD_CLIENT_ID is the SSM placeholder';
+} else if (!isDiscordSnowflake(normalizedDiscordClientId)) {
+  discordInstallNotConfiguredReason = 'DISCORD_CLIENT_ID is not a valid Discord snowflake';
+} else if (!normalizedDiscordClientSecret) {
+  discordInstallNotConfiguredReason = 'DISCORD_CLIENT_SECRET unset';
+} else if (isInfraSeedSentinel(normalizedDiscordClientSecret)) {
+  discordInstallNotConfiguredReason = 'DISCORD_CLIENT_SECRET is the SSM placeholder';
+} else if (!canRetainSecureInstallCookie(normalizedBaseUrl)) {
+  discordInstallNotConfiguredReason = 'BASE_URL cannot retain the Secure install cookie';
+}
+const isDiscordInstallConfigured = discordInstallNotConfiguredReason === null;
 
 // Shard identifier for the shard-aware composite flow_id
 // (`<shard_id>#<guild_id>#<channel_id>#<user_id>`, see src/flow-id.js).
@@ -315,18 +405,29 @@ for (const suffix of detectExtraNonProdHostSuffixes) {
 module.exports = {
   // Discord
   DISCORD_TOKEN: process.env.DISCORD_TOKEN,
-  DISCORD_CLIENT_ID: process.env.DISCORD_CLIENT_ID,
+  // Invalid values normalize to null so the optional customer-install route
+  // cannot build an OAuth URL for a placeholder/non-snowflake application ID.
+  // Normal command registration gets its app ID from Discord's READY payload.
+  DISCORD_CLIENT_ID: isDiscordSnowflake(normalizedDiscordClientId)
+    ? normalizedDiscordClientId
+    : null,
   // Required for the Stage-2 "Add to Discord, select server" install
   // callback (src/routes/discord-install.js). Not used by normal bot
   // operations — only by the OAuth2 token exchange when an admin
-  // installs the bot via the install link. Optional: omit and the
-  // /oauth/discord/callback route will return 503 with a documented
-  // "not configured" page until Justin sets the secret.
-  DISCORD_CLIENT_SECRET: process.env.DISCORD_CLIENT_SECRET,
+  // installs the bot via the install link. Omit it to disable the customer
+  // install flow: both /oauth/discord/install and its callback return a
+  // documented 503 until an operator sets the secret. The seed sentinel maps
+  // to null so no caller can use it; unset/empty stay falsy as read.
+  DISCORD_CLIENT_SECRET: isInfraSeedSentinel(normalizedDiscordClientSecret)
+    ? null
+    : normalizedDiscordClientSecret,
   GUILD_ID: normalizedGuildId,
   isMultiTenant,
   isQurlOAuthConfigured,
+  isQurlSetupAvailable,
+  canRetainSecureOAuthCookies: canRetainSecureInstallCookie(normalizedBaseUrl),
   isDiscordInstallConfigured,
+  discordInstallNotConfiguredReason,
 
   // Legacy shared HMAC secret for OAuth state tokens. Retained as the
   // fallback below QURL_OAUTH_STATE_SECRET so a deploy that predates
@@ -341,8 +442,14 @@ module.exports = {
   // qURL webhook receiver HMAC. Written to SSM by the webhook-registrar
   // Lambda (apps/discord/lambda/webhook-registrar/) on each deploy
   // invocation, then injected into the bot's task env. The bot reads
-  // it here and never modifies it — Lambda is the sole writer.
-  QURL_WEBHOOK_SECRET: process.env.QURL_WEBHOOK_SECRET,
+  // it here without changing the signing key bytes — Lambda is the sole
+  // writer. A whitespace-only value reads as unset.
+  QURL_WEBHOOK_SECRET: process.env.QURL_WEBHOOK_SECRET?.trim() === ''
+    ? '' : process.env.QURL_WEBHOOK_SECRET,
+  // Explicit opt-out for deployments with no Lambda-managed default
+  // subscription. Without this flag, a missing shared secret makes guild
+  // webhook linking fail closed instead of silently taking the rotation path.
+  QURL_WEBHOOK_PURE_BYOK: process.env.QURL_WEBHOOK_PURE_BYOK === 'true',
 
   // qURL OAuth (Auth0) — for /qurl setup admin consent flow.
   // When unset, /qurl setup falls back to the legacy modal-paste path so the
@@ -354,6 +461,19 @@ module.exports = {
   AUTH0_CLIENT_ID: process.env.AUTH0_CLIENT_ID,
   AUTH0_CLIENT_SECRET: process.env.AUTH0_CLIENT_SECRET,
   AUTH0_AUDIENCE: process.env.AUTH0_AUDIENCE,
+  // Optional Auth0 connection pinned on every Discord setup authorize
+  // redirect. Validated at config load; unlike Slack, empty or unset means no
+  // pin (#1365). The shared env-var name is an operator-facing cross-service
+  // contract, not permission to share one task env bundle: Discord and Slack
+  // deliberately read independently provisioned values during the staged
+  // rollout because Discord cannot pin until its Auth0 app enables email.
+  AUTH0_EMAIL_CONNECTION: auth0EmailConnection,
+  // Parser-owned state keeps logs and route policy aligned without
+  // reconstructing whether an empty normalized value was unset or rejected.
+  auth0EmailConnectionState,
+  // Preserve the difference between intentionally unset and rejected input so
+  // structured boot telemetry cannot misreport a fail-open pin as "unset".
+  isAuth0EmailConnectionRejected,
 
   // Flow-dedicated HMAC secret for the qURL OAuth state token
   // (utils/qurl-oauth-state.js) — the preferred key, so ops can rotate
@@ -364,20 +484,38 @@ module.exports = {
 
   // Server
   PORT: intEnv('PORT', 3000),
-  BASE_URL: normalizeBaseUrl(process.env.BASE_URL),
+  BASE_URL: normalizedBaseUrl,
 
   // Rate limiting
-  RATE_LIMIT_WINDOW_MS: intEnv('RATE_LIMIT_WINDOW_MS', 60000), // 1 minute
-  RATE_LIMIT_MAX_REQUESTS: intEnv('RATE_LIMIT_MAX_REQUESTS', 30),
+  // 0 or a negative window would silently disable every OAuth rate limit.
+  RATE_LIMIT_WINDOW_MS: intEnv('RATE_LIMIT_WINDOW_MS', 60000, { // 1 minute
+    minPositive: true, strictInteger: true,
+  }),
+  // 0 or a negative value would 429 every OAuth callback.
+  // The max keeps worst-case limiter memory (20k IPs x both ceilings) bounded.
+  RATE_LIMIT_MAX_REQUESTS: intEnv('RATE_LIMIT_MAX_REQUESTS', 30, {
+    minPositive: true, strictInteger: true, max: 1000,
+  }),
+  // The public /oauth/discord/install page is a pure redirect that many
+  // unrelated admins can reach from one NAT egress, so it gets its own ceiling.
+  // Completion is still bounded by RATE_LIMIT_MAX_REQUESTS: each finished
+  // install spends two callback-bucket slots (/oauth/discord/callback, then
+  // /oauth/qurl/callback), so the default end-to-end ceiling is 15 installs
+  // per IP per window. Raise RATE_LIMIT_MAX_REQUESTS if a shared egress needs more.
+  // 0 or a negative value would 429 every /install request as "heavy load".
+  RATE_LIMIT_INSTALL_MAX_REQUESTS: intEnv('RATE_LIMIT_INSTALL_MAX_REQUESTS', 120, {
+    minPositive: true, strictInteger: true, max: 1000,
+  }),
 
   // qURL. In production we fall back to the real endpoints; in dev we fall
   // back to localhost so a missing .env file doesn't silently hit prod APIs.
   //
-  // Neither is a boot blocker. QURL_ENDPOINT can't be missing — the
+  // QURL_ENDPOINT can't be missing — the
   // ternary below always yields a value. QURL_API_KEY is only the
   // global fallback for /qurl send + /qurl map; every deployment shape
   // configures a per-guild key through /qurl setup, so it is
-  // deliberately absent from prodRequired() in boot-requirements.js.
+  // absent from prodRequired(). The separate production webhook gate requires
+  // QURL_API_KEY when QURL_WEBHOOK_SECRET is set, for default-owner discovery.
   QURL_API_KEY: process.env.QURL_API_KEY,
   QURL_ENDPOINT: process.env.QURL_ENDPOINT
     || (process.env.NODE_ENV === 'production' ? 'https://api.layerv.ai' : 'http://localhost:8080'),
@@ -648,4 +786,5 @@ module.exports = {
   // Exposed as a function, NOT a property — second call returns
   // undefined.
   takeGatewayHandoffHmac,
+  isDiscordSnowflake,
 };

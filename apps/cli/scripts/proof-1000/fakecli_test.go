@@ -115,9 +115,13 @@ func fakeEnvironment(t *testing.T, rules []fakeRule) *environment {
 	if err := os.MkdirAll(filepath.Join(dir, "cover"), 0o700); err != nil {
 		t.Fatal(err)
 	}
+	socketPath, err := connectordaemon.SocketPathForStateDir(stateDir, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	return &environment{
 		StateDir:   stateDir,
-		SocketPath: connectordaemon.StateSocketPath(stateDir),
+		SocketPath: socketPath,
 		LogDir:     filepath.Join(dir, "logs"),
 		QurlBin:    os.Args[0],
 		ConsumeBin: os.Args[0],

@@ -2385,8 +2385,8 @@ func TestCLIReleaseValidatesPackagesBeforePublication(t *testing.T) {
 	if globals.Env["QURL_RELEASE_LIFECYCLE_COMMANDS"] != commandRoster {
 		t.Errorf("release lifecycle command roster = %q, want %q", globals.Env["QURL_RELEASE_LIFECYCLE_COMMANDS"], commandRoster)
 	}
-	if globals.Env["QURL_REQUIRE_RELEASE_HUB_PIN"] != "0" {
-		t.Errorf("release Hub-pin source mode = %q, want reviewed dark mode 0", globals.Env["QURL_REQUIRE_RELEASE_HUB_PIN"])
+	if globals.Env["QURL_REQUIRE_RELEASE_HUB_PIN"] != "1" {
+		t.Errorf("release Hub-pin source mode = %q, want production-required mode 1", globals.Env["QURL_REQUIRE_RELEASE_HUB_PIN"])
 	}
 
 	workflow := readWorkflow(t, releasePleaseWorkflow)
@@ -2455,6 +2455,9 @@ func TestCLIReleaseValidatesPackagesBeforePublication(t *testing.T) {
 		`brew --cache --cask "$token"`,
 		`install -m 0644 "$archive" "$cache_path"`,
 		`brew install --cask "$token"`,
+		`attributes=$(xattr "$(realpath "$installed")")`,
+		`if grep -Fxq com.apple.quarantine <<<"$attributes"; then`,
+		`Homebrew postflight left quarantine on the staged CLI`,
 		`reported_version=$("$installed" version | awk 'NR == 1 { print $3 }')`,
 		`[[ "$reported_version" == "$release_version" ]]`,
 		`for command in $QURL_RELEASE_LIFECYCLE_COMMANDS; do`,

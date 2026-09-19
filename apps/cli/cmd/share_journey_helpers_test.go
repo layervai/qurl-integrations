@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -10,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -153,7 +156,11 @@ func reserveCmdTCPPort(t *testing.T) int {
 	return port
 }
 
-func startCmdFRPS(t *testing.T, bindPort, vhostPort int, subDomainHost, pluginURL string) {
+// startCmdFRPS returns the test CA file. Go's httptest certificate uses
+// example.com; callers set that expected name when dialing localhost.
+// Register client cleanup after this call so clients stop before the CA file
+// is removed; reconnects read the file again.
+func startCmdFRPS(t *testing.T, bindPort, vhostPort int, subDomainHost, pluginURL string) string {
 	t.Helper()
 	cfg := &v1.ServerConfig{
 		BindAddr: "127.0.0.1", BindPort: bindPort, ProxyBindAddr: "127.0.0.1",
@@ -162,9 +169,28 @@ func startCmdFRPS(t *testing.T, bindPort, vhostPort int, subDomainHost, pluginUR
 			Name: "proxy-lifecycle-recorder", Addr: pluginURL, Path: "/", Ops: []string{"NewProxy", "CloseProxy"},
 		}},
 	}
+	certificate := httptest.NewTLSServer(http.NotFoundHandler())
+	pair := certificate.TLS.Certificates[0]
+	certificate.Close()
+	key, err := x509.MarshalPKCS8PrivateKey(pair.PrivateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	cfg.Transport.TLS.CertFile = filepath.Join(dir, "cert.pem")
+	cfg.Transport.TLS.KeyFile = filepath.Join(dir, "key.pem")
+	for path, block := range map[string]*pem.Block{
+		cfg.Transport.TLS.CertFile: {Type: "CERTIFICATE", Bytes: pair.Certificate[0]},
+		cfg.Transport.TLS.KeyFile:  {Type: "PRIVATE KEY", Bytes: key},
+	} {
+		if err := os.WriteFile(path, pem.EncodeToMemory(block), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if err := cfg.Complete(); err != nil {
 		t.Fatalf("complete journey server config: %v", err)
 	}
+	// NewService loads the key pair before the test removes its temp directory.
 	service, err := frpserver.NewService(cfg)
 	if err != nil {
 		t.Fatalf("construct journey server on 127.0.0.1:%d: %v", bindPort, err)
@@ -177,4 +203,5 @@ func startCmdFRPS(t *testing.T, bindPort, vhostPort int, subDomainHost, pluginUR
 	cmdFRPSTestServices.Lock()
 	cmdFRPSTestServices.items = append(cmdFRPSTestServices.items, cmdFRPSTestService{service: service, done: done})
 	cmdFRPSTestServices.Unlock()
+	return cfg.Transport.TLS.CertFile
 }

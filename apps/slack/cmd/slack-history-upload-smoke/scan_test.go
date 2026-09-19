@@ -12,6 +12,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/layervai/qurl-integrations/apps/slack/internal/httpbody"
 	"github.com/layervai/qurl-integrations/apps/slack/internal/slacksmoke"
 )
 
@@ -1377,8 +1378,8 @@ func TestGetOnceNamesARedirectTarget(t *testing.T) {
 }
 
 // TestGetOnceRejectsOversizeResponse pins the wiring the hoist left behind in this
-// caller: that getOnce hands slacksmoke.ReadResponseBody THIS command's ceiling and
-// propagates the refusal. The over-read and comparison are covered by slacksmoke's own
+// caller: that getOnce hands httpbody.ReadResponseBody THIS command's ceiling and
+// propagates the refusal. The over-read and comparison are covered by httpbody's own
 // tests; what only a caller test can catch is the constant going astray — swapping this
 // command's 4 MiB for the DM smoke's 64 KiB is exactly the hazard ReadResponseBody's doc
 // names as the reason limit is a parameter, and nothing here failed on it before.
@@ -1392,8 +1393,8 @@ func TestGetOnceRejectsOversizeResponse(t *testing.T) {
 	client := &slackClient{token: testToken, baseURL: srv.URL, userAgent: defaultUserAgent, httpClient: slacksmoke.NewHTTPClient(testRequestTimeout)}
 	var out slackMessagesResponse
 	err := client.get(context.Background(), methodConversationsHistory, nil, &out)
-	if !errors.Is(err, slacksmoke.ErrResponseTooLarge) {
-		t.Fatalf("get = %v, want errors.Is slacksmoke.ErrResponseTooLarge", err)
+	if !errors.Is(err, httpbody.ErrResponseTooLarge) {
+		t.Fatalf("get = %v, want errors.Is httpbody.ErrResponseTooLarge", err)
 	}
 	// Spelled out rather than built from the constant, so substituting a different
 	// ceiling fails here instead of quietly agreeing with itself.

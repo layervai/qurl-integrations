@@ -25,7 +25,7 @@ revocable at any time.
 | `/qurl revoke` | Revoke every link from a previous send |
 | `/qurl help` | Show the command reference |
 | `/qurl setup` | *(admin)* Connect this server to qURL |
-| `/qurl status` | *(admin)* Check whether qURL is configured |
+| `/qurl status` | *(admin)* Verify the stored key and show its prefix and scopes |
 
 ### `/qurl send` options
 
@@ -37,8 +37,9 @@ revocable at any time.
 | `self-destruct` | No | Countdown after the first open (default: no timer) |
 | `personal-message` | No | A note included in each recipient's DM |
 
-`/qurl map` shares a location instead of a file: it takes a required `location`
-(a Google Maps URL, or a place/address to search) in place of `attachment`, the
+When `MAP_COMMAND_ENABLED=true`, `/qurl map` shares a location instead of a
+file: it takes a required `location` (a Google Maps URL, or a place/address to
+search) in place of `attachment`, the
 same `recipients` / `expires-in` / `self-destruct` / `personal-message` options,
 and an optional `location-name` to override the label recipients see.
 
@@ -46,9 +47,25 @@ and an optional `location-name` to override the label recipients see.
 
 ### 1. Add the bot to your server
 
-Invite the qURL bot using the install link from your qURL operator. The bot
-requests only four permissions: **View Channels**, **Send Messages**,
-**Embed Links**, and **Use Application Commands**.
+Use the **Add to Discord** link on layerv.ai. It opens the bot's
+`/oauth/discord/install` endpoint, where the deployment builds the matching
+Discord authorization URL and chains the install into qURL sign-in. The
+Discord OAuth request includes `identify` because the callback uses
+`/users/@me` to bind setup to the installing admin. The Discord application
+must register the deployment's exact `/oauth/discord/callback` URL and enable
+**Require OAuth2 Code Grant** so Discord waits for the callback exchange before
+finishing the bot installation. The callback always binds the server from the
+authoritative guild in Discord's token response. Grant only **View Channels**,
+**Send Messages**, **Embed Links**, and **Use Application Commands**
+(permission bitfield `2147503104`).
+
+After seeding or rotating `DISCORD_CLIENT_SECRET`, restart the HTTP service;
+ECS injects the SSM value and the bot derives install readiness only at process
+start.
+
+**Require OAuth2 Code Grant** applies to the entire Discord application. Deploy
+the callback endpoint and register its exact URL before enabling the setting;
+legacy static invite links do not complete installation after it is enabled.
 
 > On the multi-tenant public bot, slash commands can take up to an hour to
 > appear the first time the bot joins a server, while Discord propagates the
@@ -57,10 +74,15 @@ requests only four permissions: **View Channels**, **Send Messages**,
 
 ### 2. Connect qURL (admin)
 
-A server admin runs `/qurl setup` once and follows the prompts to connect this
-server to its own qURL account — by authorizing qURL or entering an API key,
-depending on the deployment. The key is stored **encrypted at rest** and scoped
-to the server. Run `/qurl status` to confirm the connection.
+The Add to Discord flow prompts the installing admin to sign in to qURL and
+connects the server automatically. For a bot that is already installed, a
+server admin can run `/qurl setup` to complete or replace that connection. The
+key is stored **encrypted at rest** and scoped to the server. Run `/qurl status`
+to confirm the connection.
+
+Every Add to Discord and `/qurl setup` asks for a fresh qURL sign-in, even if
+the browser is already signed in, so a guild is never silently bound to
+whichever qURL account that browser session belongs to.
 
 ### 3. Share
 
@@ -73,6 +95,43 @@ invalidate the links from any previous send.
 
 > Recipients must allow direct messages from server members to receive their
 > link.
+
+## Child revocation rollout
+
+This release upgrades `@layervai/qurl` from 0.6.x to 2.x. Detect uses CRIDs
+and binds the signed link to the expected CRID. The image omits the optional
+native state store; the bot does not use producer state.
+
+Deploy and validate the connector revoke endpoint before deploying this
+consumer. Until that endpoint is enabled, ordinary children use the SDK
+fallback. Watermarked children cannot be confirmed through that fallback;
+the send stays available for retry. Legacy send rows with no usable `qurl_id`
+also remain unconfirmed after endpoint activation; deleting their shared parent
+is not a safe recovery. A repeated connector 429 fails closed
+after one bounded retry, without an SDK fallback. Revoke buttons and selects
+share a process-local guard for each sender and send. The guard remains active
+after the 13-minute result wait while revocation continues. Store checks still
+enforce ownership and prevent new recipients across processes.
+
+Before deployment, configure alarms for `Connector mint_link returned a link
+without a valid qurl_id`, `Connector mint_link over-minted`, `Connector mint_link
+returned more partial links than requested`, `Minted link revoke incomplete`,
+and `Revoke select acknowledgement failed`. Update any filters or saved queries
+that use `Failed to revoke QURL`, `missing resource identity`, or the partial-mint
+`resource_id` field: these become `Failed to revoke qURL`, `missing resource or
+token identity`, and `resource_ref`. The load-test warning now says
+`carried no usable resource identifier`.
+
+Each mint request allows 65 seconds for the connector’s 55-second deadline
+and response transport. Only the connector’s `request_admission_rejected` 429
+with `success: false` and an empty `links` array is retried, up to five times,
+with bounded backoff and a 100-second total mint budget. Other errors and
+partial results are never retried. A failing mint and its cleanup can take
+up to 290 seconds before the error is reported; earlier batches add time.
+Cleanup can continue after that reply; under degraded service a 30-child
+resource can take about 17 minutes. Check completion logs before manual cleanup.
+Load-test upload records rejected by SDK 2.x stay in the cleanup ledger;
+remove them only after cleanup or link expiry is confirmed.
 
 ## Configuration
 
@@ -88,11 +147,16 @@ setup) means required to use that feature.
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `DISCORD_TOKEN` | Yes | Discord bot token |
-| `DISCORD_CLIENT_ID` | Yes | Discord application client ID |
-| `QURL_API_KEY` | `/qurl detect` | Requires `qurl:read` and `qurl:write` for detect; also the fallback for send operations without a server key from `/qurl setup`. |
+| `DISCORD_CLIENT_ID` | Customer install | Numeric Discord application ID for the one-click Add to Discord flow; `PLACEHOLDER` or a malformed value disables that flow |
+| `DISCORD_CLIENT_SECRET` | Customer install | Discord OAuth2 client secret for the one-click Add to Discord flow |
+| `QURL_API_KEY` | `/qurl detect`; Production when `QURL_WEBHOOK_SECRET` is set | Requires `qurl:read` and `qurl:write` for detect; also the fallback for send operations without a server key from `/qurl setup`. |
 | `QURL_ENDPOINT` | No | qURL API base URL (defaults to production; localhost in dev) |
+| `QURL_WEBHOOK_SECRET` | Default webhook | Shared HMAC secret written by the registrar Lambda; required in every process that links guild webhooks when a default subscription exists. |
+| `QURL_WEBHOOK_PURE_BYOK` | No | Set to `true` only when the deployment intentionally has no default webhook subscription. |
 | `CONNECTOR_URL` | No | qURL connector URL for file upload + serving |
-| `BASE_URL` | OAuth setup | Public `https://` origin of the bot; required to complete the OAuth `/qurl setup` flow (defaults to `http://localhost:3000`). |
+| `BASE_URL` | OAuth setup | Public `https://` origin of the bot; required to complete OAuth setup (defaults to `http://localhost:3000`). Local customer-install testing must use `localhost` or HTTPS because its `__Host-` session cookie is always `Secure`. |
+| `AUTH0_EMAIL_CONNECTION` | No | Auth0 connection pinned on setup/install authorize redirects (e.g. `email`). Unset or `PLACEHOLDER` sends no pin; a malformed value blocks every `/qurl setup` entry path until corrected. |
+| `RATE_LIMIT_INSTALL_MAX_REQUESTS` | No | Per-IP ceiling for the public `/oauth/discord/install` page per rate-limit window (default 120). Completed installs are still bounded by `RATE_LIMIT_MAX_REQUESTS` (two callback slots per install). Both limits are per bot task, not global. |
 | `KEY_ENCRYPTION_KEY` | Production | 32 random bytes, base64 — encrypts stored keys at rest |
 | `METRICS_TOKEN` | Production | Bearer token guarding the `/metrics` endpoint |
 | `MAP_COMMAND_ENABLED` | No | Set to `true` to enable `/qurl map` (default off) |
@@ -208,7 +272,8 @@ See `.env.example` for the local-development environment setup.
 - **Connector** — uploads and serves shared files through the qURL connector
   behind an SSRF-guarded fetch.
 - **HTTP surface** — `/health` for load-balancer probes, `/metrics` (bearer
-  authenticated), and the OAuth callback that completes the `/qurl setup` flow.
+  authenticated), `/oauth/discord/install` plus its callback for customer
+  installs, and the qURL OAuth start/callback routes used by `/qurl setup`.
 
 ## Troubleshooting
 
@@ -226,3 +291,8 @@ Commands** permission.
 ## License
 
 [MIT](../../LICENSE) — Copyright (c) 2025-present LayerV, Inc.
+
+Setup and install cookies use `__Host-` names with `Secure`, `HttpOnly`,
+`SameSite=Lax`, and `Path=/`. Use HTTPS (or browser-supported localhost) for
+local setup tests. Deploying this change invalidates older setup cookies;
+admins with an in-flight setup must start again.

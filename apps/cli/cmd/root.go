@@ -13,6 +13,7 @@ import (
 	"os/signal"
 	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -51,6 +52,12 @@ type globalOpts struct {
 	// shareGroupMode is bound by `daemon run --share-group-mode`; every other
 	// command resolves the mode from the environment, profile, or default.
 	shareGroupMode string
+	// Optional trust settings for an explicitly managed daemon process.
+	tunnelCAFile     string
+	tunnelServerName string
+	// supervision is the persistent --supervision flag: who owns the sharing
+	// daemon's process for the state namespace a command addresses.
+	supervision string
 
 	version string
 
@@ -79,7 +86,7 @@ type globalOpts struct {
 	loadLocalShares      func(context.Context) ([]connectorstate.LocalShare, error)
 	readLocalShares      func(context.Context, string) ([]connectorstate.LocalShare, bool, error)
 	openShareRegistry    func(string) (localShareRegistry, error)
-	newShareDaemon       func(string, string) shareDaemonController
+	newShareDaemon       func(string, string) (shareDaemonController, error)
 	preflightTarget      func(context.Context, string, int) error
 	resolveShareStateDir func(string) (string, error)
 	resolveLocalResource localResourceResolver
@@ -117,6 +124,9 @@ type globalOpts struct {
 	// resolvedShareGroupMode is the session group mode the daemon runs in and
 	// the per-user job definition carries.
 	resolvedShareGroupMode connectordaemon.GroupMode
+	// resolvedSupervision is the lifecycle contract every mutating command
+	// checks against the namespace's policy marker before it acts.
+	resolvedSupervision connectorstate.RuntimeSupervision
 }
 
 // rootOption is a test hook for injecting process context.
@@ -233,6 +243,7 @@ QURL_API_KEY for the same one-time bootstrap.`,
 	flags.StringVar(&opts.colorMode, "color", "", "colorize output: auto, always, or never (default auto)")
 	flags.BoolVarP(&opts.verbose, "verbose", "v", false, "print request diagnostics on stderr")
 	flags.StringVar(&opts.profile, "profile", "", "configuration profile name")
+	flags.StringVar(&opts.supervision, "supervision", "", "who runs the sharing daemon: native (qURL manages a background job) or external (another program runs qurl daemon run) (default native)")
 
 	cmd.SetOut(streams.Out)
 	cmd.SetErr(streams.Err)
@@ -261,6 +272,18 @@ QURL_API_KEY for the same one-time bootstrap.`,
 	)
 
 	return cmd, opts
+}
+
+// nativeShareDaemon builds the production per-user background-job controller
+// for one state directory.
+func (o *globalOpts) nativeShareDaemon(stateDir, logDir string) (shareDaemonController, error) {
+	controller, err := connectordaemon.NewJobController(
+		stateDir, logDir, o.version, o.resolvedEndpoint, o.resolvedShareGroupMode, o.resolvedSupervision, o.resolveHubBootstrap, o.lookupEnv,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return controller, nil
 }
 
 func (o *globalOpts) applyDefaults() {
@@ -307,11 +330,7 @@ func (o *globalOpts) applyDefaults() {
 		}
 	}
 	if o.newShareDaemon == nil {
-		o.newShareDaemon = func(stateDir, logDir string) shareDaemonController {
-			return connectordaemon.NewJobController(
-				stateDir, logDir, o.version, o.resolvedEndpoint, o.resolvedShareGroupMode, o.resolveHubBootstrap,
-			)
-		}
+		o.newShareDaemon = o.nativeShareDaemon
 	}
 	if o.preflightTarget == nil {
 		o.preflightTarget = preflightLocalTarget
@@ -375,8 +394,37 @@ func (o *globalOpts) resolveSettings() error {
 		return exitcode.UsageError(err)
 	}
 	o.resolvedShareGroupMode = groupMode
+
+	supervision := config.Resolve(o.supervision, connectorstate.EnvRuntimeSupervision, o.lookupEnv, cfg.DaemonSupervision, string(connectorstate.DefaultRuntimeSupervision))
+	mode, err := connectorstate.ParseRuntimeSupervision(supervision)
+	if err != nil {
+		return exitcode.UsageError(err)
+	}
+	o.resolvedSupervision = mode
 	o.resolved = true
 	return nil
+}
+
+// requireRuntimeSupervision refuses to mutate a namespace whose supervision
+// policy does not match this invocation's setting, so a native qurl never
+// installs a job over an external supervisor's daemon and an external one
+// never adopts a natively managed namespace.
+func (o *globalOpts) requireRuntimeSupervision(stateDir string) error {
+	return connectorstate.RequireRuntimeSupervision(stateDir, o.resolvedSupervision)
+}
+
+// requireRuntimeSupervisionIfNamespace applies requireRuntimeSupervision to
+// the default namespace and tolerates a host without one: a command that
+// only changes cloud state must still work there.
+func (o *globalOpts) requireRuntimeSupervisionIfNamespace() error {
+	stateDir, err := o.resolveShareStateDir("")
+	if errors.Is(err, connectorstate.ErrNoDefaultStateDir) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return o.requireRuntimeSupervision(stateDir)
 }
 
 // printer builds the per-invocation Printer from the resolved settings.
@@ -695,13 +743,7 @@ func (o *globalOpts) openNativeRegisteredClient(
 		if handoffErr != nil {
 			return nil, handoffErr
 		}
-		return qurlapi.NewRegistered(ctx, &qurlapi.Config{
-			BaseURL:      origin,
-			Version:      o.version,
-			Verbose:      o.verboseLogger(),
-			Sleep:        o.sleep,
-			NewRequestID: o.newRequestID,
-		}, store)
+		return o.openRegisteredDeviceClient(ctx, origin, store)
 	}
 	client, err := openDeviceClient()
 	if err != nil {
@@ -717,25 +759,193 @@ func (o *globalOpts) openNativeRegisteredClient(
 	if deviceIdentity == nil {
 		return nil, nil, errors.New("qURL account identity response is empty")
 	}
-	deviceKeyID := ""
-	if deviceIdentity.Key != nil {
-		deviceKeyID = deviceIdentity.Key.KeyID
-	}
 	if bootstrap.identity != nil && bootstrap.identity.OwnerID != deviceIdentity.OwnerID {
 		return nil, nil, &deviceAccountConflictError{
-			stateDir: stateDir, deviceKeyID: deviceKeyID,
+			stateDir: stateDir, deviceKeyID: identityKeyID(deviceIdentity),
 			currentOwner: deviceIdentity.OwnerID, requestedOwner: bootstrap.identity.OwnerID,
 		}
 	}
-	registry, err := o.openShareRegistry(stateDir)
-	if err != nil {
-		return nil, nil, err
-	}
-	if err := bindRegisteredDeviceOwner(ctx, registry, stateDir, deviceKeyID, deviceIdentity.OwnerID); err != nil {
+	if err := o.bindDeviceOwner(ctx, stateDir, deviceIdentity); err != nil {
 		return nil, nil, err
 	}
 	o.nativeRuntime = nativeRuntime
 	return client, deviceIdentity, nil
+}
+
+// openNativeExternalRegisteredClient enrolls this machine from a supervisor's
+// one-time token file into an externally supervised namespace, or opens the
+// identity already there. Establishing the external policy is part of the
+// operation: a fresh directory is labeled before anything is written into
+// it, and an already external namespace is accepted as is. The token stays
+// behind the runtime's lazy enrollment provider, so a warm namespace never
+// reads the file, and there is no recovery provider because a one-time token
+// can never become recovery authority.
+func (o *globalOpts) openNativeExternalRegisteredClient(
+	ctx context.Context,
+	tokenPath, stateDir string,
+) (_ qurlapi.Client, _ *qurlapi.Identity, retErr error) {
+	o.warnInsecureEndpoint()
+	if o.nativeRuntime != nil {
+		return nil, nil, errors.New("registered-device runtime is already open")
+	}
+	hubBootstrap, err := o.resolveHubBootstrap()
+	if err != nil {
+		return nil, nil, err
+	}
+	origin, err := agent.ResourceSDKOrigin(o.resolvedEndpoint)
+	if err != nil {
+		return nil, nil, err
+	}
+	hostname, err := os.Hostname()
+	if err != nil {
+		return nil, nil, fmt.Errorf("read local hostname: %w", err)
+	}
+	if err := connectorstate.EstablishExternalRuntimeMode(ctx, stateDir); err != nil {
+		return nil, nil, err
+	}
+	nativeRuntime, err := o.openNativeRuntime(ctx, connectorshare.NativeRuntimeConfig{
+		StateDir:                     stateDir,
+		AgentID:                      connectorstate.ConfiguredAgentID(),
+		Hub:                          hubBootstrap,
+		Hostname:                     hostname,
+		Version:                      o.version,
+		ClientBaseURL:                origin,
+		EnrollmentCredentialProvider: oneShotEnrollmentToken(tokenPath),
+		RefreshMode:                  connectorRefreshModeAuto,
+	})
+	if err != nil {
+		// Connector provider/envelope failures have no typed sentinel. Keep the
+		// Config fallback for unclassified errors, without relabeling known
+		// credential, network, or cancellation failures as state problems.
+		if exitcode.FromError(err) == exitcode.General {
+			err = fmt.Errorf("%w: %w", connectorstate.ErrAgentStateEnvelope, err)
+		}
+		return nil, nil, err
+	}
+	defer func() {
+		if retErr != nil {
+			retErr = errors.Join(retErr, nativeRuntime.Close())
+		}
+	}()
+	store, err := nativeRuntime.Handoff()
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := requireExternalOwnerScopedAgentState(ctx, store); err != nil {
+		return nil, nil, err
+	}
+	client, err := o.openRegisteredDeviceClient(ctx, origin, store)
+	if err != nil {
+		return nil, nil, err
+	}
+	deviceIdentity, err := client.Me(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	if deviceIdentity == nil {
+		return nil, nil, errors.New("qURL account identity response is empty")
+	}
+	if err := o.bindDeviceOwner(ctx, stateDir, deviceIdentity); err != nil {
+		return nil, nil, err
+	}
+	o.nativeRuntime = nativeRuntime
+	return client, deviceIdentity, nil
+}
+
+// requireExternalOwnerScopedAgentState refuses a device a supervisor cannot
+// use: native session operations accept only the owner-scoped agent
+// enrollment kind, and a token minted for target connector yields a
+// credential qurl-go refuses for them forever. The namespace is left as it is
+// for the supervisor to rotate.
+func requireExternalOwnerScopedAgentState(ctx context.Context, store qurl.AgentStateStore) error {
+	persisted, err := store.LoadAgentState(ctx)
+	if err != nil {
+		return err
+	}
+	if persisted == nil || persisted.RegisteredAt == nil || strings.TrimSpace(persisted.DeviceAPIKey) == "" {
+		return fmt.Errorf("%w: device registration is incomplete", auth.ErrDeviceEnrollmentScope)
+	}
+	// Both account and bootstrap are owner-scoped; only the connector-scoped
+	// kinds are refused by native session operations. This mirrors
+	// validateSandboxDeviceIdentity rather than narrowing past it - rejecting
+	// an account-enrolled device here would tell a supervisor to move aside a
+	// state directory whose device is perfectly usable, and that is not
+	// reversible by the operator.
+	//
+	// TODO(upstream-contract): a token minted for target=agent is recorded by
+	// the platform as RegistrationKeyKindBootstrap, which is why the external
+	// path expects bootstrap in practice. If that mapping changes, external
+	// login starts refusing valid devices with exit 4 and nothing else fails
+	// loudly.
+	kind := qurl.RegistrationKeyKind(strings.TrimSpace(persisted.EnrollmentCredentialKind))
+	switch kind {
+	case qurl.RegistrationKeyKindAccount, qurl.RegistrationKeyKindBootstrap:
+		return nil
+	case qurl.RegistrationKeyKindConnectorBootstrap, qurl.RegistrationKeyKindAgent:
+		// Connector-scoped: exactly what native session operations refuse.
+	default:
+		// Empty or unrecognized: fail closed rather than guess.
+	}
+	return fmt.Errorf("%w: enrolled with credential kind %q, want the owner-scoped %q or %q; move the state directory aside and enroll again with a token minted for target agent",
+		auth.ErrDeviceEnrollmentScope, kind, qurl.RegistrationKeyKindAccount, qurl.RegistrationKeyKindBootstrap)
+}
+
+// openRegisteredDeviceClient builds the narrow REST client around the durable
+// device credential held in store.
+func (o *globalOpts) openRegisteredDeviceClient(ctx context.Context, origin string, store qurl.AgentStateStore) (qurlapi.Client, error) {
+	return qurlapi.NewRegistered(ctx, &qurlapi.Config{
+		BaseURL:      origin,
+		Version:      o.version,
+		Verbose:      o.verboseLogger(),
+		Sleep:        o.sleep,
+		NewRequestID: o.newRequestID,
+	}, store)
+}
+
+// bindDeviceOwner records the authenticated owner in the namespace's registry,
+// refusing a namespace that belongs to another account.
+func (o *globalOpts) bindDeviceOwner(ctx context.Context, stateDir string, deviceIdentity *qurlapi.Identity) error {
+	registry, err := o.openShareRegistry(stateDir)
+	if err != nil {
+		return err
+	}
+	return bindRegisteredDeviceOwner(ctx, registry, stateDir, identityKeyID(deviceIdentity), deviceIdentity.OwnerID)
+}
+
+// oneShotEnrollmentToken reads the supervisor's token file at most once per
+// enrollment and replays that outcome for every later call. The file is
+// one-shot and the supervisor deletes it on every exit path, so re-opening it
+// on a retry would report a file-shape error about a path that is gone. The
+// cache is what prevents that; a repeated call gets the same token and lets
+// the platform be the one to reject a genuinely spent credential, the way the
+// account-key provider's cached idempotency key does. The returned token stays
+// in memory for this enrollment; clearing the reader's buffer does not erase it.
+func oneShotEnrollmentToken(path string) func(context.Context, qurl.AgentEnrollmentCredentialRequest) (string, error) {
+	var (
+		once  sync.Once
+		token string
+		err   error
+	)
+	return func(context.Context, qurl.AgentEnrollmentCredentialRequest) (string, error) {
+		once.Do(func() {
+			token, err = auth.ReadExternalEnrollmentTokenFile(path)
+			if err != nil {
+				// Claim the failure before it reaches the caller's envelope wrap:
+				// every file-shape check runs here, inside the runtime open, and
+				// none of them is an agent-state-envelope problem.
+				err = fmt.Errorf("%w: %w", auth.ErrEnrollmentTokenFile, err)
+			}
+		})
+		return token, err
+	}
+}
+
+// identityKeyID is the non-secret identifier of the credential behind id.
+func identityKeyID(id *qurlapi.Identity) string {
+	if id == nil || id.Key == nil {
+		return ""
+	}
+	return id.Key.KeyID
 }
 
 func repairExplicitLoginDeviceAuthorization(

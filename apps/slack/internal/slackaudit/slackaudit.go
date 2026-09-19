@@ -25,6 +25,10 @@ const (
 	// to live on this side — and now actually exists.
 	QURLMintReason = "qurl_mint_reason"
 
+	// QURLMintCRID records every CRID-addressed mint, including those without a reason.
+	// With a reason, QURLMintReason is emitted too; the events must not be summed as mint counts.
+	QURLMintCRID = "qurl_mint_crid"
+
 	// AgentSlack is the audit.agent value for Slack-originated dependency events.
 	AgentSlack = "slack"
 	// DependencyQURLService is the audit.dependency value for qurl-service calls.
@@ -63,13 +67,14 @@ func LogDependencyAuthFailure(log *slog.Logger, attrs ...slog.Attr) {
 // discrete slog attribute rather than interpolated into the message, so the
 // handler quotes/escapes it and a reason carrying newlines cannot forge a
 // surrounding log record.
-func QURLMintReasonAttrs(teamID, channelID, userID, resourceID, reason string) []slog.Attr {
+func QURLMintReasonAttrs(teamID, channelID, userID, resourceID, reason, addressedBy string) []slog.Attr {
 	return []slog.Attr{
 		slog.String("team_id", teamID),
 		slog.String("channel_id", channelID),
 		slog.String("user_id", userID),
 		slog.String("resource_id", resourceID),
 		slog.String("reason", reason),
+		slog.String("addressed_by", addressedBy),
 	}
 }
 
@@ -98,4 +103,11 @@ func logAudit(log *slog.Logger, level slog.Level, msg, event string, attrs ...sl
 
 	log.LogAttrs(context.Background(), level, msg,
 		slog.Attr{Key: "audit", Value: slog.GroupValue(auditAttrs...)})
+}
+
+// LogQURLMintCRID records the channel-authorized resource without logging the link.
+func LogQURLMintCRID(log *slog.Logger, teamID, channelID, userID, resourceID string) {
+	logAudit(log, slog.LevelInfo, "qurl mint by CRID", QURLMintCRID,
+		slog.String("team_id", teamID), slog.String("channel_id", channelID),
+		slog.String("user_id", userID), slog.String("resource_id", resourceID))
 }

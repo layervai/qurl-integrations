@@ -37,6 +37,27 @@ Optional variables gate extra suites, which skip themselves
   running `discord-commands.smoke.test.ts`; that suite fails fast
   otherwise (see the comment there for why).
 
+## File browser ownership receipts
+
+Before running `file-revoke`, build the verifier from the repository root:
+
+```sh
+umask 077
+receipt_dir=$(mktemp -d)
+go build -o "$receipt_dir/verify-ownership" ./e2e/cmd/verify-ownership
+export QURL_OWNERSHIP_VERIFIER="$receipt_dir/verify-ownership"
+export QURL_OWNERSHIP_RECEIPTS="$receipt_dir/owned-admissions.jsonl"
+export QURL_PUBLIC_CONFIG_URL=https://qurl.link.layerv.xyz/
+```
+
+The suite checks public issuer/cell configuration and authenticated `/v1/me`
+before creating fixtures. Each browser attempt records only public ownership
+and a time window. Source deletion does not revoke shared-tunnel children.
+Retain the receipts for the operator's service-owner child cleanup and exact
+native close/readback; browser shutdown does not prove native CLOSED. Catalog
+binding requires independent Control readback. CI artifacts are accessible to
+repository readers for one day. Never put links, private keys or tokens in them.
+
 ## Run
 
 Run these package commands from `e2e/` (or use `npm --prefix e2e`); npm then

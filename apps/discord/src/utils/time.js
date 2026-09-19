@@ -188,7 +188,21 @@ function formatSessionDurationSeconds(seconds) {
   return `${Math.ceil(seconds)}s`;
 }
 
+// Resolves true if `promise` settles within `ms`, false otherwise. The work
+// keeps running either way; callers use this to stop waiting on best-effort
+// cleanup so a user-facing error is not held past its deadline.
+function settlesWithin(promise, ms) {
+  let timer;
+  const timeout = new Promise((resolve) => {
+    timer = setTimeout(resolve, ms, false);
+    timer.unref?.();
+  });
+  return Promise.race([promise.then(() => true, () => true), timeout])
+    .finally(() => clearTimeout(timer));
+}
+
 module.exports = {
+  settlesWithin,
   expiryToISO,
   expiryToMs,
   // Exposed so callers that need the parse-or-fail signal (`null` on
