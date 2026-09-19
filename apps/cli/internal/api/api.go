@@ -26,6 +26,7 @@ import (
 
 // Client is what commands program against.
 type Client interface {
+	LinkAccount(context.Context, string) error
 	// MintConnectorEnrollmentToken creates a short-lived, one-shot credential
 	// bound to exactly one Connector. The caller supplies the idempotency key
 	// so a higher-level enrollment attempt can recover an ambiguous response
@@ -189,6 +190,8 @@ type Sharing struct {
 
 // Config configures New. Zero hooks get production defaults.
 type Config struct {
+	// OwnerID selects a linked namespace for a signed-in account.
+	OwnerID string
 	// BaseURL is the qURL API origin (no trailing slash required).
 	BaseURL string
 	// APIKey is the bearer credential. Never logged; see Redact.

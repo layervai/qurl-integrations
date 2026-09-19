@@ -1,0 +1,70 @@
+package qurlapi
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"testing"
+)
+
+func TestAccountBrowserPKCEAndState(t *testing.T) {
+	var authQuery url.Values
+	var server *httptest.Server
+	server = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/account/auth":
+			u, _ := url.Parse(server.URL)
+			_ = json.NewEncoder(w).Encode(map[string]string{"domain": u.Host, "client_id": "native-client", "audience": "qurl-api"})
+		case "/oauth/token":
+			if err := r.ParseForm(); err != nil {
+				t.Error(err)
+				w.WriteHeader(400)
+				return
+			}
+			digest := sha256.Sum256([]byte(r.Form.Get("code_verifier")))
+			if base64.RawURLEncoding.EncodeToString(digest[:]) != authQuery.Get("code_challenge") || r.Form.Get("code") != "verified-code" || r.Form.Get("redirect_uri") != accountCallback {
+				t.Error("PKCE exchange does not match browser request")
+				w.WriteHeader(400)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]string{"access_token": "account-token", "token_type": "Bearer"})
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+	defer server.Close()
+	previous := http.DefaultTransport
+	http.DefaultTransport = server.Client().Transport
+	defer func() { http.DefaultTransport = previous }()
+	token, err := SignInAccount(context.Background(), server.URL, func(ctx context.Context, link string) error {
+		u, err := url.Parse(link)
+		if err != nil {
+			return err
+		}
+		authQuery = u.Query()
+		for _, state := range []string{"attacker-state", authQuery.Get("state")} {
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, accountCallback+"?"+url.Values{"state": {state}, "code": {"verified-code"}}.Encode(), http.NoBody)
+			if err != nil {
+				return err
+			}
+			response, err := http.DefaultClient.Do(req)
+			if err != nil {
+				return err
+			}
+			_, _ = io.Copy(io.Discard, response.Body)
+			_ = response.Body.Close()
+			if state == "attacker-state" && response.StatusCode != 400 {
+				t.Error("foreign callback state accepted")
+			}
+		}
+		return nil
+	})
+	if err != nil || token != "account-token" {
+		t.Fatalf("sign-in = %q, %v", token, err)
+	}
+}

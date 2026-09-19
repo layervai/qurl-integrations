@@ -40,21 +40,12 @@ brew upgrade qurl
 
 Using another package format? See [Install](#install).
 
-### 2. Sign in
+### 2. Start your app, then publish it
 
-[Create or copy an API key in the qURL dashboard](https://layerv.ai/qurl/dashboard/keys/).
-Select `qurl:agent` to publish the local app and `qurl:resolve` (the scope
-that allows sharing resources by CRID) to open it in step 4. Then run:
-
-```bash
-qurl login
-```
-
-Paste the key at the hidden prompt. The CLI validates it, enrolls this machine,
-and then discards it. qurl stores the restricted device identity in its
-owner-only native state; it does not store the account API key.
-
-### 3. Start your app, then publish it
+No account, API key, or browser sign-in is required. The first command creates
+and registers a device identity automatically. Keep its local state to keep
+control of your resources. Anonymous devices can publish up to three active
+resources with links valid for at most 24 hours.
 
 Keep your app running in one terminal. If you only want to try the flow, start
 Python's built-in web server:
@@ -91,7 +82,7 @@ debugging. When another program owns the daemon process, run it with
 `qurl daemon run --supervision external` instead — see
 [External supervision](#external-supervision).
 
-### 4. Open or share it
+### 3. Open or share it
 
 The CRID is safe to share. An authorized user can open the app with:
 
@@ -110,7 +101,7 @@ prints its CRID and exits immediately.
 | What you see | What to do |
 |--------------|------------|
 | `only HTTPS URLs are allowed` or no `start`, `stop`, `restart`, and `status` commands | You have the legacy CLI. Run `brew update`, `brew upgrade qurl`, and confirm `qurl version` reports 2.0.0 or newer. |
-| No API key is configured | Run `qurl login` |
+| You want account recovery or another device | Run `qurl account setup` |
 | The key lacks `qurl:agent` | Add that scope in the dashboard, then log in with the updated key |
 | The local app cannot be reached | Check it with `curl http://127.0.0.1:3000` and use the same URL with `qurl publish` |
 | `This Connector needs its qURL platform assignment refreshed` | Upgrade qURL. Current releases refresh stale assignments automatically with bounded backoff; no approval flag is required. |
@@ -155,10 +146,22 @@ qurl version
 
 ## Authentication
 
-The CLI uses a registered device identity for ordinary commands. To enroll the
-device, create an account API key (`lv_live_…` for production, `lv_test_…` for
-test) in the [qURL dashboard](https://layerv.ai/qurl/dashboard/keys/) with the
-`qurl:agent` scope, then run `qurl login`.
+The CLI creates a registered device identity automatically for ordinary commands.
+Account access is optional:
+
+```bash
+qurl account setup
+```
+
+Sign in through the browser to link the current resources to your account.
+Existing resource IDs and links stay unchanged. On a new device, run
+`qurl account recover` to regain management access. If the account has several
+resource owners, select the owner with `--owner`. Recovery does not copy local
+files or restart apps from the previous device. Keep the device state until
+account linking completes; an unlinked device cannot be recovered from an email.
+
+Existing account API keys remain supported through `qurl login` and environment
+variables. Use a key with `qurl:agent` for explicit account enrollment.
 
 There is deliberately no `--api-key` flag — command-line arguments leak into
 shell history and process lists. `qurl login` reads it from a hidden prompt or

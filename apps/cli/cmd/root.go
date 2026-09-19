@@ -253,6 +253,7 @@ QURL_API_KEY for the same one-time bootstrap.`,
 	})
 
 	cmd.AddCommand(
+		accountCmd(opts),
 		publishCmd(opts),
 		shareCmd(opts),
 		getCmd(opts),
@@ -651,6 +652,11 @@ func (b *registeredAccountBootstrap) load(ctx context.Context) (qurlapi.AccountC
 func (b *registeredAccountBootstrap) enrollmentCredential(ctx context.Context, request qurl.AgentEnrollmentCredentialRequest) (string, error) {
 	if strings.TrimSpace(request.AgentID) == "" {
 		return "", errors.New("registered-device enrollment has no durable agent ID")
+	}
+	if b.client == nil {
+		if _, _, err := auth.Resolve(b.opts.lookupEnv); errors.Is(err, auth.ErrNoCredential) {
+			return qurl.AnonymousEnrollmentCredential(ctx, request)
+		}
 	}
 	client, _, _, err := b.load(ctx)
 	if err != nil {
