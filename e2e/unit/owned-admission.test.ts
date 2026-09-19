@@ -20,7 +20,7 @@ test('receipt contains only public ownership and failed verification writes noth
     process.env.MINT_API_URL = 'https://api.example/v1/qurls';
     process.env.QURL_API_KEY = 'private-api-key';
     global.fetch = jest.fn().mockImplementation(() => Promise.resolve(new Response(JSON.stringify({ data: { owner_id: 'owner' } }))));
-    const identity = { agent_public_key: 'public-agent', resource_public_key_b64: 'public-resource', cell_public_key_b64: 'public-cell', cell_id: 'cell0', signed_jti: 'independent-signed-jti', signed_expiry_unix: '1789862400' };
+    const identity = { agent_public_key: 'public-agent', resource_public_key_b64: 'public-resource', cell_public_key_b64: 'public-cell', cell_id: '', signed_jti: 'independent-signed-jti', signed_expiry_unix: '1789862400' };
     const child = { resource_id: 'source', qurl_id: 'child', expires_at: '2026-09-20T00:00:00Z' };
     (spawnSync as jest.Mock).mockReturnValue({ status: 0, stdout: JSON.stringify(identity) });
     await checkOwnershipConfig();

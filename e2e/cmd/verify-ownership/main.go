@@ -39,7 +39,7 @@ func main() {
 	}
 	identity, err := verifiedPublicIdentity(strings.TrimSpace(string(raw)), config)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "ownership verification failed")
+		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 	if err := json.NewEncoder(os.Stdout).Encode(identity); err != nil {
@@ -134,8 +134,9 @@ func verifiedPublicIdentity(link string, config publicConfig) (map[string]string
 	if err != nil || len(cellKey) != 32 {
 		return nil, errors.New("invalid public cell identity")
 	}
+	// cell_id is optional in qURL v2; retain it without inventing a value.
 	cellID := frag.Claims.CellID
-	if cellID == "" || config.CellKey != base64.StdEncoding.EncodeToString(cellKey) {
+	if config.CellKey != base64.StdEncoding.EncodeToString(cellKey) {
 		return nil, errors.New("browser cell identity mismatch")
 	}
 	return map[string]string{"agent_public_key": base64.StdEncoding.EncodeToString(agent), "resource_public_key_b64": frag.Claims.ResourcePublicKeyB64, "cell_public_key_b64": base64.StdEncoding.EncodeToString(cellKey), "cell_id": cellID, "signed_jti": frag.Claims.Jti, "signed_expiry_unix": strconv.FormatInt(frag.Claims.Exp, 10)}, nil

@@ -21,7 +21,7 @@ func TestVerifiedPublicOwnership(t *testing.T) {
 	cell, _ := ecdh.X25519().GenerateKey(rand.Reader)
 	signer, _ := qurl.NewLocalSigner(priv, "test-issuer")
 	config := publicConfig{Issuers: map[string]string{"test-issuer": base64.RawURLEncoding.EncodeToString(der)}, CellKey: base64.StdEncoding.EncodeToString(cell.PublicKey().Bytes())}
-	link, err := qurl.CreatePortalWithParams(context.Background(), signer, qurl.CreateParams{CellPublicKey: cell.PublicKey().Bytes(), ResourcePublicKey: der, RelayURL: "https://relay.example.com", CellID: "cell0", JTI: "test-owned-qurl", IssuedAt: 1781910000, NotBefore: 1781910000, Expiry: 1781910300})
+	link, err := qurl.CreatePortalWithParams(context.Background(), signer, qurl.CreateParams{CellPublicKey: cell.PublicKey().Bytes(), ResourcePublicKey: der, RelayURL: "https://relay.example.com", JTI: "test-owned-qurl", IssuedAt: 1781910000, NotBefore: 1781910000, Expiry: 1781910300})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -29,7 +29,7 @@ func TestVerifiedPublicOwnership(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got["cell_id"] != "cell0" || got["cell_public_key_b64"] != config.CellKey || got["resource_public_key_b64"] != base64.RawURLEncoding.EncodeToString(der) {
+	if got["cell_id"] != "" || got["cell_public_key_b64"] != config.CellKey || got["resource_public_key_b64"] != base64.RawURLEncoding.EncodeToString(der) {
 		t.Fatal("public binding mismatch")
 	}
 	agent, err := base64.StdEncoding.DecodeString(got["agent_public_key"])
