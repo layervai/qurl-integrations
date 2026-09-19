@@ -23,6 +23,9 @@ const accountCallback = "http://" + accountCallbackAddress + "/callback"
 
 // SignInAccount runs authorization-code + PKCE only after explicit account
 // setup. No account token is written to disk or passed to the browser launcher.
+// TODO(upstream-contract): Auth0 serves /authorize and /oauth/token and honors
+// prompt=login consent. The qURL audience accepts the scopes below; account
+// linking requires qurl:agent as well as verified account identity.
 func SignInAccount(ctx context.Context, cfg *Config, openBrowser func(context.Context, string) error) (_ string, retErr error) {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()

@@ -154,13 +154,16 @@ Account access is optional:
 qurl account setup
 ```
 
+Commands that open device state, including `list` and `whoami`, create a device identity on first use.
+`get <CRID>` manages access to your own resource; it is not a recipient link opener.
+
 Sign in through the browser to link the current resources to your account.
 Existing resource IDs and links stay unchanged. On a new device, run
 `QURL_CONNECTOR_STATE_DIR=~/.qurl-recovered qurl account recover` to regain management access.
 Use an unused directory and keep existing device state intact. If the account has several
 resource owners, select the owner with `--owner`. Recovery does not copy local
 files or restart apps from the previous device. Keep the device state until
-account linking completes; an unlinked device cannot be recovered from an email.
+account linking completes. Recovery requires a linked account or a saved copy of the device state.
 
 Existing account API keys remain supported through `qurl login` and environment
 variables. Use a key with `qurl:agent` for explicit account enrollment.
