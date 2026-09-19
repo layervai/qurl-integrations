@@ -129,3 +129,18 @@ func (p *Printer) loginText(id *qurlapi.Identity) error {
 	twe.printf("  %s\t%s\n", p.bold("Enrollment credential:"), "consumed, not stored")
 	return twe.flush(tw)
 }
+
+// Account reports an optional account operation using the normal output contract.
+// Human guidance stays on stderr; JSON and quiet output carry the resource owner.
+func (p *Printer) Account(ownerID, status, message string) error {
+	switch {
+	case p.format == FormatJSON:
+		return p.writeJSON(map[string]string{"owner_id": ownerID, "status": status})
+	case p.quiet:
+		_, err := fmt.Fprintln(p.out, ownerID)
+		return err
+	default:
+		_, err := fmt.Fprintln(p.err, message)
+		return err
+	}
+}

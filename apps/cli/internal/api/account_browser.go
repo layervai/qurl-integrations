@@ -66,7 +66,12 @@ func SignInAccount(ctx context.Context, cfg *Config, openBrowser func(context.Co
 	codes := make(chan string, 1)
 	mux := accountCallbackHandler(state, codes)
 	server := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second, MaxHeaderBytes: 16384}
-	defer func() { _ = server.Close() }()
+	defer func() {
+		shutdownCtx, stop := context.WithTimeout(context.Background(), time.Second)
+		defer stop()
+		_ = server.Shutdown(shutdownCtx)
+		_ = server.Close()
+	}()
 	go func() { _ = server.Serve(listener) }()
 	query := url.Values{"response_type": {"code"}, "client_id": {settings.ClientID}, "redirect_uri": {accountCallback}, "audience": {settings.Audience}, "scope": {"openid email qurl:read qurl:write qurl:agent"}, "state": {state}, "code_challenge": {base64.RawURLEncoding.EncodeToString(challenge[:])}, "code_challenge_method": {"S256"}}
 	if err := openBrowser(ctx, "https://"+settings.Domain+"/authorize?"+query.Encode()); err != nil {
@@ -117,11 +122,7 @@ func accountCallbackHandler(state string, codes chan<- string) http.Handler {
 			return
 		}
 		code := r.URL.Query().Get("code")
-		if len(code) > 4096 {
-			http.Error(w, msgAccountCallbackInvalid, 400)
-			return
-		}
-		if r.URL.Query().Get("error") != "" {
+		if len(code) > 4096 || r.URL.Query().Get("error") != "" {
 			code = ""
 		}
 		select {

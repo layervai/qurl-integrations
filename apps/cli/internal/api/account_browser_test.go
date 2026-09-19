@@ -68,20 +68,22 @@ func TestAccountBrowserPKCEAndState(t *testing.T) {
 }
 
 func TestAccountCallbackDenial(t *testing.T) {
-	codes := make(chan string, 1)
-	handler := accountCallbackHandler("expected", codes)
-	request := httptest.NewRequest(http.MethodGet, accountCallback+"?state=expected&error=access_denied&code=ignored", http.NoBody)
-	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, request)
-	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), msgAccountCanceled) {
-		t.Fatalf("denial = %d %q", response.Code, response.Body.String())
-	}
-	select {
-	case code := <-codes:
-		if code != "" {
-			t.Fatal("denial accepted an authorization code")
+	for _, query := range []string{"error=access_denied&code=ignored", "code=" + strings.Repeat("a", 4097)} {
+		codes := make(chan string, 1)
+		handler := accountCallbackHandler("expected", codes)
+		request := httptest.NewRequest(http.MethodGet, accountCallback+"?state=expected&"+query, http.NoBody)
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), msgAccountCanceled) {
+			t.Fatalf("denial = %d %q", response.Code, response.Body.String())
 		}
-	default:
-		t.Fatal("denial did not end sign-in")
+		select {
+		case code := <-codes:
+			if code != "" {
+				t.Fatal("denial accepted an authorization code")
+			}
+		default:
+			t.Fatal("denial did not end sign-in")
+		}
 	}
 }

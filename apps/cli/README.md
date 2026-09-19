@@ -102,8 +102,8 @@ prints its CRID and exits immediately.
 | What you see | What to do |
 |--------------|------------|
 | `only HTTPS URLs are allowed` or no `start`, `stop`, `restart`, and `status` commands | You have the legacy CLI. Run `brew update`, `brew upgrade qurl`, and confirm `qurl version` reports 2.0.0 or newer. |
-| Account recovery is not enabled | Run `qurl account setup` |
-| The key lacks `qurl:agent` | Add that scope in the dashboard, then set `QURL_API_KEY_FILE` to its file and run `qurl login` |
+| Using a new device identity | Run `qurl account setup` to enable recovery |
+| The key lacks `qurl:agent` | Add that scope in the dashboard, update your key file, and retry |
 | The local app cannot be reached | Check it with `curl http://127.0.0.1:3000` and use the same URL with `qurl publish` |
 | `This Connector needs its qURL platform assignment refreshed` | Upgrade qURL. Current releases refresh stale assignments automatically with bounded backoff; no approval flag is required. |
 | The route is rejected or times out | Run the command once more; if it repeats, contact LayerV support |
@@ -226,6 +226,14 @@ key in the dashboard, move the complete state directory aside, then run
 copy individual bindings or pending requests into the new state.
 
 ### Supervised installs
+
+All commands that open device state, including `list`, `whoami`, and `get`, must
+use the state's supervision mode. For an externally supervised namespace, set
+`QURL_DAEMON_SUPERVISION=external` or pass `--supervision external`. A fresh
+externally supervised namespace must first use the existing enrollment-token
+login flow. `account recover` needs a new device state directory; keep existing
+state intact when choosing that directory.
+
 
 A program that runs the daemon itself (see
 [External supervision](#external-supervision)) never hands qurl an account API
@@ -1013,3 +1021,6 @@ exactly that reason.
 ```bash
 qurl list -o json | jq -r '.resources[].crid'
 ```
+
+Account setup and recovery return `owner_id` and `status` (`linked` or
+`recovered`) with `-o json`. With `--quiet`, they print only the owner ID.

@@ -71,6 +71,8 @@ type globalOpts struct {
 	// openBrowser launches the user's browser at an already-verified link;
 	// tests inject a recorder so no real browser ever starts under test.
 	openBrowser func(ctx context.Context, link string) error
+	// Browser authentication is injected separately from command wiring tests.
+	signInAccount func(context.Context, *qurlapi.Config, func(context.Context, string) error) (string, error)
 	// enterPortalGrant asks the qURL platform for direct access to an
 	// already-verified link and retains both its application authorization and
 	// acknowledged lifetime. Tests always inject (the harness refuses by
@@ -175,6 +177,7 @@ func newRoot(version string, streams *output.Streams, options ...rootOption) (*c
 		lookupEnv:           os.LookupEnv,
 		now:                 time.Now,
 		backgroundShareGOOS: runtime.GOOS,
+		signInAccount:       qurlapi.SignInAccount,
 	}
 	for _, opt := range options {
 		opt(opts)
@@ -697,7 +700,7 @@ func (b *registeredAccountBootstrap) enrollmentCredential(ctx context.Context, r
 func (b *registeredAccountBootstrap) recoveryCredential(ctx context.Context) (string, error) {
 	_, key, _, err := b.load(ctx)
 	if err == nil && key == "" {
-		return "", fmt.Errorf("%w: account recovery requires a new device state directory", auth.ErrNoCredential)
+		return "", fmt.Errorf("%w: %s", auth.ErrNoCredential, msgAccountNewState)
 	}
 	return key, err
 }

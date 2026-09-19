@@ -64,6 +64,7 @@ func customerMessages() []string {
 	return []string{
 		msgAccountSetup,
 		msgAccountContinue,
+		msgAccountNewState,
 		msgAccountLinked,
 		msgAccountRecovered,
 		msgAnonymousDevice,
@@ -85,6 +86,7 @@ func customerMessages() []string {
 }
 
 const (
+	msgAccountNewState    = "account recovery requires a new device state directory"
 	msgAccountContinue    = "Continue in your browser to recover resource access."
 	msgAccountSetup       = "This device controls your qURL resources.\n\nLink an account to recover access and manage resources from other devices.\nYour existing links will keep working.\nLinking is permanent. Check the account you choose in the browser.\n\nContinue in your browser."
 	msgAccountLinked      = "Account linked. Your existing links are unchanged."

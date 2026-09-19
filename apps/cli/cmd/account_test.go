@@ -1,14 +1,19 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/auth"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/output"
 
 	"github.com/layervai/qurl-go/qurl"
 )
@@ -54,6 +59,120 @@ func TestSelectAccountOwner(t *testing.T) {
 		got, err := selectAccountOwner(tc.owners, tc.requested)
 		if got != tc.want || (err != nil) != (tc.want == "") {
 			t.Fatalf("select %v / %q = %q, %v", tc.owners, tc.requested, got, err)
+		}
+	}
+}
+
+// Command wiring stays independent of the browser protocol (tested with a real
+// PKCE exchange in internal/api) and the native enrollment runtime tests.
+func TestAccountCommandsRespectOutputAndAccountBoundaries(t *testing.T) {
+	for _, command := range []string{"setup", "recover"} {
+		for _, format := range []string{"text", "json", "quiet", "denied"} {
+			t.Run(command+"/"+format, func(t *testing.T) {
+				const owner = "device:command-owner"
+				linked, enrolled, signedIn := false, false, false
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					w.Header().Set("Content-Type", "application/json")
+					switch r.URL.Path {
+					case "/v1/me":
+						if r.Header.Get("Authorization") == "Bearer account-token" && r.Header.Get("X-QURL-Owner") != owner {
+							t.Error("recovery identity used the wrong owner")
+						}
+						_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]string{"owner_id": owner, "auth_type": "api_key"}})
+					case "/v1/account/owners":
+						if r.Header.Get("Authorization") != "Bearer account-token" || r.Header.Get("X-QURL-Owner") != "" {
+							t.Error("account discovery used device authority")
+						}
+						_ = json.NewEncoder(w).Encode(map[string]any{"owners": []string{"auth0|account", "device:other", owner}})
+					case "/v1/account/link":
+						var body map[string]string
+						if json.NewDecoder(r.Body).Decode(&body) != nil || body["account_token"] != "account-token" || r.Header.Get("Authorization") != "Bearer device-token" {
+							t.Error("account linking lost one of its authorities")
+						}
+						linked = true
+						_ = json.NewEncoder(w).Encode(map[string]string{"owner_id": owner, "account_id": "auth0|account"})
+					default:
+						t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+						w.WriteHeader(http.StatusNotFound)
+					}
+				}))
+				defer server.Close()
+				device, err := qurlapi.New(&qurlapi.Config{BaseURL: server.URL, APIKey: "device-token"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				var stdout, stderr bytes.Buffer
+				root, opts := newRoot("test", &output.Streams{In: strings.NewReader(""), Out: &stdout, Err: &stderr}, func(g *globalOpts) {
+					g.lookupEnv = func(string) (string, bool) { return "", false }
+					g.configDir = t.TempDir()
+					stateDir := connectorStateTestDir(t)
+					g.resolveShareStateDir = func(string) (string, error) { return stateDir, nil }
+					g.openAPIClient = func(context.Context) (qurlapi.Client, error) { return device, nil }
+					g.signInAccount = func(_ context.Context, cfg *qurlapi.Config, _ func(context.Context, string) error) (string, error) {
+						signedIn = true
+						if cfg.APIKey != "" || cfg.OwnerID != "" || cfg.BaseURL != server.URL {
+							t.Error("browser sign-in carried device authority")
+						}
+						if format == "denied" {
+							return "", errors.New("sign-in denied")
+						}
+						return "account-token", nil
+					}
+					g.openRegisteredClient = func(_ context.Context, account qurlapi.AccountClient, key string, identity *qurlapi.Identity) (qurlapi.Client, *qurlapi.Identity, error) {
+						if account == nil || key != "" || identity == nil || identity.OwnerID != owner {
+							t.Fatal("recovery did not select the requested account owner")
+						}
+						enrolled = true
+						return device, &qurlapi.Identity{OwnerID: owner, AuthType: "api_key"}, nil
+					}
+				})
+				args := []string{"account", command, "--endpoint", server.URL}
+				if command == "recover" {
+					args = append(args, "--owner", owner)
+				}
+				if format == "json" {
+					args = append(args, "--output", "json")
+				}
+				if format == "quiet" {
+					args = append(args, "--quiet")
+				}
+				root.SetArgs(args)
+				code := run(context.Background(), root, opts)
+				if !signedIn {
+					t.Fatal("account command did not invoke browser sign-in")
+				}
+				if format == "denied" {
+					if code == 0 || linked || enrolled || stdout.Len() != 0 {
+						t.Fatalf("denied sign-in changed account state: exit=%d linked=%v enrolled=%v stdout=%q", code, linked, enrolled, stdout.String())
+					}
+					return
+				}
+				if code != 0 || linked != (command == "setup") || enrolled != (command == "recover") {
+					t.Fatalf("command exit=%d linked=%v enrolled=%v stderr=%s", code, linked, enrolled, stderr.String())
+				}
+				switch format {
+				case "json":
+					var result map[string]string
+					if json.Unmarshal(stdout.Bytes(), &result) != nil || result["owner_id"] != owner {
+						t.Fatalf("invalid JSON result: %s", stdout.String())
+					}
+					want := "linked"
+					if command == "recover" {
+						want = "recovered"
+					}
+					if result["status"] != want {
+						t.Fatalf("status=%q", result["status"])
+					}
+				case "quiet":
+					if stdout.String() != owner+"\n" || stderr.Len() != 0 {
+						t.Fatalf("quiet stdout=%q stderr=%q", stdout.String(), stderr.String())
+					}
+				case "text":
+					if stdout.Len() != 0 || !strings.Contains(stderr.String(), "Existing links are unchanged.") && !strings.Contains(stderr.String(), "Your existing links are unchanged.") {
+						t.Fatalf("text stdout=%q stderr=%q", stdout.String(), stderr.String())
+					}
+				}
+			})
 		}
 	}
 }
