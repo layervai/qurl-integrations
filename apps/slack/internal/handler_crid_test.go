@@ -3,6 +3,7 @@ package internal
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -52,6 +53,9 @@ func TestHandleCRID_NotInChannelFailsClosed(t *testing.T) {
 			ts.seedPolicySet(t, testAdminTeamID, "C_test", "prod-db", []string{testResourceIDFix})
 			ts.seedPolicySet(t, testAdminTeamID, "C_other", "tunnel", []string{testTunnelResourceID})
 		},
+		"another workspace": func(t *testing.T, ts *adminTestServers) {
+			ts.seedPolicySet(t, "T_other", "C_test", "tunnel", []string{testTunnelResourceID})
+		},
 		"cold channel": func(t *testing.T, ts *adminTestServers) { ts.seedNonAdmin(t) },
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -67,6 +71,9 @@ func TestHandleCRID_NotInChannelFailsClosed(t *testing.T) {
 			_, _, async := newAdminSlashInvoker(t, h).invokeAdminAsync("crid "+testTunnelCRID, testAdminTeamID, testAdminUserID)
 			if !strings.Contains(async, cridNotInChannelMessage) {
 				t.Errorf("async reply = %q, want not-in-channel copy", async)
+			}
+			if strings.Contains(async, testTunnelCRID) || strings.Contains(async, testTunnelResourceID) {
+				t.Errorf("denial disclosed resource identity: %q", async)
 			}
 			if mintHits.Load() != 0 {
 				t.Errorf("mint reached for a CRID outside the channel allow-set (hits = %d)", mintHits.Load())
@@ -85,6 +92,7 @@ func TestHandleCRID_SyncParseReplies(t *testing.T) {
 		"crid " + strings.ToUpper(testTunnelCRID): invalidCRIDMessage,
 		"crid " + testTunnelCRID + " junk":        cridUsageMessage,
 		"get " + testTunnelCRID:                   cridNotSupportedGetMessage,
+		"get " + strings.Repeat("a", 60):          invalidCRIDMessage,
 	} {
 		t.Run(text, func(t *testing.T) {
 			_, ack := newAdminSlashInvoker(t, h).invokeAdmin(text, testAdminTeamID, testAdminUserID)
@@ -156,7 +164,7 @@ func TestHandleCRID_ReasonAuditsResourceID(t *testing.T) {
 
 func TestResourceIDForCRID(t *testing.T) {
 	allowed := map[string]struct{}{
-		testResourceIDFix:         {},
+		"bG9jYWwtZml4dHVyZQ":      {},
 		"r_legacy":                {},
 		"https://legacy.example/": {},
 		testTunnelResourceID:      {},
@@ -165,7 +173,9 @@ func TestResourceIDForCRID(t *testing.T) {
 		t.Errorf("resourceIDForCRID = %q, want %q", got, testTunnelResourceID)
 	}
 	delete(allowed, testTunnelResourceID)
-	// testResourceIDFix and "r_legacy" decode as base64url (candidates whose
+	// Go base64 decoding ignores line breaks even in strict mode.
+	allowed[testTunnelResourceID[:8]+"\n"+testTunnelResourceID[8:]] = struct{}{}
+	// The local base64url fixture and "r_legacy" decode as base64url (candidates whose
 	// digest cannot match); the URL does not decode at all.
 	if got, candidates := resourceIDForCRID(allowed, testTunnelCRID); got != "" || candidates != 2 {
 		t.Errorf("resourceIDForCRID = %q, %d candidates; want miss with 2 candidates", got, candidates)
@@ -181,6 +191,7 @@ func TestHandleCRID_DMRefusedWhenPostDMBlocksNil(t *testing.T) {
 		writeCreateFixture(t, w, "https://qurl.link/must-not", testTunnelResourceID)
 	})
 	h := newAdminTestHandler(t, ts) // PostDMBlocks is nil by default.
+	ts.ddb.SetGetItemErr(ts.tableNames.channelPolicy, errors.New("policy read must not run before DM refusal"))
 
 	_, _, async := newAdminSlashInvoker(t, h).invokeAdminAsync("crid "+testTunnelCRID+" dm:true", testAdminTeamID, testAdminUserID)
 	if !strings.Contains(async, errDMNotConfigured.msg) || mintHits.Load() != 0 {
@@ -210,11 +221,8 @@ func TestHandleCRID_DMDelivers(t *testing.T) {
 	}
 }
 
-// TestHandleGet_DMGuardRunsAfterResolution pins the get ordering this PR
-// introduced: an unknown alias reports the alias miss even with dm:true in a
-// workspace without DM delivery, while a valid alias reports the DM refusal
-// before any mint.
-func TestHandleGet_DMGuardRunsAfterResolution(t *testing.T) {
+// TestHandleGet_DMGuardRunsBeforeResolution checks the early privacy refusal.
+func TestHandleGet_DMGuardRunsBeforeResolution(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedPolicySet(t, testAdminTeamID, "C_test", "prod-db", []string{testResourceIDFix})
 	var mintHits atomic.Int32
@@ -226,13 +234,88 @@ func TestHandleGet_DMGuardRunsAfterResolution(t *testing.T) {
 		writeResourceListFixture(t, w, []map[string]any{}, "", false)
 	})
 	h := newAdminTestHandler(t, ts) // PostDMBlocks is nil by default.
+	ts.ddb.SetGetItemErr(ts.tableNames.channelPolicy, errors.New("policy read must not run before DM refusal"))
 
 	_, _, typo := newAdminSlashInvoker(t, h).invokeAdminAsync("get $typo dm:true", testAdminTeamID, testAdminUserID)
-	if !strings.Contains(typo, "`$typo` is not configured for this channel") {
-		t.Errorf("unknown alias + dm:true = %q, want alias-miss copy", typo)
+	if !strings.Contains(typo, errDMNotConfigured.msg) {
+		t.Errorf("unknown alias + dm:true = %q, want DM refusal", typo)
 	}
 	_, _, valid := newAdminSlashInvoker(t, h).invokeAdminAsync("get $prod-db dm:true", testAdminTeamID, testAdminUserID)
 	if !strings.Contains(valid, errDMNotConfigured.msg) || mintHits.Load() != 0 {
 		t.Errorf("valid alias + dm:true = %q (mints = %d), want DM refusal before mint", valid, mintHits.Load())
+	}
+}
+
+func TestHandleCRID_MintErrors(t *testing.T) {
+	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			logs := captureDefaultSlog(t)
+			ts := newAdminTestServers(t)
+			ts.seedPolicySet(t, testAdminTeamID, "C_test", "tunnel", []string{testTunnelResourceID})
+			ts.addCustomer(http.MethodPost, mintByTestTunnelPath, func(w http.ResponseWriter, _ *http.Request) {
+				writeAPIError(t, w, status, "unexpected", "private upstream detail")
+			})
+			h := newAdminTestHandler(t, ts)
+			_, _, reply := newAdminSlashInvoker(t, h).invokeAdminAsync("crid "+testTunnelCRID, testAdminTeamID, testAdminUserID)
+			if !strings.Contains(reply, commonGetMintFailedMessage) || strings.Contains(reply, "private upstream detail") || strings.Contains(reply, testTunnelResourceID) {
+				t.Fatalf("unsafe or incorrect failure reply: %q", reply)
+			}
+			if got := findAuditRecord(logs, slackaudit.DependencyAuthFailure); (got != nil) != (status != http.StatusNotFound) {
+				t.Errorf("dependency auth audit = %#v for status %d", got, status)
+			}
+			if findAuditRecord(logs, slackaudit.QURLMintCRID) != nil {
+				t.Error("failed mint recorded as successful")
+			}
+		})
+	}
+}
+
+func TestHandleCRID_AuditsWithoutReason(t *testing.T) {
+	logs := captureDefaultSlog(t)
+	ts := newAdminTestServers(t)
+	ts.seedPolicySet(t, testAdminTeamID, "C_test", "tunnel", []string{testTunnelResourceID})
+	ts.addCustomer(http.MethodPost, mintByTestTunnelPath, func(w http.ResponseWriter, _ *http.Request) {
+		writeCreateFixture(t, w, "https://qurl.link/crid", testTunnelResourceID)
+	})
+	h := newAdminTestHandler(t, ts)
+	newAdminSlashInvoker(t, h).invokeAdminAsync("crid "+testTunnelCRID, testAdminTeamID, testAdminUserID)
+	audit := findAuditRecord(logs, slackaudit.QURLMintCRID)
+	if audit == nil || audit["resource_id"] != testTunnelResourceID || audit["channel_id"] != "C_test" || audit["user_id"] != testAdminUserID || audit["team_id"] != testAdminTeamID {
+		t.Fatalf("missing CRID mint identity: %#v", audit)
+	}
+	if strings.Contains(logs.String(), "https://qurl.link/crid") {
+		t.Error("mint audit disclosed the access link")
+	}
+}
+
+func TestMintFlagErrorsBoundAndEscapeInput(t *testing.T) {
+	for _, prefix := range []string{"get $test ", "crid " + testTunnelCRID + " "} {
+		for _, token := range []string{"<!channel>", "`<!channel>", "dm:<!channel>", "<!channel>:true", strings.Repeat("z", 2048), "dm:" + strings.Repeat("z", 2048)} {
+			_, err := Parse(prefix + token)
+			if err == nil || len(err.Error()) > 200 {
+				t.Fatalf("unbounded flag error: %v", err)
+			}
+			for i, part := range strings.Split(err.Error(), "`") {
+				if i%2 == 0 && strings.Contains(part, "<!channel>") {
+					t.Errorf("mention outside code span: %s", err)
+				}
+			}
+		}
+	}
+}
+
+func TestHandleCRID_PolicyReadFailure(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedPolicySet(t, testAdminTeamID, "C_test", "tunnel", []string{testTunnelResourceID})
+	ts.ddb.SetGetItemErr(ts.tableNames.channelPolicy, errors.New("private policy failure"))
+	var mints atomic.Int32
+	ts.addCustomerPrefix(http.MethodPost, "/v1/resources/", func(w http.ResponseWriter, _ *http.Request) {
+		mints.Add(1)
+		writeCreateFixture(t, w, "https://qurl.link/must-not", testTunnelResourceID)
+	})
+	h := newAdminTestHandler(t, ts)
+	_, _, reply := newAdminSlashInvoker(t, h).invokeAdminAsync("crid "+testTunnelCRID, testAdminTeamID, testAdminUserID)
+	if mints.Load() != 0 || !strings.Contains(reply, serviceUnreachableMessage) || strings.Contains(reply, "private policy failure") {
+		t.Fatalf("policy failure did not fail closed: mints=%d reply=%q", mints.Load(), reply)
 	}
 }

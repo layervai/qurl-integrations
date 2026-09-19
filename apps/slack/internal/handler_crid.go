@@ -2,7 +2,9 @@ package internal
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -63,7 +65,9 @@ func (h *Handler) cridWork(ctx context.Context, log *slog.Logger, args *getWorkA
 		// channel — worth an operator-visible line, unlike an alias typo.
 		// allow_set_size vs key_candidates separates an empty channel, a
 		// real miss, and resource_id encoding drift (candidates == 0).
-		log.Warn("crid: CRID not in channel allow-set", "team_id", args.teamID, "channel_id", args.channelID, "user_id", args.userID, "allow_set_size", len(allowed), "key_candidates", keyCandidates)
+		// Hash the attempt for correlation without logging the supplied identifier.
+		attempt := sha256.Sum256([]byte(args.cmd.CRID))
+		log.Warn("crid: CRID not in channel allow-set", "team_id", args.teamID, "channel_id", args.channelID, "user_id", args.userID, "crid_fingerprint", hex.EncodeToString(attempt[:8]), "allow_set_size", len(allowed), "key_candidates", keyCandidates)
 		return getResult{}, &userError{msg: cridNotInChannelMessage}
 	}
 	return h.mintForResource(ctx, log, args, resourceID)
@@ -72,7 +76,8 @@ func (h *Handler) cridWork(ctx context.Context, log *slog.Logger, args *getWorkA
 // resourceIDForCRID finds the allow-set entry whose public key the CRID
 // fingerprints. A resource_id is the base64url DER public key and a CRID is a
 // digest of that DER, so the match is local and needs no CRID→resource_id
-// lookup. Any other entry (a legacy id or URL) either fails to decode or
+// lookup. keyCandidates is a complete count only on a miss.
+// Any other entry (a legacy id or URL) either fails to decode or
 // decodes to bytes whose digest cannot match.
 //
 // TODO(upstream-contract): mirrors qurl-service's unpadded base64url
@@ -80,7 +85,7 @@ func (h *Handler) cridWork(ctx context.Context, log *slog.Logger, args *getWorkA
 func resourceIDForCRID(allowed map[string]struct{}, cridValue string) (resourceID string, keyCandidates int) {
 	for id := range allowed {
 		der, err := base64.RawURLEncoding.Strict().DecodeString(id)
-		if err != nil {
+		if err != nil || base64.RawURLEncoding.EncodeToString(der) != id {
 			continue
 		}
 		keyCandidates++

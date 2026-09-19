@@ -487,6 +487,9 @@ func parseGet(cmd *Command, rest []string) (*Command, error) {
 		return nil, ErrURLNotSupportedGet
 	}
 	if looksLikeCRIDForGet(rest[0]) {
+		if crid.Validate(strings.TrimPrefix(rest[0], "$")) != nil {
+			return nil, ErrInvalidCRID
+		}
 		return nil, ErrCRIDNotSupportedGet
 	}
 	if strings.HasPrefix(rest[0], "$r_") {
@@ -517,7 +520,7 @@ func applyMintFlags(cmd *Command, toks []string) (*Command, error) {
 		// (expected key:value)" — accurate to applyFlag but confusing
 		// to a user who didn't intend to type a flag at all.
 		if !looksLikeFlag(tok) {
-			return nil, fmt.Errorf("%w: %q", ErrUnexpectedArgument, tok)
+			return nil, fmt.Errorf("%w: `%s`", ErrUnexpectedArgument, truncateForError(tok))
 		}
 		if err := applyFlag(cmd, tok); err != nil {
 			return nil, err
@@ -777,10 +780,10 @@ func hasASCIIPrefixFold(s, prefix string) bool {
 func applyFlag(cmd *Command, tok string) error {
 	colonIdx := strings.IndexByte(tok, ':')
 	if colonIdx < 0 {
-		return fmt.Errorf("%w: %q (expected key:value)", ErrInvalidFlag, tok)
+		return fmt.Errorf("%w: `%s` (expected key:value)", ErrInvalidFlag, truncateForError(tok))
 	}
 	if colonIdx == 0 {
-		return fmt.Errorf("%w: %q (missing key before colon)", ErrInvalidFlag, tok)
+		return fmt.Errorf("%w: `%s` (missing key before colon)", ErrInvalidFlag, truncateForError(tok))
 	}
 	// Lowercase only the key portion so `Reason:"On Call"` keeps
 	// its mixed-case value intact.
@@ -792,11 +795,11 @@ func applyFlag(cmd *Command, tok string) error {
 	// quoted-empty (`reason:""`) both report the same "empty value"
 	// reason.
 	if colonIdx == len(tok)-1 {
-		return fmt.Errorf("%w: %q (empty value — use a non-empty value or omit the flag)", ErrInvalidFlag, tok)
+		return fmt.Errorf("%w: `%s` (empty value — use a non-empty value or omit the flag)", ErrInvalidFlag, truncateForError(tok))
 	}
 	m := flagPattern.FindStringSubmatch(normalized)
 	if len(m) == 0 {
-		return fmt.Errorf("%w: %q (expected key:value)", ErrInvalidFlag, tok)
+		return fmt.Errorf("%w: `%s` (expected key:value)", ErrInvalidFlag, truncateForError(tok))
 	}
 	key := m[1]
 	val := m[2]
@@ -804,7 +807,7 @@ func applyFlag(cmd *Command, tok string) error {
 		val = m[3]
 	}
 	if val == "" {
-		return fmt.Errorf("%w: %q (empty value — use a non-empty value or omit the flag)", ErrInvalidFlag, tok)
+		return fmt.Errorf("%w: `%s` (empty value — use a non-empty value or omit the flag)", ErrInvalidFlag, truncateForError(tok))
 	}
 	switch key {
 	case "dm":
@@ -817,7 +820,7 @@ func applyFlag(cmd *Command, tok string) error {
 		// (`whatever:true` → ErrInvalidFlag), so we reject typo'd
 		// values too.
 		if !strings.EqualFold(val, "true") && !strings.EqualFold(val, "false") {
-			return fmt.Errorf("%w: dm:%q (use dm:true or omit the flag)", ErrInvalidFlag, val)
+			return fmt.Errorf("%w: dm:`%s` (use dm:true or omit the flag)", ErrInvalidFlag, truncateForError(val))
 		}
 		cmd.Flags[key] = val
 		return nil
@@ -832,6 +835,6 @@ func applyFlag(cmd *Command, tok string) error {
 		// slash-command recipes and deserve to know it's now redundant.
 		return fmt.Errorf("%w: `once` is no longer needed — every `/qurl get` link is one-time use by default", ErrInvalidFlag)
 	default:
-		return fmt.Errorf("%w: unknown flag %q", ErrInvalidFlag, key)
+		return fmt.Errorf("%w: unknown flag `%s`", ErrInvalidFlag, truncateForError(key))
 	}
 }

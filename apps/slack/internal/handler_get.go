@@ -233,11 +233,10 @@ var errDMNotConfigured = &userError{msg: "DM delivery is not configured for this
 // Optional flags:
 //   - `dm:true` → the minted link is delivered via PostDMBlocks to the
 //     user's DM (an Enter Portal button) instead of the channel ephemeral.
-//     Refused up front (getWork) with a "DM delivery is not configured —
+//     Refused before resolution (processGet) with a "DM delivery is not configured —
 //     re-run without dm:true" warning when PostDMBlocks is nil, rather than
 //     falling back in-channel against the user's privacy intent.
-//   - `reason:"…"` → forwarded as [client.CreateInput.Reason] so it
-//     lands in the audit row.
+//   - `reason:"…"` → recorded in the local mint audit event.
 func (h *Handler) handleGet(w http.ResponseWriter, values url.Values) {
 	text := strings.TrimSpace(values.Get(fieldText))
 	cmd, err := Parse(text)
@@ -252,6 +251,10 @@ func (h *Handler) handleGet(w http.ResponseWriter, values url.Values) {
 		}
 		if errors.Is(err, ErrResourceIDNotSupportedGet) {
 			respondSlack(w, ":warning: "+resourceIDNotSupportedGetMessage)
+			return
+		}
+		if errors.Is(err, ErrInvalidCRID) {
+			respondSlack(w, ":warning: "+invalidCRIDMessage)
 			return
 		}
 		if errors.Is(err, ErrCRIDNotSupportedGet) {
@@ -305,6 +308,11 @@ func (h *Handler) processGet(ctx context.Context, log *slog.Logger, values url.V
 		// full rationale (single source of truth).
 		log.Warn("get: empty channel_id; refusing channel-less invocation")
 		_ = h.postResponse(log, responseURL, ":warning: "+channelRequiredMessage)
+		return
+	}
+
+	if cmd.DM() && h.cfg.PostDMBlocks == nil {
+		h.finishGet(log, responseURL, getResult{}, errDMNotConfigured)
 		return
 	}
 
@@ -576,10 +584,13 @@ func (h *Handler) mintForResource(ctx context.Context, log *slog.Logger, args *g
 	if reason := strings.TrimSpace(args.cmd.Reason()); reason != "" {
 		// addressed_by separates a channel `$id`/`$alias` mint (get) from one
 		// addressed by a permanent CRID obtained outside Slack (crid).
-		slackaudit.LogQURLMintReason(log, append(slackaudit.QURLMintReasonAttrs(
+		slackaudit.LogQURLMintReason(log, slackaudit.QURLMintReasonAttrs(
 			args.teamID, args.channelID, args.userID, input.ResourceID,
-			truncateRunes(reason, getReasonAuditMaxRunes),
-		), slog.String("addressed_by", string(args.cmd.Subcommand)))...)
+			truncateRunes(reason, getReasonAuditMaxRunes), string(args.cmd.Subcommand),
+		)...)
+	}
+	if args.cmd.Subcommand == SubcmdCRID {
+		slackaudit.LogQURLMintCRID(log, args.teamID, args.channelID, args.userID, input.ResourceID)
 	}
 	// Defensive: an empty OR non-https qurl_link is a server contract surprise (mints
 	// return absolute https qurl.link URLs). The Enter Portal render puts the link in a

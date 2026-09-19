@@ -164,6 +164,9 @@ note why you minted it in the audit log.
 `/qurl crid <CRID>` is the same command addressed by a resource's permanent
 CRID instead of a `$id` or `$alias`. It is channel-scoped exactly like
 `/qurl get`: a CRID mints only in a channel where its resource is available.
+Every successful CRID mint records a `qurl_mint_crid` audit event with the
+workspace, channel, user, and resource IDs, including when no reason is given.
+This command is available through slash commands; agent tools still use aliases.
 
 ## FAQ
 
