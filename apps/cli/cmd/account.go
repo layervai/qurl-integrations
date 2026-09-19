@@ -12,14 +12,15 @@ import (
 )
 
 func accountCmd(opts *globalOpts) *cobra.Command {
-	command := &cobra.Command{Use: "account", Short: "Manage optional account access"}
-	command.AddCommand(&cobra.Command{Use: "setup", Short: "Link this device to an account in your browser", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+	command := &cobra.Command{Use: "account", Short: "Manage optional account access", Long: "Publish without an account. Link this device only when you need account recovery or access from other devices.", Example: "  qurl account setup\n  qurl account recover"}
+	command.AddCommand(&cobra.Command{Use: "setup", Short: "Link this device to an account in your browser", Long: "Sign in with a verified account to recover access and use other devices. Existing resources and links stay unchanged.", Example: "  qurl account setup", Args: noArgs, RunE: func(cmd *cobra.Command, _ []string) error {
 		client, err := opts.newClient(cmd.Context())
 		if err != nil {
 			return err
 		}
 		_, _ = fmt.Fprintln(cmd.OutOrStdout(), "This device controls your qURL resources.\n\nLink an account to recover access and manage resources from other devices.\nYour existing links will keep working.\n\nContinue in your browser.")
-		token, err := qurlapi.SignInAccount(cmd.Context(), opts.resolvedEndpoint, opts.openBrowser)
+		opts.warnInsecureEndpoint()
+		token, err := qurlapi.SignInAccount(cmd.Context(), opts.accountConfig("", ""), opts.openBrowser)
 		if err != nil {
 			return err
 		}
@@ -35,35 +36,24 @@ func accountCmd(opts *globalOpts) *cobra.Command {
 
 func accountRecoverCmd(opts *globalOpts) *cobra.Command {
 	var selectedOwner string
-	recoverCmd := &cobra.Command{Use: "recover", Short: "Recover account resources on a new device", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
-		token, err := qurlapi.SignInAccount(cmd.Context(), opts.resolvedEndpoint, opts.openBrowser)
+	recoverCmd := &cobra.Command{Use: "recover", Short: "Recover account resources on a new device", Long: "Sign in to restore management access on a new device. This does not restore files or running apps from another host.", Example: "  qurl account recover\n  qurl account recover --owner device:...", Args: noArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+		if err := opts.requireRuntimeSupervisionIfNamespace(); err != nil {
+			return err
+		}
+		opts.warnInsecureEndpoint()
+		token, err := qurlapi.SignInAccount(cmd.Context(), opts.accountConfig("", ""), opts.openBrowser)
 		if err != nil {
 			return err
 		}
-		owners, err := qurlapi.AccountOwners(cmd.Context(), opts.resolvedEndpoint, token)
+		owners, err := qurlapi.AccountOwners(cmd.Context(), opts.accountConfig(token, ""))
 		if err != nil {
 			return err
 		}
-		if selectedOwner == "" && len(owners) == 1 {
-			selectedOwner = owners[0]
+		owner, err := selectAccountOwner(owners, selectedOwner)
+		if err != nil {
+			return err
 		}
-		if selectedOwner == "" {
-			devices := []string{}
-			for _, owner := range owners {
-				if strings.HasPrefix(owner, "device:") {
-					devices = append(devices, owner)
-				}
-			}
-			if len(devices) == 1 {
-				selectedOwner = devices[0]
-			} else {
-				return fmt.Errorf("choose resources to recover with --owner; available owners: %s", strings.Join(owners, ", "))
-			}
-		}
-		if !slices.Contains(owners, selectedOwner) {
-			return errors.New("this account does not own the selected resources")
-		}
-		account, err := qurlapi.New(&qurlapi.Config{BaseURL: opts.resolvedEndpoint, APIKey: token, OwnerID: selectedOwner})
+		account, err := qurlapi.New(opts.accountConfig(token, owner))
 		if err != nil {
 			return err
 		}
@@ -81,4 +71,24 @@ func accountRecoverCmd(opts *globalOpts) *cobra.Command {
 	}}
 	recoverCmd.Flags().StringVar(&selectedOwner, "owner", "", "resource owner to recover when the account has several devices")
 	return recoverCmd
+}
+
+func selectAccountOwner(owners []string, requested string) (string, error) {
+	if requested == "" && len(owners) == 1 {
+		requested = owners[0]
+	}
+	if requested == "" {
+		for _, owner := range owners {
+			if strings.HasPrefix(owner, "device:") {
+				if requested != "" {
+					return "", fmt.Errorf("choose resources to recover with --owner; available owners: %s", strings.Join(owners, ", "))
+				}
+				requested = owner
+			}
+		}
+	}
+	if !slices.Contains(owners, requested) {
+		return "", errors.New("this account does not own the selected resources")
+	}
+	return requested, nil
 }

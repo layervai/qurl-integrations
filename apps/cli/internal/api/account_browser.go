@@ -17,22 +17,32 @@ import (
 	"time"
 )
 
+// Auth0 requires this exact registered callback URI.
 const accountCallback = "http://127.0.0.1:8765/callback"
 
 // SignInAccount runs authorization-code + PKCE only after explicit account
 // setup. No account token is written to disk or passed to the browser launcher.
-func SignInAccount(ctx context.Context, endpoint string, openBrowser func(context.Context, string) error) (string, error) {
+func SignInAccount(ctx context.Context, cfg *Config, openBrowser func(context.Context, string) error) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
-	if err := validateAccountEndpoint(endpoint); err != nil {
+	if err := validateAccountEndpoint(cfg.BaseURL); err != nil {
 		return "", err
 	}
-	client := &http.Client{Timeout: 30 * time.Second, CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }}
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, trimBaseURL(endpoint)+"/v1/account/auth", http.NoBody)
+	httpClient := http.Client{Timeout: 30 * time.Second}
+	if cfg.HTTPClient != nil {
+		httpClient = *cfg.HTTPClient
+	}
+	httpClient.CheckRedirect = func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }
+	httpClient.Timeout = 30 * time.Second
+	browserConfig := *cfg
+	browserConfig.APIKey = ""
+	browserConfig.HTTPClient = &httpClient
+	client := newTransport(&browserConfig)
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, trimBaseURL(cfg.BaseURL)+"/v1/account/auth", http.NoBody)
 	if err != nil {
 		return "", err
 	}
-	response, err := client.Do(request)
+	response, err := client.DoOnce(request)
 	if err != nil {
 		return "", errors.New("cannot load account sign-in settings")
 	}
@@ -71,7 +81,7 @@ func SignInAccount(ctx context.Context, endpoint string, openBrowser func(contex
 	select {
 	case code = <-codes:
 	case <-ctx.Done():
-		return "", errors.New("account sign-in timed out or was canceled; run qurl account setup to retry")
+		return "", errors.New("account sign-in timed out or was canceled; run the command again")
 	}
 	if code == "" {
 		return "", errors.New("account sign-in was canceled")
@@ -79,16 +89,16 @@ func SignInAccount(ctx context.Context, endpoint string, openBrowser func(contex
 	return exchangeAccountCode(ctx, client, settings.Domain, settings.ClientID, code, verifier)
 }
 
-func exchangeAccountCode(ctx context.Context, client *http.Client, domain, clientID, code, verifier string) (string, error) {
+func exchangeAccountCode(ctx context.Context, client *transport, domain, clientID, code, verifier string) (string, error) {
 	form := url.Values{"grant_type": {"authorization_code"}, "client_id": {clientID}, "code": {code}, "code_verifier": {verifier}, "redirect_uri": {accountCallback}}
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://"+domain+"/oauth/token", strings.NewReader(form.Encode()))
 	if err != nil {
 		return "", err
 	}
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	response, err := client.Do(request)
+	response, err := client.DoOnce(request)
 	if err != nil {
-		return "", errors.New("account sign-in could not complete; retry account setup")
+		return "", errors.New("account sign-in could not complete; run the command again")
 	}
 	defer func() { _ = response.Body.Close() }()
 	var token struct {
@@ -96,7 +106,7 @@ func exchangeAccountCode(ctx context.Context, client *http.Client, domain, clien
 		TokenType   string `json:"token_type"`
 	}
 	if response.StatusCode != http.StatusOK || json.NewDecoder(io.LimitReader(response.Body, 32768)).Decode(&token) != nil || token.AccessToken == "" || !strings.EqualFold(token.TokenType, "Bearer") {
-		return "", errors.New("account sign-in could not complete; retry account setup")
+		return "", errors.New("account sign-in could not complete; run the command again")
 	}
 	return token.AccessToken, nil
 }

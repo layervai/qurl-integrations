@@ -38,10 +38,7 @@ func TestAccountBrowserPKCEAndState(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	previous := http.DefaultTransport
-	http.DefaultTransport = server.Client().Transport
-	defer func() { http.DefaultTransport = previous }()
-	token, err := SignInAccount(context.Background(), server.URL, func(ctx context.Context, link string) error {
+	token, err := SignInAccount(context.Background(), &Config{BaseURL: server.URL, HTTPClient: server.Client()}, func(ctx context.Context, link string) error {
 		u, err := url.Parse(link)
 		if err != nil {
 			return err

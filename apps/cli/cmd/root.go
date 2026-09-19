@@ -542,14 +542,19 @@ func (o *globalOpts) apiCredential() (string, error) {
 // everything else goes through newClient.
 func (o *globalOpts) apiClient(key string) (qurlapi.AccountClient, error) {
 	o.warnInsecureEndpoint()
-	return qurlapi.New(&qurlapi.Config{
+	return qurlapi.New(o.accountConfig(key, ""))
+}
+
+func (o *globalOpts) accountConfig(key, owner string) *qurlapi.Config {
+	return &qurlapi.Config{
+		OwnerID:      owner,
 		BaseURL:      o.resolvedEndpoint,
 		APIKey:       key,
 		Version:      o.version,
 		Verbose:      o.verboseLogger(),
 		Sleep:        o.sleep,
 		NewRequestID: o.newRequestID,
-	})
+	}
 }
 
 // registeredAccountBootstrap owns the account-key capability only during one
@@ -655,6 +660,9 @@ func (b *registeredAccountBootstrap) enrollmentCredential(ctx context.Context, r
 	}
 	if b.client == nil {
 		if _, _, err := auth.Resolve(b.opts.lookupEnv); errors.Is(err, auth.ErrNoCredential) {
+			if b.opts.streams != nil && b.opts.streams.Err != nil && !b.opts.quiet {
+				_, _ = fmt.Fprintln(b.opts.streams.Err, "Using a new device identity. Keep its local state, or run qurl account setup to enable recovery.")
+			}
 			return qurl.AnonymousEnrollmentCredential(ctx, request)
 		}
 	}
@@ -686,6 +694,9 @@ func (b *registeredAccountBootstrap) enrollmentCredential(ctx context.Context, r
 
 func (b *registeredAccountBootstrap) recoveryCredential(ctx context.Context) (string, error) {
 	_, key, _, err := b.load(ctx)
+	if err == nil && key == "" {
+		return "", fmt.Errorf("%w: account recovery requires a new device state directory", auth.ErrNoCredential)
+	}
 	return key, err
 }
 
