@@ -91,6 +91,10 @@ const (
 // still mintable by their listed `$alias`; only ad hoc raw URL input is refused.
 const urlNotSupportedGetMessage = "`/qurl get` works with a listed `$id` or `$alias` — raw URLs aren't supported. Run `/qurl list` and copy the URL resource's alias."
 
+// cridNotSupportedGetMessage redirects a CRID pasted into `/qurl get`
+// ([ErrCRIDNotSupportedGet]) to `/qurl crid`.
+const cridNotSupportedGetMessage = "That looks like a CRID. Use `/qurl crid <CRID>` to create a qURL from it."
+
 // resourceIDNotSupportedGetMessage is the user-facing copy for a `$r_<id>`
 // `/qurl get` (the resource-id form is gone). Same terse-sentinel
 // ([ErrResourceIDNotSupportedGet]) → rich-handler-copy split as the URL case.
@@ -212,6 +216,10 @@ func (e *userError) Error() string { return e.msg }
 // completed the install.
 var errAdminStoreNotConfigured = &userError{msg: "qURL admin features are not yet configured for this workspace. Ask the workspace owner who connected qURL, or contact qURL support at " + qurlContactURL + "."}
 
+// errDMNotConfigured refuses `dm:true` when PostDMBlocks is not wired; see
+// [Handler.mintForResource].
+var errDMNotConfigured = &userError{msg: "DM delivery is not configured for this workspace. Re-run the command without `dm:true` to receive the link in-channel."}
+
 // handleGet implements `/qurl get <$id|$alias>`:
 //  1. Parse the slash-command text → [Command]. The positional arg is a
 //     listed resource ID/alias token: a tunnel `$slug`, a channel-scoped
@@ -225,11 +233,10 @@ var errAdminStoreNotConfigured = &userError{msg: "qURL admin features are not ye
 // Optional flags:
 //   - `dm:true` → the minted link is delivered via PostDMBlocks to the
 //     user's DM (an Enter Portal button) instead of the channel ephemeral.
-//     Refused up front (getWork) with a "DM delivery is not configured —
+//     Refused before resolution (processGet) with a "DM delivery is not configured —
 //     re-run without dm:true" warning when PostDMBlocks is nil, rather than
 //     falling back in-channel against the user's privacy intent.
-//   - `reason:"…"` → forwarded as [client.CreateInput.Reason] so it
-//     lands in the audit row.
+//   - `reason:"…"` → recorded in the local mint audit event.
 func (h *Handler) handleGet(w http.ResponseWriter, values url.Values) {
 	text := strings.TrimSpace(values.Get(fieldText))
 	cmd, err := Parse(text)
@@ -244,6 +251,14 @@ func (h *Handler) handleGet(w http.ResponseWriter, values url.Values) {
 		}
 		if errors.Is(err, ErrResourceIDNotSupportedGet) {
 			respondSlack(w, ":warning: "+resourceIDNotSupportedGetMessage)
+			return
+		}
+		if errors.Is(err, ErrInvalidCRID) {
+			respondSlack(w, ":warning: "+invalidCRIDMessage+" For an alias, use `/qurl get $alias`.")
+			return
+		}
+		if errors.Is(err, ErrCRIDNotSupportedGet) {
+			respondSlack(w, ":warning: "+cridNotSupportedGetMessage)
 			return
 		}
 		// Bare `get` (no token) parses to ErrEmptyResource. Surface the
@@ -277,7 +292,7 @@ func (h *Handler) handleGet(w http.ResponseWriter, values url.Values) {
 	})
 }
 
-// processGet is the async-worker body for /qurl get. Builds the
+// processGet is the async-worker body for /qurl get and /qurl crid. Builds the
 // reply text and POSTs it via response_url. Errors from the inner
 // pipeline reach the user as a friendly `:warning:` message.
 func (h *Handler) processGet(ctx context.Context, log *slog.Logger, values url.Values, cmd *Command) {
@@ -296,7 +311,16 @@ func (h *Handler) processGet(ctx context.Context, log *slog.Logger, values url.V
 		return
 	}
 
-	res, err := h.getWork(ctx, log, &getWorkArgs{
+	if cmd.DM() && h.cfg.PostDMBlocks == nil {
+		h.finishGet(log, responseURL, getResult{}, errDMNotConfigured)
+		return
+	}
+
+	work := h.getWork
+	if cmd.Subcommand == SubcmdCRID {
+		work = h.cridWork
+	}
+	res, err := work(ctx, log, &getWorkArgs{
 		cmd:          cmd,
 		teamID:       teamID,
 		enterpriseID: enterpriseID,
@@ -311,8 +335,8 @@ func (h *Handler) processGet(ctx context.Context, log *slog.Logger, values url.V
 // ephemeral: the Enter Portal link render on success, or the [*userError]
 // message (prefixed with `:warning:`) on failure. A non-userError leak is a
 // programmer mistake — log it loud and surface the generic catch-all so
-// internals never reach Slack. Shared by the `/qurl get` slash path
-// ([Handler.processGet]) and the `/qurl list` "Create qURL" button
+// internals never reach Slack. Shared by the `/qurl get` and `/qurl crid`
+// slash paths ([Handler.processGet]) and the `/qurl list` "Create qURL" button
 // ([Handler.processButtonGet]) so both render identical replies.
 func (h *Handler) finishGet(log *slog.Logger, responseURL string, res getResult, err error) {
 	if err != nil {
@@ -468,16 +492,6 @@ func isLegacyDirectURLBinding(s string) bool {
 func (h *Handler) getWork(ctx context.Context, log *slog.Logger, args *getWorkArgs) (getResult, error) {
 	alias := args.cmd.Alias
 
-	// Refuse `dm:true` early when PostDMBlocks is not wired — the user's
-	// intent is "do not leak the link in channel history", and a
-	// silent channel-fallback violates that intent. Fail-fast here
-	// avoids burning a mint quota on a request that can't be
-	// delivered the way the user asked. (deliverGetDM delivers the Enter
-	// Portal render via PostDMBlocks, so that is the seam to guard on.)
-	if args.cmd.DM() && h.cfg.PostDMBlocks == nil {
-		return getResult{}, &userError{msg: "DM delivery is not configured for this workspace. Re-run the command without `dm:true` to receive the link in-channel."}
-	}
-
 	if alias == "" {
 		// Defensive: parseGet guarantees a non-empty alias-shaped token
 		// (raw URLs and `$r_<id>` are rejected at parse time). This only
@@ -504,10 +518,28 @@ func (h *Handler) getWork(ctx context.Context, log *slog.Logger, args *getWorkAr
 		// `/qurl get $typo` never burns the user's quota.
 		return getResult{}, err
 	}
+	return h.mintForResource(ctx, log, args, boundResourceID)
+}
+
+// mintForResource runs the rate-limit→mint→render tail shared by `/qurl get`
+// and `/qurl crid` once the caller has resolved a channel-authorized
+// resource_id. Every mint surface therefore pins the same link policy,
+// idempotency key, error mapping, and reason audit.
+func (h *Handler) mintForResource(ctx context.Context, log *slog.Logger, args *getWorkArgs, resourceID string) (getResult, error) {
+	// Keep this guard for callers that bypass processGet (buttons and agent actions).
+	// Refuse `dm:true` when PostDMBlocks is not wired — the user's intent
+	// is "do not leak the link in channel history", and a silent
+	// channel-fallback violates that intent. Checked before the rate limit
+	// so a request that can't be delivered the way the user asked never
+	// burns mint quota. (deliverGetDM delivers the Enter Portal render via
+	// PostDMBlocks, so that is the seam to guard on.)
+	if args.cmd.DM() && h.cfg.PostDMBlocks == nil {
+		return getResult{}, errDMNotConfigured
+	}
 
 	// Rate-limit AFTER a successful resolution: only a request that resolved to a
 	// real, channel-authorized resource — i.e. an actual mint attempt — counts
-	// against the user's quota. The dm:true delivery guard above stays earliest
+	// against the user's quota. The dm:true delivery guard above runs first
 	// so an undeliverable privacy request consumes nothing either. (Resolution
 	// work for unknown aliases is instead bounded by Slack's own per-user
 	// slash-command throttle, not by spending the user's mint quota on typos.)
@@ -529,7 +561,7 @@ func (h *Handler) getWork(ctx context.Context, log *slog.Logger, args *getWorkAr
 		SessionDuration: resourceSessionDuration,
 		MaxSessions:     resourceMaxSessions,
 		IdempotencyKey:  IdempotencyKey(args.teamID, args.channelID, args.userID, args.triggerID),
-		ResourceID:      boundResourceID,
+		ResourceID:      resourceID,
 	}
 
 	c, err := h.authenticatedClient(ctx, args.teamID)
@@ -542,7 +574,19 @@ func (h *Handler) getWork(ctx context.Context, log *slog.Logger, args *getWorkAr
 	if err != nil {
 		return getResult{}, mapMintError(log, err)
 	}
-	// Record the operator's reason against the mint that just happened.
+	// Never deliver a mint response naming a different resource from the
+	// one authorized in this channel. This checks the API response identity;
+	// recipients still verify the signed link before granting network access.
+	// TODO(upstream-contract): CreateQurlForResource returns the same canonical
+	// resource_id as its request path. On mismatch, withhold the short-lived
+	// link; do not revoke an identity we cannot trust.
+	if out.ResourceID != input.ResourceID {
+		log.Error("get: mint response resource identity mismatch",
+			"expected_resource_id", sanitizeLogValue(input.ResourceID),
+			"returned_resource_id", sanitizeLogValue(out.ResourceID))
+		return getResult{}, &userError{msg: commonGetMintFailedMessage}
+	}
+	// Record the operator's reason after validating the minted resource identity.
 	//
 	// This is deliberately AFTER the mint and BEFORE the delivery guards
 	// below: the mint has already burned the user's quota at this point, so
@@ -551,10 +595,15 @@ func (h *Handler) getWork(ctx context.Context, log *slog.Logger, args *getWorkAr
 	// [slackaudit.QURLMintReason] for why the mint body was never the record
 	// it was documented to be.
 	if reason := strings.TrimSpace(args.cmd.Reason()); reason != "" {
+		// addressed_by separates a channel `$id`/`$alias` mint (get) from one
+		// addressed by a permanent CRID obtained outside Slack (crid).
 		slackaudit.LogQURLMintReason(log, slackaudit.QURLMintReasonAttrs(
 			args.teamID, args.channelID, args.userID, input.ResourceID,
-			truncateRunes(reason, getReasonAuditMaxRunes),
+			truncateRunes(reason, getReasonAuditMaxRunes), string(args.cmd.Subcommand),
 		)...)
+	}
+	if args.cmd.Subcommand == SubcmdCRID {
+		slackaudit.LogQURLMintCRID(log, args.teamID, args.channelID, args.userID, input.ResourceID)
 	}
 	// Defensive: an empty OR non-https qurl_link is a server contract surprise (mints
 	// return absolute https qurl.link URLs). The Enter Portal render puts the link in a
@@ -825,7 +874,7 @@ func (h *Handler) allowedResourceIDsForGet(ctx context.Context, log *slog.Logger
 // DM via PostDMBlocks; the response_url ephemeral confirms (without leaking the
 // link in channel history).
 //
-// PostDMBlocks-nil is rejected earlier in getWork — the dm:true contract is
+// PostDMBlocks-nil is rejected in processGet and, defensively, mintForResource — the dm:true contract is
 // privacy ("do not leak the link in channel history") and a silent
 // channel-fallback violates that. If PostDMBlocks is wired but the call itself
 // fails, we surface the failure without re-posting the link (the user can retry

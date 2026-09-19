@@ -462,7 +462,7 @@ func TestDispatchSplit_WrongSurfaceRedirects(t *testing.T) {
 	}
 
 	// User verbs on /qurl-admin → redirect to /qurl.
-	for _, text := range []string{string(SubcmdGet) + " $prod-db", string(SubcmdList), string(SubcmdAliases), setupAdminExampleText, uninstallVerb} {
+	for _, text := range []string{string(SubcmdGet) + " $prod-db", string(SubcmdCRID) + " " + testTunnelCRID, string(SubcmdList), string(SubcmdAliases), setupAdminExampleText, uninstallVerb} {
 		reply := slashReply(t, h, commandAdmin, text)
 		if !strings.Contains(reply, "belongs on `/qurl`") || !strings.Contains(reply, "/qurl ") {
 			t.Errorf("/qurl-admin %q: want /qurl-command redirect, got %q", text, reply)

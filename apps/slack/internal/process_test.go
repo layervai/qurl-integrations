@@ -354,7 +354,7 @@ func TestHandle_AckIsFastUnderSlowAPI(t *testing.T) {
 func TestHandle_AsyncGetPostsResultToResponseURL(t *testing.T) {
 	qurlSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"data":{"resource_id":"r_abc","qurl_link":"https://qurl.link/at_token"}}`))
+		_, _ = w.Write([]byte(`{"data":{"resource_id":"` + getTestResourceID + `","qurl_link":"https://qurl.link/at_token"}}`))
 	}))
 	t.Cleanup(qurlSrv.Close)
 

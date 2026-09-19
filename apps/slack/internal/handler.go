@@ -1272,7 +1272,7 @@ var adminVerbs = []string{string(SubcmdAdmin), adminVerbProtect, adminVerbProtec
 // redirect a user who typed a user verb on `/qurl-admin`. `setup` is a
 // user verb (first-come-claims; see handleSetup), so `/qurl-admin setup`
 // redirects here to `/qurl setup`. Immutable like adminVerbs (see above).
-var userVerbs = []string{"get", "list", string(SubcmdAliases), "create", setupVerb, uninstallVerb, "feedback"}
+var userVerbs = []string{"get", string(SubcmdCRID), "list", string(SubcmdAliases), "create", setupVerb, uninstallVerb, "feedback"}
 
 // isAdminVerb reports whether text's leading verb is an admin verb.
 func isAdminVerb(text string) bool {
@@ -1493,6 +1493,8 @@ func (h *Handler) dispatchUserCommand(w http.ResponseWriter, command, text strin
 		// routing here. The parser then produces ErrEmptyResource
 		// for a bare `get`.
 		h.handleGet(w, values)
+	case slashSubcommand(text, string(SubcmdCRID)):
+		h.handleCRID(w, values)
 	case text == string(SubcmdAliases):
 		h.handleAliases(w, values)
 	case slashSubcommand(text, "feedback"):
@@ -2577,7 +2579,7 @@ func (h *Handler) userHelpMessage(command string) string {
 		lines = append(lines,
 			"• `/qurl setup <email> --rotate` — Replace the workspace qURL key on the same qURL account",
 			"• `/qurl setup <email> --repoint` — Move the workspace to a different qURL account (cross-account moves route to an operator)",
-			"_A CRID is a resource's permanent identifier. In Slack, use a listed `$id` or `$alias` with `/qurl get`. Several aliases can point to one resource._",
+			"_A CRID is a resource's permanent identifier. Use a listed `$id` or `$alias` with `/qurl get`, or the CRID with `/qurl crid`. Several aliases can point to one resource._",
 			"",
 			"• `/qurl get <$id|$alias>` — Create a qURL for a resource `$id` or a `$alias` configured in this channel",
 		)
@@ -2589,6 +2591,7 @@ func (h *Handler) userHelpMessage(command string) string {
 		}
 		lines = append(lines,
 			"• `/qurl get <$id|$alias> reason:\"…\"` — Create a qURL, recording a reason in the audit log",
+			"• `/qurl crid <CRID>` — Create a qURL for a resource in this channel by its CRID (same flags as `/qurl get`)",
 		)
 	}
 	lines = append(lines,

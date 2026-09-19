@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+
+	"github.com/layervai/qurl-go/crid"
 )
 
 // Subcommand is a recognized verb after the `/qurl` slash command.
@@ -25,6 +27,9 @@ const (
 	// channel-scoped `$alias`. Raw URLs and `$r_<id>` resource IDs are
 	// rejected — get is slug/alias-only.
 	SubcmdGet Subcommand = "get"
+	// SubcmdCRID is get addressed by a resource's CRID instead of a
+	// `$slug`/`$alias`; it is authorized against the same channel allow-set.
+	SubcmdCRID Subcommand = "crid"
 	// SubcmdSetAlias binds an alias to a target. The parser accepts a
 	// URL, resource ID, or tunnel slug shape, but the handler
 	// ([Handler.handleSetAlias] / parseAliasArgs) now enforces
@@ -111,6 +116,9 @@ type Command struct {
 	// slug or a channel alias; the alias-mutating verbs treat it as the
 	// alias name.
 	Alias string
+	// CRID is the cryptographic resource identifier supplied to `crid`.
+	// It remains exactly as entered: CRIDs are case-sensitive canonical values.
+	CRID string
 	// Target is the trailing positional arg used by `setalias` (parser
 	// accepts a URL, raw resource_id, or `$slug` shape — the handler then
 	// enforces tunnels-only). `revoke` carries its `$<id|alias>` in Alias
@@ -169,6 +177,14 @@ var ErrUnknownSubcommand = errors.New("unknown subcommand")
 // trailing target positional argument.
 var ErrMissingTarget = errors.New("missing target argument")
 
+// ErrInvalidCRID is returned when `crid` is not a structurally valid CRID.
+// The SDK and service independently validate it before minting as well; this
+// parser gate avoids sending a permanent typo over the network.
+var ErrInvalidCRID = errors.New("invalid CRID")
+
+// ErrEmptyCRID is returned for a bare `crid` with no identifier.
+var ErrEmptyCRID = errors.New("missing CRID argument")
+
 // ErrURLNotSupportedGet is returned when `/qurl get` is handed a raw
 // URL. The Slack bot only mints links for tunnel resources now, reached
 // by their `$slug` or a channel `$alias` — never an arbitrary URL.
@@ -188,6 +204,12 @@ var ErrURLNotSupportedGet = errors.New("raw URL not supported by get")
 // rather than reporting the generic alias-charset rule the `_` would trip.
 // Same terse-sentinel / rich-handler-copy split as [ErrURLNotSupportedGet].
 var ErrResourceIDNotSupportedGet = errors.New("resource id not supported by get")
+
+// ErrCRIDNotSupportedGet is returned when `/qurl get` is handed a CRID-shaped
+// token, so the handler can redirect to `/qurl crid` instead of reporting a
+// missing `$` sigil. Same terse-sentinel / rich-handler-copy split as
+// [ErrURLNotSupportedGet].
+var ErrCRIDNotSupportedGet = errors.New("CRID not supported by get")
 
 // ErrMissingUserMention is returned when `/qurl-admin add`, `remove`, or
 // `transfer-ownership` are invoked without a `<@U…>` Slack user mention.
@@ -307,6 +329,9 @@ func Parse(text string) (*Command, error) {
 	case SubcmdGet:
 		cmd.Subcommand = SubcmdGet
 		return parseGet(cmd, rest)
+	case SubcmdCRID:
+		cmd.Subcommand = SubcmdCRID
+		return parseCRID(cmd, rest)
 	case SubcmdSetAlias:
 		cmd.Subcommand = SubcmdSetAlias
 		return parseSetAlias(cmd, rest)
@@ -461,6 +486,17 @@ func parseGet(cmd *Command, rest []string) (*Command, error) {
 		// tunnel `$slug` or a channel `$alias` only.
 		return nil, ErrURLNotSupportedGet
 	}
+	// A valid CRID redirects even with a sigil. A CRID-shaped alias with a
+	// bad checksum remains an alias; only a bare malformed CRID is rejected.
+	bare, hadSigil := strings.CutPrefix(rest[0], "$")
+	if crid.MatchesShape(bare) {
+		if crid.Validate(bare) == nil {
+			return nil, ErrCRIDNotSupportedGet
+		}
+		if !hadSigil {
+			return nil, ErrInvalidCRID
+		}
+	}
 	if strings.HasPrefix(rest[0], "$r_") {
 		// A `$r_<id>` paste: the resource-id get form is gone. Redirect to
 		// the `$slug` rather than falling through to the generic
@@ -475,7 +511,13 @@ func parseGet(cmd *Command, rest []string) (*Command, error) {
 		return nil, err
 	}
 	cmd.Alias = alias
-	for _, tok := range rest[1:] {
+	return applyMintFlags(cmd, rest[1:])
+}
+
+// applyMintFlags applies the trailing `dm:` / `reason:` flags shared by `get`
+// and `crid`.
+func applyMintFlags(cmd *Command, toks []string) (*Command, error) {
+	for _, tok := range toks {
 		// Surface non-flag-shaped tokens as ErrUnexpectedArgument so
 		// `get $alias junk` reads as a typo (matches the strict
 		// posture taken on `aliases`, `list`, `admin policies`, etc.).
@@ -483,13 +525,27 @@ func parseGet(cmd *Command, rest []string) (*Command, error) {
 		// (expected key:value)" — accurate to applyFlag but confusing
 		// to a user who didn't intend to type a flag at all.
 		if !looksLikeFlag(tok) {
-			return nil, fmt.Errorf("%w: %q", ErrUnexpectedArgument, tok)
+			return nil, fmt.Errorf("%w: `%s`", ErrUnexpectedArgument, truncateForError(tok))
 		}
 		if err := applyFlag(cmd, tok); err != nil {
 			return nil, err
 		}
 	}
 	return cmd, nil
+}
+
+// parseCRID extracts one strict CRID positional argument and the same optional
+// delivery/audit flags supported by `get`. CRIDs deliberately are not trimmed
+// or case-folded: crid.Validate accepts only their canonical spelling.
+func parseCRID(cmd *Command, rest []string) (*Command, error) {
+	if len(rest) == 0 {
+		return nil, ErrEmptyCRID
+	}
+	if err := crid.Validate(rest[0]); err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrInvalidCRID, err)
+	}
+	cmd.CRID = rest[0]
+	return applyMintFlags(cmd, rest[1:])
 }
 
 // parseSetAlias extracts `$alias <target>`. At the parser layer Target
@@ -718,10 +774,10 @@ func hasASCIIPrefixFold(s, prefix string) bool {
 func applyFlag(cmd *Command, tok string) error {
 	colonIdx := strings.IndexByte(tok, ':')
 	if colonIdx < 0 {
-		return fmt.Errorf("%w: %q (expected key:value)", ErrInvalidFlag, tok)
+		return fmt.Errorf("%w: `%s` (expected key:value)", ErrInvalidFlag, truncateForError(tok))
 	}
 	if colonIdx == 0 {
-		return fmt.Errorf("%w: %q (missing key before colon)", ErrInvalidFlag, tok)
+		return fmt.Errorf("%w: `%s` (missing key before colon)", ErrInvalidFlag, truncateForError(tok))
 	}
 	// Lowercase only the key portion so `Reason:"On Call"` keeps
 	// its mixed-case value intact.
@@ -733,11 +789,11 @@ func applyFlag(cmd *Command, tok string) error {
 	// quoted-empty (`reason:""`) both report the same "empty value"
 	// reason.
 	if colonIdx == len(tok)-1 {
-		return fmt.Errorf("%w: %q (empty value — use a non-empty value or omit the flag)", ErrInvalidFlag, tok)
+		return fmt.Errorf("%w: `%s` (empty value — use a non-empty value or omit the flag)", ErrInvalidFlag, truncateForError(tok))
 	}
 	m := flagPattern.FindStringSubmatch(normalized)
 	if len(m) == 0 {
-		return fmt.Errorf("%w: %q (expected key:value)", ErrInvalidFlag, tok)
+		return fmt.Errorf("%w: `%s` (expected key:value)", ErrInvalidFlag, truncateForError(tok))
 	}
 	key := m[1]
 	val := m[2]
@@ -745,7 +801,7 @@ func applyFlag(cmd *Command, tok string) error {
 		val = m[3]
 	}
 	if val == "" {
-		return fmt.Errorf("%w: %q (empty value — use a non-empty value or omit the flag)", ErrInvalidFlag, tok)
+		return fmt.Errorf("%w: `%s` (empty value — use a non-empty value or omit the flag)", ErrInvalidFlag, truncateForError(tok))
 	}
 	switch key {
 	case "dm":
@@ -758,7 +814,7 @@ func applyFlag(cmd *Command, tok string) error {
 		// (`whatever:true` → ErrInvalidFlag), so we reject typo'd
 		// values too.
 		if !strings.EqualFold(val, "true") && !strings.EqualFold(val, "false") {
-			return fmt.Errorf("%w: dm:%q (use dm:true or omit the flag)", ErrInvalidFlag, val)
+			return fmt.Errorf("%w: dm:`%s` (use dm:true or omit the flag)", ErrInvalidFlag, truncateForError(val))
 		}
 		cmd.Flags[key] = val
 		return nil
@@ -771,8 +827,8 @@ func applyFlag(cmd *Command, tok string) error {
 		// but with a transitional hint instead of the generic
 		// "unknown flag", since some users have `once:true` in saved
 		// slash-command recipes and deserve to know it's now redundant.
-		return fmt.Errorf("%w: `once` is no longer needed — every `/qurl get` link is one-time use by default", ErrInvalidFlag)
+		return fmt.Errorf("%w: `once` is no longer needed — every `/qurl get` or `/qurl crid` link is one-time use by default", ErrInvalidFlag)
 	default:
-		return fmt.Errorf("%w: unknown flag %q", ErrInvalidFlag, key)
+		return fmt.Errorf("%w: unknown flag `%s`", ErrInvalidFlag, truncateForError(key))
 	}
 }
