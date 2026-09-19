@@ -13,11 +13,13 @@ func TestRegisteredRequestPreservesHTTPErrorAndSafeHeaders(t *testing.T) {
 	srv := apitest.NewServer(t)
 	srv.Script(http.MethodPost, "/v1/account/link", func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Idempotency-Key") != "01234567-89ab-cdef-0123-456789abcdef" {
-			t.Fatal("idempotency key lost")
+			t.Error("idempotency key lost")
+			return
 		}
 		var body map[string]string
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body["account_token"] != "secret-account-token" {
-			t.Fatal("request body changed")
+			t.Error("request body changed")
+			return
 		}
 		w.Header().Set("Content-Type", "application/problem+json")
 		w.Header().Set("Retry-After", "7")
@@ -40,6 +42,8 @@ func TestRegisteredRequestPreservesHTTPErrorAndSafeHeaders(t *testing.T) {
 func TestRegisteredRequestRejectsAuthorityAndDisallowedRoutes(t *testing.T) {
 	srv := apitest.NewServer(t)
 	client := newRegisteredTestClient(t, srv)
+	// TODO(upstream-contract): keep these denied routes aligned with the
+	// reviewed qurl-go registered-device transport before updating the SDK.
 	for _, path := range []string{"https://evil.test/v1/me", "//evil.test/v1/me", "/v1/me#fragment", "/v1/%6de", "/v1/../v1/me", "/v1/me?x=1", "/v1/quota", "/v1/resources/id/sessions"} {
 		if _, err := Request(context.Background(), client, http.MethodGet, path, nil, ""); err == nil {
 			t.Errorf("accepted %q", path)

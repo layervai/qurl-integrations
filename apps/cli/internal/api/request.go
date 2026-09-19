@@ -22,6 +22,9 @@ type RequestResponse struct {
 
 // Request uses only the registered SDK transport's existing route allowlist.
 // It performs one attempt; the supervisor owns any retry decision.
+// TODO(upstream-contract): qurl-go v0.18.0 owns the exact registered-device
+// method/route allowlist and permits queries only for GET /v1/resources.
+// Review this command and its negative-route tests together on SDK changes.
 func Request(ctx context.Context, api Client, method, relativePath string, body json.RawMessage, idempotencyKey string) (*RequestResponse, error) {
 	registered, ok := api.(*registeredClient)
 	if !ok {
