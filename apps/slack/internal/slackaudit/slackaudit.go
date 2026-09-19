@@ -26,6 +26,7 @@ const (
 	QURLMintReason = "qurl_mint_reason"
 
 	// QURLMintCRID records every CRID-addressed mint, including those without a reason.
+	// With a reason, QURLMintReason is emitted too; the events must not be summed as mint counts.
 	QURLMintCRID = "qurl_mint_crid"
 
 	// AgentSlack is the audit.agent value for Slack-originated dependency events.

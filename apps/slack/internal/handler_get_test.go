@@ -1282,6 +1282,9 @@ func TestGetWithoutReason_EmitsNoAuditRecord(t *testing.T) {
 
 	inv.invokeAdminAsync("get $prod-db", testAdminTeamID, testAdminUserID)
 
+	if findAuditRecord(logs, slackaudit.QURLMintCRID) != nil {
+		t.Error("alias mint emitted a CRID audit event")
+	}
 	if audit := findAuditRecord(logs, slackaudit.QURLMintReason); audit != nil {
 		t.Errorf("unreasoned get emitted a %s record: %#v", slackaudit.QURLMintReason, audit)
 	}

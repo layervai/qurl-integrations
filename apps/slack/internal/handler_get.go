@@ -577,6 +577,9 @@ func (h *Handler) mintForResource(ctx context.Context, log *slog.Logger, args *g
 	// Never deliver a mint response naming a different resource from the
 	// one authorized in this channel. This checks the API response identity;
 	// recipients still verify the signed link before granting network access.
+	// TODO(upstream-contract): CreateQurlForResource returns the same canonical
+	// resource_id as its request path. On mismatch, withhold the short-lived
+	// link; do not revoke an identity we cannot trust.
 	if out.ResourceID != input.ResourceID {
 		log.Error("get: mint response resource identity mismatch",
 			"expected_resource_id", sanitizeLogValue(input.ResourceID),

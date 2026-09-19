@@ -65,7 +65,7 @@ func (h *Handler) cridWork(ctx context.Context, log *slog.Logger, args *getWorkA
 		// channel — worth an operator-visible line, unlike an alias typo.
 		// allow_set_size vs key_candidates separates an empty channel, a
 		// real miss, and resource_id encoding drift (candidates == 0).
-		// Hash the attempt for correlation without logging the supplied identifier.
+		// Stable correlation handle, not anonymization of a known CRID.
 		attempt := sha256.Sum256([]byte(args.cmd.CRID))
 		log.Warn("crid: CRID not in channel allow-set", "team_id", sanitizeLogValue(args.teamID), "channel_id", sanitizeLogValue(args.channelID), "user_id", sanitizeLogValue(args.userID), "crid_fingerprint", hex.EncodeToString(attempt[:8]), "allow_set_size", len(allowed), "key_candidates", keyCandidates)
 		return getResult{}, &userError{msg: cridNotInChannelMessage}
