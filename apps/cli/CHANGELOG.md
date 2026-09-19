@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.6.1](https://github.com/layervai/qurl-integrations/compare/v2.6.0...v2.6.1) (2026-09-19)
+
+
+### Bug Fixes
+
+* **cli:** verify tunnel TLS certificates by default ([#1508](https://github.com/layervai/qurl-integrations/issues/1508)) ([59401f0](https://github.com/layervai/qurl-integrations/commit/59401f0bb3a0a3def3b2674fb5a3fccde660f9d0))
+
 ## [2.6.0](https://github.com/layervai/qurl-integrations/compare/v2.5.4...v2.6.0) (2026-09-17)
 
 
