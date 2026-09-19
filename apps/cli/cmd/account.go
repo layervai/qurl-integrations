@@ -9,6 +9,7 @@ import (
 	"github.com/spf13/cobra"
 
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/auth"
 )
 
 func accountCmd(opts *globalOpts) *cobra.Command {
@@ -62,8 +63,8 @@ func accountRecoverCmd(opts *globalOpts) *cobra.Command {
 	recoverCmd := &cobra.Command{
 		Use:     "recover",
 		Short:   "Recover account resources on a new device",
-		Long:    "Sign in to restore management access on a new device. This does not restore files or running apps from another host.",
-		Example: "  qurl account recover\n  qurl account recover --owner device:...",
+		Long:    "Sign in to restore management access on a new device. Use QURL_CONNECTOR_STATE_DIR to choose an unused directory and keep existing state intact. This does not restore files or running apps from another host.",
+		Example: "  QURL_CONNECTOR_STATE_DIR=~/.qurl-recovered qurl account recover\n  qurl account recover --owner device:...",
 		Args:    noArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if err := opts.requireRuntimeSupervisionIfNamespace(); err != nil {
@@ -94,6 +95,9 @@ func accountRecoverCmd(opts *globalOpts) *cobra.Command {
 				return err
 			}
 			client, deviceIdentity, err := opts.openRegisteredClient(cmd.Context(), account, "", identity)
+			if errors.Is(err, auth.ErrDeviceAccountConflict) {
+				return auth.ErrAccountRecoveryState
+			}
 			if err != nil {
 				return err
 			}

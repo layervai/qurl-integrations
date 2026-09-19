@@ -80,7 +80,10 @@ func TestSelectAccountOwner(t *testing.T) {
 // PKCE exchange in internal/api) and the native enrollment runtime tests.
 func TestAccountCommandsRespectOutputAndAccountBoundaries(t *testing.T) {
 	for _, command := range []string{"setup", "recover"} {
-		for _, format := range []string{"text", "json", "quiet", "denied"} {
+		for _, format := range []string{"text", "json", "quiet", "denied", "occupied"} {
+			if command == "setup" && format == "occupied" {
+				continue
+			}
 			t.Run(command+"/"+format, func(t *testing.T) {
 				const owner = "device:command-owner"
 				linked, enrolled, signedIn := false, false, false
@@ -135,6 +138,9 @@ func TestAccountCommandsRespectOutputAndAccountBoundaries(t *testing.T) {
 						if account == nil || key != "" || identity == nil || identity.OwnerID != owner {
 							t.Fatal("recovery did not select the requested account owner")
 						}
+						if format == "occupied" {
+							return nil, nil, &deviceAccountConflictError{stateDir: stateDir, currentOwner: "device:existing", requestedOwner: owner}
+						}
 						enrolled = true
 						return device, &qurlapi.Identity{OwnerID: owner, AuthType: "api_key"}, nil
 					}
@@ -153,6 +159,12 @@ func TestAccountCommandsRespectOutputAndAccountBoundaries(t *testing.T) {
 				code := run(context.Background(), root, opts)
 				if !signedIn {
 					t.Fatal("account command did not invoke browser sign-in")
+				}
+				if format == "occupied" {
+					if code != 4 || enrolled || linked || stdout.Len() != 0 || !strings.Contains(stderr.String(), "QURL_CONNECTOR_STATE_DIR") || strings.Contains(stderr.String(), "qurl login") {
+						t.Fatalf("occupied recovery: exit=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+					}
+					return
 				}
 				if format == "denied" {
 					if code == 0 || linked || enrolled || stdout.Len() != 0 {
