@@ -567,6 +567,7 @@ type registeredAccountBootstrap struct {
 	identity                          *qurlapi.Identity
 	explicitValidatedAccountAuthority bool
 	enrollmentIdempotencyKey          string
+	warnedAnonymousDevice             bool
 }
 
 type deviceAccountConflictError struct {
@@ -660,8 +661,9 @@ func (b *registeredAccountBootstrap) enrollmentCredential(ctx context.Context, r
 	}
 	if b.client == nil {
 		if _, _, err := auth.Resolve(b.opts.lookupEnv); errors.Is(err, auth.ErrNoCredential) {
-			if b.opts.streams != nil && b.opts.streams.Err != nil && !b.opts.quiet {
-				_, _ = fmt.Fprintln(b.opts.streams.Err, msgAnonymousDevice)
+			if !b.warnedAnonymousDevice && !b.opts.quiet && b.opts.streams != nil && b.opts.streams.Err != nil {
+				b.opts.printer().Notef("%s", msgAnonymousDevice)
+				b.warnedAnonymousDevice = true
 			}
 			return qurl.AnonymousEnrollmentCredential(ctx, request)
 		}

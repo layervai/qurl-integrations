@@ -27,7 +27,7 @@ import (
 // Client is what commands program against.
 type Client interface {
 	// LinkAccount uses the device credential and a separate browser account token.
-	LinkAccount(ctx context.Context, accountToken string) error
+	LinkAccount(ctx context.Context, accountToken, ownerID string) error
 	// MintConnectorEnrollmentToken creates a short-lived, one-shot credential
 	// bound to exactly one Connector. The caller supplies the idempotency key
 	// so a higher-level enrollment attempt can recover an ambiguous response

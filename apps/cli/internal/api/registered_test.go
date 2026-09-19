@@ -171,7 +171,7 @@ func TestRegisteredClientLinksAccountWithDeviceCredential(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"owner_id":"device:owner","account_id":"auth0|account"}`))
 	})
-	if err := newRegisteredTestClient(t, srv).LinkAccount(context.Background(), "account-token"); err != nil {
+	if err := newRegisteredTestClient(t, srv).LinkAccount(context.Background(), "account-token", "device:owner"); err != nil {
 		t.Fatal(err)
 	}
 	if len(srv.Requests()) != 1 {

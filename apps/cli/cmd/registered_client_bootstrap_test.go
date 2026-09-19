@@ -683,6 +683,9 @@ func TestPublishDefaultsToDeviceEnrollment(t *testing.T) {
 					if err != nil || got != want {
 						t.Fatalf("anonymous enrollment = %q, %v", got, err)
 					}
+					if _, err := cfg.EnrollmentCredentialProvider(ctx, request); err != nil {
+						t.Fatal(err)
+					}
 					return runtime, nil
 				}
 			})
@@ -704,11 +707,50 @@ func TestPublishDefaultsToDeviceEnrollment(t *testing.T) {
 				if strings.Contains(stderr.String(), "Using a new device identity") == tc.quiet {
 					t.Fatalf("notice quiet=%v stderr=%s", tc.quiet, stderr.String())
 				}
+				if strings.Count(stderr.String(), "Using a new device identity") > 1 {
+					t.Fatal("enrollment retry repeated the device notice")
+				}
 				for _, request := range srv.Requests() {
 					if request.Path == "/v1/api-keys" {
 						t.Fatal("anonymous publication tried to mint an account enrollment token")
 					}
 				}
+			}
+		})
+	}
+}
+
+// Even read commands open a runtime that can refresh durable enrollment state.
+// They must use the namespace's declared supervision mode before that open.
+func TestRegisteredOpenHonorsExternalNamespace(t *testing.T) {
+	for _, mode := range []connectorstate.RuntimeSupervision{connectorstate.RuntimeSupervisionNative, connectorstate.RuntimeSupervisionExternal} {
+		t.Run(string(mode), func(t *testing.T) {
+			srv := apitest.NewServer(t)
+			runtime := &bootstrapNativeRuntime{store: &bootstrapAgentStateStore{state: bootstrapRegisteredState(t)}}
+			opts := bootstrapGlobalOpts(t, srv.URL, runtime)
+			stateDir, err := opts.resolveShareStateDir("")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := connectorstate.EstablishExternalRuntimeMode(context.Background(), stateDir); err != nil {
+				t.Fatal(err)
+			}
+			opts.resolvedSupervision = mode
+			opts.openRegisteredClient = opts.openNativeRegisteredClient
+			defer func() { _ = opts.closeAPIClient() }()
+			if mode == connectorstate.RuntimeSupervisionNative {
+				opts.openNativeRuntime = func(context.Context, connectorshare.NativeRuntimeConfig) (registeredNativeRuntime, error) {
+					t.Error("mismatched supervision opened durable runtime")
+					return nil, errors.New("unexpected runtime open")
+				}
+			}
+			_, err = opts.newClient(context.Background())
+			if mode == connectorstate.RuntimeSupervisionNative {
+				if !errors.Is(err, connectorstate.ErrRuntimeSupervision) || !strings.Contains(err.Error(), "--supervision external") {
+					t.Fatalf("wrong supervision remedy: %v", err)
+				}
+			} else if err != nil {
+				t.Fatal(err)
 			}
 		})
 	}

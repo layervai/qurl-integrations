@@ -29,16 +29,9 @@ func SignInAccount(ctx context.Context, cfg *Config, openBrowser func(context.Co
 	if err := validateAccountEndpoint(cfg.BaseURL); err != nil {
 		return "", err
 	}
-	httpClient := http.Client{Timeout: 30 * time.Second}
-	if cfg.HTTPClient != nil {
-		httpClient = *cfg.HTTPClient
-	}
-	httpClient.CheckRedirect = func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }
-	httpClient.Timeout = 30 * time.Second
 	browserConfig := *cfg
 	browserConfig.APIKey = ""
 	browserConfig.OwnerID = ""
-	browserConfig.HTTPClient = &httpClient
 	client := newTransport(&browserConfig)
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, trimBaseURL(cfg.BaseURL)+"/v1/account/auth", http.NoBody)
 	if err != nil {
@@ -128,9 +121,16 @@ func accountCallbackHandler(state string, codes chan<- string) http.Handler {
 			http.Error(w, msgAccountCallbackInvalid, 400)
 			return
 		}
+		if r.URL.Query().Get("error") != "" {
+			code = ""
+		}
 		select {
 		case codes <- code:
 		default:
+		}
+		if code == "" {
+			http.Error(w, msgAccountCanceled, http.StatusBadRequest)
+			return
 		}
 		_, _ = io.WriteString(w, msgAccountCallbackComplete)
 	})

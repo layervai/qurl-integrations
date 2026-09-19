@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 )
 
@@ -63,5 +64,24 @@ func TestAccountBrowserPKCEAndState(t *testing.T) {
 	})
 	if err != nil || token != "account-token" {
 		t.Fatalf("sign-in = %q, %v", token, err)
+	}
+}
+
+func TestAccountCallbackDenial(t *testing.T) {
+	codes := make(chan string, 1)
+	handler := accountCallbackHandler("expected", codes)
+	request := httptest.NewRequest(http.MethodGet, accountCallback+"?state=expected&error=access_denied&code=ignored", http.NoBody)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), msgAccountCanceled) {
+		t.Fatalf("denial = %d %q", response.Code, response.Body.String())
+	}
+	select {
+	case code := <-codes:
+		if code != "" {
+			t.Fatal("denial accepted an authorization code")
+		}
+	default:
+		t.Fatal("denial did not end sign-in")
 	}
 }

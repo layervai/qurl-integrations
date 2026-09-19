@@ -102,8 +102,8 @@ prints its CRID and exits immediately.
 | What you see | What to do |
 |--------------|------------|
 | `only HTTPS URLs are allowed` or no `start`, `stop`, `restart`, and `status` commands | You have the legacy CLI. Run `brew update`, `brew upgrade qurl`, and confirm `qurl version` reports 2.0.0 or newer. |
-| You want account recovery or another device | Run `qurl account setup` |
-| The key lacks `qurl:agent` | Add that scope in the dashboard, then log in with the updated key |
+| Account recovery is not enabled | Run `qurl account setup` |
+| The key lacks `qurl:agent` | Add that scope in the dashboard, then set `QURL_API_KEY_FILE` to its file and run `qurl login` |
 | The local app cannot be reached | Check it with `curl http://127.0.0.1:3000` and use the same URL with `qurl publish` |
 | `This Connector needs its qURL platform assignment refreshed` | Upgrade qURL. Current releases refresh stale assignments automatically with bounded backoff; no approval flag is required. |
 | The route is rejected or times out | Run the command once more; if it repeats, contact LayerV support |

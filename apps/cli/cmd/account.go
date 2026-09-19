@@ -18,13 +18,23 @@ func accountCmd(opts *globalOpts) *cobra.Command {
 		if err != nil {
 			return err
 		}
+		id := opts.registeredIdentity
+		if id == nil {
+			id, err = client.Me(cmd.Context())
+			if err != nil {
+				return err
+			}
+		}
+		if id == nil || id.OwnerID == "" {
+			return errors.New("qURL account identity response is empty")
+		}
 		_, _ = fmt.Fprintln(cmd.OutOrStdout(), msgAccountSetup)
 		opts.warnInsecureEndpoint()
 		token, err := qurlapi.SignInAccount(cmd.Context(), opts.accountConfig("", ""), opts.openBrowser)
 		if err != nil {
 			return err
 		}
-		if err := client.LinkAccount(cmd.Context(), token); err != nil {
+		if err := client.LinkAccount(cmd.Context(), token, id.OwnerID); err != nil {
 			return err
 		}
 		_, err = fmt.Fprintln(cmd.OutOrStdout(), msgAccountLinked)
@@ -40,6 +50,7 @@ func accountRecoverCmd(opts *globalOpts) *cobra.Command {
 		if err := opts.requireRuntimeSupervisionIfNamespace(); err != nil {
 			return err
 		}
+		_, _ = fmt.Fprintln(cmd.OutOrStdout(), msgAccountContinue)
 		opts.warnInsecureEndpoint()
 		token, err := qurlapi.SignInAccount(cmd.Context(), opts.accountConfig("", ""), opts.openBrowser)
 		if err != nil {
