@@ -301,6 +301,9 @@ cannot silently rebind the tenant to another qURL account.
 Reuse the environment's Teams application if it exists. For sandbox, name it
 `qURL Teams (sandbox)` and select **Regular Web Application**.
 
+<!-- TODO(upstream-contract): Recheck Auth0 dashboard labels against the linked
+client-grants documentation when Auth0 changes the application settings UI. -->
+
 1. Set **Allowed Callback URLs** to the deployed `TEAMS_BASE_URL` followed by
    `/oauth/qurl/callback`. Match the runtime's normalized HTTPS URL: lowercase
    host, no default `:443` port, and no trailing slash after `callback`.

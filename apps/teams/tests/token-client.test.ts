@@ -60,9 +60,6 @@ describe('confidential token client', () => {
     expect(url.searchParams.get('redirect_uri')).toBe('https://teams-bot.example.com/oauth/qurl/callback');
     expect(url.searchParams.get('scope')).toBe('openid email qurl:read qurl:write qurl:agent');
     expect(url.searchParams.get('prompt')).toBe('consent');
-    expect(url.searchParams.get('scope')?.split(' ')).toEqual([
-      'openid', 'email', 'qurl:read', 'qurl:write', 'qurl:agent',
-    ]);
     expect(url.search).not.toContain('offline_access');
     expect(url.searchParams.get('state')).toBe(STATE);
     expect(url.searchParams.get('nonce')).toBe(NONCE);
