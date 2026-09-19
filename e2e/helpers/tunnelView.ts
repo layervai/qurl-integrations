@@ -168,6 +168,7 @@ export async function recordAdmissionAttempt(link: string, child: ViewViaQurlLin
   }) + '\n', { mode: 0o600 });
 }
 
+// TODO(upstream-contract): qurl-service GET /v1/me returns data.owner_id.
 async function readOwner(): Promise<string> {
   const meURL = new URL('/v1/me', process.env.MINT_API_URL!);
   const response = await fetchWithTransientRetry(meURL.toString(), { headers: { Authorization: `Bearer ${process.env.QURL_API_KEY}` } });

@@ -25,6 +25,7 @@ test('receipt contains only public ownership and failed verification writes noth
     (spawnSync as jest.Mock).mockReturnValue({ status: 0, stdout: JSON.stringify(identity) });
     await checkOwnershipConfig();
     await recordAdmissionAttempt('https://qurl.link/#private-secret', child, 30_000);
+    expect(spawnSync).toHaveBeenLastCalledWith(verifier, [], expect.objectContaining({ input: 'https://qurl.link/#private-secret' }));
     const raw = readFileSync(path, 'utf8');
     expect(raw).not.toContain('private-secret');
     expect(JSON.parse(raw)).toMatchObject({ owner_id: 'owner', resource_id: 'source', qurl_id: 'child', public_identity: identity });

@@ -39,6 +39,11 @@ func TestVerifiedPublicOwnership(t *testing.T) {
 	if _, err := verifiedPublicIdentity(link+"tampered", config); err == nil {
 		t.Fatal("tampered signature accepted")
 	}
+	mismatch := config
+	mismatch.CellKey = base64.StdEncoding.EncodeToString(make([]byte, 32))
+	if _, err := verifiedPublicIdentity(link, mismatch); err == nil {
+		t.Fatal("signed cell mismatch accepted")
+	}
 	if len(got) != 4 {
 		t.Fatal("unexpected receipt fields")
 	}
@@ -52,6 +57,14 @@ func TestPublicConfigShape(t *testing.T) {
 	for _, bad := range []string{"", html + html, strings.ReplaceAll(html, "issuerTrustStore:", "missing:"), strings.ReplaceAll(html, "{\"issuer\":\"public\"}", "null")} {
 		if _, err := parsePublicConfig(bad); err == nil {
 			t.Fatal("malformed public config accepted")
+		}
+	}
+}
+
+func TestIssuerPreflightRejectsInvalidKeys(t *testing.T) {
+	for _, key := range []string{"not+raw/url=", base64.RawURLEncoding.EncodeToString([]byte("not DER"))} {
+		if _, err := issuerTrust(publicConfig{Issuers: map[string]string{"issuer": key}}); err == nil {
+			t.Fatal("invalid issuer passed preflight")
 		}
 	}
 }

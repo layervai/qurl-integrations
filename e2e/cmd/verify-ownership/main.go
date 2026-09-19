@@ -25,6 +25,10 @@ func main() {
 		os.Exit(1)
 	}
 	if len(os.Args) == 2 && os.Args[1] == "--check-config" {
+		if _, err := issuerTrust(config); err != nil {
+			fmt.Fprintln(os.Stderr, "invalid issuer trust")
+			os.Exit(1)
+		}
 		return
 	}
 	raw, err := io.ReadAll(io.LimitReader(os.Stdin, 65537))
@@ -47,7 +51,8 @@ type publicConfig struct {
 	CellKey string
 }
 
-// Read only the template's public literals; never evaluate HTML or JavaScript.
+// TODO(upstream-contract): NHP terraform/modules/qurl-link/frontend/index.html
+// declares these exact public literals. Never evaluate HTML or JavaScript.
 func parsePublicConfig(html string) (publicConfig, error) {
 	var config publicConfig
 	blocks := regexp.MustCompile(`(?s)const QURL_LINK_CONFIG = \{(.*?)\n {6}\};`).FindAllStringSubmatch(html, -1)
@@ -99,7 +104,7 @@ func loadPublicConfig(endpoint string) (publicConfig, error) {
 	return parsePublicConfig(string(raw))
 }
 
-func verifiedPublicIdentity(link string, config publicConfig) (map[string]string, error) {
+func issuerTrust(config publicConfig) (*qurl.TrustStore, error) {
 	keys := map[string][]byte{}
 	for kid, encoded := range config.Issuers {
 		der, err := base64.RawURLEncoding.DecodeString(encoded)
@@ -108,7 +113,11 @@ func verifiedPublicIdentity(link string, config publicConfig) (map[string]string
 		}
 		keys[kid] = der
 	}
-	trust, err := qurl.NewTrustStoreFromDER(keys)
+	return qurl.NewTrustStoreFromDER(keys)
+}
+
+func verifiedPublicIdentity(link string, config publicConfig) (map[string]string, error) {
+	trust, err := issuerTrust(config)
 	if err != nil {
 		return nil, errors.New("invalid issuer trust")
 	}

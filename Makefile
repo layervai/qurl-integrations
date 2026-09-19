@@ -230,6 +230,10 @@ check-teams:
 # it covers helpers/ and the live tests/ too, while test:unit runs only
 # unit/**. For the live suite that typecheck is the only gate there is.
 check-e2e:
+	go test -race ./e2e/cmd/verify-ownership
+	go vet ./e2e/cmd/verify-ownership
+	go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 config verify
+	go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 run --timeout=5m ./e2e/cmd/verify-ownership/...
 	$(call node_version_warning,e2e)
 	cd e2e && npm ci --no-audit --no-fund
 	cd e2e && npx tsc -p tsconfig.json --noEmit
