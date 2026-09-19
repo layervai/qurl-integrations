@@ -128,7 +128,9 @@
  *   it was written against and a sweep refuses to run against a different one.
  *   Re-running is safe: revoked ids are pruned, and only an explicit terminal
  *   response counts an already-gone resource as reclaimed. Ambiguous 404s
- *   remain in the ledger for manual verification.
+ *   remain in the ledger for manual verification. Connector upload parents
+ *   that SDK 2.x cannot address stay in the ledger until their links are
+ *   confirmed expired or an operator completes cleanup.
  *
  *   Two windows this cannot close, both leaking exactly the resource in hand:
  *   a create that succeeds server-side whose response is then lost, and a
@@ -166,10 +168,13 @@ const { mintLinks, reUploadBuffer } = require('../src/connector');
 const { createOneTimeLink, deleteLink } = require('../src/qurl');
 const {
   hasSafeResourceIdShape,
-  LEGACY_RESOURCE_ID_PREFIX,
   maskResourceIdPath,
 } = require('../src/utils/resource-id');
-const { isGoneQurlApiError, qurlApiErrorStatus } = require('../src/utils/qurl-errors');
+const {
+  isClientValidationQurlApiError,
+  isGoneQurlApiError,
+  qurlApiErrorStatus,
+} = require('../src/utils/qurl-errors');
 
 // The same pool depth the send pipeline batches against — imported, not
 // copied, so a change to the cap reaches this script instead of silently
@@ -963,8 +968,10 @@ async function trackCreate(fn) {
 // run's resources; the ledger is exact.
 //
 // Recipient links from mintLinks are deliberately not recorded individually:
-// deleting the parent file resource revokes every qURL minted against it
-// (shared/client/client.go documents the cascade).
+// deleting a parent revokes every qURL minted against it
+// (shared/client/client.go documents the cascade). SDK 2.x cannot address an
+// upload parent by the public key the connector returns, so reclaim retains
+// those rows for manual cleanup or confirmed expiry.
 function recordResource(resourceId, kind) {
   // Share deleteLink's transport guard so every recorded ID is sweepable and
   // a malformed service response cannot persist a bearer token in the ledger.
@@ -973,7 +980,7 @@ function recordResource(resourceId, kind) {
   // the repo-wide resource-ID fixture convention; making this warning fatal
   // previously stopped ordinary fixture-backed rounds after their first batch.
   if (!hasSafeResourceIdShape(resourceId)) {
-    console.error(`WARNING: ${kind} response carried no usable resource_id — that resource cannot be reclaimed.`);
+    console.error(`WARNING: ${kind} response carried no usable resource identifier — that resource cannot be reclaimed.`);
     return;
   }
   try {
@@ -1142,7 +1149,7 @@ async function reclaim(ledgerPath) {
   const outstanding = new Set();
   const causes = new Map();
   let revoked = 0;
-  let legacyRejected = 0;
+  let nonCridRows = 0;
   let ambiguousNotFound = 0;
   let invalidLedgerIds = 0;
 
@@ -1186,8 +1193,8 @@ async function reclaim(ledgerPath) {
         // formatted message fallback covers serialized errors that lost it.
         //
         // TODO(upstream-contract): DELETE /resources returns 204 for a known
-        // revoked row. A 404 is ambiguous (absent, wrong owner/key, or public-ID
-        // resolution miss) and stays retryable; only 410 proves a gone state.
+        // revoked row. A 404 is ambiguous (absent or wrong owner/key) and stays
+        // retryable; only 410 proves a gone state.
         // If that changes, re-runs retain the row and report a visible failure.
         if (isGoneQurlApiError(e)) {
           revoked++;
@@ -1195,11 +1202,14 @@ async function reclaim(ledgerPath) {
         } else {
           outstanding.add(id);
           const status = qurlApiErrorStatus(e);
-          // TODO(upstream-contract): qurl-service public routes reject the
-          // retired private r_ identifier cohort with 400. Those rows cannot
-          // drain automatically, so distinguish them from transient failures.
+          // SDK 2.x deletes only by CRID and rejects any other identifier before
+          // a request, so older ledgers' retired r_ IDs cannot drain
+          // automatically. deleteLink sends only the ID, so a client-side
+          // rejection is an identifier rejection that no re-run can fix. If the
+          // SDK ever rejected client configuration this way instead, every row
+          // would land here at once, which reads plainly in the summary.
           if (!hasSafeResourceIdShape(id)) invalidLedgerIds++;
-          else if (id.startsWith(LEGACY_RESOURCE_ID_PREFIX) && status === 400) legacyRejected++;
+          else if (isClientValidationQurlApiError(e)) nonCridRows++;
           else if (status === 404) ambiguousNotFound++;
           // Keyed on a scrubbed cause. callQurl uses a static route label, but
           // this also protects aggregation from foreign/serialized errors that
@@ -1235,8 +1245,8 @@ async function reclaim(ledgerPath) {
   for (const [message, n] of [...causes.entries()].sort((a, b) => b[1] - a[1])) {
     console.error(`  ${n}x ${message}`);
   }
-  if (legacyRejected > 0) {
-    console.error(`Reclaim: ${legacyRejected} legacy resource ID(s) were rejected with 400 and cannot be reclaimed automatically; remove them only after confirming their links expired.`);
+  if (nonCridRows > 0) {
+    console.error(`Reclaim: the SDK rejected ${nonCridRows} resource ID(s) before sending a request (not CRIDs, such as retired r_ IDs); remove them only after confirming their links expired. If every row failed this way, check QURL_ENDPOINT and the SDK version instead.`);
   }
   if (ambiguousNotFound > 0) {
     console.error(`Reclaim: ${ambiguousNotFound} resource(s) returned 404 and remain in the ledger; verify the owner/key and absence manually before pruning.`);
@@ -1244,7 +1254,7 @@ async function reclaim(ledgerPath) {
   if (invalidLedgerIds > 0) {
     console.error(`Reclaim: ${invalidLedgerIds} invalid ledger resource ID(s) cannot be reclaimed automatically; correct or remove them only after manual verification.`);
   }
-  const retryable = failed - legacyRejected - ambiguousNotFound - invalidLedgerIds;
+  const retryable = failed - nonCridRows - ambiguousNotFound - invalidLedgerIds;
   if (retryable > 0) {
     console.error(`Reclaim: ${retryable} other resource(s) failed with potentially retryable errors — re-run with --reclaim ${ledgerPath}`);
   }
@@ -2226,8 +2236,9 @@ async function runRound(roundNum) {
         uploadName,
         'application/octet-stream',
       );
-      // Recorded before anything is minted against it. Reclaiming this parent
-      // is what reclaims the recipient links, so it has to be on disk first.
+      // Recorded before anything is minted against it. SDK 2.x cannot delete
+      // it by this public key, so reclaim retains the row until cleanup
+      // or expiry is confirmed.
       recordResource(parsed.resource_id, 'upload');
       return parsed;
     });
@@ -2329,8 +2340,10 @@ async function runRound(roundNum) {
       if (shouldStop()) { results.partial = true; break; }
       try {
         await trackCreate(async () => {
+          // TODO(upstream-contract): qurl-service's POST /v1/qurls response
+          // carries crid for every current resource; recordResource warns if not.
           const loc = await createOneTimeLink(TEST_LOCATION_URL, '24h', 'Load test location');
-          recordResource(loc.resource_id, 'location');
+          recordResource(loc.crid, 'location');
         });
         results.locLinks++;
       } catch (e) {
@@ -2427,10 +2440,12 @@ async function main() {
   try {
     const r = await trackCreate(async () => {
       const link = await createOneTimeLink('https://example.com', '24h', 'smoke test');
-      recordResource(link.resource_id, 'smoke');
+      // Fail here rather than after N rounds of unreclaimable location links.
+      if (typeof link?.crid !== 'string') throw new Error('create response carried no crid');
+      recordResource(link.crid, 'smoke');
       return link;
     });
-    console.log(`Smoke test OK: ${r.resource_id}`);
+    console.log(`Smoke test OK: ${r.crid}`);
   } catch (e) {
     console.error(`FATAL: Smoke test failed — ${e.message}`);
     process.exit(1);

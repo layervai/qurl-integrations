@@ -276,7 +276,7 @@ commands then reload this daemon and never install a background job.`,
 			return runShareDaemonWithDeployment(cmd.Context(), opts, stateDir, runtimeDir, jobVersion, headlessConfig, enrollmentTokenFile, hubOverride, deferFirstReconcile)
 		},
 	}
-	run.Flags().StringVar(&opts.tunnelCAFile, "tunnel-ca-file", "", "absolute path to trusted tunnel CA certificates (PEM), required for runtime origin headers")
+	run.Flags().StringVar(&opts.tunnelCAFile, "tunnel-ca-file", "", "absolute path to custom tunnel CA certificates (PEM); defaults to system certificates")
 	run.Flags().StringVar(&opts.tunnelServerName, "tunnel-server-name", "", "expected tunnel certificate name (default: admitted host)")
 	run.Flags().StringVar(&stateDir, "state-dir", "", "qURL share daemon state directory")
 	run.Flags().StringVar(&runtimeDir, "runtime-dir", "", "dedicated per-namespace directory for the qURL share daemon control socket (enforced mode 0700)")
@@ -505,9 +505,8 @@ func runShareDaemonWithDeployment(ctx context.Context, opts *globalOpts, stateDi
 	}
 	opts.redirectFRPLogs()
 	server := &connectordaemon.IPCServer{
-		RequestHeadersEnabled: common.Transport.TLS.TrustedCaFile != "",
-		SocketPath:            socketPath,
-		Manager:               manager, JobVersion: jobVersion,
+		SocketPath: socketPath,
+		Manager:    manager, JobVersion: jobVersion,
 	}
 	return server.Run(ctx)
 }

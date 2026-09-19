@@ -110,10 +110,11 @@ daemon in the new mode, the same path a binary-version change takes.
 
 ## Runtime request headers
 
-Header-bearing routes require a daemon configured with tunnel trust
-(`qurl daemon run --tunnel-ca-file`); see the CLI README's
+The default daemon supports header-bearing routes over verified TLS using
+system CA certificates. Private deployments can supply a custom CA with
+`qurl daemon run --tunnel-ca-file`; see the CLI README's
 [External supervision](../apps/cli/README.md#external-supervision). The
-Connector rejects them otherwise.
+Connector rejects header-bearing routes on an unverified transport.
 
 <!-- TODO(upstream-contract): qurl-connector MaxGroupRoutes, header validation
 limits, route re-registration, and session rotation/drain semantics. -->

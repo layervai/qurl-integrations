@@ -27,6 +27,18 @@
       }
     },
     {
+      "files": ["src/**/*.js"],
+      "excludedFiles": ["src/qurl.js"],
+      "rules": {
+        "no-restricted-syntax": ["error",
+          {
+            "selector": "ObjectPattern > Property[key.name='deleteLink'], MemberExpression[property.name='deleteLink'], MemberExpression[property.value='deleteLink']",
+            "message": "Bot code must revoke children (connector.revokeMintedLinks); whole-resource deleteLink misses watermarked children and breaks sends sharing a deduplicated parent. It is kept for scripts/loadtest-standalone.js only."
+          }
+        ]
+      }
+    },
+    {
       "files": ["src/logger.js"],
       "rules": {
         "no-console": "off"

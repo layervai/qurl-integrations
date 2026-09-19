@@ -24,19 +24,10 @@ import (
 // would split the source address used for admission from the Connector route.
 var ErrDirectEgressRequired = errors.New("qURL local sharing requires direct egress")
 
-// DefaultFRPCommon preserves the transport configuration for ordinary routes.
-// Runtime request headers require explicit tunnel trust through ConfiguredFRPCommon.
-func DefaultFRPCommon(dialTimeoutSeconds, keepaliveSeconds int64) (*v1.ClientCommonConfig, error) {
-	return ConfiguredFRPCommon(dialTimeoutSeconds, keepaliveSeconds, "", "")
-}
-
-// ConfiguredFRPCommon enables authenticated TLS when a trusted CA file is supplied.
+// ConfiguredFRPCommon enables authenticated TLS with system roots or a custom CA file.
 // The optional server name overrides the admitted host only for certificate verification.
 // It validates trust before enrollment or starting any routes; no insecure fallback is allowed.
 func ConfiguredFRPCommon(dialTimeoutSeconds, keepaliveSeconds int64, caFile, serverName string) (*v1.ClientCommonConfig, error) {
-	if serverName != "" && caFile == "" {
-		return nil, errors.New("qURL tunnel server name requires a trusted CA file")
-	}
 	if serverName != strings.TrimSpace(serverName) || strings.ContainsAny(serverName, "/\\ \t\r\n") ||
 		(net.ParseIP(serverName) == nil && strings.ContainsAny(serverName, ":*")) {
 		return nil, errors.New("qURL tunnel server name must be a certificate hostname or IP address")
@@ -53,6 +44,7 @@ func ConfiguredFRPCommon(dialTimeoutSeconds, keepaliveSeconds int64, caFile, ser
 	tlsEnabled := true
 	common := &v1.ClientCommonConfig{LoginFailExit: &loginFailExit}
 	common.Transport.TLS.Enable = &tlsEnabled
+	common.Transport.TLS.VerifyServerCertificate = true
 	common.Transport.TLS.TrustedCaFile = caFile
 	common.Transport.TLS.ServerName = serverName
 	common.Transport.DialServerTimeout = dialTimeoutSeconds

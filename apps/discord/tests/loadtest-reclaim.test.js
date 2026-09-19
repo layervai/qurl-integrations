@@ -14,6 +14,8 @@ jest.mock('../src/connector', () => ({
 }));
 
 const { deleteLink } = require('../src/qurl');
+const { ERROR_CODE_CLIENT_VALIDATION } = jest.requireActual('@layervai/qurl');
+const { CRID_RESOURCE_ID, PUBLIC_KEY_RESOURCE_ID } = require('./helpers/qurl-fixtures');
 const { resourcePath } = require('../src/utils/resource-id');
 const { qurlApiError, qurlApiErrorMessage } = require('../src/utils/qurl-errors');
 const config = require('../src/config');
@@ -194,7 +196,7 @@ describe('recordResource', () => {
     const before = fs.existsSync(LEDGER_PATH) ? fs.readFileSync(LEDGER_PATH, 'utf8') : '';
     recordResource(value, 'upload');
     expect(console.error).toHaveBeenCalledWith(
-      expect.stringContaining('carried no usable resource_id'),
+      expect.stringContaining('carried no usable resource identifier'),
     );
     const after = fs.existsSync(LEDGER_PATH) ? fs.readFileSync(LEDGER_PATH, 'utf8') : '';
     expect(after).toBe(before);
@@ -235,6 +237,22 @@ describe('runRound ledgering', () => {
 
     expect(reUploadBuffer).toHaveBeenCalledTimes(3);
     expect(mod.readLedger(ledger)).toEqual(['res-1', 'res-2', 'res-3']);
+    // Preserve the resource kind for manual reconciliation.
+    expect(fs.readFileSync(ledger, 'utf8').trim().split('\n').map(l => JSON.parse(l).kind))
+      .toEqual(['upload', 'upload', 'upload']);
+  });
+
+  it('records the CRID, not the public key, for a location link', async () => {
+    const ledger = path.join(os.tmpdir(), `loadtest-location-ledger-${process.pid}.jsonl`);
+    created.push(ledger);
+    const { createOneTimeLink } = require('../src/qurl');
+    createOneTimeLink.mockReset();
+    createOneTimeLink.mockResolvedValue({ resource_id: PUBLIC_KEY_RESOURCE_ID, crid: CRID_RESOURCE_ID });
+
+    const mod = loadWith(['--count', '1', '--location', '--ledger', ledger]);
+    await mod.runRound(1);
+
+    expect(mod.readLedger(ledger)).toEqual([CRID_RESOURCE_ID]);
   });
 });
 
@@ -392,18 +410,51 @@ describe('reclaim', () => {
     );
   });
 
-  it('keeps a legacy-ID 400 visible for another reclaim attempt', async () => {
-    const ledger = tempLedger(line('r_legacy42'));
+  it.each([
+    ['a transient failure', qurlApiErrorMessage('DELETE', '/resources/:resourceId', 503)],
+    ['a client rejection of a CRID-shaped id', qurlApiErrorMessage('DELETE', '/resources/:resourceId', 'client_validation')],
+  ])('keeps an upload row after %s', async (_label, message) => {
+    const id = message.endsWith('(503)') ? PUBLIC_KEY_RESOURCE_ID : CRID_RESOURCE_ID;
+    const ledger = tempLedger(line(id, { kind: 'upload' }));
+    deleteLink.mockRejectedValue(new Error(message));
+
+    const result = await reclaim(ledger);
+
+    expect(result).toMatchObject({ revoked: 0, failed: 1 });
+    expect(readLedger(ledger)).toEqual([id]);
+  });
+
+  it('retains an upload rejected by the SDK while pruning a successfully revoked sibling', async () => {
+    const ledger = tempLedger(`${line(PUBLIC_KEY_RESOURCE_ID, { kind: 'upload' })}${line(CRID_RESOURCE_ID, { kind: 'upload' })}`);
+    deleteLink.mockImplementation(async (id) => {
+      if (id === PUBLIC_KEY_RESOURCE_ID) {
+        throw new Error(qurlApiErrorMessage('DELETE', '/resources/:resourceId', ERROR_CODE_CLIENT_VALIDATION));
+      }
+    });
+
+    const result = await reclaim(ledger);
+
+    expect(result).toMatchObject({ revoked: 1, failed: 1 });
+    expect(readLedger(ledger)).toEqual([PUBLIC_KEY_RESOURCE_ID]);
+    expect(console.error).toHaveBeenCalledWith(expect.stringContaining('remove them only after confirming their links expired'));
+    expect(console.error).not.toHaveBeenCalledWith(expect.stringContaining('re-run with --reclaim'));
+  });
+
+  it.each([
+    ['a non-upload public key', PUBLIC_KEY_RESOURCE_ID],
+    ['a retired r_ ID', 'r_legacy42'],
+  ])('keeps %s the SDK rejects as a non-CRID for manual verification', async (_kind, id) => {
+    const ledger = tempLedger(line(id));
     deleteLink.mockRejectedValue(
-      new Error(qurlApiErrorMessage('DELETE', resourcePath('r_legacy42'), 400)),
+      new Error(qurlApiErrorMessage('DELETE', '/resources/:resourceId', ERROR_CODE_CLIENT_VALIDATION)),
     );
 
     const result = await reclaim(ledger);
 
     expect(result).toMatchObject({ revoked: 0, failed: 1 });
-    expect(readLedger(ledger)).toEqual(['r_legacy42']);
+    expect(readLedger(ledger)).toEqual([id]);
     expect(console.error).toHaveBeenCalledWith(
-      expect.stringContaining('1 legacy resource ID(s) were rejected with 400'),
+      expect.stringContaining('the SDK rejected 1 resource ID(s) before sending a request'),
     );
     expect(console.error).not.toHaveBeenCalledWith(
       expect.stringContaining('re-run with --reclaim'),

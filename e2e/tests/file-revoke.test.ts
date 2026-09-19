@@ -9,12 +9,9 @@
  * confirming it serves through the tunnel, then revoking by resource_id and
  * confirming the qURL resource is marked revoked via getResourceStatus.
  *
- * Revoke semantics: `DELETE /v1/resources/{id}` kills the qURL-layer token
- * chain (the qurl.link → NHP knock → tunnel view). #1111 removed the legacy
- * md5-addressed fileviewer URL, so under the render-at-mint tunnel the only
- * access is the minted qurl.link, which this revoke invalidates. The canonical
- * revoke assertion is the management API retaining the resource with
- * `status=revoked`, matching smoke.test.ts.
+ * Source DELETE is checked only through canonical source status. It does not
+ * cascade to the separately minted shared-tunnel children (#1552). Child cleanup
+ * and exact native session close require the recorded owner/operator process.
  *
  * Without this coverage, a regression in the revoke API for
  * connector-uploaded resources would ship silently (URL-mint revoke
@@ -51,7 +48,7 @@ import * as path from 'path';
 import { trackedQurlResources } from '../helpers/cleanup';
 import { loadEnv } from '../helpers/env';
 import * as qurl from '../helpers/qurl-api';
-import { mintIdFromTunnelViewUrl, viewViaQurlLink } from '../helpers/tunnelView';
+import { mintIdFromTunnelViewUrl, viewViaQurlLink, checkOwnershipConfig } from '../helpers/tunnelView';
 
 const env = loadEnv();
 
@@ -61,6 +58,8 @@ const env = loadEnv();
 // only inline, leaking to TTL on a mid-test failure). In-test revokes go
 // through tracked.revoke so the assertion stays while the ledger syncs.
 const tracked = trackedQurlResources(env);
+
+beforeAll(() => checkOwnershipConfig());
 
 afterAll(() => tracked.revokeAll());
 
@@ -104,9 +103,9 @@ describe('File Revoke', () => {
 
     // View through the REAL recipient path: qurl.link → NHP knock → tunnel view.
     // #1111 decommissioned the legacy fileviewer host, so only a real browser
-    // completes the SPA-driven knock (the SPA reads the #at_ fragment in JS). A
+    // completes the SPA-driven knock (the SPA reads the signed fragment in JS). A
     // 200 means the baked image served end-to-end through the tunnel.
-    const view = await viewViaQurlLink(minted.qurl_link);
+    const view = await viewViaQurlLink(minted.qurl_link, { ownership: { resource_id: upload.resource_id, qurl_id: minted.qurl_id, expires_at: minted.expires_at } });
     expect(view.status).toBe(200);
 
     // Resource-level canary guarding the post-revoke lifecycle assertion.
@@ -164,8 +163,8 @@ describe('File Revoke', () => {
     // cold chromium and these run on a single jest worker (maxWorkers:1) — serial
     // keeps peak memory to one browser and avoids the two knocks racing for the
     // shared CI egress IP's WAF budget.
-    const viewA = await viewViaQurlLink(mintedA.qurl_link);
-    const viewB = await viewViaQurlLink(mintedB.qurl_link);
+    const viewA = await viewViaQurlLink(mintedA.qurl_link, { ownership: { resource_id: upload.resource_id, qurl_id: mintedA.qurl_id, expires_at: mintedA.expires_at } });
+    const viewB = await viewViaQurlLink(mintedB.qurl_link, { ownership: { resource_id: upload.resource_id, qurl_id: mintedB.qurl_id, expires_at: mintedB.expires_at } });
 
     // Both recipients get a served (200) per-recipient object end-to-end.
     expect(viewA.status).toBe(200);
@@ -205,7 +204,7 @@ describe('File Revoke', () => {
       expect(host).toContain('_'); // the relaxed-charset character, resolving + TLS-valid
     }
 
-    // Cleanup: revoke the shared resource (kills both views' token chains).
+    // Source cleanup only; shared-tunnel children require owner cleanup (#1552).
     const revoked = await tracked.revoke(upload.resource_id);
     expect(revoked).toBe(true);
     const status = await qurl.getResourceStatus(
@@ -238,7 +237,7 @@ describe('File Revoke', () => {
       oneTimeUse: true,
     });
 
-    const first = await viewViaQurlLink(minted.qurl_link);
+    const first = await viewViaQurlLink(minted.qurl_link, { ownership: { resource_id: upload.resource_id, qurl_id: minted.qurl_id, expires_at: minted.expires_at } });
     expect(first.status).toBe(200);
 
     // Both rejection messages are valid "did not serve" shapes (knock
@@ -250,7 +249,7 @@ describe('File Revoke', () => {
     // (tunnelView.ts's sandbox-proven note), so 20s amply proves "did
     // not serve" without spending the default 30s on a pass-by-timeout.
     await expect(
-      viewViaQurlLink(minted.qurl_link, { timeoutMs: 20_000 }),
+      viewViaQurlLink(minted.qurl_link, { timeoutMs: 20_000, ownership: { resource_id: upload.resource_id, qurl_id: minted.qurl_id, expires_at: minted.expires_at } }),
     ).rejects.toThrow(/no tunnel-view response|tunnel-view returned/);
 
     // Cleanup as assertion (tracked.revoke also syncs the afterAll ledger).

@@ -14,7 +14,8 @@ fmt:
 
 # Pinned so local runs match CI exactly. Keep in sync with every pin site:
 # .github/workflows/slack.yml (2), .github/workflows/shared-test.yml (2),
-# .github/workflows/cli.yml (2), .github/workflows/workflow-contract.yml (1),
+# .github/workflows/cli.yml (2), .github/workflows/e2e.yml (2),
+# .github/workflows/workflow-contract.yml (1),
 # and .pre-commit-config.yaml's golangci-lint rev. An unpinned PATH install
 # drifts: newer golangci-lint versions flag issues the pinned config is clean
 # on.
@@ -230,6 +231,10 @@ check-teams:
 # it covers helpers/ and the live tests/ too, while test:unit runs only
 # unit/**. For the live suite that typecheck is the only gate there is.
 check-e2e:
+	go test -race ./e2e/cmd/verify-ownership
+	go vet ./e2e/cmd/verify-ownership
+	go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION) config verify
+	go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION) run --timeout=5m ./e2e/cmd/verify-ownership/...
 	$(call node_version_warning,e2e)
 	cd e2e && npm ci --no-audit --no-fund
 	cd e2e && npx tsc -p tsconfig.json --noEmit
