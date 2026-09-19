@@ -129,3 +129,29 @@ func (p *Printer) loginText(id *qurlapi.Identity) error {
 	twe.printf("  %s\t%s\n", p.bold("Enrollment credential:"), "consumed, not stored")
 	return twe.flush(tw)
 }
+
+// LocalDeviceIdentity contains only public metadata from the local namespace.
+// A pending replacement has no active key ID until native completion succeeds.
+type LocalDeviceIdentity struct {
+	AgentID              string  `json:"agent_id"`
+	DeviceKeyID          *string `json:"device_key_id"`
+	RecoveryPending      bool    `json:"recovery_pending"`
+	RecoveryIssuePending bool    `json:"recovery_issue_pending"`
+}
+
+// LocalIdentity makes no assertion about current server authorization.
+func (p *Printer) LocalIdentity(identity LocalDeviceIdentity) error {
+	if p.format == FormatJSON {
+		return p.writeJSON(identity)
+	}
+	if p.quiet {
+		_, err := fmt.Fprintln(p.out, identity.AgentID)
+		return err
+	}
+	keyID := "pending recovery"
+	if identity.DeviceKeyID != nil {
+		keyID = *identity.DeviceKeyID
+	}
+	_, err := fmt.Fprintf(p.out, "Agent: %s\nDevice key: %s\nRecovery pending: %t\n", identity.AgentID, keyID, identity.RecoveryPending)
+	return err
+}
