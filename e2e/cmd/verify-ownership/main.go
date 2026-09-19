@@ -117,6 +117,7 @@ func issuerTrust(config publicConfig) (*qurl.TrustStore, error) {
 	return qurl.NewTrustStoreFromDER(keys)
 }
 
+// Errors from this function are printed to stderr; never include input or upstream errors.
 func verifiedPublicIdentity(link string, config publicConfig) (map[string]string, error) {
 	trust, err := issuerTrust(config)
 	if err != nil {
@@ -134,7 +135,7 @@ func verifiedPublicIdentity(link string, config publicConfig) (map[string]string
 	if err != nil || len(cellKey) != 32 {
 		return nil, errors.New("invalid public cell identity")
 	}
-	// cell_id is optional in qURL v2; retain it without inventing a value.
+	// TODO(upstream-contract): cell_id is optional in qURL v2; retain it without inventing a value.
 	cellID := frag.Claims.CellID
 	if config.CellKey != base64.StdEncoding.EncodeToString(cellKey) {
 		return nil, errors.New("browser cell identity mismatch")
