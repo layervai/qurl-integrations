@@ -50,12 +50,14 @@ export QURL_OWNERSHIP_RECEIPTS="$receipt_dir/owned-admissions.jsonl"
 export QURL_PUBLIC_CONFIG_URL=https://qurl.link.layerv.xyz/
 ```
 
-The suite checks public issuer/cell configuration and authenticated `/v1/me`
+The suite checks public issuer configuration and authenticated `/v1/me`
 before creating fixtures. Each browser attempt records only public ownership
 and a time window. Source deletion does not revoke shared-tunnel children.
 Retain the receipts for the operator's service-owner child cleanup and exact
 native close/readback; browser shutdown does not prove native CLOSED. Catalog
-binding requires independent Control readback. CI artifacts are accessible to
+binding requires independent Control readback by the signed cell public key;
+`cell_id` is empty when the optional signed claim is absent. Do not infer a cell
+ID from the legacy browser configuration. CI artifacts are accessible to
 repository readers for one day. Never put links, private keys or tokens in them.
 
 ## Run
