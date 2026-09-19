@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 
 	"github.com/spf13/cobra"
@@ -12,7 +11,6 @@ import (
 	connectordaemon "github.com/layervai/qurl-integrations/apps/cli/internal/connector/daemon"
 	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/exitcode"
-	"github.com/layervai/qurl-integrations/apps/cli/internal/output"
 )
 
 // daemonRetargetLocalCmd changes only local origins while the external owner
@@ -25,7 +23,10 @@ func daemonRetargetLocalCmd(opts *globalOpts) *cobra.Command {
 				return exitcode.UsageError(errors.New("local target conversion requires external supervision"))
 			}
 			data, err := io.ReadAll(io.LimitReader(cmd.InOrStdin(), 4097))
-			if err != nil || len(data) > 4096 {
+			if err != nil {
+				return errors.New("cannot read local target conversion input")
+			}
+			if len(data) > 4096 {
 				return exitcode.UsageError(errors.New("local target conversion input must be JSON under 4096 bytes"))
 			}
 			var input struct {
@@ -37,6 +38,9 @@ func daemonRetargetLocalCmd(opts *globalOpts) *cobra.Command {
 			decoder.DisallowUnknownFields()
 			if decoder.Decode(&input) != nil || decoder.Decode(new(any)) != io.EOF {
 				return exitcode.UsageError(errors.New("local target conversion input has an invalid JSON shape"))
+			}
+			if err := connectorstate.ValidateLocalRetargetSelector(input.OwnerID, input.ConnectorIDPrefix); err != nil {
+				return exitcode.UsageError(err)
 			}
 			if _, err := connectorstate.ParseUnixTarget(input.Target); err != nil {
 				return exitcode.UsageError(err)
@@ -65,13 +69,7 @@ func daemonRetargetLocalCmd(opts *globalOpts) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if opts.resolvedFormat == output.FormatJSON {
-				return json.NewEncoder(opts.streams.Out).Encode(struct {
-					Changed int `json:"changed"`
-				}{changed})
-			}
-			_, err = fmt.Fprintf(opts.streams.Out, "Updated %d local share targets.\n", changed)
-			return err
+			return opts.printer().Retargeted(changed)
 		},
 	}
 }

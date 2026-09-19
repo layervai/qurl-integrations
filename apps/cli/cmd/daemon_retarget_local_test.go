@@ -5,6 +5,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"net"
 	"os"
@@ -71,7 +72,10 @@ func TestDaemonRetargetLocalNeedsNoRESTAndRefusesLiveDaemon(t *testing.T) {
 		t.Fatal("blocked conversion changed local shares")
 	}
 	converted := invoke()
-	if converted.code != 0 || !strings.Contains(converted.stdout.String(), `"changed":1`) {
+	var receipt struct {
+		Changed int `json:"changed"`
+	}
+	if converted.code != 0 || json.Unmarshal(converted.stdout.Bytes(), &receipt) != nil || receipt.Changed != 1 {
 		t.Fatalf("local conversion failed: exit=%d stderr=%s stdout=%s", converted.code, converted.stderr.String(), converted.stdout.String())
 	}
 	if apiCalls != 0 {

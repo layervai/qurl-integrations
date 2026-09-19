@@ -450,7 +450,9 @@ existing externally supervised namespace and matching durable owner, reserves
 the daemon IPC endpoint and lifetime lock, and atomically retargets every saved
 row matching the prefix, including stopped shares. It preserves resource IDs,
 qURLs, desired state and serving epochs, makes no network requests, and returns
-`{"changed":N}` (`0` on an unchanged retry). A live or ambiguous daemon blocks
+`{"changed":N}` (`0` on an unchanged retry or when the selected prefix has no rows).
+The supervisor owns the exact prefix; it must use the same constant for publishing
+and conversion. An owner-bound profile with no file shares is a valid empty set. A live or ambiguous daemon blocks
 conversion. Start the daemon only after conversion succeeds. New daemon binaries
 hold the lifetime lock before loading credentials, closing the startup race.
 

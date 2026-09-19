@@ -159,8 +159,8 @@ github.com/layervai/frp v1.0.3-0.20260919230857-69553e26571b h1:7l83442yV11fHFL4
 github.com/layervai/frp v1.0.3-0.20260919230857-69553e26571b/go.mod h1:331xzwO1dn+7QoHwW65q2FA2Zn/DaYqfxFUM7TUaH8I=
 github.com/layervai/qurl-conformance v0.17.0 h1:r7X0pr4U8WRn91opA8Cif+Lx0d8FQr8DKBVVCStiLpM=
 github.com/layervai/qurl-conformance v0.17.0/go.mod h1:NHtczZdj7SRFqLj9iS4dCGyYZSZKfpILnBRhC53W7WA=
-github.com/layervai/qurl-connector v0.14.1-rc.1.0.20260919231153-5bffbbd5e0ed h1:fF/pP2rFfujt6mjdn8b6uzKgvlTgYfBCHE0kZ9F5SsQ=
-github.com/layervai/qurl-connector v0.14.1-rc.1.0.20260919231153-5bffbbd5e0ed/go.mod h1:+/JgDnayeF8hGbl6nb4Z+Q14yf37VX7hQ3HM5XC0dWI=
+github.com/layervai/qurl-connector v0.14.1-rc.1.0.20260919232759-ee67fa3f88f1 h1:wJVH4i6LkJvtI9WRE3wzgQZv6T9lDxTGykOXTQshFrk=
+github.com/layervai/qurl-connector v0.14.1-rc.1.0.20260919232759-ee67fa3f88f1/go.mod h1:+/JgDnayeF8hGbl6nb4Z+Q14yf37VX7hQ3HM5XC0dWI=
 github.com/layervai/qurl-go v0.17.0 h1:4//1HTkLiC8G27FHP0FvZup88qFZIS5PTd2YIRADn4s=
 github.com/layervai/qurl-go v0.17.0/go.mod h1:RzV0C7ELzGuiBSfyMTHCcPuBVwNEKlP1X+1k2vCV5FQ=
 github.com/lestrrat-go/blackmagic v1.0.4 h1:IwQibdnf8l2KoO+qC3uT4OaTWsW7tuRQXy9TRN9QanA=

@@ -571,6 +571,10 @@ func TestStoppedFileTargetConversionPreservesEveryRegistryRow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// A freshly enrolled owner-bound profile legitimately has no file rows.
+	if changed, err := registry.RetargetStoppedToUnix(ctx, "owner-test", "qurl-file-", "http+unix:///tmp/private.sock"); err != nil || changed != 0 {
+		t.Fatalf("empty file set conversion = %d, %v", changed, err)
+	}
 	for index, id := range []string{"qurl-file-first", "qurl-file-orphan", "local-app"} {
 		binding := testResourceBinding(t, id)
 		binding.CRID = testBindingCRID(t, &binding, apitest.VersionTest)

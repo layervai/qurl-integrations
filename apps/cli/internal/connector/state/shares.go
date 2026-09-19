@@ -228,7 +228,7 @@ func (r *LocalShareRegistry) SetDesired(ctx context.Context, id, desired string,
 }
 
 // LocalTarget is one loopback destination, already classified by the caller.
-// Retarget takes the three fields rather than re-deriving the address from
+// Retarget takes the transport fields rather than re-deriving the address from
 // the URL: the caller holds them, and re-parsing would swallow the errors
 // that say what is actually wrong. validateLocalShare still cross-checks them
 // against the URL, so a caller outside this package cannot store a mismatch.
@@ -244,7 +244,7 @@ func (s *LocalShare) Target() LocalTarget {
 	return LocalTarget{URL: s.TargetURL, IP: s.LocalIP, Port: s.LocalPort, SocketPath: s.LocalSocketPath}
 }
 
-// Retarget moves one row to a new loopback target under the newer serving
+// Retarget moves one row to a new local target under the newer serving
 // epoch the platform returned when the share was restarted. The target and
 // epoch land in one write, so no durable row ever pairs the old target with
 // the new epoch or the new target with the old one. A restart is
@@ -301,6 +301,14 @@ func AcquireDaemonLease(ctx context.Context, dir string) (func() error, error) {
 	return unlock, nil
 }
 
+// ValidateLocalRetargetSelector rejects malformed caller selectors before I/O.
+func ValidateLocalRetargetSelector(owner, prefix string) error {
+	if owner == "" || prefix == "" || !strings.HasSuffix(prefix, "-") || validateConnectorID(prefix+"x") != nil {
+		return errors.New("local target selector requires an owner and a valid connector ID prefix ending in a hyphen")
+	}
+	return nil
+}
+
 // RetargetStoppedToUnix changes only local transport fields while no daemon can
 // use this namespace. External supervisors preserve resource authority, desired
 // state and serving epochs; ordinary live Retarget still requires a newer epoch.
@@ -309,8 +317,8 @@ func (r *LocalShareRegistry) RetargetStoppedToUnix(ctx context.Context, owner, p
 	if err != nil {
 		return 0, err
 	}
-	if prefix == "" || !strings.HasSuffix(prefix, "-") || validateConnectorID(prefix+"x") != nil {
-		return 0, errors.New("local target selector must be a nonempty connector ID prefix ending in a hyphen")
+	if err := ValidateLocalRetargetSelector(owner, prefix); err != nil {
+		return 0, err
 	}
 	if err := RequireRuntimeSupervision(r.dir, RuntimeSupervisionExternal); err != nil {
 		return 0, err
@@ -676,6 +684,10 @@ func validateLocalShareIdentity(share *LocalShare) error {
 	return nil
 }
 
+// TODO(upstream-contract): keep this conservative sun_path cap aligned with
+// Connector LocalHTTPRoute (macOS104 bytes including terminator, Linux108).
+const maxPrivateSocketPathBytes = 100
+
 // ParseUnixTarget validates the local-only Unix HTTP origin grammar. Paths are
 // deliberately excluded from errors because callers may log validation failures.
 func ParseUnixTarget(raw string) (LocalTarget, error) {
@@ -684,7 +696,7 @@ func ParseUnixTarget(raw string) (LocalTarget, error) {
 		return LocalTarget{}, errors.New("local Unix target must be an absolute socket URL without authority, query or fragment on a supported platform")
 	}
 	socket := parsed.Path
-	if !filepath.IsAbs(socket) || socket == "/" || filepath.Clean(socket) != socket || len(socket) > 100 || strings.ContainsAny(socket, "\x00\r\n") {
+	if !filepath.IsAbs(socket) || socket == "/" || filepath.Clean(socket) != socket || len(socket) > maxPrivateSocketPathBytes || strings.ContainsAny(socket, "\x00\r\n") {
 		return LocalTarget{}, errors.New("local Unix socket path is invalid")
 	}
 	canonical := (&url.URL{Scheme: "http+unix", Path: socket}).String()
