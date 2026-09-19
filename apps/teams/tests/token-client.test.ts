@@ -64,6 +64,9 @@ describe('confidential token client', () => {
       'openid', 'email', 'qurl:read', 'qurl:write', 'qurl:agent',
     ]);
     expect(url.search).not.toContain('offline_access');
+    expect(url.searchParams.get('state')).toBe(STATE);
+    expect(url.searchParams.get('nonce')).toBe(NONCE);
+    expect(url.searchParams.get('code_challenge')).toBe(CHALLENGE);
     expect(url.searchParams.get('code_challenge_method')).toBe('S256');
     expect(url.searchParams.get('login_hint')).toBe('admin@example.com');
   });

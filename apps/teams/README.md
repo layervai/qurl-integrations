@@ -296,38 +296,41 @@ email-bound OAuth flow becomes the tenant owner. This first-authenticated-
 installer behavior is intentional; later setup attempts are owner-gated and
 cannot silently rebind the tenant to another qURL account.
 
-The confidential Auth0 app must allow Authorization Code with client-secret
-POST authentication and RS256 ID tokens. Setup requests
-`openid email qurl:read qurl:write qurl:agent` and renewed consent. Its client ID
-must match the API's trusted Teams client ID. Use the approved Auth0 identity
-connections so Teams and the dashboard resolve to the same qURL owner subject.
-The managed sandbox's API audience matches its API origin; the private runtime
-checks the seeded audience against that reviewed expectation. Custom deployments
-can supply a different expected audience or leave the optional check unset.
-
 ### Auth0 application setup
 
 Reuse the environment's Teams application if it exists. For sandbox, name it
 `qURL Teams (sandbox)` and select **Regular Web Application**.
 
 1. Set **Allowed Callback URLs** to the deployed `TEAMS_BASE_URL` followed by
-   `/oauth/qurl/callback`. Use the exact HTTPS URL, without a trailing slash.
-2. Keep **Authorization Code** enabled. **Client Credentials** is not needed.
+   `/oauth/qurl/callback`. Match the runtime's normalized HTTPS URL: lowercase
+   host, no default `:443` port, and no trailing slash after `callback`.
+2. Enable only **Authorization Code**. The runtime does not use **Implicit**,
+   **Client Credentials**, or **Refresh Token** grants.
    Set token endpoint authentication to **Post** and ID-token signing to **RS256**.
-3. Authorize the qURL API whose identifier matches `AUTH0_AUDIENCE`, with
-   `qurl:read`, `qurl:write`, and `qurl:agent` for user access. Do not enable
-   machine-to-machine access for this user sign-in flow.
+3. In the application's **API Access** tab, select **Edit** for the qURL API
+   whose identifier matches `AUTH0_AUDIENCE`. Under **User-Delegated Access**,
+   select **Grant Access**, select `qurl:read`, `qurl:write`, and `qurl:agent`,
+   then save. These permissions must exist on the API. If API RBAC is enabled,
+   the user must also hold them. Leave **Client Access** ungranted. See
+   [Auth0 client grants](https://auth0.com/docs/get-started/applications/application-access-to-apis-client-grants).
 4. Enable the passwordless **email** connection on the application. Use the same
    identity connection as the qURL dashboard so the owner subject matches.
+   Setup requires `email_verified: true`; an unverified address is rejected.
 5. Store the application's domain, client ID, and client secret in the target
    environment's `AUTH0_DOMAIN`, `AUTH0_CLIENT_ID`, and `AUTH0_CLIENT_SECRET`
    secret parameters. Set `AUTH0_AUDIENCE` to the API identifier, and configure
-   the API's trusted Teams client ID to match this application.
+   the API's trusted Teams client ID to match this application. For secret
+   rotation, see `AUTH0_CLIENT_SECRET_FALLBACK` in the configuration table.
 
 The runtime builds the callback from `TEAMS_BASE_URL` and requests
-`openid email qurl:read qurl:write qurl:agent`. No source change is needed for a
-new environment. Keep real environment URLs and credentials in the private
-deployment configuration.
+the standard `openid email` scopes, the API permissions above, and renewed
+consent. No source change is needed for a new environment. Keep real environment
+URLs and credentials in the private deployment configuration. The managed
+sandbox audience matches its API origin; `AUTH0_EXPECTED_AUDIENCE` checks that
+expectation. Custom deployments can set a different expected audience or leave
+the optional check unset.
+
+### Setup and uninstall lifecycle
 
 Setup uses a stable per-tenant idempotency key, as Slack does. A new setup can
 recover a failed local credential save within the service's 24-hour replay
