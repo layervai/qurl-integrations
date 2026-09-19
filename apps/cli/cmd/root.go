@@ -990,7 +990,7 @@ func repairExplicitDeviceAuthorization(
 	deviceIdentity *qurlapi.Identity,
 	requestErr error,
 ) (qurlapi.Client, *qurlapi.Identity, error) {
-	// Only explicit login supplies recovery authority. Ordinary warm opens and
+	// Only explicit login or recovery supplies repair authority. Ordinary warm opens and
 	// enrollment-token login cannot spend recovery authority on a REST failure.
 	var apiErr *qurlapi.Error
 	if requestErr != nil && provider != nil && errors.As(requestErr, &apiErr) &&

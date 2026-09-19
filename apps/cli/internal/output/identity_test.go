@@ -168,3 +168,25 @@ func TestLoginJSONOmitsAnAbsentDeviceKeyID(t *testing.T) {
 		t.Fatalf("login JSON = %s, want no device_key_id when /v1/me reports no key", out.String())
 	}
 }
+
+func TestRecoveredIdentityTextDoesNotClaimEnrollment(t *testing.T) {
+	var out, errOut bytes.Buffer
+	printer := newTestPrinter(&out, &errOut, FormatText, false, false, false)
+	if err := printer.Recovered(&qurlapi.Identity{OwnerID: "owner"}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(errOut.String(), "Recovered device access") || strings.Contains(errOut.String(), "Enrollment") || out.Len() != 0 {
+		t.Fatalf("recovery text=%q stdout=%q", errOut.String(), out.String())
+	}
+}
+
+func TestLocalIdentityTextIncludesIssuePending(t *testing.T) {
+	var out, errOut bytes.Buffer
+	printer := newTestPrinter(&out, &errOut, FormatText, false, false, false)
+	if err := printer.LocalIdentity(LocalDeviceIdentity{AgentID: "agent-one", RecoveryIssuePending: true}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "Recovery issue pending: true") {
+		t.Fatalf("local identity text=%q", out.String())
+	}
+}

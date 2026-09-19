@@ -261,5 +261,5 @@ func runExternalRecovery(ctx context.Context, opts *globalOpts, tokenPath string
 		return err
 	}
 	opts.registeredClient, opts.registeredIdentity = client, identity
-	return opts.printer().Login(identity)
+	return opts.printer().Recovered(identity)
 }

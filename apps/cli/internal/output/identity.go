@@ -117,6 +117,15 @@ func (p *Printer) Login(id *qurlapi.Identity) error {
 	}
 }
 
+// Recovered preserves the login identity document while describing repair accurately.
+func (p *Printer) Recovered(id *qurlapi.Identity) error {
+	if p.format == FormatJSON || p.quiet {
+		return p.Login(id)
+	}
+	_, err := fmt.Fprintf(p.err, "Recovered device access for %s.\n", id.OwnerID)
+	return err
+}
+
 func (p *Printer) loginText(id *qurlapi.Identity) error {
 	ew := &errWriter{w: p.err}
 	ew.printf("%s\n\n", fmt.Sprintf(msgDeviceEnrolled, p.bold(id.OwnerID)))
@@ -152,6 +161,6 @@ func (p *Printer) LocalIdentity(identity LocalDeviceIdentity) error {
 	if identity.DeviceKeyID != nil {
 		keyID = *identity.DeviceKeyID
 	}
-	_, err := fmt.Fprintf(p.out, "Agent: %s\nDevice key: %s\nRecovery pending: %t\n", identity.AgentID, keyID, identity.RecoveryPending)
+	_, err := fmt.Fprintf(p.out, "Agent: %s\nDevice key: %s\nRecovery pending: %t\nRecovery issue pending: %t\n", identity.AgentID, keyID, identity.RecoveryPending, identity.RecoveryIssuePending)
 	return err
 }
