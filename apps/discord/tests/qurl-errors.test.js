@@ -1,4 +1,5 @@
 const {
+  isClientValidationQurlApiError,
   isGoneQurlApiError,
   qurlApiError,
   qurlApiErrorMessage,
@@ -28,6 +29,16 @@ describe('qURL API error contract', () => {
     expect(error.status).toBeUndefined();
     expect(qurlApiErrorStatus(error)).toBeNull();
     expect(isGoneQurlApiError(error)).toBe(false);
+  });
+
+  it('classifies the SDK client-validation code callQurl re-wraps', () => {
+    const { ERROR_CODE_CLIENT_VALIDATION } = require('@layervai/qurl');
+    const error = qurlApiError('DELETE', '/resources/:resourceId', ERROR_CODE_CLIENT_VALIDATION);
+
+    expect(isClientValidationQurlApiError(error)).toBe(true);
+    expect(isClientValidationQurlApiError(error.message)).toBe(true);
+    expect(isClientValidationQurlApiError(qurlApiError('DELETE', '/resources/:resourceId', 400))).toBe(false);
+    expect(isClientValidationQurlApiError(undefined)).toBe(false);
   });
 
   it('rejects unrelated and non-terminal status messages', () => {

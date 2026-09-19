@@ -392,6 +392,23 @@ describe('handleFlowInteraction', () => {
     );
   });
 
+  it('follows up when a handler throws after acknowledging (e.g. revoke select progress update)', async () => {
+    const interaction = makeInteraction({ customId: 'route_throws_after_ack' });
+    const handler = jest.fn(async () => {
+      interaction.replied = true;
+      throw new Error('getSendItems failed');
+    });
+    registerFlow('route_throws_after_ack', { expectedStage: 'awaiting', handler });
+    loadFlow.mockResolvedValue({ flow_id: '0:1#g#c#u', stage: 'awaiting', version: 1 });
+
+    await handleFlowInteraction(interaction);
+
+    expect(interaction.reply).not.toHaveBeenCalled();
+    expect(interaction.followUp).toHaveBeenCalledWith(
+      expect.objectContaining({ content: expect.stringMatching(/Something went wrong/), ephemeral: true }),
+    );
+  });
+
   it('flow_id passed to handler is derived from interaction context', async () => {
     const handler = jest.fn().mockResolvedValue(undefined);
     registerFlow('route_spoof_check', { expectedStage: 's', handler });

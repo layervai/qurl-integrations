@@ -110,6 +110,10 @@ const MAX_FILE_SIZE = 25 * 1024 * 1024;
 // without DDB_TABLE_PREFIX), and a copy in the script had no way to notice
 // this one moving.
 const TOKENS_PER_RESOURCE = 10;
+// Over-minted children beyond the requested count that mint-failure
+// compensation still revokes (commands.js 2xx path and connector.js non-2xx
+// partial path); further overflow ids are only logged for reconciliation.
+const MAX_OVERFLOW_REVOKE_IDS = 20;
 
 // Cap on concurrent link-status monitors. Each monitor fires setInterval
 // up to 1 hour; a burst of sends could otherwise stack dozens of timers.
@@ -720,6 +724,7 @@ module.exports = {
   ddbSendConfigGuardFitsTransaction,
   MAX_FILE_SIZE,
   TOKENS_PER_RESOURCE,
+  MAX_OVERFLOW_REVOKE_IDS,
   MAX_CONCURRENT_MONITORS,
   DISCORD_MEMBERS_PAGE_SIZE,
   PREWARM_MAX_PAGES,
