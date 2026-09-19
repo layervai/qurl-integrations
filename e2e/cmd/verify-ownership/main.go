@@ -39,7 +39,7 @@ func main() {
 	}
 	identity, err := verifiedPublicIdentity(strings.TrimSpace(string(raw)), config)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		fmt.Fprintln(os.Stderr, "ownership verification failed")
 		os.Exit(1)
 	}
 	if err := json.NewEncoder(os.Stdout).Encode(identity); err != nil {
@@ -117,7 +117,6 @@ func issuerTrust(config publicConfig) (*qurl.TrustStore, error) {
 	return qurl.NewTrustStoreFromDER(keys)
 }
 
-// Errors from this function are printed to stderr; never include input or upstream errors.
 func verifiedPublicIdentity(link string, config publicConfig) (map[string]string, error) {
 	trust, err := issuerTrust(config)
 	if err != nil {

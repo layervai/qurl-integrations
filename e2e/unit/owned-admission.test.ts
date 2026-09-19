@@ -34,7 +34,7 @@ test.each(['', 'cell0'])('receipt retains optional cell ID %j and rejects invali
     await expect(recordAdmissionAttempt('private-secret', child, 30_000)).rejects.toThrow('verified public identity is incomplete');
     expect(readFileSync(path, 'utf8')).toBe(raw);
     (spawnSync as jest.Mock).mockReturnValue({ status: 1, stderr: 'private-secret' });
-    await expect(recordAdmissionAttempt('private-secret', child, 30_000)).rejects.toThrow('signed ownership verification failed');
+    await expect(recordAdmissionAttempt('private-secret', child, 30_000)).rejects.toThrow(/^signed ownership verification failed$/);
     expect(readFileSync(path, 'utf8')).toBe(raw);
     const reads = (global.fetch as jest.Mock).mock.calls.length;
     await expect(checkOwnershipConfig()).rejects.toThrow('public ownership configuration failed');

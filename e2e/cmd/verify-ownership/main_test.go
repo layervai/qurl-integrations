@@ -53,7 +53,7 @@ func TestVerifiedPublicOwnership(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if absent, err := verifiedPublicIdentity(link, config); err != nil || absent["cell_id"] != "" {
+	if absent, err := verifiedPublicIdentity(link, config); err != nil || absent["cell_id"] != "" || len(absent) != 6 {
 		t.Fatal("optional cell ID rejected or invented")
 	}
 	if len(got) != 6 {
