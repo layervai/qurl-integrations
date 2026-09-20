@@ -27,7 +27,7 @@ const accountCallback = "http://" + accountCallbackAddress + "/callback"
 // prompt=login consent. The qURL audience accepts the scopes below; account
 // linking requires qurl:agent as well as verified account identity.
 func SignInAccount(ctx context.Context, cfg *Config, openBrowser func(context.Context, string) error) (_ string, retErr error) {
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Minute)
 	defer cancel()
 	defer func() {
 		if retErr != nil && errors.Is(ctx.Err(), context.Canceled) {
