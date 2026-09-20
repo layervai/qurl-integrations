@@ -462,9 +462,12 @@ The supervisor owns the exact prefix; it must use the same constant for publishi
 and conversion. An owner-bound profile with no file shares is a valid empty set.
 The origin must be bound inside an owner-only (0700) directory controlled by
 the supervisor, with ancestors other users cannot replace; do not use a socket
-directly under a shared temporary directory.
-The supervisor must pass the same runtime-directory settings to daemon startup
-and conversion so the IPC reservation also excludes older daemon binaries.
+directly under a shared temporary directory. The supervisor enforces this
+filesystem boundary; the CLI validates the Unix target grammar. Conversion is
+offline and may precede binding the origin, so it does not dial the target.
+Set the same `QURL_CONNECTOR_RUNTIME_DIR` environment value for daemon startup
+and conversion (including any value supplied through daemon run's hidden
+`--runtime-dir` flag), so the IPC reservation also excludes older daemon binaries.
 A live or ambiguous daemon at that endpoint blocks conversion. Start the daemon only after conversion succeeds. New daemon binaries
 hold the lifetime lock before loading credentials, closing the startup race.
 

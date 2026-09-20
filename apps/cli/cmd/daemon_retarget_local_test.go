@@ -12,11 +12,13 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/apitest"
 	connectordaemon "github.com/layervai/qurl-integrations/apps/cli/internal/connector/daemon"
 	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/exitcode"
 )
 
 func TestDaemonRetargetLocalNeedsNoRESTAndRefusesLiveDaemon(t *testing.T) {
@@ -143,5 +145,39 @@ func TestDaemonRetargetLocalRejectsInvalidInputsAndNativeNamespace(t *testing.T)
 		if _, err := os.Stat(filepath.Join(dir, connectorstate.LocalSharesFile)); !errors.Is(err, os.ErrNotExist) {
 			t.Fatal("rejected command mutated the registry")
 		}
+	}
+}
+
+func TestDaemonRunLeaseContentionPreservesConflictAndCallerCancellation(t *testing.T) {
+	dir := connectorStateTestDir(t)
+	unlock, err := connectorstate.AcquireDaemonLease(context.Background(), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := unlock(); err != nil {
+			t.Error(err)
+		}
+	}()
+	for _, tc := range []struct {
+		name    string
+		timeout time.Duration
+		want    int
+	}{
+		{"another daemon", 0, exitcode.Conflict},
+		{"caller deadline", time.Millisecond, exitcode.Unavailable},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			if tc.timeout != 0 {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(ctx, tc.timeout)
+				defer cancel()
+			}
+			res := runCLI(t, &runOpts{ctx: ctx, args: []string{"daemon", "run", "--supervision", "external"}, shareStateDir: dir})
+			if res.code != tc.want {
+				t.Fatalf("exit=%d want=%d: %s", res.code, tc.want, res.stderr.String())
+			}
+		})
 	}
 }

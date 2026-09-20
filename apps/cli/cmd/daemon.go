@@ -520,6 +520,11 @@ func lockDaemonPaths(ctx context.Context, opts *globalOpts, stateDirOverride, ru
 		return "", "", nil, err
 	}
 	unlock, err = connectorstate.AcquireDaemonLease(ctx, stateDir)
+	// Only the lease's internal wait means another daemon owns the namespace.
+	// Preserve the caller's cancellation/deadline instead of relabelling it.
+	if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
+		err = connectordaemon.ErrAlreadyRunning
+	}
 	return stateDir, socketPath, unlock, err
 }
 
