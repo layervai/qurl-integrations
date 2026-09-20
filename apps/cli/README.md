@@ -255,15 +255,21 @@ Pass a stable `--idempotency-key` when retrying mutations (32–256 ASCII letter
 digits, hyphens or underscores). Bodies are limited to 1 MiB; GET and DELETE
 accept no body. Absolute URLs, caller-selected headers and routes outside the
 SDK's registered-device allowlist are refused. Queries are supported only for
-`GET /v1/resources`; the SDK rejects queries on other routes. Response bodies
-also have a 1 MiB cap; exceeding it returns a nonzero exit.
+`GET /v1/resources` and `GET /v1/resources/{id}/qurls`; the SDK rejects queries
+on other routes. Response bodies also have a 1 MiB cap; exceeding it returns
+a nonzero exit.
+
+The device can list a resource's qURLs, update or revoke an individual qURL,
+list its active sessions, and terminate individual or all resource sessions.
+These operations require matching service-side device authorization; sessions
+are unpaginated. Account administration, billing, quota and usage remain outside
+this device transport's authority.
 
 For example, account linking uses `POST /v1/account/link` with
 `{"account_token":"<account access token>"}` on stdin. Keep that token out of
 argv, environment variables, logs and durable files. The device credential
 stays inside the CLI. Before recording success, verify the returned `owner_id`
-matches this device and `account_id` matches the intended account. Sessions, individual-link revocation, quota and usage
-remain outside this device transport's authority.
+matches this device and `account_id` matches the intended account.
 
 A program that runs the daemon itself (see
 [External supervision](#external-supervision)) never hands qurl an account API

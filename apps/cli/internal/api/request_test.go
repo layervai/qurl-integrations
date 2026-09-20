@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/layervai/qurl-integrations/apps/cli/internal/apitest"
@@ -44,7 +45,7 @@ func TestRegisteredRequestRejectsAuthorityAndDisallowedRoutes(t *testing.T) {
 	client := newRegisteredTestClient(t, srv)
 	// TODO(upstream-contract): keep these denied routes aligned with the
 	// reviewed qurl-go registered-device transport before updating the SDK.
-	for _, path := range []string{"https://evil.test/v1/me", "//evil.test/v1/me", "/v1/me#fragment", "/v1/%6de", "/v1/../v1/me", "/v1/me?x=1", "/v1/quota", "/v1/resources/id/sessions"} {
+	for _, path := range []string{"https://evil.test/v1/me", "//evil.test/v1/me", "/v1/me#fragment", "/v1/%6de", "/v1/../v1/me", "/v1/me?x=1", "/v1/quota", "/v1/resources/id/sessions/session_id"} {
 		if _, err := Request(context.Background(), client, http.MethodGet, path, nil, ""); err == nil {
 			t.Errorf("accepted %q", path)
 		}
@@ -84,5 +85,30 @@ func TestRegisteredRequestBodyAndCancellation(t *testing.T) {
 	}
 	if len(srv.Requests()) != 2 {
 		t.Fatal("canceled request reached network")
+	}
+}
+
+func TestRegisteredRequestResourceManagement(t *testing.T) {
+	srv := apitest.NewServer(t)
+	client := newRegisteredTestClient(t, srv)
+	routes := []struct{ method, path string }{
+		{http.MethodGet, "/v1/resources/id/qurls?limit=100&cursor=next"},
+		{http.MethodPatch, "/v1/resources/id/qurls/q_token"},
+		{http.MethodDelete, "/v1/resources/id/qurls/q_token"},
+		{http.MethodGet, "/v1/resources/id/sessions"},
+		{http.MethodDelete, "/v1/resources/id/sessions"},
+		{http.MethodDelete, "/v1/resources/id/sessions/s_session"},
+	}
+	for _, route := range routes {
+		srv.Script(route.method, strings.SplitN(route.path, "?", 2)[0], func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusNoContent)
+		})
+		result, err := Request(context.Background(), client, route.method, route.path, nil, "")
+		if err != nil || result.Status != http.StatusNoContent {
+			t.Fatalf("%s %s: response=%+v error=%v", route.method, route.path, result, err)
+		}
+	}
+	if len(srv.Requests()) != len(routes) {
+		t.Fatal("management requests were dropped or replayed")
 	}
 }
