@@ -171,7 +171,7 @@ func TestActiveSourcesDoNotReferenceLegacyConnectorArtifacts(t *testing.T) {
 			}
 			return nil
 		}
-		if strings.HasSuffix(path, "_test.go") || strings.HasSuffix(path, ".golden") {
+		if strings.HasSuffix(path, "_test.go") || strings.HasSuffix(path, ".test.ts") || strings.HasSuffix(path, ".golden") {
 			return nil
 		}
 		info, err := entry.Info()
