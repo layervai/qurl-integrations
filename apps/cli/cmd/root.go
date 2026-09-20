@@ -662,7 +662,7 @@ func (b *registeredAccountBootstrap) enrollmentCredential(ctx context.Context, r
 	if strings.TrimSpace(request.AgentID) == "" {
 		return "", errors.New("registered-device enrollment has no durable agent ID")
 	}
-	if b.client == nil {
+	if b.client == nil && b.opts.resolvedSupervision == connectorstate.RuntimeSupervisionNative {
 		if _, _, err := auth.Resolve(b.opts.lookupEnv); errors.Is(err, auth.ErrNoCredential) {
 			if !b.warnedAnonymousDevice && !b.opts.quiet && b.opts.streams != nil && b.opts.streams.Err != nil {
 				b.opts.printer().Notef("%s", msgAnonymousDevice)
