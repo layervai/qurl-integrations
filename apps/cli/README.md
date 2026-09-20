@@ -916,6 +916,32 @@ namespace with a fresh token. Login JSON includes
 `owner_id`, `auth_type`, `device_enrolled`, and `device_key_id` when the
 service supplies a key ID.
 
+### Supervised device credential recovery
+
+A supervisor can repair a revoked device credential in its existing sealed
+namespace:
+
+```sh
+qurl login --recovery-token-file /abs/path/to/capability --supervision external
+```
+
+The capability comes from a fresh same-owner sign-in;
+this command does not mint an ordinary account API key or enroll a replacement
+device. It uses the same private token-file and inherited wrapping-key descriptor
+contract as supervised enrollment, requires an existing externally supervised
+owner-scoped device, and is available on macOS and Linux. Windows rejects this
+handoff before opening native state. Ordinary account-key login remains unchanged.
+
+`qurl whoami --local -o json` reads only local public identity metadata without
+contacting the API: `agent_id`, nullable `device_key_id`, `recovery_pending`, and
+`recovery_issue_pending`. It requires the wrapping-key descriptor for sealed
+state and does not assert current server authorization. Preserve the same
+capability while `recovery_issue_pending` is true: replay must keep the secret
+bound to the pending native Issue. A terminal authentication rejection uses exit
+code 4; a new intentional sign-in may authorize a new attempt only after that
+pending Issue has cleared. Successful recovery retains the login JSON identity
+contract; human output identifies recovery rather than enrollment.
+
 ### qurl completion
 
 `qurl completion <shell>` writes a completion script to stdout for

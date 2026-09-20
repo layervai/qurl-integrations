@@ -651,3 +651,11 @@ func TestRunRendersCommandErrorBeforeNativeRuntimeCloseWarning(t *testing.T) {
 		t.Fatalf("command error/cleanup warning order = %d/%d in %q", commandError, cleanupWarning, stderr.String())
 	}
 }
+
+func TestBindRegisteredDeviceOwnerPreservesDeviceOwnedNamespace(t *testing.T) {
+	registry := &ownerOnlyTestShareRegistry{ownerID: "device:existing-guest"}
+	err := bindRegisteredDeviceOwner(context.Background(), registry, "/state/guest", "key-existing", "auth0|signed-in-account")
+	if !errors.Is(err, auth.ErrDeviceAccountConflict) || registry.bindCalls != 0 || registry.ownerID != "device:existing-guest" {
+		t.Fatalf("account authority changed device-owned namespace: error=%v binds=%d owner=%q", err, registry.bindCalls, registry.ownerID)
+	}
+}
