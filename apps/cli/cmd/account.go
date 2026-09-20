@@ -6,10 +6,12 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/layervai/qurl-go/qurl"
 	"github.com/spf13/cobra"
 
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/auth"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/exitcode"
 )
 
 func accountCmd(opts *globalOpts) *cobra.Command {
@@ -38,7 +40,7 @@ func accountCmd(opts *globalOpts) *cobra.Command {
 				}
 			}
 			if id == nil || id.OwnerID == "" {
-				return errors.New("qURL account identity response is empty")
+				return fmt.Errorf("%w: qURL account identity response is empty", qurl.ErrInvalidAPIResponse)
 			}
 			if !opts.quiet {
 				opts.printer().Notef("%s", msgAccountSetup)
@@ -118,19 +120,20 @@ func selectAccountOwner(owners []string, requested string) (string, error) {
 	}
 	if requested == "" {
 		for _, owner := range owners {
+			// TODO(upstream-contract): qurl-service identifies device owners with the device: prefix.
 			if strings.HasPrefix(owner, "device:") {
 				if requested != "" {
-					return "", fmt.Errorf(msgAccountChooseOwner, strings.Join(owners, ", "))
+					return "", exitcode.UsageError(fmt.Errorf(msgAccountChooseOwner, strings.Join(owners, ", ")))
 				}
 				requested = owner
 			}
 		}
 	}
 	if requested == "" {
-		return "", fmt.Errorf(msgAccountChooseOwner, strings.Join(owners, ", "))
+		return "", exitcode.UsageError(fmt.Errorf(msgAccountChooseOwner, strings.Join(owners, ", ")))
 	}
 	if !slices.Contains(owners, requested) {
-		return "", errors.New(msgAccountOwnerDenied)
+		return "", exitcode.UsageError(errors.New(msgAccountOwnerDenied))
 	}
 	return requested, nil
 }

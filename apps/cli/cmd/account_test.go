@@ -14,6 +14,7 @@ import (
 
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/auth"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/exitcode"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/output"
 
 	"github.com/layervai/qurl-go/qurl"
@@ -70,6 +71,9 @@ func TestSelectAccountOwner(t *testing.T) {
 		{[]string{"auth0|one"}, "device:foreign", ""},
 	} {
 		got, err := selectAccountOwner(tc.owners, tc.requested)
+		if err != nil && exitcode.FromError(err) != exitcode.Usage {
+			t.Fatalf("owner selection exit = %d", exitcode.FromError(err))
+		}
 		if got != tc.want || (err != nil) != (tc.want == "") {
 			t.Fatalf("select %v / %q = %q, %v", tc.owners, tc.requested, got, err)
 		}

@@ -109,3 +109,28 @@ func TestAccountBrowserPreservesCancellation(t *testing.T) {
 		}
 	}
 }
+
+func TestAccountSignInRejectsUntrustedSettings(t *testing.T) {
+	for _, endpoint := range []string{"http://example.com", "ftp://localhost", "://bad", "https:///missing-host"} {
+		if err := validateAccountEndpoint(endpoint); !errors.Is(err, ErrAccountEndpoint) {
+			t.Fatalf("endpoint %q: %v", endpoint, err)
+		}
+	}
+	for _, endpoint := range []string{"https://example.com", "http://127.0.0.1:8765", "http://[::1]:8765", "http://localhost"} {
+		if err := validateAccountEndpoint(endpoint); err != nil {
+			t.Fatalf("endpoint %q: %v", endpoint, err)
+		}
+	}
+	for _, domain := range []string{"", "host/path", "user@host", "host?query", "host#fragment", `host\path`} {
+		t.Run(domain, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_ = json.NewEncoder(w).Encode(map[string]string{"domain": domain, "client_id": "client", "audience": "audience"})
+			}))
+			defer server.Close()
+			_, err := SignInAccount(context.Background(), &Config{BaseURL: server.URL}, func(context.Context, string) error { t.Fatal("browser opened for invalid settings"); return nil })
+			if !errors.Is(err, ErrAccountUnavailable) {
+				t.Fatalf("settings error: %v", err)
+			}
+		})
+	}
+}

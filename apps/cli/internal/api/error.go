@@ -1,6 +1,7 @@
 package qurlapi
 
 import (
+	"errors"
 	"fmt"
 	"strconv"
 )
@@ -91,3 +92,13 @@ const (
 
 const msgAccountCallbackInvalid = "Invalid sign-in response."
 const msgAccountCallbackComplete = "Return to qURL to finish sign-in. You can close this tab."
+
+// Account sign-in failures retain stable exit classes for scripts.
+var (
+	ErrAccountLoad        = errors.New(msgAccountLoadFailed)
+	ErrAccountUnavailable = errors.New(msgAccountUnavailable)
+	ErrAccountPort        = errors.New(msgAccountPortBusy)
+	ErrAccountDenied      = errors.New(msgAccountCanceled)
+	ErrAccountExchange    = errors.New(msgAccountExchangeFailed)
+	ErrAccountEndpoint    = errors.New(msgAccountHTTPSRequired)
+)
