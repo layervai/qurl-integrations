@@ -25,7 +25,7 @@ const (
 	hintNoCredential  = "Hint: run `qurl login`, or set QURL_API_KEY for one-time device enrollment."
 	hintUnauthorized  = "Hint: the service rejected this device identity. Run `qurl login` with a current account API key."
 	hintNotFound      = "Hint: the CRID may be mistyped, expired, or no longer published. Ask whoever shared it for a current one."
-	hintQuotaExceeded = "Hint: you've reached your plan's limit. See https://layerv.ai/pricing to raise it."
+	hintQuotaExceeded = "Hint: if this device is not linked to an account, run `qurl account setup`. For account plan limits, see https://layerv.ai/pricing."
 	hintRetryAfter    = "Retry after %ds."
 
 	// hintRevoked is owner-truthful: the platform tells a resource's owner
