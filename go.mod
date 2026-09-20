@@ -13,7 +13,7 @@ require (
 	github.com/fatedier/frp v0.71.0
 	github.com/fatedier/golib v0.8.2
 	github.com/layervai/qurl-conformance v0.17.0
-	github.com/layervai/qurl-connector v0.14.1-rc.1.0.20260919232759-ee67fa3f88f1
+	github.com/layervai/qurl-connector v0.14.1-rc.1.0.20260920043736-fb5740cf30b2
 	github.com/layervai/qurl-go v0.17.0
 	github.com/lestrrat-go/jwx/v2 v2.1.7
 	github.com/spf13/cobra v1.10.2
@@ -141,4 +141,4 @@ replace github.com/hashicorp/yamux => github.com/fatedier/yamux v0.0.0-202508250
 // TODO(upstream-contract): keep both replacements aligned with qurl-connector;
 // Go does not inherit dependency replacements. This reviewed FRP revision adds
 // system CA verification and retains the lifecycle fixes and InitialRunID.
-replace github.com/fatedier/frp => github.com/layervai/frp v1.0.3-0.20260919230857-69553e26571b
+replace github.com/fatedier/frp => github.com/layervai/frp v1.0.3-0.20260920043337-55c3b7c5e0b9
