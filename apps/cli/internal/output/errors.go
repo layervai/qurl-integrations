@@ -45,6 +45,12 @@ func renderErrorLines(p *Printer, err error) []string {
 	if errors.Is(err, qurl.ErrTemporaryAccessLinksDisabled) {
 		return []string{head + " " + msgLinksUnavailable}
 	}
+	if errors.Is(err, auth.ErrAccountRecoveryState) {
+		return []string{head + " " + msgAccountRecoveryState, "", "  " + p.dim(hintAccountRecoveryState)}
+	}
+	if errors.Is(err, auth.ErrAnonymousRecovery) {
+		return []string{head + " " + msgAnonymousRecovery, "", "  " + p.dim(hintAnonymousRecovery)}
+	}
 	if errors.Is(err, auth.ErrNoCredential) {
 		return []string{head + " " + msgNoCredential, "", "  " + p.dim(hintNoCredential)}
 	}

@@ -16,8 +16,8 @@ func whoamiCmd(opts *globalOpts) *cobra.Command {
 
 The command opens the same durable device identity as publish, list, share,
 and lifecycle commands, then checks it against the qURL service. It does not
-read an account API key on a warm start. If this machine is not enrolled, run
-"qurl login" or set QURL_API_KEY for one-time bootstrap.
+read an account API key on a warm start. A new device enrolls automatically
+without an account. Use "qurl account setup" to enable account recovery.
 
 Useful for checking which account a script will act as before it publishes
 anything.`,

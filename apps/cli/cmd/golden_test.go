@@ -155,6 +155,7 @@ func TestGoldens(t *testing.T) {
 			stderrGolden: true,
 		},
 		{
+			// Legacy injected account-client error rendering, not default enrollment.
 			name: "error_nokey",
 			args: func(*apitest.Server) []string { return []string{"list"} },
 			env: func(srv *apitest.Server) map[string]string {

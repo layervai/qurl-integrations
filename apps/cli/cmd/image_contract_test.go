@@ -171,7 +171,8 @@ func TestActiveSourcesDoNotReferenceLegacyConnectorArtifacts(t *testing.T) {
 			}
 			return nil
 		}
-		if strings.HasSuffix(path, "_test.go") || strings.HasSuffix(path, ".golden") {
+		// Unit tests may name retired artifacts to assert that they are rejected.
+		if strings.HasSuffix(path, "_test.go") || strings.HasSuffix(path, ".test.ts") || strings.HasSuffix(path, ".golden") {
 			return nil
 		}
 		info, err := entry.Info()

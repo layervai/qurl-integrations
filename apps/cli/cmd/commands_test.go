@@ -139,8 +139,7 @@ func TestREADMECarriesACompleteLocalQuickstart(t *testing.T) {
 		"brew install layervai/tap/qurl",
 		"qurl version",
 		"2.0.0 or newer",
-		"https://layerv.ai/qurl/dashboard/keys/",
-		"qurl login",
+		"No account, API key, or browser sign-in is required.",
 		"python3 -m http.server 3000 --bind 127.0.0.1",
 		"qurl publish http://127.0.0.1:3000",
 		"Status:  serving",
@@ -487,7 +486,9 @@ func TestConfigFileWithSecretRefusedExitThree(t *testing.T) {
 	}
 }
 
-func TestMissingCredentialExitFour(t *testing.T) {
+// The legacy injected account client still requires its explicit credential.
+// TestPublishDefaultsToDeviceEnrollment covers the production default.
+func TestInjectedAccountClientMissingCredentialExitFour(t *testing.T) {
 	res := runCLI(t, &runOpts{args: []string{"list"}, env: map[string]string{}})
 	if res.code != 4 {
 		t.Fatalf("exit = %d, want 4; stderr: %s", res.code, res.stderr.String())

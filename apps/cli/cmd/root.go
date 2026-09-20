@@ -71,6 +71,8 @@ type globalOpts struct {
 	// openBrowser launches the user's browser at an already-verified link;
 	// tests inject a recorder so no real browser ever starts under test.
 	openBrowser func(ctx context.Context, link string) error
+	// Browser authentication is injected separately from command wiring tests.
+	signInAccount func(context.Context, *qurlapi.Config, func(context.Context, string) error) (string, error)
 	// enterPortalGrant asks the qURL platform for direct access to an
 	// already-verified link and retains both its application authorization and
 	// acknowledged lifetime. Tests always inject (the harness refuses by
@@ -175,6 +177,7 @@ func newRoot(version string, streams *output.Streams, options ...rootOption) (*c
 		lookupEnv:           os.LookupEnv,
 		now:                 time.Now,
 		backgroundShareGOOS: runtime.GOOS,
+		signInAccount:       qurlapi.SignInAccount,
 	}
 	for _, opt := range options {
 		opt(opts)
@@ -191,9 +194,9 @@ A CRID is a permanent, shareable resource ID — it contains no secret and grant
 no access by itself. Authorized users turn it into a short-lived access link
 with "qurl get" or "qurl share".
 
-Authentication: use ` + "`qurl login`" + ` to enroll this machine. The account API key is
-used only for enrollment and is not stored by qurl. Scripts and CI can set
-QURL_API_KEY for the same one-time bootstrap.`,
+Publish without an account or API key. qurl creates and stores a device identity
+automatically. Use "qurl account setup" to enable recovery and other devices.
+Existing accounts can still use "qurl login" or QURL_API_KEY for enrollment.`,
 		Example: "  qurl publish http://127.0.0.1:3000\n" +
 			"  qurl get " + exampleCRID + "\n" +
 			"  qurl publish https://api.example.com/reports",
@@ -253,6 +256,7 @@ QURL_API_KEY for the same one-time bootstrap.`,
 	})
 
 	cmd.AddCommand(
+		accountCmd(opts),
 		publishCmd(opts),
 		shareCmd(opts),
 		getCmd(opts),
@@ -541,14 +545,19 @@ func (o *globalOpts) apiCredential() (string, error) {
 // everything else goes through newClient.
 func (o *globalOpts) apiClient(key string) (qurlapi.AccountClient, error) {
 	o.warnInsecureEndpoint()
-	return qurlapi.New(&qurlapi.Config{
+	return qurlapi.New(o.accountConfig(key, ""))
+}
+
+func (o *globalOpts) accountConfig(key, owner string) *qurlapi.Config {
+	return &qurlapi.Config{
+		OwnerID:      owner,
 		BaseURL:      o.resolvedEndpoint,
 		APIKey:       key,
 		Version:      o.version,
 		Verbose:      o.verboseLogger(),
 		Sleep:        o.sleep,
 		NewRequestID: o.newRequestID,
-	})
+	}
 }
 
 // registeredAccountBootstrap owns the account-key capability only during one
@@ -561,6 +570,7 @@ type registeredAccountBootstrap struct {
 	identity                          *qurlapi.Identity
 	explicitValidatedAccountAuthority bool
 	enrollmentIdempotencyKey          string
+	warnedAnonymousDevice             bool
 }
 
 type deviceAccountConflictError struct {
@@ -652,6 +662,15 @@ func (b *registeredAccountBootstrap) enrollmentCredential(ctx context.Context, r
 	if strings.TrimSpace(request.AgentID) == "" {
 		return "", errors.New("registered-device enrollment has no durable agent ID")
 	}
+	if b.client == nil && b.opts.resolvedSupervision == connectorstate.RuntimeSupervisionNative {
+		if _, _, err := auth.Resolve(b.opts.lookupEnv); errors.Is(err, auth.ErrNoCredential) {
+			if !b.warnedAnonymousDevice && !b.opts.quiet && b.opts.streams != nil && b.opts.streams.Err != nil {
+				b.opts.printer().Notef("%s", msgAnonymousDevice)
+				b.warnedAnonymousDevice = true
+			}
+			return qurl.AnonymousEnrollmentCredential(ctx, request)
+		}
+	}
 	client, _, _, err := b.load(ctx)
 	if err != nil {
 		return "", err
@@ -680,6 +699,12 @@ func (b *registeredAccountBootstrap) enrollmentCredential(ctx context.Context, r
 
 func (b *registeredAccountBootstrap) recoveryCredential(ctx context.Context) (string, error) {
 	_, key, _, err := b.load(ctx)
+	if err == nil && key == "" {
+		return "", auth.ErrAccountRecoveryState
+	}
+	if errors.Is(err, auth.ErrNoCredential) {
+		return "", auth.ErrAnonymousRecovery
+	}
 	return key, err
 }
 
@@ -699,6 +724,9 @@ func (o *globalOpts) openNativeRegisteredClient(
 	}
 	stateDir, err := o.resolveShareStateDir("")
 	if err != nil {
+		return nil, nil, err
+	}
+	if err := o.requireRuntimeSupervision(stateDir); err != nil {
 		return nil, nil, err
 	}
 	hubBootstrap, err := o.resolveHubBootstrap()

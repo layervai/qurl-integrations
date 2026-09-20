@@ -30,6 +30,10 @@ const (
 var (
 	// ErrNoCredential reports that no API key is configured anywhere.
 	ErrNoCredential = errors.New("cli: no qURL API key configured")
+	// ErrAccountRecoveryState requires a new namespace for browser recovery.
+	ErrAccountRecoveryState = fmt.Errorf("%w: account recovery needs new state", ErrNoCredential)
+	// ErrAnonymousRecovery reports missing authority to recover an existing device.
+	ErrAnonymousRecovery = fmt.Errorf("%w: anonymous device recovery needs linked account or saved state", ErrNoCredential)
 	// ErrInvalidKey reports a configured value that cannot be a qURL API key.
 	ErrInvalidKey = errors.New("cli: the configured value does not look like a qURL API key")
 	// ErrCredentialConflict rejects ambiguous inline and file authority.

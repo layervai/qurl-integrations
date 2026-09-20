@@ -161,3 +161,20 @@ func TestNewRegistered_RestartNeverReplaysRateLimit(t *testing.T) {
 		t.Fatalf("registered restart requests = %d, want one", got)
 	}
 }
+
+func TestRegisteredClientLinksAccountWithDeviceCredential(t *testing.T) {
+	srv := apitest.NewServer(t)
+	srv.Script(http.MethodPost, "/v1/account/link", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer "+registeredAPIState(t).DeviceAPIKey {
+			t.Error("account linking did not use durable device credential")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"owner_id":"device:owner","account_id":"auth0|account"}`))
+	})
+	if err := newRegisteredTestClient(t, srv).LinkAccount(context.Background(), "account-token", "device:owner"); err != nil {
+		t.Fatal(err)
+	}
+	if len(srv.Requests()) != 1 {
+		t.Fatal("registered account-link request did not reach server exactly once")
+	}
+}
