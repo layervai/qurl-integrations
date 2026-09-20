@@ -214,3 +214,14 @@ func TestAccountCommandsRespectOutputAndAccountBoundaries(t *testing.T) {
 		}
 	}
 }
+
+func TestAccountRejectsUnknownSubcommand(t *testing.T) {
+	cmd := accountCmd(&globalOpts{})
+	var rendered bytes.Buffer
+	cmd.SetOut(&rendered)
+	cmd.SetErr(&rendered)
+	cmd.SetArgs([]string{"setupp"})
+	if err := cmd.Execute(); exitcode.FromError(err) != exitcode.Usage {
+		t.Fatalf("unknown subcommand: %v", err)
+	}
+}
