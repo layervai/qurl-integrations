@@ -62,6 +62,13 @@ scripts and pipelines must pass --yes.`,
 			}
 			result, err := client.Delete(cmd.Context(), assessment.Input)
 			if err != nil {
+				// A revoke may commit before protection cleanup returns 503. Only
+				// authoritative read-back permits withdrawing the local route; the
+				// original error still requires the caller to retry protection proof.
+				resource, readErr := client.Resource(cmd.Context(), assessment.Input)
+				if readErr == nil && resource != nil && resource.Status == "revoked" {
+					return errors.Join(err, cleanupDeletedLocalShare(cmd.Context(), opts, assessment.Input))
+				}
 				return err
 			}
 			if result.AlreadyGone {

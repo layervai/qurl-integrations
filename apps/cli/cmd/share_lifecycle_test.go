@@ -3949,3 +3949,59 @@ func TestRestartRetargetServesNewOriginThroughRealConnector(t *testing.T) {
 		t.Fatalf("unexpected resource creation or API requests: %#v", requests)
 	}
 }
+
+// A committed revoke can return 503 while protection cleanup is pending.
+// Keep that failure visible, but never leave a confirmed revoked route desired-on.
+func TestDeletePendingProtectionWithdrawsOnlyConfirmedRevokedShare(t *testing.T) {
+	for _, status := range []string{"revoked", "active", "unavailable"} {
+		t.Run(status, func(t *testing.T) {
+			srv := apitest.NewServer(t)
+			srv.Script(http.MethodDelete, "/v1/resources/"+srv.Key.CRID, func(w http.ResponseWriter, _ *http.Request) {
+				apitest.WriteProblem(t, w, http.StatusServiceUnavailable, "service_unavailable", "Service Unavailable", "Revocation committed; protection update is pending. Retry to confirm.")
+			})
+			srv.Script(http.MethodGet, "/v1/resources/"+srv.Key.CRID, func(w http.ResponseWriter, _ *http.Request) {
+				if status == "unavailable" {
+					w.WriteHeader(http.StatusServiceUnavailable)
+					return
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"resource": map[string]any{
+					"resource_id": srv.Key.ResourceID, "crid": srv.Key.CRID, "type": "tunnel", "status": status,
+					"desired_state": "off", "serving_epoch": 1,
+				}}})
+			})
+			stateDir := connectorStateTestDir(t)
+			t.Setenv("QURL_CONNECTOR_STATE_DIR", stateDir)
+			registry, err := openOwnedTestShareRegistry(stateDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			local := localShareFixture(srv)
+			seedLocalConnectorResourceBinding(t, stateDir, &local)
+			if err := registry.Put(context.Background(), &local); err != nil {
+				t.Fatal(err)
+			}
+			daemon := &recordingShareDaemon{}
+			res := runCLI(t, &runOpts{
+				args:          []string{"--endpoint", srv.URL, "delete", srv.Key.CRID, "--yes"},
+				env:           map[string]string{"QURL_API_KEY": testAPIKey, "QURL_CONNECTOR_STATE_DIR": stateDir},
+				shareRegistry: registry, shareStateDir: stateDir,
+				shareDaemonFactory: func(string, string) shareDaemonController { return daemon },
+			})
+			if res.code == 0 {
+				t.Fatal("pending protection must still fail")
+			}
+			_, err = registry.Get(context.Background(), srv.Key.CRID)
+			if status == "revoked" {
+				if !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("revoked share remains in local registry: %v", err)
+				}
+				if daemon.reloads != 1 || daemon.ensures != 0 {
+					t.Fatalf("expected reload without daemon restart: %+v", daemon)
+				}
+				assertLocalConnectorResourceRetired(t, stateDir, local.ConnectorID)
+			} else if err != nil || daemon.reloads != 0 {
+				t.Fatalf("unconfirmed share changed: err=%v daemon=%+v", err, daemon)
+			}
+		})
+	}
+}
