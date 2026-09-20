@@ -571,10 +571,6 @@ func TestStoppedFileTargetConversionPreservesEveryRegistryRow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// A freshly enrolled owner-bound profile legitimately has no file rows.
-	if changed, err := registry.RetargetStoppedToUnix(ctx, "owner-test", "qurl-file-", "http+unix:///tmp/private.sock"); err != nil || changed != 0 {
-		t.Fatalf("empty file set conversion = %d, %v", changed, err)
-	}
 	for index, id := range []string{"qurl-file-first", "qurl-file-orphan", "local-app"} {
 		binding := testResourceBinding(t, id)
 		binding.CRID = testBindingCRID(t, &binding, apitest.VersionTest)
@@ -768,4 +764,76 @@ func TestRetargetStoppedCrashHelper(t *testing.T) {
 	}
 	fmt.Println("converted")
 	<-time.After(time.Hour)
+}
+
+func TestEmptyPrivateOriginConversionFencesOldAndCurrentWriters(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix origins are unsupported on Windows")
+	}
+	ctx := context.Background()
+	dir := secureStateTestDir(t)
+	if err := EstablishExternalRuntimeMode(ctx, dir); err != nil {
+		t.Fatal(err)
+	}
+	registry, err := openOwnedLocalShareRegistry(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed, err := registry.RetargetStoppedToUnix(ctx, "owner-test", "qurl-file-", "http+unix:///tmp/private.sock"); err != nil || changed != 0 {
+		t.Fatalf("empty conversion=%d %v", changed, err)
+	}
+	snapshot, err := os.ReadFile(filepath.Join(dir, LocalSharesFile)) // #nosec G304 -- private test fixture.
+	if err != nil {
+		t.Fatal(err)
+	}
+	// This is the v2.6.0 top-level schema and its strict decoding rule. There
+	// are no Unix rows yet: only the durable marker can reject this old writer.
+	var old struct {
+		Version int                        `json:"version"`
+		OwnerID string                     `json:"owner_id,omitempty"`
+		Shares  map[string]json.RawMessage `json:"shares"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(snapshot))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&old); err == nil || !strings.Contains(err.Error(), "private_origin_prefix") {
+		t.Fatalf("old empty-registry writer remains compatible: %v", err)
+	}
+	binding := testResourceBinding(t, "qurl-file-first")
+	binding.CRID = testBindingCRID(t, &binding, apitest.VersionTest)
+	row := LocalShare{CRID: binding.CRID, ResourceID: binding.ResourceID, ConnectorID: binding.ConnectorID, ConnectorRoutingID: binding.ConnectorRoutingID, KnockResourceID: binding.KnockResourceID, TargetURL: "http://127.0.0.1:3000", LocalIP: "127.0.0.1", LocalPort: 3000, DesiredState: "on", ServingEpoch: 7}
+	if err := registry.Put(ctx, &row); err == nil {
+		t.Fatal("first TCP file publish bypassed converted prefix")
+	}
+	current, err := os.ReadFile(filepath.Join(dir, LocalSharesFile)) // #nosec G304 -- private test fixture.
+	if err != nil || !bytes.Equal(current, snapshot) {
+		t.Fatal("refused first publish mutated registry")
+	}
+	row.TargetURL, row.LocalIP, row.LocalPort, row.LocalSocketPath = "http+unix:///tmp/private.sock", "", 0, "/tmp/private.sock"
+	if err := registry.Put(ctx, &row); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := registry.SetDesired(ctx, row.ResourceID, "off", 8); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := OpenLocalShareRegistry(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reopened.Retarget(ctx, row.ResourceID, LocalTarget{URL: "http://127.0.0.1:4000", IP: "127.0.0.1", Port: 4000}, 9); err == nil {
+		t.Fatal("higher epoch restored a reusable TCP file target")
+	}
+	row.TargetURL, row.LocalIP, row.LocalPort, row.LocalSocketPath, row.ServingEpoch = "http://127.0.0.1:4000", "127.0.0.1", 4000, "", 9
+	if err := reopened.Put(ctx, &row); err == nil {
+		t.Fatal("higher-epoch publish bypassed private prefix")
+	}
+	stored, err := reopened.Get(ctx, row.ResourceID)
+	if err != nil || stored.CRID != row.CRID || stored.ServingEpoch != 8 || stored.DesiredState != "off" || stored.LocalSocketPath != "/tmp/private.sock" {
+		t.Fatalf("refused target change lost identity/state: %+v %v", stored, err)
+	}
+	if _, err := reopened.RetargetStoppedToUnix(ctx, "owner-test", "other-prefix-", "http+unix:///tmp/private.sock"); err == nil {
+		t.Fatal("converted namespace accepted a second private-origin prefix")
+	}
+	if changed, err := reopened.RetargetStoppedToUnix(ctx, "owner-test", "qurl-file-", "http+unix:///tmp/private.sock"); err != nil || changed != 0 {
+		t.Fatalf("same-prefix retry=%d %v", changed, err)
+	}
 }

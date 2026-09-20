@@ -455,8 +455,14 @@ the daemon IPC endpoint and lifetime lock, and atomically retargets every saved
 row matching the prefix, including stopped shares. It preserves resource IDs,
 qURLs, desired state and serving epochs, makes no network requests, and returns
 `{"changed":N}` (`0` on an unchanged retry or when the selected prefix has no rows).
+Conversion durably reserves one private-origin prefix per namespace even when
+`changed` is zero. Older CLI binaries then refuse this registry, and current
+writers cannot publish or retarget that prefix back to TCP, even at a newer epoch.
 The supervisor owns the exact prefix; it must use the same constant for publishing
 and conversion. An owner-bound profile with no file shares is a valid empty set.
+The origin must be bound inside an owner-only (0700) directory controlled by
+the supervisor, with ancestors other users cannot replace; do not use a socket
+directly under a shared temporary directory.
 The supervisor must pass the same runtime-directory settings to daemon startup
 and conversion so the IPC reservation also excludes older daemon binaries.
 A live or ambiguous daemon at that endpoint blocks conversion. Start the daemon only after conversion succeeds. New daemon binaries

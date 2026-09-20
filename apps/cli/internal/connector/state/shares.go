@@ -74,9 +74,12 @@ type LocalShare struct {
 }
 
 type localSharesState struct {
-	Version int                   `json:"version"`
-	OwnerID string                `json:"owner_id,omitempty"`
-	Shares  map[string]LocalShare `json:"shares"`
+	// PrivateOriginPrefix is set by external conversion even with no shares.
+	// Old strict decoders then refuse writes; current writers keep this prefix Unix-only.
+	PrivateOriginPrefix string                `json:"private_origin_prefix,omitempty"`
+	Version             int                   `json:"version"`
+	OwnerID             string                `json:"owner_id,omitempty"`
+	Shares              map[string]LocalShare `json:"shares"`
 }
 
 // LocalShareRegistry is a crash-safe owner-only registry rooted beside the
@@ -333,6 +336,11 @@ func (r *LocalShareRegistry) RetargetStoppedToUnix(ctx context.Context, owner, p
 		if owner == "" || state.OwnerID != owner {
 			return errors.New("local target conversion account owner does not match")
 		}
+		if state.PrivateOriginPrefix != "" && state.PrivateOriginPrefix != prefix {
+			return errors.New("local target conversion prefix differs from the private origin namespace")
+		}
+		marked := state.PrivateOriginPrefix != ""
+		state.PrivateOriginPrefix = prefix
 		for key := range state.Shares {
 			share := state.Shares[key]
 			if !strings.HasPrefix(share.ConnectorID, prefix) || share.Target() == target {
@@ -346,7 +354,7 @@ func (r *LocalShareRegistry) RetargetStoppedToUnix(ctx context.Context, owner, p
 			state.Shares[key] = share
 			changed++
 		}
-		if changed == 0 {
+		if changed == 0 && marked {
 			return errLocalShareUnchanged
 		}
 		return nil
@@ -603,6 +611,11 @@ func validateLocalSharesState(state localSharesState) error {
 	if len(state.Shares) > 0 && state.OwnerID == "" {
 		return errors.New("local share registry with shares has no account owner")
 	}
+	if state.PrivateOriginPrefix != "" {
+		if err := ValidateLocalRetargetSelector(state.OwnerID, state.PrivateOriginPrefix); err != nil {
+			return err
+		}
+	}
 	crids := map[string]string{}
 	connectorIDs := map[string]string{}
 	for key := range state.Shares {
@@ -612,6 +625,9 @@ func validateLocalSharesState(state localSharesState) error {
 		}
 		if err := validateLocalShare(&share); err != nil {
 			return fmt.Errorf("local share %q: %w", key, err)
+		}
+		if state.PrivateOriginPrefix != "" && strings.HasPrefix(share.ConnectorID, state.PrivateOriginPrefix) && share.LocalSocketPath == "" {
+			return errors.New("private origin shares require Unix transport")
 		}
 		if owner, ok := crids[share.CRID]; ok {
 			return fmt.Errorf("local shares %q and %q have the same CRID", owner, key)
