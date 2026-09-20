@@ -815,6 +815,8 @@ func (o *globalOpts) openNativeExternalRegisteredClient(
 		RefreshMode:                  connectorRefreshModeAuto,
 	}
 	if recovery {
+		// TODO(upstream-contract): Connector resumes pending recovery during
+		// OpenNativeRuntime, before the owner/credential guard reads Handoff.
 		provider := oneShotEnrollmentToken(tokenPath)
 		cfg.EnrollmentCredentialProvider = nil
 		cfg.RecoveryCredentialProvider = func(ctx context.Context) (string, error) {

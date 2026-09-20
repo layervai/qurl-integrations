@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -129,7 +130,7 @@ func TestExternalRecoveryRepairsOnlyExactDeviceAuthorizationFailure(t *testing.T
 				if res.code != 0 || repaired != 1 || calls != 2 {
 					t.Fatalf("recovery exit=%d attempts=%d calls=%d: %s", res.code, repaired, calls, res.stderr.String())
 				}
-			} else if res.code == 0 || repaired != 0 || calls != 1 {
+			} else if res.code != tc.wantExit || repaired != 0 || calls != 1 {
 				t.Fatal("unrelated failure triggered recovery")
 			}
 		})
@@ -138,23 +139,25 @@ func TestExternalRecoveryRepairsOnlyExactDeviceAuthorizationFailure(t *testing.T
 
 func TestExternalRecoveryRejectsMixedAuthority(t *testing.T) {
 	for _, tc := range []struct {
-		name string
-		args []string
-		env  map[string]string
+		name        string
+		args        []string
+		env         map[string]string
+		wantMessage string
 	}{
-		{"enrollment", []string{"--enrollment-token-file", "unused"}, externalLoginEnv()},
-		{"account", nil, externalLoginEnv("QURL_API_KEY", "unused")},
-		{"native supervision", []string{"--supervision", "native"}, externalLoginEnv()},
+		{"enrollment", []string{"--enrollment-token-file", "unused"}, externalLoginEnv(), "cannot be combined"},
+		{"account", nil, externalLoginEnv("QURL_API_KEY", "unused"), "account API key"},
+		{"account file", nil, externalLoginEnv("QURL_API_KEY_FILE", "unused"), "account API key"},
+		{"native supervision", []string{"--supervision", "native"}, externalLoginEnv(), "requires --supervision external"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			called := false
-			args := append([]string{"login", "--recovery-token-file", "unused", "--supervision", "external"}, tc.args...)
+			args := append([]string{"login", "--recovery-token-file", filepath.Join(t.TempDir(), "capability"), "--supervision", "external"}, tc.args...)
 			res := runCLI(t, &runOpts{args: args, env: tc.env, openNativeRuntime: func(context.Context, connectorshare.NativeRuntimeConfig) (registeredNativeRuntime, error) {
 				called = true
 				return nil, errors.New("unexpected runtime")
 			}})
-			if res.code == 0 || called {
-				t.Fatal("mixed recovery authority was accepted")
+			if res.code != exitcode.Usage || called || !strings.Contains(res.stderr.String(), tc.wantMessage) {
+				t.Fatalf("mixed recovery authority exit=%d: %s", res.code, res.stderr.String())
 			}
 		})
 	}
@@ -164,7 +167,9 @@ func TestExternalRecoveryRejectsMixedAuthority(t *testing.T) {
 // before Handoff. Exercise the CLI seam with real persisted cleared-key state;
 // never satisfy the owner guard with a credential that existed before open.
 func TestExternalRecoveryResumesClearedCredentialBeforeOwnerValidation(t *testing.T) {
-	t.Setenv(connectoragentstate.EnvKeyProvider, "")
+	key := bytes.Repeat([]byte{0x73}, 32)
+	t.Setenv(connectoragentstate.EnvKeyProvider, connectoragentstate.KeyProviderLocalKey)
+	t.Setenv(connectoragentstate.EnvLocalKeyFD, localIdentityKeyFD(t, key, 850))
 	dir, err := filepath.EvalSymlinks(connectorStateTestDir(t))
 	if err != nil {
 		t.Fatal(err)
@@ -199,9 +204,13 @@ func TestExternalRecoveryResumesClearedCredentialBeforeOwnerValidation(t *testin
 	if err := os.WriteFile(tokenPath, []byte(secret), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// A fresh inherited descriptor is consumed by the public preflight. The
+	// runtime reader must reuse its cached provider key after that fd closes.
+	fd := localIdentityKeyFD(t, key, 851)
+	t.Setenv(connectoragentstate.EnvLocalKeyFD, fd)
 	srv := apitest.NewServer(t)
 	opened := false
-	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "login", "--recovery-token-file", tokenPath, "--supervision", "external", "-o", "json"}, env: externalLoginEnv(), shareStateDir: dir,
+	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "login", "--recovery-token-file", tokenPath, "--supervision", "external", "-o", "json"}, env: externalLoginEnv(connectoragentstate.EnvLocalKeyFD, fd), shareStateDir: dir,
 		openNativeRuntime: func(ctx context.Context, cfg connectorshare.NativeRuntimeConfig) (registeredNativeRuntime, error) {
 			opened = true
 			reader, err := connectoragentstate.OpenSDKStateReader(cfg.StateDir, "")

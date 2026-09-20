@@ -65,6 +65,9 @@ preserves the device identity and requires an existing external namespace.`,
   qurl login --enrollment-token-file /path/to/enrollment-token --supervision external`,
 		Args: noArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if cmd.Flags().Changed("recovery-token-file") && cmd.Flags().Changed("enrollment-token-file") {
+				return exitcode.UsageError(errors.New("--recovery-token-file cannot be combined with --enrollment-token-file"))
+			}
 			// An explicit token file, even an empty value, selects the
 			// external form: it must never fall through to the key prompt.
 			if cmd.Flags().Changed("recovery-token-file") {
@@ -109,7 +112,6 @@ preserves the device identity and requires an existing external namespace.`,
 	}
 	cmd.Flags().StringVar(&enrollmentTokenFile, "enrollment-token-file", "", "enroll from a one-time enrollment token file written by a supervising app (requires --supervision external)")
 	cmd.Flags().StringVar(&recoveryTokenFile, "recovery-token-file", "", "repair this device credential using a fresh sign-in recovery capability (requires --supervision external)")
-	cmd.MarkFlagsMutuallyExclusive("enrollment-token-file", "recovery-token-file")
 	return cmd
 }
 
