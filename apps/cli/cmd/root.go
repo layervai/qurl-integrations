@@ -778,12 +778,11 @@ func (o *globalOpts) openNativeRegisteredClient(
 // operation: a fresh directory is labeled before anything is written into
 // it, and an already external namespace is accepted as is. The token stays
 // behind the runtime's lazy enrollment provider, so a warm namespace never
-// reads the file. Explicit recovery instead supplies only recovery authority;
-// an enrollment token is never treated as a recovery capability.
+// reads the file, and there is no recovery provider because a one-time token
+// can never become recovery authority.
 func (o *globalOpts) openNativeExternalRegisteredClient(
 	ctx context.Context,
 	tokenPath, stateDir string,
-	recovery bool,
 ) (_ qurlapi.Client, _ *qurlapi.Identity, retErr error) {
 	o.warnInsecureEndpoint()
 	if o.nativeRuntime != nil {
@@ -804,7 +803,7 @@ func (o *globalOpts) openNativeExternalRegisteredClient(
 	if err := connectorstate.EstablishExternalRuntimeMode(ctx, stateDir); err != nil {
 		return nil, nil, err
 	}
-	cfg := connectorshare.NativeRuntimeConfig{
+	nativeRuntime, err := o.openNativeRuntime(ctx, connectorshare.NativeRuntimeConfig{
 		StateDir:                     stateDir,
 		AgentID:                      connectorstate.ConfiguredAgentID(),
 		Hub:                          hubBootstrap,
@@ -813,15 +812,7 @@ func (o *globalOpts) openNativeExternalRegisteredClient(
 		ClientBaseURL:                origin,
 		EnrollmentCredentialProvider: oneShotEnrollmentToken(tokenPath),
 		RefreshMode:                  connectorRefreshModeAuto,
-	}
-	if recovery {
-		provider := oneShotEnrollmentToken(tokenPath)
-		cfg.EnrollmentCredentialProvider = nil
-		cfg.RecoveryCredentialProvider = func(ctx context.Context) (string, error) {
-			return provider(ctx, qurl.AgentEnrollmentCredentialRequest{})
-		}
-	}
-	nativeRuntime, err := o.openNativeRuntime(ctx, cfg)
+	})
 	if err != nil {
 		// Connector provider/envelope failures have no typed sentinel. Keep the
 		// Config fallback for unclassified errors, without relabeling known
@@ -848,15 +839,6 @@ func (o *globalOpts) openNativeExternalRegisteredClient(
 		return nil, nil, err
 	}
 	deviceIdentity, err := client.Me(ctx)
-	client, deviceIdentity, err = repairExplicitDeviceAuthorization(ctx, nativeRuntime, cfg.RecoveryCredentialProvider,
-		func() (qurlapi.Client, error) {
-			recovered, handoffErr := nativeRuntime.Handoff()
-			if handoffErr != nil {
-				return nil, handoffErr
-			}
-			return o.openRegisteredDeviceClient(ctx, origin, recovered)
-		}, client, deviceIdentity, err)
-
 	if err != nil {
 		return nil, nil, err
 	}
@@ -975,28 +957,16 @@ func repairExplicitLoginDeviceAuthorization(
 	deviceIdentity *qurlapi.Identity,
 	requestErr error,
 ) (qurlapi.Client, *qurlapi.Identity, error) {
-	if !bootstrap.explicitValidatedAccountAuthority {
-		return client, deviceIdentity, requestErr
-	}
-	return repairExplicitDeviceAuthorization(ctx, nativeRuntime, bootstrap.recoveryCredential, openDeviceClient, client, deviceIdentity, requestErr)
-}
-
-func repairExplicitDeviceAuthorization(
-	ctx context.Context,
-	nativeRuntime registeredNativeRuntime,
-	provider func(context.Context) (string, error),
-	openDeviceClient func() (qurlapi.Client, error),
-	client qurlapi.Client,
-	deviceIdentity *qurlapi.Identity,
-	requestErr error,
-) (qurlapi.Client, *qurlapi.Identity, error) {
-	// Only explicit login or recovery supplies repair authority. Ordinary warm opens and
-	// enrollment-token login cannot spend recovery authority on a REST failure.
+	// Explicit login already validated this exact account key. If a warm native
+	// open then exposes the exact registered-device invalid-key response, allow
+	// the connector to spend that authority once and retry this request once.
+	// Ordinary warm commands never enter this branch, even if Hub recovery had
+	// to load bootstrap authority while opening the native runtime.
 	var apiErr *qurlapi.Error
-	if requestErr != nil && provider != nil && errors.As(requestErr, &apiErr) &&
+	if requestErr != nil && bootstrap.explicitValidatedAccountAuthority && errors.As(requestErr, &apiErr) &&
 		apiErr.StatusCode == http.StatusUnauthorized && apiErr.Code == "api_key_invalid" {
 		if repairErr := nativeRuntime.RecoverCredentialAfterDeviceAuthorizationFailure(
-			ctx, apiErr.StatusCode, apiErr.Code, provider,
+			ctx, apiErr.StatusCode, apiErr.Code, bootstrap.recoveryCredential,
 		); repairErr != nil {
 			return nil, nil, repairErr
 		}

@@ -445,9 +445,9 @@ qurl daemon retarget-local --supervision external -o json <<'JSON'
 JSON
 ```
 
-Private Unix origins and external `--enrollment-token-file` /
-`--recovery-token-file` handoff require Unix. Windows rejects those paths;
-ordinary account-API-key login and credential recovery are separate flows.
+Private Unix origins and external `--enrollment-token-file` handoff require
+Unix. Windows rejects those paths; ordinary account-API-key login remains
+available.
 
 The command uses the normal profile/state-directory settings. It requires an
 existing externally supervised namespace and matching durable owner, reserves

@@ -19,6 +19,20 @@ import (
 	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 )
 
+// externalLoginEnv is the supervisor's process contract for an external
+// enrollment: a local-key sealed namespace and no account credential. extra
+// holds key/value pairs layered on top of it.
+func externalLoginEnv(extra ...string) map[string]string {
+	env := map[string]string{
+		connectoragentstate.EnvKeyProvider: connectoragentstate.KeyProviderLocalKey,
+		connectoragentstate.EnvLocalKeyFD:  "3",
+	}
+	for i := 0; i+1 < len(extra); i += 2 {
+		env[extra[i]] = extra[i+1]
+	}
+	return env
+}
+
 // refuseNativeRuntime fails the test if a rejected external login reaches the
 // native runtime at all.
 func refuseNativeRuntime(t *testing.T) func(context.Context, connectorshare.NativeRuntimeConfig) (registeredNativeRuntime, error) {

@@ -31,10 +31,10 @@ import (
 // one-time enrollment token itself: no account key is read from anywhere, and
 // the namespace is labeled externally supervised as part of the enrollment.
 func loginCmd(opts *globalOpts) *cobra.Command {
-	var enrollmentTokenFile, recoveryTokenFile string
+	var enrollmentTokenFile string
 	cmd := &cobra.Command{
 		Use:   "login",
-		Short: "Enroll this machine or repair its device credential",
+		Short: "Enroll this machine with a qURL account key or enrollment token",
 		Long: `Enroll this machine for future qURL commands.
 
 The key is read from standard input when piped, or typed at a hidden prompt
@@ -55,11 +55,7 @@ enrollment token itself and pass it with --enrollment-token-file under
 --supervision external. qurl then reads the token file once, only while
 enrolling, and reads no account key from the environment or standard input.
 The state directory must be sealed: LAYERV_KEY_PROVIDER=local-key with the
-wrapping key on the inherited LAYERV_LOCAL_KEY_FD descriptor.
-
-To repair a revoked credential in that same namespace, the supervisor uses
---recovery-token-file with a fresh sign-in recovery capability. This mode
-preserves the device identity and requires an existing external namespace.`,
+wrapping key on the inherited LAYERV_LOCAL_KEY_FD descriptor.`,
 		Example: `  qurl login
   op read op://team/qurl/key | qurl login
   qurl login --enrollment-token-file /path/to/enrollment-token --supervision external`,
@@ -67,9 +63,6 @@ preserves the device identity and requires an existing external namespace.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			// An explicit token file, even an empty value, selects the
 			// external form: it must never fall through to the key prompt.
-			if cmd.Flags().Changed("recovery-token-file") {
-				return runExternalRecovery(cmd.Context(), opts, recoveryTokenFile)
-			}
 			if cmd.Flags().Changed("enrollment-token-file") {
 				return runExternalLogin(cmd.Context(), opts, enrollmentTokenFile)
 			}
@@ -108,8 +101,6 @@ preserves the device identity and requires an existing external namespace.`,
 		},
 	}
 	cmd.Flags().StringVar(&enrollmentTokenFile, "enrollment-token-file", "", "enroll from a one-time enrollment token file written by a supervising app (requires --supervision external)")
-	cmd.Flags().StringVar(&recoveryTokenFile, "recovery-token-file", "", "repair this device credential using a fresh sign-in recovery capability (requires --supervision external)")
-	cmd.MarkFlagsMutuallyExclusive("enrollment-token-file", "recovery-token-file")
 	return cmd
 }
 
@@ -134,7 +125,7 @@ func runExternalLogin(ctx context.Context, opts *globalOpts, tokenPath string) e
 	if err != nil {
 		return err
 	}
-	client, deviceIdentity, err := opts.openNativeExternalRegisteredClient(ctx, tokenPath, stateDir, false)
+	client, deviceIdentity, err := opts.openNativeExternalRegisteredClient(ctx, tokenPath, stateDir)
 	if err != nil {
 		return err
 	}
@@ -162,10 +153,10 @@ func accountKeyConfigured(lookup func(string) (string, bool)) bool {
 func requireLocalKeyProvider(lookup func(string) (string, bool)) error {
 	provider, _ := lookup(connectoragentstate.EnvKeyProvider)
 	if strings.ToLower(strings.TrimSpace(provider)) != connectoragentstate.KeyProviderLocalKey {
-		return fmt.Errorf("external token login requires %s=%s", connectoragentstate.EnvKeyProvider, connectoragentstate.KeyProviderLocalKey)
+		return fmt.Errorf("--enrollment-token-file requires %s=%s", connectoragentstate.EnvKeyProvider, connectoragentstate.KeyProviderLocalKey)
 	}
 	if fd, _ := lookup(connectoragentstate.EnvLocalKeyFD); !validLocalKeyDescriptor(fd) {
-		return fmt.Errorf("external token login requires %s to name an inherited descriptor in bare decimal form (3 through %d, no leading zeros)", connectoragentstate.EnvLocalKeyFD, maxLocalKeyDescriptor)
+		return fmt.Errorf("--enrollment-token-file requires %s to name an inherited descriptor in bare decimal form (3 through %d, no leading zeros)", connectoragentstate.EnvLocalKeyFD, maxLocalKeyDescriptor)
 	}
 	return nil
 }
@@ -229,37 +220,4 @@ func readSecret(opts *globalOpts, prompt string) (string, error) {
 		return "", exitcode.UsageError(errors.New(msgNoKeyProvided))
 	}
 	return secret, nil
-}
-
-// runExternalRecovery is an intentional supervisor operation. It never grants
-// enrollment authority or initializes a missing device namespace.
-func runExternalRecovery(ctx context.Context, opts *globalOpts, tokenPath string) error {
-	if opts.resolvedSupervision != connectorstate.RuntimeSupervisionExternal {
-		return exitcode.UsageError(errors.New("--recovery-token-file requires --supervision external"))
-	}
-	if err := auth.ValidateExternalEnrollmentTokenPath(tokenPath); err != nil {
-		return exitcode.UsageError(fmt.Errorf("--recovery-token-file: %w", err))
-	}
-	if accountKeyConfigured(opts.lookupEnv) {
-		return exitcode.UsageError(errors.New("--recovery-token-file cannot be combined with an account API key"))
-	}
-	if err := requireLocalKeyProvider(opts.lookupEnv); err != nil {
-		return exitcode.UsageError(err)
-	}
-	dir, err := opts.resolveShareStateDir("")
-	if err != nil {
-		return err
-	}
-	if err := connectorstate.RequireRuntimeSupervision(dir, connectorstate.RuntimeSupervisionExternal); err != nil {
-		return err
-	}
-	if _, err := readLocalDeviceIdentity(ctx, dir); err != nil {
-		return err
-	}
-	client, identity, err := opts.openNativeExternalRegisteredClient(ctx, tokenPath, dir, true)
-	if err != nil {
-		return err
-	}
-	opts.registeredClient, opts.registeredIdentity = client, identity
-	return opts.printer().Recovered(identity)
 }
