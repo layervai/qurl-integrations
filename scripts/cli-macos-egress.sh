@@ -9,10 +9,10 @@ case ${1:-} in
       echo '::error::protected macOS WireGuard configuration is missing' >&2
       exit 1
     }
-    brew install wireguard-tools wireguard-go
     sudo install -d -m 0700 /var/run/qurl-ci-egress
     printf '%s\n' "$QURL_JOURNEY_WIREGUARD_CONFIG" | sudo tee "$config" >/dev/null
     unset QURL_JOURNEY_WIREGUARD_CONFIG
+    brew install wireguard-tools wireguard-go
     sudo chmod 0600 "$config"
     sudo env "PATH=$PATH" wg-quick up "$config"
     # Teardown needs the routing configuration, but not the private key.
