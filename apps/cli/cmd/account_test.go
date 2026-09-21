@@ -14,13 +14,15 @@ import (
 
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/auth"
+	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/exitcode"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/output"
 
 	"github.com/layervai/qurl-go/qurl"
 )
 
 func TestAnonymousBootstrapNeedsNoAccountCredential(t *testing.T) {
-	opts := &globalOpts{lookupEnv: func(string) (string, bool) { return "", false }}
+	opts := &globalOpts{resolvedSupervision: connectorstate.RuntimeSupervisionNative, lookupEnv: func(string) (string, bool) { return "", false }}
 	bootstrap := newRegisteredAccountBootstrap(opts, nil, "", nil)
 	request := qurl.AgentEnrollmentCredentialRequest{AgentID: "anonymous-device", PublicKeyB64: base64.StdEncoding.EncodeToString([]byte(strings.Repeat("a", 32)))}
 	got, err := bootstrap.enrollmentCredential(context.Background(), request)
@@ -30,6 +32,14 @@ func TestAnonymousBootstrapNeedsNoAccountCredential(t *testing.T) {
 	want, err := qurl.AnonymousEnrollmentCredential(context.Background(), request)
 	if err != nil || got != want || bootstrap.client != nil {
 		t.Fatal("anonymous enrollment unexpectedly needed an account client")
+	}
+	for _, mode := range []connectorstate.RuntimeSupervision{connectorstate.RuntimeSupervisionExternal, ""} {
+		opts.resolvedSupervision = mode
+		bootstrap = newRegisteredAccountBootstrap(opts, nil, "", nil)
+		got, err = bootstrap.enrollmentCredential(context.Background(), request)
+		if got != "" || !errors.Is(err, auth.ErrNoCredential) {
+			t.Fatalf("supervision %q silently enrolled: %q, %v", mode, got, err)
+		}
 	}
 }
 
@@ -70,6 +80,9 @@ func TestSelectAccountOwner(t *testing.T) {
 		{[]string{"auth0|one"}, "device:foreign", ""},
 	} {
 		got, err := selectAccountOwner(tc.owners, tc.requested)
+		if err != nil && exitcode.FromError(err) != exitcode.Usage {
+			t.Fatalf("owner selection exit = %d", exitcode.FromError(err))
+		}
 		if got != tc.want || (err != nil) != (tc.want == "") {
 			t.Fatalf("select %v / %q = %q, %v", tc.owners, tc.requested, got, err)
 		}
@@ -199,5 +212,16 @@ func TestAccountCommandsRespectOutputAndAccountBoundaries(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestAccountRejectsUnknownSubcommand(t *testing.T) {
+	cmd := accountCmd(&globalOpts{})
+	var rendered bytes.Buffer
+	cmd.SetOut(&rendered)
+	cmd.SetErr(&rendered)
+	cmd.SetArgs([]string{"setupp"})
+	if err := cmd.Execute(); exitcode.FromError(err) != exitcode.Usage {
+		t.Fatalf("unknown subcommand: %v", err)
 	}
 }

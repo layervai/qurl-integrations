@@ -1308,7 +1308,6 @@ type RateLimits struct {
 	ListPerMinute    int `json:"list_per_minute"`
 	ResolvePerMinute int `json:"resolve_per_minute"`
 	MaxActiveQURLs   int `json:"max_active_qurls"`
-	MaxTokensPerQURL int `json:"max_tokens_per_qurl"`
 }
 
 // UsageInfo holds usage statistics.

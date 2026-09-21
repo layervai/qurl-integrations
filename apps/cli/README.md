@@ -715,7 +715,10 @@ from a script, use `qurl get <CRID> --file <path>`.
 | Flag | Description |
 |------|-------------|
 | `--ttl <duration>` | Requested link lifetime in whole seconds (e.g. `5m`, `1h`). The service may grant less; a shorter grant is reported on stderr, never silent. Sub-second or negative values are refused rather than rounded. |
+| `--session-duration <duration>` | Lifetime of each admitted session, e.g. `5m` or `1h`. Zero or omission uses the service default. The service enforces resource limits. |
 | `--yes` | Proceed without confirmation, including sending a test CRID to production |
+
+Link expiry and session duration are separate: an expired link does not end an already admitted session.
 
 Production share verification needs no extra settings. Sandbox and custom
 deployments use the settings described under `qurl get`.
@@ -746,6 +749,7 @@ it, then opens or downloads — nothing is ever acted on unverified:
 |------|-------------|
 | `--file <path>` | Download to this path instead of opening a browser (`-` = raw bytes to stdout) |
 | `--force` | Allow `--file` to replace an existing file |
+| `--session-duration <duration>` | Lifetime of each admitted session, e.g. `5m` or `1h`. Zero or omission uses the service default. The service enforces resource limits. |
 | `--yes` | Proceed without confirmation, including sending a test CRID to production |
 
 When stdout is not a terminal, get never opens a browser: pass `--file`,

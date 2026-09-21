@@ -83,6 +83,8 @@ type ShareOptions struct {
 	// TTLSeconds asks for the minted link's lifetime; 0 leaves the server
 	// default in effect. The server may clamp the value it grants.
 	TTLSeconds int
+	// SessionDurationSeconds bounds an admitted session independently of link TTL.
+	SessionDurationSeconds int
 }
 
 // ListOptions carries the optional list parameters; zero values are omitted
@@ -295,8 +297,11 @@ func NewRegistered(ctx context.Context, cfg *Config, store qurl.AgentStateStore)
 // Share delegates to the SDK's CRID-based ShareResource.
 func (c *client) Share(ctx context.Context, id string, opts ShareOptions) (*ShareLink, error) {
 	var sdkOpts *qurl.ShareResourceOptions
-	if opts.TTLSeconds > 0 {
-		sdkOpts = &qurl.ShareResourceOptions{TTL: time.Duration(opts.TTLSeconds) * time.Second}
+	if opts.TTLSeconds != 0 || opts.SessionDurationSeconds != 0 {
+		sdkOpts = &qurl.ShareResourceOptions{
+			TTL:             time.Duration(opts.TTLSeconds) * time.Second,
+			SessionDuration: time.Duration(opts.SessionDurationSeconds) * time.Second,
+		}
 	}
 	access, err := c.sdk.ShareResource(ctx, id, sdkOpts)
 	if err != nil {

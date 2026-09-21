@@ -250,6 +250,8 @@ func runAnonymousExternalLogin(ctx context.Context, opts *globalOpts) error {
 		return err
 	}
 	opts.warnInsecureEndpoint()
+	opts.anonymousExternalLogin = true
+	defer func() { opts.anonymousExternalLogin = false }()
 	client, identity, err := opts.openNativeRegisteredClient(ctx, nil, "", nil)
 	if err != nil {
 		return err

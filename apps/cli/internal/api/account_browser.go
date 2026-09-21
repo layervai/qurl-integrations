@@ -27,7 +27,7 @@ const accountCallback = "http://" + accountCallbackAddress + "/callback"
 // prompt=login consent. The qURL audience accepts the scopes below; account
 // linking requires qurl:agent as well as verified account identity.
 func SignInAccount(ctx context.Context, cfg *Config, openBrowser func(context.Context, string) error) (_ string, retErr error) {
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Minute)
 	defer cancel()
 	defer func() {
 		if retErr != nil && errors.Is(ctx.Err(), context.Canceled) {
@@ -47,7 +47,7 @@ func SignInAccount(ctx context.Context, cfg *Config, openBrowser func(context.Co
 	}
 	response, err := client.DoOnce(request)
 	if err != nil {
-		return "", errors.New(msgAccountLoadFailed)
+		return "", ErrAccountLoad
 	}
 	var settings struct {
 		Domain   string `json:"domain"`
@@ -57,7 +57,7 @@ func SignInAccount(ctx context.Context, cfg *Config, openBrowser func(context.Co
 	decodeErr := json.NewDecoder(io.LimitReader(response.Body, 16384)).Decode(&settings)
 	_ = response.Body.Close()
 	if response.StatusCode != http.StatusOK || decodeErr != nil || settings.ClientID == "" || settings.Audience == "" || settings.Domain == "" || strings.ContainsAny(settings.Domain, "/@?#\\") {
-		return "", errors.New(msgAccountUnavailable)
+		return "", ErrAccountUnavailable
 	}
 	nonce := make([]byte, 64)
 	if _, err := rand.Read(nonce); err != nil {
@@ -68,7 +68,7 @@ func SignInAccount(ctx context.Context, cfg *Config, openBrowser func(context.Co
 	challenge := sha256.Sum256([]byte(verifier))
 	listener, err := (&net.ListenConfig{}).Listen(ctx, "tcp4", accountCallbackAddress)
 	if err != nil {
-		return "", errors.New(msgAccountPortBusy)
+		return "", ErrAccountPort
 	}
 	defer func() { _ = listener.Close() }()
 	codes := make(chan string, 1)
@@ -89,10 +89,10 @@ func SignInAccount(ctx context.Context, cfg *Config, openBrowser func(context.Co
 	select {
 	case code = <-codes:
 	case <-ctx.Done():
-		return "", errors.New(msgAccountTimedOut)
+		return "", fmt.Errorf("%s: %w", msgAccountTimedOut, ctx.Err())
 	}
 	if code == "" {
-		return "", errors.New(msgAccountCanceled)
+		return "", ErrAccountDenied
 	}
 	return exchangeAccountCode(ctx, client, settings.Domain, settings.ClientID, code, verifier)
 }
@@ -106,7 +106,7 @@ func exchangeAccountCode(ctx context.Context, client *transport, domain, clientI
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	response, err := client.DoOnce(request)
 	if err != nil {
-		return "", errors.New(msgAccountExchangeFailed)
+		return "", ErrAccountExchange
 	}
 	defer func() { _ = response.Body.Close() }()
 	var token struct {
@@ -114,7 +114,7 @@ func exchangeAccountCode(ctx context.Context, client *transport, domain, clientI
 		TokenType   string `json:"token_type"`
 	}
 	if response.StatusCode != http.StatusOK || json.NewDecoder(io.LimitReader(response.Body, 32768)).Decode(&token) != nil || token.AccessToken == "" || !strings.EqualFold(token.TokenType, "Bearer") {
-		return "", errors.New(msgAccountExchangeFailed)
+		return "", ErrAccountExchange
 	}
 	return token.AccessToken, nil
 }
@@ -149,7 +149,7 @@ func accountCallbackHandler(state string, codes chan<- string) http.Handler {
 func validateAccountEndpoint(endpoint string) error {
 	base, err := url.Parse(endpoint)
 	if err != nil || base.Host == "" || (base.Scheme != "https" && (base.Scheme != "http" || (base.Hostname() != "localhost" && !net.ParseIP(base.Hostname()).IsLoopback()))) {
-		return errors.New(msgAccountHTTPSRequired)
+		return ErrAccountEndpoint
 	}
 	return nil
 }

@@ -36,6 +36,12 @@ var cliSentinels = map[string]struct {
 	err  error
 	code int
 }{
+	"qurlapi.ErrAccountLoad":        {qurlapi.ErrAccountLoad, Unavailable},
+	"qurlapi.ErrAccountUnavailable": {qurlapi.ErrAccountUnavailable, Unavailable},
+	"qurlapi.ErrAccountExchange":    {qurlapi.ErrAccountExchange, Unavailable},
+	"qurlapi.ErrAccountPort":        {qurlapi.ErrAccountPort, Config},
+	"qurlapi.ErrAccountEndpoint":    {qurlapi.ErrAccountEndpoint, Config},
+	"qurlapi.ErrAccountDenied":      {qurlapi.ErrAccountDenied, Auth},
 	"auth.ErrAccountRecoveryState":  {auth.ErrAccountRecoveryState, Auth},
 	"auth.ErrAnonymousRecovery":     {auth.ErrAnonymousRecovery, Auth},
 	"auth.ErrNoCredential":          {auth.ErrNoCredential, Auth},

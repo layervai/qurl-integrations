@@ -223,6 +223,10 @@ func FromError(err error) int {
 // their exit codes.
 func cliSentinelCode(err error) (int, bool) {
 	switch {
+	case errors.Is(err, qurlapi.ErrAccountPort), errors.Is(err, qurlapi.ErrAccountEndpoint):
+		return Config, true
+	case errors.Is(err, qurlapi.ErrAccountDenied):
+		return Auth, true
 	case errors.Is(err, cridux.ErrTestIDOnProduction):
 		return Usage, true
 	case errors.Is(err, cridux.ErrUnusableID):
@@ -242,7 +246,8 @@ func cliSentinelCode(err error) (int, bool) {
 		// Expiry that survived the one automatic refresh joins the
 		// platform's gone family: the link no longer leads to content.
 		return NotFound, true
-	case errors.Is(err, consume.ErrLinkUnavailable):
+	case errors.Is(err, consume.ErrLinkUnavailable), errors.Is(err, qurlapi.ErrAccountLoad),
+		errors.Is(err, qurlapi.ErrAccountUnavailable), errors.Is(err, qurlapi.ErrAccountExchange):
 		// The URL-bearing request or transport cause is intentionally removed,
 		// but this remains a retryable reachability failure.
 		return Unavailable, true

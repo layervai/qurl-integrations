@@ -25,7 +25,9 @@
  *    in CI logs, since silently-resumed resource leaks are the exact
  *    class this module exists to close. Transient single failures are
  *    harmless: every nonced mint carries its own expiry, so stragglers
- *    lapse on their own.
+ *    lapse on their own. This best-effort rule applies only to source resources.
+ *    Tracked shared-tunnel children are revoked separately; a child failure
+ *    fails cleanup after all entries are attempted. Neither confirms native CLOSED.
  *
  *  - trackedDiscordMessages(): the same idea for the Discord suites,
  *    whose leaked "resources" are bot messages piling up in the shared
@@ -63,6 +65,9 @@ export interface QurlResourceTracker {
    * mint fails only its own assertions, not also a spurious
    * `revokeLink(undefined)` warning in afterAll. */
   track(resourceId: string | undefined): void;
+  /** Record each returned child before assertions. Child failures fail cleanup;
+   * source revocation does not cascade to shared-tunnel children. */
+  trackChild(qurlId: string): void;
   /** Revoke a tracked resource NOW, with the tracker's credentials, and
    * drop it from the afterAll ledger on success (so cleanup doesn't
    * re-revoke it and warn about the expected not-ok); on failure it
@@ -76,7 +81,8 @@ export interface QurlResourceTracker {
    * qurl.revokeLink directly — those must not touch the ledger. */
   revoke(resourceId: string): Promise<boolean>;
   /** Best-effort revocation of everything still tracked — see the module
-   * header for the warn-but-never-throw contract. Wire up as
+   * header for source cleanup. Child revocation failures throw after all
+   * tracked entries are attempted. Wire up as
    * `afterAll(() => tracked.revokeAll())`. */
   revokeAll(): Promise<void>;
 }
@@ -89,6 +95,7 @@ export function trackedQurlResources(env: {
   // target_url to one resource_id (link-lifecycle's same-target test),
   // and one revoke per resource is enough.
   const ids = new Set<string>();
+  const children = new Set<string>();
   // Shared by revoke() and revokeAll() so EVERY successful revoke —
   // test-time or cleanup-time — drops the id from the ledger.
   // Cleanup uses one DELETE per resource; test-time revokes confirm the update.
@@ -106,8 +113,23 @@ export function trackedQurlResources(env: {
     track(resourceId) {
       if (resourceId) ids.add(resourceId);
     },
+    trackChild(qurlId) {
+      children.add(qurlId);
+    },
     revoke,
     async revokeAll() {
+      const failedChildren: string[] = [];
+      for (const id of children) {
+        try {
+          await qurl.revokeChild(env.MINT_API_URL, env.QURL_API_KEY, id);
+          children.delete(id);
+        } catch (error) {
+          const status = (error as { status?: unknown } | null)?.status;
+          const detail = typeof status === 'number' && Number.isInteger(status)
+            ? `HTTP ${status}` : error instanceof TypeError ? 'TypeError' : 'Error';
+          failedChildren.push(`${id} (${detail})`);
+        }
+      }
       // Deliberately serial WITH a short pause between requests
       // (symmetric with deleteAll): this is the best-effort path, and a
       // burst — even a serial back-to-back one, ~50-60 DELETEs after the
@@ -130,6 +152,9 @@ export function trackedQurlResources(env: {
         } catch (err) {
           console.warn(`afterAll: best-effort revoke of ${id} threw: ${String(err)}`);
         }
+      }
+      if (failedChildren.length) {
+        throw new Error(`Child cleanup failed for: ${failedChildren.join(', ')}`);
       }
     },
   };

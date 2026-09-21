@@ -210,11 +210,15 @@ func (s *Store) nowOrDefault() time.Time {
 // on a "not-found"-style condition, 409 for "already exists",
 // 503 for transport).
 type Error struct {
+	cause      error
 	StatusCode int
 	Code       string
 	Title      string
 	Detail     string
 }
+
+// Unwrap preserves the SDK cause for cancellation classification.
+func (e *Error) Unwrap() error { return e.cause }
 
 // Error returns a human-readable message. Mirrors the old
 // AdminError.Error() format so log/grep across the cutover sees
@@ -305,6 +309,7 @@ func ddbToError(op string, err error) error {
 			Code:       "conditional_check_failed",
 			Title:      op,
 			Detail:     err.Error(),
+			cause:      err,
 		}
 	}
 	return &Error{
@@ -312,6 +317,7 @@ func ddbToError(op string, err error) error {
 		Code:       "ddb_error",
 		Title:      op,
 		Detail:     err.Error(),
+		cause:      err,
 	}
 }
 

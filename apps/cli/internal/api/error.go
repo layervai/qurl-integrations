@@ -1,6 +1,7 @@
 package qurlapi
 
 import (
+	"errors"
 	"fmt"
 	"strconv"
 )
@@ -81,7 +82,7 @@ const (
 	msgAccountUnavailable    = "account sign-in is temporarily unavailable"
 	msgAccountPortBusy       = "account sign-in needs local port 8765; close the other sign-in and retry"
 	msgAccountBrowserFailed  = "open account sign-in: %w"
-	msgAccountTimedOut       = "account sign-in timed out or was canceled; run the command again"
+	msgAccountTimedOut       = "account sign-in timed out after 15 minutes; run the command again"
 	msgAccountCanceled       = "account sign-in was canceled"
 	msgAccountExchangeFailed = "account sign-in could not complete; run the command again"
 	msgAccountHTTPSRequired  = "account sign-in requires a trusted HTTPS endpoint"
@@ -91,3 +92,13 @@ const (
 
 const msgAccountCallbackInvalid = "Invalid sign-in response."
 const msgAccountCallbackComplete = "Return to qURL to finish sign-in. You can close this tab."
+
+// Account sign-in failures retain stable exit classes for scripts.
+var (
+	ErrAccountLoad        = errors.New(msgAccountLoadFailed)
+	ErrAccountUnavailable = errors.New(msgAccountUnavailable)
+	ErrAccountPort        = errors.New(msgAccountPortBusy)
+	ErrAccountDenied      = errors.New(msgAccountCanceled)
+	ErrAccountExchange    = errors.New(msgAccountExchangeFailed)
+	ErrAccountEndpoint    = errors.New(msgAccountHTTPSRequired)
+)
