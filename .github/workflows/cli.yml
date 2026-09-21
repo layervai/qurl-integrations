@@ -149,6 +149,7 @@ jobs:
               - '.github/workflows/release-please.yml'
               - 'scripts/build-cli-customer-journey-artifacts.sh'
               - 'scripts/cli-macos-egress.sh'
+              - 'scripts/test-cli-macos-egress.sh'
               - 'scripts/qurl-cli-ci-credentials.py'
               - 'scripts/remove-sensitive-tree.sh'
               - 'scripts/test-qurl-cli-ci-credentials.py'
@@ -476,6 +477,7 @@ jobs:
           shellcheck \
             scripts/build-cli-customer-journey-artifacts.sh \
             scripts/cli-macos-egress.sh \
+            scripts/test-cli-macos-egress.sh \
             scripts/check-exact-cli-release-gate.sh \
             scripts/notify-qurl-cli-soak-status.sh \
             scripts/qurl-cli-soak-watchdog.sh \
