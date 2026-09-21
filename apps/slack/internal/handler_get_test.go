@@ -18,6 +18,7 @@ import (
 	"github.com/layervai/qurl-integrations/apps/slack/internal/slackaudit"
 	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
 	"github.com/layervai/qurl-integrations/shared/client"
+	"github.com/layervai/qurl-integrations/shared/observability"
 )
 
 const (
@@ -356,6 +357,10 @@ func TestHandleGet_InBotRateLimitDeniesAfterLimit(t *testing.T) {
 	})
 	h := newAdminTestHandler(t, ts)
 	enableAdminStoreRateLimit(t, h, 1)
+	logs := &capturedLogs{}
+	previous := slog.Default()
+	slog.SetDefault(slog.New(observability.NewRedactingJSONHandler(logs, nil)))
+	t.Cleanup(func() { h.Wait(); slog.SetDefault(previous) })
 
 	_, _, first := newAdminSlashInvoker(t, h).invokeAdminAsync("get $prod-db", testAdminTeamID, testAdminUserID)
 	if !strings.Contains(first, "https://qurl.link/allowed") {
@@ -368,6 +373,19 @@ func TestHandleGet_InBotRateLimitDeniesAfterLimit(t *testing.T) {
 	}
 	if got := mintHits.Load(); got != 1 {
 		t.Fatalf("mint hits = %d, want only the under-limit call to reach qURL", got)
+	}
+	h.Wait()
+	for _, line := range strings.Split(strings.TrimSpace(logs.String()), "\n") {
+		if line == "" {
+			continue
+		}
+		var record map[string]any
+		if err := json.Unmarshal([]byte(line), &record); err != nil {
+			t.Fatal(err)
+		}
+		if record["level"] == "ERROR" {
+			t.Fatalf("normal quota denial logged as outage: %s", line)
+		}
 	}
 }
 

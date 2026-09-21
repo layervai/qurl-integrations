@@ -282,14 +282,14 @@ func (h *Handler) purgeResourceBindings(ctx context.Context, log *slog.Logger, t
 	}
 	channels, err := h.cfg.AdminStore.ChannelsForResource(ctx, teamID, resourceID)
 	if err != nil {
-		log.Warn("revoke: channel-binding sweep failed; an orphaned alias may remain",
+		log.Log(ctx, storeErrorLogLevel(err, slog.LevelWarn), "revoke: channel-binding sweep failed; an orphaned alias may remain",
 			"error", err, "team_id", teamID, "resource_id", resourceID)
 		return
 	}
 	for _, channelID := range channels {
 		unbound, err := h.cfg.AdminStore.PurgeResourceFromChannel(ctx, teamID, channelID, resourceID)
 		if err != nil {
-			log.Warn("revoke: failed to purge resource from a channel; an orphaned alias may remain",
+			log.Log(ctx, storeErrorLogLevel(err, slog.LevelWarn), "revoke: failed to purge resource from a channel; an orphaned alias may remain",
 				"error", err, "team_id", teamID, "channel_id", channelID, "resource_id", resourceID)
 			continue
 		}

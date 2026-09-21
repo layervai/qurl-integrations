@@ -165,7 +165,7 @@ func (h *Handler) exposedChannelsForEdit(ctx context.Context, log *slog.Logger, 
 	}
 	found, err := h.cfg.AdminStore.ChannelsForResource(ctx, meta.TeamID, meta.ResourceID)
 	if err != nil {
-		log.Warn("list edit: channel enumeration failed — pre-filling current channel only",
+		log.Log(ctx, storeErrorLogLevel(err, slog.LevelWarn), "list edit: channel enumeration failed — pre-filling current channel only",
 			"error", err, "team_id", meta.TeamID, "resource_id", meta.ResourceID)
 		return channels
 	}
@@ -621,7 +621,7 @@ func (h *Handler) reconcileChannelExposure(ctx context.Context, log *slog.Logger
 func (h *Handler) channelHasAliasForResource(ctx context.Context, log *slog.Logger, teamID, channelID, resourceID string) bool {
 	entries, err := h.cfg.AdminStore.GetChannelPolicy(ctx, teamID, channelID)
 	if err != nil {
-		log.Warn("tunnel edit: post-revoke alias re-check failed; reporting channel as revoked",
+		log.Log(ctx, storeErrorLogLevel(err, slog.LevelWarn), "tunnel edit: post-revoke alias re-check failed; reporting channel as revoked",
 			"error", err, "channel_id", channelID, "resource_id", resourceID)
 		return false
 	}

@@ -65,7 +65,7 @@ func (h *Handler) publishAgentHome(ctx context.Context, log *slog.Logger, teamID
 	if h.cfg.AgentStore != nil {
 		var err error
 		if entries, err = h.cfg.AgentStore.ListAuditEntries(ctx, teamID, userID, agentHomeMaxEntries); err != nil {
-			log.Warn("agent: list audit entries for App Home failed", "error", err)
+			log.Log(ctx, storeErrorLogLevel(err, slog.LevelWarn), "agent: list audit entries for App Home failed", "error", err)
 		}
 	}
 	if err := h.cfg.AppHomePublish(ctx, teamID, enterpriseID, userID, buildAgentHomeView(entries)); err != nil {

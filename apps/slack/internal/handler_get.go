@@ -545,7 +545,7 @@ func (h *Handler) mintForResource(ctx context.Context, log *slog.Logger, args *g
 	// slash-command throttle, not by spending the user's mint quota on typos.)
 	ok, retry, err := h.cfg.AdminStore.CheckRateLimit(ctx, args.userID, args.teamID)
 	if err != nil {
-		log.Warn("get: rate-limit check failed", "error", err, "team_id", args.teamID, "user_id", args.userID)
+		log.Log(ctx, storeErrorLogLevel(err, slog.LevelWarn), "get: rate-limit check failed", "error", err, "team_id", args.teamID, "user_id", args.userID)
 		return getResult{}, &userError{msg: rateLimitErrorMessage(err)}
 	}
 	if !ok {
@@ -686,7 +686,7 @@ func (h *Handler) mintForResource(ctx context.Context, log *slog.Logger, args *g
 func (h *Handler) resolveTokenForGet(ctx context.Context, log *slog.Logger, teamID, channelID, userID, token string) (string, error) {
 	resourceID, found, err := h.cfg.AdminStore.LookupChannelAlias(ctx, teamID, channelID, token)
 	if err != nil {
-		log.Warn("get: alias lookup failed", "error", err, "team_id", teamID, "channel_id", channelID, "token", token)
+		log.Log(ctx, storeErrorLogLevel(err, slog.LevelWarn), "get: alias lookup failed", "error", err, "team_id", teamID, "channel_id", channelID, "token", token)
 		return "", &userError{msg: serviceUnreachableMessage}
 	}
 	if found {
@@ -863,7 +863,7 @@ func (h *Handler) allowedResourceIDsForGet(ctx context.Context, log *slog.Logger
 	}
 	allowed, err := h.cfg.AdminStore.AllowedResourceIDsForChannel(ctx, teamID, channelID)
 	if err != nil {
-		log.Warn("get: allowed-resource fetch failed", "error", err, "team_id", teamID, "channel_id", channelID)
+		log.Log(ctx, storeErrorLogLevel(err, slog.LevelWarn), "get: allowed-resource fetch failed", "error", err, "team_id", teamID, "channel_id", channelID)
 		return nil, &userError{msg: serviceUnreachableMessage}
 	}
 	return allowed, nil

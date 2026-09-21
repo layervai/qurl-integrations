@@ -379,7 +379,7 @@ func (h *Handler) workspaceAgentEnabled(ctx context.Context, log *slog.Logger, t
 	}
 	enabled, set, err := h.cfg.AdminStore.AgentEnabledFor(ctx, teamID)
 	if err != nil {
-		log.Warn("agent: per-workspace toggle read failed; treating as disabled", "team_id", teamID, "error", err)
+		log.Log(ctx, storeErrorLogLevel(err, slog.LevelWarn), "agent: per-workspace toggle read failed; treating as disabled", "team_id", teamID, "error", err)
 		return false
 	}
 	if set {
@@ -422,7 +422,7 @@ func (h *Handler) agentTurnLimited(ctx context.Context, log *slog.Logger, env *s
 func (h *Handler) overTurnLimit(ctx context.Context, log *slog.Logger, teamID, scope string, limit int) bool {
 	count, err := h.cfg.AgentStore.BumpTurnCount(ctx, teamID, scope, agentTurnRateWindow)
 	if err != nil {
-		log.Warn(agentTurnRateCounterFailOpenMsg, "scope", scope, "team_id", teamID, "error", err)
+		log.Log(ctx, storeErrorLogLevel(err, slog.LevelWarn), agentTurnRateCounterFailOpenMsg, "scope", scope, "team_id", teamID, "error", err)
 		return false
 	}
 	if count > int64(limit) {

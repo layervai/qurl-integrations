@@ -222,7 +222,7 @@ func (h *Handler) listCallerCanEdit(ctx context.Context, log *slog.Logger, teamI
 	defer cancel()
 	isAdmin, _, err := h.cfg.AdminStore.CheckAdmin(gateCtx, teamID, userID)
 	if err != nil {
-		log.Debug("list: admin check for Edit button failed — hiding Edit", "error", err, "team_id", teamID)
+		log.Log(ctx, storeErrorLogLevel(err, slog.LevelDebug), "list: admin check for Edit button failed — hiding Edit", "error", err, "team_id", teamID)
 		return false
 	}
 	return isAdmin
@@ -243,7 +243,7 @@ func (h *Handler) listCallerIsAdmin(ctx context.Context, log *slog.Logger, teamI
 	defer cancel()
 	isAdmin, _, err := h.cfg.AdminStore.CheckAdmin(gateCtx, teamID, userID)
 	if err != nil {
-		log.Debug("list: admin check failed — using non-admin copy", "purpose", purpose, "error", err, "team_id", teamID)
+		log.Log(ctx, storeErrorLogLevel(err, slog.LevelDebug), "list: admin check failed — using non-admin copy", "purpose", purpose, "error", err, "team_id", teamID)
 		return false
 	}
 	return isAdmin
@@ -383,7 +383,7 @@ func (h *Handler) listChannelScope(ctx context.Context, log *slog.Logger, respon
 	}
 	allowed, err := h.cfg.AdminStore.AllowedResourceIDsForChannel(ctx, teamID, channelID)
 	if err != nil {
-		log.Warn("list: channel allow-set fetch failed — failing closed", "error", err, "team_id", teamID, "channel_id", channelID)
+		log.Log(ctx, storeErrorLogLevel(err, slog.LevelWarn), "list: channel allow-set fetch failed — failing closed", "error", err, "team_id", teamID, "channel_id", channelID)
 		_ = h.postResponse(log, responseURL, ":warning: "+serviceUnreachableMessage)
 		return nil, false
 	}
@@ -1032,7 +1032,7 @@ func (h *Handler) channelAliasesByResourceID(ctx context.Context, log *slog.Logg
 	}
 	entries, err := h.cfg.AdminStore.GetChannelPolicy(ctx, teamID, channelID)
 	if err != nil {
-		log.Debug("list: channel-policy fetch for alias display failed — rendering slug-only",
+		log.Log(ctx, storeErrorLogLevel(err, slog.LevelDebug), "list: channel-policy fetch for alias display failed — rendering slug-only",
 			"error", err, "team_id", teamID, "channel_id", channelID)
 		return nil
 	}
