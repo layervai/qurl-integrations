@@ -947,7 +947,9 @@ func mapMintError(log *slog.Logger, err error) error {
 	}
 	// No APIError → wrapped network/dial failure. Same retry-friendly
 	// disposition as 5xx above.
-	log.Warn("get: mint failed", "error", err)
+	// TODO(upstream-contract): infra#964 selects ERROR plus the client transport
+	// wrapper in error; WARN would hide connectivity failures from its alarm.
+	log.Error("get: mint failed", "error", err)
 	return &userError{msg: serviceUnreachableMessage}
 }
 
