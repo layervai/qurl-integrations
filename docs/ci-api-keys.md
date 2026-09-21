@@ -50,5 +50,6 @@ both protocols use one IP; `/32` admission and the customer tests are unchanged.
 The setup step consumes the configuration, removes its private key from disk after
 installation, and the final cleanup removes the peer and routing configuration.
 The workflow serializes only the macOS lane because the gateway has one peer.
-Provisioning and rotation are in the
-[NHP gateway runbook](https://github.com/layervai/nhp/blob/main/docs/runbooks/cli-macos-ci-egress.md).
+The CI operator provisions the gateway and installs the protected environment
+secret before enabling this lane. Update that secret whenever the gateway keys
+change; never copy the configuration into logs, source files, or artifacts.
