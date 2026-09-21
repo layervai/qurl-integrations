@@ -283,7 +283,7 @@ func TestLoginsProviderGateImpliesTheNamespaceIsSealed(t *testing.T) {
 				connectoragentstate.EnvKeyProvider: provider,
 				connectoragentstate.EnvLocalKeyFD:  "3",
 			}
-			if err := requireLocalKeyProvider(func(k string) (string, bool) { v, ok := env[k]; return v, ok }); err != nil {
+			if err := requireLocalKeyProvider(func(k string) (string, bool) { v, ok := env[k]; return v, ok }, "--enrollment-token-file"); err != nil {
 				t.Fatalf("login refused %q: %v", provider, err)
 			}
 			t.Setenv(connectoragentstate.EnvKeyProvider, provider)
@@ -297,7 +297,7 @@ func TestLoginsProviderGateImpliesTheNamespaceIsSealed(t *testing.T) {
 		connectoragentstate.EnvKeyProvider: connectoragentstate.KeyProviderFile,
 		connectoragentstate.EnvLocalKeyFD:  "3",
 	}
-	if err := requireLocalKeyProvider(func(k string) (string, bool) { v, ok := env[k]; return v, ok }); err == nil {
+	if err := requireLocalKeyProvider(func(k string) (string, bool) { v, ok := env[k]; return v, ok }, "--enrollment-token-file"); err == nil {
 		t.Fatal("login accepted the plaintext file provider for a token-file enrollment")
 	}
 }

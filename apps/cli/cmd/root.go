@@ -108,12 +108,13 @@ type globalOpts struct {
 	// openRegisteredClient is the login/bootstrap seam. Production uses the
 	// native NHP registration path; command tests inject a platform-only
 	// client because their mock server does not implement NHP.
-	openRegisteredClient func(context.Context, qurlapi.AccountClient, string, *qurlapi.Identity) (qurlapi.Client, *qurlapi.Identity, error)
-	openNativeRuntime    func(context.Context, connectorshare.NativeRuntimeConfig) (registeredNativeRuntime, error)
-	registeredClient     qurlapi.Client
-	registeredIdentity   *qurlapi.Identity
-	nativeRuntime        registeredNativeRuntime
-	warnedCleartextAuth  bool
+	openRegisteredClient   func(context.Context, qurlapi.AccountClient, string, *qurlapi.Identity) (qurlapi.Client, *qurlapi.Identity, error)
+	openNativeRuntime      func(context.Context, connectorshare.NativeRuntimeConfig) (registeredNativeRuntime, error)
+	registeredClient       qurlapi.Client
+	registeredIdentity     *qurlapi.Identity
+	nativeRuntime          registeredNativeRuntime
+	anonymousExternalLogin bool
+	warnedCleartextAuth    bool
 
 	// Resolved in PersistentPreRunE.
 	resolved           bool
@@ -257,6 +258,7 @@ Existing accounts can still use "qurl login" or QURL_API_KEY for enrollment.`,
 
 	cmd.AddCommand(
 		accountCmd(opts),
+		requestCmd(opts),
 		publishCmd(opts),
 		shareCmd(opts),
 		getCmd(opts),
@@ -662,7 +664,7 @@ func (b *registeredAccountBootstrap) enrollmentCredential(ctx context.Context, r
 	if strings.TrimSpace(request.AgentID) == "" {
 		return "", errors.New("registered-device enrollment has no durable agent ID")
 	}
-	if b.client == nil && b.opts.resolvedSupervision == connectorstate.RuntimeSupervisionNative {
+	if b.client == nil && (b.opts.resolvedSupervision == connectorstate.RuntimeSupervisionNative || b.opts.anonymousExternalLogin) {
 		if _, _, err := auth.Resolve(b.opts.lookupEnv); errors.Is(err, auth.ErrNoCredential) {
 			if !b.warnedAnonymousDevice && !b.opts.quiet && b.opts.streams != nil && b.opts.streams.Err != nil {
 				b.opts.printer().Notef("%s", msgAnonymousDevice)
