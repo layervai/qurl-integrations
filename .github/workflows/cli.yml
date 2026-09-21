@@ -148,6 +148,7 @@ jobs:
               - '.github/workflows/qurl-cli-customer-cleanup.yml'
               - '.github/workflows/release-please.yml'
               - 'scripts/build-cli-customer-journey-artifacts.sh'
+              - 'scripts/cli-macos-egress.sh'
               - 'scripts/qurl-cli-ci-credentials.py'
               - 'scripts/remove-sensitive-tree.sh'
               - 'scripts/test-qurl-cli-ci-credentials.py'
@@ -474,6 +475,7 @@ jobs:
         run: |
           shellcheck \
             scripts/build-cli-customer-journey-artifacts.sh \
+            scripts/cli-macos-egress.sh \
             scripts/check-exact-cli-release-gate.sh \
             scripts/notify-qurl-cli-soak-status.sh \
             scripts/qurl-cli-soak-watchdog.sh \
@@ -772,6 +774,10 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: ${{ matrix.timeout_minutes }}
     environment: cli-customer-journey
+    # One WireGuard peer serves the protected macOS lane. Other lanes stay independent.
+    concurrency:
+      group: ${{ matrix.lane == 'macos' && 'cli-macos-egress' || format('cli-journey-{0}-{1}-{2}', github.run_id, github.run_attempt, matrix.lane_id) }}
+      cancel-in-progress: false
     permissions:
       contents: read
     env:
@@ -909,6 +915,12 @@ jobs:
           "QURL_CLI_SANDBOX_BINARY=$qurl" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "QURL_CLI_SANDBOX_QURL_BINARY=$qurl" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "QURL_CUSTOMER_JOURNEY_TEST=$harness" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Set the macOS public egress
+        if: runner.os == 'macOS'
+        env:
+          QURL_JOURNEY_WIREGUARD_CONFIG: ${{ secrets.QURL_JOURNEY_WIREGUARD_CONFIG }}
+        run: scripts/cli-macos-egress.sh up
 
       # The reusable automation key exists only in this trusted setup step. The journey
       # receives two isolated expiring customer keys: one for its normal
@@ -1152,6 +1164,10 @@ jobs:
           if ($env:QURL_CLI_SANDBOX_INSTALL_DIR -ne $expected) { throw 'Windows customer install directory is not the exact run-owned path' }
           if (Test-Path -LiteralPath $expected) { Remove-Item -LiteralPath $expected -Recurse -Force }
           if (Test-Path -LiteralPath $expected) { throw 'Windows customer install directory remains after the service fence' }
+
+      - name: Remove the macOS network peer
+        if: always() && runner.os == 'macOS'
+        run: scripts/cli-macos-egress.sh down
 
   journey-cleanup:
     name: cli / customer journey cleanup
