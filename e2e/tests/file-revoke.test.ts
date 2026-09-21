@@ -10,8 +10,9 @@
  * confirming the qURL resource is marked revoked via getResourceStatus.
  *
  * Source DELETE is checked only through canonical source status. It does not
- * cascade to the separately minted shared-tunnel children (#1552). Child cleanup
- * and exact native session close require the recorded owner/operator process.
+ * cascade to the separately minted shared-tunnel children (#1552). Cleanup
+ * revokes each tracked child separately; exact native CLOSED still requires
+ * the recorded owner/operator reconciliation.
  *
  * Without this coverage, a regression in the revoke API for
  * connector-uploaded resources would ship silently (URL-mint revoke
@@ -100,6 +101,7 @@ describe('File Revoke', () => {
       expiresAt,
       oneTimeUse: true,
     });
+    tracked.trackChild(minted.qurl_id);
 
     // View through the REAL recipient path: qurl.link → NHP knock → tunnel view.
     // #1111 decommissioned the legacy fileviewer host, so only a real browser
@@ -150,10 +152,12 @@ describe('File Revoke', () => {
       expiresAt,
       oneTimeUse: true,
     });
+    tracked.trackChild(mintedA.qurl_id);
     const mintedB = await qurl.mintConnectorView(env.UPLOAD_API_URL, upload.resource_id, env.QURL_API_KEY, {
       expiresAt,
       oneTimeUse: true,
     });
+    tracked.trackChild(mintedB.qurl_id);
     // Each mint MUST yield its own distinct qurl.link, or the two viewers below
     // would just be re-driving the same one-time link (and the second would 404).
     expect(mintedA.qurl_link).not.toBe(mintedB.qurl_link);
@@ -236,6 +240,7 @@ describe('File Revoke', () => {
       expiresAt,
       oneTimeUse: true,
     });
+    tracked.trackChild(minted.qurl_id);
 
     const first = await viewViaQurlLink(minted.qurl_link, { ownership: { resource_id: upload.resource_id, qurl_id: minted.qurl_id, expires_at: minted.expires_at } });
     expect(first.status).toBe(200);
