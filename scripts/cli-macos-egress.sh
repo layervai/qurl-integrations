@@ -12,13 +12,15 @@ case ${1:-} in
     sudo install -d -m 0700 /var/run/qurl-ci-egress
     printf '%s\n' "$QURL_JOURNEY_WIREGUARD_CONFIG" | sudo tee "$config" >/dev/null
     unset QURL_JOURNEY_WIREGUARD_CONFIG
-    brew install wireguard-tools wireguard-go
     sudo chmod 0600 "$config"
+    # Remove the private key even when package setup or tunnel startup fails.
+    trap 'sudo sed -i "" "/^PrivateKey = /d" "$config"' EXIT
+    brew install wireguard-tools wireguard-go
     sudo env "PATH=$PATH" wg-quick up "$config"
     # Teardown needs the routing configuration, but not the private key.
     sudo sed -i '' '/^PrivateKey = /d' "$config"
     expected=$(sudo awk '/^Endpoint = / {split($3, endpoint, ":"); print endpoint[1]}' "$config")
-    actual=$(curl --fail --silent --show-error --max-time 15 https://checkip.amazonaws.com)
+    actual=$(curl --fail --silent --show-error --retry 2 --max-time 15 https://checkip.amazonaws.com)
     [[ -n "$expected" && "$actual" == "$expected" ]] || {
       echo '::error::macOS traffic did not use the configured CI gateway' >&2
       exit 1
@@ -29,6 +31,9 @@ case ${1:-} in
     if sudo test -f "$config"; then
       result=0
       sudo env "PATH=$PATH" wg-quick down "$config" || result=$?
+      # Retain routing information if teardown fails so cleanup can be retried.
+      sudo sed -i '' '/^PrivateKey = /d' "$config"
+      ((result == 0)) || exit "$result"
       sudo rm -f "$config"
       sudo rmdir /var/run/qurl-ci-egress
       exit "$result"
