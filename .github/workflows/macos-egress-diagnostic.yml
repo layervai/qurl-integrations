@@ -1,0 +1,46 @@
+name: macOS egress diagnostic
+on:
+  push:
+    branches: [test/macos-egress-diagnostic]
+permissions: {}
+jobs:
+  egress:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15-intel, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 5
+    steps:
+      - name: Compare UDP and TCP public addresses
+        shell: bash
+        run: |
+          python3 - <<'PYTHON'
+          import ipaddress, json, secrets, socket, struct, time, urllib.request
+          for sample in range(5):
+              transaction = secrets.token_bytes(12)
+              packet = struct.pack("!HHI", 1, 0, 0x2112A442) + transaction
+              with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp:
+                  udp.settimeout(10)
+                  udp.sendto(packet, ("stun.l.google.com", 19302))
+                  response, _ = udp.recvfrom(2048)
+              if response[:2] != b"\x01\x01" or response[8:20] != transaction:
+                  raise RuntimeError("invalid STUN reply")
+              address = None
+              offset = 20
+              while offset + 4 <= len(response):
+                  kind, length = struct.unpack("!HH", response[offset:offset + 4])
+                  value = response[offset + 4:offset + 4 + length]
+                  if kind in (1, 0x20) and len(value) >= 8 and value[1] == 1:
+                      raw = int.from_bytes(value[4:8], "big")
+                      address = str(ipaddress.IPv4Address(raw ^ (0x2112A442 if kind == 0x20 else 0)))
+                      if kind == 0x20:
+                          break
+                  offset += 4 + ((length + 3) & ~3)
+              if not address:
+                  raise RuntimeError("STUN reply has no IPv4 address")
+              with urllib.request.urlopen("https://api.ipify.org", timeout=10) as response:
+                  tcp = str(ipaddress.IPv4Address(response.read().decode().strip()))
+              print(json.dumps({"sample": sample, "udp_ip": address, "tcp_ip": tcp, "same_ip": address == tcp}), flush=True)
+              time.sleep(2)
+          PYTHON
