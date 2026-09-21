@@ -12,6 +12,7 @@ import (
 
 	slackoauth "github.com/layervai/qurl-integrations/apps/slack/internal/oauth"
 	"github.com/layervai/qurl-integrations/apps/slack/internal/slackaudit"
+	"github.com/layervai/qurl-integrations/shared/auth"
 	"github.com/layervai/qurl-integrations/shared/client"
 )
 
@@ -728,7 +729,7 @@ func (h *Handler) resolveTokenForGet(ctx context.Context, log *slog.Logger, team
 	slugResourceID, slugErr := h.resolveTunnelSlugAliasTarget(ctx, teamID, token)
 	if slugErr != nil {
 		if !errors.Is(slugErr, errTunnelSlugNotFound) {
-			log.Warn("get: tunnel-slug fallback lookup failed", "error", slugErr, "team_id", teamID, "slug", token)
+			log.Log(ctx, storeErrorLogLevel(slugErr, slog.LevelWarn), "get: tunnel-slug fallback lookup failed", "error", slugErr, "team_id", teamID, "slug", token)
 			return "", &userError{msg: serviceUnreachableMessage}
 		}
 		aliasResourceID, aliasFound, aliasErr := h.resolveListedResourceAliasForGet(ctx, log, teamID, channelID, userID, token, allowedSet)
@@ -772,7 +773,7 @@ func (h *Handler) resolveListedResourceAliasForGet(ctx context.Context, log *slo
 	}
 	resources, aliasErr := h.lookupListedResourceAliasesForGet(ctx, log, teamID, token)
 	if aliasErr != nil {
-		log.Warn("get: resource-alias fallback lookup failed", "error", aliasErr, "team_id", teamID, "alias", token)
+		log.Log(ctx, storeErrorLogLevel(aliasErr, slog.LevelWarn), "get: resource-alias fallback lookup failed", "error", aliasErr, "team_id", teamID, "alias", token)
 		return "", false, &userError{msg: serviceUnreachableMessage}
 	}
 	if len(resources) == 0 {
@@ -803,6 +804,9 @@ func (h *Handler) resolveListedResourceAliasForGet(ctx context.Context, log *slo
 func (h *Handler) lookupListedResourceAliasesForGet(ctx context.Context, log *slog.Logger, teamID, alias string) ([]client.Resource, error) {
 	c, err := h.authenticatedClient(ctx, teamID)
 	if err != nil {
+		if !errors.Is(err, auth.ErrWorkspaceNotConfigured) {
+			err = fmt.Errorf("%w: %w", errCredentialLookup, err)
+		}
 		return nil, err
 	}
 	page, err := c.ListResources(ctx, client.ListResourcesInput{Limit: listResourcesScanLimit})
