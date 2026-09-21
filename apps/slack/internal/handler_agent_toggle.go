@@ -79,7 +79,7 @@ func (h *Handler) handleAgentToggle(w http.ResponseWriter, values url.Values) {
 func (h *Handler) agentToggleStatus(ctx context.Context, teamID string) string {
 	enabled, set, err := h.cfg.AdminStore.AgentEnabledFor(ctx, teamID)
 	if err != nil {
-		slog.Warn("agent toggle: status read failed", "team_id", teamID, "error", err)
+		slog.Log(ctx, storeErrorLogLevel(ctx, err, slog.LevelWarn), "agent toggle: status read failed", "team_id", teamID, "error", err)
 		return "Couldn't read the conversation-mode setting right now. Please try again."
 	}
 	if !set {

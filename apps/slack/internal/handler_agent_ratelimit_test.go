@@ -168,8 +168,8 @@ func TestAgentTurnLimit_FailOpenLogContract(t *testing.T) {
 	if rec["msg"] != infraFilterFailOpenMsg {
 		t.Fatalf("msg = %v, want %q", rec["msg"], infraFilterFailOpenMsg)
 	}
-	if rec["level"] != "WARN" {
-		t.Fatalf("level = %v, want WARN", rec["level"])
+	if rec["level"] != "ERROR" {
+		t.Fatalf("level = %v, want ERROR for typed DDB failure", rec["level"])
 	}
 	if rec["scope"] != "team" {
 		t.Fatalf("scope = %v, want team", rec["scope"])

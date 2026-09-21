@@ -160,6 +160,9 @@ const agentTurnRateCounterFailOpenMsg = "agent: turn-rate counter failed; allowi
 // agentTurnRateCounterFailOpenMsg), so splitting sent-from-suppressed across two
 // strings would also make total demand require summing two filters. Both problems
 // go away by keeping one msg and putting the outcome in notice_posted.
+// TODO(upstream-contract): qurl-integrations-infra#1388 freezes this exact msg,
+// boolean files_field_present, and numeric files_visible for both emitters below.
+// Change them only with the CloudWatch filter and its AWS match verification.
 const agentUnsupportedMediaMsg = "agent: unsupported media"
 
 // agentAckReaction is the glanceable "working on it" emoji the agent adds to the
@@ -376,7 +379,7 @@ func (h *Handler) workspaceAgentEnabled(ctx context.Context, log *slog.Logger, t
 	}
 	enabled, set, err := h.cfg.AdminStore.AgentEnabledFor(ctx, teamID)
 	if err != nil {
-		log.Warn("agent: per-workspace toggle read failed; treating as disabled", "team_id", teamID, "error", err)
+		log.Log(ctx, storeErrorLogLevel(ctx, err, slog.LevelWarn), "agent: per-workspace toggle read failed; treating as disabled", "team_id", teamID, "error", err)
 		return false
 	}
 	if set {
@@ -419,7 +422,7 @@ func (h *Handler) agentTurnLimited(ctx context.Context, log *slog.Logger, env *s
 func (h *Handler) overTurnLimit(ctx context.Context, log *slog.Logger, teamID, scope string, limit int) bool {
 	count, err := h.cfg.AgentStore.BumpTurnCount(ctx, teamID, scope, agentTurnRateWindow)
 	if err != nil {
-		log.Warn(agentTurnRateCounterFailOpenMsg, "scope", scope, "team_id", teamID, "error", err)
+		log.Log(ctx, storeErrorLogLevel(ctx, err, slog.LevelWarn), agentTurnRateCounterFailOpenMsg, "scope", scope, "team_id", teamID, "error", err)
 		return false
 	}
 	if count > int64(limit) {
