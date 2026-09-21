@@ -144,3 +144,23 @@ test('a failed revoke stays tracked for the sweep to retry', async () => {
     warnSpy.mockRestore();
   }
 });
+
+test('child cleanup deduplicates, continues on failure, fails the hook and retains only failures', async () => {
+  const childMock = qurl.revokeChild as jest.MockedFunction<typeof qurl.revokeChild>;
+  childMock.mockReset();
+  childMock.mockRejectedValueOnce(new Error('refused')).mockResolvedValue(undefined);
+  const tracked = trackedQurlResources(env);
+  tracked.trackChild('q_first');
+  tracked.trackChild('q_first');
+  tracked.trackChild('q_second');
+  tracked.track('source');
+  await expect(tracked.revokeAll()).rejects.toThrow('Child cleanup failed for: q_first');
+  expect(childMock.mock.calls).toEqual([
+    [env.MINT_API_URL, env.QURL_API_KEY, 'q_first'],
+    [env.MINT_API_URL, env.QURL_API_KEY, 'q_second'],
+  ]);
+  expect(revokeLinkMock).toHaveBeenCalledWith(env.MINT_API_URL, env.QURL_API_KEY, 'source', { confirmPending: false });
+  childMock.mockClear();
+  await expect(tracked.revokeAll()).resolves.toBeUndefined();
+  expect(childMock.mock.calls).toEqual([[env.MINT_API_URL, env.QURL_API_KEY, 'q_first']]);
+});

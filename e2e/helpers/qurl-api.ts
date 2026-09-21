@@ -414,6 +414,24 @@ async function getQurlResource(
   return resource;
 }
 
+/** Revoke only a child minted by this test, never its shared tunnel parent.
+ * TODO(upstream-contract): GET /v1/qurls/{child} returns its canonical parent;
+ * child DELETE enforces that parent binding and repeated revocation succeeds.
+ * This confirms API revocation, not native session CLOSED. */
+export async function revokeChild(managementUrl: string, apiKey: string, qurlId: string): Promise<void> {
+  if (!/^q_[a-zA-Z0-9]+$/.test(qurlId)) throw new TypeError('Child cleanup requires a qurl_id');
+  const parent = await getQurlResource(managementUrl, apiKey, qurlId);
+  if (!parent.resource_id) throw new Error('Child cleanup requires a canonical parent');
+  const url = new URL(managementUrl);
+  url.pathname = `/v1/resources/${encodeURIComponent(parent.resource_id)}/qurls/${encodeURIComponent(qurlId)}`;
+  const res = await fetchWithTransientRetry(url, {
+    method: 'DELETE',
+    headers: { Authorization: `Bearer ${apiKey}` },
+  }, { maxAttempts: 1 });
+  await res.body?.cancel().catch(() => {});
+  if (res.status !== 204) throw new Error(`Child cleanup did not confirm revocation: ${res.status}`);
+}
+
 /** Get one qURL token's status from its parent resource response. The id must
  * be a qurl_id; use getResourceStatus for an opaque public resource_id.
  * TODO(upstream-contract): layervai/qurl-service#1233 tracks the bounded qURL
