@@ -160,6 +160,9 @@ const agentTurnRateCounterFailOpenMsg = "agent: turn-rate counter failed; allowi
 // agentTurnRateCounterFailOpenMsg), so splitting sent-from-suppressed across two
 // strings would also make total demand require summing two filters. Both problems
 // go away by keeping one msg and putting the outcome in notice_posted.
+// TODO(upstream-contract): qurl-integrations-infra#1388 freezes this exact msg,
+// boolean files_field_present, and numeric files_visible for both emitters below.
+// Change them only with the CloudWatch filter and its AWS match verification.
 const agentUnsupportedMediaMsg = "agent: unsupported media"
 
 // agentAckReaction is the glanceable "working on it" emoji the agent adds to the
