@@ -427,9 +427,11 @@ export async function revokeChild(managementUrl: string, apiKey: string, qurlId:
   const res = await fetchWithTransientRetry(url, {
     method: 'DELETE',
     headers: { Authorization: `Bearer ${apiKey}` },
-  }, { maxAttempts: 1 });
+  });
   await res.body?.cancel().catch(() => {});
-  if (res.status !== 204) throw new Error(`Child cleanup did not confirm revocation: ${res.status}`);
+  if (res.status !== 204) {
+    throw Object.assign(new Error(`Child cleanup did not confirm revocation: ${res.status}`), { status: res.status });
+  }
 }
 
 /** Get one qURL token's status from its parent resource response. The id must

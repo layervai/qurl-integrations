@@ -25,7 +25,9 @@
  *    in CI logs, since silently-resumed resource leaks are the exact
  *    class this module exists to close. Transient single failures are
  *    harmless: every nonced mint carries its own expiry, so stragglers
- *    lapse on their own.
+ *    lapse on their own. This best-effort rule applies only to source resources.
+ *    Tracked shared-tunnel children are revoked separately; a child failure
+ *    fails cleanup after all entries are attempted. Neither confirms native CLOSED.
  *
  *  - trackedDiscordMessages(): the same idea for the Discord suites,
  *    whose leaked "resources" are bot messages piling up in the shared
@@ -121,8 +123,11 @@ export function trackedQurlResources(env: {
         try {
           await qurl.revokeChild(env.MINT_API_URL, env.QURL_API_KEY, id);
           children.delete(id);
-        } catch {
-          failedChildren.push(id);
+        } catch (error) {
+          const status = (error as { status?: unknown } | null)?.status;
+          const detail = typeof status === 'number' && Number.isInteger(status)
+            ? `HTTP ${status}` : error instanceof TypeError ? 'TypeError' : 'Error';
+          failedChildren.push(`${id} (${detail})`);
         }
       }
       // Deliberately serial WITH a short pause between requests
