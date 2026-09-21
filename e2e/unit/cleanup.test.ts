@@ -154,7 +154,7 @@ test('child cleanup deduplicates, continues on failure, fails the hook and retai
   tracked.trackChild('q_first');
   tracked.trackChild('q_second');
   tracked.track('source');
-  await expect(tracked.revokeAll()).rejects.toThrow('Child cleanup failed for: q_first (HTTP 403)');
+  await expect(tracked.revokeAll()).rejects.toThrow(/^Child cleanup failed for: q_first \(HTTP 403\)$/);
   expect(childMock.mock.calls).toEqual([
     [env.MINT_API_URL, env.QURL_API_KEY, 'q_first'],
     [env.MINT_API_URL, env.QURL_API_KEY, 'q_second'],
