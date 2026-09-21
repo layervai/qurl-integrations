@@ -546,7 +546,7 @@ func (h *Handler) mintForResource(ctx context.Context, log *slog.Logger, args *g
 	// slash-command throttle, not by spending the user's mint quota on typos.)
 	ok, retry, err := h.cfg.AdminStore.CheckRateLimit(ctx, args.userID, args.teamID)
 	if err != nil {
-		log.Log(ctx, storeErrorLogLevel(err, slog.LevelWarn), "get: rate-limit check failed", "error", err, "team_id", args.teamID, "user_id", args.userID)
+		log.Log(ctx, storeErrorLogLevel(ctx, err, slog.LevelWarn), "get: rate-limit check failed", "error", err, "team_id", args.teamID, "user_id", args.userID)
 		return getResult{}, &userError{msg: rateLimitErrorMessage(err)}
 	}
 	if !ok {
@@ -573,7 +573,7 @@ func (h *Handler) mintForResource(ctx context.Context, log *slog.Logger, args *g
 
 	out, err := c.Create(ctx, input)
 	if err != nil {
-		return getResult{}, mapMintError(log, err)
+		return getResult{}, mapMintError(ctx, log, err)
 	}
 	// Never deliver a mint response naming a different resource from the
 	// one authorized in this channel. This checks the API response identity;
@@ -687,7 +687,7 @@ func (h *Handler) mintForResource(ctx context.Context, log *slog.Logger, args *g
 func (h *Handler) resolveTokenForGet(ctx context.Context, log *slog.Logger, teamID, channelID, userID, token string) (string, error) {
 	resourceID, found, err := h.cfg.AdminStore.LookupChannelAlias(ctx, teamID, channelID, token)
 	if err != nil {
-		log.Log(ctx, storeErrorLogLevel(err, slog.LevelWarn), "get: alias lookup failed", "error", err, "team_id", teamID, "channel_id", channelID, "token", token)
+		log.Log(ctx, storeErrorLogLevel(ctx, err, slog.LevelWarn), "get: alias lookup failed", "error", err, "team_id", teamID, "channel_id", channelID, "token", token)
 		return "", &userError{msg: serviceUnreachableMessage}
 	}
 	if found {
@@ -729,7 +729,7 @@ func (h *Handler) resolveTokenForGet(ctx context.Context, log *slog.Logger, team
 	slugResourceID, slugErr := h.resolveTunnelSlugAliasTarget(ctx, teamID, token)
 	if slugErr != nil {
 		if !errors.Is(slugErr, errTunnelSlugNotFound) {
-			log.Log(ctx, storeErrorLogLevel(slugErr, slog.LevelWarn), "get: tunnel-slug fallback lookup failed", "error", slugErr, "team_id", teamID, "slug", token)
+			log.Log(ctx, storeErrorLogLevel(ctx, slugErr, slog.LevelWarn), "get: tunnel-slug fallback lookup failed", "error", slugErr, "team_id", teamID, "slug", token)
 			return "", &userError{msg: serviceUnreachableMessage}
 		}
 		aliasResourceID, aliasFound, aliasErr := h.resolveListedResourceAliasForGet(ctx, log, teamID, channelID, userID, token, allowedSet)
@@ -773,7 +773,7 @@ func (h *Handler) resolveListedResourceAliasForGet(ctx context.Context, log *slo
 	}
 	resources, aliasErr := h.lookupListedResourceAliasesForGet(ctx, log, teamID, token)
 	if aliasErr != nil {
-		log.Log(ctx, storeErrorLogLevel(aliasErr, slog.LevelWarn), "get: resource-alias fallback lookup failed", "error", aliasErr, "team_id", teamID, "alias", token)
+		log.Log(ctx, storeErrorLogLevel(ctx, aliasErr, slog.LevelWarn), "get: resource-alias fallback lookup failed", "error", aliasErr, "team_id", teamID, "alias", token)
 		return "", false, &userError{msg: serviceUnreachableMessage}
 	}
 	if len(resources) == 0 {
@@ -867,7 +867,7 @@ func (h *Handler) allowedResourceIDsForGet(ctx context.Context, log *slog.Logger
 	}
 	allowed, err := h.cfg.AdminStore.AllowedResourceIDsForChannel(ctx, teamID, channelID)
 	if err != nil {
-		log.Log(ctx, storeErrorLogLevel(err, slog.LevelWarn), "get: allowed-resource fetch failed", "error", err, "team_id", teamID, "channel_id", channelID)
+		log.Log(ctx, storeErrorLogLevel(ctx, err, slog.LevelWarn), "get: allowed-resource fetch failed", "error", err, "team_id", teamID, "channel_id", channelID)
 		return nil, &userError{msg: serviceUnreachableMessage}
 	}
 	return allowed, nil
@@ -899,7 +899,7 @@ func (h *Handler) deliverGetDM(ctx context.Context, log *slog.Logger, teamID, en
 // transport-class (5xx/network) gets the retry-friendly
 // [serviceUnreachableMessage]; everything else gets the generic
 // [commonGetMintFailedMessage].
-func mapMintError(log *slog.Logger, err error) error {
+func mapMintError(ctx context.Context, log *slog.Logger, err error) error {
 	var apiErr *client.APIError
 	if errors.As(err, &apiErr) {
 		switch apiErr.StatusCode {
@@ -953,7 +953,11 @@ func mapMintError(log *slog.Logger, err error) error {
 	// disposition as 5xx above.
 	// TODO(upstream-contract): infra#964 selects ERROR plus the client transport
 	// wrapper in error; WARN would hide connectivity failures from its alarm.
-	log.Error("get: mint failed", "error", err)
+	level := slog.LevelError
+	if callerStopped(ctx, err) {
+		level = slog.LevelWarn
+	}
+	log.Log(ctx, level, "get: mint failed", "error", err)
 	return &userError{msg: serviceUnreachableMessage}
 }
 

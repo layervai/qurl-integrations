@@ -624,7 +624,9 @@ func lifecyclePurgeErrorIsNonRetryable(err error) bool {
 		return true
 	}
 	if wrapped, ok := err.(interface{ Unwrap() error }); ok {
-		return lifecyclePurgeErrorIsNonRetryable(wrapped.Unwrap())
+		if cause := wrapped.Unwrap(); cause != nil {
+			return lifecyclePurgeErrorIsNonRetryable(cause)
+		}
 	}
 	var storeErr *slackdata.Error
 	if errors.As(err, &storeErr) {

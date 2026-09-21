@@ -1364,7 +1364,7 @@ func TestMapMintErrorDependencyAuthAudit(t *testing.T) {
 			var logs bytes.Buffer
 			log := slog.New(slog.NewJSONHandler(&logs, nil))
 
-			gotErr := mapMintError(log, tc.apiErr)
+			gotErr := mapMintError(context.Background(), log, tc.apiErr)
 
 			var audit map[string]any
 			for _, line := range strings.Split(strings.TrimSpace(logs.String()), "\n") {
@@ -1435,7 +1435,7 @@ func TestMapMintError_RetiredTunnelDisabledFailsLoud(t *testing.T) {
 	var logs bytes.Buffer
 	log := slog.New(slog.NewJSONHandler(&logs, nil))
 
-	gotErr := mapMintError(log, &client.APIError{
+	gotErr := mapMintError(context.Background(), log, &client.APIError{
 		StatusCode: http.StatusForbidden,
 		Code:       "tunnel_disabled",
 		RequestID:  "req_retired_tunnel_disabled",

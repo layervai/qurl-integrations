@@ -355,7 +355,7 @@ func (h *Handler) resolveTunnelByID(ctx context.Context, log *slog.Logger, teamI
 			// the service-unavailable signal (matching resolveTokenForGet) rather than
 			// falling through to the "no such id" copy, which would misdiagnose an
 			// outage as a typo.
-			log.Log(ctx, storeErrorLogLevel(lookupErr, slog.LevelWarn), "display-name: channel alias lookup failed", "error", lookupErr, "team_id", teamID, "channel_id", channelID, "id", id)
+			log.Log(ctx, storeErrorLogLevel(ctx, lookupErr, slog.LevelWarn), "display-name: channel alias lookup failed", "error", lookupErr, "team_id", teamID, "channel_id", channelID, "id", id)
 			return nil, nil, serviceUnreachableMessage
 		case found:
 			// Legacy guard, mirroring resolveTokenForGet: a pre-resource set-alias

@@ -140,7 +140,7 @@ func (h *Handler) paneContextChannel(ctx context.Context, log *slog.Logger, env 
 	partition, key := env.TeamID, agentEventThreadKey(env)
 	c, found, err := h.cfg.AgentStore.GetThreadContext(ctx, partition, key)
 	if err != nil {
-		log.Log(ctx, storeErrorLogLevel(err, slog.LevelWarn), "agent: read pane context failed; using DM scope", "error", err)
+		log.Log(ctx, storeErrorLogLevel(ctx, err, slog.LevelWarn), "agent: read pane context failed; using DM scope", "error", err)
 		return ""
 	}
 	if !found || c == "" {
@@ -153,7 +153,7 @@ func (h *Handler) paneContextChannel(ctx context.Context, log *slog.Logger, env 
 	// Refresh the context TTL on this ATTEMPT (before the turn runs), so an active thread keeps
 	// channel-awareness even if this turn then fails transiently — it tracks activity, not success.
 	if err := h.cfg.AgentStore.PutThreadContext(ctx, partition, key, c); err != nil {
-		log.Log(ctx, storeErrorLogLevel(err, slog.LevelWarn), "agent: refresh pane context TTL failed", "error", err)
+		log.Log(ctx, storeErrorLogLevel(ctx, err, slog.LevelWarn), "agent: refresh pane context TTL failed", "error", err)
 	}
 	return c
 }

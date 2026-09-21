@@ -1217,7 +1217,7 @@ func (h *Handler) recordAgentAuditEntry(ctx context.Context, log *slog.Logger, t
 		return
 	}
 	if err := h.cfg.AgentStore.PutAuditEntry(ctx, teamID, entry); err != nil {
-		log.Log(ctx, storeErrorLogLevel(err, slog.LevelWarn), "agent: record audit entry failed", "error", err)
+		log.Log(ctx, storeErrorLogLevel(ctx, err, slog.LevelWarn), "agent: record audit entry failed", "error", err)
 	}
 }
 

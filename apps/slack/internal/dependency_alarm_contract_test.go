@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/aws/aws-sdk-go-v2/service/kms"
@@ -109,11 +110,11 @@ func TestStoreErrorLogLevel(t *testing.T) {
 			if code == "ddb_error" {
 				want = slog.LevelError
 			}
-			if got := storeErrorLogLevel(err, fallback); got != want {
+			if got := storeErrorLogLevel(context.Background(), err, fallback); got != want {
 				t.Fatalf("%s: got %v want %v", code, got, want)
 			}
 		}
-		if got := storeErrorLogLevel(errors.New("ddb_error"), fallback); got != fallback {
+		if got := storeErrorLogLevel(context.Background(), errors.New("ddb_error"), fallback); got != fallback {
 			t.Fatal("untyped text promoted")
 		}
 	}
@@ -208,5 +209,79 @@ func TestHandleGet_CredentialProviderAlarmContract(t *testing.T) {
 				t.Fatalf("missing %s record: %s", msg, logs.String())
 			})
 		}
+	}
+}
+
+func TestStoreErrorLogLevel_CallerCancellation(t *testing.T) {
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	optional, cancelOptional := context.WithDeadlineCause(context.Background(), time.Time{}, errOptionalProbeDeadline)
+	defer cancelOptional()
+	expired, cancelExpired := context.WithDeadline(context.Background(), time.Time{})
+	defer cancelExpired()
+	for _, tc := range []struct {
+		name  string
+		ctx   context.Context
+		cause error
+		want  slog.Level
+	}{
+		{"shutdown", canceled, context.Canceled, slog.LevelDebug},
+		{"independent cancellation", context.Background(), context.Canceled, slog.LevelError},
+		{"optional probe budget", optional, context.DeadlineExceeded, slog.LevelDebug},
+		{"dependency timeout", context.Background(), context.DeadlineExceeded, slog.LevelError},
+		{"required caller budget", expired, context.DeadlineExceeded, slog.LevelError},
+		{"outage during shutdown", canceled, errors.New("DynamoDB unavailable"), slog.LevelError},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ts := newAdminTestServers(t)
+			ts.ddb.SetGetItemErr(ts.tableNames.channelPolicy, fmt.Errorf("SDK: %w", tc.cause))
+			h := newAdminTestHandler(t, ts)
+			_, _, err := h.cfg.AdminStore.LookupChannelAlias(tc.ctx, testAdminTeamID, "C_test", "prod-db")
+			if !errors.Is(err, tc.cause) {
+				t.Fatalf("store lost cause: %v", err)
+			}
+			var storeErr *slackdata.Error
+			if !errors.As(err, &storeErr) || storeErr.Code != "ddb_error" || !strings.Contains(err.Error(), "[ddb_error]") {
+				t.Fatalf("store contract changed: %v", err)
+			}
+			encoded, marshalErr := json.Marshal(storeErr)
+			if marshalErr != nil || strings.Contains(string(encoded), "cause") {
+				t.Fatalf("cause leaked into JSON: %s, %v", encoded, marshalErr)
+			}
+			if got := storeErrorLogLevel(tc.ctx, err, slog.LevelDebug); got != tc.want {
+				t.Fatalf("level=%v want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestMapMintError_CallerCancellation(t *testing.T) {
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	for _, tc := range []struct {
+		name  string
+		ctx   context.Context
+		cause error
+		want  string
+	}{
+		{"shutdown", canceled, context.Canceled, "WARN"},
+		{"dependency timeout", context.Background(), context.DeadlineExceeded, "ERROR"},
+		{"outage during shutdown", canceled, errors.New("connection refused"), "ERROR"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			logs := &capturedLogs{}
+			log := slog.New(observability.NewRedactingJSONHandler(logs, nil))
+			err := mapMintError(tc.ctx, log, fmt.Errorf("http request: %w", tc.cause))
+			if err.Error() != serviceUnreachableMessage {
+				t.Fatalf("user response changed: %v", err)
+			}
+			var record map[string]any
+			if err := json.Unmarshal([]byte(logs.String()), &record); err != nil {
+				t.Fatal(err)
+			}
+			if record["level"] != tc.want || record["msg"] != "get: mint failed" {
+				t.Fatalf("wrong log: %s", logs.String())
+			}
+		})
 	}
 }
