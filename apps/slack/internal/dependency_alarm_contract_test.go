@@ -285,3 +285,20 @@ func TestMapMintError_CallerCancellation(t *testing.T) {
 		})
 	}
 }
+
+func TestLifecyclePurge_ConvertedStoreErrorClassification(t *testing.T) {
+	ts := newAdminTestServers(t)
+	h := newAdminTestHandler(t, ts)
+	for _, cause := range []error{&types.ConditionalCheckFailedException{}, &slackdata.Error{StatusCode: 500, Title: "inner SDK failure"}, context.DeadlineExceeded} {
+		ts.ddb.SetGetItemErr(ts.tableNames.channelPolicy, cause)
+		_, _, err := h.cfg.AdminStore.LookupChannelAlias(context.Background(), testAdminTeamID, "C_test", "prod-db")
+		if lifecyclePurgeErrorIsNonRetryable(fmt.Errorf("caller: %w", err)) {
+			t.Fatalf("discarded converted store status: %v", err)
+		}
+	}
+	badShape := &slackdata.Error{StatusCode: 500, Title: "missing row key"}
+	mixed := fmt.Errorf("caller: %w", errors.Join(badShape, errors.New("temporary AWS failure")))
+	if lifecyclePurgeErrorIsNonRetryable(mixed) {
+		t.Fatal("mixed wrapped join lost retryable child")
+	}
+}

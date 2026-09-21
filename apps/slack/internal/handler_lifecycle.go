@@ -623,14 +623,11 @@ func lifecyclePurgeErrorIsNonRetryable(err error) bool {
 		}
 		return true
 	}
-	if wrapped, ok := err.(interface{ Unwrap() error }); ok {
-		if cause := wrapped.Unwrap(); cause != nil {
-			return lifecyclePurgeErrorIsNonRetryable(cause)
-		}
-	}
-	var storeErr *slackdata.Error
-	if errors.As(err, &storeErr) {
+	if storeErr, ok := err.(*slackdata.Error); ok { //nolint:errorlint // Inspect this node; errors.As can hide retryable siblings in a wrapped join.
 		return storeErr.StatusCode == http.StatusBadRequest || storeErr.StatusCode == http.StatusInternalServerError
+	}
+	if wrapped, ok := err.(interface{ Unwrap() error }); ok {
+		return lifecyclePurgeErrorIsNonRetryable(wrapped.Unwrap())
 	}
 	return false
 }
