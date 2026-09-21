@@ -808,7 +808,7 @@ func assertListFindsCRID(ctx context.Context, t *testing.T, cliEnv map[string]st
 // at all.
 func assertShareJourney(ctx context.Context, t *testing.T, cliEnv map[string]string, id string) string {
 	t.Helper()
-	res := runSandboxCLI(ctx, t, cliEnv, "share", id)
+	res := runSandboxCLI(ctx, t, cliEnv, "share", id, "--session-duration", "5m")
 	link, err := validateSandboxShareCommandResult("share", res.code, res.stdout.String(), res.stderr.String())
 	if err != nil {
 		t.Fatal(err)
@@ -838,7 +838,9 @@ const journeyTargetMarker = "Example Domain"
 func assertGetDownloadsBytes(ctx context.Context, t *testing.T, cliEnv map[string]string, id string) {
 	t.Helper()
 	dest := filepath.Join(t.TempDir(), "journey-payload")
-	res := runSandboxCLI(ctx, t, cliEnv, "get", id, "--file", dest)
+	// Resource deletion does not close an already-admitted NHP session.
+	// Keep this short download's grant within the sandbox deployment drain budget.
+	res := runSandboxCLI(ctx, t, cliEnv, "get", id, "--file", dest, "--session-duration", "5m")
 	if res.code != 0 {
 		t.Fatalf("get --file exit = %d, want 0\nstderr: %s", res.code, res.stderr.String())
 	}
