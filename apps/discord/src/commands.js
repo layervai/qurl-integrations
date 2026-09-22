@@ -3034,8 +3034,10 @@ async function cleanupFreshAddRecipientResources(batchSends, apiKey, sendId, opt
   }
   const results = await cleanup;
   const failed = [];
+  const failedResources = new Set();
   results.forEach((result, index) => {
     if (result.status === 'rejected') {
+      failedResources.add(entries[index][0]);
       failed.push({
         resource_ref: resourceIdLogRef(entries[index][0]),
         qurl_ids: entries[index][1],
@@ -3047,8 +3049,8 @@ async function cleanupFreshAddRecipientResources(batchSends, apiKey, sendId, opt
     logger.error('Failed to clean up freshly minted Add Recipients qURL resources', {
       sendId,
       reason: cleanupReason,
-      failed_count: failed.length,
-      total: entries.length,
+      failed_count: failedResources.size,
+      total: qurlIdsByResource.size,
       unidentified_count: unidentifiedCount,
       failures: failed,
     });
@@ -3056,7 +3058,7 @@ async function cleanupFreshAddRecipientResources(batchSends, apiKey, sendId, opt
     logger.info('Cleaned up freshly minted Add Recipients qURL resources', {
       sendId,
       reason: cleanupReason,
-      total: entries.length,
+      total: qurlIdsByResource.size,
     });
   }
 }

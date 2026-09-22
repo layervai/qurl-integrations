@@ -2883,16 +2883,19 @@ describe('handleAddRecipients — DB failure mid-flow', () => {
     expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-new', ['q_aaaaaaaaaa1'], 'apikey');
   });
 
-  it('attempts every fresh child chunk after a middle cleanup failure', async () => {
-    const ids = Array.from({ length: 30 }, (_, i) => `q_${i}`);
+  it('attempts every fresh child chunk after middle cleanup failures and counts distinct resources', async () => {
+    const ids = Array.from({ length: 40 }, (_, i) => `q_${i}`);
     mockRevokeMintedLinks.mockImplementation(async (_, chunk) => {
-      if (chunk.includes('q_10')) throw new Error('middle chunk failed');
+      if (chunk.includes('q_10') || chunk.includes('q_20')) throw new Error('middle chunk failed');
     });
     await cleanupFreshAddRecipientResources(ids.map(qurlId => ({ resourceId: 'res-1', qurlId })), 'apikey', 'send-1', { rowsMayHavePersisted: false });
-    expect(mockRevokeMintedLinks).toHaveBeenCalledTimes(3);
-    expect(mockRevokeMintedLinks).toHaveBeenLastCalledWith('res-1', ids.slice(20), 'apikey');
+    expect(mockRevokeMintedLinks).toHaveBeenCalledTimes(4);
+    expect(mockRevokeMintedLinks).toHaveBeenLastCalledWith('res-1', ids.slice(30), 'apikey');
     expect(logger.error).toHaveBeenCalledWith('Failed to clean up freshly minted Add Recipients qURL resources', expect.objectContaining({
-      failed_count: 1, total: 3, failures: [{ resource_ref: resourceIdLogRef('res-1'), qurl_ids: ids.slice(10, 20), error: 'middle chunk failed' }],
+      failed_count: 1, total: 1, failures: [
+        { resource_ref: resourceIdLogRef('res-1'), qurl_ids: ids.slice(10, 20), error: 'middle chunk failed' },
+        { resource_ref: resourceIdLogRef('res-1'), qurl_ids: ids.slice(20, 30), error: 'middle chunk failed' },
+      ],
     }));
   });
 
