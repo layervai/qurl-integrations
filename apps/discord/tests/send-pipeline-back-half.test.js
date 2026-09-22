@@ -2992,9 +2992,9 @@ describe('handleAddRecipients — DB failure mid-flow', () => {
     expect(result.newRecipients).toEqual([]);
     expect(mockDb.recordQURLSendBatch).not.toHaveBeenCalled();
     expect(mockSendDM).not.toHaveBeenCalled();
-    expect(mockRevokeMintedLinks).toHaveBeenCalledTimes(10);
-    expect(mockRevokeMintedLinks.mock.calls.map(call => call[0]).sort()).toEqual(
-      Array.from({ length: 10 }, (_, i) => `res-${i}`).sort(),
+    expect(mockRevokeMintedLinks).toHaveBeenCalledTimes(1);
+    expect(mockRevokeMintedLinks).toHaveBeenCalledWith(
+      'res-0', Array.from({ length: 100 }, (_, i) => `q_${Math.floor(i / 10)}_${i % 10}`), 'apikey',
     );
   });
 });
@@ -3169,7 +3169,7 @@ describe('handleAddRecipients — happy path (location)', () => {
 });
 
 describe('mintLinksInBatches', () => {
-  it('mints once for recipientCount <= TOKENS_PER_RESOURCE (10)', async () => {
+  it('mints once for recipientCount <= MINT_BATCH_SIZE (10)', async () => {
     mockMintLinks.mockResolvedValueOnce([
       { qurl_id: 'q_1', qurl_link: 'https://q.test/1' },
       { qurl_id: 'q_2', qurl_link: 'https://q.test/2' },
@@ -3188,7 +3188,7 @@ describe('mintLinksInBatches', () => {
     expect(result[0].resourceId).toBe('res-1');
   });
 
-  it('re-uploads + mints again when recipientCount > TOKENS_PER_RESOURCE', async () => {
+  it('reuses the resource across bounded requests for more than 10 recipients', async () => {
     mockMintLinks
       .mockResolvedValueOnce(Array.from({ length: 10 }, (_, i) => ({ qurl_id: `q_${i}`, qurl_link: `https://q.test/${i}` })))
       .mockResolvedValueOnce([{ qurl_id: 'q_10', qurl_link: 'https://q.test/10' }]);
@@ -3202,10 +3202,11 @@ describe('mintLinksInBatches', () => {
       apiKey: 'apikey',
     });
 
-    expect(reuploadFn).toHaveBeenCalledTimes(1);
+    expect(reuploadFn).not.toHaveBeenCalled();
     expect(mockMintLinks).toHaveBeenCalledTimes(2);
     expect(result).toHaveLength(11);
-    expect(result[10].resourceId).toBe('res-2');
+    expect(result.every(link => link.resourceId === 'res-1')).toBe(true);
+    expect(mockMintLinks.mock.calls.map(([id, opts]) => [id, opts.n])).toEqual([['res-1', 10], ['res-1', 1]]);
   });
 
   it('revokes earlier batches before rethrowing a later mint failure', async () => {
