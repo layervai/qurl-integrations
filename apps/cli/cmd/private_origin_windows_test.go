@@ -125,7 +125,10 @@ func TestWindowsRetargetLocalOfflineAndDaemonExclusion(t *testing.T) {
 		t.Fatal(err)
 	}
 	result := invoke()
-	if result.code != 0 || !strings.Contains(result.stdout.String(), `"changed":1`) {
+	var receipt struct {
+		Changed int `json:"changed"`
+	}
+	if result.code != 0 || json.Unmarshal(result.stdout.Bytes(), &receipt) != nil || receipt.Changed != 1 {
 		t.Fatalf("offline missing-pipe conversion: %d %s %s", result.code, result.stderr.String(), result.stdout.String())
 	}
 	stored, err := registry.Get(ctx, row.CRID)

@@ -253,6 +253,9 @@ func (s *LocalShare) Target() LocalTarget {
 // ValidateTarget rejects a forbidden transport before callers change cloud
 // sharing. Writes also enforce the policy under the registry lock.
 func (r *LocalShareRegistry) ValidateTarget(ctx context.Context, connectorID string, target LocalTarget) error {
+	if err := validateLocalShareTarget(&LocalShare{TargetURL: target.URL, LocalIP: target.IP, LocalPort: target.Port, LocalSocketPath: target.SocketPath, LocalPipeName: target.PipeName}); err != nil {
+		return err
+	}
 	state, unlock, err := r.loadLocked(ctx)
 	if err != nil {
 		return err
@@ -262,9 +265,6 @@ func (r *LocalShareRegistry) ValidateTarget(ctx context.Context, connectorID str
 }
 
 func validatePrivateOriginTarget(prefix, connectorID string, target LocalTarget) error {
-	if err := validateLocalShareTarget(&LocalShare{TargetURL: target.URL, LocalIP: target.IP, LocalPort: target.Port, LocalSocketPath: target.SocketPath, LocalPipeName: target.PipeName}); err != nil {
-		return err
-	}
 	if prefix != "" && strings.HasPrefix(connectorID, prefix) && target.SocketPath == "" && target.PipeName == "" {
 		return errors.New("private origin shares require private transport")
 	}
@@ -336,7 +336,8 @@ func ValidateLocalRetargetSelector(owner, prefix string) error {
 	return nil
 }
 
-// RetargetStoppedToUnix retains strict Unix-only compatibility.
+// RetargetStoppedToUnix retains the strict Unix-only API for callers of the
+// original Unix conversion; pipe callers must use RetargetStoppedToPrivate.
 func (r *LocalShareRegistry) RetargetStoppedToUnix(ctx context.Context, owner, prefix, origin string) (int, error) {
 	if _, err := ParseUnixTarget(origin); err != nil {
 		return 0, err
@@ -737,11 +738,13 @@ func validateLocalShareIdentity(share *LocalShare) error {
 // Connector LocalHTTPRoute (macOS104 bytes including terminator, Linux108).
 const maxPrivateSocketPathBytes = 100
 
+const windowsOS = "windows"
+
 // ParseUnixTarget validates the local-only Unix HTTP origin grammar. Paths are
 // deliberately excluded from errors because callers may log validation failures.
 func ParseUnixTarget(raw string) (LocalTarget, error) {
 	parsed, err := url.Parse(raw)
-	if err != nil || runtime.GOOS == "windows" || parsed.Scheme != "http+unix" || parsed.Host != "" || parsed.User != nil || parsed.Opaque != "" || parsed.RawQuery != "" || parsed.ForceQuery || strings.Contains(raw, "#") {
+	if err != nil || runtime.GOOS == windowsOS || parsed.Scheme != "http+unix" || parsed.Host != "" || parsed.User != nil || parsed.Opaque != "" || parsed.RawQuery != "" || parsed.ForceQuery || strings.Contains(raw, "#") {
 		return LocalTarget{}, errors.New("local Unix target must be an absolute socket URL without authority, query or fragment on a supported platform")
 	}
 	socket := parsed.Path
@@ -756,9 +759,11 @@ func ParseUnixTarget(raw string) (LocalTarget, error) {
 }
 
 // ParsePipeTarget accepts only the canonical local Windows pipe URL.
+// TODO(upstream-contract): qurl-connector ValidateLocalPipeName owns the strict
+// 64-hex profile hash / 32-hex launch nonce grammar for the local pipe namespace.
 func ParsePipeTarget(raw string) (LocalTarget, error) {
 	const prefix = "http+npipe:///"
-	if !strings.HasPrefix(raw, prefix) {
+	if runtime.GOOS != windowsOS || !strings.HasPrefix(raw, prefix) {
 		return LocalTarget{}, errors.New("local pipe target requires a canonical Windows pipe URL")
 	}
 	name := `\\.\pipe\` + strings.TrimPrefix(raw, prefix)

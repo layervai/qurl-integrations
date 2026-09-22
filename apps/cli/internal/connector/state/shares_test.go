@@ -588,7 +588,7 @@ func TestStoppedFileTargetConversionPreservesEveryRegistryRow(t *testing.T) {
 		RetargetStoppedToPrivate(context.Context, string, string, string) (int, error)
 	})
 	if !ok {
-		t.Fatal("registry cannot atomically convert stopped Unix targets")
+		t.Fatal("registry cannot atomically convert stopped private targets")
 	}
 	unlock, err := AcquireDaemonLease(ctx, dir)
 	if err != nil {
@@ -863,13 +863,17 @@ func TestPipeTargetGrammarAndTuple(t *testing.T) {
 	if err := validateLocalShareTarget(&row); err != nil {
 		t.Fatal(err)
 	}
+	registry, err := OpenLocalShareRegistry(secureStateTestDir(t))
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, mixed := range []LocalShare{
 		{TargetURL: target.URL, LocalPipeName: target.PipeName, LocalIP: "127.0.0.1", LocalPort: 3000},
 		{TargetURL: target.URL, LocalPipeName: target.PipeName, LocalSocketPath: "/tmp/private.sock"},
 		{TargetURL: target.URL, LocalPipeName: target.PipeName + "b"},
 		{TargetURL: "http://127.0.0.1:3000", LocalIP: "127.0.0.1", LocalPort: 3000, LocalPipeName: target.PipeName},
 	} {
-		if validateLocalShareTarget(&mixed) == nil || validatePrivateOriginTarget("qurl-file-", "qurl-file-test", mixed.Target()) == nil {
+		if validateLocalShareTarget(&mixed) == nil || registry.ValidateTarget(context.Background(), "qurl-file-test", mixed.Target()) == nil {
 			t.Fatal("invalid private tuple accepted")
 		}
 	}

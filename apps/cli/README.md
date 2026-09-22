@@ -454,6 +454,9 @@ which maps to the local `\\.\pipe\layerv-qurl-file-...` namespace. Each pipe
 connection verifies that the server owner is the current Windows user before
 sending bytes. Neither private transport falls back to TCP. Request-header
 overlays still require a trusted TLS tunnel connection.
+Use a stable explicit `--id` when publishing a Windows private origin: without
+one (or another configured Connector ID), each new launch nonce derives a new
+Connector ID, resource, and CRID.
 
 Windows Desktop sharing remains disabled pending packaged-app qualification;
 this prepares the CLI transport and does not enable that product feature.

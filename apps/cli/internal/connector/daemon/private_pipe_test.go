@@ -32,6 +32,12 @@ func TestManagersProjectExclusivePipeAlongsideTCP(t *testing.T) {
 						if route.LocalPipeName != pipe.LocalPipeName || route.LocalSocketPath != "" || route.LocalIP != "" || route.LocalPort != 0 || route.ResourcePublicKey != pipe.ResourceID {
 							t.Fatal("private pipe lost transport or identity")
 						}
+						// TODO(upstream-contract): Connector Equal must distinguish launch nonces.
+						rotated := route
+						rotated.LocalPipeName = pipe.LocalPipeName[:len(pipe.LocalPipeName)-32] + strings.Repeat("c", 32)
+						if route.Equal(rotated) {
+							t.Fatal("pipe nonce change compares equal")
+						}
 					case "connector-b":
 						seen++
 						if route.LocalPipeName != "" || route.LocalSocketPath != "" || route.LocalIP != "127.0.0.1" || route.LocalPort != 3000 {
