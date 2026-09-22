@@ -837,3 +837,30 @@ func TestEmptyPrivateOriginConversionFencesOldAndCurrentWriters(t *testing.T) {
 		t.Fatalf("same-prefix retry=%d %v", changed, err)
 	}
 }
+
+func TestDaemonLeaseWithinWaitsForReleaseButStaysExclusive(t *testing.T) {
+	ctx := context.Background()
+	dir := secureStateTestDir(t)
+	unlock, err := AcquireDaemonLease(ctx, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := AcquireDaemonLease(ctx, dir); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("default lease wait = %v, want deadline while held", err)
+	}
+	released := make(chan error, 1)
+	time.AfterFunc(300*time.Millisecond, func() { released <- unlock() })
+	next, err := AcquireDaemonLeaseWithin(ctx, dir, 10*time.Second)
+	if err != nil {
+		t.Fatalf("bounded wait did not outlast the predecessor: %v", err)
+	}
+	if err := <-released; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := AcquireDaemonLease(ctx, dir); err == nil {
+		t.Fatal("waiting acquisition is not exclusive")
+	}
+	if err := next(); err != nil {
+		t.Fatal(err)
+	}
+}
