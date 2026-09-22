@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	connectorshare "github.com/layervai/qurl-connector/pkg/share"
 	qurl "github.com/layervai/qurl-go/qurl"
 	"github.com/spf13/cobra"
 
@@ -75,7 +76,7 @@ func shareRestartCmd(opts *globalOpts) *cobra.Command {
 		Long: `Restart sharing a local app.
 
 Rotates the share on a fresh serving epoch so no stale session keeps serving
-it. With --target the share also moves to a different loopback origin on this
+it. With --target the share also moves to a different local origin on this
 machine; the CRID and Connector identity stay the same, so every link already
 handed out keeps working — and now resolves to whatever serves the new
 origin.`,
@@ -91,13 +92,13 @@ origin.`,
 			return changeShareState(cmd.Context(), opts, args[0], "restart", destination)
 		},
 	}
-	cmd.Flags().StringVar(&target, "target", "", "move the share to this loopback HTTP origin, e.g. http://127.0.0.1:4000")
+	cmd.Flags().StringVar(&target, "target", "", "move the share to a loopback HTTP or platform-specific private origin")
 	return cmd
 }
 
 // restartTarget validates a restart --target with the local publish rules
 // before the command touches local state or the network. A share's target is
-// what the daemon proxies to on this machine, so only a loopback origin can
+// what the daemon proxies to on this machine, so only a local origin can
 // be a destination.
 func restartTarget(raw string) (*publishTarget, error) {
 	target, err := classifyPublishTarget(raw)
@@ -105,7 +106,7 @@ func restartTarget(raw string) (*publishTarget, error) {
 		return nil, err
 	}
 	if target.kind != publishTargetLocal {
-		return nil, invalidPublishTarget(errors.New("a local share can only move to a loopback HTTP origin such as http://127.0.0.1:4000"))
+		return nil, invalidPublishTarget(errors.New("a local share requires a loopback HTTP or platform-specific private origin"))
 	}
 	return target, nil
 }
@@ -924,23 +925,31 @@ func preflightLocalTarget(ctx context.Context, ip string, port int) error {
 }
 
 func preflightShareTarget(ctx context.Context, opts *globalOpts, target connectorstate.LocalTarget) error {
-	if target.SocketPath == "" {
+	if target.SocketPath == "" && target.PipeName == "" && !strings.HasPrefix(target.URL, "http+unix:") && !strings.HasPrefix(target.URL, "http+npipe:") {
 		return opts.preflightTarget(ctx, target.IP, target.Port)
 	}
-	checked, err := connectorstate.ParseUnixTarget(target.URL)
+	checked, err := connectorstate.ParsePrivateTarget(target.URL)
 	if err != nil || checked != target {
-		return errors.New("local Unix target is invalid")
+		return errors.New("local private target is invalid")
 	}
 	// Enforce the documented owner-only (0700) parent instead of trusting the
 	// supervisor alone. The fixed message keeps the private path out of output.
-	if connectordaemon.ValidateOwnerOnlyParent(target.SocketPath) != nil {
+	if target.SocketPath != "" && connectordaemon.ValidateOwnerOnlyParent(target.SocketPath) != nil {
 		return errors.New("local Unix origin must be inside a directory you own with mode 0700")
 	}
 	dialCtx, cancel := context.WithTimeout(ctx, 1500*time.Millisecond)
 	defer cancel()
-	conn, err := (&net.Dialer{}).DialContext(dialCtx, "unix", target.SocketPath)
-	if err != nil {
-		return errors.New("local Unix origin is not accepting connections; start it and retry")
+	var conn net.Conn
+	if target.PipeName != "" {
+		conn, err = connectorshare.DialLocalPipe(dialCtx, target.PipeName)
+	} else {
+		conn, err = (&net.Dialer{}).DialContext(dialCtx, "unix", target.SocketPath)
 	}
-	return conn.Close()
+	if err != nil {
+		return errors.New("local private origin is not accepting connections; start it and retry")
+	}
+	if err := conn.Close(); err != nil {
+		return errors.New("local private origin connection could not be closed")
+	}
+	return nil
 }

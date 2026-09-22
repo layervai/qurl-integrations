@@ -348,7 +348,7 @@ directory rather than switching in place.
 
 | Command | Description |
 |---------|-------------|
-| `qurl publish <target-url>` | Publish a remote URL or serve a loopback HTTP app, and get its CRID |
+| `qurl publish <target-url>` | Publish a remote URL or serve a local app, and get its CRID |
 | `qurl share <CRID>` | Share a CRID as a short-lived access link |
 | `qurl get <CRID>` | Fetch what a CRID points to: browser on a terminal, or download with `--file` |
 | `qurl list` | List your published resources |
@@ -448,9 +448,18 @@ External supervision changes three things:
   either way, but can still enroll a device and write authentication state.
 
 Private file origins can use a canonical `http+unix:///absolute/socket/path`
-target on macOS and Linux. The path must fit within 100 bytes; Windows has no
-TCP fallback for this transport. Request-header overlays still require a
-trusted TLS tunnel connection.
+target on macOS and Linux (at most 100 path bytes). Windows accepts only
+`http+npipe:///layerv-qurl-file-<64 lowercase hex profile SHA256>-<32 lowercase hex launch nonce>`,
+which maps to the local `\\.\pipe\layerv-qurl-file-...` namespace. Each pipe
+connection verifies that the server owner is the current Windows user before
+sending bytes. Neither private transport falls back to TCP. Request-header
+overlays still require a trusted TLS tunnel connection.
+Use a stable explicit `--id` when publishing a Windows private origin: without
+one (or another configured Connector ID), each new launch nonce derives a new
+Connector ID, resource, and CRID.
+
+Windows Desktop sharing remains disabled pending packaged-app qualification;
+this prepares the CLI transport and does not enable that product feature.
 
 To convert existing supervised file shares, first stop and verify the daemon
 has exited, bind the private origin, then run:
@@ -461,9 +470,9 @@ qurl daemon retarget-local --supervision external -o json <<'JSON'
 JSON
 ```
 
-Private Unix origins and external `--enrollment-token-file` handoff require
-Unix. Windows rejects those paths; ordinary account-API-key login remains
-available.
+On Windows, supply the canonical `http+npipe` target to the same command.
+Private Unix origins and external `--enrollment-token-file` handoff still require
+Unix; ordinary account-API-key login remains available on Windows.
 
 The command uses the normal profile/state-directory settings. It requires an
 existing externally supervised namespace and matching durable owner, reserves
@@ -476,13 +485,18 @@ Conversion durably reserves one private-origin prefix per namespace even when
 writers cannot publish or retarget that prefix back to TCP, even at a newer epoch.
 The supervisor owns the exact prefix; it must use the same constant for publishing
 and conversion. An owner-bound profile with no file shares is a valid empty set.
-The origin must be bound inside an owner-only (0700) directory controlled by
+On Unix, the origin must be bound inside an owner-only (0700) directory controlled by
 the supervisor, with ancestors other users cannot replace; do not use a socket
 directly under a shared temporary directory. The supervisor owns the ancestor
-boundary; before dialing, the CLI also refuses a socket whose parent is not an
-owned `0700` directory. Conversion is
-offline and may precede binding the origin, so it does not dial the target.
-Set the same `QURL_CONNECTOR_RUNTIME_DIR` environment value for daemon startup
+boundary; before dialing, the CLI also refuses a Unix socket whose parent is not
+an owned `0700` directory. On Windows,
+the CLI verifies the connected pipe's owner SID matches the current user before
+sending bytes. The supervisor must require the per-launch proxy token on every
+request, including local preview, and rotate the nonce when starting a new origin.
+The Windows default pipe DACL is not owner-only; same-user malware and
+administrators remain outside this isolation boundary. Conversion is offline
+and may precede binding the origin, so it does not dial the target.
+On Unix, set the same `QURL_CONNECTOR_RUNTIME_DIR` environment value for daemon startup
 and conversion (including any value supplied through daemon run's hidden
 `--runtime-dir` flag), so the IPC reservation also excludes older daemon binaries.
 A live or ambiguous daemon at that endpoint blocks conversion. Start the daemon only after conversion succeeds. New daemon binaries
@@ -676,12 +690,12 @@ the resource first if you intentionally want a new CRID.
 ### Move a local share
 
 Use `qurl restart <CRID> --target http://127.0.0.1:4000` to move an existing
-local share to a new loopback HTTP origin. The destination must be reachable;
+local share to a new loopback HTTP or platform-specific private origin. The destination must be reachable;
 the old origin can already be stopped. The CRID and Connector ID stay the same.
 
 | Flag | Description |
 |------|-------------|
-| `--target <url>` | Move the share to this loopback HTTP origin, e.g. `http://127.0.0.1:4000` |
+| `--target <url>` | Move the share to a loopback HTTP or platform-specific private origin |
 
 The destination follows the [local publish rules](#local-apps) — a loopback
 HTTP origin without path, query, fragment, or credentials; anything else is a

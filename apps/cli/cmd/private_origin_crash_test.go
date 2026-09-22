@@ -1,10 +1,7 @@
-//go:build !windows
-
 package main
 
 import (
 	"context"
-	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -16,7 +13,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"testing"
 	"time"
 
@@ -35,12 +31,15 @@ func TestPrivateOriginCrashLeavesSurvivingDaemonOffTCP(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	dir, err := os.MkdirTemp("/tmp", "qc-") // Keep the socket below macOS sun_path's limit.
+	rootDir, err := os.MkdirTemp(privateTestTempRoot(), "qc-") // Keep the socket below macOS sun_path's limit.
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-	socket := filepath.Join(dir, "file.sock")
+	t.Cleanup(func() { _ = os.RemoveAll(rootDir) })
+	// Create the namespace through EnsureDirMode so elevated Windows runners
+	// assign its owner to the current user, not the inherited Administrators SID.
+	dir := filepath.Join(rootDir, "state")
+	target := privateCmdTarget(t, dir)
 	if err := connectorstate.EstablishExternalRuntimeMode(ctx, dir); err != nil {
 		t.Fatal(err)
 	}
@@ -56,7 +55,7 @@ func TestPrivateOriginCrashLeavesSurvivingDaemonOffTCP(t *testing.T) {
 	if err := registry.Put(ctx, &row); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := registry.RetargetStoppedToUnix(ctx, "own_cli_fixture", "qurl-file-", "http+unix://"+socket); err != nil {
+	if _, err := registry.RetargetStoppedToPrivate(ctx, "own_cli_fixture", "qurl-file-", target.URL); err != nil {
 		t.Fatal(err)
 	}
 	before, err := registry.Get(ctx, row.CRID)
@@ -142,13 +141,11 @@ func TestPrivateOriginCrashLeavesSurvivingDaemonOffTCP(t *testing.T) {
 		t.Fatal("private origin never served through the daemon")
 	}
 	waitForOrigin()
-	crashOrigin() // SIGKILL: no server shutdown, overlay removal or daemon cleanup.
+	crashOrigin() // Forced process termination: no graceful cleanup.
 	if origin.ProcessState == nil {
 		t.Fatal("origin crash was not reaped")
 	}
-	if status, ok := origin.ProcessState.Sys().(syscall.WaitStatus); !ok || !status.Signaled() || status.Signal() != syscall.SIGKILL {
-		t.Fatalf("origin did not die from SIGKILL: %s", origin.ProcessState)
-	}
+	assertPrivateOriginKilled(t, origin.ProcessState)
 	var hits atomic.Int32
 	occupant := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		hits.Add(1)
@@ -163,7 +160,7 @@ func TestPrivateOriginCrashLeavesSurvivingDaemonOffTCP(t *testing.T) {
 	t.Cleanup(occupant.Close)
 	for range 5 {
 		status, body := request()
-		if (status >= 100 && status < 400) || strings.Contains(body, crashOriginToken) || strings.Contains(body, socket) {
+		if (status >= 100 && status < 400) || strings.Contains(body, crashOriginToken) || strings.Contains(body, target.SocketPath+target.PipeName) {
 			t.Fatalf("dead origin returned successful or private response: status=%d", status)
 		}
 	}
@@ -171,7 +168,7 @@ func TestPrivateOriginCrashLeavesSurvivingDaemonOffTCP(t *testing.T) {
 		t.Fatal("surviving daemon sent a request or origin header to the TCP occupant")
 	}
 	start("origin")
-	waitForOrigin() // Same route, registry and Unix path; no daemon reload.
+	waitForOrigin() // Same route and registry; no daemon reload.
 	status, running, err := ipc.Status(ctx)
 	if err != nil || !running || status.Pid != daemon.Process.Pid {
 		t.Fatalf("daemon did not survive origin crash: pid=%d running=%t err=%v", status.Pid, running, err)
@@ -189,11 +186,8 @@ func TestPrivateOriginCrashProcessHelper(t *testing.T) {
 	}
 	dir := os.Getenv("QURL_CRASH_STATE")
 	if role == "origin" {
-		socket := filepath.Join(dir, "file.sock")
-		if err := os.Remove(socket); err != nil && !errors.Is(err, os.ErrNotExist) {
-			t.Fatal(err)
-		}
-		listener, err := (&net.ListenConfig{}).Listen(context.Background(), "unix", socket)
+		target := privateCmdTarget(t, dir)
+		listener, err := listenPrivateTestOrigin(target)
 		if err != nil {
 			t.Fatal(err)
 		}

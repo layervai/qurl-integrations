@@ -29,6 +29,7 @@ type publishTarget struct {
 	localIP         string
 	localPort       int
 	localSocketPath string
+	localPipeName   string
 }
 
 // classifyPublishTarget separates the existing remote publish path from the
@@ -47,12 +48,12 @@ func classifyPublishTarget(raw string) (*publishTarget, error) {
 		}
 		return nil, invalidPublishTarget(fmt.Errorf("parse target URL: %w", err))
 	}
-	if u.Scheme == "http+unix" {
-		target, err := connectorstate.ParseUnixTarget(raw)
+	if u.Scheme == "http+unix" || u.Scheme == "http+npipe" {
+		target, err := connectorstate.ParsePrivateTarget(raw)
 		if err != nil {
 			return nil, invalidPublishTarget(err)
 		}
-		return &publishTarget{kind: publishTargetLocal, original: raw, canonicalOrigin: target.URL, localSocketPath: target.SocketPath}, nil
+		return &publishTarget{kind: publishTargetLocal, original: raw, canonicalOrigin: target.URL, localSocketPath: target.SocketPath, localPipeName: target.PipeName}, nil
 	}
 	if u.Scheme != httpURLScheme && u.Scheme != httpsURLScheme {
 		return nil, invalidPublishTarget(errors.New("target URL must use http or https"))
@@ -200,5 +201,5 @@ func invalidConnectorID(id string) error {
 }
 
 func (t *publishTarget) localTarget() connectorstate.LocalTarget {
-	return connectorstate.LocalTarget{URL: t.canonicalOrigin, IP: t.localIP, Port: t.localPort, SocketPath: t.localSocketPath}
+	return connectorstate.LocalTarget{URL: t.canonicalOrigin, IP: t.localIP, Port: t.localPort, SocketPath: t.localSocketPath, PipeName: t.localPipeName}
 }
