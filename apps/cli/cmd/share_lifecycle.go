@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	connectorshare "github.com/layervai/qurl-connector/pkg/share"
 	qurl "github.com/layervai/qurl-go/qurl"
 	"github.com/spf13/cobra"
 
@@ -924,18 +925,26 @@ func preflightLocalTarget(ctx context.Context, ip string, port int) error {
 }
 
 func preflightShareTarget(ctx context.Context, opts *globalOpts, target connectorstate.LocalTarget) error {
-	if target.SocketPath == "" {
+	if target.SocketPath == "" && target.PipeName == "" && !strings.HasPrefix(target.URL, "http+unix:") && !strings.HasPrefix(target.URL, "http+npipe:") {
 		return opts.preflightTarget(ctx, target.IP, target.Port)
 	}
-	checked, err := connectorstate.ParseUnixTarget(target.URL)
+	checked, err := connectorstate.ParsePrivateTarget(target.URL)
 	if err != nil || checked != target {
-		return errors.New("local Unix target is invalid")
+		return errors.New("local private target is invalid")
 	}
 	dialCtx, cancel := context.WithTimeout(ctx, 1500*time.Millisecond)
 	defer cancel()
-	conn, err := (&net.Dialer{}).DialContext(dialCtx, "unix", target.SocketPath)
-	if err != nil {
-		return errors.New("local Unix origin is not accepting connections; start it and retry")
+	var conn net.Conn
+	if target.PipeName != "" {
+		conn, err = connectorshare.DialLocalPipe(dialCtx, target.PipeName)
+	} else {
+		conn, err = (&net.Dialer{}).DialContext(dialCtx, "unix", target.SocketPath)
 	}
-	return conn.Close()
+	if err != nil {
+		return errors.New("local private origin is not accepting connections; start it and retry")
+	}
+	if err := conn.Close(); err != nil {
+		return errors.New("local private origin connection could not be closed")
+	}
+	return nil
 }

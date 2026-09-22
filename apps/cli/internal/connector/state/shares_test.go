@@ -559,9 +559,6 @@ func TestLocalShareRegistryRetargetRequiresNewerEpochAndLoopbackTarget(t *testin
 }
 
 func TestStoppedFileTargetConversionPreservesEveryRegistryRow(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Unix origins are unsupported on Windows")
-	}
 	ctx := context.Background()
 	dir := secureStateTestDir(t)
 	if err := EstablishExternalRuntimeMode(ctx, dir); err != nil {
@@ -588,7 +585,7 @@ func TestStoppedFileTargetConversionPreservesEveryRegistryRow(t *testing.T) {
 		t.Fatal(err)
 	}
 	converter, ok := any(registry).(interface {
-		RetargetStoppedToUnix(context.Context, string, string, string) (int, error)
+		RetargetStoppedToPrivate(context.Context, string, string, string) (int, error)
 	})
 	if !ok {
 		t.Fatal("registry cannot atomically convert stopped Unix targets")
@@ -597,13 +594,13 @@ func TestStoppedFileTargetConversionPreservesEveryRegistryRow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := converter.RetargetStoppedToUnix(ctx, "owner-test", "qurl-file-", "http+unix:///tmp/private.sock"); err == nil {
+	if _, err := converter.RetargetStoppedToPrivate(ctx, "owner-test", "qurl-file-", privateStateTarget(t).URL); err == nil {
 		t.Fatal("conversion bypassed a live daemon lease")
 	}
 	if err := unlock(); err != nil {
 		t.Fatal(err)
 	}
-	changed, err := converter.RetargetStoppedToUnix(ctx, "owner-test", "qurl-file-", "http+unix:///tmp/private.sock")
+	changed, err := converter.RetargetStoppedToPrivate(ctx, "owner-test", "qurl-file-", privateStateTarget(t).URL)
 	if err != nil || changed != 2 {
 		t.Fatalf("conversion = %d, %v", changed, err)
 	}
@@ -616,15 +613,15 @@ func TestStoppedFileTargetConversionPreservesEveryRegistryRow(t *testing.T) {
 	for i := range after {
 		expected := before[i]
 		if strings.HasPrefix(expected.ConnectorID, "qurl-file-") {
-			expected.TargetURL, expected.LocalIP, expected.LocalPort = "http+unix:///tmp/private.sock", "", 0
-			expected.LocalSocketPath = "/tmp/private.sock"
+			expected.TargetURL, expected.LocalIP, expected.LocalPort = privateStateTarget(t).URL, "", 0
+			expected.LocalSocketPath, expected.LocalPipeName = privateStateTarget(t).SocketPath, privateStateTarget(t).PipeName
 			expected.UpdatedAt = after[i].UpdatedAt
 		}
 		if !reflect.DeepEqual(expected, after[i]) {
 			t.Fatal("conversion changed identity, preference, epoch or a sibling app")
 		}
 	}
-	changed, err = converter.RetargetStoppedToUnix(ctx, "owner-test", "qurl-file-", "http+unix:///tmp/private.sock")
+	changed, err = converter.RetargetStoppedToPrivate(ctx, "owner-test", "qurl-file-", privateStateTarget(t).URL)
 	if err != nil || changed != 0 {
 		t.Fatalf("idempotent conversion = %d, %v", changed, err)
 	}
@@ -632,8 +629,8 @@ func TestStoppedFileTargetConversionPreservesEveryRegistryRow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, args := range [][3]string{{"other-owner", "qurl-file-", "http+unix:///tmp/new.sock"}, {"owner-test", "", "http+unix:///tmp/new.sock"}, {"owner-test", "qurl-file-", "http://127.0.0.1:4000"}} {
-		if _, err := converter.RetargetStoppedToUnix(ctx, args[0], args[1], args[2]); err == nil {
+	for _, args := range [][3]string{{"other-owner", "qurl-file-", privateStateTarget(t).URL}, {"owner-test", "", privateStateTarget(t).URL}, {"owner-test", "qurl-file-", "http://127.0.0.1:4000"}} {
+		if _, err := converter.RetargetStoppedToPrivate(ctx, args[0], args[1], args[2]); err == nil {
 			t.Fatal("invalid conversion was accepted")
 		}
 		current, err := os.ReadFile(filepath.Join(dir, LocalSharesFile)) // #nosec G304 -- private test registry fixture.
@@ -644,9 +641,6 @@ func TestStoppedFileTargetConversionPreservesEveryRegistryRow(t *testing.T) {
 }
 
 func TestRetargetStoppedCrashBoundaries(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Unix origins are unsupported on Windows")
-	}
 	for _, beforeCommit := range []bool{true, false} {
 		t.Run(fmt.Sprintf("before_commit_%t", beforeCommit), func(t *testing.T) {
 			ctx := context.Background()
@@ -736,14 +730,14 @@ func TestRetargetStoppedCrashBoundaries(t *testing.T) {
 			for i := range after {
 				expected := before[i]
 				if !beforeCommit {
-					expected.TargetURL, expected.LocalIP, expected.LocalPort, expected.LocalSocketPath = "http+unix:///tmp/private.sock", "", 0, "/tmp/private.sock"
+					expected.TargetURL, expected.LocalIP, expected.LocalPort, expected.LocalSocketPath, expected.LocalPipeName = privateStateTarget(t).URL, "", 0, privateStateTarget(t).SocketPath, privateStateTarget(t).PipeName
 					expected.UpdatedAt = after[i].UpdatedAt
 				}
 				if !reflect.DeepEqual(after[i], expected) {
 					t.Fatal("process death left a partial conversion or changed resource identity")
 				}
 			}
-			if _, err := registry.RetargetStoppedToUnix(ctx, "owner-test", "qurl-file-", "http+unix:///tmp/private.sock"); err != nil {
+			if _, err := registry.RetargetStoppedToPrivate(ctx, "owner-test", "qurl-file-", privateStateTarget(t).URL); err != nil {
 				t.Fatalf("restart could not resume: %v", err)
 			}
 		})
@@ -759,7 +753,7 @@ func TestRetargetStoppedCrashHelper(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := registry.RetargetStoppedToUnix(context.Background(), "owner-test", "qurl-file-", "http+unix:///tmp/private.sock"); err != nil {
+	if _, err := registry.RetargetStoppedToPrivate(context.Background(), "owner-test", "qurl-file-", privateStateTarget(t).URL); err != nil {
 		t.Fatal(err)
 	}
 	fmt.Println("converted")
@@ -767,9 +761,6 @@ func TestRetargetStoppedCrashHelper(t *testing.T) {
 }
 
 func TestEmptyPrivateOriginConversionFencesOldAndCurrentWriters(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Unix origins are unsupported on Windows")
-	}
 	ctx := context.Background()
 	dir := secureStateTestDir(t)
 	if err := EstablishExternalRuntimeMode(ctx, dir); err != nil {
@@ -779,7 +770,7 @@ func TestEmptyPrivateOriginConversionFencesOldAndCurrentWriters(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if changed, err := registry.RetargetStoppedToUnix(ctx, "owner-test", "qurl-file-", "http+unix:///tmp/private.sock"); err != nil || changed != 0 {
+	if changed, err := registry.RetargetStoppedToPrivate(ctx, "owner-test", "qurl-file-", privateStateTarget(t).URL); err != nil || changed != 0 {
 		t.Fatalf("empty conversion=%d %v", changed, err)
 	}
 	snapshot, err := os.ReadFile(filepath.Join(dir, LocalSharesFile)) // #nosec G304 -- private test fixture.
@@ -808,7 +799,7 @@ func TestEmptyPrivateOriginConversionFencesOldAndCurrentWriters(t *testing.T) {
 	if err != nil || !bytes.Equal(current, snapshot) {
 		t.Fatal("refused first publish mutated registry")
 	}
-	row.TargetURL, row.LocalIP, row.LocalPort, row.LocalSocketPath = "http+unix:///tmp/private.sock", "", 0, "/tmp/private.sock"
+	row.TargetURL, row.LocalIP, row.LocalPort, row.LocalSocketPath, row.LocalPipeName = privateStateTarget(t).URL, "", 0, privateStateTarget(t).SocketPath, privateStateTarget(t).PipeName
 	if err := registry.Put(ctx, &row); err != nil {
 		t.Fatal(err)
 	}
@@ -822,18 +813,125 @@ func TestEmptyPrivateOriginConversionFencesOldAndCurrentWriters(t *testing.T) {
 	if _, err := reopened.Retarget(ctx, row.ResourceID, LocalTarget{URL: "http://127.0.0.1:4000", IP: "127.0.0.1", Port: 4000}, 9); err == nil {
 		t.Fatal("higher epoch restored a reusable TCP file target")
 	}
-	row.TargetURL, row.LocalIP, row.LocalPort, row.LocalSocketPath, row.ServingEpoch = "http://127.0.0.1:4000", "127.0.0.1", 4000, "", 9
+	row.TargetURL, row.LocalIP, row.LocalPort, row.LocalSocketPath, row.LocalPipeName, row.ServingEpoch = "http://127.0.0.1:4000", "127.0.0.1", 4000, "", "", 9
 	if err := reopened.Put(ctx, &row); err == nil {
 		t.Fatal("higher-epoch publish bypassed private prefix")
 	}
 	stored, err := reopened.Get(ctx, row.ResourceID)
-	if err != nil || stored.CRID != row.CRID || stored.ServingEpoch != 8 || stored.DesiredState != "off" || stored.LocalSocketPath != "/tmp/private.sock" {
+	if err != nil || stored.CRID != row.CRID || stored.ServingEpoch != 8 || stored.DesiredState != "off" || stored.Target() != privateStateTarget(t) {
 		t.Fatalf("refused target change lost identity/state: %+v %v", stored, err)
 	}
-	if _, err := reopened.RetargetStoppedToUnix(ctx, "owner-test", "other-prefix-", "http+unix:///tmp/private.sock"); err == nil {
+	if _, err := reopened.RetargetStoppedToPrivate(ctx, "owner-test", "other-prefix-", privateStateTarget(t).URL); err == nil {
 		t.Fatal("converted namespace accepted a second private-origin prefix")
 	}
-	if changed, err := reopened.RetargetStoppedToUnix(ctx, "owner-test", "qurl-file-", "http+unix:///tmp/private.sock"); err != nil || changed != 0 {
+	if changed, err := reopened.RetargetStoppedToPrivate(ctx, "owner-test", "qurl-file-", privateStateTarget(t).URL); err != nil || changed != 0 {
 		t.Fatalf("same-prefix retry=%d %v", changed, err)
+	}
+}
+
+func privateStateTarget(t *testing.T) LocalTarget {
+	t.Helper()
+	raw := "http+unix:///tmp/private.sock"
+	if runtime.GOOS == "windows" {
+		raw = "http+npipe:///layerv-qurl-file-" + strings.Repeat("a", 64) + "-" + strings.Repeat("b", 32)
+	}
+	target, err := ParsePrivateTarget(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return target
+}
+
+func TestPipeTargetGrammarAndTuple(t *testing.T) {
+	raw := "http+npipe:///layerv-qurl-file-" + strings.Repeat("a", 64) + "-" + strings.Repeat("b", 32)
+	target, err := ParsePipeTarget(raw)
+	if runtime.GOOS != "windows" {
+		if err == nil {
+			t.Fatal("pipe accepted on unsupported OS")
+		}
+		return
+	}
+	if err != nil || target.PipeName != `\\.\pipe\`+strings.TrimPrefix(raw, "http+npipe:///") {
+		t.Fatalf("mapping: %+v %v", target, err)
+	}
+	for _, bad := range []string{raw + "?", raw + "#", raw + "/", raw + `\`, raw + "/extra", strings.ToUpper(raw), strings.Replace(raw, "///", "//host/", 1), strings.Replace(raw, "///", "//user@host/", 1), strings.Replace(raw, "aaaa", "%61aaa", 1), raw[:len(raw)-1], raw + "b"} {
+		if _, err := ParsePipeTarget(bad); err == nil {
+			t.Error("accepted noncanonical pipe URL")
+		}
+	}
+	row := LocalShare{TargetURL: target.URL, LocalPipeName: target.PipeName}
+	if err := validateLocalShareTarget(&row); err != nil {
+		t.Fatal(err)
+	}
+	for _, mixed := range []LocalShare{
+		{TargetURL: target.URL, LocalPipeName: target.PipeName, LocalIP: "127.0.0.1", LocalPort: 3000},
+		{TargetURL: target.URL, LocalPipeName: target.PipeName, LocalSocketPath: "/tmp/private.sock"},
+		{TargetURL: target.URL, LocalPipeName: target.PipeName + "b"},
+		{TargetURL: "http://127.0.0.1:3000", LocalIP: "127.0.0.1", LocalPort: 3000, LocalPipeName: target.PipeName},
+	} {
+		if validateLocalShareTarget(&mixed) == nil || validatePrivateOriginTarget("qurl-file-", "qurl-file-test", mixed.Target()) == nil {
+			t.Fatal("invalid private tuple accepted")
+		}
+	}
+	if _, err := (&LocalShareRegistry{}).RetargetStoppedToUnix(context.Background(), "owner-test", "qurl-file-", raw); err == nil {
+		t.Fatal("Unix wrapper accepted pipe")
+	}
+}
+
+func TestPrivateLaunchNonceRotationPreservesAuthority(t *testing.T) {
+	ctx := context.Background()
+	dir := secureStateTestDir(t)
+	if err := EstablishExternalRuntimeMode(ctx, dir); err != nil {
+		t.Fatal(err)
+	}
+	registry, err := openOwnedLocalShareRegistry(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding := testResourceBinding(t, "qurl-file-launch")
+	binding.CRID = testBindingCRID(t, &binding, apitest.VersionTest)
+	first := privateStateTarget(t)
+	row := LocalShare{CRID: binding.CRID, ResourceID: binding.ResourceID, ConnectorID: binding.ConnectorID, ConnectorRoutingID: binding.ConnectorRoutingID, KnockResourceID: binding.KnockResourceID, TargetURL: first.URL, LocalSocketPath: first.SocketPath, LocalPipeName: first.PipeName, DesiredState: "off", ServingEpoch: 7}
+	if err := registry.Put(ctx, &row); err != nil {
+		t.Fatal(err)
+	}
+	secondURL := strings.Replace(first.URL, "private.sock", "new.sock", 1)
+	if first.PipeName != "" {
+		secondURL = first.URL[:len(first.URL)-32] + strings.Repeat("c", 32)
+	}
+	second, err := ParsePrivateTarget(secondURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed := row
+	changed.TargetURL, changed.LocalSocketPath, changed.LocalPipeName = second.URL, second.SocketPath, second.PipeName
+	if err := registry.Put(ctx, &changed); err == nil {
+		t.Fatal("nonce changed without newer epoch outside offline conversion")
+	}
+	if _, err := registry.Retarget(ctx, row.CRID, second, row.ServingEpoch); err == nil {
+		t.Fatal("live same-epoch nonce change accepted")
+	}
+	if n, err := registry.RetargetStoppedToPrivate(ctx, "owner-test", "qurl-file-", second.URL); err != nil || n != 1 {
+		t.Fatalf("offline nonce rotation = %d %v", n, err)
+	}
+	stored, err := registry.Get(ctx, row.CRID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed.UpdatedAt = stored.UpdatedAt
+	if *stored != changed {
+		t.Fatal("offline nonce rotation changed authority, preference or epoch")
+	}
+	if owner, _, err := registry.OwnerID(ctx); err != nil || owner != "owner-test" {
+		t.Fatal("offline nonce rotation changed owner")
+	}
+	if _, err := registry.Retarget(ctx, row.CRID, first, row.ServingEpoch+1); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.Delete(ctx, row.CRID); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.ValidateTarget(ctx, row.ConnectorID, LocalTarget{URL: "http://127.0.0.1:3000", IP: "127.0.0.1", Port: 3000}); err == nil {
+		t.Fatal("delete removed private fence")
 	}
 }

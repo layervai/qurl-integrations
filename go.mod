@@ -13,7 +13,7 @@ require (
 	github.com/fatedier/frp v0.71.0
 	github.com/fatedier/golib v0.8.2
 	github.com/layervai/qurl-conformance v0.17.0
-	github.com/layervai/qurl-connector v0.14.1-rc.1.0.20260920045047-917aaf914b7a
+	github.com/layervai/qurl-connector v0.14.1-rc.1.0.20260922175907-13af5d3ff3ad
 	github.com/layervai/qurl-go v0.19.0
 	github.com/lestrrat-go/jwx/v2 v2.1.7
 	github.com/spf13/cobra v1.10.2

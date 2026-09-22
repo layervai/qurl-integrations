@@ -411,7 +411,7 @@ func activateLocalPublish(
 	local := &connectorstate.LocalShare{
 		CRID: resource.CRID, ResourceID: resource.ResourcePublicKey, ConnectorID: resource.Slug,
 		ConnectorRoutingID: resource.ConnectorRoutingID, KnockResourceID: knockResourceID,
-		TargetURL: target.canonicalOrigin, LocalIP: target.localIP, LocalPort: target.localPort, LocalSocketPath: target.localSocketPath,
+		TargetURL: target.canonicalOrigin, LocalIP: target.localIP, LocalPort: target.localPort, LocalSocketPath: target.localSocketPath, LocalPipeName: target.localPipeName,
 		DesiredState: string(sharing.DesiredState), ServingEpoch: sharing.ServingEpoch,
 	}
 	return local, sharing, compensateOff, nil

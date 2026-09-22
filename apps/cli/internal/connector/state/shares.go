@@ -17,6 +17,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	connectorshare "github.com/layervai/qurl-connector/pkg/share"
 	"github.com/layervai/qurl-go/crid"
 )
 
@@ -68,6 +69,7 @@ type LocalShare struct {
 	LocalIP            string    `json:"local_ip" yaml:"local_ip"`
 	LocalPort          int       `json:"local_port" yaml:"local_port"`
 	LocalSocketPath    string    `json:"local_socket_path,omitempty" yaml:"local_socket_path,omitempty"`
+	LocalPipeName      string    `json:"local_pipe_name,omitempty" yaml:"local_pipe_name,omitempty"`
 	DesiredState       string    `json:"desired_state" yaml:"desired_state"`
 	ServingEpoch       uint64    `json:"serving_epoch" yaml:"serving_epoch"`
 	UpdatedAt          time.Time `json:"updated_at" yaml:"-"`
@@ -75,7 +77,7 @@ type LocalShare struct {
 
 type localSharesState struct {
 	// PrivateOriginPrefix is set by external conversion even with no shares.
-	// Old strict decoders then refuse writes; current writers keep this prefix Unix-only.
+	// Old strict decoders then refuse writes; current writers keep this prefix private-only.
 	PrivateOriginPrefix string                `json:"private_origin_prefix,omitempty"`
 	Version             int                   `json:"version"`
 	OwnerID             string                `json:"owner_id,omitempty"`
@@ -240,11 +242,12 @@ type LocalTarget struct {
 	IP         string
 	Port       int
 	SocketPath string
+	PipeName   string
 }
 
 // Target returns the complete local transport destination.
 func (s *LocalShare) Target() LocalTarget {
-	return LocalTarget{URL: s.TargetURL, IP: s.LocalIP, Port: s.LocalPort, SocketPath: s.LocalSocketPath}
+	return LocalTarget{URL: s.TargetURL, IP: s.LocalIP, Port: s.LocalPort, SocketPath: s.LocalSocketPath, PipeName: s.LocalPipeName}
 }
 
 // ValidateTarget rejects a forbidden transport before callers change cloud
@@ -259,8 +262,11 @@ func (r *LocalShareRegistry) ValidateTarget(ctx context.Context, connectorID str
 }
 
 func validatePrivateOriginTarget(prefix, connectorID string, target LocalTarget) error {
-	if prefix != "" && strings.HasPrefix(connectorID, prefix) && target.SocketPath == "" {
-		return errors.New("private origin shares require Unix transport")
+	if err := validateLocalShareTarget(&LocalShare{TargetURL: target.URL, LocalIP: target.IP, LocalPort: target.Port, LocalSocketPath: target.SocketPath, LocalPipeName: target.PipeName}); err != nil {
+		return err
+	}
+	if prefix != "" && strings.HasPrefix(connectorID, prefix) && target.SocketPath == "" && target.PipeName == "" {
+		return errors.New("private origin shares require private transport")
 	}
 	return nil
 }
@@ -290,7 +296,7 @@ func (r *LocalShareRegistry) Retarget(ctx context.Context, id string, target Loc
 		if epoch <= share.ServingEpoch {
 			return fmt.Errorf("refuse local target change without a newer serving epoch than %d", share.ServingEpoch)
 		}
-		share.TargetURL, share.LocalIP, share.LocalPort, share.LocalSocketPath = target.URL, target.IP, target.Port, target.SocketPath
+		share.TargetURL, share.LocalIP, share.LocalPort, share.LocalSocketPath, share.LocalPipeName = target.URL, target.IP, target.Port, target.SocketPath, target.PipeName
 		share.DesiredState = desiredStateOn
 		share.ServingEpoch = epoch
 		share.UpdatedAt = time.Now().UTC()
@@ -330,12 +336,20 @@ func ValidateLocalRetargetSelector(owner, prefix string) error {
 	return nil
 }
 
-// RetargetStoppedToUnix excludes lease-aware daemons while changing local targets.
+// RetargetStoppedToUnix retains strict Unix-only compatibility.
+func (r *LocalShareRegistry) RetargetStoppedToUnix(ctx context.Context, owner, prefix, origin string) (int, error) {
+	if _, err := ParseUnixTarget(origin); err != nil {
+		return 0, err
+	}
+	return r.RetargetStoppedToPrivate(ctx, owner, prefix, origin)
+}
+
+// RetargetStoppedToPrivate excludes lease-aware daemons while changing local targets.
 // Callers must also reserve the configured IPC endpoint to exclude older daemons,
 // as daemon retarget-local does. External supervisors preserve resource authority, desired
 // state and serving epochs; ordinary live Retarget still requires a newer epoch.
-func (r *LocalShareRegistry) RetargetStoppedToUnix(ctx context.Context, owner, prefix, origin string) (changed int, retErr error) {
-	target, err := ParseUnixTarget(origin)
+func (r *LocalShareRegistry) RetargetStoppedToPrivate(ctx context.Context, owner, prefix, origin string) (changed int, retErr error) {
+	target, err := ParsePrivateTarget(origin)
 	if err != nil {
 		return 0, err
 	}
@@ -364,7 +378,7 @@ func (r *LocalShareRegistry) RetargetStoppedToUnix(ctx context.Context, owner, p
 			if !strings.HasPrefix(share.ConnectorID, prefix) || share.Target() == target {
 				continue
 			}
-			share.TargetURL, share.LocalIP, share.LocalPort, share.LocalSocketPath = target.URL, "", 0, target.SocketPath
+			share.TargetURL, share.LocalIP, share.LocalPort, share.LocalSocketPath, share.LocalPipeName = target.URL, "", 0, target.SocketPath, target.PipeName
 			share.UpdatedAt = time.Now().UTC()
 			if err := validateLocalShare(&share); err != nil {
 				return err
@@ -741,14 +755,35 @@ func ParseUnixTarget(raw string) (LocalTarget, error) {
 	return LocalTarget{URL: canonical, SocketPath: socket}, nil
 }
 
+// ParsePipeTarget accepts only the canonical local Windows pipe URL.
+func ParsePipeTarget(raw string) (LocalTarget, error) {
+	const prefix = "http+npipe:///"
+	if !strings.HasPrefix(raw, prefix) {
+		return LocalTarget{}, errors.New("local pipe target requires a canonical Windows pipe URL")
+	}
+	name := `\\.\pipe\` + strings.TrimPrefix(raw, prefix)
+	if err := connectorshare.ValidateLocalPipeName(name); err != nil {
+		return LocalTarget{}, errors.New("local pipe target is invalid")
+	}
+	return LocalTarget{URL: raw, PipeName: name}, nil
+}
+
+// ParsePrivateTarget validates the platform-specific private origin transport.
+func ParsePrivateTarget(raw string) (LocalTarget, error) {
+	if strings.HasPrefix(raw, "http+npipe:") {
+		return ParsePipeTarget(raw)
+	}
+	return ParseUnixTarget(raw)
+}
+
 func validateLocalShareTarget(share *LocalShare) error {
-	if strings.HasPrefix(share.TargetURL, "http+unix:") || share.LocalSocketPath != "" {
-		target, err := ParseUnixTarget(share.TargetURL)
+	if strings.HasPrefix(share.TargetURL, "http+unix:") || strings.HasPrefix(share.TargetURL, "http+npipe:") || share.LocalSocketPath != "" || share.LocalPipeName != "" {
+		target, err := ParsePrivateTarget(share.TargetURL)
 		if err != nil {
 			return err
 		}
-		if share.LocalIP != "" || share.LocalPort != 0 || share.LocalSocketPath != target.SocketPath {
-			return errors.New("local Unix target must match its recorded socket and exclude TCP")
+		if share.Target() != target {
+			return errors.New("local private target must match its recorded transport and exclude other transports")
 		}
 		return nil
 	}

@@ -448,9 +448,15 @@ External supervision changes three things:
   either way, but can still enroll a device and write authentication state.
 
 Private file origins can use a canonical `http+unix:///absolute/socket/path`
-target on macOS and Linux. The path must fit within 100 bytes; Windows has no
-TCP fallback for this transport. Request-header overlays still require a
-trusted TLS tunnel connection.
+target on macOS and Linux (at most 100 path bytes). Windows accepts only
+`http+npipe:///layerv-qurl-file-<64 lowercase hex profile SHA256>-<32 lowercase hex launch nonce>`,
+which maps to the local `\\.\pipe\layerv-qurl-file-...` namespace. Each pipe
+connection verifies that the server owner is the current Windows user before
+sending bytes. Neither private transport falls back to TCP. Request-header
+overlays still require a trusted TLS tunnel connection.
+
+Windows Desktop sharing remains disabled pending packaged-app qualification;
+this prepares the CLI transport and does not enable that product feature.
 
 To convert existing supervised file shares, first stop and verify the daemon
 has exited, bind the private origin, then run:
@@ -461,9 +467,9 @@ qurl daemon retarget-local --supervision external -o json <<'JSON'
 JSON
 ```
 
-Private Unix origins and external `--enrollment-token-file` handoff require
-Unix. Windows rejects those paths; ordinary account-API-key login remains
-available.
+On Windows, supply the canonical `http+npipe` target to the same command.
+Private Unix origins and external `--enrollment-token-file` handoff still require
+Unix; ordinary account-API-key login remains available on Windows.
 
 The command uses the normal profile/state-directory settings. It requires an
 existing externally supervised namespace and matching durable owner, reserves
