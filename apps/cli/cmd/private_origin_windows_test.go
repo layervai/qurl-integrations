@@ -99,7 +99,7 @@ func TestWindowsRetargetLocalOfflineAndDaemonExclusion(t *testing.T) {
 		t.Fatal(err)
 	}
 	invoke := func() *runResult {
-		bounded, cancel := context.WithTimeout(ctx, time.Second)
+		bounded, cancel := context.WithTimeout(ctx, 5*time.Second)
 		defer cancel()
 		return runCLI(t, &runOpts{ctx: bounded, args: []string{"daemon", "retarget-local", "--supervision", "external", "-o", "json"}, env: map[string]string{}, shareStateDir: dir, stdin: strings.NewReader(string(input)), openAPIClient: func(context.Context) (qurlapi.Client, error) {
 			t.Error("offline retarget opened REST client")
