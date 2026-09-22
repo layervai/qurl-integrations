@@ -555,6 +555,7 @@ func TestOpenNativeRegisteredClient_ExplicitLoginUsesRealConnectorRecovery(t *te
 		}
 		if recovered == nil {
 			t.Fatal("persisted connector agent state is missing")
+			return
 		}
 		if recovered.DeviceAPIKeyID != connectorIntegrationRecoveredKeyID {
 			t.Fatalf("recovered device API key ID = %q, want %q", recovered.DeviceAPIKeyID, connectorIntegrationRecoveredKeyID)
