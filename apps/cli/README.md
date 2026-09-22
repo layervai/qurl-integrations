@@ -482,12 +482,17 @@ Conversion durably reserves one private-origin prefix per namespace even when
 writers cannot publish or retarget that prefix back to TCP, even at a newer epoch.
 The supervisor owns the exact prefix; it must use the same constant for publishing
 and conversion. An owner-bound profile with no file shares is a valid empty set.
-The origin must be bound inside an owner-only (0700) directory controlled by
+On Unix, the origin must be bound inside an owner-only (0700) directory controlled by
 the supervisor, with ancestors other users cannot replace; do not use a socket
 directly under a shared temporary directory. The supervisor enforces this
-filesystem boundary; the CLI validates the Unix target grammar. Conversion is
-offline and may precede binding the origin, so it does not dial the target.
-Set the same `QURL_CONNECTOR_RUNTIME_DIR` environment value for daemon startup
+filesystem boundary; the CLI validates the Unix target grammar. On Windows,
+the CLI verifies the connected pipe's owner SID matches the current user before
+sending bytes. The supervisor must require the per-launch proxy token on every
+request, including local preview, and rotate the nonce when starting a new origin.
+The Windows default pipe DACL is not owner-only; same-user malware and
+administrators remain outside this isolation boundary. Conversion is offline
+and may precede binding the origin, so it does not dial the target.
+On Unix, set the same `QURL_CONNECTOR_RUNTIME_DIR` environment value for daemon startup
 and conversion (including any value supplied through daemon run's hidden
 `--runtime-dir` flag), so the IPC reservation also excludes older daemon binaries.
 A live or ambiguous daemon at that endpoint blocks conversion. Start the daemon only after conversion succeeds. New daemon binaries
