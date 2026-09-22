@@ -4,6 +4,9 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
+const originalEnv = { ...process.env };
+beforeEach(() => { jest.clearAllMocks(); });
+afterEach(() => { process.env = { ...originalEnv }; });
 const { installMintReceipt } = require('../scripts/smoke-detect');
 
 test('captures exact detector child before returning mint, without capability or native session claims', async () => {
@@ -24,7 +27,7 @@ test('captures exact detector child before returning mint, without capability or
     const text = fs.readFileSync(process.env.QURL_OWNERSHIP_RECEIPTS, 'utf8');
     const receipt = JSON.parse(text);
     expect(receipt).toMatchObject({ owner_id: 'owner', resource_id: 'r_owned', qurl_id: 'q_detector',
-      purpose: 'discord_detect_smoke_detector_child', public_identity: identity });
+      purpose: 'discord_detect_smoke_detector_child', crid: 'crid-owned', public_identity: identity });
     expect(text).not.toMatch(/secret-capability|session_id|detected/);
     expect(restore.captured).toBe(1);
     expect(fs.statSync(process.env.QURL_OWNERSHIP_RECEIPTS).mode & 0o777).toBe(0o600);
@@ -80,4 +83,12 @@ test('failed child revoke retains only structured safe cleanup identity', async 
     });
     expect(JSON.stringify(log.mock.calls)).not.toContain('at_');
   } finally { restore(); log.mockRestore(); }
+});
+
+
+test('real SDK exposes the interception and exact-child revoke methods', () => {
+  const { QURLClient } = jest.requireActual('@layervai/qurl');
+  expect(typeof QURLClient.prototype.createQurlForResource).toBe('function');
+  expect(typeof QURLClient.prototype.revokeResourceQurl).toBe('function');
+  expect(() => installMintReceipt(class {}, 'owner')).toThrow('interception point missing');
 });

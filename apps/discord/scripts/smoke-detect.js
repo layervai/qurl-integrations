@@ -13,6 +13,7 @@ const { validateResourceId } = require('../src/utils/resource-id');
 // can start native opening. The detected watermark's qurl_id is a different ID.
 function installMintReceipt(Client, owner) {
   const original = Client.prototype.createQurlForResource;
+  assert.equal(typeof original, 'function', 'SDK mint interception point missing');
   const restore = () => { Client.prototype.createQurlForResource = original; };
   restore.captured = 0;
   Client.prototype.createQurlForResource = async function (crid, ...args) {
@@ -32,8 +33,10 @@ function installMintReceipt(Client, owner) {
       const now = new Date();
       fs.appendFileSync(process.env.QURL_OWNERSHIP_RECEIPTS, JSON.stringify({
         event: 'owned_admission_attempt', purpose: 'discord_detect_smoke_detector_child',
-        owner_id: owner, resource_id: minted.resource_id, qurl_id: minted.qurl_id,
+        owner_id: owner, resource_id: minted.resource_id, crid, qurl_id: minted.qurl_id,
         expires_at: minted.expires_at, observed_at: now.toISOString(),
+        // Native start deadline begins after verification; expires_at separately
+        // bounds the child credential. Neither field claims the session is CLOSED.
         attempt_deadline: new Date(now.getTime() + 15000).toISOString(),
         public_identity: publicIdentity, catalog_binding: 'pending_independent_readback',
         child_binding: 'pending_independent_readback',
@@ -73,19 +76,21 @@ async function main() {
     'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=',
     'base64',
   );
-  for (const name of ['QURL_OWNERSHIP_VERIFIER', 'QURL_OWNERSHIP_RECEIPTS', 'QURL_PUBLIC_CONFIG_URL']) {
+  for (const name of ['QURL_OWNERSHIP_VERIFIER', 'QURL_OWNERSHIP_RECEIPTS', 'QURL_PUBLIC_CONFIG_URL', 'QURL_ENDPOINT', 'QURL_API_KEY']) {
     assert.ok(process.env[name], `Missing ${name}`);
   }
   fs.accessSync(process.env.QURL_OWNERSHIP_VERIFIER, fs.constants.X_OK);
   fs.appendFileSync(process.env.QURL_OWNERSHIP_RECEIPTS, '', { mode: 0o600 });
+  fs.chmodSync(process.env.QURL_OWNERSHIP_RECEIPTS, 0o600);
   const checked = spawnSync(process.env.QURL_OWNERSHIP_VERIFIER, ['--check-config'], { timeout: 10000 });
   assert.ok(!checked.error && checked.status === 0, 'ownership trust unavailable');
   const me = await fetch(new URL('/v1/me', process.env.QURL_ENDPOINT), {
     headers: { Authorization: `Bearer ${process.env.QURL_API_KEY}` }, signal: AbortSignal.timeout(10000),
   });
   assert.ok(me.ok, 'ownership owner read failed');
+  // TODO(upstream-contract): qurl-service GET /v1/me returns data.owner_id.
   const owner = (await me.json()).data?.owner_id;
-  assert.ok(typeof owner === 'string' && owner.trim(), 'ownership owner missing');
+  validateResourceId(owner);
   const restore = installMintReceipt(QURLClient, owner);
   try {
     const { detectWatermark } = require('../src/connector');
