@@ -877,9 +877,6 @@ func TestPipeTargetGrammarAndTuple(t *testing.T) {
 			t.Fatal("invalid private tuple accepted")
 		}
 	}
-	if _, err := (&LocalShareRegistry{}).RetargetStoppedToUnix(context.Background(), "owner-test", "qurl-file-", raw); err == nil {
-		t.Fatal("Unix wrapper accepted pipe")
-	}
 }
 
 func TestPrivateLaunchNonceRotationPreservesAuthority(t *testing.T) {
@@ -937,5 +934,32 @@ func TestPrivateLaunchNonceRotationPreservesAuthority(t *testing.T) {
 	}
 	if err := registry.ValidateTarget(ctx, row.ConnectorID, LocalTarget{URL: "http://127.0.0.1:3000", IP: "127.0.0.1", Port: 3000}); err == nil {
 		t.Fatal("delete removed private fence")
+	}
+}
+
+func TestDaemonLeaseWithinWaitsForReleaseButStaysExclusive(t *testing.T) {
+	ctx := context.Background()
+	dir := secureStateTestDir(t)
+	unlock, err := AcquireDaemonLease(ctx, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := AcquireDaemonLease(ctx, dir); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("default lease wait = %v, want deadline while held", err)
+	}
+	released := make(chan error, 1)
+	time.AfterFunc(300*time.Millisecond, func() { released <- unlock() })
+	next, err := AcquireDaemonLeaseWithin(ctx, dir, 10*time.Second)
+	if err != nil {
+		t.Fatalf("bounded wait did not outlast the predecessor: %v", err)
+	}
+	if err := <-released; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := AcquireDaemonLease(ctx, dir); err == nil {
+		t.Fatal("waiting acquisition is not exclusive")
+	}
+	if err := next(); err != nil {
+		t.Fatal(err)
 	}
 }

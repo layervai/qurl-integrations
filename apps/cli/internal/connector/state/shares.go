@@ -316,10 +316,17 @@ func (r *LocalShareRegistry) Retarget(ctx context.Context, id string, target Loc
 // AcquireDaemonLease excludes another daemon or offline target conversion for
 // this state namespace, even when its IPC socket has been removed or relocated.
 func AcquireDaemonLease(ctx context.Context, dir string) (func() error, error) {
+	return AcquireDaemonLeaseWithin(ctx, dir, 100*time.Millisecond)
+}
+
+// AcquireDaemonLeaseWithin is AcquireDaemonLease with a caller-chosen wait, so
+// an externally supervised daemon can outlast an overlapping predecessor that
+// is still draining during a rolling deploy.
+func AcquireDaemonLeaseWithin(ctx context.Context, dir string, wait time.Duration) (func() error, error) {
 	if err := EnsureDirMode(dir); err != nil {
 		return nil, err
 	}
-	bounded, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
+	bounded, cancel := context.WithTimeout(ctx, wait)
 	defer cancel()
 	unlock, err := acquireNamedStateLock(bounded, dir, "daemon.lock")
 	if err != nil {
@@ -334,15 +341,6 @@ func ValidateLocalRetargetSelector(owner, prefix string) error {
 		return errors.New("local target selector requires an owner and a valid connector ID prefix ending in a hyphen")
 	}
 	return nil
-}
-
-// RetargetStoppedToUnix retains the strict Unix-only API for callers of the
-// original Unix conversion; pipe callers must use RetargetStoppedToPrivate.
-func (r *LocalShareRegistry) RetargetStoppedToUnix(ctx context.Context, owner, prefix, origin string) (int, error) {
-	if _, err := ParseUnixTarget(origin); err != nil {
-		return 0, err
-	}
-	return r.RetargetStoppedToPrivate(ctx, owner, prefix, origin)
 }
 
 // RetargetStoppedToPrivate excludes lease-aware daemons while changing local targets.
