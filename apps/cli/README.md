@@ -487,8 +487,9 @@ The supervisor owns the exact prefix; it must use the same constant for publishi
 and conversion. An owner-bound profile with no file shares is a valid empty set.
 On Unix, the origin must be bound inside an owner-only (0700) directory controlled by
 the supervisor, with ancestors other users cannot replace; do not use a socket
-directly under a shared temporary directory. The supervisor enforces this
-filesystem boundary; the CLI validates the Unix target grammar. On Windows,
+directly under a shared temporary directory. The supervisor owns the ancestor
+boundary; before dialing, the CLI also refuses a Unix socket whose parent is not
+an owned `0700` directory. On Windows,
 the CLI verifies the connected pipe's owner SID matches the current user before
 sending bytes. The supervisor must require the per-launch proxy token on every
 request, including local preview, and rotate the nonce when starting a new origin.

@@ -932,6 +932,11 @@ func preflightShareTarget(ctx context.Context, opts *globalOpts, target connecto
 	if err != nil || checked != target {
 		return errors.New("local private target is invalid")
 	}
+	// Enforce the documented owner-only (0700) parent instead of trusting the
+	// supervisor alone. The fixed message keeps the private path out of output.
+	if target.SocketPath != "" && connectordaemon.ValidateOwnerOnlyParent(target.SocketPath) != nil {
+		return errors.New("local Unix origin must be inside a directory you own with mode 0700")
+	}
 	dialCtx, cancel := context.WithTimeout(ctx, 1500*time.Millisecond)
 	defer cancel()
 	var conn net.Conn

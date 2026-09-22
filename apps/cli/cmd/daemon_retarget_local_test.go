@@ -117,6 +117,15 @@ func TestPrivateOriginPreflightUsesOnlyUnixSocket(t *testing.T) {
 	if err := preflightShareTarget(ctx, opts, target); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.Chmod(dir, 0o755); err != nil { // #nosec G302 -- deliberately unsafe fixture directory.
+		t.Fatal(err)
+	}
+	if err := preflightShareTarget(ctx, opts, target); err == nil || strings.Contains(err.Error(), dir) {
+		t.Fatal("origin outside an owner-only directory must fail without disclosing its path")
+	}
+	if err := os.Chmod(dir, 0o700); err != nil { // #nosec G302 -- directories need the owner execute bit.
+		t.Fatal(err)
+	}
 	if err := origin.Close(); err != nil {
 		t.Fatal(err)
 	}
