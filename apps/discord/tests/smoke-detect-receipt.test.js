@@ -50,3 +50,34 @@ test.each([['write', 0], ['verification', 1]])('%s failure prevents opening and 
   } finally { restore(); }
   expect(Client.prototype.createQurlForResource).toBe(original);
 });
+
+
+test.each([undefined, 'at_secret', 'bad/id'])('invalid child %s is never revoked', async qurl_id => {
+  const revoke = jest.fn();
+  class Client {
+    async createQurlForResource() { return { crid: 'crid-owned', resource_id: 'r_owned', qurl_id }; }
+    async revokeResourceQurl(...args) { revoke(...args); }
+  }
+  const restore = installMintReceipt(Client, 'owner');
+  try {
+    await expect(new Client().createQurlForResource('crid-owned')).rejects.toThrow('could not be persisted');
+    expect(revoke).not.toHaveBeenCalled();
+  } finally { restore(); }
+});
+
+test('failed child revoke retains only structured safe cleanup identity', async () => {
+  const log = jest.spyOn(console, 'error').mockImplementation(() => {});
+  spawnSync.mockReturnValue({ status: 1 });
+  class Client {
+    async createQurlForResource() { return { crid: 'crid-owned', resource_id: 'r_owned', qurl_id: 'q_detector', expires_at: '2030-01-01T00:00:00Z', qurl_link: 'at_capability' }; }
+    async revokeResourceQurl() { throw new Error('at_dependency-secret'); }
+  }
+  const restore = installMintReceipt(Client, 'owner');
+  try {
+    await expect(new Client().createQurlForResource('crid-owned')).rejects.toThrow('could not be persisted');
+    expect(log).toHaveBeenCalledWith('Detector child cleanup required', {
+      event: 'detector_child_cleanup_required', owner_id: 'owner', resource_id: 'r_owned', qurl_id: 'q_detector', crid: 'crid-owned',
+    });
+    expect(JSON.stringify(log.mock.calls)).not.toContain('at_');
+  } finally { restore(); log.mockRestore(); }
+});

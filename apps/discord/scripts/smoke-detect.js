@@ -6,6 +6,8 @@ const fs = require('node:fs');
 const { spawnSync } = require('node:child_process');
 const { createHash } = require('node:crypto');
 const { QURLClient } = require('@layervai/qurl');
+const { hasPersistableQurlIdShape } = require('../src/utils/qurl-id');
+const { validateResourceId } = require('../src/utils/resource-id');
 
 // Smoke-only interception: persist the actual detector child before the caller
 // can start native opening. The detected watermark's qurl_id is a different ID.
@@ -16,7 +18,8 @@ function installMintReceipt(Client, owner) {
   Client.prototype.createQurlForResource = async function (crid, ...args) {
     const minted = await original.call(this, crid, ...args);
     try {
-      assert.ok(minted.resource_id && minted.qurl_id && minted.crid === crid);
+      validateResourceId(minted.resource_id);
+      assert.ok(hasPersistableQurlIdShape(minted.qurl_id) && minted.crid === crid);
       assert.ok(Number.isFinite(Date.parse(minted.expires_at)));
       const verified = spawnSync(process.env.QURL_OWNERSHIP_VERIFIER, [], {
         input: minted.qurl_link, encoding: 'utf8', timeout: 10000, maxBuffer: 16384,
@@ -40,7 +43,19 @@ function installMintReceipt(Client, owner) {
     } catch {
       // No native opening occurred. Revoke only this returned child, never its
       // shared detector resource. Preserve cleanup failure as a failed smoke.
-      await this.revokeResourceQurl(crid, minted.qurl_id);
+      if (hasPersistableQurlIdShape(minted?.qurl_id)) {
+        try {
+          await this.revokeResourceQurl(crid, minted.qurl_id);
+        } catch {
+          // Restricted CI log fallback if the required private file could not
+          // be written. Never include dependency errors or the signed link.
+          const safeID = value => { try { validateResourceId(value); return value; } catch { return null; } };
+          console.error('Detector child cleanup required', {
+            event: 'detector_child_cleanup_required', owner_id: safeID(owner),
+            resource_id: safeID(minted.resource_id), qurl_id: minted.qurl_id, crid: safeID(crid),
+          });
+        }
+      }
       throw new Error('detector child ownership receipt could not be persisted');
     }
     return minted;
