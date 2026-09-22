@@ -514,7 +514,7 @@ func runShareDaemonWithDeployment(ctx context.Context, opts *globalOpts, stateDi
 
 // TODO(upstream-contract): externalDaemonLeaseWait covers ECS's default 30s
 // stopTimeout plus drain; a raised stopTimeout (max 120s) needs stop-first deploys.
-const externalDaemonLeaseWait = 60 * time.Second
+var externalDaemonLeaseWait = 60 * time.Second
 
 // lockDaemonPaths excludes offline retargeting for the complete daemon lifetime,
 // including startup before its IPC listener exists.

@@ -347,6 +347,8 @@ func ValidateLocalRetargetSelector(owner, prefix string) error {
 // Callers must also reserve the configured IPC endpoint to exclude older daemons,
 // as daemon retarget-local does. External supervisors preserve resource authority, desired
 // state and serving epochs; ordinary live Retarget still requires a newer epoch.
+// Only the target grammar is checked: a Unix origin directory may not exist yet,
+// so its owner-only parent is enforced when publish or restart preflights it.
 func (r *LocalShareRegistry) RetargetStoppedToPrivate(ctx context.Context, owner, prefix, origin string) (changed int, retErr error) {
 	target, err := ParsePrivateTarget(origin)
 	if err != nil {

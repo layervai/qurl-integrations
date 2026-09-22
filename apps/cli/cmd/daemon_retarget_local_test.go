@@ -158,6 +158,9 @@ func TestDaemonRetargetLocalRejectsInvalidInputsAndNativeNamespace(t *testing.T)
 }
 
 func TestDaemonRunLeaseContentionPreservesConflictAndCallerCancellation(t *testing.T) {
+	// Assert the classification without paying the production ECS wait.
+	defer func(wait time.Duration) { externalDaemonLeaseWait = wait }(externalDaemonLeaseWait)
+	externalDaemonLeaseWait = 200 * time.Millisecond
 	dir := connectorStateTestDir(t)
 	unlock, err := connectorstate.AcquireDaemonLease(context.Background(), dir)
 	if err != nil {
