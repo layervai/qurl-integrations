@@ -31,11 +31,14 @@ func TestPrivateOriginCrashLeavesSurvivingDaemonOffTCP(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	dir, err := os.MkdirTemp(privateTestTempRoot(), "qc-") // Keep the socket below macOS sun_path's limit.
+	rootDir, err := os.MkdirTemp(privateTestTempRoot(), "qc-") // Keep the socket below macOS sun_path's limit.
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	t.Cleanup(func() { _ = os.RemoveAll(rootDir) })
+	// Create the namespace through EnsureDirMode so elevated Windows runners
+	// assign its owner to the current user, not the inherited Administrators SID.
+	dir := filepath.Join(rootDir, "state")
 	target := privateCmdTarget(t, dir)
 	if err := connectorstate.EstablishExternalRuntimeMode(ctx, dir); err != nil {
 		t.Fatal(err)

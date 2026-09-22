@@ -76,7 +76,7 @@ func shareRestartCmd(opts *globalOpts) *cobra.Command {
 		Long: `Restart sharing a local app.
 
 Rotates the share on a fresh serving epoch so no stale session keeps serving
-it. With --target the share also moves to a different loopback origin on this
+it. With --target the share also moves to a different local origin on this
 machine; the CRID and Connector identity stay the same, so every link already
 handed out keeps working — and now resolves to whatever serves the new
 origin.`,
@@ -92,13 +92,13 @@ origin.`,
 			return changeShareState(cmd.Context(), opts, args[0], "restart", destination)
 		},
 	}
-	cmd.Flags().StringVar(&target, "target", "", "move the share to this loopback HTTP origin, e.g. http://127.0.0.1:4000")
+	cmd.Flags().StringVar(&target, "target", "", "move the share to a loopback HTTP or platform-specific private origin")
 	return cmd
 }
 
 // restartTarget validates a restart --target with the local publish rules
 // before the command touches local state or the network. A share's target is
-// what the daemon proxies to on this machine, so only a loopback origin can
+// what the daemon proxies to on this machine, so only a local origin can
 // be a destination.
 func restartTarget(raw string) (*publishTarget, error) {
 	target, err := classifyPublishTarget(raw)
@@ -106,7 +106,7 @@ func restartTarget(raw string) (*publishTarget, error) {
 		return nil, err
 	}
 	if target.kind != publishTargetLocal {
-		return nil, invalidPublishTarget(errors.New("a local share can only move to a loopback HTTP origin such as http://127.0.0.1:4000"))
+		return nil, invalidPublishTarget(errors.New("a local share requires a loopback HTTP or platform-specific private origin"))
 	}
 	return target, nil
 }

@@ -348,7 +348,7 @@ directory rather than switching in place.
 
 | Command | Description |
 |---------|-------------|
-| `qurl publish <target-url>` | Publish a remote URL or serve a loopback HTTP app, and get its CRID |
+| `qurl publish <target-url>` | Publish a remote URL or serve a local app, and get its CRID |
 | `qurl share <CRID>` | Share a CRID as a short-lived access link |
 | `qurl get <CRID>` | Fetch what a CRID points to: browser on a terminal, or download with `--file` |
 | `qurl list` | List your published resources |
@@ -686,12 +686,12 @@ the resource first if you intentionally want a new CRID.
 ### Move a local share
 
 Use `qurl restart <CRID> --target http://127.0.0.1:4000` to move an existing
-local share to a new loopback HTTP origin. The destination must be reachable;
+local share to a new loopback HTTP or platform-specific private origin. The destination must be reachable;
 the old origin can already be stopped. The CRID and Connector ID stay the same.
 
 | Flag | Description |
 |------|-------------|
-| `--target <url>` | Move the share to this loopback HTTP origin, e.g. `http://127.0.0.1:4000` |
+| `--target <url>` | Move the share to a loopback HTTP or platform-specific private origin |
 
 The destination follows the [local publish rules](#local-apps) — a loopback
 HTTP origin without path, query, fragment, or credentials; anything else is a

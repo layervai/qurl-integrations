@@ -39,6 +39,9 @@ For a local app, pass its loopback HTTP address:
 
   qurl publish http://127.0.0.1:3000
 
+Private origins also accept http+unix socket URLs on Unix or canonical
+http+npipe URLs on Windows. Private transports never fall back to TCP.
+
 On Linux, macOS, and Windows, qURL starts a per-user background daemon, waits
 until the route is serving, prints the CRID, and exits. The daemon resumes
 desired-on shares after login, sleep, wake, and network changes. Running the
@@ -74,10 +77,10 @@ share and turns it off when it exits.`,
 				return runLocalPublish(cmd.Context(), opts, target, connectorID, foreground)
 			}
 			if cmd.Flags().Changed("id") {
-				return exitcode.UsageError(errors.New("--id applies only when publishing a loopback HTTP origin"))
+				return exitcode.UsageError(errors.New("--id applies only when publishing a local origin"))
 			}
 			if cmd.Flags().Changed("foreground") {
-				return exitcode.UsageError(errors.New("--foreground applies only when publishing a loopback HTTP origin"))
+				return exitcode.UsageError(errors.New("--foreground applies only when publishing a local origin"))
 			}
 			if err := opts.requireRuntimeSupervisionIfNamespace(); err != nil {
 				return err
