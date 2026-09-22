@@ -97,8 +97,12 @@ function ddbSendConfigGuardFitsTransaction(sends = []) {
 // Keep in sync with Discord's own 25MB attachment limit.
 const MAX_FILE_SIZE = 25 * 1024 * 1024;
 
-// Bound each mint request; resources can have more links across requests.
+// TODO(upstream-contract): Connector handler.MaxMintBatchCount is 10
+// (qurl-integrations-infra 26957e61). This bounds requests, not resources.
+// Shared here because the standalone load test cannot import commands/store.
 const MINT_BATCH_SIZE = 10;
+// TODO(upstream-contract): Connector POST /api/revoke_links accepts 10 ids.
+const REVOKE_CHILD_BATCH_SIZE = 10;
 // Over-minted children beyond the requested count that mint-failure
 // compensation still revokes (commands.js 2xx path and connector.js non-2xx
 // partial path); further overflow ids are only logged for reconciliation.
@@ -582,19 +586,10 @@ const AUDIT_EVENTS = {
   // it does NOT split on `reason`, because a systemic outage can be a 4xx
   // (the 2026-05-13 incident was a sub-floor-session_duration 400) — and
   // pages on a sustained spike. `reason`/`kind` are forensic + dashboard
-  // dimensions, not the alarm gate. `quota_exceeded` — the one genuinely
-  // high-volume normal condition (a viral upload hitting the per-qURL token
-  // quota) — is skipped at source below, so it can't inflate the metric.
-  //
-  // Everything else emits, by design. Other "expected, user-recoverable"
-  // conditions — an expired Discord CDN URL (Add Recipients on a >24h-old
-  // send) or per-resource pool exhaustion (429, which mintLinksInBatches
-  // auto-handles via re-upload) — are RARE at the catch, so the alarm's
-  // sustained threshold absorbs them; they are NOT skipped at source.
-  // A source-side message/phase-based skip was tried for CDN-expiry and
-  // removed: it kept mis-bucketing real connector 403/auth outages as
-  // "expiry" and silently suppressing them. Skip only what is genuinely
-  // high-volume (quota); let volume + threshold handle the rest.
+  // dimensions, not the alarm gate. Account quota exhaustion is an expected
+  // user condition with a dedicated reply; it does not page the on-call team.
+  // Other errors still emit, including rate limits and expired CDN URLs:
+  // message-based filtering can hide real connector authentication failures.
   //
   // The sibling connector_no_resource_id alarm separately catches the
   // "200 + missing resource_id" shape.
@@ -713,6 +708,7 @@ module.exports = {
   ddbSendConfigGuardFitsTransaction,
   MAX_FILE_SIZE,
   MINT_BATCH_SIZE,
+  REVOKE_CHILD_BATCH_SIZE,
   MAX_OVERFLOW_REVOKE_IDS,
   MAX_CONCURRENT_MONITORS,
   DISCORD_MEMBERS_PAGE_SIZE,

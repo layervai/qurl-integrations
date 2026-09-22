@@ -30,6 +30,7 @@ const {
   DM_STATUS,
   MAX_FILE_SIZE,
   MINT_BATCH_SIZE,
+  REVOKE_CHILD_BATCH_SIZE,
   MAX_OVERFLOW_REVOKE_IDS,
   MAX_CONCURRENT_MONITORS,
   DISCORD_MEMBERS_PAGE_SIZE,
@@ -688,6 +689,18 @@ function setDetectCooldown(guildId, userId) {
 
 function clearDetectCooldown(guildId, userId) {
   detectCooldowns.delete(detectCooldownKey(guildId, userId));
+}
+
+// Keep revoke failures local to one bounded group, even when many recipients
+// share an upload. batchSettled must still attempt groups after a failure.
+function revokeWorkUnits(byResource) {
+  return [...byResource].flatMap(([resourceId, children]) => {
+    const units = [];
+    for (let i = 0; i < children.length; i += REVOKE_CHILD_BATCH_SIZE) {
+      units.push([resourceId, children.slice(i, i + REVOKE_CHILD_BATCH_SIZE)]);
+    }
+    return units;
+  });
 }
 
 async function batchSettled(items, fn, batchSize = 5) {
@@ -1753,7 +1766,7 @@ async function mintLinksInBatches({ initialResourceId, expiresAt, recipientCount
       ids.push(qurlId);
       idsByResource.set(link.resourceId, ids);
     }
-    const entries = [...idsByResource];
+    const entries = revokeWorkUnits(idsByResource);
     const compensation = batchSettled(entries, ([resourceId, ids]) => (
       revokeMintedLinks(resourceId, ids, apiKey)
     ), 5);
@@ -2998,11 +3011,11 @@ async function cleanupFreshAddRecipientResources(batchSends, apiKey, sendId, opt
     ids.push(qurlId);
     qurlIdsByResource.set(s.resourceId, ids);
   }
-  const resourceIds = [...qurlIdsByResource.keys()];
-  if (resourceIds.length === 0 && unidentifiedCount === 0) return;
+  const entries = revokeWorkUnits(qurlIdsByResource);
+  if (entries.length === 0 && unidentifiedCount === 0) return;
 
-  const cleanup = batchSettled(resourceIds, async (resourceId) => {
-    await revokeMintedLinks(resourceId, qurlIdsByResource.get(resourceId), apiKey);
+  const cleanup = batchSettled(entries, async ([resourceId, ids]) => {
+    await revokeMintedLinks(resourceId, ids, apiKey);
     return resourceId;
   }, 5);
   // Same bounded wait as mint-failure compensation: the Add Recipients reply
@@ -3012,9 +3025,9 @@ async function cleanupFreshAddRecipientResources(batchSends, apiKey, sendId, opt
       sendId,
       reason: cleanupReason,
       unidentified_count: unidentifiedCount,
-      resources: resourceIds.map(resourceId => ({
+      resources: entries.map(([resourceId, ids]) => ({
         resource_ref: resourceIdLogRef(resourceId),
-        qurl_ids: qurlIdsByResource.get(resourceId),
+        qurl_ids: ids,
       })),
     });
     return;
@@ -3024,7 +3037,8 @@ async function cleanupFreshAddRecipientResources(batchSends, apiKey, sendId, opt
   results.forEach((result, index) => {
     if (result.status === 'rejected') {
       failed.push({
-        resource_ref: resourceIdLogRef(resourceIds[index]),
+        resource_ref: resourceIdLogRef(entries[index][0]),
+        qurl_ids: entries[index][1],
         error: result.reason?.message,
       });
     }
@@ -3034,7 +3048,7 @@ async function cleanupFreshAddRecipientResources(batchSends, apiKey, sendId, opt
       sendId,
       reason: cleanupReason,
       failed_count: failed.length,
-      total: resourceIds.length,
+      total: entries.length,
       unidentified_count: unidentifiedCount,
       failures: failed,
     });
@@ -3042,7 +3056,7 @@ async function cleanupFreshAddRecipientResources(batchSends, apiKey, sendId, opt
     logger.info('Cleaned up freshly minted Add Recipients qURL resources', {
       sendId,
       reason: cleanupReason,
-      total: resourceIds.length,
+      total: entries.length,
     });
   }
 }
@@ -8517,9 +8531,8 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
   // step skips them.
   const items = await db.getSendItems(sendId, senderDiscordId, { consistentRead: true });
 
-  // Revoke each resource's children in one call per unique resource_id and
-  // fan the result out to every recipient sharing it (mintLinksInBatches packs
-  // multiple request batches against one resource).
+  // Revoke bounded child groups independently. A failed group must not stop
+  // later groups or hide confirmed outcomes for other recipients.
   // A row without a usable qurl_id cannot be revoked: a watermarked child lives
   // on the connector's tunnel, so deleting the shared parent would neither
   // reach it nor be safe for other sends. Only that row's recipient fails;
@@ -8536,7 +8549,7 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
     list.push({ recipientId: item.recipient_discord_id, qurlId });
     byResource.set(item.resource_id, list);
   }
-  const resourceEntries = [...byResource.entries()];
+  const resourceEntries = revokeWorkUnits(byResource);
   const totalUsers = new Set(items.map(it => it.recipient_discord_id)).size;
 
   const successUserIds = [];
@@ -8588,7 +8601,8 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
   // affected recipients in a separate field while keeping finalization
   // fail-closed.
   const auditTotal = byResource.size;
-  const auditSuccess = results.filter(r => r.status === 'fulfilled').length;
+  const failedResources = new Set(resourceEntries.filter((_, i) => results[i].status === 'rejected').map(([id]) => id));
+  const auditSuccess = auditTotal - failedResources.size;
   const unresolvableRecipients = invalidResourceRecipientIds.size;
   const fullyConfirmed = auditSuccess === auditTotal && unresolvableRecipients === 0;
 
