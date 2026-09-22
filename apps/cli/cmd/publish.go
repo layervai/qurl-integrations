@@ -126,6 +126,9 @@ func runLocalPublish(ctx context.Context, opts *globalOpts, target *publishTarge
 	if err != nil {
 		return err
 	}
+	if err := registry.ValidateTarget(ctx, requestedID, target.localTarget()); err != nil {
+		return err
+	}
 	ownerID, client, err := localPublishOwner(ctx, opts, registry, stateDir)
 	if err != nil {
 		return err
@@ -376,6 +379,9 @@ func activateLocalPublish(
 	knockResourceID string,
 	target *publishTarget,
 ) (*connectorstate.LocalShare, *qurlapi.Sharing, bool, error) {
+	if err := registry.ValidateTarget(ctx, resource.Slug, target.localTarget()); err != nil {
+		return nil, nil, false, err
+	}
 	existing, err := registry.Get(ctx, resource.ResourcePublicKey)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, nil, false, err

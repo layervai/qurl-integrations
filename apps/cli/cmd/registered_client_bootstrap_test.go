@@ -82,6 +82,10 @@ func (*ownerOnlyTestShareRegistry) Put(context.Context, *connectorstate.LocalSha
 	return errors.New("unexpected test registry Put")
 }
 
+func (*ownerOnlyTestShareRegistry) ValidateTarget(context.Context, string, connectorstate.LocalTarget) error {
+	return nil
+}
+
 func (*ownerOnlyTestShareRegistry) SetDesired(context.Context, string, string, uint64) (*connectorstate.LocalShare, error) {
 	return nil, errors.New("unexpected test registry SetDesired")
 }
@@ -135,8 +139,9 @@ func bootstrapGlobalOpts(t *testing.T, endpoint string, runtime *bootstrapNative
 	stateDir := connectorStateTestDir(t)
 	registry := &ownerOnlyTestShareRegistry{}
 	return &globalOpts{
-		resolvedEndpoint: endpoint,
-		version:          "bootstrap-test",
+		resolvedEndpoint:    endpoint,
+		resolvedSupervision: connectorstate.RuntimeSupervisionNative,
+		version:             "bootstrap-test",
 		lookupEnv: func(string) (string, bool) {
 			t.Fatal("warm registered-device open read an account credential")
 			return "", false
@@ -649,6 +654,109 @@ func TestRunRendersCommandErrorBeforeNativeRuntimeCloseWarning(t *testing.T) {
 	cleanupWarning := strings.Index(stderr.String(), "local native-state cleanup reported a problem")
 	if commandError < 0 || cleanupWarning <= commandError {
 		t.Fatalf("command error/cleanup warning order = %d/%d in %q", commandError, cleanupWarning, stderr.String())
+	}
+}
+
+func TestPublishDefaultsToDeviceEnrollment(t *testing.T) {
+	for _, tc := range []struct {
+		name, supervision string
+		quiet             bool
+		want              int
+	}{
+		{"native", "native", false, 0}, {"quiet", "native", true, 0}, {"supervised", "external", false, 3},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := apitest.NewServer(t)
+			state := bootstrapRegisteredState(t)
+			runtime := &bootstrapNativeRuntime{store: &bootstrapAgentStateStore{state: state}}
+			var stdout, stderr bytes.Buffer
+			called := false
+			stateDir := connectorStateTestDir(t)
+			registry := &ownerOnlyTestShareRegistry{}
+			root, opts := newRoot("test", &output.Streams{In: strings.NewReader(""), Out: &stdout, Err: &stderr}, func(g *globalOpts) {
+				g.lookupEnv = func(string) (string, bool) { return "", false }
+				g.configDir = t.TempDir()
+				g.resolveShareStateDir = func(string) (string, error) { return stateDir, nil }
+				g.resolveHubBootstrap = func() (qurl.HubBootstrap, error) { return qurl.HubBootstrap{}, nil }
+				g.openShareRegistry = func(string) (localShareRegistry, error) { return registry, nil }
+				g.openNativeRuntime = func(ctx context.Context, cfg connectorshare.NativeRuntimeConfig) (registeredNativeRuntime, error) {
+					called = true
+					request := qurl.AgentEnrollmentCredentialRequest{AgentID: state.AgentID, PublicKeyB64: state.PublicKeyB64}
+					got, err := cfg.EnrollmentCredentialProvider(ctx, request)
+					want, _ := qurl.AnonymousEnrollmentCredential(ctx, request)
+					if err != nil || got != want {
+						t.Fatalf("anonymous enrollment = %q, %v", got, err)
+					}
+					if _, err := cfg.EnrollmentCredentialProvider(ctx, request); err != nil {
+						t.Fatal(err)
+					}
+					return runtime, nil
+				}
+			})
+			args := []string{"publish", "https://example.test", "--endpoint", srv.URL, "--supervision", tc.supervision}
+			if tc.quiet {
+				args = append(args, "--quiet")
+			}
+			root.SetArgs(args)
+			if code := run(context.Background(), root, opts); code != tc.want {
+				t.Fatalf("exit=%d want=%d stderr=%s", code, tc.want, stderr.String())
+			}
+			if called != (tc.want == 0) {
+				t.Fatalf("runtime called=%v", called)
+			}
+			if tc.want == 0 {
+				if !strings.Contains(stdout.String(), srv.Key.CRID) {
+					t.Fatalf("missing published CRID: %s", stdout.String())
+				}
+				if strings.Contains(stderr.String(), "Using a new device identity") == tc.quiet {
+					t.Fatalf("notice quiet=%v stderr=%s", tc.quiet, stderr.String())
+				}
+				if strings.Count(stderr.String(), "Using a new device identity") > 1 {
+					t.Fatal("enrollment retry repeated the device notice")
+				}
+				for _, request := range srv.Requests() {
+					if request.Path == "/v1/api-keys" {
+						t.Fatal("anonymous publication tried to mint an account enrollment token")
+					}
+				}
+			}
+		})
+	}
+}
+
+// Even read commands open a runtime that can refresh durable enrollment state.
+// They must use the namespace's declared supervision mode before that open.
+func TestRegisteredOpenHonorsExternalNamespace(t *testing.T) {
+	for _, mode := range []connectorstate.RuntimeSupervision{connectorstate.RuntimeSupervisionNative, connectorstate.RuntimeSupervisionExternal} {
+		t.Run(string(mode), func(t *testing.T) {
+			srv := apitest.NewServer(t)
+			runtime := &bootstrapNativeRuntime{store: &bootstrapAgentStateStore{state: bootstrapRegisteredState(t)}}
+			opts := bootstrapGlobalOpts(t, srv.URL, runtime)
+			stateDir, err := opts.resolveShareStateDir("")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := connectorstate.EstablishExternalRuntimeMode(context.Background(), stateDir); err != nil {
+				t.Fatal(err)
+			}
+			opts.resolvedSupervision = mode
+			opts.openRegisteredClient = opts.openNativeRegisteredClient
+			defer func() { _ = opts.closeAPIClient() }()
+			if mode == connectorstate.RuntimeSupervisionNative {
+				opts.openNativeRuntime = func(context.Context, connectorshare.NativeRuntimeConfig) (registeredNativeRuntime, error) {
+					t.Error("mismatched supervision opened durable runtime")
+					return nil, errors.New("unexpected runtime open")
+				}
+			}
+			_, err = opts.newClient(context.Background())
+			if mode == connectorstate.RuntimeSupervisionNative {
+				if !errors.Is(err, connectorstate.ErrRuntimeSupervision) || !strings.Contains(err.Error(), "--supervision external") {
+					t.Fatalf("wrong supervision remedy: %v", err)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }
 

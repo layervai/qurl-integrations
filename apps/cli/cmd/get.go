@@ -17,9 +17,10 @@ import (
 
 // getFlags carries get's flag values into the run helpers.
 type getFlags struct {
-	file  string
-	force bool
-	yes   bool
+	file            string
+	force           bool
+	yes             bool
+	sessionDuration time.Duration
 }
 
 // getCmd is the Phase-1 consume command: mint a share link for a CRID,
@@ -77,6 +78,7 @@ use ` + "`qurl share`" + ` if you only need the link.`,
 
 	cmd.Flags().StringVar(&flags.file, "file", "", "download to this path instead of opening a browser (\"-\" = raw bytes to stdout)")
 	cmd.Flags().BoolVar(&flags.force, "force", false, "allow --file to replace an existing file")
+	cmd.Flags().DurationVar(&flags.sessionDuration, "session-duration", 0, "session lifetime after access starts, e.g. 5m or 1h (default: service policy)")
 	cmd.Flags().BoolVar(&flags.yes, "yes", false, "proceed without confirmation, including sending a test CRID to production")
 
 	return cmd
@@ -85,6 +87,9 @@ use ` + "`qurl share`" + ` if you only need the link.`,
 // runGet applies the CRID guards, decides the action locally, and acts on a
 // verified answer only.
 func runGet(ctx context.Context, opts *globalOpts, operand string, flags getFlags) error {
+	if flags.sessionDuration != 0 && (flags.sessionDuration < 0 || flags.sessionDuration%time.Second != 0) {
+		return exitcode.UsageError(fmt.Errorf("--session-duration %s must be a positive whole number of seconds", flags.sessionDuration))
+	}
 	assessment, err := cridux.Assess(operand)
 	if err != nil {
 		return err
@@ -115,7 +120,7 @@ func runGet(ctx context.Context, opts *globalOpts, operand string, flags getFlag
 	// through it, so nothing ever acts on an unverified answer.
 	var shareLink *qurlapi.ShareLink
 	mint := func(ctx context.Context) (string, error) {
-		result, err := client.Share(ctx, assessment.Input, qurlapi.ShareOptions{})
+		result, err := client.Share(ctx, assessment.Input, qurlapi.ShareOptions{SessionDurationSeconds: int(flags.sessionDuration / time.Second)})
 		if err := verifyShareLink(assessment, result, err); err != nil {
 			return "", err
 		}

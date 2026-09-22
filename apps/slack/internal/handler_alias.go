@@ -13,6 +13,7 @@ import (
 	"unicode"
 
 	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
+	"github.com/layervai/qurl-integrations/shared/auth"
 	"github.com/layervai/qurl-integrations/shared/client"
 )
 
@@ -438,6 +439,9 @@ func logAliasBound(teamID, channelID, alias, slug, resourceID string) {
 func (h *Handler) resolveTunnelSlugAliasTarget(ctx context.Context, teamID, slug string) (string, error) {
 	c, err := h.authenticatedClient(ctx, teamID)
 	if err != nil {
+		if !errors.Is(err, auth.ErrWorkspaceNotConfigured) {
+			err = fmt.Errorf("%w: %w", errCredentialLookup, err)
+		}
 		return "", err
 	}
 	page, err := c.ListResources(ctx, client.ListResourcesInput{Slug: slug})

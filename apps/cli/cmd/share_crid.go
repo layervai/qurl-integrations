@@ -22,8 +22,9 @@ import (
 // a hard cutover with no alias.
 func shareCmd(opts *globalOpts) *cobra.Command {
 	var (
-		ttl time.Duration
-		yes bool
+		ttl             time.Duration
+		sessionDuration time.Duration
+		yes             bool
 	)
 
 	cmd := &cobra.Command{
@@ -70,12 +71,17 @@ else, ready to hand out or open.`,
 				return exitcode.UsageError(fmt.Errorf("--ttl %s must be a positive whole number of seconds", ttl))
 			}
 
+			if sessionDuration != 0 && (sessionDuration < 0 || sessionDuration%time.Second != 0) {
+				return exitcode.UsageError(fmt.Errorf("--session-duration %s must be a positive whole number of seconds", sessionDuration))
+			}
+
 			client, err := opts.newClient(cmd.Context())
 			if err != nil {
 				return err
 			}
 			link, err := client.Share(cmd.Context(), assessment.Input, qurlapi.ShareOptions{
-				TTLSeconds: int(ttl.Seconds()),
+				TTLSeconds:             int(ttl.Seconds()),
+				SessionDurationSeconds: int(sessionDuration / time.Second),
 			})
 			if err := verifyShareLink(assessment, link, err); err != nil {
 				return err
@@ -89,6 +95,7 @@ else, ready to hand out or open.`,
 	}
 
 	cmd.Flags().DurationVar(&ttl, "ttl", 0, "requested link lifetime, e.g. 5m or 1h (service may grant less)")
+	cmd.Flags().DurationVar(&sessionDuration, "session-duration", 0, "session lifetime after access starts, e.g. 5m or 1h (default: service policy)")
 	cmd.Flags().BoolVar(&yes, "yes", false, "proceed without confirmation, including sending a test CRID to production")
 
 	return cmd

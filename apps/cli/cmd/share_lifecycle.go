@@ -27,6 +27,7 @@ type localShareRegistry interface {
 	BindOwner(context.Context, string) error
 	OwnerID(context.Context) (string, bool, error)
 	Get(context.Context, string) (*connectorstate.LocalShare, error)
+	ValidateTarget(context.Context, string, connectorstate.LocalTarget) error
 	Put(context.Context, *connectorstate.LocalShare) error
 	SetDesired(context.Context, string, string, uint64) (*connectorstate.LocalShare, error)
 	Retarget(context.Context, string, connectorstate.LocalTarget, uint64) (*connectorstate.LocalShare, error)
@@ -206,11 +207,7 @@ func changeShareState(ctx context.Context, opts *globalOpts, id, action string, 
 	if err != nil {
 		return err
 	}
-	preflight := local.Target()
-	if target != nil {
-		preflight = target.localTarget()
-	}
-	if err := preflightShareTarget(ctx, opts, preflight); err != nil {
+	if err := preflightShareChange(ctx, opts, registry, local, target); err != nil {
 		return err
 	}
 	client, err := opts.newClient(ctx)
@@ -271,6 +268,17 @@ func changeShareState(ctx context.Context, opts *globalOpts, id, action string, 
 		return err
 	}
 	return opts.printer().Sharing(local.TargetURL, sharing)
+}
+
+func preflightShareChange(ctx context.Context, opts *globalOpts, registry localShareRegistry, local *connectorstate.LocalShare, target *publishTarget) error {
+	destination := local.Target()
+	if target != nil {
+		destination = target.localTarget()
+	}
+	if err := registry.ValidateTarget(ctx, local.ConnectorID, destination); err != nil {
+		return err
+	}
+	return preflightShareTarget(ctx, opts, destination)
 }
 
 func controllableLocalShare(ctx context.Context, registry localShareRegistry, id, action string) (*connectorstate.LocalShare, error) {

@@ -40,21 +40,13 @@ brew upgrade qurl
 
 Using another package format? See [Install](#install).
 
-### 2. Sign in
+### 2. Start your app, then publish it
 
-[Create or copy an API key in the qURL dashboard](https://layerv.ai/qurl/dashboard/keys/).
-Select `qurl:agent` to publish the local app and `qurl:resolve` (the scope
-that allows sharing resources by CRID) to open it in step 4. Then run:
-
-```bash
-qurl login
-```
-
-Paste the key at the hidden prompt. The CLI validates it, enrolls this machine,
-and then discards it. qurl stores the restricted device identity in its
-owner-only native state; it does not store the account API key.
-
-### 3. Start your app, then publish it
+No account, API key, or browser sign-in is required. The first command creates
+and registers a device identity automatically. Keep its local state to keep
+control of your resources. <!-- TODO(upstream-contract): qurl-service owns the anonymous resource and link caps. -->
+Anonymous devices can publish up to three active
+resources with links valid for at most 24 hours.
 
 Keep your app running in one terminal. If you only want to try the flow, start
 Python's built-in web server:
@@ -91,7 +83,7 @@ debugging. When another program owns the daemon process, run it with
 `qurl daemon run --supervision external` instead — see
 [External supervision](#external-supervision).
 
-### 4. Open or share it
+### 3. Open or share it
 
 The CRID is safe to share. An authorized user can open the app with:
 
@@ -110,8 +102,8 @@ prints its CRID and exits immediately.
 | What you see | What to do |
 |--------------|------------|
 | `only HTTPS URLs are allowed` or no `start`, `stop`, `restart`, and `status` commands | You have the legacy CLI. Run `brew update`, `brew upgrade qurl`, and confirm `qurl version` reports 2.0.0 or newer. |
-| No API key is configured | Run `qurl login` |
-| The key lacks `qurl:agent` | Add that scope in the dashboard, then log in with the updated key |
+| Using a new device identity | Run `qurl account setup` to enable recovery |
+| The key lacks `qurl:agent` | Add that scope in the dashboard, update your key file, and retry |
 | The local app cannot be reached | Check it with `curl http://127.0.0.1:3000` and use the same URL with `qurl publish` |
 | `This Connector needs its qURL platform assignment refreshed` | Upgrade qURL. Current releases refresh stale assignments automatically with bounded backoff; no approval flag is required. |
 | The route is rejected or times out | Run the command once more; if it repeats, contact LayerV support |
@@ -155,10 +147,26 @@ qurl version
 
 ## Authentication
 
-The CLI uses a registered device identity for ordinary commands. To enroll the
-device, create an account API key (`lv_live_…` for production, `lv_test_…` for
-test) in the [qURL dashboard](https://layerv.ai/qurl/dashboard/keys/) with the
-`qurl:agent` scope, then run `qurl login`.
+The CLI creates a registered device identity automatically for ordinary commands.
+Account access is optional:
+
+```bash
+qurl account setup
+```
+
+Commands that open device state, including `list` and `whoami`, create a device identity on first use.
+`get <CRID>` manages access to your own resource; it is not a recipient link opener.
+
+Sign in through the browser to link the current resources to your account.
+Existing resource IDs and links stay unchanged. On a new device, run
+`QURL_CONNECTOR_STATE_DIR=~/.qurl-recovered qurl account recover` to regain management access.
+Use an unused directory and keep existing device state intact. If the account has several
+resource owners, select the owner with `--owner`. Recovery does not copy local
+files or restart apps from the previous device. Keep the device state until
+account linking completes. Recovery requires a linked account or a saved copy of the device state.
+
+Existing account API keys remain supported through `qurl login` and environment
+variables. Use a key with `qurl:agent` for explicit account enrollment.
 
 There is deliberately no `--api-key` flag — command-line arguments leak into
 shell history and process lists. `qurl login` reads it from a hidden prompt or
@@ -222,6 +230,12 @@ key in the dashboard, move the complete state directory aside, then run
 copy individual bindings or pending requests into the new state.
 
 ### Supervised installs
+
+All commands that open device state, including `list`, `whoami`, and `get`, must
+use the state's supervision mode. For an externally supervised namespace, set
+`QURL_DAEMON_SUPERVISION=external` or pass `--supervision external`. A fresh
+externally supervised namespace must first use the existing enrollment-token
+login flow.
 
 A program that runs the daemon itself (see
 [External supervision](#external-supervision)) never hands qurl an account API
@@ -345,6 +359,8 @@ directory rather than switching in place.
 | `qurl inspect <CRID>` | Inspect the same authoritative resource or sharing state |
 | `qurl daemon run` | Run the local sharing daemon directly for headless or supervised use |
 | `qurl delete <CRID>` | Delete a published resource |
+| `qurl account setup` | Link this device to an account for recovery and other devices |
+| `qurl account recover` | Restore account resource access on a new device |
 | `qurl login` | Enroll this device with a one-time account key, or from a supervisor's enrollment token file |
 | `qurl whoami` | Show which account this registered device belongs to |
 | `qurl completion <shell>` | Generate shell completions (`bash`, `zsh`, `fish`, `powershell`) |
@@ -704,7 +720,10 @@ from a script, use `qurl get <CRID> --file <path>`.
 | Flag | Description |
 |------|-------------|
 | `--ttl <duration>` | Requested link lifetime in whole seconds (e.g. `5m`, `1h`). The service may grant less; a shorter grant is reported on stderr, never silent. Sub-second or negative values are refused rather than rounded. |
+| `--session-duration <duration>` | Lifetime of each admitted session, e.g. `5m` or `1h`. Zero or omission uses the service default. The service enforces resource limits. |
 | `--yes` | Proceed without confirmation, including sending a test CRID to production |
+
+Link expiry and session duration are separate: an expired link does not end an already admitted session.
 
 Production share verification needs no extra settings. Sandbox and custom
 deployments use the settings described under `qurl get`.
@@ -735,6 +754,7 @@ it, then opens or downloads — nothing is ever acted on unverified:
 |------|-------------|
 | `--file <path>` | Download to this path instead of opening a browser (`-` = raw bytes to stdout) |
 | `--force` | Allow `--file` to replace an existing file |
+| `--session-duration <duration>` | Lifetime of each admitted session, e.g. `5m` or `1h`. Zero or omission uses the service default. The service enforces resource limits. |
 | `--yes` | Proceed without confirmation, including sending a test CRID to production |
 
 When stdout is not a terminal, get never opens a browser: pass `--file`,
@@ -1047,3 +1067,6 @@ exactly that reason.
 ```bash
 qurl list -o json | jq -r '.resources[].crid'
 ```
+
+Account setup and recovery return `owner_id` and `status` (`linked` or
+`recovered`) with `-o json`. With `--quiet`, they print only the owner ID.

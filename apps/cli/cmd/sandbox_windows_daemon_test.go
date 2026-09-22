@@ -714,7 +714,7 @@ func runWindowsSandboxRemoteJourney(t *testing.T, binary string, env map[string]
 		}
 	}
 	assertWindowsSandboxListContains(t, binary, env, resource.CRID)
-	shared := runWindowsSandboxCLI(t, binary, env, "share", resource.CRID)
+	shared := runWindowsSandboxCLI(t, binary, env, "share", resource.CRID, "--session-duration", "5m")
 	if _, err := validateSandboxShareCommandResult(
 		"Windows remote share",
 		windowsSandboxExitCode(shared.err),
@@ -724,7 +724,7 @@ func runWindowsSandboxRemoteJourney(t *testing.T, binary string, env map[string]
 		t.Fatal(err)
 	}
 	destination := filepath.Join(t.TempDir(), "remote-payload")
-	downloaded := runWindowsSandboxCLI(t, binary, env, "get", resource.CRID, "--file", destination)
+	downloaded := runWindowsSandboxCLI(t, binary, env, "get", resource.CRID, "--file", destination, "--session-duration", "5m")
 	if downloaded.err != nil {
 		t.Fatalf("Windows remote get: %v; stderr %q", downloaded.err, downloaded.stderr)
 	}

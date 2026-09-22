@@ -247,6 +247,24 @@ func (s *LocalShare) Target() LocalTarget {
 	return LocalTarget{URL: s.TargetURL, IP: s.LocalIP, Port: s.LocalPort, SocketPath: s.LocalSocketPath}
 }
 
+// ValidateTarget rejects a forbidden transport before callers change cloud
+// sharing. Writes also enforce the policy under the registry lock.
+func (r *LocalShareRegistry) ValidateTarget(ctx context.Context, connectorID string, target LocalTarget) error {
+	state, unlock, err := r.loadLocked(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = unlock() }()
+	return validatePrivateOriginTarget(state.PrivateOriginPrefix, connectorID, target)
+}
+
+func validatePrivateOriginTarget(prefix, connectorID string, target LocalTarget) error {
+	if prefix != "" && strings.HasPrefix(connectorID, prefix) && target.SocketPath == "" {
+		return errors.New("private origin shares require Unix transport")
+	}
+	return nil
+}
+
 // Retarget moves one row to a new local target under the newer serving
 // epoch the platform returned when the share was restarted. The target and
 // epoch land in one write, so no durable row ever pairs the old target with
@@ -626,8 +644,8 @@ func validateLocalSharesState(state localSharesState) error {
 		if err := validateLocalShare(&share); err != nil {
 			return fmt.Errorf("local share %q: %w", key, err)
 		}
-		if state.PrivateOriginPrefix != "" && strings.HasPrefix(share.ConnectorID, state.PrivateOriginPrefix) && share.LocalSocketPath == "" {
-			return errors.New("private origin shares require Unix transport")
+		if err := validatePrivateOriginTarget(state.PrivateOriginPrefix, share.ConnectorID, share.Target()); err != nil {
+			return err
 		}
 		if owner, ok := crids[share.CRID]; ok {
 			return fmt.Errorf("local shares %q and %q have the same CRID", owner, key)
