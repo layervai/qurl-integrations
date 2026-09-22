@@ -1789,9 +1789,10 @@ async function mintLinksInBatches({ initialResourceId, expiresAt, recipientCount
       error: result.reason?.message,
     }] : []));
     if (failures.length > 0 || unidentifiedCount > 0) {
+      const failedResources = new Set(entries.filter((_, i) => results[i].status === 'rejected').map(([id]) => id));
       logger.error('Failed to revoke links after a mint failure', {
-        failed_count: failures.length,
-        total: results.length,
+        failed_count: failedResources.size,
+        total: idsByResource.size,
         unidentified_count: unidentifiedCount,
         failures,
       });

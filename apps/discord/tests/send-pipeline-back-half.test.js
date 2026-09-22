@@ -3284,7 +3284,7 @@ describe('mintLinksInBatches', () => {
     expect(mockRevokeMintedLinks).toHaveBeenCalledTimes(3);
     expect(mockRevokeMintedLinks).toHaveBeenLastCalledWith('res-1', ids.slice(20), 'apikey');
     expect(logger.error).toHaveBeenCalledWith('Failed to revoke links after a mint failure', expect.objectContaining({
-      failed_count: 1, total: 3, failures: [{ resource_ref: resourceIdLogRef('res-1'), qurl_ids: ids.slice(10, 20), error: 'middle chunk failed' }],
+      failed_count: 1, total: 1, failures: [{ resource_ref: resourceIdLogRef('res-1'), qurl_ids: ids.slice(10, 20), error: 'middle chunk failed' }],
     }));
   });
 
