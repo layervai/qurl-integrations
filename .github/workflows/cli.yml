@@ -630,8 +630,7 @@ jobs:
           }
           Remove-Item -LiteralPath $eventsPath -Force
 
-      - name: Run pinned Windows private-origin crash integration
-        if: runner.os == 'Windows'
+      - name: Run pinned cross-platform private-origin crash integration
         shell: pwsh
         run: |
           $testName = 'TestPrivateOriginCrashLeavesSurvivingDaemonOffTCP'
@@ -643,10 +642,10 @@ jobs:
           )
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           if ($declared.Count -ne 1 -or $declared[0] -ne $testName) {
-            Write-Error "exact Windows private-origin crash integration declaration is missing or ambiguous: $($declared -join ', ')"
+            Write-Error "exact cross-platform private-origin crash integration declaration is missing or ambiguous: $($declared -join ', ')"
             exit 1
           }
-          $eventsPath = Join-Path $env:RUNNER_TEMP 'qurl-windows-private-origin-events.jsonl'
+          $eventsPath = Join-Path $env:RUNNER_TEMP 'qurl-private-origin-events.jsonl'
           & go test -count=1 -json -run $testPattern $testPackage |
             Tee-Object -FilePath $eventsPath
           $testStatus = $LASTEXITCODE
@@ -655,7 +654,7 @@ jobs:
           $skipped = @($events | Where-Object { $_.Test -eq $testName -and $_.Action -eq 'skip' })
           $passed = @($events | Where-Object { $_.Test -eq $testName -and $_.Action -eq 'pass' })
           if ($skipped.Count -ne 0 -or $passed.Count -ne 1) {
-            Write-Error 'required Windows private-origin crash integration must report one PASS and no SKIP'
+            Write-Error 'required cross-platform private-origin crash integration must report one PASS and no SKIP'
             exit 1
           }
           Remove-Item -LiteralPath $eventsPath -Force
