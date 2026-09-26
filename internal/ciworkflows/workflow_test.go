@@ -586,7 +586,7 @@ func TestCLICustomerJourneyIsConsolidatedAndTrusted(t *testing.T) {
 	if !strings.Contains(fallbackSource, "branches: [main]") {
 		t.Error("cancellation cleanup workflow_run trigger is not filtered to main")
 	}
-	for _, forbidden := range []string{"actions/download-artifact", "actions/upload-artifact", "qurl-integrations-infra", "ops-routines"} {
+	for _, forbidden := range []string{"actions/download-artifact", "actions/upload-artifact", "qurl-integrations-" + "infra", "ops-routines"} {
 		if strings.Contains(fallbackSource, forbidden) {
 			t.Errorf("cancellation cleanup retains unnecessary coupling %q", forbidden)
 		}

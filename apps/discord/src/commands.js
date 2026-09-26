@@ -2161,7 +2161,7 @@ async function executeSendPipeline(interaction, {
       const locPayload = { type: 'google-map', url: locationUrl, name: locationName || locationUrl };
       // Note: google-map JSON resources hit the connector's render
       // carve-out (mapEmbedTmpl/mapFallbackTmpl don't honor
-      // expire_after at view time — qurl-integrations-infra#480).
+      // expire_after at view time — infra repo #480).
       // We still forward selfDestructSeconds so behavior matches the
       // contract once the carve-out is removed; today it's a no-op.
       const firstUpload = await uploadJsonToConnector(locPayload, 'location.json', apiKey, selfDestructSeconds);
@@ -2197,7 +2197,7 @@ async function executeSendPipeline(interaction, {
       logger.audit(AUDIT_EVENTS.UPLOAD_SUCCESS, { send_id: sendId, kind: 'location' });
     }
   } catch (error) {
-    // Audit for the CloudWatch metric filter + alarm at qurl-integrations-infra
+    // Audit for the CloudWatch metric filter + alarm at the infrastructure repository
     // qurl-bot-discord/terraform/monitoring.tf (qurl-integrations#276); the why
     // lives in the QURL_SEND_CREATE_LINK_FAILURE docstring in constants.js.
     // kindMap (not a `=== FILE ? 'file' : 'location'` ternary) so a future third
@@ -2547,7 +2547,7 @@ async function executeSendPipeline(interaction, {
         // ≤14 min would self-defend while the monitor + token are still
         // good). This also bounds the sensitive token's at-rest life until
         // the qurl-bot-ddb DDB TTL on confirm_expires_at lands
-        // (qurl-integrations-infra#1227) to physically reap the row.
+        // (infra repo #1227) to physically reap the row.
         confirmExpiresAt: Math.floor(Date.now() / 1000) + 15 * 60,
       });
     } catch (err) {
@@ -6358,7 +6358,7 @@ const DETECT_STAFF_PERMISSIONS = [
 // authorization boundary. The connector's /api/detect enforces only guild-scope; a holder of the
 // guild's qURL API key (admin-tier) could call /api/detect directly and bypass THIS gate (guild-
 // scope still holds — never cross-tenant). Closing that gap needs a connector-side per-route auth
-// factor (tracked in qurl-integrations-infra#1170); until then, standing is enforced here.
+// factor (tracked in infra repo #1170); until then, standing is enforced here.
 //
 // This is a deanonymization oracle by construction. The guards, in order:
 //   - guild-only (DM rejects, no oracle outside a guild).

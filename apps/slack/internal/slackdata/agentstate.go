@@ -103,7 +103,7 @@ const (
 // token exists to reach: a conditional write that failed against THIS call's own
 // marker, i.e. the SDK retried a write whose response was lost. Kept as a stable
 // exact string so infra can key a CloudWatch metric filter on it the way
-// qurl-integrations-infra#1065 does for the turn-rate fail-open. Worth watching in
+// infra repo #1065 does for the turn-rate fail-open. Worth watching in
 // both directions — a nonzero rate says the retryer is replaying marker writes in
 // production, and a permanently zero one says this machinery is unearned.
 const markerLostResponseRecoveredMsg = "agent-state: marker write recovered after a lost response"

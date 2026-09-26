@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-// Deployment-shaped fixture names, mirroring what qurl-integrations-infra
+// Deployment-shaped fixture names, mirroring what the infrastructure repository
 // actually renders, so a case claiming to exercise "the sandbox wiring" asserts
 // against the real string. modules/qurl-slack-ddb prefixes the two scanned
 // tables with `qurl-bot-slack-<env>-`; workspace_state is env-agnostic

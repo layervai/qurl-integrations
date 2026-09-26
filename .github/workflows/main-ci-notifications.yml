@@ -1,6 +1,6 @@
 name: Main CI Notifications
 
-# Deploy workflows already notify once a build reaches qurl-integrations-infra.
+# Deploy workflows already notify once a build reaches the infrastructure repository.
 # This source-repo notifier covers the earlier failure mode: post-merge CI fails
 # before `trigger-deploy` can dispatch, leaving sandbox on the previous image
 # with no deploy notification to explain why. It also closes an alert when the
@@ -175,10 +175,10 @@ jobs:
           # generic impact message.
           case "$WORKFLOW_NAME" in
             "slack: Build and Test")
-              impact="Slack bot deploy dispatch did not run. No new image was sent to qurl-integrations-infra, so sandbox remains on the prior Slack bot image until this workflow succeeds."
+              impact="Slack bot deploy dispatch did not run. No new image was sent to the infrastructure repository, so sandbox remains on the prior Slack bot image until this workflow succeeds."
               ;;
             "discord: Build and Test")
-              impact="Discord bot deploy dispatch did not run. No new image was sent to qurl-integrations-infra, so sandbox remains on the prior Discord bot image; prod promotion will fail its sandbox gate. See <${REPOSITORY_URL}/pull/204|#204> for the hotfix pattern."
+              impact="Discord bot deploy dispatch did not run. No new image was sent to the infrastructure repository, so sandbox remains on the prior Discord bot image; prod promotion will fail its sandbox gate. See <${REPOSITORY_URL}/pull/204|#204> for the hotfix pattern."
               ;;
             "browser-extensions: Build and Test")
               impact="The browser extension tests or release packaging did not complete successfully. Treat both Chrome Web Store and Microsoft Edge Add-ons bundles from this SHA as unshippable until the run is repaired."

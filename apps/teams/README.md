@@ -193,7 +193,7 @@ Every variable below is read in `src/server.ts`. The required ones are read
 through a helper that throws `<NAME> is required` on an empty or missing value,
 so the process fails at startup rather than mid-request. Provisioning the
 backing AWS resources (tables and KMS keys) lives in the
-`qurl-integrations-infra` repository; Microsoft registration is an operator task, and this table is the contract the process
+infrastructure repository; Microsoft registration is an operator task, and this table is the contract the process
 itself enforces.
 
 | Variable | Required | Notes |

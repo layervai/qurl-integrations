@@ -162,7 +162,7 @@ const LOG_EVENTS = Object.freeze({
 });
 
 // Canonical event names emitted via logger.audit(). The CloudWatch metric
-// filters at qurl-integrations-infra/qurl-bot-discord/terraform/main.tf
+// filters at the infra repo's qurl-bot-discord/terraform/main.tf
 // pattern-match these strings, so a typo at a call site silently disables
 // the metric. Always import from here rather than passing literal strings.
 // Adding a new metric event: add the constant here, the call site, AND the
@@ -178,7 +178,7 @@ const LOG_EVENTS = Object.freeze({
 // with an `agent` dimension fed by an X-QURL-Agent header so every
 // integration (Discord, Slack, Teams, CLI, web/portal) gets them for
 // free without each re-implementing emission. Tracked separately; see
-// Justin's review comment on qurl-integrations-infra#309.
+// Justin's review comment on infra repo #309.
 //
 // SECRETS CONTRACT: callers SHOULD pass only non-sensitive meta values
 // from a small, pre-vetted vocabulary: `send_id`, `kind`, `count`,
@@ -251,13 +251,13 @@ const AUDIT_EVENTS = {
   // so the dashboard can split a clean WebSocket disconnect from a
   // readiness-closure bug under load. The wget probe runs every
   // 30 s, so a real wedge produces this event at probe cadence —
-  // the paired CloudWatch metric filter at qurl-integrations-infra
+  // the paired CloudWatch metric filter at the infrastructure repository
   // qurl-bot-discord/terraform/monitoring.tf counts these so an
   // alarm can fire on >N unhealthy responses in a window.
   GATEWAY_HEALTH_UNHEALTHY: 'gateway_health_unhealthy',
 
   // Phase 1 monitoring events — emitted by the gateway role only.
-  // Paired with terraform filters in qurl-integrations-infra
+  // Paired with terraform filters in the infrastructure repository
   // qurl-bot-discord/terraform/monitoring.tf.
 
   // Single emission per ChatInputCommand interaction. handleCommand
@@ -314,12 +314,12 @@ const AUDIT_EVENTS = {
   // Names reserved by the event-shipper observability Phase 1.0 PR;
   // emissions wired by the state-machine harness PR in
   // apps/discord/src/flow-state.js. The paired CloudWatch metric filters
-  // land in qurl-integrations-infra (separate PR) once the harness is
+  // land in the infrastructure repository (separate PR) once the harness is
   // producing events in sandbox. Three-stage rollout — names reserved →
   // emissions wired → metric filters lit — keeps each layer reviewable
   // in isolation.
   //
-  // The "flow_state" table is created by qurl-integrations-infra#504; the
+  // The "flow_state" table is created by infra repo #504; the
   // SLI these events feed is "Flow continuity" (design doc § SLI / SLO
   // definitions, target 99.99% over 1-day windows).
   //
@@ -469,7 +469,7 @@ const AUDIT_EVENTS = {
 
   // Emitted by setGuildApiKey when a successful guild setup (OAuth callback or
   // `/qurl setup` paste) rebinds an existing guild to a different configured_by
-  // admin. TODO(upstream-contract): keep qurl-integrations-infra's
+  // admin. TODO(upstream-contract): keep the infra repo's
   // qurl_setup_admin_changed CloudWatch filter/alarm in sync with this string
   // (pinned literally in ddb-store.test.js). Scope: an administrator change
   // only; a same-admin key replacement (e.g. a compromised admin session
@@ -528,7 +528,7 @@ const AUDIT_EVENTS = {
   // binary (success has its own event below).
   QURL_WEBHOOK_SUBSCRIPTION_REGISTERED: 'qurl_webhook_subscription_registered',
   QURL_WEBHOOK_SUBSCRIPTION_REGISTER_FAILED: 'qurl_webhook_subscription_register_failed',
-  // Peer: qurl-integrations-infra install_monitoring.tf.
+  // Peer: the infra repo's install_monitoring.tf.
   OAUTH_RATE_LIMIT_HARD_CAP: 'oauth_rate_limit_hard_cap',
   QURL_WEBHOOK_SUBSCRIPTION_DELETE_FAILED: 'qurl_webhook_subscription_delete_failed',
   // Per-row decrypt failure during scanGuildSubscriptions. Sustained
@@ -590,8 +590,8 @@ const AUDIT_EVENTS = {
   //   - timeout               — request timed out before status
   //   - unknown               — fallback for unclassifiable errors
   //
-  // CloudWatch metric filter + alarm live in qurl-integrations-infra
-  // qurl-bot-discord/terraform/monitoring.tf (qurl-integrations-infra#928,
+  // CloudWatch metric filter + alarm live in the infrastructure repository
+  // qurl-bot-discord/terraform/monitoring.tf (infra repo #928,
   // the #276 terraform half). The alarm counts EVERY emitted failure —
   // it does NOT split on `reason`, because a systemic outage can be a 4xx
   // (the 2026-05-13 incident was a sub-floor-session_duration 400) — and
