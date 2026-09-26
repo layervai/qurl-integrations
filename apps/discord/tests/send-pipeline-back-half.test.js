@@ -2168,6 +2168,20 @@ describe('handleAddRecipients — QURL_SEND_CREATE_LINK_FAILURE emission (#276)'
 });
 
 describe('executeSendPipeline — QURL_SEND_CREATE_LINK_FAILURE emission (#276, primary site)', () => {
+  it('primary site never logs apiDetail for quota_exceeded or an unmarked apiCode', async () => {
+    for (const fields of [
+      { apiCode: 'quota_exceeded', apiDetail: 'RAW-UNREDACTED-BODY' },
+      { apiCode: 'qurl_creation_failed', apiDetail: 'RAW-UNREDACTED-BODY', status: 400 },
+    ]) {
+      logger.error.mockClear();
+      mockDownloadAndUpload.mockRejectedValueOnce(Object.assign(new Error('upload failed'), fields));
+      await executeSendPipeline(makeInteraction(), makePipelineParams());
+      const call = logger.error.mock.calls.find(c => c[0] === 'Failed to prepare QURL links');
+      expect(call[1]).not.toHaveProperty('apiDetail');
+      expect(JSON.stringify(logger.error.mock.calls)).not.toContain('RAW-UNREDACTED-BODY');
+    }
+  });
+
   // Seam test: drive the REAL connector upload (only fetch is faked) so the
   // typed apiCode is proven to survive from connector.js into the audit
   // reason. The two unit tests sit on either side of this boundary; a wrapper

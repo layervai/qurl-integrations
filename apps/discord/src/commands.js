@@ -160,12 +160,13 @@ function classifyMintFailure(error) {
   return 'unknown';
 }
 
-// Only the connector's `qurl_creation_failed` apiDetail is bounded and
-// redacted at the connector boundary (redactUploadApiDetail in connector.js);
-// other codes' apiDetail is raw body text and is not log-safe, so it stays off
-// the ERROR lines that call this.
+// Only an apiDetail that connector.js bounded and redacted itself
+// (assertUploadResult → redactUploadApiDetail, which sets apiDetailRedacted)
+// is log-safe. Gate on that local marker, never on apiCode: other paths parse
+// apiCode out of response bodies, so a body claiming `qurl_creation_failed`
+// must not smuggle raw apiDetail text onto the ERROR lines that call this.
 function logSafeApiDetail(error) {
-  return error?.apiCode === 'qurl_creation_failed' && error.apiDetail
+  return error?.apiDetailRedacted === true && typeof error.apiDetail === 'string'
     ? { apiDetail: error.apiDetail }
     : {};
 }
@@ -10006,6 +10007,7 @@ module.exports = {
   // NODE_ENV=test (jest's default); production deploys set NODE_ENV=production.
   ...(process.env.NODE_ENV !== 'production' && {
     _test: {
+      logSafeApiDetail,
       isGoogleMapsURL,
       sanitizeFilename,
       sanitizeMessage,

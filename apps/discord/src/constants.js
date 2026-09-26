@@ -610,8 +610,17 @@ const AUDIT_EVENTS = {
   // "expiry" and silently suppressing them. Skip only what is genuinely
   // high-volume (quota); let volume + threshold handle the rest.
   //
-  // The sibling connector_no_resource_id alarm separately catches the
-  // "200 + missing resource_id" shape.
+  // The sibling connector_no_resource_id alarm separately pages on the
+  // connector's "200 + missing resource_id" shape. It is a log-TEXT filter
+  // (not an audit-event filter) matching either of the two messages
+  // connector.js assertUploadResult throws for it: "upstream qURL creation
+  // failed" (the connector reported a failed upstream create) and "returned
+  // no resource_id" (malformed / body-less response). The companion infra
+  // change widened the filter to both phrases.
+  // TODO(upstream-contract): those two phrases are mirrored by that infra
+  // log filter; rewording either message here silently blinds the alarm in
+  // prod. connector-coverage.test.js pins both phrases; change the filter in
+  // the same merge train.
   QURL_SEND_CREATE_LINK_FAILURE: 'qurl_send_create_link_failure',
 
   // /qurl detect — watermark-attribution lookup (#1101). Audits the attribution

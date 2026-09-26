@@ -180,6 +180,38 @@ describe('Connector client — coverage boost', () => {
       expect(err.apiDetail.length).toBeLessThanOrEqual(201);
     });
 
+    it.each(uploaders)('%s marks only its own redacted apiDetail as log-safe', async (label, run, pre) => {
+      mockUploadReply(pre, createFailedBody);
+      const err = await run(connector).catch(e => e);
+      expect(err.apiDetailRedacted).toBe(true);
+    });
+
+    it.each(uploaders)('%s reports a body-less reply as the malformed no-resource_id case', async (label, run, pre) => {
+      mockUploadReply(pre, null);
+      const err = await run(connector).catch(e => e);
+      expect(err.message).toBe(`${label} returned no resource_id`);
+    });
+
+    // The connector_no_resource_id infra log filter matches these two exact
+    // phrases (upstream-contract); a rewording must fail here first.
+    it('pins the two phrases the connector alarm filter matches', async () => {
+      mockUploadReply([], createFailedBody);
+      const created = await connector.reUploadBuffer(Buffer.from('hi'), 'x.txt', 'text/plain').catch(e => e);
+      expect(created.message).toContain('upstream qURL creation failed');
+      mockUploadReply([], { success: true });
+      const malformed = await connector.reUploadBuffer(Buffer.from('hi'), 'x.txt', 'text/plain').catch(e => e);
+      expect(malformed.message).toContain('returned no resource_id');
+    });
+
+    it('bounds the scanned input before redaction (large bodies stay fast and capped)', async () => {
+      const huge = 'qURL creation failed: ' + 'a'.repeat(100_000);
+      mockUploadReply([], { ...createFailedBody, error: huge });
+      const t0 = Date.now();
+      const err = await connector.reUploadBuffer(Buffer.from('hi'), 'x.txt', 'text/plain').catch(e => e);
+      expect(Date.now() - t0).toBeLessThan(1000);
+      expect(err.apiDetail.length).toBeLessThanOrEqual(201);
+    });
+
     it.each(uploaders)('%s keeps the malformed-response error when no upstream failure is reported', async (label, run, pre) => {
       mockUploadReply(pre, { success: true, hash: 'h1' });
       const err = await run(connector).catch(e => e);

@@ -185,11 +185,18 @@ async function throwConnectorError(label, response) {
 // "qURL API error (NNN)"). If the connector rewords either string this
 // silently reverts to the untyped "returned no resource_id" error and the
 // send-failure audit reason reverts to `unknown`; update both sides together.
+// The same silent revert happens if the connector retypes `error` (e.g. to an
+// object): only a string `error` is recognized here.
 // Matching is case-insensitive on purpose: the prefix is a human-readable
 // message, so tolerate a casing change rather than lose the classification.
 const QURL_CREATION_FAILED_PATTERN = /^qURL creation failed/i;
 const UPSTREAM_STATUS_PATTERN = /qURL API error \((\d{3})\)/i;
 const UPLOAD_API_DETAIL_MAX_CHARS = 200;
+// Input bound applied BEFORE the redaction regexes: the connector's JSON reply
+// is not size-capped the way CDN downloads are, and the URL rule backtracks on
+// long scheme-less runs. Comfortably above the 200-char output so a URL that
+// straddles the output cut is still caught whole.
+const UPLOAD_API_DETAIL_SCAN_CHARS = 4096;
 
 // Bound and redact connector-supplied error text before it is attached to an
 // Error that callers log at ERROR. The connector already redacts its own
@@ -199,6 +206,7 @@ const UPLOAD_API_DETAIL_MAX_CHARS = 200;
 // are dropped, and the result is capped.
 function redactUploadApiDetail(text) {
   const cleaned = String(text)
+    .slice(0, UPLOAD_API_DETAIL_SCAN_CHARS)
     // eslint-disable-next-line no-control-regex
     .replace(/[\u0000-\u001f\u007f]+/g, ' ')
     .replace(/[a-z][a-z0-9+.-]*:\/\/\S+/gi, '<url>')
@@ -211,10 +219,16 @@ function redactUploadApiDetail(text) {
 }
 
 function assertUploadResult(label, result) {
+  // No usable body at all is the malformed-response case, not a connector
+  // `success: false`; report it as such (the no_resource_id message, which the
+  // connector alarm counts).
+  if (!result || typeof result !== 'object') {
+    throw new Error(`${label} returned no resource_id`);
+  }
   // `success: false` deliberately stays untyped: the create-failed shape is
   // defined by the connector having stored the file (success: true), and the
   // "stored the file" wording below would be false otherwise.
-  if (!result || !result.success) {
+  if (!result.success) {
     throw new Error(`${label} returned success: false`);
   }
   if (result.resource_id) return;
@@ -223,6 +237,9 @@ function assertUploadResult(label, result) {
     const err = new Error(`${label} stored the file but upstream qURL creation failed`);
     err.apiCode = 'qurl_creation_failed';
     err.apiDetail = redactUploadApiDetail(errStr);
+    // Log-safety marker. Only this function sets it, so callers gate on it
+    // rather than on apiCode, which other paths parse out of response bodies.
+    err.apiDetailRedacted = true;
     const statusMatch = UPSTREAM_STATUS_PATTERN.exec(errStr);
     // The status of the hop that failed (qurl-service's reply to the
     // connector), not the connector's own 200 — that is what the operator

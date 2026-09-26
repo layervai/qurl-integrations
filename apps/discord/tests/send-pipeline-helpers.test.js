@@ -1503,6 +1503,64 @@ describe('handleAddRecipients', () => {
     expect(JSON.stringify(logger.error.mock.calls)).not.toContain('at_secret');
   });
 
+  describe('apiDetail log-safety on both ERROR sites', () => {
+    const FILE_CONFIG = {
+      resource_type: 'file',
+      connector_resource_id: 'conn-res-1',
+      actual_url: null,
+      expires_in: '6h',
+      personal_message: null,
+      location_name: null,
+      attachment_name: 'file.bin',
+      attachment_content_type: 'application/octet-stream',
+      attachment_url: 'https://cdn.discordapp.com/attachments/1/2/file.bin',
+    };
+    const MAPS_CONFIG = {
+      resource_type: 'maps',
+      connector_resource_id: null,
+      actual_url: 'https://www.google.com/maps/place/Eiffel+Tower',
+      expires_in: '1h',
+      personal_message: null,
+      location_name: 'Eiffel Tower',
+      attachment_name: null,
+    };
+    const RAW = 'RAW-UNREDACTED-BODY lv_live_secretsecretsecretsecret';
+    const sites = [
+      ['file', 'addRecipients file re-upload failed', FILE_CONFIG, () => mockDownloadAndUpload],
+      ['location', 'Failed to create links for additional recipients', MAPS_CONFIG, () => mockUploadJsonToConnector],
+    ];
+    const errWith = (fields) => Object.assign(new Error('upload failed'), fields);
+    async function runSite(config, uploadMock, err) {
+      mockDb.getSendConfig.mockReturnValue(config);
+      uploadMock().mockRejectedValue(err);
+      await handleAddRecipients('send-detail', makeUsersCollection([{ id: 'rcpt-1', bot: false, username: 'Alice' }]), mockOriginalInteraction, 'test-api-key');
+      const logger = require('../src/logger');
+      return logger.error.mock.calls;
+    }
+    const callFor = (calls, msg) => calls.find(c => c[0] === msg);
+
+    it.each(sites)('%s site logs a connector-redacted apiDetail', async (_k, msg, config, uploadMock) => {
+      const calls = await runSite(config, uploadMock, errWith({
+        apiCode: 'qurl_creation_failed', status: 400, apiDetail: 'qURL API error (400): bad field', apiDetailRedacted: true,
+      }));
+      expect(callFor(calls, msg)[1]).toEqual(expect.objectContaining({
+        apiCode: 'qurl_creation_failed', status: 400, apiDetail: 'qURL API error (400): bad field',
+      }));
+    });
+
+    it.each(sites)('%s site never logs apiDetail for quota_exceeded (unredacted body text)', async (_k, msg, config, uploadMock) => {
+      const calls = await runSite(config, uploadMock, errWith({ apiCode: 'quota_exceeded', apiDetail: RAW }));
+      expect(callFor(calls, msg)[1]).not.toHaveProperty('apiDetail');
+      expect(JSON.stringify(calls)).not.toContain('RAW-UNREDACTED-BODY');
+    });
+
+    it.each(sites)('%s site never logs a body-claimed qurl_creation_failed apiDetail without the local marker', async (_k, msg, config, uploadMock) => {
+      const calls = await runSite(config, uploadMock, errWith({ apiCode: 'qurl_creation_failed', apiDetail: RAW }));
+      expect(callFor(calls, msg)[1]).not.toHaveProperty('apiDetail');
+      expect(JSON.stringify(calls)).not.toContain('RAW-UNREDACTED-BODY');
+    });
+  });
+
   it('file send: batches > 10 new recipients into multiple mintLinks calls', async () => {
     mockDb.getSendConfig.mockReturnValue({
       resource_type: 'file',
