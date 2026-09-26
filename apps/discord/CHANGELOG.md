@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.2.7](https://github.com/layervai/qurl-integrations/compare/discord-v0.2.6...discord-v0.2.7) (2026-09-26)
+
+
+### Features
+
+* **discord:** add secure customer install with setup re-auth and default webhook reuse ([#1333](https://github.com/layervai/qurl-integrations/issues/1333)) ([5d6d8e8](https://github.com/layervai/qurl-integrations/commit/5d6d8e8c240486e6575aa1478ea873d0a5f2c158))
+* **discord:** audit setup administrator changes ([#850](https://github.com/layervai/qurl-integrations/issues/850)) ([5e156a6](https://github.com/layervai/qurl-integrations/commit/5e156a678beb037b53bdf0c941553c1e1f2e0bee))
+
+
+### Bug Fixes
+
+* **discord:** enforce identify budget at send boundary ([#1345](https://github.com/layervai/qurl-integrations/issues/1345)) ([1028c5c](https://github.com/layervai/qurl-integrations/commit/1028c5cecf8d8b6c07355084389b8247075279af))
+* **discord:** name upstream qURL create failures on connector upload ([#1533](https://github.com/layervai/qurl-integrations/issues/1533)) ([6ae3c38](https://github.com/layervai/qurl-integrations/commit/6ae3c38a261a09e12dacfddbbe33863588df537f))
+* **discord:** never reuse the seed sentinel as a webhook secret ([#1353](https://github.com/layervai/qurl-integrations/issues/1353)) ([1eac407](https://github.com/layervai/qurl-integrations/commit/1eac407f108b861c6197b792e8c2461462a55ad4))
+* **discord:** restore shim gateway metrics ([#1342](https://github.com/layervai/qurl-integrations/issues/1342)) ([fa6578f](https://github.com/layervai/qurl-integrations/commit/fa6578f89dbb10a5bca5714d2df609aae67daf55))
+* **discord:** revoke watermarked children and adopt SDK 2.x ([#1472](https://github.com/layervai/qurl-integrations/issues/1472)) ([0fccdd1](https://github.com/layervai/qurl-integrations/commit/0fccdd1220993ebb2aa9fae1d7016dabde5773e5))
+* **discord:** verify the stored key with GET /v1/me in /qurl status ([#1367](https://github.com/layervai/qurl-integrations/issues/1367)) ([82c6d3d](https://github.com/layervai/qurl-integrations/commit/82c6d3d2efcbaa46f3b3f96b7727604612093123))
+
 ## [0.2.6](https://github.com/layervai/qurl-integrations/compare/discord-v0.2.5...discord-v0.2.6) (2026-09-11)
 
 
