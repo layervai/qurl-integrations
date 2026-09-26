@@ -1,5 +1,23 @@
 # Changelog
 
+## [3.0.0](https://github.com/layervai/qurl-integrations/compare/v2.6.0...v3.0.0) (2026-09-26)
+
+
+### ⚠ BREAKING CHANGES
+
+* **cli:** All commands that open device state, including list, whoami, and get, require --supervision external or QURL_DAEMON_SUPERVISION=external when the state belongs to an external supervisor. Set the mode before upgrading these installations.
+
+### Features
+
+* **cli:** preserve private file origins through offline conversion ([#1514](https://github.com/layervai/qurl-integrations/issues/1514)) ([096a0df](https://github.com/layervai/qurl-integrations/commit/096a0df6fea1575e298d2bacf1ca736d8d85c5f0))
+* **cli:** publish without signup and add optional account recovery ([#1510](https://github.com/layervai/qurl-integrations/issues/1510)) ([1de5926](https://github.com/layervai/qurl-integrations/commit/1de5926e4fda81ac45c9f7d7f44c3ec9191f90ee))
+
+
+### Bug Fixes
+
+* **cli:** bound remote journey sessions for sandbox drains ([#1524](https://github.com/layervai/qurl-integrations/issues/1524)) ([3ba98c6](https://github.com/layervai/qurl-integrations/commit/3ba98c6a507a621209cab308629b1a104f1b3ada))
+* **cli:** verify tunnel TLS certificates by default ([#1508](https://github.com/layervai/qurl-integrations/issues/1508)) ([59401f0](https://github.com/layervai/qurl-integrations/commit/59401f0bb3a0a3def3b2674fb5a3fccde660f9d0))
+
 ## [2.6.0](https://github.com/layervai/qurl-integrations/compare/v2.5.4...v2.6.0) (2026-09-17)
 
 
