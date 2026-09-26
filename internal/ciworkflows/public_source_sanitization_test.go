@@ -178,10 +178,34 @@ var sanitizeKnownReference = map[string]bool{
 	".github/workflows/validate-issue-templates.yml|layervai/ops-routines": true,
 	// Contract test asserting the shape of that workflow's run URL.
 	"internal/ciworkflows/connector_resource_proof_test.go|layervai/nhp": true,
+}
+
+// sanitizeKnownLine is the line-exact form of sanitizeKnownReference, for a
+// file where one line functionally has to name a private repository but the
+// rest of the file must not: exempting the whole file would let prose next to
+// the functional line leak the same name unnoticed. Only lines whose trimmed
+// text equals the value are removed before the bare-name scan.
+var sanitizeKnownLine = map[string]string{
 	// Deploy dispatch: `target_repo:` must name the repository it dispatches
-	// to. Only that line may; comments in these files describe it by role.
-	".github/workflows/discord.yml|" + "integrations-" + "infra": true,
-	".github/workflows/slack.yml|" + "integrations-" + "infra":   true,
+	// to. Comments in these files describe it by role.
+	".github/workflows/discord.yml": "target_repo: qurl-" + "integrations-" + "infra",
+	".github/workflows/slack.yml":   "target_repo: qurl-" + "integrations-" + "infra",
+}
+
+// sanitizeStripKnownLine removes rel's reviewed functional line, if it has one.
+func sanitizeStripKnownLine(rel, text string) string {
+	known, ok := sanitizeKnownLine[rel]
+	if !ok {
+		return text
+	}
+	lines := strings.Split(text, "\n")
+	kept := lines[:0]
+	for _, line := range lines {
+		if strings.TrimSpace(line) != known {
+			kept = append(kept, line)
+		}
+	}
+	return strings.Join(kept, "\n")
 }
 
 func TestPublicSourceNamesNoPrivateLayerVMaterial(t *testing.T) {
@@ -239,7 +263,7 @@ func TestPublicSourceNamesNoPrivateLayerVMaterial(t *testing.T) {
 // sanitizeKnownReference ratchet.
 func sanitizeFindings(rel, text string) []string {
 	var findings []string
-	lower := strings.ToLower(text)
+	lower := strings.ToLower(sanitizeStripKnownLine(rel, text))
 
 	for _, name := range sanitizePrivateRepo {
 		if !strings.Contains(lower, name) || sanitizeKnownReference[rel+"|"+name] {
@@ -298,7 +322,8 @@ func TestSanitizeFindingsCatchesBarePrivateRepoNames(t *testing.T) {
 		{name: "role description", rel: file, text: "// filters at the infra repo's qurl-bot-discord/terraform/main.tf (infra repo #309)", flag: false},
 		{name: "protocol name", rel: file, text: "// the NHP knock precedes every connection; OpenNHP is the protocol", flag: false},
 		{name: "internal service name", rel: file, text: "// the landing URL qurl-service returns from POST /v1/qurls", flag: false},
-		{name: "functional dispatch target", rel: ".github/workflows/discord.yml", text: "target_repo: " + infra, flag: false},
+		{name: "functional dispatch target", rel: ".github/workflows/discord.yml", text: "    with:\n      target_repo: " + infra + "\n", flag: false},
+		{name: "prose beside the dispatch target", rel: ".github/workflows/discord.yml", text: "      target_repo: " + infra + "\n      # receiver lives in " + infra + "\n", flag: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
