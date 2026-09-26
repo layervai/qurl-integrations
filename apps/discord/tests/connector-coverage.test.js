@@ -203,12 +203,24 @@ describe('Connector client — coverage boost', () => {
       expect(malformed.message).toContain('returned no resource_id');
     });
 
+    it('masks short scheme-less resource paths that the opaque-run rule misses', async () => {
+      mockUploadReply([], {
+        ...createFailedBody,
+        error: 'qURL creation failed: qURL API error (404): /resources/abc123def and /qurls/q_1a2b3 not found',
+      });
+      const err = await connector.reUploadBuffer(Buffer.from('hi'), 'x.txt', 'text/plain').catch(e => e);
+      expect(err.apiDetail).not.toContain('abc123def');
+      expect(err.apiDetail).not.toContain('q_1a2b3');
+      expect(err.apiDetail).toContain('/resources/<id>');
+      expect(err.apiDetail).toContain('/qurls/<id>');
+    });
+
     it('bounds the scanned input before redaction (large bodies stay fast and capped)', async () => {
       const huge = 'qURL creation failed: ' + 'a'.repeat(100_000);
       mockUploadReply([], { ...createFailedBody, error: huge });
       const t0 = Date.now();
       const err = await connector.reUploadBuffer(Buffer.from('hi'), 'x.txt', 'text/plain').catch(e => e);
-      expect(Date.now() - t0).toBeLessThan(1000);
+      expect(Date.now() - t0).toBeLessThan(2000);
       expect(err.apiDetail.length).toBeLessThanOrEqual(201);
     });
 

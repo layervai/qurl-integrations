@@ -79,11 +79,16 @@ describe('classifyMintFailure (qurl-integrations#276 reason taxonomy)', () => {
 
   describe('upstream_create_failed class', () => {
     test('connector 200 with failed upstream qURL create → upstream_create_failed', () => {
-      expect(classifyMintFailure({ apiCode: 'qurl_creation_failed' })).toBe('upstream_create_failed');
+      expect(classifyMintFailure({ apiCode: 'qurl_creation_failed', apiDetailRedacted: true })).toBe('upstream_create_failed');
     });
 
-    test('apiCode beats status: create failure carrying the upstream 400 stays upstream_create_failed', () => {
-      expect(classifyMintFailure({ apiCode: 'qurl_creation_failed', status: 400 })).toBe('upstream_create_failed');
+    test('marked create failure beats status: carrying the upstream 400 stays upstream_create_failed', () => {
+      expect(classifyMintFailure({ apiCode: 'qurl_creation_failed', apiDetailRedacted: true, status: 400 })).toBe('upstream_create_failed');
+    });
+
+    test('a body-claimed qurl_creation_failed without the local marker buckets on status', () => {
+      expect(classifyMintFailure({ apiCode: 'qurl_creation_failed', status: 503 })).toBe('upstream_5xx');
+      expect(classifyMintFailure({ apiCode: 'qurl_creation_failed' })).toBe('unknown');
     });
   });
 

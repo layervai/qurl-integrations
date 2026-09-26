@@ -615,8 +615,12 @@ const AUDIT_EVENTS = {
   // (not an audit-event filter) matching either of the two messages
   // connector.js assertUploadResult throws for it: "upstream qURL creation
   // failed" (the connector reported a failed upstream create) and "returned
-  // no resource_id" (malformed / body-less response). The companion infra
-  // change widened the filter to both phrases.
+  // no resource_id" (malformed / body-less response). The infra filter MUST
+  // match both phrases before a bot build that emits "upstream qURL creation
+  // failed" reaches prod: the companion infra change widens it, and its apply
+  // is ordered ahead of any bot rollout carrying this message. An explicit
+  // connector `success: false` matches neither phrase and is deliberately
+  // outside this alarm (QURL_SEND_CREATE_LINK_FAILURE still counts it).
   // TODO(upstream-contract): those two phrases are mirrored by that infra
   // log filter; rewording either message here silently blinds the alarm in
   // prod. connector-coverage.test.js pins both phrases; change the filter in

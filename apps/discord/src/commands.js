@@ -151,9 +151,14 @@ function classifyMintFailure(error) {
       error.name === 'TimeoutError') {
     return 'timeout';
   }
-  // The connector answered 200 but its own upstream qURL create failed, so
-  // there is no HTTP status to bucket on; name the hop instead of `unknown`.
-  if (error.apiCode === 'qurl_creation_failed') return 'upstream_create_failed';
+  // The connector answered 200 but its own upstream qURL create failed; name
+  // that hop instead of bucketing on the upstream status. Gated on the local
+  // redaction marker only assertUploadResult sets, never on apiCode alone:
+  // other paths parse apiCode out of response bodies, so a 5xx body claiming
+  // `qurl_creation_failed` must still bucket as upstream_5xx.
+  if (error.apiDetailRedacted === true && error.apiCode === 'qurl_creation_failed') {
+    return 'upstream_create_failed';
+  }
   const status = error.status ?? 0;
   if (status >= 500 && status < 600) return 'upstream_5xx';
   if (status >= 400 && status < 500) return 'upstream_4xx';

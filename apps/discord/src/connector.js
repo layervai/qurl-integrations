@@ -3,7 +3,7 @@ const { QURLClient } = require('@layervai/qurl');
 
 const config = require('./config');
 const logger = require('./logger');
-const { validateResourceId, resourceIdLogRef } = require('./utils/resource-id');
+const { validateResourceId, resourceIdLogRef, maskResourceIdPath } = require('./utils/resource-id');
 const { qurlIdForCleanup } = require('./utils/qurl-id');
 
 // Reuse the security-critical, syntactic private/loopback/link-local IP guard
@@ -190,6 +190,9 @@ async function throwConnectorError(label, response) {
 // Matching is case-insensitive on purpose: the prefix is a human-readable
 // message, so tolerate a casing change rather than lose the classification.
 const QURL_CREATION_FAILED_PATTERN = /^qURL creation failed/i;
+// TODO(upstream-rebrand): mirrors the connector's brand-bearing
+// "qURL API error (NNN)" wrapper around qurl-service errors (the /i flag
+// already absorbs a QURL/qURL casing change); update with any rebrand sweep.
 const UPSTREAM_STATUS_PATTERN = /qURL API error \((\d{3})\)/i;
 const UPLOAD_API_DETAIL_MAX_CHARS = 200;
 // Input bound applied BEFORE the redaction regexes: the connector's JSON reply
@@ -202,11 +205,12 @@ const UPLOAD_API_DETAIL_SCAN_CHARS = 4096;
 // Error that callers log at ERROR. The connector already redacts its own
 // message; this is defense in depth against a connector build that does not:
 // URLs (which could carry a view path or token fragment) and long opaque runs
-// (keys, bearer tokens, hashes, resource ids) are replaced, control characters
-// are dropped, and the result is capped.
+// (keys, bearer tokens, hashes, resource ids) are replaced, `/resources/<id>`
+// and `/qurls/<id>` paths are masked whatever the id length (shared
+// maskResourceIdPath), control characters are dropped, and the result is
+// capped.
 function redactUploadApiDetail(text) {
-  const cleaned = String(text)
-    .slice(0, UPLOAD_API_DETAIL_SCAN_CHARS)
+  const cleaned = maskResourceIdPath(String(text).slice(0, UPLOAD_API_DETAIL_SCAN_CHARS))
     // eslint-disable-next-line no-control-regex
     .replace(/[\u0000-\u001f\u007f]+/g, ' ')
     .replace(/[a-z][a-z0-9+.-]*:\/\/\S+/gi, '<url>')
@@ -244,6 +248,12 @@ function assertUploadResult(label, result) {
     // The status of the hop that failed (qurl-service's reply to the
     // connector), not the connector's own 200 — that is what the operator
     // needs, and it is what the send-failure audit's status_code carries.
+    // Safe to set on these errors: the only readers of `.status` on the
+    // upload-failure path are classifyMintFailure (whose marker-gated
+    // create-failed branch runs before the status buckets), the audit's
+    // status_code, and the ERROR log fields. No retry, quota or user-message
+    // branch reads `.status` for upload errors (the Add Recipients copy keys
+    // off err.message).
     if (statusMatch) err.status = Number(statusMatch[1]);
     throw err;
   }
