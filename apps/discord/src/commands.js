@@ -160,6 +160,16 @@ function classifyMintFailure(error) {
   return 'unknown';
 }
 
+// Only the connector's `qurl_creation_failed` apiDetail is bounded and
+// redacted at the connector boundary (redactUploadApiDetail in connector.js);
+// other codes' apiDetail is raw body text and is not log-safe, so it stays off
+// the ERROR lines that call this.
+function logSafeApiDetail(error) {
+  return error?.apiCode === 'qurl_creation_failed' && error.apiDetail
+    ? { apiDetail: error.apiDetail }
+    : {};
+}
+
 // emitMintFailureAudit centralizes the QURL_SEND_CREATE_LINK_FAILURE
 // emission contract so the three catch sites (initial /qurl send +
 // addRecipients file branch + addRecipients location branch) cannot
@@ -2193,6 +2203,7 @@ async function executeSendPipeline(interaction, {
       error: error.message,
       apiCode: error.apiCode,
       status: error.status,
+      ...logSafeApiDetail(error),
       ...(error.partialLinkCount ? {
         partial_link_count: error.partialLinkCount,
         partial_qurl_ids: error.partialQurlIds,
@@ -3282,6 +3293,7 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
           error: err.message,
           apiCode: err.apiCode,
           status: err.status,
+          ...logSafeApiDetail(err),
           ...(err.partialLinkCount ? {
             partial_link_count: err.partialLinkCount,
             partial_qurl_ids: err.partialQurlIds,
@@ -3362,6 +3374,7 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
       error: error.message,
       apiCode: error.apiCode,
       status: error.status,
+      ...logSafeApiDetail(error),
       ...(error.partialLinkCount ? {
         partial_link_count: error.partialLinkCount,
         partial_qurl_ids: error.partialQurlIds,

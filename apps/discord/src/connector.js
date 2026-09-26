@@ -174,21 +174,60 @@ async function throwConnectorError(label, response) {
 // "qURL creation failed". That is an upstream rejection, not a malformed
 // response, and conflating the two sent operators hunting a connector parsing
 // bug while every file send failed on an upstream schema change. Tag it with a
-// typed apiCode (never the raw `error` text, which is body content and stays
-// out of err.message per the policy above) so the send-failure audit and the
-// "Failed to prepare QURL links" log name the failing hop.
+// typed apiCode (a local literal, never copied from the body) and keep the raw
+// `error` text out of err.message per the policy above. The reason travels the
+// sanctioned way instead: a bounded, redacted `apiDetail` plus the upstream
+// HTTP status parsed from the connector's `qURL API error (NNN)` wrapper.
+//
+// TODO(upstream-contract): this mirrors the S3 connector's /api/upload
+// create-failed response (HTTP 200, `success: true`, no `resource_id`,
+// `error` prefixed "qURL creation failed", upstream status rendered as
+// "qURL API error (NNN)"). If the connector rewords either string this
+// silently reverts to the untyped "returned no resource_id" error and the
+// send-failure audit reason reverts to `unknown`; update both sides together.
+// Matching is case-insensitive on purpose: the prefix is a human-readable
+// message, so tolerate a casing change rather than lose the classification.
 const QURL_CREATION_FAILED_PATTERN = /^qURL creation failed/i;
+const UPSTREAM_STATUS_PATTERN = /qURL API error \((\d{3})\)/i;
+const UPLOAD_API_DETAIL_MAX_CHARS = 200;
+
+// Bound and redact connector-supplied error text before it is attached to an
+// Error that callers log at ERROR. The connector already redacts its own
+// message; this is defense in depth against a connector build that does not:
+// URLs (which could carry a view path or token fragment) and long opaque runs
+// (keys, bearer tokens, hashes, resource ids) are replaced, control characters
+// are dropped, and the result is capped.
+function redactUploadApiDetail(text) {
+  const cleaned = String(text)
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\u0000-\u001f\u007f]+/g, ' ')
+    .replace(/[a-z][a-z0-9+.-]*:\/\/\S+/gi, '<url>')
+    .replace(/[A-Za-z0-9_\-+/=|.]{24,}/g, '<redacted>')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return cleaned.length > UPLOAD_API_DETAIL_MAX_CHARS
+    ? `${cleaned.slice(0, UPLOAD_API_DETAIL_MAX_CHARS)}…`
+    : cleaned;
+}
 
 function assertUploadResult(label, result) {
+  // `success: false` deliberately stays untyped: the create-failed shape is
+  // defined by the connector having stored the file (success: true), and the
+  // "stored the file" wording below would be false otherwise.
   if (!result || !result.success) {
     throw new Error(`${label} returned success: false`);
   }
   if (result.resource_id) return;
   const errStr = typeof result.error === 'string' ? result.error : '';
   if (QURL_CREATION_FAILED_PATTERN.test(errStr)) {
-    logger.debug(`${label} qURL creation failed upstream`, { errorLen: errStr.length });
     const err = new Error(`${label} stored the file but upstream qURL creation failed`);
     err.apiCode = 'qurl_creation_failed';
+    err.apiDetail = redactUploadApiDetail(errStr);
+    const statusMatch = UPSTREAM_STATUS_PATTERN.exec(errStr);
+    // The status of the hop that failed (qurl-service's reply to the
+    // connector), not the connector's own 200 — that is what the operator
+    // needs, and it is what the send-failure audit's status_code carries.
+    if (statusMatch) err.status = Number(statusMatch[1]);
     throw err;
   }
   // Guard against a malformed connector response silently propagating

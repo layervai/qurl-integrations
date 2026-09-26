@@ -81,6 +81,10 @@ describe('classifyMintFailure (qurl-integrations#276 reason taxonomy)', () => {
     test('connector 200 with failed upstream qURL create → upstream_create_failed', () => {
       expect(classifyMintFailure({ apiCode: 'qurl_creation_failed' })).toBe('upstream_create_failed');
     });
+
+    test('apiCode beats status: create failure carrying the upstream 400 stays upstream_create_failed', () => {
+      expect(classifyMintFailure({ apiCode: 'qurl_creation_failed', status: 400 })).toBe('upstream_create_failed');
+    });
   });
 
   describe('priority ordering: timeout beats status when both present', () => {
