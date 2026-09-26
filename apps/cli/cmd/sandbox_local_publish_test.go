@@ -411,7 +411,7 @@ func assertSandboxRemoteURLDeviceJourney(t *testing.T, binary string, cliEnv map
 		t.Fatalf("device-authenticated remote CRID appeared %d times in the newest active list window, want once", seen)
 	}
 
-	shared := runSandboxLocalCLI(t, binary, cliEnv, stateDir, "share", pub.CRID)
+	shared := runSandboxLocalCLI(t, binary, cliEnv, stateDir, "share", pub.CRID, "--session-duration", "5m")
 	if _, err := validateSandboxShareCommandResult(
 		"device-authenticated remote share",
 		shared.code,
@@ -422,7 +422,7 @@ func assertSandboxRemoteURLDeviceJourney(t *testing.T, binary string, cliEnv map
 	}
 
 	destination := filepath.Join(t.TempDir(), "remote-url-payload")
-	downloaded := runSandboxLocalCLI(t, binary, cliEnv, stateDir, "get", pub.CRID, "--file", destination)
+	downloaded := runSandboxLocalCLI(t, binary, cliEnv, stateDir, "get", pub.CRID, "--file", destination, "--session-duration", "5m")
 	if downloaded.code != 0 {
 		t.Fatalf("device-authenticated remote get exit = %d: %s", downloaded.code, downloaded.stderr.String())
 	}
