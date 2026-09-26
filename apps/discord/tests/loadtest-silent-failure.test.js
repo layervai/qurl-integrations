@@ -1042,8 +1042,8 @@ describe('loadtest script — static checks on call sites no test can reach', ()
     expect(preflight).toBeLessThan(guard);
   });
 
-  it('uploads through reUploadBuffer, twice and only twice', () => {
-    expect(callsNamed('reUploadBuffer')).toHaveLength(2);
+  it('uploads through reUploadBuffer once per round', () => {
+    expect(callsNamed('reUploadBuffer')).toHaveLength(1);
   });
 
   it('passes the first three parameters positionally and omits the last two', () => {

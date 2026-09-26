@@ -814,6 +814,22 @@ describe('revokeAllLinks', () => {
     expect(mockDb.markSendRevoked).toHaveBeenCalledWith('send-1', 'sender-1');
   });
 
+  it('attempts later shared-resource chunks after a middle failure and reports confirmed recipients', async () => {
+    mockDb.getSendItems.mockResolvedValueOnce(Array.from({ length: 30 }, (_, i) => ({
+      resource_id: 'res-1', qurl_id: `q_${i}`, recipient_discord_id: `user-${i}`,
+    })));
+    mockRevokeMintedLinks.mockImplementation(async (_, ids) => {
+      if (ids.includes('q_10')) throw new Error('middle chunk failed');
+    });
+    const result = await revokeAllLinks('send-1', 'sender-1', 'apikey');
+    expect(mockRevokeMintedLinks).toHaveBeenCalledTimes(3);
+    expect(mockRevokeMintedLinks).toHaveBeenLastCalledWith('res-1', Array.from({ length: 10 }, (_, i) => `q_${i + 20}`), 'apikey');
+    expect(result).toMatchObject({ success: 20, total: 30, failureUserIds: Array.from({ length: 10 }, (_, i) => `user-${i + 10}`) });
+    expect(result.successUserIds).toEqual(expect.arrayContaining(['user-0', 'user-29']));
+    expect(mockDb.markSendRevoked).not.toHaveBeenCalled();
+    expect(logger.audit).toHaveBeenCalledWith(require('../src/constants').AUDIT_EVENTS.REVOKE_FAILED, expect.objectContaining({ success: 0, total: 1 }));
+  });
+
   it('leaves the send retryable when the connector cannot confirm a child revoke', async () => {
     mockRevokeMintedLinks.mockRejectedValueOnce(new Error('Connector revoke_links failed (429)'));
     mockDb.getSendItems.mockResolvedValueOnce([
@@ -2921,6 +2937,22 @@ describe('handleAddRecipients — DB failure mid-flow', () => {
     expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-new', ['q_aaaaaaaaaa1'], 'apikey');
   });
 
+  it('attempts every fresh child chunk after middle cleanup failures and counts distinct resources', async () => {
+    const ids = Array.from({ length: 40 }, (_, i) => `q_${i}`);
+    mockRevokeMintedLinks.mockImplementation(async (_, chunk) => {
+      if (chunk.includes('q_10') || chunk.includes('q_20')) throw new Error('middle chunk failed');
+    });
+    await cleanupFreshAddRecipientResources(ids.map(qurlId => ({ resourceId: 'res-1', qurlId })), 'apikey', 'send-1', { rowsMayHavePersisted: false });
+    expect(mockRevokeMintedLinks).toHaveBeenCalledTimes(4);
+    expect(mockRevokeMintedLinks).toHaveBeenLastCalledWith('res-1', ids.slice(30), 'apikey');
+    expect(logger.error).toHaveBeenCalledWith('Failed to clean up freshly minted Add Recipients qURL resources', expect.objectContaining({
+      failed_count: 1, total: 1, failures: [
+        { resource_ref: resourceIdLogRef('res-1'), qurl_ids: ids.slice(10, 20), error: 'middle chunk failed' },
+        { resource_ref: resourceIdLogRef('res-1'), qurl_ids: ids.slice(20, 30), error: 'middle chunk failed' },
+      ],
+    }));
+  });
+
   it('still revokes identifiable fresh children when one cleanup row lacks an id', async () => {
     await cleanupFreshAddRecipientResources([
       { resourceId: 'res-new', qurlId: 'q_aaaaaaaaaa1' },
@@ -3008,7 +3040,7 @@ describe('handleAddRecipients — DB failure mid-flow', () => {
         reason: 'revoked_guard',
         failed_count: 1,
         total: 1,
-        failures: [{ resource_ref: resourceIdLogRef(sensitiveResourceId), error: 'delete failed' }],
+        failures: [{ resource_ref: resourceIdLogRef(sensitiveResourceId), qurl_ids: ['q_aaaaaaaaaa1'], error: 'delete failed' }],
       }),
     );
     expect(JSON.stringify(logger.error.mock.calls)).not.toContain(sensitiveResourceId);
@@ -3047,9 +3079,10 @@ describe('handleAddRecipients — DB failure mid-flow', () => {
     expect(mockDb.recordQURLSendBatch).not.toHaveBeenCalled();
     expect(mockSendDM).not.toHaveBeenCalled();
     expect(mockRevokeMintedLinks).toHaveBeenCalledTimes(10);
-    expect(mockRevokeMintedLinks.mock.calls.map(call => call[0]).sort()).toEqual(
-      Array.from({ length: 10 }, (_, i) => `res-${i}`).sort(),
+    expect(mockRevokeMintedLinks.mock.calls.flatMap(call => call[1])).toEqual(
+      Array.from({ length: 100 }, (_, i) => `q_${Math.floor(i / 10)}_${i % 10}`),
     );
+    expect(mockRevokeMintedLinks.mock.calls.every(call => call[0] === 'res-0' && call[1].length === 10)).toBe(true);
   });
 });
 
@@ -3223,7 +3256,7 @@ describe('handleAddRecipients — happy path (location)', () => {
 });
 
 describe('mintLinksInBatches', () => {
-  it('mints once for recipientCount <= TOKENS_PER_RESOURCE (10)', async () => {
+  it('mints once for recipientCount <= MINT_BATCH_SIZE (10)', async () => {
     mockMintLinks.mockResolvedValueOnce([
       { qurl_id: 'q_1', qurl_link: 'https://q.test/1' },
       { qurl_id: 'q_2', qurl_link: 'https://q.test/2' },
@@ -3242,7 +3275,7 @@ describe('mintLinksInBatches', () => {
     expect(result[0].resourceId).toBe('res-1');
   });
 
-  it('re-uploads + mints again when recipientCount > TOKENS_PER_RESOURCE', async () => {
+  it('reuses the resource across bounded requests for more than 10 recipients', async () => {
     mockMintLinks
       .mockResolvedValueOnce(Array.from({ length: 10 }, (_, i) => ({ qurl_id: `q_${i}`, qurl_link: `https://q.test/${i}` })))
       .mockResolvedValueOnce([{ qurl_id: 'q_10', qurl_link: 'https://q.test/10' }]);
@@ -3256,10 +3289,11 @@ describe('mintLinksInBatches', () => {
       apiKey: 'apikey',
     });
 
-    expect(reuploadFn).toHaveBeenCalledTimes(1);
+    expect(reuploadFn).not.toHaveBeenCalled();
     expect(mockMintLinks).toHaveBeenCalledTimes(2);
     expect(result).toHaveLength(11);
-    expect(result[10].resourceId).toBe('res-2');
+    expect(result.every(link => link.resourceId === 'res-1')).toBe(true);
+    expect(mockMintLinks.mock.calls.map(([id, opts]) => [id, opts.n])).toEqual([['res-1', 10], ['res-1', 1]]);
   });
 
   it('revokes earlier batches before rethrowing a later mint failure', async () => {
@@ -3290,6 +3324,22 @@ describe('mintLinksInBatches', () => {
         error: 'connector unavailable',
       }],
     });
+  });
+
+  it('attempts later compensation chunks after a middle revoke failure', async () => {
+    const ids = Array.from({ length: 30 }, (_, i) => `q_${i}`);
+    for (let i = 0; i < 30; i += 10) mockMintLinks.mockResolvedValueOnce(ids.slice(i, i + 10).map(qurl_id => ({ qurl_id, qurl_link: 'https://q.test/link' })));
+    const failure = new Error('fourth mint failed');
+    mockMintLinks.mockRejectedValueOnce(failure);
+    mockRevokeMintedLinks.mockImplementation(async (_, chunk) => {
+      if (chunk.includes('q_10')) throw new Error('middle chunk failed');
+    });
+    await expect(mintLinksInBatches({ initialResourceId: 'res-1', recipientCount: 31, apiKey: 'apikey' })).rejects.toBe(failure);
+    expect(mockRevokeMintedLinks).toHaveBeenCalledTimes(3);
+    expect(mockRevokeMintedLinks).toHaveBeenLastCalledWith('res-1', ids.slice(20), 'apikey');
+    expect(logger.error).toHaveBeenCalledWith('Failed to revoke links after a mint failure', expect.objectContaining({
+      failed_count: 1, total: 1, failures: [{ resource_ref: resourceIdLogRef('res-1'), qurl_ids: ids.slice(10, 20), error: 'middle chunk failed' }],
+    }));
   });
 
   it('surfaces the invalid-qurl_id error, not a TypeError, for a null mint entry', async () => {
@@ -3358,7 +3408,8 @@ describe('mintLinksInBatches', () => {
       apiKey: 'apikey',
     })).rejects.toThrow('Connector mint_link returned 24 links for a 1-link batch');
     // Compensation covers the request plus 20 overflow ids, not the whole untrusted body.
-    expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-1', minted.slice(0, 21).map(l => l.qurl_id), 'apikey');
+    expect(mockRevokeMintedLinks.mock.calls.flatMap(call => call[1])).toEqual(minted.slice(0, 21).map(l => l.qurl_id));
+    expect(mockRevokeMintedLinks.mock.calls.every(call => call[0] === 'res-1' && call[1].length <= 10)).toBe(true);
     expect(logger.error).toHaveBeenCalledWith('Connector mint_link over-minted', {
       resource_ref: resourceIdLogRef('res-1'), requested: 1, returned: 24,
       unrevoked_overflow_qurl_ids: ['q_x21', 'q_x22', 'q_x23'],
