@@ -151,10 +151,29 @@ function classifyMintFailure(error) {
       error.name === 'TimeoutError') {
     return 'timeout';
   }
+  // The connector answered 200 but its own upstream qURL create failed; name
+  // that hop instead of bucketing on the upstream status. Gated on the local
+  // redaction marker only assertUploadResult sets, never on apiCode alone:
+  // other paths parse apiCode out of response bodies, so a 5xx body claiming
+  // `qurl_creation_failed` must still bucket as upstream_5xx.
+  if (error.apiDetailRedacted === true && error.apiCode === 'qurl_creation_failed') {
+    return 'upstream_create_failed';
+  }
   const status = error.status ?? 0;
   if (status >= 500 && status < 600) return 'upstream_5xx';
   if (status >= 400 && status < 500) return 'upstream_4xx';
   return 'unknown';
+}
+
+// Only an apiDetail that connector.js bounded and redacted itself
+// (assertUploadResult → redactUploadApiDetail, which sets apiDetailRedacted)
+// is log-safe. Gate on that local marker, never on apiCode: other paths parse
+// apiCode out of response bodies, so a body claiming `qurl_creation_failed`
+// must not smuggle raw apiDetail text onto the ERROR lines that call this.
+function logSafeApiDetail(error) {
+  return error?.apiDetailRedacted === true && typeof error.apiDetail === 'string'
+    ? { apiDetail: error.apiDetail }
+    : {};
 }
 
 // emitMintFailureAudit centralizes the QURL_SEND_CREATE_LINK_FAILURE
@@ -2190,6 +2209,7 @@ async function executeSendPipeline(interaction, {
       error: error.message,
       apiCode: error.apiCode,
       status: error.status,
+      ...logSafeApiDetail(error),
       ...(error.partialLinkCount ? {
         partial_link_count: error.partialLinkCount,
         partial_qurl_ids: error.partialQurlIds,
@@ -3279,6 +3299,7 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
           error: err.message,
           apiCode: err.apiCode,
           status: err.status,
+          ...logSafeApiDetail(err),
           ...(err.partialLinkCount ? {
             partial_link_count: err.partialLinkCount,
             partial_qurl_ids: err.partialQurlIds,
@@ -3359,6 +3380,7 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
       error: error.message,
       apiCode: error.apiCode,
       status: error.status,
+      ...logSafeApiDetail(error),
       ...(error.partialLinkCount ? {
         partial_link_count: error.partialLinkCount,
         partial_qurl_ids: error.partialQurlIds,
@@ -9990,6 +10012,7 @@ module.exports = {
   // NODE_ENV=test (jest's default); production deploys set NODE_ENV=production.
   ...(process.env.NODE_ENV !== 'production' && {
     _test: {
+      logSafeApiDetail,
       isGoogleMapsURL,
       sanitizeFilename,
       sanitizeMessage,

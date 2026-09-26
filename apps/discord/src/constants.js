@@ -584,6 +584,9 @@ const AUDIT_EVENTS = {
   //                              isn't quota_exceeded (already split
   //                              into its own user-message path)
   //   - upstream_5xx          — connector or qurl-service 5xx
+  //   - upstream_create_failed — connector stored the upload (HTTP 200)
+  //                              but its upstream qURL create failed, so
+  //                              no resource_id came back
   //   - timeout               — request timed out before status
   //   - unknown               — fallback for unclassifiable errors
   //
@@ -607,8 +610,21 @@ const AUDIT_EVENTS = {
   // "expiry" and silently suppressing them. Skip only what is genuinely
   // high-volume (quota); let volume + threshold handle the rest.
   //
-  // The sibling connector_no_resource_id alarm separately catches the
-  // "200 + missing resource_id" shape.
+  // The sibling connector_no_resource_id alarm separately pages on the
+  // connector's "200 + missing resource_id" shape. It is a log-TEXT filter
+  // (not an audit-event filter) matching either of the two messages
+  // connector.js assertUploadResult throws for it: "upstream qURL creation
+  // failed" (the connector reported a failed upstream create) and "returned
+  // no resource_id" (malformed / body-less response). The infra filter MUST
+  // match both phrases before a bot build that emits "upstream qURL creation
+  // failed" reaches prod: the companion infra change widens it, and its apply
+  // is ordered ahead of any bot rollout carrying this message. An explicit
+  // connector `success: false` matches neither phrase and is deliberately
+  // outside this alarm (QURL_SEND_CREATE_LINK_FAILURE still counts it).
+  // TODO(upstream-contract): those two phrases are mirrored by that infra
+  // log filter; rewording either message here silently blinds the alarm in
+  // prod. connector-coverage.test.js pins both phrases; change the filter in
+  // the same merge train.
   QURL_SEND_CREATE_LINK_FAILURE: 'qurl_send_create_link_failure',
 
   // /qurl detect — watermark-attribution lookup (#1101). Audits the attribution

@@ -3,7 +3,7 @@ const { QURLClient } = require('@layervai/qurl');
 
 const config = require('./config');
 const logger = require('./logger');
-const { validateResourceId, resourceIdLogRef } = require('./utils/resource-id');
+const { validateResourceId, resourceIdLogRef, maskResourceIdPath } = require('./utils/resource-id');
 const { qurlIdForCleanup } = require('./utils/qurl-id');
 
 // Reuse the security-critical, syntactic private/loopback/link-local IP guard
@@ -168,6 +168,100 @@ async function throwConnectorError(label, response) {
   throwConnectorErrorFromBody(label, response, { bodyText, apiCode, apiDetail });
 }
 
+// The connector answers `/api/upload` with HTTP 200 + `success: true` but no
+// `resource_id` when it stored the file yet its upstream qURL create failed:
+// the body then carries `resource_url` plus an `error` string beginning
+// "qURL creation failed". That is an upstream rejection, not a malformed
+// response, and conflating the two sent operators hunting a connector parsing
+// bug while every file send failed on an upstream schema change. Tag it with a
+// typed apiCode (a local literal, never copied from the body) and keep the raw
+// `error` text out of err.message per the policy above. The reason travels the
+// sanctioned way instead: a bounded, redacted `apiDetail` plus the upstream
+// HTTP status parsed from the connector's `qURL API error (NNN)` wrapper.
+//
+// TODO(upstream-contract): this mirrors the S3 connector's /api/upload
+// create-failed response (HTTP 200, `success: true`, no `resource_id`,
+// `error` prefixed "qURL creation failed", upstream status rendered as
+// "qURL API error (NNN)"). If the connector rewords either string this
+// silently reverts to the untyped "returned no resource_id" error and the
+// send-failure audit reason reverts to `unknown`; update both sides together.
+// The same silent revert happens if the connector retypes `error` (e.g. to an
+// object): only a string `error` is recognized here.
+// Matching is case-insensitive on purpose: the prefix is a human-readable
+// message, so tolerate a casing change rather than lose the classification.
+const QURL_CREATION_FAILED_PATTERN = /^qURL creation failed/i;
+// TODO(upstream-rebrand): mirrors the connector's brand-bearing
+// "qURL API error (NNN)" wrapper around qurl-service errors (the /i flag
+// already absorbs a QURL/qURL casing change); update with any rebrand sweep.
+const UPSTREAM_STATUS_PATTERN = /qURL API error \((\d{3})\)/i;
+const UPLOAD_API_DETAIL_MAX_CHARS = 200;
+// Input bound applied BEFORE the redaction regexes: the connector's JSON reply
+// is not size-capped the way CDN downloads are, and the URL rule backtracks on
+// long scheme-less runs. Comfortably above the 200-char output so a URL that
+// straddles the output cut is still caught whole.
+const UPLOAD_API_DETAIL_SCAN_CHARS = 4096;
+
+// Bound and redact connector-supplied error text before it is attached to an
+// Error that callers log at ERROR. The connector already redacts its own
+// message; this is defense in depth against a connector build that does not:
+// URLs (which could carry a view path or token fragment) and long opaque runs
+// (keys, bearer tokens, hashes, resource ids) are replaced, `/resources/<id>`
+// and `/qurls/<id>` paths are masked whatever the id length (shared
+// maskResourceIdPath), control characters are dropped, and the result is
+// capped.
+function redactUploadApiDetail(text) {
+  const cleaned = maskResourceIdPath(String(text).slice(0, UPLOAD_API_DETAIL_SCAN_CHARS))
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\u0000-\u001f\u007f]+/g, ' ')
+    .replace(/[a-z][a-z0-9+.-]*:\/\/\S+/gi, '<url>')
+    .replace(/[A-Za-z0-9_\-+/=|.]{24,}/g, '<redacted>')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return cleaned.length > UPLOAD_API_DETAIL_MAX_CHARS
+    ? `${cleaned.slice(0, UPLOAD_API_DETAIL_MAX_CHARS)}…`
+    : cleaned;
+}
+
+function assertUploadResult(label, result) {
+  // No usable body at all is the malformed-response case, not a connector
+  // `success: false`; report it as such (the no_resource_id message, which the
+  // connector alarm counts).
+  if (!result || typeof result !== 'object') {
+    throw new Error(`${label} returned no resource_id`);
+  }
+  // `success: false` deliberately stays untyped: the create-failed shape is
+  // defined by the connector having stored the file (success: true), and the
+  // "stored the file" wording below would be false otherwise.
+  if (!result.success) {
+    throw new Error(`${label} returned success: false`);
+  }
+  if (result.resource_id) return;
+  const errStr = typeof result.error === 'string' ? result.error : '';
+  if (QURL_CREATION_FAILED_PATTERN.test(errStr)) {
+    const err = new Error(`${label} stored the file but upstream qURL creation failed`);
+    err.apiCode = 'qurl_creation_failed';
+    err.apiDetail = redactUploadApiDetail(errStr);
+    // Log-safety marker. Only this function sets it, so callers gate on it
+    // rather than on apiCode, which other paths parse out of response bodies.
+    err.apiDetailRedacted = true;
+    const statusMatch = UPSTREAM_STATUS_PATTERN.exec(errStr);
+    // The status of the hop that failed (qurl-service's reply to the
+    // connector), not the connector's own 200 — that is what the operator
+    // needs, and it is what the send-failure audit's status_code carries.
+    // Safe to set on these errors: the only readers of `.status` on the
+    // upload-failure path are classifyMintFailure (whose marker-gated
+    // create-failed branch runs before the status buckets), the audit's
+    // status_code, and the ERROR log fields. No retry, quota or user-message
+    // branch reads `.status` for upload errors (the Add Recipients copy keys
+    // off err.message).
+    if (statusMatch) err.status = Number(statusMatch[1]);
+    throw err;
+  }
+  // Guard against a malformed connector response silently propagating
+  // `undefined` as the resource ID into downstream mintLinks/saveSendConfig.
+  throw new Error(`${label} returned no resource_id`);
+}
+
 // Read the response body chunk-by-chunk and abort as soon as we cross the cap.
 // Guards against a CDN that returns a missing/incorrect Content-Length — the
 // old code would buffer the whole body into memory before noticing it was
@@ -317,14 +411,7 @@ async function uploadToConnector(sourceUrl, filename, contentType, apiKey, viewe
   }
 
   const result = await uploadResponse.json();
-  if (!result.success) {
-    throw new Error('Connector upload returned success: false');
-  }
-  if (!result.resource_id) {
-    // Guard against a malformed connector response silently propagating
-    // `undefined` as the resource ID into downstream mintLinks/saveSendConfig.
-    throw new Error('Connector upload returned no resource_id');
-  }
+  assertUploadResult('Connector upload', result);
 
   logger.info('Uploaded to connector', {
     md5_prefix: md5Prefix(result.hash),
@@ -361,12 +448,7 @@ async function reUploadBuffer(fileBuffer, filename, contentType, apiKey, viewerT
   }
 
   const result = await uploadResponse.json();
-  if (!result.success) {
-    throw new Error('Connector re-upload returned success: false');
-  }
-  if (!result.resource_id) {
-    throw new Error('Connector re-upload returned no resource_id');
-  }
+  assertUploadResult('Connector re-upload', result);
 
   logger.info('Re-uploaded to connector (new resource)', {
     md5_prefix: md5Prefix(result.hash),
@@ -1261,12 +1343,7 @@ async function uploadJsonToConnector(jsonPayload, filename, apiKey, viewerTtlSec
   }
 
   const result = await uploadResponse.json();
-  if (!result.success) {
-    throw new Error('Connector JSON upload returned success: false');
-  }
-  if (!result.resource_id) {
-    throw new Error('Connector JSON upload returned no resource_id');
-  }
+  assertUploadResult('Connector JSON upload', result);
 
   logger.info('Uploaded JSON to connector', {
     md5_prefix: md5Prefix(result.hash),
