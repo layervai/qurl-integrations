@@ -479,9 +479,11 @@ and conversion. An owner-bound profile with no file shares is a valid empty set.
 The origin must be bound inside an owner-only (0700) directory controlled by
 the supervisor, with ancestors other users cannot replace; do not use a socket
 directly under a shared temporary directory. The supervisor owns the ancestor
-boundary; before dialing, the CLI also refuses a socket whose parent is not an
-owned `0700` directory. Conversion is
-offline and may precede binding the origin, so it does not dial the target.
+boundary; publish, restart, and the daemon itself (before handing each route
+to the Connector) also refuse a socket whose parent is not an owned `0700`
+directory. The daemon withholds only that share, reports it as retrying with a
+`local_state` failure, and re-checks it on backoff. Conversion is offline and
+may precede binding the origin, so it does not dial the target.
 Set the same `QURL_CONNECTOR_RUNTIME_DIR` environment value for daemon startup
 and conversion (including any value supplied through daemon run's hidden
 `--runtime-dir` flag), so the IPC reservation also excludes older daemon binaries.

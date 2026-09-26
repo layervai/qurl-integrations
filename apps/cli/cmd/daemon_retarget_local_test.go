@@ -12,11 +12,15 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	connectorshare "github.com/layervai/qurl-connector/pkg/share"
+
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/apitest"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/agent"
 	connectordaemon "github.com/layervai/qurl-integrations/apps/cli/internal/connector/daemon"
 	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/exitcode"
@@ -58,14 +62,25 @@ func TestPrivateOriginTCPCommandsRejectBeforeChangingSharing(t *testing.T) {
 			if action == "restart" {
 				args = []string{"--endpoint", srv.URL, "restart", row.CRID, "--target", "http://127.0.0.1:4000"}
 			}
+			// Resource discovery mints the Connector enrollment credential and
+			// creates the Connector resource, so a refused target must never
+			// reach it — including the default, generated-ID publish.
+			var discovered atomic.Int32
+			resolve := resolvedLocalResource(srv, true)
 			result := runCLI(t, &runOpts{
 				args: args, env: map[string]string{"QURL_API_KEY": testAPIKey, connectorstate.EnvRuntimeSupervision: "external"},
 				shareStateDir: dir, shareRegistry: registry, shareDaemon: &recordingShareDaemon{},
 				preflightTarget: func(context.Context, string, int) error { return nil },
-				localResource:   resolvedLocalResource(srv, true),
+				localResource: func(ctx context.Context, cfg *connectorshare.NativeRuntimeConfig, credential func(string) (string, error)) (*agent.ResolvedResource, error) {
+					discovered.Add(1)
+					return resolve(ctx, cfg, credential)
+				},
 			})
 			if result.code == 0 || !strings.Contains(result.stderr.String(), "private origin shares require Unix transport") {
 				t.Fatalf("expected private target refusal: exit=%d stderr=%s", result.code, result.stderr.String())
+			}
+			if got := discovered.Load(); got != 0 {
+				t.Fatalf("rejected target reached Connector resource discovery %d times", got)
 			}
 			for _, request := range srv.Requests() {
 				if strings.HasPrefix(request.Path, path) && request.Method != http.MethodGet {

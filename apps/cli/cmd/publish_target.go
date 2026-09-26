@@ -150,8 +150,12 @@ func generatedLocalConnectorID(agentID, canonicalOrigin string) (string, error) 
 	}
 	digest := sha256.Sum256([]byte(connectorstate.LocalPublishIDDomain + "\x00id\x00" + agentID + "\x00" + canonicalOrigin))
 	suffix := strings.ToLower(base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(digest[:10]))
-	return "local-" + suffix, nil
+	return generatedLocalConnectorIDPrefix + suffix, nil
 }
+
+// generatedLocalConnectorIDPrefix begins every generated local Connector ID;
+// the hyphen-free base32 suffix follows it.
+const generatedLocalConnectorIDPrefix = "local-"
 
 const localEnrollmentEntropyBytes = 32
 

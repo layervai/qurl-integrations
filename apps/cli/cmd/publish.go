@@ -126,7 +126,15 @@ func runLocalPublish(ctx context.Context, opts *globalOpts, target *publishTarge
 	if err != nil {
 		return err
 	}
-	if err := registry.ValidateTarget(ctx, requestedID, target.localTarget()); err != nil {
+	// The generated default ID needs the agent identity, which is only known
+	// after cloud mutation begins. Checking its fixed prefix is exact: private
+	// origin prefixes must end in a hyphen and the generated suffix has none,
+	// so a prefix matches a generated ID only when it is that prefix itself.
+	checkID := requestedID
+	if checkID == "" {
+		checkID = generatedLocalConnectorIDPrefix
+	}
+	if err := registry.ValidateTarget(ctx, checkID, target.localTarget()); err != nil {
 		return err
 	}
 	ownerID, client, err := localPublishOwner(ctx, opts, registry, stateDir)
