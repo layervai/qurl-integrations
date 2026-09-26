@@ -76,6 +76,11 @@ func dialDaemonIPC(ctx context.Context, path string) (net.Conn, error) {
 
 func validatePlatformIPCPath(string) error { return nil }
 
+// ValidateOwnerOnlyParent is Unix-only; Windows has no Unix private origins.
+func ValidateOwnerOnlyParent(string) error {
+	return errors.New("owner-only socket directories are Unix-only")
+}
+
 // platformSocketPath returns the logical path windowsDaemonPipeName hashes
 // into the named-pipe address. runtimeDir is ignored: a named pipe has no
 // path-length bound, and the Windows EnsureDirMode anchors its ACL on the

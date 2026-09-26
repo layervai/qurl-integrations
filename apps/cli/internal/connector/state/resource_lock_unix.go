@@ -17,7 +17,11 @@ import (
 const connectorResourcesLockRetry = 25 * time.Millisecond
 
 func acquireConnectorResourcesLock(ctx context.Context, dir string) (func() error, error) {
-	path := filepath.Join(dir, connectorResourcesLock)
+	return acquireNamedStateLock(ctx, dir, connectorResourcesLock)
+}
+
+func acquireNamedStateLock(ctx context.Context, dir, name string) (func() error, error) {
+	path := filepath.Join(dir, name)
 	file, info, err := openValidatedConnectorResourcesLock(path)
 	if err != nil {
 		return nil, err

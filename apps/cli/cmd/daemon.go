@@ -139,7 +139,7 @@ func reconcileReauthorizedHeadlessShare(ctx context.Context, runtime *connectors
 	if err != nil {
 		return err
 	}
-	sameTarget := existing.TargetURL == configured.TargetURL && existing.LocalIP == configured.LocalIP && existing.LocalPort == configured.LocalPort
+	sameTarget := existing.Target() == configured.Target()
 	if !sameTarget {
 		return nil
 	}
@@ -309,7 +309,7 @@ commands then reload this daemon and never install a background job.`,
 			return nil
 		},
 	}
-	cmd.AddCommand(run, validateTestCRID)
+	cmd.AddCommand(run, validateTestCRID, daemonRetargetLocalCmd(opts))
 	return cmd
 }
 
@@ -414,10 +414,11 @@ func runShareDaemonWithDeployment(ctx context.Context, opts *globalOpts, stateDi
 	if err != nil {
 		return err
 	}
-	stateDir, socketPath, err := resolveDaemonPaths(ctx, opts, stateDirOverride, runtimeDirOverride)
+	stateDir, socketPath, unlock, err := lockDaemonPaths(ctx, opts, stateDirOverride, runtimeDirOverride)
 	if err != nil {
 		return err
 	}
+	defer func() { retErr = errors.Join(retErr, unlock()) }()
 	headless, enrollmentCredential, err := loadHeadlessBootstrap(ctx, stateDir, headlessConfigPath, enrollmentTokenPath)
 	if err != nil {
 		return err
@@ -509,6 +510,33 @@ func runShareDaemonWithDeployment(ctx context.Context, opts *globalOpts, stateDi
 		Manager:    manager, JobVersion: jobVersion,
 	}
 	return server.Run(ctx)
+}
+
+// TODO(upstream-contract): externalDaemonLeaseWait covers ECS's default 30s
+// stopTimeout plus drain; a raised stopTimeout (max 120s) needs stop-first deploys.
+var externalDaemonLeaseWait = 60 * time.Second
+
+// lockDaemonPaths excludes offline retargeting for the complete daemon lifetime,
+// including startup before its IPC listener exists.
+func lockDaemonPaths(ctx context.Context, opts *globalOpts, stateDirOverride, runtimeDirOverride string) (stateDir, socketPath string, unlock func() error, err error) {
+	stateDir, socketPath, err = resolveDaemonPaths(ctx, opts, stateDirOverride, runtimeDirOverride)
+	if err != nil {
+		return "", "", nil, err
+	}
+	// ECS restart policies skip a sidecar that exits before its attempt period,
+	// so an external daemon waits out an overlapping task's stop instead of
+	// failing fast. The lease stays exclusive either way.
+	wait := 100 * time.Millisecond
+	if opts.resolvedSupervision == connectorstate.RuntimeSupervisionExternal {
+		wait = externalDaemonLeaseWait
+	}
+	unlock, err = connectorstate.AcquireDaemonLeaseWithin(ctx, stateDir, wait)
+	// Only the lease's internal wait means another daemon owns the namespace.
+	// Preserve the caller's cancellation/deadline instead of relabelling it.
+	if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
+		err = connectordaemon.ErrAlreadyRunning
+	}
+	return stateDir, socketPath, unlock, err
 }
 
 // applyRuntimeSupervision commits or verifies the resolved state directory's

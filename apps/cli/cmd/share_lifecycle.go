@@ -27,6 +27,7 @@ type localShareRegistry interface {
 	BindOwner(context.Context, string) error
 	OwnerID(context.Context) (string, bool, error)
 	Get(context.Context, string) (*connectorstate.LocalShare, error)
+	ValidateTarget(context.Context, string, connectorstate.LocalTarget) error
 	Put(context.Context, *connectorstate.LocalShare) error
 	SetDesired(context.Context, string, string, uint64) (*connectorstate.LocalShare, error)
 	Retarget(context.Context, string, connectorstate.LocalTarget, uint64) (*connectorstate.LocalShare, error)
@@ -206,11 +207,7 @@ func changeShareState(ctx context.Context, opts *globalOpts, id, action string, 
 	if err != nil {
 		return err
 	}
-	preflightIP, preflightPort := local.LocalIP, local.LocalPort
-	if target != nil {
-		preflightIP, preflightPort = target.localIP, target.localPort
-	}
-	if err := opts.preflightTarget(ctx, preflightIP, preflightPort); err != nil {
+	if err := preflightShareChange(ctx, opts, registry, local, target); err != nil {
 		return err
 	}
 	client, err := opts.newClient(ctx)
@@ -255,7 +252,7 @@ func changeShareState(ctx context.Context, opts *globalOpts, id, action string, 
 				compensateOff, client, registry, local, sharing)
 		}
 		updated, updateErr = registry.Retarget(ctx, local.ResourceID,
-			connectorstate.LocalTarget{URL: target.canonicalOrigin, IP: target.localIP, Port: target.localPort}, sharing.ServingEpoch)
+			target.localTarget(), sharing.ServingEpoch)
 	} else {
 		updated, updateErr = registry.SetDesired(ctx, local.ResourceID, string(sharing.DesiredState), sharing.ServingEpoch)
 	}
@@ -271,6 +268,17 @@ func changeShareState(ctx context.Context, opts *globalOpts, id, action string, 
 		return err
 	}
 	return opts.printer().Sharing(local.TargetURL, sharing)
+}
+
+func preflightShareChange(ctx context.Context, opts *globalOpts, registry localShareRegistry, local *connectorstate.LocalShare, target *publishTarget) error {
+	destination := local.Target()
+	if target != nil {
+		destination = target.localTarget()
+	}
+	if err := registry.ValidateTarget(ctx, local.ConnectorID, destination); err != nil {
+		return err
+	}
+	return preflightShareTarget(ctx, opts, destination)
 }
 
 func controllableLocalShare(ctx context.Context, registry localShareRegistry, id, action string) (*connectorstate.LocalShare, error) {
@@ -609,7 +617,7 @@ func inspectLocalSharing(ctx context.Context, opts *globalOpts, local *connector
 	lastTransition := local.UpdatedAt.UTC()
 	inspection.LastTransition = &lastTransition
 	healthCtx, cancelHealth := context.WithTimeout(ctx, 2*time.Second)
-	healthErr := opts.preflightTarget(healthCtx, local.LocalIP, local.LocalPort)
+	healthErr := preflightShareTarget(healthCtx, opts, local.Target())
 	cancelHealth()
 	if healthErr == nil {
 		inspection.TargetHealth = "healthy"
@@ -911,6 +919,28 @@ func preflightLocalTarget(ctx context.Context, ip string, port int) error {
 	conn, err := (&net.Dialer{}).DialContext(dialCtx, "tcp", address)
 	if err != nil {
 		return fmt.Errorf("local app is not accepting TCP connections at %s: start it, then try again: %w", address, err)
+	}
+	return conn.Close()
+}
+
+func preflightShareTarget(ctx context.Context, opts *globalOpts, target connectorstate.LocalTarget) error {
+	if target.SocketPath == "" {
+		return opts.preflightTarget(ctx, target.IP, target.Port)
+	}
+	checked, err := connectorstate.ParseUnixTarget(target.URL)
+	if err != nil || checked != target {
+		return errors.New("local Unix target is invalid")
+	}
+	// Enforce the documented owner-only (0700) parent instead of trusting the
+	// supervisor alone. The fixed message keeps the private path out of output.
+	if connectordaemon.ValidateOwnerOnlyParent(target.SocketPath) != nil {
+		return errors.New("local Unix origin must be inside a directory you own with mode 0700")
+	}
+	dialCtx, cancel := context.WithTimeout(ctx, 1500*time.Millisecond)
+	defer cancel()
+	conn, err := (&net.Dialer{}).DialContext(dialCtx, "unix", target.SocketPath)
+	if err != nil {
+		return errors.New("local Unix origin is not accepting connections; start it and retry")
 	}
 	return conn.Close()
 }

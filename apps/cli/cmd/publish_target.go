@@ -28,6 +28,7 @@ type publishTarget struct {
 	canonicalOrigin string
 	localIP         string
 	localPort       int
+	localSocketPath string
 }
 
 // classifyPublishTarget separates the existing remote publish path from the
@@ -45,6 +46,13 @@ func classifyPublishTarget(raw string) (*publishTarget, error) {
 			err = parseErr.Err
 		}
 		return nil, invalidPublishTarget(fmt.Errorf("parse target URL: %w", err))
+	}
+	if u.Scheme == "http+unix" {
+		target, err := connectorstate.ParseUnixTarget(raw)
+		if err != nil {
+			return nil, invalidPublishTarget(err)
+		}
+		return &publishTarget{kind: publishTargetLocal, original: raw, canonicalOrigin: target.URL, localSocketPath: target.SocketPath}, nil
 	}
 	if u.Scheme != httpURLScheme && u.Scheme != httpsURLScheme {
 		return nil, invalidPublishTarget(errors.New("target URL must use http or https"))
@@ -142,8 +150,12 @@ func generatedLocalConnectorID(agentID, canonicalOrigin string) (string, error) 
 	}
 	digest := sha256.Sum256([]byte(connectorstate.LocalPublishIDDomain + "\x00id\x00" + agentID + "\x00" + canonicalOrigin))
 	suffix := strings.ToLower(base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(digest[:10]))
-	return "local-" + suffix, nil
+	return generatedLocalConnectorIDPrefix + suffix, nil
 }
+
+// generatedLocalConnectorIDPrefix begins every generated local Connector ID;
+// the hyphen-free base32 suffix follows it.
+const generatedLocalConnectorIDPrefix = "local-"
 
 const localEnrollmentEntropyBytes = 32
 
@@ -189,4 +201,8 @@ func validateConnectorID(id string) error {
 
 func invalidConnectorID(id string) error {
 	return exitcode.UsageError(fmt.Errorf("invalid Connector ID %q: use 3-64 lowercase letters, numbers, or hyphens; start with a letter and end with a letter or number", id))
+}
+
+func (t *publishTarget) localTarget() connectorstate.LocalTarget {
+	return connectorstate.LocalTarget{URL: t.canonicalOrigin, IP: t.localIP, Port: t.localPort, SocketPath: t.localSocketPath}
 }
