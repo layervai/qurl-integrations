@@ -121,6 +121,52 @@ describe('Connector client — coverage boost', () => {
     });
   });
 
+  describe('upload result validation', () => {
+    // Shape the connector returns when it stored the file but its upstream
+    // qURL create was rejected (observed in prod as an upstream 400).
+    const createFailedBody = {
+      success: true,
+      hash: 'h1',
+      resource_url: 'https://connector.test.local/resources/h1',
+      error: 'qURL creation failed: API error 400 (resource URL is still valid)',
+    };
+    const uploaders = [
+      ['Connector re-upload', (c) => c.reUploadBuffer(Buffer.from('hi'), 'x.txt', 'text/plain')],
+      ['Connector JSON upload', (c) => c.uploadJsonToConnector({ type: 'google-map' }, 'loc.json')],
+    ];
+
+    it.each(uploaders)('%s tags an upstream qURL create failure with a typed apiCode', async (label, run) => {
+      globalThis.fetch = jest.fn().mockResolvedValueOnce({ ok: true, json: async () => createFailedBody });
+      const err = await run(connector).catch(e => e);
+      expect(err).toBeInstanceOf(Error);
+      expect(err.message).toBe(`${label} stored the file but upstream qURL creation failed`);
+      expect(err.apiCode).toBe('qurl_creation_failed');
+      // Body text never reaches err.message (callers log it at ERROR).
+      expect(err.message).not.toContain('API error 400');
+    });
+
+    it('uploadToConnector tags an upstream qURL create failure', async () => {
+      globalThis.fetch = jest.fn()
+        .mockResolvedValueOnce({ ok: true, headers: { get: jest.fn(() => '10') }, arrayBuffer: async () => new ArrayBuffer(10) })
+        .mockResolvedValueOnce({ ok: true, json: async () => createFailedBody });
+      const err = await connector.uploadToConnector('https://cdn.discordapp.com/f.png', 'f.png', 'image/png').catch(e => e);
+      expect(err.apiCode).toBe('qurl_creation_failed');
+      expect(err.message).toBe('Connector upload stored the file but upstream qURL creation failed');
+    });
+
+    it.each(uploaders)('%s keeps the malformed-response error when no upstream failure is reported', async (label, run) => {
+      globalThis.fetch = jest.fn().mockResolvedValueOnce({ ok: true, json: async () => ({ success: true, hash: 'h1' }) });
+      const err = await run(connector).catch(e => e);
+      expect(err.message).toBe(`${label} returned no resource_id`);
+      expect(err.apiCode).toBeUndefined();
+    });
+
+    it.each(uploaders)('%s still rejects success: false', async (label, run) => {
+      globalThis.fetch = jest.fn().mockResolvedValueOnce({ ok: true, json: async () => ({ success: false }) });
+      await expect(run(connector)).rejects.toThrow(`${label} returned success: false`);
+    });
+  });
+
   describe('viewer_ttl_seconds field forwarding', () => {
     function captureUploadFormFields() {
       globalThis.fetch = jest.fn()

@@ -584,6 +584,9 @@ const AUDIT_EVENTS = {
   //                              isn't quota_exceeded (already split
   //                              into its own user-message path)
   //   - upstream_5xx          — connector or qurl-service 5xx
+  //   - upstream_create_failed — connector stored the upload (HTTP 200)
+  //                              but its upstream qURL create failed, so
+  //                              no resource_id came back
   //   - timeout               — request timed out before status
   //   - unknown               — fallback for unclassifiable errors
   //

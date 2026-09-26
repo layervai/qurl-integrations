@@ -168,6 +168,34 @@ async function throwConnectorError(label, response) {
   throwConnectorErrorFromBody(label, response, { bodyText, apiCode, apiDetail });
 }
 
+// The connector answers `/api/upload` with HTTP 200 + `success: true` but no
+// `resource_id` when it stored the file yet its upstream qURL create failed:
+// the body then carries `resource_url` plus an `error` string beginning
+// "qURL creation failed". That is an upstream rejection, not a malformed
+// response, and conflating the two sent operators hunting a connector parsing
+// bug while every file send failed on an upstream schema change. Tag it with a
+// typed apiCode (never the raw `error` text, which is body content and stays
+// out of err.message per the policy above) so the send-failure audit and the
+// "Failed to prepare QURL links" log name the failing hop.
+const QURL_CREATION_FAILED_PATTERN = /^qURL creation failed/i;
+
+function assertUploadResult(label, result) {
+  if (!result || !result.success) {
+    throw new Error(`${label} returned success: false`);
+  }
+  if (result.resource_id) return;
+  const errStr = typeof result.error === 'string' ? result.error : '';
+  if (QURL_CREATION_FAILED_PATTERN.test(errStr)) {
+    logger.debug(`${label} qURL creation failed upstream`, { errorLen: errStr.length });
+    const err = new Error(`${label} stored the file but upstream qURL creation failed`);
+    err.apiCode = 'qurl_creation_failed';
+    throw err;
+  }
+  // Guard against a malformed connector response silently propagating
+  // `undefined` as the resource ID into downstream mintLinks/saveSendConfig.
+  throw new Error(`${label} returned no resource_id`);
+}
+
 // Read the response body chunk-by-chunk and abort as soon as we cross the cap.
 // Guards against a CDN that returns a missing/incorrect Content-Length — the
 // old code would buffer the whole body into memory before noticing it was
@@ -317,14 +345,7 @@ async function uploadToConnector(sourceUrl, filename, contentType, apiKey, viewe
   }
 
   const result = await uploadResponse.json();
-  if (!result.success) {
-    throw new Error('Connector upload returned success: false');
-  }
-  if (!result.resource_id) {
-    // Guard against a malformed connector response silently propagating
-    // `undefined` as the resource ID into downstream mintLinks/saveSendConfig.
-    throw new Error('Connector upload returned no resource_id');
-  }
+  assertUploadResult('Connector upload', result);
 
   logger.info('Uploaded to connector', {
     md5_prefix: md5Prefix(result.hash),
@@ -361,12 +382,7 @@ async function reUploadBuffer(fileBuffer, filename, contentType, apiKey, viewerT
   }
 
   const result = await uploadResponse.json();
-  if (!result.success) {
-    throw new Error('Connector re-upload returned success: false');
-  }
-  if (!result.resource_id) {
-    throw new Error('Connector re-upload returned no resource_id');
-  }
+  assertUploadResult('Connector re-upload', result);
 
   logger.info('Re-uploaded to connector (new resource)', {
     md5_prefix: md5Prefix(result.hash),
@@ -1261,12 +1277,7 @@ async function uploadJsonToConnector(jsonPayload, filename, apiKey, viewerTtlSec
   }
 
   const result = await uploadResponse.json();
-  if (!result.success) {
-    throw new Error('Connector JSON upload returned success: false');
-  }
-  if (!result.resource_id) {
-    throw new Error('Connector JSON upload returned no resource_id');
-  }
+  assertUploadResult('Connector JSON upload', result);
 
   logger.info('Uploaded JSON to connector', {
     md5_prefix: md5Prefix(result.hash),

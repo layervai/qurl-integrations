@@ -77,6 +77,12 @@ describe('classifyMintFailure (qurl-integrations#276 reason taxonomy)', () => {
     });
   });
 
+  describe('upstream_create_failed class', () => {
+    test('connector 200 with failed upstream qURL create → upstream_create_failed', () => {
+      expect(classifyMintFailure({ apiCode: 'qurl_creation_failed' })).toBe('upstream_create_failed');
+    });
+  });
+
   describe('priority ordering: timeout beats status when both present', () => {
     test('ETIMEDOUT + status 504 → timeout (not upstream_5xx)', () => {
       expect(classifyMintFailure({ code: 'ETIMEDOUT', status: 504 })).toBe('timeout');
