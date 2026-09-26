@@ -142,8 +142,8 @@ func TestAgentTurnLimit_FailsOpenOnCounterError(t *testing.T) {
 }
 
 func TestAgentTurnLimit_FailOpenLogContract(t *testing.T) {
-	// qurl-integrations-infra#1065 filters this exact msg key/value for the
-	// fail-open path introduced by qurl-integrations-infra#1055.
+	// infra repo #1065 filters this exact msg key/value for the
+	// fail-open path introduced by infra repo #1055.
 	const infraFilterFailOpenMsg = "agent: turn-rate counter failed; allowing turn (fail-open)"
 
 	if agentTurnRateCounterFailOpenMsg != infraFilterFailOpenMsg {

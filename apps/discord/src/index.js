@@ -314,7 +314,7 @@ if (hotStandbyMissing.length > 0) {
     'INSTANCE_ID + INSTANCE_IP are derived in-process from `os.hostname()` and `os.networkInterfaces()` ' +
     '(env overrides accepted) — null or empty means the container has no hostname or no non-internal IPv4. ' +
     'GATEWAY_HANDOFF_HMAC is the SSM-decrypted JSON `{current, previous?}` secret. Verify the ' +
-    'qurl-integrations-infra/qurl-bot-discord/terraform/main.tf wiring and re-deploy.'
+    "the infra repo's qurl-bot-discord/terraform/main.tf wiring and re-deploy."
   );
   process.exit(1);
 }
@@ -382,7 +382,7 @@ const isWorker = isHttp && config.ENABLE_EVENT_SHIPPER;
 // The DDB session-table name is derived from `DDB_TABLE_PREFIX` (the
 // same env-specific prefix the rest of the bot uses for its DDB
 // tables) so a future env-name rename touches one var, not many.
-// Both this module and the qurl-integrations-infra qurl-bot-ddb
+// Both this module and the infra repo's qurl-bot-ddb
 // module pin the `gateway-session` suffix.
 // Pillar 3 hot-standby plumbing. Constructed inside startHotStandby
 // (the leader factory needs the shim's WebSocketManager handle, which
@@ -1055,7 +1055,7 @@ async function start() {
   //     webhooks, /health, /metrics). The ALB targets HTTP replicas
   //     only; gateway-only tasks aren't behind the ALB.
   //   - gateway-only: minimal /health responder so the container-level
-  //     wget probe (re-added in qurl-integrations-infra follow-up to
+  //     wget probe (re-added in the infrastructure repository follow-up to
   //     #151) can catch WebSocket disconnect / event-loop wedge /
   //     dispatch deadlock — failure modes the deployment_circuit_breaker
   //     misses because the node process stays alive. Without this,
@@ -1154,7 +1154,7 @@ async function start() {
     eventPublisher.start();
   }
 
-  // TODO(upstream-contract): qurl-integrations-infra still emits and
+  // TODO(upstream-contract): the infrastructure repository still emits and
   // provisions the retired view-update queue. No app producer remains; remove
   // its variables, queue, and IAM there, then delete this compatibility log.
   if (process.env.ENABLE_VIEW_UPDATE_PUSH === 'true' && isHttp && !isShuttingDown) {

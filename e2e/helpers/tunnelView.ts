@@ -1,7 +1,7 @@
 /**
  * Headless-browser viewer for the fileviewer reverse-tunnel (render-at-mint).
  *
- * WHY a browser and not `fetch`/curl: PR qurl-integrations-infra#1111
+ * WHY a browser and not `fetch`/curl: infra repo PR #1111
  * decommissioned the legacy EC2 fileviewer host (fileviewer.layerv.xyz). Under
  * render-at-mint + the NHP tunnel a recipient NEVER hits a fetchable view URL
  * directly. The flow is entirely JS-driven:

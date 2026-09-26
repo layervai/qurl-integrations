@@ -18,7 +18,7 @@ const { formatSessionDurationSeconds, isPositiveFinite, settlesWithin } = requir
 
 const { MAX_FILE_SIZE, MAX_OVERFLOW_REVOKE_IDS } = require('./constants');
 const MAX_CDN_REDIRECTS = 3;
-// TODO(upstream-contract): qurl-integrations-infra#1551's POST /api/revoke_links
+// TODO(upstream-contract): infra repo #1551's POST /api/revoke_links
 // processes at most 10 unique ids under one 55s handler deadline. Leave 10s for
 // response transport so the caller, not an accidental race, owns the bound.
 // The endpoint rejects larger requests atomically, so chunk rather than couple
@@ -502,7 +502,7 @@ async function downloadAndUpload(sourceUrl, filename, contentType, apiKey, viewe
  * `selfDestructSeconds` is forwarded as `session_duration` so every
  * minted token's L7 session window matches the fileviewer's client-
  * side self-destruct timer (closes the mint-side gap left by
- * qurl-integrations-infra#540, tracked in qurl-integrations-infra#764).
+ * infra repo #540, tracked in infra repo #764).
  * The seconds→duration-string mapping lives in
  * `utils/time.js::formatSessionDurationSeconds` (co-located with
  * `SELF_DESTRUCT_PRESETS`).
@@ -609,7 +609,7 @@ async function mintLinks(resourceId, { expiresAt, n, apiKey, selfDestructSeconds
         unidentified_qurl_count: unidentifiedCount,
       });
     }
-    // TODO(upstream-contract): qurl-integrations-infra#1551 returns id-only
+    // TODO(upstream-contract): infra repo #1551 returns id-only
     // compensation entries for children whose view write failed, and callers
     // must revoke them. Revoke every returned child before rethrowing so a
     // failed mint never strands a live shared-tunnel token; a cleanup failure
@@ -698,11 +698,11 @@ async function postRevokeLinks(resourceId, batchIds, apiKey) {
  *
  * Watermarked views are minted on the connector's shared fileviewer tunnel, not
  * on the resource the guild owns, so a qURL resource revoke cannot reach them
- * (qurl-integrations-infra#1552). The connector revokes them on our behalf after
+ * (infra repo #1552). The connector revokes them on our behalf after
  * proving `apiKey` owns `resourceId` and each child maps to it; children it
  * classifies `not_connector_managed` are ordinary tokens the SDK revokes here.
  *
- * TODO(upstream-contract): qurl-integrations-infra#1551 keeps the route
+ * TODO(upstream-contract): infra repo #1551 keeps the route
  * default-off, so a 404 means it is not registered (the registered route never
  * returns 404; it denies with 401/403), never that a child is gone.
  * Fall back to the SDK, which succeeds only for ordinary children of this exact

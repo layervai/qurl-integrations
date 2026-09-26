@@ -207,8 +207,8 @@ function baseUrlHttpsProblem(cfg, baseUrlExplicitlySet) {
   // Bare origin only. server.js mounts the qURL OAuth router at the root
   // while the redirect URI is built by concatenation
   // (`${BASE_URL}/oauth/qurl/callback`), so a path-prefixed BASE_URL yields
-  // a redirect_uri no mounted route can ever serve. qurl-integrations-infra
-  // rejects the same shape at plan time as of qurl-integrations-infra#1379
+  // a redirect_uri no mounted route can ever serve. The infrastructure repository
+  // rejects the same shape at plan time as of infra repo #1379
   // (its `base_url` variable now validates `^https://[^[:space:]/?#]+$`),
   // so plan-time and boot-time agree — a prefixed value can no longer reach
   // a deploy.

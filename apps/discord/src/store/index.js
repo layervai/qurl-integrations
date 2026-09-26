@@ -1,4 +1,4 @@
-// TODO(upstream-contract): remove this check after qurl-integrations-infra
+// TODO(upstream-contract): remove this check after the infrastructure repository
 // stops emitting STORE_TYPE.
 const configured = process.env.STORE_TYPE?.trim();
 if (configured && configured !== 'ddb') {

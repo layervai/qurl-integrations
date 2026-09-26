@@ -11,7 +11,7 @@ rewrite tracked in [#314](https://github.com/layervai/qurl-integrations/issues/3
 > distinct from the legacy `/qurl send` wizard — same name, different
 > implementation.
 
-**Tracking:** `qurl-integrations-infra#122` (deploy outage), `qurl-integrations#TBD` (this PR)
+**Tracking:** `infra repo #122` (deploy outage), `qurl-integrations#TBD` (this PR)
 **Owners:** posey + reviewers
 
 ## Summary
@@ -50,7 +50,7 @@ Two Discord constraints make these hard:
 - **One active Gateway WebSocket per bot token.** A second `IDENTIFY` on the
   same token invalidates the first session. Rules out the naive
   `desired_count=2` rolling deploy. Already enforced in
-  `qurl-integrations-infra/qurl-bot-discord/terraform/variables.tf` via a
+  the infra repo's `qurl-bot-discord/terraform/variables.tf` via a
   validation block rejecting `gateway_desired_count != 1`.
 - **`MESSAGE_CREATE` is Gateway-only.** Discord's HTTPS Interactions endpoint
   (an alternative interaction delivery surface) carries interaction events but
@@ -138,7 +138,7 @@ The state-machine harness `apps/discord/src/flow-state.js` (PR 4) provides
 metric `qurl_bot_flow_transition_total{stage_from,stage_to,result,terminal}`
 (materialized by the event-shipper observability Phase 1.0 PR's audit-event
 reservation plus the matching CloudWatch metric filter in
-`qurl-integrations-infra`).
+the infrastructure repository).
 
 **Application-level concurrency rule:** a user with an existing non-expired
 flow row in a given `(channel_id)` cannot start a second flow there. The second
@@ -780,7 +780,7 @@ The event-shipper observability Phase 1.0 PR reserves the
 `FLOW_CREATED` / `FLOW_TRANSITION` / `FLOW_DELETED` audit-event names in
 `apps/discord/src/constants.js`. The state-machine harness PR wires the
 emissions. The paired CloudWatch metric filters land in
-`qurl-integrations-infra` once the harness is producing events in
+the infrastructure repository once the harness is producing events in
 sandbox.
 
 If a future change adds a "delete-on-TTL-reap" sweeper, it MUST emit a

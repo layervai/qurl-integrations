@@ -720,7 +720,7 @@ module.exports = {
   // because the peer reaches it via the task's VPC IP. The security
   // posture is HMAC-on-every-request (gateway-hmac) plus a security-
   // group rule that restricts the listening port to peer tasks in the
-  // same service — see qurl-integrations-infra `qurl-bot-discord/terraform/control-channel.tf`.
+  // same service — see the infra repo's `qurl-bot-discord/terraform/control-channel.tf`.
   GATEWAY_CONTROL_PORT: intEnv('GATEWAY_CONTROL_PORT', 7800, {
     strictInteger: true,
     min: 1024,
@@ -751,7 +751,7 @@ module.exports = {
   DDB_TABLE_PREFIX: (process.env.DDB_TABLE_PREFIX ?? '').trim(),
 
   // SQS Standard queue the gateway publishes to and the worker
-  // consumes from (provisioned by qurl-integrations-infra PR B).
+  // consumes from (provisioned by infra repo PR B).
   // Required when ENABLE_EVENT_SHIPPER=true; validated at boot in
   // index.js so a misconfigured deploy fails closed instead of
   // silently no-op'ing the consumer or dropping every dispatch on

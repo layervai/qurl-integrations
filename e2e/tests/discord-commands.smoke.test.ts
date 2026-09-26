@@ -137,7 +137,7 @@ describe('Discord command registration (smoke)', () => {
       // Strict shape check: require the env var to be exactly "true"
       // or "false" — if a workflow regression drops the "Resolve
       // MAP_COMMAND_ENABLED" step (see e2e-smoke.yml in
-      // qurl-integrations-infra), the env would be unset and the
+      // the infrastructure repository), the env would be unset and the
       // smoke would silently default to a flag-off expectation,
       // masking a flag-on deploy as a regression. Failing the test
       // up front with a named workflow step is louder than chasing a

@@ -574,7 +574,7 @@ func retryLifecyclePurge(ctx context.Context, log *slog.Logger, op string, purge
 			return
 		}
 		if attempt == lifecyclePurgeRetryAttempts {
-			// Keep cleanup_action_required stable: qurl-integrations-infra#1284
+			// Keep cleanup_action_required stable: infra repo #1284
 			// tracks the CloudWatch alarm that should page on this field.
 			log.Error(op+": exhausted retries; manual cleanup may be required",
 				"attempts", attempt,
