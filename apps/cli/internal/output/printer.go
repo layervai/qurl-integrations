@@ -76,7 +76,8 @@ func (p *Printer) writeJSON(v any) error {
 
 // RequestEnvelope emits a supervisor request envelope. HTML escaping stays
 // off so passed-through response bodies keep their characters.
-func (p *Printer) RequestEnvelope(v any) error {
+// The caller gates this on --output json.
+func (p *Printer) RequestEnvelope(v *qurlapi.RequestResponse) error {
 	return p.writeJSONWith(v, false)
 }
 

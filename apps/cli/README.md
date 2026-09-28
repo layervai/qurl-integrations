@@ -252,23 +252,27 @@ recovers a device implicitly. For POST, PUT and PATCH, pipe an optional JSON
 body through stdin; when there is no body, redirect stdin from the null device
 (`/dev/null`, or `NUL` on Windows) rather than closing it, because a closed
 stdin is a read error. GET and DELETE never read stdin. Responses have
-`{status, headers, body}`; headers contain only `content-type` and
-`retry-after`. Empty responses use `body: null`; non-JSON responses use a
+`{status, headers, body}`; headers contain only `content-type`, `retry-after`
+and `x-request-id`. Empty responses use `body: null`; non-JSON responses use a
 string. HTTP failures also return this envelope with exit zero; local and
 transport failures exit nonzero. Requests make one attempt. Pass a stable
-`--idempotency-key` when retrying mutations (32–256 ASCII letters, digits,
-hyphens or underscores). Bodies are limited to 1 MiB including surrounding
-whitespace. Absolute URLs, caller-selected headers and routes outside the
-registered-device allowlist (mirrored locally from the SDK) are refused. Queries
-are supported only for `GET /v1/resources` and `GET /v1/resources/{id}/qurls`;
-the CLI and the SDK both reject queries on other routes. Response bodies also
-have a 1 MiB cap; exceeding it returns a nonzero exit.
+`--idempotency-key` when retrying mutations (never on GET) (32–256 ASCII
+letters, digits, hyphens or underscores). Bodies are limited to 1 MiB including
+surrounding whitespace. Absolute URLs, caller-selected headers and routes
+outside the registered-device allowlist (mirrored locally from the SDK) are
+refused. Queries are supported only for `GET /v1/resources` and
+`GET /v1/resources/{id}/qurls`; the CLI and the SDK both reject queries on other
+routes. Response bodies also have a 1 MiB cap; exceeding it returns a nonzero
+exit.
 
-The device can list a resource's qURLs, update or revoke an individual qURL,
-list its active sessions, and terminate individual or all resource sessions.
-These operations require matching service-side device authorization; sessions
-are unpaginated. Account administration, billing, quota and usage remain outside
-this device transport's authority.
+The allowed routes are `GET /v1/me`, `POST /v1/account/link`, `POST /v1/qurls`,
+resource listing, creation, reading, updating and deletion, a resource's sharing
+state, share links, qURLs and sessions: list a resource's qURLs, update or
+revoke an individual qURL, list its active sessions, and terminate individual or
+all resource sessions. These operations require matching service-side device
+authorization. Sessions are unpaginated, so a session list larger than the 1 MiB
+response cap fails; terminate all sessions to recover. API key creation, account
+owner enumeration, billing, quota and usage are refused.
 
 For example, account linking uses `POST /v1/account/link` with
 `{"account_token":"<account access token>"}` on stdin. Keep that token out of

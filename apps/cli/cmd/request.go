@@ -58,6 +58,9 @@ account_id matching the intended account.`,
 			if err := qurlapi.ValidateRequestTarget(args[0], args[1]); err != nil {
 				return exitcode.UsageError(err)
 			}
+			if idempotencyKey != "" && args[0] == http.MethodGet {
+				return exitcode.UsageError(errors.New("--idempotency-key applies only to mutations"))
+			}
 			body, err := readRequestBody(opts.streams, args[0])
 			if err != nil {
 				return err

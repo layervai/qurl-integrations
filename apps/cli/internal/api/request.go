@@ -65,7 +65,7 @@ func Request(ctx context.Context, api Client, method, relativePath string, body 
 		return nil, err
 	}
 	result := &RequestResponse{Status: reply.status, Headers: map[string]string{}, Body: json.RawMessage("null")}
-	for _, name := range []string{"content-type", "retry-after"} {
+	for _, name := range []string{"content-type", "retry-after", "x-request-id"} {
 		if value := reply.header.Get(name); value != "" {
 			result.Headers[name] = value
 		}
@@ -105,12 +105,12 @@ func ValidateRequestTarget(method, value string) error {
 
 const requestResourcesPath = "/v1/resources"
 
-// requestRoutes mirrors qurl-go's registeredAgentResourceRouteAllowed: route
-// pattern to its methods, with {id} for a resource, qURL, or
-// session identifier.
+// requestRoutes mirrors qurl-go's registeredAgentResourceRouteAllowed, minus
+// POST /v1/api-keys: a supervisor must never mint a portable credential that
+// outlives the sealed namespace. Keys are route patterns, with {id} for a
+// resource, qURL, or session identifier.
 var requestRoutes = map[string][]string{
 	"/v1/account/link":                   {http.MethodPost},
-	"/v1/api-keys":                       {http.MethodPost},
 	"/v1/qurls":                          {http.MethodPost},
 	"/v1/me":                             {http.MethodGet},
 	requestResourcesPath:                 {http.MethodGet, http.MethodPost},
@@ -127,12 +127,12 @@ var requestRoutes = map[string][]string{
 func requestRouteAllowed(method, requestPath string) bool {
 	parts := strings.Split(requestPath, "/")
 	if len(parts) >= 4 && parts[2] == "resources" {
-		if !requestRouteIDAllowed(parts[3]) {
+		if !isASCIIToken(parts[3]) {
 			return false
 		}
 		parts[3] = "{id}"
 		if len(parts) == 6 && (parts[4] == "qurls" || parts[4] == "sessions") {
-			if !requestRouteIDAllowed(parts[5]) {
+			if !isASCIIToken(parts[5]) {
 				return false
 			}
 			parts[5] = "{id}"
@@ -142,7 +142,9 @@ func requestRouteAllowed(method, requestPath string) bool {
 	return ok && slices.Contains(methods, method)
 }
 
-func requestRouteIDAllowed(value string) bool {
+// isASCIIToken accepts nonempty letters, digits, hyphens and underscores. For
+// route identifiers it also keeps a literal {id} from matching a pattern.
+func isASCIIToken(value string) bool {
 	return value != "" && strings.IndexFunc(value, func(r rune) bool {
 		return (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9') && r != '-' && r != '_'
 	}) < 0
@@ -155,17 +157,20 @@ func queryAllowed(method, requestPath string) bool {
 	if requestPath == requestResourcesPath {
 		return true
 	}
-	id, ok := strings.CutPrefix(requestPath, "/v1/resources/")
-	id, ok2 := strings.CutSuffix(id, "/qurls")
-	return ok && ok2 && id != "" && !strings.Contains(id, "/")
+	// Only query presence is gated here; the service validates its contents.
+	id, hasPrefix := strings.CutPrefix(requestPath, "/v1/resources/")
+	id, hasSuffix := strings.CutSuffix(id, "/qurls")
+	return hasPrefix && hasSuffix && id != "" && !strings.Contains(id, "/")
 }
 
-// ValidateRequestIdempotencyKey accepts only bounded, nonsecret header values.
+// ValidateRequestIdempotencyKey accepts only bounded, nonsecret ASCII tokens.
+// It is deliberately stricter than validateEnrollmentIdempotencyKey because a
+// supervisor, not this CLI, chooses the value; do not unify the two.
 func ValidateRequestIdempotencyKey(value string) error {
 	if value == "" {
 		return nil
 	}
-	if len(value) < minIdempotencyKeyLength || len(value) > maxIdempotencyKeyLength || !requestRouteIDAllowed(value) {
+	if len(value) < minIdempotencyKeyLength || len(value) > maxIdempotencyKeyLength || !isASCIIToken(value) {
 		return fmt.Errorf("%w: idempotency key must be %d-%d letters, digits, hyphens or underscores", qurl.ErrInvalidResourceRequest, minIdempotencyKeyLength, maxIdempotencyKeyLength)
 	}
 	return nil

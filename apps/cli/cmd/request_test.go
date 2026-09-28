@@ -61,6 +61,7 @@ func TestRequestRejectsInputBeforeOpeningDevice(t *testing.T) {
 		{[]string{"POST", "/v1/account/link"}, `{"account_token":"private-token"} garbage`, "request body must be JSON"},
 		{[]string{"POST", "/v1/account/link"}, "{}" + strings.Repeat(" ", qurlapi.MaxRequestBody-1), "exceeds 1 MiB"},
 		{[]string{"GET", "/v1/me", "--idempotency-key", strings.Repeat("a", 32) + "\r\nheader"}, "", "idempotency key"},
+		{[]string{"GET", "/v1/me", "--idempotency-key", strings.Repeat("a", 32)}, "", "applies only to mutations"},
 		{[]string{"POST", "/v1/resources", "--idempotency-key", strings.Repeat("a", 31)}, "", "idempotency key"},
 		{[]string{"POST", "/v1/resources", "--idempotency-key", strings.Repeat("a", 257)}, "", "idempotency key"},
 		{[]string{"HEAD", "/v1/me"}, "", "request method must be"},
@@ -191,11 +192,20 @@ func TestRequestExplainsUnenrolledExternalNamespace(t *testing.T) {
 	if err := connectorstate.EstablishExternalRuntimeMode(context.Background(), dir); err != nil {
 		t.Fatal(err)
 	}
-	res := runCLI(t, &runOpts{env: externalLoginEnv(), shareStateDir: dir, args: []string{"request", "GET", "/v1/me", "--supervision", "external", "-o", "json"}, openNativeRuntime: func(ctx context.Context, cfg connectorshare.NativeRuntimeConfig) (registeredNativeRuntime, error) {
+	res := runCLI(t, &runOpts{nativeClient: true, env: externalLoginEnv(), shareStateDir: dir, args: []string{"request", "GET", "/v1/me", "--supervision", "external", "-o", "json"}, openNativeRuntime: func(ctx context.Context, cfg connectorshare.NativeRuntimeConfig) (registeredNativeRuntime, error) {
 		_, err := cfg.EnrollmentCredentialProvider(ctx, qurl.AgentEnrollmentCredentialRequest{AgentID: "agent", PublicKeyB64: "key"})
 		return nil, err
 	}})
 	if res.code == 0 || !strings.Contains(res.stderr.String(), "run `qurl login --anonymous --supervision external`") {
 		t.Fatalf("exit %d: %s", res.code, res.stderr.String())
 	}
+}
+
+func TestRequestRefusesNativeNamespace(t *testing.T) {
+	stateDir := connectorStateTestDir(t)
+	res := runCLI(t, &runOpts{nativeClient: true, env: map[string]string{}, shareStateDir: stateDir, args: []string{"request", "GET", "/v1/me", "--supervision", "external", "-o", "json"}, openNativeRuntime: refuseNativeRuntime(t)})
+	if res.code != 3 || !strings.Contains(res.stderr.String(), `runtime supervision is "native", not "external"`) {
+		t.Fatalf("exit %d: %s", res.code, res.stderr.String())
+	}
+	mustNoExternalPolicy(t, stateDir)
 }

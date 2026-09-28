@@ -141,6 +141,9 @@ type runOpts struct {
 	// redirected process-global logger while the command goroutine writes
 	// too.
 	syncStreams bool
+	// nativeClient routes newClient through the production native
+	// registered-client path instead of the account-key mock.
+	nativeClient bool
 	// openRegisteredClient overrides login's native enrollment boundary.
 	// The default returns the already-validated account mock as a registered
 	// client so command tests stay HTTP-only; dedicated API and connector tests
@@ -227,6 +230,9 @@ func runCLI(t *testing.T, o *runOpts) *runResult {
 		}
 		if o.openAPIClient != nil {
 			g.openAPIClient = o.openAPIClient
+		}
+		if o.nativeClient {
+			g.openAPIClient, g.openRegisteredClient = nil, g.openNativeRegisteredClient
 		}
 		if o.openNativeRuntime != nil {
 			g.openNativeRuntime = o.openNativeRuntime

@@ -29,6 +29,7 @@ func TestRegisteredRequestPreservesHTTPErrorAndSafeHeaders(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "application/problem+json")
 		w.Header().Set("Retry-After", "7")
+		w.Header().Set("X-Request-Id", "req_123")
 		w.Header().Set("Authorization", "must-not-escape")
 		w.WriteHeader(http.StatusConflict)
 		_, _ = w.Write([]byte(`{"error":{"code":"conflict"}}`))
@@ -37,7 +38,7 @@ func TestRegisteredRequestPreservesHTTPErrorAndSafeHeaders(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Status != 409 || len(result.Headers) != 2 || result.Headers["retry-after"] != "7" || result.Headers["content-type"] != "application/problem+json" || string(result.Body) != `{"error":{"code":"conflict"}}` {
+	if result.Status != 409 || len(result.Headers) != 3 || result.Headers["x-request-id"] != "req_123" || result.Headers["retry-after"] != "7" || result.Headers["content-type"] != "application/problem+json" || string(result.Body) != `{"error":{"code":"conflict"}}` {
 		t.Fatalf("unexpected result: %+v", result)
 	}
 	if len(srv.Requests()) != 1 {
@@ -189,7 +190,7 @@ func TestRegisteredRequestResourceManagement(t *testing.T) {
 // registered-device routes: every SDK route passes, and neighbors do not.
 func TestRequestRouteAllowlistMirrorsSDK(t *testing.T) {
 	allowed := []struct{ method, path string }{
-		{http.MethodPost, "/v1/account/link"}, {http.MethodPost, "/v1/api-keys"}, {http.MethodPost, "/v1/qurls"},
+		{http.MethodPost, "/v1/account/link"}, {http.MethodPost, "/v1/qurls"},
 		{http.MethodGet, "/v1/resources"}, {http.MethodPost, "/v1/resources"}, {http.MethodGet, "/v1/me"},
 		{http.MethodGet, "/v1/resources/r_1"}, {http.MethodPatch, "/v1/resources/r_1"}, {http.MethodDelete, "/v1/resources/r_1"},
 		{http.MethodGet, "/v1/resources/r_1/sharing"}, {http.MethodPut, "/v1/resources/r_1/sharing"},
@@ -204,7 +205,7 @@ func TestRequestRouteAllowlistMirrorsSDK(t *testing.T) {
 		}
 	}
 	denied := []struct{ method, path string }{
-		{http.MethodGet, "/v1/account/link"}, {http.MethodDelete, "/v1/api-keys"}, {http.MethodGet, "/v1/quota"},
+		{http.MethodGet, "/v1/account/link"}, {http.MethodPost, "/v1/api-keys"}, {http.MethodDelete, "/v1/api-keys"}, {http.MethodGet, "/v1/quota"},
 		{http.MethodPut, "/v1/resources/r_1"}, {http.MethodPost, "/v1/resources/r_1/sharing/stop"},
 		{http.MethodPatch, "/v1/resources/r_1/sessions/s_1"}, {http.MethodGet, "/v1/resources/r_1/qurls/q_1"},
 		{http.MethodGet, "/v1/resources/r.1"}, {http.MethodGet, "/v1/resources/r_1/qurls/q_1/extra"},
