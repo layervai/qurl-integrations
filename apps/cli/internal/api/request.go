@@ -12,6 +12,9 @@ import (
 	"github.com/layervai/qurl-go/qurl"
 )
 
+// MaxRequestBody caps a supervisor request body, matching maxResponseBody.
+const MaxRequestBody = 1 << 20
+
 // RequestResponse preserves HTTP failures for supervising apps without exposing
 // request metadata or credential-bearing response headers.
 type RequestResponse struct {

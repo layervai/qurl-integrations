@@ -254,7 +254,7 @@ contain only `content-type` and `retry-after`. Empty responses use `body: null`;
 non-JSON responses use a string. HTTP failures also return this envelope with
 exit zero; local and transport failures exit nonzero. Requests make one attempt.
 Pass a stable `--idempotency-key` when retrying mutations (32–256 ASCII letters,
-digits, hyphens or underscores). Bodies are limited to 1 MiB; GET and DELETE
+digits, hyphens or underscores). Bodies are limited to 1 MiB including surrounding whitespace; GET and DELETE
 accept no body. Absolute URLs, caller-selected headers and routes outside the
 SDK's registered-device allowlist are refused. Queries are supported only for
 `GET /v1/resources` and `GET /v1/resources/{id}/qurls`; the CLI and the SDK

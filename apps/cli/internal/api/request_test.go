@@ -1,9 +1,11 @@
 package qurlapi
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"strings"
 	"testing"
@@ -134,19 +136,26 @@ func TestRegisteredRequestBodyAndCancellation(t *testing.T) {
 func TestRegisteredRequestResourceManagement(t *testing.T) {
 	srv := apitest.NewServer(t)
 	client := newRegisteredTestClient(t, srv)
-	routes := []struct{ method, path string }{
-		{http.MethodGet, "/v1/resources/id/qurls?limit=100&cursor=next"},
-		{http.MethodPatch, "/v1/resources/id/qurls/q_token"},
-		{http.MethodDelete, "/v1/resources/id/qurls/q_token"},
-		{http.MethodGet, "/v1/resources/id/sessions"},
-		{http.MethodDelete, "/v1/resources/id/sessions"},
-		{http.MethodDelete, "/v1/resources/id/sessions/s_session"},
+	routes := []struct {
+		method, path string
+		body         json.RawMessage
+	}{
+		{http.MethodGet, "/v1/resources/id/qurls?limit=100&cursor=next", nil},
+		{http.MethodPatch, "/v1/resources/id/qurls/q_token", json.RawMessage(`{"label":"renamed"}`)},
+		{http.MethodPut, "/v1/resources/id/sharing", json.RawMessage(`{"enabled":true}`)},
+		{http.MethodDelete, "/v1/resources/id/qurls/q_token", nil},
+		{http.MethodGet, "/v1/resources/id/sessions", nil},
+		{http.MethodDelete, "/v1/resources/id/sessions", nil},
+		{http.MethodDelete, "/v1/resources/id/sessions/s_session", nil},
 	}
 	for _, route := range routes {
-		srv.Script(route.method, strings.SplitN(route.path, "?", 2)[0], func(w http.ResponseWriter, _ *http.Request) {
+		srv.Script(route.method, strings.SplitN(route.path, "?", 2)[0], func(w http.ResponseWriter, r *http.Request) {
+			if got, _ := io.ReadAll(r.Body); !bytes.Equal(got, route.body) {
+				t.Errorf("%s %s body = %q, want %q", route.method, route.path, got, route.body)
+			}
 			w.WriteHeader(http.StatusNoContent)
 		})
-		result, err := Request(context.Background(), client, route.method, route.path, nil, "")
+		result, err := Request(context.Background(), client, route.method, route.path, route.body, "")
 		if err != nil || result.Status != http.StatusNoContent {
 			t.Fatalf("%s %s: response=%+v error=%v", route.method, route.path, result, err)
 		}

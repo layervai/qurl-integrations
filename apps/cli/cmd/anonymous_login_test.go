@@ -19,7 +19,7 @@ func TestAnonymousExternalLogin(t *testing.T) {
 	state := bootstrapRegisteredState(t)
 	res := runCLI(t, &runOpts{
 		args: []string{"login", "--anonymous", "--supervision", "external", "--endpoint", srv.URL, "-o", "json"},
-		env:  map[string]string{"LAYERV_KEY_PROVIDER": "local-key", "LAYERV_LOCAL_KEY_FD": "3"}, shareStateDir: dir,
+		env:  externalLoginEnv(), shareStateDir: dir,
 		openNativeRuntime: func(ctx context.Context, cfg connectorshare.NativeRuntimeConfig) (registeredNativeRuntime, error) {
 			if err := connectorstate.RequireRuntimeSupervision(dir, connectorstate.RuntimeSupervisionExternal); err != nil {
 				t.Fatal(err)
@@ -42,23 +42,24 @@ func TestAnonymousExternalLogin(t *testing.T) {
 }
 
 func TestAnonymousLoginRejectsUnsafeConfiguration(t *testing.T) {
-	for _, extra := range [][]string{{}, {"--supervision", "external", "--enrollment-token-file", "unused"}, {"--supervision", "external"}} {
-		res := runCLI(t, &runOpts{args: append([]string{"login", "--anonymous"}, extra...), env: map[string]string{}, openNativeRuntime: func(context.Context, connectorshare.NativeRuntimeConfig) (registeredNativeRuntime, error) {
-			t.Error("opened runtime")
-			return nil, errors.New("unexpected")
-		}})
-		if res.code == 0 {
-			t.Fatal("accepted unsafe enrollment")
+	for _, tc := range []struct {
+		extra []string
+		want  string
+	}{
+		{nil, "--anonymous requires --supervision external"},
+		{[]string{"--supervision", "external", "--enrollment-token-file", "unused"}, "--anonymous cannot be combined with --enrollment-token-file"},
+		{[]string{"--supervision", "external"}, "--anonymous requires LAYERV_KEY_PROVIDER"},
+	} {
+		res := runCLI(t, &runOpts{args: append([]string{"login", "--anonymous"}, tc.extra...), env: map[string]string{}, openNativeRuntime: refuseNativeRuntime(t)})
+		if res.code == 0 || !strings.Contains(res.stderr.String(), tc.want) {
+			t.Fatalf("%v: exit %d: %s", tc.extra, res.code, res.stderr.String())
 		}
 	}
 }
 
 func TestAnonymousLoginRejectsAccountCredentials(t *testing.T) {
 	for _, name := range []string{"QURL_API_KEY", "QURL_API_KEY_FILE"} {
-		res := runCLI(t, &runOpts{args: []string{"login", "--anonymous", "--supervision", "external"}, env: map[string]string{"LAYERV_KEY_PROVIDER": "local-key", "LAYERV_LOCAL_KEY_FD": "3", name: "credential-do-not-read"}, openNativeRuntime: func(context.Context, connectorshare.NativeRuntimeConfig) (registeredNativeRuntime, error) {
-			t.Error("opened runtime")
-			return nil, errors.New("unexpected")
-		}})
+		res := runCLI(t, &runOpts{args: []string{"login", "--anonymous", "--supervision", "external"}, env: externalLoginEnv(name, "credential-do-not-read"), openNativeRuntime: refuseNativeRuntime(t)})
 		if res.code != 2 || strings.Contains(res.stderr.String(), "credential-do-not-read") {
 			t.Fatalf("exit %d: %s", res.code, res.stderr.String())
 		}
@@ -69,7 +70,7 @@ func TestAnonymousLoginPreservesFailedExternalNamespace(t *testing.T) {
 	dir := connectorStateTestDir(t)
 	failed := errors.New("device state unavailable")
 	for attempt := 0; attempt < 2; attempt++ {
-		res := runCLI(t, &runOpts{args: []string{"login", "--anonymous", "--supervision", "external"}, env: map[string]string{"LAYERV_KEY_PROVIDER": "local-key", "LAYERV_LOCAL_KEY_FD": "3"}, shareStateDir: dir, openNativeRuntime: func(context.Context, connectorshare.NativeRuntimeConfig) (registeredNativeRuntime, error) {
+		res := runCLI(t, &runOpts{args: []string{"login", "--anonymous", "--supervision", "external"}, env: externalLoginEnv(), shareStateDir: dir, openNativeRuntime: func(context.Context, connectorshare.NativeRuntimeConfig) (registeredNativeRuntime, error) {
 			return nil, failed
 		}})
 		if res.code == 0 || !strings.Contains(res.stderr.String(), failed.Error()) {
@@ -81,6 +82,15 @@ func TestAnonymousLoginPreservesFailedExternalNamespace(t *testing.T) {
 	}
 }
 
+func TestAnonymousLoginInvalidEndpointLeavesNamespaceUnmarked(t *testing.T) {
+	dir := connectorStateTestDir(t)
+	res := runCLI(t, &runOpts{args: []string{"login", "--anonymous", "--supervision", "external", "--endpoint", "https://api.example.test/v1?x=1"}, env: externalLoginEnv(), shareStateDir: dir, openNativeRuntime: refuseNativeRuntime(t)})
+	if res.code == 0 {
+		t.Fatal("accepted an invalid endpoint")
+	}
+	mustNoExternalPolicy(t, dir)
+}
+
 func TestAnonymousLoginNamesItsOwnFlag(t *testing.T) {
 	res := runCLI(t, &runOpts{args: []string{"login", "--anonymous", "--supervision", "external"}, env: map[string]string{}})
 	if !strings.Contains(res.stderr.String(), "--anonymous requires LAYERV_KEY_PROVIDER") {
@@ -89,7 +99,7 @@ func TestAnonymousLoginNamesItsOwnFlag(t *testing.T) {
 }
 
 func TestAnonymousLoginWarnsBeforeCleartextEnrollment(t *testing.T) {
-	res := runCLI(t, &runOpts{args: []string{"login", "--anonymous", "--supervision", "external", "--endpoint", "http://api.example.test"}, env: map[string]string{"LAYERV_KEY_PROVIDER": "local-key", "LAYERV_LOCAL_KEY_FD": "3"}, openNativeRuntime: func(context.Context, connectorshare.NativeRuntimeConfig) (registeredNativeRuntime, error) {
+	res := runCLI(t, &runOpts{args: []string{"login", "--anonymous", "--supervision", "external", "--endpoint", "http://api.example.test"}, env: externalLoginEnv(), openNativeRuntime: func(context.Context, connectorshare.NativeRuntimeConfig) (registeredNativeRuntime, error) {
 		return nil, errors.New("stop before network")
 	}})
 	if strings.Count(res.stderr.String(), "authorization credential would travel unencrypted") != 1 {
@@ -101,7 +111,7 @@ func TestAnonymousLoginRejectsConnectorScopedState(t *testing.T) {
 	srv := apitest.NewServer(t)
 	state := bootstrapRegisteredState(t)
 	state.EnrollmentCredentialKind = string(qurl.RegistrationKeyKindConnectorBootstrap)
-	res := runCLI(t, &runOpts{args: []string{"login", "--anonymous", "--supervision", "external", "--endpoint", srv.URL}, env: map[string]string{"LAYERV_KEY_PROVIDER": "local-key", "LAYERV_LOCAL_KEY_FD": "3"}, openNativeRuntime: func(context.Context, connectorshare.NativeRuntimeConfig) (registeredNativeRuntime, error) {
+	res := runCLI(t, &runOpts{args: []string{"login", "--anonymous", "--supervision", "external", "--endpoint", srv.URL}, env: externalLoginEnv(), openNativeRuntime: func(context.Context, connectorshare.NativeRuntimeConfig) (registeredNativeRuntime, error) {
 		return &bootstrapNativeRuntime{store: &bootstrapAgentStateStore{state: state}}, nil
 	}})
 	if res.code == 0 {
@@ -122,7 +132,7 @@ func TestAnonymousLoginReopensExistingExternalNamespace(t *testing.T) {
 		enrolled := attempt == 0
 		res := runCLI(t, &runOpts{
 			args: []string{"login", "--anonymous", "--supervision", "external", "--endpoint", srv.URL, "-o", "json"},
-			env:  map[string]string{"LAYERV_KEY_PROVIDER": "local-key", "LAYERV_LOCAL_KEY_FD": "3"}, shareStateDir: dir,
+			env:  externalLoginEnv(), shareStateDir: dir,
 			openNativeRuntime: func(ctx context.Context, cfg connectorshare.NativeRuntimeConfig) (registeredNativeRuntime, error) {
 				// A warm namespace reopens the persisted device; only the first
 				// launch spends the anonymous enrollment credential.

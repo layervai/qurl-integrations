@@ -3,14 +3,17 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	connectoragentstate "github.com/layervai/qurl-connector/pkg/agentstate"
 	connectorshare "github.com/layervai/qurl-connector/pkg/share"
 	qurl "github.com/layervai/qurl-go/qurl"
 	"github.com/spf13/cobra"
@@ -333,5 +336,36 @@ func mustEmptyStdout(t *testing.T, res *runResult) {
 	t.Helper()
 	if res.stdout.Len() != 0 {
 		t.Fatalf("stdout must be empty, got %q", res.stdout.String())
+	}
+}
+
+// externalLoginEnv is the supervisor's process contract for an external
+// enrollment: a local-key sealed namespace and no account credential. extra
+// holds key/value pairs layered on top of it.
+func externalLoginEnv(extra ...string) map[string]string {
+	env := map[string]string{
+		connectoragentstate.EnvKeyProvider: connectoragentstate.KeyProviderLocalKey,
+		connectoragentstate.EnvLocalKeyFD:  "3",
+	}
+	for i := 0; i+1 < len(extra); i += 2 {
+		env[extra[i]] = extra[i+1]
+	}
+	return env
+}
+
+// refuseNativeRuntime fails the test if a rejected external login reaches the
+// native runtime at all.
+func refuseNativeRuntime(t *testing.T) func(context.Context, connectorshare.NativeRuntimeConfig) (registeredNativeRuntime, error) {
+	t.Helper()
+	return func(context.Context, connectorshare.NativeRuntimeConfig) (registeredNativeRuntime, error) {
+		t.Fatal("rejected external login opened the native runtime")
+		return nil, errors.New("unreachable native runtime")
+	}
+}
+
+func mustNoExternalPolicy(t *testing.T, stateDir string) {
+	t.Helper()
+	if _, err := os.Lstat(filepath.Join(stateDir, connectorstate.RuntimeModeFile)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("rejected external login established the policy marker: %v", err)
 	}
 }

@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	connectoragentstate "github.com/layervai/qurl-connector/pkg/agentstate"
+	"github.com/layervai/qurl-go/qurl"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 
@@ -35,7 +36,7 @@ func loginCmd(opts *globalOpts) *cobra.Command {
 	var anonymous bool
 	cmd := &cobra.Command{
 		Use:   "login",
-		Short: "Enroll this machine with a qURL account key or enrollment token",
+		Short: "Enroll this machine with a qURL account key, enrollment token, or anonymously",
 		Long: `Enroll this machine for future qURL commands.
 
 The key is read from standard input when piped, or typed at a hidden prompt
@@ -56,10 +57,16 @@ enrollment token itself and pass it with --enrollment-token-file under
 --supervision external. qurl then reads the token file once, only while
 enrolling, and reads no account key from the environment or standard input.
 The state directory must be sealed: LAYERV_KEY_PROVIDER=local-key with the
-wrapping key on the inherited LAYERV_LOCAL_KEY_FD descriptor.`,
+wrapping key on the inherited LAYERV_LOCAL_KEY_FD descriptor.
+
+A supervising app without a signed-in account can instead pass --anonymous
+under --supervision external with the same sealed key provider. qurl enrolls
+an account-free device and refuses account key configuration. An existing
+external identity is reopened, never replaced.`,
 		Example: `  qurl login
   op read op://team/qurl/key | qurl login
-  qurl login --enrollment-token-file /path/to/enrollment-token --supervision external`,
+  qurl login --enrollment-token-file /path/to/enrollment-token --supervision external
+  qurl login --anonymous --supervision external -o json`,
 		Args: noArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if anonymous {
@@ -133,7 +140,7 @@ func runExternalLogin(ctx context.Context, opts *globalOpts, tokenPath string) e
 	if err != nil {
 		return err
 	}
-	client, deviceIdentity, err := opts.openNativeExternalRegisteredClient(ctx, tokenPath, stateDir)
+	client, deviceIdentity, err := opts.openNativeExternalRegisteredClient(ctx, stateDir, oneShotEnrollmentToken(tokenPath), nil)
 	if err != nil {
 		return err
 	}
@@ -230,8 +237,9 @@ func readSecret(opts *globalOpts, prompt string) (string, error) {
 	return secret, nil
 }
 
-// runAnonymousExternalLogin commits the supervision policy before native
-// enrollment; an existing external identity is reopened, never replaced.
+// runAnonymousExternalLogin enrolls an account-free device into an externally
+// supervised namespace; an existing external identity is reopened, never
+// replaced.
 func runAnonymousExternalLogin(ctx context.Context, opts *globalOpts) error {
 	if opts.resolvedSupervision != connectorstate.RuntimeSupervisionExternal {
 		return exitcode.UsageError(errors.New("--anonymous requires --supervision external"))
@@ -246,17 +254,19 @@ func runAnonymousExternalLogin(ctx context.Context, opts *globalOpts) error {
 	if err != nil {
 		return err
 	}
-	if err := connectorstate.EstablishExternalRuntimeMode(ctx, stateDir); err != nil {
-		return err
+	var noted bool
+	enroll := func(ctx context.Context, request qurl.AgentEnrollmentCredentialRequest) (string, error) {
+		if !noted && !opts.quiet {
+			opts.printer().Notef("%s", msgAnonymousDevice)
+			noted = true
+		}
+		return qurl.AnonymousEnrollmentCredential(ctx, request)
 	}
-	opts.warnInsecureEndpoint()
-	// anonymousExternalLogin makes openNativeRegisteredClient check the device
-	// scope before any network call. Its recovery provider stays wired but
-	// always fails with auth.ErrAnonymousRecovery: account keys were rejected
-	// above, so an accountless device can never acquire recovery authority.
-	opts.anonymousExternalLogin = true
-	defer func() { opts.anonymousExternalLogin = false }()
-	client, identity, err := opts.openNativeRegisteredClient(ctx, nil, "", nil)
+	// The recovery provider stays wired but always fails: account keys were
+	// rejected above, so an accountless device can never acquire recovery
+	// authority.
+	recovery := func(context.Context) (string, error) { return "", auth.ErrAnonymousRecovery }
+	client, identity, err := opts.openNativeExternalRegisteredClient(ctx, stateDir, enroll, recovery)
 	if err != nil {
 		return err
 	}

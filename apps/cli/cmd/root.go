@@ -108,13 +108,12 @@ type globalOpts struct {
 	// openRegisteredClient is the login/bootstrap seam. Production uses the
 	// native NHP registration path; command tests inject a platform-only
 	// client because their mock server does not implement NHP.
-	openRegisteredClient   func(context.Context, qurlapi.AccountClient, string, *qurlapi.Identity) (qurlapi.Client, *qurlapi.Identity, error)
-	openNativeRuntime      func(context.Context, connectorshare.NativeRuntimeConfig) (registeredNativeRuntime, error)
-	registeredClient       qurlapi.Client
-	registeredIdentity     *qurlapi.Identity
-	nativeRuntime          registeredNativeRuntime
-	anonymousExternalLogin bool
-	warnedCleartextAuth    bool
+	openRegisteredClient func(context.Context, qurlapi.AccountClient, string, *qurlapi.Identity) (qurlapi.Client, *qurlapi.Identity, error)
+	openNativeRuntime    func(context.Context, connectorshare.NativeRuntimeConfig) (registeredNativeRuntime, error)
+	registeredClient     qurlapi.Client
+	registeredIdentity   *qurlapi.Identity
+	nativeRuntime        registeredNativeRuntime
+	warnedCleartextAuth  bool
 
 	// Resolved in PersistentPreRunE.
 	resolved           bool
@@ -258,7 +257,6 @@ Existing accounts can still use "qurl login" or QURL_API_KEY for enrollment.`,
 
 	cmd.AddCommand(
 		accountCmd(opts),
-		requestCmd(opts),
 		publishCmd(opts),
 		shareCmd(opts),
 		getCmd(opts),
@@ -272,6 +270,7 @@ Existing accounts can still use "qurl login" or QURL_API_KEY for enrollment.`,
 		daemonCmd(opts),
 		loginCmd(opts),
 		whoamiCmd(opts),
+		requestCmd(opts),
 		versionCmd(version),
 		completionCmd(),
 		docsCmd(),
@@ -664,7 +663,7 @@ func (b *registeredAccountBootstrap) enrollmentCredential(ctx context.Context, r
 	if strings.TrimSpace(request.AgentID) == "" {
 		return "", errors.New("registered-device enrollment has no durable agent ID")
 	}
-	if b.client == nil && (b.opts.resolvedSupervision == connectorstate.RuntimeSupervisionNative || b.opts.anonymousExternalLogin) {
+	if b.client == nil && b.opts.resolvedSupervision == connectorstate.RuntimeSupervisionNative {
 		if _, _, err := auth.Resolve(b.opts.lookupEnv); errors.Is(err, auth.ErrNoCredential) {
 			if !b.warnedAnonymousDevice && !b.opts.quiet && b.opts.streams != nil && b.opts.streams.Err != nil {
 				b.opts.printer().Notef("%s", msgAnonymousDevice)
@@ -710,6 +709,21 @@ func (b *registeredAccountBootstrap) recoveryCredential(ctx context.Context) (st
 	return key, err
 }
 
+// resolveNativeRuntimeInputs resolves the local runtime inputs that can fail
+// before any state is written.
+func (o *globalOpts) resolveNativeRuntimeInputs() (hubBootstrap qurl.HubBootstrap, origin, hostname string, err error) {
+	if hubBootstrap, err = o.resolveHubBootstrap(); err != nil {
+		return qurl.HubBootstrap{}, "", "", err
+	}
+	if origin, err = agent.ResourceSDKOrigin(o.resolvedEndpoint); err != nil {
+		return qurl.HubBootstrap{}, "", "", err
+	}
+	if hostname, err = os.Hostname(); err != nil {
+		return qurl.HubBootstrap{}, "", "", fmt.Errorf("read local hostname: %w", err)
+	}
+	return hubBootstrap, origin, hostname, nil
+}
+
 // openNativeRegisteredClient opens or creates the machine identity through
 // NHP, then builds the narrow REST client from the durable device credential.
 // account is non-nil only for an explicit login. Otherwise the enrollment and
@@ -731,17 +745,9 @@ func (o *globalOpts) openNativeRegisteredClient(
 	if err := o.requireRuntimeSupervision(stateDir); err != nil {
 		return nil, nil, err
 	}
-	hubBootstrap, err := o.resolveHubBootstrap()
+	hubBootstrap, origin, hostname, err := o.resolveNativeRuntimeInputs()
 	if err != nil {
 		return nil, nil, err
-	}
-	origin, err := agent.ResourceSDKOrigin(o.resolvedEndpoint)
-	if err != nil {
-		return nil, nil, err
-	}
-	hostname, err := os.Hostname()
-	if err != nil {
-		return nil, nil, fmt.Errorf("read local hostname: %w", err)
 	}
 
 	bootstrap := newRegisteredAccountBootstrap(o, account, accountKey, accountIdentity)
@@ -768,17 +774,6 @@ func (o *globalOpts) openNativeRegisteredClient(
 			retErr = errors.Join(retErr, nativeRuntime.Close())
 		}
 	}()
-	if o.anonymousExternalLogin {
-		// Refuse an incompatible existing device before any server contact
-		// or owner-binding write, matching the token-file external path.
-		store, handoffErr := nativeRuntime.Handoff()
-		if handoffErr != nil {
-			return nil, nil, handoffErr
-		}
-		if err := requireExternalOwnerScopedAgentState(ctx, store); err != nil {
-			return nil, nil, err
-		}
-	}
 	openDeviceClient := func() (qurlapi.Client, error) {
 		store, handoffErr := nativeRuntime.Handoff()
 		if handoffErr != nil {
@@ -813,33 +808,27 @@ func (o *globalOpts) openNativeRegisteredClient(
 	return client, deviceIdentity, nil
 }
 
-// openNativeExternalRegisteredClient enrolls this machine from a supervisor's
-// one-time token file into an externally supervised namespace, or opens the
-// identity already there. Establishing the external policy is part of the
-// operation: a fresh directory is labeled before anything is written into
-// it, and an already external namespace is accepted as is. The token stays
-// behind the runtime's lazy enrollment provider, so a warm namespace never
-// reads the file, and there is no recovery provider because a one-time token
-// can never become recovery authority.
+// openNativeExternalRegisteredClient enrolls this machine into an externally
+// supervised namespace, or opens the identity already there. Establishing the
+// external policy is part of the operation: a fresh directory is labeled only
+// after local inputs resolve and before anything is written into it, and an
+// already external namespace is accepted as is. The enrollment credential
+// stays behind the runtime's lazy provider, so a warm namespace never
+// consumes it. Neither a one-time token nor an anonymous enrollment can
+// become recovery authority, so recovery is nil or always fails.
 func (o *globalOpts) openNativeExternalRegisteredClient(
 	ctx context.Context,
-	tokenPath, stateDir string,
+	stateDir string,
+	enroll qurl.AgentEnrollmentCredentialProvider,
+	recovery func(context.Context) (string, error),
 ) (_ qurlapi.Client, _ *qurlapi.Identity, retErr error) {
 	o.warnInsecureEndpoint()
 	if o.nativeRuntime != nil {
 		return nil, nil, errors.New("registered-device runtime is already open")
 	}
-	hubBootstrap, err := o.resolveHubBootstrap()
+	hubBootstrap, origin, hostname, err := o.resolveNativeRuntimeInputs()
 	if err != nil {
 		return nil, nil, err
-	}
-	origin, err := agent.ResourceSDKOrigin(o.resolvedEndpoint)
-	if err != nil {
-		return nil, nil, err
-	}
-	hostname, err := os.Hostname()
-	if err != nil {
-		return nil, nil, fmt.Errorf("read local hostname: %w", err)
 	}
 	if err := connectorstate.EstablishExternalRuntimeMode(ctx, stateDir); err != nil {
 		return nil, nil, err
@@ -851,7 +840,8 @@ func (o *globalOpts) openNativeExternalRegisteredClient(
 		Hostname:                     hostname,
 		Version:                      o.version,
 		ClientBaseURL:                origin,
-		EnrollmentCredentialProvider: oneShotEnrollmentToken(tokenPath),
+		EnrollmentCredentialProvider: enroll,
+		RecoveryCredentialProvider:   recovery,
 		RefreshMode:                  connectorRefreshModeAuto,
 	})
 	if err != nil {

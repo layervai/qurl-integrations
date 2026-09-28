@@ -49,23 +49,25 @@ func TestRequestCommand(t *testing.T) {
 
 func TestRequestRejectsInputBeforeOpeningDevice(t *testing.T) {
 	for _, tc := range []struct {
-		args []string
-		body string
+		args       []string
+		body, want string
 	}{
-		{[]string{"GET", "https://evil.test/v1/me"}, ""},
-		{[]string{"GET", "/v1/me"}, "{}"},
-		{[]string{"POST", "/v1/account/link"}, `{"account_token":"private-token"} garbage`},
-		{[]string{"POST", "/v1/account/link"}, "{}" + strings.Repeat(" ", 1<<20)},
-		{[]string{"GET", "/v1/me", "--idempotency-key", strings.Repeat("a", 32) + "\r\nheader"}, ""},
-		{[]string{"HEAD", "/v1/me"}, ""},
-		{[]string{"get", "/v1/me"}, ""},
-		{[]string{"GET", "/v1/me?x=1"}, ""},
+		{[]string{"GET", "https://evil.test/v1/me"}, "", "canonical /v1/ path"},
+		{[]string{"GET", "/v1/me"}, "{}", "must not include a body"},
+		{[]string{"POST", "/v1/account/link"}, `{"account_token":"private-token"} garbage`, "request body must be JSON"},
+		{[]string{"POST", "/v1/account/link"}, "{}" + strings.Repeat(" ", 1<<20), "exceeds 1 MiB"},
+		{[]string{"GET", "/v1/me", "--idempotency-key", strings.Repeat("a", 32) + "\r\nheader"}, "", "idempotency key"},
+		{[]string{"POST", "/v1/resources", "--idempotency-key", strings.Repeat("a", 31)}, "", "idempotency key"},
+		{[]string{"POST", "/v1/resources", "--idempotency-key", strings.Repeat("a", 257)}, "", "idempotency key"},
+		{[]string{"HEAD", "/v1/me"}, "", "request method must be"},
+		{[]string{"get", "/v1/me"}, "", "request method must be"},
+		{[]string{"GET", "/v1/me?x=1"}, "", "queries are allowed only"},
 	} {
 		res := runCLI(t, &runOpts{args: append([]string{"request", "-o", "json"}, tc.args...), stdin: strings.NewReader(tc.body), openAPIClient: func(context.Context) (qurlapi.Client, error) {
 			t.Error("opened device for invalid input")
 			return nil, errors.New("unexpected device open")
 		}})
-		if res.code == 0 || res.stdout.Len() != 0 || strings.Contains(res.stderr.String(), "private-token") {
+		if res.code == 0 || res.stdout.Len() != 0 || !strings.Contains(res.stderr.String(), tc.want) || strings.Contains(res.stderr.String(), "private-token") {
 			t.Fatalf("invalid input exit %d: %s", res.code, res.stderr.String())
 		}
 	}
@@ -107,5 +109,13 @@ func TestRequestAcceptsOneMiBBody(t *testing.T) {
 	}})
 	if len(body) != 1<<20 || res.code != 0 || len(srv.Requests()) != 1 {
 		t.Fatalf("exit %d: %s", res.code, res.stderr.String())
+	}
+}
+
+func TestRequestAcceptsBoundaryIdempotencyKeys(t *testing.T) {
+	for _, key := range []string{strings.Repeat("a", 32), strings.Repeat("a", 256)} {
+		if err := qurlapi.ValidateRequestIdempotencyKey(key); err != nil {
+			t.Fatalf("rejected %d-byte key: %v", len(key), err)
+		}
 	}
 }

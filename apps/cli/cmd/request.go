@@ -17,8 +17,18 @@ import (
 func requestCmd(opts *globalOpts) *cobra.Command {
 	var idempotencyKey string
 	cmd := &cobra.Command{
-		Use: "request METHOD PATH", Short: "Make a device-authorized JSON request for a supervising app",
-		Long:    "Read an optional JSON body from standard input and return status, safe headers, and body as JSON. Only the registered device's existing resource routes are allowed. HTTP errors are returned in the envelope with exit zero; local and transport failures exit nonzero. Requests are never retried.",
+		Use:   "request METHOD PATH",
+		Short: "Make a device-authorized JSON request for a supervising app",
+		Long: `Read an optional JSON body from standard input and return status, safe
+headers, and body as JSON. Only the registered device's existing resource
+routes are allowed. HTTP errors are returned in the envelope with exit zero;
+local and transport failures exit nonzero. Requests are never retried.
+
+The body limit is 1 MiB including surrounding whitespace.
+
+The envelope is returned unvalidated. For POST /v1/account/link, record the
+link only after status 200 with an owner_id matching this device and an
+account_id matching the intended account.`,
 		Example: "  # Redirect stdin from the null device (/dev/null, or NUL on Windows) when there is no body.\n  qurl request GET /v1/me -o json < /dev/null",
 		Args:    exactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -34,16 +44,16 @@ func requestCmd(opts *globalOpts) *cobra.Command {
 			var body []byte
 			if !opts.streams.InIsTTY {
 				var err error
-				body, err = io.ReadAll(io.LimitReader(opts.streams.In, (1<<20)+1))
+				body, err = io.ReadAll(io.LimitReader(opts.streams.In, qurlapi.MaxRequestBody+1))
 				if err != nil {
 					return fmt.Errorf("could not read request body: %w", err)
 				}
-				if len(body) > 1<<20 {
-					return exitcode.UsageError(errors.New("request body exceeds 1 MiB"))
+				if len(body) > qurlapi.MaxRequestBody {
+					return exitcode.UsageError(errors.New("request body exceeds 1 MiB including surrounding whitespace"))
 				}
 				body = bytes.TrimSpace(body)
 				if len(body) > 0 && !json.Valid(body) {
-					return exitcode.UsageError(errors.New("request body must be JSON of at most 1 MiB"))
+					return exitcode.UsageError(errors.New("request body must be JSON"))
 				}
 			}
 			if (args[0] == "GET" || args[0] == "DELETE") && len(body) > 0 {
@@ -57,7 +67,9 @@ func requestCmd(opts *globalOpts) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return json.NewEncoder(opts.streams.Out).Encode(reply)
+			enc := json.NewEncoder(opts.streams.Out)
+			enc.SetEscapeHTML(false)
+			return enc.Encode(reply)
 		},
 	}
 	cmd.Flags().StringVar(&idempotencyKey, "idempotency-key", "", "stable nonsecret mutation key (32-256 letters, digits, hyphens or underscores)")
