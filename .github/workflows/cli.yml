@@ -165,6 +165,8 @@ jobs:
 
       - id: journey_matrix
         name: Select protected customer journeys
+        env:
+          RELEASE_GATE: ${{ inputs.release_source_sha != '' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -172,7 +174,7 @@ jobs:
           # with the long soak. This is intentional: the green message means
           # the whole packaged CLI journey is current, not only one Linux test.
           matrix='{"include":[{"lane":"linux","lane_id":1,"os":"ubuntu-latest","test_name":"TestSandboxLinuxDefaultDaemonLifecycle","timeout_minutes":35,"soak":false},{"lane":"macos","lane_id":2,"os":"macos-latest","test_name":"TestSandboxMacOSDefaultDaemonLifecycle","timeout_minutes":35,"soak":false},{"lane":"windows","lane_id":3,"os":"windows-latest","test_name":"TestSandboxWindowsDefaultDaemonFullCustomerLifecycle","timeout_minutes":35,"soak":false}]}'
-          if [[ "$GITHUB_EVENT_NAME" == schedule || "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
+          if [[ "$GITHUB_EVENT_NAME" == schedule || ( "$GITHUB_EVENT_NAME" == workflow_dispatch && "$RELEASE_GATE" != true ) ]]; then
             matrix="$(jq -c '.include += [{"lane":"linux","lane_id":4,"os":"ubuntu-latest","test_name":"TestSandboxLocalPublishSoak","timeout_minutes":110,"soak":true}]' <<<"$matrix")"
           fi
           echo "json=$matrix" >>"$GITHUB_OUTPUT"
@@ -1449,6 +1451,7 @@ jobs:
       !cancelled() &&
       github.ref == 'refs/heads/main' &&
       contains(fromJson('["schedule","workflow_dispatch"]'), github.event_name) &&
+      inputs.release_source_sha == '' &&
       needs.required.result == 'success' &&
       needs.journey.result == 'success'
     runs-on: ubuntu-latest
@@ -1485,6 +1488,7 @@ jobs:
       !cancelled() &&
       github.ref == 'refs/heads/main' &&
       github.event_name == 'workflow_dispatch' &&
+      inputs.release_source_sha == '' &&
       (needs.required.result != 'success' ||
        needs.journey.result != 'success' ||
        needs.notify-soak-success.result != 'success')
