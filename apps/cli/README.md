@@ -256,15 +256,16 @@ error. GET and DELETE never read stdin. Responses have
 `{status, headers, body}`; headers contain only `content-type`, `retry-after`
 and `x-request-id`. Empty responses use `body: null`; non-JSON responses use a
 string. HTTP failures also return this envelope with exit zero; local and
-transport failures exit nonzero. Requests make one attempt. Pass a stable
-`--idempotency-key` when retrying mutations (never on GET) (32–256 ASCII
-letters, digits, hyphens or underscores). Bodies are limited to 1 MiB including
-surrounding whitespace. Absolute URLs, caller-selected headers and routes
-outside the registered-device allowlist (mirrored locally from the SDK) are
-refused. Queries are supported only for `GET /v1/resources` and
-`GET /v1/resources/{id}/qurls`; the CLI and the SDK both reject queries on other
-routes. Response bodies also have a 1 MiB cap; exceeding it returns a nonzero
-exit.
+transport failures exit nonzero. Requests make one attempt. When retrying a
+mutation, pass the same `--idempotency-key` (32–256 ASCII letters, digits,
+hyphens or underscores; never on GET); it protects only routes where the qURL
+service implements idempotency. Bodies are limited to 1 MiB including
+surrounding whitespace. Absolute URLs and routes outside the registered-device
+allowlist (mirrored locally from the SDK) are refused. Queries are supported
+only for `GET /v1/resources` and `GET /v1/resources/{id}/qurls`; the CLI and the
+SDK both reject queries on other routes. Response bodies also have a 1 MiB cap;
+exceeding it returns a nonzero exit. Responses can carry capability material
+such as newly minted qURL links; do not log stdout durably.
 
 The allowed routes are `GET /v1/me`, `POST /v1/account/link`, `POST /v1/qurls`,
 `GET` and `POST /v1/resources`, and for one resource: `GET`, `PATCH` and

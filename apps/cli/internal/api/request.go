@@ -57,6 +57,8 @@ func Request(ctx context.Context, api Client, method, relativePath string, body 
 		return nil, fmt.Errorf("%w: GET and DELETE requests must not include a body", qurl.ErrInvalidResourceRequest)
 	}
 	headers := make(http.Header)
+	// TODO(upstream-contract): the header protects a retried mutation only on
+	// routes where qurl-service implements idempotency; the help says so.
 	if idempotencyKey != "" {
 		headers.Set("Idempotency-Key", idempotencyKey)
 	}
@@ -90,12 +92,15 @@ func ValidateRequestTarget(method, value string) error {
 	default:
 		return fmt.Errorf("%w: request method must be GET, POST, PUT, PATCH, or DELETE", qurl.ErrRegisteredAgentResourceRequestDenied)
 	}
-	parsed, err := url.Parse(value)
-	if err != nil || !strings.HasPrefix(value, "/v1/") || parsed.IsAbs() || parsed.Host != "" || parsed.User != nil || parsed.Opaque != "" || parsed.Fragment != "" || parsed.RawFragment != "" || strings.Contains(value, "#") || parsed.RawPath != "" || path.Clean(parsed.Path) != parsed.Path {
+	parsed, ok := canonicalRequestPath(value)
+	if !ok {
 		return fmt.Errorf("%w: request path must be a canonical /v1/ path", qurl.ErrRegisteredAgentResourceRequestDenied)
 	}
-	pattern, ok := requestRoutePattern(parsed.Path)
-	if !ok || !slices.Contains(requestRoutes[pattern], method) {
+	pattern, known, validIDs := requestRoutePattern(parsed.Path)
+	if !validIDs {
+		return fmt.Errorf("%w: request path identifiers must be letters, digits, hyphens or underscores", qurl.ErrRegisteredAgentResourceRequestDenied)
+	}
+	if !known || !slices.Contains(requestRoutes[pattern], method) {
 		return fmt.Errorf("%w: %s %s is not a registered-device route", qurl.ErrRegisteredAgentResourceRequestDenied, method, parsed.Path)
 	}
 	// Only query presence is gated here; the service validates its contents.
@@ -103,6 +108,16 @@ func ValidateRequestTarget(method, value string) error {
 		return fmt.Errorf("%w: queries are allowed only for GET /v1/resources and GET /v1/resources/{id}/qurls", qurl.ErrRegisteredAgentResourceRequestDenied)
 	}
 	return nil
+}
+
+// canonicalRequestPath parses a relative /v1/ path, refusing authority,
+// userinfo, fragments, ambiguous percent-encoding, and dot segments.
+func canonicalRequestPath(value string) (*url.URL, bool) {
+	parsed, err := url.Parse(value)
+	if err != nil || !strings.HasPrefix(value, "/v1/") || parsed.IsAbs() || parsed.Host != "" || parsed.User != nil || parsed.Opaque != "" || parsed.Fragment != "" || parsed.RawFragment != "" || strings.Contains(value, "#") || parsed.RawPath != "" || path.Clean(parsed.Path) != parsed.Path {
+		return nil, false
+	}
+	return parsed, true
 }
 
 const (
@@ -130,23 +145,25 @@ var requestRoutes = map[string][]string{
 }
 
 // requestRoutePattern maps a canonical path to its requestRoutes pattern.
-func requestRoutePattern(requestPath string) (string, bool) {
+// Resource IDs (unpadded base64url) and CRIDs (lowercase alphanumerics) are
+// both ASCII tokens; validIDs is false when an identifier segment is not.
+func requestRoutePattern(requestPath string) (pattern string, ok, validIDs bool) {
 	parts := strings.Split(requestPath, "/")
 	if len(parts) >= 4 && parts[2] == "resources" {
 		if !isASCIIToken(parts[3]) {
-			return "", false
+			return "", false, false
 		}
 		parts[3] = "{id}"
 		if len(parts) == 6 && (parts[4] == "qurls" || parts[4] == "sessions") {
 			if !isASCIIToken(parts[5]) {
-				return "", false
+				return "", false, false
 			}
 			parts[5] = "{id}"
 		}
 	}
-	pattern := strings.Join(parts, "/")
-	_, ok := requestRoutes[pattern]
-	return pattern, ok
+	pattern = strings.Join(parts, "/")
+	_, ok = requestRoutes[pattern]
+	return pattern, ok, true
 }
 
 // isASCIIToken accepts nonempty letters, digits, hyphens and underscores. For

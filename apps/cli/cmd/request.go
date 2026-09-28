@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -25,7 +26,9 @@ func requestCmd(opts *globalOpts) *cobra.Command {
 		Long: `Read an optional JSON body from standard input and return status, safe
 headers, and body as JSON. Only the registered device's existing resource
 routes are allowed. HTTP errors are returned in the envelope with exit zero;
-local and transport failures exit nonzero. Requests are never retried.
+local and transport failures exit nonzero. The CLI never retries; a
+supervisor that retries a mutation passes the same --idempotency-key, which
+protects only routes where the qURL service implements idempotency.
 
 Only externally supervised namespaces are accepted, so the command never
 enrolls a device implicitly. POST, PUT, and PATCH read standard input to end
@@ -39,45 +42,14 @@ account_id matching the intended account.`,
 		Example: "  qurl request GET /v1/me --supervision external -o json\n  # Redirect stdin from the null device (/dev/null, or NUL on Windows) when a mutation has no body.\n  qurl request DELETE /v1/resources/r_abc/sessions --supervision external -o json",
 		Args:    exactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if opts.resolvedFormat != output.FormatJSON {
-				return exitcode.UsageError(errors.New("request requires --output json"))
-			}
-			if opts.resolvedSupervision != connectorstate.RuntimeSupervisionExternal {
-				return exitcode.UsageError(errors.New("request requires --supervision external (or " + connectorstate.EnvRuntimeSupervision + "=external)"))
-			}
-			// The device must already exist: account authority must never
-			// enroll or recover it on the supervisor's behalf.
-			if accountKeyConfigured(opts.lookupEnv) {
-				return exitcode.UsageError(fmt.Errorf("request cannot be combined with %s or %s", auth.EnvAPIKey, auth.EnvAPIKeyFile))
-			}
-			if err := requireLocalKeyProvider(opts.lookupEnv, "request"); err != nil {
-				return exitcode.UsageError(err)
-			}
-			// Validate before opening the device; Request re-checks as the
-			// library contract.
-			if err := qurlapi.ValidateRequestIdempotencyKey(idempotencyKey); err != nil {
-				return exitcode.UsageError(err)
-			}
-			if err := qurlapi.ValidateRequestTarget(args[0], args[1]); err != nil {
-				return exitcode.UsageError(err)
-			}
-			if idempotencyKey != "" && args[0] == http.MethodGet {
-				return exitcode.UsageError(errors.New("--idempotency-key applies only to mutations"))
+			if err := validateRequestInvocation(opts, args[0], args[1], idempotencyKey); err != nil {
+				return err
 			}
 			body, err := readRequestBody(opts.streams, args[0])
 			if err != nil {
 				return err
 			}
-			client, err := opts.newClient(cmd.Context())
-			// Account keys were refused above: a device that needs recovery
-			// gets the supervised remedy, and a bare missing credential means
-			// the external namespace holds no enrolled device.
-			switch {
-			case errors.Is(err, auth.ErrAnonymousRecovery) && !errors.Is(err, auth.ErrExternalAnonymousRecovery):
-				err = fmt.Errorf("%w: %w", auth.ErrExternalAnonymousRecovery, err)
-			case errors.Is(err, auth.ErrNoCredential) && !errors.Is(err, auth.ErrAnonymousRecovery) && !errors.Is(err, auth.ErrAccountRecoveryState):
-				err = fmt.Errorf("%w: %w", auth.ErrExternalDeviceMissing, err)
-			}
+			client, err := openRequestClient(cmd.Context(), opts)
 			if err != nil {
 				return err
 			}
@@ -88,7 +60,7 @@ account_id matching the intended account.`,
 			return opts.printer().RequestEnvelope(reply)
 		},
 	}
-	cmd.Flags().StringVar(&idempotencyKey, "idempotency-key", "", "stable nonsecret key for retrying mutations (32-256 letters, digits, hyphens or underscores)")
+	cmd.Flags().StringVar(&idempotencyKey, "idempotency-key", "", "stable nonsecret key a supervisor reuses when retrying a mutation; effective only where the service implements idempotency (32-256 letters, digits, hyphens or underscores)")
 	return cmd
 }
 
@@ -113,4 +85,60 @@ func readRequestBody(streams *output.Streams, method string) ([]byte, error) {
 		return nil, exitcode.UsageError(errors.New("request body must be JSON"))
 	}
 	return body, nil
+}
+
+// validateRequestInvocation checks everything local before a device can be
+// opened; Request re-checks the target and key as the library contract.
+func validateRequestInvocation(opts *globalOpts, method, target, idempotencyKey string) error {
+	if opts.resolvedFormat != output.FormatJSON {
+		return exitcode.UsageError(errors.New("request requires --output json"))
+	}
+	if opts.resolvedSupervision != connectorstate.RuntimeSupervisionExternal {
+		return exitcode.UsageError(errors.New("request requires --supervision external (or " + connectorstate.EnvRuntimeSupervision + "=external)"))
+	}
+	// The device must already exist: account authority must never enroll or
+	// recover it on the supervisor's behalf.
+	if accountKeyConfigured(opts.lookupEnv) {
+		return exitcode.UsageError(fmt.Errorf("request cannot be combined with %s or %s", auth.EnvAPIKey, auth.EnvAPIKeyFile))
+	}
+	if err := requireLocalKeyProvider(opts.lookupEnv, "request"); err != nil {
+		return exitcode.UsageError(err)
+	}
+	if err := qurlapi.ValidateRequestIdempotencyKey(idempotencyKey); err != nil {
+		return exitcode.UsageError(err)
+	}
+	if err := qurlapi.ValidateRequestTarget(method, target); err != nil {
+		return exitcode.UsageError(err)
+	}
+	if idempotencyKey != "" && method == http.MethodGet {
+		return exitcode.UsageError(errors.New("--idempotency-key applies only to mutations"))
+	}
+	return nil
+}
+
+// openRequestClient opens the existing supervised device. Account keys were
+// refused before this, so a device that needs recovery gets the supervised
+// remedy, and a bare missing credential means no enrolled device.
+func openRequestClient(ctx context.Context, opts *globalOpts) (qurlapi.Client, error) {
+	client, err := opts.newClient(ctx)
+	switch {
+	case errors.Is(err, auth.ErrAnonymousRecovery) && !errors.Is(err, auth.ErrExternalAnonymousRecovery):
+		return nil, fmt.Errorf("%w: %w", auth.ErrExternalAnonymousRecovery, err)
+	case errors.Is(err, auth.ErrNoCredential) && !errors.Is(err, auth.ErrAnonymousRecovery) && !errors.Is(err, auth.ErrAccountRecoveryState):
+		return nil, fmt.Errorf("%w: %w", auth.ErrExternalDeviceMissing, err)
+	case err != nil:
+		return nil, err
+	}
+	// Refuse a connector-scoped device with login's remedy rather than a raw
+	// service refusal on the first management call.
+	if opts.nativeRuntime != nil {
+		store, err := opts.nativeRuntime.Handoff()
+		if err != nil {
+			return nil, err
+		}
+		if err := requireExternalOwnerScopedAgentState(ctx, store); err != nil {
+			return nil, err
+		}
+	}
+	return client, nil
 }

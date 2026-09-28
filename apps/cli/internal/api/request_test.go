@@ -219,3 +219,17 @@ func TestRequestRouteAllowlistMirrorsSDK(t *testing.T) {
 		}
 	}
 }
+
+func TestRequestAcceptsBoundaryIdempotencyKeys(t *testing.T) {
+	for _, key := range []string{strings.Repeat("a", 32), strings.Repeat("a", 256)} {
+		if err := ValidateRequestIdempotencyKey(key); err != nil {
+			t.Fatalf("rejected %d-byte key: %v", len(key), err)
+		}
+	}
+}
+
+func TestRequestTargetNamesInvalidIdentifiers(t *testing.T) {
+	if err := ValidateRequestTarget(http.MethodGet, "/v1/resources/r.1"); err == nil || !strings.Contains(err.Error(), "identifiers must be letters") {
+		t.Fatalf("error = %v", err)
+	}
+}

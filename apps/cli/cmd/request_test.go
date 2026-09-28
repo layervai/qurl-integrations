@@ -121,14 +121,6 @@ func TestRequestAcceptsOneMiBBody(t *testing.T) {
 	}
 }
 
-func TestRequestAcceptsBoundaryIdempotencyKeys(t *testing.T) {
-	for _, key := range []string{strings.Repeat("a", 32), strings.Repeat("a", 256)} {
-		if err := qurlapi.ValidateRequestIdempotencyKey(key); err != nil {
-			t.Fatalf("rejected %d-byte key: %v", len(key), err)
-		}
-	}
-}
-
 func TestRequestRequiresExternalSupervision(t *testing.T) {
 	res := runCLI(t, &runOpts{env: externalLoginEnv(), args: []string{"request", "GET", "/v1/me", "-o", "json"}, stdin: strings.NewReader(""), openAPIClient: func(context.Context) (qurlapi.Client, error) {
 		t.Error("opened device in a native namespace")
@@ -268,5 +260,28 @@ func TestRequestRequiresSealedKeyProvider(t *testing.T) {
 	}})
 	if res.code != 2 || !strings.Contains(res.stderr.String(), "request requires LAYERV_KEY_PROVIDER") {
 		t.Fatalf("exit %d: %s", res.code, res.stderr.String())
+	}
+}
+
+// A correctly enrolled external namespace returns an envelope through the
+// production registered-client path and closes its runtime.
+func TestRequestEnrolledExternalNamespaceReturnsEnvelope(t *testing.T) {
+	srv := apitest.NewServer(t)
+	dir := connectorStateTestDir(t)
+	if err := connectorstate.EstablishExternalRuntimeMode(context.Background(), dir); err != nil {
+		t.Fatal(err)
+	}
+	runtime := &bootstrapNativeRuntime{store: &bootstrapAgentStateStore{state: bootstrapRegisteredState(t)}}
+	res := runCLI(t, &runOpts{nativeClient: true, env: externalLoginEnv(), shareStateDir: dir, args: []string{"request", "GET", "/v1/me", "--endpoint", srv.URL, "--supervision", "external", "-o", "json"}, openNativeRuntime: func(context.Context, connectorshare.NativeRuntimeConfig) (registeredNativeRuntime, error) {
+		return runtime, nil
+	}})
+	var envelope struct {
+		Status int `json:"status"`
+	}
+	if res.code != 0 || json.Unmarshal(res.stdout.Bytes(), &envelope) != nil || envelope.Status != http.StatusOK {
+		t.Fatalf("exit %d: %s %s", res.code, res.stdout.String(), res.stderr.String())
+	}
+	if !runtime.closed {
+		t.Fatal("request left the native runtime open")
 	}
 }
