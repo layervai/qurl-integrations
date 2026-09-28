@@ -6,7 +6,7 @@
  * Why this exists: the connector post-deploy smoke runs WHILE the connector-v2
  * ECS rollout is still in flight — the infra `terraform` apply has no
  * wait_for_steady_state, so the smoke races the rollout
- * (qurl-integrations-infra#1085). A brief rolling/drain window can serve a 5xx
+ * (infra repo #1085). A brief rolling/drain window can serve a 5xx
  * from the ALB before the replacement task is healthy, which previously
  * hard-failed the smoke on the very first response (a false red).
  *
@@ -37,7 +37,7 @@
  *   - Excludes 403: on this path a 403 is a WAF-layer block (e.g. AWS managed
  *     IP-reputation flagging the CI runner's egress IP), which blocks the runner
  *     run-wide — an intra-run retry (same IP) can't recover it and would only
- *     delay the failure (tracked in qurl-integrations-infra#1091).
+ *     delay the failure (tracked in infra repo #1091).
  *   - Deterministic 4xx (400/401/404/409) fail fast — real failures or test bugs.
  *   - Does NOT catch fetch REJECTIONS (DNS / ECONNREFUSED / the sustained
  *     fileviewer.layerv.xyz:443 ConnectTimeout the ticket calls out). Those

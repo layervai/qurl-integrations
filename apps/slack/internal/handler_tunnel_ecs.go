@@ -109,7 +109,7 @@ func renderECSFargateTunnelInstructions(args *tunnelInstallArgs, image string) (
 		configBlock + "\n\n" +
 		"3. Add this non-essential qURL sidecar container to the same task definition as the target container:\n\n" +
 		containerBlock + "\n\n" +
-		"4. Add EFS-backed volumes named qurl-agent-state, qurl-config, and qurl-bootstrap. Do not share qurl-agent-state across concurrently running sidecars. After the task logs show qURL connected, deploy a warm-start revision without `--enrollment-token-file` or the qurl-bootstrap mount; verify it reconnects from qurl-agent-state, then delete the enrollment-token file.", nil
+		"4. Add EFS-backed volumes named qurl-agent-state, qurl-config, and qurl-bootstrap. Do not share qurl-agent-state across concurrently running sidecars. Stop the old task before a replacement mounts the same state (for an ECS service, use deployment maximumPercent 100 and minimumHealthyPercent 0). After the task logs show qURL connected, deploy a warm-start revision without `--enrollment-token-file` or the qurl-bootstrap mount; verify it reconnects from qurl-agent-state, then delete the enrollment-token file.", nil
 }
 
 func renderECSSidecarContainerJSON(args *tunnelInstallArgs, image string) (string, error) {

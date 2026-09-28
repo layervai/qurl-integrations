@@ -365,7 +365,7 @@ func desiredShares(shares []connectorstate.LocalShare) []connectorstate.LocalSha
 // holds m.mu.
 func (m *Manager) shareRouteLocked(share *connectorstate.LocalShare) connectorshare.LocalHTTPRoute {
 	return connectorshare.LocalHTTPRoute{
-		RouteID: share.ConnectorID, LocalIP: share.LocalIP, LocalPort: share.LocalPort,
+		RouteID: share.ConnectorID, LocalIP: share.LocalIP, LocalPort: share.LocalPort, LocalSocketPath: share.LocalSocketPath,
 		ResourcePublicKey: share.ResourceID, ConnectorRoutingID: share.ConnectorRoutingID,
 		RequestHeaders: m.overlay[share.ConnectorID],
 	}
@@ -558,17 +558,52 @@ func (m *Manager) eligibleRoutes(desired []connectorstate.LocalShare) ([]connect
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for i := range desired {
-		tracked := m.tracked[desired[i].ResourceID]
+		resourceID := desired[i].ResourceID
+		tracked := m.tracked[resourceID]
 		if !tracked.retryAt.IsZero() && tracked.retryAt.After(now) {
-			withheld[desired[i].ResourceID] = struct{}{}
+			withheld[resourceID] = struct{}{}
 			if nextDue.IsZero() || tracked.retryAt.Before(nextDue) {
 				nextDue = tracked.retryAt
+			}
+			continue
+		}
+		if !m.unixOriginParentOKLocked(&desired[i], now) {
+			withheld[resourceID] = struct{}{}
+			if retryAt := m.tracked[resourceID].retryAt; nextDue.IsZero() || retryAt.Before(nextDue) {
+				nextDue = retryAt
 			}
 			continue
 		}
 		routes = append(routes, m.shareRouteLocked(&desired[i]))
 	}
 	return routes, withheld, nextDue
+}
+
+// unixOriginParentOKLocked enforces the owner-only (0700) parent of a Unix
+// origin where it is load-bearing: here, immediately before the route reaches
+// the Connector that dials it. Offline conversion and daemon start never pass
+// through publish/restart preflight, so without this a converted row under a
+// shared-writable directory would be served to whoever replaced the socket.
+// A refused share is withheld on its own backoff as a local_state diagnostic
+// (no path in the cause) and its siblings keep serving.
+func (m *Manager) unixOriginParentOKLocked(share *connectorstate.LocalShare, now time.Time) bool {
+	if share.LocalSocketPath == "" || ValidateOwnerOnlyParent(share.LocalSocketPath) == nil {
+		return true
+	}
+	wait := m.retryDelay(m.retry[share.ResourceID] + 1)
+	m.setRetryingLocked(share.ResourceID, diagnosticFailureLocalState, "", m.retry[share.ResourceID]+1, wait)
+	m.retry[share.ResourceID]++
+	if tracked, ok := m.tracked[share.ResourceID]; ok {
+		tracked.retryAt = now.Add(wait)
+		m.tracked[share.ResourceID] = tracked
+	}
+	logCtx := m.lifetime // m.mu is held; lifetimeContext would self-deadlock.
+	if logCtx == nil {
+		logCtx = context.Background()
+	}
+	slog.WarnContext(logCtx, "share daemon withheld a Unix origin whose directory is not owner-only (0700); will re-check",
+		"resource_id", share.ResourceID, "retry_in", wait)
+	return false
 }
 
 // pushRoutes hands the desired set to the live group under a bounded context.
@@ -610,12 +645,14 @@ func (m *Manager) startGroup(ctx context.Context, desired []connectorstate.Local
 		return nil
 	}
 	routes, _, nextDue := m.eligibleRoutes(desired)
+	if !nextDue.IsZero() {
+		// As in applyDesired: re-check a withheld route when it is due, whether
+		// or not its siblings start now.
+		m.scheduleGroupRetry(ctx, time.Until(nextDue))
+	}
 	if len(routes) == 0 {
 		// Every desired route is waiting out a backoff; start the group when
 		// the first one is due rather than knocking for an empty set.
-		if !nextDue.IsZero() {
-			m.scheduleGroupRetry(ctx, time.Until(nextDue))
-		}
 		return nil
 	}
 	// A daemon serves exactly one Connector, so every desired share is a proxy

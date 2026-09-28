@@ -151,10 +151,29 @@ function classifyMintFailure(error) {
       error.name === 'TimeoutError') {
     return 'timeout';
   }
+  // The connector answered 200 but its own upstream qURL create failed; name
+  // that hop instead of bucketing on the upstream status. Gated on the local
+  // redaction marker only assertUploadResult sets, never on apiCode alone:
+  // other paths parse apiCode out of response bodies, so a 5xx body claiming
+  // `qurl_creation_failed` must still bucket as upstream_5xx.
+  if (error.apiDetailRedacted === true && error.apiCode === 'qurl_creation_failed') {
+    return 'upstream_create_failed';
+  }
   const status = error.status ?? 0;
   if (status >= 500 && status < 600) return 'upstream_5xx';
   if (status >= 400 && status < 500) return 'upstream_4xx';
   return 'unknown';
+}
+
+// Only an apiDetail that connector.js bounded and redacted itself
+// (assertUploadResult → redactUploadApiDetail, which sets apiDetailRedacted)
+// is log-safe. Gate on that local marker, never on apiCode: other paths parse
+// apiCode out of response bodies, so a body claiming `qurl_creation_failed`
+// must not smuggle raw apiDetail text onto the ERROR lines that call this.
+function logSafeApiDetail(error) {
+  return error?.apiDetailRedacted === true && typeof error.apiDetail === 'string'
+    ? { apiDetail: error.apiDetail }
+    : {};
 }
 
 // emitMintFailureAudit centralizes the QURL_SEND_CREATE_LINK_FAILURE
@@ -2142,7 +2161,7 @@ async function executeSendPipeline(interaction, {
       const locPayload = { type: 'google-map', url: locationUrl, name: locationName || locationUrl };
       // Note: google-map JSON resources hit the connector's render
       // carve-out (mapEmbedTmpl/mapFallbackTmpl don't honor
-      // expire_after at view time — qurl-integrations-infra#480).
+      // expire_after at view time — infra repo #480).
       // We still forward selfDestructSeconds so behavior matches the
       // contract once the carve-out is removed; today it's a no-op.
       const firstUpload = await uploadJsonToConnector(locPayload, 'location.json', apiKey, selfDestructSeconds);
@@ -2178,7 +2197,7 @@ async function executeSendPipeline(interaction, {
       logger.audit(AUDIT_EVENTS.UPLOAD_SUCCESS, { send_id: sendId, kind: 'location' });
     }
   } catch (error) {
-    // Audit for the CloudWatch metric filter + alarm at qurl-integrations-infra
+    // Audit for the CloudWatch metric filter + alarm at the infrastructure repository
     // qurl-bot-discord/terraform/monitoring.tf (qurl-integrations#276); the why
     // lives in the QURL_SEND_CREATE_LINK_FAILURE docstring in constants.js.
     // kindMap (not a `=== FILE ? 'file' : 'location'` ternary) so a future third
@@ -2190,6 +2209,7 @@ async function executeSendPipeline(interaction, {
       error: error.message,
       apiCode: error.apiCode,
       status: error.status,
+      ...logSafeApiDetail(error),
       ...(error.partialLinkCount ? {
         partial_link_count: error.partialLinkCount,
         partial_qurl_ids: error.partialQurlIds,
@@ -2527,7 +2547,7 @@ async function executeSendPipeline(interaction, {
         // ≤14 min would self-defend while the monitor + token are still
         // good). This also bounds the sensitive token's at-rest life until
         // the qurl-bot-ddb DDB TTL on confirm_expires_at lands
-        // (qurl-integrations-infra#1227) to physically reap the row.
+        // (infra repo #1227) to physically reap the row.
         confirmExpiresAt: Math.floor(Date.now() / 1000) + 15 * 60,
       });
     } catch (err) {
@@ -3279,6 +3299,7 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
           error: err.message,
           apiCode: err.apiCode,
           status: err.status,
+          ...logSafeApiDetail(err),
           ...(err.partialLinkCount ? {
             partial_link_count: err.partialLinkCount,
             partial_qurl_ids: err.partialQurlIds,
@@ -3359,6 +3380,7 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
       error: error.message,
       apiCode: error.apiCode,
       status: error.status,
+      ...logSafeApiDetail(error),
       ...(error.partialLinkCount ? {
         partial_link_count: error.partialLinkCount,
         partial_qurl_ids: error.partialQurlIds,
@@ -6336,7 +6358,7 @@ const DETECT_STAFF_PERMISSIONS = [
 // authorization boundary. The connector's /api/detect enforces only guild-scope; a holder of the
 // guild's qURL API key (admin-tier) could call /api/detect directly and bypass THIS gate (guild-
 // scope still holds — never cross-tenant). Closing that gap needs a connector-side per-route auth
-// factor (tracked in qurl-integrations-infra#1170); until then, standing is enforced here.
+// factor (tracked in infra repo #1170); until then, standing is enforced here.
 //
 // This is a deanonymization oracle by construction. The guards, in order:
 //   - guild-only (DM rejects, no oracle outside a guild).
@@ -9990,6 +10012,7 @@ module.exports = {
   // NODE_ENV=test (jest's default); production deploys set NODE_ENV=production.
   ...(process.env.NODE_ENV !== 'production' && {
     _test: {
+      logSafeApiDetail,
       isGoogleMapsURL,
       sanitizeFilename,
       sanitizeMessage,

@@ -186,7 +186,7 @@ const (
 
 // adminCommandSuffix is how every env names its admin slash command: the
 // user command plus this suffix (`/qurl`→`/qurl-admin`,
-// `/qurl-sandbox`→`/qurl-sandbox-admin`; see qurl-integrations-infra
+// `/qurl-sandbox`→`/qurl-sandbox-admin`; see the infrastructure repository
 // slack-manifests/envs.json). handleSlashCommand classifies on the suffix
 // rather than the literal commandAdmin so a non-prod env whose commands
 // carry an env infix still reaches the admin surface instead of falling
@@ -1590,7 +1590,7 @@ func (h *Handler) dispatchAdminCommand(w http.ResponseWriter, command, text stri
 		h.handleUnsetAlias(w, values)
 	// Use slashSubcommand directly here (unlike set-alias's dedicated
 	// helper): the verb has a single canonical spelling, and the
-	// cross-repo dispatcher-drift check (qurl-integrations-infra) only
+	// cross-repo dispatcher-drift check (the infrastructure repository) only
 	// extracts the slashSubcommand and …AliasSubcommand case shapes — a
 	// …DisplayNameSubcommand helper would be invisible to it and keep the
 	// infra manifest drift check red even after this merges.

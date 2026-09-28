@@ -232,7 +232,7 @@ jobs:
     with:
       target_repo: qurl-integrations-infra
       # `event_type` must match the receiver's `repository_dispatch.types` at
-      # qurl-integrations-infra/.github/workflows/qurl-bot-discord-deploy.yml.
+      # the infra repo's .github/workflows/qurl-bot-discord-deploy.yml.
       # An off-allowlist value hard-fails in the reusable; an allowlisted
       # value that misses the receiver silently no-ops (HTTP 204 from the
       # dispatch API but no workflow fires).

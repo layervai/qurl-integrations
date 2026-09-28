@@ -121,6 +121,124 @@ describe('Connector client — coverage boost', () => {
     });
   });
 
+  describe('upload result validation', () => {
+    // Shape the connector returns when it stored the file but its upstream
+    // qURL create was rejected (observed in prod as an upstream 400).
+    const createFailedBody = {
+      success: true,
+      hash: 'h1',
+      resource_url: 'https://connector.test.local/resources/h1',
+      error: 'qURL creation failed: qURL API error (400): request body has unknown field "description" (resource URL is still valid)',
+    };
+    const cdnDownload = () => ({ ok: true, headers: { get: jest.fn(() => '10') }, arrayBuffer: async () => new ArrayBuffer(10) });
+    // [label, run, fetch responses that precede the upload reply]
+    const uploaders = [
+      ['Connector upload', (c) => c.uploadToConnector('https://cdn.discordapp.com/f.png', 'f.png', 'image/png'), [cdnDownload]],
+      ['Connector re-upload', (c) => c.reUploadBuffer(Buffer.from('hi'), 'x.txt', 'text/plain'), []],
+      ['Connector JSON upload', (c) => c.uploadJsonToConnector({ type: 'google-map' }, 'loc.json'), []],
+    ];
+    function mockUploadReply(pre, body) {
+      const f = jest.fn();
+      for (const r of pre) f.mockResolvedValueOnce(r());
+      f.mockResolvedValueOnce({ ok: true, json: async () => body });
+      globalThis.fetch = f;
+    }
+
+    it.each(uploaders)('%s tags an upstream qURL create failure with apiCode, status and a bounded apiDetail', async (label, run, pre) => {
+      mockUploadReply(pre, createFailedBody);
+      const err = await run(connector).catch(e => e);
+      expect(err).toBeInstanceOf(Error);
+      expect(err.message).toBe(`${label} stored the file but upstream qURL creation failed`);
+      expect(err.apiCode).toBe('qurl_creation_failed');
+      expect(err.status).toBe(400);
+      expect(err.apiDetail).toContain('unknown field "description"');
+      // Body text never reaches err.message (callers log err.message at ERROR).
+      expect(err.message).not.toContain('description');
+    });
+
+    it.each(uploaders)('%s matches the create-failed prefix case-insensitively', async (label, run, pre) => {
+      mockUploadReply(pre, { ...createFailedBody, error: 'QURL CREATION FAILED: upstream unavailable' });
+      const err = await run(connector).catch(e => e);
+      expect(err.apiCode).toBe('qurl_creation_failed');
+      // No "qURL API error (NNN)" wrapper → no status is invented.
+      expect(err.status).toBeUndefined();
+    });
+
+    it('redacts URLs and long opaque tokens and bounds the apiDetail length', async () => {
+      const secret = 'lv_live_' + 'A'.repeat(40);
+      mockUploadReply([], {
+        ...createFailedBody,
+        error: `qURL creation failed: qURL API error (401): bad key ${secret} for https://get.example/view/abc?t=zz\n${'x '.repeat(300)}`,
+      });
+      const err = await connector.reUploadBuffer(Buffer.from('hi'), 'x.txt', 'text/plain').catch(e => e);
+      expect(err.status).toBe(401);
+      expect(err.apiDetail).not.toContain(secret);
+      expect(err.apiDetail).not.toContain('https://');
+      expect(err.apiDetail).toContain('<redacted>');
+      expect(err.apiDetail).toContain('<url>');
+      expect(err.apiDetail).not.toContain("\n");
+      expect(err.apiDetail.length).toBeLessThanOrEqual(201);
+    });
+
+    it.each(uploaders)('%s marks only its own redacted apiDetail as log-safe', async (label, run, pre) => {
+      mockUploadReply(pre, createFailedBody);
+      const err = await run(connector).catch(e => e);
+      expect(err.apiDetailRedacted).toBe(true);
+    });
+
+    it.each(uploaders)('%s reports a body-less reply as the malformed no-resource_id case', async (label, run, pre) => {
+      mockUploadReply(pre, null);
+      const err = await run(connector).catch(e => e);
+      expect(err.message).toBe(`${label} returned no resource_id`);
+    });
+
+    // The connector_no_resource_id infra log filter matches these two exact
+    // phrases (upstream-contract); a rewording must fail here first.
+    it('pins the two phrases the connector alarm filter matches', async () => {
+      mockUploadReply([], createFailedBody);
+      const created = await connector.reUploadBuffer(Buffer.from('hi'), 'x.txt', 'text/plain').catch(e => e);
+      expect(created.message).toContain('upstream qURL creation failed');
+      mockUploadReply([], { success: true });
+      const malformed = await connector.reUploadBuffer(Buffer.from('hi'), 'x.txt', 'text/plain').catch(e => e);
+      expect(malformed.message).toContain('returned no resource_id');
+    });
+
+    it('masks short scheme-less resource paths that the opaque-run rule misses', async () => {
+      mockUploadReply([], {
+        ...createFailedBody,
+        error: 'qURL creation failed: qURL API error (404): /resources/abc123def and /qurls/q_1a2b3 not found',
+      });
+      const err = await connector.reUploadBuffer(Buffer.from('hi'), 'x.txt', 'text/plain').catch(e => e);
+      expect(err.apiDetail).not.toContain('abc123def');
+      expect(err.apiDetail).not.toContain('q_1a2b3');
+      expect(err.apiDetail).toContain('/resources/<id>');
+      expect(err.apiDetail).toContain('/qurls/<id>');
+    });
+
+    it('bounds the scanned input before redaction (large bodies stay fast and capped)', async () => {
+      const huge = 'qURL creation failed: ' + 'a'.repeat(100_000);
+      mockUploadReply([], { ...createFailedBody, error: huge });
+      const t0 = Date.now();
+      const err = await connector.reUploadBuffer(Buffer.from('hi'), 'x.txt', 'text/plain').catch(e => e);
+      expect(Date.now() - t0).toBeLessThan(2000);
+      expect(err.apiDetail.length).toBeLessThanOrEqual(201);
+    });
+
+    it.each(uploaders)('%s keeps the malformed-response error when no upstream failure is reported', async (label, run, pre) => {
+      mockUploadReply(pre, { success: true, hash: 'h1' });
+      const err = await run(connector).catch(e => e);
+      expect(err.message).toBe(`${label} returned no resource_id`);
+      expect(err.apiCode).toBeUndefined();
+    });
+
+    it.each(uploaders)('%s still rejects success: false (untyped, even with the create-failed text)', async (label, run, pre) => {
+      mockUploadReply(pre, { success: false, error: createFailedBody.error });
+      const err = await run(connector).catch(e => e);
+      expect(err.message).toBe(`${label} returned success: false`);
+      expect(err.apiCode).toBeUndefined();
+    });
+  });
+
   describe('viewer_ttl_seconds field forwarding', () => {
     function captureUploadFormFields() {
       globalThis.fetch = jest.fn()

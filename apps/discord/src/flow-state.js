@@ -1,7 +1,7 @@
 // flow-state — DDB-backed state-machine harness.
 //
 // Single-purpose: create / load / transition / delete a flow row in
-// the `flow_state` DDB table provisioned by qurl-integrations-infra
+// the `flow_state` DDB table provisioned by the infrastructure repository
 // modules/qurl-bot-ddb (PR #504). Standalone module — NOT a Store
 // contract method — because flow_state's lifecycle is tightly
 // coupled to the SQS event-shipper architecture and shouldn't be

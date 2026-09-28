@@ -154,11 +154,11 @@ jobs:
     env:
       # Pulled anonymously: the ghcr.io/layervai/qurl package is public. If it ever
       # turns private, add docker/login-action and `packages: read` here.
-      # TODO(upstream-contract): mirrors qurl-integrations-infra QURL_IMAGE (keep in lockstep).
+      # TODO(upstream-contract): mirrors the infra repo's QURL_IMAGE (keep in lockstep).
       # Released qurl CLI image (v2.1.1 index digest; derived from
       # `docker buildx imagetools inspect ghcr.io/layervai/qurl:v2.1.1`) that must strict-decode
       # the guided v2 headless config and stop at the credential gate. Keep in
-      # lockstep with qurl-integrations-infra's QURL_IMAGE pin.
+      # lockstep with the infra repo's QURL_IMAGE pin.
       QURL_IMAGE: ghcr.io/layervai/qurl@sha256:5de963d335cca0a6e9a030978d7f3de6587ae1e26f369a38afbf168c04ee220a
       QURL_RELEASE_IMAGE_REQUIRED: "true"
       # The control-char, upstream-response and request-preflight assertions

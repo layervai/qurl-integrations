@@ -447,6 +447,49 @@ External supervision changes three things:
   including commands for remote resources. Read-only sharing commands work
   either way, but can still enroll a device and write authentication state.
 
+Private file origins can use a canonical `http+unix:///absolute/socket/path`
+target on macOS and Linux. The path must fit within 100 bytes; Windows has no
+TCP fallback for this transport. Request-header overlays still require a
+trusted TLS tunnel connection.
+
+To convert existing supervised file shares, first stop and verify the daemon
+has exited, bind the private origin, then run:
+
+```sh
+qurl daemon retarget-local --supervision external -o json <<'JSON'
+{"owner_id":"<account-owner>","connector_id_prefix":"qurl-file-","target":"http+unix:///absolute/socket/path"}
+JSON
+```
+
+Private Unix origins and external `--enrollment-token-file` handoff require
+Unix. Windows rejects those paths; ordinary account-API-key login remains
+available.
+
+The command uses the normal profile/state-directory settings. It requires an
+existing externally supervised namespace and matching durable owner, reserves
+the daemon IPC endpoint and lifetime lock, and atomically retargets every saved
+row matching the prefix, including stopped shares. It preserves resource IDs,
+qURLs, desired state and serving epochs, makes no network requests, and returns
+`{"changed":N}` (`0` on an unchanged retry or when the selected prefix has no rows).
+Conversion durably reserves one private-origin prefix per namespace even when
+`changed` is zero. Older CLI binaries then refuse this registry, and current
+writers cannot publish or retarget that prefix back to TCP, even at a newer epoch.
+The supervisor owns the exact prefix; it must use the same constant for publishing
+and conversion. An owner-bound profile with no file shares is a valid empty set.
+The origin must be bound inside an owner-only (0700) directory controlled by
+the supervisor, with ancestors other users cannot replace; do not use a socket
+directly under a shared temporary directory. The supervisor owns the ancestor
+boundary; publish, restart, and the daemon itself (before handing each route
+to the Connector) also refuse a socket whose parent is not an owned `0700`
+directory. The daemon withholds only that share, reports it as retrying with a
+`local_state` failure, and re-checks it on backoff. Conversion is offline and
+may precede binding the origin, so it does not dial the target.
+Set the same `QURL_CONNECTOR_RUNTIME_DIR` environment value for daemon startup
+and conversion (including any value supplied through daemon run's hidden
+`--runtime-dir` flag), so the IPC reservation also excludes older daemon binaries.
+A live or ambiguous daemon at that endpoint blocks conversion. Start the daemon only after conversion succeeds. New daemon binaries
+hold the lifetime lock before loading credentials, closing the startup race.
+
 A supervisor enrolls the device once per state directory with the token-file
 form of `qurl login` (see [Supervised installs](#supervised-installs)) and
 then follows one lifecycle:

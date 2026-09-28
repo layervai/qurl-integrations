@@ -234,7 +234,7 @@ const logger = {
   // human-readable preamble) so CloudWatch Logs metric filters can
   // pattern-match `{ $.audit.event = "<name>" }` and dimension by
   // `$.audit.agent`. The terraform filters at
-  // qurl-integrations-infra/qurl-bot-discord/terraform/main.tf
+  // the infra repo's qurl-bot-discord/terraform/main.tf
   // pick these up.
   //
   // `agent` is hard-coded to "discord" for this codebase. Future

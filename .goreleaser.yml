@@ -126,6 +126,7 @@ homebrew_casks:
     license: "MIT"
     manpages:
       - manpages/qurl-completion.1
+      - manpages/qurl-daemon-retarget-local.1
       - manpages/qurl-daemon-run.1
       - manpages/qurl-daemon.1
       - manpages/qurl-delete.1

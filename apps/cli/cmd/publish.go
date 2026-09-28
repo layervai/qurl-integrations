@@ -126,6 +126,17 @@ func runLocalPublish(ctx context.Context, opts *globalOpts, target *publishTarge
 	if err != nil {
 		return err
 	}
+	// The generated default ID needs the agent identity, which is only known
+	// after cloud mutation begins. Checking its fixed prefix is exact: private
+	// origin prefixes must end in a hyphen and the generated suffix has none,
+	// so a prefix matches a generated ID only when it is that prefix itself.
+	checkID := requestedID
+	if checkID == "" {
+		checkID = generatedLocalConnectorIDPrefix
+	}
+	if err := registry.ValidateTarget(ctx, checkID, target.localTarget()); err != nil {
+		return err
+	}
 	ownerID, client, err := localPublishOwner(ctx, opts, registry, stateDir)
 	if err != nil {
 		return err
@@ -185,7 +196,7 @@ func validateLocalPublishRequest(ctx context.Context, opts *globalOpts, target *
 			return "", err
 		}
 	}
-	if err := opts.preflightTarget(ctx, target.localIP, target.localPort); err != nil {
+	if err := preflightShareTarget(ctx, opts, target.localTarget()); err != nil {
 		return "", err
 	}
 	return requestedID, nil
@@ -376,13 +387,16 @@ func activateLocalPublish(
 	knockResourceID string,
 	target *publishTarget,
 ) (*connectorstate.LocalShare, *qurlapi.Sharing, bool, error) {
+	if err := registry.ValidateTarget(ctx, resource.Slug, target.localTarget()); err != nil {
+		return nil, nil, false, err
+	}
 	existing, err := registry.Get(ctx, resource.ResourcePublicKey)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, nil, false, err
 	}
 	localMissing := errors.Is(err, os.ErrNotExist)
 	localPresent := err == nil
-	targetChanged := localPresent && (existing.TargetURL != target.canonicalOrigin || existing.LocalIP != target.localIP || existing.LocalPort != target.localPort)
+	targetChanged := localPresent && (existing.Target() != target.localTarget())
 	prior, err := client.Sharing(ctx, resource.CRID)
 	if err != nil {
 		return nil, nil, false, err
@@ -405,7 +419,7 @@ func activateLocalPublish(
 	local := &connectorstate.LocalShare{
 		CRID: resource.CRID, ResourceID: resource.ResourcePublicKey, ConnectorID: resource.Slug,
 		ConnectorRoutingID: resource.ConnectorRoutingID, KnockResourceID: knockResourceID,
-		TargetURL: target.canonicalOrigin, LocalIP: target.localIP, LocalPort: target.localPort,
+		TargetURL: target.canonicalOrigin, LocalIP: target.localIP, LocalPort: target.localPort, LocalSocketPath: target.localSocketPath,
 		DesiredState: string(sharing.DesiredState), ServingEpoch: sharing.ServingEpoch,
 	}
 	return local, sharing, compensateOff, nil
