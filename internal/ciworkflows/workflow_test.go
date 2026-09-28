@@ -566,7 +566,7 @@ func TestCLICustomerJourneyIsConsolidatedAndTrusted(t *testing.T) {
 	}
 
 	manualFailure := workflow.Jobs["notify-soak-manual-failure"]
-	wantManualFailureIf := "!cancelled() && github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && inputs.release_source_sha == '' && (needs.required.result != 'success' || needs.journey.result != 'success' || needs.notify-soak-success.result != 'success')" //nolint:misspell // GitHub expression function spelling.
+	wantManualFailureIf := "!cancelled() && github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && (needs.required.result != 'success' || needs.journey.result != 'success' || (inputs.release_source_sha == '' && needs.notify-soak-success.result != 'success'))" //nolint:misspell // GitHub expression function spelling.
 	if got := strings.Join(strings.Fields(manualFailure.If), " "); got != wantManualFailureIf {
 		t.Errorf("manual soak failure notification if = %q, want %q", got, wantManualFailureIf)
 	}

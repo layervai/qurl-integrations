@@ -1488,10 +1488,9 @@ jobs:
       !cancelled() &&
       github.ref == 'refs/heads/main' &&
       github.event_name == 'workflow_dispatch' &&
-      inputs.release_source_sha == '' &&
       (needs.required.result != 'success' ||
        needs.journey.result != 'success' ||
-       needs.notify-soak-success.result != 'success')
+       (inputs.release_source_sha == '' && needs.notify-soak-success.result != 'success'))
     runs-on: ubuntu-latest
     timeout-minutes: 5
     environment: cli-customer-journey
