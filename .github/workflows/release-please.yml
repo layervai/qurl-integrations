@@ -34,8 +34,8 @@ name: Release Please
 # for the exact tag, then dispatch this workflow with the tag and exact passing
 # run identity. Asset re-uploads are idempotent
 # (release.replace_existing_artifacts in .goreleaser.yml).
-# The exact release journey includes the scheduled 80-minute soak lane. Expect
-# the draft to remain private for about two hours, including setup and queueing.
+# Exact releases require all three platform lifecycle journeys and cleanup.
+# The 80-minute soak remains in scheduled and explicit operator validation.
 # If the automatic handoff fails, dispatch cli.yml from main with
 # release_source_sha and release_source_tag set to the exact release. After that
 # run passes, dispatch this workflow from main with the tag, source SHA, run ID,
@@ -199,7 +199,7 @@ jobs:
           # Run trusted workflow code from main. The CLI workflow checks out
           # and builds this exact immutable tag after it proves main ancestry.
           # TestCLICustomerJourneyIsConsolidatedAndTrusted pins the display
-          # title, exact gate names, and four-lane release matrix together.
+          # title, exact gate names, and three-lane release matrix together.
           gh workflow run cli.yml --repo "$GITHUB_REPOSITORY" --ref main \
             --field "release_source_sha=$SOURCE_SHA" \
             --field "release_source_tag=$CLI_TAG"
@@ -307,7 +307,7 @@ jobs:
           set -euo pipefail
           selection=$(scripts/check-exact-cli-release-gate.sh \
             '${{ steps.source.outputs.sha }}' '${{ steps.source.outputs.tag }}' \
-            "$CLI_RUN_ID" "$CLI_RUN_ATTEMPT" 4)
+            "$CLI_RUN_ID" "$CLI_RUN_ATTEMPT" 3)
           {
             echo "run_id=$(jq -r .run_id <<<"$selection")"
             echo "run_attempt=$(jq -r .run_attempt <<<"$selection")"
