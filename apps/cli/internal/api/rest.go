@@ -536,7 +536,11 @@ func (c *client) doRESTWithHeaders(ctx context.Context, method, path string, bod
 
 func (c *client) doRESTRequest(ctx context.Context, method, path string, body any, headers http.Header, allowRetry bool) (*restReply, error) {
 	reqBody := io.Reader(http.NoBody)
-	if body != nil {
+	if raw, ok := body.(json.RawMessage); ok {
+		// Pre-encoded JSON goes out as is: json.Marshal would HTML-escape it
+		// and could grow a capped supervisor body past its limit.
+		reqBody = bytes.NewReader(raw)
+	} else if body != nil {
 		raw, err := json.Marshal(body)
 		if err != nil {
 			return nil, fmt.Errorf("encode qURL API request: %w", err)

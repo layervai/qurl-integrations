@@ -161,7 +161,7 @@ func TestRegisteredRequestResourceManagement(t *testing.T) {
 		body         json.RawMessage
 	}{
 		{http.MethodGet, "/v1/resources/id/qurls?limit=100&cursor=next", nil},
-		{http.MethodPatch, "/v1/resources/id/qurls/q_token", json.RawMessage(`{"label":"renamed"}`)},
+		{http.MethodPatch, "/v1/resources/id/qurls/q_token", json.RawMessage(`{"label":"a<b>&c"}`)},
 		{http.MethodPut, "/v1/resources/id/sharing", json.RawMessage(`{"enabled":true}`)},
 		{http.MethodDelete, "/v1/resources/id/qurls/q_token", nil},
 		{http.MethodGet, "/v1/resources/id/sessions", nil},

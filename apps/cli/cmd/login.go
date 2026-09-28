@@ -243,7 +243,7 @@ func readSecret(opts *globalOpts, prompt string) (string, error) {
 // replaced.
 func runAnonymousExternalLogin(ctx context.Context, opts *globalOpts) error {
 	if opts.resolvedSupervision != connectorstate.RuntimeSupervisionExternal {
-		return exitcode.UsageError(errors.New("--anonymous requires --supervision external"))
+		return exitcode.UsageError(errors.New("--anonymous requires --supervision external (or " + connectorstate.EnvRuntimeSupervision + "=external)"))
 	}
 	if accountKeyConfigured(opts.lookupEnv) {
 		return exitcode.UsageError(errors.New("--anonymous cannot be combined with account API key configuration"))
@@ -269,7 +269,8 @@ func runAnonymousExternalLogin(ctx context.Context, opts *globalOpts) error {
 		return err
 	}
 	opts.registeredClient, opts.registeredIdentity = client, identity
-	// Only a device created by this run gets the note, and only after it exists.
+	// The note follows a successful open in which the runtime requested an
+	// enrollment credential; a warm namespace never requests one.
 	if enrolled.Load() && !opts.quiet {
 		opts.printer().Notef("%s", msgAnonymousSupervisedDevice)
 	}

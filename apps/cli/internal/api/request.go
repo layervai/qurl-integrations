@@ -12,9 +12,9 @@ import (
 	"github.com/layervai/qurl-go/qurl"
 )
 
-// MaxRequestBody caps a supervisor request body. It matches maxResponseBody;
-// change both caps and the README's request contract together.
-const MaxRequestBody = 1 << 20
+// MaxRequestBody caps a supervisor request body at the response cap. The
+// README's request contract documents both caps.
+const MaxRequestBody = maxResponseBody
 
 // RequestResponse preserves HTTP failures for supervising apps without exposing
 // request metadata or credential-bearing response headers.

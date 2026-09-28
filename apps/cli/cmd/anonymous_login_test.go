@@ -102,7 +102,7 @@ func TestAnonymousLoginInvalidEndpointLeavesNamespaceUnmarked(t *testing.T) {
 
 func TestAnonymousLoginNamesItsOwnFlag(t *testing.T) {
 	res := runCLI(t, &runOpts{args: []string{"login", "--anonymous", "--supervision", "external"}, env: map[string]string{}})
-	if !strings.Contains(res.stderr.String(), "--anonymous requires LAYERV_KEY_PROVIDER") {
+	if !strings.Contains(res.stderr.String(), "--anonymous requires LAYERV_KEY_PROVIDER") || strings.Contains(res.stderr.String(), "--enrollment-token-file") {
 		t.Fatalf("wrong flag: %s", res.stderr.String())
 	}
 }

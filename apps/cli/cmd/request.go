@@ -11,6 +11,7 @@ import (
 	"github.com/spf13/cobra"
 
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/auth"
 	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/exitcode"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/output"
@@ -43,6 +44,11 @@ account_id matching the intended account.`,
 			}
 			if opts.resolvedSupervision != connectorstate.RuntimeSupervisionExternal {
 				return exitcode.UsageError(errors.New("request requires --supervision external (or " + connectorstate.EnvRuntimeSupervision + "=external)"))
+			}
+			// The device must already exist: account authority must never
+			// enroll or recover it on the supervisor's behalf.
+			if accountKeyConfigured(opts.lookupEnv) {
+				return exitcode.UsageError(fmt.Errorf("request cannot be combined with %s or %s", auth.EnvAPIKey, auth.EnvAPIKeyFile))
 			}
 			if err := qurlapi.ValidateRequestIdempotencyKey(idempotencyKey); err != nil {
 				return exitcode.UsageError(err)
