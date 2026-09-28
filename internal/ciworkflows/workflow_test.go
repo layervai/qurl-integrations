@@ -214,7 +214,7 @@ func TestCLICustomerJourneyIsConsolidatedAndTrusted(t *testing.T) {
 		want           int
 	}{{"schedule", "false", 4}, {"workflow_dispatch", "false", 4}, {"workflow_dispatch", "true", 3}} {
 		output := filepath.Join(t.TempDir(), "matrix")
-		cmd := exec.Command("bash", "-c", selector.Run) // #nosec G204 -- executes the checked-in workflow step with fixed test inputs
+		cmd := exec.CommandContext(t.Context(), "bash", "-c", selector.Run) // #nosec G204 -- executes the checked-in workflow step with fixed test inputs
 		cmd.Env = append(os.Environ(), "GITHUB_EVENT_NAME="+tc.event, "RELEASE_GATE="+tc.release, "GITHUB_OUTPUT="+output)
 		if log, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("journey selector failed: %v: %s", err, log)
