@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"strings"
 	"testing"
@@ -27,7 +28,7 @@ func TestRequestCommand(t *testing.T) {
 		_, _ = w.Write([]byte(`{"error":{"code":"rate_limit"}}`))
 	})
 	state := bootstrapRegisteredState(t)
-	res := runCLI(t, &runOpts{args: []string{"request", "POST", "/v1/account/link", "-o", "json", "--idempotency-key", "01234567-89ab-cdef-0123-456789abcdef"}, stdin: strings.NewReader(`{"account_token":"private-token"}`), openAPIClient: func(ctx context.Context) (qurlapi.Client, error) {
+	res := runCLI(t, &runOpts{args: []string{"request", "POST", "/v1/account/link", "--supervision", "external", "-o", "json", "--idempotency-key", "01234567-89ab-cdef-0123-456789abcdef"}, stdin: strings.NewReader(`{"account_token":"private-token"}`), openAPIClient: func(ctx context.Context) (qurlapi.Client, error) {
 		return qurlapi.NewRegistered(ctx, &qurlapi.Config{BaseURL: srv.URL, HTTPClient: srv.Client()}, &bootstrapAgentStateStore{state: state})
 	}})
 	var envelope struct {
@@ -53,9 +54,8 @@ func TestRequestRejectsInputBeforeOpeningDevice(t *testing.T) {
 		body, want string
 	}{
 		{[]string{"GET", "https://evil.test/v1/me"}, "", "canonical /v1/ path"},
-		{[]string{"GET", "/v1/me"}, "{}", "must not include a body"},
 		{[]string{"POST", "/v1/account/link"}, `{"account_token":"private-token"} garbage`, "request body must be JSON"},
-		{[]string{"POST", "/v1/account/link"}, "{}" + strings.Repeat(" ", 1<<20), "exceeds 1 MiB"},
+		{[]string{"POST", "/v1/account/link"}, "{}" + strings.Repeat(" ", qurlapi.MaxRequestBody-1), "exceeds 1 MiB"},
 		{[]string{"GET", "/v1/me", "--idempotency-key", strings.Repeat("a", 32) + "\r\nheader"}, "", "idempotency key"},
 		{[]string{"POST", "/v1/resources", "--idempotency-key", strings.Repeat("a", 31)}, "", "idempotency key"},
 		{[]string{"POST", "/v1/resources", "--idempotency-key", strings.Repeat("a", 257)}, "", "idempotency key"},
@@ -63,7 +63,7 @@ func TestRequestRejectsInputBeforeOpeningDevice(t *testing.T) {
 		{[]string{"get", "/v1/me"}, "", "request method must be"},
 		{[]string{"GET", "/v1/me?x=1"}, "", "queries are allowed only"},
 	} {
-		res := runCLI(t, &runOpts{args: append([]string{"request", "-o", "json"}, tc.args...), stdin: strings.NewReader(tc.body), openAPIClient: func(context.Context) (qurlapi.Client, error) {
+		res := runCLI(t, &runOpts{args: append([]string{"request", "--supervision", "external", "-o", "json"}, tc.args...), stdin: strings.NewReader(tc.body), openAPIClient: func(context.Context) (qurlapi.Client, error) {
 			t.Error("opened device for invalid input")
 			return nil, errors.New("unexpected device open")
 		}})
@@ -88,7 +88,7 @@ type failingReader struct{}
 func (failingReader) Read([]byte) (int, error) { return 0, errors.New("stdin is closed") }
 
 func TestRequestReportsStdinReadError(t *testing.T) {
-	res := runCLI(t, &runOpts{args: []string{"request", "GET", "/v1/me", "-o", "json"}, stdin: failingReader{}, openAPIClient: func(context.Context) (qurlapi.Client, error) {
+	res := runCLI(t, &runOpts{args: []string{"request", "POST", "/v1/resources", "--supervision", "external", "-o", "json"}, stdin: failingReader{}, openAPIClient: func(context.Context) (qurlapi.Client, error) {
 		t.Error("opened device after stdin failure")
 		return nil, errors.New("unexpected device open")
 	}})
@@ -100,11 +100,14 @@ func TestRequestReportsStdinReadError(t *testing.T) {
 func TestRequestAcceptsOneMiBBody(t *testing.T) {
 	srv := apitest.NewServer(t)
 	body := `{"x":"` + strings.Repeat("a", (1<<20)-8) + `"}`
-	srv.Script(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+	srv.Script(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, r *http.Request) {
+		if got, _ := io.ReadAll(r.Body); string(got) != body {
+			t.Errorf("request body arrived with %d bytes, want %d", len(got), len(body))
+		}
 		w.WriteHeader(http.StatusCreated)
 	})
 	state := bootstrapRegisteredState(t)
-	res := runCLI(t, &runOpts{args: []string{"request", "POST", "/v1/resources", "-o", "json"}, stdin: strings.NewReader(body), openAPIClient: func(ctx context.Context) (qurlapi.Client, error) {
+	res := runCLI(t, &runOpts{args: []string{"request", "POST", "/v1/resources", "--supervision", "external", "-o", "json"}, stdin: strings.NewReader(body), openAPIClient: func(ctx context.Context) (qurlapi.Client, error) {
 		return qurlapi.NewRegistered(ctx, &qurlapi.Config{BaseURL: srv.URL, HTTPClient: srv.Client()}, &bootstrapAgentStateStore{state: state})
 	}})
 	if len(body) != 1<<20 || res.code != 0 || len(srv.Requests()) != 1 {
@@ -117,5 +120,40 @@ func TestRequestAcceptsBoundaryIdempotencyKeys(t *testing.T) {
 		if err := qurlapi.ValidateRequestIdempotencyKey(key); err != nil {
 			t.Fatalf("rejected %d-byte key: %v", len(key), err)
 		}
+	}
+}
+
+func TestRequestRequiresExternalSupervision(t *testing.T) {
+	res := runCLI(t, &runOpts{args: []string{"request", "GET", "/v1/me", "-o", "json"}, stdin: strings.NewReader(""), openAPIClient: func(context.Context) (qurlapi.Client, error) {
+		t.Error("opened device in a native namespace")
+		return nil, errors.New("unexpected device open")
+	}})
+	if res.code != 2 || !strings.Contains(res.stderr.String(), "request requires --supervision external") {
+		t.Fatalf("exit %d: %s", res.code, res.stderr.String())
+	}
+}
+
+// A GET never reads stdin, so an inherited pipe that never reaches EOF (here
+// one that fails if read) cannot stall it.
+func TestRequestGETReturnsEnvelopeWithoutReadingStdin(t *testing.T) {
+	srv := apitest.NewServer(t)
+	srv.Script(http.MethodGet, "/v1/me", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"owner_id":"owner-a&b"}`))
+	})
+	state := bootstrapRegisteredState(t)
+	res := runCLI(t, &runOpts{args: []string{"request", "GET", "/v1/me", "--supervision", "external", "-o", "json"}, stdin: failingReader{}, openAPIClient: func(ctx context.Context) (qurlapi.Client, error) {
+		return qurlapi.NewRegistered(ctx, &qurlapi.Config{BaseURL: srv.URL, HTTPClient: srv.Client()}, &bootstrapAgentStateStore{state: state})
+	}})
+	var envelope struct {
+		Status  int               `json:"status"`
+		Headers map[string]string `json:"headers"`
+		Body    struct {
+			OwnerID string `json:"owner_id"`
+		} `json:"body"`
+	}
+	if res.code != 0 || json.Unmarshal(res.stdout.Bytes(), &envelope) != nil || envelope.Status != http.StatusOK ||
+		envelope.Headers["content-type"] != "application/json" || envelope.Body.OwnerID != "owner-a&b" || strings.Contains(res.stdout.String(), `\u0026`) {
+		t.Fatalf("exit %d: %s %s", res.code, res.stdout.String(), res.stderr.String())
 	}
 }

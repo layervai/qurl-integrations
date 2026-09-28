@@ -114,6 +114,11 @@ func TestRegisteredRequestEnforcesBodyCaps(t *testing.T) {
 	if _, err := Request(context.Background(), client, http.MethodPost, "/v1/resources", oversized, ""); err == nil || len(srv.Requests()) != 0 {
 		t.Fatalf("library accepted an oversized request body: %v", err)
 	}
+	for _, method := range []string{http.MethodGet, http.MethodDelete} {
+		if _, err := Request(context.Background(), client, method, "/v1/resources/id/sessions", json.RawMessage(`{}`), ""); err == nil || len(srv.Requests()) != 0 {
+			t.Fatalf("library accepted a %s body: %v", method, err)
+		}
+	}
 	srv.Script(http.MethodGet, "/v1/me", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`"` + strings.Repeat("a", maxResponseBody) + `"`))
 	})

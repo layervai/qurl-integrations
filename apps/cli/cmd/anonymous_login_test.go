@@ -156,6 +156,9 @@ func TestAnonymousLoginReopensExistingExternalNamespace(t *testing.T) {
 		if res.code != 0 || !strings.Contains(res.stdout.String(), `"device_enrolled": true`) {
 			t.Fatalf("attempt %d exit %d: %s %s", attempt, res.code, res.stdout.String(), res.stderr.String())
 		}
+		if strings.Contains(res.stderr.String(), msgAnonymousSupervisedDevice) != enrolled {
+			t.Fatalf("attempt %d enrollment note mismatch: %s", attempt, res.stderr.String())
+		}
 		if err := connectorstate.RequireRuntimeSupervision(dir, connectorstate.RuntimeSupervisionExternal); err != nil {
 			t.Fatal(err)
 		}
@@ -163,5 +166,23 @@ func TestAnonymousLoginReopensExistingExternalNamespace(t *testing.T) {
 	}
 	if outputs[0] != outputs[1] {
 		t.Fatalf("reopened identity changed:\n%s\n%s", outputs[0], outputs[1])
+	}
+}
+
+func TestAnonymousLoginQuietSuppressesEnrollmentNote(t *testing.T) {
+	srv := apitest.NewServer(t)
+	state := bootstrapRegisteredState(t)
+	res := runCLI(t, &runOpts{
+		args: []string{"login", "--anonymous", "--supervision", "external", "--endpoint", srv.URL, "--quiet"},
+		env:  externalLoginEnv(), shareStateDir: connectorStateTestDir(t),
+		openNativeRuntime: func(ctx context.Context, cfg connectorshare.NativeRuntimeConfig) (registeredNativeRuntime, error) {
+			if _, err := cfg.EnrollmentCredentialProvider(ctx, qurl.AgentEnrollmentCredentialRequest{AgentID: state.AgentID, PublicKeyB64: state.PublicKeyB64}); err != nil {
+				t.Fatal(err)
+			}
+			return &bootstrapNativeRuntime{store: &bootstrapAgentStateStore{state: state}}, nil
+		},
+	})
+	if res.code != 0 || strings.Contains(res.stderr.String(), msgAnonymousSupervisedDevice) {
+		t.Fatalf("exit %d: %s", res.code, res.stderr.String())
 	}
 }

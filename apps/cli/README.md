@@ -245,17 +245,18 @@ Its JSON result contains `owner_id`, `auth_type`, `device_key_id` when available
 and `device_enrolled: true`. Retain the complete state namespace and wrapping
 key across launches; failure never authorizes deleting or replacing them.
 
-Supervisors can use `qurl request METHOD /v1/... -o json` for the registered
-device's existing resource operations. Pipe an optional JSON body through stdin;
-when there is no body, redirect stdin from the null device (`/dev/null`, or
-`NUL` on Windows) rather than closing it, because a closed stdin is a read
-error. Responses have `{status, headers, body}`; headers
+Supervisors can use `qurl request METHOD /v1/... --supervision external -o json`
+for the registered device's existing resource operations. It refuses natively
+supervised namespaces, so it never enrolls a device implicitly. For POST, PUT
+and PATCH, pipe an optional JSON body through stdin; when there is no body,
+redirect stdin from the null device (`/dev/null`, or `NUL` on Windows) rather
+than closing it, because a closed stdin is a read error. GET and DELETE never
+read stdin. Responses have `{status, headers, body}`; headers
 contain only `content-type` and `retry-after`. Empty responses use `body: null`;
 non-JSON responses use a string. HTTP failures also return this envelope with
 exit zero; local and transport failures exit nonzero. Requests make one attempt.
 Pass a stable `--idempotency-key` when retrying mutations (32–256 ASCII letters,
-digits, hyphens or underscores). Bodies are limited to 1 MiB including surrounding whitespace; GET and DELETE
-accept no body. Absolute URLs, caller-selected headers and routes outside the
+digits, hyphens or underscores). Bodies are limited to 1 MiB including surrounding whitespace. Absolute URLs, caller-selected headers and routes outside the
 SDK's registered-device allowlist are refused. Queries are supported only for
 `GET /v1/resources` and `GET /v1/resources/{id}/qurls`; the CLI and the SDK
 both reject queries on other routes. Response bodies also have a 1 MiB cap; exceeding it returns

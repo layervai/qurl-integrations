@@ -8,7 +8,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"sync"
+	"sync/atomic"
 
 	connectoragentstate "github.com/layervai/qurl-connector/pkg/agentstate"
 	"github.com/layervai/qurl-go/qurl"
@@ -255,11 +255,9 @@ func runAnonymousExternalLogin(ctx context.Context, opts *globalOpts) error {
 	if err != nil {
 		return err
 	}
-	var noted sync.Once
+	var enrolled atomic.Bool
 	enroll := func(ctx context.Context, request qurl.AgentEnrollmentCredentialRequest) (string, error) {
-		if !opts.quiet {
-			noted.Do(func() { opts.printer().Notef("%s", msgAnonymousSupervisedDevice) })
-		}
+		enrolled.Store(true)
 		return qurl.AnonymousEnrollmentCredential(ctx, request)
 	}
 	// The recovery provider stays wired but always fails: account keys were
@@ -271,5 +269,9 @@ func runAnonymousExternalLogin(ctx context.Context, opts *globalOpts) error {
 		return err
 	}
 	opts.registeredClient, opts.registeredIdentity = client, identity
+	// Only a device created by this run gets the note, and only after it exists.
+	if enrolled.Load() && !opts.quiet {
+		opts.printer().Notef("%s", msgAnonymousSupervisedDevice)
+	}
 	return opts.printer().Login(identity)
 }

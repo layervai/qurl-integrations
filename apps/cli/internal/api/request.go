@@ -12,7 +12,8 @@ import (
 	"github.com/layervai/qurl-go/qurl"
 )
 
-// MaxRequestBody caps a supervisor request body, matching maxResponseBody.
+// MaxRequestBody caps a supervisor request body. It matches maxResponseBody;
+// change both caps and the README's request contract together.
 const MaxRequestBody = 1 << 20
 
 // RequestResponse preserves HTTP failures for supervising apps without exposing
@@ -43,6 +44,9 @@ func Request(ctx context.Context, api Client, method, relativePath string, body 
 	}
 	if len(body) > MaxRequestBody || (len(body) > 0 && !json.Valid(body)) {
 		return nil, fmt.Errorf("%w: request body must be JSON of at most 1 MiB", qurl.ErrInvalidResourceRequest)
+	}
+	if (method == http.MethodGet || method == http.MethodDelete) && len(body) > 0 {
+		return nil, fmt.Errorf("%w: GET and DELETE requests must not include a body", qurl.ErrInvalidResourceRequest)
 	}
 	var requestBody any
 	if len(body) > 0 {
