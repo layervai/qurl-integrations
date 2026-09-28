@@ -536,7 +536,7 @@ func (c *client) doRESTWithHeaders(ctx context.Context, method, path string, bod
 
 func (c *client) doRESTRequest(ctx context.Context, method, path string, body any, headers http.Header, allowRetry bool) (*restReply, error) {
 	reqBody := io.Reader(http.NoBody)
-	if raw, ok := body.(json.RawMessage); ok {
+	if raw, ok := body.(json.RawMessage); ok && len(raw) > 0 {
 		// Pre-encoded JSON goes out as is: json.Marshal would HTML-escape it
 		// and could grow a capped supervisor body past its limit.
 		reqBody = bytes.NewReader(raw)

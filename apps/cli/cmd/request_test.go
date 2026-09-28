@@ -9,8 +9,12 @@ import (
 	"strings"
 	"testing"
 
+	connectorshare "github.com/layervai/qurl-connector/pkg/share"
+	"github.com/layervai/qurl-go/qurl"
+
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/apitest"
+	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 )
 
 func TestRequestCommand(t *testing.T) {
@@ -167,5 +171,31 @@ func TestRequestRefusesAccountKeyConfiguration(t *testing.T) {
 		if res.code != 2 || !strings.Contains(res.stderr.String(), "request cannot be combined with") || strings.Contains(res.stderr.String(), "credential-do-not-read") {
 			t.Fatalf("%s: exit %d: %s", name, res.code, res.stderr.String())
 		}
+	}
+}
+
+func TestRequestRefusesTerminalBodyInput(t *testing.T) {
+	res := runCLI(t, &runOpts{env: map[string]string{}, args: []string{"request", "POST", "/v1/resources", "--supervision", "external", "-o", "json"}, inTTY: true, openAPIClient: func(context.Context) (qurlapi.Client, error) {
+		t.Error("opened device with a terminal body")
+		return nil, errors.New("unexpected device open")
+	}})
+	if res.code != 2 || !strings.Contains(res.stderr.String(), "redirect it from the null device") {
+		t.Fatalf("exit %d: %s", res.code, res.stderr.String())
+	}
+}
+
+// A namespace whose anonymous enrollment failed keeps its external mark but
+// has no device; request must point back at login, not at an account key.
+func TestRequestExplainsUnenrolledExternalNamespace(t *testing.T) {
+	dir := connectorStateTestDir(t)
+	if err := connectorstate.EstablishExternalRuntimeMode(context.Background(), dir); err != nil {
+		t.Fatal(err)
+	}
+	res := runCLI(t, &runOpts{env: externalLoginEnv(), shareStateDir: dir, args: []string{"request", "GET", "/v1/me", "--supervision", "external", "-o", "json"}, openNativeRuntime: func(ctx context.Context, cfg connectorshare.NativeRuntimeConfig) (registeredNativeRuntime, error) {
+		_, err := cfg.EnrollmentCredentialProvider(ctx, qurl.AgentEnrollmentCredentialRequest{AgentID: "agent", PublicKeyB64: "key"})
+		return nil, err
+	}})
+	if res.code == 0 || !strings.Contains(res.stderr.String(), "run `qurl login --anonymous --supervision external`") {
+		t.Fatalf("exit %d: %s", res.code, res.stderr.String())
 	}
 }

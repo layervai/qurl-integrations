@@ -15,10 +15,12 @@ const (
 	hintConnectorStopped = "Hint: run `qurl start <CRID>`, then try again."
 
 	// Recovery messages preserve the state and distinguish optional account access.
-	msgAccountRecoveryState  = "Account recovery needs a new device state directory."
-	hintAccountRecoveryState = "Hint: keep existing state intact. Run `QURL_CONNECTOR_STATE_DIR=~/.qurl-recovered qurl account recover` with an unused directory."
-	msgAnonymousRecovery     = "This device cannot recover access with its current credential."
-	hintAnonymousRecovery    = "Hint: keep existing state intact. If you linked an account, run `qurl account recover` with a new QURL_CONNECTOR_STATE_DIR. Otherwise restore a saved copy of this device state; a new identity cannot recover these resources."
+	msgAccountRecoveryState   = "Account recovery needs a new device state directory."
+	hintAccountRecoveryState  = "Hint: keep existing state intact. Run `QURL_CONNECTOR_STATE_DIR=~/.qurl-recovered qurl account recover` with an unused directory."
+	msgAnonymousRecovery      = "This device cannot recover access with its current credential."
+	msgExternalDeviceMissing  = "This state directory has no enrolled device."
+	hintExternalDeviceMissing = "Hint: run `qurl login --anonymous --supervision external` with the same state directory first."
+	hintAnonymousRecovery     = "Hint: keep existing state intact. If you linked an account, run `qurl account recover` with a new QURL_CONNECTOR_STATE_DIR. Otherwise restore a saved copy of this device state; a new identity cannot recover these resources."
 	// msgNoCredential renders the explicit account-key bootstrap condition.
 	msgNoCredential = "This machine is not enrolled with qURL."
 
@@ -264,7 +266,7 @@ func CustomerMessages() []string {
 		msgLinksUnavailable,
 		msgConnectorStopped,
 		hintConnectorStopped,
-		msgAccountRecoveryState, hintAccountRecoveryState, msgAnonymousRecovery, hintAnonymousRecovery,
+		msgAccountRecoveryState, hintAccountRecoveryState, msgAnonymousRecovery, hintAnonymousRecovery, msgExternalDeviceMissing, hintExternalDeviceMissing,
 		msgNoCredential,
 		hintNoCredential,
 		hintUnauthorized,

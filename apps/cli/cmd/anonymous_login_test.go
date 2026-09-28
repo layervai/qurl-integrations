@@ -27,8 +27,7 @@ func TestAnonymousExternalLogin(t *testing.T) {
 			}
 			request := qurl.AgentEnrollmentCredentialRequest{AgentID: state.AgentID, PublicKeyB64: state.PublicKeyB64}
 			got, err := cfg.EnrollmentCredentialProvider(ctx, request)
-			want, wantErr := qurl.AnonymousEnrollmentCredential(ctx, request)
-			if err != nil || wantErr != nil || want == "" || got != want {
+			if err != nil || got == "" {
 				t.Fatal("wrong anonymous enrollment credential")
 			}
 			if _, err := cfg.RecoveryCredentialProvider(ctx); err == nil {

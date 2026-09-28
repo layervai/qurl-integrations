@@ -134,7 +134,7 @@ func RequireRuntimeSupervision(dir string, expected RuntimeSupervision) error {
 			// started against an unenrolled directory exits with "no durable
 			// account owner" rather than marking it, so pointing at daemon run
 			// first sends the supervisor through a failure on the way.
-			return fmt.Errorf("%w is %q, not %q; enroll a dedicated empty state directory first with qurl login --enrollment-token-file <path> --supervision external", ErrRuntimeSupervision, actual, expected)
+			return fmt.Errorf("%w is %q, not %q; enroll a dedicated empty state directory first with qurl login --anonymous --supervision external or qurl login --enrollment-token-file <path> --supervision external", ErrRuntimeSupervision, actual, expected)
 		}
 		return fmt.Errorf("%w is %q, not %q; run this command with --supervision %s", ErrRuntimeSupervision, actual, expected, actual)
 	}

@@ -139,7 +139,7 @@ func TestRegisteredRequestBodyAndCancellation(t *testing.T) {
 			_, _ = w.Write([]byte(tc.body))
 		})
 		result, err := Request(context.Background(), client, http.MethodGet, "/v1/me", nil, "")
-		if err != nil || result.Status != tc.status || string(result.Body) != tc.want {
+		if err != nil || result.Status != tc.status || string(result.Body) != tc.want || result.Headers == nil || (tc.status == 204 && len(result.Headers) != 0) {
 			t.Fatalf("response = %+v, %v", result, err)
 		}
 	}

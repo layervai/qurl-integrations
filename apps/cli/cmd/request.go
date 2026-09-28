@@ -50,28 +50,24 @@ account_id matching the intended account.`,
 			if accountKeyConfigured(opts.lookupEnv) {
 				return exitcode.UsageError(fmt.Errorf("request cannot be combined with %s or %s", auth.EnvAPIKey, auth.EnvAPIKeyFile))
 			}
+			// Validate before opening the device; Request re-checks as the
+			// library contract.
 			if err := qurlapi.ValidateRequestIdempotencyKey(idempotencyKey); err != nil {
 				return exitcode.UsageError(err)
 			}
 			if err := qurlapi.ValidateRequestTarget(args[0], args[1]); err != nil {
 				return exitcode.UsageError(err)
 			}
-			var body []byte
-			if args[0] != http.MethodGet && args[0] != http.MethodDelete && !opts.streams.InIsTTY {
-				var err error
-				body, err = io.ReadAll(io.LimitReader(opts.streams.In, qurlapi.MaxRequestBody+1))
-				if err != nil {
-					return fmt.Errorf("could not read request body: %w", err)
-				}
-				if len(body) > qurlapi.MaxRequestBody {
-					return exitcode.UsageError(errors.New("request body exceeds 1 MiB including surrounding whitespace"))
-				}
-				body = bytes.TrimSpace(body)
-				if len(body) > 0 && !json.Valid(body) {
-					return exitcode.UsageError(errors.New("request body must be JSON"))
-				}
+			body, err := readRequestBody(opts.streams, args[0])
+			if err != nil {
+				return err
 			}
 			client, err := opts.newClient(cmd.Context())
+			if errors.Is(err, auth.ErrNoCredential) && !errors.Is(err, auth.ErrAnonymousRecovery) {
+				// Account keys were refused above, so a missing enrollment
+				// credential means the external namespace holds no device.
+				return auth.ErrExternalDeviceMissing
+			}
 			if err != nil {
 				return err
 			}
@@ -82,6 +78,29 @@ account_id matching the intended account.`,
 			return opts.printer().RequestEnvelope(reply)
 		},
 	}
-	cmd.Flags().StringVar(&idempotencyKey, "idempotency-key", "", "stable nonsecret mutation key (32-256 letters, digits, hyphens or underscores)")
+	cmd.Flags().StringVar(&idempotencyKey, "idempotency-key", "", "stable nonsecret key for retrying mutations (32-256 letters, digits, hyphens or underscores)")
 	return cmd
+}
+
+// readRequestBody reads a bounded JSON body for POST, PUT and PATCH. GET and
+// DELETE never read stdin, so an inherited pipe cannot stall them.
+func readRequestBody(streams *output.Streams, method string) ([]byte, error) {
+	if method == http.MethodGet || method == http.MethodDelete {
+		return nil, nil
+	}
+	if streams.InIsTTY {
+		return nil, exitcode.UsageError(errors.New("request reads a " + method + " body from standard input; pipe JSON or redirect it from the null device"))
+	}
+	body, err := io.ReadAll(io.LimitReader(streams.In, qurlapi.MaxRequestBody+1))
+	if err != nil {
+		return nil, fmt.Errorf("could not read request body: %w", err)
+	}
+	if len(body) > qurlapi.MaxRequestBody {
+		return nil, exitcode.UsageError(errors.New("request body exceeds 1 MiB including surrounding whitespace"))
+	}
+	body = bytes.TrimSpace(body)
+	if len(body) > 0 && !json.Valid(body) {
+		return nil, exitcode.UsageError(errors.New("request body must be JSON"))
+	}
+	return body, nil
 }
