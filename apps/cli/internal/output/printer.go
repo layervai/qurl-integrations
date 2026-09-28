@@ -76,6 +76,15 @@ func (p *Printer) writeJSON(v any) error {
 	return enc.Encode(v)
 }
 
+// Request emits a supervisor request envelope as indented JSON. HTML escaping
+// stays off so passed-through response bodies keep their characters.
+func (p *Printer) Request(v any) error {
+	enc := json.NewEncoder(p.out)
+	enc.SetIndent("", "  ")
+	enc.SetEscapeHTML(false)
+	return enc.Encode(v)
+}
+
 // ANSI styling. Color is per-printer state, never a global, so parallel
 // tests and injected streams cannot race on it.
 const (

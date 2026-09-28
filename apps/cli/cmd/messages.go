@@ -67,6 +67,7 @@ func customerMessages() []string {
 		msgAccountLinked,
 		msgAccountRecovered,
 		msgAnonymousDevice,
+		msgAnonymousSupervisedDevice,
 		msgAccountChooseOwner,
 		msgAccountOwnerDenied,
 		msgVerifyMismatch,
@@ -85,11 +86,14 @@ func customerMessages() []string {
 }
 
 const (
-	msgAccountContinue    = "Continue in your browser to recover resource access."
-	msgAccountSetup       = "This device controls your qURL resources.\n\nLink an account to recover access and manage resources from other devices.\nYour existing links will keep working.\nLinking is permanent. Check the account you choose in the browser.\n\nContinue in your browser."
-	msgAccountLinked      = "Account linked. Your existing links are unchanged."
-	msgAccountRecovered   = "Resource access recovered on this device. Existing links are unchanged."
-	msgAnonymousDevice    = "Using a new device identity. Keep its local state, or run qurl account setup to enable recovery."
-	msgAccountChooseOwner = "choose resources to recover with --owner; available owners: %s"
-	msgAccountOwnerDenied = "this account does not own the selected resources"
+	msgAccountContinue  = "Continue in your browser to recover resource access."
+	msgAccountSetup     = "This device controls your qURL resources.\n\nLink an account to recover access and manage resources from other devices.\nYour existing links will keep working.\nLinking is permanent. Check the account you choose in the browser.\n\nContinue in your browser."
+	msgAccountLinked    = "Account linked. Your existing links are unchanged."
+	msgAccountRecovered = "Resource access recovered on this device. Existing links are unchanged."
+	msgAnonymousDevice  = "Using a new device identity. Keep its local state, or run qurl account setup to enable recovery."
+	// msgAnonymousSupervisedDevice replaces msgAnonymousDevice under external
+	// supervision, where linking goes through the supervising app.
+	msgAnonymousSupervisedDevice = "Using a new device identity. Keep its local state; the supervising app can link an account to enable recovery."
+	msgAccountChooseOwner        = "choose resources to recover with --owner; available owners: %s"
+	msgAccountOwnerDenied        = "this account does not own the selected resources"
 )

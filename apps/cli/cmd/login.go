@@ -8,6 +8,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 
 	connectoragentstate "github.com/layervai/qurl-connector/pkg/agentstate"
 	"github.com/layervai/qurl-go/qurl"
@@ -254,11 +255,10 @@ func runAnonymousExternalLogin(ctx context.Context, opts *globalOpts) error {
 	if err != nil {
 		return err
 	}
-	var noted bool
+	var noted sync.Once
 	enroll := func(ctx context.Context, request qurl.AgentEnrollmentCredentialRequest) (string, error) {
-		if !noted && !opts.quiet {
-			opts.printer().Notef("%s", msgAnonymousDevice)
-			noted = true
+		if !opts.quiet {
+			noted.Do(func() { opts.printer().Notef("%s", msgAnonymousSupervisedDevice) })
 		}
 		return qurl.AnonymousEnrollmentCredential(ctx, request)
 	}

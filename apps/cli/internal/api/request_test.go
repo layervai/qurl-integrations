@@ -37,7 +37,7 @@ func TestRegisteredRequestPreservesHTTPErrorAndSafeHeaders(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Status != 409 || len(result.Headers) != 2 || result.Headers["retry-after"] != "7" || string(result.Body) != `{"error":{"code":"conflict"}}` {
+	if result.Status != 409 || len(result.Headers) != 2 || result.Headers["retry-after"] != "7" || result.Headers["content-type"] != "application/problem+json" || string(result.Body) != `{"error":{"code":"conflict"}}` {
 		t.Fatalf("unexpected result: %+v", result)
 	}
 	if len(srv.Requests()) != 1 {
@@ -104,6 +104,21 @@ func TestValidateRequestTargetEnforcesMethodAndQueryLocally(t *testing.T) {
 	srv := apitest.NewServer(t)
 	if _, err := Request(context.Background(), newRegisteredTestClient(t, srv), "TRACE", "/v1/me", nil, ""); err == nil || len(srv.Requests()) != 0 {
 		t.Fatalf("library accepted unsupported method: %v", err)
+	}
+}
+
+func TestRegisteredRequestEnforcesBodyCaps(t *testing.T) {
+	srv := apitest.NewServer(t)
+	client := newRegisteredTestClient(t, srv)
+	oversized := json.RawMessage(`"` + strings.Repeat("a", MaxRequestBody-1) + `"`)
+	if _, err := Request(context.Background(), client, http.MethodPost, "/v1/resources", oversized, ""); err == nil || len(srv.Requests()) != 0 {
+		t.Fatalf("library accepted an oversized request body: %v", err)
+	}
+	srv.Script(http.MethodGet, "/v1/me", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`"` + strings.Repeat("a", maxResponseBody) + `"`))
+	})
+	if _, err := Request(context.Background(), client, http.MethodGet, "/v1/me", nil, ""); !errors.Is(err, qurl.ErrInvalidAPIResponse) {
+		t.Fatalf("oversized response error = %v", err)
 	}
 }
 

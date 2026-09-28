@@ -24,7 +24,9 @@ headers, and body as JSON. Only the registered device's existing resource
 routes are allowed. HTTP errors are returned in the envelope with exit zero;
 local and transport failures exit nonzero. Requests are never retried.
 
-The body limit is 1 MiB including surrounding whitespace.
+The body limit is 1 MiB including surrounding whitespace. The request reads
+standard input to end of file: redirect it from the null device when there is
+no body, and impose a deadline on the process.
 
 The envelope is returned unvalidated. For POST /v1/account/link, record the
 link only after status 200 with an owner_id matching this device and an
@@ -67,9 +69,7 @@ account_id matching the intended account.`,
 			if err != nil {
 				return err
 			}
-			enc := json.NewEncoder(opts.streams.Out)
-			enc.SetEscapeHTML(false)
-			return enc.Encode(reply)
+			return opts.printer().Request(reply)
 		},
 	}
 	cmd.Flags().StringVar(&idempotencyKey, "idempotency-key", "", "stable nonsecret mutation key (32-256 letters, digits, hyphens or underscores)")

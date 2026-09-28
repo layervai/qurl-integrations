@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -36,8 +37,16 @@ func TestAnonymousExternalLogin(t *testing.T) {
 			return &bootstrapNativeRuntime{store: &bootstrapAgentStateStore{state: state}}, nil
 		},
 	})
-	if res.code != 0 || !strings.Contains(res.stdout.String(), `"device_enrolled": true`) {
+	var doc struct {
+		OwnerID        string `json:"owner_id"`
+		AuthType       string `json:"auth_type"`
+		DeviceEnrolled bool   `json:"device_enrolled"`
+	}
+	if res.code != 0 || json.Unmarshal(res.stdout.Bytes(), &doc) != nil || doc.OwnerID == "" || doc.AuthType == "" || !doc.DeviceEnrolled {
 		t.Fatalf("exit %d: %s %s", res.code, res.stdout.String(), res.stderr.String())
+	}
+	if !strings.Contains(res.stderr.String(), msgAnonymousSupervisedDevice) {
+		t.Fatalf("missing supervised enrollment note: %s", res.stderr.String())
 	}
 }
 

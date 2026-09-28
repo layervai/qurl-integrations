@@ -41,8 +41,8 @@ func Request(ctx context.Context, api Client, method, relativePath string, body 
 	if err := ValidateRequestTarget(method, relativePath); err != nil {
 		return nil, err
 	}
-	if len(body) > 0 && !json.Valid(body) {
-		return nil, fmt.Errorf("%w: request body must be JSON", qurl.ErrInvalidResourceRequest)
+	if len(body) > MaxRequestBody || (len(body) > 0 && !json.Valid(body)) {
+		return nil, fmt.Errorf("%w: request body must be JSON of at most 1 MiB", qurl.ErrInvalidResourceRequest)
 	}
 	var requestBody any
 	if len(body) > 0 {
