@@ -97,15 +97,19 @@ func ValidateRequestTarget(method, value string) error {
 		return fmt.Errorf("%w: request path must be a canonical /v1/ path", qurl.ErrRegisteredAgentResourceRequestDenied)
 	}
 	pattern, known, validIDs := requestRoutePattern(parsed.Path)
-	if !validIDs {
-		return fmt.Errorf("%w: request path identifiers must be letters, digits, hyphens or underscores", qurl.ErrRegisteredAgentResourceRequestDenied)
-	}
 	if !known || !slices.Contains(requestRoutes[pattern], method) {
 		return fmt.Errorf("%w: %s %s is not a registered-device route", qurl.ErrRegisteredAgentResourceRequestDenied, method, parsed.Path)
 	}
-	// Only query presence is gated here; the service validates its contents.
+	if !validIDs {
+		return fmt.Errorf("%w: request path identifiers must be letters, digits, hyphens or underscores", qurl.ErrRegisteredAgentResourceRequestDenied)
+	}
+	// Query presence is gated by route; its characters must already be
+	// URL-safe, and the service validates the parameters themselves.
 	if (parsed.RawQuery != "" || parsed.ForceQuery) && (method != http.MethodGet || (pattern != requestResourcesPath && pattern != requestQurlsPattern)) {
 		return fmt.Errorf("%w: queries are allowed only for GET /v1/resources and GET /v1/resources/{id}/qurls", qurl.ErrRegisteredAgentResourceRequestDenied)
+	}
+	if strings.ContainsFunc(parsed.RawQuery, func(r rune) bool { return r <= ' ' || r >= 0x7f || strings.ContainsRune(`"<>\^`+"`"+`{|}`, r) }) {
+		return fmt.Errorf("%w: request query must be URL-encoded", qurl.ErrRegisteredAgentResourceRequestDenied)
 	}
 	return nil
 }
@@ -146,24 +150,22 @@ var requestRoutes = map[string][]string{
 
 // requestRoutePattern maps a canonical path to its requestRoutes pattern.
 // Resource IDs (unpadded base64url) and CRIDs (lowercase alphanumerics) are
-// both ASCII tokens; validIDs is false when an identifier segment is not.
+// both ASCII tokens; validIDs is false when an identifier segment is not, so
+// a literal {id} can match a pattern only to be refused.
 func requestRoutePattern(requestPath string) (pattern string, ok, validIDs bool) {
 	parts := strings.Split(requestPath, "/")
+	validIDs = true
 	if len(parts) >= 4 && parts[2] == "resources" {
-		if !isASCIIToken(parts[3]) {
-			return "", false, false
-		}
+		validIDs = isASCIIToken(parts[3])
 		parts[3] = "{id}"
 		if len(parts) == 6 && (parts[4] == "qurls" || parts[4] == "sessions") {
-			if !isASCIIToken(parts[5]) {
-				return "", false, false
-			}
+			validIDs = validIDs && isASCIIToken(parts[5])
 			parts[5] = "{id}"
 		}
 	}
 	pattern = strings.Join(parts, "/")
 	_, ok = requestRoutes[pattern]
-	return pattern, ok, true
+	return pattern, ok, validIDs
 }
 
 // isASCIIToken accepts nonempty letters, digits, hyphens and underscores. For

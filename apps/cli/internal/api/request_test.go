@@ -228,7 +228,19 @@ func TestRequestAcceptsBoundaryIdempotencyKeys(t *testing.T) {
 	}
 }
 
+func TestRequestTargetRejectsUnencodedQuery(t *testing.T) {
+	if err := ValidateRequestTarget(http.MethodGet, "/v1/resources?q=a b"); err == nil || !strings.Contains(err.Error(), "URL-encoded") {
+		t.Fatalf("error = %v", err)
+	}
+	if err := ValidateRequestTarget(http.MethodGet, "/v1/resources?q=a%20b&limit=5"); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestRequestTargetNamesInvalidIdentifiers(t *testing.T) {
+	if err := ValidateRequestTarget(http.MethodGet, "/v1/resources/r.1/bogus"); err == nil || !strings.Contains(err.Error(), "not a registered-device route") {
+		t.Fatalf("unknown route error = %v", err)
+	}
 	if err := ValidateRequestTarget(http.MethodGet, "/v1/resources/r.1"); err == nil || !strings.Contains(err.Error(), "identifiers must be letters") {
 		t.Fatalf("error = %v", err)
 	}

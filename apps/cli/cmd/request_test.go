@@ -140,7 +140,7 @@ func TestRequestGETReturnsEnvelopeWithoutReadingStdin(t *testing.T) {
 		_, _ = w.Write([]byte(`{"owner_id":"owner-a&b"}`))
 	})
 	state := bootstrapRegisteredState(t)
-	res := runCLI(t, &runOpts{env: externalLoginEnv(), args: []string{"request", "GET", "/v1/me", "--supervision", "external", "-o", "json"}, stdin: failingReader{}, openAPIClient: func(ctx context.Context) (qurlapi.Client, error) {
+	res := runCLI(t, &runOpts{env: externalLoginEnv(), args: []string{"request", "GET", "/v1/me", "--supervision", "external", "-o", "json", "--quiet"}, stdin: failingReader{}, openAPIClient: func(ctx context.Context) (qurlapi.Client, error) {
 		return qurlapi.NewRegistered(ctx, &qurlapi.Config{BaseURL: srv.URL, HTTPClient: srv.Client()}, &bootstrapAgentStateStore{state: state})
 	}})
 	var envelope struct {
@@ -169,12 +169,14 @@ func TestRequestRefusesAccountKeyConfiguration(t *testing.T) {
 }
 
 func TestRequestRefusesTerminalBodyInput(t *testing.T) {
-	res := runCLI(t, &runOpts{env: externalLoginEnv(), args: []string{"request", "POST", "/v1/resources", "--supervision", "external", "-o", "json"}, inTTY: true, openAPIClient: func(context.Context) (qurlapi.Client, error) {
-		t.Error("opened device with a terminal body")
-		return nil, errors.New("unexpected device open")
-	}})
-	if res.code != 2 || !strings.Contains(res.stderr.String(), "redirect it from the null device") {
-		t.Fatalf("exit %d: %s", res.code, res.stderr.String())
+	for _, route := range [][]string{{"POST", "/v1/resources"}, {"PUT", "/v1/resources/r_1/sharing"}, {"PATCH", "/v1/resources/r_1"}} {
+		res := runCLI(t, &runOpts{env: externalLoginEnv(), args: append([]string{"request", "--supervision", "external", "-o", "json"}, route...), inTTY: true, openAPIClient: func(context.Context) (qurlapi.Client, error) {
+			t.Error("opened device with a terminal body")
+			return nil, errors.New("unexpected device open")
+		}})
+		if res.code != 2 || !strings.Contains(res.stderr.String(), "redirect it from the null device") {
+			t.Fatalf("%v: exit %d: %s", route, res.code, res.stderr.String())
+		}
 	}
 }
 

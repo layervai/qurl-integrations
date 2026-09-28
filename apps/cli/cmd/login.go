@@ -166,13 +166,13 @@ func accountKeyConfigured(lookup func(string) (string, bool)) bool {
 // only: the provider name and a plausible inherited descriptor number. The
 // key bytes are read by the connector's provider, never here, and the
 // descriptor value is never echoed.
-func requireLocalKeyProvider(lookup func(string) (string, bool), flag string) error {
+func requireLocalKeyProvider(lookup func(string) (string, bool), subject string) error {
 	provider, _ := lookup(connectoragentstate.EnvKeyProvider)
 	if strings.ToLower(strings.TrimSpace(provider)) != connectoragentstate.KeyProviderLocalKey {
-		return fmt.Errorf("%s requires %s=%s", flag, connectoragentstate.EnvKeyProvider, connectoragentstate.KeyProviderLocalKey)
+		return fmt.Errorf("%s requires %s=%s", subject, connectoragentstate.EnvKeyProvider, connectoragentstate.KeyProviderLocalKey)
 	}
 	if fd, _ := lookup(connectoragentstate.EnvLocalKeyFD); !validLocalKeyDescriptor(fd) {
-		return fmt.Errorf("%s requires %s to name an inherited descriptor in bare decimal form (3 through %d, no leading zeros)", flag, connectoragentstate.EnvLocalKeyFD, maxLocalKeyDescriptor)
+		return fmt.Errorf("%s requires %s to name an inherited descriptor in bare decimal form (3 through %d, no leading zeros)", subject, connectoragentstate.EnvLocalKeyFD, maxLocalKeyDescriptor)
 	}
 	return nil
 }
