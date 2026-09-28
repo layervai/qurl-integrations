@@ -26,8 +26,8 @@ func TestAnonymousExternalLogin(t *testing.T) {
 			}
 			request := qurl.AgentEnrollmentCredentialRequest{AgentID: state.AgentID, PublicKeyB64: state.PublicKeyB64}
 			got, err := cfg.EnrollmentCredentialProvider(ctx, request)
-			want, _ := qurl.AnonymousEnrollmentCredential(ctx, request)
-			if err != nil || got != want {
+			want, wantErr := qurl.AnonymousEnrollmentCredential(ctx, request)
+			if err != nil || wantErr != nil || want == "" || got != want {
 				t.Fatal("wrong anonymous enrollment credential")
 			}
 			if _, err := cfg.RecoveryCredentialProvider(ctx); err == nil {
@@ -106,5 +106,43 @@ func TestAnonymousLoginRejectsConnectorScopedState(t *testing.T) {
 	}})
 	if res.code == 0 {
 		t.Fatal("connector-scoped identity reported successful enrollment")
+	}
+	// No Me call means no owner binding either: binding needs Me's identity.
+	if n := len(srv.Requests()); n != 0 {
+		t.Fatalf("contacted the server %d times before rejecting the device", n)
+	}
+}
+
+func TestAnonymousLoginReopensExistingExternalNamespace(t *testing.T) {
+	srv := apitest.NewServer(t)
+	dir := connectorStateTestDir(t)
+	state := bootstrapRegisteredState(t)
+	var outputs []string
+	for attempt := 0; attempt < 2; attempt++ {
+		enrolled := attempt == 0
+		res := runCLI(t, &runOpts{
+			args: []string{"login", "--anonymous", "--supervision", "external", "--endpoint", srv.URL, "-o", "json"},
+			env:  map[string]string{"LAYERV_KEY_PROVIDER": "local-key", "LAYERV_LOCAL_KEY_FD": "3"}, shareStateDir: dir,
+			openNativeRuntime: func(ctx context.Context, cfg connectorshare.NativeRuntimeConfig) (registeredNativeRuntime, error) {
+				// A warm namespace reopens the persisted device; only the first
+				// launch spends the anonymous enrollment credential.
+				if enrolled {
+					if _, err := cfg.EnrollmentCredentialProvider(ctx, qurl.AgentEnrollmentCredentialRequest{AgentID: state.AgentID, PublicKeyB64: state.PublicKeyB64}); err != nil {
+						t.Fatal(err)
+					}
+				}
+				return &bootstrapNativeRuntime{store: &bootstrapAgentStateStore{state: state}}, nil
+			},
+		})
+		if res.code != 0 || !strings.Contains(res.stdout.String(), `"device_enrolled": true`) {
+			t.Fatalf("attempt %d exit %d: %s %s", attempt, res.code, res.stdout.String(), res.stderr.String())
+		}
+		if err := connectorstate.RequireRuntimeSupervision(dir, connectorstate.RuntimeSupervisionExternal); err != nil {
+			t.Fatal(err)
+		}
+		outputs = append(outputs, res.stdout.String())
+	}
+	if outputs[0] != outputs[1] {
+		t.Fatalf("reopened identity changed:\n%s\n%s", outputs[0], outputs[1])
 	}
 }

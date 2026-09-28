@@ -24,8 +24,8 @@ type RequestResponse struct {
 // It performs one attempt; the supervisor owns any retry decision.
 // TODO(upstream-contract): the pinned qurl-go owns the exact registered-device
 // method/route allowlist, including nested resource qURL/session management.
-// Queries are permitted only for GET /v1/resources and GET /v1/resources/{id}/qurls.
-// Review this command and its negative-route tests together on SDK changes.
+// ValidateRequestTarget enforces the method set and query policy locally as
+// well, so a looser SDK cannot widen them. Review this command and its negative-route tests together on SDK changes.
 func Request(ctx context.Context, api Client, method, relativePath string, body json.RawMessage, idempotencyKey string) (*RequestResponse, error) {
 	registered, ok := api.(*registeredClient)
 	if !ok {
@@ -35,7 +35,7 @@ func Request(ctx context.Context, api Client, method, relativePath string, body 
 	if !ok || c.registeredDoer == nil {
 		return nil, fmt.Errorf("%w: registered transport is unavailable", qurl.ErrInvalidClientConfig)
 	}
-	if err := ValidateRequestPath(relativePath); err != nil {
+	if err := ValidateRequestTarget(method, relativePath); err != nil {
 		return nil, err
 	}
 	if len(body) > 0 && !json.Valid(body) {
@@ -72,14 +72,36 @@ func Request(ctx context.Context, api Client, method, relativePath string, body 
 	return result, nil
 }
 
-// ValidateRequestPath rejects URL authority, ambiguous encoding, and dot
-// segments before a supervisor request can open or enroll a device.
-func ValidateRequestPath(value string) error {
+// ValidateRequestTarget rejects unsupported methods, URL authority, ambiguous
+// encoding, dot segments, and queries outside GET /v1/resources and
+// GET /v1/resources/{id}/qurls before a supervisor request can open or enroll
+// a device.
+func ValidateRequestTarget(method, value string) error {
+	switch method {
+	case http.MethodGet, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
+	default:
+		return fmt.Errorf("%w: request method must be GET, POST, PUT, PATCH, or DELETE", qurl.ErrRegisteredAgentResourceRequestDenied)
+	}
 	parsed, err := url.Parse(value)
 	if err != nil || !strings.HasPrefix(value, "/v1/") || parsed.IsAbs() || parsed.Host != "" || parsed.User != nil || parsed.Opaque != "" || parsed.Fragment != "" || parsed.RawFragment != "" || strings.Contains(value, "#") || parsed.RawPath != "" || path.Clean(parsed.Path) != parsed.Path {
 		return fmt.Errorf("%w: request path must be a canonical /v1/ path", qurl.ErrRegisteredAgentResourceRequestDenied)
 	}
+	if (parsed.RawQuery != "" || parsed.ForceQuery) && !queryAllowed(method, parsed.Path) {
+		return fmt.Errorf("%w: queries are allowed only for GET /v1/resources and GET /v1/resources/{id}/qurls", qurl.ErrRegisteredAgentResourceRequestDenied)
+	}
 	return nil
+}
+
+func queryAllowed(method, requestPath string) bool {
+	if method != http.MethodGet {
+		return false
+	}
+	if requestPath == "/v1/resources" {
+		return true
+	}
+	id, ok := strings.CutPrefix(requestPath, "/v1/resources/")
+	id, ok2 := strings.CutSuffix(id, "/qurls")
+	return ok && ok2 && id != "" && !strings.Contains(id, "/")
 }
 
 // ValidateRequestIdempotencyKey accepts only bounded, nonsecret header values.

@@ -250,17 +250,14 @@ func runAnonymousExternalLogin(ctx context.Context, opts *globalOpts) error {
 		return err
 	}
 	opts.warnInsecureEndpoint()
+	// anonymousExternalLogin makes openNativeRegisteredClient check the device
+	// scope before any network call. Its recovery provider stays wired but
+	// always fails with auth.ErrAnonymousRecovery: account keys were rejected
+	// above, so an accountless device can never acquire recovery authority.
 	opts.anonymousExternalLogin = true
 	defer func() { opts.anonymousExternalLogin = false }()
 	client, identity, err := opts.openNativeRegisteredClient(ctx, nil, "", nil)
 	if err != nil {
-		return err
-	}
-	store, err := opts.nativeRuntime.Handoff()
-	if err != nil {
-		return err
-	}
-	if err := requireExternalOwnerScopedAgentState(ctx, store); err != nil {
 		return err
 	}
 	opts.registeredClient, opts.registeredIdentity = client, identity

@@ -768,6 +768,17 @@ func (o *globalOpts) openNativeRegisteredClient(
 			retErr = errors.Join(retErr, nativeRuntime.Close())
 		}
 	}()
+	if o.anonymousExternalLogin {
+		// Refuse an incompatible existing device before any server contact
+		// or owner-binding write, matching the token-file external path.
+		store, handoffErr := nativeRuntime.Handoff()
+		if handoffErr != nil {
+			return nil, nil, handoffErr
+		}
+		if err := requireExternalOwnerScopedAgentState(ctx, store); err != nil {
+			return nil, nil, err
+		}
+	}
 	openDeviceClient := func() (qurlapi.Client, error) {
 		store, handoffErr := nativeRuntime.Handoff()
 		if handoffErr != nil {

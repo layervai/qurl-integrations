@@ -57,6 +57,9 @@ func TestRequestRejectsInputBeforeOpeningDevice(t *testing.T) {
 		{[]string{"POST", "/v1/account/link"}, `{"account_token":"private-token"} garbage`},
 		{[]string{"POST", "/v1/account/link"}, "{}" + strings.Repeat(" ", 1<<20)},
 		{[]string{"GET", "/v1/me", "--idempotency-key", strings.Repeat("a", 32) + "\r\nheader"}, ""},
+		{[]string{"HEAD", "/v1/me"}, ""},
+		{[]string{"get", "/v1/me"}, ""},
+		{[]string{"GET", "/v1/me?x=1"}, ""},
 	} {
 		res := runCLI(t, &runOpts{args: append([]string{"request", "-o", "json"}, tc.args...), stdin: strings.NewReader(tc.body), openAPIClient: func(context.Context) (qurlapi.Client, error) {
 			t.Error("opened device for invalid input")
@@ -65,5 +68,44 @@ func TestRequestRejectsInputBeforeOpeningDevice(t *testing.T) {
 		if res.code == 0 || res.stdout.Len() != 0 || strings.Contains(res.stderr.String(), "private-token") {
 			t.Fatalf("invalid input exit %d: %s", res.code, res.stderr.String())
 		}
+	}
+}
+
+func TestRequestRequiresJSONOutput(t *testing.T) {
+	res := runCLI(t, &runOpts{args: []string{"request", "GET", "/v1/me"}, stdin: strings.NewReader(""), openAPIClient: func(context.Context) (qurlapi.Client, error) {
+		t.Error("opened device without JSON output")
+		return nil, errors.New("unexpected device open")
+	}})
+	if res.code != 2 || !strings.Contains(res.stderr.String(), "request requires --output json") {
+		t.Fatalf("exit %d: %s", res.code, res.stderr.String())
+	}
+}
+
+type failingReader struct{}
+
+func (failingReader) Read([]byte) (int, error) { return 0, errors.New("stdin is closed") }
+
+func TestRequestReportsStdinReadError(t *testing.T) {
+	res := runCLI(t, &runOpts{args: []string{"request", "GET", "/v1/me", "-o", "json"}, stdin: failingReader{}, openAPIClient: func(context.Context) (qurlapi.Client, error) {
+		t.Error("opened device after stdin failure")
+		return nil, errors.New("unexpected device open")
+	}})
+	if res.code == 0 || !strings.Contains(res.stderr.String(), "could not read request body: stdin is closed") {
+		t.Fatalf("exit %d: %s", res.code, res.stderr.String())
+	}
+}
+
+func TestRequestAcceptsOneMiBBody(t *testing.T) {
+	srv := apitest.NewServer(t)
+	body := `{"x":"` + strings.Repeat("a", (1<<20)-8) + `"}`
+	srv.Script(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+	})
+	state := bootstrapRegisteredState(t)
+	res := runCLI(t, &runOpts{args: []string{"request", "POST", "/v1/resources", "-o", "json"}, stdin: strings.NewReader(body), openAPIClient: func(ctx context.Context) (qurlapi.Client, error) {
+		return qurlapi.NewRegistered(ctx, &qurlapi.Config{BaseURL: srv.URL, HTTPClient: srv.Client()}, &bootstrapAgentStateStore{state: state})
+	}})
+	if len(body) != 1<<20 || res.code != 0 || len(srv.Requests()) != 1 {
+		t.Fatalf("exit %d: %s", res.code, res.stderr.String())
 	}
 }

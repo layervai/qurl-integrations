@@ -3,9 +3,12 @@ package qurlapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"testing"
+
+	"github.com/layervai/qurl-go/qurl"
 
 	"github.com/layervai/qurl-integrations/apps/cli/internal/apitest"
 )
@@ -42,11 +45,11 @@ func TestRegisteredRequestPreservesHTTPErrorAndSafeHeaders(t *testing.T) {
 
 func TestRegisteredRequestRejectsAuthorityAndDisallowedRoutes(t *testing.T) {
 	srv := apitest.NewServer(t)
-	client := newRegisteredTestClient(t, srv)
+	registered := newRegisteredTestClient(t, srv)
 	// TODO(upstream-contract): keep these denied routes aligned with the
 	// reviewed qurl-go registered-device transport before updating the SDK.
 	for _, path := range []string{"https://evil.test/v1/me", "//evil.test/v1/me", "/v1/me#fragment", "/v1/%6de", "/v1/../v1/me", "/v1/me?x=1", "/v1/quota", "/v1/resources/id/sessions/session_id"} {
-		if _, err := Request(context.Background(), client, http.MethodGet, path, nil, ""); err == nil {
+		if _, err := Request(context.Background(), registered, http.MethodGet, path, nil, ""); err == nil {
 			t.Errorf("accepted %q", path)
 		}
 	}
@@ -59,6 +62,46 @@ func TestRegisteredRequestRejectsAuthorityAndDisallowedRoutes(t *testing.T) {
 	}
 	if _, err := Request(context.Background(), account, http.MethodGet, "/v1/me", nil, ""); err == nil {
 		t.Fatal("accepted account authority")
+	}
+	if _, err := Request(context.Background(), &registeredClient{Client: &client{}}, http.MethodGet, "/v1/me", nil, ""); err == nil || !strings.Contains(err.Error(), "registered transport is unavailable") {
+		t.Fatalf("nil registered transport error = %v", err)
+	}
+}
+
+// TestValidateRequestTargetEnforcesMethodAndQueryLocally pins the policy
+// independently of the SDK allowlist.
+func TestValidateRequestTargetEnforcesMethodAndQueryLocally(t *testing.T) {
+	for _, tc := range []struct{ method, path string }{
+		{http.MethodGet, "/v1/resources?limit=1"},
+		{http.MethodGet, "/v1/resources/id/qurls?limit=100&cursor=next"},
+		{http.MethodPost, "/v1/resources"},
+		{http.MethodDelete, "/v1/resources/id/sessions"},
+	} {
+		if err := ValidateRequestTarget(tc.method, tc.path); err != nil {
+			t.Errorf("%s %s rejected: %v", tc.method, tc.path, err)
+		}
+	}
+	for _, tc := range []struct{ method, path string }{
+		{http.MethodHead, "/v1/me"},
+		{http.MethodOptions, "/v1/me"},
+		{"get", "/v1/me"},
+		{"", "/v1/me"},
+		{http.MethodGet, "/v1/me?x=1"},
+		{http.MethodGet, "/v1/me?"},
+		{http.MethodGet, "/v1/resources/id/sessions?limit=1"},
+		{http.MethodGet, "/v1/resources//qurls?limit=1"},
+		{http.MethodGet, "/v1/resources/a/b/qurls?limit=1"},
+		{http.MethodGet, "/v1/resources/id/qurls/q_token?x=1"},
+		{http.MethodPost, "/v1/resources?limit=1"},
+		{http.MethodPatch, "/v1/resources/id/qurls?x=1"},
+	} {
+		if err := ValidateRequestTarget(tc.method, tc.path); !errors.Is(err, qurl.ErrRegisteredAgentResourceRequestDenied) {
+			t.Errorf("%q %s error = %v", tc.method, tc.path, err)
+		}
+	}
+	srv := apitest.NewServer(t)
+	if _, err := Request(context.Background(), newRegisteredTestClient(t, srv), "TRACE", "/v1/me", nil, ""); err == nil || len(srv.Requests()) != 0 {
+		t.Fatalf("library accepted unsupported method: %v", err)
 	}
 }
 
