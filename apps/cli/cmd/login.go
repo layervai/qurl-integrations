@@ -270,9 +270,11 @@ func runAnonymousExternalLogin(ctx context.Context, opts *globalOpts) error {
 	}
 	opts.registeredClient, opts.registeredIdentity = client, identity
 	// The note follows a successful open in which the runtime requested an
-	// enrollment credential; a warm namespace never requests one.
+	// enrollment credential. TODO(upstream-contract): the connector runtime
+	// owns the promise that a warm namespace never requests one.
+	printer := opts.printer()
 	if enrolled.Load() && !opts.quiet {
-		opts.printer().Notef("%s", msgAnonymousSupervisedDevice)
+		printer.Notef("%s", msgAnonymousSupervisedDevice)
 	}
-	return opts.printer().Login(identity)
+	return printer.Login(identity)
 }

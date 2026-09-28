@@ -50,7 +50,7 @@ func TestRegisteredRequestRejectsAuthorityAndDisallowedRoutes(t *testing.T) {
 	registered := newRegisteredTestClient(t, srv)
 	// TODO(upstream-contract): keep these denied routes aligned with the
 	// reviewed qurl-go registered-device transport before updating the SDK.
-	for _, path := range []string{"https://evil.test/v1/me", "//evil.test/v1/me", "/v1/me#fragment", "/v1/%6de", "/v1/../v1/me", "/v1/me?x=1", "/v1/quota", "/v1/resources/id/sessions/session_id"} {
+	for _, path := range []string{"https://evil.test/v1/me", "//evil.test/v1/me", "/v1/me#fragment", "/v1/%6de", "/v1/../v1/me", "/v1/me?x=1", "/v1/quota", "/v1/usage", "/v1/billing", "/v1/account/owners", "/v1/api-keys", "/v1/resources/id/sessions/session_id"} {
 		if _, err := Request(context.Background(), registered, http.MethodGet, path, nil, ""); err == nil {
 			t.Errorf("accepted %q", path)
 		}
@@ -182,5 +182,36 @@ func TestRegisteredRequestResourceManagement(t *testing.T) {
 	}
 	if len(srv.Requests()) != len(routes) {
 		t.Fatal("management requests were dropped or replayed")
+	}
+}
+
+// TestRequestRouteAllowlistMirrorsSDK pins the local mirror of qurl-go's
+// registered-device routes: every SDK route passes, and neighbors do not.
+func TestRequestRouteAllowlistMirrorsSDK(t *testing.T) {
+	allowed := []struct{ method, path string }{
+		{http.MethodPost, "/v1/account/link"}, {http.MethodPost, "/v1/api-keys"}, {http.MethodPost, "/v1/qurls"},
+		{http.MethodGet, "/v1/resources"}, {http.MethodPost, "/v1/resources"}, {http.MethodGet, "/v1/me"},
+		{http.MethodGet, "/v1/resources/r_1"}, {http.MethodPatch, "/v1/resources/r_1"}, {http.MethodDelete, "/v1/resources/r_1"},
+		{http.MethodGet, "/v1/resources/r_1/sharing"}, {http.MethodPut, "/v1/resources/r_1/sharing"},
+		{http.MethodPost, "/v1/resources/r_1/share"}, {http.MethodGet, "/v1/resources/r_1/qurls"}, {http.MethodPost, "/v1/resources/r_1/qurls"},
+		{http.MethodGet, "/v1/resources/r_1/sessions"}, {http.MethodDelete, "/v1/resources/r_1/sessions"},
+		{http.MethodPost, "/v1/resources/r_1/sharing/restart"}, {http.MethodPatch, "/v1/resources/r_1/qurls/q_1"},
+		{http.MethodDelete, "/v1/resources/r_1/qurls/q_1"}, {http.MethodDelete, "/v1/resources/r_1/sessions/s_1"},
+	}
+	for _, route := range allowed {
+		if err := ValidateRequestTarget(route.method, route.path); err != nil {
+			t.Errorf("%s %s: %v", route.method, route.path, err)
+		}
+	}
+	denied := []struct{ method, path string }{
+		{http.MethodGet, "/v1/account/link"}, {http.MethodDelete, "/v1/api-keys"}, {http.MethodGet, "/v1/quota"},
+		{http.MethodPut, "/v1/resources/r_1"}, {http.MethodPost, "/v1/resources/r_1/sharing/stop"},
+		{http.MethodPatch, "/v1/resources/r_1/sessions/s_1"}, {http.MethodGet, "/v1/resources/r_1/qurls/q_1"},
+		{http.MethodGet, "/v1/resources/r.1"}, {http.MethodGet, "/v1/resources/r_1/qurls/q_1/extra"},
+	}
+	for _, route := range denied {
+		if err := ValidateRequestTarget(route.method, route.path); !errors.Is(err, qurl.ErrRegisteredAgentResourceRequestDenied) {
+			t.Errorf("%s %s: error = %v", route.method, route.path, err)
+		}
 	}
 }

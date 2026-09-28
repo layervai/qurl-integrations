@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"slices"
 	"strings"
 
 	"github.com/layervai/qurl-go/qurl"
@@ -26,10 +27,10 @@ type RequestResponse struct {
 
 // Request uses only the registered SDK transport's existing route allowlist.
 // It performs one attempt; the supervisor owns any retry decision.
-// TODO(upstream-contract): the pinned qurl-go owns the exact registered-device
-// method/route allowlist, including nested resource qURL/session management.
-// ValidateRequestTarget enforces the method set and query policy locally as
-// well, so a looser SDK cannot widen them. Review this command and its negative-route tests together on SDK changes.
+// TODO(upstream-contract): requestRouteAllowed mirrors the pinned qurl-go
+// registered-device route allowlist, and ValidateRequestTarget also enforces
+// the method set and query policy locally, so a looser SDK cannot widen this
+// command's authority. Widening it is an explicit change in both repos.
 func Request(ctx context.Context, api Client, method, relativePath string, body json.RawMessage, idempotencyKey string) (*RequestResponse, error) {
 	registered, ok := api.(*registeredClient)
 	if !ok {
@@ -93,17 +94,65 @@ func ValidateRequestTarget(method, value string) error {
 	if err != nil || !strings.HasPrefix(value, "/v1/") || parsed.IsAbs() || parsed.Host != "" || parsed.User != nil || parsed.Opaque != "" || parsed.Fragment != "" || parsed.RawFragment != "" || strings.Contains(value, "#") || parsed.RawPath != "" || path.Clean(parsed.Path) != parsed.Path {
 		return fmt.Errorf("%w: request path must be a canonical /v1/ path", qurl.ErrRegisteredAgentResourceRequestDenied)
 	}
+	if !requestRouteAllowed(method, parsed.Path) {
+		return fmt.Errorf("%w: %s %s is not a registered-device route", qurl.ErrRegisteredAgentResourceRequestDenied, method, parsed.Path)
+	}
 	if (parsed.RawQuery != "" || parsed.ForceQuery) && !queryAllowed(method, parsed.Path) {
 		return fmt.Errorf("%w: queries are allowed only for GET /v1/resources and GET /v1/resources/{id}/qurls", qurl.ErrRegisteredAgentResourceRequestDenied)
 	}
 	return nil
 }
 
+const requestResourcesPath = "/v1/resources"
+
+// requestRoutes mirrors qurl-go's registeredAgentResourceRouteAllowed: route
+// pattern to its methods, with {id} for a resource, qURL, or
+// session identifier.
+var requestRoutes = map[string][]string{
+	"/v1/account/link":                   {http.MethodPost},
+	"/v1/api-keys":                       {http.MethodPost},
+	"/v1/qurls":                          {http.MethodPost},
+	"/v1/me":                             {http.MethodGet},
+	requestResourcesPath:                 {http.MethodGet, http.MethodPost},
+	"/v1/resources/{id}":                 {http.MethodGet, http.MethodPatch, http.MethodDelete},
+	"/v1/resources/{id}/sharing":         {http.MethodGet, http.MethodPut},
+	"/v1/resources/{id}/sharing/restart": {http.MethodPost},
+	"/v1/resources/{id}/share":           {http.MethodPost},
+	"/v1/resources/{id}/qurls":           {http.MethodGet, http.MethodPost},
+	"/v1/resources/{id}/qurls/{id}":      {http.MethodPatch, http.MethodDelete},
+	"/v1/resources/{id}/sessions":        {http.MethodGet, http.MethodDelete},
+	"/v1/resources/{id}/sessions/{id}":   {http.MethodDelete},
+}
+
+func requestRouteAllowed(method, requestPath string) bool {
+	parts := strings.Split(requestPath, "/")
+	if len(parts) >= 4 && parts[2] == "resources" {
+		if !requestRouteIDAllowed(parts[3]) {
+			return false
+		}
+		parts[3] = "{id}"
+		if len(parts) == 6 && (parts[4] == "qurls" || parts[4] == "sessions") {
+			if !requestRouteIDAllowed(parts[5]) {
+				return false
+			}
+			parts[5] = "{id}"
+		}
+	}
+	methods, ok := requestRoutes[strings.Join(parts, "/")]
+	return ok && slices.Contains(methods, method)
+}
+
+func requestRouteIDAllowed(value string) bool {
+	return value != "" && strings.IndexFunc(value, func(r rune) bool {
+		return (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9') && r != '-' && r != '_'
+	}) < 0
+}
+
 func queryAllowed(method, requestPath string) bool {
 	if method != http.MethodGet {
 		return false
 	}
-	if requestPath == "/v1/resources" {
+	if requestPath == requestResourcesPath {
 		return true
 	}
 	id, ok := strings.CutPrefix(requestPath, "/v1/resources/")
@@ -116,10 +165,8 @@ func ValidateRequestIdempotencyKey(value string) error {
 	if value == "" {
 		return nil
 	}
-	if len(value) < 32 || len(value) > 256 || strings.IndexFunc(value, func(r rune) bool {
-		return (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9') && r != '-' && r != '_'
-	}) >= 0 {
-		return fmt.Errorf("%w: idempotency key must be 32-256 letters, digits, hyphens or underscores", qurl.ErrInvalidResourceRequest)
+	if len(value) < minIdempotencyKeyLength || len(value) > maxIdempotencyKeyLength || !requestRouteIDAllowed(value) {
+		return fmt.Errorf("%w: idempotency key must be %d-%d letters, digits, hyphens or underscores", qurl.ErrInvalidResourceRequest, minIdempotencyKeyLength, maxIdempotencyKeyLength)
 	}
 	return nil
 }

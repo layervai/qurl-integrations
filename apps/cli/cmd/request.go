@@ -63,10 +63,11 @@ account_id matching the intended account.`,
 				return err
 			}
 			client, err := opts.newClient(cmd.Context())
-			if errors.Is(err, auth.ErrNoCredential) && !errors.Is(err, auth.ErrAnonymousRecovery) {
-				// Account keys were refused above, so a missing enrollment
-				// credential means the external namespace holds no device.
-				return auth.ErrExternalDeviceMissing
+			// Account keys were refused above, so the bare missing-credential
+			// error means the external namespace holds no enrolled device.
+			// The recovery sentinels keep their own remedies.
+			if errors.Is(err, auth.ErrNoCredential) && !errors.Is(err, auth.ErrAnonymousRecovery) && !errors.Is(err, auth.ErrAccountRecoveryState) {
+				return fmt.Errorf("%w: %w", auth.ErrExternalDeviceMissing, err)
 			}
 			if err != nil {
 				return err
