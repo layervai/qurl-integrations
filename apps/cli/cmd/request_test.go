@@ -32,7 +32,7 @@ func TestRequestCommand(t *testing.T) {
 		_, _ = w.Write([]byte(`{"error":{"code":"rate_limit"}}`))
 	})
 	state := bootstrapRegisteredState(t)
-	res := runCLI(t, &runOpts{env: map[string]string{}, args: []string{"request", "POST", "/v1/account/link", "--supervision", "external", "-o", "json", "--idempotency-key", "01234567-89ab-cdef-0123-456789abcdef"}, stdin: strings.NewReader(`{"account_token":"private-token"}`), openAPIClient: func(ctx context.Context) (qurlapi.Client, error) {
+	res := runCLI(t, &runOpts{env: externalLoginEnv(), args: []string{"request", "POST", "/v1/account/link", "--supervision", "external", "-o", "json", "--idempotency-key", "01234567-89ab-cdef-0123-456789abcdef"}, stdin: strings.NewReader(`{"account_token":"private-token"}`), openAPIClient: func(ctx context.Context) (qurlapi.Client, error) {
 		return qurlapi.NewRegistered(ctx, &qurlapi.Config{BaseURL: srv.URL, HTTPClient: srv.Client()}, &bootstrapAgentStateStore{state: state})
 	}})
 	var envelope struct {
@@ -67,8 +67,9 @@ func TestRequestRejectsInputBeforeOpeningDevice(t *testing.T) {
 		{[]string{"HEAD", "/v1/me"}, "", "request method must be"},
 		{[]string{"get", "/v1/me"}, "", "request method must be"},
 		{[]string{"GET", "/v1/me?x=1"}, "", "queries are allowed only"},
+		{[]string{"POST", "/v1/api-keys"}, "{}", "not a registered-device route"},
 	} {
-		res := runCLI(t, &runOpts{env: map[string]string{}, args: append([]string{"request", "--supervision", "external", "-o", "json"}, tc.args...), stdin: strings.NewReader(tc.body), openAPIClient: func(context.Context) (qurlapi.Client, error) {
+		res := runCLI(t, &runOpts{env: externalLoginEnv(), args: append([]string{"request", "--supervision", "external", "-o", "json"}, tc.args...), stdin: strings.NewReader(tc.body), openAPIClient: func(context.Context) (qurlapi.Client, error) {
 			t.Error("opened device for invalid input")
 			return nil, errors.New("unexpected device open")
 		}})
@@ -79,7 +80,7 @@ func TestRequestRejectsInputBeforeOpeningDevice(t *testing.T) {
 }
 
 func TestRequestRequiresJSONOutput(t *testing.T) {
-	res := runCLI(t, &runOpts{env: map[string]string{}, args: []string{"request", "GET", "/v1/me"}, stdin: strings.NewReader(""), openAPIClient: func(context.Context) (qurlapi.Client, error) {
+	res := runCLI(t, &runOpts{env: externalLoginEnv(), args: []string{"request", "GET", "/v1/me"}, stdin: strings.NewReader(""), openAPIClient: func(context.Context) (qurlapi.Client, error) {
 		t.Error("opened device without JSON output")
 		return nil, errors.New("unexpected device open")
 	}})
@@ -93,7 +94,7 @@ type failingReader struct{}
 func (failingReader) Read([]byte) (int, error) { return 0, errors.New("stdin is closed") }
 
 func TestRequestReportsStdinReadError(t *testing.T) {
-	res := runCLI(t, &runOpts{env: map[string]string{}, args: []string{"request", "POST", "/v1/resources", "--supervision", "external", "-o", "json"}, stdin: failingReader{}, openAPIClient: func(context.Context) (qurlapi.Client, error) {
+	res := runCLI(t, &runOpts{env: externalLoginEnv(), args: []string{"request", "POST", "/v1/resources", "--supervision", "external", "-o", "json"}, stdin: failingReader{}, openAPIClient: func(context.Context) (qurlapi.Client, error) {
 		t.Error("opened device after stdin failure")
 		return nil, errors.New("unexpected device open")
 	}})
@@ -112,7 +113,7 @@ func TestRequestAcceptsOneMiBBody(t *testing.T) {
 		w.WriteHeader(http.StatusCreated)
 	})
 	state := bootstrapRegisteredState(t)
-	res := runCLI(t, &runOpts{env: map[string]string{}, args: []string{"request", "POST", "/v1/resources", "--supervision", "external", "-o", "json"}, stdin: strings.NewReader(body), openAPIClient: func(ctx context.Context) (qurlapi.Client, error) {
+	res := runCLI(t, &runOpts{env: externalLoginEnv(), args: []string{"request", "POST", "/v1/resources", "--supervision", "external", "-o", "json"}, stdin: strings.NewReader(body), openAPIClient: func(ctx context.Context) (qurlapi.Client, error) {
 		return qurlapi.NewRegistered(ctx, &qurlapi.Config{BaseURL: srv.URL, HTTPClient: srv.Client()}, &bootstrapAgentStateStore{state: state})
 	}})
 	if len(body) != 1<<20 || res.code != 0 || len(srv.Requests()) != 1 {
@@ -129,7 +130,7 @@ func TestRequestAcceptsBoundaryIdempotencyKeys(t *testing.T) {
 }
 
 func TestRequestRequiresExternalSupervision(t *testing.T) {
-	res := runCLI(t, &runOpts{env: map[string]string{}, args: []string{"request", "GET", "/v1/me", "-o", "json"}, stdin: strings.NewReader(""), openAPIClient: func(context.Context) (qurlapi.Client, error) {
+	res := runCLI(t, &runOpts{env: externalLoginEnv(), args: []string{"request", "GET", "/v1/me", "-o", "json"}, stdin: strings.NewReader(""), openAPIClient: func(context.Context) (qurlapi.Client, error) {
 		t.Error("opened device in a native namespace")
 		return nil, errors.New("unexpected device open")
 	}})
@@ -147,7 +148,7 @@ func TestRequestGETReturnsEnvelopeWithoutReadingStdin(t *testing.T) {
 		_, _ = w.Write([]byte(`{"owner_id":"owner-a&b"}`))
 	})
 	state := bootstrapRegisteredState(t)
-	res := runCLI(t, &runOpts{env: map[string]string{}, args: []string{"request", "GET", "/v1/me", "--supervision", "external", "-o", "json"}, stdin: failingReader{}, openAPIClient: func(ctx context.Context) (qurlapi.Client, error) {
+	res := runCLI(t, &runOpts{env: externalLoginEnv(), args: []string{"request", "GET", "/v1/me", "--supervision", "external", "-o", "json"}, stdin: failingReader{}, openAPIClient: func(ctx context.Context) (qurlapi.Client, error) {
 		return qurlapi.NewRegistered(ctx, &qurlapi.Config{BaseURL: srv.URL, HTTPClient: srv.Client()}, &bootstrapAgentStateStore{state: state})
 	}})
 	var envelope struct {
@@ -176,7 +177,7 @@ func TestRequestRefusesAccountKeyConfiguration(t *testing.T) {
 }
 
 func TestRequestRefusesTerminalBodyInput(t *testing.T) {
-	res := runCLI(t, &runOpts{env: map[string]string{}, args: []string{"request", "POST", "/v1/resources", "--supervision", "external", "-o", "json"}, inTTY: true, openAPIClient: func(context.Context) (qurlapi.Client, error) {
+	res := runCLI(t, &runOpts{env: externalLoginEnv(), args: []string{"request", "POST", "/v1/resources", "--supervision", "external", "-o", "json"}, inTTY: true, openAPIClient: func(context.Context) (qurlapi.Client, error) {
 		t.Error("opened device with a terminal body")
 		return nil, errors.New("unexpected device open")
 	}})
@@ -196,14 +197,14 @@ func TestRequestExplainsUnenrolledExternalNamespace(t *testing.T) {
 		_, err := cfg.EnrollmentCredentialProvider(ctx, qurl.AgentEnrollmentCredentialRequest{AgentID: "agent", PublicKeyB64: "key"})
 		return nil, err
 	}})
-	if res.code == 0 || !strings.Contains(res.stderr.String(), "run `qurl login --anonymous --supervision external`") {
+	if res.code == 0 || !strings.Contains(res.stderr.String(), "enroll this state directory first") {
 		t.Fatalf("exit %d: %s", res.code, res.stderr.String())
 	}
 }
 
 func TestRequestRefusesNativeNamespace(t *testing.T) {
 	stateDir := connectorStateTestDir(t)
-	res := runCLI(t, &runOpts{nativeClient: true, env: map[string]string{}, shareStateDir: stateDir, args: []string{"request", "GET", "/v1/me", "--supervision", "external", "-o", "json"}, openNativeRuntime: refuseNativeRuntime(t)})
+	res := runCLI(t, &runOpts{nativeClient: true, env: externalLoginEnv(), shareStateDir: stateDir, args: []string{"request", "GET", "/v1/me", "--supervision", "external", "-o", "json"}, openNativeRuntime: refuseNativeRuntime(t)})
 	if res.code != 3 || !strings.Contains(res.stderr.String(), `runtime supervision is "native", not "external"`) {
 		t.Fatalf("exit %d: %s", res.code, res.stderr.String())
 	}
@@ -232,7 +233,7 @@ func TestRequestBodylessMutations(t *testing.T) {
 		{"POST", "/v1/resources/r_1/sharing/restart"},
 		{"DELETE", "/v1/resources/r_1/sessions", "--idempotency-key", key},
 	} {
-		res := runCLI(t, &runOpts{env: map[string]string{}, args: append([]string{"request", "--supervision", "external", "-o", "json"}, args...), stdin: strings.NewReader(""), openAPIClient: func(ctx context.Context) (qurlapi.Client, error) {
+		res := runCLI(t, &runOpts{env: externalLoginEnv(), args: append([]string{"request", "--supervision", "external", "-o", "json"}, args...), stdin: strings.NewReader(""), openAPIClient: func(ctx context.Context) (qurlapi.Client, error) {
 			return qurlapi.NewRegistered(ctx, &qurlapi.Config{BaseURL: srv.URL, HTTPClient: srv.Client()}, &bootstrapAgentStateStore{state: state})
 		}})
 		if res.code != 0 {
@@ -256,6 +257,16 @@ func TestRequestExplainsSupervisedRecovery(t *testing.T) {
 		return nil, err
 	}})
 	if res.code != 4 || !strings.Contains(res.stderr.String(), "The supervising app can restore") || strings.Contains(res.stderr.String(), "qurl account recover") {
+		t.Fatalf("exit %d: %s", res.code, res.stderr.String())
+	}
+}
+
+func TestRequestRequiresSealedKeyProvider(t *testing.T) {
+	res := runCLI(t, &runOpts{env: map[string]string{}, args: []string{"request", "GET", "/v1/me", "--supervision", "external", "-o", "json"}, openAPIClient: func(context.Context) (qurlapi.Client, error) {
+		t.Error("opened device without the sealed key provider")
+		return nil, errors.New("unexpected device open")
+	}})
+	if res.code != 2 || !strings.Contains(res.stderr.String(), "request requires LAYERV_KEY_PROVIDER") {
 		t.Fatalf("exit %d: %s", res.code, res.stderr.String())
 	}
 }

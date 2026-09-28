@@ -137,7 +137,7 @@ func TestRegisteredRequestBodyAndCancellation(t *testing.T) {
 	for _, tc := range []struct {
 		status     int
 		body, want string
-	}{{204, "", "null"}, {502, "upstream unavailable", `"upstream unavailable"`}} {
+	}{{204, "", "null"}, {502, "upstream <unavailable> &", `"upstream <unavailable> &"`}} {
 		srv.Script(http.MethodGet, "/v1/me", func(w http.ResponseWriter, _ *http.Request) {
 			w.WriteHeader(tc.status)
 			_, _ = w.Write([]byte(tc.body))

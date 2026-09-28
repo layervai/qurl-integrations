@@ -50,6 +50,9 @@ account_id matching the intended account.`,
 			if accountKeyConfigured(opts.lookupEnv) {
 				return exitcode.UsageError(fmt.Errorf("request cannot be combined with %s or %s", auth.EnvAPIKey, auth.EnvAPIKeyFile))
 			}
+			if err := requireLocalKeyProvider(opts.lookupEnv, "request"); err != nil {
+				return exitcode.UsageError(err)
+			}
 			// Validate before opening the device; Request re-checks as the
 			// library contract.
 			if err := qurlapi.ValidateRequestIdempotencyKey(idempotencyKey); err != nil {
@@ -103,7 +106,7 @@ func readRequestBody(streams *output.Streams, method string) ([]byte, error) {
 		return nil, fmt.Errorf("could not read request body: %w", err)
 	}
 	if len(body) > qurlapi.MaxRequestBody {
-		return nil, exitcode.UsageError(errors.New("request body exceeds 1 MiB including surrounding whitespace"))
+		return nil, exitcode.UsageError(fmt.Errorf("request body exceeds %d MiB including surrounding whitespace", qurlapi.MaxRequestBody>>20))
 	}
 	body = bytes.TrimSpace(body)
 	if len(body) > 0 && !json.Valid(body) {

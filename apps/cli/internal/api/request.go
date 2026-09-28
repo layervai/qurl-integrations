@@ -1,6 +1,7 @@
 package qurlapi
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -50,7 +51,7 @@ func Request(ctx context.Context, api Client, method, relativePath string, body 
 		return nil, fmt.Errorf("%w: idempotency keys apply only to mutations", qurl.ErrInvalidResourceRequest)
 	}
 	if len(body) > MaxRequestBody || (len(body) > 0 && !json.Valid(body)) {
-		return nil, fmt.Errorf("%w: request body must be JSON of at most 1 MiB", qurl.ErrInvalidResourceRequest)
+		return nil, fmt.Errorf("%w: request body must be JSON of at most %d MiB", qurl.ErrInvalidResourceRequest, MaxRequestBody>>20)
 	}
 	if (method == http.MethodGet || method == http.MethodDelete) && len(body) > 0 {
 		return nil, fmt.Errorf("%w: GET and DELETE requests must not include a body", qurl.ErrInvalidResourceRequest)
@@ -73,7 +74,7 @@ func Request(ctx context.Context, api Client, method, relativePath string, body 
 		if json.Valid(reply.body) {
 			result.Body = reply.body
 		} else {
-			result.Body, _ = json.Marshal(string(reply.body))
+			result.Body = jsonStringNoHTMLEscape(string(reply.body))
 		}
 	}
 	return result, nil
@@ -93,16 +94,21 @@ func ValidateRequestTarget(method, value string) error {
 	if err != nil || !strings.HasPrefix(value, "/v1/") || parsed.IsAbs() || parsed.Host != "" || parsed.User != nil || parsed.Opaque != "" || parsed.Fragment != "" || parsed.RawFragment != "" || strings.Contains(value, "#") || parsed.RawPath != "" || path.Clean(parsed.Path) != parsed.Path {
 		return fmt.Errorf("%w: request path must be a canonical /v1/ path", qurl.ErrRegisteredAgentResourceRequestDenied)
 	}
-	if !requestRouteAllowed(method, parsed.Path) {
+	pattern, ok := requestRoutePattern(parsed.Path)
+	if !ok || !slices.Contains(requestRoutes[pattern], method) {
 		return fmt.Errorf("%w: %s %s is not a registered-device route", qurl.ErrRegisteredAgentResourceRequestDenied, method, parsed.Path)
 	}
-	if (parsed.RawQuery != "" || parsed.ForceQuery) && !queryAllowed(method, parsed.Path) {
+	// Only query presence is gated here; the service validates its contents.
+	if (parsed.RawQuery != "" || parsed.ForceQuery) && (method != http.MethodGet || (pattern != requestResourcesPath && pattern != requestQurlsPattern)) {
 		return fmt.Errorf("%w: queries are allowed only for GET /v1/resources and GET /v1/resources/{id}/qurls", qurl.ErrRegisteredAgentResourceRequestDenied)
 	}
 	return nil
 }
 
-const requestResourcesPath = "/v1/resources"
+const (
+	requestResourcesPath = "/v1/resources"
+	requestQurlsPattern  = "/v1/resources/{id}/qurls"
+)
 
 // requestRoutes mirrors qurl-go's registeredAgentResourceRouteAllowed, minus
 // POST /v1/api-keys: a supervisor must never mint a portable credential that
@@ -117,28 +123,30 @@ var requestRoutes = map[string][]string{
 	"/v1/resources/{id}/sharing":         {http.MethodGet, http.MethodPut},
 	"/v1/resources/{id}/sharing/restart": {http.MethodPost},
 	"/v1/resources/{id}/share":           {http.MethodPost},
-	"/v1/resources/{id}/qurls":           {http.MethodGet, http.MethodPost},
+	requestQurlsPattern:                  {http.MethodGet, http.MethodPost},
 	"/v1/resources/{id}/qurls/{id}":      {http.MethodPatch, http.MethodDelete},
 	"/v1/resources/{id}/sessions":        {http.MethodGet, http.MethodDelete},
 	"/v1/resources/{id}/sessions/{id}":   {http.MethodDelete},
 }
 
-func requestRouteAllowed(method, requestPath string) bool {
+// requestRoutePattern maps a canonical path to its requestRoutes pattern.
+func requestRoutePattern(requestPath string) (string, bool) {
 	parts := strings.Split(requestPath, "/")
 	if len(parts) >= 4 && parts[2] == "resources" {
 		if !isASCIIToken(parts[3]) {
-			return false
+			return "", false
 		}
 		parts[3] = "{id}"
 		if len(parts) == 6 && (parts[4] == "qurls" || parts[4] == "sessions") {
 			if !isASCIIToken(parts[5]) {
-				return false
+				return "", false
 			}
 			parts[5] = "{id}"
 		}
 	}
-	methods, ok := requestRoutes[strings.Join(parts, "/")]
-	return ok && slices.Contains(methods, method)
+	pattern := strings.Join(parts, "/")
+	_, ok := requestRoutes[pattern]
+	return pattern, ok
 }
 
 // isASCIIToken accepts nonempty letters, digits, hyphens and underscores. For
@@ -149,18 +157,12 @@ func isASCIIToken(value string) bool {
 	}) < 0
 }
 
-func queryAllowed(method, requestPath string) bool {
-	if method != http.MethodGet {
-		return false
-	}
-	if requestPath == requestResourcesPath {
-		return true
-	}
-	// Only query presence is gated here; the service validates its contents.
-	id, hasPrefix := strings.CutPrefix(requestPath, "/v1/resources/")
-	id, hasSuffix := strings.CutSuffix(id, "/qurls")
-	return hasPrefix && hasSuffix && id != "" && !strings.Contains(id, "/")
-}
+// The request idempotency-key bounds are a published supervisor contract
+// (flag help, README, man page), independent of the enrollment bounds.
+const (
+	minRequestIdempotencyKey = 32
+	maxRequestIdempotencyKey = 256
+)
 
 // ValidateRequestIdempotencyKey accepts only bounded, nonsecret ASCII tokens.
 // It is deliberately stricter than validateEnrollmentIdempotencyKey because a
@@ -169,8 +171,19 @@ func ValidateRequestIdempotencyKey(value string) error {
 	if value == "" {
 		return nil
 	}
-	if len(value) < minIdempotencyKeyLength || len(value) > maxIdempotencyKeyLength || !isASCIIToken(value) {
-		return fmt.Errorf("%w: idempotency key must be %d-%d letters, digits, hyphens or underscores", qurl.ErrInvalidResourceRequest, minIdempotencyKeyLength, maxIdempotencyKeyLength)
+	if len(value) < minRequestIdempotencyKey || len(value) > maxRequestIdempotencyKey || !isASCIIToken(value) {
+		return fmt.Errorf("%w: idempotency key must be %d-%d letters, digits, hyphens or underscores", qurl.ErrInvalidResourceRequest, minRequestIdempotencyKey, maxRequestIdempotencyKey)
 	}
 	return nil
+}
+
+// jsonStringNoHTMLEscape encodes s as a JSON string without HTML escaping, to
+// match how the envelope printer emits JSON bodies. Encoding a string cannot
+// fail; invalid UTF-8 becomes U+FFFD.
+func jsonStringNoHTMLEscape(s string) json.RawMessage {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	_ = enc.Encode(s)
+	return bytes.TrimSuffix(buf.Bytes(), []byte("\n"))
 }

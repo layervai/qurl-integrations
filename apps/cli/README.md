@@ -246,12 +246,13 @@ and `device_enrolled: true`. Retain the complete state namespace and wrapping
 key across launches; failure never authorizes deleting or replacing them.
 
 Supervisors can use `qurl request METHOD /v1/... --supervision external -o json`
-for the registered device's existing resource operations. It refuses natively
-supervised namespaces and account API-key configuration, so it never enrolls or
-recovers a device implicitly. For POST, PUT and PATCH, pipe an optional JSON
-body through stdin; when there is no body, redirect stdin from the null device
-(`/dev/null`, or `NUL` on Windows) rather than closing it, because a closed
-stdin is a read error. GET and DELETE never read stdin. Responses have
+for the registered device's existing resource operations. It requires the same
+sealed key provider as enrollment and refuses natively supervised namespaces and
+account API-key configuration, so it never enrolls or recovers a device
+implicitly. For POST, PUT and PATCH, pipe an optional JSON body through stdin;
+when there is no body, redirect stdin from the null device (`/dev/null`, or
+`NUL` on Windows) rather than closing it, because a closed stdin is a read
+error. GET and DELETE never read stdin. Responses have
 `{status, headers, body}`; headers contain only `content-type`, `retry-after`
 and `x-request-id`. Empty responses use `body: null`; non-JSON responses use a
 string. HTTP failures also return this envelope with exit zero; local and
