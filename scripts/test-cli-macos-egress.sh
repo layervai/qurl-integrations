@@ -27,6 +27,7 @@ exit "${BREW_EXIT:-0}"
 STUB
 cat >"$work/bin/curl" <<'STUB'
 #!/bin/sh
+[ "${CURL_FAIL:-0}" = 0 ] || exit 7
 echo "${OBSERVED_IP:-203.0.113.10}"
 STUB
 cat >"$work/bin/wg-quick" <<'STUB'
@@ -54,10 +55,9 @@ Endpoint = 203.0.113.10:51820"
   [[ ! -e "$config" ]]
 done
 if BREW_EXIT=8 bash "$work/helper.sh" up; then exit 1; fi
-if grep -qi privatekey "$config"; then exit 1; fi
-env -u QURL_JOURNEY_WIREGUARD_CONFIG bash "$work/helper.sh" down
 [[ ! -e "$config" ]]
 if OBSERVED_IP=203.0.113.11 bash "$work/helper.sh" up 2>/dev/null; then exit 1; fi
-if grep -qi privatekey "$config"; then exit 1; fi
-env -u QURL_JOURNEY_WIREGUARD_CONFIG bash "$work/helper.sh" down
+[[ ! -e "$config" && ! -e "$work/wireguard/qci.name" ]]
+if CURL_FAIL=1 bash "$work/helper.sh" up; then exit 1; fi
+[[ ! -e "$config" && ! -e "$work/wireguard/qci.name" ]]
 echo 'macOS egress setup, failure cleanup, and teardown retry: PASS'

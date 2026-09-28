@@ -15,7 +15,7 @@ case ${1:-} in
     unset QURL_JOURNEY_WIREGUARD_CONFIG
     sudo chmod 0600 "$config"
     # Remove the private key even when package setup or tunnel startup fails.
-    trap 'sudo sed -i "" -E "/$private_key_pattern/d" "$config"' EXIT
+    trap 'setup_status=$?; sudo sed -i "" -E "/$private_key_pattern/d" "$config"; if ((setup_status != 0)); then bash "$0" down || true; fi; exit "$setup_status"' EXIT
     brew install wireguard-tools wireguard-go
     sudo env "PATH=$PATH" wg-quick up "$config"
     # Teardown needs the routing configuration, but not the private key.

@@ -777,6 +777,7 @@ jobs:
     timeout-minutes: ${{ matrix.timeout_minutes }}
     environment: cli-customer-journey
     # One WireGuard peer serves the protected macOS lane. Other lanes stay independent.
+    # GitHub retains one pending job per group; rerun an evicted pending lane.
     concurrency:
       group: ${{ matrix.lane == 'macos' && 'cli-macos-egress' || format('cli-journey-{0}-{1}-{2}', github.run_id, github.run_attempt, matrix.lane_id) }}
       cancel-in-progress: false
