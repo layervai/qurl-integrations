@@ -263,7 +263,7 @@ func runAnonymousExternalLogin(ctx context.Context, opts *globalOpts) error {
 	// The recovery provider stays wired but always fails: account keys were
 	// rejected above, so an accountless device can never acquire recovery
 	// authority.
-	recovery := func(context.Context) (string, error) { return "", auth.ErrAnonymousRecovery }
+	recovery := func(context.Context) (string, error) { return "", auth.ErrExternalAnonymousRecovery }
 	client, identity, err := opts.openNativeExternalRegisteredClient(ctx, stateDir, enroll, recovery)
 	if err != nil {
 		return err

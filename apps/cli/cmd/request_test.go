@@ -209,3 +209,53 @@ func TestRequestRefusesNativeNamespace(t *testing.T) {
 	}
 	mustNoExternalPolicy(t, stateDir)
 }
+
+// A body-less mutation (stdin from the null device) reaches the service with
+// no body and no Content-Type, and a DELETE keeps its idempotency key.
+func TestRequestBodylessMutations(t *testing.T) {
+	srv := apitest.NewServer(t)
+	key := strings.Repeat("k", 32)
+	srv.Script(http.MethodPost, "/v1/resources/r_1/sharing/restart", func(w http.ResponseWriter, r *http.Request) {
+		if got, _ := io.ReadAll(r.Body); len(got) != 0 || r.Header.Get("Content-Type") != "" {
+			t.Errorf("body-less POST sent %q with Content-Type %q", got, r.Header.Get("Content-Type"))
+		}
+		w.WriteHeader(http.StatusAccepted)
+	})
+	srv.Script(http.MethodDelete, "/v1/resources/r_1/sessions", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Idempotency-Key") != key {
+			t.Error("DELETE lost its idempotency key")
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+	state := bootstrapRegisteredState(t)
+	for _, args := range [][]string{
+		{"POST", "/v1/resources/r_1/sharing/restart"},
+		{"DELETE", "/v1/resources/r_1/sessions", "--idempotency-key", key},
+	} {
+		res := runCLI(t, &runOpts{env: map[string]string{}, args: append([]string{"request", "--supervision", "external", "-o", "json"}, args...), stdin: strings.NewReader(""), openAPIClient: func(ctx context.Context) (qurlapi.Client, error) {
+			return qurlapi.NewRegistered(ctx, &qurlapi.Config{BaseURL: srv.URL, HTTPClient: srv.Client()}, &bootstrapAgentStateStore{state: state})
+		}})
+		if res.code != 0 {
+			t.Fatalf("%v: exit %d: %s", args, res.code, res.stderr.String())
+		}
+	}
+	if len(srv.Requests()) != 2 {
+		t.Fatalf("requests = %d, want 2", len(srv.Requests()))
+	}
+}
+
+// A supervised device that needs recovery gets the supervisor's remedy, not
+// the native account-recover advice.
+func TestRequestExplainsSupervisedRecovery(t *testing.T) {
+	dir := connectorStateTestDir(t)
+	if err := connectorstate.EstablishExternalRuntimeMode(context.Background(), dir); err != nil {
+		t.Fatal(err)
+	}
+	res := runCLI(t, &runOpts{nativeClient: true, env: externalLoginEnv(), shareStateDir: dir, args: []string{"request", "GET", "/v1/me", "--supervision", "external", "-o", "json"}, openNativeRuntime: func(ctx context.Context, cfg connectorshare.NativeRuntimeConfig) (registeredNativeRuntime, error) {
+		_, err := cfg.RecoveryCredentialProvider(ctx)
+		return nil, err
+	}})
+	if res.code != 4 || !strings.Contains(res.stderr.String(), "The supervising app can restore") || strings.Contains(res.stderr.String(), "qurl account recover") {
+		t.Fatalf("exit %d: %s", res.code, res.stderr.String())
+	}
+}

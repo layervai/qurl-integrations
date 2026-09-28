@@ -66,11 +66,14 @@ account_id matching the intended account.`,
 				return err
 			}
 			client, err := opts.newClient(cmd.Context())
-			// Account keys were refused above, so the bare missing-credential
-			// error means the external namespace holds no enrolled device.
-			// The recovery sentinels keep their own remedies.
-			if errors.Is(err, auth.ErrNoCredential) && !errors.Is(err, auth.ErrAnonymousRecovery) && !errors.Is(err, auth.ErrAccountRecoveryState) {
-				return fmt.Errorf("%w: %w", auth.ErrExternalDeviceMissing, err)
+			// Account keys were refused above: a device that needs recovery
+			// gets the supervised remedy, and a bare missing credential means
+			// the external namespace holds no enrolled device.
+			switch {
+			case errors.Is(err, auth.ErrAnonymousRecovery) && !errors.Is(err, auth.ErrExternalAnonymousRecovery):
+				err = fmt.Errorf("%w: %w", auth.ErrExternalAnonymousRecovery, err)
+			case errors.Is(err, auth.ErrNoCredential) && !errors.Is(err, auth.ErrAnonymousRecovery) && !errors.Is(err, auth.ErrAccountRecoveryState):
+				err = fmt.Errorf("%w: %w", auth.ErrExternalDeviceMissing, err)
 			}
 			if err != nil {
 				return err

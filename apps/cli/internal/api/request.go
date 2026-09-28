@@ -43,24 +43,23 @@ func Request(ctx context.Context, api Client, method, relativePath string, body 
 	if err := ValidateRequestTarget(method, relativePath); err != nil {
 		return nil, err
 	}
+	if err := ValidateRequestIdempotencyKey(idempotencyKey); err != nil {
+		return nil, err
+	}
+	if idempotencyKey != "" && method == http.MethodGet {
+		return nil, fmt.Errorf("%w: idempotency keys apply only to mutations", qurl.ErrInvalidResourceRequest)
+	}
 	if len(body) > MaxRequestBody || (len(body) > 0 && !json.Valid(body)) {
 		return nil, fmt.Errorf("%w: request body must be JSON of at most 1 MiB", qurl.ErrInvalidResourceRequest)
 	}
 	if (method == http.MethodGet || method == http.MethodDelete) && len(body) > 0 {
 		return nil, fmt.Errorf("%w: GET and DELETE requests must not include a body", qurl.ErrInvalidResourceRequest)
 	}
-	var requestBody any
-	if len(body) > 0 {
-		requestBody = body
-	}
-	if err := ValidateRequestIdempotencyKey(idempotencyKey); err != nil {
-		return nil, err
-	}
 	headers := make(http.Header)
 	if idempotencyKey != "" {
 		headers.Set("Idempotency-Key", idempotencyKey)
 	}
-	reply, err := c.doRESTRequest(ctx, method, relativePath, requestBody, headers, false)
+	reply, err := c.doRESTRequest(ctx, method, relativePath, body, headers, false)
 	if err != nil {
 		return nil, err
 	}

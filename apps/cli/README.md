@@ -266,13 +266,14 @@ routes. Response bodies also have a 1 MiB cap; exceeding it returns a nonzero
 exit.
 
 The allowed routes are `GET /v1/me`, `POST /v1/account/link`, `POST /v1/qurls`,
-resource listing, creation, reading, updating and deletion, a resource's sharing
-state, share links, qURLs and sessions: list a resource's qURLs, update or
-revoke an individual qURL, list its active sessions, and terminate individual or
-all resource sessions. These operations require matching service-side device
-authorization. Sessions are unpaginated, so a session list larger than the 1 MiB
-response cap fails; terminate all sessions to recover. API key creation, account
-owner enumeration, billing, quota and usage are refused.
+`GET` and `POST /v1/resources`, and for one resource: `GET`, `PATCH` and
+`DELETE /v1/resources/{id}`; `GET` and `PUT .../sharing`;
+`POST .../sharing/restart`; `POST .../share`; `GET` and `POST .../qurls`;
+`PATCH` and `DELETE .../qurls/{id}`; `GET` and `DELETE .../sessions`; and
+`DELETE .../sessions/{id}`. These operations require matching service-side
+device authorization. Sessions are unpaginated, so a session list larger than
+the 1 MiB response cap fails; terminate all sessions to recover. API key
+creation, account owner enumeration, billing, quota and usage are refused.
 
 For example, account linking uses `POST /v1/account/link` with
 `{"account_token":"<account access token>"}` on stdin. Keep that token out of
@@ -404,8 +405,9 @@ directory rather than switching in place.
 | `qurl delete <CRID>` | Delete a published resource |
 | `qurl account setup` | Link this device to an account for recovery and other devices |
 | `qurl account recover` | Restore account resource access on a new device |
-| `qurl login` | Enroll this device with a one-time account key, or from a supervisor's enrollment token file |
+| `qurl login` | Enroll this device with a one-time account key, from a supervisor's enrollment token file, or anonymously for a supervisor |
 | `qurl whoami` | Show which account this registered device belongs to |
+| `qurl request METHOD PATH` | Make a device-authorized JSON request for a supervising app (see [Supervised installs](#supervised-installs)) |
 | `qurl completion <shell>` | Generate shell completions (`bash`, `zsh`, `fish`, `powershell`) |
 | `qurl version` | Print version information |
 
