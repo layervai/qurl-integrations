@@ -9,6 +9,10 @@ const { QURLClient } = require('@layervai/qurl');
 const { hasPersistableQurlIdShape } = require('../src/utils/qurl-id');
 const { validateResourceId } = require('../src/utils/resource-id');
 
+// Owner IDs are identity-provider subjects, not resource public keys.
+const safeOwnerID = value => typeof value === 'string' && /^[\w|@.:-]{1,1024}$/.test(value)
+  && !value.startsWith('at_') ? value : null;
+
 // Smoke-only interception: persist the actual detector child before the caller
 // can start native opening. The detected watermark's qurl_id is a different ID.
 function installMintReceipt(Client, owner) {
@@ -61,7 +65,7 @@ function installMintReceipt(Client, owner) {
       if (!revoked) {
         const safeID = value => { try { validateResourceId(value); return value; } catch { return null; } };
         console.error('Detector child cleanup required', {
-          event: 'detector_child_cleanup_required', owner_id: safeID(owner),
+          event: 'detector_child_cleanup_required', owner_id: safeOwnerID(owner),
           resource_id: safeID(minted?.resource_id), qurl_id: childID, crid: safeID(crid),
         });
       }
@@ -104,7 +108,7 @@ async function main() {
   assert.ok(me.ok, 'ownership owner read failed');
   // TODO(upstream-contract): qurl-service GET /v1/me returns data.owner_id.
   const owner = (await me.json()).data?.owner_id;
-  validateResourceId(owner);
+  assert.ok(safeOwnerID(owner), 'invalid ownership owner identity');
   const restore = installMintReceipt(QURLClient, owner);
   try {
     const { detectWatermark } = require('../src/connector');

@@ -25,13 +25,13 @@ test.each(['cell', ''])('captures exact detector child with cell_id=%s without c
     status: 200, headers: { 'Content-Type': 'application/json' },
   }));
   const client = new Client({ baseUrl: 'https://api.example', apiKey: 'test-key', fetch });
-  const restore = installMintReceipt(Client, 'owner');
+  const restore = installMintReceipt(Client, 'auth0|owner');
   try {
     expect(await client.createQurlForResource(crid)).toEqual(minted);
     expect(fetch).toHaveBeenCalledTimes(1);
     const text = fs.readFileSync(process.env.QURL_OWNERSHIP_RECEIPTS, 'utf8');
     const receipt = JSON.parse(text);
-    expect(receipt).toMatchObject({ owner_id: 'owner', resource_id: 'r_owned', qurl_id: 'q_detector',
+    expect(receipt).toMatchObject({ owner_id: 'auth0|owner', resource_id: 'r_owned', qurl_id: 'q_detector',
       purpose: 'discord_detect_smoke_detector_child', crid, public_identity: identity });
     expect(text).not.toMatch(/secret-capability|secret-private-key|private_key|session_id|detected/);
     expect(restore.captured).toBe(1);
@@ -49,7 +49,7 @@ test.each([['write', 0], ['verification', 1]])('%s failure prevents opening and 
     async revokeResourceQurl(...args) { revoke(...args); }
   }
   const original = Client.prototype.createQurlForResource;
-  const restore = installMintReceipt(Client, 'owner');
+  const restore = installMintReceipt(Client, 'auth0|owner');
   const open = jest.fn();
   try {
     await expect(new Client().createQurlForResource('crid-owned').then(open)).rejects.toThrow('could not be persisted');
@@ -68,12 +68,12 @@ test.each([undefined, 'at_secret', 'bad/id'])('invalid child %s is never revoked
     async createQurlForResource() { return { crid: 'crid-owned', resource_id: 'r_owned', qurl_id }; }
     async revokeResourceQurl(...args) { revoke(...args); }
   }
-  const restore = installMintReceipt(Client, 'owner');
+  const restore = installMintReceipt(Client, 'auth0|owner');
   try {
     await expect(new Client().createQurlForResource('crid-owned')).rejects.toThrow('could not be persisted');
     expect(revoke).not.toHaveBeenCalled();
     expect(log).toHaveBeenCalledWith('Detector child cleanup required', {
-      event: 'detector_child_cleanup_required', owner_id: 'owner', resource_id: 'r_owned', qurl_id: null, crid: 'crid-owned',
+      event: 'detector_child_cleanup_required', owner_id: 'auth0|owner', resource_id: 'r_owned', qurl_id: null, crid: 'crid-owned',
     });
   } finally { restore(); log.mockRestore(); }
 });
@@ -85,11 +85,11 @@ test('failed child revoke retains only structured safe cleanup identity', async 
     async createQurlForResource() { return { crid: 'crid-owned', resource_id: 'r_owned', qurl_id: 'q_detector', expires_at: '2030-01-01T00:00:00Z', qurl_link: 'at_capability' }; }
     async revokeResourceQurl() { throw new Error('at_dependency-secret'); }
   }
-  const restore = installMintReceipt(Client, 'owner');
+  const restore = installMintReceipt(Client, 'auth0|owner');
   try {
     await expect(new Client().createQurlForResource('crid-owned')).rejects.toThrow('could not be persisted');
     expect(log).toHaveBeenCalledWith('Detector child cleanup required', {
-      event: 'detector_child_cleanup_required', owner_id: 'owner', resource_id: 'r_owned', qurl_id: 'q_detector', crid: 'crid-owned',
+      event: 'detector_child_cleanup_required', owner_id: 'auth0|owner', resource_id: 'r_owned', qurl_id: 'q_detector', crid: 'crid-owned',
     });
     expect(JSON.stringify(log.mock.calls)).not.toContain('at_');
   } finally { restore(); log.mockRestore(); }
