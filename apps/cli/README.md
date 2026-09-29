@@ -119,6 +119,18 @@ brew install layervai/tap/qurl
 Homebrew also installs the man pages and the bash/zsh/fish completions
 shipped in the release archive.
 
+**Install script** (macOS / Linux, no Homebrew or `sudo` needed):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/layervai/qurl-integrations/main/scripts/install.sh | sh
+```
+
+The script verifies the download against the release's `checksums.txt`.
+It installs to `/usr/local/bin` when that is writable and otherwise to
+`~/.local/bin`, printing a `PATH` hint if needed. It never runs `sudo`, so it
+also works unattended for coding agents and CI. Set `INSTALL_DIR` to choose
+the directory, or run the script with `sudo` for a system-wide install.
+
 The CLI supports remote and local background qURL commands on macOS, Windows,
 and Linux. Linux uses the native systemd user manager and reports a clear error
 when that manager is unavailable.
