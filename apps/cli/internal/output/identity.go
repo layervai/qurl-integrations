@@ -23,9 +23,10 @@ type identityKeyJSON struct {
 }
 
 type whoamiJSON struct {
-	OwnerID  string           `json:"owner_id"`
-	AuthType string           `json:"auth_type"`
-	APIKey   *identityKeyJSON `json:"api_key,omitempty"`
+	OwnerID            string           `json:"owner_id"`
+	AuthType           string           `json:"auth_type"`
+	APIKey             *identityKeyJSON `json:"api_key,omitempty"`
+	DevicePublicKeyB64 string           `json:"device_public_key_b64,omitempty"`
 }
 
 type loginJSON struct {
@@ -58,7 +59,9 @@ func identityKey(id *qurlapi.Identity) *identityKeyJSON {
 func (p *Printer) WhoAmI(id *qurlapi.Identity) error {
 	switch {
 	case p.format == FormatJSON:
-		return p.writeJSON(whoamiJSON{OwnerID: id.OwnerID, AuthType: id.AuthType, APIKey: identityKey(id)})
+		return p.writeJSON(whoamiJSON{
+			OwnerID: id.OwnerID, AuthType: id.AuthType, APIKey: identityKey(id), DevicePublicKeyB64: id.DevicePublicKeyB64,
+		})
 	case p.quiet:
 		_, err := fmt.Fprintln(p.out, id.OwnerID)
 		return err
@@ -77,6 +80,9 @@ func (p *Printer) whoamiText(id *qurlapi.Identity) error {
 		ew.printf("%s\t%s\n", p.bold("Kind:"), k.Kind)
 		ew.printf("%s\t%s\n", p.bold("Scopes:"), strings.Join(k.Scopes, ", "))
 		ew.printf("%s\t%s\n", p.bold("Expires:"), p.keyExpiry(k.ExpiresAt))
+	}
+	if id.DevicePublicKeyB64 != "" {
+		ew.printf("%s\t%s\n", p.bold("Device public key:"), id.DevicePublicKeyB64)
 	}
 	return ew.flush(tw)
 }

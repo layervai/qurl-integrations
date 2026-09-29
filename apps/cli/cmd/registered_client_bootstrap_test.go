@@ -243,7 +243,8 @@ func TestOpenNativeRegisteredClient_OneTimeAccountEnrollment(t *testing.T) {
 
 func TestOpenNativeRegisteredClient_WarmOpenDoesNotReadAccountKey(t *testing.T) {
 	srv := apitest.NewServer(t)
-	runtime := &bootstrapNativeRuntime{store: &bootstrapAgentStateStore{state: bootstrapRegisteredState(t)}}
+	state := bootstrapRegisteredState(t)
+	runtime := &bootstrapNativeRuntime{store: &bootstrapAgentStateStore{state: state}}
 	opts := bootstrapGlobalOpts(t, srv.URL, runtime)
 	client, identity, err := opts.openNativeRegisteredClient(context.Background(), nil, "", nil)
 	if err != nil {
@@ -252,6 +253,9 @@ func TestOpenNativeRegisteredClient_WarmOpenDoesNotReadAccountKey(t *testing.T) 
 	defer func() { _ = opts.closeAPIClient() }()
 	if client == nil || identity == nil || identity.OwnerID != apitest.MeOwnerID {
 		t.Fatalf("warm registered identity = %#v", identity)
+	}
+	if want := state.PublicKeyB64; identity.DevicePublicKeyB64 != want {
+		t.Fatalf("device public key = %q, want the persisted %q", identity.DevicePublicKeyB64, want)
 	}
 	if len(srv.Requests()) != 1 || srv.Requests()[0].Header.Get("Authorization") != "Bearer "+bootstrapRegisteredState(t).DeviceAPIKey {
 		t.Fatalf("warm open requests = %+v", srv.Requests())

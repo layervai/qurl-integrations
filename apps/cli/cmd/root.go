@@ -813,6 +813,9 @@ func (o *globalOpts) openNativeRegisteredClient(
 	if err := o.bindDeviceOwner(ctx, stateDir, deviceIdentity); err != nil {
 		return nil, nil, err
 	}
+	if err := attachDevicePublicKey(ctx, nativeRuntime, deviceIdentity); err != nil {
+		return nil, nil, err
+	}
 	o.nativeRuntime = nativeRuntime
 	return client, deviceIdentity, nil
 }
@@ -978,6 +981,24 @@ func oneShotEnrollmentToken(path string) func(context.Context, qurl.AgentEnrollm
 		})
 		return token, err
 	}
+}
+
+// attachDevicePublicKey copies the registered device's public key from the
+// native agent state onto id. The private half and the device API key stay in
+// the store; only the public key is ever surfaced.
+func attachDevicePublicKey(ctx context.Context, nativeRuntime registeredNativeRuntime, id *qurlapi.Identity) error {
+	store, err := nativeRuntime.Handoff()
+	if err != nil {
+		return err
+	}
+	persisted, err := store.LoadAgentState(ctx)
+	if err != nil {
+		return err
+	}
+	if persisted != nil {
+		id.DevicePublicKeyB64 = persisted.PublicKeyB64
+	}
+	return nil
 }
 
 // identityKeyID is the non-secret identifier of the credential behind id.

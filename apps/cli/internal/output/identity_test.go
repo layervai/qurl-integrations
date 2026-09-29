@@ -20,6 +20,7 @@ func fixtureIdentity() *qurlapi.Identity {
 			Scopes:    []string{"qurl:read", "qurl:write"},
 			KeyPrefix: "lv_test_outp",
 		},
+		DevicePublicKeyB64: "dGVzdC1kZXZpY2UtcHVibGljLWtleQ==",
 	}
 }
 
@@ -33,7 +34,7 @@ func TestWhoAmIProjections(t *testing.T) {
 		if err := p.WhoAmI(fixtureIdentity()); err != nil {
 			t.Fatal(err)
 		}
-		for _, want := range []string{"own_output_test", "key_outputtest01 (lv_test_outp)", "qurl:read, qurl:write", "never"} {
+		for _, want := range []string{"own_output_test", "key_outputtest01 (lv_test_outp)", "qurl:read, qurl:write", "never", "Device public key:", "dGVzdC1kZXZpY2UtcHVibGljLWtleQ=="} {
 			if !strings.Contains(out.String(), want) {
 				t.Errorf("text projection missing %q:\n%s", want, out.String())
 			}
@@ -63,8 +64,8 @@ func TestWhoAmIProjections(t *testing.T) {
 		if err := p.WhoAmI(&qurlapi.Identity{OwnerID: "own_jwt", AuthType: "jwt"}); err != nil {
 			t.Fatal(err)
 		}
-		if strings.Contains(out.String(), "Key:") {
-			t.Errorf("keyless identity must omit the key block:\n%s", out.String())
+		if strings.Contains(out.String(), "Key:") || strings.Contains(out.String(), "Device public key:") {
+			t.Errorf("keyless identity must omit the key block and device public key:\n%s", out.String())
 		}
 	})
 
@@ -93,11 +94,13 @@ func TestWhoAmIProjections(t *testing.T) {
 				Scopes    []string `json:"scopes"`
 				KeyPrefix string   `json:"key_prefix"`
 			} `json:"api_key"`
+			DevicePublicKeyB64 string `json:"device_public_key_b64"`
 		}
 		if err := json.Unmarshal(out.Bytes(), &doc); err != nil {
 			t.Fatal(err)
 		}
-		if doc.OwnerID != "own_output_test" || doc.APIKey == nil || doc.APIKey.KeyID != "key_outputtest01" {
+		if doc.OwnerID != "own_output_test" || doc.APIKey == nil || doc.APIKey.KeyID != "key_outputtest01" ||
+			doc.DevicePublicKeyB64 != "dGVzdC1kZXZpY2UtcHVibGljLWtleQ==" {
 			t.Errorf("json projection = %+v", doc)
 		}
 	})

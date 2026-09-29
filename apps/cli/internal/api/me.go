@@ -23,6 +23,10 @@ type Identity struct {
 	// Key identifies the API key itself; nil when the platform omitted the
 	// block (non-key authentication).
 	Key *KeyIdentity
+	// DevicePublicKeyB64 is this machine's registered-device public key, read
+	// from the local agent state rather than /v1/me. Empty when no native
+	// device state backs the credential.
+	DevicePublicKeyB64 string
 }
 
 // KeyIdentity is the non-secret identity of an API key.

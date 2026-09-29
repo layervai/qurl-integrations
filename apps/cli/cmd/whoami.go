@@ -11,13 +11,16 @@ import (
 func whoamiCmd(opts *globalOpts) *cobra.Command {
 	return &cobra.Command{
 		Use:   "whoami",
-		Short: "Show which qURL account this device belongs to",
+		Short: "Show which qURL account this device belongs to, and its device public key",
 		Long: `Show the qURL account and registered device identity used by this machine.
 
 The command opens the same durable device identity as publish, list, share,
 and lifecycle commands, then checks it against the qURL service. It does not
 read an account API key on a warm start. A new device enrolls automatically
 without an account. Use "qurl account setup" to enable account recovery.
+
+The output includes this machine's registered-device public key. The private
+key and the device API key never leave local state.
 
 Useful for checking which account a script will act as before it publishes
 anything.`,
