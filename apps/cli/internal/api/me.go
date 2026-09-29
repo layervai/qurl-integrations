@@ -12,7 +12,8 @@ import (
 )
 
 // Identity is the repo-owned result of Me: who the configured credential is,
-// as echoed by the platform. It deliberately carries no plan or usage data —
+// as echoed by the platform, plus one locally sourced field (DevicePublicKeyB64,
+// marked below). It deliberately carries no plan or usage data —
 // the identity endpoint answers from authentication state alone, so it is
 // cheap enough for login validation and whoami to call freely.
 type Identity struct {
@@ -24,8 +25,9 @@ type Identity struct {
 	// block (non-key authentication).
 	Key *KeyIdentity
 	// DevicePublicKeyB64 is this machine's registered-device public key, read
-	// from the local agent state rather than /v1/me. Empty when no native
-	// device state backs the credential.
+	// from the local agent state rather than /v1/me; whoami sets it. Empty when
+	// no native device state backs the credential. meData never carries it, so
+	// a server response cannot populate it.
 	DevicePublicKeyB64 string
 }
 

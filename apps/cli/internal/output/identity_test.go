@@ -107,6 +107,20 @@ func TestWhoAmIProjections(t *testing.T) {
 	})
 }
 
+// TestWhoAmIJSONOmitsAnAbsentDevicePublicKey pins the omitempty half of the
+// contract: without native device state there is no device_public_key_b64, so
+// a supervisor cannot persist "" as if it were a key.
+func TestWhoAmIJSONOmitsAnAbsentDevicePublicKey(t *testing.T) {
+	var out, errBuf bytes.Buffer
+	p := newTestPrinter(&out, &errBuf, FormatJSON, false, false, false)
+	if err := p.WhoAmI(&qurlapi.Identity{OwnerID: "own_jwt", AuthType: "jwt"}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out.String(), "device_public_key_b64") {
+		t.Fatalf("whoami JSON = %s, want no device_public_key_b64 without native device state", out.String())
+	}
+}
+
 // TestLoginProjections pins login's split streams: the human confirmation is
 // stderr; JSON and --quiet are stdout.
 func TestLoginProjections(t *testing.T) {

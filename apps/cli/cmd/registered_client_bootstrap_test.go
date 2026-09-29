@@ -254,8 +254,8 @@ func TestOpenNativeRegisteredClient_WarmOpenDoesNotReadAccountKey(t *testing.T) 
 	if client == nil || identity == nil || identity.OwnerID != apitest.MeOwnerID {
 		t.Fatalf("warm registered identity = %#v", identity)
 	}
-	if want := state.PublicKeyB64; identity.DevicePublicKeyB64 != want {
-		t.Fatalf("device public key = %q, want the persisted %q", identity.DevicePublicKeyB64, want)
+	if identity.DevicePublicKeyB64 != "" {
+		t.Fatalf("shared registered open read the device public key; only whoami should: %q", identity.DevicePublicKeyB64)
 	}
 	if len(srv.Requests()) != 1 || srv.Requests()[0].Header.Get("Authorization") != "Bearer "+bootstrapRegisteredState(t).DeviceAPIKey {
 		t.Fatalf("warm open requests = %+v", srv.Requests())
@@ -627,6 +627,45 @@ func TestWhoamiReusesRegisteredIdentityWithoutSecondMeRequest(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), apitest.MeOwnerID) {
 		t.Fatalf("whoami stdout = %q, want owner %q", stdout.String(), apitest.MeOwnerID)
+	}
+	if strings.Contains(stdout.String(), "Device public key:") {
+		t.Fatalf("whoami without native device state rendered a device public key:\n%s", stdout.String())
+	}
+}
+
+// TestWhoamiShowsNativeDevicePublicKey pins that whoami reads the public key
+// from the open native runtime's agent state and renders it.
+func TestWhoamiShowsNativeDevicePublicKey(t *testing.T) {
+	srv := apitest.NewServer(t)
+	client, err := qurlapi.New(&qurlapi.Config{BaseURL: srv.URL, APIKey: testAPIKey, Version: "whoami-pubkey-test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := bootstrapRegisteredState(t)
+	runtime := &bootstrapNativeRuntime{store: &bootstrapAgentStateStore{state: state}}
+	var stdout, stderr bytes.Buffer
+	root, opts := newRoot("test", &output.Streams{In: strings.NewReader(""), Out: &stdout, Err: &stderr}, func(g *globalOpts) {
+		g.openAPIClient = nil
+		g.openRegisteredClient = func(context.Context, qurlapi.AccountClient, string, *qurlapi.Identity) (qurlapi.Client, *qurlapi.Identity, error) {
+			g.nativeRuntime = runtime
+			return client, &qurlapi.Identity{OwnerID: apitest.MeOwnerID, AuthType: "api_key"}, nil
+		}
+	})
+	root.SetArgs([]string{"-o", "json", "whoami"})
+	if code := run(context.Background(), root, opts); code != 0 {
+		t.Fatalf("whoami exit = %d, stderr = %q", code, stderr.String())
+	}
+	var doc struct {
+		DevicePublicKeyB64 string `json:"device_public_key_b64"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &doc); err != nil {
+		t.Fatalf("decode whoami JSON %q: %v", stdout.String(), err)
+	}
+	if doc.DevicePublicKeyB64 != state.PublicKeyB64 {
+		t.Fatalf("device_public_key_b64 = %q, want the persisted %q", doc.DevicePublicKeyB64, state.PublicKeyB64)
+	}
+	if strings.Contains(stdout.String(), state.PrivateKeyB64) || strings.Contains(stdout.String(), state.DeviceAPIKey) {
+		t.Fatalf("whoami leaked device secret material:\n%s", stdout.String())
 	}
 }
 

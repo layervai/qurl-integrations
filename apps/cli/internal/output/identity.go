@@ -12,7 +12,8 @@ import (
 // Identity renderings for whoami and login. The identity is who the
 // credential is — owner, auth type, and the key's non-secret identity. There
 // is deliberately no plan or usage data here; the platform's identity echo is
-// authentication state only.
+// authentication state only. whoami adds the device public key, which comes
+// from local agent state, not the echo.
 
 type identityKeyJSON struct {
 	KeyID     string     `json:"key_id"`

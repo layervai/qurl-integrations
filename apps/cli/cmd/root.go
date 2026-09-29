@@ -813,9 +813,6 @@ func (o *globalOpts) openNativeRegisteredClient(
 	if err := o.bindDeviceOwner(ctx, stateDir, deviceIdentity); err != nil {
 		return nil, nil, err
 	}
-	if err := attachDevicePublicKey(ctx, nativeRuntime, deviceIdentity); err != nil {
-		return nil, nil, err
-	}
 	o.nativeRuntime = nativeRuntime
 	return client, deviceIdentity, nil
 }
@@ -984,8 +981,9 @@ func oneShotEnrollmentToken(path string) func(context.Context, qurl.AgentEnrollm
 }
 
 // attachDevicePublicKey copies the registered device's public key from the
-// native agent state onto id. The private half and the device API key stay in
-// the store; only the public key is ever surfaced.
+// native agent state onto id. Only whoami calls it, so other commands never pay
+// for a state read whose result they would not print. The private half and the
+// device API key stay in the store; only the public key is ever surfaced.
 func attachDevicePublicKey(ctx context.Context, nativeRuntime registeredNativeRuntime, id *qurlapi.Identity) error {
 	store, err := nativeRuntime.Handoff()
 	if err != nil {

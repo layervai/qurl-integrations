@@ -43,6 +43,13 @@ anything.`,
 			if id == nil {
 				return errors.New("qURL account identity response is empty")
 			}
+			if opts.nativeRuntime != nil {
+				shown := *id
+				if err := attachDevicePublicKey(cmd.Context(), opts.nativeRuntime, &shown); err != nil {
+					return err
+				}
+				id = &shown
+			}
 			return opts.printer().WhoAmI(id)
 		},
 	}
