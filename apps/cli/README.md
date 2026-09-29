@@ -274,8 +274,11 @@ The allowed routes are `GET /v1/me`, `POST /v1/account/link`, `POST /v1/qurls`,
 `POST .../sharing/restart`; `POST .../share`; `GET` and `POST .../qurls`;
 `PATCH` and `DELETE .../qurls/{id}`; `GET` and `DELETE .../sessions`; and
 `DELETE .../sessions/{id}`. These operations require matching service-side
-device authorization. Sessions are unpaginated, so a session list larger than
-the 1 MiB response cap fails; terminate all sessions to recover. API key
+device authorization. The bridge only forwards the HTTP call: it does not
+update this machine's share registry or reload the daemon, so use `qurl start`,
+`qurl stop`, `qurl restart` and `qurl delete` for resources shared from this
+machine rather than the `sharing` and resource `DELETE` routes. Sessions are
+unpaginated, so a session list larger than the 1 MiB response cap fails; terminate all sessions to recover. API key
 creation, account owner enumeration, billing, quota and usage are refused.
 
 For example, account linking uses `POST /v1/account/link` with

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/layervai/qurl-go/qurl"
 
@@ -243,5 +244,24 @@ func TestRequestTargetNamesInvalidIdentifiers(t *testing.T) {
 	}
 	if err := ValidateRequestTarget(http.MethodGet, "/v1/resources/r.1"); err == nil || !strings.Contains(err.Error(), "identifiers must be letters") {
 		t.Fatalf("error = %v", err)
+	}
+}
+
+// TestRegisteredRequestInvalidUTF8JSONBecomesString pins that JSON-shaped
+// bodies with invalid UTF-8 are not emitted raw, which would make the whole
+// envelope unparseable.
+func TestRegisteredRequestInvalidUTF8JSONBecomesString(t *testing.T) {
+	srv := apitest.NewServer(t)
+	srv.Script(http.MethodGet, "/v1/me", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte("{\"name\":\"\xff\"}"))
+	})
+	result, err := Request(context.Background(), newRegisteredTestClient(t, srv), http.MethodGet, "/v1/me", nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body string
+	if !utf8.Valid(result.Body) || json.Unmarshal(result.Body, &body) != nil || body != "{\"name\":\"�\"}" {
+		t.Fatalf("body = %q", result.Body)
 	}
 }

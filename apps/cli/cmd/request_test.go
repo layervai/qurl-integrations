@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	connectorshare "github.com/layervai/qurl-connector/pkg/share"
 	"github.com/layervai/qurl-go/qurl"
@@ -16,6 +17,7 @@ import (
 	"github.com/layervai/qurl-integrations/apps/cli/internal/apitest"
 	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/exitcode"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/output"
 )
 
 func TestRequestCommand(t *testing.T) {
@@ -307,5 +309,28 @@ func TestRequestEnrolledExternalNamespaceReturnsEnvelope(t *testing.T) {
 	}
 	if !runtime.closed {
 		t.Fatal("request left the native runtime open")
+	}
+}
+
+// TestReadRequestBodyYieldsToCancellation pins that a stalled stdin cannot
+// outlive a supervisor's SIGTERM: Main traps the signal into ctx, so the read
+// must return when ctx ends.
+func TestReadRequestBodyYieldsToCancellation(t *testing.T) {
+	stalled, writer := io.Pipe()
+	t.Cleanup(func() { _ = writer.Close() })
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := readRequestBody(ctx, &output.Streams{In: stalled}, http.MethodPost)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("err = %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("stdin read ignored cancellation")
 	}
 }

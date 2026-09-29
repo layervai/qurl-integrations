@@ -46,7 +46,7 @@ account_id matching the intended account.`,
 			if err := validateRequestInvocation(opts, args[0], args[1], idempotencyKey); err != nil {
 				return err
 			}
-			body, err := readRequestBody(opts.streams, args[0])
+			body, err := readRequestBody(cmd.Context(), opts.streams, args[0])
 			if err != nil {
 				return err
 			}
@@ -66,15 +66,33 @@ account_id matching the intended account.`,
 }
 
 // readRequestBody reads a bounded JSON body for POST, PUT and PATCH. GET and
-// DELETE never read stdin, so an inherited pipe cannot stall them.
-func readRequestBody(streams *output.Streams, method string) ([]byte, error) {
+// DELETE never read stdin, so an inherited pipe cannot stall them. Main traps
+// SIGINT and SIGTERM, so the read yields to ctx: a supervisor deadline
+// delivered as a signal must end a stalled read, not wait for SIGKILL.
+func readRequestBody(ctx context.Context, streams *output.Streams, method string) ([]byte, error) {
 	if method == http.MethodGet || method == http.MethodDelete {
 		return nil, nil
 	}
 	if streams.InIsTTY {
 		return nil, exitcode.UsageError(errors.New("request reads a " + method + " body from standard input; pipe JSON or redirect it from the null device"))
 	}
-	body, err := io.ReadAll(io.LimitReader(streams.In, qurlapi.MaxRequestBody+1))
+	type readResult struct {
+		body []byte
+		err  error
+	}
+	read := make(chan readResult, 1)
+	go func() {
+		body, err := io.ReadAll(io.LimitReader(streams.In, qurlapi.MaxRequestBody+1))
+		read <- readResult{body, err}
+	}()
+	var body []byte
+	var err error
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case r := <-read:
+		body, err = r.body, r.err
+	}
 	if err != nil {
 		return nil, exitcode.UsageError(fmt.Errorf("could not read request body: %w", err))
 	}

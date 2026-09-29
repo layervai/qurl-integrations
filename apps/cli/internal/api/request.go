@@ -10,6 +10,7 @@ import (
 	"path"
 	"slices"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/layervai/qurl-go/qurl"
 )
@@ -73,13 +74,19 @@ func Request(ctx context.Context, api Client, method, relativePath string, body 
 		}
 	}
 	if len(reply.body) > 0 {
-		if json.Valid(reply.body) {
-			result.Body = reply.body
-		} else {
-			result.Body = jsonStringNoHTMLEscape(string(reply.body))
-		}
+		result.Body = requestResponseBody(reply.body)
 	}
 	return result, nil
+}
+
+// requestResponseBody passes JSON through and encodes anything else as a
+// string. json.Valid accepts invalid UTF-8 inside strings; emitting it raw
+// would make the whole envelope unparseable, so it takes the string path.
+func requestResponseBody(body []byte) json.RawMessage {
+	if json.Valid(body) && utf8.Valid(body) {
+		return body
+	}
+	return jsonStringNoHTMLEscape(string(body))
 }
 
 // ValidateRequestTarget rejects unsupported methods, URL authority, ambiguous
