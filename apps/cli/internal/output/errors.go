@@ -34,6 +34,13 @@ func RenderError(w io.Writer, err error, color bool) {
 func renderErrorLines(p *Printer, err error) []string {
 	head := p.style(ansiRed+ansiBold, errorPrefix)
 
+	// Local host conditions come first, matching exitcode.hostConditionCode:
+	// a failed compensating API call can be joined onto them, and the local
+	// remedy and exit code must still agree.
+	if lines, ok := hostErrorLines(p, head, err); ok {
+		return lines
+	}
+
 	// Typed service postures come before the generic API-problem rendering:
 	// their chains contain an API error too, but the posture is the message.
 	var apiErr *qurlapi.Error
@@ -78,6 +85,31 @@ func renderErrorLines(p *Printer, err error) []string {
 		return apiErrorLines(p, head, apiErr)
 	}
 	return []string{head + " " + err.Error()}
+}
+
+// hostErrorLines renders local host conditions that block native sharing.
+// They come before the connector taxonomy because their chains still carry
+// whatever the connector wrapped, and the host condition is the actionable
+// part. The raw detail is omitted: for a missing user manager it lists every
+// executable path the connector rejected, which reads like a security failure
+// rather than a missing capability.
+func hostErrorLines(p *Printer, head string, err error) ([]string, bool) {
+	var unsafeDir *state.UnsafeDirectoryError
+	switch {
+	case errors.As(err, &unsafeDir):
+		hint := hintUnsafeDirectory
+		if unsafeDir.ContainsStateDir {
+			hint = hintUnsafeStateDirectory
+		}
+		return []string{
+			head + " " + fmt.Sprintf(msgUnsafeDirectory, unsafeDir.Dir, unsafeDir.Mode.Perm()),
+			"", "  " + p.dim(fmt.Sprintf(hint, unsafeDir.Dir)),
+		}, true
+	case errors.Is(err, connectordaemon.ErrUserServiceManagerUnavailable):
+		return []string{head + " " + msgNoUserServiceManager, "", "  " + p.dim(hintNoUserServiceManager)}, true
+	default:
+		return nil, false
+	}
 }
 
 // connectorErrorLines is the customer-language translation of the Connector

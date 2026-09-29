@@ -218,10 +218,36 @@ func FromError(err error) int {
 	}
 }
 
+// hostConditionCode maps local host conditions ahead of every sentinel
+// family (below only the CLI-typed wrappers in FromError), matching
+// output.RenderError, which renders them ahead of the connector taxonomy: their
+// chains still carry whatever the connector wrapped, and the exit code must
+// agree with the message. qurl-go's own permission refusals never become
+// ErrUnsafeDirectory (ExplainUnsafeDirectory leaves them as they are), so a
+// loose credential state mode stays Auth.
+func hostConditionCode(err error) (int, bool) {
+	switch {
+	case errors.Is(err, state.ErrUnsafeDirectory):
+		// The remedy is a local directory mode or state location: the
+		// configuration row.
+		return Config, true
+	case errors.Is(err, connectordaemon.ErrUserServiceManagerUnavailable):
+		// Like ErrRuntimeSupervision, the remedy is the supervision mode
+		// (--foreground or --supervision external), not the command's operands.
+		return Config, true
+	default:
+		return 0, false
+	}
+}
+
 // cliSentinelCode maps the CLI's own sentinel families — operand
 // assessment, credentials, configuration, and the consume layer — onto
 // their exit codes.
-func cliSentinelCode(err error) (int, bool) {
+func cliSentinelCode(err error) (int, bool) { //nolint:gocyclo // Keep the closed CLI sentinel-to-exit-code mapping in one boundary.
+	// Host conditions precede every sentinel family; see hostConditionCode.
+	if code, ok := hostConditionCode(err); ok {
+		return code, true
+	}
 	switch {
 	case errors.Is(err, qurlapi.ErrAccountPort), errors.Is(err, qurlapi.ErrAccountEndpoint):
 		return Config, true

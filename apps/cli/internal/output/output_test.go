@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"slices"
 	"strings"
 	"testing"
@@ -1017,5 +1018,100 @@ func TestValidFormat(t *testing.T) {
 	}
 	if ValidFormat("yaml") || ValidFormat("") {
 		t.Error("unknown formats must not validate")
+	}
+}
+
+// TestNoUserServiceManagerRenderingNamesTheWorkarounds uses the connector's
+// reported executable-search failure from a stock ubuntu:24.04 container. The
+// rejected candidate paths read like a security failure; the rendering must
+// instead say what is missing and name both supervision modes that work.
+func TestNoUserServiceManagerRenderingNamesTheWorkarounds(t *testing.T) {
+	raw := errors.Join(
+		errors.New("validate systemctl candidate /usr/bin/systemctl: statat systemctl: no such file or directory"),
+		errors.New("validate systemctl candidate /bin/systemctl: directory component /bin must not be a symlink"),
+		errors.New("validate systemctl candidate /run/current-system/sw/bin/systemctl: resolve systemctl alias: lstat /run/current-system: no such file or directory"),
+	)
+	err := fmt.Errorf("%w: inspect systemd user job ai.layerv.qurl.share-daemon: resolve trusted systemctl control plane: %w",
+		connectordaemon.ErrUserServiceManagerUnavailable, raw)
+	var buf bytes.Buffer
+	RenderError(&buf, err, false)
+	got := buf.String()
+	for _, want := range []string{
+		msgNoUserServiceManager,
+		"qurl publish <url> --foreground",
+		"qurl daemon run --supervision external",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("missing user manager rendering lacks %q:\n%s", want, got)
+		}
+	}
+	for _, forbidden := range []string{"symlink", "systemctl candidate", "/run/current-system", "control plane"} {
+		if strings.Contains(got, forbidden) {
+			t.Fatalf("missing user manager rendering kept connector detail %q:\n%s", forbidden, got)
+		}
+	}
+}
+
+func TestUnsafeDirectoryRenderingNamesTheDirectoryAndRemedy(t *testing.T) {
+	// Verbatim from `qurl list` (v3.0.0) on ubuntu:24.04 with a 0775 ~/.local.
+	raw := errors.New("prepare native agent state directory: directory component /home/agent/.local has unsafe mode 0775")
+	tests := []struct {
+		name        string
+		containsDir bool
+		want        []string
+		forbidden   []string
+	}{
+		{
+			name:        "state ancestor",
+			containsDir: true,
+			want: []string{
+				"Other users can write to /home/agent/.local (mode 0775)",
+				"chmod go-w /home/agent/.local",
+				"QURL_CONNECTOR_STATE_DIR", "XDG_STATE_HOME",
+			},
+		},
+		{
+			// The executable's directory is not relocated by a state override,
+			// so that remedy must not be offered for it.
+			name: "executable directory",
+			want: []string{
+				"Other users can write to /home/agent/.local (mode 0775)",
+				"chmod go-w /home/agent/.local",
+			},
+			forbidden: []string{"QURL_CONNECTOR_STATE_DIR", "XDG_STATE_HOME"},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			// The directory bit proves rendering prints permission bits only.
+			err := &state.UnsafeDirectoryError{Dir: "/home/agent/.local", Mode: os.ModeDir | 0o775, ContainsStateDir: test.containsDir, Err: raw}
+			var buf bytes.Buffer
+			RenderError(&buf, fmt.Errorf("open local shares: %w", err), false)
+			got := buf.String()
+			for _, want := range test.want {
+				if !strings.Contains(got, want) {
+					t.Fatalf("unsafe directory rendering lacks %q:\n%s", want, got)
+				}
+			}
+			for _, forbidden := range append(test.forbidden, "unsafe mode", "directory component") {
+				if strings.Contains(got, forbidden) {
+					t.Fatalf("unsafe directory rendering kept %q:\n%s", forbidden, got)
+				}
+			}
+		})
+	}
+}
+
+// TestHostConditionsRenderAheadOfJoinedPostures pins the order exitcode uses:
+// a joined connector_stopped or credential posture must not replace the
+// local remedy that decides the exit code.
+func TestHostConditionsRenderAheadOfJoinedPostures(t *testing.T) {
+	local := &state.UnsafeDirectoryError{Dir: "/home/agent/bin", Mode: 0o775, Err: errors.New("directory component /home/agent/bin has unsafe mode 0775")}
+	for _, joined := range []error{&qurlapi.Error{StatusCode: 409, Code: "connector_stopped"}, auth.ErrNoCredential} {
+		var buf bytes.Buffer
+		RenderError(&buf, errors.Join(local, joined), false)
+		if !strings.Contains(buf.String(), "chmod go-w /home/agent/bin") {
+			t.Fatalf("joined %v replaced the local remedy:\n%s", joined, buf.String())
+		}
 	}
 }

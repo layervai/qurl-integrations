@@ -156,7 +156,16 @@ func Main(version string) int {
 // Interrupted exit code but renders no error anatomy: the interrupt was the
 // user's own act.
 func run(ctx context.Context, root *cobra.Command, opts *globalOpts) int {
+	// The connector reports a group- or other-writable directory only as
+	// text; name the directory and its remedy once, for rendering and the exit
+	// code alike. A qURL service response that itself carries the phrase is
+	// left as it is; an unrelated API error joined onto a local refusal (for
+	// example a failed compensation after the job install) is not a reason to
+	// hide the local remedy.
 	err := root.ExecuteContext(ctx)
+	if apiErr := (*qurlapi.Error)(nil); !errors.As(err, &apiErr) || !connectorstate.MentionsUnsafeDirectory(apiErr.Error()) {
+		err = connectorstate.ExplainUnsafeDirectory(err)
+	}
 	if err != nil && !errors.Is(err, context.Canceled) {
 		output.RenderError(opts.streams.Err, err, opts.errColor())
 	}

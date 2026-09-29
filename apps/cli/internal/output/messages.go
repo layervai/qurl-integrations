@@ -91,6 +91,22 @@ const (
 
 	hintConnectorDirectEgress = "Hint: unset the lowercase http_proxy environment variable for this command, then retry."
 
+	// msgNoUserServiceManager is Linux without a running systemd user manager
+	// (containers, sandboxes, minimal images); the hint names both supervision
+	// modes that do not need one.
+	msgNoUserServiceManager  = "This Linux session can't reach a systemd user manager, so qURL can't keep sharing in the background."
+	hintNoUserServiceManager = "Hint: run `qurl publish <url> --foreground` to share from this terminal, or have your own process supervisor run `qurl daemon run --supervision external`."
+
+	// msgUnsafeDirectory names the directory other users can write to and its
+	// mode; %s is the directory, %04o its permission bits.
+	msgUnsafeDirectory = "Other users can write to %s (mode %04o), so qURL can't safely keep its files under it."
+	// hintUnsafeStateDirectory applies when the directory holds qurl's state:
+	// %s is the directory again.
+	hintUnsafeStateDirectory = "Hint: run `chmod go-w %s`, then retry. Or set QURL_CONNECTOR_STATE_DIR (or XDG_STATE_HOME) to a directory you own that other users can't write to."
+	// hintUnsafeDirectory applies to any other directory, such as the one that
+	// holds the qurl executable: %s is the directory again.
+	hintUnsafeDirectory = "Hint: run `chmod go-w %s`, then retry."
+
 	labelConnectorErrorCode = "Error code:"
 
 	msgConnectorSessionConfig  = "This Connector's saved account binding is missing or invalid, so it can't start."
@@ -290,6 +306,11 @@ func CustomerMessages() []string {
 		hintConnectorConnectionConfig,
 		msgConnectorDirectEgress,
 		hintConnectorDirectEgress,
+		msgNoUserServiceManager,
+		hintNoUserServiceManager,
+		msgUnsafeDirectory,
+		hintUnsafeStateDirectory,
+		hintUnsafeDirectory,
 		labelConnectorErrorCode,
 		msgConnectorSessionConfig,
 		hintConnectorSessionConfig,
