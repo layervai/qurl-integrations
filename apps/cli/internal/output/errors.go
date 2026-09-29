@@ -48,6 +48,12 @@ func renderErrorLines(p *Printer, err error) []string {
 	if errors.Is(err, auth.ErrAccountRecoveryState) {
 		return []string{head + " " + msgAccountRecoveryState, "", "  " + p.dim(hintAccountRecoveryState)}
 	}
+	if errors.Is(err, auth.ErrExternalDeviceMissing) {
+		return []string{head + " " + msgExternalDeviceMissing, "", "  " + p.dim(hintExternalDeviceMissing)}
+	}
+	if errors.Is(err, auth.ErrExternalAnonymousRecovery) {
+		return []string{head + " " + msgAnonymousRecovery, "", "  " + p.dim(hintExternalAnonymousRecovery)}
+	}
 	if errors.Is(err, auth.ErrAnonymousRecovery) {
 		return []string{head + " " + msgAnonymousRecovery, "", "  " + p.dim(hintAnonymousRecovery)}
 	}
