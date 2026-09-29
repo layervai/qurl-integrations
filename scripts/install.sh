@@ -2,6 +2,12 @@
 # qURL CLI installer
 # Usage: curl -fsSL https://raw.githubusercontent.com/layervai/qurl-integrations/main/scripts/install.sh | sh
 #
+# Install location: $INSTALL_DIR when set (created if missing), otherwise
+# /usr/local/bin when it is writable, otherwise ~/.local/bin. The installer
+# never runs sudo, so it cannot stall on a password prompt: coding agents,
+# CI jobs, and fresh machines without Homebrew all complete unattended. For a
+# system-wide install, run the script itself with sudo.
+#
 # Release contract (see .github/workflows/release-please.yml): this monorepo
 # tags most components with a prefix (slack-v*, discord-v*, ...), but CLI
 # releases are the bare `v<semver>` tags, and GoReleaser publishes assets
@@ -22,7 +28,20 @@ download() {
 main() {
     REPO="layervai/qurl-integrations"
     BINARY="qurl"
-    INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
+    # An explicit INSTALL_DIR is honoured as given. The default prefers the
+    # conventional system directory and falls back to the per-user one
+    # instead of escalating (see the header).
+    # _QURL_INSTALL_SYSTEM_DIR is a test seam (scripts/test-install.sh) so
+    # the fallback can be exercised without touching the host's
+    # /usr/local/bin; it is not a user-facing setting.
+    SYSTEM_DIR="${_QURL_INSTALL_SYSTEM_DIR:-/usr/local/bin}"
+    if [ -z "${INSTALL_DIR:-}" ]; then
+        if [ -d "$SYSTEM_DIR" ] && [ -w "$SYSTEM_DIR" ]; then
+            INSTALL_DIR="$SYSTEM_DIR"
+        else
+            INSTALL_DIR="${HOME:?HOME is not set; set INSTALL_DIR}/.local/bin"
+        fi
+    fi
 
     # Detect OS and architecture
     OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
@@ -149,20 +168,35 @@ $(printf '%s\n' "$PAGE_FLAT" \
 
     tar -xzf "${TMP_DIR}/${ARCHIVE}" -C "$TMP_DIR"
 
-    # Install binary. chmod before the move: the target may end up root-owned.
-    chmod +x "${TMP_DIR}/${BINARY}"
-    if [ -w "$INSTALL_DIR" ]; then
-        mv "${TMP_DIR}/${BINARY}" "${INSTALL_DIR}/${BINARY}"
-    else
-        echo "Installing to ${INSTALL_DIR} (requires sudo)..."
-        sudo mv "${TMP_DIR}/${BINARY}" "${INSTALL_DIR}/${BINARY}"
+    # Install binary. Never escalate: an unwritable directory is an error
+    # that names the fix, not a password prompt nobody may be there to answer.
+    # umask 022: directories we create must not be group/other-writable.
+    # The CLI keeps its identity under ~/.local/state and refuses to run
+    # beneath a writable ancestor, and distributions whose default umask is
+    # 002 (Ubuntu, Fedora) would otherwise leave ~/.local at 0775.
+    (umask 022 && mkdir -p "$INSTALL_DIR") 2>/dev/null || true
+    if ! [ -d "$INSTALL_DIR" ] || ! [ -w "$INSTALL_DIR" ]; then
+        echo "Error: ${INSTALL_DIR} is not writable." >&2
+        echo "  Set INSTALL_DIR to a directory you own (for example INSTALL_DIR=\"\$HOME/.local/bin\")," >&2
+        echo "  or run the installer with sudo for a system-wide install." >&2
+        exit 1
     fi
+    chmod +x "${TMP_DIR}/${BINARY}"
+    mv "${TMP_DIR}/${BINARY}" "${INSTALL_DIR}/${BINARY}"
 
     echo "Installed qurl v${VERSION} to ${INSTALL_DIR}/${BINARY}"
+    case ":${PATH}:" in
+        *":${INSTALL_DIR}:"*) ;;
+        *)
+            echo ""
+            echo "${INSTALL_DIR} is not on your PATH. Add it for this shell with:"
+            echo "  export PATH=\"${INSTALL_DIR}:\$PATH\""
+            echo "and add the same line to your shell profile to keep it."
+            ;;
+    esac
     echo ""
-    echo "Get started:"
-    echo "  qurl login"
-    echo "  qurl publish https://example.com"
+    echo "Get started (no account needed):"
+    echo "  qurl publish http://127.0.0.1:3000"
     echo "  qurl --help"
 }
 

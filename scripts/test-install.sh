@@ -116,13 +116,24 @@ run_case() {
   case_no=$((case_no + 1))
   local run_path="${4:-$fixdir:$PATH}"
 
+  # RUN_INSTALL_DIR overrides INSTALL_DIR for one case ("-" leaves it unset
+  # so the installer picks its default); RUN_HOME and RUN_SYSTEM_DIR pin the
+  # fallback inputs so no case can touch the host's HOME or /usr/local/bin.
+  local install_dir="${RUN_INSTALL_DIR:-$fixdir/bin}"
+  local -a env_args=(
+    FIXDIR="$fixdir" PATH="$run_path" VERSION="$version"
+    HOME="${RUN_HOME:-$fixdir/home}"
+    _QURL_INSTALL_SYSTEM_DIR="${RUN_SYSTEM_DIR:-$fixdir/no-system-dir}"
+  )
+  [[ "$install_dir" == "-" ]] || env_args+=(INSTALL_DIR="$install_dir")
+
   set +e
   local output
-  output="$(cd "$fixdir" \
-    && FIXDIR="$fixdir" PATH="$run_path" INSTALL_DIR="$fixdir/bin" \
-       VERSION="$version" sh "$installer" 2>&1)"
+  output="$(umask "${RUN_UMASK:-022}" && cd "$fixdir" \
+    && env -u INSTALL_DIR "${env_args[@]}" sh "$installer" 2>&1)"
   local status="$?"
   set -e
+  LAST_OUTPUT="$output"
 
   if [[ "$status" != "$expected_status" ]]; then
     printf '%s: expected exit %s, got %s\n%s\n' "$name" "$expected_status" "$status" "$output" >&2
@@ -136,7 +147,7 @@ run_case() {
 
 assert_installed() {
   local version="$1"
-  local bin="$fixdir/bin/qurl"
+  local bin="${2:-$fixdir/bin}/qurl"
   [[ -x "$bin" ]] || { echo "$fixdir: expected executable $bin" >&2; exit 1; }
   [[ "$("$bin")" == "qurl-fixture $version" ]] \
     || { echo "$fixdir: installed binary is not the $version fixture" >&2; exit 1; }
@@ -332,5 +343,80 @@ run_case 0 "Installed qurl v0.2.0"
 assert_installed 0.2.0
 grep -q 'page=2' "$fixdir/curl.log" \
   || { echo "$fixdir: expected a page-2 request" >&2; exit 1; }
+
+# --- Install location. A sudo stub on PATH records any call; the installer
+# must never escalate (an agent or CI job cannot answer a password prompt).
+add_sudo_stub() {
+  cat > "$fixdir/sudo" <<'STUB'
+#!/usr/bin/env bash
+echo "sudo $*" >> "$FIXDIR/sudo.log"
+exit 1
+STUB
+  chmod +x "$fixdir/sudo"
+}
+assert_no_sudo() {
+  if [[ -e "$fixdir/sudo.log" ]]; then
+    echo "$fixdir: installer invoked sudo: $(cat "$fixdir/sudo.log")" >&2
+    exit 1
+  fi
+}
+
+# --- Case 15: no INSTALL_DIR and a writable system directory -> install there.
+new_fixdir default-system-dir
+add_sudo_stub
+make_release_assets "$fixdir" 0.2.0
+mkdir -p "$fixdir/system-bin"
+RUN_INSTALL_DIR=- RUN_SYSTEM_DIR="$fixdir/system-bin" run_case 0 "Installed qurl v0.2.0" 0.2.0
+assert_installed 0.2.0 "$fixdir/system-bin"
+assert_no_sudo
+
+# --- Case 16: no INSTALL_DIR and no system directory (a fresh Mac without
+# Homebrew) -> ~/.local/bin, created on demand, with a PATH hint and no sudo.
+# umask 002 (Ubuntu/Fedora default): the directories created must still come
+# out 0755, because the CLI refuses to keep state under a writable ~/.local.
+new_fixdir fallback-user-dir
+add_sudo_stub
+make_release_assets "$fixdir" 0.2.0
+RUN_UMASK=002 RUN_INSTALL_DIR=- run_case 0 "Installed qurl v0.2.0 to $fixdir/home/.local/bin/qurl" 0.2.0
+for dir in "$fixdir/home/.local" "$fixdir/home/.local/bin"; do
+  mode="$(stat -c %a "$dir" 2>/dev/null || stat -f %Lp "$dir")"
+  [[ "$mode" == "755" ]] || { echo "$fixdir: $dir has mode $mode, want 755" >&2; exit 1; }
+done
+assert_installed 0.2.0 "$fixdir/home/.local/bin"
+assert_no_sudo
+[[ "$LAST_OUTPUT" == *"is not on your PATH"* ]] \
+  || { echo "$fixdir: expected a PATH hint" >&2; exit 1; }
+[[ "$LAST_OUTPUT" != *"qurl login"* ]] \
+  || { echo "$fixdir: getting-started text must not ask for a login" >&2; exit 1; }
+
+# --- Case 17: an explicit INSTALL_DIR that does not exist yet is created.
+new_fixdir creates-install-dir
+add_sudo_stub
+make_release_assets "$fixdir" 0.2.0
+RUN_INSTALL_DIR="$fixdir/new/nested/bin" run_case 0 "Installed qurl v0.2.0" 0.2.0
+assert_installed 0.2.0 "$fixdir/new/nested/bin"
+assert_no_sudo
+
+# --- Case 18: an INSTALL_DIR already on PATH gets no PATH hint.
+new_fixdir install-dir-on-path
+make_release_assets "$fixdir" 0.2.0
+run_case 0 "Installed qurl v0.2.0" 0.2.0 "$fixdir/bin:$fixdir:$PATH"
+assert_installed 0.2.0
+[[ "$LAST_OUTPUT" != *"is not on your PATH"* ]] \
+  || { echo "$fixdir: unexpected PATH hint" >&2; exit 1; }
+
+# --- Case 19: an unwritable explicit INSTALL_DIR fails with the fix named,
+# instead of escalating. Root can write anywhere, so the case needs non-root.
+if [[ "$(id -u)" != "0" ]]; then
+  new_fixdir unwritable-install-dir
+  add_sudo_stub
+  make_release_assets "$fixdir" 0.2.0
+  mkdir -p "$fixdir/locked"
+  chmod 555 "$fixdir/locked"
+  RUN_INSTALL_DIR="$fixdir/locked" run_case 1 "is not writable" 0.2.0
+  chmod 755 "$fixdir/locked"
+  assert_no_sudo
+  [[ ! -e "$fixdir/locked/qurl" ]] || { echo "$fixdir: installed into a locked dir" >&2; exit 1; }
+fi
 
 echo "install.sh tests passed (${case_no} cases)"
