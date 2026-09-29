@@ -991,7 +991,8 @@ func oneShotEnrollmentToken(path string) func(context.Context, qurl.AgentEnrollm
 // store.
 //
 // No state is "" with no error: whoami can run on paths with no native device
-// behind the credential, and there is nothing to show. State without a public
+// behind the credential, and there is nothing to show. Incomplete registration
+// cannot reach here, because the device client only opens on completed state. State without a public
 // key is an error, because a registered device should always have one and a
 // warning is the only way that gap becomes visible.
 //
