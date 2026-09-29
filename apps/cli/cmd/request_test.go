@@ -15,6 +15,7 @@ import (
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/apitest"
 	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/exitcode"
 )
 
 func TestRequestCommand(t *testing.T) {
@@ -267,6 +268,27 @@ func TestRequestRequiresSealedKeyProvider(t *testing.T) {
 
 // A correctly enrolled external namespace returns an envelope through the
 // production registered-client path and closes its runtime.
+func TestRequestRejectsConnectorScopedDevice(t *testing.T) {
+	srv := apitest.NewServer(t)
+	dir := connectorStateTestDir(t)
+	if err := connectorstate.EstablishExternalRuntimeMode(context.Background(), dir); err != nil {
+		t.Fatal(err)
+	}
+	state := bootstrapRegisteredState(t)
+	state.EnrollmentCredentialKind = string(qurl.RegistrationKeyKindConnectorBootstrap)
+	res := runCLI(t, &runOpts{nativeClient: true, env: externalLoginEnv(), shareStateDir: dir, args: []string{"request", "GET", "/v1/resources", "--endpoint", srv.URL, "--supervision", "external", "-o", "json"}, openNativeRuntime: func(context.Context, connectorshare.NativeRuntimeConfig) (registeredNativeRuntime, error) {
+		return &bootstrapNativeRuntime{store: &bootstrapAgentStateStore{state: state}}, nil
+	}})
+	if res.code != exitcode.Auth || res.stdout.Len() != 0 {
+		t.Fatalf("exit %d: %s %s", res.code, res.stdout.String(), res.stderr.String())
+	}
+	for _, req := range srv.Requests() {
+		if req.Path == "/v1/resources" {
+			t.Fatal("forwarded the request for a connector-scoped device")
+		}
+	}
+}
+
 func TestRequestEnrolledExternalNamespaceReturnsEnvelope(t *testing.T) {
 	srv := apitest.NewServer(t)
 	dir := connectorStateTestDir(t)

@@ -122,7 +122,7 @@ func validateRequestInvocation(opts *globalOpts, method, target, idempotencyKey 
 func openRequestClient(ctx context.Context, opts *globalOpts) (qurlapi.Client, error) {
 	client, err := opts.newClient(ctx)
 	switch {
-	case errors.Is(err, auth.ErrAnonymousRecovery) && !errors.Is(err, auth.ErrExternalAnonymousRecovery):
+	case errors.Is(err, auth.ErrAnonymousRecovery):
 		return nil, fmt.Errorf("%w: %w", auth.ErrExternalAnonymousRecovery, err)
 	case errors.Is(err, auth.ErrNoCredential) && !errors.Is(err, auth.ErrAnonymousRecovery) && !errors.Is(err, auth.ErrAccountRecoveryState):
 		return nil, fmt.Errorf("%w: %w", auth.ErrExternalDeviceMissing, err)

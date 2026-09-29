@@ -18,10 +18,10 @@ const (
 	msgAccountRecoveryState       = "Account recovery needs a new device state directory."
 	hintAccountRecoveryState      = "Hint: keep existing state intact. Run `QURL_CONNECTOR_STATE_DIR=~/.qurl-recovered qurl account recover` with an unused directory."
 	msgAnonymousRecovery          = "This device cannot recover access with its current credential."
-	msgExternalDeviceMissing      = "This state directory has no enrolled device."
-	hintExternalAnonymousRecovery = "Hint: keep this state directory intact. The supervising app can restore its saved copy of this state, or enroll a new state directory with `qurl login --anonymous` or `qurl login --enrollment-token-file <path>` under `--supervision external`."
-	hintExternalDeviceMissing     = "Hint: enroll this state directory first with `qurl login --anonymous` or `qurl login --enrollment-token-file <path>` under `--supervision external`."
 	hintAnonymousRecovery         = "Hint: keep existing state intact. If you linked an account, run `qurl account recover` with a new QURL_CONNECTOR_STATE_DIR. Otherwise restore a saved copy of this device state; a new identity cannot recover these resources."
+	hintExternalAnonymousRecovery = "Hint: keep this state directory intact. The supervising app can restore its saved copy of this state, or enroll a new state directory with `qurl login --anonymous` or `qurl login --enrollment-token-file <path>` under `--supervision external`."
+	msgExternalDeviceMissing      = "This state directory has no enrolled device."
+	hintExternalDeviceMissing     = "Hint: enroll this state directory first with `qurl login --anonymous` or `qurl login --enrollment-token-file <path>` under `--supervision external`."
 	// msgNoCredential renders the explicit account-key bootstrap condition.
 	msgNoCredential = "This machine is not enrolled with qURL."
 

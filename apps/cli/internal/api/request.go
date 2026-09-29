@@ -132,7 +132,8 @@ const (
 // requestRoutes mirrors qurl-go's registeredAgentResourceRouteAllowed, minus
 // POST /v1/api-keys: a supervisor must never mint a portable credential that
 // outlives the sealed namespace. Keys are route patterns, with {id} for a
-// resource, qURL, or session identifier.
+// resource, qURL, or session identifier. The CLI README lists these routes for
+// supervisor authors; update it with any change here.
 var requestRoutes = map[string][]string{
 	"/v1/account/link":                   {http.MethodPost},
 	"/v1/qurls":                          {http.MethodPost},
