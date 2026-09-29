@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.8](https://github.com/layervai/qurl-integrations/compare/discord-v0.2.7...discord-v0.2.8) (2026-09-29)
+
+
+### Bug Fixes
+
+* **discord:** retain owned detector child before smoke admission ([#1529](https://github.com/layervai/qurl-integrations/issues/1529)) ([95db70b](https://github.com/layervai/qurl-integrations/commit/95db70bf49972044b64b2563944001ce253b8e1d))
+
 ## [0.2.7](https://github.com/layervai/qurl-integrations/compare/discord-v0.2.6...discord-v0.2.7) (2026-09-28)
 
 
