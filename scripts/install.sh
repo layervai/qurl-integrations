@@ -204,20 +204,29 @@ $(printf '%s\n' "$PAGE_FLAT" \
     # ~/.local that already exists group-writable (pip, pipx and npm create it
     # under umask 002) still makes every qurl command refuse to run, so say so
     # now rather than at the first publish. Never chmod the user's directory.
-    if [ -n "${XDG_STATE_HOME:-}" ]; then
-        STATE_DIRS="$XDG_STATE_HOME"
-    elif [ -n "${HOME:-}" ]; then
-        STATE_DIRS="$HOME $HOME/.local $HOME/.local/state"
-    else
-        STATE_DIRS=""
-    fi
-    for dir in $STATE_DIRS; do
-        if group_or_other_writable "$dir"; then
+    warn_if_unsafe() {
+        if group_or_other_writable "$1"; then
             echo "" >&2
-            echo "Warning: ${dir} is writable by other users, so qurl will refuse to keep its identity under it." >&2
-            echo "  Fix it with: chmod go-w \"${dir}\"" >&2
+            echo "Warning: $1 is writable by other users, so qurl will refuse to keep its identity under it." >&2
+            echo "  Fix it with: chmod go-w \"$1\"" >&2
         fi
-    done
+    }
+    if [ -n "${XDG_STATE_HOME:-}" ]; then
+        warn_if_unsafe "$(dirname "$XDG_STATE_HOME")"
+        warn_if_unsafe "$XDG_STATE_HOME"
+    elif [ -n "${HOME:-}" ]; then
+        warn_if_unsafe "$HOME"
+        warn_if_unsafe "$HOME/.local"
+        warn_if_unsafe "$HOME/.local/state"
+    fi
+    # Other users able to write the install directory could replace the
+    # binary. /usr/local/bin is admin-group-writable by design on Homebrew
+    # Macs, so only the per-user directory is checked.
+    if [ "$INSTALL_DIR" = "${HOME:-}/.local/bin" ] && group_or_other_writable "$INSTALL_DIR"; then
+        echo "" >&2
+        echo "Warning: ${INSTALL_DIR} is writable by other users, who could replace qurl." >&2
+        echo "  Fix it with: chmod go-w \"${INSTALL_DIR}\"" >&2
+    fi
 
     # An older qurl earlier on PATH (for example a previous sudo install in
     # /usr/local/bin) would shadow this one.

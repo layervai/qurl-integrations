@@ -132,7 +132,7 @@ run_case() {
   set +e
   local output
   output="$(umask "${RUN_UMASK:-022}" && cd "$fixdir" \
-    && env -u INSTALL_DIR -u HOME "${env_args[@]}" sh "$installer" 2>&1)"
+    && env -u INSTALL_DIR -u HOME -u XDG_STATE_HOME "${env_args[@]}" sh "$installer" 2>&1)"
   local status="$?"
   set -e
   LAST_OUTPUT="$output"
@@ -467,6 +467,17 @@ RUN_INSTALL_DIR=- run_case 0 "chmod go-w" 0.2.0
   || { echo "$fixdir: expected the unsafe ~/.local warning" >&2; exit 1; }
 mode="$(stat -c %a "$fixdir/home/.local" 2>/dev/null || stat -f %Lp "$fixdir/home/.local")"
 [[ "${mode: -3}" == "775" ]] || { echo "$fixdir: installer changed ~/.local mode to $mode" >&2; exit 1; }
+
+# --- Case 22b: a HOME containing spaces is checked as one path (no word
+# splitting), and a group-writable ~/.local/state is flagged.
+new_fixdir home-with-spaces
+make_release_assets "$fixdir" 0.2.0
+mkdir -p "$fixdir/my home/.local/state"
+chmod 775 "$fixdir/my home/.local/state"
+RUN_INSTALL_DIR=- RUN_HOME="$fixdir/my home" run_case 0 "Installed qurl v0.2.0" 0.2.0
+[[ "$LAST_OUTPUT" == *"$fixdir/my home/.local/state is writable by other users"* ]] \
+  || { echo "$fixdir: expected the ~/.local/state warning" >&2; exit 1; }
+chmod 755 "$fixdir/my home/.local/state"
 
 # --- Case 23: an older qurl earlier on PATH is reported as shadowing.
 new_fixdir shadowed-by-older-install
