@@ -123,20 +123,24 @@ run_case() {
   local install_dir="${RUN_INSTALL_DIR:-$fixdir/bin}"
   local -a env_args=(
     FIXDIR="$fixdir" PATH="$run_path" VERSION="$version"
-    HOME="${RUN_HOME:-$fixdir/home}"
     _QURL_INSTALL_SYSTEM_DIR="${RUN_SYSTEM_DIR:-$fixdir/no-system-dir}"
   )
   [[ "$install_dir" == "-" ]] || env_args+=(INSTALL_DIR="$install_dir")
+  # RUN_HOME="-" leaves HOME unset.
+  [[ "${RUN_HOME:-}" == "-" ]] || env_args+=(HOME="${RUN_HOME:-$fixdir/home}")
 
   set +e
   local output
   output="$(umask "${RUN_UMASK:-022}" && cd "$fixdir" \
-    && env -u INSTALL_DIR "${env_args[@]}" sh "$installer" 2>&1)"
+    && env -u INSTALL_DIR -u HOME "${env_args[@]}" sh "$installer" 2>&1)"
   local status="$?"
   set -e
   LAST_OUTPUT="$output"
 
-  if [[ "$status" != "$expected_status" ]]; then
+  # "nonzero": sh implementations differ on the exit code of ${VAR:?}.
+  if [[ "$expected_status" == "nonzero" && "$status" != "0" ]]; then
+    :
+  elif [[ "$status" != "$expected_status" ]]; then
     printf '%s: expected exit %s, got %s\n%s\n' "$name" "$expected_status" "$status" "$output" >&2
     exit 1
   fi
@@ -378,6 +382,8 @@ assert_no_sudo
 new_fixdir fallback-user-dir
 add_sudo_stub
 make_release_assets "$fixdir" 0.2.0
+printf '#!/bin/sh\necho 1000\n' > "$fixdir/id"  # non-root, even if the suite runs as root
+chmod +x "$fixdir/id"
 RUN_UMASK=002 RUN_INSTALL_DIR=- run_case 0 "Installed qurl v0.2.0 to $fixdir/home/.local/bin/qurl" 0.2.0
 for dir in "$fixdir/home/.local" "$fixdir/home/.local/bin"; do
   mode="$(stat -c %a "$dir" 2>/dev/null || stat -f %Lp "$dir")"
@@ -441,12 +447,14 @@ fi
 # --- Case 21: run as root (curl ... | sudo sh) with no system dir yet -> the
 # system dir is created and used. An `id` stub reports uid 0.
 new_fixdir root-creates-system-dir
+add_sudo_stub
 make_release_assets "$fixdir" 0.2.0
 printf '#!/bin/sh\necho 0\n' > "$fixdir/id"
 chmod +x "$fixdir/id"
 RUN_INSTALL_DIR=- RUN_SYSTEM_DIR="$fixdir/new-system-bin" \
   run_case 0 "Installed qurl v0.2.0 to $fixdir/new-system-bin/qurl" 0.2.0
 assert_installed 0.2.0 "$fixdir/new-system-bin"
+assert_no_sudo
 
 # --- Case 22: a pre-existing group-writable ~/.local (pip/pipx/npm under
 # umask 002) is flagged with the fix; the installer never chmods it.
@@ -467,5 +475,12 @@ mkdir -p "$fixdir/old-bin"
 printf '#!/bin/sh\necho old\n' > "$fixdir/old-bin/qurl"
 chmod +x "$fixdir/old-bin/qurl"
 run_case 0 "comes first on your PATH" 0.2.0 "$fixdir/old-bin:$fixdir:$PATH"
+
+# --- Case 24: HOME unset and no INSTALL_DIR -> clear error, nothing installed.
+new_fixdir home-unset
+make_release_assets "$fixdir" 0.2.0
+printf '#!/bin/sh\necho 1000\n' > "$fixdir/id"
+chmod +x "$fixdir/id"
+RUN_INSTALL_DIR=- RUN_HOME=- run_case nonzero "HOME is not set; set INSTALL_DIR" 0.2.0
 
 echo "install.sh tests passed (${case_no} cases)"

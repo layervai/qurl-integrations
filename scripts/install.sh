@@ -2,8 +2,9 @@
 # qURL CLI installer
 # Usage: curl -fsSL https://raw.githubusercontent.com/layervai/qurl-integrations/main/scripts/install.sh | sh
 #
-# Install location: $INSTALL_DIR when set (created if missing), otherwise
-# /usr/local/bin when it is writable, otherwise ~/.local/bin. The installer
+# Install location: $INSTALL_DIR when set (created if missing); otherwise
+# /usr/local/bin when running as root (created if missing) or when it is
+# writable; otherwise ~/.local/bin. The installer
 # never runs sudo, so it cannot stall on a password prompt: coding agents,
 # CI jobs, and fresh machines without Homebrew all complete unattended. For a
 # system-wide install, run the script itself with sudo.
@@ -53,6 +54,8 @@ main() {
             INSTALL_DIR="${HOME:?HOME is not set; set INSTALL_DIR}/.local/bin"
         fi
     fi
+    # Textual PATH/shadow checks below compare paths; drop a trailing slash.
+    [ "$INSTALL_DIR" = "/" ] || INSTALL_DIR="${INSTALL_DIR%/}"
 
     # Detect OS and architecture
     OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
@@ -201,15 +204,20 @@ $(printf '%s\n' "$PAGE_FLAT" \
     # ~/.local that already exists group-writable (pip, pipx and npm create it
     # under umask 002) still makes every qurl command refuse to run, so say so
     # now rather than at the first publish. Never chmod the user's directory.
-    if [ -n "${HOME:-}" ] && [ -z "${XDG_STATE_HOME:-}" ]; then
-        for dir in "$HOME/.local" "$HOME/.local/state"; do
-            if group_or_other_writable "$dir"; then
-                echo "" >&2
-                echo "Warning: ${dir} is writable by other users, so qurl will refuse to keep its identity under it." >&2
-                echo "  Fix it with: chmod go-w \"${dir}\"" >&2
-            fi
-        done
+    if [ -n "${XDG_STATE_HOME:-}" ]; then
+        STATE_DIRS="$XDG_STATE_HOME"
+    elif [ -n "${HOME:-}" ]; then
+        STATE_DIRS="$HOME $HOME/.local $HOME/.local/state"
+    else
+        STATE_DIRS=""
     fi
+    for dir in $STATE_DIRS; do
+        if group_or_other_writable "$dir"; then
+            echo "" >&2
+            echo "Warning: ${dir} is writable by other users, so qurl will refuse to keep its identity under it." >&2
+            echo "  Fix it with: chmod go-w \"${dir}\"" >&2
+        fi
+    done
 
     # An older qurl earlier on PATH (for example a previous sudo install in
     # /usr/local/bin) would shadow this one.
