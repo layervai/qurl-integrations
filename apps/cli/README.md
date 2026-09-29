@@ -252,7 +252,8 @@ account API-key configuration, so it never enrolls or recovers a device
 implicitly. For POST, PUT and PATCH, pipe an optional JSON body through stdin;
 when there is no body, redirect stdin from the null device (`/dev/null`, or
 `NUL` on Windows) rather than closing it, because a closed stdin is a read
-error. GET and DELETE never read stdin. Responses have
+error. The CLI sets no timeout, so impose a deadline on the process; it covers
+both the stdin read and the HTTP call. GET and DELETE never read stdin. Responses have
 `{status, headers, body}`; headers contain only `content-type`, `retry-after`
 and `x-request-id`. Empty responses use `body: null`; non-JSON responses use a
 string. HTTP failures also return this envelope with exit zero; local and

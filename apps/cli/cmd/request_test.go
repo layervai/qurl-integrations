@@ -99,7 +99,7 @@ func TestRequestReportsStdinReadError(t *testing.T) {
 		t.Error("opened device after stdin failure")
 		return nil, errors.New("unexpected device open")
 	}})
-	if res.code == 0 || !strings.Contains(res.stderr.String(), "could not read request body: stdin is closed") {
+	if res.code != 2 || !strings.Contains(res.stderr.String(), "could not read request body: stdin is closed") {
 		t.Fatalf("exit %d: %s", res.code, res.stderr.String())
 	}
 }

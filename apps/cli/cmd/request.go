@@ -32,8 +32,9 @@ protects only routes where the qURL service implements idempotency.
 
 Only externally supervised namespaces are accepted, so the command never
 enrolls a device implicitly. POST, PUT, and PATCH read standard input to end
-of file; redirect it from the null device when there is no body, and impose a
-deadline on the process. GET and DELETE never read standard input. The body
+of file; redirect it from the null device when there is no body. The CLI sets no
+timeout of its own, so impose a deadline on the process; it bounds both the
+stdin read and the HTTP call. GET and DELETE never read standard input. The body
 limit is 1 MiB including surrounding whitespace.
 
 The envelope is returned unvalidated. For POST /v1/account/link, record the
@@ -75,7 +76,7 @@ func readRequestBody(streams *output.Streams, method string) ([]byte, error) {
 	}
 	body, err := io.ReadAll(io.LimitReader(streams.In, qurlapi.MaxRequestBody+1))
 	if err != nil {
-		return nil, fmt.Errorf("could not read request body: %w", err)
+		return nil, exitcode.UsageError(fmt.Errorf("could not read request body: %w", err))
 	}
 	if len(body) > qurlapi.MaxRequestBody {
 		return nil, exitcode.UsageError(fmt.Errorf("request body exceeds %d MiB including surrounding whitespace", qurlapi.MaxRequestBody>>20))
@@ -124,7 +125,7 @@ func openRequestClient(ctx context.Context, opts *globalOpts) (qurlapi.Client, e
 	switch {
 	case errors.Is(err, auth.ErrAnonymousRecovery):
 		return nil, fmt.Errorf("%w: %w", auth.ErrExternalAnonymousRecovery, err)
-	case errors.Is(err, auth.ErrNoCredential) && !errors.Is(err, auth.ErrAnonymousRecovery) && !errors.Is(err, auth.ErrAccountRecoveryState):
+	case errors.Is(err, auth.ErrNoCredential) && !errors.Is(err, auth.ErrAccountRecoveryState):
 		return nil, fmt.Errorf("%w: %w", auth.ErrExternalDeviceMissing, err)
 	case err != nil:
 		return nil, err

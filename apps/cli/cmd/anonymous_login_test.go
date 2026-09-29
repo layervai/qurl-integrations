@@ -21,6 +21,8 @@ func TestAnonymousExternalLogin(t *testing.T) {
 	res := runCLI(t, &runOpts{
 		args: []string{"login", "--anonymous", "--supervision", "external", "--endpoint", srv.URL, "-o", "json"},
 		env:  externalLoginEnv(), shareStateDir: dir,
+		// Anonymous login must never read an account key from stdin.
+		stdin: failingReader{},
 		openNativeRuntime: func(ctx context.Context, cfg connectorshare.NativeRuntimeConfig) (registeredNativeRuntime, error) {
 			if err := connectorstate.RequireRuntimeSupervision(dir, connectorstate.RuntimeSupervisionExternal); err != nil {
 				t.Fatal(err)
