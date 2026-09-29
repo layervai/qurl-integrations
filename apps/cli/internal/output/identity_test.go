@@ -10,6 +10,8 @@ import (
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
 )
 
+const fixtureDeviceKey = "dGVzdC1kZXZpY2UtcHVibGljLWtleQ=="
+
 func fixtureIdentity() *qurlapi.Identity {
 	return &qurlapi.Identity{
 		OwnerID:  "own_output_test",
@@ -19,7 +21,6 @@ func fixtureIdentity() *qurlapi.Identity {
 			Kind:   "api_key",
 			Scopes: []string{"qurl:read", "qurl:write"},
 		},
-		DevicePublicKeyB64: "dGVzdC1kZXZpY2UtcHVibGljLWtleQ==",
 	}
 }
 
@@ -30,10 +31,10 @@ func TestWhoAmIProjections(t *testing.T) {
 	t.Run("text", func(t *testing.T) {
 		var out, errBuf bytes.Buffer
 		p := newTestPrinter(&out, &errBuf, FormatText, false, false, false)
-		if err := p.WhoAmI(fixtureIdentity()); err != nil {
+		if err := p.WhoAmI(fixtureIdentity(), fixtureDeviceKey); err != nil {
 			t.Fatal(err)
 		}
-		for _, want := range []string{"own_output_test", "key_outputtest01", "qurl:read, qurl:write", "never", "Device public key:", "dGVzdC1kZXZpY2UtcHVibGljLWtleQ=="} {
+		for _, want := range []string{"own_output_test", "key_outputtest01", "qurl:read, qurl:write", "never", "Device public key:", fixtureDeviceKey} {
 			if !strings.Contains(out.String(), want) {
 				t.Errorf("text projection missing %q:\n%s", want, out.String())
 			}
@@ -48,7 +49,7 @@ func TestWhoAmIProjections(t *testing.T) {
 			"Kind:               api_key\n" +
 			"Scopes:             qurl:read, qurl:write\n" +
 			"Expires:            never\n" +
-			"Device public key:  dGVzdC1kZXZpY2UtcHVibGljLWtleQ==\n"
+			"Device public key:  " + fixtureDeviceKey + "\n"
 		if out.String() != want {
 			t.Errorf("text projection =\n%s\nwant\n%s", out.String(), want)
 		}
@@ -60,7 +61,7 @@ func TestWhoAmIProjections(t *testing.T) {
 		id := fixtureIdentity()
 		expiry := fixedClock().Add(48 * time.Hour)
 		id.Key.ExpiresAt = &expiry
-		if err := p.WhoAmI(id); err != nil {
+		if err := p.WhoAmI(id, fixtureDeviceKey); err != nil {
 			t.Fatal(err)
 		}
 		if !strings.Contains(out.String(), "(in 2d)") {
@@ -71,7 +72,7 @@ func TestWhoAmIProjections(t *testing.T) {
 	t.Run("keyless identity", func(t *testing.T) {
 		var out, errBuf bytes.Buffer
 		p := newTestPrinter(&out, &errBuf, FormatText, false, false, false)
-		if err := p.WhoAmI(&qurlapi.Identity{OwnerID: "own_jwt", AuthType: "jwt"}); err != nil {
+		if err := p.WhoAmI(&qurlapi.Identity{OwnerID: "own_jwt", AuthType: "jwt"}, ""); err != nil {
 			t.Fatal(err)
 		}
 		if strings.Contains(out.String(), "Key:") || strings.Contains(out.String(), "Device public key:") {
@@ -82,7 +83,7 @@ func TestWhoAmIProjections(t *testing.T) {
 	t.Run("quiet", func(t *testing.T) {
 		var out, errBuf bytes.Buffer
 		p := newTestPrinter(&out, &errBuf, FormatText, true, false, false)
-		if err := p.WhoAmI(fixtureIdentity()); err != nil {
+		if err := p.WhoAmI(fixtureIdentity(), fixtureDeviceKey); err != nil {
 			t.Fatal(err)
 		}
 		if out.String() != "own_output_test\n" {
@@ -93,7 +94,7 @@ func TestWhoAmIProjections(t *testing.T) {
 	t.Run("json", func(t *testing.T) {
 		var out, errBuf bytes.Buffer
 		p := newTestPrinter(&out, &errBuf, FormatJSON, false, false, false)
-		if err := p.WhoAmI(fixtureIdentity()); err != nil {
+		if err := p.WhoAmI(fixtureIdentity(), fixtureDeviceKey); err != nil {
 			t.Fatal(err)
 		}
 		var doc struct {
@@ -109,7 +110,7 @@ func TestWhoAmIProjections(t *testing.T) {
 			t.Fatal(err)
 		}
 		if doc.OwnerID != "own_output_test" || doc.APIKey == nil || doc.APIKey.KeyID != "key_outputtest01" ||
-			doc.DevicePublicKeyB64 != "dGVzdC1kZXZpY2UtcHVibGljLWtleQ==" {
+			doc.DevicePublicKeyB64 != fixtureDeviceKey {
 			t.Errorf("json projection = %+v", doc)
 		}
 		if strings.Contains(out.String(), "key_prefix") {
@@ -118,13 +119,40 @@ func TestWhoAmIProjections(t *testing.T) {
 	})
 }
 
+// TestWhoAmIRendersDeviceKey pins that the predicate whoami uses to skip the
+// state read agrees with what WhoAmI actually renders, for every projection.
+func TestWhoAmIRendersDeviceKey(t *testing.T) {
+	for _, tc := range []struct {
+		format Format
+		quiet  bool
+		want   bool
+	}{
+		{FormatText, false, true},
+		{FormatText, true, false},
+		{FormatJSON, false, true},
+		{FormatJSON, true, true},
+	} {
+		var out, errBuf bytes.Buffer
+		p := newTestPrinter(&out, &errBuf, tc.format, tc.quiet, false, false)
+		if got := p.WhoAmIRendersDeviceKey(); got != tc.want {
+			t.Errorf("format %v quiet %v: WhoAmIRendersDeviceKey = %v, want %v", tc.format, tc.quiet, got, tc.want)
+		}
+		if err := p.WhoAmI(fixtureIdentity(), fixtureDeviceKey); err != nil {
+			t.Fatal(err)
+		}
+		if got := strings.Contains(out.String(), fixtureDeviceKey); got != tc.want {
+			t.Errorf("format %v quiet %v: WhoAmI rendered key = %v, but WhoAmIRendersDeviceKey = %v", tc.format, tc.quiet, got, tc.want)
+		}
+	}
+}
+
 // TestWhoAmIJSONOmitsAnAbsentDevicePublicKey pins the omitempty half of the
 // contract: without native device state there is no device_public_key_b64, so
 // a supervisor cannot persist "" as if it were a key.
 func TestWhoAmIJSONOmitsAnAbsentDevicePublicKey(t *testing.T) {
 	var out, errBuf bytes.Buffer
 	p := newTestPrinter(&out, &errBuf, FormatJSON, false, false, false)
-	if err := p.WhoAmI(&qurlapi.Identity{OwnerID: "own_jwt", AuthType: "jwt"}); err != nil {
+	if err := p.WhoAmI(&qurlapi.Identity{OwnerID: "own_jwt", AuthType: "jwt"}, ""); err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(out.String(), "device_public_key_b64") {

@@ -12,8 +12,8 @@ import (
 // Identity renderings for whoami and login. The identity is who the
 // credential is — owner, auth type, and the key's non-secret identity. There
 // is deliberately no plan or usage data here; the platform's identity echo is
-// authentication state only. whoami adds the device public key, which comes
-// from local agent state, not the echo.
+// authentication state only. whoami also renders the device public key, which
+// comes from local agent state and is passed in separately.
 
 type identityKeyJSON struct {
 	KeyID     string     `json:"key_id"`
@@ -52,24 +52,35 @@ func identityKey(id *qurlapi.Identity) *identityKeyJSON {
 	}
 }
 
+// WhoAmIRendersDeviceKey reports whether WhoAmI's projection for this printer
+// includes the device public key. It mirrors WhoAmI's switch: JSON wins over
+// --quiet, and plain --quiet prints only the owner id. Callers use it to skip a
+// state read whose result would be discarded.
+func (p *Printer) WhoAmIRendersDeviceKey() bool {
+	return p.format == FormatJSON || !p.quiet
+}
+
 // WhoAmI renders the identity behind the configured credential. Identity is
 // data (scripts pipe it), so every projection goes to stdout; --quiet prints
 // just the owner id.
-func (p *Printer) WhoAmI(id *qurlapi.Identity) error {
+//
+// devicePublicKeyB64 is this machine's registered-device public key from local
+// agent state, never from /v1/me; "" omits the row and the JSON field.
+func (p *Printer) WhoAmI(id *qurlapi.Identity, devicePublicKeyB64 string) error {
 	switch {
 	case p.format == FormatJSON:
 		return p.writeJSON(whoamiJSON{
-			OwnerID: id.OwnerID, AuthType: id.AuthType, APIKey: identityKey(id), DevicePublicKeyB64: id.DevicePublicKeyB64,
+			OwnerID: id.OwnerID, AuthType: id.AuthType, APIKey: identityKey(id), DevicePublicKeyB64: devicePublicKeyB64,
 		})
 	case p.quiet:
 		_, err := fmt.Fprintln(p.out, id.OwnerID)
 		return err
 	default:
-		return p.whoamiText(id)
+		return p.whoamiText(id, devicePublicKeyB64)
 	}
 }
 
-func (p *Printer) whoamiText(id *qurlapi.Identity) error {
+func (p *Printer) whoamiText(id *qurlapi.Identity, devicePublicKeyB64 string) error {
 	tw := tabwriter.NewWriter(p.out, 0, 0, 2, ' ', 0)
 	ew := &errWriter{w: tw}
 	ew.printf("%s\t%s\n", p.bold("Owner:"), id.OwnerID)
@@ -80,8 +91,8 @@ func (p *Printer) whoamiText(id *qurlapi.Identity) error {
 		ew.printf("%s\t%s\n", p.bold("Scopes:"), strings.Join(k.Scopes, ", "))
 		ew.printf("%s\t%s\n", p.bold("Expires:"), p.keyExpiry(k.ExpiresAt))
 	}
-	if id.DevicePublicKeyB64 != "" {
-		ew.printf("%s\t%s\n", p.bold("Device public key:"), id.DevicePublicKeyB64)
+	if devicePublicKeyB64 != "" {
+		ew.printf("%s\t%s\n", p.bold("Device public key:"), devicePublicKeyB64)
 	}
 	return ew.flush(tw)
 }

@@ -113,7 +113,10 @@ type globalOpts struct {
 	registeredClient     qurlapi.Client
 	registeredIdentity   *qurlapi.Identity
 	nativeRuntime        registeredNativeRuntime
-	warnedCleartextAuth  bool
+	// nativeStateStore is the store nativeRuntime handed off when the device
+	// client was built. whoami reads the device public key from it.
+	nativeStateStore    qurl.AgentStateStore
+	warnedCleartextAuth bool
 
 	// Resolved in PersistentPreRunE.
 	resolved           bool
@@ -783,11 +786,13 @@ func (o *globalOpts) openNativeRegisteredClient(
 			retErr = errors.Join(retErr, nativeRuntime.Close())
 		}
 	}()
+	var store qurl.AgentStateStore
 	openDeviceClient := func() (qurlapi.Client, error) {
-		store, handoffErr := nativeRuntime.Handoff()
+		handedOff, handoffErr := nativeRuntime.Handoff()
 		if handoffErr != nil {
 			return nil, handoffErr
 		}
+		store = handedOff
 		return o.openRegisteredDeviceClient(ctx, origin, store)
 	}
 	client, err := openDeviceClient()
@@ -813,7 +818,7 @@ func (o *globalOpts) openNativeRegisteredClient(
 	if err := o.bindDeviceOwner(ctx, stateDir, deviceIdentity); err != nil {
 		return nil, nil, err
 	}
-	o.nativeRuntime = nativeRuntime
+	o.nativeRuntime, o.nativeStateStore = nativeRuntime, store
 	return client, deviceIdentity, nil
 }
 
@@ -888,7 +893,7 @@ func (o *globalOpts) openNativeExternalRegisteredClient(
 	if err := o.bindDeviceOwner(ctx, stateDir, deviceIdentity); err != nil {
 		return nil, nil, err
 	}
-	o.nativeRuntime = nativeRuntime
+	o.nativeRuntime, o.nativeStateStore = nativeRuntime, store
 	return client, deviceIdentity, nil
 }
 
@@ -980,27 +985,23 @@ func oneShotEnrollmentToken(path string) func(context.Context, qurl.AgentEnrollm
 	}
 }
 
-// attachDevicePublicKey copies the registered device's public key from the
-// native agent state onto id. Only whoami calls it, so other commands never pay
-// for a state read whose result they would not print. The private half and the
-// device API key stay in the store; only the public key is ever surfaced.
-//
-// TODO(upstream-contract): this is a second Handoff after the runtime open
-// built the REST client. qurl-connector's Handoff is assumed idempotent (the
-// login repair path also calls it twice); the in-repo fake cannot prove it.
-func attachDevicePublicKey(ctx context.Context, nativeRuntime registeredNativeRuntime, id *qurlapi.Identity) error {
-	store, err := nativeRuntime.Handoff()
-	if err != nil {
-		return err
-	}
+// devicePublicKey reads the registered device's public key from store. Only
+// whoami calls it, so other commands never pay for a state read whose result
+// they would not print. The private half and the device API key stay in the
+// store. No state is "" with no error; state without a public key is an error,
+// since a registered device should always have one.
+func devicePublicKey(ctx context.Context, store qurl.AgentStateStore) (string, error) {
 	persisted, err := store.LoadAgentState(ctx)
 	if err != nil {
-		return err
+		return "", err
 	}
-	if persisted != nil {
-		id.DevicePublicKeyB64 = persisted.PublicKeyB64
+	if persisted == nil {
+		return "", nil
 	}
-	return nil
+	if strings.TrimSpace(persisted.PublicKeyB64) == "" {
+		return "", errors.New("device state records no public key")
+	}
+	return persisted.PublicKeyB64, nil
 }
 
 // identityKeyID is the non-secret identifier of the credential behind id.
@@ -1049,6 +1050,7 @@ func (o *globalOpts) closeAPIClient() error {
 	}
 	err := o.nativeRuntime.Close()
 	o.nativeRuntime = nil
+	o.nativeStateStore = nil
 	o.registeredClient = nil
 	o.registeredIdentity = nil
 	return err

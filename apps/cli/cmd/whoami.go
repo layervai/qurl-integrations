@@ -4,8 +4,6 @@ import (
 	"errors"
 
 	"github.com/spf13/cobra"
-
-	"github.com/layervai/qurl-integrations/apps/cli/internal/output"
 )
 
 // whoamiCmd reports the account and device identity behind the registered
@@ -46,23 +44,17 @@ anything.`,
 			if id == nil {
 				return errors.New("qURL account identity response is empty")
 			}
-			// Plain --quiet prints only the owner id, so it skips the state read.
-			// JSON wins over --quiet in the printer, so JSON still reads it.
-			rendersDeviceKey := opts.resolvedFormat == output.FormatJSON || !opts.quiet
-			if opts.nativeRuntime != nil && rendersDeviceKey {
-				// Copy so the cached registeredIdentity stays a pure /v1/me echo.
-				// The shallow copy is safe only because attach writes a string
-				// field; revisit if it ever writes a slice or pointer.
-				shown := *id
-				if err := attachDevicePublicKey(cmd.Context(), opts.nativeRuntime, &shown); err != nil {
+			printer := opts.printer()
+			var deviceKey string
+			if opts.nativeStateStore != nil && printer.WhoAmIRendersDeviceKey() {
+				deviceKey, err = devicePublicKey(cmd.Context(), opts.nativeStateStore)
+				if err != nil {
 					// The identity is already complete. A missing key row must not
 					// turn the diagnostic command into a failure.
-					opts.printer().Warnf(msgDevicePublicKeyUnreadable, err)
-				} else {
-					id = &shown
+					printer.Warnf(msgDevicePublicKeyUnreadable, err)
 				}
 			}
-			return opts.printer().WhoAmI(id)
+			return printer.WhoAmI(id, deviceKey)
 		},
 	}
 }
