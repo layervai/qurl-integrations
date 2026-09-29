@@ -72,13 +72,13 @@ const (
 func customerMessages() []string {
 	return []string{
 		msgAccountSetup,
-		msgDevicePublicKeyUnreadable,
-		msgDevicePublicKeyInvalid,
 		msgAccountContinue,
 		msgAccountLinked,
 		msgAccountRecovered,
 		msgAnonymousDevice,
 		msgAnonymousSupervisedDevice,
+		msgDevicePublicKeyUnreadable,
+		msgDevicePublicKeyInvalid,
 		msgAccountChooseOwner,
 		msgAccountOwnerDenied,
 		msgVerifyMismatch,

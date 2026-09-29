@@ -676,8 +676,6 @@ func TestWhoamiDevicePublicKeyReadFailureWarns(t *testing.T) {
 	const unreadable = "could not read the local device public key"
 	const invalid = "the local device state has no valid public key"
 	const escape = "\x1b[31mRED"
-	validKey := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x42}, 32))
-	insertAt := func(s string, i int, sep string) string { return s[:i] + sep + s[i:] }
 	cases := map[string]struct {
 		store *bootstrapAgentStateStore
 		want  string
@@ -686,8 +684,6 @@ func TestWhoamiDevicePublicKeyReadFailureWarns(t *testing.T) {
 		"empty public key":      {withKey(""), invalid},
 		"not base64":            {withKey(escape), invalid},
 		"valid key then escape": {withKey(base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x42}, 32)) + escape), invalid},
-		"carriage return":       {withKey(insertAt(validKey, 10, "\r")), invalid},
-		"line feed":             {withKey(insertAt(validKey, 10, "\n")), invalid},
 		"wrong length":          {withKey(base64.StdEncoding.EncodeToString([]byte("sixteen byte key"))), invalid},
 	}
 	for name, tc := range cases {
@@ -704,6 +700,31 @@ func TestWhoamiDevicePublicKeyReadFailureWarns(t *testing.T) {
 			}
 			if strings.ContainsAny(stdout+stderr, "\x1b\r") || strings.Contains(stderr, "invalid device public key") {
 				t.Fatalf("whoami echoed control bytes from local state or repeated itself:\nstdout %q\nstderr %q", stdout, stderr)
+			}
+		})
+	}
+}
+
+// TestWhoamiDevicePublicKeyIsReencoded pins that whoami prints a key built
+// from the decoded bytes, never the stored string: stray \r or \n (which the
+// decoder skips) cannot reach the terminal, and an unpadded key still shows.
+func TestWhoamiDevicePublicKeyIsReencoded(t *testing.T) {
+	raw := bytes.Repeat([]byte{0x42}, 32)
+	canonical := base64.StdEncoding.EncodeToString(raw)
+	for name, stored := range map[string]string{
+		"carriage return": canonical[:10] + "\r" + canonical[10:],
+		"line feed":       canonical[:10] + "\n" + canonical[10:],
+		"unpadded":        base64.RawStdEncoding.EncodeToString(raw),
+	} {
+		t.Run(name, func(t *testing.T) {
+			state := bootstrapRegisteredState(t)
+			state.PublicKeyB64 = stored
+			code, stdout, stderr := runWhoamiWithStateStore(t, &bootstrapAgentStateStore{state: state})
+			if code != 0 || stderr != "" {
+				t.Fatalf("whoami = %d, stderr %q; want success with no warning", code, stderr)
+			}
+			if !strings.Contains(stdout, "Device public key:  "+canonical+"\n") || strings.Contains(stdout, "\r") {
+				t.Fatalf("whoami stdout = %q, want the canonical key %q and no stray control bytes", stdout, canonical)
 			}
 		})
 	}
