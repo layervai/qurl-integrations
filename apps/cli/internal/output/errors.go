@@ -34,6 +34,13 @@ func RenderError(w io.Writer, err error, color bool) {
 func renderErrorLines(p *Printer, err error) []string {
 	head := p.style(ansiRed+ansiBold, errorPrefix)
 
+	// Local host conditions come first, matching exitcode.hostConditionCode:
+	// a failed compensating API call can be joined onto them, and the local
+	// remedy and exit code must still agree.
+	if lines, ok := hostErrorLines(p, head, err); ok {
+		return lines
+	}
+
 	// Typed service postures come before the generic API-problem rendering:
 	// their chains contain an API error too, but the posture is the message.
 	var apiErr *qurlapi.Error
@@ -59,9 +66,6 @@ func renderErrorLines(p *Printer, err error) []string {
 	}
 	if errors.Is(err, auth.ErrNoCredential) {
 		return []string{head + " " + msgNoCredential, "", "  " + p.dim(hintNoCredential)}
-	}
-	if lines, ok := hostErrorLines(p, head, err); ok {
-		return lines
 	}
 	if lines, ok := connectorErrorLines(p, head, err); ok {
 		return lines

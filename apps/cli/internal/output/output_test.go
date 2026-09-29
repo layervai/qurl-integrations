@@ -1101,3 +1101,17 @@ func TestUnsafeDirectoryRenderingNamesTheDirectoryAndRemedy(t *testing.T) {
 		})
 	}
 }
+
+// TestHostConditionsRenderAheadOfJoinedPostures pins the order exitcode uses:
+// a joined connector_stopped or credential posture must not replace the
+// local remedy that decides the exit code.
+func TestHostConditionsRenderAheadOfJoinedPostures(t *testing.T) {
+	local := &state.UnsafeDirectoryError{Dir: "/home/agent/bin", Mode: 0o775, Err: errors.New("directory component /home/agent/bin has unsafe mode 0775")}
+	for _, joined := range []error{&qurlapi.Error{StatusCode: 409, Code: "connector_stopped"}, auth.ErrNoCredential} {
+		var buf bytes.Buffer
+		RenderError(&buf, errors.Join(local, joined), false)
+		if !strings.Contains(buf.String(), "chmod go-w /home/agent/bin") {
+			t.Fatalf("joined %v replaced the local remedy:\n%s", joined, buf.String())
+		}
+	}
+}
