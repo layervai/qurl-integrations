@@ -5,6 +5,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,6 +16,7 @@ import (
 
 	connectoragentstate "github.com/layervai/qurl-connector/pkg/agentstate"
 
+	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/output"
 )
 
@@ -38,10 +41,23 @@ func TestRunExplainsConnectorUnsafeDirectory(t *testing.T) {
 	stateDir := filepath.Join(loose, "state")
 	t.Setenv("QURL_CONNECTOR_STATE_DIR", stateDir)
 
-	var stderr bytes.Buffer
 	// No real config directory or ambient QURL_* environment, like runCLI.
 	// The state override stays in the process environment above because
 	// state.ResolveDir reads it there.
+	for name, apiErr := range map[string]*qurlapi.Error{
+		"local refusal":                    nil,
+		"unrelated API error joined on it": {StatusCode: 500, Title: "internal error"},
+	} {
+		t.Run(name, func(t *testing.T) { runUnsafeDirectoryCommand(t, stateDir, loose, apiErr) })
+	}
+}
+
+// runUnsafeDirectoryCommand runs a command returning the real connector
+// refusal, optionally joined with a failed compensating API call, and
+// asserts the local remedy and exit code survive.
+func runUnsafeDirectoryCommand(t *testing.T, stateDir, loose string, apiErr *qurlapi.Error) {
+	t.Helper()
+	var stderr bytes.Buffer
 	root, opts := newRoot("test", &output.Streams{In: strings.NewReader(""), Out: &bytes.Buffer{}, Err: &stderr}, func(g *globalOpts) {
 		g.configDir = t.TempDir()
 		g.lookupEnv = func(key string) (string, bool) {
@@ -55,7 +71,11 @@ func TestRunExplainsConnectorUnsafeDirectory(t *testing.T) {
 		Use:    "open-state",
 		Hidden: true,
 		RunE: func(*cobra.Command, []string) error {
-			return connectoragentstate.ValidateSDKStoreLayout(stateDir)
+			err := connectoragentstate.ValidateSDKStoreLayout(stateDir)
+			if apiErr != nil {
+				err = errors.Join(err, fmt.Errorf("turn sharing off: %w", apiErr))
+			}
+			return err
 		},
 	})
 	root.SetArgs([]string{"open-state"})

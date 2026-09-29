@@ -118,6 +118,12 @@ func TestExplainUnsafeDirectoryLeavesOtherErrorsAlone(t *testing.T) {
 			t.Fatalf("ExplainUnsafeDirectory rewrote qurl-go's %v", sentinel)
 		}
 	}
+	// A joined error naming a directory that is fine now and one that is
+	// loose names the loose one, not merely the first.
+	var joined *UnsafeDirectoryError
+	if !errors.As(ExplainUnsafeDirectory(errors.Join(refusal(private), refusal(loose))), &joined) || joined.Dir != loose {
+		t.Fatalf("joined refusal named %#v, want %s", joined, loose)
+	}
 	if ExplainUnsafeDirectory(nil) != nil {
 		t.Fatal("nil must stay nil")
 	}

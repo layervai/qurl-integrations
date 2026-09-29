@@ -63,21 +63,30 @@ func ExplainUnsafeDirectory(err error) error {
 		errors.Is(err, qurl.ErrInsecureAgentStatePermissions) {
 		return err
 	}
-	match := unsafeDirectoryPattern.FindStringSubmatch(err.Error())
-	if match == nil {
+	// A joined error can name several directories. Name one that is loose
+	// now, preferring one on the state path, which blocks every command.
+	var found *UnsafeDirectoryError
+	for _, match := range unsafeDirectoryPattern.FindAllStringSubmatch(err.Error(), -1) {
+		dir := filepath.Clean(match[1])
+		info, statErr := os.Lstat(dir)
+		if statErr != nil || !info.IsDir() || info.Mode().Perm()&0o022 == 0 || info.Mode()&os.ModeSticky != 0 {
+			continue
+		}
+		candidate := &UnsafeDirectoryError{Dir: dir, Mode: info.Mode().Perm(), ContainsStateDir: containsStateDir(dir), Err: err}
+		if found == nil || candidate.ContainsStateDir && !found.ContainsStateDir {
+			found = candidate
+		}
+	}
+	if found == nil {
 		return err
 	}
-	dir := filepath.Clean(match[1])
-	info, statErr := os.Lstat(dir)
-	if statErr != nil || !info.IsDir() || info.Mode().Perm()&0o022 == 0 || info.Mode()&os.ModeSticky != 0 {
-		return err
-	}
-	return &UnsafeDirectoryError{
-		Dir:              dir,
-		Mode:             info.Mode().Perm(),
-		ContainsStateDir: containsStateDir(dir),
-		Err:              err,
-	}
+	return found
+}
+
+// MentionsUnsafeDirectory reports whether text carries the connector's
+// loose-directory refusal phrase.
+func MentionsUnsafeDirectory(text string) bool {
+	return unsafeDirectoryPattern.MatchString(text)
 }
 
 // containsStateDir compares against the environment-resolved state directory
