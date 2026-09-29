@@ -23,19 +23,20 @@ function installMintReceipt(Client, owner) {
       assert.ok(hasPersistableQurlIdShape(minted.qurl_id) && minted.crid === crid);
       assert.ok(Number.isFinite(Date.parse(minted.expires_at)));
       const verified = spawnSync(process.env.QURL_OWNERSHIP_VERIFIER, [], {
+        env: { QURL_PUBLIC_CONFIG_URL: process.env.QURL_PUBLIC_CONFIG_URL },
         input: minted.qurl_link, encoding: 'utf8', timeout: 10000, maxBuffer: 16384,
       });
       assert.ok(!verified.error && verified.status === 0, 'signed ownership verification failed');
       const identity = JSON.parse(verified.stdout);
       const publicIdentity = Object.fromEntries(['agent_public_key', 'resource_public_key_b64', 'cell_public_key_b64',
         'cell_id', 'signed_jti', 'signed_expiry_unix'].map(key => [key, identity[key]]));
-      assert.ok(publicIdentity.agent_public_key && publicIdentity.resource_public_key_b64 && publicIdentity.cell_public_key_b64);
+      assert.ok(Object.values(publicIdentity).every(value => typeof value === 'string' && value.length > 0));
       const now = new Date();
       fs.appendFileSync(process.env.QURL_OWNERSHIP_RECEIPTS, JSON.stringify({
         event: 'owned_admission_attempt', purpose: 'discord_detect_smoke_detector_child',
         owner_id: owner, resource_id: minted.resource_id, crid, qurl_id: minted.qurl_id,
         expires_at: minted.expires_at, observed_at: now.toISOString(),
-        // Native start deadline begins after verification; expires_at separately
+        // SDK native opening has a 15-second timeout; expires_at separately
         // bounds the child credential. Neither field claims the session is CLOSED.
         attempt_deadline: new Date(now.getTime() + 15000).toISOString(),
         public_identity: publicIdentity, catalog_binding: 'pending_independent_readback',
@@ -46,18 +47,20 @@ function installMintReceipt(Client, owner) {
     } catch {
       // No native opening occurred. Revoke only this returned child, never its
       // shared detector resource. Preserve cleanup failure as a failed smoke.
-      if (hasPersistableQurlIdShape(minted?.qurl_id)) {
+      const childID = hasPersistableQurlIdShape(minted?.qurl_id) ? minted.qurl_id : null;
+      let revoked = false;
+      if (childID) {
         try {
-          await this.revokeResourceQurl(crid, minted.qurl_id);
-        } catch {
-          // Restricted CI log fallback if the required private file could not
-          // be written. Never include dependency errors or the signed link.
-          const safeID = value => { try { validateResourceId(value); return value; } catch { return null; } };
-          console.error('Detector child cleanup required', {
-            event: 'detector_child_cleanup_required', owner_id: safeID(owner),
-            resource_id: safeID(minted.resource_id), qurl_id: minted.qurl_id, crid: safeID(crid),
-          });
-        }
+          await this.revokeResourceQurl(crid, childID);
+          revoked = true;
+        } catch { /* Keep safe cleanup identity below. */ }
+      }
+      if (!revoked) {
+        const safeID = value => { try { validateResourceId(value); return value; } catch { return null; } };
+        console.error('Detector child cleanup required', {
+          event: 'detector_child_cleanup_required', owner_id: safeID(owner),
+          resource_id: safeID(minted?.resource_id), qurl_id: childID, crid: safeID(crid),
+        });
       }
       throw new Error('detector child ownership receipt could not be persisted');
     }
@@ -82,7 +85,9 @@ async function main() {
   fs.accessSync(process.env.QURL_OWNERSHIP_VERIFIER, fs.constants.X_OK);
   fs.appendFileSync(process.env.QURL_OWNERSHIP_RECEIPTS, '', { mode: 0o600 });
   fs.chmodSync(process.env.QURL_OWNERSHIP_RECEIPTS, 0o600);
-  const checked = spawnSync(process.env.QURL_OWNERSHIP_VERIFIER, ['--check-config'], { timeout: 10000 });
+  const checked = spawnSync(process.env.QURL_OWNERSHIP_VERIFIER, ['--check-config'], {
+    env: { QURL_PUBLIC_CONFIG_URL: process.env.QURL_PUBLIC_CONFIG_URL }, timeout: 10000,
+  });
   assert.ok(!checked.error && checked.status === 0, 'ownership trust unavailable');
   const me = await fetch(new URL('/v1/me', process.env.QURL_ENDPOINT), {
     headers: { Authorization: `Bearer ${process.env.QURL_API_KEY}` }, signal: AbortSignal.timeout(10000),
