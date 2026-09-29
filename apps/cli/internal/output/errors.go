@@ -54,6 +54,9 @@ func renderErrorLines(p *Printer, err error) []string {
 	if errors.Is(err, auth.ErrNoCredential) {
 		return []string{head + " " + msgNoCredential, "", "  " + p.dim(hintNoCredential)}
 	}
+	if lines, ok := hostErrorLines(p, head, err); ok {
+		return lines
+	}
 	if lines, ok := connectorErrorLines(p, head, err); ok {
 		return lines
 	}
@@ -72,6 +75,31 @@ func renderErrorLines(p *Printer, err error) []string {
 		return apiErrorLines(p, head, apiErr)
 	}
 	return []string{head + " " + err.Error()}
+}
+
+// hostErrorLines renders local host conditions that block native sharing.
+// They come before the connector taxonomy because their chains still carry
+// whatever the connector wrapped, and the host condition is the actionable
+// part. The raw detail is omitted: for a missing user manager it lists every
+// executable path the connector rejected, which reads like a security failure
+// rather than a missing capability.
+func hostErrorLines(p *Printer, head string, err error) ([]string, bool) {
+	var unsafeDir *state.UnsafeDirectoryError
+	switch {
+	case errors.As(err, &unsafeDir):
+		hint := hintUnsafeDirectory
+		if unsafeDir.ContainsStateDir {
+			hint = hintUnsafeStateDirectory
+		}
+		return []string{
+			head + " " + fmt.Sprintf(msgUnsafeDirectory, unsafeDir.Dir, unsafeDir.Mode),
+			"", "  " + p.dim(fmt.Sprintf(hint, unsafeDir.Dir)),
+		}, true
+	case errors.Is(err, connectordaemon.ErrUserServiceManagerUnavailable):
+		return []string{head + " " + msgNoUserServiceManager, "", "  " + p.dim(hintNoUserServiceManager)}, true
+	default:
+		return nil, false
+	}
 }
 
 // connectorErrorLines is the customer-language translation of the Connector

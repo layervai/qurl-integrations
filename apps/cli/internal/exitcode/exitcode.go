@@ -307,6 +307,15 @@ func connectorSentinelCode(err error) (int, bool) { //nolint:gocyclo // Keep the
 		return code, true
 	}
 	switch {
+	case errors.Is(err, state.ErrUnsafeDirectory):
+		// Checked first: the wrapped connector chain may carry other
+		// sentinels, but the remedy is a local directory mode or state
+		// location, the configuration row.
+		return Config, true
+	case errors.Is(err, connectordaemon.ErrUserServiceManagerUnavailable):
+		// Like ErrRuntimeSupervision, the remedy is the supervision mode
+		// (--foreground or --supervision external), not the command's operands.
+		return Config, true
 	case errors.Is(err, connectordaemon.ErrAlreadyRunning):
 		return Conflict, true
 	case errors.Is(err, connectordaemon.ErrDirectEgressRequired):

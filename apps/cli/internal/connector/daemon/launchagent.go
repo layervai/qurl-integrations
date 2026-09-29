@@ -82,7 +82,9 @@ func NewJobController(stateDir, logDir, binaryVersion, endpoint string, mode Gro
 		return nil, err
 	}
 	controller := &JobController{
-		Manager:    connectorservice.NewUserJobManager(),
+		Manager: withUserServiceManagerDiagnosis(connectorservice.NewUserJobManager(), func() bool {
+			return systemdUserManagerAvailable(lookupEnv)
+		}),
 		IPC:        IPCClient{SocketPath: socket},
 		RuntimeDir: filepath.Dir(socket),
 		StateDir:   stateDir, LogDir: logDir, BinaryVersion: strings.TrimSpace(binaryVersion),

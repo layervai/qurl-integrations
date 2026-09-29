@@ -156,7 +156,10 @@ func Main(version string) int {
 // Interrupted exit code but renders no error anatomy: the interrupt was the
 // user's own act.
 func run(ctx context.Context, root *cobra.Command, opts *globalOpts) int {
-	err := root.ExecuteContext(ctx)
+	// The connector reports a group- or other-writable directory only as
+	// text; name the directory and its remedy once, for rendering and the exit
+	// code alike.
+	err := connectorstate.ExplainUnsafeDirectory(root.ExecuteContext(ctx))
 	if err != nil && !errors.Is(err, context.Canceled) {
 		output.RenderError(opts.streams.Err, err, opts.errColor())
 	}

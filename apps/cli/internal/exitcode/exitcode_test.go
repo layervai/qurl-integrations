@@ -75,12 +75,18 @@ var cliSentinels = map[string]struct {
 	"daemon.ErrAlreadyRunning":          {connectordaemon.ErrAlreadyRunning, Conflict},
 	"daemon.ErrDirectEgressRequired":    {connectordaemon.ErrDirectEgressRequired, Config},
 	"daemon.ErrResourceGone":            {connectordaemon.ErrResourceGone, NotFound},
+	// No systemd user manager is remedied by the supervision mode, the same
+	// remedy class as ErrRuntimeSupervision.
+	"daemon.ErrUserServiceManagerUnavailable": {connectordaemon.ErrUserServiceManagerUnavailable, Config},
 	// An externally supervised daemon that is absent is the Unavailable row:
 	// the command and operand are valid, the local service is not serving,
 	// and the supervisor (not qurl) is what brings it back.
 	"daemon.ErrExternalDaemonNotRunning": {connectordaemon.ErrExternalDaemonNotRunning, Unavailable},
 	"state.ErrNoDefaultStateDir":         {state.ErrNoDefaultStateDir, Config},
 	"state.ErrAgentStateEnvelope":        {state.ErrAgentStateEnvelope, Config},
+	// A directory other users can write to is remedied by its mode or by the
+	// state location: configuration, not the command line.
+	"state.ErrUnsafeDirectory": {state.ErrUnsafeDirectory, Config},
 	// A supervision mismatch is remedied by the --supervision setting, the
 	// same remedy class as the Hub triple: configuration, not the command line.
 	"state.ErrRuntimeSupervision":           {state.ErrRuntimeSupervision, Config},

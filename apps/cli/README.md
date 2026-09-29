@@ -120,8 +120,16 @@ Homebrew also installs the man pages and the bash/zsh/fish completions
 shipped in the release archive.
 
 The CLI supports remote and local background qURL commands on macOS, Windows,
-and Linux. Linux uses the native systemd user manager and reports a clear error
-when that manager is unavailable.
+and Linux. Linux uses the native systemd user manager. Containers and sandboxes
+often run without one; there, `qurl publish` says so and points to
+`qurl publish <url> --foreground` or `qurl daemon run --supervision external`.
+
+qURL refuses to keep its state or run its background job under a directory
+other users can write to. With `umask 002` (the Ubuntu and Fedora default), a
+`~/.local` or `~/bin` created by another tool can end up mode `0775`; the error
+names the directory. Run `chmod go-w <directory>`, or set
+`QURL_CONNECTOR_STATE_DIR` (or `XDG_STATE_HOME`) to a directory you own that
+other users can't write to.
 
 **Debian / RPM** — download the `.deb` or `.rpm` for your architecture from
 the [latest release](https://github.com/layervai/qurl-integrations/releases)
