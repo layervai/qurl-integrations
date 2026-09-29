@@ -988,8 +988,16 @@ func oneShotEnrollmentToken(path string) func(context.Context, qurl.AgentEnrollm
 // devicePublicKey reads the registered device's public key from store. Only
 // whoami calls it, so other commands never pay for a state read whose result
 // they would not print. The private half and the device API key stay in the
-// store. No state is "" with no error; state without a public key is an error,
-// since a registered device should always have one.
+// store.
+//
+// No state is "" with no error: whoami can run on paths with no native device
+// behind the credential, and there is nothing to show. State without a public
+// key is an error, because a registered device should always have one and a
+// warning is the only way that gap becomes visible.
+//
+// TODO(upstream-contract): qurl-go's AgentState is assumed to always carry
+// PublicKeyB64 for a registered device. If an enrollment shape ever leaves it
+// empty, every whoami warns instead of failing anything loudly.
 func devicePublicKey(ctx context.Context, store qurl.AgentStateStore) (string, error) {
 	persisted, err := store.LoadAgentState(ctx)
 	if err != nil {

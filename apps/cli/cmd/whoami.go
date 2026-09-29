@@ -20,8 +20,8 @@ read an account API key on a warm start. A new device enrolls automatically
 without an account. Use "qurl account setup" to enable account recovery.
 
 When this machine has registered device state, the output includes its
-device public key. The private key and the device API key never leave local
-state.
+device public key (plain --quiet prints only the owner id). The private key
+and the device API key never leave local state.
 
 Useful for checking which account a script will act as before it publishes
 anything.`,
@@ -47,11 +47,12 @@ anything.`,
 			printer := opts.printer()
 			var deviceKey string
 			if opts.nativeStateStore != nil && printer.WhoAmIRendersDeviceKey() {
-				deviceKey, err = devicePublicKey(cmd.Context(), opts.nativeStateStore)
-				if err != nil {
+				var keyErr error
+				deviceKey, keyErr = devicePublicKey(cmd.Context(), opts.nativeStateStore)
+				if keyErr != nil {
 					// The identity is already complete. A missing key row must not
 					// turn the diagnostic command into a failure.
-					printer.Warnf(msgDevicePublicKeyUnreadable, err)
+					printer.Warnf(msgDevicePublicKeyUnreadable, keyErr)
 				}
 			}
 			return printer.WhoAmI(id, deviceKey)
