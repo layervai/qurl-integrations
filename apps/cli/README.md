@@ -337,9 +337,9 @@ appears in arguments, the environment, or a file. Every `qurl` process the
 supervisor runs against that state directory — `daemon run` and the lifecycle
 commands included — inherits the same two settings, each with a descriptor of
 its own. The sealed envelope (`agent_state.sealed.json`) and the plaintext one
-(`agent_state.json`) never share a directory: with the provider set, a
-directory that already holds plaintext state is refused, and without it, a
-directory that holds a sealed envelope is refused with the two variable names
+(`agent_state.json`) never share a directory. With the provider set, a
+directory that already holds plaintext state is refused. Without it, a
+directory sealed by `local-key` is refused, and the error names the variables
 to set. Omitting the provider is an error for token-file login; plaintext
 state remains available to native account-key enrollment. Switching providers
 is therefore a fresh namespace, not an in-place migration. There is no flag for the provider; the supervisor that owns the key
@@ -395,24 +395,41 @@ production settings are included in releases; environment-only, with no profile 
 CLI at a plain-`http` endpoint on a non-local address warns that the key
 would travel unencrypted; loopback endpoints are exempt.
 
-`LAYERV_KEY_PROVIDER` seals the local agent state under a key provider
-instead of the plaintext default (`file`); with `local-key`, the 32-byte
-wrapping key arrives on the inherited descriptor named by
-`LAYERV_LOCAL_KEY_FD`, on macOS and Linux. There is deliberately no flag: the
-supervisor that owns the key (for example qURL Desktop) sets the environment.
-A sealed namespace requires `--supervision external`: the background job
-`qurl` installs under native supervision carries no environment and cannot
-inherit a key descriptor. Every command that checks the namespace's
-supervision policy - `publish`, `start`, `stop`, `restart`, `delete`, `login`
-and `daemon run` - therefore refuses a sealed namespace under native
-supervision (exit code 3), not only the ones that would install a job.
-Read-only commands do not run that check and open the sealed envelope
-normally.
+### Key storage
 
-A state directory holds exactly one
-envelope, so qurl refuses to open a sealed directory without these variables,
-or a plaintext one with them (also exit code 3); use a different state
-directory rather than switching in place.
+The local agent state holds this device's credential and identity. When a new
+state directory is created on a machine with a TPM 2.0 that `qurl` can use,
+that state is sealed to the TPM (`agent_state.sealed.json`). A copy of the
+directory is then useless on any other machine, and it becomes unreadable on
+this one if the TPM is cleared. Everywhere else, the state is a plaintext
+owner-only file (`agent_state.json`). "Usable" means the Linux kernel
+resource manager `/dev/tpmrm0`, which usually requires membership in the
+`tss` group, or TPM Base Services on Windows. macOS has no TPM. A TPM-sealed
+directory needs no environment to reopen, so the natively supervised
+background job serves it as usual. Existing directories keep the envelope
+they were created with and are never migrated in place.
+
+`LAYERV_KEY_PROVIDER` overrides that choice when a directory is created.
+`file` keeps it plaintext even where a TPM is available, and `tpm` requires
+the TPM. The other providers seal the state under a key held elsewhere. With
+`local-key`, the 32-byte wrapping key arrives on the inherited descriptor
+named by `LAYERV_LOCAL_KEY_FD`, on macOS and Linux. There is deliberately no
+flag: the supervisor that owns the key (for example qURL Desktop) sets the
+environment. A namespace sealed by such a provider requires `--supervision
+external`, because the background job `qurl` installs under native
+supervision carries no environment and cannot inherit a key descriptor. Every
+command that checks the namespace's supervision policy (`publish`, `start`,
+`stop`, `restart`, `delete`, `login` and `daemon run`) therefore refuses that
+namespace under native supervision with exit code 3, not only the commands
+that would install a job. Read-only commands do not run that check and open
+the sealed envelope normally.
+
+A state directory holds exactly one envelope. `qurl` refuses a directory
+sealed by an environment provider when that provider's variables are missing.
+It also refuses a directory whose envelope conflicts with
+`LAYERV_KEY_PROVIDER`, for example a plaintext directory with the provider
+set. Both refusals exit with code 3. Use a different state directory rather
+than switching in place.
 
 ## Commands
 

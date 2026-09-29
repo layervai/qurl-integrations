@@ -97,10 +97,11 @@ func RequireRuntimeSupervision(dir string, expected RuntimeSupervision) error {
 	if _, err := ParseRuntimeSupervision(string(expected)); err != nil {
 		return err
 	}
-	// A sealed namespace can only be served by a daemon its supervisor runs:
-	// the background job qurl installs natively carries no environment, and an
-	// inherited key descriptor cannot survive into a launchd, systemd, or Task
-	// Scheduler process. Refuse here, which every mutating command reaches
+	// A namespace sealed by a provider that needs its environment can only be
+	// served by a daemon its supervisor runs: the background job qurl installs
+	// natively carries no environment, and an inherited key descriptor cannot
+	// survive into a launchd, systemd, or Task Scheduler process. The TPM
+	// provider needs nothing from the environment, so it passes. Refuse here, which every mutating command reaches
 	// before it writes, rather than at the install: a sealed envelope written
 	// under native supervision cannot afterwards be adopted by
 	// EstablishExternalRuntimeMode, which requires a fresh namespace.
@@ -110,7 +111,7 @@ func RequireRuntimeSupervision(dir string, expected RuntimeSupervision) error {
 	// ReadRuntimeSupervision, so a sealed namespace addressed natively gets
 	// this message rather than "is external, not native" - the more
 	// actionable of the two.
-	if provider, sealed := SelectedKeyProvider(); expected == RuntimeSupervisionNative && sealed {
+	if provider, needsEnv := SelectedProviderNeedsEnvironment(); expected == RuntimeSupervisionNative && needsEnv {
 		// Name the value: any non-empty name but file selects a sealed envelope,
 		// so a typo lands here too and its author needs to see what was read.
 		//

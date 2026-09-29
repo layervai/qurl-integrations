@@ -2,14 +2,18 @@
 // where the state directory lives, the qurl-go agent state envelope opened
 // inside it, and the assignment-refresh marker breadcrumb written next to it.
 //
-// The plaintext file envelope is the default: qurl-go's OpenFileAgentState
-// pins the state directory, requires owner-only permissions, and validates
-// continuity across every lifecycle operation. Sealed envelopes follow the
-// connector's environment contract: LAYERV_KEY_PROVIDER names a key provider
-// (for example local-key, with the wrapping key inherited on
-// LAYERV_LOCAL_KEY_FD) and the connector's SDK store seals the same qurl-go
-// state under it. qurl has no flag for the provider; the supervisor that owns
-// the key sets the environment.
+// The connector's ResolveKeyProvider picks the envelope. A fresh namespace is
+// sealed to this machine's TPM 2.0 when the process can use one, and is the
+// plaintext file envelope otherwise; an existing envelope keeps its provider,
+// and a TPM envelope opens with no environment, so the natively supervised
+// background job can serve it. LAYERV_KEY_PROVIDER overrides the choice:
+// file opts out of the TPM, and the other providers follow the connector's
+// environment contract (for example local-key, with the wrapping key
+// inherited on LAYERV_LOCAL_KEY_FD). qurl has no flag for the provider; the
+// supervisor that owns the key sets the environment. The plaintext envelope
+// is opened with qurl-go's OpenFileAgentState, which pins the state
+// directory, requires owner-only permissions, and validates continuity across
+// every lifecycle operation.
 package state
 
 import (
@@ -111,16 +115,8 @@ func ConfiguredAgentID() string {
 var errStoreNotOpen = fmt.Errorf("%w: Connector state store is not open", qurl.ErrAgentStateContinuity)
 
 // SealedProviderSelected reports whether LAYERV_KEY_PROVIDER names a key
-// provider other than the plaintext file default, and so whether this
-// process's environment selects a sealed agent state envelope. The connector
-// validates the name and the provider's own environment when the sealed store
-// opens. RequireRuntimeSupervision also consults it: a sealed namespace can
-// only be served by an external supervisor.
-//
-// TODO(upstream-contract): mirrors qurl-connector pkg/agentstate
-// selectedKeyProviderName (trimmed, case-folded, empty means file). If the
-// connector adds a provider that still writes the plaintext envelope, route
-// it here too or the plaintext guard in Open is skipped for it.
+// provider other than the plaintext file default. It says nothing about a
+// namespace whose provider the environment leaves to ResolveKeyProvider.
 func SealedProviderSelected() bool {
 	_, sealed := SelectedKeyProvider()
 	return sealed
@@ -130,10 +126,23 @@ func SealedProviderSelected() bool {
 // whether it selects a sealed envelope. Callers that need to name the value in
 // an error take it from here rather than reading the environment a second time
 // with different trimming.
+//
+// TODO(upstream-contract): mirrors qurl-connector pkg/agentstate
+// explicitKeyProviderName (trimmed, case-folded, empty leaves the choice to
+// the namespace).
 func SelectedKeyProvider() (string, bool) {
 	raw := strings.TrimSpace(os.Getenv(connectoragentstate.EnvKeyProvider))
 	name := strings.ToLower(raw)
 	return raw, name != "" && name != connectoragentstate.KeyProviderFile
+}
+
+// SelectedProviderNeedsEnvironment reports whether LAYERV_KEY_PROVIDER names a
+// provider whose key only its environment can supply, so a namespace sealed
+// under it can only be served by the supervisor that sets that environment.
+// The TPM provider does not: its key never leaves this machine's TPM.
+func SelectedProviderNeedsEnvironment() (string, bool) {
+	raw, sealed := SelectedKeyProvider()
+	return raw, sealed && connectoragentstate.KeyProviderRequiresEnvironment(strings.ToLower(raw))
 }
 
 // Store owns the qurl-go agent state envelope for the process lifetime: the
@@ -177,10 +186,11 @@ func (o fileStateOwner) ValidateContinuity() error { return o.store.ValidateCont
 // Close releases the plaintext state capability.
 func (o fileStateOwner) Close() error { return o.store.Close() }
 
-// Open prepares dir (owner-only 0700) and opens the agent state envelope
-// inside it: the plaintext file unless LAYERV_KEY_PROVIDER selects a key
-// provider, in which case the connector's SDK store opens the sealed envelope
-// and refuses a directory that already holds the plaintext one. The caller
+// Open prepares dir (owner-only 0700) and opens the agent state envelope the
+// connector's ResolveKeyProvider selects for it: the plaintext file, or a
+// sealed envelope through the connector's SDK store. The resolver refuses a
+// directory whose existing envelope conflicts with LAYERV_KEY_PROVIDER, or
+// whose sealed envelope needs an environment this process lacks. The caller
 // must Close every successful result.
 func Open(dir string) (*Store, error) {
 	dir = strings.TrimSpace(dir)
@@ -190,39 +200,27 @@ func Open(dir string) (*Store, error) {
 	if err := EnsureDirMode(dir); err != nil {
 		return nil, fmt.Errorf("prepare native agent state directory: %w", err)
 	}
-	if SealedProviderSelected() {
+	provider, err := connectoragentstate.ResolveKeyProvider(dir)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrAgentStateEnvelope, err)
+	}
+	if provider != connectoragentstate.KeyProviderFile {
 		sealed, err := connectoragentstate.NewSDKStore(dir, ConfiguredAgentID())
 		if err != nil {
 			return nil, fmt.Errorf("%w: initialize sealed agent state: %w", ErrAgentStateEnvelope, err)
 		}
 		return &Store{dir: dir, envelope: connectoragentstate.SealedAgentStateFile, owner: sealed}, nil
 	}
-	// A sealed envelope means another owner (for example qURL Desktop, which
-	// supplies a wrapping key over an inherited descriptor) established this
-	// namespace. Writing a plaintext envelope beside it would make the
-	// connector refuse the directory outright, so fail closed here instead.
-	//
-	// TODO(upstream-contract): this is the file-provider clause of the
-	// connector's validateSDKStoreLayoutInNamespace. It is deliberately not
-	// ValidateSDKStoreLayout, which would put the default plaintext path
-	// through the connector's pinned namespace preparation (creating its
-	// durability artifacts) where qurl-go's own capability already pins it.
-	// The sealed branch also inherits the connector's legacy-artifact reject
-	// list (agent_id, private_key, registration_refresh, etc/, ...), so no
-	// file qurl writes into this directory may take one of those names.
-	// The window between this Lstat and OpenFileAgentState is benign: a sealed
-	// envelope that appears inside it leaves a directory holding both, which
-	// the connector refuses on its next open. Keying on the envelope filename
-	// rather than on a namespace marker is deliberate and complete: the
-	// connector's own preparation is pinnedfs.EnsurePrivate, which creates only
-	// the 0700 directory, so a sealed open that failed before its first save
-	// leaves a namespace that is genuinely fresh.
-	if _, err := os.Lstat(filepath.Join(dir, connectoragentstate.SealedAgentStateFile)); err == nil {
-		return nil, fmt.Errorf("%w: this state directory holds %s; set %s and %s to open it, or use a different state directory",
-			ErrAgentStateEnvelope, connectoragentstate.SealedAgentStateFile, connectoragentstate.EnvKeyProvider, connectoragentstate.EnvLocalKeyFD)
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return nil, fmt.Errorf("inspect native agent state directory: %w", err)
-	}
+	// The plaintext branch deliberately bypasses NewSDKStore, which would put
+	// the default path through the connector's pinned namespace preparation
+	// (creating its durability artifacts) where qurl-go's own capability
+	// already pins it. The sealed branch inherits the connector's
+	// legacy-artifact reject list (agent_id, private_key, registration_refresh,
+	// etc/, ...), so no file qurl writes into this directory may take one of
+	// those names. The window between the resolver's inspection and
+	// OpenFileAgentState is benign: a sealed envelope that appears inside it
+	// leaves a directory holding both, which the connector refuses on its next
+	// open.
 	file, err := qurl.OpenFileAgentState(filepath.Join(dir, AgentStateFile))
 	if err != nil {
 		return nil, fmt.Errorf("initialize plaintext agent state: %w", err)

@@ -329,6 +329,7 @@ func TestSealedProviderSelectedMirrorsTheConnectorsProviderName(t *testing.T) {
 		"File":                                  false,
 		connectoragentstate.KeyProviderLocalKey: true,
 		" LOCAL-KEY ":                           true,
+		connectoragentstate.KeyProviderTPM:      true,
 		" not-a-provider ":                      true,
 	} {
 		t.Run(raw, func(t *testing.T) {
