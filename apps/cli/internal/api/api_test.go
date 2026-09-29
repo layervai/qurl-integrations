@@ -991,7 +991,8 @@ func TestBodySnippetIsBoundedValidUTF8(t *testing.T) {
 }
 
 // TestMeParsesIdentityEnvelope pins the GET /v1/me success contract: the
-// envelope decodes into the repo-owned Identity and the CLI headers ride the same shared transport.
+// envelope decodes into the repo-owned Identity and the CLI headers ride the
+// same shared transport.
 func TestMeParsesIdentityEnvelope(t *testing.T) {
 	srv := apitest.NewServer(t)
 	client := newTestClient(t, srv, nil)

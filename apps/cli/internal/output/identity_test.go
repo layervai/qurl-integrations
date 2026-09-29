@@ -41,6 +41,17 @@ func TestWhoAmIProjections(t *testing.T) {
 		if errBuf.Len() != 0 {
 			t.Errorf("whoami text is data; stderr must stay empty, got %q", errBuf.String())
 		}
+		// The long label re-aligns every row; pin the exact layout.
+		want := "Owner:              own_output_test\n" +
+			"Auth:               api_key\n" +
+			"Key:                key_outputtest01\n" +
+			"Kind:               api_key\n" +
+			"Scopes:             qurl:read, qurl:write\n" +
+			"Expires:            never\n" +
+			"Device public key:  dGVzdC1kZXZpY2UtcHVibGljLWtleQ==\n"
+		if out.String() != want {
+			t.Errorf("text projection =\n%s\nwant\n%s", out.String(), want)
+		}
 	})
 
 	t.Run("expiring key", func(t *testing.T) {

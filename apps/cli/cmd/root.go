@@ -984,6 +984,10 @@ func oneShotEnrollmentToken(path string) func(context.Context, qurl.AgentEnrollm
 // native agent state onto id. Only whoami calls it, so other commands never pay
 // for a state read whose result they would not print. The private half and the
 // device API key stay in the store; only the public key is ever surfaced.
+//
+// TODO(upstream-contract): this is a second Handoff after the runtime open
+// built the REST client. qurl-connector's Handoff is assumed idempotent (the
+// login repair path also calls it twice); the in-repo fake cannot prove it.
 func attachDevicePublicKey(ctx context.Context, nativeRuntime registeredNativeRuntime, id *qurlapi.Identity) error {
 	store, err := nativeRuntime.Handoff()
 	if err != nil {

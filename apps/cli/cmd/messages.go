@@ -28,6 +28,11 @@ const (
 	// an authorization credential unencrypted. Loopback endpoints never warn.
 	msgInsecureEndpoint = "your authorization credential would travel unencrypted: %s uses plain http on a non-local address — use https"
 
+	// msgDevicePublicKeyUnreadable reports that whoami could not re-read the
+	// local device state for its public key. The rest of the identity still
+	// prints and the command still succeeds.
+	msgDevicePublicKeyUnreadable = "could not read the local device public key: %v"
+
 	// msgTTLClamped reports the service granting a shorter link lifetime
 	// than requested.
 	msgTTLClamped = "Note: the service granted a %s link lifetime instead of the requested %s."
