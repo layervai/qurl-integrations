@@ -664,26 +664,42 @@ func runWhoamiWithStateStore(t *testing.T, store qurl.AgentStateStore, args ...s
 	return code, outBuf.String(), errBuf.String()
 }
 
-// TestWhoamiDevicePublicKeyReadFailureWarns pins that an unreadable device
-// state costs only the key row: whoami still prints the identity and exits 0.
+// TestWhoamiDevicePublicKeyReadFailureWarns pins that an unreadable or invalid
+// device key costs only the key row: whoami still prints the identity, exits 0,
+// names the right condition, and never echoes the bad value.
 func TestWhoamiDevicePublicKeyReadFailureWarns(t *testing.T) {
-	noKey := bootstrapRegisteredState(t)
-	noKey.PublicKeyB64 = ""
-	cases := map[string]*bootstrapAgentStateStore{
-		"load":             {loadErr: errors.New("state unreadable")},
-		"empty public key": {state: noKey},
+	withKey := func(key string) *bootstrapAgentStateStore {
+		state := bootstrapRegisteredState(t)
+		state.PublicKeyB64 = key
+		return &bootstrapAgentStateStore{state: state}
 	}
-	for name, store := range cases {
+	const unreadable = "could not read the local device public key"
+	const invalid = "the local device state has no valid public key"
+	const escape = "\x1b[31mRED"
+	cases := map[string]struct {
+		store *bootstrapAgentStateStore
+		want  string
+	}{
+		"load":                  {&bootstrapAgentStateStore{loadErr: errors.New("state unreadable")}, unreadable},
+		"empty public key":      {withKey(""), invalid},
+		"not base64":            {withKey(escape), invalid},
+		"valid key then escape": {withKey(base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x42}, 32)) + escape), invalid},
+		"wrong length":          {withKey(base64.StdEncoding.EncodeToString([]byte("sixteen byte key"))), invalid},
+	}
+	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			code, stdout, stderr := runWhoamiWithStateStore(t, store)
+			code, stdout, stderr := runWhoamiWithStateStore(t, tc.store)
 			if code != 0 {
 				t.Fatalf("whoami exit = %d, want 0; stderr = %q", code, stderr)
 			}
 			if !strings.Contains(stdout, apitest.MeOwnerID) || strings.Contains(stdout, "Device public key:") {
 				t.Fatalf("whoami stdout = %q, want the owner and no key row", stdout)
 			}
-			if !strings.Contains(stderr, "could not read the local device public key") {
-				t.Fatalf("whoami stderr = %q, want the unreadable-key warning", stderr)
+			if !strings.Contains(stderr, tc.want) {
+				t.Fatalf("whoami stderr = %q, want %q", stderr, tc.want)
+			}
+			if strings.Contains(stdout+stderr, "\x1b[31m") {
+				t.Fatalf("whoami echoed a terminal escape from local state:\nstdout %q\nstderr %q", stdout, stderr)
 			}
 		})
 	}

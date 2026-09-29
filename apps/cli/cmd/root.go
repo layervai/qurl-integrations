@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -990,15 +991,20 @@ func oneShotEnrollmentToken(path string) func(context.Context, qurl.AgentEnrollm
 // they would not print. The private half and the device API key stay in the
 // store.
 //
-// No state is "" with no error: whoami can run on paths with no native device
-// behind the credential, and there is nothing to show. Incomplete registration
-// cannot reach here, because the device client only opens on completed state. State without a public
-// key is an error, because a registered device should always have one and a
-// warning is the only way that gap becomes visible.
+// The value comes from a local file and is echoed to a terminal, so it must
+// decode as a standard-base64 X25519 key before it is returned. Anything else,
+// including an empty value, is errInvalidDevicePublicKey, and the error never
+// carries the bad bytes. A registered device should always have a valid key,
+// so the warning is the only way that gap becomes visible.
 //
-// TODO(upstream-contract): qurl-go's AgentState is assumed to always carry
-// PublicKeyB64 for a registered device. If an enrollment shape ever leaves it
-// empty, every whoami warns instead of failing anything loudly.
+// The nil-state branch is defensive: whoami only calls this once a device
+// client has opened, so a real store has completed state. It covers a store
+// implementation that reports (nil, nil).
+//
+// TODO(upstream-contract): qurl-go's AgentState is assumed to always carry a
+// standard-base64 32-byte X25519 PublicKeyB64 for a registered device. If an
+// enrollment shape ever changes that, every whoami warns instead of failing
+// anything loudly.
 func devicePublicKey(ctx context.Context, store qurl.AgentStateStore) (string, error) {
 	persisted, err := store.LoadAgentState(ctx)
 	if err != nil {
@@ -1007,11 +1013,26 @@ func devicePublicKey(ctx context.Context, store qurl.AgentStateStore) (string, e
 	if persisted == nil {
 		return "", nil
 	}
-	if strings.TrimSpace(persisted.PublicKeyB64) == "" {
-		return "", errors.New("device state records no public key")
+	key := persisted.PublicKeyB64
+	if key == "" {
+		return "", fmt.Errorf("%w: device state records no public key", errInvalidDevicePublicKey)
 	}
-	return persisted.PublicKeyB64, nil
+	raw, err := base64.StdEncoding.DecodeString(key)
+	if err != nil {
+		return "", fmt.Errorf("%w: not standard base64", errInvalidDevicePublicKey)
+	}
+	if len(raw) != devicePublicKeySize {
+		return "", fmt.Errorf("%w: decodes to %d bytes, want %d", errInvalidDevicePublicKey, len(raw), devicePublicKeySize)
+	}
+	return key, nil
 }
+
+// devicePublicKeySize is the length of an X25519 public key.
+const devicePublicKeySize = 32
+
+// errInvalidDevicePublicKey marks device state that loaded but holds no usable
+// public key, as distinct from a state read that failed.
+var errInvalidDevicePublicKey = errors.New("invalid device public key")
 
 // identityKeyID is the non-secret identifier of the credential behind id.
 func identityKeyID(id *qurlapi.Identity) string {
