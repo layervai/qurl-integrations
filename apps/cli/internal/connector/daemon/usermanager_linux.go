@@ -12,7 +12,9 @@ import (
 // systemd user manager: the host booted with systemd (sd_booted's
 // /run/systemd/system test), XDG_RUNTIME_DIR is set, and a user manager has
 // created its private control socket there. That socket is a proxy for "a
-// user manager started", not the bus systemctl --user dials; it is consulted
+// user manager started", not the bus systemctl --user dials: a running
+// manager whose user bus is absent probes as available, and its raw
+// "Failed to connect to bus" error passes through. The probe is consulted
 // only after the manager already failed, so it decides the message and exit
 // code, never whether a working host fails.
 //

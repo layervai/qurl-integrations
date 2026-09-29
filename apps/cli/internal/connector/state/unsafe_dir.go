@@ -22,7 +22,8 @@ var ErrUnsafeDirectory = errors.New("directory is writable by other users")
 type UnsafeDirectoryError struct {
 	// Dir is the absolute directory that other users can write to.
 	Dir string
-	// Mode is Dir's permission bits when the CLI inspected it.
+	// Mode is Dir's permission bits when the CLI inspected it. Rendering masks
+	// it with Perm, so a full FileMode is also safe to supply.
 	Mode os.FileMode
 	// ContainsStateDir reports that Dir is the resolved state directory or one
 	// of its ancestors, so relocating the state directory also avoids it.
@@ -79,6 +80,10 @@ func ExplainUnsafeDirectory(err error) error {
 	}
 }
 
+// containsStateDir compares against the environment-resolved state directory
+// only (QURL_CONNECTOR_STATE_DIR, XDG_STATE_HOME, the platform default). An
+// explicit --state-dir elsewhere yields false, which drops only the
+// relocation half of the hint; the chmod remedy is always correct.
 func containsStateDir(dir string) bool {
 	stateDir, err := ResolveDir("")
 	if err != nil {

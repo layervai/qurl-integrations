@@ -39,7 +39,18 @@ func TestRunExplainsConnectorUnsafeDirectory(t *testing.T) {
 	t.Setenv("QURL_CONNECTOR_STATE_DIR", stateDir)
 
 	var stderr bytes.Buffer
-	root, opts := newRoot("test", &output.Streams{In: strings.NewReader(""), Out: &bytes.Buffer{}, Err: &stderr})
+	// No real config directory or ambient QURL_* environment, like runCLI.
+	// The state override stays in the process environment above because
+	// state.ResolveDir reads it there.
+	root, opts := newRoot("test", &output.Streams{In: strings.NewReader(""), Out: &bytes.Buffer{}, Err: &stderr}, func(g *globalOpts) {
+		g.configDir = t.TempDir()
+		g.lookupEnv = func(key string) (string, bool) {
+			if key == "QURL_CONNECTOR_STATE_DIR" {
+				return stateDir, true
+			}
+			return "", false
+		}
+	})
 	root.AddCommand(&cobra.Command{
 		Use:    "open-state",
 		Hidden: true,

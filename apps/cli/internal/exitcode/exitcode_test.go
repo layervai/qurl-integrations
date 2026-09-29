@@ -449,3 +449,18 @@ func TestSealedOpenKeepsTheCauseQurlGoClassifies(t *testing.T) {
 		})
 	}
 }
+
+// TestHostConditionsWinOverWrappedSentinels pins that the exit code agrees
+// with the rendering, which puts host conditions first: a chain that also
+// carries a CLI, resource, or connector sentinel still exits Config.
+func TestHostConditionsWinOverWrappedSentinels(t *testing.T) {
+	for _, inner := range []error{config.ErrConfigFile, state.ErrConnectorResourceState, connectordaemon.ErrAlreadyRunning} {
+		unsafeDir := &state.UnsafeDirectoryError{Dir: "/home/agent/.local", Mode: 0o775, Err: fmt.Errorf("open: %w", inner)}
+		noManager := fmt.Errorf("%w: %w", connectordaemon.ErrUserServiceManagerUnavailable, inner)
+		for _, err := range []error{unsafeDir, noManager} {
+			if got := FromError(err); got != Config {
+				t.Errorf("FromError(%v) = %d, want Config", err, got)
+			}
+		}
+	}
+}
