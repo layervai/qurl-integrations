@@ -18,7 +18,6 @@ type identityKeyJSON struct {
 	KeyID     string     `json:"key_id"`
 	Kind      string     `json:"kind"`
 	Scopes    []string   `json:"scopes"`
-	KeyPrefix string     `json:"key_prefix,omitempty"`
 	ExpiresAt *time.Time `json:"expires_at,omitempty"`
 }
 
@@ -48,7 +47,6 @@ func identityKey(id *qurlapi.Identity) *identityKeyJSON {
 		KeyID:     id.Key.KeyID,
 		Kind:      id.Key.Kind,
 		Scopes:    id.Key.Scopes,
-		KeyPrefix: id.Key.KeyPrefix,
 		ExpiresAt: id.Key.ExpiresAt,
 	}
 }
@@ -76,7 +74,7 @@ func (p *Printer) whoamiText(id *qurlapi.Identity) error {
 	ew.printf("%s\t%s\n", p.bold("Owner:"), id.OwnerID)
 	ew.printf("%s\t%s\n", p.bold("Auth:"), id.AuthType)
 	if k := id.Key; k != nil {
-		ew.printf("%s\t%s\n", p.bold("Key:"), keyLine(k))
+		ew.printf("%s\t%s\n", p.bold("Key:"), k.KeyID)
 		ew.printf("%s\t%s\n", p.bold("Kind:"), k.Kind)
 		ew.printf("%s\t%s\n", p.bold("Scopes:"), strings.Join(k.Scopes, ", "))
 		ew.printf("%s\t%s\n", p.bold("Expires:"), p.keyExpiry(k.ExpiresAt))
@@ -85,15 +83,6 @@ func (p *Printer) whoamiText(id *qurlapi.Identity) error {
 		ew.printf("%s\t%s\n", p.bold("Device public key:"), id.DevicePublicKeyB64)
 	}
 	return ew.flush(tw)
-}
-
-// keyLine renders the key's identity: the id, plus the non-secret display
-// prefix when the platform provided one.
-func keyLine(k *qurlapi.KeyIdentity) string {
-	if k.KeyPrefix == "" {
-		return k.KeyID
-	}
-	return fmt.Sprintf("%s (%s)", k.KeyID, k.KeyPrefix)
 }
 
 func (p *Printer) keyExpiry(t *time.Time) string {

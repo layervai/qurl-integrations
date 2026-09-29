@@ -15,10 +15,9 @@ func fixtureIdentity() *qurlapi.Identity {
 		OwnerID:  "own_output_test",
 		AuthType: "api_key",
 		Key: &qurlapi.KeyIdentity{
-			KeyID:     "key_outputtest01",
-			Kind:      "api_key",
-			Scopes:    []string{"qurl:read", "qurl:write"},
-			KeyPrefix: "lv_test_outp",
+			KeyID:  "key_outputtest01",
+			Kind:   "api_key",
+			Scopes: []string{"qurl:read", "qurl:write"},
 		},
 		DevicePublicKeyB64: "dGVzdC1kZXZpY2UtcHVibGljLWtleQ==",
 	}
@@ -34,7 +33,7 @@ func TestWhoAmIProjections(t *testing.T) {
 		if err := p.WhoAmI(fixtureIdentity()); err != nil {
 			t.Fatal(err)
 		}
-		for _, want := range []string{"own_output_test", "key_outputtest01 (lv_test_outp)", "qurl:read, qurl:write", "never", "Device public key:", "dGVzdC1kZXZpY2UtcHVibGljLWtleQ=="} {
+		for _, want := range []string{"own_output_test", "key_outputtest01", "qurl:read, qurl:write", "never", "Device public key:", "dGVzdC1kZXZpY2UtcHVibGljLWtleQ=="} {
 			if !strings.Contains(out.String(), want) {
 				t.Errorf("text projection missing %q:\n%s", want, out.String())
 			}
@@ -90,9 +89,8 @@ func TestWhoAmIProjections(t *testing.T) {
 			OwnerID  string `json:"owner_id"`
 			AuthType string `json:"auth_type"`
 			APIKey   *struct {
-				KeyID     string   `json:"key_id"`
-				Scopes    []string `json:"scopes"`
-				KeyPrefix string   `json:"key_prefix"`
+				KeyID  string   `json:"key_id"`
+				Scopes []string `json:"scopes"`
 			} `json:"api_key"`
 			DevicePublicKeyB64 string `json:"device_public_key_b64"`
 		}
@@ -102,6 +100,9 @@ func TestWhoAmIProjections(t *testing.T) {
 		if doc.OwnerID != "own_output_test" || doc.APIKey == nil || doc.APIKey.KeyID != "key_outputtest01" ||
 			doc.DevicePublicKeyB64 != "dGVzdC1kZXZpY2UtcHVibGljLWtleQ==" {
 			t.Errorf("json projection = %+v", doc)
+		}
+		if strings.Contains(out.String(), "key_prefix") {
+			t.Errorf("whoami must not echo any part of the API key secret:\n%s", out.String())
 		}
 	})
 }
