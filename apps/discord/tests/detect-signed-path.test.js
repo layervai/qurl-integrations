@@ -15,6 +15,7 @@ const qurl = 'https://qurl.link/#qv2t1.test-credential';
 // SDK 2.x resource item routes take the CRID; `resource_id` stays the public key.
 const { PUBLIC_KEY_RESOURCE_ID: publicKey, CRID_RESOURCE_ID: crid } = require('./helpers/qurl-fixtures');
 const minted = (overrides = {}) => ({
+  qurl_id: 'q_0123456789a', expires_at: '2030-01-01T00:00:00Z',
   resource_id: publicKey, crid, qurl_link: qurl, qurl_site: origin, target_path: path, ...overrides,
 });
 let detect, opener, send;
