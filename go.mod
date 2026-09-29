@@ -12,9 +12,9 @@ require (
 	github.com/distribution/reference v0.6.0
 	github.com/fatedier/frp v0.71.0
 	github.com/fatedier/golib v0.8.2
-	github.com/layervai/qurl-conformance v0.17.0
+	github.com/layervai/qurl-conformance v0.17.1
 	github.com/layervai/qurl-connector v0.14.1
-	github.com/layervai/qurl-go v0.19.1-0.20260925183328-3250002455d9
+	github.com/layervai/qurl-go v0.19.1
 	github.com/lestrrat-go/jwx/v2 v2.1.7
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.0.10
