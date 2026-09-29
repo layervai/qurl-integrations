@@ -13,6 +13,8 @@ test('captures exact detector child before returning mint, without capability or
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'detect-receipt-'));
   process.env.QURL_OWNERSHIP_RECEIPTS = path.join(dir, 'owned.jsonl');
   process.env.QURL_OWNERSHIP_VERIFIER = '/private/verifier';
+  process.env.QURL_PUBLIC_CONFIG_URL = 'https://qurl.link.layerv.xyz/';
+  process.env.QURL_API_KEY = 'private-api-key';
   const { CRID_RESOURCE_ID: crid } = require('./helpers/qurl-fixtures');
   const minted = { crid, resource_id: 'r_owned', qurl_id: 'q_detector',
     expires_at: '2030-01-01T00:00:00Z', qurl_link: 'secret-capability' };
@@ -22,7 +24,7 @@ test('captures exact detector child before returning mint, without capability or
   const fetch = jest.fn(async () => new Response(JSON.stringify({ data: minted }), {
     status: 200, headers: { 'Content-Type': 'application/json' },
   }));
-  const client = new Client({ endpoint: 'https://api.example', apiKey: 'test-key', fetch });
+  const client = new Client({ baseUrl: 'https://api.example', apiKey: 'test-key', fetch });
   const restore = installMintReceipt(Client, 'owner');
   try {
     expect(await client.createQurlForResource(crid)).toEqual(minted);
@@ -99,4 +101,20 @@ test('real SDK exposes the interception and exact-child revoke methods', () => {
   expect(typeof QURLClient.prototype.createQurlForResource).toBe('function');
   expect(typeof QURLClient.prototype.revokeResourceQurl).toBe('function');
   expect(() => installMintReceipt(class {}, 'owner')).toThrow('interception point missing');
+});
+
+
+test.each(['http://api.layerv.xyz', 'https://untrusted.example', 'https://user:pass@api.layerv.xyz'])('preflight rejects %s before fetching owner identity', async endpoint => {
+  process.env.DETECT_SMOKE_GUILD_ID = '1491271325791293611';
+  for (const key of ['QURL_OWNERSHIP_VERIFIER', 'QURL_OWNERSHIP_RECEIPTS', 'QURL_PUBLIC_CONFIG_URL', 'QURL_ENDPOINT', 'QURL_API_KEY']) process.env[key] = 'configured';
+  const argv = process.argv;
+  process.argv = argv.slice(0, 2);
+  const config = require('../src/config');
+  const original = config.QURL_ENDPOINT;
+  config.QURL_ENDPOINT = endpoint;
+  const fetch = jest.spyOn(global, 'fetch');
+  try {
+    await expect(require('../scripts/smoke-detect').main()).rejects.toThrow('untrusted ownership API endpoint');
+    expect(fetch).not.toHaveBeenCalled();
+  } finally { process.argv = argv; config.QURL_ENDPOINT = original; fetch.mockRestore(); }
 });

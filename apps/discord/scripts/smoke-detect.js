@@ -21,6 +21,7 @@ function installMintReceipt(Client, owner) {
     try {
       validateResourceId(minted.resource_id);
       assert.ok(hasPersistableQurlIdShape(minted.qurl_id) && minted.crid === crid);
+      // TODO(upstream-contract): qurl-service CreateQurlForResource returns both qurl_id and expires_at.
       assert.ok(Number.isFinite(Date.parse(minted.expires_at)));
       const verified = spawnSync(process.env.QURL_OWNERSHIP_VERIFIER, [], {
         env: { QURL_PUBLIC_CONFIG_URL: process.env.QURL_PUBLIC_CONFIG_URL },
@@ -82,6 +83,12 @@ async function main() {
   for (const name of ['QURL_OWNERSHIP_VERIFIER', 'QURL_OWNERSHIP_RECEIPTS', 'QURL_PUBLIC_CONFIG_URL', 'QURL_ENDPOINT', 'QURL_API_KEY']) {
     assert.ok(process.env[name], `Missing ${name}`);
   }
+  const config = require('../src/config');
+  const endpoint = new URL(config.QURL_ENDPOINT);
+  assert.ok(endpoint.protocol === 'https:' && !endpoint.username && !endpoint.password
+    && !endpoint.port && ['api.layerv.ai', 'api.layerv.xyz',
+      ...(config.DETECT_EXTRA_NON_PROD_QURL_ENDPOINT_HOSTS || [])].includes(endpoint.hostname),
+  'untrusted ownership API endpoint');
   fs.accessSync(process.env.QURL_OWNERSHIP_VERIFIER, fs.constants.X_OK);
   fs.appendFileSync(process.env.QURL_OWNERSHIP_RECEIPTS, '', { mode: 0o600 });
   fs.chmodSync(process.env.QURL_OWNERSHIP_RECEIPTS, 0o600);
@@ -89,8 +96,8 @@ async function main() {
     env: { QURL_PUBLIC_CONFIG_URL: process.env.QURL_PUBLIC_CONFIG_URL }, timeout: 10000,
   });
   assert.ok(!checked.error && checked.status === 0, 'ownership trust unavailable');
-  const me = await fetch(new URL('/v1/me', process.env.QURL_ENDPOINT), {
-    headers: { Authorization: `Bearer ${process.env.QURL_API_KEY}` }, signal: AbortSignal.timeout(10000),
+  const me = await fetch(new URL('/v1/me', endpoint), {
+    headers: { Authorization: `Bearer ${process.env.QURL_API_KEY}` }, redirect: 'error', signal: AbortSignal.timeout(10000),
   });
   assert.ok(me.ok, 'ownership owner read failed');
   // TODO(upstream-contract): qurl-service GET /v1/me returns data.owner_id.
@@ -115,4 +122,4 @@ if (require.main === module) main().catch(error => {
   process.exitCode = 1;
 });
 
-module.exports = { installMintReceipt };
+module.exports = { installMintReceipt, main };
