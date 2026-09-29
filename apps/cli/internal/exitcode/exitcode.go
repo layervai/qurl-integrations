@@ -308,9 +308,11 @@ func connectorSentinelCode(err error) (int, bool) { //nolint:gocyclo // Keep the
 	}
 	switch {
 	case errors.Is(err, state.ErrUnsafeDirectory):
-		// Checked first: the wrapped connector chain may carry other
-		// sentinels, but the remedy is a local directory mode or state
-		// location, the configuration row.
+		// First in this switch: the wrapped connector chain may carry other
+		// connector sentinels, but the remedy is a local directory mode or
+		// state location, the configuration row. qurl-go's own permission
+		// refusals never reach here; ExplainUnsafeDirectory leaves them as
+		// they are, so a loose credential state mode stays Auth.
 		return Config, true
 	case errors.Is(err, connectordaemon.ErrUserServiceManagerUnavailable):
 		// Like ErrRuntimeSupervision, the remedy is the supervision mode

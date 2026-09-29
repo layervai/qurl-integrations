@@ -92,7 +92,7 @@ func hostErrorLines(p *Printer, head string, err error) ([]string, bool) {
 			hint = hintUnsafeStateDirectory
 		}
 		return []string{
-			head + " " + fmt.Sprintf(msgUnsafeDirectory, unsafeDir.Dir, unsafeDir.Mode),
+			head + " " + fmt.Sprintf(msgUnsafeDirectory, unsafeDir.Dir, unsafeDir.Mode.Perm()),
 			"", "  " + p.dim(fmt.Sprintf(hint, unsafeDir.Dir)),
 		}, true
 	case errors.Is(err, connectordaemon.ErrUserServiceManagerUnavailable):

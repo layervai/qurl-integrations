@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+
+	qurl "github.com/layervai/qurl-go/qurl"
 )
 
 // ErrUnsafeDirectory means a directory on the path to qurl's state or to the
@@ -44,12 +46,20 @@ var unsafeDirectoryPattern = regexp.MustCompile(`directory component (/.*?) has 
 // describes the filesystem as it is now. A sticky directory (such as /tmp) is
 // left untranslated: it is shared on purpose, and `chmod go-w` is the wrong
 // advice for it.
+//
+// qurl-go's own permission refusals keep their classification (a loose
+// credential state mode exits Auth) and their message, which already names
+// the chmod. Windows is excluded outright: the connector's mode rule is Unix
+// only, and Go synthesizes Windows directory modes, so the re-inspection
+// would prove nothing there.
 func ExplainUnsafeDirectory(err error) error {
-	if err == nil {
-		return nil
+	if err == nil || !unixModeRule {
+		return err
 	}
 	var already *UnsafeDirectoryError
-	if errors.As(err, &already) {
+	if errors.As(err, &already) ||
+		errors.Is(err, qurl.ErrInsecureCredentialStatePermissions) ||
+		errors.Is(err, qurl.ErrInsecureAgentStatePermissions) {
 		return err
 	}
 	match := unsafeDirectoryPattern.FindStringSubmatch(err.Error())

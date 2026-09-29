@@ -13,12 +13,16 @@ import (
 // lack one. The remedy is a different supervision mode (--foreground, or
 // --supervision external under another supervisor), so exitcode maps it to
 // Config like ErrRuntimeSupervision.
-var ErrUserServiceManagerUnavailable = errors.New("no systemd user manager is running for this user; run 'qurl publish <url> --foreground' or 'qurl daemon run --supervision external' instead")
+var ErrUserServiceManagerUnavailable = errors.New("no systemd user manager is reachable from this session")
 
 // diagnosedJobManager attributes native job-manager failures to a missing
 // systemd user manager when the host evidently has none. Without it, the
 // connector's executable search reports every candidate path it rejected,
 // which reads like a security failure rather than a missing capability.
+//
+// TODO(upstream-contract): the interface is embedded, so a method added to
+// connectorservice.UserJobManager passes through undiagnosed rather than
+// failing to compile. Wrap any new method here.
 type diagnosedJobManager struct {
 	connectorservice.UserJobManager
 	available func() bool

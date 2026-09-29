@@ -4,11 +4,13 @@ package state
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 
 	connectoragentstate "github.com/layervai/qurl-connector/pkg/agentstate"
+	qurl "github.com/layervai/qurl-go/qurl"
 )
 
 // realTempDir resolves macOS's /var -> /private/var alias and closes the
@@ -20,7 +22,7 @@ func realTempDir(t *testing.T) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(dir, 0o700); err != nil {
+	if err := os.Chmod(dir, 0o700); err != nil { //nolint:gosec // a directory, which needs its search bit.
 		t.Fatal(err)
 	}
 	return dir
@@ -107,6 +109,14 @@ func TestExplainUnsafeDirectoryLeavesOtherErrorsAlone(t *testing.T) {
 				t.Fatalf("ExplainUnsafeDirectory rewrote %v into %v", err, got)
 			}
 		})
+	}
+	// qurl-go classifies its own permission refusals; they must keep their
+	// exit code and message even when the text also names a loose directory.
+	for _, sentinel := range []error{qurl.ErrInsecureCredentialStatePermissions, qurl.ErrInsecureAgentStatePermissions} {
+		err := fmt.Errorf("%w: %w", sentinel, refusal(loose))
+		if got := ExplainUnsafeDirectory(err); got != err { //nolint:errorlint // identity is the contract.
+			t.Fatalf("ExplainUnsafeDirectory rewrote qurl-go's %v", sentinel)
+		}
 	}
 	if ExplainUnsafeDirectory(nil) != nil {
 		t.Fatal("nil must stay nil")

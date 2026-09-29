@@ -5,15 +5,24 @@ package daemon
 import (
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 )
 
 // systemdUserManagerAvailable reports whether this session can reach a
 // systemd user manager: the host booted with systemd (sd_booted's
-// /run/systemd/system test) and this user's manager has created its private
-// control socket in the user runtime directory.
+// /run/systemd/system test), XDG_RUNTIME_DIR is set, and a user manager has
+// created its private control socket there. That socket is a proxy for "a
+// user manager started", not the bus systemctl --user dials; it is consulted
+// only after the manager already failed, so it decides the message and exit
+// code, never whether a working host fails.
+//
+// An unset or relative XDG_RUNTIME_DIR counts as unreachable even when a
+// manager runs under /run/user/<uid>: systemctl --user cannot find its bus
+// without it ("Failed to connect to bus: No medium found").
 func systemdUserManagerAvailable(lookupEnv func(string) (string, bool)) bool {
+	if lookupEnv == nil {
+		lookupEnv = os.LookupEnv
+	}
 	return systemdUserManagerAvailableAt("/run", lookupEnv)
 }
 
@@ -21,11 +30,10 @@ func systemdUserManagerAvailableAt(runRoot string, lookupEnv func(string) (strin
 	if info, err := os.Stat(filepath.Join(runRoot, "systemd", "system")); err != nil || !info.IsDir() {
 		return false
 	}
-	runtimeDir := filepath.Join(runRoot, "user", strconv.Itoa(os.Geteuid()))
-	if lookupEnv != nil {
-		if value, ok := lookupEnv("XDG_RUNTIME_DIR"); ok && filepath.IsAbs(strings.TrimSpace(value)) {
-			runtimeDir = strings.TrimSpace(value)
-		}
+	value, ok := lookupEnv("XDG_RUNTIME_DIR")
+	runtimeDir := strings.TrimSpace(value)
+	if !ok || !filepath.IsAbs(runtimeDir) {
+		return false
 	}
 	info, err := os.Stat(filepath.Join(runtimeDir, "systemd", "private"))
 	return err == nil && info.Mode()&os.ModeSocket != 0

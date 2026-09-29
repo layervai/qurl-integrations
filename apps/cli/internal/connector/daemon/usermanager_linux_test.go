@@ -43,11 +43,17 @@ func TestSystemdUserManagerAvailableAt(t *testing.T) {
 			t.Fatal("no private socket means no user manager")
 		}
 	})
-	t.Run("default runtime dir", func(t *testing.T) {
+	t.Run("manager running but XDG_RUNTIME_DIR unset", func(t *testing.T) {
+		// systemctl --user cannot find its bus here, so the probe must not
+		// report a reachable manager just because /run/user/<uid> has one.
 		run := booted(t)
 		listenPrivate(t, filepath.Join(run, "user", strconv.Itoa(os.Geteuid())))
-		if !systemdUserManagerAvailableAt(run, noEnv) {
-			t.Fatal("user manager socket under /run/user/<uid> was not found")
+		if systemdUserManagerAvailableAt(run, noEnv) {
+			t.Fatal("a manager this session cannot address is not reachable")
+		}
+		relative := func(key string) (string, bool) { return "run/user", key == "XDG_RUNTIME_DIR" }
+		if systemdUserManagerAvailableAt(run, relative) {
+			t.Fatal("a relative XDG_RUNTIME_DIR is not usable")
 		}
 	})
 	t.Run("XDG_RUNTIME_DIR", func(t *testing.T) {
@@ -61,13 +67,14 @@ func TestSystemdUserManagerAvailableAt(t *testing.T) {
 	t.Run("regular file is not a socket", func(t *testing.T) {
 		run := booted(t)
 		runtimeDir := filepath.Join(run, "user", strconv.Itoa(os.Geteuid()))
+		env := func(key string) (string, bool) { return runtimeDir, key == "XDG_RUNTIME_DIR" }
 		if err := os.MkdirAll(filepath.Join(runtimeDir, "systemd"), 0o700); err != nil {
 			t.Fatal(err)
 		}
 		if err := os.WriteFile(filepath.Join(runtimeDir, "systemd", "private"), nil, 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if systemdUserManagerAvailableAt(run, noEnv) {
+		if systemdUserManagerAvailableAt(run, env) {
 			t.Fatal("a regular file is not a user manager socket")
 		}
 	})

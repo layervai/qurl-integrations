@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"slices"
 	"strings"
 	"testing"
@@ -1052,6 +1053,7 @@ func TestNoUserServiceManagerRenderingNamesTheWorkarounds(t *testing.T) {
 }
 
 func TestUnsafeDirectoryRenderingNamesTheDirectoryAndRemedy(t *testing.T) {
+	// Verbatim from `qurl list` (v3.0.0) on ubuntu:24.04 with a 0775 ~/.local.
 	raw := errors.New("prepare native agent state directory: directory component /home/agent/.local has unsafe mode 0775")
 	tests := []struct {
 		name        string
@@ -1081,7 +1083,8 @@ func TestUnsafeDirectoryRenderingNamesTheDirectoryAndRemedy(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			err := &state.UnsafeDirectoryError{Dir: "/home/agent/.local", Mode: 0o775, ContainsStateDir: test.containsDir, Err: raw}
+			// The directory bit proves rendering prints permission bits only.
+			err := &state.UnsafeDirectoryError{Dir: "/home/agent/.local", Mode: os.ModeDir | 0o775, ContainsStateDir: test.containsDir, Err: raw}
 			var buf bytes.Buffer
 			RenderError(&buf, fmt.Errorf("open local shares: %w", err), false)
 			got := buf.String()

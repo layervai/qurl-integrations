@@ -91,7 +91,7 @@ const (
 	// msgNoUserServiceManager is Linux without a running systemd user manager
 	// (containers, sandboxes, minimal images); the hint names both supervision
 	// modes that do not need one.
-	msgNoUserServiceManager  = "This Linux session has no systemd user manager, so qURL can't keep sharing in the background."
+	msgNoUserServiceManager  = "This Linux session can't reach a systemd user manager, so qURL can't keep sharing in the background."
 	hintNoUserServiceManager = "Hint: run `qurl publish <url> --foreground` to share from this terminal, or have your own process supervisor run `qurl daemon run --supervision external`."
 
 	// msgUnsafeDirectory names the directory other users can write to and its
