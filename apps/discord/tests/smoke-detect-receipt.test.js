@@ -104,8 +104,10 @@ test('real SDK exposes the interception and exact-child revoke methods', () => {
 });
 
 
-test.each(['http://api.layerv.xyz', 'https://untrusted.example', 'https://user:pass@api.layerv.xyz'])('preflight rejects %s before fetching owner identity', async endpoint => {
+test.each(['http://api.layerv.xyz', 'https://untrusted.example', 'https://user:pass@api.layerv.xyz',
+  'https://api.layerv.xyz/staging', 'https://api.layerv.xyz/?tenant=other', 'https://api.layerv.xyz/#other'])('preflight rejects %s before fetching owner identity', async endpoint => {
   process.env.DETECT_SMOKE_GUILD_ID = '1491271325791293611';
+  delete process.env.DETECT_SMOKE_QURL_ID;
   for (const key of ['QURL_OWNERSHIP_VERIFIER', 'QURL_OWNERSHIP_RECEIPTS', 'QURL_PUBLIC_CONFIG_URL', 'QURL_ENDPOINT', 'QURL_API_KEY']) process.env[key] = 'configured';
   const argv = process.argv;
   process.argv = argv.slice(0, 2);
@@ -117,4 +119,9 @@ test.each(['http://api.layerv.xyz', 'https://untrusted.example', 'https://user:p
     await expect(require('../scripts/smoke-detect').main()).rejects.toThrow('untrusted ownership API endpoint');
     expect(fetch).not.toHaveBeenCalled();
   } finally { process.argv = argv; config.QURL_ENDPOINT = original; fetch.mockRestore(); }
+});
+
+
+test.each(['at_secret', 'owner\n', undefined])('rejects unsafe owner before installing interception: %s', owner => {
+  expect(() => installMintReceipt(class {}, owner)).toThrow('invalid ownership owner identity');
 });

@@ -11,22 +11,25 @@ const { validateResourceId } = require('../src/utils/resource-id');
 
 // Owner IDs are identity-provider subjects, not resource public keys.
 const safeOwnerID = value => typeof value === 'string' && /^[\w|@.:-]{1,1024}$/.test(value)
-  && !value.startsWith('at_') ? value : null;
+  && value.trim() === value && !value.startsWith('at_') ? value : null;
 
 // Smoke-only interception: persist the actual detector child before the caller
 // can start native opening. The detected watermark's qurl_id is a different ID.
 function installMintReceipt(Client, owner) {
+  assert.ok(safeOwnerID(owner), 'invalid ownership owner identity');
   const original = Client.prototype.createQurlForResource;
   assert.equal(typeof original, 'function', 'SDK mint interception point missing');
   const restore = () => { Client.prototype.createQurlForResource = original; };
   restore.captured = 0;
   Client.prototype.createQurlForResource = async function (crid, ...args) {
     const minted = await original.call(this, crid, ...args);
+    let stage = 'Shape';
     try {
       validateResourceId(minted.resource_id);
       assert.ok(hasPersistableQurlIdShape(minted.qurl_id) && minted.crid === crid);
       // TODO(upstream-contract): qurl-service CreateQurlForResource returns both qurl_id and expires_at.
       assert.ok(Number.isFinite(Date.parse(minted.expires_at)));
+      stage = 'Verify';
       const verified = spawnSync(process.env.QURL_OWNERSHIP_VERIFIER, [], {
         env: { QURL_PUBLIC_CONFIG_URL: process.env.QURL_PUBLIC_CONFIG_URL },
         input: minted.qurl_link, encoding: 'utf8', timeout: 10000, maxBuffer: 16384,
@@ -39,6 +42,7 @@ function installMintReceipt(Client, owner) {
       assert.ok(Object.entries(publicIdentity).every(([key, value]) =>
         typeof value === 'string' && (key === 'cell_id' || value.length > 0)));
       const now = new Date();
+      stage = 'Persist';
       fs.appendFileSync(process.env.QURL_OWNERSHIP_RECEIPTS, JSON.stringify({
         event: 'owned_admission_attempt', purpose: 'discord_detect_smoke_detector_child',
         owner_id: owner, resource_id: minted.resource_id, crid, qurl_id: minted.qurl_id,
@@ -69,7 +73,7 @@ function installMintReceipt(Client, owner) {
           resource_id: safeID(minted?.resource_id), qurl_id: childID, crid: safeID(crid),
         });
       }
-      throw new Error('detector child ownership receipt could not be persisted');
+      throw Object.assign(new Error('detector child ownership receipt could not be persisted'), { name: `DetectorReceipt${stage}Error` });
     }
     return minted;
   };
@@ -92,7 +96,8 @@ async function main() {
   const config = require('../src/config');
   const endpoint = new URL(config.QURL_ENDPOINT);
   assert.ok(endpoint.protocol === 'https:' && !endpoint.username && !endpoint.password
-    && !endpoint.port && ['api.layerv.ai', 'api.layerv.xyz',
+    && !endpoint.port && endpoint.pathname === '/' && !endpoint.search && !endpoint.hash
+    && ['api.layerv.ai', 'api.layerv.xyz',
       ...(config.DETECT_EXTRA_NON_PROD_QURL_ENDPOINT_HOSTS || [])].includes(endpoint.hostname),
   'untrusted ownership API endpoint');
   fs.accessSync(process.env.QURL_OWNERSHIP_VERIFIER, fs.constants.X_OK);
