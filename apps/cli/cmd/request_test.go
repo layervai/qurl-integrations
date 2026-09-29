@@ -1,0 +1,336 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"io"
+	"net/http"
+	"strings"
+	"testing"
+	"time"
+
+	connectorshare "github.com/layervai/qurl-connector/pkg/share"
+	"github.com/layervai/qurl-go/qurl"
+
+	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/apitest"
+	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/exitcode"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/output"
+)
+
+func TestRequestCommand(t *testing.T) {
+	srv := apitest.NewServer(t)
+	srv.Script(http.MethodPost, "/v1/account/link", func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body["account_token"] != "private-token" {
+			t.Error("stdin body lost")
+		}
+		if r.Header.Get("Idempotency-Key") != "01234567-89ab-cdef-0123-456789abcdef" {
+			t.Error("idempotency key lost")
+		}
+		w.Header().Set("Retry-After", "3")
+		w.WriteHeader(429)
+		_, _ = w.Write([]byte(`{"error":{"code":"rate_limit"}}`))
+	})
+	state := bootstrapRegisteredState(t)
+	res := runCLI(t, &runOpts{env: externalLoginEnv(), args: []string{"request", "POST", "/v1/account/link", "--supervision", "external", "-o", "json", "--idempotency-key", "01234567-89ab-cdef-0123-456789abcdef"}, stdin: strings.NewReader(`{"account_token":"private-token"}`), openAPIClient: func(ctx context.Context) (qurlapi.Client, error) {
+		return qurlapi.NewRegistered(ctx, &qurlapi.Config{BaseURL: srv.URL, HTTPClient: srv.Client()}, &bootstrapAgentStateStore{state: state})
+	}})
+	var envelope struct {
+		Status  int               `json:"status"`
+		Headers map[string]string `json:"headers"`
+	}
+	if err := json.Unmarshal(res.stdout.Bytes(), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if res.code != 0 || envelope.Status != 429 || envelope.Headers["retry-after"] != "3" || len(srv.Requests()) != 1 {
+		t.Fatalf("exit %d: %s %s", res.code, res.stdout.String(), res.stderr.String())
+	}
+	for _, secret := range []string{state.DeviceAPIKey, "private-token"} {
+		if strings.Contains(res.stdout.String()+res.stderr.String(), secret) {
+			t.Fatal("credential leaked")
+		}
+	}
+}
+
+func TestRequestRejectsInputBeforeOpeningDevice(t *testing.T) {
+	for _, tc := range []struct {
+		args       []string
+		body, want string
+	}{
+		{[]string{"GET", "https://evil.test/v1/me"}, "", "canonical /v1/ path"},
+		{[]string{"POST", "/v1/account/link"}, `{"account_token":"private-token"} garbage`, "request body must be JSON"},
+		{[]string{"POST", "/v1/account/link"}, "{}" + strings.Repeat(" ", qurlapi.MaxRequestBody-1), "exceeds 1 MiB"},
+		{[]string{"GET", "/v1/me", "--idempotency-key", strings.Repeat("a", 32) + "\r\nheader"}, "", "idempotency key"},
+		{[]string{"GET", "/v1/me", "--idempotency-key", strings.Repeat("a", 32)}, "", "applies only to mutations"},
+		{[]string{"POST", "/v1/resources", "--idempotency-key", strings.Repeat("a", 31)}, "", "idempotency key"},
+		{[]string{"POST", "/v1/resources", "--idempotency-key", strings.Repeat("a", 257)}, "", "idempotency key"},
+		{[]string{"HEAD", "/v1/me"}, "", "request method must be"},
+		{[]string{"get", "/v1/me"}, "", "request method must be"},
+		{[]string{"GET", "/v1/me?x=1"}, "", "queries are allowed only"},
+		{[]string{"POST", "/v1/api-keys"}, "{}", "not a registered-device route"},
+	} {
+		res := runCLI(t, &runOpts{env: externalLoginEnv(), args: append([]string{"request", "--supervision", "external", "-o", "json"}, tc.args...), stdin: strings.NewReader(tc.body), openAPIClient: func(context.Context) (qurlapi.Client, error) {
+			t.Error("opened device for invalid input")
+			return nil, errors.New("unexpected device open")
+		}})
+		if res.code == 0 || res.stdout.Len() != 0 || !strings.Contains(res.stderr.String(), tc.want) || strings.Contains(res.stderr.String(), "private-token") {
+			t.Fatalf("invalid input exit %d: %s", res.code, res.stderr.String())
+		}
+	}
+}
+
+func TestRequestRequiresJSONOutput(t *testing.T) {
+	res := runCLI(t, &runOpts{env: externalLoginEnv(), args: []string{"request", "GET", "/v1/me"}, stdin: strings.NewReader(""), openAPIClient: func(context.Context) (qurlapi.Client, error) {
+		t.Error("opened device without JSON output")
+		return nil, errors.New("unexpected device open")
+	}})
+	if res.code != 2 || !strings.Contains(res.stderr.String(), "request requires --output json") {
+		t.Fatalf("exit %d: %s", res.code, res.stderr.String())
+	}
+}
+
+type failingReader struct{}
+
+func (failingReader) Read([]byte) (int, error) { return 0, errors.New("stdin is closed") }
+
+func TestRequestReportsStdinReadError(t *testing.T) {
+	res := runCLI(t, &runOpts{env: externalLoginEnv(), args: []string{"request", "POST", "/v1/resources", "--supervision", "external", "-o", "json"}, stdin: failingReader{}, openAPIClient: func(context.Context) (qurlapi.Client, error) {
+		t.Error("opened device after stdin failure")
+		return nil, errors.New("unexpected device open")
+	}})
+	if res.code != 2 || !strings.Contains(res.stderr.String(), "could not read request body: stdin is closed") {
+		t.Fatalf("exit %d: %s", res.code, res.stderr.String())
+	}
+}
+
+func TestRequestAcceptsOneMiBBody(t *testing.T) {
+	srv := apitest.NewServer(t)
+	body := `{"x":"` + strings.Repeat("a", (1<<20)-8) + `"}`
+	srv.Script(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, r *http.Request) {
+		if got, _ := io.ReadAll(r.Body); string(got) != body {
+			t.Errorf("request body arrived with %d bytes, want %d", len(got), len(body))
+		}
+		w.WriteHeader(http.StatusCreated)
+	})
+	state := bootstrapRegisteredState(t)
+	res := runCLI(t, &runOpts{env: externalLoginEnv(), args: []string{"request", "POST", "/v1/resources", "--supervision", "external", "-o", "json"}, stdin: strings.NewReader(body), openAPIClient: func(ctx context.Context) (qurlapi.Client, error) {
+		return qurlapi.NewRegistered(ctx, &qurlapi.Config{BaseURL: srv.URL, HTTPClient: srv.Client()}, &bootstrapAgentStateStore{state: state})
+	}})
+	if len(body) != 1<<20 || res.code != 0 || len(srv.Requests()) != 1 {
+		t.Fatalf("exit %d: %s", res.code, res.stderr.String())
+	}
+}
+
+func TestRequestRequiresExternalSupervision(t *testing.T) {
+	res := runCLI(t, &runOpts{env: externalLoginEnv(), args: []string{"request", "GET", "/v1/me", "-o", "json"}, stdin: strings.NewReader(""), openAPIClient: func(context.Context) (qurlapi.Client, error) {
+		t.Error("opened device in a native namespace")
+		return nil, errors.New("unexpected device open")
+	}})
+	if res.code != 2 || !strings.Contains(res.stderr.String(), "request requires --supervision external") {
+		t.Fatalf("exit %d: %s", res.code, res.stderr.String())
+	}
+}
+
+// A GET never reads stdin, so an inherited pipe that never reaches EOF (here
+// one that fails if read) cannot stall it.
+func TestRequestGETReturnsEnvelopeWithoutReadingStdin(t *testing.T) {
+	srv := apitest.NewServer(t)
+	srv.Script(http.MethodGet, "/v1/me", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"owner_id":"owner-a&b"}`))
+	})
+	state := bootstrapRegisteredState(t)
+	res := runCLI(t, &runOpts{env: externalLoginEnv(), args: []string{"request", "GET", "/v1/me", "--supervision", "external", "-o", "json", "--quiet"}, stdin: failingReader{}, openAPIClient: func(ctx context.Context) (qurlapi.Client, error) {
+		return qurlapi.NewRegistered(ctx, &qurlapi.Config{BaseURL: srv.URL, HTTPClient: srv.Client()}, &bootstrapAgentStateStore{state: state})
+	}})
+	var envelope struct {
+		Status  int               `json:"status"`
+		Headers map[string]string `json:"headers"`
+		Body    struct {
+			OwnerID string `json:"owner_id"`
+		} `json:"body"`
+	}
+	if res.code != 0 || json.Unmarshal(res.stdout.Bytes(), &envelope) != nil || envelope.Status != http.StatusOK ||
+		envelope.Headers["content-type"] != "application/json" || envelope.Body.OwnerID != "owner-a&b" || strings.Contains(res.stdout.String(), `\u0026`) {
+		t.Fatalf("exit %d: %s %s", res.code, res.stdout.String(), res.stderr.String())
+	}
+}
+
+func TestRequestRefusesAccountKeyConfiguration(t *testing.T) {
+	for _, name := range []string{"QURL_API_KEY", "QURL_API_KEY_FILE"} {
+		res := runCLI(t, &runOpts{args: []string{"request", "GET", "/v1/me", "--supervision", "external", "-o", "json"}, env: map[string]string{name: "credential-do-not-read"}, openAPIClient: func(context.Context) (qurlapi.Client, error) {
+			t.Error("opened device with account authority configured")
+			return nil, errors.New("unexpected device open")
+		}})
+		if res.code != 2 || !strings.Contains(res.stderr.String(), "request cannot be combined with") || strings.Contains(res.stderr.String(), "credential-do-not-read") {
+			t.Fatalf("%s: exit %d: %s", name, res.code, res.stderr.String())
+		}
+	}
+}
+
+func TestRequestRefusesTerminalBodyInput(t *testing.T) {
+	for _, route := range [][]string{{"POST", "/v1/resources"}, {"PUT", "/v1/resources/r_1/sharing"}, {"PATCH", "/v1/resources/r_1"}} {
+		res := runCLI(t, &runOpts{env: externalLoginEnv(), args: append([]string{"request", "--supervision", "external", "-o", "json"}, route...), inTTY: true, openAPIClient: func(context.Context) (qurlapi.Client, error) {
+			t.Error("opened device with a terminal body")
+			return nil, errors.New("unexpected device open")
+		}})
+		if res.code != 2 || !strings.Contains(res.stderr.String(), "redirect it from the null device") {
+			t.Fatalf("%v: exit %d: %s", route, res.code, res.stderr.String())
+		}
+	}
+}
+
+// A namespace whose anonymous enrollment failed keeps its external mark but
+// has no device; request must point back at login, not at an account key.
+func TestRequestExplainsUnenrolledExternalNamespace(t *testing.T) {
+	dir := connectorStateTestDir(t)
+	if err := connectorstate.EstablishExternalRuntimeMode(context.Background(), dir); err != nil {
+		t.Fatal(err)
+	}
+	res := runCLI(t, &runOpts{nativeClient: true, env: externalLoginEnv(), shareStateDir: dir, args: []string{"request", "GET", "/v1/me", "--supervision", "external", "-o", "json"}, openNativeRuntime: func(ctx context.Context, cfg connectorshare.NativeRuntimeConfig) (registeredNativeRuntime, error) {
+		_, err := cfg.EnrollmentCredentialProvider(ctx, qurl.AgentEnrollmentCredentialRequest{AgentID: "agent", PublicKeyB64: "key"})
+		return nil, err
+	}})
+	if res.code == 0 || !strings.Contains(res.stderr.String(), "enroll this state directory first") {
+		t.Fatalf("exit %d: %s", res.code, res.stderr.String())
+	}
+}
+
+func TestRequestRefusesNativeNamespace(t *testing.T) {
+	stateDir := connectorStateTestDir(t)
+	res := runCLI(t, &runOpts{nativeClient: true, env: externalLoginEnv(), shareStateDir: stateDir, args: []string{"request", "GET", "/v1/me", "--supervision", "external", "-o", "json"}, openNativeRuntime: refuseNativeRuntime(t)})
+	if res.code != 3 || !strings.Contains(res.stderr.String(), `runtime supervision is "native", not "external"`) {
+		t.Fatalf("exit %d: %s", res.code, res.stderr.String())
+	}
+	mustNoExternalPolicy(t, stateDir)
+}
+
+// A body-less mutation (stdin from the null device) reaches the service with
+// no body and no Content-Type, and a DELETE keeps its idempotency key.
+func TestRequestBodylessMutations(t *testing.T) {
+	srv := apitest.NewServer(t)
+	key := strings.Repeat("k", 32)
+	srv.Script(http.MethodPost, "/v1/resources/r_1/sharing/restart", func(w http.ResponseWriter, r *http.Request) {
+		if got, _ := io.ReadAll(r.Body); len(got) != 0 || r.Header.Get("Content-Type") != "" {
+			t.Errorf("body-less POST sent %q with Content-Type %q", got, r.Header.Get("Content-Type"))
+		}
+		w.WriteHeader(http.StatusAccepted)
+	})
+	srv.Script(http.MethodDelete, "/v1/resources/r_1/sessions", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Idempotency-Key") != key {
+			t.Error("DELETE lost its idempotency key")
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+	state := bootstrapRegisteredState(t)
+	for _, args := range [][]string{
+		{"POST", "/v1/resources/r_1/sharing/restart"},
+		{"DELETE", "/v1/resources/r_1/sessions", "--idempotency-key", key},
+	} {
+		res := runCLI(t, &runOpts{env: externalLoginEnv(), args: append([]string{"request", "--supervision", "external", "-o", "json"}, args...), stdin: strings.NewReader(""), openAPIClient: func(ctx context.Context) (qurlapi.Client, error) {
+			return qurlapi.NewRegistered(ctx, &qurlapi.Config{BaseURL: srv.URL, HTTPClient: srv.Client()}, &bootstrapAgentStateStore{state: state})
+		}})
+		if res.code != 0 {
+			t.Fatalf("%v: exit %d: %s", args, res.code, res.stderr.String())
+		}
+	}
+	if len(srv.Requests()) != 2 {
+		t.Fatalf("requests = %d, want 2", len(srv.Requests()))
+	}
+}
+
+// A supervised device that needs recovery gets the supervisor's remedy, not
+// the native account-recover advice.
+func TestRequestExplainsSupervisedRecovery(t *testing.T) {
+	dir := connectorStateTestDir(t)
+	if err := connectorstate.EstablishExternalRuntimeMode(context.Background(), dir); err != nil {
+		t.Fatal(err)
+	}
+	res := runCLI(t, &runOpts{nativeClient: true, env: externalLoginEnv(), shareStateDir: dir, args: []string{"request", "GET", "/v1/me", "--supervision", "external", "-o", "json"}, openNativeRuntime: func(ctx context.Context, cfg connectorshare.NativeRuntimeConfig) (registeredNativeRuntime, error) {
+		_, err := cfg.RecoveryCredentialProvider(ctx)
+		return nil, err
+	}})
+	if res.code != 4 || !strings.Contains(res.stderr.String(), "The supervising app can restore") || strings.Contains(res.stderr.String(), "qurl account recover") {
+		t.Fatalf("exit %d: %s", res.code, res.stderr.String())
+	}
+}
+
+func TestRequestRequiresSealedKeyProvider(t *testing.T) {
+	res := runCLI(t, &runOpts{env: map[string]string{}, args: []string{"request", "GET", "/v1/me", "--supervision", "external", "-o", "json"}, openAPIClient: func(context.Context) (qurlapi.Client, error) {
+		t.Error("opened device without the sealed key provider")
+		return nil, errors.New("unexpected device open")
+	}})
+	if res.code != 2 || !strings.Contains(res.stderr.String(), "request requires LAYERV_KEY_PROVIDER") {
+		t.Fatalf("exit %d: %s", res.code, res.stderr.String())
+	}
+}
+
+// A correctly enrolled external namespace returns an envelope through the
+// production registered-client path and closes its runtime.
+func TestRequestRejectsConnectorScopedDevice(t *testing.T) {
+	srv := apitest.NewServer(t)
+	dir := connectorStateTestDir(t)
+	if err := connectorstate.EstablishExternalRuntimeMode(context.Background(), dir); err != nil {
+		t.Fatal(err)
+	}
+	state := bootstrapRegisteredState(t)
+	state.EnrollmentCredentialKind = string(qurl.RegistrationKeyKindConnectorBootstrap)
+	res := runCLI(t, &runOpts{nativeClient: true, env: externalLoginEnv(), shareStateDir: dir, args: []string{"request", "GET", "/v1/resources", "--endpoint", srv.URL, "--supervision", "external", "-o", "json"}, openNativeRuntime: func(context.Context, connectorshare.NativeRuntimeConfig) (registeredNativeRuntime, error) {
+		return &bootstrapNativeRuntime{store: &bootstrapAgentStateStore{state: state}}, nil
+	}})
+	if res.code != exitcode.Auth || res.stdout.Len() != 0 {
+		t.Fatalf("exit %d: %s %s", res.code, res.stdout.String(), res.stderr.String())
+	}
+	for _, req := range srv.Requests() {
+		if req.Path == "/v1/resources" {
+			t.Fatal("forwarded the request for a connector-scoped device")
+		}
+	}
+}
+
+func TestRequestEnrolledExternalNamespaceReturnsEnvelope(t *testing.T) {
+	srv := apitest.NewServer(t)
+	dir := connectorStateTestDir(t)
+	if err := connectorstate.EstablishExternalRuntimeMode(context.Background(), dir); err != nil {
+		t.Fatal(err)
+	}
+	runtime := &bootstrapNativeRuntime{store: &bootstrapAgentStateStore{state: bootstrapRegisteredState(t)}}
+	res := runCLI(t, &runOpts{nativeClient: true, env: externalLoginEnv(), shareStateDir: dir, args: []string{"request", "GET", "/v1/me", "--endpoint", srv.URL, "--supervision", "external", "-o", "json"}, openNativeRuntime: func(context.Context, connectorshare.NativeRuntimeConfig) (registeredNativeRuntime, error) {
+		return runtime, nil
+	}})
+	var envelope struct {
+		Status int `json:"status"`
+	}
+	if res.code != 0 || json.Unmarshal(res.stdout.Bytes(), &envelope) != nil || envelope.Status != http.StatusOK {
+		t.Fatalf("exit %d: %s %s", res.code, res.stdout.String(), res.stderr.String())
+	}
+	if !runtime.closed {
+		t.Fatal("request left the native runtime open")
+	}
+}
+
+// TestReadRequestBodyYieldsToCancellation pins that a stalled stdin cannot
+// outlive a supervisor's SIGTERM: Main traps the signal into ctx, so the read
+// must return when ctx ends.
+func TestReadRequestBodyYieldsToCancellation(t *testing.T) {
+	stalled, writer := io.Pipe()
+	t.Cleanup(func() { _ = writer.Close() })
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := readRequestBody(ctx, &output.Streams{In: stalled}, http.MethodPost)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("err = %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("stdin read ignored cancellation")
+	}
+}

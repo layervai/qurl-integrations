@@ -71,8 +71,20 @@ func (p *Printer) Notef(format string, args ...any) {
 
 // writeJSON emits v to stdout as indented JSON with a trailing newline.
 func (p *Printer) writeJSON(v any) error {
+	return p.writeJSONWith(v, true)
+}
+
+// RequestEnvelope emits a supervisor request envelope. HTML escaping stays
+// off so passed-through response bodies keep their characters.
+// The caller gates this on --output json.
+func (p *Printer) RequestEnvelope(v *qurlapi.RequestResponse) error {
+	return p.writeJSONWith(v, false)
+}
+
+func (p *Printer) writeJSONWith(v any, escapeHTML bool) error {
 	enc := json.NewEncoder(p.out)
 	enc.SetIndent("", "  ")
+	enc.SetEscapeHTML(escapeHTML)
 	return enc.Encode(v)
 }
 

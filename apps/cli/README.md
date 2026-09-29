@@ -119,6 +119,18 @@ brew install layervai/tap/qurl
 Homebrew also installs the man pages and the bash/zsh/fish completions
 shipped in the release archive.
 
+**Install script** (macOS / Linux, no Homebrew or `sudo` needed):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/layervai/qurl-integrations/main/scripts/install.sh | sh
+```
+
+The script verifies the download against the release's `checksums.txt`.
+It installs to `/usr/local/bin` when that is writable and otherwise to
+`~/.local/bin`, printing a `PATH` hint if needed. It never runs `sudo`, so it
+also works unattended for coding agents and CI. Set `INSTALL_DIR` to choose
+the directory, or run the script with `sudo` for a system-wide install.
+
 The CLI supports remote and local background qURL commands on macOS, Windows,
 and Linux. Linux uses the native systemd user manager. Containers and sandboxes
 often run without one; there, `qurl publish` says so and points to
@@ -242,8 +254,58 @@ copy individual bindings or pending requests into the new state.
 All commands that open device state, including `list`, `whoami`, and `get`, must
 use the state's supervision mode. For an externally supervised namespace, set
 `QURL_DAEMON_SUPERVISION=external` or pass `--supervision external`. A fresh
-externally supervised namespace must first use the existing enrollment-token
-login flow.
+externally supervised namespace must first enroll with `login --anonymous` or
+the enrollment-token login flow. Both require the sealed key-provider settings
+below and preserve an existing external identity.
+
+For account-free enrollment, invoke `qurl login --anonymous --supervision external
+-o json` with the same sealed key provider and inherited descriptor. This form
+refuses account API-key environment variables and `--enrollment-token-file`.
+Its JSON result contains `owner_id`, `auth_type`, `device_key_id` when available,
+and `device_enrolled: true`. Retain the complete state namespace and wrapping
+key across launches; failure never authorizes deleting or replacing them.
+
+Supervisors can use `qurl request METHOD /v1/... --supervision external -o json`
+for the registered device's existing resource operations. It requires the same
+sealed key provider as enrollment and refuses natively supervised namespaces and
+account API-key configuration, so it never enrolls or recovers a device
+implicitly. For POST, PUT and PATCH, pipe an optional JSON body through stdin;
+when there is no body, redirect stdin from the null device (`/dev/null`, or
+`NUL` on Windows) rather than closing it, because a closed stdin is a read
+error. The CLI sets no timeout, so impose a deadline on the process; it covers
+both the stdin read and the HTTP call. GET and DELETE never read stdin. Responses have
+`{status, headers, body}`; headers contain only `content-type`, `retry-after`
+and `x-request-id`. Empty responses use `body: null`; non-JSON responses use a
+string. HTTP failures also return this envelope with exit zero; local and
+transport failures exit nonzero. Requests make one attempt. When retrying a
+mutation, pass the same `--idempotency-key` (32–256 ASCII letters, digits,
+hyphens or underscores; never on GET); it protects only routes where the qURL
+service implements idempotency. Bodies are limited to 1 MiB including
+surrounding whitespace. Absolute URLs and routes outside the registered-device
+allowlist (mirrored locally from the SDK) are refused. Queries are supported
+only for `GET /v1/resources` and `GET /v1/resources/{id}/qurls`; the CLI and the
+SDK both reject queries on other routes. Response bodies also have a 1 MiB cap;
+exceeding it returns a nonzero exit. Responses can carry capability material
+such as newly minted qURL links; do not log stdout durably.
+
+The allowed routes are `GET /v1/me`, `POST /v1/account/link`, `POST /v1/qurls`,
+`GET` and `POST /v1/resources`, and for one resource: `GET`, `PATCH` and
+`DELETE /v1/resources/{id}`; `GET` and `PUT .../sharing`;
+`POST .../sharing/restart`; `POST .../share`; `GET` and `POST .../qurls`;
+`PATCH` and `DELETE .../qurls/{id}`; `GET` and `DELETE .../sessions`; and
+`DELETE .../sessions/{id}`. These operations require matching service-side
+device authorization. The bridge only forwards the HTTP call: it does not
+update this machine's share registry or reload the daemon, so use `qurl start`,
+`qurl stop`, `qurl restart` and `qurl delete` for resources shared from this
+machine rather than the `sharing` and resource `DELETE` routes. Sessions are
+unpaginated, so a session list larger than the 1 MiB response cap fails; terminate all sessions to recover. API key
+creation, account owner enumeration, billing, quota and usage are refused.
+
+For example, account linking uses `POST /v1/account/link` with
+`{"account_token":"<account access token>"}` on stdin. Keep that token out of
+argv, environment variables, logs and durable files. The device credential
+stays inside the CLI. Before recording success, verify the returned `owner_id`
+matches this device and `account_id` matches the intended account.
 
 A program that runs the daemon itself (see
 [External supervision](#external-supervision)) never hands qurl an account API
@@ -369,8 +431,9 @@ directory rather than switching in place.
 | `qurl delete <CRID>` | Delete a published resource |
 | `qurl account setup` | Link this device to an account for recovery and other devices |
 | `qurl account recover` | Restore account resource access on a new device |
-| `qurl login` | Enroll this device with a one-time account key, or from a supervisor's enrollment token file |
+| `qurl login` | Enroll this device with a one-time account key, from a supervisor's enrollment token file, or anonymously for a supervisor |
 | `qurl whoami` | Show which account this registered device belongs to |
+| `qurl request METHOD PATH` | Make a device-authorized JSON request for a supervising app (see [Supervised installs](#supervised-installs)) |
 | `qurl completion <shell>` | Generate shell completions (`bash`, `zsh`, `fish`, `powershell`) |
 | `qurl version` | Print version information |
 
@@ -417,7 +480,8 @@ directory with the same setting (flag `--supervision`, environment
 `QURL_DAEMON_SUPERVISION`, config key `daemon_supervision`):
 
 Use a dedicated, fresh state directory rather than the native default. Enroll
-with the one-shot token file described in [Supervised installs](#supervised-installs),
+without an account using `qurl login --anonymous --supervision external -o json`,
+or use the one-shot token file described in [Supervised installs](#supervised-installs),
 then start the daemon. For each command below, the supervising process must
 attach a fresh inherited key descriptor and set `LAYERV_KEY_PROVIDER` and
 `LAYERV_LOCAL_KEY_FD` as described above. Exporting a descriptor number alone
@@ -438,7 +502,7 @@ directory to return to native supervision instead of deleting a marker beside du
 
 External supervision changes three things:
 
-- Token-file login (or the first external daemon invocation) marks the
+- Anonymous or token-file login marks the
   state directory as externally supervised (`runtime_mode.json`). It accepts
   only a directory that holds no natively managed state, and the mark is
   permanent. Starting the daemon before enrollment exits nonzero with
