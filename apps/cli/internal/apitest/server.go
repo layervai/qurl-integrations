@@ -303,8 +303,9 @@ const (
 // the presented credential. key_prefix mirrors the first 12 characters of the
 // bearer, as the platform still sends it. The CLI deliberately drops it, since
 // it is a slice of the secret; keeping it here is what lets the whoami goldens
-// prove it never reaches output. Scopes come back alphabetical (a platform contract), and
-// expires_at is omitted — the default fixture is a non-expiring key.
+// prove it never reaches output. Scopes come back alphabetical (a platform
+// contract), and expires_at is omitted — the default fixture is a non-expiring
+// key.
 func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	bearer := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 	if bearer == "" || bearer == r.Header.Get("Authorization") {

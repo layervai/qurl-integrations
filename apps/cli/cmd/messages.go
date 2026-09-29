@@ -72,6 +72,8 @@ const (
 func customerMessages() []string {
 	return []string{
 		msgAccountSetup,
+		msgDevicePublicKeyUnreadable,
+		msgDevicePublicKeyInvalid,
 		msgAccountContinue,
 		msgAccountLinked,
 		msgAccountRecovered,

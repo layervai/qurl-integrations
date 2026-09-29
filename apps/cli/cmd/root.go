@@ -992,9 +992,10 @@ func oneShotEnrollmentToken(path string) func(context.Context, qurl.AgentEnrollm
 // store.
 //
 // The value comes from a local file and is echoed to a terminal, so it must
-// decode as a standard-base64 X25519 key before it is returned. Anything else,
-// including an empty value, is errInvalidDevicePublicKey, and the error never
-// carries the bad bytes. A registered device should always have a valid key,
+// be the canonical standard-base64 encoding of an X25519 key before it is
+// returned. The decoder skips \r and \n, so a value that decodes is not enough:
+// it must also re-encode to exactly itself. Anything else, including an empty
+// value, is an *invalidDevicePublicKeyError, which never carries the bad bytes. A registered device should always have a valid key,
 // so the warning is the only way that gap becomes visible.
 //
 // The nil-state branch is defensive: whoami only calls this once a device
@@ -1015,14 +1016,17 @@ func devicePublicKey(ctx context.Context, store qurl.AgentStateStore) (string, e
 	}
 	key := persisted.PublicKeyB64
 	if key == "" {
-		return "", fmt.Errorf("%w: device state records no public key", errInvalidDevicePublicKey)
+		return "", &invalidDevicePublicKeyError{reason: "device state records no public key"}
 	}
 	raw, err := base64.StdEncoding.DecodeString(key)
 	if err != nil {
-		return "", fmt.Errorf("%w: not standard base64", errInvalidDevicePublicKey)
+		return "", &invalidDevicePublicKeyError{reason: "not standard base64"}
 	}
 	if len(raw) != devicePublicKeySize {
-		return "", fmt.Errorf("%w: decodes to %d bytes, want %d", errInvalidDevicePublicKey, len(raw), devicePublicKeySize)
+		return "", &invalidDevicePublicKeyError{reason: fmt.Sprintf("decodes to %d bytes, want %d", len(raw), devicePublicKeySize)}
+	}
+	if base64.StdEncoding.EncodeToString(raw) != key {
+		return "", &invalidDevicePublicKeyError{reason: "not canonical base64"}
 	}
 	return key, nil
 }
@@ -1030,9 +1034,12 @@ func devicePublicKey(ctx context.Context, store qurl.AgentStateStore) (string, e
 // devicePublicKeySize is the length of an X25519 public key.
 const devicePublicKeySize = 32
 
-// errInvalidDevicePublicKey marks device state that loaded but holds no usable
-// public key, as distinct from a state read that failed.
-var errInvalidDevicePublicKey = errors.New("invalid device public key")
+// invalidDevicePublicKeyError marks device state that loaded but holds no
+// usable public key, as distinct from a state read that failed. Its text is
+// only the reason, so the whoami warning reads once.
+type invalidDevicePublicKeyError struct{ reason string }
+
+func (e *invalidDevicePublicKeyError) Error() string { return e.reason }
 
 // identityKeyID is the non-secret identifier of the credential behind id.
 func identityKeyID(id *qurlapi.Identity) string {

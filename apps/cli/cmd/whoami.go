@@ -51,8 +51,9 @@ anything.`,
 				deviceKey, keyErr = devicePublicKey(cmd.Context(), opts.nativeStateStore)
 				// The identity is already complete. A missing key row must not
 				// turn the diagnostic command into a failure.
+				var invalid *invalidDevicePublicKeyError
 				switch {
-				case errors.Is(keyErr, errInvalidDevicePublicKey):
+				case errors.As(keyErr, &invalid):
 					printer.Warnf(msgDevicePublicKeyInvalid, keyErr)
 				case keyErr != nil:
 					printer.Warnf(msgDevicePublicKeyUnreadable, keyErr)

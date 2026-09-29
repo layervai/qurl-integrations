@@ -676,6 +676,8 @@ func TestWhoamiDevicePublicKeyReadFailureWarns(t *testing.T) {
 	const unreadable = "could not read the local device public key"
 	const invalid = "the local device state has no valid public key"
 	const escape = "\x1b[31mRED"
+	validKey := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x42}, 32))
+	insertAt := func(s string, i int, sep string) string { return s[:i] + sep + s[i:] }
 	cases := map[string]struct {
 		store *bootstrapAgentStateStore
 		want  string
@@ -684,6 +686,8 @@ func TestWhoamiDevicePublicKeyReadFailureWarns(t *testing.T) {
 		"empty public key":      {withKey(""), invalid},
 		"not base64":            {withKey(escape), invalid},
 		"valid key then escape": {withKey(base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x42}, 32)) + escape), invalid},
+		"carriage return":       {withKey(insertAt(validKey, 10, "\r")), invalid},
+		"line feed":             {withKey(insertAt(validKey, 10, "\n")), invalid},
 		"wrong length":          {withKey(base64.StdEncoding.EncodeToString([]byte("sixteen byte key"))), invalid},
 	}
 	for name, tc := range cases {
@@ -698,8 +702,8 @@ func TestWhoamiDevicePublicKeyReadFailureWarns(t *testing.T) {
 			if !strings.Contains(stderr, tc.want) {
 				t.Fatalf("whoami stderr = %q, want %q", stderr, tc.want)
 			}
-			if strings.Contains(stdout+stderr, "\x1b[31m") {
-				t.Fatalf("whoami echoed a terminal escape from local state:\nstdout %q\nstderr %q", stdout, stderr)
+			if strings.ContainsAny(stdout+stderr, "\x1b\r") || strings.Contains(stderr, "invalid device public key") {
+				t.Fatalf("whoami echoed control bytes from local state or repeated itself:\nstdout %q\nstderr %q", stdout, stderr)
 			}
 		})
 	}
