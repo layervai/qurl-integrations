@@ -64,6 +64,19 @@ func TestSystemdUserManagerAvailableAt(t *testing.T) {
 			t.Fatal("user manager socket under XDG_RUNTIME_DIR was not found")
 		}
 	})
+	t.Run("explicit session bus address", func(t *testing.T) {
+		// systemctl --user can dial it without XDG_RUNTIME_DIR, so the
+		// connector's own error must stand.
+		env := func(key string) (string, bool) {
+			return "unix:path=/run/user/1000/bus", key == "DBUS_SESSION_BUS_ADDRESS"
+		}
+		if !systemdUserManagerAvailableAt(booted(t), env) {
+			t.Fatal("an explicit session bus address is reachable")
+		}
+		if systemdUserManagerAvailableAt(shortTempRoot(t), env) {
+			t.Fatal("a host that did not boot systemd has no user manager, whatever the bus address")
+		}
+	})
 	t.Run("regular file is not a socket", func(t *testing.T) {
 		run := booted(t)
 		runtimeDir := filepath.Join(run, "user", strconv.Itoa(os.Geteuid()))

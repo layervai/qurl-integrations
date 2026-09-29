@@ -158,8 +158,12 @@ func Main(version string) int {
 func run(ctx context.Context, root *cobra.Command, opts *globalOpts) int {
 	// The connector reports a group- or other-writable directory only as
 	// text; name the directory and its remedy once, for rendering and the exit
-	// code alike.
-	err := connectorstate.ExplainUnsafeDirectory(root.ExecuteContext(ctx))
+	// code alike. A qURL service response is never a local directory-mode
+	// refusal, so its problem anatomy and exit code are left as they are.
+	err := root.ExecuteContext(ctx)
+	if apiErr := (*qurlapi.Error)(nil); !errors.As(err, &apiErr) {
+		err = connectorstate.ExplainUnsafeDirectory(err)
+	}
 	if err != nil && !errors.Is(err, context.Canceled) {
 		output.RenderError(opts.streams.Err, err, opts.errColor())
 	}

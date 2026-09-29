@@ -218,8 +218,9 @@ func FromError(err error) int {
 	}
 }
 
-// hostConditionCode maps local host conditions ahead of every other sentinel
-// family, mirroring output.RenderError, which renders them first: their
+// hostConditionCode maps local host conditions ahead of every sentinel
+// family (below only the CLI-typed wrappers in FromError), matching
+// output.RenderError, which renders them ahead of the connector taxonomy: their
 // chains still carry whatever the connector wrapped, and the exit code must
 // agree with the message. qurl-go's own permission refusals never become
 // ErrUnsafeDirectory (ExplainUnsafeDirectory leaves them as they are), so a
