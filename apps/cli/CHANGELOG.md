@@ -1,5 +1,18 @@
 # Changelog
 
+## [3.1.0](https://github.com/layervai/qurl-integrations/compare/v3.0.0...v3.1.0) (2026-09-29)
+
+
+### Features
+
+* **cli:** support sealed anonymous enrollment and supervised requests ([#1515](https://github.com/layervai/qurl-integrations/issues/1515)) ([ceb0018](https://github.com/layervai/qurl-integrations/commit/ceb00182fd9e227d07bcc0fb32cad27b9e27b5ad))
+
+
+### Bug Fixes
+
+* **cli:** install without sudo or Homebrew on fresh machines ([#1540](https://github.com/layervai/qurl-integrations/issues/1540)) ([cb4e0fd](https://github.com/layervai/qurl-integrations/commit/cb4e0fd4b55baa16a848bbe3edc3648694413dbf))
+* **cli:** make Linux sandbox and loose-directory errors actionable ([#1541](https://github.com/layervai/qurl-integrations/issues/1541)) ([6b2a74c](https://github.com/layervai/qurl-integrations/commit/6b2a74c6433e7f391b0a9976947acbaa2aaf6031))
+
 ## [3.0.0](https://github.com/layervai/qurl-integrations/compare/v2.6.0...v3.0.0) (2026-09-28)
 
 
