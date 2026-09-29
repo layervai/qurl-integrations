@@ -429,7 +429,7 @@ func TestParse_AdminErrorsNeutralizeMrkdwn(t *testing.T) {
 
 // TestParse_AliasLengthBoundary pins the off-by-one boundary on the
 // shared 64-char alias cap. 64 chars must accept (qurl-service's
-// nhp #1825 GSI key is exactly 64); 65 must reject with the
+// GSI key is exactly 64); 65 must reject with the
 // length-specific message so the user sees "$… is longer than 64
 // characters" rather than the generic invalid-alias message — that
 // wording mirrors handler_alias.go's `setalias` path so the two

@@ -20,7 +20,7 @@ import (
 	"github.com/layervai/qurl-integrations/shared/observability"
 )
 
-// TODO(upstream-contract): qurl-integrations-infra#964 requires ERROR and a
+// TODO(upstream-contract): infra repo #964 requires ERROR and a
 // top-level error containing the real client's "http request:" transport wrap.
 func TestHandleGet_DependencyTransportAlarmContract(t *testing.T) {
 	ts := newAdminTestServers(t)

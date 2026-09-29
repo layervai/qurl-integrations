@@ -1,6 +1,7 @@
 package ciworkflows
 
 import (
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -23,12 +24,19 @@ import (
 //     anything else is suspicious. Here, layerv.ai hostnames are the product
 //     surface: the browser extension ships them to users.
 //
-//   - A shorter banned-name list. "qurl-service" appears in 114 files and
-//     "qurl-integrations-infra" in 41 -- they are this repository's ordinary
-//     architectural vocabulary, and qurl-service is internal rather than
-//     private. Banning them is a migration, not a check. Both are still caught
-//     in the `layervai/<repo>` form below, which is the form that reads as a
-//     repository reference rather than a service name.
+//   - A shorter banned-name list. "qurl-service" appears in over 100 files
+//     as this repository's ordinary architectural vocabulary, and it is
+//     internal rather than private, so its bare name stays allowed; it is
+//     still caught in the `layervai/<repo>` form below.
+//
+// The private infrastructure repository used to get the same pass, on the
+// theory that banning it was "a migration, not a check". That exemption is
+// how 45 files -- apps/discord/src/constants.js among them -- came to name it
+// in comments, issue references (name#123) and path references
+// (name/qurl-bot-discord/terraform/main.tf) with the guard green. None of
+// those forms is the `layervai/<repo>` form, so nothing looked at them. The
+// migration has now been done and the bare name is banned like any other
+// private repository; describe it by role ("the infra repo").
 //
 // Forbidden literals are split so this file does not itself contain the terms
 // it bans.
@@ -44,10 +52,25 @@ var (
 	// through entirely.
 	sanitizeLayerVRepo = regexp.MustCompile(`(?i)(?:^|[^@\w])layervai/([a-z0-9][a-z0-9_-]*)`)
 	// Bare names that carry no legitimate use in this repository. Each is
-	// verified to appear zero times outside this file.
+	// verified to appear zero times outside this file and the functional
+	// references in sanitizeKnownReference. Matched as a case-insensitive
+	// substring, so "qurl-<name>", "<name>#123" and "<name>/path" all hit.
 	sanitizePrivateRepo = []string{
 		"qurl-" + "reverse-tunnel-server",
 		"traefik-" + "plugins",
+		"integrations-" + "infra",
+	}
+	// Private repository names that are too short, or too much like ordinary
+	// words, for a substring match. "nhp" in particular is also the name of
+	// the protocol, which this repository legitimately discusses everywhere;
+	// what is banned is the name used as a repository -- an issue or PR
+	// reference. "qrts" has no use here other than naming the repository.
+	// A preceding "/" is excluded from the nhp form because layervai/nhp#N is
+	// the owner-qualified form, which sanitizeLayerVRepo already judges
+	// (including its sanitizeKnownReference ratchet).
+	sanitizePrivateRepoRef = []*regexp.Regexp{
+		regexp.MustCompile(`(?i)\b` + `qrts\b`),
+		regexp.MustCompile(`(?i)(?:^|[^/\w])nhp` + ` ?(?:pr ?)?#\d+`),
 	}
 	// Match a CREDENTIAL-BEARING webhook, not the bare host. apps/slack and
 	// apps/discord legitimately name these hosts -- posting to them is what
@@ -157,6 +180,34 @@ var sanitizeKnownReference = map[string]bool{
 	"internal/ciworkflows/connector_resource_proof_test.go|layervai/nhp": true,
 }
 
+// sanitizeKnownLine is the line-exact form of sanitizeKnownReference, for a
+// file where one line functionally has to name a private repository but the
+// rest of the file must not: exempting the whole file would let prose next to
+// the functional line leak the same name unnoticed. Only lines whose trimmed
+// text equals the value are removed before the bare-name scan.
+var sanitizeKnownLine = map[string]string{
+	// Deploy dispatch: `target_repo:` must name the repository it dispatches
+	// to. Comments in these files describe it by role.
+	".github/workflows/discord.yml": "target_repo: qurl-" + "integrations-" + "infra",
+	".github/workflows/slack.yml":   "target_repo: qurl-" + "integrations-" + "infra",
+}
+
+// sanitizeStripKnownLine removes rel's reviewed functional line, if it has one.
+func sanitizeStripKnownLine(rel, text string) string {
+	known, ok := sanitizeKnownLine[rel]
+	if !ok {
+		return text
+	}
+	lines := strings.Split(text, "\n")
+	kept := lines[:0]
+	for _, line := range lines {
+		if strings.TrimSpace(line) != known {
+			kept = append(kept, line)
+		}
+	}
+	return strings.Join(kept, "\n")
+}
+
 func TestPublicSourceNamesNoPrivateLayerVMaterial(t *testing.T) {
 	t.Parallel()
 
@@ -173,7 +224,9 @@ func TestPublicSourceNamesNoPrivateLayerVMaterial(t *testing.T) {
 		}
 		if entry.IsDir() {
 			switch filepath.Base(rel) {
-			case ".git", "node_modules", "dist", "build", "bin", ".next", "coverage":
+			// .worktrees holds other sessions' checkouts of this repository;
+			// scanning them reports their files under the wrong path.
+			case ".git", ".worktrees", "node_modules", "dist", "build", "bin", ".next", "coverage":
 				return filepath.SkipDir
 			}
 			return nil
@@ -195,34 +248,89 @@ func TestPublicSourceNamesNoPrivateLayerVMaterial(t *testing.T) {
 		if err != nil {
 			return nil //nolint:nilerr // non-source entries are not the subject of this check
 		}
-		text := string(body)
-		lower := strings.ToLower(text)
-
-		for _, name := range sanitizePrivateRepo {
-			if strings.Contains(lower, name) && !sanitizeKnownReference[rel+"|"+name] {
-				t.Errorf("%s names private LayerV repository %q; describe it by role instead (for example \"the producer repository\")", rel, name)
-			}
-		}
-		for _, match := range sanitizeLayerVRepo.FindAllStringSubmatchIndex(text, -1) {
-			repo := strings.ToLower(text[match[2]:match[3]])
-			if sanitizeReviewedArtifactNamespace(text, match[0], repo) {
-				continue
-			}
-			if !sanitizePublicLayerVRepos[repo] && !sanitizeKnownReference[rel+"|layervai/"+repo] {
-				t.Errorf("%s refers to LayerV repository %q, which is not on the reviewed-public list in this test", rel, "layervai/"+repo)
-			}
-		}
-		for _, endpoint := range sanitizeSecretEndpoint {
-			if hit := endpoint.FindString(text); hit != "" {
-				t.Errorf("%s contains what looks like a credential-bearing endpoint %q", rel, hit)
-			}
-		}
-		if match := sanitizeAppID.FindStringSubmatch(text); match != nil {
-			t.Errorf("%s contains a literal GitHub App identifier %s", rel, match[1])
+		for _, finding := range sanitizeFindings(rel, string(body)) {
+			t.Error(finding)
 		}
 		return nil
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+// sanitizeFindings returns every violation in one file's text. rel is the
+// file's slash-separated path relative to the repository root, which keys the
+// sanitizeKnownReference ratchet.
+func sanitizeFindings(rel, text string) []string {
+	var findings []string
+	lower := strings.ToLower(sanitizeStripKnownLine(rel, text))
+
+	for _, name := range sanitizePrivateRepo {
+		if !strings.Contains(lower, name) || sanitizeKnownReference[rel+"|"+name] {
+			continue
+		}
+		findings = append(findings, fmt.Sprintf("%s names private LayerV repository %q; describe it by role instead (for example \"the infra repo\")", rel, name))
+	}
+	for _, ref := range sanitizePrivateRepoRef {
+		if hit := ref.FindString(text); hit != "" {
+			findings = append(findings, fmt.Sprintf("%s refers to a private LayerV repository as %q; describe it by role instead", rel, hit))
+		}
+	}
+	for _, match := range sanitizeLayerVRepo.FindAllStringSubmatchIndex(text, -1) {
+		repo := strings.ToLower(text[match[2]:match[3]])
+		if sanitizeReviewedArtifactNamespace(text, match[0], repo) {
+			continue
+		}
+		if !sanitizePublicLayerVRepos[repo] && !sanitizeKnownReference[rel+"|layervai/"+repo] {
+			findings = append(findings, fmt.Sprintf("%s refers to LayerV repository %q, which is not on the reviewed-public list in this test", rel, "layervai/"+repo))
+		}
+	}
+	for _, endpoint := range sanitizeSecretEndpoint {
+		if hit := endpoint.FindString(text); hit != "" {
+			findings = append(findings, fmt.Sprintf("%s contains what looks like a credential-bearing endpoint %q", rel, hit))
+		}
+	}
+	if match := sanitizeAppID.FindStringSubmatch(text); match != nil {
+		findings = append(findings, fmt.Sprintf("%s contains a literal GitHub App identifier %s", rel, match[1]))
+	}
+	return findings
+}
+
+// The guard once passed while apps/discord/src/constants.js named the private
+// infrastructure repository in all three of the shapes below, because only
+// the `layervai/<repo>` form was checked. Each "flag" case is one of those
+// real comment lines (with the name spliced back together at run time).
+func TestSanitizeFindingsCatchesBarePrivateRepoNames(t *testing.T) {
+	t.Parallel()
+	infra := "qurl-integrations-" + "infra"
+	const file = "apps/discord/src/constants.js"
+	for _, test := range []struct {
+		name string
+		rel  string
+		text string
+		flag bool
+	}{
+		{name: "path reference", rel: file, text: "// filters at " + infra + "/qurl-bot-discord/terraform/main.tf", flag: true},
+		{name: "issue reference", rel: file, text: "// Justin's review comment on " + infra + "#309.", flag: true},
+		{name: "possessive prose", rel: file, text: "// TODO(upstream-contract): keep " + infra + "'s", flag: true},
+		{name: "upper case", rel: file, text: "// see " + strings.ToUpper(infra), flag: true},
+		{name: "tunnel server acronym", rel: "apps/cli/cmd/x_test.go", text: "// q" + "RTS currently uses FRP's 90-second stale", flag: true},
+		{name: "nhp issue reference", rel: "apps/slack/internal/x.go", text: "// the GSI key handler from nh" + "p #1825", flag: true},
+		{name: "nhp PR reference", rel: "apps/slack/internal/x.go", text: "// landed in NH" + "P PR #12", flag: true},
+		{name: "ratchet does not cover other files", rel: ".github/workflows/cli.yml", text: "target_repo: " + infra, flag: true},
+		{name: "owner-qualified nhp reference is left to the ratchet", rel: ".github/workflows/validate-issue-templates.yml", text: "# hit this in layervai/nh" + "p#1307", flag: false},
+		{name: "role description", rel: file, text: "// filters at the infra repo's qurl-bot-discord/terraform/main.tf (infra repo #309)", flag: false},
+		{name: "protocol name", rel: file, text: "// the NHP knock precedes every connection; OpenNHP is the protocol", flag: false},
+		{name: "internal service name", rel: file, text: "// the landing URL qurl-service returns from POST /v1/qurls", flag: false},
+		{name: "functional dispatch target", rel: ".github/workflows/discord.yml", text: "    with:\n      target_repo: " + infra + "\n", flag: false},
+		{name: "prose beside the dispatch target", rel: ".github/workflows/discord.yml", text: "      target_repo: " + infra + "\n      # receiver lives in " + infra + "\n", flag: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			findings := sanitizeFindings(test.rel, test.text)
+			if got := len(findings) > 0; got != test.flag {
+				t.Fatalf("flagged = %t, want %t (findings: %q)", got, test.flag, findings)
+			}
+		})
 	}
 }

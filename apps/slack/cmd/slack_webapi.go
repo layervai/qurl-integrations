@@ -273,7 +273,7 @@ const (
 	// acceptable degradation for a best-effort access guard, NOT a correctness bug (the bound is
 	// the cap, fail-closed is the safety); it also bounds the non-member case, which would
 	// otherwise scan every page. The effective page size should be confirmed against a large
-	// channel before enablement (qurl-integrations-infra#1004) and the bound tuned if it's small.
+	// channel before enablement (infra repo #1004) and the bound tuned if it's small.
 	maxMembershipPages = 2
 	// membershipPageLimit is the per-page member count REQUESTED (member ids are a light
 	// payload). Slack may cap the returned page below this (see maxMembershipPages); requesting

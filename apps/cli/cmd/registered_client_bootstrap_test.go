@@ -82,6 +82,10 @@ func (*ownerOnlyTestShareRegistry) Put(context.Context, *connectorstate.LocalSha
 	return errors.New("unexpected test registry Put")
 }
 
+func (*ownerOnlyTestShareRegistry) ValidateTarget(context.Context, string, connectorstate.LocalTarget) error {
+	return nil
+}
+
 func (*ownerOnlyTestShareRegistry) SetDesired(context.Context, string, string, uint64) (*connectorstate.LocalShare, error) {
 	return nil, errors.New("unexpected test registry SetDesired")
 }
@@ -753,5 +757,13 @@ func TestRegisteredOpenHonorsExternalNamespace(t *testing.T) {
 				t.Fatal(err)
 			}
 		})
+	}
+}
+
+func TestBindRegisteredDeviceOwnerPreservesDeviceOwnedNamespace(t *testing.T) {
+	registry := &ownerOnlyTestShareRegistry{ownerID: "device:existing-guest"}
+	err := bindRegisteredDeviceOwner(context.Background(), registry, "/state/guest", "key-existing", "auth0|signed-in-account")
+	if !errors.Is(err, auth.ErrDeviceAccountConflict) || registry.bindCalls != 0 || registry.ownerID != "device:existing-guest" {
+		t.Fatalf("account authority changed device-owned namespace: error=%v binds=%d owner=%q", err, registry.bindCalls, registry.ownerID)
 	}
 }

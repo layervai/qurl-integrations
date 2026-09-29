@@ -408,7 +408,7 @@ def test_scheduled_soak_workflow_contract() -> None:
         encoding="utf-8"
     )
     assert (
-        f'"$CLI_RUN_ID" "$CLI_RUN_ATTEMPT" {lane_count})'
+        f'"$CLI_RUN_ID" "$CLI_RUN_ATTEMPT" {len(base_matrix["include"])})'
         in RELEASE_WORKFLOW.read_text(encoding="utf-8")
     )
     assert "needs: [required, journey]" in workflow

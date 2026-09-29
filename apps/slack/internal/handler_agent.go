@@ -141,8 +141,8 @@ const agentInvalidAliasReply = "That alias isn't valid. Use lowercase letters, n
 const agentTurnRateWindow = time.Hour
 
 // agentTurnRateCounterFailOpenMsg is an infra-observed contract: the CloudWatch
-// metric filter added in qurl-integrations-infra#1065 keys on this exact slog
-// msg value for the fail-open path introduced by qurl-integrations-infra#1055.
+// metric filter added in infra repo #1065 keys on this exact slog
+// msg value for the fail-open path introduced by infra repo #1055.
 // TODO(upstream-contract): keep this value in lockstep with that infra filter.
 const agentTurnRateCounterFailOpenMsg = "agent: turn-rate counter failed; allowing turn (fail-open)"
 
@@ -160,7 +160,7 @@ const agentTurnRateCounterFailOpenMsg = "agent: turn-rate counter failed; allowi
 // agentTurnRateCounterFailOpenMsg), so splitting sent-from-suppressed across two
 // strings would also make total demand require summing two filters. Both problems
 // go away by keeping one msg and putting the outcome in notice_posted.
-// TODO(upstream-contract): qurl-integrations-infra#1388 freezes this exact msg,
+// TODO(upstream-contract): infra repo #1388 freezes this exact msg,
 // boolean files_field_present, and numeric files_visible for both emitters below.
 // Change them only with the CloudWatch filter and its AWS match verification.
 const agentUnsupportedMediaMsg = "agent: unsupported media"

@@ -2,7 +2,7 @@
 // admin_client.go HTTP wrapper around qurl-service `/internal/v1/admin/*`.
 //
 // Justin's 2026-05-12 pivot (see SLACK_QURL_ROLLOUT.md and
-// qurl-integrations-infra #523) moved the Slack-keyed DynamoDB
+// infra repo #523) moved the Slack-keyed DynamoDB
 // tables — workspace_mappings and channel_policies — out of
 // qurl-service into qurl-bot-slack-owned terraform
 // (`modules/qurl-slack-ddb/`). The bot now reads/writes those tables

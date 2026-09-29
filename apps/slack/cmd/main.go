@@ -102,7 +102,7 @@ const (
 	// margin while leaving roughly 12s for in-flight requests and async
 	// workers before Fargate's 30s SIGTERM→SIGKILL window closes.
 	// TODO(upstream-contract): Keep this in lockstep with
-	// qurl-integrations-infra's qurl-webhook-runtime health check cadence.
+	// the infra repo's qurl-webhook-runtime health check cadence.
 	lameduckDuration = 13 * time.Second
 	// maxHeaderBytes is well above Slack's realistic header size (sig +
 	// timestamp + standard headers fit comfortably in 2 KiB) but bounds

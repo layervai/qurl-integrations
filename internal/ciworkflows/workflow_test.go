@@ -206,6 +206,31 @@ func TestCLICustomerJourneyIsConsolidatedAndTrusted(t *testing.T) {
 	if selector == nil {
 		t.Fatal("change detector has no protected customer-journey selector")
 	}
+	if fmt.Sprint(selector.Env["RELEASE_GATE"]) != "${{ inputs.release_source_sha != '' }}" {
+		t.Fatal("release journey selector is not bound to the exact release handoff")
+	}
+	for _, tc := range []struct {
+		event, release string
+		want           int
+	}{{"schedule", "false", 4}, {"workflow_dispatch", "false", 4}, {"workflow_dispatch", "true", 3}} {
+		output := filepath.Join(t.TempDir(), "matrix")
+		cmd := exec.CommandContext(t.Context(), "bash", "-c", selector.Run) // #nosec G204 -- executes the checked-in workflow step with fixed test inputs
+		cmd.Env = append(os.Environ(), "GITHUB_EVENT_NAME="+tc.event, "RELEASE_GATE="+tc.release, "GITHUB_OUTPUT="+output)
+		if log, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("journey selector failed: %v: %s", err, log)
+		}
+		raw, err := os.ReadFile(output) // #nosec G304 -- output is a fixed filename inside t.TempDir()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var matrix journeyMatrix
+		if err := json.Unmarshal(bytes.TrimSpace(bytes.TrimPrefix(raw, []byte("json="))), &matrix); err != nil {
+			t.Fatal(err)
+		}
+		if len(matrix.Include) != tc.want {
+			t.Errorf("event=%s release=%s: got %d lanes, want %d", tc.event, tc.release, len(matrix.Include), tc.want)
+		}
+	}
 	var baseLine, soakLine string
 	for line := range strings.SplitSeq(selector.Run, "\n") {
 		line = strings.TrimSpace(line)
@@ -288,8 +313,8 @@ func TestCLICustomerJourneyIsConsolidatedAndTrusted(t *testing.T) {
 	if len(releaseCountMatch) == 2 {
 		releaseCount, releaseCountErr = strconv.Atoi(releaseCountMatch[1])
 	}
-	if len(releaseCountMatch) != 2 || releaseCountErr != nil || releaseCount != len(baseMatrix.Include)+1 {
-		t.Errorf("release gate journey count = %v, want scheduled matrix size %d: %v", releaseCountMatch, len(baseMatrix.Include)+1, releaseCountErr)
+	if len(releaseCountMatch) != 2 || releaseCountErr != nil || releaseCount != len(baseMatrix.Include) {
+		t.Errorf("release gate journey count = %v, want release matrix size %d: %v", releaseCountMatch, len(baseMatrix.Include), releaseCountErr)
 	}
 
 	journey := workflow.Jobs["journey"]
@@ -506,7 +531,7 @@ func TestCLICustomerJourneyIsConsolidatedAndTrusted(t *testing.T) {
 	}
 
 	notify := workflow.Jobs["notify-soak-success"]
-	wantNotifyIf := "!cancelled() && github.ref == 'refs/heads/main' && contains(fromJson('[\"schedule\",\"workflow_dispatch\"]'), github.event_name) && needs.required.result == 'success' && needs.journey.result == 'success'" //nolint:misspell // GitHub expression function spelling.
+	wantNotifyIf := "!cancelled() && github.ref == 'refs/heads/main' && contains(fromJson('[\"schedule\",\"workflow_dispatch\"]'), github.event_name) && inputs.release_source_sha == '' && needs.required.result == 'success' && needs.journey.result == 'success'" //nolint:misspell // GitHub expression function spelling.
 	if got := strings.Join(strings.Fields(notify.If), " "); got != wantNotifyIf {
 		t.Errorf("soak success notification if = %q, want %q", got, wantNotifyIf)
 	}
@@ -541,7 +566,7 @@ func TestCLICustomerJourneyIsConsolidatedAndTrusted(t *testing.T) {
 	}
 
 	manualFailure := workflow.Jobs["notify-soak-manual-failure"]
-	wantManualFailureIf := "!cancelled() && github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && (needs.required.result != 'success' || needs.journey.result != 'success' || needs.notify-soak-success.result != 'success')" //nolint:misspell // GitHub expression function spelling.
+	wantManualFailureIf := "!cancelled() && github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && (needs.required.result != 'success' || needs.journey.result != 'success' || (inputs.release_source_sha == '' && needs.notify-soak-success.result != 'success'))" //nolint:misspell // GitHub expression function spelling.
 	if got := strings.Join(strings.Fields(manualFailure.If), " "); got != wantManualFailureIf {
 		t.Errorf("manual soak failure notification if = %q, want %q", got, wantManualFailureIf)
 	}
@@ -586,7 +611,7 @@ func TestCLICustomerJourneyIsConsolidatedAndTrusted(t *testing.T) {
 	if !strings.Contains(fallbackSource, "branches: [main]") {
 		t.Error("cancellation cleanup workflow_run trigger is not filtered to main")
 	}
-	for _, forbidden := range []string{"actions/download-artifact", "actions/upload-artifact", "qurl-integrations-infra", "ops-routines"} {
+	for _, forbidden := range []string{"actions/download-artifact", "actions/upload-artifact", "qurl-integrations-" + "infra", "ops-routines"} {
 		if strings.Contains(fallbackSource, forbidden) {
 			t.Errorf("cancellation cleanup retains unnecessary coupling %q", forbidden)
 		}
