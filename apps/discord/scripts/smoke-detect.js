@@ -31,7 +31,9 @@ function installMintReceipt(Client, owner) {
       const identity = JSON.parse(verified.stdout);
       const publicIdentity = Object.fromEntries(['agent_public_key', 'resource_public_key_b64', 'cell_public_key_b64',
         'cell_id', 'signed_jti', 'signed_expiry_unix'].map(key => [key, identity[key]]));
-      assert.ok(Object.values(publicIdentity).every(value => typeof value === 'string' && value.length > 0));
+      // TODO(upstream-contract): qv2 permits an empty cell_id; bind it by signed key.
+      assert.ok(Object.entries(publicIdentity).every(([key, value]) =>
+        typeof value === 'string' && (key === 'cell_id' || value.length > 0)));
       const now = new Date();
       fs.appendFileSync(process.env.QURL_OWNERSHIP_RECEIPTS, JSON.stringify({
         event: 'owned_admission_attempt', purpose: 'discord_detect_smoke_detector_child',

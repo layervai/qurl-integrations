@@ -9,7 +9,7 @@ beforeEach(() => { jest.clearAllMocks(); });
 afterEach(() => { process.env = { ...originalEnv }; });
 const { installMintReceipt } = require('../scripts/smoke-detect');
 
-test('captures exact detector child before returning mint, without capability or native session claims', async () => {
+test.each(['cell', ''])('captures exact detector child with cell_id=%s without capability or native session claims', async cellID => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'detect-receipt-'));
   process.env.QURL_OWNERSHIP_RECEIPTS = path.join(dir, 'owned.jsonl');
   process.env.QURL_OWNERSHIP_VERIFIER = '/private/verifier';
@@ -18,7 +18,7 @@ test('captures exact detector child before returning mint, without capability or
   const { CRID_RESOURCE_ID: crid } = require('./helpers/qurl-fixtures');
   const minted = { crid, resource_id: 'r_owned', qurl_id: 'q_detector',
     expires_at: '2030-01-01T00:00:00Z', qurl_link: 'secret-capability' };
-  const identity = { agent_public_key: 'YWdlbnQ=', resource_public_key_b64: 'cmVzb3VyY2U=', cell_public_key_b64: 'Y2VsbA==', cell_id: 'cell', signed_jti: 'jti', signed_expiry_unix: '1893456000' };
+  const identity = { agent_public_key: 'YWdlbnQ=', resource_public_key_b64: 'cmVzb3VyY2U=', cell_public_key_b64: 'Y2VsbA==', cell_id: cellID, signed_jti: 'jti', signed_expiry_unix: '1893456000' };
   spawnSync.mockReturnValue({ status: 0, stdout: JSON.stringify({ ...identity, private_key: 'secret-private-key' }) });
   const { QURLClient: Client } = jest.requireActual('@layervai/qurl');
   const fetch = jest.fn(async () => new Response(JSON.stringify({ data: minted }), {
