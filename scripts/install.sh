@@ -25,6 +25,13 @@ download() {
     }
 }
 
+# group_or_other_writable <path> — true when <path> exists and has the group
+# or other write bit. find -perm rather than stat: stat's flags differ between
+# GNU and BSD.
+group_or_other_writable() {
+    [ -e "$1" ] && [ -n "$(find "$1" -prune \( -perm -020 -o -perm -002 \) 2>/dev/null)" ]
+}
+
 main() {
     REPO="layervai/qurl-integrations"
     BINARY="qurl"
@@ -36,7 +43,11 @@ main() {
     # /usr/local/bin; it is not a user-facing setting.
     SYSTEM_DIR="${_QURL_INSTALL_SYSTEM_DIR:-/usr/local/bin}"
     if [ -z "${INSTALL_DIR:-}" ]; then
-        if [ -d "$SYSTEM_DIR" ] && [ -w "$SYSTEM_DIR" ]; then
+        if [ "$(id -u)" = 0 ]; then
+            # Run with sudo: a system-wide install, even on a minimal image
+            # that has no /usr/local/bin yet.
+            INSTALL_DIR="$SYSTEM_DIR"
+        elif [ -d "$SYSTEM_DIR" ] && [ -w "$SYSTEM_DIR" ]; then
             INSTALL_DIR="$SYSTEM_DIR"
         else
             INSTALL_DIR="${HOME:?HOME is not set; set INSTALL_DIR}/.local/bin"
@@ -176,7 +187,7 @@ $(printf '%s\n' "$PAGE_FLAT" \
     # 002 (Ubuntu, Fedora) would otherwise leave ~/.local at 0775.
     (umask 022 && mkdir -p "$INSTALL_DIR") 2>/dev/null || true
     if ! [ -d "$INSTALL_DIR" ] || ! [ -w "$INSTALL_DIR" ]; then
-        echo "Error: ${INSTALL_DIR} is not writable." >&2
+        echo "Error: could not create or write to ${INSTALL_DIR}." >&2
         echo "  Set INSTALL_DIR to a directory you own (for example INSTALL_DIR=\"\$HOME/.local/bin\")," >&2
         echo "  or run the installer with sudo for a system-wide install." >&2
         exit 1
@@ -185,6 +196,29 @@ $(printf '%s\n' "$PAGE_FLAT" \
     mv "${TMP_DIR}/${BINARY}" "${INSTALL_DIR}/${BINARY}"
 
     echo "Installed qurl v${VERSION} to ${INSTALL_DIR}/${BINARY}"
+
+    # umask 022 above only governs directories this script creates. A
+    # ~/.local that already exists group-writable (pip, pipx and npm create it
+    # under umask 002) still makes every qurl command refuse to run, so say so
+    # now rather than at the first publish. Never chmod the user's directory.
+    if [ -n "${HOME:-}" ] && [ -z "${XDG_STATE_HOME:-}" ]; then
+        for dir in "$HOME/.local" "$HOME/.local/state"; do
+            if group_or_other_writable "$dir"; then
+                echo "" >&2
+                echo "Warning: ${dir} is writable by other users, so qurl will refuse to keep its identity under it." >&2
+                echo "  Fix it with: chmod go-w \"${dir}\"" >&2
+            fi
+        done
+    fi
+
+    # An older qurl earlier on PATH (for example a previous sudo install in
+    # /usr/local/bin) would shadow this one.
+    RESOLVED="$(command -v "$BINARY" 2>/dev/null || true)"
+    if [ -n "$RESOLVED" ] && [ "$RESOLVED" != "${INSTALL_DIR}/${BINARY}" ]; then
+        echo "" >&2
+        echo "Warning: ${RESOLVED} comes first on your PATH and will run instead of this install." >&2
+        echo "  Remove it, or put ${INSTALL_DIR} earlier on your PATH." >&2
+    fi
     case ":${PATH}:" in
         *":${INSTALL_DIR}:"*) ;;
         *)

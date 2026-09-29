@@ -101,6 +101,7 @@ make_release_assets() {
 # global $fixdir consumed by run_case (assigning directly instead of echoing
 # keeps the path derived exactly once).
 new_fixdir() {
+  unset RUN_INSTALL_DIR RUN_HOME RUN_SYSTEM_DIR RUN_UMASK
   fixdir="$tmp_parent/$((case_no + 1))-$1"
   mkdir -p "$fixdir/assets" "$fixdir/bin"
   make_curl_stub "$fixdir"
@@ -380,8 +381,11 @@ make_release_assets "$fixdir" 0.2.0
 RUN_UMASK=002 RUN_INSTALL_DIR=- run_case 0 "Installed qurl v0.2.0 to $fixdir/home/.local/bin/qurl" 0.2.0
 for dir in "$fixdir/home/.local" "$fixdir/home/.local/bin"; do
   mode="$(stat -c %a "$dir" 2>/dev/null || stat -f %Lp "$dir")"
+  mode="${mode: -3}"  # ignore setuid/setgid/sticky digits from the fixture tree
   [[ "$mode" == "755" ]] || { echo "$fixdir: $dir has mode $mode, want 755" >&2; exit 1; }
 done
+[[ "$LAST_OUTPUT" != *"writable by other users"* ]] \
+  || { echo "$fixdir: unexpected unsafe-mode warning" >&2; exit 1; }
 assert_installed 0.2.0 "$fixdir/home/.local/bin"
 assert_no_sudo
 [[ "$LAST_OUTPUT" == *"is not on your PATH"* ]] \
@@ -413,10 +417,55 @@ if [[ "$(id -u)" != "0" ]]; then
   make_release_assets "$fixdir" 0.2.0
   mkdir -p "$fixdir/locked"
   chmod 555 "$fixdir/locked"
-  RUN_INSTALL_DIR="$fixdir/locked" run_case 1 "is not writable" 0.2.0
+  RUN_INSTALL_DIR="$fixdir/locked" run_case 1 "could not create or write" 0.2.0
   chmod 755 "$fixdir/locked"
   assert_no_sudo
   [[ ! -e "$fixdir/locked/qurl" ]] || { echo "$fixdir: installed into a locked dir" >&2; exit 1; }
 fi
+
+# --- Case 20: no INSTALL_DIR and a system dir that exists but is not writable
+# (stock macOS: root-owned /usr/local/bin) -> ~/.local/bin, no sudo.
+if [[ "$(id -u)" != "0" ]]; then
+  new_fixdir unwritable-system-dir
+  add_sudo_stub
+  make_release_assets "$fixdir" 0.2.0
+  mkdir -p "$fixdir/system-bin"
+  chmod 555 "$fixdir/system-bin"
+  RUN_INSTALL_DIR=- RUN_SYSTEM_DIR="$fixdir/system-bin" \
+    run_case 0 "Installed qurl v0.2.0 to $fixdir/home/.local/bin/qurl" 0.2.0
+  chmod 755 "$fixdir/system-bin"
+  assert_installed 0.2.0 "$fixdir/home/.local/bin"
+  assert_no_sudo
+fi
+
+# --- Case 21: run as root (curl ... | sudo sh) with no system dir yet -> the
+# system dir is created and used. An `id` stub reports uid 0.
+new_fixdir root-creates-system-dir
+make_release_assets "$fixdir" 0.2.0
+printf '#!/bin/sh\necho 0\n' > "$fixdir/id"
+chmod +x "$fixdir/id"
+RUN_INSTALL_DIR=- RUN_SYSTEM_DIR="$fixdir/new-system-bin" \
+  run_case 0 "Installed qurl v0.2.0 to $fixdir/new-system-bin/qurl" 0.2.0
+assert_installed 0.2.0 "$fixdir/new-system-bin"
+
+# --- Case 22: a pre-existing group-writable ~/.local (pip/pipx/npm under
+# umask 002) is flagged with the fix; the installer never chmods it.
+new_fixdir existing-writable-local
+make_release_assets "$fixdir" 0.2.0
+mkdir -p "$fixdir/home/.local"
+chmod 775 "$fixdir/home/.local"
+RUN_INSTALL_DIR=- run_case 0 "chmod go-w" 0.2.0
+[[ "$LAST_OUTPUT" == *"$fixdir/home/.local is writable by other users"* ]] \
+  || { echo "$fixdir: expected the unsafe ~/.local warning" >&2; exit 1; }
+mode="$(stat -c %a "$fixdir/home/.local" 2>/dev/null || stat -f %Lp "$fixdir/home/.local")"
+[[ "${mode: -3}" == "775" ]] || { echo "$fixdir: installer changed ~/.local mode to $mode" >&2; exit 1; }
+
+# --- Case 23: an older qurl earlier on PATH is reported as shadowing.
+new_fixdir shadowed-by-older-install
+make_release_assets "$fixdir" 0.2.0
+mkdir -p "$fixdir/old-bin"
+printf '#!/bin/sh\necho old\n' > "$fixdir/old-bin/qurl"
+chmod +x "$fixdir/old-bin/qurl"
+run_case 0 "comes first on your PATH" 0.2.0 "$fixdir/old-bin:$fixdir:$PATH"
 
 echo "install.sh tests passed (${case_no} cases)"
