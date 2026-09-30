@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	connectoragentstate "github.com/layervai/qurl-connector/pkg/agentstate"
 	"github.com/layervai/qurl-go/crid"
 	"github.com/layervai/qurl-go/qurl"
 
@@ -439,6 +440,8 @@ func TestSealedOpenKeepsTheCauseQurlGoClassifies(t *testing.T) {
 		"state not found":      {qurl.ErrCredentialStateNotFound, Auth},
 		"setup lock":           {qurl.ErrAgentSetupLock, General},
 		"envelope mismatch":    {nil, Config},
+		"TPM not responding":   {fmt.Errorf("%w: operation abandoned: %w", connectoragentstate.ErrTPMNotResponding, context.DeadlineExceeded), Unavailable},
+		"TPM busy at create":   {fmt.Errorf("%w; retry, or set LAYERV_KEY_PROVIDER=file", connectoragentstate.ErrTPMNotResponding), Unavailable},
 	} {
 		t.Run(name, func(t *testing.T) {
 			err := fmt.Errorf("%w: initialize sealed agent state", state.ErrAgentStateEnvelope)
@@ -464,5 +467,16 @@ func TestHostConditionsWinOverWrappedSentinels(t *testing.T) {
 				t.Errorf("FromError(%v) = %d, want Config", err, got)
 			}
 		}
+	}
+}
+
+// TestTPMNotRespondingOutranksAHostCondition pins the deliberate exception in
+// hostConditionCode: a chain carrying both a host condition and a TPM that is
+// not responding exits retryable.
+func TestTPMNotRespondingOutranksAHostCondition(t *testing.T) {
+	unsafeDir := &state.UnsafeDirectoryError{Dir: "/home/agent/.local", Mode: 0o775, Err: errors.New("open")}
+	err := errors.Join(unsafeDir, fmt.Errorf("%w: busy", connectoragentstate.ErrTPMNotResponding))
+	if got := FromError(err); got != Unavailable {
+		t.Fatalf("FromError(unsafe directory + TPM not responding) = %d, want Unavailable", got)
 	}
 }

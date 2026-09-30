@@ -18,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	connectoragentstate "github.com/layervai/qurl-connector/pkg/agentstate"
 	connectorshare "github.com/layervai/qurl-connector/pkg/share"
 	qurl "github.com/layervai/qurl-go/qurl"
 	"github.com/spf13/cobra"
@@ -102,6 +103,11 @@ type globalOpts struct {
 	// can exercise the daemon control plane on every CI runner without enabling
 	// unsupported production paths.
 	backgroundShareGOOS string
+	// keyStorageNoticeGOOS selects the TPM sealing notice's wording.
+	// Production pins it to runtime.GOOS; it is separate from
+	// backgroundShareGOOS, which tests set to darwin for the daemon control
+	// plane. Empty skips the notice.
+	keyStorageNoticeGOOS string
 
 	// openAPIClient is the hermetic command-test seam. Production leaves it
 	// nil and opens the persisted registered-device client below.
@@ -116,7 +122,10 @@ type globalOpts struct {
 	nativeRuntime        registeredNativeRuntime
 	// nativeStateStore is the store nativeRuntime handed off when the device
 	// client was built. whoami reads the device public key from it.
-	nativeStateStore    qurl.AgentStateStore
+	nativeStateStore qurl.AgentStateStore
+	// nativeStateDir is the state directory nativeStateStore was opened in, so
+	// whoami describes exactly that namespace.
+	nativeStateDir      string
 	warnedCleartextAuth bool
 
 	// Resolved in PersistentPreRunE.
@@ -185,12 +194,13 @@ func run(ctx context.Context, root *cobra.Command, opts *globalOpts) int {
 // newRoot builds the v2 command tree.
 func newRoot(version string, streams *output.Streams, options ...rootOption) (*cobra.Command, *globalOpts) {
 	opts := &globalOpts{
-		version:             version,
-		streams:             streams,
-		lookupEnv:           os.LookupEnv,
-		now:                 time.Now,
-		backgroundShareGOOS: runtime.GOOS,
-		signInAccount:       qurlapi.SignInAccount,
+		version:              version,
+		streams:              streams,
+		lookupEnv:            os.LookupEnv,
+		now:                  time.Now,
+		backgroundShareGOOS:  runtime.GOOS,
+		keyStorageNoticeGOOS: runtime.GOOS,
+		signInAccount:        qurlapi.SignInAccount,
 	}
 	for _, opt := range options {
 		opt(opts)
@@ -643,6 +653,40 @@ func bindRegisteredDeviceOwner(
 	return nil
 }
 
+// noteTPMSealing tells the user, before any state is written, that a new
+// device identity is about to be sealed to this machine's TPM: that choice is
+// permanent for the directory, and this is the only moment it is cheap to
+// change. On Linux it also names the tss requirement the background job has.
+func (o *globalOpts) noteTPMSealing(stateDir string) {
+	if o.quiet || o.streams == nil || o.streams.Err == nil || o.resolvedSupervision != connectorstate.RuntimeSupervisionNative {
+		return
+	}
+	message, ok := tpmSealingNotice(o.keyStorageNoticeGOOS)
+	if !ok || connectorstate.EnvelopePresent(stateDir) {
+		return
+	}
+	// TODO(upstream-contract): with no envelope, qurl-connector's resolver
+	// probes the TPM here and caches the result, so the runtime that opens
+	// next reaches the same decision without probing again.
+	if provider, err := connectorstate.ResolveKeyProvider(stateDir); err == nil && provider == connectoragentstate.KeyProviderTPM {
+		o.printer().Notef("%s", message)
+	}
+}
+
+// tpmSealingNotice returns the sealing notice for a platform. Only Linux names
+// the tss group: a systemd user manager keeps the groups it started with, so
+// the background job can lack TPM access a foreground command has.
+func tpmSealingNotice(goos string) (string, bool) {
+	switch goos {
+	case "":
+		return "", false
+	case "linux":
+		return msgTPMSealedLinuxDevice, true
+	default:
+		return msgTPMSealedDevice, true
+	}
+}
+
 func newRegisteredAccountBootstrap(opts *globalOpts, client qurlapi.AccountClient, key string, identity *qurlapi.Identity) *registeredAccountBootstrap {
 	return &registeredAccountBootstrap{
 		opts: opts, client: client, key: key, identity: identity,
@@ -764,6 +808,10 @@ func (o *globalOpts) openNativeRegisteredClient(
 	}
 
 	bootstrap := newRegisteredAccountBootstrap(o, account, accountKey, accountIdentity)
+	// Before the runtime opens: qurl-go persists the agent ID before it asks
+	// for an enrollment credential, so this is the last point at which an
+	// absent envelope still means a namespace about to be created.
+	o.noteTPMSealing(stateDir)
 
 	nativeRuntime, err := o.openNativeRuntime(ctx, connectorshare.NativeRuntimeConfig{
 		StateDir:                     stateDir,
@@ -819,7 +867,7 @@ func (o *globalOpts) openNativeRegisteredClient(
 	if err := o.bindDeviceOwner(ctx, stateDir, deviceIdentity); err != nil {
 		return nil, nil, err
 	}
-	o.nativeRuntime, o.nativeStateStore = nativeRuntime, store
+	o.nativeRuntime, o.nativeStateStore, o.nativeStateDir = nativeRuntime, store, stateDir
 	return client, deviceIdentity, nil
 }
 
@@ -894,7 +942,7 @@ func (o *globalOpts) openNativeExternalRegisteredClient(
 	if err := o.bindDeviceOwner(ctx, stateDir, deviceIdentity); err != nil {
 		return nil, nil, err
 	}
-	o.nativeRuntime, o.nativeStateStore = nativeRuntime, store
+	o.nativeRuntime, o.nativeStateStore, o.nativeStateDir = nativeRuntime, store, stateDir
 	return client, deviceIdentity, nil
 }
 
@@ -1091,6 +1139,7 @@ func (o *globalOpts) closeAPIClient() error {
 	err := o.nativeRuntime.Close()
 	o.nativeRuntime = nil
 	o.nativeStateStore = nil
+	o.nativeStateDir = ""
 	o.registeredClient = nil
 	o.registeredIdentity = nil
 	return err

@@ -97,32 +97,42 @@ func RequireRuntimeSupervision(dir string, expected RuntimeSupervision) error {
 	if _, err := ParseRuntimeSupervision(string(expected)); err != nil {
 		return err
 	}
-	// A sealed namespace can only be served by a daemon its supervisor runs:
-	// the background job qurl installs natively carries no environment, and an
-	// inherited key descriptor cannot survive into a launchd, systemd, or Task
-	// Scheduler process. Refuse here, which every mutating command reaches
-	// before it writes, rather than at the install: a sealed envelope written
-	// under native supervision cannot afterwards be adopted by
-	// EstablishExternalRuntimeMode, which requires a fresh namespace.
+	// A namespace sealed by a provider that needs its environment can only be
+	// served by a daemon its supervisor runs: the background job qurl installs
+	// natively carries no environment, and an inherited key descriptor cannot
+	// survive into a launchd, systemd, or Task Scheduler process. The TPM
+	// provider needs nothing from the environment, so it passes. It does need
+	// TPM device access in the serving process, which on Linux is tss group
+	// membership: a user manager started before the user joined tss lacks it
+	// until the next login, and the daemon then cannot open state a foreground
+	// command sealed. That is documented, and noted to the user at
+	// enrollment, rather than guarded here; the daemon's error names the TPM.
+	//
+	// Refuse here, which every mutating command reaches before it writes,
+	// rather than at the install: a sealed envelope written under native
+	// supervision cannot afterwards be adopted by EstablishExternalRuntimeMode,
+	// which requires a fresh namespace.
 	// The sentinel is ErrAgentStateEnvelope, not ErrRuntimeSupervision: both
 	// map to Config, and the cause really is the envelope the environment
 	// selects, not a marker this directory carries. It also runs before
 	// ReadRuntimeSupervision, so a sealed namespace addressed natively gets
 	// this message rather than "is external, not native" - the more
 	// actionable of the two.
-	if provider, sealed := SelectedKeyProvider(); expected == RuntimeSupervisionNative && sealed {
-		// Name the value: any non-empty name but file selects a sealed envelope,
-		// so a typo lands here too and its author needs to see what was read.
+	if provider, needsEnv := selectedProviderNeedsEnvironment(); expected == RuntimeSupervisionNative && needsEnv {
+		// Name the value: any name that is neither file nor tpm lands here,
+		// including a typo (the connector rejects unknown names on open), and
+		// its author needs to see what was read.
 		//
 		// The primary instruction is the supervision flag, which is right for an
 		// established sealed namespace as well as a new one. The fresh-directory
 		// clause is scoped to creating a new namespace: an operator whose shell
 		// merely inherited the variable must not read this as "abandon your
-		// enrollment and start over". Unsetting is the other exit, because the
-		// leak over a plaintext namespace is as likely as a real sealed one.
+		// enrollment and start over". The other exit is file, not unsetting:
+		// unset leaves the choice to the namespace, which seals a new one to
+		// this machine's TPM when one is usable, and that choice is permanent.
 		return fmt.Errorf(
-			"%w: %s=%q selects a sealed agent state envelope, which only an external supervisor can serve; run every command with --supervision external, or unset %s for the plaintext default. A new sealed namespace must be a state directory that has held no state before",
-			ErrAgentStateEnvelope, connectoragentstate.EnvKeyProvider, provider, connectoragentstate.EnvKeyProvider)
+			"%w: %s=%q selects a sealed agent state envelope, which only an external supervisor can serve; run every command with --supervision external; or, if this state directory holds plaintext state or none yet, set %s=%s for the plaintext envelope (unsetting it lets the state directory decide, which may seal a new one to this machine's TPM). A directory already sealed by this provider opens only with it. A new sealed namespace must be a state directory that has held no state before",
+			ErrAgentStateEnvelope, connectoragentstate.EnvKeyProvider, provider, connectoragentstate.EnvKeyProvider, connectoragentstate.KeyProviderFile)
 	}
 	actual, err := ReadRuntimeSupervision(dir)
 	if err != nil {

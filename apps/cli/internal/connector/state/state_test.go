@@ -12,7 +12,10 @@ import (
 	qurl "github.com/layervai/qurl-go/qurl"
 )
 
-// clearStateEnv detaches the test from any ambient operator configuration.
+// clearStateEnv detaches the test from any ambient operator configuration and
+// pins LAYERV_KEY_PROVIDER to file. Unset now lets a fresh namespace take the host's TPM, which would make
+// these tests depend on the machine running them; a test about the unset
+// path calls unsetKeyProvider after this.
 func clearStateEnv(t *testing.T) {
 	t.Helper()
 	for _, name := range []string{EnvStateDirPrimary, EnvAgentID, "XDG_STATE_HOME", "HOME", "LOCALAPPDATA", connectoragentstate.EnvKeyProvider, connectoragentstate.EnvLocalKeyFD} {
@@ -20,6 +23,24 @@ func clearStateEnv(t *testing.T) {
 		if err := os.Unsetenv(name); err != nil {
 			t.Fatal(err)
 		}
+	}
+	// Restored after the test because the loop above registered
+	// EnvKeyProvider with t.Setenv, which restores the pre-test value.
+	if err := os.Setenv(connectoragentstate.EnvKeyProvider, connectoragentstate.KeyProviderFile); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// unsetKeyProvider opts a test into the unset LAYERV_KEY_PROVIDER path. Only
+// use it where the namespace already holds an envelope, so no fresh default
+// (and so no host TPM) is consulted.
+func unsetKeyProvider(t *testing.T) {
+	t.Helper()
+	// t.Setenv registers restoration of the value from before this call; the
+	// Unsetenv then leaves the variable absent for the rest of the test.
+	t.Setenv(connectoragentstate.EnvKeyProvider, "restore-after-test")
+	if err := os.Unsetenv(connectoragentstate.EnvKeyProvider); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -316,11 +337,10 @@ func TestOpenLocalKeyWithoutDescriptorFailsClosed(t *testing.T) {
 	t.Cleanup(func() { _ = plaintext.Close() })
 }
 
-// TestSealedProviderSelectedMirrorsTheConnectorsProviderName pins the
-// trim-and-case-fold rule two packages now depend on: Open picks the sealed
-// branch with it, and RequireRuntimeSupervision refuses native supervision
-// with it.
-func TestSealedProviderSelectedMirrorsTheConnectorsProviderName(t *testing.T) {
+// TestSelectedKeyProviderMirrorsTheConnectorsProviderName pins the
+// trim-and-case-fold rule RequireRuntimeSupervision depends on: whether the
+// environment names a sealed provider, read the way the connector reads it.
+func TestSelectedKeyProviderMirrorsTheConnectorsProviderName(t *testing.T) {
 	for raw, want := range map[string]bool{
 		"":                                      false,
 		"   ":                                   false,
@@ -329,12 +349,13 @@ func TestSealedProviderSelectedMirrorsTheConnectorsProviderName(t *testing.T) {
 		"File":                                  false,
 		connectoragentstate.KeyProviderLocalKey: true,
 		" LOCAL-KEY ":                           true,
+		connectoragentstate.KeyProviderTPM:      true,
 		" not-a-provider ":                      true,
 	} {
 		t.Run(raw, func(t *testing.T) {
 			t.Setenv(connectoragentstate.EnvKeyProvider, raw)
-			if got := SealedProviderSelected(); got != want {
-				t.Fatalf("SealedProviderSelected() with %q = %t, want %t", raw, got, want)
+			if _, got := SelectedKeyProvider(); got != want {
+				t.Fatalf("SelectedKeyProvider() with %q reports sealed=%t, want %t", raw, got, want)
 			}
 		})
 	}
@@ -356,7 +377,8 @@ func TestRequireRuntimeSupervisionRefusesASealedNamespaceUnderNative(t *testing.
 	if !errors.Is(err, ErrAgentStateEnvelope) {
 		t.Fatalf("sealed native namespace = %v, want ErrAgentStateEnvelope", err)
 	}
-	if !strings.Contains(err.Error(), "--supervision external") || !strings.Contains(err.Error(), "held no state before") {
+	if !strings.Contains(err.Error(), "--supervision external") || !strings.Contains(err.Error(), "held no state before") ||
+		!strings.Contains(err.Error(), connectoragentstate.EnvKeyProvider+"="+connectoragentstate.KeyProviderFile) {
 		t.Fatalf("refusal = %v, want the whole remedy: external supervision in a directory that has held no state", err)
 	}
 	if err := EstablishExternalRuntimeMode(context.Background(), dir); err != nil {

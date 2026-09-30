@@ -18,6 +18,7 @@ import (
 	"net/url"
 	"strings"
 
+	connectoragentstate "github.com/layervai/qurl-connector/pkg/agentstate"
 	"github.com/layervai/qurl-go/crid"
 	"github.com/layervai/qurl-go/qurl"
 
@@ -63,7 +64,8 @@ const (
 	// outside its contract.
 	ServerError = 10
 	// Unavailable: the service cannot be reached or is not serving this
-	// surface (HTTP 503, network failures, timeouts).
+	// surface (HTTP 503, network failures, timeouts), or the local TPM that
+	// protects device state is not responding.
 	Unavailable = 11
 	// VerificationFailed: the response failed CRID-anchored verification.
 	// Nothing was emitted; treat as tampering, not transience.
@@ -169,7 +171,15 @@ func FromError(err error) int {
 		return Interrupted
 	case errors.Is(err, context.DeadlineExceeded):
 		return Unavailable
-	case errors.Is(err, qurl.ErrTemporaryAccessLinksDisabled):
+	case errors.Is(err, qurl.ErrTemporaryAccessLinksDisabled),
+		// The local TPM exists but did not answer (busy, starting, timed out).
+		// Open wraps this in ErrAgentStateEnvelope, whose Config row would tell
+		// a script its setup is wrong; retrying is the remedy. It is checked
+		// ahead of the host and qurl-go rows on purpose: a chain that also
+		// carries one of those still exits retryable, because no setup change
+		// can help until the TPM answers. It stays behind context.Canceled: a
+		// TPM call the user interrupted is an interrupt (130).
+		errors.Is(err, connectoragentstate.ErrTPMNotResponding):
 		return Unavailable
 	case errors.Is(err, qurl.ErrNoCRID), errors.Is(err, qurl.ErrCRIDMismatch):
 		return VerificationFailed
@@ -208,10 +218,10 @@ func FromError(err error) int {
 		// every failure, including ones qurl-go classifies itself - a loose
 		// directory mode is Auth on the plaintext branch and must stay Auth on
 		// the sealed one. Reaching here means nothing more specific matched, so
-		// the cause is what the sentinel names: the envelope does not match the
-		// selected key provider, whose remedy is LAYERV_KEY_PROVIDER /
-		// LAYERV_LOCAL_KEY_FD or a different state directory, never the command
-		// line.
+		// the cause is what the sentinel names: the envelope cannot be opened as
+		// selected, whose remedy is LAYERV_KEY_PROVIDER / LAYERV_LOCAL_KEY_FD or
+		// the state directory (including moving aside TPM-sealed state this TPM
+		// can no longer open), never the command line.
 		return Config
 	default:
 		return General
@@ -219,12 +229,15 @@ func FromError(err error) int {
 }
 
 // hostConditionCode maps local host conditions ahead of every sentinel
-// family (below only the CLI-typed wrappers in FromError), matching
-// output.RenderError, which renders them ahead of the connector taxonomy: their
-// chains still carry whatever the connector wrapped, and the exit code must
-// agree with the message. qurl-go's own permission refusals never become
-// ErrUnsafeDirectory (ExplainUnsafeDirectory leaves them as they are), so a
-// loose credential state mode stays Auth.
+// family (below only the CLI-typed wrappers and the early transient rows in
+// FromError), matching output.RenderError, which renders them ahead of the
+// connector taxonomy: their chains still carry whatever the connector
+// wrapped, and the exit code agrees with the message. The one deliberate
+// exception is a chain that also carries ErrTPMNotResponding: it exits
+// Unavailable even where the message names the host condition, because no
+// host change helps until the TPM answers. qurl-go's own permission refusals
+// never become ErrUnsafeDirectory (ExplainUnsafeDirectory leaves them as they
+// are), so a loose credential state mode stays Auth.
 func hostConditionCode(err error) (int, bool) {
 	switch {
 	case errors.Is(err, state.ErrUnsafeDirectory):

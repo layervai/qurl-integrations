@@ -22,11 +22,23 @@ type identityKeyJSON struct {
 	ExpiresAt *time.Time `json:"expires_at,omitempty"`
 }
 
+// KeyStorage is the key provider protecting local device state: its id for
+// JSON and a description for people. The zero value omits both.
+type KeyStorage struct {
+	Provider    string
+	Description string
+}
+
 type whoamiJSON struct {
 	OwnerID            string           `json:"owner_id"`
 	AuthType           string           `json:"auth_type"`
 	APIKey             *identityKeyJSON `json:"api_key,omitempty"`
 	DevicePublicKeyB64 string           `json:"device_public_key_b64,omitempty"`
+	// KeyStorage names the key provider protecting the local device state. It
+	// is the connector's provider id, drawn from a closed set; encoding/json
+	// escapes any control bytes, so it needs no text-side sanitizing here. It
+	// is omitted when no local state was found.
+	KeyStorage string `json:"key_storage,omitempty"`
 }
 
 type loginJSON struct {
@@ -65,22 +77,24 @@ func (p *Printer) WhoAmIRendersDeviceKey() bool {
 // just the owner id.
 //
 // devicePublicKeyB64 is this machine's registered-device public key from local
-// agent state, never from /v1/me; "" omits the row and the JSON field.
-func (p *Printer) WhoAmI(id *qurlapi.Identity, devicePublicKeyB64 string) error {
+// agent state, never from /v1/me, and keyStorage describes the key provider
+// protecting that state. An empty value omits its row and JSON field.
+func (p *Printer) WhoAmI(id *qurlapi.Identity, devicePublicKeyB64 string, keyStorage KeyStorage) error {
 	switch {
 	case p.format == FormatJSON:
 		return p.writeJSON(whoamiJSON{
 			OwnerID: id.OwnerID, AuthType: id.AuthType, APIKey: identityKey(id), DevicePublicKeyB64: devicePublicKeyB64,
+			KeyStorage: keyStorage.Provider,
 		})
 	case p.quiet:
 		_, err := fmt.Fprintln(p.out, id.OwnerID)
 		return err
 	default:
-		return p.whoamiText(id, devicePublicKeyB64)
+		return p.whoamiText(id, devicePublicKeyB64, keyStorage.Description)
 	}
 }
 
-func (p *Printer) whoamiText(id *qurlapi.Identity, devicePublicKeyB64 string) error {
+func (p *Printer) whoamiText(id *qurlapi.Identity, devicePublicKeyB64, keyStorage string) error {
 	tw := tabwriter.NewWriter(p.out, 0, 0, 2, ' ', 0)
 	ew := &errWriter{w: tw}
 	ew.printf("%s\t%s\n", p.bold("Owner:"), id.OwnerID)
@@ -93,6 +107,9 @@ func (p *Printer) whoamiText(id *qurlapi.Identity, devicePublicKeyB64 string) er
 	}
 	if devicePublicKeyB64 != "" {
 		ew.printf("%s\t%s\n", p.bold("Device public key:"), devicePublicKeyB64)
+	}
+	if keyStorage != "" {
+		ew.printf("%s\t%s\n", p.bold("Key storage:"), keyStorage)
 	}
 	return ew.flush(tw)
 }
