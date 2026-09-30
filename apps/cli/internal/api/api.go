@@ -231,6 +231,21 @@ type client struct {
 // through a type assertion.
 type registeredClient struct{ Client }
 
+// NewPublic builds a client without credentials for public share requests.
+func NewPublic(cfg *Config) (Client, error) {
+	if cfg == nil || cfg.BaseURL == "" {
+		return nil, fmt.Errorf("%w: base URL must not be empty", qurl.ErrInvalidClientConfig)
+	}
+	tr := newTransport(cfg)
+	provider := qurl.CredentialProviderFunc(func(context.Context, *http.Request) error { return nil })
+	sdk, err := qurl.NewClient(provider,
+		qurl.WithBaseURL(cfg.BaseURL), qurl.WithHTTPClient(tr))
+	if err != nil {
+		return nil, err
+	}
+	return &client{sdk: sdk, transport: tr, baseURL: trimBaseURL(cfg.BaseURL), authorize: provider.Authorize}, nil
+}
+
 // New builds the one Client implementation. The same decorated transport
 // serves both the SDK-backed calls and the direct REST calls, so headers,
 // retry, and redaction cannot diverge between them.

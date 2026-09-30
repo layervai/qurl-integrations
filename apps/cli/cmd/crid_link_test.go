@@ -121,3 +121,19 @@ func TestCRIDBindingBeforeShareBrowserAndDownload(t *testing.T) {
 		}
 	}
 }
+
+func TestShareWithoutAccountOrEnrollment(t *testing.T) {
+	srv := apitest.NewServer(t)
+	result := runCLI(t, &runOpts{
+		args:         []string{"--endpoint", srv.URL, "share", srv.Key.CRID},
+		env:          map[string]string{},
+		nativeClient: true,
+	})
+	if result.code != 0 || strings.TrimSpace(result.stdout.String()) == "" {
+		t.Fatalf("anonymous share failed: exit=%d stderr=%s", result.code, result.stderr.String())
+	}
+	requests := srv.Requests()
+	if len(requests) != 1 || requests[0].Path != "/v1/resources/"+srv.Key.CRID+"/share" || requests[0].Header.Get("Authorization") != "" {
+		t.Fatalf("share must make only the share request: %+v", requests)
+	}
+}

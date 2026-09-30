@@ -6,10 +6,9 @@ Publish an app running on your machine with one command:
 qurl publish http://127.0.0.1:3000
 ```
 
-qURL™ gives the app a permanent **CRID** you can safely paste into chat,
-documentation, or an agent prompt. A CRID identifies the protected resource;
-it does not grant access. Authorized users turn it into a short-lived access
-link only when they need one.
+qURL™ gives the app a permanent **CRID** you can give to recipients in chat,
+documentation, or an agent prompt. Anyone given the CRID can request a
+short-lived access link without a LayerV account or login.
 
 [Publish localhost in 60 seconds](#publish-localhost-in-60-seconds) ·
 [Command reference](#commands) · [Scripting](#scripting-contract)
@@ -85,7 +84,7 @@ debugging. When another program owns the daemon process, run it with
 
 ### 3. Open or share it
 
-The CRID is safe to share. An authorized user can open the app with:
+Anyone given the CRID can request an access link. To open the app:
 
 ```bash
 qurl get <CRID>
@@ -782,10 +781,9 @@ identity. Use the share's existing `--id` when publishing it again by ID.
 ### qurl share
 
 `qurl share <CRID>` mints a short-lived share link for the resource the
-CRID names. A CRID is safe to paste anywhere — it grants nothing by
-itself; the share link is what turns it into access, so treat the link as
-a secret. The link expires on its own; share again whenever you need a
-fresh one. When stdout is not a terminal the command prints the bare link
+CRID names. Anyone given the CRID can request a link without an account
+or login. Share the CRID only with people who should be able to request
+access. The link expires on its own; share again whenever you need a fresh one. When stdout is not a terminal the command prints the bare link
 and nothing else, ready to hand out or open.
 
 The link opens in a browser. Passing it to a tool like curl fetches the

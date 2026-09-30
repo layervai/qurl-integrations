@@ -36,9 +36,9 @@ func shareCmd(opts *globalOpts) *cobra.Command {
 		Short:      "Share a CRID as a short-lived access link",
 		Long: `Share a CRID as a temporary access link for the resource it names.
 
-A CRID is safe to paste anywhere — it grants nothing by itself. The share
-link is what turns it into access, so treat the link as a secret. It expires
-on its own; share again whenever you need a fresh one.
+Anyone with a CRID can request a link. No account or login is required.
+Give the CRID and the link only to people who should have access.
+The link expires on its own; share again whenever you need a fresh one.
 
 Before anything is printed, the CLI verifies that the link belongs
 to the CRID you asked for — a mismatched answer is discarded and the
@@ -75,7 +75,8 @@ else, ready to hand out or open.`,
 				return exitcode.UsageError(fmt.Errorf("--session-duration %s must be a positive whole number of seconds", sessionDuration))
 			}
 
-			client, err := opts.newClient(cmd.Context())
+			opts.warnInsecureEndpoint()
+			client, err := qurlapi.NewPublic(opts.accountConfig("", ""))
 			if err != nil {
 				return err
 			}
