@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"os"
@@ -66,11 +67,14 @@ share and turns it off when it exits.`,
 		Args: exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			privacy := qurlapi.PublishOptions{AllowedDeviceKeys: allowedDeviceKeys}
-			if cmd.Flags().Changed("private") {
+			if private {
 				privacy.Private = &private
 			}
 			if len(allowedDeviceKeys) > 0 && !private {
 				return exitcode.UsageError(errors.New("--allow-device-key requires --private"))
+			}
+			if err := validateAllowedDeviceKeys(allowedDeviceKeys); err != nil {
+				return exitcode.UsageError(err)
 			}
 			target, err := classifyPublishTarget(args[0])
 			if err != nil {
@@ -664,4 +668,21 @@ func resolveLocalPublishResource(ctx context.Context, cfg *connectorshare.Native
 	}
 	defer func() { retErr = errors.Join(retErr, resourceStore.Close()) }()
 	return agent.ResolveResourceWithResult(ctx, nativeRuntime.Binding, resourceStore, id)
+}
+
+func validateAllowedDeviceKeys(keys []string) error {
+	// TODO(upstream-contract): service grants allow at most 256 unique,
+	// canonical padded-base64 X25519 public keys.
+	if len(keys) > 256 {
+		return errors.New("--allow-device-key accepts at most 256 keys")
+	}
+	seen := make(map[string]bool, len(keys))
+	for _, key := range keys {
+		raw, err := base64.StdEncoding.DecodeString(key)
+		if err != nil || len(raw) != devicePublicKeySize || base64.StdEncoding.EncodeToString(raw) != key || seen[key] {
+			return errors.New("--allow-device-key requires unique canonical base64 X25519 public keys")
+		}
+		seen[key] = true
+	}
+	return nil
 }

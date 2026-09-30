@@ -71,14 +71,15 @@ type AccountClient interface {
 	MintAgentEnrollmentToken(ctx context.Context, opts MintAgentEnrollmentTokenOptions) (*AgentEnrollmentToken, error)
 }
 
-// PublishOptions carries the optional publish metadata.
+// PublishOptions carries creation policy and optional metadata.
 type PublishOptions struct {
 	Private           *bool
 	AllowedDeviceKeys []string
-	ConnectorID       string
-	Description       string
-	Tags              []string
-	Alias             string
+	// ConnectorID selects a tunnel resource instead of a URL.
+	ConnectorID string
+	Description string
+	Tags        []string
+	Alias       string
 }
 
 // ShareOptions carries the optional share parameters.
@@ -101,6 +102,7 @@ type ListOptions struct {
 
 // Published is the repo-owned result of Publish.
 type Published struct {
+	Private    *bool
 	CRID       string
 	ResourceID string
 	TargetURL  string
@@ -149,6 +151,7 @@ type ResourcePage struct {
 // necessarily "never set". Type is not redacted and is always populated —
 // legacy rows with no stored type read back as "url".
 type ResourceSummary struct {
+	Private      *bool
 	CRID         string
 	ResourceID   string
 	TargetURL    string

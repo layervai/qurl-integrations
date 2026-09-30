@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -3957,39 +3958,54 @@ func TestPrivateLocalPublishCreatesPrivacyBeforeNativeEnsure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	created := false
+	var created atomic.Bool
 	srv.Script(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
-			Private      bool   `json:"private"`
-			Type         string `json:"type"`
-			Slug         string `json:"slug"`
-			FindOrCreate bool   `json:"find_or_create"`
+			Allowed      []string `json:"allowed_device_keys"`
+			Private      bool     `json:"private"`
+			Type         string   `json:"type"`
+			Slug         string   `json:"slug"`
+			FindOrCreate bool     `json:"find_or_create"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			t.Error(err)
 		}
-		if !body.Private || body.Type != "tunnel" || body.Slug == "" || !body.FindOrCreate {
+		if !body.Private || body.Type != "tunnel" || body.Slug == "" || !body.FindOrCreate || len(body.Allowed) != 1 {
 			t.Errorf("unsafe creation: %+v", body)
 		}
-		created = true
+		created.Store(true)
 		apitest.WriteEnvelope(t, w, http.StatusCreated, map[string]any{"resource_id": srv.Key.ResourceID, "crid": srv.Key.CRID, "private": true}, nil)
 	})
 	stop := errors.New("native ensure reached after private create")
 	res := runCLI(t, &runOpts{
-		args: []string{"--endpoint", srv.URL, "publish", "http://127.0.0.1:3000", "--private"},
+		args: []string{"--endpoint", srv.URL, "publish", "http://127.0.0.1:3000", "--private", "--allow-device-key", "cHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHA="},
 		env:  map[string]string{"QURL_API_KEY": testAPIKey}, shareStateDir: stateDir, shareRegistry: registry, shareDaemon: &recordingShareDaemon{},
 		preflightTarget: func(context.Context, string, int) error { return nil },
 		localResource: func(_ context.Context, _ *connectorshare.NativeRuntimeConfig, resolveID func(string) (string, error)) (*agent.ResolvedResource, error) {
 			if _, err := resolveID("agent-one"); err != nil {
 				return nil, err
 			}
-			if !created {
+			if !created.Load() {
 				t.Error("native ensure ran before private creation")
 			}
 			return nil, stop
 		},
 	})
-	if !created || !strings.Contains(res.stderr.String(), stop.Error()) {
+	if !created.Load() || !strings.Contains(res.stderr.String(), stop.Error()) {
 		t.Fatalf("private preparation failed: %s", res.stderr.String())
+	}
+}
+
+func TestPublishRejectsInvalidDeviceGrantsBeforeEnrollment(t *testing.T) {
+	key := "cHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHA="
+	for _, flags := range [][]string{
+		{"--allow-device-key", key},
+		{"--private", "--allow-device-key", "invalid"},
+		{"--private", "--allow-device-key", key, "--allow-device-key", key},
+	} {
+		res := runCLI(t, &runOpts{args: append([]string{"publish", "https://example.com"}, flags...)})
+		if res.code == 0 || !strings.Contains(res.stderr.String(), "--allow-device-key") {
+			t.Fatalf("invalid grant accepted: %s", res.stderr.String())
+		}
 	}
 }

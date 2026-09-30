@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
@@ -161,10 +162,11 @@ func (opts *globalOpts) shareResource(ctx context.Context, id string, options qu
 	}
 	link, err := client.Share(ctx, id, options)
 	var apiErr *qurlapi.Error
-	if errors.As(err, &apiErr) && apiErr.StatusCode == 401 {
+	// TODO(upstream-contract): share challenges private resources with HTTP 401.
+	if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusUnauthorized {
 		authenticated, openErr := opts.newClient(ctx)
 		if openErr != nil {
-			return nil, openErr
+			return nil, fmt.Errorf("private resource requires device authentication: %w", openErr)
 		}
 		return authenticated.Share(ctx, id, options)
 	}

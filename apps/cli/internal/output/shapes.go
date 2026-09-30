@@ -14,6 +14,7 @@ import (
 // cannot silently change the CLI's output.
 
 type publishJSON struct {
+	Private    *bool      `json:"private,omitempty"`
 	CRID       string     `json:"crid,omitempty"`
 	ResourceID string     `json:"resource_id"`
 	TargetURL  string     `json:"target_url"`
@@ -40,6 +41,7 @@ type shareLinkJSON struct {
 // (the text table deliberately omits them — see List). A sweeper identifying
 // throwaway rows by the label their publisher gave them reads this document.
 type listItemJSON struct {
+	Private    *bool  `json:"private,omitempty"`
 	CRID       string `json:"crid,omitempty"`
 	ResourceID string `json:"resource_id"`
 	// TargetURL is the owner-visible URL for URL resources and the target
@@ -108,6 +110,7 @@ type SharingInspection struct {
 }
 
 type resourceStatusJSON struct {
+	Private *bool `json:"private,omitempty"`
 	// Description and tags are intentionally absent: status is the compact
 	// lifecycle view, while list is the metadata inventory surface.
 	CRID       string     `json:"crid,omitempty"`
@@ -139,6 +142,7 @@ func (p *Printer) Publish(res *qurlapi.Published) error {
 	switch {
 	case p.format == FormatJSON:
 		return p.writeJSON(publishJSON{
+			Private:       res.Private,
 			CRID:          res.CRID,
 			ResourceID:    res.ResourceID,
 			TargetURL:     res.TargetURL,
@@ -247,7 +251,8 @@ func (p *Printer) ResourceStatus(resource *qurlapi.ResourceSummary) error {
 	switch {
 	case p.format == FormatJSON:
 		return p.writeJSON(resourceStatusJSON{
-			CRID: resource.CRID, ResourceID: resource.ResourceID,
+			Private: resource.Private,
+			CRID:    resource.CRID, ResourceID: resource.ResourceID,
 			TargetURL: resource.TargetURL, Type: resource.Type, Status: resource.Status,
 			CreatedAt: resource.CreatedAt, ExpiresAt: resource.ExpiresAt,
 		})
@@ -291,6 +296,9 @@ func (p *Printer) publishText(res *qurlapi.Published) error {
 	tw := tabwriter.NewWriter(p.out, 0, 0, 2, ' ', 0)
 	twe := &errWriter{w: tw}
 	twe.printf("  %s\t%s\n", p.bold("Target:"), res.TargetURL)
+	if res.Private != nil {
+		twe.printf("  %s\t%t\n", p.bold("Private:"), *res.Private)
+	}
 	if res.Status != "" {
 		twe.printf("  %s\t%s\n", p.bold("Status:"), res.Status)
 	}
@@ -394,6 +402,7 @@ func (p *Printer) List(page *qurlapi.ResourcePage) error {
 			out.Resources = append(out.Resources, listItemJSON{
 				CRID:         item.CRID,
 				ResourceID:   item.ResourceID,
+				Private:      item.Private,
 				TargetURL:    item.TargetURL,
 				Type:         item.Type,
 				Status:       item.Status,

@@ -29,6 +29,7 @@ const maxResponseBody = 1 << 20
 // Decoding is deliberately lax about extra fields: the server owns its own
 // payloads, and the projection into ResourceSummary is the contract.
 type resourceRow struct {
+	Private      *bool        `json:"private"`
 	ResourceID   string       `json:"resource_id"`
 	CRID         string       `json:"crid"`
 	TargetURL    string       `json:"target_url"`
@@ -153,8 +154,8 @@ type envelopeMeta struct {
 	FoundExisting *bool  `json:"found_existing"`
 }
 
-// publishRequest is the pinned publish wire shape: type is required and
-// always "url" for CLI publishes (the tunnel type belongs to the Connector).
+// TODO(upstream-contract): privacy and tunnel find-or-create fields mirror
+// qurl-service CreateResourceRequest; privacy is immutable after creation.
 type publishRequest struct {
 	Private           *bool    `json:"private,omitempty"`
 	AllowedDeviceKeys []string `json:"allowed_device_keys,omitempty"`
@@ -167,14 +168,12 @@ type publishRequest struct {
 	Alias             string   `json:"alias,omitempty"`
 }
 
-// Publish registers targetURL as a protected URL resource. This is a direct
-// call rather than the SDK's ProtectURL because the pinned platform contract
-// requires the explicit `type: url` discriminator, which qurl-go v0.8.1 does
-// not send.
+// Publish registers a URL or pre-creates a private Connector resource.
+// The direct REST call carries fields absent from the pinned SDK.
 //
 //nolint:gocritic // Keep value options in the existing Client contract; this one-shot network operation is not a hot loop.
 func (c *client) Publish(ctx context.Context, targetURL string, opts PublishOptions) (*Published, error) {
-	if opts.ConnectorID == "" {
+	if opts.ConnectorID == "" || targetURL != "" {
 		if err := validateTargetURL(targetURL); err != nil {
 			return nil, err
 		}
@@ -219,7 +218,11 @@ func (c *client) Publish(ctx context.Context, targetURL string, opts PublishOpti
 	if err := resourceidentity.ValidatePair(env.Data.CRID, env.Data.ResourceID); err != nil {
 		return nil, fmt.Errorf("%w: publish response identity: %w", qurl.ErrInvalidAPIResponse, err)
 	}
+	if opts.Private != nil && (env.Data.Private == nil || *env.Data.Private != *opts.Private) {
+		return nil, fmt.Errorf("%w: API did not confirm the requested resource privacy", qurl.ErrInvalidAPIResponse)
+	}
 	return &Published{
+		Private:       env.Data.Private,
 		CRID:          env.Data.CRID,
 		ResourceID:    env.Data.ResourceID,
 		TargetURL:     env.Data.TargetURL,
@@ -355,7 +358,8 @@ func summarizeResourceRow(row *resourceRow, source string) (*ResourceSummary, er
 		}
 	}
 	return &ResourceSummary{
-		CRID: row.CRID, ResourceID: row.ResourceID, TargetURL: row.TargetURL,
+		Private: row.Private,
+		CRID:    row.CRID, ResourceID: row.ResourceID, TargetURL: row.TargetURL,
 		Type: row.Type, Status: row.Status, DesiredState: row.DesiredState,
 		ServingEpoch: row.ServingEpoch, Description: row.Description, Tags: row.Tags,
 		CreatedAt: row.CreatedAt, ExpiresAt: row.ExpiresAt,

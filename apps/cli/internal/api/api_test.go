@@ -1211,3 +1211,29 @@ func TestPublicClientCannotSelectAccountOrManageResources(t *testing.T) {
 		t.Fatal("public client exposes management operations")
 	}
 }
+
+func TestPrivatePublishRequiresConfirmation(t *testing.T) {
+	for _, connectorID := range []string{"", "private-connector"} {
+		for _, responsePrivacy := range []any{nil, false, true} {
+			t.Run(fmt.Sprintf("connector=%s/private=%v", connectorID, responsePrivacy), func(t *testing.T) {
+				srv := apitest.NewServer(t)
+				srv.Script(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+					data := map[string]any{"resource_id": srv.Key.ResourceID, "crid": srv.Key.CRID}
+					if responsePrivacy != nil {
+						data["private"] = responsePrivacy
+					}
+					apitest.WriteEnvelope(t, w, http.StatusCreated, data, map[string]any{"found_existing": true})
+				})
+				private := true
+				result, err := newTestClient(t, srv, nil).Publish(t.Context(), "https://example.com", PublishOptions{Private: &private, ConnectorID: connectorID})
+				if responsePrivacy == true {
+					if err != nil || result.Private == nil || !*result.Private {
+						t.Fatalf("confirmed private publish: %v", err)
+					}
+				} else if !errors.Is(err, qurl.ErrInvalidAPIResponse) || result != nil {
+					t.Fatalf("unconfirmed private publish succeeded: %v", err)
+				}
+			})
+		}
+	}
+}
