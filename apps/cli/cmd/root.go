@@ -1024,10 +1024,10 @@ func devicePublicKey(ctx context.Context, store qurl.AgentStateStore) (string, e
 		raw, err = base64.RawStdEncoding.DecodeString(key)
 	}
 	if err != nil {
-		return "", &invalidDevicePublicKeyError{reason: "not standard base64"}
+		return "", &invalidDevicePublicKeyError{reason: "the stored value is not a valid key"}
 	}
 	if len(raw) != devicePublicKeySize {
-		return "", &invalidDevicePublicKeyError{reason: fmt.Sprintf("decodes to %d bytes, want %d", len(raw), devicePublicKeySize)}
+		return "", &invalidDevicePublicKeyError{reason: "the stored key is the wrong size"}
 	}
 	// Construct, never echo: the output is built from the decoded bytes.
 	return base64.StdEncoding.EncodeToString(raw), nil
@@ -1038,7 +1038,8 @@ const devicePublicKeySize = 32
 
 // invalidDevicePublicKeyError marks device state that loaded but holds no
 // usable public key, as distinct from a state read that failed. Its text is
-// only the reason, so the whoami warning reads once.
+// only the reason, so the whoami warning reads once. Reasons reach customer
+// stderr, so they are plain language and pass the jargon gate.
 type invalidDevicePublicKeyError struct{ reason string }
 
 func (e *invalidDevicePublicKeyError) Error() string { return e.reason }

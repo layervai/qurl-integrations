@@ -698,6 +698,11 @@ func TestWhoamiDevicePublicKeyReadFailureWarns(t *testing.T) {
 			if !strings.Contains(stderr, tc.want) {
 				t.Fatalf("whoami stderr = %q, want %q", stderr, tc.want)
 			}
+			// The reason is filled in at runtime, so the constant-only jargon
+			// gate cannot see it; check the composed warning here.
+			if word, found := findForbiddenJargon(stderr); found && name != "load" {
+				t.Fatalf("whoami warning %q uses forbidden customer jargon %q", stderr, word)
+			}
 			if strings.ContainsAny(stdout+stderr, "\x1b\r") || strings.Contains(stderr, "invalid device public key") {
 				t.Fatalf("whoami echoed control bytes from local state or repeated itself:\nstdout %q\nstderr %q", stdout, stderr)
 			}
