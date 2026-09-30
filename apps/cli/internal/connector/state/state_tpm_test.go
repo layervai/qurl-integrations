@@ -14,6 +14,10 @@ import (
 // background job depends on: launchd, systemd, and Task Scheduler start
 // `qurl daemon run` with no LAYERV_KEY_PROVIDER, so a namespace sealed to the
 // TPM must still open sealed rather than be refused or forked into plaintext.
+//
+// It passes on a TPM-less runner because the connector's NewSDKStore defers
+// all TPM contact to the first unseal; if that ever becomes eager, this test
+// fails on every hosted runner rather than on the change that caused it.
 func TestOpenReopensATPMNamespaceWithoutTheEnvironment(t *testing.T) {
 	clearStateEnv(t)
 	dir := secureStateTestDir(t)
@@ -40,15 +44,15 @@ func TestOpenReopensATPMNamespaceWithoutTheEnvironment(t *testing.T) {
 func TestOpenRefusesTPMOverAnExistingPlaintextNamespace(t *testing.T) {
 	clearStateEnv(t)
 	dir := secureStateTestDir(t)
+	// Pin the plaintext precondition explicitly, so the refusal is asserted
+	// even on a host whose TPM would otherwise seal a fresh namespace.
+	t.Setenv(connectoragentstate.EnvKeyProvider, connectoragentstate.KeyProviderFile)
 	first, err := Open(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if first.envelope != AgentStateFile {
-		// The host has a usable TPM, so this fresh namespace was sealed and the
-		// plaintext precondition cannot be built through Open.
-		_ = first.Close()
-		t.Skip("host TPM sealed the fresh namespace")
+		t.Fatalf("Open with the file provider chose %q", first.envelope)
 	}
 	if err := os.WriteFile(filepath.Join(dir, AgentStateFile), []byte("{}"), 0o600); err != nil {
 		t.Fatal(err)
@@ -62,6 +66,8 @@ func TestOpenRefusesTPMOverAnExistingPlaintextNamespace(t *testing.T) {
 		_ = store.Close()
 		t.Fatal("Open accepted LAYERV_KEY_PROVIDER=tpm over plaintext state")
 	}
+	// TODO(upstream-contract): "not an in-place migration" is qurl-connector
+	// pkg/agentstate's refusal text for a provider change.
 	if !errors.Is(err, ErrAgentStateEnvelope) || !strings.Contains(err.Error(), "not an in-place migration") {
 		t.Fatalf("Open error = %v, want an ErrAgentStateEnvelope migration refusal", err)
 	}

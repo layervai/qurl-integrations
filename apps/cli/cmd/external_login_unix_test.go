@@ -117,7 +117,7 @@ func TestExternalLoginEnrollsFreshNamespaceFromTheTokenFile(t *testing.T) {
 	}
 	// This is a negative-space check, not sealing coverage: the harness injects
 	// the environment through opts.lookupEnv, while state.Open and
-	// SealedProviderSelected read the process environment so they agree with
+	// SelectedKeyProvider read the process environment so they agree with
 	// what qurl-connector will see. The sealed branch is therefore never taken
 	// here and the fake runtime writes no state at all. Real sealing is covered
 	// by the state package's t.Setenv tests.

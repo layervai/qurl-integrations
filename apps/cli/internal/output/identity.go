@@ -2,6 +2,7 @@ package output
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -27,9 +28,9 @@ type whoamiJSON struct {
 	AuthType           string           `json:"auth_type"`
 	APIKey             *identityKeyJSON `json:"api_key,omitempty"`
 	DevicePublicKeyB64 string           `json:"device_public_key_b64,omitempty"`
-	// KeyStorage names the key provider protecting the local device state:
-	// "tpm", "file" (plaintext), or a supervisor's provider. It is omitted
-	// when no local state was found.
+	// KeyStorage names the key provider protecting the local device state,
+	// as the connector reports it (see keyStorageLine). It is omitted when no
+	// local state was found.
 	KeyStorage string `json:"key_storage,omitempty"`
 }
 
@@ -86,17 +87,27 @@ func (p *Printer) WhoAmI(id *qurlapi.Identity, devicePublicKeyB64, keyStorage st
 	}
 }
 
-// keyStorageLine describes a key provider for people.
+// keyStorageLine describes a key provider for people. The provider id comes
+// from local state, so an unrecognized one is never echoed to the terminal:
+// only a plain lowercase provider name is shown as itself.
+//
+// TODO(upstream-contract): mirrors qurl-connector pkg/agentstate's
+// KeyProviderTPM ("tpm") and KeyProviderFile ("file") ids, which that module
+// resolves from a closed set; this package does not import the connector.
 func keyStorageLine(provider string) string {
 	switch provider {
 	case "tpm":
 		return "TPM (sealed to this machine)"
 	case "file":
 		return "file (owner-only, not encrypted)"
-	default:
+	}
+	if providerNamePattern.MatchString(provider) {
 		return provider
 	}
+	return "unrecognized provider"
 }
+
+var providerNamePattern = regexp.MustCompile(`^[a-z][a-z0-9-]{0,63}$`)
 
 func (p *Printer) whoamiText(id *qurlapi.Identity, devicePublicKeyB64, keyStorage string) error {
 	tw := tabwriter.NewWriter(p.out, 0, 0, 2, ' ', 0)

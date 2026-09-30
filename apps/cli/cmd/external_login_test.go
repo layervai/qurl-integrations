@@ -234,10 +234,10 @@ func TestPlainLoginDoesNotEstablishExternalPolicy(t *testing.T) {
 // TestLoginsProviderGateImpliesTheNamespaceIsSealed closes the seam between
 // login's env check and the sealing decision. login reads
 // LAYERV_KEY_PROVIDER through opts.lookupEnv and checks only the name, while
-// connectorstate.SealedProviderSelected reads the process environment and
+// connectorstate.SelectedKeyProvider reads the process environment and
 // decides whether Open takes the sealed branch. They coincide in production
 // because newRoot sets lookupEnv = os.LookupEnv, but nothing forced them to
-// agree: a provider name login accepted and SealedProviderSelected treated as
+// agree: a provider name login accepted and SelectedKeyProvider treated as
 // the plaintext default would enroll an external device into a plaintext
 // namespace, which is the divergence sealedProviderSelected's
 // TODO(upstream-contract) warns about.
@@ -256,7 +256,7 @@ func TestLoginsProviderGateImpliesTheNamespaceIsSealed(t *testing.T) {
 				t.Fatalf("login refused %q: %v", provider, err)
 			}
 			t.Setenv(connectoragentstate.EnvKeyProvider, provider)
-			if !connectorstate.SealedProviderSelected() {
+			if _, sealed := connectorstate.SelectedKeyProvider(); !sealed {
 				t.Fatalf("login accepted %q but the namespace would open plaintext", provider)
 			}
 		})

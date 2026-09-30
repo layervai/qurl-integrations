@@ -316,11 +316,10 @@ func TestOpenLocalKeyWithoutDescriptorFailsClosed(t *testing.T) {
 	t.Cleanup(func() { _ = plaintext.Close() })
 }
 
-// TestSealedProviderSelectedMirrorsTheConnectorsProviderName pins the
-// trim-and-case-fold rule two packages now depend on: Open picks the sealed
-// branch with it, and RequireRuntimeSupervision refuses native supervision
-// with it.
-func TestSealedProviderSelectedMirrorsTheConnectorsProviderName(t *testing.T) {
+// TestSelectedKeyProviderMirrorsTheConnectorsProviderName pins the
+// trim-and-case-fold rule RequireRuntimeSupervision depends on: whether the
+// environment names a sealed provider, read the way the connector reads it.
+func TestSelectedKeyProviderMirrorsTheConnectorsProviderName(t *testing.T) {
 	for raw, want := range map[string]bool{
 		"":                                      false,
 		"   ":                                   false,
@@ -334,8 +333,8 @@ func TestSealedProviderSelectedMirrorsTheConnectorsProviderName(t *testing.T) {
 	} {
 		t.Run(raw, func(t *testing.T) {
 			t.Setenv(connectoragentstate.EnvKeyProvider, raw)
-			if got := SealedProviderSelected(); got != want {
-				t.Fatalf("SealedProviderSelected() with %q = %t, want %t", raw, got, want)
+			if _, got := SelectedKeyProvider(); got != want {
+				t.Fatalf("SelectedKeyProvider() with %q reports sealed=%t, want %t", raw, got, want)
 			}
 		})
 	}
@@ -357,7 +356,8 @@ func TestRequireRuntimeSupervisionRefusesASealedNamespaceUnderNative(t *testing.
 	if !errors.Is(err, ErrAgentStateEnvelope) {
 		t.Fatalf("sealed native namespace = %v, want ErrAgentStateEnvelope", err)
 	}
-	if !strings.Contains(err.Error(), "--supervision external") || !strings.Contains(err.Error(), "held no state before") {
+	if !strings.Contains(err.Error(), "--supervision external") || !strings.Contains(err.Error(), "held no state before") ||
+		!strings.Contains(err.Error(), connectoragentstate.EnvKeyProvider+"="+connectoragentstate.KeyProviderFile) {
 		t.Fatalf("refusal = %v, want the whole remedy: external supervision in a directory that has held no state", err)
 	}
 	if err := EstablishExternalRuntimeMode(context.Background(), dir); err != nil {

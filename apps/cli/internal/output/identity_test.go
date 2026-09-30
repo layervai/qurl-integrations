@@ -231,9 +231,10 @@ func TestLoginJSONOmitsAnAbsentDeviceKeyID(t *testing.T) {
 // state to describe.
 func TestWhoAmIReportsKeyStorage(t *testing.T) {
 	for provider, wantText := range map[string]string{
-		"tpm":       "TPM (sealed to this machine)",
-		"file":      "file (owner-only, not encrypted)",
-		"local-key": "local-key",
+		"tpm":                "TPM (sealed to this machine)",
+		"file":               "file (owner-only, not encrypted)",
+		"local-key":          "local-key",
+		"\x1b[31mred\x1b[0m": "unrecognized provider",
 	} {
 		t.Run(provider, func(t *testing.T) {
 			var out, errBuf bytes.Buffer
@@ -242,6 +243,9 @@ func TestWhoAmIReportsKeyStorage(t *testing.T) {
 			}
 			if !strings.Contains(out.String(), "Key storage:") || !strings.Contains(out.String(), wantText) {
 				t.Fatalf("text projection missing key storage %q:\n%s", wantText, out.String())
+			}
+			if strings.Contains(out.String(), "\x1b") {
+				t.Fatalf("text projection echoed a control sequence from local state:\n%q", out.String())
 			}
 			out.Reset()
 			if err := newTestPrinter(&out, &errBuf, FormatJSON, false, false, false).WhoAmI(fixtureIdentity(), fixtureDeviceKey, provider); err != nil {

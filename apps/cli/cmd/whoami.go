@@ -25,8 +25,10 @@ read an account API key on a warm start. A new device enrolls automatically
 without an account. Use "qurl account setup" to enable account recovery.
 
 When this machine has registered device state, the output includes its
-device public key (plain --quiet prints only the owner id). The private key
-and the device API key never leave local state.
+device public key and which key storage protects that state: the TPM (sealed
+to this machine) or a plaintext owner-only file (plain --quiet prints only
+the owner id). The private key and the device API key never leave local
+state.
 
 Useful for checking which account a script will act as before it publishes
 anything.`,
@@ -64,7 +66,11 @@ anything.`,
 					printer.Warnf(msgDevicePublicKeyUnreadable, keyErr)
 				}
 			}
-			return printer.WhoAmI(id, deviceKey, localKeyStorage(opts))
+			var keyStorage string
+			if printer.WhoAmIRendersDeviceKey() {
+				keyStorage = localKeyStorage(opts)
+			}
+			return printer.WhoAmI(id, deviceKey, keyStorage)
 		},
 	}
 }
@@ -74,11 +80,7 @@ anything.`,
 // existing envelope, so it never probes the TPM, and it is best effort: a
 // failure here must not turn an identity answer into an error.
 func localKeyStorage(opts *globalOpts) string {
-	resolve := opts.resolveShareStateDir
-	if resolve == nil {
-		resolve = connectorstate.ResolveDir
-	}
-	stateDir, err := resolve("")
+	stateDir, err := opts.resolveShareStateDir("")
 	if err != nil {
 		return ""
 	}

@@ -114,14 +114,6 @@ func ConfiguredAgentID() string {
 // qurl.ErrAgentStateContinuity so callers fail closed on errors.Is.
 var errStoreNotOpen = fmt.Errorf("%w: Connector state store is not open", qurl.ErrAgentStateContinuity)
 
-// SealedProviderSelected reports whether LAYERV_KEY_PROVIDER names a key
-// provider other than the plaintext file default. It says nothing about a
-// namespace whose provider the environment leaves to ResolveKeyProvider.
-func SealedProviderSelected() bool {
-	_, sealed := SelectedKeyProvider()
-	return sealed
-}
-
 // SelectedKeyProvider returns LAYERV_KEY_PROVIDER as this process reads it and
 // whether it selects a sealed envelope. Callers that need to name the value in
 // an error take it from here rather than reading the environment a second time
