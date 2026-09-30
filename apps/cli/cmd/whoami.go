@@ -19,6 +19,10 @@ and lifecycle commands, then checks it against the qURL service. It does not
 read an account API key on a warm start. A new device enrolls automatically
 without an account. Use "qurl account setup" to enable account recovery.
 
+When this machine has registered device state, the output includes its
+device public key (plain --quiet prints only the owner id). The private key
+and the device API key never leave local state.
+
 Useful for checking which account a script will act as before it publishes
 anything.`,
 		Example: `  qurl whoami
@@ -40,7 +44,22 @@ anything.`,
 			if id == nil {
 				return errors.New("qURL account identity response is empty")
 			}
-			return opts.printer().WhoAmI(id)
+			printer := opts.printer()
+			var deviceKey string
+			if opts.nativeStateStore != nil && printer.WhoAmIRendersDeviceKey() {
+				var keyErr error
+				deviceKey, keyErr = devicePublicKey(cmd.Context(), opts.nativeStateStore)
+				// The identity is already complete. A missing key row must not
+				// turn the diagnostic command into a failure.
+				var invalid *invalidDevicePublicKeyError
+				switch {
+				case errors.As(keyErr, &invalid):
+					printer.Warnf(msgDevicePublicKeyInvalid, keyErr)
+				case keyErr != nil:
+					printer.Warnf(msgDevicePublicKeyUnreadable, keyErr)
+				}
+			}
+			return printer.WhoAmI(id, deviceKey)
 		},
 	}
 }

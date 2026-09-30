@@ -12,20 +12,21 @@ import (
 // Identity renderings for whoami and login. The identity is who the
 // credential is — owner, auth type, and the key's non-secret identity. There
 // is deliberately no plan or usage data here; the platform's identity echo is
-// authentication state only.
+// authentication state only. whoami also renders the device public key, which
+// comes from local agent state and is passed in separately.
 
 type identityKeyJSON struct {
 	KeyID     string     `json:"key_id"`
 	Kind      string     `json:"kind"`
 	Scopes    []string   `json:"scopes"`
-	KeyPrefix string     `json:"key_prefix,omitempty"`
 	ExpiresAt *time.Time `json:"expires_at,omitempty"`
 }
 
 type whoamiJSON struct {
-	OwnerID  string           `json:"owner_id"`
-	AuthType string           `json:"auth_type"`
-	APIKey   *identityKeyJSON `json:"api_key,omitempty"`
+	OwnerID            string           `json:"owner_id"`
+	AuthType           string           `json:"auth_type"`
+	APIKey             *identityKeyJSON `json:"api_key,omitempty"`
+	DevicePublicKeyB64 string           `json:"device_public_key_b64,omitempty"`
 }
 
 type loginJSON struct {
@@ -47,47 +48,53 @@ func identityKey(id *qurlapi.Identity) *identityKeyJSON {
 		KeyID:     id.Key.KeyID,
 		Kind:      id.Key.Kind,
 		Scopes:    id.Key.Scopes,
-		KeyPrefix: id.Key.KeyPrefix,
 		ExpiresAt: id.Key.ExpiresAt,
 	}
+}
+
+// WhoAmIRendersDeviceKey reports whether WhoAmI's projection for this printer
+// includes the device public key. It mirrors WhoAmI's switch: JSON wins over
+// --quiet, and plain --quiet prints only the owner id. Callers use it to skip a
+// state read whose result would be discarded.
+func (p *Printer) WhoAmIRendersDeviceKey() bool {
+	return p.format == FormatJSON || !p.quiet
 }
 
 // WhoAmI renders the identity behind the configured credential. Identity is
 // data (scripts pipe it), so every projection goes to stdout; --quiet prints
 // just the owner id.
-func (p *Printer) WhoAmI(id *qurlapi.Identity) error {
+//
+// devicePublicKeyB64 is this machine's registered-device public key from local
+// agent state, never from /v1/me; "" omits the row and the JSON field.
+func (p *Printer) WhoAmI(id *qurlapi.Identity, devicePublicKeyB64 string) error {
 	switch {
 	case p.format == FormatJSON:
-		return p.writeJSON(whoamiJSON{OwnerID: id.OwnerID, AuthType: id.AuthType, APIKey: identityKey(id)})
+		return p.writeJSON(whoamiJSON{
+			OwnerID: id.OwnerID, AuthType: id.AuthType, APIKey: identityKey(id), DevicePublicKeyB64: devicePublicKeyB64,
+		})
 	case p.quiet:
 		_, err := fmt.Fprintln(p.out, id.OwnerID)
 		return err
 	default:
-		return p.whoamiText(id)
+		return p.whoamiText(id, devicePublicKeyB64)
 	}
 }
 
-func (p *Printer) whoamiText(id *qurlapi.Identity) error {
+func (p *Printer) whoamiText(id *qurlapi.Identity, devicePublicKeyB64 string) error {
 	tw := tabwriter.NewWriter(p.out, 0, 0, 2, ' ', 0)
 	ew := &errWriter{w: tw}
 	ew.printf("%s\t%s\n", p.bold("Owner:"), id.OwnerID)
 	ew.printf("%s\t%s\n", p.bold("Auth:"), id.AuthType)
 	if k := id.Key; k != nil {
-		ew.printf("%s\t%s\n", p.bold("Key:"), keyLine(k))
+		ew.printf("%s\t%s\n", p.bold("Key:"), k.KeyID)
 		ew.printf("%s\t%s\n", p.bold("Kind:"), k.Kind)
 		ew.printf("%s\t%s\n", p.bold("Scopes:"), strings.Join(k.Scopes, ", "))
 		ew.printf("%s\t%s\n", p.bold("Expires:"), p.keyExpiry(k.ExpiresAt))
 	}
-	return ew.flush(tw)
-}
-
-// keyLine renders the key's identity: the id, plus the non-secret display
-// prefix when the platform provided one.
-func keyLine(k *qurlapi.KeyIdentity) string {
-	if k.KeyPrefix == "" {
-		return k.KeyID
+	if devicePublicKeyB64 != "" {
+		ew.printf("%s\t%s\n", p.bold("Device public key:"), devicePublicKeyB64)
 	}
-	return fmt.Sprintf("%s (%s)", k.KeyID, k.KeyPrefix)
+	return ew.flush(tw)
 }
 
 func (p *Printer) keyExpiry(t *time.Time) string {

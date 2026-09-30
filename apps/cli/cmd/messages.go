@@ -28,6 +28,15 @@ const (
 	// an authorization credential unencrypted. Loopback endpoints never warn.
 	msgInsecureEndpoint = "your authorization credential would travel unencrypted: %s uses plain http on a non-local address — use https"
 
+	// msgDevicePublicKeyUnreadable reports that whoami could not read the local
+	// device state for its public key. The rest of the identity still prints
+	// and the command still succeeds.
+	msgDevicePublicKeyUnreadable = "could not read the local device public key: %v"
+
+	// msgDevicePublicKeyInvalid reports that the local device state loaded but
+	// holds no usable public key. The bad value itself is never printed.
+	msgDevicePublicKeyInvalid = "the local device state has no valid public key: %v"
+
 	// msgTTLClamped reports the service granting a shorter link lifetime
 	// than requested.
 	msgTTLClamped = "Note: the service granted a %s link lifetime instead of the requested %s."
@@ -68,6 +77,8 @@ func customerMessages() []string {
 		msgAccountRecovered,
 		msgAnonymousDevice,
 		msgAnonymousSupervisedDevice,
+		msgDevicePublicKeyUnreadable,
+		msgDevicePublicKeyInvalid,
 		msgAccountChooseOwner,
 		msgAccountOwnerDenied,
 		msgVerifyMismatch,

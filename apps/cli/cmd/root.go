@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -113,7 +114,10 @@ type globalOpts struct {
 	registeredClient     qurlapi.Client
 	registeredIdentity   *qurlapi.Identity
 	nativeRuntime        registeredNativeRuntime
-	warnedCleartextAuth  bool
+	// nativeStateStore is the store nativeRuntime handed off when the device
+	// client was built. whoami reads the device public key from it.
+	nativeStateStore    qurl.AgentStateStore
+	warnedCleartextAuth bool
 
 	// Resolved in PersistentPreRunE.
 	resolved           bool
@@ -782,11 +786,13 @@ func (o *globalOpts) openNativeRegisteredClient(
 			retErr = errors.Join(retErr, nativeRuntime.Close())
 		}
 	}()
+	var store qurl.AgentStateStore
 	openDeviceClient := func() (qurlapi.Client, error) {
-		store, handoffErr := nativeRuntime.Handoff()
+		handedOff, handoffErr := nativeRuntime.Handoff()
 		if handoffErr != nil {
 			return nil, handoffErr
 		}
+		store = handedOff
 		return o.openRegisteredDeviceClient(ctx, origin, store)
 	}
 	client, err := openDeviceClient()
@@ -812,7 +818,7 @@ func (o *globalOpts) openNativeRegisteredClient(
 	if err := o.bindDeviceOwner(ctx, stateDir, deviceIdentity); err != nil {
 		return nil, nil, err
 	}
-	o.nativeRuntime = nativeRuntime
+	o.nativeRuntime, o.nativeStateStore = nativeRuntime, store
 	return client, deviceIdentity, nil
 }
 
@@ -887,7 +893,7 @@ func (o *globalOpts) openNativeExternalRegisteredClient(
 	if err := o.bindDeviceOwner(ctx, stateDir, deviceIdentity); err != nil {
 		return nil, nil, err
 	}
-	o.nativeRuntime = nativeRuntime
+	o.nativeRuntime, o.nativeStateStore = nativeRuntime, store
 	return client, deviceIdentity, nil
 }
 
@@ -979,6 +985,64 @@ func oneShotEnrollmentToken(path string) func(context.Context, qurl.AgentEnrollm
 	}
 }
 
+// devicePublicKey reads the registered device's public key from store. Only
+// whoami calls it, so other commands never pay for a state read whose result
+// they would not print. The private half and the device API key stay in the
+// store.
+//
+// The value comes from a local file and is shown on a terminal, so the stored
+// string is never echoed. It is decoded (padded or unpadded standard base64),
+// checked to be a 32-byte X25519 key, and re-encoded; only the base64 alphabet
+// can reach output. Anything that does not decode to a key, including an empty
+// value, is an *invalidDevicePublicKeyError, which never carries the bad bytes.
+// A registered device should always have a valid key, so the warning is the
+// only way that gap becomes visible.
+//
+// The nil-state branch is defensive: whoami only calls this once a device
+// client has opened, so a real store has completed state. It covers a store
+// implementation that reports (nil, nil).
+//
+// TODO(upstream-contract): qurl-go's AgentState is assumed to always carry a
+// standard-base64 (padded or not) 32-byte X25519 PublicKeyB64 for a registered
+// device. If an enrollment shape ever changes that, every whoami warns instead
+// of failing anything loudly.
+func devicePublicKey(ctx context.Context, store qurl.AgentStateStore) (string, error) {
+	persisted, err := store.LoadAgentState(ctx)
+	if err != nil {
+		return "", err
+	}
+	if persisted == nil {
+		return "", nil
+	}
+	key := persisted.PublicKeyB64
+	if key == "" {
+		return "", &invalidDevicePublicKeyError{reason: "the key is empty"}
+	}
+	raw, err := base64.StdEncoding.DecodeString(key)
+	if err != nil {
+		raw, err = base64.RawStdEncoding.DecodeString(key)
+	}
+	if err != nil {
+		return "", &invalidDevicePublicKeyError{reason: "the stored value is not a valid key"}
+	}
+	if len(raw) != devicePublicKeySize {
+		return "", &invalidDevicePublicKeyError{reason: "the stored key is the wrong size"}
+	}
+	// Construct, never echo: the output is built from the decoded bytes.
+	return base64.StdEncoding.EncodeToString(raw), nil
+}
+
+// devicePublicKeySize is the length of an X25519 public key.
+const devicePublicKeySize = 32
+
+// invalidDevicePublicKeyError marks device state that loaded but holds no
+// usable public key, as distinct from a state read that failed. Its text is
+// only the reason, so the whoami warning reads once. Reasons reach customer
+// stderr, so they are plain language and pass the jargon gate.
+type invalidDevicePublicKeyError struct{ reason string }
+
+func (e *invalidDevicePublicKeyError) Error() string { return e.reason }
+
 // identityKeyID is the non-secret identifier of the credential behind id.
 func identityKeyID(id *qurlapi.Identity) string {
 	if id == nil || id.Key == nil {
@@ -1025,6 +1089,7 @@ func (o *globalOpts) closeAPIClient() error {
 	}
 	err := o.nativeRuntime.Close()
 	o.nativeRuntime = nil
+	o.nativeStateStore = nil
 	o.registeredClient = nil
 	o.registeredIdentity = nil
 	return err

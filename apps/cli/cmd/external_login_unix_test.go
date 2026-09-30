@@ -195,6 +195,26 @@ func TestExternalLoginWarmRunNeverReadsTheTokenFile(t *testing.T) {
 	}
 }
 
+// TestOpenNativeExternalRegisteredClientKeepsHandedOffStore pins that the
+// external-supervision open keeps the store it handed off, so whoami can read
+// the device public key without another Handoff.
+func TestOpenNativeExternalRegisteredClientKeepsHandedOffStore(t *testing.T) {
+	srv := apitest.NewServer(t)
+	runtime := &bootstrapNativeRuntime{store: &bootstrapAgentStateStore{state: bootstrapRegisteredState(t)}}
+	opts := bootstrapGlobalOpts(t, srv.URL, runtime)
+	stateDir, err := opts.resolveShareStateDir("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := opts.openNativeExternalRegisteredClient(context.Background(), stateDir, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = opts.closeAPIClient() }()
+	if opts.nativeStateStore != runtime.store {
+		t.Fatalf("external open kept store %v, want the handed-off %v", opts.nativeStateStore, runtime.store)
+	}
+}
+
 // TestExternalLoginRejectsNonOwnerScopedState pins the post-open check: a
 // device whose enrollment is not the owner-scoped agent kind, or whose
 // registration is incomplete, is an authentication failure that never binds

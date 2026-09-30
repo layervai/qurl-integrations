@@ -23,9 +23,18 @@ import (
 	"github.com/layervai/qurl-integrations/apps/cli/internal/output"
 )
 
-type bootstrapAgentStateStore struct{ state *qurl.AgentState }
+type bootstrapAgentStateStore struct {
+	state   *qurl.AgentState
+	loadErr error
+}
 
 func (s *bootstrapAgentStateStore) LoadAgentState(context.Context) (*qurl.AgentState, error) {
+	if s.loadErr != nil {
+		return nil, s.loadErr
+	}
+	if s.state == nil {
+		return nil, nil //nolint:nilnil // The test pins whoami's guard for a store that reports no state.
+	}
 	stateCopy := *s.state
 	registeredAt := *s.state.RegisteredAt
 	stateCopy.RegisteredAt = &registeredAt
@@ -243,7 +252,8 @@ func TestOpenNativeRegisteredClient_OneTimeAccountEnrollment(t *testing.T) {
 
 func TestOpenNativeRegisteredClient_WarmOpenDoesNotReadAccountKey(t *testing.T) {
 	srv := apitest.NewServer(t)
-	runtime := &bootstrapNativeRuntime{store: &bootstrapAgentStateStore{state: bootstrapRegisteredState(t)}}
+	state := bootstrapRegisteredState(t)
+	runtime := &bootstrapNativeRuntime{store: &bootstrapAgentStateStore{state: state}}
 	opts := bootstrapGlobalOpts(t, srv.URL, runtime)
 	client, identity, err := opts.openNativeRegisteredClient(context.Background(), nil, "", nil)
 	if err != nil {
@@ -252,6 +262,9 @@ func TestOpenNativeRegisteredClient_WarmOpenDoesNotReadAccountKey(t *testing.T) 
 	defer func() { _ = opts.closeAPIClient() }()
 	if client == nil || identity == nil || identity.OwnerID != apitest.MeOwnerID {
 		t.Fatalf("warm registered identity = %#v", identity)
+	}
+	if opts.nativeStateStore != runtime.store {
+		t.Fatalf("registered open kept store %v, want the handed-off %v", opts.nativeStateStore, runtime.store)
 	}
 	if len(srv.Requests()) != 1 || srv.Requests()[0].Header.Get("Authorization") != "Bearer "+bootstrapRegisteredState(t).DeviceAPIKey {
 		t.Fatalf("warm open requests = %+v", srv.Requests())
@@ -623,6 +636,153 @@ func TestWhoamiReusesRegisteredIdentityWithoutSecondMeRequest(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), apitest.MeOwnerID) {
 		t.Fatalf("whoami stdout = %q, want owner %q", stdout.String(), apitest.MeOwnerID)
+	}
+	if strings.Contains(stdout.String(), "Device public key:") {
+		t.Fatalf("whoami without native device state rendered a device public key:\n%s", stdout.String())
+	}
+}
+
+// runWhoamiWithStateStore runs whoami as if the native open had succeeded and
+// handed off store, and returns the exit code and both streams.
+func runWhoamiWithStateStore(t *testing.T, store qurl.AgentStateStore, args ...string) (code int, stdout, stderr string) {
+	t.Helper()
+	srv := apitest.NewServer(t)
+	client, err := qurlapi.New(&qurlapi.Config{BaseURL: srv.URL, APIKey: testAPIKey, Version: "whoami-pubkey-test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var outBuf, errBuf bytes.Buffer
+	root, opts := newRoot("test", &output.Streams{In: strings.NewReader(""), Out: &outBuf, Err: &errBuf}, func(g *globalOpts) {
+		g.openAPIClient = nil
+		g.openRegisteredClient = func(context.Context, qurlapi.AccountClient, string, *qurlapi.Identity) (qurlapi.Client, *qurlapi.Identity, error) {
+			g.nativeStateStore = store
+			return client, &qurlapi.Identity{OwnerID: apitest.MeOwnerID, AuthType: "api_key"}, nil
+		}
+	})
+	root.SetArgs(append(args, "whoami"))
+	code = run(context.Background(), root, opts)
+	return code, outBuf.String(), errBuf.String()
+}
+
+// TestWhoamiDevicePublicKeyReadFailureWarns pins that an unreadable or invalid
+// device key costs only the key row: whoami still prints the identity, exits 0,
+// names the right condition, and never echoes the bad value.
+func TestWhoamiDevicePublicKeyReadFailureWarns(t *testing.T) {
+	withKey := func(key string) *bootstrapAgentStateStore {
+		state := bootstrapRegisteredState(t)
+		state.PublicKeyB64 = key
+		return &bootstrapAgentStateStore{state: state}
+	}
+	const unreadable = "could not read the local device public key"
+	const invalid = "the local device state has no valid public key"
+	const escape = "\x1b[31mRED"
+	cases := map[string]struct {
+		store *bootstrapAgentStateStore
+		want  string
+	}{
+		"load":                  {&bootstrapAgentStateStore{loadErr: errors.New("state unreadable")}, unreadable},
+		"empty public key":      {withKey(""), invalid},
+		"not base64":            {withKey(escape), invalid},
+		"valid key then escape": {withKey(base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x42}, 32)) + escape), invalid},
+		"wrong length":          {withKey(base64.StdEncoding.EncodeToString([]byte("sixteen byte key"))), invalid},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			code, stdout, stderr := runWhoamiWithStateStore(t, tc.store)
+			if code != 0 {
+				t.Fatalf("whoami exit = %d, want 0; stderr = %q", code, stderr)
+			}
+			if !strings.Contains(stdout, apitest.MeOwnerID) || strings.Contains(stdout, "Device public key:") {
+				t.Fatalf("whoami stdout = %q, want the owner and no key row", stdout)
+			}
+			if !strings.Contains(stderr, tc.want) {
+				t.Fatalf("whoami stderr = %q, want %q", stderr, tc.want)
+			}
+			// The reason is filled in at runtime, so the constant-only jargon
+			// gate cannot see it; check the composed warning here.
+			if word, found := findForbiddenJargon(stderr); found && name != "load" {
+				t.Fatalf("whoami warning %q uses forbidden customer jargon %q", stderr, word)
+			}
+			if strings.ContainsAny(stdout+stderr, "\x1b\r") || strings.Contains(stderr, "invalid device public key") {
+				t.Fatalf("whoami echoed control bytes from local state or repeated itself:\nstdout %q\nstderr %q", stdout, stderr)
+			}
+		})
+	}
+}
+
+// TestWhoamiDevicePublicKeyIsReencoded pins that whoami prints a key built
+// from the decoded bytes, never the stored string: stray \r or \n (which the
+// decoder skips) cannot reach the terminal, and an unpadded key still shows.
+func TestWhoamiDevicePublicKeyIsReencoded(t *testing.T) {
+	raw := bytes.Repeat([]byte{0x42}, 32)
+	canonical := base64.StdEncoding.EncodeToString(raw)
+	for name, stored := range map[string]string{
+		"carriage return": canonical[:10] + "\r" + canonical[10:],
+		"line feed":       canonical[:10] + "\n" + canonical[10:],
+		"unpadded":        base64.RawStdEncoding.EncodeToString(raw),
+	} {
+		t.Run(name, func(t *testing.T) {
+			state := bootstrapRegisteredState(t)
+			state.PublicKeyB64 = stored
+			code, stdout, stderr := runWhoamiWithStateStore(t, &bootstrapAgentStateStore{state: state})
+			if code != 0 || stderr != "" {
+				t.Fatalf("whoami = %d, stderr %q; want success with no warning", code, stderr)
+			}
+			if !strings.Contains(stdout, "Device public key:  "+canonical+"\n") || strings.Contains(stdout, "\r") {
+				t.Fatalf("whoami stdout = %q, want the canonical key %q and no stray control bytes", stdout, canonical)
+			}
+		})
+	}
+}
+
+// TestWhoamiDevicePublicKeyNilState pins the empty-state guard: no state means
+// no key row and no warning.
+func TestWhoamiDevicePublicKeyNilState(t *testing.T) {
+	code, stdout, stderr := runWhoamiWithStateStore(t, &bootstrapAgentStateStore{})
+	if code != 0 || strings.Contains(stdout, "Device public key:") || stderr != "" {
+		t.Fatalf("whoami = %d, stdout %q, stderr %q; want success with no key row and no warning", code, stdout, stderr)
+	}
+}
+
+// TestWhoamiQuietSkipsDevicePublicKeyRead pins that plain --quiet, which
+// prints only the owner id, never touches device state.
+func TestWhoamiQuietSkipsDevicePublicKeyRead(t *testing.T) {
+	store := &bootstrapAgentStateStore{loadErr: errors.New("quiet whoami must not read state")}
+	code, stdout, stderr := runWhoamiWithStateStore(t, store, "-q")
+	if code != 0 || stdout != apitest.MeOwnerID+"\n" || stderr != "" {
+		t.Fatalf("whoami -q = %d, stdout %q, stderr %q; want the bare owner id and no state read", code, stdout, stderr)
+	}
+}
+
+// TestWhoamiJSONQuietStillShowsDevicePublicKey pins the other half of the
+// quiet gate: JSON wins over --quiet in the printer, so it still reads the key.
+func TestWhoamiJSONQuietStillShowsDevicePublicKey(t *testing.T) {
+	state := bootstrapRegisteredState(t)
+	code, stdout, stderr := runWhoamiWithStateStore(t, &bootstrapAgentStateStore{state: state}, "-o", "json", "-q")
+	if code != 0 || stderr != "" || !strings.Contains(stdout, `"device_public_key_b64": "`+state.PublicKeyB64+`"`) {
+		t.Fatalf("whoami -o json -q = %d, stdout %q, stderr %q; want the device public key", code, stdout, stderr)
+	}
+}
+
+// TestWhoamiShowsNativeDevicePublicKey pins that whoami reads the public key
+// from the handed-off agent state store and renders it.
+func TestWhoamiShowsNativeDevicePublicKey(t *testing.T) {
+	state := bootstrapRegisteredState(t)
+	code, stdout, stderr := runWhoamiWithStateStore(t, &bootstrapAgentStateStore{state: state}, "-o", "json")
+	if code != 0 {
+		t.Fatalf("whoami exit = %d, stderr = %q", code, stderr)
+	}
+	var doc struct {
+		DevicePublicKeyB64 string `json:"device_public_key_b64"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &doc); err != nil {
+		t.Fatalf("decode whoami JSON %q: %v", stdout, err)
+	}
+	if doc.DevicePublicKeyB64 != state.PublicKeyB64 {
+		t.Fatalf("device_public_key_b64 = %q, want the persisted %q", doc.DevicePublicKeyB64, state.PublicKeyB64)
+	}
+	if strings.Contains(stdout, state.PrivateKeyB64) || strings.Contains(stdout, state.DeviceAPIKey) {
+		t.Fatalf("whoami leaked device secret material:\n%s", stdout)
 	}
 }
 
