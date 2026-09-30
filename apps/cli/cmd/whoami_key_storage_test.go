@@ -3,11 +3,9 @@ package main
 import (
 	"bytes"
 	"context"
-	"errors"
 	"io"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 
@@ -50,7 +48,7 @@ func TestLocalKeyStorageDescribesOnlyAnExistingEnvelope(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			opts := &globalOpts{resolveShareStateDir: func(string) (string, error) { return dir, nil }}
+			opts := &globalOpts{nativeStateDir: dir}
 			if got := localKeyStorage(opts).Provider; got != tc.want {
 				t.Fatalf("localKeyStorage = %q, want %q", got, tc.want)
 			}
@@ -64,13 +62,12 @@ func TestLocalKeyStorageDescribesProvidersForPeople(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, connectoragentstate.SealedAgentStateFile), []byte(`{"provider_id":"tpm"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	got := localKeyStorage(&globalOpts{resolveShareStateDir: func(string) (string, error) { return dir, nil }})
+	got := localKeyStorage(&globalOpts{nativeStateDir: dir})
 	if got.Provider != connectoragentstate.KeyProviderTPM || got.Description != msgKeyStorageTPM {
 		t.Fatalf("localKeyStorage = %+v", got)
 	}
-	failing := &globalOpts{resolveShareStateDir: func(string) (string, error) { return "", errors.New("no state dir") }}
-	if got := localKeyStorage(failing); got != (output.KeyStorage{}) {
-		t.Fatalf("localKeyStorage with an unresolvable state dir = %+v, want nothing", got)
+	if got := localKeyStorage(&globalOpts{}); got != (output.KeyStorage{}) {
+		t.Fatalf("localKeyStorage with no opened state directory = %+v, want nothing", got)
 	}
 }
 
@@ -85,9 +82,9 @@ func TestLocalKeyStorageDescribesNothingForAConflictingEnvelope(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, connectoragentstate.SealedAgentStateFile), []byte("{\"provider_id\":\"\x1b[31mevil\"}"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	got := localKeyStorage(&globalOpts{resolveShareStateDir: func(string) (string, error) { return dir, nil }})
-	if strings.Contains(got.Description, "\x1b") || strings.Contains(got.Provider, "\x1b") {
-		t.Fatalf("localKeyStorage echoed a control sequence from disk: %+v", got)
+	got := localKeyStorage(&globalOpts{nativeStateDir: dir})
+	if got != (output.KeyStorage{}) {
+		t.Fatalf("localKeyStorage for a conflicting envelope = %+v, want nothing described", got)
 	}
 }
 
@@ -99,10 +96,10 @@ func TestLocalKeyStorageNeverEchoesAnUnknownProvider(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, connectoragentstate.SealedAgentStateFile), []byte(`{}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	original := resolveLocalKeyProvider
-	resolveLocalKeyProvider = func(string) (string, error) { return "\x1b[31mevil", nil }
-	t.Cleanup(func() { resolveLocalKeyProvider = original })
-	got := localKeyStorage(&globalOpts{resolveShareStateDir: func(string) (string, error) { return dir, nil }})
+	original := connectorstate.ResolveKeyProvider
+	connectorstate.ResolveKeyProvider = func(string) (string, error) { return "\x1b[31mevil", nil }
+	t.Cleanup(func() { connectorstate.ResolveKeyProvider = original })
+	got := localKeyStorage(&globalOpts{nativeStateDir: dir})
 	if got != (output.KeyStorage{Description: msgKeyStorageUnrecognizedRow}) {
 		t.Fatalf("localKeyStorage with an unknown provider = %+v, want only the fixed description", got)
 	}
@@ -113,14 +110,14 @@ func TestLocalKeyStoragePassesTheConnectorsOtherProvidersThrough(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, connectoragentstate.SealedAgentStateFile), []byte(`{}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	original := resolveLocalKeyProvider
-	t.Cleanup(func() { resolveLocalKeyProvider = original })
+	original := connectorstate.ResolveKeyProvider
+	t.Cleanup(func() { connectorstate.ResolveKeyProvider = original })
 	for _, provider := range []string{
 		connectoragentstate.KeyProviderLocalKey, connectoragentstate.KeyProviderAWSKMS, connectoragentstate.KeyProviderGCPKMS,
 		connectoragentstate.KeyProviderAWSNitro, connectoragentstate.KeyProviderGCPConfidentialSpace,
 	} {
-		resolveLocalKeyProvider = func(string) (string, error) { return provider, nil }
-		got := localKeyStorage(&globalOpts{resolveShareStateDir: func(string) (string, error) { return dir, nil }})
+		connectorstate.ResolveKeyProvider = func(string) (string, error) { return provider, nil }
+		got := localKeyStorage(&globalOpts{nativeStateDir: dir})
 		if got != (output.KeyStorage{Provider: provider, Description: provider}) {
 			t.Errorf("localKeyStorage for %q = %+v", provider, got)
 		}
@@ -147,9 +144,9 @@ func TestTPMSealingNoticeWordingByPlatform(t *testing.T) {
 // TPM, and silent once any envelope exists (qurl-go persists the agent ID
 // before enrollment, so a later call site would never fire).
 func TestSealingNoticeFiresOnlyBeforeStateExists(t *testing.T) {
-	originalResolve := resolveLocalKeyProvider
-	resolveLocalKeyProvider = func(string) (string, error) { return connectoragentstate.KeyProviderTPM, nil }
-	t.Cleanup(func() { resolveLocalKeyProvider = originalResolve })
+	originalResolve := connectorstate.ResolveKeyProvider
+	connectorstate.ResolveKeyProvider = func(string) (string, error) { return connectoragentstate.KeyProviderTPM, nil }
+	t.Cleanup(func() { connectorstate.ResolveKeyProvider = originalResolve })
 
 	note := func(dir, goos string, supervision connectorstate.RuntimeSupervision) string {
 		var stderr bytes.Buffer
@@ -199,9 +196,9 @@ func TestLocalKeyStorageTakesPlaintextFromTheOpenedStore(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	original := resolveLocalKeyProvider
-	resolveLocalKeyProvider = func(string) (string, error) { t.Fatal("re-resolved a plaintext store"); return "", nil }
-	t.Cleanup(func() { resolveLocalKeyProvider = original })
+	original := connectorstate.ResolveKeyProvider
+	connectorstate.ResolveKeyProvider = func(string) (string, error) { t.Fatal("re-resolved a plaintext store"); return "", nil }
+	t.Cleanup(func() { connectorstate.ResolveKeyProvider = original })
 	got := localKeyStorage(&globalOpts{nativeStateStore: store})
 	if got != (output.KeyStorage{Provider: connectoragentstate.KeyProviderFile, Description: msgKeyStorageFile}) {
 		t.Fatalf("localKeyStorage for an opened plaintext store = %+v", got)
@@ -213,9 +210,9 @@ func TestLocalKeyStorageTakesPlaintextFromTheOpenedStore(t *testing.T) {
 // the resolver assigns to the TPM prints the sealing notice, and a namespace
 // that already holds a sealed envelope renders Key storage without it.
 func TestWhoAmIWiresTheSealingNoticeAndKeyStorage(t *testing.T) {
-	original := resolveLocalKeyProvider
-	resolveLocalKeyProvider = func(string) (string, error) { return connectoragentstate.KeyProviderTPM, nil }
-	t.Cleanup(func() { resolveLocalKeyProvider = original })
+	original := connectorstate.ResolveKeyProvider
+	connectorstate.ResolveKeyProvider = func(string) (string, error) { return connectoragentstate.KeyProviderTPM, nil }
+	t.Cleanup(func() { connectorstate.ResolveKeyProvider = original })
 
 	run := func(dir string) *runResult {
 		srv := apitest.NewServer(t)
@@ -246,27 +243,5 @@ func TestWhoAmIWiresTheSealingNoticeAndKeyStorage(t *testing.T) {
 	}
 	if !strings.Contains(existing.stdout.String(), "Key storage:") || !strings.Contains(existing.stdout.String(), msgKeyStorageTPM) {
 		t.Fatalf("existing namespace stdout = %q, want the TPM key storage row", existing.stdout.String())
-	}
-}
-
-func TestAgentStateEnvelopePresentTreatsOnlyNotExistAsAbsent(t *testing.T) {
-	if agentStateEnvelopePresent(filepath.Join(t.TempDir(), "absent")) {
-		t.Fatal("a missing directory reported an envelope")
-	}
-	if agentStateEnvelopePresent(t.TempDir()) {
-		t.Fatal("an empty directory reported an envelope")
-	}
-	// A path whose parent is a file cannot be stat'ed as a directory entry
-	// (ENOTDIR, not ENOENT): unknown must read as present, the safe answer.
-	// Windows reports that case as path-not-found, which is ErrNotExist.
-	if runtime.GOOS == "windows" {
-		return
-	}
-	parentFile := filepath.Join(t.TempDir(), "file")
-	if err := os.WriteFile(parentFile, nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if !agentStateEnvelopePresent(parentFile) {
-		t.Fatal("an unreadable directory reported no envelope")
 	}
 }

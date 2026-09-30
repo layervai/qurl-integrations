@@ -12,7 +12,6 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -123,7 +122,10 @@ type globalOpts struct {
 	nativeRuntime        registeredNativeRuntime
 	// nativeStateStore is the store nativeRuntime handed off when the device
 	// client was built. whoami reads the device public key from it.
-	nativeStateStore    qurl.AgentStateStore
+	nativeStateStore qurl.AgentStateStore
+	// nativeStateDir is the state directory nativeStateStore was opened in, so
+	// whoami describes exactly that namespace.
+	nativeStateDir      string
 	warnedCleartextAuth bool
 
 	// Resolved in PersistentPreRunE.
@@ -660,13 +662,13 @@ func (o *globalOpts) noteTPMSealing(stateDir string) {
 		return
 	}
 	message, ok := tpmSealingNotice(o.keyStorageNoticeGOOS)
-	if !ok || agentStateEnvelopePresent(stateDir) {
+	if !ok || connectorstate.EnvelopePresent(stateDir) {
 		return
 	}
 	// TODO(upstream-contract): with no envelope, qurl-connector's resolver
 	// probes the TPM here and caches the result, so the runtime that opens
 	// next reaches the same decision without probing again.
-	if provider, err := resolveLocalKeyProvider(stateDir); err == nil && provider == connectoragentstate.KeyProviderTPM {
+	if provider, err := connectorstate.ResolveKeyProvider(stateDir); err == nil && provider == connectoragentstate.KeyProviderTPM {
 		o.printer().Notef("%s", message)
 	}
 }
@@ -683,23 +685,6 @@ func tpmSealingNotice(goos string) (string, bool) {
 	default:
 		return msgTPMSealedDevice, true
 	}
-}
-
-// agentStateEnvelopePresent reports whether dir may already hold an agent
-// state envelope. Only a definite "does not exist" for both names counts as
-// absent: an unreadable entry or directory is treated as present, which is
-// the safe answer for both callers (no false sealing notice, and whoami still
-// asks the resolver).
-//
-// TODO(upstream-contract): mirrors qurl-connector pkg/agentstate's two
-// envelope names; a third would need adding here.
-func agentStateEnvelopePresent(dir string) bool {
-	for _, name := range []string{connectorstate.AgentStateFile, connectoragentstate.SealedAgentStateFile} {
-		if _, err := os.Lstat(filepath.Join(dir, name)); !errors.Is(err, os.ErrNotExist) {
-			return true
-		}
-	}
-	return false
 }
 
 func newRegisteredAccountBootstrap(opts *globalOpts, client qurlapi.AccountClient, key string, identity *qurlapi.Identity) *registeredAccountBootstrap {
@@ -882,7 +867,7 @@ func (o *globalOpts) openNativeRegisteredClient(
 	if err := o.bindDeviceOwner(ctx, stateDir, deviceIdentity); err != nil {
 		return nil, nil, err
 	}
-	o.nativeRuntime, o.nativeStateStore = nativeRuntime, store
+	o.nativeRuntime, o.nativeStateStore, o.nativeStateDir = nativeRuntime, store, stateDir
 	return client, deviceIdentity, nil
 }
 
@@ -957,7 +942,7 @@ func (o *globalOpts) openNativeExternalRegisteredClient(
 	if err := o.bindDeviceOwner(ctx, stateDir, deviceIdentity); err != nil {
 		return nil, nil, err
 	}
-	o.nativeRuntime, o.nativeStateStore = nativeRuntime, store
+	o.nativeRuntime, o.nativeStateStore, o.nativeStateDir = nativeRuntime, store, stateDir
 	return client, deviceIdentity, nil
 }
 
@@ -1154,6 +1139,7 @@ func (o *globalOpts) closeAPIClient() error {
 	err := o.nativeRuntime.Close()
 	o.nativeRuntime = nil
 	o.nativeStateStore = nil
+	o.nativeStateDir = ""
 	o.registeredClient = nil
 	o.registeredIdentity = nil
 	return err

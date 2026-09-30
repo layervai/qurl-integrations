@@ -41,8 +41,8 @@ const (
 	// supervision: the moment the choice becomes permanent is the only moment
 	// it is cheap to change. Linux adds the tss requirement of the background
 	// job.
-	msgTPMSealedDevice      = "Local device state is being sealed to this machine's TPM, so it will open only on this machine. To keep it unencrypted instead, move the state directory aside afterwards and run the command again with LAYERV_KEY_PROVIDER=file; that creates a new device identity."
-	msgTPMSealedLinuxDevice = "Local device state is being sealed to this machine's TPM, so it will open only on this machine. The background job needs the tss group as well: if you joined it this session, log out fully first. To keep it unencrypted instead, move the state directory aside afterwards and run the command again with LAYERV_KEY_PROVIDER=file; that creates a new device identity."
+	msgTPMSealedDevice      = "Local device state will be sealed to this machine's TPM, so it will open only on this machine. To keep it unencrypted instead, move the state directory aside afterwards and run the command again with LAYERV_KEY_PROVIDER=file; that creates a new device identity."
+	msgTPMSealedLinuxDevice = "Local device state will be sealed to this machine's TPM, so it will open only on this machine. The background job needs the tss group as well: if you joined it this session, log out fully first. To keep it unencrypted instead, move the state directory aside afterwards and run the command again with LAYERV_KEY_PROVIDER=file; that creates a new device identity."
 	// Key storage descriptions whoami shows for the providers it names; the
 	// other connector providers are shown by their own id.
 	msgKeyStorageTPM             = "TPM (sealed to this machine)"

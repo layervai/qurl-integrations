@@ -49,9 +49,27 @@ const (
 	stateSubdir = "qurl/connector-v2"
 )
 
-// resolveKeyProvider is the connector's envelope decision for a namespace.
-// Tests replace it to drive Open's branches without depending on the host TPM.
-var resolveKeyProvider = connectoragentstate.ResolveKeyProvider
+// ResolveKeyProvider is the connector's envelope decision for a namespace:
+// the one seam over it in this CLI. Open and cmd's whoami and sealing notice
+// all read it, so a test that replaces it drives them together without
+// depending on the host TPM.
+var ResolveKeyProvider = connectoragentstate.ResolveKeyProvider
+
+// EnvelopePresent reports whether dir may already hold an agent state
+// envelope. Only a definite "does not exist" for both names counts as absent:
+// an unreadable entry or directory is treated as present, the safe answer for
+// callers deciding whether a namespace is new.
+//
+// TODO(upstream-contract): mirrors qurl-connector pkg/agentstate's two
+// envelope names; a third would need adding here.
+func EnvelopePresent(dir string) bool {
+	for _, name := range []string{AgentStateFile, connectoragentstate.SealedAgentStateFile} {
+		if _, err := os.Lstat(filepath.Join(dir, name)); !errors.Is(err, os.ErrNotExist) {
+			return true
+		}
+	}
+	return false
+}
 
 // ErrNoDefaultStateDir means no explicit state override or absolute platform
 // user-state directory exists. Read-only remote commands treat this as an
@@ -66,7 +84,10 @@ var ErrNoDefaultStateDir = errors.New("no default qurl sharing state directory")
 // error names the cause and the recovery, moving the directory aside). The
 // remedy is the environment or the state directory, never the command line,
 // so exitcode maps it to Config. A TPM that is merely not responding is
-// Unavailable instead.
+// Unavailable instead. Open also wraps any other failure of the connector's
+// resolver in it, including an I/O error reading the directory, so the
+// wrapped cause, not this sentinel, is the diagnosis in that case; a directory
+// that is unsafe to use is caught earlier as a host condition.
 //
 // TODO(upstream-contract): the wrapped TPM wording is qurl-connector
 // pkg/agentstate's.
@@ -213,7 +234,7 @@ func Open(dir string) (*Store, error) {
 	// TODO(upstream-contract): ResolveKeyProvider returns the exact
 	// connectoragentstate.KeyProviderFile id for plaintext; any other value,
 	// including "" or a different case, takes the sealed branch below.
-	provider, err := resolveKeyProvider(dir)
+	provider, err := ResolveKeyProvider(dir)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrAgentStateEnvelope, err)
 	}

@@ -7,6 +7,7 @@ import (
 	qurl "github.com/layervai/qurl-go/qurl"
 	"github.com/spf13/cobra"
 
+	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/output"
 )
 
@@ -79,21 +80,10 @@ anything.`,
 	}
 }
 
-// resolveLocalKeyProvider is the connector's provider resolution; tests replace
-// it to reach localKeyStorage's mapping and the sealing notice. It is this
-// package's twin of state.resolveKeyProvider, which Open uses.
-var resolveLocalKeyProvider = connectoragentstate.ResolveKeyProvider
-
-// localKeyStorage describes the key provider protecting this device's local
-// state, or the zero value when there is no envelope to describe. It is best
-// effort: a failure here must not turn an identity answer into an error. It
-// resolves the directory the same way openNativeRegisteredClient did
-// (resolveShareStateDir("")), which is what makes it describe the state whoami
-// opened; the handed-off store does not carry its provider.
-//
-// TODO(upstream-contract): "never probes the TPM" rests on qurl-connector's
-// ResolveKeyProvider not probing when an envelope already exists; the
-// presence check here only makes the probing path unreachable locally.
+// localKeyStorage describes the key provider protecting the state whoami
+// opened (opts.nativeStateDir, recorded with the store), or the zero value
+// when there is no envelope to describe. It is best effort: a failure here
+// must not turn an identity answer into an error.
 func localKeyStorage(opts *globalOpts) output.KeyStorage {
 	// The store whoami opened settles the plaintext case by itself. A sealed
 	// store does not say which provider sealed it, so only that case reads the
@@ -106,17 +96,11 @@ func localKeyStorage(opts *globalOpts) output.KeyStorage {
 	if _, plaintext := opts.nativeStateStore.(*qurl.FileAgentStateStore); plaintext {
 		return output.KeyStorage{Provider: connectoragentstate.KeyProviderFile, Description: msgKeyStorageFile}
 	}
-	if opts.resolveShareStateDir == nil {
+	stateDir := opts.nativeStateDir
+	if stateDir == "" || !connectorstate.EnvelopePresent(stateDir) {
 		return output.KeyStorage{}
 	}
-	stateDir, err := opts.resolveShareStateDir("")
-	if err != nil {
-		return output.KeyStorage{}
-	}
-	if !agentStateEnvelopePresent(stateDir) {
-		return output.KeyStorage{}
-	}
-	provider, err := resolveLocalKeyProvider(stateDir)
+	provider, err := connectorstate.ResolveKeyProvider(stateDir)
 	if err != nil {
 		return output.KeyStorage{}
 	}

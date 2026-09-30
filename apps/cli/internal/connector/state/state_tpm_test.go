@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -111,9 +112,9 @@ func TestOpenRefusesAnEnvironmentSealedNamespaceWithoutItsVariables(t *testing.T
 func TestOpenSealsAFreshNamespaceWhenTheResolverChoosesTheTPM(t *testing.T) {
 	clearStateEnv(t)
 	dir := secureStateTestDir(t)
-	original := resolveKeyProvider
-	resolveKeyProvider = func(string) (string, error) { return connectoragentstate.KeyProviderTPM, nil }
-	t.Cleanup(func() { resolveKeyProvider = original })
+	original := ResolveKeyProvider
+	ResolveKeyProvider = func(string) (string, error) { return connectoragentstate.KeyProviderTPM, nil }
+	t.Cleanup(func() { ResolveKeyProvider = original })
 	store, err := Open(dir)
 	if err != nil {
 		t.Fatalf("Open fresh namespace with the resolver choosing tpm = %v", err)
@@ -134,11 +135,11 @@ func TestOpenSealsAFreshNamespaceWhenTheResolverChoosesTheTPM(t *testing.T) {
 func TestOpenKeepsTPMNotRespondingReachable(t *testing.T) {
 	clearStateEnv(t)
 	dir := secureStateTestDir(t)
-	original := resolveKeyProvider
-	resolveKeyProvider = func(string) (string, error) {
+	original := ResolveKeyProvider
+	ResolveKeyProvider = func(string) (string, error) {
 		return "", fmt.Errorf("%w; retry, or set %s=%s", connectoragentstate.ErrTPMNotResponding, connectoragentstate.EnvKeyProvider, connectoragentstate.KeyProviderFile)
 	}
-	t.Cleanup(func() { resolveKeyProvider = original })
+	t.Cleanup(func() { ResolveKeyProvider = original })
 	store, err := Open(dir)
 	if err == nil {
 		_ = store.Close()
@@ -204,5 +205,52 @@ func writeOwnerOnlyTestFile(t *testing.T, dir, name string, data []byte) {
 	t.Helper()
 	if err := replaceConnectorResources(dir, filepath.Join(dir, name), data); err != nil {
 		t.Fatalf("write %s: %v", name, err)
+	}
+}
+
+func TestEnvelopePresentTreatsOnlyNotExistAsAbsent(t *testing.T) {
+	if EnvelopePresent(filepath.Join(t.TempDir(), "absent")) {
+		t.Fatal("a missing directory reported an envelope")
+	}
+	if EnvelopePresent(t.TempDir()) {
+		t.Fatal("an empty directory reported an envelope")
+	}
+	// A path whose parent is a file (ENOTDIR, not ENOENT) is unknown, which
+	// must read as present. Windows reports it as path-not-found instead.
+	if runtime.GOOS == "windows" {
+		return
+	}
+	parentFile := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(parentFile, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if !EnvelopePresent(parentFile) {
+		t.Fatal("an unreadable directory reported no envelope")
+	}
+}
+
+// TestOpenTakesTheSealedBranchForAnythingButExactlyFile pins the TODO on
+// Open: only the exact file id is plaintext, so an empty or differently cased
+// answer from the resolver can never silently open plaintext state.
+func TestOpenTakesTheSealedBranchForAnythingButExactlyFile(t *testing.T) {
+	for _, provider := range []string{"", "File"} {
+		t.Run(provider, func(t *testing.T) {
+			clearStateEnv(t)
+			dir := secureStateTestDir(t)
+			original := ResolveKeyProvider
+			ResolveKeyProvider = func(string) (string, error) { return provider, nil }
+			t.Cleanup(func() { ResolveKeyProvider = original })
+			store, err := Open(dir)
+			if err == nil {
+				t.Cleanup(func() { _ = store.Close() })
+				if store.envelope != connectoragentstate.SealedAgentStateFile {
+					t.Fatalf("Open with resolver answer %q chose %q, want the sealed branch", provider, store.envelope)
+				}
+				return
+			}
+			if !strings.Contains(err.Error(), "initialize sealed agent state") {
+				t.Fatalf("Open with resolver answer %q = %v, want the sealed branch", provider, err)
+			}
+		})
 	}
 }
