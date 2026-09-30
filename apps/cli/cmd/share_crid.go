@@ -1,9 +1,11 @@
 package main
 
 import (
+	"context"
 	"crypto/subtle"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
@@ -12,6 +14,7 @@ import (
 	"github.com/layervai/qurl-go/qurl"
 
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/agent"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/cridux"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/exitcode"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/output"
@@ -36,9 +39,10 @@ func shareCmd(opts *globalOpts) *cobra.Command {
 		Short:      "Share a CRID as a short-lived access link",
 		Long: `Share a CRID as a temporary access link for the resource it names.
 
-A CRID is safe to paste anywhere — it grants nothing by itself. The share
-link is what turns it into access, so treat the link as a secret. It expires
-on its own; share again whenever you need a fresh one.
+Public CRIDs need no account or login. For a private CRID, only its owner
+or a device allowed by the publisher can request a link. The CLI uses
+your registered device when the resource is private.
+The link expires on its own; share again whenever you need a fresh one.
 
 Before anything is printed, the CLI verifies that the link belongs
 to the CRID you asked for — a mismatched answer is discarded and the
@@ -75,14 +79,10 @@ else, ready to hand out or open.`,
 				return exitcode.UsageError(fmt.Errorf("--session-duration %s must be a positive whole number of seconds", sessionDuration))
 			}
 
-			client, err := opts.newClient(cmd.Context())
-			if err != nil {
-				return err
-			}
-			link, err := client.Share(cmd.Context(), assessment.Input, qurlapi.ShareOptions{
-				TTLSeconds:             int(ttl.Seconds()),
-				SessionDurationSeconds: int(sessionDuration / time.Second),
+			link, err := opts.shareResource(cmd.Context(), assessment.Input, qurlapi.ShareOptions{
+				TTLSeconds: int(ttl.Seconds()), SessionDurationSeconds: int(sessionDuration / time.Second),
 			})
+
 			if err := verifyShareLink(assessment, link, err); err != nil {
 				return err
 			}
@@ -152,4 +152,30 @@ func reportClamp(printer *output.Printer, requested time.Duration, link *qurlapi
 	if granted < requested {
 		printer.Notef(msgTTLClamped, granted.String(), requested.String())
 	}
+}
+
+// shareResource is the common public-first path for share and get. Only a
+// private-resource challenge opens the registered device runtime.
+func (opts *globalOpts) shareResource(ctx context.Context, id string, options qurlapi.ShareOptions) (*qurlapi.ShareLink, error) {
+	cfg := opts.accountConfig("", "")
+	origin, err := agent.ResourceSDKOrigin(cfg.BaseURL)
+	if err != nil {
+		return nil, err
+	}
+	cfg.BaseURL = origin
+	client, err := qurlapi.NewPublic(cfg)
+	if err != nil {
+		return nil, err
+	}
+	link, err := client.Share(ctx, id, options)
+	var apiErr *qurlapi.Error
+	// TODO(upstream-contract): share challenges private resources with HTTP 401.
+	if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusUnauthorized && apiErr.Code == "unauthorized" {
+		authenticated, openErr := opts.newClient(ctx)
+		if openErr != nil {
+			return nil, fmt.Errorf("private resource requires device authentication: %w", openErr)
+		}
+		return authenticated.Share(ctx, id, options)
+	}
+	return link, err
 }

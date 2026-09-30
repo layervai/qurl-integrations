@@ -45,6 +45,8 @@ type Client interface {
 	List(ctx context.Context, opts ListOptions) (*ResourcePage, error)
 	// Resource returns one owner-visible resource by CRID or public resource ID.
 	Resource(ctx context.Context, id string) (*ResourceSummary, error)
+	// SetDeviceGrants replaces the complete private-resource device grant list.
+	SetDeviceGrants(ctx context.Context, id string, keys []string) (*ResourceSummary, error)
 	// Sharing returns the durable desired state and current platform-observed
 	// connection state of one tunnel resource. It is the connector sharing
 	// state, not the Share operator above.
@@ -71,8 +73,12 @@ type AccountClient interface {
 	MintAgentEnrollmentToken(ctx context.Context, opts MintAgentEnrollmentTokenOptions) (*AgentEnrollmentToken, error)
 }
 
-// PublishOptions carries the optional publish metadata.
+// PublishOptions carries creation policy and optional metadata.
 type PublishOptions struct {
+	Private           *bool
+	AllowedDeviceKeys []string
+	// ConnectorID selects a tunnel resource instead of a URL.
+	ConnectorID string
 	Description string
 	Tags        []string
 	Alias       string
@@ -98,6 +104,8 @@ type ListOptions struct {
 
 // Published is the repo-owned result of Publish.
 type Published struct {
+	// Nil means privacy was not returned or queried, never public confirmation.
+	Private    *bool
 	CRID       string
 	ResourceID string
 	TargetURL  string
@@ -146,17 +154,19 @@ type ResourcePage struct {
 // necessarily "never set". Type is not redacted and is always populated —
 // legacy rows with no stored type read back as "url".
 type ResourceSummary struct {
-	CRID         string
-	ResourceID   string
-	TargetURL    string
-	Type         string
-	Status       string
-	DesiredState DesiredState
-	ServingEpoch uint64
-	Description  string
-	Tags         []string
-	CreatedAt    *time.Time
-	ExpiresAt    *time.Time
+	AllowedDeviceKeys []string
+	Private           *bool
+	CRID              string
+	ResourceID        string
+	TargetURL         string
+	Type              string
+	Status            string
+	DesiredState      DesiredState
+	ServingEpoch      uint64
+	Description       string
+	Tags              []string
+	CreatedAt         *time.Time
+	ExpiresAt         *time.Time
 }
 
 // DesiredState is the durable customer intent for a tunnel resource.
@@ -230,6 +240,30 @@ type client struct {
 // narrow interface prevents a registered caller from recovering that method
 // through a type assertion.
 type registeredClient struct{ Client }
+
+// ShareClient exposes only resource-to-link exchange.
+type ShareClient interface {
+	Share(context.Context, string, ShareOptions) (*ShareLink, error)
+}
+type publicClient struct{ ShareClient }
+
+// NewPublic builds a credential-free client limited to sharing.
+func NewPublic(cfg *Config) (ShareClient, error) {
+	if cfg == nil || cfg.BaseURL == "" {
+		return nil, fmt.Errorf("%w: base URL must not be empty", qurl.ErrInvalidClientConfig)
+	}
+	if cfg.APIKey != "" || cfg.OwnerID != "" {
+		return nil, fmt.Errorf("%w: public sharing cannot select an account or credential", qurl.ErrInvalidClientConfig)
+	}
+	tr := newTransport(cfg)
+	provider := qurl.CredentialProviderFunc(func(context.Context, *http.Request) error { return nil })
+	sdk, err := qurl.NewClient(provider,
+		qurl.WithBaseURL(cfg.BaseURL), qurl.WithHTTPClient(tr))
+	if err != nil {
+		return nil, err
+	}
+	return &publicClient{ShareClient: &client{sdk: sdk, transport: tr, baseURL: trimBaseURL(cfg.BaseURL)}}, nil
+}
 
 // New builds the one Client implementation. The same decorated transport
 // serves both the SDK-backed calls and the direct REST calls, so headers,

@@ -203,9 +203,8 @@ func newRoot(version string, streams *output.Streams, options ...rootOption) (*c
 		Long: `Publish a local app or remote URL as a protected qURL resource, then use
 its CRID to open it when access is authorized.
 
-A CRID is a permanent, shareable resource ID — it contains no secret and grants
-no access by itself. Authorized users turn it into a short-lived access link
-with "qurl get" or "qurl share".
+A CRID is a permanent resource ID. Anyone given a public CRID can use "qurl share"
+to create a short-lived access link without an account or login.
 
 Publish without an account or API key. qurl creates and stores a device identity
 automatically. Use "qurl account setup" to enable recovery and other devices.
@@ -272,6 +271,7 @@ Existing accounts can still use "qurl login" or QURL_API_KEY for enrollment.`,
 		accountCmd(opts),
 		publishCmd(opts),
 		shareCmd(opts),
+		grantsCmd(opts),
 		getCmd(opts),
 		listCmd(opts),
 		shareStartCmd(opts),

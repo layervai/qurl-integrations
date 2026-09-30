@@ -6,10 +6,9 @@ Publish an app running on your machine with one command:
 qurl publish http://127.0.0.1:3000
 ```
 
-qURL™ gives the app a permanent **CRID** you can safely paste into chat,
-documentation, or an agent prompt. A CRID identifies the protected resource;
-it does not grant access. Authorized users turn it into a short-lived access
-link only when they need one.
+qURL™ gives the app a permanent **CRID** you can give to recipients in chat,
+documentation, or an agent prompt. Anyone given a public CRID can request a
+short-lived access link without a LayerV account or login.
 
 [Publish localhost in 60 seconds](#publish-localhost-in-60-seconds) ·
 [Command reference](#commands) · [Scripting](#scripting-contract)
@@ -85,7 +84,7 @@ debugging. When another program owns the daemon process, run it with
 
 ### 3. Open or share it
 
-The CRID is safe to share. An authorized user can open the app with:
+Anyone given a public CRID can request an access link without an account or login. To open the app:
 
 ```bash
 qurl get <CRID>
@@ -812,10 +811,10 @@ identity. Use the share's existing `--id` when publishing it again by ID.
 ### qurl share
 
 `qurl share <CRID>` mints a short-lived share link for the resource the
-CRID names. A CRID is safe to paste anywhere — it grants nothing by
-itself; the share link is what turns it into access, so treat the link as
-a secret. The link expires on its own; share again whenever you need a
-fresh one. When stdout is not a terminal the command prints the bare link
+CRID names. Treat the minted link as a secret: it is a bearer credential.
+Anyone given a public CRID can request a link without an account
+or login. Share the CRID only with people who should be able to request
+access. The link expires on its own; share again whenever you need a fresh one. When stdout is not a terminal the command prints the bare link
 and nothing else, ready to hand out or open.
 
 The link opens in a browser. Passing it to a tool like curl fetches the
@@ -1139,6 +1138,11 @@ in every archive.
   and `qurl get` check the service's answer against the CRID you asked
   for and discard mismatches (exit 12).
 
+`list` and resource status JSON include `private` when known and an
+`allowed_device_keys` array, including `[]` when no devices are allowed.
+The text resource list includes a `PRIVATE` column. Grant changes show the
+resulting complete device list in text and JSON output.
+
 ### Exit codes
 
 Exit codes are stable. The meanings below mirror the CLI's single
@@ -1180,3 +1184,26 @@ qurl list -o json | jq -r '.resources[].crid'
 
 Account setup and recovery return `owner_id` and `status` (`linked` or
 `recovered`) with `-o json`. With `--quiet`, they print only the owner ID.
+
+### Private CRIDs
+
+CRIDs are public by default. Use `qurl publish <target-url> --private` to
+allow only the owner to request links. Add each allowed recipient with
+`--allow-device-key <public-key>`. This works for remote URLs and local apps.
+
+For a private CRID, `qurl share <CRID>` uses the registered device identity.
+No LayerV account or browser login is required for an allowed device.
+Read the current `allowed_device_keys` with `qurl list -o json` before adding
+a recipient. JSON shows an empty array when there are no grants.
+The publisher can replace the complete grant list with the registered CLI:
+
+```sh
+qurl grants <CRID> --allow-device-key <public-key>
+qurl grants <CRID> --clear
+```
+
+<!-- TODO(upstream-contract): keep the grant limit and key encoding in sync with qurl-service. -->
+`--clear` removes all device grants. The list accepts up to 256 canonical
+X25519 public keys. Privacy is set at creation; a retry cannot change it.
+Removing a device stops new link requests. Previously issued links retain
+their expiry and revocation rules.
