@@ -3,6 +3,7 @@ package output
 import (
 	"errors"
 	"fmt"
+	"strconv"
 	"text/tabwriter"
 	"time"
 
@@ -268,6 +269,9 @@ func (p *Printer) ResourceStatus(resource *qurlapi.ResourceSummary) error {
 		}
 		ew.printf("%s\t%s\n", p.bold("Type:"), resource.Type)
 		ew.printf("%s\t%s\n", p.bold("Status:"), resource.Status)
+		if resource.Private != nil {
+			ew.printf("%s\t%t\n", p.bold("Private:"), *resource.Private)
+		}
 		if resource.CreatedAt != nil {
 			ew.printf("%s\t%s\n", p.bold("Created:"), p.relativeTime(*resource.CreatedAt))
 		}
@@ -443,7 +447,7 @@ func (p *Printer) listText(page *qurlapi.ResourcePage) error {
 	ew := &errWriter{w: tw}
 	// Headers stay uncolored: tabwriter counts ANSI escape bytes as cell
 	// width, so styled headers would skew every column under them.
-	ew.printf("CRID\tTARGET\tDESIRED\tOBSERVED\tCREATED\tEXPIRES\n")
+	ew.printf("CRID\tTARGET\tDESIRED\tOBSERVED\tCREATED\tEXPIRES\tPRIVATE\n")
 	for i := range page.Items {
 		item := &page.Items[i]
 		desired, observed := "-", item.Status
@@ -454,13 +458,17 @@ func (p *Printer) listText(page *qurlapi.ResourcePage) error {
 				desired = "unknown"
 			}
 		}
-		ew.printf("%s\t%s\t%s\t%s\t%s\t%s\n",
+		privacy := "-"
+		if item.Private != nil {
+			privacy = strconv.FormatBool(*item.Private)
+		}
+		ew.printf("%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			item.CRID,
 			item.TargetURL,
 			desired,
 			observed,
 			p.listCreated(item.CreatedAt),
-			p.listExpires(item.ExpiresAt))
+			p.listExpires(item.ExpiresAt), privacy)
 	}
 	if err := ew.flush(tw); err != nil {
 		return err

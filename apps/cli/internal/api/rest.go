@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -29,18 +30,19 @@ const maxResponseBody = 1 << 20
 // Decoding is deliberately lax about extra fields: the server owns its own
 // payloads, and the projection into ResourceSummary is the contract.
 type resourceRow struct {
-	Private      *bool        `json:"private"`
-	ResourceID   string       `json:"resource_id"`
-	CRID         string       `json:"crid"`
-	TargetURL    string       `json:"target_url"`
-	Type         string       `json:"type"`
-	Status       string       `json:"status"`
-	DesiredState DesiredState `json:"desired_state"`
-	ServingEpoch uint64       `json:"serving_epoch"`
-	Description  string       `json:"description"`
-	Tags         []string     `json:"tags"`
-	CreatedAt    *time.Time   `json:"created_at"`
-	ExpiresAt    *time.Time   `json:"expires_at"`
+	AllowedDeviceKeys []string     `json:"allowed_device_keys"`
+	Private           *bool        `json:"private"`
+	ResourceID        string       `json:"resource_id"`
+	CRID              string       `json:"crid"`
+	TargetURL         string       `json:"target_url"`
+	Type              string       `json:"type"`
+	Status            string       `json:"status"`
+	DesiredState      DesiredState `json:"desired_state"`
+	ServingEpoch      uint64       `json:"serving_epoch"`
+	Description       string       `json:"description"`
+	Tags              []string     `json:"tags"`
+	CreatedAt         *time.Time   `json:"created_at"`
+	ExpiresAt         *time.Time   `json:"expires_at"`
 }
 
 type sharingRow struct {
@@ -220,6 +222,9 @@ func (c *client) Publish(ctx context.Context, targetURL string, opts PublishOpti
 	}
 	if opts.Private != nil && (env.Data.Private == nil || *env.Data.Private != *opts.Private) {
 		return nil, fmt.Errorf("%w: API did not confirm the requested resource privacy", qurl.ErrInvalidAPIResponse)
+	}
+	if len(opts.AllowedDeviceKeys) > 0 && !slices.Equal(slices.Sorted(slices.Values(opts.AllowedDeviceKeys)), slices.Sorted(slices.Values(env.Data.AllowedDeviceKeys))) {
+		return nil, fmt.Errorf("%w: API did not confirm the requested device grants", qurl.ErrInvalidAPIResponse)
 	}
 	return &Published{
 		Private:       env.Data.Private,
@@ -703,4 +708,34 @@ func firstNonEmpty(values ...string) string {
 
 func trimBaseURL(base string) string {
 	return strings.TrimRight(base, "/")
+}
+
+// SetDeviceGrants changes grants with one authenticated PATCH. It never retries.
+func (c *client) SetDeviceGrants(ctx context.Context, id string, keys []string) (*ResourceSummary, error) {
+	if err := ValidateRequestTarget(http.MethodPatch, "/v1/resources/"+id); err != nil {
+		return nil, err
+	}
+	if keys == nil {
+		keys = []string{}
+	}
+	reply, err := c.doRESTOnce(ctx, http.MethodPatch, "/v1/resources/"+id, map[string]any{"allowed_device_keys": keys})
+	if err != nil {
+		return nil, err
+	}
+	if reply.status != http.StatusOK {
+		return nil, reply.problem()
+	}
+	var env struct {
+		Data resourceRow `json:"data"`
+	}
+	if err := json.Unmarshal(reply.body, &env); err != nil {
+		return nil, fmt.Errorf("%w: decode device grants: %w", qurl.ErrInvalidAPIResponse, err)
+	}
+	if err := validateSharingIdentity(id, sharingRow{CRID: env.Data.CRID, ResourceID: env.Data.ResourceID}); err != nil {
+		return nil, err
+	}
+	if !slices.Equal(slices.Sorted(slices.Values(keys)), slices.Sorted(slices.Values(env.Data.AllowedDeviceKeys))) {
+		return nil, fmt.Errorf("%w: API did not confirm the device grants", qurl.ErrInvalidAPIResponse)
+	}
+	return summarizeResourceRow(&env.Data, "device grants")
 }

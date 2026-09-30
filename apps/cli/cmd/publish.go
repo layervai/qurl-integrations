@@ -386,6 +386,7 @@ func prepareLocalPublishResource(
 		RecoveryCredentialProvider:   enrollment.recoveryCredential,
 		RefreshMode:                  connectorRefreshModeAuto,
 	}
+	var precreated *qurlapi.Published
 	resolved, err = opts.resolveLocalResource(ctx, cfg, func(agentID string) (string, error) {
 		id, err := enrollment.resolveID(ctx, stateDir, agentID)
 		if err != nil {
@@ -398,7 +399,8 @@ func prepareLocalPublishResource(
 			}
 			privacy := enrollment.privacy
 			privacy.ConnectorID = id
-			if _, err := client.Publish(ctx, "", privacy); err != nil {
+			precreated, err = client.Publish(ctx, "", privacy)
+			if err != nil {
 				return "", err
 			}
 		}
@@ -406,6 +408,12 @@ func prepareLocalPublishResource(
 	})
 	if err != nil {
 		return nil, "", err
+	}
+	if precreated != nil {
+		if resolved == nil || resolved.Resource == nil || precreated.CRID != resolved.Resource.CRID || precreated.ResourceID != resolved.Resource.ResourcePublicKey {
+			return nil, "", fmt.Errorf("%w: private resource does not match the Connector resource", qurl.ErrInvalidAPIResponse)
+		}
+		resolved.Private = precreated.Private
 	}
 	knockResourceID, err = agent.KnockResourceID(resolved.Resource)
 	if err != nil {
@@ -624,7 +632,7 @@ func printLocalPublishServing(opts *globalOpts, resolved *agent.ResolvedResource
 	printer := opts.printer()
 	return printer.Publish(&qurlapi.Published{
 		CRID: local.CRID, ResourceID: local.ResourceID, TargetURL: local.TargetURL,
-		Status: "serving", FoundExisting: resolved.FoundExisting,
+		Status: "serving", FoundExisting: resolved.FoundExisting, Private: resolved.Private,
 	})
 }
 

@@ -984,7 +984,7 @@ func TestListTextOmitsRowMetadata(t *testing.T) {
 	}
 	// tabwriter pads the header into columns, so compare fields.
 	header := strings.Fields(strings.SplitN(got, "\n", 2)[0])
-	if want := []string{"CRID", "TARGET", "DESIRED", "OBSERVED", "CREATED", "EXPIRES"}; !slices.Equal(header, want) {
+	if want := []string{"CRID", "TARGET", "DESIRED", "OBSERVED", "CREATED", "EXPIRES", "PRIVATE"}; !slices.Equal(header, want) {
 		t.Errorf("table header = %v, want %v", header, want)
 	}
 }

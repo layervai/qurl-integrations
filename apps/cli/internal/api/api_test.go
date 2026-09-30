@@ -1189,7 +1189,7 @@ func TestPublishPrivateWireShape(t *testing.T) {
 		if !body.Private || !slices.Equal(body.Allowed, []string{"recipient-public-key"}) {
 			t.Errorf("privacy lost: %+v", body)
 		}
-		apitest.WriteEnvelope(t, w, http.StatusCreated, map[string]any{"resource_id": srv.Key.ResourceID, "crid": srv.Key.CRID, "private": true}, nil)
+		apitest.WriteEnvelope(t, w, http.StatusCreated, map[string]any{"resource_id": srv.Key.ResourceID, "crid": srv.Key.CRID, "private": true, "allowed_device_keys": body.Allowed}, nil)
 	})
 	private := true
 	if _, err := newTestClient(t, srv, nil).Publish(t.Context(), "https://example.com", PublishOptions{Private: &private, AllowedDeviceKeys: []string{"recipient-public-key"}}); err != nil {
@@ -1234,6 +1234,34 @@ func TestPrivatePublishRequiresConfirmation(t *testing.T) {
 					t.Fatalf("unconfirmed private publish succeeded: %v", err)
 				}
 			})
+		}
+	}
+}
+
+func TestDeviceGrantsRequireConfirmation(t *testing.T) {
+	for _, method := range []string{http.MethodPost, http.MethodPatch} {
+		srv := apitest.NewServer(t)
+		path := "/v1/resources"
+		if method == http.MethodPatch {
+			path += "/" + srv.Key.CRID
+		}
+		srv.Script(method, path, func(w http.ResponseWriter, _ *http.Request) {
+			status := http.StatusOK
+			if method == http.MethodPost {
+				status = http.StatusCreated
+			}
+			apitest.WriteEnvelope(t, w, status, map[string]any{"resource_id": srv.Key.ResourceID, "crid": srv.Key.CRID, "private": true, "type": "url", "status": "active", "allowed_device_keys": []string{}}, nil)
+		})
+		client := newTestClient(t, srv, nil)
+		var err error
+		if method == http.MethodPost {
+			private := true
+			_, err = client.Publish(t.Context(), "https://example.com", PublishOptions{Private: &private, AllowedDeviceKeys: []string{"requested-key"}})
+		} else {
+			_, err = client.SetDeviceGrants(t.Context(), srv.Key.CRID, []string{"requested-key"})
+		}
+		if !errors.Is(err, qurl.ErrInvalidAPIResponse) {
+			t.Fatalf("missing grants accepted for %s: %v", method, err)
 		}
 	}
 }

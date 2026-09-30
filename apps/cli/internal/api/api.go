@@ -45,6 +45,8 @@ type Client interface {
 	List(ctx context.Context, opts ListOptions) (*ResourcePage, error)
 	// Resource returns one owner-visible resource by CRID or public resource ID.
 	Resource(ctx context.Context, id string) (*ResourceSummary, error)
+	// SetDeviceGrants replaces the complete private-resource device grant list.
+	SetDeviceGrants(ctx context.Context, id string, keys []string) (*ResourceSummary, error)
 	// Sharing returns the durable desired state and current platform-observed
 	// connection state of one tunnel resource. It is the connector sharing
 	// state, not the Share operator above.

@@ -781,7 +781,8 @@ identity. Use the share's existing `--id` when publishing it again by ID.
 ### qurl share
 
 `qurl share <CRID>` mints a short-lived share link for the resource the
-CRID names. Anyone given a public CRID can request a link without an account
+CRID names. Treat the minted link as a secret: it is a bearer credential.
+Anyone given a public CRID can request a link without an account
 or login. Share the CRID only with people who should be able to request
 access. The link expires on its own; share again whenever you need a fresh one. When stdout is not a terminal the command prints the bare link
 and nothing else, ready to hand out or open.
@@ -1156,15 +1157,15 @@ allow only the owner to request links. Add each allowed recipient with
 
 For a private CRID, `qurl share <CRID>` uses the registered device identity.
 No LayerV account or browser login is required for an allowed device.
-The publisher can replace or clear the list with
-the registered CLI (no exposed credential is needed):
+The publisher can replace the complete grant list with the registered CLI:
 
 ```sh
-printf '%s' '{"allowed_device_keys":["<public-key>"]}' | qurl request PATCH '/v1/resources/<CRID>' --supervision external -o json
+qurl grants <CRID> --allow-device-key <public-key>
+qurl grants <CRID> --clear
 ```
 
 <!-- TODO(upstream-contract): keep the grant limit and key encoding in sync with qurl-service. -->
-An empty list removes all device grants. The list accepts up to 256 canonical
+`--clear` removes all device grants. The list accepts up to 256 canonical
 X25519 public keys. Privacy is set at creation; a retry cannot change it.
 Removing a device stops new link requests. Previously issued links retain
 their expiry and revocation rules.

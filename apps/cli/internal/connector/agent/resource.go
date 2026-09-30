@@ -20,6 +20,8 @@ const EnvKnockResourceID = "QURL_CONNECTOR_KNOCK_RESOURCE_ID"
 // ResolvedResource carries the selected Connector resource plus the creation
 // provenance authenticated by the assigned cell.
 type ResolvedResource struct {
+	// Private is confirmed by REST pre-creation when the caller requests privacy.
+	Private       *bool
 	Resource      *qurl.ConnectorResource
 	FoundExisting *bool
 }

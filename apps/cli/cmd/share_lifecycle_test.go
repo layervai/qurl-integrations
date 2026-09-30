@@ -3974,7 +3974,7 @@ func TestPrivateLocalPublishCreatesPrivacyBeforeNativeEnsure(t *testing.T) {
 			t.Errorf("unsafe creation: %+v", body)
 		}
 		created.Store(true)
-		apitest.WriteEnvelope(t, w, http.StatusCreated, map[string]any{"resource_id": srv.Key.ResourceID, "crid": srv.Key.CRID, "private": true}, nil)
+		apitest.WriteEnvelope(t, w, http.StatusCreated, map[string]any{"resource_id": srv.Key.ResourceID, "crid": srv.Key.CRID, "private": true, "allowed_device_keys": body.Allowed}, nil)
 	})
 	stop := errors.New("native ensure reached after private create")
 	res := runCLI(t, &runOpts{
@@ -4007,5 +4007,28 @@ func TestPublishRejectsInvalidDeviceGrantsBeforeEnrollment(t *testing.T) {
 		if res.code == 0 || !strings.Contains(res.stderr.String(), "--allow-device-key") {
 			t.Fatalf("invalid grant accepted: %s", res.stderr.String())
 		}
+	}
+}
+
+func TestPrivateLocalPublishRejectsDivergentNativeResource(t *testing.T) {
+	srv := apitest.NewServer(t)
+	stateDir := connectorStateTestDir(t)
+	registry, err := openOwnedTestShareRegistry(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := runCLI(t, &runOpts{
+		args: []string{"--endpoint", srv.URL, "publish", "http://127.0.0.1:3000", "--private"},
+		env:  map[string]string{"QURL_API_KEY": testAPIKey}, shareStateDir: stateDir, shareRegistry: registry, shareDaemon: &recordingShareDaemon{},
+		preflightTarget: func(context.Context, string, int) error { return nil },
+		localResource: func(_ context.Context, _ *connectorshare.NativeRuntimeConfig, resolveID func(string) (string, error)) (*agent.ResolvedResource, error) {
+			if _, err := resolveID("agent-one"); err != nil {
+				return nil, err
+			}
+			return &agent.ResolvedResource{Resource: &qurl.ConnectorResource{CRID: "different", ResourcePublicKey: srv.Key.ResourceID}}, nil
+		},
+	})
+	if res.code == 0 || res.stdout.Len() != 0 || !strings.Contains(res.stderr.String(), "does not match the Connector resource") {
+		t.Fatalf("divergent private resource accepted: %s", res.stderr.String())
 	}
 }
