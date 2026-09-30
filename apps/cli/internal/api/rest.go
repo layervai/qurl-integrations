@@ -363,8 +363,9 @@ func summarizeResourceRow(row *resourceRow, source string) (*ResourceSummary, er
 		}
 	}
 	return &ResourceSummary{
-		Private: row.Private,
-		CRID:    row.CRID, ResourceID: row.ResourceID, TargetURL: row.TargetURL,
+		AllowedDeviceKeys: row.AllowedDeviceKeys,
+		Private:           row.Private,
+		CRID:              row.CRID, ResourceID: row.ResourceID, TargetURL: row.TargetURL,
 		Type: row.Type, Status: row.Status, DesiredState: row.DesiredState,
 		ServingEpoch: row.ServingEpoch, Description: row.Description, Tags: row.Tags,
 		CreatedAt: row.CreatedAt, ExpiresAt: row.ExpiresAt,

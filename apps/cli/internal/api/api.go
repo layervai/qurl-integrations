@@ -104,6 +104,7 @@ type ListOptions struct {
 
 // Published is the repo-owned result of Publish.
 type Published struct {
+	// Nil means privacy was not returned or queried, never public confirmation.
 	Private    *bool
 	CRID       string
 	ResourceID string
@@ -153,18 +154,19 @@ type ResourcePage struct {
 // necessarily "never set". Type is not redacted and is always populated —
 // legacy rows with no stored type read back as "url".
 type ResourceSummary struct {
-	Private      *bool
-	CRID         string
-	ResourceID   string
-	TargetURL    string
-	Type         string
-	Status       string
-	DesiredState DesiredState
-	ServingEpoch uint64
-	Description  string
-	Tags         []string
-	CreatedAt    *time.Time
-	ExpiresAt    *time.Time
+	AllowedDeviceKeys []string
+	Private           *bool
+	CRID              string
+	ResourceID        string
+	TargetURL         string
+	Type              string
+	Status            string
+	DesiredState      DesiredState
+	ServingEpoch      uint64
+	Description       string
+	Tags              []string
+	CreatedAt         *time.Time
+	ExpiresAt         *time.Time
 }
 
 // DesiredState is the durable customer intent for a tunnel resource.

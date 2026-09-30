@@ -192,3 +192,15 @@ func TestPublicShareDoesNotAuthenticateOnForbidden(t *testing.T) {
 		t.Fatal("forbidden public share retried or emitted a link")
 	}
 }
+
+func TestPublicShareDoesNotEnrollForUnrelatedUnauthorizedCode(t *testing.T) {
+	srv := apitest.NewServer(t)
+	path := "/v1/resources/" + srv.Key.CRID + "/share"
+	srv.Script(http.MethodPost, path, func(w http.ResponseWriter, _ *http.Request) {
+		apitest.WriteProblem(t, w, http.StatusUnauthorized, "proxy_auth", "Unauthorized", "Proxy authentication required")
+	})
+	result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "share", srv.Key.CRID}, env: map[string]string{}, nativeClient: true})
+	if result.code == 0 || result.stdout.Len() != 0 || len(srv.Requests()) != 1 {
+		t.Fatal("unrelated 401 triggered enrollment or emitted a link")
+	}
+}

@@ -392,7 +392,7 @@ func prepareLocalPublishResource(
 		if err != nil {
 			return "", err
 		}
-		if enrollment.privacy.Private != nil || len(enrollment.privacy.AllowedDeviceKeys) > 0 {
+		if enrollment.privacy.Private != nil {
 			client, err := opts.newClient(ctx)
 			if err != nil {
 				return "", err
@@ -411,7 +411,7 @@ func prepareLocalPublishResource(
 	}
 	if precreated != nil {
 		if resolved == nil || resolved.Resource == nil || precreated.CRID != resolved.Resource.CRID || precreated.ResourceID != resolved.Resource.ResourcePublicKey {
-			return nil, "", fmt.Errorf("%w: private resource does not match the Connector resource", qurl.ErrInvalidAPIResponse)
+			return nil, "", fmt.Errorf("%w: private resource does not match the Connector resource; check your published resources before retrying", qurl.ErrInvalidAPIResponse)
 		}
 		resolved.Private = precreated.Private
 	}

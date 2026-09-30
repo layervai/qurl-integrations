@@ -254,11 +254,12 @@ const resourceTypeURL = "url"
 // handlePublish accepts URL creation and Connector find-or-create.
 func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Private      bool   `json:"private"`
-		Slug         string `json:"slug"`
-		FindOrCreate bool   `json:"find_or_create"`
-		Type         string `json:"type"`
-		TargetURL    string `json:"target_url"`
+		AllowedDeviceKeys []string `json:"allowed_device_keys"`
+		Private           bool     `json:"private"`
+		Slug              string   `json:"slug"`
+		FindOrCreate      bool     `json:"find_or_create"`
+		Type              string   `json:"type"`
+		TargetURL         string   `json:"target_url"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		WriteProblem(s.t, w, http.StatusBadRequest, "invalid_request", "Bad Request", "request body must be JSON")
@@ -292,6 +293,9 @@ func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
 		"target_url":  body.TargetURL,
 		fieldStatus:   "active",
 		"created_at":  fixtureCreatedAt,
+	}
+	if len(body.AllowedDeviceKeys) > 0 {
+		data["allowed_device_keys"] = body.AllowedDeviceKeys
 	}
 	if body.Private {
 		data["private"] = true

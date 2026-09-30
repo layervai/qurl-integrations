@@ -1157,7 +1157,8 @@ allow only the owner to request links. Add each allowed recipient with
 
 For a private CRID, `qurl share <CRID>` uses the registered device identity.
 No LayerV account or browser login is required for an allowed device.
-The publisher can replace the complete grant list with the registered CLI:
+Read the current `allowed_device_keys` with `qurl list -o json` before adding
+a recipient. The publisher can replace the complete grant list with the registered CLI:
 
 ```sh
 qurl grants <CRID> --allow-device-key <public-key>

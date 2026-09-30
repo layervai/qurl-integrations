@@ -163,7 +163,7 @@ func (opts *globalOpts) shareResource(ctx context.Context, id string, options qu
 	link, err := client.Share(ctx, id, options)
 	var apiErr *qurlapi.Error
 	// TODO(upstream-contract): share challenges private resources with HTTP 401.
-	if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusUnauthorized {
+	if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusUnauthorized && apiErr.Code == "unauthorized" {
 		authenticated, openErr := opts.newClient(ctx)
 		if openErr != nil {
 			return nil, fmt.Errorf("private resource requires device authentication: %w", openErr)

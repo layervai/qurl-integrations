@@ -43,6 +43,9 @@ func TestGrantsReplaceAndClear(t *testing.T) {
 			args = append(args, "--allow-device-key", key)
 		}
 		res := runCLI(t, &runOpts{args: args})
+		if !clearGrants && !strings.Contains(res.stdout.String(), key) {
+			t.Fatal("grant response omitted current keys")
+		}
 		if res.code != 0 || !strings.Contains(res.stdout.String(), `"private": true`) {
 			t.Fatalf("grant mutation failed: %s / %s", res.stdout.String(), res.stderr.String())
 		}
@@ -52,5 +55,24 @@ func TestGrantsReplaceAndClear(t *testing.T) {
 func TestDeviceGrantLimit(t *testing.T) {
 	if err := validateAllowedDeviceKeys(make([]string, 257)); err == nil || !strings.Contains(err.Error(), "256") {
 		t.Fatal("grant cap not enforced")
+	}
+}
+
+func TestGrantsRequireExactlyOneMutation(t *testing.T) {
+	srv := apitest.NewServer(t)
+	for _, flags := range [][]string{nil, {"--clear", "--allow-device-key", "invalid"}} {
+		res := runCLI(t, &runOpts{args: append([]string{"grants", srv.Key.CRID}, flags...)})
+		if res.code != 2 || !strings.Contains(res.stderr.String(), "choose --allow-device-key or --clear") {
+			t.Fatalf("ambiguous grant mutation accepted: %s", res.stderr.String())
+		}
+	}
+}
+
+func TestPrivatePublishConfirmsOutput(t *testing.T) {
+	srv := apitest.NewServer(t)
+	key := "cHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHA="
+	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "publish", "https://example.com", "--private", "--allow-device-key", key, "-o", "json"}})
+	if res.code != 0 || !strings.Contains(res.stdout.String(), `"private": true`) {
+		t.Fatalf("private publish failed: %s", res.stderr.String())
 	}
 }
