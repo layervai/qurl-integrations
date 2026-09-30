@@ -275,6 +275,7 @@ func (p *Printer) ResourceStatus(resource *qurlapi.ResourceSummary) error {
 		if resource.Private != nil {
 			ew.printf("%s\t%t\n", p.bold("Private:"), *resource.Private)
 		}
+		ew.printf("%s\t%v\n", p.bold("Allowed device keys:"), resource.AllowedDeviceKeys)
 		if resource.CreatedAt != nil {
 			ew.printf("%s\t%s\n", p.bold("Created:"), p.relativeTime(*resource.CreatedAt))
 		}

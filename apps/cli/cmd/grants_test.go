@@ -90,3 +90,14 @@ func TestPublicGrantsExplainThatAccessRemainsPublic(t *testing.T) {
 		t.Fatalf("public grant result was misleading: %s", res.stderr.String())
 	}
 }
+
+func TestGrantsTextConfirmsEmptyList(t *testing.T) {
+	srv := apitest.NewServer(t)
+	srv.Script(http.MethodPatch, "/v1/resources/"+srv.Key.CRID, func(w http.ResponseWriter, _ *http.Request) {
+		apitest.WriteEnvelope(t, w, http.StatusOK, map[string]any{"resource_id": srv.Key.ResourceID, "crid": srv.Key.CRID, "private": true, "type": "url", "status": "active"}, nil)
+	})
+	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "grants", srv.Key.CRID, "--clear"}})
+	if res.code != 0 || !strings.Contains(res.stdout.String(), "Allowed device keys:") || !strings.Contains(res.stdout.String(), "[]") {
+		t.Fatalf("clear result lacks grant confirmation: %s / %s", res.stdout.String(), res.stderr.String())
+	}
+}

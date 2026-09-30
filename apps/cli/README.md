@@ -1107,6 +1107,11 @@ in every archive.
   and `qurl get` check the service's answer against the CRID you asked
   for and discard mismatches (exit 12).
 
+`list` and resource status JSON include `private` when known and an
+`allowed_device_keys` array, including `[]` when no devices are allowed.
+The text resource list includes a `PRIVATE` column. Grant changes show the
+resulting complete device list in text and JSON output.
+
 ### Exit codes
 
 Exit codes are stable. The meanings below mirror the CLI's single

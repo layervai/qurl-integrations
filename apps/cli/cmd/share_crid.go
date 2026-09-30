@@ -14,6 +14,7 @@ import (
 	"github.com/layervai/qurl-go/qurl"
 
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/agent"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/cridux"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/exitcode"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/output"
@@ -156,7 +157,13 @@ func reportClamp(printer *output.Printer, requested time.Duration, link *qurlapi
 // shareResource is the common public-first path for share and get. Only a
 // private-resource challenge opens the registered device runtime.
 func (opts *globalOpts) shareResource(ctx context.Context, id string, options qurlapi.ShareOptions) (*qurlapi.ShareLink, error) {
-	client, err := qurlapi.NewPublic(opts.accountConfig("", ""))
+	cfg := opts.accountConfig("", "")
+	origin, err := agent.ResourceSDKOrigin(cfg.BaseURL)
+	if err != nil {
+		return nil, err
+	}
+	cfg.BaseURL = origin
+	client, err := qurlapi.NewPublic(cfg)
 	if err != nil {
 		return nil, err
 	}
