@@ -18,6 +18,7 @@ import (
 	"net/url"
 	"strings"
 
+	connectoragentstate "github.com/layervai/qurl-connector/pkg/agentstate"
 	"github.com/layervai/qurl-go/crid"
 	"github.com/layervai/qurl-go/qurl"
 
@@ -63,7 +64,8 @@ const (
 	// outside its contract.
 	ServerError = 10
 	// Unavailable: the service cannot be reached or is not serving this
-	// surface (HTTP 503, network failures, timeouts).
+	// surface (HTTP 503, network failures, timeouts), or the local TPM that
+	// protects device state is not responding.
 	Unavailable = 11
 	// VerificationFailed: the response failed CRID-anchored verification.
 	// Nothing was emitted; treat as tampering, not transience.
@@ -169,7 +171,11 @@ func FromError(err error) int {
 		return Interrupted
 	case errors.Is(err, context.DeadlineExceeded):
 		return Unavailable
-	case errors.Is(err, qurl.ErrTemporaryAccessLinksDisabled):
+	case errors.Is(err, qurl.ErrTemporaryAccessLinksDisabled),
+		// The local TPM exists but did not answer (busy, starting, timed out).
+		// Open wraps this in ErrAgentStateEnvelope, whose Config row would tell
+		// a script its setup is wrong; retrying is the remedy.
+		errors.Is(err, connectoragentstate.ErrTPMNotResponding):
 		return Unavailable
 	case errors.Is(err, qurl.ErrNoCRID), errors.Is(err, qurl.ErrCRIDMismatch):
 		return VerificationFailed

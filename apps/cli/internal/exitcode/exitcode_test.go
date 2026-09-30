@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	connectoragentstate "github.com/layervai/qurl-connector/pkg/agentstate"
 	"github.com/layervai/qurl-go/crid"
 	"github.com/layervai/qurl-go/qurl"
 
@@ -439,6 +440,8 @@ func TestSealedOpenKeepsTheCauseQurlGoClassifies(t *testing.T) {
 		"state not found":      {qurl.ErrCredentialStateNotFound, Auth},
 		"setup lock":           {qurl.ErrAgentSetupLock, General},
 		"envelope mismatch":    {nil, Config},
+		"TPM not responding":   {fmt.Errorf("%w: operation abandoned: %w", connectoragentstate.ErrTPMNotResponding, context.DeadlineExceeded), Unavailable},
+		"TPM busy at create":   {fmt.Errorf("%w; retry, or set LAYERV_KEY_PROVIDER=file", connectoragentstate.ErrTPMNotResponding), Unavailable},
 	} {
 		t.Run(name, func(t *testing.T) {
 			err := fmt.Errorf("%w: initialize sealed agent state", state.ErrAgentStateEnvelope)

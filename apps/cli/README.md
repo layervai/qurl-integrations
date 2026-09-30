@@ -404,7 +404,10 @@ directory is then useless on any other machine, and it becomes unreadable on
 this one if the TPM is cleared. Everywhere else, the state is a plaintext
 owner-only file (`agent_state.json`). "Usable" means the Linux kernel
 resource manager `/dev/tpmrm0`, which usually requires membership in the
-`tss` group, or TPM Base Services on Windows. macOS has no TPM. A TPM-sealed
+`tss` group, or TPM Base Services on Windows. macOS has no TPM. A TPM that
+is present but not responding (busy, starting, or timing out) fails with exit
+code 11 instead of falling back to plaintext, because the choice is permanent;
+retry, or set `LAYERV_KEY_PROVIDER=file`. A TPM-sealed
 directory needs no environment to reopen, so the natively supervised
 background job serves it as usual. Existing directories keep the envelope
 they were created with and are never migrated in place. `qurl whoami` shows
@@ -1144,7 +1147,7 @@ exit-code authority in code (`apps/cli/internal/exitcode`):
 | 8 | invalid input | An operand or request rejected as invalid (by the service, or locally for inputs that can never be valid). |
 | 9 | rate limited | Still rate limited after the CLI's bounded automatic retries. |
 | 10 | server error | The service failed or answered outside its contract. |
-| 11 | unavailable | The service cannot be reached or is not serving this surface: HTTP 503, network failures, timeouts. |
+| 11 | unavailable | The service cannot be reached or is not serving this surface: HTTP 503, network failures, timeouts. Also a local TPM that is not responding. |
 | 12 | verification failed | The response failed CRID-anchored verification. Nothing was printed — treat it as tampering, not transience. |
 | 130 | interrupted | The foreground daemon or another command was canceled with Ctrl-C or SIGTERM. |
 
