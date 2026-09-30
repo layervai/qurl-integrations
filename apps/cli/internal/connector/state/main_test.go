@@ -4,19 +4,12 @@ import (
 	"os"
 	"testing"
 
-	connectoragentstate "github.com/layervai/qurl-connector/pkg/agentstate"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/state/statetest"
 )
 
-// TestMain keeps every test in this package off the host's TPM: with
-// LAYERV_KEY_PROVIDER unset, a fresh namespace is sealed to a usable TPM, so
-// tests that open a new store would depend on the machine running them. Tests
-// that need another provider set it with t.Setenv (or clearStateEnv and
-// unsetKeyProvider), which restore this.
+// TestMain keeps this package's tests off the host TPM; see
+// statetest.PinFileKeyProvider.
 func TestMain(m *testing.M) {
-	// Unconditional: an ambient value (tpm on a box testing this feature, or
-	// a whitespace-only value, which also counts as unset) must not decide.
-	if err := os.Setenv(connectoragentstate.EnvKeyProvider, connectoragentstate.KeyProviderFile); err != nil {
-		panic("pin LAYERV_KEY_PROVIDER for hermetic tests: " + err.Error())
-	}
+	statetest.PinFileKeyProvider()
 	os.Exit(m.Run())
 }

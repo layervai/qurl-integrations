@@ -420,6 +420,11 @@ directory aside and enroll again, which creates a new device identity.
 <!-- TODO(upstream-contract): "the error says which" relies on qurl-connector
 pkg/agentstate's TPM unseal diagnostics. -->
 
+Under native supervision `qurl` prints a one-time notice on stderr just
+before it seals a new directory to the TPM. With `--quiet`, or under an
+external supervisor (which normally sets the provider itself), the same
+permanent choice is made without it; `qurl whoami` shows the result.
+
 The background job must be able to reach the TPM too. On Linux a systemd user
 manager keeps the groups it started with, so after adding yourself to `tss`,
 log out fully (or reboot) before the first `qurl publish`; otherwise a
@@ -432,7 +437,8 @@ with `-o json`).
 
 `LAYERV_KEY_PROVIDER` overrides that choice when a directory is created.
 `file` keeps it plaintext even where a TPM is available, and `tpm` requires
-the TPM. The other providers seal the state under a key held elsewhere. With
+the TPM: without a usable one it exits 3, and with one that is not responding
+it exits 11. The other providers seal the state under a key held elsewhere. With
 `local-key`, the 32-byte wrapping key arrives on the inherited descriptor
 named by `LAYERV_LOCAL_KEY_FD`, on macOS and Linux. There is deliberately no
 flag: the supervisor that owns the key (for example qURL Desktop) sets the

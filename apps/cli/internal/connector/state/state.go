@@ -130,9 +130,11 @@ var errStoreNotOpen = fmt.Errorf("%w: Connector state store is not open", qurl.E
 // an error take it from here rather than reading the environment a second time
 // with different trimming.
 //
-// TODO(upstream-contract): mirrors qurl-connector pkg/agentstate
-// explicitKeyProviderName (trimmed, case-folded, empty leaves the choice to
-// the namespace).
+// TODO(upstream-contract): mirrors the trim-and-case-fold rule of
+// qurl-connector pkg/agentstate explicitKeyProviderName (empty leaves the
+// choice to the namespace). It does not mirror that function's validation:
+// an unknown name reports sealed here, where upstream errors, which keeps
+// SelectedProviderNeedsEnvironment failing closed on a typo.
 func SelectedKeyProvider() (string, bool) {
 	raw := strings.TrimSpace(os.Getenv(connectoragentstate.EnvKeyProvider))
 	name := strings.ToLower(raw)

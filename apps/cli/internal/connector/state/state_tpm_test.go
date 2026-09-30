@@ -2,6 +2,7 @@ package state
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -123,6 +124,28 @@ func TestOpenSealsAFreshNamespaceWhenTheResolverChoosesTheTPM(t *testing.T) {
 	}
 	if _, err := os.Lstat(filepath.Join(dir, AgentStateFile)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("plaintext envelope created for a TPM namespace: %v", err)
+	}
+}
+
+// TestOpenKeepsTPMNotRespondingReachable pins the chain exitcode relies on to
+// exit Unavailable (11) rather than Config (3): Open wraps a resolver failure
+// in ErrAgentStateEnvelope, and ErrTPMNotResponding must stay reachable
+// through that wrapping.
+func TestOpenKeepsTPMNotRespondingReachable(t *testing.T) {
+	clearStateEnv(t)
+	dir := secureStateTestDir(t)
+	original := resolveKeyProvider
+	resolveKeyProvider = func(string) (string, error) {
+		return "", fmt.Errorf("%w; retry, or set %s=%s", connectoragentstate.ErrTPMNotResponding, connectoragentstate.EnvKeyProvider, connectoragentstate.KeyProviderFile)
+	}
+	t.Cleanup(func() { resolveKeyProvider = original })
+	store, err := Open(dir)
+	if err == nil {
+		_ = store.Close()
+		t.Fatal("Open succeeded while the TPM was not responding")
+	}
+	if !errors.Is(err, connectoragentstate.ErrTPMNotResponding) || !errors.Is(err, ErrAgentStateEnvelope) {
+		t.Fatalf("Open error = %v, want both ErrTPMNotResponding and ErrAgentStateEnvelope reachable", err)
 	}
 }
 

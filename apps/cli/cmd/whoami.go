@@ -113,16 +113,19 @@ func localKeyStorage(opts *globalOpts) output.KeyStorage {
 	var description string
 	switch provider {
 	case connectoragentstate.KeyProviderTPM:
-		description = "TPM (sealed to this machine)"
+		description = msgKeyStorageTPM
 	case connectoragentstate.KeyProviderFile:
-		description = "file (owner-only, not encrypted)"
+		description = msgKeyStorageFile
 	case connectoragentstate.KeyProviderLocalKey, connectoragentstate.KeyProviderAWSKMS,
 		connectoragentstate.KeyProviderGCPKMS, connectoragentstate.KeyProviderAWSNitro,
 		connectoragentstate.KeyProviderGCPConfidentialSpace:
+		// Safe to show as is: provider has just matched one of the
+		// connector's own constants, and these ids are what their operators
+		// set, so the id itself is the clearest description.
 		description = provider
 	default:
 		// No synthetic id in JSON: only the human row warns.
-		return output.KeyStorage{Description: "unrecognized provider"}
+		return output.KeyStorage{Description: msgKeyStorageUnrecognizedRow}
 	}
 	return output.KeyStorage{Provider: provider, Description: description}
 }

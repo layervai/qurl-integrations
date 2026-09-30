@@ -60,7 +60,7 @@ func TestLocalKeyStorageDescribesProvidersForPeople(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := localKeyStorage(&globalOpts{resolveShareStateDir: func(string) (string, error) { return dir, nil }})
-	if got.Provider != connectoragentstate.KeyProviderTPM || got.Description != "TPM (sealed to this machine)" {
+	if got.Provider != connectoragentstate.KeyProviderTPM || got.Description != msgKeyStorageTPM {
 		t.Fatalf("localKeyStorage = %+v", got)
 	}
 	failing := &globalOpts{resolveShareStateDir: func(string) (string, error) { return "", errors.New("no state dir") }}
@@ -98,7 +98,7 @@ func TestLocalKeyStorageNeverEchoesAnUnknownProvider(t *testing.T) {
 	resolveLocalKeyProvider = func(string) (string, error) { return "\x1b[31mevil", nil }
 	t.Cleanup(func() { resolveLocalKeyProvider = original })
 	got := localKeyStorage(&globalOpts{resolveShareStateDir: func(string) (string, error) { return dir, nil }})
-	if got != (output.KeyStorage{Description: "unrecognized provider"}) {
+	if got != (output.KeyStorage{Description: msgKeyStorageUnrecognizedRow}) {
 		t.Fatalf("localKeyStorage with an unknown provider = %+v, want only the fixed description", got)
 	}
 }
@@ -156,7 +156,7 @@ func TestSealingNoticeFiresOnlyBeforeStateExists(t *testing.T) {
 		opts.noteTPMSealing(dir)
 		return stderr.String()
 	}
-	if got := note(t.TempDir(), "linux", connectorstate.RuntimeSupervisionNative); !strings.Contains(got, "tss group") || !strings.Contains(got, "LAYERV_KEY_PROVIDER=file") {
+	if got := note(t.TempDir(), "linux", connectorstate.RuntimeSupervisionNative); !strings.Contains(got, "tss group") || !strings.Contains(got, "move the state directory aside") || !strings.Contains(got, "LAYERV_KEY_PROVIDER=file") {
 		t.Fatalf("linux notice = %q, want the tss clause and the opt-out", got)
 	}
 	if got := note(t.TempDir(), "windows", connectorstate.RuntimeSupervisionNative); !strings.Contains(got, "open only on this machine") || strings.Contains(got, "tss") {

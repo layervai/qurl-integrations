@@ -17,8 +17,6 @@ import (
 	"testing"
 	"time"
 
-	connectoragentstate "github.com/layervai/qurl-connector/pkg/agentstate"
-
 	v1 "github.com/fatedier/frp/pkg/config/v1"
 	frplog "github.com/fatedier/frp/pkg/util/log"
 	frpserver "github.com/fatedier/frp/server"
@@ -26,6 +24,7 @@ import (
 	golibmux "github.com/fatedier/golib/net/mux"
 
 	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/state/statetest"
 )
 
 type cmdFRPSTestService struct {
@@ -52,14 +51,9 @@ func openOwnedTestShareRegistry(dir string) (*connectorstate.LocalShareRegistry,
 // TestMain pins FRP's process-global logger before journey-test goroutines
 // start. The in-process client and server share this logger.
 func TestMain(m *testing.M) {
-	// Keep fresh test namespaces off the host TPM: unset LAYERV_KEY_PROVIDER
-	// now seals a new namespace to it when one is usable. Tests that need
-	// another provider set it with t.Setenv, which restores this.
-	// Unconditional: an ambient value (tpm on a box testing this feature, or
-	// a whitespace-only value, which also counts as unset) must not decide.
-	if err := os.Setenv(connectoragentstate.EnvKeyProvider, connectoragentstate.KeyProviderFile); err != nil {
-		panic("pin LAYERV_KEY_PROVIDER for hermetic tests: " + err.Error())
-	}
+	// Keep fresh test namespaces off the host TPM; see
+	// statetest.PinFileKeyProvider.
+	statetest.PinFileKeyProvider()
 	frplog.Logger = goliblog.New(
 		goliblog.WithCaller(false),
 		goliblog.WithLevel(goliblog.WarnLevel),
