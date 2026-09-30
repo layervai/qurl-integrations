@@ -2,16 +2,20 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
 	connectoragentstate "github.com/layervai/qurl-connector/pkg/agentstate"
+	connectorshare "github.com/layervai/qurl-connector/pkg/share"
 	"github.com/layervai/qurl-go/qurl"
 
+	"github.com/layervai/qurl-integrations/apps/cli/internal/apitest"
 	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/output"
 )
@@ -201,5 +205,68 @@ func TestLocalKeyStorageTakesPlaintextFromTheOpenedStore(t *testing.T) {
 	got := localKeyStorage(&globalOpts{nativeStateStore: store})
 	if got != (output.KeyStorage{Provider: connectoragentstate.KeyProviderFile, Description: msgKeyStorageFile}) {
 		t.Fatalf("localKeyStorage for an opened plaintext store = %+v", got)
+	}
+}
+
+// TestWhoAmIWiresTheSealingNoticeAndKeyStorage drives both new call sites
+// through the real command and openNativeRegisteredClient: a fresh namespace
+// the resolver assigns to the TPM prints the sealing notice, and a namespace
+// that already holds a sealed envelope renders Key storage without it.
+func TestWhoAmIWiresTheSealingNoticeAndKeyStorage(t *testing.T) {
+	original := resolveLocalKeyProvider
+	resolveLocalKeyProvider = func(string) (string, error) { return connectoragentstate.KeyProviderTPM, nil }
+	t.Cleanup(func() { resolveLocalKeyProvider = original })
+
+	run := func(dir string) *runResult {
+		srv := apitest.NewServer(t)
+		state := bootstrapRegisteredState(t)
+		return runCLI(t, &runOpts{
+			args:          []string{"--endpoint", srv.URL, "whoami"},
+			env:           map[string]string{},
+			nativeClient:  true,
+			shareStateDir: dir,
+			openNativeRuntime: func(context.Context, connectorshare.NativeRuntimeConfig) (registeredNativeRuntime, error) {
+				return &bootstrapNativeRuntime{store: &bootstrapAgentStateStore{state: state}}, nil
+			},
+		})
+	}
+
+	fresh := run(connectorStateTestDir(t))
+	if fresh.code != 0 || !strings.Contains(fresh.stderr.String(), "sealed to this machine's TPM") {
+		t.Fatalf("fresh namespace: exit=%d stderr=%q, want the sealing notice", fresh.code, fresh.stderr.String())
+	}
+
+	sealed := connectorStateTestDir(t)
+	if err := os.WriteFile(filepath.Join(sealed, connectoragentstate.SealedAgentStateFile), []byte(`{"provider_id":"tpm"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	existing := run(sealed)
+	if existing.code != 0 || strings.Contains(existing.stderr.String(), "sealed to this machine's TPM") {
+		t.Fatalf("existing namespace: exit=%d stderr=%q, want no sealing notice", existing.code, existing.stderr.String())
+	}
+	if !strings.Contains(existing.stdout.String(), "Key storage:") || !strings.Contains(existing.stdout.String(), msgKeyStorageTPM) {
+		t.Fatalf("existing namespace stdout = %q, want the TPM key storage row", existing.stdout.String())
+	}
+}
+
+func TestAgentStateEnvelopePresentTreatsOnlyNotExistAsAbsent(t *testing.T) {
+	if agentStateEnvelopePresent(filepath.Join(t.TempDir(), "absent")) {
+		t.Fatal("a missing directory reported an envelope")
+	}
+	if agentStateEnvelopePresent(t.TempDir()) {
+		t.Fatal("an empty directory reported an envelope")
+	}
+	// A path whose parent is a file cannot be stat'ed as a directory entry
+	// (ENOTDIR, not ENOENT): unknown must read as present, the safe answer.
+	// Windows reports that case as path-not-found, which is ErrNotExist.
+	if runtime.GOOS == "windows" {
+		return
+	}
+	parentFile := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(parentFile, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if !agentStateEnvelopePresent(parentFile) {
+		t.Fatal("an unreadable directory reported no envelope")
 	}
 }

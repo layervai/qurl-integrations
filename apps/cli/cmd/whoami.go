@@ -98,6 +98,11 @@ func localKeyStorage(opts *globalOpts) output.KeyStorage {
 	// The store whoami opened settles the plaintext case by itself. A sealed
 	// store does not say which provider sealed it, so only that case reads the
 	// envelope again.
+	//
+	// TODO(upstream-contract): relies on qurl-connector's native runtime
+	// handing off qurl-go's concrete *FileAgentStateStore for plaintext state.
+	// If it wrapped it, this shortcut would stop matching and the envelope
+	// read below would still answer file, only less directly.
 	if _, plaintext := opts.nativeStateStore.(*qurl.FileAgentStateStore); plaintext {
 		return output.KeyStorage{Provider: connectoragentstate.KeyProviderFile, Description: msgKeyStorageFile}
 	}

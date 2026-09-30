@@ -685,14 +685,17 @@ func tpmSealingNotice(goos string) (string, bool) {
 	}
 }
 
-// agentStateEnvelopePresent reports whether dir already holds either agent
-// state envelope.
+// agentStateEnvelopePresent reports whether dir may already hold an agent
+// state envelope. Only a definite "does not exist" for both names counts as
+// absent: an unreadable entry or directory is treated as present, which is
+// the safe answer for both callers (no false sealing notice, and whoami still
+// asks the resolver).
 //
 // TODO(upstream-contract): mirrors qurl-connector pkg/agentstate's two
 // envelope names; a third would need adding here.
 func agentStateEnvelopePresent(dir string) bool {
 	for _, name := range []string{connectorstate.AgentStateFile, connectoragentstate.SealedAgentStateFile} {
-		if _, err := os.Lstat(filepath.Join(dir, name)); err == nil {
+		if _, err := os.Lstat(filepath.Join(dir, name)); !errors.Is(err, os.ErrNotExist) {
 			return true
 		}
 	}
