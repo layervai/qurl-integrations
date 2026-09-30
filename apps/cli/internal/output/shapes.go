@@ -42,7 +42,7 @@ type shareLinkJSON struct {
 // (the text table deliberately omits them — see List). A sweeper identifying
 // throwaway rows by the label their publisher gave them reads this document.
 type listItemJSON struct {
-	AllowedDeviceKeys []string `json:"allowed_device_keys,omitempty"`
+	AllowedDeviceKeys []string `json:"allowed_device_keys"`
 	Private           *bool    `json:"private,omitempty"`
 	CRID              string   `json:"crid,omitempty"`
 	ResourceID        string   `json:"resource_id"`
@@ -112,7 +112,7 @@ type SharingInspection struct {
 }
 
 type resourceStatusJSON struct {
-	AllowedDeviceKeys []string `json:"allowed_device_keys,omitempty"`
+	AllowedDeviceKeys []string `json:"allowed_device_keys"`
 	Private           *bool    `json:"private,omitempty"`
 	// Description and tags are intentionally absent: status is the compact
 	// lifecycle view, while list is the metadata inventory surface.
@@ -254,7 +254,7 @@ func (p *Printer) ResourceStatus(resource *qurlapi.ResourceSummary) error {
 	switch {
 	case p.format == FormatJSON:
 		return p.writeJSON(resourceStatusJSON{
-			AllowedDeviceKeys: resource.AllowedDeviceKeys,
+			AllowedDeviceKeys: append([]string{}, resource.AllowedDeviceKeys...),
 			Private:           resource.Private,
 			CRID:              resource.CRID, ResourceID: resource.ResourceID,
 			TargetURL: resource.TargetURL, Type: resource.Type, Status: resource.Status,
@@ -407,7 +407,7 @@ func (p *Printer) List(page *qurlapi.ResourcePage) error {
 				servingEpoch = &epoch
 			}
 			out.Resources = append(out.Resources, listItemJSON{
-				AllowedDeviceKeys: item.AllowedDeviceKeys,
+				AllowedDeviceKeys: append([]string{}, item.AllowedDeviceKeys...),
 				CRID:              item.CRID,
 				ResourceID:        item.ResourceID,
 				Private:           item.Private,

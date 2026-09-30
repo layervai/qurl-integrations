@@ -712,6 +712,8 @@ func trimBaseURL(base string) string {
 }
 
 // SetDeviceGrants changes grants with one authenticated PATCH. It never retries.
+// TODO(upstream-contract): PATCH returns 200 with a flat data resource row,
+// including type, status, privacy and grants; GET nests its row under resource.
 func (c *client) SetDeviceGrants(ctx context.Context, id string, keys []string) (*ResourceSummary, error) {
 	if err := ValidateRequestTarget(http.MethodPatch, "/v1/resources/"+id); err != nil {
 		return nil, err

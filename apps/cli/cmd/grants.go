@@ -38,7 +38,11 @@ func grantsCmd(opts *globalOpts) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return opts.printer().ResourceStatus(resource)
+			printer := opts.printer()
+			if resource.Private != nil && !*resource.Private {
+				printer.Notef("This resource is public; device grants do not restrict who can request links.")
+			}
+			return printer.ResourceStatus(resource)
 		},
 	}
 	cmd.Flags().StringArrayVar(&keys, "allow-device-key", nil, "allowed recipient public key (repeatable; replaces the complete list)")
