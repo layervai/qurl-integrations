@@ -1024,7 +1024,9 @@ checks that the device belongs to the same account, and discards the account
 key. `qurl whoami` checks the registered device and shows its account identity
 and the device's public key (`device_public_key_b64` in `-o json`), with no plan
 or usage data. It never shows the device's private key or any part of an API
-key secret. `--quiet` prints just the owner id.
+key secret: since 3.2.0 it no longer prints the key prefix (`lv_live_…`), and
+`-o json` no longer has `api_key.key_prefix`; use `api_key.key_id` to identify
+the key. `--quiet` prints just the owner id.
 
 ```bash
 op read op://team/qurl/key | qurl login
