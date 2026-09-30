@@ -134,14 +134,14 @@ var errStoreNotOpen = fmt.Errorf("%w: Connector state store is not open", qurl.E
 // qurl-connector pkg/agentstate explicitKeyProviderName (empty leaves the
 // choice to the namespace). It does not mirror that function's validation:
 // an unknown name reports sealed here, where upstream errors, which keeps
-// SelectedProviderNeedsEnvironment failing closed on a typo.
+// selectedProviderNeedsEnvironment failing closed on a typo.
 func SelectedKeyProvider() (string, bool) {
 	raw := strings.TrimSpace(os.Getenv(connectoragentstate.EnvKeyProvider))
 	name := strings.ToLower(raw)
 	return raw, name != "" && name != connectoragentstate.KeyProviderFile
 }
 
-// SelectedProviderNeedsEnvironment reports whether LAYERV_KEY_PROVIDER names a
+// selectedProviderNeedsEnvironment reports whether LAYERV_KEY_PROVIDER names a
 // provider whose key only its environment can supply, so a namespace sealed
 // under it can only be served by the supervisor that sets that environment.
 // The TPM provider does not: its key never leaves this machine's TPM.
@@ -149,7 +149,7 @@ func SelectedKeyProvider() (string, bool) {
 // TODO(upstream-contract): relies on qurl-connector pkg/agentstate
 // KeyProviderRequiresEnvironment returning true for every name it does not
 // know, so a mistyped provider is still refused under native supervision.
-func SelectedProviderNeedsEnvironment() (string, bool) {
+func selectedProviderNeedsEnvironment() (string, bool) {
 	raw, sealed := SelectedKeyProvider()
 	return raw, sealed && connectoragentstate.KeyProviderRequiresEnvironment(strings.ToLower(raw))
 }

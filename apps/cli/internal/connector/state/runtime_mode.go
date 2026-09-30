@@ -118,7 +118,7 @@ func RequireRuntimeSupervision(dir string, expected RuntimeSupervision) error {
 	// ReadRuntimeSupervision, so a sealed namespace addressed natively gets
 	// this message rather than "is external, not native" - the more
 	// actionable of the two.
-	if provider, needsEnv := SelectedProviderNeedsEnvironment(); expected == RuntimeSupervisionNative && needsEnv {
+	if provider, needsEnv := selectedProviderNeedsEnvironment(); expected == RuntimeSupervisionNative && needsEnv {
 		// Name the value: any name that is neither file nor tpm lands here,
 		// including a typo (the connector rejects unknown names on open), and
 		// its author needs to see what was read.

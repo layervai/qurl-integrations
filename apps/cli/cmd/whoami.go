@@ -4,6 +4,7 @@ import (
 	"errors"
 
 	connectoragentstate "github.com/layervai/qurl-connector/pkg/agentstate"
+	qurl "github.com/layervai/qurl-go/qurl"
 	"github.com/spf13/cobra"
 
 	"github.com/layervai/qurl-integrations/apps/cli/internal/output"
@@ -94,6 +95,12 @@ var resolveLocalKeyProvider = connectoragentstate.ResolveKeyProvider
 // ResolveKeyProvider not probing when an envelope already exists; the
 // presence check here only makes the probing path unreachable locally.
 func localKeyStorage(opts *globalOpts) output.KeyStorage {
+	// The store whoami opened settles the plaintext case by itself. A sealed
+	// store does not say which provider sealed it, so only that case reads the
+	// envelope again.
+	if _, plaintext := opts.nativeStateStore.(*qurl.FileAgentStateStore); plaintext {
+		return output.KeyStorage{Provider: connectoragentstate.KeyProviderFile, Description: msgKeyStorageFile}
+	}
 	if opts.resolveShareStateDir == nil {
 		return output.KeyStorage{}
 	}
@@ -110,6 +117,9 @@ func localKeyStorage(opts *globalOpts) output.KeyStorage {
 	}
 	// Construct, never echo: the provider id comes from a file on disk, so
 	// only the connector's own names reach the terminal.
+	//
+	// TODO(upstream-contract): mirrors qurl-connector pkg/agentstate's provider
+	// constants; a new provider shows as unrecognized until it is added here.
 	var description string
 	switch provider {
 	case connectoragentstate.KeyProviderTPM:

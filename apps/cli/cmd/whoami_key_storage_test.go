@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	connectoragentstate "github.com/layervai/qurl-connector/pkg/agentstate"
+	"github.com/layervai/qurl-go/qurl"
 
 	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/output"
@@ -159,6 +160,12 @@ func TestSealingNoticeFiresOnlyBeforeStateExists(t *testing.T) {
 	if got := note(t.TempDir(), "linux", connectorstate.RuntimeSupervisionNative); !strings.Contains(got, "tss group") || !strings.Contains(got, "move the state directory aside") || !strings.Contains(got, "LAYERV_KEY_PROVIDER=file") {
 		t.Fatalf("linux notice = %q, want the tss clause and the opt-out", got)
 	}
+	// A genuine first run: nothing has created the state directory yet. The
+	// connector's resolver treats a missing directory like an empty one
+	// (pinned upstream by TestResolveKeyProviderMissingDirectoryResolvesLikeEmptyWithoutCreatingIt).
+	if got := note(filepath.Join(t.TempDir(), "absent"), "linux", connectorstate.RuntimeSupervisionNative); !strings.Contains(got, "sealed to this machine's TPM") {
+		t.Fatalf("first-run notice for an absent directory = %q, want it printed", got)
+	}
 	if got := note(t.TempDir(), "windows", connectorstate.RuntimeSupervisionNative); !strings.Contains(got, "open only on this machine") || strings.Contains(got, "tss") {
 		t.Fatalf("windows notice = %q, want the permanence notice without tss", got)
 	}
@@ -171,5 +178,28 @@ func TestSealingNoticeFiresOnlyBeforeStateExists(t *testing.T) {
 	}
 	if got := note(existing, "linux", connectorstate.RuntimeSupervisionNative); got != "" {
 		t.Fatalf("existing state printed %q, want nothing", got)
+	}
+}
+
+func TestLocalKeyStorageTakesPlaintextFromTheOpenedStore(t *testing.T) {
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(base, "state")
+	if err := connectorstate.EnsureDirMode(dir); err != nil {
+		t.Fatal(err)
+	}
+	store, err := qurl.OpenFileAgentState(filepath.Join(dir, connectorstate.AgentStateFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	original := resolveLocalKeyProvider
+	resolveLocalKeyProvider = func(string) (string, error) { t.Fatal("re-resolved a plaintext store"); return "", nil }
+	t.Cleanup(func() { resolveLocalKeyProvider = original })
+	got := localKeyStorage(&globalOpts{nativeStateStore: store})
+	if got != (output.KeyStorage{Provider: connectoragentstate.KeyProviderFile, Description: msgKeyStorageFile}) {
+		t.Fatalf("localKeyStorage for an opened plaintext store = %+v", got)
 	}
 }

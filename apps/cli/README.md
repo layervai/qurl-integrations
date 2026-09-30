@@ -336,8 +336,9 @@ appears in arguments, the environment, or a file. Every `qurl` process the
 supervisor runs against that state directory — `daemon run` and the lifecycle
 commands included — inherits the same two settings, each with a descriptor of
 its own. The sealed envelope (`agent_state.sealed.json`) and the plaintext one
-(`agent_state.json`) never share a directory. With the provider set, a
-directory that already holds plaintext state is refused. Without it, a
+(`agent_state.json`) never share a directory. With a sealing provider set
+(anything but `file`), a directory that already holds plaintext state is
+refused. Without it, a
 directory sealed by `local-key` is refused, and the error names the variables
 to set. Omitting the provider is an error for token-file login. Native
 account-key enrollment uses the default [key storage](#key-storage): sealed to
@@ -454,8 +455,9 @@ the sealed envelope normally.
 A state directory holds exactly one envelope. `qurl` refuses a directory
 sealed by an environment provider when that provider's variables are missing.
 It also refuses a directory whose envelope conflicts with
-`LAYERV_KEY_PROVIDER`, for example a plaintext directory with the provider
-set. Both refusals exit with code 3. Use a different state directory rather
+`LAYERV_KEY_PROVIDER`: a plaintext directory with a sealing provider set, or a
+sealed directory with `file` set. `file` over a plaintext directory is the
+ordinary case and opens normally. Both refusals exit with code 3. Use a different state directory rather
 than switching in place.
 
 ## Commands

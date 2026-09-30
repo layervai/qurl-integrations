@@ -177,7 +177,8 @@ func FromError(err error) int {
 		// a script its setup is wrong; retrying is the remedy. It is checked
 		// ahead of the host and qurl-go rows on purpose: a chain that also
 		// carries one of those still exits retryable, because no setup change
-		// can help until the TPM answers.
+		// can help until the TPM answers. It stays behind context.Canceled: a
+		// TPM call the user interrupted is an interrupt (130).
 		errors.Is(err, connectoragentstate.ErrTPMNotResponding):
 		return Unavailable
 	case errors.Is(err, qurl.ErrNoCRID), errors.Is(err, qurl.ErrCRIDMismatch):
