@@ -167,3 +167,15 @@ func TestPrivateShareAuthenticatesOnlyAfterChallenge(t *testing.T) {
 		t.Fatalf("shares=%d output=%q", shares, result.stdout.String())
 	}
 }
+
+func TestPublicGetBrowserNeedsNoEnrollment(t *testing.T) {
+	srv := apitest.NewServer(t)
+	browser := &fakeBrowser{}
+	result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "get", srv.Key.CRID}, env: map[string]string{}, nativeClient: true, tty: true, browser: browser})
+	if result.code != 0 || len(browser.opened) != 1 {
+		t.Fatalf("public get: %s", result.stderr.String())
+	}
+	if len(srv.Requests()) != 1 || srv.Requests()[0].Header.Get("Authorization") != "" {
+		t.Fatal("public get requires device authority")
+	}
+}

@@ -234,10 +234,19 @@ type client struct {
 // through a type assertion.
 type registeredClient struct{ Client }
 
-// NewPublic builds a client without credentials for public share requests.
-func NewPublic(cfg *Config) (Client, error) {
+// ShareClient exposes only resource-to-link exchange.
+type ShareClient interface {
+	Share(context.Context, string, ShareOptions) (*ShareLink, error)
+}
+type publicClient struct{ ShareClient }
+
+// NewPublic builds a credential-free client limited to sharing.
+func NewPublic(cfg *Config) (ShareClient, error) {
 	if cfg == nil || cfg.BaseURL == "" {
 		return nil, fmt.Errorf("%w: base URL must not be empty", qurl.ErrInvalidClientConfig)
+	}
+	if cfg.APIKey != "" || cfg.OwnerID != "" {
+		return nil, fmt.Errorf("%w: public sharing cannot select an account or credential", qurl.ErrInvalidClientConfig)
 	}
 	tr := newTransport(cfg)
 	provider := qurl.CredentialProviderFunc(func(context.Context, *http.Request) error { return nil })
@@ -246,7 +255,7 @@ func NewPublic(cfg *Config) (Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &client{sdk: sdk, transport: tr, baseURL: trimBaseURL(cfg.BaseURL), authorize: provider.Authorize}, nil
+	return &publicClient{ShareClient: &client{sdk: sdk, transport: tr, baseURL: trimBaseURL(cfg.BaseURL)}}, nil
 }
 
 // New builds the one Client implementation. The same decorated transport

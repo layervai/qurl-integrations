@@ -1196,3 +1196,18 @@ func TestPublishPrivateWireShape(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestPublicClientCannotSelectAccountOrManageResources(t *testing.T) {
+	for _, cfg := range []*Config{{BaseURL: "https://example.com", APIKey: "not-allowed"}, {BaseURL: "https://example.com", OwnerID: "not-allowed"}} {
+		if _, err := NewPublic(cfg); !errors.Is(err, qurl.ErrInvalidClientConfig) {
+			t.Fatal("public client accepted account authority")
+		}
+	}
+	public, err := NewPublic(&Config{BaseURL: "https://example.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := public.(Client); ok {
+		t.Fatal("public client exposes management operations")
+	}
+}

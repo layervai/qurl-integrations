@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/subtle"
 	"errors"
 	"fmt"
@@ -76,23 +77,9 @@ else, ready to hand out or open.`,
 				return exitcode.UsageError(fmt.Errorf("--session-duration %s must be a positive whole number of seconds", sessionDuration))
 			}
 
-			opts.warnInsecureEndpoint()
-			client, err := qurlapi.NewPublic(opts.accountConfig("", ""))
-			if err != nil {
-				return err
-			}
-			shareOpts := qurlapi.ShareOptions{
+			link, err := opts.shareResource(cmd.Context(), assessment.Input, qurlapi.ShareOptions{
 				TTLSeconds: int(ttl.Seconds()), SessionDurationSeconds: int(sessionDuration / time.Second),
-			}
-			link, err := client.Share(cmd.Context(), assessment.Input, shareOpts)
-			var apiErr *qurlapi.Error
-			if errors.As(err, &apiErr) && apiErr.StatusCode == 401 {
-				client, openErr := opts.newClient(cmd.Context())
-				if openErr != nil {
-					return openErr
-				}
-				link, err = client.Share(cmd.Context(), assessment.Input, shareOpts)
-			}
+			})
 
 			if err := verifyShareLink(assessment, link, err); err != nil {
 				return err
@@ -163,4 +150,23 @@ func reportClamp(printer *output.Printer, requested time.Duration, link *qurlapi
 	if granted < requested {
 		printer.Notef(msgTTLClamped, granted.String(), requested.String())
 	}
+}
+
+// shareResource is the common public-first path for share and get. Only a
+// private-resource challenge opens the registered device runtime.
+func (opts *globalOpts) shareResource(ctx context.Context, id string, options qurlapi.ShareOptions) (*qurlapi.ShareLink, error) {
+	client, err := qurlapi.NewPublic(opts.accountConfig("", ""))
+	if err != nil {
+		return nil, err
+	}
+	link, err := client.Share(ctx, id, options)
+	var apiErr *qurlapi.Error
+	if errors.As(err, &apiErr) && apiErr.StatusCode == 401 {
+		authenticated, openErr := opts.newClient(ctx)
+		if openErr != nil {
+			return nil, openErr
+		}
+		return authenticated.Share(ctx, id, options)
+	}
+	return link, err
 }
