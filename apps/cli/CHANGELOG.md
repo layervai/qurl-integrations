@@ -1,5 +1,17 @@
 # Changelog
 
+## [3.2.0](https://github.com/layervai/qurl-integrations/compare/v3.1.0...v3.2.0) (2026-09-30)
+
+
+### Features
+
+* **cli:** whoami shows the device public key ([03fd58c](https://github.com/layervai/qurl-integrations/commit/03fd58cf4ee0e4cd9e1317af7d593ad142ff5b0c))
+
+
+### Bug Fixes
+
+* **cli:** whoami no longer prints the API key prefix. For -o json consumers: api_key.key_prefix is removed; use api_key.key_id ([03fd58c](https://github.com/layervai/qurl-integrations/commit/03fd58cf4ee0e4cd9e1317af7d593ad142ff5b0c))
+
 ## [3.1.0](https://github.com/layervai/qurl-integrations/compare/v3.0.0...v3.1.0) (2026-09-29)
 
 
