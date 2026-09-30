@@ -32,6 +32,16 @@ const (
 	// device state for its public key. The rest of the identity still prints
 	// and the command still succeeds.
 	msgDevicePublicKeyUnreadable = "could not read the local device public key: %v"
+	// msgKeyStorageUnrecognized warns that the local state's key storage is not
+	// one this version names, so whoami -o json omits it rather than inventing
+	// a value.
+	msgKeyStorageUnrecognized = "the local device state uses a key storage this version does not recognize"
+	// msgTPMSealedLinuxDevice is shown once, when a new device identity is
+	// about to be sealed to the TPM under native supervision on Linux: the
+	// moment the choice becomes permanent is the only moment it is cheap to
+	// change. It avoids naming the environment variable, which the jargon gate
+	// would reject; the README's Key storage section names the opt-out.
+	msgTPMSealedLinuxDevice = "Local device state is being sealed to this machine's TPM. The background job needs the tss group as well: if you joined it this session, log out fully before the next command. See Key storage in the README to keep state unencrypted instead."
 
 	// msgDevicePublicKeyInvalid reports that the local device state loaded but
 	// holds no usable public key. The bad value itself is never printed.
@@ -78,6 +88,8 @@ func customerMessages() []string {
 		msgAnonymousDevice,
 		msgAnonymousSupervisedDevice,
 		msgDevicePublicKeyUnreadable,
+		msgKeyStorageUnrecognized,
+		msgTPMSealedLinuxDevice,
 		msgDevicePublicKeyInvalid,
 		msgAccountChooseOwner,
 		msgAccountOwnerDenied,

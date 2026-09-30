@@ -64,11 +64,12 @@ var ErrNoDefaultStateDir = errors.New("no default qurl sharing state directory")
 // connector does not accept, or a TPM-sealed envelope this machine's TPM can
 // no longer open (cleared, replaced, or another machine's state; the wrapped
 // error names the cause and the recovery, moving the directory aside). The
-// TODO(upstream-contract): that wording is qurl-connector pkg/agentstate's.
-// The
 // remedy is the environment or the state directory, never the command line,
 // so exitcode maps it to Config. A TPM that is merely not responding is
 // Unavailable instead.
+//
+// TODO(upstream-contract): the wrapped TPM wording is qurl-connector
+// pkg/agentstate's.
 //
 // A sealed open also wraps it around failures qurl-go classifies itself, such
 // as a loose directory mode or a continuity break. exitcode therefore checks
@@ -152,8 +153,9 @@ func SelectedProviderNeedsEnvironment() (string, bool) {
 }
 
 // Store owns the qurl-go agent state envelope for the process lifetime: the
-// plaintext file store by default, or the connector's SDK store around the
-// sealed envelope when LAYERV_KEY_PROVIDER selects a key provider. Call
+// plaintext file store, or the connector's SDK store around the sealed
+// envelope, whichever the connector's resolver selects for the namespace
+// (with no environment at all for a TPM namespace). Call
 // Handoff at each SDK lifecycle boundary and retain the Store until every
 // returned client and runtime binding has finished; Close releases the pinned
 // state directory. The mutex keeps Close from racing a handoff or continuity
@@ -206,6 +208,9 @@ func Open(dir string) (*Store, error) {
 	if err := EnsureDirMode(dir); err != nil {
 		return nil, fmt.Errorf("prepare native agent state directory: %w", err)
 	}
+	// TODO(upstream-contract): ResolveKeyProvider returns the exact
+	// connectoragentstate.KeyProviderFile id for plaintext; any other value,
+	// including "" or a different case, takes the sealed branch below.
 	provider, err := resolveKeyProvider(dir)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrAgentStateEnvelope, err)

@@ -339,8 +339,9 @@ its own. The sealed envelope (`agent_state.sealed.json`) and the plaintext one
 (`agent_state.json`) never share a directory. With the provider set, a
 directory that already holds plaintext state is refused. Without it, a
 directory sealed by `local-key` is refused, and the error names the variables
-to set. Omitting the provider is an error for token-file login; plaintext
-state remains available to native account-key enrollment. Switching providers
+to set. Omitting the provider is an error for token-file login. Native
+account-key enrollment uses the default [key storage](#key-storage): sealed to
+the TPM where one is usable, otherwise plaintext. Switching providers
 is therefore a fresh namespace, not an in-place migration. There is no flag for the provider; the supervisor that owns the key
 sets the environment. The token-file reader and the inherited-descriptor key
 transport are available on macOS and Linux.

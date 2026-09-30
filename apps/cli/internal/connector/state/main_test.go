@@ -15,6 +15,8 @@ import (
 func TestMain(m *testing.M) {
 	// Unconditional: an ambient value (tpm on a box testing this feature, or
 	// a whitespace-only value, which also counts as unset) must not decide.
-	_ = os.Setenv(connectoragentstate.EnvKeyProvider, connectoragentstate.KeyProviderFile)
+	if err := os.Setenv(connectoragentstate.EnvKeyProvider, connectoragentstate.KeyProviderFile); err != nil {
+		panic("pin LAYERV_KEY_PROVIDER for hermetic tests: " + err.Error())
+	}
 	os.Exit(m.Run())
 }

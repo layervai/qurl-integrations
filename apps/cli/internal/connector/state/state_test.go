@@ -24,6 +24,8 @@ func clearStateEnv(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// Restored after the test because the loop above registered
+	// EnvKeyProvider with t.Setenv, which restores the pre-test value.
 	if err := os.Setenv(connectoragentstate.EnvKeyProvider, connectoragentstate.KeyProviderFile); err != nil {
 		t.Fatal(err)
 	}
@@ -34,6 +36,8 @@ func clearStateEnv(t *testing.T) {
 // (and so no host TPM) is consulted.
 func unsetKeyProvider(t *testing.T) {
 	t.Helper()
+	// t.Setenv registers restoration of the value from before this call; the
+	// Unsetenv then leaves the variable absent for the rest of the test.
 	t.Setenv(connectoragentstate.EnvKeyProvider, "restore-after-test")
 	if err := os.Unsetenv(connectoragentstate.EnvKeyProvider); err != nil {
 		t.Fatal(err)

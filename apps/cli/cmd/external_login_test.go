@@ -234,8 +234,8 @@ func TestPlainLoginDoesNotEstablishExternalPolicy(t *testing.T) {
 // TestLoginsProviderGateImpliesTheNamespaceIsSealed closes the seam between
 // login's env check and the sealing decision. login reads
 // LAYERV_KEY_PROVIDER through opts.lookupEnv and checks only the name, while
-// connectorstate.SelectedKeyProvider reads the process environment and
-// decides whether Open takes the sealed branch. They coincide in production
+// connectorstate.SelectedKeyProvider reads the process environment the way
+// the connector's resolver does when it picks Open's branch. They coincide in production
 // because newRoot sets lookupEnv = os.LookupEnv, but nothing forced them to
 // agree: a provider name login accepted and SelectedKeyProvider treated as
 // the plaintext default would enroll an external device into a plaintext

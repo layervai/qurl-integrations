@@ -57,7 +57,9 @@ func TestMain(m *testing.M) {
 	// another provider set it with t.Setenv, which restores this.
 	// Unconditional: an ambient value (tpm on a box testing this feature, or
 	// a whitespace-only value, which also counts as unset) must not decide.
-	_ = os.Setenv(connectoragentstate.EnvKeyProvider, connectoragentstate.KeyProviderFile)
+	if err := os.Setenv(connectoragentstate.EnvKeyProvider, connectoragentstate.KeyProviderFile); err != nil {
+		panic("pin LAYERV_KEY_PROVIDER for hermetic tests: " + err.Error())
+	}
 	frplog.Logger = goliblog.New(
 		goliblog.WithCaller(false),
 		goliblog.WithLevel(goliblog.WarnLevel),

@@ -100,3 +100,39 @@ func TestLocalKeyStorageNeverEchoesAnUnknownProvider(t *testing.T) {
 		t.Fatalf("localKeyStorage with an unknown provider = %+v, want only the fixed description", got)
 	}
 }
+
+func TestLocalKeyStoragePassesTheConnectorsOtherProvidersThrough(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, connectoragentstate.SealedAgentStateFile), []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	original := resolveLocalKeyProvider
+	t.Cleanup(func() { resolveLocalKeyProvider = original })
+	for _, provider := range []string{
+		connectoragentstate.KeyProviderLocalKey, connectoragentstate.KeyProviderAWSKMS, connectoragentstate.KeyProviderGCPKMS,
+		connectoragentstate.KeyProviderAWSNitro, connectoragentstate.KeyProviderGCPConfidentialSpace,
+	} {
+		resolveLocalKeyProvider = func(string) (string, error) { return provider, nil }
+		got := localKeyStorage(&globalOpts{resolveShareStateDir: func(string) (string, error) { return dir, nil }})
+		if got != (output.KeyStorage{Provider: provider, Description: provider}) {
+			t.Errorf("localKeyStorage for %q = %+v", provider, got)
+		}
+	}
+}
+
+func TestTPMSealingNoticeIsForNativeLinuxOnly(t *testing.T) {
+	for _, tc := range []struct {
+		goos        string
+		supervision connectorstate.RuntimeSupervision
+		want        bool
+	}{
+		{"linux", connectorstate.RuntimeSupervisionNative, true},
+		{"linux", connectorstate.RuntimeSupervisionExternal, false},
+		{"windows", connectorstate.RuntimeSupervisionNative, false},
+		{"darwin", connectorstate.RuntimeSupervisionNative, false},
+	} {
+		if got := tpmSealingNeedsNotice(tc.goos, tc.supervision); got != tc.want {
+			t.Errorf("tpmSealingNeedsNotice(%s, %s) = %v, want %v", tc.goos, tc.supervision, got, tc.want)
+		}
+	}
+}

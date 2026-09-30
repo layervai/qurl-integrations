@@ -105,12 +105,13 @@ func RequireRuntimeSupervision(dir string, expected RuntimeSupervision) error {
 	// TPM device access in the serving process, which on Linux is tss group
 	// membership: a user manager started before the user joined tss lacks it
 	// until the next login, and the daemon then cannot open state a foreground
-	// command sealed. That is documented rather than guarded here; the daemon's
-	// error names the TPM. Refuse here,
-	// which every mutating command reaches before it writes, rather than at
-	// the install: a sealed envelope written under native supervision cannot
-	// afterwards be adopted by EstablishExternalRuntimeMode, which requires a
-	// fresh namespace.
+	// command sealed. That is documented, and noted to the user at
+	// enrollment, rather than guarded here; the daemon's error names the TPM.
+	//
+	// Refuse here, which every mutating command reaches before it writes,
+	// rather than at the install: a sealed envelope written under native
+	// supervision cannot afterwards be adopted by EstablishExternalRuntimeMode,
+	// which requires a fresh namespace.
 	// The sentinel is ErrAgentStateEnvelope, not ErrRuntimeSupervision: both
 	// map to Config, and the cause really is the envelope the environment
 	// selects, not a marker this directory carries. It also runs before

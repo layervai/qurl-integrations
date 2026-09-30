@@ -59,6 +59,11 @@ anything.`,
 			// under one condition so they cannot drift apart.
 			if opts.nativeStateStore != nil && printer.WhoAmIRendersDeviceKey() {
 				keyStorage = localKeyStorage(opts)
+				if keyStorage.Provider == "" && keyStorage.Description != "" {
+					// JSON omits an unrecognized id; the warning reaches both
+					// projections without inventing one.
+					printer.Warnf("%s", msgKeyStorageUnrecognized)
+				}
 				var keyErr error
 				deviceKey, keyErr = devicePublicKey(cmd.Context(), opts.nativeStateStore)
 				// The identity is already complete. A missing key row must not
@@ -82,7 +87,10 @@ var resolveLocalKeyProvider = connectoragentstate.ResolveKeyProvider
 
 // localKeyStorage describes the key provider protecting this device's local
 // state, or the zero value when there is no envelope to describe. It is best
-// effort: a failure here must not turn an identity answer into an error.
+// effort: a failure here must not turn an identity answer into an error. It
+// resolves the directory the same way openNativeRegisteredClient did
+// (resolveShareStateDir("")), which is what makes it describe the state whoami
+// opened; the handed-off store does not carry its provider.
 //
 // TODO(upstream-contract): "never probes the TPM" rests on qurl-connector's
 // ResolveKeyProvider not probing when an envelope already exists; the

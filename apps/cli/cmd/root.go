@@ -18,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	connectoragentstate "github.com/layervai/qurl-connector/pkg/agentstate"
 	connectorshare "github.com/layervai/qurl-connector/pkg/share"
 	qurl "github.com/layervai/qurl-go/qurl"
 	"github.com/spf13/cobra"
@@ -585,6 +586,7 @@ type registeredAccountBootstrap struct {
 	explicitValidatedAccountAuthority bool
 	enrollmentIdempotencyKey          string
 	warnedAnonymousDevice             bool
+	notedTPMSealing                   bool
 }
 
 type deviceAccountConflictError struct {
@@ -672,10 +674,40 @@ func (b *registeredAccountBootstrap) load(ctx context.Context) (qurlapi.AccountC
 	return b.client, b.key, b.identity, nil
 }
 
+// noteTPMSealing tells the user, once and before the state is written, that a
+// new device identity on Linux under native supervision is being sealed to the
+// TPM, which the background job must also be able to reach.
+func (b *registeredAccountBootstrap) noteTPMSealing() {
+	if b.notedTPMSealing || b.opts.quiet || b.opts.streams == nil || b.opts.streams.Err == nil {
+		return
+	}
+	b.notedTPMSealing = true
+	if !tpmSealingNeedsNotice(runtime.GOOS, b.opts.resolvedSupervision) || b.opts.resolveShareStateDir == nil {
+		return
+	}
+	dir, err := b.opts.resolveShareStateDir("")
+	if err != nil {
+		return
+	}
+	// Enrollment runs before the envelope exists, so this is the provider the
+	// new state is about to get (the probe result is already cached).
+	if provider, err := connectoragentstate.ResolveKeyProvider(dir); err == nil && provider == connectoragentstate.KeyProviderTPM {
+		b.opts.printer().Notef("%s", msgTPMSealedLinuxDevice)
+	}
+}
+
+// tpmSealingNeedsNotice reports whether sealing a new identity can leave the
+// background job without TPM access: only a Linux systemd user manager keeps
+// the groups it started with.
+func tpmSealingNeedsNotice(goos string, supervision connectorstate.RuntimeSupervision) bool {
+	return goos == "linux" && supervision == connectorstate.RuntimeSupervisionNative
+}
+
 func (b *registeredAccountBootstrap) enrollmentCredential(ctx context.Context, request qurl.AgentEnrollmentCredentialRequest) (string, error) {
 	if strings.TrimSpace(request.AgentID) == "" {
 		return "", errors.New("registered-device enrollment has no durable agent ID")
 	}
+	b.noteTPMSealing()
 	if b.client == nil && b.opts.resolvedSupervision == connectorstate.RuntimeSupervisionNative {
 		if _, _, err := auth.Resolve(b.opts.lookupEnv); errors.Is(err, auth.ErrNoCredential) {
 			if !b.warnedAnonymousDevice && !b.opts.quiet && b.opts.streams != nil && b.opts.streams.Err != nil {
