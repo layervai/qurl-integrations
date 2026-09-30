@@ -13,8 +13,8 @@ import (
 // that need another provider set it with t.Setenv (or clearStateEnv and
 // unsetKeyProvider), which restore this.
 func TestMain(m *testing.M) {
-	if os.Getenv(connectoragentstate.EnvKeyProvider) == "" {
-		_ = os.Setenv(connectoragentstate.EnvKeyProvider, connectoragentstate.KeyProviderFile)
-	}
+	// Unconditional: an ambient value (tpm on a box testing this feature, or
+	// a whitespace-only value, which also counts as unset) must not decide.
+	_ = os.Setenv(connectoragentstate.EnvKeyProvider, connectoragentstate.KeyProviderFile)
 	os.Exit(m.Run())
 }

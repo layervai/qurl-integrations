@@ -55,9 +55,9 @@ func TestMain(m *testing.M) {
 	// Keep fresh test namespaces off the host TPM: unset LAYERV_KEY_PROVIDER
 	// now seals a new namespace to it when one is usable. Tests that need
 	// another provider set it with t.Setenv, which restores this.
-	if os.Getenv(connectoragentstate.EnvKeyProvider) == "" {
-		_ = os.Setenv(connectoragentstate.EnvKeyProvider, connectoragentstate.KeyProviderFile)
-	}
+	// Unconditional: an ambient value (tpm on a box testing this feature, or
+	// a whitespace-only value, which also counts as unset) must not decide.
+	_ = os.Setenv(connectoragentstate.EnvKeyProvider, connectoragentstate.KeyProviderFile)
 	frplog.Logger = goliblog.New(
 		goliblog.WithCaller(false),
 		goliblog.WithLevel(goliblog.WarnLevel),

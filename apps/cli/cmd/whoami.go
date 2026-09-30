@@ -54,7 +54,11 @@ anything.`,
 			}
 			printer := opts.printer()
 			var deviceKey string
+			var keyStorage output.KeyStorage
+			// Both rows describe the local state this command actually opened,
+			// under one condition so they cannot drift apart.
 			if opts.nativeStateStore != nil && printer.WhoAmIRendersDeviceKey() {
+				keyStorage = localKeyStorage(opts)
 				var keyErr error
 				deviceKey, keyErr = devicePublicKey(cmd.Context(), opts.nativeStateStore)
 				// The identity is already complete. A missing key row must not
@@ -67,21 +71,18 @@ anything.`,
 					printer.Warnf(msgDevicePublicKeyUnreadable, keyErr)
 				}
 			}
-			var keyStorage output.KeyStorage
-			if opts.nativeStateStore != nil && printer.WhoAmIRendersDeviceKey() {
-				// Same condition as the device key above: both rows describe the
-				// local state this command actually opened.
-				keyStorage = localKeyStorage(opts)
-			}
 			return printer.WhoAmI(id, deviceKey, keyStorage)
 		},
 	}
 }
 
 // localKeyStorage describes the key provider protecting this device's local
-// state, or the zero value when there is no envelope to describe. It reports
-// only an existing envelope, so it never probes the TPM, and it is best
+// state, or the zero value when there is no envelope to describe. It is best
 // effort: a failure here must not turn an identity answer into an error.
+//
+// TODO(upstream-contract): "never probes the TPM" rests on qurl-connector's
+// ResolveKeyProvider not probing when an envelope already exists; the
+// presence check here only makes the probing path unreachable locally.
 func localKeyStorage(opts *globalOpts) output.KeyStorage {
 	stateDir, err := opts.resolveShareStateDir("")
 	if err != nil {
@@ -91,6 +92,7 @@ func localKeyStorage(opts *globalOpts) output.KeyStorage {
 	for _, name := range []string{connectorstate.AgentStateFile, connectoragentstate.SealedAgentStateFile} {
 		if _, err := os.Lstat(filepath.Join(stateDir, name)); err == nil {
 			present = true
+			break
 		}
 	}
 	if !present {
@@ -100,12 +102,20 @@ func localKeyStorage(opts *globalOpts) output.KeyStorage {
 	if err != nil {
 		return output.KeyStorage{}
 	}
-	description := provider
+	// Construct, never echo: the provider id comes from a file on disk, so
+	// only the connector's own names reach the terminal.
+	var description string
 	switch provider {
 	case connectoragentstate.KeyProviderTPM:
 		description = "TPM (sealed to this machine)"
 	case connectoragentstate.KeyProviderFile:
 		description = "file (owner-only, not encrypted)"
+	case connectoragentstate.KeyProviderLocalKey, connectoragentstate.KeyProviderAWSKMS,
+		connectoragentstate.KeyProviderGCPKMS, connectoragentstate.KeyProviderAWSNitro,
+		connectoragentstate.KeyProviderGCPConfidentialSpace:
+		description = provider
+	default:
+		return output.KeyStorage{Provider: "unrecognized", Description: "unrecognized provider"}
 	}
 	return output.KeyStorage{Provider: provider, Description: description}
 }

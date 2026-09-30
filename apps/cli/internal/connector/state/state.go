@@ -54,11 +54,15 @@ const (
 // absent local share namespace; commands that create local state surface it.
 var ErrNoDefaultStateDir = errors.New("no default qurl sharing state directory")
 
-// ErrAgentStateEnvelope means the state directory's envelope does not match
-// the selected key provider: a sealed envelope without LAYERV_KEY_PROVIDER, a
-// plaintext one with it, or a provider the connector does not accept. The
-// remedy is the environment or a different state directory, never the command
-// line, so exitcode maps it to Config.
+// ErrAgentStateEnvelope means the state directory's envelope cannot be opened
+// as selected: a sealed envelope whose provider needs variables that are not
+// set, an envelope that conflicts with LAYERV_KEY_PROVIDER, a provider the
+// connector does not accept, or a TPM-sealed envelope this machine's TPM can
+// no longer open (cleared, replaced, or another machine's state; the wrapped
+// error names the cause and the recovery, moving the directory aside). The
+// remedy is the environment or the state directory, never the command line,
+// so exitcode maps it to Config. A TPM that is merely not responding is
+// Unavailable instead.
 //
 // A sealed open also wraps it around failures qurl-go classifies itself, such
 // as a loose directory mode or a continuity break. exitcode therefore checks
@@ -123,18 +127,29 @@ var errStoreNotOpen = fmt.Errorf("%w: Connector state store is not open", qurl.E
 // explicitKeyProviderName (trimmed, case-folded, empty leaves the choice to
 // the namespace).
 func SelectedKeyProvider() (string, bool) {
-	raw := strings.TrimSpace(os.Getenv(connectoragentstate.EnvKeyProvider))
-	name := strings.ToLower(raw)
+	raw, name := selectedKeyProviderName()
 	return raw, name != "" && name != connectoragentstate.KeyProviderFile
+}
+
+// selectedKeyProviderName returns LAYERV_KEY_PROVIDER trimmed, and its
+// normalized (case-folded) name: the one place that rule is applied.
+func selectedKeyProviderName() (raw, name string) {
+	raw = strings.TrimSpace(os.Getenv(connectoragentstate.EnvKeyProvider))
+	return raw, strings.ToLower(raw)
 }
 
 // SelectedProviderNeedsEnvironment reports whether LAYERV_KEY_PROVIDER names a
 // provider whose key only its environment can supply, so a namespace sealed
 // under it can only be served by the supervisor that sets that environment.
 // The TPM provider does not: its key never leaves this machine's TPM.
+//
+// TODO(upstream-contract): relies on qurl-connector pkg/agentstate
+// KeyProviderRequiresEnvironment returning true for every name it does not
+// know, so a mistyped provider is still refused under native supervision.
 func SelectedProviderNeedsEnvironment() (string, bool) {
-	raw, sealed := SelectedKeyProvider()
-	return raw, sealed && connectoragentstate.KeyProviderRequiresEnvironment(strings.ToLower(raw))
+	raw, name := selectedKeyProviderName()
+	sealed := name != "" && name != connectoragentstate.KeyProviderFile
+	return raw, sealed && connectoragentstate.KeyProviderRequiresEnvironment(name)
 }
 
 // Store owns the qurl-go agent state envelope for the process lifetime: the

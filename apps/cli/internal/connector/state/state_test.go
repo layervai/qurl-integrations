@@ -12,9 +12,8 @@ import (
 	qurl "github.com/layervai/qurl-go/qurl"
 )
 
-// clearStateEnv detaches the test from any ambient operator configuration.
-// clearStateEnv clears the state environment and pins LAYERV_KEY_PROVIDER to
-// file. Unset now lets a fresh namespace take the host's TPM, which would make
+// clearStateEnv detaches the test from any ambient operator configuration and
+// pins LAYERV_KEY_PROVIDER to file. Unset now lets a fresh namespace take the host's TPM, which would make
 // these tests depend on the machine running them; a test about the unset
 // path calls unsetKeyProvider after this.
 func clearStateEnv(t *testing.T) {

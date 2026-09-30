@@ -399,22 +399,28 @@ would travel unencrypted; loopback endpoints are exempt.
 
 The local agent state holds this device's credential and identity. When a new
 state directory is created on a machine with a TPM 2.0 that `qurl` can use,
-that state is sealed to the TPM (`agent_state.sealed.json`). A copy of the
-directory is then useless on any other machine, and it becomes unreadable on
-this one if the TPM is cleared. Everywhere else, the state is a plaintext
-owner-only file (`agent_state.json`). "Usable" means the Linux kernel
-resource manager `/dev/tpmrm0`, which usually requires membership in the
-`tss` group, or TPM Base Services on Windows. macOS has no TPM. The check
-is made by the process that creates the directory, with that process's
-groups: `qurl` run under `sudo -u`, in a container, or from a session without
-`tss` creates plaintext state even where an interactive shell would seal it. A TPM that
-is present but not responding (busy, starting, or timing out) fails with exit
-code 11 instead of falling back to plaintext, because the choice is permanent;
-retry, or set `LAYERV_KEY_PROVIDER=file`. A TPM-sealed
-directory needs no environment to reopen, so the natively supervised
-background job serves it as usual. Existing directories keep the envelope
-they were created with and are never migrated in place. `qurl whoami` shows
-which one this device uses (`Key storage:`, or `key_storage` with `-o json`).
+that state is sealed to the TPM (`agent_state.sealed.json`). Everywhere else,
+the state is a plaintext owner-only file (`agent_state.json`). "Usable" means
+the Linux kernel resource manager `/dev/tpmrm0`, which usually requires
+membership in the `tss` group, or TPM Base Services on Windows. macOS has no
+TPM. The check is made by the process that creates the directory, with that
+process's groups: `qurl` run under `sudo -u`, in a container, or from a
+session without `tss` creates plaintext state even where an interactive shell
+would seal it. A TPM that is present but not responding (busy, starting, or
+timing out) fails with exit code 11 instead of falling back to plaintext,
+because the choice is permanent; retry, or set `LAYERV_KEY_PROVIDER=file`.
+
+A TPM-sealed directory needs no environment to reopen, so the natively
+supervised background job serves it as usual. It opens only on this machine's
+TPM as it was when the state was sealed. A backup restored onto other
+hardware, a VM clone or image, a TPM clear, or another system later taking
+ownership of the TPM (most commonly Windows on a dual-boot machine) leaves it
+unreadable, and the error says which. The recovery is to move the state
+directory aside and enroll again, which creates a new device identity.
+Existing directories keep the
+envelope they were created with and are never migrated in place. `qurl
+whoami` shows which one this device uses (`Key storage:`, or `key_storage`
+with `-o json`).
 
 `LAYERV_KEY_PROVIDER` overrides that choice when a directory is created.
 `file` keeps it plaintext even where a TPM is available, and `tpm` requires

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	connectoragentstate "github.com/layervai/qurl-connector/pkg/agentstate"
@@ -63,5 +64,19 @@ func TestLocalKeyStorageDescribesProvidersForPeople(t *testing.T) {
 	failing := &globalOpts{resolveShareStateDir: func(string) (string, error) { return "", errors.New("no state dir") }}
 	if got := localKeyStorage(failing); got != (output.KeyStorage{}) {
 		t.Fatalf("localKeyStorage with an unresolvable state dir = %+v, want nothing", got)
+	}
+}
+
+func TestLocalKeyStorageNeverEchoesAnUnknownProvider(t *testing.T) {
+	t.Setenv(connectoragentstate.EnvKeyProvider, connectoragentstate.KeyProviderTPM)
+	dir := t.TempDir()
+	// With the variable set, the connector checks it against the envelope; an
+	// unknown provider id in the file is refused, so nothing is described.
+	if err := os.WriteFile(filepath.Join(dir, connectoragentstate.SealedAgentStateFile), []byte("{\"provider_id\":\"\x1b[31mevil\"}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got := localKeyStorage(&globalOpts{resolveShareStateDir: func(string) (string, error) { return dir, nil }})
+	if strings.Contains(got.Description, "\x1b") || strings.Contains(got.Provider, "\x1b") {
+		t.Fatalf("localKeyStorage echoed a control sequence from disk: %+v", got)
 	}
 }

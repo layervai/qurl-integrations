@@ -15,9 +15,10 @@ import (
 // `qurl daemon run` with no LAYERV_KEY_PROVIDER, so a namespace sealed to the
 // TPM must still open sealed rather than be refused or forked into plaintext.
 //
-// It passes on a TPM-less runner because the connector's NewSDKStore defers
-// all TPM contact to the first unseal; if that ever becomes eager, this test
-// fails on every hosted runner rather than on the change that caused it.
+// What it asserts on every host: resolution did not take the "set
+// LAYERV_KEY_PROVIDER" path, and no plaintext envelope was forked beside the
+// sealed one. Whether the stub envelope then initializes (it does wherever the
+// connector defers TPM contact to the first unseal) is deliberately tolerated.
 func TestOpenReopensATPMNamespaceWithoutTheEnvironment(t *testing.T) {
 	clearStateEnv(t)
 	dir := secureStateTestDir(t)
