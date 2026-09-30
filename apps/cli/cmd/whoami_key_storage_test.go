@@ -11,7 +11,6 @@ import (
 
 	connectoragentstate "github.com/layervai/qurl-connector/pkg/agentstate"
 	connectorshare "github.com/layervai/qurl-connector/pkg/share"
-	"github.com/layervai/qurl-go/qurl"
 
 	"github.com/layervai/qurl-integrations/apps/cli/internal/apitest"
 	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
@@ -179,29 +178,6 @@ func TestSealingNoticeFiresOnlyBeforeStateExists(t *testing.T) {
 	}
 	if got := note(existing, "linux", connectorstate.RuntimeSupervisionNative); got != "" {
 		t.Fatalf("existing state printed %q, want nothing", got)
-	}
-}
-
-func TestLocalKeyStorageTakesPlaintextFromTheOpenedStore(t *testing.T) {
-	base, err := filepath.EvalSymlinks(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	dir := filepath.Join(base, "state")
-	if err := connectorstate.EnsureDirMode(dir); err != nil {
-		t.Fatal(err)
-	}
-	store, err := qurl.OpenFileAgentState(filepath.Join(dir, connectorstate.AgentStateFile))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = store.Close() })
-	original := connectorstate.ResolveKeyProvider
-	connectorstate.ResolveKeyProvider = func(string) (string, error) { t.Fatal("re-resolved a plaintext store"); return "", nil }
-	t.Cleanup(func() { connectorstate.ResolveKeyProvider = original })
-	got := localKeyStorage(&globalOpts{nativeStateStore: store})
-	if got != (output.KeyStorage{Provider: connectoragentstate.KeyProviderFile, Description: msgKeyStorageFile}) {
-		t.Fatalf("localKeyStorage for an opened plaintext store = %+v", got)
 	}
 }
 

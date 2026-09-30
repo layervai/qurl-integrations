@@ -4,7 +4,6 @@ import (
 	"errors"
 
 	connectoragentstate "github.com/layervai/qurl-connector/pkg/agentstate"
-	qurl "github.com/layervai/qurl-go/qurl"
 	"github.com/spf13/cobra"
 
 	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
@@ -85,17 +84,9 @@ anything.`,
 // when there is no envelope to describe. It is best effort: a failure here
 // must not turn an identity answer into an error.
 func localKeyStorage(opts *globalOpts) output.KeyStorage {
-	// The store whoami opened settles the plaintext case by itself. A sealed
-	// store does not say which provider sealed it, so only that case reads the
-	// envelope again.
-	//
-	// TODO(upstream-contract): relies on qurl-connector's native runtime
-	// handing off qurl-go's concrete *FileAgentStateStore for plaintext state.
-	// If it wrapped it, this shortcut would stop matching and the envelope
-	// read below would still answer file, only less directly.
-	if _, plaintext := opts.nativeStateStore.(*qurl.FileAgentStateStore); plaintext {
-		return output.KeyStorage{Provider: connectoragentstate.KeyProviderFile, Description: msgKeyStorageFile}
-	}
+	// Described from the envelope on disk, never from the store's Go type: a
+	// type another repository hands off is not evidence of whether the state
+	// is encrypted.
 	stateDir := opts.nativeStateDir
 	if stateDir == "" || !connectorstate.EnvelopePresent(stateDir) {
 		return output.KeyStorage{}
