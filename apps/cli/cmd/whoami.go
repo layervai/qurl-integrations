@@ -2,8 +2,13 @@ package main
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 
+	connectoragentstate "github.com/layervai/qurl-connector/pkg/agentstate"
 	"github.com/spf13/cobra"
+
+	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 )
 
 // whoamiCmd reports the account and device identity behind the registered
@@ -59,7 +64,36 @@ anything.`,
 					printer.Warnf(msgDevicePublicKeyUnreadable, keyErr)
 				}
 			}
-			return printer.WhoAmI(id, deviceKey)
+			return printer.WhoAmI(id, deviceKey, localKeyStorage(opts))
 		},
 	}
+}
+
+// localKeyStorage names the key provider protecting this device's local
+// state, or "" when there is no envelope to describe. It reports only an
+// existing envelope, so it never probes the TPM, and it is best effort: a
+// failure here must not turn an identity answer into an error.
+func localKeyStorage(opts *globalOpts) string {
+	resolve := opts.resolveShareStateDir
+	if resolve == nil {
+		resolve = connectorstate.ResolveDir
+	}
+	stateDir, err := resolve("")
+	if err != nil {
+		return ""
+	}
+	present := false
+	for _, name := range []string{connectorstate.AgentStateFile, connectoragentstate.SealedAgentStateFile} {
+		if _, err := os.Lstat(filepath.Join(stateDir, name)); err == nil {
+			present = true
+		}
+	}
+	if !present {
+		return ""
+	}
+	provider, err := connectoragentstate.ResolveKeyProvider(stateDir)
+	if err != nil {
+		return ""
+	}
+	return provider
 }

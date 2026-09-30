@@ -31,7 +31,7 @@ func TestWhoAmIProjections(t *testing.T) {
 	t.Run("text", func(t *testing.T) {
 		var out, errBuf bytes.Buffer
 		p := newTestPrinter(&out, &errBuf, FormatText, false, false, false)
-		if err := p.WhoAmI(fixtureIdentity(), fixtureDeviceKey); err != nil {
+		if err := p.WhoAmI(fixtureIdentity(), fixtureDeviceKey, ""); err != nil {
 			t.Fatal(err)
 		}
 		for _, want := range []string{"own_output_test", "key_outputtest01", "qurl:read, qurl:write", "never", "Device public key:", fixtureDeviceKey} {
@@ -61,7 +61,7 @@ func TestWhoAmIProjections(t *testing.T) {
 		id := fixtureIdentity()
 		expiry := fixedClock().Add(48 * time.Hour)
 		id.Key.ExpiresAt = &expiry
-		if err := p.WhoAmI(id, fixtureDeviceKey); err != nil {
+		if err := p.WhoAmI(id, fixtureDeviceKey, ""); err != nil {
 			t.Fatal(err)
 		}
 		if !strings.Contains(out.String(), "(in 2d)") {
@@ -72,7 +72,7 @@ func TestWhoAmIProjections(t *testing.T) {
 	t.Run("keyless identity", func(t *testing.T) {
 		var out, errBuf bytes.Buffer
 		p := newTestPrinter(&out, &errBuf, FormatText, false, false, false)
-		if err := p.WhoAmI(&qurlapi.Identity{OwnerID: "own_jwt", AuthType: "jwt"}, ""); err != nil {
+		if err := p.WhoAmI(&qurlapi.Identity{OwnerID: "own_jwt", AuthType: "jwt"}, "", ""); err != nil {
 			t.Fatal(err)
 		}
 		if strings.Contains(out.String(), "Key:") || strings.Contains(out.String(), "Device public key:") {
@@ -83,7 +83,7 @@ func TestWhoAmIProjections(t *testing.T) {
 	t.Run("quiet", func(t *testing.T) {
 		var out, errBuf bytes.Buffer
 		p := newTestPrinter(&out, &errBuf, FormatText, true, false, false)
-		if err := p.WhoAmI(fixtureIdentity(), fixtureDeviceKey); err != nil {
+		if err := p.WhoAmI(fixtureIdentity(), fixtureDeviceKey, ""); err != nil {
 			t.Fatal(err)
 		}
 		if out.String() != "own_output_test\n" {
@@ -94,7 +94,7 @@ func TestWhoAmIProjections(t *testing.T) {
 	t.Run("json", func(t *testing.T) {
 		var out, errBuf bytes.Buffer
 		p := newTestPrinter(&out, &errBuf, FormatJSON, false, false, false)
-		if err := p.WhoAmI(fixtureIdentity(), fixtureDeviceKey); err != nil {
+		if err := p.WhoAmI(fixtureIdentity(), fixtureDeviceKey, ""); err != nil {
 			t.Fatal(err)
 		}
 		var doc struct {
@@ -137,7 +137,7 @@ func TestWhoAmIRendersDeviceKey(t *testing.T) {
 		if got := p.WhoAmIRendersDeviceKey(); got != tc.want {
 			t.Errorf("format %v quiet %v: WhoAmIRendersDeviceKey = %v, want %v", tc.format, tc.quiet, got, tc.want)
 		}
-		if err := p.WhoAmI(fixtureIdentity(), fixtureDeviceKey); err != nil {
+		if err := p.WhoAmI(fixtureIdentity(), fixtureDeviceKey, ""); err != nil {
 			t.Fatal(err)
 		}
 		if got := strings.Contains(out.String(), fixtureDeviceKey); got != tc.want {
@@ -152,7 +152,7 @@ func TestWhoAmIRendersDeviceKey(t *testing.T) {
 func TestWhoAmIJSONOmitsAnAbsentDevicePublicKey(t *testing.T) {
 	var out, errBuf bytes.Buffer
 	p := newTestPrinter(&out, &errBuf, FormatJSON, false, false, false)
-	if err := p.WhoAmI(&qurlapi.Identity{OwnerID: "own_jwt", AuthType: "jwt"}, ""); err != nil {
+	if err := p.WhoAmI(&qurlapi.Identity{OwnerID: "own_jwt", AuthType: "jwt"}, "", ""); err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(out.String(), "device_public_key_b64") {
@@ -223,5 +223,44 @@ func TestLoginJSONOmitsAnAbsentDeviceKeyID(t *testing.T) {
 	}
 	if strings.Contains(out.String(), "device_key_id") {
 		t.Fatalf("login JSON = %s, want no device_key_id when /v1/me reports no key", out.String())
+	}
+}
+
+// TestWhoAmIReportsKeyStorage pins the key-storage line: named for people in
+// text, the raw provider in JSON, and absent from both when there is no local
+// state to describe.
+func TestWhoAmIReportsKeyStorage(t *testing.T) {
+	for provider, wantText := range map[string]string{
+		"tpm":       "TPM (sealed to this machine)",
+		"file":      "file (owner-only, not encrypted)",
+		"local-key": "local-key",
+	} {
+		t.Run(provider, func(t *testing.T) {
+			var out, errBuf bytes.Buffer
+			if err := newTestPrinter(&out, &errBuf, FormatText, false, false, false).WhoAmI(fixtureIdentity(), fixtureDeviceKey, provider); err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(out.String(), "Key storage:") || !strings.Contains(out.String(), wantText) {
+				t.Fatalf("text projection missing key storage %q:\n%s", wantText, out.String())
+			}
+			out.Reset()
+			if err := newTestPrinter(&out, &errBuf, FormatJSON, false, false, false).WhoAmI(fixtureIdentity(), fixtureDeviceKey, provider); err != nil {
+				t.Fatal(err)
+			}
+			var doc map[string]any
+			if err := json.Unmarshal(out.Bytes(), &doc); err != nil {
+				t.Fatal(err)
+			}
+			if doc["key_storage"] != provider {
+				t.Fatalf("JSON key_storage = %v, want %q", doc["key_storage"], provider)
+			}
+		})
+	}
+	var out, errBuf bytes.Buffer
+	if err := newTestPrinter(&out, &errBuf, FormatJSON, false, false, false).WhoAmI(fixtureIdentity(), fixtureDeviceKey, ""); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out.String(), "key_storage") {
+		t.Fatalf("JSON without local state must omit key_storage:\n%s", out.String())
 	}
 }

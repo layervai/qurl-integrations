@@ -407,7 +407,8 @@ resource manager `/dev/tpmrm0`, which usually requires membership in the
 `tss` group, or TPM Base Services on Windows. macOS has no TPM. A TPM-sealed
 directory needs no environment to reopen, so the natively supervised
 background job serves it as usual. Existing directories keep the envelope
-they were created with and are never migrated in place.
+they were created with and are never migrated in place. `qurl whoami` shows
+which one this device uses (`Key storage:`, or `key_storage` with `-o json`).
 
 `LAYERV_KEY_PROVIDER` overrides that choice when a directory is created.
 `file` keeps it plaintext even where a TPM is available, and `tpm` requires

@@ -27,6 +27,10 @@ type whoamiJSON struct {
 	AuthType           string           `json:"auth_type"`
 	APIKey             *identityKeyJSON `json:"api_key,omitempty"`
 	DevicePublicKeyB64 string           `json:"device_public_key_b64,omitempty"`
+	// KeyStorage names the key provider protecting the local device state:
+	// "tpm", "file" (plaintext), or a supervisor's provider. It is omitted
+	// when no local state was found.
+	KeyStorage string `json:"key_storage,omitempty"`
 }
 
 type loginJSON struct {
@@ -65,22 +69,36 @@ func (p *Printer) WhoAmIRendersDeviceKey() bool {
 // just the owner id.
 //
 // devicePublicKeyB64 is this machine's registered-device public key from local
-// agent state, never from /v1/me; "" omits the row and the JSON field.
-func (p *Printer) WhoAmI(id *qurlapi.Identity, devicePublicKeyB64 string) error {
+// agent state, never from /v1/me; keyStorage names the key provider protecting
+// that state. "" omits either row and its JSON field.
+func (p *Printer) WhoAmI(id *qurlapi.Identity, devicePublicKeyB64, keyStorage string) error {
 	switch {
 	case p.format == FormatJSON:
 		return p.writeJSON(whoamiJSON{
 			OwnerID: id.OwnerID, AuthType: id.AuthType, APIKey: identityKey(id), DevicePublicKeyB64: devicePublicKeyB64,
+			KeyStorage: keyStorage,
 		})
 	case p.quiet:
 		_, err := fmt.Fprintln(p.out, id.OwnerID)
 		return err
 	default:
-		return p.whoamiText(id, devicePublicKeyB64)
+		return p.whoamiText(id, devicePublicKeyB64, keyStorage)
 	}
 }
 
-func (p *Printer) whoamiText(id *qurlapi.Identity, devicePublicKeyB64 string) error {
+// keyStorageLine describes a key provider for people.
+func keyStorageLine(provider string) string {
+	switch provider {
+	case "tpm":
+		return "TPM (sealed to this machine)"
+	case "file":
+		return "file (owner-only, not encrypted)"
+	default:
+		return provider
+	}
+}
+
+func (p *Printer) whoamiText(id *qurlapi.Identity, devicePublicKeyB64, keyStorage string) error {
 	tw := tabwriter.NewWriter(p.out, 0, 0, 2, ' ', 0)
 	ew := &errWriter{w: tw}
 	ew.printf("%s\t%s\n", p.bold("Owner:"), id.OwnerID)
@@ -93,6 +111,9 @@ func (p *Printer) whoamiText(id *qurlapi.Identity, devicePublicKeyB64 string) er
 	}
 	if devicePublicKeyB64 != "" {
 		ew.printf("%s\t%s\n", p.bold("Device public key:"), devicePublicKeyB64)
+	}
+	if keyStorage != "" {
+		ew.printf("%s\t%s\n", p.bold("Key storage:"), keyStorageLine(keyStorage))
 	}
 	return ew.flush(tw)
 }
