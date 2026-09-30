@@ -239,7 +239,7 @@ func TestPlainLoginDoesNotEstablishExternalPolicy(t *testing.T) {
 // because newRoot sets lookupEnv = os.LookupEnv, but nothing forced them to
 // agree: a provider name login accepted and SelectedKeyProvider treated as
 // the plaintext default would enroll an external device into a plaintext
-// namespace, which is the divergence sealedProviderSelected's
+// namespace, which is the divergence SelectedKeyProvider's
 // TODO(upstream-contract) warns about.
 func TestLoginsProviderGateImpliesTheNamespaceIsSealed(t *testing.T) {
 	for _, provider := range []string{

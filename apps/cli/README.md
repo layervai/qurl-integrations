@@ -416,6 +416,14 @@ hardware, a VM clone or image, a TPM clear, or another system later taking
 ownership of the TPM (most commonly Windows on a dual-boot machine) leaves it
 unreadable, and the error says which. The recovery is to move the state
 directory aside and enroll again, which creates a new device identity.
+<!-- TODO(upstream-contract): "the error says which" relies on qurl-connector
+pkg/agentstate's TPM unseal diagnostics. -->
+
+The background job must be able to reach the TPM too. On Linux a systemd user
+manager keeps the groups it started with, so after adding yourself to `tss`,
+log out fully (or reboot) before the first `qurl publish`; otherwise a
+foreground command can seal state that the background job, still without
+`tss`, cannot open. Its error then names the TPM.
 Existing directories keep the
 envelope they were created with and are never migrated in place. `qurl
 whoami` shows which one this device uses (`Key storage:`, or `key_storage`

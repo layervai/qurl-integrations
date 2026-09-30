@@ -49,6 +49,10 @@ const (
 	stateSubdir = "qurl/connector-v2"
 )
 
+// resolveKeyProvider is the connector's envelope decision for a namespace.
+// Tests replace it to drive Open's branches without depending on the host TPM.
+var resolveKeyProvider = connectoragentstate.ResolveKeyProvider
+
 // ErrNoDefaultStateDir means no explicit state override or absolute platform
 // user-state directory exists. Read-only remote commands treat this as an
 // absent local share namespace; commands that create local state surface it.
@@ -60,6 +64,8 @@ var ErrNoDefaultStateDir = errors.New("no default qurl sharing state directory")
 // connector does not accept, or a TPM-sealed envelope this machine's TPM can
 // no longer open (cleared, replaced, or another machine's state; the wrapped
 // error names the cause and the recovery, moving the directory aside). The
+// TODO(upstream-contract): that wording is qurl-connector pkg/agentstate's.
+// The
 // remedy is the environment or the state directory, never the command line,
 // so exitcode maps it to Config. A TPM that is merely not responding is
 // Unavailable instead.
@@ -127,15 +133,9 @@ var errStoreNotOpen = fmt.Errorf("%w: Connector state store is not open", qurl.E
 // explicitKeyProviderName (trimmed, case-folded, empty leaves the choice to
 // the namespace).
 func SelectedKeyProvider() (string, bool) {
-	raw, name := selectedKeyProviderName()
+	raw := strings.TrimSpace(os.Getenv(connectoragentstate.EnvKeyProvider))
+	name := strings.ToLower(raw)
 	return raw, name != "" && name != connectoragentstate.KeyProviderFile
-}
-
-// selectedKeyProviderName returns LAYERV_KEY_PROVIDER trimmed, and its
-// normalized (case-folded) name: the one place that rule is applied.
-func selectedKeyProviderName() (raw, name string) {
-	raw = strings.TrimSpace(os.Getenv(connectoragentstate.EnvKeyProvider))
-	return raw, strings.ToLower(raw)
 }
 
 // SelectedProviderNeedsEnvironment reports whether LAYERV_KEY_PROVIDER names a
@@ -147,9 +147,8 @@ func selectedKeyProviderName() (raw, name string) {
 // KeyProviderRequiresEnvironment returning true for every name it does not
 // know, so a mistyped provider is still refused under native supervision.
 func SelectedProviderNeedsEnvironment() (string, bool) {
-	raw, name := selectedKeyProviderName()
-	sealed := name != "" && name != connectoragentstate.KeyProviderFile
-	return raw, sealed && connectoragentstate.KeyProviderRequiresEnvironment(name)
+	raw, sealed := SelectedKeyProvider()
+	return raw, sealed && connectoragentstate.KeyProviderRequiresEnvironment(strings.ToLower(raw))
 }
 
 // Store owns the qurl-go agent state envelope for the process lifetime: the
@@ -207,7 +206,7 @@ func Open(dir string) (*Store, error) {
 	if err := EnsureDirMode(dir); err != nil {
 		return nil, fmt.Errorf("prepare native agent state directory: %w", err)
 	}
-	provider, err := connectoragentstate.ResolveKeyProvider(dir)
+	provider, err := resolveKeyProvider(dir)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrAgentStateEnvelope, err)
 	}

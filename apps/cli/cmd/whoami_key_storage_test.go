@@ -67,7 +67,10 @@ func TestLocalKeyStorageDescribesProvidersForPeople(t *testing.T) {
 	}
 }
 
-func TestLocalKeyStorageNeverEchoesAnUnknownProvider(t *testing.T) {
+// TestLocalKeyStorageDescribesNothingForAConflictingEnvelope covers the file
+// path: an unknown id in the envelope conflicts with the selected provider,
+// the connector refuses it, and nothing is described.
+func TestLocalKeyStorageDescribesNothingForAConflictingEnvelope(t *testing.T) {
 	t.Setenv(connectoragentstate.EnvKeyProvider, connectoragentstate.KeyProviderTPM)
 	dir := t.TempDir()
 	// With the variable set, the connector checks it against the envelope; an
@@ -78,5 +81,22 @@ func TestLocalKeyStorageNeverEchoesAnUnknownProvider(t *testing.T) {
 	got := localKeyStorage(&globalOpts{resolveShareStateDir: func(string) (string, error) { return dir, nil }})
 	if strings.Contains(got.Description, "\x1b") || strings.Contains(got.Provider, "\x1b") {
 		t.Fatalf("localKeyStorage echoed a control sequence from disk: %+v", got)
+	}
+}
+
+// TestLocalKeyStorageNeverEchoesAnUnknownProvider drives the mapping's
+// default arm directly: even an id that survived resolution is described with
+// fixed text, and JSON carries no synthetic id.
+func TestLocalKeyStorageNeverEchoesAnUnknownProvider(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, connectoragentstate.SealedAgentStateFile), []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	original := resolveLocalKeyProvider
+	resolveLocalKeyProvider = func(string) (string, error) { return "\x1b[31mevil", nil }
+	t.Cleanup(func() { resolveLocalKeyProvider = original })
+	got := localKeyStorage(&globalOpts{resolveShareStateDir: func(string) (string, error) { return dir, nil }})
+	if got != (output.KeyStorage{Description: "unrecognized provider"}) {
+		t.Fatalf("localKeyStorage with an unknown provider = %+v, want only the fixed description", got)
 	}
 }

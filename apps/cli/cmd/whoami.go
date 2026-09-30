@@ -76,6 +76,10 @@ anything.`,
 	}
 }
 
+// resolveLocalKeyProvider is the connector's provider resolution; tests replace
+// it to reach localKeyStorage's own mapping with ids a file could not produce.
+var resolveLocalKeyProvider = connectoragentstate.ResolveKeyProvider
+
 // localKeyStorage describes the key provider protecting this device's local
 // state, or the zero value when there is no envelope to describe. It is best
 // effort: a failure here must not turn an identity answer into an error.
@@ -98,7 +102,7 @@ func localKeyStorage(opts *globalOpts) output.KeyStorage {
 	if !present {
 		return output.KeyStorage{}
 	}
-	provider, err := connectoragentstate.ResolveKeyProvider(stateDir)
+	provider, err := resolveLocalKeyProvider(stateDir)
 	if err != nil {
 		return output.KeyStorage{}
 	}
@@ -115,7 +119,8 @@ func localKeyStorage(opts *globalOpts) output.KeyStorage {
 		connectoragentstate.KeyProviderGCPConfidentialSpace:
 		description = provider
 	default:
-		return output.KeyStorage{Provider: "unrecognized", Description: "unrecognized provider"}
+		// No synthetic id in JSON: only the human row warns.
+		return output.KeyStorage{Description: "unrecognized provider"}
 	}
 	return output.KeyStorage{Provider: provider, Description: description}
 }

@@ -101,7 +101,12 @@ func RequireRuntimeSupervision(dir string, expected RuntimeSupervision) error {
 	// served by a daemon its supervisor runs: the background job qurl installs
 	// natively carries no environment, and an inherited key descriptor cannot
 	// survive into a launchd, systemd, or Task Scheduler process. The TPM
-	// provider needs nothing from the environment, so it passes. Refuse here,
+	// provider needs nothing from the environment, so it passes. It does need
+	// TPM device access in the serving process, which on Linux is tss group
+	// membership: a user manager started before the user joined tss lacks it
+	// until the next login, and the daemon then cannot open state a foreground
+	// command sealed. That is documented rather than guarded here; the daemon's
+	// error names the TPM. Refuse here,
 	// which every mutating command reaches before it writes, rather than at
 	// the install: a sealed envelope written under native supervision cannot
 	// afterwards be adopted by EstablishExternalRuntimeMode, which requires a

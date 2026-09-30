@@ -174,7 +174,10 @@ func FromError(err error) int {
 	case errors.Is(err, qurl.ErrTemporaryAccessLinksDisabled),
 		// The local TPM exists but did not answer (busy, starting, timed out).
 		// Open wraps this in ErrAgentStateEnvelope, whose Config row would tell
-		// a script its setup is wrong; retrying is the remedy.
+		// a script its setup is wrong; retrying is the remedy. It is checked
+		// ahead of the host and qurl-go rows on purpose: a chain that also
+		// carries one of those still exits retryable, because no setup change
+		// can help until the TPM answers.
 		errors.Is(err, connectoragentstate.ErrTPMNotResponding):
 		return Unavailable
 	case errors.Is(err, qurl.ErrNoCRID), errors.Is(err, qurl.ErrCRIDMismatch):

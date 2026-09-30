@@ -102,6 +102,55 @@ func TestOpenRefusesAnEnvironmentSealedNamespaceWithoutItsVariables(t *testing.T
 	}
 }
 
+// TestOpenSealsAFreshNamespaceWhenTheResolverChoosesTheTPM pins the part of
+// the headline behavior this repository owns: when the connector's resolver
+// picks tpm for an empty directory with no LAYERV_KEY_PROVIDER, Open takes the
+// sealed branch and writes no plaintext envelope. Whether the host has a TPM
+// is the resolver's question, stubbed here.
+func TestOpenSealsAFreshNamespaceWhenTheResolverChoosesTheTPM(t *testing.T) {
+	clearStateEnv(t)
+	dir := secureStateTestDir(t)
+	original := resolveKeyProvider
+	resolveKeyProvider = func(string) (string, error) { return connectoragentstate.KeyProviderTPM, nil }
+	t.Cleanup(func() { resolveKeyProvider = original })
+	store, err := Open(dir)
+	if err != nil {
+		t.Fatalf("Open fresh namespace with the resolver choosing tpm = %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if store.envelope != connectoragentstate.SealedAgentStateFile {
+		t.Fatalf("Open chose envelope %q, want the sealed envelope", store.envelope)
+	}
+	if _, err := os.Lstat(filepath.Join(dir, AgentStateFile)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("plaintext envelope created for a TPM namespace: %v", err)
+	}
+}
+
+// TestOpenRefusesExplicitFileOverASealedNamespace pins the opt-out's other
+// edge, the guarantee the removed local guard in Open used to give: naming
+// the plaintext provider over sealed state is refused, never a second
+// envelope written beside it.
+//
+// TODO(upstream-contract): the refusal belongs to qurl-connector
+// pkg/agentstate resolveKeyProvider.
+func TestOpenRefusesExplicitFileOverASealedNamespace(t *testing.T) {
+	clearStateEnv(t)
+	dir := secureStateTestDir(t)
+	writeOwnerOnlyTestFile(t, dir, connectoragentstate.SealedAgentStateFile, []byte(`{"provider_id":"tpm"}`))
+	t.Setenv(connectoragentstate.EnvKeyProvider, connectoragentstate.KeyProviderFile)
+	store, err := Open(dir)
+	if err == nil {
+		_ = store.Close()
+		t.Fatal("Open accepted LAYERV_KEY_PROVIDER=file over a sealed namespace")
+	}
+	if !errors.Is(err, ErrAgentStateEnvelope) || !strings.Contains(err.Error(), connectoragentstate.SealedAgentStateFile) {
+		t.Fatalf("Open error = %v, want ErrAgentStateEnvelope naming the sealed envelope", err)
+	}
+	if _, statErr := os.Lstat(filepath.Join(dir, AgentStateFile)); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("plaintext envelope written beside the sealed one: %v", statErr)
+	}
+}
+
 // TestRequireRuntimeSupervisionAcceptsTheTPMUnderNative pins that only
 // providers whose key lives in the environment force external supervision.
 func TestRequireRuntimeSupervisionAcceptsTheTPMUnderNative(t *testing.T) {
