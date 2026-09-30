@@ -754,7 +754,7 @@ func TestWhoamiQuietSkipsDevicePublicKeyRead(t *testing.T) {
 func TestWhoamiJSONQuietStillShowsDevicePublicKey(t *testing.T) {
 	state := bootstrapRegisteredState(t)
 	code, stdout, stderr := runWhoamiWithStateStore(t, &bootstrapAgentStateStore{state: state}, "-o", "json", "-q")
-	if code != 0 || !strings.Contains(stdout, `"device_public_key_b64": "`+state.PublicKeyB64+`"`) {
+	if code != 0 || stderr != "" || !strings.Contains(stdout, `"device_public_key_b64": "`+state.PublicKeyB64+`"`) {
 		t.Fatalf("whoami -o json -q = %d, stdout %q, stderr %q; want the device public key", code, stdout, stderr)
 	}
 }

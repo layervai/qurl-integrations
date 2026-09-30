@@ -1017,7 +1017,7 @@ func devicePublicKey(ctx context.Context, store qurl.AgentStateStore) (string, e
 	}
 	key := persisted.PublicKeyB64
 	if key == "" {
-		return "", &invalidDevicePublicKeyError{reason: "device state records no public key"}
+		return "", &invalidDevicePublicKeyError{reason: "the key is empty"}
 	}
 	raw, err := base64.StdEncoding.DecodeString(key)
 	if err != nil {
