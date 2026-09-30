@@ -3,6 +3,7 @@ package output
 import (
 	"errors"
 	"fmt"
+	"strconv"
 	"text/tabwriter"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 // cannot silently change the CLI's output.
 
 type publishJSON struct {
+	Private    *bool      `json:"private,omitempty"`
 	CRID       string     `json:"crid,omitempty"`
 	ResourceID string     `json:"resource_id"`
 	TargetURL  string     `json:"target_url"`
@@ -40,8 +42,10 @@ type shareLinkJSON struct {
 // (the text table deliberately omits them — see List). A sweeper identifying
 // throwaway rows by the label their publisher gave them reads this document.
 type listItemJSON struct {
-	CRID       string `json:"crid,omitempty"`
-	ResourceID string `json:"resource_id"`
+	AllowedDeviceKeys []string `json:"allowed_device_keys"`
+	Private           *bool    `json:"private,omitempty"`
+	CRID              string   `json:"crid,omitempty"`
+	ResourceID        string   `json:"resource_id"`
 	// TargetURL is the owner-visible URL for URL resources and the target
 	// from this machine's local registry for tunnel resources when present.
 	TargetURL    string               `json:"target_url,omitempty"`
@@ -108,6 +112,8 @@ type SharingInspection struct {
 }
 
 type resourceStatusJSON struct {
+	AllowedDeviceKeys []string `json:"allowed_device_keys"`
+	Private           *bool    `json:"private,omitempty"`
 	// Description and tags are intentionally absent: status is the compact
 	// lifecycle view, while list is the metadata inventory surface.
 	CRID       string     `json:"crid,omitempty"`
@@ -139,6 +145,7 @@ func (p *Printer) Publish(res *qurlapi.Published) error {
 	switch {
 	case p.format == FormatJSON:
 		return p.writeJSON(publishJSON{
+			Private:       res.Private,
 			CRID:          res.CRID,
 			ResourceID:    res.ResourceID,
 			TargetURL:     res.TargetURL,
@@ -247,7 +254,9 @@ func (p *Printer) ResourceStatus(resource *qurlapi.ResourceSummary) error {
 	switch {
 	case p.format == FormatJSON:
 		return p.writeJSON(resourceStatusJSON{
-			CRID: resource.CRID, ResourceID: resource.ResourceID,
+			AllowedDeviceKeys: append([]string{}, resource.AllowedDeviceKeys...),
+			Private:           resource.Private,
+			CRID:              resource.CRID, ResourceID: resource.ResourceID,
 			TargetURL: resource.TargetURL, Type: resource.Type, Status: resource.Status,
 			CreatedAt: resource.CreatedAt, ExpiresAt: resource.ExpiresAt,
 		})
@@ -263,6 +272,10 @@ func (p *Printer) ResourceStatus(resource *qurlapi.ResourceSummary) error {
 		}
 		ew.printf("%s\t%s\n", p.bold("Type:"), resource.Type)
 		ew.printf("%s\t%s\n", p.bold("Status:"), resource.Status)
+		if resource.Private != nil {
+			ew.printf("%s\t%t\n", p.bold("Private:"), *resource.Private)
+		}
+		ew.printf("%s\t%v\n", p.bold("Allowed device keys:"), resource.AllowedDeviceKeys)
 		if resource.CreatedAt != nil {
 			ew.printf("%s\t%s\n", p.bold("Created:"), p.relativeTime(*resource.CreatedAt))
 		}
@@ -291,6 +304,9 @@ func (p *Printer) publishText(res *qurlapi.Published) error {
 	tw := tabwriter.NewWriter(p.out, 0, 0, 2, ' ', 0)
 	twe := &errWriter{w: tw}
 	twe.printf("  %s\t%s\n", p.bold("Target:"), res.TargetURL)
+	if res.Private != nil {
+		twe.printf("  %s\t%t\n", p.bold("Private:"), *res.Private)
+	}
 	if res.Status != "" {
 		twe.printf("  %s\t%s\n", p.bold("Status:"), res.Status)
 	}
@@ -392,17 +408,19 @@ func (p *Printer) List(page *qurlapi.ResourcePage) error {
 				servingEpoch = &epoch
 			}
 			out.Resources = append(out.Resources, listItemJSON{
-				CRID:         item.CRID,
-				ResourceID:   item.ResourceID,
-				TargetURL:    item.TargetURL,
-				Type:         item.Type,
-				Status:       item.Status,
-				DesiredState: item.DesiredState,
-				ServingEpoch: servingEpoch,
-				Description:  item.Description,
-				Tags:         item.Tags,
-				CreatedAt:    item.CreatedAt,
-				ExpiresAt:    item.ExpiresAt,
+				AllowedDeviceKeys: append([]string{}, item.AllowedDeviceKeys...),
+				CRID:              item.CRID,
+				ResourceID:        item.ResourceID,
+				Private:           item.Private,
+				TargetURL:         item.TargetURL,
+				Type:              item.Type,
+				Status:            item.Status,
+				DesiredState:      item.DesiredState,
+				ServingEpoch:      servingEpoch,
+				Description:       item.Description,
+				Tags:              item.Tags,
+				CreatedAt:         item.CreatedAt,
+				ExpiresAt:         item.ExpiresAt,
 			})
 		}
 		return p.writeJSON(out)
@@ -434,7 +452,7 @@ func (p *Printer) listText(page *qurlapi.ResourcePage) error {
 	ew := &errWriter{w: tw}
 	// Headers stay uncolored: tabwriter counts ANSI escape bytes as cell
 	// width, so styled headers would skew every column under them.
-	ew.printf("CRID\tTARGET\tDESIRED\tOBSERVED\tCREATED\tEXPIRES\n")
+	ew.printf("CRID\tTARGET\tDESIRED\tOBSERVED\tCREATED\tEXPIRES\tPRIVATE\n")
 	for i := range page.Items {
 		item := &page.Items[i]
 		desired, observed := "-", item.Status
@@ -445,13 +463,17 @@ func (p *Printer) listText(page *qurlapi.ResourcePage) error {
 				desired = "unknown"
 			}
 		}
-		ew.printf("%s\t%s\t%s\t%s\t%s\t%s\n",
+		privacy := "-"
+		if item.Private != nil {
+			privacy = strconv.FormatBool(*item.Private)
+		}
+		ew.printf("%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			item.CRID,
 			item.TargetURL,
 			desired,
 			observed,
 			p.listCreated(item.CreatedAt),
-			p.listExpires(item.ExpiresAt))
+			p.listExpires(item.ExpiresAt), privacy)
 	}
 	if err := ew.flush(tw); err != nil {
 		return err

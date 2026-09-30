@@ -75,7 +75,7 @@ func TestHelpLeadsWithTheOneCommandLocalJourney(t *testing.T) {
 	if local < 0 || remote < 0 || local >= remote {
 		t.Errorf("root help must show local publish before remote publish:\n%s", rootHelp)
 	}
-	for _, want := range []string{"shareable resource ID", "no access by itself", "qurl get"} {
+	for _, want := range []string{"permanent resource ID", "without an account or login", "qurl get"} {
 		if !strings.Contains(rootHelp, want) {
 			t.Errorf("root help missing %q:\n%s", want, rootHelp)
 		}
@@ -91,7 +91,7 @@ func TestHelpLeadsWithTheOneCommandLocalJourney(t *testing.T) {
 	if local < 0 || remote < 0 || local >= remote {
 		t.Errorf("publish help must explain the local path first:\n%s", publishHelp)
 	}
-	for _, want := range []string{"On Linux, macOS, and Windows", "background daemon", "--foreground", "prints the CRID, and exits", "qurl get <CRID>", "identifies the resource but grants no access"} {
+	for _, want := range []string{"On Linux, macOS, and Windows", "background daemon", "--foreground", "prints the CRID, and exits", "qurl get <CRID>", "request an access link without an account or login"} {
 		if !strings.Contains(publishHelp, want) {
 			t.Errorf("publish help missing %q:\n%s", want, publishHelp)
 		}

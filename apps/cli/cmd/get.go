@@ -111,16 +111,12 @@ func runGet(ctx context.Context, opts *globalOpts, operand string, flags getFlag
 		}
 	}
 
-	client, err := opts.newClient(ctx)
-	if err != nil {
-		return err
-	}
 	// mint requests a share link and verifies it; every path below — the
 	// browser launch, the download, and the mid-download retry — goes
 	// through it, so nothing ever acts on an unverified answer.
 	var shareLink *qurlapi.ShareLink
 	mint := func(ctx context.Context) (string, error) {
-		result, err := client.Share(ctx, assessment.Input, qurlapi.ShareOptions{SessionDurationSeconds: int(flags.sessionDuration / time.Second)})
+		result, err := opts.shareResource(ctx, assessment.Input, qurlapi.ShareOptions{SessionDurationSeconds: int(flags.sessionDuration / time.Second)})
 		if err := verifyShareLink(assessment, result, err); err != nil {
 			return "", err
 		}

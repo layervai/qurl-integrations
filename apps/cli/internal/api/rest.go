@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -29,17 +30,19 @@ const maxResponseBody = 1 << 20
 // Decoding is deliberately lax about extra fields: the server owns its own
 // payloads, and the projection into ResourceSummary is the contract.
 type resourceRow struct {
-	ResourceID   string       `json:"resource_id"`
-	CRID         string       `json:"crid"`
-	TargetURL    string       `json:"target_url"`
-	Type         string       `json:"type"`
-	Status       string       `json:"status"`
-	DesiredState DesiredState `json:"desired_state"`
-	ServingEpoch uint64       `json:"serving_epoch"`
-	Description  string       `json:"description"`
-	Tags         []string     `json:"tags"`
-	CreatedAt    *time.Time   `json:"created_at"`
-	ExpiresAt    *time.Time   `json:"expires_at"`
+	AllowedDeviceKeys []string     `json:"allowed_device_keys"`
+	Private           *bool        `json:"private"`
+	ResourceID        string       `json:"resource_id"`
+	CRID              string       `json:"crid"`
+	TargetURL         string       `json:"target_url"`
+	Type              string       `json:"type"`
+	Status            string       `json:"status"`
+	DesiredState      DesiredState `json:"desired_state"`
+	ServingEpoch      uint64       `json:"serving_epoch"`
+	Description       string       `json:"description"`
+	Tags              []string     `json:"tags"`
+	CreatedAt         *time.Time   `json:"created_at"`
+	ExpiresAt         *time.Time   `json:"expires_at"`
 }
 
 type sharingRow struct {
@@ -153,30 +156,43 @@ type envelopeMeta struct {
 	FoundExisting *bool  `json:"found_existing"`
 }
 
-// publishRequest is the pinned publish wire shape: type is required and
-// always "url" for CLI publishes (the tunnel type belongs to the Connector).
+// TODO(upstream-contract): privacy and tunnel find-or-create fields mirror
+// qurl-service CreateResourceRequest; privacy is immutable after creation.
 type publishRequest struct {
-	Type        string   `json:"type"`
-	TargetURL   string   `json:"target_url"`
-	Description string   `json:"description,omitempty"`
-	Tags        []string `json:"tags,omitempty"`
-	Alias       string   `json:"alias,omitempty"`
+	Private           *bool    `json:"private,omitempty"`
+	AllowedDeviceKeys []string `json:"allowed_device_keys,omitempty"`
+	Slug              string   `json:"slug,omitempty"`
+	FindOrCreate      bool     `json:"find_or_create,omitempty"`
+	Type              string   `json:"type"`
+	TargetURL         string   `json:"target_url,omitempty"`
+	Description       string   `json:"description,omitempty"`
+	Tags              []string `json:"tags,omitempty"`
+	Alias             string   `json:"alias,omitempty"`
 }
 
-// Publish registers targetURL as a protected URL resource. This is a direct
-// call rather than the SDK's ProtectURL because the pinned platform contract
-// requires the explicit `type: url` discriminator, which qurl-go v0.8.1 does
-// not send.
+// Publish registers a URL or pre-creates a private Connector resource.
+// The direct REST call carries fields absent from the pinned SDK.
+//
+//nolint:gocritic // Keep value options in the existing Client contract; this one-shot network operation is not a hot loop.
 func (c *client) Publish(ctx context.Context, targetURL string, opts PublishOptions) (*Published, error) {
-	if err := validateTargetURL(targetURL); err != nil {
-		return nil, err
+	if opts.ConnectorID == "" || targetURL != "" {
+		if err := validateTargetURL(targetURL); err != nil {
+			return nil, err
+		}
 	}
 	body := publishRequest{
-		Type:        "url",
-		TargetURL:   targetURL,
-		Description: opts.Description,
-		Tags:        opts.Tags,
-		Alias:       opts.Alias,
+		Private:           opts.Private,
+		AllowedDeviceKeys: opts.AllowedDeviceKeys,
+		Type:              "url",
+		TargetURL:         targetURL,
+		Description:       opts.Description,
+		Tags:              opts.Tags,
+		Alias:             opts.Alias,
+	}
+	if opts.ConnectorID != "" {
+		body.Type = "tunnel"
+		body.Slug = opts.ConnectorID
+		body.FindOrCreate = true
 	}
 	// Publish has no service idempotency key. A rate-limit response is usually
 	// pre-application, but the client cannot prove that a replay would not mint
@@ -204,7 +220,14 @@ func (c *client) Publish(ctx context.Context, targetURL string, opts PublishOpti
 	if err := resourceidentity.ValidatePair(env.Data.CRID, env.Data.ResourceID); err != nil {
 		return nil, fmt.Errorf("%w: publish response identity: %w", qurl.ErrInvalidAPIResponse, err)
 	}
+	if opts.Private != nil && (env.Data.Private == nil || *env.Data.Private != *opts.Private) {
+		return nil, fmt.Errorf("%w: API did not confirm the requested resource privacy", qurl.ErrInvalidAPIResponse)
+	}
+	if len(opts.AllowedDeviceKeys) > 0 && !slices.Equal(slices.Sorted(slices.Values(opts.AllowedDeviceKeys)), slices.Sorted(slices.Values(env.Data.AllowedDeviceKeys))) {
+		return nil, fmt.Errorf("%w: API did not confirm the requested device grants", qurl.ErrInvalidAPIResponse)
+	}
 	return &Published{
+		Private:       env.Data.Private,
 		CRID:          env.Data.CRID,
 		ResourceID:    env.Data.ResourceID,
 		TargetURL:     env.Data.TargetURL,
@@ -340,7 +363,9 @@ func summarizeResourceRow(row *resourceRow, source string) (*ResourceSummary, er
 		}
 	}
 	return &ResourceSummary{
-		CRID: row.CRID, ResourceID: row.ResourceID, TargetURL: row.TargetURL,
+		AllowedDeviceKeys: row.AllowedDeviceKeys,
+		Private:           row.Private,
+		CRID:              row.CRID, ResourceID: row.ResourceID, TargetURL: row.TargetURL,
 		Type: row.Type, Status: row.Status, DesiredState: row.DesiredState,
 		ServingEpoch: row.ServingEpoch, Description: row.Description, Tags: row.Tags,
 		CreatedAt: row.CreatedAt, ExpiresAt: row.ExpiresAt,
@@ -684,4 +709,36 @@ func firstNonEmpty(values ...string) string {
 
 func trimBaseURL(base string) string {
 	return strings.TrimRight(base, "/")
+}
+
+// SetDeviceGrants changes grants with one authenticated PATCH. It never retries.
+// TODO(upstream-contract): PATCH returns 200 with a flat data resource row,
+// including type, status, privacy and grants; GET nests its row under resource.
+func (c *client) SetDeviceGrants(ctx context.Context, id string, keys []string) (*ResourceSummary, error) {
+	if err := ValidateRequestTarget(http.MethodPatch, "/v1/resources/"+id); err != nil {
+		return nil, err
+	}
+	if keys == nil {
+		keys = []string{}
+	}
+	reply, err := c.doRESTOnce(ctx, http.MethodPatch, "/v1/resources/"+id, map[string]any{"allowed_device_keys": keys})
+	if err != nil {
+		return nil, err
+	}
+	if reply.status != http.StatusOK {
+		return nil, reply.problem()
+	}
+	var env struct {
+		Data resourceRow `json:"data"`
+	}
+	if err := json.Unmarshal(reply.body, &env); err != nil {
+		return nil, fmt.Errorf("%w: decode device grants: %w", qurl.ErrInvalidAPIResponse, err)
+	}
+	if err := validateSharingIdentity(id, sharingRow{CRID: env.Data.CRID, ResourceID: env.Data.ResourceID}); err != nil {
+		return nil, err
+	}
+	if !slices.Equal(slices.Sorted(slices.Values(keys)), slices.Sorted(slices.Values(env.Data.AllowedDeviceKeys))) {
+		return nil, fmt.Errorf("%w: API did not confirm the device grants", qurl.ErrInvalidAPIResponse)
+	}
+	return summarizeResourceRow(&env.Data, "device grants")
 }

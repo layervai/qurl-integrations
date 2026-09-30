@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"os"
@@ -23,11 +24,13 @@ import (
 
 func publishCmd(opts *globalOpts) *cobra.Command {
 	var (
-		description string
-		tags        []string
-		alias       string
-		connectorID string
-		foreground  bool
+		description       string
+		tags              []string
+		alias             string
+		connectorID       string
+		private           bool
+		allowedDeviceKeys []string
+		foreground        bool
 	)
 
 	cmd := &cobra.Command{
@@ -51,7 +54,9 @@ For a remote URL, qURL registers it, prints the CRID, and exits:
 
   qurl publish https://api.example.com/reports
 
-A CRID is safe to share: it identifies the resource but grants no access.
+Anyone given a public CRID can request an access link without an account or login.
+Use --private to limit link requests to the owner and devices you allow with
+--allow-device-key. Use "qurl whoami -o json" to find a recipient public key.
 Authorized users open it with "qurl get <CRID>". The --quiet flag prints only
 the CRID. Use --foreground for CI or daemon debugging; that process owns the
 share and turns it off when it exits.`,
@@ -61,6 +66,16 @@ share and turns it off when it exits.`,
   qurl publish https://grafana.internal.example.com --description "Team dashboard" --quiet`,
 		Args: exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			privacy := qurlapi.PublishOptions{AllowedDeviceKeys: allowedDeviceKeys}
+			if private {
+				privacy.Private = &private
+			}
+			if len(allowedDeviceKeys) > 0 && !private {
+				return exitcode.UsageError(errors.New("--allow-device-key requires --private"))
+			}
+			if err := validateAllowedDeviceKeys(allowedDeviceKeys); err != nil {
+				return exitcode.UsageError(err)
+			}
 			target, err := classifyPublishTarget(args[0])
 			if err != nil {
 				return err
@@ -71,7 +86,7 @@ share and turns it off when it exits.`,
 						return exitcode.UsageError(fmt.Errorf("--%s is not supported for a local Connector publish", name))
 					}
 				}
-				return runLocalPublish(cmd.Context(), opts, target, connectorID, foreground)
+				return runLocalPublish(cmd.Context(), opts, target, connectorID, foreground, &privacy)
 			}
 			if cmd.Flags().Changed("id") {
 				return exitcode.UsageError(errors.New("--id applies only when publishing a loopback HTTP origin"))
@@ -88,9 +103,11 @@ share and turns it off when it exits.`,
 			}
 
 			result, err := client.Publish(cmd.Context(), args[0], qurlapi.PublishOptions{
-				Description: description,
-				Tags:        tags,
-				Alias:       alias,
+				Private:           privacy.Private,
+				AllowedDeviceKeys: allowedDeviceKeys,
+				Description:       description,
+				Tags:              tags,
+				Alias:             alias,
 			})
 			if err != nil {
 				return err
@@ -101,6 +118,8 @@ share and turns it off when it exits.`,
 		},
 	}
 
+	cmd.Flags().BoolVar(&private, "private", false, "allow only the owner and listed devices to request access links")
+	cmd.Flags().StringArrayVar(&allowedDeviceKeys, "allow-device-key", nil, "recipient public key allowed to request links for a private CRID (repeatable)")
 	cmd.Flags().StringVar(&description, "description", "", "human-readable description stored with the resource")
 	cmd.Flags().StringArrayVar(&tags, "tag", nil, "tag stored with the resource (repeatable)")
 	cmd.Flags().StringVar(&alias, "alias", "", "memorable handle stored with the resource")
@@ -110,7 +129,7 @@ share and turns it off when it exits.`,
 	return cmd
 }
 
-func runLocalPublish(ctx context.Context, opts *globalOpts, target *publishTarget, flagID string, foreground bool) (retErr error) {
+func runLocalPublish(ctx context.Context, opts *globalOpts, target *publishTarget, flagID string, foreground bool, privacy *qurlapi.PublishOptions) (retErr error) {
 	requestedID, err := validateLocalPublishRequest(ctx, opts, target, flagID, foreground)
 	if err != nil {
 		return err
@@ -148,7 +167,7 @@ func runLocalPublish(ctx context.Context, opts *globalOpts, target *publishTarge
 	if _, err := opts.resolveSessionConfig(ownerID); err != nil {
 		return err
 	}
-	enrollment := &localEnrollment{opts: opts, target: target, requestedID: requestedID}
+	enrollment := &localEnrollment{opts: opts, target: target, requestedID: requestedID, privacy: *privacy}
 	// The registered REST client is open and cached before resource discovery
 	// can request a Connector enrollment credential. Resource discovery can
 	// therefore reuse it without a nested native-runtime open. The separate
@@ -235,6 +254,7 @@ func localPublishOwner(ctx context.Context, opts *globalOpts, registry localShar
 }
 
 type localEnrollment struct {
+	privacy     qurlapi.PublishOptions
 	opts        *globalOpts
 	target      *publishTarget
 	requestedID string
@@ -366,11 +386,34 @@ func prepareLocalPublishResource(
 		RecoveryCredentialProvider:   enrollment.recoveryCredential,
 		RefreshMode:                  connectorRefreshModeAuto,
 	}
+	var precreated *qurlapi.Published
 	resolved, err = opts.resolveLocalResource(ctx, cfg, func(agentID string) (string, error) {
-		return enrollment.resolveID(ctx, stateDir, agentID)
+		id, err := enrollment.resolveID(ctx, stateDir, agentID)
+		if err != nil {
+			return "", err
+		}
+		if enrollment.privacy.Private != nil {
+			client, err := opts.newClient(ctx)
+			if err != nil {
+				return "", err
+			}
+			privacy := enrollment.privacy
+			privacy.ConnectorID = id
+			precreated, err = client.Publish(ctx, "", privacy)
+			if err != nil {
+				return "", err
+			}
+		}
+		return id, nil
 	})
 	if err != nil {
 		return nil, "", err
+	}
+	if precreated != nil {
+		if resolved == nil || resolved.Resource == nil || precreated.CRID != resolved.Resource.CRID || precreated.ResourceID != resolved.Resource.ResourcePublicKey {
+			return nil, "", fmt.Errorf("%w: private resource does not match the Connector resource; check your published resources before retrying", qurl.ErrInvalidAPIResponse)
+		}
+		resolved.Private = precreated.Private
 	}
 	knockResourceID, err = agent.KnockResourceID(resolved.Resource)
 	if err != nil {
@@ -589,7 +632,7 @@ func printLocalPublishServing(opts *globalOpts, resolved *agent.ResolvedResource
 	printer := opts.printer()
 	return printer.Publish(&qurlapi.Published{
 		CRID: local.CRID, ResourceID: local.ResourceID, TargetURL: local.TargetURL,
-		Status: "serving", FoundExisting: resolved.FoundExisting,
+		Status: "serving", FoundExisting: resolved.FoundExisting, Private: resolved.Private,
 	})
 }
 
@@ -633,4 +676,21 @@ func resolveLocalPublishResource(ctx context.Context, cfg *connectorshare.Native
 	}
 	defer func() { retErr = errors.Join(retErr, resourceStore.Close()) }()
 	return agent.ResolveResourceWithResult(ctx, nativeRuntime.Binding, resourceStore, id)
+}
+
+func validateAllowedDeviceKeys(keys []string) error {
+	// TODO(upstream-contract): service grants allow at most 256 unique,
+	// canonical padded-base64 X25519 public keys.
+	if len(keys) > 256 {
+		return errors.New("--allow-device-key accepts at most 256 keys")
+	}
+	seen := make(map[string]bool, len(keys))
+	for _, key := range keys {
+		raw, err := base64.StdEncoding.DecodeString(key)
+		if err != nil || len(raw) != devicePublicKeySize || base64.StdEncoding.EncodeToString(raw) != key || seen[key] {
+			return errors.New("--allow-device-key requires unique canonical base64 X25519 public keys")
+		}
+		seen[key] = true
+	}
+	return nil
 }

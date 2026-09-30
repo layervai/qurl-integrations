@@ -1175,3 +1175,93 @@ func TestNewRejectsEmptyBaseURL(t *testing.T) {
 		t.Errorf("err = %v, want ErrInvalidClientConfig", err)
 	}
 }
+
+func TestPublishPrivateWireShape(t *testing.T) {
+	srv := apitest.NewServer(t)
+	srv.Script(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Private bool     `json:"private"`
+			Allowed []string `json:"allowed_device_keys"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Error(err)
+		}
+		if !body.Private || !slices.Equal(body.Allowed, []string{"recipient-public-key"}) {
+			t.Errorf("privacy lost: %+v", body)
+		}
+		apitest.WriteEnvelope(t, w, http.StatusCreated, map[string]any{"resource_id": srv.Key.ResourceID, "crid": srv.Key.CRID, "private": true, "allowed_device_keys": body.Allowed}, nil)
+	})
+	private := true
+	if _, err := newTestClient(t, srv, nil).Publish(t.Context(), "https://example.com", PublishOptions{Private: &private, AllowedDeviceKeys: []string{"recipient-public-key"}}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPublicClientCannotSelectAccountOrManageResources(t *testing.T) {
+	for _, cfg := range []*Config{{BaseURL: "https://example.com", APIKey: "not-allowed"}, {BaseURL: "https://example.com", OwnerID: "not-allowed"}} {
+		if _, err := NewPublic(cfg); !errors.Is(err, qurl.ErrInvalidClientConfig) {
+			t.Fatal("public client accepted account authority")
+		}
+	}
+	public, err := NewPublic(&Config{BaseURL: "https://example.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := public.(Client); ok {
+		t.Fatal("public client exposes management operations")
+	}
+}
+
+func TestPrivatePublishRequiresConfirmation(t *testing.T) {
+	for _, connectorID := range []string{"", "private-connector"} {
+		for _, responsePrivacy := range []any{nil, false, true} {
+			t.Run(fmt.Sprintf("connector=%s/private=%v", connectorID, responsePrivacy), func(t *testing.T) {
+				srv := apitest.NewServer(t)
+				srv.Script(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+					data := map[string]any{"resource_id": srv.Key.ResourceID, "crid": srv.Key.CRID}
+					if responsePrivacy != nil {
+						data["private"] = responsePrivacy
+					}
+					apitest.WriteEnvelope(t, w, http.StatusCreated, data, map[string]any{"found_existing": true})
+				})
+				private := true
+				result, err := newTestClient(t, srv, nil).Publish(t.Context(), "https://example.com", PublishOptions{Private: &private, ConnectorID: connectorID})
+				if responsePrivacy == true {
+					if err != nil || result.Private == nil || !*result.Private {
+						t.Fatalf("confirmed private publish: %v", err)
+					}
+				} else if !errors.Is(err, qurl.ErrInvalidAPIResponse) || result != nil {
+					t.Fatalf("unconfirmed private publish succeeded: %v", err)
+				}
+			})
+		}
+	}
+}
+
+func TestDeviceGrantsRequireConfirmation(t *testing.T) {
+	for _, method := range []string{http.MethodPost, http.MethodPatch} {
+		srv := apitest.NewServer(t)
+		path := "/v1/resources"
+		if method == http.MethodPatch {
+			path += "/" + srv.Key.CRID
+		}
+		srv.Script(method, path, func(w http.ResponseWriter, _ *http.Request) {
+			status := http.StatusOK
+			if method == http.MethodPost {
+				status = http.StatusCreated
+			}
+			apitest.WriteEnvelope(t, w, status, map[string]any{"resource_id": srv.Key.ResourceID, "crid": srv.Key.CRID, "private": true, "type": "url", "status": "active", "allowed_device_keys": []string{}}, nil)
+		})
+		client := newTestClient(t, srv, nil)
+		var err error
+		if method == http.MethodPost {
+			private := true
+			_, err = client.Publish(t.Context(), "https://example.com", PublishOptions{Private: &private, AllowedDeviceKeys: []string{"requested-key"}})
+		} else {
+			_, err = client.SetDeviceGrants(t.Context(), srv.Key.CRID, []string{"requested-key"})
+		}
+		if !errors.Is(err, qurl.ErrInvalidAPIResponse) {
+			t.Fatalf("missing grants accepted for %s: %v", method, err)
+		}
+	}
+}

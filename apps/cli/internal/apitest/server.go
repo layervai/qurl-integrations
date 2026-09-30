@@ -228,7 +228,7 @@ func (s *Server) defaultHandler(w http.ResponseWriter, r *http.Request) {
 			"resource_id": s.Key.ResourceID,
 			fieldCRID:     s.Key.CRID,
 			"target_url":  "https://example.com/data",
-			fieldType:     "url",
+			fieldType:     resourceTypeURL,
 			fieldStatus:   "active",
 			"description": "example data drop",
 			"tags":        []string{"demo", "fixture"},
@@ -249,23 +249,31 @@ func (s *Server) defaultHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handlePublish enforces the pinned publish contract: type=url and
-// target_url are required; violations are the 400 validation shape.
+const resourceTypeURL = "url"
+
+// handlePublish accepts URL creation and Connector find-or-create.
 func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Type      string `json:"type"`
-		TargetURL string `json:"target_url"`
+		AllowedDeviceKeys []string `json:"allowed_device_keys"`
+		Private           bool     `json:"private"`
+		Slug              string   `json:"slug"`
+		FindOrCreate      bool     `json:"find_or_create"`
+		Type              string   `json:"type"`
+		TargetURL         string   `json:"target_url"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		WriteProblem(s.t, w, http.StatusBadRequest, "invalid_request", "Bad Request", "request body must be JSON")
 		return
 	}
 	invalid := map[string]string{}
-	if body.Type != "url" {
-		invalid["type"] = "must be url"
+	if body.Type != resourceTypeURL && body.Type != "tunnel" {
+		invalid["type"] = "must be url or tunnel"
 	}
-	if body.TargetURL == "" {
+	if body.Type == resourceTypeURL && body.TargetURL == "" {
 		invalid["target_url"] = "is required"
+	}
+	if body.Type == "tunnel" && (body.Slug == "" || !body.FindOrCreate) {
+		invalid["slug"] = "tunnel creation requires slug and find_or_create"
 	}
 	if len(invalid) > 0 {
 		WriteProblemExtra(s.t, w, http.StatusBadRequest, "invalid_request", "Bad Request",
@@ -285,6 +293,12 @@ func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
 		"target_url":  body.TargetURL,
 		fieldStatus:   "active",
 		"created_at":  fixtureCreatedAt,
+	}
+	if len(body.AllowedDeviceKeys) > 0 {
+		data["allowed_device_keys"] = body.AllowedDeviceKeys
+	}
+	if body.Private {
+		data["private"] = true
 	}
 	if omitCRID {
 		delete(data, fieldCRID)
