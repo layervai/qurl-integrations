@@ -990,9 +990,40 @@ func TestBodySnippetIsBoundedValidUTF8(t *testing.T) {
 	}
 }
 
+// TestMeFixtureStillSendsKeyPrefix pins the premise of the whoami goldens:
+// the mock /v1/me still sends key_prefix, as the platform does, so a golden
+// without it proves the CLI drops it. Deleting the fixture field as dead data
+// would otherwise leave the goldens green with no guard behind them.
+func TestMeFixtureStillSendsKeyPrefix(t *testing.T) {
+	srv := apitest.NewServer(t)
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, srv.URL+"/v1/me", http.NoBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer lv_test_fixture_prefix_guard")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	var env struct {
+		Data struct {
+			APIKey struct {
+				KeyPrefix string `json:"key_prefix"`
+			} `json:"api_key"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&env); err != nil {
+		t.Fatal(err)
+	}
+	if env.Data.APIKey.KeyPrefix != "lv_test_fixt" {
+		t.Fatalf("mock /v1/me key_prefix = %q, want the bearer's first 12 chars", env.Data.APIKey.KeyPrefix)
+	}
+}
+
 // TestMeParsesIdentityEnvelope pins the GET /v1/me success contract: the
-// envelope decodes into the repo-owned Identity, key_prefix echoes the
-// presented credential, and the CLI headers ride the same shared transport.
+// envelope decodes into the repo-owned Identity and the CLI headers ride the
+// same shared transport.
 func TestMeParsesIdentityEnvelope(t *testing.T) {
 	srv := apitest.NewServer(t)
 	client := newTestClient(t, srv, nil)
@@ -1012,9 +1043,6 @@ func TestMeParsesIdentityEnvelope(t *testing.T) {
 	}
 	if want := []string{"qurl:read", "qurl:resolve", "qurl:write"}; !slices.Equal(id.Key.Scopes, want) {
 		t.Errorf("scopes = %v, want the platform's alphabetical %v", id.Key.Scopes, want)
-	}
-	if id.Key.KeyPrefix != "lv_test_apit" {
-		t.Errorf("key_prefix = %q, want the presented key's first 12 chars", id.Key.KeyPrefix)
 	}
 	if id.Key.ExpiresAt != nil {
 		t.Errorf("non-expiring fixture must project a nil expiry, got %v", id.Key.ExpiresAt)
