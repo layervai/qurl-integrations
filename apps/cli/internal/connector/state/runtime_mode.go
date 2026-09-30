@@ -131,7 +131,7 @@ func RequireRuntimeSupervision(dir string, expected RuntimeSupervision) error {
 		// unset leaves the choice to the namespace, which seals a new one to
 		// this machine's TPM when one is usable, and that choice is permanent.
 		return fmt.Errorf(
-			"%w: %s=%q selects a sealed agent state envelope, which only an external supervisor can serve; run every command with --supervision external, or set %s=%s for the plaintext envelope (unsetting it lets the state directory decide, which may seal a new one to this machine's TPM). A new sealed namespace must be a state directory that has held no state before",
+			"%w: %s=%q selects a sealed agent state envelope, which only an external supervisor can serve; run every command with --supervision external; or, if this state directory holds plaintext state or none yet, set %s=%s for the plaintext envelope (unsetting it lets the state directory decide, which may seal a new one to this machine's TPM). A directory already sealed by this provider opens only with it. A new sealed namespace must be a state directory that has held no state before",
 			ErrAgentStateEnvelope, connectoragentstate.EnvKeyProvider, provider, connectoragentstate.EnvKeyProvider, connectoragentstate.KeyProviderFile)
 	}
 	actual, err := ReadRuntimeSupervision(dir)

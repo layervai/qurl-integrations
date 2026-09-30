@@ -57,8 +57,10 @@ var ResolveKeyProvider = connectoragentstate.ResolveKeyProvider
 
 // EnvelopePresent reports whether dir may already hold an agent state
 // envelope. Only a definite "does not exist" for both names counts as absent:
-// an unreadable entry or directory is treated as present, the safe answer for
-// callers deciding whether a namespace is new.
+// an unreadable entry or directory is treated as present. That is advisory,
+// not a guarantee: on Windows a non-directory parent reports path-not-found,
+// which reads as absent, so callers use it only for notices and descriptions,
+// never to decide whether to create state.
 //
 // TODO(upstream-contract): mirrors qurl-connector pkg/agentstate's two
 // envelope names; a third would need adding here.
