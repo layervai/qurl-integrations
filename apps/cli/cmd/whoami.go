@@ -2,13 +2,10 @@ package main
 
 import (
 	"errors"
-	"os"
-	"path/filepath"
 
 	connectoragentstate "github.com/layervai/qurl-connector/pkg/agentstate"
 	"github.com/spf13/cobra"
 
-	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/output"
 )
 
@@ -82,7 +79,8 @@ anything.`,
 }
 
 // resolveLocalKeyProvider is the connector's provider resolution; tests replace
-// it to reach localKeyStorage's own mapping with ids a file could not produce.
+// it to reach localKeyStorage's mapping and the sealing notice. It is this
+// package's twin of state.resolveKeyProvider, which Open uses.
 var resolveLocalKeyProvider = connectoragentstate.ResolveKeyProvider
 
 // localKeyStorage describes the key provider protecting this device's local
@@ -103,14 +101,7 @@ func localKeyStorage(opts *globalOpts) output.KeyStorage {
 	if err != nil {
 		return output.KeyStorage{}
 	}
-	present := false
-	for _, name := range []string{connectorstate.AgentStateFile, connectoragentstate.SealedAgentStateFile} {
-		if _, err := os.Lstat(filepath.Join(stateDir, name)); err == nil {
-			present = true
-			break
-		}
-	}
-	if !present {
+	if !agentStateEnvelopePresent(stateDir) {
 		return output.KeyStorage{}
 	}
 	provider, err := resolveLocalKeyProvider(stateDir)

@@ -122,50 +122,54 @@ func TestLocalKeyStoragePassesTheConnectorsOtherProvidersThrough(t *testing.T) {
 	}
 }
 
-func TestTPMSealingNoticeIsForNativeLinuxOnly(t *testing.T) {
-	for _, tc := range []struct {
-		goos        string
-		supervision connectorstate.RuntimeSupervision
-		want        bool
-	}{
-		{"linux", connectorstate.RuntimeSupervisionNative, true},
-		{"linux", connectorstate.RuntimeSupervisionExternal, false},
-		{"windows", connectorstate.RuntimeSupervisionNative, false},
-		{"darwin", connectorstate.RuntimeSupervisionNative, false},
+func TestTPMSealingNoticeWordingByPlatform(t *testing.T) {
+	for goos, want := range map[string]string{
+		"linux":   msgTPMSealedLinuxDevice,
+		"windows": msgTPMSealedDevice,
+		"darwin":  msgTPMSealedDevice,
+		"":        "",
 	} {
-		if got := tpmSealingNeedsNotice(tc.goos, tc.supervision); got != tc.want {
-			t.Errorf("tpmSealingNeedsNotice(%s, %s) = %v, want %v", tc.goos, tc.supervision, got, tc.want)
+		got, ok := tpmSealingNotice(goos)
+		if got != want || ok != (want != "") {
+			t.Errorf("tpmSealingNotice(%q) = %q, %v; want %q", goos, got, ok, want)
 		}
 	}
 }
 
-// TestEnrollmentNotesTPMSealingOnlyForANewNamespace drives the one new
-// customer-visible notice: printed on native Linux when the resolver assigns a
-// new namespace to the TPM, and not when state already exists.
-func TestEnrollmentNotesTPMSealingOnlyForANewNamespace(t *testing.T) {
-	originalGOOS, originalResolve := hostGOOS, resolveLocalKeyProvider
-	hostGOOS = "linux"
+// TestSealingNoticeFiresOnlyBeforeStateExists drives the one new
+// customer-visible notice through its real entry point: printed under native
+// supervision when the resolver assigns a namespace with no envelope to the
+// TPM, and silent once any envelope exists (qurl-go persists the agent ID
+// before enrollment, so a later call site would never fire).
+func TestSealingNoticeFiresOnlyBeforeStateExists(t *testing.T) {
+	originalResolve := resolveLocalKeyProvider
 	resolveLocalKeyProvider = func(string) (string, error) { return connectoragentstate.KeyProviderTPM, nil }
-	t.Cleanup(func() { hostGOOS, resolveLocalKeyProvider = originalGOOS, originalResolve })
+	t.Cleanup(func() { resolveLocalKeyProvider = originalResolve })
 
-	note := func(dir string) string {
+	note := func(dir, goos string, supervision connectorstate.RuntimeSupervision) string {
 		var stderr bytes.Buffer
 		opts := &globalOpts{
 			streams:              &output.Streams{In: strings.NewReader(""), Out: io.Discard, Err: &stderr},
-			resolvedSupervision:  connectorstate.RuntimeSupervisionNative,
-			resolveShareStateDir: func(string) (string, error) { return dir, nil },
+			resolvedSupervision:  supervision,
+			keyStorageNoticeGOOS: goos,
 		}
-		newRegisteredAccountBootstrap(opts, nil, "", nil).noteTPMSealing()
+		opts.noteTPMSealing(dir)
 		return stderr.String()
 	}
-	if got := note(t.TempDir()); !strings.Contains(got, "sealed to this machine's TPM") {
-		t.Fatalf("new namespace notice = %q, want the TPM sealing notice", got)
+	if got := note(t.TempDir(), "linux", connectorstate.RuntimeSupervisionNative); !strings.Contains(got, "tss group") || !strings.Contains(got, "LAYERV_KEY_PROVIDER=file") {
+		t.Fatalf("linux notice = %q, want the tss clause and the opt-out", got)
+	}
+	if got := note(t.TempDir(), "windows", connectorstate.RuntimeSupervisionNative); !strings.Contains(got, "open only on this machine") || strings.Contains(got, "tss") {
+		t.Fatalf("windows notice = %q, want the permanence notice without tss", got)
+	}
+	if got := note(t.TempDir(), "linux", connectorstate.RuntimeSupervisionExternal); got != "" {
+		t.Fatalf("external supervision printed %q, want nothing", got)
 	}
 	existing := t.TempDir()
 	if err := os.WriteFile(filepath.Join(existing, connectoragentstate.SealedAgentStateFile), []byte(`{}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if got := note(existing); got != "" {
-		t.Fatalf("re-enrolling into existing TPM state printed %q, want nothing", got)
+	if got := note(existing, "linux", connectorstate.RuntimeSupervisionNative); got != "" {
+		t.Fatalf("existing state printed %q, want nothing", got)
 	}
 }

@@ -104,6 +104,11 @@ type globalOpts struct {
 	// can exercise the daemon control plane on every CI runner without enabling
 	// unsupported production paths.
 	backgroundShareGOOS string
+	// keyStorageNoticeGOOS selects the TPM sealing notice's wording.
+	// Production pins it to runtime.GOOS; it is separate from
+	// backgroundShareGOOS, which tests set to darwin for the daemon control
+	// plane. Empty skips the notice.
+	keyStorageNoticeGOOS string
 
 	// openAPIClient is the hermetic command-test seam. Production leaves it
 	// nil and opens the persisted registered-device client below.
@@ -187,12 +192,13 @@ func run(ctx context.Context, root *cobra.Command, opts *globalOpts) int {
 // newRoot builds the v2 command tree.
 func newRoot(version string, streams *output.Streams, options ...rootOption) (*cobra.Command, *globalOpts) {
 	opts := &globalOpts{
-		version:             version,
-		streams:             streams,
-		lookupEnv:           os.LookupEnv,
-		now:                 time.Now,
-		backgroundShareGOOS: runtime.GOOS,
-		signInAccount:       qurlapi.SignInAccount,
+		version:              version,
+		streams:              streams,
+		lookupEnv:            os.LookupEnv,
+		now:                  time.Now,
+		backgroundShareGOOS:  runtime.GOOS,
+		keyStorageNoticeGOOS: runtime.GOOS,
+		signInAccount:        qurlapi.SignInAccount,
 	}
 	for _, opt := range options {
 		opt(opts)
@@ -587,7 +593,6 @@ type registeredAccountBootstrap struct {
 	explicitValidatedAccountAuthority bool
 	enrollmentIdempotencyKey          string
 	warnedAnonymousDevice             bool
-	notedTPMSealing                   bool
 }
 
 type deviceAccountConflictError struct {
@@ -646,6 +651,54 @@ func bindRegisteredDeviceOwner(
 	return nil
 }
 
+// noteTPMSealing tells the user, before any state is written, that a new
+// device identity is about to be sealed to this machine's TPM: that choice is
+// permanent for the directory, and this is the only moment it is cheap to
+// change. On Linux it also names the tss requirement the background job has.
+func (o *globalOpts) noteTPMSealing(stateDir string) {
+	if o.quiet || o.streams == nil || o.streams.Err == nil || o.resolvedSupervision != connectorstate.RuntimeSupervisionNative {
+		return
+	}
+	message, ok := tpmSealingNotice(o.keyStorageNoticeGOOS)
+	if !ok || agentStateEnvelopePresent(stateDir) {
+		return
+	}
+	// TODO(upstream-contract): with no envelope, qurl-connector's resolver
+	// probes the TPM here and caches the result, so the runtime that opens
+	// next reaches the same decision without probing again.
+	if provider, err := resolveLocalKeyProvider(stateDir); err == nil && provider == connectoragentstate.KeyProviderTPM {
+		o.printer().Notef("%s", message)
+	}
+}
+
+// tpmSealingNotice returns the sealing notice for a platform. Only Linux names
+// the tss group: a systemd user manager keeps the groups it started with, so
+// the background job can lack TPM access a foreground command has.
+func tpmSealingNotice(goos string) (string, bool) {
+	switch goos {
+	case "":
+		return "", false
+	case "linux":
+		return msgTPMSealedLinuxDevice, true
+	default:
+		return msgTPMSealedDevice, true
+	}
+}
+
+// agentStateEnvelopePresent reports whether dir already holds either agent
+// state envelope.
+//
+// TODO(upstream-contract): mirrors qurl-connector pkg/agentstate's two
+// envelope names; a third would need adding here.
+func agentStateEnvelopePresent(dir string) bool {
+	for _, name := range []string{connectorstate.AgentStateFile, connectoragentstate.SealedAgentStateFile} {
+		if _, err := os.Lstat(filepath.Join(dir, name)); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
 func newRegisteredAccountBootstrap(opts *globalOpts, client qurlapi.AccountClient, key string, identity *qurlapi.Identity) *registeredAccountBootstrap {
 	return &registeredAccountBootstrap{
 		opts: opts, client: client, key: key, identity: identity,
@@ -675,51 +728,10 @@ func (b *registeredAccountBootstrap) load(ctx context.Context) (qurlapi.AccountC
 	return b.client, b.key, b.identity, nil
 }
 
-// noteTPMSealing tells the user, once and before the state is written, that a
-// new device identity on Linux under native supervision is being sealed to the
-// TPM, which the background job must also be able to reach.
-func (b *registeredAccountBootstrap) noteTPMSealing() {
-	if b.notedTPMSealing || b.opts.quiet || b.opts.streams == nil || b.opts.streams.Err == nil {
-		return
-	}
-	b.notedTPMSealing = true
-	if !tpmSealingNeedsNotice(hostGOOS, b.opts.resolvedSupervision) || b.opts.resolveShareStateDir == nil {
-		return
-	}
-	dir, err := b.opts.resolveShareStateDir("")
-	if err != nil {
-		return
-	}
-	// Only a namespace with no envelope is about to be sealed; re-enrolling
-	// into existing TPM state decides nothing and must not claim otherwise.
-	for _, name := range []string{connectorstate.AgentStateFile, connectoragentstate.SealedAgentStateFile} {
-		if _, err := os.Lstat(filepath.Join(dir, name)); err == nil {
-			return
-		}
-	}
-	// TODO(upstream-contract): this reuses qurl-connector's cached ProbeTPM
-	// result from resolving the namespace moments earlier; if the connector
-	// stopped caching it, this would probe the TPM a second time.
-	if provider, err := resolveLocalKeyProvider(dir); err == nil && provider == connectoragentstate.KeyProviderTPM {
-		b.opts.printer().Notef("%s", msgTPMSealedLinuxDevice)
-	}
-}
-
-// hostGOOS is runtime.GOOS; tests replace it to reach the Linux notice.
-var hostGOOS = runtime.GOOS
-
-// tpmSealingNeedsNotice reports whether sealing a new identity can leave the
-// background job without TPM access: only a Linux systemd user manager keeps
-// the groups it started with.
-func tpmSealingNeedsNotice(goos string, supervision connectorstate.RuntimeSupervision) bool {
-	return goos == "linux" && supervision == connectorstate.RuntimeSupervisionNative
-}
-
 func (b *registeredAccountBootstrap) enrollmentCredential(ctx context.Context, request qurl.AgentEnrollmentCredentialRequest) (string, error) {
 	if strings.TrimSpace(request.AgentID) == "" {
 		return "", errors.New("registered-device enrollment has no durable agent ID")
 	}
-	b.noteTPMSealing()
 	if b.client == nil && b.opts.resolvedSupervision == connectorstate.RuntimeSupervisionNative {
 		if _, _, err := auth.Resolve(b.opts.lookupEnv); errors.Is(err, auth.ErrNoCredential) {
 			if !b.warnedAnonymousDevice && !b.opts.quiet && b.opts.streams != nil && b.opts.streams.Err != nil {
@@ -808,6 +820,10 @@ func (o *globalOpts) openNativeRegisteredClient(
 	}
 
 	bootstrap := newRegisteredAccountBootstrap(o, account, accountKey, accountIdentity)
+	// Before the runtime opens: qurl-go persists the agent ID before it asks
+	// for an enrollment credential, so this is the last point at which an
+	// absent envelope still means a namespace about to be created.
+	o.noteTPMSealing(stateDir)
 
 	nativeRuntime, err := o.openNativeRuntime(ctx, connectorshare.NativeRuntimeConfig{
 		StateDir:                     stateDir,
