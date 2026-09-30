@@ -27,8 +27,8 @@ without an account. Use "qurl account setup" to enable account recovery.
 
 When this machine has registered device state, the output includes its
 device public key and which key storage protects that state: the TPM (sealed
-to this machine) or a plaintext owner-only file (plain --quiet prints only
-the owner id). The private key and the device API key never leave local
+to this machine) or a plaintext owner-only file. Plain --quiet prints only
+the owner id. The private key and the device API key never leave local
 state.
 
 Useful for checking which account a script will act as before it publishes
@@ -96,6 +96,9 @@ var resolveLocalKeyProvider = connectoragentstate.ResolveKeyProvider
 // ResolveKeyProvider not probing when an envelope already exists; the
 // presence check here only makes the probing path unreachable locally.
 func localKeyStorage(opts *globalOpts) output.KeyStorage {
+	if opts.resolveShareStateDir == nil {
+		return output.KeyStorage{}
+	}
 	stateDir, err := opts.resolveShareStateDir("")
 	if err != nil {
 		return output.KeyStorage{}

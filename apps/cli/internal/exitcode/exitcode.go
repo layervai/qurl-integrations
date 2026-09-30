@@ -229,14 +229,14 @@ func FromError(err error) int {
 
 // hostConditionCode maps local host conditions ahead of every sentinel
 // family (below only the CLI-typed wrappers and the early transient rows in
-// FromError, including a TPM that is not responding), matching
-// output.RenderError, which renders them ahead of the connector taxonomy: their
-// chains still carry whatever the connector wrapped, and the exit code must
-// agree with the message. The one deliberate exception is a chain that also
-// carries ErrTPMNotResponding: it exits Unavailable, because no host change
-// helps until the TPM answers, even where the message names the host condition. qurl-go's own permission refusals never become
-// ErrUnsafeDirectory (ExplainUnsafeDirectory leaves them as they are), so a
-// loose credential state mode stays Auth.
+// FromError), matching output.RenderError, which renders them ahead of the
+// connector taxonomy: their chains still carry whatever the connector
+// wrapped, and the exit code agrees with the message. The one deliberate
+// exception is a chain that also carries ErrTPMNotResponding: it exits
+// Unavailable even where the message names the host condition, because no
+// host change helps until the TPM answers. qurl-go's own permission refusals
+// never become ErrUnsafeDirectory (ExplainUnsafeDirectory leaves them as they
+// are), so a loose credential state mode stays Auth.
 func hostConditionCode(err error) (int, bool) {
 	switch {
 	case errors.Is(err, state.ErrUnsafeDirectory):

@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -682,19 +683,30 @@ func (b *registeredAccountBootstrap) noteTPMSealing() {
 		return
 	}
 	b.notedTPMSealing = true
-	if !tpmSealingNeedsNotice(runtime.GOOS, b.opts.resolvedSupervision) || b.opts.resolveShareStateDir == nil {
+	if !tpmSealingNeedsNotice(hostGOOS, b.opts.resolvedSupervision) || b.opts.resolveShareStateDir == nil {
 		return
 	}
 	dir, err := b.opts.resolveShareStateDir("")
 	if err != nil {
 		return
 	}
-	// Enrollment runs before the envelope exists, so this is the provider the
-	// new state is about to get (the probe result is already cached).
-	if provider, err := connectoragentstate.ResolveKeyProvider(dir); err == nil && provider == connectoragentstate.KeyProviderTPM {
+	// Only a namespace with no envelope is about to be sealed; re-enrolling
+	// into existing TPM state decides nothing and must not claim otherwise.
+	for _, name := range []string{connectorstate.AgentStateFile, connectoragentstate.SealedAgentStateFile} {
+		if _, err := os.Lstat(filepath.Join(dir, name)); err == nil {
+			return
+		}
+	}
+	// TODO(upstream-contract): this reuses qurl-connector's cached ProbeTPM
+	// result from resolving the namespace moments earlier; if the connector
+	// stopped caching it, this would probe the TPM a second time.
+	if provider, err := resolveLocalKeyProvider(dir); err == nil && provider == connectoragentstate.KeyProviderTPM {
 		b.opts.printer().Notef("%s", msgTPMSealedLinuxDevice)
 	}
 }
+
+// hostGOOS is runtime.GOOS; tests replace it to reach the Linux notice.
+var hostGOOS = runtime.GOOS
 
 // tpmSealingNeedsNotice reports whether sealing a new identity can leave the
 // background job without TPM access: only a Linux systemd user manager keeps

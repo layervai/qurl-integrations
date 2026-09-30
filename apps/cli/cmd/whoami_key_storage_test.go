@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -134,5 +136,36 @@ func TestTPMSealingNoticeIsForNativeLinuxOnly(t *testing.T) {
 		if got := tpmSealingNeedsNotice(tc.goos, tc.supervision); got != tc.want {
 			t.Errorf("tpmSealingNeedsNotice(%s, %s) = %v, want %v", tc.goos, tc.supervision, got, tc.want)
 		}
+	}
+}
+
+// TestEnrollmentNotesTPMSealingOnlyForANewNamespace drives the one new
+// customer-visible notice: printed on native Linux when the resolver assigns a
+// new namespace to the TPM, and not when state already exists.
+func TestEnrollmentNotesTPMSealingOnlyForANewNamespace(t *testing.T) {
+	originalGOOS, originalResolve := hostGOOS, resolveLocalKeyProvider
+	hostGOOS = "linux"
+	resolveLocalKeyProvider = func(string) (string, error) { return connectoragentstate.KeyProviderTPM, nil }
+	t.Cleanup(func() { hostGOOS, resolveLocalKeyProvider = originalGOOS, originalResolve })
+
+	note := func(dir string) string {
+		var stderr bytes.Buffer
+		opts := &globalOpts{
+			streams:              &output.Streams{In: strings.NewReader(""), Out: io.Discard, Err: &stderr},
+			resolvedSupervision:  connectorstate.RuntimeSupervisionNative,
+			resolveShareStateDir: func(string) (string, error) { return dir, nil },
+		}
+		newRegisteredAccountBootstrap(opts, nil, "", nil).noteTPMSealing()
+		return stderr.String()
+	}
+	if got := note(t.TempDir()); !strings.Contains(got, "sealed to this machine's TPM") {
+		t.Fatalf("new namespace notice = %q, want the TPM sealing notice", got)
+	}
+	existing := t.TempDir()
+	if err := os.WriteFile(filepath.Join(existing, connectoragentstate.SealedAgentStateFile), []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := note(existing); got != "" {
+		t.Fatalf("re-enrolling into existing TPM state printed %q, want nothing", got)
 	}
 }

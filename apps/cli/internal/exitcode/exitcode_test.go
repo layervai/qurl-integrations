@@ -469,3 +469,14 @@ func TestHostConditionsWinOverWrappedSentinels(t *testing.T) {
 		}
 	}
 }
+
+// TestTPMNotRespondingOutranksAHostCondition pins the deliberate exception in
+// hostConditionCode: a chain carrying both a host condition and a TPM that is
+// not responding exits retryable.
+func TestTPMNotRespondingOutranksAHostCondition(t *testing.T) {
+	unsafeDir := &state.UnsafeDirectoryError{Dir: "/home/agent/.local", Mode: 0o775, Err: errors.New("open")}
+	err := errors.Join(unsafeDir, fmt.Errorf("%w: busy", connectoragentstate.ErrTPMNotResponding))
+	if got := FromError(err); got != Unavailable {
+		t.Fatalf("FromError(unsafe directory + TPM not responding) = %d, want Unavailable", got)
+	}
+}
