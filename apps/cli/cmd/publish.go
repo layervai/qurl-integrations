@@ -23,11 +23,13 @@ import (
 
 func publishCmd(opts *globalOpts) *cobra.Command {
 	var (
-		description string
-		tags        []string
-		alias       string
-		connectorID string
-		foreground  bool
+		description       string
+		tags              []string
+		alias             string
+		connectorID       string
+		private           bool
+		allowedDeviceKeys []string
+		foreground        bool
 	)
 
 	cmd := &cobra.Command{
@@ -61,6 +63,13 @@ share and turns it off when it exits.`,
   qurl publish https://grafana.internal.example.com --description "Team dashboard" --quiet`,
 		Args: exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			privacy := qurlapi.PublishOptions{AllowedDeviceKeys: allowedDeviceKeys}
+			if cmd.Flags().Changed("private") {
+				privacy.Private = &private
+			}
+			if len(allowedDeviceKeys) > 0 && !private {
+				return exitcode.UsageError(errors.New("--allow-device-key requires --private"))
+			}
 			target, err := classifyPublishTarget(args[0])
 			if err != nil {
 				return err
@@ -71,7 +80,7 @@ share and turns it off when it exits.`,
 						return exitcode.UsageError(fmt.Errorf("--%s is not supported for a local Connector publish", name))
 					}
 				}
-				return runLocalPublish(cmd.Context(), opts, target, connectorID, foreground)
+				return runLocalPublish(cmd.Context(), opts, target, connectorID, foreground, &privacy)
 			}
 			if cmd.Flags().Changed("id") {
 				return exitcode.UsageError(errors.New("--id applies only when publishing a loopback HTTP origin"))
@@ -88,9 +97,11 @@ share and turns it off when it exits.`,
 			}
 
 			result, err := client.Publish(cmd.Context(), args[0], qurlapi.PublishOptions{
-				Description: description,
-				Tags:        tags,
-				Alias:       alias,
+				Private:           privacy.Private,
+				AllowedDeviceKeys: allowedDeviceKeys,
+				Description:       description,
+				Tags:              tags,
+				Alias:             alias,
 			})
 			if err != nil {
 				return err
@@ -101,6 +112,8 @@ share and turns it off when it exits.`,
 		},
 	}
 
+	cmd.Flags().BoolVar(&private, "private", false, "allow only the owner and listed devices to request access links")
+	cmd.Flags().StringArrayVar(&allowedDeviceKeys, "allow-device-key", nil, "recipient public key allowed to request links for a private CRID (repeatable)")
 	cmd.Flags().StringVar(&description, "description", "", "human-readable description stored with the resource")
 	cmd.Flags().StringArrayVar(&tags, "tag", nil, "tag stored with the resource (repeatable)")
 	cmd.Flags().StringVar(&alias, "alias", "", "memorable handle stored with the resource")
@@ -110,7 +123,7 @@ share and turns it off when it exits.`,
 	return cmd
 }
 
-func runLocalPublish(ctx context.Context, opts *globalOpts, target *publishTarget, flagID string, foreground bool) (retErr error) {
+func runLocalPublish(ctx context.Context, opts *globalOpts, target *publishTarget, flagID string, foreground bool, privacy *qurlapi.PublishOptions) (retErr error) {
 	requestedID, err := validateLocalPublishRequest(ctx, opts, target, flagID, foreground)
 	if err != nil {
 		return err
@@ -148,7 +161,7 @@ func runLocalPublish(ctx context.Context, opts *globalOpts, target *publishTarge
 	if _, err := opts.resolveSessionConfig(ownerID); err != nil {
 		return err
 	}
-	enrollment := &localEnrollment{opts: opts, target: target, requestedID: requestedID}
+	enrollment := &localEnrollment{opts: opts, target: target, requestedID: requestedID, privacy: *privacy}
 	// The registered REST client is open and cached before resource discovery
 	// can request a Connector enrollment credential. Resource discovery can
 	// therefore reuse it without a nested native-runtime open. The separate
@@ -235,6 +248,7 @@ func localPublishOwner(ctx context.Context, opts *globalOpts, registry localShar
 }
 
 type localEnrollment struct {
+	privacy     qurlapi.PublishOptions
 	opts        *globalOpts
 	target      *publishTarget
 	requestedID string
@@ -367,7 +381,22 @@ func prepareLocalPublishResource(
 		RefreshMode:                  connectorRefreshModeAuto,
 	}
 	resolved, err = opts.resolveLocalResource(ctx, cfg, func(agentID string) (string, error) {
-		return enrollment.resolveID(ctx, stateDir, agentID)
+		id, err := enrollment.resolveID(ctx, stateDir, agentID)
+		if err != nil {
+			return "", err
+		}
+		if enrollment.privacy.Private != nil || len(enrollment.privacy.AllowedDeviceKeys) > 0 {
+			client, err := opts.newClient(ctx)
+			if err != nil {
+				return "", err
+			}
+			privacy := enrollment.privacy
+			privacy.ConnectorID = id
+			if _, err := client.Publish(ctx, "", privacy); err != nil {
+				return "", err
+			}
+		}
+		return id, nil
 	})
 	if err != nil {
 		return nil, "", err

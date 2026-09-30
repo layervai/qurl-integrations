@@ -7,7 +7,7 @@ qurl publish http://127.0.0.1:3000
 ```
 
 qURL™ gives the app a permanent **CRID** you can give to recipients in chat,
-documentation, or an agent prompt. Anyone given the CRID can request a
+documentation, or an agent prompt. Anyone given a public CRID can request a
 short-lived access link without a LayerV account or login.
 
 [Publish localhost in 60 seconds](#publish-localhost-in-60-seconds) ·
@@ -84,7 +84,7 @@ debugging. When another program owns the daemon process, run it with
 
 ### 3. Open or share it
 
-Anyone given the CRID can request an access link. To open the app:
+Anyone given a public CRID can request an access link without an account or login. To open the app:
 
 ```bash
 qurl get <CRID>
@@ -1143,3 +1143,18 @@ qurl list -o json | jq -r '.resources[].crid'
 
 Account setup and recovery return `owner_id` and `status` (`linked` or
 `recovered`) with `-o json`. With `--quiet`, they print only the owner ID.
+
+### Private CRIDs
+
+CRIDs are public by default. Use `qurl publish <target-url> --private` to
+allow only the owner to request links. Add each allowed recipient with
+`--allow-device-key <public-key>`. This works for remote URLs and local apps.
+
+For a private CRID, `qurl share <CRID>` uses the registered device identity.
+No LayerV account or browser login is required for an allowed device.
+The publisher can replace or clear the list with
+`PATCH /v1/resources/{CRID}` and `{"allowed_device_keys":["<public-key>"]}`.
+An empty list removes all device grants. The list accepts up to 256 canonical
+X25519 public keys. Privacy is set at creation; a retry cannot change it.
+Removing a device stops new link requests. Previously issued links retain
+their expiry and revocation rules.

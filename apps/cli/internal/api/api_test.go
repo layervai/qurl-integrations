@@ -1147,3 +1147,24 @@ func TestNewRejectsEmptyBaseURL(t *testing.T) {
 		t.Errorf("err = %v, want ErrInvalidClientConfig", err)
 	}
 }
+
+func TestPublishPrivateWireShape(t *testing.T) {
+	srv := apitest.NewServer(t)
+	srv.Script(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Private bool     `json:"private"`
+			Allowed []string `json:"allowed_device_keys"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Error(err)
+		}
+		if !body.Private || !slices.Equal(body.Allowed, []string{"recipient-public-key"}) {
+			t.Errorf("privacy lost: %+v", body)
+		}
+		apitest.WriteEnvelope(t, w, http.StatusCreated, map[string]any{"resource_id": srv.Key.ResourceID, "crid": srv.Key.CRID, "private": true}, nil)
+	})
+	private := true
+	if _, err := newTestClient(t, srv, nil).Publish(t.Context(), "https://example.com", PublishOptions{Private: &private, AllowedDeviceKeys: []string{"recipient-public-key"}}); err != nil {
+		t.Fatal(err)
+	}
+}

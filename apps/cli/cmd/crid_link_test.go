@@ -137,3 +137,33 @@ func TestShareWithoutAccountOrEnrollment(t *testing.T) {
 		t.Fatalf("share must make only the share request: %+v", requests)
 	}
 }
+
+func TestPrivateShareAuthenticatesOnlyAfterChallenge(t *testing.T) {
+	srv := apitest.NewServer(t)
+	path := "/v1/resources/" + srv.Key.CRID + "/share"
+	srv.Script(http.MethodPost, path, func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "" {
+			t.Error("initial share was authenticated")
+		}
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":{"code":"unauthorized","status":401,"detail":"Private resource requires authentication"}}`))
+	})
+	result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "share", srv.Key.CRID}})
+	if result.code != 0 {
+		t.Fatalf("private retry failed: %s", result.stderr.String())
+	}
+	shares := 0
+	for _, request := range srv.Requests() {
+		if request.Path != path {
+			continue
+		}
+		shares++
+		if shares == 2 && request.Header.Get("Authorization") == "" {
+			t.Fatal("private retry has no credential")
+		}
+	}
+	if shares != 2 || strings.TrimSpace(result.stdout.String()) == "" {
+		t.Fatalf("shares=%d output=%q", shares, result.stdout.String())
+	}
+}

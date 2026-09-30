@@ -156,27 +156,42 @@ type envelopeMeta struct {
 // publishRequest is the pinned publish wire shape: type is required and
 // always "url" for CLI publishes (the tunnel type belongs to the Connector).
 type publishRequest struct {
-	Type        string   `json:"type"`
-	TargetURL   string   `json:"target_url"`
-	Description string   `json:"description,omitempty"`
-	Tags        []string `json:"tags,omitempty"`
-	Alias       string   `json:"alias,omitempty"`
+	Private           *bool    `json:"private,omitempty"`
+	AllowedDeviceKeys []string `json:"allowed_device_keys,omitempty"`
+	Slug              string   `json:"slug,omitempty"`
+	FindOrCreate      bool     `json:"find_or_create,omitempty"`
+	Type              string   `json:"type"`
+	TargetURL         string   `json:"target_url,omitempty"`
+	Description       string   `json:"description,omitempty"`
+	Tags              []string `json:"tags,omitempty"`
+	Alias             string   `json:"alias,omitempty"`
 }
 
 // Publish registers targetURL as a protected URL resource. This is a direct
 // call rather than the SDK's ProtectURL because the pinned platform contract
 // requires the explicit `type: url` discriminator, which qurl-go v0.8.1 does
 // not send.
+//
+//nolint:gocritic // Keep value options in the existing Client contract; this one-shot network operation is not a hot loop.
 func (c *client) Publish(ctx context.Context, targetURL string, opts PublishOptions) (*Published, error) {
-	if err := validateTargetURL(targetURL); err != nil {
-		return nil, err
+	if opts.ConnectorID == "" {
+		if err := validateTargetURL(targetURL); err != nil {
+			return nil, err
+		}
 	}
 	body := publishRequest{
-		Type:        "url",
-		TargetURL:   targetURL,
-		Description: opts.Description,
-		Tags:        opts.Tags,
-		Alias:       opts.Alias,
+		Private:           opts.Private,
+		AllowedDeviceKeys: opts.AllowedDeviceKeys,
+		Type:              "url",
+		TargetURL:         targetURL,
+		Description:       opts.Description,
+		Tags:              opts.Tags,
+		Alias:             opts.Alias,
+	}
+	if opts.ConnectorID != "" {
+		body.Type = "tunnel"
+		body.Slug = opts.ConnectorID
+		body.FindOrCreate = true
 	}
 	// Publish has no service idempotency key. A rate-limit response is usually
 	// pre-application, but the client cannot prove that a replay would not mint

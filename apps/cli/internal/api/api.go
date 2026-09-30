@@ -73,9 +73,12 @@ type AccountClient interface {
 
 // PublishOptions carries the optional publish metadata.
 type PublishOptions struct {
-	Description string
-	Tags        []string
-	Alias       string
+	Private           *bool
+	AllowedDeviceKeys []string
+	ConnectorID       string
+	Description       string
+	Tags              []string
+	Alias             string
 }
 
 // ShareOptions carries the optional share parameters.

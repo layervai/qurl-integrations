@@ -36,8 +36,9 @@ func shareCmd(opts *globalOpts) *cobra.Command {
 		Short:      "Share a CRID as a short-lived access link",
 		Long: `Share a CRID as a temporary access link for the resource it names.
 
-Anyone with a CRID can request a link. No account or login is required.
-Give the CRID and the link only to people who should have access.
+Public CRIDs need no account or login. For a private CRID, only its owner
+or a device allowed by the publisher can request a link. The CLI uses
+your registered device when the resource is private.
 The link expires on its own; share again whenever you need a fresh one.
 
 Before anything is printed, the CLI verifies that the link belongs
@@ -80,10 +81,19 @@ else, ready to hand out or open.`,
 			if err != nil {
 				return err
 			}
-			link, err := client.Share(cmd.Context(), assessment.Input, qurlapi.ShareOptions{
-				TTLSeconds:             int(ttl.Seconds()),
-				SessionDurationSeconds: int(sessionDuration / time.Second),
-			})
+			shareOpts := qurlapi.ShareOptions{
+				TTLSeconds: int(ttl.Seconds()), SessionDurationSeconds: int(sessionDuration / time.Second),
+			}
+			link, err := client.Share(cmd.Context(), assessment.Input, shareOpts)
+			var apiErr *qurlapi.Error
+			if errors.As(err, &apiErr) && apiErr.StatusCode == 401 {
+				client, openErr := opts.newClient(cmd.Context())
+				if openErr != nil {
+					return openErr
+				}
+				link, err = client.Share(cmd.Context(), assessment.Input, shareOpts)
+			}
+
 			if err := verifyShareLink(assessment, link, err); err != nil {
 				return err
 			}
