@@ -21,17 +21,22 @@ import (
 func TestOpenReopensATPMNamespaceWithoutTheEnvironment(t *testing.T) {
 	clearStateEnv(t)
 	dir := secureStateTestDir(t)
-	envelope := filepath.Join(dir, connectoragentstate.SealedAgentStateFile)
-	if err := os.WriteFile(envelope, []byte(`{"provider_id":"tpm"}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	writeOwnerOnlyTestFile(t, dir, connectoragentstate.SealedAgentStateFile, []byte(`{"provider_id":"tpm"}`))
+	unsetKeyProvider(t)
 	store, err := Open(dir)
 	if err != nil {
-		t.Fatalf("Open TPM namespace without the environment = %v", err)
-	}
-	t.Cleanup(func() { _ = store.Close() })
-	if store.envelope != connectoragentstate.SealedAgentStateFile {
-		t.Fatalf("Open chose envelope %q, want the sealed envelope", store.envelope)
+		// The stub envelope may not satisfy every check the sealed store makes
+		// on a real one. What this test pins is the branch: the failure must
+		// come from initializing sealed state, never from resolution telling
+		// the operator to set LAYERV_KEY_PROVIDER.
+		if !strings.Contains(err.Error(), "initialize sealed agent state") || strings.Contains(err.Error(), connectoragentstate.EnvKeyProvider) {
+			t.Fatalf("Open TPM namespace without the environment = %v, want the sealed branch", err)
+		}
+	} else {
+		t.Cleanup(func() { _ = store.Close() })
+		if store.envelope != connectoragentstate.SealedAgentStateFile {
+			t.Fatalf("Open chose envelope %q, want the sealed envelope", store.envelope)
+		}
 	}
 	if _, err := os.Lstat(filepath.Join(dir, AgentStateFile)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("plaintext envelope created beside the TPM one: %v", err)
@@ -54,9 +59,7 @@ func TestOpenRefusesTPMOverAnExistingPlaintextNamespace(t *testing.T) {
 	if first.envelope != AgentStateFile {
 		t.Fatalf("Open with the file provider chose %q", first.envelope)
 	}
-	if err := os.WriteFile(filepath.Join(dir, AgentStateFile), []byte("{}"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	writeOwnerOnlyTestFile(t, dir, AgentStateFile, []byte("{}"))
 	if err := first.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -70,6 +73,31 @@ func TestOpenRefusesTPMOverAnExistingPlaintextNamespace(t *testing.T) {
 	// pkg/agentstate's refusal text for a provider change.
 	if !errors.Is(err, ErrAgentStateEnvelope) || !strings.Contains(err.Error(), "not an in-place migration") {
 		t.Fatalf("Open error = %v, want an ErrAgentStateEnvelope migration refusal", err)
+	}
+}
+
+// TestOpenRefusesAnEnvironmentSealedNamespaceWithoutItsVariables pins the
+// guarantee the removed local guard in Open used to provide, now owned by the
+// connector's resolver: a namespace sealed by local-key opened with no
+// provider selected is refused, and the error names the variable to set.
+//
+// TODO(upstream-contract): the refusal and its wording belong to
+// qurl-connector pkg/agentstate resolveKeyProvider.
+func TestOpenRefusesAnEnvironmentSealedNamespaceWithoutItsVariables(t *testing.T) {
+	clearStateEnv(t)
+	dir := secureStateTestDir(t)
+	writeOwnerOnlyTestFile(t, dir, connectoragentstate.SealedAgentStateFile, []byte(`{"provider_id":"local-key"}`))
+	unsetKeyProvider(t)
+	store, err := Open(dir)
+	if err == nil {
+		_ = store.Close()
+		t.Fatal("Open accepted a local-key namespace with no provider selected")
+	}
+	if !errors.Is(err, ErrAgentStateEnvelope) || !strings.Contains(err.Error(), connectoragentstate.EnvKeyProvider+"="+connectoragentstate.KeyProviderLocalKey) {
+		t.Fatalf("Open error = %v, want ErrAgentStateEnvelope naming %s=%s", err, connectoragentstate.EnvKeyProvider, connectoragentstate.KeyProviderLocalKey)
+	}
+	if _, statErr := os.Lstat(filepath.Join(dir, AgentStateFile)); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("plaintext envelope written beside the sealed one: %v", statErr)
 	}
 }
 
@@ -93,5 +121,15 @@ func TestRequireRuntimeSupervisionAcceptsTheTPMUnderNative(t *testing.T) {
 				t.Fatalf("RequireRuntimeSupervision(native) with %q = %v, want refused=%v", provider, err, refused)
 			}
 		})
+	}
+}
+
+// writeOwnerOnlyTestFile writes name through the package's owner-only state
+// writer, so on Windows it carries the protected ACL the stores require
+// rather than the directory's inherited one.
+func writeOwnerOnlyTestFile(t *testing.T, dir, name string, data []byte) {
+	t.Helper()
+	if err := replaceConnectorResources(dir, filepath.Join(dir, name), data); err != nil {
+		t.Fatalf("write %s: %v", name, err)
 	}
 }

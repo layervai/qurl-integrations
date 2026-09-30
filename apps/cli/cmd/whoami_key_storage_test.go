@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -8,6 +9,7 @@ import (
 	connectoragentstate "github.com/layervai/qurl-connector/pkg/agentstate"
 
 	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/output"
 )
 
 // TestLocalKeyStorageDescribesOnlyAnExistingEnvelope pins that whoami reports
@@ -22,18 +24,44 @@ func TestLocalKeyStorageDescribesOnlyAnExistingEnvelope(t *testing.T) {
 		"plaintext": {file: connectorstate.AgentStateFile, body: "{}", want: connectoragentstate.KeyProviderFile},
 		"tpm":       {file: connectoragentstate.SealedAgentStateFile, body: `{"provider_id":"tpm"}`, want: connectoragentstate.KeyProviderTPM},
 		"corrupt":   {file: connectoragentstate.SealedAgentStateFile, body: `{}`},
+		"both":      {file: "both"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			dir := t.TempDir()
-			if tc.file != "" {
+			switch tc.file {
+			case "":
+			case "both":
+				// Two envelopes: the connector refuses, so nothing is described.
+				for name, body := range map[string]string{connectorstate.AgentStateFile: "{}", connectoragentstate.SealedAgentStateFile: `{"provider_id":"tpm"}`} {
+					if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+			default:
 				if err := os.WriteFile(filepath.Join(dir, tc.file), []byte(tc.body), 0o600); err != nil {
 					t.Fatal(err)
 				}
 			}
 			opts := &globalOpts{resolveShareStateDir: func(string) (string, error) { return dir, nil }}
-			if got := localKeyStorage(opts); got != tc.want {
+			if got := localKeyStorage(opts).Provider; got != tc.want {
 				t.Fatalf("localKeyStorage = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestLocalKeyStorageDescribesProvidersForPeople(t *testing.T) {
+	t.Setenv(connectoragentstate.EnvKeyProvider, "")
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, connectoragentstate.SealedAgentStateFile), []byte(`{"provider_id":"tpm"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got := localKeyStorage(&globalOpts{resolveShareStateDir: func(string) (string, error) { return dir, nil }})
+	if got.Provider != connectoragentstate.KeyProviderTPM || got.Description != "TPM (sealed to this machine)" {
+		t.Fatalf("localKeyStorage = %+v", got)
+	}
+	failing := &globalOpts{resolveShareStateDir: func(string) (string, error) { return "", errors.New("no state dir") }}
+	if got := localKeyStorage(failing); got != (output.KeyStorage{}) {
+		t.Fatalf("localKeyStorage with an unresolvable state dir = %+v, want nothing", got)
 	}
 }

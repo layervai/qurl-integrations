@@ -9,6 +9,7 @@ import (
 	"github.com/spf13/cobra"
 
 	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/output"
 )
 
 // whoamiCmd reports the account and device identity behind the registered
@@ -66,8 +67,10 @@ anything.`,
 					printer.Warnf(msgDevicePublicKeyUnreadable, keyErr)
 				}
 			}
-			var keyStorage string
-			if printer.WhoAmIRendersDeviceKey() {
+			var keyStorage output.KeyStorage
+			if opts.nativeStateStore != nil && printer.WhoAmIRendersDeviceKey() {
+				// Same condition as the device key above: both rows describe the
+				// local state this command actually opened.
 				keyStorage = localKeyStorage(opts)
 			}
 			return printer.WhoAmI(id, deviceKey, keyStorage)
@@ -75,14 +78,14 @@ anything.`,
 	}
 }
 
-// localKeyStorage names the key provider protecting this device's local
-// state, or "" when there is no envelope to describe. It reports only an
-// existing envelope, so it never probes the TPM, and it is best effort: a
-// failure here must not turn an identity answer into an error.
-func localKeyStorage(opts *globalOpts) string {
+// localKeyStorage describes the key provider protecting this device's local
+// state, or the zero value when there is no envelope to describe. It reports
+// only an existing envelope, so it never probes the TPM, and it is best
+// effort: a failure here must not turn an identity answer into an error.
+func localKeyStorage(opts *globalOpts) output.KeyStorage {
 	stateDir, err := opts.resolveShareStateDir("")
 	if err != nil {
-		return ""
+		return output.KeyStorage{}
 	}
 	present := false
 	for _, name := range []string{connectorstate.AgentStateFile, connectoragentstate.SealedAgentStateFile} {
@@ -91,11 +94,18 @@ func localKeyStorage(opts *globalOpts) string {
 		}
 	}
 	if !present {
-		return ""
+		return output.KeyStorage{}
 	}
 	provider, err := connectoragentstate.ResolveKeyProvider(stateDir)
 	if err != nil {
-		return ""
+		return output.KeyStorage{}
 	}
-	return provider
+	description := provider
+	switch provider {
+	case connectoragentstate.KeyProviderTPM:
+		description = "TPM (sealed to this machine)"
+	case connectoragentstate.KeyProviderFile:
+		description = "file (owner-only, not encrypted)"
+	}
+	return output.KeyStorage{Provider: provider, Description: description}
 }

@@ -17,6 +17,8 @@ import (
 	"testing"
 	"time"
 
+	connectoragentstate "github.com/layervai/qurl-connector/pkg/agentstate"
+
 	v1 "github.com/fatedier/frp/pkg/config/v1"
 	frplog "github.com/fatedier/frp/pkg/util/log"
 	frpserver "github.com/fatedier/frp/server"
@@ -50,6 +52,12 @@ func openOwnedTestShareRegistry(dir string) (*connectorstate.LocalShareRegistry,
 // TestMain pins FRP's process-global logger before journey-test goroutines
 // start. The in-process client and server share this logger.
 func TestMain(m *testing.M) {
+	// Keep fresh test namespaces off the host TPM: unset LAYERV_KEY_PROVIDER
+	// now seals a new namespace to it when one is usable. Tests that need
+	// another provider set it with t.Setenv, which restores this.
+	if os.Getenv(connectoragentstate.EnvKeyProvider) == "" {
+		_ = os.Setenv(connectoragentstate.EnvKeyProvider, connectoragentstate.KeyProviderFile)
+	}
 	frplog.Logger = goliblog.New(
 		goliblog.WithCaller(false),
 		goliblog.WithLevel(goliblog.WarnLevel),

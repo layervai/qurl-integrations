@@ -13,6 +13,10 @@ import (
 )
 
 // clearStateEnv detaches the test from any ambient operator configuration.
+// clearStateEnv clears the state environment and pins LAYERV_KEY_PROVIDER to
+// file. Unset now lets a fresh namespace take the host's TPM, which would make
+// these tests depend on the machine running them; a test about the unset
+// path calls unsetKeyProvider after this.
 func clearStateEnv(t *testing.T) {
 	t.Helper()
 	for _, name := range []string{EnvStateDirPrimary, EnvAgentID, "XDG_STATE_HOME", "HOME", "LOCALAPPDATA", connectoragentstate.EnvKeyProvider, connectoragentstate.EnvLocalKeyFD} {
@@ -20,6 +24,20 @@ func clearStateEnv(t *testing.T) {
 		if err := os.Unsetenv(name); err != nil {
 			t.Fatal(err)
 		}
+	}
+	if err := os.Setenv(connectoragentstate.EnvKeyProvider, connectoragentstate.KeyProviderFile); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// unsetKeyProvider opts a test into the unset LAYERV_KEY_PROVIDER path. Only
+// use it where the namespace already holds an envelope, so no fresh default
+// (and so no host TPM) is consulted.
+func unsetKeyProvider(t *testing.T) {
+	t.Helper()
+	t.Setenv(connectoragentstate.EnvKeyProvider, "restore-after-test")
+	if err := os.Unsetenv(connectoragentstate.EnvKeyProvider); err != nil {
+		t.Fatal(err)
 	}
 }
 

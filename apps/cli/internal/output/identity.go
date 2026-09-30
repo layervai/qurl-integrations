@@ -2,7 +2,6 @@ package output
 
 import (
 	"fmt"
-	"regexp"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -23,14 +22,22 @@ type identityKeyJSON struct {
 	ExpiresAt *time.Time `json:"expires_at,omitempty"`
 }
 
+// KeyStorage is the key provider protecting local device state: its id for
+// JSON and a description for people. The zero value omits both.
+type KeyStorage struct {
+	Provider    string
+	Description string
+}
+
 type whoamiJSON struct {
 	OwnerID            string           `json:"owner_id"`
 	AuthType           string           `json:"auth_type"`
 	APIKey             *identityKeyJSON `json:"api_key,omitempty"`
 	DevicePublicKeyB64 string           `json:"device_public_key_b64,omitempty"`
-	// KeyStorage names the key provider protecting the local device state,
-	// as the connector reports it (see keyStorageLine). It is omitted when no
-	// local state was found.
+	// KeyStorage names the key provider protecting the local device state. It
+	// is the connector's provider id, drawn from a closed set; encoding/json
+	// escapes any control bytes, so it needs no text-side sanitizing here. It
+	// is omitted when no local state was found.
 	KeyStorage string `json:"key_storage,omitempty"`
 }
 
@@ -70,44 +77,22 @@ func (p *Printer) WhoAmIRendersDeviceKey() bool {
 // just the owner id.
 //
 // devicePublicKeyB64 is this machine's registered-device public key from local
-// agent state, never from /v1/me; keyStorage names the key provider protecting
-// that state. "" omits either row and its JSON field.
-func (p *Printer) WhoAmI(id *qurlapi.Identity, devicePublicKeyB64, keyStorage string) error {
+// agent state, never from /v1/me, and keyStorage describes the key provider
+// protecting that state. An empty value omits its row and JSON field.
+func (p *Printer) WhoAmI(id *qurlapi.Identity, devicePublicKeyB64 string, keyStorage KeyStorage) error {
 	switch {
 	case p.format == FormatJSON:
 		return p.writeJSON(whoamiJSON{
 			OwnerID: id.OwnerID, AuthType: id.AuthType, APIKey: identityKey(id), DevicePublicKeyB64: devicePublicKeyB64,
-			KeyStorage: keyStorage,
+			KeyStorage: keyStorage.Provider,
 		})
 	case p.quiet:
 		_, err := fmt.Fprintln(p.out, id.OwnerID)
 		return err
 	default:
-		return p.whoamiText(id, devicePublicKeyB64, keyStorage)
+		return p.whoamiText(id, devicePublicKeyB64, keyStorage.Description)
 	}
 }
-
-// keyStorageLine describes a key provider for people. The provider id comes
-// from local state, so an unrecognized one is never echoed to the terminal:
-// only a plain lowercase provider name is shown as itself.
-//
-// TODO(upstream-contract): mirrors qurl-connector pkg/agentstate's
-// KeyProviderTPM ("tpm") and KeyProviderFile ("file") ids, which that module
-// resolves from a closed set; this package does not import the connector.
-func keyStorageLine(provider string) string {
-	switch provider {
-	case "tpm":
-		return "TPM (sealed to this machine)"
-	case "file":
-		return "file (owner-only, not encrypted)"
-	}
-	if providerNamePattern.MatchString(provider) {
-		return provider
-	}
-	return "unrecognized provider"
-}
-
-var providerNamePattern = regexp.MustCompile(`^[a-z][a-z0-9-]{0,63}$`)
 
 func (p *Printer) whoamiText(id *qurlapi.Identity, devicePublicKeyB64, keyStorage string) error {
 	tw := tabwriter.NewWriter(p.out, 0, 0, 2, ' ', 0)
@@ -124,7 +109,7 @@ func (p *Printer) whoamiText(id *qurlapi.Identity, devicePublicKeyB64, keyStorag
 		ew.printf("%s\t%s\n", p.bold("Device public key:"), devicePublicKeyB64)
 	}
 	if keyStorage != "" {
-		ew.printf("%s\t%s\n", p.bold("Key storage:"), keyStorageLine(keyStorage))
+		ew.printf("%s\t%s\n", p.bold("Key storage:"), keyStorage)
 	}
 	return ew.flush(tw)
 }
