@@ -53,7 +53,9 @@ For a remote URL, qURL registers it, prints the CRID, and exits:
 
   qurl publish https://api.example.com/reports
 
-Anyone given the CRID can request an access link without an account or login.
+Anyone given a public CRID can request a link without an account or login.
+Use --private to limit link requests to the owner and devices you allow with
+--allow-device-key. Use "qurl whoami -o json" to find a recipient public key.
 Authorized users open it with "qurl get <CRID>". The --quiet flag prints only
 the CRID. Use --foreground for CI or daemon debugging; that process owns the
 share and turns it off when it exits.`,
