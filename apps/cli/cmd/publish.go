@@ -509,10 +509,11 @@ func finishLocalPublish(
 	if err := daemon.Ensure(ctx); err != nil {
 		return compensate(err)
 	}
-	if _, err := waitForSharingWithDiagnostics(ctx, opts, client, local, stateDir, local.ServingEpoch, opts.sharingWaitLimit); err != nil {
+	sharing, err := waitForSharingWithDiagnostics(ctx, opts, client, local, stateDir, local.ServingEpoch, opts.sharingWaitLimit)
+	if err != nil {
 		return err
 	}
-	return printLocalPublishServing(opts, resolved, local)
+	return printLocalPublishServing(opts, resolved, local, sharing)
 }
 
 func runForegroundLocalPublish(
@@ -584,10 +585,11 @@ func runForegroundLocalPublish(
 	if err != nil {
 		return err
 	}
-	if _, err := waitForSharingWithDiagnostics(ctx, opts, client, local, stateDir, local.ServingEpoch, opts.sharingWaitLimit); err != nil {
+	sharing, err := waitForSharingWithDiagnostics(ctx, opts, client, local, stateDir, local.ServingEpoch, opts.sharingWaitLimit)
+	if err != nil {
 		return err
 	}
-	if err := printLocalPublishServing(opts, resolved, local); err != nil {
+	if err := printLocalPublishServing(opts, resolved, local, sharing); err != nil {
 		return err
 	}
 	retErr = <-daemonErr
@@ -628,12 +630,21 @@ func withoutExpectedDaemonCancellation(err error) error {
 	return err
 }
 
-func printLocalPublishServing(opts *globalOpts, resolved *agent.ResolvedResource, local *connectorstate.LocalShare) error {
-	printer := opts.printer()
-	return printer.Publish(&qurlapi.Published{
+// printLocalPublishServing renders a serving local publish. The publisher in
+// the JSON document comes from the sharing state that confirmed serving, so it
+// costs no extra request; a service that does not report one leaves it
+// unnamed and unverified. The text document deliberately has no publisher
+// row: a first publish stays calm, and the status is shown where a recipient
+// decides (share, get) and where an owner asks (status, inspect, publisher).
+func printLocalPublishServing(opts *globalOpts, resolved *agent.ResolvedResource, local *connectorstate.LocalShare, sharing *qurlapi.Sharing) error {
+	published := &qurlapi.Published{
 		CRID: local.CRID, ResourceID: local.ResourceID, TargetURL: local.TargetURL,
 		Status: "serving", FoundExisting: resolved.FoundExisting, Private: resolved.Private,
-	})
+	}
+	if sharing != nil {
+		published.Publisher = sharing.Publisher
+	}
+	return opts.printer().Publish(published)
 }
 
 func resolveLocalConnectorID(opts *globalOpts, flagID string) string {

@@ -43,6 +43,8 @@ type resourceRow struct {
 	Tags              []string     `json:"tags"`
 	CreatedAt         *time.Time   `json:"created_at"`
 	ExpiresAt         *time.Time   `json:"expires_at"`
+	// Publisher decodes leniently and fails closed; see publisherWire.
+	Publisher publisherWire `json:"publisher"`
 }
 
 type sharingRow struct {
@@ -51,6 +53,11 @@ type sharingRow struct {
 	DesiredState    DesiredState    `json:"desired_state"`
 	ServingEpoch    uint64          `json:"serving_epoch"`
 	ConnectionState ConnectionState `json:"connection_state"`
+	// TODO(upstream-contract): qurl-service adds created_at and publisher to
+	// the Connector sharing-state response. Both are optional here, so an
+	// older service leaves "no date, no name, unverified".
+	CreatedAt *time.Time    `json:"created_at"`
+	Publisher publisherWire `json:"publisher"`
 }
 
 // UnmarshalJSON requires the serving-epoch lifecycle fence to be present and
@@ -67,7 +74,7 @@ func (row *sharingRow) UnmarshalJSON(data []byte) error {
 	if delim, ok := first.(json.Delim); !ok || delim != '{' {
 		return errors.New("sharing row must be an object")
 	}
-	seen := make(map[string]bool, 5)
+	seen := make(map[string]bool, 7)
 	for decoder.More() {
 		token, err := decoder.Token()
 		if err != nil {
@@ -113,7 +120,7 @@ func (row *sharingRow) UnmarshalJSON(data []byte) error {
 
 func isSharingField(name string) bool {
 	switch name {
-	case "resource_id", "crid", "desired_state", "serving_epoch", "connection_state":
+	case "resource_id", "crid", "desired_state", "serving_epoch", "connection_state", "created_at", "publisher":
 		return true
 	default:
 		return false
@@ -130,6 +137,16 @@ func decodeSharingField(row *sharingRow, name string, raw json.RawMessage) error
 		return json.Unmarshal(raw, &row.DesiredState)
 	case "connection_state":
 		return json.Unmarshal(raw, &row.ConnectionState)
+	case "created_at":
+		// Descriptive metadata must never fail a lifecycle read: a date this
+		// CLI cannot parse is treated as absent.
+		var createdAt *time.Time
+		if json.Unmarshal(raw, &createdAt) == nil {
+			row.CreatedAt = createdAt
+		}
+		return nil
+	case "publisher":
+		return json.Unmarshal(raw, &row.Publisher)
 	case "serving_epoch":
 		encoded := strings.TrimSpace(string(raw))
 		if encoded == "" || strings.IndexFunc(encoded, func(r rune) bool { return r < '0' || r > '9' }) >= 0 {
@@ -235,6 +252,7 @@ func (c *client) Publish(ctx context.Context, targetURL string, opts PublishOpti
 		CreatedAt:     env.Data.CreatedAt,
 		ExpiresAt:     env.Data.ExpiresAt,
 		FoundExisting: env.Meta.FoundExisting,
+		Publisher:     env.Data.Publisher.publisher(),
 	}, nil
 }
 
@@ -369,6 +387,7 @@ func summarizeResourceRow(row *resourceRow, source string) (*ResourceSummary, er
 		Type: row.Type, Status: row.Status, DesiredState: row.DesiredState,
 		ServingEpoch: row.ServingEpoch, Description: row.Description, Tags: row.Tags,
 		CreatedAt: row.CreatedAt, ExpiresAt: row.ExpiresAt,
+		Publisher: row.Publisher.publisher(),
 	}, nil
 }
 
@@ -433,20 +452,25 @@ func (c *client) doSharing(ctx context.Context, method, id string, body any, all
 	if err := json.Unmarshal(reply.body, &env); err != nil {
 		return nil, fmt.Errorf("%w: decode sharing response: %w", qurl.ErrInvalidAPIResponse, err)
 	}
-	if err := validateSharingRow(env.Data); err != nil {
+	if err := validateSharingRow(&env.Data); err != nil {
 		return nil, err
 	}
-	if err := validateSharingIdentity(id, env.Data); err != nil {
+	if err := validateSharingIdentity(id, &env.Data); err != nil {
 		return nil, err
 	}
-	return &Sharing{
+	sharing := &Sharing{
 		ResourceID: env.Data.ResourceID, CRID: env.Data.CRID,
 		DesiredState: env.Data.DesiredState, ServingEpoch: env.Data.ServingEpoch,
 		ConnectionState: env.Data.ConnectionState,
-	}, nil
+		Publisher:       env.Data.Publisher.publisher(),
+	}
+	if env.Data.CreatedAt != nil && !env.Data.CreatedAt.IsZero() {
+		sharing.CreatedAt = env.Data.CreatedAt
+	}
+	return sharing, nil
 }
 
-func validateSharingIdentity(requestID string, row sharingRow) error {
+func validateSharingIdentity(requestID string, row *sharingRow) error {
 	der, err := resourceidentity.ValidateResourceID(row.ResourceID)
 	if err != nil {
 		return fmt.Errorf("%w: sharing response resource identity: %w", qurl.ErrInvalidAPIResponse, err)
@@ -465,7 +489,7 @@ func validateSharingIdentity(requestID string, row sharingRow) error {
 	return nil
 }
 
-func validateSharingRow(row sharingRow) error {
+func validateSharingRow(row *sharingRow) error {
 	if strings.TrimSpace(row.ResourceID) == "" {
 		return fmt.Errorf("%w: sharing response missing resource_id", qurl.ErrInvalidAPIResponse)
 	}
@@ -734,7 +758,7 @@ func (c *client) SetDeviceGrants(ctx context.Context, id string, keys []string) 
 	if err := json.Unmarshal(reply.body, &env); err != nil {
 		return nil, fmt.Errorf("%w: decode device grants: %w", qurl.ErrInvalidAPIResponse, err)
 	}
-	if err := validateSharingIdentity(id, sharingRow{CRID: env.Data.CRID, ResourceID: env.Data.ResourceID}); err != nil {
+	if err := validateSharingIdentity(id, &sharingRow{CRID: env.Data.CRID, ResourceID: env.Data.ResourceID}); err != nil {
 		return nil, err
 	}
 	if !slices.Equal(slices.Sorted(slices.Values(keys)), slices.Sorted(slices.Values(env.Data.AllowedDeviceKeys))) {

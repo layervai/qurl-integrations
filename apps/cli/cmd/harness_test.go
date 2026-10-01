@@ -80,10 +80,18 @@ var fixedNow = time.Date(2026, 3, 2, 0, 0, 0, 0, time.UTC)
 type fakeBrowser struct {
 	opened []string
 	err    error
+	// stdout is the invocation's stdout buffer, set by runCLI, and
+	// stdoutAtOpen what it held at each launch: the evidence for what a
+	// reader had been shown before the browser took over.
+	stdout       *bytes.Buffer
+	stdoutAtOpen []string
 }
 
 func (f *fakeBrowser) open(_ context.Context, link string) error {
 	f.opened = append(f.opened, link)
+	if f.stdout != nil {
+		f.stdoutAtOpen = append(f.stdoutAtOpen, f.stdout.String())
+	}
 	return f.err
 }
 
@@ -199,6 +207,7 @@ func runCLI(t *testing.T, o *runOpts) *runResult {
 	if browser == nil {
 		browser = &fakeBrowser{}
 	}
+	browser.stdout = &res.stdout
 
 	root, opts := newRoot("test", streams, func(g *globalOpts) {
 		// Exercise the injected background-job/daemon boundary on every host. The

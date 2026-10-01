@@ -480,6 +480,7 @@ than switching in place.
 | `qurl account recover` | Restore account resource access on a new device |
 | `qurl login` | Enroll this device with a one-time account key, from a supervisor's enrollment token file, or anonymously for a supervisor |
 | `qurl whoami` | Show which account this registered device belongs to |
+| `qurl publisher` | Show the publisher name shown with your CRIDs; `set <name>` and `clear` change it |
 | `qurl request METHOD PATH` | Make a device-authorized JSON request for a supervising app (see [Supervised installs](#supervised-installs)) |
 | `qurl completion <shell>` | Generate shell completions (`bash`, `zsh`, `fish`, `powershell`) |
 | `qurl version` | Print version information |
@@ -832,8 +833,33 @@ identity. Use the share's existing `--id` when publishing it again by ID.
 CRID names. Treat the minted link as a secret: it is a bearer credential.
 Anyone given a public CRID can request a link without an account
 or login. Share the CRID only with people who should be able to request
-access. The link expires on its own; share again whenever you need a fresh one. When stdout is not a terminal the command prints the bare link
-and nothing else, ready to hand out or open.
+access. The link expires on its own; share again whenever you need a fresh one.
+
+`share` also tells you who published the resource and when it was created:
+
+```text
+https://qurl.link/#…
+
+  Publisher: "Acme Docs" — UNVERIFIED (self-declared name, not confirmed by LayerV)
+  Created:   2026-03-01 (1d ago)
+  Expires in 5m (single use)
+```
+
+The publisher name is whatever the publisher typed. LayerV has not confirmed
+who they are, so every publisher is `UNVERIFIED` today: treat the name as a
+claim, not as proof. A publisher that set no name shows `no name provided`.
+The name is always printed in quotes with unusual characters escaped.
+
+When stdout is not a terminal the command prints the bare link on stdout,
+ready to hand out or open, and one notice on stderr:
+
+```text
+Warning: UNVERIFIED publisher "Acme Docs" (self-declared name, not confirmed by LayerV). Created 2026-03-01.
+```
+
+`--quiet` prints only the link and no notice. `-o json` puts
+`resource_created_at` and `publisher` in the document and prints no notice.
+That date is when the resource was created, not when the link was minted.
 
 The link opens in a browser. Passing it to a tool like curl fetches the
 page that opens the link, not the content itself — to download content
@@ -858,8 +884,9 @@ exits with code 12 without printing a link.
 `qurl get <CRID>` mints a share link exactly like `qurl share`, verifies
 it, then opens or downloads — nothing is ever acted on unverified:
 
-- **On a terminal**, get prints the link, then opens it in your browser
-  (set `QURL_BROWSER` or `BROWSER` to choose which one).
+- **On a terminal**, get prints the link with the publisher and creation
+  date, exactly as `qurl share` does, then opens it in your browser (set
+  `QURL_BROWSER` or `BROWSER` to choose which one).
 - **With `--file <path>`** it downloads to that path instead. For links
   that need a browser to open, get asks the qURL platform for direct
   access and downloads the granted content — it never saves the
@@ -879,10 +906,17 @@ it, then opens or downloads — nothing is ever acted on unverified:
 | `--session-duration <duration>` | Lifetime of each admitted session, e.g. `5m` or `1h`. Zero or omission uses the service default. The service enforces resource limits. |
 | `--yes` | Proceed without confirmation, including sending a test CRID to production |
 
+With `--file`, the publisher notice goes to stderr: after the saved message
+for `--file <path>`, and before the bytes for `--file -`. `--quiet` omits it.
+The publisher is `UNVERIFIED`, so decide whether to use the content on what
+you know about the CRID's source, not on the name.
+
 When stdout is not a terminal, get never opens a browser: pass `--file`,
 or use `qurl share` if you only need the link. With `-o json`, get is a
 machine asking for data, so browser mode and `--file -` are refused
-loudly; `--file <path> -o json` downloads and emits the outcome document.
+loudly; `--file <path> -o json` downloads and emits the outcome document,
+which includes `resource_created_at` (the resource's creation date, not the
+link's) and `publisher`.
 
 Releases include the production settings used by `share` and `get` to verify
 the signed link and its CRID. Production needs no deployment file. For sandbox
@@ -974,7 +1008,10 @@ requires the saved local target to be reachable. `restart` re-registers just
 that share on the Connector session under a fresh serving epoch, so a stale
 session cannot keep serving it; the other shares are not disturbed. `status`
 and `inspect` use the same authoritative view. Both work for remote resources
-and include the local target only when this machine owns one.
+and include the local target only when this machine owns one. Both also show
+the `Publisher` and `Created` rows that people who request a link are shown
+(`publisher` and `created_at` in `-o json`); `qurl grants` prints the same
+rows.
 
 `restart --target <origin>` additionally moves the share to a different
 loopback origin on this machine, keeping its CRID and links; see
@@ -1103,6 +1140,37 @@ namespace with a fresh token. Login JSON includes
 `owner_id`, `auth_type`, `device_enrolled`, and `device_key_id` when the
 service supplies a key ID.
 
+### qurl publisher
+
+`qurl publisher` shows the publisher profile people see with your CRIDs.
+Anyone who requests a link with `qurl share` or `qurl get` is shown the name
+you set here, or `no name provided` when you set none.
+
+```bash
+qurl publisher                    # show the current profile
+qurl publisher set "Acme Docs"    # set or replace the name
+qurl publisher clear              # remove the name
+```
+
+```text
+Publisher: "Acme Docs" — UNVERIFIED (self-declared name, not confirmed by LayerV)
+```
+
+The name is optional and self-declared. Setting one does not confirm who you
+are: LayerV cannot confirm any publisher yet, so every publisher is shown as
+`UNVERIFIED`. One name applies to every CRID published by this device's
+owner, including ones already published.
+
+<!-- TODO(upstream-contract): qurl-service owns the publisher naming rules. -->
+A name is 1 to 64 characters: letters, digits, single spaces, and common
+punctuation. It cannot spell "verified", "LayerV" or "qURL", even split by
+spaces or punctuation. The service checks the name; a refused name exits
+with code 8 and the reason on stderr.
+
+`-o json` prints `{"publisher": {"name": "...", "verified": false}}`, with
+`name` omitted when none is set. `--quiet` prints only the name, and nothing
+when none is set.
+
 ### qurl completion
 
 `qurl completion <shell>` writes a completion script to stdout for
@@ -1146,12 +1214,17 @@ in every archive.
 ## Scripting contract
 
 - **stdout carries data, stderr carries everything else.** `qurl share`
-  piped into another command prints the bare link and nothing more;
-  notes, warnings, and confirmation prompts go to stderr.
+  piped into another command prints the bare link and nothing more on
+  stdout; notes, warnings, and confirmation prompts go to stderr.
+- **`qurl share` and `qurl get --file` report the publisher on stderr** as
+  one line: `Warning: UNVERIFIED publisher "<name>" (...)`. stdout is
+  unchanged, so `link="$(qurl share <CRID>)"` still captures only the link.
+  Do not parse that line: read `publisher` from `-o json`. Pass `--quiet`
+  when a script requires an empty stderr.
 - **`--quiet` prints only the primary value**, one per line: the CRID for
   `publish`, the link for `share`, full CRIDs for `list`, the
   destination path for a `get --file` download, the owner id for
-  `whoami` and `login`.
+  `whoami` and `login`, the publisher name for `publisher`.
 - **Verification is built in:** before printing anything, `qurl share`
   and `qurl get` check the service's answer against the CRID you asked
   for and discard mismatches (exit 12).
@@ -1198,6 +1271,33 @@ exactly that reason.
 
 ```bash
 qurl list -o json | jq -r '.resources[].crid'
+```
+
+Every document that describes a resource carries a `publisher` object:
+`share`, `get --file`, `publish`, `status`, `inspect`, `grants`, each `list`
+row, and `qurl publisher` itself. `publish` and `list` carry it in JSON only;
+their text output has no publisher row.
+
+```json
+"resource_created_at": "2026-03-01T00:00:00Z",
+"publisher": { "name": "Acme Docs", "verified": false }
+```
+
+`verified` is always present and is `false` for every publisher today. `name`
+is omitted when the publisher set none.
+
+The resource's creation date has two keys. `share` and `get --file` describe
+a minted link, so they name it `resource_created_at`: it is the resource's
+creation date, not the link's. `publish`, `status`, `inspect`, `grants`, and
+`list` rows describe the resource itself and use `created_at`. Either key is
+omitted when the service did not report the date.
+
+A name is the publisher's own text: quote or escape it before showing it, and
+never show it without its `verified` status. An agent that acts for a person
+must tell that person the publisher is unverified.
+
+```bash
+qurl share <CRID> -o json | jq '{link: .qurl, publisher: .publisher}'
 ```
 
 Account setup and recovery return `owner_id` and `status` (`linked` or

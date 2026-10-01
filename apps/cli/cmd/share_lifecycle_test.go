@@ -3478,11 +3478,15 @@ func TestRestartWithoutTargetKeepsTodaysOutput(t *testing.T) {
 			)
 			srv.Script(http.MethodPost, path+"/restart", sharingResponse(t, srv, "on", seed.ServingEpoch+1, "connecting"))
 			args := []string{"--endpoint", srv.URL, "restart", srv.Key.CRID}
+			// The scripted sharing state carries no publisher, as an older
+			// service answers, so the row reads unnamed and UNVERIFIED and no
+			// creation date is invented.
 			want := "CRID:           " + srv.Key.CRID + "\n" +
 				"Target:         http://127.0.0.1:3000\n" +
 				"Desired:        on\n" +
 				"Observed:       serving\n" +
-				"Serving epoch:  5\n"
+				"Serving epoch:  5\n" +
+				"Publisher:      no name provided — UNVERIFIED (not confirmed by LayerV)\n"
 			if format == "json" {
 				args = append(args, "-o", "json")
 				want = "{\n" +
@@ -3491,7 +3495,10 @@ func TestRestartWithoutTargetKeepsTodaysOutput(t *testing.T) {
 					"  \"target_url\": \"http://127.0.0.1:3000\",\n" +
 					"  \"desired_state\": \"on\",\n" +
 					"  \"connection_state\": \"serving\",\n" +
-					"  \"serving_epoch\": 5\n" +
+					"  \"serving_epoch\": 5,\n" +
+					"  \"publisher\": {\n" +
+					"    \"verified\": false\n" +
+					"  }\n" +
 					"}\n"
 			}
 			daemon := &recordingShareDaemon{}

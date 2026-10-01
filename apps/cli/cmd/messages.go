@@ -81,6 +81,20 @@ const (
 	// msgBrowserJSON refuses browser-open under the JSON output mode: a
 	// machine asked for data, and a spawned browser is not data.
 	msgBrowserJSON = "browser opening isn't available with --output json — use --file to download, or `qurl share --output json` for the link"
+
+	// msgPublisherSetNeedsName refuses an empty name: removing the name is a
+	// separate, explicit command.
+	msgPublisherSetNeedsName = "a publisher name can't be empty — run `qurl publisher clear` to remove the name"
+
+	// msgPublisherNameRefusedReason reports a name the service (or the local
+	// gate, for a name that can never be valid) did not accept; %s is the
+	// reason. The name itself is never echoed.
+	msgPublisherNameRefusedReason = "that publisher name can't be used: %s"
+	// msgPublisherUnsupported explains a qURL endpoint that has no publisher
+	// profile yet, instead of the generic not-found hint about CRIDs.
+	msgPublisherUnsupported = "this qURL endpoint doesn't support publisher names yet. Until it does, your CRIDs show \"no name provided\""
+	// msgPublisherNameRefused is the same outcome when no reason was given.
+	msgPublisherNameRefused = "that publisher name can't be used. Names are 1 to 64 characters: letters, digits, single spaces, and common punctuation"
 )
 
 // customerMessages returns every fixed customer-facing string the cmd
@@ -115,6 +129,10 @@ func customerMessages() []string {
 		msgFileNeedsPath,
 		msgFileDashJSON,
 		msgBrowserJSON,
+		msgPublisherSetNeedsName,
+		msgPublisherNameRefusedReason,
+		msgPublisherNameRefused,
+		msgPublisherUnsupported,
 	}
 }
 

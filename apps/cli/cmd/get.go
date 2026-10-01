@@ -41,14 +41,19 @@ against the CRID you asked for — a mismatch is discarded and the command
 exits with code 12 before anything happens. Only a verified link is ever
 acted on:
 
-  - On a terminal, get opens the link in your browser (set QURL_BROWSER or
-    BROWSER to choose which one).
+  - On a terminal, get prints the link with the resource's publisher and
+    creation date, then opens it in your browser (set QURL_BROWSER or BROWSER
+    to choose which one).
   - With --file <path> it downloads to that path instead. The download is
     atomic: bytes arrive in <path>.part, which becomes <path> only when the
     download completes. Existing files are never replaced unless --force is
     given. If a granted link is not ready, the CLI retries that same grant
     briefly. It requests one fresh link only after the grant expires.
   - With --file - the raw bytes stream to stdout, clean for piping.
+
+With --file, the publisher and creation date are reported on stderr. A
+publisher name is self-declared and shown as UNVERIFIED: LayerV has not
+confirmed who the publisher is. --quiet omits that report.
 
 When stdout is not a terminal, get never opens a browser: pass --file, or
 use ` + "`qurl share`" + ` if you only need the link.`,
@@ -159,7 +164,8 @@ func runGet(ctx context.Context, opts *globalOpts, operand string, flags getFlag
 		}
 		return openInBrowser(ctx, opts, printer, shareLink)
 	case consume.ActionStreamStdout:
-		downloader := &consume.Downloader{MintTarget: fetchTarget}
+		announced := announcePublisherOnce(printer, fetchTarget, func() *qurlapi.ShareLink { return shareLink })
+		downloader := &consume.Downloader{MintTarget: announced}
 		_, err := downloader.StreamTo(ctx, opts.streams.Out)
 		return err
 	case consume.ActionSaveFile:
@@ -168,15 +174,36 @@ func runGet(ctx context.Context, opts *globalOpts, operand string, flags getFlag
 		if err != nil {
 			return err
 		}
-		return printer.Downloaded(shareLink.CRID, flags.file, n)
+		return printer.Downloaded(shareLink, flags.file, n)
 	default:
 		return fmt.Errorf("unhandled action %d", action)
 	}
 }
 
-// openInBrowser prints the verified link, then launches the browser at it.
-// Data first: with the link on stdout, a failed launch still leaves the
-// user something to act on.
+// announcePublisherOnce wraps the download target source for `--file -`.
+// stdout carries the raw bytes there, so the publisher goes to stderr: once,
+// after the first verified answer and before any content is fetched. A link
+// refreshed mid-download names the same resource and stays silent.
+func announcePublisherOnce(
+	printer *output.Printer,
+	fetch func(context.Context) (consume.DownloadTarget, error),
+	minted func() *qurlapi.ShareLink,
+) func(context.Context) (consume.DownloadTarget, error) {
+	announced := false
+	return func(ctx context.Context) (consume.DownloadTarget, error) {
+		target, err := fetch(ctx)
+		if err == nil && !announced {
+			announced = true
+			printer.PublisherNotice(minted())
+		}
+		return target, err
+	}
+}
+
+// openInBrowser prints the verified link with its publisher and creation
+// date, then launches the browser at it. Data first: the reader sees who
+// published the resource before the browser opens, and with the link on
+// stdout a failed launch still leaves the user something to act on.
 func openInBrowser(ctx context.Context, opts *globalOpts, printer *output.Printer, link *qurlapi.ShareLink) error {
 	if err := printer.ShareLink(link); err != nil {
 		return err

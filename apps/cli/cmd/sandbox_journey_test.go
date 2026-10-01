@@ -798,14 +798,15 @@ func assertListFindsCRID(ctx context.Context, t *testing.T, cliEnv map[string]st
 }
 
 // assertShareJourney shares the CRID and holds the piped contract: with
-// stdout not a terminal the command emits the bare link and nothing else, so
-// `link="$(qurl share <CRID>)"` captures it cleanly (the link opens in a
-// browser — downloading is get's job). Exit 0 here IS the verification
+// stdout not a terminal the command emits the bare link and nothing else on
+// stdout, so `link="$(qurl share <CRID>)"` captures it cleanly (the link opens
+// in a browser — downloading is get's job), and stderr carries exactly the
+// one UNVERIFIED publisher notice. Exit 0 here IS the verification
 // evidence — the CLI discards any answer that fails CRID verification before
 // printing (exit 12), so a printed link is a verified link. It also holds
 // the environment-guard case: the sandbox is the test environment, so its
-// 'q'-prefixed CRID at this non-production endpoint must produce no warning
-// at all.
+// 'q'-prefixed CRID at this non-production endpoint must produce no guard
+// warning — any stderr beyond the publisher notice fails the validator.
 func assertShareJourney(ctx context.Context, t *testing.T, cliEnv map[string]string, id string) string {
 	t.Helper()
 	res := runSandboxCLI(ctx, t, cliEnv, "share", id, "--session-duration", "5m")

@@ -25,7 +25,8 @@ type publishJSON struct {
 	// FoundExisting mirrors the text-mode already-published note for scripts.
 	// Known remote and local outcomes emit true or false; an uncertain local
 	// reconciliation omits the field rather than claiming a fresh publish.
-	FoundExisting *bool `json:"found_existing,omitempty"`
+	FoundExisting *bool         `json:"found_existing,omitempty"`
+	Publisher     publisherJSON `json:"publisher"`
 }
 
 type shareLinkJSON struct {
@@ -35,6 +36,11 @@ type shareLinkJSON struct {
 	ExpiresAt        *time.Time `json:"expires_at,omitempty"`
 	ExpiresInSeconds int        `json:"expires_in_seconds,omitempty"`
 	SingleUse        bool       `json:"single_use,omitempty"`
+	// ResourceCreatedAt is when the resource was created. The key names the
+	// resource because every other field here describes the minted link. It
+	// is omitted when the service did not say. Publisher is always present.
+	ResourceCreatedAt *time.Time    `json:"resource_created_at,omitempty"`
+	Publisher         publisherJSON `json:"publisher"`
 }
 
 // listItemJSON is the only projection that carries a row's publish-time
@@ -57,6 +63,7 @@ type listItemJSON struct {
 	Tags         []string             `json:"tags,omitempty"`
 	CreatedAt    *time.Time           `json:"created_at,omitempty"`
 	ExpiresAt    *time.Time           `json:"expires_at,omitempty"`
+	Publisher    publisherJSON        `json:"publisher"`
 }
 
 type listJSON struct {
@@ -84,6 +91,17 @@ type sharingJSON struct {
 	DesiredState    qurlapi.DesiredState    `json:"desired_state"`
 	ConnectionState qurlapi.ConnectionState `json:"connection_state"`
 	ServingEpoch    uint64                  `json:"serving_epoch"`
+	CreatedAt       *time.Time              `json:"created_at,omitempty"`
+	Publisher       publisherJSON           `json:"publisher"`
+}
+
+func sharingDocument(target string, state *qurlapi.Sharing) sharingJSON {
+	return sharingJSON{
+		CRID: state.CRID, ResourceID: state.ResourceID, TargetURL: target,
+		DesiredState: state.DesiredState, ConnectionState: state.ConnectionState,
+		ServingEpoch: state.ServingEpoch,
+		CreatedAt:    state.CreatedAt, Publisher: publisherDocument(state.Publisher),
+	}
 }
 
 type sharingInspectionJSON struct {
@@ -116,13 +134,14 @@ type resourceStatusJSON struct {
 	Private           *bool    `json:"private,omitempty"`
 	// Description and tags are intentionally absent: status is the compact
 	// lifecycle view, while list is the metadata inventory surface.
-	CRID       string     `json:"crid,omitempty"`
-	ResourceID string     `json:"resource_id"`
-	TargetURL  string     `json:"target_url,omitempty"`
-	Type       string     `json:"type"`
-	Status     string     `json:"status"`
-	CreatedAt  *time.Time `json:"created_at,omitempty"`
-	ExpiresAt  *time.Time `json:"expires_at,omitempty"`
+	CRID       string        `json:"crid,omitempty"`
+	ResourceID string        `json:"resource_id"`
+	TargetURL  string        `json:"target_url,omitempty"`
+	Type       string        `json:"type"`
+	Status     string        `json:"status"`
+	CreatedAt  *time.Time    `json:"created_at,omitempty"`
+	ExpiresAt  *time.Time    `json:"expires_at,omitempty"`
+	Publisher  publisherJSON `json:"publisher"`
 }
 
 type downloadJSON struct {
@@ -130,6 +149,10 @@ type downloadJSON struct {
 	File string `json:"file"`
 	// Bytes is the payload size actually written.
 	Bytes int64 `json:"bytes"`
+	// ResourceCreatedAt uses the share document's key: the download came
+	// through a minted link, and this is the resource's date, not the link's.
+	ResourceCreatedAt *time.Time    `json:"resource_created_at,omitempty"`
+	Publisher         publisherJSON `json:"publisher"`
 }
 
 // Publish renders a publish result. Text mode prints the CRID last, alone on
@@ -153,6 +176,7 @@ func (p *Printer) Publish(res *qurlapi.Published) error {
 			CreatedAt:     res.CreatedAt,
 			ExpiresAt:     res.ExpiresAt,
 			FoundExisting: res.FoundExisting,
+			Publisher:     publisherDocument(res.Publisher),
 		})
 	case p.quiet:
 		_, err := fmt.Fprintln(p.out, res.CRID)
@@ -168,11 +192,7 @@ func (p *Printer) Publish(res *qurlapi.Published) error {
 func (p *Printer) Sharing(target string, state *qurlapi.Sharing) error {
 	switch {
 	case p.format == FormatJSON:
-		return p.writeJSON(sharingJSON{
-			CRID: state.CRID, ResourceID: state.ResourceID, TargetURL: target,
-			DesiredState: state.DesiredState, ConnectionState: state.ConnectionState,
-			ServingEpoch: state.ServingEpoch,
-		})
+		return p.writeJSON(sharingDocument(target, state))
 	case p.quiet:
 		_, err := fmt.Fprintln(p.out, state.CRID)
 		return err
@@ -186,6 +206,7 @@ func (p *Printer) Sharing(target string, state *qurlapi.Sharing) error {
 		ew.printf("%s\t%s\n", p.bold("Desired:"), state.DesiredState)
 		ew.printf("%s\t%s\n", p.bold("Observed:"), state.ConnectionState)
 		ew.printf("%s\t%d\n", p.bold("Serving epoch:"), state.ServingEpoch)
+		p.publisherRows(ew, state.Publisher, state.CreatedAt)
 		return ew.flush(tw)
 	}
 }
@@ -203,11 +224,7 @@ func (p *Printer) InspectSharing(inspection *SharingInspection) error {
 	switch {
 	case p.format == FormatJSON:
 		return p.writeJSON(sharingInspectionJSON{
-			sharingJSON: sharingJSON{
-				CRID: state.CRID, ResourceID: state.ResourceID, TargetURL: inspection.TargetURL,
-				DesiredState: state.DesiredState, ConnectionState: state.ConnectionState,
-				ServingEpoch: state.ServingEpoch,
-			},
+			sharingJSON: sharingDocument(inspection.TargetURL, state),
 			DaemonState: inspection.DaemonState, LastTransition: inspection.LastTransition,
 			FailureCategory: inspection.FailureCategory, FailureCode: inspection.FailureCode,
 			RetryAttempt: inspection.RetryAttempt, NextRetryAt: inspection.NextRetryAt,
@@ -226,6 +243,7 @@ func (p *Printer) InspectSharing(inspection *SharingInspection) error {
 		ew.printf("%s\t%s\n", p.bold("Desired:"), state.DesiredState)
 		ew.printf("%s\t%s\n", p.bold("Observed:"), state.ConnectionState)
 		ew.printf("%s\t%d\n", p.bold("Serving epoch:"), state.ServingEpoch)
+		p.publisherRows(ew, state.Publisher, state.CreatedAt)
 		ew.printf("%s\t%s\n", p.bold("Daemon:"), inspection.DaemonState)
 		ew.printf("%s\t%s\n", p.bold("Local target:"), inspection.TargetHealth)
 		if inspection.LastTransition != nil {
@@ -259,6 +277,7 @@ func (p *Printer) ResourceStatus(resource *qurlapi.ResourceSummary) error {
 			CRID:              resource.CRID, ResourceID: resource.ResourceID,
 			TargetURL: resource.TargetURL, Type: resource.Type, Status: resource.Status,
 			CreatedAt: resource.CreatedAt, ExpiresAt: resource.ExpiresAt,
+			Publisher: publisherDocument(resource.Publisher),
 		})
 	case p.quiet:
 		_, err := fmt.Fprintln(p.out, resource.CRID)
@@ -276,9 +295,7 @@ func (p *Printer) ResourceStatus(resource *qurlapi.ResourceSummary) error {
 			ew.printf("%s\t%t\n", p.bold("Private:"), *resource.Private)
 		}
 		ew.printf("%s\t%v\n", p.bold("Allowed device keys:"), resource.AllowedDeviceKeys)
-		if resource.CreatedAt != nil {
-			ew.printf("%s\t%s\n", p.bold("Created:"), p.relativeTime(*resource.CreatedAt))
-		}
+		p.publisherRows(ew, resource.Publisher, resource.CreatedAt)
 		if resource.ExpiresAt != nil {
 			ew.printf("%s\t%s\n", p.bold("Expires:"), p.formatExpiry(*resource.ExpiresAt))
 		}
@@ -335,19 +352,32 @@ func foundExisting(res *qurlapi.Published) bool {
 	return res.FoundExisting != nil && *res.FoundExisting
 }
 
+// publisherRows writes the `Publisher:` and `Created:` rows of a key/value
+// view. The Created row is omitted when the service gave no date.
+func (p *Printer) publisherRows(ew *errWriter, publisher qurlapi.Publisher, createdAt *time.Time) {
+	ew.printf("%s\t%s\n", p.bold(labelPublisher), p.publisherStatus(publisher))
+	if created := p.createdText(createdAt); created != "" {
+		ew.printf("%s\t%s\n", p.bold(labelCreated), created)
+	}
+}
+
 // ShareLink renders a minted share link. Piped stdout gets the bare link
 // and nothing else, so `link="$(qurl share <CRID>)"` captures it cleanly
 // (the link opens in a browser — fetching it with curl yields the page that
-// opens the link, which is why `qurl get --file` exists); a TTY gets the
-// link plus its expiry on stderr-free stdout decoration.
+// opens the link, which is why `qurl get --file` exists); the publisher and
+// creation date then go to stderr as one notice. A TTY gets the link, who
+// published the resource, when it was created, and the link's expiry as
+// stdout decoration. --quiet prints the link alone.
 func (p *Printer) ShareLink(link *qurlapi.ShareLink) error {
 	if p.format == FormatJSON {
 		out := shareLinkJSON{
-			QURL:             link.QURL,
-			CRID:             link.CRID,
-			Type:             link.Type,
-			ExpiresInSeconds: link.ExpiresInSeconds,
-			SingleUse:        link.SingleUse,
+			QURL:              link.QURL,
+			CRID:              link.CRID,
+			Type:              link.Type,
+			ExpiresInSeconds:  link.ExpiresInSeconds,
+			SingleUse:         link.SingleUse,
+			ResourceCreatedAt: link.ResourceCreatedAt,
+			Publisher:         publisherDocument(link.Publisher),
 		}
 		if !link.ExpiresAt.IsZero() {
 			t := link.ExpiresAt
@@ -356,13 +386,23 @@ func (p *Printer) ShareLink(link *qurlapi.ShareLink) error {
 		return p.writeJSON(out)
 	}
 	if p.quiet || !p.outTTY {
-		_, err := fmt.Fprintln(p.out, link.QURL)
-		return err
+		if _, err := fmt.Fprintln(p.out, link.QURL); err != nil {
+			return err
+		}
+		// Data first: the link is already on stdout when the notice is written.
+		p.PublisherNotice(link)
+		return nil
 	}
 	ew := &errWriter{w: p.out}
-	ew.printf("%s\n", link.QURL)
+	ew.printf("%s\n\n", link.QURL)
+	// Hand-aligned rather than tabwriter: the styled status would count as
+	// cell width.
+	ew.printf("  %s %s\n", p.bold(labelPublisher), p.publisherStatus(link.Publisher))
+	if created := p.createdText(link.ResourceCreatedAt); created != "" {
+		ew.printf("  %s   %s\n", p.bold(labelCreated), created)
+	}
 	if line := p.shareLinkDetail(link); line != "" {
-		ew.printf("\n%s\n", p.dim("  "+line))
+		ew.printf("%s\n", p.dim("  "+line))
 	}
 	return ew.flush(nil)
 }
@@ -421,6 +461,7 @@ func (p *Printer) List(page *qurlapi.ResourcePage) error {
 				Tags:              item.Tags,
 				CreatedAt:         item.CreatedAt,
 				ExpiresAt:         item.ExpiresAt,
+				Publisher:         publisherDocument(item.Publisher),
 			})
 		}
 		return p.writeJSON(out)
@@ -531,14 +572,18 @@ func (p *Printer) Delete(id string, alreadyGone bool) error {
 	}
 }
 
-// Downloaded renders a completed --file download. The file itself is the
-// data, so the text confirmation is a status message for humans and goes to
-// stderr; --quiet echoes the destination path to stdout for pipelines; JSON
-// emits the outcome document.
-func (p *Printer) Downloaded(crid, path string, bytes int64) error {
+// Downloaded renders a completed --file download of the resource link
+// names. The file itself is the data, so the text confirmation and the
+// publisher notice are status messages for humans and go to stderr; --quiet
+// echoes the destination path to stdout for pipelines; JSON emits the outcome
+// document, publisher and creation date included.
+func (p *Printer) Downloaded(link *qurlapi.ShareLink, path string, bytes int64) error {
 	switch {
 	case p.format == FormatJSON:
-		return p.writeJSON(downloadJSON{CRID: crid, File: path, Bytes: bytes})
+		return p.writeJSON(downloadJSON{
+			CRID: link.CRID, File: path, Bytes: bytes,
+			ResourceCreatedAt: link.ResourceCreatedAt, Publisher: publisherDocument(link.Publisher),
+		})
 	case p.quiet:
 		_, err := fmt.Fprintln(p.out, path)
 		return err
@@ -546,6 +591,7 @@ func (p *Printer) Downloaded(crid, path string, bytes int64) error {
 		// Best-effort like every stderr status line: the file is already in
 		// place, so a broken stderr must not turn success into failure.
 		_, _ = fmt.Fprintf(p.err, msgSavedTo+"\n", path, bytes)
+		p.PublisherNotice(link)
 		return nil
 	}
 }

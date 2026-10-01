@@ -4,5 +4,9 @@
   "target_url": "https://example.com/data",
   "status": "active",
   "created_at": "2026-03-01T00:00:00Z",
-  "found_existing": true
+  "found_existing": true,
+  "publisher": {
+    "name": "Acme Docs",
+    "verified": false
+  }
 }

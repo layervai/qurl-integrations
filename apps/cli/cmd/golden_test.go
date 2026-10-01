@@ -70,10 +70,84 @@ func TestGoldens(t *testing.T) {
 			stderrGolden: true,
 		},
 		{
+			// A terminal gets the publisher and creation date with the link on
+			// stdout; JSON carries them in the document. Neither writes stderr.
 			name:         "share",
 			args:         func(srv *apitest.Server) []string { return []string{"share", srv.Key.CRID} },
+			variants:     []string{"tty", "json"},
+			stdoutGolden: true,
+		},
+		{
+			// Piped: stdout stays exactly the bare link, and the publisher is
+			// one notice line on stderr.
+			name:         "share",
+			args:         func(srv *apitest.Server) []string { return []string{"share", srv.Key.CRID} },
+			variants:     []string{"plain"},
+			stdoutGolden: true,
+			stderrGolden: true,
+		},
+		{
+			// The publisher set no name: the fixed text stands in for it, and
+			// the status word is unchanged.
+			name:         "share_unnamed",
+			args:         func(srv *apitest.Server) []string { return []string{"share", srv.Key.CRID} },
+			prepare:      func(srv *apitest.Server) { srv.SetPublisherName("") },
+			variants:     []string{"tty", "json"},
+			stdoutGolden: true,
+		},
+		{
+			name:         "share_unnamed",
+			args:         func(srv *apitest.Server) []string { return []string{"share", srv.Key.CRID} },
+			prepare:      func(srv *apitest.Server) { srv.SetPublisherName("") },
+			variants:     []string{"plain"},
+			stdoutGolden: true,
+			stderrGolden: true,
+		},
+		{
+			// status on a URL resource: the sharing-state read answers that
+			// this is not a Connector, then the resource detail carries the
+			// publisher and creation date.
+			name:         "status_url",
+			args:         func(srv *apitest.Server) []string { return []string{"status", srv.Key.CRID} },
 			variants:     goldenVariants(),
 			stdoutGolden: true,
+		},
+		{
+			name:         "publisher",
+			args:         func(*apitest.Server) []string { return []string{"publisher"} },
+			variants:     goldenVariants(),
+			stdoutGolden: true,
+		},
+		{
+			// Setting a name prints the row recipients will see; the
+			// confirmation is a status note on stderr.
+			name:         "publisher_set",
+			args:         func(*apitest.Server) []string { return []string{"publisher", "set", "Northwind Labs"} },
+			variants:     []string{"tty", "plain"},
+			stdoutGolden: true,
+			stderrGolden: true,
+		},
+		{
+			name:         "publisher_set",
+			args:         func(*apitest.Server) []string { return []string{"publisher", "set", "Northwind Labs"} },
+			variants:     []string{"json"},
+			stdoutGolden: true,
+		},
+		{
+			name:         "publisher_clear",
+			args:         func(*apitest.Server) []string { return []string{"publisher", "clear"} },
+			variants:     []string{"plain"},
+			stdoutGolden: true,
+			stderrGolden: true,
+		},
+		{
+			// The service refuses a name: exit 8 with its reason, and the
+			// name itself is not echoed.
+			name:         "error_publisher_name",
+			args:         func(*apitest.Server) []string { return []string{"publisher", "set", "Acme Verified"} },
+			variants:     []string{"plain"},
+			wantCode:     8,
+			stderrGolden: true,
 		},
 		{
 			name:         "list",
