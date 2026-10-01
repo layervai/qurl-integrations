@@ -177,6 +177,44 @@ func TestResourceRowReadsOnlyItsLatestObject(t *testing.T) {
 	})
 }
 
+// The readers are handed bytes an outer decoder already validated, but they
+// do not depend on that: an object that is cut short, or followed by anything
+// else, reads as unnamed and unverified rather than as whatever its members
+// said before the input went wrong.
+func TestPublisherReadersNeedOneCompleteObject(t *testing.T) {
+	t.Parallel()
+	const whole = `{"name":"Acme Docs","verified":true}`
+	if got := parsePublisherWire([]byte(whole)).publisher(); got != (Publisher{Name: "Acme Docs", Verified: true}) {
+		t.Fatalf("a complete object = %+v", got)
+	}
+	if got := publisherMember([]byte(`{"publisher":` + whole + `}`)).publisher(); got != (Publisher{Name: "Acme Docs", Verified: true}) {
+		t.Fatalf("a complete row = %+v", got)
+	}
+	for name, object := range map[string]string{
+		"empty":             ``,
+		"no closing brace":  `{"name":"Acme Docs","verified":true`,
+		"cut after a comma": `{"name":"Acme Docs","verified":true,`,
+		"cut in a value":    `{"verified":true,"name":"Acme`,
+		"trailing value":    whole + ` true`,
+		"trailing object":   whole + whole,
+		"trailing brace":    whole + `}`,
+		"wrapped in array":  `[` + whole + `]`,
+	} {
+		if got := parsePublisherWire([]byte(object)).publisher(); got != (Publisher{}) {
+			t.Errorf("%s: publisher object = %+v, want the unverified zero value", name, got)
+		}
+	}
+	for name, row := range map[string]string{
+		"no closing brace": `{"publisher":` + whole,
+		"trailing value":   `{"publisher":` + whole + `} true`,
+		"trailing row":     `{"publisher":` + whole + `}{"publisher":` + whole + `}`,
+	} {
+		if got := publisherMember([]byte(row)).publisher(); got != (Publisher{}) {
+			t.Errorf("%s: row publisher = %+v, want the unverified zero value", name, got)
+		}
+	}
+}
+
 // A struct that only tags a field with the publisher type reads nothing into
 // it: the type has no decoder of its own, so a new carrier cannot pick up
 // encoding/json's last-member-wins by forgetting to count.

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 
 	"github.com/layervai/qurl-go/qurl"
@@ -102,8 +103,9 @@ func publisherMember(object []byte) publisherWire {
 }
 
 // objectMembers calls visit with each member of one JSON object, in order and
-// including repeated names. It reports whether data was an object it could
-// read to the end.
+// including repeated names. It reports whether data was exactly one complete
+// object: input that stops before the closing brace, or carries anything
+// after it, is not, whatever its members said before that point.
 func objectMembers(data []byte, visit func(name string, value json.RawMessage)) bool {
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	if first, err := decoder.Token(); err != nil || first != json.Delim('{') {
@@ -121,7 +123,11 @@ func objectMembers(data []byte, visit func(name string, value json.RawMessage)) 
 		}
 		visit(name, value)
 	}
-	return true
+	if last, err := decoder.Token(); err != nil || last != json.Delim('}') {
+		return false
+	}
+	_, err := decoder.Token()
+	return errors.Is(err, io.EOF)
 }
 
 func (w publisherWire) publisher() Publisher {
