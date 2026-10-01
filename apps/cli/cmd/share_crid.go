@@ -37,8 +37,9 @@ func shareCmd(opts *globalOpts) *cobra.Command {
 		Short:      "Share a CRID as a short-lived access link",
 		Long: `Share a CRID as a temporary access link for the resource it names.
 
-The request uses this device's identity. The resource's owner, or a device
-the publisher allowed, gets a link; anyone else gets "not found".
+share uses this device's identity. It works on the resource owner's devices
+and, for a private resource, on the devices the publisher allowed; any other
+device gets "not found".
 The link expires on its own; share again whenever you need a fresh one.
 
 Before anything is printed, the CLI verifies that the link belongs
@@ -157,8 +158,9 @@ func reportClamp(printer *output.Printer, requested time.Duration, link *qurlapi
 // cannot be opened fails here, before the share route is contacted.
 //
 // TODO(upstream-contract): qurl-service decides who may share. It mints a
-// link for the resource's owner or a device the publisher allowed and answers
-// anyone else 404. The share help and the README state that rule.
+// link on the resource owner's devices and, for a private resource, on the
+// devices the publisher allowed, and it answers any other device 404. The
+// help, the README, and the share not-found hint all state that rule.
 func (opts *globalOpts) shareResource(ctx context.Context, id string, options qurlapi.ShareOptions) (*qurlapi.ShareLink, error) {
 	client, err := opts.newClient(ctx)
 	if err != nil {

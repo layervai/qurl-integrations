@@ -315,7 +315,7 @@ func (c *client) Share(ctx context.Context, id string, opts ShareOptions) (*Shar
 	}
 	access, err := c.sdk.ShareResource(ctx, id, sdkOpts)
 	if err != nil {
-		return nil, mapError(err)
+		return nil, mapShareError(err)
 	}
 	return &ShareLink{
 		QURL:             access.Link,
@@ -325,6 +325,18 @@ func (c *client) Share(ctx context.Context, id string, opts ShareOptions) (*Shar
 		ExpiresInSeconds: access.ExpiresInSeconds,
 		SingleUse:        access.SingleUse,
 	}, nil
+}
+
+// mapShareError is mapError for the share operator. It marks a not-found
+// answer as share's own, so the customer rendering can say what that answer
+// may mean for a CRID instead of repeating the guidance other routes get.
+func mapShareError(err error) error {
+	mapped := mapError(err)
+	var apiErr *Error
+	if errors.As(mapped, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
+		apiErr.shareNotFound = true
+	}
+	return mapped
 }
 
 // mapError converts a wire failure into this package's typed *Error while

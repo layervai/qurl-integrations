@@ -22,7 +22,8 @@ import (
 // Tests for the one share path `qurl share` and `qurl get` have in common.
 // The contract: every share request carries this device's credential, none is
 // ever sent without one, and the service's answer for a device that is
-// neither the owner nor allowed is the ordinary not-found result.
+// neither the owner's nor allowed is the not-found result, whose guidance
+// covers every cause the CLI cannot tell apart.
 //
 // These runs use the production registered-device path, not the harness's
 // account-key client. Only the native runtime is a fake, because it is the
@@ -291,8 +292,9 @@ func TestShareIsNeverSentWithoutACredential(t *testing.T) {
 // for a private CRID against two registered devices. The device the
 // publisher allowed gets a link with its own credential. Any other device is
 // answered the ambiguous 404, the same answer a device that does not own a
-// public CRID receives. share and get cannot tell those cases apart and
-// surface both as the ordinary not-found result: one request, no retry, and
+// public CRID receives. share and get cannot tell those cases apart, so both
+// surface as the one not-found result, exit code 5, whose guidance names
+// every cause and how a device gets allowed: one request, no retry, and
 // nothing printed, opened, or saved.
 func TestPrivateShareIsDecidedByTheDeviceCredential(t *testing.T) {
 	allowed := bootstrapRegisteredState(t)
@@ -332,9 +334,22 @@ func TestPrivateShareIsDecidedByTheDeviceCredential(t *testing.T) {
 			if run.result.code != exitcode.NotFound {
 				t.Fatalf("exit = %d, want %d; stderr: %s", run.result.code, exitcode.NotFound, run.result.stderr.String())
 			}
-			for _, want := range []string{"Not Found (HTTP 404)", "Ask whoever shared it for a current one"} {
-				if !strings.Contains(run.result.stderr.String(), want) {
-					t.Errorf("stderr = %q, want the not-found message %q", run.result.stderr.String(), want)
+			stderr := run.result.stderr.String()
+			for _, want := range []string{
+				"Not Found (HTTP 404)",
+				"the CRID may be mistyped, the resource may have been removed, or this device may be neither the owner's nor one the publisher allowed",
+				"send the publisher its public key from `qurl whoami -o json`",
+			} {
+				if !strings.Contains(stderr, want) {
+					t.Errorf("stderr = %q, want the not-found guidance %q", stderr, want)
+				}
+			}
+			// The CLI cannot tell why the service said not-found, so it must
+			// not read like the answer an owner gets for a deleted resource,
+			// and it must not give the advice meant for an expired link.
+			for _, wrong := range []string{"deleted", "Ask whoever shared it"} {
+				if strings.Contains(strings.ToLower(stderr), strings.ToLower(wrong)) {
+					t.Errorf("stderr = %q, must not say %q", stderr, wrong)
 				}
 			}
 			run.mustNotHaveActed(t)

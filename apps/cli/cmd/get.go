@@ -36,8 +36,9 @@ func getCmd(opts *globalOpts) *cobra.Command {
 		Short: "Fetch what a CRID points to",
 		Long: `Fetch the content behind a CRID.
 
-get uses this device's identity. The resource's owner, or a device the
-publisher allowed, can fetch it; anyone else gets "not found".
+get uses this device's identity. It works on the resource owner's devices
+and, for a private resource, on the devices the publisher allowed; any other
+device gets "not found".
 
 get mints a fresh share link exactly like ` + "`qurl share`" + ` and verifies it
 against the CRID you asked for — a mismatch is discarded and the command

@@ -198,6 +198,7 @@ func (s *Server) Requests() []RecordedRequest {
 func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	// A share request with no credential is recorded like any other, so a
 	// test can still see exactly what arrived, but it never reaches a script.
+	// It falls through to handleShare, which writes its 401.
 	unauthenticatedShare := isShareRequest(r) && bearerCredential(r) == ""
 
 	s.mu.Lock()
@@ -227,9 +228,33 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	s.defaultHandler(w, r)
 }
 
-// isShareRequest reports whether r addresses the CRID share operator.
+// isShareRequest reports whether r addresses the CRID share operator. Only
+// that route is held to the credential rule: another route whose path happens
+// to end in /share is not a share request.
 func isShareRequest(r *http.Request) bool {
-	return r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/share")
+	if r.Method != http.MethodPost {
+		return false
+	}
+	_, ok := shareResourceID(r.URL.Path)
+	return ok
+}
+
+// shareResourceID returns the {id} of a share route, which is
+// /v1/resources/{id}/share or the same path without the version prefix. The
+// id is exactly one non-empty path segment.
+func shareResourceID(path string) (string, bool) {
+	rest, ok := strings.CutPrefix(path, "/v1/resources/")
+	if !ok {
+		rest, ok = strings.CutPrefix(path, "/resources/")
+	}
+	if !ok {
+		return "", false
+	}
+	id, ok := strings.CutSuffix(rest, "/share")
+	if !ok || id == "" || strings.Contains(id, "/") {
+		return "", false
+	}
+	return id, true
 }
 
 // bearerCredential returns the bearer token r presented. It is empty when r
@@ -392,6 +417,9 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 // `unauthorized` whatever it names. Any credential is the owner here: tests
 // script the 404 a caller who is neither owner nor allowed receives.
 func (s *Server) handleShare(w http.ResponseWriter, r *http.Request) {
+	// This is the 401 writer for the guard in handle: handle reports the
+	// request and keeps it from a script, then falls through to here for
+	// the answer. The two checks are one rule and must change together.
 	if bearerCredential(r) == "" {
 		s.writeUnauthorized(w)
 		return
@@ -402,7 +430,8 @@ func (s *Server) handleShare(w http.ResponseWriter, r *http.Request) {
 			"request body must be a JSON object")
 		return
 	}
-	id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v1/resources/"), "/share")
+	// defaultHandler routes here only for a path isShareRequest matched.
+	id, _ := shareResourceID(r.URL.Path)
 	s.mu.Lock()
 	qurlLink := s.shareQURL
 	s.mu.Unlock()

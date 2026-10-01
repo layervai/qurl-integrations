@@ -1176,22 +1176,119 @@ func TestNewRejectsEmptyBaseURL(t *testing.T) {
 	}
 }
 
-// TestShareAlwaysCarriesACredential pins the client seam under share: no
-// client can be built without a credential, so nothing in this package can
-// send a share request without one, and a built client's share carries it.
+// TestShareAlwaysCarriesACredential pins the client seam under share. This
+// package builds a client two ways, New from an account key and NewRegistered
+// from device state, and neither returns one without a usable credential, so
+// nothing here can send a share request without one. A client that either
+// does build sends its credential with the share request.
 func TestShareAlwaysCarriesACredential(t *testing.T) {
 	srv := apitest.NewServer(t)
+
 	for _, key := range []string{"", "   "} {
 		if client, err := New(&Config{BaseURL: srv.URL, APIKey: key, Version: "test"}); client != nil || !errors.Is(err, qurl.ErrInvalidClientConfig) {
 			t.Fatalf("New with credential %q = %v, %v; want ErrInvalidClientConfig", key, client, err)
 		}
 	}
-	if _, err := newTestClient(t, srv, nil).Share(context.Background(), srv.Key.CRID, ShareOptions{}); err != nil {
-		t.Fatalf("Share: %v", err)
+	for _, tc := range []struct {
+		name  string
+		state func() *qurl.AgentState
+	}{
+		{"no device state", func() *qurl.AgentState { return nil }},
+		{"no device credential", func() *qurl.AgentState {
+			state := registeredAPIState(t)
+			state.DeviceAPIKey = ""
+			return state
+		}},
+		{"blank device credential", func() *qurl.AgentState {
+			state := registeredAPIState(t)
+			state.DeviceAPIKey = "   "
+			return state
+		}},
+	} {
+		client, err := NewRegistered(context.Background(), &Config{
+			BaseURL: srv.URL, Version: "test", HTTPClient: srv.Client(),
+		}, &registeredAPIStateStore{state: tc.state()})
+		if client != nil || err == nil {
+			t.Fatalf("NewRegistered with %s = %v, %v; want no client", tc.name, client, err)
+		}
 	}
-	requests := srv.Requests()
-	if len(requests) != 1 || requests[0].Header.Get("Authorization") != "Bearer lv_test_apitestingvalue123456789" {
-		t.Fatalf("share requests = %+v, want one carrying the configured credential", requests)
+	if got := len(srv.Requests()); got != 0 {
+		t.Fatalf("refusing to build a client sent %d requests, want none", got)
+	}
+
+	for _, built := range []struct {
+		name   string
+		client Client
+		want   string
+	}{
+		{"account key", newTestClient(t, srv, nil), "Bearer lv_test_apitestingvalue123456789"},
+		{"device state", newRegisteredTestClient(t, srv), "Bearer " + registeredAPIState(t).DeviceAPIKey},
+	} {
+		if _, err := built.client.Share(context.Background(), srv.Key.CRID, ShareOptions{}); err != nil {
+			t.Fatalf("Share with a client built from %s: %v", built.name, err)
+		}
+		requests := srv.Requests()
+		last := requests[len(requests)-1]
+		if last.Path != "/v1/resources/"+srv.Key.CRID+"/share" || last.Header.Get("Authorization") != built.want {
+			t.Fatalf("share from a client built from %s = %s %s with %d Authorization bytes, want its own credential",
+				built.name, last.Method, last.Path, len(last.Header.Get("Authorization")))
+		}
+	}
+	if got := len(srv.Requests()); got != 2 {
+		t.Fatalf("requests = %d, want exactly the two share requests", got)
+	}
+}
+
+// TestShareMarksOnlyItsOwnNotFound pins which errors carry share's not-found
+// marker: a 404 from the share operator, whatever its problem code, and
+// nothing else. The owner-truthful answers share can also give keep their own
+// codes, and another route's 404 keeps the guidance every route shares.
+func TestShareMarksOnlyItsOwnNotFound(t *testing.T) {
+	srv := apitest.NewServer(t)
+	shareRoute := "/v1/resources/" + srv.Key.CRID + "/share"
+	client := newTestClient(t, srv, nil)
+
+	for _, tc := range []struct {
+		name    string
+		handler http.HandlerFunc
+		status  int
+		want    bool
+	}{
+		{"share not-found code", apitest.HandlerNotFound404(t, "resource_not_found"), http.StatusNotFound, true},
+		{"generic not-found code", apitest.HandlerNotFound404(t, "not_found"), http.StatusNotFound, true},
+		{"no problem body", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNotFound) }, http.StatusNotFound, true},
+		{"deleted by its owner", apitest.HandlerRevoked400(t), http.StatusBadRequest, false},
+		{"retired", apitest.HandlerTombstoned410(t), http.StatusGone, false},
+		{"missing scope", apitest.HandlerInsufficientScope403(t), http.StatusForbidden, false},
+		{"stopped", apitest.HandlerConnectorStopped503(t), http.StatusServiceUnavailable, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv.Script(http.MethodPost, shareRoute, tc.handler)
+			_, err := client.Share(context.Background(), srv.Key.CRID, ShareOptions{})
+			var apiErr *Error
+			if !errors.As(err, &apiErr) || apiErr.StatusCode != tc.status {
+				t.Fatalf("Share error = %v, want a typed HTTP %d", err, tc.status)
+			}
+			if got := apiErr.ShareNotFound(); got != tc.want {
+				t.Fatalf("ShareNotFound() = %t for HTTP %d %q, want %t", got, apiErr.StatusCode, apiErr.Code, tc.want)
+			}
+		})
+	}
+
+	t.Run("another route", func(t *testing.T) {
+		srv.Script(http.MethodGet, "/v1/resources/"+srv.Key.CRID+"/sharing", apitest.HandlerNotFound404(t, "not_found"))
+		_, err := client.Sharing(context.Background(), srv.Key.CRID)
+		var apiErr *Error
+		if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusNotFound {
+			t.Fatalf("Sharing error = %v, want a typed HTTP 404", err)
+		}
+		if apiErr.ShareNotFound() {
+			t.Fatal("a 404 from a route other than share carries share's not-found marker")
+		}
+	})
+
+	if (*Error)(nil).ShareNotFound() {
+		t.Fatal("a nil error reports share's not-found marker")
 	}
 }
 

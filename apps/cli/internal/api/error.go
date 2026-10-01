@@ -35,6 +35,7 @@ type Error struct {
 
 	agentEnrollmentScopeRequired     bool
 	connectorEnrollmentScopeRequired bool
+	shareNotFound                    bool
 }
 
 // Error renders a single line: the fixed frame, the server's title (or
@@ -68,6 +69,17 @@ func (e *Error) AgentEnrollmentScopeRequired() bool {
 // not mint the one-time credential for a local Connector.
 func (e *Error) ConnectorEnrollmentScopeRequired() bool {
 	return e != nil && e.connectorEnrollmentScopeRequired
+}
+
+// ShareNotFound reports that the share operator answered not-found for a
+// CRID.
+//
+// TODO(upstream-contract): qurl-service gives share that one answer for a
+// CRID that does not exist, a resource that was removed, and a device that is
+// neither the owner's nor allowed. The answer therefore identifies none of
+// them, and nothing here may treat it as any one of them.
+func (e *Error) ShareNotFound() bool {
+	return e != nil && e.shareNotFound
 }
 
 // CustomerMessages returns the fixed customer-facing strings this package

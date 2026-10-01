@@ -31,6 +31,15 @@ const (
 	hintQuotaExceeded = "Hint: if this device is not linked to an account, run `qurl account setup`. For account plan limits, see https://layerv.ai/pricing."
 	hintRetryAfter    = "Retry after %ds."
 
+	// hintShareNotFound is the not-found guidance for sharing or getting a
+	// CRID, in place of hintNotFound. The service answers a mistyped CRID, a
+	// removed resource, and a device that is neither the owner's nor allowed
+	// with one 404, so the hint names all three and claims none. It says
+	// "removed", never "deleted": that word belongs to hintRevoked, the
+	// answer only an owner gets, and the journey validators require it to
+	// prove that answer.
+	hintShareNotFound = "Hint: the CRID may be mistyped, the resource may have been removed, or this device may be neither the owner's nor one the publisher allowed. To get this device allowed, send the publisher its public key from `qurl whoami -o json`."
+
 	// hintRevoked is owner-truthful: the platform tells a resource's owner
 	// that their own resource was deleted rather than hiding it behind the
 	// ambiguous not-found. Everyone else gets the ambiguous 404.
@@ -288,6 +297,7 @@ func CustomerMessages() []string {
 		hintNoCredential,
 		hintUnauthorized,
 		hintNotFound,
+		hintShareNotFound,
 		hintQuotaExceeded,
 		hintRetryAfter,
 		hintRevoked,

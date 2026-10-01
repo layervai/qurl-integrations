@@ -2,4 +2,4 @@ Error: Not Found (HTTP 404)
 
   the requested resource does not exist
 
-  Hint: the CRID may be mistyped, expired, or no longer published. Ask whoever shared it for a current one.
+  Hint: the CRID may be mistyped, the resource may have been removed, or this device may be neither the owner's nor one the publisher allowed. To get this device allowed, send the publisher its public key from `qurl whoami -o json`.
