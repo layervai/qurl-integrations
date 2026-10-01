@@ -197,12 +197,13 @@ func TestStatusNeverRendersVerifiedFromAGarbledField(t *testing.T) {
 	}
 }
 
-// TestOwnerReadsOmitAZeroCreationDate holds the text and JSON projections of
-// the owner reads to one answer for an all-zeros created_at: it is an unset
-// date, so text has no Created row and JSON has no created_at key. Without
-// that, JSON printed year 1 while text printed nothing.
-func TestOwnerReadsOmitAZeroCreationDate(t *testing.T) {
-	const zero = `,"created_at":"0001-01-01T00:00:00Z"`
+// TestOwnerReadsOmitAZeroDate holds the text and JSON projections of the
+// owner reads to one answer for an all-zeros created_at or expires_at: it is
+// an unset date. Text has no Created row and JSON has no created_at key,
+// where JSON used to print year 1 while text printed nothing; and a resource
+// with no expiry is not shown as expired.
+func TestOwnerReadsOmitAZeroDate(t *testing.T) {
+	const zero = `,"created_at":"0001-01-01T00:00:00Z","expires_at":"0001-01-01T00:00:00Z"`
 	script := func(srv *apitest.Server, createdAt string) {
 		row := fmt.Sprintf(`{"resource_id":%q,"crid":%q,"type":"url","status":"active","target_url":"https://example.com/data","allowed_device_keys":[]%s}`,
 			srv.Key.ResourceID, srv.Key.CRID, createdAt)
@@ -232,9 +233,11 @@ func TestOwnerReadsOmitAZeroCreationDate(t *testing.T) {
 				if res.code != 0 {
 					t.Fatalf("%s: exit = %d, stderr: %s", format, res.code, res.stderr.String())
 				}
-				if got := res.stdout.String(); strings.Contains(got, "created_at") || strings.Contains(got, "Created:") ||
-					strings.Contains(got, "0001") || strings.Contains(got, " ago") {
-					t.Errorf("%s: a zero created_at was rendered as a date:\n%s", format, got)
+				got := res.stdout.String()
+				for _, rendered := range []string{"created_at", "Created:", "expires_at", "Expires:", "expired", "0001", "1d ago"} {
+					if strings.Contains(got, rendered) {
+						t.Errorf("%s: a zero date was rendered (%q):\n%s", format, rendered, got)
+					}
 				}
 
 				// The same row with a real date does show it, so the check
@@ -242,7 +245,7 @@ func TestOwnerReadsOmitAZeroCreationDate(t *testing.T) {
 				srv = apitest.NewServer(t)
 				script(srv, `,"created_at":"2026-03-01T00:00:00Z"`)
 				res = runCLI(t, &runOpts{args: append([]string{"--endpoint", srv.URL, "-o", format}, command(srv)...)})
-				if got := res.stdout.String(); res.code != 0 || !strings.Contains(got, shown[format]) {
+				if got = res.stdout.String(); res.code != 0 || !strings.Contains(got, shown[format]) {
 					t.Errorf("%s: exit = %d; a real created_at is missing (want %q):\n%s", format, res.code, shown[format], got)
 				}
 			}

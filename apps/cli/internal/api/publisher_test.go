@@ -46,6 +46,13 @@ func TestPublisherWireFailsClosed(t *testing.T) {
 		"verified beside":         {row: `{"verified":true,"publisher":{"name":"Acme Docs"}}`, want: Publisher{Name: "Acme Docs"}},
 		"verified beside, absent": {row: `{"verified":true,"publisher_verified":true}`},
 		"numeric name":            {row: `{"publisher":{"name":7,"verified":false}}`},
+		// A repeated name is ambiguous: no occurrence wins, and the status
+		// beside it is unaffected.
+		"repeated name":           {row: `{"publisher":{"name":"Acme Docs","name":"LayerV Security"}}`},
+		"repeated same name":      {row: `{"publisher":{"name":"Acme Docs","name":"Acme Docs"}}`},
+		"name, then garbled name": {row: `{"publisher":{"name":"Acme Docs","name":7}}`},
+		"garbled name, then name": {row: `{"publisher":{"name":null,"name":"Acme Docs"}}`},
+		"repeated name, verified": {row: `{"publisher":{"name":"Acme Docs","verified":true,"name":"LayerV Security"}}`, want: Publisher{Verified: true}},
 		"null name":               {row: `{"publisher":{"name":null,"verified":false}}`},
 		"uppercase name key":      {row: `{"publisher":{"NAME":"Acme Docs"}}`},
 		"explicit false":          {row: `{"publisher":{"name":"Acme Docs","verified":false}}`, want: Publisher{Name: "Acme Docs"}},
@@ -186,23 +193,28 @@ func TestPublisherWireHasNoDecoderOfItsOwn(t *testing.T) {
 	}
 }
 
-// An all-zeros created_at is an unset date. Every owner read that carries a
-// resource row drops it, so no rendering can print year 1 as a creation date.
-func TestResourceReadsDropAZeroCreationDate(t *testing.T) {
-	created := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
+// An all-zeros created_at or expires_at is an unset date. Every owner read
+// that carries a resource row drops it, so no rendering can print year 1 as a
+// creation date or list a resource with no expiry as expired.
+func TestResourceReadsDropAZeroDate(t *testing.T) {
+	date := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
 	for name, test := range map[string]struct {
-		createdAt string
-		want      *time.Time
+		value string
+		want  *time.Time
 	}{
-		"zero time": {createdAt: `,"created_at":"0001-01-01T00:00:00Z"`},
-		"null":      {createdAt: `,"created_at":null`},
+		"zero time": {value: `"0001-01-01T00:00:00Z"`},
+		"null":      {value: `null`},
 		"absent":    {},
-		"a date":    {createdAt: `,"created_at":"2026-03-01T00:00:00Z"`, want: &created},
+		"a date":    {value: `"2026-03-01T00:00:00Z"`, want: &date},
 	} {
 		t.Run(name, func(t *testing.T) {
 			srv := apitest.NewServer(t)
+			dates := ""
+			if test.value != "" {
+				dates = `,"created_at":` + test.value + `,"expires_at":` + test.value
+			}
 			row := fmt.Sprintf(`{"resource_id":%q,"crid":%q,"type":"url","status":"active","target_url":"https://example.com/data","allowed_device_keys":[]%s}`,
-				srv.Key.ResourceID, srv.Key.CRID, test.createdAt)
+				srv.Key.ResourceID, srv.Key.CRID, dates)
 			answer := func(status int, body string) http.HandlerFunc {
 				return func(w http.ResponseWriter, _ *http.Request) {
 					w.Header().Set("Content-Type", "application/json")
@@ -215,13 +227,12 @@ func TestResourceReadsDropAZeroCreationDate(t *testing.T) {
 			srv.Script(http.MethodPost, "/v1/resources", answer(http.StatusCreated, `{"data":`+row+`,"meta":{}}`))
 			srv.Script(http.MethodPatch, "/v1/resources/"+srv.Key.CRID, answer(http.StatusOK, `{"data":`+row+`}`))
 			client := newTestClient(t, srv, nil)
-			check := func(read string, got *time.Time, err error) {
+			check := func(read string, createdAt, expiresAt *time.Time) {
 				t.Helper()
-				if err != nil {
-					t.Fatalf("%s: %v", read, err)
-				}
-				if (got == nil) != (test.want == nil) || (got != nil && !got.Equal(*test.want)) {
-					t.Errorf("%s: created_at = %v, want %v", read, got, test.want)
+				for key, got := range map[string]*time.Time{"created_at": createdAt, "expires_at": expiresAt} {
+					if (got == nil) != (test.want == nil) || (got != nil && !got.Equal(*test.want)) {
+						t.Errorf("%s: %s = %v, want %v", read, key, got, test.want)
+					}
 				}
 			}
 
@@ -229,25 +240,24 @@ func TestResourceReadsDropAZeroCreationDate(t *testing.T) {
 			if err != nil || len(page.Items) != 1 {
 				t.Fatalf("List = %+v, %v; want one row", page, err)
 			}
-			check("List", page.Items[0].CreatedAt, nil)
+			check("List", page.Items[0].CreatedAt, page.Items[0].ExpiresAt)
 			resource, err := client.Resource(context.Background(), srv.Key.CRID)
-			check("Resource", createdAtOf(resource), err)
+			if err != nil {
+				t.Fatalf("Resource: %v", err)
+			}
+			check("Resource", resource.CreatedAt, resource.ExpiresAt)
 			published, err := client.Publish(context.Background(), "https://example.com/data", PublishOptions{})
 			if err != nil {
 				t.Fatalf("Publish: %v", err)
 			}
-			check("Publish", published.CreatedAt, nil)
+			check("Publish", published.CreatedAt, published.ExpiresAt)
 			granted, err := client.SetDeviceGrants(context.Background(), srv.Key.CRID, nil)
-			check("SetDeviceGrants", createdAtOf(granted), err)
+			if err != nil {
+				t.Fatalf("SetDeviceGrants: %v", err)
+			}
+			check("SetDeviceGrants", granted.CreatedAt, granted.ExpiresAt)
 		})
 	}
-}
-
-func createdAtOf(resource *ResourceSummary) *time.Time {
-	if resource == nil {
-		return nil
-	}
-	return resource.CreatedAt
 }
 
 // The three owner reads that carry a resource row all refuse to let a

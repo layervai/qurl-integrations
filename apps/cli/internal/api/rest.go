@@ -272,7 +272,7 @@ func (c *client) Publish(ctx context.Context, targetURL string, opts PublishOpti
 		TargetURL:     env.Data.TargetURL,
 		Status:        env.Data.Status,
 		CreatedAt:     knownTime(env.Data.CreatedAt),
-		ExpiresAt:     env.Data.ExpiresAt,
+		ExpiresAt:     knownTime(env.Data.ExpiresAt),
 		FoundExisting: env.Meta.FoundExisting,
 		Publisher:     env.Data.Publisher.publisher(),
 	}, nil
@@ -408,15 +408,15 @@ func summarizeResourceRow(row *resourceRow, source string) (*ResourceSummary, er
 		CRID:              row.CRID, ResourceID: row.ResourceID, TargetURL: row.TargetURL,
 		Type: row.Type, Status: row.Status, DesiredState: row.DesiredState,
 		ServingEpoch: row.ServingEpoch, Description: row.Description, Tags: row.Tags,
-		CreatedAt: knownTime(row.CreatedAt), ExpiresAt: row.ExpiresAt,
+		CreatedAt: knownTime(row.CreatedAt), ExpiresAt: knownTime(row.ExpiresAt),
 		Publisher: row.Publisher.publisher(),
 	}, nil
 }
 
-// knownTime is a creation date the service actually gave. The all-zeros
-// timestamp (0001-01-01T00:00:00Z) is how an unset date serializes, so it is
-// treated as absent: every rendering then omits the date instead of the text
-// form dropping it while JSON prints year 1.
+// knownTime is a date the service actually gave. The all-zeros timestamp
+// (0001-01-01T00:00:00Z) is how an unset date serializes, so it is treated as
+// absent: no rendering prints year 1 as a creation date, and a resource with
+// no expiry is not listed as expired.
 func knownTime(t *time.Time) *time.Time {
 	if t == nil || t.IsZero() {
 		return nil

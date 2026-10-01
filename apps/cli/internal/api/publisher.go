@@ -54,18 +54,21 @@ const fieldPublisher = "publisher"
 // is not an object, an object without a usable member, and a service that
 // predates the field all read that way. Only one exact, lowercase "verified"
 // member holding the JSON literal true verifies: a string, a number, a
-// differently cased key, or a repeated member does not.
+// differently cased key, or a repeated member does not. A repeated "name" is
+// ambiguous in the same way, so no occurrence wins and the publisher reads as
+// unnamed.
 func parsePublisherWire(data []byte) publisherWire {
 	var parsed publisherWire
-	seenVerified := false
+	seenName, seenVerified := false, false
 	if !objectMembers(data, func(name string, value json.RawMessage) {
 		switch name {
 		case "name":
 			parsed.name = ""
 			var text string
-			if json.Unmarshal(value, &text) == nil {
+			if !seenName && json.Unmarshal(value, &text) == nil {
 				parsed.name = text
 			}
+			seenName = true
 		case "verified":
 			parsed.verified = !seenVerified && string(bytes.TrimSpace(value)) == "true"
 			seenVerified = true
@@ -88,7 +91,9 @@ func publisherMember(object []byte) publisherWire {
 	if !objectMembers(object, func(name string, value json.RawMessage) {
 		if name == fieldPublisher {
 			occurrences++
-			publisher = parsePublisherWire(value)
+			if occurrences == 1 {
+				publisher = parsePublisherWire(value)
+			}
 		}
 	}) || occurrences != 1 {
 		return publisherWire{}
