@@ -653,7 +653,7 @@ func TestWhoamiListedInHelp(t *testing.T) {
 	if res.code != 0 {
 		t.Fatalf("help exit = %d", res.code)
 	}
-	for _, name := range []string{"publish", "share", "get", "list", "start", "stop", "restart", "status", "inspect", "daemon", "delete", "login", "whoami", "version", "completion"} {
+	for _, name := range []string{"publish", "share", "get", "list", "start", "stop", "restart", "status", "inspect", "daemon", "delete", "login", "whoami", "publisher", "version", "completion"} {
 		if !strings.Contains(res.stdout.String(), name) {
 			t.Errorf("help does not list %q", name)
 		}

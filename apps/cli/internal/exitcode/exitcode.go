@@ -204,7 +204,9 @@ func FromError(err error) int {
 		errors.Is(err, qurl.ErrInsecureCredentialStatePermissions):
 		return Auth
 	case errors.Is(err, qurl.ErrInvalidResourceRequest),
-		errors.Is(err, qurl.ErrInvalidPortalRequest):
+		errors.Is(err, qurl.ErrInvalidPortalRequest),
+		// A publisher name the service refused, or one that can never be valid.
+		errors.Is(err, qurl.ErrInvalidPublisherName):
 		return InvalidInput
 	case errors.Is(err, qurl.ErrInvalidAPIResponse):
 		return ServerError

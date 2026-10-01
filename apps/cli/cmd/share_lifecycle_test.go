@@ -840,11 +840,15 @@ func TestShareLifecycleCommandsConvergeCloudRegistryAndDaemon(t *testing.T) {
 			if test.command == "restart" {
 				path += "/restart"
 			}
+			// The answers carry the publisher and creation date, as the
+			// service sends them with every sharing state.
 			reply := func(w http.ResponseWriter, _ *http.Request) {
 				apitest.WriteEnvelope(t, w, http.StatusOK, map[string]any{
 					"resource_id": srv.Key.ResourceID, "crid": srv.Key.CRID,
 					"desired_state": test.desired, "serving_epoch": test.epoch,
 					"connection_state": test.connection,
+					"created_at":       "2026-03-01T00:00:00Z",
+					"publisher":        map[string]any{"name": apitest.DefaultPublisherName, "verified": false},
 				}, nil)
 			}
 			if test.command != "stop" {
@@ -886,6 +890,14 @@ func TestShareLifecycleCommandsConvergeCloudRegistryAndDaemon(t *testing.T) {
 			for _, want := range []string{srv.Key.CRID, seed.TargetURL, test.desired, test.connection} {
 				if !strings.Contains(res.stdout.String(), want) {
 					t.Errorf("stdout missing %q:\n%s", want, res.stdout.String())
+				}
+			}
+			// A lifecycle change reports the change. The publisher and creation
+			// date belong to the read views (status, inspect), not here.
+			shown := res.stdout.String() + res.stderr.String()
+			for _, unwanted := range []string{"Publisher", "Created", "UNVERIFIED", apitest.DefaultPublisherName} {
+				if strings.Contains(shown, unwanted) {
+					t.Errorf("%s text shows %q:\n%s", test.command, unwanted, shown)
 				}
 			}
 		})
@@ -3491,7 +3503,10 @@ func TestRestartWithoutTargetKeepsTodaysOutput(t *testing.T) {
 					"  \"target_url\": \"http://127.0.0.1:3000\",\n" +
 					"  \"desired_state\": \"on\",\n" +
 					"  \"connection_state\": \"serving\",\n" +
-					"  \"serving_epoch\": 5\n" +
+					"  \"serving_epoch\": 5,\n" +
+					"  \"publisher\": {\n" +
+					"    \"verified\": false\n" +
+					"  }\n" +
 					"}\n"
 			}
 			daemon := &recordingShareDaemon{}

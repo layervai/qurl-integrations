@@ -123,7 +123,11 @@ func shareReadStateCmd(opts *globalOpts, use, short string, inspect bool) *cobra
 
 For a remote URL, this command reports the resource type, target, and active or
 revoked state. For a local app, it reports durable desired state separately from
-the platform's observed Connector state and serving epoch.`
+the platform's observed Connector state and serving epoch.
+
+Both views show the publisher that people who request a link are shown, and
+when the resource was created. A publisher name is self-declared and marked
+UNVERIFIED; change it with "qurl publisher set <name>".`
 	if inspect {
 		long += "\n\nInspect also reports redacted daemon, retry, transition, and local target health diagnostics."
 	}
@@ -173,7 +177,7 @@ the platform's observed Connector state and serving epoch.`
 			if inspect {
 				return inspectLocalSharing(cmd.Context(), opts, local, stateDir, localLookup.err, sharing)
 			}
-			return opts.printer().Sharing(target, sharing)
+			return opts.printer().SharingStatus(target, sharing)
 		},
 	}
 }

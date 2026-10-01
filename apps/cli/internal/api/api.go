@@ -63,6 +63,12 @@ type Client interface {
 	// platform contract (no repository reads server-side), so login can
 	// validate keys with it and whoami can call it freely.
 	Me(ctx context.Context) (*Identity, error)
+	// Publisher returns the publisher profile of the owner behind the
+	// configured credential.
+	Publisher(ctx context.Context) (*Publisher, error)
+	// SetPublisherName sets that owner's self-declared publisher name; an
+	// empty name removes it.
+	SetPublisherName(ctx context.Context, name string) (*Publisher, error)
 }
 
 // AccountClient adds the one account-authorized bootstrap operation. The CLI
@@ -117,6 +123,8 @@ type Published struct {
 	// as can happen when local enrollment reconciles an uncertain create by
 	// reading the resource back.
 	FoundExisting *bool
+	// Publisher is what recipients are shown as this resource's publisher.
+	Publisher Publisher
 }
 
 // DeleteResult reports a completed (idempotent) delete.
@@ -134,6 +142,12 @@ type ShareLink struct {
 	ExpiresAt        time.Time
 	ExpiresInSeconds int
 	SingleUse        bool
+	// ResourceCreatedAt is when the resource behind the CRID was created -
+	// not when this link was minted; nil when the service did not say.
+	ResourceCreatedAt *time.Time
+	// Publisher is the service's description of who published the resource.
+	// It is not covered by CRID or link verification.
+	Publisher Publisher
 }
 
 // ResourcePage is one page of List results. HasMore — not NextCursor — is
@@ -167,6 +181,7 @@ type ResourceSummary struct {
 	Tags              []string
 	CreatedAt         *time.Time
 	ExpiresAt         *time.Time
+	Publisher         Publisher
 }
 
 // DesiredState is the durable customer intent for a tunnel resource.
@@ -199,6 +214,10 @@ type Sharing struct {
 	DesiredState    DesiredState
 	ServingEpoch    uint64
 	ConnectionState ConnectionState
+	// CreatedAt is when the resource was created; nil when the service did
+	// not say.
+	CreatedAt *time.Time
+	Publisher Publisher
 }
 
 // Config configures New. Zero hooks get production defaults.
@@ -317,14 +336,24 @@ func (c *client) Share(ctx context.Context, id string, opts ShareOptions) (*Shar
 	if err != nil {
 		return nil, mapShareError(err)
 	}
-	return &ShareLink{
+	link := &ShareLink{
 		QURL:             access.Link,
 		CRID:             access.CRID,
 		Type:             access.Type,
 		ExpiresAt:        access.ExpiresAt,
 		ExpiresInSeconds: access.ExpiresInSeconds,
 		SingleUse:        access.SingleUse,
-	}, nil
+		// Field by field, never a type conversion: an SDK field added later
+		// must not reach the CLI's publisher rendering unreviewed. The
+		// fail-closed decode for this path lives in qurl-go, which owns the
+		// share answer; publisherWire covers the reads this repo decodes.
+		Publisher: Publisher{Name: access.Publisher.Name, Verified: access.Publisher.Verified},
+	}
+	if access.ResourceCreatedAt != nil && !access.ResourceCreatedAt.IsZero() {
+		createdAt := *access.ResourceCreatedAt
+		link.ResourceCreatedAt = &createdAt
+	}
+	return link, nil
 }
 
 // mapShareError is mapError for the share operator. It marks a not-found

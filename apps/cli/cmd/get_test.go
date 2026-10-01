@@ -451,11 +451,23 @@ func TestGetFileDashBinaryCleanStdout(t *testing.T) {
 	if !bytes.Equal(res.stdout.Bytes(), payload) {
 		t.Errorf("stdout = %q, want the exact payload bytes", res.stdout.Bytes())
 	}
-	if res.stderr.Len() != 0 {
-		t.Errorf("--file - must not decorate any stream, stderr = %q", res.stderr.String())
+	// stdout is the payload and nothing else. The publisher of the content is
+	// the one thing stderr carries, as a single line.
+	const wantNotice = "Warning: UNVERIFIED publisher \"Acme Docs\" (self-declared name, not confirmed by LayerV). Created 2026-03-01.\n"
+	if got := res.stderr.String(); got != wantNotice {
+		t.Errorf("--file - stderr = %q, want only the publisher notice %q", got, wantNotice)
 	}
 	if len(browser.opened) != 0 {
 		t.Errorf("--file - launched a browser: %q", browser.opened)
+	}
+
+	// --quiet means the primary value only: the bytes, and a silent stderr.
+	quiet := runCLI(t, &runOpts{
+		args: []string{"--endpoint", srv.URL, "--quiet", "get", srv.Key.CRID, "--file", "-"},
+	})
+	if quiet.code != 0 || !bytes.Equal(quiet.stdout.Bytes(), payload) || quiet.stderr.Len() != 0 {
+		t.Errorf("--quiet --file -: exit=%d stdout=%q stderr=%q; want the payload and nothing else",
+			quiet.code, quiet.stdout.Bytes(), quiet.stderr.String())
 	}
 }
 

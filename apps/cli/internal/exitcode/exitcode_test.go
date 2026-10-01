@@ -120,6 +120,7 @@ var sdkSentinels = map[string]struct {
 	"qurl.ErrInvalidClientConfig":                 {qurl.ErrInvalidClientConfig, Config},
 	"qurl.ErrInvalidResourceRequest":              {qurl.ErrInvalidResourceRequest, InvalidInput},
 	"qurl.ErrInvalidPortalRequest":                {qurl.ErrInvalidPortalRequest, InvalidInput},
+	"qurl.ErrInvalidPublisherName":                {qurl.ErrInvalidPublisherName, InvalidInput},
 	"qurl.ErrInvalidAPIResponse":                  {qurl.ErrInvalidAPIResponse, ServerError},
 	"qurl.ErrCredentialStateNotFound":             {qurl.ErrCredentialStateNotFound, Auth},
 	"qurl.ErrInsecureCredentialStatePermissions":  {qurl.ErrInsecureCredentialStatePermissions, Auth},

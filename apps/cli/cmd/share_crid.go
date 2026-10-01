@@ -50,8 +50,13 @@ The link opens in a browser. Passing it to a tool like curl fetches the
 page that opens the link, not the content itself — to download the content
 from a script, use ` + "`qurl get <CRID> --file <path>`" + `.
 
-When stdout is not a terminal the command prints the bare link and nothing
-else, ready to hand out or open.`,
+The CLI also shows who published the resource and when it was created. The
+publisher name is self-declared and shown as UNVERIFIED: LayerV has not
+confirmed who the publisher is, so treat the name as a claim, not as proof.
+
+When stdout is not a terminal the command prints the bare link on stdout,
+ready to hand out or open, and reports the publisher in one line on stderr.
+--quiet prints only the link.`,
 		Example: "  qurl share " + exampleCRID + "\n" +
 			"  qurl get " + exampleCRID + " --file report.pdf   # download instead of linking",
 		Args: exactArgs(1),

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/layervai/qurl-go/crid"
 )
@@ -43,6 +44,8 @@ type Server struct {
 	downloadPayload      []byte
 	publishFoundExisting *bool
 	publishOmitCRID      bool
+	publisherName        string
+	omitPublisher        bool
 	// failf reports a contract violation to the owning test. It is t.Errorf,
 	// which is safe to call from a handler goroutine; this package's own
 	// tests replace it to observe the report without failing themselves.
@@ -95,7 +98,21 @@ const (
 	// authTypeAPIKey is the auth_type/kind *value* — distinct from the
 	// "api_key" JSON field name that carries the key object.
 	authTypeAPIKey = "api_key"
+	// fieldCreatedAt and fieldPublisher are the resource metadata keys that
+	// ride share answers and resource rows.
+	fieldCreatedAt = "created_at"
+	// fieldResourceCreatedAt is the share answer's key for the same date:
+	// every other share field describes the minted link, so the resource's
+	// creation date is named as such there.
+	fieldResourceCreatedAt = "resource_created_at"
+	fieldPublisher         = "publisher"
+	// publisherPath is the owner's publisher profile route.
+	publisherPath = "/v1/me/publisher"
 )
+
+// DefaultPublisherName is the self-declared publisher name the mock owner
+// starts with. The apps/cli goldens pin it.
+const DefaultPublisherName = "Acme Docs"
 
 // NewServer starts a mock with consistent happy-path handlers for publish,
 // share, list, and delete. Close it via t.Cleanup automatically.
@@ -114,6 +131,7 @@ func NewServerWithKey(t *testing.T, key *ResourceKey) *Server {
 		Key:                  key,
 		scripts:              map[string][]http.HandlerFunc{},
 		publishFoundExisting: &foundExisting,
+		publisherName:        DefaultPublisherName,
 		failf:                t.Errorf,
 	}
 	s.Server = httptest.NewServer(http.HandlerFunc(s.handle))
@@ -169,6 +187,42 @@ func (s *Server) SetPublishOmitCRID(v bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.publishOmitCRID = v
+}
+
+// SetPublisherName sets the mock owner's publisher name without a request;
+// empty means the owner set none, so answers omit the name.
+func (s *Server) SetPublisherName(name string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.publisherName = name
+}
+
+// OmitPublisherMetadata makes the mock answer like a service that predates
+// publisher metadata: share answers carry neither publisher nor
+// resource_created_at,
+// and resource rows carry no publisher.
+func (s *Server) OmitPublisherMetadata() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.omitPublisher = true
+}
+
+// publisherObject returns the wire publisher object and whether this mock
+// sends one at all. verified is always false: no publisher is verified.
+//
+// TODO(upstream-contract): mirrors the qurl-service Publisher object,
+// {"name"?: string, "verified": boolean}, with name omitted when unset.
+func (s *Server) publisherObject() (map[string]any, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.omitPublisher {
+		return nil, false
+	}
+	publisher := map[string]any{"verified": false}
+	if s.publisherName != "" {
+		publisher["name"] = s.publisherName
+	}
+	return publisher, true
 }
 
 // SetShareQURL overrides the qurl field of share responses; download
@@ -275,6 +329,9 @@ func (s *Server) writeUnauthorized(w http.ResponseWriter) {
 }
 
 func (s *Server) defaultHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet && s.handleResourceRead(w, r) {
+		return
+	}
 	switch {
 	case r.Method == http.MethodPost && r.URL.Path == "/v1/resources":
 		s.handlePublish(w, r)
@@ -282,25 +339,11 @@ func (s *Server) defaultHandler(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodGet && r.URL.Path == "/v1/me":
 		s.handleMe(w, r)
 
+	case (r.Method == http.MethodGet || r.Method == http.MethodPatch) && r.URL.Path == publisherPath:
+		s.handlePublisher(w, r)
+
 	case isShareRequest(r):
 		s.handleShare(w, r)
-
-	case r.Method == http.MethodGet && r.URL.Path == "/v1/resources":
-		// A fully populated list row: the publish-time metadata (type,
-		// description, tags) rides every real list row and the CLI projects
-		// it into `-o json`, so the default row carries it or the goldens
-		// would pin a shape no deployment serves. Like fixtureCreatedAt,
-		// these values are pinned by the apps/cli goldens.
-		WriteEnvelope(s.t, w, http.StatusOK, []map[string]any{{
-			"resource_id": s.Key.ResourceID,
-			fieldCRID:     s.Key.CRID,
-			"target_url":  "https://example.com/data",
-			fieldType:     resourceTypeURL,
-			fieldStatus:   "active",
-			"description": "example data drop",
-			"tags":        []string{"demo", "fixture"},
-			"created_at":  fixtureCreatedAt,
-		}}, map[string]any{"has_more": false})
 
 	case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/v1/resources/"):
 		w.WriteHeader(http.StatusNoContent)
@@ -317,6 +360,50 @@ func (s *Server) defaultHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 const resourceTypeURL = "url"
+
+// handleResourceRead serves the owner's resource reads for the mock's one
+// resource and reports whether the request was one of them.
+func (s *Server) handleResourceRead(w http.ResponseWriter, r *http.Request) bool {
+	switch r.URL.Path {
+	case "/v1/resources":
+		// A fully populated list row: the publish-time metadata (type,
+		// description, tags) rides every real list row and the CLI projects
+		// it into `-o json`, so the default row carries it or the goldens
+		// would pin a shape no deployment serves. Like fixtureCreatedAt,
+		// these values are pinned by the apps/cli goldens.
+		WriteEnvelope(s.t, w, http.StatusOK, []map[string]any{s.resourceRow()}, map[string]any{"has_more": false})
+	case "/v1/resources/" + s.Key.CRID + "/sharing":
+		// The default resource is a URL, not a Connector, so it has no sharing
+		// state. `qurl status` reads this answer, then the resource detail.
+		WriteProblem(s.t, w, http.StatusBadRequest, "invalid_input", "Invalid Input", "Resource is not a qURL Connector")
+	case "/v1/resources/" + s.Key.CRID:
+		// The owner-facing detail read nests the same row under "resource".
+		WriteEnvelope(s.t, w, http.StatusOK, map[string]any{"resource": s.resourceRow()}, nil)
+	default:
+		return false
+	}
+	return true
+}
+
+// resourceRow is the one fully populated resource row the list and detail
+// reads share: the publish-time metadata and, unless the mock plays an older
+// service, the owner's publisher.
+func (s *Server) resourceRow() map[string]any {
+	row := map[string]any{
+		"resource_id":  s.Key.ResourceID,
+		fieldCRID:      s.Key.CRID,
+		"target_url":   "https://example.com/data",
+		fieldType:      resourceTypeURL,
+		fieldStatus:    "active",
+		"description":  "example data drop",
+		"tags":         []string{"demo", "fixture"},
+		fieldCreatedAt: fixtureCreatedAt,
+	}
+	if publisher, ok := s.publisherObject(); ok {
+		row[fieldPublisher] = publisher
+	}
+	return row
+}
 
 // handlePublish accepts URL creation and Connector find-or-create.
 func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
@@ -355,11 +442,14 @@ func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
 	omitCRID := s.publishOmitCRID
 	s.mu.Unlock()
 	data := map[string]any{
-		"resource_id": s.Key.ResourceID,
-		fieldCRID:     s.Key.CRID,
-		"target_url":  body.TargetURL,
-		fieldStatus:   "active",
-		"created_at":  fixtureCreatedAt,
+		"resource_id":  s.Key.ResourceID,
+		fieldCRID:      s.Key.CRID,
+		"target_url":   body.TargetURL,
+		fieldStatus:    "active",
+		fieldCreatedAt: fixtureCreatedAt,
+	}
+	if publisher, ok := s.publisherObject(); ok {
+		data[fieldPublisher] = publisher
 	}
 	if len(body.AllowedDeviceKeys) > 0 {
 		data["allowed_device_keys"] = body.AllowedDeviceKeys
@@ -439,14 +529,67 @@ func (s *Server) handleShare(w http.ResponseWriter, r *http.Request) {
 	if qurlLink == "" {
 		qurlLink = "https://qurl.link/#qv2t1.1.1.1.AQ.AQ.AQ"
 	}
-	WriteEnvelope(s.t, w, http.StatusOK, map[string]any{
+	data := map[string]any{
 		"qurl":               qurlLink,
 		fieldCRID:            s.cridFor(id),
 		fieldType:            "qv2",
 		"expires_at":         "2026-03-01T00:05:00Z",
 		"expires_in_seconds": 300,
 		"single_use":         true,
-	}, nil)
+	}
+	// The resource's creation date and publisher ride the share answer itself;
+	// there is no second, anonymous metadata request to serve.
+	if publisher, ok := s.publisherObject(); ok {
+		data[fieldResourceCreatedAt] = fixtureCreatedAt
+		data[fieldPublisher] = publisher
+	}
+	WriteEnvelope(s.t, w, http.StatusOK, data, nil)
+}
+
+// handlePublisher serves the owner's publisher profile: GET reads it and
+// PATCH {"name": "..."} sets the name, an empty name removing it. It enforces
+// the parts of the contract a client can get wrong: the body is exactly one
+// name member (so a request can never carry verified), and a name is refused
+// with 400 invalid_input and a reason.
+//
+// TODO(upstream-contract): mirrors qurl-service GET and PATCH
+// /v1/me/publisher. Only the two naming rules the CLI tests exercise are
+// modeled; the service owns the full rule set.
+func (s *Server) handlePublisher(w http.ResponseWriter, r *http.Request) {
+	if bearer := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "); bearer == "" || bearer == r.Header.Get("Authorization") {
+		WriteProblem(s.t, w, http.StatusUnauthorized, "unauthorized", "Unauthorized", "Authentication required")
+		return
+	}
+	if r.Method == http.MethodPatch {
+		var body struct {
+			Name *string `json:"name"`
+		}
+		decoder := json.NewDecoder(r.Body)
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&body); err != nil || body.Name == nil {
+			WriteProblem(s.t, w, http.StatusBadRequest, "invalid_input", "Bad Request",
+				"the request body must be exactly one name member")
+			return
+		}
+		name := *body.Name
+		switch {
+		case utf8.RuneCountInString(name) > 64:
+			WriteProblem(s.t, w, http.StatusBadRequest, "invalid_input", "Bad Request",
+				"name must be at most 64 characters")
+			return
+		case strings.Contains(strings.ToLower(name), "verified"):
+			WriteProblem(s.t, w, http.StatusBadRequest, "invalid_input", "Bad Request",
+				"name must not contain the word verified")
+			return
+		}
+		s.SetPublisherName(name)
+	}
+	publisher, ok := s.publisherObject()
+	if !ok {
+		WriteProblem(s.t, w, http.StatusNotFound, "not_found", "Not Found", "no such route in the mock qURL API")
+		return
+	}
+	WriteEnvelope(s.t, w, http.StatusOK, publisher, nil)
 }
 
 // handleDownload serves the link-host bytes for DownloadPath.

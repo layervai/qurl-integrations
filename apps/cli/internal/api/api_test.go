@@ -357,7 +357,7 @@ func TestSharingResponseInvariants(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			row := valid
 			mutate(&row)
-			if err := validateSharingRow(row); !errors.Is(err, qurl.ErrInvalidAPIResponse) {
+			if err := validateSharingRow(&row); !errors.Is(err, qurl.ErrInvalidAPIResponse) {
 				t.Fatalf("validateSharingRow(%+v) error = %v", row, err)
 			}
 		})

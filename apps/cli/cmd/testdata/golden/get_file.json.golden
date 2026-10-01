@@ -1,5 +1,10 @@
 {
   "crid": "qhtpthw4qt7wkw7khghr6x3z4hsfyn4zbuyhnee4i6bi67yu6yytgvwdbb4q",
   "file": "out.bin",
-  "bytes": 23
+  "bytes": 23,
+  "resource_created_at": "2026-03-01T00:00:00Z",
+  "publisher": {
+    "name": "Acme Docs",
+    "verified": false
+  }
 }
