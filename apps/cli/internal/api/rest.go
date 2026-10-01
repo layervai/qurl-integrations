@@ -75,8 +75,11 @@ type sharingRow struct {
 	// TODO(upstream-contract): qurl-service adds created_at and publisher to
 	// the Connector sharing-state response. Both are optional here, so an
 	// older service leaves "no date, no name, unverified".
-	CreatedAt *time.Time    `json:"created_at"`
-	Publisher publisherWire `json:"publisher"`
+	CreatedAt *time.Time `json:"created_at"`
+	// Publisher is read by UnmarshalJSON (decodeSharingField), never by the
+	// struct decoder: publisherWire has no decoder of its own, so a tag here
+	// would only look like one. isSharingField names the wire member.
+	Publisher publisherWire `json:"-"`
 }
 
 // UnmarshalJSON requires the serving-epoch lifecycle fence to be present and
