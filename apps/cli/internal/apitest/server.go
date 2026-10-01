@@ -21,6 +21,12 @@ type RecordedRequest struct {
 }
 
 // Server is the scriptable mock qURL API.
+//
+// The share route is authenticated. A share request that carries no bearer
+// credential fails the owning test and is answered 401, and no scripted
+// handler runs for it: a client that sends one has a defect no scenario
+// should be able to hide. The guard is unconditional, so a future path that
+// may share without a credential has to change the guard here, deliberately.
 type Server struct {
 	*httptest.Server
 	t *testing.T
@@ -37,6 +43,10 @@ type Server struct {
 	downloadPayload      []byte
 	publishFoundExisting *bool
 	publishOmitCRID      bool
+	// failf reports a contract violation to the owning test. It is t.Errorf,
+	// which is safe to call from a handler goroutine; this package's own
+	// tests replace it to observe the report without failing themselves.
+	failf func(format string, args ...any)
 }
 
 // DownloadPath is the mock's link-host route: SetShareQURL(srv.URL +
@@ -104,6 +114,7 @@ func NewServerWithKey(t *testing.T, key *ResourceKey) *Server {
 		Key:                  key,
 		scripts:              map[string][]http.HandlerFunc{},
 		publishFoundExisting: &foundExisting,
+		failf:                t.Errorf,
 	}
 	s.Server = httptest.NewServer(http.HandlerFunc(s.handle))
 	t.Cleanup(s.Close)
@@ -111,7 +122,8 @@ func NewServerWithKey(t *testing.T, key *ResourceKey) *Server {
 }
 
 // Script queues handlers for one "METHOD /path" route. Each request to the
-// route consumes one queued handler before default behavior resumes.
+// route consumes one queued handler before default behavior resumes. A share
+// request with no bearer credential consumes none: see Server.
 func (s *Server) Script(method, path string, handlers ...http.HandlerFunc) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -185,6 +197,11 @@ func (s *Server) Requests() []RecordedRequest {
 }
 
 func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
+	// A share request with no credential is recorded like any other, so a
+	// test can still see exactly what arrived, but it never reaches a script.
+	// It falls through to handleShare, which writes its 401.
+	unauthenticatedShare := isShareRequest(r) && bearerCredential(r) == ""
+
 	s.mu.Lock()
 	s.requests = append(s.requests, RecordedRequest{
 		Method: r.Method,
@@ -194,17 +211,67 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	})
 	var scripted http.HandlerFunc
 	key := r.Method + " " + r.URL.Path
-	if queue := s.scripts[key]; len(queue) > 0 {
+	if queue := s.scripts[key]; len(queue) > 0 && !unauthenticatedShare {
 		scripted = queue[0]
 		s.scripts[key] = queue[1:]
 	}
+	failf := s.failf
 	s.mu.Unlock()
 
+	if unauthenticatedShare {
+		failf("apitest: %s %s arrived with no bearer credential; share and get must always send the device credential",
+			r.Method, r.URL.Path)
+	}
 	if scripted != nil {
 		scripted(w, r)
 		return
 	}
 	s.defaultHandler(w, r)
+}
+
+// isShareRequest reports whether r addresses the CRID share operator. Only
+// that route is held to the credential rule: another route whose path happens
+// to end in /share is not a share request.
+func isShareRequest(r *http.Request) bool {
+	if r.Method != http.MethodPost {
+		return false
+	}
+	_, ok := shareResourceID(r.URL.Path)
+	return ok
+}
+
+// shareResourceID returns the {id} of a share route, which is
+// /v1/resources/{id}/share or the same path without the version prefix. The
+// id is exactly one non-empty path segment.
+func shareResourceID(path string) (string, bool) {
+	rest, ok := strings.CutPrefix(path, "/v1/resources/")
+	if !ok {
+		rest, ok = strings.CutPrefix(path, "/resources/")
+	}
+	if !ok {
+		return "", false
+	}
+	id, ok := strings.CutSuffix(rest, "/share")
+	if !ok || id == "" || strings.Contains(id, "/") {
+		return "", false
+	}
+	return id, true
+}
+
+// bearerCredential returns the bearer token r presented. It is empty when r
+// has no Authorization header, a non-bearer one, or a bearer with no token.
+func bearerCredential(r *http.Request) string {
+	token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+	if !ok {
+		return ""
+	}
+	return token
+}
+
+// writeUnauthorized answers the way the platform does when a request carries
+// no usable credential.
+func (s *Server) writeUnauthorized(w http.ResponseWriter) {
+	WriteProblem(s.t, w, http.StatusUnauthorized, "unauthorized", "Unauthorized", "Authentication required")
 }
 
 func (s *Server) defaultHandler(w http.ResponseWriter, r *http.Request) {
@@ -215,7 +282,7 @@ func (s *Server) defaultHandler(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodGet && r.URL.Path == "/v1/me":
 		s.handleMe(w, r)
 
-	case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/share"):
+	case isShareRequest(r):
 		s.handleShare(w, r)
 
 	case r.Method == http.MethodGet && r.URL.Path == "/v1/resources":
@@ -321,9 +388,9 @@ const (
 // contract), and expires_at is omitted — the default fixture is a non-expiring
 // key.
 func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
-	bearer := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-	if bearer == "" || bearer == r.Header.Get("Authorization") {
-		WriteProblem(s.t, w, http.StatusUnauthorized, "unauthorized", "Unauthorized", "Authentication required")
+	bearer := bearerCredential(r)
+	if bearer == "" {
+		s.writeUnauthorized(w)
 		return
 	}
 	apiKey := map[string]any{
@@ -342,17 +409,30 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleShare serves the CRID share operator (POST /v1/resources/{id}/share).
-// It enforces the pinned bind rule — the body must be JSON (`{}` at
-// minimum); a literal empty body is a 400 — then answers a consistent
-// minted share link.
+// It refuses a request with no bearer credential, then enforces the pinned
+// bind rule — the body must be JSON (`{}` at minimum); a literal empty body
+// is a 400 — and answers a consistent minted share link.
+//
+// TODO(upstream-contract): qurl-service authenticates the share route before
+// it looks at the resource, so a request with no credential is answered 401
+// `unauthorized` whatever it names. Any credential is the owner here: tests
+// script the 404 a caller who is neither owner nor allowed receives.
 func (s *Server) handleShare(w http.ResponseWriter, r *http.Request) {
+	// This is the 401 writer for the guard in handle: handle reports the
+	// request and keeps it from a script, then falls through to here for
+	// the answer. The two checks are one rule and must change together.
+	if bearerCredential(r) == "" {
+		s.writeUnauthorized(w)
+		return
+	}
 	raw, err := io.ReadAll(r.Body)
 	if err != nil || len(raw) == 0 || !json.Valid(raw) {
 		WriteProblem(s.t, w, http.StatusBadRequest, "invalid_request", "Bad Request",
 			"request body must be a JSON object")
 		return
 	}
-	id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v1/resources/"), "/share")
+	// defaultHandler routes here only for a path isShareRequest matched.
+	id, _ := shareResourceID(r.URL.Path)
 	s.mu.Lock()
 	qurlLink := s.shareQURL
 	s.mu.Unlock()

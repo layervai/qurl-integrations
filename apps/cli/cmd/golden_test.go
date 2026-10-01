@@ -94,11 +94,27 @@ func TestGoldens(t *testing.T) {
 			stdoutGolden: true,
 		},
 		{
-			name: "error_notfound",
+			// The share operator's not-found, which share and get both get,
+			// has its own hint: a 404 for a CRID also covers a device that is
+			// not allowed.
+			name: "error_share_notfound",
 			args: func(srv *apitest.Server) []string { return []string{"share", srv.Key.CRID} },
 			prepare: func(srv *apitest.Server) {
 				srv.Script(http.MethodPost, "/v1/resources/"+key.CRID+"/share",
 					apitest.HandlerNotFound404(t, "resource_not_found"))
+			},
+			variants:     []string{"tty", "plain"},
+			wantCode:     5,
+			stderrGolden: true,
+		},
+		{
+			// Every other route's not-found keeps the hint they all share.
+			// status stands in for them here.
+			name: "error_notfound",
+			args: func(srv *apitest.Server) []string { return []string{"status", srv.Key.CRID} },
+			prepare: func(srv *apitest.Server) {
+				srv.Script(http.MethodGet, "/v1/resources/"+key.CRID+"/sharing",
+					apitest.HandlerNotFound404(t, "not_found"))
 			},
 			variants:     []string{"tty", "plain"},
 			wantCode:     5,
