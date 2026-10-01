@@ -75,7 +75,7 @@ func TestHelpLeadsWithTheOneCommandLocalJourney(t *testing.T) {
 	if local < 0 || remote < 0 || local >= remote {
 		t.Errorf("root help must show local publish before remote publish:\n%s", rootHelp)
 	}
-	for _, want := range []string{"permanent resource ID", "without an account or login", "qurl get"} {
+	for _, want := range []string{"permanent resource ID", "qurl get"} {
 		if !strings.Contains(rootHelp, want) {
 			t.Errorf("root help missing %q:\n%s", want, rootHelp)
 		}
@@ -91,7 +91,7 @@ func TestHelpLeadsWithTheOneCommandLocalJourney(t *testing.T) {
 	if local < 0 || remote < 0 || local >= remote {
 		t.Errorf("publish help must explain the local path first:\n%s", publishHelp)
 	}
-	for _, want := range []string{"On Linux, macOS, and Windows", "background daemon", "--foreground", "prints the CRID, and exits", "qurl get <CRID>", "request an access link without an account or login"} {
+	for _, want := range []string{"On Linux, macOS, and Windows", "background daemon", "--foreground", "prints the CRID, and exits", "qurl get <CRID>"} {
 		if !strings.Contains(publishHelp, want) {
 			t.Errorf("publish help missing %q:\n%s", want, publishHelp)
 		}
@@ -102,6 +102,102 @@ func TestHelpLeadsWithTheOneCommandLocalJourney(t *testing.T) {
 	for _, jargon := range []string{"FRP", "proxy registration", "one-shot enrollment", "native device identity"} {
 		if strings.Contains(publishHelp, jargon) {
 			t.Errorf("publish help exposes implementation jargon %q:\n%s", jargon, publishHelp)
+		}
+	}
+}
+
+// TestSharingCopyStatesTheDeviceAccessRule pins the access copy wherever the
+// CLI explains sharing.
+//
+// The rule is about the two commands: share and get use the device's
+// identity, they work on the resource owner's devices and, for a private
+// resource, on the devices the publisher allowed, and any other device gets
+// "not found".
+//
+// Public and private stay distinct, so --private never reads as a no-op: a
+// resource is public unless published with --private, which limits it to its
+// owner and the allowed devices. That a public CRID is meant for anyone who
+// has it, while this release opens it only on the owner's devices, is said
+// exactly once in publish help and once in the README.
+//
+// The test also keeps the retired promise, that a public CRID can be shared
+// without an account or login, off every help surface and out of the README.
+func TestSharingCopyStatesTheDeviceAccessRule(t *testing.T) {
+	collapse := func(text string) string { return strings.Join(strings.Fields(text), " ") }
+	help := func(args ...string) string {
+		t.Helper()
+		res := runCLI(t, &runOpts{args: append(args, "--help")})
+		if res.code != 0 {
+			t.Fatalf("qurl %s exit = %d, stderr: %s", strings.Join(args, " "), res.code, res.stderr.String())
+		}
+		return collapse(res.stdout.String())
+	}
+	readme := collapse(readCLIREADME(t))
+	publishHelp := help("publish")
+
+	const (
+		scope = "resource owner's devices and, for a private resource, on the devices"
+		rule  = `any other device gets "not found"`
+	)
+	for _, surface := range []struct{ name, text, identity string }{
+		{"qurl --help", help(), "using this device's identity"},
+		{"qurl share --help", help("share"), "share uses this device's identity"},
+		{"qurl get --help", help("get"), "get uses this device's identity"},
+		{"qurl publish --help", publishHelp, "use the identity of the device they run on"},
+		{"README", readme, "using this device's identity"},
+	} {
+		for _, want := range []string{surface.identity, scope, rule} {
+			if !strings.Contains(surface.text, want) {
+				t.Errorf("%s does not state the access rule: missing %q", surface.name, want)
+			}
+		}
+	}
+
+	const interim = "this CLI release opens it only on the owner's devices"
+	for _, surface := range []struct{ name, text string }{
+		{"qurl publish --help", publishHelp},
+		{"README", readme},
+	} {
+		for _, want := range []string{
+			"A resource is public unless you publish it with",
+			"limits it to its owner and the devices",
+			"A public CRID is meant to be opened by anyone who has it",
+			"from other devices is not available yet",
+		} {
+			if !strings.Contains(surface.text, want) {
+				t.Errorf("%s does not keep public and private distinct: missing %q", surface.name, want)
+			}
+		}
+		if got := strings.Count(surface.text, interim); got != 1 {
+			t.Errorf("%s states the interim limitation %d times, want exactly once", surface.name, got)
+		}
+	}
+
+	root, _ := newRoot("test", discardStreams())
+	checked := map[string]string{"README": readme}
+	for where, text := range visibleSurfaces(root) {
+		checked[where] = collapse(text)
+		if where != "qurl publish long" && strings.Contains(checked[where], interim) {
+			t.Errorf("%s repeats the interim limitation; among the help surfaces only publish states it", where)
+		}
+	}
+	if len(checked) < 2 {
+		t.Fatal("no help surfaces collected; the retired-promise check would be vacuous")
+	}
+	if !strings.Contains(checked["qurl publish long"], interim) {
+		t.Fatal("publish help is not collected under the key the limitation check exempts")
+	}
+	for where, text := range checked {
+		lower := strings.ToLower(text)
+		for _, retired := range []string{
+			"anyone given a public crid",
+			"need no account or login",
+			"without an account or login",
+			"without a layerv account",
+		} {
+			if strings.Contains(lower, retired) {
+				t.Errorf("%s still promises sharing without the device's identity: found %q", where, retired)
+			}
 		}
 	}
 }

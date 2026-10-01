@@ -199,7 +199,9 @@ func TestStatusNeverRendersVerifiedFromAGarbledField(t *testing.T) {
 
 // TestShareMetadataNeedsNoSecondRequest holds the footprint rule for every
 // projection: the publisher and creation date come from the share answer
-// itself, on the same single unauthenticated request.
+// itself. The share request is the only request about the resource — no
+// resource read, no sharing-state read, no publisher-profile read — and it
+// carries this device's credential.
 func TestShareMetadataNeedsNoSecondRequest(t *testing.T) {
 	for name, opts := range map[string]*runOpts{
 		"piped":    {args: []string{"share"}},
@@ -209,7 +211,6 @@ func TestShareMetadataNeedsNoSecondRequest(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			srv := apitest.NewServer(t)
 			opts.args = append([]string{"--endpoint", srv.URL}, append(opts.args, srv.Key.CRID)...)
-			opts.env, opts.nativeClient = map[string]string{}, true
 			res := runCLI(t, opts)
 			if res.code != 0 {
 				t.Fatalf("exit = %d, stderr: %s", res.code, res.stderr.String())
@@ -217,9 +218,21 @@ func TestShareMetadataNeedsNoSecondRequest(t *testing.T) {
 			if shown := res.stdout.String() + res.stderr.String(); !strings.Contains(shown, apitest.DefaultPublisherName) {
 				t.Fatalf("the publisher was not shown:\n%s", shown)
 			}
-			requests := srv.Requests()
-			if len(requests) != 1 || requests[0].Path != "/v1/resources/"+srv.Key.CRID+"/share" || requests[0].Header.Get("Authorization") != "" {
-				t.Fatalf("share must make exactly one unauthenticated request: %+v", requests)
+			sharePath := "/v1/resources/" + srv.Key.CRID + "/share"
+			shares := 0
+			for _, request := range srv.Requests() {
+				switch {
+				case request.Method == http.MethodPost && request.Path == sharePath:
+					shares++
+					if request.Header.Get("Authorization") == "" {
+						t.Fatalf("the share request carried no credential: %+v", request)
+					}
+				case strings.HasPrefix(request.Path, "/v1/resources"), request.Path == "/v1/me/publisher":
+					t.Fatalf("publisher metadata must ride the share answer, not a second request: %s %s", request.Method, request.Path)
+				}
+			}
+			if shares != 1 {
+				t.Fatalf("share requests = %d, want exactly 1: %+v", shares, srv.Requests())
 			}
 		})
 	}

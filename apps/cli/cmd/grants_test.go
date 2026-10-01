@@ -80,14 +80,24 @@ func TestPrivatePublishConfirmsOutput(t *testing.T) {
 	}
 }
 
-func TestPublicGrantsExplainThatAccessRemainsPublic(t *testing.T) {
-	srv := apitest.NewServer(t)
-	srv.Script(http.MethodPatch, "/v1/resources/"+srv.Key.CRID, func(w http.ResponseWriter, _ *http.Request) {
-		apitest.WriteEnvelope(t, w, http.StatusOK, map[string]any{"resource_id": srv.Key.ResourceID, "crid": srv.Key.CRID, "private": false, "type": "url", "status": "active"}, nil)
-	})
-	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "grants", srv.Key.CRID, "--clear", "-o", "json"}})
-	if res.code != 0 || !strings.Contains(res.stderr.String(), "device grants do not restrict") {
-		t.Fatalf("public grant result was misleading: %s", res.stderr.String())
+// A grant change on a public resource succeeds, so the note has to say that
+// it changed nothing about who can use the resource. A private resource gets
+// no such note.
+func TestPublicGrantsExplainThatGrantsHaveNoEffect(t *testing.T) {
+	for _, private := range []bool{false, true} {
+		srv := apitest.NewServer(t)
+		srv.Script(http.MethodPatch, "/v1/resources/"+srv.Key.CRID, func(w http.ResponseWriter, _ *http.Request) {
+			apitest.WriteEnvelope(t, w, http.StatusOK, map[string]any{"resource_id": srv.Key.ResourceID, "crid": srv.Key.CRID, "private": private, "type": "url", "status": "active"}, nil)
+		})
+		res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "grants", srv.Key.CRID, "--clear", "-o", "json"}})
+		stderr := res.stderr.String()
+		noted := strings.Contains(stderr, "This resource is public, so device grants have no effect on it. They apply to a resource published with --private.")
+		if res.code != 0 || noted == private {
+			t.Fatalf("private=%t: exit %d, no-effect note shown=%t: %s", private, res.code, noted, stderr)
+		}
+		if strings.Contains(stderr, "who can request links") {
+			t.Fatalf("private=%t: the note still makes a claim about who can request links: %s", private, stderr)
+		}
 	}
 }
 

@@ -400,6 +400,64 @@ func TestRenderEnrollmentScopeRemedy(t *testing.T) {
 	}
 }
 
+// TestShareNotFoundRendering pins the not-found guidance for the CRID share
+// operator, which `share` and `get` both go through. Its 404 covers a
+// mistyped CRID, a removed resource, and a device that is not allowed, so the
+// hint names all three and picks none. The remedy is conditional: a grant
+// helps only on a private resource, and a public one opens only on its
+// owner's devices. The exit code stays not-found, and a 404 from any other
+// route keeps the hint every route shares.
+func TestShareNotFoundRendering(t *testing.T) {
+	srv := apitest.NewServer(t)
+	client, err := qurlapi.New(&qurlapi.Config{
+		BaseURL: srv.URL,
+		APIKey:  "lv_test_logincredential123456789",
+		Version: "test",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	srv.Script(http.MethodPost, "/v1/resources/"+srv.Key.CRID+"/share", apitest.HandlerNotFound404(t, "resource_not_found"))
+	_, shareErr := client.Share(context.Background(), srv.Key.CRID, qurlapi.ShareOptions{})
+	if got := exitcode.FromError(shareErr); got != exitcode.NotFound {
+		t.Fatalf("share not-found exit code = %d, want %d (error %v)", got, exitcode.NotFound, shareErr)
+	}
+	var buf bytes.Buffer
+	RenderError(&buf, shareErr, false)
+	const want = "Error: Not Found (HTTP 404)\n\n  the requested resource does not exist\n\n  " + hintShareNotFound + "\n"
+	if got := buf.String(); got != want {
+		t.Fatalf("share not-found rendering = %q, want %q", got, want)
+	}
+	for _, part := range []string{
+		"the CRID may be mistyped",
+		"the resource may have been removed",
+		"this device may not be allowed to open it",
+		"If the resource is private, send the publisher this device's public key from `qurl whoami -o json` so they can allow it",
+		"A public resource opens only on its owner's devices in this release",
+	} {
+		if !strings.Contains(hintShareNotFound, part) {
+			t.Errorf("share not-found hint lost %q: %q", part, hintShareNotFound)
+		}
+	}
+	// The journeys accept "deleted" only as the answer an owner gets for a
+	// resource they deleted, so the ambiguous hint must never use the word.
+	if strings.Contains(strings.ToLower(buf.String()), "deleted") {
+		t.Errorf("ambiguous share not-found reads like the owner-truthful deleted answer: %q", buf.String())
+	}
+
+	srv.Script(http.MethodGet, "/v1/resources/"+srv.Key.CRID+"/sharing", apitest.HandlerNotFound404(t, "not_found"))
+	_, otherErr := client.Sharing(context.Background(), srv.Key.CRID)
+	if got := exitcode.FromError(otherErr); got != exitcode.NotFound {
+		t.Fatalf("other route not-found exit code = %d, want %d (error %v)", got, exitcode.NotFound, otherErr)
+	}
+	buf.Reset()
+	RenderError(&buf, otherErr, false)
+	if got := buf.String(); !strings.Contains(got, hintNotFound) || strings.Contains(got, hintShareNotFound) {
+		t.Errorf("another route's not-found must keep the shared hint, got %q", got)
+	}
+}
+
 // TestConnectorAssignmentRenderings is the customer-language contract for
 // qurl-go's enrollment/assignment taxonomy. Every row is asserted twice —
 // bare, and wrapped the way the enroll/refresh path really wraps it — because

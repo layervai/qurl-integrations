@@ -57,6 +57,16 @@ const (
 	// than requested.
 	msgTTLClamped = "Note: the service granted a %s link lifetime instead of the requested %s."
 
+	// msgShareNeedsDevice frames a failure to open this device's identity on
+	// the share path, which share and get both take. The cause follows it
+	// unchanged, so the exit code stays the cause's.
+	msgShareNeedsDevice = "sharing needs this device's identity: %w"
+
+	// msgPublicGrantsNoEffect follows a grant change on a public resource.
+	// Device grants decide who else may use a private resource; a public one
+	// does not consult them.
+	msgPublicGrantsNoEffect = "This resource is public, so device grants have no effect on it. They apply to a resource published with --private."
+
 	// msgNoKeyProvided is login's empty-input error.
 	msgNoKeyProvided = "no API key provided"
 
@@ -122,6 +132,8 @@ func customerMessages() []string {
 		msgNeedsYes,
 		msgDeleteCanceled,
 		msgTTLClamped,
+		msgShareNeedsDevice,
+		msgPublicGrantsNoEffect,
 		msgNoKeyProvided,
 		msgAlreadyGone,
 		msgOpeningBrowser,

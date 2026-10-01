@@ -14,7 +14,7 @@ func grantsCmd(opts *globalOpts) *cobra.Command {
 	var clearGrants, yes bool
 	cmd := &cobra.Command{
 		Use: "grants <CRID>", Short: "Replace the devices allowed to request links",
-		Long: "Replace the complete device grant list as the resource owner. Repeat --allow-device-key for each allowed device, or use --clear to remove all device grants. This does not change resource privacy or revoke existing links. Public resources remain public.",
+		Long: "Replace the complete device grant list as the resource owner. Repeat --allow-device-key for each allowed device, or use --clear to remove all device grants. Device grants apply to a private resource and have no effect on a public one. This does not change resource privacy or revoke existing links.",
 		Args: exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if clearGrants == (len(keys) > 0) {
@@ -40,7 +40,7 @@ func grantsCmd(opts *globalOpts) *cobra.Command {
 			}
 			printer := opts.printer()
 			if resource.Private != nil && !*resource.Private {
-				printer.Notef("This resource is public; device grants do not restrict who can request links.")
+				printer.Notef("%s", msgPublicGrantsNoEffect)
 			}
 			return printer.ResourceStatus(resource)
 		},
