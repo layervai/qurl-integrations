@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
+	"unicode"
 	"unicode/utf16"
 	"unicode/utf8"
 
@@ -23,6 +25,11 @@ import (
 //   - "verified" is rendered only for a publisher whose Verified field is
 //     true. Every gap upstream decodes to false, so a missing or garbled
 //     field can only ever read as UNVERIFIED.
+//
+// One difference between the two forms is deliberate. The stderr notice goes
+// through Warnf or Notef, and every stderr line is passed through Redact, so
+// a credential-shaped name is masked there. The stdout rows are data and,
+// like every data output, are not redacted: the same name prints in full.
 
 // Fixed customer-facing publisher strings, registered in CustomerMessages.
 const (
@@ -58,8 +65,9 @@ const (
 	msgPublisherNameUnset         = "No publisher name is set. Run `qurl publisher set <name>` to add one."
 )
 
-// maxPublisherNameRunes bounds a displayed name so a service answering
-// outside its contract cannot flood a terminal.
+// maxPublisherNameRunes bounds a displayed name, and a service's reason for
+// refusing one, so a service answering outside its contract cannot flood a
+// terminal.
 //
 // TODO(upstream-contract): qurl-service accepts publisher names of 1-64
 // characters. The bound here is deliberately looser, so it never cuts a name
@@ -160,6 +168,27 @@ func (p *Printer) escapedPublisherName(name string) string {
 		escaped += p.ellipsis()
 	}
 	return escaped
+}
+
+// ServiceReason prepares a service's explanation of a refusal for one stderr
+// line: whitespace is collapsed, anything that is not plainly printable is
+// replaced, and the text is held to the same bound and marker as a displayed
+// name, so neither a hostile nor a runaway explanation can forge a line or
+// flood a terminal.
+func (p *Printer) ServiceReason(reason string) string {
+	reason = strings.Join(strings.Fields(strings.Map(func(r rune) rune {
+		if unicode.IsSpace(r) {
+			return ' '
+		}
+		if !unicode.IsPrint(r) {
+			return unicode.ReplacementChar
+		}
+		return r
+	}, strings.ToValidUTF8(reason, string(unicode.ReplacementChar)))), " ")
+	if runes := []rune(reason); len(runes) > maxPublisherNameRunes {
+		reason = string(runes[:maxPublisherNameRunes]) + p.ellipsis()
+	}
+	return reason
 }
 
 // dash separates a name from its status, degraded for non-UTF-8 locales.

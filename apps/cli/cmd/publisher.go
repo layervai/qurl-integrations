@@ -4,8 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"strings"
-	"unicode"
 
 	"github.com/layervai/qurl-go/qurl"
 	"github.com/spf13/cobra"
@@ -31,7 +29,10 @@ Anyone who requests a link for one of your CRIDs with "qurl share" or
 
 The name is optional and self-declared. LayerV does not check it, and no
 publisher can be confirmed by LayerV yet, so every publisher is shown as
-UNVERIFIED. One name applies to every CRID published by this device's owner.
+UNVERIFIED.
+
+The same name appears on every CRID this device's owner publishes, so people
+can tell those CRIDs come from the same publisher.
 
 Plain --quiet prints only the name, and nothing when none is set.`,
 		Example: `  qurl publisher
@@ -72,8 +73,9 @@ punctuation. It cannot spell "verified", "LayerV" or "qURL", even split by
 spaces or punctuation. The qURL service checks the name and says why when it
 refuses one. Quote a name that has spaces.
 
-Setting a name replaces the previous one and applies to every CRID published
-by this device's owner, including ones already published.`,
+Setting a name replaces the previous one. The same name appears on every CRID
+this device's owner publishes, including ones already published, so people
+can tell those CRIDs come from the same publisher.`,
 		Example: `  qurl publisher set "Acme Docs"
   qurl publisher set Acme -o json`,
 		Args: exactArgs(1),
@@ -87,7 +89,7 @@ by this device's owner, including ones already published.`,
 			}
 			profile, err := client.SetPublisherName(cmd.Context(), args[0])
 			if err != nil {
-				return publisherNameError(err)
+				return publisherNameError(opts.printer(), err)
 			}
 			return printPublisherProfile(opts, profile, output.PublisherNameSet)
 		},
@@ -110,7 +112,9 @@ CRIDs are then shown "no name provided", still marked UNVERIFIED.`,
 			// The service removes the name when asked to set an empty one.
 			profile, err := client.SetPublisherName(cmd.Context(), "")
 			if err != nil {
-				return publisherRouteError(err)
+				// A refused removal is the same 400 a refused name is, so it
+				// gets the same rendering and exit code.
+				return publisherNameError(opts.printer(), err)
 			}
 			return printPublisherProfile(opts, profile, output.PublisherNameCleared)
 		},
@@ -149,22 +153,14 @@ func publisherRouteError(err error) error {
 
 // publisherNameError turns a refused publisher name into the invalid-input
 // outcome (exit 8) with the reason on stderr. The message is built from the
-// service's explanation only: the argument itself is never echoed, and any
-// character the explanation carries that is not plainly printable is replaced
-// before it can reach the terminal. Every other failure passes through.
-func publisherNameError(err error) error {
+// service's explanation only: the argument itself is never echoed, and the
+// explanation is sanitized and bounded (Printer.ServiceReason) before it can
+// reach the terminal. Every other failure goes through publisherRouteError.
+func publisherNameError(printer *output.Printer, err error) error {
 	if !errors.Is(err, qurl.ErrInvalidPublisherName) {
 		return publisherRouteError(err)
 	}
-	reason := strings.Join(strings.Fields(strings.Map(func(r rune) rune {
-		if unicode.IsSpace(r) {
-			return ' '
-		}
-		if !unicode.IsPrint(r) {
-			return unicode.ReplacementChar
-		}
-		return r
-	}, strings.ToValidUTF8(qurlapi.PublisherNameReason(err), string(unicode.ReplacementChar)))), " ")
+	reason := printer.ServiceReason(qurlapi.PublisherNameReason(err))
 	if reason == "" {
 		return exitcode.InvalidInputError(msgPublisherNameRefused, err)
 	}

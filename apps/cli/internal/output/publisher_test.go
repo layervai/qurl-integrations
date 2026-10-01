@@ -82,16 +82,24 @@ type publisherSurface struct {
 	render func(*Printer, qurlapi.Publisher) error
 }
 
-// textShowsPublisher reports whether the surface's text output has a
-// publisher row. The list table and the publish document deliberately have
-// none: they carry the publisher in JSON only.
+// textShowsPublisher reports whether the surface's text output shows the
+// publisher. Four deliberately do not, and carry it in JSON only: the list
+// table, the publish document, the outcome of a lifecycle change (start,
+// stop, restart), and the download confirmation, whose publisher was already
+// announced by the notice before the content was fetched.
 func (s publisherSurface) textShowsPublisher() bool {
-	return s.name != "list" && s.name != "publish"
+	switch s.name {
+	case "list", "publish", "lifecycle", "download":
+		return false
+	default:
+		return true
+	}
 }
 
-// TestPublishAndListTextHaveNoPublisherRow pins that deliberate absence: a
-// first publish must not open with a status word about the publisher.
-func TestPublishAndListTextHaveNoPublisherRow(t *testing.T) {
+// TestTextSurfacesWithoutAPublisherRow pins that deliberate absence: a first
+// publish or a start must not open with a status word about the publisher,
+// and a download does not repeat a notice it already gave.
+func TestTextSurfacesWithoutAPublisherRow(t *testing.T) {
 	t.Parallel()
 	for _, surface := range publisherSurfaces() {
 		if surface.textShowsPublisher() {
@@ -150,7 +158,10 @@ func publisherSurfaces() []publisherSurface {
 				CreatedAt: &created, Publisher: publisher,
 			})
 		}},
-		{"sharing", func(p *Printer, publisher qurlapi.Publisher) error {
+		{"sharing status", func(p *Printer, publisher qurlapi.Publisher) error {
+			return p.SharingStatus("http://127.0.0.1:3000", sharing(publisher))
+		}},
+		{"lifecycle", func(p *Printer, publisher qurlapi.Publisher) error {
 			return p.Sharing("http://127.0.0.1:3000", sharing(publisher))
 		}},
 		{"inspect", func(p *Printer, publisher qurlapi.Publisher) error {
@@ -561,18 +572,47 @@ func TestQuietAndJSONSuppressThePublisherNotice(t *testing.T) {
 	}
 }
 
-func TestDownloadedReportsThePublisherOnStderr(t *testing.T) {
+// The publisher of a download is announced before the content is fetched
+// (PublisherNotice, driven by the command), so the confirmation that follows
+// is the saved message alone.
+func TestDownloadedDoesNotRepeatThePublisherNotice(t *testing.T) {
 	t.Parallel()
 	created := fixtureCreated
 	var out, errBuf bytes.Buffer
 	p := publisherPrinter(&out, &errBuf, FormatText, false, false, false, false)
-	if err := p.Downloaded(fixtureShareLink(qurlapi.Publisher{Name: "Acme Docs"}, &created), "out.bin", 23); err != nil {
+	link := fixtureShareLink(qurlapi.Publisher{Name: "Acme Docs"}, &created)
+	p.PublisherNotice(link)
+	if err := p.Downloaded(link, "out.bin", 23); err != nil {
 		t.Fatal(err)
 	}
-	want := "Saved to out.bin (23 bytes).\n" +
-		"Warning: UNVERIFIED publisher \"Acme Docs\" (self-declared name, not confirmed by LayerV). Created 2026-03-01.\n"
+	want := "Warning: UNVERIFIED publisher \"Acme Docs\" (self-declared name, not confirmed by LayerV). Created 2026-03-01.\n" +
+		"Saved to out.bin (23 bytes).\n"
 	if out.Len() != 0 || errBuf.String() != want {
 		t.Errorf("download: stdout=%q stderr=\n%s\nwant\n%s", out.String(), errBuf.String(), want)
+	}
+}
+
+func TestServiceReasonIsSanitizedAndBounded(t *testing.T) {
+	t.Parallel()
+	var out, errBuf bytes.Buffer
+	p := publisherPrinter(&out, &errBuf, FormatText, false, false, false, false)
+	if got, want := p.ServiceReason("  name \x1b[31mAcme\x1b[0m\u202e\n is\tnot allowed\r\n"), "name \ufffd[31mAcme\ufffd[0m\ufffd is not allowed"; got != want {
+		t.Errorf("ServiceReason = %q, want %q", got, want)
+	}
+	long := p.ServiceReason(strings.Repeat("word ", 4000))
+	if got := []rune(long); len(got) != maxPublisherNameRunes+1 || !strings.HasSuffix(long, "…") {
+		t.Errorf("a %d-rune reason was not held to the display bound and marked", len(got))
+	}
+	exact := strings.Repeat("a", maxPublisherNameRunes)
+	if got := p.ServiceReason(exact); got != exact {
+		t.Errorf("a reason at the bound was cut to %d bytes", len(got))
+	}
+	ascii := publisherPrinter(&out, &errBuf, FormatText, false, false, false, true)
+	if got := ascii.ServiceReason(strings.Repeat("a", maxPublisherNameRunes+1)); !strings.HasSuffix(got, "a...") {
+		t.Errorf("ascii marker missing: %q", got[len(got)-8:])
+	}
+	if got := p.ServiceReason(" \x00\n "); got != "\ufffd" {
+		t.Errorf("a reason of control characters = %q", got)
 	}
 }
 
@@ -683,6 +723,8 @@ func TestPublisherJSONShape(t *testing.T) {
 			if surface.name == "notice" || surface.name == "list" || surface.name == "profile" {
 				continue
 			}
+			// Includes "lifecycle": start, stop, and restart return the same
+			// sharing document as status, publisher and created_at included.
 			var out, errBuf bytes.Buffer
 			p := publisherPrinter(&out, &errBuf, FormatJSON, false, false, false, false)
 			if err := surface.render(p, qurlapi.Publisher{}); err != nil {

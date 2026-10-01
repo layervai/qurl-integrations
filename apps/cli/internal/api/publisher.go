@@ -36,6 +36,11 @@ type Publisher struct {
 type publisherWire struct {
 	name     string
 	verified bool
+	// decoded and repeated track how many times one row offered a publisher
+	// member. encoding/json calls UnmarshalJSON once per occurrence, and the
+	// last one would otherwise win.
+	decoded  bool
+	repeated bool
 }
 
 // UnmarshalJSON never fails and never guesses. Anything that is not an
@@ -44,8 +49,15 @@ type publisherWire struct {
 // can never break the resource read that carries it. Only one exact,
 // lowercase "verified" member holding the JSON literal true verifies: a
 // string, a number, a differently cased key, or a repeated member does not.
+//
+// A row that carries the publisher member more than once is ambiguous, so
+// every repetition reads as unnamed and unverified rather than letting the
+// last occurrence win. A value is therefore decoded into once: each row gets
+// a fresh one.
 func (w *publisherWire) UnmarshalJSON(data []byte) error {
+	repeated := w.decoded
 	*w = parsePublisherWire(data)
+	w.decoded, w.repeated = true, repeated
 	return nil
 }
 
@@ -84,6 +96,9 @@ func parsePublisherWire(data []byte) publisherWire {
 }
 
 func (w publisherWire) publisher() Publisher {
+	if w.repeated {
+		return Publisher{}
+	}
 	return Publisher{Name: w.name, Verified: w.verified}
 }
 

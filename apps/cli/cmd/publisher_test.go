@@ -165,6 +165,8 @@ func TestStatusNeverRendersVerifiedFromAGarbledField(t *testing.T) {
 		"string flag":      `,"publisher":{"verified":"true"}`,
 		"numeric flag":     `,"publisher":{"verified":1}`,
 		"repeated flag":    `,"publisher":{"verified":false,"verified":true}`,
+		"repeated object":  `,"publisher":{"verified":false},"publisher":{"verified":true}`,
+		"repeated named":   `,"publisher":{"name":"Acme","verified":true},"publisher":{"name":"Acme","verified":true}`,
 		"nested flag":      `,"publisher":{"status":{"verified":true}}`,
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -264,7 +266,39 @@ func TestGetFileReportsThePublisher(t *testing.T) {
 		if res.code != 0 || res.stdout.Len() != 0 {
 			t.Fatalf("exit = %d, stdout = %q, stderr: %s", res.code, res.stdout.String(), res.stderr.String())
 		}
-		if want := "Saved to out.bin (23 bytes).\n" + wantNamedNotice; res.stderr.String() != want {
+		// The publisher is announced before the content is fetched; the saved
+		// message follows and does not repeat it.
+		if want := wantNamedNotice + "Saved to out.bin (23 bytes).\n"; res.stderr.String() != want {
+			t.Errorf("stderr =\n%s\nwant\n%s", res.stderr.String(), want)
+		}
+	})
+
+	// The notice is written when the verified answer arrives, so a download
+	// that then fails has still told the reader whose content it was fetching.
+	t.Run("announced before a failed fetch", func(t *testing.T) {
+		t.Chdir(t.TempDir())
+		srv := downloadServer(t)
+		srv.ScriptRepeat(http.MethodGet, apitest.DownloadPath, 2, handlerGone)
+		res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "get", srv.Key.CRID, "--file", "out.bin"}})
+		if res.code != exitcode.NotFound || res.stdout.Len() != 0 {
+			t.Fatalf("exit = %d, stdout = %q, stderr: %s", res.code, res.stdout.String(), res.stderr.String())
+		}
+		got := res.stderr.String()
+		if !strings.HasPrefix(got, wantNamedNotice) || strings.Count(got, "UNVERIFIED") != 1 || strings.Contains(got, "Saved to") {
+			t.Errorf("stderr = %q, want the notice once, first, and no saved message", got)
+		}
+		mustNotExistCmd(t, "out.bin")
+	})
+
+	t.Run("announced once across a refresh", func(t *testing.T) {
+		t.Chdir(t.TempDir())
+		srv := downloadServer(t)
+		srv.Script(http.MethodGet, apitest.DownloadPath, handlerGone)
+		res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "get", srv.Key.CRID, "--file", "out.bin"}})
+		if res.code != 0 {
+			t.Fatalf("exit = %d, stderr: %s", res.code, res.stderr.String())
+		}
+		if want := wantNamedNotice + "Saved to out.bin (23 bytes).\n"; res.stderr.String() != want {
 			t.Errorf("stderr =\n%s\nwant\n%s", res.stderr.String(), want)
 		}
 	})
@@ -286,7 +320,7 @@ func TestGetFileReportsThePublisher(t *testing.T) {
 		if res.code != 0 {
 			t.Fatalf("exit = %d, stderr: %s", res.code, res.stderr.String())
 		}
-		if want := "Saved to out.bin (23 bytes).\n" + wantUnnamedNotice; res.stderr.String() != want {
+		if want := wantUnnamedNotice + "Saved to out.bin (23 bytes).\n"; res.stderr.String() != want {
 			t.Errorf("stderr =\n%s\nwant\n%s", res.stderr.String(), want)
 		}
 	})
@@ -624,6 +658,45 @@ func TestPublisherSetRefusals(t *testing.T) {
 		}
 	})
 
+	// A refused removal is rendered like a refused name: exit 8 with the
+	// service's reason, not the generic problem anatomy.
+	t.Run("clear refused", func(t *testing.T) {
+		srv := apitest.NewServer(t)
+		srv.Script(http.MethodPatch, "/v1/me/publisher", func(w http.ResponseWriter, _ *http.Request) {
+			apitest.WriteProblem(t, w, http.StatusBadRequest, "invalid_input", "Bad Request", "name cannot be removed right now")
+		})
+		res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "publisher", "clear"}})
+		if res.code != exitcode.InvalidInput {
+			t.Fatalf("exit = %d, want %d; stderr: %q", res.code, exitcode.InvalidInput, res.stderr.String())
+		}
+		mustEmptyStdout(t, res)
+		if want := "Error: that publisher name can't be used: name cannot be removed right now\n"; res.stderr.String() != want {
+			t.Errorf("stderr = %q, want %q", res.stderr.String(), want)
+		}
+	})
+
+	// A runaway explanation is cut at the display bound and marked; it cannot
+	// flood the terminal.
+	t.Run("multi-kilobyte reason", func(t *testing.T) {
+		for _, command := range [][]string{{"publisher", "set", "Acme"}, {"publisher", "clear"}} {
+			srv := apitest.NewServer(t)
+			srv.Script(http.MethodPatch, "/v1/me/publisher", func(w http.ResponseWriter, _ *http.Request) {
+				apitest.WriteProblem(t, w, http.StatusBadRequest, "invalid_input", "Bad Request", strings.Repeat("no ", 8000))
+			})
+			res := runCLI(t, &runOpts{args: append([]string{"--endpoint", srv.URL}, command...)})
+			if res.code != exitcode.InvalidInput {
+				t.Fatalf("%q: exit = %d, want %d", command, res.code, exitcode.InvalidInput)
+			}
+			const prefix = "Error: that publisher name can't be used: "
+			got := res.stderr.String()
+			reason := strings.TrimSuffix(strings.TrimPrefix(got, prefix), "\n")
+			if !strings.HasPrefix(got, prefix) || strings.Count(got, "\n") != 1 ||
+				len([]rune(reason)) != 257 || !strings.HasSuffix(reason, "…") {
+				t.Errorf("%q: a 24 KB reason rendered as %d bytes (%d runes of reason)", command, len(got), len([]rune(reason)))
+			}
+		}
+	})
+
 	t.Run("reason missing", func(t *testing.T) {
 		srv := apitest.NewServer(t)
 		srv.Script(http.MethodPatch, "/v1/me/publisher", func(w http.ResponseWriter, _ *http.Request) {
@@ -712,7 +785,7 @@ func TestPublisherAgainstAnOlderService(t *testing.T) {
 
 func TestPublisherNameErrorPassesOtherErrorsThrough(t *testing.T) {
 	other := fmt.Errorf("%w: unrelated", qurl.ErrInvalidAPIResponse)
-	if got := publisherNameError(other); !errors.Is(got, qurl.ErrInvalidAPIResponse) || exitcode.FromError(got) != exitcode.ServerError ||
+	if got := publisherNameError(output.New(discardStreams(), output.FormatText, false, false, false, nil), other); !errors.Is(got, qurl.ErrInvalidAPIResponse) || exitcode.FromError(got) != exitcode.ServerError ||
 		got.Error() != other.Error() {
 		t.Fatalf("an unrelated error was rewritten: %v", got)
 	}

@@ -186,10 +186,26 @@ func (p *Printer) Publish(res *qurlapi.Published) error {
 	}
 }
 
-// Sharing renders one local share's durable and observed lifecycle state.
-// Desired and observed state are separate so an in-progress reconnect never
-// looks stopped or successfully serving.
+// Sharing renders the outcome of a lifecycle change (start, stop, restart):
+// one local share's durable and observed state. Desired and observed state
+// are separate so an in-progress reconnect never looks stopped or
+// successfully serving. The text has no publisher rows: the owner asked to
+// change the share, not to read about it. SharingStatus is the read view.
 func (p *Printer) Sharing(target string, state *qurlapi.Sharing) error {
+	return p.sharing(target, state, false)
+}
+
+// SharingStatus renders the same state for `qurl status`, where the owner
+// asked for details: the text adds the Publisher and Created rows that people
+// who request a link are shown.
+func (p *Printer) SharingStatus(target string, state *qurlapi.Sharing) error {
+	return p.sharing(target, state, true)
+}
+
+// sharing renders both views. The JSON document is one type for every
+// command that returns sharing state, so it always carries publisher and
+// created_at; only the text rows are chosen by publisherRows.
+func (p *Printer) sharing(target string, state *qurlapi.Sharing, publisherRows bool) error {
 	switch {
 	case p.format == FormatJSON:
 		return p.writeJSON(sharingDocument(target, state))
@@ -206,7 +222,9 @@ func (p *Printer) Sharing(target string, state *qurlapi.Sharing) error {
 		ew.printf("%s\t%s\n", p.bold("Desired:"), state.DesiredState)
 		ew.printf("%s\t%s\n", p.bold("Observed:"), state.ConnectionState)
 		ew.printf("%s\t%d\n", p.bold("Serving epoch:"), state.ServingEpoch)
-		p.publisherRows(ew, state.Publisher, state.CreatedAt)
+		if publisherRows {
+			p.publisherRows(ew, state.Publisher, state.CreatedAt)
+		}
 		return ew.flush(tw)
 	}
 }
@@ -396,7 +414,8 @@ func (p *Printer) ShareLink(link *qurlapi.ShareLink) error {
 	ew := &errWriter{w: p.out}
 	ew.printf("%s\n\n", link.QURL)
 	// Hand-aligned rather than tabwriter: the styled status would count as
-	// cell width.
+	// cell width. The one and three spaces are tied to the lengths of
+	// labelPublisher and labelCreated; change them together.
 	ew.printf("  %s %s\n", p.bold(labelPublisher), p.publisherStatus(link.Publisher))
 	if created := p.createdText(link.ResourceCreatedAt); created != "" {
 		ew.printf("  %s   %s\n", p.bold(labelCreated), created)
@@ -573,10 +592,12 @@ func (p *Printer) Delete(id string, alreadyGone bool) error {
 }
 
 // Downloaded renders a completed --file download of the resource link
-// names. The file itself is the data, so the text confirmation and the
-// publisher notice are status messages for humans and go to stderr; --quiet
-// echoes the destination path to stdout for pipelines; JSON emits the outcome
-// document, publisher and creation date included.
+// names. The file itself is the data, so the text confirmation is a status
+// message for humans and goes to stderr; --quiet echoes the destination path
+// to stdout for pipelines; JSON emits the outcome document, publisher and
+// creation date included. In text mode the publisher was already announced on
+// stderr before any content was fetched (PublisherNotice), so it is not
+// repeated here.
 func (p *Printer) Downloaded(link *qurlapi.ShareLink, path string, bytes int64) error {
 	switch {
 	case p.format == FormatJSON:
@@ -591,7 +612,6 @@ func (p *Printer) Downloaded(link *qurlapi.ShareLink, path string, bytes int64) 
 		// Best-effort like every stderr status line: the file is already in
 		// place, so a broken stderr must not turn success into failure.
 		_, _ = fmt.Fprintf(p.err, msgSavedTo+"\n", path, bytes)
-		p.PublisherNotice(link)
 		return nil
 	}
 }

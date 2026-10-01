@@ -906,8 +906,9 @@ it, then opens or downloads — nothing is ever acted on unverified:
 | `--session-duration <duration>` | Lifetime of each admitted session, e.g. `5m` or `1h`. Zero or omission uses the service default. The service enforces resource limits. |
 | `--yes` | Proceed without confirmation, including sending a test CRID to production |
 
-With `--file`, the publisher notice goes to stderr: after the saved message
-for `--file <path>`, and before the bytes for `--file -`. `--quiet` omits it.
+With `--file`, the publisher notice goes to stderr before the content is
+fetched, so you see it before the download: ahead of the saved message for
+`--file <path>`, and ahead of the bytes for `--file -`. `--quiet` omits it.
 The publisher is `UNVERIFIED`, so decide whether to use the content on what
 you know about the CRID's source, not on the name.
 
@@ -1009,9 +1010,10 @@ that share on the Connector session under a fresh serving epoch, so a stale
 session cannot keep serving it; the other shares are not disturbed. `status`
 and `inspect` use the same authoritative view. Both work for remote resources
 and include the local target only when this machine owns one. Both also show
-the `Publisher` and `Created` rows that people who request a link are shown
-(`publisher` and `created_at` in `-o json`); `qurl grants` prints the same
-rows.
+the `Publisher` and `Created` rows that people who request a link are shown;
+`qurl grants` prints the same rows. `start`, `stop`, and `restart` report the
+change and print no publisher rows. All five return `publisher` and
+`created_at` in `-o json`.
 
 `restart --target <origin>` additionally moves the share to a different
 loopback origin on this machine, keeping its CRID and links; see
@@ -1158,8 +1160,11 @@ Publisher: "Acme Docs" — UNVERIFIED (self-declared name, not confirmed by Laye
 
 The name is optional and self-declared. Setting one does not confirm who you
 are: LayerV cannot confirm any publisher yet, so every publisher is shown as
-`UNVERIFIED`. One name applies to every CRID published by this device's
-owner, including ones already published.
+`UNVERIFIED`.
+
+The same name appears on every CRID this device's owner publishes, including
+ones already published, so people can tell those CRIDs come from the same
+publisher.
 
 <!-- TODO(upstream-contract): qurl-service owns the publisher naming rules. -->
 A name is 1 to 64 characters: letters, digits, single spaces, and common
@@ -1168,8 +1173,8 @@ spaces or punctuation. The service checks the name; a refused name exits
 with code 8 and the reason on stderr.
 
 `-o json` prints `{"publisher": {"name": "...", "verified": false}}`, with
-`name` omitted when none is set. `--quiet` prints only the name, and nothing
-when none is set.
+`name` omitted when none is set. `--quiet` prints only the name, with any
+non-printing characters escaped, and nothing when none is set.
 
 ### qurl completion
 
@@ -1273,10 +1278,16 @@ exactly that reason.
 qurl list -o json | jq -r '.resources[].crid'
 ```
 
-Every document that describes a resource carries a `publisher` object:
-`share`, `get --file`, `publish`, `status`, `inspect`, `grants`, each `list`
-row, and `qurl publisher` itself. `publish` and `list` carry it in JSON only;
-their text output has no publisher row.
+Where the publisher appears:
+
+| Command | Text | `-o json` |
+|---------|------|-----------|
+| `share` | `Publisher` and `Created` rows on a terminal; one stderr notice when piped | `publisher`, `resource_created_at` |
+| `get` | Same rows before the browser opens; one stderr notice before a `--file` download | `publisher`, `resource_created_at` (`--file <path>`) |
+| `status`, `inspect`, `grants` | `Publisher` and `Created` rows | `publisher`, `created_at` |
+| `publisher`, `publisher set`, `publisher clear` | `Publisher` row | `publisher` |
+| `publish`, `list` | Not shown | `publisher`, `created_at` |
+| `start`, `stop`, `restart` | Not shown | `publisher`, `created_at` |
 
 ```json
 "resource_created_at": "2026-03-01T00:00:00Z",
@@ -1288,9 +1299,10 @@ is omitted when the publisher set none.
 
 The resource's creation date has two keys. `share` and `get --file` describe
 a minted link, so they name it `resource_created_at`: it is the resource's
-creation date, not the link's. `publish`, `status`, `inspect`, `grants`, and
-`list` rows describe the resource itself and use `created_at`. Either key is
-omitted when the service did not report the date.
+creation date, not the link's. `publish`, `status`, `inspect`, `grants`,
+`start`, `stop`, `restart`, and `list` rows describe the resource itself and
+use `created_at`. Either key is omitted when the service did not report the
+date.
 
 A name is the publisher's own text: quote or escape it before showing it, and
 never show it without its `verified` status. An agent that acts for a person

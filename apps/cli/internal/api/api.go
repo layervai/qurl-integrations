@@ -368,7 +368,9 @@ func (c *client) Share(ctx context.Context, id string, opts ShareOptions) (*Shar
 		ExpiresInSeconds: access.ExpiresInSeconds,
 		SingleUse:        access.SingleUse,
 		// Field by field, never a type conversion: an SDK field added later
-		// must not reach the CLI's publisher rendering unreviewed.
+		// must not reach the CLI's publisher rendering unreviewed. The
+		// fail-closed decode for this path lives in qurl-go, which owns the
+		// share answer; publisherWire covers the reads this repo decodes.
 		Publisher: Publisher{Name: access.Publisher.Name, Verified: access.Publisher.Verified},
 	}
 	if access.ResourceCreatedAt != nil && !access.ResourceCreatedAt.IsZero() {

@@ -51,7 +51,13 @@ func TestPublisherWireFailsClosed(t *testing.T) {
 		"explicit false":          {row: `{"publisher":{"name":"Acme Docs","verified":false}}`, want: Publisher{Name: "Acme Docs"}},
 		"explicit true":           {row: `{"publisher":{"name":"Acme Docs","verified":true}}`, want: Publisher{Name: "Acme Docs", Verified: true}},
 		"spaced true":             {row: `{"publisher":{"verified" : true }}`, want: Publisher{Verified: true}},
-		"unknown members ignored": {row: `{"publisher":{"name":"Acme Docs","verified":true,"badge":"gold"}}`, want: Publisher{Name: "Acme Docs", Verified: true}},
+		// A repeated publisher member is ambiguous: no occurrence wins.
+		"repeated, last verified":    {row: `{"publisher":{"verified":false},"publisher":{"verified":true}}`},
+		"repeated, first verified":   {row: `{"publisher":{"name":"Acme Docs","verified":true},"publisher":{"verified":false}}`},
+		"repeated, both verified":    {row: `{"publisher":{"name":"Acme Docs","verified":true},"publisher":{"name":"Acme Docs","verified":true}}`},
+		"repeated three times":       {row: `{"publisher":{"verified":true},"publisher":null,"publisher":{"name":"Acme Docs","verified":true}}`},
+		"repeated around a neighbor": {row: `{"publisher":{"verified":true},"crid":"x","publisher":{"name":"Acme Docs","verified":true}}`},
+		"unknown members ignored":    {row: `{"publisher":{"name":"Acme Docs","verified":true,"badge":"gold"}}`, want: Publisher{Name: "Acme Docs", Verified: true}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
@@ -66,19 +72,73 @@ func TestPublisherWireFailsClosed(t *testing.T) {
 	}
 }
 
-// A decoder reused across rows must not carry one row's publisher into the
-// next row that has none.
-func TestPublisherWireResetsBetweenDecodes(t *testing.T) {
+// A value decoded into twice has seen the member twice. Whatever the two
+// occurrences say, the result is the unnamed, unverified zero value, and it
+// stays that way: nothing decoded later can verify it.
+func TestPublisherWireTreatsASecondDecodeAsARepeatedMember(t *testing.T) {
 	t.Parallel()
 	var wire publisherWire
 	if err := json.Unmarshal([]byte(`{"name":"Acme Docs","verified":true}`), &wire); err != nil {
 		t.Fatal(err)
 	}
-	if err := json.Unmarshal([]byte(`"garbled"`), &wire); err != nil {
+	if got := wire.publisher(); got != (Publisher{Name: "Acme Docs", Verified: true}) {
+		t.Fatalf("first decode = %+v", got)
+	}
+	for _, again := range []string{`"garbled"`, `{"name":"Acme Docs","verified":true}`, `{"verified":true}`} {
+		if err := json.Unmarshal([]byte(again), &wire); err != nil {
+			t.Fatal(err)
+		}
+		if got := wire.publisher(); got != (Publisher{}) {
+			t.Fatalf("publisher after a repeated decode of %s = %+v, want the unverified zero value", again, got)
+		}
+	}
+	// Every row of a list is its own value, so one row's repetition does not
+	// leak into the next.
+	var rows []resourceRow
+	if err := json.Unmarshal([]byte(`[
+		{"publisher":{"verified":true},"publisher":{"verified":true}},
+		{"publisher":{"name":"Acme Docs","verified":true}}
+	]`), &rows); err != nil {
 		t.Fatal(err)
 	}
-	if got := wire.publisher(); got != (Publisher{}) {
-		t.Fatalf("publisher after a garbled decode = %+v, want the unverified zero value", got)
+	if got := rows[0].Publisher.publisher(); got != (Publisher{}) {
+		t.Fatalf("row with a repeated member = %+v", got)
+	}
+	if got := rows[1].Publisher.publisher(); got != (Publisher{Name: "Acme Docs", Verified: true}) {
+		t.Fatalf("clean row after a repeated one = %+v", got)
+	}
+}
+
+// The three owner reads that carry a resource row all refuse to let a
+// repeated publisher member verify.
+func TestResourceReadsNeverVerifyFromARepeatedPublisher(t *testing.T) {
+	srv := apitest.NewServer(t)
+	row := fmt.Sprintf(`{"resource_id":%q,"crid":%q,"type":"url","status":"active","target_url":"https://example.com/data",`+
+		`"publisher":{"name":"Acme Docs","verified":false},"publisher":{"name":"Acme Docs","verified":true}}`,
+		srv.Key.ResourceID, srv.Key.CRID)
+	answer := func(status int, body string) http.HandlerFunc {
+		return func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(status)
+			_, _ = w.Write([]byte(body))
+		}
+	}
+	srv.Script(http.MethodGet, "/v1/resources", answer(http.StatusOK, `{"data":[`+row+`],"meta":{"has_more":false}}`))
+	srv.Script(http.MethodGet, "/v1/resources/"+srv.Key.CRID, answer(http.StatusOK, `{"data":{"resource":`+row+`}}`))
+	srv.Script(http.MethodPost, "/v1/resources", answer(http.StatusCreated, `{"data":`+row+`,"meta":{}}`))
+	client := newTestClient(t, srv, nil)
+
+	page, err := client.List(context.Background(), ListOptions{})
+	if err != nil || len(page.Items) != 1 || page.Items[0].Publisher != (Publisher{}) {
+		t.Fatalf("List = %+v, %v; want the zero publisher", page, err)
+	}
+	resource, err := client.Resource(context.Background(), srv.Key.CRID)
+	if err != nil || resource.Publisher != (Publisher{}) {
+		t.Fatalf("Resource = %+v, %v; want the zero publisher", resource, err)
+	}
+	published, err := client.Publish(context.Background(), "https://example.com/data", PublishOptions{})
+	if err != nil || published.Publisher != (Publisher{}) {
+		t.Fatalf("Publish = %+v, %v; want the zero publisher", published, err)
 	}
 }
 

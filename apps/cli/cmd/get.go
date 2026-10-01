@@ -51,9 +51,10 @@ acted on:
     briefly. It requests one fresh link only after the grant expires.
   - With --file - the raw bytes stream to stdout, clean for piping.
 
-With --file, the publisher and creation date are reported on stderr. A
-publisher name is self-declared and shown as UNVERIFIED: LayerV has not
-confirmed who the publisher is. --quiet omits that report.
+With --file, the publisher and creation date are reported on stderr before
+the content is fetched. A publisher name is self-declared and shown as
+UNVERIFIED: LayerV has not confirmed who the publisher is. --quiet omits that
+report.
 
 When stdout is not a terminal, get never opens a browser: pass --file, or
 use ` + "`qurl share`" + ` if you only need the link.`,
@@ -157,6 +158,9 @@ func runGet(ctx context.Context, opts *globalOpts, operand string, flags getFlag
 		}, nil
 	}
 
+	// Both download modes say who published the content before fetching it.
+	announced := announcePublisherOnce(printer, fetchTarget, func() *qurlapi.ShareLink { return shareLink })
+
 	switch action {
 	case consume.ActionOpenBrowser:
 		if _, err := mint(ctx); err != nil {
@@ -164,12 +168,11 @@ func runGet(ctx context.Context, opts *globalOpts, operand string, flags getFlag
 		}
 		return openInBrowser(ctx, opts, printer, shareLink)
 	case consume.ActionStreamStdout:
-		announced := announcePublisherOnce(printer, fetchTarget, func() *qurlapi.ShareLink { return shareLink })
 		downloader := &consume.Downloader{MintTarget: announced}
 		_, err := downloader.StreamTo(ctx, opts.streams.Out)
 		return err
 	case consume.ActionSaveFile:
-		downloader := &consume.Downloader{MintTarget: fetchTarget}
+		downloader := &consume.Downloader{MintTarget: announced}
 		n, err := downloader.SaveTo(ctx, flags.file, flags.force)
 		if err != nil {
 			return err
@@ -180,10 +183,12 @@ func runGet(ctx context.Context, opts *globalOpts, operand string, flags getFlag
 	}
 }
 
-// announcePublisherOnce wraps the download target source for `--file -`.
-// stdout carries the raw bytes there, so the publisher goes to stderr: once,
-// after the first verified answer and before any content is fetched. A link
-// refreshed mid-download names the same resource and stays silent.
+// announcePublisherOnce wraps the download target source for both --file
+// modes. The publisher goes to stderr once, after the first verified answer
+// and before any content is fetched, so the reader sees UNVERIFIED before the
+// download rather than after it. A link refreshed mid-download names the same
+// resource and stays silent. The Downloader calls MintTarget sequentially,
+// never concurrently, so the flag needs no lock.
 func announcePublisherOnce(
 	printer *output.Printer,
 	fetch func(context.Context) (consume.DownloadTarget, error),

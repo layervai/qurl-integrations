@@ -177,7 +177,7 @@ UNVERIFIED; change it with "qurl publisher set <name>".`
 			if inspect {
 				return inspectLocalSharing(cmd.Context(), opts, local, stateDir, localLookup.err, sharing)
 			}
-			return opts.printer().Sharing(target, sharing)
+			return opts.printer().SharingStatus(target, sharing)
 		},
 	}
 }
