@@ -5,7 +5,6 @@ import (
 	"crypto/subtle"
 	"errors"
 	"fmt"
-	"net/http"
 	"strings"
 	"time"
 
@@ -14,7 +13,6 @@ import (
 	"github.com/layervai/qurl-go/qurl"
 
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
-	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/agent"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/cridux"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/exitcode"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/output"
@@ -39,9 +37,8 @@ func shareCmd(opts *globalOpts) *cobra.Command {
 		Short:      "Share a CRID as a short-lived access link",
 		Long: `Share a CRID as a temporary access link for the resource it names.
 
-Public CRIDs need no account or login. For a private CRID, only its owner
-or a device allowed by the publisher can request a link. The CLI uses
-your registered device when the resource is private.
+The request uses this device's identity. The resource's owner, or a device
+the publisher allowed, gets a link; anyone else gets "not found".
 The link expires on its own; share again whenever you need a fresh one.
 
 Before anything is printed, the CLI verifies that the link belongs
@@ -154,28 +151,18 @@ func reportClamp(printer *output.Printer, requested time.Duration, link *qurlapi
 	}
 }
 
-// shareResource is the common public-first path for share and get. Only a
-// private-resource challenge opens the registered device runtime.
+// shareResource is the one share path for share and get. It always goes
+// through the registered-device client, so every share request carries this
+// device's credential and none is ever sent without one: a device that
+// cannot be opened fails here, before the share route is contacted.
+//
+// TODO(upstream-contract): qurl-service decides who may share. It mints a
+// link for the resource's owner or a device the publisher allowed and answers
+// anyone else 404. The share help and the README state that rule.
 func (opts *globalOpts) shareResource(ctx context.Context, id string, options qurlapi.ShareOptions) (*qurlapi.ShareLink, error) {
-	cfg := opts.accountConfig("", "")
-	origin, err := agent.ResourceSDKOrigin(cfg.BaseURL)
+	client, err := opts.newClient(ctx)
 	if err != nil {
 		return nil, err
 	}
-	cfg.BaseURL = origin
-	client, err := qurlapi.NewPublic(cfg)
-	if err != nil {
-		return nil, err
-	}
-	link, err := client.Share(ctx, id, options)
-	var apiErr *qurlapi.Error
-	// TODO(upstream-contract): share challenges private resources with HTTP 401.
-	if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusUnauthorized && apiErr.Code == "unauthorized" {
-		authenticated, openErr := opts.newClient(ctx)
-		if openErr != nil {
-			return nil, fmt.Errorf("private resource requires device authentication: %w", openErr)
-		}
-		return authenticated.Share(ctx, id, options)
-	}
-	return link, err
+	return client.Share(ctx, id, options)
 }

@@ -7,8 +7,10 @@ qurl publish http://127.0.0.1:3000
 ```
 
 qURL™ gives the app a permanent **CRID** you can give to recipients in chat,
-documentation, or an agent prompt. Anyone given a public CRID can request a
-short-lived access link without a LayerV account or login.
+documentation, or an agent prompt. `qurl share` and `qurl get` turn a CRID
+into a short-lived access link using this device's identity: the resource's
+owner, or a device the publisher allowed, gets a link; anyone else gets
+"not found".
 
 [Publish localhost in 60 seconds](#publish-localhost-in-60-seconds) ·
 [Command reference](#commands) · [Scripting](#scripting-contract)
@@ -84,11 +86,15 @@ debugging. When another program owns the daemon process, run it with
 
 ### 3. Open or share it
 
-Anyone given a public CRID can request an access link without an account or login. To open the app:
+`qurl get` uses this device's identity. On the machine that published the app,
+open it with:
 
 ```bash
 qurl get <CRID>
 ```
+
+To publish an app that another device can open, see
+[Private CRIDs](#private-crids).
 
 Your app still listens only on your machine. The CLI connects outward to qURL;
 you do not need public DNS, a public IP, or custom Connector configuration.
@@ -830,9 +836,9 @@ identity. Use the share's existing `--id` when publishing it again by ID.
 
 `qurl share <CRID>` mints a short-lived share link for the resource the
 CRID names. Treat the minted link as a secret: it is a bearer credential.
-Anyone given a public CRID can request a link without an account
-or login. Share the CRID only with people who should be able to request
-access. The link expires on its own; share again whenever you need a fresh one. When stdout is not a terminal the command prints the bare link
+The command uses this device's identity: the resource's owner, or a device
+the publisher allowed, gets a link; anyone else gets "not found".
+The link expires on its own; share again whenever you need a fresh one. When stdout is not a terminal the command prints the bare link
 and nothing else, ready to hand out or open.
 
 The link opens in a browser. Passing it to a tool like curl fetches the
@@ -855,8 +861,9 @@ exits with code 12 without printing a link.
 
 ### qurl get
 
-`qurl get <CRID>` mints a share link exactly like `qurl share`, verifies
-it, then opens or downloads — nothing is ever acted on unverified:
+`qurl get <CRID>` mints a share link exactly like `qurl share`, with this
+device's identity and the same access rule, verifies it, then opens or
+downloads — nothing is ever acted on unverified:
 
 - **On a terminal**, get prints the link, then opens it in your browser
   (set `QURL_BROWSER` or `BROWSER` to choose which one).
@@ -1209,8 +1216,9 @@ CRIDs are public by default. Use `qurl publish <target-url> --private` to
 allow only the owner to request links. Add each allowed recipient with
 `--allow-device-key <public-key>`. This works for remote URLs and local apps.
 
-For a private CRID, `qurl share <CRID>` uses the registered device identity.
-No LayerV account or browser login is required for an allowed device.
+`qurl share <CRID>` and `qurl get <CRID>` always use the registered device
+identity, so an allowed device needs no LayerV account or browser login.
+A device that is neither the owner nor allowed gets "not found".
 Read the current `allowed_device_keys` with `qurl list -o json` before adding
 a recipient. JSON shows an empty array when there are no grants.
 The publisher can replace the complete grant list with the registered CLI:

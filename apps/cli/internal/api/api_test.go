@@ -1176,6 +1176,25 @@ func TestNewRejectsEmptyBaseURL(t *testing.T) {
 	}
 }
 
+// TestShareAlwaysCarriesACredential pins the client seam under share: no
+// client can be built without a credential, so nothing in this package can
+// send a share request without one, and a built client's share carries it.
+func TestShareAlwaysCarriesACredential(t *testing.T) {
+	srv := apitest.NewServer(t)
+	for _, key := range []string{"", "   "} {
+		if client, err := New(&Config{BaseURL: srv.URL, APIKey: key, Version: "test"}); client != nil || !errors.Is(err, qurl.ErrInvalidClientConfig) {
+			t.Fatalf("New with credential %q = %v, %v; want ErrInvalidClientConfig", key, client, err)
+		}
+	}
+	if _, err := newTestClient(t, srv, nil).Share(context.Background(), srv.Key.CRID, ShareOptions{}); err != nil {
+		t.Fatalf("Share: %v", err)
+	}
+	requests := srv.Requests()
+	if len(requests) != 1 || requests[0].Header.Get("Authorization") != "Bearer lv_test_apitestingvalue123456789" {
+		t.Fatalf("share requests = %+v, want one carrying the configured credential", requests)
+	}
+}
+
 func TestPublishPrivateWireShape(t *testing.T) {
 	srv := apitest.NewServer(t)
 	srv.Script(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, r *http.Request) {
@@ -1194,21 +1213,6 @@ func TestPublishPrivateWireShape(t *testing.T) {
 	private := true
 	if _, err := newTestClient(t, srv, nil).Publish(t.Context(), "https://example.com", PublishOptions{Private: &private, AllowedDeviceKeys: []string{"recipient-public-key"}}); err != nil {
 		t.Fatal(err)
-	}
-}
-
-func TestPublicClientCannotSelectAccountOrManageResources(t *testing.T) {
-	for _, cfg := range []*Config{{BaseURL: "https://example.com", APIKey: "not-allowed"}, {BaseURL: "https://example.com", OwnerID: "not-allowed"}} {
-		if _, err := NewPublic(cfg); !errors.Is(err, qurl.ErrInvalidClientConfig) {
-			t.Fatal("public client accepted account authority")
-		}
-	}
-	public, err := NewPublic(&Config{BaseURL: "https://example.com"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, ok := public.(Client); ok {
-		t.Fatal("public client exposes management operations")
 	}
 }
 

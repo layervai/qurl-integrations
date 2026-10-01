@@ -141,9 +141,10 @@ func TestGetDownloadEndToEnd(t *testing.T) {
 	if requests[1].Method != http.MethodGet || requests[1].Path != apitest.DownloadPath {
 		t.Errorf("second request = %s %s, want the download GET", requests[1].Method, requests[1].Path)
 	}
-	// Public sharing and downloading must not send an API credential.
-	if auth := requests[0].Header.Get("Authorization"); auth != "" {
-		t.Error("public share sent an Authorization header")
+	// The credential authenticates the share and must never follow the
+	// minted link to the download host.
+	if auth := requests[0].Header.Get("Authorization"); auth != "Bearer "+testAPIKey {
+		t.Errorf("share request Authorization is not the configured credential (%d bytes)", len(auth))
 	}
 	if auth := requests[1].Header.Get("Authorization"); auth != "" {
 		t.Errorf("download request carried Authorization (%d bytes); the key must never reach the link host", len(auth))

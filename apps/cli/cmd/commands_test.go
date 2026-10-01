@@ -75,7 +75,7 @@ func TestHelpLeadsWithTheOneCommandLocalJourney(t *testing.T) {
 	if local < 0 || remote < 0 || local >= remote {
 		t.Errorf("root help must show local publish before remote publish:\n%s", rootHelp)
 	}
-	for _, want := range []string{"permanent resource ID", "without an account or login", "qurl get"} {
+	for _, want := range []string{"permanent resource ID", "qurl get"} {
 		if !strings.Contains(rootHelp, want) {
 			t.Errorf("root help missing %q:\n%s", want, rootHelp)
 		}
@@ -91,7 +91,7 @@ func TestHelpLeadsWithTheOneCommandLocalJourney(t *testing.T) {
 	if local < 0 || remote < 0 || local >= remote {
 		t.Errorf("publish help must explain the local path first:\n%s", publishHelp)
 	}
-	for _, want := range []string{"On Linux, macOS, and Windows", "background daemon", "--foreground", "prints the CRID, and exits", "qurl get <CRID>", "request an access link without an account or login"} {
+	for _, want := range []string{"On Linux, macOS, and Windows", "background daemon", "--foreground", "prints the CRID, and exits", "qurl get <CRID>"} {
 		if !strings.Contains(publishHelp, want) {
 			t.Errorf("publish help missing %q:\n%s", want, publishHelp)
 		}
@@ -102,6 +102,61 @@ func TestHelpLeadsWithTheOneCommandLocalJourney(t *testing.T) {
 	for _, jargon := range []string{"FRP", "proxy registration", "one-shot enrollment", "native device identity"} {
 		if strings.Contains(publishHelp, jargon) {
 			t.Errorf("publish help exposes implementation jargon %q:\n%s", jargon, publishHelp)
+		}
+	}
+}
+
+// TestSharingCopyStatesTheDeviceAccessRule pins the access rule wherever the
+// CLI explains sharing: share and get use the device's identity, the owner or
+// a device the publisher allowed gets a link, and anyone else gets "not
+// found". It also keeps the retired promise, that a public CRID can be shared
+// without an account or login, off every help surface and out of the README.
+func TestSharingCopyStatesTheDeviceAccessRule(t *testing.T) {
+	collapse := func(text string) string { return strings.Join(strings.Fields(text), " ") }
+	help := func(args ...string) string {
+		t.Helper()
+		res := runCLI(t, &runOpts{args: append(args, "--help")})
+		if res.code != 0 {
+			t.Fatalf("qurl %s exit = %d, stderr: %s", strings.Join(args, " "), res.code, res.stderr.String())
+		}
+		return collapse(res.stdout.String())
+	}
+	readme := collapse(readCLIREADME(t))
+
+	const rule = `anyone else gets "not found"`
+	for _, surface := range []struct{ name, text, identity string }{
+		{"qurl --help", help(), "using this device's identity"},
+		{"qurl share --help", help("share"), "uses this device's identity"},
+		{"qurl get --help", help("get"), "uses this device's identity"},
+		{"qurl publish --help", help("publish"), "use the identity of the device they run on"},
+		{"README", readme, "using this device's identity"},
+	} {
+		for _, want := range []string{surface.identity, rule} {
+			if !strings.Contains(surface.text, want) {
+				t.Errorf("%s does not state the access rule: missing %q", surface.name, want)
+			}
+		}
+	}
+
+	root, _ := newRoot("test", discardStreams())
+	checked := map[string]string{"README": readme}
+	for where, text := range visibleSurfaces(root) {
+		checked[where] = collapse(text)
+	}
+	if len(checked) < 2 {
+		t.Fatal("no help surfaces collected; the retired-promise check would be vacuous")
+	}
+	for where, text := range checked {
+		lower := strings.ToLower(text)
+		for _, retired := range []string{
+			"anyone given a public crid",
+			"need no account or login",
+			"without an account or login",
+			"without a layerv account",
+		} {
+			if strings.Contains(lower, retired) {
+				t.Errorf("%s still promises sharing without the device's identity: found %q", where, retired)
+			}
 		}
 	}
 }
