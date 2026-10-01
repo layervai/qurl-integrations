@@ -275,7 +275,9 @@ func (p *Printer) publisherNotice(publisher qurlapi.Publisher, createdAt *time.T
 // value only" and JSON carries the same facts in its document, so both
 // suppress it.
 func (p *Printer) PublisherNotice(link *qurlapi.ShareLink) {
-	if p.quiet || p.format == FormatJSON {
+	// A nil link has nothing to announce. Callers pass one only after a
+	// verified mint, but that guarantee lives in another function.
+	if link == nil || p.quiet || p.format == FormatJSON {
 		return
 	}
 	line, warning := p.publisherNotice(link.Publisher, link.ResourceCreatedAt)

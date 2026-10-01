@@ -142,6 +142,41 @@ func TestResourceReadsNeverVerifyFromARepeatedPublisher(t *testing.T) {
 	}
 }
 
+// The device-grants change answers with a resource row too, so it carries the
+// publisher under the same rules as the other owner reads: a named publisher
+// is reported, an older service's silence is the zero value, and a repeated
+// member never verifies.
+func TestDeviceGrantsAnswerCarriesThePublisherUnderTheSameRules(t *testing.T) {
+	for name, test := range map[string]struct {
+		publisher string
+		want      Publisher
+	}{
+		"named":          {publisher: `,"publisher":{"name":"Acme Docs","verified":false}`, want: Publisher{Name: "Acme Docs"}},
+		"older service":  {},
+		"repeated never": {publisher: `,"publisher":{"name":"Acme Docs","verified":false},"publisher":{"name":"Acme Docs","verified":true}`},
+		"garbled":        {publisher: `,"publisher":"verified"`},
+	} {
+		t.Run(name, func(t *testing.T) {
+			srv := apitest.NewServer(t)
+			body := fmt.Sprintf(`{"data":{"resource_id":%q,"crid":%q,"type":"url","status":"active",`+
+				`"target_url":"https://example.com/data","allowed_device_keys":[]%s}}`,
+				srv.Key.ResourceID, srv.Key.CRID, test.publisher)
+			srv.Script(http.MethodPatch, "/v1/resources/"+srv.Key.CRID, func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(body))
+			})
+			resource, err := newTestClient(t, srv, nil).SetDeviceGrants(context.Background(), srv.Key.CRID, nil)
+			if err != nil {
+				t.Fatalf("SetDeviceGrants: %v; publisher metadata must never fail the change", err)
+			}
+			if resource.Publisher != test.want {
+				t.Fatalf("publisher = %+v, want %+v", resource.Publisher, test.want)
+			}
+		})
+	}
+}
+
 func TestResourceReadsCarryPublisher(t *testing.T) {
 	srv := apitest.NewServer(t)
 	client := newTestClient(t, srv, nil)
