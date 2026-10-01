@@ -112,9 +112,7 @@ CRIDs are then shown "no name provided", still marked UNVERIFIED.`,
 			// The service removes the name when asked to set an empty one.
 			profile, err := client.SetPublisherName(cmd.Context(), "")
 			if err != nil {
-				// A refused removal is the same 400 a refused name is, so it
-				// gets the same rendering and exit code.
-				return publisherNameError(opts.printer(), err)
+				return publisherClearError(opts.printer(), err)
 			}
 			return printPublisherProfile(opts, profile, output.PublisherNameCleared)
 		},
@@ -157,12 +155,27 @@ func publisherRouteError(err error) error {
 // explanation is sanitized and bounded (Printer.ServiceReason) before it can
 // reach the terminal. Every other failure goes through publisherRouteError.
 func publisherNameError(printer *output.Printer, err error) error {
+	return publisherRefusal(printer, err, msgPublisherNameRefused, msgPublisherNameRefusedReason)
+}
+
+// publisherClearError is the same outcome for `qurl publisher clear`. A
+// refused removal is the same 400 a refused name is, so it has the same exit
+// code and the same handling of the reason; only the sentence differs,
+// because no name was supplied for it to be about.
+func publisherClearError(printer *output.Printer, err error) error {
+	return publisherRefusal(printer, err, msgPublisherClearRefused, msgPublisherClearRefusedReason)
+}
+
+// publisherRefusal renders a refused publisher-name change with the given
+// sentence: bare when the service gave no usable reason, and withReason (one
+// %s operand) when it did.
+func publisherRefusal(printer *output.Printer, err error, bare, withReason string) error {
 	if !errors.Is(err, qurl.ErrInvalidPublisherName) {
 		return publisherRouteError(err)
 	}
 	reason := printer.ServiceReason(qurlapi.PublisherNameReason(err))
 	if reason == "" {
-		return exitcode.InvalidInputError(msgPublisherNameRefused, err)
+		return exitcode.InvalidInputError(bare, err)
 	}
-	return exitcode.InvalidInputError(fmt.Sprintf(msgPublisherNameRefusedReason, reason), err)
+	return exitcode.InvalidInputError(fmt.Sprintf(withReason, reason), err)
 }

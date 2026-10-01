@@ -497,7 +497,7 @@ func TestPipedShareKeepsStdoutBare(t *testing.T) {
 		{
 			name:       "verified unnamed",
 			link:       fixtureShareLink(qurlapi.Publisher{Verified: true}, nil),
-			wantStderr: "Publisher verified by LayerV, no name provided.\n",
+			wantStderr: "Publisher no name provided, verified by LayerV.\n",
 		},
 		{
 			name:       "hostile name stays on one escaped line",
@@ -600,15 +600,15 @@ func TestServiceReasonIsSanitizedAndBounded(t *testing.T) {
 		t.Errorf("ServiceReason = %q, want %q", got, want)
 	}
 	long := p.ServiceReason(strings.Repeat("word ", 4000))
-	if got := []rune(long); len(got) != maxPublisherNameRunes+1 || !strings.HasSuffix(long, "…") {
+	if got := []rune(long); len(got) != maxServiceReasonRunes+1 || !strings.HasSuffix(long, "…") {
 		t.Errorf("a %d-rune reason was not held to the display bound and marked", len(got))
 	}
-	exact := strings.Repeat("a", maxPublisherNameRunes)
+	exact := strings.Repeat("a", maxServiceReasonRunes)
 	if got := p.ServiceReason(exact); got != exact {
 		t.Errorf("a reason at the bound was cut to %d bytes", len(got))
 	}
 	ascii := publisherPrinter(&out, &errBuf, FormatText, false, false, false, true)
-	if got := ascii.ServiceReason(strings.Repeat("a", maxPublisherNameRunes+1)); !strings.HasSuffix(got, "a...") {
+	if got := ascii.ServiceReason(strings.Repeat("a", maxServiceReasonRunes+1)); !strings.HasSuffix(got, "a...") {
 		t.Errorf("ascii marker missing: %q", got[len(got)-8:])
 	}
 	if got := p.ServiceReason(" \x00\n "); got != "\ufffd" {
@@ -847,6 +847,32 @@ func TestPublisherProfileProjections(t *testing.T) {
 				t.Errorf("stdout=%q stderr=%q\nwant stdout=%q stderr=%q", out.String(), errBuf.String(), test.wantStdout, test.wantStderr)
 			}
 		})
+	}
+}
+
+// A nil profile is refused in every mode before anything is written, the way
+// PublisherNotice ignores a nil link: neither depends on its caller's check.
+func TestPublisherProfileRefusesANilProfile(t *testing.T) {
+	t.Parallel()
+	for _, mode := range []struct {
+		name   string
+		format Format
+		quiet  bool
+	}{
+		{name: "text", format: FormatText},
+		{name: "quiet", format: FormatText, quiet: true},
+		{name: "json", format: FormatJSON},
+	} {
+		for _, change := range []PublisherChange{PublisherShown, PublisherNameSet, PublisherNameCleared} {
+			var out, errBuf bytes.Buffer
+			p := publisherPrinter(&out, &errBuf, mode.format, false, mode.quiet, false, false)
+			if err := p.PublisherProfile(nil, change); err == nil {
+				t.Errorf("%s: a nil profile was rendered", mode.name)
+			}
+			if out.Len() != 0 || errBuf.Len() != 0 {
+				t.Errorf("%s: a nil profile wrote stdout=%q stderr=%q", mode.name, out.String(), errBuf.String())
+			}
+		}
 	}
 }
 

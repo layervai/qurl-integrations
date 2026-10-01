@@ -197,6 +197,59 @@ func TestStatusNeverRendersVerifiedFromAGarbledField(t *testing.T) {
 	}
 }
 
+// TestOwnerReadsOmitAZeroCreationDate holds the text and JSON projections of
+// the owner reads to one answer for an all-zeros created_at: it is an unset
+// date, so text has no Created row and JSON has no created_at key. Without
+// that, JSON printed year 1 while text printed nothing.
+func TestOwnerReadsOmitAZeroCreationDate(t *testing.T) {
+	const zero = `,"created_at":"0001-01-01T00:00:00Z"`
+	script := func(srv *apitest.Server, createdAt string) {
+		row := fmt.Sprintf(`{"resource_id":%q,"crid":%q,"type":"url","status":"active","target_url":"https://example.com/data","allowed_device_keys":[]%s}`,
+			srv.Key.ResourceID, srv.Key.CRID, createdAt)
+		answer := func(status int, body string) http.HandlerFunc {
+			return func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(status)
+				_, _ = w.Write([]byte(body))
+			}
+		}
+		srv.Script(http.MethodGet, "/v1/resources", answer(http.StatusOK, `{"data":[`+row+`],"meta":{"has_more":false}}`))
+		srv.Script(http.MethodGet, "/v1/resources/"+srv.Key.CRID, answer(http.StatusOK, `{"data":{"resource":`+row+`}}`))
+		srv.Script(http.MethodPost, "/v1/resources", answer(http.StatusCreated, `{"data":`+row+`,"meta":{}}`))
+	}
+	// How each format shows the mock's real date, a day before the test clock.
+	shown := map[string]string{"text": "1d ago", "json": `"created_at": "2026-03-01T00:00:00Z"`}
+	for name, command := range map[string]func(*apitest.Server) []string{
+		"status":  func(srv *apitest.Server) []string { return []string{"status", srv.Key.CRID} },
+		"list":    func(*apitest.Server) []string { return []string{"list"} },
+		"publish": func(*apitest.Server) []string { return []string{"publish", "https://example.com/data"} },
+	} {
+		t.Run(name, func(t *testing.T) {
+			for _, format := range []string{"text", "json"} {
+				srv := apitest.NewServer(t)
+				script(srv, zero)
+				res := runCLI(t, &runOpts{args: append([]string{"--endpoint", srv.URL, "-o", format}, command(srv)...)})
+				if res.code != 0 {
+					t.Fatalf("%s: exit = %d, stderr: %s", format, res.code, res.stderr.String())
+				}
+				if got := res.stdout.String(); strings.Contains(got, "created_at") || strings.Contains(got, "Created:") ||
+					strings.Contains(got, "0001") || strings.Contains(got, " ago") {
+					t.Errorf("%s: a zero created_at was rendered as a date:\n%s", format, got)
+				}
+
+				// The same row with a real date does show it, so the check
+				// above is not passing on a projection that never shows dates.
+				srv = apitest.NewServer(t)
+				script(srv, `,"created_at":"2026-03-01T00:00:00Z"`)
+				res = runCLI(t, &runOpts{args: append([]string{"--endpoint", srv.URL, "-o", format}, command(srv)...)})
+				if got := res.stdout.String(); res.code != 0 || !strings.Contains(got, shown[format]) {
+					t.Errorf("%s: exit = %d; a real created_at is missing (want %q):\n%s", format, res.code, shown[format], got)
+				}
+			}
+		})
+	}
+}
+
 // TestShareMetadataNeedsNoSecondRequest holds the footprint rule for every
 // projection: the publisher and creation date come from the share answer
 // itself. The share request is the only request about the resource — no
@@ -671,8 +724,9 @@ func TestPublisherSetRefusals(t *testing.T) {
 		}
 	})
 
-	// A refused removal is rendered like a refused name: exit 8 with the
-	// service's reason, not the generic problem anatomy.
+	// A refused removal has the same outcome as a refused name: exit 8 with
+	// the service's reason, not the generic problem anatomy. Its sentence is
+	// its own, because clear takes no name for "that publisher name" to mean.
 	t.Run("clear refused", func(t *testing.T) {
 		srv := apitest.NewServer(t)
 		srv.Script(http.MethodPatch, "/v1/me/publisher", func(w http.ResponseWriter, _ *http.Request) {
@@ -683,15 +737,44 @@ func TestPublisherSetRefusals(t *testing.T) {
 			t.Fatalf("exit = %d, want %d; stderr: %q", res.code, exitcode.InvalidInput, res.stderr.String())
 		}
 		mustEmptyStdout(t, res)
-		if want := "Error: that publisher name can't be used: name cannot be removed right now\n"; res.stderr.String() != want {
+		if want := "Error: the publisher name can't be removed: name cannot be removed right now\n"; res.stderr.String() != want {
 			t.Errorf("stderr = %q, want %q", res.stderr.String(), want)
+		}
+	})
+
+	t.Run("clear refused, reason missing", func(t *testing.T) {
+		srv := apitest.NewServer(t)
+		srv.Script(http.MethodPatch, "/v1/me/publisher", func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/problem+json")
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":{"code":"invalid_input"}}`))
+		})
+		res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "publisher", "clear"}})
+		if res.code != exitcode.InvalidInput {
+			t.Fatalf("exit = %d, want %d; stderr: %q", res.code, exitcode.InvalidInput, res.stderr.String())
+		}
+		mustEmptyStdout(t, res)
+		if want := "Error: the publisher name can't be removed. Run `qurl publisher` to see the name shown with your CRIDs\n"; res.stderr.String() != want {
+			t.Errorf("stderr = %q, want %q", res.stderr.String(), want)
+		}
+	})
+
+	t.Run("clear: other failures are not a refused removal", func(t *testing.T) {
+		srv := apitest.NewServer(t)
+		srv.Script(http.MethodPatch, "/v1/me/publisher", apitest.HandlerAccountFrozen403(t))
+		res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "publisher", "clear"}})
+		if res.code != exitcode.Forbidden || strings.Contains(res.stderr.String(), "publisher name can't be") {
+			t.Fatalf("exit = %d, stderr = %q; want the account-standing error", res.code, res.stderr.String())
 		}
 	})
 
 	// A runaway explanation is cut at the display bound and marked; it cannot
 	// flood the terminal.
 	t.Run("multi-kilobyte reason", func(t *testing.T) {
-		for _, command := range [][]string{{"publisher", "set", "Acme"}, {"publisher", "clear"}} {
+		for prefix, command := range map[string][]string{
+			"Error: that publisher name can't be used: ":   {"publisher", "set", "Acme"},
+			"Error: the publisher name can't be removed: ": {"publisher", "clear"},
+		} {
 			srv := apitest.NewServer(t)
 			srv.Script(http.MethodPatch, "/v1/me/publisher", func(w http.ResponseWriter, _ *http.Request) {
 				apitest.WriteProblem(t, w, http.StatusBadRequest, "invalid_input", "Bad Request", strings.Repeat("no ", 8000))
@@ -700,7 +783,6 @@ func TestPublisherSetRefusals(t *testing.T) {
 			if res.code != exitcode.InvalidInput {
 				t.Fatalf("%q: exit = %d, want %d", command, res.code, exitcode.InvalidInput)
 			}
-			const prefix = "Error: that publisher name can't be used: "
 			got := res.stderr.String()
 			reason := strings.TrimSuffix(strings.TrimPrefix(got, prefix), "\n")
 			if !strings.HasPrefix(got, prefix) || strings.Count(got, "\n") != 1 ||
@@ -753,7 +835,7 @@ func TestPublisherSetRefusals(t *testing.T) {
 		srv := apitest.NewServer(t)
 		srv.Script(http.MethodPatch, "/v1/me/publisher", apitest.HandlerAccountFrozen403(t))
 		res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "publisher", "set", "Acme"}})
-		if res.code != exitcode.Forbidden || strings.Contains(res.stderr.String(), "publisher name can't be used") {
+		if res.code != exitcode.Forbidden || strings.Contains(res.stderr.String(), "publisher name can't be") {
 			t.Fatalf("exit = %d, stderr = %q; want the account-standing error", res.code, res.stderr.String())
 		}
 	})
@@ -798,9 +880,14 @@ func TestPublisherAgainstAnOlderService(t *testing.T) {
 
 func TestPublisherNameErrorPassesOtherErrorsThrough(t *testing.T) {
 	other := fmt.Errorf("%w: unrelated", qurl.ErrInvalidAPIResponse)
-	if got := publisherNameError(output.New(discardStreams(), output.FormatText, false, false, false, nil), other); !errors.Is(got, qurl.ErrInvalidAPIResponse) || exitcode.FromError(got) != exitcode.ServerError ||
-		got.Error() != other.Error() {
-		t.Fatalf("an unrelated error was rewritten: %v", got)
+	printer := output.New(discardStreams(), output.FormatText, false, false, false, nil)
+	for name, render := range map[string]func(*output.Printer, error) error{
+		"set": publisherNameError, "clear": publisherClearError,
+	} {
+		if got := render(printer, other); !errors.Is(got, qurl.ErrInvalidAPIResponse) || exitcode.FromError(got) != exitcode.ServerError ||
+			got.Error() != other.Error() {
+			t.Fatalf("%s: an unrelated error was rewritten: %v", name, got)
+		}
 	}
 	if got := printPublisherProfile(&globalOpts{}, nil, output.PublisherShown); got == nil || exitcode.FromError(got) != exitcode.ServerError {
 		t.Fatalf("an empty profile = %v, want an invalid API response", got)
