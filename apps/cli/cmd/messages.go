@@ -105,6 +105,12 @@ const (
 	msgPublisherUnsupported = "this qURL endpoint doesn't support publisher names yet. Until it does, your CRIDs show \"no name provided\""
 	// msgPublisherNameRefused is the same outcome when no reason was given.
 	msgPublisherNameRefused = "that publisher name can't be used. Names are 1 to 64 characters: letters, digits, single spaces, and common punctuation"
+	// msgPublisherClearRefusedReason reports a removal the service refused;
+	// %s is the reason. `qurl publisher clear` takes no name, so it does not
+	// borrow the sentence about a name that can't be used.
+	msgPublisherClearRefusedReason = "the publisher name can't be removed: %s"
+	// msgPublisherClearRefused is the same outcome when no reason was given.
+	msgPublisherClearRefused = "the publisher name can't be removed. Run `qurl publisher` to see the name shown with your CRIDs"
 )
 
 // customerMessages returns every fixed customer-facing string the cmd
@@ -144,6 +150,8 @@ func customerMessages() []string {
 		msgPublisherSetNeedsName,
 		msgPublisherNameRefusedReason,
 		msgPublisherNameRefused,
+		msgPublisherClearRefusedReason,
+		msgPublisherClearRefused,
 		msgPublisherUnsupported,
 	}
 }

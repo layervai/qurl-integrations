@@ -43,8 +43,27 @@ type resourceRow struct {
 	Tags              []string     `json:"tags"`
 	CreatedAt         *time.Time   `json:"created_at"`
 	ExpiresAt         *time.Time   `json:"expires_at"`
-	// Publisher decodes leniently and fails closed; see publisherWire.
-	Publisher publisherWire `json:"publisher"`
+	// Publisher is read by UnmarshalJSON, not by the struct decoder, so a
+	// repeated member can be counted; see publisherMember.
+	Publisher publisherWire `json:"-"`
+}
+
+// UnmarshalJSON decodes the row's fields by the usual lax rules, then reads
+// the publisher from the same object on its own terms: a row that repeats the
+// publisher member reads as unnamed and unverified instead of letting the
+// last occurrence win, and no shape of that member fails the row. Each call
+// replaces the whole row from one JSON object, so decoding into a row that
+// was used before leaves nothing of the earlier object behind.
+func (row *resourceRow) UnmarshalJSON(data []byte) error {
+	// resourceFields has the row's fields without this method.
+	type resourceFields resourceRow
+	var fields resourceFields
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	fields.Publisher = publisherMember(data)
+	*row = resourceRow(fields)
+	return nil
 }
 
 type sharingRow struct {
@@ -120,7 +139,7 @@ func (row *sharingRow) UnmarshalJSON(data []byte) error {
 
 func isSharingField(name string) bool {
 	switch name {
-	case "resource_id", "crid", "desired_state", "serving_epoch", "connection_state", "created_at", "publisher":
+	case "resource_id", "crid", "desired_state", "serving_epoch", "connection_state", "created_at", fieldPublisher:
 		return true
 	default:
 		return false
@@ -145,8 +164,11 @@ func decodeSharingField(row *sharingRow, name string, raw json.RawMessage) error
 			row.CreatedAt = createdAt
 		}
 		return nil
-	case "publisher":
-		return json.Unmarshal(raw, &row.Publisher)
+	case fieldPublisher:
+		// Never an error: a publisher this CLI cannot read is unnamed and
+		// unverified.
+		row.Publisher = parsePublisherWire(raw)
+		return nil
 	case "serving_epoch":
 		encoded := strings.TrimSpace(string(raw))
 		if encoded == "" || strings.IndexFunc(encoded, func(r rune) bool { return r < '0' || r > '9' }) >= 0 {
@@ -249,8 +271,8 @@ func (c *client) Publish(ctx context.Context, targetURL string, opts PublishOpti
 		ResourceID:    env.Data.ResourceID,
 		TargetURL:     env.Data.TargetURL,
 		Status:        env.Data.Status,
-		CreatedAt:     env.Data.CreatedAt,
-		ExpiresAt:     env.Data.ExpiresAt,
+		CreatedAt:     knownTime(env.Data.CreatedAt),
+		ExpiresAt:     knownTime(env.Data.ExpiresAt),
 		FoundExisting: env.Meta.FoundExisting,
 		Publisher:     env.Data.Publisher.publisher(),
 	}, nil
@@ -386,9 +408,20 @@ func summarizeResourceRow(row *resourceRow, source string) (*ResourceSummary, er
 		CRID:              row.CRID, ResourceID: row.ResourceID, TargetURL: row.TargetURL,
 		Type: row.Type, Status: row.Status, DesiredState: row.DesiredState,
 		ServingEpoch: row.ServingEpoch, Description: row.Description, Tags: row.Tags,
-		CreatedAt: row.CreatedAt, ExpiresAt: row.ExpiresAt,
+		CreatedAt: knownTime(row.CreatedAt), ExpiresAt: knownTime(row.ExpiresAt),
 		Publisher: row.Publisher.publisher(),
 	}, nil
+}
+
+// knownTime is a date the service actually gave. The all-zeros timestamp
+// (0001-01-01T00:00:00Z) is how an unset date serializes, so it is treated as
+// absent: no rendering prints year 1 as a creation date, and a resource with
+// no expiry is not listed as expired.
+func knownTime(t *time.Time) *time.Time {
+	if t == nil || t.IsZero() {
+		return nil
+	}
+	return t
 }
 
 // Sharing reads one tunnel resource's durable and observed serving state.
@@ -458,16 +491,13 @@ func (c *client) doSharing(ctx context.Context, method, id string, body any, all
 	if err := validateSharingIdentity(id, &env.Data); err != nil {
 		return nil, err
 	}
-	sharing := &Sharing{
+	return &Sharing{
 		ResourceID: env.Data.ResourceID, CRID: env.Data.CRID,
 		DesiredState: env.Data.DesiredState, ServingEpoch: env.Data.ServingEpoch,
 		ConnectionState: env.Data.ConnectionState,
+		CreatedAt:       knownTime(env.Data.CreatedAt),
 		Publisher:       env.Data.Publisher.publisher(),
-	}
-	if env.Data.CreatedAt != nil && !env.Data.CreatedAt.IsZero() {
-		sharing.CreatedAt = env.Data.CreatedAt
-	}
-	return sharing, nil
+	}, nil
 }
 
 func validateSharingIdentity(requestID string, row *sharingRow) error {

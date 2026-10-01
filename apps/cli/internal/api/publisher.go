@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 
 	"github.com/layervai/qurl-go/qurl"
@@ -26,8 +27,14 @@ type Publisher struct {
 	Verified bool
 }
 
-// publisherWire is the publisher object the service attaches to share
-// answers, resource rows, and Connector sharing state.
+// publisherWire is the publisher object the service attaches to resource rows
+// and Connector sharing state.
+//
+// It has no UnmarshalJSON on purpose. encoding/json lets the last of a
+// repeated member win, so the decoder of the object that carries a publisher
+// reads the member itself and counts it there: resourceRow blanks a repeated
+// publisher and sharingRow rejects one. A struct that only tags a field with
+// this type decodes nothing into it and reads as unnamed and unverified.
 //
 // TODO(upstream-contract): mirrors the qurl-service Publisher object
 // {"name"?: string, "verified": boolean}. The service always sends verified
@@ -36,69 +43,94 @@ type Publisher struct {
 type publisherWire struct {
 	name     string
 	verified bool
-	// decoded and repeated track how many times one row offered a publisher
-	// member. encoding/json calls UnmarshalJSON once per occurrence, and the
-	// last one would otherwise win.
-	decoded  bool
-	repeated bool
 }
 
-// UnmarshalJSON never fails and never guesses. Anything that is not an
-// object, an object without a usable member, and a service that predates the
-// field all leave the unnamed, unverified zero value, so publisher metadata
-// can never break the resource read that carries it. Only one exact,
-// lowercase "verified" member holding the JSON literal true verifies: a
-// string, a number, a differently cased key, or a repeated member does not.
-//
-// A row that carries the publisher member more than once is ambiguous, so
-// every repetition reads as unnamed and unverified rather than letting the
-// last occurrence win. A value is therefore decoded into once: each row gets
-// a fresh one.
-func (w *publisherWire) UnmarshalJSON(data []byte) error {
-	repeated := w.decoded
-	*w = parsePublisherWire(data)
-	w.decoded, w.repeated = true, repeated
-	return nil
-}
+// fieldPublisher is the member that carries a publisher object. It is matched
+// exactly: a differently cased key is an unknown field.
+const fieldPublisher = "publisher"
 
-// parsePublisherWire reads one publisher object. It has no error result on
-// purpose: whatever cannot be read is the unnamed, unverified zero value.
+// parsePublisherWire reads one publisher object. It never fails and never
+// guesses: whatever cannot be read is the unnamed, unverified zero value, so
+// publisher metadata can never break the read that carries it. Anything that
+// is not an object, an object without a usable member, and a service that
+// predates the field all read that way. Only one exact, lowercase "verified"
+// member holding the JSON literal true verifies: a string, a number, a
+// differently cased key, or a repeated member does not. A repeated "name" is
+// ambiguous in the same way, so no occurrence wins and the publisher reads as
+// unnamed.
 func parsePublisherWire(data []byte) publisherWire {
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	if first, err := decoder.Token(); err != nil || first != json.Delim('{') {
-		return publisherWire{}
-	}
 	var parsed publisherWire
-	seenVerified := false
-	for decoder.More() {
-		token, err := decoder.Token()
-		name, ok := token.(string)
-		if err != nil || !ok {
-			return publisherWire{}
-		}
-		var raw json.RawMessage
-		if err := decoder.Decode(&raw); err != nil {
-			return publisherWire{}
-		}
+	seenName, seenVerified := false, false
+	if !objectMembers(data, func(name string, value json.RawMessage) {
 		switch name {
 		case "name":
 			parsed.name = ""
-			var value string
-			if json.Unmarshal(raw, &value) == nil {
-				parsed.name = value
+			var text string
+			if !seenName && json.Unmarshal(value, &text) == nil {
+				parsed.name = text
 			}
+			seenName = true
 		case "verified":
-			parsed.verified = !seenVerified && string(bytes.TrimSpace(raw)) == "true"
+			parsed.verified = !seenVerified && string(bytes.TrimSpace(value)) == "true"
 			seenVerified = true
 		}
+	}) {
+		return publisherWire{}
 	}
 	return parsed
 }
 
-func (w publisherWire) publisher() Publisher {
-	if w.repeated {
-		return Publisher{}
+// publisherMember reads the publisher of one JSON object: the value of its
+// exact, lowercase "publisher" member when the object carries that member
+// once. An object that repeats the member is ambiguous, so no occurrence wins
+// and the publisher reads as unnamed and unverified, as it does when the
+// member is absent or the input is not an object. The count belongs to this
+// one object: nothing is remembered between calls.
+func publisherMember(object []byte) publisherWire {
+	var publisher publisherWire
+	occurrences := 0
+	if !objectMembers(object, func(name string, value json.RawMessage) {
+		if name == fieldPublisher {
+			occurrences++
+			if occurrences == 1 {
+				publisher = parsePublisherWire(value)
+			}
+		}
+	}) || occurrences != 1 {
+		return publisherWire{}
 	}
+	return publisher
+}
+
+// objectMembers calls visit with each member of one JSON object, in order and
+// including repeated names. It reports whether data was exactly one complete
+// object: input that stops before the closing brace, or carries anything
+// after it, is not, whatever its members said before that point.
+func objectMembers(data []byte, visit func(name string, value json.RawMessage)) bool {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	if first, err := decoder.Token(); err != nil || first != json.Delim('{') {
+		return false
+	}
+	for decoder.More() {
+		token, err := decoder.Token()
+		name, ok := token.(string)
+		if err != nil || !ok {
+			return false
+		}
+		var value json.RawMessage
+		if err := decoder.Decode(&value); err != nil {
+			return false
+		}
+		visit(name, value)
+	}
+	if last, err := decoder.Token(); err != nil || last != json.Delim('}') {
+		return false
+	}
+	_, err := decoder.Token()
+	return errors.Is(err, io.EOF)
+}
+
+func (w publisherWire) publisher() Publisher {
 	return Publisher{Name: w.name, Verified: w.verified}
 }
 

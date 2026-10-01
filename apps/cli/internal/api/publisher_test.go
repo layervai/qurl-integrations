@@ -46,6 +46,13 @@ func TestPublisherWireFailsClosed(t *testing.T) {
 		"verified beside":         {row: `{"verified":true,"publisher":{"name":"Acme Docs"}}`, want: Publisher{Name: "Acme Docs"}},
 		"verified beside, absent": {row: `{"verified":true,"publisher_verified":true}`},
 		"numeric name":            {row: `{"publisher":{"name":7,"verified":false}}`},
+		// A repeated name is ambiguous: no occurrence wins, and the status
+		// beside it is unaffected.
+		"repeated name":           {row: `{"publisher":{"name":"Acme Docs","name":"LayerV Security"}}`},
+		"repeated same name":      {row: `{"publisher":{"name":"Acme Docs","name":"Acme Docs"}}`},
+		"name, then garbled name": {row: `{"publisher":{"name":"Acme Docs","name":7}}`},
+		"garbled name, then name": {row: `{"publisher":{"name":null,"name":"Acme Docs"}}`},
+		"repeated name, verified": {row: `{"publisher":{"name":"Acme Docs","verified":true,"name":"LayerV Security"}}`, want: Publisher{Verified: true}},
 		"null name":               {row: `{"publisher":{"name":null,"verified":false}}`},
 		"uppercase name key":      {row: `{"publisher":{"NAME":"Acme Docs"}}`},
 		"explicit false":          {row: `{"publisher":{"name":"Acme Docs","verified":false}}`, want: Publisher{Name: "Acme Docs"}},
@@ -58,6 +65,16 @@ func TestPublisherWireFailsClosed(t *testing.T) {
 		"repeated three times":       {row: `{"publisher":{"verified":true},"publisher":null,"publisher":{"name":"Acme Docs","verified":true}}`},
 		"repeated around a neighbor": {row: `{"publisher":{"verified":true},"crid":"x","publisher":{"name":"Acme Docs","verified":true}}`},
 		"unknown members ignored":    {row: `{"publisher":{"name":"Acme Docs","verified":true,"badge":"gold"}}`, want: Publisher{Name: "Acme Docs", Verified: true}},
+		// Only the exact, lowercase member is the publisher. encoding/json
+		// would match these keys to the field without regard to case.
+		"capitalized member":     {row: `{"Publisher":{"name":"Acme Docs","verified":true}}`},
+		"uppercase member":       {row: `{"PUBLISHER":{"verified":true}}`},
+		"exact, then other case": {row: `{"publisher":{"name":"Acme Docs","verified":false},"Publisher":{"name":"Acme Docs","verified":true}}`, want: Publisher{Name: "Acme Docs"}},
+		"other case, then exact": {row: `{"Publisher":{"name":"Acme Docs","verified":true},"publisher":{"name":"Acme Docs","verified":false}}`, want: Publisher{Name: "Acme Docs"}},
+		// The count is per object: a publisher member of a nested object is
+		// not a repetition of the row's own.
+		"nested object has its own": {row: `{"publisher":{"name":"Acme Docs","verified":true},"links":{"publisher":{"verified":false}}}`, want: Publisher{Name: "Acme Docs", Verified: true}},
+		"only a nested one":         {row: `{"links":{"publisher":{"name":"Acme Docs","verified":true}}}`},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
@@ -72,40 +89,212 @@ func TestPublisherWireFailsClosed(t *testing.T) {
 	}
 }
 
-// A value decoded into twice has seen the member twice. Whatever the two
-// occurrences say, the result is the unnamed, unverified zero value, and it
-// stays that way: nothing decoded later can verify it.
-func TestPublisherWireTreatsASecondDecodeAsARepeatedMember(t *testing.T) {
+// A repeated publisher member is counted within one JSON object, not over
+// the lifetime of a Go value. A row that is decoded into again reads exactly
+// what its latest object says: a repetition in one object does not blank the
+// next, and nothing of an earlier object, verified or not, is left behind.
+func TestResourceRowReadsOnlyItsLatestObject(t *testing.T) {
 	t.Parallel()
-	var wire publisherWire
-	if err := json.Unmarshal([]byte(`{"name":"Acme Docs","verified":true}`), &wire); err != nil {
-		t.Fatal(err)
-	}
-	if got := wire.publisher(); got != (Publisher{Name: "Acme Docs", Verified: true}) {
-		t.Fatalf("first decode = %+v", got)
-	}
-	for _, again := range []string{`"garbled"`, `{"name":"Acme Docs","verified":true}`, `{"verified":true}`} {
-		if err := json.Unmarshal([]byte(again), &wire); err != nil {
+	const (
+		verified = `{"crid":"first","publisher":{"name":"Acme Docs","verified":true}}`
+		repeated = `{"publisher":{"name":"Acme Docs","verified":true},"publisher":{"name":"Acme Docs","verified":true}}`
+		silent   = `{"description":"no publisher member"}`
+	)
+	want := Publisher{Name: "Acme Docs", Verified: true}
+
+	t.Run("one value decoded into repeatedly", func(t *testing.T) {
+		t.Parallel()
+		var row resourceRow
+		for step, test := range []struct {
+			object string
+			want   Publisher
+		}{
+			{object: verified, want: want},
+			{object: repeated},
+			{object: verified, want: want},
+			{object: silent},
+			{object: `null`},
+			{object: verified, want: want},
+		} {
+			if err := json.Unmarshal([]byte(test.object), &row); err != nil {
+				t.Fatalf("step %d: %v", step, err)
+			}
+			if got := row.Publisher.publisher(); got != test.want {
+				t.Fatalf("step %d: publisher after %s = %+v, want %+v", step, test.object, got, test.want)
+			}
+		}
+		if err := json.Unmarshal([]byte(silent), &row); err != nil {
 			t.Fatal(err)
 		}
-		if got := wire.publisher(); got != (Publisher{}) {
-			t.Fatalf("publisher after a repeated decode of %s = %+v, want the unverified zero value", again, got)
+		if row.CRID != "" || row.Description != "no publisher member" {
+			t.Fatalf("row after a later object = %+v, want only that object's fields", row)
+		}
+	})
+
+	t.Run("one value across a stream", func(t *testing.T) {
+		t.Parallel()
+		decoder := json.NewDecoder(strings.NewReader(repeated + verified + silent + verified))
+		var row resourceRow
+		for step, test := range []Publisher{{}, want, {}, want} {
+			if err := decoder.Decode(&row); err != nil {
+				t.Fatalf("object %d: %v", step, err)
+			}
+			if got := row.Publisher.publisher(); got != test {
+				t.Fatalf("object %d: publisher = %+v, want %+v", step, got, test)
+			}
+		}
+	})
+
+	t.Run("a list decoded into a reused slice", func(t *testing.T) {
+		t.Parallel()
+		rows := make([]resourceRow, 2, 4)
+		for _, list := range []string{
+			"[" + verified + "," + verified + "]",
+			"[" + repeated + "," + verified + "," + silent + "]",
+		} {
+			if err := json.Unmarshal([]byte(list), &rows); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if len(rows) != 3 {
+			t.Fatalf("decoded %d rows, want 3", len(rows))
+		}
+		for i, test := range []Publisher{{}, want, {}} {
+			if got := rows[i].Publisher.publisher(); got != test {
+				t.Fatalf("row %d: publisher = %+v, want %+v", i, got, test)
+			}
+		}
+	})
+
+	// Publisher metadata never fails a row, but the row's own fields are
+	// still held to their types.
+	t.Run("a malformed row is still an error", func(t *testing.T) {
+		t.Parallel()
+		var row resourceRow
+		if err := json.Unmarshal([]byte(`{"resource_id":7,"publisher":{"verified":true}}`), &row); err == nil {
+			t.Fatalf("a numeric resource_id decoded into %+v", row)
+		}
+	})
+}
+
+// The readers are handed bytes an outer decoder already validated, but they
+// do not depend on that: an object that is cut short, or followed by anything
+// else, reads as unnamed and unverified rather than as whatever its members
+// said before the input went wrong.
+func TestPublisherReadersNeedOneCompleteObject(t *testing.T) {
+	t.Parallel()
+	const whole = `{"name":"Acme Docs","verified":true}`
+	if got := parsePublisherWire([]byte(whole)).publisher(); got != (Publisher{Name: "Acme Docs", Verified: true}) {
+		t.Fatalf("a complete object = %+v", got)
+	}
+	if got := publisherMember([]byte(`{"publisher":` + whole + `}`)).publisher(); got != (Publisher{Name: "Acme Docs", Verified: true}) {
+		t.Fatalf("a complete row = %+v", got)
+	}
+	for name, object := range map[string]string{
+		"empty":             ``,
+		"no closing brace":  `{"name":"Acme Docs","verified":true`,
+		"cut after a comma": `{"name":"Acme Docs","verified":true,`,
+		"cut in a value":    `{"verified":true,"name":"Acme`,
+		"trailing value":    whole + ` true`,
+		"trailing object":   whole + whole,
+		"trailing brace":    whole + `}`,
+		"wrapped in array":  `[` + whole + `]`,
+	} {
+		if got := parsePublisherWire([]byte(object)).publisher(); got != (Publisher{}) {
+			t.Errorf("%s: publisher object = %+v, want the unverified zero value", name, got)
 		}
 	}
-	// Every row of a list is its own value, so one row's repetition does not
-	// leak into the next.
-	var rows []resourceRow
-	if err := json.Unmarshal([]byte(`[
-		{"publisher":{"verified":true},"publisher":{"verified":true}},
-		{"publisher":{"name":"Acme Docs","verified":true}}
-	]`), &rows); err != nil {
+	for name, row := range map[string]string{
+		"no closing brace": `{"publisher":` + whole,
+		"trailing value":   `{"publisher":` + whole + `} true`,
+		"trailing row":     `{"publisher":` + whole + `}{"publisher":` + whole + `}`,
+	} {
+		if got := publisherMember([]byte(row)).publisher(); got != (Publisher{}) {
+			t.Errorf("%s: row publisher = %+v, want the unverified zero value", name, got)
+		}
+	}
+}
+
+// A struct that only tags a field with the publisher type reads nothing into
+// it: the type has no decoder of its own, so a new carrier cannot pick up
+// encoding/json's last-member-wins by forgetting to count.
+func TestPublisherWireHasNoDecoderOfItsOwn(t *testing.T) {
+	t.Parallel()
+	var carrier struct {
+		Publisher publisherWire `json:"publisher"`
+	}
+	if err := json.Unmarshal([]byte(`{"publisher":{"name":"Acme Docs","verified":true}}`), &carrier); err != nil {
 		t.Fatal(err)
 	}
-	if got := rows[0].Publisher.publisher(); got != (Publisher{}) {
-		t.Fatalf("row with a repeated member = %+v", got)
+	if got := carrier.Publisher.publisher(); got != (Publisher{}) {
+		t.Fatalf("publisher decoded by the struct decoder = %+v, want the unverified zero value", got)
 	}
-	if got := rows[1].Publisher.publisher(); got != (Publisher{Name: "Acme Docs", Verified: true}) {
-		t.Fatalf("clean row after a repeated one = %+v", got)
+}
+
+// An all-zeros created_at or expires_at is an unset date. Every owner read
+// that carries a resource row drops it, so no rendering can print year 1 as a
+// creation date or list a resource with no expiry as expired.
+func TestResourceReadsDropAZeroDate(t *testing.T) {
+	date := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
+	for name, test := range map[string]struct {
+		value string
+		want  *time.Time
+	}{
+		"zero time": {value: `"0001-01-01T00:00:00Z"`},
+		"null":      {value: `null`},
+		"absent":    {},
+		"a date":    {value: `"2026-03-01T00:00:00Z"`, want: &date},
+	} {
+		t.Run(name, func(t *testing.T) {
+			srv := apitest.NewServer(t)
+			dates := ""
+			if test.value != "" {
+				dates = `,"created_at":` + test.value + `,"expires_at":` + test.value
+			}
+			row := fmt.Sprintf(`{"resource_id":%q,"crid":%q,"type":"url","status":"active","target_url":"https://example.com/data","allowed_device_keys":[]%s}`,
+				srv.Key.ResourceID, srv.Key.CRID, dates)
+			answer := func(status int, body string) http.HandlerFunc {
+				return func(w http.ResponseWriter, _ *http.Request) {
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(status)
+					_, _ = w.Write([]byte(body))
+				}
+			}
+			srv.Script(http.MethodGet, "/v1/resources", answer(http.StatusOK, `{"data":[`+row+`],"meta":{"has_more":false}}`))
+			srv.Script(http.MethodGet, "/v1/resources/"+srv.Key.CRID, answer(http.StatusOK, `{"data":{"resource":`+row+`}}`))
+			srv.Script(http.MethodPost, "/v1/resources", answer(http.StatusCreated, `{"data":`+row+`,"meta":{}}`))
+			srv.Script(http.MethodPatch, "/v1/resources/"+srv.Key.CRID, answer(http.StatusOK, `{"data":`+row+`}`))
+			client := newTestClient(t, srv, nil)
+			check := func(read string, createdAt, expiresAt *time.Time) {
+				t.Helper()
+				for key, got := range map[string]*time.Time{"created_at": createdAt, "expires_at": expiresAt} {
+					if (got == nil) != (test.want == nil) || (got != nil && !got.Equal(*test.want)) {
+						t.Errorf("%s: %s = %v, want %v", read, key, got, test.want)
+					}
+				}
+			}
+
+			page, err := client.List(context.Background(), ListOptions{})
+			if err != nil || len(page.Items) != 1 {
+				t.Fatalf("List = %+v, %v; want one row", page, err)
+			}
+			check("List", page.Items[0].CreatedAt, page.Items[0].ExpiresAt)
+			resource, err := client.Resource(context.Background(), srv.Key.CRID)
+			if err != nil {
+				t.Fatalf("Resource: %v", err)
+			}
+			check("Resource", resource.CreatedAt, resource.ExpiresAt)
+			published, err := client.Publish(context.Background(), "https://example.com/data", PublishOptions{})
+			if err != nil {
+				t.Fatalf("Publish: %v", err)
+			}
+			check("Publish", published.CreatedAt, published.ExpiresAt)
+			granted, err := client.SetDeviceGrants(context.Background(), srv.Key.CRID, nil)
+			if err != nil {
+				t.Fatalf("SetDeviceGrants: %v", err)
+			}
+			check("SetDeviceGrants", granted.CreatedAt, granted.ExpiresAt)
+		})
 	}
 }
 

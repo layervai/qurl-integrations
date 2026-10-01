@@ -2,6 +2,7 @@ package output
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -46,11 +47,14 @@ const (
 	msgPublisherSelfDeclared = "self-declared name, not confirmed by LayerV"
 	msgPublisherUnconfirmed  = "not confirmed by LayerV"
 
-	// The stderr notice, for modes whose stdout must stay bare. Operands are
-	// the status word, the quoted name (or msgPublisherNoName), and the
-	// explanation.
-	msgPublisherNoticeNamed           = "%s publisher %s (%s)."
-	msgPublisherNoticeUnnamed         = "%s publisher, %s (%s)."
+	// The stderr notice, for modes whose stdout must stay bare. An unverified
+	// publisher leads with the status word: the operands are the status word,
+	// the quoted name (or msgPublisherNoName), and the explanation.
+	msgPublisherNoticeNamed   = "%s publisher %s (%s)."
+	msgPublisherNoticeUnnamed = "%s publisher, %s (%s)."
+	// A verified publisher reads name first, then status, like the row form:
+	// the operands are the quoted name (or msgPublisherNoName) and
+	// msgPublisherVerified.
 	msgPublisherNoticeVerifiedNamed   = "Publisher %s (%s)."
 	msgPublisherNoticeVerifiedUnnamed = "Publisher %s, %s."
 	// msgPublisherNoticeCreated follows the notice when the service gave the
@@ -65,14 +69,19 @@ const (
 	msgPublisherNameUnset         = "No publisher name is set. Run `qurl publisher set <name>` to add one."
 )
 
-// maxPublisherNameRunes bounds a displayed name, and a service's reason for
-// refusing one, so a service answering outside its contract cannot flood a
-// terminal.
+// maxPublisherNameRunes bounds a displayed name, so a service answering
+// outside its contract cannot flood a terminal.
 //
 // TODO(upstream-contract): qurl-service accepts publisher names of 1-64
 // characters. The bound here is deliberately looser, so it never cuts a name
 // the service accepted.
 const maxPublisherNameRunes = 256
+
+// maxServiceReasonRunes bounds a service's explanation of a refusal, for the
+// same reason. It is the name bound today because the only explanations shown
+// are about a publisher name; it has its own name so a command that adopts
+// ServiceReason for something else can size it without moving the name bound.
+const maxServiceReasonRunes = maxPublisherNameRunes
 
 // PublisherChange says what a `qurl publisher` invocation did, so the text
 // rendering can confirm it.
@@ -172,9 +181,9 @@ func (p *Printer) escapedPublisherName(name string) string {
 
 // ServiceReason prepares a service's explanation of a refusal for one stderr
 // line: whitespace is collapsed, anything that is not plainly printable is
-// replaced, and the text is held to the same bound and marker as a displayed
-// name, so neither a hostile nor a runaway explanation can forge a line or
-// flood a terminal.
+// replaced, and the text is held to maxServiceReasonRunes with the same
+// marker as a cut name, so neither a hostile nor a runaway explanation can
+// forge a line or flood a terminal.
 func (p *Printer) ServiceReason(reason string) string {
 	reason = strings.Join(strings.Fields(strings.Map(func(r rune) rune {
 		if unicode.IsSpace(r) {
@@ -185,8 +194,8 @@ func (p *Printer) ServiceReason(reason string) string {
 		}
 		return r
 	}, strings.ToValidUTF8(reason, string(unicode.ReplacementChar)))), " ")
-	if runes := []rune(reason); len(runes) > maxPublisherNameRunes {
-		reason = string(runes[:maxPublisherNameRunes]) + p.ellipsis()
+	if runes := []rune(reason); len(runes) > maxServiceReasonRunes {
+		reason = string(runes[:maxServiceReasonRunes]) + p.ellipsis()
 	}
 	return reason
 }
@@ -257,7 +266,7 @@ func (p *Printer) publisherNotice(publisher qurlapi.Publisher, createdAt *time.T
 	case publisher.Verified && named:
 		line = fmt.Sprintf(msgPublisherNoticeVerifiedNamed, name, msgPublisherVerified)
 	case publisher.Verified:
-		line = fmt.Sprintf(msgPublisherNoticeVerifiedUnnamed, msgPublisherVerified, name)
+		line = fmt.Sprintf(msgPublisherNoticeVerifiedUnnamed, name, msgPublisherVerified)
 	case named:
 		line = fmt.Sprintf(msgPublisherNoticeNamed, p.unverifiedLabel(), name, explanation)
 	default:
@@ -293,6 +302,11 @@ func (p *Printer) PublisherNotice(link *qurlapi.ShareLink) {
 // whoami; the confirmation of a change is a status note on stderr. --quiet
 // prints the bare escaped name, or nothing when none is set.
 func (p *Printer) PublisherProfile(publisher *qurlapi.Publisher, change PublisherChange) error {
+	// A nil profile has nothing to render. The caller checks first, but that
+	// guarantee lives in another function, as it does for PublisherNotice.
+	if publisher == nil {
+		return errors.New("qURL publisher profile is incomplete")
+	}
 	switch {
 	case p.format == FormatJSON:
 		return p.writeJSON(publisherProfileJSON{Publisher: publisherDocument(*publisher)})
