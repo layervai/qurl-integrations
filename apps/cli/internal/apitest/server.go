@@ -25,7 +25,8 @@ type RecordedRequest struct {
 // The share route is authenticated. A share request that carries no bearer
 // credential fails the owning test and is answered 401, and no scripted
 // handler runs for it: a client that sends one has a defect no scenario
-// should be able to hide.
+// should be able to hide. The guard is unconditional, so a future path that
+// may share without a credential has to change the guard here, deliberately.
 type Server struct {
 	*httptest.Server
 	t *testing.T

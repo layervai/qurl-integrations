@@ -2,4 +2,5 @@
 
   the requested resource does not exist
 
-  [2mHint: the CRID may be mistyped, the resource may have been removed, or this device may be neither the owner's nor one the publisher allowed. To get this device allowed, send the publisher its public key from `qurl whoami -o json`.[0m
+  [2mHint: the CRID may be mistyped, expired, or no longer published. Ask whoever shared it for a current one.[0m
+  [2mRequest ID: req_test[0m

@@ -402,10 +402,11 @@ func TestRenderEnrollmentScopeRemedy(t *testing.T) {
 
 // TestShareNotFoundRendering pins the not-found guidance for the CRID share
 // operator, which `share` and `get` both go through. Its 404 covers a
-// mistyped CRID, a removed resource, and a device that is neither the owner's
-// nor allowed, so the hint names all three, picks none, and gives the remedy
-// for the last. The exit code stays not-found, and a 404 from any other route
-// keeps the hint every route shares.
+// mistyped CRID, a removed resource, and a device that is not allowed, so the
+// hint names all three and picks none. The remedy is conditional: a grant
+// helps only on a private resource, and a public one opens only on its
+// owner's devices. The exit code stays not-found, and a 404 from any other
+// route keeps the hint every route shares.
 func TestShareNotFoundRendering(t *testing.T) {
 	srv := apitest.NewServer(t)
 	client, err := qurlapi.New(&qurlapi.Config{
@@ -431,8 +432,9 @@ func TestShareNotFoundRendering(t *testing.T) {
 	for _, part := range []string{
 		"the CRID may be mistyped",
 		"the resource may have been removed",
-		"this device may be neither the owner's nor one the publisher allowed",
-		"send the publisher its public key from `qurl whoami -o json`",
+		"this device may not be allowed to open it",
+		"If the resource is private, send the publisher this device's public key from `qurl whoami -o json` so they can allow it",
+		"A public resource opens only on its owner's devices in this release",
 	} {
 		if !strings.Contains(hintShareNotFound, part) {
 			t.Errorf("share not-found hint lost %q: %q", part, hintShareNotFound)

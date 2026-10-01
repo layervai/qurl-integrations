@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -14,7 +15,9 @@ import (
 	connectorshare "github.com/layervai/qurl-connector/pkg/share"
 	"github.com/layervai/qurl-go/qurl"
 
+	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/apitest"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/auth"
 	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/exitcode"
 )
@@ -170,11 +173,21 @@ func registeredDeviceOpts(
 
 // otherRegisteredState is a second device: the same shape as
 // bootstrapRegisteredState with its own credential.
+//
+// TODO(upstream-contract): qurl-go opens persisted device state only when the
+// device credential has the one shape the platform mints, so a test-prefixed
+// value cannot stand in for it. The prefix is therefore taken from the shared
+// fixture instead of being spelled out here, and the rest is plainly
+// synthetic.
 func otherRegisteredState(t *testing.T) *qurl.AgentState {
 	t.Helper()
 	state := bootstrapRegisteredState(t)
+	parts := strings.SplitAfterN(state.DeviceAPIKey, "_", 3)
+	if len(parts) != 3 {
+		t.Fatalf("shared device fixture credential has %d underscore-separated parts, want a two-part prefix and a body", len(parts))
+	}
 	state.AgentID = "agent-durable-02"
-	state.DeviceAPIKey = "lv_live_" + base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x41}, 32))
+	state.DeviceAPIKey = parts[0] + parts[1] + base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x41}, 32))
 	state.DeviceAPIKeyID = "key_ZyXwVu654321"
 	return state
 }
@@ -182,8 +195,10 @@ func otherRegisteredState(t *testing.T) *qurl.AgentState {
 // TestShareAndGetSendTheDeviceCredential pins the wire contract: every share
 // request share and get send carries this device's credential, including the
 // renewal after a link expired mid-download, and the credential never follows
-// the link to the download host. An endpoint written with its /v1 suffix
-// reaches the same route with the same credential.
+// the link to the download host. The device proves its identity once per
+// process, when the client opens, however many share requests follow. An
+// endpoint written with its /v1 suffix reaches the same routes with the same
+// credential.
 func TestShareAndGetSendTheDeviceCredential(t *testing.T) {
 	state := bootstrapRegisteredState(t)
 	want := "Bearer " + state.DeviceAPIKey
@@ -211,20 +226,38 @@ func TestShareAndGetSendTheDeviceCredential(t *testing.T) {
 						t.Errorf("share request %d did not carry the device credential (Authorization is %d bytes)", i+1, len(got))
 					}
 				}
+				identityChecks := 0
 				for _, request := range srv.Requests() {
-					if request.Path == apitest.DownloadPath && request.Header.Get("Authorization") != "" {
+					switch {
+					case request.Method == http.MethodGet && request.Path == "/v1/me":
+						identityChecks++
+						if got := request.Header.Get("Authorization"); got != want {
+							t.Errorf("identity request did not carry the device credential (Authorization is %d bytes)", len(got))
+						}
+					case request.Path == apitest.DownloadPath && request.Header.Get("Authorization") != "":
 						t.Error("the device credential followed the minted link to the download host")
 					}
+				}
+				// One per process, not one per share: the renewal above reuses
+				// the client that is already open.
+				if identityChecks != 1 {
+					t.Errorf("identity requests = %d for %d share requests, want exactly one per process", identityChecks, wantShares)
 				}
 			})
 		}
 	}
 }
 
+// shareNeedsDevice is the context shareResource puts in front of a failure to
+// open this device's identity.
+const shareNeedsDevice = "sharing needs this device's identity: "
+
 // TestShareIsNeverSentWithoutACredential pins the other half: when this
 // device's credential cannot be had, share and get stop before the share
 // route instead of trying it without one. The mock fails any test that sends
-// it such a request; these cases also show none was attempted.
+// it such a request; these cases also show none was attempted. The error
+// says that sharing needed the device and then gives the cause, with the
+// cause's own exit code.
 func TestShareIsNeverSentWithoutACredential(t *testing.T) {
 	errDeviceUnavailable := errors.New("device state is unavailable")
 	for _, cause := range []struct {
@@ -232,7 +265,7 @@ func TestShareIsNeverSentWithoutACredential(t *testing.T) {
 		prepare  func(srv *apitest.Server)
 		device   func(t *testing.T) func(args []string) *runOpts
 		wantCode int
-		wantText string
+		wantText []string
 	}{
 		{
 			name: "device cannot be opened",
@@ -244,11 +277,14 @@ func TestShareIsNeverSentWithoutACredential(t *testing.T) {
 				}
 			},
 			wantCode: exitcode.General,
-			wantText: errDeviceUnavailable.Error(),
+			wantText: []string{shareNeedsDevice + errDeviceUnavailable.Error()},
 		},
 		{
 			// The identity check every registered open makes is refused, so
-			// the device has no credential the service accepts.
+			// the device has no credential the service accepts. A service
+			// answer renders through its own anatomy, which shows the cause;
+			// TestShareResourceSaysSharingNeededTheDevice checks that the
+			// context is on that error too.
 			name: "service rejects the device credential",
 			prepare: func(srv *apitest.Server) {
 				srv.Script(http.MethodGet, "/v1/me", apitest.HandlerAPIKeyInvalid401(t))
@@ -257,7 +293,7 @@ func TestShareIsNeverSentWithoutACredential(t *testing.T) {
 				return registeredDevice(t, bootstrapRegisteredState(t))
 			},
 			wantCode: exitcode.Auth,
-			wantText: "Unauthorized (HTTP 401)",
+			wantText: []string{"Unauthorized (HTTP 401)", "the provided API key is not valid"},
 		},
 	} {
 		for _, mode := range shareModes() {
@@ -271,8 +307,10 @@ func TestShareIsNeverSentWithoutACredential(t *testing.T) {
 				if run.result.code != cause.wantCode {
 					t.Fatalf("exit = %d, want %d; stderr: %s", run.result.code, cause.wantCode, run.result.stderr.String())
 				}
-				if !strings.Contains(run.result.stderr.String(), cause.wantText) {
-					t.Errorf("stderr = %q, want it to explain %q", run.result.stderr.String(), cause.wantText)
+				for _, want := range cause.wantText {
+					if !strings.Contains(run.result.stderr.String(), want) {
+						t.Errorf("stderr = %q, want it to say %q", run.result.stderr.String(), want)
+					}
 				}
 				run.mustNotHaveActed(t)
 				if shares := shareRequests(srv); len(shares) != 0 {
@@ -288,14 +326,113 @@ func TestShareIsNeverSentWithoutACredential(t *testing.T) {
 	}
 }
 
+// TestShareResourceSaysSharingNeededTheDevice pins the context shareResource
+// adds when the device client cannot open, for every kind of cause: one the
+// renderer prints as text, and ones it renders through their own anatomy and
+// so never prints the context for. The message leads with what sharing
+// needed, the cause stays reachable, and the exit code is the cause's own.
+func TestShareResourceSaysSharingNeededTheDevice(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		cause error
+	}{
+		{"plain failure", errors.New("device state is unavailable")},
+		{"no state directory", fmt.Errorf("%w: set %s", connectorstate.ErrNoDefaultStateDir, connectorstate.EnvStateDirPrimary)},
+		{"supervised the other way", fmt.Errorf("%w is %q, not %q", connectorstate.ErrRuntimeSupervision, "external", "native")},
+		{"no credential", auth.ErrNoCredential},
+		{"service rejects the device credential", &qurlapi.Error{StatusCode: http.StatusUnauthorized, Code: "api_key_invalid", Title: "Unauthorized"}},
+		{"interrupted", context.Canceled},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			opts := &globalOpts{openAPIClient: func(context.Context) (qurlapi.Client, error) { return nil, tc.cause }}
+			link, err := opts.shareResource(context.Background(), exampleCRID, qurlapi.ShareOptions{})
+			if link != nil || !errors.Is(err, tc.cause) {
+				t.Fatalf("shareResource = %v, %v; want no link and the cause %v", link, err, tc.cause)
+			}
+			if want := shareNeedsDevice + tc.cause.Error(); err.Error() != want {
+				t.Errorf("error = %q, want %q", err.Error(), want)
+			}
+			if got, want := exitcode.FromError(err), exitcode.FromError(tc.cause); got != want {
+				t.Errorf("exit code = %d, want the cause's own %d", got, want)
+			}
+		})
+	}
+}
+
+// TestShareAndGetNeedAUsableDeviceNamespace pins two preconditions share and
+// get have because they use the device's identity, the same two publish and
+// list have: a state directory the identity can live in, and a namespace
+// supervised the way the command was invoked. Either one stops the command
+// before any request, with an error that says sharing needed the device and
+// then names the problem, and with the configuration exit code.
+func TestShareAndGetNeedAUsableDeviceNamespace(t *testing.T) {
+	mustNotOpen := func(context.Context, connectorshare.NativeRuntimeConfig) (registeredNativeRuntime, error) {
+		t.Error("the device runtime was opened in a namespace the command cannot use")
+		return nil, errors.New("unexpected device runtime open")
+	}
+	for _, precondition := range []struct {
+		name     string
+		device   func(t *testing.T) func(args []string) *runOpts
+		wantText []string
+	}{
+		{
+			name: "no state directory",
+			device: func(t *testing.T) func(args []string) *runOpts {
+				return func(args []string) *runOpts {
+					opts := registeredDeviceOpts(t, args, mustNotOpen)
+					// The error connectorstate.ResolveDir returns on a host with
+					// no state override and no platform user-state directory.
+					opts.shareStateDirErr = fmt.Errorf("%w: set %s", connectorstate.ErrNoDefaultStateDir, connectorstate.EnvStateDirPrimary)
+					return opts
+				}
+			},
+			wantText: []string{shareNeedsDevice + "no default qurl sharing state directory: set QURL_CONNECTOR_STATE_DIR"},
+		},
+		{
+			// The namespace belongs to an external supervisor and the command
+			// runs with the default, native supervision.
+			name: "externally supervised namespace",
+			device: func(t *testing.T) func(args []string) *runOpts {
+				return func(args []string) *runOpts {
+					opts := registeredDeviceOpts(t, args, mustNotOpen)
+					if err := connectorstate.EstablishExternalRuntimeMode(context.Background(), opts.shareStateDir); err != nil {
+						t.Fatal(err)
+					}
+					return opts
+				}
+			},
+			wantText: []string{shareNeedsDevice + `runtime supervision is "external", not "native"; run this command with --supervision external`},
+		},
+	} {
+		for _, mode := range shareModes() {
+			t.Run(precondition.name+"/"+mode.name, func(t *testing.T) {
+				srv := downloadServer(t)
+				run := runShareMode(t, srv, srv.URL, mode, precondition.device(t))
+				if run.result.code != exitcode.Config {
+					t.Fatalf("exit = %d, want %d; stderr: %s", run.result.code, exitcode.Config, run.result.stderr.String())
+				}
+				for _, want := range precondition.wantText {
+					if !strings.Contains(run.result.stderr.String(), want) {
+						t.Errorf("stderr = %q, want it to say %q", run.result.stderr.String(), want)
+					}
+				}
+				run.mustNotHaveActed(t)
+				if got := len(srv.Requests()); got != 0 {
+					t.Fatalf("the command sent %d requests before its namespace was usable, want none", got)
+				}
+			})
+		}
+	}
+}
+
 // TestPrivateShareIsDecidedByTheDeviceCredential plays the service's rule
 // for a private CRID against two registered devices. The device the
 // publisher allowed gets a link with its own credential. Any other device is
 // answered the ambiguous 404, the same answer a device that does not own a
 // public CRID receives. share and get cannot tell those cases apart, so both
 // surface as the one not-found result, exit code 5, whose guidance names
-// every cause and how a device gets allowed: one request, no retry, and
-// nothing printed, opened, or saved.
+// every cause and says what helps for a private resource and what a public
+// one allows: one request, no retry, and nothing printed, opened, or saved.
 func TestPrivateShareIsDecidedByTheDeviceCredential(t *testing.T) {
 	allowed := bootstrapRegisteredState(t)
 	other := otherRegisteredState(t)
@@ -337,8 +474,9 @@ func TestPrivateShareIsDecidedByTheDeviceCredential(t *testing.T) {
 			stderr := run.result.stderr.String()
 			for _, want := range []string{
 				"Not Found (HTTP 404)",
-				"the CRID may be mistyped, the resource may have been removed, or this device may be neither the owner's nor one the publisher allowed",
-				"send the publisher its public key from `qurl whoami -o json`",
+				"the CRID may be mistyped, the resource may have been removed, or this device may not be allowed to open it",
+				"If the resource is private, send the publisher this device's public key from `qurl whoami -o json` so they can allow it",
+				"A public resource opens only on its owner's devices in this release",
 			} {
 				if !strings.Contains(stderr, want) {
 					t.Errorf("stderr = %q, want the not-found guidance %q", stderr, want)

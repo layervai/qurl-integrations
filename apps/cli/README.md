@@ -1221,9 +1221,9 @@ remote URLs and local apps.
 `qurl share <CRID>` and `qurl get <CRID>` use this device's identity, so an
 allowed device needs no LayerV account or browser login. They work on the
 resource owner's devices and, for a private resource, on the devices the
-publisher allowed; any other device gets "not found". To be allowed, a
-recipient sends the publisher their device's public key from
-`qurl whoami -o json`.
+publisher allowed; any other device gets "not found". To be allowed on a
+private resource, a recipient sends the publisher their device's public key
+from `qurl whoami -o json`.
 
 A public CRID is meant to be opened by anyone who has it, but this CLI release
 opens it only on the owner's devices. Opening it from other devices is not

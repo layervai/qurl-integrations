@@ -1,0 +1,5 @@
+[31m[1mError:[0m Not Found (HTTP 404)
+
+  the requested resource does not exist
+
+  [2mHint: the CRID may be mistyped, the resource may have been removed, or this device may not be allowed to open it. If the resource is private, send the publisher this device's public key from `qurl whoami -o json` so they can allow it. A public resource opens only on its owner's devices in this release.[0m

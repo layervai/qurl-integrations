@@ -155,7 +155,8 @@ func reportClamp(printer *output.Printer, requested time.Duration, link *qurlapi
 // shareResource is the one share path for share and get. It always goes
 // through the registered-device client, so every share request carries this
 // device's credential and none is ever sent without one: a device that
-// cannot be opened fails here, before the share route is contacted.
+// cannot be opened fails here, before the share route is contacted, and the
+// error says that sharing needed the device before it gives the cause.
 //
 // TODO(upstream-contract): qurl-service decides who may share. It mints a
 // link on the resource owner's devices and, for a private resource, on the
@@ -164,7 +165,7 @@ func reportClamp(printer *output.Printer, requested time.Duration, link *qurlapi
 func (opts *globalOpts) shareResource(ctx context.Context, id string, options qurlapi.ShareOptions) (*qurlapi.ShareLink, error) {
 	client, err := opts.newClient(ctx)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf(msgShareNeedsDevice, err)
 	}
 	return client.Share(ctx, id, options)
 }
