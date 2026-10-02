@@ -1,5 +1,22 @@
 # Changelog
 
+## [3.3.0](https://github.com/layervai/qurl-integrations/compare/v3.2.0...v3.3.0) (2026-10-02)
+
+
+### Features
+
+* **cli:** seal new local device state to the TPM when one is available; LAYERV_KEY_PROVIDER=file opts out ([63d912b](https://github.com/layervai/qurl-integrations/commit/63d912ba99680d5f813237d430e1474e38a2ec91))
+* **cli:** show a CRID's publisher and creation date ([#1550](https://github.com/layervai/qurl-integrations/issues/1550)) ([b5f959f](https://github.com/layervai/qurl-integrations/commit/b5f959fc0b9934125c7e923baf83c645a6e34462))
+* **cli:** support private device grants ([127fb9e](https://github.com/layervai/qurl-integrations/commit/127fb9e690a78e6b832a2211e3e5cbb1a2b2c01a))
+* **cli:** whoami shows which key storage protects local state ([63d912b](https://github.com/layervai/qurl-integrations/commit/63d912ba99680d5f813237d430e1474e38a2ec91))
+
+
+### Bug Fixes
+
+* **cli:** a TPM that is not responding exits 11 (unavailable) instead of 3 ([63d912b](https://github.com/layervai/qurl-integrations/commit/63d912ba99680d5f813237d430e1474e38a2ec91))
+* **cli:** explain a share or get "not found" result and how a private resource is opened ([e419a20](https://github.com/layervai/qurl-integrations/commit/e419a201e93ce37002ec5209fa6373c8922824a8))
+* **cli:** omit unset creation dates and reword publisher refusals ([#1551](https://github.com/layervai/qurl-integrations/issues/1551)) ([bb2ccef](https://github.com/layervai/qurl-integrations/commit/bb2ccef514d2453907ae8b3cac7145e4308df80f))
+
 ## [3.2.0](https://github.com/layervai/qurl-integrations/compare/v3.1.0...v3.2.0) (2026-09-30)
 
 
