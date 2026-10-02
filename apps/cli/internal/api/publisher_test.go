@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -228,6 +229,34 @@ func TestPublisherWireHasNoDecoderOfItsOwn(t *testing.T) {
 	}
 	if got := carrier.Publisher.publisher(); got != (Publisher{}) {
 		t.Fatalf("publisher decoded by the struct decoder = %+v, want the unverified zero value", got)
+	}
+}
+
+// Neither carrier of a publisher offers the field to the struct decoder: each
+// reads the member in its own UnmarshalJSON, and the field is tagged out so it
+// cannot suggest a decode path that would read nothing.
+func TestPublisherCarriersReadThePublisherThemselves(t *testing.T) {
+	t.Parallel()
+	const object = `{"resource_id":"r","crid":"c","serving_epoch":1,"publisher":{"name":"Acme Docs","verified":true}}`
+	want := Publisher{Name: "Acme Docs", Verified: true}
+
+	var sharing sharingRow
+	if err := json.Unmarshal([]byte(object), &sharing); err != nil || sharing.Publisher.publisher() != want {
+		t.Fatalf("sharing row = %+v, %v; want publisher %+v", sharing.Publisher.publisher(), err, want)
+	}
+	var resource resourceRow
+	if err := json.Unmarshal([]byte(object), &resource); err != nil || resource.Publisher.publisher() != want {
+		t.Fatalf("resource row = %+v, %v; want publisher %+v", resource.Publisher.publisher(), err, want)
+	}
+
+	for _, carrier := range []reflect.Type{reflect.TypeOf(sharingRow{}), reflect.TypeOf(resourceRow{})} {
+		field, ok := carrier.FieldByName("Publisher")
+		if !ok || field.Type != reflect.TypeOf(publisherWire{}) {
+			t.Fatalf("%s has no publisherWire field named Publisher", carrier.Name())
+		}
+		if tag := field.Tag.Get("json"); tag != "-" {
+			t.Errorf("%s.Publisher is tagged %q, want it withheld from the struct decoder", carrier.Name(), tag)
+		}
 	}
 }
 
