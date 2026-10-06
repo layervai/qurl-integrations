@@ -847,3 +847,63 @@ func (c *client) SetDeviceGrants(ctx context.Context, id string, keys []string) 
 	}
 	return summarizeResourceRow(&env.Data, "device grants")
 }
+
+// deviceGrantEdit is the PATCH body that adds and removes single device keys.
+// It never carries allowed_device_keys: that member replaces the whole list.
+//
+// TODO(upstream-contract): the service applies both members as one change,
+// treats a key that is already present or already absent as nothing to do,
+// refuses a key that is in both and a result above 256 keys, and answers
+// with the complete resulting list.
+type deviceGrantEdit struct {
+	Add    []string `json:"allowed_device_keys_add,omitempty"`
+	Remove []string `json:"allowed_device_keys_remove,omitempty"`
+}
+
+// EditDeviceGrants adds and removes single device keys with one authenticated
+// PATCH. It never retries.
+//
+// The answer is checked against the request: every added key must be on the
+// returned list and no removed key may be. A service from before these
+// members ignores them and returns the list as it was, with a success status;
+// that answer fails here instead of being reported as a change that was made.
+func (c *client) EditDeviceGrants(ctx context.Context, id string, add, remove []string) (*ResourceSummary, error) {
+	if len(add) == 0 && len(remove) == 0 {
+		return nil, fmt.Errorf("%w: no device key to add or remove", qurl.ErrInvalidResourceRequest)
+	}
+	for _, key := range add {
+		if slices.Contains(remove, key) {
+			return nil, fmt.Errorf("%w: a device key cannot be both added and removed", qurl.ErrInvalidResourceRequest)
+		}
+	}
+	if err := ValidateRequestTarget(http.MethodPatch, "/v1/resources/"+id); err != nil {
+		return nil, err
+	}
+	reply, err := c.doRESTOnce(ctx, http.MethodPatch, "/v1/resources/"+id, deviceGrantEdit{Add: add, Remove: remove})
+	if err != nil {
+		return nil, err
+	}
+	if reply.status != http.StatusOK {
+		return nil, reply.problem()
+	}
+	var env struct {
+		Data resourceRow `json:"data"`
+	}
+	if err := json.Unmarshal(reply.body, &env); err != nil {
+		return nil, fmt.Errorf("%w: decode device grants: %w", qurl.ErrInvalidAPIResponse, err)
+	}
+	if err := validateSharingIdentity(id, &sharingRow{CRID: env.Data.CRID, ResourceID: env.Data.ResourceID}); err != nil {
+		return nil, err
+	}
+	for _, key := range add {
+		if !slices.Contains(env.Data.AllowedDeviceKeys, key) {
+			return nil, &grantEditError{}
+		}
+	}
+	for _, key := range remove {
+		if slices.Contains(env.Data.AllowedDeviceKeys, key) {
+			return nil, &grantEditError{}
+		}
+	}
+	return summarizeResourceRow(&env.Data, "device grants")
+}

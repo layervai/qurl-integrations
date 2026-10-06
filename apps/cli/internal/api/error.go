@@ -92,8 +92,29 @@ func CustomerMessages() []string {
 		errTemplate, msgAccountCallbackInvalid, msgAccountCallbackComplete, msgAccountLoadFailed, msgAccountUnavailable, msgAccountPortBusy, msgAccountBrowserFailed, msgAccountTimedOut, msgAccountCanceled, msgAccountExchangeFailed, msgAccountHTTPSRequired, msgAccountLinkInvalid, msgAccountOwnersInvalid,
 		msgPublishAccessConflict, msgPublishExistingPublic, msgPublishExistingPrivate, msgPublishAccessDiffers,
 		msgPrivateUnconfirmed, msgPublicUnconfirmed,
+		msgGrantEditUnconfirmed,
 	}
 }
+
+// msgGrantEditUnconfirmed is shown when the answer to an add or remove of
+// single device grants does not show the change. A service from before those
+// requests ignores them and returns the list as it was, so that is the cause
+// the message names. It claims nothing about the list: the command to read it
+// is the next step.
+const msgGrantEditUnconfirmed = "this service cannot add or remove single device grants yet: its answer does not show the change that was asked for. Run `qurl grants <CRID>` to see the list as it is now"
+
+// grantEditError is an answer to an add or remove of device grants that does
+// not show the change. It is an answer outside the contract, so it matches
+// the SDK's invalid-response sentinel and has that exit code.
+type grantEditError struct{}
+
+func (e *grantEditError) Error() string { return msgGrantEditUnconfirmed }
+
+// UserMessage is the text the terminal rendering shows in place of the
+// generic invalid-response wording.
+func (e *grantEditError) UserMessage() string { return msgGrantEditUnconfirmed }
+
+func (e *grantEditError) Unwrap() error { return qurl.ErrInvalidAPIResponse }
 
 // Publish refusals and answers that do not confirm the privacy asked for.
 const (

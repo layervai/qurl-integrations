@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -395,5 +396,94 @@ func TestRequestsAreRecordedWithTheirBody(t *testing.T) {
 	requests := srv.Requests()
 	if len(requests) != 1 || string(requests[0].Body) != body {
 		t.Fatalf("recorded requests = %+v, want the one create with its body", requests)
+	}
+}
+
+// TestDeviceGrantChangesFollowTheServiceContract pins the mock's grant
+// update: a replacement sets the complete list; an edit adds and removes
+// single keys as one change, leaves a key that is already present or absent
+// alone, and is refused, with the list untouched, when one key is on both
+// sides or the result would pass 256 keys. Every answer carries the complete
+// resulting list.
+func TestDeviceGrantChangesFollowTheServiceContract(t *testing.T) {
+	full := make([]string, 0, maxAllowedDeviceKeys)
+	for index := range maxAllowedDeviceKeys {
+		full = append(full, fmt.Sprintf("key-%03d", index))
+	}
+	for _, test := range []struct {
+		name     string
+		existing []string
+		body     string
+		want     []string
+		refused  bool
+	}{
+		{name: "replace", existing: []string{"a", "b"}, body: `{"allowed_device_keys":["c"]}`, want: []string{"c"}},
+		{name: "replace with nothing", existing: []string{"a", "b"}, body: `{"allowed_device_keys":[]}`},
+		{name: "add", existing: []string{"a"}, body: `{"allowed_device_keys_add":["b"]}`, want: []string{"a", "b"}},
+		{name: "add what is there", existing: []string{"a"}, body: `{"allowed_device_keys_add":["a"]}`, want: []string{"a"}},
+		{name: "remove", existing: []string{"a", "b"}, body: `{"allowed_device_keys_remove":["a"]}`, want: []string{"b"}},
+		{name: "remove what is not there", existing: []string{"a"}, body: `{"allowed_device_keys_remove":["z"]}`, want: []string{"a"}},
+		{name: "add and remove", existing: []string{"a", "b"}, body: `{"allowed_device_keys_add":["c"],"allowed_device_keys_remove":["a"]}`, want: []string{"b", "c"}},
+		{name: "one key on both sides", existing: []string{"a"}, body: `{"allowed_device_keys_add":["b"],"allowed_device_keys_remove":["b"]}`, want: []string{"a"}, refused: true},
+		{name: "replace and edit together", existing: []string{"a"}, body: `{"allowed_device_keys":["c"],"allowed_device_keys_add":["b"]}`, want: []string{"a"}, refused: true},
+		{name: "one more than a full list", existing: full, body: `{"allowed_device_keys_add":["one-more"]}`, want: full, refused: true},
+		{name: "a swap on a full list", existing: full, body: `{"allowed_device_keys_add":["one-more"],"allowed_device_keys_remove":["key-000"]}`, want: append(append([]string(nil), full[1:]...), "one-more")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			srv := NewServer(t)
+			srv.SetResourceAccess(true, test.existing...)
+			status, got := call(t, srv, http.MethodPatch, "/v1/resources/"+srv.Key.CRID, test.body)
+			if test.refused {
+				if status != http.StatusBadRequest || got.Error.Code != "invalid_input" {
+					t.Fatalf("change = %d %q, want 400 invalid_input", status, got.Error.Code)
+				}
+			} else if status != http.StatusOK || !slices.Equal(got.Data.AllowedDeviceKeys, test.want) {
+				t.Fatalf("change = %d with list %v, want 200 with %v", status, got.Data.AllowedDeviceKeys, test.want)
+			}
+			_, detail := call(t, srv, http.MethodGet, "/v1/resources/"+srv.Key.CRID, "")
+			if detail.Data.Resource == nil || !slices.Equal(detail.Data.Resource.AllowedDeviceKeys, test.want) {
+				t.Fatalf("the list after the change = %+v, want %v", detail.Data.Resource, test.want)
+			}
+		})
+	}
+}
+
+// TestOlderServiceIgnoresSingleGrantEdits pins the mock of a service from
+// before single grants: an edit is answered with a success status and the
+// list as it was, and a replacement still works.
+func TestOlderServiceIgnoresSingleGrantEdits(t *testing.T) {
+	srv := NewServer(t)
+	srv.SetResourceAccess(true, "a")
+	srv.PlayNoSingleGrantEdits()
+	status, got := call(t, srv, http.MethodPatch, "/v1/resources/"+srv.Key.CRID, `{"allowed_device_keys_add":["b"],"allowed_device_keys_remove":["a"]}`)
+	if status != http.StatusOK || !slices.Equal(got.Data.AllowedDeviceKeys, []string{"a"}) {
+		t.Fatalf("ignored edit = %d with list %v, want 200 with the list as it was", status, got.Data.AllowedDeviceKeys)
+	}
+	status, got = call(t, srv, http.MethodPatch, "/v1/resources/"+srv.Key.CRID, `{"allowed_device_keys":["b"]}`)
+	if status != http.StatusOK || !slices.Equal(got.Data.AllowedDeviceKeys, []string{"b"}) {
+		t.Fatalf("replacement = %d with list %v, want 200 with the new list", status, got.Data.AllowedDeviceKeys)
+	}
+}
+
+// TestDeviceGrantChangeNeedsACredential pins that the mock refuses a grant
+// change with no credential, as the service does, and changes nothing.
+func TestDeviceGrantChangeNeedsACredential(t *testing.T) {
+	srv := NewServer(t)
+	srv.SetResourceAccess(true, "a")
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPatch, srv.URL+"/v1/resources/"+srv.Key.CRID, strings.NewReader(`{"allowed_device_keys":[]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("grant change without a credential = %d, want 401", resp.StatusCode)
+	}
+	_, detail := call(t, srv, http.MethodGet, "/v1/resources/"+srv.Key.CRID, "")
+	if detail.Data.Resource == nil || !slices.Equal(detail.Data.Resource.AllowedDeviceKeys, []string{"a"}) {
+		t.Fatalf("a refused change altered the list: %+v", detail.Data.Resource)
 	}
 }

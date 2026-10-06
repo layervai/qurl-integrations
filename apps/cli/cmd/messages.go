@@ -96,6 +96,12 @@ const (
 	msgPrivateFalse       = "--private=false is not accepted: a resource is private unless you publish it with --public"
 	msgAllowKeyWithPublic = "--allow-device-key cannot be used with --public: a public resource has no list of allowed devices"
 
+	// Usage errors of `qurl grants`. msgGrantsReplaceRemoved answers the flag
+	// that replaced the complete list, and names what to use instead.
+	msgGrantsReplaceRemoved = "--allow-device-key no longer replaces the list: use --add <public-key> to allow a device, --remove <public-key> to take one off the list, or --clear to take every device off it"
+	msgGrantsClearWithEdit  = "--clear cannot be combined with --add or --remove"
+	msgGrantsAddAndRemove   = "the same public key cannot be given to both --add and --remove"
+
 	// msgNoKeyProvided is login's empty-input error.
 	msgNoKeyProvided = "no API key provided"
 
@@ -174,6 +180,9 @@ func customerMessages() []string {
 		msgPublicAndPrivate,
 		msgPrivateFalse,
 		msgAllowKeyWithPublic,
+		msgGrantsReplaceRemoved,
+		msgGrantsClearWithEdit,
+		msgGrantsAddAndRemove,
 		msgNoKeyProvided,
 		msgAlreadyGone,
 		msgOpeningBrowser,

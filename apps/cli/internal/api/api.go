@@ -46,8 +46,16 @@ type Client interface {
 	List(ctx context.Context, opts ListOptions) (*ResourcePage, error)
 	// Resource returns one owner-visible resource by CRID or public resource ID.
 	Resource(ctx context.Context, id string) (*ResourceSummary, error)
-	// SetDeviceGrants replaces the complete private-resource device grant list.
+	// SetDeviceGrants replaces the complete private-resource device grant
+	// list. The CLI calls it only with an empty list, to clear the grants; a
+	// single device is allowed or removed with EditDeviceGrants, which cannot
+	// drop a grant it was not asked to.
 	SetDeviceGrants(ctx context.Context, id string, keys []string) (*ResourceSummary, error)
+	// EditDeviceGrants adds and removes single device keys in one request,
+	// which the service applies as one change, and returns the resource with
+	// its complete resulting list. A key that is already on the list, or
+	// already off it, is left as it is.
+	EditDeviceGrants(ctx context.Context, id string, add, remove []string) (*ResourceSummary, error)
 	// Sharing returns the durable desired state and current platform-observed
 	// connection state of one tunnel resource. It is the connector sharing
 	// state, not the Share operator above.

@@ -316,6 +316,16 @@ func TestManagementMutationsDeclareExplicitNoReplay(t *testing.T) {
 			_, err := c.Delete(context.Background(), apitest.FixedResourceKey(t).CRID)
 			return err
 		}},
+		{name: "replace device grants", call: func(t *testing.T, c Client) error {
+			t.Helper()
+			_, err := c.SetDeviceGrants(context.Background(), apitest.FixedResourceKey(t).CRID, nil)
+			return err
+		}},
+		{name: "edit device grants", call: func(t *testing.T, c Client) error {
+			t.Helper()
+			_, err := c.EditDeviceGrants(context.Background(), apitest.FixedResourceKey(t).CRID, []string{"added-key"}, []string{"removed-key"})
+			return err
+		}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			attempts := 0
@@ -1524,5 +1534,143 @@ func TestDeviceGrantsRequireConfirmation(t *testing.T) {
 		if !errors.Is(err, qurl.ErrInvalidAPIResponse) {
 			t.Fatalf("missing grants accepted for %s: %v", method, err)
 		}
+	}
+}
+
+// TestEditDeviceGrantsSendsOnlyTheEdit pins the wire shape of a change to
+// single device keys: one PATCH with the keys to add and the keys to remove.
+// It never carries allowed_device_keys, the member that replaces the complete
+// list, and it omits an empty side instead of sending an empty array.
+func TestEditDeviceGrantsSendsOnlyTheEdit(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		add, remove []string
+		want        string
+	}{
+		{name: "add", add: []string{"a", "b"}, want: `{"allowed_device_keys_add":["a","b"]}`},
+		{name: "remove", remove: []string{"c"}, want: `{"allowed_device_keys_remove":["c"]}`},
+		{name: "both", add: []string{"a"}, remove: []string{"c"}, want: `{"allowed_device_keys_add":["a"],"allowed_device_keys_remove":["c"]}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			srv := apitest.NewServer(t)
+			srv.SetResourceAccess(true, "c", "d")
+			resource, err := newTestClient(t, srv, nil).EditDeviceGrants(t.Context(), srv.Key.CRID, test.add, test.remove)
+			if err != nil {
+				t.Fatalf("EditDeviceGrants: %v", err)
+			}
+			requests := srv.Requests()
+			if len(requests) != 1 || requests[0].Method != http.MethodPatch || requests[0].Path != "/v1/resources/"+srv.Key.CRID {
+				t.Fatalf("requests = %+v, want one PATCH of the resource", requests)
+			}
+			if got := string(requests[0].Body); got != test.want {
+				t.Fatalf("body = %s, want %s", got, test.want)
+			}
+			if requests[0].Header.Get("Authorization") == "" {
+				t.Fatal("the grant change carries no credential")
+			}
+			for _, key := range test.add {
+				if !slices.Contains(resource.AllowedDeviceKeys, key) {
+					t.Fatalf("resulting list %v lacks the added key %q", resource.AllowedDeviceKeys, key)
+				}
+			}
+			for _, key := range test.remove {
+				if slices.Contains(resource.AllowedDeviceKeys, key) {
+					t.Fatalf("resulting list %v still has the removed key %q", resource.AllowedDeviceKeys, key)
+				}
+			}
+			if !slices.Contains(resource.AllowedDeviceKeys, "d") {
+				t.Fatalf("a key the change did not name was lost: %v", resource.AllowedDeviceKeys)
+			}
+		})
+	}
+}
+
+// TestEditDeviceGrantsRequiresTheAnswerToShowTheChange pins the check on the
+// answer: every added key on the returned list, no removed key on it. An
+// older service that ignores the request and returns the list as it was
+// fails that check, with the message that names the cause.
+func TestEditDeviceGrantsRequiresTheAnswerToShowTheChange(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		add, remove []string
+		answered    []string
+		wantErr     bool
+	}{
+		{name: "added", add: []string{"a"}, answered: []string{"x", "a"}},
+		{name: "removed", remove: []string{"x"}, answered: []string{"a"}},
+		{name: "both", add: []string{"a"}, remove: []string{"x"}, answered: []string{"a"}},
+		{name: "removed to an empty list", remove: []string{"x"}},
+		{name: "list unchanged after add", add: []string{"a"}, answered: []string{"x"}, wantErr: true},
+		{name: "list unchanged after remove", remove: []string{"x"}, answered: []string{"x"}, wantErr: true},
+		{name: "second added key missing", add: []string{"a", "b"}, answered: []string{"a"}, wantErr: true},
+		{name: "added but not removed", add: []string{"a"}, remove: []string{"x"}, answered: []string{"x", "a"}, wantErr: true},
+		{name: "removed but not added", add: []string{"a"}, remove: []string{"x"}, wantErr: true},
+		{name: "no list after add", add: []string{"a"}, wantErr: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			srv := apitest.NewServer(t)
+			srv.Script(http.MethodPatch, "/v1/resources/"+srv.Key.CRID, func(w http.ResponseWriter, _ *http.Request) {
+				data := map[string]any{"resource_id": srv.Key.ResourceID, "crid": srv.Key.CRID, "private": true, "type": "url", "status": "active"}
+				if test.answered != nil {
+					data["allowed_device_keys"] = test.answered
+				}
+				apitest.WriteEnvelope(t, w, http.StatusOK, data, nil)
+			})
+			resource, err := newTestClient(t, srv, nil).EditDeviceGrants(t.Context(), srv.Key.CRID, test.add, test.remove)
+			if !test.wantErr {
+				if err != nil || !slices.Equal(resource.AllowedDeviceKeys, test.answered) {
+					t.Fatalf("EditDeviceGrants = %+v, %v; want the answered list %v", resource, err, test.answered)
+				}
+				return
+			}
+			if !errors.Is(err, qurl.ErrInvalidAPIResponse) || resource != nil {
+				t.Fatalf("an answer that does not show the change returned %+v, %v", resource, err)
+			}
+			var shown interface{ UserMessage() string }
+			if !errors.As(err, &shown) || shown.UserMessage() != msgGrantEditUnconfirmed || !strings.Contains(err.Error(), "this service cannot add or remove single device grants yet") {
+				t.Fatalf("error = %q, want the message that names the cause", err)
+			}
+		})
+	}
+
+	// The older service itself: it ignores the edit and answers 200.
+	srv := apitest.NewServer(t)
+	srv.SetResourceAccess(true, "x")
+	srv.PlayNoSingleGrantEdits()
+	if _, err := newTestClient(t, srv, nil).EditDeviceGrants(t.Context(), srv.Key.CRID, []string{"a"}, nil); !errors.Is(err, qurl.ErrInvalidAPIResponse) {
+		t.Fatalf("an ignored edit was reported as made: %v", err)
+	}
+}
+
+// TestEditDeviceGrantsRefusesAnEditThatCannotBeOne pins the local refusals:
+// nothing to change, and one key on both sides. Neither sends a request.
+func TestEditDeviceGrantsRefusesAnEditThatCannotBeOne(t *testing.T) {
+	srv := apitest.NewServer(t)
+	client := newTestClient(t, srv, nil)
+	for name, edit := range map[string][2][]string{
+		"nothing":             {nil, nil},
+		"empty lists":         {{}, {}},
+		"a key on both sides": {{"a", "b"}, {"b"}},
+	} {
+		if _, err := client.EditDeviceGrants(t.Context(), srv.Key.CRID, edit[0], edit[1]); !errors.Is(err, qurl.ErrInvalidResourceRequest) {
+			t.Errorf("%s: error = %v, want an invalid-request refusal", name, err)
+		}
+	}
+	if got := len(srv.Requests()); got != 0 {
+		t.Fatalf("a refused edit sent %d requests", got)
+	}
+}
+
+// TestEditDeviceGrantsShowsTheServiceRefusal pins that a refused edit is the
+// service's problem, not a result.
+func TestEditDeviceGrantsShowsTheServiceRefusal(t *testing.T) {
+	srv := apitest.NewServer(t)
+	srv.Script(http.MethodPatch, "/v1/resources/"+srv.Key.CRID, func(w http.ResponseWriter, _ *http.Request) {
+		apitest.WriteProblem(t, w, http.StatusBadRequest, "invalid_input", "Invalid Input", "at most 256 allowed device keys")
+	})
+	resource, err := newTestClient(t, srv, nil).EditDeviceGrants(t.Context(), srv.Key.CRID, []string{"a"}, nil)
+	var problem *Error
+	if resource != nil || !errors.As(err, &problem) || problem.StatusCode != http.StatusBadRequest || problem.Detail != "at most 256 allowed device keys" {
+		t.Fatalf("refused edit = %+v, %v", resource, err)
 	}
 }

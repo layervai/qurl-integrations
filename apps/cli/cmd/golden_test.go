@@ -37,9 +37,12 @@ type goldenCase struct {
 
 func goldenVariants() []string { return []string{"tty", "plain", "json"} }
 
-// goldenDevicePublicKey is a well-formed device public key for the cases that
-// name one. No device holds it.
-const goldenDevicePublicKey = "cHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHA="
+// goldenDevicePublicKey and goldenSecondDevicePublicKey are well-formed
+// device public keys for the cases that name one. No device holds them.
+const (
+	goldenDevicePublicKey       = "cHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHA="
+	goldenSecondDevicePublicKey = "cXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXE="
+)
 
 // TestGoldens pins the rendered bytes of every implemented command across
 // TTY, plain, and JSON projections, for success and error anatomies alike.
@@ -137,6 +140,57 @@ func TestGoldens(t *testing.T) {
 			},
 			variants:     []string{"plain"},
 			wantCode:     10,
+			stderrGolden: true,
+		},
+		{
+			// With no flag, grants prints the resource with its current list.
+			name:         "grants",
+			args:         func(srv *apitest.Server) []string { return []string{"grants", srv.Key.CRID} },
+			prepare:      func(srv *apitest.Server) { srv.SetResourceAccess(true, goldenDevicePublicKey) },
+			variants:     goldenVariants(),
+			stdoutGolden: true,
+		},
+		{
+			// Adding one device prints the complete list that results.
+			name: "grants_add",
+			args: func(srv *apitest.Server) []string {
+				return []string{"grants", srv.Key.CRID, "--add", goldenSecondDevicePublicKey}
+			},
+			prepare:      func(srv *apitest.Server) { srv.SetResourceAccess(true, goldenDevicePublicKey) },
+			variants:     []string{"plain", "json"},
+			stdoutGolden: true,
+		},
+		{
+			// On a public resource the list is shown and a note says that it
+			// has no effect.
+			name:         "grants_public",
+			args:         func(srv *apitest.Server) []string { return []string{"grants", srv.Key.CRID} },
+			prepare:      func(srv *apitest.Server) { srv.SetResourceAccess(false) },
+			variants:     []string{"plain"},
+			stdoutGolden: true,
+			stderrGolden: true,
+		},
+		{
+			// A service from before single grants answers with the list as it
+			// was: exit 10 and nothing on stdout.
+			name: "error_grants_unconfirmed",
+			args: func(srv *apitest.Server) []string {
+				return []string{"grants", srv.Key.CRID, "--add", goldenDevicePublicKey}
+			},
+			prepare:      func(srv *apitest.Server) { srv.PlayNoSingleGrantEdits() },
+			variants:     []string{"plain"},
+			wantCode:     10,
+			stderrGolden: true,
+		},
+		{
+			// The flag that replaced the complete list is a usage error that
+			// names --add.
+			name: "error_grants_replace_flag",
+			args: func(srv *apitest.Server) []string {
+				return []string{"grants", srv.Key.CRID, "--allow-device-key", goldenDevicePublicKey}
+			},
+			variants:     []string{"plain"},
+			wantCode:     2,
 			stderrGolden: true,
 		},
 		{

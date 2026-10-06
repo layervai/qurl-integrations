@@ -370,7 +370,7 @@ func TestPublishAccessConflictRendering(t *testing.T) {
 	for hint, parts := range map[string][]string{
 		hintPublishExistingPublic:  {"run the command again with --public", "delete it with `qurl delete <CRID>`", "`qurl list` shows its CRID", "publish again"},
 		hintPublishExistingPrivate: {"run the command again without --public", "delete it with `qurl delete <CRID>`", "`qurl list` shows its CRID", "publish again"},
-		hintPublishAccessDiffers:   {"privacy is fixed when a resource is first published", "without --allow-device-key", "`qurl grants <CRID>`", "delete the resource and publish again"},
+		hintPublishAccessDiffers:   {"privacy is fixed when a resource is first published", "without --allow-device-key", "`qurl grants <CRID> --add <public-key>` or `--remove <public-key>`", "delete the resource and publish again"},
 	} {
 		for _, part := range parts {
 			if !strings.Contains(hint, part) {

@@ -475,6 +475,7 @@ than switching in place.
 |---------|-------------|
 | `qurl publish <target-url>` | Publish a remote URL or serve a loopback HTTP app, and get its CRID |
 | `qurl share <CRID>` | Share a CRID as a short-lived access link |
+| `qurl grants <CRID>` | Show or change the devices allowed to open a private resource |
 | `qurl get <CRID>` | Fetch what a CRID points to: browser on a terminal, or download with `--file` |
 | `qurl list` | List your published resources |
 | `qurl start <CRID>` | Turn on a previously published local share |
@@ -909,6 +910,43 @@ Before anything is printed, the CLI verifies the signed link against
 the CRID you asked for; a mismatched answer is discarded and the command
 exits with code 12 without printing a link.
 
+### qurl grants
+
+`qurl grants <CRID>` shows the devices allowed to open a private resource, and
+changes that list for the resource owner. With no flag it prints the resource
+with its current list; `-o json` has the list as `allowed_device_keys`.
+
+```bash
+qurl grants <CRID>
+qurl grants <CRID> --add <public-key>
+qurl grants <CRID> --add <public-key> --remove <other-public-key>
+qurl grants <CRID> --clear
+```
+
+| Flag | Description |
+|------|-------------|
+| `--add <public-key>` | Allow a device (repeatable) |
+| `--remove <public-key>` | Take a device off the list (repeatable) |
+| `--clear` | Take every device off the list |
+| `--yes` | Proceed without confirmation when sending a test CRID to production |
+
+`--add` and `--remove` can be used in one command, which is applied as one
+change. A public key that is already on the list, or already off it, is left
+as it is, so a command can be repeated safely. Every change prints the
+complete list that results. The same public key cannot be given to both
+flags, and `--clear` cannot be combined with either.
+
+The command checks the service's answer before it reports a change: every
+added key must be on the returned list, and no removed key may be. A service
+that cannot add or remove single grants yet fails that check with exit code
+10 and nothing on stdout; `qurl grants <CRID>` then shows the list as it is.
+
+Earlier releases replaced the complete list with
+`qurl grants <CRID> --allow-device-key <public-key>`. That form is removed and
+is now a usage error that names `--add`, so a grant the command did not name
+can no longer be dropped. `qurl publish --allow-device-key` still sets the
+first list when you publish.
+
 ### qurl get
 
 `qurl get <CRID>` mints a share link exactly like `qurl share`, with this
@@ -1301,7 +1339,7 @@ exit-code authority in code (`apps/cli/internal/exitcode`):
 | 7 | conflict | The request conflicts with current state — including `--file` refusing to replace an existing destination without `--force`, and `publish` for a target that is already published with the other privacy. |
 | 8 | invalid input | An operand or request rejected as invalid (by the service, or locally for inputs that can never be valid). |
 | 9 | rate limited | Still rate limited after the CLI's bounded automatic retries. |
-| 10 | server error | The service failed or answered outside its contract — including a `publish` answer that does not confirm the privacy that was asked for. |
+| 10 | server error | The service failed or answered outside its contract — including a `publish` answer that does not confirm the privacy that was asked for, and a `grants` answer that does not show the change that was asked for. |
 | 11 | unavailable | The service cannot be reached or is not serving this surface: HTTP 503, network failures, timeouts. Also a local TPM that is not responding. |
 | 12 | verification failed | The response failed CRID-anchored verification. Nothing was printed — treat it as tampering, not transience. |
 | 130 | interrupted | The foreground daemon or another command was canceled with Ctrl-C or SIGTERM. |
@@ -1380,12 +1418,13 @@ Where the deployment offers it, a public resource can also be opened by anyone
 who has its CRID. The deployment this release ships does not offer it yet. See
 [`qurl get`](#qurl-get) for how that works.
 
-Read the current `allowed_device_keys` with `qurl list -o json` before adding
-a recipient. JSON shows an empty array when there are no grants.
-The publisher can replace the complete grant list with the registered CLI:
+Read the current list with `qurl grants <CRID>`. With `-o json` it is
+`allowed_device_keys`, an empty array when there are no grants. The publisher
+allows a device, or takes one off the list, without touching the others:
 
 ```sh
-qurl grants <CRID> --allow-device-key <public-key>
+qurl grants <CRID> --add <public-key>
+qurl grants <CRID> --remove <public-key>
 qurl grants <CRID> --clear
 ```
 

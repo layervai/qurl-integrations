@@ -732,16 +732,23 @@ func resolveLocalPublishResource(ctx context.Context, cfg *connectorshare.Native
 }
 
 func validateAllowedDeviceKeys(keys []string) error {
+	return validateDeviceKeys("--allow-device-key", keys)
+}
+
+// validateDeviceKeys checks the device public keys given to one flag, named
+// in the message, before anything is sent: publish and grants apply the same
+// rule to every list.
+func validateDeviceKeys(flag string, keys []string) error {
 	// TODO(upstream-contract): service grants allow at most 256 unique,
 	// canonical padded-base64 X25519 public keys.
 	if len(keys) > 256 {
-		return errors.New("--allow-device-key accepts at most 256 keys")
+		return fmt.Errorf("%s accepts at most 256 keys", flag)
 	}
 	seen := make(map[string]bool, len(keys))
 	for _, key := range keys {
 		raw, err := base64.StdEncoding.DecodeString(key)
 		if err != nil || len(raw) != devicePublicKeySize || base64.StdEncoding.EncodeToString(raw) != key || seen[key] {
-			return errors.New("--allow-device-key requires unique canonical base64 X25519 public keys")
+			return fmt.Errorf("%s requires unique canonical base64 X25519 public keys", flag)
 		}
 		seen[key] = true
 	}

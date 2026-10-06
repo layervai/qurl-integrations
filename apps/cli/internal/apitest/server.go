@@ -58,6 +58,9 @@ type Server struct {
 	// publicByDefault makes the mock a service from before private became
 	// the default; see PlayPublicByDefault.
 	publicByDefault bool
+	// ignoreGrantEdits makes the mock a service from before single device
+	// grants could be added or removed; see PlayNoSingleGrantEdits.
+	ignoreGrantEdits bool
 	// failf reports a contract violation to the owning test. It is t.Errorf,
 	// which is safe to call from a handler goroutine; this package's own
 	// tests replace it to observe the report without failing themselves.
@@ -230,6 +233,17 @@ func (s *Server) PlayPublicByDefault() {
 	defer s.mu.Unlock()
 	s.publicByDefault = true
 	s.private = false
+}
+
+// PlayNoSingleGrantEdits makes the mock answer like a service from before
+// single device grants could be added or removed: it ignores those two
+// request members and answers a grant change that carries only them with a
+// success status and the list as it was. Replacing the complete list still
+// works.
+func (s *Server) PlayNoSingleGrantEdits() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ignoreGrantEdits = true
 }
 
 // SetResourceAccess sets who can open the mock's one resource without a
@@ -417,6 +431,9 @@ func (s *Server) defaultHandler(w http.ResponseWriter, r *http.Request) {
 	case isShareRequest(r):
 		s.handleShare(w, r)
 
+	case r.Method == http.MethodPatch && (r.URL.Path == "/v1/resources/"+s.Key.CRID || r.URL.Path == "/v1/resources/"+s.Key.ResourceID):
+		s.handleDeviceGrants(w, r)
+
 	case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/v1/resources/"):
 		w.WriteHeader(http.StatusNoContent)
 
@@ -577,6 +594,76 @@ func (s *Server) applyCreateAccess(stated *bool, allowedDeviceKeys []string) str
 	default:
 		return ""
 	}
+}
+
+// maxAllowedDeviceKeys is the most device keys one resource can list.
+const maxAllowedDeviceKeys = 256
+
+// handleDeviceGrants serves the owner's change to the device grant list of
+// the mock's one resource: PATCH /v1/resources/{id} with allowed_device_keys
+// to replace the complete list, or with allowed_device_keys_add and
+// allowed_device_keys_remove to change single keys. It answers with the flat
+// resource row, which carries the complete resulting list.
+//
+// TODO(upstream-contract): mirrors the service's grant update. Both edit
+// members are applied as one change; a key that is already present or already
+// absent is nothing to do; a key in both members and a result above 256 keys
+// are refused with 400 invalid_input; and the answer is the whole row.
+func (s *Server) handleDeviceGrants(w http.ResponseWriter, r *http.Request) {
+	if bearerCredential(r) == "" {
+		s.writeUnauthorized(w)
+		return
+	}
+	var body struct {
+		Replace *[]string `json:"allowed_device_keys"`
+		Add     []string  `json:"allowed_device_keys_add"`
+		Remove  []string  `json:"allowed_device_keys_remove"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		WriteProblem(s.t, w, http.StatusBadRequest, "invalid_request", "Bad Request", "request body must be JSON")
+		return
+	}
+	s.mu.Lock()
+	refusal := s.applyGrantChange(body.Replace, body.Add, body.Remove)
+	s.mu.Unlock()
+	if refusal != "" {
+		WriteProblem(s.t, w, http.StatusBadRequest, "invalid_input", "Invalid Input", refusal)
+		return
+	}
+	WriteEnvelope(s.t, w, http.StatusOK, s.resourceRow(), nil)
+}
+
+// applyGrantChange applies one grant change to the mock's device list and
+// returns the detail of the refusal, empty when the change is accepted. A
+// refused change leaves the list as it was. The caller holds s.mu.
+func (s *Server) applyGrantChange(replace *[]string, add, remove []string) string {
+	if s.ignoreGrantEdits {
+		add, remove = nil, nil
+	}
+	next := s.allowedDeviceKeys
+	switch {
+	case replace != nil && len(add)+len(remove) > 0:
+		return "replace the complete device list or change single keys, not both"
+	case replace != nil:
+		next = *replace
+	default:
+		for _, key := range add {
+			if slices.Contains(remove, key) {
+				return "a device key cannot be both added and removed"
+			}
+		}
+		next = slices.DeleteFunc(slices.Clone(next), func(key string) bool { return slices.Contains(remove, key) })
+		for _, key := range add {
+			if !slices.Contains(next, key) {
+				next = append(next, key)
+			}
+		}
+	}
+	if len(next) > maxAllowedDeviceKeys {
+		return "at most 256 allowed device keys"
+	}
+	s.allowedDeviceKeys = slices.Clone(next)
+	return ""
 }
 
 // sameKeys reports whether two device key lists hold the same keys in any
