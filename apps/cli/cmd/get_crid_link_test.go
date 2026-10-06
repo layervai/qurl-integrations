@@ -136,13 +136,32 @@ func getModes() []shareMode {
 	return modes
 }
 
-// markDeviceState makes stateDir read as holding a device identity. The
-// content is never read: the device runtime in these tests is a fake, and the
-// local check looks only at the file's name.
-func markDeviceState(t *testing.T, stateDir string) {
+// saveDeviceState stores state in stateDir through the CLI's own state store,
+// which is how an enrollment writes it. After that, stateDir reads as holding
+// a device identity.
+//
+// The tests never read the file back: the device runtime here is a fake, and
+// get's local check looks only at the file's name. The file must still come
+// from the store. Every command checks the state directory before it uses it,
+// and on Windows that check refuses a state file whose access control list
+// (ACL) is not the protected, owner-only one. A file written with
+// os.WriteFile gets the default ACL there, so the command would stop before
+// the code under test runs.
+func saveDeviceState(t *testing.T, stateDir string, state *qurl.AgentState) {
 	t.Helper()
-	if err := os.WriteFile(filepath.Join(stateDir, connectorstate.AgentStateFile), []byte("{}\n"), 0o600); err != nil {
-		t.Fatal(err)
+	store, err := connectorstate.Open(stateDir)
+	if err != nil {
+		t.Fatalf("open the device state store: %v", err)
+	}
+	sdkStore, err := store.Handoff()
+	if err == nil {
+		err = sdkStore.SaveAgentState(context.Background(), state)
+	}
+	if closeErr := store.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		t.Fatalf("save the device state: %v", err)
 	}
 }
 
@@ -152,8 +171,52 @@ func enrolledDevice(t *testing.T, state *qurl.AgentState) func(args []string) *r
 	t.Helper()
 	return func(args []string) *runOpts {
 		opts := registeredDevice(t, state)(args)
-		markDeviceState(t, opts.shareStateDir)
+		saveDeviceState(t, opts.shareStateDir, state)
 		return opts
+	}
+}
+
+// TestEnrolledDeviceHoldsStateTheCLIAccepts pins the fixture that every test
+// of a device with an identity is built on. The state directory must pass the
+// check each command makes before it uses the directory, and it must hold the
+// device's state as the store wrote it.
+//
+// If this test fails, fix enrolledDevice first: the other tests of a device
+// with an identity then fail for the same reason, before the code they test
+// runs.
+func TestEnrolledDeviceHoldsStateTheCLIAccepts(t *testing.T) {
+	state := bootstrapRegisteredState(t)
+	stateDir := enrolledDevice(t, state)(nil).shareStateDir
+
+	if !connectorstate.EnvelopePresent(stateDir) {
+		t.Fatal("the fixture's state directory does not read as holding a device identity")
+	}
+	// The share and get commands open the local share registry first. That
+	// open is the check of the directory and of the state file in it.
+	if _, err := connectorstate.OpenLocalShareRegistry(stateDir); err != nil {
+		t.Fatalf("the CLI refuses the fixture's state directory: %v", err)
+	}
+
+	store, err := connectorstate.Open(stateDir)
+	if err != nil {
+		t.Fatalf("the CLI cannot open the fixture's device state: %v", err)
+	}
+	defer func() {
+		if err := store.Close(); err != nil {
+			t.Errorf("close the device state store: %v", err)
+		}
+	}()
+	sdkStore, err := store.Handoff()
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := sdkStore.LoadAgentState(context.Background())
+	if err != nil || loaded == nil {
+		t.Fatalf("the CLI cannot load the fixture's device state: state present %t, error %v", loaded != nil, err)
+	}
+	if loaded.AgentID != state.AgentID || loaded.DeviceAPIKeyID != state.DeviceAPIKeyID {
+		t.Errorf("the state directory holds device %q with key id %q, want %q with %q",
+			loaded.AgentID, loaded.DeviceAPIKeyID, state.AgentID, state.DeviceAPIKeyID)
 	}
 }
 
