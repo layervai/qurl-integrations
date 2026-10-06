@@ -330,13 +330,27 @@ type journeyResourceStatusDoc struct {
 	Status     string `json:"status"`
 }
 
+// sandboxInspectionDoc names every key of the sharing document that
+// `qurl inspect -o json` may print for a published local service. The healthy
+// journey decodes into it with unknown keys refused, so a key added to that
+// document has to be added here in the same change;
+// TestSandboxInspectionDocReadsEveryInspectKey holds that. Give the key its
+// rule in assertHealthySandboxInspection too; no test holds that.
 type sandboxInspectionDoc struct {
-	CRID            string     `json:"crid"`
-	ResourceID      string     `json:"resource_id"`
-	TargetURL       string     `json:"target_url"`
-	DesiredState    string     `json:"desired_state"`
-	ConnectionState string     `json:"connection_state"`
-	ServingEpoch    uint64     `json:"serving_epoch"`
+	CRID            string `json:"crid"`
+	ResourceID      string `json:"resource_id"`
+	TargetURL       string `json:"target_url"`
+	DesiredState    string `json:"desired_state"`
+	ConnectionState string `json:"connection_state"`
+	ServingEpoch    uint64 `json:"serving_epoch"`
+	// CreatedAt is absent when the service did not report the date.
+	CreatedAt *time.Time `json:"created_at"`
+	// Publisher is always present. Its name is absent when the publisher set
+	// none; its verified key is always written.
+	Publisher *struct {
+		Name     *string `json:"name"`
+		Verified *bool   `json:"verified"`
+	} `json:"publisher"`
 	DaemonState     *string    `json:"daemon_state"`
 	LastTransition  *time.Time `json:"last_transition"`
 	FailureCategory *string    `json:"failure_category"`
@@ -604,6 +618,15 @@ func assertHealthySandboxInspection(
 	}
 	if document.FailureCategory != nil || document.FailureCode != nil || document.NextRetryAt != nil {
 		t.Fatalf("qurl inspect exposed failure or retry details for a healthy share: %+v", document)
+	}
+	// The publisher object and its status are always written, so a script
+	// never reads a missing key as a status. A creation date, when the service
+	// reported one, is a real date.
+	if document.Publisher == nil || document.Publisher.Verified == nil {
+		t.Fatal("qurl inspect wrote no publisher status")
+	}
+	if document.CreatedAt != nil && document.CreatedAt.IsZero() {
+		t.Fatal("qurl inspect wrote a creation date that is the zero time")
 	}
 	for _, secret := range forbidden {
 		if secret != "" && bytes.Contains(raw, []byte(secret)) {

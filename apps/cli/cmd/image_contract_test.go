@@ -297,6 +297,7 @@ func TestCLIRequiredPRTestGatesAreExactAndFailClosed(t *testing.T) {
 		"TestSandboxGrantedRouteProbeRejectsMissingAuthorization",
 		"TestSandboxGrantedRouteReadiness",
 		"TestSandboxHarnessPassesInlineAPIKeyToExactBinary",
+		"TestSandboxInspectionDocReadsEveryInspectKey",
 		"TestSandboxLocalStateReasonDoesNotForwardHostileLogText",
 		"TestSandboxLocalStateReasonIsClosedAndUsesLatestCause",
 		"TestSandboxNamespaceIsCanonicalAndSeparated",
