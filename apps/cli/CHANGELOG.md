@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.3.1](https://github.com/layervai/qurl-integrations/compare/v3.3.0...v3.3.1) (2026-10-06)
+
+
+### Bug Fixes
+
+* **cli:** the journey reads the publisher and creation date that inspect writes ([#1560](https://github.com/layervai/qurl-integrations/issues/1560)) ([8dd72dd](https://github.com/layervai/qurl-integrations/commit/8dd72dd56145fb9053f522a523cc12658c3cf2a5))
+
 ## [3.3.0](https://github.com/layervai/qurl-integrations/compare/v3.2.0...v3.3.0) (2026-10-06)
 
 
