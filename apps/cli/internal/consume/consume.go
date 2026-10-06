@@ -138,5 +138,6 @@ func CustomerMessages() []string {
 		MsgCRIDLinkRequestRejected,
 		MsgCRIDLinkRefused,
 		msgCRIDLinkEntryUnusable,
+		msgCRIDLinkClientNeedsSettings,
 	}
 }

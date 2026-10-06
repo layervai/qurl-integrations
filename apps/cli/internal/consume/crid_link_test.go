@@ -171,6 +171,56 @@ func TestRequestCRIDLinkUnderTheShippedDeploymentIsNotMade(t *testing.T) {
 	}
 }
 
+// TestRequestCRIDLinkRefusesAnHTTPClientWithNoSettingsFile pins that an HTTP
+// client set for the link request is never dropped in silence. Without
+// QURL_DEPLOYMENT the request would go through the SDK's own resolution,
+// which takes no client from the opener. It would then pass by the double a
+// test set to keep requests inside the process. So the opener refuses before
+// it calls the SDK: no link, nothing sent, and a fixed error that reads as a
+// setup fault and carries no SDK text.
+//
+// The context is already canceled and QURL_DEPLOYMENT is empty in the
+// process too, so a version of the code without the check could not send a
+// request from this test either.
+func TestRequestCRIDLinkRefusesAnHTTPClientWithNoSettingsFile(t *testing.T) {
+	t.Setenv(qurl.EnvDeploymentPath, "")
+	const want = MsgAccessNotConfigured + " (an HTTP client was set for the request with only a CRID, and it is used only with a settings file)"
+	crid := apitest.GenerateResourceKey(t).CRID
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	for name, lookupEnv := range map[string]func(string) (string, bool){
+		"no environment":          nil,
+		"QURL_DEPLOYMENT not set": envMap(nil),
+		"QURL_DEPLOYMENT blank":   envMap(map[string]string{qurl.EnvDeploymentPath: "  "}),
+	} {
+		t.Run(name, func(t *testing.T) {
+			doer := &linkRequestDoer{}
+			opener := &AccessOpener{LookupEnv: lookupEnv, CRIDLinkHTTPClient: doer}
+
+			link, err := opener.RequestCRIDLink(ctx, crid)
+			if link != nil || !errors.Is(err, ErrAccessNotConfigured) || err.Error() != want {
+				t.Fatalf("RequestCRIDLink = %v, %v; want no link and ErrAccessNotConfigured with the message %q", link, err, want)
+			}
+			if errors.Is(err, qurl.ErrNotConfigured) || CRIDNotRequestable(err) {
+				t.Fatalf("the refusal %v reads as an answer of the SDK, which must not have been called", err)
+			}
+			// The classifier keeps it: the user would see the fixed message.
+			if got := ClassifyCRIDLinkError(err, true); got != err { //nolint:errorlint // The classifier must return this error itself.
+				t.Fatalf("ClassifyCRIDLinkError(%v) = %v, want the same error", err, got)
+			}
+			if sent := doer.sent(); sent != 0 {
+				t.Fatalf("a request was sent %d times", sent)
+			}
+		})
+	}
+
+	// With no client set, the same opener asks the SDK as before.
+	_, err := (&AccessOpener{LookupEnv: envMap(nil)}).RequestCRIDLink(ctx, crid)
+	if !errors.Is(err, qurl.ErrCRIDLinkNotConfigured) {
+		t.Fatalf("RequestCRIDLink with no client set = %v, want the SDK's answer for a deployment that names no endpoint", err)
+	}
+}
+
 // TestCRIDLinkOfferedFromADeploymentFile drives the real SDK check and the
 // real SDK call with settings from QURL_DEPLOYMENT, for the three things a
 // file can say about the request.

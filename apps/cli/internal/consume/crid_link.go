@@ -75,6 +75,12 @@ const (
 	// CRID and that entry cannot be used. It names the entry by the key it
 	// has in the settings file, so the person who fixes the file can find it.
 	msgCRIDLinkEntryUnusable = `the settings name a "crid_link" entry that cannot be used`
+
+	// msgCRIDLinkClientNeedsSettings is the detail added to
+	// MsgAccessNotConfigured when RequestCRIDLink was given an HTTP client of
+	// its own and no settings file to use it with. Only a test can cause it:
+	// production never sets that client.
+	msgCRIDLinkClientNeedsSettings = "an HTTP client was set for the request with only a CRID, and it is used only with a settings file"
 )
 
 // Sentinels for a link requested with only a CRID, each mapped to exactly one
@@ -117,6 +123,17 @@ var (
 // someone meant to offer it here, and falling back in silence would hide the
 // mistake from them.
 var errCRIDLinkSetup = fmt.Errorf("%w (%s)", ErrAccessNotConfigured, msgCRIDLinkEntryUnusable)
+
+// errCRIDLinkClientNeedsSettings reports a programming mistake: the opener
+// carries an HTTP client for the link request, and no settings file to use
+// it with. Without a settings file the request goes through the SDK's own
+// resolution, which takes no client from here. So the request would leave
+// through the SDK's default client, which is exactly what a test sets the
+// client to prevent. RequestCRIDLink refuses and sends nothing.
+//
+// It is ErrAccessNotConfigured with a fixed detail, like errCRIDLinkSetup, so
+// ClassifyCRIDLinkError keeps it as it is and no SDK text is involved.
+var errCRIDLinkClientNeedsSettings = fmt.Errorf("%w (%s)", ErrAccessNotConfigured, msgCRIDLinkClientNeedsSettings)
 
 // CRIDLinkOffered reports whether this machine can ask for a link with only
 // a CRID at all. It needs no CRID. It sends nothing and creates nothing: it
@@ -183,8 +200,10 @@ func (o *AccessOpener) checkCRIDLinkConfig() error {
 // QURL_DEPLOYMENT through the CLI's environment first, then the SDK's own
 // resolution. It returns the SDK's answer unchanged, so the caller can tell
 // "the SDK will not ask for this CRID" (CRIDNotRequestable) from every other
-// failure (ClassifyCRIDLinkError). A settings file that cannot be used is the
-// one failure it reports itself, as ErrAccessNotConfigured.
+// failure (ClassifyCRIDLinkError). It reports two failures itself, both as
+// ErrAccessNotConfigured: a settings file that cannot be used, and an opener
+// with CRIDLinkHTTPClient set and no settings file, which is a mistake only a
+// test can make (errCRIDLinkClientNeedsSettings).
 //
 // Callers ask CRIDLinkOffered first. It reads the same settings, so a request
 // made after it said true is sent, unless the CRID is one the SDK will not
@@ -201,6 +220,12 @@ func (o *AccessOpener) RequestCRIDLink(ctx context.Context, resourceCRID string)
 		return nil, err
 	}
 	if !configured {
+		if o.CRIDLinkHTTPClient != nil {
+			// The SDK's own resolution cannot be given this client. Refuse
+			// before the SDK is called, so the client is never dropped in
+			// silence.
+			return nil, errCRIDLinkClientNeedsSettings
+		}
 		return qurl.RequestCRIDLink(ctx, resourceCRID)
 	}
 	cfg, err := cridLinkConfig(&d)
