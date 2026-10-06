@@ -86,7 +86,15 @@ const (
 	// msgPublicGrantsNoEffect follows a grant change on a public resource.
 	// Device grants decide who else may use a private resource; a public one
 	// does not consult them.
-	msgPublicGrantsNoEffect = "This resource is public, so device grants have no effect on it. They apply to a resource published with --private."
+	msgPublicGrantsNoEffect = "This resource is public, so device grants have no effect on it. They apply to a private resource, which is what `qurl publish` creates unless you pass --public."
+
+	// Usage errors for the publish flags that say who can open the resource.
+	// msgPublicAndPrivate and msgPrivateFalse are about the hidden --private
+	// flag, which is accepted only where it asks for what a publish does
+	// anyway.
+	msgPublicAndPrivate   = "--private and --public cannot be used together"
+	msgPrivateFalse       = "--private=false is not accepted: a resource is private unless you publish it with --public"
+	msgAllowKeyWithPublic = "--allow-device-key cannot be used with --public: a public resource has no list of allowed devices"
 
 	// msgNoKeyProvided is login's empty-input error.
 	msgNoKeyProvided = "no API key provided"
@@ -163,6 +171,9 @@ func customerMessages() []string {
 		msgValidCRIDRequired,
 		msgShareNeedsDevice,
 		msgPublicGrantsNoEffect,
+		msgPublicAndPrivate,
+		msgPrivateFalse,
+		msgAllowKeyWithPublic,
 		msgNoKeyProvided,
 		msgAlreadyGone,
 		msgOpeningBrowser,

@@ -114,16 +114,20 @@ func TestHelpLeadsWithTheOneCommandLocalJourney(t *testing.T) {
 // resource, on the devices the publisher allowed, and any other device gets
 // "not found".
 //
-// Public and private stay distinct, so --private never reads as a no-op: a
-// resource is public unless published with --private, which limits it to its
+// Public and private stay distinct, and the default is stated: a resource is
+// private unless published with --public, and a private one is limited to its
 // owner and the allowed devices.
 //
 // Publish help and the README then say what a publisher needs to know about
 // a public resource, each exactly once and in the words get's help uses:
 // where the deployment offers it, anyone who has the CRID can open the
-// resource; the deployment this release ships does not offer it yet; and
-// --private is how to limit a resource. Both also say that privacy is set at
-// creation.
+// resource; and the deployment this release ships does not offer it yet. Both
+// also say that privacy is set at creation.
+//
+// --private was how a private resource was published while public was the
+// default. It is still accepted and changes nothing, so no help surface
+// teaches it: the flag is hidden, and only the README mentions it, once, for
+// a reader who has a command from an earlier release.
 //
 // The sentence about the shipped deployment is true for as long as
 // TestRequestCRIDLinkUnderTheShippedDeploymentIsNotMade passes. A release
@@ -172,7 +176,6 @@ func TestSharingCopyStatesTheDeviceAccessRule(t *testing.T) {
 	const (
 		anyone = "Where the deployment offers it, a public resource can also be opened by anyone who has its CRID."
 		notYet = "The deployment this release ships does not offer it yet."
-		limit  = "To limit a resource to its owner and the devices you allow, publish it with --private."
 	)
 	for _, surface := range []struct {
 		name, text string
@@ -187,14 +190,14 @@ func TestSharingCopyStatesTheDeviceAccessRule(t *testing.T) {
 		{"README", readme, "Privacy is set at creation; a retry cannot change it.", 2},
 	} {
 		for _, want := range []string{
-			"A resource is public unless you publish it with",
-			"limits it to its owner and the devices",
+			"A resource is private unless you publish it with --public",
+			"limited to its owner and the devices",
 		} {
 			if !strings.Contains(surface.text, want) {
-				t.Errorf("%s does not keep public and private distinct: missing %q", surface.name, want)
+				t.Errorf("%s does not state the default and keep public and private distinct: missing %q", surface.name, want)
 			}
 		}
-		for _, want := range []string{anyone + " " + notYet, limit, surface.setAtCreation} {
+		for _, want := range []string{anyone + " " + notYet, surface.setAtCreation} {
 			if got := strings.Count(surface.text, want); got != 1 {
 				t.Errorf("%s states %q %d times, want exactly once", surface.name, want, got)
 			}
@@ -206,7 +209,13 @@ func TestSharingCopyStatesTheDeviceAccessRule(t *testing.T) {
 
 	root, _ := newRoot("test", discardStreams())
 	checked := map[string]string{"README": readme}
+	if got := strings.Count(readme, "--private"); got != 1 || !strings.Contains(readme, "--private was given; that flag is still accepted and now changes nothing") {
+		t.Errorf("README mentions --private %d times; want once, saying that the flag is still accepted and changes nothing", got)
+	}
 	for where, text := range visibleSurfaces(root) {
+		if strings.Contains(text, "--private") {
+			t.Errorf("%s teaches --private, which no longer changes what a publish does", where)
+		}
 		checked[where] = collapse(text)
 		if where != "qurl publish long" && where != "qurl get long" && strings.Contains(checked[where], notYet) {
 			t.Errorf("%s says that the shipped deployment does not offer the request; among the help surfaces only publish and get say it", where)
@@ -230,6 +239,16 @@ func TestSharingCopyStatesTheDeviceAccessRule(t *testing.T) {
 		} {
 			if strings.Contains(lower, retired) {
 				t.Errorf("%s still promises sharing without the device's identity: found %q", where, retired)
+			}
+		}
+		// Public was the default until private became it.
+		for _, retired := range []string{
+			"a resource is public unless",
+			"publish it with --private",
+			"requires --private",
+		} {
+			if strings.Contains(lower, retired) {
+				t.Errorf("%s still describes public as the default: found %q", where, retired)
 			}
 		}
 		for _, retired := range []string{
@@ -326,7 +345,10 @@ func TestREADMEQuickstartOutputMatchesPrinter(t *testing.T) {
 		Out: &stdout,
 		Err: &stderr,
 	}, output.FormatText, false, false, false, nil)
+	// The walkthrough publishes with no flag, so its resource is private.
+	private := true
 	if err := printer.Publish(&qurlapi.Published{
+		Private:   &private,
 		CRID:      "<CRID>",
 		TargetURL: "http://127.0.0.1:3000",
 		Status:    "serving",

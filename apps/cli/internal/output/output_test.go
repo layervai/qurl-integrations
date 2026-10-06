@@ -265,6 +265,121 @@ func TestPublishFoundExistingTriState(t *testing.T) {
 	}
 }
 
+// TestPublishSaysWhoCanOpenTheResource pins the one row of the publish
+// document that says which kind of resource was made, in both directions and
+// in plain words, and what the other two outputs do with the same fact: JSON
+// carries it as private, and --quiet stays the CRID alone. A value with no
+// confirmed privacy gets no row and no member; it is never shown as either.
+func TestPublishSaysWhoCanOpenTheResource(t *testing.T) {
+	t.Parallel()
+	yes, no := true, false
+	for _, tc := range []struct {
+		name     string
+		private  *bool
+		wantRow  string
+		wantJSON string
+	}{
+		{name: "private", private: &yes, wantRow: "  Access:  private — only you and the people you allow can open it\n", wantJSON: `"private": true`},
+		{name: "public", private: &no, wantRow: "  Access:  public — anyone who has the CRID can open it\n", wantJSON: `"private": false`},
+		{name: "not confirmed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			published := &qurlapi.Published{Private: tc.private, CRID: "thecrid", ResourceID: "rid", TargetURL: "http://127.0.0.1:3000", Status: "serving"}
+			render := func(format Format, quiet bool) string {
+				t.Helper()
+				var out, errBuf bytes.Buffer
+				if err := newTestPrinter(&out, &errBuf, format, quiet, false, false).Publish(published); err != nil {
+					t.Fatal(err)
+				}
+				if errBuf.Len() != 0 {
+					t.Fatalf("publish wrote to stderr: %q", errBuf.String())
+				}
+				return out.String()
+			}
+			text := render(FormatText, false)
+			want := "Published\n\n  Target:  http://127.0.0.1:3000\n" + tc.wantRow + "  Status:  serving\n\nCRID: thecrid\n"
+			if text != want {
+				t.Fatalf("text = %q, want %q", text, want)
+			}
+			if tc.wantRow == "" && (strings.Contains(text, labelAccess) || strings.Contains(text, "private") || strings.Contains(text, "public")) {
+				t.Fatalf("unconfirmed privacy was shown as one kind: %q", text)
+			}
+			document := render(FormatJSON, false)
+			if tc.wantJSON == "" {
+				if strings.Contains(document, `"private"`) {
+					t.Fatalf("unconfirmed privacy reached the JSON document: %s", document)
+				}
+			} else if !strings.Contains(document, tc.wantJSON) {
+				t.Fatalf("JSON = %s, want %s", document, tc.wantJSON)
+			}
+			if quiet := render(FormatText, true); quiet != "thecrid\n" {
+				t.Fatalf("--quiet = %q, want the CRID alone", quiet)
+			}
+		})
+	}
+	if !strings.HasPrefix(msgPublishPrivate, "private") || !strings.HasPrefix(msgPublishPublic, "public") {
+		t.Fatal("each access row must lead with the word a publisher will look for")
+	}
+}
+
+// TestPublishAccessConflictRendering pins what a publisher reads when the
+// target is already published with other access settings, for the code the
+// service sends and for the answer of an older service: what exists, the one
+// next step, and the request id. The exit code is the Conflict row for every
+// case, and the service's own wording, which is about request fields, never
+// reaches the terminal.
+func TestPublishAccessConflictRendering(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		olderService    bool
+		existingPrivate bool
+		opts            qurlapi.PublishOptions
+		headline        string
+		hint            string
+	}{
+		{name: "public exists", headline: "this target is already published as public, and privacy is fixed when a resource is first published", hint: hintPublishExistingPublic},
+		{name: "private exists", existingPrivate: true, opts: qurlapi.PublishOptions{Public: true}, headline: "this target is already published as private, and privacy is fixed when a resource is first published", hint: hintPublishExistingPrivate},
+		{name: "older service, public exists", olderService: true, headline: "this target is already published as public, and privacy is fixed when a resource is first published", hint: hintPublishExistingPublic},
+		{name: "older service, private exists", olderService: true, existingPrivate: true, opts: qurlapi.PublishOptions{Public: true}, headline: "this target is already published as private, and privacy is fixed when a resource is first published", hint: hintPublishExistingPrivate},
+		{name: "older service, a device list", olderService: true, opts: qurlapi.PublishOptions{AllowedDeviceKeys: []string{"recipient"}}, headline: "this target is already published, and its privacy or its allowed devices differ from what this command asked for", hint: hintPublishAccessDiffers},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := apitest.NewServer(t)
+			if tc.olderService {
+				srv.PlayPublicByDefault()
+			}
+			srv.SetResourceAccess(tc.existingPrivate)
+			srv.SetPublishFoundExisting(true)
+			client, err := qurlapi.New(&qurlapi.Config{BaseURL: srv.URL, APIKey: "lv_test_logincredential123456789", Version: "test"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, publishErr := client.Publish(context.Background(), "https://example.com/data", tc.opts)
+			if got := exitcode.FromError(publishErr); got != exitcode.Conflict {
+				t.Fatalf("exit code = %d, want %d (error %v)", got, exitcode.Conflict, publishErr)
+			}
+			var buf bytes.Buffer
+			RenderError(&buf, fmt.Errorf("publish: %w", publishErr), false)
+			want := "Error: " + tc.headline + "\n\n  " + tc.hint + "\n  Request ID: req_test\n"
+			if got := buf.String(); got != want {
+				t.Fatalf("rendering = %q, want %q", got, want)
+			}
+		})
+	}
+	for hint, parts := range map[string][]string{
+		hintPublishExistingPublic:  {"run the command again with --public", "delete it with `qurl delete <CRID>`", "`qurl list` shows its CRID", "publish again"},
+		hintPublishExistingPrivate: {"run the command again without --public", "delete it with `qurl delete <CRID>`", "`qurl list` shows its CRID", "publish again"},
+		hintPublishAccessDiffers:   {"privacy is fixed when a resource is first published", "without --allow-device-key", "`qurl grants <CRID>`", "delete the resource and publish again"},
+	} {
+		for _, part := range parts {
+			if !strings.Contains(hint, part) {
+				t.Errorf("hint lost %q: %q", part, hint)
+			}
+		}
+	}
+}
+
 // TestRedactionGrepProof plants a credential in every input a formatter or
 // error rendering touches on the diagnostic surfaces and asserts the secret
 // never reaches the rendered bytes.
@@ -1002,6 +1117,8 @@ func TestEveryConnectorMessageIsRegistered(t *testing.T) {
 		msgConnectorAssignmentUnavailable, hintConnectorAssignmentUnavailable,
 		msgConnectorAssignmentInvalid, hintConnectorAssignmentInvalid,
 		msgConnectorAssignmentExpired, hintConnectorAssignmentExpired,
+		labelAccess, msgPublishPrivate, msgPublishPublic,
+		hintPublishExistingPublic, hintPublishExistingPrivate, hintPublishAccessDiffers,
 	}
 	for _, msg := range rendered {
 		if !registered[msg] {

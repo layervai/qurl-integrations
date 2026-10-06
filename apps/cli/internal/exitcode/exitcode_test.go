@@ -43,6 +43,7 @@ var cliSentinels = map[string]struct {
 	"qurlapi.ErrAccountPort":            {qurlapi.ErrAccountPort, Config},
 	"qurlapi.ErrAccountEndpoint":        {qurlapi.ErrAccountEndpoint, Config},
 	"qurlapi.ErrAccountDenied":          {qurlapi.ErrAccountDenied, Auth},
+	"qurlapi.ErrPublishAccessConflict":  {qurlapi.ErrPublishAccessConflict, Conflict},
 	"auth.ErrAccountRecoveryState":      {auth.ErrAccountRecoveryState, Auth},
 	"auth.ErrAnonymousRecovery":         {auth.ErrAnonymousRecovery, Auth},
 	"auth.ErrExternalDeviceMissing":     {auth.ErrExternalDeviceMissing, Auth},

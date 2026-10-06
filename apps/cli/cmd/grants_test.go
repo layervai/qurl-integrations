@@ -71,12 +71,12 @@ func TestGrantsRequireExactlyOneMutation(t *testing.T) {
 	}
 }
 
-func TestPrivatePublishConfirmsOutput(t *testing.T) {
+func TestPublishWithADeviceListConfirmsOutput(t *testing.T) {
 	srv := apitest.NewServer(t)
 	key := "cHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHA="
-	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "publish", "https://example.com", "--private", "--allow-device-key", key, "-o", "json"}})
+	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "publish", "https://example.com", "--allow-device-key", key, "-o", "json"}})
 	if res.code != 0 || !strings.Contains(res.stdout.String(), `"private": true`) {
-		t.Fatalf("private publish failed: %s", res.stderr.String())
+		t.Fatalf("publish with a device list failed: %s", res.stderr.String())
 	}
 }
 
@@ -91,7 +91,7 @@ func TestPublicGrantsExplainThatGrantsHaveNoEffect(t *testing.T) {
 		})
 		res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "grants", srv.Key.CRID, "--clear", "-o", "json"}})
 		stderr := res.stderr.String()
-		noted := strings.Contains(stderr, "This resource is public, so device grants have no effect on it. They apply to a resource published with --private.")
+		noted := strings.Contains(stderr, "This resource is public, so device grants have no effect on it. They apply to a private resource, which is what `qurl publish` creates unless you pass --public.")
 		if res.code != 0 || noted == private {
 			t.Fatalf("private=%t: exit %d, no-effect note shown=%t: %s", private, res.code, noted, stderr)
 		}

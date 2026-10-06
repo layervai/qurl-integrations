@@ -199,9 +199,12 @@ type envelopeMeta struct {
 }
 
 // TODO(upstream-contract): privacy and tunnel find-or-create fields mirror
-// qurl-service CreateResourceRequest; privacy is immutable after creation.
+// the service's create-resource request; privacy is immutable after creation.
 type publishRequest struct {
-	Private           *bool    `json:"private,omitempty"`
+	// Private is always sent, never omitted. What an absent field means is
+	// the service's choice and has changed: a newer service reads it as
+	// private, an older one as public.
+	Private           bool     `json:"private"`
 	AllowedDeviceKeys []string `json:"allowed_device_keys,omitempty"`
 	Slug              string   `json:"slug,omitempty"`
 	FindOrCreate      bool     `json:"find_or_create,omitempty"`
@@ -212,8 +215,9 @@ type publishRequest struct {
 	Alias             string   `json:"alias,omitempty"`
 }
 
-// Publish registers a URL or pre-creates a private Connector resource.
-// The direct REST call carries fields absent from the pinned SDK.
+// Publish registers a URL or pre-creates a Connector resource, private unless
+// opts.Public is set. The direct REST call carries fields absent from the
+// pinned SDK.
 //
 //nolint:gocritic // Keep value options in the existing Client contract; this one-shot network operation is not a hot loop.
 func (c *client) Publish(ctx context.Context, targetURL string, opts PublishOptions) (*Published, error) {
@@ -222,8 +226,9 @@ func (c *client) Publish(ctx context.Context, targetURL string, opts PublishOpti
 			return nil, err
 		}
 	}
+	wantPrivate := !opts.Public
 	body := publishRequest{
-		Private:           opts.Private,
+		Private:           wantPrivate,
 		AllowedDeviceKeys: opts.AllowedDeviceKeys,
 		Type:              "url",
 		TargetURL:         targetURL,
@@ -244,7 +249,7 @@ func (c *client) Publish(ctx context.Context, targetURL string, opts PublishOpti
 		return nil, err
 	}
 	if reply.status != http.StatusCreated {
-		return nil, reply.problem()
+		return nil, publishProblem(reply, &opts)
 	}
 	var env struct {
 		Data resourceRow  `json:"data"`
@@ -262,8 +267,11 @@ func (c *client) Publish(ctx context.Context, targetURL string, opts PublishOpti
 	if err := resourceidentity.ValidatePair(env.Data.CRID, env.Data.ResourceID); err != nil {
 		return nil, fmt.Errorf("%w: publish response identity: %w", qurl.ErrInvalidAPIResponse, err)
 	}
-	if opts.Private != nil && (env.Data.Private == nil || *env.Data.Private != *opts.Private) {
-		return nil, fmt.Errorf("%w: API did not confirm the requested resource privacy", qurl.ErrInvalidAPIResponse)
+	// The row must say which privacy the resource has, and it must be the one
+	// asked for. A row that omits it is not read as either: a service that
+	// ignored the field may have made the resource with the other privacy.
+	if env.Data.Private == nil || *env.Data.Private != wantPrivate {
+		return nil, &publishPrivacyError{wantPublic: opts.Public}
 	}
 	if len(opts.AllowedDeviceKeys) > 0 && !slices.Equal(slices.Sorted(slices.Values(opts.AllowedDeviceKeys)), slices.Sorted(slices.Values(env.Data.AllowedDeviceKeys))) {
 		return nil, fmt.Errorf("%w: API did not confirm the requested device grants", qurl.ErrInvalidAPIResponse)
@@ -279,6 +287,46 @@ func (c *client) Publish(ctx context.Context, targetURL string, opts PublishOpti
 		FoundExisting: env.Meta.FoundExisting,
 		Publisher:     env.Data.Publisher.publisher(),
 	}, nil
+}
+
+// TODO(upstream-contract): the service refuses a publish whose target is
+// already published with the other privacy with HTTP 400 and the code
+// privacy_mismatch. A service from before that code answers its generic
+// invalid-input problem with this text in the detail, and gives the same
+// answer when the request's device list differs from the stored one.
+const (
+	codePrivacyMismatch        = "privacy_mismatch"
+	legacyAccessSettingsDetail = "existing resource access settings differ"
+)
+
+// publishProblem builds the error for a refused publish. A refusal because
+// the target is already published with other access settings becomes a
+// PublishAccessConflictError; every other refusal is the plain problem.
+//
+// The request stated one privacy, so a privacy mismatch means the resource
+// that exists has the other one. The older answer says that only when the
+// request carried no device list: with a list, the list may be what differs,
+// and the error then names neither.
+func publishProblem(reply *restReply, opts *PublishOptions) error {
+	problem := reply.problem()
+	var apiErr *Error
+	if !errors.As(problem, &apiErr) || apiErr.StatusCode != http.StatusBadRequest {
+		return problem
+	}
+	existing := ExistingAccessPublic
+	if opts.Public {
+		existing = ExistingAccessPrivate
+	}
+	switch {
+	case strings.EqualFold(apiErr.Code, codePrivacyMismatch):
+	case strings.Contains(strings.ToLower(apiErr.Detail), legacyAccessSettingsDetail):
+		if len(opts.AllowedDeviceKeys) > 0 {
+			existing = ExistingAccessUnknown
+		}
+	default:
+		return problem
+	}
+	return &PublishAccessConflictError{Existing: existing, problem: apiErr}
 }
 
 // validateTargetURL applies the SDK's local target rules (http/https, a

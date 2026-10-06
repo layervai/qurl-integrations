@@ -155,8 +155,10 @@ type downloadJSON struct {
 	Publisher         publisherJSON `json:"publisher"`
 }
 
-// Publish renders a publish result. Text mode prints the CRID last, alone on
-// its line, so it is the easiest thing to select and copy. Publishing an
+// Publish renders a publish result. Text mode says in one row who can open
+// the resource and prints the CRID last, alone on its line, so it is the
+// easiest thing to select and copy; JSON carries the same fact as `private`,
+// and --quiet stays the CRID alone. Publishing an
 // already-published URL returns the existing resource, and the rendering
 // says so: the text document itself carries the story (headline plus note),
 // while --quiet and JSON keep their stdout documents unchanged and note the
@@ -339,8 +341,14 @@ func (p *Printer) publishText(res *qurlapi.Published) error {
 	tw := tabwriter.NewWriter(p.out, 0, 0, 2, ' ', 0)
 	twe := &errWriter{w: tw}
 	twe.printf("  %s\t%s\n", p.bold("Target:"), res.TargetURL)
+	// A publish result always carries the privacy the service confirmed. The
+	// row is left out only for a value that has none, never guessed.
 	if res.Private != nil {
-		twe.printf("  %s\t%t\n", p.bold("Private:"), *res.Private)
+		access := msgPublishPublic
+		if *res.Private {
+			access = msgPublishPrivate
+		}
+		twe.printf("  %s\t%s\n", p.bold(labelAccess), access)
 	}
 	if res.Status != "" {
 		twe.printf("  %s\t%s\n", p.bold("Status:"), res.Status)

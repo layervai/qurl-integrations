@@ -34,7 +34,8 @@ type Client interface {
 	// without minting a second credential.
 	MintConnectorEnrollmentToken(ctx context.Context, opts MintConnectorEnrollmentTokenOptions) (*ConnectorEnrollmentToken, error)
 	// Publish registers targetURL as a protected resource and returns its
-	// identity, CRID included when the service mints one.
+	// identity, CRID included when the service mints one. The resource is
+	// private unless opts.Public is set.
 	Publish(ctx context.Context, targetURL string, opts PublishOptions) (*Published, error)
 	// Share mints a short-lived share link for the resource identified by
 	// id, which must be a CRID.
@@ -81,7 +82,14 @@ type AccountClient interface {
 
 // PublishOptions carries creation policy and optional metadata.
 type PublishOptions struct {
-	Private           *bool
+	// Public asks for a resource that anyone who has its CRID can open. The
+	// zero value asks for a private one, limited to its owner and the devices
+	// in AllowedDeviceKeys. Publish states the choice in every create request
+	// and requires the answer to confirm it, so no caller depends on what a
+	// service does when the field is absent.
+	Public bool
+	// AllowedDeviceKeys is the first list of devices allowed on a private
+	// resource. It has no meaning for a public one.
 	AllowedDeviceKeys []string
 	// ConnectorID selects a tunnel resource instead of a URL.
 	ConnectorID string
@@ -110,7 +118,9 @@ type ListOptions struct {
 
 // Published is the repo-owned result of Publish.
 type Published struct {
-	// Nil means privacy was not returned or queried, never public confirmation.
+	// Private is the privacy the service confirmed. Publish never returns a
+	// result without it. Nil means privacy was not returned or queried, never
+	// public confirmation, and occurs only in a value built elsewhere.
 	Private    *bool
 	CRID       string
 	ResourceID string

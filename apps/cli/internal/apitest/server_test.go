@@ -259,3 +259,141 @@ func TestUnversionedShareRouteIsHeldToTheSameRule(t *testing.T) {
 		}
 	}
 }
+
+// answer is the part of a resource answer these tests read.
+type answer struct {
+	Data struct {
+		Private           *bool    `json:"private"`
+		AllowedDeviceKeys []string `json:"allowed_device_keys"`
+		Resource          *struct {
+			Private           *bool    `json:"private"`
+			AllowedDeviceKeys []string `json:"allowed_device_keys"`
+		} `json:"resource"`
+	} `json:"data"`
+	Error struct {
+		Code   string `json:"code"`
+		Detail string `json:"detail"`
+	} `json:"error"`
+}
+
+// call sends one authenticated JSON request and decodes the answer.
+func call(t *testing.T, srv *Server, method, path, body string) (int, answer) {
+	t.Helper()
+	req, err := http.NewRequestWithContext(t.Context(), method, srv.URL+path, strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer lv_test_apitest")
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	var decoded answer
+	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
+		t.Fatalf("decode %s %s answer: %v", method, path, err)
+	}
+	return resp.StatusCode, decoded
+}
+
+// TestCreateDefaultIsPrivateUnlessTheMockPlaysAnOlderService pins what the mock
+// does with a create request that states no privacy: private, as the service
+// does now, and public once the mock plays a service from before that. A
+// request that states its privacy gets it from both, and the resource reads
+// show what was made.
+func TestCreateDefaultIsPrivateUnlessTheMockPlaysAnOlderService(t *testing.T) {
+	const create = `{"type":"url","target_url":"https://example.com/data"%s}`
+	for _, test := range []struct {
+		name            string
+		publicByDefault bool
+		stated          string
+		want            bool
+	}{
+		{name: "nothing stated", want: true},
+		{name: "private stated", stated: `,"private":true`, want: true},
+		{name: "public stated", stated: `,"private":false`, want: false},
+		{name: "older service, nothing stated", publicByDefault: true, want: false},
+		{name: "older service, private stated", publicByDefault: true, stated: `,"private":true`, want: true},
+		{name: "older service, public stated", publicByDefault: true, stated: `,"private":false`, want: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			srv := NewServer(t)
+			if test.publicByDefault {
+				srv.PlayPublicByDefault()
+			}
+			status, created := call(t, srv, http.MethodPost, "/v1/resources", fmt.Sprintf(create, test.stated))
+			if status != http.StatusCreated || created.Data.Private == nil || *created.Data.Private != test.want {
+				t.Fatalf("create = %d with private %v, want 201 with %t", status, created.Data.Private, test.want)
+			}
+			_, detail := call(t, srv, http.MethodGet, "/v1/resources/"+srv.Key.CRID, "")
+			if detail.Data.Resource == nil || detail.Data.Resource.Private == nil || *detail.Data.Resource.Private != test.want {
+				t.Fatalf("the resource read does not show the privacy that was made: %+v", detail.Data.Resource)
+			}
+		})
+	}
+}
+
+// TestCreateThatFindsOtherAccessSettingsIsRefused pins the refusal for a
+// create that finds the existing resource with other access settings: the
+// privacy-mismatch code now, and before that code the invalid-input answer,
+// which a different device list gets too. A create that agrees with what
+// exists is answered with it.
+func TestCreateThatFindsOtherAccessSettingsIsRefused(t *testing.T) {
+	const create = `{"type":"url","target_url":"https://example.com/data"%s}`
+	for _, test := range []struct {
+		name            string
+		publicByDefault bool
+		existingPrivate bool
+		existingKeys    []string
+		stated          string
+		wantCode        string
+	}{
+		{name: "same privacy", existingPrivate: true, stated: `,"private":true`},
+		{name: "private asked, public exists", stated: `,"private":true`, wantCode: CodePrivacyMismatch},
+		{name: "public asked, private exists", existingPrivate: true, stated: `,"private":false`, wantCode: CodePrivacyMismatch},
+		{name: "nothing stated, public exists", wantCode: CodePrivacyMismatch},
+		{name: "older service, same privacy", publicByDefault: true, existingPrivate: true, stated: `,"private":true`},
+		{name: "older service, nothing stated, public exists", publicByDefault: true},
+		{name: "older service, private asked, public exists", publicByDefault: true, stated: `,"private":true`, wantCode: "invalid_input"},
+		{name: "older service, another device list", publicByDefault: true, existingPrivate: true, existingKeys: []string{"a"}, stated: `,"private":true,"allowed_device_keys":["b"]`, wantCode: "invalid_input"},
+		{name: "older service, the same device list", publicByDefault: true, existingPrivate: true, existingKeys: []string{"a", "b"}, stated: `,"private":true,"allowed_device_keys":["b","a"]`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			srv := NewServer(t)
+			if test.publicByDefault {
+				srv.PlayPublicByDefault()
+			}
+			srv.SetResourceAccess(test.existingPrivate, test.existingKeys...)
+			srv.SetPublishFoundExisting(true)
+			status, got := call(t, srv, http.MethodPost, "/v1/resources", fmt.Sprintf(create, test.stated))
+			if test.wantCode == "" {
+				if status != http.StatusCreated || got.Data.Private == nil || *got.Data.Private != test.existingPrivate {
+					t.Fatalf("create = %d with private %v, want the existing resource (private %t)", status, got.Data.Private, test.existingPrivate)
+				}
+				return
+			}
+			if status != http.StatusBadRequest || got.Error.Code != test.wantCode {
+				t.Fatalf("create = %d code %q, want 400 %q", status, got.Error.Code, test.wantCode)
+			}
+			if legacy := got.Error.Detail == LegacyAccessSettingsDetail; legacy != (test.wantCode == "invalid_input") {
+				t.Fatalf("refusal detail %q does not match the service the mock plays", got.Error.Detail)
+			}
+		})
+	}
+}
+
+// TestRequestsAreRecordedWithTheirBody pins that a recorded request carries
+// the bytes that were sent, and that the handler still reads them.
+func TestRequestsAreRecordedWithTheirBody(t *testing.T) {
+	srv := NewServer(t)
+	const body = `{"type":"url","target_url":"https://example.com/data","private":false}`
+	status, created := call(t, srv, http.MethodPost, "/v1/resources", body)
+	if status != http.StatusCreated || created.Data.Private == nil || *created.Data.Private {
+		t.Fatalf("the handler did not read the body it was sent: %d %+v", status, created.Data)
+	}
+	requests := srv.Requests()
+	if len(requests) != 1 || string(requests[0].Body) != body {
+		t.Fatalf("recorded requests = %+v, want the one create with its body", requests)
+	}
+}

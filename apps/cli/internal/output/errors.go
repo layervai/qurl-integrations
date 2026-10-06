@@ -53,6 +53,9 @@ func renderErrorLines(p *Printer, err error) []string {
 	if errors.Is(err, qurl.ErrTemporaryAccessLinksDisabled) {
 		return []string{head + " " + msgLinksUnavailable}
 	}
+	if lines, ok := publishConflictLines(p, head, err); ok {
+		return lines
+	}
 	if errors.Is(err, auth.ErrAccountRecoveryState) {
 		return []string{head + " " + msgAccountRecoveryState, "", "  " + p.dim(hintAccountRecoveryState)}
 	}
@@ -94,6 +97,32 @@ func renderErrorLines(p *Printer, err error) []string {
 		return apiErrorLines(p, head, apiErr)
 	}
 	return []string{head + " " + err.Error()}
+}
+
+// publishConflictLines renders a publish refused because the target is
+// already published with other access settings: what exists, the one next
+// step, and the request id. The service's own problem text is not shown. It
+// is the generic invalid-input wording, or names request fields, and neither
+// tells a publisher what to do.
+func publishConflictLines(p *Printer, head string, err error) ([]string, bool) {
+	var conflict *qurlapi.PublishAccessConflictError
+	if !errors.As(err, &conflict) {
+		return nil, false
+	}
+	hint := hintPublishAccessDiffers
+	switch conflict.Existing {
+	case qurlapi.ExistingAccessPublic:
+		hint = hintPublishExistingPublic
+	case qurlapi.ExistingAccessPrivate:
+		hint = hintPublishExistingPrivate
+	case qurlapi.ExistingAccessUnknown:
+	}
+	lines := []string{head + " " + conflict.Error(), "", "  " + p.dim(hint)}
+	var apiErr *qurlapi.Error
+	if errors.As(err, &apiErr) && apiErr.RequestID != "" {
+		lines = append(lines, "  "+p.dim("Request ID: "+apiErr.RequestID))
+	}
+	return lines, true
 }
 
 // hostErrorLines renders local host conditions that block native sharing.

@@ -37,6 +37,10 @@ type goldenCase struct {
 
 func goldenVariants() []string { return []string{"tty", "plain", "json"} }
 
+// goldenDevicePublicKey is a well-formed device public key for the cases that
+// name one. No device holds it.
+const goldenDevicePublicKey = "cHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHA="
+
 // TestGoldens pins the rendered bytes of every implemented command across
 // TTY, plain, and JSON projections, for success and error anatomies alike.
 func TestGoldens(t *testing.T) {
@@ -67,6 +71,72 @@ func TestGoldens(t *testing.T) {
 			prepare:      func(srv *apitest.Server) { srv.SetPublishFoundExisting(true) },
 			variants:     []string{"json"},
 			stdoutGolden: true,
+			stderrGolden: true,
+		},
+		{
+			// --public: the Access row says so in plain words and the JSON
+			// document says private: false. Nothing else differs.
+			name: "publish_public",
+			args: func(*apitest.Server) []string {
+				return []string{"publish", "https://example.com/data", "--public"}
+			},
+			variants:     goldenVariants(),
+			stdoutGolden: true,
+		},
+		{
+			// The target is already published as public and this publish asks
+			// for a private resource, the default: exit 7, what exists, and
+			// the two things the publisher can do. Nothing on stdout.
+			name: "error_publish_existing_public",
+			args: func(*apitest.Server) []string { return []string{"publish", "https://example.com/data"} },
+			prepare: func(srv *apitest.Server) {
+				srv.SetResourceAccess(false)
+				srv.SetPublishFoundExisting(true)
+			},
+			variants:     []string{"tty", "plain"},
+			wantCode:     7,
+			stderrGolden: true,
+		},
+		{
+			// The other direction: --public for a target that is private.
+			name: "error_publish_existing_private",
+			args: func(*apitest.Server) []string {
+				return []string{"publish", "https://example.com/data", "--public"}
+			},
+			prepare:      func(srv *apitest.Server) { srv.SetPublishFoundExisting(true) },
+			variants:     []string{"plain"},
+			wantCode:     7,
+			stderrGolden: true,
+		},
+		{
+			// An older service refuses a different device list with the answer
+			// it gives a privacy difference, so the message claims neither.
+			name: "error_publish_access_differs",
+			args: func(*apitest.Server) []string {
+				return []string{"publish", "https://example.com/data", "--allow-device-key", goldenDevicePublicKey}
+			},
+			prepare: func(srv *apitest.Server) {
+				srv.PlayPublicByDefault()
+				srv.SetPublishFoundExisting(true)
+			},
+			variants:     []string{"plain"},
+			wantCode:     7,
+			stderrGolden: true,
+		},
+		{
+			// The create answer does not say the resource is private: exit 10,
+			// no CRID anywhere, and what the publisher should check.
+			name: "error_publish_unconfirmed",
+			args: func(*apitest.Server) []string { return []string{"publish", "https://example.com/data"} },
+			prepare: func(srv *apitest.Server) {
+				srv.Script(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+					apitest.WriteEnvelope(t, w, http.StatusCreated, map[string]any{
+						"resource_id": srv.Key.ResourceID, "crid": srv.Key.CRID, "status": "active",
+					}, nil)
+				})
+			},
+			variants:     []string{"plain"},
+			wantCode:     10,
 			stderrGolden: true,
 		},
 		{

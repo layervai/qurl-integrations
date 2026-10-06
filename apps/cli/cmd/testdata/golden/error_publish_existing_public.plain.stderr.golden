@@ -1,0 +1,4 @@
+Error: this target is already published as public, and privacy is fixed when a resource is first published
+
+  Hint: to keep using the public resource, run the command again with --public. To make it private instead, delete it with `qurl delete <CRID>` (`qurl list` shows its CRID) and publish again; the new resource gets a new CRID.
+  Request ID: req_test

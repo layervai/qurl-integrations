@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+
+	"github.com/layervai/qurl-go/qurl"
 )
 
 // errTemplate is the fixed frame around server-provided problem text. It is
@@ -86,8 +88,100 @@ func (e *Error) ShareNotFound() bool {
 // can emit, for the CLI-wide jargon gate. Server-provided problem text is
 // out of scope: the gate covers what this repo authors.
 func CustomerMessages() []string {
-	return []string{errTemplate, msgAccountCallbackInvalid, msgAccountCallbackComplete, msgAccountLoadFailed, msgAccountUnavailable, msgAccountPortBusy, msgAccountBrowserFailed, msgAccountTimedOut, msgAccountCanceled, msgAccountExchangeFailed, msgAccountHTTPSRequired, msgAccountLinkInvalid, msgAccountOwnersInvalid}
+	return []string{
+		errTemplate, msgAccountCallbackInvalid, msgAccountCallbackComplete, msgAccountLoadFailed, msgAccountUnavailable, msgAccountPortBusy, msgAccountBrowserFailed, msgAccountTimedOut, msgAccountCanceled, msgAccountExchangeFailed, msgAccountHTTPSRequired, msgAccountLinkInvalid, msgAccountOwnersInvalid,
+		msgPublishAccessConflict, msgPublishExistingPublic, msgPublishExistingPrivate, msgPublishAccessDiffers,
+		msgPrivateUnconfirmed, msgPublicUnconfirmed,
+	}
 }
+
+// Publish refusals and answers that do not confirm the privacy asked for.
+const (
+	// msgPublishAccessConflict is the text of ErrPublishAccessConflict. The
+	// three messages after it are what a customer reads, one for each thing
+	// the refusal can say about the resource that exists.
+	msgPublishAccessConflict  = "this target is already published with other access settings"
+	msgPublishExistingPublic  = "this target is already published as public, and privacy is fixed when a resource is first published"
+	msgPublishExistingPrivate = "this target is already published as private, and privacy is fixed when a resource is first published"
+	msgPublishAccessDiffers   = "this target is already published, and its privacy or its allowed devices differ from what this command asked for"
+
+	// The answer to a create request did not say that the resource has the
+	// privacy the request stated. Nothing is printed on stdout, and the
+	// message says what may now exist, because the service may have made the
+	// resource before it answered.
+	msgPrivateUnconfirmed = "the service did not confirm that this resource is private, so no CRID was printed. A resource may now exist for this target and may be public: run `qurl list` to check, and delete it if you did not mean to publish it"
+	msgPublicUnconfirmed  = "the service did not confirm that this resource is public, so no CRID was printed. A resource may now exist for this target and may be private: run `qurl list` to check"
+)
+
+// ErrPublishAccessConflict marks a publish the service refused because the
+// target is already published with other access settings. Command, operand
+// and credential are all valid; the request conflicts with a resource that
+// exists, so it has the Conflict exit code.
+var ErrPublishAccessConflict = errors.New(msgPublishAccessConflict)
+
+// ExistingAccess is what a refused publish says about the resource that is
+// already published for the target.
+type ExistingAccess int
+
+const (
+	// ExistingAccessUnknown means the refusal does not say whether privacy or
+	// the device list is what differs.
+	ExistingAccessUnknown ExistingAccess = iota
+	// ExistingAccessPublic means the target is already published as public.
+	ExistingAccessPublic
+	// ExistingAccessPrivate means the target is already published as private.
+	ExistingAccessPrivate
+)
+
+// PublishAccessConflictError is a publish refused because the target is
+// already published with other access settings. It matches
+// ErrPublishAccessConflict, and the service's problem stays in the chain for
+// the request id.
+type PublishAccessConflictError struct {
+	// Existing is what the refusal says about the resource that exists.
+	Existing ExistingAccess
+
+	problem *Error
+}
+
+// Error states what exists, in the customer's words. The rendering adds the
+// next step.
+func (e *PublishAccessConflictError) Error() string {
+	switch e.Existing {
+	case ExistingAccessPublic:
+		return msgPublishExistingPublic
+	case ExistingAccessPrivate:
+		return msgPublishExistingPrivate
+	case ExistingAccessUnknown:
+	}
+	return msgPublishAccessDiffers
+}
+
+// Unwrap exposes the sentinel and the service's problem.
+func (e *PublishAccessConflictError) Unwrap() []error {
+	if e.problem == nil {
+		return []error{ErrPublishAccessConflict}
+	}
+	return []error{ErrPublishAccessConflict, e.problem}
+}
+
+// publishPrivacyError is a create answer that did not confirm the privacy the
+// request stated. It is an answer outside the contract, so it matches the
+// SDK's invalid-response sentinel and has that exit code.
+type publishPrivacyError struct{ wantPublic bool }
+
+func (e *publishPrivacyError) Error() string { return e.UserMessage() }
+
+// UserMessage is the text the terminal rendering shows in place of the
+// generic invalid-response wording.
+func (e *publishPrivacyError) UserMessage() string {
+	if e.wantPublic {
+		return msgPublicUnconfirmed
+	}
+	return msgPrivateUnconfirmed
+}
+
+func (e *publishPrivacyError) Unwrap() error { return qurl.ErrInvalidAPIResponse }
 
 const (
 	msgAccountLoadFailed     = "cannot load account sign-in settings"
