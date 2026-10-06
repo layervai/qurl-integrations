@@ -44,7 +44,8 @@ Where the deployment offers it, a public resource can also be fetched on any
 machine with only its CRID: no account and no setup. The deployment this
 release ships does not offer it yet. Where it is offered, get asks for a link
 with the CRID alone when this device cannot share the resource, and a machine
-with no device identity creates none. Three answers mean no link was given:
+with no device identity creates none. The three most common answers when no
+link is given:
 
   - "not found" (exit code 5): the CRID is mistyped, the resource was
     removed, or it is not open to this machine.

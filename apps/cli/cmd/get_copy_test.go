@@ -19,8 +19,10 @@ import (
 // it, together with the interim limitation
 // TestSharingCopyStatesTheDeviceAccessRule pins in publish help.
 //
-// Both name the three answers that mean no link was given, with the exit
-// codes of the table in internal/exitcode.
+// Both name the three most common answers when no link is given, with the
+// exit codes of the table in internal/exitcode. Both say that these are the
+// most common answers and not all of them: get has more, such as a publisher
+// that is offline or a resource that was closed.
 //
 // And neither sends the reader to a login, an account or an API key first:
 // fetching a public resource by its CRID has no such step.
@@ -39,6 +41,10 @@ func TestGetCopyStatesWhatOpensWithOnlyACRID(t *testing.T) {
 		promise = "a public resource can also be fetched on any machine with only its CRID: no account and no setup."
 		notYet  = "The deployment this release ships does not offer it yet."
 		noNew   = "a machine with no device identity creates none"
+		// common introduces the list of answers. allOfThem is the earlier
+		// wording, which claimed that the list was complete.
+		common    = "The three most common answers when no link is given:"
+		allOfThem = "Three answers mean no link was given"
 	)
 	answers := []struct {
 		answer, meaning string
@@ -58,10 +64,13 @@ func TestGetCopyStatesWhatOpensWithOnlyACRID(t *testing.T) {
 		{"qurl get --help", help, `"%s" (exit code %d): %s`},
 		{"README", readme, "%s %d %s"},
 	} {
-		for _, want := range []string{"Where the deployment offers it, " + promise + " " + notYet, noNew} {
+		for _, want := range []string{"Where the deployment offers it, " + promise + " " + notYet, noNew + ". " + common} {
 			if got := strings.Count(surface.text, want); got != 1 {
 				t.Errorf("%s states %q %d times, want exactly once", surface.name, want, got)
 			}
+		}
+		if strings.Contains(surface.text, allOfThem) {
+			t.Errorf("%s says %q, but get has more answers than the three it lists", surface.name, allOfThem)
 		}
 		lower := strings.ToLower(surface.text)
 		for _, a := range answers {
