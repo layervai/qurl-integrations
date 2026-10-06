@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/layervai/qurl-go/crid"
 	"github.com/layervai/qurl-go/qurl"
 )
 
@@ -273,6 +274,45 @@ func cridLinkConfig(d *qurl.Deployment) (qurl.Config, error) {
 // error after sending a request, this must change with it.
 func CRIDNotRequestable(err error) bool {
 	return errors.Is(err, qurl.ErrInvalidResourceRequest)
+}
+
+// CRIDNotRequestableClass names why the SDK will not ask for a link for a
+// CRID, for a diagnostic line. err is an error for which CRIDNotRequestable
+// is true.
+//
+// The result is one word from the fixed list below, chosen by the sentinel
+// err matches. It is never the SDK's own text, because that text can quote
+// what the user typed: for a character outside the CRID alphabet it gives
+// the byte and its position, and for a wrong length it gives the length.
+//
+// "unsupported_version" is the cause that reaches a caller in practice: a
+// well-formed CRID whose version this SDK cannot check a link against. The
+// next five are the classes of the local CRID check, under the names the
+// public conformance vectors give them. A caller that sees one of those has
+// found the SDK's check and the CLI's own check in disagreement, since the
+// CLI refuses such a CRID before it asks. "other" is a cause this list does
+// not know.
+//
+// TODO(upstream-contract): qurl-go refuses a CRID for a link request with
+// qurl.ErrUnsupportedCRIDVersion or with exactly one of the five sentinels of
+// its crid package. A cause it adds reads as "other" here until it is listed.
+func CRIDNotRequestableClass(err error) string {
+	switch {
+	case errors.Is(err, qurl.ErrUnsupportedCRIDVersion):
+		return "unsupported_version"
+	case errors.Is(err, crid.ErrCharset):
+		return "charset"
+	case errors.Is(err, crid.ErrLength):
+		return "length"
+	case errors.Is(err, crid.ErrChecksum):
+		return "checksum"
+	case errors.Is(err, crid.ErrNonCanonical):
+		return "non_canonical"
+	case errors.Is(err, crid.ErrForbiddenVersion):
+		return "version"
+	default:
+		return "other"
+	}
 }
 
 // maxRefusalCodeDigits bounds a code CRIDLinkRefusalCode returns. The codes

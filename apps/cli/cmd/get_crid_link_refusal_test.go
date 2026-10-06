@@ -1,19 +1,24 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/layervai/qurl-go/qurl"
+
+	"github.com/layervai/qurl-integrations/apps/cli/internal/apitest"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/exitcode"
 )
 
-// Tests for how `qurl get` tells the user that the service refused to give a
-// link for a CRID. The refusal comes from the SDK's own test server through
-// the real SDK call, so the error get reads is the one the SDK builds from a
-// server's answer, not one a test put together. get_crid_link_offer_test.go
-// has the helpers and says what that server can and cannot do.
+// Tests for how `qurl get` tells the user that no link was given for a CRID:
+// the service refused, or the SDK would not ask. The refusal comes from the
+// SDK's own test server through the real SDK call, or from the SDK itself,
+// so the error get reads is the one the SDK builds, not one a test put
+// together. get_crid_link_offer_test.go has the helpers and says what that
+// server can and cannot do.
 
 // TestGetRefusalsThroughTheSDK pins how get tells the user about a refusal
 // that came from a server through the SDK, on a machine with no identity:
@@ -132,6 +137,159 @@ func TestGetShowsTheRefusalCodeOnlyWithVerbose(t *testing.T) {
 					t.Errorf("stderr %q advises an update for code %s", stderr, code)
 				}
 				run.mustNotHaveActed(t)
+			})
+		}
+	}
+}
+
+// TestGetSaysWhyNoLinkWasAskedForOnlyWithVerbose pins the diagnostic line for
+// a CRID the SDK will not ask a link for. Without --verbose nothing is added
+// to what the user is told. With --verbose there is one more line, and the
+// message for the user is the same, byte for byte.
+//
+// The line is fixed text and one word for the class of the cause. The SDK's
+// own error text is never shown: for a character outside the CRID alphabet
+// it quotes the byte and its position, and for a wrong length the length.
+//
+// Only one of these causes can reach get from a real user: a CRID version
+// this client cannot check. The CLI's own check refuses the others first. To
+// run that branch anyway, the test puts itself between get and the SDK: get
+// is given a valid CRID, and the real SDK call is made with another operand,
+// one the SDK refuses. So the error get reads is the SDK's own, and the
+// SDK's test server shows that nothing was sent.
+func TestGetSaysWhyNoLinkWasAskedForOnlyWithVerbose(t *testing.T) {
+	state := bootstrapRegisteredState(t)
+	// Another resource, so no part of an operand can appear in the output
+	// for a reason of its own.
+	other := apitest.GenerateResourceKey(t)
+	file := getModes()[1]
+	if file.name != "get file" {
+		t.Fatalf("second get mode is %q, want get file", file.name)
+	}
+	debugLine := func(class string) string {
+		return "[debug] " + fmt.Sprintf(msgCRIDLinkNotSent, class) + "\n"
+	}
+	// withoutDebugLines is what the user is told: stderr without the
+	// diagnostics --verbose adds.
+	withoutDebugLines := func(stderr string) string {
+		var kept strings.Builder
+		for line := range strings.SplitAfterSeq(stderr, "\n") {
+			if !strings.HasPrefix(line, "[debug] ") {
+				kept.WriteString(line)
+			}
+		}
+		return kept.String()
+	}
+
+	for _, tc := range []struct {
+		name string
+		// operand is what the SDK is asked for.
+		operand string
+		class   string
+		// sdkWords are pieces of the SDK's own text for this cause.
+		sdkWords []string
+		// noDeviceCode and noDeviceMessage are what a machine with no
+		// identity is told. A device with an identity is told what its share
+		// request answered.
+		noDeviceCode    int
+		noDeviceMessage string
+	}{
+		{
+			name: "version this client cannot check", operand: apitest.DeriveCRID(t, other.DER, 0x05),
+			class: "unsupported_version", sdkWords: []string{"0x05", "cannot be verified"},
+			noDeviceCode: exitcode.Config, noDeviceMessage: goldenBytes(t, "error_get_crid_version.plain.stderr.golden"),
+		},
+		{
+			name: "character outside the alphabet", operand: other.CRID[:20] + "!" + other.CRID[21:],
+			class: "charset", sdkWords: []string{"0x21", "index 20", "alphabet"},
+			noDeviceCode: exitcode.InvalidInput, noDeviceMessage: "Error: " + msgValidCRIDRequired + "\n",
+		},
+		{
+			name: "wrong length", operand: other.CRID[:59],
+			class: "length", sdkWords: []string{"59 characters"},
+			noDeviceCode: exitcode.InvalidInput, noDeviceMessage: "Error: " + msgValidCRIDRequired + "\n",
+		},
+		{
+			name: "mistyped", operand: mistypedCRID(other.CRID),
+			class: "checksum", sdkWords: []string{"crc32c", "does not match"},
+			noDeviceCode: exitcode.InvalidInput, noDeviceMessage: "Error: " + msgValidCRIDRequired + "\n",
+		},
+	} {
+		for _, device := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/device=%t", tc.name, device), func(t *testing.T) {
+				wantCode, wantMessage := tc.noDeviceCode, tc.noDeviceMessage
+				if device {
+					wantCode, wantMessage = exitcode.NotFound, goldenBytes(t, "error_share_notfound.plain.stderr.golden")
+				}
+				run := func(t *testing.T, verbose bool) string {
+					t.Helper()
+					path := newSDKLinkPath(t, nil)
+					srv := downloadServer(t)
+					stateDir := filepath.Join(t.TempDir(), "no-device-state")
+					machine := machineWithNoIdentity(t, stateDir)
+					if device {
+						machine = enrolledDevice(t, state)
+						shareNotFoundTwice(t, srv)
+					}
+					var sdkErr error
+					ask := func(ctx context.Context, _ string) (*qurl.CRIDLink, error) {
+						link, err := path.opener.RequestCRIDLink(ctx, tc.operand)
+						sdkErr = err
+						return link, err
+					}
+					configure := func(args []string) *runOpts {
+						if verbose {
+							args = append(args, "--verbose")
+						}
+						return withLinkRequests(machine, ask)(args)
+					}
+
+					result := runShareMode(t, srv, srv.URL, file, configure)
+					stderr := result.result.stderr.String()
+					if result.result.code != wantCode {
+						t.Fatalf("verbose=%t: exit = %d, want %d; stderr: %s", verbose, result.result.code, wantCode, stderr)
+					}
+					result.mustNotHaveActed(t)
+					if sdkErr == nil {
+						t.Fatalf("verbose=%t: the SDK was not asked, or it did not refuse the operand", verbose)
+					}
+					if got := len(path.server.Requests()); got != 0 {
+						t.Errorf("verbose=%t: the service answered %d request(s), want none", verbose, got)
+					}
+					// The case is real: the SDK's text holds these words, and
+					// none of them may reach the reader.
+					for _, word := range tc.sdkWords {
+						if !strings.Contains(sdkErr.Error(), word) {
+							t.Fatalf("the SDK's error %q does not hold %q: the row no longer tests what it names", sdkErr, word)
+						}
+						if strings.Contains(strings.ReplaceAll(stderr, debugLine(tc.class), ""), word) {
+							t.Errorf("verbose=%t: stderr %q carries %q from the SDK's own error text", verbose, stderr, word)
+						}
+					}
+					if strings.Contains(stderr, tc.operand) {
+						t.Errorf("verbose=%t: stderr %q carries the operand the SDK refused", verbose, stderr)
+					}
+					if !device {
+						mustNotExistCmd(t, stateDir)
+					}
+					return stderr
+				}
+
+				quiet := run(t, false)
+				if quiet != wantMessage {
+					t.Errorf("stderr = %q, want exactly %q", quiet, wantMessage)
+				}
+
+				verbose := run(t, true)
+				if got := strings.Count(verbose, debugLine(tc.class)); got != 1 {
+					t.Errorf("stderr = %q, want the diagnostic line %q once, found %d", verbose, debugLine(tc.class), got)
+				}
+				if got := strings.Count(verbose, "CRID link request not sent"); got != 1 {
+					t.Errorf("stderr = %q, want one line about the request that was not sent, found %d", verbose, got)
+				}
+				if got := withoutDebugLines(verbose); got != wantMessage {
+					t.Errorf("with --verbose the user is told %q, want the same message %q", got, wantMessage)
+				}
 			})
 		}
 	}

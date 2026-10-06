@@ -324,6 +324,7 @@ func (opts *globalOpts) linkByCRIDAlone(ctx context.Context, resourceCRID string
 	issued, err := opts.requestCRIDLink(ctx, resourceCRID)
 	switch {
 	case consume.CRIDNotRequestable(err):
+		opts.noteCRIDNotRequestable(err)
 		if errors.Is(err, qurl.ErrUnsupportedCRIDVersion) {
 			return nil, errCRIDVersionNotRequestable
 		}
@@ -349,6 +350,22 @@ func (opts *globalOpts) noteCRIDLinkRefusalCode(err error) {
 	}
 	if code, ok := consume.CRIDLinkRefusalCode(err); ok {
 		logf(msgCRIDLinkRefusalCode, code)
+	}
+}
+
+// noteCRIDNotRequestable writes, as a --verbose diagnostic, why the SDK will
+// not ask for a link for the CRID. linkByCRIDAlone keeps only two facts of
+// that answer, "the version" or "anything else", and a device with an
+// identity then shows the share request's answer, so without this line the
+// cause is lost. A cause other than the version means that the SDK's check
+// of the CRID and the CLI's own check disagree, and this line is the only
+// evidence of it.
+//
+// The line is fixed text and one word for the class of the cause. It never
+// carries the SDK's own error text, which can quote what the user typed.
+func (opts *globalOpts) noteCRIDNotRequestable(err error) {
+	if logf := opts.verboseLogger(); logf != nil {
+		logf(msgCRIDLinkNotSent, consume.CRIDNotRequestableClass(err))
 	}
 }
 
