@@ -118,9 +118,14 @@ type runOpts struct {
 	// refusing fake, so no hermetic test can ever send a real access request
 	// (the clisandbox journey uses the production wiring via realOpener).
 	enterPortalGrant func(ctx context.Context, link string) (consume.AccessGrant, error)
-	// realOpener keeps the production access opener in place instead of the
-	// refusing fake. Only the clisandbox-tagged live suite sets it.
+	// realOpener keeps the production access opener and the production HTTP
+	// client in place instead of the refusing fakes. Only the clisandbox-tagged
+	// live suite sets it.
 	realOpener bool
+	// egress replaces the HTTP boundary every API client sends through; nil
+	// means a guard that fails this test on a request to any host other than
+	// this machine. Only the guard's own tests pass one.
+	egress     *egressGuard
 	verifyLink func(context.Context, string, string) error
 	// cridLinkOffered is the injected answer to "can this machine ask for a
 	// link with only a CRID at all". nil means the answer the shipped
@@ -184,7 +189,8 @@ type runResult struct {
 }
 
 // runCLI executes the real command tree with injected process context: no
-// real environment, no real TTYs, a fixed clock, and recorded sleeps.
+// real environment, no real TTYs, a fixed clock, recorded sleeps, and an HTTP
+// client that cannot reach past this machine.
 func runCLI(t *testing.T, o *runOpts) *runResult {
 	t.Helper()
 
@@ -260,6 +266,15 @@ func runCLI(t *testing.T, o *runOpts) *runResult {
 			g.resolveHubBootstrap = func() (qurl.HubBootstrap, error) { return qurl.HubBootstrap{}, nil }
 		}
 		g.openBrowser = browser.open
+		switch {
+		case o.egress != nil:
+			g.httpClient = o.egress.client()
+		case o.realOpener:
+			// nil is the production default: a live journey names a real
+			// endpoint on purpose.
+		default:
+			g.httpClient = newEgressGuard(t).client()
+		}
 		if o.verifyLink != nil {
 			g.verifyLink = o.verifyLink
 		} else if !o.realOpener {
