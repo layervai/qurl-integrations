@@ -60,9 +60,12 @@ to its owner and the devices you allow with --allow-device-key. Run
 
 "qurl share" and "qurl get" use the identity of the device they run on. They
 work on the resource owner's devices and, for a private resource, on the
-devices you allowed; any other device gets "not found". A public CRID is meant
-to be opened by anyone who has it, but this CLI release opens it only on the
-owner's devices; opening it from other devices is not available yet.
+devices you allowed; any other device gets "not found".
+
+Where the deployment offers it, a public resource can also be opened by anyone
+who has its CRID. The deployment this release ships does not offer it yet. To
+limit a resource to its owner and the devices you allow, publish it with
+--private. Privacy is set at creation and cannot be changed later.
 
 Authorized users open the resource with "qurl get <CRID>". The --quiet flag
 prints only the CRID. Use --foreground for CI or daemon debugging; that process

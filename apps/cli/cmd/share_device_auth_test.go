@@ -476,7 +476,7 @@ func TestPrivateShareIsDecidedByTheDeviceCredential(t *testing.T) {
 				"Not Found (HTTP 404)",
 				"the CRID may be mistyped, the resource may have been removed, or this device may not be allowed to open it",
 				"If the resource is private, send the publisher this device's public key from `qurl whoami -o json` so they can allow it",
-				"A public resource opens only on its owner's devices in this release",
+				"A public resource opens on other devices only where the deployment offers it. The deployment this release ships does not offer it yet.",
 			} {
 				if !strings.Contains(stderr, want) {
 					t.Errorf("stderr = %q, want the not-found guidance %q", stderr, want)
