@@ -639,6 +639,127 @@ func TestGetOpensALinkGivenForTheCRIDAlone(t *testing.T) {
 	}
 }
 
+// shareAnswerWithPublisher answers a share request with a link to srv's own
+// content route and the given publisher object. A nil publisher is the answer
+// of a service that sends no publisher and no creation date.
+func shareAnswerWithPublisher(t *testing.T, srv *apitest.Server, publisher map[string]any) http.HandlerFunc {
+	t.Helper()
+	return func(w http.ResponseWriter, _ *http.Request) {
+		data := map[string]any{
+			"qurl": srv.URL + apitest.DownloadPath, "crid": srv.Key.CRID, "type": "qv2",
+			"expires_at": "2026-03-01T00:05:00Z", "expires_in_seconds": 300, "single_use": true,
+		}
+		if publisher != nil {
+			data["resource_created_at"] = "2026-03-01T00:00:00Z"
+			data["publisher"] = publisher
+		}
+		apitest.WriteEnvelope(t, w, http.StatusOK, data, nil)
+	}
+}
+
+// publisherShown returns the one line of a get run that says who published
+// the resource: the Publisher row of the terminal document, or the notice the
+// piped actions write to stderr before anything else.
+func publisherShown(t *testing.T, mode shareMode, run *shareRun) string {
+	t.Helper()
+	if mode.downloads {
+		notice, _, _ := strings.Cut(run.result.stderr.String(), "\n")
+		return notice
+	}
+	for line := range strings.SplitSeq(run.result.stdout.String(), "\n") {
+		if strings.HasPrefix(strings.TrimSpace(withoutStyle(line)), "Publisher:") {
+			return line
+		}
+	}
+	t.Fatalf("the terminal document has no Publisher row: %q", run.result.stdout.String())
+	return ""
+}
+
+// TestGetShowsThePublisherOfALinkGivenForTheCRIDAloneAsShareDoes pins what
+// the reader is told about the publisher of a link given for the CRID alone.
+// The SDK reports the publisher beside the link, as the service stated it.
+// get shows it by the rule the share path has, in the same words: "verified"
+// only for a publisher the service reported as verified, and the UNVERIFIED
+// warning for every other answer, including one with no publisher at all.
+//
+// Each case runs get twice. A device with an identity gets the publisher in
+// a share answer. A machine with no identity gets the same publisher beside a
+// link for the CRID alone. The line that names the publisher must be the same
+// bytes on both paths.
+//
+// No service reports a verified publisher today, and the SDK's test server
+// answers with one fixed reply that names none. So the answer is given at the
+// seam where get takes the SDK's result.
+func TestGetShowsThePublisherOfALinkGivenForTheCRIDAloneAsShareDoes(t *testing.T) {
+	state := bootstrapRegisteredState(t)
+	createdAt := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name string
+		// shared is the publisher object of the share answer. nil is an
+		// answer with none.
+		shared map[string]any
+		// reported is the same publisher as the SDK reports it beside a link
+		// for the CRID alone.
+		reported qurl.Publisher
+		// createdAt is the creation date the SDK reports. The share answer
+		// carries one exactly when it carries a publisher.
+		createdAt *time.Time
+	}{
+		{
+			name:   "verified",
+			shared: map[string]any{"name": "Acme Docs", "verified": true}, reported: qurl.Publisher{Name: "Acme Docs", Verified: true},
+			createdAt: &createdAt,
+		},
+		{
+			name:   "not verified",
+			shared: map[string]any{"name": "Acme Docs", "verified": false}, reported: qurl.Publisher{Name: "Acme Docs"},
+			createdAt: &createdAt,
+		},
+		{name: "no publisher"},
+	} {
+		for _, mode := range getModes() {
+			t.Run(tc.name+"/"+mode.name, func(t *testing.T) {
+				shown := func(run *shareRun) string {
+					run.mustHaveDelivered(t, mode)
+					return publisherShown(t, mode, run)
+				}
+
+				shareSrv := downloadServer(t)
+				shareSrv.Script(http.MethodPost, shareRoute(shareSrv), shareAnswerWithPublisher(t, shareSrv, tc.shared))
+				want := shown(runShareMode(t, shareSrv, shareSrv.URL, mode, enrolledDevice(t, state)))
+
+				srv := downloadServer(t)
+				requests := &linkRequests{link: &qurl.CRIDLink{
+					Link: srv.URL + apitest.DownloadPath, ExpiresAt: fixedNow.Add(5 * time.Minute),
+					ResourceCreatedAt: tc.createdAt, Publisher: tc.reported,
+				}}
+				stateDir := filepath.Join(t.TempDir(), "no-device-state")
+				got := shown(runShareMode(t, srv, srv.URL, mode, withLinkRequests(machineWithNoIdentity(t, stateDir), requests.answer)))
+
+				if got != want {
+					t.Errorf("a link for the CRID alone shows the publisher as\n%q\nwant the share path's\n%q", got, want)
+				}
+				// The share path's own words, so that two equal wrong
+				// renderings cannot pass.
+				plain := withoutStyle(got)
+				if tc.reported.Verified {
+					if !strings.Contains(plain, `"Acme Docs"`) || !strings.Contains(plain, wordVerified) ||
+						strings.Contains(plain, "UNVERIFIED") || strings.Contains(plain, "Warning") {
+						t.Errorf("a publisher the service reported as verified is shown as %q, want the name, %q, and no warning", plain, wordVerified)
+					}
+					return
+				}
+				if strings.Count(plain, "UNVERIFIED") != 1 || strings.Contains(plain, wordVerified) {
+					t.Errorf("a publisher the service did not report as verified is shown as %q, want it marked UNVERIFIED once", plain)
+				}
+				if mode.downloads && !strings.HasPrefix(plain, "Warning: UNVERIFIED publisher") {
+					t.Errorf("the notice is %q, want the UNVERIFIED warning", plain)
+				}
+			})
+		}
+	}
+}
+
 // TestGetAnswersForALinkAskedWithTheCRIDAlone walks the rest of the answer
 // table: every refusal, for both starting states and all three actions. Each
 // answer has one message and one exit code, nothing is opened or saved, and

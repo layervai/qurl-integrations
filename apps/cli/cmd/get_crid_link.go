@@ -278,6 +278,18 @@ func (opts *globalOpts) noteCRIDLinkRefusalCode(err error) {
 // A link asked for this way reports no link type, no lifetime in seconds and
 // no single-use flag, so those stay zero. Its id is not kept: the share path
 // does not show one either.
+//
+// TODO(upstream-contract): Publisher.Verified is copied as qurl-go reports
+// it. qurl-go documents the flag as the service's statement: it is true only
+// when the service explicitly reported a verified publisher, in a reply that
+// the SDK accepted as authenticated to the server key of the deployment
+// settings. The name beside it is the publisher's own choice, and the SDK
+// call that sets a name cannot ask for verification. qurl-go also documents
+// that the flag is not covered by the check of the link against the CRID. So
+// this code shows the flag exactly as the share path shows the same flag of
+// a share answer, and it means no more here than it does there. If qurl-go
+// ever fills the flag from anything but that reply, this copy must report
+// every publisher as unverified.
 func shareLinkFromCRIDLink(resourceCRID string, issued *qurl.CRIDLink) *qurlapi.ShareLink {
 	link := &qurlapi.ShareLink{
 		QURL:      issued.Link,
