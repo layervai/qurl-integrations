@@ -152,6 +152,7 @@ func customerMessages() []string {
 		msgDeleteCanceled,
 		msgTTLClamped,
 		msgSessionDurationNotApplied,
+		msgValidCRIDRequired,
 		msgShareNeedsDevice,
 		msgPublicGrantsNoEffect,
 		msgNoKeyProvided,
