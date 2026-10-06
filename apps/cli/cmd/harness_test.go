@@ -121,7 +121,8 @@ type runOpts struct {
 	enterPortalGrant func(ctx context.Context, link string) (consume.AccessGrant, error)
 	// realOpener keeps the production access opener and the production HTTP
 	// client in place instead of the refusing fakes. Only the clisandbox-tagged
-	// live suite sets it.
+	// live suite sets it to send; the harness's own wiring test sets it on a
+	// command that sends nothing.
 	realOpener bool
 	// egress replaces the HTTP boundary every API client sends through; nil
 	// means a guard that fails this test on a request to any host other than
@@ -196,8 +197,9 @@ type runResult struct {
 // runCLI executes the real command tree with injected process context: no
 // real environment, no real TTYs, a fixed clock, recorded sleeps, and qURL API
 // clients that cannot send past this machine. That last fence covers the API
-// client only: the access opener, the native runtime and the target preflight
-// are separate boundaries with their own injected fakes below.
+// client only. The access opener is a separate boundary that is refused by
+// default below; the native runtime and the target preflight are replaced only
+// when a test injects one, and are otherwise the production implementations.
 func runCLI(t *testing.T, o *runOpts) *runResult {
 	t.Helper()
 

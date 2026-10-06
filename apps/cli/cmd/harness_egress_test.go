@@ -36,12 +36,17 @@ func (g *egressGuard) RoundTrip(req *http.Request) (*http.Response, error) {
 	if isLoopbackHost(req.URL.Hostname()) {
 		return g.next.RoundTrip(req)
 	}
+	if req.Body != nil {
+		_ = req.Body.Close()
+	}
 	g.report("hermetic test sent %s %s to %s: pass --endpoint with a local test server, or expect the error that stops the command before it sends", req.Method, req.URL.Path, req.URL.Host)
 	return nil, fmt.Errorf("test harness refused %s %s: %s is not this machine", req.Method, req.URL.Path, req.URL.Host)
 }
 
-// isLoopbackHost answers for the literal host only. A name is never resolved:
-// only an address that cannot leave this machine by construction passes.
+// isLoopbackHost answers for the literal host only and never resolves a name
+// itself. A loopback address passes by construction; the one name that passes
+// is localhost, which is reserved for loopback and is what local test servers
+// are commonly addressed by.
 func isLoopbackHost(host string) bool {
 	if strings.EqualFold(host, "localhost") {
 		return true
@@ -74,6 +79,9 @@ type countingTransport struct{ sent atomic.Int32 }
 
 func (c *countingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	c.sent.Add(1)
+	if req.Body != nil {
+		_ = req.Body.Close()
+	}
 	return nil, fmt.Errorf("countingTransport: %s %s was handed on", req.Method, req.URL)
 }
 
@@ -161,6 +169,8 @@ func TestHarnessGuardIsTheDefault(t *testing.T) {
 		t.Fatalf("reports = %q, handed on = %d; want one report naming POST /v1/resources and nothing sent", reports, next.sent.Load())
 	}
 
+	// version reads no settings and builds no client, so this is safe to run
+	// with the production client in the default build.
 	if live := runCLI(t, &runOpts{args: []string{"version"}, realOpener: true}); live.httpClient != nil {
 		t.Fatalf("a live journey sends with %T, want the production client", live.httpClient.Transport)
 	}
