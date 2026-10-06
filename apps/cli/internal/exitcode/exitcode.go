@@ -321,6 +321,29 @@ func cliSentinelCode(err error) (int, bool) { //nolint:gocyclo // Keep the close
 		// The platform asked the caller to come back later: not serving
 		// this request now — the Unavailable row.
 		return Unavailable, true
+	case errors.Is(err, consume.ErrCRIDNotFound), errors.Is(err, consume.ErrCRIDResourceClosed):
+		// A link asked for with only a CRID. The one not-found answer, with or
+		// without a device identity (ErrCRIDNotFoundNoDevice matches
+		// ErrCRIDNotFound), and a closed resource join the platform's gone
+		// family: the CRID does not lead to content.
+		return NotFound, true
+	case errors.Is(err, consume.ErrCRIDLinkUnavailable),
+		errors.Is(err, consume.ErrCRIDLinkNoAnswer),
+		errors.Is(err, consume.ErrCRIDPublisherOffline):
+		// Not serving this request now, or not reachable: waiting is the
+		// remedy. ErrCRIDLinkUnavailable is also what a refusal code outside
+		// the request's own set becomes (consume.ClassifyCRIDLinkError), so
+		// that answer exits with this code too.
+		return Unavailable, true
+	case errors.Is(err, consume.ErrCRIDLinkRateLimited):
+		return RateLimited, true
+	case errors.Is(err, consume.ErrCRIDLinkRequestRejected):
+		// The service rejected the request itself as invalid.
+		return InvalidInput, true
+	case errors.Is(err, consume.ErrCRIDLinkRefused):
+		// An answer that failed its check is discarded like any link that
+		// fails CRID verification: nothing was opened, nothing was emitted.
+		return VerificationFailed, true
 	case errors.Is(err, auth.ErrNoCredential), errors.Is(err, auth.ErrInvalidKey):
 		return Auth, true
 	case errors.Is(err, auth.ErrDeviceEnrollmentScope):

@@ -107,13 +107,13 @@ ready to hand out or open, and reports the publisher in one line on stderr.
 // applyCRIDGuards requires a valid CRID and applies the environment guard.
 func applyCRIDGuards(printer *output.Printer, assessment *cridux.Assessment, productionEndpoint, yes bool) error {
 	if assessment.Kind != cridux.KindCRID {
-		message := "a valid CRID is required; copy it from the resource listing"
 		if assessment.Kind == cridux.KindResourceKey {
-			message = "public keys are verification data; use the resource's CRID"
-		} else if len(assessment.Warnings) > 0 {
-			message = strings.Join(assessment.Warnings, " ")
+			return exitcode.InvalidInputError("public keys are verification data; use the resource's CRID", cridux.ErrUnusableID)
 		}
-		return exitcode.InvalidInputError(message, cridux.ErrUnusableID)
+		if len(assessment.Warnings) > 0 {
+			return exitcode.InvalidInputError(strings.Join(assessment.Warnings, " "), cridux.ErrUnusableID)
+		}
+		return errValidCRIDRequired()
 	}
 	warning, err := cridux.EnvironmentGuard(assessment.CRID.Environment(), productionEndpoint, yes)
 	if err != nil {
@@ -123,6 +123,12 @@ func applyCRIDGuards(printer *output.Printer, assessment *cridux.Assessment, pro
 		printer.Warnf("%s", warning)
 	}
 	return nil
+}
+
+// errValidCRIDRequired is the refusal for an operand that is not a CRID this
+// client accepts, when there is nothing more specific to say about it.
+func errValidCRIDRequired() error {
+	return exitcode.InvalidInputError(msgValidCRIDRequired, cridux.ErrUnusableID)
 }
 
 // verifyShareLink rejects unverified responses before any link is used or printed.

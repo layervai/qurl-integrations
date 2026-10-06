@@ -43,6 +43,21 @@ const (
 	// require it to prove that answer.
 	hintShareNotFound = "Hint: the CRID may be mistyped, the resource may have been removed, or this device may not be allowed to open it. If the resource is private, send the publisher this device's public key from `qurl whoami -o json` so they can allow it. A public resource opens only on its owner's devices in this release."
 
+	// hintCRIDNotFound is the not-found guidance when `qurl get` asked for a
+	// link with only the CRID, on a device that has an identity. It has the
+	// rules of hintShareNotFound: the answer has one form whatever the cause,
+	// so the hint names every cause and claims none, and it gives the grant
+	// remedy for a private resource only. It differs in its last sentence,
+	// because on this path a public resource can open on other devices, but
+	// not every public resource does.
+	hintCRIDNotFound = "Hint: the CRID may be mistyped, the resource may have been removed, or this device may not be allowed to open it. If the resource is private, send the publisher this device's public key from `qurl whoami -o json` so they can allow it. Some public resources open only on their owner's devices."
+
+	// hintCRIDNotFoundNoDevice is the same guidance for a machine with no
+	// device identity. That machine has no public key to send yet, so the
+	// hint says so and says which command creates the identity: `qurl get`
+	// does not create one, and the reader should choose to.
+	hintCRIDNotFoundNoDevice = "Hint: the CRID may be mistyped, the resource may have been removed, or this device may not be allowed to open it. If the resource is private, the publisher must allow this device, and this device has no identity yet. Run `qurl whoami -o json` to create one, then send the publisher the device public key it shows. Some public resources open only on their owner's devices."
+
 	// hintRevoked is owner-truthful: the platform tells a resource's owner
 	// that their own resource was deleted rather than hiding it behind the
 	// ambiguous not-found. Everyone else gets the ambiguous 404.
@@ -301,6 +316,8 @@ func CustomerMessages() []string {
 		hintUnauthorized,
 		hintNotFound,
 		hintShareNotFound,
+		hintCRIDNotFound,
+		hintCRIDNotFoundNoDevice,
 		hintQuotaExceeded,
 		hintRetryAfter,
 		hintRevoked,
