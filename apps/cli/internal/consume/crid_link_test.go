@@ -574,6 +574,32 @@ func TestClassifyCRIDLinkErrorReadsAGeneralCodeAsTryAgainLater(t *testing.T) {
 	}
 }
 
+// TestClassifyCRIDLinkErrorForSettingsTheSDKCannotUse pins the answer for the
+// SDK's "not configured" errors: it has no deployment settings to check a
+// link with, or the settings name no place to send the request although the
+// check before the request said they did. Each reads as ErrAccessNotConfigured
+// itself. That is the fixed message with no detail, so nothing of the SDK's
+// text, which names files and variables, comes with it.
+func TestClassifyCRIDLinkErrorForSettingsTheSDKCannotUse(t *testing.T) {
+	t.Parallel()
+	const detail = "read deployment /etc/example/deployment.json"
+	for name, in := range map[string]error{
+		"not configured":         fmt.Errorf("%w: %s", qurl.ErrNotConfigured, detail),
+		"no deployment settings": qurl.ErrNoDeployment,
+		"names no endpoint":      fmt.Errorf("%w: %s", qurl.ErrCRIDLinkNotConfigured, detail),
+	} {
+		if !errors.Is(in, qurl.ErrNotConfigured) {
+			t.Fatalf("%s: the input %v is not one of the SDK's not-configured errors", name, in)
+		}
+		for _, deviceIdentity := range []bool{true, false} {
+			got := ClassifyCRIDLinkError(in, deviceIdentity)
+			if got != ErrAccessNotConfigured { //nolint:errorlint // The classifier must return the bare sentinel.
+				t.Errorf("%s: ClassifyCRIDLinkError(%v, %t) = %v, want ErrAccessNotConfigured itself", name, in, deviceIdentity, got)
+			}
+		}
+	}
+}
+
 // TestClassifyCRIDLinkErrorNotFoundDependsOnlyOnTheDevice pins the one place
 // the device identity matters: which of the two not-found sentinels is
 // returned. Both are the same answer with the same text.

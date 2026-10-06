@@ -1621,6 +1621,64 @@ func TestGetRefreshesALinkGivenForTheCRIDAlone(t *testing.T) {
 	}
 }
 
+// TestGetRefreshCanChangeToALinkGivenForTheCRIDAlone covers one download
+// whose two links come from different paths. The share request gives the
+// first link. That link expires before any byte is served, and the download
+// asks again. This time the share request says "not found", so the second
+// link is given for the CRID alone.
+//
+// It is the only way the session-duration note can appear in the middle of a
+// download. The note is printed once, when the path changes, and so after the
+// publisher notice of the first link. The publisher is still announced once:
+// the second link is for the same resource.
+func TestGetRefreshCanChangeToALinkGivenForTheCRIDAlone(t *testing.T) {
+	state := bootstrapRegisteredState(t)
+	for _, mode := range getModes() {
+		if !mode.downloads {
+			continue
+		}
+		t.Run(mode.name, func(t *testing.T) {
+			srv := downloadServer(t)
+			var durations []any
+			recordDuration := func(next http.HandlerFunc) http.HandlerFunc {
+				return func(w http.ResponseWriter, r *http.Request) {
+					var body map[string]any
+					if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+						t.Errorf("decode share request: %v", err)
+					}
+					durations = append(durations, body["session_duration"])
+					next(w, r)
+				}
+			}
+			srv.Script(http.MethodPost, shareRoute(srv),
+				recordDuration(shareAnswerWithPublisher(t, srv, map[string]any{"name": apitest.DefaultPublisherName, "verified": false})),
+				recordDuration(apitest.HandlerNotFound404(t, "resource_not_found")))
+			srv.Script(http.MethodGet, apitest.DownloadPath, handlerGone)
+			requests := &linkRequests{link: issuedLink(srv.URL + apitest.DownloadPath)}
+
+			configure := func(args []string) *runOpts {
+				return withLinkRequests(enrolledDevice(t, state), requests.answer)(append(args, "--session-duration", "5m"))
+			}
+			run := runShareMode(t, srv, srv.URL, mode, configure)
+			run.mustHaveDelivered(t, mode)
+
+			// Both share requests carry the flag. Only the second link could
+			// not take it.
+			if len(durations) != 2 || durations[0] != "5m" || durations[1] != "5m" {
+				t.Errorf("session durations of the share requests = %v, want the flag on both", durations)
+			}
+			if len(requests.asked) != 1 {
+				t.Errorf("asked with the CRID alone %d times, want once, for the refresh", len(requests.asked))
+			}
+			stderr := run.result.stderr.String()
+			publisher, note := strings.Index(stderr, "UNVERIFIED publisher"), strings.Index(stderr, msgSessionDurationNotApplied)
+			if strings.Count(stderr, "UNVERIFIED publisher") != 1 || strings.Count(stderr, msgSessionDurationNotApplied) != 1 || note < publisher {
+				t.Errorf("stderr = %q, want the publisher notice once and, after it, the session-duration note once", stderr)
+			}
+		})
+	}
+}
+
 // TestGetSessionDurationWithALinkGivenForTheCRIDAlone pins what happens to
 // --session-duration. The share request carries it, as before. A link given
 // for the CRID alone cannot, so get says the flag was not applied and uses
