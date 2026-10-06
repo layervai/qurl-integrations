@@ -1002,6 +1002,54 @@ func TestGetAsksWithTheCRIDAloneOnlyAfterShareNotFound(t *testing.T) {
 	}
 }
 
+// TestGetSaysTheServiceDidNotAnswerAfterShareNotFound pins one row of the
+// table in get_crid_link.go. The share request said "not found", and the
+// request with only the CRID got no answer: it timed out, or the service
+// could not be reached. Nobody knows then whether the resource opens with the
+// CRID alone, and "not found" would be wrong for every public resource. So
+// get says that the service did not answer, with the exit code for "try
+// again later". It prints neither "not found" nor the not-found hint, and it
+// sends each of the two requests once.
+func TestGetSaysTheServiceDidNotAnswerAfterShareNotFound(t *testing.T) {
+	state := bootstrapRegisteredState(t)
+	for name, noAnswer := range map[string]error{
+		"timed out": fmt.Errorf("qurl: CRID link request did not complete: %w: %w",
+			context.DeadlineExceeded, &qurl.RelayError{Msg: "relay POST https://endpoint.example.test/x failed"}),
+		"cannot connect": &qurl.RelayError{Msg: "relay POST https://endpoint.example.test/x failed: connection refused"},
+	} {
+		for _, mode := range getModes() {
+			t.Run(name+"/"+mode.name, func(t *testing.T) {
+				srv := downloadServer(t)
+				shareNotFoundTwice(t, srv)
+				requests := &linkRequests{err: noAnswer}
+
+				run := runShareMode(t, srv, srv.URL, mode, withLinkRequests(enrolledDevice(t, state), requests.answer))
+				if run.result.code != exitcode.Unavailable {
+					t.Fatalf("exit = %d, want %d; stderr: %s", run.result.code, exitcode.Unavailable, run.result.stderr.String())
+				}
+				run.mustNotHaveActed(t)
+
+				// The whole of stderr is the one message: no hint follows it.
+				stderr := withoutStyle(run.result.stderr.String())
+				if want := "Error: " + consume.MsgCRIDLinkNoAnswer + "\n"; stderr != want {
+					t.Errorf("stderr = %q, want exactly %q", stderr, want)
+				}
+				for _, unwanted := range []string{consume.MsgCRIDNotFound, "not found", "Hint:"} {
+					if strings.Contains(stderr, unwanted) {
+						t.Errorf("stderr %q carries %q from the share request's answer", stderr, unwanted)
+					}
+				}
+				if got := len(shareRequests(srv)); got != 1 {
+					t.Errorf("the share request was sent %d times, want once", got)
+				}
+				if len(requests.asked) != 1 {
+					t.Errorf("asked with the CRID alone %d times, want once and no retry", len(requests.asked))
+				}
+			})
+		}
+	}
+}
+
 // TestShareNeverAsksWithTheCRIDAlone pins that `qurl share` is unchanged. It
 // shares with the device and reports the service's answer, whatever the
 // second request would have said.

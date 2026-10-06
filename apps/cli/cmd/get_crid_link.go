@@ -60,9 +60,18 @@ import (
 //	no        not offered   either             share request, as before
 //	no        wrong setup   either             setup error; nothing sent or created
 //	yes       offered       yes                share; on "not found", ask
+//	yes       offered       yes, and that      share; on "not found", ask; then
+//	                        request gets       "the service did not answer",
+//	                        no answer          and not "not found"
 //	yes       offered       no                 share; its answer stands
 //	yes       not offered   either             share; its answer stands
 //	yes       wrong setup   either             share; on "not found", setup error
+//
+// The row with no answer is a decision. When the share request says "not
+// found" and the request with the CRID alone times out or cannot reach the
+// service, nobody knows whether the resource opens with the CRID alone. "Not
+// found" would be wrong for every public resource, so get says that the
+// service did not answer and that the user can try again later.
 //
 // `qurl share` does not use this file. It always shares with the device.
 
@@ -144,6 +153,9 @@ func (opts *globalOpts) linkForGet(ctx context.Context, assessment *cridux.Asses
 		// Not possible for this CRID: the share request's answer stands too.
 		return nil, false, shareErr
 	}
+	// From here the second request's answer is the result. That includes no
+	// answer at all, which does not bring back the share request's "not
+	// found": see the table at the top of this file.
 	return link, err == nil, err
 }
 
