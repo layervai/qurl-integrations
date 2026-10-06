@@ -91,13 +91,13 @@ func TestHarnessRefusesRequestsThatLeaveThisMachine(t *testing.T) {
 		wantHost string
 		wantCall string
 	}{
-		{name: "no endpoint resolves the default", args: []string{"list"}, wantHost: defaultHost, wantCall: "GET /v1/"},
+		{name: "no endpoint resolves the default", args: []string{"list"}, wantHost: defaultHost, wantCall: "GET /v1/resources"},
 		{name: "publish with no endpoint", args: []string{"publish", "https://example.com"}, wantHost: defaultHost, wantCall: "POST /v1/resources"},
-		{name: "flag endpoint", args: []string{"--endpoint", "https://api.example.test", "list"}, wantHost: "api.example.test", wantCall: "GET /v1/"},
+		{name: "flag endpoint", args: []string{"--endpoint", "https://api.example.test", "list"}, wantHost: "api.example.test", wantCall: "GET /v1/resources"},
 		{
 			name: "environment endpoint", args: []string{"list"},
 			env:      map[string]string{"QURL_API_KEY": testAPIKey, "QURL_ENDPOINT": "https://api.example.test"},
-			wantHost: "api.example.test", wantCall: "GET /v1/",
+			wantHost: "api.example.test", wantCall: "GET /v1/resources",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -115,8 +115,8 @@ func TestHarnessRefusesRequestsThatLeaveThisMachine(t *testing.T) {
 				t.Fatal("the guard reported nothing: the owning test would have passed")
 			}
 			for _, report := range reports {
-				if !strings.Contains(report, tc.wantCall) || !strings.Contains(report, " to "+tc.wantHost+":") {
-					t.Errorf("report = %q, want it to name %q and host %q", report, tc.wantCall, tc.wantHost)
+				if want := "hermetic test sent " + tc.wantCall + " to " + tc.wantHost + ":"; !strings.HasPrefix(report, want) {
+					t.Errorf("report = %q, want it to start %q", report, want)
 				}
 			}
 		})
@@ -124,26 +124,45 @@ func TestHarnessRefusesRequestsThatLeaveThisMachine(t *testing.T) {
 }
 
 // TestHarnessGuardIsTheDefault holds the wiring, not the guard: an invocation
-// that names no guard still gets one, and it reports to the test it was given.
+// that names no guard sends through one all the same, and only a live journey
+// keeps the production client. The client is read back from the command
+// tree's own options, so removing the harness's default fails here.
 func TestHarnessGuardIsTheDefault(t *testing.T) {
-	recorder := &egressRecorder{}
-	guard := newEgressGuard(t)
+	// version sends nothing, so the default guard has nothing to report.
+	res := runCLI(t, &runOpts{args: []string{"version"}})
+	if res.code != 0 {
+		t.Fatalf("version exit = %d, stderr %q", res.code, res.stderr.String())
+	}
+	if res.httpClient == nil {
+		t.Fatal("a hermetic invocation kept the production HTTP client")
+	}
+	guard, ok := res.httpClient.Transport.(*egressGuard)
+	if !ok {
+		t.Fatalf("a hermetic invocation sends with %T, want the guard", res.httpClient.Transport)
+	}
 	if guard.next != http.DefaultTransport {
 		t.Fatalf("default guard sends with %T, want the default transport", guard.next)
 	}
-	guard.report, guard.next = recorder.reportf, &countingTransport{}
 
+	// The wired client itself refuses: stand in for this test and the network
+	// only now, after the harness has built it.
+	recorder, next := &egressRecorder{}, &countingTransport{}
+	guard.report, guard.next = recorder.reportf, next
 	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, config.DefaultEndpoint+"/v1/resources", http.NoBody)
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp, err := guard.client().Do(req)
+	resp, err := res.httpClient.Do(req)
 	if err == nil {
 		_ = resp.Body.Close()
-		t.Fatal("the guard answered a request to the default endpoint")
+		t.Fatal("the harness client answered a request to the default endpoint")
 	}
-	if reports := recorder.all(); len(reports) != 1 || !strings.Contains(reports[0], "POST /v1/resources") {
-		t.Fatalf("reports = %q, want one naming POST /v1/resources", reports)
+	if reports := recorder.all(); len(reports) != 1 || !strings.Contains(reports[0], "POST /v1/resources") || next.sent.Load() != 0 {
+		t.Fatalf("reports = %q, handed on = %d; want one report naming POST /v1/resources and nothing sent", reports, next.sent.Load())
+	}
+
+	if live := runCLI(t, &runOpts{args: []string{"version"}, realOpener: true}); live.httpClient != nil {
+		t.Fatalf("a live journey sends with %T, want the production client", live.httpClient.Transport)
 	}
 }
 
@@ -174,9 +193,15 @@ func TestEgressGuardPassesOnlyThisMachine(t *testing.T) {
 				_ = resp.Body.Close()
 				t.Fatal("RoundTrip answered; both test transports refuse")
 			}
-			sent, reported := next.sent.Load() == 1, len(recorder.all()) == 1
-			if sent != tc.wantSent || reported == tc.wantSent {
-				t.Fatalf("sent = %v, reported = %v; want sent = %v and reported = %v", sent, reported, tc.wantSent, !tc.wantSent)
+			wantSent, wantReports := int32(0), 1
+			if tc.wantSent {
+				wantSent, wantReports = 1, 0
+			}
+			if sent := next.sent.Load(); sent != wantSent {
+				t.Fatalf("handed on %d request(s), want %d", sent, wantSent)
+			}
+			if reports := recorder.all(); len(reports) != wantReports {
+				t.Fatalf("reports = %q, want %d", reports, wantReports)
 			}
 		})
 	}

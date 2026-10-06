@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -186,11 +187,17 @@ type runResult struct {
 	stdout bytes.Buffer
 	stderr bytes.Buffer
 	code   int
+	// httpClient is the HTTP client the invocation's API clients sent with,
+	// read back from the command tree's own options: nil is the production
+	// client.
+	httpClient *http.Client
 }
 
 // runCLI executes the real command tree with injected process context: no
-// real environment, no real TTYs, a fixed clock, recorded sleeps, and an HTTP
-// client that cannot reach past this machine.
+// real environment, no real TTYs, a fixed clock, recorded sleeps, and qURL API
+// clients that cannot send past this machine. That last fence covers the API
+// client only: the access opener, the native runtime and the target preflight
+// are separate boundaries with their own injected fakes below.
 func runCLI(t *testing.T, o *runOpts) *runResult {
 	t.Helper()
 
@@ -374,6 +381,7 @@ func runCLI(t *testing.T, o *runOpts) *runResult {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	res.httpClient = opts.httpClient
 	res.code = run(ctx, root, opts)
 	return res
 }
