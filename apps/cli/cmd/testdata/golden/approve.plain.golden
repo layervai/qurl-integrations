@@ -1,0 +1,9 @@
+Approved
+
+  Name:       "Ana Lopez" (typed by them, not checked)
+  Device ID:  abcd-efgh-2345-mnop
+  Approved:   2026-03-02 (just now)
+
+This person can now open qhtpthw4qt7wkw7khghr6x3z4hsfyn4zbuyhnee4i6bi67yu6yytgvwdbb4q. To take the access away, run:
+
+  qurl grants qhtpthw4qt7wkw7khghr6x3z4hsfyn4zbuyhnee4i6bi67yu6yytgvwdbb4q --remove abcd-efgh-2345-mnop

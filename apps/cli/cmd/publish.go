@@ -30,6 +30,7 @@ func publishCmd(opts *globalOpts) *cobra.Command {
 		connectorID       string
 		public            bool
 		private           bool
+		allowRequests     bool
 		allowedDeviceKeys []string
 		foreground        bool
 	)
@@ -64,6 +65,13 @@ when you publish it, and with "qurl grants" afterwards. Run
 work on the resource owner's devices and, for a private resource, on the
 devices you allowed; any other device gets "not found".
 
+To share a private resource with people who have no qURL CLI, publish it with
+--allow-requests. They open the resource's address in a browser, ask for
+access, and are shown a six-digit code to give you. You approve each person
+with "qurl approve <CRID> <code>": approve a code only when the person gave it
+to you themselves. The address and the CRID are safe to send to anyone,
+because a private resource opens only for you and the people you allow.
+
 Where the deployment offers it, a public resource can also be opened by anyone
 who has its CRID. The deployment this release ships does not offer it yet.
 Privacy is set at creation and cannot be changed later. Publishing a target
@@ -77,13 +85,14 @@ owns the share and turns it off when it exits.`,
   qurl publish http://localhost:8080 --id local-dashboard
   qurl publish https://api.example.com/reports
   qurl publish https://docs.example.com/handbook --public
+  qurl publish https://wiki.example.com/team --allow-requests
   qurl publish https://grafana.internal.example.com --description "Team dashboard" --quiet`,
 		Args: exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := validatePublishAccessFlags(cmd, public, private, allowedDeviceKeys); err != nil {
+			if err := validatePublishAccessFlags(cmd, public, private, allowRequests, allowedDeviceKeys); err != nil {
 				return exitcode.UsageError(err)
 			}
-			access := qurlapi.PublishOptions{Public: public, AllowedDeviceKeys: allowedDeviceKeys}
+			access := qurlapi.PublishOptions{Public: public, AllowedDeviceKeys: allowedDeviceKeys, AllowRequests: allowRequests}
 			target, err := classifyPublishTarget(args[0])
 			if err != nil {
 				return err
@@ -115,6 +124,7 @@ owns the share and turns it off when it exits.`,
 			if err != nil {
 				return err
 			}
+			result.LinkSiteURL = opts.resourceAddress(result.CRID)
 
 			printer := opts.printer()
 			return printer.Publish(result)
@@ -130,6 +140,7 @@ owns the share and turns it off when it exits.`,
 		panic(err) // unreachable: the flag is defined on the line above
 	}
 	cmd.Flags().StringArrayVar(&allowedDeviceKeys, "allow-device-key", nil, "recipient public key allowed to open the private resource (repeatable)")
+	cmd.Flags().BoolVar(&allowRequests, "allow-requests", false, "let people ask you for access to the private resource; you approve each person by a code they give you")
 	cmd.Flags().StringVar(&description, "description", "", "human-readable description stored with the resource")
 	cmd.Flags().StringArrayVar(&tags, "tag", nil, "tag stored with the resource (repeatable)")
 	cmd.Flags().StringVar(&alias, "alias", "", "memorable handle stored with the resource")
@@ -145,7 +156,7 @@ owns the share and turns it off when it exits.`,
 // false form is refused instead of ignored: read literally it asks for a
 // public resource, and a private one must never be the silent answer to that,
 // nor a public one to anything but --public.
-func validatePublishAccessFlags(cmd *cobra.Command, public, private bool, allowedDeviceKeys []string) error {
+func validatePublishAccessFlags(cmd *cobra.Command, public, private, allowRequests bool, allowedDeviceKeys []string) error {
 	if cmd.Flags().Changed("private") {
 		if public {
 			return errors.New(msgPublicAndPrivate)
@@ -156,6 +167,9 @@ func validatePublishAccessFlags(cmd *cobra.Command, public, private bool, allowe
 	}
 	if public && len(allowedDeviceKeys) > 0 {
 		return errors.New(msgAllowKeyWithPublic)
+	}
+	if public && allowRequests {
+		return errors.New(msgAllowRequestsWithPublic)
 	}
 	return validateAllowedDeviceKeys(allowedDeviceKeys)
 }
@@ -453,6 +467,7 @@ func prepareLocalPublishResource(
 		return nil, "", fmt.Errorf("%w: the resource created for this app does not match the Connector resource; check your published resources with `qurl list` before retrying", qurl.ErrInvalidAPIResponse)
 	}
 	resolved.Private = precreated.Private
+	resolved.AccessRequests = precreated.AccessRequests
 	// The Connector request always finds the resource created just above, so
 	// its own answer cannot tell a first publish from a repeated one. The
 	// create answer can.
@@ -682,6 +697,7 @@ func printLocalPublishServing(opts *globalOpts, resolved *agent.ResolvedResource
 	published := &qurlapi.Published{
 		CRID: local.CRID, ResourceID: local.ResourceID, TargetURL: local.TargetURL,
 		Status: "serving", FoundExisting: resolved.FoundExisting, Private: resolved.Private,
+		AccessRequests: resolved.AccessRequests, LinkSiteURL: opts.resourceAddress(local.CRID),
 	}
 	if sharing != nil {
 		published.Publisher = sharing.Publisher

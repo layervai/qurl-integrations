@@ -56,6 +56,23 @@ type Client interface {
 	// its complete resulting list. A key that is already on the list, or
 	// already off it, is left as it is.
 	EditDeviceGrants(ctx context.Context, id string, add, remove []string) (*ResourceSummary, error)
+	// SetAccessRequests turns access requests on or off for an existing
+	// private resource and returns the resource as the service confirmed it.
+	SetAccessRequests(ctx context.Context, id string, on bool) (*ResourceSummary, error)
+	// AccessRequests lists the pending access requests of one resource, or of
+	// all of the owner's resources when id is empty.
+	AccessRequests(ctx context.Context, id string) ([]AccessRequest, error)
+	// ApproveAccessRequest approves the pending request that has this code
+	// and returns the person who now has access.
+	ApproveAccessRequest(ctx context.Context, id, code string) (*AllowedPasskey, error)
+	// DenyAccessRequest removes the pending request that has this code. The
+	// person gets no access.
+	DenyAccessRequest(ctx context.Context, id, code string) error
+	// RemoveAllowedPasskeys takes away the access of approved people, named
+	// by device id, and returns the resource as it reads afterwards. A device
+	// id that is not on the list is an error, and nothing after it is
+	// removed.
+	RemoveAllowedPasskeys(ctx context.Context, id string, deviceIDs []string) (*ResourceSummary, error)
 	// Sharing returns the durable desired state and current platform-observed
 	// connection state of one tunnel resource. It is the connector sharing
 	// state, not the Share operator above.
@@ -99,6 +116,11 @@ type PublishOptions struct {
 	// AllowedDeviceKeys is the first list of devices allowed on a private
 	// resource. It has no meaning for a public one.
 	AllowedDeviceKeys []string
+	// AllowRequests lets people ask the publisher for access to the new
+	// private resource. Publish requires the answer to confirm it. It has no
+	// meaning for a public resource, which the service refuses to combine
+	// with it.
+	AllowRequests bool
 	// ConnectorID selects a tunnel resource instead of a URL.
 	ConnectorID string
 	Description string
@@ -143,6 +165,46 @@ type Published struct {
 	FoundExisting *bool
 	// Publisher is what recipients are shown as this resource's publisher.
 	Publisher Publisher
+	// AccessRequests is whether people can ask for access to the resource, as
+	// the service's answer said; nil when it did not say.
+	AccessRequests *bool
+	// LinkSiteURL is the resource's address on the link site, where a person
+	// with no CLI opens it. The service does not send it: the command sets it
+	// when this install knows that site for its deployment.
+	LinkSiteURL string
+}
+
+// AllowedPasskey is one person the publisher approved for a private resource.
+// The person is known by the device they asked from.
+type AllowedPasskey struct {
+	// DeviceID names the person's device in the form xxxx-xxxx-xxxx-xxxx. It
+	// is derived from the device's public key, and it is what a publisher
+	// passes to take the access away.
+	DeviceID string
+	// Name is what the person typed when they asked. It proves nothing about
+	// who they are.
+	Name string
+	// ApprovedAt is when the publisher approved the request; nil when the
+	// service did not say.
+	ApprovedAt *time.Time
+}
+
+// AccessRequest is one pending request for access to a private resource.
+type AccessRequest struct {
+	// Code is the six digits the service made for this request. The person
+	// who asked is shown it and gives it to the publisher; approving by code
+	// is what ties an approval to a person.
+	Code string
+	// Name is what the requester typed. Anyone can type any name.
+	Name string
+	// DeviceID names the device the request came from.
+	DeviceID string
+	// RequestedAt and ExpiresAt are nil when the service did not say.
+	RequestedAt *time.Time
+	ExpiresAt   *time.Time
+	// CRID and ResourceID name the resource the request is for.
+	CRID       string
+	ResourceID string
 }
 
 // DeleteResult reports a completed (idempotent) delete.
@@ -200,6 +262,12 @@ type ResourceSummary struct {
 	CreatedAt         *time.Time
 	ExpiresAt         *time.Time
 	Publisher         Publisher
+	// AccessRequests is whether people can ask for access to the resource;
+	// nil when the service's row does not say, as a service from before
+	// access requests never does.
+	AccessRequests *bool
+	// AllowedPasskeys are the people the publisher approved.
+	AllowedPasskeys []AllowedPasskey
 }
 
 // DesiredState is the durable customer intent for a tunnel resource.

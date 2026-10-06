@@ -158,6 +158,12 @@ func publisherSurfaces() []publisherSurface {
 				CreatedAt: &created, Publisher: publisher,
 			})
 		}},
+		{"grants", func(p *Printer, publisher qurlapi.Publisher) error {
+			return p.Grants(&qurlapi.ResourceSummary{
+				CRID: "acrid", ResourceID: "rid", Type: "url", Status: "active",
+				CreatedAt: &created, Publisher: publisher,
+			})
+		}},
 		{"sharing status", func(p *Printer, publisher qurlapi.Publisher) error {
 			return p.SharingStatus("http://127.0.0.1:3000", sharing(publisher))
 		}},

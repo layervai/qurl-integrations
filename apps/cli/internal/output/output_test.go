@@ -342,7 +342,7 @@ func TestPublishAccessConflictRendering(t *testing.T) {
 		{name: "private exists", existingPrivate: true, opts: qurlapi.PublishOptions{Public: true}, headline: "this target is already published as private, and privacy is fixed when a resource is first published", hint: hintPublishExistingPrivate},
 		{name: "older service, public exists", olderService: true, headline: "this target is already published as public, and privacy is fixed when a resource is first published", hint: hintPublishExistingPublic},
 		{name: "older service, private exists", olderService: true, existingPrivate: true, opts: qurlapi.PublishOptions{Public: true}, headline: "this target is already published as private, and privacy is fixed when a resource is first published", hint: hintPublishExistingPrivate},
-		{name: "older service, a device list", olderService: true, opts: qurlapi.PublishOptions{AllowedDeviceKeys: []string{"recipient"}}, headline: "this target is already published, and its privacy or its allowed devices differ from what this command asked for", hint: hintPublishAccessDiffers},
+		{name: "older service, a device list", olderService: true, opts: qurlapi.PublishOptions{AllowedDeviceKeys: []string{"recipient"}}, headline: "this target is already published, and its access settings differ from what this command asked for", hint: hintPublishAccessDiffers},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv := apitest.NewServer(t)
@@ -370,7 +370,7 @@ func TestPublishAccessConflictRendering(t *testing.T) {
 	for hint, parts := range map[string][]string{
 		hintPublishExistingPublic:  {"run the command again with --public", "delete it with `qurl delete <CRID>`", "`qurl list` shows its CRID", "publish again"},
 		hintPublishExistingPrivate: {"run the command again without --public", "delete it with `qurl delete <CRID>`", "`qurl list` shows its CRID", "publish again"},
-		hintPublishAccessDiffers:   {"privacy is fixed when a resource is first published", "without --allow-device-key", "`qurl grants <CRID> --add <public-key>` or `--remove <public-key>`", "delete the resource and publish again"},
+		hintPublishAccessDiffers:   {"privacy is fixed when a resource is first published", "without --allow-device-key and --allow-requests", "`qurl grants <CRID> --add <public-key>` or `--remove <public-key>`", "`qurl requests <CRID> --on`", "delete the resource and publish again"},
 	} {
 		for _, part := range parts {
 			if !strings.Contains(hint, part) {
@@ -1119,6 +1119,14 @@ func TestEveryConnectorMessageIsRegistered(t *testing.T) {
 		msgConnectorAssignmentExpired, hintConnectorAssignmentExpired,
 		labelAccess, msgPublishPrivate, msgPublishPublic,
 		hintPublishExistingPublic, hintPublishExistingPrivate, hintPublishAccessDiffers,
+		msgRequestsSendAddress, msgRequestsSendCRID, msgRequestsNextStep, msgRequestsNextStepNoSite,
+		msgRequestsApproveCommand, msgRequestsSafeToSend, msgRequestsSafeToSendCRID,
+		msgRequestsOn, msgRequestsOff, msgRequestsOffOnePerson, msgRequestsOffPeople,
+		msgNoPendingRequests, msgNoPendingRequestsForOne, msgApproveOnlyGivenCodes,
+		msgRequesterNoName, msgRequesterNameUnchecked,
+		msgApproved, msgApprovedCanOpen, msgRemoveCommand, msgDenied,
+		labelName, labelDeviceID, labelApproved, labelAccessRequests, labelApprovedPeople,
+		msgNoApprovedPeople, msgStateOn, msgStateOff, msgRemovePersonHint,
 	}
 	for _, msg := range rendered {
 		if !registered[msg] {

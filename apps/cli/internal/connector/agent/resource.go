@@ -23,8 +23,11 @@ type ResolvedResource struct {
 	// Private is the privacy the create request stated and its answer
 	// confirmed. This package never sets it: the Connector resource request
 	// carries no privacy, so the publish command creates the resource first.
-	Private  *bool
-	Resource *qurl.ConnectorResource
+	Private *bool
+	// AccessRequests is whether people can ask for access, as the same create
+	// answer said; nil when it did not say.
+	AccessRequests *bool
+	Resource       *qurl.ConnectorResource
 	// FoundExisting is what the Connector resource request reported. The
 	// publish command replaces it with the create answer's value.
 	FoundExisting *bool

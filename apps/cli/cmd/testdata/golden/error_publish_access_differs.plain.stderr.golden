@@ -1,4 +1,4 @@
-Error: this target is already published, and its privacy or its allowed devices differ from what this command asked for
+Error: this target is already published, and its access settings differ from what this command asked for
 
-  Hint: privacy is fixed when a resource is first published, and publishing again does not change the allowed devices of a resource that exists. Run the command again without --allow-device-key, with --public if the resource is public, then change the allowed devices with `qurl grants <CRID> --add <public-key>` or `--remove <public-key>`. To change privacy, delete the resource and publish again.
+  Hint: privacy is fixed when a resource is first published, and publishing again changes neither the allowed devices nor the access-request setting of a resource that exists. Run the command again without --allow-device-key and --allow-requests, with --public if the resource is public. Then change the allowed devices with `qurl grants <CRID> --add <public-key>` or `--remove <public-key>`, and turn access requests on with `qurl requests <CRID> --on`. To change privacy, delete the resource and publish again.
   Request ID: req_test

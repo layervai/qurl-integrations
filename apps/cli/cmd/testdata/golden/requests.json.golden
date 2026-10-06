@@ -1,0 +1,22 @@
+{
+  "requests": [
+    {
+      "code": "175306",
+      "name": "Sam Okafor",
+      "name_verified": false,
+      "device_id": "qrst-uvwx-yz67-abcd",
+      "requested_at": "2026-03-01T23:58:00Z",
+      "expires_at": "2026-03-02T00:58:00Z",
+      "crid": "qhtpthw4qt7wkw7khghr6x3z4hsfyn4zbuyhnee4i6bi67yu6yytgvwdbb4q"
+    },
+    {
+      "code": "482913",
+      "name": "Ana Lopez",
+      "name_verified": false,
+      "device_id": "abcd-efgh-2345-mnop",
+      "requested_at": "2026-03-01T23:58:00Z",
+      "expires_at": "2026-03-02T00:58:00Z",
+      "crid": "qhtpthw4qt7wkw7khghr6x3z4hsfyn4zbuyhnee4i6bi67yu6yytgvwdbb4q"
+    }
+  ]
+}

@@ -266,9 +266,9 @@ func TestGrantsUsageErrorsSendNothing(t *testing.T) {
 		{name: "clear with add", flags: []string{"--clear", "--add", key}, want: msgGrantsClearWithEdit},
 		{name: "clear with remove", flags: []string{"--clear", "--remove", key}, want: msgGrantsClearWithEdit},
 		{name: "add a value that is not a public key", flags: []string{"--add", "invalid"}, want: "--add requires unique canonical"},
-		{name: "remove a value that is not a public key", flags: []string{"--remove", "invalid"}, want: "--remove requires unique canonical"},
+		{name: "remove a value that is neither a public key nor a device id", flags: []string{"--remove", "invalid"}, want: msgGrantsRemoveInvalid},
 		{name: "add the same key twice", flags: []string{"--add", key, "--add", key}, want: "--add requires unique canonical"},
-		{name: "remove the same key twice", flags: []string{"--remove", key, "--remove", key}, want: "--remove requires unique canonical"},
+		{name: "remove the same key twice", flags: []string{"--remove", key, "--remove", key}, want: msgGrantsRemoveInvalid},
 		{name: "add and remove the same key", flags: []string{"--add", key, "--remove", key}, want: msgGrantsAddAndRemove},
 		{name: "more keys than a list can hold", flags: tooMany, want: "--add accepts at most 256 keys"},
 	} {
@@ -372,7 +372,7 @@ func TestGrantsCopyTeachesAddAndRemove(t *testing.T) {
 		"qurl grants <CRID> --add <public-key>",
 		"qurl grants <CRID> --remove <public-key>",
 		"qurl grants <CRID> --clear",
-		"| qurl grants <CRID> | Show or change the devices allowed to open a private resource |",
+		"| qurl grants <CRID> | Show or change the devices and people allowed to open a private resource |",
 	} {
 		if !strings.Contains(readme, want) {
 			t.Errorf("README does not teach %q", want)
@@ -389,10 +389,10 @@ func TestGrantsCopyTeachesAddAndRemove(t *testing.T) {
 	}
 	help := collapse(res.stdout.String())
 	for _, want := range []string{
-		"With no flag, the command prints the current list.",
+		"With no flag, the command prints both lists",
 		"--add allows a device and --remove takes one off the list.",
 		"applied as one change",
-		"--clear takes every device off the list.",
+		"--clear takes every public key off the list. It does not remove approved people.",
 		`To set the first list when you publish, use "qurl publish --allow-device-key".`,
 		"have no effect on a public one",
 	} {

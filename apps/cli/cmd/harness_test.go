@@ -134,6 +134,11 @@ type runOpts struct {
 	// that request (the clisandbox journey uses the production wiring via
 	// realOpener).
 	requestCRIDLink func(ctx context.Context, resourceCRID string) (*qurl.CRIDLink, error)
+	// linkSite is the origin this install knows as its link site. Empty
+	// leaves the production wiring in place, which reads the injected
+	// environment only and so knows no site unless a test names a settings
+	// file there.
+	linkSite string
 
 	// ctx, when non-nil, replaces context.Background() so a test can cancel a
 	// foreground daemon or another long-running command.
@@ -295,6 +300,9 @@ func runCLI(t *testing.T, o *runOpts) *runResult {
 			// nil is the production default, as for enterPortalGrant above.
 		default:
 			g.requestCRIDLink = mustNotAskWithTheCRIDAlone(t)
+		}
+		if o.linkSite != "" {
+			g.linkSite = func() string { return o.linkSite }
 		}
 		switch {
 		case o.sleeps != nil:

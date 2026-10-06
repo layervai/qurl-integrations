@@ -102,6 +102,18 @@ const (
 	msgGrantsClearWithEdit  = "--clear cannot be combined with --add or --remove"
 	msgGrantsAddAndRemove   = "the same public key cannot be given to both --add and --remove"
 
+	// msgGrantsRemoveInvalid refuses a --remove value that is neither of the
+	// two things the flag takes.
+	msgGrantsRemoveInvalid = "--remove takes public keys and device ids of the form xxxx-xxxx-xxxx-xxxx, each given once"
+
+	// Usage errors of the commands for access requests.
+	msgAllowRequestsWithPublic  = "--allow-requests cannot be used with --public: access requests are for a private resource, and a public one already opens for anyone who has the CRID"
+	msgRequestsOnAndOff         = "--on and --off cannot be used together"
+	msgRequestsSettingNeedsCRID = "--on and --off need the CRID of the resource: qurl requests <CRID> --on"
+	// msgRequestCodeInvalid refuses an operand that can never be a request
+	// code, before any request is sent.
+	msgRequestCodeInvalid = "a request code is six digits, written as 123456, 123 456 or 123-456"
+
 	// msgNoKeyProvided is login's empty-input error.
 	msgNoKeyProvided = "no API key provided"
 
@@ -183,6 +195,11 @@ func customerMessages() []string {
 		msgGrantsReplaceRemoved,
 		msgGrantsClearWithEdit,
 		msgGrantsAddAndRemove,
+		msgGrantsRemoveInvalid,
+		msgAllowRequestsWithPublic,
+		msgRequestsOnAndOff,
+		msgRequestsSettingNeedsCRID,
+		msgRequestCodeInvalid,
 		msgNoKeyProvided,
 		msgAlreadyGone,
 		msgOpeningBrowser,

@@ -125,11 +125,13 @@ homebrew_casks:
     description: "Publish and access protected resources"
     license: "MIT"
     manpages:
+      - manpages/qurl-approve.1
       - manpages/qurl-completion.1
       - manpages/qurl-daemon-retarget-local.1
       - manpages/qurl-daemon-run.1
       - manpages/qurl-daemon.1
       - manpages/qurl-delete.1
+      - manpages/qurl-deny.1
       - manpages/qurl-get.1
       - manpages/qurl-grants.1
       - manpages/qurl-inspect.1
@@ -143,6 +145,7 @@ homebrew_casks:
       - manpages/qurl-publisher-set.1
       - manpages/qurl-publisher.1
       - manpages/qurl-request.1
+      - manpages/qurl-requests.1
       - manpages/qurl-restart.1
       - manpages/qurl-share.1
       - manpages/qurl-start.1

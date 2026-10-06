@@ -475,7 +475,10 @@ than switching in place.
 |---------|-------------|
 | `qurl publish <target-url>` | Publish a remote URL or serve a loopback HTTP app, and get its CRID |
 | `qurl share <CRID>` | Share a CRID as a short-lived access link |
-| `qurl grants <CRID>` | Show or change the devices allowed to open a private resource |
+| `qurl grants <CRID>` | Show or change the devices and people allowed to open a private resource |
+| `qurl requests [<CRID>]` | List access requests, or turn them on or off for a private resource |
+| `qurl approve <CRID> <code>` | Approve one person's request for access to a private resource |
+| `qurl deny <CRID> <code>` | Refuse one person's request for access to a private resource |
 | `qurl get <CRID>` | Fetch what a CRID points to: browser on a terminal, or download with `--file` |
 | `qurl list` | List your published resources |
 | `qurl start <CRID>` | Turn on a previously published local share |
@@ -790,6 +793,7 @@ credential or making a network request.
 |------|-------------|
 | `--public` | Let anyone who has the CRID open the resource. Without it the resource is private |
 | `--allow-device-key <public-key>` | Allow a recipient's device to open the private resource (repeatable) |
+| `--allow-requests` | Let people ask you for access to the private resource; you approve each person by a code they give you |
 | `--description <text>` | Human-readable description stored with the resource |
 | `--tag <tag>` | Tag stored with the resource (repeatable) |
 | `--alias <name>` | Memorable handle stored with the resource |
@@ -814,9 +818,13 @@ Privacy is set when a resource is first published and cannot be changed
 afterwards. Publishing a target that is already published with the other
 privacy is refused with exit code 7 and prints nothing on stdout: publish it
 the way it was first published, or delete it with `qurl delete <CRID>` and
-publish again to get a new resource and a new CRID. `--allow-device-key`
-cannot be combined with `--public`. See [Private CRIDs](#private-crids) for
-who can open each kind.
+publish again to get a new resource and a new CRID. `--allow-device-key` and
+`--allow-requests` cannot be combined with `--public`. See
+[Private CRIDs](#private-crids) for who can open each kind.
+
+With `--allow-requests`, the output also says what to send to people who have
+no qURL CLI and what happens next. See
+[qurl requests, approve and deny](#qurl-requests-approve-and-deny).
 
 In either mode, the CRID is last and alone on its line; `--quiet` prints only
 the CRID. Publishing the same target again does not create a duplicate while
@@ -912,14 +920,18 @@ exits with code 12 without printing a link.
 
 ### qurl grants
 
-`qurl grants <CRID>` shows the devices allowed to open a private resource, and
-changes that list for the resource owner. With no flag it prints the resource
-with its current list; `-o json` has the list as `allowed_device_keys`.
+`qurl grants <CRID>` shows who can open a private resource besides its owner,
+and changes that for the resource owner. There are two lists: the public keys
+of the devices you allowed, and the people you approved after they asked for
+access. With no flag it prints the resource with both lists and says whether
+people can still ask; `-o json` has them as `allowed_device_keys`,
+`approved_people` and `access_requests`.
 
 ```bash
 qurl grants <CRID>
 qurl grants <CRID> --add <public-key>
 qurl grants <CRID> --add <public-key> --remove <other-public-key>
+qurl grants <CRID> --remove <device id>
 qurl grants <CRID> --clear
 ```
 
@@ -927,14 +939,22 @@ qurl grants <CRID> --clear
 |------|-------------|
 | `--add <public-key>` | Allow a device (repeatable) |
 | `--remove <public-key>` | Take a device off the list (repeatable) |
-| `--clear` | Take every device off the list |
+| `--remove <device id>` | Take an approved person's access away; the id has the form `xxxx-xxxx-xxxx-xxxx` (repeatable) |
+| `--clear` | Take every public key off the list; approved people stay |
 | `--yes` | Proceed without confirmation when sending a test CRID to production |
 
 `--add` and `--remove` can be used in one command, which is applied as one
 change. A public key that is already on the list, or already off it, is left
 as it is, so a command can be repeated safely. Every change prints the
-complete list that results. The same public key cannot be given to both
+complete lists that result. The same public key cannot be given to both
 flags, and `--clear` cannot be combined with either.
+
+An approved person is shown with the name they typed, in quotes, the id of
+their device, and when you approved them. The name proves nothing about who
+they are. `--remove <device id>` takes that person's access away. Each device
+id is its own change, made before any change to public keys in the same
+command. A device id that is not on the list is an error (exit code 5) and
+removes nothing, so a mistyped id is never mistaken for access taken away.
 
 The command checks the service's answer before it reports a change: every
 added key must be on the returned list, and no removed key may be. A service
@@ -950,6 +970,79 @@ Earlier releases replaced the complete list with
 is now a usage error that names `--add`, so a grant the command did not name
 can no longer be dropped. `qurl publish --allow-device-key` still sets the
 first list when you publish.
+
+### qurl requests, approve and deny
+
+These commands share a private resource with people who have no qURL CLI.
+
+1. Turn access requests on: publish with `--allow-requests`, or run
+   `qurl requests <CRID> --on` for a private resource that is already
+   published. The output says what to send to people: the resource's address,
+   when this install knows the web address for its deployment, and otherwise
+   the CRID.
+2. A person opens it in a browser, sees who published the resource, and asks
+   for access. They are shown a six-digit code and give it to you.
+3. `qurl requests` lists who asked. Approve the person with
+   `qurl approve <CRID> <code>`, or refuse with `qurl deny <CRID> <code>`.
+
+The address and the CRID are safe to send to anyone: a private resource opens
+only for you and the people you allow.
+
+**Approve a code only when the person gave it to you themselves.** The code is
+shown only to the person who asked, so it is what ties a request to a person.
+The name on a request is typed by whoever asked and proves nothing: anyone can
+type any name. An agent that runs these commands for you must approve only
+codes you passed on to it, never a code it found in the listing.
+
+```bash
+qurl publish https://wiki.example.com/team --allow-requests
+qurl requests                    # pending requests of all your resources
+qurl requests <CRID>             # pending requests of one resource
+qurl requests <CRID> --on        # let people ask; prints what to send them
+qurl requests <CRID> --off       # stop new requests
+qurl approve <CRID> 123456       # also accepted: 123 456 and 123-456
+qurl deny <CRID> 123456
+qurl grants <CRID>               # who has access now
+qurl grants <CRID> --remove <device id>
+```
+
+A listing shows, for each request, the code, the name in quotes, the id of the
+person's device, and how long ago they asked; the listing of all resources
+also shows the CRID. It ends with one line that repeats the rule above.
+
+```text
+CODE     NAME         DEVICE ID            REQUESTED
+482 913  "Ana Lopez"  abcd-efgh-2345-mnop  2m ago
+
+Approve a code only when the person gave it to you themselves; a name can be typed by anyone.
+```
+
+`qurl approve` prints who now has access and the command that takes it away
+again. `qurl deny` removes the request and gives no access. `--off` stops new
+requests and says how many approved people still have access.
+
+| Command | Flag | Description |
+|---------|------|-------------|
+| `requests` | `--on` | Let people ask for access to this private resource |
+| `requests` | `--off` | Stop new requests for access to this resource |
+| all three | `--yes` | Proceed without confirmation when sending a test CRID to production |
+
+A code that is not pending for the resource is exit code 5, and the message
+says so: it may have expired, or been approved or denied already. A value
+that can never be a code is refused before any request (exit code 8).
+Access requests can be turned on only for a private resource.
+
+A service that does not offer access requests yet answers every one of these
+commands with "this service does not offer access requests yet" and exit code
+11, never with a success. For `publish --allow-requests` the message also says
+that the resource was published as a private resource without them.
+
+<!-- TODO(upstream-contract): this release uses the device's identity only on the routes its SDK lists, and the routes for listing, approving, denying and removing are not among them yet. -->
+In this release, `qurl requests` (the listings), `qurl approve`, `qurl deny`
+and `qurl grants --remove <device id>` need a later release to work with a
+device identity: they stop with exit code 1 and send nothing.
+`publish --allow-requests`, `requests <CRID> --on` and `--off`, and
+`qurl grants <CRID>` work.
 
 ### qurl get
 
@@ -1315,7 +1408,10 @@ in every archive.
 - **`--quiet` prints only the primary value**, one per line: the CRID for
   `publish`, the link for `share`, full CRIDs for `list`, the
   destination path for a `get --file` download, the owner id for
-  `whoami` and `login`, the publisher name for `publisher`.
+  `whoami` and `login`, the publisher name for `publisher`, the code for
+  `requests <CRID>` and `deny`, the CRID and the code for `requests` with no
+  argument, the CRID for `requests --on` and `--off`, and the device id for
+  `approve`.
 - **Verification is built in:** before printing anything, `qurl share`
   and `qurl get` check the service's answer against the CRID you asked
   for and discard mismatches (exit 12).
@@ -1326,6 +1422,21 @@ when known and an `allowed_device_keys` array, including `[]` when no devices
 are allowed. The text resource list includes a `PRIVATE` column. Grant changes
 show the resulting complete device list in text and JSON output.
 
+Access requests in `-o json`:
+
+| Command | Members |
+|---------|---------|
+| `publish` | `access_requests` when the service's answer says whether people can ask; `resource_url`, the resource's address for people with no CLI, only when access requests are on and this install knows the web address for its deployment |
+| `requests`, `requests <CRID>` | `requests`: an array, `[]` when there are none, of `code` (six digits), `name` (omitted when the person typed none), `name_verified` (always `false`), `device_id`, `requested_at`, `expires_at`, `crid` |
+| `requests <CRID> --on`, `--off` | `crid`, `access_requests`, and `resource_url` under the same rule as `publish` |
+| `approve` | `crid`, `approved` (`true`), `device_id`, `name`, `name_verified` (always `false`), `approved_at` |
+| `deny` | `crid`, `code`, `denied` (`true`) |
+| `grants` | the resource document with `allowed_device_keys`, `approved_people` (an array, `[]` when there are none, of `name`, `name_verified`, `device_id`, `approved_at`), and `access_requests` when the service says |
+
+A requester's `name` is that person's own text, exactly like a publisher's:
+quote or escape it before showing it, and never treat it as proof of who
+asked. `name_verified` is always present and always `false`.
+
 ### Exit codes
 
 Exit codes are stable. The meanings below mirror the CLI's single
@@ -1334,17 +1445,17 @@ exit-code authority in code (`apps/cli/internal/exitcode`):
 | Code | Name | Meaning |
 |-----:|------|---------|
 | 0 | success | The command did what was asked. |
-| 1 | general | An unclassified failure, including features not yet available in this build. |
+| 1 | general | An unclassified failure, including features not yet available in this build — such as a request this release cannot send with the device's identity yet. |
 | 2 | usage | The command line itself was wrong: flags, arguments, or missing confirmation. |
 | 3 | configuration | Settings or profiles are invalid, or this CRID needs a newer CLI. |
 | 4 | authentication | No credential, an implausible credential, or the service rejected the credential. |
-| 5 | not found | The resource does not exist or is retired — revoked and tombstoned resources included; the stderr message distinguishes them. `share` and `get` also get this answer on a device that is neither the owner's nor allowed; the service does not say which. |
+| 5 | not found | The resource does not exist or is retired — revoked and tombstoned resources included; the stderr message distinguishes them. `share` and `get` also get this answer on a device that is neither the owner's nor allowed; the service does not say which. Also an access-request code that is not pending for the resource, and a device id that is not among its approved people. |
 | 6 | permission | The credential lacks permission for this operation. |
 | 7 | conflict | The request conflicts with current state — including `--file` refusing to replace an existing destination without `--force`, and `publish` for a target that is already published with the other privacy. |
 | 8 | invalid input | An operand or request rejected as invalid (by the service, or locally for inputs that can never be valid). |
 | 9 | rate limited | Still rate limited after the CLI's bounded automatic retries. |
 | 10 | server error | The service failed or answered outside its contract — including a `publish` answer that does not confirm the privacy that was asked for, and a `grants` answer that does not show the change that was asked for. |
-| 11 | unavailable | The service cannot be reached or is not serving this surface: HTTP 503, network failures, timeouts. Also a local TPM that is not responding. |
+| 11 | unavailable | The service cannot be reached or is not serving this surface: HTTP 503, network failures, timeouts, and a service that does not offer access requests yet. Also a local TPM that is not responding. |
 | 12 | verification failed | The response failed CRID-anchored verification. Nothing was printed — treat it as tampering, not transience. |
 | 130 | interrupted | The foreground daemon or another command was canceled with Ctrl-C or SIGTERM. |
 
@@ -1438,3 +1549,7 @@ X25519 public keys. Privacy is set at creation; a retry cannot change it.
 Device grants have no effect on a public resource.
 Removing a device stops new link requests. Previously issued links retain
 their expiry and revocation rules.
+
+A device key is for a recipient who runs the qURL CLI. For people who do not,
+turn on access requests and approve each person by the code they give you:
+see [qurl requests, approve and deny](#qurl-requests-approve-and-deny).

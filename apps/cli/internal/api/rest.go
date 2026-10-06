@@ -43,6 +43,11 @@ type resourceRow struct {
 	Tags              []string     `json:"tags"`
 	CreatedAt         *time.Time   `json:"created_at"`
 	ExpiresAt         *time.Time   `json:"expires_at"`
+	// AccessRequests is nil when the row has no such member, which is how a
+	// service from before access requests answers. AllowedPasskeys are the
+	// people the publisher approved.
+	AccessRequests  *bool        `json:"access_requests"`
+	AllowedPasskeys []passkeyRow `json:"allowed_passkeys"`
 	// Publisher is read by UnmarshalJSON, not by the struct decoder, so a
 	// repeated member can be counted; see publisherMember.
 	Publisher publisherWire `json:"-"`
@@ -206,13 +211,17 @@ type publishRequest struct {
 	// private, an older one as public.
 	Private           bool     `json:"private"`
 	AllowedDeviceKeys []string `json:"allowed_device_keys,omitempty"`
-	Slug              string   `json:"slug,omitempty"`
-	FindOrCreate      bool     `json:"find_or_create,omitempty"`
-	Type              string   `json:"type"`
-	TargetURL         string   `json:"target_url,omitempty"`
-	Description       string   `json:"description,omitempty"`
-	Tags              []string `json:"tags,omitempty"`
-	Alias             string   `json:"alias,omitempty"`
+	// AccessRequests is sent only to turn access requests on. Off is the
+	// service's default and is not planned to change, and a service from
+	// before access requests is never sent a member it does not know.
+	AccessRequests bool     `json:"access_requests,omitempty"`
+	Slug           string   `json:"slug,omitempty"`
+	FindOrCreate   bool     `json:"find_or_create,omitempty"`
+	Type           string   `json:"type"`
+	TargetURL      string   `json:"target_url,omitempty"`
+	Description    string   `json:"description,omitempty"`
+	Tags           []string `json:"tags,omitempty"`
+	Alias          string   `json:"alias,omitempty"`
 }
 
 // Publish registers a URL or pre-creates a Connector resource, private unless
@@ -230,6 +239,7 @@ func (c *client) Publish(ctx context.Context, targetURL string, opts PublishOpti
 	body := publishRequest{
 		Private:           wantPrivate,
 		AllowedDeviceKeys: opts.AllowedDeviceKeys,
+		AccessRequests:    opts.AllowRequests,
 		Type:              "url",
 		TargetURL:         targetURL,
 		Description:       opts.Description,
@@ -276,16 +286,29 @@ func (c *client) Publish(ctx context.Context, targetURL string, opts PublishOpti
 	if len(opts.AllowedDeviceKeys) > 0 && !slices.Equal(slices.Sorted(slices.Values(opts.AllowedDeviceKeys)), slices.Sorted(slices.Values(env.Data.AllowedDeviceKeys))) {
 		return nil, fmt.Errorf("%w: API did not confirm the requested device grants", qurl.ErrInvalidAPIResponse)
 	}
+	// Access requests that were asked for must be confirmed too. A row with
+	// no such member is how a service from before them answers: it made the
+	// resource, private as confirmed above, and ignored the rest. A row that
+	// says they are off is a service that has them and did not turn them on.
+	if opts.AllowRequests {
+		switch {
+		case env.Data.AccessRequests == nil:
+			return nil, &accessRequestsUnsupportedError{detail: msgAccessRequestsCreateIgnored}
+		case !*env.Data.AccessRequests:
+			return nil, &answerError{message: msgAccessRequestsCreateUnconfirmed}
+		}
+	}
 	return &Published{
-		Private:       env.Data.Private,
-		CRID:          env.Data.CRID,
-		ResourceID:    env.Data.ResourceID,
-		TargetURL:     env.Data.TargetURL,
-		Status:        env.Data.Status,
-		CreatedAt:     knownTime(env.Data.CreatedAt),
-		ExpiresAt:     knownTime(env.Data.ExpiresAt),
-		FoundExisting: env.Meta.FoundExisting,
-		Publisher:     env.Data.Publisher.publisher(),
+		AccessRequests: env.Data.AccessRequests,
+		Private:        env.Data.Private,
+		CRID:           env.Data.CRID,
+		ResourceID:     env.Data.ResourceID,
+		TargetURL:      env.Data.TargetURL,
+		Status:         env.Data.Status,
+		CreatedAt:      knownTime(env.Data.CreatedAt),
+		ExpiresAt:      knownTime(env.Data.ExpiresAt),
+		FoundExisting:  env.Meta.FoundExisting,
+		Publisher:      env.Data.Publisher.publisher(),
 	}, nil
 }
 
@@ -305,8 +328,9 @@ const (
 //
 // The request stated one privacy, so a privacy mismatch means the resource
 // that exists has the other one. The older answer says that only when the
-// request carried no device list: with a list, the list may be what differs,
-// and the error then names neither.
+// request carried nothing else about access: with a device list, or with
+// access requests turned on, one of those may be what differs, and the error
+// then names none of them.
 func publishProblem(reply *restReply, opts *PublishOptions) error {
 	problem := reply.problem()
 	var apiErr *Error
@@ -320,7 +344,7 @@ func publishProblem(reply *restReply, opts *PublishOptions) error {
 	switch {
 	case strings.EqualFold(apiErr.Code, codePrivacyMismatch):
 	case strings.Contains(strings.ToLower(apiErr.Detail), legacyAccessSettingsDetail):
-		if len(opts.AllowedDeviceKeys) > 0 {
+		if len(opts.AllowedDeviceKeys) > 0 || opts.AllowRequests {
 			existing = ExistingAccessUnknown
 		}
 	default:
@@ -453,7 +477,13 @@ func summarizeResourceRow(row *resourceRow, source string) (*ResourceSummary, er
 			return nil, fmt.Errorf("%w: desired-on tunnel %s has zero serving_epoch", qurl.ErrInvalidAPIResponse, source)
 		}
 	}
+	people, err := allowedPasskeys(row.AllowedPasskeys, source)
+	if err != nil {
+		return nil, err
+	}
 	return &ResourceSummary{
+		AccessRequests:    row.AccessRequests,
+		AllowedPasskeys:   people,
 		AllowedDeviceKeys: row.AllowedDeviceKeys,
 		Private:           row.Private,
 		CRID:              row.CRID, ResourceID: row.ResourceID, TargetURL: row.TargetURL,

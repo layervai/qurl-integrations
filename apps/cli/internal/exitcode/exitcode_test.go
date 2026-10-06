@@ -121,6 +121,11 @@ var cliSentinels = map[string]struct {
 	// even though it lives in the environment.
 	"hub.ErrConfig":           {hub.ErrConfig, Config},
 	"sessionconfig.ErrConfig": {sessionconfig.ErrConfig, Config},
+
+	// A service that does not offer access requests is not serving that
+	// surface: the Unavailable row, whether a missing route or an answer
+	// without the setting showed it.
+	"qurlapi.ErrAccessRequestsUnsupported": {qurlapi.ErrAccessRequestsUnsupported, Unavailable},
 }
 
 // sdkSentinels pins the mapping for every qurl-go sentinel the CLI can
@@ -217,6 +222,11 @@ var sdkSentinels = map[string]struct {
 	"qurl.ErrConnectorResourceRateLimited":           {qurl.ErrConnectorResourceRateLimited, RateLimited},
 	"qurl.ErrConnectorResourceRequestRejected":       {qurl.ErrConnectorResourceRequestRejected, InvalidInput},
 	"qurl.ErrInvalidNativeConnectorResourceResponse": {qurl.ErrInvalidNativeConnectorResourceResponse, ServerError},
+
+	// The device credential may be used on a fixed list of routes. A request
+	// outside it is refused before it is sent: a capability this build does
+	// not have, the General row.
+	"qurl.ErrRegisteredAgentResourceRequestDenied": {qurl.ErrRegisteredAgentResourceRequestDenied, General},
 }
 
 // TestSentinelMapping asserts every defined sentinel — CLI and SDK — maps to

@@ -95,6 +95,12 @@ type globalOpts struct {
 	// harness fails a test that reaches it without an answer), so no hermetic
 	// test sends a real request.
 	requestCRIDLink func(ctx context.Context, resourceCRID string) (*qurl.CRIDLink, error)
+	// linkSite returns the origin of the site where a person opens a resource
+	// in a browser with only its CRID, or the empty string when this install
+	// does not know it for its deployment. It reads settings only: it sends
+	// nothing and never fails a command. Publish and `qurl requests --on` use
+	// it to print the address a publisher sends to people.
+	linkSite func() string
 
 	// redirectFRPLogs rebinds the FRP library's process-global logger to this
 	// invocation's stderr (production default). The cmd test binary injects a
@@ -298,6 +304,9 @@ Existing accounts can still use "qurl login" or QURL_API_KEY for enrollment.`,
 		publishCmd(opts),
 		shareCmd(opts),
 		grantsCmd(opts),
+		requestsCmd(opts),
+		approveCmd(opts),
+		denyCmd(opts),
 		getCmd(opts),
 		listCmd(opts),
 		shareStartCmd(opts),
@@ -348,6 +357,9 @@ func (o *globalOpts) applyLinkDefaults() {
 	}
 	if o.requestCRIDLink == nil {
 		o.requestCRIDLink = opener.RequestCRIDLink
+	}
+	if o.linkSite == nil {
+		o.linkSite = opener.LinkSite
 	}
 }
 

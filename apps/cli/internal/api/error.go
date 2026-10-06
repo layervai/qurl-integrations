@@ -93,8 +93,109 @@ func CustomerMessages() []string {
 		msgPublishAccessConflict, msgPublishExistingPublic, msgPublishExistingPrivate, msgPublishAccessDiffers,
 		msgPrivateUnconfirmed, msgPublicUnconfirmed,
 		msgGrantEditUnconfirmed,
+		msgAccessRequestsUnsupported, msgAccessRequestsCreateIgnored, msgAccessRequestsSettingIgnored,
+		msgAccessRequestsCreateUnconfirmed, msgAccessRequestsSettingUnconfirmed, msgApprovalUnconfirmed,
+		msgRequestCodeNotFound, msgDeviceIDNotFound, msgAccessRouteRefused, msgRemovalUnconfirmed,
 	}
 }
+
+// Access requests: a service that does not offer them, an answer that does
+// not confirm what was asked, a code or a device id that is not there, and a
+// request this release cannot send.
+const (
+	// msgAccessRequestsUnsupported is the text of
+	// ErrAccessRequestsUnsupported, and the start of every message for it.
+	// The two details after it say what the service did do, where the command
+	// can know.
+	msgAccessRequestsUnsupported    = "this service does not offer access requests yet"
+	msgAccessRequestsCreateIgnored  = ". The resource was published as a private resource without them; run the command again without --allow-requests to see its CRID"
+	msgAccessRequestsSettingIgnored = ": its answer to this change does not show the setting"
+
+	// The service has access requests and its answer does not show the
+	// setting that was asked for.
+	msgAccessRequestsCreateUnconfirmed  = "the service did not turn on access requests for this resource, so no CRID was printed. The resource is private. If the target was already published, turn them on with `qurl requests <CRID> --on`; `qurl list` shows its CRID"
+	msgAccessRequestsSettingUnconfirmed = "the service did not confirm the change to access requests. Run `qurl grants <CRID>` to see the setting as it is now"
+
+	// msgApprovalUnconfirmed is shown when the answer to an approval does not
+	// name the device that got access. The request may have been approved.
+	msgApprovalUnconfirmed = "the service's answer to the approval does not say who got access. Run `qurl grants <CRID>` to see who has access now"
+
+	// %s is the code, written as two groups of three.
+	msgRequestCodeNotFound = "no pending request has the code %s for this resource. It may have expired, or been approved or denied already. Run `qurl requests <CRID>` to see the pending requests"
+	// %s is the device id. Nothing was removed, and the message says so: a
+	// mistyped id must never read as access taken away.
+	msgDeviceIDNotFound = "no approved person has the device id %s on this resource, so nothing was removed. Run `qurl grants <CRID>` to see who has access"
+
+	// msgRemovalUnconfirmed is shown when the service answered a removal
+	// with success and the resource still lists the person.
+	msgRemovalUnconfirmed = "the service still lists a person whose access was removed. Run `qurl grants <CRID>` to see who has access now"
+
+	// msgAccessRouteRefused is shown when this release may not use the
+	// device's identity on the route the command needs. Nothing was sent.
+	msgAccessRouteRefused = "this release of qurl cannot send this request with this device's identity yet, so nothing was sent. It needs a later release"
+)
+
+// ErrAccessRequestsUnsupported marks a service that does not offer access
+// requests: its routes are missing, or its answer to a create or a change
+// does not have the setting. The command, the operands and the credential are
+// all valid; the service is not serving this surface, which is the
+// Unavailable exit code.
+var ErrAccessRequestsUnsupported = errors.New(msgAccessRequestsUnsupported)
+
+// accessRequestsUnsupportedError is ErrAccessRequestsUnsupported with what
+// the command knows about what the service did instead.
+type accessRequestsUnsupportedError struct{ detail string }
+
+func (e *accessRequestsUnsupportedError) Error() string { return e.UserMessage() }
+
+// UserMessage is the text the terminal rendering shows.
+func (e *accessRequestsUnsupportedError) UserMessage() string {
+	return msgAccessRequestsUnsupported + e.detail
+}
+
+func (e *accessRequestsUnsupportedError) Unwrap() error { return ErrAccessRequestsUnsupported }
+
+// answerError is an answer that does not confirm what a command asked for,
+// with the message a customer reads. It is an answer outside the contract, so
+// it matches the SDK's invalid-response sentinel and has that exit code.
+type answerError struct{ message string }
+
+func (e *answerError) Error() string { return e.message }
+
+// UserMessage is the text the terminal rendering shows in place of the
+// generic invalid-response wording.
+func (e *answerError) UserMessage() string { return e.message }
+
+func (e *answerError) Unwrap() error { return qurl.ErrInvalidAPIResponse }
+
+// accessNotFoundError is a request code or a device id that the service does
+// not have for a resource it does have. The service's not-found problem stays
+// in the chain, so the exit code is the not-found row and the request id is
+// shown.
+type accessNotFoundError struct {
+	message string
+	problem *Error
+}
+
+func (e *accessNotFoundError) Error() string { return e.message }
+
+// UserMessage is the text the terminal rendering shows in place of the
+// generic not-found hint, which is about a mistyped CRID.
+func (e *accessNotFoundError) UserMessage() string { return e.message }
+
+func (e *accessNotFoundError) Unwrap() error { return e.problem }
+
+// accessRouteRefusedError is a request this release may not send with the
+// device's identity. The SDK refused it before anything left the machine.
+type accessRouteRefusedError struct{ cause error }
+
+func (e *accessRouteRefusedError) Error() string { return msgAccessRouteRefused }
+
+// UserMessage is the text the terminal rendering shows in place of the SDK's
+// own wording, which names a method and a path.
+func (e *accessRouteRefusedError) UserMessage() string { return msgAccessRouteRefused }
+
+func (e *accessRouteRefusedError) Unwrap() error { return e.cause }
 
 // msgGrantEditUnconfirmed is shown when the answer to an add or remove of
 // single device grants does not show the change. A service from before those
@@ -124,7 +225,7 @@ const (
 	msgPublishAccessConflict  = "this target is already published with other access settings"
 	msgPublishExistingPublic  = "this target is already published as public, and privacy is fixed when a resource is first published"
 	msgPublishExistingPrivate = "this target is already published as private, and privacy is fixed when a resource is first published"
-	msgPublishAccessDiffers   = "this target is already published, and its privacy or its allowed devices differ from what this command asked for"
+	msgPublishAccessDiffers   = "this target is already published, and its access settings differ from what this command asked for"
 
 	// The answer to a create request did not say that the resource has the
 	// privacy the request stated. Nothing is printed on stdout, and the

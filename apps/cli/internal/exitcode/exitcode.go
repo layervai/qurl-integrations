@@ -65,8 +65,9 @@ const (
 	// outside its contract.
 	ServerError = 10
 	// Unavailable: the service cannot be reached or is not serving this
-	// surface (HTTP 503, network failures, timeouts), or the local TPM that
-	// protects device state is not responding.
+	// surface (HTTP 503, network failures, timeouts, a service that does not
+	// offer access requests yet), or the local TPM that protects device state
+	// is not responding.
 	Unavailable = 11
 	// VerificationFailed: the response failed CRID-anchored verification.
 	// Nothing was emitted; treat as tampering, not transience.
@@ -291,6 +292,15 @@ func cliSentinelCode(err error) (int, bool) { //nolint:gocyclo // Keep the close
 		// change after creation. A request that conflicts with state which
 		// already exists is the Conflict row, as for ErrFileExists above.
 		return Conflict, true
+	case errors.Is(err, qurlapi.ErrAccessRequestsUnsupported):
+		// The service has no access requests: their routes are missing, or
+		// its answer does not have the setting. Nothing about the command is
+		// wrong and no retyping helps. A service that is not serving this
+		// surface is the Unavailable row, as it is for a deployment that does
+		// not serve temporary access links. The route that told the client
+		// answers 404, so this is checked before the status table, which
+		// would call it not found.
+		return Unavailable, true
 	case errors.Is(err, consume.ErrLinkExpired):
 		// Expiry that survived the one automatic refresh joins the
 		// platform's gone family: the link no longer leads to content.

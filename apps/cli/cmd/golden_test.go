@@ -23,6 +23,9 @@ type goldenCase struct {
 	wantCode int
 	// stdin is piped input (login's key); empty means an empty pipe.
 	stdin string
+	// linkSite is the origin this install knows as its link site; empty
+	// means it knows none, as with the deployment a release ships.
+	linkSite string
 	// chdirTemp runs the variant in a fresh temp working directory, so
 	// cases whose output embeds a relative --file path stay deterministic
 	// and leave nothing behind in the repo tree.
@@ -191,6 +194,154 @@ func TestGoldens(t *testing.T) {
 			},
 			variants:     []string{"plain"},
 			wantCode:     2,
+			stderrGolden: true,
+		},
+		{
+			// Publishing with access requests on, on an install that knows
+			// its link site: the document says what to send to people and
+			// what happens next, before the CRID line.
+			name: "publish_requests",
+			args: func(*apitest.Server) []string {
+				return []string{"publish", "https://example.com/data", "--allow-requests"}
+			},
+			linkSite:     testLinkSite,
+			variants:     goldenVariants(),
+			stdoutGolden: true,
+		},
+		{
+			// The same on an install that does not know its link site: the
+			// CRID is what to send, and no address is named.
+			name: "publish_requests_no_site",
+			args: func(*apitest.Server) []string {
+				return []string{"publish", "https://example.com/data", "--allow-requests"}
+			},
+			variants:     []string{"plain", "json"},
+			stdoutGolden: true,
+		},
+		{
+			// A service from before access requests: exit 11 and no CRID.
+			name: "error_publish_requests_unsupported",
+			args: func(*apitest.Server) []string {
+				return []string{"publish", "https://example.com/data", "--allow-requests"}
+			},
+			prepare:      func(srv *apitest.Server) { srv.PlayNoAccessRequests() },
+			variants:     []string{"plain"},
+			wantCode:     11,
+			stderrGolden: true,
+		},
+		{
+			// The pending requests of every resource, ending with the line on
+			// what a code and a name are worth.
+			name:         "requests",
+			args:         func(*apitest.Server) []string { return []string{"requests"} },
+			prepare:      twoRequests,
+			variants:     goldenVariants(),
+			stdoutGolden: true,
+		},
+		{
+			name:         "requests_one",
+			args:         func(srv *apitest.Server) []string { return []string{"requests", srv.Key.CRID} },
+			prepare:      twoRequests,
+			variants:     []string{"plain"},
+			stdoutGolden: true,
+		},
+		{
+			// Nothing pending: a note on stderr and nothing on stdout.
+			name:         "requests_none",
+			args:         func(*apitest.Server) []string { return []string{"requests"} },
+			variants:     []string{"plain"},
+			stderrGolden: true,
+		},
+		{
+			name:         "requests_on",
+			args:         func(srv *apitest.Server) []string { return []string{"requests", srv.Key.CRID, "--on"} },
+			linkSite:     testLinkSite,
+			variants:     []string{"plain", "json"},
+			stdoutGolden: true,
+		},
+		{
+			name: "requests_off",
+			args: func(srv *apitest.Server) []string { return []string{"requests", srv.Key.CRID, "--off"} },
+			prepare: func(srv *apitest.Server) {
+				srv.SetAccessRequests(true)
+				srv.AddApprovedPerson(requesterDevice, requesterName)
+				srv.AddApprovedPerson(otherDevice, otherRequester)
+			},
+			variants:     []string{"plain"},
+			stdoutGolden: true,
+		},
+		{
+			name:         "error_requests_unsupported",
+			args:         func(*apitest.Server) []string { return []string{"requests"} },
+			prepare:      func(srv *apitest.Server) { srv.PlayNoAccessRequests() },
+			variants:     []string{"plain"},
+			wantCode:     11,
+			stderrGolden: true,
+		},
+		{
+			// An approval: who now has access, and the command that takes it
+			// away again.
+			name:         "approve",
+			args:         func(srv *apitest.Server) []string { return []string{"approve", srv.Key.CRID, "482 913"} },
+			prepare:      twoRequests,
+			variants:     goldenVariants(),
+			stdoutGolden: true,
+		},
+		{
+			// A code that is not pending for the resource: exit 5 and a
+			// message about the code.
+			name:         "error_approve_not_pending",
+			args:         func(srv *apitest.Server) []string { return []string{"approve", srv.Key.CRID, "000000"} },
+			prepare:      twoRequests,
+			variants:     []string{"plain"},
+			wantCode:     5,
+			stderrGolden: true,
+		},
+		{
+			// A value that can never be a code: exit 8 before any request.
+			name:         "error_approve_code",
+			args:         func(srv *apitest.Server) []string { return []string{"approve", srv.Key.CRID, "Ana Lopez"} },
+			variants:     []string{"plain"},
+			wantCode:     8,
+			stderrGolden: true,
+		},
+		{
+			name:         "deny",
+			args:         func(srv *apitest.Server) []string { return []string{"deny", srv.Key.CRID, "482913"} },
+			prepare:      twoRequests,
+			variants:     []string{"tty", "plain"},
+			stderrGolden: true,
+		},
+		{
+			name:         "deny",
+			args:         func(srv *apitest.Server) []string { return []string{"deny", srv.Key.CRID, "482913"} },
+			prepare:      twoRequests,
+			variants:     []string{"json"},
+			stdoutGolden: true,
+		},
+		{
+			// grants with approved people beside the device keys.
+			name: "grants_people",
+			args: func(srv *apitest.Server) []string { return []string{"grants", srv.Key.CRID} },
+			prepare: func(srv *apitest.Server) {
+				srv.SetResourceAccess(true, goldenDevicePublicKey)
+				srv.SetAccessRequests(true)
+				srv.AddApprovedPerson(requesterDevice, requesterName)
+				srv.AddApprovedPerson(otherDevice, "")
+			},
+			variants:     goldenVariants(),
+			stdoutGolden: true,
+		},
+		{
+			// Removing a device id that is not on the list: exit 5, and the
+			// message says that nothing was removed.
+			name: "error_grants_remove_unknown",
+			args: func(srv *apitest.Server) []string {
+				return []string{"grants", srv.Key.CRID, "--remove", otherDevice}
+			},
+			prepare:      func(srv *apitest.Server) { srv.AddApprovedPerson(requesterDevice, requesterName) },
+			variants:     []string{"plain"},
+			wantCode:     5,
 			stderrGolden: true,
 		},
 		{
@@ -562,9 +713,10 @@ func TestGoldens(t *testing.T) {
 					env = tc.env(srv)
 				}
 				o := &runOpts{
-					args: append([]string{"--endpoint", srv.URL}, args...),
-					env:  env,
-					tty:  variant == "tty",
+					args:     append([]string{"--endpoint", srv.URL}, args...),
+					env:      env,
+					tty:      variant == "tty",
+					linkSite: tc.linkSite,
 				}
 				if tc.stdin != "" {
 					o.stdin = strings.NewReader(tc.stdin)
