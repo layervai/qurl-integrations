@@ -81,6 +81,20 @@ type globalOpts struct {
 	// default), so no hermetic test sends a real access request.
 	enterPortalGrant func(ctx context.Context, link string) (consume.AccessGrant, error)
 	verifyLink       func(ctx context.Context, link, expectedCRID string) error
+	// cridLinkOffered reports whether this machine can ask for a link with
+	// only a CRID at all: offered, not offered (false and no error), or set
+	// up wrongly (an error). It needs no CRID, sends nothing and creates
+	// nothing. Only `qurl get` calls it, before requestCRIDLink. Tests always
+	// inject (the harness answers "not offered", as the shipped deployment
+	// does).
+	cridLinkOffered func() (bool, error)
+	// requestCRIDLink asks the service for a link with only a CRID, through
+	// the SDK, and returns the SDK's answer unchanged. It uses no device
+	// identity and creates none. Only `qurl get` calls it, and only after
+	// cridLinkOffered said the request is offered. Tests always inject (the
+	// harness fails a test that reaches it without an answer), so no hermetic
+	// test sends a real request.
+	requestCRIDLink func(ctx context.Context, resourceCRID string) (*qurl.CRIDLink, error)
 
 	// redirectFRPLogs rebinds the FRP library's process-global logger to this
 	// invocation's stderr (production default). The cmd test binary injects a
@@ -317,6 +331,26 @@ func (o *globalOpts) nativeShareDaemon(stateDir, logDir string) (shareDaemonCont
 	return controller, nil
 }
 
+// applyLinkDefaults wires the link operations the SDK performs to one opener
+// over this invocation's environment: verifying a link, asking the platform
+// for access to one, and asking for one with only a CRID, which has a check
+// of its own for whether it can be asked here at all.
+func (o *globalOpts) applyLinkDefaults() {
+	opener := &consume.AccessOpener{LookupEnv: o.lookupEnv}
+	if o.verifyLink == nil {
+		o.verifyLink = opener.Verify
+	}
+	if o.enterPortalGrant == nil {
+		o.enterPortalGrant = opener.Grant
+	}
+	if o.cridLinkOffered == nil {
+		o.cridLinkOffered = opener.CRIDLinkOffered
+	}
+	if o.requestCRIDLink == nil {
+		o.requestCRIDLink = opener.RequestCRIDLink
+	}
+}
+
 func (o *globalOpts) applyDefaults() {
 	if o.configDir == "" {
 		o.configDir = config.DefaultDir()
@@ -325,14 +359,7 @@ func (o *globalOpts) applyDefaults() {
 		launcher := &consume.Launcher{LookupEnv: o.lookupEnv, GOOS: runtime.GOOS}
 		o.openBrowser = launcher.Open
 	}
-	if o.verifyLink == nil {
-		opener := &consume.AccessOpener{LookupEnv: o.lookupEnv}
-		o.verifyLink = opener.Verify
-	}
-	if o.enterPortalGrant == nil {
-		opener := &consume.AccessOpener{LookupEnv: o.lookupEnv}
-		o.enterPortalGrant = opener.Grant
-	}
+	o.applyLinkDefaults()
 	if o.redirectFRPLogs == nil {
 		o.redirectFRPLogs = func() { redirectFRPLogsToStderr(o) }
 	}

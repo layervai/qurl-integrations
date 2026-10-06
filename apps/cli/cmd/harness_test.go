@@ -122,6 +122,18 @@ type runOpts struct {
 	// refusing fake. Only the clisandbox-tagged live suite sets it.
 	realOpener bool
 	verifyLink func(context.Context, string, string) error
+	// cridLinkOffered is the injected answer to "can this machine ask for a
+	// link with only a CRID at all". nil means the answer the shipped
+	// deployment gives, "not offered", unless the test injects
+	// requestCRIDLink: a test that supplies an answer to the request says
+	// the request can be made (the clisandbox journey uses the production
+	// wiring via realOpener).
+	cridLinkOffered func() (bool, error)
+	// requestCRIDLink is the injected answer to "give me a link for this CRID
+	// alone"; nil fails a test that asks, so no hermetic test can ever send
+	// that request (the clisandbox journey uses the production wiring via
+	// realOpener).
+	requestCRIDLink func(ctx context.Context, resourceCRID string) (*qurl.CRIDLink, error)
 
 	// ctx, when non-nil, replaces context.Background() so a test can cancel a
 	// foreground daemon or another long-running command.
@@ -265,6 +277,24 @@ func runCLI(t *testing.T, o *runOpts) *runResult {
 			g.enterPortalGrant = func(_ context.Context, link string) (consume.AccessGrant, error) {
 				return consume.AccessGrant{}, fmt.Errorf("test invoked the platform access opener without injecting one (link %d bytes)", len(link))
 			}
+		}
+		switch {
+		case o.cridLinkOffered != nil:
+			g.cridLinkOffered = o.cridLinkOffered
+		case o.requestCRIDLink != nil:
+			g.cridLinkOffered = cridLinkIsOffered
+		case o.realOpener:
+			// nil is the production default, as for enterPortalGrant above.
+		default:
+			g.cridLinkOffered = cridLinkNotOffered
+		}
+		switch {
+		case o.requestCRIDLink != nil:
+			g.requestCRIDLink = o.requestCRIDLink
+		case o.realOpener:
+			// nil is the production default, as for enterPortalGrant above.
+		default:
+			g.requestCRIDLink = mustNotAskWithTheCRIDAlone(t)
 		}
 		switch {
 		case o.sleeps != nil:

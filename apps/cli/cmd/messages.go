@@ -57,6 +57,19 @@ const (
 	// than requested.
 	msgTTLClamped = "Note: the service granted a %s link lifetime instead of the requested %s."
 
+	// msgSessionDurationNotApplied tells a `qurl get --session-duration` user
+	// that the flag had no effect, because the link was given for the CRID
+	// alone and not minted by this device. The link is still used.
+	msgSessionDurationNotApplied = "Note: --session-duration applies only on the resource owner's devices and on devices the publisher allowed. This link uses the resource's own session lifetime."
+
+	// msgValidCRIDRequired refuses an operand that is not a CRID.
+	msgValidCRIDRequired = "a valid CRID is required; copy it from the resource listing"
+
+	// msgCRIDLinkRefusalCode is the --verbose diagnostic for a link request
+	// with only a CRID that the service refused. It carries the service's
+	// code, which the message for the user never does.
+	msgCRIDLinkRefusalCode = "< CRID link request refused, code %s"
+
 	// msgShareNeedsDevice frames a failure to open this device's identity on
 	// the share path, which share and get both take. The cause follows it
 	// unchanged, so the exit code stays the cause's.
@@ -138,6 +151,7 @@ func customerMessages() []string {
 		msgNeedsYes,
 		msgDeleteCanceled,
 		msgTTLClamped,
+		msgSessionDurationNotApplied,
 		msgShareNeedsDevice,
 		msgPublicGrantsNoEffect,
 		msgNoKeyProvided,

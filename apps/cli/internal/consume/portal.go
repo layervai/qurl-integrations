@@ -102,6 +102,11 @@ type AccessOpener struct {
 	// LookupEnv resolves QURL_DEPLOYMENT; nil skips the override and uses
 	// the SDK's shipped deployment resolution.
 	LookupEnv func(string) (string, bool)
+
+	// CRIDLinkHTTPClient replaces the HTTP client RequestCRIDLink sends with
+	// when QURL_DEPLOYMENT names the settings. Tests set it so no request
+	// leaves the process; production leaves it nil.
+	CRIDLinkHTTPClient qurl.HTTPDoer
 }
 
 // AccessGrant is a verified, reachable content URL and its server-reported

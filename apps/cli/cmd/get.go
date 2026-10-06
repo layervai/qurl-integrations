@@ -40,6 +40,18 @@ get uses this device's identity. It works on the resource owner's devices
 and, for a private resource, on the devices the publisher allowed; any other
 device gets "not found".
 
+Where the deployment offers it, a public resource can also be fetched on any
+machine with only its CRID: no account and no setup. The deployment this
+release ships does not offer it yet. Where it is offered, get asks for a link
+with the CRID alone when this device cannot share the resource, and a machine
+with no device identity creates none. Three answers mean no link was given:
+
+  - "not found" (exit code 5): the CRID is mistyped, the resource was
+    removed, or it is not open to this machine.
+  - "can't give a link right now" (exit code 11): nothing is wrong with the
+    CRID. Try again later.
+  - "too many requests" (exit code 9): wait, then try again.
+
 get mints a fresh share link exactly like ` + "`qurl share`" + ` and verifies it
 against the CRID you asked for — a mismatch is discarded and the command
 exits with code 12 before anything happens. Only a verified link is ever
@@ -123,16 +135,20 @@ func runGet(ctx context.Context, opts *globalOpts, operand string, flags getFlag
 
 	// mint requests a share link and verifies it; every path below — the
 	// browser launch, the download, and the mid-download retry — goes
-	// through it, so nothing ever acts on an unverified answer.
+	// through it, so nothing ever acts on an unverified answer. linkForGet
+	// decides where the link comes from; what happens to it afterwards does
+	// not depend on that.
 	var shareLink *qurlapi.ShareLink
+	noteSessionDuration := sessionDurationNoteOnce(printer, flags.sessionDuration)
 	mint := func(ctx context.Context) (string, error) {
-		result, err := opts.shareResource(ctx, assessment.Input, qurlapi.ShareOptions{SessionDurationSeconds: int(flags.sessionDuration / time.Second)})
-		if err := verifyShareLink(assessment, result, err); err != nil {
+		result, byCRIDAlone, err := opts.linkForGet(ctx, assessment, qurlapi.ShareOptions{SessionDurationSeconds: int(flags.sessionDuration / time.Second)})
+		if err != nil {
 			return "", err
 		}
 		if err := opts.verifyLink(ctx, result.QURL, assessment.Input); err != nil {
 			return "", err
 		}
+		noteSessionDuration(byCRIDAlone)
 		shareLink = result
 		return result.QURL, nil
 	}

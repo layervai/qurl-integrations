@@ -65,6 +65,20 @@ var cliSentinels = map[string]struct {
 	"consume.ErrLinkFetch":              {consume.ErrLinkFetch, ServerError},
 	"consume.ErrUnopenableLink":         {consume.ErrUnopenableLink, ServerError},
 
+	// A link asked for with only a CRID. Not found is one answer whatever the
+	// cause and whatever the device; a closed resource joins the gone family;
+	// "not now" and "no answer" are Unavailable; an answer that failed its
+	// check shares CRID verification's fail-closed row.
+	"consume.ErrCRIDNotFound":            {consume.ErrCRIDNotFound, NotFound},
+	"consume.ErrCRIDNotFoundNoDevice":    {consume.ErrCRIDNotFoundNoDevice, NotFound},
+	"consume.ErrCRIDResourceClosed":      {consume.ErrCRIDResourceClosed, NotFound},
+	"consume.ErrCRIDLinkUnavailable":     {consume.ErrCRIDLinkUnavailable, Unavailable},
+	"consume.ErrCRIDLinkNoAnswer":        {consume.ErrCRIDLinkNoAnswer, Unavailable},
+	"consume.ErrCRIDPublisherOffline":    {consume.ErrCRIDPublisherOffline, Unavailable},
+	"consume.ErrCRIDLinkRateLimited":     {consume.ErrCRIDLinkRateLimited, RateLimited},
+	"consume.ErrCRIDLinkRequestRejected": {consume.ErrCRIDLinkRequestRejected, InvalidInput},
+	"consume.ErrCRIDLinkRefused":         {consume.ErrCRIDLinkRefused, VerificationFailed},
+
 	// Platform access flow (direct downloads through the SDK opener). The
 	// two settings sentinels share the Hub triple's Config row; the local
 	// link check shares CRID verification's fail-closed row; a platform

@@ -907,6 +907,19 @@ downloads — nothing is ever acted on unverified:
   gate pipelines on the exit status, since a mid-stream failure leaves
   already-written bytes behind.
 
+Where the deployment offers it, a public resource can also be fetched on any
+machine with only its CRID: no account and no setup. The deployment this
+release ships does not offer it yet. Where it is offered, `get` asks for a
+link with the CRID alone when this device cannot share the resource, and a
+machine with no device identity creates none. Three answers mean no link was
+given:
+
+| Answer | Exit code | What it means |
+|--------|-----------|---------------|
+| not found | 5 | The CRID is mistyped, the resource was removed, or it is not open to this machine. |
+| can't give a link right now | 11 | Nothing is wrong with the CRID. Try again later. |
+| too many requests | 9 | Wait, then try again. |
+
 | Flag | Description |
 |------|-------------|
 | `--file <path>` | Download to this path instead of opening a browser (`-` = raw bytes to stdout) |

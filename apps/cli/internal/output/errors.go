@@ -16,6 +16,7 @@ import (
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/hub"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/sessionconfig"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/consume"
 )
 
 // RenderError writes the customer-facing rendering of err to w (stderr).
@@ -66,6 +67,14 @@ func renderErrorLines(p *Printer, err error) []string {
 	}
 	if errors.Is(err, auth.ErrNoCredential) {
 		return []string{head + " " + msgNoCredential, "", "  " + p.dim(hintNoCredential)}
+	}
+	// The not-found answer for a link asked for with only a CRID. The
+	// narrower sentinel is tested first: it matches ErrCRIDNotFound too.
+	if errors.Is(err, consume.ErrCRIDNotFoundNoDevice) {
+		return []string{head + " " + consume.MsgCRIDNotFound, "", "  " + p.dim(hintCRIDNotFoundNoDevice)}
+	}
+	if errors.Is(err, consume.ErrCRIDNotFound) {
+		return []string{head + " " + consume.MsgCRIDNotFound, "", "  " + p.dim(hintCRIDNotFound)}
 	}
 	if lines, ok := connectorErrorLines(p, head, err); ok {
 		return lines

@@ -23,6 +23,7 @@ import (
 	connectordaemon "github.com/layervai/qurl-integrations/apps/cli/internal/connector/daemon"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/hub"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/consume"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/exitcode"
 )
 
@@ -455,6 +456,74 @@ func TestShareNotFoundRendering(t *testing.T) {
 	RenderError(&buf, otherErr, false)
 	if got := buf.String(); !strings.Contains(got, hintNotFound) || strings.Contains(got, hintShareNotFound) {
 		t.Errorf("another route's not-found must keep the shared hint, got %q", got)
+	}
+}
+
+// TestCRIDNotFoundRendering pins the not-found answer for a link `qurl get`
+// asked for with only the CRID. The service gives one answer whatever the
+// cause, so the rendering is one headline and one hint that names every cause
+// and picks none. The hint has two forms, chosen by a local fact only: whether
+// this machine has a device identity. A machine without one has no public key
+// to send yet, so its hint says how to get one.
+func TestCRIDNotFoundRendering(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		hint string
+	}{
+		{"device with an identity", consume.ErrCRIDNotFound, hintCRIDNotFound},
+		{"machine with no identity", consume.ErrCRIDNotFoundNoDevice, hintCRIDNotFoundNoDevice},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, err := range []error{tc.err, fmt.Errorf("get: %w", tc.err)} {
+				if got := exitcode.FromError(err); got != exitcode.NotFound {
+					t.Errorf("exit code = %d, want %d", got, exitcode.NotFound)
+				}
+				var buf bytes.Buffer
+				RenderError(&buf, err, false)
+				want := "Error: " + consume.MsgCRIDNotFound + "\n\n  " + tc.hint + "\n"
+				if got := buf.String(); got != want {
+					t.Errorf("rendering = %q, want %q", got, want)
+				}
+			}
+
+			// Every cause the share hint names, and no claim about which.
+			for _, part := range []string{
+				"the CRID may be mistyped",
+				"the resource may have been removed",
+				"this device may not be allowed to open it",
+				"If the resource is private,",
+				"`qurl whoami -o json`",
+			} {
+				if !strings.Contains(tc.hint, part) {
+					t.Errorf("hint lost %q: %q", part, tc.hint)
+				}
+			}
+			// On this path a public resource can open on other devices, so the
+			// share hint's last sentence would be false here. "deleted" is the
+			// answer only an owner gets, as on the share path.
+			for _, wrong := range []string{"in this release", "A public resource opens only", "deleted"} {
+				if strings.Contains(tc.hint+consume.MsgCRIDNotFound, wrong) {
+					t.Errorf("hint says %q: %q", wrong, tc.hint)
+				}
+			}
+		})
+	}
+
+	// The two forms differ in the sentence about a private resource and in
+	// nothing else.
+	const withKey = "send the publisher this device's public key from `qurl whoami -o json` so they can allow it."
+	const withoutKey = "the publisher must allow this device, and this device has no identity yet. Run `qurl whoami -o json` to create one, then send the publisher the device public key it shows."
+	if !strings.Contains(hintCRIDNotFound, withKey) || strings.Contains(hintCRIDNotFoundNoDevice, "this device's public key") {
+		t.Errorf("the hints are not matched to their device:\n%q\n%q", hintCRIDNotFound, hintCRIDNotFoundNoDevice)
+	}
+	if got := strings.Replace(hintCRIDNotFound, withKey, withoutKey, 1); got != hintCRIDNotFoundNoDevice {
+		t.Errorf("the no-identity hint = %q, want the other hint with only the private-resource sentence changed: %q", hintCRIDNotFoundNoDevice, got)
+	}
+	// The share hint is unchanged: it is what get prints when the second
+	// request cannot be made.
+	if !strings.HasSuffix(hintShareNotFound, "A public resource opens only on its owner's devices in this release.") {
+		t.Errorf("the share not-found hint changed: %q", hintShareNotFound)
 	}
 }
 
