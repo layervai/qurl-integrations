@@ -517,6 +517,12 @@ type unusableSettingsFile struct {
 	// own words for the failure. Windows words them differently. The golden
 	// holds the words of a Unix system, so it is compared on Unix only.
 	systemWords bool
+	// parserWords says that the message ends with the words of Go's JSON
+	// parser for what is wrong with the file. Those words are no contract:
+	// a new Go release can word them differently. So this case has no
+	// golden, and only the text around the parser's words is compared, on
+	// every system.
+	parserWords bool
 	// create makes the file in dir and returns the path QURL_DEPLOYMENT
 	// names. It skips the test on a system where the case cannot be made.
 	create func(t *testing.T, dir string) string
@@ -524,6 +530,13 @@ type unusableSettingsFile struct {
 
 // unusableSettingsFiles lists the cases: a file that does not exist, a
 // directory, a file that is not JSON, and a file this user may not read.
+//
+// TODO(upstream-contract): the messages of these cases end with qurl-go's own
+// words for a settings file it cannot use ("qurl: read deployment <path>: …"
+// and "qurl: parse deployment <path>: …"), which the goldens and the
+// assertions below hold. If qurl-go words them differently, these fail and
+// the goldens are written again; the CLI's own sentence in front of them does
+// not change.
 func unusableSettingsFiles() []unusableSettingsFile {
 	return []unusableSettingsFile{
 		{
@@ -541,7 +554,7 @@ func unusableSettingsFiles() []unusableSettingsFile {
 			},
 		},
 		{
-			name: "not JSON", golden: "error_get_crid_settings_not_json",
+			name: "not JSON", parserWords: true,
 			create: func(t *testing.T, dir string) string {
 				path := filepath.Join(dir, "not-json.json")
 				if err := os.WriteFile(path, []byte("not settings"), 0o600); err != nil {
@@ -597,6 +610,13 @@ func (f *unusableSettingsFile) mustBeTheMessage(t *testing.T, message string) {
 		start := "Error: " + consume.MsgAccessNotConfigured + " (qurl: read deployment " + settingsDirWord + "/"
 		if !strings.HasPrefix(message, start) || !strings.HasSuffix(message, ")\n") || strings.Count(message, "\n") != 1 {
 			t.Errorf("stderr = %q, want one line that starts with %q and ends with the system's reason", message, start)
+		}
+		return
+	}
+	if f.parserWords {
+		start := "Error: " + consume.MsgAccessNotConfigured + " (qurl: parse deployment " + settingsDirWord + "/not-json.json: "
+		if !strings.HasPrefix(message, start) || !strings.HasSuffix(message, ")\n") || strings.Count(message, "\n") != 1 || len(message) <= len(start)+len(")\n") {
+			t.Errorf("stderr = %q, want one line that starts with %q and ends with the parser's reason", message, start)
 		}
 		return
 	}
