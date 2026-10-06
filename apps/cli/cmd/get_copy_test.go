@@ -16,8 +16,9 @@ import (
 // deployment this release ships does not offer it yet. That sentence is true
 // for as long as TestRequestCRIDLinkUnderTheShippedDeploymentIsNotMade
 // passes. A release that ships a deployment which offers the request drops
-// it, together with the interim limitation
-// TestSharingCopyStatesTheDeviceAccessRule pins in publish help.
+// it, together with the same sentence in publish help and in the README's
+// section about private CRIDs (TestSharingCopyStatesTheDeviceAccessRule) and
+// in the share not-found hint.
 //
 // Both name the three most common answers when no link is given, with the
 // exit codes of the table in internal/exitcode. Both say that these are the

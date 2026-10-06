@@ -580,24 +580,61 @@ func TestClassifyCRIDLinkErrorReadsAGeneralCodeAsTryAgainLater(t *testing.T) {
 // check before the request said they did. Each reads as ErrAccessNotConfigured
 // itself. That is the fixed message with no detail, so nothing of the SDK's
 // text, which names files and variables, comes with it.
+//
+// "Names no endpoint" is matched by its own sentinel,
+// qurl.ErrCRIDLinkNotConfigured, the one CRIDLinkOffered matches. qurl-go
+// documents that this sentinel also matches qurl.ErrNotConfigured, and the
+// rows marked alsoNotConfigured hold that fact about the SDK. The classifier
+// does not depend on it. The last row is an error that matches the sentinel
+// and nothing else, as the SDK's answer would if qurl-go stopped wrapping.
+// Without the case for the sentinel that row reads as an answer that failed
+// its safety check, which tells a user whose settings changed to stop and
+// contact whoever shared the CRID.
 func TestClassifyCRIDLinkErrorForSettingsTheSDKCannotUse(t *testing.T) {
 	t.Parallel()
 	const detail = "read deployment /etc/example/deployment.json"
-	for name, in := range map[string]error{
-		"not configured":         fmt.Errorf("%w: %s", qurl.ErrNotConfigured, detail),
-		"no deployment settings": qurl.ErrNoDeployment,
-		"names no endpoint":      fmt.Errorf("%w: %s", qurl.ErrCRIDLinkNotConfigured, detail),
+	for name, tc := range map[string]struct {
+		in error
+		// alsoNotConfigured says the input matches qurl.ErrNotConfigured.
+		alsoNotConfigured bool
+	}{
+		"not configured":                         {fmt.Errorf("%w: %s", qurl.ErrNotConfigured, detail), true},
+		"no deployment settings":                 {qurl.ErrNoDeployment, true},
+		"names no endpoint":                      {fmt.Errorf("%w: %s", qurl.ErrCRIDLinkNotConfigured, detail), true},
+		"names no endpoint, the sentinel itself": {qurl.ErrCRIDLinkNotConfigured, true},
+		"names no endpoint, the sentinel only":   {cridLinkNotConfiguredOnly{detail: detail}, false},
 	} {
-		if !errors.Is(in, qurl.ErrNotConfigured) {
-			t.Fatalf("%s: the input %v is not one of the SDK's not-configured errors", name, in)
+		if got := errors.Is(tc.in, qurl.ErrNotConfigured); got != tc.alsoNotConfigured {
+			t.Fatalf("%s: the input %v matches the SDK's plain not-configured error = %t, want %t", name, tc.in, got, tc.alsoNotConfigured)
 		}
 		for _, deviceIdentity := range []bool{true, false} {
-			got := ClassifyCRIDLinkError(in, deviceIdentity)
+			got := ClassifyCRIDLinkError(tc.in, deviceIdentity)
 			if got != ErrAccessNotConfigured { //nolint:errorlint // The classifier must return the bare sentinel.
-				t.Errorf("%s: ClassifyCRIDLinkError(%v, %t) = %v, want ErrAccessNotConfigured itself", name, in, deviceIdentity, got)
+				t.Errorf("%s: ClassifyCRIDLinkError(%v, %t) = %v, want ErrAccessNotConfigured itself", name, tc.in, deviceIdentity, got)
 			}
 		}
 	}
+
+	// The row above is the case it claims to be: the sentinel, and neither
+	// the plain error nor the error for an endpoint that cannot be used.
+	only := cridLinkNotConfiguredOnly{detail: detail}
+	if !errors.Is(only, qurl.ErrCRIDLinkNotConfigured) || errors.Is(only, qurl.ErrCRIDLinkMisconfigured) {
+		t.Fatalf("the stand-in %v does not match exactly the SDK's names-no-endpoint error", only)
+	}
+}
+
+// cridLinkNotConfiguredOnly is an error that matches
+// qurl.ErrCRIDLinkNotConfigured and no other error. It stands for a qurl-go
+// that reports "the settings name no endpoint" without wrapping
+// qurl.ErrNotConfigured.
+type cridLinkNotConfiguredOnly struct{ detail string }
+
+func (e cridLinkNotConfiguredOnly) Error() string {
+	return "qurl: no usable CRID link endpoint: " + e.detail
+}
+
+func (cridLinkNotConfiguredOnly) Is(target error) bool {
+	return target == qurl.ErrCRIDLinkNotConfigured
 }
 
 // TestClassifyCRIDLinkErrorNotFoundDependsOnlyOnTheDevice pins the one place
@@ -680,9 +717,81 @@ func TestCRIDNotRequestable(t *testing.T) {
 	}
 }
 
+// TestCRIDNotRequestableClass pins the one word a diagnostic line may show for
+// a CRID the SDK will not ask a link for. Every cause the SDK has is produced
+// by the SDK itself here: the real request is made for an operand its check
+// refuses. It refuses before it reads any settings, so nothing is sent. A
+// cause the list does not know is built by hand, and reads as "other".
+//
+// The word is never the SDK's own text. For some causes that text quotes
+// what the user typed, and the operand must not come back in the word.
+func TestCRIDNotRequestableClass(t *testing.T) {
+	t.Parallel()
+	key := apitest.GenerateResourceKey(t)
+	// The last character of a CRID holds one bit of it. The other four bits
+	// are padding and must be zero, so only two characters can end a CRID.
+	// "b" is not one of them.
+	nonCanonical := key.CRID[:len(key.CRID)-1] + "b"
+	mistyped := []byte(key.CRID)
+	if mistyped[10] == 'a' {
+		mistyped[10] = 'b'
+	} else {
+		mistyped[10] = 'a'
+	}
+	doer := &linkRequestDoer{}
+	opener := newLinkDeployment(t).opener(doer)
+	// refusals keeps the SDK's own error for each class.
+	refusals := map[string]error{}
+
+	for _, tc := range []struct {
+		name, operand, want string
+	}{
+		{"version the SDK cannot check", apitest.DeriveCRID(t, key.DER, 0x05), "unsupported_version"},
+		{"version registered for another length", apitest.DeriveCRID(t, key.DER, 0x02), "unsupported_version"},
+		{"character outside the alphabet", key.CRID[:20] + "!" + key.CRID[21:], "charset"},
+		{"wrong length", key.CRID[:59], "length"},
+		{"mistyped", string(mistyped), "checksum"},
+		{"padding bits set", nonCanonical, "non_canonical"},
+		{"version that is never valid", apitest.DeriveCRID(t, key.DER, 0x00), "version"},
+	} {
+		link, err := opener.RequestCRIDLink(context.Background(), tc.operand)
+		if link != nil || !CRIDNotRequestable(err) {
+			t.Errorf("%s: RequestCRIDLink = %v, %v; want no link and the SDK's refusal of the operand", tc.name, link, err)
+			continue
+		}
+		got := CRIDNotRequestableClass(err)
+		if got != tc.want {
+			t.Errorf("%s: CRIDNotRequestableClass(%v) = %q, want %q", tc.name, err, got, tc.want)
+		}
+		refusals[tc.want] = err
+	}
+	if sent := doer.sent(); sent != 0 {
+		t.Fatalf("a request for an operand the SDK refuses was sent %d times", sent)
+	}
+
+	unknown := fmt.Errorf("%w: a cause this list does not know, for operand %s", qurl.ErrInvalidResourceRequest, key.CRID)
+	if got := CRIDNotRequestableClass(unknown); got != "other" {
+		t.Errorf("CRIDNotRequestableClass(%v) = %q, want %q", unknown, got, "other")
+	}
+	// The version cause wins when an error names both it and a class of the
+	// CRID check: it is the one a caller acts on.
+	if refusals["length"] == nil {
+		t.Fatal("no refusal of the length class was collected above")
+	}
+	both := fmt.Errorf("%w: %w", qurl.ErrUnsupportedCRIDVersion, refusals["length"])
+	if got := CRIDNotRequestableClass(both); got != "unsupported_version" {
+		t.Errorf("CRIDNotRequestableClass(%v) = %q, want %q", both, got, "unsupported_version")
+	}
+}
+
 // TestCRIDLinkRefusalCode pins the one piece of the service's answer a
 // diagnostic may show: the refusal code, and only when it is a short run of
 // decimal digits.
+//
+// The codes the platform defines have five digits. A code of another length
+// is shown too, up to the bound: the SDK hands on any decimal code, and a
+// code nobody expected is the one a diagnostic is for. maxRefusalCodeDigits
+// says why this bound is not the five of a Connector resource code.
 func TestCRIDLinkRefusalCode(t *testing.T) {
 	t.Parallel()
 	for name, tc := range map[string]struct {
@@ -692,6 +801,8 @@ func TestCRIDLinkRefusalCode(t *testing.T) {
 		"refusal the request defines": {sdkRefusal(qurl.ErrCRIDLinkNotFound, "52602"), "52602"},
 		"general code":                {&qurl.ServerDenyError{ErrCode: "51002"}, "51002"},
 		"wrapped":                     {fmt.Errorf("request failed: %w", &qurl.ServerDenyError{ErrCode: "51002"}), "51002"},
+		"one digit":                   {&qurl.ServerDenyError{ErrCode: "7"}, "7"},
+		"six digits":                  {&qurl.ServerDenyError{ErrCode: "526001"}, "526001"},
 		"longest code shown":          {&qurl.ServerDenyError{ErrCode: strings.Repeat("9", maxRefusalCodeDigits)}, strings.Repeat("9", maxRefusalCodeDigits)},
 
 		"no error":             {nil, ""},

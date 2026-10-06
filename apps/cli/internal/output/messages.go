@@ -36,20 +36,29 @@ const (
 	// removed resource, and a device that is not allowed with one 404, so
 	// the hint names all three and claims none. The remedy is conditional
 	// for the same reason: a publisher can allow a device only on a private
-	// resource, and a public one opens only on its owner's devices, so the
-	// hint must not send the reader of a public CRID after a grant that
-	// cannot help. It says "removed", never "deleted": that word belongs to
-	// hintRevoked, the answer only an owner gets, and the journey validators
-	// require it to prove that answer.
-	hintShareNotFound = "Hint: the CRID may be mistyped, the resource may have been removed, or this device may not be allowed to open it. If the resource is private, send the publisher this device's public key from `qurl whoami -o json` so they can allow it. A public resource opens only on its owner's devices in this release."
+	// resource, so the hint must not send the reader of a public CRID after a
+	// grant that cannot help. It says "removed", never "deleted": that word
+	// belongs to hintRevoked, the answer only an owner gets, and the journey
+	// validators require it to prove that answer.
+	//
+	// Its last two sentences say what a public resource allows, in the words
+	// of get's help. A device that cannot share a public resource opens it
+	// only where the deployment offers the request that uses the CRID alone,
+	// and the deployment a release ships does not offer it yet. That is when
+	// get prints this hint. Where the request is offered and can be made for
+	// the CRID, get's not-found answer has hintCRIDNotFound. A release that
+	// ships a deployment which offers the request drops the last sentence,
+	// as get's help does.
+	hintShareNotFound = "Hint: the CRID may be mistyped, the resource may have been removed, or this device may not be allowed to open it. If the resource is private, send the publisher this device's public key from `qurl whoami -o json` so they can allow it. A public resource opens on other devices only where the deployment offers it. The deployment this release ships does not offer it yet."
 
 	// hintCRIDNotFound is the not-found guidance when `qurl get` asked for a
 	// link with only the CRID, on a device that has an identity. It has the
 	// rules of hintShareNotFound: the answer has one form whatever the cause,
 	// so the hint names every cause and claims none, and it gives the grant
-	// remedy for a private resource only. It differs in its last sentence,
-	// because on this path a public resource can open on other devices, but
-	// not every public resource does.
+	// remedy for a private resource only. It differs in what follows that
+	// remedy, because on this path the deployment offers the request and a
+	// public resource can open on other devices, but not every public
+	// resource does.
 	hintCRIDNotFound = "Hint: the CRID may be mistyped, the resource may have been removed, or this device may not be allowed to open it. If the resource is private, send the publisher this device's public key from `qurl whoami -o json` so they can allow it. Some public resources open only on their owner's devices."
 
 	// hintCRIDNotFoundNoDevice is the same guidance for a machine with no

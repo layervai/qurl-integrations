@@ -5,10 +5,12 @@ import (
 	"crypto/ecdh"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -486,50 +488,204 @@ func TestGetReportsLinkSettingsThatCannotBeUsed(t *testing.T) {
 	}
 }
 
+// settingsDirWord stands for the directory a test made its settings files
+// in. The message for a settings file that cannot be used names the file by
+// the path the user gave, so what such a test prints holds a path of the
+// machine it ran on. withoutSettingsDir puts this word in its place before
+// anything is compared or written to a golden.
+const settingsDirWord = "<settings-dir>"
+
+// withoutSettingsDir returns output with dir, the directory a test made its
+// settings files in, replaced by settingsDirWord. The separator after it
+// becomes "/", so the result is the same on every system.
+func withoutSettingsDir(t *testing.T, output, dir string) string {
+	t.Helper()
+	fixed := strings.ReplaceAll(output, dir+string(filepath.Separator), settingsDirWord+"/")
+	if strings.Contains(fixed, dir) {
+		t.Fatalf("the output still names the test's own directory: %q", fixed)
+	}
+	return fixed
+}
+
+// unusableSettingsFile is one way QURL_DEPLOYMENT can name a file that cannot
+// be read as deployment settings.
+type unusableSettingsFile struct {
+	name string
+	// golden names the stderr golden of what get prints for the file.
+	golden string
+	// systemWords says that the message ends with the operating system's
+	// own words for the failure. Windows words them differently. The golden
+	// holds the words of a Unix system, so it is compared on Unix only.
+	systemWords bool
+	// parserWords says that the message ends with the words of Go's JSON
+	// parser for what is wrong with the file. Those words are no contract:
+	// a new Go release can word them differently. So this case has no
+	// golden, and only the text around the parser's words is compared, on
+	// every system.
+	parserWords bool
+	// create makes the file in dir and returns the path QURL_DEPLOYMENT
+	// names. It skips the test on a system where the case cannot be made.
+	create func(t *testing.T, dir string) string
+}
+
+// unusableSettingsFiles lists the cases: a file that does not exist, a
+// directory, a file that is not JSON, and a file this user may not read.
+//
+// TODO(upstream-contract): the messages of these cases end with qurl-go's own
+// words for a settings file it cannot use ("qurl: read deployment <path>: …"
+// and "qurl: parse deployment <path>: …"), which the goldens and the
+// assertions below hold. If qurl-go words them differently, these fail and
+// the goldens are written again; the CLI's own sentence in front of them does
+// not change.
+func unusableSettingsFiles() []unusableSettingsFile {
+	return []unusableSettingsFile{
+		{
+			name: "missing file", golden: "error_get_crid_settings_missing", systemWords: true,
+			create: func(_ *testing.T, dir string) string { return filepath.Join(dir, "absent.json") },
+		},
+		{
+			name: "directory", golden: "error_get_crid_settings_directory", systemWords: true,
+			create: func(t *testing.T, dir string) string {
+				path := filepath.Join(dir, "a-directory")
+				if err := os.Mkdir(path, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				return path
+			},
+		},
+		{
+			name: "not JSON", parserWords: true,
+			create: func(t *testing.T, dir string) string {
+				path := filepath.Join(dir, "not-json.json")
+				if err := os.WriteFile(path, []byte("not settings"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				return path
+			},
+		},
+		{
+			name: "no read permission", golden: "error_get_crid_settings_unreadable", systemWords: true,
+			create: func(t *testing.T, dir string) string {
+				if runtime.GOOS == "windows" {
+					t.Skip("Windows has no permission bits that take read access to a file away from its owner")
+				}
+				if os.Geteuid() == 0 {
+					t.Skip("the root user can read a file whatever its permission bits say")
+				}
+				// Settings that could be used, so the permission is the only
+				// fault.
+				raw, err := json.Marshal(shippedShapeDeployment(t))
+				if err != nil {
+					t.Fatal(err)
+				}
+				path := filepath.Join(dir, "unreadable.json")
+				if err := os.WriteFile(path, raw, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chmod(path, 0); err != nil {
+					t.Fatal(err)
+				}
+				return path
+			},
+		},
+	}
+}
+
+// opener makes the file in dir and returns the production opener of a user
+// whose QURL_DEPLOYMENT names it.
+func (f *unusableSettingsFile) opener(t *testing.T, dir string) *consume.AccessOpener {
+	t.Helper()
+	path := f.create(t, dir)
+	return &consume.AccessOpener{LookupEnv: func(key string) (string, bool) { return path, key == qurl.EnvDeploymentPath }}
+}
+
+// mustBeTheMessage asserts that message is what get prints for the file.
+// message is stderr with no terminal styling and with the test's directory
+// replaced (withoutSettingsDir).
+func (f *unusableSettingsFile) mustBeTheMessage(t *testing.T, message string) {
+	t.Helper()
+	if f.systemWords && runtime.GOOS == "windows" {
+		// The golden holds a Unix system's words for the failure. Everything
+		// around them is the same here.
+		start := "Error: " + consume.MsgAccessNotConfigured + " (qurl: read deployment " + settingsDirWord + "/"
+		if !strings.HasPrefix(message, start) || !strings.HasSuffix(message, ")\n") || strings.Count(message, "\n") != 1 {
+			t.Errorf("stderr = %q, want one line that starts with %q and ends with the system's reason", message, start)
+		}
+		return
+	}
+	if f.parserWords {
+		start := "Error: " + consume.MsgAccessNotConfigured + " (qurl: parse deployment " + settingsDirWord + "/not-json.json: "
+		if !strings.HasPrefix(message, start) || !strings.HasSuffix(message, ")\n") || strings.Count(message, "\n") != 1 || len(message) <= len(start)+len(")\n") {
+			t.Errorf("stderr = %q, want one line that starts with %q and ends with the parser's reason", message, start)
+		}
+		return
+	}
+	if want := goldenBytes(t, f.golden+".plain.stderr.golden"); message != want {
+		t.Errorf("stderr = %q, want the golden %q", message, want)
+	}
+}
+
 // TestGetReportsASettingsFileThatCannotBeUsed covers the other way a machine
 // can be set up wrongly: QURL_DEPLOYMENT names a file that cannot be read as
-// settings at all. The check for whether the request is offered reports it,
-// so a machine with no identity stops there, with nothing sent and no
-// identity created. A device with an identity is told after its share request
-// was answered "not found".
+// settings at all. Each case is a real file of that kind, and the production
+// code reads it through the real SDK. What get prints is compared with a
+// golden, so the goldens hold what the CLI says and not a message a test put
+// together.
+//
+// The fault is found in one of two places, and get says the same in both:
+//
+//   - By the check for whether the request is offered. A machine with no
+//     identity stops there, with nothing sent and no identity created. A
+//     device with an identity is told after its share request was answered
+//     "not found". The request is never made.
+//   - By the request itself, when the file stopped being usable after the
+//     check had said that the request is offered. The request then reads
+//     the file again, finds the fault, and sends nothing.
 func TestGetReportsASettingsFileThatCannotBeUsed(t *testing.T) {
 	state := bootstrapRegisteredState(t)
-	notSettings := filepath.Join(t.TempDir(), "deployment.json")
-	if err := os.WriteFile(notSettings, []byte("not settings"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	for name, path := range map[string]string{
-		"missing file": filepath.Join(t.TempDir(), "absent.json"),
-		"not settings": notSettings,
-	} {
-		opener := &consume.AccessOpener{LookupEnv: func(key string) (string, bool) { return path, key == qurl.EnvDeploymentPath }}
-		for _, device := range []bool{false, true} {
-			for _, mode := range getModes() {
-				t.Run(fmt.Sprintf("%s/device=%t/%s", name, device, mode.name), func(t *testing.T) {
-					srv := downloadServer(t)
-					stateDir := filepath.Join(t.TempDir(), "no-device-state")
-					machine := machineWithNoIdentity(t, stateDir)
-					wantAPI := []string(nil)
-					if device {
-						machine = enrolledDevice(t, state)
-						shareNotFoundTwice(t, srv)
-						wantAPI = []string{"GET /v1/me", "POST " + shareRoute(srv)}
-					}
-					configure := withLinkOffer(withLinkRequests(machine, mustNotAskWithTheCRIDAlone(t)), opener.CRIDLinkOffered)
+	const byTheCheck, byTheRequest = "the check", "the request"
+	for _, file := range unusableSettingsFiles() {
+		for _, foundBy := range []string{byTheCheck, byTheRequest} {
+			for _, device := range []bool{false, true} {
+				for _, mode := range getModes() {
+					t.Run(fmt.Sprintf("%s/found by %s/device=%t/%s", file.name, foundBy, device, mode.name), func(t *testing.T) {
+						dir := t.TempDir()
+						opener := file.opener(t, dir)
+						srv := downloadServer(t)
+						stateDir := filepath.Join(t.TempDir(), "no-device-state")
+						machine := machineWithNoIdentity(t, stateDir)
+						wantAPI := []string(nil)
+						if device {
+							machine = enrolledDevice(t, state)
+							shareNotFoundTwice(t, srv)
+							wantAPI = []string{"GET /v1/me", "POST " + shareRoute(srv)}
+						}
+						offered, request, asks, wantAsks := opener.CRIDLinkOffered, mustNotAskWithTheCRIDAlone(t), 0, 0
+						if foundBy == byTheRequest {
+							offered, wantAsks = cridLinkIsOffered, 1
+							request = func(ctx context.Context, resourceCRID string) (*qurl.CRIDLink, error) {
+								asks++
+								return opener.RequestCRIDLink(ctx, resourceCRID)
+							}
+						}
 
-					run := runShareMode(t, srv, srv.URL, mode, configure)
-					stderr := withoutStyle(run.result.stderr.String())
-					if run.result.code != exitcode.Config || !strings.Contains(stderr, "Error: "+consume.MsgAccessNotConfigured) {
-						t.Fatalf("exit = %d, stderr = %q; want %d and the message for a machine that is not set up", run.result.code, stderr, exitcode.Config)
-					}
-					run.mustNotHaveActed(t)
-					if got := apiRequests(srv); strings.Join(got, "\n") != strings.Join(wantAPI, "\n") {
-						t.Errorf("qURL API requests = %q, want %q", got, wantAPI)
-					}
-					if !device {
-						mustNotExistCmd(t, stateDir)
-					}
-				})
+						run := runShareMode(t, srv, srv.URL, mode, withLinkOffer(withLinkRequests(machine, request), offered))
+						if run.result.code != exitcode.Config {
+							t.Fatalf("exit = %d, want %d; stderr: %s", run.result.code, exitcode.Config, run.result.stderr.String())
+						}
+						run.mustNotHaveActed(t)
+						file.mustBeTheMessage(t, withoutStyle(withoutSettingsDir(t, run.result.stderr.String(), dir)))
+						if asks != wantAsks {
+							t.Errorf("the request with only the CRID was made %d times, want %d", asks, wantAsks)
+						}
+						if got := apiRequests(srv); strings.Join(got, "\n") != strings.Join(wantAPI, "\n") {
+							t.Errorf("qURL API requests = %q, want %q", got, wantAPI)
+						}
+						if !device {
+							mustNotExistCmd(t, stateDir)
+						}
+					})
+				}
 			}
 		}
 	}

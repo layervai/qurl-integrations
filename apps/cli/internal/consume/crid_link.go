@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/layervai/qurl-go/crid"
 	"github.com/layervai/qurl-go/qurl"
 )
 
@@ -275,8 +276,70 @@ func CRIDNotRequestable(err error) bool {
 	return errors.Is(err, qurl.ErrInvalidResourceRequest)
 }
 
-// maxRefusalCodeDigits bounds a code CRIDLinkRefusalCode returns. The codes
-// the service sends have five digits.
+// CRIDNotRequestableClass names why the SDK will not ask for a link for a
+// CRID, for a diagnostic line. err is an error for which CRIDNotRequestable
+// is true.
+//
+// The result is one word from the fixed list below, chosen by the sentinel
+// err matches. It is never the SDK's own text, because that text can quote
+// what the user typed: for a character outside the CRID alphabet it gives
+// the byte and its position, and for a wrong length it gives the length.
+//
+// "unsupported_version" is the cause that reaches a caller in practice: a
+// well-formed CRID whose version this SDK cannot check a link against. The
+// next five are the classes of the local CRID check, under the names the
+// public conformance vectors give them. A caller that sees one of those has
+// found the SDK's check and the CLI's own check in disagreement, since the
+// CLI refuses such a CRID before it asks. "other" is a cause this list does
+// not know.
+//
+// TODO(upstream-contract): qurl-go refuses a CRID for a link request with
+// qurl.ErrUnsupportedCRIDVersion or with exactly one of the five sentinels of
+// its crid package. A cause it adds reads as "other" here until it is listed.
+func CRIDNotRequestableClass(err error) string {
+	switch {
+	case errors.Is(err, qurl.ErrUnsupportedCRIDVersion):
+		return "unsupported_version"
+	case errors.Is(err, crid.ErrCharset):
+		return "charset"
+	case errors.Is(err, crid.ErrLength):
+		return "length"
+	case errors.Is(err, crid.ErrChecksum):
+		return "checksum"
+	case errors.Is(err, crid.ErrNonCanonical):
+		return "non_canonical"
+	case errors.Is(err, crid.ErrForbiddenVersion):
+		return "version"
+	default:
+		return "other"
+	}
+}
+
+// maxRefusalCodeDigits bounds a code CRIDLinkRefusalCode returns.
+//
+// Every code the platform defines today has five decimal digits, the six of
+// this request among them. internal/output has a second bound for a code of
+// the service, connectorResourceCodeDigits, and it admits exactly five. This
+// one is looser on purpose, because the two codes are not the same kind:
+//
+//   - The code of a Connector resource answer comes from a closed list.
+//     qurl-go accepts seven codes there, each of five digits, and refuses a
+//     reply that carries any other. The CLI prints that code in the error
+//     message itself.
+//   - The code of a refused link request is open. The public conformance
+//     vectors define six codes and say that any other code is a general
+//     server error. qurl-go checks only the form of such a code: decimal
+//     digits with no leading zero, of any length. It hands on a code it has
+//     never seen, because that is what a service answers when it does not
+//     serve this request. The CLI prints it only with --verbose.
+//
+// A bound of five here would drop the diagnostic line for a code of another
+// length, which is a code nobody expected, and so the case the line is for.
+// Digits cannot carry anything else the answer held, so this bound has one
+// job: it keeps the line short.
+//
+// TODO(upstream-contract): both facts are qurl-go's. If it ever bounds the
+// length of a refusal code for this request, use its bound here.
 const maxRefusalCodeDigits = 16
 
 // CRIDLinkRefusalCode returns the code the service refused a link request
@@ -300,8 +363,11 @@ func CRIDLinkRefusalCode(err error) (code string, ok bool) {
 
 // ClassifyCRIDLinkError maps a failed RequestCRIDLink onto the CLI's
 // customer-language sentinels. The mapping is closed: an error it does not
-// know is treated as an answer that failed its check, so nothing the SDK or
-// the service says can reach the terminal or be acted on. deviceIdentity says
+// know is treated as an answer that failed its check, so nothing the service
+// says can reach the terminal or be acted on, and nothing the SDK says about
+// an answer can either. One error passes through with its detail: settings
+// that cannot be used (ErrAccessNotConfigured), whose detail names the user's
+// own settings file and what is wrong with it. deviceIdentity says
 // whether this machine holds a device identity; it selects the not-found
 // hint and nothing else.
 //
@@ -319,6 +385,14 @@ func CRIDLinkRefusalCode(err error) (code string, ok bool) {
 // shows the code (CRIDLinkRefusalCode).
 //
 // Callers pass an err for which CRIDNotRequestable is false.
+//
+// TODO(upstream-contract): the two answers about the endpoint are matched by
+// qurl-go's own sentinels, the ones CRIDLinkOffered matches, and not by
+// qurl.ErrNotConfigured, which qurl-go documents that both wrap. So neither
+// case changes if that wrapping does. What they still depend on is the same
+// as in CRIDLinkOffered: qurl.ErrCRIDLinkMisconfigured also matches
+// qurl.ErrCRIDLinkNotConfigured, so it is tested first, and an unusable
+// endpoint that qurl-go ever reports without it reads as "names none".
 func ClassifyCRIDLinkError(err error, deviceIdentity bool) error {
 	var deny *qurl.ServerDenyError
 	var relay *qurl.RelayError
@@ -336,6 +410,13 @@ func ClassifyCRIDLinkError(err error, deviceIdentity bool) error {
 		// The settings name a place to send the request that cannot be used.
 		// CRIDLinkOffered reports the same fault before any request.
 		return errCRIDLinkSetup
+	case errors.Is(err, qurl.ErrCRIDLinkNotConfigured):
+		// The settings name no place to send the request, although
+		// CRIDLinkOffered said they did: they changed after the check. The
+		// machine's settings are the fault. Nothing was sent, so this is
+		// never an answer of the service, and it must not read as one that
+		// failed its check.
+		return ErrAccessNotConfigured
 	case errors.Is(err, qurl.ErrCRIDLinkRejected), errors.Is(err, qurl.ErrCRIDLinkProtocol):
 		return ErrCRIDLinkRefused
 	case errors.Is(err, qurl.ErrCRIDLinkNotFound):
@@ -362,10 +443,8 @@ func ClassifyCRIDLinkError(err error, deviceIdentity bool) error {
 		// No answer in time, or none at all.
 		return ErrCRIDLinkNoAnswer
 	case errors.Is(err, qurl.ErrNotConfigured):
-		// The SDK has no deployment settings to check any link with, or the
-		// settings name no place to send this request although
-		// CRIDLinkOffered said they did. Either way the machine's settings
-		// are the fault.
+		// The SDK has no deployment settings to check any link with. The
+		// machine's settings are the fault here too.
 		return ErrAccessNotConfigured
 	default:
 		// This includes a reply that does not prove where it came from.

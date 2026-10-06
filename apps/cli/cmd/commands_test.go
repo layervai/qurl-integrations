@@ -116,12 +116,26 @@ func TestHelpLeadsWithTheOneCommandLocalJourney(t *testing.T) {
 //
 // Public and private stay distinct, so --private never reads as a no-op: a
 // resource is public unless published with --private, which limits it to its
-// owner and the allowed devices. That a public CRID is meant for anyone who
-// has it, while this release opens it only on the owner's devices, is said
-// exactly once in publish help and once in the README.
+// owner and the allowed devices.
 //
-// The test also keeps the retired promise, that a public CRID can be shared
-// without an account or login, off every help surface and out of the README.
+// Publish help and the README then say what a publisher needs to know about
+// a public resource, each exactly once and in the words get's help uses:
+// where the deployment offers it, anyone who has the CRID can open the
+// resource; the deployment this release ships does not offer it yet; and
+// --private is how to limit a resource. Both also say that privacy is set at
+// creation.
+//
+// The sentence about the shipped deployment is true for as long as
+// TestRequestCRIDLinkUnderTheShippedDeploymentIsNotMade passes. A release
+// that ships a deployment which offers the request drops it in publish help,
+// in get's help (TestGetCopyStatesWhatOpensWithOnlyACRID), in the README and
+// in the share not-found hint.
+//
+// The test also keeps two retired statements off every help surface and out
+// of the README: the promise that a public CRID can be shared without an
+// account or login, and the limitation that a CLI release opens a public
+// CRID only on the owner's devices. The CLI can ask for a link with the CRID
+// alone now, so what is missing is a deployment that offers the request.
 func TestSharingCopyStatesTheDeviceAccessRule(t *testing.T) {
 	collapse := func(text string) string { return strings.Join(strings.Fields(text), " ") }
 	help := func(args ...string) string {
@@ -132,7 +146,9 @@ func TestSharingCopyStatesTheDeviceAccessRule(t *testing.T) {
 		}
 		return collapse(res.stdout.String())
 	}
-	readme := collapse(readCLIREADME(t))
+	// Markdown code marks are dropped from the README, so one set of
+	// sentences is compared with both.
+	readme := collapse(strings.ReplaceAll(readCLIREADME(t), "`", ""))
 	publishHelp := help("publish")
 
 	const (
@@ -153,23 +169,38 @@ func TestSharingCopyStatesTheDeviceAccessRule(t *testing.T) {
 		}
 	}
 
-	const interim = "this CLI release opens it only on the owner's devices"
-	for _, surface := range []struct{ name, text string }{
-		{"qurl publish --help", publishHelp},
-		{"README", readme},
+	const (
+		anyone = "Where the deployment offers it, a public resource can also be opened by anyone who has its CRID."
+		notYet = "The deployment this release ships does not offer it yet."
+		limit  = "To limit a resource to its owner and the devices you allow, publish it with --private."
+	)
+	for _, surface := range []struct {
+		name, text string
+		// setAtCreation is how the surface says that privacy cannot change.
+		setAtCreation string
+		// notYetCount is how often the surface says that the shipped
+		// deployment does not offer the request. The README says it here and
+		// in its section about get.
+		notYetCount int
+	}{
+		{"qurl publish --help", publishHelp, "Privacy is set at creation and cannot be changed later.", 1},
+		{"README", readme, "Privacy is set at creation; a retry cannot change it.", 2},
 	} {
 		for _, want := range []string{
 			"A resource is public unless you publish it with",
 			"limits it to its owner and the devices",
-			"A public CRID is meant to be opened by anyone who has it",
-			"from other devices is not available yet",
 		} {
 			if !strings.Contains(surface.text, want) {
 				t.Errorf("%s does not keep public and private distinct: missing %q", surface.name, want)
 			}
 		}
-		if got := strings.Count(surface.text, interim); got != 1 {
-			t.Errorf("%s states the interim limitation %d times, want exactly once", surface.name, got)
+		for _, want := range []string{anyone + " " + notYet, limit, surface.setAtCreation} {
+			if got := strings.Count(surface.text, want); got != 1 {
+				t.Errorf("%s states %q %d times, want exactly once", surface.name, want, got)
+			}
+		}
+		if got := strings.Count(surface.text, notYet); got != surface.notYetCount {
+			t.Errorf("%s says %d times that the shipped deployment does not offer the request, want %d", surface.name, got, surface.notYetCount)
 		}
 	}
 
@@ -177,15 +208,17 @@ func TestSharingCopyStatesTheDeviceAccessRule(t *testing.T) {
 	checked := map[string]string{"README": readme}
 	for where, text := range visibleSurfaces(root) {
 		checked[where] = collapse(text)
-		if where != "qurl publish long" && strings.Contains(checked[where], interim) {
-			t.Errorf("%s repeats the interim limitation; among the help surfaces only publish states it", where)
+		if where != "qurl publish long" && where != "qurl get long" && strings.Contains(checked[where], notYet) {
+			t.Errorf("%s says that the shipped deployment does not offer the request; among the help surfaces only publish and get say it", where)
 		}
 	}
 	if len(checked) < 2 {
-		t.Fatal("no help surfaces collected; the retired-promise check would be vacuous")
+		t.Fatal("no help surfaces collected; the retired-statement check would be vacuous")
 	}
-	if !strings.Contains(checked["qurl publish long"], interim) {
-		t.Fatal("publish help is not collected under the key the limitation check exempts")
+	for _, where := range []string{"qurl publish long", "qurl get long"} {
+		if !strings.Contains(checked[where], notYet) {
+			t.Fatalf("%s is not collected under the key the check above exempts", where)
+		}
 	}
 	for where, text := range checked {
 		lower := strings.ToLower(text)
@@ -197,6 +230,16 @@ func TestSharingCopyStatesTheDeviceAccessRule(t *testing.T) {
 		} {
 			if strings.Contains(lower, retired) {
 				t.Errorf("%s still promises sharing without the device's identity: found %q", where, retired)
+			}
+		}
+		for _, retired := range []string{
+			"a public crid is meant to be opened by anyone who has it",
+			"opens it only on the owner's devices",
+			"from other devices is not available yet",
+			"only on its owner's devices in this release",
+		} {
+			if strings.Contains(lower, retired) {
+				t.Errorf("%s still says a CLI release cannot open a public CRID on other devices: found %q", where, retired)
 			}
 		}
 	}

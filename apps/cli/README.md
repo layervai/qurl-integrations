@@ -1350,9 +1350,10 @@ publisher allowed; any other device gets "not found". To be allowed on a
 private resource, a recipient sends the publisher their device's public key
 from `qurl whoami -o json`.
 
-A public CRID is meant to be opened by anyone who has it, but this CLI release
-opens it only on the owner's devices. Opening it from other devices is not
-available yet.
+Where the deployment offers it, a public resource can also be opened by anyone
+who has its CRID. The deployment this release ships does not offer it yet. See
+[`qurl get`](#qurl-get) for how that works. To limit a resource to its owner
+and the devices you allow, publish it with `--private`.
 
 Read the current `allowed_device_keys` with `qurl list -o json` before adding
 a recipient. JSON shows an empty array when there are no grants.

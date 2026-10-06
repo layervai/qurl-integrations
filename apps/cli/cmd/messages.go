@@ -70,6 +70,14 @@ const (
 	// code, which the message for the user never does.
 	msgCRIDLinkRefusalCode = "< CRID link request refused, code %s"
 
+	// msgCRIDLinkNotSent is the --verbose diagnostic for a link request with
+	// only a CRID that was never sent, because the SDK will not ask for a
+	// link for that CRID. %s is one word for the class of the cause, from
+	// consume.CRIDNotRequestableClass. The message for the user does not say
+	// which class it was, and on a device with an identity it is the share
+	// request's own answer, which says nothing about this request at all.
+	msgCRIDLinkNotSent = "> CRID link request not sent, the SDK will not ask for this CRID: %s"
+
 	// msgShareNeedsDevice frames a failure to open this device's identity on
 	// the share path, which share and get both take. The cause follows it
 	// unchanged, so the exit code stays the cause's.

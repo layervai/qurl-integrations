@@ -405,8 +405,9 @@ func TestRenderEnrollmentScopeRemedy(t *testing.T) {
 // operator, which `share` and `get` both go through. Its 404 covers a
 // mistyped CRID, a removed resource, and a device that is not allowed, so the
 // hint names all three and picks none. The remedy is conditional: a grant
-// helps only on a private resource, and a public one opens only on its
-// owner's devices. The exit code stays not-found, and a 404 from any other
+// helps only on a private resource, and a public one opens on other devices
+// only where the deployment offers it, which the deployment a release ships
+// does not do yet. The exit code stays not-found, and a 404 from any other
 // route keeps the hint every route shares.
 func TestShareNotFoundRendering(t *testing.T) {
 	srv := apitest.NewServer(t)
@@ -435,7 +436,7 @@ func TestShareNotFoundRendering(t *testing.T) {
 		"the resource may have been removed",
 		"this device may not be allowed to open it",
 		"If the resource is private, send the publisher this device's public key from `qurl whoami -o json` so they can allow it",
-		"A public resource opens only on its owner's devices in this release",
+		sharePublicResourceSentences,
 	} {
 		if !strings.Contains(hintShareNotFound, part) {
 			t.Errorf("share not-found hint lost %q: %q", part, hintShareNotFound)
@@ -499,10 +500,11 @@ func TestCRIDNotFoundRendering(t *testing.T) {
 					t.Errorf("hint lost %q: %q", part, tc.hint)
 				}
 			}
-			// On this path a public resource can open on other devices, so the
-			// share hint's last sentence would be false here. "deleted" is the
+			// On this path the deployment offers the request and a public
+			// resource can open on other devices, so what the share hint says
+			// about a public resource would be false here. "deleted" is the
 			// answer only an owner gets, as on the share path.
-			for _, wrong := range []string{"in this release", "A public resource opens only", "deleted"} {
+			for _, wrong := range []string{"only where the deployment offers it", "does not offer it yet", "in this release", "deleted"} {
 				if strings.Contains(tc.hint+consume.MsgCRIDNotFound, wrong) {
 					t.Errorf("hint says %q: %q", wrong, tc.hint)
 				}
@@ -520,12 +522,18 @@ func TestCRIDNotFoundRendering(t *testing.T) {
 	if got := strings.Replace(hintCRIDNotFound, withKey, withoutKey, 1); got != hintCRIDNotFoundNoDevice {
 		t.Errorf("the no-identity hint = %q, want the other hint with only the private-resource sentence changed: %q", hintCRIDNotFoundNoDevice, got)
 	}
-	// The share hint is unchanged: it is what get prints when the second
-	// request cannot be made.
-	if !strings.HasSuffix(hintShareNotFound, "A public resource opens only on its owner's devices in this release.") {
+	// The share hint keeps its own ending: it is what get prints when the
+	// second request cannot be made.
+	if !strings.HasSuffix(hintShareNotFound, sharePublicResourceSentences) {
 		t.Errorf("the share not-found hint changed: %q", hintShareNotFound)
 	}
 }
+
+// sharePublicResourceSentences is how the share not-found hint ends. It says
+// who can open a public resource in the words `qurl get --help`, `qurl
+// publish --help` and the README use, so a reader meets one statement
+// everywhere. The copy tests of package cmd pin those three.
+const sharePublicResourceSentences = "A public resource opens on other devices only where the deployment offers it. The deployment this release ships does not offer it yet."
 
 // TestConnectorAssignmentRenderings is the customer-language contract for
 // qurl-go's enrollment/assignment taxonomy. Every row is asserted twice —
@@ -841,6 +849,25 @@ func TestConnectorResourceRenderings(t *testing.T) {
 		RenderError(&buf, err, false)
 		if got := buf.String(); strings.Contains(got, "host1") || strings.Contains(got, labelConnectorErrorCode) {
 			t.Fatalf("malformed support code reached customer output:\n%s", got)
+		}
+	})
+
+	// The code of a Connector resource answer is one of a closed list of
+	// five-digit codes, so only a value of exactly five digits is printed in
+	// the error message. The bound for the code of a refused link request,
+	// in internal/consume, is looser on purpose; see
+	// connectorResourceCodeDigits.
+	t.Run("support code of another length stays hidden", func(t *testing.T) {
+		for _, code := range []string{"5250", "525000", strings.Repeat("9", 16)} {
+			err := errors.Join(
+				qurl.ErrConnectorResourceUnavailable,
+				&qurl.ConnectorResourceDiscoveryError{Code: code},
+			)
+			var buf bytes.Buffer
+			RenderError(&buf, err, false)
+			if got := buf.String(); strings.Contains(got, code) || strings.Contains(got, labelConnectorErrorCode) {
+				t.Errorf("a support code of %d digits reached customer output:\n%s", len(code), got)
+			}
 		}
 	})
 }

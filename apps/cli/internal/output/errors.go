@@ -281,9 +281,21 @@ func renderConnectorResourcePosture(p *Printer, head string, err error, headline
 	return append(lines, "", "  "+p.dim(hint))
 }
 
+// connectorResourceCodeDigits is the length of a code connectorResourceCode
+// shows: exactly five decimal digits. qurl-go accepts a closed list of codes
+// for a Connector resource answer, each of five digits, and refuses a reply
+// that carries any other. A value of another length is therefore not one of
+// them, and it is not printed in an error message.
+//
+// internal/consume has a second bound for a code of the service,
+// maxRefusalCodeDigits, and it is looser on purpose: the code of a refused
+// link request can be any decimal code, and it is shown only with --verbose.
+// The comment there says why the two differ.
+const connectorResourceCodeDigits = 5
+
 func connectorResourceCode(err error) string {
 	var discovery *qurl.ConnectorResourceDiscoveryError
-	if !errors.As(err, &discovery) || discovery == nil || len(discovery.Code) != 5 {
+	if !errors.As(err, &discovery) || discovery == nil || len(discovery.Code) != connectorResourceCodeDigits {
 		return ""
 	}
 	for _, character := range discovery.Code {
