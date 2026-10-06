@@ -580,24 +580,61 @@ func TestClassifyCRIDLinkErrorReadsAGeneralCodeAsTryAgainLater(t *testing.T) {
 // check before the request said they did. Each reads as ErrAccessNotConfigured
 // itself. That is the fixed message with no detail, so nothing of the SDK's
 // text, which names files and variables, comes with it.
+//
+// "Names no endpoint" is matched by its own sentinel,
+// qurl.ErrCRIDLinkNotConfigured, the one CRIDLinkOffered matches. qurl-go
+// documents that this sentinel also matches qurl.ErrNotConfigured, and the
+// rows marked alsoNotConfigured hold that fact about the SDK. The classifier
+// does not depend on it. The last row is an error that matches the sentinel
+// and nothing else, as the SDK's answer would if qurl-go stopped wrapping.
+// Without the case for the sentinel that row reads as an answer that failed
+// its safety check, which tells a user whose settings changed to stop and
+// contact whoever shared the CRID.
 func TestClassifyCRIDLinkErrorForSettingsTheSDKCannotUse(t *testing.T) {
 	t.Parallel()
 	const detail = "read deployment /etc/example/deployment.json"
-	for name, in := range map[string]error{
-		"not configured":         fmt.Errorf("%w: %s", qurl.ErrNotConfigured, detail),
-		"no deployment settings": qurl.ErrNoDeployment,
-		"names no endpoint":      fmt.Errorf("%w: %s", qurl.ErrCRIDLinkNotConfigured, detail),
+	for name, tc := range map[string]struct {
+		in error
+		// alsoNotConfigured says the input matches qurl.ErrNotConfigured.
+		alsoNotConfigured bool
+	}{
+		"not configured":                         {fmt.Errorf("%w: %s", qurl.ErrNotConfigured, detail), true},
+		"no deployment settings":                 {qurl.ErrNoDeployment, true},
+		"names no endpoint":                      {fmt.Errorf("%w: %s", qurl.ErrCRIDLinkNotConfigured, detail), true},
+		"names no endpoint, the sentinel itself": {qurl.ErrCRIDLinkNotConfigured, true},
+		"names no endpoint, the sentinel only":   {cridLinkNotConfiguredOnly{detail: detail}, false},
 	} {
-		if !errors.Is(in, qurl.ErrNotConfigured) {
-			t.Fatalf("%s: the input %v is not one of the SDK's not-configured errors", name, in)
+		if got := errors.Is(tc.in, qurl.ErrNotConfigured); got != tc.alsoNotConfigured {
+			t.Fatalf("%s: the input %v matches the SDK's plain not-configured error = %t, want %t", name, tc.in, got, tc.alsoNotConfigured)
 		}
 		for _, deviceIdentity := range []bool{true, false} {
-			got := ClassifyCRIDLinkError(in, deviceIdentity)
+			got := ClassifyCRIDLinkError(tc.in, deviceIdentity)
 			if got != ErrAccessNotConfigured { //nolint:errorlint // The classifier must return the bare sentinel.
-				t.Errorf("%s: ClassifyCRIDLinkError(%v, %t) = %v, want ErrAccessNotConfigured itself", name, in, deviceIdentity, got)
+				t.Errorf("%s: ClassifyCRIDLinkError(%v, %t) = %v, want ErrAccessNotConfigured itself", name, tc.in, deviceIdentity, got)
 			}
 		}
 	}
+
+	// The row above is the case it claims to be: the sentinel, and neither
+	// the plain error nor the error for an endpoint that cannot be used.
+	only := cridLinkNotConfiguredOnly{detail: detail}
+	if !errors.Is(only, qurl.ErrCRIDLinkNotConfigured) || errors.Is(only, qurl.ErrCRIDLinkMisconfigured) {
+		t.Fatalf("the stand-in %v does not match exactly the SDK's names-no-endpoint error", only)
+	}
+}
+
+// cridLinkNotConfiguredOnly is an error that matches
+// qurl.ErrCRIDLinkNotConfigured and no other error. It stands for a qurl-go
+// that reports "the settings name no endpoint" without wrapping
+// qurl.ErrNotConfigured.
+type cridLinkNotConfiguredOnly struct{ detail string }
+
+func (e cridLinkNotConfiguredOnly) Error() string {
+	return "qurl: no usable CRID link endpoint: " + e.detail
+}
+
+func (cridLinkNotConfiguredOnly) Is(target error) bool {
+	return target == qurl.ErrCRIDLinkNotConfigured
 }
 
 // TestClassifyCRIDLinkErrorNotFoundDependsOnlyOnTheDevice pins the one place

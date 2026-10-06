@@ -319,6 +319,14 @@ func CRIDLinkRefusalCode(err error) (code string, ok bool) {
 // shows the code (CRIDLinkRefusalCode).
 //
 // Callers pass an err for which CRIDNotRequestable is false.
+//
+// TODO(upstream-contract): the two answers about the endpoint are matched by
+// qurl-go's own sentinels, the ones CRIDLinkOffered matches, and not by
+// qurl.ErrNotConfigured, which qurl-go documents that both wrap. So neither
+// case changes if that wrapping does. What they still depend on is the same
+// as in CRIDLinkOffered: qurl.ErrCRIDLinkMisconfigured also matches
+// qurl.ErrCRIDLinkNotConfigured, so it is tested first, and an unusable
+// endpoint that qurl-go ever reports without it reads as "names none".
 func ClassifyCRIDLinkError(err error, deviceIdentity bool) error {
 	var deny *qurl.ServerDenyError
 	var relay *qurl.RelayError
@@ -336,6 +344,13 @@ func ClassifyCRIDLinkError(err error, deviceIdentity bool) error {
 		// The settings name a place to send the request that cannot be used.
 		// CRIDLinkOffered reports the same fault before any request.
 		return errCRIDLinkSetup
+	case errors.Is(err, qurl.ErrCRIDLinkNotConfigured):
+		// The settings name no place to send the request, although
+		// CRIDLinkOffered said they did: they changed after the check. The
+		// machine's settings are the fault. Nothing was sent, so this is
+		// never an answer of the service, and it must not read as one that
+		// failed its check.
+		return ErrAccessNotConfigured
 	case errors.Is(err, qurl.ErrCRIDLinkRejected), errors.Is(err, qurl.ErrCRIDLinkProtocol):
 		return ErrCRIDLinkRefused
 	case errors.Is(err, qurl.ErrCRIDLinkNotFound):
@@ -362,10 +377,8 @@ func ClassifyCRIDLinkError(err error, deviceIdentity bool) error {
 		// No answer in time, or none at all.
 		return ErrCRIDLinkNoAnswer
 	case errors.Is(err, qurl.ErrNotConfigured):
-		// The SDK has no deployment settings to check any link with, or the
-		// settings name no place to send this request although
-		// CRIDLinkOffered said they did. Either way the machine's settings
-		// are the fault.
+		// The SDK has no deployment settings to check any link with. The
+		// machine's settings are the fault here too.
 		return ErrAccessNotConfigured
 	default:
 		// This includes a reply that does not prove where it came from.
