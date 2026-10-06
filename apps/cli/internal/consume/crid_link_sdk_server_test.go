@@ -85,6 +85,10 @@ func TestRequestCRIDLinkIssuedByTheSDKTestServer(t *testing.T) {
 // A code outside the set is what a server answers when it does not serve
 // this request, 51002 among them. It reads as "try again later" and never as
 // "update qurl". Its code stays available for a diagnostic line.
+//
+// The last two codes do not have five digits. The SDK hands them on like any
+// other decimal code, so the diagnostic line shows them too:
+// maxRefusalCodeDigits says why its bound is not five.
 func TestRequestCRIDLinkRefusedByTheSDKTestServer(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
@@ -102,6 +106,8 @@ func TestRequestCRIDLinkRefusedByTheSDKTestServer(t *testing.T) {
 		{code: "51002", want: ErrCRIDLinkUnavailable},
 		{code: "52005", want: ErrCRIDLinkUnavailable},
 		{code: "52607", want: ErrCRIDLinkUnavailable},
+		{code: "7", want: ErrCRIDLinkUnavailable},
+		{code: "526001", want: ErrCRIDLinkUnavailable},
 	} {
 		t.Run(tc.code, func(t *testing.T) {
 			t.Parallel()

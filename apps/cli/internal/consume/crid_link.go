@@ -315,8 +315,31 @@ func CRIDNotRequestableClass(err error) string {
 	}
 }
 
-// maxRefusalCodeDigits bounds a code CRIDLinkRefusalCode returns. The codes
-// the service sends have five digits.
+// maxRefusalCodeDigits bounds a code CRIDLinkRefusalCode returns.
+//
+// Every code the platform defines today has five decimal digits, the six of
+// this request among them. internal/output has a second bound for a code of
+// the service, connectorResourceCodeDigits, and it admits exactly five. This
+// one is looser on purpose, because the two codes are not the same kind:
+//
+//   - The code of a Connector resource answer comes from a closed list.
+//     qurl-go accepts seven codes there, each of five digits, and refuses a
+//     reply that carries any other. The CLI prints that code in the error
+//     message itself.
+//   - The code of a refused link request is open. The public conformance
+//     vectors define six codes and say that any other code is a general
+//     server error. qurl-go checks only the form of such a code: decimal
+//     digits with no leading zero, of any length. It hands on a code it has
+//     never seen, because that is what a service answers when it does not
+//     serve this request. The CLI prints it only with --verbose.
+//
+// A bound of five here would drop the diagnostic line for a code of another
+// length, which is a code nobody expected, and so the case the line is for.
+// Digits cannot carry anything else the answer held, so this bound has one
+// job: it keeps the line short.
+//
+// TODO(upstream-contract): both facts are qurl-go's. If it ever bounds the
+// length of a refusal code for this request, use its bound here.
 const maxRefusalCodeDigits = 16
 
 // CRIDLinkRefusalCode returns the code the service refused a link request

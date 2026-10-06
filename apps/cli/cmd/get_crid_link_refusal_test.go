@@ -88,9 +88,13 @@ func TestGetRefusalsThroughTheSDK(t *testing.T) {
 // visible. The message for the user never carries it, because several codes
 // share one message. --verbose adds one diagnostic line with the code, for
 // whoever looks into a failure, and the message stays the same.
+//
+// 526001 is a code of six digits. No code the platform defines has that
+// length, and the SDK hands it on like any other decimal code, so the line
+// shows it: a code nobody expected is the one the line is for.
 func TestGetShowsTheRefusalCodeOnlyWithVerbose(t *testing.T) {
 	state := bootstrapRegisteredState(t)
-	for _, code := range []string{"51002", "52005", "52602"} {
+	for _, code := range []string{"51002", "52005", "52602", "526001"} {
 		for _, device := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/device=%t", code, device), func(t *testing.T) {
 				path := newSDKLinkPath(t, nil)

@@ -851,6 +851,25 @@ func TestConnectorResourceRenderings(t *testing.T) {
 			t.Fatalf("malformed support code reached customer output:\n%s", got)
 		}
 	})
+
+	// The code of a Connector resource answer is one of a closed list of
+	// five-digit codes, so only a value of exactly five digits is printed in
+	// the error message. The bound for the code of a refused link request,
+	// in internal/consume, is looser on purpose; see
+	// connectorResourceCodeDigits.
+	t.Run("support code of another length stays hidden", func(t *testing.T) {
+		for _, code := range []string{"7", "5250", "525000", strings.Repeat("9", 16)} {
+			err := errors.Join(
+				qurl.ErrConnectorResourceUnavailable,
+				&qurl.ConnectorResourceDiscoveryError{Code: code},
+			)
+			var buf bytes.Buffer
+			RenderError(&buf, err, false)
+			if got := buf.String(); strings.Contains(got, code) || strings.Contains(got, labelConnectorErrorCode) {
+				t.Errorf("a support code of %d digits reached customer output:\n%s", len(code), got)
+			}
+		}
+	})
 }
 
 func TestConnectorConnectionConfigRenderingHidesTopology(t *testing.T) {

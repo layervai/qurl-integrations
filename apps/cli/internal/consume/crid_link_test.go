@@ -787,6 +787,11 @@ func TestCRIDNotRequestableClass(t *testing.T) {
 // TestCRIDLinkRefusalCode pins the one piece of the service's answer a
 // diagnostic may show: the refusal code, and only when it is a short run of
 // decimal digits.
+//
+// The codes the platform defines have five digits. A code of another length
+// is shown too, up to the bound: the SDK hands on any decimal code, and a
+// code nobody expected is the one a diagnostic is for. maxRefusalCodeDigits
+// says why this bound is not the five of a Connector resource code.
 func TestCRIDLinkRefusalCode(t *testing.T) {
 	t.Parallel()
 	for name, tc := range map[string]struct {
@@ -796,6 +801,8 @@ func TestCRIDLinkRefusalCode(t *testing.T) {
 		"refusal the request defines": {sdkRefusal(qurl.ErrCRIDLinkNotFound, "52602"), "52602"},
 		"general code":                {&qurl.ServerDenyError{ErrCode: "51002"}, "51002"},
 		"wrapped":                     {fmt.Errorf("request failed: %w", &qurl.ServerDenyError{ErrCode: "51002"}), "51002"},
+		"one digit":                   {&qurl.ServerDenyError{ErrCode: "7"}, "7"},
+		"six digits":                  {&qurl.ServerDenyError{ErrCode: "526001"}, "526001"},
 		"longest code shown":          {&qurl.ServerDenyError{ErrCode: strings.Repeat("9", maxRefusalCodeDigits)}, strings.Repeat("9", maxRefusalCodeDigits)},
 
 		"no error":             {nil, ""},
