@@ -363,8 +363,11 @@ func CRIDLinkRefusalCode(err error) (code string, ok bool) {
 
 // ClassifyCRIDLinkError maps a failed RequestCRIDLink onto the CLI's
 // customer-language sentinels. The mapping is closed: an error it does not
-// know is treated as an answer that failed its check, so nothing the SDK or
-// the service says can reach the terminal or be acted on. deviceIdentity says
+// know is treated as an answer that failed its check, so nothing the service
+// says can reach the terminal or be acted on, and nothing the SDK says about
+// an answer can either. One error passes through with its detail: settings
+// that cannot be used (ErrAccessNotConfigured), whose detail names the user's
+// own settings file and what is wrong with it. deviceIdentity says
 // whether this machine holds a device identity; it selects the not-found
 // hint and nothing else.
 //

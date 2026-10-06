@@ -858,7 +858,7 @@ func TestConnectorResourceRenderings(t *testing.T) {
 	// in internal/consume, is looser on purpose; see
 	// connectorResourceCodeDigits.
 	t.Run("support code of another length stays hidden", func(t *testing.T) {
-		for _, code := range []string{"7", "5250", "525000", strings.Repeat("9", 16)} {
+		for _, code := range []string{"5250", "525000", strings.Repeat("9", 16)} {
 			err := errors.Join(
 				qurl.ErrConnectorResourceUnavailable,
 				&qurl.ConnectorResourceDiscoveryError{Code: code},

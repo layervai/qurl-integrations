@@ -319,7 +319,11 @@ func shareNotFound(err error) bool {
 //
 // It returns errCRIDNotRequestable when the SDK will not ask for this CRID
 // and sent nothing. Every other failure comes back as one of the CLI's fixed
-// messages; the SDK's own error text never does.
+// messages, and the SDK's own error text does not, with one exception: a
+// settings file that cannot be read or parsed. Its message ends with the
+// SDK's detail, which names the file the user pointed QURL_DEPLOYMENT at and
+// says what is wrong with it. That file is the user's own, and the detail is
+// what lets them fix it.
 func (opts *globalOpts) linkByCRIDAlone(ctx context.Context, resourceCRID string, device bool) (*qurlapi.ShareLink, error) {
 	issued, err := opts.requestCRIDLink(ctx, resourceCRID)
 	switch {

@@ -1705,6 +1705,12 @@ func TestGetRefreshStaysWithTheCRIDAlone(t *testing.T) {
 		return modes
 	}
 
+	// With no mode that downloads, both loops below would run nothing and
+	// this test would pass while it holds nothing.
+	if len(downloads()) == 0 {
+		t.Fatal("no get mode downloads; this test would pin nothing")
+	}
+
 	for _, mode := range downloads() {
 		t.Run("the share request would fail/"+mode.name, func(t *testing.T) {
 			srv := downloadServer(t)
