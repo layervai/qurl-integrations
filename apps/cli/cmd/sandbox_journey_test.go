@@ -330,10 +330,12 @@ type journeyResourceStatusDoc struct {
 	Status     string `json:"status"`
 }
 
-// sandboxInspectionDoc names every key `qurl inspect -o json` may print. The
-// healthy journey decodes into it with unknown keys refused, so a key added to
-// the command's document has to be added here, with its rule in
-// assertHealthySandboxInspection, in the same change.
+// sandboxInspectionDoc names every key of the sharing document that
+// `qurl inspect -o json` may print for a published local service. The healthy
+// journey decodes into it with unknown keys refused, so a key added to that
+// document has to be added here in the same change;
+// TestSandboxInspectionDocReadsEveryInspectKey holds that. Give the key its
+// rule in assertHealthySandboxInspection too; no test holds that.
 type sandboxInspectionDoc struct {
 	CRID            string `json:"crid"`
 	ResourceID      string `json:"resource_id"`
