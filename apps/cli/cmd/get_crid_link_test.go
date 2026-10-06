@@ -519,7 +519,7 @@ func TestGetByCRIDAloneGoldens(t *testing.T) {
 	// word before the golden is written or compared, so no golden holds a
 	// path of the machine the test ran on.
 	for _, file := range unusableSettingsFiles() {
-		t.Run(file.golden+".plain.stderr.golden", func(t *testing.T) {
+		t.Run(file.name, func(t *testing.T) {
 			if file.systemWords && runtime.GOOS == "windows" {
 				t.Skip("the message ends with the operating system's own words for the failure, and the golden holds those of a Unix system")
 			}
@@ -535,7 +535,14 @@ func TestGetByCRIDAloneGoldens(t *testing.T) {
 			if result.code != exitcode.Config || result.stdout.Len() != 0 {
 				t.Fatalf("exit = %d, want %d; stdout = %q, stderr: %s", result.code, exitcode.Config, result.stdout.String(), result.stderr.String())
 			}
-			clitest.GoldenAt(t, filepath.Join(goldenDir, file.golden+".plain.stderr.golden"), []byte(withoutSettingsDir(t, result.stderr.String(), dir)))
+			message := withoutSettingsDir(t, result.stderr.String(), dir)
+			if file.parserWords {
+				// This case has no golden: its message ends with the
+				// words of Go's JSON parser. See unusableSettingsFile.
+				file.mustBeTheMessage(t, message)
+				return
+			}
+			clitest.GoldenAt(t, filepath.Join(goldenDir, file.golden+".plain.stderr.golden"), []byte(message))
 		})
 	}
 
