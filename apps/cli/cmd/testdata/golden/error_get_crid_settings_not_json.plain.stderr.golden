@@ -1,0 +1,1 @@
+Error: this machine is not set up to verify qURL links — set QURL_DEPLOYMENT to your deployment settings file (qurl: parse deployment <settings-dir>/not-json.json: invalid character 'o' in literal null (expecting 'u'))

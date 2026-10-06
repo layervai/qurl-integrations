@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -384,11 +385,11 @@ func refusalRows() []answerRow {
 		{name: "malformed reply", err: fmt.Errorf("%w: unexpected reply type 9", qurl.ErrMalformedReply), wantCode: exitcode.VerificationFailed, golden: "error_get_crid_refused"},
 		{name: "reply that does not prove its source", err: errors.New("decrypt reply: message authentication failed"), wantCode: exitcode.VerificationFailed, golden: "error_get_crid_refused"},
 		{name: "neither a link nor an error", err: nil, wantCode: exitcode.VerificationFailed, golden: "error_get_crid_refused"},
-		{
-			name:     "settings file that cannot be used",
-			err:      fmt.Errorf("%w (%w)", consume.ErrAccessNotConfigured, os.ErrNotExist),
-			wantCode: exitcode.Config, golden: "error_get_crid_settings",
-		},
+		// A settings file that cannot be used at all is not a row here: its
+		// message names the file, so no error a test builds by hand is what
+		// the CLI prints. TestGetReportsASettingsFileThatCannotBeUsed gives
+		// get real files of that kind, for the check and for the request.
+		//
 		// The check for whether the request is offered reports these two
 		// before any request. A request that still ends in one of them has
 		// found the settings changed, and reads the same way.
@@ -510,6 +511,33 @@ func TestGetByCRIDAloneGoldens(t *testing.T) {
 		}
 		clitest.GoldenAt(t, filepath.Join(goldenDir, "error_get_crid_version.plain.stderr.golden"), result.stderr.Bytes())
 	})
+
+	// A settings file that cannot be used at all, one golden for each kind of
+	// file. The file is a real one and the production code reads it, so the
+	// golden holds what the CLI prints. That message names the file by the
+	// path the user gave. The directory the test made is replaced by a fixed
+	// word before the golden is written or compared, so no golden holds a
+	// path of the machine the test ran on.
+	for _, file := range unusableSettingsFiles() {
+		t.Run(file.golden+".plain.stderr.golden", func(t *testing.T) {
+			if file.systemWords && runtime.GOOS == "windows" {
+				t.Skip("the message ends with the operating system's own words for the failure, and the golden holds those of a Unix system")
+			}
+			dir := t.TempDir()
+			opener := file.opener(t, dir)
+			t.Chdir(t.TempDir())
+			srv := apitest.NewServerWithKey(t, apitest.FixedResourceKey(t))
+			result := runCLI(t, &runOpts{
+				args:            []string{"--endpoint", srv.URL, "get", srv.Key.CRID, "--file", "out.bin"},
+				env:             map[string]string{},
+				cridLinkOffered: opener.CRIDLinkOffered,
+			})
+			if result.code != exitcode.Config || result.stdout.Len() != 0 {
+				t.Fatalf("exit = %d, want %d; stdout = %q, stderr: %s", result.code, exitcode.Config, result.stdout.String(), result.stderr.String())
+			}
+			clitest.GoldenAt(t, filepath.Join(goldenDir, file.golden+".plain.stderr.golden"), []byte(withoutSettingsDir(t, result.stderr.String(), dir)))
+		})
+	}
 
 	// One golden per answer. The plain variant runs the file action; the two
 	// not-found answers also have a terminal variant, which runs the browser
