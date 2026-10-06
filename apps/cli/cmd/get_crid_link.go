@@ -48,6 +48,13 @@ import (
 //     and no new identity. A device with an identity is told so only after
 //     its own share request was answered "not found", because its share
 //     request does not depend on those settings.
+//   - The rules above give the first link. One run of the command can need a
+//     second one: a download asks again when its link expired before any
+//     byte was served (a refresh). Once a link given for the CRID alone has
+//     passed the link check and is in use, the refresh asks with the CRID
+//     alone too, and that answer is final. It sends no share request and
+//     does not ask again whether the request is offered. See the second
+//     table.
 //
 // The whole table. "CRID" is one that passed the local check every command
 // applies first; a CRID that fails it is refused before this file runs, on
@@ -72,6 +79,25 @@ import (
 // service, nobody knows whether the resource opens with the CRID alone. "Not
 // found" would be wrong for every public resource, so get says that the
 // service did not answer and that the user can try again later.
+//
+// The refresh, by the link that is in use when a download asks again:
+//
+//	link in use came from   refresh
+//	the share request       decided again by the table above
+//	the request with the    ask with the CRID alone; the answer is final;
+//	CRID alone              no share request
+//
+// The second row is a decision too. The share request cannot give that run
+// a link: it already answered "not found", or the machine has no identity to
+// make it with. Sending it again would name this device to the service once
+// more for nothing. And if it then failed in any other way, for example
+// because the service was busy for a moment, that failure would end a
+// download that links for the CRID alone were serving. The first row keeps
+// the rule get always had: a link from the share request does not fix the
+// choice, so when the share request says "not found" at the refresh, get
+// asks with the CRID alone.
+//
+// getLinkSource holds that memory for one run. Nothing is kept between runs.
 //
 // `qurl share` does not use this file. It always shares with the device.
 
@@ -120,9 +146,58 @@ func (opts *globalOpts) hasDeviceIdentity() bool {
 	return connectorstate.EnvelopePresent(stateDir)
 }
 
-// linkForGet returns the link get acts on. byCRIDAlone reports that the link
-// came from the request that uses only the CRID, which cannot carry a session
-// duration.
+// getLinkSource gives one run of get its links: the first one, and the one a
+// download asks for when its link expired before any byte was served.
+//
+// It remembers one fact about the run: a link given for the CRID alone
+// passed the link check and is in use. From then on next asks with the CRID
+// alone and sends no share request. The table at the top of this file says
+// why.
+//
+// The downloader asks for its links one after the other, never at the same
+// time, so the memory needs no lock.
+type getLinkSource struct {
+	opts       *globalOpts
+	assessment *cridux.Assessment
+	options    qurlapi.ShareOptions
+	// cridAlone is the memory. Only verified sets it.
+	cridAlone bool
+}
+
+// linkSourceForGet returns the link source of one run of get.
+func (opts *globalOpts) linkSourceForGet(assessment *cridux.Assessment, options qurlapi.ShareOptions) *getLinkSource {
+	return &getLinkSource{opts: opts, assessment: assessment, options: options}
+}
+
+// next returns the next link of the run and reports whether it was given for
+// the CRID alone. The caller verifies the link, and then calls verified.
+func (s *getLinkSource) next(ctx context.Context) (link *qurlapi.ShareLink, byCRIDAlone bool, err error) {
+	if !s.cridAlone {
+		return s.opts.linkForGet(ctx, s.assessment, s.options)
+	}
+	// The identity is looked at only to pick the not-found hint.
+	link, err = s.opts.linkByCRIDAlone(ctx, s.assessment.Input, s.opts.hasDeviceIdentity())
+	if errors.Is(err, errCRIDNotRequestable) {
+		// The SDK asked for this same CRID earlier in the run, so it does not
+		// give this answer now. If it ever does, there is no share answer to
+		// fall back on, and the error must not leave this file.
+		err = refusalForCRIDNotRequestable(err)
+	}
+	return link, err == nil, err
+}
+
+// verified records that the link next returned passed the link check and is
+// now the link in use. byCRIDAlone is what next reported for it.
+func (s *getLinkSource) verified(byCRIDAlone bool) {
+	if byCRIDAlone {
+		s.cridAlone = true
+	}
+}
+
+// linkForGet returns the link get acts on when the run has not yet used a
+// link given for the CRID alone: the first link, and a refresh after a link
+// from the share request. byCRIDAlone reports that the link came from the
+// request that uses only the CRID, which cannot carry a session duration.
 //
 // The caller verifies the link against the CRID and opens it the same way
 // whichever path it came from.

@@ -36,7 +36,7 @@ import (
 // get_crid_link_offer_test.go has the ones that send to the SDK's test
 // server.
 //
-// Three rules are pinned here:
+// Four rules are pinned here:
 //
 //   - Where the second request is not offered, get is unchanged for every
 //     machine: the same output, the same exit code, the same requests.
@@ -45,6 +45,8 @@ import (
 //   - A machine with no identity, where the request is offered, asks with the
 //     CRID alone. Whatever the answer is, it is final, and no identity is
 //     created.
+//   - A download that used a link given for the CRID alone asks the same way
+//     when it needs a fresh link, and sends no share request then.
 
 // cridLinkNotOffered answers the way the deployment every release ships
 // today does: it names no place to send the request, so the request is not
@@ -1572,9 +1574,19 @@ func TestGetVerifiesALinkGivenForTheCRIDAlone(t *testing.T) {
 	}
 }
 
-// TestGetRefreshesALinkGivenForTheCRIDAlone covers a link that expires before
-// any byte is served: the download asks again, by the same rules, and the
-// reader is told about the publisher once.
+// TestGetRefreshesALinkGivenForTheCRIDAlone covers a link given for the CRID
+// alone that expires before any byte is served. The download asks again the
+// same way: the second table in get_crid_link.go. The service gets one more
+// request with the CRID alone and nothing else.
+//
+// A device with an identity sends its share request once, for the first
+// link. It does not send it again at the refresh, although the share route
+// here would answer "not found" again and so lead to the same link. A
+// machine with no identity still sends nothing to the qURL API. Neither asks
+// a second time whether the request is offered.
+//
+// The reader is told about the publisher once, and once that
+// --session-duration was not applied.
 func TestGetRefreshesALinkGivenForTheCRIDAlone(t *testing.T) {
 	state := bootstrapRegisteredState(t)
 	for _, device := range []bool{true, false} {
@@ -1586,19 +1598,20 @@ func TestGetRefreshesALinkGivenForTheCRIDAlone(t *testing.T) {
 				srv := downloadServer(t)
 				srv.Script(http.MethodGet, apitest.DownloadPath, handlerGone)
 				requests := &linkRequests{link: issuedLink(srv.URL + apitest.DownloadPath)}
+				offer := &linkOffer{offered: true}
 				stateDir := filepath.Join(t.TempDir(), "no-device-state")
 				machine := machineWithNoIdentity(t, stateDir)
 				wantAPI := []string(nil)
 				if device {
 					machine = enrolledDevice(t, state)
 					shareNotFoundTwice(t, srv)
-					// The share request comes first each time. The device proves
+					// One share request, for the first link. The device proves
 					// its identity once per process.
-					wantAPI = []string{"GET /v1/me", "POST " + shareRoute(srv), "POST " + shareRoute(srv)}
+					wantAPI = []string{"GET /v1/me", "POST " + shareRoute(srv)}
 				}
 
 				configure := func(args []string) *runOpts {
-					return withLinkRequests(machine, requests.answer)(append(args, "--session-duration", "5m"))
+					return withLinkOffer(withLinkRequests(machine, requests.answer), offer.answer)(append(args, "--session-duration", "5m"))
 				}
 				run := runShareMode(t, srv, srv.URL, mode, configure)
 				run.mustHaveDelivered(t, mode)
@@ -1607,7 +1620,10 @@ func TestGetRefreshesALinkGivenForTheCRIDAlone(t *testing.T) {
 					t.Errorf("asked with the CRID alone %d times, want twice: once, and once for the refresh", len(requests.asked))
 				}
 				if got := apiRequests(srv); strings.Join(got, "\n") != strings.Join(wantAPI, "\n") {
-					t.Errorf("qURL API requests = %q, want %q", got, wantAPI)
+					t.Errorf("qURL API requests = %q, want %q: the refresh sends no share request", got, wantAPI)
+				}
+				if offer.checks != 1 {
+					t.Errorf("asked whether the request is offered %d times, want once, for the first link", offer.checks)
 				}
 				stderr := run.result.stderr.String()
 				if strings.Count(stderr, "UNVERIFIED publisher") != 1 {
@@ -1616,7 +1632,154 @@ func TestGetRefreshesALinkGivenForTheCRIDAlone(t *testing.T) {
 				if strings.Count(stderr, msgSessionDurationNotApplied) != 1 {
 					t.Errorf("stderr = %q, want the session-duration note once", stderr)
 				}
+				if !device {
+					mustNotExistCmd(t, stateDir)
+				}
 			})
+		}
+	}
+}
+
+// TestGetRefreshStaysWithTheCRIDAlone pins the second row of the refresh
+// table in get_crid_link.go for the case it was written for. The first link
+// of a download was given for the CRID alone, after the share request said
+// "not found". The link expires before any byte is served, and the download
+// asks again.
+//
+// Here the share route fails if it is asked a second time, with an answer
+// that is not "not found": the service is unavailable. When get decided
+// again at every refresh where its link comes from, it sent the share
+// request again, and that failure ended a download which links for the CRID
+// alone were serving. Now the run remembers where its link came from. The
+// download completes, the share route is asked exactly once, and the reader
+// is still told once that --session-duration was not applied.
+//
+// The answer at the refresh is final, whatever it is: a refusal is reported
+// as that refusal, with the hint that fits the machine, and no share request
+// follows it either.
+func TestGetRefreshStaysWithTheCRIDAlone(t *testing.T) {
+	state := bootstrapRegisteredState(t)
+	// shareNotFoundThenUnavailable answers the first share request "not
+	// found" and every later one "unavailable". The later answers are queued
+	// more than once, so a request that is sent again is counted too.
+	shareNotFoundThenUnavailable := func(t *testing.T, srv *apitest.Server) {
+		t.Helper()
+		srv.Script(http.MethodPost, shareRoute(srv), apitest.HandlerNotFound404(t, "resource_not_found"))
+		srv.ScriptRepeat(http.MethodPost, shareRoute(srv), 3, apitest.HandlerDark503(t))
+	}
+	downloads := func() []shareMode {
+		var modes []shareMode
+		for _, mode := range getModes() {
+			if mode.downloads {
+				modes = append(modes, mode)
+			}
+		}
+		return modes
+	}
+
+	for _, mode := range downloads() {
+		t.Run("the share request would fail/"+mode.name, func(t *testing.T) {
+			srv := downloadServer(t)
+			srv.Script(http.MethodGet, apitest.DownloadPath, handlerGone)
+			shareNotFoundThenUnavailable(t, srv)
+			requests := &linkRequests{link: issuedLink(srv.URL + apitest.DownloadPath)}
+
+			configure := func(args []string) *runOpts {
+				return withLinkRequests(enrolledDevice(t, state), requests.answer)(append(args, "--session-duration", "5m"))
+			}
+			run := runShareMode(t, srv, srv.URL, mode, configure)
+			run.mustHaveDelivered(t, mode)
+
+			if got := len(shareRequests(srv)); got != 1 {
+				t.Errorf("the share request was sent %d times, want once: the refresh must not send it again", got)
+			}
+			if len(requests.asked) != 2 {
+				t.Errorf("asked with the CRID alone %d times, want twice: once, and once for the refresh", len(requests.asked))
+			}
+			stderr := run.result.stderr.String()
+			if strings.Count(stderr, msgSessionDurationNotApplied) != 1 {
+				t.Errorf("stderr = %q, want the session-duration note once", stderr)
+			}
+			if strings.Count(stderr, "UNVERIFIED publisher") != 1 {
+				t.Errorf("stderr = %q, want the publisher notice once", stderr)
+			}
+		})
+	}
+
+	for _, tc := range []struct {
+		name string
+		// refusal is the answer to the request at the refresh.
+		refusal  error
+		wantCode int
+		// golden and goldenNoDevice name the stderr golden the output must
+		// end with, as in answerRow.
+		golden, goldenNoDevice string
+	}{
+		{
+			name: "unavailable", refusal: sdkRefusal(qurl.ErrCRIDLinkUnavailable, "52601"),
+			wantCode: exitcode.Unavailable, golden: "error_get_crid_unavailable",
+		},
+		{
+			name: "not found", refusal: sdkRefusal(qurl.ErrCRIDLinkNotFound, "52602"),
+			wantCode: exitcode.NotFound, golden: "error_get_crid_notfound", goldenNoDevice: "error_get_crid_notfound_no_device",
+		},
+		{
+			// Not an answer the SDK gives at a refresh: it asked for this
+			// same CRID a moment earlier. If it ever does, the reader gets
+			// the message for a CRID this client cannot ask for, and not an
+			// internal error.
+			name: "CRID this client cannot ask for", refusal: errCRIDVersionTheSDKCannotCheck,
+			wantCode: exitcode.Config, golden: "error_get_crid_version",
+		},
+	} {
+		for _, device := range []bool{true, false} {
+			for _, mode := range downloads() {
+				t.Run(fmt.Sprintf("the refresh is refused/%s/device=%t/%s", tc.name, device, mode.name), func(t *testing.T) {
+					srv := downloadServer(t)
+					srv.Script(http.MethodGet, apitest.DownloadPath, handlerGone)
+					stateDir := filepath.Join(t.TempDir(), "no-device-state")
+					machine := machineWithNoIdentity(t, stateDir)
+					wantShares, golden := 0, tc.golden
+					if device {
+						machine = enrolledDevice(t, state)
+						shareNotFoundThenUnavailable(t, srv)
+						wantShares = 1
+					} else if tc.goldenNoDevice != "" {
+						golden = tc.goldenNoDevice
+					}
+					first := &linkRequests{link: issuedLink(srv.URL + apitest.DownloadPath)}
+					asks := 0
+					answer := func(ctx context.Context, resourceCRID string) (*qurl.CRIDLink, error) {
+						asks++
+						if asks == 1 {
+							return first.answer(ctx, resourceCRID)
+						}
+						return nil, tc.refusal
+					}
+
+					run := runShareMode(t, srv, srv.URL, mode, withLinkRequests(machine, answer))
+					stderr := run.result.stderr.String()
+					if run.result.code != tc.wantCode {
+						t.Fatalf("exit = %d, want %d; stderr: %s", run.result.code, tc.wantCode, stderr)
+					}
+					run.mustNotHaveActed(t)
+					if want := goldenBytes(t, golden+".plain.stderr.golden"); !strings.HasSuffix(stderr, want) {
+						t.Errorf("stderr = %q, want it to end with the golden %q", stderr, want)
+					}
+					if strings.Contains(stderr, errCRIDNotRequestable.Error()) {
+						t.Errorf("stderr %q carries an error that must not leave get_crid_link.go", stderr)
+					}
+					if asks != 2 {
+						t.Errorf("asked with the CRID alone %d times, want twice and no retry", asks)
+					}
+					if got := len(shareRequests(srv)); got != wantShares {
+						t.Errorf("the share request was sent %d times, want %d: a refusal at the refresh is final", got, wantShares)
+					}
+					if !device {
+						mustNotExistCmd(t, stateDir)
+					}
+				})
+			}
 		}
 	}
 }

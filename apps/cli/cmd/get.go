@@ -136,19 +136,21 @@ func runGet(ctx context.Context, opts *globalOpts, operand string, flags getFlag
 
 	// mint requests a share link and verifies it; every path below — the
 	// browser launch, the download, and the mid-download retry — goes
-	// through it, so nothing ever acts on an unverified answer. linkForGet
-	// decides where the link comes from; what happens to it afterwards does
-	// not depend on that.
+	// through it, so nothing ever acts on an unverified answer. links
+	// decides where each link of this run comes from; what happens to a
+	// link afterwards does not depend on that.
 	var shareLink *qurlapi.ShareLink
+	links := opts.linkSourceForGet(assessment, qurlapi.ShareOptions{SessionDurationSeconds: int(flags.sessionDuration / time.Second)})
 	noteSessionDuration := sessionDurationNoteOnce(printer, flags.sessionDuration)
 	mint := func(ctx context.Context) (string, error) {
-		result, byCRIDAlone, err := opts.linkForGet(ctx, assessment, qurlapi.ShareOptions{SessionDurationSeconds: int(flags.sessionDuration / time.Second)})
+		result, byCRIDAlone, err := links.next(ctx)
 		if err != nil {
 			return "", err
 		}
 		if err := opts.verifyLink(ctx, result.QURL, assessment.Input); err != nil {
 			return "", err
 		}
+		links.verified(byCRIDAlone)
 		noteSessionDuration(byCRIDAlone)
 		shareLink = result
 		return result.QURL, nil
