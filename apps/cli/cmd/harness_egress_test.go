@@ -133,7 +133,7 @@ func TestHarnessRefusesRequestsThatLeaveThisMachine(t *testing.T) {
 
 // TestHarnessGuardIsTheDefault holds the wiring, not the guard: an invocation
 // that names no guard sends through one all the same, and only a live journey
-// keeps the production client. The client is read back from the command
+// in a binary built for live journeys keeps the production client. The client is read back from the command
 // tree's own options, so removing the harness's default fails here.
 func TestHarnessGuardIsTheDefault(t *testing.T) {
 	// version sends nothing, so the default guard has nothing to report.
@@ -169,10 +169,12 @@ func TestHarnessGuardIsTheDefault(t *testing.T) {
 		t.Fatalf("reports = %q, handed on = %d; want one report naming POST /v1/resources and nothing sent", reports, next.sent.Load())
 	}
 
-	// version reads no settings and builds no client, so this is safe to run
-	// with the production client in the default build.
-	if live := runCLI(t, &runOpts{args: []string{"version"}, realOpener: true}); live.httpClient != nil {
-		t.Fatalf("a live journey sends with %T, want the production client", live.httpClient.Transport)
+	// Only a binary built with the live journeys lets an invocation keep the
+	// production client; in the default build the option cannot remove the
+	// guard. version builds no client, so this sends nothing in either build.
+	live := runCLI(t, &runOpts{args: []string{"version"}, realOpener: true})
+	if kept := live.httpClient == nil; kept != liveJourneysBuilt {
+		t.Fatalf("realOpener kept the production client = %v, want %v (live journeys built)", kept, liveJourneysBuilt)
 	}
 }
 

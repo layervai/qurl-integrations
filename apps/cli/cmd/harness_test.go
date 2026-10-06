@@ -121,8 +121,9 @@ type runOpts struct {
 	enterPortalGrant func(ctx context.Context, link string) (consume.AccessGrant, error)
 	// realOpener keeps the production access opener and the production HTTP
 	// client in place instead of the refusing fakes. Only the clisandbox-tagged
-	// live suite sets it to send; the harness's own wiring test sets it on a
-	// command that sends nothing.
+	// live suite sets it to send. The production HTTP client additionally
+	// needs that build tag: in the default build this option leaves the guard
+	// in place.
 	realOpener bool
 	// egress replaces the HTTP boundary every API client sends through; nil
 	// means a guard that fails this test on a request to any host other than
@@ -278,9 +279,10 @@ func runCLI(t *testing.T, o *runOpts) *runResult {
 		switch {
 		case o.egress != nil:
 			g.httpClient = o.egress.client()
-		case o.realOpener:
+		case o.realOpener && liveJourneysBuilt:
 			// nil is the production default: a live journey names a real
-			// endpoint on purpose.
+			// endpoint on purpose. The build tag is part of the condition so
+			// that no test in the default build can switch the guard off.
 		default:
 			g.httpClient = newEgressGuard(t).client()
 		}
