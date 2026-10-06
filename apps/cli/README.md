@@ -941,6 +941,10 @@ added key must be on the returned list, and no removed key may be. A service
 that cannot add or remove single grants yet fails that check with exit code
 10 and nothing on stdout; `qurl grants <CRID>` then shows the list as it is.
 
+When several changes to one resource arrive together, the service can answer
+that this one lost to the others (exit code 11). Nothing was changed, and the
+command does not send it again on its own: run it again.
+
 Earlier releases replaced the complete list with
 `qurl grants <CRID> --allow-device-key <public-key>`. That form is removed and
 is now a usage error that names `--add`, so a grant the command did not name

@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/layervai/qurl-integrations/apps/cli/internal/apitest"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/exitcode"
@@ -401,5 +402,41 @@ func TestGrantsCopyTeachesAddAndRemove(t *testing.T) {
 	}
 	if strings.Contains(strings.ToLower(help), "replace") {
 		t.Errorf("grants help still describes replacing the list:\n%s", res.stdout.String())
+	}
+}
+
+// TestGrantsEditThatLostToOtherWritersIsUnavailableAndNotRetried pins the
+// answer the service gives when a change to single grants lost every attempt
+// against other changes to the same resource: HTTP 503 with a short
+// Retry-After, and nothing changed. The command reports it with the
+// unavailable exit code and the service's own text, prints nothing on stdout,
+// and sends the request exactly once: sending it again is the caller's
+// decision.
+func TestGrantsEditThatLostToOtherWritersIsUnavailableAndNotRetried(t *testing.T) {
+	const detail = "The device grants were being changed by other requests. Nothing was changed; send the request again."
+	for _, flags := range [][]string{{"--add", grantKey(3)}, {"--remove", grantKey(1)}, {"--add", grantKey(3), "--remove", grantKey(1)}} {
+		for _, mode := range [][]string{nil, {"-o", "json"}, {"--quiet"}} {
+			t.Run(fmt.Sprintf("%v/%v", flags, mode), func(t *testing.T) {
+				srv := apitest.NewServer(t)
+				srv.SetResourceAccess(true, grantKey(1))
+				srv.ScriptRepeat(http.MethodPatch, "/v1/resources/"+srv.Key.CRID, 3, func(w http.ResponseWriter, _ *http.Request) {
+					w.Header().Set("Retry-After", "1")
+					apitest.WriteProblem(t, w, http.StatusServiceUnavailable, "service_unavailable", "Service Unavailable", detail)
+				})
+				var sleeps []time.Duration
+				args := append([]string{"--endpoint", srv.URL, "grants", srv.Key.CRID}, flags...)
+				res := runCLI(t, &runOpts{args: append(args, mode...), sleeps: &sleeps})
+				if res.code != exitcode.Unavailable {
+					t.Fatalf("exit = %d, want %d; stderr: %s", res.code, exitcode.Unavailable, res.stderr.String())
+				}
+				mustEmptyStdout(t, res)
+				if !strings.Contains(res.stderr.String(), detail) || !strings.Contains(res.stderr.String(), "HTTP 503") {
+					t.Fatalf("stderr does not carry the service's text: %s", res.stderr.String())
+				}
+				if got := len(srv.Requests()); got != 1 || len(sleeps) != 0 {
+					t.Fatalf("the change was sent %d times with %d waits, want once and no wait", got, len(sleeps))
+				}
+			})
+		}
 	}
 }
