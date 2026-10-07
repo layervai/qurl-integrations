@@ -97,11 +97,12 @@ func CustomerMessages() []string {
 }
 
 // msgGrantEditUnconfirmed is shown when the answer to an add or remove of
-// single device grants does not show the change. A service from before those
-// requests ignores them and returns the list as it was, so that is the cause
-// the message names. It claims nothing about the list: the command to read it
-// is the next step.
-const msgGrantEditUnconfirmed = "this service cannot add or remove single device grants yet: its answer does not show the change that was asked for. Run `qurl grants <CRID>` to see the list as it is now"
+// single device grants does not show the change. It says what is known first:
+// the answer does not show the change. Why is not known. A service from
+// before those requests ignores them and returns the list as it was, so that
+// is named as what may be the cause, not as the cause. The message claims
+// nothing about the list: the command to read it is the next step.
+const msgGrantEditUnconfirmed = "the service's answer does not show the change that was asked for. The service may not support adding or removing single device grants yet. Run `qurl grants <CRID>` to see the list as it is now"
 
 // grantEditError is an answer to an add or remove of device grants that does
 // not show the change. It is an answer outside the contract, so it matches

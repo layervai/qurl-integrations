@@ -106,14 +106,8 @@ ready to hand out or open, and reports the publisher in one line on stderr.
 
 // applyCRIDGuards requires a valid CRID and applies the environment guard.
 func applyCRIDGuards(printer *output.Printer, assessment *cridux.Assessment, productionEndpoint, yes bool) error {
-	if assessment.Kind != cridux.KindCRID {
-		if assessment.Kind == cridux.KindResourceKey {
-			return exitcode.InvalidInputError("public keys are verification data; use the resource's CRID", cridux.ErrUnusableID)
-		}
-		if len(assessment.Warnings) > 0 {
-			return exitcode.InvalidInputError(strings.Join(assessment.Warnings, " "), cridux.ErrUnusableID)
-		}
-		return errValidCRIDRequired()
+	if err := requireCRID(assessment); err != nil {
+		return err
 	}
 	warning, err := cridux.EnvironmentGuard(assessment.CRID.Environment(), productionEndpoint, yes)
 	if err != nil {
@@ -123,6 +117,22 @@ func applyCRIDGuards(printer *output.Printer, assessment *cridux.Assessment, pro
 		printer.Warnf("%s", warning)
 	}
 	return nil
+}
+
+// requireCRID refuses an operand that is not a CRID, with the most specific
+// reason the assessment has. It is the whole guard for a command that only
+// reads a resource: the environment guard is for a request that acts on one.
+func requireCRID(assessment *cridux.Assessment) error {
+	if assessment.Kind == cridux.KindCRID {
+		return nil
+	}
+	if assessment.Kind == cridux.KindResourceKey {
+		return exitcode.InvalidInputError("public keys are verification data; use the resource's CRID", cridux.ErrUnusableID)
+	}
+	if len(assessment.Warnings) > 0 {
+		return exitcode.InvalidInputError(strings.Join(assessment.Warnings, " "), cridux.ErrUnusableID)
+	}
+	return errValidCRIDRequired()
 }
 
 // errValidCRIDRequired is the refusal for an operand that is not a CRID this

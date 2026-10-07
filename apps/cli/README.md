@@ -947,7 +947,7 @@ qurl grants <CRID> --clear
 | `--add <public-key>` | Allow a device (repeatable) |
 | `--remove <public-key>` | Take a device off the list (repeatable) |
 | `--clear` | Take every device off the list |
-| `--yes` | Proceed without confirmation when sending a test CRID to production |
+| `--yes` | Proceed without confirmation when a change is sent for a test CRID to production. Reading the list never needs it |
 
 `--add` and `--remove` can be used in one command, which is applied as one
 change. A public key that is already on the list, or already off it, is left
@@ -955,10 +955,16 @@ as it is, so a command can be repeated safely. Every change prints the
 complete list that results. The same public key cannot be given to both
 flags, and `--clear` cannot be combined with either.
 
+A list holds at most 256 devices. `--add` and `--remove` each take at most 256
+public keys in one command, which is checked before anything is sent. The
+limit on the list that results is the service's: it refuses a change that
+would leave more than 256 devices, and the list stays as it was.
+
 The command checks the service's answer before it reports a change: every
-added key must be on the returned list, and no removed key may be. A service
-that cannot add or remove single grants yet fails that check with exit code
-10 and nothing on stdout; `qurl grants <CRID>` then shows the list as it is.
+added key must be on the returned list, and no removed key may be. An answer
+that does not show the change fails that check with exit code 10 and nothing
+on stdout. A service that cannot add or remove single grants yet answers that
+way; `qurl grants <CRID>` then shows the list as it is.
 
 Earlier releases replaced the complete list with
 `qurl grants <CRID> --allow-device-key <public-key>`. That form is removed and

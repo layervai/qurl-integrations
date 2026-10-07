@@ -1603,7 +1603,7 @@ func TestEditDeviceGrantsSendsOnlyTheEdit(t *testing.T) {
 // TestEditDeviceGrantsRequiresTheAnswerToShowTheChange pins the check on the
 // answer: every added key on the returned list, no removed key on it. An
 // older service that ignores the request and returns the list as it was
-// fails that check, with the message that names the cause.
+// fails that check, with the message that says what is known.
 func TestEditDeviceGrantsRequiresTheAnswerToShowTheChange(t *testing.T) {
 	for _, test := range []struct {
 		name        string
@@ -1642,8 +1642,8 @@ func TestEditDeviceGrantsRequiresTheAnswerToShowTheChange(t *testing.T) {
 				t.Fatalf("an answer that does not show the change returned %+v, %v", resource, err)
 			}
 			var shown interface{ UserMessage() string }
-			if !errors.As(err, &shown) || shown.UserMessage() != msgGrantEditUnconfirmed || !strings.Contains(err.Error(), "this service cannot add or remove single device grants yet") {
-				t.Fatalf("error = %q, want the message that names the cause", err)
+			if !errors.As(err, &shown) || shown.UserMessage() != msgGrantEditUnconfirmed || err.Error() != msgGrantEditUnconfirmed {
+				t.Fatalf("error = %q, want the unconfirmed-change message", err)
 			}
 		})
 	}

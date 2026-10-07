@@ -26,6 +26,11 @@ one command, which is applied as one change. A public key that is already on
 the list, or already off it, is left as it is, so the command can be repeated
 safely. --clear takes every device off the list.
 
+A list holds at most 256 devices. --add and --remove each take at most 256
+public keys in one command, which is checked before anything is sent. The
+limit on the list that results is the service's: it refuses a change that
+would leave more than 256 devices, and the list stays as it was.
+
 Run "qurl whoami -o json" on a recipient's device to find its public key. To
 set the first list when you publish, use "qurl publish --allow-device-key".
 
@@ -46,7 +51,16 @@ their own expiry.`,
 			if err != nil {
 				return err
 			}
-			if err := applyCRIDGuards(opts.printer(), assessment, opts.productionEndpoint(), yes); err != nil {
+			// Reading the list sends nothing that acts on the resource, so
+			// like status and inspect it needs no confirmation for a test
+			// CRID on a production endpoint. A change does.
+			changes := clearGrants || len(add)+len(remove) > 0
+			if !changes {
+				err = requireCRID(assessment)
+			} else {
+				err = applyCRIDGuards(opts.printer(), assessment, opts.productionEndpoint(), yes)
+			}
+			if err != nil {
 				return err
 			}
 			client, err := opts.newClient(cmd.Context())
@@ -77,7 +91,7 @@ their own expiry.`,
 	cmd.Flags().StringArrayVar(&add, "add", nil, "public key of a device to allow (repeatable)")
 	cmd.Flags().StringArrayVar(&remove, "remove", nil, "public key of a device to take off the list (repeatable)")
 	cmd.Flags().BoolVar(&clearGrants, "clear", false, "take every device off the list")
-	cmd.Flags().BoolVar(&yes, "yes", false, "allow a test CRID on a production endpoint")
+	cmd.Flags().BoolVar(&yes, "yes", false, "allow a change to a test CRID on a production endpoint; reading the list never needs it")
 	// --allow-device-key replaced the complete list here. It is still parsed,
 	// hidden, so that a command from earlier documentation gets a usage error
 	// that names --add instead of "unknown flag", and never replaces a list.
