@@ -178,15 +178,21 @@ func TestPublishRequiresTheAnswerToConfirmAccessRequests(t *testing.T) {
 	}
 }
 
-// TestPublishConflictWithAccessRequestsIsAboutPrivacy pins the reading of a
-// refusal when the request turned access requests on. The service never
-// refuses a create over that setting, so the refusal is about privacy, with
-// the privacy-mismatch code and with the older wording alike: the target is
-// already published as public.
-func TestPublishConflictWithAccessRequestsIsAboutPrivacy(t *testing.T) {
-	for _, test := range []struct{ code, detail string }{
-		{code: "invalid_input", detail: apitest.LegacyAccessSettingsDetail},
-		{code: apitest.CodePrivacyMismatch, detail: "d"},
+// TestPublishWithAccessRequestsOfAPublicTargetIsAConflict pins a publish that
+// asks for access requests when the target is already published as public.
+// Access requests are for a private resource, so the publisher named a
+// privacy: the refusal stands, and no second create is ever sent to keep the
+// public resource, whatever else the caller set. The service never refuses a
+// create over the access-request setting itself, so the conflict is read as
+// for any request: the privacy-mismatch code means the target is published
+// as public, and the older answer does not say what differs.
+func TestPublishWithAccessRequestsOfAPublicTargetIsAConflict(t *testing.T) {
+	for _, test := range []struct {
+		code, detail string
+		want         ExistingAccess
+	}{
+		{code: "invalid_input", detail: apitest.LegacyAccessSettingsDetail, want: ExistingAccessUnknown},
+		{code: apitest.CodePrivacyMismatch, detail: "d", want: ExistingAccessPublic},
 	} {
 		srv := apitest.NewServer(t)
 		srv.Script(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
@@ -194,26 +200,31 @@ func TestPublishConflictWithAccessRequestsIsAboutPrivacy(t *testing.T) {
 		})
 		_, err := newTestClient(t, srv, nil).Publish(t.Context(), "https://example.com/data", PublishOptions{AllowRequests: true})
 		var conflict *PublishAccessConflictError
-		if !errors.As(err, &conflict) || conflict.Existing != ExistingAccessPublic {
-			t.Fatalf("code %q: error = %v, want a conflict with a public resource", test.code, err)
+		if !errors.As(err, &conflict) || conflict.Existing != test.want {
+			t.Fatalf("code %q: error = %v, want conflict %d", test.code, err, test.want)
 		}
 	}
-	// The mock of the service itself: the target is already published as
-	// public. The conflict stands, and nothing is changed on that resource.
+	// The mock of the service itself, and of an older one. KeepExistingPublic
+	// is set as well, as a caller that did not count the flag would set it:
+	// the request still asked for access requests, so nothing is kept.
 	for _, older := range []bool{false, true} {
-		srv := apitest.NewServer(t)
-		if older {
-			srv.PlayPublicByDefault()
-		}
-		srv.SetResourceAccess(false)
-		srv.SetPublishFoundExisting(true)
-		result, err := newTestClient(t, srv, nil).Publish(t.Context(), "https://example.com/data", PublishOptions{AllowRequests: true})
-		var conflict *PublishAccessConflictError
-		if result != nil || !errors.As(err, &conflict) || conflict.Existing != ExistingAccessPublic {
-			t.Fatalf("older %t: publish = %+v, %v, want a conflict with a public resource", older, result, err)
-		}
-		if lines := requestLines(srv); !slices.Equal(lines, []string{"POST /v1/resources"}) {
-			t.Fatalf("older %t: requests = %v, want the create alone", older, lines)
+		for _, keep := range []bool{false, true} {
+			srv := apitest.NewServer(t)
+			want := ExistingAccessPublic
+			if older {
+				srv.PlayPublicByDefault()
+				want = ExistingAccessUnknown
+			}
+			srv.SetResourceAccess(false)
+			srv.SetPublishFoundExisting(true)
+			result, err := newTestClient(t, srv, nil).Publish(t.Context(), "https://example.com/data", PublishOptions{AllowRequests: true, KeepExistingPublic: keep})
+			var conflict *PublishAccessConflictError
+			if result != nil || !errors.As(err, &conflict) || conflict.Existing != want {
+				t.Fatalf("older %t, keep %t: publish = %+v, %v, want conflict %d", older, keep, result, err, want)
+			}
+			if lines := requestLines(srv); !slices.Equal(lines, []string{"POST /v1/resources"}) {
+				t.Fatalf("older %t, keep %t: requests = %v, want the create alone", older, keep, lines)
+			}
 		}
 	}
 }

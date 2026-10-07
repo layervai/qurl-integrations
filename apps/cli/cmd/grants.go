@@ -38,6 +38,11 @@ its own change, made before any change to public keys. A device id that is
 not on the list is an error and removes nothing, so a mistyped id is never
 mistaken for access taken away.
 
+A list holds at most 256 devices. --add and --remove each take at most 256
+public keys in one command, which is checked before anything is sent. The
+limit on the list that results is the service's: it refuses a change that
+would leave more than 256 devices, and the list stays as it was.
+
 Run "qurl whoami -o json" on a recipient's device to find its public key. To
 set the first list when you publish, use "qurl publish --allow-device-key".
 People are approved with "qurl approve", after "qurl requests" shows who asked.
@@ -64,7 +69,16 @@ issued keep their own expiry.`,
 			if err != nil {
 				return err
 			}
-			if err := applyCRIDGuards(opts.printer(), assessment, opts.productionEndpoint(), yes); err != nil {
+			// Reading the list sends nothing that acts on the resource, so
+			// like status and inspect it needs no confirmation for a test
+			// CRID on a production endpoint. A change does.
+			changes := clearGrants || len(add)+len(remove) > 0
+			if !changes {
+				err = requireCRID(assessment)
+			} else {
+				err = applyCRIDGuards(opts.printer(), assessment, opts.productionEndpoint(), yes)
+			}
+			if err != nil {
 				return err
 			}
 			client, err := opts.newClient(cmd.Context())
@@ -103,7 +117,7 @@ issued keep their own expiry.`,
 	cmd.Flags().StringArrayVar(&add, "add", nil, "public key of a device to allow (repeatable)")
 	cmd.Flags().StringArrayVar(&remove, "remove", nil, "public key of a device, or device id of an approved person, to take off the list (repeatable)")
 	cmd.Flags().BoolVar(&clearGrants, "clear", false, "take every public key off the list; approved people stay")
-	cmd.Flags().BoolVar(&yes, "yes", false, "allow a test CRID on a production endpoint")
+	cmd.Flags().BoolVar(&yes, "yes", false, "allow a change to a test CRID on a production endpoint; reading the list never needs it")
 	// --allow-device-key replaced the complete list here. It is still parsed,
 	// hidden, so that a command from earlier documentation gets a usage error
 	// that names --add instead of "unknown flag", and never replaces a list.

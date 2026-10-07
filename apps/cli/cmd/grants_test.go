@@ -222,10 +222,13 @@ func TestGrantsFailWhenTheAnswerDoesNotShowTheChange(t *testing.T) {
 					t.Fatalf("exit = %d, want %d; stdout %q stderr %q", res.code, exitcode.ServerError, res.stdout.String(), res.stderr.String())
 				}
 				mustEmptyStdout(t, res)
-				for _, want := range []string{"this service cannot add or remove single device grants yet", "Run `qurl grants <CRID>` to see the list as it is now"} {
-					if !strings.Contains(res.stderr.String(), want) {
-						t.Errorf("stderr lacks %q: %s", want, res.stderr.String())
-					}
+				// What is known comes first, then what may be the cause, then
+				// the next step. No cause is stated as the cause.
+				const want = "Error: the service's answer does not show the change that was asked for. " +
+					"The service may not support adding or removing single device grants yet. " +
+					"Run `qurl grants <CRID>` to see the list as it is now\n"
+				if res.stderr.String() != want {
+					t.Errorf("stderr = %q, want %q", res.stderr.String(), want)
 				}
 			})
 		}

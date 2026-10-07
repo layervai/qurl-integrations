@@ -324,32 +324,42 @@ func TestPublishSaysWhoCanOpenTheResource(t *testing.T) {
 }
 
 // TestPublishAccessConflictRendering pins what a publisher reads when the
-// target is already published with other access settings, for the code the
-// service sends and for the answer of an older service: what exists, the one
-// next step, and the request id. The exit code is the Conflict row for every
-// case, and the service's own wording, which is about request fields, never
-// reaches the terminal.
+// target is already published with other access settings: what exists, the
+// one next step, and the request id. The privacy that exists is named only
+// for the service's privacy code, and the device list only for its device
+// code. The answer of an older service does not say what differs, so it gets
+// the sentence and the hint that name neither, whatever the request carried.
+// The exit code is the Conflict row for every case, and the service's own
+// wording, which is about request fields, never reaches the terminal.
 func TestPublishAccessConflictRendering(t *testing.T) {
+	const (
+		public  = "this target is already published as public, and privacy is fixed when a resource is first published"
+		private = "this target is already published as private, and privacy is fixed when a resource is first published"
+		devices = "this target is already published, and its allowed devices differ from the ones this command named"
+		neither = "this target is already published, and its privacy or its allowed devices differ from what this command asked for"
+	)
 	for _, tc := range []struct {
 		name            string
 		olderService    bool
 		existingPrivate bool
+		existingKeys    []string
 		opts            qurlapi.PublishOptions
 		headline        string
 		hint            string
 	}{
-		{name: "public exists", headline: "this target is already published as public, and privacy is fixed when a resource is first published", hint: hintPublishExistingPublic},
-		{name: "private exists", existingPrivate: true, opts: qurlapi.PublishOptions{Public: true}, headline: "this target is already published as private, and privacy is fixed when a resource is first published", hint: hintPublishExistingPrivate},
-		{name: "older service, public exists", olderService: true, headline: "this target is already published as public, and privacy is fixed when a resource is first published", hint: hintPublishExistingPublic},
-		{name: "older service, private exists", olderService: true, existingPrivate: true, opts: qurlapi.PublishOptions{Public: true}, headline: "this target is already published as private, and privacy is fixed when a resource is first published", hint: hintPublishExistingPrivate},
-		{name: "older service, a device list", olderService: true, opts: qurlapi.PublishOptions{AllowedDeviceKeys: []string{"recipient"}}, headline: "this target is already published, and its access settings differ from what this command asked for", hint: hintPublishAccessDiffers},
+		{name: "public exists", headline: public, hint: hintPublishExistingPublic},
+		{name: "private exists", existingPrivate: true, opts: qurlapi.PublishOptions{Public: true}, headline: private, hint: hintPublishExistingPrivate},
+		{name: "another device list", existingPrivate: true, existingKeys: []string{"stored"}, opts: qurlapi.PublishOptions{AllowedDeviceKeys: []string{"recipient"}}, headline: devices, hint: hintPublishOtherDevices},
+		{name: "older service, public exists", olderService: true, headline: neither, hint: hintPublishAccessDiffers},
+		{name: "older service, private exists", olderService: true, existingPrivate: true, opts: qurlapi.PublishOptions{Public: true}, headline: neither, hint: hintPublishAccessDiffers},
+		{name: "older service, a device list", olderService: true, opts: qurlapi.PublishOptions{AllowedDeviceKeys: []string{"recipient"}}, headline: neither, hint: hintPublishAccessDiffers},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv := apitest.NewServer(t)
 			if tc.olderService {
 				srv.PlayPublicByDefault()
 			}
-			srv.SetResourceAccess(tc.existingPrivate)
+			srv.SetResourceAccess(tc.existingPrivate, tc.existingKeys...)
 			srv.SetPublishFoundExisting(true)
 			client, err := qurlapi.New(&qurlapi.Config{BaseURL: srv.URL, APIKey: "lv_test_logincredential123456789", Version: "test"})
 			if err != nil {
@@ -371,12 +381,82 @@ func TestPublishAccessConflictRendering(t *testing.T) {
 		hintPublishExistingPublic:  {"run the command again with --public", "delete it with `qurl delete <CRID>`", "`qurl list` shows its CRID", "publish again"},
 		hintPublishExistingPrivate: {"run the command again without --public", "delete it with `qurl delete <CRID>`", "`qurl list` shows its CRID", "publish again"},
 		hintPublishAccessDiffers:   {"privacy is fixed when a resource is first published", "without --allow-device-key", "`qurl grants <CRID> --add <public-key>` or `--remove <public-key>`", "delete the resource and publish again"},
+		hintPublishOtherDevices:    {"does not change the allowed devices of a resource that exists", "without --allow-device-key", "`qurl grants <CRID> --add <public-key>` or `--remove <public-key>`"},
 	} {
 		for _, part := range parts {
 			if !strings.Contains(hint, part) {
 				t.Errorf("hint lost %q: %q", part, hint)
 			}
 		}
+	}
+	// A device list that differs is not about privacy, and its hint does not
+	// send the publisher to change it.
+	if strings.Contains(hintPublishOtherDevices, "--public") || strings.Contains(hintPublishOtherDevices, "delete") {
+		t.Errorf("the device-list hint talks about privacy: %q", hintPublishOtherDevices)
+	}
+}
+
+// TestPublishKeptPublicWarning pins the warning of a publish that named no
+// privacy and kept a target that was already published as public. It cannot
+// be dim or left out: in text mode it is in the document, after the Access
+// row and before the CRID line, which stays last; with JSON and --quiet it is
+// on stderr and the stdout documents keep their shape. It takes the place of
+// the note for a target that was already published, and it names the command
+// that makes the resource private, with the resource's own CRID in it.
+func TestPublishKeptPublicWarning(t *testing.T) {
+	t.Parallel()
+	const keptCRID = "qexamplecridofakeptpublicresource"
+	const warning = "Warning: this target was published as public before, and it stays public: anyone who has the CRID can open it. " +
+		"To make it private, delete it with `qurl delete " + keptCRID + "` and publish again; the new resource gets a new CRID.\n"
+	public, found := false, true
+	kept := func() *qurlapi.Published {
+		return &qurlapi.Published{
+			Private: &public, FoundExisting: &found, KeptPublic: true,
+			CRID: keptCRID, ResourceID: "rid", TargetURL: "https://example.com/data", Status: "active",
+		}
+	}
+	render := func(res *qurlapi.Published, format Format, quiet, color bool) (string, string) {
+		t.Helper()
+		var out, errBuf bytes.Buffer
+		if err := newTestPrinter(&out, &errBuf, format, quiet, color, false).Publish(res); err != nil {
+			t.Fatal(err)
+		}
+		return out.String(), errBuf.String()
+	}
+
+	text, stderr := render(kept(), FormatText, false, false)
+	want := "Already published\n\n" +
+		"  Target:  https://example.com/data\n" +
+		"  Access:  public — anyone who has the CRID can open it\n" +
+		"  Status:  active\n\n" +
+		warning + "\n" +
+		"CRID: " + keptCRID + "\n"
+	if text != want || stderr != "" {
+		t.Fatalf("publish text =\n%s\nstderr %q\nwant\n%s", text, stderr, want)
+	}
+	if strings.Contains(text, msgPublishFoundExisting) {
+		t.Fatalf("the already-published note is shown beside the warning:\n%s", text)
+	}
+	if colored, _ := render(kept(), FormatText, false, true); !strings.Contains(colored, ansiBold+ansiYellow+labelWarning) || strings.Contains(colored, ansiDim+"this target") {
+		t.Fatalf("the warning is not set off in a terminal: %q", colored)
+	}
+
+	document, stderr := render(kept(), FormatJSON, false, false)
+	if !strings.Contains(document, `"private": false`) || !strings.Contains(document, `"found_existing": true`) || strings.Contains(document, "Warning") || stderr != warning {
+		t.Fatalf("publish JSON = %s\nstderr %q, want the warning on stderr alone", document, stderr)
+	}
+	if quiet, stderr := render(kept(), FormatText, true, false); quiet != keptCRID+"\n" || stderr != warning {
+		t.Fatalf("--quiet = %q / %q", quiet, stderr)
+	}
+
+	// A public resource that was not kept this way gets no warning: the
+	// publisher asked for it with --public.
+	asked := kept()
+	asked.KeptPublic = false
+	text, _ = render(asked, FormatText, false, false)
+	_, stderr = render(asked, FormatJSON, false, false)
+	if strings.Contains(text, "Warning") || strings.Contains(stderr, "Warning") || !strings.Contains(text, msgPublishFoundExisting) {
+		t.Fatalf("a public resource that was asked for got the warning:\n%s%s", text, stderr)
 	}
 }
 

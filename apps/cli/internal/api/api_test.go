@@ -1434,11 +1434,13 @@ func TestPublishDoesNotDependOnTheServiceDefault(t *testing.T) {
 }
 
 // TestPublishAccessConflict pins how a publish refused because the target is
-// already published with other access settings is recognized: by the
-// privacy-mismatch code, and by the detail an older service sends. Both mean
-// the existing resource has the other privacy. The older answer is also what
-// a different device list gets, so with a list in the request it names
-// neither. Any other refusal stays the plain service problem.
+// already published with other access settings is recognized, and what the
+// conflict then says. The privacy-mismatch code means the existing resource
+// has the other privacy, and the device-list code means its list is another
+// one. The detail an older service sends covers both and says neither, so it
+// names nothing, whatever the request carried. Any other refusal stays the
+// plain service problem, including an invalid-input answer with some other
+// wording about device keys: only the older text is ever matched.
 func TestPublishAccessConflict(t *testing.T) {
 	const key = "recipient-public-key"
 	for _, test := range []struct {
@@ -1454,11 +1456,16 @@ func TestPublishAccessConflict(t *testing.T) {
 		{name: "code, public asked", status: 400, code: apitest.CodePrivacyMismatch, detail: "d", opts: PublishOptions{Public: true}, want: ExistingAccessPrivate},
 		{name: "code, with a device list", status: 400, code: apitest.CodePrivacyMismatch, detail: "d", opts: PublishOptions{AllowedDeviceKeys: []string{key}}, want: ExistingAccessPublic},
 		{name: "code in another case", status: 400, code: "PRIVACY_MISMATCH", detail: "d", want: ExistingAccessPublic},
-		{name: "older detail, private asked", status: 400, code: "invalid_input", detail: apitest.LegacyAccessSettingsDetail, want: ExistingAccessPublic},
-		{name: "older detail, public asked", status: 400, code: "invalid_input", detail: apitest.LegacyAccessSettingsDetail, opts: PublishOptions{Public: true}, want: ExistingAccessPrivate},
+		{name: "device code", status: 400, code: apitest.CodeDeviceKeysMismatch, detail: "d", opts: PublishOptions{AllowedDeviceKeys: []string{key}}, want: ExistingAccessOtherDevices},
+		{name: "device code in another case", status: 400, code: "Device_Keys_Mismatch", detail: "d", opts: PublishOptions{AllowedDeviceKeys: []string{key}}, want: ExistingAccessOtherDevices},
+		{name: "device code with the older detail", status: 400, code: apitest.CodeDeviceKeysMismatch, detail: apitest.LegacyAccessSettingsDetail, opts: PublishOptions{AllowedDeviceKeys: []string{key}}, want: ExistingAccessOtherDevices},
+		{name: "older detail, private asked", status: 400, code: "invalid_input", detail: apitest.LegacyAccessSettingsDetail, want: ExistingAccessUnknown},
+		{name: "older detail, public asked", status: 400, code: "invalid_input", detail: apitest.LegacyAccessSettingsDetail, opts: PublishOptions{Public: true}, want: ExistingAccessUnknown},
 		{name: "older detail, with a device list", status: 400, code: "invalid_input", detail: apitest.LegacyAccessSettingsDetail, opts: PublishOptions{AllowedDeviceKeys: []string{key}}, want: ExistingAccessUnknown},
 		{name: "another invalid input", status: 400, code: "invalid_input", detail: "target_url is not allowed", plain: true},
+		{name: "another wording about device keys", status: 400, code: "invalid_input", detail: "allowed_device_keys differ from the device keys this resource has", opts: PublishOptions{AllowedDeviceKeys: []string{key}}, plain: true},
 		{name: "the code on another status", status: 409, code: apitest.CodePrivacyMismatch, detail: "d", plain: true},
+		{name: "the device code on another status", status: 409, code: apitest.CodeDeviceKeysMismatch, detail: "d", plain: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			srv := apitest.NewServer(t)
@@ -1490,13 +1497,15 @@ func TestPublishAccessConflict(t *testing.T) {
 	}
 }
 
-// TestPublishAccessConflictSaysWhatExists pins the three sentences, each to
-// its case, so a refusal can never be shown with the other one's text.
+// TestPublishAccessConflictSaysWhatExists pins the four sentences, each to
+// its case, so a refusal can never be shown with another one's text.
 func TestPublishAccessConflictSaysWhatExists(t *testing.T) {
 	for existing, want := range map[ExistingAccess]string{
-		ExistingAccessPublic:  msgPublishExistingPublic,
-		ExistingAccessPrivate: msgPublishExistingPrivate,
-		ExistingAccessUnknown: msgPublishAccessDiffers,
+		ExistingAccessPublic:       msgPublishExistingPublic,
+		ExistingAccessPrivate:      msgPublishExistingPrivate,
+		ExistingAccessOtherDevices: msgPublishOtherDevices,
+		ExistingAccessUnknown:      msgPublishAccessDiffers,
+		ExistingAccess(99):         msgPublishAccessDiffers,
 	} {
 		if got := (&PublishAccessConflictError{Existing: existing}).Error(); got != want {
 			t.Errorf("existing %d: message %q, want %q", existing, got, want)
@@ -1504,6 +1513,12 @@ func TestPublishAccessConflictSaysWhatExists(t *testing.T) {
 	}
 	if !strings.Contains(msgPublishExistingPublic, "as public") || !strings.Contains(msgPublishExistingPrivate, "as private") {
 		t.Fatal("the two definite messages do not name the privacy that exists")
+	}
+	// The other two say nothing definite about privacy: the service did not.
+	for _, message := range []string{msgPublishOtherDevices, msgPublishAccessDiffers} {
+		if strings.Contains(message, "as public") || strings.Contains(message, "as private") {
+			t.Fatalf("a message for a conflict that does not name the privacy states one: %q", message)
+		}
 	}
 	if !errors.Is(&PublishAccessConflictError{}, ErrPublishAccessConflict) {
 		t.Fatal("a conflict without a service problem does not match its sentinel")
@@ -1588,7 +1603,7 @@ func TestEditDeviceGrantsSendsOnlyTheEdit(t *testing.T) {
 // TestEditDeviceGrantsRequiresTheAnswerToShowTheChange pins the check on the
 // answer: every added key on the returned list, no removed key on it. An
 // older service that ignores the request and returns the list as it was
-// fails that check, with the message that names the cause.
+// fails that check, with the message that says what is known.
 func TestEditDeviceGrantsRequiresTheAnswerToShowTheChange(t *testing.T) {
 	for _, test := range []struct {
 		name        string
@@ -1627,8 +1642,8 @@ func TestEditDeviceGrantsRequiresTheAnswerToShowTheChange(t *testing.T) {
 				t.Fatalf("an answer that does not show the change returned %+v, %v", resource, err)
 			}
 			var shown interface{ UserMessage() string }
-			if !errors.As(err, &shown) || shown.UserMessage() != msgGrantEditUnconfirmed || !strings.Contains(err.Error(), "this service cannot add or remove single device grants yet") {
-				t.Fatalf("error = %q, want the message that names the cause", err)
+			if !errors.As(err, &shown) || shown.UserMessage() != msgGrantEditUnconfirmed || err.Error() != msgGrantEditUnconfirmed {
+				t.Fatalf("error = %q, want the unconfirmed-change message", err)
 			}
 		})
 	}

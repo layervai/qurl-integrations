@@ -109,9 +109,10 @@ type AccountClient interface {
 type PublishOptions struct {
 	// Public asks for a resource that anyone who has its CRID can open. The
 	// zero value asks for a private one, limited to its owner and the devices
-	// in AllowedDeviceKeys. Publish states the choice in every create request
+	// in AllowedDeviceKeys. Publish states the choice in its create request
 	// and requires the answer to confirm it, so no caller depends on what a
-	// service does when the field is absent.
+	// service does when the field is absent. KeepExistingPublic is the one
+	// case with a second create that does not state it.
 	Public bool
 	// AllowedDeviceKeys is the first list of devices allowed on a private
 	// resource. It has no meaning for a public one.
@@ -121,6 +122,14 @@ type PublishOptions struct {
 	// meaning for a public resource, which the service refuses to combine
 	// with it.
 	AllowRequests bool
+	// KeepExistingPublic says that the publisher named no privacy at all, so
+	// the request asks for a private resource only because that is the
+	// default. If the target is then already published as public, Publish
+	// keeps using that resource instead of failing, and marks the result
+	// KeptPublic. A caller sets it only when nothing on its command line
+	// said who may open the resource. It has no effect together with Public,
+	// AllowedDeviceKeys or AllowRequests.
+	KeepExistingPublic bool
 	// ConnectorID selects a tunnel resource instead of a URL.
 	ConnectorID string
 	Description string
@@ -171,6 +180,10 @@ type Published struct {
 	// AccessRequestsTurnedOn reports that the target was already published
 	// with access requests off, and that this publish turned them on.
 	AccessRequestsTurnedOn bool
+	// KeptPublic reports that the target was already published as public and
+	// that this publish, which named no privacy, kept using that resource.
+	// Private is then false, and the caller warns the publisher.
+	KeptPublic bool
 	// LinkSiteURL is the resource's address on the link site, where a person
 	// with no CLI opens it. The service does not send it: the command sets it
 	// when this install knows that site for its deployment.

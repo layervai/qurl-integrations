@@ -77,8 +77,15 @@ access requests on for that resource.
 Where the deployment offers it, a public resource can also be opened by anyone
 who has its CRID. The deployment this release ships does not offer it yet.
 Privacy is set at creation and cannot be changed later. Publishing a target
-that is already published with the other privacy is refused: publish it the
-way it was first published, or delete it and publish again.
+again reuses its resource, with the privacy it has.
+
+If you published a target with a release that made resources public by
+default, that resource is still public. Publishing it again with no privacy
+flag keeps it, and warns you that it stays public. To make it private, delete
+it with "qurl delete <CRID>" and publish again; the new resource gets a new
+CRID. A flag that asks for what the existing resource is not is refused:
+--allow-device-key or --allow-requests for a public resource, --public for a
+private one.
 
 Authorized users open the resource with "qurl get <CRID>". The --quiet flag
 prints only the CRID. Use --foreground for CI or daemon debugging; that process
@@ -94,7 +101,10 @@ owns the share and turns it off when it exits.`,
 			if err := validatePublishAccessFlags(cmd, public, private, allowRequests, allowedDeviceKeys); err != nil {
 				return exitcode.UsageError(err)
 			}
-			access := qurlapi.PublishOptions{Public: public, AllowedDeviceKeys: allowedDeviceKeys, AllowRequests: allowRequests}
+			access := qurlapi.PublishOptions{
+				Public: public, AllowedDeviceKeys: allowedDeviceKeys, AllowRequests: allowRequests,
+				KeepExistingPublic: !publishNamesAccess(cmd),
+			}
 			target, err := classifyPublishTarget(args[0])
 			if err != nil {
 				return err
@@ -150,6 +160,23 @@ owns the share and turns it off when it exits.`,
 	cmd.Flags().BoolVar(&foreground, "foreground", false, "serve in this process for debugging or CI and stop sharing when it exits")
 
 	return cmd
+}
+
+// publishNamesAccess reports whether the command line said anything about
+// who may open the resource. A publish that said nothing asks for a private
+// resource only because that is the default, so it keeps a target that is
+// already published as public instead of failing: the person may have
+// published it while public was the default and never chose either. A flag
+// that was given, in any form, is a choice, and a resource that cannot be
+// given that way stays a conflict. Asking for access requests is such a
+// choice: they are for a private resource.
+func publishNamesAccess(cmd *cobra.Command) bool {
+	for _, name := range []string{"public", "private", "allow-device-key", "allow-requests"} {
+		if cmd.Flags().Changed(name) {
+			return true
+		}
+	}
+	return false
 }
 
 // validatePublishAccessFlags refuses flag combinations that contradict each
@@ -471,6 +498,7 @@ func prepareLocalPublishResource(
 	resolved.Private = precreated.Private
 	resolved.AccessRequests = precreated.AccessRequests
 	resolved.AccessRequestsTurnedOn = precreated.AccessRequestsTurnedOn
+	resolved.KeptPublic = precreated.KeptPublic
 	// The Connector request always finds the resource created just above, so
 	// its own answer cannot tell a first publish from a repeated one. The
 	// create answer can.
@@ -701,7 +729,7 @@ func printLocalPublishServing(opts *globalOpts, resolved *agent.ResolvedResource
 		CRID: local.CRID, ResourceID: local.ResourceID, TargetURL: local.TargetURL,
 		Status: "serving", FoundExisting: resolved.FoundExisting, Private: resolved.Private,
 		AccessRequests: resolved.AccessRequests, AccessRequestsTurnedOn: resolved.AccessRequestsTurnedOn,
-		LinkSiteURL: opts.resourceAddress(local.CRID),
+		KeptPublic: resolved.KeptPublic, LinkSiteURL: opts.resourceAddress(local.CRID),
 	}
 	if sharing != nil {
 		published.Publisher = sharing.Publisher

@@ -337,9 +337,10 @@ func TestCreateDefaultIsPrivateUnlessTheMockPlaysAnOlderService(t *testing.T) {
 
 // TestCreateThatFindsOtherAccessSettingsIsRefused pins the refusal for a
 // create that finds the existing resource with other access settings: the
-// privacy-mismatch code now, and before that code the invalid-input answer,
-// which a different device list gets too. A create that agrees with what
-// exists is answered with it.
+// privacy-mismatch code and the device-list code now, and before those codes
+// the one invalid-input answer for both. A create that agrees with what
+// exists is answered with it, and so is one that states no privacy, which
+// the service gives the resource as it is.
 func TestCreateThatFindsOtherAccessSettingsIsRefused(t *testing.T) {
 	const create = `{"type":"url","target_url":"https://example.com/data"%s}`
 	for _, test := range []struct {
@@ -353,9 +354,20 @@ func TestCreateThatFindsOtherAccessSettingsIsRefused(t *testing.T) {
 		{name: "same privacy", existingPrivate: true, stated: `,"private":true`},
 		{name: "private asked, public exists", stated: `,"private":true`, wantCode: CodePrivacyMismatch},
 		{name: "public asked, private exists", existingPrivate: true, stated: `,"private":false`, wantCode: CodePrivacyMismatch},
-		{name: "nothing stated, public exists", wantCode: CodePrivacyMismatch},
+		// A request that states no privacy is given the resource as it is,
+		// whichever privacy it has.
+		{name: "nothing stated, public exists"},
+		{name: "nothing stated, private exists", existingPrivate: true},
+		{name: "another device list", existingPrivate: true, existingKeys: []string{"a"}, stated: `,"private":true,"allowed_device_keys":["b"]`, wantCode: CodeDeviceKeysMismatch},
+		{name: "another device list, nothing else stated", existingPrivate: true, existingKeys: []string{"a"}, stated: `,"allowed_device_keys":["b"]`, wantCode: CodeDeviceKeysMismatch},
+		{name: "the same device list", existingPrivate: true, existingKeys: []string{"a", "b"}, stated: `,"private":true,"allowed_device_keys":["b","a"]`},
+		{name: "no device list stated, one exists", existingPrivate: true, existingKeys: []string{"a"}, stated: `,"private":true`},
+		// Privacy is what the refusal names when both differ.
+		{name: "another privacy and another device list", existingKeys: []string{"a"}, stated: `,"private":true,"allowed_device_keys":["b"]`, wantCode: CodePrivacyMismatch},
 		{name: "older service, same privacy", publicByDefault: true, existingPrivate: true, stated: `,"private":true`},
 		{name: "older service, nothing stated, public exists", publicByDefault: true},
+		// An older service reads an absent privacy as public, its default.
+		{name: "older service, nothing stated, private exists", publicByDefault: true, existingPrivate: true, wantCode: "invalid_input"},
 		{name: "older service, private asked, public exists", publicByDefault: true, stated: `,"private":true`, wantCode: "invalid_input"},
 		{name: "older service, another device list", publicByDefault: true, existingPrivate: true, existingKeys: []string{"a"}, stated: `,"private":true,"allowed_device_keys":["b"]`, wantCode: "invalid_input"},
 		{name: "older service, the same device list", publicByDefault: true, existingPrivate: true, existingKeys: []string{"a", "b"}, stated: `,"private":true,"allowed_device_keys":["b","a"]`},

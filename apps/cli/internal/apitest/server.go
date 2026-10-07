@@ -137,14 +137,16 @@ const (
 )
 
 // CodePrivacyMismatch is the problem code for a publish whose target is
-// already published with the other privacy.
+// already published with the other privacy, and CodeDeviceKeysMismatch the
+// one for a publish whose device list differs from the stored list.
 //
-// TODO(upstream-contract): mirrors the service's code for that refusal, HTTP
-// 400. LegacyAccessSettingsDetail is what a service from before the code
-// answers instead, in the detail of its generic invalid-input problem, for a
-// privacy difference and for a different device list alike.
+// TODO(upstream-contract): mirrors the service's codes for those refusals,
+// both HTTP 400. LegacyAccessSettingsDetail is what a service from before the
+// codes answers instead, in the detail of its generic invalid-input problem,
+// for a privacy difference and for a different device list alike.
 const (
 	CodePrivacyMismatch        = "privacy_mismatch"
+	CodeDeviceKeysMismatch     = "device_keys_mismatch"
 	LegacyAccessSettingsDetail = "existing resource access settings differ; update allowed_device_keys with PATCH or create a new resource for different privacy"
 )
 
@@ -514,13 +516,14 @@ func (s *Server) resourceRow() map[string]any {
 
 // handlePublish accepts URL creation and Connector find-or-create.
 //
-// A request that states no privacy gets the default of the service the mock
-// plays: private, or public after PlayPublicByDefault. A fresh create stores
-// what was asked for. A create that finds the existing resource
-// (SetPublishFoundExisting) returns it only when the request agrees with its
-// privacy and device list, and is refused otherwise, as the service does. A
-// different access-request setting is not a refusal: the answer carries the
-// setting the resource has.
+// A fresh create stores what was asked for; one that states no privacy gets
+// the default of the service the mock plays: private, or public after
+// PlayPublicByDefault. A create that finds the existing resource
+// (SetPublishFoundExisting) changes nothing. It is refused when it states a
+// privacy or a device list other than the resource's, and returns the
+// resource as it is otherwise, as the service does. A different
+// access-request setting is not a refusal: the answer carries the setting
+// the resource has.
 func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		AllowedDeviceKeys []string `json:"allowed_device_keys"`
@@ -567,17 +570,12 @@ func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
 	}
 	omitCRID := s.publishOmitCRID
 	s.mu.Unlock()
-	switch {
-	case requestsRefusal != "":
+	if requestsRefusal != "" {
 		WriteProblem(s.t, w, http.StatusBadRequest, codeInvalidInput, titleInvalidInput, requestsRefusal)
 		return
-	case refusal == "":
-	case refusal == CodePrivacyMismatch:
-		WriteProblem(s.t, w, http.StatusBadRequest, CodePrivacyMismatch, "Privacy Mismatch",
-			"this target is already published with the other privacy")
-		return
-	default:
-		WriteProblem(s.t, w, http.StatusBadRequest, refusal, titleInvalidInput, LegacyAccessSettingsDetail)
+	}
+	if refusal != "" {
+		s.writeCreateRefusal(w, refusal)
 		return
 	}
 	data := map[string]any{
@@ -597,35 +595,60 @@ func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
 	WriteEnvelope(s.t, w, http.StatusCreated, data, meta)
 }
 
+// writeCreateRefusal answers a create that applyCreateAccess refused. Each of
+// the service's two codes has its own problem; any other refusal is the
+// generic invalid-input problem an older service sends for both.
+func (s *Server) writeCreateRefusal(w http.ResponseWriter, refusal string) {
+	switch refusal {
+	case CodePrivacyMismatch:
+		WriteProblem(s.t, w, http.StatusBadRequest, CodePrivacyMismatch, "Privacy Mismatch",
+			"this target is already published with the other privacy")
+	case CodeDeviceKeysMismatch:
+		WriteProblem(s.t, w, http.StatusBadRequest, CodeDeviceKeysMismatch, "Device Keys Mismatch",
+			"this target is already published with another list of allowed devices")
+	default:
+		WriteProblem(s.t, w, http.StatusBadRequest, refusal, titleInvalidInput, LegacyAccessSettingsDetail)
+	}
+}
+
 // applyCreateAccess decides what a create request does to the access
 // settings of the mock's one resource, and returns the problem code of the
 // refusal, empty when the request is accepted. The caller holds s.mu.
 //
 // A fresh create stores the privacy that was stated, or the default of the
 // service the mock plays, and the device list. A create that finds the
-// existing resource changes nothing and must agree with it: the service
-// refuses another privacy with the privacy-mismatch code, and a service from
-// before that code refuses another privacy or another device list with its
-// invalid-input answer.
+// existing resource changes nothing.
+//
+// The service reuses that resource with the privacy it has when the request
+// states none, refuses a stated privacy that differs with the
+// privacy-mismatch code, and refuses a stated device list that differs with
+// the device-list code. A service from before those codes reads an absent
+// privacy as its default, public, and refuses another privacy or another
+// device list with its one invalid-input answer.
 func (s *Server) applyCreateAccess(stated *bool, allowedDeviceKeys []string) string {
-	private := !s.publicByDefault
-	if stated != nil {
-		private = *stated
-	}
 	if s.publishFoundExisting == nil || !*s.publishFoundExisting {
-		s.private = private
+		s.private = !s.publicByDefault
+		if stated != nil {
+			s.private = *stated
+		}
 		s.allowedDeviceKeys = append([]string(nil), allowedDeviceKeys...)
 		return ""
 	}
 	otherKeys := allowedDeviceKeys != nil && !sameKeys(allowedDeviceKeys, s.allowedDeviceKeys)
-	switch {
-	case s.publicByDefault && (private != s.private || otherKeys):
-		return "invalid_input"
-	case private != s.private:
-		return CodePrivacyMismatch
-	default:
+	if s.publicByDefault {
+		private := stated != nil && *stated
+		if private != s.private || otherKeys {
+			return codeInvalidInput
+		}
 		return ""
 	}
+	if stated != nil && *stated != s.private {
+		return CodePrivacyMismatch
+	}
+	if otherKeys {
+		return CodeDeviceKeysMismatch
+	}
+	return ""
 }
 
 // maxAllowedDeviceKeys is the most device keys one resource can list.

@@ -815,9 +815,13 @@ and for a remote URL alike. The text output says which it is in one row, and
 ```
 
 Privacy is set when a resource is first published and cannot be changed
-afterwards. Publishing a target that is already published with the other
-privacy is refused with exit code 7 and prints nothing on stdout: publish it
-the way it was first published, or delete it with `qurl delete <CRID>` and
+afterwards. Publishing a target again reuses its resource, with the privacy it
+has. A flag that asks for what that resource is not is refused with exit code
+7 and prints nothing on stdout: `--allow-device-key` or `--allow-requests` for
+a target that is published as public, `--public` for one that is private, and
+`--allow-device-key` with a list other than the one the resource has. The
+message says what to do: publish without that flag, change the allowed devices
+with `qurl grants`, or delete the resource with `qurl delete <CRID>` and
 publish again to get a new resource and a new CRID. `--allow-device-key` and
 `--allow-requests` cannot be combined with `--public`. See
 [Private CRIDs](#private-crids) for who can open each kind.
@@ -834,6 +838,21 @@ requests are now on for it."), in the document in text mode and on stderr with
 was, private, and the command fails with the reason and the command that tries
 again, `qurl requests <CRID> --on`, with the resource's CRID in it. For a
 target that is already published as public it is the exit code 7 above.
+
+**If you published with an earlier release.** Releases from before private
+became the default published a public resource unless you asked for a private
+one, and those resources are still public. `qurl publish` for such a target
+with no privacy flag keeps working: it returns the existing resource, shows
+the public `Access:` row, and warns you.
+
+```text
+Warning: this target was published as public before, and it stays public: anyone who has the CRID can open it. To make it private, delete it with `qurl delete <CRID>` and publish again; the new resource gets a new CRID.
+```
+
+The warning is part of the text output, and goes to stderr with `-o json` and
+`--quiet`; JSON says `private: false`. The resource stays as it is until you
+delete it. A publish never turns a public resource private, and it never makes
+a new public resource unless you pass `--public`.
 
 In either mode, the CRID is last and alone on its line; `--quiet` prints only
 the CRID. Publishing the same target again does not create a duplicate while
@@ -950,7 +969,7 @@ qurl grants <CRID> --clear
 | `--remove <public-key>` | Take a device off the list (repeatable) |
 | `--remove <device id>` | Take an approved person's access away; the id has the form `xxxx-xxxx-xxxx-xxxx` (repeatable) |
 | `--clear` | Take every public key off the list; approved people stay |
-| `--yes` | Proceed without confirmation when sending a test CRID to production |
+| `--yes` | Proceed without confirmation when a change is sent for a test CRID to production. Reading the list never needs it |
 
 `--add` and `--remove` can be used in one command, which is applied as one
 change. A public key that is already on the list, or already off it, is left
@@ -965,10 +984,16 @@ id is its own change, made before any change to public keys in the same
 command. A device id that is not on the list is an error (exit code 5) and
 removes nothing, so a mistyped id is never mistaken for access taken away.
 
+A list holds at most 256 devices. `--add` and `--remove` each take at most 256
+public keys in one command, which is checked before anything is sent. The
+limit on the list that results is the service's: it refuses a change that
+would leave more than 256 devices, and the list stays as it was.
+
 The command checks the service's answer before it reports a change: every
-added key must be on the returned list, and no removed key may be. A service
-that cannot add or remove single grants yet fails that check with exit code
-10 and nothing on stdout; `qurl grants <CRID>` then shows the list as it is.
+added key must be on the returned list, and no removed key may be. An answer
+that does not show the change fails that check with exit code 10 and nothing
+on stdout. A service that cannot add or remove single grants yet answers that
+way; `qurl grants <CRID>` then shows the list as it is.
 
 When several changes to one resource arrive together, the service can answer
 that this one lost to the others (exit code 11). Nothing was changed, and the
@@ -1463,7 +1488,7 @@ exit-code authority in code (`apps/cli/internal/exitcode`):
 | 4 | authentication | No credential, an implausible credential, or the service rejected the credential. |
 | 5 | not found | The resource does not exist or is retired — revoked and tombstoned resources included; the stderr message distinguishes them. `share` and `get` also get this answer on a device that is neither the owner's nor allowed; the service does not say which. Also an access-request code that is not pending for the resource, and a device id that is not among its approved people. |
 | 6 | permission | The credential lacks permission for this operation. |
-| 7 | conflict | The request conflicts with current state — including `--file` refusing to replace an existing destination without `--force`, and `publish` for a target that is already published with the other privacy. |
+| 7 | conflict | The request conflicts with current state — including `--file` refusing to replace an existing destination without `--force`, and `publish` with a flag that asks for what the already published resource is not: the other privacy, or another list of allowed devices. |
 | 8 | invalid input | An operand or request rejected as invalid (by the service, or locally for inputs that can never be valid). |
 | 9 | rate limited | Still rate limited after the CLI's bounded automatic retries. |
 | 10 | server error | The service failed or answered outside its contract — including a `publish` answer that does not confirm the privacy that was asked for, and a `grants` answer that does not show the change that was asked for. |
@@ -1531,8 +1556,11 @@ A resource is private unless you publish it with `--public`
 (`qurl publish <target-url> --public`). A private resource is limited to its
 owner and the devices allowed with `--allow-device-key <public-key>`. This
 works for remote URLs and local apps. Earlier releases published a public
-resource unless `--private` was given; that flag is still accepted and now
-changes nothing.
+resource unless `--private` was given; that flag is still accepted and asks
+for what a publish does anyway, except that it is refused for a target that is
+already published as public. A resource those releases published is still
+public, and `qurl publish` with no privacy flag keeps it and says so; see
+[Private or public](#private-or-public).
 
 `qurl share <CRID>` and `qurl get <CRID>` use this device's identity, so an
 allowed device needs no LayerV account or browser login. They work on the

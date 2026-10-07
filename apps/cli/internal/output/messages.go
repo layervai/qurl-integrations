@@ -101,6 +101,9 @@ const (
 	// into two spellings of the same label.
 	labelCRID = "CRID:"
 
+	// labelWarning opens every warning, on stderr and in a text document.
+	labelWarning = "Warning:"
+
 	// msgDeviceEnrolled opens the login confirmation; %s is the account.
 	msgDeviceEnrolled = "Enrolled this device for %s."
 
@@ -132,6 +135,17 @@ const (
 	hintPublishExistingPublic  = "Hint: to keep using the public resource, run the command again with --public. To make it private instead, delete it with `qurl delete <CRID>` (`qurl list` shows its CRID) and publish again; the new resource gets a new CRID."
 	hintPublishExistingPrivate = "Hint: to keep using the private resource, run the command again without --public. To make it public instead, delete it with `qurl delete <CRID>` (`qurl list` shows its CRID) and publish again; the new resource gets a new CRID."
 	hintPublishAccessDiffers   = "Hint: privacy is fixed when a resource is first published, and publishing again does not change the allowed devices of a resource that exists. Run the command again without --allow-device-key, with --public if the resource is public, then change the allowed devices with `qurl grants <CRID> --add <public-key>` or `--remove <public-key>`. To change privacy, delete the resource and publish again."
+	// hintPublishOtherDevices is the next step when what differs is known to
+	// be the list of allowed devices.
+	hintPublishOtherDevices = "Hint: publishing again does not change the allowed devices of a resource that exists. Run the command again without --allow-device-key, then change the allowed devices with `qurl grants <CRID> --add <public-key>` or `--remove <public-key>`."
+
+	// msgPublishKeptPublic is the warning for a publish that named no privacy
+	// and found the target already published as public: the resource is kept
+	// and stays public. A person who published it while public was the
+	// default never chose that, so the warning says what it means and how to
+	// change it. %s is the resource's CRID. It follows the word "Warning:",
+	// in the document in text mode and on stderr for JSON and --quiet.
+	msgPublishKeptPublic = "this target was published as public before, and it stays public: anyone who has the CRID can open it. To make it private, delete it with `qurl delete %s` and publish again; the new resource gets a new CRID."
 
 	// hintAccessRequestsNotTurnedOn is the next step when a publish found the
 	// target already published as a private resource and could not turn
@@ -363,12 +377,14 @@ func CustomerMessages() []string {
 		hintExpired,
 		hintKeyInvalid,
 		labelCRID,
+		labelWarning,
 		msgDeviceEnrolled,
 		msgSavedTo,
 		msgAlreadyPublished,
 		msgPublishFoundExisting,
 		labelAccess, msgPublishPrivate, msgPublishPublic,
-		hintPublishExistingPublic, hintPublishExistingPrivate, hintPublishAccessDiffers,
+		hintPublishExistingPublic, hintPublishExistingPrivate, hintPublishAccessDiffers, hintPublishOtherDevices,
+		msgPublishKeptPublic,
 		hintAccessRequestsNotTurnedOn, msgPublishRequestsTurnedOn,
 		msgRequestsSendAddress, msgRequestsSendCRID, msgRequestsNextStep, msgRequestsNextStepNoSite,
 		msgRequestsApproveCommand, msgRequestsSafeToSend, msgRequestsSafeToSendCRID,

@@ -1,1 +1,1 @@
-Error: this service cannot add or remove single device grants yet: its answer does not show the change that was asked for. Run `qurl grants <CRID>` to see the list as it is now
+Error: the service's answer does not show the change that was asked for. The service may not support adding or removing single device grants yet. Run `qurl grants <CRID>` to see the list as it is now
