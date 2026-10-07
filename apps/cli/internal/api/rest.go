@@ -286,19 +286,7 @@ func (c *client) Publish(ctx context.Context, targetURL string, opts PublishOpti
 	if len(opts.AllowedDeviceKeys) > 0 && !slices.Equal(slices.Sorted(slices.Values(opts.AllowedDeviceKeys)), slices.Sorted(slices.Values(env.Data.AllowedDeviceKeys))) {
 		return nil, fmt.Errorf("%w: API did not confirm the requested device grants", qurl.ErrInvalidAPIResponse)
 	}
-	// Access requests that were asked for must be confirmed too. A row with
-	// no such member is how a service from before them answers: it made the
-	// resource, private as confirmed above, and ignored the rest. A row that
-	// says they are off is a service that has them and did not turn them on.
-	if opts.AllowRequests {
-		switch {
-		case env.Data.AccessRequests == nil:
-			return nil, &accessRequestsUnsupportedError{detail: msgAccessRequestsCreateIgnored}
-		case !*env.Data.AccessRequests:
-			return nil, &answerError{message: msgAccessRequestsCreateUnconfirmed}
-		}
-	}
-	return &Published{
+	published := &Published{
 		AccessRequests: env.Data.AccessRequests,
 		Private:        env.Data.Private,
 		CRID:           env.Data.CRID,
@@ -309,7 +297,51 @@ func (c *client) Publish(ctx context.Context, targetURL string, opts PublishOpti
 		ExpiresAt:      knownTime(env.Data.ExpiresAt),
 		FoundExisting:  env.Meta.FoundExisting,
 		Publisher:      env.Data.Publisher.publisher(),
-	}, nil
+	}
+	// Access requests that were asked for must be confirmed too. A row with
+	// no such member is how a service from before them answers: it made the
+	// resource, private as confirmed above, and ignored the rest. A row that
+	// says they are off for a resource that was just made is a service that
+	// has them and did not turn them on.
+	if opts.AllowRequests {
+		switch {
+		case env.Data.AccessRequests == nil:
+			return nil, &accessRequestsUnsupportedError{detail: msgAccessRequestsCreateIgnored}
+		case *env.Data.AccessRequests:
+		case env.Meta.FoundExisting == nil || !*env.Meta.FoundExisting:
+			return nil, &answerError{message: msgAccessRequestsCreateUnconfirmed}
+		default:
+			if err := c.turnOnAccessRequestsOfExisting(ctx, published); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return published, nil
+}
+
+// turnOnAccessRequestsOfExisting finishes a publish that asked for access
+// requests and found the target already published. The service changes
+// nothing about a resource a create finds, so the answer said they are off.
+// The publisher asked for people to be able to ask for access to this target,
+// so the setting is turned on with the same change `qurl requests --on`
+// makes, and that answer is checked the same way.
+//
+// The create answer has already confirmed the resource is private, and a
+// failed change leaves it as it was. The error therefore names the CRID: the
+// publisher needs it to try again, and nothing about the resource is unknown.
+func (c *client) turnOnAccessRequestsOfExisting(ctx context.Context, published *Published) error {
+	resource, err := c.SetAccessRequests(ctx, published.CRID, true)
+	if err != nil {
+		return &AccessRequestsNotTurnedOnError{CRID: published.CRID, cause: err}
+	}
+	if resource.Private == nil || !*resource.Private {
+		// The two answers disagree about who can open the resource. That is
+		// the privacy failure, and it names no CRID.
+		return &publishPrivacyError{}
+	}
+	published.AccessRequests = resource.AccessRequests
+	published.AccessRequestsTurnedOn = true
+	return nil
 }
 
 // TODO(upstream-contract): the service refuses a publish whose target is
@@ -344,7 +376,9 @@ func publishProblem(reply *restReply, opts *PublishOptions) error {
 	switch {
 	case strings.EqualFold(apiErr.Code, codePrivacyMismatch):
 	case strings.Contains(strings.ToLower(apiErr.Detail), legacyAccessSettingsDetail):
-		if len(opts.AllowedDeviceKeys) > 0 || opts.AllowRequests {
+		// Asking for access requests is never what differs: the service does
+		// not refuse a create over that setting.
+		if len(opts.AllowedDeviceKeys) > 0 {
 			existing = ExistingAccessUnknown
 		}
 	default:

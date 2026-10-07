@@ -171,7 +171,11 @@ type downloadJSON struct {
 // replay on stderr.
 func (p *Printer) Publish(res *qurlapi.Published) error {
 	if foundExisting(res) && (p.format == FormatJSON || p.quiet) {
-		p.Notef(msgAlreadyPublished)
+		if res.AccessRequestsTurnedOn {
+			p.Notef(msgPublishRequestsTurnedOn)
+		} else {
+			p.Notef(msgAlreadyPublished)
+		}
 	}
 	switch {
 	case p.format == FormatJSON:
@@ -397,7 +401,14 @@ func (p *Printer) publishText(res *qurlapi.Published) error {
 	// found_existing is newer than CRID minting — but the wording is
 	// unconditional, so the guard keeps it from ever contradicting itself.
 	if foundExisting(res) && res.CRID != "" {
-		ew.printf("\n%s\n", p.dim(msgPublishFoundExisting))
+		note := msgPublishFoundExisting
+		if res.AccessRequestsTurnedOn {
+			// The publish changed the resource it found, and the one line
+			// says so. The other note's next step, deleting the resource,
+			// is not what this publisher asked about.
+			note = msgPublishRequestsTurnedOn
+		}
+		ew.printf("\n%s\n", p.dim(note))
 	}
 	// With access requests on, the document says what to send to people and
 	// what happens next. It comes before the CRID, which stays last and alone

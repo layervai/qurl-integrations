@@ -793,7 +793,7 @@ credential or making a network request.
 |------|-------------|
 | `--public` | Let anyone who has the CRID open the resource. Without it the resource is private |
 | `--allow-device-key <public-key>` | Allow a recipient's device to open the private resource (repeatable) |
-| `--allow-requests` | Let people ask you for access to the private resource; you approve each person by a code they give you |
+| `--allow-requests` | Let people ask you for access to the private resource, also when the target is already published; you approve each person by a code they give you |
 | `--description <text>` | Human-readable description stored with the resource |
 | `--tag <tag>` | Tag stored with the resource (repeatable) |
 | `--alias <name>` | Memorable handle stored with the resource |
@@ -825,6 +825,15 @@ publish again to get a new resource and a new CRID. `--allow-device-key` and
 With `--allow-requests`, the output also says what to send to people who have
 no qURL CLI and what happens next. See
 [qurl requests, approve and deny](#qurl-requests-approve-and-deny).
+
+`--allow-requests` also works for a target that is already published as a
+private resource: the command turns access requests on for the resource it
+finds, and says so in one line ("This target was already published. Access
+requests are now on for it."), in the document in text mode and on stderr with
+`-o json` and `--quiet`. If they cannot be turned on, the resource stays as it
+was, private, and the command fails with the reason and the command that tries
+again, `qurl requests <CRID> --on`, with the resource's CRID in it. For a
+target that is already published as public it is the exit code 7 above.
 
 In either mode, the CRID is last and alone on its line; `--quiet` prints only
 the CRID. Publishing the same target again does not create a duplicate while
@@ -975,11 +984,11 @@ first list when you publish.
 
 These commands share a private resource with people who have no qURL CLI.
 
-1. Turn access requests on: publish with `--allow-requests`, or run
-   `qurl requests <CRID> --on` for a private resource that is already
-   published. The output says what to send to people: the resource's address,
-   when this install knows the web address for its deployment, and otherwise
-   the CRID.
+1. Turn access requests on: publish with `--allow-requests`, whether or not
+   the target is already published as a private resource, or run
+   `qurl requests <CRID> --on`. The output says what to send to people: the
+   resource's address, when this install knows the web address for its
+   deployment, and otherwise the CRID.
 2. A person opens it in a browser, sees who published the resource, and asks
    for access. They are shown a six-digit code and give it to you.
 3. `qurl requests` lists who asked. Approve the person with

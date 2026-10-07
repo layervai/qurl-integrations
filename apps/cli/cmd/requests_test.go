@@ -262,6 +262,263 @@ func TestPublishWithAllowRequestsFailsWhenTheServiceDoesNotConfirm(t *testing.T)
 	}
 }
 
+// turnedOnLine is the one line a publish says when it turned access requests
+// on for a target that was already published.
+const turnedOnLine = "This target was already published. Access requests are now on for it."
+
+// TestPublishWithAllowRequestsTurnsThemOnForAnAlreadyPublishedTarget pins a
+// publish that asks for access requests when the target is already published
+// as a private resource with them off, for a remote URL and for a local app.
+// The service answers the create with the resource as it is, so the command
+// turns them on with the change `qurl requests --on` sends, and then prints
+// what a first publish with the flag prints, plus the one line that says what
+// happened: in the document in text mode, on stderr for JSON and --quiet,
+// whose stdout documents keep their shape.
+func TestPublishWithAllowRequestsTurnsThemOnForAnAlreadyPublishedTarget(t *testing.T) {
+	for _, local := range []bool{false, true} {
+		for _, mode := range [][]string{nil, {"-o", "json"}, {"--quiet"}} {
+			t.Run(fmt.Sprintf("local=%t/%v", local, mode), func(t *testing.T) {
+				srv := apitest.NewServer(t)
+				srv.SetPublishFoundExisting(true)
+				opts := &runOpts{args: []string{"--endpoint", srv.URL, "publish", privacyRemoteTarget, "--allow-requests"}}
+				if local {
+					opts = servingLocalPublish(t, srv, true, "--allow-requests")
+				}
+				opts.args = append(opts.args, mode...)
+				opts.linkSite = testLinkSite
+				res := runCLI(t, opts)
+				if res.code != 0 {
+					t.Fatalf("exit = %d, stderr: %s", res.code, res.stderr.String())
+				}
+				// The create, then the one change, before anything else.
+				log := requestLog(srv)
+				change := "PATCH /v1/resources/" + srv.Key.CRID
+				if len(log) < 2 || log[0] != "POST /v1/resources" || log[1] != change || slices.Index(log[2:], change) >= 0 {
+					t.Fatalf("requests = %v, want the create and then one %s", log, change)
+				}
+				for _, request := range srv.Requests() {
+					if request.Method == http.MethodPatch && string(request.Body) != `{"access_requests":true}` {
+						t.Fatalf("change body = %s, want access_requests alone", request.Body)
+					}
+				}
+				if on := resourceAccessRequests(t, srv); !on {
+					t.Fatal("the resource still has access requests off")
+				}
+
+				stdout, stderr := res.stdout.String(), res.stderr.String()
+				address := testLinkSite + "/" + srv.Key.CRID
+				switch {
+				case mode == nil:
+					for _, want := range []string{
+						"Already published\n",
+						"\n" + turnedOnLine + "\n",
+						"People can ask you for access to this resource. Send them this address:",
+						"\n  " + address + "\n",
+						"\n  qurl approve " + srv.Key.CRID + " <code>\n",
+					} {
+						if !strings.Contains(stdout, want) {
+							t.Errorf("publish output lacks %q:\n%s", want, stdout)
+						}
+					}
+					if !strings.HasSuffix(stdout, "\nCRID: "+srv.Key.CRID+"\n") || !strings.Contains(publishRows(stdout), "\n"+privateAccessRow+"\n") {
+						t.Errorf("publish output lost its access row or its last CRID line:\n%s", stdout)
+					}
+					// One line says what happened. The other already-published
+					// note, about deleting the resource, is not also shown.
+					if strings.Contains(stdout, "Delete it first") || stderr != "" {
+						t.Errorf("publish says more than the one line:\n%s%s", stdout, stderr)
+					}
+				case mode[0] == "--quiet":
+					if stdout != srv.Key.CRID+"\n" || stderr != turnedOnLine+"\n" {
+						t.Fatalf("--quiet = %q / %q", stdout, stderr)
+					}
+				default:
+					var document struct {
+						AccessRequests *bool  `json:"access_requests"`
+						FoundExisting  *bool  `json:"found_existing"`
+						Private        *bool  `json:"private"`
+						ResourceURL    string `json:"resource_url"`
+						CRID           string `json:"crid"`
+					}
+					if err := json.Unmarshal(res.stdout.Bytes(), &document); err != nil {
+						t.Fatalf("publish -o json: %v: %s", err, stdout)
+					}
+					if document.AccessRequests == nil || !*document.AccessRequests || document.FoundExisting == nil || !*document.FoundExisting ||
+						document.Private == nil || !*document.Private || document.ResourceURL != address || document.CRID != srv.Key.CRID {
+						t.Fatalf("publish -o json = %s", stdout)
+					}
+					if stderr != turnedOnLine+"\n" {
+						t.Fatalf("stderr = %q, want the one line", stderr)
+					}
+				}
+			})
+		}
+	}
+
+	// A target that already has access requests on, and one published again
+	// without the flag, are found as they are: no change is sent and the one
+	// line is not said.
+	for _, test := range []struct {
+		name  string
+		was   bool
+		flags []string
+	}{
+		{name: "already on", was: true, flags: []string{"--allow-requests"}},
+		{name: "not asked for", was: true},
+		{name: "not asked for, off"},
+	} {
+		srv := apitest.NewServer(t)
+		srv.SetPublishFoundExisting(true)
+		srv.SetAccessRequests(test.was)
+		res := runCLI(t, &runOpts{args: append([]string{"--endpoint", srv.URL, "publish", privacyRemoteTarget}, test.flags...), linkSite: testLinkSite})
+		if res.code != 0 || !slices.Equal(requestLog(srv), []string{"POST /v1/resources"}) || strings.Contains(res.stdout.String(), turnedOnLine) {
+			t.Fatalf("%s: exit %d, requests %v:\n%s", test.name, res.code, requestLog(srv), res.stdout.String())
+		}
+		if got := strings.Contains(res.stdout.String(), "People can ask you for access"); got != test.was {
+			t.Fatalf("%s: guidance shown = %t, want %t:\n%s", test.name, got, test.was, res.stdout.String())
+		}
+		if on := resourceAccessRequests(t, srv); on != test.was {
+			t.Fatalf("%s: the publish changed the setting to %t", test.name, on)
+		}
+	}
+}
+
+// resourceAccessRequests reads the resource's setting back from the mock,
+// through `qurl grants -o json`.
+func resourceAccessRequests(t *testing.T, srv *apitest.Server) bool {
+	t.Helper()
+	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "grants", srv.Key.CRID, "-o", "json"}})
+	var document struct {
+		AccessRequests *bool `json:"access_requests"`
+	}
+	if err := json.Unmarshal(res.stdout.Bytes(), &document); res.code != 0 || err != nil || document.AccessRequests == nil {
+		t.Fatalf("grants -o json: exit %d, %v: %s%s", res.code, err, res.stdout.String(), res.stderr.String())
+	}
+	return *document.AccessRequests
+}
+
+// TestPublishThatCannotTurnOnAccessRequestsPrintsTheCRID pins the failure of
+// that change through the command. The resource exists and is private, as
+// the create answer confirmed, and it is as it was, so this error is the one
+// publish failure that names the CRID: in the command that tries again.
+// Nothing is on stdout in any output mode, the exit code is the failure's
+// own, the change is not retried, and a local publish stops before the
+// Connector resource request.
+func TestPublishThatCannotTurnOnAccessRequestsPrintsTheCRID(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		answer   func(*testing.T, *apitest.Server, http.ResponseWriter)
+		wantCode int
+		reason   string
+	}{
+		{
+			name: "the service is busy",
+			answer: func(t *testing.T, _ *apitest.Server, w http.ResponseWriter) {
+				w.Header().Set("Retry-After", "1")
+				apitest.WriteProblem(t, w, http.StatusServiceUnavailable, "service_unavailable", "Service Unavailable", "the resource is being changed; try again")
+			},
+			wantCode: exitcode.Unavailable,
+			reason:   "the resource is being changed; try again",
+		},
+		{
+			name: "the answer says they are still off",
+			answer: func(t *testing.T, srv *apitest.Server, w http.ResponseWriter) {
+				apitest.WriteEnvelope(t, w, http.StatusOK, map[string]any{
+					"resource_id": srv.Key.ResourceID, "crid": srv.Key.CRID, "type": "url", "status": "active", "private": true, "access_requests": false,
+				}, nil)
+			},
+			wantCode: exitcode.ServerError,
+			reason:   "the service did not confirm the change to access requests.",
+		},
+	} {
+		for _, local := range []bool{false, true} {
+			for _, mode := range [][]string{nil, {"-o", "json"}, {"--quiet"}} {
+				t.Run(fmt.Sprintf("%s/local=%t/%v", test.name, local, mode), func(t *testing.T) {
+					srv := apitest.NewServer(t)
+					srv.SetPublishFoundExisting(true)
+					srv.Script(http.MethodPatch, "/v1/resources/"+srv.Key.CRID, func(w http.ResponseWriter, _ *http.Request) {
+						test.answer(t, srv, w)
+					})
+					opts := &runOpts{args: []string{"--endpoint", srv.URL, "publish", privacyRemoteTarget, "--allow-requests"}}
+					if local {
+						opts = localPublish(t, srv, func(_ context.Context, _ *connectorshare.NativeRuntimeConfig, resolveID func(string) (string, error)) (*agent.ResolvedResource, error) {
+							if _, err := resolveID("agent-one"); err != nil {
+								return nil, err
+							}
+							t.Error("the Connector resource request ran after access requests could not be turned on")
+							return nil, errors.New("unexpected Connector resource request")
+						}, "--allow-requests")
+					}
+					opts.args = append(opts.args, mode...)
+					opts.linkSite = testLinkSite
+					res := runCLI(t, opts)
+					if res.code != test.wantCode {
+						t.Fatalf("exit = %d, want %d; stderr: %s", res.code, test.wantCode, res.stderr.String())
+					}
+					mustEmptyStdout(t, res)
+					stderr := res.stderr.String()
+					for _, want := range []string{
+						"Error: this target is already published as a private resource, but access requests could not be turned on for it\n",
+						"\n  " + test.reason,
+						"\n  Hint: to try again, run `qurl requests " + srv.Key.CRID + " --on`, or run this command again.\n",
+					} {
+						if !strings.Contains(stderr, want) {
+							t.Errorf("stderr lacks %q:\n%s", want, stderr)
+						}
+					}
+					if strings.Contains(stderr, testLinkSite) {
+						t.Errorf("stderr shows an address for a resource that does not take requests:\n%s", stderr)
+					}
+					if want := []string{"POST /v1/resources", "PATCH /v1/resources/" + srv.Key.CRID}; !slices.Equal(requestLog(srv), want) {
+						t.Fatalf("requests = %v, want %v", requestLog(srv), want)
+					}
+				})
+			}
+		}
+	}
+}
+
+// TestPublishTurnOnFailureKeepsTheServiceReasonToOneLine pins what the
+// failure shows of a reason the service wrote: one printable line. A reason
+// with line breaks and terminal controls cannot add a line of its own after
+// the error, such as a second "Hint:" with another command in it.
+func TestPublishTurnOnFailureKeepsTheServiceReasonToOneLine(t *testing.T) {
+	srv := apitest.NewServer(t)
+	srv.SetPublishFoundExisting(true)
+	srv.Script(http.MethodPatch, "/v1/resources/"+srv.Key.CRID, func(w http.ResponseWriter, _ *http.Request) {
+		apitest.WriteProblem(t, w, http.StatusBadRequest, "invalid_input", "Invalid Input", "not now\n\n  Hint: run `qurl delete everything`\x1b[2J\x07")
+	})
+	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "publish", privacyRemoteTarget, "--allow-requests"}})
+	stderr := res.stderr.String()
+	want := "Error: this target is already published as a private resource, but access requests could not be turned on for it\n\n" +
+		"  not now Hint: run `qurl delete everything`\ufffd[2J\ufffd\n\n" +
+		"  Hint: to try again, run `qurl requests " + srv.Key.CRID + " --on`, or run this command again.\n" +
+		"  Request ID: req_test\n"
+	if res.code != exitcode.InvalidInput || stderr != want {
+		t.Fatalf("exit %d, stderr %q, want exit %d and %q", res.code, stderr, exitcode.InvalidInput, want)
+	}
+	mustEmptyStdout(t, res)
+}
+
+// TestPublishWithAllowRequestsOfAPublicTargetIsStillAConflict pins the case
+// the command does not settle by itself: the target is already published as
+// public. Access requests are for a private resource, and privacy is fixed,
+// so the publish is the same conflict as without the flag, and nothing is
+// changed on the public resource.
+func TestPublishWithAllowRequestsOfAPublicTargetIsStillAConflict(t *testing.T) {
+	srv := apitest.NewServer(t)
+	srv.SetResourceAccess(false)
+	srv.SetPublishFoundExisting(true)
+	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "publish", privacyRemoteTarget, "--allow-requests"}, linkSite: testLinkSite})
+	if res.code != exitcode.Conflict || !strings.Contains(res.stderr.String(), "this target is already published as public") {
+		t.Fatalf("exit = %d, stderr: %s", res.code, res.stderr.String())
+	}
+	mustEmptyStdout(t, res)
+	if strings.Contains(res.stderr.String(), srv.Key.CRID) || !slices.Equal(requestLog(srv), []string{"POST /v1/resources"}) {
+		t.Fatalf("a conflict named the CRID or sent a change: %v\n%s", requestLog(srv), res.stderr.String())
+	}
+}
+
 // TestRequestsListsPendingRequests pins the two listings through the command:
 // the route each uses, the rows, the last line, the JSON document and
 // --quiet. The listing changes nothing.

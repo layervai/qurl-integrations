@@ -518,7 +518,9 @@ func (s *Server) resourceRow() map[string]any {
 // plays: private, or public after PlayPublicByDefault. A fresh create stores
 // what was asked for. A create that finds the existing resource
 // (SetPublishFoundExisting) returns it only when the request agrees with its
-// access settings, and is refused otherwise, as the service does.
+// privacy and device list, and is refused otherwise, as the service does. A
+// different access-request setting is not a refusal: the answer carries the
+// setting the resource has.
 func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		AllowedDeviceKeys []string `json:"allowed_device_keys"`

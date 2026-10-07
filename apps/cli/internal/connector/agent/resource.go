@@ -27,7 +27,10 @@ type ResolvedResource struct {
 	// AccessRequests is whether people can ask for access, as the same create
 	// answer said; nil when it did not say.
 	AccessRequests *bool
-	Resource       *qurl.ConnectorResource
+	// AccessRequestsTurnedOn reports that the create found the resource with
+	// access requests off and the publish command turned them on.
+	AccessRequestsTurnedOn bool
+	Resource               *qurl.ConnectorResource
 	// FoundExisting is what the Connector resource request reported. The
 	// publish command replaces it with the create answer's value.
 	FoundExisting *bool

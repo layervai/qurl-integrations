@@ -94,7 +94,7 @@ func CustomerMessages() []string {
 		msgPrivateUnconfirmed, msgPublicUnconfirmed,
 		msgGrantEditUnconfirmed,
 		msgAccessRequestsUnsupported, msgAccessRequestsCreateIgnored, msgAccessRequestsSettingIgnored,
-		msgAccessRequestsCreateUnconfirmed, msgAccessRequestsSettingUnconfirmed, msgApprovalUnconfirmed,
+		msgAccessRequestsCreateUnconfirmed, msgAccessRequestsSettingUnconfirmed, msgAccessRequestsNotTurnedOn, msgApprovalUnconfirmed,
 		msgRequestCodeNotFound, msgDeviceIDNotFound, msgAccessRouteRefused, msgRemovalUnconfirmed,
 	}
 }
@@ -113,8 +113,14 @@ const (
 
 	// The service has access requests and its answer does not show the
 	// setting that was asked for.
-	msgAccessRequestsCreateUnconfirmed  = "the service did not turn on access requests for this resource, so no CRID was printed. The resource is private. If the target was already published, turn them on with `qurl requests <CRID> --on`; `qurl list` shows its CRID"
+	msgAccessRequestsCreateUnconfirmed  = "the service did not turn on access requests for this resource, so no CRID was printed. The resource is private. Turn them on with `qurl requests <CRID> --on`; `qurl list` shows its CRID"
 	msgAccessRequestsSettingUnconfirmed = "the service did not confirm the change to access requests. Run `qurl grants <CRID>` to see the setting as it is now"
+
+	// msgAccessRequestsNotTurnedOn is the headline for a publish that found
+	// the target already published as a private resource and could not turn
+	// access requests on for it. The rendering adds why, and the command that
+	// tries again with the resource's CRID in it.
+	msgAccessRequestsNotTurnedOn = "this target is already published as a private resource, but access requests could not be turned on for it"
 
 	// msgApprovalUnconfirmed is shown when the answer to an approval does not
 	// name the device that got access. The request may have been approved.
@@ -154,6 +160,50 @@ func (e *accessRequestsUnsupportedError) UserMessage() string {
 }
 
 func (e *accessRequestsUnsupportedError) Unwrap() error { return ErrAccessRequestsUnsupported }
+
+// AccessRequestsNotTurnedOnError is a publish that asked for access requests,
+// found the target already published as a private resource with them off,
+// and could not turn them on. The resource is as it was before the command.
+// What went wrong stays in the chain, so the exit code is that failure's and
+// the request id is shown.
+type AccessRequestsNotTurnedOnError struct {
+	// CRID names the resource that exists. It is shown to the publisher:
+	// the create answer confirmed the resource is private, and the CRID is
+	// what they need to try again.
+	CRID string
+
+	cause error
+}
+
+func (e *AccessRequestsNotTurnedOnError) Error() string {
+	return msgAccessRequestsNotTurnedOn + ": " + e.Reason()
+}
+
+// Headline says what exists and what did not happen. The rendering adds the
+// reason and the next step.
+func (e *AccessRequestsNotTurnedOnError) Headline() string { return msgAccessRequestsNotTurnedOn }
+
+// Reason is why the change failed, in the words a customer reads: the
+// message of a failure that has one, the service's own text for a problem it
+// reported, and the failure as it is otherwise.
+func (e *AccessRequestsNotTurnedOnError) Reason() string {
+	var worded interface{ UserMessage() string }
+	if errors.As(e.cause, &worded) {
+		return worded.UserMessage()
+	}
+	var problem *Error
+	if errors.As(e.cause, &problem) {
+		if problem.Detail != "" {
+			return problem.Detail
+		}
+		if problem.Title != "" {
+			return problem.Title
+		}
+	}
+	return e.cause.Error()
+}
+
+func (e *AccessRequestsNotTurnedOnError) Unwrap() error { return e.cause }
 
 // answerError is an answer that does not confirm what a command asked for,
 // with the message a customer reads. It is an answer outside the contract, so

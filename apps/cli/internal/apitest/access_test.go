@@ -154,6 +154,33 @@ func TestAccessRequestsSettingNeedsAPrivateResource(t *testing.T) {
 	}
 }
 
+// TestCreateThatFindsAResourceLeavesItsAccessRequests pins what the mock does
+// with the setting when a create finds the resource instead of making it:
+// nothing is refused and nothing changes, and the answer carries the setting
+// the resource has, whichever way the request and the resource differ.
+func TestCreateThatFindsAResourceLeavesItsAccessRequests(t *testing.T) {
+	for _, stored := range []bool{false, true} {
+		for _, stated := range []string{"", `,"access_requests":true`, `,"access_requests":false`} {
+			srv := NewServer(t)
+			srv.SetPublishFoundExisting(true)
+			srv.SetAccessRequests(stored)
+			status, answer := accessCall(t, srv, http.MethodPost, "/v1/resources", `{"type":"url","target_url":"https://example.com/data","private":true`+stated+`}`)
+			var row struct {
+				AccessRequests *bool `json:"access_requests"`
+			}
+			if err := json.Unmarshal(answer.Data, &row); err != nil {
+				t.Fatal(err)
+			}
+			if status != http.StatusCreated || row.AccessRequests == nil || *row.AccessRequests != stored {
+				t.Fatalf("stored %t, stated %q: answer = %d access_requests %v, want 201 with the stored setting", stored, stated, status, row.AccessRequests)
+			}
+			if on, _ := resourceState(t, srv); on == nil || *on != stored {
+				t.Fatalf("stored %t, stated %q: the create changed the setting to %v", stored, stated, on)
+			}
+		}
+	}
+}
+
 // TestOlderServiceHasNoAccessRequests pins the mock of a service from before
 // access requests: every one of their routes is 404, the setting is ignored
 // at creation and in a change, and no row has it.

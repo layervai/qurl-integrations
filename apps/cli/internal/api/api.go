@@ -168,6 +168,9 @@ type Published struct {
 	// AccessRequests is whether people can ask for access to the resource, as
 	// the service's answer said; nil when it did not say.
 	AccessRequests *bool
+	// AccessRequestsTurnedOn reports that the target was already published
+	// with access requests off, and that this publish turned them on.
+	AccessRequestsTurnedOn bool
 	// LinkSiteURL is the resource's address on the link site, where a person
 	// with no CLI opens it. The service does not send it: the command sets it
 	// when this install knows that site for its deployment.

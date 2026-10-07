@@ -70,7 +70,9 @@ To share a private resource with people who have no qURL CLI, publish it with
 access, and are shown a six-digit code to give you. You approve each person
 with "qurl approve <CRID> <code>": approve a code only when the person gave it
 to you themselves. The address and the CRID are safe to send to anyone,
-because a private resource opens only for you and the people you allow.
+because a private resource opens only for you and the people you allow. If the
+target is already published as a private resource, --allow-requests turns
+access requests on for that resource.
 
 Where the deployment offers it, a public resource can also be opened by anyone
 who has its CRID. The deployment this release ships does not offer it yet.
@@ -140,7 +142,7 @@ owns the share and turns it off when it exits.`,
 		panic(err) // unreachable: the flag is defined on the line above
 	}
 	cmd.Flags().StringArrayVar(&allowedDeviceKeys, "allow-device-key", nil, "recipient public key allowed to open the private resource (repeatable)")
-	cmd.Flags().BoolVar(&allowRequests, "allow-requests", false, "let people ask you for access to the private resource; you approve each person by a code they give you")
+	cmd.Flags().BoolVar(&allowRequests, "allow-requests", false, "let people ask you for access to the private resource, also when the target is already published; you approve each person by a code they give you")
 	cmd.Flags().StringVar(&description, "description", "", "human-readable description stored with the resource")
 	cmd.Flags().StringArrayVar(&tags, "tag", nil, "tag stored with the resource (repeatable)")
 	cmd.Flags().StringVar(&alias, "alias", "", "memorable handle stored with the resource")
@@ -468,6 +470,7 @@ func prepareLocalPublishResource(
 	}
 	resolved.Private = precreated.Private
 	resolved.AccessRequests = precreated.AccessRequests
+	resolved.AccessRequestsTurnedOn = precreated.AccessRequestsTurnedOn
 	// The Connector request always finds the resource created just above, so
 	// its own answer cannot tell a first publish from a repeated one. The
 	// create answer can.
@@ -697,7 +700,8 @@ func printLocalPublishServing(opts *globalOpts, resolved *agent.ResolvedResource
 	published := &qurlapi.Published{
 		CRID: local.CRID, ResourceID: local.ResourceID, TargetURL: local.TargetURL,
 		Status: "serving", FoundExisting: resolved.FoundExisting, Private: resolved.Private,
-		AccessRequests: resolved.AccessRequests, LinkSiteURL: opts.resourceAddress(local.CRID),
+		AccessRequests: resolved.AccessRequests, AccessRequestsTurnedOn: resolved.AccessRequestsTurnedOn,
+		LinkSiteURL: opts.resourceAddress(local.CRID),
 	}
 	if sharing != nil {
 		published.Publisher = sharing.Publisher

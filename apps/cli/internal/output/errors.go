@@ -56,6 +56,9 @@ func renderErrorLines(p *Printer, err error) []string {
 	if lines, ok := publishConflictLines(p, head, err); ok {
 		return lines
 	}
+	if lines, ok := requestsNotTurnedOnLines(p, head, err); ok {
+		return lines
+	}
 	if errors.Is(err, auth.ErrAccountRecoveryState) {
 		return []string{head + " " + msgAccountRecoveryState, "", "  " + p.dim(hintAccountRecoveryState)}
 	}
@@ -118,6 +121,30 @@ func publishConflictLines(p *Printer, head string, err error) ([]string, bool) {
 	case qurlapi.ExistingAccessUnknown:
 	}
 	lines := []string{head + " " + conflict.Error(), "", "  " + p.dim(hint)}
+	var apiErr *qurlapi.Error
+	if errors.As(err, &apiErr) && apiErr.RequestID != "" {
+		lines = append(lines, "  "+p.dim("Request ID: "+apiErr.RequestID))
+	}
+	return lines, true
+}
+
+// requestsNotTurnedOnLines renders a publish that found the target already
+// published as a private resource and could not turn access requests on for
+// it: what exists, why the change failed, the command that tries again, and
+// the request id. The CRID is in that command. The resource is private and
+// unchanged, so naming it gives nothing away, and the publisher needs it.
+// The reason can be the service's own text, so it is held to one printable
+// line and cannot forge the hint that follows it.
+func requestsNotTurnedOnLines(p *Printer, head string, err error) ([]string, bool) {
+	var failed *qurlapi.AccessRequestsNotTurnedOnError
+	if !errors.As(err, &failed) {
+		return nil, false
+	}
+	lines := []string{
+		head + " " + failed.Headline(),
+		"", "  " + p.ServiceReason(failed.Reason()),
+		"", "  " + p.dim(fmt.Sprintf(hintAccessRequestsNotTurnedOn, failed.CRID)),
+	}
 	var apiErr *qurlapi.Error
 	if errors.As(err, &apiErr) && apiErr.RequestID != "" {
 		lines = append(lines, "  "+p.dim("Request ID: "+apiErr.RequestID))

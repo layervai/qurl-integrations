@@ -113,18 +113,20 @@ func (p approvedPersonFixture) payload() map[string]any {
 // applyAccessRequestsSetting applies the access_requests member of a create
 // request or a change, and returns the detail of the refusal, empty when it
 // is accepted. A service from before access requests does not read the
-// member. existing says that a create found the resource instead of making
-// it: the service then changes nothing and refuses a setting that differs,
-// as it refuses a device list that differs. The caller holds s.mu.
+// member. Turning them on for a public resource is refused. existing says
+// that a create found the resource instead of making it: the service then
+// changes nothing and does not refuse, so its answer carries the setting the
+// resource already had, whatever the request asked for. The caller holds
+// s.mu.
 func (s *Server) applyAccessRequestsSetting(stated *bool, existing bool) string {
 	if s.noAccessRequests || stated == nil {
 		return ""
 	}
 	switch {
-	case existing && *stated != s.accessRequests:
-		return LegacyAccessSettingsDetail
 	case *stated && !s.private:
 		return "access requests can be turned on only for a private resource"
+	case existing:
+		return ""
 	}
 	s.accessRequests = *stated
 	return ""

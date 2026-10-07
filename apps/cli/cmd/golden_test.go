@@ -219,6 +219,50 @@ func TestGoldens(t *testing.T) {
 			stdoutGolden: true,
 		},
 		{
+			// The target is already published as a private resource with
+			// access requests off: the publish turns them on, and the
+			// document says so in one line before what to send to people.
+			name: "publish_requests_existing",
+			args: func(*apitest.Server) []string {
+				return []string{"publish", "https://example.com/data", "--allow-requests"}
+			},
+			prepare:      func(srv *apitest.Server) { srv.SetPublishFoundExisting(true) },
+			linkSite:     testLinkSite,
+			variants:     []string{"tty", "plain"},
+			stdoutGolden: true,
+		},
+		{
+			// The JSON document keeps its shape; the one line is on stderr.
+			name: "publish_requests_existing",
+			args: func(*apitest.Server) []string {
+				return []string{"publish", "https://example.com/data", "--allow-requests"}
+			},
+			prepare:      func(srv *apitest.Server) { srv.SetPublishFoundExisting(true) },
+			linkSite:     testLinkSite,
+			variants:     []string{"json"},
+			stdoutGolden: true,
+			stderrGolden: true,
+		},
+		{
+			// The same target, and the change that turns access requests on
+			// is refused for now: the failure's own exit code, what exists,
+			// why, and the command that tries again with the CRID in it.
+			name: "error_publish_requests_not_turned_on",
+			args: func(*apitest.Server) []string {
+				return []string{"publish", "https://example.com/data", "--allow-requests"}
+			},
+			prepare: func(srv *apitest.Server) {
+				srv.SetPublishFoundExisting(true)
+				srv.Script(http.MethodPatch, "/v1/resources/"+srv.Key.CRID, func(w http.ResponseWriter, _ *http.Request) {
+					apitest.WriteProblem(t, w, http.StatusServiceUnavailable, "service_unavailable", "Service Unavailable", "the resource is being changed; try again")
+				})
+			},
+			linkSite:     testLinkSite,
+			variants:     []string{"tty", "plain"},
+			wantCode:     11,
+			stderrGolden: true,
+		},
+		{
 			// A service from before access requests: exit 11 and no CRID.
 			name: "error_publish_requests_unsupported",
 			args: func(*apitest.Server) []string {

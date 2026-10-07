@@ -137,6 +137,11 @@ func TestPublishRequiresTheAnswerToConfirmAccessRequests(t *testing.T) {
 			if !errors.Is(err, qurl.ErrInvalidAPIResponse) || err.Error() != msgAccessRequestsCreateUnconfirmed {
 				t.Fatalf("error = %v, want the not-turned-on message", err)
 			}
+			for _, part := range []string{"no CRID was printed", "The resource is private", "`qurl requests <CRID> --on`", "`qurl list` shows its CRID"} {
+				if !strings.Contains(err.Error(), part) {
+					t.Fatalf("the message lost %q: %v", part, err)
+				}
+			}
 		}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -173,17 +178,15 @@ func TestPublishRequiresTheAnswerToConfirmAccessRequests(t *testing.T) {
 	}
 }
 
-// TestPublishConflictWithAccessRequestsNamesNoCause pins the reading of the
-// older refusal when the request turned access requests on: the setting may
-// be what differs, so the error names neither privacy nor anything else. The
-// privacy-mismatch code still means privacy.
-func TestPublishConflictWithAccessRequestsNamesNoCause(t *testing.T) {
-	for _, test := range []struct {
-		code, detail string
-		want         ExistingAccess
-	}{
-		{code: "invalid_input", detail: apitest.LegacyAccessSettingsDetail, want: ExistingAccessUnknown},
-		{code: apitest.CodePrivacyMismatch, detail: "d", want: ExistingAccessPublic},
+// TestPublishConflictWithAccessRequestsIsAboutPrivacy pins the reading of a
+// refusal when the request turned access requests on. The service never
+// refuses a create over that setting, so the refusal is about privacy, with
+// the privacy-mismatch code and with the older wording alike: the target is
+// already published as public.
+func TestPublishConflictWithAccessRequestsIsAboutPrivacy(t *testing.T) {
+	for _, test := range []struct{ code, detail string }{
+		{code: "invalid_input", detail: apitest.LegacyAccessSettingsDetail},
+		{code: apitest.CodePrivacyMismatch, detail: "d"},
 	} {
 		srv := apitest.NewServer(t)
 		srv.Script(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
@@ -191,17 +194,236 @@ func TestPublishConflictWithAccessRequestsNamesNoCause(t *testing.T) {
 		})
 		_, err := newTestClient(t, srv, nil).Publish(t.Context(), "https://example.com/data", PublishOptions{AllowRequests: true})
 		var conflict *PublishAccessConflictError
-		if !errors.As(err, &conflict) || conflict.Existing != test.want {
-			t.Fatalf("code %q: error = %v, want existing access %d", test.code, err, test.want)
+		if !errors.As(err, &conflict) || conflict.Existing != ExistingAccessPublic {
+			t.Fatalf("code %q: error = %v, want a conflict with a public resource", test.code, err)
 		}
 	}
-	// The mock of the service itself: a create that finds the resource with
-	// access requests off is refused, not answered with them still off.
+	// The mock of the service itself: the target is already published as
+	// public. The conflict stands, and nothing is changed on that resource.
+	for _, older := range []bool{false, true} {
+		srv := apitest.NewServer(t)
+		if older {
+			srv.PlayPublicByDefault()
+		}
+		srv.SetResourceAccess(false)
+		srv.SetPublishFoundExisting(true)
+		result, err := newTestClient(t, srv, nil).Publish(t.Context(), "https://example.com/data", PublishOptions{AllowRequests: true})
+		var conflict *PublishAccessConflictError
+		if result != nil || !errors.As(err, &conflict) || conflict.Existing != ExistingAccessPublic {
+			t.Fatalf("older %t: publish = %+v, %v, want a conflict with a public resource", older, result, err)
+		}
+		if lines := requestLines(srv); !slices.Equal(lines, []string{"POST /v1/resources"}) {
+			t.Fatalf("older %t: requests = %v, want the create alone", older, lines)
+		}
+	}
+}
+
+// turnOnRequests is what a publish sends to turn access requests on for a
+// resource it found: the create, then the one change.
+func turnOnRequests(srv *apitest.Server) []string {
+	return []string{"POST /v1/resources", "PATCH /v1/resources/" + srv.Key.CRID}
+}
+
+// TestPublishTurnsOnAccessRequestsOfAnExistingPrivateResource pins what a
+// publish with access requests does when the target is already published.
+// The service answers a create that finds a resource with the setting the
+// resource has and changes nothing, so the client turns them on itself, with
+// the change `qurl requests --on` makes, only when the answer says the
+// resource existed, is private and has them off.
+func TestPublishTurnsOnAccessRequestsOfAnExistingPrivateResource(t *testing.T) {
+	stored := func(t *testing.T, srv *apitest.Server) bool {
+		t.Helper()
+		resource, err := newTestClient(t, srv, nil).Resource(t.Context(), srv.Key.CRID)
+		if err != nil || resource.AccessRequests == nil {
+			t.Fatalf("read the resource back: %+v, %v", resource, err)
+		}
+		return *resource.AccessRequests
+	}
+
+	t.Run("off: turned on", func(t *testing.T) {
+		srv := apitest.NewServer(t)
+		srv.SetPublishFoundExisting(true)
+		result, err := newTestClient(t, srv, nil).Publish(t.Context(), "https://example.com/data", PublishOptions{AllowRequests: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.AccessRequests == nil || !*result.AccessRequests || !result.AccessRequestsTurnedOn {
+			t.Fatalf("result = %+v, want access requests on and reported as turned on", result)
+		}
+		if result.FoundExisting == nil || !*result.FoundExisting || result.Private == nil || !*result.Private || result.CRID != srv.Key.CRID {
+			t.Fatalf("result = %+v, want the existing private resource", result)
+		}
+		if lines := requestLines(srv); !slices.Equal(lines, turnOnRequests(srv)) {
+			t.Fatalf("requests = %v, want %v", lines, turnOnRequests(srv))
+		}
+		if bodies := requestBodies(srv, http.MethodPatch, "/v1/resources/"+srv.Key.CRID); len(bodies) != 1 || bodies[0] != `{"access_requests":true}` {
+			t.Fatalf("change = %v, want access_requests alone", bodies)
+		}
+		if !stored(t, srv) {
+			t.Fatal("the resource still has access requests off")
+		}
+	})
+
+	// Nothing to turn on, or nothing asked for: the create is the only
+	// request, and the result carries what the resource has.
+	for _, test := range []struct {
+		name          string
+		existing, was bool
+		opts          PublishOptions
+	}{
+		{name: "already on", existing: true, was: true, opts: PublishOptions{AllowRequests: true}},
+		{name: "not asked for, off", existing: true},
+		{name: "not asked for, on", existing: true, was: true},
+		{name: "a new resource", opts: PublishOptions{AllowRequests: true}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			srv := apitest.NewServer(t)
+			srv.SetPublishFoundExisting(test.existing)
+			srv.SetAccessRequests(test.was)
+			result, err := newTestClient(t, srv, nil).Publish(t.Context(), "https://example.com/data", test.opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := test.was || test.opts.AllowRequests
+			if result.AccessRequests == nil || *result.AccessRequests != want || result.AccessRequestsTurnedOn {
+				t.Fatalf("result = %+v, want access requests %t and nothing turned on", result, want)
+			}
+			if lines := requestLines(srv); !slices.Equal(lines, []string{"POST /v1/resources"}) {
+				t.Fatalf("requests = %v, want the create alone", lines)
+			}
+			if got := stored(t, srv); got != want {
+				t.Fatalf("stored setting = %t, want %t", got, want)
+			}
+		})
+	}
+
+	// An answer that does not say the resource existed is a resource that was
+	// just made with access requests off. That is the service not doing what
+	// was asked, not a resource to change.
+	for _, meta := range []map[string]any{nil, {"found_existing": false}} {
+		srv := apitest.NewServer(t)
+		srv.Script(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+			apitest.WriteEnvelope(t, w, http.StatusCreated, map[string]any{
+				"resource_id": srv.Key.ResourceID, "crid": srv.Key.CRID, "private": true, "access_requests": false,
+			}, meta)
+		})
+		result, err := newTestClient(t, srv, nil).Publish(t.Context(), "https://example.com/data", PublishOptions{AllowRequests: true})
+		if result != nil || !errors.Is(err, qurl.ErrInvalidAPIResponse) || err.Error() != msgAccessRequestsCreateUnconfirmed {
+			t.Fatalf("meta %v: publish = %+v, %v, want the not-turned-on message", meta, result, err)
+		}
+		if lines := requestLines(srv); !slices.Equal(lines, []string{"POST /v1/resources"}) {
+			t.Fatalf("meta %v: requests = %v, want the create alone", meta, lines)
+		}
+	}
+
+	// A service from before access requests has no setting to turn on.
+	t.Run("older service", func(t *testing.T) {
+		srv := apitest.NewServer(t)
+		srv.PlayNoAccessRequests()
+		srv.SetPublishFoundExisting(true)
+		result, err := newTestClient(t, srv, nil).Publish(t.Context(), "https://example.com/data", PublishOptions{AllowRequests: true})
+		wantUnsupported(t, err)
+		if lines := requestLines(srv); result != nil || !slices.Equal(lines, []string{"POST /v1/resources"}) {
+			t.Fatalf("publish = %+v with requests %v, want no result and the create alone", result, lines)
+		}
+	})
+}
+
+// TestPublishThatCannotTurnOnAccessRequestsNamesTheResource pins the failure
+// of that change. The resource exists, is private and is as it was, so the
+// error names its CRID for the retry; what went wrong stays in the chain for
+// the exit code; and the change is sent once, never retried.
+func TestPublishThatCannotTurnOnAccessRequestsNamesTheResource(t *testing.T) {
+	row := func(srv *apitest.Server, private, requests bool) map[string]any {
+		return map[string]any{
+			"resource_id": srv.Key.ResourceID, "crid": srv.Key.CRID, "type": "url", "status": "active",
+			"private": private, "access_requests": requests,
+		}
+	}
+	for _, test := range []struct {
+		name   string
+		answer func(*testing.T, *apitest.Server, http.ResponseWriter)
+		reason string
+		check  func(*testing.T, error)
+	}{
+		{
+			name: "the service is busy",
+			answer: func(t *testing.T, _ *apitest.Server, w http.ResponseWriter) {
+				w.Header().Set("Retry-After", "1")
+				apitest.WriteProblem(t, w, http.StatusServiceUnavailable, "service_unavailable", "Service Unavailable", "the resource is being changed; try again")
+			},
+			reason: "the resource is being changed; try again",
+			check: func(t *testing.T, err error) {
+				var problem *Error
+				if !errors.As(err, &problem) || problem.StatusCode != http.StatusServiceUnavailable || problem.RequestID == "" {
+					t.Fatalf("the service's problem is not in the chain: %v", err)
+				}
+			},
+		},
+		{
+			name: "a problem with a title alone",
+			answer: func(t *testing.T, _ *apitest.Server, w http.ResponseWriter) {
+				apitest.WriteProblem(t, w, http.StatusForbidden, "forbidden", "Forbidden", "")
+			},
+			reason: "Forbidden",
+		},
+		{
+			name: "the answer says they are still off",
+			answer: func(t *testing.T, srv *apitest.Server, w http.ResponseWriter) {
+				apitest.WriteEnvelope(t, w, http.StatusOK, row(srv, true, false), nil)
+			},
+			reason: msgAccessRequestsSettingUnconfirmed,
+			check: func(t *testing.T, err error) {
+				if !errors.Is(err, qurl.ErrInvalidAPIResponse) {
+					t.Fatalf("an unconfirmed change is not an invalid answer: %v", err)
+				}
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			srv := apitest.NewServer(t)
+			srv.SetPublishFoundExisting(true)
+			srv.Script(http.MethodPatch, "/v1/resources/"+srv.Key.CRID, func(w http.ResponseWriter, _ *http.Request) {
+				test.answer(t, srv, w)
+			})
+			result, err := newTestClient(t, srv, nil).Publish(t.Context(), "https://example.com/data", PublishOptions{AllowRequests: true})
+			var failed *AccessRequestsNotTurnedOnError
+			if result != nil || !errors.As(err, &failed) {
+				t.Fatalf("publish = %+v, %v, want the not-turned-on error and no result", result, err)
+			}
+			if failed.CRID != srv.Key.CRID || failed.Headline() != msgAccessRequestsNotTurnedOn || failed.Reason() != test.reason {
+				t.Fatalf("error names %q, says %q because %q; want the resource's CRID and reason %q", failed.CRID, failed.Headline(), failed.Reason(), test.reason)
+			}
+			if got, want := err.Error(), msgAccessRequestsNotTurnedOn+": "+test.reason; got != want {
+				t.Fatalf("error text = %q, want %q", got, want)
+			}
+			if test.check != nil {
+				test.check(t, err)
+			}
+			if lines := requestLines(srv); !slices.Equal(lines, turnOnRequests(srv)) {
+				t.Fatalf("requests = %v, want the create and one change", lines)
+			}
+		})
+	}
+
+	// A failure with no wording of its own is shown as it is.
+	plain := &AccessRequestsNotTurnedOnError{CRID: "q", cause: errors.New("connection refused")}
+	if plain.Reason() != "connection refused" || !strings.HasSuffix(plain.Error(), ": connection refused") {
+		t.Fatalf("plain failure = %q / %q", plain.Reason(), plain.Error())
+	}
+
+	// The change answered, and its row says the resource is public. The two
+	// answers disagree about who can open it, so this is the privacy failure
+	// and no CRID is named.
 	srv := apitest.NewServer(t)
 	srv.SetPublishFoundExisting(true)
-	_, err := newTestClient(t, srv, nil).Publish(t.Context(), "https://example.com/data", PublishOptions{AllowRequests: true})
-	if !errors.Is(err, ErrPublishAccessConflict) {
-		t.Fatalf("error = %v, want an access conflict", err)
+	srv.Script(http.MethodPatch, "/v1/resources/"+srv.Key.CRID, func(w http.ResponseWriter, _ *http.Request) {
+		apitest.WriteEnvelope(t, w, http.StatusOK, row(srv, false, true), nil)
+	})
+	result, err := newTestClient(t, srv, nil).Publish(t.Context(), "https://example.com/data", PublishOptions{AllowRequests: true})
+	var failed *AccessRequestsNotTurnedOnError
+	if result != nil || errors.As(err, &failed) || !errors.Is(err, qurl.ErrInvalidAPIResponse) || err.Error() != msgPrivateUnconfirmed || strings.Contains(err.Error(), srv.Key.CRID) {
+		t.Fatalf("publish = %+v, %v, want the privacy failure without a CRID", result, err)
 	}
 }
 

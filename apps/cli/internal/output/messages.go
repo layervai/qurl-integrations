@@ -131,7 +131,17 @@ const (
 	// answer that does not say whether privacy or the allowed devices differ.
 	hintPublishExistingPublic  = "Hint: to keep using the public resource, run the command again with --public. To make it private instead, delete it with `qurl delete <CRID>` (`qurl list` shows its CRID) and publish again; the new resource gets a new CRID."
 	hintPublishExistingPrivate = "Hint: to keep using the private resource, run the command again without --public. To make it public instead, delete it with `qurl delete <CRID>` (`qurl list` shows its CRID) and publish again; the new resource gets a new CRID."
-	hintPublishAccessDiffers   = "Hint: privacy is fixed when a resource is first published, and publishing again changes neither the allowed devices nor the access-request setting of a resource that exists. Run the command again without --allow-device-key and --allow-requests, with --public if the resource is public. Then change the allowed devices with `qurl grants <CRID> --add <public-key>` or `--remove <public-key>`, and turn access requests on with `qurl requests <CRID> --on`. To change privacy, delete the resource and publish again."
+	hintPublishAccessDiffers   = "Hint: privacy is fixed when a resource is first published, and publishing again does not change the allowed devices of a resource that exists. Run the command again without --allow-device-key, with --public if the resource is public, then change the allowed devices with `qurl grants <CRID> --add <public-key>` or `--remove <public-key>`. To change privacy, delete the resource and publish again."
+
+	// hintAccessRequestsNotTurnedOn is the next step when a publish found the
+	// target already published as a private resource and could not turn
+	// access requests on for it. %s is the resource's CRID.
+	hintAccessRequestsNotTurnedOn = "Hint: to try again, run `qurl requests %s --on`, or run this command again."
+
+	// msgPublishRequestsTurnedOn is the one line a publish says when the
+	// target was already published and the command turned access requests on
+	// for it. It takes the place of both already-published notes.
+	msgPublishRequestsTurnedOn = "This target was already published. Access requests are now on for it."
 
 	// msgConnectorConnectionConfig renders native connection configuration
 	// errors without exposing deployment topology or custom-build inputs.
@@ -359,6 +369,7 @@ func CustomerMessages() []string {
 		msgPublishFoundExisting,
 		labelAccess, msgPublishPrivate, msgPublishPublic,
 		hintPublishExistingPublic, hintPublishExistingPrivate, hintPublishAccessDiffers,
+		hintAccessRequestsNotTurnedOn, msgPublishRequestsTurnedOn,
 		msgRequestsSendAddress, msgRequestsSendCRID, msgRequestsNextStep, msgRequestsNextStepNoSite,
 		msgRequestsApproveCommand, msgRequestsSafeToSend, msgRequestsSafeToSendCRID,
 		msgRequestsOn, msgRequestsOff, msgRequestsOffOnePerson, msgRequestsOffPeople,
