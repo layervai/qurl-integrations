@@ -500,22 +500,44 @@ func TestPublishTurnOnFailureKeepsTheServiceReasonToOneLine(t *testing.T) {
 	mustEmptyStdout(t, res)
 }
 
-// TestPublishWithAllowRequestsOfAPublicTargetIsStillAConflict pins the case
-// the command does not settle by itself: the target is already published as
-// public. Access requests are for a private resource, and privacy is fixed,
-// so the publish is the same conflict as without the flag, and nothing is
-// changed on the public resource.
-func TestPublishWithAllowRequestsOfAPublicTargetIsStillAConflict(t *testing.T) {
-	srv := apitest.NewServer(t)
-	srv.SetResourceAccess(false)
-	srv.SetPublishFoundExisting(true)
-	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "publish", privacyRemoteTarget, "--allow-requests"}, linkSite: testLinkSite})
-	if res.code != exitcode.Conflict || !strings.Contains(res.stderr.String(), "this target is already published as public") {
-		t.Fatalf("exit = %d, stderr: %s", res.code, res.stderr.String())
-	}
-	mustEmptyStdout(t, res)
-	if strings.Contains(res.stderr.String(), srv.Key.CRID) || !slices.Equal(requestLog(srv), []string{"POST /v1/resources"}) {
-		t.Fatalf("a conflict named the CRID or sent a change: %v\n%s", requestLog(srv), res.stderr.String())
+// TestPublishWithAllowRequestsOfAPublicTargetIsAConflict pins the case the
+// command does not settle by itself: the target is already published as
+// public. Access requests are for a private resource, so --allow-requests is
+// a named choice like --allow-device-key: exit 7, nothing on stdout, and no
+// second create that would keep the public resource, as a publish with no
+// privacy flag does. Nothing is changed on that resource. It is so against
+// the service and against an older one, for a remote URL and for a local
+// app.
+func TestPublishWithAllowRequestsOfAPublicTargetIsAConflict(t *testing.T) {
+	for _, olderService := range []bool{false, true} {
+		for _, local := range []bool{false, true} {
+			t.Run(fmt.Sprintf("older_service=%t/local=%t", olderService, local), func(t *testing.T) {
+				srv := apitest.NewServer(t)
+				want := "this target is already published as public"
+				if olderService {
+					srv.PlayPublicByDefault()
+					want = "its privacy or its allowed devices differ from what this command asked for"
+				}
+				srv.SetResourceAccess(false)
+				srv.SetPublishFoundExisting(true)
+				opts := &runOpts{args: []string{"--endpoint", srv.URL, "publish", privacyRemoteTarget, "--allow-requests"}}
+				if local {
+					opts = refusingLocalPublish(t, srv, "--allow-requests")
+				}
+				opts.linkSite = testLinkSite
+				res := runCLI(t, opts)
+				if res.code != exitcode.Conflict || !strings.Contains(res.stderr.String(), want) {
+					t.Fatalf("exit = %d, stderr: %s", res.code, res.stderr.String())
+				}
+				mustEmptyStdout(t, res)
+				if log := requestLog(srv); !slices.Equal(log, []string{"POST /v1/resources"}) {
+					t.Fatalf("requests = %v, want the one create: no second create and no change", log)
+				}
+				if strings.Contains(res.stderr.String(), srv.Key.CRID) || strings.Contains(res.stderr.String(), "Warning") {
+					t.Fatalf("a conflict named the CRID or read as a kept resource:\n%s", res.stderr.String())
+				}
+			})
+		}
 	}
 }
 
