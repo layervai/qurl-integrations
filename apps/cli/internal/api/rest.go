@@ -201,10 +201,11 @@ type envelopeMeta struct {
 // TODO(upstream-contract): privacy and tunnel find-or-create fields mirror
 // the service's create-resource request; privacy is immutable after creation.
 type publishRequest struct {
-	// Private is always sent, never omitted. What an absent field means is
-	// the service's choice and has changed: a newer service reads it as
-	// private, an older one as public.
-	Private           bool     `json:"private"`
+	// Private is stated in every create request but one. What an absent
+	// field means for a new resource is the service's choice and has changed:
+	// a newer service reads it as private, an older one as public. The one
+	// request without it is the second create of keepExistingPublic.
+	Private           *bool    `json:"private,omitempty"`
 	AllowedDeviceKeys []string `json:"allowed_device_keys,omitempty"`
 	Slug              string   `json:"slug,omitempty"`
 	FindOrCreate      bool     `json:"find_or_create,omitempty"`
@@ -228,7 +229,7 @@ func (c *client) Publish(ctx context.Context, targetURL string, opts PublishOpti
 	}
 	wantPrivate := !opts.Public
 	body := publishRequest{
-		Private:           wantPrivate,
+		Private:           &wantPrivate,
 		AllowedDeviceKeys: opts.AllowedDeviceKeys,
 		Type:              "url",
 		TargetURL:         targetURL,
@@ -249,32 +250,56 @@ func (c *client) Publish(ctx context.Context, targetURL string, opts PublishOpti
 		return nil, err
 	}
 	if reply.status != http.StatusCreated {
-		return nil, publishProblem(reply, &opts)
+		refusal := publishProblem(reply, &opts)
+		if !mayKeepExistingPublic(&opts, refusal) {
+			return nil, refusal
+		}
+		return c.keepExistingPublic(ctx, &body, refusal)
 	}
+	published, allowedDeviceKeys, err := publishedFromReply(reply)
+	if err != nil {
+		return nil, err
+	}
+	// The row must say which privacy the resource has, and it must be the one
+	// asked for. A row that omits it is not read as either: a service that
+	// ignored the field may have made the resource with the other privacy.
+	if published.Private == nil || *published.Private != wantPrivate {
+		return nil, &publishPrivacyError{wantPublic: opts.Public}
+	}
+	if len(opts.AllowedDeviceKeys) > 0 && !slices.Equal(slices.Sorted(slices.Values(opts.AllowedDeviceKeys)), slices.Sorted(slices.Values(allowedDeviceKeys))) {
+		// A resource that already existed keeps the list it has: publishing
+		// again never changes it. That is the same conflict the service
+		// reports with its own code, seen here in an answer that accepted
+		// the request instead. Only a resource that was just made with
+		// another list is an answer outside the contract.
+		if published.FoundExisting != nil && *published.FoundExisting {
+			return nil, &PublishAccessConflictError{Existing: ExistingAccessOtherDevices}
+		}
+		return nil, fmt.Errorf("%w: API did not confirm the requested device grants", qurl.ErrInvalidAPIResponse)
+	}
+	return published, nil
+}
+
+// publishedFromReply decodes a 201 answer to a create request and checks the
+// identity of the resource it names. It returns the row's device list beside
+// the result, which does not carry it. Privacy is returned as the row has it
+// and is the caller's to check.
+func publishedFromReply(reply *restReply) (*Published, []string, error) {
 	var env struct {
 		Data resourceRow  `json:"data"`
 		Meta envelopeMeta `json:"meta"`
 	}
 	if err := json.Unmarshal(reply.body, &env); err != nil {
-		return nil, fmt.Errorf("%w: decode publish response: %w", qurl.ErrInvalidAPIResponse, err)
+		return nil, nil, fmt.Errorf("%w: decode publish response: %w", qurl.ErrInvalidAPIResponse, err)
 	}
 	if strings.TrimSpace(env.Data.ResourceID) == "" {
-		return nil, fmt.Errorf("%w: publish response missing resource_id", qurl.ErrInvalidAPIResponse)
+		return nil, nil, fmt.Errorf("%w: publish response missing resource_id", qurl.ErrInvalidAPIResponse)
 	}
 	if strings.TrimSpace(env.Data.CRID) == "" {
-		return nil, fmt.Errorf("%w: publish response missing crid", qurl.ErrInvalidAPIResponse)
+		return nil, nil, fmt.Errorf("%w: publish response missing crid", qurl.ErrInvalidAPIResponse)
 	}
 	if err := resourceidentity.ValidatePair(env.Data.CRID, env.Data.ResourceID); err != nil {
-		return nil, fmt.Errorf("%w: publish response identity: %w", qurl.ErrInvalidAPIResponse, err)
-	}
-	// The row must say which privacy the resource has, and it must be the one
-	// asked for. A row that omits it is not read as either: a service that
-	// ignored the field may have made the resource with the other privacy.
-	if env.Data.Private == nil || *env.Data.Private != wantPrivate {
-		return nil, &publishPrivacyError{wantPublic: opts.Public}
-	}
-	if len(opts.AllowedDeviceKeys) > 0 && !slices.Equal(slices.Sorted(slices.Values(opts.AllowedDeviceKeys)), slices.Sorted(slices.Values(env.Data.AllowedDeviceKeys))) {
-		return nil, fmt.Errorf("%w: API did not confirm the requested device grants", qurl.ErrInvalidAPIResponse)
+		return nil, nil, fmt.Errorf("%w: publish response identity: %w", qurl.ErrInvalidAPIResponse, err)
 	}
 	return &Published{
 		Private:       env.Data.Private,
@@ -286,16 +311,90 @@ func (c *client) Publish(ctx context.Context, targetURL string, opts PublishOpti
 		ExpiresAt:     knownTime(env.Data.ExpiresAt),
 		FoundExisting: env.Meta.FoundExisting,
 		Publisher:     env.Data.Publisher.publisher(),
-	}, nil
+	}, env.Data.AllowedDeviceKeys, nil
+}
+
+// mayKeepExistingPublic reports whether a refused create is the one a publish
+// answers by keeping the resource that exists: the publisher named no
+// privacy, and the refusal says the target is already published as public, or
+// is the older answer that does not say what differs.
+func mayKeepExistingPublic(opts *PublishOptions, refusal error) bool {
+	if !opts.KeepExistingPublic || opts.Public || len(opts.AllowedDeviceKeys) > 0 {
+		return false
+	}
+	var conflict *PublishAccessConflictError
+	if !errors.As(refusal, &conflict) {
+		return false
+	}
+	return conflict.Existing == ExistingAccessPublic || conflict.Existing == ExistingAccessUnknown
+}
+
+// keepExistingPublic finishes a publish that named no privacy and was refused
+// because the target is already published as public. A person who published a
+// target while public was the default, and publishes it again after an
+// upgrade, never chose a privacy; refusing them on every run would break a
+// command that worked. So the create is sent once more, this time without
+// stating privacy, which makes the service return the resource that exists
+// with the privacy it has.
+//
+// That second request is the only create that leaves privacy to the service,
+// so its answer is held to what was meant. A public resource is accepted
+// only when the answer says it already existed, and the result is marked so
+// the caller warns the publisher. A private resource is what a publish with
+// no flag asks for and is returned as it is. A public resource that was just
+// made is one nobody asked for: an older service makes it when the existing
+// resource went away between the two requests. It is deleted, and the
+// publish fails without naming a CRID.
+//
+// refusal is the first answer. It is what the publisher is told when the
+// second request is refused for the same kind of reason.
+func (c *client) keepExistingPublic(ctx context.Context, body *publishRequest, refusal error) (*Published, error) {
+	again := *body
+	again.Private = nil
+	reply, err := c.doRESTOnce(ctx, http.MethodPost, "/v1/resources", again)
+	if err != nil {
+		return nil, err
+	}
+	if reply.status != http.StatusCreated {
+		if problem := publishProblem(reply, &PublishOptions{}); !errors.Is(problem, ErrPublishAccessConflict) {
+			return nil, problem
+		}
+		return nil, refusal
+	}
+	published, _, err := publishedFromReply(reply)
+	if err != nil {
+		return nil, err
+	}
+	switch {
+	case published.Private == nil:
+		return nil, &publishPrivacyError{}
+	case *published.Private:
+		return published, nil
+	case published.FoundExisting == nil:
+		// A public resource, and the answer does not say whether it existed.
+		// It is not kept, because that was not confirmed, and not deleted,
+		// because it may be the one that was published before.
+		return nil, &publishPrivacyError{}
+	case *published.FoundExisting:
+		published.KeptPublic = true
+		return published, nil
+	}
+	if _, err := c.Delete(ctx, published.CRID); err != nil {
+		return nil, &unaskedPublicError{notDeleted: err}
+	}
+	return nil, &unaskedPublicError{}
 }
 
 // TODO(upstream-contract): the service refuses a publish whose target is
 // already published with the other privacy with HTTP 400 and the code
-// privacy_mismatch. A service from before that code answers its generic
-// invalid-input problem with this text in the detail, and gives the same
-// answer when the request's device list differs from the stored one.
+// privacy_mismatch, and one whose device list differs from the stored list
+// with HTTP 400 and the code device_keys_mismatch. A service from before
+// those codes answers both with its generic invalid-input problem and this
+// text in the detail. Only that older text is matched; the wording a service
+// with the codes uses is never read.
 const (
 	codePrivacyMismatch        = "privacy_mismatch"
+	codeDeviceKeysMismatch     = "device_keys_mismatch"
 	legacyAccessSettingsDetail = "existing resource access settings differ"
 )
 
@@ -303,30 +402,31 @@ const (
 // the target is already published with other access settings becomes a
 // PublishAccessConflictError; every other refusal is the plain problem.
 //
-// The request stated one privacy, so a privacy mismatch means the resource
-// that exists has the other one. The older answer says that only when the
-// request carried no device list: with a list, the list may be what differs,
-// and the error then names neither.
+// The conflict says what the resource that exists is like only when the
+// service said so. The privacy-mismatch code means it has the privacy the
+// request did not state, and the device-list code means its list is another
+// one. The older answer covers both without saying which, so it names
+// neither, whatever the request carried.
 func publishProblem(reply *restReply, opts *PublishOptions) error {
 	problem := reply.problem()
 	var apiErr *Error
 	if !errors.As(problem, &apiErr) || apiErr.StatusCode != http.StatusBadRequest {
 		return problem
 	}
-	existing := ExistingAccessPublic
-	if opts.Public {
-		existing = ExistingAccessPrivate
-	}
-	switch {
-	case strings.EqualFold(apiErr.Code, codePrivacyMismatch):
-	case strings.Contains(strings.ToLower(apiErr.Detail), legacyAccessSettingsDetail):
-		if len(opts.AllowedDeviceKeys) > 0 {
-			existing = ExistingAccessUnknown
+	if strings.EqualFold(apiErr.Code, codePrivacyMismatch) {
+		existing := ExistingAccessPublic
+		if opts.Public {
+			existing = ExistingAccessPrivate
 		}
-	default:
-		return problem
+		return &PublishAccessConflictError{Existing: existing, problem: apiErr}
 	}
-	return &PublishAccessConflictError{Existing: existing, problem: apiErr}
+	if strings.EqualFold(apiErr.Code, codeDeviceKeysMismatch) {
+		return &PublishAccessConflictError{Existing: ExistingAccessOtherDevices, problem: apiErr}
+	}
+	if strings.Contains(strings.ToLower(apiErr.Detail), legacyAccessSettingsDetail) {
+		return &PublishAccessConflictError{Existing: ExistingAccessUnknown, problem: apiErr}
+	}
+	return problem
 }
 
 // validateTargetURL applies the SDK's local target rules (http/https, a

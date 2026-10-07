@@ -164,8 +164,15 @@ type downloadJSON struct {
 // while --quiet and JSON keep their stdout documents unchanged and note the
 // replay on stderr.
 func (p *Printer) Publish(res *qurlapi.Published) error {
-	if foundExisting(res) && (p.format == FormatJSON || p.quiet) {
-		p.Notef(msgAlreadyPublished)
+	if p.format == FormatJSON || p.quiet {
+		switch {
+		case res.KeptPublic:
+			// The warning says the target was published before, so it takes
+			// the place of the replay note.
+			p.Warnf(msgPublishKeptPublic, res.CRID)
+		case foundExisting(res):
+			p.Notef(msgAlreadyPublished)
+		}
 	}
 	switch {
 	case p.format == FormatJSON:
@@ -367,7 +374,12 @@ func (p *Printer) publishText(res *qurlapi.Published) error {
 	// one actually follows. The combination is unreachable in practice —
 	// found_existing is newer than CRID minting — but the wording is
 	// unconditional, so the guard keeps it from ever contradicting itself.
-	if foundExisting(res) && res.CRID != "" {
+	switch {
+	case res.KeptPublic && res.CRID != "":
+		// In the document, so it is read with the Access row it explains,
+		// and never dim: a publisher who did not choose public must see it.
+		ew.printf("\n%s %s\n", p.style(ansiBold+ansiYellow, labelWarning), fmt.Sprintf(msgPublishKeptPublic, res.CRID))
+	case foundExisting(res) && res.CRID != "":
 		ew.printf("\n%s\n", p.dim(msgPublishFoundExisting))
 	}
 	ew.printf("\n%s %s\n", p.bold(labelCRID), res.CRID)

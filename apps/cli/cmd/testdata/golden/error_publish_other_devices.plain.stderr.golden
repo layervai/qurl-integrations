@@ -1,0 +1,4 @@
+Error: this target is already published, and its allowed devices differ from the ones this command named
+
+  Hint: publishing again does not change the allowed devices of a resource that exists. Run the command again without --allow-device-key, then change the allowed devices with `qurl grants <CRID> --add <public-key>` or `--remove <public-key>`.
+  Request ID: req_test

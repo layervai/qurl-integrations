@@ -276,21 +276,25 @@ func TestPublishFailsClosedWhenPrivacyIsNotConfirmed(t *testing.T) {
 }
 
 // TestPublishOfATargetWithTheOtherPrivacyIsAConflict pins the refusal through
-// the command, for the code the service sends now and for the answer of an
-// older one, for a remote URL and for a local app: exit 7, nothing on stdout,
-// what exists, and what to do. A local publish makes no Connector resource
-// request and never turns sharing on.
+// the command when a flag asked for what the existing resource is not, for a
+// remote URL and for a local app: exit 7, nothing on stdout, what exists, and
+// what to do. The privacy that exists is named for the code the service sends
+// now; the answer of an older service does not say what differs, so the
+// message names neither. A local publish makes no Connector resource request
+// and never turns sharing on. A publish with no privacy flag at all is not
+// this case: it keeps a public resource that exists.
 func TestPublishOfATargetWithTheOtherPrivacyIsAConflict(t *testing.T) {
+	older := []string{"its privacy or its allowed devices differ from what this command asked for", "privacy is fixed when a resource is first published", "Run the command again without --allow-device-key, with --public if the resource is public"}
+	public := []string{"already published as public", "privacy is fixed when a resource is first published", "run the command again with --public", "delete it with `qurl delete <CRID>`"}
 	for _, test := range []struct {
 		name            string
 		flags           []string
 		existingPrivate bool
 		want            []string
 	}{
-		{
-			name: "private asked, public exists",
-			want: []string{"already published as public", "privacy is fixed when a resource is first published", "run the command again with --public", "delete it with `qurl delete <CRID>`"},
-		},
+		{name: "private asked, public exists", flags: []string{"--private"}, want: public},
+		{name: "a device list asked, public exists", flags: []string{"--allow-device-key", goldenDevicePublicKey}, want: public},
+		{name: "not public asked, public exists", flags: []string{"--public=false"}, want: public},
 		{
 			name: "public asked, private exists", flags: []string{"--public"}, existingPrivate: true,
 			want: []string{"already published as private", "privacy is fixed when a resource is first published", "run the command again without --public", "delete it with `qurl delete <CRID>`"},
@@ -300,8 +304,10 @@ func TestPublishOfATargetWithTheOtherPrivacyIsAConflict(t *testing.T) {
 			for _, local := range []bool{false, true} {
 				t.Run(fmt.Sprintf("%s/older_service=%t/local=%t", test.name, olderService, local), func(t *testing.T) {
 					srv := apitest.NewServer(t)
+					want := test.want
 					if olderService {
 						srv.PlayPublicByDefault()
+						want = older
 					}
 					srv.SetResourceAccess(test.existingPrivate)
 					srv.SetPublishFoundExisting(true)
@@ -320,10 +326,13 @@ func TestPublishOfATargetWithTheOtherPrivacyIsAConflict(t *testing.T) {
 						t.Fatalf("exit = %d, want %d; stderr: %s", res.code, exitcode.Conflict, res.stderr.String())
 					}
 					mustEmptyStdout(t, res)
-					for _, want := range test.want {
-						if !strings.Contains(res.stderr.String(), want) {
-							t.Errorf("stderr lacks %q:\n%s", want, res.stderr.String())
+					for _, part := range want {
+						if !strings.Contains(res.stderr.String(), part) {
+							t.Errorf("stderr lacks %q:\n%s", part, res.stderr.String())
 						}
+					}
+					if olderService && (strings.Contains(res.stderr.String(), "as public") || strings.Contains(res.stderr.String(), "as private")) {
+						t.Errorf("stderr names a privacy the older answer did not state:\n%s", res.stderr.String())
 					}
 					for _, serviceText := range []string{"Invalid Input", "Privacy Mismatch", "allowed_device_keys", "HTTP 400"} {
 						if strings.Contains(res.stderr.String(), serviceText) {

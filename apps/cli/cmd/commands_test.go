@@ -209,12 +209,15 @@ func TestSharingCopyStatesTheDeviceAccessRule(t *testing.T) {
 
 	root, _ := newRoot("test", discardStreams())
 	checked := map[string]string{"README": readme}
-	if got := strings.Count(readme, "--private"); got != 1 || !strings.Contains(readme, "--private was given; that flag is still accepted and now changes nothing") {
-		t.Errorf("README mentions --private %d times; want once, saying that the flag is still accepted and changes nothing", got)
+	// The flag is named once, as accepted, with the one thing it still does:
+	// it is a stated choice, so it refuses a target that is published as
+	// public where a publish with no flag keeps it.
+	if got := strings.Count(readme, "--private"); got != 1 || !strings.Contains(readme, "--private was given; that flag is still accepted and asks for what a publish does anyway, except that it is refused for a target that is already published as public") {
+		t.Errorf("README mentions --private %d times; want once, saying that the flag is still accepted and what it still does", got)
 	}
 	for where, text := range visibleSurfaces(root) {
 		if strings.Contains(text, "--private") {
-			t.Errorf("%s teaches --private, which no longer changes what a publish does", where)
+			t.Errorf("%s teaches --private, which a new publish no longer needs", where)
 		}
 		checked[where] = collapse(text)
 		if where != "qurl publish long" && where != "qurl get long" && strings.Contains(checked[where], notYet) {

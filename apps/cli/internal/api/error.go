@@ -90,8 +90,8 @@ func (e *Error) ShareNotFound() bool {
 func CustomerMessages() []string {
 	return []string{
 		errTemplate, msgAccountCallbackInvalid, msgAccountCallbackComplete, msgAccountLoadFailed, msgAccountUnavailable, msgAccountPortBusy, msgAccountBrowserFailed, msgAccountTimedOut, msgAccountCanceled, msgAccountExchangeFailed, msgAccountHTTPSRequired, msgAccountLinkInvalid, msgAccountOwnersInvalid,
-		msgPublishAccessConflict, msgPublishExistingPublic, msgPublishExistingPrivate, msgPublishAccessDiffers,
-		msgPrivateUnconfirmed, msgPublicUnconfirmed,
+		msgPublishAccessConflict, msgPublishExistingPublic, msgPublishExistingPrivate, msgPublishOtherDevices, msgPublishAccessDiffers,
+		msgPrivateUnconfirmed, msgPublicUnconfirmed, msgUnaskedPublicDeleted, msgUnaskedPublicNotDeleted,
 		msgGrantEditUnconfirmed,
 	}
 }
@@ -124,7 +124,16 @@ const (
 	msgPublishAccessConflict  = "this target is already published with other access settings"
 	msgPublishExistingPublic  = "this target is already published as public, and privacy is fixed when a resource is first published"
 	msgPublishExistingPrivate = "this target is already published as private, and privacy is fixed when a resource is first published"
+	msgPublishOtherDevices    = "this target is already published, and its allowed devices differ from the ones this command named"
 	msgPublishAccessDiffers   = "this target is already published, and its privacy or its allowed devices differ from what this command asked for"
+
+	// A publish that named no privacy went to keep using the public resource
+	// that exists, and the service made a new public resource instead. Nobody
+	// asked for one, so it is not kept and its CRID is not named. The first
+	// message is for a resource the command deleted, the second for one it
+	// could not delete.
+	msgUnaskedPublicDeleted    = "this target was no longer published when the command went to keep using its public resource, and the service made a new public resource for it. Nobody asked for a public one, so the command deleted it and printed no CRID. Run the command again to publish the target as private"
+	msgUnaskedPublicNotDeleted = "this target was no longer published when the command went to keep using its public resource, and the service made a new public resource for it. Nobody asked for a public one, and the command could not delete it, so no CRID was printed. Run `qurl list` to find it, delete it with `qurl delete <CRID>`, and publish again"
 
 	// The answer to a create request did not say that the resource has the
 	// privacy the request stated. Nothing is printed on stdout, and the
@@ -152,14 +161,18 @@ const (
 	ExistingAccessPublic
 	// ExistingAccessPrivate means the target is already published as private.
 	ExistingAccessPrivate
+	// ExistingAccessOtherDevices means the target is already published with
+	// another list of allowed devices than the request named.
+	ExistingAccessOtherDevices
 )
 
-// PublishAccessConflictError is a publish refused because the target is
-// already published with other access settings. It matches
-// ErrPublishAccessConflict, and the service's problem stays in the chain for
-// the request id.
+// PublishAccessConflictError is a publish that cannot be given because the
+// target is already published with other access settings. It matches
+// ErrPublishAccessConflict. When the service refused the request, its problem
+// stays in the chain for the request id; a conflict read from an answer that
+// accepted the request has none.
 type PublishAccessConflictError struct {
-	// Existing is what the refusal says about the resource that exists.
+	// Existing is what is known about the resource that exists.
 	Existing ExistingAccess
 
 	problem *Error
@@ -173,7 +186,10 @@ func (e *PublishAccessConflictError) Error() string {
 		return msgPublishExistingPublic
 	case ExistingAccessPrivate:
 		return msgPublishExistingPrivate
+	case ExistingAccessOtherDevices:
+		return msgPublishOtherDevices
 	case ExistingAccessUnknown:
+		return msgPublishAccessDiffers
 	}
 	return msgPublishAccessDiffers
 }
@@ -203,6 +219,31 @@ func (e *publishPrivacyError) UserMessage() string {
 }
 
 func (e *publishPrivacyError) Unwrap() error { return qurl.ErrInvalidAPIResponse }
+
+// unaskedPublicError is a publish that named no privacy and was answered with
+// a new public resource. That is an answer outside what the request meant, so
+// it matches the SDK's invalid-response sentinel and has that exit code.
+// notDeleted is why the command could not delete the resource, nil when it
+// did.
+type unaskedPublicError struct{ notDeleted error }
+
+func (e *unaskedPublicError) Error() string {
+	if e.notDeleted != nil {
+		return msgUnaskedPublicNotDeleted + ": " + e.notDeleted.Error()
+	}
+	return msgUnaskedPublicDeleted
+}
+
+// UserMessage is the text the terminal rendering shows in place of the
+// generic invalid-response wording.
+func (e *unaskedPublicError) UserMessage() string {
+	if e.notDeleted != nil {
+		return msgUnaskedPublicNotDeleted
+	}
+	return msgUnaskedPublicDeleted
+}
+
+func (e *unaskedPublicError) Unwrap() error { return qurl.ErrInvalidAPIResponse }
 
 const (
 	msgAccountLoadFailed     = "cannot load account sign-in settings"

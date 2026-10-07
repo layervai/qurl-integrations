@@ -109,20 +109,29 @@ func publishConflictLines(p *Printer, head string, err error) ([]string, bool) {
 	if !errors.As(err, &conflict) {
 		return nil, false
 	}
-	hint := hintPublishAccessDiffers
-	switch conflict.Existing {
-	case qurlapi.ExistingAccessPublic:
-		hint = hintPublishExistingPublic
-	case qurlapi.ExistingAccessPrivate:
-		hint = hintPublishExistingPrivate
-	case qurlapi.ExistingAccessUnknown:
-	}
-	lines := []string{head + " " + conflict.Error(), "", "  " + p.dim(hint)}
+	lines := []string{head + " " + conflict.Error(), "", "  " + p.dim(publishConflictHint(conflict.Existing))}
 	var apiErr *qurlapi.Error
 	if errors.As(err, &apiErr) && apiErr.RequestID != "" {
 		lines = append(lines, "  "+p.dim("Request ID: "+apiErr.RequestID))
 	}
 	return lines, true
+}
+
+// publishConflictHint is the next step for each thing a conflict can say
+// about the resource that exists. A conflict that does not say what differs
+// gets the hint that covers privacy and the allowed devices.
+func publishConflictHint(existing qurlapi.ExistingAccess) string {
+	switch existing {
+	case qurlapi.ExistingAccessPublic:
+		return hintPublishExistingPublic
+	case qurlapi.ExistingAccessPrivate:
+		return hintPublishExistingPrivate
+	case qurlapi.ExistingAccessOtherDevices:
+		return hintPublishOtherDevices
+	case qurlapi.ExistingAccessUnknown:
+		return hintPublishAccessDiffers
+	}
+	return hintPublishAccessDiffers
 }
 
 // hostErrorLines renders local host conditions that block native sharing.
