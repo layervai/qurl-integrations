@@ -1214,6 +1214,12 @@ func exactArgs(n int) cobra.PositionalArgs {
 	}
 }
 
+// usageErrorWithHint is a usage error with one more line: the next step for
+// the mistake the command line most likely is.
+func usageErrorWithHint(err error, hint string) error {
+	return exitcode.UsageError(fmt.Errorf("%w\n\n  %s", err, hint))
+}
+
 // noArgs wraps cobra.NoArgs the same way.
 func noArgs(cmd *cobra.Command, args []string) error {
 	if err := cobra.NoArgs(cmd, args); err != nil {

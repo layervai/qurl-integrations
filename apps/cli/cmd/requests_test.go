@@ -519,6 +519,60 @@ func TestPublishWithAllowRequestsOfAPublicTargetIsStillAConflict(t *testing.T) {
 	}
 }
 
+// TestRequestAndRequestsNameEachOther pins the pointers between two commands
+// whose names differ by one letter. `qurl request` is for a supervising app;
+// a person who wanted the access requests and typed it lands on its operand
+// count or on a flag it does not have, and both errors name `qurl requests`.
+// The other way round, a method and a path given to `qurl requests` name
+// `qurl request`. Every one is a usage error before any request, and each
+// command's help names the other.
+func TestRequestAndRequestsNameEachOther(t *testing.T) {
+	srv := apitest.NewServer(t)
+	const (
+		toRequests = "\n\n  Hint: if you meant to see who asked for access to your resources, use `qurl requests`.\n"
+		toRequest  = "\n\n  Hint: if you meant to make a request for a supervising app, use `qurl request METHOD PATH`.\n"
+	)
+	for _, test := range []struct {
+		args []string
+		want string
+	}{
+		{args: []string{"request"}, want: "Error: accepts 2 arg(s), received 0" + toRequests},
+		{args: []string{"request", srv.Key.CRID}, want: "Error: accepts 2 arg(s), received 1" + toRequests},
+		{args: []string{"request", srv.Key.CRID, "--on"}, want: "Error: unknown flag: --on" + toRequests},
+		{args: []string{"request", "--off", srv.Key.CRID}, want: "Error: unknown flag: --off" + toRequests},
+		{args: []string{"requests", "GET", "/v1/me"}, want: "Error: accepts at most 1 arg(s), received 2" + toRequest},
+		{args: []string{"requests", "delete", "/v1/resources/r_abc/sessions"}, want: "Error: accepts at most 1 arg(s), received 2" + toRequest},
+		// Two operands that are not a method and a path are not a request
+		// for a supervising app, so that command is not named.
+		{args: []string{"requests", srv.Key.CRID, "482913"}, want: "Error: accepts at most 1 arg(s), received 2\n"},
+	} {
+		res := runCLI(t, &runOpts{args: append([]string{"--endpoint", srv.URL}, test.args...)})
+		if res.code != exitcode.Usage || res.stderr.String() != test.want {
+			t.Errorf("qurl %v: exit %d, stderr %q, want exit %d and %q", test.args, res.code, res.stderr.String(), exitcode.Usage, test.want)
+		}
+		mustEmptyStdout(t, res)
+	}
+	if got := len(srv.Requests()); got != 0 {
+		t.Fatalf("a usage error sent %d requests: %v", got, requestLog(srv))
+	}
+
+	// The usage errors of a real supervised request are as they were.
+	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "request", "GET", "/v1/me"}})
+	if res.code != exitcode.Usage || strings.Contains(res.stderr.String(), "qurl requests") {
+		t.Fatalf("request GET /v1/me: exit %d, stderr %q", res.code, res.stderr.String())
+	}
+
+	for command, want := range map[string]string{
+		"request":  `To see who asked for access` + "\n" + `to your resources, use "qurl requests".`,
+		"requests": `"qurl request", without the s, is another command`,
+	} {
+		res := runCLI(t, &runOpts{args: []string{command, "--help"}})
+		if res.code != 0 || !strings.Contains(res.stdout.String(), want) {
+			t.Errorf("qurl %s --help does not name the other command (%q):\n%s", command, want, res.stdout.String())
+		}
+	}
+}
+
 // TestRequestsListsPendingRequests pins the two listings through the command:
 // the route each uses, the rows, the last line, the JSON document and
 // --quiet. The listing changes nothing.

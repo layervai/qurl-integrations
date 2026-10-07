@@ -983,6 +983,9 @@ first list when you publish.
 ### qurl requests, approve and deny
 
 These commands share a private resource with people who have no qURL CLI.
+`qurl request`, without the s, is another command: it makes one request for a
+supervising app (see [Supervised installs](#supervised-installs)). Each of the
+two names the other in its usage error.
 
 1. Turn access requests on: publish with `--allow-requests`, whether or not
    the target is already published as a private resource, or run

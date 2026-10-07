@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"net/http"
 	"regexp"
 	"strings"
 
@@ -46,6 +47,17 @@ func codeArgs(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// isHTTPMethod reports whether operand is one of the methods `qurl request`
+// takes as its first operand, in any case. No CRID is one of these words.
+func isHTTPMethod(operand string) bool {
+	switch strings.ToUpper(operand) {
+	case http.MethodGet, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
+		return true
+	default:
+		return false
+	}
+}
+
 func requestsCmd(opts *globalOpts) *cobra.Command {
 	var on, off, yes bool
 	cmd := &cobra.Command{
@@ -66,16 +78,25 @@ and refuse with "qurl deny <CRID> <code>".
 
 --on lets people ask for access to a private resource that is already
 published, and prints what to send them. --off stops new requests. To see who
-was approved, and to take one person's access away, use "qurl grants <CRID>".`,
+was approved, and to take one person's access away, use "qurl grants <CRID>".
+
+"qurl request", without the s, is another command: it makes one request for an
+app that supervises qURL.`,
 		Example: `  qurl requests
   qurl requests ` + exampleCRID + `
   qurl requests ` + exampleCRID + ` --on
   qurl requests ` + exampleCRID + ` --off`,
 		Args: func(cmd *cobra.Command, args []string) error {
-			if err := cobra.MaximumNArgs(1)(cmd, args); err != nil {
+			err := cobra.MaximumNArgs(1)(cmd, args)
+			switch {
+			case err == nil:
+				return nil
+			case isHTTPMethod(args[0]):
+				// A method and a path are the operands of `qurl request`.
+				return usageErrorWithHint(err, hintMeantRequest)
+			default:
 				return exitcode.UsageError(err)
 			}
-			return nil
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			switch {

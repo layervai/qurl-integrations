@@ -114,6 +114,12 @@ const (
 	// code, before any request is sent.
 	msgRequestCodeInvalid = "a request code is six digits, written as 123456, 123 456 or 123-456"
 
+	// `qurl request` and `qurl requests` differ by one letter and do unrelated
+	// things. Each one's usage error names the other where a person who typed
+	// the wrong name lands.
+	hintMeantRequests = "Hint: if you meant to see who asked for access to your resources, use `qurl requests`."
+	hintMeantRequest  = "Hint: if you meant to make a request for a supervising app, use `qurl request METHOD PATH`."
+
 	// msgNoKeyProvided is login's empty-input error.
 	msgNoKeyProvided = "no API key provided"
 
@@ -200,6 +206,8 @@ func customerMessages() []string {
 		msgRequestsOnAndOff,
 		msgRequestsSettingNeedsCRID,
 		msgRequestCodeInvalid,
+		hintMeantRequests,
+		hintMeantRequest,
 		msgNoKeyProvided,
 		msgAlreadyGone,
 		msgOpeningBrowser,
