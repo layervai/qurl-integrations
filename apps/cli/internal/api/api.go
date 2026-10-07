@@ -269,6 +269,9 @@ type Config struct {
 	Sleep func(time.Duration)
 	// NewRequestID mints the X-Request-Id value; nil means a random one.
 	NewRequestID func() string
+	// Now is the clock; nil means time.Now. Publish reads it once, to tell
+	// a resource this command made from one that existed before it.
+	Now func() time.Time
 	// HTTPClient is the underlying HTTP client. Nil, or an injected client with
 	// Timeout zero, gets a 30-second bound for each HTTP attempt. A nonzero
 	// timeout is preserved. A retryable logical request can span multiple
@@ -283,6 +286,16 @@ type client struct {
 	registeredDoer qurl.HTTPDoer
 	baseURL        string
 	authorize      func(context.Context, *http.Request) error
+	// now is Config.Now, or time.Now.
+	now func() time.Time
+}
+
+// clock returns the configured clock, or the wall clock.
+func clock(cfg *Config) func() time.Time {
+	if cfg.Now != nil {
+		return cfg.Now
+	}
+	return time.Now
 }
 
 // registeredClient exposes exactly Client. The concrete implementation also
@@ -315,6 +328,7 @@ func New(cfg *Config) (AccountClient, error) {
 		transport: tr,
 		baseURL:   trimBaseURL(cfg.BaseURL),
 		authorize: provider.Authorize,
+		now:       clock(cfg),
 	}, nil
 }
 
@@ -349,7 +363,7 @@ func NewRegistered(ctx context.Context, cfg *Config, store qurl.AgentStateStore)
 	}
 	core := &client{
 		sdk: sdk, transport: tr, registeredDoer: doer,
-		baseURL: trimBaseURL(cfg.BaseURL),
+		baseURL: trimBaseURL(cfg.BaseURL), now: clock(cfg),
 	}
 	return &registeredClient{Client: core}, nil
 }

@@ -611,6 +611,7 @@ func (o *globalOpts) accountConfig(key, owner string) *qurlapi.Config {
 		Verbose:      o.verboseLogger(),
 		Sleep:        o.sleep,
 		NewRequestID: o.newRequestID,
+		Now:          o.now,
 	}
 }
 
@@ -1023,6 +1024,7 @@ func (o *globalOpts) openRegisteredDeviceClient(ctx context.Context, origin stri
 		Verbose:      o.verboseLogger(),
 		Sleep:        o.sleep,
 		NewRequestID: o.newRequestID,
+		Now:          o.now,
 	}, store)
 }
 

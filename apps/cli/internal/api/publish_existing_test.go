@@ -6,7 +6,9 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/layervai/qurl-go/qurl"
 
@@ -14,6 +16,24 @@ import (
 )
 
 const existingTarget = "https://example.com/data"
+
+// firstCreateTime is the clock of the tests that judge whether a resource
+// was made by the publish under test: the moment its first create is sent.
+var firstCreateTime = time.Date(2026, 3, 2, 12, 0, 0, 0, time.UTC)
+
+// clockedClient is a client whose clock stands at firstCreateTime.
+func clockedClient(t *testing.T, srv *apitest.Server) Client {
+	t.Helper()
+	client, err := New(&Config{
+		BaseURL: srv.URL, APIKey: "lv_test_apitestingvalue123456789", Version: "test",
+		Sleep: func(time.Duration) {},
+		Now:   func() time.Time { return firstCreateTime },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return client
+}
 
 // sentCreates returns the body members of every create request the mock
 // received, in order.
@@ -218,21 +238,6 @@ func TestPublishHoldsTheSecondCreateToWhatWasMeant(t *testing.T) {
 			},
 		},
 		{
-			name: "public, just made", private: false, meta: map[string]any{"found_existing": false},
-			check: func(t *testing.T, srv *apitest.Server, result *Published, err error) {
-				var shown interface{ UserMessage() string }
-				if result != nil || !errors.Is(err, qurl.ErrInvalidAPIResponse) || !errors.As(err, &shown) || shown.UserMessage() != msgUnaskedPublicDeleted {
-					t.Fatalf("publish = %+v, %v, want the deleted-resource failure", result, err)
-				}
-				if strings.Contains(err.Error(), srv.Key.CRID) {
-					t.Fatalf("the failure names the CRID of a resource nobody asked for: %v", err)
-				}
-				if lines := sentRequests(srv); len(lines) != 3 || lines[2] != deletion(srv) {
-					t.Fatalf("requests = %v, want the two creates and then the delete", lines)
-				}
-			},
-		},
-		{
 			name: "public, and the answer does not say whether it existed", private: false,
 			check: func(t *testing.T, srv *apitest.Server, result *Published, err error) {
 				if result != nil || !errors.Is(err, qurl.ErrInvalidAPIResponse) || err.Error() != msgPrivateUnconfirmed {
@@ -265,18 +270,83 @@ func TestPublishHoldsTheSecondCreateToWhatWasMeant(t *testing.T) {
 			test.check(t, srv, result, err)
 		})
 	}
+}
+
+// TestPublishDeletesOnlyAResourceItsOwnRequestMade pins the two things that
+// must both hold before the command deletes the public resource a second
+// create answered with. A delete is final, so the answer's word that the
+// resource is new is not enough: its creation time must also be no older
+// than the moment this command sent its first create, less one minute for a
+// local clock that runs ahead of the service's. An answer with no creation
+// time, an older one, or one that is not a time is never acted on: nothing
+// is deleted, no CRID is named, and the publisher is sent to look at what
+// exists.
+func TestPublishDeletesOnlyAResourceItsOwnRequestMade(t *testing.T) {
+	at := func(offset time.Duration) string { return firstCreateTime.Add(offset).Format(time.RFC3339) }
+	for _, test := range []struct {
+		name      string
+		createdAt any
+		deleted   bool
+	}{
+		{name: "made after the first create", createdAt: at(2 * time.Second), deleted: true},
+		{name: "made at the first create", createdAt: at(0), deleted: true},
+		{name: "inside the clock tolerance", createdAt: at(-59 * time.Second), deleted: true},
+		{name: "at the clock tolerance", createdAt: at(-time.Minute), deleted: true},
+		{name: "just outside the clock tolerance", createdAt: at(-61 * time.Second)},
+		{name: "made a day before", createdAt: at(-24 * time.Hour)},
+		{name: "no creation time"},
+		{name: "a creation time of zero", createdAt: "0001-01-01T00:00:00Z"},
+		{name: "a creation time that is not a time", createdAt: "yesterday"},
+		{name: "a creation time that is not a string", createdAt: 1772366400},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			srv := apitest.NewServer(t)
+			srv.Script(http.MethodPost, "/v1/resources", publicExistsRefusal(t), func(w http.ResponseWriter, _ *http.Request) {
+				data := map[string]any{"resource_id": srv.Key.ResourceID, "crid": srv.Key.CRID, "status": "active", "private": false}
+				if test.createdAt != nil {
+					data["created_at"] = test.createdAt
+				}
+				apitest.WriteEnvelope(t, w, http.StatusCreated, data, map[string]any{"found_existing": false})
+			})
+			result, err := clockedClient(t, srv).Publish(t.Context(), existingTarget, PublishOptions{KeepExistingPublic: true})
+			wantSecondCreateWithoutPrivacy(t, srv)
+			var shown interface{ UserMessage() string }
+			if result != nil || !errors.Is(err, qurl.ErrInvalidAPIResponse) || !errors.As(err, &shown) {
+				t.Fatalf("publish = %+v, %v, want a failure with a message and no result", result, err)
+			}
+			if strings.Contains(err.Error(), srv.Key.CRID) || strings.Contains(shown.UserMessage(), srv.Key.CRID) {
+				t.Fatalf("the failure names the CRID: %v", err)
+			}
+			deletion := "DELETE /v1/resources/" + srv.Key.CRID
+			lines := sentRequests(srv)
+			if test.deleted {
+				if shown.UserMessage() != msgUnaskedPublicDeleted || len(lines) != 3 || lines[2] != deletion {
+					t.Fatalf("message %q, requests %v; want the deleted-resource failure after the two creates and the delete", shown.UserMessage(), lines)
+				}
+				return
+			}
+			if slices.Contains(lines, deletion) {
+				t.Fatalf("requests = %v: a resource was deleted without evidence that this command made it", lines)
+			}
+			if shown.UserMessage() != msgPrivateUnconfirmed || !strings.Contains(shown.UserMessage(), "run `qurl list` to check") {
+				t.Fatalf("message = %q, want the unconfirmed-privacy failure that sends the publisher to qurl list", shown.UserMessage())
+			}
+		})
+	}
 
 	// The new public resource could not be deleted: the failure says so and
 	// how to find it, and still names no CRID.
-	t.Run("public, just made, and the delete fails", func(t *testing.T) {
+	t.Run("the delete fails", func(t *testing.T) {
 		srv := apitest.NewServer(t)
 		srv.Script(http.MethodPost, "/v1/resources", publicExistsRefusal(t), func(w http.ResponseWriter, _ *http.Request) {
-			apitest.WriteEnvelope(t, w, http.StatusCreated, row(srv, false), map[string]any{"found_existing": false})
+			apitest.WriteEnvelope(t, w, http.StatusCreated, map[string]any{
+				"resource_id": srv.Key.ResourceID, "crid": srv.Key.CRID, "status": "active", "private": false, "created_at": at(time.Second),
+			}, map[string]any{"found_existing": false})
 		})
 		srv.Script(http.MethodDelete, "/v1/resources/"+srv.Key.CRID, func(w http.ResponseWriter, _ *http.Request) {
 			apitest.WriteProblem(t, w, http.StatusServiceUnavailable, "service_unavailable", "Service Unavailable", "try again")
 		})
-		result, err := newTestClient(t, srv, nil).Publish(t.Context(), existingTarget, PublishOptions{KeepExistingPublic: true})
+		result, err := clockedClient(t, srv).Publish(t.Context(), existingTarget, PublishOptions{KeepExistingPublic: true})
 		var shown interface{ UserMessage() string }
 		if result != nil || !errors.Is(err, qurl.ErrInvalidAPIResponse) || !errors.As(err, &shown) || shown.UserMessage() != msgUnaskedPublicNotDeleted {
 			t.Fatalf("publish = %+v, %v, want the not-deleted failure", result, err)
@@ -286,6 +356,48 @@ func TestPublishHoldsTheSecondCreateToWhatWasMeant(t *testing.T) {
 		}
 		if lines := sentRequests(srv); len(lines) != 3 {
 			t.Fatalf("requests = %v, want the two creates and one delete, not retried", lines)
+		}
+	})
+
+	// The clock is read once, before the first create is sent. Here an hour
+	// passes while the first create is answered. Read afterwards, the clock
+	// would make the new resource look an hour old and it would be left in
+	// place; read before, the resource is newer than the command, and it is
+	// deleted.
+	t.Run("the clock is read before the first create", func(t *testing.T) {
+		srv := apitest.NewServer(t)
+		var mu sync.Mutex
+		now, readings := firstCreateTime, 0
+		srv.Script(http.MethodPost, "/v1/resources",
+			func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				now = now.Add(time.Hour)
+				mu.Unlock()
+				publicExistsRefusal(t)(w, r)
+			},
+			func(w http.ResponseWriter, _ *http.Request) {
+				apitest.WriteEnvelope(t, w, http.StatusCreated, map[string]any{
+					"resource_id": srv.Key.ResourceID, "crid": srv.Key.CRID, "status": "active", "private": false, "created_at": at(time.Second),
+				}, map[string]any{"found_existing": false})
+			})
+		client, err := New(&Config{
+			BaseURL: srv.URL, APIKey: "lv_test_apitestingvalue123456789", Version: "test",
+			Now: func() time.Time {
+				mu.Lock()
+				defer mu.Unlock()
+				readings++
+				return now
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = client.Publish(t.Context(), existingTarget, PublishOptions{KeepExistingPublic: true})
+		var shown interface{ UserMessage() string }
+		mu.Lock()
+		defer mu.Unlock()
+		if !errors.As(err, &shown) || shown.UserMessage() != msgUnaskedPublicDeleted || readings != 1 {
+			t.Fatalf("error = %v after %d clock readings, want the deleted-resource failure after one reading", err, readings)
 		}
 	})
 }
