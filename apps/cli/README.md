@@ -1113,8 +1113,12 @@ one opens for anyone who has the CRID.
 again. `qurl deny` removes the request and gives no access. It takes the
 device id the listing shows, in the form `xxxx-xxxx-xxxx-xxxx`. It also takes
 a six-digit code in the same place, for a request whose code you were given
-and want to refuse. A request that is neither approved nor denied gives no
-access and expires by itself. `--off` stops new requests and says how many
+and want to refuse. A code that is not pending counts toward the service's
+limit on wrong codes: after 5 wrong codes for one resource within an hour, it
+refuses every code for that resource for a time, in `qurl approve` too. A
+denial by device id never counts, and is the usual way to refuse a request. A
+request that is neither approved nor denied gives no access and expires by
+itself. `--off` stops new requests and says how many
 approved people still have access.
 
 | Command | Flag | Description |

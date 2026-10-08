@@ -759,6 +759,12 @@ func TestAccessRequestCopySaysWhatTheServiceLimits(t *testing.T) {
 			"after 5 wrong codes for one resource within an hour, it refuses every code for that resource for a time, a right one included",
 			"does not try again by itself", "Ask the person for the code on their screen.",
 		},
+		// A denial by code can be a wrong code too, and its help says what
+		// that costs and which form never costs anything.
+		"qurl deny --help": {
+			"A code that is not pending counts toward the service's limit on wrong codes: after 5 wrong codes for one resource within an hour, it refuses every code for that resource for a time, in \"qurl approve\" too.",
+			"A denial by device id never counts, and is the usual way to refuse a request.",
+		},
 		"qurl grants --help": {
 			"From the first person removed on, every failure says exactly which device ids were removed and which were not",
 			"a failure that does not say so came before any access was taken away",
@@ -785,6 +791,8 @@ func TestAccessRequestCopySaysWhatTheServiceLimits(t *testing.T) {
 		"After 5 wrong codes for one resource within an hour, it answers qurl approve, and qurl deny with a code, with \"too many requests\" (exit code 9) for a time, whatever the code, a right one included.",
 		"does not try again by itself: another attempt could be one more wrong code. Ask the person for the code on their screen.",
 		"qurl deny with a device id is not limited.",
+		"A code that is not pending counts toward the service's limit on wrong codes: after 5 wrong codes for one resource within an hour, it refuses every code for that resource for a time, in qurl approve too.",
+		"A denial by device id never counts, and is the usual way to refuse a request.",
 		"From the first person removed on, every failure says exactly what happened",
 		"a list that cannot be read again after the removals", "a list that still shows a person the service said it removed",
 		"A failure that says none of this came before any access was taken away.",

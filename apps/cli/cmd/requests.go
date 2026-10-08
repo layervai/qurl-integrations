@@ -255,6 +255,11 @@ xxxx-xxxx-xxxx-xxxx, as "qurl requests <CRID>" shows it. If the person gave
 you their six-digit code and you want to refuse it, the code is accepted in
 the same place: write it as 123456, 123 456 or 123-456.
 
+A code that is not pending counts toward the service's limit on wrong codes:
+after 5 wrong codes for one resource within an hour, it refuses every code for
+that resource for a time, in "qurl approve" too. A denial by device id never
+counts, and is the usual way to refuse a request.
+
 A request that is not approved gives no access and expires by itself. To take
 away access you already approved, use "qurl grants <CRID> --remove <device id>"
 instead.`,
