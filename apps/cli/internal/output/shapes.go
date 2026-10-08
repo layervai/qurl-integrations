@@ -16,6 +16,11 @@ import (
 
 type publishJSON struct {
 	Private *bool `json:"private,omitempty"`
+	// KeptPublic is true, and otherwise absent, when the target was already
+	// published as public and a publish that named no privacy kept it. It
+	// tells that case from --public on an existing resource, which has the
+	// same private: false and found_existing: true, without reading stderr.
+	KeptPublic bool `json:"kept_public,omitempty"`
 	// AccessRequests is present when the service's answer said whether people
 	// can ask for access. ResourceURL is the resource's address on the link
 	// site, present only when access requests are on and this install knows
@@ -175,7 +180,7 @@ func (p *Printer) Publish(res *qurlapi.Published) error {
 		case res.KeptPublic:
 			// The warning says the target was published before, so it takes
 			// the place of the replay note.
-			p.Warnf(msgPublishKeptPublic, res.CRID)
+			p.Warnf("%s", keptPublicWarning(res))
 		case res.AccessRequestsTurnedOn:
 			p.Notef(msgPublishRequestsTurnedOn)
 		case foundExisting(res):
@@ -186,6 +191,7 @@ func (p *Printer) Publish(res *qurlapi.Published) error {
 	case p.format == FormatJSON:
 		return p.writeJSON(publishJSON{
 			Private:        res.Private,
+			KeptPublic:     res.KeptPublic,
 			AccessRequests: res.AccessRequests,
 			ResourceURL:    requestAddress(res),
 			CRID:           res.CRID,
@@ -406,10 +412,10 @@ func (p *Printer) publishText(res *qurlapi.Published) error {
 	// found_existing is newer than CRID minting — but the wording is
 	// unconditional, so the guard keeps it from ever contradicting itself.
 	switch {
-	case res.KeptPublic && res.CRID != "":
+	case res.KeptPublic:
 		// In the document, so it is read with the Access row it explains,
 		// and never dim: a publisher who did not choose public must see it.
-		ew.printf("\n%s %s\n", p.style(ansiBold+ansiYellow, labelWarning), fmt.Sprintf(msgPublishKeptPublic, res.CRID))
+		ew.printf("\n%s %s\n", p.style(ansiBold+ansiYellow, labelWarning), keptPublicWarning(res))
 	case res.AccessRequestsTurnedOn && res.CRID != "":
 		// The publish changed the resource it found, and the one line says
 		// so. The other note's next step, deleting the resource, is not
@@ -442,6 +448,18 @@ func requestAddress(res *qurlapi.Published) string {
 		return ""
 	}
 	return res.LinkSiteURL
+}
+
+// keptPublicWarning is the text of the warning for a kept public resource,
+// the same in every output mode. The warning is shown whenever a resource
+// was kept, so it does not depend on the CRID: the command it names has the
+// resource's CRID in it, and the placeholder if a result ever had none.
+func keptPublicWarning(res *qurlapi.Published) string {
+	id := res.CRID
+	if id == "" {
+		id = placeholderCRID
+	}
+	return fmt.Sprintf(msgPublishKeptPublic, id)
 }
 
 func foundExisting(res *qurlapi.Published) bool {

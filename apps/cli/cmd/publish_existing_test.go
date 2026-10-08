@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	connectorshare "github.com/layervai/qurl-connector/pkg/share"
 
@@ -113,6 +115,7 @@ func TestPublishWithNoPrivacyFlagKeepsAPublicTarget(t *testing.T) {
 					default:
 						var document struct {
 							Private       *bool  `json:"private"`
+							KeptPublic    *bool  `json:"kept_public"`
 							FoundExisting *bool  `json:"found_existing"`
 							CRID          string `json:"crid"`
 						}
@@ -121,6 +124,10 @@ func TestPublishWithNoPrivacyFlagKeepsAPublicTarget(t *testing.T) {
 						}
 						if document.Private == nil || *document.Private || document.FoundExisting == nil || !*document.FoundExisting || document.CRID != srv.Key.CRID {
 							t.Fatalf("publish -o json = %s", stdout)
+						}
+						// The member a script reads instead of stderr.
+						if document.KeptPublic == nil || !*document.KeptPublic {
+							t.Fatalf("publish -o json lacks kept_public: true: %s", stdout)
 						}
 						if stderr != warning {
 							t.Fatalf("stderr = %q, want the warning alone", stderr)
@@ -149,28 +156,75 @@ func TestPublishWithNoPrivacyFlagOfAPrivateTargetIsUnchanged(t *testing.T) {
 	}
 }
 
+// TestPublishJSONSaysKeptPublicOnlyForAKeptResource pins the JSON member that
+// tells a kept public resource from every other publish: it is absent, never
+// false, for a new resource, for a private one that was found, and for
+// --public on a resource that is already public. That last document is
+// otherwise the same as a kept one, private: false and found_existing: true.
+func TestPublishJSONSaysKeptPublicOnlyForAKeptResource(t *testing.T) {
+	for _, test := range []struct {
+		name           string
+		flags          []string
+		found, private bool
+	}{
+		{name: "new and private", private: true},
+		{name: "new and public", flags: []string{"--public"}},
+		{name: "found, private", found: true, private: true},
+		{name: "found, public, asked for with --public", flags: []string{"--public"}, found: true},
+	} {
+		srv := apitest.NewServer(t)
+		srv.SetResourceAccess(test.private)
+		srv.SetPublishFoundExisting(test.found)
+		args := append([]string{"--endpoint", srv.URL, "publish", privacyRemoteTarget, "-o", "json"}, test.flags...)
+		res := runCLI(t, &runOpts{args: args})
+		var document map[string]json.RawMessage
+		if err := json.Unmarshal(res.stdout.Bytes(), &document); res.code != 0 || err != nil {
+			t.Fatalf("%s: exit %d, %v: %s%s", test.name, res.code, err, res.stdout.String(), res.stderr.String())
+		}
+		if value, present := document["kept_public"]; present {
+			t.Errorf("%s: publish -o json has kept_public: %s", test.name, value)
+		}
+		if got, want := string(document["private"]), strconv.FormatBool(test.private); got != want {
+			t.Errorf("%s: private = %s, want %s", test.name, got, want)
+		}
+	}
+}
+
+// scriptUnaskedPublicResource makes the mock play an older service in the
+// race: the first create is refused because the target exists, and the
+// second, which states no privacy, is answered with a public resource the
+// answer says was just made. createdAt is the creation time in that answer,
+// left out when empty.
+func scriptUnaskedPublicResource(t *testing.T, srv *apitest.Server, createdAt string) {
+	t.Helper()
+	srv.PlayPublicByDefault()
+	srv.Script(http.MethodPost, "/v1/resources",
+		func(w http.ResponseWriter, _ *http.Request) {
+			apitest.WriteProblem(t, w, http.StatusBadRequest, "invalid_input", "Invalid Input", apitest.LegacyAccessSettingsDetail)
+		},
+		func(w http.ResponseWriter, _ *http.Request) {
+			data := map[string]any{"resource_id": srv.Key.ResourceID, "crid": srv.Key.CRID, "private": false, "status": "active"}
+			if createdAt != "" {
+				data["created_at"] = createdAt
+			}
+			apitest.WriteEnvelope(t, w, http.StatusCreated, data, map[string]any{"found_existing": false})
+		})
+}
+
 // TestPublishNeverKeepsAPublicResourceThatWasJustMade pins the one answer to
 // the second create that must not be kept. Between the two creates the
 // existing resource went away, and an older service answers a create that
 // states no privacy by making a public resource. Nobody asked for one: the
 // command deletes it, prints no CRID anywhere, and fails. A local publish
-// stops before its Connector resource request.
+// stops before its Connector resource request. The creation time in the
+// answer is the moment the command ran, which is what lets it delete.
 func TestPublishNeverKeepsAPublicResourceThatWasJustMade(t *testing.T) {
 	for _, local := range []bool{false, true} {
 		for _, deleteFails := range []bool{false, true} {
 			for _, mode := range [][]string{nil, {"-o", "json"}, {"--quiet"}} {
 				t.Run(fmt.Sprintf("local=%t/delete_fails=%t/%v", local, deleteFails, mode), func(t *testing.T) {
 					srv := apitest.NewServer(t)
-					srv.PlayPublicByDefault()
-					srv.Script(http.MethodPost, "/v1/resources",
-						func(w http.ResponseWriter, _ *http.Request) {
-							apitest.WriteProblem(t, w, http.StatusBadRequest, "invalid_input", "Invalid Input", apitest.LegacyAccessSettingsDetail)
-						},
-						func(w http.ResponseWriter, _ *http.Request) {
-							apitest.WriteEnvelope(t, w, http.StatusCreated, map[string]any{
-								"resource_id": srv.Key.ResourceID, "crid": srv.Key.CRID, "private": false, "status": "active",
-							}, map[string]any{"found_existing": false})
-						})
+					scriptUnaskedPublicResource(t, srv, fixedNow.Format(time.RFC3339))
 					if deleteFails {
 						srv.Script(http.MethodDelete, "/v1/resources/"+srv.Key.CRID, func(w http.ResponseWriter, _ *http.Request) {
 							apitest.WriteProblem(t, w, http.StatusServiceUnavailable, "service_unavailable", "Service Unavailable", "try again")
@@ -201,6 +255,52 @@ func TestPublishNeverKeepsAPublicResourceThatWasJustMade(t *testing.T) {
 					}
 					if log := sentLog(srv); !slices.Equal(log, []string{"POST /v1/resources", "POST /v1/resources", "DELETE /v1/resources/" + srv.Key.CRID}) {
 						t.Fatalf("requests = %v, want the two creates and one delete", log)
+					}
+				})
+			}
+		}
+	}
+}
+
+// TestPublishDeletesNothingItCannotShowItMade pins the second thing the
+// command needs before it deletes: a creation time in the answer that is no
+// older than the command's first create. A delete is final, and the answer's
+// word that the resource is new is one member of one answer. When the
+// creation time is older, or is not there, the resource may be the one that
+// was published before: nothing is deleted, no CRID is printed, the exit
+// code is 10, and the message sends the publisher to `qurl list`.
+func TestPublishDeletesNothingItCannotShowItMade(t *testing.T) {
+	for name, createdAt := range map[string]string{
+		"a day before the command":       fixedNow.Add(-24 * time.Hour).Format(time.RFC3339),
+		"two minutes before the command": fixedNow.Add(-2 * time.Minute).Format(time.RFC3339),
+		"no creation time":               "",
+	} {
+		for _, local := range []bool{false, true} {
+			for _, mode := range [][]string{nil, {"-o", "json"}, {"--quiet"}} {
+				t.Run(fmt.Sprintf("%s/local=%t/%v", name, local, mode), func(t *testing.T) {
+					srv := apitest.NewServer(t)
+					scriptUnaskedPublicResource(t, srv, createdAt)
+					opts := &runOpts{args: []string{"--endpoint", srv.URL, "publish", privacyRemoteTarget}}
+					if local {
+						opts = refusingLocalPublish(t, srv)
+					}
+					opts.args = append(opts.args, mode...)
+					res := runCLI(t, opts)
+					if res.code != exitcode.ServerError {
+						t.Fatalf("exit = %d, want %d; stderr: %s", res.code, exitcode.ServerError, res.stderr.String())
+					}
+					mustEmptyStdout(t, res)
+					stderr := res.stderr.String()
+					for _, part := range []string{"the service did not confirm that this resource is private, so no CRID was printed", "run `qurl list` to check"} {
+						if !strings.Contains(stderr, part) {
+							t.Errorf("stderr lacks %q:\n%s", part, stderr)
+						}
+					}
+					if strings.Contains(stderr, srv.Key.CRID) || strings.Contains(stderr, "deleted it") {
+						t.Errorf("stderr names the CRID or claims a delete:\n%s", stderr)
+					}
+					if log := sentLog(srv); !slices.Equal(log, []string{"POST /v1/resources", "POST /v1/resources"}) {
+						t.Fatalf("requests = %v, want the two creates and no delete", log)
 					}
 				})
 			}
@@ -329,7 +429,9 @@ func TestPublishCopySaysWhatHappensToATargetPublishedBefore(t *testing.T) {
 		"those resources are still public",
 		"qurl publish for such a target with no privacy flag keeps working",
 		collapse(strings.ReplaceAll(keptPublicWarning("<CRID>"), "`", "")),
-		"The warning is part of the text output, and goes to stderr with -o json and --quiet; JSON says private: false.",
+		"The warning is part of the text output, and goes to stderr with -o json and --quiet; JSON says private: false and kept_public: true.",
+		"the document also has kept_public: true; the member is absent otherwise",
+		"Fields that only sometimes apply (found_existing, kept_public, already_gone) are omitted",
 		"A publish never turns a public resource private, and it never makes a new public resource unless you pass --public.",
 		"--allow-device-key with a list other than the one the resource has",
 	} {

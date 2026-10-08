@@ -255,6 +255,7 @@ func (c *client) Publish(ctx context.Context, targetURL string, opts PublishOpti
 	// Publish has no service idempotency key. A rate-limit response is usually
 	// pre-application, but the client cannot prove that a replay would not mint
 	// a duplicate resource, so it is deliberately single-shot.
+	firstCreateSentAt := c.now()
 	reply, err := c.doRESTOnce(ctx, http.MethodPost, "/v1/resources", body)
 	if err != nil {
 		return nil, err
@@ -264,7 +265,7 @@ func (c *client) Publish(ctx context.Context, targetURL string, opts PublishOpti
 		if !mayKeepExistingPublic(&opts, refusal) {
 			return nil, refusal
 		}
-		return c.keepExistingPublic(ctx, &body, refusal)
+		return c.keepExistingPublic(ctx, &body, refusal, firstCreateSentAt)
 	}
 	published, allowedDeviceKeys, err := publishedFromReply(reply)
 	if err != nil {
@@ -347,6 +348,24 @@ func mayKeepExistingPublic(opts *PublishOptions, refusal error) bool {
 	return conflict.Existing == ExistingAccessPublic || conflict.Existing == ExistingAccessUnknown
 }
 
+// createdAtClockTolerance is how far before this command's first create the
+// created_at of a resource may lie for the resource to still count as made by
+// this command. created_at is read from the service's clock and the moment
+// the first create was sent from this machine's, so the two are compared with
+// room for a local clock that runs ahead. The room is small on purpose. A
+// wider one would let a resource that existed shortly before the command
+// pass as new. A local clock that is further ahead only means that a new
+// resource is left in place and the publisher is told to look, which is the
+// safe side: a delete cannot be undone.
+const createdAtClockTolerance = time.Minute
+
+// madeSince reports whether createdAt says that a resource was made after
+// this command sent its first create: it is present and not older than that
+// moment, less the clock tolerance.
+func madeSince(createdAt *time.Time, firstCreateSentAt time.Time) bool {
+	return createdAt != nil && !createdAt.Before(firstCreateSentAt.Add(-createdAtClockTolerance))
+}
+
 // keepExistingPublic finishes a publish that named no privacy and was refused
 // because the target is already published as public. A person who published a
 // target while public was the default, and publishes it again after an
@@ -364,9 +383,21 @@ func mayKeepExistingPublic(opts *PublishOptions, refusal error) bool {
 // resource went away between the two requests. It is deleted, and the
 // publish fails without naming a CRID.
 //
+// A delete is final: the CRID never comes back. So the command deletes only
+// what two things in the answer say this request made. The answer must say
+// the resource did not exist before, and its creation time must not be older
+// than firstCreateSentAt, the moment this command sent its first create. An
+// answer that lacks either, or that cannot be read, is not acted on: the
+// publish fails with the unconfirmed-privacy message, which sends the
+// publisher to look at what exists.
+//
+// TODO(upstream-contract): the delete rests on two members of the service's
+// create answer: meta.found_existing is false only for a resource this
+// request made, and data.created_at is the time the resource was made.
+//
 // refusal is the first answer. It is what the publisher is told when the
 // second request is refused for the same kind of reason.
-func (c *client) keepExistingPublic(ctx context.Context, body *publishRequest, refusal error) (*Published, error) {
+func (c *client) keepExistingPublic(ctx context.Context, body *publishRequest, refusal error, firstCreateSentAt time.Time) (*Published, error) {
 	again := *body
 	again.Private = nil
 	reply, err := c.doRESTOnce(ctx, http.MethodPost, "/v1/resources", again)
@@ -381,7 +412,10 @@ func (c *client) keepExistingPublic(ctx context.Context, body *publishRequest, r
 	}
 	published, _, err := publishedFromReply(reply)
 	if err != nil {
-		return nil, err
+		// The service accepted a create that stated no privacy, and its
+		// answer cannot be read, a creation time that is not a time
+		// included. A resource may exist and nothing says what it is like.
+		return nil, &publishPrivacyError{}
 	}
 	switch {
 	case published.Private == nil:
@@ -396,6 +430,11 @@ func (c *client) keepExistingPublic(ctx context.Context, body *publishRequest, r
 	case *published.FoundExisting:
 		published.KeptPublic = true
 		return published, nil
+	case !madeSince(published.CreatedAt, firstCreateSentAt):
+		// The answer says the resource is new, and its creation time does
+		// not bear that out. It may be the one that was published before,
+		// so it is left alone.
+		return nil, &publishPrivacyError{}
 	}
 	if _, err := c.Delete(ctx, published.CRID); err != nil {
 		return nil, &unaskedPublicError{notDeleted: err}
@@ -983,13 +1022,14 @@ func trimBaseURL(base string) string {
 // TODO(upstream-contract): PATCH returns 200 with a flat data resource row,
 // including type, status, privacy and grants; GET nests its row under resource.
 func (c *client) SetDeviceGrants(ctx context.Context, id string, keys []string) (*ResourceSummary, error) {
-	if err := ValidateRequestTarget(http.MethodPatch, "/v1/resources/"+id); err != nil {
+	id, path, err := deviceGrantsPath(id)
+	if err != nil {
 		return nil, err
 	}
 	if keys == nil {
 		keys = []string{}
 	}
-	reply, err := c.doRESTOnce(ctx, http.MethodPatch, "/v1/resources/"+id, map[string]any{"allowed_device_keys": keys})
+	reply, err := c.doRESTOnce(ctx, http.MethodPatch, path, map[string]any{"allowed_device_keys": keys})
 	if err != nil {
 		return nil, err
 	}
@@ -1009,6 +1049,22 @@ func (c *client) SetDeviceGrants(ctx context.Context, id string, keys []string) 
 		return nil, fmt.Errorf("%w: API did not confirm the device grants", qurl.ErrInvalidAPIResponse)
 	}
 	return summarizeResourceRow(&env.Data, "device grants")
+}
+
+// deviceGrantsPath returns the trimmed identifier and the escaped path of the
+// resource a grant change is sent to, as every method here builds its path.
+// The path is also held to the routes a device credential may use, so an
+// identifier that could never name a resource is refused before a request.
+func deviceGrantsPath(id string) (trimmed, path string, err error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return "", "", fmt.Errorf("%w: resource identifier must not be empty", qurl.ErrInvalidResourceRequest)
+	}
+	path = "/v1/resources/" + url.PathEscape(id)
+	if err := ValidateRequestTarget(http.MethodPatch, path); err != nil {
+		return "", "", err
+	}
+	return id, path, nil
 }
 
 // deviceGrantEdit is the PATCH body that adds and removes single device keys.
@@ -1039,10 +1095,11 @@ func (c *client) EditDeviceGrants(ctx context.Context, id string, add, remove []
 			return nil, fmt.Errorf("%w: a device key cannot be both added and removed", qurl.ErrInvalidResourceRequest)
 		}
 	}
-	if err := ValidateRequestTarget(http.MethodPatch, "/v1/resources/"+id); err != nil {
+	id, path, err := deviceGrantsPath(id)
+	if err != nil {
 		return nil, err
 	}
-	reply, err := c.doRESTOnce(ctx, http.MethodPatch, "/v1/resources/"+id, deviceGrantEdit{Add: add, Remove: remove})
+	reply, err := c.doRESTOnce(ctx, http.MethodPatch, path, deviceGrantEdit{Add: add, Remove: remove})
 	if err != nil {
 		return nil, err
 	}

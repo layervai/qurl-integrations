@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -118,9 +119,16 @@ type runOpts struct {
 	// refusing fake, so no hermetic test can ever send a real access request
 	// (the clisandbox journey uses the production wiring via realOpener).
 	enterPortalGrant func(ctx context.Context, link string) (consume.AccessGrant, error)
-	// realOpener keeps the production access opener in place instead of the
-	// refusing fake. Only the clisandbox-tagged live suite sets it.
+	// realOpener keeps the production access opener and the production HTTP
+	// client in place instead of the refusing fakes. Only the clisandbox-tagged
+	// live suite sets it to send. The production HTTP client additionally
+	// needs that build tag: in the default build this option leaves the guard
+	// in place.
 	realOpener bool
+	// egress replaces the HTTP boundary every API client sends through; nil
+	// means a guard that fails this test on a request to any host other than
+	// this machine. Only the guard's own tests pass one.
+	egress     *egressGuard
 	verifyLink func(context.Context, string, string) error
 	// cridLinkOffered is the injected answer to "can this machine ask for a
 	// link with only a CRID at all". nil means the answer the shipped
@@ -186,10 +194,18 @@ type runResult struct {
 	stdout bytes.Buffer
 	stderr bytes.Buffer
 	code   int
+	// httpClient is the HTTP client the invocation's API clients sent with,
+	// read back from the command tree's own options: nil is the production
+	// client.
+	httpClient *http.Client
 }
 
 // runCLI executes the real command tree with injected process context: no
-// real environment, no real TTYs, a fixed clock, and recorded sleeps.
+// real environment, no real TTYs, a fixed clock, recorded sleeps, and qURL API
+// clients that cannot send past this machine. That last fence covers the API
+// client only. The access opener is a separate boundary that is refused by
+// default below; the native runtime and the target preflight are replaced only
+// when a test injects one, and are otherwise the production implementations.
 func runCLI(t *testing.T, o *runOpts) *runResult {
 	t.Helper()
 
@@ -265,6 +281,16 @@ func runCLI(t *testing.T, o *runOpts) *runResult {
 			g.resolveHubBootstrap = func() (qurl.HubBootstrap, error) { return qurl.HubBootstrap{}, nil }
 		}
 		g.openBrowser = browser.open
+		switch {
+		case o.egress != nil:
+			g.httpClient = o.egress.client()
+		case o.realOpener && liveJourneysBuilt:
+			// nil is the production default: a live journey names a real
+			// endpoint on purpose. The build tag is part of the condition so
+			// that no test in the default build can switch the guard off.
+		default:
+			g.httpClient = newEgressGuard(t).client()
+		}
 		if o.verifyLink != nil {
 			g.verifyLink = o.verifyLink
 		} else if !o.realOpener {
@@ -367,6 +393,7 @@ func runCLI(t *testing.T, o *runOpts) *runResult {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	res.httpClient = opts.httpClient
 	res.code = run(ctx, root, opts)
 	return res
 }

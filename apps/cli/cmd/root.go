@@ -75,6 +75,10 @@ type globalOpts struct {
 	openBrowser func(ctx context.Context, link string) error
 	// Browser authentication is injected separately from command wiring tests.
 	signInAccount func(context.Context, *qurlapi.Config, func(context.Context, string) error) (string, error)
+	// httpClient is the HTTP client every qURL API client sends with. Nil is
+	// the production default; the test harness injects one that refuses a
+	// request to any host other than this machine.
+	httpClient *http.Client
 	// enterPortalGrant asks the qURL platform for direct access to an
 	// already-verified link and retains both its application authorization and
 	// acknowledged lifetime. Tests always inject (the harness refuses by
@@ -623,6 +627,8 @@ func (o *globalOpts) accountConfig(key, owner string) *qurlapi.Config {
 		Verbose:      o.verboseLogger(),
 		Sleep:        o.sleep,
 		NewRequestID: o.newRequestID,
+		HTTPClient:   o.httpClient,
+		Now:          o.now,
 	}
 }
 
@@ -1035,6 +1041,8 @@ func (o *globalOpts) openRegisteredDeviceClient(ctx context.Context, origin stri
 		Verbose:      o.verboseLogger(),
 		Sleep:        o.sleep,
 		NewRequestID: o.newRequestID,
+		HTTPClient:   o.httpClient,
+		Now:          o.now,
 	}, store)
 }
 
