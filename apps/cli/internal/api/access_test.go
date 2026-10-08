@@ -455,6 +455,24 @@ func TestSetAccessRequests(t *testing.T) {
 		}
 	}
 
+	// The path is built as every request here builds it: the identifier is
+	// trimmed, and one that could never name a resource is refused before
+	// any request.
+	t.Run("the identifier", func(t *testing.T) {
+		srv := apitest.NewServer(t)
+		if _, err := newTestClient(t, srv, nil).SetAccessRequests(t.Context(), "  "+srv.Key.CRID+"\n", true); err != nil {
+			t.Fatalf("a padded identifier: %v", err)
+		}
+		if lines := requestLines(srv); !slices.Equal(lines, []string{"PATCH /v1/resources/" + srv.Key.CRID}) {
+			t.Fatalf("requests = %v, want one change to the trimmed identifier", lines)
+		}
+		for _, id := range []string{"", "   ", "a/b", "a b", "../" + srv.Key.CRID, srv.Key.CRID + "?x=1"} {
+			srv := apitest.NewServer(t)
+			if _, err := newTestClient(t, srv, nil).SetAccessRequests(t.Context(), id, true); err == nil || len(srv.Requests()) != 0 {
+				t.Fatalf("identifier %q: error %v after %d requests, want a refusal before any request", id, err, len(srv.Requests()))
+			}
+		}
+	})
 	t.Run("older service", func(t *testing.T) {
 		srv := apitest.NewServer(t)
 		srv.PlayNoAccessRequests()

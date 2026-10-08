@@ -128,10 +128,13 @@ func (c *client) doAccess(ctx context.Context, method, path string, body any, al
 // access requests ignores the member and answers with a row that does not
 // have it; that answer fails here instead of being reported as a change.
 func (c *client) SetAccessRequests(ctx context.Context, id string, on bool) (*ResourceSummary, error) {
-	if err := ValidateRequestTarget(http.MethodPatch, "/v1/resources/"+id); err != nil {
+	// The setting is changed on the route a grant change uses, and the path
+	// is built the same way: the identifier trimmed and escaped.
+	id, path, err := deviceGrantsPath(id)
+	if err != nil {
 		return nil, err
 	}
-	reply, err := c.doRESTOnce(ctx, http.MethodPatch, "/v1/resources/"+id, struct {
+	reply, err := c.doRESTOnce(ctx, http.MethodPatch, path, struct {
 		AccessRequests bool `json:"access_requests"`
 	}{AccessRequests: on})
 	if err != nil {
