@@ -255,6 +255,25 @@ func (e *AccessRequestsNotTurnedOnError) Reason() string {
 
 func (e *AccessRequestsNotTurnedOnError) Unwrap() error { return e.cause }
 
+// RequestCodeLimitError is a "too many requests" answer to an approval or to
+// a denial by code. The service limits wrong codes for one resource, and
+// while the limit holds it refuses every code for that resource, a right one
+// included. The answer is the service's: its sentence, and how long it asked
+// the caller to wait. What this adds is what a publisher does next, which is
+// to ask the person for the code on their screen.
+//
+// The client does not send such a request again by itself. Another attempt
+// could be one more wrong code, and the wait can be an hour.
+type RequestCodeLimitError struct {
+	// Problem is the service's answer.
+	Problem *Error
+}
+
+func (e *RequestCodeLimitError) Error() string { return e.Problem.Error() }
+
+// Unwrap exposes the service's answer, which decides the exit code.
+func (e *RequestCodeLimitError) Unwrap() error { return e.Problem }
+
 // accessRequestsNotPrivateError is an answer that turned access requests on
 // for a resource it does not say is private: public says that it says the
 // resource is public. Nothing about the resource may then be presented as

@@ -289,6 +289,28 @@ func TestGrantsRemoveSaysWhoLostAccessWhateverFailsNext(t *testing.T) {
 	})
 }
 
+// TestGrantsRemoveTakesADeviceIDWithSpaceAroundIt pins that a device id
+// pasted with a space before or after it is still a device id, as it is for
+// `qurl deny`, and is not read as a public key that cannot be one.
+func TestGrantsRemoveTakesADeviceIDWithSpaceAroundIt(t *testing.T) {
+	for _, written := range []string{" " + requesterDevice, requesterDevice + " ", "\t" + strings.ToUpper(requesterDevice) + "\n"} {
+		srv := twoApproved(t)
+		res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "grants", srv.Key.CRID, "--remove", written}})
+		if res.code != 0 {
+			t.Fatalf("--remove %q: exit %d, stderr %q", written, res.code, res.stderr.String())
+		}
+		if got := approvedDevices(t, srv); !slices.Equal(got, []string{otherDevice}) {
+			t.Fatalf("--remove %q: approved people = %v", written, got)
+		}
+	}
+	// The same id twice is still the same id twice.
+	srv := twoApproved(t)
+	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "grants", srv.Key.CRID, "--remove", requesterDevice, "--remove", " " + requesterDevice}})
+	if res.code != exitcode.Usage || !strings.Contains(res.stderr.String(), msgGrantsRemoveTwice) || len(srv.Requests()) != 0 {
+		t.Fatalf("the same id twice: exit %d, %d requests, stderr %q", res.code, len(srv.Requests()), res.stderr.String())
+	}
+}
+
 // TestRequestsOnSaysNothingIsSafeToSendUnlessTheResourceIsPrivate pins the
 // one sentence in this feature that must never be wrong. After `qurl
 // requests <CRID> --on` the command says that the resource's address is safe
@@ -365,5 +387,298 @@ func TestRequestsOnSaysNothingIsSafeToSendUnlessTheResourceIsPrivate(t *testing.
 	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "requests", srv.Key.CRID, "--on"}, linkSite: testLinkSite})
 	if res.code != 0 || !strings.Contains(res.stdout.String(), "safe to send to anyone: a private resource opens only for you and the people you allow.") {
 		t.Fatalf("a private resource: exit %d\n%s%s", res.code, res.stdout.String(), res.stderr.String())
+	}
+}
+
+// wrongCodesSpent gives the mock as many wrong codes as the service allows
+// for one resource, so that the next approval or denial by code is limited.
+func wrongCodesSpent(t *testing.T, srv *apitest.Server) {
+	t.Helper()
+	for range apitest.WrongCodeLimit {
+		res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "approve", srv.Key.CRID, "000000"}})
+		if res.code != exitcode.NotFound {
+			t.Fatalf("a wrong code before the limit: exit %d, stderr %q", res.code, res.stderr.String())
+		}
+	}
+}
+
+// TestTooManyWrongCodes pins what `qurl approve` and `qurl deny <code>` do
+// when the service's limit on wrong codes is reached: the service's own
+// sentence, how long to wait, in words, the line that says to ask the
+// person for the code on their screen, and the exit code for "too many
+// requests", in every output mode, with nothing on stdout.
+//
+// The command sends the request once. It does not wait and try again by
+// itself, as it does for a read: another attempt could be one more wrong
+// code, and the wait can be an hour. A right code is refused during the
+// limit too, and gives nobody access.
+func TestTooManyWrongCodes(t *testing.T) {
+	want := "Error: Too Many Requests (HTTP 429)\n\n" +
+		"  Too many wrong codes were tried for this resource. Try again later.\n\n" +
+		"  Try again in 1 hour.\n" +
+		"  Ask the person for the code on their screen.\n" +
+		"  Request ID: req_test\n"
+	for _, test := range []struct {
+		name, method, suffix string
+		args                 []string
+	}{
+		{name: "approve with a wrong code", method: "POST", suffix: "111111/approve", args: []string{"approve", "111111"}},
+		{name: "approve with the right code", method: "POST", suffix: requestCode + "/approve", args: []string{"approve", requestCode}},
+		{name: "deny with a wrong code", method: "DELETE", suffix: "111111", args: []string{"deny", "111111"}},
+		{name: "deny with the right code", method: "DELETE", suffix: requestCode, args: []string{"deny", requestCode}},
+	} {
+		for _, mode := range [][]string{nil, {"-o", "json"}, {"--quiet"}} {
+			t.Run(fmt.Sprintf("%s %v", test.name, mode), func(t *testing.T) {
+				srv := apitest.NewServer(t)
+				twoRequests(srv)
+				wrongCodesSpent(t, srv)
+				sent := len(srv.Requests())
+				var sleeps []time.Duration
+				res := runCLI(t, &runOpts{args: append([]string{"--endpoint", srv.URL, test.args[0], srv.Key.CRID, test.args[1]}, mode...), sleeps: &sleeps})
+				if res.code != exitcode.RateLimited || res.stderr.String() != want {
+					t.Fatalf("exit = %d, want %d; stderr =\n%s\nwant\n%s", res.code, exitcode.RateLimited, res.stderr.String(), want)
+				}
+				mustEmptyStdout(t, res)
+				route := test.method + " /v1/resources/" + srv.Key.CRID + "/access-requests/" + test.suffix
+				if got := requestLog(srv)[sent:]; !slices.Equal(got, []string{route}) {
+					t.Fatalf("requests = %v, want %q once and nothing else", got, route)
+				}
+				if len(sleeps) != 0 {
+					t.Fatalf("the command waited %v to try again by itself", sleeps)
+				}
+				if got := approvedDevices(t, srv); len(got) != 0 {
+					t.Fatalf("approved people = %v, want nobody", got)
+				}
+				if pending := pendingDevices(t, srv); len(pending) != 2 {
+					t.Fatalf("pending = %v, want both requests", pending)
+				}
+			})
+		}
+	}
+
+	// A denial by device id is not a guess at a code. It is not limited.
+	srv := apitest.NewServer(t)
+	twoRequests(srv)
+	wrongCodesSpent(t, srv)
+	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "deny", srv.Key.CRID, requesterDevice}})
+	if res.code != 0 || !strings.Contains(res.stderr.String(), "No access was given.") {
+		t.Fatalf("deny by device id during the limit: exit %d, stderr %q", res.code, res.stderr.String())
+	}
+
+	// The same answer with a shorter wait says it in the words for it, and
+	// with no wait at all says none.
+	for wait, line := range map[string]string{"45": "  Try again in 45 seconds.\n", "90": "  Try again in 2 minutes.\n", "5400": "  Try again in 1 hour 30 minutes.\n", "": ""} {
+		srv := apitest.NewServer(t)
+		twoRequests(srv)
+		srv.Script(http.MethodPost, "/v1/resources/"+srv.Key.CRID+"/access-requests/"+requestCode+"/approve", func(w http.ResponseWriter, _ *http.Request) {
+			if wait != "" {
+				w.Header().Set("Retry-After", wait)
+			}
+			apitest.WriteProblem(t, w, http.StatusTooManyRequests, "rate_limited", "Too Many Requests", apitest.WrongCodesDetail)
+		})
+		res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "approve", srv.Key.CRID, requestCode}})
+		wantWait := "  Too many wrong codes were tried for this resource. Try again later.\n\n" + line + "  Ask the person for the code on their screen.\n"
+		if res.code != exitcode.RateLimited || !strings.Contains(res.stderr.String(), wantWait) || len(srv.Requests()) != 1 {
+			t.Fatalf("Retry-After %q: exit %d, %d requests, stderr =\n%s\nwant in it\n%s", wait, res.code, len(srv.Requests()), res.stderr.String(), wantWait)
+		}
+	}
+}
+
+// TestVerboseNeverShowsATypedCode pins the diagnostics of every command that
+// sends a code. With --verbose the command writes the route of each request
+// to stderr, and the route of an approval, and of a denial by code, has the
+// code in it. The publisher typed that code, but it gives a person access
+// for as long as their request is pending, and a terminal gets pasted into
+// chats and tickets. So the line shows ****** where the code is, whether the
+// request succeeds or fails. A device id in the same place is shown.
+func TestVerboseNeverShowsATypedCode(t *testing.T) {
+	debugLines := func(stderr string) []string {
+		var lines []string
+		for _, line := range strings.Split(stderr, "\n") {
+			if strings.HasPrefix(line, "[debug] ") {
+				lines = append(lines, line)
+			}
+		}
+		return lines
+	}
+	for _, test := range []struct {
+		name    string
+		prepare func(*testing.T, *apitest.Server)
+		args    func(*apitest.Server) []string
+		code    string
+		// route is the diagnostic line for the request that carried the
+		// code. wantExit is the command's exit code.
+		route    func(*apitest.Server) string
+		wantExit int
+	}{
+		{
+			name: "approve", code: requestCode,
+			args: func(srv *apitest.Server) []string { return []string{"approve", srv.Key.CRID, "482 913"} },
+			route: func(srv *apitest.Server) string {
+				return "[debug] > POST /v1/resources/" + srv.Key.CRID + "/access-requests/******/approve"
+			},
+		},
+		{
+			name: "approve of a code that is not pending", code: "000000", wantExit: exitcode.NotFound,
+			args: func(srv *apitest.Server) []string { return []string{"approve", srv.Key.CRID, "000000"} },
+			route: func(srv *apitest.Server) string {
+				return "[debug] > POST /v1/resources/" + srv.Key.CRID + "/access-requests/******/approve"
+			},
+		},
+		{
+			name: "approve that the service cannot serve", code: requestCode, wantExit: exitcode.Unavailable,
+			prepare: func(t *testing.T, srv *apitest.Server) {
+				srv.Script(http.MethodPost, "/v1/resources/"+srv.Key.CRID+"/access-requests/"+requestCode+"/approve", func(w http.ResponseWriter, _ *http.Request) {
+					apitest.WriteProblem(t, w, http.StatusServiceUnavailable, "service_unavailable", "Service Unavailable", "try again")
+				})
+			},
+			args: func(srv *apitest.Server) []string { return []string{"approve", srv.Key.CRID, requestCode} },
+			route: func(srv *apitest.Server) string {
+				return "[debug] > POST /v1/resources/" + srv.Key.CRID + "/access-requests/******/approve"
+			},
+		},
+		{
+			name: "approve during the limit on wrong codes", code: requestCode, wantExit: exitcode.RateLimited,
+			prepare: func(t *testing.T, srv *apitest.Server) { wrongCodesSpent(t, srv) },
+			args:    func(srv *apitest.Server) []string { return []string{"approve", srv.Key.CRID, requestCode} },
+			route: func(srv *apitest.Server) string {
+				return "[debug] > POST /v1/resources/" + srv.Key.CRID + "/access-requests/******/approve"
+			},
+		},
+		{
+			name: "deny by code", code: requestCode,
+			args: func(srv *apitest.Server) []string { return []string{"deny", srv.Key.CRID, requestCode} },
+			route: func(srv *apitest.Server) string {
+				return "[debug] > DELETE /v1/resources/" + srv.Key.CRID + "/access-requests/******"
+			},
+		},
+		{
+			name: "deny by a code that is not pending", code: "000000", wantExit: exitcode.NotFound,
+			args: func(srv *apitest.Server) []string { return []string{"deny", srv.Key.CRID, "000000"} },
+			route: func(srv *apitest.Server) string {
+				return "[debug] > DELETE /v1/resources/" + srv.Key.CRID + "/access-requests/******"
+			},
+		},
+		{
+			name: "deny by code that the service cannot serve", code: requestCode, wantExit: exitcode.Unavailable,
+			prepare: func(t *testing.T, srv *apitest.Server) {
+				srv.Script(http.MethodDelete, "/v1/resources/"+srv.Key.CRID+"/access-requests/"+requestCode, func(w http.ResponseWriter, _ *http.Request) {
+					apitest.WriteProblem(t, w, http.StatusServiceUnavailable, "service_unavailable", "Service Unavailable", "try again")
+				})
+			},
+			args: func(srv *apitest.Server) []string { return []string{"deny", srv.Key.CRID, requestCode} },
+			route: func(srv *apitest.Server) string {
+				return "[debug] > DELETE /v1/resources/" + srv.Key.CRID + "/access-requests/******"
+			},
+		},
+	} {
+		for _, mode := range [][]string{nil, {"-o", "json"}, {"--quiet"}} {
+			t.Run(fmt.Sprintf("%s %v", test.name, mode), func(t *testing.T) {
+				srv := apitest.NewServer(t)
+				twoRequests(srv)
+				if test.prepare != nil {
+					test.prepare(t, srv)
+				}
+				args := append(append([]string{"--endpoint", srv.URL}, test.args(srv)...), mode...)
+				res := runCLI(t, &runOpts{args: append(args, "--verbose")})
+				if res.code != test.wantExit {
+					t.Fatalf("exit = %d, want %d; stderr: %s", res.code, test.wantExit, res.stderr.String())
+				}
+				lines := debugLines(res.stderr.String())
+				if !slices.Contains(lines, test.route(srv)) {
+					t.Fatalf("the diagnostics lack %q:\n%s", test.route(srv), res.stderr.String())
+				}
+				for _, line := range lines {
+					for _, form := range codeForms(test.code) {
+						if strings.Contains(line, form) {
+							t.Errorf("a diagnostic line shows the code %q: %s", form, line)
+						}
+					}
+				}
+				// A request that failed leaves the code good for as long
+				// as the person's request is pending, so nothing on
+				// stderr may show it then, diagnostic or not.
+				if test.code == requestCode && test.wantExit != 0 {
+					for _, form := range codeForms(test.code) {
+						if strings.Contains(res.stderr.String(), form) {
+							t.Errorf("stderr of a failed request shows the code %q:\n%s", form, res.stderr.String())
+						}
+					}
+				}
+			})
+		}
+	}
+
+	// A device id gives nobody access, and the diagnostics show it.
+	srv := apitest.NewServer(t)
+	twoRequests(srv)
+	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "deny", srv.Key.CRID, requesterDevice, "--verbose"}})
+	if want := "[debug] > DELETE /v1/resources/" + srv.Key.CRID + "/access-requests/" + requesterDevice; res.code != 0 || !slices.Contains(debugLines(res.stderr.String()), want) {
+		t.Fatalf("exit %d; the diagnostics lack %q:\n%s", res.code, want, res.stderr.String())
+	}
+}
+
+// TestAccessRequestCopySaysWhatTheServiceLimits pins, in the help and in the
+// README, the facts a publisher would otherwise take for bugs: the listing
+// of all resources has no next page, the listing of one resource holds at
+// most 20 requests, wrong codes are limited, a failure after a removal says
+// who lost access, and --on prints what to send only for a private resource.
+func TestAccessRequestCopySaysWhatTheServiceLimits(t *testing.T) {
+	collapse := func(text string) string { return strings.Join(strings.Fields(text), " ") }
+	help := func(command string) string {
+		t.Helper()
+		res := runCLI(t, &runOpts{args: []string{command, "--help"}})
+		if res.code != 0 {
+			t.Fatalf("qurl %s --help exit = %d", command, res.code)
+		}
+		return collapse(res.stdout.String())
+	}
+	readme := collapse(strings.ReplaceAll(strings.ReplaceAll(readCLIREADME(t), "`", ""), "**", ""))
+	for where, wants := range map[string][]string{
+		"qurl requests --help": {
+			"The listing of all your resources is bounded, and it has no next page.",
+			"The listing of one resource holds at most 20 requests.",
+			"It prints that only when the service's answer says the resource is private",
+		},
+		"qurl approve --help": {
+			"after 5 wrong codes for one resource within an hour, it refuses every code for that resource for a time, a right one included",
+			"does not try again by itself", "Ask the person for the code on their screen.",
+		},
+		"qurl grants --help": {
+			"From the first person removed on, every failure says exactly which device ids were removed and which were not",
+			"a failure that does not say so came before any access was taken away",
+		},
+	} {
+		text := help(strings.Fields(where)[1])
+		for _, want := range wants {
+			if !strings.Contains(text, want) {
+				t.Errorf("%s lacks %q", where, want)
+			}
+		}
+	}
+	// The stars are what the diagnostics show, so they are looked for in
+	// the README as it is written.
+	if want := "shows `******` in place of the code. A device id is shown as it is."; !strings.Contains(collapse(readCLIREADME(t)), want) {
+		t.Errorf("README lacks %q", want)
+	}
+	for _, want := range []string{
+		"The listing of all your resources is bounded, and it has no next page: the service takes no cursor for it, so the command has none to pass.",
+		"The listing of one resource holds at most 20 requests.",
+		"There is no cursor and no next page",
+		"qurl requests <CRID> --on prints what to send to people only when the service's answer says that the resource is private.",
+		"the command fails (exit code 10) and prints no address",
+		"After 5 wrong codes for one resource within an hour, it answers qurl approve, and qurl deny with a code, with \"too many requests\" (exit code 9) for a time, whatever the code, a right one included.",
+		"does not try again by itself: another attempt could be one more wrong code. Ask the person for the code on their screen.",
+		"qurl deny with a device id is not limited.",
+		"From the first person removed on, every failure says exactly what happened",
+		"a list that cannot be read again after the removals", "a list that still shows a person the service said it removed",
+		"A failure that says none of this came before any access was taken away.",
+		"or stops before it gets to them",
+		"a failure with no document came before any access was taken away",
+		"So are the routes for access requests and approved people",
+	} {
+		if !strings.Contains(readme, want) {
+			t.Errorf("README lacks %q", want)
+		}
 	}
 }

@@ -76,8 +76,10 @@ type Server struct {
 	listRequestCodes      bool
 	accessRequestsHasMore *bool
 	// acceptOnPublic turns access requests on for a public resource instead
-	// of refusing; see AcceptAccessRequestsOnPublic.
+	// of refusing; see AcceptAccessRequestsOnPublic. wrongCodes counts the
+	// wrong codes given to an approval or a denial of the mock's resource.
 	acceptOnPublic bool
+	wrongCodes     int
 	// refuseAccessRequestsMember makes a create or a change that carries
 	// access_requests a validation failure; see
 	// PlayStrictWithoutAccessRequests.

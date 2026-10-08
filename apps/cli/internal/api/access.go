@@ -117,6 +117,10 @@ func allowedPasskeys(rows []passkeyRow, source string) ([]AllowedPasskey, error)
 // one that could never name a resource, is refused before any request. The
 // routes of this file are that path or lie below it, and what they append, a
 // request code or a device id, is checked by its own rule before it is added.
+//
+// What is checked here is the identifier, against the route of the resource
+// itself. The routes below it are not looked up in the list of routes for
+// supervised requests, and are not on it: see requestRoutes.
 func resourcePath(id string) (trimmed, path string, err error) {
 	return deviceGrantsPath(id)
 }
@@ -213,7 +217,9 @@ func (c *client) SetAccessRequests(ctx context.Context, id string, on bool) (*Re
 //
 // TODO(upstream-contract): the service bounds the listing of all resources
 // and sets meta.has_more when it may be incomplete; a listing without the
-// member is complete.
+// member is complete. That listing takes no cursor, so there is no next page
+// to ask for, and none is asked for here. The listing of one resource holds
+// at most 20 requests.
 func (c *client) AccessRequests(ctx context.Context, id string) (*AccessRequestList, error) {
 	id = strings.TrimSpace(id)
 	path := "/v1/access-requests"
@@ -292,6 +298,12 @@ func (c *client) accessListingProblem(ctx context.Context, id string, reply *res
 // ApproveAccessRequest approves one pending request with one authenticated
 // POST. It never retries: after an approval the request is gone, so a replay
 // of a request that succeeded would read as "not found".
+//
+// TODO(upstream-contract): the service limits wrong codes. After 5 wrong
+// codes for one resource within an hour it answers an approval, and a denial
+// by code, with 429 and a Retry-After, whatever the code, a right one
+// included. That answer is never sent again by this client either: another
+// attempt could be one more wrong code, and the wait can be an hour.
 func (c *client) ApproveAccessRequest(ctx context.Context, id, code string) (*AllowedPasskey, error) {
 	if !ValidRequestCode(code) {
 		return nil, fmt.Errorf("%w: a request code is six digits", qurl.ErrInvalidResourceRequest)
@@ -308,6 +320,8 @@ func (c *client) ApproveAccessRequest(ctx context.Context, id, code string) (*Al
 	case http.StatusOK, http.StatusCreated:
 	case http.StatusNotFound:
 		return nil, c.accessNotFound(ctx, id, reply, fmt.Sprintf(msgRequestCodeNotFound, spacedRequestCode(code)))
+	case http.StatusTooManyRequests:
+		return nil, codeLimit(reply)
 	default:
 		return nil, reply.problem()
 	}
@@ -357,9 +371,24 @@ func (c *client) DenyAccessRequest(ctx context.Context, id, request string) erro
 			return c.accessNotFound(ctx, id, reply, fmt.Sprintf(msgRequestDeviceNotFound, request))
 		}
 		return c.accessNotFound(ctx, id, reply, fmt.Sprintf(msgRequestCodeNotFound, spacedRequestCode(request)))
+	case http.StatusTooManyRequests:
+		if !byDevice {
+			return codeLimit(reply)
+		}
+		return reply.problem()
 	default:
 		return reply.problem()
 	}
+}
+
+// codeLimit is the error for a "too many requests" answer to a request that
+// carried a code.
+func codeLimit(reply *restReply) error {
+	limit := &RequestCodeLimitError{}
+	if !errors.As(reply.problem(), &limit.Problem) {
+		return reply.problem()
+	}
+	return limit
 }
 
 // RemoveAllowedPasskeys takes approved people off the list, and returns the

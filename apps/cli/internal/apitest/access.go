@@ -3,6 +3,7 @@ package apitest
 import (
 	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 )
 
@@ -117,6 +118,56 @@ func (s *Server) AcceptAccessRequestsOnPublic() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.acceptOnPublic = true
+}
+
+// The limit on wrong codes, as the service has it: after WrongCodeLimit
+// wrong codes for one resource, an approval and a denial by code are
+// answered 429 with a Retry-After and WrongCodesDetail, whatever the code,
+// a right one included. A denial by device id is not limited and counts
+// nothing.
+//
+// TODO(upstream-contract): the service counts wrong codes for one resource
+// within an hour. The mock has no clock: once the limit is reached it stays
+// reached.
+const (
+	WrongCodeLimit        = 5
+	WrongCodesRetryAfter  = 3600
+	WrongCodesDetail      = "Too many wrong codes were tried for this resource. Try again later."
+	wrongCodesProblemCode = "rate_limited"
+)
+
+// ReachWrongCodeLimit puts the mock where WrongCodeLimit wrong codes leave
+// it, without the requests.
+func (s *Server) ReachWrongCodeLimit() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.wrongCodes = WrongCodeLimit
+}
+
+// codeLimited answers 429 and reports true when the limit on wrong codes is
+// reached. The caller holds no lock.
+func (s *Server) codeLimited(w http.ResponseWriter) bool {
+	s.mu.Lock()
+	limited := s.wrongCodes >= WrongCodeLimit
+	s.mu.Unlock()
+	if limited {
+		w.Header().Set("Retry-After", strconv.Itoa(WrongCodesRetryAfter))
+		WriteProblem(s.t, w, http.StatusTooManyRequests, wrongCodesProblemCode, "Too Many Requests", WrongCodesDetail)
+	}
+	return limited
+}
+
+// isRequestCode reports whether operand has the form of a request code.
+func isRequestCode(operand string) bool {
+	if len(operand) != 6 {
+		return false
+	}
+	for _, character := range operand {
+		if character < '0' || character > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // SetAccessRequestsHasMore makes both listings of pending requests carry
@@ -290,37 +341,9 @@ func (s *Server) serveAccessRoute(w http.ResponseWriter, route accessRoute) {
 		s.mu.Unlock()
 		WriteEnvelope(s.t, w, http.StatusOK, rows, meta)
 	case accessApprove:
-		s.mu.Lock()
-		index := slices.IndexFunc(s.pendingRequests, func(request accessRequestFixture) bool { return request.code == route.operand })
-		var person approvedPersonFixture
-		if index >= 0 {
-			request := s.pendingRequests[index]
-			person = approvedPersonFixture{deviceID: request.deviceID, name: request.name, approvedAt: FixtureApprovedAt}
-			s.approvedPeople = append(s.approvedPeople, person)
-			s.pendingRequests = slices.Delete(s.pendingRequests, index, index+1)
-		}
-		s.mu.Unlock()
-		if index < 0 {
-			s.writeAccessNotFound(w, "no pending access request has that code")
-			return
-		}
-		WriteEnvelope(s.t, w, http.StatusOK, person.payload(), nil)
+		s.serveApproval(w, route.operand)
 	case accessDeny:
-		// A request is refused by the device id it came from, which a
-		// listing shows, or by its code, which only the person who asked
-		// could have given.
-		s.mu.Lock()
-		before := len(s.pendingRequests)
-		s.pendingRequests = slices.DeleteFunc(s.pendingRequests, func(request accessRequestFixture) bool {
-			return request.code == route.operand || request.deviceID == route.operand
-		})
-		removed := len(s.pendingRequests) != before
-		s.mu.Unlock()
-		if !removed {
-			s.writeAccessNotFound(w, "no pending access request matches")
-			return
-		}
-		w.WriteHeader(http.StatusNoContent)
+		s.serveDenial(w, route.operand)
 	case accessRemove:
 		s.mu.Lock()
 		before := len(s.approvedPeople)
@@ -333,6 +356,58 @@ func (s *Server) serveAccessRoute(w http.ResponseWriter, route accessRoute) {
 		}
 		w.WriteHeader(http.StatusNoContent)
 	}
+}
+
+// serveApproval approves the pending request that has this code. An
+// approval is by code and by nothing else.
+func (s *Server) serveApproval(w http.ResponseWriter, code string) {
+	if s.codeLimited(w) {
+		return
+	}
+	s.mu.Lock()
+	index := slices.IndexFunc(s.pendingRequests, func(request accessRequestFixture) bool { return request.code == code })
+	var person approvedPersonFixture
+	if index < 0 && isRequestCode(code) {
+		s.wrongCodes++
+	}
+	if index >= 0 {
+		request := s.pendingRequests[index]
+		person = approvedPersonFixture{deviceID: request.deviceID, name: request.name, approvedAt: FixtureApprovedAt}
+		s.approvedPeople = append(s.approvedPeople, person)
+		s.pendingRequests = slices.Delete(s.pendingRequests, index, index+1)
+	}
+	s.mu.Unlock()
+	if index < 0 {
+		s.writeAccessNotFound(w, "no pending access request has that code")
+		return
+	}
+	WriteEnvelope(s.t, w, http.StatusOK, person.payload(), nil)
+}
+
+// serveDenial refuses one pending request. It is named by the device id it
+// came from, which a listing shows, or by its code, which only the person
+// who asked could have given. Only a denial by code can be a wrong guess at
+// a code, so only that is limited and counted.
+func (s *Server) serveDenial(w http.ResponseWriter, operand string) {
+	byCode := isRequestCode(operand)
+	if byCode && s.codeLimited(w) {
+		return
+	}
+	s.mu.Lock()
+	before := len(s.pendingRequests)
+	s.pendingRequests = slices.DeleteFunc(s.pendingRequests, func(request accessRequestFixture) bool {
+		return request.code == operand || request.deviceID == operand
+	})
+	removed := len(s.pendingRequests) != before
+	if !removed && byCode {
+		s.wrongCodes++
+	}
+	s.mu.Unlock()
+	if !removed {
+		s.writeAccessNotFound(w, "no pending access request matches")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) writeAccessNotFound(w http.ResponseWriter, detail string) {

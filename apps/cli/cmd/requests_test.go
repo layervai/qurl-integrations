@@ -1944,7 +1944,7 @@ func TestAccessRequestCopySaysToApproveOnlyGivenCodes(t *testing.T) {
 	// No command shows a code, and each place a publisher reads about the
 	// listing says so, and says how a request is refused without one.
 	for where, wants := range map[string][]string{
-		"qurl requests --help": {"The listing never shows a request's six-digit code, in any output mode.", "it is the only proof of who is asking", "qurl deny <CRID> <device id>", "The listing of all your resources is bounded.", "listing never needs it"},
+		"qurl requests --help": {"The listing never shows a request's six-digit code, in any output mode.", "it is the only proof of who is asking", "qurl deny <CRID> <device id>", "The listing of all your resources is bounded, and it has no next page.", "listing never needs it"},
 		"qurl approve --help":  {"no qURL command shows it"},
 		"qurl deny --help":     {"Name the request by the device id it came from, in the form xxxx-xxxx-xxxx-xxxx", "the code is accepted in the same place", "gives no access and expires by itself"},
 	} {

@@ -332,6 +332,63 @@ func TestAccessRequestRoutesNeedACredential(t *testing.T) {
 	}
 }
 
+// TestWrongCodesAreLimited pins the mock's limit on wrong codes: after
+// WrongCodeLimit wrong codes for the resource, an approval and a denial by
+// code are answered 429 with a Retry-After and the detail, whatever the
+// code, a right one included, and nothing changes. A denial by device id is
+// not limited and counts nothing.
+func TestWrongCodesAreLimited(t *testing.T) {
+	srv := NewServer(t)
+	srv.SetAccessRequests(true)
+	srv.AddAccessRequest("482913", "Ana Lopez", "abcd-efgh-2345-mnop")
+	srv.AddAccessRequest("175306", "Sam Okafor", "qrst-uvwx-yz67-abcd")
+	base := "/v1/resources/" + srv.Key.CRID + "/access-requests/"
+
+	// Denials by a device id that is not there are not guesses at a code.
+	for range 2 * WrongCodeLimit {
+		if status, _ := accessCall(t, srv, http.MethodDelete, base+"nope-nope-nope-nope", ""); status != http.StatusNotFound {
+			t.Fatalf("a denial by a device id that is not there = %d, want 404", status)
+		}
+	}
+	// Wrong codes count, from an approval and from a denial alike.
+	for attempt := range WrongCodeLimit {
+		method, path := http.MethodPost, base+"000000/approve"
+		if attempt%2 == 1 {
+			method, path = http.MethodDelete, base+"000000"
+		}
+		if status, _ := accessCall(t, srv, method, path, "{}"); status != http.StatusNotFound {
+			t.Fatalf("wrong code number %d = %d, want 404", attempt+1, status)
+		}
+	}
+	for _, call := range []struct{ method, path string }{
+		{http.MethodPost, base + "000000/approve"}, {http.MethodPost, base + "482913/approve"},
+		{http.MethodDelete, base + "000000"}, {http.MethodDelete, base + "175306"},
+	} {
+		req, err := http.NewRequestWithContext(t.Context(), call.method, srv.URL+call.path, strings.NewReader("{}"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Authorization", "Bearer lv_test_apitest")
+		resp, err := srv.Client().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var answer accessAnswer
+		decodeErr := json.NewDecoder(resp.Body).Decode(&answer)
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusTooManyRequests || resp.Header.Get("Retry-After") != "3600" || decodeErr != nil || answer.Error.Detail != WrongCodesDetail {
+			t.Fatalf("%s %s during the limit = %d, Retry-After %q, detail %q (%v)", call.method, call.path, resp.StatusCode, resp.Header.Get("Retry-After"), answer.Error.Detail, decodeErr)
+		}
+	}
+	// Nothing changed during the limit, and a denial by device id works.
+	if _, people := resourceState(t, srv); len(people) != 0 {
+		t.Fatalf("people approved during the limit: %+v", people)
+	}
+	if status, _ := accessCall(t, srv, http.MethodDelete, base+"abcd-efgh-2345-mnop", ""); status != http.StatusNoContent {
+		t.Fatalf("a denial by device id during the limit = %d, want 204", status)
+	}
+}
+
 // TestAccessRequestsOnAPublicResourceOnlyWhenAsked pins the mode a test uses
 // to play a service that turns access requests on for a public resource.
 // The service refuses that, and so does the mock unless a test asks.

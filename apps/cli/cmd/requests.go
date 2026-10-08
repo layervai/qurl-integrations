@@ -89,8 +89,10 @@ To let a person in, ask them for their code and run
 "qurl approve <CRID> <code>". To refuse a request, run
 "qurl deny <CRID> <device id>" with the device id from the listing.
 
-The listing of all your resources is bounded. When there may be more requests
-than it shows, it says so; list one resource to see all of its requests.
+The listing of all your resources is bounded, and it has no next page. When
+there may be more requests than it shows, it says so; list one resource to see
+all the requests for that resource. The listing of one resource holds at most
+20 requests.
 
 --on lets people ask for access to a private resource that is already
 published, and prints what to send them. It prints that only when the
@@ -203,7 +205,12 @@ request is typed by whoever asked and can be typed by anyone, so never approve
 because of a name alone. To see who is waiting, run "qurl requests <CRID>".
 
 Write the code as 123456, 123 456 or 123-456. The command prints who now has
-access and the command that takes that access away again.`,
+access and the command that takes that access away again.
+
+The service limits wrong codes: after 5 wrong codes for one resource within an
+hour, it refuses every code for that resource for a time, a right one
+included. The command then says how long to wait and does not try again by
+itself. Ask the person for the code on their screen.`,
 		Example: `  qurl approve ` + exampleCRID + ` 123456
   qurl approve ` + exampleCRID + ` 123 456`,
 		Args: codeArgs,

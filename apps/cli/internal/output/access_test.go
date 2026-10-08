@@ -871,3 +871,49 @@ func TestRemovalOutcomeDocumentAndMessage(t *testing.T) {
 		t.Fatalf("no outcome wrote %q, %v", out.String(), err)
 	}
 }
+
+// TestWrongCodeLimitRendering pins the lines for a "too many requests" answer
+// to an approval or to a denial by code: the service's problem as every
+// problem is shown, how long to wait in words, and the line that says what
+// to do. The wait is rounded up, never down: a wait that is understated has
+// the publisher try again while the limit holds.
+func TestWrongCodeLimitRendering(t *testing.T) {
+	t.Parallel()
+	for seconds, want := range map[uint64]string{
+		1: "1 second", 2: "2 seconds", 59: "59 seconds",
+		60: "1 minute", 61: "2 minutes", 119: "2 minutes", 120: "2 minutes", 3540: "59 minutes", 3541: "1 hour",
+		3600: "1 hour", 3601: "1 hour 1 minute", 5400: "1 hour 30 minutes", 7200: "2 hours", 7260: "2 hours 1 minute", 86400: "24 hours",
+	} {
+		if got := waitInWords(seconds); got != want {
+			t.Errorf("waitInWords(%d) = %q, want %q", seconds, got, want)
+		}
+	}
+
+	problem := &qurlapi.Error{StatusCode: 429, Title: "Too Many Requests", Detail: "Too many wrong codes were tried for this resource.", RetryAfter: 3600, RequestID: "req_1"}
+	var rendered bytes.Buffer
+	RenderError(&rendered, fmt.Errorf("approve: %w", &qurlapi.RequestCodeLimitError{Problem: problem}), false)
+	want := "Error: Too Many Requests (HTTP 429)\n\n" +
+		"  Too many wrong codes were tried for this resource.\n\n" +
+		"  Try again in 1 hour.\n" +
+		"  Ask the person for the code on their screen.\n" +
+		"  Request ID: req_1\n"
+	if rendered.String() != want {
+		t.Fatalf("rendered =\n%s\nwant\n%s", rendered.String(), want)
+	}
+
+	// With no wait from the service, none is made up, and the line about
+	// the person's screen is still there.
+	rendered.Reset()
+	RenderError(&rendered, &qurlapi.RequestCodeLimitError{Problem: &qurlapi.Error{StatusCode: 429, Detail: "slow down"}}, false)
+	if got := rendered.String(); strings.Contains(got, "Try again in") || !strings.HasSuffix(got, "\n\n  Ask the person for the code on their screen.\n") {
+		t.Fatalf("rendered without a wait =\n%s", got)
+	}
+
+	// The same problem from any other command is shown as before, without
+	// that line.
+	rendered.Reset()
+	RenderError(&rendered, problem, false)
+	if got := rendered.String(); strings.Contains(got, "Ask the person") || !strings.Contains(got, "Retry after 3600s.") {
+		t.Fatalf("a plain too-many-requests problem =\n%s", got)
+	}
+}

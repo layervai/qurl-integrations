@@ -444,6 +444,20 @@ func TestGoldens(t *testing.T) {
 			stderrGolden: true,
 		},
 		{
+			// The service's limit on wrong codes: its own sentence, how
+			// long to wait, and what to do. Exit 9, and the right code is
+			// refused too.
+			name: "error_approve_too_many_codes",
+			args: func(srv *apitest.Server) []string { return []string{"approve", srv.Key.CRID, "482 913"} },
+			prepare: func(srv *apitest.Server) {
+				twoRequests(srv)
+				srv.ReachWrongCodeLimit()
+			},
+			variants:     []string{"tty", "plain"},
+			wantCode:     9,
+			stderrGolden: true,
+		},
+		{
 			// A value that can never be a code: exit 8 before any request.
 			name:         "error_approve_code",
 			args:         func(srv *apitest.Server) []string { return []string{"approve", srv.Key.CRID, "Ana Lopez"} },

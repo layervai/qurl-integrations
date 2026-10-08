@@ -30,6 +30,10 @@ const (
 	hintNotFound      = "Hint: the CRID may be mistyped, expired, or no longer published. Ask whoever shared it for a current one."
 	hintQuotaExceeded = "Hint: if this device is not linked to an account, run `qurl account setup`. For account plan limits, see https://layerv.ai/pricing."
 	hintRetryAfter    = "Retry after %ds."
+	// The two lines after a "too many requests" answer to an approval or to
+	// a denial by code. %s is the wait in words.
+	hintTryCodeAgainIn = "Try again in %s."
+	hintAskForCode     = "Ask the person for the code on their screen."
 
 	// hintShareNotFound is the not-found guidance for sharing or getting a
 	// CRID, in place of hintNotFound. The service answers a mistyped CRID, a
@@ -380,7 +384,7 @@ func CustomerMessages() []string {
 		hintCRIDNotFound,
 		hintCRIDNotFoundNoDevice,
 		hintQuotaExceeded,
-		hintRetryAfter,
+		hintRetryAfter, hintTryCodeAgainIn, hintAskForCode,
 		hintRevoked,
 		hintRetired,
 		hintScope,

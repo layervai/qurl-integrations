@@ -222,13 +222,14 @@ func reportRemovalFailure(printer *output.Printer, err error, finish string) err
 const maxRemovedPeople = 256
 
 // splitRemovals sorts the values of --remove into public keys and device ids.
-// A device id is recognized by its form, in either case, and is returned in
-// the lowercase form the service uses. Everything else must be a public key.
+// A device id is recognized by its form, in either case and with space
+// around it, as `qurl deny` recognizes one, and is returned in the lowercase
+// form the service uses. Everything else must be a public key.
 // A value given twice, more values of either kind than one command takes,
 // and a value that is neither, are each refused with their own message.
 func splitRemovals(values []string) (keys, deviceIDs []string, err error) {
 	for _, value := range values {
-		deviceID := strings.ToLower(value)
+		deviceID := strings.ToLower(strings.TrimSpace(value))
 		if !qurlapi.ValidDeviceID(deviceID) {
 			if slices.Contains(keys, value) {
 				return nil, nil, errors.New(msgGrantsRemoveTwice)

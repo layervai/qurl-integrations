@@ -306,7 +306,9 @@ update this machine's share registry or reload the daemon, so use `qurl start`,
 `qurl stop`, `qurl restart` and `qurl delete` for resources shared from this
 machine rather than the `sharing` and resource `DELETE` routes. Sessions are
 unpaginated, so a session list larger than the 1 MiB response cap fails; terminate all sessions to recover. API key
-creation, account owner enumeration, billing, quota and usage are refused.
+creation, account owner enumeration, billing, quota and usage are refused. So
+are the routes for access requests and approved people: use `qurl requests`,
+`qurl approve`, `qurl deny` and `qurl grants` for those.
 
 For example, account linking uses `POST /v1/account/link` with
 `{"account_token":"<account access token>"}` on stdin. Keep that token out of
@@ -1083,9 +1085,12 @@ NAME         DEVICE ID            REQUESTED  EXPIRES
 To let one of these people in, ask them for the six-digit code on their screen and run `qurl approve <CRID> <code>`; a name can be typed by anyone, so the code is the only proof of who is asking.
 ```
 
-The listing of all your resources is bounded. When there may be more requests
-than it shows, it says so after the rows, and `-o json` has `has_more: true`.
-List one resource with `qurl requests <CRID>` to see all of its requests.
+The listing of all your resources is bounded, and it has no next page: the
+service takes no cursor for it, so the command has none to pass. When there
+may be more requests than it shows, it says so after the rows, and `-o json`
+has `has_more: true`. List one resource with `qurl requests <CRID>` to see all
+the requests for that resource. The listing of one resource holds at most 20
+requests.
 
 `qurl requests <CRID> --on` prints what to send to people only when the
 service's answer says that the resource is private. If the answer says that
@@ -1113,6 +1118,16 @@ about which codes are pending. A device id with no pending request gets the
 same answer from `qurl deny`. A value that can never be a code, or for
 `qurl deny` neither a device id nor a code, is refused before any request
 (exit code 8). Access requests can be turned on only for a private resource.
+
+The service limits wrong codes. After 5 wrong codes for one resource within an
+hour, it answers `qurl approve`, and `qurl deny` with a code, with "too many
+requests" (exit code 9) for a time, whatever the code, a right one included.
+The command shows the service's message and how long to wait, and does not try
+again by itself: another attempt could be one more wrong code. Ask the person
+for the code on their screen. `qurl deny` with a device id is not limited.
+
+With `--verbose`, the request line of an approval, and of a denial with a
+code, shows `******` in place of the code. A device id is shown as it is.
 
 A service that does not offer access requests yet answers every one of these
 commands with "this service does not offer access requests yet" and exit code
@@ -1519,7 +1534,7 @@ Access requests in `-o json`:
 | Command | Members |
 |---------|---------|
 | `publish` | `access_requests` when the service's answer says whether people can ask; `resource_url`, the resource's address for people with no CLI, only when access requests are on and this install knows the web address for its deployment |
-| `requests`, `requests <CRID>` | `requests`: an array, `[]` when there are none, of `name` (omitted when the person typed none), `name_verified` (always `false`), `device_id`, `requested_at`, `expires_at`, `crid`. No member holds a request's code. Beside it, `approval_rule`: always present, one sentence; and `has_more`: always present, `true` when there may be more requests than the listing shows |
+| `requests`, `requests <CRID>` | `requests`: an array, `[]` when there are none, of `name` (omitted when the person typed none), `name_verified` (always `false`), `device_id`, `requested_at`, `expires_at`, `crid`. No member holds a request's code. Beside it, `approval_rule`: always present, one sentence; and `has_more`: always present, `true` when there may be more requests than the listing shows. There is no cursor and no next page |
 | `requests <CRID> --on`, `--off` | `crid`, `access_requests`, and `resource_url` under the same rule as `publish` |
 | `approve` | `crid`, `approved` (`true`), `device_id`, `name`, `name_verified` (always `false`), `approved_at`, and `name_note`: always present, one sentence |
 | `deny` | `crid`, `denied` (`true`), and what you named the request by: `device_id`, or `code` |
