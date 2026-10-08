@@ -181,35 +181,32 @@ func TestPublishAccessFlagsAgainstEveryTarget(t *testing.T) {
 	}
 }
 
-// TestPublishNamesAccessCountsEveryAccessFlag pins which flags make a publish
-// one that named who may open the resource. Only a publish that named
-// nothing keeps a target that is already published as public. Each of these
-// flags is a choice in any form it is given, an explicit false included, and
-// --allow-requests is one of them: access requests are for a private
-// resource. A flag about anything else is not.
-func TestPublishNamesAccessCountsEveryAccessFlag(t *testing.T) {
+// TestPublishAccessFlagsIncludeAllowRequests pins that --allow-requests is one
+// of the flags that say who may open the resource, beside the ones the
+// privacy change pinned. Only a publish that named none keeps a target that
+// is already published as public, and access requests are for a private
+// resource, so the flag is a choice in any form it is given, an explicit
+// false included. It is named as it was written, in the order the conflict
+// hint lists the flags.
+func TestPublishAccessFlagsIncludeAllowRequests(t *testing.T) {
 	for _, test := range []struct {
 		args []string
-		want bool
+		want []string
 	}{
 		{args: nil},
 		{args: []string{"--description", "d"}},
-		{args: []string{"--tag", "t", "--alias", "a"}},
-		{args: []string{"--id", "local-app", "--foreground"}},
-		{args: []string{"--public"}, want: true},
-		{args: []string{"--public=false"}, want: true},
-		{args: []string{"--private"}, want: true},
-		{args: []string{"--allow-device-key", goldenDevicePublicKey}, want: true},
-		{args: []string{"--allow-requests"}, want: true},
-		{args: []string{"--allow-requests=false"}, want: true},
-		{args: []string{"--description", "d", "--allow-requests"}, want: true},
+		{args: []string{"--allow-requests"}, want: []string{"--allow-requests"}},
+		{args: []string{"--allow-requests=false"}, want: []string{"--allow-requests=false"}},
+		{args: []string{"--allow-requests", "--private"}, want: []string{"--private", "--allow-requests"}},
+		{args: []string{"--allow-requests", "--allow-device-key", goldenDevicePublicKey}, want: []string{"--allow-device-key", "--allow-requests"}},
+		{args: []string{"--description", "d", "--allow-requests"}, want: []string{"--allow-requests"}},
 	} {
 		cmd := publishCmd(&globalOpts{})
 		if err := cmd.ParseFlags(test.args); err != nil {
 			t.Fatalf("flags %v: %v", test.args, err)
 		}
-		if got := publishNamesAccess(cmd); got != test.want {
-			t.Errorf("flags %v: names access = %t, want %t", test.args, got, test.want)
+		if got := publishAccessFlags(cmd); !slices.Equal(got, test.want) {
+			t.Errorf("flags %v: named %v, want %v", test.args, got, test.want)
 		}
 	}
 }

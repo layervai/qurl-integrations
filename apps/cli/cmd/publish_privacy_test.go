@@ -285,16 +285,21 @@ func TestPublishFailsClosedWhenPrivacyIsNotConfirmed(t *testing.T) {
 // this case: it keeps a public resource that exists.
 func TestPublishOfATargetWithTheOtherPrivacyIsAConflict(t *testing.T) {
 	older := []string{"its privacy or its allowed devices differ from what this command asked for", "privacy is fixed when a resource is first published", "Run the command again without --allow-device-key, with --public if the resource is public"}
-	public := []string{"already published as public", "privacy is fixed when a resource is first published", "run the command again with --public", "delete it with `qurl delete <CRID>`"}
+	// The step that keeps the public resource names the flag that was given:
+	// --public works only without it.
+	public := func(given string) []string {
+		return []string{"already published as public", "privacy is fixed when a resource is first published", "run the command again with --public and without " + given + ".", "delete it with `qurl delete <CRID>`"}
+	}
 	for _, test := range []struct {
 		name            string
 		flags           []string
 		existingPrivate bool
 		want            []string
 	}{
-		{name: "private asked, public exists", flags: []string{"--private"}, want: public},
-		{name: "a device list asked, public exists", flags: []string{"--allow-device-key", goldenDevicePublicKey}, want: public},
-		{name: "not public asked, public exists", flags: []string{"--public=false"}, want: public},
+		{name: "private asked, public exists", flags: []string{"--private"}, want: public("--private")},
+		{name: "a device list asked, public exists", flags: []string{"--allow-device-key", goldenDevicePublicKey}, want: public("--allow-device-key")},
+		{name: "not public asked, public exists", flags: []string{"--public=false"}, want: public("--public=false")},
+		{name: "private and a device list asked, public exists", flags: []string{"--allow-device-key", goldenDevicePublicKey, "--private"}, want: public("--private and --allow-device-key")},
 		{
 			name: "public asked, private exists", flags: []string{"--public"}, existingPrivate: true,
 			want: []string{"already published as private", "privacy is fixed when a resource is first published", "run the command again without --public", "delete it with `qurl delete <CRID>`"},

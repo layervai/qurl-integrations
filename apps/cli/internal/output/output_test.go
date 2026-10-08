@@ -348,6 +348,24 @@ func TestPublishAccessConflictRendering(t *testing.T) {
 		hint            string
 	}{
 		{name: "public exists", headline: public, hint: hintPublishExistingPublic},
+		{
+			name: "public exists, a device list named", opts: qurlapi.PublishOptions{AllowedDeviceKeys: []string{"recipient"}, NamedAccessFlags: []string{"--allow-device-key"}},
+			headline: public, hint: fmt.Sprintf(hintPublishExistingPublicWithout, "--allow-device-key"),
+		},
+		{
+			name: "public exists, private named", opts: qurlapi.PublishOptions{NamedAccessFlags: []string{"--private"}},
+			headline: public, hint: fmt.Sprintf(hintPublishExistingPublicWithout, "--private"),
+		},
+		{
+			name: "public exists, two flags named", opts: qurlapi.PublishOptions{NamedAccessFlags: []string{"--private", "--allow-device-key"}},
+			headline: public, hint: fmt.Sprintf(hintPublishExistingPublicWithout, "--private and --allow-device-key"),
+		},
+		// The other hints do not change with the flags: what they say to
+		// leave out is already the flag that was given.
+		{
+			name: "private exists, public named", existingPrivate: true, opts: qurlapi.PublishOptions{Public: true, NamedAccessFlags: []string{"--public"}},
+			headline: private, hint: hintPublishExistingPrivate,
+		},
 		{name: "private exists", existingPrivate: true, opts: qurlapi.PublishOptions{Public: true}, headline: private, hint: hintPublishExistingPrivate},
 		{name: "another device list", existingPrivate: true, existingKeys: []string{"stored"}, opts: qurlapi.PublishOptions{AllowedDeviceKeys: []string{"recipient"}}, headline: devices, hint: hintPublishOtherDevices},
 		{name: "older service, public exists", olderService: true, headline: neither, hint: hintPublishAccessDiffers},
@@ -387,6 +405,22 @@ func TestPublishAccessConflictRendering(t *testing.T) {
 			if !strings.Contains(hint, part) {
 				t.Errorf("hint lost %q: %q", part, hint)
 			}
+		}
+	}
+	// The step that keeps a public resource is --public without the flags
+	// that were given. With them it is a usage error, which is why they are
+	// named.
+	if want := "run the command again with --public and without %s. To make it private instead"; !strings.Contains(hintPublishExistingPublicWithout, want) {
+		t.Errorf("hint lost %q: %q", want, hintPublishExistingPublicWithout)
+	}
+	for want, flags := range map[string][]string{
+		"":                 nil,
+		"--a":              {"--a"},
+		"--a and --b":      {"--a", "--b"},
+		"--a, --b and --c": {"--a", "--b", "--c"},
+	} {
+		if got := flagList(flags); got != want {
+			t.Errorf("flagList(%v) = %q, want %q", flags, got, want)
 		}
 	}
 	// A device list that differs is not about privacy, and its hint does not

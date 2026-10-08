@@ -530,6 +530,11 @@ func TestPublishWithAllowRequestsOfAPublicTargetIsAConflict(t *testing.T) {
 					t.Fatalf("exit = %d, stderr: %s", res.code, res.stderr.String())
 				}
 				mustEmptyStdout(t, res)
+				// The step that keeps the public resource names the flag to
+				// leave out; --public cannot be combined with it.
+				if hint := "run the command again with --public and without --allow-requests."; !olderService && !strings.Contains(res.stderr.String(), hint) {
+					t.Errorf("stderr lacks the hint %q:\n%s", hint, res.stderr.String())
+				}
 				if log := requestLog(srv); !slices.Equal(log, []string{"POST /v1/resources"}) {
 					t.Fatalf("requests = %v, want the one create: no second create and no change", log)
 				}

@@ -104,9 +104,10 @@ func TestGoldens(t *testing.T) {
 			stdoutGolden: true,
 		},
 		{
-			// The JSON document says private: false and found_existing: true
-			// as for any such resource; the warning is on stderr.
-			name: "publish_kept_public",
+			// The script-facing form of the same publish: the JSON document
+			// says private: false, kept_public: true and found_existing:
+			// true, and the warning is on stderr.
+			name: "publish_kept_public_script",
 			args: func(*apitest.Server) []string { return []string{"publish", "https://example.com/data"} },
 			prepare: func(srv *apitest.Server) {
 				srv.SetResourceAccess(false)

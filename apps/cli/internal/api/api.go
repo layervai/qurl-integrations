@@ -48,13 +48,15 @@ type Client interface {
 	Resource(ctx context.Context, id string) (*ResourceSummary, error)
 	// SetDeviceGrants replaces the complete private-resource device grant
 	// list. The CLI calls it only with an empty list, to clear the grants; a
-	// single device is allowed or removed with EditDeviceGrants, which cannot
-	// drop a grant it was not asked to.
+	// single device is allowed or removed with EditDeviceGrants.
 	SetDeviceGrants(ctx context.Context, id string, keys []string) (*ResourceSummary, error)
 	// EditDeviceGrants adds and removes single device keys in one request,
 	// which the service applies as one change, and returns the resource with
 	// its complete resulting list. A key that is already on the list, or
-	// already off it, is left as it is.
+	// already off it, is left as it is. What it guarantees about the other
+	// grants is the shape of its request, which never carries the whole list
+	// and so cannot replace it; what it checks in the answer is the keys it
+	// named, not that the keys it did not name are still there.
 	EditDeviceGrants(ctx context.Context, id string, add, remove []string) (*ResourceSummary, error)
 	// SetAccessRequests turns access requests on or off for an existing
 	// private resource and returns the resource as the service confirmed it.
@@ -130,6 +132,11 @@ type PublishOptions struct {
 	// said who may open the resource. It has no effect together with Public,
 	// AllowedDeviceKeys or AllowRequests.
 	KeepExistingPublic bool
+	// NamedAccessFlags are the flags on the caller's command line that said
+	// who may open the resource, as they were written. Publish sends nothing
+	// of them. They are carried into a conflict, so that its next step can
+	// name the flag to leave out instead of a command line that cannot work.
+	NamedAccessFlags []string
 	// ConnectorID selects a tunnel resource instead of a URL.
 	ConnectorID string
 	Description string
@@ -340,8 +347,8 @@ type Config struct {
 	Sleep func(time.Duration)
 	// NewRequestID mints the X-Request-Id value; nil means a random one.
 	NewRequestID func() string
-	// Now is the clock; nil means time.Now. Publish reads it once, to tell
-	// a resource this command made from one that existed before it.
+	// Now is the clock; nil means time.Now. Publish reads it to tell a
+	// resource this command made from one that existed before it.
 	Now func() time.Time
 	// HTTPClient is the underlying HTTP client. Nil, or an injected client with
 	// Timeout zero, gets a 30-second bound for each HTTP attempt. A nonzero

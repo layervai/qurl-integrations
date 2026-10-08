@@ -112,7 +112,7 @@ func publishConflictLines(p *Printer, head string, err error) ([]string, bool) {
 	if !errors.As(err, &conflict) {
 		return nil, false
 	}
-	lines := []string{head + " " + conflict.Error(), "", "  " + p.dim(publishConflictHint(conflict.Existing))}
+	lines := []string{head + " " + conflict.Error(), "", "  " + p.dim(publishConflictHint(conflict))}
 	var apiErr *qurlapi.Error
 	if errors.As(err, &apiErr) && apiErr.RequestID != "" {
 		lines = append(lines, "  "+p.dim("Request ID: "+apiErr.RequestID))
@@ -147,9 +147,16 @@ func requestsNotTurnedOnLines(p *Printer, head string, err error) ([]string, boo
 // publishConflictHint is the next step for each thing a conflict can say
 // about the resource that exists. A conflict that does not say what differs
 // gets the hint that covers privacy and the allowed devices.
-func publishConflictHint(existing qurlapi.ExistingAccess) string {
-	switch existing {
+//
+// For a target that is already published as public, the step that keeps it
+// is --public, and it works only without the access flags the command line
+// carried: --public cannot be combined with them. So the hint names them.
+func publishConflictHint(conflict *qurlapi.PublishAccessConflictError) string {
+	switch conflict.Existing {
 	case qurlapi.ExistingAccessPublic:
+		if named := flagList(conflict.NamedFlags); named != "" {
+			return fmt.Sprintf(hintPublishExistingPublicWithout, named)
+		}
 		return hintPublishExistingPublic
 	case qurlapi.ExistingAccessPrivate:
 		return hintPublishExistingPrivate
@@ -159,6 +166,17 @@ func publishConflictHint(existing qurlapi.ExistingAccess) string {
 		return hintPublishAccessDiffers
 	}
 	return hintPublishAccessDiffers
+}
+
+// flagList writes flags as a phrase: "a", "a and b", "a, b and c".
+func flagList(flags []string) string {
+	switch len(flags) {
+	case 0:
+		return ""
+	case 1:
+		return flags[0]
+	}
+	return strings.Join(flags[:len(flags)-1], ", ") + " and " + flags[len(flags)-1]
 }
 
 // hostErrorLines renders local host conditions that block native sharing.

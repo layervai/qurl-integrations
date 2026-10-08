@@ -326,6 +326,10 @@ const (
 type PublishAccessConflictError struct {
 	// Existing is what is known about the resource that exists.
 	Existing ExistingAccess
+	// NamedFlags are the access flags the publisher's command line carried,
+	// as written, empty when the caller gave none. The next step names them:
+	// they are what has to be left out for the command to work.
+	NamedFlags []string
 
 	problem *Error
 }
