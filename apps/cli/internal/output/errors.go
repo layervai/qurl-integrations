@@ -56,6 +56,9 @@ func renderErrorLines(p *Printer, err error) []string {
 	if lines, ok := publishConflictLines(p, head, err); ok {
 		return lines
 	}
+	if lines, ok := accessRequestErrorLines(p, head, err); ok {
+		return lines
+	}
 	if errors.Is(err, auth.ErrAccountRecoveryState) {
 		return []string{head + " " + msgAccountRecoveryState, "", "  " + p.dim(hintAccountRecoveryState)}
 	}
@@ -115,6 +118,116 @@ func publishConflictLines(p *Printer, head string, err error) ([]string, bool) {
 		lines = append(lines, "  "+p.dim("Request ID: "+apiErr.RequestID))
 	}
 	return lines, true
+}
+
+// accessRequestErrorLines renders the failures of the access-request
+// commands that have a shape of their own: a publish that could not turn
+// requests on, a removal of approved people that stopped, and the limit on
+// wrong codes.
+func accessRequestErrorLines(p *Printer, head string, err error) ([]string, bool) {
+	if lines, ok := requestsNotTurnedOnLines(p, head, err); ok {
+		return lines, true
+	}
+	if lines, ok := passkeyRemovalLines(p, head, err); ok {
+		return lines, true
+	}
+	return requestCodeLimitLines(p, head, err)
+}
+
+// requestsNotTurnedOnLines renders a publish that found the target already
+// published as a private resource and could not turn access requests on for
+// it: what exists, why the change failed, the command that tries again, and
+// the request id. The CRID is in that command. The resource is private and
+// unchanged, so naming it gives nothing away, and the publisher needs it.
+// The reason can be the service's own text, so it is held to one printable
+// line and cannot forge the hint that follows it.
+func requestsNotTurnedOnLines(p *Printer, head string, err error) ([]string, bool) {
+	var failed *qurlapi.AccessRequestsNotTurnedOnError
+	if !errors.As(err, &failed) {
+		return nil, false
+	}
+	lines := []string{
+		head + " " + failed.Headline(),
+		"", "  " + p.ServiceReason(failed.Reason()),
+		"", "  " + p.dim(fmt.Sprintf(hintAccessRequestsNotTurnedOn, failed.CRID)),
+	}
+	var apiErr *qurlapi.Error
+	if errors.As(err, &apiErr) && apiErr.RequestID != "" {
+		lines = append(lines, "  "+p.dim("Request ID: "+apiErr.RequestID))
+	}
+	return lines, true
+}
+
+// passkeyRemovalLines renders a removal of approved people that did not take
+// every person it named off the list: what happened to which device id, the
+// reason when a removal failed for another reason than an id that was not
+// found, the command that shows who has access now, and the request id. The
+// reason can be the service's own text, so it is held to one printable line.
+func passkeyRemovalLines(p *Printer, head string, err error) ([]string, bool) {
+	var outcome *qurlapi.PasskeyRemovalError
+	if !errors.As(err, &outcome) {
+		return nil, false
+	}
+	lines := []string{head + " " + outcome.Headline() + "."}
+	if reason := outcome.Reason(); reason != "" {
+		lines = append(lines, "", "  "+p.ServiceReason(reason))
+	}
+	if outcome.KeysNotChanged {
+		lines = append(lines, "", "  "+msgRemovalKeysNotChanged)
+	}
+	lines = append(lines, "", "  "+p.dim(outcome.NextStep()+"."))
+	if outcome.KeyChangeCommand != "" {
+		lines = append(lines, "  "+p.dim(fmt.Sprintf(msgRemovalFinishKeys, outcome.KeyChangeCommand)))
+	}
+	var apiErr *qurlapi.Error
+	if errors.As(err, &apiErr) && apiErr.RequestID != "" {
+		lines = append(lines, "  "+p.dim("Request ID: "+apiErr.RequestID))
+	}
+	return lines, true
+}
+
+// requestCodeLimitLines renders a "too many requests" answer to an approval
+// or to a denial by code: the service's own problem, as every other problem
+// is shown, then how long to wait, in words, and what to do in the meantime.
+// The wait can be an hour, which reads badly as a count of seconds.
+func requestCodeLimitLines(p *Printer, head string, err error) ([]string, bool) {
+	var limit *qurlapi.RequestCodeLimitError
+	if !errors.As(err, &limit) || limit.Problem == nil {
+		return nil, false
+	}
+	lines := apiProblemLines(head, limit.Problem)
+	lines = append(lines, "")
+	if limit.Problem.RetryAfter > 0 {
+		lines = append(lines, "  "+p.dim(fmt.Sprintf(hintTryCodeAgainIn, waitInWords(limit.Problem.RetryAfter))))
+	}
+	lines = append(lines, "  "+p.dim(hintAskForCode))
+	if limit.Problem.RequestID != "" {
+		lines = append(lines, "  "+p.dim("Request ID: "+limit.Problem.RequestID))
+	}
+	return lines, true
+}
+
+// waitInWords writes a wait of some seconds the way a person says it: in
+// seconds below a minute, in whole minutes below an hour, rounded up so
+// that the wait is never understated, and in hours and minutes from there.
+func waitInWords(seconds uint64) string {
+	count := func(n uint64, unit string) string {
+		if n == 1 {
+			return "1 " + unit
+		}
+		return fmt.Sprintf("%d %ss", n, unit)
+	}
+	if seconds < 60 {
+		return count(seconds, "second")
+	}
+	minutes := (seconds + 59) / 60
+	if minutes < 60 {
+		return count(minutes, "minute")
+	}
+	if minutes%60 == 0 {
+		return count(minutes/60, "hour")
+	}
+	return count(minutes/60, "hour") + " " + count(minutes%60, "minute")
 }
 
 // publishConflictHint is the next step for each thing a conflict can say
@@ -396,6 +509,19 @@ func connectorResourceErrorPosture(err error) (headline, hint string, ok bool) {
 // heuristic topology sanitizer here because it would silently rewrite that
 // public contract.
 func apiErrorLines(p *Printer, head string, apiErr *qurlapi.Error) []string {
+	lines := apiProblemLines(head, apiErr)
+	if hint := errorHint(apiErr); hint != "" {
+		lines = append(lines, "", "  "+p.dim(hint))
+	}
+	if apiErr.RequestID != "" {
+		lines = append(lines, "  "+p.dim("Request ID: "+apiErr.RequestID))
+	}
+	return lines
+}
+
+// apiProblemLines is the part of a problem that is the service's own: the
+// headline with the status, the detail, and the invalid fields.
+func apiProblemLines(head string, apiErr *qurlapi.Error) []string {
 	headline := apiErr.Title
 	if headline == "" {
 		headline = "the qURL service reported a problem"
@@ -416,13 +542,6 @@ func apiErrorLines(p *Printer, head string, apiErr *qurlapi.Error) []string {
 		for _, name := range fields {
 			lines = append(lines, fmt.Sprintf("    %s: %s", name, apiErr.InvalidFields[name]))
 		}
-	}
-
-	if hint := errorHint(apiErr); hint != "" {
-		lines = append(lines, "", "  "+p.dim(hint))
-	}
-	if apiErr.RequestID != "" {
-		lines = append(lines, "  "+p.dim("Request ID: "+apiErr.RequestID))
 	}
 	return lines
 }

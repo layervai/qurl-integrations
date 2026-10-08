@@ -1,0 +1,18 @@
+Published
+
+  Target:   https://example.com/data
+  Access:   private — only you and the people you allow can open it
+  Status:   active
+  Created:  1d ago
+
+People can ask you for access to this resource. This install does not know the web address where a CRID is opened for its deployment, so send them the CRID itself:
+
+  qhtpthw4qt7wkw7khghr6x3z4hsfyn4zbuyhnee4i6bi67yu6yytgvwdbb4q
+
+Where they open it, they ask for access and get a six-digit code to give you. Approve a code with:
+
+  qurl approve qhtpthw4qt7wkw7khghr6x3z4hsfyn4zbuyhnee4i6bi67yu6yytgvwdbb4q <code>
+
+The CRID is safe to send to anyone: a private resource opens only for you and the people you allow.
+
+CRID: qhtpthw4qt7wkw7khghr6x3z4hsfyn4zbuyhnee4i6bi67yu6yytgvwdbb4q

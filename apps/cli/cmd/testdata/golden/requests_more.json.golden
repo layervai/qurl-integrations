@@ -1,0 +1,22 @@
+{
+  "requests": [
+    {
+      "name": "Sam Okafor",
+      "name_verified": false,
+      "device_id": "qrst-uvwx-yz67-abcd",
+      "requested_at": "2026-03-01T23:58:00Z",
+      "expires_at": "2026-03-02T00:58:00Z",
+      "crid": "qhtpthw4qt7wkw7khghr6x3z4hsfyn4zbuyhnee4i6bi67yu6yytgvwdbb4q"
+    },
+    {
+      "name": "Ana Lopez",
+      "name_verified": false,
+      "device_id": "abcd-efgh-2345-mnop",
+      "requested_at": "2026-03-01T23:58:00Z",
+      "expires_at": "2026-03-02T00:58:00Z",
+      "crid": "qhtpthw4qt7wkw7khghr6x3z4hsfyn4zbuyhnee4i6bi67yu6yytgvwdbb4q"
+    }
+  ],
+  "approval_rule": "To let one of these people in, ask them for the six-digit code on their screen and run `qurl approve \u003cCRID\u003e \u003ccode\u003e`; a name can be typed by anyone, so the code is the only proof of who is asking.",
+  "has_more": true
+}

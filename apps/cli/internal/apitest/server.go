@@ -61,6 +61,29 @@ type Server struct {
 	// ignoreGrantEdits makes the mock a service from before single device
 	// grants could be added or removed; see PlayNoSingleGrantEdits.
 	ignoreGrantEdits bool
+	// Access requests of the mock's one resource: whether people can ask,
+	// who asked, and who was approved. noAccessRequests makes the mock a
+	// service from before all of it; see PlayNoAccessRequests.
+	accessRequests   bool
+	pendingRequests  []accessRequestFixture
+	approvedPeople   []approvedPersonFixture
+	noAccessRequests bool
+	// omitApprovedPeople leaves allowed_passkeys out of every resource row.
+	omitApprovedPeople bool
+	// listRequestCodes puts request_code in listing rows; see
+	// ListRequestCodes. accessRequestsHasMore is meta.has_more of the
+	// listings, nil when the member is left out.
+	listRequestCodes      bool
+	accessRequestsHasMore *bool
+	// acceptOnPublic turns access requests on for a public resource instead
+	// of refusing; see AcceptAccessRequestsOnPublic. wrongCodes counts the
+	// wrong codes given to an approval or a denial of the mock's resource.
+	acceptOnPublic bool
+	wrongCodes     int
+	// refuseAccessRequestsMember makes a create or a change that carries
+	// access_requests a validation failure; see
+	// PlayStrictWithoutAccessRequests.
+	refuseAccessRequestsMember bool
 	// failf reports a contract violation to the owning test. It is t.Errorf,
 	// which is safe to call from a handler goroutine; this package's own
 	// tests replace it to observe the report without failing themselves.
@@ -269,6 +292,7 @@ func (s *Server) addResourceAccess(row map[string]any) {
 	if len(s.allowedDeviceKeys) > 0 {
 		row[fieldAllowedDeviceKeys] = append([]string(nil), s.allowedDeviceKeys...)
 	}
+	s.addAccessRequestFields(row)
 }
 
 // SetPublisherName sets the mock owner's publisher name without a request;
@@ -417,7 +441,7 @@ func (s *Server) writeUnauthorized(w http.ResponseWriter) {
 }
 
 func (s *Server) defaultHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method == http.MethodGet && s.handleResourceRead(w, r) {
+	if s.handleResourceRoute(w, r) {
 		return
 	}
 	switch {
@@ -451,6 +475,15 @@ func (s *Server) defaultHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 const resourceTypeURL = "url"
+
+// handleResourceRoute serves the routes that are tried before the default
+// table: the owner's resource reads and the access-request routes. It reports
+// whether r was one of them. They come first because the delete of a resource
+// in that table matches any path under /v1/resources/, and a denial or a
+// removal must not be answered as one.
+func (s *Server) handleResourceRoute(w http.ResponseWriter, r *http.Request) bool {
+	return (r.Method == http.MethodGet && s.handleResourceRead(w, r)) || s.handleAccessRoute(w, r)
+}
 
 // handleResourceRead serves the owner's resource reads for the mock's one
 // resource and reports whether the request was one of them.
@@ -504,11 +537,14 @@ func (s *Server) resourceRow() map[string]any {
 // PlayPublicByDefault. A create that finds the existing resource
 // (SetPublishFoundExisting) changes nothing. It is refused when it states a
 // privacy or a device list other than the resource's, and returns the
-// resource as it is otherwise, as the service does.
+// resource as it is otherwise, as the service does. A different
+// access-request setting is not a refusal: the answer carries the setting
+// the resource has.
 func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		AllowedDeviceKeys []string `json:"allowed_device_keys"`
 		Private           *bool    `json:"private"`
+		AccessRequests    *bool    `json:"access_requests"`
 		Slug              string   `json:"slug"`
 		FindOrCreate      bool     `json:"find_or_create"`
 		Type              string   `json:"type"`
@@ -533,14 +569,30 @@ func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
 			"the request had invalid fields", invalid, nil)
 		return
 	}
+	if s.refusesAccessRequestsMember(w, body.AccessRequests) {
+		return
+	}
 	meta := map[string]any{}
 	s.mu.Lock()
 	refusal := s.applyCreateAccess(body.Private, body.AllowedDeviceKeys)
+	requestsRefusal := ""
+	if refusal == "" {
+		existing := s.publishFoundExisting != nil && *s.publishFoundExisting
+		if !existing {
+			// A resource that was just made starts with access requests off.
+			s.accessRequests = false
+		}
+		requestsRefusal = s.applyAccessRequestsSetting(body.AccessRequests, existing)
+	}
 	if s.publishFoundExisting != nil {
 		meta["found_existing"] = *s.publishFoundExisting
 	}
 	omitCRID := s.publishOmitCRID
 	s.mu.Unlock()
+	if requestsRefusal != "" {
+		WriteProblem(s.t, w, http.StatusBadRequest, codeInvalidInput, titleInvalidInput, requestsRefusal)
+		return
+	}
 	if refusal != "" {
 		s.writeCreateRefusal(w, refusal)
 		return
@@ -574,7 +626,7 @@ func (s *Server) writeCreateRefusal(w http.ResponseWriter, refusal string) {
 		WriteProblem(s.t, w, http.StatusBadRequest, CodeDeviceKeysMismatch, "Device Keys Mismatch",
 			"this target is already published with another list of allowed devices")
 	default:
-		WriteProblem(s.t, w, http.StatusBadRequest, refusal, "Invalid Input", LegacyAccessSettingsDetail)
+		WriteProblem(s.t, w, http.StatusBadRequest, refusal, titleInvalidInput, LegacyAccessSettingsDetail)
 	}
 }
 
@@ -605,7 +657,7 @@ func (s *Server) applyCreateAccess(stated *bool, allowedDeviceKeys []string) str
 	if s.publicByDefault {
 		private := stated != nil && *stated
 		if private != s.private || otherKeys {
-			return "invalid_input"
+			return codeInvalidInput
 		}
 		return ""
 	}
@@ -637,19 +689,26 @@ func (s *Server) handleDeviceGrants(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Replace *[]string `json:"allowed_device_keys"`
-		Add     []string  `json:"allowed_device_keys_add"`
-		Remove  []string  `json:"allowed_device_keys_remove"`
+		Replace        *[]string `json:"allowed_device_keys"`
+		Add            []string  `json:"allowed_device_keys_add"`
+		Remove         []string  `json:"allowed_device_keys_remove"`
+		AccessRequests *bool     `json:"access_requests"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		WriteProblem(s.t, w, http.StatusBadRequest, "invalid_request", "Bad Request", "request body must be JSON")
 		return
 	}
+	if s.refusesAccessRequestsMember(w, body.AccessRequests) {
+		return
+	}
 	s.mu.Lock()
 	refusal := s.applyGrantChange(body.Replace, body.Add, body.Remove)
+	if refusal == "" {
+		refusal = s.applyAccessRequestsSetting(body.AccessRequests, false)
+	}
 	s.mu.Unlock()
 	if refusal != "" {
-		WriteProblem(s.t, w, http.StatusBadRequest, "invalid_input", "Invalid Input", refusal)
+		WriteProblem(s.t, w, http.StatusBadRequest, codeInvalidInput, titleInvalidInput, refusal)
 		return
 	}
 	WriteEnvelope(s.t, w, http.StatusOK, s.resourceRow(), nil)

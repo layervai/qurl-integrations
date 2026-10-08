@@ -1725,3 +1725,36 @@ func TestEditDeviceGrantsShowsTheServiceRefusal(t *testing.T) {
 		t.Fatalf("refused edit = %+v, %v", resource, err)
 	}
 }
+
+// TestEditDeviceGrantsThatLostToOtherWritersIsNotRetried pins what the client
+// does with the 503 the service answers when a grant edit lost every attempt
+// against other changes: it returns the problem with its Retry-After and
+// sends nothing more, with an account key and with a device credential.
+func TestEditDeviceGrantsThatLostToOtherWritersIsNotRetried(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		open func(*testing.T, *apitest.Server, *[]time.Duration) Client
+	}{
+		{name: "account", open: newTestClient},
+		{name: "registered", open: func(t *testing.T, srv *apitest.Server, _ *[]time.Duration) Client {
+			return newRegisteredTestClient(t, srv)
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			srv := apitest.NewServer(t)
+			srv.ScriptRepeat(http.MethodPatch, "/v1/resources/"+srv.Key.CRID, maxAttempts, func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Retry-After", "1")
+				apitest.WriteProblem(t, w, http.StatusServiceUnavailable, "service_unavailable", "Service Unavailable", "nothing was changed; send the request again")
+			})
+			var sleeps []time.Duration
+			resource, err := test.open(t, srv, &sleeps).EditDeviceGrants(t.Context(), srv.Key.CRID, []string{"a"}, []string{"b"})
+			var problem *Error
+			if resource != nil || !errors.As(err, &problem) || problem.StatusCode != http.StatusServiceUnavailable || problem.Code != "service_unavailable" || problem.RetryAfter != 1 {
+				t.Fatalf("EditDeviceGrants = %+v, %v; want the 503 problem with its Retry-After", resource, err)
+			}
+			if got := len(srv.Requests()); got != 1 || len(sleeps) != 0 {
+				t.Fatalf("the edit was sent %d times with %d waits, want once and no wait", got, len(sleeps))
+			}
+		})
+	}
+}

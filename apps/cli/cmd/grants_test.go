@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/layervai/qurl-integrations/apps/cli/internal/apitest"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/exitcode"
@@ -268,9 +269,14 @@ func TestGrantsUsageErrorsSendNothing(t *testing.T) {
 		{name: "clear with add", flags: []string{"--clear", "--add", key}, want: msgGrantsClearWithEdit},
 		{name: "clear with remove", flags: []string{"--clear", "--remove", key}, want: msgGrantsClearWithEdit},
 		{name: "add a value that is not a public key", flags: []string{"--add", "invalid"}, want: "--add requires unique canonical"},
-		{name: "remove a value that is not a public key", flags: []string{"--remove", "invalid"}, want: "--remove requires unique canonical"},
+		{name: "remove a value that is neither a public key nor a device id", flags: []string{"--remove", "invalid"}, want: msgGrantsRemoveInvalid},
 		{name: "add the same key twice", flags: []string{"--add", key, "--add", key}, want: "--add requires unique canonical"},
-		{name: "remove the same key twice", flags: []string{"--remove", key, "--remove", key}, want: "--remove requires unique canonical"},
+		{name: "remove the same key twice", flags: []string{"--remove", key, "--remove", key}, want: msgGrantsRemoveTwice},
+		// The flag that replaced the list is answered first, whatever else
+		// is wrong with the command line: a command from earlier
+		// documentation must be told that the flag is gone.
+		{name: "the replace flag with a remove that is invalid", flags: []string{"--allow-device-key", key, "--remove", "invalid"}, want: "--allow-device-key no longer replaces the list: use --add <public-key>"},
+		{name: "the replace flag with a remove given twice", flags: []string{"--remove", key, "--remove", key, "--allow-device-key", key}, want: "--allow-device-key no longer replaces the list: use --add <public-key>"},
 		{name: "add and remove the same key", flags: []string{"--add", key, "--remove", key}, want: msgGrantsAddAndRemove},
 		{name: "more keys than a list can hold", flags: tooMany, want: "--add accepts at most 256 keys"},
 	} {
@@ -374,7 +380,7 @@ func TestGrantsCopyTeachesAddAndRemove(t *testing.T) {
 		"qurl grants <CRID> --add <public-key>",
 		"qurl grants <CRID> --remove <public-key>",
 		"qurl grants <CRID> --clear",
-		"| qurl grants <CRID> | Show or change the devices allowed to open a private resource |",
+		"| qurl grants <CRID> | Show or change the devices and people allowed to open a private resource |",
 	} {
 		if !strings.Contains(readme, want) {
 			t.Errorf("README does not teach %q", want)
@@ -391,10 +397,10 @@ func TestGrantsCopyTeachesAddAndRemove(t *testing.T) {
 	}
 	help := collapse(res.stdout.String())
 	for _, want := range []string{
-		"With no flag, the command prints the current list.",
+		"With no flag, the command prints both lists",
 		"--add allows a device and --remove takes one off the list.",
 		"applied as one change",
-		"--clear takes every device off the list.",
+		"--clear takes every public key off the list. It does not remove approved people.",
 		`To set the first list when you publish, use "qurl publish --allow-device-key".`,
 		"have no effect on a public one",
 	} {
@@ -404,5 +410,41 @@ func TestGrantsCopyTeachesAddAndRemove(t *testing.T) {
 	}
 	if strings.Contains(strings.ToLower(help), "replace") {
 		t.Errorf("grants help still describes replacing the list:\n%s", res.stdout.String())
+	}
+}
+
+// TestGrantsEditThatLostToOtherWritersIsUnavailableAndNotRetried pins the
+// answer the service gives when a change to single grants lost every attempt
+// against other changes to the same resource: HTTP 503 with a short
+// Retry-After, and nothing changed. The command reports it with the
+// unavailable exit code and the service's own text, prints nothing on stdout,
+// and sends the request exactly once: sending it again is the caller's
+// decision.
+func TestGrantsEditThatLostToOtherWritersIsUnavailableAndNotRetried(t *testing.T) {
+	const detail = "The device grants were being changed by other requests. Nothing was changed; send the request again."
+	for _, flags := range [][]string{{"--add", grantKey(3)}, {"--remove", grantKey(1)}, {"--add", grantKey(3), "--remove", grantKey(1)}} {
+		for _, mode := range [][]string{nil, {"-o", "json"}, {"--quiet"}} {
+			t.Run(fmt.Sprintf("%v/%v", flags, mode), func(t *testing.T) {
+				srv := apitest.NewServer(t)
+				srv.SetResourceAccess(true, grantKey(1))
+				srv.ScriptRepeat(http.MethodPatch, "/v1/resources/"+srv.Key.CRID, 3, func(w http.ResponseWriter, _ *http.Request) {
+					w.Header().Set("Retry-After", "1")
+					apitest.WriteProblem(t, w, http.StatusServiceUnavailable, "service_unavailable", "Service Unavailable", detail)
+				})
+				var sleeps []time.Duration
+				args := append([]string{"--endpoint", srv.URL, "grants", srv.Key.CRID}, flags...)
+				res := runCLI(t, &runOpts{args: append(args, mode...), sleeps: &sleeps})
+				if res.code != exitcode.Unavailable {
+					t.Fatalf("exit = %d, want %d; stderr: %s", res.code, exitcode.Unavailable, res.stderr.String())
+				}
+				mustEmptyStdout(t, res)
+				if !strings.Contains(res.stderr.String(), detail) || !strings.Contains(res.stderr.String(), "HTTP 503") {
+					t.Fatalf("stderr does not carry the service's text: %s", res.stderr.String())
+				}
+				if got := len(srv.Requests()); got != 1 || len(sleeps) != 0 {
+					t.Fatalf("the change was sent %d times with %d waits, want once and no wait", got, len(sleeps))
+				}
+			})
+		}
 	}
 }

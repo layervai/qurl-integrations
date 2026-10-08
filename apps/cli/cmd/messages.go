@@ -102,6 +102,34 @@ const (
 	msgGrantsClearWithEdit  = "--clear cannot be combined with --add or --remove"
 	msgGrantsAddAndRemove   = "the same public key cannot be given to both --add and --remove"
 
+	// msgGrantsRemoveInvalid refuses a --remove value that is neither of the
+	// two things the flag takes.
+	msgGrantsRemoveInvalid = "--remove takes public keys and device ids of the form xxxx-xxxx-xxxx-xxxx, each given once"
+	// msgGrantsRemoveTwice refuses a value that --remove was given more than
+	// once, which is another mistake than a value that is neither a public
+	// key nor a device id.
+	msgGrantsRemoveTwice = "--remove was given the same value twice; give each public key and each device id once"
+	// msgGrantsRemoveTooManyPeople bounds the device ids of one command as
+	// public keys are bounded: each is one request, sent one after another.
+	msgGrantsRemoveTooManyPeople = "--remove accepts at most 256 device ids"
+
+	// Usage errors of the commands for access requests.
+	msgAllowRequestsWithPublic  = "--allow-requests cannot be used with --public: access requests are for a private resource, and a public one already opens for anyone who has the CRID"
+	msgRequestsOnAndOff         = "--on and --off cannot be used together"
+	msgRequestsSettingNeedsCRID = "--on and --off need the CRID of the resource: qurl requests <CRID> --on"
+	// msgRequestCodeInvalid refuses an operand that can never be a request
+	// code, before any request is sent.
+	msgRequestCodeInvalid = "a request code is six digits, written as 123456, 123 456 or 123-456"
+	// msgDeniedRequestInvalid refuses an operand of `qurl deny` that is
+	// neither of the two things that name a request.
+	msgDeniedRequestInvalid = "name the request by its device id, of the form xxxx-xxxx-xxxx-xxxx, as `qurl requests <CRID>` shows it, or by its six-digit code"
+
+	// `qurl request` and `qurl requests` differ by one letter and do unrelated
+	// things. Each one's usage error names the other where a person who typed
+	// the wrong name lands.
+	hintMeantRequests = "Hint: if you meant to see who asked for access to your resources, use `qurl requests`."
+	hintMeantRequest  = "Hint: if you meant to make a request for a supervising app, use `qurl request METHOD PATH`."
+
 	// msgNoKeyProvided is login's empty-input error.
 	msgNoKeyProvided = "no API key provided"
 
@@ -183,6 +211,16 @@ func customerMessages() []string {
 		msgGrantsReplaceRemoved,
 		msgGrantsClearWithEdit,
 		msgGrantsAddAndRemove,
+		msgGrantsRemoveInvalid,
+		msgGrantsRemoveTwice,
+		msgGrantsRemoveTooManyPeople,
+		msgAllowRequestsWithPublic,
+		msgRequestsOnAndOff,
+		msgRequestsSettingNeedsCRID,
+		msgRequestCodeInvalid,
+		msgDeniedRequestInvalid,
+		hintMeantRequests,
+		hintMeantRequest,
 		msgNoKeyProvided,
 		msgAlreadyGone,
 		msgOpeningBrowser,

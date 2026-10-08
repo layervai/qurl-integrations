@@ -30,6 +30,10 @@ const (
 	hintNotFound      = "Hint: the CRID may be mistyped, expired, or no longer published. Ask whoever shared it for a current one."
 	hintQuotaExceeded = "Hint: if this device is not linked to an account, run `qurl account setup`. For account plan limits, see https://layerv.ai/pricing."
 	hintRetryAfter    = "Retry after %ds."
+	// The two lines after a "too many requests" answer to an approval or to
+	// a denial by code. %s is the wait in words.
+	hintTryCodeAgainIn = "Try again in %s."
+	hintAskForCode     = "Ask the person for the code on their screen."
 
 	// hintShareNotFound is the not-found guidance for sharing or getting a
 	// CRID, in place of hintNotFound. The service answers a mistyped CRID, a
@@ -158,6 +162,16 @@ const (
 	// change it. %s is the resource's CRID. It follows the word "Warning:",
 	// in the document in text mode and on stderr for JSON and --quiet.
 	msgPublishKeptPublic = "this target was published as public before, and it stays public: anyone who has the CRID can open it. To make it private, delete it with `qurl delete %s` and publish again; the new resource gets a new CRID."
+
+	// hintAccessRequestsNotTurnedOn is the next step when a publish found the
+	// target already published as a private resource and could not turn
+	// access requests on for it. %s is the resource's CRID.
+	hintAccessRequestsNotTurnedOn = "Hint: to try again, run `qurl requests %s --on`, or run this command again."
+
+	// msgPublishRequestsTurnedOn is the one line a publish says when the
+	// target was already published and the command turned access requests on
+	// for it. It takes the place of both already-published notes.
+	msgPublishRequestsTurnedOn = "This target was already published. Access requests are now on for it."
 
 	// msgConnectorConnectionConfig renders native connection configuration
 	// errors without exposing deployment topology or custom-build inputs.
@@ -370,7 +384,7 @@ func CustomerMessages() []string {
 		hintCRIDNotFound,
 		hintCRIDNotFoundNoDevice,
 		hintQuotaExceeded,
-		hintRetryAfter,
+		hintRetryAfter, hintTryCodeAgainIn, hintAskForCode,
 		hintRevoked,
 		hintRetired,
 		hintScope,
@@ -388,6 +402,16 @@ func CustomerMessages() []string {
 		labelAccess, msgPublishPrivate, msgPublishPublic,
 		hintPublishExistingPublic, hintPublishExistingPrivate, hintPublishAccessDiffers, hintPublishOtherDevices,
 		msgPublishKeptPublic,
+		hintAccessRequestsNotTurnedOn, msgPublishRequestsTurnedOn,
+		msgRequestsSendAddress, msgRequestsSendCRID, msgRequestsNextStep, msgRequestsNextStepNoSite,
+		msgRequestsApproveCommand, msgRequestsSafeToSend, msgRequestsSafeToSendCRID,
+		msgRequestsOn, msgRequestsOff, msgRequestsOffOnePerson, msgRequestsOffPeople, msgRequestsOffPeopleUnknown,
+		msgRequesterNameNote, msgRemovalKeysNotChanged, msgRequestsMayBeMore, msgRequestsMayBeMoreForOne, msgDeniedDevice, msgRemovalFinishKeys,
+		msgNoPendingRequests, msgNoPendingRequestsForOne, msgApproveOnlyGivenCodes,
+		msgRequesterNoName, msgRequesterNameUnchecked,
+		msgApproved, msgApprovedCanOpen, msgRemoveCommand, msgDenied,
+		labelName, labelDeviceID, labelApproved, labelAccessRequests, labelApprovedPeople,
+		msgNoApprovedPeople, msgStateOn, msgStateOff, msgRemovePersonHint,
 		hintPublishExistingPublicWithout,
 		labelPublisher, labelCreated,
 		msgPublisherNoName, msgPublisherUnverified, msgPublisherVerified,

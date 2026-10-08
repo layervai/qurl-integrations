@@ -20,13 +20,19 @@ type publishJSON struct {
 	// published as public and a publish that named no privacy kept it. It
 	// tells that case from --public on an existing resource, which has the
 	// same private: false and found_existing: true, without reading stderr.
-	KeptPublic bool       `json:"kept_public,omitempty"`
-	CRID       string     `json:"crid,omitempty"`
-	ResourceID string     `json:"resource_id"`
-	TargetURL  string     `json:"target_url"`
-	Status     string     `json:"status,omitempty"`
-	CreatedAt  *time.Time `json:"created_at,omitempty"`
-	ExpiresAt  *time.Time `json:"expires_at,omitempty"`
+	KeptPublic bool `json:"kept_public,omitempty"`
+	// AccessRequests is present when the service's answer said whether people
+	// can ask for access. ResourceURL is the resource's address on the link
+	// site, present only when access requests are on and this install knows
+	// that site.
+	AccessRequests *bool      `json:"access_requests,omitempty"`
+	ResourceURL    string     `json:"resource_url,omitempty"`
+	CRID           string     `json:"crid,omitempty"`
+	ResourceID     string     `json:"resource_id"`
+	TargetURL      string     `json:"target_url"`
+	Status         string     `json:"status,omitempty"`
+	CreatedAt      *time.Time `json:"created_at,omitempty"`
+	ExpiresAt      *time.Time `json:"expires_at,omitempty"`
 	// FoundExisting mirrors the text-mode already-published note for scripts.
 	// Known remote and local outcomes emit true or false; an uncertain local
 	// reconciliation omits the field rather than claiming a fresh publish.
@@ -175,6 +181,8 @@ func (p *Printer) Publish(res *qurlapi.Published) error {
 			// The warning says the target was published before, so it takes
 			// the place of the replay note.
 			p.Warnf("%s", keptPublicWarning(res))
+		case res.AccessRequestsTurnedOn:
+			p.Notef(msgPublishRequestsTurnedOn)
 		case foundExisting(res):
 			p.Notef(msgAlreadyPublished)
 		}
@@ -182,16 +190,18 @@ func (p *Printer) Publish(res *qurlapi.Published) error {
 	switch {
 	case p.format == FormatJSON:
 		return p.writeJSON(publishJSON{
-			Private:       res.Private,
-			KeptPublic:    res.KeptPublic,
-			CRID:          res.CRID,
-			ResourceID:    res.ResourceID,
-			TargetURL:     res.TargetURL,
-			Status:        res.Status,
-			CreatedAt:     res.CreatedAt,
-			ExpiresAt:     res.ExpiresAt,
-			FoundExisting: res.FoundExisting,
-			Publisher:     publisherDocument(res.Publisher),
+			Private:        res.Private,
+			KeptPublic:     res.KeptPublic,
+			AccessRequests: res.AccessRequests,
+			ResourceURL:    requestAddress(res),
+			CRID:           res.CRID,
+			ResourceID:     res.ResourceID,
+			TargetURL:      res.TargetURL,
+			Status:         res.Status,
+			CreatedAt:      res.CreatedAt,
+			ExpiresAt:      res.ExpiresAt,
+			FoundExisting:  res.FoundExisting,
+			Publisher:      publisherDocument(res.Publisher),
 		})
 	case p.quiet:
 		_, err := fmt.Fprintln(p.out, res.CRID)
@@ -318,21 +328,42 @@ func (p *Printer) ResourceStatus(resource *qurlapi.ResourceSummary) error {
 	default:
 		tw := tabwriter.NewWriter(p.out, 0, 0, 2, ' ', 0)
 		ew := &errWriter{w: tw}
-		ew.printf("%s\t%s\n", p.bold("CRID:"), resource.CRID)
-		if resource.TargetURL != "" {
-			ew.printf("%s\t%s\n", p.bold("Target:"), resource.TargetURL)
-		}
-		ew.printf("%s\t%s\n", p.bold("Type:"), resource.Type)
-		ew.printf("%s\t%s\n", p.bold("Status:"), resource.Status)
-		if resource.Private != nil {
-			ew.printf("%s\t%t\n", p.bold("Private:"), *resource.Private)
-		}
-		ew.printf("%s\t%v\n", p.bold("Allowed device keys:"), resource.AllowedDeviceKeys)
-		p.publisherRows(ew, resource.Publisher, resource.CreatedAt)
-		if resource.ExpiresAt != nil {
-			ew.printf("%s\t%s\n", p.bold("Expires:"), p.formatExpiry(*resource.ExpiresAt))
-		}
+		p.resourceStatusRows(ew, resource, false)
 		return ew.flush(tw)
+	}
+}
+
+// resourceStatusRows writes the key/value rows of a resource. grants adds the
+// two rows only `qurl grants` shows: whether people can ask for access, and
+// how many were approved. The status and inspect views stay as they were.
+func (p *Printer) resourceStatusRows(ew *errWriter, resource *qurlapi.ResourceSummary, grants bool) {
+	ew.printf("%s\t%s\n", p.bold("CRID:"), resource.CRID)
+	if resource.TargetURL != "" {
+		ew.printf("%s\t%s\n", p.bold("Target:"), resource.TargetURL)
+	}
+	ew.printf("%s\t%s\n", p.bold("Type:"), resource.Type)
+	ew.printf("%s\t%s\n", p.bold("Status:"), resource.Status)
+	if resource.Private != nil {
+		ew.printf("%s\t%t\n", p.bold("Private:"), *resource.Private)
+	}
+	if grants && resource.AccessRequests != nil {
+		state := msgStateOff
+		if *resource.AccessRequests {
+			state = msgStateOn
+		}
+		ew.printf("%s\t%s\n", p.bold(labelAccessRequests), state)
+	}
+	ew.printf("%s\t%v\n", p.bold("Allowed device keys:"), resource.AllowedDeviceKeys)
+	if grants {
+		people := msgNoApprovedPeople
+		if count := len(resource.AllowedPasskeys); count > 0 {
+			people = strconv.Itoa(count)
+		}
+		ew.printf("%s\t%s\n", p.bold(labelApprovedPeople), people)
+	}
+	p.publisherRows(ew, resource.Publisher, resource.CreatedAt)
+	if resource.ExpiresAt != nil {
+		ew.printf("%s\t%s\n", p.bold("Expires:"), p.formatExpiry(*resource.ExpiresAt))
 	}
 }
 
@@ -385,11 +416,40 @@ func (p *Printer) publishText(res *qurlapi.Published) error {
 		// In the document, so it is read with the Access row it explains,
 		// and never dim: a publisher who did not choose public must see it.
 		ew.printf("\n%s %s\n", p.style(ansiBold+ansiYellow, labelWarning), keptPublicWarning(res))
+	case res.AccessRequestsTurnedOn && res.CRID != "":
+		// The publish changed the resource it found, and the one line says
+		// so. The other note's next step, deleting the resource, is not
+		// what this publisher asked about.
+		ew.printf("\n%s\n", p.dim(msgPublishRequestsTurnedOn))
 	case foundExisting(res) && res.CRID != "":
 		ew.printf("\n%s\n", p.dim(msgPublishFoundExisting))
 	}
+	// With access requests on, the document says what to send to people and
+	// what happens next. It comes before the CRID, which stays last and alone
+	// on its line.
+	if acceptsRequests(res) && res.CRID != "" {
+		ew.printf("\n")
+		p.requestGuidance(ew, res.CRID, requestAddress(res))
+	}
 	ew.printf("\n%s %s\n", p.bold(labelCRID), res.CRID)
 	return ew.flush(nil)
+}
+
+// acceptsRequests reports whether the service confirmed that people can ask
+// for access to the published resource, and that the resource is private.
+// Both are needed for what follows from it: the guidance that says the
+// resource's address is safe to send to anyone, and that address.
+func acceptsRequests(res *qurlapi.Published) bool {
+	return res.AccessRequests != nil && *res.AccessRequests && saidPrivate(res.Private)
+}
+
+// requestAddress is the address a publisher sends to people: the resource's
+// address on the link site, and only for a resource that accepts requests.
+func requestAddress(res *qurlapi.Published) string {
+	if !acceptsRequests(res) {
+		return ""
+	}
+	return res.LinkSiteURL
 }
 
 // keptPublicWarning is the text of the warning for a kept public resource,

@@ -24,6 +24,12 @@ type ResolvedResource struct {
 	// confirmed. This package never sets it: the Connector resource request
 	// carries no privacy, so the publish command creates the resource first.
 	Private *bool
+	// AccessRequests is whether people can ask for access, as the same create
+	// answer said; nil when it did not say.
+	AccessRequests *bool
+	// AccessRequestsTurnedOn reports that the create found the resource with
+	// access requests off and the publish command turned them on.
+	AccessRequestsTurnedOn bool
 	// KeptPublic reports that the publish command named no privacy and kept
 	// the public resource the target already had. Private is then false.
 	KeptPublic bool

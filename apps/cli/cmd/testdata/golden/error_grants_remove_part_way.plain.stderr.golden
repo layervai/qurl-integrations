@@ -1,0 +1,4 @@
+Error: access was taken away from abcd-efgh-2345-mnop. Then no approved person had the device id qrst-uvwx-yz67-abcd on this resource, and the command stopped. keep-keep-keep-keep still has access.
+
+  Run `qurl grants qhtpthw4qt7wkw7khghr6x3z4hsfyn4zbuyhnee4i6bi67yu6yytgvwdbb4q` to see who has access now.
+  Request ID: req_test

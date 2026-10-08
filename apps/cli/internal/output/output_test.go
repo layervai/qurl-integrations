@@ -1261,6 +1261,15 @@ func TestEveryConnectorMessageIsRegistered(t *testing.T) {
 		msgConnectorAssignmentExpired, hintConnectorAssignmentExpired,
 		labelAccess, msgPublishPrivate, msgPublishPublic,
 		hintPublishExistingPublic, hintPublishExistingPrivate, hintPublishAccessDiffers,
+		hintAccessRequestsNotTurnedOn, msgPublishRequestsTurnedOn,
+		msgRequestsSendAddress, msgRequestsSendCRID, msgRequestsNextStep, msgRequestsNextStepNoSite,
+		msgRequestsApproveCommand, msgRequestsSafeToSend, msgRequestsSafeToSendCRID,
+		msgRequestsOn, msgRequestsOff, msgRequestsOffOnePerson, msgRequestsOffPeople,
+		msgNoPendingRequests, msgNoPendingRequestsForOne, msgApproveOnlyGivenCodes,
+		msgRequesterNoName, msgRequesterNameUnchecked,
+		msgApproved, msgApprovedCanOpen, msgRemoveCommand, msgDenied,
+		labelName, labelDeviceID, labelApproved, labelAccessRequests, labelApprovedPeople,
+		msgNoApprovedPeople, msgStateOn, msgStateOff, msgRemovePersonHint,
 	}
 	for _, msg := range rendered {
 		if !registered[msg] {

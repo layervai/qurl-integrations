@@ -432,6 +432,11 @@ func TestPublishConflictHintsCanBeFollowed(t *testing.T) {
 			followed: []string{"--public"}, deadEnd: []string{"--allow-device-key", goldenDevicePublicKey, "--public"},
 		},
 		{
+			name: "--allow-requests for a public target", given: []string{"--allow-requests"},
+			hint:     "run the command again with --public and without --allow-requests.",
+			followed: []string{"--public"}, deadEnd: []string{"--allow-requests", "--public"},
+		},
+		{
 			name: "--public=false for a public target", given: []string{"--public=false"},
 			hint:     "run the command again with --public and without --public=false.",
 			followed: []string{"--public"},
@@ -535,7 +540,7 @@ func TestPublishCopySaysWhatHappensToATargetPublishedBefore(t *testing.T) {
 		"If you published a target with a release that made resources public by default, that resource is still public.",
 		"Publishing it again with no privacy flag keeps it, and warns you that it stays public.",
 		`To make it private, delete it with "qurl delete <CRID>" and publish again; the new resource gets a new CRID.`,
-		"A flag that asks for what the existing resource is not is refused: --allow-device-key for a public resource, --public for a private one.",
+		"A flag that asks for what the existing resource is not is refused: --allow-device-key or --allow-requests for a public resource, --public for a private one.",
 	} {
 		if !strings.Contains(help, want) {
 			t.Errorf("publish help lacks %q:\n%s", want, res.stdout.String())

@@ -1,5 +1,6 @@
 {
   "private": true,
+  "access_requests": false,
   "crid": "qhtpthw4qt7wkw7khghr6x3z4hsfyn4zbuyhnee4i6bi67yu6yytgvwdbb4q",
   "resource_id": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE155W1ele0q0AK_YFZnQqzfhJLxqLgHaG3B5rXzPO87WZlnYa5TWlrbIO2C6ALvLxT7zaFWm9fc8PCklq1v4arg",
   "target_url": "https://example.com/data",

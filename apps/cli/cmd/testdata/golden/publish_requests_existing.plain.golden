@@ -1,0 +1,20 @@
+Already published
+
+  Target:   https://example.com/data
+  Access:   private — only you and the people you allow can open it
+  Status:   active
+  Created:  1d ago
+
+This target was already published. Access requests are now on for it.
+
+People can ask you for access to this resource. Send them this address:
+
+  https://links.example.test/qhtpthw4qt7wkw7khghr6x3z4hsfyn4zbuyhnee4i6bi67yu6yytgvwdbb4q
+
+They ask for access there and get a six-digit code to give you. Approve a code with:
+
+  qurl approve qhtpthw4qt7wkw7khghr6x3z4hsfyn4zbuyhnee4i6bi67yu6yytgvwdbb4q <code>
+
+The address and the CRID are safe to send to anyone: a private resource opens only for you and the people you allow.
+
+CRID: qhtpthw4qt7wkw7khghr6x3z4hsfyn4zbuyhnee4i6bi67yu6yytgvwdbb4q

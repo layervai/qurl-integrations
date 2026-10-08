@@ -43,6 +43,11 @@ type resourceRow struct {
 	Tags              []string     `json:"tags"`
 	CreatedAt         *time.Time   `json:"created_at"`
 	ExpiresAt         *time.Time   `json:"expires_at"`
+	// AccessRequests is nil when the row has no such member, which is how a
+	// service from before access requests answers. AllowedPasskeys are the
+	// people the publisher approved.
+	AccessRequests  *bool        `json:"access_requests"`
+	AllowedPasskeys []passkeyRow `json:"allowed_passkeys"`
 	// Publisher is read by UnmarshalJSON, not by the struct decoder, so a
 	// repeated member can be counted; see publisherMember.
 	Publisher publisherWire `json:"-"`
@@ -207,13 +212,17 @@ type publishRequest struct {
 	// request without it is the second create of keepExistingPublic.
 	Private           *bool    `json:"private,omitempty"`
 	AllowedDeviceKeys []string `json:"allowed_device_keys,omitempty"`
-	Slug              string   `json:"slug,omitempty"`
-	FindOrCreate      bool     `json:"find_or_create,omitempty"`
-	Type              string   `json:"type"`
-	TargetURL         string   `json:"target_url,omitempty"`
-	Description       string   `json:"description,omitempty"`
-	Tags              []string `json:"tags,omitempty"`
-	Alias             string   `json:"alias,omitempty"`
+	// AccessRequests is sent only to turn access requests on. Off is the
+	// service's default and is not planned to change, and a service from
+	// before access requests is never sent a member it does not know.
+	AccessRequests bool     `json:"access_requests,omitempty"`
+	Slug           string   `json:"slug,omitempty"`
+	FindOrCreate   bool     `json:"find_or_create,omitempty"`
+	Type           string   `json:"type"`
+	TargetURL      string   `json:"target_url,omitempty"`
+	Description    string   `json:"description,omitempty"`
+	Tags           []string `json:"tags,omitempty"`
+	Alias          string   `json:"alias,omitempty"`
 }
 
 // Publish registers a URL or pre-creates a Connector resource, private unless
@@ -231,6 +240,7 @@ func (c *client) Publish(ctx context.Context, targetURL string, opts PublishOpti
 	body := publishRequest{
 		Private:           &wantPrivate,
 		AllowedDeviceKeys: opts.AllowedDeviceKeys,
+		AccessRequests:    opts.AllowRequests,
 		Type:              "url",
 		TargetURL:         targetURL,
 		Description:       opts.Description,
@@ -251,7 +261,7 @@ func (c *client) Publish(ctx context.Context, targetURL string, opts PublishOpti
 		return nil, err
 	}
 	if reply.status != http.StatusCreated {
-		refusal := publishProblem(reply, &opts)
+		refusal := c.publishRefusal(ctx, reply, &opts)
 		if !mayKeepExistingPublic(&opts, refusal) {
 			return nil, refusal
 		}
@@ -278,7 +288,32 @@ func (c *client) Publish(ctx context.Context, targetURL string, opts PublishOpti
 		}
 		return nil, fmt.Errorf("%w: API did not confirm the requested device grants", qurl.ErrInvalidAPIResponse)
 	}
+	if opts.AllowRequests {
+		if err := c.confirmAccessRequests(ctx, published); err != nil {
+			return nil, err
+		}
+	}
 	return published, nil
+}
+
+// publishRefusal builds the error for a create that the service refused.
+//
+// It is publishProblem's reading of the answer, with one more question for a
+// request that asked for access requests. A service that does not have them
+// and validates request bodies strictly refuses the member it does not know
+// with its generic validation problem, and nothing was created. That is told
+// apart from a real refusal by asking the service, not by reading the
+// problem's words; see refusedForNoAccessRequests. A conflict with a resource
+// that exists is never that case: the service read the request to find it.
+func (c *client) publishRefusal(ctx context.Context, reply *restReply, opts *PublishOptions) error {
+	refusal := publishProblem(reply, opts)
+	if !opts.AllowRequests || errors.Is(refusal, ErrPublishAccessConflict) {
+		return refusal
+	}
+	if c.refusedForNoAccessRequests(ctx, reply) {
+		return &accessRequestsUnsupportedError{detail: msgAccessRequestsCreateRefused}
+	}
+	return refusal
 }
 
 // publishedFromReply decodes a 201 answer to a create request and checks the
@@ -303,24 +338,27 @@ func publishedFromReply(reply *restReply) (*Published, []string, error) {
 		return nil, nil, fmt.Errorf("%w: publish response identity: %w", qurl.ErrInvalidAPIResponse, err)
 	}
 	return &Published{
-		Private:       env.Data.Private,
-		CRID:          env.Data.CRID,
-		ResourceID:    env.Data.ResourceID,
-		TargetURL:     env.Data.TargetURL,
-		Status:        env.Data.Status,
-		CreatedAt:     knownTime(env.Data.CreatedAt),
-		ExpiresAt:     knownTime(env.Data.ExpiresAt),
-		FoundExisting: env.Meta.FoundExisting,
-		Publisher:     env.Data.Publisher.publisher(),
+		AccessRequests: env.Data.AccessRequests,
+		Private:        env.Data.Private,
+		CRID:           env.Data.CRID,
+		ResourceID:     env.Data.ResourceID,
+		TargetURL:      env.Data.TargetURL,
+		Status:         env.Data.Status,
+		CreatedAt:      knownTime(env.Data.CreatedAt),
+		ExpiresAt:      knownTime(env.Data.ExpiresAt),
+		FoundExisting:  env.Meta.FoundExisting,
+		Publisher:      env.Data.Publisher.publisher(),
 	}, env.Data.AllowedDeviceKeys, nil
 }
 
 // mayKeepExistingPublic reports whether a refused create is the one a publish
 // answers by keeping the resource that exists: the publisher named no
 // privacy, and the refusal says the target is already published as public, or
-// is the older answer that does not say what differs.
+// is the older answer that does not say what differs. A request that carries
+// a device list or asks for access requests named a private resource, so it
+// never keeps a public one, whatever the caller set.
 func mayKeepExistingPublic(opts *PublishOptions, refusal error) bool {
-	if !opts.KeepExistingPublic || opts.Public || len(opts.AllowedDeviceKeys) > 0 {
+	if !opts.KeepExistingPublic || opts.Public || len(opts.AllowedDeviceKeys) > 0 || opts.AllowRequests {
 		return false
 	}
 	var conflict *PublishAccessConflictError
@@ -444,6 +482,48 @@ func (c *client) keepExistingPublic(ctx context.Context, body *publishRequest, r
 		return nil, &unaskedPublicError{notDeleted: err}
 	}
 	return nil, &unaskedPublicError{}
+}
+
+// confirmAccessRequests holds a publish that asked for access requests to
+// that: the result says they are on, or the publish fails.
+//
+// A row with no such member is how a service from before access requests
+// answers: it made the resource, private as already confirmed, and ignored
+// the rest. A row that says they are off for a resource that was just made is
+// a service that has them and did not turn them on.
+//
+// A row that says they are off for a resource the create found is the
+// service doing what it does: it changes nothing about a resource that
+// exists. The publisher asked for people to be able to ask for access to
+// this target, so the setting is turned on here with the change
+// `qurl requests --on` makes, and that answer is checked the same way. A
+// failed change leaves the resource as it was, which the create answer
+// confirmed is private. The error therefore names the CRID: the publisher
+// needs it to try again, and nothing about the resource is unknown.
+func (c *client) confirmAccessRequests(ctx context.Context, published *Published) error {
+	switch {
+	case published.AccessRequests == nil:
+		return &accessRequestsUnsupportedError{detail: msgAccessRequestsCreateIgnored}
+	case *published.AccessRequests:
+		return nil
+	case published.FoundExisting == nil || !*published.FoundExisting:
+		return &answerError{message: msgAccessRequestsCreateUnconfirmed}
+	}
+	resource, err := c.SetAccessRequests(ctx, published.CRID, true)
+	var notPrivate *accessRequestsNotPrivateError
+	switch {
+	case errors.As(err, &notPrivate):
+		// The change requires its answer to say that the resource is
+		// private, and this one did not. The create answer said it is, so
+		// the two disagree about who can open the resource. That is the
+		// privacy failure, and it names no CRID.
+		return &publishPrivacyError{}
+	case err != nil:
+		return &AccessRequestsNotTurnedOnError{CRID: published.CRID, cause: err}
+	}
+	published.AccessRequests = resource.AccessRequests
+	published.AccessRequestsTurnedOn = true
+	return nil
 }
 
 // TODO(upstream-contract): the service refuses a publish whose target is
@@ -616,7 +696,13 @@ func summarizeResourceRow(row *resourceRow, source string) (*ResourceSummary, er
 			return nil, fmt.Errorf("%w: desired-on tunnel %s has zero serving_epoch", qurl.ErrInvalidAPIResponse, source)
 		}
 	}
+	people, err := allowedPasskeys(row.AllowedPasskeys, source)
+	if err != nil {
+		return nil, err
+	}
 	return &ResourceSummary{
+		AccessRequests:    row.AccessRequests,
+		AllowedPasskeys:   people,
 		AllowedDeviceKeys: row.AllowedDeviceKeys,
 		Private:           row.Private,
 		CRID:              row.CRID, ResourceID: row.ResourceID, TargetURL: row.TargetURL,
