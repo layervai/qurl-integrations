@@ -300,8 +300,11 @@ type accessRequestsSettingJSON struct {
 // no count is printed and nothing reads as "nobody": the line says that
 // anyone approved earlier still has access, and where to look.
 //
-// TODO(upstream-contract): the count rests on the answer to the change
-// carrying allowed_passkeys, as every resource row does.
+// TODO(upstream-contract): the service sends allowed_passkeys on every
+// resource row, as an empty array when nobody is approved, on the answer to
+// a change as on a read. The count is read from that member. A missing
+// member is read as "the service did not say", which is the line with no
+// count.
 //
 // On, the resource must be one the service said is private: the guidance
 // says that its address is safe to send to anyone, which is true of a

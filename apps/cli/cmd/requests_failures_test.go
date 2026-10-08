@@ -315,9 +315,11 @@ func TestGrantsNeverReadsAMissingListAsNobody(t *testing.T) {
 		t.Run(fmt.Sprintf("a removal the list does not confirm %v", mode), func(t *testing.T) {
 			srv := seed(t)
 			res := runCLI(t, &runOpts{args: append([]string{"--endpoint", srv.URL, "grants", srv.Key.CRID, "--remove", requesterDevice, "--remove", otherDevice}, mode...)})
+			// The usual next step, a read of the lists, is not offered:
+			// on this service it would show "not said" again.
 			wantStderr := "Error: the service answered that access was taken away from " + requesterDevice + " and " + otherDevice +
-				". The list does not confirm it: the service's answer afterwards does not show who has access now.\n\n" +
-				"  Run `qurl grants " + srv.Key.CRID + "` to see who has access now.\n"
+				". This service does not show who has access, so the removal cannot be confirmed from here.\n\n" +
+				"  Nothing more can be learned with this command against this service: `qurl grants " + srv.Key.CRID + "` does not show who has access either.\n"
 			if res.code != exitcode.ServerError || res.stderr.String() != wantStderr {
 				t.Fatalf("exit = %d, want %d; stderr =\n%s\nwant\n%s", res.code, exitcode.ServerError, res.stderr.String(), wantStderr)
 			}
@@ -345,24 +347,36 @@ func TestGrantsNeverReadsAMissingListAsNobody(t *testing.T) {
 	// The same in a command that also names a public key. The change to the
 	// keys comes after the list is checked, so it was not made, and the
 	// outcome names the command that makes it alone.
-	t.Run("a removal the list does not confirm, with a public key waiting", func(t *testing.T) {
-		srv := seed(t)
-		res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "grants", srv.Key.CRID, "--remove", requesterDevice, "--add", grantKey(2)}})
-		wantStderr := "Error: the service answered that access was taken away from " + requesterDevice +
-			". The list does not confirm it: the service's answer afterwards does not show who has access now.\n\n" +
-			"  No public key was added or removed: that change comes after the removals, and the command stopped before it.\n\n" +
-			"  Run `qurl grants " + srv.Key.CRID + "` to see who has access now.\n" +
-			"  To make the change to the public keys, run: qurl grants " + srv.Key.CRID + " --add " + grantKey(2) + "\n"
-		if res.code != exitcode.ServerError || res.stderr.String() != wantStderr {
-			t.Fatalf("exit = %d, want %d; stderr =\n%s\nwant\n%s", res.code, exitcode.ServerError, res.stderr.String(), wantStderr)
-		}
-		mustEmptyStdout(t, res)
-		for _, line := range requestLog(srv) {
-			if strings.HasPrefix(line, "PATCH ") {
-				t.Fatalf("a change to the public keys was sent: %v", requestLog(srv))
+	// In JSON mode the outcome document says the same: the people in
+	// removed, that no public key was changed, and that command.
+	for _, mode := range [][]string{nil, {"-o", "json"}, {"--quiet"}} {
+		t.Run(fmt.Sprintf("a removal the list does not confirm, with a public key waiting %v", mode), func(t *testing.T) {
+			srv := seed(t)
+			finish := "qurl grants " + srv.Key.CRID + " --add " + grantKey(2)
+			res := runCLI(t, &runOpts{args: append([]string{"--endpoint", srv.URL, "grants", srv.Key.CRID, "--remove", requesterDevice, "--add", grantKey(2)}, mode...)})
+			wantStderr := "Error: the service answered that access was taken away from " + requesterDevice +
+				". This service does not show who has access, so the removal cannot be confirmed from here.\n\n" +
+				"  No public key was added or removed: that change comes after the removals, and the command stopped before it.\n\n" +
+				"  Nothing more can be learned with this command against this service: `qurl grants " + srv.Key.CRID + "` does not show who has access either.\n" +
+				"  To make the change to the public keys, run: " + finish + "\n"
+			if res.code != exitcode.ServerError || res.stderr.String() != wantStderr {
+				t.Fatalf("exit = %d, want %d; stderr =\n%s\nwant\n%s", res.code, exitcode.ServerError, res.stderr.String(), wantStderr)
 			}
-		}
-	})
+			if len(mode) == 2 {
+				want := `{"crid":"` + srv.Key.CRID + `","removed":["` + requesterDevice + `"],"not_found":[],"not_removed":[],"public_keys_changed":false,"public_keys_command":"` + finish + `"}`
+				if got := compactJSON(t, res.stdout.Bytes()); got != want {
+					t.Fatalf("outcome document = %s, want %s", got, want)
+				}
+			} else {
+				mustEmptyStdout(t, res)
+			}
+			for _, line := range requestLog(srv) {
+				if strings.HasPrefix(line, "PATCH ") {
+					t.Fatalf("a change to the public keys was sent: %v", requestLog(srv))
+				}
+			}
+		})
+	}
 
 	// A read of the grants on that service.
 	t.Run("a read says not said", func(t *testing.T) {

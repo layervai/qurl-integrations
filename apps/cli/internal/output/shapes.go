@@ -358,10 +358,9 @@ func (p *Printer) resourceStatusRows(ew *errWriter, resource *qurlapi.ResourceSu
 		// "none" is what the service said, with an empty list. A resource
 		// with no list at all gets the words for that, never "none".
 		people := msgNoApprovedPeople
-		switch count := len(resource.AllowedPasskeys); {
-		case resource.AllowedPasskeys == nil:
+		if resource.AllowedPasskeys == nil {
 			people = msgApprovedPeopleNotSaid
-		case count > 0:
+		} else if count := len(resource.AllowedPasskeys); count > 0 {
 			people = strconv.Itoa(count)
 		}
 		ew.printf("%s\t%s\n", p.bold(labelApprovedPeople), people)

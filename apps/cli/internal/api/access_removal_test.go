@@ -116,6 +116,9 @@ func TestRemovalThatTookAccessAwaySaysSoOnEveryFailure(t *testing.T) {
 		// that there is one and the test does not pin its words.
 		headline, reason string
 		anyReason        bool
+		// nextStep is what the outcome says to do next, with %s for the
+		// CRID. Empty means the command that shows who has access now.
+		nextStep string
 		// is must match the error, and isNot must not.
 		is, isNot error
 		// approved is who the mock still lists afterwards.
@@ -282,8 +285,11 @@ func TestRemovalThatTookAccessAwaySaysSoOnEveryFailure(t *testing.T) {
 			},
 			removed: []string{removalFirst, removalSecond, removalThird},
 			headline: "the service answered that access was taken away from " + removalFirst + ", " + removalSecond + " and " + removalThird +
-				". The list does not confirm it: the service's answer afterwards does not show who has access now",
-			is: qurl.ErrInvalidAPIResponse, isNot: ErrApprovedPersonNotFound,
+				". This service does not show who has access, so the removal cannot be confirmed from here",
+			// The usual next step is a read of the lists, which on this
+			// service shows nothing more. It is not offered.
+			nextStep: "Nothing more can be learned with this command against this service: `qurl grants %s` does not show who has access either",
+			is:       qurl.ErrInvalidAPIResponse, isNot: ErrApprovedPersonNotFound,
 		},
 		{
 			// The service answers a removal as made and does not make it:
@@ -337,8 +343,12 @@ func TestRemovalThatTookAccessAwaySaysSoOnEveryFailure(t *testing.T) {
 			if got := outcome.Reason(); !strings.Contains(got, test.reason) || (test.reason == "" && got != "" && !test.anyReason) {
 				t.Errorf("reason = %q, want %q in it", got, test.reason)
 			}
-			if got, want := outcome.NextStep(), "Run `qurl grants "+srv.Key.CRID+"` to see who has access now"; got != want {
-				t.Errorf("next step = %q, want %q", got, want)
+			wantNext := "Run `qurl grants " + srv.Key.CRID + "` to see who has access now"
+			if test.nextStep != "" {
+				wantNext = fmt.Sprintf(test.nextStep, srv.Key.CRID)
+			}
+			if got := outcome.NextStep(); got != wantNext {
+				t.Errorf("next step = %q, want %q", got, wantNext)
 			}
 			if test.is != nil && !errors.Is(err, test.is) {
 				t.Errorf("error %v does not match %v", err, test.is)

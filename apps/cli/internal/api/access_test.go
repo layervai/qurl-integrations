@@ -1189,9 +1189,14 @@ func TestRemovalSaysExactlyWhatWasRemovedWhenItStopsPartWay(t *testing.T) {
 			t.Fatalf("a removal the list does not confirm returned a resource: %+v", resource)
 		}
 		outcome := removalOutcome(t, err, []string{first, third}, nil, nil)
-		want := "the service answered that access was taken away from " + first + " and " + third + ". The list does not confirm it: the service's answer afterwards does not show who has access now"
+		want := "the service answered that access was taken away from " + first + " and " + third + ". This service does not show who has access, so the removal cannot be confirmed from here"
 		if outcome.Headline() != want || outcome.Reason() != "" || !errors.Is(err, qurl.ErrInvalidAPIResponse) || errors.Is(err, ErrApprovedPersonNotFound) {
 			t.Fatalf("outcome = %q, reason %q, error %v; want %q, no reason, and an answer that does not confirm", outcome.Headline(), outcome.Reason(), err, want)
+		}
+		// A read of the lists would show nothing more on this service, so
+		// the outcome does not send the publisher to it.
+		if next := outcome.NextStep(); strings.HasPrefix(next, "Run ") || !strings.Contains(next, "Nothing more can be learned with this command against this service") {
+			t.Fatalf("next step = %q", next)
 		}
 		base := "/v1/resources/" + srv.Key.CRID
 		if got, want := requestLines(srv), []string{"GET " + base, "DELETE " + base + "/allowed-passkeys/" + first, "DELETE " + base + "/allowed-passkeys/" + third, "GET " + base}; !slices.Equal(got, want) {
@@ -1464,6 +1469,44 @@ func TestApprovedPeopleSaidToBeNobodyIsNotTheSameAsNotSaid(t *testing.T) {
 	srv.OmitApprovedPeople()
 	if fromRead, fromChange := read(t, srv); fromRead != nil || fromChange != nil {
 		t.Fatalf("the list left out: read %#v, change %#v; want nil for both, never an empty list", fromRead, fromChange)
+	}
+
+	// A member that is there and null says no more than a member that is
+	// not there. It is read the same way, as "not said", on a read and on
+	// the answer to a change, and never as an empty list.
+	srv = apitest.NewServer(t)
+	row := map[string]any{
+		"resource_id": srv.Key.ResourceID, "crid": srv.Key.CRID, "type": "url", "status": "active",
+		"private": true, "access_requests": false, "allowed_passkeys": nil,
+	}
+	srv.Script(http.MethodGet, "/v1/resources/"+srv.Key.CRID, func(w http.ResponseWriter, _ *http.Request) {
+		apitest.WriteEnvelope(t, w, http.StatusOK, map[string]any{"resource": row}, nil)
+	})
+	srv.Script(http.MethodPatch, "/v1/resources/"+srv.Key.CRID, func(w http.ResponseWriter, _ *http.Request) {
+		apitest.WriteEnvelope(t, w, http.StatusOK, row, nil)
+	})
+	if fromRead, fromChange := read(t, srv); fromRead != nil || fromChange != nil {
+		t.Fatalf("the list sent as null: read %#v, change %#v; want nil for both, never an empty list", fromRead, fromChange)
+	}
+	// And a removal that reads such a row afterwards is not confirmed by it.
+	srv = apitest.NewServer(t)
+	srv.AddApprovedPerson(testDeviceID, testRequester)
+	reads := 0
+	client := faultyClient(t, srv, func(_ int, req *http.Request) *fault {
+		if req.Method != http.MethodGet {
+			return nil
+		}
+		reads++
+		if reads == 1 {
+			return nil
+		}
+		return &fault{status: http.StatusOK, body: fmt.Sprintf(
+			`{"data":{"resource":{"resource_id":%q,"crid":%q,"type":"url","status":"active","private":true,"access_requests":false,"allowed_passkeys":null}}}`,
+			srv.Key.ResourceID, srv.Key.CRID)}
+	})
+	_, err := client.RemoveAllowedPasskeys(t.Context(), srv.Key.CRID, []string{testDeviceID})
+	if outcome := removalOutcome(t, err, []string{testDeviceID}, nil, nil); !strings.Contains(outcome.Headline(), "This service does not show who has access") {
+		t.Fatalf("a removal read back with a null list: %v", err)
 	}
 }
 

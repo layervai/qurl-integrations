@@ -957,10 +957,11 @@ access. With no flag it prints the resource with both lists and says whether
 people can still ask; `-o json` has them as `allowed_device_keys`,
 `approved_people` and `access_requests`.
 
-When the service's answer has no list of approved people, the command says
-`not said` where the count would be, and never `none`: the service did not say
-who was approved, which is not the same as nobody. `-o json` then has no
-`approved_people` member.
+The service sends the list of approved people with every resource, as an
+empty list when nobody is approved. When an answer has no list at all, the
+command says `not said` where the count would be, and never `none`: the
+service did not say who is approved, which is not the same as nobody.
+`-o json` then has no `approved_people` member.
 
 ```bash
 qurl grants <CRID>
@@ -1005,10 +1006,13 @@ reads as "nothing was removed". A failure that says none of this came before
 any access was taken away. `qurl grants <CRID>` shows who has access now.
 
 A removal is reported as done only when the list the service sends afterwards
-confirms it. If that answer has no list of approved people, the command says
-that the service answered each removal as made and that the list does not
-confirm it (exit code 10), and prints no lists: an answer that does not show
-who has access is never read as "nobody has access".
+confirms it. The service sends the list of approved people with every
+resource, as an empty list when nobody is approved. An answer without the list
+means that the service did not say who is approved, and it is never read as
+"nobody has access". After a removal, the command then says that the service
+answered each removal as made, that this service does not show who has access,
+so the removal cannot be confirmed from here, and that `qurl grants <CRID>`
+does not show it either (exit code 10). It prints no lists.
 
 The same holds when a command that also names public keys removes every person
 and then fails to change the keys, or stops before it gets to them. The
@@ -1555,7 +1559,7 @@ Access requests in `-o json`:
 | `approve` | `crid`, `approved` (`true`), `device_id`, `name`, `name_verified` (always `false`), `approved_at`, and `name_note`: always present, one sentence |
 | `deny` | `crid`, `denied` (`true`), and what you named the request by: `device_id`, or `code` |
 | `grants` | the resource document with `allowed_device_keys`; `approved_people` when the service's answer has the list (an array, `[]` when nobody is approved, of `name`, `name_verified`, `device_id`, `approved_at`); and `access_requests` when the service says. A missing `approved_people` means that the service did not say who is approved, never that nobody is |
-| `grants --remove <device id>` that did not finish | `crid` and three arrays that are always present and together hold every device id the command named: `removed`, `not_found`, `not_removed`. `public_keys_changed` (`false`) when a removal failed and the command also named public keys. `public_keys_command` when every person was removed and the change to the public keys failed or was not reached: the command that makes that change alone |
+| `grants --remove <device id>` that did not finish | `crid` and three arrays that are always present and together hold every device id the command named: `removed`, `not_found`, `not_removed`. `public_keys_changed` (`false`) when the command also named public keys: that change comes after the removals, and it was not made. `public_keys_command` when every person was removed and the change to the public keys failed or was not reached: the command that makes that change alone |
 
 A requester's `name` is that person's own text, exactly like a publisher's:
 quote or escape it before showing it, and never treat it as proof of who

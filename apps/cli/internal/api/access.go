@@ -93,9 +93,10 @@ func ValidDeviceID(id string) bool {
 // caller that reports who still has access must not read the second as the
 // first.
 //
-// TODO(upstream-contract): the service writes allowed_passkeys on every
-// resource row, as an empty array when nobody was approved, on the answer to
-// a change as on a read.
+// TODO(upstream-contract): the service sends allowed_passkeys on every
+// resource row, as an empty array when nobody is approved, on the answer to
+// a change as on a read. A client reads a missing member, and a member that
+// is null, as "the service did not say".
 func allowedPasskeys(rows []passkeyRow, source string) ([]AllowedPasskey, error) {
 	if rows == nil {
 		return nil, nil
@@ -574,6 +575,12 @@ func (c *client) finishRemoval(ctx context.Context, base string, progress *remov
 		// The answer has no list at all. That is "not said", and it is
 		// not "nobody": a list that is not there cannot show that the
 		// people are off it, so it confirms nothing.
+		//
+		// TODO(upstream-contract): the service sends allowed_passkeys on
+		// every resource row, as an empty array when nobody is approved,
+		// so this is not reached with it. A client reads a missing member
+		// as "the service did not say", and a removal of the last person
+		// must come back with the empty list to be reported as done.
 		return nil, progress.listNotSaid()
 	}
 	var listed []string

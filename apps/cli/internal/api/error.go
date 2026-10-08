@@ -98,7 +98,7 @@ func CustomerMessages() []string {
 		msgAccessRequestsCreateUnconfirmed, msgAccessRequestsSettingUnconfirmed, msgAccessRequestsNotTurnedOn, msgApprovalUnconfirmed,
 		msgAccessRequestsOnPublic, msgAccessRequestsPrivacyNotSaid,
 		msgRequestCodeNotFound, msgRequestDeviceNotFound, msgDeviceIDNotFound, msgDeviceIDsNotFound, msgRemovedThenNotFound, msgRemovedThenFailed,
-		msgRemovedThenKeysFailed, msgRemovedThenUnexplained, msgRemovedThenListNotRead, msgRemovedButStillListed, msgAnsweredButStillListed, msgRemovalListNotSaid,
+		msgRemovedThenKeysFailed, msgRemovedThenUnexplained, msgRemovedThenListNotRead, msgRemovedButStillListed, msgAnsweredButStillListed, msgRemovalListNotSaid, msgNothingMoreFromService,
 		msgStillHasAccess, msgStillHaveAccess, msgSeeWhoHasAccess, msgApprovedPersonNotFound, msgRemovalUnconfirmed,
 	}
 }
@@ -181,7 +181,12 @@ const (
 	// The service answered every removal as made, and the resource it sent
 	// afterwards has no list of approved people. The removal was sent. It is
 	// not confirmed, and the message does not say that it is.
-	msgRemovalListNotSaid = "the service answered that access was taken away from %s. The list does not confirm it: the service's answer afterwards does not show who has access now"
+	msgRemovalListNotSaid = "the service answered that access was taken away from %s. This service does not show who has access, so the removal cannot be confirmed from here"
+	// msgNothingMoreFromService stands where the next step is, for that
+	// outcome. The usual next step is to read the lists, and on a service
+	// that does not send the list of approved people that read shows
+	// nothing more. So no step is offered that cannot help.
+	msgNothingMoreFromService = "Nothing more can be learned with this command against this service: `qurl grants %s` does not show who has access either"
 	// The device ids the command named that still have access as far as it
 	// knows, and the next step.
 	msgStillHasAccess  = "%s still has access"
@@ -434,11 +439,15 @@ func (e *PasskeyRemovalError) Reason() string {
 	return failure.Error()
 }
 
-// NextStep is the command that shows who has access now.
+// NextStep is the command that shows who has access now. For a service that
+// does not show that, it says so instead: the command would be a dead end.
 func (e *PasskeyRemovalError) NextStep() string {
 	id := e.ID
 	if id == "" {
 		id = "<CRID>"
+	}
+	if e.stop == stoppedListNotSaid {
+		return fmt.Sprintf(msgNothingMoreFromService, id)
 	}
 	return fmt.Sprintf(msgSeeWhoHasAccess, id)
 }

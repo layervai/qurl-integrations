@@ -1,3 +1,3 @@
-Error: the service answered that access was taken away from abcd-efgh-2345-mnop. The list does not confirm it: the service's answer afterwards does not show who has access now.
+Error: the service answered that access was taken away from abcd-efgh-2345-mnop. This service does not show who has access, so the removal cannot be confirmed from here.
 
-  Run `qurl grants qhtpthw4qt7wkw7khghr6x3z4hsfyn4zbuyhnee4i6bi67yu6yytgvwdbb4q` to see who has access now.
+  Nothing more can be learned with this command against this service: `qurl grants qhtpthw4qt7wkw7khghr6x3z4hsfyn4zbuyhnee4i6bi67yu6yytgvwdbb4q` does not show who has access either.
