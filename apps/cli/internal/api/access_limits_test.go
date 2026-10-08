@@ -280,3 +280,18 @@ func TestRequestCodeIsNotInDiagnostics(t *testing.T) {
 		}
 	}
 }
+
+// TestSpacedRequestCode pins the one place a code is written as it is read
+// aloud: two groups of three. The messages of this client and the output of
+// the commands both use it, so the two cannot drift apart. A value that is
+// not six characters is returned as it is.
+func TestSpacedRequestCode(t *testing.T) {
+	for in, want := range map[string]string{"482913": "482 913", "000000": "000 000", "": "", "48291": "48291", "4829133": "4829133", "abcd-efgh-2345-mnop": "abcd-efgh-2345-mnop"} {
+		if got := SpacedRequestCode(in); got != want {
+			t.Errorf("SpacedRequestCode(%q) = %q, want %q", in, got, want)
+		}
+	}
+	if want := "no pending request has the code 482 913 for this resource"; !strings.HasPrefix(fmt.Sprintf(msgRequestCodeNotFound, SpacedRequestCode("482913")), want) {
+		t.Errorf("the message for a code that is not pending does not write it that way")
+	}
+}

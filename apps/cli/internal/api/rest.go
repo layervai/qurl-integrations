@@ -45,7 +45,9 @@ type resourceRow struct {
 	ExpiresAt         *time.Time   `json:"expires_at"`
 	// AccessRequests is nil when the row has no such member, which is how a
 	// service from before access requests answers. AllowedPasskeys are the
-	// people the publisher approved.
+	// people the publisher approved. The service sends the member on every
+	// resource row, as an empty array when nobody is approved; a row
+	// without it is read as "the service did not say"; see allowedPasskeys.
 	AccessRequests  *bool        `json:"access_requests"`
 	AllowedPasskeys []passkeyRow `json:"allowed_passkeys"`
 	// Publisher is read by UnmarshalJSON, not by the struct decoder, so a

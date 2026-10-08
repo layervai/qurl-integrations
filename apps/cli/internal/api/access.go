@@ -93,9 +93,10 @@ func ValidDeviceID(id string) bool {
 // caller that reports who still has access must not read the second as the
 // first.
 //
-// TODO(upstream-contract): the service writes allowed_passkeys on every
-// resource row, as an empty array when nobody was approved, on the answer to
-// a change as on a read.
+// TODO(upstream-contract): the service sends allowed_passkeys on every
+// resource row, as an empty array when nobody is approved, on the answer to
+// a change as on a read. A client reads a missing member, and a member that
+// is null, as "the service did not say".
 func allowedPasskeys(rows []passkeyRow, source string) ([]AllowedPasskey, error) {
 	if rows == nil {
 		return nil, nil
@@ -303,7 +304,8 @@ func (c *client) accessListingProblem(ctx context.Context, id string, reply *res
 // codes for one resource within an hour it answers an approval, and a denial
 // by code, with 429 and a Retry-After, whatever the code, a right one
 // included. That answer is never sent again by this client either: another
-// attempt could be one more wrong code, and the wait can be an hour.
+// attempt could be one more wrong code, and the wait can be an hour. What
+// counts as a wrong code is in the note on DenyAccessRequest.
 func (c *client) ApproveAccessRequest(ctx context.Context, id, code string) (*AllowedPasskey, error) {
 	if !ValidRequestCode(code) {
 		return nil, fmt.Errorf("%w: a request code is six digits", qurl.ErrInvalidResourceRequest)
@@ -319,7 +321,7 @@ func (c *client) ApproveAccessRequest(ctx context.Context, id, code string) (*Al
 	switch reply.status {
 	case http.StatusOK, http.StatusCreated:
 	case http.StatusNotFound:
-		return nil, c.accessNotFound(ctx, id, reply, fmt.Sprintf(msgRequestCodeNotFound, spacedRequestCode(code)))
+		return nil, c.accessNotFound(ctx, id, reply, fmt.Sprintf(msgRequestCodeNotFound, SpacedRequestCode(code)))
 	case http.StatusTooManyRequests:
 		return nil, codeLimit(reply)
 	default:
@@ -350,6 +352,15 @@ func (c *client) ApproveAccessRequest(ctx context.Context, id, code string) (*Al
 //
 // TODO(upstream-contract): the service takes a device id or a code in that
 // position, and so does the SDK for a device credential.
+//
+// TODO(upstream-contract): what the service counts toward its limit on wrong
+// codes, in two halves. A code that is not pending for the resource counts,
+// when it comes with a denial as when it comes with an approval. A denial by
+// device id never counts, whether or not a request from that device is
+// pending. Both halves are stated to publishers in the help of `qurl deny`
+// and in the README section on requests, approve and deny, and the help of
+// `qurl approve` states the limit. If the service changes either half, those
+// texts and the tests that pin them change with this note.
 func (c *client) DenyAccessRequest(ctx context.Context, id, request string) error {
 	byDevice := ValidDeviceID(request)
 	if !byDevice && !ValidRequestCode(request) {
@@ -370,7 +381,7 @@ func (c *client) DenyAccessRequest(ctx context.Context, id, request string) erro
 		if byDevice {
 			return c.accessNotFound(ctx, id, reply, fmt.Sprintf(msgRequestDeviceNotFound, request))
 		}
-		return c.accessNotFound(ctx, id, reply, fmt.Sprintf(msgRequestCodeNotFound, spacedRequestCode(request)))
+		return c.accessNotFound(ctx, id, reply, fmt.Sprintf(msgRequestCodeNotFound, SpacedRequestCode(request)))
 	case http.StatusTooManyRequests:
 		if !byDevice {
 			return codeLimit(reply)
@@ -413,8 +424,10 @@ func codeLimit(reply *restReply) error {
 // says who lost access, what failed, and who still has access as far as the
 // command knows.
 //
-// Last, the resource is read again, and no removed device id may be on the
-// list it shows. That read is the resource the caller prints.
+// Last, the resource is read again. It must have the list of approved
+// people, and no removed device id may be on it. A resource without the list
+// confirms nothing: "not said" is not "nobody". That read is the resource the
+// caller prints.
 func (c *client) RemoveAllowedPasskeys(ctx context.Context, id string, deviceIDs []string) (*ResourceSummary, error) {
 	if err := validateDeviceIDs(deviceIDs); err != nil {
 		return nil, err
@@ -441,7 +454,7 @@ func (c *client) RemoveAllowedPasskeys(ctx context.Context, id string, deviceIDs
 		}
 		return nil, &PasskeyRemovalError{ID: id, NotFound: deviceIDs[:1], NotRemoved: deviceIDs[1:], problem: problem}
 	}
-	resource, outcome := c.finishRemoval(ctx, base, &removalProgress{id: id, named: deviceIDs, removed: 1})
+	resource, outcome := c.finishRemoval(ctx, base, &removalProgress{id: id, named: deviceIDs, removed: 1, listedBefore: before.AllowedPasskeys != nil})
 	if outcome != nil {
 		return nil, outcome
 	}
@@ -466,8 +479,9 @@ func (c *client) removePerson(ctx context.Context, base, deviceID string) (*rest
 }
 
 // removalProgress is what a removal knows once its first person is off the
-// list: the device ids the command named, in order, and how many of them,
-// from the front, were removed.
+// list: the device ids the command named, in order, how many of them, from
+// the front, were removed, and whether the resource read before the removals
+// carried the list of approved people.
 //
 // Its methods are the only places that build the failure of a removal that
 // has taken access away. Each starts from the same outcome, which has the
@@ -476,10 +490,15 @@ type removalProgress struct {
 	id      string
 	named   []string
 	removed int
+	// listedBefore says that the service sent the list of approved people
+	// in its answer before the removals. It is the evidence for what a
+	// missing list afterwards means: a service that sent the list a moment
+	// ago does send it, and one answer left it out.
+	listedBefore bool
 }
 
-// outcome is the start of every failure: who lost access, and who the
-// command did not get to.
+// outcome is the start of every failure: the people whose removal the
+// service answered as made, and the people the command did not get to.
 func (p *removalProgress) outcome() *PasskeyRemovalError {
 	return &PasskeyRemovalError{ID: p.id, Removed: p.named[:p.removed], NotRemoved: p.named[p.removed:]}
 }
@@ -514,6 +533,32 @@ func (p *removalProgress) unexplained(cause error) *PasskeyRemovalError {
 func (p *removalProgress) listNotRead(cause error) *PasskeyRemovalError {
 	outcome := p.outcome()
 	outcome.stop, outcome.cause = stoppedListNotRead, cause
+	return outcome
+}
+
+// listNotSaid is a removal of every person that the service answered as
+// made, after which the resource it sent has no list of approved people.
+// Each removal was sent and answered. What is missing is the check that the
+// people are off the list, so the removal is not confirmed, and the command
+// does not report it as done.
+//
+// What it says about the service depends on what the service sent before the
+// removals. If the list was there then, one answer left it out: the removal
+// is not confirmed yet, and the read that shows who has access is the right
+// next step. If the list was missing then too, this service does not show
+// who has access, and that read would show nothing more. The outcome never
+// says the second of a service that has just shown the list.
+//
+// The cause is there for the exit code, as an answer that does not confirm
+// a change. Its text is not shown: the headline says it all.
+func (p *removalProgress) listNotSaid() *PasskeyRemovalError {
+	outcome := p.outcome()
+	outcome.cause = &answerError{message: msgRemovalListNotSaid}
+	if p.listedBefore {
+		outcome.stop = stoppedListMissingAfter
+	} else {
+		outcome.stop = stoppedListNeverSaid
+	}
 	return outcome
 }
 
@@ -556,6 +601,18 @@ func (c *client) finishRemoval(ctx context.Context, base string, progress *remov
 	resource, err := c.Resource(ctx, progress.id)
 	if err != nil {
 		return nil, progress.listNotRead(err)
+	}
+	if resource.AllowedPasskeys == nil {
+		// The answer has no list at all. That is "not said", and it is
+		// not "nobody": a list that is not there cannot show that the
+		// people are off it, so it confirms nothing.
+		//
+		// TODO(upstream-contract): the service sends allowed_passkeys on
+		// every resource row, as an empty array when nobody is approved,
+		// so this is not reached with it. A client reads a missing member
+		// as "the service did not say", and a removal of the last person
+		// must come back with the empty list to be reported as done.
+		return nil, progress.listNotSaid()
 	}
 	var listed []string
 	for _, deviceID := range progress.named {
@@ -612,11 +669,14 @@ func peopleNotOnList(id string, approved []AllowedPasskey, deviceIDs []string) *
 	return outcome
 }
 
-// spacedRequestCode writes a valid request code as two groups of three, the
-// form it is read aloud and typed in. The text output of a listing writes
-// codes the same way, with its own function for a value it did not check; a
-// change to one form belongs in both.
-func spacedRequestCode(code string) string {
+// SpacedRequestCode writes a six-digit request code as two groups of three,
+// the form it is read aloud and typed in. Anything that is not six
+// characters is returned as it is. It is the one place that form is made:
+// the messages of this client and the output of the commands both use it.
+func SpacedRequestCode(code string) string {
+	if len(code) != 6 {
+		return code
+	}
 	return code[:3] + " " + code[3:]
 }
 
@@ -641,6 +701,14 @@ func (c *client) accessNotFound(ctx context.Context, id string, reply *restReply
 //   - neither: the code or the device id is the thing that was not found.
 //     Then there is no error, and the service's problem is returned for the
 //     caller's own message.
+//
+// A removal of approved people read the resource before it began, and still
+// asks here. That earlier read says what was true then. The resource can be
+// deleted, and the list can change, between that read and the removal that
+// was answered "not found", and which of the three it is now decides what the
+// publisher is told: that a person is not on the list, or that there is no
+// such resource. It costs one or two reads, on a path that has already
+// failed.
 func (c *client) classifyAccessNotFound(ctx context.Context, id string, reply *restReply) (*Error, error) {
 	offered, err := c.accessRequestsOffered(ctx, id, true)
 	if err != nil {

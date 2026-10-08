@@ -116,6 +116,9 @@ func TestRemovalThatTookAccessAwaySaysSoOnEveryFailure(t *testing.T) {
 		// that there is one and the test does not pin its words.
 		headline, reason string
 		anyReason        bool
+		// nextStep is what the outcome says to do next, with %s for the
+		// CRID. Empty means the command that shows who has access now.
+		nextStep string
 		// is must match the error, and isNot must not.
 		is, isNot error
 		// approved is who the mock still lists afterwards.
@@ -267,6 +270,48 @@ func TestRemovalThatTookAccessAwaySaysSoOnEveryFailure(t *testing.T) {
 			is:        qurl.ErrInvalidAPIResponse, isNot: ErrApprovedPersonNotFound, approved: []string{},
 		},
 		{
+			// Everyone is removed, and the resource the service sends
+			// afterwards has no list of approved people, though the one
+			// it sent before the removals had it. A missing list is "not
+			// said", not "nobody", so it confirms nothing: the removal was
+			// sent and answered, and is not reported as done. One answer
+			// left the list out. Nothing is said about the service, and
+			// the next step is the read that showed the list a moment ago.
+			name: "the list was there before the removals and is missing after",
+			answer: func(srv *apitest.Server, _ *bool) func(int, *http.Request) *fault {
+				return func(_ int, req *http.Request) *fault {
+					if isRemovalOf(req, removalThird) {
+						srv.OmitApprovedPeople()
+					}
+					return nil
+				}
+			},
+			removed: []string{removalFirst, removalSecond, removalThird},
+			headline: "the service answered that access was taken away from " + removalFirst + ", " + removalSecond + " and " + removalThird +
+				". Its answer afterwards did not include the list of approved people, so the removal is not confirmed yet",
+			is: qurl.ErrInvalidAPIResponse, isNot: ErrApprovedPersonNotFound,
+		},
+		{
+			// The same, on a service that sent no list before the removals
+			// either. This service does not show who has access, and the
+			// read that would be the next step shows nothing more on it,
+			// so it is not offered.
+			name: "the list was missing before the removals as well",
+			answer: func(srv *apitest.Server, _ *bool) func(int, *http.Request) *fault {
+				return func(n int, _ *http.Request) *fault {
+					if n == 1 {
+						srv.OmitApprovedPeople()
+					}
+					return nil
+				}
+			},
+			removed: []string{removalFirst, removalSecond, removalThird},
+			headline: "the service answered that access was taken away from " + removalFirst + ", " + removalSecond + " and " + removalThird +
+				". This service does not show who has access, so the removal cannot be confirmed from here",
+			nextStep: "Nothing more can be learned with this command against this service: `qurl grants %s` does not show who has access either",
+			is:       qurl.ErrInvalidAPIResponse, isNot: ErrApprovedPersonNotFound,
+		},
+		{
 			// The service answers a removal as made and does not make it:
 			// its list still shows the person. The list is what it says
 			// now, so that person still has access.
@@ -318,8 +363,12 @@ func TestRemovalThatTookAccessAwaySaysSoOnEveryFailure(t *testing.T) {
 			if got := outcome.Reason(); !strings.Contains(got, test.reason) || (test.reason == "" && got != "" && !test.anyReason) {
 				t.Errorf("reason = %q, want %q in it", got, test.reason)
 			}
-			if got, want := outcome.NextStep(), "Run `qurl grants "+srv.Key.CRID+"` to see who has access now"; got != want {
-				t.Errorf("next step = %q, want %q", got, want)
+			wantNext := "Run `qurl grants " + srv.Key.CRID + "` to see who has access now"
+			if test.nextStep != "" {
+				wantNext = fmt.Sprintf(test.nextStep, srv.Key.CRID)
+			}
+			if got := outcome.NextStep(); got != wantNext {
+				t.Errorf("next step = %q, want %q", got, wantNext)
 			}
 			if test.is != nil && !errors.Is(err, test.is) {
 				t.Errorf("error %v does not match %v", err, test.is)

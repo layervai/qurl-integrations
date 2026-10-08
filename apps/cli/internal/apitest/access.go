@@ -12,7 +12,9 @@ import (
 // who were approved.
 //
 // TODO(upstream-contract): mirrors the service's publisher API. A resource
-// row carries access_requests, and allowed_passkeys when there are any. Only
+// row carries access_requests. The service sends allowed_passkeys on every
+// resource row, as an empty array when nobody is approved. A client reads a
+// missing member as "the service did not say", never as "nobody". Only
 // a private resource may turn access requests on. A request is addressed by
 // its six-digit code and an approved person by device id. An approval is one
 // change: the person is on the list and the request is gone, or neither. The
@@ -211,8 +213,9 @@ func (s *Server) addAccessRequestFields(row map[string]any) {
 	if s.omitApprovedPeople {
 		return
 	}
-	// The member is on every row, as an empty array when nobody was
-	// approved: "nobody" is said, never left out.
+	// The service sends allowed_passkeys on every resource row, as an
+	// empty array when nobody is approved: "nobody" is said, never left
+	// out.
 	people := make([]map[string]any, 0, len(s.approvedPeople))
 	for _, person := range s.approvedPeople {
 		people = append(people, person.payload())

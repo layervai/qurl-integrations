@@ -34,6 +34,13 @@ const (
 	safetyLine       = "To let one of these people in, ask them for the six-digit code on their screen and run `qurl approve <CRID> <code>`; a name can be typed by anyone, so the code is the only proof of who is asking."
 )
 
+// safetyLineFor is the last line of the listing of one resource: safetyLine
+// with that resource's CRID where the listing of every resource, which has a
+// CRID in each row, has the placeholder.
+func safetyLineFor(resourceCRID string) string {
+	return strings.Replace(safetyLine, "<CRID>", resourceCRID, 1)
+}
+
 // pendingDevices reads the device ids of the pending requests of the mock's
 // resource from `qurl requests <CRID> --quiet`.
 func pendingDevices(t *testing.T, srv *apitest.Server) []string {
@@ -629,7 +636,12 @@ func TestRequestsListsPendingRequests(t *testing.T) {
 				`"Ana Lopez"   abcd-efgh-2345-mnop  2m ago     in 58m   ` + srv.Key.CRID,
 			}
 			wantQuiet := srv.Key.CRID + " " + otherDevice + "\n" + srv.Key.CRID + " " + requesterDevice + "\n"
+			// The last line names the command that lets a person in. The
+			// listing of one resource writes that resource's CRID into it:
+			// a reader, most often an agent, has the command as it is run.
+			wantLast := safetyLine
 			if !all {
+				wantLast = safetyLineFor(srv.Key.CRID)
 				args = append(args, srv.Key.CRID)
 				wantRoute = "GET /v1/resources/" + srv.Key.CRID + "/access-requests"
 				wantHeader = "NAME          DEVICE ID            REQUESTED  EXPIRES"
@@ -645,7 +657,7 @@ func TestRequestsListsPendingRequests(t *testing.T) {
 				t.Fatalf("exit = %d, stderr: %s", res.code, res.stderr.String())
 			}
 			lines := strings.Split(strings.TrimRight(res.stdout.String(), "\n"), "\n")
-			if len(lines) != 5 || lines[0] != wantHeader || lines[1] != wantRows[0] || lines[2] != wantRows[1] || lines[3] != "" || lines[4] != safetyLine {
+			if len(lines) != 5 || lines[0] != wantHeader || lines[1] != wantRows[0] || lines[2] != wantRows[1] || lines[3] != "" || lines[4] != wantLast {
 				t.Fatalf("listing =\n%s", res.stdout.String())
 			}
 
@@ -667,7 +679,7 @@ func TestRequestsListsPendingRequests(t *testing.T) {
 			if second.Name != requesterName || second.NameVerified == nil || *second.NameVerified || second.DeviceID != requesterDevice || second.CRID != srv.Key.CRID {
 				t.Fatalf("requests -o json row = %+v", second)
 			}
-			if document.ApprovalRule != safetyLine || document.HasMore == nil || *document.HasMore {
+			if document.ApprovalRule != wantLast || document.HasMore == nil || *document.HasMore {
 				t.Fatalf("requests -o json: approval_rule %q, has_more %v", document.ApprovalRule, document.HasMore)
 			}
 
@@ -817,9 +829,9 @@ func TestRequestsListingSaysWhenThereMayBeMore(t *testing.T) {
 				if test.set != nil {
 					srv.SetAccessRequestsHasMore(*test.set)
 				}
-				args, line := []string{"--endpoint", srv.URL, "requests"}, forAll
+				args, line, last := []string{"--endpoint", srv.URL, "requests"}, forAll, safetyLine
 				if !all {
-					args, line = append(args, srv.Key.CRID), forOne
+					args, line, last = append(args, srv.Key.CRID), forOne, safetyLineFor(srv.Key.CRID)
 				}
 
 				res := runCLI(t, &runOpts{args: args})
@@ -827,7 +839,7 @@ func TestRequestsListingSaysWhenThereMayBeMore(t *testing.T) {
 				if res.code != 0 || res.stderr.Len() != 0 || strings.Contains(text, "There may be more") != test.more {
 					t.Fatalf("text: exit %d, stderr %q:\n%s", res.code, res.stderr.String(), text)
 				}
-				if test.more && (!strings.HasSuffix(text, "\n\n"+line+"\n\n"+safetyLine+"\n") || strings.Index(text, requesterDevice) > strings.Index(text, line)) {
+				if test.more && (!strings.HasSuffix(text, "\n\n"+line+"\n\n"+last+"\n") || strings.Index(text, requesterDevice) > strings.Index(text, line)) {
 					t.Fatalf("text: the line is not after the rows and before the last line:\n%s", text)
 				}
 
@@ -1064,12 +1076,17 @@ func TestAccessRequestCommandsOnAServiceWithoutThem(t *testing.T) {
 		}
 	}
 	// On that service a read of the grants still works, and says nothing
-	// about requests or people it was not told about.
+	// about requests or people it was not told about: the service sent no
+	// list of approved people, which is "not said" and never "none".
 	srv := apitest.NewServer(t)
 	srv.PlayNoAccessRequests()
 	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "grants", srv.Key.CRID}})
-	if res.code != 0 || strings.Contains(res.stdout.String(), "Access requests:") || !strings.Contains(res.stdout.String(), "Approved people:      none") {
+	if res.code != 0 || strings.Contains(res.stdout.String(), "Access requests:") || !strings.Contains(res.stdout.String(), "Approved people:      not said\n") {
 		t.Fatalf("grants against a service without access requests: exit %d\n%s%s", res.code, res.stdout.String(), res.stderr.String())
+	}
+	res = runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "grants", srv.Key.CRID, "-o", "json"}})
+	if res.code != 0 || strings.Contains(res.stdout.String(), "approved_people") || strings.Contains(res.stdout.String(), "access_requests") {
+		t.Fatalf("grants -o json against a service without access requests: exit %d\n%s%s", res.code, res.stdout.String(), res.stderr.String())
 	}
 }
 
@@ -1444,7 +1461,7 @@ func TestGrantsRemoveTakesADeviceID(t *testing.T) {
 				if log := requestLog(srv); !slices.Equal(log, []string{"GET /v1/resources/" + srv.Key.CRID}) {
 					t.Fatalf("%v: requests = %v, want the one read: nothing may be removed or changed", mode, log)
 				}
-				if len(mode) == 2 {
+				if slices.Contains(mode, "json") {
 					var document struct {
 						CRID                          string
 						Removed, NotFound, NotRemoved []string
@@ -1557,7 +1574,7 @@ func TestGrantsRemoveTakesADeviceID(t *testing.T) {
 			if strings.Contains(res.stderr.String(), "No public key was added or removed") || strings.Contains(res.stderr.String(), "nothing was removed") {
 				t.Fatalf("%v: the outcome claims something it does not know:\n%s", mode, res.stderr.String())
 			}
-			if len(mode) == 2 {
+			if slices.Contains(mode, "json") {
 				want := `{"crid":"` + srv.Key.CRID + `","removed":["` + requesterDevice + `","` + otherDevice + `"],"not_found":[],"not_removed":[],"public_keys_command":"` + finish + `"}`
 				var compact bytes.Buffer
 				if err := json.Compact(&compact, res.stdout.Bytes()); err != nil || compact.String() != want {

@@ -957,6 +957,12 @@ access. With no flag it prints the resource with both lists and says whether
 people can still ask; `-o json` has them as `allowed_device_keys`,
 `approved_people` and `access_requests`.
 
+The service sends the list of approved people with every resource, as an
+empty list when nobody is approved. When an answer has no list at all, the
+command says `not said` where the count would be, and never `none`: the
+service did not say who is approved, which is not the same as nobody.
+`-o json` then has no `approved_people` member.
+
 ```bash
 qurl grants <CRID>
 qurl grants <CRID> --add <public-key>
@@ -998,6 +1004,19 @@ a list that cannot be read again after the removals, and for a list that still
 shows a person the service said it removed. Access that was taken away never
 reads as "nothing was removed". A failure that says none of this came before
 any access was taken away. `qurl grants <CRID>` shows who has access now.
+
+A removal is reported as done only when the list the service sends afterwards
+confirms it. The service sends the list of approved people with every
+resource, as an empty list when nobody is approved. An answer without the list
+means that the service did not say who is approved, and it is never read as
+"nobody has access". After a removal, such an answer confirms nothing, and the
+command says that the service answered each removal as made and that the
+removal is not confirmed (exit code 10). It prints no lists. What it says next
+depends on the answer the service gave before the removals. If the list was
+there then, one answer left it out: the removal is not confirmed yet, and
+`qurl grants <CRID>` shows who has access now. If the list was missing then
+too, this service does not show who has access, so the removal cannot be
+confirmed from here, and `qurl grants <CRID>` does not show it either.
 
 The same holds when a command that also names public keys removes every person
 and then fails to change the keys, or stops before it gets to them. The
@@ -1076,7 +1095,8 @@ qurl grants <CRID> --remove <device id>
 A listing shows, for each request, the name in quotes, the id of the person's
 device, how long ago they asked, and when the request expires; the listing of
 all resources also shows the CRID. It shows no code. It ends with one line
-that says how a person is let in.
+that says how a person is let in. In the listing of one resource, that line
+has the resource's CRID in the command, where the sample below has `<CRID>`.
 
 ```text
 NAME         DEVICE ID            REQUESTED  EXPIRES
@@ -1102,9 +1122,13 @@ one opens for anyone who has the CRID.
 again. `qurl deny` removes the request and gives no access. It takes the
 device id the listing shows, in the form `xxxx-xxxx-xxxx-xxxx`. It also takes
 a six-digit code in the same place, for a request whose code you were given
-and want to refuse. A request that is neither approved nor denied gives no
-access and expires by itself. `--off` stops new requests and says how many
-approved people still have access.
+and want to refuse. A code that is not pending counts toward the service's
+limit on wrong codes: after 5 wrong codes for one resource within an hour, it
+refuses every code for that resource for a time, in `qurl approve` too. A
+denial by device id never counts, and is the usual way to refuse a request. A
+request that is neither approved nor denied gives no access and expires by
+itself. `--off` stops new requests and says how many approved people still
+have access.
 
 | Command | Flag | Description |
 |---------|------|-------------|
@@ -1538,8 +1562,8 @@ Access requests in `-o json`:
 | `requests <CRID> --on`, `--off` | `crid`, `access_requests`, and `resource_url` under the same rule as `publish` |
 | `approve` | `crid`, `approved` (`true`), `device_id`, `name`, `name_verified` (always `false`), `approved_at`, and `name_note`: always present, one sentence |
 | `deny` | `crid`, `denied` (`true`), and what you named the request by: `device_id`, or `code` |
-| `grants` | the resource document with `allowed_device_keys`, `approved_people` (an array, `[]` when there are none, of `name`, `name_verified`, `device_id`, `approved_at`), and `access_requests` when the service says |
-| `grants --remove <device id>` that did not finish | `crid` and three arrays that are always present and together hold every device id the command named: `removed`, `not_found`, `not_removed`. `public_keys_changed` (`false`) when a removal failed and the command also named public keys. `public_keys_command` when every person was removed and the change to the public keys failed or was not reached: the command that makes that change alone |
+| `grants` | the resource document with `allowed_device_keys`; `approved_people` when the service's answer has the list (an array, `[]` when nobody is approved, of `name`, `name_verified`, `device_id`, `approved_at`); and `access_requests` when the service says. A missing `approved_people` means that the service did not say who is approved, never that nobody is |
+| `grants --remove <device id>` that did not finish | `crid` and three arrays that are always present and together hold every device id the command named: `removed`, `not_found`, `not_removed`. `public_keys_changed` (`false`) when the command also named public keys and stopped before it reached that change, because a removal failed or the removals were not confirmed: the change comes after the removals, so it was not made. A key change that was reached and failed has no such member, and may have changed a key: `public_keys_command` without `public_keys_changed` beside it is that case. `public_keys_command` when every person was removed and the change to the public keys failed or was not reached: the command that makes that change alone |
 
 A requester's `name` is that person's own text, exactly like a publisher's:
 quote or escape it before showing it, and never treat it as proof of who
@@ -1553,18 +1577,19 @@ in the document it reads:
   for the six-digit code on their screen and run `qurl approve <CRID> <code>`;
   a name can be typed by anyone, so the code is the only proof of who is
   asking." It is one member beside `requests`, not one for each request, and
-  it is there for an empty listing too.
+  it is there for an empty listing too. In the listing of one resource it has
+  that resource's CRID in place of `<CRID>`.
 - `name_note`, in the `approve` document: "The name was typed by the person
   who asked. Nobody checked it."
 
 A removal that fails is the one failure that writes a document to stdout:
 exit code 5 when a device id was not found, with the message on stderr as in
-text mode. Read `removed` before deciding what to do next: those people have
-lost access, whatever the exit code says. The document is written for every
-failure from the first person removed on; a failure with no document came
-before any access was taken away. When `public_keys_command` is present, every
-person was removed and only the change to the public keys is left: running
-that command finishes the job.
+text mode. Read `removed` before deciding what to do next: the service
+answered the removal of those people as made, whatever the exit code says. The
+document is written for every failure from the first person removed on; a
+failure with no document came before any access was taken away. When
+`public_keys_command` is present, every person was removed and only the change
+to the public keys is left: running that command finishes the job.
 
 ### Exit codes
 

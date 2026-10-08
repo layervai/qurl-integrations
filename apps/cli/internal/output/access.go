@@ -54,8 +54,10 @@ const (
 	// the approval_rule member of every JSON listing: the reader of JSON is
 	// most often an agent, which decides what to approve from that document.
 	// A listing shows no code, and this is the sentence that says where the
-	// code is.
-	msgApproveOnlyGivenCodes = "To let one of these people in, ask them for the six-digit code on their screen and run `qurl approve <CRID> <code>`; a name can be typed by anyone, so the code is the only proof of who is asking."
+	// code is. %s is the CRID of the resource in the listing of one
+	// resource, where the command knows it, and the placeholder in the
+	// listing of all resources, where each row has its own.
+	msgApproveOnlyGivenCodes = "To let one of these people in, ask them for the six-digit code on their screen and run `qurl approve %s <code>`; a name can be typed by anyone, so the code is the only proof of who is asking."
 
 	// msgRequestsMayBeMore follows a listing of all resources that the
 	// service said may be incomplete. That listing is bounded; the listing
@@ -88,6 +90,10 @@ const (
 	msgStateOn          = "on"
 	msgStateOff         = "off"
 	msgRemovePersonHint = "Take one person's access away with `qurl grants %s --remove <device id>`."
+	// msgApprovedPeopleNotSaid stands where the count of approved people
+	// would be, for a resource whose answer has no list of them. It is not
+	// "none": the service did not say who was approved.
+	msgApprovedPeopleNotSaid = "not said"
 	// msgRemovalKeysNotChanged follows a removal of approved people that
 	// stopped, when the same command also named public keys. It is true
 	// whether the command stopped at a removal or after the last one.
@@ -108,17 +114,6 @@ func (p *Printer) requesterName(name string) string {
 		return msgRequesterNoName
 	}
 	return p.publisherName(name)
-}
-
-// spacedCode writes a six-digit request code as two groups of three, the
-// form it is read aloud in. Anything else is returned as it is. The API
-// client writes a code it has checked the same way in its own messages; a
-// change to one form belongs in both.
-func spacedCode(code string) string {
-	if len(code) != 6 {
-		return code
-	}
-	return code[:3] + " " + code[3:]
 }
 
 // saidPrivate reports whether the service said that a resource is private. A
@@ -169,8 +164,9 @@ type accessRequestsJSON struct {
 	HasMore      bool                `json:"has_more"`
 }
 
-// AccessRequests renders pending access requests. all says that the listing
-// covers every resource of the owner, so each row names its resource.
+// AccessRequests renders pending access requests. resourceCRID is the
+// resource the listing is for. It is empty for the listing that covers every
+// resource of the owner, where each row names its resource.
 //
 // No mode shows the code of a request. Text is a table of who asked, from
 // which device, when, and until when the request stands, and it ends with
@@ -181,14 +177,15 @@ type accessRequestsJSON struct {
 //
 // A listing the service said may be incomplete says so after its rows, in
 // text, and on stderr with --quiet, whose stdout is values only.
-func (p *Printer) AccessRequests(list *qurlapi.AccessRequestList, all bool) error {
+func (p *Printer) AccessRequests(list *qurlapi.AccessRequestList, resourceCRID string) error {
 	if list == nil {
 		return errors.New("qURL access-request listing is incomplete")
 	}
+	all := resourceCRID == ""
 	requests := list.Requests
 	switch {
 	case p.format == FormatJSON:
-		out := accessRequestsJSON{Requests: make([]accessRequestJSON, 0, len(requests)), ApprovalRule: msgApproveOnlyGivenCodes, HasMore: list.HasMore}
+		out := accessRequestsJSON{Requests: make([]accessRequestJSON, 0, len(requests)), ApprovalRule: approvalRule(resourceCRID), HasMore: list.HasMore}
 		for index := range requests {
 			request := &requests[index]
 			out.Requests = append(out.Requests, accessRequestJSON{
@@ -254,8 +251,19 @@ func (p *Printer) AccessRequests(list *qurlapi.AccessRequestList, all bool) erro
 	if list.HasMore {
 		plain.printf("\n%s\n", mayBeMore(all))
 	}
-	plain.printf("\n%s\n", msgApproveOnlyGivenCodes)
+	plain.printf("\n%s\n", approvalRule(resourceCRID))
 	return plain.flush(nil)
+}
+
+// approvalRule is the sentence on how a person is let in, with the command
+// that does it. The listing of one resource knows the CRID that command
+// takes and writes it. The listing of all resources has one in each row, so
+// its sentence has the placeholder.
+func approvalRule(resourceCRID string) string {
+	if resourceCRID == "" {
+		resourceCRID = placeholderCRID
+	}
+	return fmt.Sprintf(msgApproveOnlyGivenCodes, resourceCRID)
 }
 
 // mayBeMore is the line for a listing the service said may be incomplete.
@@ -292,8 +300,11 @@ type accessRequestsSettingJSON struct {
 // no count is printed and nothing reads as "nobody": the line says that
 // anyone approved earlier still has access, and where to look.
 //
-// TODO(upstream-contract): the count rests on the answer to the change
-// carrying allowed_passkeys, as every resource row does.
+// TODO(upstream-contract): the service sends allowed_passkeys on every
+// resource row, as an empty array when nobody is approved, on the answer to
+// a change as on a read. The count is read from that member. A missing
+// member is read as "the service did not say", which is the line with no
+// count.
 //
 // On, the resource must be one the service said is private: the guidance
 // says that its address is safe to send to anyone, which is true of a
@@ -423,7 +434,7 @@ func (p *Printer) Denied(resourceCRID, request string) error {
 		_, err := fmt.Fprintf(p.err, msgDeniedDevice+"\n", request, resourceCRID)
 		return err
 	}
-	_, err := fmt.Fprintf(p.err, msgDenied+"\n", spacedCode(request), resourceCRID)
+	_, err := fmt.Fprintf(p.err, msgDenied+"\n", qurlapi.SpacedRequestCode(request), resourceCRID)
 	return err
 }
 
@@ -437,7 +448,11 @@ type removalOutcomeJSON struct {
 	NotFound   []string `json:"not_found"`
 	NotRemoved []string `json:"not_removed"`
 	// PublicKeysChanged is present, and false, only when the command also
-	// named public keys to add or remove: that change was not made.
+	// named public keys and stopped before it reached that change, because
+	// a removal failed or the removals were not confirmed: the change comes
+	// after the removals, so it was not made. It is not there when the
+	// change to public keys was reached and failed, which may have changed
+	// a key: PublicKeysCommand without this member is that case.
 	PublicKeysChanged *bool `json:"public_keys_changed,omitempty"`
 	// PublicKeysCommand is present only when every person was removed and
 	// the change to public keys failed or was not reached: the command that
@@ -470,21 +485,25 @@ func (p *Printer) RemovalOutcome(outcome *qurlapi.PasskeyRemovalError) error {
 
 // grantsJSON is the `qurl grants` document: the resource status document with
 // the two things that decide who else can open a private resource beside its
-// device keys. approved_people is always an array, empty when nobody was
-// approved; access_requests is omitted when the service did not say.
+// device keys. Each is omitted when the service did not say it, like every
+// member the service may leave out. approved_people is an array when the
+// service sent the list, empty when it said that nobody was approved, and
+// the member is not there when the service sent no list: a reader must not
+// take "not said" for "nobody". access_requests is there when the service
+// said whether people can ask.
 type grantsJSON struct {
-	AllowedDeviceKeys []string             `json:"allowed_device_keys"`
-	ApprovedPeople    []approvedPersonJSON `json:"approved_people"`
-	AccessRequests    *bool                `json:"access_requests,omitempty"`
-	Private           *bool                `json:"private,omitempty"`
-	CRID              string               `json:"crid,omitempty"`
-	ResourceID        string               `json:"resource_id"`
-	TargetURL         string               `json:"target_url,omitempty"`
-	Type              string               `json:"type"`
-	Status            string               `json:"status"`
-	CreatedAt         *time.Time           `json:"created_at,omitempty"`
-	ExpiresAt         *time.Time           `json:"expires_at,omitempty"`
-	Publisher         publisherJSON        `json:"publisher"`
+	AllowedDeviceKeys []string              `json:"allowed_device_keys"`
+	ApprovedPeople    *[]approvedPersonJSON `json:"approved_people,omitempty"`
+	AccessRequests    *bool                 `json:"access_requests,omitempty"`
+	Private           *bool                 `json:"private,omitempty"`
+	CRID              string                `json:"crid,omitempty"`
+	ResourceID        string                `json:"resource_id"`
+	TargetURL         string                `json:"target_url,omitempty"`
+	Type              string                `json:"type"`
+	Status            string                `json:"status"`
+	CreatedAt         *time.Time            `json:"created_at,omitempty"`
+	ExpiresAt         *time.Time            `json:"expires_at,omitempty"`
+	Publisher         publisherJSON         `json:"publisher"`
 }
 
 // Grants renders who can open a resource besides its owner: the allowed
@@ -494,13 +513,19 @@ type grantsJSON struct {
 func (p *Printer) Grants(resource *qurlapi.ResourceSummary) error {
 	switch {
 	case p.format == FormatJSON:
-		people := make([]approvedPersonJSON, 0, len(resource.AllowedPasskeys))
-		for index := range resource.AllowedPasskeys {
-			people = append(people, approvedPersonDocument(&resource.AllowedPasskeys[index]))
+		// A list the service did not send stays out of the document. A
+		// list it sent is an array, empty when nobody was approved.
+		var approved *[]approvedPersonJSON
+		if resource.AllowedPasskeys != nil {
+			people := make([]approvedPersonJSON, 0, len(resource.AllowedPasskeys))
+			for index := range resource.AllowedPasskeys {
+				people = append(people, approvedPersonDocument(&resource.AllowedPasskeys[index]))
+			}
+			approved = &people
 		}
 		return p.writeJSON(grantsJSON{
 			AllowedDeviceKeys: append([]string{}, resource.AllowedDeviceKeys...),
-			ApprovedPeople:    people,
+			ApprovedPeople:    approved,
 			AccessRequests:    resource.AccessRequests,
 			Private:           resource.Private,
 			CRID:              resource.CRID, ResourceID: resource.ResourceID,
