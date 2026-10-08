@@ -271,10 +271,13 @@ func TestRemovalThatTookAccessAwaySaysSoOnEveryFailure(t *testing.T) {
 		},
 		{
 			// Everyone is removed, and the resource the service sends
-			// afterwards has no list of approved people. That is "not
-			// said". It is not "nobody", so it confirms nothing: the
-			// removal was sent and answered, and is not reported as done.
-			name: "the resource read after the removals has no list",
+			// afterwards has no list of approved people, though the one
+			// it sent before the removals had it. A missing list is "not
+			// said", not "nobody", so it confirms nothing: the removal was
+			// sent and answered, and is not reported as done. One answer
+			// left the list out. Nothing is said about the service, and
+			// the next step is the read that showed the list a moment ago.
+			name: "the list was there before the removals and is missing after",
 			answer: func(srv *apitest.Server, _ *bool) func(int, *http.Request) *fault {
 				return func(_ int, req *http.Request) *fault {
 					if isRemovalOf(req, removalThird) {
@@ -285,9 +288,26 @@ func TestRemovalThatTookAccessAwaySaysSoOnEveryFailure(t *testing.T) {
 			},
 			removed: []string{removalFirst, removalSecond, removalThird},
 			headline: "the service answered that access was taken away from " + removalFirst + ", " + removalSecond + " and " + removalThird +
+				". Its answer afterwards did not include the list of approved people, so the removal is not confirmed yet",
+			is: qurl.ErrInvalidAPIResponse, isNot: ErrApprovedPersonNotFound,
+		},
+		{
+			// The same, on a service that sent no list before the removals
+			// either. This service does not show who has access, and the
+			// read that would be the next step shows nothing more on it,
+			// so it is not offered.
+			name: "the list was missing before the removals as well",
+			answer: func(srv *apitest.Server, _ *bool) func(int, *http.Request) *fault {
+				return func(n int, _ *http.Request) *fault {
+					if n == 1 {
+						srv.OmitApprovedPeople()
+					}
+					return nil
+				}
+			},
+			removed: []string{removalFirst, removalSecond, removalThird},
+			headline: "the service answered that access was taken away from " + removalFirst + ", " + removalSecond + " and " + removalThird +
 				". This service does not show who has access, so the removal cannot be confirmed from here",
-			// The usual next step is a read of the lists, which on this
-			// service shows nothing more. It is not offered.
 			nextStep: "Nothing more can be learned with this command against this service: `qurl grants %s` does not show who has access either",
 			is:       qurl.ErrInvalidAPIResponse, isNot: ErrApprovedPersonNotFound,
 		},

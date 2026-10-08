@@ -1489,6 +1489,8 @@ func TestApprovedPeopleSaidToBeNobodyIsNotTheSameAsNotSaid(t *testing.T) {
 		t.Fatalf("the list sent as null: read %#v, change %#v; want nil for both, never an empty list", fromRead, fromChange)
 	}
 	// And a removal that reads such a row afterwards is not confirmed by it.
+	// The list was there before the removal, so one answer left it out, and
+	// the next step is the read that shows who has access.
 	srv = apitest.NewServer(t)
 	srv.AddApprovedPerson(testDeviceID, testRequester)
 	reads := 0
@@ -1505,7 +1507,9 @@ func TestApprovedPeopleSaidToBeNobodyIsNotTheSameAsNotSaid(t *testing.T) {
 			srv.Key.ResourceID, srv.Key.CRID)}
 	})
 	_, err := client.RemoveAllowedPasskeys(t.Context(), srv.Key.CRID, []string{testDeviceID})
-	if outcome := removalOutcome(t, err, []string{testDeviceID}, nil, nil); !strings.Contains(outcome.Headline(), "This service does not show who has access") {
+	outcome := removalOutcome(t, err, []string{testDeviceID}, nil, nil)
+	if !strings.HasSuffix(outcome.Headline(), "Its answer afterwards did not include the list of approved people, so the removal is not confirmed yet") ||
+		outcome.NextStep() != "Run `qurl grants "+srv.Key.CRID+"` to see who has access now" || strings.Contains(err.Error(), "This service does not show") {
 		t.Fatalf("a removal read back with a null list: %v", err)
 	}
 }

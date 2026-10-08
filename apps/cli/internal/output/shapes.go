@@ -355,13 +355,17 @@ func (p *Printer) resourceStatusRows(ew *errWriter, resource *qurlapi.ResourceSu
 	}
 	ew.printf("%s\t%v\n", p.bold("Allowed device keys:"), resource.AllowedDeviceKeys)
 	if grants {
-		// "none" is what the service said, with an empty list. A resource
-		// with no list at all gets the words for that, never "none".
-		people := msgNoApprovedPeople
-		if resource.AllowedPasskeys == nil {
+		// The row has three values. A resource with no list at all gets the
+		// words for that, never "none". "none" is what the service said,
+		// with an empty list. Otherwise it is the count.
+		var people string
+		switch {
+		case resource.AllowedPasskeys == nil:
 			people = msgApprovedPeopleNotSaid
-		} else if count := len(resource.AllowedPasskeys); count > 0 {
-			people = strconv.Itoa(count)
+		case len(resource.AllowedPasskeys) == 0:
+			people = msgNoApprovedPeople
+		default:
+			people = strconv.Itoa(len(resource.AllowedPasskeys))
 		}
 		ew.printf("%s\t%s\n", p.bold(labelApprovedPeople), people)
 	}

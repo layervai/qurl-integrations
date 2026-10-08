@@ -98,7 +98,7 @@ func CustomerMessages() []string {
 		msgAccessRequestsCreateUnconfirmed, msgAccessRequestsSettingUnconfirmed, msgAccessRequestsNotTurnedOn, msgApprovalUnconfirmed,
 		msgAccessRequestsOnPublic, msgAccessRequestsPrivacyNotSaid,
 		msgRequestCodeNotFound, msgRequestDeviceNotFound, msgDeviceIDNotFound, msgDeviceIDsNotFound, msgRemovedThenNotFound, msgRemovedThenFailed,
-		msgRemovedThenKeysFailed, msgRemovedThenUnexplained, msgRemovedThenListNotRead, msgRemovedButStillListed, msgAnsweredButStillListed, msgRemovalListNotSaid, msgNothingMoreFromService,
+		msgRemovedThenKeysFailed, msgRemovedThenUnexplained, msgRemovedThenListNotRead, msgRemovedButStillListed, msgAnsweredButStillListed, msgRemovalListMissingAfter, msgRemovalListNeverSaid, msgNothingMoreFromService,
 		msgStillHasAccess, msgStillHaveAccess, msgSeeWhoHasAccess, msgApprovedPersonNotFound, msgRemovalUnconfirmed,
 	}
 }
@@ -180,12 +180,20 @@ const (
 	msgAnsweredButStillListed = "the service answered that access was taken away from %s, but its list still shows %s"
 	// The service answered every removal as made, and the resource it sent
 	// afterwards has no list of approved people. The removal was sent. It is
-	// not confirmed, and the message does not say that it is.
-	msgRemovalListNotSaid = "the service answered that access was taken away from %s. This service does not show who has access, so the removal cannot be confirmed from here"
-	// msgNothingMoreFromService stands where the next step is, for that
-	// outcome. The usual next step is to read the lists, and on a service
-	// that does not send the list of approved people that read shows
-	// nothing more. So no step is offered that cannot help.
+	// not confirmed, and neither message says that it is. Which one is used
+	// depends on what the service sent before the removals.
+	//
+	// The list was there before: one answer left it out. Nothing is said
+	// about the service, and the next step is the usual one, the read that
+	// shows who has access now.
+	msgRemovalListMissingAfter = "the service answered that access was taken away from %s. Its answer afterwards did not include the list of approved people, so the removal is not confirmed yet"
+	// The list was missing before as well: this service does not show who
+	// has access.
+	msgRemovalListNeverSaid = "the service answered that access was taken away from %s. This service does not show who has access, so the removal cannot be confirmed from here"
+	// msgNothingMoreFromService stands where the next step is, for the
+	// second of the two. The usual next step is to read the lists, and on a
+	// service that does not send the list of approved people that read
+	// shows nothing more. So no step is offered that cannot help.
 	msgNothingMoreFromService = "Nothing more can be learned with this command against this service: `qurl grants %s` does not show who has access either"
 	// The device ids the command named that still have access as far as it
 	// knows, and the next step.
@@ -369,10 +377,20 @@ const (
 	// stoppedStillListed: the service answered every removal as made, and
 	// its list still shows some of the people.
 	stoppedStillListed
-	// stoppedListNotSaid: the service answered every removal as made, and
-	// the resource it sent afterwards has no list of approved people.
-	stoppedListNotSaid
+	// stoppedListMissingAfter: the service answered every removal as made,
+	// and the resource it sent afterwards has no list of approved people,
+	// though the one it sent before the removals had it.
+	stoppedListMissingAfter
+	// stoppedListNeverSaid: the same, and the resource the service sent
+	// before the removals had no list either.
+	stoppedListNeverSaid
 )
+
+// listNotConfirmed reports whether the removal stopped because the resource
+// sent after it has no list of approved people, in either of the two ways.
+func (e *PasskeyRemovalError) listNotConfirmed() bool {
+	return e.stop == stoppedListMissingAfter || e.stop == stoppedListNeverSaid
+}
 
 // Headline says what happened, in one sentence or two, without the reason of
 // a failure and without the next step.
@@ -383,8 +401,10 @@ func (e *PasskeyRemovalError) Headline() string {
 		text = fmt.Sprintf(msgRemovedThenKeysFailed, wordList(e.Removed))
 	case e.stop == stoppedListNotRead:
 		text = fmt.Sprintf(msgRemovedThenListNotRead, wordList(e.Removed))
-	case e.stop == stoppedListNotSaid:
-		text = fmt.Sprintf(msgRemovalListNotSaid, wordList(e.Removed))
+	case e.stop == stoppedListMissingAfter:
+		text = fmt.Sprintf(msgRemovalListMissingAfter, wordList(e.Removed))
+	case e.stop == stoppedListNeverSaid:
+		text = fmt.Sprintf(msgRemovalListNeverSaid, wordList(e.Removed))
 	case e.stop == stoppedStillListed && len(e.Removed) > 0:
 		text = fmt.Sprintf(msgRemovedButStillListed, wordList(e.Removed), wordList(e.NotRemoved), wordList(e.NotRemoved))
 	case e.stop == stoppedStillListed:
@@ -420,7 +440,7 @@ func (e *PasskeyRemovalError) Reason() string {
 	}
 	// A list that still shows a person, and a list that is not there, are
 	// the whole reason, and the headline has it.
-	if failure == nil || ((e.stop == stoppedStillListed || e.stop == stoppedListNotSaid) && e.KeyChange == nil) {
+	if failure == nil || ((e.stop == stoppedStillListed || e.listNotConfirmed()) && e.KeyChange == nil) {
 		return ""
 	}
 	var worded interface{ UserMessage() string }
@@ -440,13 +460,15 @@ func (e *PasskeyRemovalError) Reason() string {
 }
 
 // NextStep is the command that shows who has access now. For a service that
-// does not show that, it says so instead: the command would be a dead end.
+// did not show that before the removals either, it says so instead: the
+// command would be a dead end. A service that showed the list a moment ago
+// gets the command, which is the one that confirms the removal.
 func (e *PasskeyRemovalError) NextStep() string {
 	id := e.ID
 	if id == "" {
 		id = "<CRID>"
 	}
-	if e.stop == stoppedListNotSaid {
+	if e.stop == stoppedListNeverSaid {
 		return fmt.Sprintf(msgNothingMoreFromService, id)
 	}
 	return fmt.Sprintf(msgSeeWhoHasAccess, id)

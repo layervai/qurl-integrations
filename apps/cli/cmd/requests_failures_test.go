@@ -378,6 +378,43 @@ func TestGrantsNeverReadsAMissingListAsNobody(t *testing.T) {
 		})
 	}
 
+	// A service that sent the list before the removal and leaves it out of
+	// the answer after it. That one answer confirms nothing, so the removal
+	// is not reported as done. But this service does show who has access:
+	// it did a moment ago. So the command does not say that it does not,
+	// and the next step is the read that confirms the removal.
+	for _, mode := range [][]string{nil, {"-o", "json"}, {"--quiet"}} {
+		t.Run(fmt.Sprintf("the list was there before the removal and is missing after %v", mode), func(t *testing.T) {
+			srv := twoApproved(t)
+			choose := func(req *http.Request) *answerInPlace {
+				if removalOf(req, otherDevice) {
+					srv.OmitApprovedPeople()
+				}
+				return nil
+			}
+			res := runCLI(t, withChosenAnswers(srv, choose, append([]string{"grants", srv.Key.CRID, "--remove", requesterDevice, "--remove", otherDevice}, mode...)...))
+			wantStderr := "Error: the service answered that access was taken away from " + requesterDevice + " and " + otherDevice +
+				". Its answer afterwards did not include the list of approved people, so the removal is not confirmed yet.\n\n" +
+				"  Run `qurl grants " + srv.Key.CRID + "` to see who has access now.\n"
+			if res.code != exitcode.ServerError || res.stderr.String() != wantStderr {
+				t.Fatalf("exit = %d, want %d; stderr =\n%s\nwant\n%s", res.code, exitcode.ServerError, res.stderr.String(), wantStderr)
+			}
+			if len(mode) == 2 {
+				want := `{"crid":"` + srv.Key.CRID + `","removed":["` + requesterDevice + `","` + otherDevice + `"],"not_found":[],"not_removed":[]}`
+				if got := compactJSON(t, res.stdout.Bytes()); got != want {
+					t.Fatalf("outcome document = %s, want %s", got, want)
+				}
+			} else {
+				mustEmptyStdout(t, res)
+			}
+			for _, never := range []string{"This service does not show", "Nothing more can be learned", "Approved people", "none"} {
+				if strings.Contains(res.stdout.String()+res.stderr.String(), never) {
+					t.Errorf("the output has %q:\n%s%s", never, res.stdout.String(), res.stderr.String())
+				}
+			}
+		})
+	}
+
 	// A read of the grants on that service.
 	t.Run("a read says not said", func(t *testing.T) {
 		srv := seed(t)

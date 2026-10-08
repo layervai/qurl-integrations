@@ -304,7 +304,8 @@ func (c *client) accessListingProblem(ctx context.Context, id string, reply *res
 // codes for one resource within an hour it answers an approval, and a denial
 // by code, with 429 and a Retry-After, whatever the code, a right one
 // included. That answer is never sent again by this client either: another
-// attempt could be one more wrong code, and the wait can be an hour.
+// attempt could be one more wrong code, and the wait can be an hour. What
+// counts as a wrong code is in the note on DenyAccessRequest.
 func (c *client) ApproveAccessRequest(ctx context.Context, id, code string) (*AllowedPasskey, error) {
 	if !ValidRequestCode(code) {
 		return nil, fmt.Errorf("%w: a request code is six digits", qurl.ErrInvalidResourceRequest)
@@ -351,6 +352,15 @@ func (c *client) ApproveAccessRequest(ctx context.Context, id, code string) (*Al
 //
 // TODO(upstream-contract): the service takes a device id or a code in that
 // position, and so does the SDK for a device credential.
+//
+// TODO(upstream-contract): what the service counts toward its limit on wrong
+// codes, in two halves. A code that is not pending for the resource counts,
+// when it comes with a denial as when it comes with an approval. A denial by
+// device id never counts, whether or not a request from that device is
+// pending. Both halves are stated to publishers in the help of `qurl deny`
+// and in the README section on requests, approve and deny, and the help of
+// `qurl approve` states the limit. If the service changes either half, those
+// texts and the tests that pin them change with this note.
 func (c *client) DenyAccessRequest(ctx context.Context, id, request string) error {
 	byDevice := ValidDeviceID(request)
 	if !byDevice && !ValidRequestCode(request) {
@@ -444,7 +454,7 @@ func (c *client) RemoveAllowedPasskeys(ctx context.Context, id string, deviceIDs
 		}
 		return nil, &PasskeyRemovalError{ID: id, NotFound: deviceIDs[:1], NotRemoved: deviceIDs[1:], problem: problem}
 	}
-	resource, outcome := c.finishRemoval(ctx, base, &removalProgress{id: id, named: deviceIDs, removed: 1})
+	resource, outcome := c.finishRemoval(ctx, base, &removalProgress{id: id, named: deviceIDs, removed: 1, listedBefore: before.AllowedPasskeys != nil})
 	if outcome != nil {
 		return nil, outcome
 	}
@@ -469,8 +479,9 @@ func (c *client) removePerson(ctx context.Context, base, deviceID string) (*rest
 }
 
 // removalProgress is what a removal knows once its first person is off the
-// list: the device ids the command named, in order, and how many of them,
-// from the front, were removed.
+// list: the device ids the command named, in order, how many of them, from
+// the front, were removed, and whether the resource read before the removals
+// carried the list of approved people.
 //
 // Its methods are the only places that build the failure of a removal that
 // has taken access away. Each starts from the same outcome, which has the
@@ -479,6 +490,11 @@ type removalProgress struct {
 	id      string
 	named   []string
 	removed int
+	// listedBefore says that the service sent the list of approved people
+	// in its answer before the removals. It is the evidence for what a
+	// missing list afterwards means: a service that sent the list a moment
+	// ago does send it, and one answer left it out.
+	listedBefore bool
 }
 
 // outcome is the start of every failure: who lost access, and who the
@@ -525,9 +541,19 @@ func (p *removalProgress) listNotRead(cause error) *PasskeyRemovalError {
 // Each removal was sent and answered. What is missing is the check that the
 // people are off the list, so the removal is not confirmed, and the command
 // does not report it as done.
+//
+// What it says about the service depends on what the service sent before the
+// removals. If the list was there then, one answer left it out: the removal
+// is not confirmed yet, and the read that shows who has access is the right
+// next step. If the list was missing then too, this service does not show
+// who has access, and that read would show nothing more. The outcome never
+// says the second of a service that has just shown the list.
 func (p *removalProgress) listNotSaid() *PasskeyRemovalError {
 	outcome := p.outcome()
-	outcome.stop, outcome.cause = stoppedListNotSaid, &answerError{message: msgRemovalUnconfirmed}
+	outcome.stop, outcome.cause = stoppedListNeverSaid, &answerError{message: msgRemovalUnconfirmed}
+	if p.listedBefore {
+		outcome.stop = stoppedListMissingAfter
+	}
 	return outcome
 }
 

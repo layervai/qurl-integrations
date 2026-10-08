@@ -1009,10 +1009,14 @@ A removal is reported as done only when the list the service sends afterwards
 confirms it. The service sends the list of approved people with every
 resource, as an empty list when nobody is approved. An answer without the list
 means that the service did not say who is approved, and it is never read as
-"nobody has access". After a removal, the command then says that the service
-answered each removal as made, that this service does not show who has access,
-so the removal cannot be confirmed from here, and that `qurl grants <CRID>`
-does not show it either (exit code 10). It prints no lists.
+"nobody has access". After a removal, such an answer confirms nothing, and the
+command says that the service answered each removal as made and that the
+removal is not confirmed (exit code 10). It prints no lists. What it says next
+depends on the answer the service gave before the removals. If the list was
+there then, one answer left it out: the removal is not confirmed yet, and
+`qurl grants <CRID>` shows who has access now. If the list was missing then
+too, this service does not show who has access, so the removal cannot be
+confirmed from here, and `qurl grants <CRID>` does not show it either.
 
 The same holds when a command that also names public keys removes every person
 and then fails to change the keys, or stops before it gets to them. The
@@ -1123,8 +1127,8 @@ limit on wrong codes: after 5 wrong codes for one resource within an hour, it
 refuses every code for that resource for a time, in `qurl approve` too. A
 denial by device id never counts, and is the usual way to refuse a request. A
 request that is neither approved nor denied gives no access and expires by
-itself. `--off` stops new requests and says how many
-approved people still have access.
+itself. `--off` stops new requests and says how many approved people still
+have access.
 
 | Command | Flag | Description |
 |---------|------|-------------|
