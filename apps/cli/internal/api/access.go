@@ -413,8 +413,10 @@ func codeLimit(reply *restReply) error {
 // says who lost access, what failed, and who still has access as far as the
 // command knows.
 //
-// Last, the resource is read again, and no removed device id may be on the
-// list it shows. That read is the resource the caller prints.
+// Last, the resource is read again. It must have the list of approved
+// people, and no removed device id may be on it. A resource without the list
+// confirms nothing: "not said" is not "nobody". That read is the resource the
+// caller prints.
 func (c *client) RemoveAllowedPasskeys(ctx context.Context, id string, deviceIDs []string) (*ResourceSummary, error) {
 	if err := validateDeviceIDs(deviceIDs); err != nil {
 		return nil, err
@@ -517,6 +519,17 @@ func (p *removalProgress) listNotRead(cause error) *PasskeyRemovalError {
 	return outcome
 }
 
+// listNotSaid is a removal of every person that the service answered as
+// made, after which the resource it sent has no list of approved people.
+// Each removal was sent and answered. What is missing is the check that the
+// people are off the list, so the removal is not confirmed, and the command
+// does not report it as done.
+func (p *removalProgress) listNotSaid() *PasskeyRemovalError {
+	outcome := p.outcome()
+	outcome.stop, outcome.cause = stoppedListNotSaid, &answerError{message: msgRemovalUnconfirmed}
+	return outcome
+}
+
 // stillListed is a removal of every person that the service answered as
 // made, with a list read afterwards that still shows some of them. The list
 // is what the service says now, so the people on it still have access, and
@@ -556,6 +569,12 @@ func (c *client) finishRemoval(ctx context.Context, base string, progress *remov
 	resource, err := c.Resource(ctx, progress.id)
 	if err != nil {
 		return nil, progress.listNotRead(err)
+	}
+	if resource.AllowedPasskeys == nil {
+		// The answer has no list at all. That is "not said", and it is
+		// not "nobody": a list that is not there cannot show that the
+		// people are off it, so it confirms nothing.
+		return nil, progress.listNotSaid()
 	}
 	var listed []string
 	for _, deviceID := range progress.named {

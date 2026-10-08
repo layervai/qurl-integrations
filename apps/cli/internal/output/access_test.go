@@ -754,9 +754,10 @@ func TestGrantsListsApprovedPeopleBesideTheDeviceKeys(t *testing.T) {
 		t.Fatalf("an approved person with no name and no date = %v", second)
 	}
 
-	// Nobody approved and a service that does not say whether people can ask:
-	// one row that says "none", an empty array, and no setting.
-	plain := &qurlapi.ResourceSummary{CRID: accessCRID, ResourceID: "rid", Type: "url", Status: "active"}
+	// Nobody approved, said by the service with an empty list, and a service
+	// that does not say whether people can ask: one row that says "none", an
+	// empty array, and no setting.
+	plain := &qurlapi.ResourceSummary{CRID: accessCRID, ResourceID: "rid", Type: "url", Status: "active", AllowedPasskeys: []qurlapi.AllowedPasskey{}}
 	out.Reset()
 	if err := newTestPrinter(&out, &errBuf, FormatText, false, false, false).Grants(plain); err != nil {
 		t.Fatal(err)
@@ -770,6 +771,30 @@ func TestGrantsListsApprovedPeopleBesideTheDeviceKeys(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), `"approved_people": []`) || !strings.Contains(out.String(), `"allowed_device_keys": []`) || strings.Contains(out.String(), "access_requests") {
 		t.Fatalf("grants JSON with nobody approved = %s", out.String())
+	}
+
+	// A resource whose answer has no list of approved people at all. That is
+	// "the service did not say", and it is never shown as "nobody": the row
+	// says "not said", and the document has no approved_people member, as it
+	// has no access_requests member when the service did not say that.
+	notSaid := &qurlapi.ResourceSummary{CRID: accessCRID, ResourceID: "rid", Type: "url", Status: "active"}
+	out.Reset()
+	if err := newTestPrinter(&out, &errBuf, FormatText, false, false, false).Grants(notSaid); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "Approved people:      not said\n") || strings.Contains(out.String(), "none") || strings.Contains(out.String(), "--remove") {
+		t.Fatalf("grants with no list of approved people =\n%s", out.String())
+	}
+	out.Reset()
+	if err := newTestPrinter(&out, &errBuf, FormatJSON, false, false, false).Grants(notSaid); err != nil {
+		t.Fatal(err)
+	}
+	var members map[string]json.RawMessage
+	if err := json.Unmarshal(out.Bytes(), &members); err != nil {
+		t.Fatal(err)
+	}
+	if _, has := members["approved_people"]; has || string(members["allowed_device_keys"]) != "[]" {
+		t.Fatalf("grants JSON with no list of approved people = %s; want no approved_people member", out.String())
 	}
 }
 

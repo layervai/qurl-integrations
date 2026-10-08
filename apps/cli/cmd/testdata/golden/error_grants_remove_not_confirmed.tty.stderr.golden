@@ -1,0 +1,3 @@
+[31m[1mError:[0m the service answered that access was taken away from abcd-efgh-2345-mnop. The list does not confirm it: the service's answer afterwards does not show who has access now.
+
+  [2mRun `qurl grants qhtpthw4qt7wkw7khghr6x3z4hsfyn4zbuyhnee4i6bi67yu6yytgvwdbb4q` to see who has access now.[0m

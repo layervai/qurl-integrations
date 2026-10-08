@@ -289,6 +289,121 @@ func TestGrantsRemoveSaysWhoLostAccessWhateverFailsNext(t *testing.T) {
 	})
 }
 
+// TestGrantsNeverReadsAMissingListAsNobody pins what the command says when
+// the service's answer has no list of approved people. That is "the service
+// did not say". It is not "nobody", and reading it as nobody would tell a
+// publisher that a private resource opens for no one else when the command
+// does not know that.
+//
+// After a removal, such an answer confirms nothing: a list that is not
+// there cannot show that the people are off it. The removal was sent and
+// answered as made, and the command says exactly that, exits 10, and prints
+// no lists. It does not print "Approved people: none".
+//
+// A read of the grants shows "not said" where the count would be, and the
+// JSON document has no approved_people member, as it has no access_requests
+// member when the service did not say that. An empty list the service did
+// send is still "none" and an empty array.
+func TestGrantsNeverReadsAMissingListAsNobody(t *testing.T) {
+	seed := func(t *testing.T) *apitest.Server {
+		t.Helper()
+		srv := twoApproved(t)
+		srv.OmitApprovedPeople()
+		return srv
+	}
+	for _, mode := range [][]string{nil, {"-o", "json"}, {"--quiet"}} {
+		t.Run(fmt.Sprintf("a removal the list does not confirm %v", mode), func(t *testing.T) {
+			srv := seed(t)
+			res := runCLI(t, &runOpts{args: append([]string{"--endpoint", srv.URL, "grants", srv.Key.CRID, "--remove", requesterDevice, "--remove", otherDevice}, mode...)})
+			wantStderr := "Error: the service answered that access was taken away from " + requesterDevice + " and " + otherDevice +
+				". The list does not confirm it: the service's answer afterwards does not show who has access now.\n\n" +
+				"  Run `qurl grants " + srv.Key.CRID + "` to see who has access now.\n"
+			if res.code != exitcode.ServerError || res.stderr.String() != wantStderr {
+				t.Fatalf("exit = %d, want %d; stderr =\n%s\nwant\n%s", res.code, exitcode.ServerError, res.stderr.String(), wantStderr)
+			}
+			if len(mode) == 2 {
+				want := `{"crid":"` + srv.Key.CRID + `","removed":["` + requesterDevice + `","` + otherDevice + `"],"not_found":[],"not_removed":[]}`
+				if got := compactJSON(t, res.stdout.Bytes()); got != want {
+					t.Fatalf("outcome document = %s, want %s", got, want)
+				}
+			} else {
+				mustEmptyStdout(t, res)
+			}
+			for _, never := range []string{"Approved people", "none", "approved_people"} {
+				if strings.Contains(res.stdout.String()+res.stderr.String(), never) {
+					t.Errorf("the output has %q:\n%s%s", never, res.stdout.String(), res.stderr.String())
+				}
+			}
+			base := "/v1/resources/" + srv.Key.CRID
+			want := []string{"GET " + base, "DELETE " + base + "/allowed-passkeys/" + requesterDevice, "DELETE " + base + "/allowed-passkeys/" + otherDevice, "GET " + base}
+			if got := requestLog(srv); !slices.Equal(got, want) {
+				t.Fatalf("requests = %v, want %v", got, want)
+			}
+		})
+	}
+
+	// The same in a command that also names a public key. The change to the
+	// keys comes after the list is checked, so it was not made, and the
+	// outcome names the command that makes it alone.
+	t.Run("a removal the list does not confirm, with a public key waiting", func(t *testing.T) {
+		srv := seed(t)
+		res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "grants", srv.Key.CRID, "--remove", requesterDevice, "--add", grantKey(2)}})
+		wantStderr := "Error: the service answered that access was taken away from " + requesterDevice +
+			". The list does not confirm it: the service's answer afterwards does not show who has access now.\n\n" +
+			"  No public key was added or removed: that change comes after the removals, and the command stopped before it.\n\n" +
+			"  Run `qurl grants " + srv.Key.CRID + "` to see who has access now.\n" +
+			"  To make the change to the public keys, run: qurl grants " + srv.Key.CRID + " --add " + grantKey(2) + "\n"
+		if res.code != exitcode.ServerError || res.stderr.String() != wantStderr {
+			t.Fatalf("exit = %d, want %d; stderr =\n%s\nwant\n%s", res.code, exitcode.ServerError, res.stderr.String(), wantStderr)
+		}
+		mustEmptyStdout(t, res)
+		for _, line := range requestLog(srv) {
+			if strings.HasPrefix(line, "PATCH ") {
+				t.Fatalf("a change to the public keys was sent: %v", requestLog(srv))
+			}
+		}
+	})
+
+	// A read of the grants on that service.
+	t.Run("a read says not said", func(t *testing.T) {
+		srv := seed(t)
+		res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "grants", srv.Key.CRID}})
+		if res.code != 0 || !strings.Contains(res.stdout.String(), "Approved people:      not said\n") || strings.Contains(res.stdout.String(), "none") {
+			t.Fatalf("grants: exit %d\n%s%s", res.code, res.stdout.String(), res.stderr.String())
+		}
+		res = runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "grants", srv.Key.CRID, "-o", "json"}})
+		var document map[string]json.RawMessage
+		if err := json.Unmarshal(res.stdout.Bytes(), &document); res.code != 0 || err != nil {
+			t.Fatalf("grants -o json: exit %d, %v: %s", res.code, err, res.stdout.String())
+		}
+		if _, has := document["approved_people"]; has || string(document["allowed_device_keys"]) == "" {
+			t.Fatalf("grants -o json has approved_people for a list the service did not send: %s", res.stdout.String())
+		}
+	})
+
+	// An empty list the service did send is "none", and an empty array.
+	t.Run("an empty list is still none", func(t *testing.T) {
+		srv := apitest.NewServer(t)
+		srv.SetResourceAccess(true, grantKey(1))
+		res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "grants", srv.Key.CRID}})
+		if res.code != 0 || !strings.Contains(res.stdout.String(), "Approved people:      none\n") {
+			t.Fatalf("grants: exit %d\n%s%s", res.code, res.stdout.String(), res.stderr.String())
+		}
+		res = runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "grants", srv.Key.CRID, "-o", "json"}})
+		var document map[string]json.RawMessage
+		if err := json.Unmarshal(res.stdout.Bytes(), &document); res.code != 0 || err != nil || string(document["approved_people"]) != "[]" {
+			t.Fatalf("grants -o json: exit %d, %v: %s", res.code, err, res.stdout.String())
+		}
+		// A removal on that service, with the list there to confirm it,
+		// succeeds and prints the lists.
+		srv.AddApprovedPerson(requesterDevice, requesterName)
+		res = runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "grants", srv.Key.CRID, "--remove", requesterDevice}})
+		if res.code != 0 || !strings.Contains(res.stdout.String(), "Approved people:      none\n") {
+			t.Fatalf("a removal the list confirms: exit %d\n%s%s", res.code, res.stdout.String(), res.stderr.String())
+		}
+	})
+}
+
 // TestGrantsRemoveTakesADeviceIDWithSpaceAroundIt pins that a device id
 // pasted with a space before or after it is still a device id, as it is for
 // `qurl deny`, and is not read as a public key that cannot be one.

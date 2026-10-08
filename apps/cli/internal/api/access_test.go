@@ -1172,6 +1172,32 @@ func TestRemovalSaysExactlyWhatWasRemovedWhenItStopsPartWay(t *testing.T) {
 			t.Fatalf("removals sent = %v, want the first two", sent)
 		}
 	})
+
+	// On that service a removal of people who are all there is sent and
+	// answered, and the resource read afterwards has no list either. A list
+	// that is not there cannot show that the people are off it. So the
+	// removal is not reported as done, and no resource is returned for the
+	// caller to print as "nobody has access": the outcome says that each
+	// removal was answered as made and that the list does not confirm it.
+	t.Run("the list is not sent, and every removal is answered as made", func(t *testing.T) {
+		srv := apitest.NewServer(t)
+		srv.AddApprovedPerson(first, testRequester)
+		srv.AddApprovedPerson(third, testOtherPerson)
+		srv.OmitApprovedPeople()
+		resource, err := newTestClient(t, srv, nil).RemoveAllowedPasskeys(t.Context(), srv.Key.CRID, []string{first, third})
+		if resource != nil {
+			t.Fatalf("a removal the list does not confirm returned a resource: %+v", resource)
+		}
+		outcome := removalOutcome(t, err, []string{first, third}, nil, nil)
+		want := "the service answered that access was taken away from " + first + " and " + third + ". The list does not confirm it: the service's answer afterwards does not show who has access now"
+		if outcome.Headline() != want || outcome.Reason() != "" || !errors.Is(err, qurl.ErrInvalidAPIResponse) || errors.Is(err, ErrApprovedPersonNotFound) {
+			t.Fatalf("outcome = %q, reason %q, error %v; want %q, no reason, and an answer that does not confirm", outcome.Headline(), outcome.Reason(), err, want)
+		}
+		base := "/v1/resources/" + srv.Key.CRID
+		if got, want := requestLines(srv), []string{"GET " + base, "DELETE " + base + "/allowed-passkeys/" + first, "DELETE " + base + "/allowed-passkeys/" + third, "GET " + base}; !slices.Equal(got, want) {
+			t.Fatalf("requests = %v, want %v", got, want)
+		}
+	})
 }
 
 // TestResourceRowsCarryAccessRequestsAndApprovedPeople pins the two members a

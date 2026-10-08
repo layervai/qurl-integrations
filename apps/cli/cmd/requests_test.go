@@ -1064,12 +1064,17 @@ func TestAccessRequestCommandsOnAServiceWithoutThem(t *testing.T) {
 		}
 	}
 	// On that service a read of the grants still works, and says nothing
-	// about requests or people it was not told about.
+	// about requests or people it was not told about: the service sent no
+	// list of approved people, which is "not said" and never "none".
 	srv := apitest.NewServer(t)
 	srv.PlayNoAccessRequests()
 	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "grants", srv.Key.CRID}})
-	if res.code != 0 || strings.Contains(res.stdout.String(), "Access requests:") || !strings.Contains(res.stdout.String(), "Approved people:      none") {
+	if res.code != 0 || strings.Contains(res.stdout.String(), "Access requests:") || !strings.Contains(res.stdout.String(), "Approved people:      not said\n") {
 		t.Fatalf("grants against a service without access requests: exit %d\n%s%s", res.code, res.stdout.String(), res.stderr.String())
+	}
+	res = runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "grants", srv.Key.CRID, "-o", "json"}})
+	if res.code != 0 || strings.Contains(res.stdout.String(), "approved_people") || strings.Contains(res.stdout.String(), "access_requests") {
+		t.Fatalf("grants -o json against a service without access requests: exit %d\n%s%s", res.code, res.stdout.String(), res.stderr.String())
 	}
 }
 

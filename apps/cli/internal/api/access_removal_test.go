@@ -267,6 +267,25 @@ func TestRemovalThatTookAccessAwaySaysSoOnEveryFailure(t *testing.T) {
 			is:        qurl.ErrInvalidAPIResponse, isNot: ErrApprovedPersonNotFound, approved: []string{},
 		},
 		{
+			// Everyone is removed, and the resource the service sends
+			// afterwards has no list of approved people. That is "not
+			// said". It is not "nobody", so it confirms nothing: the
+			// removal was sent and answered, and is not reported as done.
+			name: "the resource read after the removals has no list",
+			answer: func(srv *apitest.Server, _ *bool) func(int, *http.Request) *fault {
+				return func(_ int, req *http.Request) *fault {
+					if isRemovalOf(req, removalThird) {
+						srv.OmitApprovedPeople()
+					}
+					return nil
+				}
+			},
+			removed: []string{removalFirst, removalSecond, removalThird},
+			headline: "the service answered that access was taken away from " + removalFirst + ", " + removalSecond + " and " + removalThird +
+				". The list does not confirm it: the service's answer afterwards does not show who has access now",
+			is: qurl.ErrInvalidAPIResponse, isNot: ErrApprovedPersonNotFound,
+		},
+		{
 			// The service answers a removal as made and does not make it:
 			// its list still shows the person. The list is what it says
 			// now, so that person still has access.

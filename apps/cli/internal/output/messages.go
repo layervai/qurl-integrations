@@ -411,7 +411,7 @@ func CustomerMessages() []string {
 		msgRequesterNoName, msgRequesterNameUnchecked,
 		msgApproved, msgApprovedCanOpen, msgRemoveCommand, msgDenied,
 		labelName, labelDeviceID, labelApproved, labelAccessRequests, labelApprovedPeople,
-		msgNoApprovedPeople, msgStateOn, msgStateOff, msgRemovePersonHint,
+		msgNoApprovedPeople, msgApprovedPeopleNotSaid, msgStateOn, msgStateOff, msgRemovePersonHint,
 		hintPublishExistingPublicWithout,
 		labelPublisher, labelCreated,
 		msgPublisherNoName, msgPublisherUnverified, msgPublisherVerified,

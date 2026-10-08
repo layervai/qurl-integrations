@@ -98,7 +98,7 @@ func CustomerMessages() []string {
 		msgAccessRequestsCreateUnconfirmed, msgAccessRequestsSettingUnconfirmed, msgAccessRequestsNotTurnedOn, msgApprovalUnconfirmed,
 		msgAccessRequestsOnPublic, msgAccessRequestsPrivacyNotSaid,
 		msgRequestCodeNotFound, msgRequestDeviceNotFound, msgDeviceIDNotFound, msgDeviceIDsNotFound, msgRemovedThenNotFound, msgRemovedThenFailed,
-		msgRemovedThenKeysFailed, msgRemovedThenUnexplained, msgRemovedThenListNotRead, msgRemovedButStillListed, msgAnsweredButStillListed,
+		msgRemovedThenKeysFailed, msgRemovedThenUnexplained, msgRemovedThenListNotRead, msgRemovedButStillListed, msgAnsweredButStillListed, msgRemovalListNotSaid,
 		msgStillHasAccess, msgStillHaveAccess, msgSeeWhoHasAccess, msgApprovedPersonNotFound, msgRemovalUnconfirmed,
 	}
 }
@@ -178,6 +178,10 @@ const (
 	// and third %s of the first message are the same people.
 	msgRemovedButStillListed  = "access was taken away from %s. The service answered the same for %s, but its list still shows %s"
 	msgAnsweredButStillListed = "the service answered that access was taken away from %s, but its list still shows %s"
+	// The service answered every removal as made, and the resource it sent
+	// afterwards has no list of approved people. The removal was sent. It is
+	// not confirmed, and the message does not say that it is.
+	msgRemovalListNotSaid = "the service answered that access was taken away from %s. The list does not confirm it: the service's answer afterwards does not show who has access now"
 	// The device ids the command named that still have access as far as it
 	// knows, and the next step.
 	msgStillHasAccess  = "%s still has access"
@@ -360,6 +364,9 @@ const (
 	// stoppedStillListed: the service answered every removal as made, and
 	// its list still shows some of the people.
 	stoppedStillListed
+	// stoppedListNotSaid: the service answered every removal as made, and
+	// the resource it sent afterwards has no list of approved people.
+	stoppedListNotSaid
 )
 
 // Headline says what happened, in one sentence or two, without the reason of
@@ -371,6 +378,8 @@ func (e *PasskeyRemovalError) Headline() string {
 		text = fmt.Sprintf(msgRemovedThenKeysFailed, wordList(e.Removed))
 	case e.stop == stoppedListNotRead:
 		text = fmt.Sprintf(msgRemovedThenListNotRead, wordList(e.Removed))
+	case e.stop == stoppedListNotSaid:
+		text = fmt.Sprintf(msgRemovalListNotSaid, wordList(e.Removed))
 	case e.stop == stoppedStillListed && len(e.Removed) > 0:
 		text = fmt.Sprintf(msgRemovedButStillListed, wordList(e.Removed), wordList(e.NotRemoved), wordList(e.NotRemoved))
 	case e.stop == stoppedStillListed:
@@ -404,9 +413,9 @@ func (e *PasskeyRemovalError) Reason() string {
 	if e.KeyChange != nil {
 		failure = e.KeyChange
 	}
-	// The list that still shows a person is the whole reason, and the
-	// headline has it.
-	if failure == nil || (e.stop == stoppedStillListed && e.KeyChange == nil) {
+	// A list that still shows a person, and a list that is not there, are
+	// the whole reason, and the headline has it.
+	if failure == nil || ((e.stop == stoppedStillListed || e.stop == stoppedListNotSaid) && e.KeyChange == nil) {
 		return ""
 	}
 	var worded interface{ UserMessage() string }

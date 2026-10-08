@@ -605,6 +605,51 @@ func TestGoldens(t *testing.T) {
 			stderrGolden: true,
 		},
 		{
+			// A resource whose answer has no list of approved people: the
+			// row says "not said", never "none", and the document has no
+			// approved_people member.
+			name: "grants_people_not_said",
+			args: func(srv *apitest.Server) []string { return []string{"grants", srv.Key.CRID} },
+			prepare: func(srv *apitest.Server) {
+				srv.SetResourceAccess(true, goldenDevicePublicKey)
+				srv.SetAccessRequests(true)
+				srv.AddApprovedPerson(requesterDevice, requesterName)
+				srv.OmitApprovedPeople()
+			},
+			variants:     []string{"plain", "json"},
+			stdoutGolden: true,
+		},
+		{
+			// A removal on that service: each removal was answered as made,
+			// and no list confirms it. Exit 10, and no lists are printed.
+			name: "error_grants_remove_not_confirmed",
+			args: func(srv *apitest.Server) []string {
+				return []string{"grants", srv.Key.CRID, "--remove", requesterDevice}
+			},
+			prepare: func(srv *apitest.Server) {
+				srv.AddApprovedPerson(requesterDevice, requesterName)
+				srv.OmitApprovedPeople()
+			},
+			variants:     []string{"tty", "plain"},
+			wantCode:     10,
+			stderrGolden: true,
+		},
+		{
+			// The script-facing form of the same outcome.
+			name: "error_grants_remove_not_confirmed_script",
+			args: func(srv *apitest.Server) []string {
+				return []string{"grants", srv.Key.CRID, "--remove", requesterDevice}
+			},
+			prepare: func(srv *apitest.Server) {
+				srv.AddApprovedPerson(requesterDevice, requesterName)
+				srv.OmitApprovedPeople()
+			},
+			variants:     []string{"json"},
+			wantCode:     10,
+			stdoutGolden: true,
+			stderrGolden: true,
+		},
+		{
 			// The service answers a removal as made, and its list still
 			// shows the person: who lost access, and who still has it.
 			name: "error_grants_remove_still_listed",

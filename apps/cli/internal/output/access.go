@@ -88,6 +88,10 @@ const (
 	msgStateOn          = "on"
 	msgStateOff         = "off"
 	msgRemovePersonHint = "Take one person's access away with `qurl grants %s --remove <device id>`."
+	// msgApprovedPeopleNotSaid stands where the count of approved people
+	// would be, for a resource whose answer has no list of them. It is not
+	// "none": the service did not say who was approved.
+	msgApprovedPeopleNotSaid = "not said"
 	// msgRemovalKeysNotChanged follows a removal of approved people that
 	// stopped, when the same command also named public keys. It is true
 	// whether the command stopped at a removal or after the last one.
@@ -470,21 +474,25 @@ func (p *Printer) RemovalOutcome(outcome *qurlapi.PasskeyRemovalError) error {
 
 // grantsJSON is the `qurl grants` document: the resource status document with
 // the two things that decide who else can open a private resource beside its
-// device keys. approved_people is always an array, empty when nobody was
-// approved; access_requests is omitted when the service did not say.
+// device keys. Each is omitted when the service did not say it, like every
+// member the service may leave out. approved_people is an array when the
+// service sent the list, empty when it said that nobody was approved, and
+// the member is not there when the service sent no list: a reader must not
+// take "not said" for "nobody". access_requests is there when the service
+// said whether people can ask.
 type grantsJSON struct {
-	AllowedDeviceKeys []string             `json:"allowed_device_keys"`
-	ApprovedPeople    []approvedPersonJSON `json:"approved_people"`
-	AccessRequests    *bool                `json:"access_requests,omitempty"`
-	Private           *bool                `json:"private,omitempty"`
-	CRID              string               `json:"crid,omitempty"`
-	ResourceID        string               `json:"resource_id"`
-	TargetURL         string               `json:"target_url,omitempty"`
-	Type              string               `json:"type"`
-	Status            string               `json:"status"`
-	CreatedAt         *time.Time           `json:"created_at,omitempty"`
-	ExpiresAt         *time.Time           `json:"expires_at,omitempty"`
-	Publisher         publisherJSON        `json:"publisher"`
+	AllowedDeviceKeys []string              `json:"allowed_device_keys"`
+	ApprovedPeople    *[]approvedPersonJSON `json:"approved_people,omitempty"`
+	AccessRequests    *bool                 `json:"access_requests,omitempty"`
+	Private           *bool                 `json:"private,omitempty"`
+	CRID              string                `json:"crid,omitempty"`
+	ResourceID        string                `json:"resource_id"`
+	TargetURL         string                `json:"target_url,omitempty"`
+	Type              string                `json:"type"`
+	Status            string                `json:"status"`
+	CreatedAt         *time.Time            `json:"created_at,omitempty"`
+	ExpiresAt         *time.Time            `json:"expires_at,omitempty"`
+	Publisher         publisherJSON         `json:"publisher"`
 }
 
 // Grants renders who can open a resource besides its owner: the allowed
@@ -494,13 +502,19 @@ type grantsJSON struct {
 func (p *Printer) Grants(resource *qurlapi.ResourceSummary) error {
 	switch {
 	case p.format == FormatJSON:
-		people := make([]approvedPersonJSON, 0, len(resource.AllowedPasskeys))
-		for index := range resource.AllowedPasskeys {
-			people = append(people, approvedPersonDocument(&resource.AllowedPasskeys[index]))
+		// A list the service did not send stays out of the document. A
+		// list it sent is an array, empty when nobody was approved.
+		var approved *[]approvedPersonJSON
+		if resource.AllowedPasskeys != nil {
+			people := make([]approvedPersonJSON, 0, len(resource.AllowedPasskeys))
+			for index := range resource.AllowedPasskeys {
+				people = append(people, approvedPersonDocument(&resource.AllowedPasskeys[index]))
+			}
+			approved = &people
 		}
 		return p.writeJSON(grantsJSON{
 			AllowedDeviceKeys: append([]string{}, resource.AllowedDeviceKeys...),
-			ApprovedPeople:    people,
+			ApprovedPeople:    approved,
 			AccessRequests:    resource.AccessRequests,
 			Private:           resource.Private,
 			CRID:              resource.CRID, ResourceID: resource.ResourceID,
