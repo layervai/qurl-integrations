@@ -1779,11 +1779,10 @@ func TestRequestsOffSaysNoCountItWasNotGiven(t *testing.T) {
 // TestAccessRequestCommandsWithADeviceCredential runs every command for
 // access requests the way a real install does: with the device's own
 // credential, which the SDK lets be used only on the routes it lists. Both
-// listings, the approval, the denial by code and the removal of an approved
-// person are sent and do what they say, and so are the commands that use
-// routes the SDK listed before. Every request carries the device credential
-// and no other. The one command the pinned SDK does not send yet, a denial
-// by device id, has its own test below.
+// listings, the approval, the denial by device id and by code, and the
+// removal of an approved person are sent and do what they say, and so are
+// the commands that use routes the SDK listed before. Every request carries
+// the device credential and no other.
 func TestAccessRequestCommandsWithADeviceCredential(t *testing.T) {
 	state := bootstrapRegisteredState(t)
 	device := func(srv *apitest.Server) func(context.Context) (qurlapi.Client, error) {
@@ -1821,6 +1820,23 @@ func TestAccessRequestCommandsWithADeviceCredential(t *testing.T) {
 			check: func(t *testing.T, srv *apitest.Server) {
 				if devices := approvedDevices(t, srv); !slices.Contains(devices, requesterDevice) {
 					t.Fatalf("approved devices = %v, want the person whose code was given", devices)
+				}
+			},
+		},
+		{
+			// The denial a publisher makes from a listing: the device id
+			// goes into the path as the listing shows it.
+			name: "deny by device id", args: func(srv *apitest.Server) []string { return []string{"deny", srv.Key.CRID, requesterDevice} },
+			want: "Denied the request from the device id " + requesterDevice,
+			sent: func(srv *apitest.Server) []string {
+				return []string{"DELETE /v1/resources/" + srv.Key.CRID + "/access-requests/" + requesterDevice}
+			},
+			check: func(t *testing.T, srv *apitest.Server) {
+				if devices := approvedDevices(t, srv); slices.Contains(devices, requesterDevice) {
+					t.Fatalf("approved devices = %v: a denial gave access", devices)
+				}
+				if pending := pendingDevices(t, srv); !slices.Equal(pending, []string{otherDevice}) {
+					t.Fatalf("pending after the denial = %v, want the other request alone", pending)
 				}
 			},
 		},
@@ -1892,47 +1908,6 @@ func TestAccessRequestCommandsWithADeviceCredential(t *testing.T) {
 				t.Fatalf("exit = %d\nstdout: %s\nstderr: %s", res.code, res.stdout.String(), res.stderr.String())
 			}
 		})
-	}
-}
-
-// TestDenyByDeviceIDWithADeviceCredentialIsNotSentYet records a limit of
-// this release through the command, and fails when the limit is gone.
-//
-// A real install runs every command with the device's own credential, which
-// goes through the SDK. The pinned SDK admits a denial only with a six-digit
-// code in the path, so `qurl deny <CRID> <device id>` is refused before
-// anything is sent. The command says so, says that nothing was sent and that
-// the request gives no access unless it is approved, and exits 1 in every
-// output mode with nothing on stdout. The request is still pending.
-//
-// When the SDK admits a device id there, this test fails. The fix is to move
-// the case into TestAccessRequestCommandsWithADeviceCredential, where the
-// denial is sent with the device credential and the request is gone, and to
-// remove the message.
-func TestDenyByDeviceIDWithADeviceCredentialIsNotSentYet(t *testing.T) {
-	state := bootstrapRegisteredState(t)
-	for _, mode := range [][]string{nil, {"-o", "json"}, {"--quiet"}} {
-		srv := apitest.NewServer(t)
-		twoRequests(srv)
-		res := runCLI(t, &runOpts{
-			args: append([]string{"--endpoint", srv.URL, "deny", srv.Key.CRID, requesterDevice}, mode...), env: map[string]string{},
-			openAPIClient: func(ctx context.Context) (qurlapi.Client, error) {
-				return qurlapi.NewRegistered(ctx, &qurlapi.Config{BaseURL: srv.URL, HTTPClient: srv.Client()}, &bootstrapAgentStateStore{state: state})
-			},
-		})
-		want := "Error: this release of qurl cannot refuse a request by its device id with this device's identity yet, so nothing was sent. " +
-			"The request gives no access unless you approve it, and it expires by itself. " +
-			"To refuse it now, use its six-digit code if the person gave it to you\n"
-		if res.code != exitcode.General || res.stderr.String() != want {
-			t.Fatalf("%v: exit %d, stderr %q; want exit %d and %q. If the denial went through, the SDK now admits it: see this test's comment", mode, res.code, res.stderr.String(), exitcode.General, want)
-		}
-		mustEmptyStdout(t, res)
-		if got := len(srv.Requests()); got != 0 {
-			t.Fatalf("%v: a refused denial was sent: %v", mode, requestLog(srv))
-		}
-		if pending := pendingDevices(t, srv); !slices.Equal(pending, []string{otherDevice, requesterDevice}) {
-			t.Fatalf("%v: pending after a denial that was not sent = %v", mode, pending)
-		}
 	}
 }
 

@@ -850,44 +850,47 @@ func TestDenyAccessRequest(t *testing.T) {
 	}
 }
 
-// TestDeviceCredentialCannotDenyByDeviceIDYet records a limit of this
-// release, and fails when the limit is gone.
-//
-// A device credential is used through the SDK, on the routes the SDK lists.
-// The pinned SDK admits a denial only with a six-digit code in the path, so
-// on a real install, where every command uses the device credential, a
-// denial by device id is refused before anything is sent. The client turns
-// that into a message that says so and says what it means: the request gives
-// no access unless it is approved. A denial by code goes through.
-//
-// When the SDK admits a device id there, this test fails. The fix is to
-// assert the opposite for the device id: that the request is sent with the
-// device credential and the request is gone.
-func TestDeviceCredentialCannotDenyByDeviceIDYet(t *testing.T) {
+// TestDeviceCredentialDeniesByDeviceID pins the denial a publisher makes on a
+// real install, where every command uses the device's own credential through
+// the SDK: `qurl deny <CRID> <device id>`, with the device id a listing
+// shows. The SDK sends on the routes it lists and refuses any other before
+// anything leaves the machine, and it lists this one for a device id as for
+// a code. One DELETE is sent, with the device id in the path as it was
+// given and the device credential on it. Nothing is read first, the request
+// is gone, and the other person's request is not touched.
+func TestDeviceCredentialDeniesByDeviceID(t *testing.T) {
 	srv := apitest.NewServer(t)
-	srv.AddAccessRequest(testRequestCode, testRequester, testDeviceID)
+	// The other request is first, so a denial that took "the first row"
+	// would refuse the wrong person.
 	srv.AddAccessRequest(testOtherCode, testOtherPerson, testOtherDevice)
+	srv.AddAccessRequest(testRequestCode, testRequester, testDeviceID)
 	client := newRegisteredTestClient(t, srv)
 
-	err := client.DenyAccessRequest(t.Context(), srv.Key.CRID, testDeviceID)
-	var shown interface{ UserMessage() string }
-	if !errors.Is(err, qurl.ErrRegisteredAgentResourceRequestDenied) || !errors.As(err, &shown) || shown.UserMessage() != msgDenyByDeviceRefused {
-		t.Fatalf("denial by device id through a device credential: error = %v; if it succeeded, the SDK now admits it: see this test's comment", err)
+	if err := client.DenyAccessRequest(t.Context(), srv.Key.CRID, testDeviceID); err != nil {
+		t.Fatalf("denial by device id through a device credential: %v", err)
 	}
-	if got := len(srv.Requests()); got != 0 {
-		t.Fatalf("a refused denial was sent: %v", requestLines(srv))
+	want := []string{"DELETE /v1/resources/" + srv.Key.CRID + "/access-requests/" + testDeviceID}
+	if got := requestLines(srv); !slices.Equal(got, want) {
+		t.Fatalf("requests = %v, want %v", got, want)
 	}
-	for _, part := range []string{"nothing was sent", "gives no access unless you approve it", "use its six-digit code"} {
-		if !strings.Contains(msgDenyByDeviceRefused, part) {
-			t.Fatalf("the message lost %q: %q", part, msgDenyByDeviceRefused)
-		}
+	credential := "Bearer " + registeredAPIState(t).DeviceAPIKey
+	if got := srv.Requests()[0].Header.Get("Authorization"); got != credential {
+		t.Fatalf("the denial's authorization = %q, want the device credential", got)
+	}
+	if pending := pendingDevices(t, srv); !slices.Equal(pending, []string{testOtherDevice}) {
+		t.Fatalf("pending after the denial = %v, want the other request alone", pending)
 	}
 
-	if err := client.DenyAccessRequest(t.Context(), srv.Key.CRID, testOtherCode); err != nil {
-		t.Fatalf("denial by code through a device credential: %v", err)
+	// A device id with no pending request is the service's answer, sent and
+	// answered like any other, not a refusal on this machine.
+	sent := len(srv.Requests())
+	err := client.DenyAccessRequest(t.Context(), srv.Key.CRID, testDeviceID)
+	var problem *Error
+	if !errors.As(err, &problem) || problem.StatusCode != http.StatusNotFound || errors.Is(err, qurl.ErrRegisteredAgentResourceRequestDenied) {
+		t.Fatalf("a second denial by device id: error = %v, want the service's not-found", err)
 	}
-	if pending := pendingDevices(t, srv); !slices.Equal(pending, []string{testDeviceID}) {
-		t.Fatalf("pending after the denial by code = %v", pending)
+	if got := requestLines(srv)[sent:]; len(got) == 0 || got[0] != want[0] {
+		t.Fatalf("a second denial by device id sent %v", got)
 	}
 }
 
@@ -1202,8 +1205,7 @@ func TestResourceRowsCarryAccessRequestsAndApprovedPeople(t *testing.T) {
 // approved person are sent, each with the device credential, and each does
 // what it says. So are the three requests that use routes the SDK listed
 // before: creating a resource with access requests, changing the setting and
-// reading the resource. The one request the pinned SDK does not send yet, a
-// denial by device id, has its own test.
+// reading the resource. The denial by device id has its own test.
 func TestDeviceCredentialReachesEveryAccessRequestRoute(t *testing.T) {
 	srv := apitest.NewServer(t)
 	client := newRegisteredTestClient(t, srv)
@@ -1300,9 +1302,8 @@ func TestDeviceCredentialStillRefusesWhatIsNotARoute(t *testing.T) {
 		"a denial for an identifier that is not one": func() error {
 			return client.DenyAccessRequest(t.Context(), "a/b", testRequestCode)
 		},
-		// The one refusal that is a limit of this release is a denial by
-		// device id for a real resource. The same denial for an identifier
-		// that could never name a resource is refused for that reason.
+		// A denial by device id is a route. The same denial for an
+		// identifier that could never name a resource is not.
 		"a denial by device id for an identifier that is not one": func() error {
 			return client.DenyAccessRequest(t.Context(), "a/b", testDeviceID)
 		},

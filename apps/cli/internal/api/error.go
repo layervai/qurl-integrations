@@ -96,7 +96,7 @@ func CustomerMessages() []string {
 		msgGrantEditUnconfirmed,
 		msgAccessRequestsUnsupported, msgAccessRequestsCreateIgnored, msgAccessRequestsCreateRefused, msgAccessRequestsSettingIgnored,
 		msgAccessRequestsCreateUnconfirmed, msgAccessRequestsSettingUnconfirmed, msgAccessRequestsNotTurnedOn, msgApprovalUnconfirmed,
-		msgRequestCodeNotFound, msgRequestDeviceNotFound, msgDenyByDeviceRefused, msgDeviceIDNotFound, msgDeviceIDsNotFound, msgRemovedThenNotFound, msgRemovedThenFailed,
+		msgRequestCodeNotFound, msgRequestDeviceNotFound, msgDeviceIDNotFound, msgDeviceIDsNotFound, msgRemovedThenNotFound, msgRemovedThenFailed,
 		msgRemovedThenKeysFailed,
 		msgStillHasAccess, msgStillHaveAccess, msgSeeWhoHasAccess, msgApprovedPersonNotFound, msgRemovalUnconfirmed,
 	}
@@ -138,11 +138,6 @@ const (
 	msgRequestCodeNotFound = "no pending request has the code %s for this resource. It may have expired, or been approved or denied already. Ask the person for the code on their screen; `qurl requests <CRID>` shows who is waiting"
 	// %s is the device id the publisher named for a denial.
 	msgRequestDeviceNotFound = "no pending request is from the device id %s for this resource. It may have expired, or been approved or denied already. Run `qurl requests <CRID>` to see who is waiting"
-	// msgDenyByDeviceRefused is shown when this release may not send a
-	// denial by device id with the device's identity. Nothing was sent. It
-	// says what that means for the publisher: no access was given, and none
-	// will be unless they approve.
-	msgDenyByDeviceRefused = "this release of qurl cannot refuse a request by its device id with this device's identity yet, so nothing was sent. The request gives no access unless you approve it, and it expires by itself. To refuse it now, use its six-digit code if the person gave it to you"
 	// The messages of a removal of approved people that did not remove every
 	// person it named. A mistyped device id must never read as access taken
 	// away, and access that was taken away must never read as a typo, so
@@ -237,19 +232,6 @@ func (e *AccessRequestsNotTurnedOnError) Reason() string {
 }
 
 func (e *AccessRequestsNotTurnedOnError) Unwrap() error { return e.cause }
-
-// denyByDeviceRefusedError is a denial by device id that this release may not
-// send with the device's identity. The SDK refused it before anything left
-// the machine.
-type denyByDeviceRefusedError struct{ cause error }
-
-func (e *denyByDeviceRefusedError) Error() string { return msgDenyByDeviceRefused }
-
-// UserMessage is the text the terminal rendering shows in place of the SDK's
-// own wording, which names a method and a path.
-func (e *denyByDeviceRefusedError) UserMessage() string { return msgDenyByDeviceRefused }
-
-func (e *denyByDeviceRefusedError) Unwrap() error { return e.cause }
 
 // ErrApprovedPersonNotFound marks a removal that named a device id no approved
 // person has. The command and the resource are fine; the thing that was named

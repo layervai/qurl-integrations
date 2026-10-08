@@ -323,9 +323,7 @@ func (c *client) ApproveAccessRequest(ctx context.Context, id, code string) (*Al
 // before any request.
 //
 // TODO(upstream-contract): the service takes a device id or a code in that
-// position. The pinned SDK lets a device credential send only a code there;
-// its refusal of a device id becomes the message that says so, until a
-// release of the SDK admits it.
+// position, and so does the SDK for a device credential.
 func (c *client) DenyAccessRequest(ctx context.Context, id, request string) error {
 	byDevice := ValidDeviceID(request)
 	if !byDevice && !ValidRequestCode(request) {
@@ -337,9 +335,6 @@ func (c *client) DenyAccessRequest(ctx context.Context, id, request string) erro
 	}
 	reply, err := c.doRESTOnce(ctx, http.MethodDelete, base+accessRequestsSegment+"/"+request, nil)
 	if err != nil {
-		if byDevice && errors.Is(err, qurl.ErrRegisteredAgentResourceRequestDenied) {
-			return &denyByDeviceRefusedError{cause: err}
-		}
 		return err
 	}
 	switch reply.status {

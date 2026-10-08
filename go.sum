@@ -165,8 +165,8 @@ github.com/layervai/qurl-conformance v0.17.2 h1:wwQRoRNOrc21s7SrkKEf/cePJ56OQr2r
 github.com/layervai/qurl-conformance v0.17.2/go.mod h1:NHtczZdj7SRFqLj9iS4dCGyYZSZKfpILnBRhC53W7WA=
 github.com/layervai/qurl-connector v0.14.2 h1:iLSdKd/wBWRqe2bmaicatZtEyLGGBC+zzlo8ZQgRDQI=
 github.com/layervai/qurl-connector v0.14.2/go.mod h1:Dq6lULHkN9ZBvSl+V8MDZdJ6EQ4qhPyT+qAQ7s70Vb4=
-github.com/layervai/qurl-go v0.22.0 h1:3LmqG9WRvppWNA+ou3koEkcriLJq5NWZl0NpRcRVZjo=
-github.com/layervai/qurl-go v0.22.0/go.mod h1:KJzaJWFkAIen8fVN/he/M9dp9iGtUvC/jOEI2dBmFDE=
+github.com/layervai/qurl-go v0.22.1 h1:y+oB46VSl/X92tlWIRn4tsCb70OIX2y8cD55LnmO8uk=
+github.com/layervai/qurl-go v0.22.1/go.mod h1:KJzaJWFkAIen8fVN/he/M9dp9iGtUvC/jOEI2dBmFDE=
 github.com/lestrrat-go/blackmagic v1.0.4 h1:IwQibdnf8l2KoO+qC3uT4OaTWsW7tuRQXy9TRN9QanA=
 github.com/lestrrat-go/blackmagic v1.0.4/go.mod h1:6AWFyKNNj0zEXQYfTMPfZrAXUWUfTIZ5ECEUEJaijtw=
 github.com/lestrrat-go/httpcc v1.0.1 h1:ydWCStUeJLkpYyjLDHihupbn2tYmZ7m22BGkcvZZrIE=
