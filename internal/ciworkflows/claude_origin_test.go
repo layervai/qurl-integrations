@@ -38,7 +38,7 @@ func runClaudeOriginPattern(t *testing.T, script, serverURL, candidate string) (
 	t.Helper()
 
 	// #nosec G204 -- the script is cut from a checked-in workflow file.
-	command := exec.Command("bash", "-c", script)
+	command := exec.CommandContext(t.Context(), "bash", "-c", script)
 	command.Env = append(os.Environ(),
 		"GITHUB_SERVER_URL="+serverURL,
 		"GITHUB_REPOSITORY=layervai/qurl-integrations",
