@@ -966,8 +966,15 @@ func TestRemoveAllowedPasskeys(t *testing.T) {
 			w.WriteHeader(http.StatusNoContent)
 		})
 		resource, err := newTestClient(t, srv, nil).RemoveAllowedPasskeys(t.Context(), srv.Key.CRID, []string{testDeviceID})
-		if resource != nil || !errors.Is(err, qurl.ErrInvalidAPIResponse) || err.Error() != msgRemovalUnconfirmed {
+		if resource != nil || !errors.Is(err, qurl.ErrInvalidAPIResponse) {
 			t.Fatalf("an answer that still lists the person returned %+v, %v", resource, err)
+		}
+		// The list is what the service says now: the person still has
+		// access, and nobody lost it.
+		outcome := removalOutcome(t, err, nil, nil, []string{testDeviceID})
+		want := "the service answered that access was taken away from " + testDeviceID + ", but its list still shows " + testDeviceID + ". " + testDeviceID + " still has access"
+		if outcome.Headline() != want || outcome.Reason() != "" {
+			t.Fatalf("headline = %q, reason = %q; want %q and no reason", outcome.Headline(), outcome.Reason(), want)
 		}
 	})
 	t.Run("nothing that is not a device id is sent", func(t *testing.T) {

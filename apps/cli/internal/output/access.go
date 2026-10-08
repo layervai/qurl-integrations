@@ -88,14 +88,15 @@ const (
 	msgStateOn          = "on"
 	msgStateOff         = "off"
 	msgRemovePersonHint = "Take one person's access away with `qurl grants %s --remove <device id>`."
-	// msgRemovalKeysNotChanged follows a removal of approved people that did
-	// not finish, when the same command also named public keys.
-	msgRemovalKeysNotChanged = "No public key was added or removed: that change comes after the removals, and they did not finish."
-	// msgRemovalFinishKeys follows a removal whose change to public keys
-	// failed after every person was removed. %s is the command that makes
-	// that change alone. It can be run whether or not the failed change was
-	// made: a key that is already on the list, or already off it, is left
-	// as it is.
+	// msgRemovalKeysNotChanged follows a removal of approved people that
+	// stopped, when the same command also named public keys. It is true
+	// whether the command stopped at a removal or after the last one.
+	msgRemovalKeysNotChanged = "No public key was added or removed: that change comes after the removals, and the command stopped before it."
+	// msgRemovalFinishKeys follows a removal of every person after which
+	// the change to public keys failed or was not reached. %s is the
+	// command that makes that change alone. It can be run whether or not a
+	// failed change was made: a key that is already on the list, or already
+	// off it, is left as it is.
 	msgRemovalFinishKeys = "To make the change to the public keys, run: %s"
 )
 
@@ -420,9 +421,9 @@ type removalOutcomeJSON struct {
 	// PublicKeysChanged is present, and false, only when the command also
 	// named public keys to add or remove: that change was not made.
 	PublicKeysChanged *bool `json:"public_keys_changed,omitempty"`
-	// PublicKeysCommand is present only when every removal was made and the
-	// change to public keys then failed: the command that makes that change
-	// alone, which is what finishes the job.
+	// PublicKeysCommand is present only when every person was removed and
+	// the change to public keys failed or was not reached: the command that
+	// makes that change alone, which is what finishes the job.
 	PublicKeysCommand string `json:"public_keys_command,omitempty"`
 }
 
@@ -445,9 +446,7 @@ func (p *Printer) RemovalOutcome(outcome *qurlapi.PasskeyRemovalError) error {
 		changed := false
 		document.PublicKeysChanged = &changed
 	}
-	if outcome.KeyChange != nil {
-		document.PublicKeysCommand = outcome.KeyChangeCommand
-	}
+	document.PublicKeysCommand = outcome.KeyChangeCommand
 	return p.writeJSON(document)
 }
 

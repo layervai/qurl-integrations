@@ -97,7 +97,7 @@ func CustomerMessages() []string {
 		msgAccessRequestsUnsupported, msgAccessRequestsCreateIgnored, msgAccessRequestsCreateRefused, msgAccessRequestsSettingIgnored,
 		msgAccessRequestsCreateUnconfirmed, msgAccessRequestsSettingUnconfirmed, msgAccessRequestsNotTurnedOn, msgApprovalUnconfirmed,
 		msgRequestCodeNotFound, msgRequestDeviceNotFound, msgDeviceIDNotFound, msgDeviceIDsNotFound, msgRemovedThenNotFound, msgRemovedThenFailed,
-		msgRemovedThenKeysFailed,
+		msgRemovedThenKeysFailed, msgRemovedThenUnexplained, msgRemovedThenListNotRead, msgRemovedButStillListed, msgAnsweredButStillListed,
 		msgStillHasAccess, msgStillHaveAccess, msgSeeWhoHasAccess, msgApprovedPersonNotFound, msgRemovalUnconfirmed,
 	}
 }
@@ -156,6 +156,18 @@ const (
 	// command named failed. The message does not say whether any key was
 	// changed: a change that failed may still have been made.
 	msgRemovedThenKeysFailed = "access was taken away from %s. Then the change to the public keys failed"
+	// Access was taken away from some, and then the service answered a
+	// removal with "not found" and the command could not find out whether
+	// the person or the resource was not found. Nothing is said about
+	// whether that person has access.
+	msgRemovedThenUnexplained = "access was taken away from %s. Then the service found nothing to remove for %s, and the command stopped before it could find out why"
+	// Every removal was made, and the list could not be read afterwards.
+	msgRemovedThenListNotRead = "access was taken away from %s. Then the list of who has access could not be read"
+	// The service answered every removal as made, and the list it sent
+	// afterwards still shows some of the people, or all of them. The second
+	// and third %s of the first message are the same people.
+	msgRemovedButStillListed  = "access was taken away from %s. The service answered the same for %s, but its list still shows %s"
+	msgAnsweredButStillListed = "the service answered that access was taken away from %s, but its list still shows %s"
 	// The device ids the command named that still have access as far as it
 	// knows, and the next step.
 	msgStillHasAccess  = "%s still has access"
@@ -245,12 +257,17 @@ var ErrApprovedPersonNotFound = errors.New(msgApprovedPersonNotFound)
 //
 // The three lists hold every device id the command named, each in one of
 // them, in the order given.
+//
+// A removal that has taken access away from someone fails with this error
+// and with no other; see finishRemoval.
 type PasskeyRemovalError struct {
 	// ID is the resource identifier the command was given.
 	ID string
 	// Removed are the device ids whose access was taken away.
 	Removed []string
-	// NotFound are the device ids that are not on the list.
+	// NotFound are the device ids the service did not find: the ones that
+	// are not on the list, and one whose removal it answered with "not
+	// found" when the command could not find out why.
 	NotFound []string
 	// NotRemoved are the device ids that still have access as far as the
 	// command knows: the ones it did not get to, and one whose removal
@@ -266,16 +283,37 @@ type PasskeyRemovalError struct {
 	// not say, and running the same command again would find them gone.
 	KeyChange error
 	// KeyChangeCommand is the command that makes the change to public keys
-	// alone: what finishes the job after KeyChange.
+	// alone. A caller sets it when every person was removed and the change
+	// to public keys failed or was not reached: it is what finishes the job.
 	KeyChangeCommand string
 
 	// failed is the device id whose removal failed for another reason than
-	// not being found, and cause that reason.
+	// not being found, and cause that reason. cause is also why the command
+	// stopped in the ways stop names.
 	failed string
 	cause  error
+	// stop says that the removal stopped in one of the ways that are not a
+	// device id that was not found and not a removal that failed.
+	stop removalStop
 	// problem is the service's not-found answer, when a removal got one.
 	problem *Error
 }
+
+// removalStop is a way a removal can stop after it has taken access away,
+// other than a device id that was not found and a removal that failed.
+type removalStop int
+
+const (
+	// stoppedUnexplained: the service answered a removal with "not found",
+	// and the command could not find out what was not found.
+	stoppedUnexplained removalStop = iota + 1
+	// stoppedListNotRead: every person was removed, and the list could not
+	// be read afterwards.
+	stoppedListNotRead
+	// stoppedStillListed: the service answered every removal as made, and
+	// its list still shows some of the people.
+	stoppedStillListed
+)
 
 // Headline says what happened, in one sentence or two, without the reason of
 // a failure and without the next step.
@@ -284,6 +322,14 @@ func (e *PasskeyRemovalError) Headline() string {
 	switch {
 	case e.KeyChange != nil:
 		text = fmt.Sprintf(msgRemovedThenKeysFailed, wordList(e.Removed))
+	case e.stop == stoppedListNotRead:
+		text = fmt.Sprintf(msgRemovedThenListNotRead, wordList(e.Removed))
+	case e.stop == stoppedStillListed && len(e.Removed) > 0:
+		text = fmt.Sprintf(msgRemovedButStillListed, wordList(e.Removed), wordList(e.NotRemoved), wordList(e.NotRemoved))
+	case e.stop == stoppedStillListed:
+		text = fmt.Sprintf(msgAnsweredButStillListed, wordList(e.NotRemoved), wordList(e.NotRemoved))
+	case e.stop == stoppedUnexplained:
+		text = fmt.Sprintf(msgRemovedThenUnexplained, wordList(e.Removed), wordList(e.NotFound))
 	case e.failed != "":
 		text = fmt.Sprintf(msgRemovedThenFailed, wordList(e.Removed), e.failed)
 	case len(e.Removed) > 0:
@@ -311,7 +357,9 @@ func (e *PasskeyRemovalError) Reason() string {
 	if e.KeyChange != nil {
 		failure = e.KeyChange
 	}
-	if failure == nil {
+	// The list that still shows a person is the whole reason, and the
+	// headline has it.
+	if failure == nil || (e.stop == stoppedStillListed && e.KeyChange == nil) {
 		return ""
 	}
 	var worded interface{ UserMessage() string }
@@ -352,7 +400,10 @@ func (e *PasskeyRemovalError) Error() string {
 // A removal that failed for another reason is that failure.
 func (e *PasskeyRemovalError) Unwrap() []error {
 	var chain []error
-	if len(e.NotFound) > 0 {
+	// An answer the command could not explain is not known to be about the
+	// person, so it is not the not-found sentinel: why the command could
+	// not explain it decides.
+	if len(e.NotFound) > 0 && e.stop != stoppedUnexplained {
 		chain = append(chain, ErrApprovedPersonNotFound)
 	}
 	if e.problem != nil {

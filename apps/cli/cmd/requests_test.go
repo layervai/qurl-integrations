@@ -1436,7 +1436,7 @@ func TestGrantsRemoveTakesADeviceID(t *testing.T) {
 					t.Fatalf("%v: exit = %d, stderr: %s", mode, res.code, res.stderr.String())
 				}
 				wantStderr := headline + "\n\n" +
-					"  No public key was added or removed: that change comes after the removals, and they did not finish.\n\n" +
+					"  No public key was added or removed: that change comes after the removals, and the command stopped before it.\n\n" +
 					"  Run `qurl grants " + srv.Key.CRID + "` to see who has access now.\n"
 				if res.stderr.String() != wantStderr {
 					t.Fatalf("%v: stderr =\n%s\nwant\n%s", mode, res.stderr.String(), wantStderr)
@@ -1988,8 +1988,8 @@ func TestAccessRequestCopySaysToApproveOnlyGivenCodes(t *testing.T) {
 		"removed, not_found, not_removed", "for at most 256 people in one command",
 		// What a command says when it removed every person and then could
 		// not change the public keys.
-		"that the change to the public keys failed and why, and the command that makes that change alone",
-		"public_keys_command when every person was removed and the change to the public keys then failed",
+		"what failed and why, and the command that makes the change to the public keys alone",
+		"public_keys_command when every person was removed and the change to the public keys failed or was not reached",
 	} {
 		if !strings.Contains(readme, want) {
 			t.Errorf("README lacks %q", want)
@@ -2006,8 +2006,8 @@ func TestAccessRequestCopySaysToApproveOnlyGivenCodes(t *testing.T) {
 		"--remove also takes the device id of an approved person", "It does not remove approved people.",
 		"Every device id is checked against the list before any access is taken away.",
 		"One that is not on the list is an error and removes nothing, so a mistyped id is never mistaken for access taken away.",
-		"the error says exactly which device ids were removed and which were not",
-		"If the change to public keys fails after the people were removed, the error says who lost access and gives the command that makes that change alone.",
+		"every failure says exactly which device ids were removed and which were not",
+		"If the change to public keys fails, or is not reached, after every person was removed, the error says who lost access and gives the command that makes that change alone.",
 		"for at most 256 people in one command",
 	} {
 		if !strings.Contains(grants, want) {

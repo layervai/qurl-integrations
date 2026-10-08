@@ -165,7 +165,7 @@ func passkeyRemovalLines(p *Printer, head string, err error) ([]string, bool) {
 		lines = append(lines, "", "  "+msgRemovalKeysNotChanged)
 	}
 	lines = append(lines, "", "  "+p.dim(outcome.NextStep()+"."))
-	if outcome.KeyChange != nil && outcome.KeyChangeCommand != "" {
+	if outcome.KeyChangeCommand != "" {
 		lines = append(lines, "  "+p.dim(fmt.Sprintf(msgRemovalFinishKeys, outcome.KeyChangeCommand)))
 	}
 	var apiErr *qurlapi.Error

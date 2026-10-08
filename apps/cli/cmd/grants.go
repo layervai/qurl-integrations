@@ -40,10 +40,11 @@ people in one command. Every device id is checked against the list before any
 access is taken away. One that is not on the list is an error and removes
 nothing, so a mistyped id is never mistaken for access taken away. Then each
 person is removed with a change of their own, before any change to public
-keys. If one of those changes fails after others were made, the error says
-exactly which device ids were removed and which were not. If the change to
-public keys fails after the people were removed, the error says who lost
-access and gives the command that makes that change alone.
+keys. From the first person removed on, every failure says exactly which
+device ids were removed and which were not; a failure that does not say so
+came before any access was taken away. If the change to public keys fails, or
+is not reached, after every person was removed, the error says who lost access
+and gives the command that makes that change alone.
 
 A list holds at most 256 devices. --add and --remove each take at most 256
 public keys in one command, which is checked before anything is sent. The
@@ -144,7 +145,11 @@ func changeGrants(ctx context.Context, client qurlapi.Client, printer *output.Pr
 	if len(removePeople) > 0 {
 		resource, err = client.RemoveAllowedPasskeys(ctx, id, removePeople)
 		if err != nil {
-			return nil, reportRemovalFailure(printer, err, len(add)+len(removeKeys) > 0)
+			finish := ""
+			if len(add)+len(removeKeys) > 0 {
+				finish = keyChangeCommand(id, add, removeKeys)
+			}
+			return nil, reportRemovalFailure(printer, err, finish)
 		}
 	}
 	if len(add)+len(removeKeys) == 0 {
@@ -185,18 +190,26 @@ func keyChangeCommand(id string, add, removeKeys []string) string {
 // reportRemovalFailure finishes a `qurl grants --remove` whose removal of
 // approved people failed, and returns the error the command exits with.
 //
-// When the failure says what happened to each device id, that is also written
-// as a document in JSON mode, so a script learns which people lost access all
-// the same. keysWaiting says that the command also named public keys. That
-// change is made after the removals, so it was not made, and the outcome
-// says so: a publisher must not be left guessing which half of the command
-// ran.
-func reportRemovalFailure(printer *output.Printer, err error, keysWaiting bool) error {
+// A failure that says what happened to each device id is also written as a
+// document in JSON mode, so a script learns which people lost access all the
+// same. A failure that does not is one from before any access was taken
+// away, and is returned as it is.
+//
+// finish is the command that makes the change to public keys alone, empty
+// when the command named no public keys. That change is made after the
+// removals, so it was not made, and the outcome says so: a publisher must
+// not be left guessing which half of the command ran. When every person was
+// removed all the same, finish is all that is left to do, and the outcome
+// names it.
+func reportRemovalFailure(printer *output.Printer, err error, finish string) error {
 	var outcome *qurlapi.PasskeyRemovalError
 	if !errors.As(err, &outcome) {
 		return err
 	}
-	outcome.KeysNotChanged = keysWaiting
+	outcome.KeysNotChanged = finish != ""
+	if len(outcome.NotFound)+len(outcome.NotRemoved) == 0 {
+		outcome.KeyChangeCommand = finish
+	}
 	if printErr := printer.RemovalOutcome(outcome); printErr != nil {
 		return errors.Join(err, printErr)
 	}

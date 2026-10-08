@@ -363,9 +363,14 @@ func (c *client) DenyAccessRequest(ctx context.Context, id, request string) erro
 // Then the people are removed, one authenticated DELETE for each device id,
 // in the order given. No request is retried. The requests are separate
 // changes, so one that fails after others succeeded leaves those people
-// removed, and the list can change between the read and a removal. Such an
-// error is a PasskeyRemovalError that says exactly which device ids were
-// removed, which was not found, and which were not attempted.
+// removed, and the list can change between the read and a removal.
+//
+// Until the first removal is made, nothing was removed, and a failure is
+// returned as it is: it is the whole story. From the first removal on, access
+// was taken away from someone, and everything that can still fail is in
+// finishRemoval, whose failure is a PasskeyRemovalError and nothing else. It
+// says who lost access, what failed, and who still has access as far as the
+// command knows.
 //
 // Last, the resource is read again, and no removed device id may be on the
 // list it shows. That read is the resource the caller prints.
@@ -384,17 +389,141 @@ func (c *client) RemoveAllowedPasskeys(ctx context.Context, id string, deviceIDs
 	if outcome := peopleNotOnList(id, before.AllowedPasskeys, deviceIDs); outcome != nil {
 		return nil, outcome
 	}
-	if err := c.removePeopleInOrder(ctx, id, base, deviceIDs); err != nil {
-		return nil, err
-	}
-	resource, err := c.Resource(ctx, id)
+	answer, err := c.removePerson(ctx, base, deviceIDs[0])
 	if err != nil {
 		return nil, err
 	}
-	for index := range resource.AllowedPasskeys {
-		if slices.Contains(deviceIDs, resource.AllowedPasskeys[index].DeviceID) {
-			return nil, &answerError{message: msgRemovalUnconfirmed}
+	if answer.status == http.StatusNotFound {
+		problem, err := c.classifyAccessNotFound(ctx, id, answer)
+		if err != nil {
+			return nil, err
 		}
+		return nil, &PasskeyRemovalError{ID: id, NotFound: deviceIDs[:1], NotRemoved: deviceIDs[1:], problem: problem}
+	}
+	resource, outcome := c.finishRemoval(ctx, base, &removalProgress{id: id, named: deviceIDs, removed: 1})
+	if outcome != nil {
+		return nil, outcome
+	}
+	return resource, nil
+}
+
+// removePerson sends the one DELETE that takes a person off the list, and
+// returns the service's answer. The answer has one of two meanings: the
+// person was removed, or, with the status "not found", something was not
+// found, and the caller finds out what. Every other answer is an error.
+func (c *client) removePerson(ctx context.Context, base, deviceID string) (*restReply, error) {
+	reply, err := c.doRESTOnce(ctx, http.MethodDelete, base+"/allowed-passkeys/"+deviceID, nil)
+	if err != nil {
+		return nil, err
+	}
+	switch reply.status {
+	case http.StatusOK, http.StatusNoContent, http.StatusNotFound:
+		return reply, nil
+	default:
+		return nil, reply.problem()
+	}
+}
+
+// removalProgress is what a removal knows once its first person is off the
+// list: the device ids the command named, in order, and how many of them,
+// from the front, were removed.
+//
+// Its methods are the only places that build the failure of a removal that
+// has taken access away. Each starts from the same outcome, which has the
+// people who lost access in it, so no failure can leave them out.
+type removalProgress struct {
+	id      string
+	named   []string
+	removed int
+}
+
+// outcome is the start of every failure: who lost access, and who the
+// command did not get to.
+func (p *removalProgress) outcome() *PasskeyRemovalError {
+	return &PasskeyRemovalError{ID: p.id, Removed: p.named[:p.removed], NotRemoved: p.named[p.removed:]}
+}
+
+// failed is a removal that failed for another reason than "not found". The
+// person still has access as far as the command knows.
+func (p *removalProgress) failed(cause error) *PasskeyRemovalError {
+	outcome := p.outcome()
+	outcome.failed, outcome.cause = p.named[p.removed], cause
+	return outcome
+}
+
+// notFound is a removal of a device id that no approved person has any more.
+func (p *removalProgress) notFound(problem *Error) *PasskeyRemovalError {
+	outcome := p.outcome()
+	outcome.NotFound, outcome.NotRemoved, outcome.problem = p.named[p.removed:p.removed+1], p.named[p.removed+1:], problem
+	return outcome
+}
+
+// unexplained is a removal that the service answered with "not found", when
+// the command could not find out whether the person or the resource was not
+// found. cause is why it could not. The command does not say that this
+// person still has access: it does not know.
+func (p *removalProgress) unexplained(cause error) *PasskeyRemovalError {
+	outcome := p.notFound(nil)
+	outcome.stop, outcome.cause = stoppedUnexplained, cause
+	return outcome
+}
+
+// listNotRead is a removal of every person, after which the list could not
+// be read again. Everyone the command named lost access.
+func (p *removalProgress) listNotRead(cause error) *PasskeyRemovalError {
+	outcome := p.outcome()
+	outcome.stop, outcome.cause = stoppedListNotRead, cause
+	return outcome
+}
+
+// stillListed is a removal of every person that the service answered as
+// made, with a list read afterwards that still shows some of them. The list
+// is what the service says now, so the people on it still have access, and
+// the others lost it.
+func (p *removalProgress) stillListed(listed []string) *PasskeyRemovalError {
+	outcome := p.outcome()
+	outcome.Removed = slices.DeleteFunc(slices.Clone(p.named), func(deviceID string) bool { return slices.Contains(listed, deviceID) })
+	outcome.NotRemoved, outcome.stop, outcome.cause = listed, stoppedStillListed, &answerError{message: msgRemovalUnconfirmed}
+	return outcome
+}
+
+// finishRemoval removes the people after the first, reads the resource again
+// and checks it. base is the escaped path of the resource.
+//
+// Its failure type is the outcome, not error, on purpose. Access has been
+// taken away from at least one person when it is called, and a failure that
+// did not say so would read as "nothing happened": the same command run
+// again would then find that person gone and say that nothing was removed.
+// So a path that returns a plain error here does not compile, and every
+// outcome is built by removalProgress, which puts the people who lost access
+// into it.
+func (c *client) finishRemoval(ctx context.Context, base string, progress *removalProgress) (*ResourceSummary, *PasskeyRemovalError) {
+	for progress.removed < len(progress.named) {
+		answer, err := c.removePerson(ctx, base, progress.named[progress.removed])
+		if err != nil {
+			return nil, progress.failed(err)
+		}
+		if answer.status == http.StatusNotFound {
+			problem, err := c.classifyAccessNotFound(ctx, progress.id, answer)
+			if err != nil {
+				return nil, progress.unexplained(err)
+			}
+			return nil, progress.notFound(problem)
+		}
+		progress.removed++
+	}
+	resource, err := c.Resource(ctx, progress.id)
+	if err != nil {
+		return nil, progress.listNotRead(err)
+	}
+	var listed []string
+	for _, deviceID := range progress.named {
+		if slices.ContainsFunc(resource.AllowedPasskeys, func(person AllowedPasskey) bool { return person.DeviceID == deviceID }) {
+			listed = append(listed, deviceID)
+		}
+	}
+	if len(listed) > 0 {
+		return nil, progress.stillListed(listed)
 	}
 	return resource, nil
 }
@@ -440,40 +569,6 @@ func peopleNotOnList(id string, approved []AllowedPasskey, deviceIDs []string) *
 		return nil
 	}
 	return outcome
-}
-
-// removePeopleInOrder sends one DELETE for each device id, in the order
-// given, and stops at the first that does not succeed. base is the escaped
-// path of the resource.
-//
-// A failure of the first removal is returned as it is: nothing was removed,
-// and the failure is the whole story. After that, and for a device id that
-// is not found at any position, the error is the outcome that says what
-// happened to each device id.
-func (c *client) removePeopleInOrder(ctx context.Context, id, base string, deviceIDs []string) error {
-	for index, deviceID := range deviceIDs {
-		outcome := &PasskeyRemovalError{ID: id, Removed: deviceIDs[:index], NotRemoved: deviceIDs[index+1:]}
-		reply, err := c.doRESTOnce(ctx, http.MethodDelete, base+"/allowed-passkeys/"+deviceID, nil)
-		if err == nil && reply.status != http.StatusOK && reply.status != http.StatusNoContent && reply.status != http.StatusNotFound {
-			err = reply.problem()
-		}
-		switch {
-		case err != nil && index == 0:
-			return err
-		case err != nil:
-			outcome.NotRemoved, outcome.failed, outcome.cause = deviceIDs[index:], deviceID, err
-			return outcome
-		case reply.status != http.StatusNotFound:
-			continue
-		}
-		problem, err := c.classifyAccessNotFound(ctx, id, reply)
-		if err != nil {
-			return err
-		}
-		outcome.NotFound, outcome.problem = []string{deviceID}, problem
-		return outcome
-	}
-	return nil
 }
 
 // spacedRequestCode writes a valid request code as two groups of three, the

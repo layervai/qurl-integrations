@@ -576,6 +576,42 @@ func TestGoldens(t *testing.T) {
 			stderrGolden: true,
 		},
 		{
+			// The service answers a removal as made, and its list still
+			// shows the person: who lost access, and who still has it.
+			name: "error_grants_remove_still_listed",
+			args: func(srv *apitest.Server) []string {
+				return []string{"grants", srv.Key.CRID, "--remove", requesterDevice, "--remove", otherDevice}
+			},
+			prepare: func(srv *apitest.Server) {
+				srv.AddApprovedPerson(requesterDevice, requesterName)
+				srv.AddApprovedPerson(otherDevice, otherRequester)
+				srv.Script(http.MethodDelete, "/v1/resources/"+srv.Key.CRID+"/allowed-passkeys/"+otherDevice, func(w http.ResponseWriter, _ *http.Request) {
+					w.WriteHeader(http.StatusNoContent)
+				})
+			},
+			variants:     []string{"plain"},
+			wantCode:     10,
+			stderrGolden: true,
+		},
+		{
+			// The script-facing form of the same outcome.
+			name: "error_grants_remove_still_listed_script",
+			args: func(srv *apitest.Server) []string {
+				return []string{"grants", srv.Key.CRID, "--remove", requesterDevice, "--remove", otherDevice}
+			},
+			prepare: func(srv *apitest.Server) {
+				srv.AddApprovedPerson(requesterDevice, requesterName)
+				srv.AddApprovedPerson(otherDevice, otherRequester)
+				srv.Script(http.MethodDelete, "/v1/resources/"+srv.Key.CRID+"/allowed-passkeys/"+otherDevice, func(w http.ResponseWriter, _ *http.Request) {
+					w.WriteHeader(http.StatusNoContent)
+				})
+			},
+			variants:     []string{"json"},
+			wantCode:     10,
+			stdoutGolden: true,
+			stderrGolden: true,
+		},
+		{
 			// Every person is removed, and then the change to the public
 			// keys fails: who lost access, why the key change failed, and
 			// the command that makes the key change alone.
