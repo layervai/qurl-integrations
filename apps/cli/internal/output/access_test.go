@@ -35,6 +35,15 @@ func fixtureRequests(name string) *qurlapi.AccessRequestList {
 	}}
 }
 
+// listed is the resource a listing is for: none for the listing of every
+// resource, and the fixture resource for the listing of one.
+func listed(all bool) string {
+	if all {
+		return ""
+	}
+	return accessCRID
+}
+
 // oneRequest is a listing with the first fixture request alone.
 func oneRequest(more bool) *qurlapi.AccessRequestList {
 	list := fixtureRequests("Ana Lopez")
@@ -68,8 +77,8 @@ type requesterSurface struct {
 
 func requesterSurfaces() []requesterSurface {
 	return []requesterSurface{
-		{"requests of every resource", func(p *Printer, name string) error { return p.AccessRequests(fixtureRequests(name), true) }},
-		{"requests of one resource", func(p *Printer, name string) error { return p.AccessRequests(fixtureRequests(name), false) }},
+		{"requests of every resource", func(p *Printer, name string) error { return p.AccessRequests(fixtureRequests(name), "") }},
+		{"requests of one resource", func(p *Printer, name string) error { return p.AccessRequests(fixtureRequests(name), accessCRID) }},
 		{"approved", func(p *Printer, name string) error {
 			return p.Approved(accessCRID, &qurlapi.AllowedPasskey{DeviceID: accessDevice, Name: name, ApprovedAt: accessTime(0)})
 		}},
@@ -158,7 +167,7 @@ func TestAccessRequestsListing(t *testing.T) {
 	t.Parallel()
 	for _, all := range []bool{false, true} {
 		var out, errBuf bytes.Buffer
-		if err := newTestPrinter(&out, &errBuf, FormatText, false, false, false).AccessRequests(fixtureRequests("Ana Lopez"), all); err != nil {
+		if err := newTestPrinter(&out, &errBuf, FormatText, false, false, false).AccessRequests(fixtureRequests("Ana Lopez"), listed(all)); err != nil {
 			t.Fatal(err)
 		}
 		want := "NAME           DEVICE ID            REQUESTED  EXPIRES\n" +
@@ -169,7 +178,14 @@ func TestAccessRequestsListing(t *testing.T) {
 				"\"Ana Lopez\"    abcd-efgh-2345-mnop  2m ago     in 58m   " + accessCRID + "\n" +
 				"no name given  qrst-uvwx-yz67-abcd  1h ago     -        " + accessOtherCRID + "\n"
 		}
-		want += "\nTo let one of these people in, ask them for the six-digit code on their screen and run `qurl approve <CRID> <code>`; a name can be typed by anyone, so the code is the only proof of who is asking.\n"
+		// The last line names the command that lets a person in. The
+		// listing of one resource knows the CRID that command takes and
+		// writes it; the listing of every resource has one in each row.
+		approve := "qurl approve <CRID> <code>"
+		if !all {
+			approve = "qurl approve " + accessCRID + " <code>"
+		}
+		want += "\nTo let one of these people in, ask them for the six-digit code on their screen and run `" + approve + "`; a name can be typed by anyone, so the code is the only proof of who is asking.\n"
 		if got := out.String(); got != want || errBuf.Len() != 0 {
 			t.Fatalf("all=%t: listing =\n%s\nwant\n%s\nstderr %q", all, got, want, errBuf.String())
 		}
@@ -180,7 +196,7 @@ func TestAccessRequestsListing(t *testing.T) {
 	lapsed := oneRequest(false)
 	lapsed.Requests[0].ExpiresAt = accessTime(1)
 	var out, errBuf bytes.Buffer
-	if err := newTestPrinter(&out, &errBuf, FormatText, false, false, false).AccessRequests(lapsed, false); err != nil {
+	if err := newTestPrinter(&out, &errBuf, FormatText, false, false, false).AccessRequests(lapsed, accessCRID); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(out.String(), "2m ago     expired\n") {
@@ -197,11 +213,11 @@ func TestAccessRequestsListingAlwaysEndsWithTheSafetyLine(t *testing.T) {
 		for _, color := range []bool{false, true} {
 			for _, more := range []bool{false, true} {
 				var out, errBuf bytes.Buffer
-				if err := newTestPrinter(&out, &errBuf, FormatText, false, color, false).AccessRequests(oneRequest(more), all); err != nil {
+				if err := newTestPrinter(&out, &errBuf, FormatText, false, color, false).AccessRequests(oneRequest(more), listed(all)); err != nil {
 					t.Fatal(err)
 				}
 				text := out.String()
-				if !strings.HasSuffix(text, "\n\n"+msgApproveOnlyGivenCodes+"\n") || strings.Count(text, msgApproveOnlyGivenCodes) != 1 {
+				if rule := approvalRule(listed(all)); !strings.HasSuffix(text, "\n\n"+rule+"\n") || strings.Count(text, rule) != 1 || strings.Contains(rule, "%") {
 					t.Fatalf("all=%t color=%t more=%t: the listing does not end with the safety line, once:\n%s", all, color, more, text)
 				}
 			}
@@ -211,7 +227,7 @@ func TestAccessRequestsListingAlwaysEndsWithTheSafetyLine(t *testing.T) {
 		"ask them for the six-digit code on their screen", "`qurl approve <CRID> <code>`",
 		"a name can be typed by anyone", "the code is the only proof of who is asking",
 	} {
-		if !strings.Contains(msgApproveOnlyGivenCodes, part) {
+		if !strings.Contains(approvalRule(""), part) {
 			t.Errorf("the safety line lost %q", part)
 		}
 	}
@@ -237,7 +253,7 @@ func TestAccessRequestsListingSaysWhenThereMayBeMore(t *testing.T) {
 		for _, more := range []bool{false, true} {
 			where := fmt.Sprintf("all=%t more=%t", all, more)
 			var out, errBuf bytes.Buffer
-			if err := newTestPrinter(&out, &errBuf, FormatText, false, false, false).AccessRequests(oneRequest(more), all); err != nil {
+			if err := newTestPrinter(&out, &errBuf, FormatText, false, false, false).AccessRequests(oneRequest(more), listed(all)); err != nil {
 				t.Fatal(err)
 			}
 			text := out.String()
@@ -245,14 +261,14 @@ func TestAccessRequestsListingSaysWhenThereMayBeMore(t *testing.T) {
 				t.Fatalf("%s: text =\n%s\nstderr %q", where, text, errBuf.String())
 			}
 			if more {
-				rows, rule := strings.Index(text, accessDevice), strings.Index(text, msgApproveOnlyGivenCodes)
+				rows, rule := strings.Index(text, accessDevice), strings.Index(text, approvalRule(listed(all)))
 				if at := strings.Index(text, "\n\n"+line+"\n\n"); at < rows || at > rule {
 					t.Fatalf("%s: the line is not between the rows and the last line:\n%s", where, text)
 				}
 			}
 
 			out.Reset()
-			if err := newTestPrinter(&out, &errBuf, FormatJSON, false, false, false).AccessRequests(oneRequest(more), all); err != nil {
+			if err := newTestPrinter(&out, &errBuf, FormatJSON, false, false, false).AccessRequests(oneRequest(more), listed(all)); err != nil {
 				t.Fatal(err)
 			}
 			var document struct {
@@ -263,7 +279,7 @@ func TestAccessRequestsListingSaysWhenThereMayBeMore(t *testing.T) {
 			}
 
 			out.Reset()
-			if err := newTestPrinter(&out, &errBuf, FormatText, true, false, false).AccessRequests(oneRequest(more), all); err != nil {
+			if err := newTestPrinter(&out, &errBuf, FormatText, true, false, false).AccessRequests(oneRequest(more), listed(all)); err != nil {
 				t.Fatal(err)
 			}
 			wantErr := ""
@@ -277,7 +293,7 @@ func TestAccessRequestsListingSaysWhenThereMayBeMore(t *testing.T) {
 			// An empty page of a listing that goes on is not "none".
 			out.Reset()
 			errBuf.Reset()
-			if err := newTestPrinter(&out, &errBuf, FormatText, false, false, false).AccessRequests(noRequests(more), all); err != nil {
+			if err := newTestPrinter(&out, &errBuf, FormatText, false, false, false).AccessRequests(noRequests(more), listed(all)); err != nil {
 				t.Fatal(err)
 			}
 			if got := errBuf.String() == line+"\n"; got != more || out.Len() != 0 || (more && strings.Contains(errBuf.String(), "No pending")) {
@@ -295,7 +311,7 @@ func TestEmptyAccessRequestsListing(t *testing.T) {
 	t.Parallel()
 	for all, note := range map[bool]string{true: msgNoPendingRequests, false: msgNoPendingRequestsForOne} {
 		var out, errBuf bytes.Buffer
-		if err := newTestPrinter(&out, &errBuf, FormatText, false, false, false).AccessRequests(noRequests(false), all); err != nil {
+		if err := newTestPrinter(&out, &errBuf, FormatText, false, false, false).AccessRequests(noRequests(false), listed(all)); err != nil {
 			t.Fatal(err)
 		}
 		if out.Len() != 0 || errBuf.String() != note+"\n" {
@@ -303,18 +319,18 @@ func TestEmptyAccessRequestsListing(t *testing.T) {
 		}
 		out.Reset()
 		errBuf.Reset()
-		if err := newTestPrinter(&out, &errBuf, FormatJSON, false, false, false).AccessRequests(noRequests(false), all); err != nil {
+		if err := newTestPrinter(&out, &errBuf, FormatJSON, false, false, false).AccessRequests(noRequests(false), listed(all)); err != nil {
 			t.Fatal(err)
 		}
 		// The documents of this CLI write an angle bracket as its JSON
 		// escape, like every other; a reader of JSON gets the sentence.
-		rule := strings.NewReplacer("<", `\u003c`, ">", `\u003e`).Replace(msgApproveOnlyGivenCodes)
+		rule := strings.NewReplacer("<", `\u003c`, ">", `\u003e`).Replace(approvalRule(listed(all)))
 		if want := "{\n  \"requests\": [],\n  \"approval_rule\": \"" + rule + "\",\n  \"has_more\": false\n}\n"; out.String() != want || errBuf.Len() != 0 {
 			t.Fatalf("all=%t: empty JSON listing = %q, stderr %q, want %q", all, out.String(), errBuf.String(), want)
 		}
 	}
 	var out, errBuf bytes.Buffer
-	if err := newTestPrinter(&out, &errBuf, FormatText, false, false, false).AccessRequests(nil, true); err == nil || out.Len() != 0 {
+	if err := newTestPrinter(&out, &errBuf, FormatText, false, false, false).AccessRequests(nil, ""); err == nil || out.Len() != 0 {
 		t.Fatalf("a listing that is not there was rendered: %q, %v", out.String(), err)
 	}
 }
@@ -327,7 +343,7 @@ func TestEmptyAccessRequestsListing(t *testing.T) {
 func TestAccessRequestsJSONAndQuiet(t *testing.T) {
 	t.Parallel()
 	var out, errBuf bytes.Buffer
-	if err := newTestPrinter(&out, &errBuf, FormatJSON, false, false, false).AccessRequests(fixtureRequests("Ana Lopez"), true); err != nil {
+	if err := newTestPrinter(&out, &errBuf, FormatJSON, false, false, false).AccessRequests(fixtureRequests("Ana Lopez"), ""); err != nil {
 		t.Fatal(err)
 	}
 	var document struct {
@@ -341,7 +357,7 @@ func TestAccessRequestsJSONAndQuiet(t *testing.T) {
 	// is said once, beside the rows, not on each of them.
 	for _, all := range []bool{true, false} {
 		var listing bytes.Buffer
-		if err := newTestPrinter(&listing, &errBuf, FormatJSON, false, false, false).AccessRequests(fixtureRequests("Ana Lopez"), all); err != nil {
+		if err := newTestPrinter(&listing, &errBuf, FormatJSON, false, false, false).AccessRequests(fixtureRequests("Ana Lopez"), listed(all)); err != nil {
 			t.Fatal(err)
 		}
 		var top map[string]json.RawMessage
@@ -349,8 +365,13 @@ func TestAccessRequestsJSONAndQuiet(t *testing.T) {
 			t.Fatal(err)
 		}
 		var rule string
-		if err := json.Unmarshal(top["approval_rule"], &rule); err != nil || rule != msgApproveOnlyGivenCodes || len(top) != 3 || string(top["has_more"]) != "false" {
-			t.Fatalf("all=%t: listing members = %v with approval_rule %q, want requests, has_more and the rule %q", all, top, rule, msgApproveOnlyGivenCodes)
+		if err := json.Unmarshal(top["approval_rule"], &rule); err != nil || rule != approvalRule(listed(all)) || len(top) != 3 || string(top["has_more"]) != "false" {
+			t.Fatalf("all=%t: listing members = %v with approval_rule %q, want requests, has_more and the rule %q", all, top, rule, approvalRule(listed(all)))
+		}
+		// The rule names the command with the CRID where the listing is
+		// for one resource, and with the placeholder where it is for all.
+		if all != strings.Contains(rule, "qurl approve <CRID> <code>") || all == strings.Contains(rule, "qurl approve "+accessCRID+" <code>") {
+			t.Fatalf("all=%t: the rule names the command as %q", all, rule)
 		}
 		if strings.Count(listing.String(), "a name can be typed by anyone") != 1 {
 			t.Fatalf("all=%t: the rule is not said exactly once:\n%s", all, listing.String())
@@ -389,7 +410,7 @@ func TestAccessRequestsJSONAndQuiet(t *testing.T) {
 	} {
 		out.Reset()
 		errBuf.Reset()
-		if err := newTestPrinter(&out, &errBuf, FormatText, true, false, false).AccessRequests(fixtureRequests("Ana Lopez"), all); err != nil {
+		if err := newTestPrinter(&out, &errBuf, FormatText, true, false, false).AccessRequests(fixtureRequests("Ana Lopez"), listed(all)); err != nil {
 			t.Fatal(err)
 		}
 		if out.String() != wantQuiet || errBuf.Len() != 0 {

@@ -1087,7 +1087,8 @@ qurl grants <CRID> --remove <device id>
 A listing shows, for each request, the name in quotes, the id of the person's
 device, how long ago they asked, and when the request expires; the listing of
 all resources also shows the CRID. It shows no code. It ends with one line
-that says how a person is let in.
+that says how a person is let in. In the listing of one resource, that line
+has the resource's CRID in the command, where the sample below has `<CRID>`.
 
 ```text
 NAME         DEVICE ID            REQUESTED  EXPIRES
@@ -1568,7 +1569,8 @@ in the document it reads:
   for the six-digit code on their screen and run `qurl approve <CRID> <code>`;
   a name can be typed by anyone, so the code is the only proof of who is
   asking." It is one member beside `requests`, not one for each request, and
-  it is there for an empty listing too.
+  it is there for an empty listing too. In the listing of one resource it has
+  that resource's CRID in place of `<CRID>`.
 - `name_note`, in the `approve` document: "The name was typed by the person
   who asked. Nobody checked it."
 

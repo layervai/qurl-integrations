@@ -165,7 +165,7 @@ func listAccessRequests(ctx context.Context, opts *globalOpts, operand string) e
 	if err != nil {
 		return err
 	}
-	return opts.printer().AccessRequests(requests, id == "")
+	return opts.printer().AccessRequests(requests, id)
 }
 
 // setAccessRequests turns access requests on or off for one resource. It is

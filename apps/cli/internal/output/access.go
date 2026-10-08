@@ -54,8 +54,10 @@ const (
 	// the approval_rule member of every JSON listing: the reader of JSON is
 	// most often an agent, which decides what to approve from that document.
 	// A listing shows no code, and this is the sentence that says where the
-	// code is.
-	msgApproveOnlyGivenCodes = "To let one of these people in, ask them for the six-digit code on their screen and run `qurl approve <CRID> <code>`; a name can be typed by anyone, so the code is the only proof of who is asking."
+	// code is. %s is the CRID of the resource in the listing of one
+	// resource, where the command knows it, and the placeholder in the
+	// listing of all resources, where each row has its own.
+	msgApproveOnlyGivenCodes = "To let one of these people in, ask them for the six-digit code on their screen and run `qurl approve %s <code>`; a name can be typed by anyone, so the code is the only proof of who is asking."
 
 	// msgRequestsMayBeMore follows a listing of all resources that the
 	// service said may be incomplete. That listing is bounded; the listing
@@ -114,17 +116,6 @@ func (p *Printer) requesterName(name string) string {
 	return p.publisherName(name)
 }
 
-// spacedCode writes a six-digit request code as two groups of three, the
-// form it is read aloud in. Anything else is returned as it is. The API
-// client writes a code it has checked the same way in its own messages; a
-// change to one form belongs in both.
-func spacedCode(code string) string {
-	if len(code) != 6 {
-		return code
-	}
-	return code[:3] + " " + code[3:]
-}
-
 // saidPrivate reports whether the service said that a resource is private. A
 // value it did not send is not that.
 func saidPrivate(private *bool) bool {
@@ -173,8 +164,9 @@ type accessRequestsJSON struct {
 	HasMore      bool                `json:"has_more"`
 }
 
-// AccessRequests renders pending access requests. all says that the listing
-// covers every resource of the owner, so each row names its resource.
+// AccessRequests renders pending access requests. resourceCRID is the
+// resource the listing is for. It is empty for the listing that covers every
+// resource of the owner, where each row names its resource.
 //
 // No mode shows the code of a request. Text is a table of who asked, from
 // which device, when, and until when the request stands, and it ends with
@@ -185,14 +177,15 @@ type accessRequestsJSON struct {
 //
 // A listing the service said may be incomplete says so after its rows, in
 // text, and on stderr with --quiet, whose stdout is values only.
-func (p *Printer) AccessRequests(list *qurlapi.AccessRequestList, all bool) error {
+func (p *Printer) AccessRequests(list *qurlapi.AccessRequestList, resourceCRID string) error {
 	if list == nil {
 		return errors.New("qURL access-request listing is incomplete")
 	}
+	all := resourceCRID == ""
 	requests := list.Requests
 	switch {
 	case p.format == FormatJSON:
-		out := accessRequestsJSON{Requests: make([]accessRequestJSON, 0, len(requests)), ApprovalRule: msgApproveOnlyGivenCodes, HasMore: list.HasMore}
+		out := accessRequestsJSON{Requests: make([]accessRequestJSON, 0, len(requests)), ApprovalRule: approvalRule(resourceCRID), HasMore: list.HasMore}
 		for index := range requests {
 			request := &requests[index]
 			out.Requests = append(out.Requests, accessRequestJSON{
@@ -258,8 +251,19 @@ func (p *Printer) AccessRequests(list *qurlapi.AccessRequestList, all bool) erro
 	if list.HasMore {
 		plain.printf("\n%s\n", mayBeMore(all))
 	}
-	plain.printf("\n%s\n", msgApproveOnlyGivenCodes)
+	plain.printf("\n%s\n", approvalRule(resourceCRID))
 	return plain.flush(nil)
+}
+
+// approvalRule is the sentence on how a person is let in, with the command
+// that does it. The listing of one resource knows the CRID that command
+// takes and writes it. The listing of all resources has one in each row, so
+// its sentence has the placeholder.
+func approvalRule(resourceCRID string) string {
+	if resourceCRID == "" {
+		resourceCRID = placeholderCRID
+	}
+	return fmt.Sprintf(msgApproveOnlyGivenCodes, resourceCRID)
 }
 
 // mayBeMore is the line for a listing the service said may be incomplete.
@@ -427,7 +431,7 @@ func (p *Printer) Denied(resourceCRID, request string) error {
 		_, err := fmt.Fprintf(p.err, msgDeniedDevice+"\n", request, resourceCRID)
 		return err
 	}
-	_, err := fmt.Fprintf(p.err, msgDenied+"\n", spacedCode(request), resourceCRID)
+	_, err := fmt.Fprintf(p.err, msgDenied+"\n", qurlapi.SpacedRequestCode(request), resourceCRID)
 	return err
 }
 

@@ -797,6 +797,10 @@ func TestAccessRequestCopySaysWhatTheServiceLimits(t *testing.T) {
 		"a list that cannot be read again after the removals", "a list that still shows a person the service said it removed",
 		"A failure that says none of this came before any access was taken away.",
 		"or stops before it gets to them",
+		// The line that ends a listing has the CRID where the command knows
+		// it, in the text and in the document an agent reads.
+		"In the listing of one resource, that line has the resource's CRID in the command",
+		"In the listing of one resource it has that resource's CRID in place of <CRID>.",
 		"a failure with no document came before any access was taken away",
 		"So are the routes for access requests and approved people",
 	} {

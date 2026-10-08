@@ -319,7 +319,7 @@ func (c *client) ApproveAccessRequest(ctx context.Context, id, code string) (*Al
 	switch reply.status {
 	case http.StatusOK, http.StatusCreated:
 	case http.StatusNotFound:
-		return nil, c.accessNotFound(ctx, id, reply, fmt.Sprintf(msgRequestCodeNotFound, spacedRequestCode(code)))
+		return nil, c.accessNotFound(ctx, id, reply, fmt.Sprintf(msgRequestCodeNotFound, SpacedRequestCode(code)))
 	case http.StatusTooManyRequests:
 		return nil, codeLimit(reply)
 	default:
@@ -370,7 +370,7 @@ func (c *client) DenyAccessRequest(ctx context.Context, id, request string) erro
 		if byDevice {
 			return c.accessNotFound(ctx, id, reply, fmt.Sprintf(msgRequestDeviceNotFound, request))
 		}
-		return c.accessNotFound(ctx, id, reply, fmt.Sprintf(msgRequestCodeNotFound, spacedRequestCode(request)))
+		return c.accessNotFound(ctx, id, reply, fmt.Sprintf(msgRequestCodeNotFound, SpacedRequestCode(request)))
 	case http.StatusTooManyRequests:
 		if !byDevice {
 			return codeLimit(reply)
@@ -631,11 +631,14 @@ func peopleNotOnList(id string, approved []AllowedPasskey, deviceIDs []string) *
 	return outcome
 }
 
-// spacedRequestCode writes a valid request code as two groups of three, the
-// form it is read aloud and typed in. The text output of a listing writes
-// codes the same way, with its own function for a value it did not check; a
-// change to one form belongs in both.
-func spacedRequestCode(code string) string {
+// SpacedRequestCode writes a six-digit request code as two groups of three,
+// the form it is read aloud and typed in. Anything that is not six
+// characters is returned as it is. It is the one place that form is made:
+// the messages of this client and the output of the commands both use it.
+func SpacedRequestCode(code string) string {
+	if len(code) != 6 {
+		return code
+	}
 	return code[:3] + " " + code[3:]
 }
 
@@ -660,6 +663,14 @@ func (c *client) accessNotFound(ctx context.Context, id string, reply *restReply
 //   - neither: the code or the device id is the thing that was not found.
 //     Then there is no error, and the service's problem is returned for the
 //     caller's own message.
+//
+// A removal of approved people read the resource before it began, and still
+// asks here. That earlier read says what was true then. The resource can be
+// deleted, and the list can change, between that read and the removal that
+// was answered "not found", and which of the three it is now decides what the
+// publisher is told: that a person is not on the list, or that there is no
+// such resource. It costs one or two reads, on a path that has already
+// failed.
 func (c *client) classifyAccessNotFound(ctx context.Context, id string, reply *restReply) (*Error, error) {
 	offered, err := c.accessRequestsOffered(ctx, id, true)
 	if err != nil {
