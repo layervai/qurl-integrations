@@ -1552,6 +1552,42 @@ func TestDeviceGrantsRequireConfirmation(t *testing.T) {
 	}
 }
 
+// TestDeviceGrantRequestsTrimAndEscapeTheIdentifier pins that the two grant
+// changes build their path as every other request here does: the identifier
+// is trimmed and escaped, and an empty one is refused before any request.
+func TestDeviceGrantRequestsTrimAndEscapeTheIdentifier(t *testing.T) {
+	calls := map[string]func(Client, string) error{
+		"set": func(client Client, id string) error {
+			_, err := client.SetDeviceGrants(t.Context(), id, []string{"a"})
+			return err
+		},
+		"edit": func(client Client, id string) error {
+			_, err := client.EditDeviceGrants(t.Context(), id, []string{"a"}, nil)
+			return err
+		},
+	}
+	for name, call := range calls {
+		srv := apitest.NewServer(t)
+		if err := call(newTestClient(t, srv, nil), "  "+srv.Key.CRID+"\n"); err != nil {
+			t.Fatalf("%s with a padded identifier: %v", name, err)
+		}
+		if lines := sentRequests(srv); !slices.Equal(lines, []string{"PATCH /v1/resources/" + srv.Key.CRID}) {
+			t.Fatalf("%s: requests = %v, want one change to the trimmed identifier", name, lines)
+		}
+
+		for _, id := range []string{"", "   ", "a/b", "a b", "a%2Fb", "../" + srv.Key.CRID, srv.Key.CRID + "?x=1"} {
+			srv := apitest.NewServer(t)
+			err := call(newTestClient(t, srv, nil), id)
+			if err == nil || len(srv.Requests()) != 0 {
+				t.Fatalf("%s with identifier %q: error %v after %d requests, want a refusal before any request", name, id, err, len(srv.Requests()))
+			}
+			if strings.TrimSpace(id) == "" && !errors.Is(err, qurl.ErrInvalidResourceRequest) {
+				t.Fatalf("%s with an empty identifier: error = %v, want an invalid request", name, err)
+			}
+		}
+	}
+}
+
 // TestEditDeviceGrantsSendsOnlyTheEdit pins the wire shape of a change to
 // single device keys: one PATCH with the keys to add and the keys to remove.
 // It never carries allowed_device_keys, the member that replaces the complete

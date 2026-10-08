@@ -959,13 +959,14 @@ func trimBaseURL(base string) string {
 // TODO(upstream-contract): PATCH returns 200 with a flat data resource row,
 // including type, status, privacy and grants; GET nests its row under resource.
 func (c *client) SetDeviceGrants(ctx context.Context, id string, keys []string) (*ResourceSummary, error) {
-	if err := ValidateRequestTarget(http.MethodPatch, "/v1/resources/"+id); err != nil {
+	id, path, err := deviceGrantsPath(id)
+	if err != nil {
 		return nil, err
 	}
 	if keys == nil {
 		keys = []string{}
 	}
-	reply, err := c.doRESTOnce(ctx, http.MethodPatch, "/v1/resources/"+id, map[string]any{"allowed_device_keys": keys})
+	reply, err := c.doRESTOnce(ctx, http.MethodPatch, path, map[string]any{"allowed_device_keys": keys})
 	if err != nil {
 		return nil, err
 	}
@@ -985,6 +986,22 @@ func (c *client) SetDeviceGrants(ctx context.Context, id string, keys []string) 
 		return nil, fmt.Errorf("%w: API did not confirm the device grants", qurl.ErrInvalidAPIResponse)
 	}
 	return summarizeResourceRow(&env.Data, "device grants")
+}
+
+// deviceGrantsPath returns the trimmed identifier and the escaped path of the
+// resource a grant change is sent to, as every method here builds its path.
+// The path is also held to the routes a device credential may use, so an
+// identifier that could never name a resource is refused before a request.
+func deviceGrantsPath(id string) (trimmed, path string, err error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return "", "", fmt.Errorf("%w: resource identifier must not be empty", qurl.ErrInvalidResourceRequest)
+	}
+	path = "/v1/resources/" + url.PathEscape(id)
+	if err := ValidateRequestTarget(http.MethodPatch, path); err != nil {
+		return "", "", err
+	}
+	return id, path, nil
 }
 
 // deviceGrantEdit is the PATCH body that adds and removes single device keys.
@@ -1015,10 +1032,11 @@ func (c *client) EditDeviceGrants(ctx context.Context, id string, add, remove []
 			return nil, fmt.Errorf("%w: a device key cannot be both added and removed", qurl.ErrInvalidResourceRequest)
 		}
 	}
-	if err := ValidateRequestTarget(http.MethodPatch, "/v1/resources/"+id); err != nil {
+	id, path, err := deviceGrantsPath(id)
+	if err != nil {
 		return nil, err
 	}
-	reply, err := c.doRESTOnce(ctx, http.MethodPatch, "/v1/resources/"+id, deviceGrantEdit{Add: add, Remove: remove})
+	reply, err := c.doRESTOnce(ctx, http.MethodPatch, path, deviceGrantEdit{Add: add, Remove: remove})
 	if err != nil {
 		return nil, err
 	}
