@@ -331,3 +331,24 @@ func TestAccessRequestRoutesNeedACredential(t *testing.T) {
 		t.Fatalf("an approval without a credential gave access: %+v", people)
 	}
 }
+
+// TestAccessRequestsOnAPublicResourceOnlyWhenAsked pins the mode a test uses
+// to play a service that turns access requests on for a public resource.
+// The service refuses that, and so does the mock unless a test asks.
+func TestAccessRequestsOnAPublicResourceOnlyWhenAsked(t *testing.T) {
+	srv := NewServer(t)
+	srv.SetResourceAccess(false)
+	path := "/v1/resources/" + srv.Key.CRID
+	if status, _ := accessCall(t, srv, http.MethodPatch, path, `{"access_requests":true}`); status != http.StatusBadRequest {
+		t.Fatalf("the setting for a public resource = %d, want a refusal", status)
+	}
+	srv.AcceptAccessRequestsOnPublic()
+	status, answer := accessCall(t, srv, http.MethodPatch, path, `{"access_requests":true}`)
+	var row struct {
+		Private        *bool `json:"private"`
+		AccessRequests *bool `json:"access_requests"`
+	}
+	if err := json.Unmarshal(answer.Data, &row); err != nil || status != http.StatusOK || row.Private == nil || *row.Private || row.AccessRequests == nil || !*row.AccessRequests {
+		t.Fatalf("the setting for a public resource, accepted = %d %s (%v), want a public row with access requests on", status, answer.Data, err)
+	}
+}

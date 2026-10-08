@@ -121,10 +121,20 @@ func spacedCode(code string) string {
 	return code[:3] + " " + code[3:]
 }
 
+// saidPrivate reports whether the service said that a resource is private. A
+// value it did not send is not that.
+func saidPrivate(private *bool) bool {
+	return private != nil && *private
+}
+
 // requestGuidance writes what a publisher sends to people and what happens
 // next, for a resource whose access requests are on. address is the
 // resource's address on the link site, empty when this install does not know
 // that site.
+//
+// It says that the address and the CRID are safe to send to anyone, because
+// a private resource opens only for the people the publisher allows. Every
+// caller therefore checks saidPrivate first.
 func (p *Printer) requestGuidance(ew *errWriter, resourceCRID, address string) {
 	opening, sent, next, safe := msgRequestsSendAddress, address, msgRequestsNextStep, msgRequestsSafeToSend
 	if address == "" {
@@ -284,11 +294,19 @@ type accessRequestsSettingJSON struct {
 //
 // TODO(upstream-contract): the count rests on the answer to the change
 // carrying allowed_passkeys, as every resource row does.
+//
+// On, the resource must be one the service said is private: the guidance
+// says that its address is safe to send to anyone, which is true of a
+// private resource only. The API client fails such an answer before it gets
+// here; this is the same rule at the place that prints the sentence.
 func (p *Printer) AccessRequestsSetting(resource *qurlapi.ResourceSummary, address string) error {
 	if resource == nil || resource.AccessRequests == nil {
 		return errors.New("qURL access-request setting is incomplete")
 	}
 	on := *resource.AccessRequests
+	if on && !saidPrivate(resource.Private) {
+		return errors.New("qURL access requests are on for a resource that is not known to be private")
+	}
 	if !on {
 		address = ""
 	}

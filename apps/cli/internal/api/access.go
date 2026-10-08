@@ -159,6 +159,14 @@ func (c *client) refusedForNoAccessRequests(ctx context.Context, reply *restRepl
 // have it; that answer fails here instead of being reported as a change. One
 // that refuses the member it does not know is told apart from a service that
 // refused the change itself; see refusedForNoAccessRequests.
+//
+// An answer that turns access requests on must also say that the resource is
+// private. What a publisher is told next is that the resource's address is
+// safe to send to anyone, because a private resource opens only for the
+// people they allow. That is true of a private resource and of no other, so
+// it is said only when the service's own answer says the resource is
+// private. The service refuses the setting for a public resource; an answer
+// that accepts it for one, or does not say, fails here.
 func (c *client) SetAccessRequests(ctx context.Context, id string, on bool) (*ResourceSummary, error) {
 	// The setting is changed on the route a grant change uses, and the path
 	// is built the same way: the identifier trimmed and escaped.
@@ -192,6 +200,10 @@ func (c *client) SetAccessRequests(ctx context.Context, id string, on bool) (*Re
 		return nil, &accessRequestsUnsupportedError{detail: msgAccessRequestsSettingIgnored}
 	case *env.Data.AccessRequests != on:
 		return nil, &answerError{message: msgAccessRequestsSettingUnconfirmed}
+	case on && env.Data.Private == nil:
+		return nil, &accessRequestsNotPrivateError{}
+	case on && !*env.Data.Private:
+		return nil, &accessRequestsNotPrivateError{public: true}
 	}
 	return summarizeResourceRow(&env.Data, "access-request setting")
 }

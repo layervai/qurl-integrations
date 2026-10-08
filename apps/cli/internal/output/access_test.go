@@ -404,11 +404,11 @@ func TestAccessRequestsJSONAndQuiet(t *testing.T) {
 // install does not know the address, and it names no site.
 func TestRequestGuidanceSaysWhatToSendAndWhatHappensNext(t *testing.T) {
 	t.Parallel()
-	on := true
+	on, private := true, true
 	for _, address := range []string{accessAddress, ""} {
 		var out, errBuf bytes.Buffer
 		p := newTestPrinter(&out, &errBuf, FormatText, false, false, false)
-		if err := p.AccessRequestsSetting(&qurlapi.ResourceSummary{CRID: accessCRID, AccessRequests: &on}, address); err != nil {
+		if err := p.AccessRequestsSetting(&qurlapi.ResourceSummary{CRID: accessCRID, AccessRequests: &on, Private: &private}, address); err != nil {
 			t.Fatal(err)
 		}
 		want := "Access requests are on for " + accessCRID + ".\n\n" +
@@ -430,6 +430,60 @@ func TestRequestGuidanceSaysWhatToSendAndWhatHappensNext(t *testing.T) {
 		}
 		if address == "" && strings.Contains(out.String(), "://") {
 			t.Fatalf("guidance without a known site names an address:\n%s", out.String())
+		}
+	}
+}
+
+// TestGuidanceIsOnlyForAResourceTheServiceSaidIsPrivate pins the rule at the
+// two places that print the guidance. It says that the resource's address
+// is safe to send to anyone, because a private resource opens only for the
+// people the publisher allows. That is true of a private resource and of no
+// other, so it is printed only for a resource the service said is private.
+//
+// The setting change with access requests on, for a resource that is public
+// or whose privacy was not said, is an error and writes nothing, in every
+// output mode: no sentence, no address, no document. A publish result like
+// that prints its document without the guidance and without an address.
+// Turning requests off says nothing about privacy and needs none.
+func TestGuidanceIsOnlyForAResourceTheServiceSaidIsPrivate(t *testing.T) {
+	t.Parallel()
+	on, off, public := true, false, false
+	for name, private := range map[string]*bool{"public": &public, "privacy not said": nil} {
+		for mode, printer := range map[string]func(out, errBuf *bytes.Buffer) *Printer{
+			"text": func(out, errBuf *bytes.Buffer) *Printer {
+				return newTestPrinter(out, errBuf, FormatText, false, false, false)
+			},
+			"json": func(out, errBuf *bytes.Buffer) *Printer {
+				return newTestPrinter(out, errBuf, FormatJSON, false, false, false)
+			},
+			"quiet": func(out, errBuf *bytes.Buffer) *Printer {
+				return newTestPrinter(out, errBuf, FormatText, true, false, false)
+			},
+		} {
+			var out, errBuf bytes.Buffer
+			err := printer(&out, &errBuf).AccessRequestsSetting(&qurlapi.ResourceSummary{CRID: accessCRID, AccessRequests: &on, Private: private}, accessAddress)
+			if err == nil || out.Len() != 0 || errBuf.Len() != 0 {
+				t.Errorf("%s, %s: the setting was rendered: %v, stdout %q, stderr %q", name, mode, err, out.String(), errBuf.String())
+			}
+
+			out.Reset()
+			if err := printer(&out, &errBuf).AccessRequestsSetting(&qurlapi.ResourceSummary{CRID: accessCRID, AccessRequests: &off, Private: private}, accessAddress); err != nil {
+				t.Errorf("%s, %s: turning requests off needs no privacy: %v", name, mode, err)
+			}
+
+			out.Reset()
+			published := &qurlapi.Published{
+				Private: private, AccessRequests: &on, LinkSiteURL: accessAddress,
+				CRID: accessCRID, ResourceID: "rid", TargetURL: "https://example.com/data", Status: "active",
+			}
+			if err := printer(&out, &errBuf).Publish(published); err != nil {
+				t.Fatalf("%s, %s: %v", name, mode, err)
+			}
+			for _, never := range []string{"safe to send", "People can ask you for access", accessAddress, "qurl approve"} {
+				if strings.Contains(out.String(), never) {
+					t.Errorf("%s, %s: a publish result that is not private shows %q:\n%s", name, mode, never, out.String())
+				}
+			}
 		}
 	}
 }
@@ -529,16 +583,16 @@ func TestAccessRequestsSettingOff(t *testing.T) {
 			t.Fatalf("off JSON = %q; it must not carry an address", out.String())
 		}
 	}
-	on := true
+	on, private := true, true
 	var out, errBuf bytes.Buffer
-	if err := newTestPrinter(&out, &errBuf, FormatJSON, false, false, false).AccessRequestsSetting(&qurlapi.ResourceSummary{CRID: accessCRID, AccessRequests: &on}, accessAddress); err != nil {
+	if err := newTestPrinter(&out, &errBuf, FormatJSON, false, false, false).AccessRequestsSetting(&qurlapi.ResourceSummary{CRID: accessCRID, AccessRequests: &on, Private: &private}, accessAddress); err != nil {
 		t.Fatal(err)
 	}
 	if got := strings.Join(strings.Fields(out.String()), ""); got != `{"crid":"`+accessCRID+`","access_requests":true,"resource_url":"`+accessAddress+`"}` {
 		t.Fatalf("on JSON = %q", out.String())
 	}
 	out.Reset()
-	if err := newTestPrinter(&out, &errBuf, FormatText, true, false, false).AccessRequestsSetting(&qurlapi.ResourceSummary{CRID: accessCRID, AccessRequests: &on}, accessAddress); err != nil || out.String() != accessCRID+"\n" {
+	if err := newTestPrinter(&out, &errBuf, FormatText, true, false, false).AccessRequestsSetting(&qurlapi.ResourceSummary{CRID: accessCRID, AccessRequests: &on, Private: &private}, accessAddress); err != nil || out.String() != accessCRID+"\n" {
 		t.Fatalf("--quiet = %q, %v", out.String(), err)
 	}
 	if err := newTestPrinter(&out, &errBuf, FormatText, false, false, false).AccessRequestsSetting(&qurlapi.ResourceSummary{CRID: accessCRID}, ""); err == nil {

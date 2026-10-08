@@ -93,8 +93,11 @@ The listing of all your resources is bounded. When there may be more requests
 than it shows, it says so; list one resource to see all of its requests.
 
 --on lets people ask for access to a private resource that is already
-published, and prints what to send them. --off stops new requests. To see who
-was approved, and to take one person's access away, use "qurl grants <CRID>".
+published, and prints what to send them. It prints that only when the
+service's answer says the resource is private: access requests are for a
+private resource, and a public one opens for anyone who has the CRID. --off
+stops new requests. To see who was approved, and to take one person's access
+away, use "qurl grants <CRID>".
 
 "qurl request", without the s, is another command: it makes one request for an
 app that supervises qURL.`,

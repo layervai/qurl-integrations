@@ -391,6 +391,21 @@ func TestGoldens(t *testing.T) {
 			stdoutGolden: true,
 		},
 		{
+			// A service that turned access requests on for a public
+			// resource: no guidance and no address, and a message that says
+			// the resource is public. Exit 10.
+			name: "error_requests_on_public",
+			args: func(srv *apitest.Server) []string { return []string{"requests", srv.Key.CRID, "--on"} },
+			prepare: func(srv *apitest.Server) {
+				srv.SetResourceAccess(false)
+				srv.AcceptAccessRequestsOnPublic()
+			},
+			linkSite:     testLinkSite,
+			variants:     []string{"plain"},
+			wantCode:     10,
+			stderrGolden: true,
+		},
+		{
 			name: "requests_off",
 			args: func(srv *apitest.Server) []string { return []string{"requests", srv.Key.CRID, "--off"} },
 			prepare: func(srv *apitest.Server) {

@@ -1087,6 +1087,12 @@ The listing of all your resources is bounded. When there may be more requests
 than it shows, it says so after the rows, and `-o json` has `has_more: true`.
 List one resource with `qurl requests <CRID>` to see all of its requests.
 
+`qurl requests <CRID> --on` prints what to send to people only when the
+service's answer says that the resource is private. If the answer says that
+the resource is public, or does not say, the command fails (exit code 10) and
+prints no address: access requests are for a private resource, and a public
+one opens for anyone who has the CRID.
+
 `qurl approve` prints who now has access and the command that takes it away
 again. `qurl deny` removes the request and gives no access. It takes the
 device id the listing shows, in the form `xxxx-xxxx-xxxx-xxxx`. It also takes

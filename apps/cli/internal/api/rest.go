@@ -510,13 +510,16 @@ func (c *client) confirmAccessRequests(ctx context.Context, published *Published
 		return &answerError{message: msgAccessRequestsCreateUnconfirmed}
 	}
 	resource, err := c.SetAccessRequests(ctx, published.CRID, true)
-	if err != nil {
-		return &AccessRequestsNotTurnedOnError{CRID: published.CRID, cause: err}
-	}
-	if resource.Private == nil || !*resource.Private {
-		// The two answers disagree about who can open the resource. That is
-		// the privacy failure, and it names no CRID.
+	var notPrivate *accessRequestsNotPrivateError
+	switch {
+	case errors.As(err, &notPrivate):
+		// The change requires its answer to say that the resource is
+		// private, and this one did not. The create answer said it is, so
+		// the two disagree about who can open the resource. That is the
+		// privacy failure, and it names no CRID.
 		return &publishPrivacyError{}
+	case err != nil:
+		return &AccessRequestsNotTurnedOnError{CRID: published.CRID, cause: err}
 	}
 	published.AccessRequests = resource.AccessRequests
 	published.AccessRequestsTurnedOn = true

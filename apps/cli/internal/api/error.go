@@ -96,6 +96,7 @@ func CustomerMessages() []string {
 		msgGrantEditUnconfirmed,
 		msgAccessRequestsUnsupported, msgAccessRequestsCreateIgnored, msgAccessRequestsCreateRefused, msgAccessRequestsSettingIgnored,
 		msgAccessRequestsCreateUnconfirmed, msgAccessRequestsSettingUnconfirmed, msgAccessRequestsNotTurnedOn, msgApprovalUnconfirmed,
+		msgAccessRequestsOnPublic, msgAccessRequestsPrivacyNotSaid,
 		msgRequestCodeNotFound, msgRequestDeviceNotFound, msgDeviceIDNotFound, msgDeviceIDsNotFound, msgRemovedThenNotFound, msgRemovedThenFailed,
 		msgRemovedThenKeysFailed, msgRemovedThenUnexplained, msgRemovedThenListNotRead, msgRemovedButStillListed, msgAnsweredButStillListed,
 		msgStillHasAccess, msgStillHaveAccess, msgSeeWhoHasAccess, msgApprovedPersonNotFound, msgRemovalUnconfirmed,
@@ -121,6 +122,15 @@ const (
 	// setting that was asked for.
 	msgAccessRequestsCreateUnconfirmed  = "the service did not turn on access requests for this resource, so no CRID was printed. The resource is private. Turn them on with `qurl requests <CRID> --on`; `qurl list` shows its CRID"
 	msgAccessRequestsSettingUnconfirmed = "the service did not confirm the change to access requests. Run `qurl grants <CRID>` to see the setting as it is now"
+
+	// msgAccessRequestsOnPublic is shown when the answer that turns access
+	// requests on says the resource is public. The service refuses the
+	// setting for a public resource, so this is a service that did not. The
+	// publisher must not be told what is true of a private resource only.
+	msgAccessRequestsOnPublic = "access requests are for a private resource, and the service's answer says this one is public: anyone who has the CRID can open it, whether you approve them or not. The service turned the setting on all the same. To turn it off again, run `qurl requests <CRID> --off`"
+	// msgAccessRequestsPrivacyNotSaid is the same refusal for an answer
+	// that does not say whether the resource is private.
+	msgAccessRequestsPrivacyNotSaid = "the service turned access requests on, but its answer does not say that this resource is private. Until you know that it is, treat it as a resource that anyone who has the CRID can open. Run `qurl grants <CRID>` to see the resource as it is"
 
 	// msgAccessRequestsNotTurnedOn is the headline for a publish that found
 	// the target already published as a private resource and could not turn
@@ -244,6 +254,24 @@ func (e *AccessRequestsNotTurnedOnError) Reason() string {
 }
 
 func (e *AccessRequestsNotTurnedOnError) Unwrap() error { return e.cause }
+
+// accessRequestsNotPrivateError is an answer that turned access requests on
+// for a resource it does not say is private: public says that it says the
+// resource is public. Nothing about the resource may then be presented as
+// private.
+type accessRequestsNotPrivateError struct{ public bool }
+
+func (e *accessRequestsNotPrivateError) Error() string { return e.UserMessage() }
+
+// UserMessage is the text the terminal rendering shows.
+func (e *accessRequestsNotPrivateError) UserMessage() string {
+	if e.public {
+		return msgAccessRequestsOnPublic
+	}
+	return msgAccessRequestsPrivacyNotSaid
+}
+
+func (e *accessRequestsNotPrivateError) Unwrap() error { return qurl.ErrInvalidAPIResponse }
 
 // ErrApprovedPersonNotFound marks a removal that named a device id no approved
 // person has. The command and the resource are fine; the thing that was named

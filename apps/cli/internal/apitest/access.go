@@ -109,6 +109,16 @@ func (s *Server) ListRequestCodes() {
 	s.listRequestCodes = true
 }
 
+// AcceptAccessRequestsOnPublic makes the mock turn access requests on for a
+// public resource instead of refusing. The service does not do that. A
+// client must never tell a publisher that such a resource opens only for
+// the people they allow, and this is how a test shows that it does not.
+func (s *Server) AcceptAccessRequestsOnPublic() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.acceptOnPublic = true
+}
+
 // SetAccessRequestsHasMore makes both listings of pending requests carry
 // meta.has_more with this value. Without it the member is left out, which
 // means the listing is complete.
@@ -186,7 +196,7 @@ func (s *Server) applyAccessRequestsSetting(stated *bool, existing bool) string 
 		return ""
 	}
 	switch {
-	case *stated && !s.private:
+	case *stated && !s.private && !s.acceptOnPublic:
 		return "access requests can be turned on only for a private resource"
 	case existing:
 		return ""

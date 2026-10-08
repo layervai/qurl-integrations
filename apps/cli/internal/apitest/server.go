@@ -75,6 +75,9 @@ type Server struct {
 	// listings, nil when the member is left out.
 	listRequestCodes      bool
 	accessRequestsHasMore *bool
+	// acceptOnPublic turns access requests on for a public resource instead
+	// of refusing; see AcceptAccessRequestsOnPublic.
+	acceptOnPublic bool
 	// refuseAccessRequestsMember makes a create or a change that carries
 	// access_requests a validation failure; see
 	// PlayStrictWithoutAccessRequests.

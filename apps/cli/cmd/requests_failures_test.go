@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"slices"
@@ -286,4 +287,83 @@ func TestGrantsRemoveSaysWhoLostAccessWhateverFailsNext(t *testing.T) {
 			t.Fatalf("approved people afterwards = %v, want both", got)
 		}
 	})
+}
+
+// TestRequestsOnSaysNothingIsSafeToSendUnlessTheResourceIsPrivate pins the
+// one sentence in this feature that must never be wrong. After `qurl
+// requests <CRID> --on` the command says that the resource's address is safe
+// to send to anyone, because a private resource opens only for the people
+// the publisher allows. It says so only when the service's answer says the
+// resource is private.
+//
+// The service refuses the setting for a public resource. One that accepted
+// it would otherwise have the command tell a publisher to hand out the
+// address of a public resource as if it were private. So an answer that
+// says public, or does not say, is an error in every output mode: no "safe
+// to send" line, no address, no document, exit 10, and nothing sent after
+// the one change.
+func TestRequestsOnSaysNothingIsSafeToSendUnlessTheResourceIsPrivate(t *testing.T) {
+	modes := [][]string{nil, {"-o", "json"}, {"--quiet"}}
+	for _, mode := range modes {
+		t.Run(fmt.Sprintf("the answer says public %v", mode), func(t *testing.T) {
+			srv := apitest.NewServer(t)
+			srv.SetResourceAccess(false)
+			srv.AcceptAccessRequestsOnPublic()
+			res := runCLI(t, &runOpts{args: append([]string{"--endpoint", srv.URL, "requests", srv.Key.CRID, "--on"}, mode...), linkSite: testLinkSite})
+			want := "Error: access requests are for a private resource, and the service's answer says this one is public: anyone who has the CRID can open it, whether you approve them or not. " +
+				"The service turned the setting on all the same. To turn it off again, run `qurl requests <CRID> --off`\n"
+			if res.code != exitcode.ServerError || res.stderr.String() != want {
+				t.Fatalf("exit = %d, want %d; stderr =\n%s\nwant\n%s", res.code, exitcode.ServerError, res.stderr.String(), want)
+			}
+			mustEmptyStdout(t, res)
+			if got := requestLog(srv); !slices.Equal(got, []string{"PATCH /v1/resources/" + srv.Key.CRID}) {
+				t.Fatalf("requests = %v, want the one change and nothing after it", got)
+			}
+			// The command the message names works, and says nothing about
+			// what is safe to send.
+			off := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "requests", srv.Key.CRID, "--off"}})
+			if off.code != 0 || !strings.Contains(off.stdout.String(), "Access requests are off for "+srv.Key.CRID) || strings.Contains(off.stdout.String(), "safe to send") {
+				t.Fatalf("--off afterwards: exit %d, stdout %q, stderr %q", off.code, off.stdout.String(), off.stderr.String())
+			}
+		})
+		t.Run(fmt.Sprintf("the answer does not say %v", mode), func(t *testing.T) {
+			srv := apitest.NewServer(t)
+			srv.Script(http.MethodPatch, "/v1/resources/"+srv.Key.CRID, func(w http.ResponseWriter, _ *http.Request) {
+				apitest.WriteEnvelope(t, w, http.StatusOK, map[string]any{
+					"resource_id": srv.Key.ResourceID, "crid": srv.Key.CRID, "type": "url", "status": "active", "access_requests": true,
+				}, nil)
+			})
+			res := runCLI(t, &runOpts{args: append([]string{"--endpoint", srv.URL, "requests", srv.Key.CRID, "--on"}, mode...), linkSite: testLinkSite})
+			if res.code != exitcode.ServerError || !strings.Contains(res.stderr.String(), "its answer does not say that this resource is private") {
+				t.Fatalf("exit = %d, want %d; stderr = %s", res.code, exitcode.ServerError, res.stderr.String())
+			}
+			mustEmptyStdout(t, res)
+		})
+	}
+	// Whatever the mode, nothing in either failure reads as the guidance.
+	for _, public := range []bool{true, false} {
+		srv := apitest.NewServer(t)
+		if public {
+			srv.SetResourceAccess(false)
+			srv.AcceptAccessRequestsOnPublic()
+		} else {
+			srv.Script(http.MethodPatch, "/v1/resources/"+srv.Key.CRID, func(w http.ResponseWriter, _ *http.Request) {
+				apitest.WriteEnvelope(t, w, http.StatusOK, map[string]any{
+					"resource_id": srv.Key.ResourceID, "crid": srv.Key.CRID, "type": "url", "status": "active", "access_requests": true,
+				}, nil)
+			})
+		}
+		res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "requests", srv.Key.CRID, "--on"}, linkSite: testLinkSite})
+		for _, never := range []string{"safe to send", "Send them", testLinkSite, "qurl approve"} {
+			if strings.Contains(res.stdout.String()+res.stderr.String(), never) {
+				t.Errorf("public %t: the output has %q:\n%s%s", public, never, res.stdout.String(), res.stderr.String())
+			}
+		}
+	}
+	// A private resource gets the guidance, as before.
+	srv := apitest.NewServer(t)
+	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "requests", srv.Key.CRID, "--on"}, linkSite: testLinkSite})
+	if res.code != 0 || !strings.Contains(res.stdout.String(), "safe to send to anyone: a private resource opens only for you and the people you allow.") {
+		t.Fatalf("a private resource: exit %d\n%s%s", res.code, res.stdout.String(), res.stderr.String())
+	}
 }
