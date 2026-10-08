@@ -497,8 +497,8 @@ type removalProgress struct {
 	listedBefore bool
 }
 
-// outcome is the start of every failure: who lost access, and who the
-// command did not get to.
+// outcome is the start of every failure: the people whose removal the
+// service answered as made, and the people the command did not get to.
 func (p *removalProgress) outcome() *PasskeyRemovalError {
 	return &PasskeyRemovalError{ID: p.id, Removed: p.named[:p.removed], NotRemoved: p.named[p.removed:]}
 }
@@ -553,9 +553,11 @@ func (p *removalProgress) listNotRead(cause error) *PasskeyRemovalError {
 // a change. Its text is not shown: the headline says it all.
 func (p *removalProgress) listNotSaid() *PasskeyRemovalError {
 	outcome := p.outcome()
-	outcome.stop, outcome.cause = stoppedListNeverSaid, &answerError{message: msgRemovalUnconfirmed}
+	outcome.cause = &answerError{message: msgRemovalListNotSaid}
 	if p.listedBefore {
 		outcome.stop = stoppedListMissingAfter
+	} else {
+		outcome.stop = stoppedListNeverSaid
 	}
 	return outcome
 }

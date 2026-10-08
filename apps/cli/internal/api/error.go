@@ -99,7 +99,7 @@ func CustomerMessages() []string {
 		msgAccessRequestsOnPublic, msgAccessRequestsPrivacyNotSaid,
 		msgRequestCodeNotFound, msgRequestDeviceNotFound, msgDeviceIDNotFound, msgDeviceIDsNotFound, msgRemovedThenNotFound, msgRemovedThenFailed,
 		msgRemovedThenKeysFailed, msgRemovedThenUnexplained, msgRemovedThenListNotRead, msgRemovedButStillListed, msgAnsweredButStillListed, msgRemovalListMissingAfter, msgRemovalListNeverSaid, msgNothingMoreFromService,
-		msgStillHasAccess, msgStillHaveAccess, msgSeeWhoHasAccess, msgApprovedPersonNotFound, msgRemovalUnconfirmed,
+		msgStillHasAccess, msgStillHaveAccess, msgSeeWhoHasAccess, msgApprovedPersonNotFound, msgRemovalUnconfirmed, msgRemovalListNotSaid,
 	}
 }
 
@@ -206,6 +206,10 @@ const (
 	// msgRemovalUnconfirmed is shown when the service answered a removal
 	// with success and the resource still lists the person.
 	msgRemovalUnconfirmed = "the service still lists a person whose access was removed. Run `qurl grants <CRID>` to see who has access now"
+	// msgRemovalListNotSaid is the cause of a removal that the service
+	// answered as made and then sent no list of approved people for. It is
+	// there for the exit code and is not displayed: the headline says more.
+	msgRemovalListNotSaid = "the answer after the removal has no list of approved people, so the removal is not confirmed"
 )
 
 // ErrAccessRequestsUnsupported marks a service that does not offer access
@@ -327,7 +331,9 @@ var ErrApprovedPersonNotFound = errors.New(msgApprovedPersonNotFound)
 type PasskeyRemovalError struct {
 	// ID is the resource identifier the command was given.
 	ID string
-	// Removed are the device ids whose access was taken away.
+	// Removed are the device ids whose removal the service answered as
+	// made. Where the list read afterwards could not confirm it, that
+	// answer is all the command knows.
 	Removed []string
 	// NotFound are the device ids the service did not find: the ones that
 	// are not on the list, and one whose removal it answered with "not
