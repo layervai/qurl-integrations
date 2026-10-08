@@ -1,0 +1,9 @@
+{
+  "crid": "qhtpthw4qt7wkw7khghr6x3z4hsfyn4zbuyhnee4i6bi67yu6yytgvwdbb4q",
+  "removed": [
+    "abcd-efgh-2345-mnop"
+  ],
+  "not_found": [],
+  "not_removed": [],
+  "public_keys_command": "qurl grants qhtpthw4qt7wkw7khghr6x3z4hsfyn4zbuyhnee4i6bi67yu6yytgvwdbb4q --add cHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHA="
+}

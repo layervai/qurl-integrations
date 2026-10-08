@@ -402,7 +402,7 @@ func CustomerMessages() []string {
 		msgRequestsSendAddress, msgRequestsSendCRID, msgRequestsNextStep, msgRequestsNextStepNoSite,
 		msgRequestsApproveCommand, msgRequestsSafeToSend, msgRequestsSafeToSendCRID,
 		msgRequestsOn, msgRequestsOff, msgRequestsOffOnePerson, msgRequestsOffPeople, msgRequestsOffPeopleUnknown,
-		msgRequesterNameNote, msgRemovalKeysNotChanged, msgRequestsMayBeMore, msgRequestsMayBeMoreForOne, msgDeniedDevice,
+		msgRequesterNameNote, msgRemovalKeysNotChanged, msgRequestsMayBeMore, msgRequestsMayBeMoreForOne, msgDeniedDevice, msgRemovalFinishKeys,
 		msgNoPendingRequests, msgNoPendingRequestsForOne, msgApproveOnlyGivenCodes,
 		msgRequesterNoName, msgRequesterNameUnchecked,
 		msgApproved, msgApprovedCanOpen, msgRemoveCommand, msgDenied,

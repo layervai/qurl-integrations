@@ -3,6 +3,7 @@ package output
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -765,6 +766,21 @@ func TestRemovalOutcomeDocumentAndMessage(t *testing.T) {
 			message: "Error: access was taken away from " + first + ". Then no approved person had the device id " + second + " on this resource, and the command stopped. " + third + " still has access.\n\n" +
 				"  Run `qurl grants " + accessCRID + "` to see who has access now.\n",
 			document: `{"crid":"` + accessCRID + `","removed":["` + first + `"],"not_found":["` + second + `"],"not_removed":["` + third + `"]}`,
+		},
+		{
+			// Every person was removed, and then the change to the public
+			// keys failed. Who lost access, why the key change failed, and
+			// the command that makes the key change alone.
+			name: "all removed, then the key change failed",
+			outcome: &qurlapi.PasskeyRemovalError{
+				ID: accessCRID, Removed: []string{first, second},
+				KeyChange: errors.New("the service is not reachable"), KeyChangeCommand: "qurl grants " + accessCRID + " --add a-public-key",
+			},
+			message: "Error: access was taken away from " + first + " and " + second + ". Then the change to the public keys failed.\n\n" +
+				"  the service is not reachable\n\n" +
+				"  Run `qurl grants " + accessCRID + "` to see who has access now.\n" +
+				"  To make the change to the public keys, run: qurl grants " + accessCRID + " --add a-public-key\n",
+			document: `{"crid":"` + accessCRID + `","removed":["` + first + `","` + second + `"],"not_found":[],"not_removed":[],"public_keys_command":"qurl` + "grants" + accessCRID + "--add" + `a-public-key"}`,
 		},
 		{
 			name:    "the last one not found",

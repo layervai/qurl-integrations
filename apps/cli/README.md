@@ -993,6 +993,12 @@ says exactly what happened: from whom access was taken away, which device id
 was not found, and who still has access. Access that was taken away never
 reads as "nothing was removed". `qurl grants <CRID>` shows who has access now.
 
+The same holds when a command that also names public keys removes every person
+and then fails to change the keys. The command says from whom access was taken
+away, that the change to the public keys failed and why, and the command that
+makes that change alone. Run that command to finish: the first one, run again,
+would stop at the device ids that are already off the list.
+
 A list holds at most 256 devices. `--add` and `--remove` each take at most 256
 public keys in one command, which is checked before anything is sent. The
 limit on the list that results is the service's: it refuses a change that
@@ -1507,7 +1513,7 @@ Access requests in `-o json`:
 | `approve` | `crid`, `approved` (`true`), `device_id`, `name`, `name_verified` (always `false`), `approved_at`, and `name_note`: always present, one sentence |
 | `deny` | `crid`, `denied` (`true`), and what you named the request by: `device_id`, or `code` |
 | `grants` | the resource document with `allowed_device_keys`, `approved_people` (an array, `[]` when there are none, of `name`, `name_verified`, `device_id`, `approved_at`), and `access_requests` when the service says |
-| `grants --remove <device id>` that did not remove everyone it named | `crid` and three arrays that are always present and together hold every device id the command named: `removed`, `not_found`, `not_removed`. `public_keys_changed` (`false`) when the command also named public keys |
+| `grants --remove <device id>` that did not finish | `crid` and three arrays that are always present and together hold every device id the command named: `removed`, `not_found`, `not_removed`. `public_keys_changed` (`false`) when a removal failed and the command also named public keys. `public_keys_command` when every person was removed and the change to the public keys then failed: the command that makes that change alone |
 
 A requester's `name` is that person's own text, exactly like a publisher's:
 quote or escape it before showing it, and never treat it as proof of who
@@ -1528,7 +1534,10 @@ in the document it reads:
 A removal that fails is the one failure that writes a document to stdout:
 exit code 5 when a device id was not found, with the message on stderr as in
 text mode. Read `removed` before deciding what to do next: those people have
-lost access, whatever the exit code says.
+lost access, whatever the exit code says. When `public_keys_command` is
+present, every person was removed and only the change to the public keys is
+left: the exit code is the one of that failure, and running that command
+finishes the job.
 
 ### Exit codes
 

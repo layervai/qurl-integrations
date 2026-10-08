@@ -41,7 +41,9 @@ access is taken away. One that is not on the list is an error and removes
 nothing, so a mistyped id is never mistaken for access taken away. Then each
 person is removed with a change of their own, before any change to public
 keys. If one of those changes fails after others were made, the error says
-exactly which device ids were removed and which were not.
+exactly which device ids were removed and which were not. If the change to
+public keys fails after the people were removed, the error says who lost
+access and gives the command that makes that change alone.
 
 A list holds at most 256 devices. --add and --remove each take at most 256
 public keys in one command, which is checked before anything is sent. The
@@ -73,7 +75,7 @@ issued keep their own expiry.`,
 			if err != nil {
 				return exitcode.UsageError(err)
 			}
-			if err := validateGrantFlags(add, removeKeys, replaced, clearGrants, len(removePeople) > 0); err != nil {
+			if err := validateGrantFlags(add, removeKeys, clearGrants, len(removePeople) > 0); err != nil {
 				return exitcode.UsageError(err)
 			}
 			assessment, err := cridux.Assess(args[0])
@@ -145,10 +147,39 @@ func changeGrants(ctx context.Context, client qurlapi.Client, printer *output.Pr
 			return nil, reportRemovalFailure(printer, err, len(add)+len(removeKeys) > 0)
 		}
 	}
-	if len(add)+len(removeKeys) > 0 {
-		resource, err = client.EditDeviceGrants(ctx, id, add, removeKeys)
+	if len(add)+len(removeKeys) == 0 {
+		return resource, nil
 	}
-	return resource, err
+	resource, err = client.EditDeviceGrants(ctx, id, add, removeKeys)
+	if err == nil || len(removePeople) == 0 {
+		return resource, err
+	}
+	// The people are already off the list. The failure of the key change
+	// alone would not say so, and the same command run again would stop at
+	// device ids that are gone. The outcome names who lost access, and the
+	// command that makes the key change alone.
+	outcome := &qurlapi.PasskeyRemovalError{
+		ID: id, Removed: removePeople,
+		KeyChange: err, KeyChangeCommand: keyChangeCommand(id, add, removeKeys),
+	}
+	if printErr := printer.RemovalOutcome(outcome); printErr != nil {
+		return nil, errors.Join(outcome, printErr)
+	}
+	return nil, outcome
+}
+
+// keyChangeCommand is the `qurl grants` command that adds and removes these
+// public keys and nothing else.
+func keyChangeCommand(id string, add, removeKeys []string) string {
+	words := make([]string, 0, 3+2*(len(add)+len(removeKeys)))
+	words = append(words, "qurl", "grants", id)
+	for _, key := range add {
+		words = append(words, "--add", key)
+	}
+	for _, key := range removeKeys {
+		words = append(words, "--remove", key)
+	}
+	return strings.Join(words, " ")
 }
 
 // reportRemovalFailure finishes a `qurl grants --remove` whose removal of
@@ -214,10 +245,7 @@ func splitRemovals(values []string) (keys, deviceIDs []string, err error) {
 // valid: it reads the lists. removeKeys are the public keys given to
 // --remove, already checked by splitRemovals, and removePeople says that
 // --remove was also given a device id.
-func validateGrantFlags(add, removeKeys, replaced []string, clearGrants, removePeople bool) error {
-	if len(replaced) > 0 {
-		return errors.New(msgGrantsReplaceRemoved)
-	}
+func validateGrantFlags(add, removeKeys []string, clearGrants, removePeople bool) error {
 	if clearGrants && (len(add)+len(removeKeys) > 0 || removePeople) {
 		return errors.New(msgGrantsClearWithEdit)
 	}

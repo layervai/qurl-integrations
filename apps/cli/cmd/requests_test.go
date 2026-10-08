@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -1529,6 +1530,80 @@ func TestGrantsRemoveTakesADeviceID(t *testing.T) {
 		}
 		mustEmptyStdout(t, res)
 	})
+	// Every person is removed, and then the change to the public keys
+	// fails. The failure alone would say nothing about the people, who have
+	// lost access, and the same command run again would stop at device ids
+	// that are gone. So the outcome says who lost access, that the key
+	// change failed and why, where to see the list as it is, and the command
+	// that makes the key change alone. The exit code is the failure's.
+	t.Run("the people are removed and then the key change fails", func(t *testing.T) {
+		for _, mode := range [][]string{nil, {"-o", "json"}, {"--quiet"}} {
+			srv := seed(t)
+			base := "/v1/resources/" + srv.Key.CRID
+			srv.Script(http.MethodPatch, base, func(w http.ResponseWriter, _ *http.Request) {
+				apitest.WriteProblem(t, w, http.StatusServiceUnavailable, "service_unavailable", "Service Unavailable", "the resource is being changed; try again")
+			})
+			command := []string{"grants", srv.Key.CRID, "--add", grantKey(2), "--remove", requesterDevice, "--remove", grantKey(1), "--remove", otherDevice}
+			res := runCLI(t, &runOpts{args: append(append([]string{"--endpoint", srv.URL}, command...), mode...)})
+			finish := "qurl grants " + srv.Key.CRID + " --add " + grantKey(2) + " --remove " + grantKey(1)
+			wantStderr := "Error: access was taken away from " + requesterDevice + " and " + otherDevice + ". Then the change to the public keys failed.\n\n" +
+				"  the resource is being changed; try again\n\n" +
+				"  Run `qurl grants " + srv.Key.CRID + "` to see who has access now.\n" +
+				"  To make the change to the public keys, run: " + finish + "\n" +
+				"  Request ID: req_test\n"
+			if res.code != exitcode.Unavailable || res.stderr.String() != wantStderr {
+				t.Fatalf("%v: exit = %d, want %d; stderr =\n%s\nwant\n%s", mode, res.code, exitcode.Unavailable, res.stderr.String(), wantStderr)
+			}
+			if strings.Contains(res.stderr.String(), "No public key was added or removed") || strings.Contains(res.stderr.String(), "nothing was removed") {
+				t.Fatalf("%v: the outcome claims something it does not know:\n%s", mode, res.stderr.String())
+			}
+			if len(mode) == 2 {
+				want := `{"crid":"` + srv.Key.CRID + `","removed":["` + requesterDevice + `","` + otherDevice + `"],"not_found":[],"not_removed":[],"public_keys_command":"` + finish + `"}`
+				var compact bytes.Buffer
+				if err := json.Compact(&compact, res.stdout.Bytes()); err != nil || compact.String() != want {
+					t.Fatalf("outcome document = %s (%v), want %s", res.stdout.String(), err, want)
+				}
+			} else {
+				mustEmptyStdout(t, res)
+			}
+			want := []string{"GET " + base, "DELETE " + base + "/allowed-passkeys/" + requesterDevice, "DELETE " + base + "/allowed-passkeys/" + otherDevice, "GET " + base, "PATCH " + base}
+			if got := requestLog(srv); !slices.Equal(got, want) {
+				t.Fatalf("%v: requests = %v, want %v", mode, got, want)
+			}
+			// What the outcome said is what happened: the people are off
+			// the list and the keys are as they were.
+			if got := approvedDevices(t, srv); len(got) != 0 {
+				t.Fatalf("%v: approved people afterwards = %v, want none", mode, got)
+			}
+			// The same command again stops at the device ids that are gone,
+			// which is why the outcome names another one.
+			again := runCLI(t, &runOpts{args: append([]string{"--endpoint", srv.URL}, command...)})
+			if again.code != exitcode.NotFound || !strings.Contains(again.stderr.String(), "so nothing was removed") {
+				t.Fatalf("%v: the same command again: exit %d, stderr %q", mode, again.code, again.stderr.String())
+			}
+			// The command the outcome names finishes the job.
+			done := runCLI(t, &runOpts{args: append([]string{"--endpoint", srv.URL}, append(strings.Fields(finish)[1:], "-o", "json")...)})
+			var lists struct {
+				Keys []string `json:"allowed_device_keys"`
+			}
+			if err := json.Unmarshal(done.stdout.Bytes(), &lists); done.code != 0 || err != nil || !slices.Equal(lists.Keys, []string{grantKey(2)}) {
+				t.Fatalf("%v: the finishing command: exit %d, %v, stdout %s, stderr %s", mode, done.code, err, done.stdout.String(), done.stderr.String())
+			}
+		}
+	})
+	// A key change that fails with no person removed is that failure and
+	// nothing more: there is no outcome to report.
+	t.Run("a key change alone that fails is only that failure", func(t *testing.T) {
+		srv := seed(t)
+		srv.Script(http.MethodPatch, "/v1/resources/"+srv.Key.CRID, func(w http.ResponseWriter, _ *http.Request) {
+			apitest.WriteProblem(t, w, http.StatusServiceUnavailable, "service_unavailable", "Service Unavailable", "the resource is being changed; try again")
+		})
+		res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "grants", srv.Key.CRID, "--add", grantKey(2), "-o", "json"}})
+		if res.code != exitcode.Unavailable || strings.Contains(res.stderr.String(), "access was taken away") || strings.Contains(res.stderr.String(), "To make the change") {
+			t.Fatalf("exit %d, stderr %q", res.code, res.stderr.String())
+		}
+		mustEmptyStdout(t, res)
+	})
 	t.Run("usage errors send nothing", func(t *testing.T) {
 		srv := seed(t)
 		for _, test := range []struct {
@@ -1936,6 +2011,10 @@ func TestAccessRequestCopySaysToApproveOnlyGivenCodes(t *testing.T) {
 		"checks every device id against it before it takes any access away",
 		"Access that was taken away never reads as \"nothing was removed\".",
 		"removed, not_found, not_removed", "for at most 256 people in one command",
+		// What a command says when it removed every person and then could
+		// not change the public keys.
+		"that the change to the public keys failed and why, and the command that makes that change alone",
+		"public_keys_command when every person was removed and the change to the public keys then failed",
 	} {
 		if !strings.Contains(readme, want) {
 			t.Errorf("README lacks %q", want)
@@ -1953,6 +2032,7 @@ func TestAccessRequestCopySaysToApproveOnlyGivenCodes(t *testing.T) {
 		"Every device id is checked against the list before any access is taken away.",
 		"One that is not on the list is an error and removes nothing, so a mistyped id is never mistaken for access taken away.",
 		"the error says exactly which device ids were removed and which were not",
+		"If the change to public keys fails after the people were removed, the error says who lost access and gives the command that makes that change alone.",
 		"for at most 256 people in one command",
 	} {
 		if !strings.Contains(grants, want) {

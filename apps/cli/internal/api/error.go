@@ -97,6 +97,7 @@ func CustomerMessages() []string {
 		msgAccessRequestsUnsupported, msgAccessRequestsCreateIgnored, msgAccessRequestsCreateRefused, msgAccessRequestsSettingIgnored,
 		msgAccessRequestsCreateUnconfirmed, msgAccessRequestsSettingUnconfirmed, msgAccessRequestsNotTurnedOn, msgApprovalUnconfirmed,
 		msgRequestCodeNotFound, msgRequestDeviceNotFound, msgDenyByDeviceRefused, msgDeviceIDNotFound, msgDeviceIDsNotFound, msgRemovedThenNotFound, msgRemovedThenFailed,
+		msgRemovedThenKeysFailed,
 		msgStillHasAccess, msgStillHaveAccess, msgSeeWhoHasAccess, msgApprovedPersonNotFound, msgRemovalUnconfirmed,
 	}
 }
@@ -156,6 +157,10 @@ const (
 	// removal failed for another reason.
 	msgRemovedThenNotFound = "access was taken away from %s. Then no approved person had the device id %s on this resource, and the command stopped"
 	msgRemovedThenFailed   = "access was taken away from %s. Then taking it away from %s failed, and the command stopped"
+	// Every removal was made, and the change to public keys that the same
+	// command named failed. The message does not say whether any key was
+	// changed: a change that failed may still have been made.
+	msgRemovedThenKeysFailed = "access was taken away from %s. Then the change to the public keys failed"
 	// The device ids the command named that still have access as far as it
 	// knows, and the next step.
 	msgStillHasAccess  = "%s still has access"
@@ -273,6 +278,14 @@ type PasskeyRemovalError struct {
 	// public keys in the same command. That change comes after the removals,
 	// so it was not made, and the outcome says so.
 	KeysNotChanged bool
+	// KeyChange is set by a caller whose removals were all made and whose
+	// change to public keys then failed: it is that failure. The people in
+	// Removed have lost access all the same, which the failure alone would
+	// not say, and running the same command again would find them gone.
+	KeyChange error
+	// KeyChangeCommand is the command that makes the change to public keys
+	// alone: what finishes the job after KeyChange.
+	KeyChangeCommand string
 
 	// failed is the device id whose removal failed for another reason than
 	// not being found, and cause that reason.
@@ -287,6 +300,8 @@ type PasskeyRemovalError struct {
 func (e *PasskeyRemovalError) Headline() string {
 	var text string
 	switch {
+	case e.KeyChange != nil:
+		text = fmt.Sprintf(msgRemovedThenKeysFailed, wordList(e.Removed))
 	case e.failed != "":
 		text = fmt.Sprintf(msgRemovedThenFailed, wordList(e.Removed), e.failed)
 	case len(e.Removed) > 0:
@@ -305,19 +320,24 @@ func (e *PasskeyRemovalError) Headline() string {
 	return text + ". " + fmt.Sprintf(msgStillHaveAccess, wordList(e.NotRemoved))
 }
 
-// Reason is why a removal failed, when it failed for another reason than a
-// device id that was not found; empty otherwise. It is the service's own text
-// for a problem it reported, and the failure as it is otherwise.
+// Reason is why a removal, or the change to public keys after the removals,
+// failed, when it failed for another reason than a device id that was not
+// found; empty otherwise. It is the service's own text for a problem it
+// reported, and the failure as it is otherwise.
 func (e *PasskeyRemovalError) Reason() string {
-	if e.cause == nil {
+	failure := e.cause
+	if e.KeyChange != nil {
+		failure = e.KeyChange
+	}
+	if failure == nil {
 		return ""
 	}
 	var worded interface{ UserMessage() string }
-	if errors.As(e.cause, &worded) {
+	if errors.As(failure, &worded) {
 		return worded.UserMessage()
 	}
 	var problem *Error
-	if errors.As(e.cause, &problem) {
+	if errors.As(failure, &problem) {
 		if problem.Detail != "" {
 			return problem.Detail
 		}
@@ -325,7 +345,7 @@ func (e *PasskeyRemovalError) Reason() string {
 			return problem.Title
 		}
 	}
-	return e.cause.Error()
+	return failure.Error()
 }
 
 // NextStep is the command that shows who has access now.
@@ -358,6 +378,9 @@ func (e *PasskeyRemovalError) Unwrap() []error {
 	}
 	if e.cause != nil {
 		chain = append(chain, e.cause)
+	}
+	if e.KeyChange != nil {
+		chain = append(chain, e.KeyChange)
 	}
 	return chain
 }

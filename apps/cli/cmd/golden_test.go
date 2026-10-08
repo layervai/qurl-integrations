@@ -576,6 +576,41 @@ func TestGoldens(t *testing.T) {
 			stderrGolden: true,
 		},
 		{
+			// Every person is removed, and then the change to the public
+			// keys fails: who lost access, why the key change failed, and
+			// the command that makes the key change alone.
+			name: "error_grants_remove_keys_failed",
+			args: func(srv *apitest.Server) []string {
+				return []string{"grants", srv.Key.CRID, "--remove", requesterDevice, "--add", goldenDevicePublicKey}
+			},
+			prepare: func(srv *apitest.Server) {
+				srv.AddApprovedPerson(requesterDevice, requesterName)
+				srv.Script(http.MethodPatch, "/v1/resources/"+srv.Key.CRID, func(w http.ResponseWriter, _ *http.Request) {
+					apitest.WriteProblem(t, w, http.StatusServiceUnavailable, "service_unavailable", "Service Unavailable", "the resource is being changed; try again")
+				})
+			},
+			variants:     []string{"tty", "plain"},
+			wantCode:     11,
+			stderrGolden: true,
+		},
+		{
+			// The script-facing form of the same outcome.
+			name: "error_grants_remove_keys_failed_script",
+			args: func(srv *apitest.Server) []string {
+				return []string{"grants", srv.Key.CRID, "--remove", requesterDevice, "--add", goldenDevicePublicKey}
+			},
+			prepare: func(srv *apitest.Server) {
+				srv.AddApprovedPerson(requesterDevice, requesterName)
+				srv.Script(http.MethodPatch, "/v1/resources/"+srv.Key.CRID, func(w http.ResponseWriter, _ *http.Request) {
+					apitest.WriteProblem(t, w, http.StatusServiceUnavailable, "service_unavailable", "Service Unavailable", "the resource is being changed; try again")
+				})
+			},
+			variants:     []string{"json"},
+			wantCode:     11,
+			stdoutGolden: true,
+			stderrGolden: true,
+		},
+		{
 			// A terminal gets the publisher and creation date with the link on
 			// stdout; JSON carries them in the document. Neither writes stderr.
 			name:         "share",

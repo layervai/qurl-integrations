@@ -91,6 +91,12 @@ const (
 	// msgRemovalKeysNotChanged follows a removal of approved people that did
 	// not finish, when the same command also named public keys.
 	msgRemovalKeysNotChanged = "No public key was added or removed: that change comes after the removals, and they did not finish."
+	// msgRemovalFinishKeys follows a removal whose change to public keys
+	// failed after every person was removed. %s is the command that makes
+	// that change alone. It can be run whether or not the failed change was
+	// made: a key that is already on the list, or already off it, is left
+	// as it is.
+	msgRemovalFinishKeys = "To make the change to the public keys, run: %s"
 )
 
 // requesterName is the only form in which a requester's name sits beside
@@ -414,6 +420,10 @@ type removalOutcomeJSON struct {
 	// PublicKeysChanged is present, and false, only when the command also
 	// named public keys to add or remove: that change was not made.
 	PublicKeysChanged *bool `json:"public_keys_changed,omitempty"`
+	// PublicKeysCommand is present only when every removal was made and the
+	// change to public keys then failed: the command that makes that change
+	// alone, which is what finishes the job.
+	PublicKeysCommand string `json:"public_keys_command,omitempty"`
 }
 
 // RemovalOutcome writes, in JSON mode only, what happened to each device id
@@ -434,6 +444,9 @@ func (p *Printer) RemovalOutcome(outcome *qurlapi.PasskeyRemovalError) error {
 	if outcome.KeysNotChanged {
 		changed := false
 		document.PublicKeysChanged = &changed
+	}
+	if outcome.KeyChange != nil {
+		document.PublicKeysCommand = outcome.KeyChangeCommand
 	}
 	return p.writeJSON(document)
 }
