@@ -182,6 +182,49 @@ func TestPublishKeepsNothingWhenAPrivacyWasNamed(t *testing.T) {
 	}
 }
 
+// TestPublishConflictCarriesTheNamedFlags pins that a conflict knows which
+// access flags the caller's command line carried, for every way a conflict is
+// recognized: the next step is written from them. The flags are never sent.
+func TestPublishConflictCarriesTheNamedFlags(t *testing.T) {
+	named := []string{"--private", "--allow-device-key"}
+	opts := PublishOptions{AllowedDeviceKeys: []string{"asked"}, NamedAccessFlags: named}
+	for name, answer := range map[string]http.HandlerFunc{
+		"the privacy code": func(w http.ResponseWriter, _ *http.Request) {
+			apitest.WriteProblem(t, w, http.StatusBadRequest, apitest.CodePrivacyMismatch, "Privacy Mismatch", "d")
+		},
+		"the device-list code": func(w http.ResponseWriter, _ *http.Request) {
+			apitest.WriteProblem(t, w, http.StatusBadRequest, apitest.CodeDeviceKeysMismatch, "Device Keys Mismatch", "d")
+		},
+		"the older answer": func(w http.ResponseWriter, _ *http.Request) {
+			apitest.WriteProblem(t, w, http.StatusBadRequest, "invalid_input", "Invalid Input", apitest.LegacyAccessSettingsDetail)
+		},
+	} {
+		srv := apitest.NewServer(t)
+		srv.Script(http.MethodPost, "/v1/resources", answer)
+		_, err := newTestClient(t, srv, nil).Publish(t.Context(), existingTarget, opts)
+		var conflict *PublishAccessConflictError
+		if !errors.As(err, &conflict) || !slices.Equal(conflict.NamedFlags, named) {
+			t.Fatalf("%s: error = %v with named flags %v, want a conflict that carries %v", name, err, conflict, named)
+		}
+		if body := string(srv.Requests()[0].Body); strings.Contains(body, "--") || strings.Contains(strings.ToLower(body), "named") {
+			t.Fatalf("%s: the create request carries the flag names: %s", name, body)
+		}
+	}
+
+	// An accepted request for a resource that existed with another list.
+	srv := apitest.NewServer(t)
+	srv.Script(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		apitest.WriteEnvelope(t, w, http.StatusCreated, map[string]any{
+			"resource_id": srv.Key.ResourceID, "crid": srv.Key.CRID, "private": true, "allowed_device_keys": []string{"stored"},
+		}, map[string]any{"found_existing": true})
+	})
+	_, err := newTestClient(t, srv, nil).Publish(t.Context(), existingTarget, opts)
+	var conflict *PublishAccessConflictError
+	if !errors.As(err, &conflict) || !slices.Equal(conflict.NamedFlags, named) {
+		t.Fatalf("accepted request: error = %v, want a conflict that carries %v", err, named)
+	}
+}
+
 // publicExistsRefusal is the service's answer to a create that states
 // private for a target that is already published as public.
 func publicExistsRefusal(t *testing.T) http.HandlerFunc {

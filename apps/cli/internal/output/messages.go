@@ -143,6 +143,14 @@ const (
 	// be the list of allowed devices.
 	hintPublishOtherDevices = "Hint: publishing again does not change the allowed devices of a resource that exists. Run the command again without --allow-device-key, then change the allowed devices with `qurl grants <CRID> --add <public-key>` or `--remove <public-key>`."
 
+	// hintPublishExistingPublicWithout is hintPublishExistingPublic for a
+	// command line that carried access flags, which is every command line
+	// that reaches this conflict: a publish with none keeps the public
+	// resource. Adding --public to such a command line is a usage error, so
+	// the hint names what to leave out. %s is the flag, or the flags, as
+	// they were written.
+	hintPublishExistingPublicWithout = "Hint: to keep using the public resource, run the command again with --public and without %s. To make it private instead, delete it with `qurl delete <CRID>` (`qurl list` shows its CRID) and publish again; the new resource gets a new CRID."
+
 	// msgPublishKeptPublic is the warning for a publish that named no privacy
 	// and found the target already published as public: the resource is kept
 	// and stays public. A person who published it while public was the
@@ -380,6 +388,7 @@ func CustomerMessages() []string {
 		labelAccess, msgPublishPrivate, msgPublishPublic,
 		hintPublishExistingPublic, hintPublishExistingPrivate, hintPublishAccessDiffers, hintPublishOtherDevices,
 		msgPublishKeptPublic,
+		hintPublishExistingPublicWithout,
 		labelPublisher, labelCreated,
 		msgPublisherNoName, msgPublisherUnverified, msgPublisherVerified,
 		msgPublisherSelfDeclared, msgPublisherUnconfirmed,

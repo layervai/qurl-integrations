@@ -89,9 +89,10 @@ owns the share and turns it off when it exits.`,
 			if err := validatePublishAccessFlags(cmd, public, private, allowedDeviceKeys); err != nil {
 				return exitcode.UsageError(err)
 			}
+			named := publishAccessFlags(cmd)
 			access := qurlapi.PublishOptions{
 				Public: public, AllowedDeviceKeys: allowedDeviceKeys,
-				KeepExistingPublic: !publishNamesAccess(cmd),
+				KeepExistingPublic: len(named) == 0, NamedAccessFlags: named,
 			}
 			target, err := classifyPublishTarget(args[0])
 			if err != nil {
@@ -148,20 +149,27 @@ owns the share and turns it off when it exits.`,
 	return cmd
 }
 
-// publishNamesAccess reports whether the command line said anything about
-// who may open the resource. A publish that said nothing asks for a private
-// resource only because that is the default, so it keeps a target that is
-// already published as public instead of failing: the person may have
-// published it while public was the default and never chose either. A flag
-// that was given, in any form, is a choice, and a resource that cannot be
-// given that way stays a conflict.
-func publishNamesAccess(cmd *cobra.Command) bool {
+// publishAccessFlags returns the flags on the command line that said who may
+// open the resource, as they were written. A publish that gave none asks for
+// a private resource only because that is the default, so it keeps a target
+// that is already published as public instead of failing: the person may
+// have published it while public was the default and never chose either. A
+// flag that was given, in any form, is a choice, and a resource that cannot
+// be given that way stays a conflict, whose next step names these flags.
+func publishAccessFlags(cmd *cobra.Command) []string {
+	var named []string
 	for _, name := range []string{"public", "private", "allow-device-key"} {
-		if cmd.Flags().Changed(name) {
-			return true
+		flag := cmd.Flags().Lookup(name)
+		if flag == nil || !flag.Changed {
+			continue
 		}
+		written := "--" + name
+		if flag.Value.Type() == "bool" && flag.Value.String() == "false" {
+			written += "=false"
+		}
+		named = append(named, written)
 	}
-	return false
+	return named
 }
 
 // validatePublishAccessFlags refuses flag combinations that contradict each

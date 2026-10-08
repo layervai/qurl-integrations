@@ -402,6 +402,122 @@ func TestPublishWithADeviceListThatDiffersIsAConflict(t *testing.T) {
 	}
 }
 
+// TestPublishConflictHintsCanBeFollowed runs each privacy conflict and then
+// the command line its hint tells the publisher to run, and requires that
+// second command to work. The step that keeps a public resource is --public
+// without the flag that was given; adding --public to the first command line,
+// which is how the hint once read, is a usage error. The step that keeps a
+// private resource is the same command without --public.
+func TestPublishConflictHintsCanBeFollowed(t *testing.T) {
+	for _, test := range []struct {
+		name            string
+		existingPrivate bool
+		// given is the command line that conflicts, hint what its hint must
+		// say, and followed the command line the hint describes.
+		given    []string
+		hint     string
+		followed []string
+		// deadEnd is the given command line with --public added. It is
+		// empty where the hint never suggested that.
+		deadEnd []string
+	}{
+		{
+			name: "--private for a public target", given: []string{"--private"},
+			hint:     "run the command again with --public and without --private.",
+			followed: []string{"--public"}, deadEnd: []string{"--private", "--public"},
+		},
+		{
+			name: "--allow-device-key for a public target", given: []string{"--allow-device-key", goldenDevicePublicKey},
+			hint:     "run the command again with --public and without --allow-device-key.",
+			followed: []string{"--public"}, deadEnd: []string{"--allow-device-key", goldenDevicePublicKey, "--public"},
+		},
+		{
+			name: "--public=false for a public target", given: []string{"--public=false"},
+			hint:     "run the command again with --public and without --public=false.",
+			followed: []string{"--public"},
+		},
+		{
+			name: "--public for a private target", existingPrivate: true, given: []string{"--public"},
+			hint: "run the command again without --public.",
+		},
+	} {
+		for _, local := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/local=%t", test.name, local), func(t *testing.T) {
+				run := func(flags []string, serves bool) (*runResult, *apitest.Server) {
+					srv := apitest.NewServer(t)
+					srv.SetResourceAccess(test.existingPrivate)
+					srv.SetPublishFoundExisting(true)
+					opts := &runOpts{args: append([]string{"--endpoint", srv.URL, "publish", privacyRemoteTarget}, flags...)}
+					switch {
+					case local && serves:
+						opts = servingLocalPublish(t, srv, true, flags...)
+					case local:
+						opts = refusingLocalPublish(t, srv, flags...)
+					}
+					return runCLI(t, opts), srv
+				}
+
+				res, _ := run(test.given, false)
+				if res.code != exitcode.Conflict || !strings.Contains(res.stderr.String(), test.hint) {
+					t.Fatalf("given %v: exit %d, want %d with the hint %q:\n%s", test.given, res.code, exitcode.Conflict, test.hint, res.stderr.String())
+				}
+
+				res, srv := run(test.followed, true)
+				if res.code != 0 || !strings.HasSuffix(res.stdout.String(), "\nCRID: "+srv.Key.CRID+"\n") {
+					t.Fatalf("the command the hint describes, %v: exit %d\n%s%s", test.followed, res.code, res.stdout.String(), res.stderr.String())
+				}
+				wantRow := publicAccessRow
+				if test.existingPrivate {
+					wantRow = privateAccessRow
+				}
+				if !strings.Contains(publishRows(res.stdout.String()), "\n"+wantRow+"\n") || strings.Contains(res.stdout.String(), "Warning") {
+					t.Fatalf("following the hint did not keep the resource as it is, without a warning:\n%s", res.stdout.String())
+				}
+
+				if test.deadEnd == nil {
+					return
+				}
+				res, srv = run(test.deadEnd, false)
+				if res.code != exitcode.Usage || len(srv.Requests()) != 0 {
+					t.Fatalf("%v: exit %d after %d requests, want the usage error the hint must not lead to", test.deadEnd, res.code, len(srv.Requests()))
+				}
+			})
+		}
+	}
+}
+
+// TestPublishAccessFlagsAreNamedAsWritten pins which flags a conflict's hint
+// can name, and how: the flags that said who may open the resource, in the
+// form they were given, an explicit false included. A flag about anything
+// else is not one of them, and a publish that gave none is the one that
+// keeps a target that is already published as public.
+func TestPublishAccessFlagsAreNamedAsWritten(t *testing.T) {
+	for _, test := range []struct {
+		args []string
+		want []string
+	}{
+		{args: nil},
+		{args: []string{"--description", "d", "--tag", "t", "--alias", "a"}},
+		{args: []string{"--id", "local-app", "--foreground"}},
+		{args: []string{"--public"}, want: []string{"--public"}},
+		{args: []string{"--public=true"}, want: []string{"--public"}},
+		{args: []string{"--public=false"}, want: []string{"--public=false"}},
+		{args: []string{"--private"}, want: []string{"--private"}},
+		{args: []string{"--private=false"}, want: []string{"--private=false"}},
+		{args: []string{"--allow-device-key", goldenDevicePublicKey}, want: []string{"--allow-device-key"}},
+		{args: []string{"--allow-device-key", goldenDevicePublicKey, "--allow-device-key", goldenSecondDevicePublicKey}, want: []string{"--allow-device-key"}},
+		{args: []string{"--allow-device-key", goldenDevicePublicKey, "--private"}, want: []string{"--private", "--allow-device-key"}},
+	} {
+		cmd := publishCmd(&globalOpts{})
+		if err := cmd.ParseFlags(test.args); err != nil {
+			t.Fatalf("flags %v: %v", test.args, err)
+		}
+		if got := publishAccessFlags(cmd); !slices.Equal(got, test.want) {
+			t.Errorf("flags %v: named %v, want %v", test.args, got, test.want)
+		}
+	}
+}
+
 // TestPublishCopySaysWhatHappensToATargetPublishedBefore pins the note for
 // people who upgrade, in help and in the README: a target that an earlier
 // release published is still public, a publish with no privacy flag keeps it

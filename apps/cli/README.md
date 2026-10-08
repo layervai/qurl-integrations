@@ -961,16 +961,19 @@ limit on the list that results is the service's: it refuses a change that
 would leave more than 256 devices, and the list stays as it was.
 
 The command checks the service's answer before it reports a change: every
-added key must be on the returned list, and no removed key may be. An answer
-that does not show the change fails that check with exit code 10 and nothing
+added key must be on the returned list, and no removed key may be. That check
+covers the keys the command named, not the rest of the list. What keeps the
+other grants in place is the request itself, which carries only the keys to
+add and to remove and never the whole list, so it cannot replace it. An answer
+that does not show the change fails the check with exit code 10 and nothing
 on stdout. A service that cannot add or remove single grants yet answers that
 way; `qurl grants <CRID>` then shows the list as it is.
 
 Earlier releases replaced the complete list with
 `qurl grants <CRID> --allow-device-key <public-key>`. That form is removed and
-is now a usage error that names `--add`, so a grant the command did not name
-can no longer be dropped. `qurl publish --allow-device-key` still sets the
-first list when you publish.
+is now a usage error that names `--add`, so the command no longer sends a
+list that replaces the grants it did not name. `qurl publish
+--allow-device-key` still sets the first list when you publish.
 
 ### qurl get
 

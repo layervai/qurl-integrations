@@ -274,7 +274,7 @@ func (c *client) Publish(ctx context.Context, targetURL string, opts PublishOpti
 		// the request instead. Only a resource that was just made with
 		// another list is an answer outside the contract.
 		if published.FoundExisting != nil && *published.FoundExisting {
-			return nil, &PublishAccessConflictError{Existing: ExistingAccessOtherDevices}
+			return nil, &PublishAccessConflictError{Existing: ExistingAccessOtherDevices, NamedFlags: opts.NamedAccessFlags}
 		}
 		return nil, fmt.Errorf("%w: API did not confirm the requested device grants", qurl.ErrInvalidAPIResponse)
 	}
@@ -474,18 +474,20 @@ func publishProblem(reply *restReply, opts *PublishOptions) error {
 	if !errors.As(problem, &apiErr) || apiErr.StatusCode != http.StatusBadRequest {
 		return problem
 	}
+	conflict := func(existing ExistingAccess) error {
+		return &PublishAccessConflictError{Existing: existing, NamedFlags: opts.NamedAccessFlags, problem: apiErr}
+	}
 	if strings.EqualFold(apiErr.Code, codePrivacyMismatch) {
-		existing := ExistingAccessPublic
 		if opts.Public {
-			existing = ExistingAccessPrivate
+			return conflict(ExistingAccessPrivate)
 		}
-		return &PublishAccessConflictError{Existing: existing, problem: apiErr}
+		return conflict(ExistingAccessPublic)
 	}
 	if strings.EqualFold(apiErr.Code, codeDeviceKeysMismatch) {
-		return &PublishAccessConflictError{Existing: ExistingAccessOtherDevices, problem: apiErr}
+		return conflict(ExistingAccessOtherDevices)
 	}
 	if strings.Contains(strings.ToLower(apiErr.Detail), legacyAccessSettingsDetail) {
-		return &PublishAccessConflictError{Existing: ExistingAccessUnknown, problem: apiErr}
+		return conflict(ExistingAccessUnknown)
 	}
 	return problem
 }
@@ -1042,9 +1044,12 @@ type deviceGrantEdit struct {
 // PATCH. It never retries.
 //
 // The answer is checked against the request: every added key must be on the
-// returned list and no removed key may be. A service from before these
-// members ignores them and returns the list as it was, with a success status;
-// that answer fails here instead of being reported as a change that was made.
+// returned list and no removed key may be. The keys the request did not name
+// are not checked. What the client guarantees about them is the shape of the
+// request, which never carries the whole list and so cannot replace it. A
+// service from before these members ignores them and returns the list as it
+// was, with a success status; that answer fails here instead of being
+// reported as a change that was made.
 func (c *client) EditDeviceGrants(ctx context.Context, id string, add, remove []string) (*ResourceSummary, error) {
 	if len(add) == 0 && len(remove) == 0 {
 		return nil, fmt.Errorf("%w: no device key to add or remove", qurl.ErrInvalidResourceRequest)
