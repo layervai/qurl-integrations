@@ -323,8 +323,8 @@ jobs:
             anything yourself: this workflow publishes that final message
             verbatim as this run's pull-request comment.
 
-          # Nothing enforces model lockstep; keep --model identical to
-          # claude.yml's and change both in the same pull request.
+          # Nothing enforces model lockstep; keep --model and --effort identical
+          # to claude.yml's and change both in the same pull request.
           # Use the action's GitHub MCP subprocess for reads only. It receives
           # the repository token but not the Anthropic key. Local, network,
           # delegation, and GitHub write tools stay denied: the publish step
