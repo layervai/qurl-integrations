@@ -445,6 +445,10 @@ func TestPublishKeptPublicWarning(t *testing.T) {
 	if !strings.Contains(document, `"private": false`) || !strings.Contains(document, `"found_existing": true`) || strings.Contains(document, "Warning") || stderr != warning {
 		t.Fatalf("publish JSON = %s\nstderr %q, want the warning on stderr alone", document, stderr)
 	}
+	// The document says it too, so a script need not read stderr.
+	if !strings.Contains(document, "\n  \"private\": false,\n  \"kept_public\": true,\n") {
+		t.Fatalf("publish JSON lacks kept_public: true after private: %s", document)
+	}
 	if quiet, stderr := render(kept(), FormatText, true, false); quiet != keptCRID+"\n" || stderr != warning {
 		t.Fatalf("--quiet = %q / %q", quiet, stderr)
 	}
@@ -457,6 +461,30 @@ func TestPublishKeptPublicWarning(t *testing.T) {
 	_, stderr = render(asked, FormatJSON, false, false)
 	if strings.Contains(text, "Warning") || strings.Contains(stderr, "Warning") || !strings.Contains(text, msgPublishFoundExisting) {
 		t.Fatalf("a public resource that was asked for got the warning:\n%s%s", text, stderr)
+	}
+	if document, _ := render(asked, FormatJSON, false, false); strings.Contains(document, "kept_public") {
+		t.Fatalf("a public resource that was asked for has kept_public: %s", document)
+	}
+
+	// The warning does not depend on the CRID, in any mode: a kept resource
+	// is always warned about. A result with no CRID, which a publish never
+	// returns, would get the same warning with the placeholder in its
+	// command, in the document and on stderr alike.
+	nameless := kept()
+	nameless.CRID = ""
+	const placeholderWarning = "Warning: this target was published as public before, and it stays public: anyone who has the CRID can open it. " +
+		"To make it private, delete it with `qurl delete <CRID>` and publish again; the new resource gets a new CRID.\n"
+	if text, _ := render(nameless, FormatText, false, false); !strings.Contains(text, "\n"+placeholderWarning) {
+		t.Fatalf("text mode dropped the warning for a result with no CRID:\n%s", text)
+	}
+	for _, quiet := range []bool{false, true} {
+		format := FormatJSON
+		if quiet {
+			format = FormatText
+		}
+		if _, stderr := render(nameless, format, quiet, false); stderr != placeholderWarning {
+			t.Fatalf("quiet %t: stderr = %q, want the warning with the placeholder", quiet, stderr)
+		}
 	}
 }
 

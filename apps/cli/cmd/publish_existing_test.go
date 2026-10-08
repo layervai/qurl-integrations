@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -114,6 +115,7 @@ func TestPublishWithNoPrivacyFlagKeepsAPublicTarget(t *testing.T) {
 					default:
 						var document struct {
 							Private       *bool  `json:"private"`
+							KeptPublic    *bool  `json:"kept_public"`
 							FoundExisting *bool  `json:"found_existing"`
 							CRID          string `json:"crid"`
 						}
@@ -122,6 +124,10 @@ func TestPublishWithNoPrivacyFlagKeepsAPublicTarget(t *testing.T) {
 						}
 						if document.Private == nil || *document.Private || document.FoundExisting == nil || !*document.FoundExisting || document.CRID != srv.Key.CRID {
 							t.Fatalf("publish -o json = %s", stdout)
+						}
+						// The member a script reads instead of stderr.
+						if document.KeptPublic == nil || !*document.KeptPublic {
+							t.Fatalf("publish -o json lacks kept_public: true: %s", stdout)
 						}
 						if stderr != warning {
 							t.Fatalf("stderr = %q, want the warning alone", stderr)
@@ -146,6 +152,40 @@ func TestPublishWithNoPrivacyFlagOfAPrivateTargetIsUnchanged(t *testing.T) {
 		}
 		if strings.Contains(res.stdout.String()+res.stderr.String(), "Warning") || !strings.Contains(publishRows(res.stdout.String()), "\n"+privateAccessRow+"\n") {
 			t.Fatalf("found %t: a private publish warns or lost its Access row:\n%s%s", found, res.stdout.String(), res.stderr.String())
+		}
+	}
+}
+
+// TestPublishJSONSaysKeptPublicOnlyForAKeptResource pins the JSON member that
+// tells a kept public resource from every other publish: it is absent, never
+// false, for a new resource, for a private one that was found, and for
+// --public on a resource that is already public. That last document is
+// otherwise the same as a kept one, private: false and found_existing: true.
+func TestPublishJSONSaysKeptPublicOnlyForAKeptResource(t *testing.T) {
+	for _, test := range []struct {
+		name           string
+		flags          []string
+		found, private bool
+	}{
+		{name: "new and private", private: true},
+		{name: "new and public", flags: []string{"--public"}},
+		{name: "found, private", found: true, private: true},
+		{name: "found, public, asked for with --public", flags: []string{"--public"}, found: true},
+	} {
+		srv := apitest.NewServer(t)
+		srv.SetResourceAccess(test.private)
+		srv.SetPublishFoundExisting(test.found)
+		args := append([]string{"--endpoint", srv.URL, "publish", privacyRemoteTarget, "-o", "json"}, test.flags...)
+		res := runCLI(t, &runOpts{args: args})
+		var document map[string]json.RawMessage
+		if err := json.Unmarshal(res.stdout.Bytes(), &document); res.code != 0 || err != nil {
+			t.Fatalf("%s: exit %d, %v: %s%s", test.name, res.code, err, res.stdout.String(), res.stderr.String())
+		}
+		if value, present := document["kept_public"]; present {
+			t.Errorf("%s: publish -o json has kept_public: %s", test.name, value)
+		}
+		if got, want := string(document["private"]), strconv.FormatBool(test.private); got != want {
+			t.Errorf("%s: private = %s, want %s", test.name, got, want)
 		}
 	}
 }
@@ -389,7 +429,9 @@ func TestPublishCopySaysWhatHappensToATargetPublishedBefore(t *testing.T) {
 		"those resources are still public",
 		"qurl publish for such a target with no privacy flag keeps working",
 		collapse(strings.ReplaceAll(keptPublicWarning("<CRID>"), "`", "")),
-		"The warning is part of the text output, and goes to stderr with -o json and --quiet; JSON says private: false.",
+		"The warning is part of the text output, and goes to stderr with -o json and --quiet; JSON says private: false and kept_public: true.",
+		"the document also has kept_public: true; the member is absent otherwise",
+		"Fields that only sometimes apply (found_existing, kept_public, already_gone) are omitted",
 		"A publish never turns a public resource private, and it never makes a new public resource unless you pass --public.",
 		"--allow-device-key with a list other than the one the resource has",
 	} {

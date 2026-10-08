@@ -833,9 +833,9 @@ Warning: this target was published as public before, and it stays public: anyone
 ```
 
 The warning is part of the text output, and goes to stderr with `-o json` and
-`--quiet`; JSON says `private: false`. The resource stays as it is until you
-delete it. A publish never turns a public resource private, and it never makes
-a new public resource unless you pass `--public`.
+`--quiet`; JSON says `private: false` and `kept_public: true`. The resource
+stays as it is until you delete it. A publish never turns a public resource
+private, and it never makes a new public resource unless you pass `--public`.
 
 In either mode, the CRID is last and alone on its line; `--quiet` prints only
 the CRID. Publishing the same target again does not create a duplicate while
@@ -1342,10 +1342,17 @@ in every archive.
   for and discard mismatches (exit 12).
 
 `publish -o json` always includes `private`: `true` unless the resource was
-published with `--public`. `list` and resource status JSON include `private`
-when known and an `allowed_device_keys` array, including `[]` when no devices
-are allowed. The text resource list includes a `PRIVATE` column. Grant changes
-show the resulting complete device list in text and JSON output.
+published with `--public`, or was already published as public and kept. In
+that second case, a publish with no privacy flag that kept an existing public
+resource, the document also has `kept_public: true`; the member is absent
+otherwise. It is how a script tells that case from `--public` on an existing
+resource, which has the same `private: false` and `found_existing: true`,
+without reading stderr. `--quiet` prints only the CRID in both cases.
+
+`list` and resource status JSON include `private` when known and an
+`allowed_device_keys` array, including `[]` when no devices are allowed. The
+text resource list includes a `PRIVATE` column. Grant changes show the
+resulting complete device list in text and JSON output.
 
 ### Exit codes
 
@@ -1373,8 +1380,8 @@ exit-code authority in code (`apps/cli/internal/exitcode`):
 
 Every command's `-o json` document uses field names owned by this repo —
 a stable contract independent of upstream renames. Fields that only
-sometimes apply (`found_existing`, `already_gone`) are omitted rather than
-emitted empty. Every resource result requires a verified `crid`.
+sometimes apply (`found_existing`, `kept_public`, `already_gone`) are omitted
+rather than emitted empty. Every resource result requires a verified `crid`.
 
 For `qurl list`, **`has_more` — not `next_cursor` presence — is the
 pagination terminator.** The service legitimately serves short and even

@@ -104,6 +104,10 @@ const (
 	// labelWarning opens every warning, on stderr and in a text document.
 	labelWarning = "Warning:"
 
+	// placeholderCRID stands where a command in a message takes a CRID and
+	// the message has none to put there.
+	placeholderCRID = "<CRID>"
+
 	// msgDeviceEnrolled opens the login confirmation; %s is the account.
 	msgDeviceEnrolled = "Enrolled this device for %s."
 
@@ -368,6 +372,7 @@ func CustomerMessages() []string {
 		hintKeyInvalid,
 		labelCRID,
 		labelWarning,
+		placeholderCRID,
 		msgDeviceEnrolled,
 		msgSavedTo,
 		msgAlreadyPublished,
