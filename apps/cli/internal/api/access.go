@@ -548,6 +548,9 @@ func (p *removalProgress) listNotRead(cause error) *PasskeyRemovalError {
 // next step. If the list was missing then too, this service does not show
 // who has access, and that read would show nothing more. The outcome never
 // says the second of a service that has just shown the list.
+//
+// The cause is there for the exit code, as an answer that does not confirm
+// a change. Its text is not shown: the headline says it all.
 func (p *removalProgress) listNotSaid() *PasskeyRemovalError {
 	outcome := p.outcome()
 	outcome.stop, outcome.cause = stoppedListNeverSaid, &answerError{message: msgRemovalUnconfirmed}

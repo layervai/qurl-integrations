@@ -338,8 +338,11 @@ type PasskeyRemovalError struct {
 	// failed.
 	NotRemoved []string
 	// KeysNotChanged is set by a caller that was also asked to change the
-	// public keys in the same command. That change comes after the removals,
-	// so it was not made, and the outcome says so.
+	// public keys in the same command, when the command stopped before it
+	// reached that change: a removal failed, or the removals were not
+	// confirmed. The change comes after the removals, so it was not made,
+	// and the outcome says so. It is not set when the change was reached
+	// and failed; that is KeyChange.
 	KeysNotChanged bool
 	// KeyChange is set by a caller whose removals were all made and whose
 	// change to public keys then failed: it is that failure. The people in
@@ -468,6 +471,8 @@ func (e *PasskeyRemovalError) NextStep() string {
 	if id == "" {
 		id = "<CRID>"
 	}
+	// Only this one of the two listNotConfirmed stops: after the other, the
+	// read is the right next step.
 	if e.stop == stoppedListNeverSaid {
 		return fmt.Sprintf(msgNothingMoreFromService, id)
 	}

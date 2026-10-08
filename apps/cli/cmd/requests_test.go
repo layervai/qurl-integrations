@@ -1461,7 +1461,7 @@ func TestGrantsRemoveTakesADeviceID(t *testing.T) {
 				if log := requestLog(srv); !slices.Equal(log, []string{"GET /v1/resources/" + srv.Key.CRID}) {
 					t.Fatalf("%v: requests = %v, want the one read: nothing may be removed or changed", mode, log)
 				}
-				if len(mode) == 2 {
+				if slices.Contains(mode, "json") {
 					var document struct {
 						CRID                          string
 						Removed, NotFound, NotRemoved []string
@@ -1574,7 +1574,7 @@ func TestGrantsRemoveTakesADeviceID(t *testing.T) {
 			if strings.Contains(res.stderr.String(), "No public key was added or removed") || strings.Contains(res.stderr.String(), "nothing was removed") {
 				t.Fatalf("%v: the outcome claims something it does not know:\n%s", mode, res.stderr.String())
 			}
-			if len(mode) == 2 {
+			if slices.Contains(mode, "json") {
 				want := `{"crid":"` + srv.Key.CRID + `","removed":["` + requesterDevice + `","` + otherDevice + `"],"not_found":[],"not_removed":[],"public_keys_command":"` + finish + `"}`
 				var compact bytes.Buffer
 				if err := json.Compact(&compact, res.stdout.Bytes()); err != nil || compact.String() != want {

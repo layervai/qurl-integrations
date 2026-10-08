@@ -448,7 +448,11 @@ type removalOutcomeJSON struct {
 	NotFound   []string `json:"not_found"`
 	NotRemoved []string `json:"not_removed"`
 	// PublicKeysChanged is present, and false, only when the command also
-	// named public keys to add or remove: that change was not made.
+	// named public keys and stopped before it reached that change, because
+	// a removal failed or the removals were not confirmed: the change comes
+	// after the removals, so it was not made. It is not there when the
+	// change to public keys was reached and failed, which may have changed
+	// a key; PublicKeysCommand is what tells that case.
 	PublicKeysChanged *bool `json:"public_keys_changed,omitempty"`
 	// PublicKeysCommand is present only when every person was removed and
 	// the change to public keys failed or was not reached: the command that

@@ -125,7 +125,7 @@ func TestGrantsRemoveSaysWhoLostAccessWhateverFailsNext(t *testing.T) {
 			if res.code != exitcode.Unavailable || res.stderr.String() != wantStderr {
 				t.Fatalf("%v: exit = %d, want %d; stderr =\n%s\nwant\n%s", mode, res.code, exitcode.Unavailable, res.stderr.String(), wantStderr)
 			}
-			if len(mode) == 2 {
+			if slices.Contains(mode, "json") {
 				want := `{"crid":"` + srv.Key.CRID + `","removed":["` + requesterDevice + `","` + otherDevice + `"],"not_found":[],"not_removed":[]}`
 				if got := compactJSON(t, res.stdout.Bytes()); got != want {
 					t.Fatalf("outcome document = %s, want %s", got, want)
@@ -175,7 +175,7 @@ func TestGrantsRemoveSaysWhoLostAccessWhateverFailsNext(t *testing.T) {
 			if res.code != exitcode.Unavailable || res.stderr.String() != wantStderr {
 				t.Fatalf("%v: exit = %d, want %d; stderr =\n%s\nwant\n%s", mode, res.code, exitcode.Unavailable, res.stderr.String(), wantStderr)
 			}
-			if len(mode) == 2 {
+			if slices.Contains(mode, "json") {
 				want := `{"crid":"` + srv.Key.CRID + `","removed":["` + requesterDevice + `","` + otherDevice + `"],"not_found":[],"not_removed":[],"public_keys_changed":false,"public_keys_command":"` + finish + `"}`
 				if got := compactJSON(t, res.stdout.Bytes()); got != want {
 					t.Fatalf("outcome document = %s, want %s", got, want)
@@ -215,7 +215,7 @@ func TestGrantsRemoveSaysWhoLostAccessWhateverFailsNext(t *testing.T) {
 			if res.code != exitcode.ServerError || res.stderr.String() != wantStderr {
 				t.Fatalf("%v: exit = %d, want %d; stderr =\n%s\nwant\n%s", mode, res.code, exitcode.ServerError, res.stderr.String(), wantStderr)
 			}
-			if len(mode) == 2 {
+			if slices.Contains(mode, "json") {
 				want := `{"crid":"` + srv.Key.CRID + `","removed":["` + requesterDevice + `"],"not_found":[],"not_removed":["` + otherDevice + `"]}`
 				if got := compactJSON(t, res.stdout.Bytes()); got != want {
 					t.Fatalf("outcome document = %s, want %s", got, want)
@@ -257,7 +257,7 @@ func TestGrantsRemoveSaysWhoLostAccessWhateverFailsNext(t *testing.T) {
 			if res.code != exitcode.Unavailable || res.stderr.String() != wantStderr {
 				t.Fatalf("%v: exit = %d, want %d; stderr =\n%s\nwant\n%s", mode, res.code, exitcode.Unavailable, res.stderr.String(), wantStderr)
 			}
-			if len(mode) == 2 {
+			if slices.Contains(mode, "json") {
 				want := `{"crid":"` + srv.Key.CRID + `","removed":["` + requesterDevice + `"],"not_found":["` + otherDevice + `"],"not_removed":["` + third + `"]}`
 				if got := compactJSON(t, res.stdout.Bytes()); got != want {
 					t.Fatalf("outcome document = %s, want %s", got, want)
@@ -323,7 +323,7 @@ func TestGrantsNeverReadsAMissingListAsNobody(t *testing.T) {
 			if res.code != exitcode.ServerError || res.stderr.String() != wantStderr {
 				t.Fatalf("exit = %d, want %d; stderr =\n%s\nwant\n%s", res.code, exitcode.ServerError, res.stderr.String(), wantStderr)
 			}
-			if len(mode) == 2 {
+			if slices.Contains(mode, "json") {
 				want := `{"crid":"` + srv.Key.CRID + `","removed":["` + requesterDevice + `","` + otherDevice + `"],"not_found":[],"not_removed":[]}`
 				if got := compactJSON(t, res.stdout.Bytes()); got != want {
 					t.Fatalf("outcome document = %s, want %s", got, want)
@@ -362,7 +362,7 @@ func TestGrantsNeverReadsAMissingListAsNobody(t *testing.T) {
 			if res.code != exitcode.ServerError || res.stderr.String() != wantStderr {
 				t.Fatalf("exit = %d, want %d; stderr =\n%s\nwant\n%s", res.code, exitcode.ServerError, res.stderr.String(), wantStderr)
 			}
-			if len(mode) == 2 {
+			if slices.Contains(mode, "json") {
 				want := `{"crid":"` + srv.Key.CRID + `","removed":["` + requesterDevice + `"],"not_found":[],"not_removed":[],"public_keys_changed":false,"public_keys_command":"` + finish + `"}`
 				if got := compactJSON(t, res.stdout.Bytes()); got != want {
 					t.Fatalf("outcome document = %s, want %s", got, want)
@@ -399,7 +399,7 @@ func TestGrantsNeverReadsAMissingListAsNobody(t *testing.T) {
 			if res.code != exitcode.ServerError || res.stderr.String() != wantStderr {
 				t.Fatalf("exit = %d, want %d; stderr =\n%s\nwant\n%s", res.code, exitcode.ServerError, res.stderr.String(), wantStderr)
 			}
-			if len(mode) == 2 {
+			if slices.Contains(mode, "json") {
 				want := `{"crid":"` + srv.Key.CRID + `","removed":["` + requesterDevice + `","` + otherDevice + `"],"not_found":[],"not_removed":[]}`
 				if got := compactJSON(t, res.stdout.Bytes()); got != want {
 					t.Fatalf("outcome document = %s, want %s", got, want)
@@ -411,6 +411,49 @@ func TestGrantsNeverReadsAMissingListAsNobody(t *testing.T) {
 				if strings.Contains(res.stdout.String()+res.stderr.String(), never) {
 					t.Errorf("the output has %q:\n%s%s", never, res.stdout.String(), res.stderr.String())
 				}
+			}
+		})
+	}
+
+	// The same service, in a command that names a device id and a public
+	// key. The removal is not confirmed yet, and the change to the keys
+	// comes after the check that confirms it, so it was not made. The
+	// outcome has both: the read that shows who has access now, and the
+	// command that makes the key change alone.
+	for _, mode := range [][]string{nil, {"-o", "json"}, {"--quiet"}} {
+		t.Run(fmt.Sprintf("the list is missing after the removal, with a public key waiting %v", mode), func(t *testing.T) {
+			srv := twoApproved(t)
+			choose := func(req *http.Request) *answerInPlace {
+				if removalOf(req, requesterDevice) {
+					srv.OmitApprovedPeople()
+				}
+				return nil
+			}
+			finish := "qurl grants " + srv.Key.CRID + " --add " + grantKey(2)
+			res := runCLI(t, withChosenAnswers(srv, choose, append([]string{"grants", srv.Key.CRID, "--remove", requesterDevice, "--add", grantKey(2)}, mode...)...))
+			wantStderr := "Error: the service answered that access was taken away from " + requesterDevice +
+				". Its answer afterwards did not include the list of approved people, so the removal is not confirmed yet.\n\n" +
+				"  No public key was added or removed: that change comes after the removals, and the command stopped before it.\n\n" +
+				"  Run `qurl grants " + srv.Key.CRID + "` to see who has access now.\n" +
+				"  To make the change to the public keys, run: " + finish + "\n"
+			if res.code != exitcode.ServerError || res.stderr.String() != wantStderr {
+				t.Fatalf("exit = %d, want %d; stderr =\n%s\nwant\n%s", res.code, exitcode.ServerError, res.stderr.String(), wantStderr)
+			}
+			if slices.Contains(mode, "json") {
+				want := `{"crid":"` + srv.Key.CRID + `","removed":["` + requesterDevice + `"],"not_found":[],"not_removed":[],"public_keys_changed":false,"public_keys_command":"` + finish + `"}`
+				if got := compactJSON(t, res.stdout.Bytes()); got != want {
+					t.Fatalf("outcome document = %s, want %s", got, want)
+				}
+			} else {
+				mustEmptyStdout(t, res)
+			}
+			for _, line := range requestLog(srv) {
+				if strings.HasPrefix(line, "PATCH ") {
+					t.Fatalf("a change to the public keys was sent: %v", requestLog(srv))
+				}
+			}
+			if strings.Contains(res.stderr.String(), "This service does not show") {
+				t.Fatalf("a service that showed the list is said not to show who has access:\n%s", res.stderr.String())
 			}
 		})
 	}
