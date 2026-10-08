@@ -432,10 +432,21 @@ jobs:
           # Match the remote structurally, not by token value: claude.yml omits
           # github_token so the action embeds its own GitHub App token, which
           # this step never sees. Userinfo must be x-access-token plus a single
-          # opaque secret containing no "@" or "/", so a crafted host cannot be
+          # opaque secret of URL-unreserved characters, so a crafted host cannot be
           # smuggled through the credential field.
-          origin_host="${GITHUB_SERVER_URL#https://}"
-          action_origin_re="^https://x-access-token:[^@/]+@${origin_host//./\\.}/${GITHUB_REPOSITORY//./\\.}\\.git$"
+          # The secret is held to an allowlist rather than "anything but @ and
+          # /": a URL client ends the host at "#", "?" or "\" as well, so
+          # https://x-access-token:80#@<host>/<repo>.git would match a looser
+          # pattern while git connects to a host named x-access-token. The
+          # runner-provided host is checked too, so an empty or malformed
+          # GITHUB_SERVER_URL fails closed instead of loosening the pattern.
+          origin_host="${GITHUB_SERVER_URL:-}"
+          origin_host="${origin_host#https://}"
+          if [[ ! "${origin_host}" =~ ^[A-Za-z0-9.-]+(:[0-9]+)?$ || -z "${GITHUB_REPOSITORY:-}" ]]; then
+            echo "::error::Runner-provided origin comparison targets are unavailable; failing closed."
+            exit 1
+          fi
+          action_origin_re="^https://x-access-token:[A-Za-z0-9._~%-]+@${origin_host//./\\.}/${GITHUB_REPOSITORY//./\\.}\\.git$"
           mapfile -t origin_urls < <(git remote get-url --all origin 2>/dev/null)
           mapfile -t origin_push_urls < <(git remote get-url --push --all origin 2>/dev/null)
           origin_fetch="${origin_urls[0]-}"
@@ -443,9 +454,9 @@ jobs:
           if (( ${#origin_urls[@]} != 1 || ${#origin_push_urls[@]} != 1 )) ||
              [[ "${origin_fetch}" != "${origin_push}" ]] ||
              [[ "${origin_fetch}" != "${LOCAL_ORIGIN}" && ! "${origin_fetch}" =~ ${action_origin_re} ]]; then
-            # Redact any embedded credential before logging.
+            # Never print either URL: a hostile one can carry the token
+            # anywhere, not only in userinfo.
             echo "::error::Claude changed the credential-free review origin; failing closed."
-            echo "::error::origin fetch=${origin_fetch//:*@/:***@} push=${origin_push//:*@/:***@}"
             exit 1
           fi
           # Drop the action's credentialed remote before anything downstream can
