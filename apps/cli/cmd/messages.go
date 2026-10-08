@@ -120,6 +120,9 @@ const (
 	// msgRequestCodeInvalid refuses an operand that can never be a request
 	// code, before any request is sent.
 	msgRequestCodeInvalid = "a request code is six digits, written as 123456, 123 456 or 123-456"
+	// msgDeniedRequestInvalid refuses an operand of `qurl deny` that is
+	// neither of the two things that name a request.
+	msgDeniedRequestInvalid = "name the request by its device id, of the form xxxx-xxxx-xxxx-xxxx, as `qurl requests <CRID>` shows it, or by its six-digit code"
 
 	// `qurl request` and `qurl requests` differ by one letter and do unrelated
 	// things. Each one's usage error names the other where a person who typed
@@ -215,6 +218,7 @@ func customerMessages() []string {
 		msgRequestsOnAndOff,
 		msgRequestsSettingNeedsCRID,
 		msgRequestCodeInvalid,
+		msgDeniedRequestInvalid,
 		hintMeantRequests,
 		hintMeantRequest,
 		msgNoKeyProvided,

@@ -478,7 +478,7 @@ than switching in place.
 | `qurl grants <CRID>` | Show or change the devices and people allowed to open a private resource |
 | `qurl requests [<CRID>]` | List access requests, or turn them on or off for a private resource |
 | `qurl approve <CRID> <code>` | Approve one person's request for access to a private resource |
-| `qurl deny <CRID> <code>` | Refuse one person's request for access to a private resource |
+| `qurl deny <CRID> <device id>` | Refuse one person's request for access to a private resource |
 | `qurl get <CRID>` | Fetch what a CRID points to: browser on a terminal, or download with `--file` |
 | `qurl list` | List your published resources |
 | `qurl start <CRID>` | Turn on a previously published local share |
@@ -1031,17 +1031,22 @@ two names the other in its usage error.
    deployment, and otherwise the CRID.
 2. A person opens it in a browser, sees who published the resource, and asks
    for access. They are shown a six-digit code and give it to you.
-3. `qurl requests` lists who asked. Approve the person with
-   `qurl approve <CRID> <code>`, or refuse with `qurl deny <CRID> <code>`.
+3. `qurl requests` lists who asked: the name each person typed and the id of
+   their device. It never shows a code. Approve the person who gave you their
+   code with `qurl approve <CRID> <code>`, or refuse a request with
+   `qurl deny <CRID> <device id>`.
 
 The address and the CRID are safe to send to anyone: a private resource opens
 only for you and the people you allow.
 
 **Approve a code only when the person gave it to you themselves.** The code is
-shown only to the person who asked, so it is what ties a request to a person.
-The name on a request is typed by whoever asked and proves nothing: anyone can
+shown only to the person who asked, so it is the only proof of who is asking.
+No qURL command shows it, in any output mode. If a listing showed the codes,
+you, or an agent that runs these commands for you, could approve straight from
+the list, and all the list knows about a person is the name they typed. The
+name on a request is typed by whoever asked and proves nothing: anyone can
 type any name. An agent that runs these commands for you must approve only
-codes you passed on to it, never a code it found in the listing.
+codes you passed on to it.
 
 ```bash
 qurl publish https://wiki.example.com/team --allow-requests
@@ -1049,37 +1054,48 @@ qurl requests                    # pending requests of all your resources
 qurl requests <CRID>             # pending requests of one resource
 qurl requests <CRID> --on        # let people ask; prints what to send them
 qurl requests <CRID> --off       # stop new requests
-qurl approve <CRID> 123456       # also accepted: 123 456 and 123-456
-qurl deny <CRID> 123456
+qurl approve <CRID> 123456       # the code they gave you; also 123 456 and 123-456
+qurl deny <CRID> <device id>     # the device id from the listing
 qurl grants <CRID>               # who has access now
 qurl grants <CRID> --remove <device id>
 ```
 
-A listing shows, for each request, the code, the name in quotes, the id of the
-person's device, and how long ago they asked; the listing of all resources
-also shows the CRID. It ends with one line that repeats the rule above.
+A listing shows, for each request, the name in quotes, the id of the person's
+device, how long ago they asked, and when the request expires; the listing of
+all resources also shows the CRID. It shows no code. It ends with one line
+that says how a person is let in.
 
 ```text
-CODE     NAME         DEVICE ID            REQUESTED
-482 913  "Ana Lopez"  abcd-efgh-2345-mnop  2m ago
+NAME         DEVICE ID            REQUESTED  EXPIRES
+"Ana Lopez"  abcd-efgh-2345-mnop  2m ago     in 58m
 
-Approve a code only when the person gave it to you themselves; a name can be typed by anyone.
+To let one of these people in, ask them for the six-digit code on their screen and run `qurl approve <CRID> <code>`; a name can be typed by anyone, so the code is the only proof of who is asking.
 ```
 
+The listing of all your resources is bounded. When there may be more requests
+than it shows, it says so after the rows, and `-o json` has `has_more: true`.
+List one resource with `qurl requests <CRID>` to see all of its requests.
+
 `qurl approve` prints who now has access and the command that takes it away
-again. `qurl deny` removes the request and gives no access. `--off` stops new
-requests and says how many approved people still have access.
+again. `qurl deny` removes the request and gives no access. It takes the
+device id the listing shows, in the form `xxxx-xxxx-xxxx-xxxx`. It also takes
+a six-digit code in the same place, for a request whose code you were given
+and want to refuse. A request that is neither approved nor denied gives no
+access and expires by itself. `--off` stops new requests and says how many
+approved people still have access.
 
 | Command | Flag | Description |
 |---------|------|-------------|
 | `requests` | `--on` | Let people ask for access to this private resource |
 | `requests` | `--off` | Stop new requests for access to this resource |
-| all three | `--yes` | Proceed without confirmation when sending a test CRID to production |
+| `requests --on`, `requests --off`, `approve`, `deny` | `--yes` | Proceed without confirmation when a change is sent for a test CRID to production. Listing requests never needs it |
 
-A code that is not pending for the resource is exit code 5, and the message
-says so: it may have expired, or been approved or denied already. A value
-that can never be a code is refused before any request (exit code 8).
-Access requests can be turned on only for a private resource.
+A code that is not pending for the resource is exit code 5. The message says
+that it may have expired, or been approved or denied already, and says nothing
+about which codes are pending. A device id with no pending request gets the
+same answer from `qurl deny`. A value that can never be a code, or for
+`qurl deny` neither a device id nor a code, is refused before any request
+(exit code 8). Access requests can be turned on only for a private resource.
 
 A service that does not offer access requests yet answers every one of these
 commands with "this service does not offer access requests yet" and exit code
@@ -1459,10 +1475,11 @@ in every archive.
 - **`--quiet` prints only the primary value**, one per line: the CRID for
   `publish`, the link for `share`, full CRIDs for `list`, the
   destination path for a `get --file` download, the owner id for
-  `whoami` and `login`, the publisher name for `publisher`, the code for
-  `requests <CRID>` and `deny`, the CRID and the code for `requests` with no
-  argument, the CRID for `requests --on` and `--off`, and the device id for
-  `approve`.
+  `whoami` and `login`, the publisher name for `publisher`, the device id
+  for `requests <CRID>`, the CRID and the device id for `requests` with no
+  argument, the device id or the code you gave for `deny`, the CRID for
+  `requests --on` and `--off`, and the device id for `approve`. A listing
+  that may be incomplete says so on stderr.
 - **Verification is built in:** before printing anything, `qurl share`
   and `qurl get` check the service's answer against the CRID you asked
   for and discard mismatches (exit 12).
@@ -1485,10 +1502,10 @@ Access requests in `-o json`:
 | Command | Members |
 |---------|---------|
 | `publish` | `access_requests` when the service's answer says whether people can ask; `resource_url`, the resource's address for people with no CLI, only when access requests are on and this install knows the web address for its deployment |
-| `requests`, `requests <CRID>` | `requests`: an array, `[]` when there are none, of `code` (six digits), `name` (omitted when the person typed none), `name_verified` (always `false`), `device_id`, `requested_at`, `expires_at`, `crid`. Beside it, `approval_rule`: always present, one sentence |
+| `requests`, `requests <CRID>` | `requests`: an array, `[]` when there are none, of `name` (omitted when the person typed none), `name_verified` (always `false`), `device_id`, `requested_at`, `expires_at`, `crid`. No member holds a request's code. Beside it, `approval_rule`: always present, one sentence; and `has_more`: always present, `true` when there may be more requests than the listing shows |
 | `requests <CRID> --on`, `--off` | `crid`, `access_requests`, and `resource_url` under the same rule as `publish` |
 | `approve` | `crid`, `approved` (`true`), `device_id`, `name`, `name_verified` (always `false`), `approved_at`, and `name_note`: always present, one sentence |
-| `deny` | `crid`, `code`, `denied` (`true`) |
+| `deny` | `crid`, `denied` (`true`), and what you named the request by: `device_id`, or `code` |
 | `grants` | the resource document with `allowed_device_keys`, `approved_people` (an array, `[]` when there are none, of `name`, `name_verified`, `device_id`, `approved_at`), and `access_requests` when the service says |
 | `grants --remove <device id>` that did not remove everyone it named | `crid` and three arrays that are always present and together hold every device id the command named: `removed`, `not_found`, `not_removed`. `public_keys_changed` (`false`) when the command also named public keys |
 
@@ -1500,10 +1517,11 @@ Two members carry, for a reader of JSON, the sentences the text output has.
 An agent that runs these commands reads JSON, so the rule it must follow is
 in the document it reads:
 
-- `approval_rule`, in both listings: "Approve a code only when the person gave
-  it to you themselves; a name can be typed by anyone." It is one member
-  beside `requests`, not one for each request, and it is there for an empty
-  listing too.
+- `approval_rule`, in both listings: "To let one of these people in, ask them
+  for the six-digit code on their screen and run `qurl approve <CRID> <code>`;
+  a name can be typed by anyone, so the code is the only proof of who is
+  asking." It is one member beside `requests`, not one for each request, and
+  it is there for an empty listing too.
 - `name_note`, in the `approve` document: "The name was typed by the person
   who asked. Nobody checked it."
 
@@ -1524,7 +1542,7 @@ exit-code authority in code (`apps/cli/internal/exitcode`):
 | 2 | usage | The command line itself was wrong: flags, arguments, or missing confirmation. |
 | 3 | configuration | Settings or profiles are invalid, or this CRID needs a newer CLI. |
 | 4 | authentication | No credential, an implausible credential, or the service rejected the credential. |
-| 5 | not found | The resource does not exist or is retired — revoked and tombstoned resources included; the stderr message distinguishes them. `share` and `get` also get this answer on a device that is neither the owner's nor allowed; the service does not say which. Also an access-request code that is not pending for the resource, and a device id that is not among its approved people. |
+| 5 | not found | The resource does not exist or is retired — revoked and tombstoned resources included; the stderr message distinguishes them. `share` and `get` also get this answer on a device that is neither the owner's nor allowed; the service does not say which. Also an access-request code or device id that is not pending for the resource, and a device id that is not among its approved people. |
 | 6 | permission | The credential lacks permission for this operation. |
 | 7 | conflict | The request conflicts with current state — including `--file` refusing to replace an existing destination without `--force`, and `publish` with a flag that asks for what the already published resource is not: the other privacy, or another list of allowed devices. |
 | 8 | invalid input | An operand or request rejected as invalid (by the service, or locally for inputs that can never be valid). |

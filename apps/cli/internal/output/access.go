@@ -19,9 +19,11 @@ import (
 //     quoting and escaping as a publisher name, and JSON carries it with
 //     name_verified false beside it.
 //   - What ties an approval to a person is the code, which only the person
-//     who asked was shown. Every text listing of requests ends with the line
-//     that says so, because the publisher, or the agent that runs these
-//     commands for them, decides what to approve from this output.
+//     who asked was shown. No listing shows a code, in any output mode: a
+//     listing with the codes would let a publisher, or the agent that runs
+//     these commands for them, approve from the list, which is approval by
+//     name with one more step. Every listing says instead how a person is let
+//     in: ask them for the code on their screen.
 
 // Fixed customer-facing strings for access requests, registered in
 // CustomerMessages.
@@ -51,7 +53,17 @@ const (
 	// msgApproveOnlyGivenCodes ends every text listing of requests, and is
 	// the approval_rule member of every JSON listing: the reader of JSON is
 	// most often an agent, which decides what to approve from that document.
-	msgApproveOnlyGivenCodes = "Approve a code only when the person gave it to you themselves; a name can be typed by anyone."
+	// A listing shows no code, and this is the sentence that says where the
+	// code is.
+	msgApproveOnlyGivenCodes = "To let one of these people in, ask them for the six-digit code on their screen and run `qurl approve <CRID> <code>`; a name can be typed by anyone, so the code is the only proof of who is asking."
+
+	// msgRequestsMayBeMore follows a listing of all resources that the
+	// service said may be incomplete. That listing is bounded; the listing
+	// of one resource is how to see what that resource has.
+	// msgRequestsMayBeMoreForOne is for the listing of one resource, where
+	// that advice would point at the command that was just run.
+	msgRequestsMayBeMore       = "There may be more requests than are shown here. To see all the requests for one resource, run `qurl requests <CRID>`."
+	msgRequestsMayBeMoreForOne = "There may be more requests for this resource than are shown here. A request leaves the list when it is approved, denied or expired; run this command again to see the rest."
 
 	// msgRequesterNoName stands in for a name the requester left empty, and
 	// msgRequesterNameUnchecked qualifies a name wherever it stands alone.
@@ -66,6 +78,7 @@ const (
 	msgApprovedCanOpen  = "This person can now open %s. To take the access away, run:"
 	msgRemoveCommand    = "qurl grants %s --remove %s"
 	msgDenied           = "Denied the request with the code %s for %s. No access was given."
+	msgDeniedDevice     = "Denied the request from the device id %s for %s. No access was given."
 	labelName           = "Name:"
 	labelDeviceID       = "Device ID:"
 	labelApproved       = "Approved:"
@@ -115,8 +128,9 @@ func (p *Printer) requestGuidance(ew *errWriter, resourceCRID, address string) {
 	ew.printf("%s\n", safe)
 }
 
+// accessRequestJSON is one row of a listing. It has no member for the code
+// of a request, and the type it is built from has no code to put in one.
 type accessRequestJSON struct {
-	Code string `json:"code"`
 	// Name is omitted when the requester left it empty. NameVerified is
 	// always present and always false: nobody checks a requester's name.
 	Name         escapedJSONString `json:"name,omitempty"`
@@ -129,28 +143,39 @@ type accessRequestJSON struct {
 
 // accessRequestsJSON is the document of both listings. ApprovalRule is always
 // present, with an empty listing too, and always the sentence that ends the
-// text listing: what a code and a name are worth does not depend on the
-// output mode, and the reader of this one is most often an agent.
+// text listing: how a person is let in does not depend on the output mode,
+// and the reader of this one is most often an agent. HasMore is always
+// present, and true when the service said the listing may be incomplete.
 type accessRequestsJSON struct {
 	Requests     []accessRequestJSON `json:"requests"`
 	ApprovalRule string              `json:"approval_rule"`
+	HasMore      bool                `json:"has_more"`
 }
 
 // AccessRequests renders pending access requests. all says that the listing
 // covers every resource of the owner, so each row names its resource.
 //
-// Text is a table that ends with the line on what a code and a name are
-// worth. An empty listing writes nothing to stdout and says so on stderr.
-// --quiet prints what `qurl approve` takes, one request per line: the code,
-// after the CRID when the listing covers every resource.
-func (p *Printer) AccessRequests(requests []qurlapi.AccessRequest, all bool) error {
+// No mode shows the code of a request. Text is a table of who asked, from
+// which device, when, and until when the request stands, and it ends with
+// the line on how a person is let in. An empty listing writes nothing to
+// stdout and says so on stderr. --quiet prints what `qurl deny` takes, one
+// request per line: the device id, after the CRID when the listing covers
+// every resource.
+//
+// A listing the service said may be incomplete says so after its rows, in
+// text, and on stderr with --quiet, whose stdout is values only.
+func (p *Printer) AccessRequests(list *qurlapi.AccessRequestList, all bool) error {
+	if list == nil {
+		return errors.New("qURL access-request listing is incomplete")
+	}
+	requests := list.Requests
 	switch {
 	case p.format == FormatJSON:
-		out := accessRequestsJSON{Requests: make([]accessRequestJSON, 0, len(requests)), ApprovalRule: msgApproveOnlyGivenCodes}
+		out := accessRequestsJSON{Requests: make([]accessRequestJSON, 0, len(requests)), ApprovalRule: msgApproveOnlyGivenCodes, HasMore: list.HasMore}
 		for index := range requests {
 			request := &requests[index]
 			out.Requests = append(out.Requests, accessRequestJSON{
-				Code: request.Code, Name: escapedJSONString(request.Name), DeviceID: request.DeviceID,
+				Name: escapedJSONString(request.Name), DeviceID: request.DeviceID,
 				RequestedAt: request.RequestedAt, ExpiresAt: request.ExpiresAt, CRID: request.CRID,
 			})
 		}
@@ -159,17 +184,24 @@ func (p *Printer) AccessRequests(requests []qurlapi.AccessRequest, all bool) err
 		ew := &errWriter{w: p.out}
 		for index := range requests {
 			if all {
-				ew.printf("%s %s\n", requests[index].CRID, requests[index].Code)
+				ew.printf("%s %s\n", requests[index].CRID, requests[index].DeviceID)
 				continue
 			}
-			ew.printf("%s\n", requests[index].Code)
+			ew.printf("%s\n", requests[index].DeviceID)
+		}
+		if list.HasMore {
+			p.Notef("%s", mayBeMore(all))
 		}
 		return ew.flush(nil)
 	}
 	if len(requests) == 0 {
-		if all {
+		switch {
+		case list.HasMore:
+			// An empty page of a listing that goes on is not "none".
+			p.Notef("%s", mayBeMore(all))
+		case all:
 			p.Notef("%s", msgNoPendingRequests)
-		} else {
+		default:
 			p.Notef("%s", msgNoPendingRequestsForOne)
 		}
 		return nil
@@ -178,18 +210,21 @@ func (p *Printer) AccessRequests(requests []qurlapi.AccessRequest, all bool) err
 	ew := &errWriter{w: tw}
 	// Headers stay uncolored: tabwriter counts ANSI escape bytes as cell
 	// width, so styled headers would skew every column under them.
-	header := "CODE\tNAME\tDEVICE ID\tREQUESTED"
+	header := "NAME\tDEVICE ID\tREQUESTED\tEXPIRES"
 	if all {
 		header += "\tCRID"
 	}
 	ew.printf("%s\n", header)
 	for index := range requests {
 		request := &requests[index]
-		requested := "-"
+		requested, expires := "-", "-"
 		if request.RequestedAt != nil {
 			requested = p.relativeTime(*request.RequestedAt)
 		}
-		ew.printf("%s\t%s\t%s\t%s", spacedCode(request.Code), p.requesterName(request.Name), request.DeviceID, requested)
+		if request.ExpiresAt != nil {
+			expires = p.expiresIn(*request.ExpiresAt)
+		}
+		ew.printf("%s\t%s\t%s\t%s", p.requesterName(request.Name), request.DeviceID, requested, expires)
 		if all {
 			ew.printf("\t%s", request.CRID)
 		}
@@ -198,8 +233,30 @@ func (p *Printer) AccessRequests(requests []qurlapi.AccessRequest, all bool) err
 	if err := ew.flush(tw); err != nil {
 		return err
 	}
-	_, err := fmt.Fprintf(p.out, "\n%s\n", msgApproveOnlyGivenCodes)
-	return err
+	plain := &errWriter{w: p.out}
+	if list.HasMore {
+		plain.printf("\n%s\n", mayBeMore(all))
+	}
+	plain.printf("\n%s\n", msgApproveOnlyGivenCodes)
+	return plain.flush(nil)
+}
+
+// mayBeMore is the line for a listing the service said may be incomplete.
+func mayBeMore(all bool) string {
+	if all {
+		return msgRequestsMayBeMore
+	}
+	return msgRequestsMayBeMoreForOne
+}
+
+// expiresIn writes when a request stops standing, for a table cell: how long
+// from now, or that it has expired.
+func (p *Printer) expiresIn(t time.Time) string {
+	remaining := t.Sub(p.now())
+	if remaining <= 0 {
+		return expiredLabel
+	}
+	return "in " + formatDuration(remaining)
 }
 
 type accessRequestsSettingJSON struct {
@@ -312,24 +369,36 @@ func (p *Printer) Approved(resourceCRID string, person *qurlapi.AllowedPasskey) 
 	return ew.flush(nil)
 }
 
+// deniedJSON is the document of a denial. It names the request the way the
+// command named it: by device_id, or by code for a publisher who was given a
+// code. Exactly one of the two is present.
 type deniedJSON struct {
-	CRID   string `json:"crid"`
-	Code   string `json:"code"`
-	Denied bool   `json:"denied"`
+	CRID     string `json:"crid"`
+	DeviceID string `json:"device_id,omitempty"`
+	Code     string `json:"code,omitempty"`
+	Denied   bool   `json:"denied"`
 }
 
-// Denied renders a completed denial. Like a deletion, the text confirmation
-// is a status line on stderr; --quiet echoes the code and JSON emits the
-// outcome document.
-func (p *Printer) Denied(resourceCRID, code string) error {
+// Denied renders a completed denial. request is what the command named the
+// request by: a device id, or a six-digit code. Like a deletion, the text
+// confirmation is a status line on stderr; --quiet echoes what was given and
+// JSON emits the outcome document. A code is shown only when the publisher
+// typed it: a denial by device id never learns one.
+func (p *Printer) Denied(resourceCRID, request string) error {
+	byDevice := qurlapi.ValidDeviceID(request)
 	switch {
+	case p.format == FormatJSON && byDevice:
+		return p.writeJSON(deniedJSON{CRID: resourceCRID, DeviceID: request, Denied: true})
 	case p.format == FormatJSON:
-		return p.writeJSON(deniedJSON{CRID: resourceCRID, Code: code, Denied: true})
+		return p.writeJSON(deniedJSON{CRID: resourceCRID, Code: request, Denied: true})
 	case p.quiet:
-		_, err := fmt.Fprintln(p.out, code)
+		_, err := fmt.Fprintln(p.out, request)
+		return err
+	case byDevice:
+		_, err := fmt.Fprintf(p.err, msgDeniedDevice+"\n", request, resourceCRID)
 		return err
 	}
-	_, err := fmt.Fprintf(p.err, msgDenied+"\n", spacedCode(code), resourceCRID)
+	_, err := fmt.Fprintf(p.err, msgDenied+"\n", spacedCode(request), resourceCRID)
 	return err
 }
 

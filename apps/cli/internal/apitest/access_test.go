@@ -10,6 +10,7 @@ import (
 // accessAnswer is the part of an access-request answer these tests read.
 type accessAnswer struct {
 	Data  json.RawMessage `json:"data"`
+	Meta  json.RawMessage `json:"meta"`
 	Error struct {
 		Code   string `json:"code"`
 		Detail string `json:"detail"`
@@ -41,7 +42,6 @@ func accessCall(t *testing.T, srv *Server, method, path, body string) (int, acce
 }
 
 type requestRow struct {
-	Code     string `json:"request_code"`
 	Name     string `json:"name"`
 	DeviceID string `json:"device_id"`
 	CRID     string `json:"crid"`
@@ -68,28 +68,44 @@ func resourceState(t *testing.T, srv *Server) (accessRequests *bool, people []pe
 }
 
 // TestAccessRequestRoutesFollowTheContract walks the mock's publisher API for
-// access requests: the two listings, an approval that moves a person from the
-// pending requests to the approved people in one change, a denial that gives
-// nobody access, a removal, and 404 for a code or a device id it does not
-// have.
+// access requests: the two listings, whose rows have no code, an approval by
+// code that moves a person from the pending requests to the approved people
+// in one change, a denial by device id and one by code that give nobody
+// access, a removal, and 404 for a code or a device id it does not have.
 func TestAccessRequestRoutesFollowTheContract(t *testing.T) {
 	srv := NewServer(t)
 	srv.SetAccessRequests(true)
 	srv.AddAccessRequest("482913", "Ana Lopez", "abcd-efgh-2345-mnop")
 	srv.AddAccessRequest("175306", "Sam Okafor", "qrst-uvwx-yz67-abcd")
+	srv.AddAccessRequest("660021", "", "ijkl-mnop-qrst-uvwx")
 	base := "/v1/resources/" + srv.Key.CRID
 
 	for path, wantCRID := range map[string]string{"/v1/access-requests": srv.Key.CRID, base + "/access-requests": ""} {
 		status, answer := accessCall(t, srv, http.MethodGet, path, "")
 		var rows []requestRow
-		if err := json.Unmarshal(answer.Data, &rows); err != nil || status != http.StatusOK || len(rows) != 2 {
+		if err := json.Unmarshal(answer.Data, &rows); err != nil || status != http.StatusOK || len(rows) != 3 {
 			t.Fatalf("GET %s = %d %s (%v)", path, status, answer.Data, err)
 		}
-		if rows[0].Code != "482913" || rows[0].Name != "Ana Lopez" || rows[0].DeviceID != "abcd-efgh-2345-mnop" || rows[0].CRID != wantCRID {
+		if rows[0].Name != "Ana Lopez" || rows[0].DeviceID != "abcd-efgh-2345-mnop" || rows[0].CRID != wantCRID {
 			t.Fatalf("GET %s first row = %+v", path, rows[0])
+		}
+		// A listing has no code, in any member.
+		for _, code := range []string{"482913", "175306", "660021", "request_code"} {
+			if strings.Contains(string(answer.Data), code) {
+				t.Fatalf("GET %s carries %q: %s", path, code, answer.Data)
+			}
+		}
+		// A listing that says nothing about more is complete.
+		if strings.Contains(string(answer.Meta), "has_more") {
+			t.Fatalf("GET %s says has_more without being asked to: %s", path, answer.Meta)
 		}
 	}
 
+	// An approval is by code only: the device id of a pending request does
+	// not approve it.
+	if status, _ := accessCall(t, srv, http.MethodPost, base+"/access-requests/abcd-efgh-2345-mnop/approve", "{}"); status != http.StatusNotFound {
+		t.Fatalf("an approval by device id = %d, want 404", status)
+	}
 	status, answer := accessCall(t, srv, http.MethodPost, base+"/access-requests/482913/approve", "{}")
 	var approved personRow
 	if err := json.Unmarshal(answer.Data, &approved); err != nil || status != http.StatusOK || approved.DeviceID != "abcd-efgh-2345-mnop" || approved.Name != "Ana Lopez" {
@@ -98,15 +114,22 @@ func TestAccessRequestRoutesFollowTheContract(t *testing.T) {
 	if status, answer := accessCall(t, srv, http.MethodPost, base+"/access-requests/482913/approve", "{}"); status != http.StatusNotFound || answer.Error.Code != "not_found" {
 		t.Fatalf("a second approval of the same code = %d %q, want 404 not_found", status, answer.Error.Code)
 	}
-	if status, _ := accessCall(t, srv, http.MethodDelete, base+"/access-requests/175306", ""); status != http.StatusNoContent {
-		t.Fatalf("deny = %d, want 204", status)
+	// A denial is by device id, or by code.
+	if status, _ := accessCall(t, srv, http.MethodDelete, base+"/access-requests/qrst-uvwx-yz67-abcd", ""); status != http.StatusNoContent {
+		t.Fatalf("deny by device id = %d, want 204", status)
+	}
+	if status, answer := accessCall(t, srv, http.MethodDelete, base+"/access-requests/qrst-uvwx-yz67-abcd", ""); status != http.StatusNotFound || strings.Contains(answer.Error.Detail, "code") {
+		t.Fatalf("a second denial by device id = %d %q, want 404 that says nothing about codes", status, answer.Error.Detail)
 	}
 	if status, _ := accessCall(t, srv, http.MethodDelete, base+"/access-requests/175306", ""); status != http.StatusNotFound {
-		t.Fatalf("a second denial = %d, want 404", status)
+		t.Fatalf("a denial by the code of a request that was denied = %d, want 404", status)
+	}
+	if status, _ := accessCall(t, srv, http.MethodDelete, base+"/access-requests/660021", ""); status != http.StatusNoContent {
+		t.Fatalf("deny by code = %d, want 204", status)
 	}
 	on, people := resourceState(t, srv)
 	if on == nil || !*on || len(people) != 1 || people[0].DeviceID != "abcd-efgh-2345-mnop" {
-		t.Fatalf("resource after one approval and one denial: access_requests %v, people %+v", on, people)
+		t.Fatalf("resource after one approval and two denials: access_requests %v, people %+v", on, people)
 	}
 	if status, _ := accessCall(t, srv, http.MethodDelete, base+"/allowed-passkeys/qrst-uvwx-yz67-abcd", ""); status != http.StatusNotFound {
 		t.Fatalf("removal of a person who was never approved = %d, want 404", status)
@@ -119,6 +142,36 @@ func TestAccessRequestRoutesFollowTheContract(t *testing.T) {
 	}
 	if status, _ := accessCall(t, srv, http.MethodGet, "/v1/resources/another/access-requests", ""); status != http.StatusNotFound {
 		t.Fatalf("listing of another resource = %d, want 404", status)
+	}
+}
+
+// TestAccessRequestListingsOfAnOlderBuildAndOfABoundedList pins the two
+// things a test can ask of the listings beyond the contract: the code of
+// each request in a request_code member, as a build of the service before
+// the contract sent it, and meta.has_more with either value.
+func TestAccessRequestListingsOfAnOlderBuildAndOfABoundedList(t *testing.T) {
+	srv := NewServer(t)
+	srv.SetAccessRequests(true)
+	srv.AddAccessRequest("482913", "Ana Lopez", "abcd-efgh-2345-mnop")
+	srv.ListRequestCodes()
+	paths := []string{"/v1/access-requests", "/v1/resources/" + srv.Key.CRID + "/access-requests"}
+	for _, path := range paths {
+		_, answer := accessCall(t, srv, http.MethodGet, path, "")
+		if !strings.Contains(string(answer.Data), `"request_code":"482913"`) {
+			t.Fatalf("GET %s of an older build has no code: %s", path, answer.Data)
+		}
+	}
+	for _, more := range []bool{true, false} {
+		srv.SetAccessRequestsHasMore(more)
+		for _, path := range paths {
+			_, answer := accessCall(t, srv, http.MethodGet, path, "")
+			var meta struct {
+				HasMore *bool `json:"has_more"`
+			}
+			if err := json.Unmarshal(answer.Meta, &meta); err != nil || meta.HasMore == nil || *meta.HasMore != more {
+				t.Fatalf("GET %s meta = %s (%v), want has_more %t", path, answer.Meta, err, more)
+			}
+		}
 	}
 }
 

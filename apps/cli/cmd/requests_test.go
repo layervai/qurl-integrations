@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"slices"
 	"strings"
@@ -29,8 +30,19 @@ const (
 	otherRequester   = "Sam Okafor"
 	testLinkSite     = "https://links.example.test"
 	unsupportedText  = "this service does not offer access requests yet"
-	safetyLine       = "Approve a code only when the person gave it to you themselves; a name can be typed by anyone."
+	safetyLine       = "To let one of these people in, ask them for the six-digit code on their screen and run `qurl approve <CRID> <code>`; a name can be typed by anyone, so the code is the only proof of who is asking."
 )
+
+// pendingDevices reads the device ids of the pending requests of the mock's
+// resource from `qurl requests <CRID> --quiet`.
+func pendingDevices(t *testing.T, srv *apitest.Server) []string {
+	t.Helper()
+	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "requests", srv.Key.CRID, "--quiet"}})
+	if res.code != 0 {
+		t.Fatalf("requests --quiet: exit %d: %s", res.code, res.stderr.String())
+	}
+	return strings.Fields(res.stdout.String())
+}
 
 // requestLog returns "METHOD path" for every request the mock received.
 func requestLog(srv *apitest.Server) []string {
@@ -43,8 +55,8 @@ func requestLog(srv *apitest.Server) []string {
 }
 
 // twoRequests gives the mock two pending requests, the second one first, so
-// a command that takes "the first row" instead of the code it was given
-// approves the wrong person.
+// a command that takes "the first row" instead of what it was given approves
+// or refuses the wrong person.
 func twoRequests(srv *apitest.Server) {
 	srv.SetAccessRequests(true)
 	srv.AddAccessRequest(otherRequestCode, otherRequester, otherDevice)
@@ -602,7 +614,7 @@ func TestRequestAndRequestsNameEachOther(t *testing.T) {
 
 // TestRequestsListsPendingRequests pins the two listings through the command:
 // the route each uses, the rows, the last line, the JSON document and
-// --quiet. The listing changes nothing.
+// --quiet. The listing changes nothing, and shows no code.
 func TestRequestsListsPendingRequests(t *testing.T) {
 	for _, all := range []bool{true, false} {
 		t.Run(fmt.Sprintf("all=%t", all), func(t *testing.T) {
@@ -610,19 +622,21 @@ func TestRequestsListsPendingRequests(t *testing.T) {
 			twoRequests(srv)
 			args := []string{"--endpoint", srv.URL, "requests"}
 			wantRoute := "GET /v1/access-requests"
+			wantHeader := "NAME          DEVICE ID            REQUESTED  EXPIRES  CRID"
 			wantRows := []string{
-				`175 306  "Sam Okafor"  qrst-uvwx-yz67-abcd  2m ago     ` + srv.Key.CRID,
-				`482 913  "Ana Lopez"   abcd-efgh-2345-mnop  2m ago     ` + srv.Key.CRID,
+				`"Sam Okafor"  qrst-uvwx-yz67-abcd  2m ago     in 58m   ` + srv.Key.CRID,
+				`"Ana Lopez"   abcd-efgh-2345-mnop  2m ago     in 58m   ` + srv.Key.CRID,
 			}
-			wantQuiet := srv.Key.CRID + " " + otherRequestCode + "\n" + srv.Key.CRID + " " + requestCode + "\n"
+			wantQuiet := srv.Key.CRID + " " + otherDevice + "\n" + srv.Key.CRID + " " + requesterDevice + "\n"
 			if !all {
 				args = append(args, srv.Key.CRID)
 				wantRoute = "GET /v1/resources/" + srv.Key.CRID + "/access-requests"
+				wantHeader = "NAME          DEVICE ID            REQUESTED  EXPIRES"
 				wantRows = []string{
-					`175 306  "Sam Okafor"  qrst-uvwx-yz67-abcd  2m ago`,
-					`482 913  "Ana Lopez"   abcd-efgh-2345-mnop  2m ago`,
+					`"Sam Okafor"  qrst-uvwx-yz67-abcd  2m ago     in 58m`,
+					`"Ana Lopez"   abcd-efgh-2345-mnop  2m ago     in 58m`,
 				}
-				wantQuiet = otherRequestCode + "\n" + requestCode + "\n"
+				wantQuiet = otherDevice + "\n" + requesterDevice + "\n"
 			}
 
 			res := runCLI(t, &runOpts{args: args})
@@ -630,30 +644,34 @@ func TestRequestsListsPendingRequests(t *testing.T) {
 				t.Fatalf("exit = %d, stderr: %s", res.code, res.stderr.String())
 			}
 			lines := strings.Split(strings.TrimRight(res.stdout.String(), "\n"), "\n")
-			if len(lines) != 5 || !strings.HasPrefix(lines[0], "CODE ") || lines[1] != wantRows[0] || lines[2] != wantRows[1] || lines[3] != "" || lines[4] != safetyLine {
+			if len(lines) != 5 || lines[0] != wantHeader || lines[1] != wantRows[0] || lines[2] != wantRows[1] || lines[3] != "" || lines[4] != safetyLine {
 				t.Fatalf("listing =\n%s", res.stdout.String())
 			}
 
 			res = runCLI(t, &runOpts{args: append(slices.Clone(args), "-o", "json")})
 			var document struct {
 				Requests []struct {
-					Code         string `json:"code"`
 					Name         string `json:"name"`
 					NameVerified *bool  `json:"name_verified"`
 					DeviceID     string `json:"device_id"`
 					CRID         string `json:"crid"`
 				} `json:"requests"`
+				ApprovalRule string `json:"approval_rule"`
+				HasMore      *bool  `json:"has_more"`
 			}
 			if err := json.Unmarshal(res.stdout.Bytes(), &document); res.code != 0 || err != nil || len(document.Requests) != 2 || res.stderr.Len() != 0 {
 				t.Fatalf("requests -o json: exit %d, %v: %s", res.code, err, res.stdout.String())
 			}
 			second := document.Requests[1]
-			if second.Code != requestCode || second.Name != requesterName || second.NameVerified == nil || *second.NameVerified || second.DeviceID != requesterDevice || second.CRID != srv.Key.CRID {
+			if second.Name != requesterName || second.NameVerified == nil || *second.NameVerified || second.DeviceID != requesterDevice || second.CRID != srv.Key.CRID {
 				t.Fatalf("requests -o json row = %+v", second)
+			}
+			if document.ApprovalRule != safetyLine || document.HasMore == nil || *document.HasMore {
+				t.Fatalf("requests -o json: approval_rule %q, has_more %v", document.ApprovalRule, document.HasMore)
 			}
 
 			res = runCLI(t, &runOpts{args: append(slices.Clone(args), "--quiet")})
-			if res.code != 0 || res.stdout.String() != wantQuiet {
+			if res.code != 0 || res.stdout.String() != wantQuiet || res.stderr.Len() != 0 {
 				t.Fatalf("requests --quiet = %q, want %q", res.stdout.String(), wantQuiet)
 			}
 
@@ -672,6 +690,251 @@ func TestRequestsListsPendingRequests(t *testing.T) {
 		if res.code != 0 || res.stdout.Len() != 0 || res.stderr.String() != note {
 			t.Fatalf("empty listing %q: exit %d, stdout %q, stderr %q", args, res.code, res.stdout.String(), res.stderr.String())
 		}
+	}
+}
+
+// codeForms returns every form in which a six-digit code could be written
+// into an output: bare, and in the two groups of three a person reads aloud,
+// with each separator.
+func codeForms(code string) []string {
+	return []string{code, code[:3] + " " + code[3:], code[:3] + "-" + code[3:]}
+}
+
+// TestNoCommandShowsAPendingCode pins the rule the scheme rests on: the code
+// of a pending request is on the screen of the person who asked, and no
+// command of the publisher shows it. A publisher, or an agent working for
+// one, who could read the codes in a listing could approve from the list,
+// which is approval by name with one more step.
+//
+// The service here is a build that still sends each request's code in its
+// listings. Every command that reads or lists is run in every output mode,
+// with and without --verbose, and so are the errors a publisher can get
+// while the requests are pending. Neither code is anywhere on stdout or on
+// stderr.
+func TestNoCommandShowsAPendingCode(t *testing.T) {
+	const wrongCode, absentDevice = "000000", "nope-nope-nope-nope"
+	seed := func(t *testing.T) *apitest.Server {
+		t.Helper()
+		srv := apitest.NewServer(t)
+		twoRequests(srv)
+		srv.ListRequestCodes()
+		return srv
+	}
+	// The mock does send the codes: without that this test would pass
+	// whatever the commands did.
+	probe := seed(t)
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, probe.URL+"/v1/access-requests", http.NoBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+testAPIKey)
+	answer, err := probe.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sent, err := io.ReadAll(answer.Body)
+	_ = answer.Body.Close()
+	if err != nil || !strings.Contains(string(sent), `"request_code":"`+requestCode+`"`) || !strings.Contains(string(sent), `"request_code":"`+otherRequestCode+`"`) {
+		t.Fatalf("the mock did not send the codes this test is about: %s (%v)", sent, err)
+	}
+
+	commands := map[string]func(*apitest.Server) []string{
+		"requests":                   func(*apitest.Server) []string { return []string{"requests"} },
+		"requests <CRID>":            func(srv *apitest.Server) []string { return []string{"requests", srv.Key.CRID} },
+		"requests <CRID> --off":      func(srv *apitest.Server) []string { return []string{"requests", srv.Key.CRID, "--off"} },
+		"requests <CRID> --on":       func(srv *apitest.Server) []string { return []string{"requests", srv.Key.CRID, "--on"} },
+		"grants <CRID>":              func(srv *apitest.Server) []string { return []string{"grants", srv.Key.CRID} },
+		"status <CRID>":              func(srv *apitest.Server) []string { return []string{"status", srv.Key.CRID} },
+		"deny <CRID> <device id>":    func(srv *apitest.Server) []string { return []string{"deny", srv.Key.CRID, requesterDevice} },
+		"deny of a device not there": func(srv *apitest.Server) []string { return []string{"deny", srv.Key.CRID, absentDevice} },
+		"deny of a wrong code":       func(srv *apitest.Server) []string { return []string{"deny", srv.Key.CRID, wrongCode} },
+		"approve of a wrong code":    func(srv *apitest.Server) []string { return []string{"approve", srv.Key.CRID, wrongCode} },
+		"approve of a device id":     func(srv *apitest.Server) []string { return []string{"approve", srv.Key.CRID, requesterDevice} },
+		"deny of a name":             func(srv *apitest.Server) []string { return []string{"deny", srv.Key.CRID, requesterName} },
+	}
+	modes := map[string][]string{"text": nil, "json": {"-o", "json"}, "quiet": {"--quiet"}}
+	for name, command := range commands {
+		for mode, flags := range modes {
+			for _, verbose := range []bool{false, true} {
+				srv := seed(t)
+				args := append(append([]string{"--endpoint", srv.URL}, command(srv)...), flags...)
+				if verbose {
+					args = append(args, "--verbose")
+				}
+				res := runCLI(t, &runOpts{args: args})
+				where := fmt.Sprintf("%s (%s, verbose %t)", name, mode, verbose)
+				for _, code := range []string{requestCode, otherRequestCode} {
+					for _, form := range codeForms(code) {
+						if strings.Contains(res.stdout.String(), form) {
+							t.Errorf("%s: stdout shows the pending code %q:\n%s", where, form, res.stdout.String())
+						}
+						if strings.Contains(res.stderr.String(), form) {
+							t.Errorf("%s: stderr shows the pending code %q:\n%s", where, form, res.stderr.String())
+						}
+					}
+				}
+				for _, member := range []string{`"code"`, `"request_code"`} {
+					if strings.HasPrefix(name, "requests") && strings.Contains(res.stdout.String(), member) {
+						t.Errorf("%s: the document has the member %s:\n%s", where, member, res.stdout.String())
+					}
+				}
+				// --verbose did write its diagnostics, so their silence
+				// about the codes is not the silence of a flag that did
+				// nothing.
+				if verbose && len(srv.Requests()) > 0 && !strings.Contains(res.stderr.String(), "[debug] ") {
+					t.Errorf("%s: --verbose wrote no diagnostics:\n%s", where, res.stderr.String())
+				}
+			}
+		}
+	}
+}
+
+// TestRequestsListingSaysWhenThereMayBeMore pins the bounded listing through
+// the command. When the service says there may be more requests than it
+// sent, the listing of all resources says so after its rows and says what to
+// do, the JSON document has has_more true, and --quiet says it on stderr and
+// keeps stdout to values. A listing the service says nothing about, or calls
+// complete, has no such line, and has_more false.
+func TestRequestsListingSaysWhenThereMayBeMore(t *testing.T) {
+	const (
+		forAll = "There may be more requests than are shown here. To see all the requests for one resource, run `qurl requests <CRID>`."
+		forOne = "There may be more requests for this resource than are shown here. A request leaves the list when it is approved, denied or expired; run this command again to see the rest."
+	)
+	for _, test := range []struct {
+		name string
+		set  *bool
+		more bool
+	}{
+		{name: "the service does not say"},
+		{name: "the service says there is no more", set: new(bool)},
+		{name: "the service says there may be more", set: func() *bool { more := true; return &more }(), more: true},
+	} {
+		for _, all := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s, all=%t", test.name, all), func(t *testing.T) {
+				srv := apitest.NewServer(t)
+				twoRequests(srv)
+				if test.set != nil {
+					srv.SetAccessRequestsHasMore(*test.set)
+				}
+				args, line := []string{"--endpoint", srv.URL, "requests"}, forAll
+				if !all {
+					args, line = append(args, srv.Key.CRID), forOne
+				}
+
+				res := runCLI(t, &runOpts{args: args})
+				text := res.stdout.String()
+				if res.code != 0 || res.stderr.Len() != 0 || strings.Contains(text, "There may be more") != test.more {
+					t.Fatalf("text: exit %d, stderr %q:\n%s", res.code, res.stderr.String(), text)
+				}
+				if test.more && (!strings.HasSuffix(text, "\n\n"+line+"\n\n"+safetyLine+"\n") || strings.Index(text, requesterDevice) > strings.Index(text, line)) {
+					t.Fatalf("text: the line is not after the rows and before the last line:\n%s", text)
+				}
+
+				res = runCLI(t, &runOpts{args: append(slices.Clone(args), "-o", "json")})
+				var document struct {
+					Requests []json.RawMessage `json:"requests"`
+					HasMore  *bool             `json:"has_more"`
+				}
+				if err := json.Unmarshal(res.stdout.Bytes(), &document); res.code != 0 || err != nil || document.HasMore == nil || *document.HasMore != test.more || len(document.Requests) != 2 || res.stderr.Len() != 0 {
+					t.Fatalf("json: exit %d, %v, stderr %q:\n%s", res.code, err, res.stderr.String(), res.stdout.String())
+				}
+
+				res = runCLI(t, &runOpts{args: append(slices.Clone(args), "--quiet")})
+				wantErr := ""
+				if test.more {
+					wantErr = line + "\n"
+				}
+				if res.code != 0 || len(strings.Fields(res.stdout.String())) != map[bool]int{true: 4, false: 2}[all] || res.stderr.String() != wantErr {
+					t.Fatalf("quiet: exit %d, stdout %q, stderr %q, want stderr %q", res.code, res.stdout.String(), res.stderr.String(), wantErr)
+				}
+			})
+		}
+	}
+
+	// A page with no rows of a listing that goes on is not "none".
+	srv := apitest.NewServer(t)
+	srv.SetAccessRequestsHasMore(true)
+	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "requests"}})
+	if res.code != 0 || res.stdout.Len() != 0 || res.stderr.String() != forAll+"\n" {
+		t.Fatalf("an empty page of a listing that goes on: exit %d, stdout %q, stderr %q", res.code, res.stdout.String(), res.stderr.String())
+	}
+}
+
+// productionRequests returns the run options for an access-request command
+// pointed at the production endpoint, with the API client replaced by one
+// for the mock, so the command sees a production endpoint and no request
+// leaves the machine.
+func productionRequests(t *testing.T, srv *apitest.Server, args ...string) *runOpts {
+	t.Helper()
+	return &runOpts{
+		args: append([]string{"--endpoint", "https://api.layerv.ai"}, args...),
+		openAPIClient: func(context.Context) (qurlapi.Client, error) {
+			return qurlapi.New(&qurlapi.Config{BaseURL: srv.URL, APIKey: testAPIKey, Version: "test"})
+		},
+	}
+}
+
+// TestListingRequestsNeedsNoConfirmationForATestCRID pins which
+// access-request commands the guard for a test CRID on the production
+// endpoint applies to. A listing acts on nothing, so like `qurl grants
+// <CRID>` it needs no --yes and draws no warning, for one resource and for
+// all of them. A change is refused before any request without --yes, and
+// goes through, with the warning, with it. An operand that is not a CRID is
+// refused locally either way.
+func TestListingRequestsNeedsNoConfirmationForATestCRID(t *testing.T) {
+	for name, args := range map[string]func(*apitest.Server) []string{
+		"all resources": func(*apitest.Server) []string { return []string{"requests"} },
+		"one resource":  func(srv *apitest.Server) []string { return []string{"requests", srv.Key.CRID} },
+	} {
+		t.Run("listing "+name, func(t *testing.T) {
+			srv := apitest.NewServer(t)
+			twoRequests(srv)
+			res := runCLI(t, productionRequests(t, srv, args(srv)...))
+			if res.code != 0 || res.stderr.Len() != 0 || !strings.Contains(res.stdout.String(), requesterDevice) {
+				t.Fatalf("exit %d, stdout %q, stderr %q", res.code, res.stdout.String(), res.stderr.String())
+			}
+			if log := requestLog(srv); len(log) != 1 || !strings.HasPrefix(log[0], "GET ") {
+				t.Fatalf("requests = %v, want the one read", log)
+			}
+		})
+	}
+	changes := map[string]func(*apitest.Server) []string{
+		"requests --on":     func(srv *apitest.Server) []string { return []string{"requests", srv.Key.CRID, "--on"} },
+		"requests --off":    func(srv *apitest.Server) []string { return []string{"requests", srv.Key.CRID, "--off"} },
+		"approve":           func(srv *apitest.Server) []string { return []string{"approve", srv.Key.CRID, requestCode} },
+		"deny by device id": func(srv *apitest.Server) []string { return []string{"deny", srv.Key.CRID, requesterDevice} },
+		"deny by code":      func(srv *apitest.Server) []string { return []string{"deny", srv.Key.CRID, requestCode} },
+	}
+	for name, args := range changes {
+		t.Run(name+" without --yes", func(t *testing.T) {
+			srv := apitest.NewServer(t)
+			twoRequests(srv)
+			res := runCLI(t, productionRequests(t, srv, args(srv)...))
+			if res.code != exitcode.Usage || !strings.Contains(res.stderr.String(), "Re-run with --yes") || len(srv.Requests()) != 0 {
+				t.Fatalf("exit %d, %d requests, stderr %q", res.code, len(srv.Requests()), res.stderr.String())
+			}
+			mustEmptyStdout(t, res)
+		})
+		t.Run(name+" with --yes", func(t *testing.T) {
+			srv := apitest.NewServer(t)
+			twoRequests(srv)
+			res := runCLI(t, productionRequests(t, srv, append(args(srv), "--yes")...))
+			if res.code != 0 || !strings.Contains(res.stderr.String(), "because --yes was given") {
+				t.Fatalf("exit %d, stderr %q", res.code, res.stderr.String())
+			}
+			if log := requestLog(srv); len(log) != 1 || strings.HasPrefix(log[0], "GET ") {
+				t.Fatalf("requests = %v, want the one change", log)
+			}
+		})
+	}
+	srv := apitest.NewServer(t)
+	res := runCLI(t, productionRequests(t, srv, "requests", "not-a-crid"))
+	if res.code != exitcode.InvalidInput || len(srv.Requests()) != 0 {
+		t.Fatalf("a listing for an operand that is not a CRID: exit %d, %d requests, stderr %q", res.code, len(srv.Requests()), res.stderr.String())
+	}
+	help := runCLI(t, &runOpts{args: []string{"requests", "--help"}})
+	if !strings.Contains(help.stdout.String(), "listing never needs it") {
+		t.Fatalf("requests --help does not say that a listing needs no --yes:\n%s", help.stdout.String())
 	}
 }
 
@@ -859,9 +1122,8 @@ func TestApproveSendsTheCodeThatWasGiven(t *testing.T) {
 			if got := approvedDevices(t, srv); !slices.Equal(got, []string{requesterDevice}) {
 				t.Fatalf("approved people = %v, want only the person whose code was given", got)
 			}
-			pending := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "requests", srv.Key.CRID, "--quiet"}})
-			if pending.stdout.String() != otherRequestCode+"\n" {
-				t.Fatalf("pending after the approval = %q, want the other request", pending.stdout.String())
+			if pending := pendingDevices(t, srv); !slices.Equal(pending, []string{otherDevice}) {
+				t.Fatalf("pending after the approval = %v, want the other request", pending)
 			}
 		})
 	}
@@ -894,25 +1156,49 @@ func TestApproveSendsTheCodeThatWasGiven(t *testing.T) {
 	}
 }
 
-// TestApproveAndDenyRefuseWhatCannotBeACode pins the local refusals: a value
-// that can never be a code is exit 8 with the forms that are accepted, a
-// wrong number of operands is a usage error, and neither sends anything.
-func TestApproveAndDenyRefuseWhatCannotBeACode(t *testing.T) {
-	for _, command := range []string{"approve", "deny"} {
+// TestApproveAndDenyRefuseWhatCannotNameARequest pins the local refusals. For
+// an approval, a value that can never be a code is exit 8 with the forms
+// that are accepted, a device id included: an approval is by code and
+// nothing else. For a denial, a value that is neither a device id nor a code
+// is exit 8 with the two things that are accepted. A wrong number of
+// operands is a usage error that says so. None of them sends anything.
+func TestApproveAndDenyRefuseWhatCannotNameARequest(t *testing.T) {
+	notCodes := [][]string{{"48291"}, {"4829133"}, {"48291a"}, {"482  913"}, {"482_913"}, {"4829 13"}, {"48 2913"}, {""}, {"４８２９１３"}, {requesterName}, {"482913/approve"}}
+	for command, test := range map[string]struct {
+		refused [][]string
+		message string
+	}{
+		"approve": {refused: append(slices.Clone(notCodes), []string{requesterDevice}), message: msgRequestCodeInvalid},
+		"deny": {
+			refused: append(slices.Clone(notCodes), []string{"abcd-efgh-2345"}, []string{"abcd-efgh-1890-mnop"}, []string{"abcd_efgh_2345_mnop"}, []string{requesterDevice + "/approve"}, []string{"../" + requesterDevice}),
+			message: msgDeniedRequestInvalid,
+		},
+	} {
 		srv := apitest.NewServer(t)
 		twoRequests(srv)
-		for _, code := range [][]string{{"48291"}, {"4829133"}, {"48291a"}, {"482  913"}, {"482_913"}, {"4829 13"}, {"48 2913"}, {"482", "9133"}, {"abc", "def"}, {""}, {"４８２９１３"}, {requesterName}, {"482913/approve"}} {
-			res := runCLI(t, &runOpts{args: append([]string{"--endpoint", srv.URL, command, srv.Key.CRID}, code...)})
-			if res.code != exitcode.InvalidInput || !strings.Contains(res.stderr.String(), msgRequestCodeInvalid) {
-				t.Errorf("%s %q: exit %d, stderr %q", command, code, res.code, res.stderr.String())
+		for _, value := range test.refused {
+			res := runCLI(t, &runOpts{args: append([]string{"--endpoint", srv.URL, command, srv.Key.CRID}, value...)})
+			if res.code != exitcode.InvalidInput || !strings.Contains(res.stderr.String(), test.message) {
+				t.Errorf("%s %q: exit %d, stderr %q", command, value, res.code, res.stderr.String())
 			}
 			mustEmptyStdout(t, res)
 		}
-		for _, operands := range [][]string{nil, {srv.Key.CRID}, {srv.Key.CRID, "482", "913", "000"}} {
-			res := runCLI(t, &runOpts{args: append([]string{"--endpoint", srv.URL, command}, operands...)})
-			if res.code != exitcode.Usage {
-				t.Errorf("%s with %d operands: exit %d, want a usage error", command, len(operands), res.code)
+		// One operand too many is reported as that. Only a code that a
+		// shell split into its two halves is two operands.
+		for operands, received := range map[string]int{
+			"":           0,
+			srv.Key.CRID: 1,
+			srv.Key.CRID + " " + requestCode + " junk":               3,
+			srv.Key.CRID + " 482 9133":                               3,
+			srv.Key.CRID + " abc def":                                3,
+			srv.Key.CRID + " " + requesterDevice + " " + otherDevice: 3,
+			srv.Key.CRID + " 482 913 000":                            4,
+		} {
+			res := runCLI(t, &runOpts{args: append([]string{"--endpoint", srv.URL, command}, strings.Fields(operands)...)})
+			if want := fmt.Sprintf("accepts 2 arg(s), received %d", received); res.code != exitcode.Usage || !strings.Contains(res.stderr.String(), want) {
+				t.Errorf("%s %q: exit %d, stderr %q, want a usage error with %q", command, operands, res.code, res.stderr.String(), want)
 			}
+			mustEmptyStdout(t, res)
 		}
 		res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, command, "not-a-crid", requestCode}})
 		if res.code != exitcode.InvalidInput {
@@ -922,69 +1208,108 @@ func TestApproveAndDenyRefuseWhatCannotBeACode(t *testing.T) {
 			t.Fatalf("%s: a refused command line sent %d requests: %v", command, got, requestLog(srv))
 		}
 	}
+	if !strings.Contains(msgDeniedRequestInvalid, "xxxx-xxxx-xxxx-xxxx") || !strings.Contains(msgDeniedRequestInvalid, "six-digit code") {
+		t.Fatalf("the message for a denial lost one of the two forms: %q", msgDeniedRequestInvalid)
+	}
 }
 
-// TestApproveAndDenyACodeThatIsNotPending pins the answer for a code the
-// resource does not have: exit 5 and a message about the code, not the
-// generic hint about a mistyped CRID. Nobody gets access and the pending
-// request of another person is not touched.
-func TestApproveAndDenyACodeThatIsNotPending(t *testing.T) {
-	for _, command := range []string{"approve", "deny"} {
+// TestApproveAndDenyARequestThatIsNotPending pins the answer for a code, or
+// for a denial a device id, that the resource has no pending request for:
+// exit 5 and a message about what was named, not the generic hint about a
+// mistyped CRID, and not a word about which codes are pending. Nobody gets
+// access and the pending request of another person is not touched.
+func TestApproveAndDenyARequestThatIsNotPending(t *testing.T) {
+	const absentDevice = "nope-nope-nope-nope"
+	for _, test := range []struct {
+		command, named, want string
+	}{
+		{command: "approve", named: requestCode, want: "Error: no pending request has the code 482 913 for this resource"},
+		{command: "deny", named: requestCode, want: "Error: no pending request has the code 482 913 for this resource"},
+		{command: "deny", named: absentDevice, want: "Error: no pending request is from the device id " + absentDevice + " for this resource"},
+	} {
 		for _, mode := range [][]string{nil, {"-o", "json"}, {"--quiet"}} {
 			srv := apitest.NewServer(t)
 			srv.SetAccessRequests(true)
 			srv.AddAccessRequest(otherRequestCode, otherRequester, otherDevice)
-			args := []string{"--endpoint", srv.URL, command, srv.Key.CRID, requestCode}
+			args := []string{"--endpoint", srv.URL, test.command, srv.Key.CRID, test.named}
 			res := runCLI(t, &runOpts{args: append(args, mode...)})
+			where := fmt.Sprintf("%s %s %v", test.command, test.named, mode)
 			if res.code != exitcode.NotFound {
-				t.Fatalf("%s %v: exit %d, stderr %q", command, mode, res.code, res.stderr.String())
+				t.Fatalf("%s: exit %d, stderr %q", where, res.code, res.stderr.String())
 			}
 			mustEmptyStdout(t, res)
-			for _, want := range []string{"Error: no pending request has the code 482 913 for this resource", "It may have expired, or been approved or denied already", "`qurl requests <CRID>`", "Request ID: req_test"} {
+			for _, want := range []string{test.want, "It may have expired, or been approved or denied already", "`qurl requests <CRID>`", "Request ID: req_test"} {
 				if !strings.Contains(res.stderr.String(), want) {
-					t.Errorf("%s %v: stderr lacks %q: %s", command, mode, want, res.stderr.String())
+					t.Errorf("%s: stderr lacks %q: %s", where, want, res.stderr.String())
 				}
 			}
 			if strings.Contains(res.stderr.String(), "mistyped") {
-				t.Errorf("%s: the message is the generic hint about a CRID: %s", command, res.stderr.String())
+				t.Errorf("%s: the message is the generic hint about a CRID: %s", where, res.stderr.String())
+			}
+			for _, form := range codeForms(otherRequestCode) {
+				if strings.Contains(res.stderr.String(), form) {
+					t.Errorf("%s: the message gives away a code that is pending: %s", where, res.stderr.String())
+				}
 			}
 			if got := approvedDevices(t, srv); len(got) != 0 {
-				t.Fatalf("%s of a code that is not pending gave access: %v", command, got)
+				t.Fatalf("%s gave access: %v", where, got)
 			}
-			pending := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "requests", srv.Key.CRID, "--quiet"}})
-			if pending.stdout.String() != otherRequestCode+"\n" {
-				t.Fatalf("%s touched another person's request: pending = %q", command, pending.stdout.String())
+			if pending := pendingDevices(t, srv); !slices.Equal(pending, []string{otherDevice}) {
+				t.Fatalf("%s touched another person's request: pending = %v", where, pending)
 			}
 		}
 	}
 }
 
 // TestDenyRemovesTheRequestAndGivesNoAccess pins the denial through the
-// command: one DELETE on the route of the code that was given, a status line
-// on stderr, and no access for anyone.
+// command, for each way a request is named: by the device id a listing
+// shows, in either case, and by the code its publisher was given. One DELETE
+// is sent with that value in it and nothing is read first, so the request
+// that is refused is the one that was named. The confirmation is a status
+// line on stderr, and nobody gets access.
 func TestDenyRemovesTheRequestAndGivesNoAccess(t *testing.T) {
-	srv := apitest.NewServer(t)
-	twoRequests(srv)
-	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "deny", srv.Key.CRID, "482 913"}})
-	wantNote := "Denied the request with the code 482 913 for " + srv.Key.CRID + ". No access was given.\n"
-	if res.code != 0 || res.stdout.Len() != 0 || res.stderr.String() != wantNote {
-		t.Fatalf("deny: exit %d, stdout %q, stderr %q", res.code, res.stdout.String(), res.stderr.String())
-	}
-	if got, want := requestLog(srv), []string{"DELETE /v1/resources/" + srv.Key.CRID + "/access-requests/" + requestCode}; !slices.Equal(got, want) {
-		t.Fatalf("deny sent %v, want %v", got, want)
-	}
-	if got := approvedDevices(t, srv); len(got) != 0 {
-		t.Fatalf("a denial gave access: %v", got)
-	}
-	pending := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "requests", srv.Key.CRID, "--quiet"}})
-	if pending.stdout.String() != otherRequestCode+"\n" {
-		t.Fatalf("pending after the denial = %q", pending.stdout.String())
-	}
+	for _, test := range []struct {
+		name, written, sent, note, member string
+	}{
+		{name: "by device id", written: requesterDevice, sent: requesterDevice, member: "device_id", note: "Denied the request from the device id " + requesterDevice + " for %s. No access was given.\n"},
+		{name: "by device id in capitals", written: strings.ToUpper(requesterDevice), sent: requesterDevice, member: "device_id", note: "Denied the request from the device id " + requesterDevice + " for %s. No access was given.\n"},
+		{name: "by code", written: "482 913", sent: requestCode, member: "code", note: "Denied the request with the code 482 913 for %s. No access was given.\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			route := func(srv *apitest.Server) []string {
+				return []string{"DELETE /v1/resources/" + srv.Key.CRID + "/access-requests/" + test.sent}
+			}
+			srv := apitest.NewServer(t)
+			twoRequests(srv)
+			res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "deny", srv.Key.CRID, test.written}})
+			if want := fmt.Sprintf(test.note, srv.Key.CRID); res.code != 0 || res.stdout.Len() != 0 || res.stderr.String() != want {
+				t.Fatalf("deny: exit %d, stdout %q, stderr %q, want stderr %q", res.code, res.stdout.String(), res.stderr.String(), want)
+			}
+			if got := requestLog(srv); !slices.Equal(got, route(srv)) {
+				t.Fatalf("deny sent %v, want %v: the value is sent as it was given, and nothing is looked up", got, route(srv))
+			}
+			if got := approvedDevices(t, srv); len(got) != 0 {
+				t.Fatalf("a denial gave access: %v", got)
+			}
+			if pending := pendingDevices(t, srv); !slices.Equal(pending, []string{otherDevice}) {
+				t.Fatalf("pending after the denial = %v, want the other request alone", pending)
+			}
 
-	res = runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "deny", srv.Key.CRID, otherRequestCode, "-o", "json"}})
-	want := `{"crid":"` + srv.Key.CRID + `","code":"` + otherRequestCode + `","denied":true}`
-	if got := strings.Join(strings.Fields(res.stdout.String()), ""); res.code != 0 || got != want || res.stderr.Len() != 0 {
-		t.Fatalf("deny -o json = %q, want %q", got, want)
+			srv = apitest.NewServer(t)
+			twoRequests(srv)
+			res = runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "deny", srv.Key.CRID, test.written, "-o", "json"}})
+			want := `{"crid":"` + srv.Key.CRID + `","` + test.member + `":"` + test.sent + `","denied":true}`
+			if got := strings.Join(strings.Fields(res.stdout.String()), ""); res.code != 0 || got != want || res.stderr.Len() != 0 {
+				t.Fatalf("deny -o json = %q, want %q", got, want)
+			}
+
+			srv = apitest.NewServer(t)
+			twoRequests(srv)
+			res = runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "deny", srv.Key.CRID, test.written, "--quiet"}})
+			if res.code != 0 || res.stdout.String() != test.sent+"\n" || res.stderr.Len() != 0 || !slices.Equal(requestLog(srv), route(srv)) {
+				t.Fatalf("deny --quiet: exit %d, stdout %q, stderr %q, sent %v", res.code, res.stdout.String(), res.stderr.String(), requestLog(srv))
+			}
+		})
 	}
 }
 
@@ -1379,10 +1704,11 @@ func TestRequestsOffSaysNoCountItWasNotGiven(t *testing.T) {
 // TestAccessRequestCommandsWithADeviceCredential runs every command for
 // access requests the way a real install does: with the device's own
 // credential, which the SDK lets be used only on the routes it lists. Both
-// listings, the approval, the denial and the removal of an approved person
-// are sent and do what they say, and so are the commands that use routes the
-// SDK listed before. Every request carries the device credential and no
-// other.
+// listings, the approval, the denial by code and the removal of an approved
+// person are sent and do what they say, and so are the commands that use
+// routes the SDK listed before. Every request carries the device credential
+// and no other. The one command the pinned SDK does not send yet, a denial
+// by device id, has its own test below.
 func TestAccessRequestCommandsWithADeviceCredential(t *testing.T) {
 	state := bootstrapRegisteredState(t)
 	device := func(srv *apitest.Server) func(context.Context) (qurlapi.Client, error) {
@@ -1401,12 +1727,12 @@ func TestAccessRequestCommandsWithADeviceCredential(t *testing.T) {
 	}{
 		{
 			name: "requests", args: func(*apitest.Server) []string { return []string{"requests"} },
-			want: "482 913",
+			want: `"Ana Lopez"   abcd-efgh-2345-mnop`,
 			sent: func(*apitest.Server) []string { return []string{"GET /v1/access-requests"} },
 		},
 		{
 			name: "requests for one resource", args: func(srv *apitest.Server) []string { return []string{"requests", srv.Key.CRID} },
-			want: "175 306",
+			want: `"Sam Okafor"  qrst-uvwx-yz67-abcd`,
 			sent: func(srv *apitest.Server) []string {
 				return []string{"GET /v1/resources/" + srv.Key.CRID + "/access-requests"}
 			},
@@ -1424,7 +1750,7 @@ func TestAccessRequestCommandsWithADeviceCredential(t *testing.T) {
 			},
 		},
 		{
-			name: "deny", args: func(srv *apitest.Server) []string { return []string{"deny", srv.Key.CRID, requestCode} },
+			name: "deny by code", args: func(srv *apitest.Server) []string { return []string{"deny", srv.Key.CRID, requestCode} },
 			want: "No access was given.",
 			sent: func(srv *apitest.Server) []string {
 				return []string{"DELETE /v1/resources/" + srv.Key.CRID + "/access-requests/" + requestCode}
@@ -1494,11 +1820,52 @@ func TestAccessRequestCommandsWithADeviceCredential(t *testing.T) {
 	}
 }
 
+// TestDenyByDeviceIDWithADeviceCredentialIsNotSentYet records a limit of
+// this release through the command, and fails when the limit is gone.
+//
+// A real install runs every command with the device's own credential, which
+// goes through the SDK. The pinned SDK admits a denial only with a six-digit
+// code in the path, so `qurl deny <CRID> <device id>` is refused before
+// anything is sent. The command says so, says that nothing was sent and that
+// the request gives no access unless it is approved, and exits 1 in every
+// output mode with nothing on stdout. The request is still pending.
+//
+// When the SDK admits a device id there, this test fails. The fix is to move
+// the case into TestAccessRequestCommandsWithADeviceCredential, where the
+// denial is sent with the device credential and the request is gone, and to
+// remove the message.
+func TestDenyByDeviceIDWithADeviceCredentialIsNotSentYet(t *testing.T) {
+	state := bootstrapRegisteredState(t)
+	for _, mode := range [][]string{nil, {"-o", "json"}, {"--quiet"}} {
+		srv := apitest.NewServer(t)
+		twoRequests(srv)
+		res := runCLI(t, &runOpts{
+			args: append([]string{"--endpoint", srv.URL, "deny", srv.Key.CRID, requesterDevice}, mode...), env: map[string]string{},
+			openAPIClient: func(ctx context.Context) (qurlapi.Client, error) {
+				return qurlapi.NewRegistered(ctx, &qurlapi.Config{BaseURL: srv.URL, HTTPClient: srv.Client()}, &bootstrapAgentStateStore{state: state})
+			},
+		})
+		want := "Error: this release of qurl cannot refuse a request by its device id with this device's identity yet, so nothing was sent. " +
+			"The request gives no access unless you approve it, and it expires by itself. " +
+			"To refuse it now, use its six-digit code if the person gave it to you\n"
+		if res.code != exitcode.General || res.stderr.String() != want {
+			t.Fatalf("%v: exit %d, stderr %q; want exit %d and %q. If the denial went through, the SDK now admits it: see this test's comment", mode, res.code, res.stderr.String(), exitcode.General, want)
+		}
+		mustEmptyStdout(t, res)
+		if got := len(srv.Requests()); got != 0 {
+			t.Fatalf("%v: a refused denial was sent: %v", mode, requestLog(srv))
+		}
+		if pending := pendingDevices(t, srv); !slices.Equal(pending, []string{otherDevice, requesterDevice}) {
+			t.Fatalf("%v: pending after a denial that was not sent = %v", mode, pending)
+		}
+	}
+}
+
 // TestAccessRequestCopySaysToApproveOnlyGivenCodes pins the rule that keeps
 // the scheme safe wherever a publisher, or an agent working for one, reads
 // how to use it: approve a code only when the person gave it to you, because
-// a name can be typed by anyone. It also pins that publish says the address
-// and the CRID are safe to send to anyone.
+// a name can be typed by anyone, and no command shows a code. It also pins
+// that publish says the address and the CRID are safe to send to anyone.
 func TestAccessRequestCopySaysToApproveOnlyGivenCodes(t *testing.T) {
 	collapse := func(text string) string { return strings.Join(strings.Fields(text), " ") }
 	help := func(args ...string) string {
@@ -1511,9 +1878,30 @@ func TestAccessRequestCopySaysToApproveOnlyGivenCodes(t *testing.T) {
 	}
 	readme := collapse(strings.ReplaceAll(strings.ReplaceAll(readCLIREADME(t), "`", ""), "**", ""))
 	for where, text := range map[string]string{"qurl requests --help": help("requests"), "qurl approve --help": help("approve"), "README": readme} {
-		for _, want := range []string{"gave it to you themselves", "typed by whoever asked", "anyone"} {
+		for _, want := range []string{"typed by whoever asked", "anyone"} {
 			if !strings.Contains(text, want) {
 				t.Errorf("%s does not state the rule: missing %q", where, want)
+			}
+		}
+	}
+	for where, text := range map[string]string{"qurl approve --help": help("approve"), "README": readme} {
+		for _, want := range []string{"gave it to you themselves", "the person who asked"} {
+			if !strings.Contains(text, want) {
+				t.Errorf("%s does not state the rule: missing %q", where, want)
+			}
+		}
+	}
+	// No command shows a code, and each place a publisher reads about the
+	// listing says so, and says how a request is refused without one.
+	for where, wants := range map[string][]string{
+		"qurl requests --help": {"The listing never shows a request's six-digit code, in any output mode.", "it is the only proof of who is asking", "qurl deny <CRID> <device id>", "The listing of all your resources is bounded.", "listing never needs it"},
+		"qurl approve --help":  {"no qURL command shows it"},
+		"qurl deny --help":     {"Name the request by the device id it came from, in the form xxxx-xxxx-xxxx-xxxx", "the code is accepted in the same place", "gives no access and expires by itself"},
+	} {
+		text := help(strings.Fields(where)[1])
+		for _, want := range wants {
+			if !strings.Contains(text, want) {
+				t.Errorf("%s lacks %q", where, want)
 			}
 		}
 	}
@@ -1525,13 +1913,20 @@ func TestAccessRequestCopySaysToApproveOnlyGivenCodes(t *testing.T) {
 		}
 	}
 	for _, want := range []string{
-		"qurl requests <CRID> --on", "qurl approve <CRID> 123456", "qurl deny <CRID> 123456", "qurl grants <CRID> --remove <device id>",
-		"| qurl requests [<CRID>] |", "| qurl approve <CRID> <code> |", "| qurl deny <CRID> <code> |",
+		"qurl requests <CRID> --on", "qurl approve <CRID> 123456", "qurl deny <CRID> <device id>", "qurl grants <CRID> --remove <device id>",
+		"| qurl requests [<CRID>] |", "| qurl approve <CRID> <code> |", "| qurl deny <CRID> <device id> |",
 		"this service does not offer access requests yet", "name_verified", "approved_people", "resource_url",
-		"must approve only codes you passed on to it, never a code it found in the listing",
+		"must approve only codes you passed on to it.",
+		// No command shows a code, in the section and in the scripting
+		// table, and the listing that may be incomplete says so.
+		"It never shows a code.", "No qURL command shows it, in any output mode.", "It shows no code.", "No member holds a request's code.",
+		"NAME DEVICE ID REQUESTED EXPIRES", "has_more: true", "has_more: always present, true when there may be more requests than the listing shows",
+		"It also takes a six-digit code in the same place", "Listing requests never needs it",
+		"crid, denied (true), and what you named the request by: device_id, or code",
+		"the device id for requests <CRID>, the CRID and the device id for requests with no argument, the device id or the code you gave for deny",
 		// The two JSON members that carry the text output's sentences, with
 		// the sentences as the documents have them.
-		"approval_rule, in both listings: \"" + safetyLine + "\"",
+		"approval_rule, in both listings: \"" + strings.ReplaceAll(safetyLine, "`", "") + "\"",
 		"name_note, in the approve document: \"The name was typed by the person who asked. Nobody checked it.\"",
 		// A service without access requests, in both ways it can answer a
 		// publish that asks for them.
@@ -1544,6 +1939,12 @@ func TestAccessRequestCopySaysToApproveOnlyGivenCodes(t *testing.T) {
 	} {
 		if !strings.Contains(readme, want) {
 			t.Errorf("README lacks %q", want)
+		}
+	}
+	// Nothing a publisher reads still says that a listing has codes.
+	for _, gone := range []string{"CODE NAME", "of code (six digits)", "never a code it found in the listing", "the code for requests <CRID>"} {
+		if strings.Contains(readme, gone) {
+			t.Errorf("README still says %q", gone)
 		}
 	}
 	grants := help("grants")

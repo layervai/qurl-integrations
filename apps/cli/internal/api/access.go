@@ -34,8 +34,12 @@ type passkeyRow struct {
 
 // accessRequestRow is one pending request. The listing for all of an owner's
 // resources also names the resource; the listing for one resource does not.
+//
+// The row has no member for a request's code. The service does not send
+// one, and a build of it that still does is not read: the code belongs to
+// the person who asked, and a member this type does not have can reach no
+// output.
 type accessRequestRow struct {
-	Code        string     `json:"request_code"`
 	Name        string     `json:"name"`
 	DeviceID    string     `json:"device_id"`
 	RequestedAt *time.Time `json:"requested_at"`
@@ -194,7 +198,11 @@ func (c *client) SetAccessRequests(ctx context.Context, id string, on bool) (*Re
 
 // AccessRequests lists the pending requests of one resource, or of all of the
 // owner's resources when id is empty.
-func (c *client) AccessRequests(ctx context.Context, id string) ([]AccessRequest, error) {
+//
+// TODO(upstream-contract): the service bounds the listing of all resources
+// and sets meta.has_more when it may be incomplete; a listing without the
+// member is complete.
+func (c *client) AccessRequests(ctx context.Context, id string) (*AccessRequestList, error) {
 	id = strings.TrimSpace(id)
 	path := "/v1/access-requests"
 	if id != "" {
@@ -209,41 +217,24 @@ func (c *client) AccessRequests(ctx context.Context, id string) ([]AccessRequest
 	if err != nil {
 		return nil, err
 	}
-	switch reply.status {
-	case http.StatusOK:
-	case http.StatusNotFound:
-		// Only the listing for one resource can mean that the resource is
-		// unknown. The listing for all of them has nothing to be unknown.
-		if id == "" {
-			return nil, &accessRequestsUnsupportedError{}
-		}
-		// For one resource it is the resource that is unknown, or the route.
-		offered, err := c.accessRequestsOffered(ctx, id, false)
-		switch {
-		case err != nil:
-			return nil, err
-		case !offered:
-			return nil, &accessRequestsUnsupportedError{}
-		default:
-			return nil, reply.problem()
-		}
-	default:
-		return nil, reply.problem()
+	if reply.status != http.StatusOK {
+		return nil, c.accessListingProblem(ctx, id, reply)
 	}
 	var env struct {
 		Data []accessRequestRow `json:"data"`
+		Meta envelopeMeta       `json:"meta"`
 	}
 	if err := json.Unmarshal(reply.body, &env); err != nil {
 		return nil, fmt.Errorf("%w: decode access requests: %w", qurl.ErrInvalidAPIResponse, err)
 	}
-	requests := make([]AccessRequest, 0, len(env.Data))
+	list := &AccessRequestList{Requests: make([]AccessRequest, 0, len(env.Data)), HasMore: env.Meta.HasMore}
 	for index := range env.Data {
 		row := &env.Data[index]
-		if !ValidRequestCode(row.Code) || !ValidDeviceID(row.DeviceID) {
-			return nil, fmt.Errorf("%w: access request has an invalid request_code or device_id", qurl.ErrInvalidAPIResponse)
+		if !ValidDeviceID(row.DeviceID) {
+			return nil, fmt.Errorf("%w: access request has an invalid device_id", qurl.ErrInvalidAPIResponse)
 		}
 		request := AccessRequest{
-			Code: row.Code, Name: row.Name, DeviceID: row.DeviceID,
+			Name: row.Name, DeviceID: row.DeviceID,
 			RequestedAt: knownTime(row.RequestedAt), ExpiresAt: knownTime(row.ExpiresAt),
 			CRID: row.CRID, ResourceID: row.ResourceID,
 		}
@@ -258,9 +249,32 @@ func (c *client) AccessRequests(ctx context.Context, id string) ([]AccessRequest
 			// whatever a row says.
 			request.CRID, request.ResourceID = id, ""
 		}
-		requests = append(requests, request)
+		list.Requests = append(list.Requests, request)
 	}
-	return requests, nil
+	return list, nil
+}
+
+// accessListingProblem is the error for a listing that was not answered with
+// 200. Only the listing for one resource can mean that the resource is
+// unknown; the listing for all of them has nothing to be unknown, so its
+// not-found answer is a service without access requests.
+func (c *client) accessListingProblem(ctx context.Context, id string, reply *restReply) error {
+	if reply.status != http.StatusNotFound {
+		return reply.problem()
+	}
+	if id == "" {
+		return &accessRequestsUnsupportedError{}
+	}
+	// For one resource it is the resource that is unknown, or the route.
+	offered, err := c.accessRequestsOffered(ctx, id, false)
+	switch {
+	case err != nil:
+		return err
+	case !offered:
+		return &accessRequestsUnsupportedError{}
+	default:
+		return reply.problem()
+	}
 }
 
 // ApproveAccessRequest approves one pending request with one authenticated
@@ -301,23 +315,41 @@ func (c *client) ApproveAccessRequest(ctx context.Context, id, code string) (*Al
 
 // DenyAccessRequest removes one pending request with one authenticated
 // DELETE. It never retries.
-func (c *client) DenyAccessRequest(ctx context.Context, id, code string) error {
-	if !ValidRequestCode(code) {
-		return fmt.Errorf("%w: a request code is six digits", qurl.ErrInvalidResourceRequest)
+//
+// request names the request in one of two ways: by the device id it came
+// from, which is what a listing shows a publisher, or by its six-digit code,
+// for a publisher who was given a code and wants to refuse it. Each is sent
+// as it is, in the same place of the path. A value that is neither is refused
+// before any request.
+//
+// TODO(upstream-contract): the service takes a device id or a code in that
+// position. The pinned SDK lets a device credential send only a code there;
+// its refusal of a device id becomes the message that says so, until a
+// release of the SDK admits it.
+func (c *client) DenyAccessRequest(ctx context.Context, id, request string) error {
+	byDevice := ValidDeviceID(request)
+	if !byDevice && !ValidRequestCode(request) {
+		return fmt.Errorf("%w: a request is named by a device id of the form xxxx-xxxx-xxxx-xxxx or by a six-digit code", qurl.ErrInvalidResourceRequest)
 	}
 	id, base, err := resourcePath(id)
 	if err != nil {
 		return err
 	}
-	reply, err := c.doRESTOnce(ctx, http.MethodDelete, base+accessRequestsSegment+"/"+code, nil)
+	reply, err := c.doRESTOnce(ctx, http.MethodDelete, base+accessRequestsSegment+"/"+request, nil)
 	if err != nil {
+		if byDevice && errors.Is(err, qurl.ErrRegisteredAgentResourceRequestDenied) {
+			return &denyByDeviceRefusedError{cause: err}
+		}
 		return err
 	}
 	switch reply.status {
 	case http.StatusOK, http.StatusNoContent:
 		return nil
 	case http.StatusNotFound:
-		return c.accessNotFound(ctx, id, reply, fmt.Sprintf(msgRequestCodeNotFound, spacedRequestCode(code)))
+		if byDevice {
+			return c.accessNotFound(ctx, id, reply, fmt.Sprintf(msgRequestDeviceNotFound, request))
+		}
+		return c.accessNotFound(ctx, id, reply, fmt.Sprintf(msgRequestCodeNotFound, spacedRequestCode(request)))
 	default:
 		return reply.problem()
 	}

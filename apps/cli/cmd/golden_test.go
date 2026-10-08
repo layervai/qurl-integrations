@@ -348,12 +348,25 @@ func TestGoldens(t *testing.T) {
 			stderrGolden: true,
 		},
 		{
-			// The pending requests of every resource, ending with the line on
-			// what a code and a name are worth.
+			// The pending requests of every resource, with no code, ending
+			// with the line on how a person is let in.
 			name:         "requests",
 			args:         func(*apitest.Server) []string { return []string{"requests"} },
 			prepare:      twoRequests,
 			variants:     goldenVariants(),
+			stdoutGolden: true,
+		},
+		{
+			// The same listing from a service that says there may be more
+			// requests than it sent: a line after the rows that says what to
+			// do, and has_more in the document.
+			name: "requests_more",
+			args: func(*apitest.Server) []string { return []string{"requests"} },
+			prepare: func(srv *apitest.Server) {
+				twoRequests(srv)
+				srv.SetAccessRequestsHasMore(true)
+			},
+			variants:     []string{"plain", "json"},
 			stdoutGolden: true,
 		},
 		{
@@ -424,18 +437,53 @@ func TestGoldens(t *testing.T) {
 			stderrGolden: true,
 		},
 		{
+			// A denial by the device id the listing shows.
 			name:         "deny",
-			args:         func(srv *apitest.Server) []string { return []string{"deny", srv.Key.CRID, "482913"} },
+			args:         func(srv *apitest.Server) []string { return []string{"deny", srv.Key.CRID, requesterDevice} },
 			prepare:      twoRequests,
 			variants:     []string{"tty", "plain"},
 			stderrGolden: true,
 		},
 		{
 			name:         "deny",
+			args:         func(srv *apitest.Server) []string { return []string{"deny", srv.Key.CRID, requesterDevice} },
+			prepare:      twoRequests,
+			variants:     []string{"json"},
+			stdoutGolden: true,
+		},
+		{
+			// A denial by a code its publisher was given.
+			name:         "deny_code",
+			args:         func(srv *apitest.Server) []string { return []string{"deny", srv.Key.CRID, "482913"} },
+			prepare:      twoRequests,
+			variants:     []string{"plain"},
+			stderrGolden: true,
+		},
+		{
+			name:         "deny_code",
 			args:         func(srv *apitest.Server) []string { return []string{"deny", srv.Key.CRID, "482913"} },
 			prepare:      twoRequests,
 			variants:     []string{"json"},
 			stdoutGolden: true,
+		},
+		{
+			// A device id with no pending request: exit 5 and a message
+			// about the device id.
+			name:         "error_deny_not_pending",
+			args:         func(srv *apitest.Server) []string { return []string{"deny", srv.Key.CRID, goldenThirdDevice} },
+			prepare:      twoRequests,
+			variants:     []string{"plain"},
+			wantCode:     5,
+			stderrGolden: true,
+		},
+		{
+			// A value that is neither a device id nor a code: exit 8 before
+			// any request.
+			name:         "error_deny_request",
+			args:         func(srv *apitest.Server) []string { return []string{"deny", srv.Key.CRID, "Ana Lopez"} },
+			variants:     []string{"plain"},
+			wantCode:     8,
+			stderrGolden: true,
 		},
 		{
 			// grants with approved people beside the device keys.

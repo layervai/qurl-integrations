@@ -70,6 +70,11 @@ type Server struct {
 	noAccessRequests bool
 	// omitApprovedPeople leaves allowed_passkeys out of every resource row.
 	omitApprovedPeople bool
+	// listRequestCodes puts request_code in listing rows; see
+	// ListRequestCodes. accessRequestsHasMore is meta.has_more of the
+	// listings, nil when the member is left out.
+	listRequestCodes      bool
+	accessRequestsHasMore *bool
 	// refuseAccessRequestsMember makes a create or a change that carries
 	// access_requests a validation failure; see
 	// PlayStrictWithoutAccessRequests.

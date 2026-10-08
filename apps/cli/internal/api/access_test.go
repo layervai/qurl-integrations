@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"slices"
 	"strings"
@@ -505,8 +506,24 @@ func TestSetAccessRequests(t *testing.T) {
 	})
 }
 
+// pendingDevices returns the device ids of the pending requests of the mock's
+// resource, as the listing gives them.
+func pendingDevices(t *testing.T, srv *apitest.Server) []string {
+	t.Helper()
+	list, err := newTestClient(t, srv, nil).AccessRequests(t.Context(), srv.Key.CRID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	devices := make([]string, 0, len(list.Requests))
+	for index := range list.Requests {
+		devices = append(devices, list.Requests[index].DeviceID)
+	}
+	return devices
+}
+
 // TestAccessRequestsListings pins the two listings: every field of a row, and
-// the resource each row is for.
+// the resource each row is for. A row says who asked, from which device, when
+// and until when. It has no code.
 func TestAccessRequestsListings(t *testing.T) {
 	srv := apitest.NewServer(t)
 	srv.AddAccessRequest(testRequestCode, testRequester, testDeviceID)
@@ -514,20 +531,19 @@ func TestAccessRequestsListings(t *testing.T) {
 	client := newTestClient(t, srv, nil)
 
 	for _, id := range []string{"", srv.Key.CRID} {
-		requests, err := client.AccessRequests(t.Context(), id)
-		if err != nil || len(requests) != 2 {
-			t.Fatalf("AccessRequests(%q) = %+v, %v", id, requests, err)
+		list, err := client.AccessRequests(t.Context(), id)
+		if err != nil || len(list.Requests) != 2 || list.HasMore {
+			t.Fatalf("AccessRequests(%q) = %+v, %v", id, list, err)
 		}
-		first, second := requests[0], requests[1]
-		if first.Code != testRequestCode || first.Name != testRequester || first.DeviceID != testDeviceID ||
-			second.Code != testOtherCode || second.Name != "" || second.DeviceID != testOtherDevice {
-			t.Fatalf("AccessRequests(%q) rows = %+v", id, requests)
+		first, second := list.Requests[0], list.Requests[1]
+		if first.Name != testRequester || first.DeviceID != testDeviceID || second.Name != "" || second.DeviceID != testOtherDevice {
+			t.Fatalf("AccessRequests(%q) rows = %+v", id, list.Requests)
 		}
 		if first.RequestedAt == nil || first.ExpiresAt == nil || !first.ExpiresAt.After(*first.RequestedAt) {
 			t.Fatalf("AccessRequests(%q) lost the request times: %+v", id, first)
 		}
 		if first.CRID != srv.Key.CRID || second.CRID != srv.Key.CRID {
-			t.Fatalf("AccessRequests(%q) rows do not name the resource: %+v", id, requests)
+			t.Fatalf("AccessRequests(%q) rows do not name the resource: %+v", id, list.Requests)
 		}
 	}
 	want := []string{"GET /v1/access-requests", "GET /v1/resources/" + srv.Key.CRID + "/access-requests"}
@@ -536,35 +552,104 @@ func TestAccessRequestsListings(t *testing.T) {
 	}
 }
 
+// TestAccessRequestsListingHoldsNoCode pins that a listing cannot carry the
+// code of a request to anything that renders it. The service does not send
+// one. A build of it that still does, in the request_code member, is read
+// with a row type that has no such member, into a result type that has no
+// such field: here every value the listing returns is searched for the two
+// codes, and neither is anywhere.
+func TestAccessRequestsListingHoldsNoCode(t *testing.T) {
+	srv := apitest.NewServer(t)
+	srv.ListRequestCodes()
+	srv.AddAccessRequest(testRequestCode, testRequester, testDeviceID)
+	srv.AddAccessRequest(testOtherCode, testOtherPerson, testOtherDevice)
+	for _, id := range []string{"", srv.Key.CRID} {
+		list, err := newTestClient(t, srv, nil).AccessRequests(t.Context(), id)
+		if err != nil || len(list.Requests) != 2 {
+			t.Fatalf("AccessRequests(%q) = %+v, %v", id, list, err)
+		}
+		everything := fmt.Sprintf("%#v", list)
+		for _, code := range []string{testRequestCode, testOtherCode} {
+			if strings.Contains(everything, code) {
+				t.Fatalf("AccessRequests(%q) holds the code %s: %s", id, code, everything)
+			}
+		}
+	}
+	// The service did send them: the test would pass for the wrong reason if
+	// the mock had left them out.
+	sent, err := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL+"/v1/access-requests", http.NoBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sent.Header.Set("Authorization", "Bearer lv_test_apitestingvalue123456789")
+	answer, err := srv.Client().Do(sent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = answer.Body.Close() }()
+	body, err := io.ReadAll(answer.Body)
+	if err != nil || !strings.Contains(string(body), `"request_code":"`+testRequestCode+`"`) {
+		t.Fatalf("the mock did not send the codes this test is about: %s (%v)", body, err)
+	}
+}
+
+// TestAccessRequestsListingSaysWhenThereMayBeMore pins the one member of the
+// listing's envelope the client reads. The service bounds the listing of all
+// resources and sets has_more when it may be incomplete. A listing without
+// the member is complete.
+func TestAccessRequestsListingSaysWhenThereMayBeMore(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		set  *bool
+		want bool
+	}{
+		{name: "not said"},
+		{name: "false", set: new(bool)},
+		{name: "true", set: func() *bool { more := true; return &more }(), want: true},
+	} {
+		srv := apitest.NewServer(t)
+		srv.AddAccessRequest(testRequestCode, testRequester, testDeviceID)
+		if test.set != nil {
+			srv.SetAccessRequestsHasMore(*test.set)
+		}
+		for _, id := range []string{"", srv.Key.CRID} {
+			list, err := newTestClient(t, srv, nil).AccessRequests(t.Context(), id)
+			if err != nil || list.HasMore != test.want || len(list.Requests) != 1 {
+				t.Fatalf("%s, AccessRequests(%q) = %+v, %v; want has-more %t", test.name, id, list, err, test.want)
+			}
+		}
+	}
+}
+
 // TestAccessRequestsListingRefusesRowsOutsideTheContract pins that a row
-// whose code or device id is not one, and a row of the all-resources listing
-// that does not name a real resource, fail the listing: a code is what a
-// publisher approves, and it is never shown in a form that could not be one.
+// whose device id is not one, and a row of the all-resources listing that
+// does not name a real resource, fail the listing: a device id is what a
+// publisher passes to refuse a request, and it is never shown in a form that
+// could not be passed back.
 func TestAccessRequestsListingRefusesRowsOutsideTheContract(t *testing.T) {
 	for name, row := range map[string]map[string]any{
-		"code with a letter":  {"request_code": "48291a", "device_id": testDeviceID},
-		"code too long":       {"request_code": "4829133", "device_id": testDeviceID},
-		"no code":             {"device_id": testDeviceID},
-		"device id malformed": {"request_code": testRequestCode, "device_id": "ABCD-EFGH-2345-MNOP"},
-		"device id escape":    {"request_code": testRequestCode, "device_id": "abcd-efgh-2345-mn\x1b["},
+		"no device id":        {"name": testRequester},
+		"device id malformed": {"device_id": "ABCD-EFGH-2345-MNOP"},
+		"device id escape":    {"device_id": "abcd-efgh-2345-mn\x1b["},
+		"a code for an id":    {"device_id": testRequestCode},
 	} {
 		t.Run(name, func(t *testing.T) {
 			srv := apitest.NewServer(t)
 			srv.Script(http.MethodGet, "/v1/resources/"+srv.Key.CRID+"/access-requests", func(w http.ResponseWriter, _ *http.Request) {
 				apitest.WriteEnvelope(t, w, http.StatusOK, []map[string]any{row}, nil)
 			})
-			requests, err := newTestClient(t, srv, nil).AccessRequests(t.Context(), srv.Key.CRID)
-			if requests != nil || !errors.Is(err, qurl.ErrInvalidAPIResponse) {
-				t.Fatalf("AccessRequests = %+v, %v; want an invalid-response error", requests, err)
+			list, err := newTestClient(t, srv, nil).AccessRequests(t.Context(), srv.Key.CRID)
+			if list != nil || !errors.Is(err, qurl.ErrInvalidAPIResponse) {
+				t.Fatalf("AccessRequests = %+v, %v; want an invalid-response error", list, err)
 			}
 		})
 	}
 	srv := apitest.NewServer(t)
 	srv.Script(http.MethodGet, "/v1/access-requests", func(w http.ResponseWriter, _ *http.Request) {
-		apitest.WriteEnvelope(t, w, http.StatusOK, []map[string]any{{"request_code": testRequestCode, "device_id": testDeviceID, "crid": "not-a-crid", "resource_id": srv.Key.ResourceID}}, nil)
+		apitest.WriteEnvelope(t, w, http.StatusOK, []map[string]any{{"device_id": testDeviceID, "crid": "not-a-crid", "resource_id": srv.Key.ResourceID}}, nil)
 	})
-	if requests, err := newTestClient(t, srv, nil).AccessRequests(t.Context(), ""); requests != nil || !errors.Is(err, qurl.ErrInvalidAPIResponse) {
-		t.Fatalf("a row for no real resource was accepted: %+v, %v", requests, err)
+	if list, err := newTestClient(t, srv, nil).AccessRequests(t.Context(), ""); list != nil || !errors.Is(err, qurl.ErrInvalidAPIResponse) {
+		t.Fatalf("a row for no real resource was accepted: %+v, %v", list, err)
 	}
 }
 
@@ -615,9 +700,8 @@ func TestApproveAccessRequest(t *testing.T) {
 		t.Fatalf("approval body = %q, want an empty JSON object", body)
 	}
 	// The other request is still pending and the approved one is gone.
-	pending, err := client.AccessRequests(t.Context(), srv.Key.CRID)
-	if err != nil || len(pending) != 1 || pending[0].Code != testOtherCode {
-		t.Fatalf("pending after the approval = %+v, %v", pending, err)
+	if pending := pendingDevices(t, srv); !slices.Equal(pending, []string{testOtherDevice}) {
+		t.Fatalf("pending after the approval = %v", pending)
 	}
 	resource, err := client.Resource(t.Context(), srv.Key.CRID)
 	if err != nil || len(resource.AllowedPasskeys) != 1 || resource.AllowedPasskeys[0].DeviceID != testDeviceID {
@@ -625,73 +709,95 @@ func TestApproveAccessRequest(t *testing.T) {
 	}
 }
 
-// TestApprovalAndDenialOfACodeThatIsNotPending pins the three meanings of a
-// 404 from the routes that name a code, for an approval and for a denial.
-func TestApprovalAndDenialOfACodeThatIsNotPending(t *testing.T) {
-	calls := map[string]func(Client, string) error{
-		"approve": func(client Client, id string) error {
-			_, err := client.ApproveAccessRequest(t.Context(), id, testRequestCode)
-			return err
+// TestApprovalAndDenialOfARequestThatIsNotPending pins the three meanings of
+// a 404 from the routes that name a request, for an approval by code and for
+// a denial by code and by device id. The message for a wrong code says
+// nothing about which codes exist.
+func TestApprovalAndDenialOfARequestThatIsNotPending(t *testing.T) {
+	const absentDevice = "nope-nope-nope-nope"
+	calls := map[string]struct {
+		call func(Client, string) error
+		want []string
+	}{
+		"approve": {
+			call: func(client Client, id string) error {
+				_, err := client.ApproveAccessRequest(t.Context(), id, testRequestCode)
+				return err
+			},
+			want: []string{"no pending request has the code 482 913 for this resource", "Ask the person for the code on their screen"},
 		},
-		"deny": func(client Client, id string) error {
-			return client.DenyAccessRequest(t.Context(), id, testRequestCode)
+		"deny by code": {
+			call: func(client Client, id string) error {
+				return client.DenyAccessRequest(t.Context(), id, testRequestCode)
+			},
+			want: []string{"no pending request has the code 482 913 for this resource"},
+		},
+		"deny by device id": {
+			call: func(client Client, id string) error { return client.DenyAccessRequest(t.Context(), id, absentDevice) },
+			want: []string{"no pending request is from the device id " + absentDevice + " for this resource", "`qurl requests <CRID>`"},
 		},
 	}
-	for name, call := range calls {
-		t.Run(name+"/the code is not pending", func(t *testing.T) {
+	for name, test := range calls {
+		t.Run(name+"/the request is not pending", func(t *testing.T) {
 			srv := apitest.NewServer(t)
 			srv.AddAccessRequest(testOtherCode, testOtherPerson, testOtherDevice)
-			err := call(newTestClient(t, srv, nil), srv.Key.CRID)
+			err := test.call(newTestClient(t, srv, nil), srv.Key.CRID)
 			var problem *Error
 			var shown interface{ UserMessage() string }
 			if !errors.As(err, &problem) || problem.StatusCode != http.StatusNotFound || problem.RequestID == "" || !errors.As(err, &shown) {
 				t.Fatalf("error = %v, want a not-found with its own message", err)
 			}
-			for _, want := range []string{"no pending request has the code 482 913 for this resource", "`qurl requests <CRID>`"} {
+			for _, want := range test.want {
 				if !strings.Contains(shown.UserMessage(), want) {
 					t.Fatalf("message %q lacks %q", shown.UserMessage(), want)
 				}
 			}
+			// The code that is pending is the other one, and no message may
+			// give it away.
+			if strings.Contains(shown.UserMessage(), testOtherCode) || strings.Contains(shown.UserMessage(), testOtherCode[:3]+" "+testOtherCode[3:]) {
+				t.Fatalf("the message hints at a code that is pending: %q", shown.UserMessage())
+			}
 			if errors.Is(err, ErrAccessRequestsUnsupported) {
-				t.Fatal("a code that is not pending read as a service without access requests")
+				t.Fatal("a request that is not pending read as a service without access requests")
 			}
 			// The other request was not touched.
-			pending, listErr := newTestClient(t, srv, nil).AccessRequests(t.Context(), srv.Key.CRID)
-			if listErr != nil || len(pending) != 1 || pending[0].Code != testOtherCode {
-				t.Fatalf("pending = %+v, %v", pending, listErr)
+			if pending := pendingDevices(t, srv); !slices.Equal(pending, []string{testOtherDevice}) {
+				t.Fatalf("pending = %v", pending)
 			}
 		})
 		t.Run(name+"/the service has no access requests", func(t *testing.T) {
 			srv := apitest.NewServer(t)
 			srv.PlayNoAccessRequests()
-			wantUnsupported(t, call(newTestClient(t, srv, nil), srv.Key.CRID))
+			wantUnsupported(t, test.call(newTestClient(t, srv, nil), srv.Key.CRID))
 		})
 		t.Run(name+"/the resource is unknown", func(t *testing.T) {
 			srv := apitest.NewServer(t)
-			err := call(newTestClient(t, srv, nil), unknownTestCRID)
+			err := test.call(newTestClient(t, srv, nil), unknownTestCRID)
 			var problem *Error
 			var shown interface{ UserMessage() string }
 			if errors.Is(err, ErrAccessRequestsUnsupported) || errors.As(err, &shown) || !errors.As(err, &problem) || problem.StatusCode != http.StatusNotFound {
 				t.Fatalf("an unknown resource read as %v, want its plain not-found", err)
 			}
 		})
-		t.Run(name+"/a code that is not six digits is never sent", func(t *testing.T) {
-			srv := apitest.NewServer(t)
-			for _, code := range []string{"", "48291", "482 913", "48291a", "../482913"} {
-				var err error
-				if name == "approve" {
-					_, err = newTestClient(t, srv, nil).ApproveAccessRequest(t.Context(), srv.Key.CRID, code)
-				} else {
-					err = newTestClient(t, srv, nil).DenyAccessRequest(t.Context(), srv.Key.CRID, code)
-				}
-				if !errors.Is(err, qurl.ErrInvalidResourceRequest) {
-					t.Errorf("code %q: error = %v", code, err)
-				}
-			}
-			if got := len(srv.Requests()); got != 0 {
-				t.Fatalf("a refused code sent %d requests", got)
-			}
-		})
+	}
+
+	// An approval takes a code and nothing else. A denial takes a device id
+	// or a code. Anything else is refused before any request, a device id
+	// given to an approval included.
+	srv := apitest.NewServer(t)
+	srv.AddAccessRequest(testRequestCode, testRequester, testDeviceID)
+	for _, value := range []string{"", "48291", "482 913", "48291a", "../482913", testDeviceID} {
+		if _, err := newTestClient(t, srv, nil).ApproveAccessRequest(t.Context(), srv.Key.CRID, value); !errors.Is(err, qurl.ErrInvalidResourceRequest) {
+			t.Errorf("approval of %q: error = %v", value, err)
+		}
+	}
+	for _, value := range []string{"", "48291", "482 913", "48291a", "../482913", "ABCD-EFGH-2345-MNOP", "abcd-efgh-2345", testDeviceID + "/approve"} {
+		if err := newTestClient(t, srv, nil).DenyAccessRequest(t.Context(), srv.Key.CRID, value); !errors.Is(err, qurl.ErrInvalidResourceRequest) {
+			t.Errorf("denial of %q: error = %v", value, err)
+		}
+	}
+	if got := len(srv.Requests()); got != 0 {
+		t.Fatalf("a refused value sent %d requests", got)
 	}
 }
 
@@ -713,27 +819,75 @@ func TestApprovalAnswerMustNameTheDevice(t *testing.T) {
 	}
 }
 
-// TestDenyAccessRequest pins the denial: one DELETE on the route of the code,
-// and no access for anyone.
+// TestDenyAccessRequest pins the denial: one DELETE that names the request by
+// the device id it came from, as a listing shows it, or by its code, each
+// sent as it was given, and no access for anyone. The request that is
+// refused is the one that was named, never another one.
 func TestDenyAccessRequest(t *testing.T) {
+	for name, named := range map[string]string{"by device id": testDeviceID, "by code": testRequestCode} {
+		t.Run(name, func(t *testing.T) {
+			srv := apitest.NewServer(t)
+			// The other request is first, so a denial that took "the first
+			// row" would refuse the wrong person.
+			srv.AddAccessRequest(testOtherCode, testOtherPerson, testOtherDevice)
+			srv.AddAccessRequest(testRequestCode, testRequester, testDeviceID)
+			client := newTestClient(t, srv, nil)
+			if err := client.DenyAccessRequest(t.Context(), srv.Key.CRID, named); err != nil {
+				t.Fatal(err)
+			}
+			want := []string{"DELETE /v1/resources/" + srv.Key.CRID + "/access-requests/" + named}
+			if got := requestLines(srv); !slices.Equal(got, want) {
+				t.Fatalf("requests = %v, want %v: the value is sent as it was given, and nothing is looked up", got, want)
+			}
+			resource, err := client.Resource(t.Context(), srv.Key.CRID)
+			if err != nil || len(resource.AllowedPasskeys) != 0 {
+				t.Fatalf("a denial gave access: %+v, %v", resource, err)
+			}
+			if pending := pendingDevices(t, srv); !slices.Equal(pending, []string{testOtherDevice}) {
+				t.Fatalf("pending after the denial = %v, want the other request alone", pending)
+			}
+		})
+	}
+}
+
+// TestDeviceCredentialCannotDenyByDeviceIDYet records a limit of this
+// release, and fails when the limit is gone.
+//
+// A device credential is used through the SDK, on the routes the SDK lists.
+// The pinned SDK admits a denial only with a six-digit code in the path, so
+// on a real install, where every command uses the device credential, a
+// denial by device id is refused before anything is sent. The client turns
+// that into a message that says so and says what it means: the request gives
+// no access unless it is approved. A denial by code goes through.
+//
+// When the SDK admits a device id there, this test fails. The fix is to
+// assert the opposite for the device id: that the request is sent with the
+// device credential and the request is gone.
+func TestDeviceCredentialCannotDenyByDeviceIDYet(t *testing.T) {
 	srv := apitest.NewServer(t)
 	srv.AddAccessRequest(testRequestCode, testRequester, testDeviceID)
 	srv.AddAccessRequest(testOtherCode, testOtherPerson, testOtherDevice)
-	client := newTestClient(t, srv, nil)
-	if err := client.DenyAccessRequest(t.Context(), srv.Key.CRID, testRequestCode); err != nil {
-		t.Fatal(err)
+	client := newRegisteredTestClient(t, srv)
+
+	err := client.DenyAccessRequest(t.Context(), srv.Key.CRID, testDeviceID)
+	var shown interface{ UserMessage() string }
+	if !errors.Is(err, qurl.ErrRegisteredAgentResourceRequestDenied) || !errors.As(err, &shown) || shown.UserMessage() != msgDenyByDeviceRefused {
+		t.Fatalf("denial by device id through a device credential: error = %v; if it succeeded, the SDK now admits it: see this test's comment", err)
 	}
-	want := []string{"DELETE /v1/resources/" + srv.Key.CRID + "/access-requests/" + testRequestCode}
-	if got := requestLines(srv); !slices.Equal(got, want) {
-		t.Fatalf("requests = %v, want %v", got, want)
+	if got := len(srv.Requests()); got != 0 {
+		t.Fatalf("a refused denial was sent: %v", requestLines(srv))
 	}
-	resource, err := client.Resource(t.Context(), srv.Key.CRID)
-	if err != nil || len(resource.AllowedPasskeys) != 0 {
-		t.Fatalf("a denial gave access: %+v, %v", resource, err)
+	for _, part := range []string{"nothing was sent", "gives no access unless you approve it", "use its six-digit code"} {
+		if !strings.Contains(msgDenyByDeviceRefused, part) {
+			t.Fatalf("the message lost %q: %q", part, msgDenyByDeviceRefused)
+		}
 	}
-	pending, err := client.AccessRequests(t.Context(), srv.Key.CRID)
-	if err != nil || len(pending) != 1 || pending[0].Code != testOtherCode {
-		t.Fatalf("pending after the denial = %+v, %v", pending, err)
+
+	if err := client.DenyAccessRequest(t.Context(), srv.Key.CRID, testOtherCode); err != nil {
+		t.Fatalf("denial by code through a device credential: %v", err)
+	}
+	if pending := pendingDevices(t, srv); !slices.Equal(pending, []string{testDeviceID}) {
+		t.Fatalf("pending after the denial by code = %v", pending)
 	}
 }
 
@@ -1044,11 +1198,12 @@ func TestResourceRowsCarryAccessRequestsAndApprovedPeople(t *testing.T) {
 // credential. That credential is used through the SDK, which sends only on
 // the routes it lists, and refuses any other before anything leaves the
 // machine. The five routes that exist only for access requests are on that
-// list: both listings, the approval, the denial and the removal of an
+// list: both listings, the approval, the denial by code and the removal of an
 // approved person are sent, each with the device credential, and each does
 // what it says. So are the three requests that use routes the SDK listed
 // before: creating a resource with access requests, changing the setting and
-// reading the resource.
+// reading the resource. The one request the pinned SDK does not send yet, a
+// denial by device id, has its own test.
 func TestDeviceCredentialReachesEveryAccessRequestRoute(t *testing.T) {
 	srv := apitest.NewServer(t)
 	client := newRegisteredTestClient(t, srv)
@@ -1063,25 +1218,25 @@ func TestDeviceCredentialReachesEveryAccessRequestRoute(t *testing.T) {
 	if resource, err := client.SetAccessRequests(t.Context(), crid, true); err != nil || !*resource.AccessRequests {
 		t.Fatalf("turning access requests on through a device credential = %+v, %v", resource, err)
 	}
-	// Two people ask. The second code is listed first, so a call that took
+	// Two people ask. The second person is listed first, so a call that took
 	// "the first row" instead of the code it was given would show here.
 	srv.AddAccessRequest(testOtherCode, testOtherPerson, testOtherDevice)
 	srv.AddAccessRequest(testRequestCode, testRequester, testDeviceID)
 	sent := len(srv.Requests())
 
-	codes := func(requests []AccessRequest) []string {
-		out := make([]string, 0, len(requests))
-		for index := range requests {
-			out = append(out, requests[index].Code)
+	devices := func(list *AccessRequestList) []string {
+		out := make([]string, 0, len(list.Requests))
+		for index := range list.Requests {
+			out = append(out, list.Requests[index].DeviceID)
 		}
 		return out
 	}
 	all, err := client.AccessRequests(t.Context(), "")
-	if err != nil || !slices.Equal(codes(all), []string{testOtherCode, testRequestCode}) || all[1].CRID != crid {
+	if err != nil || !slices.Equal(devices(all), []string{testOtherDevice, testDeviceID}) || all.Requests[1].CRID != crid {
 		t.Fatalf("listing of every resource = %+v, %v", all, err)
 	}
 	one, err := client.AccessRequests(t.Context(), crid)
-	if err != nil || !slices.Equal(codes(one), []string{testOtherCode, testRequestCode}) {
+	if err != nil || !slices.Equal(devices(one), []string{testOtherDevice, testDeviceID}) {
 		t.Fatalf("listing of one resource = %+v, %v", one, err)
 	}
 	person, err := client.ApproveAccessRequest(t.Context(), crid, testRequestCode)
@@ -1091,7 +1246,7 @@ func TestDeviceCredentialReachesEveryAccessRequestRoute(t *testing.T) {
 	if err := client.DenyAccessRequest(t.Context(), crid, testOtherCode); err != nil {
 		t.Fatalf("denial: %v", err)
 	}
-	if left, err := client.AccessRequests(t.Context(), crid); err != nil || len(left) != 0 {
+	if left, err := client.AccessRequests(t.Context(), crid); err != nil || len(left.Requests) != 0 {
 		t.Fatalf("requests after one approval and one denial = %+v, %v, want none", left, err)
 	}
 	resource, err := client.RemoveAllowedPasskeys(t.Context(), crid, []string{testDeviceID})
@@ -1144,6 +1299,15 @@ func TestDeviceCredentialStillRefusesWhatIsNotARoute(t *testing.T) {
 		},
 		"a denial for an identifier that is not one": func() error {
 			return client.DenyAccessRequest(t.Context(), "a/b", testRequestCode)
+		},
+		// The one refusal that is a limit of this release is a denial by
+		// device id for a real resource. The same denial for an identifier
+		// that could never name a resource is refused for that reason.
+		"a denial by device id for an identifier that is not one": func() error {
+			return client.DenyAccessRequest(t.Context(), "a/b", testDeviceID)
+		},
+		"a denial by something that is neither a device id nor a code": func() error {
+			return client.DenyAccessRequest(t.Context(), srv.Key.CRID, "ABCD-EFGH-2345-MNOP")
 		},
 	} {
 		err := call()

@@ -1,2 +1,2 @@
-Error: no pending request has the code 000 000 for this resource. It may have expired, or been approved or denied already. Run `qurl requests <CRID>` to see the pending requests
+Error: no pending request has the code 000 000 for this resource. It may have expired, or been approved or denied already. Ask the person for the code on their screen; `qurl requests <CRID>` shows who is waiting
   Request ID: req_test

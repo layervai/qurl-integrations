@@ -18,5 +18,5 @@
     }
   ],
   "approval_rule": "To let one of these people in, ask them for the six-digit code on their screen and run `qurl approve \u003cCRID\u003e \u003ccode\u003e`; a name can be typed by anyone, so the code is the only proof of who is asking.",
-  "has_more": false
+  "has_more": true
 }

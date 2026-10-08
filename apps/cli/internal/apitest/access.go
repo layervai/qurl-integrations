@@ -99,6 +99,25 @@ func (s *Server) refusesAccessRequestsMember(w http.ResponseWriter, stated *bool
 	return refuse
 }
 
+// ListRequestCodes makes the mock put each request's code in its listing
+// rows, as the request_code member, the way a build of the service from
+// before the codes left the listings does. A client must read that member
+// nowhere and show it nowhere, and this is how a test shows that.
+func (s *Server) ListRequestCodes() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.listRequestCodes = true
+}
+
+// SetAccessRequestsHasMore makes both listings of pending requests carry
+// meta.has_more with this value. Without it the member is left out, which
+// means the listing is complete.
+func (s *Server) SetAccessRequestsHasMore(more bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.accessRequestsHasMore = &more
+}
+
 // SetAccessRequests turns access requests on or off for the mock's resource
 // without a request.
 func (s *Server) SetAccessRequests(on bool) {
@@ -239,17 +258,27 @@ func (s *Server) serveAccessRoute(w http.ResponseWriter, route accessRoute) {
 		s.mu.Lock()
 		rows := make([]map[string]any, 0, len(s.pendingRequests))
 		for _, request := range s.pendingRequests {
+			// A row says who asked and when. It does not carry the code:
+			// the code is on the screen of the person who asked, and
+			// nowhere a publisher or an agent could read it from.
 			row := map[string]any{
-				"request_code": request.code, fieldName: request.name, fieldDeviceID: request.deviceID,
+				fieldName: request.name, fieldDeviceID: request.deviceID,
 				"requested_at": FixtureRequestedAt, "expires_at": FixtureRequestExpiresAt,
+			}
+			if s.listRequestCodes {
+				row["request_code"] = request.code
 			}
 			if route.resource == "" {
 				row["resource_id"], row[fieldCRID] = s.Key.ResourceID, s.Key.CRID
 			}
 			rows = append(rows, row)
 		}
+		var meta map[string]any
+		if s.accessRequestsHasMore != nil {
+			meta = map[string]any{"has_more": *s.accessRequestsHasMore}
+		}
 		s.mu.Unlock()
-		WriteEnvelope(s.t, w, http.StatusOK, rows, nil)
+		WriteEnvelope(s.t, w, http.StatusOK, rows, meta)
 	case accessApprove:
 		s.mu.Lock()
 		index := slices.IndexFunc(s.pendingRequests, func(request accessRequestFixture) bool { return request.code == route.operand })
@@ -267,13 +296,18 @@ func (s *Server) serveAccessRoute(w http.ResponseWriter, route accessRoute) {
 		}
 		WriteEnvelope(s.t, w, http.StatusOK, person.payload(), nil)
 	case accessDeny:
+		// A request is refused by the device id it came from, which a
+		// listing shows, or by its code, which only the person who asked
+		// could have given.
 		s.mu.Lock()
 		before := len(s.pendingRequests)
-		s.pendingRequests = slices.DeleteFunc(s.pendingRequests, func(request accessRequestFixture) bool { return request.code == route.operand })
+		s.pendingRequests = slices.DeleteFunc(s.pendingRequests, func(request accessRequestFixture) bool {
+			return request.code == route.operand || request.deviceID == route.operand
+		})
 		removed := len(s.pendingRequests) != before
 		s.mu.Unlock()
 		if !removed {
-			s.writeAccessNotFound(w, "no pending access request has that code")
+			s.writeAccessNotFound(w, "no pending access request matches")
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
