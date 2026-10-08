@@ -20,9 +20,16 @@ const EnvKnockResourceID = "QURL_CONNECTOR_KNOCK_RESOURCE_ID"
 // ResolvedResource carries the selected Connector resource plus the creation
 // provenance authenticated by the assigned cell.
 type ResolvedResource struct {
-	// Private is confirmed by REST pre-creation when the caller requests privacy.
-	Private       *bool
-	Resource      *qurl.ConnectorResource
+	// Private is the privacy the create request stated and its answer
+	// confirmed. This package never sets it: the Connector resource request
+	// carries no privacy, so the publish command creates the resource first.
+	Private *bool
+	// KeptPublic reports that the publish command named no privacy and kept
+	// the public resource the target already had. Private is then false.
+	KeptPublic bool
+	Resource   *qurl.ConnectorResource
+	// FoundExisting is what the Connector resource request reported. The
+	// publish command replaces it with the create answer's value.
 	FoundExisting *bool
 }
 

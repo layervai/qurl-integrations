@@ -1,0 +1,1 @@
+Error: --allow-device-key no longer replaces the list: use --add <public-key> to allow a device, --remove <public-key> to take one off the list, or --clear to take every device off it

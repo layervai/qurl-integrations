@@ -280,7 +280,7 @@ func TestResourceReadsDropAZeroDate(t *testing.T) {
 			if test.value != "" {
 				dates = `,"created_at":` + test.value + `,"expires_at":` + test.value
 			}
-			row := fmt.Sprintf(`{"resource_id":%q,"crid":%q,"type":"url","status":"active","target_url":"https://example.com/data","allowed_device_keys":[]%s}`,
+			row := fmt.Sprintf(`{"resource_id":%q,"crid":%q,"type":"url","status":"active","target_url":"https://example.com/data","private":true,"allowed_device_keys":[]%s}`,
 				srv.Key.ResourceID, srv.Key.CRID, dates)
 			answer := func(status int, body string) http.HandlerFunc {
 				return func(w http.ResponseWriter, _ *http.Request) {
@@ -331,7 +331,7 @@ func TestResourceReadsDropAZeroDate(t *testing.T) {
 // repeated publisher member verify.
 func TestResourceReadsNeverVerifyFromARepeatedPublisher(t *testing.T) {
 	srv := apitest.NewServer(t)
-	row := fmt.Sprintf(`{"resource_id":%q,"crid":%q,"type":"url","status":"active","target_url":"https://example.com/data",`+
+	row := fmt.Sprintf(`{"resource_id":%q,"crid":%q,"type":"url","status":"active","target_url":"https://example.com/data","private":true,`+
 		`"publisher":{"name":"Acme Docs","verified":false},"publisher":{"name":"Acme Docs","verified":true}}`,
 		srv.Key.ResourceID, srv.Key.CRID)
 	answer := func(status int, body string) http.HandlerFunc {

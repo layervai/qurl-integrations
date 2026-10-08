@@ -1,0 +1,1 @@
+This resource is public, so device grants have no effect on it. They apply to a private resource, which is what `qurl publish` creates unless you pass --public.

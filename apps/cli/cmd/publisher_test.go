@@ -205,7 +205,7 @@ func TestStatusNeverRendersVerifiedFromAGarbledField(t *testing.T) {
 func TestOwnerReadsOmitAZeroDate(t *testing.T) {
 	const zero = `,"created_at":"0001-01-01T00:00:00Z","expires_at":"0001-01-01T00:00:00Z"`
 	script := func(srv *apitest.Server, createdAt string) {
-		row := fmt.Sprintf(`{"resource_id":%q,"crid":%q,"type":"url","status":"active","target_url":"https://example.com/data","allowed_device_keys":[]%s}`,
+		row := fmt.Sprintf(`{"resource_id":%q,"crid":%q,"type":"url","status":"active","target_url":"https://example.com/data","private":true,"allowed_device_keys":[]%s}`,
 			srv.Key.ResourceID, srv.Key.CRID, createdAt)
 		answer := func(status int, body string) http.HandlerFunc {
 			return func(w http.ResponseWriter, _ *http.Request) {

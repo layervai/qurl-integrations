@@ -53,6 +53,9 @@ func renderErrorLines(p *Printer, err error) []string {
 	if errors.Is(err, qurl.ErrTemporaryAccessLinksDisabled) {
 		return []string{head + " " + msgLinksUnavailable}
 	}
+	if lines, ok := publishConflictLines(p, head, err); ok {
+		return lines
+	}
 	if errors.Is(err, auth.ErrAccountRecoveryState) {
 		return []string{head + " " + msgAccountRecoveryState, "", "  " + p.dim(hintAccountRecoveryState)}
 	}
@@ -94,6 +97,59 @@ func renderErrorLines(p *Printer, err error) []string {
 		return apiErrorLines(p, head, apiErr)
 	}
 	return []string{head + " " + err.Error()}
+}
+
+// publishConflictLines renders a publish refused because the target is
+// already published with other access settings: what exists, the one next
+// step, and the request id. The service's own problem text is not shown. It
+// is the generic invalid-input wording, or names request fields, and neither
+// tells a publisher what to do.
+func publishConflictLines(p *Printer, head string, err error) ([]string, bool) {
+	var conflict *qurlapi.PublishAccessConflictError
+	if !errors.As(err, &conflict) {
+		return nil, false
+	}
+	lines := []string{head + " " + conflict.Error(), "", "  " + p.dim(publishConflictHint(conflict))}
+	var apiErr *qurlapi.Error
+	if errors.As(err, &apiErr) && apiErr.RequestID != "" {
+		lines = append(lines, "  "+p.dim("Request ID: "+apiErr.RequestID))
+	}
+	return lines, true
+}
+
+// publishConflictHint is the next step for each thing a conflict can say
+// about the resource that exists. A conflict that does not say what differs
+// gets the hint that covers privacy and the allowed devices.
+//
+// For a target that is already published as public, the step that keeps it
+// is --public, and it works only without the access flags the command line
+// carried: --public cannot be combined with them. So the hint names them.
+func publishConflictHint(conflict *qurlapi.PublishAccessConflictError) string {
+	switch conflict.Existing {
+	case qurlapi.ExistingAccessPublic:
+		if named := flagList(conflict.NamedFlags); named != "" {
+			return fmt.Sprintf(hintPublishExistingPublicWithout, named)
+		}
+		return hintPublishExistingPublic
+	case qurlapi.ExistingAccessPrivate:
+		return hintPublishExistingPrivate
+	case qurlapi.ExistingAccessOtherDevices:
+		return hintPublishOtherDevices
+	case qurlapi.ExistingAccessUnknown:
+		return hintPublishAccessDiffers
+	}
+	return hintPublishAccessDiffers
+}
+
+// flagList writes flags as a phrase: "a", "a and b", "a, b and c".
+func flagList(flags []string) string {
+	switch len(flags) {
+	case 0:
+		return ""
+	case 1:
+		return flags[0]
+	}
+	return strings.Join(flags[:len(flags)-1], ", ") + " and " + flags[len(flags)-1]
 }
 
 // hostErrorLines renders local host conditions that block native sharing.

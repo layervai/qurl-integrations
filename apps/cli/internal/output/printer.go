@@ -59,7 +59,7 @@ func New(s *Streams, format Format, quiet, color, ascii bool, now func() time.Ti
 // already reached stdout.
 func (p *Printer) Warnf(format string, args ...any) {
 	line := qurlapi.Redact(fmt.Sprintf(format, args...))
-	_, _ = fmt.Fprintf(p.err, "%s %s\n", p.yellow("Warning:"), line)
+	_, _ = fmt.Fprintf(p.err, "%s %s\n", p.yellow(labelWarning), line)
 }
 
 // Notef writes one redacted informational line to stderr, best-effort like

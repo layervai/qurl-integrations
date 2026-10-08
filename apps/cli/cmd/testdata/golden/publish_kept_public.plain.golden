@@ -1,0 +1,10 @@
+Already published
+
+  Target:   https://example.com/data
+  Access:   public — anyone who has the CRID can open it
+  Status:   active
+  Created:  1d ago
+
+Warning: this target was published as public before, and it stays public: anyone who has the CRID can open it. To make it private, delete it with `qurl delete qhtpthw4qt7wkw7khghr6x3z4hsfyn4zbuyhnee4i6bi67yu6yytgvwdbb4q` and publish again; the new resource gets a new CRID.
+
+CRID: qhtpthw4qt7wkw7khghr6x3z4hsfyn4zbuyhnee4i6bi67yu6yytgvwdbb4q

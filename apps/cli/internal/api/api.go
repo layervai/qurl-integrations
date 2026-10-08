@@ -34,7 +34,8 @@ type Client interface {
 	// without minting a second credential.
 	MintConnectorEnrollmentToken(ctx context.Context, opts MintConnectorEnrollmentTokenOptions) (*ConnectorEnrollmentToken, error)
 	// Publish registers targetURL as a protected resource and returns its
-	// identity, CRID included when the service mints one.
+	// identity, CRID included when the service mints one. The resource is
+	// private unless opts.Public is set.
 	Publish(ctx context.Context, targetURL string, opts PublishOptions) (*Published, error)
 	// Share mints a short-lived share link for the resource identified by
 	// id, which must be a CRID.
@@ -45,8 +46,18 @@ type Client interface {
 	List(ctx context.Context, opts ListOptions) (*ResourcePage, error)
 	// Resource returns one owner-visible resource by CRID or public resource ID.
 	Resource(ctx context.Context, id string) (*ResourceSummary, error)
-	// SetDeviceGrants replaces the complete private-resource device grant list.
+	// SetDeviceGrants replaces the complete private-resource device grant
+	// list. The CLI calls it only with an empty list, to clear the grants; a
+	// single device is allowed or removed with EditDeviceGrants.
 	SetDeviceGrants(ctx context.Context, id string, keys []string) (*ResourceSummary, error)
+	// EditDeviceGrants adds and removes single device keys in one request,
+	// which the service applies as one change, and returns the resource with
+	// its complete resulting list. A key that is already on the list, or
+	// already off it, is left as it is. What it guarantees about the other
+	// grants is the shape of its request, which never carries the whole list
+	// and so cannot replace it; what it checks in the answer is the keys it
+	// named, not that the keys it did not name are still there.
+	EditDeviceGrants(ctx context.Context, id string, add, remove []string) (*ResourceSummary, error)
 	// Sharing returns the durable desired state and current platform-observed
 	// connection state of one tunnel resource. It is the connector sharing
 	// state, not the Share operator above.
@@ -81,8 +92,29 @@ type AccountClient interface {
 
 // PublishOptions carries creation policy and optional metadata.
 type PublishOptions struct {
-	Private           *bool
+	// Public asks for a resource that anyone who has its CRID can open. The
+	// zero value asks for a private one, limited to its owner and the devices
+	// in AllowedDeviceKeys. Publish states the choice in its create request
+	// and requires the answer to confirm it, so no caller depends on what a
+	// service does when the field is absent. KeepExistingPublic is the one
+	// case with a second create that does not state it.
+	Public bool
+	// AllowedDeviceKeys is the first list of devices allowed on a private
+	// resource. It has no meaning for a public one.
 	AllowedDeviceKeys []string
+	// KeepExistingPublic says that the publisher named no privacy at all, so
+	// the request asks for a private resource only because that is the
+	// default. If the target is then already published as public, Publish
+	// keeps using that resource instead of failing, and marks the result
+	// KeptPublic. A caller sets it only when nothing on its command line
+	// said who may open the resource. It has no effect together with Public
+	// or AllowedDeviceKeys.
+	KeepExistingPublic bool
+	// NamedAccessFlags are the flags on the caller's command line that said
+	// who may open the resource, as they were written. Publish sends nothing
+	// of them. They are carried into a conflict, so that its next step can
+	// name the flag to leave out instead of a command line that cannot work.
+	NamedAccessFlags []string
 	// ConnectorID selects a tunnel resource instead of a URL.
 	ConnectorID string
 	Description string
@@ -110,7 +142,9 @@ type ListOptions struct {
 
 // Published is the repo-owned result of Publish.
 type Published struct {
-	// Nil means privacy was not returned or queried, never public confirmation.
+	// Private is the privacy the service confirmed. Publish never returns a
+	// result without it. Nil means privacy was not returned or queried, never
+	// public confirmation, and occurs only in a value built elsewhere.
 	Private    *bool
 	CRID       string
 	ResourceID string
@@ -125,6 +159,10 @@ type Published struct {
 	FoundExisting *bool
 	// Publisher is what recipients are shown as this resource's publisher.
 	Publisher Publisher
+	// KeptPublic reports that the target was already published as public and
+	// that this publish, which named no privacy, kept using that resource.
+	// Private is then false, and the caller warns the publisher.
+	KeptPublic bool
 }
 
 // DeleteResult reports a completed (idempotent) delete.
@@ -238,6 +276,9 @@ type Config struct {
 	Sleep func(time.Duration)
 	// NewRequestID mints the X-Request-Id value; nil means a random one.
 	NewRequestID func() string
+	// Now is the clock; nil means time.Now. Publish reads it to tell a
+	// resource this command made from one that existed before it.
+	Now func() time.Time
 	// HTTPClient is the underlying HTTP client. Nil, or an injected client with
 	// Timeout zero, gets a 30-second bound for each HTTP attempt. A nonzero
 	// timeout is preserved. A retryable logical request can span multiple
@@ -252,6 +293,16 @@ type client struct {
 	registeredDoer qurl.HTTPDoer
 	baseURL        string
 	authorize      func(context.Context, *http.Request) error
+	// now is Config.Now, or time.Now.
+	now func() time.Time
+}
+
+// clock returns the configured clock, or the wall clock.
+func clock(cfg *Config) func() time.Time {
+	if cfg.Now != nil {
+		return cfg.Now
+	}
+	return time.Now
 }
 
 // registeredClient exposes exactly Client. The concrete implementation also
@@ -284,6 +335,7 @@ func New(cfg *Config) (AccountClient, error) {
 		transport: tr,
 		baseURL:   trimBaseURL(cfg.BaseURL),
 		authorize: provider.Authorize,
+		now:       clock(cfg),
 	}, nil
 }
 
@@ -318,7 +370,7 @@ func NewRegistered(ctx context.Context, cfg *Config, store qurl.AgentStateStore)
 	}
 	core := &client{
 		sdk: sdk, transport: tr, registeredDoer: doer,
-		baseURL: trimBaseURL(cfg.BaseURL),
+		baseURL: trimBaseURL(cfg.BaseURL), now: clock(cfg),
 	}
 	return &registeredClient{Client: core}, nil
 }

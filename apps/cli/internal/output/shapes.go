@@ -15,7 +15,12 @@ import (
 // cannot silently change the CLI's output.
 
 type publishJSON struct {
-	Private    *bool      `json:"private,omitempty"`
+	Private *bool `json:"private,omitempty"`
+	// KeptPublic is true, and otherwise absent, when the target was already
+	// published as public and a publish that named no privacy kept it. It
+	// tells that case from --public on an existing resource, which has the
+	// same private: false and found_existing: true, without reading stderr.
+	KeptPublic bool       `json:"kept_public,omitempty"`
 	CRID       string     `json:"crid,omitempty"`
 	ResourceID string     `json:"resource_id"`
 	TargetURL  string     `json:"target_url"`
@@ -155,20 +160,30 @@ type downloadJSON struct {
 	Publisher         publisherJSON `json:"publisher"`
 }
 
-// Publish renders a publish result. Text mode prints the CRID last, alone on
-// its line, so it is the easiest thing to select and copy. Publishing an
+// Publish renders a publish result. Text mode says in one row who can open
+// the resource and prints the CRID last, alone on its line, so it is the
+// easiest thing to select and copy; JSON carries the same fact as `private`,
+// and --quiet stays the CRID alone. Publishing an
 // already-published URL returns the existing resource, and the rendering
 // says so: the text document itself carries the story (headline plus note),
 // while --quiet and JSON keep their stdout documents unchanged and note the
 // replay on stderr.
 func (p *Printer) Publish(res *qurlapi.Published) error {
-	if foundExisting(res) && (p.format == FormatJSON || p.quiet) {
-		p.Notef(msgAlreadyPublished)
+	if p.format == FormatJSON || p.quiet {
+		switch {
+		case res.KeptPublic:
+			// The warning says the target was published before, so it takes
+			// the place of the replay note.
+			p.Warnf("%s", keptPublicWarning(res))
+		case foundExisting(res):
+			p.Notef(msgAlreadyPublished)
+		}
 	}
 	switch {
 	case p.format == FormatJSON:
 		return p.writeJSON(publishJSON{
 			Private:       res.Private,
+			KeptPublic:    res.KeptPublic,
 			CRID:          res.CRID,
 			ResourceID:    res.ResourceID,
 			TargetURL:     res.TargetURL,
@@ -339,8 +354,14 @@ func (p *Printer) publishText(res *qurlapi.Published) error {
 	tw := tabwriter.NewWriter(p.out, 0, 0, 2, ' ', 0)
 	twe := &errWriter{w: tw}
 	twe.printf("  %s\t%s\n", p.bold("Target:"), res.TargetURL)
+	// A publish result always carries the privacy the service confirmed. The
+	// row is left out only for a value that has none, never guessed.
 	if res.Private != nil {
-		twe.printf("  %s\t%t\n", p.bold("Private:"), *res.Private)
+		access := msgPublishPublic
+		if *res.Private {
+			access = msgPublishPrivate
+		}
+		twe.printf("  %s\t%s\n", p.bold(labelAccess), access)
 	}
 	if res.Status != "" {
 		twe.printf("  %s\t%s\n", p.bold("Status:"), res.Status)
@@ -359,11 +380,28 @@ func (p *Printer) publishText(res *qurlapi.Published) error {
 	// one actually follows. The combination is unreachable in practice —
 	// found_existing is newer than CRID minting — but the wording is
 	// unconditional, so the guard keeps it from ever contradicting itself.
-	if foundExisting(res) && res.CRID != "" {
+	switch {
+	case res.KeptPublic:
+		// In the document, so it is read with the Access row it explains,
+		// and never dim: a publisher who did not choose public must see it.
+		ew.printf("\n%s %s\n", p.style(ansiBold+ansiYellow, labelWarning), keptPublicWarning(res))
+	case foundExisting(res) && res.CRID != "":
 		ew.printf("\n%s\n", p.dim(msgPublishFoundExisting))
 	}
 	ew.printf("\n%s %s\n", p.bold(labelCRID), res.CRID)
 	return ew.flush(nil)
+}
+
+// keptPublicWarning is the text of the warning for a kept public resource,
+// the same in every output mode. The warning is shown whenever a resource
+// was kept, so it does not depend on the CRID: the command it names has the
+// resource's CRID in it, and the placeholder if a result ever had none.
+func keptPublicWarning(res *qurlapi.Published) string {
+	id := res.CRID
+	if id == "" {
+		id = placeholderCRID
+	}
+	return fmt.Sprintf(msgPublishKeptPublic, id)
 }
 
 func foundExisting(res *qurlapi.Published) bool {

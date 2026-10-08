@@ -80,6 +80,11 @@ type sandboxListRowDoc struct {
 	TargetURL    string  `json:"target_url"`
 	DesiredState string  `json:"desired_state"`
 	ServingEpoch *uint64 `json:"serving_epoch"`
+	// Private is the privacy the service reports for the row. The journeys
+	// publish with --quiet, which prints the CRID alone, so the list row is
+	// where they read that a local publish with no flag made a private
+	// resource.
+	Private *bool `json:"private"`
 }
 
 type sandboxListDoc struct {
@@ -338,8 +343,8 @@ func assertSandboxRemoteURLDeviceJourney(t *testing.T, binary string, cliEnv map
 	if err := json.Unmarshal(published.stdout.Bytes(), &pub); err != nil {
 		t.Fatalf("decode device-authenticated remote publish output: %v", err)
 	}
-	if pub.CRID == "" || pub.ResourceID == "" || pub.TargetURL != canonicalTarget || pub.FoundExisting {
-		t.Fatalf("device-authenticated remote publish = %+v, want one new URL resource", pub)
+	if pub.CRID == "" || pub.ResourceID == "" || pub.TargetURL != canonicalTarget || pub.FoundExisting || !pub.confirmedPrivate() {
+		t.Fatalf("device-authenticated remote publish = %+v (private confirmed: %t), want one new private URL resource", pub, pub.confirmedPrivate())
 	}
 	deleted := false
 	t.Cleanup(func() {
@@ -844,6 +849,9 @@ func assertSandboxListRow(t *testing.T, binary string, env map[string]string, st
 				t.Fatalf("decode list row fields: %v", err)
 			}
 			connectionState, hasConnectionState := fields["connection_state"]
+			if row.Private == nil || !*row.Private {
+				t.Fatalf("list row for the local share published with no flag does not report a private resource (private present: %t)", row.Private != nil)
+			}
 			if row.ResourceID != local.ResourceID || row.TargetURL != local.TargetURL || row.DesiredState != "on" ||
 				hasConnectionState || row.ServingEpoch == nil || *row.ServingEpoch != epoch {
 				connectionStateValue := "<absent>"

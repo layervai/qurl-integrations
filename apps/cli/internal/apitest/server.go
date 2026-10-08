@@ -1,10 +1,12 @@
 package apitest
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -19,6 +21,9 @@ type RecordedRequest struct {
 	Path   string
 	Query  string
 	Header http.Header
+	// Body is the request body exactly as sent, empty when there was none.
+	// The handler that answers the request still reads the same bytes.
+	Body []byte
 }
 
 // Server is the scriptable mock qURL API.
@@ -46,6 +51,16 @@ type Server struct {
 	publishOmitCRID      bool
 	publisherName        string
 	omitPublisher        bool
+	// Who can open the mock's one resource. It starts as what a create
+	// request that states no privacy makes on the service the mock plays.
+	private           bool
+	allowedDeviceKeys []string
+	// publicByDefault makes the mock a service from before private became
+	// the default; see PlayPublicByDefault.
+	publicByDefault bool
+	// ignoreGrantEdits makes the mock a service from before single device
+	// grants could be added or removed; see PlayNoSingleGrantEdits.
+	ignoreGrantEdits bool
 	// failf reports a contract violation to the owning test. It is t.Errorf,
 	// which is safe to call from a handler goroutine; this package's own
 	// tests replace it to observe the report without failing themselves.
@@ -106,8 +121,26 @@ const (
 	// creation date is named as such there.
 	fieldResourceCreatedAt = "resource_created_at"
 	fieldPublisher         = "publisher"
+	// fieldPrivate and fieldAllowedDeviceKeys say who can open a resource, in
+	// create requests and in resource rows.
+	fieldPrivate           = "private"
+	fieldAllowedDeviceKeys = "allowed_device_keys"
 	// publisherPath is the owner's publisher profile route.
 	publisherPath = "/v1/me/publisher"
+)
+
+// CodePrivacyMismatch is the problem code for a publish whose target is
+// already published with the other privacy, and CodeDeviceKeysMismatch the
+// one for a publish whose device list differs from the stored list.
+//
+// TODO(upstream-contract): mirrors the service's codes for those refusals,
+// both HTTP 400. LegacyAccessSettingsDetail is what a service from before the
+// codes answers instead, in the detail of its generic invalid-input problem,
+// for a privacy difference and for a different device list alike.
+const (
+	CodePrivacyMismatch        = "privacy_mismatch"
+	CodeDeviceKeysMismatch     = "device_keys_mismatch"
+	LegacyAccessSettingsDetail = "existing resource access settings differ; update allowed_device_keys with PATCH or create a new resource for different privacy"
 )
 
 // DefaultPublisherName is the self-declared publisher name the mock owner
@@ -132,6 +165,7 @@ func NewServerWithKey(t *testing.T, key *ResourceKey) *Server {
 		scripts:              map[string][]http.HandlerFunc{},
 		publishFoundExisting: &foundExisting,
 		publisherName:        DefaultPublisherName,
+		private:              true,
 		failf:                t.Errorf,
 	}
 	s.Server = httptest.NewServer(http.HandlerFunc(s.handle))
@@ -187,6 +221,54 @@ func (s *Server) SetPublishOmitCRID(v bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.publishOmitCRID = v
+}
+
+// PlayPublicByDefault makes the mock answer like a service from before
+// private became the default: a create request that states no privacy makes a
+// public resource, the resource the mock starts with is public, and a publish
+// that conflicts with it is refused with the older invalid-input answer
+// instead of the privacy-mismatch code. A request that states its privacy
+// gets what it asked for on either service, which is why the CLI always
+// states it.
+func (s *Server) PlayPublicByDefault() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.publicByDefault = true
+	s.private = false
+}
+
+// PlayNoSingleGrantEdits makes the mock answer like a service from before
+// single device grants could be added or removed: it ignores those two
+// request members and answers a grant change that carries only them with a
+// success status and the list as it was. Replacing the complete list still
+// works.
+func (s *Server) PlayNoSingleGrantEdits() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ignoreGrantEdits = true
+}
+
+// SetResourceAccess sets who can open the mock's one resource without a
+// request: its privacy and its allowed device keys.
+func (s *Server) SetResourceAccess(private bool, allowedDeviceKeys ...string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.private = private
+	s.allowedDeviceKeys = append([]string(nil), allowedDeviceKeys...)
+}
+
+// addResourceAccess writes the access fields every resource row carries:
+// privacy always, and the allowed device keys when there are any.
+//
+// TODO(upstream-contract): the service writes private on every row it
+// returns and omits an empty allowed_device_keys.
+func (s *Server) addResourceAccess(row map[string]any) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	row[fieldPrivate] = s.private
+	if len(s.allowedDeviceKeys) > 0 {
+		row[fieldAllowedDeviceKeys] = append([]string(nil), s.allowedDeviceKeys...)
+	}
 }
 
 // SetPublisherName sets the mock owner's publisher name without a request;
@@ -255,6 +337,8 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	// test can still see exactly what arrived, but it never reaches a script.
 	// It falls through to handleShare, which writes its 401.
 	unauthenticatedShare := isShareRequest(r) && bearerCredential(r) == ""
+	body, readErr := io.ReadAll(r.Body)
+	r.Body = io.NopCloser(bytes.NewReader(body))
 
 	s.mu.Lock()
 	s.requests = append(s.requests, RecordedRequest{
@@ -262,6 +346,7 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		Path:   r.URL.Path,
 		Query:  r.URL.RawQuery,
 		Header: r.Header.Clone(),
+		Body:   body,
 	})
 	var scripted http.HandlerFunc
 	key := r.Method + " " + r.URL.Path
@@ -272,6 +357,9 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	failf := s.failf
 	s.mu.Unlock()
 
+	if readErr != nil {
+		failf("apitest: read the %s %s request body: %v", r.Method, r.URL.Path, readErr)
+	}
 	if unauthenticatedShare {
 		failf("apitest: %s %s arrived with no bearer credential; share and get must always send the device credential",
 			r.Method, r.URL.Path)
@@ -345,6 +433,9 @@ func (s *Server) defaultHandler(w http.ResponseWriter, r *http.Request) {
 	case isShareRequest(r):
 		s.handleShare(w, r)
 
+	case r.Method == http.MethodPatch && (r.URL.Path == "/v1/resources/"+s.Key.CRID || r.URL.Path == "/v1/resources/"+s.Key.ResourceID):
+		s.handleDeviceGrants(w, r)
+
 	case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/v1/resources/"):
 		w.WriteHeader(http.StatusNoContent)
 
@@ -402,14 +493,22 @@ func (s *Server) resourceRow() map[string]any {
 	if publisher, ok := s.publisherObject(); ok {
 		row[fieldPublisher] = publisher
 	}
+	s.addResourceAccess(row)
 	return row
 }
 
 // handlePublish accepts URL creation and Connector find-or-create.
+//
+// A fresh create stores what was asked for; one that states no privacy gets
+// the default of the service the mock plays: private, or public after
+// PlayPublicByDefault. A create that finds the existing resource
+// (SetPublishFoundExisting) changes nothing. It is refused when it states a
+// privacy or a device list other than the resource's, and returns the
+// resource as it is otherwise, as the service does.
 func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		AllowedDeviceKeys []string `json:"allowed_device_keys"`
-		Private           bool     `json:"private"`
+		Private           *bool    `json:"private"`
 		Slug              string   `json:"slug"`
 		FindOrCreate      bool     `json:"find_or_create"`
 		Type              string   `json:"type"`
@@ -436,11 +535,16 @@ func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
 	}
 	meta := map[string]any{}
 	s.mu.Lock()
+	refusal := s.applyCreateAccess(body.Private, body.AllowedDeviceKeys)
 	if s.publishFoundExisting != nil {
 		meta["found_existing"] = *s.publishFoundExisting
 	}
 	omitCRID := s.publishOmitCRID
 	s.mu.Unlock()
+	if refusal != "" {
+		s.writeCreateRefusal(w, refusal)
+		return
+	}
 	data := map[string]any{
 		"resource_id":  s.Key.ResourceID,
 		fieldCRID:      s.Key.CRID,
@@ -451,16 +555,143 @@ func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
 	if publisher, ok := s.publisherObject(); ok {
 		data[fieldPublisher] = publisher
 	}
-	if len(body.AllowedDeviceKeys) > 0 {
-		data["allowed_device_keys"] = body.AllowedDeviceKeys
-	}
-	if body.Private {
-		data["private"] = true
-	}
+	s.addResourceAccess(data)
 	if omitCRID {
 		delete(data, fieldCRID)
 	}
 	WriteEnvelope(s.t, w, http.StatusCreated, data, meta)
+}
+
+// writeCreateRefusal answers a create that applyCreateAccess refused. Each of
+// the service's two codes has its own problem; any other refusal is the
+// generic invalid-input problem an older service sends for both.
+func (s *Server) writeCreateRefusal(w http.ResponseWriter, refusal string) {
+	switch refusal {
+	case CodePrivacyMismatch:
+		WriteProblem(s.t, w, http.StatusBadRequest, CodePrivacyMismatch, "Privacy Mismatch",
+			"this target is already published with the other privacy")
+	case CodeDeviceKeysMismatch:
+		WriteProblem(s.t, w, http.StatusBadRequest, CodeDeviceKeysMismatch, "Device Keys Mismatch",
+			"this target is already published with another list of allowed devices")
+	default:
+		WriteProblem(s.t, w, http.StatusBadRequest, refusal, "Invalid Input", LegacyAccessSettingsDetail)
+	}
+}
+
+// applyCreateAccess decides what a create request does to the access
+// settings of the mock's one resource, and returns the problem code of the
+// refusal, empty when the request is accepted. The caller holds s.mu.
+//
+// A fresh create stores the privacy that was stated, or the default of the
+// service the mock plays, and the device list. A create that finds the
+// existing resource changes nothing.
+//
+// The service reuses that resource with the privacy it has when the request
+// states none, refuses a stated privacy that differs with the
+// privacy-mismatch code, and refuses a stated device list that differs with
+// the device-list code. A service from before those codes reads an absent
+// privacy as its default, public, and refuses another privacy or another
+// device list with its one invalid-input answer.
+func (s *Server) applyCreateAccess(stated *bool, allowedDeviceKeys []string) string {
+	if s.publishFoundExisting == nil || !*s.publishFoundExisting {
+		s.private = !s.publicByDefault
+		if stated != nil {
+			s.private = *stated
+		}
+		s.allowedDeviceKeys = append([]string(nil), allowedDeviceKeys...)
+		return ""
+	}
+	otherKeys := allowedDeviceKeys != nil && !sameKeys(allowedDeviceKeys, s.allowedDeviceKeys)
+	if s.publicByDefault {
+		private := stated != nil && *stated
+		if private != s.private || otherKeys {
+			return "invalid_input"
+		}
+		return ""
+	}
+	if stated != nil && *stated != s.private {
+		return CodePrivacyMismatch
+	}
+	if otherKeys {
+		return CodeDeviceKeysMismatch
+	}
+	return ""
+}
+
+// maxAllowedDeviceKeys is the most device keys one resource can list.
+const maxAllowedDeviceKeys = 256
+
+// handleDeviceGrants serves the owner's change to the device grant list of
+// the mock's one resource: PATCH /v1/resources/{id} with allowed_device_keys
+// to replace the complete list, or with allowed_device_keys_add and
+// allowed_device_keys_remove to change single keys. It answers with the flat
+// resource row, which carries the complete resulting list.
+//
+// TODO(upstream-contract): mirrors the service's grant update. Both edit
+// members are applied as one change; a key that is already present or already
+// absent is nothing to do; a key in both members and a result above 256 keys
+// are refused with 400 invalid_input; and the answer is the whole row.
+func (s *Server) handleDeviceGrants(w http.ResponseWriter, r *http.Request) {
+	if bearerCredential(r) == "" {
+		s.writeUnauthorized(w)
+		return
+	}
+	var body struct {
+		Replace *[]string `json:"allowed_device_keys"`
+		Add     []string  `json:"allowed_device_keys_add"`
+		Remove  []string  `json:"allowed_device_keys_remove"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		WriteProblem(s.t, w, http.StatusBadRequest, "invalid_request", "Bad Request", "request body must be JSON")
+		return
+	}
+	s.mu.Lock()
+	refusal := s.applyGrantChange(body.Replace, body.Add, body.Remove)
+	s.mu.Unlock()
+	if refusal != "" {
+		WriteProblem(s.t, w, http.StatusBadRequest, "invalid_input", "Invalid Input", refusal)
+		return
+	}
+	WriteEnvelope(s.t, w, http.StatusOK, s.resourceRow(), nil)
+}
+
+// applyGrantChange applies one grant change to the mock's device list and
+// returns the detail of the refusal, empty when the change is accepted. A
+// refused change leaves the list as it was. The caller holds s.mu.
+func (s *Server) applyGrantChange(replace *[]string, add, remove []string) string {
+	if s.ignoreGrantEdits {
+		add, remove = nil, nil
+	}
+	next := s.allowedDeviceKeys
+	switch {
+	case replace != nil && len(add)+len(remove) > 0:
+		return "replace the complete device list or change single keys, not both"
+	case replace != nil:
+		next = *replace
+	default:
+		for _, key := range add {
+			if slices.Contains(remove, key) {
+				return "a device key cannot be both added and removed"
+			}
+		}
+		next = slices.DeleteFunc(slices.Clone(next), func(key string) bool { return slices.Contains(remove, key) })
+		for _, key := range add {
+			if !slices.Contains(next, key) {
+				next = append(next, key)
+			}
+		}
+	}
+	if len(next) > maxAllowedDeviceKeys {
+		return "at most 256 allowed device keys"
+	}
+	s.allowedDeviceKeys = slices.Clone(next)
+	return ""
+}
+
+// sameKeys reports whether two device key lists hold the same keys in any
+// order, which is how the service compares them.
+func sameKeys(a, b []string) bool {
+	return slices.Equal(slices.Sorted(slices.Values(a)), slices.Sorted(slices.Values(b)))
 }
 
 // Fixed identity fixtures for the default GET /v1/me answer, stable so

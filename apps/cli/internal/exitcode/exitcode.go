@@ -52,7 +52,8 @@ const (
 	NotFound = 5
 	// Forbidden: the credential lacks permission (HTTP 403).
 	Forbidden = 6
-	// Conflict: the request conflicts with current state (HTTP 409).
+	// Conflict: the request conflicts with current state (HTTP 409, and a
+	// publish whose target is already published with other access settings).
 	Conflict = 7
 	// InvalidInput: an operand or request the service (or the local gate,
 	// for inputs that can never be valid) rejected as invalid.
@@ -282,6 +283,13 @@ func cliSentinelCode(err error) (int, bool) { //nolint:gocyclo // Keep the close
 		// state that already exists at the destination, exactly the shape
 		// the HTTP 409 row describes, and --force is the caller's explicit
 		// resolution. (Not InvalidInput: the path is a perfectly good path.)
+		return Conflict, true
+	case errors.Is(err, qurlapi.ErrPublishAccessConflict):
+		// The service answers this with HTTP 400, which the status table would
+		// read as invalid input. Nothing in the request is invalid: the target
+		// is already published with the other privacy, and privacy cannot
+		// change after creation. A request that conflicts with state which
+		// already exists is the Conflict row, as for ErrFileExists above.
 		return Conflict, true
 	case errors.Is(err, consume.ErrLinkExpired):
 		// Expiry that survived the one automatic refresh joins the

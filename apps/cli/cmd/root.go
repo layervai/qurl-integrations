@@ -616,6 +616,7 @@ func (o *globalOpts) accountConfig(key, owner string) *qurlapi.Config {
 		Sleep:        o.sleep,
 		NewRequestID: o.newRequestID,
 		HTTPClient:   o.httpClient,
+		Now:          o.now,
 	}
 }
 
@@ -1029,6 +1030,7 @@ func (o *globalOpts) openRegisteredDeviceClient(ctx context.Context, origin stri
 		Sleep:        o.sleep,
 		NewRequestID: o.newRequestID,
 		HTTPClient:   o.httpClient,
+		Now:          o.now,
 	}, store)
 }
 

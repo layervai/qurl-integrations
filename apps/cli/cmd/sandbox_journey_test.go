@@ -62,6 +62,13 @@ import (
 //
 // The commands run through runCLI with the PRODUCTION wiring and no injected
 // seams. The protected workflow requires an exact PASS and rejects SKIP.
+//
+// Privacy: every journey in this suite publishes with no flag, so each
+// resource is private, and every later step (status, inspect, list, share,
+// get, the route probes, stop, start, restart, delete) runs on the device or
+// with the key that published it. That is the owner's own access to a private
+// resource, which is what the journeys hold. No step opens a resource from
+// another device or with the CRID alone, so none needs --public.
 
 // journeyTimeout bounds the whole journey. Every API call also carries the
 // transport's own 30-second HTTP timeout; this outer bound exists so a
@@ -320,6 +327,14 @@ type journeyPublishDoc struct {
 	ResourceID    string `json:"resource_id"`
 	TargetURL     string `json:"target_url"`
 	FoundExisting bool   `json:"found_existing"`
+	// Private is always written: it is the privacy the service confirmed.
+	Private *bool `json:"private"`
+}
+
+// confirmedPrivate reports whether the publish document says the resource is
+// private, which a publish with no flag must make it.
+func (doc journeyPublishDoc) confirmedPrivate() bool {
+	return doc.Private != nil && *doc.Private
 }
 
 type journeyResourceStatusDoc struct {
@@ -673,6 +688,9 @@ func TestSandboxCRIDJourney(t *testing.T) {
 	}
 	if pub.CRID == "" {
 		t.Fatalf("publish minted no CRID (resource %s); this endpoint cannot carry the CRID journey", pub.ResourceID)
+	}
+	if !pub.confirmedPrivate() {
+		t.Error("publish with no flag did not report a private resource")
 	}
 	// Reclaim the one resource no matter where the journey stops below. The
 	// happy path deletes it first, so this is normally the idempotent no-op.

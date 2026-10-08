@@ -68,6 +68,7 @@ When the route is ready, qURL prints:
 Published
 
   Target:  http://127.0.0.1:3000
+  Access:  private — only you and the people you allow can open it
   Status:  serving
 
 CRID: <CRID>
@@ -93,8 +94,9 @@ open it with:
 qurl get <CRID>
 ```
 
-To publish an app that another device can open, see
-[Private CRIDs](#private-crids).
+The app is private: your own devices can open it, and no other device can
+until you allow it. To allow another device, or to publish a public resource
+instead, see [Private CRIDs](#private-crids).
 
 Your app still listens only on your machine. The CLI connects outward to qURL;
 you do not need public DNS, a public IP, or custom Connector configuration.
@@ -473,6 +475,7 @@ than switching in place.
 |---------|-------------|
 | `qurl publish <target-url>` | Publish a remote URL or serve a loopback HTTP app, and get its CRID |
 | `qurl share <CRID>` | Share a CRID as a short-lived access link |
+| `qurl grants <CRID>` | Show or change the devices allowed to open a private resource |
 | `qurl get <CRID>` | Fetch what a CRID points to: browser on a terminal, or download with `--file` |
 | `qurl list` | List your published resources |
 | `qurl start <CRID>` | Turn on a previously published local share |
@@ -785,6 +788,8 @@ credential or making a network request.
 
 | Flag | Description |
 |------|-------------|
+| `--public` | Let anyone who has the CRID open the resource. Without it the resource is private |
+| `--allow-device-key <public-key>` | Allow a recipient's device to open the private resource (repeatable) |
 | `--description <text>` | Human-readable description stored with the resource |
 | `--tag <tag>` | Tag stored with the resource (repeatable) |
 | `--alias <name>` | Memorable handle stored with the resource |
@@ -793,6 +798,44 @@ credential or making a network request.
 Description, tags, and alias apply only to remote resources. `--id` applies
 only to a local publish. Mixing those options fails loudly instead of being
 silently ignored.
+
+#### Private or public
+
+A resource is private unless you publish it with `--public`, for a local app
+and for a remote URL alike. The text output says which it is in one row, and
+`-o json` says it as `private`:
+
+```text
+  Access:  private — only you and the people you allow can open it
+  Access:  public — anyone who has the CRID can open it
+```
+
+Privacy is set when a resource is first published and cannot be changed
+afterwards. Publishing a target again reuses its resource, with the privacy it
+has. A flag that asks for what that resource is not is refused with exit code
+7 and prints nothing on stdout: `--allow-device-key` for a target that is
+published as public, `--public` for one that is private, and
+`--allow-device-key` with a list other than the one the resource has. The
+message says what to do: publish without that flag, change the allowed devices
+with `qurl grants`, or delete the resource with `qurl delete <CRID>` and
+publish again to get a new resource and a new CRID. `--allow-device-key`
+cannot be combined with `--public`. See [Private CRIDs](#private-crids) for
+who can open each kind.
+
+**If you published with an earlier release.** Releases from before private
+became the default published a public resource unless you asked for a private
+one, and those resources are still public. `qurl publish` for such a target
+with no privacy flag keeps working: it returns the existing resource, shows
+the public `Access:` row, and warns you.
+
+```text
+Warning: this target was published as public before, and it stays public: anyone who has the CRID can open it. To make it private, delete it with `qurl delete <CRID>` and publish again; the new resource gets a new CRID.
+```
+
+The warning is part of the text output, and goes to stderr with `-o json` and
+`--quiet`; JSON says `private: false` and `kept_public: true`. The resource
+stays as it is until you delete it. A publish never turns a public resource
+private, and it never makes a new public resource unless you pass `--public`.
 
 In either mode, the CRID is last and alone on its line; `--quiet` prints only
 the CRID. Publishing the same target again does not create a duplicate while
@@ -885,6 +928,52 @@ deployments use the settings described under `qurl get`.
 Before anything is printed, the CLI verifies the signed link against
 the CRID you asked for; a mismatched answer is discarded and the command
 exits with code 12 without printing a link.
+
+### qurl grants
+
+`qurl grants <CRID>` shows the devices allowed to open a private resource, and
+changes that list for the resource owner. With no flag it prints the resource
+with its current list; `-o json` has the list as `allowed_device_keys`.
+
+```bash
+qurl grants <CRID>
+qurl grants <CRID> --add <public-key>
+qurl grants <CRID> --add <public-key> --remove <other-public-key>
+qurl grants <CRID> --clear
+```
+
+| Flag | Description |
+|------|-------------|
+| `--add <public-key>` | Allow a device (repeatable) |
+| `--remove <public-key>` | Take a device off the list (repeatable) |
+| `--clear` | Take every device off the list |
+| `--yes` | Proceed without confirmation when a change is sent for a test CRID to production. Reading the list never needs it |
+
+`--add` and `--remove` can be used in one command, which is applied as one
+change. A public key that is already on the list, or already off it, is left
+as it is, so a command can be repeated safely. Every change prints the
+complete list that results. The same public key cannot be given to both
+flags, and `--clear` cannot be combined with either.
+
+A list holds at most 256 devices. `--add` and `--remove` each take at most 256
+public keys in one command, which is checked before anything is sent. The
+limit on the list that results is the service's: it refuses a change that
+would leave more than 256 devices, and the list stays as it was.
+
+The command checks the service's answer before it reports a change: every
+added key must be on the returned list, and no removed key may be. That check
+covers the keys the command named, not the rest of the list. What keeps the
+other grants in place is the request itself, which carries only the keys to
+add and to remove and never the whole list, so it cannot replace it. An answer
+that does not show the change fails the check with exit code 10 and nothing
+on stdout. A service that cannot add or remove single grants yet answers that
+way; `qurl grants <CRID>` then shows the list as it is.
+
+Earlier releases replaced the complete list with
+`qurl grants <CRID> --allow-device-key <public-key>`. That form is removed and
+is now a usage error that names `--add`, so the command no longer sends a
+list that replaces the grants it did not name. `qurl publish
+--allow-device-key` still sets the first list when you publish.
 
 ### qurl get
 
@@ -1255,9 +1344,17 @@ in every archive.
   and `qurl get` check the service's answer against the CRID you asked
   for and discard mismatches (exit 12).
 
+`publish -o json` always includes `private`: `true` unless the resource was
+published with `--public`, or was already published as public and kept. In
+that second case, a publish with no privacy flag that kept an existing public
+resource, the document also has `kept_public: true`; the member is absent
+otherwise. It is how a script tells that case from `--public` on an existing
+resource, which has the same `private: false` and `found_existing: true`,
+without reading stderr. `--quiet` prints only the CRID in both cases.
+
 `list` and resource status JSON include `private` when known and an
-`allowed_device_keys` array, including `[]` when no devices are allowed.
-The text resource list includes a `PRIVATE` column. Grant changes show the
+`allowed_device_keys` array, including `[]` when no devices are allowed. The
+text resource list includes a `PRIVATE` column. Grant changes show the
 resulting complete device list in text and JSON output.
 
 ### Exit codes
@@ -1274,10 +1371,10 @@ exit-code authority in code (`apps/cli/internal/exitcode`):
 | 4 | authentication | No credential, an implausible credential, or the service rejected the credential. |
 | 5 | not found | The resource does not exist or is retired — revoked and tombstoned resources included; the stderr message distinguishes them. `share` and `get` also get this answer on a device that is neither the owner's nor allowed; the service does not say which. |
 | 6 | permission | The credential lacks permission for this operation. |
-| 7 | conflict | The request conflicts with current state — including `--file` refusing to replace an existing destination without `--force`. |
+| 7 | conflict | The request conflicts with current state — including `--file` refusing to replace an existing destination without `--force`, and `publish` with a flag that asks for what the already published resource is not: the other privacy, or another list of allowed devices. |
 | 8 | invalid input | An operand or request rejected as invalid (by the service, or locally for inputs that can never be valid). |
 | 9 | rate limited | Still rate limited after the CLI's bounded automatic retries. |
-| 10 | server error | The service failed or answered outside its contract. |
+| 10 | server error | The service failed or answered outside its contract — including a `publish` answer that does not confirm the privacy that was asked for, and a `grants` answer that does not show the change that was asked for. |
 | 11 | unavailable | The service cannot be reached or is not serving this surface: HTTP 503, network failures, timeouts. Also a local TPM that is not responding. |
 | 12 | verification failed | The response failed CRID-anchored verification. Nothing was printed — treat it as tampering, not transience. |
 | 130 | interrupted | The foreground daemon or another command was canceled with Ctrl-C or SIGTERM. |
@@ -1286,8 +1383,8 @@ exit-code authority in code (`apps/cli/internal/exitcode`):
 
 Every command's `-o json` document uses field names owned by this repo —
 a stable contract independent of upstream renames. Fields that only
-sometimes apply (`found_existing`, `already_gone`) are omitted rather than
-emitted empty. Every resource result requires a verified `crid`.
+sometimes apply (`found_existing`, `kept_public`, `already_gone`) are omitted
+rather than emitted empty. Every resource result requires a verified `crid`.
 
 For `qurl list`, **`has_more` — not `next_cursor` presence — is the
 pagination terminator.** The service legitimately serves short and even
@@ -1338,10 +1435,15 @@ Account setup and recovery return `owner_id` and `status` (`linked` or
 
 ### Private CRIDs
 
-A resource is public unless you publish it with `--private`
-(`qurl publish <target-url> --private`). `--private` limits it to its owner
-and the devices allowed with `--allow-device-key <public-key>`. This works for
-remote URLs and local apps.
+A resource is private unless you publish it with `--public`
+(`qurl publish <target-url> --public`). A private resource is limited to its
+owner and the devices allowed with `--allow-device-key <public-key>`. This
+works for remote URLs and local apps. Earlier releases published a public
+resource unless `--private` was given; that flag is still accepted and asks
+for what a publish does anyway, except that it is refused for a target that is
+already published as public. A resource those releases published is still
+public, and `qurl publish` with no privacy flag keeps it and says so; see
+[Private or public](#private-or-public).
 
 `qurl share <CRID>` and `qurl get <CRID>` use this device's identity, so an
 allowed device needs no LayerV account or browser login. They work on the
@@ -1352,15 +1454,15 @@ from `qurl whoami -o json`.
 
 Where the deployment offers it, a public resource can also be opened by anyone
 who has its CRID. The deployment this release ships does not offer it yet. See
-[`qurl get`](#qurl-get) for how that works. To limit a resource to its owner
-and the devices you allow, publish it with `--private`.
+[`qurl get`](#qurl-get) for how that works.
 
-Read the current `allowed_device_keys` with `qurl list -o json` before adding
-a recipient. JSON shows an empty array when there are no grants.
-The publisher can replace the complete grant list with the registered CLI:
+Read the current list with `qurl grants <CRID>`. With `-o json` it is
+`allowed_device_keys`, an empty array when there are no grants. The publisher
+allows a device, or takes one off the list, without touching the others:
 
 ```sh
-qurl grants <CRID> --allow-device-key <public-key>
+qurl grants <CRID> --add <public-key>
+qurl grants <CRID> --remove <public-key>
 qurl grants <CRID> --clear
 ```
 

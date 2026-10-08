@@ -2,6 +2,7 @@ CRID:                 qhtpthw4qt7wkw7khghr6x3z4hsfyn4zbuyhnee4i6bi67yu6yytgvwdbb
 Target:               https://example.com/data
 Type:                 url
 Status:               active
+Private:              true
 Allowed device keys:  []
 Publisher:            "Acme Docs" — UNVERIFIED (self-declared name, not confirmed by LayerV)
 Created:              2026-03-01 (1d ago)

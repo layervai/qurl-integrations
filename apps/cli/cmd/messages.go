@@ -86,7 +86,21 @@ const (
 	// msgPublicGrantsNoEffect follows a grant change on a public resource.
 	// Device grants decide who else may use a private resource; a public one
 	// does not consult them.
-	msgPublicGrantsNoEffect = "This resource is public, so device grants have no effect on it. They apply to a resource published with --private."
+	msgPublicGrantsNoEffect = "This resource is public, so device grants have no effect on it. They apply to a private resource, which is what `qurl publish` creates unless you pass --public."
+
+	// Usage errors for the publish flags that say who can open the resource.
+	// msgPublicAndPrivate and msgPrivateFalse are about the hidden --private
+	// flag, which is accepted only where it asks for what a publish does
+	// anyway.
+	msgPublicAndPrivate   = "--private and --public cannot be used together"
+	msgPrivateFalse       = "--private=false is not accepted: a resource is private unless you publish it with --public"
+	msgAllowKeyWithPublic = "--allow-device-key cannot be used with --public: a public resource has no list of allowed devices"
+
+	// Usage errors of `qurl grants`. msgGrantsReplaceRemoved answers the flag
+	// that replaced the complete list, and names what to use instead.
+	msgGrantsReplaceRemoved = "--allow-device-key no longer replaces the list: use --add <public-key> to allow a device, --remove <public-key> to take one off the list, or --clear to take every device off it"
+	msgGrantsClearWithEdit  = "--clear cannot be combined with --add or --remove"
+	msgGrantsAddAndRemove   = "the same public key cannot be given to both --add and --remove"
 
 	// msgNoKeyProvided is login's empty-input error.
 	msgNoKeyProvided = "no API key provided"
@@ -163,6 +177,12 @@ func customerMessages() []string {
 		msgValidCRIDRequired,
 		msgShareNeedsDevice,
 		msgPublicGrantsNoEffect,
+		msgPublicAndPrivate,
+		msgPrivateFalse,
+		msgAllowKeyWithPublic,
+		msgGrantsReplaceRemoved,
+		msgGrantsClearWithEdit,
+		msgGrantsAddAndRemove,
 		msgNoKeyProvided,
 		msgAlreadyGone,
 		msgOpeningBrowser,
