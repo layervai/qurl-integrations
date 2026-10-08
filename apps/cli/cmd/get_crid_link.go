@@ -17,99 +17,183 @@ import (
 
 // This file is the one place `qurl get` decides where its link comes from.
 //
-// The share request is the path get has always had. It uses this device's
-// identity, and the service answers it on the resource owner's devices and on
-// the devices a publisher allowed. Every other device gets "not found".
+// There are two ways to a link.
 //
-// The second path asks the service for a link with only the CRID. It uses no
-// device identity. The SDK makes the request and returns a link only after it
-// has checked the link against the CRID.
+// The link request asks the service for a link for a CRID. The SDK sends it
+// through the deployment's relay and returns a link only after it has checked
+// the link against the CRID. It has two forms:
 //
-// Whether this machine can ask with the CRID alone at all is a fact about its
-// deployment settings. get learns it from opts.cridLinkOffered, which needs no
-// CRID, sends nothing and creates nothing. It has three answers: the request
-// is offered, it is not offered, or the settings are wrong.
+//   - With the CRID alone. It uses no device identity. The service gives a
+//     link for a public resource.
+//   - As this device. The SDK follows one rule: a random key first, the
+//     device key only after "not found". So a public resource is answered as
+//     above, and the device key is used only when the first answer is "not
+//     found". The service then also gives a link for a private resource that
+//     this device may open: the owner's own device, or a device the owner
+//     allowed.
+//
+// The share request is a request to the qURL API with this device's
+// credential. The service answers it on the resource owner's devices and on
+// the devices a publisher allowed. Every other device gets "not found". It
+// is the path get has always had, and the only one that can carry a share
+// option. get has one share option: --session-duration.
+//
+// Whether this machine can make the link request at all is a fact about its
+// deployment settings. get learns it from opts.cridLinkOffered, which needs
+// no CRID, sends nothing and creates nothing. It has three answers: the
+// request is offered, it is not offered, or the settings are wrong.
 //
 // The rules:
 //
-//   - A device with an identity uses the share request first. Only when the
-//     service answers that request "not found" does get look at the second
-//     path.
+//   - A device with an identity, where the request is offered and no share
+//     option is set, makes the link request first. A link ends the run, and
+//     no share request is sent. Any other answer leads to the share request,
+//     so every case that gave a link before this order existed still gives
+//     one.
+//   - That device asks as this device when it can read its own key, and with
+//     the CRID alone when it cannot. The key is read without changing the
+//     device state (opts.readDeviceKey). A read that fails is not an error:
+//     the device asks with the CRID alone.
+//   - When a share option is set, get keeps the order it had before: the
+//     share request first, and the link request with the CRID alone only
+//     after "not found". Only the share request can carry the option.
 //   - A machine with no identity, where the request is offered, asks with the
 //     CRID alone, and the answer is final. That includes the answer "this
 //     client cannot ask for this CRID". Such a machine does not create an
 //     identity to open somebody else's resource.
 //   - Where the request is not offered, nothing changes for anyone: get does
-//     exactly what it did before that request existed. For a machine with no
-//     identity that includes creating one, as before. This is the case under
-//     the deployment every release ships today.
+//     exactly what it did before the link request existed, and no key is
+//     read. For a machine with no identity that includes creating one, as
+//     before. This is the case under the deployment every release ships
+//     today.
 //   - Settings that name a place to send the request and cannot be used are a
-//     fault of this install. get reports it and does nothing else: no request
-//     and no new identity. A device with an identity is told so only after
-//     its own share request was answered "not found", because its share
-//     request does not depend on those settings.
+//     fault of this install. A machine with no identity is told so, and
+//     nothing else happens: no request and no new identity. A device with an
+//     identity is told so only after its own share request was answered "not
+//     found", because its share request does not depend on those settings.
 //   - The rules above give the first link. One run of the command can need a
 //     second one: a download asks again when its link expired before any
-//     byte was served (a refresh). Once a link given for the CRID alone has
-//     passed the link check and is in use, the refresh asks with the CRID
-//     alone too, and that answer is final. It sends no share request and
-//     does not ask again whether the request is offered. See the second
-//     table.
+//     byte was served (a refresh). The third table says how.
 //
-// The whole table. "CRID" is one that passed the local check every command
+// The first link. "CRID" is one that passed the local check every command
 // applies first; a CRID that fails it is refused before this file runs, on
-// every machine, with nothing sent and nothing created.
+// every machine, with nothing sent and nothing created. "Key" is what
+// opts.readDeviceKey gives.
 //
-//	identity  request       CRID this client   result
-//	                        can ask for
-//	no        offered       yes                ask; the answer is final
-//	no        offered       no                 refused; nothing sent or created
-//	no        not offered   either             share request, as before
-//	no        wrong setup   either             setup error; nothing sent or created
-//	yes       offered       yes                share; on "not found", ask
-//	yes       offered       yes, and that      share; on "not found", ask; then
-//	                        request gets       "the service did not answer",
-//	                        no answer          and not "not found"
-//	yes       offered       no                 share; its answer stands
-//	yes       not offered   either             share; its answer stands
-//	yes       wrong setup   either             share; on "not found", setup error
+//	identity  share   request      CRID this   key       result
+//	          option               client can
+//	                               ask for
+//	no        either  offered      yes         -         ask with the CRID alone; the answer is final
+//	no        either  offered      no          -         refused; nothing sent or created
+//	no        either  not offered  either      -         share request, as before
+//	no        either  wrong setup  either      -         setup error; nothing sent or created
+//	yes       either  not offered  either      not read  share; its answer stands
+//	yes       either  wrong setup  either      not read  share; on "not found", setup error
+//	yes       set     offered      yes         not read  share; on "not found", ask with the CRID alone
+//	yes       set     offered      no          not read  share; its answer stands
+//	yes       not set offered      yes         yes       ask as this device; then see the second table
+//	yes       not set offered      yes         no        ask with the CRID alone; then see the second table
+//	yes       not set offered      no          either    nothing is sent for a link; share; its answer stands
 //
-// The row with no answer is a decision. When the share request says "not
-// found" and the request with the CRID alone times out or cannot reach the
-// service, nobody knows whether the resource opens with the CRID alone. "Not
-// found" would be wrong for every public resource, so get says that the
-// service did not answer and that the user can try again later.
+// The second table is the last three rows written out: a device with an
+// identity that made the link request first.
+//
+//	answer to the link request        answer to the     result
+//	                                  share request
+//	link                              (not asked)       the link
+//	"not found"                       link              the share link
+//	"not found"                       "not found"       "not found", with the hint for a device
+//	no answer in time, or none        link              the share link
+//	no answer in time, or none        "not found"       "the service did not answer"
+//	another refusal                   link              the share link
+//	another refusal                   "not found"       that refusal
+//	not sent: this client cannot      link              the share link
+//	  ask for the CRID
+//	not sent: this client cannot      "not found"       the share request's "not found"
+//	  ask for the CRID
+//	any answer that is not a link     another failure   the share request's failure
+//	interrupted by the user           (not asked)       exit code 130 and no error text
+//
+// These are the results get gave before, with the two questions in the other
+// order. One row is a decision. When the share request says "not found" and
+// the link request got no answer, nobody knows whether the resource opens for
+// this device. "Not found" would be wrong for every public resource, so get
+// says that the service did not answer and that the user can try again later.
+//
+// The link request that comes before a share request has a shorter time
+// limit than the one whose answer is final (cridLinkTimeoutBeforeShare). A
+// relay that does not answer must not hold back for long a share request
+// that would give the link.
 //
 // The refresh, by the link that is in use when a download asks again:
 //
-//	link in use came from   refresh
-//	the share request       decided again by the table above
-//	the request with the    ask with the CRID alone; the answer is final;
-//	CRID alone              no share request
+//	link in use came from        refresh
+//	the share request            decided again by the first table
+//	the link request, and the    decided again by the first table: the link
+//	share request was not        request first, and the share request only
+//	asked for that link          if it gives no link
+//	the link request, and the    the link request with the CRID alone; the
+//	share request cannot give    answer is final; no share request
+//	this run a link
 //
-// The second row is a decision too. The share request cannot give that run
-// a link: it already answered "not found", or the machine has no identity to
-// make it with. Sending it again would name this device to the service once
-// more for nothing. And if it then failed in any other way, for example
-// because the service was busy for a moment, that failure would end a
-// download that links for the CRID alone were serving. The first row keeps
-// the rule get always had: a link from the share request does not fix the
-// choice, so when the share request says "not found" at the refresh, get
-// asks with the CRID alone.
+// The share request cannot give a run a link when it already answered "not
+// found" for the link in use, or when the machine has no identity to make it
+// with. That is the third row, and it is a decision. Sending the share
+// request again would name this device to the service once more for nothing.
+// And if it then failed in any other way, for example because the service
+// was busy for a moment, that failure would end a download that the link
+// request was serving. In the second row the share request was never asked,
+// so it can still help: a refresh there that gets no link for a moment, for
+// example "too many requests", goes on to the share request and the download
+// goes on. The first row keeps the rule get always had: a link from the
+// share request does not fix the choice.
 //
-// getLinkSource holds that memory for one run. Nothing is kept between runs.
+// The key is read again at a refresh and wiped again. It is not kept for the
+// length of a download.
+//
+// getLinkSource holds the memory of one run. Nothing is kept between runs.
 //
 // `qurl share` does not use this file. It always shares with the device.
+
+// cridLinkTimeoutBeforeShare bounds the link request of a device that makes
+// its share request afterwards when no link is given. It covers the whole
+// request as this device, which can be two requests. The link request whose
+// answer is final keeps the longer limit that internal/consume sets.
+const cridLinkTimeoutBeforeShare = 10 * time.Second
+
+// linkOrigin says where a link of this run came from. A refresh is decided
+// by the origin of the link in use: see the third table at the top of this
+// file.
+type linkOrigin int
+
+const (
+	// linkFromShare is a link from the share request.
+	linkFromShare linkOrigin = iota
+	// linkFromRequest is a link from the link request, for which the share
+	// request was not asked.
+	linkFromRequest
+	// linkFromRequestOnly is a link from the link request in a run where the
+	// share request cannot give a link: it answered "not found", or the
+	// machine has no identity.
+	linkFromRequestOnly
+)
+
+// byLinkRequest reports that the link came from the link request, which
+// cannot carry a session duration.
+func (o linkOrigin) byLinkRequest() bool { return o != linkFromShare }
 
 // errCRIDNotRequestable reports that the SDK will not ask for a link for this
 // CRID and sent nothing. errCRIDVersionNotRequestable is the one cause that
 // reaches it in practice: a CRID version this client cannot check a link
-// against. Neither leaves this file. linkForGet turns them into the share
-// request's own answer on a device with an identity, and into a refusal on a
-// machine with none.
+// against. errDeviceKeyRefused reports that the SDK will not use the device
+// key it was given, and sent nothing. None of the three leaves this file.
+// The functions below turn the first two into the share request's own answer
+// on a device with an identity, and into a refusal on a machine with none.
+// The third makes the device ask with the CRID alone.
 var (
 	errCRIDNotRequestable        = errors.New("no link can be asked for with this CRID alone")
 	errCRIDVersionNotRequestable = fmt.Errorf("%w: its version is not one this client can check", errCRIDNotRequestable)
+	errDeviceKeyRefused          = errors.New("the device key cannot be used for a link request")
 )
 
 // hasDeviceIdentity reports whether this machine can make the share request
@@ -149,10 +233,10 @@ func (opts *globalOpts) hasDeviceIdentity() bool {
 // getLinkSource gives one run of get its links: the first one, and the one a
 // download asks for when its link expired before any byte was served.
 //
-// It remembers one fact about the run: a link given for the CRID alone
-// passed the link check and is in use. From then on next asks with the CRID
-// alone and sends no share request. The table at the top of this file says
-// why.
+// It remembers one fact about the run: where the link in use came from. When
+// that is the link request, and the share request cannot give this run a
+// link, next asks with the CRID alone and sends no share request. The third
+// table at the top of this file says why.
 //
 // The downloader asks for its links one after the other, never at the same
 // time, so the memory needs no lock.
@@ -160,8 +244,8 @@ type getLinkSource struct {
 	opts       *globalOpts
 	assessment *cridux.Assessment
 	options    qurlapi.ShareOptions
-	// cridAlone is the memory. Only verified sets it.
-	cridAlone bool
+	// inUse is the memory. Only verified sets it.
+	inUse linkOrigin
 }
 
 // linkSourceForGet returns the link source of one run of get.
@@ -169,96 +253,200 @@ func (opts *globalOpts) linkSourceForGet(assessment *cridux.Assessment, options 
 	return &getLinkSource{opts: opts, assessment: assessment, options: options}
 }
 
-// next returns the next link of the run and reports whether it was given for
-// the CRID alone. The caller verifies the link, and then calls verified.
-func (s *getLinkSource) next(ctx context.Context) (link *qurlapi.ShareLink, byCRIDAlone bool, err error) {
-	if !s.cridAlone {
+// next returns the next link of the run and where it came from. The caller
+// verifies the link, and then calls verified.
+func (s *getLinkSource) next(ctx context.Context) (*qurlapi.ShareLink, linkOrigin, error) {
+	if s.inUse != linkFromRequestOnly {
 		return s.opts.linkForGet(ctx, s.assessment, s.options)
 	}
 	// The identity is looked at only to pick the not-found hint.
-	link, err = s.opts.linkByCRIDAlone(ctx, s.assessment.Input, s.opts.hasDeviceIdentity())
+	link, err := s.opts.linkByCRIDAlone(ctx, s.assessment.Input, s.opts.hasDeviceIdentity())
 	if errors.Is(err, errCRIDNotRequestable) {
 		// The SDK asked for this same CRID earlier in the run, so it does not
 		// give this answer now. If it ever does, there is no share answer to
 		// fall back on, and the error must not leave this file.
 		err = refusalForCRIDNotRequestable(err)
 	}
-	return link, err == nil, err
+	return linkWithOrigin(link, linkFromRequestOnly, err)
 }
 
 // verified records that the link next returned passed the link check and is
-// now the link in use. byCRIDAlone is what next reported for it.
-func (s *getLinkSource) verified(byCRIDAlone bool) {
-	if byCRIDAlone {
-		s.cridAlone = true
-	}
+// now the link in use. origin is what next reported for it.
+func (s *getLinkSource) verified(origin linkOrigin) {
+	s.inUse = origin
 }
 
-// linkForGet returns the link get acts on when the run has not yet used a
-// link given for the CRID alone: the first link, and a refresh after a link
-// from the share request. byCRIDAlone reports that the link came from the
-// request that uses only the CRID, which cannot carry a session duration.
+// linkWithOrigin is the result of one way to a link: the link and its origin,
+// or the error and no origin.
+func linkWithOrigin(link *qurlapi.ShareLink, origin linkOrigin, err error) (*qurlapi.ShareLink, linkOrigin, error) {
+	if err != nil {
+		return nil, linkFromShare, err
+	}
+	return link, origin, nil
+}
+
+// linkForGet returns the link get acts on when the first table decides: the
+// first link of a run, and a refresh that is decided again. origin says
+// where the link came from.
 //
 // The caller verifies the link against the CRID and opens it the same way
 // whichever path it came from.
-func (opts *globalOpts) linkForGet(ctx context.Context, assessment *cridux.Assessment, options qurlapi.ShareOptions) (link *qurlapi.ShareLink, byCRIDAlone bool, err error) {
+func (opts *globalOpts) linkForGet(ctx context.Context, assessment *cridux.Assessment, options qurlapi.ShareOptions) (link *qurlapi.ShareLink, origin linkOrigin, err error) {
 	if !opts.hasDeviceIdentity() {
 		return opts.linkWithNoIdentity(ctx, assessment, options)
 	}
+	if options != (qurlapi.ShareOptions{}) {
+		// Only the share request can carry a share option, so it comes
+		// first, as it always did. Whether the link request is offered is
+		// looked at only after "not found".
+		return opts.linkShareFirst(ctx, assessment, options, opts.cridLinkOffered)
+	}
+	offered, offerErr := opts.cridLinkOffered()
+	if offerErr != nil || !offered {
+		// No link request can be made here. This is the code get had before
+		// the link request existed, with the answer that was just given. No
+		// key is read.
+		return opts.linkShareFirst(ctx, assessment, options, func() (bool, error) { return offered, offerErr })
+	}
+	return opts.linkRequestFirst(ctx, assessment, options)
+}
 
+// linkShareFirst is the order get had before the link request came first:
+// the share request, and the link request with the CRID alone only after
+// "not found". offered answers whether the link request is offered. It is
+// called at most once, and only after "not found".
+func (opts *globalOpts) linkShareFirst(
+	ctx context.Context, assessment *cridux.Assessment, options qurlapi.ShareOptions, offered func() (bool, error),
+) (*qurlapi.ShareLink, linkOrigin, error) {
 	link, shareErr := opts.shareLinkForGet(ctx, assessment, options)
 	if shareErr == nil || !shareNotFound(shareErr) {
-		return link, false, shareErr
+		return linkWithOrigin(link, linkFromShare, shareErr)
 	}
 
 	// The service will not let this device share the CRID. The resource may
 	// still be one that opens with the CRID alone.
-	offered, err := opts.cridLinkOffered()
+	canAsk, err := offered()
 	switch {
 	case err != nil:
 		// The settings are wrong, so whether the CRID opens that way is not
 		// known. Saying "not found" here would hide the fault.
-		return nil, false, err
-	case !offered:
+		return nil, linkFromShare, err
+	case !canAsk:
 		// Not possible here: the share request's own answer stands, unchanged.
-		return nil, false, shareErr
+		return nil, linkFromShare, shareErr
 	}
+	// With the CRID alone, and not as this device: the share request has
+	// already said that this device may not open the resource. A request
+	// under the device key would name the device again for nothing.
 	link, err = opts.linkByCRIDAlone(ctx, assessment.Input, true)
 	if errors.Is(err, errCRIDNotRequestable) {
 		// Not possible for this CRID: the share request's answer stands too.
-		return nil, false, shareErr
+		return nil, linkFromShare, shareErr
 	}
-	// From here the second request's answer is the result. That includes no
+	// From here the link request's answer is the result. That includes no
 	// answer at all, which does not bring back the share request's "not
-	// found": see the table at the top of this file.
-	return link, err == nil, err
+	// found": see the second table at the top of this file.
+	return linkWithOrigin(link, linkFromRequestOnly, err)
+}
+
+// linkRequestFirst is linkForGet for a device with an identity, where the
+// link request is offered and no share option is set: the link request
+// first, and the share request only when it gives no link. The second table
+// at the top of this file is this function.
+func (opts *globalOpts) linkRequestFirst(ctx context.Context, assessment *cridux.Assessment, options qurlapi.ShareOptions) (*qurlapi.ShareLink, linkOrigin, error) {
+	link, requestErr := opts.linkByRequestBeforeShare(ctx, assessment.Input)
+	if requestErr == nil {
+		// A link ends the run. The share request is not sent.
+		return link, linkFromRequest, nil
+	}
+	if errors.Is(requestErr, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
+		// The user interrupted the command. It stops here, and does not go on
+		// to a request the user did not wait for.
+		return nil, linkFromShare, context.Canceled
+	}
+
+	link, shareErr := opts.shareLinkForGet(ctx, assessment, options)
+	switch {
+	case shareErr == nil || !shareNotFound(shareErr):
+		// A link, or a failure that is the share request's own.
+		return linkWithOrigin(link, linkFromShare, shareErr)
+	case errors.Is(requestErr, errCRIDNotRequestable):
+		// Nothing was sent for a link, because this client cannot ask for
+		// this CRID. The share request's "not found" is the only answer.
+		return nil, linkFromShare, shareErr
+	}
+	// The share request said "not found", so the link request's answer is
+	// the result, as it was when the share request came first.
+	return nil, linkFromShare, requestErr
+}
+
+// linkByRequestBeforeShare makes the link request of a device that makes its
+// share request afterwards when no link is given: as this device when the
+// device key can be read, and with the CRID alone when it cannot.
+//
+// The key is read with the command's own context and no shorter time limit.
+// The request then has the limit cridLinkTimeoutBeforeShare. The key is
+// wiped when the request has been answered.
+func (opts *globalOpts) linkByRequestBeforeShare(ctx context.Context, resourceCRID string) (*qurlapi.ShareLink, error) {
+	key, why := opts.readDeviceKey(ctx)
+	defer clear(key)
+
+	requestCtx, cancel := context.WithTimeout(ctx, cridLinkTimeoutBeforeShare)
+	defer cancel()
+	if why == "" {
+		link, err := opts.linkAsDevice(requestCtx, key, resourceCRID)
+		if !errors.Is(err, errDeviceKeyRefused) {
+			return link, err
+		}
+		// The SDK will not use the key and sent nothing. That is a key this
+		// device cannot ask with, like one it could not read.
+		why = connectorstate.NoDeviceKeyInvalid
+	}
+	if logf := opts.verboseLogger(); logf != nil {
+		logf(msgCRIDLinkDeviceKeyNotRead, string(why))
+	}
+	return opts.linkByCRIDAlone(requestCtx, resourceCRID, true)
+}
+
+// readDeviceStaticPrivateKey is the production opts.readDeviceKey: the key
+// in the device state of this command's state directory, read without
+// changing anything there.
+func (opts *globalOpts) readDeviceStaticPrivateKey(ctx context.Context) ([]byte, connectorstate.NoDeviceKey) {
+	stateDir, err := opts.resolveShareStateDir("")
+	switch {
+	case errors.Is(err, connectorstate.ErrNoDefaultStateDir):
+		return nil, connectorstate.NoDeviceKeyNoState
+	case err != nil:
+		return nil, connectorstate.NoDeviceKeyUnreadable
+	}
+	return connectorstate.ReadDeviceStaticPrivateKey(ctx, stateDir, opts.resolvedSupervision)
 }
 
 // linkWithNoIdentity is linkForGet for a machine that holds no device
 // identity and has no account key.
 //
-// Where the request with only the CRID is offered, its answer is final, a
-// refusal included, and so is a fault in the settings. In both cases this
-// function returns before shareLinkForGet, which is the only way from here to
+// Where the link request is offered, its answer is final, a refusal
+// included, and so is a fault in the settings. In both cases this function
+// returns before shareLinkForGet, which is the only way from here to
 // newClient, where an identity is created and registered.
 //
 // Where the request is not offered, nothing was sent and get does what it did
 // before that request existed: the share request, which enrolls this machine
 // first.
-func (opts *globalOpts) linkWithNoIdentity(ctx context.Context, assessment *cridux.Assessment, options qurlapi.ShareOptions) (link *qurlapi.ShareLink, byCRIDAlone bool, err error) {
+func (opts *globalOpts) linkWithNoIdentity(ctx context.Context, assessment *cridux.Assessment, options qurlapi.ShareOptions) (*qurlapi.ShareLink, linkOrigin, error) {
 	offered, err := opts.cridLinkOffered()
 	switch {
 	case err != nil:
-		return nil, false, err
+		return nil, linkFromShare, err
 	case !offered:
-		link, err = opts.shareLinkForGet(ctx, assessment, options)
-		return link, false, err
+		link, err := opts.shareLinkForGet(ctx, assessment, options)
+		return linkWithOrigin(link, linkFromShare, err)
 	}
-	link, err = opts.linkByCRIDAlone(ctx, assessment.Input, false)
+	link, err := opts.linkByCRIDAlone(ctx, assessment.Input, false)
 	if errors.Is(err, errCRIDNotRequestable) {
 		err = refusalForCRIDNotRequestable(err)
 	}
-	return link, err == nil, err
+	return linkWithOrigin(link, linkFromRequestOnly, err)
 }
 
 // shareLinkForGet is the path get has always had: the share request with
@@ -290,14 +478,15 @@ func refusalForCRIDNotRequestable(err error) error {
 }
 
 // sessionDurationNoteOnce returns the function get calls with each verified
-// link. When the user asked for a session duration and the link was given for
-// the CRID alone, it says that the flag was not applied: that request cannot
-// carry one, and a requested lifetime is never dropped silently. It says so
-// once. A link refreshed in the middle of a download is the same case.
-func sessionDurationNoteOnce(printer *output.Printer, requested time.Duration) func(byCRIDAlone bool) {
+// link. When the user asked for a session duration and the link came from
+// the link request, it says that the flag was not applied: that request
+// cannot carry one, and a requested lifetime is never dropped silently. It
+// says so once. A link refreshed in the middle of a download is the same
+// case.
+func sessionDurationNoteOnce(printer *output.Printer, requested time.Duration) func(byLinkRequest bool) {
 	noted := false
-	return func(byCRIDAlone bool) {
-		if !byCRIDAlone || requested == 0 || noted {
+	return func(byLinkRequest bool) {
+		if !byLinkRequest || requested == 0 || noted {
 			return
 		}
 		noted = true
@@ -317,6 +506,38 @@ func shareNotFound(err error) bool {
 // had. device says whether this machine holds a device identity; it only
 // selects the not-found hint.
 //
+// linkFromLinkRequest says what it returns for each answer.
+func (opts *globalOpts) linkByCRIDAlone(ctx context.Context, resourceCRID string, device bool) (*qurlapi.ShareLink, error) {
+	issued, err := opts.requestCRIDLink(ctx, resourceCRID)
+	return opts.linkFromLinkRequest(resourceCRID, device, issued, err)
+}
+
+// linkAsDevice asks for a link as this device and returns it in the shape a
+// share answer has. key is the device's static private key. It stays the
+// caller's, and the caller wipes it.
+//
+// It returns errDeviceKeyRefused when the SDK will not use the key and sent
+// nothing. linkFromLinkRequest says what it returns for every other answer.
+func (opts *globalOpts) linkAsDevice(ctx context.Context, key []byte, resourceCRID string) (*qurlapi.ShareLink, error) {
+	issued, err := opts.requestCRIDLinkAsDevice(ctx, key, resourceCRID)
+	switch {
+	case consume.DeviceKeyRefused(err):
+		return nil, errDeviceKeyRefused
+	case !consume.CRIDNotRequestable(err):
+		// The line says how the device asked. It does not say that the
+		// device key was sent: the SDK sends it only after "not found".
+		if logf := opts.verboseLogger(); logf != nil {
+			logf(msgCRIDLinkAsDevice)
+		}
+	}
+	return opts.linkFromLinkRequest(resourceCRID, true, issued, err)
+}
+
+// linkFromLinkRequest turns the SDK's answer to a link request, in either of
+// its two forms, into the link get acts on or the error the user is shown.
+// device says whether this machine holds a device identity; it only selects
+// the not-found hint.
+//
 // It returns errCRIDNotRequestable when the SDK will not ask for this CRID
 // and sent nothing. Every other failure comes back as one of the CLI's fixed
 // messages, and the SDK's own error text does not, with one exception: a
@@ -324,8 +545,7 @@ func shareNotFound(err error) bool {
 // SDK's detail, which names the file the user pointed QURL_DEPLOYMENT at and
 // says what is wrong with it. That file is the user's own, and the detail is
 // what lets them fix it.
-func (opts *globalOpts) linkByCRIDAlone(ctx context.Context, resourceCRID string, device bool) (*qurlapi.ShareLink, error) {
-	issued, err := opts.requestCRIDLink(ctx, resourceCRID)
+func (opts *globalOpts) linkFromLinkRequest(resourceCRID string, device bool, issued *qurl.CRIDLink, err error) (*qurlapi.ShareLink, error) {
 	switch {
 	case consume.CRIDNotRequestable(err):
 		opts.noteCRIDNotRequestable(err)
@@ -358,8 +578,8 @@ func (opts *globalOpts) noteCRIDLinkRefusalCode(err error) {
 }
 
 // noteCRIDNotRequestable writes, as a --verbose diagnostic, why the SDK will
-// not ask for a link for the CRID. linkByCRIDAlone keeps only two facts of
-// that answer, "the version" or "anything else", and a device with an
+// not ask for a link for the CRID. linkFromLinkRequest keeps only two facts
+// of that answer, "the version" or "anything else", and a device with an
 // identity then shows the share request's answer, so without this line the
 // cause is lost. A cause other than the version means that the SDK's check
 // of the CRID and the CLI's own check disagree, and this line is the only

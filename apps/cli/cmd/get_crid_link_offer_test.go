@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdh"
 	"crypto/rand"
@@ -18,15 +19,17 @@ import (
 	"github.com/layervai/qurl-go/qurl/qurltest"
 
 	"github.com/layervai/qurl-integrations/apps/cli/internal/apitest"
+	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/consume"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/cridux"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/exitcode"
 )
 
 // Tests for `qurl get` with nothing injected between the command and the
-// SDK. The check for whether a link can be asked for with only the CRID, the
-// request itself, and the check of the link against the CRID are the
-// production functions over the real SDK calls. The SDK's own test server
+// SDK. The check for whether the link request is offered, the request itself
+// in both of its forms (with the CRID alone, and as this device), and the
+// check of the link against the CRID are the production functions over the
+// real SDK calls. The SDK's own test server
 // (qurltest.CRIDLinkServer) stands where the service would, in process, so no
 // request leaves the test.
 //
@@ -87,6 +90,7 @@ func (p *sdkLinkPath) wire(t *testing.T, srv *apitest.Server, configure func(arg
 		opts := configure(args)
 		opts.cridLinkOffered = p.opener.CRIDLinkOffered
 		opts.requestCRIDLink = p.opener.RequestCRIDLink
+		opts.requestCRIDLinkAsDevice = p.opener.RequestCRIDLinkAsDevice
 		opts.verifyLink = func(ctx context.Context, link, expectedCRID string) error {
 			if link != p.link {
 				return nil
@@ -153,16 +157,43 @@ const (
 	cridMalformed   = "malformed"
 )
 
+// Who the resource of the SDK's test server opens for.
+const (
+	// resourcePublic opens for anyone who asks with its CRID.
+	resourcePublic = "public"
+	// resourceOfThisDevice is private, and the device under test may open it.
+	resourceOfThisDevice = "private, this device may open it"
+	// resourceOfAnotherDevice is private, and only another device may open it.
+	resourceOfAnotherDevice = "private, another device may open it"
+)
+
+// What the read of the device key gives in one row.
+const (
+	// keyNotRead marks a row in which the key must not be read at all: the
+	// read fails the test.
+	keyNotRead = "not read"
+	// keyReadable gives the key in the device state.
+	keyReadable = "readable"
+	// keyUnreadable gives no key.
+	keyUnreadable = "unreadable"
+)
+
 // getResult is what one row of the decision table must end in.
 type getResult int
 
 const (
-	// resultLinkForCRIDAlone: the link the SDK's server issued is used.
-	resultLinkForCRIDAlone getResult = iota
+	// resultLinkFromLinkRequest: the link the SDK's server issued is used.
+	resultLinkFromLinkRequest getResult = iota
 	// resultLinkFromShare: the share request's link is used, as before.
 	resultLinkFromShare
 	// resultShareNotFound: the share request's not-found answer stands.
 	resultShareNotFound
+	// resultNotFoundForDevice: the link request's not-found answer, with the
+	// hint for a device that has an identity.
+	resultNotFoundForDevice
+	// resultNotFoundNoDevice: the link request's not-found answer, with the
+	// hint for a machine that has no identity.
+	resultNotFoundNoDevice
 	// resultRefusedVersion: this client cannot ask for a link for the CRID.
 	resultRefusedVersion
 	// resultRefusedSetup: the settings name an endpoint that cannot be used.
@@ -172,74 +203,178 @@ const (
 )
 
 // TestGetDecisionTable is the whole decision of where get takes its link
-// from, one row per case: whether the machine holds an identity, what its
-// settings say about the request with only the CRID, and what kind of CRID
-// it was given. A device with an identity has one row for each answer of its
-// share request.
+// from, one row per case, through the real SDK and its test server. It is
+// the first table of get_crid_link.go: whether the machine holds an
+// identity, whether the command has a share option, what its settings say
+// about the link request, what kind of CRID it was given, and whether the
+// device can read its key. Where a link request is sent, a row also says who
+// the resource opens for. A device with an identity has one row for each
+// answer of its share request that the row can reach.
 //
-// Every row states what must not happen as well. A machine with no identity
-// is enrolled in exactly the rows marked enrolls, which are the rows where
-// the request is not offered and get does what it always did. In every other
-// row for that machine, opening the device runtime fails the test, the qURL
-// API sees no request, and no state directory appears.
+// Every row states what must not happen as well.
+//
+//   - A machine with no identity is enrolled in exactly the rows marked
+//     enrolls, which are the rows where the request is not offered and get
+//     does what it always did. In every other row for that machine, opening
+//     the device runtime fails the test, the qURL API sees no request, and
+//     no state directory appears.
+//   - The share request is sent in exactly the rows that name its answer.
+//     Where the link request gave the link, the qURL API sees nothing.
+//   - The device key is read in exactly the rows where the link request
+//     comes first: once, and it is wiped afterwards. In every other row a
+//     read fails the test.
+//   - The service answers exactly the number of link requests the row
+//     states, and exactly that many of them under the key of this device.
 func TestGetDecisionTable(t *testing.T) {
 	state := bootstrapRegisteredState(t)
+	devicePublicKey, err := base64.StdEncoding.DecodeString(state.PublicKeyB64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	anotherDevice, err := ecdh.X25519().GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
 	const (
 		shareAnswersLink     = "link"
 		shareAnswersNotFound = "not found"
 		// shareNotAsked marks a row where the share request must not be made.
 		shareNotAsked = ""
 	)
-	rows := []struct {
+	type row struct {
 		identity bool
-		offer    string
-		crid     string
-		share    string
-		want     getResult
+		// option says the command has a share option: --session-duration.
+		option bool
+		offer  string
+		crid   string
+		// resource is who the server's resource opens for. Empty is public.
+		resource string
+		// key is what the read of the device key gives. Empty is keyNotRead.
+		key   string
+		share string
+		want  getResult
 		// enrolls: a machine with no identity creates one on the share path.
 		enrolls bool
-		// linkRequests is how many requests the SDK's server must answer.
-		linkRequests int
-	}{
-		// A machine with no identity.
-		{offer: offerOffered, crid: cridOK, share: shareNotAsked, want: resultLinkForCRIDAlone, linkRequests: 1},
+		// linkRequests is how many requests the SDK's server must answer, and
+		// asDevice how many of them under the key of this device.
+		linkRequests, asDevice int
+	}
+	rows := []row{
+		// A machine with no identity. A share option changes nothing for it.
+		{offer: offerOffered, crid: cridOK, share: shareNotAsked, want: resultLinkFromLinkRequest, linkRequests: 1},
+		{option: true, offer: offerOffered, crid: cridOK, share: shareNotAsked, want: resultLinkFromLinkRequest, linkRequests: 1},
+		{offer: offerOffered, crid: cridOK, resource: resourceOfAnotherDevice, share: shareNotAsked, want: resultNotFoundNoDevice, linkRequests: 1},
 		{offer: offerOffered, crid: cridUnsupported, share: shareNotAsked, want: resultRefusedVersion},
 		{offer: offerOffered, crid: cridMalformed, share: shareNotAsked, want: resultRefusedMalformed},
 		{offer: offerNotOffered, crid: cridOK, share: shareAnswersLink, want: resultLinkFromShare, enrolls: true},
+		{option: true, offer: offerNotOffered, crid: cridOK, share: shareAnswersLink, want: resultLinkFromShare, enrolls: true},
 		{offer: offerNotOffered, crid: cridOK, share: shareAnswersNotFound, want: resultShareNotFound, enrolls: true},
 		{offer: offerNotOffered, crid: cridUnsupported, share: shareAnswersLink, want: resultLinkFromShare, enrolls: true},
 		{offer: offerNotOffered, crid: cridUnsupported, share: shareAnswersNotFound, want: resultShareNotFound, enrolls: true},
 		{offer: offerNotOffered, crid: cridMalformed, share: shareNotAsked, want: resultRefusedMalformed},
 		{offer: offerWrongSetup, crid: cridOK, share: shareNotAsked, want: resultRefusedSetup},
+		{option: true, offer: offerWrongSetup, crid: cridOK, share: shareNotAsked, want: resultRefusedSetup},
 		{offer: offerWrongSetup, crid: cridUnsupported, share: shareNotAsked, want: resultRefusedSetup},
 		{offer: offerWrongSetup, crid: cridMalformed, share: shareNotAsked, want: resultRefusedMalformed},
 
-		// A device with an identity.
-		{identity: true, offer: offerOffered, crid: cridOK, share: shareAnswersLink, want: resultLinkFromShare},
-		{identity: true, offer: offerOffered, crid: cridOK, share: shareAnswersNotFound, want: resultLinkForCRIDAlone, linkRequests: 1},
-		{identity: true, offer: offerOffered, crid: cridUnsupported, share: shareAnswersLink, want: resultLinkFromShare},
-		{identity: true, offer: offerOffered, crid: cridUnsupported, share: shareAnswersNotFound, want: resultShareNotFound},
+		// A device with an identity and no share option, where the request is
+		// offered: the link request first. A public resource is answered by
+		// the first request, whether the key can be read or not.
+		{identity: true, offer: offerOffered, crid: cridOK, key: keyReadable, share: shareNotAsked, want: resultLinkFromLinkRequest, linkRequests: 1},
+		{identity: true, offer: offerOffered, crid: cridOK, key: keyUnreadable, share: shareNotAsked, want: resultLinkFromLinkRequest, linkRequests: 1},
+		// A private resource this device may open. With its key the device
+		// gets the link from the second request, and sends no share request.
+		// Without its key it asks with the CRID alone, gets "not found", and
+		// its share request decides.
+		{
+			identity: true, offer: offerOffered, crid: cridOK, resource: resourceOfThisDevice, key: keyReadable,
+			share: shareNotAsked, want: resultLinkFromLinkRequest, linkRequests: 2, asDevice: 1,
+		},
+		{
+			identity: true, offer: offerOffered, crid: cridOK, resource: resourceOfThisDevice, key: keyUnreadable,
+			share: shareAnswersLink, want: resultLinkFromShare, linkRequests: 1,
+		},
+		{
+			identity: true, offer: offerOffered, crid: cridOK, resource: resourceOfThisDevice, key: keyUnreadable,
+			share: shareAnswersNotFound, want: resultNotFoundForDevice, linkRequests: 1,
+		},
+		// A private resource this device may not open: two requests with the
+		// key, one without, and "not found" every time. The share request
+		// then decides, and on its "not found" the answer is the link
+		// request's.
+		{
+			identity: true, offer: offerOffered, crid: cridOK, resource: resourceOfAnotherDevice, key: keyReadable,
+			share: shareAnswersLink, want: resultLinkFromShare, linkRequests: 2,
+		},
+		{
+			identity: true, offer: offerOffered, crid: cridOK, resource: resourceOfAnotherDevice, key: keyReadable,
+			share: shareAnswersNotFound, want: resultNotFoundForDevice, linkRequests: 2,
+		},
+		{
+			identity: true, offer: offerOffered, crid: cridOK, resource: resourceOfAnotherDevice, key: keyUnreadable,
+			share: shareAnswersNotFound, want: resultNotFoundForDevice, linkRequests: 1,
+		},
+		// A CRID this client cannot ask for: nothing is sent for a link, and
+		// the share request's answer stands.
+		{identity: true, offer: offerOffered, crid: cridUnsupported, key: keyReadable, share: shareAnswersLink, want: resultLinkFromShare},
+		{identity: true, offer: offerOffered, crid: cridUnsupported, key: keyReadable, share: shareAnswersNotFound, want: resultShareNotFound},
+		{identity: true, offer: offerOffered, crid: cridUnsupported, key: keyUnreadable, share: shareAnswersLink, want: resultLinkFromShare},
+		{identity: true, offer: offerOffered, crid: cridUnsupported, key: keyUnreadable, share: shareAnswersNotFound, want: resultShareNotFound},
 		{identity: true, offer: offerOffered, crid: cridMalformed, share: shareNotAsked, want: resultRefusedMalformed},
+
+		// A device with an identity and a share option, where the request is
+		// offered: the share request first, as before. The key is not read,
+		// and the link request is made with the CRID alone, also for a
+		// private resource this device may open.
+		{identity: true, option: true, offer: offerOffered, crid: cridOK, share: shareAnswersLink, want: resultLinkFromShare},
+		{identity: true, option: true, offer: offerOffered, crid: cridOK, share: shareAnswersNotFound, want: resultLinkFromLinkRequest, linkRequests: 1},
+		{
+			identity: true, option: true, offer: offerOffered, crid: cridOK, resource: resourceOfThisDevice,
+			share: shareAnswersNotFound, want: resultNotFoundForDevice, linkRequests: 1,
+		},
+		{identity: true, option: true, offer: offerOffered, crid: cridUnsupported, share: shareAnswersLink, want: resultLinkFromShare},
+		{identity: true, option: true, offer: offerOffered, crid: cridUnsupported, share: shareAnswersNotFound, want: resultShareNotFound},
+		{identity: true, option: true, offer: offerOffered, crid: cridMalformed, share: shareNotAsked, want: resultRefusedMalformed},
+
+		// A device with an identity where the request is not offered, or the
+		// settings are wrong: the share request, as before, with or without a
+		// share option. The key is not read.
 		{identity: true, offer: offerNotOffered, crid: cridOK, share: shareAnswersLink, want: resultLinkFromShare},
 		{identity: true, offer: offerNotOffered, crid: cridOK, share: shareAnswersNotFound, want: resultShareNotFound},
+		{identity: true, option: true, offer: offerNotOffered, crid: cridOK, share: shareAnswersLink, want: resultLinkFromShare},
+		{identity: true, option: true, offer: offerNotOffered, crid: cridOK, share: shareAnswersNotFound, want: resultShareNotFound},
 		{identity: true, offer: offerNotOffered, crid: cridUnsupported, share: shareAnswersLink, want: resultLinkFromShare},
 		{identity: true, offer: offerNotOffered, crid: cridUnsupported, share: shareAnswersNotFound, want: resultShareNotFound},
 		{identity: true, offer: offerNotOffered, crid: cridMalformed, share: shareNotAsked, want: resultRefusedMalformed},
 		{identity: true, offer: offerWrongSetup, crid: cridOK, share: shareAnswersLink, want: resultLinkFromShare},
 		{identity: true, offer: offerWrongSetup, crid: cridOK, share: shareAnswersNotFound, want: resultRefusedSetup},
+		{identity: true, option: true, offer: offerWrongSetup, crid: cridOK, share: shareAnswersLink, want: resultLinkFromShare},
+		{identity: true, option: true, offer: offerWrongSetup, crid: cridOK, share: shareAnswersNotFound, want: resultRefusedSetup},
 		{identity: true, offer: offerWrongSetup, crid: cridUnsupported, share: shareAnswersLink, want: resultLinkFromShare},
 		{identity: true, offer: offerWrongSetup, crid: cridUnsupported, share: shareAnswersNotFound, want: resultRefusedSetup},
 		{identity: true, offer: offerWrongSetup, crid: cridMalformed, share: shareNotAsked, want: resultRefusedMalformed},
 	}
 
 	for _, row := range rows {
+		if row.resource == "" {
+			row.resource = resourcePublic
+		}
+		if row.key == "" {
+			row.key = keyNotRead
+		}
 		for _, mode := range getModes() {
-			name := fmt.Sprintf("identity=%t/%s/CRID %s/share %s/%s", row.identity, row.offer, row.crid, row.share, mode.name)
-			if row.share == shareNotAsked {
-				name = fmt.Sprintf("identity=%t/%s/CRID %s/%s", row.identity, row.offer, row.crid, mode.name)
+			name := fmt.Sprintf("identity=%t/option=%t/%s/CRID %s/%s/key %s", row.identity, row.option, row.offer, row.crid, row.resource, row.key)
+			if row.share != shareNotAsked {
+				name += "/share " + row.share
 			}
-			t.Run(name, func(t *testing.T) {
+			t.Run(name+"/"+mode.name, func(t *testing.T) {
 				path := newSDKLinkPath(t, offerEdits()[row.offer])
+				switch row.resource {
+				case resourceOfThisDevice:
+					path.server.PrivateFor(devicePublicKey)
+				case resourceOfAnotherDevice:
+					path.server.PrivateFor(anotherDevice.PublicKey().Bytes())
+				}
 
 				// The CRID. A link is issued only for the server's own CRID,
 				// which is a production one; the rows that compare stderr
@@ -272,15 +407,30 @@ func TestGetDecisionTable(t *testing.T) {
 				default:
 					machine = machineWithNoIdentity(t, stateDir)
 				}
+				// The read of the device key.
+				var keyReads *deviceKeyReads
+				switch row.key {
+				case keyReadable:
+					keyReads = deviceKeyOf(t, state)
+				case keyUnreadable:
+					keyReads = noDeviceKey(connectorstate.NoDeviceKeyUnreadable)
+				}
+				read := mustNotReadTheDeviceKey(t)
+				if keyReads != nil {
+					read = keyReads.read
+				}
+				if row.option {
+					machine = withArgs(machine, "--session-duration", "5m")
+				}
 
 				var verified, granted []string
-				run := runShareMode(t, srv, srv.URL, mode, path.wire(t, srv, machine, &verified, &granted))
+				run := runShareMode(t, srv, srv.URL, mode, withDeviceKey(path.wire(t, srv, machine, &verified, &granted), read))
 				stderr := run.result.stderr.String()
 
 				// What the user gets.
 				wantCode, wantGolden := exitcode.Success, ""
 				switch row.want {
-				case resultLinkForCRIDAlone:
+				case resultLinkFromLinkRequest:
 					run.link = path.link
 					run.mustHaveDelivered(t, mode)
 					// The production check ran on the issued link, against the
@@ -299,6 +449,10 @@ func TestGetDecisionTable(t *testing.T) {
 					run.mustHaveDelivered(t, mode)
 				case resultShareNotFound:
 					wantCode, wantGolden = exitcode.NotFound, "error_share_notfound"
+				case resultNotFoundForDevice:
+					wantCode, wantGolden = exitcode.NotFound, "error_get_crid_notfound"
+				case resultNotFoundNoDevice:
+					wantCode, wantGolden = exitcode.NotFound, "error_get_crid_notfound_no_device"
 				case resultRefusedVersion:
 					wantCode, wantGolden = exitcode.Config, "error_get_crid_version"
 				case resultRefusedSetup:
@@ -325,21 +479,53 @@ func TestGetDecisionTable(t *testing.T) {
 						// always has.
 						want = msgAnonymousDevice + "\n" + want
 					}
+					if resourceCRID == path.server.CRID() {
+						// The server's CRID is a production one, and the mock
+						// API is not production. Every command says so first.
+						want = "Warning: " + cridux.MsgProductionOnOther + "\n" + want
+					}
 					if stderr != want {
 						t.Errorf("stderr = %q, want %q", stderr, want)
 					}
 				}
 
-				// What was sent.
-				if got := len(path.server.Requests()); got != row.linkRequests {
-					t.Errorf("the service answered %d request(s) for a link with only the CRID, want %d", got, row.linkRequests)
+				// What was sent for a link.
+				requests := path.server.Requests()
+				asDevice := 0
+				for _, request := range requests {
+					if request.AsDevice {
+						asDevice++
+					}
+					if request.CRID != resourceCRID || request.UserAgent != "" {
+						t.Errorf("link request %+v, want the CRID that was asked for and no user agent", request)
+					}
 				}
+				if len(requests) != row.linkRequests || asDevice != row.asDevice {
+					t.Errorf("the service answered %d link request(s), %d of them under the key of this device; want %d and %d",
+						len(requests), asDevice, row.linkRequests, row.asDevice)
+				}
+				if asDevice > 0 && requests[0].AsDevice {
+					t.Error("the first link request was sent under the device key, want a random key first")
+				}
+				// What was sent to the qURL API.
 				wantAPI := []string(nil)
 				if row.share != shareNotAsked {
 					wantAPI = []string{"GET /v1/me", "POST " + shareRoute(srv)}
 				}
 				if got := apiRequests(srv); strings.Join(got, "\n") != strings.Join(wantAPI, "\n") {
 					t.Errorf("qURL API requests = %q, want %q", got, wantAPI)
+				}
+
+				// The device key: read once where the row says so, and wiped.
+				if keyReads != nil {
+					if len(keyReads.given) != 1 {
+						t.Errorf("the device key was read %d times, want once", len(keyReads.given))
+					}
+					for _, given := range keyReads.given {
+						if given != nil && !bytes.Equal(given, make([]byte, len(given))) {
+							t.Error("the device key was not wiped after the link request")
+						}
+					}
 				}
 
 				// What was created.

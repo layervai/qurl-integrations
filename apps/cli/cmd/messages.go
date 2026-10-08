@@ -78,6 +78,19 @@ const (
 	// request's own answer, which says nothing about this request at all.
 	msgCRIDLinkNotSent = "> CRID link request not sent, the SDK will not ask for this CRID: %s"
 
+	// msgCRIDLinkAsDevice is the --verbose diagnostic for a link request that
+	// was made as this device. It states the rule the SDK follows, so nobody
+	// reads the line as "the device key was sent": that happens only after
+	// the answer "not found".
+	msgCRIDLinkAsDevice = "> CRID link request as this device: a random key first, the device key only after \"not found\""
+
+	// msgCRIDLinkDeviceKeyNotRead is the --verbose diagnostic for a device
+	// with an identity that asked for a link with only the CRID, because it
+	// had no device key to ask with. %s is one fixed word for the reason,
+	// from connectorstate.NoDeviceKey. The line never carries a path, an
+	// error text or any part of a key.
+	msgCRIDLinkDeviceKeyNotRead = "> CRID link request with the CRID alone, the device key was not read: %s"
+
 	// msgShareNeedsDevice frames a failure to open this device's identity on
 	// the share path, which share and get both take. The cause follows it
 	// unchanged, so the exit code stays the cause's.

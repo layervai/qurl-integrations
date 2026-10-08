@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -29,25 +30,34 @@ import (
 	"github.com/layervai/qurl-integrations/apps/cli/internal/output"
 )
 
-// Tests for where `qurl get` takes its link from: the share request this
-// device makes with its identity, or the request that asks with only the
-// CRID. Both the second request and the check for whether it is offered are
-// behind seams, so no test here sends a request. The tests in this file that
-// use the real SDK call stop before the SDK sends anything;
-// get_crid_link_offer_test.go has the ones that send to the SDK's test
-// server.
+// Tests for where `qurl get` takes its link from: the link request, which
+// asks the service for a link for a CRID, or the share request this device
+// makes with its identity. The link request has two forms: with the CRID
+// alone, and as this device. Both forms, the read of the device key, and the
+// check for whether the request is offered are behind seams, so no test here
+// sends a request. The tests in this file that use the real SDK call stop
+// before the SDK sends anything; get_crid_link_offer_test.go has the ones
+// that send to the SDK's test server.
 //
-// Four rules are pinned here:
+// The rules that are pinned here:
 //
-//   - Where the second request is not offered, get is unchanged for every
-//     machine: the same output, the same exit code, the same requests.
-//   - A device with an identity asks with the CRID alone only after the share
-//     request answered "not found".
+//   - Where the link request is not offered, get is unchanged for every
+//     machine: the same output, the same exit code, the same requests. No
+//     device key is read.
+//   - A device with an identity, where the request is offered and no share
+//     option is set, makes the link request first. A link ends the run. Any
+//     other answer leads to the share request, and the result is the one get
+//     gave when the share request came first.
+//   - That device asks as this device when its key can be read, and with the
+//     CRID alone when it cannot.
+//   - With a share option, get keeps the earlier order: the share request
+//     first, and the link request with the CRID alone only after "not
+//     found".
 //   - A machine with no identity, where the request is offered, asks with the
 //     CRID alone. Whatever the answer is, it is final, and no identity is
 //     created.
-//   - A download that used a link given for the CRID alone asks the same way
-//     when it needs a fresh link, and sends no share request then.
+//   - A download that needs a fresh link asks as the origin of the link in
+//     use says: see the third table in get_crid_link.go.
 
 // cridLinkNotOffered answers the way the deployment every release ships
 // today does: it names no place to send the request, so the request is not
@@ -78,16 +88,35 @@ var (
 	errCRIDTheSDKCallsInvalid       = fmt.Errorf("%w: a CRID link request requires a valid CRID", qurl.ErrInvalidResourceRequest)
 )
 
-// linkRequests is the injected answer to "give me a link for this CRID
-// alone". It records every CRID that was asked for.
+// linkRequests is the injected answer to the link request, in both of its
+// forms. It records every CRID that was asked for, and for each request
+// whether it was made as this device.
 type linkRequests struct {
 	link  *qurl.CRIDLink
 	err   error
 	asked []string
+	// asDevice has one entry for each entry of asked.
+	asDevice []bool
+	// keys holds a copy of the key each request as this device was given.
+	keys [][]byte
 }
 
+// answer is the request with only the CRID.
 func (r *linkRequests) answer(_ context.Context, resourceCRID string) (*qurl.CRIDLink, error) {
 	r.asked = append(r.asked, resourceCRID)
+	r.asDevice = append(r.asDevice, false)
+	return r.result()
+}
+
+// answerAsDevice is the request as this device.
+func (r *linkRequests) answerAsDevice(_ context.Context, key []byte, resourceCRID string) (*qurl.CRIDLink, error) {
+	r.asked = append(r.asked, resourceCRID)
+	r.asDevice = append(r.asDevice, true)
+	r.keys = append(r.keys, bytes.Clone(key))
+	return r.result()
+}
+
+func (r *linkRequests) result() (*qurl.CRIDLink, error) {
 	if r.err != nil {
 		return nil, r.err
 	}
@@ -98,14 +127,109 @@ func (r *linkRequests) answer(_ context.Context, resourceCRID string) (*qurl.CRI
 	return &issued, nil
 }
 
-// mustNotAskWithTheCRIDAlone fails the test if the request is made at all.
+// askedAsDevice counts the requests that were made as this device.
+func (r *linkRequests) askedAsDevice() int {
+	n := 0
+	for _, device := range r.asDevice {
+		if device {
+			n++
+		}
+	}
+	return n
+}
+
+// linkRequestGuard is the harness default for both forms of the link
+// request: it fails the owning test, by the name of the request, and answers
+// with an error. So no hermetic test can send a link request it did not
+// supply an answer for.
+type linkRequestGuard struct {
+	// report fails the owning test.
+	report func(format string, args ...any)
+}
+
+func (g *linkRequestGuard) withTheCRIDAlone(context.Context, string) (*qurl.CRIDLink, error) {
+	g.report("the command asked for a link with only the CRID")
+	return nil, errors.New("unexpected request for a link with only the CRID")
+}
+
+func (g *linkRequestGuard) asTheDevice(context.Context, []byte, string) (*qurl.CRIDLink, error) {
+	g.report("the command asked for a link as this device")
+	return nil, errors.New("unexpected request for a link as this device")
+}
+
+// mustNotAskWithTheCRIDAlone fails the test if the request with only the
+// CRID is made at all.
 func mustNotAskWithTheCRIDAlone(t *testing.T) func(context.Context, string) (*qurl.CRIDLink, error) {
 	t.Helper()
-	return func(context.Context, string) (*qurl.CRIDLink, error) {
-		t.Error("the command asked for a link with only the CRID")
-		return nil, errors.New("unexpected request for a link with only the CRID")
+	return (&linkRequestGuard{report: t.Errorf}).withTheCRIDAlone
+}
+
+// mustNotAskAsTheDevice fails the test if the request as this device is made
+// at all.
+func mustNotAskAsTheDevice(t *testing.T) func(context.Context, []byte, string) (*qurl.CRIDLink, error) {
+	t.Helper()
+	return (&linkRequestGuard{report: t.Errorf}).asTheDevice
+}
+
+// mustNotReadTheDeviceKey fails the test if the command reads the device key
+// at all. A command that makes no request as this device has no reason to.
+func mustNotReadTheDeviceKey(t *testing.T) func(context.Context) ([]byte, connectorstate.NoDeviceKey) {
+	t.Helper()
+	return func(context.Context) ([]byte, connectorstate.NoDeviceKey) {
+		t.Error("the command read the device key")
+		return nil, connectorstate.NoDeviceKeyUnreadable
 	}
 }
+
+// deviceKeyReads is an injected read of the device key. It makes the key
+// readable or not readable on every platform, and it remembers what it
+// handed out.
+type deviceKeyReads struct {
+	// key is the key a read returns; nil means the key cannot be read, and
+	// why is then the reason.
+	key []byte
+	why connectorstate.NoDeviceKey
+	// given holds the slices the reads returned. The command owns them and
+	// wipes them, so each read returns a copy of its own.
+	given [][]byte
+	// bounded has one entry for each read: whether the context of the read
+	// had a time limit.
+	bounded []bool
+}
+
+func (r *deviceKeyReads) read(ctx context.Context) ([]byte, connectorstate.NoDeviceKey) {
+	_, bounded := ctx.Deadline()
+	r.bounded = append(r.bounded, bounded)
+	if r.key == nil {
+		r.given = append(r.given, nil)
+		return nil, r.why
+	}
+	key := bytes.Clone(r.key)
+	r.given = append(r.given, key)
+	return key, ""
+}
+
+// deviceKeyOf returns reads that give the device key in state.
+func deviceKeyOf(t *testing.T, state *qurl.AgentState) *deviceKeyReads {
+	t.Helper()
+	key, err := base64.StdEncoding.DecodeString(state.PrivateKeyB64)
+	if err != nil || len(key) != 32 {
+		t.Fatalf("the fixture's device key is %d bytes, error %v; want 32 bytes", len(key), err)
+	}
+	return &deviceKeyReads{key: key}
+}
+
+// noDeviceKey returns reads that give no key, for the reason why.
+func noDeviceKey(why connectorstate.NoDeviceKey) *deviceKeyReads {
+	return &deviceKeyReads{why: why}
+}
+
+// deviceKeyReadable says whether the production read gives the key of the
+// enrolledDevice fixture on this platform. It does on Linux and macOS, and
+// nowhere else. TestEnrolledDeviceHoldsStateTheCLIAccepts pins both answers,
+// so a test may use this to say which form of the link request a device with
+// the production read makes.
+var deviceKeyReadable = runtime.GOOS == "linux" || runtime.GOOS == "darwin"
 
 // issuedLink is what the SDK returns for a CRID: the link, and the
 // display-only facts the service reports beside it. The publisher and the
@@ -143,13 +267,14 @@ func getModes() []shareMode {
 // which is how an enrollment writes it. After that, stateDir reads as holding
 // a device identity.
 //
-// The tests never read the file back: the device runtime here is a fake, and
-// get's local check looks only at the file's name. The file must still come
-// from the store. Every command checks the state directory before it uses it,
-// and on Windows that check refuses a state file whose access control list
-// (ACL) is not the protected, owner-only one. A file written with
-// os.WriteFile gets the default ACL there, so the command would stop before
-// the code under test runs.
+// get reads the file back: where the link request is offered, it reads the
+// device key from this state to ask as this device. The device runtime is
+// still a fake, so the share path does not read it. The file must come from
+// the store for a second reason. Every command checks the state directory
+// before it uses it, and on Windows that check refuses a state file whose
+// access control list (ACL) is not the protected, owner-only one. A file
+// written with os.WriteFile gets the default ACL there, so the command would
+// stop before the code under test runs.
 func saveDeviceState(t *testing.T, stateDir string, state *qurl.AgentState) {
 	t.Helper()
 	store, err := connectorstate.Open(stateDir)
@@ -170,6 +295,12 @@ func saveDeviceState(t *testing.T, stateDir string, state *qurl.AgentState) {
 
 // enrolledDevice is a machine that already holds device state. Opening the
 // device hands that state off and enrolls nothing.
+//
+// The read of the device key is the production one, and it reads the state
+// this fixture wrote. So on Linux and macOS this device asks as itself, and
+// on a platform where the read is not supported it asks with the CRID alone
+// (deviceKeyReadable). A test that must be the same on every platform
+// injects the read: withDeviceKey.
 func enrolledDevice(t *testing.T, state *qurl.AgentState) func(args []string) *runOpts {
 	t.Helper()
 	return func(args []string) *runOpts {
@@ -221,12 +352,25 @@ func TestEnrolledDeviceHoldsStateTheCLIAccepts(t *testing.T) {
 		t.Errorf("the state directory holds device %q with key id %q, want %q with %q",
 			loaded.AgentID, loaded.DeviceAPIKeyID, state.AgentID, state.DeviceAPIKeyID)
 	}
+
+	// The production read of the device key gives the key of this state on
+	// Linux and macOS, and no key with the word "platform" anywhere else.
+	// Tests of a device that asks as itself are built on this answer.
+	key, why := connectorstate.ReadDeviceStaticPrivateKey(context.Background(), stateDir, connectorstate.RuntimeSupervisionNative)
+	if deviceKeyReadable {
+		if want := deviceKeyOf(t, state).key; why != "" || !bytes.Equal(key, want) {
+			t.Errorf("the read of the device key gave %d bytes and %q, want the %d bytes of the fixture's key", len(key), why, len(want))
+		}
+	} else if key != nil || why != connectorstate.NoDeviceKeyPlatform {
+		t.Errorf("the read of the device key gave %d bytes and %q, want no key and %q on this platform", len(key), why, connectorstate.NoDeviceKeyPlatform)
+	}
 }
 
 // machineWithNoIdentity is a machine with no device state and no account key.
 // Opening the device runtime is how such a machine gets an identity: it
-// creates the state and registers the device. So opening it fails the test.
-// stateDir does not exist, and the caller checks it still does not afterwards.
+// creates the state and registers the device. So opening it fails the test,
+// and so does a read of the device key. stateDir does not exist, and the
+// caller checks it still does not afterwards.
 func machineWithNoIdentity(t *testing.T, stateDir string) func(args []string) *runOpts {
 	t.Helper()
 	return func(args []string) *runOpts {
@@ -238,6 +382,8 @@ func machineWithNoIdentity(t *testing.T, stateDir string) func(args []string) *r
 			return nil, errors.New("unexpected device runtime open")
 		})
 		opts.shareStateDir = stateDir
+		// A machine with no identity has no device key to read.
+		opts.readDeviceKey = mustNotReadTheDeviceKey(t)
 		return opts
 	}
 }
@@ -263,14 +409,48 @@ func machineThatEnrolls(t *testing.T, state *qurl.AgentState, enrolled *bool) fu
 	}
 }
 
-// withLinkRequests adds the answer for the request that uses only the CRID.
-// The harness then answers that the request is offered.
+// withLinkRequests adds one answer for the link request in both of its
+// forms: the request with only the CRID, and the request as this device,
+// whose key the answer does not look at. The harness then answers that the
+// request is offered.
+//
+// One answer for both forms keeps a test the same on every platform: which
+// form a device with the production read of its key makes depends on
+// deviceKeyReadable. A test about the form itself uses withLinkRequestsOf.
 func withLinkRequests(configure func(args []string) *runOpts, answer func(context.Context, string) (*qurl.CRIDLink, error)) func(args []string) *runOpts {
 	return func(args []string) *runOpts {
 		opts := configure(args)
 		opts.requestCRIDLink = answer
+		opts.requestCRIDLinkAsDevice = func(ctx context.Context, _ []byte, resourceCRID string) (*qurl.CRIDLink, error) {
+			return answer(ctx, resourceCRID)
+		}
 		return opts
 	}
+}
+
+// withLinkRequestsOf adds requests as the answer to both forms of the link
+// request. requests then knows which form each request had, and the key a
+// request as this device was given.
+func withLinkRequestsOf(configure func(args []string) *runOpts, requests *linkRequests) func(args []string) *runOpts {
+	return func(args []string) *runOpts {
+		opts := configure(args)
+		opts.requestCRIDLink, opts.requestCRIDLinkAsDevice = requests.answer, requests.answerAsDevice
+		return opts
+	}
+}
+
+// withDeviceKey sets the read of the device key.
+func withDeviceKey(configure func(args []string) *runOpts, read func(context.Context) ([]byte, connectorstate.NoDeviceKey)) func(args []string) *runOpts {
+	return func(args []string) *runOpts {
+		opts := configure(args)
+		opts.readDeviceKey = read
+		return opts
+	}
+}
+
+// withArgs adds flags to the command line of an invocation.
+func withArgs(configure func(args []string) *runOpts, extra ...string) func(args []string) *runOpts {
+	return func(args []string) *runOpts { return configure(append(args, extra...)) }
 }
 
 // withLinkOffer sets the answer to "can this machine ask with only the CRID
@@ -591,11 +771,20 @@ func TestGetByCRIDAloneGoldens(t *testing.T) {
 	}
 }
 
-// TestGetOpensALinkGivenForTheCRIDAlone covers the rows of the answer table
-// that end in a link: a device whose share request was answered "not found",
-// and a machine with no identity. The link is verified against the CRID and
-// then used exactly as a share link is: opened in the browser, or opened
-// through the platform and downloaded.
+// TestGetOpensALinkGivenForTheCRIDAlone covers the rows of the tables that
+// end in a link from the link request: a device with an identity, which
+// makes the link request first, and a machine with no identity. The link is
+// verified against the CRID and then used exactly as a share link is: opened
+// in the browser, or opened through the platform and downloaded.
+//
+// Neither machine sends anything to the qURL API. For the device that is
+// what the order is for: the link request gave the link, so no share request
+// was sent, and the device did not prove its identity to the API either.
+//
+// The device here reads its key with the production read, from the state the
+// fixture wrote. Where that read is supported it asks as this device, with
+// exactly the key in that state. A machine with no identity never asks that
+// way.
 func TestGetOpensALinkGivenForTheCRIDAlone(t *testing.T) {
 	state := bootstrapRegisteredState(t)
 	for _, device := range []bool{true, false} {
@@ -608,12 +797,11 @@ func TestGetOpensALinkGivenForTheCRIDAlone(t *testing.T) {
 				machine := machineWithNoIdentity(t, stateDir)
 				if device {
 					machine = enrolledDevice(t, state)
-					shareNotFoundTwice(t, srv)
 				}
 
 				var verified, granted []string
 				configure := func(args []string) *runOpts {
-					opts := withLinkRequests(machine, requests.answer)(args)
+					opts := withLinkRequestsOf(machine, requests)(args)
 					opts.verifyLink = func(_ context.Context, got, crid string) error {
 						verified = append(verified, got+" for "+crid)
 						return nil
@@ -633,7 +821,17 @@ func TestGetOpensALinkGivenForTheCRIDAlone(t *testing.T) {
 				run.mustHaveDelivered(t, mode)
 
 				if len(requests.asked) != 1 || requests.asked[0] != srv.Key.CRID {
-					t.Errorf("asked with the CRID alone for %q, want exactly once for %s", requests.asked, srv.Key.CRID)
+					t.Errorf("made the link request for %q, want exactly once for %s", requests.asked, srv.Key.CRID)
+				}
+				wantAsDevice := 0
+				if device && deviceKeyReadable {
+					wantAsDevice = 1
+				}
+				if got := requests.askedAsDevice(); got != wantAsDevice {
+					t.Errorf("asked as this device %d times, want %d", got, wantAsDevice)
+				}
+				if wantAsDevice == 1 && (len(requests.keys) != 1 || !bytes.Equal(requests.keys[0], deviceKeyOf(t, state).key)) {
+					t.Error("the request as this device was not given the key in the device state")
 				}
 				// The same check a share link gets, before anything is done with it.
 				if want := link + " for " + srv.Key.CRID; len(verified) != 1 || verified[0] != want {
@@ -661,12 +859,9 @@ func TestGetOpensALinkGivenForTheCRIDAlone(t *testing.T) {
 					t.Errorf("output %q, want the publisher shown once as %q", shown, want)
 				}
 
-				wantAPI := []string(nil)
-				if device {
-					wantAPI = []string{"GET /v1/me", "POST " + shareRoute(srv)}
-				}
-				if got := apiRequests(srv); strings.Join(got, "\n") != strings.Join(wantAPI, "\n") {
-					t.Errorf("qURL API requests = %q, want %q", got, wantAPI)
+				// No share request, and no proof of identity to the API.
+				if got := apiRequests(srv); len(got) != 0 {
+					t.Errorf("qURL API requests = %q, want none", got)
 				}
 				if !device {
 					mustNotExistCmd(t, stateDir)
@@ -798,9 +993,13 @@ func TestGetShowsThePublisherOfALinkGivenForTheCRIDAloneAsShareDoes(t *testing.T
 }
 
 // TestGetAnswersForALinkAskedWithTheCRIDAlone walks the rest of the answer
-// table: every refusal, for both starting states and all three actions. Each
-// answer has one message and one exit code, nothing is opened or saved, and
-// the message is the same for both states except for the not-found hint.
+// table: every refusal of the link request, for both starting states and all
+// three actions. Each answer has one message and one exit code, nothing is
+// opened or saved, and the message is the same for both states except for
+// the not-found hint.
+//
+// A device with an identity goes on to its share request after the refusal.
+// That request is answered "not found" here, so the refusal is the result.
 func TestGetAnswersForALinkAskedWithTheCRIDAlone(t *testing.T) {
 	state := bootstrapRegisteredState(t)
 	for _, row := range refusalRows() {
@@ -941,41 +1140,148 @@ func TestGetOnAMachineWithNoIdentityNeverEnrolls(t *testing.T) {
 // errCRIDLinkInterrupted is the SDK's error for a request the user interrupted.
 var errCRIDLinkInterrupted = fmt.Errorf("qurl: CRID link request did not complete: %w: %w", context.Canceled, &qurl.RelayError{Msg: "relay POST failed"})
 
-// TestGetInterruptedWhileAskingWithTheCRIDAlone pins the existing rule for an
-// interrupt: exit 130 and no error text.
-func TestGetInterruptedWhileAskingWithTheCRIDAlone(t *testing.T) {
-	srv := downloadServer(t)
-	requests := &linkRequests{err: errCRIDLinkInterrupted}
-	stateDir := filepath.Join(t.TempDir(), "no-device-state")
-	for _, mode := range getModes() {
-		run := runShareMode(t, srv, srv.URL, mode, withLinkRequests(machineWithNoIdentity(t, stateDir), requests.answer))
-		if run.result.code != exitcode.Interrupted || run.result.stderr.Len() != 0 {
-			t.Errorf("%s: exit = %d, stderr = %q; want %d and nothing printed", mode.name, run.result.code, run.result.stderr.String(), exitcode.Interrupted)
+// TestGetInterruptedWhileAskingForALink pins the rule for an interrupt
+// during the link request: exit 130 and no error text.
+//
+// A device with an identity stops there too. It does not go on to its share
+// request, which the user did not wait for: nothing is sent to the qURL API,
+// and the device runtime is not opened.
+func TestGetInterruptedWhileAskingForALink(t *testing.T) {
+	state := bootstrapRegisteredState(t)
+
+	t.Run("machine with no identity", func(t *testing.T) {
+		srv := downloadServer(t)
+		requests := &linkRequests{err: errCRIDLinkInterrupted}
+		stateDir := filepath.Join(t.TempDir(), "no-device-state")
+		for _, mode := range getModes() {
+			run := runShareMode(t, srv, srv.URL, mode, withLinkRequests(machineWithNoIdentity(t, stateDir), requests.answer))
+			if run.result.code != exitcode.Interrupted || run.result.stderr.Len() != 0 {
+				t.Errorf("%s: exit = %d, stderr = %q; want %d and nothing printed", mode.name, run.result.code, run.result.stderr.String(), exitcode.Interrupted)
+			}
+			run.mustNotHaveActed(t)
 		}
-		run.mustNotHaveActed(t)
+	})
+
+	// The device runtime of this device fails the test when it is opened:
+	// opening it is the first step of the share request.
+	deviceThatMustNotShare := func(t *testing.T) func(args []string) *runOpts {
+		return func(args []string) *runOpts {
+			opts := enrolledDevice(t, state)(args)
+			opts.openNativeRuntime = func(context.Context, connectorshare.NativeRuntimeConfig) (registeredNativeRuntime, error) {
+				t.Error("the device runtime was opened for a share request after the user interrupted the command")
+				return nil, errors.New("unexpected device runtime open")
+			}
+			return opts
+		}
+	}
+	for name, key := range map[string]*deviceKeyReads{
+		"device that reads its key":       deviceKeyOf(t, state),
+		"device that cannot read its key": noDeviceKey(connectorstate.NoDeviceKeyUnreadable),
+	} {
+		for _, mode := range getModes() {
+			// The SDK reports the interrupt as the error of the request.
+			t.Run(name+"/the request reports the interrupt/"+mode.name, func(t *testing.T) {
+				srv := downloadServer(t)
+				requests := &linkRequests{err: errCRIDLinkInterrupted}
+				run := runShareMode(t, srv, srv.URL, mode, withDeviceKey(withLinkRequestsOf(deviceThatMustNotShare(t), requests), key.read))
+				if run.result.code != exitcode.Interrupted || run.result.stderr.Len() != 0 {
+					t.Errorf("exit = %d, stderr = %q; want %d and nothing printed", run.result.code, run.result.stderr.String(), exitcode.Interrupted)
+				}
+				run.mustNotHaveActed(t)
+				if got := srv.Requests(); len(got) != 0 {
+					t.Errorf("the device sent %d request(s) to the qURL API after the interrupt, want none", len(got))
+				}
+			})
+
+			// The interrupt comes while the request is answered, and the answer
+			// itself is an ordinary one. The command has still been
+			// interrupted, and it still stops.
+			t.Run(name+"/the request is answered/"+mode.name, func(t *testing.T) {
+				srv := downloadServer(t)
+				ctx, interrupt := context.WithCancel(t.Context())
+				defer interrupt()
+				answer := func(context.Context, string) (*qurl.CRIDLink, error) {
+					interrupt()
+					return nil, sdkRefusal(qurl.ErrCRIDLinkNotFound, "52602")
+				}
+				configure := func(args []string) *runOpts {
+					opts := withDeviceKey(withLinkRequests(deviceThatMustNotShare(t), answer), key.read)(args)
+					opts.ctx = ctx
+					return opts
+				}
+				run := runShareMode(t, srv, srv.URL, mode, configure)
+				if run.result.code != exitcode.Interrupted || run.result.stderr.Len() != 0 {
+					t.Errorf("exit = %d, stderr = %q; want %d and nothing printed", run.result.code, run.result.stderr.String(), exitcode.Interrupted)
+				}
+				run.mustNotHaveActed(t)
+				if got := srv.Requests(); len(got) != 0 {
+					t.Errorf("the device sent %d request(s) to the qURL API after the interrupt, want none", len(got))
+				}
+			})
+		}
 	}
 }
 
-// TestGetAsksWithTheCRIDAloneOnlyAfterShareNotFound pins the rule for a
-// device with an identity: the share request comes first, and only its
-// not-found answer leads to the second request. A link, and every other
-// failure, is the share path's own result.
-func TestGetAsksWithTheCRIDAloneOnlyAfterShareNotFound(t *testing.T) {
+// getOrder is one of the two orders get has for a device with an identity
+// where the link request is offered.
+type getOrder struct {
+	name string
+	// flags are added to the command line. --session-duration is get's one
+	// share option, and a share option keeps the earlier order.
+	flags []string
+	// linkRequestFirst says the link request comes before the share request.
+	linkRequestFirst bool
+}
+
+// getOrders returns both orders: the link request first, which is the order
+// with no share option, and the share request first, which a share option
+// keeps.
+func getOrders() []getOrder {
+	return []getOrder{
+		{name: "no share option", linkRequestFirst: true},
+		{name: "session duration", flags: []string{"--session-duration", "5m"}},
+	}
+}
+
+// TestGetMakesTheShareRequestOnlyWhenTheLinkRequestGivesNoLink pins the order
+// of the two requests for a device with an identity, where the link request
+// is offered.
+//
+// With no share option the link request comes first, once, before anything
+// is sent to the qURL API. A link from it ends the run and no share request
+// is sent. Any other answer leads to one share request, and a link or a
+// failure of that request is its own result.
+//
+// With a share option the order is the earlier one: the share request first,
+// and the link request only after its "not found". Then the request is made
+// with the CRID alone, never as this device, and the device key is not read.
+func TestGetMakesTheShareRequestOnlyWhenTheLinkRequestGivesNoLink(t *testing.T) {
 	state := bootstrapRegisteredState(t)
 	other := apitest.GenerateResourceKey(t)
 	for _, tc := range []struct {
-		name     string
-		prepare  func(t *testing.T, srv *apitest.Server)
+		name string
+		// linkGiven says the link request is answered with a link. Otherwise
+		// it is answered "not found".
+		linkGiven bool
+		prepare   func(t *testing.T, srv *apitest.Server)
+		// wantCode is the exit code when the link request is answered "not
+		// found", or is not made: the share request's own result.
 		wantCode int
-		wantAsks int
+		// shareNotFound says the share request is answered "not found", the
+		// one answer that leads to the link request in the earlier order.
+		shareNotFound bool
+		// noShareRequest says the device cannot send its share request,
+		// because the API refuses its credential before that.
+		noShareRequest bool
 	}{
-		{name: "link", prepare: func(*testing.T, *apitest.Server) {}, wantCode: exitcode.Success},
+		{name: "link from the link request", linkGiven: true, prepare: func(*testing.T, *apitest.Server) {}, wantCode: exitcode.Success},
+		{name: "link from the share request", prepare: func(*testing.T, *apitest.Server) {}, wantCode: exitcode.Success},
 		{
-			name: "not found", wantCode: exitcode.NotFound, wantAsks: 1,
+			name: "not found", wantCode: exitcode.NotFound, shareNotFound: true,
 			prepare: func(t *testing.T, srv *apitest.Server) { shareNotFoundTwice(t, srv) },
 		},
 		{
-			name: "not found, the other code", wantCode: exitcode.NotFound, wantAsks: 1,
+			name: "not found, the other code", wantCode: exitcode.NotFound, shareNotFound: true,
 			prepare: func(t *testing.T, srv *apitest.Server) {
 				srv.Script(http.MethodPost, shareRoute(srv), apitest.HandlerNotFound404(t, "not_found"))
 			},
@@ -1011,7 +1317,7 @@ func TestGetAsksWithTheCRIDAloneOnlyAfterShareNotFound(t *testing.T) {
 			},
 		},
 		{
-			name: "device credential rejected", wantCode: exitcode.Auth,
+			name: "device credential rejected", wantCode: exitcode.Auth, noShareRequest: true,
 			prepare: func(t *testing.T, srv *apitest.Server) {
 				srv.Script(http.MethodGet, "/v1/me", apitest.HandlerAPIKeyInvalid401(t))
 			},
@@ -1021,32 +1327,99 @@ func TestGetAsksWithTheCRIDAloneOnlyAfterShareNotFound(t *testing.T) {
 			prepare: func(_ *testing.T, srv *apitest.Server) { srv.SetShareCRID(other.CRID) },
 		},
 	} {
-		for _, mode := range getModes() {
-			t.Run(tc.name+"/"+mode.name, func(t *testing.T) {
-				srv := downloadServer(t)
-				tc.prepare(t, srv)
-				requests := &linkRequests{err: sdkRefusal(qurl.ErrCRIDLinkNotFound, "52602")}
+		for _, order := range getOrders() {
+			for _, mode := range getModes() {
+				t.Run(tc.name+"/"+order.name+"/"+mode.name, func(t *testing.T) {
+					srv := downloadServer(t)
+					tc.prepare(t, srv)
+					requests := &linkRequests{err: sdkRefusal(qurl.ErrCRIDLinkNotFound, "52602")}
+					if tc.linkGiven {
+						requests = &linkRequests{link: issuedLink(srv.URL + apitest.DownloadPath)}
+					}
+					// What the qURL API had seen when each link request was made.
+					var apiSeen [][]string
+					observed := &linkRequests{}
+					answer := func(ctx context.Context, resourceCRID string) (*qurl.CRIDLink, error) {
+						apiSeen = append(apiSeen, apiRequests(srv))
+						observed.asDevice = append(observed.asDevice, false)
+						return requests.answer(ctx, resourceCRID)
+					}
+					answerAsDevice := func(ctx context.Context, key []byte, resourceCRID string) (*qurl.CRIDLink, error) {
+						apiSeen = append(apiSeen, apiRequests(srv))
+						observed.asDevice = append(observed.asDevice, true)
+						return requests.answerAsDevice(ctx, key, resourceCRID)
+					}
+					key := deviceKeyOf(t, state)
+					configure := func(args []string) *runOpts {
+						opts := withArgs(enrolledDevice(t, state), order.flags...)(args)
+						opts.requestCRIDLink, opts.requestCRIDLinkAsDevice, opts.readDeviceKey = answer, answerAsDevice, key.read
+						return opts
+					}
 
-				run := runShareMode(t, srv, srv.URL, mode, withLinkRequests(enrolledDevice(t, state), requests.answer))
-				if run.result.code != tc.wantCode {
-					t.Fatalf("exit = %d, want %d; stderr: %s", run.result.code, tc.wantCode, run.result.stderr.String())
-				}
-				if len(requests.asked) != tc.wantAsks {
-					t.Errorf("asked with the CRID alone %d times, want %d", len(requests.asked), tc.wantAsks)
-				}
-			})
+					run := runShareMode(t, srv, srv.URL, mode, configure)
+
+					// The link request: how often, in which form, and when.
+					wantAsks, wantAsDevice, wantKeyReads := 1, 1, 1
+					if !order.linkRequestFirst {
+						wantAsDevice, wantKeyReads = 0, 0
+						if !tc.shareNotFound {
+							wantAsks = 0
+						}
+					}
+					if len(requests.asked) != wantAsks || observed.askedAsDevice() != wantAsDevice || len(key.given) != wantKeyReads {
+						t.Errorf("made the link request %d times, %d of them as this device, and read the device key %d times; want %d, %d and %d",
+							len(requests.asked), observed.askedAsDevice(), len(key.given), wantAsks, wantAsDevice, wantKeyReads)
+					}
+					for _, seen := range apiSeen {
+						if order.linkRequestFirst && len(seen) != 0 {
+							t.Errorf("the link request came after %q, want it before anything is sent to the qURL API", seen)
+						}
+						if want := []string{"GET /v1/me", "POST " + shareRoute(srv)}; !order.linkRequestFirst && strings.Join(seen, "\n") != strings.Join(want, "\n") {
+							t.Errorf("the link request came after %q, want it after the share request: %q", seen, want)
+						}
+					}
+
+					// The share request: sent once, except where the link request
+					// came first and gave the link.
+					wantShares := 1
+					if tc.noShareRequest || (order.linkRequestFirst && tc.linkGiven) {
+						wantShares = 0
+					}
+					if got := len(shareRequests(srv)); got != wantShares {
+						t.Errorf("the share request was sent %d times, want %d", got, wantShares)
+					}
+
+					// The result. Where a link request would give a link, a
+					// share request that is asked gives one too.
+					wantCode := tc.wantCode
+					if tc.linkGiven {
+						wantCode = exitcode.Success
+					}
+					if run.result.code != wantCode {
+						t.Fatalf("exit = %d, want %d; stderr: %s", run.result.code, wantCode, run.result.stderr.String())
+					}
+					if wantCode == exitcode.Success {
+						run.mustHaveDelivered(t, mode)
+					} else {
+						run.mustNotHaveActed(t)
+					}
+				})
+			}
 		}
 	}
 }
 
 // TestGetSaysTheServiceDidNotAnswerAfterShareNotFound pins one row of the
-// table in get_crid_link.go. The share request said "not found", and the
-// request with only the CRID got no answer: it timed out, or the service
-// could not be reached. Nobody knows then whether the resource opens with the
-// CRID alone, and "not found" would be wrong for every public resource. So
-// get says that the service did not answer, with the exit code for "try
-// again later". It prints neither "not found" nor the not-found hint, and it
-// sends each of the two requests once.
+// second table in get_crid_link.go. The share request said "not found", and
+// the link request got no answer: it timed out, or the service could not be
+// reached. Nobody knows then whether the resource opens for this device, and
+// "not found" would be wrong for every public resource. So get says that the
+// service did not answer, with the exit code for "try again later". It
+// prints neither "not found" nor the not-found hint, and it sends each of
+// the two requests once.
+//
+// The result is the same in both orders: the link request first, and the
+// share request first, which a share option keeps.
 func TestGetSaysTheServiceDidNotAnswerAfterShareNotFound(t *testing.T) {
 	state := bootstrapRegisteredState(t)
 	for name, noAnswer := range map[string]error{
@@ -1054,42 +1427,60 @@ func TestGetSaysTheServiceDidNotAnswerAfterShareNotFound(t *testing.T) {
 			context.DeadlineExceeded, &qurl.RelayError{Msg: "relay POST https://endpoint.example.test/x failed"}),
 		"cannot connect": &qurl.RelayError{Msg: "relay POST https://endpoint.example.test/x failed: connection refused"},
 	} {
-		for _, mode := range getModes() {
-			t.Run(name+"/"+mode.name, func(t *testing.T) {
-				srv := downloadServer(t)
-				shareNotFoundTwice(t, srv)
-				requests := &linkRequests{err: noAnswer}
-
-				run := runShareMode(t, srv, srv.URL, mode, withLinkRequests(enrolledDevice(t, state), requests.answer))
-				if run.result.code != exitcode.Unavailable {
-					t.Fatalf("exit = %d, want %d; stderr: %s", run.result.code, exitcode.Unavailable, run.result.stderr.String())
-				}
-				run.mustNotHaveActed(t)
-
-				// The whole of stderr is the one message: no hint follows it.
-				stderr := withoutStyle(run.result.stderr.String())
-				if want := "Error: " + consume.MsgCRIDLinkNoAnswer + "\n"; stderr != want {
-					t.Errorf("stderr = %q, want exactly %q", stderr, want)
-				}
-				for _, unwanted := range []string{consume.MsgCRIDNotFound, "not found", "Hint:"} {
-					if strings.Contains(stderr, unwanted) {
-						t.Errorf("stderr %q carries %q from the share request's answer", stderr, unwanted)
+		for _, order := range getOrders() {
+			for _, mode := range getModes() {
+				t.Run(name+"/"+order.name+"/"+mode.name, func(t *testing.T) {
+					srv := downloadServer(t)
+					shareNotFoundTwice(t, srv)
+					requests := &linkRequests{err: noAnswer}
+					// How many share requests had been sent when the link
+					// request was made.
+					sharesBefore := -1
+					answer := func(ctx context.Context, resourceCRID string) (*qurl.CRIDLink, error) {
+						sharesBefore = len(shareRequests(srv))
+						return requests.answer(ctx, resourceCRID)
 					}
-				}
-				if got := len(shareRequests(srv)); got != 1 {
-					t.Errorf("the share request was sent %d times, want once", got)
-				}
-				if len(requests.asked) != 1 {
-					t.Errorf("asked with the CRID alone %d times, want once and no retry", len(requests.asked))
-				}
-			})
+
+					run := runShareMode(t, srv, srv.URL, mode, withLinkRequests(withArgs(enrolledDevice(t, state), order.flags...), answer))
+					if run.result.code != exitcode.Unavailable {
+						t.Fatalf("exit = %d, want %d; stderr: %s", run.result.code, exitcode.Unavailable, run.result.stderr.String())
+					}
+					run.mustNotHaveActed(t)
+
+					// The whole of stderr is the one message: no hint follows it.
+					stderr := withoutStyle(run.result.stderr.String())
+					if want := "Error: " + consume.MsgCRIDLinkNoAnswer + "\n"; stderr != want {
+						t.Errorf("stderr = %q, want exactly %q", stderr, want)
+					}
+					for _, unwanted := range []string{consume.MsgCRIDNotFound, "not found", "Hint:"} {
+						if strings.Contains(stderr, unwanted) {
+							t.Errorf("stderr %q carries %q from the share request's answer", stderr, unwanted)
+						}
+					}
+					if got := len(shareRequests(srv)); got != 1 {
+						t.Errorf("the share request was sent %d times, want once", got)
+					}
+					if len(requests.asked) != 1 {
+						t.Errorf("made the link request %d times, want once and no retry", len(requests.asked))
+					}
+					wantSharesBefore := 1
+					if order.linkRequestFirst {
+						wantSharesBefore = 0
+					}
+					if sharesBefore != wantSharesBefore {
+						t.Errorf("the link request was made after %d share request(s), want %d", sharesBefore, wantSharesBefore)
+					}
+				})
+			}
 		}
 	}
 }
 
 // TestShareNeverAsksWithTheCRIDAlone pins that `qurl share` is unchanged. It
-// shares with the device and reports the service's answer, whatever the
-// second request would have said.
+// shares with the device and reports the service's answer, whatever the link
+// request would have said. It makes the link request in neither form, it
+// does not ask whether the request is offered, and it does not read the
+// device key.
 func TestShareNeverAsksWithTheCRIDAlone(t *testing.T) {
 	state := bootstrapRegisteredState(t)
 	share := shareModes()[0]
@@ -1103,7 +1494,12 @@ func TestShareNeverAsksWithTheCRIDAlone(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			srv := downloadServer(t)
 			shareNotFoundTwice(t, srv)
-			configure := withLinkOffer(withLinkRequests(machine, mustNotAskWithTheCRIDAlone(t)), mustNotCheckTheLinkOffer(t))
+			configure := func(args []string) *runOpts {
+				opts := withLinkOffer(machine, mustNotCheckTheLinkOffer(t))(args)
+				opts.requestCRIDLink, opts.requestCRIDLinkAsDevice = mustNotAskWithTheCRIDAlone(t), mustNotAskAsTheDevice(t)
+				opts.readDeviceKey = mustNotReadTheDeviceKey(t)
+				return opts
+			}
 			run := runShareMode(t, srv, srv.URL, share, configure)
 			if run.result.code != exitcode.NotFound {
 				t.Fatalf("exit = %d, want %d; stderr: %s", run.result.code, exitcode.NotFound, run.result.stderr.String())
@@ -1115,7 +1511,7 @@ func TestShareNeverAsksWithTheCRIDAlone(t *testing.T) {
 	}
 }
 
-// todaysMint is what get's mint did before the second request existed: the
+// todaysMint is what get's mint did before the link request existed: the
 // share request, then the check that the answer names the CRID that was asked
 // for. Neither function was changed, so this is the reference linkForGet is
 // compared with.
@@ -1153,18 +1549,24 @@ func renderedError(err error) string {
 }
 
 // accountKeyOpts is a command context that shares with the harness's account
-// key against srv, with offered as the check for the request that uses only
-// the CRID and answer as that request.
-func accountKeyOpts(t *testing.T, srv *apitest.Server, offered func() (bool, error), answer func(context.Context, string) (*qurl.CRIDLink, error)) *globalOpts {
+// key against srv, with offered as the check for the link request and answer
+// as the request with only the CRID. The machine holds no device state, so
+// keyReads gives no key, and the request as this device fails the test.
+func accountKeyOpts(
+	t *testing.T, srv *apitest.Server, offered func() (bool, error),
+	answer func(context.Context, string) (*qurl.CRIDLink, error), keyReads *deviceKeyReads,
+) *globalOpts {
 	t.Helper()
 	opts := &globalOpts{
-		resolvedEndpoint: srv.URL,
-		version:          "test",
-		lookupEnv:        func(key string) (string, bool) { return testAPIKey, key == "QURL_API_KEY" },
-		newRequestID:     func() string { return "cli-req-fixed" },
-		sleep:            func(time.Duration) {},
-		cridLinkOffered:  offered,
-		requestCRIDLink:  answer,
+		resolvedEndpoint:        srv.URL,
+		version:                 "test",
+		lookupEnv:               func(key string) (string, bool) { return testAPIKey, key == "QURL_API_KEY" },
+		newRequestID:            func() string { return "cli-req-fixed" },
+		sleep:                   func(time.Duration) {},
+		cridLinkOffered:         offered,
+		requestCRIDLink:         answer,
+		requestCRIDLinkAsDevice: mustNotAskAsTheDevice(t),
+		readDeviceKey:           keyReads.read,
 	}
 	opts.openAPIClient = func(context.Context) (qurlapi.Client, error) { return opts.apiClient(testAPIKey) }
 	return opts
@@ -1172,15 +1574,25 @@ func accountKeyOpts(t *testing.T, srv *apitest.Server, offered func() (bool, err
 
 // TestLinkForGetIsTheSharePathWhenNoLinkCanBeAskedFor compares linkForGet
 // with todaysMint for every kind of answer the share request can get, in the
-// three cases where the second path leads nowhere: the deployment does not
+// three cases where the link request leads nowhere: the deployment does not
 // offer the request, and the two answers of the SDK for a CRID it will not
 // ask for. The link, or the error as the user sees it, the exit code, and the
-// requests sent must all be equal: nothing is added and nothing is dropped.
+// requests sent to the qURL API must all be equal: nothing is added and
+// nothing is dropped.
+//
+// It runs in both orders. With a share option, the link request is looked at
+// only after a share "not found", and then exactly once. With no share
+// option, the check for whether the request is offered comes first, once,
+// whatever the share request then answers; where the request is offered, the
+// link request is made first, once, and the SDK sends nothing for it.
+//
+// The device key is read only where a link request is made first. Where the
+// request is not offered it is never read.
 func TestLinkForGetIsTheSharePathWhenNoLinkCanBeAskedFor(t *testing.T) {
 	key := apitest.FixedResourceKey(t)
 	other := apitest.GenerateResourceKey(t)
 	route := "/v1/resources/" + key.CRID + "/share"
-	// cause is why the second path leads nowhere. notRequestable is nil when
+	// cause is why the link request leads nowhere. notRequestable is nil when
 	// the request is not offered at all, and then it must never be made.
 	causes := map[string]struct{ notRequestable error }{
 		"not offered":                {},
@@ -1224,66 +1636,88 @@ func TestLinkForGetIsTheSharePathWhenNoLinkCanBeAskedFor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	options := qurlapi.ShareOptions{SessionDurationSeconds: 300}
+	orders := map[string]qurlapi.ShareOptions{
+		"share option":    {SessionDurationSeconds: 300},
+		"no share option": {},
+	}
 
-	for cause, tc := range causes {
-		for name, prepare := range services {
-			t.Run(cause+"/"+name, func(t *testing.T) {
-				// Two servers with the same script, so each side's requests can
-				// be counted on its own.
-				before := apitest.NewServerWithKey(t, key)
-				prepare(t, before)
-				wantLink, wantErr := todaysMint(t.Context(), accountKeyOpts(t, before, mustNotCheckTheLinkOffer(t), mustNotAskWithTheCRIDAlone(t)), assessment, options)
+	for orderName, options := range orders {
+		linkRequestFirst := options == (qurlapi.ShareOptions{})
+		for cause, tc := range causes {
+			for name, prepare := range services {
+				t.Run(orderName+"/"+cause+"/"+name, func(t *testing.T) {
+					// Two servers with the same script, so each side's requests can
+					// be counted on its own.
+					before := apitest.NewServerWithKey(t, key)
+					prepare(t, before)
+					unread := noDeviceKey(connectorstate.NoDeviceKeyNoState)
+					wantLink, wantErr := todaysMint(t.Context(), accountKeyOpts(t, before, mustNotCheckTheLinkOffer(t), mustNotAskWithTheCRIDAlone(t), unread), assessment, options)
 
-				after := apitest.NewServerWithKey(t, key)
-				prepare(t, after)
-				offer := &linkOffer{offered: tc.notRequestable != nil}
-				asks := 0
-				gotLink, byCRIDAlone, gotErr := accountKeyOpts(t, after, offer.answer, func(context.Context, string) (*qurl.CRIDLink, error) {
-					asks++
-					return nil, tc.notRequestable
-				}).linkForGet(t.Context(), assessment, options)
+					after := apitest.NewServerWithKey(t, key)
+					prepare(t, after)
+					offer := &linkOffer{offered: tc.notRequestable != nil}
+					keyReads := noDeviceKey(connectorstate.NoDeviceKeyNoState)
+					asks := 0
+					gotLink, origin, gotErr := accountKeyOpts(t, after, offer.answer, func(context.Context, string) (*qurl.CRIDLink, error) {
+						asks++
+						return nil, tc.notRequestable
+					}, keyReads).linkForGet(t.Context(), assessment, options)
 
-				if byCRIDAlone {
-					t.Error("linkForGet reports a link given for the CRID alone although none could be asked for")
-				}
-				if got, want := renderedError(gotErr), renderedError(wantErr); got != want {
-					t.Errorf("linkForGet failed with\n%s\nwant what the share path gives:\n%s", got, want)
-				}
-				if got, want := describeLink(gotLink), describeLink(wantLink); got != want {
-					t.Errorf("linkForGet link = %s, want the share path's %s", got, want)
-				}
-				if got, want := apiRequests(after), apiRequests(before); strings.Join(got, "\n") != strings.Join(want, "\n") {
-					t.Errorf("linkForGet sent %q, want the share path's %q", got, want)
-				}
-				// The second path is looked at only after a share not-found,
-				// and then exactly once. The request itself is made only where
-				// it is offered.
-				wantChecks, wantAsks := 0, 0
-				if strings.HasPrefix(name, "not found") {
-					wantChecks = 1
-					if offer.offered {
+					if origin.byLinkRequest() {
+						t.Error("linkForGet reports a link from the link request although none could be asked for")
+					}
+					if got, want := renderedError(gotErr), renderedError(wantErr); got != want {
+						t.Errorf("linkForGet failed with\n%s\nwant what the share path gives:\n%s", got, want)
+					}
+					if got, want := describeLink(gotLink), describeLink(wantLink); got != want {
+						t.Errorf("linkForGet link = %s, want the share path's %s", got, want)
+					}
+					if got, want := apiRequests(after), apiRequests(before); strings.Join(got, "\n") != strings.Join(want, "\n") {
+						t.Errorf("linkForGet sent %q, want the share path's %q", got, want)
+					}
+
+					// With a share option the link request is looked at only
+					// after a share not-found, and then exactly once. With none
+					// it is looked at first, once. The request itself is made
+					// only where it is offered, and the key is read only for a
+					// request that comes first.
+					wantChecks, wantAsks, wantKeyReads := 1, 0, 0
+					switch {
+					case linkRequestFirst && offer.offered:
+						wantAsks, wantKeyReads = 1, 1
+					case linkRequestFirst:
+					case !strings.HasPrefix(name, "not found"):
+						wantChecks = 0
+					case offer.offered:
 						wantAsks = 1
 					}
-				}
-				if offer.checks != wantChecks || asks != wantAsks {
-					t.Errorf("asked whether the request is offered %d times and made it %d times, want %d and %d", offer.checks, asks, wantChecks, wantAsks)
-				}
-			})
+					if offer.checks != wantChecks || asks != wantAsks || len(keyReads.given) != wantKeyReads || len(unread.given) != 0 {
+						t.Errorf("asked whether the request is offered %d times, made it %d times and read the device key %d times; want %d, %d and %d",
+							offer.checks, asks, len(keyReads.given), wantChecks, wantAsks, wantKeyReads)
+					}
+				})
+			}
 		}
 	}
 }
 
 // TestGetIsUnchangedWhenTheLinkRequestIsNotOffered is the compatibility
 // guarantee at the command level, for every starting state and action: where
-// the deployment does not offer the second request, get prints what it
-// printed before, exits as before, and sends the requests it sent before. A
-// machine with no identity therefore still enrolls here, exactly as it did.
-// The request itself is never made: the harness fails a test that makes it.
+// the deployment does not offer the link request, get prints what it printed
+// before, exits as before, and sends the requests it sent before. A machine
+// with no identity therefore still enrolls here, exactly as it did. The link
+// request itself is never made, in either form: the harness fails a test
+// that makes it. And the device key is never read: a machine that is never
+// offered the request never opens its device state for it.
 //
 // "Before" is pinned three ways: the share path's own golden files, which
 // this change does not touch; the request list each case states; and
 // TestLinkForGetIsTheSharePathWhenNoLinkCanBeAskedFor above.
+//
+// One thing is not as before, and it sends and creates nothing: a device
+// with an identity now asks whether the request is offered before it shares,
+// once, where it asked only after a share "not found". With a share option
+// that device asks when it always did.
 func TestGetIsUnchangedWhenTheLinkRequestIsNotOffered(t *testing.T) {
 	state := bootstrapRegisteredState(t)
 
@@ -1328,68 +1762,77 @@ func TestGetIsUnchangedWhenTheLinkRequestIsNotOffered(t *testing.T) {
 	}
 
 	for _, m := range machines {
-		for _, mode := range getModes() {
-			t.Run(m.name+"/link/"+mode.name, func(t *testing.T) {
-				srv := downloadServer(t)
-				offer := &linkOffer{}
-				enrolled := false
+		for _, order := range getOrders() {
+			// notOffered is the machine with the answer "not offered", the
+			// flags of the order, and a read of the device key that fails the
+			// test.
+			notOffered := func(t *testing.T, offer *linkOffer, enrolled *bool) func(args []string) *runOpts {
+				return withDeviceKey(withLinkOffer(withArgs(m.configure(t, enrolled), order.flags...), offer.answer), mustNotReadTheDeviceKey(t))
+			}
+			for _, mode := range getModes() {
+				t.Run(m.name+"/"+order.name+"/link/"+mode.name, func(t *testing.T) {
+					srv := downloadServer(t)
+					offer := &linkOffer{}
+					enrolled := false
 
-				run := runShareMode(t, srv, srv.URL, mode, withLinkOffer(m.configure(t, &enrolled), offer.answer))
-				run.mustHaveDelivered(t, mode)
+					run := runShareMode(t, srv, srv.URL, mode, notOffered(t, offer, &enrolled))
+					run.mustHaveDelivered(t, mode)
 
-				// Only a machine with no identity looks at the second path
-				// before it shares. A share that is answered ends it for the
-				// others.
-				wantChecks := 0
-				if m.noIdentity {
-					wantChecks = 1
-				}
-				if offer.checks != wantChecks {
-					t.Errorf("asked whether the request is offered %d times, want %d", offer.checks, wantChecks)
-				}
-				if enrolled != m.noIdentity {
-					t.Errorf("enrolled = %t, want %t: a machine with no identity enrolls on the share path, as before", enrolled, m.noIdentity)
-				}
-				if got, want := apiRequests(srv), m.wantAPI(srv); strings.Join(got, "\n") != strings.Join(want, "\n") {
-					t.Errorf("qURL API requests = %q, want %q", got, want)
-				}
-			})
+					// With no share option, every machine looks at the link
+					// request before it shares, once. With a share option only a
+					// machine with no identity does: a share that is answered
+					// ends it for the others, as before.
+					wantChecks := 1
+					if !order.linkRequestFirst && !m.noIdentity {
+						wantChecks = 0
+					}
+					if offer.checks != wantChecks {
+						t.Errorf("asked whether the request is offered %d times, want %d", offer.checks, wantChecks)
+					}
+					if enrolled != m.noIdentity {
+						t.Errorf("enrolled = %t, want %t: a machine with no identity enrolls on the share path, as before", enrolled, m.noIdentity)
+					}
+					if got, want := apiRequests(srv), m.wantAPI(srv); strings.Join(got, "\n") != strings.Join(want, "\n") {
+						t.Errorf("qURL API requests = %q, want %q", got, want)
+					}
+				})
 
-			t.Run(m.name+"/not found/"+mode.name, func(t *testing.T) {
-				srv := downloadServer(t)
-				shareNotFoundTwice(t, srv)
-				offer := &linkOffer{}
-				enrolled := false
+				t.Run(m.name+"/"+order.name+"/not found/"+mode.name, func(t *testing.T) {
+					srv := downloadServer(t)
+					shareNotFoundTwice(t, srv)
+					offer := &linkOffer{}
+					enrolled := false
 
-				run := runShareMode(t, srv, srv.URL, mode, withLinkOffer(m.configure(t, &enrolled), offer.answer))
-				if run.result.code != exitcode.NotFound {
-					t.Fatalf("exit = %d, want %d; stderr: %s", run.result.code, exitcode.NotFound, run.result.stderr.String())
-				}
-				run.mustNotHaveActed(t)
+					run := runShareMode(t, srv, srv.URL, mode, notOffered(t, offer, &enrolled))
+					if run.result.code != exitcode.NotFound {
+						t.Fatalf("exit = %d, want %d; stderr: %s", run.result.code, exitcode.NotFound, run.result.stderr.String())
+					}
+					run.mustNotHaveActed(t)
 
-				// The share path's own not-found text, byte for byte. A machine
-				// that just enrolled says so first, as it always has.
-				want := goldenBytes(t, "error_share_notfound.plain.stderr.golden")
-				if mode.tty {
-					want = goldenBytes(t, "error_share_notfound.tty.stderr.golden")
-				}
-				if m.noIdentity {
-					want = dimIf(mode.tty, msgAnonymousDevice) + "\n" + want
-				}
-				if got := run.result.stderr.String(); got != want {
-					t.Errorf("stderr = %q, want the share path's not-found %q", got, want)
-				}
+					// The share path's own not-found text, byte for byte. A machine
+					// that just enrolled says so first, as it always has.
+					want := goldenBytes(t, "error_share_notfound.plain.stderr.golden")
+					if mode.tty {
+						want = goldenBytes(t, "error_share_notfound.tty.stderr.golden")
+					}
+					if m.noIdentity {
+						want = dimIf(mode.tty, msgAnonymousDevice) + "\n" + want
+					}
+					if got := run.result.stderr.String(); got != want {
+						t.Errorf("stderr = %q, want the share path's not-found %q", got, want)
+					}
 
-				// Asked once, never twice: a machine with no identity already
-				// knows the request is not offered when the share request
-				// fails.
-				if offer.checks != 1 {
-					t.Errorf("asked whether the request is offered %d times, want once", offer.checks)
-				}
-				if got, want := apiRequests(srv), m.wantAPI(srv); strings.Join(got, "\n") != strings.Join(want, "\n") {
-					t.Errorf("qURL API requests = %q, want %q (one share request, no retry)", got, want)
-				}
-			})
+					// Asked once, never twice: a machine that asked before it
+					// shared already knows the answer when the share request
+					// fails.
+					if offer.checks != 1 {
+						t.Errorf("asked whether the request is offered %d times, want once", offer.checks)
+					}
+					if got, want := apiRequests(srv), m.wantAPI(srv); strings.Join(got, "\n") != strings.Join(want, "\n") {
+						t.Errorf("qURL API requests = %q, want %q (one share request, no retry)", got, want)
+					}
+				})
+			}
 		}
 	}
 }
@@ -1449,6 +1892,9 @@ func shippedShapeDeployment(t *testing.T) *qurl.Deployment {
 // on the same path as any other here, because the check needs no CRID. There
 // is no HTTP double on purpose: nothing may be sent, and if the SDK ever
 // tried, the request would go to a reserved test name and fail the run.
+//
+// Both forms of the link request are the production functions here, and
+// neither is reached. The device key is not read: a read fails the test.
 func TestGetThroughTheRealSDKCheckIsUnchanged(t *testing.T) {
 	state := bootstrapRegisteredState(t)
 	key := apitest.GenerateResourceKey(t)
@@ -1476,6 +1922,7 @@ func TestGetThroughTheRealSDKCheckIsUnchanged(t *testing.T) {
 				opts := enrolledDevice(t, state)(append([]string{"--endpoint", srv.URL}, mode.args(tc.crid, dest)...))
 				opts.tty, opts.browser = mode.tty, browser
 				opts.cridLinkOffered, opts.requestCRIDLink = opener.CRIDLinkOffered, opener.RequestCRIDLink
+				opts.requestCRIDLinkAsDevice, opts.readDeviceKey = opener.RequestCRIDLinkAsDevice, mustNotReadTheDeviceKey(t)
 
 				result := runCLI(t, opts)
 				want := goldenBytes(t, "error_share_notfound.plain.stderr.golden")
@@ -1503,6 +1950,7 @@ func TestGetThroughTheRealSDKCheckIsUnchanged(t *testing.T) {
 				opts := machineThatEnrolls(t, state, &enrolled)(append([]string{"--endpoint", srv.URL}, mode.args(tc.crid, dest)...))
 				opts.tty, opts.browser = mode.tty, browser
 				opts.cridLinkOffered, opts.requestCRIDLink = opener.CRIDLinkOffered, opener.RequestCRIDLink
+				opts.requestCRIDLinkAsDevice, opts.readDeviceKey = opener.RequestCRIDLinkAsDevice, mustNotReadTheDeviceKey(t)
 
 				result := runCLI(t, opts)
 				if result.code != exitcode.Success || !enrolled {
@@ -1516,13 +1964,28 @@ func TestGetThroughTheRealSDKCheckIsUnchanged(t *testing.T) {
 	}
 }
 
-// TestGetWithAnAccountKeySharesFirst covers the third starting state: no
-// device state, but an account key in the environment. That key is the
-// owner's instruction to enroll this machine under their account, so get
-// takes the share path first, exactly as before. Going straight to the
-// request that uses only the CRID would stop an owner's fresh machine from
-// opening the owner's own private resources.
-func TestGetWithAnAccountKeySharesFirst(t *testing.T) {
+// TestGetWithAnAccountKeyAsksWithTheCRIDAloneFirst covers the third starting
+// state: no device state, but an account key in the environment. That key is
+// the owner's instruction to enroll this machine under their account, so the
+// machine counts as one with an identity and keeps its share request.
+//
+// Where the link request is offered, it comes first here too. The machine
+// has no device state, so it has no device key: it asks with the CRID alone,
+// never as a device, and the read of the key changes nothing in its empty
+// state directory.
+//
+//   - A resource that opens with the CRID alone is answered there. The share
+//     request is not sent, so the machine is not enrolled by this run. That
+//     is what a machine with no identity already does.
+//   - For the owner's own private resource the link request says "not
+//     found". The share request follows, enrolls the machine under the
+//     account as before, and gives the link. An owner's fresh machine keeps
+//     opening the owner's own private resources.
+//   - A resource this machine may not open ends in "not found", after the
+//     machine enrolled, as before.
+//
+// With a share option the machine shares first, exactly as before.
+func TestGetWithAnAccountKeyAsksWithTheCRIDAloneFirst(t *testing.T) {
 	const enrollmentToken = "lv_test_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"
 	state := bootstrapRegisteredState(t)
 	accountKeyMachine := func(t *testing.T, srv *apitest.Server, enrolled *bool) func(args []string) *runOpts {
@@ -1546,82 +2009,199 @@ func TestGetWithAnAccountKeySharesFirst(t *testing.T) {
 			return opts
 		}
 	}
+	enrollingShare := func(srv *apitest.Server) []string {
+		return []string{"GET /v1/me", "POST /v1/api-keys", "GET /v1/me", "POST " + shareRoute(srv)}
+	}
+	notFound := sdkRefusal(qurl.ErrCRIDLinkNotFound, "52602")
 
 	for _, mode := range getModes() {
-		t.Run("the owner's own resource/"+mode.name, func(t *testing.T) {
-			srv := downloadServer(t)
-			enrolled := false
-			run := runShareMode(t, srv, srv.URL, mode,
-				withLinkOffer(withLinkRequests(accountKeyMachine(t, srv, &enrolled), mustNotAskWithTheCRIDAlone(t)), mustNotCheckTheLinkOffer(t)))
-			run.mustHaveDelivered(t, mode)
-			if !enrolled {
-				t.Error("the machine did not enroll under the account")
-			}
-			if got, want := apiRequests(srv), []string{"GET /v1/me", "POST /v1/api-keys", "GET /v1/me", "POST " + shareRoute(srv)}; strings.Join(got, "\n") != strings.Join(want, "\n") {
-				t.Errorf("qURL API requests = %q, want %q", got, want)
-			}
-		})
-
-		t.Run("somebody else's resource/"+mode.name, func(t *testing.T) {
+		t.Run("a resource that opens with the CRID alone/"+mode.name, func(t *testing.T) {
 			srv := downloadServer(t)
 			shareNotFoundTwice(t, srv)
 			enrolled := false
 			requests := &linkRequests{link: issuedLink(srv.URL + apitest.DownloadPath)}
-			run := runShareMode(t, srv, srv.URL, mode,
-				withLinkRequests(accountKeyMachine(t, srv, &enrolled), requests.answer))
+			run := runShareMode(t, srv, srv.URL, mode, withLinkRequestsOf(accountKeyMachine(t, srv, &enrolled), requests))
 			run.mustHaveDelivered(t, mode)
-			if !enrolled || len(requests.asked) != 1 {
-				t.Errorf("enrolled = %t, asked with the CRID alone %d times; want the share path first, then one request", enrolled, len(requests.asked))
+			if len(requests.asked) != 1 || requests.askedAsDevice() != 0 {
+				t.Errorf("made the link request %d times, %d of them as a device; want once, with the CRID alone", len(requests.asked), requests.askedAsDevice())
+			}
+			if enrolled {
+				t.Error("the machine enrolled although the link request gave the link")
+			}
+			if got := apiRequests(srv); len(got) != 0 {
+				t.Errorf("qURL API requests = %q, want none", got)
+			}
+		})
+
+		t.Run("the owner's own private resource/"+mode.name, func(t *testing.T) {
+			srv := downloadServer(t)
+			enrolled := false
+			requests := &linkRequests{err: notFound}
+			run := runShareMode(t, srv, srv.URL, mode, withLinkRequestsOf(accountKeyMachine(t, srv, &enrolled), requests))
+			run.mustHaveDelivered(t, mode)
+			if len(requests.asked) != 1 || requests.askedAsDevice() != 0 {
+				t.Errorf("made the link request %d times, %d of them as a device; want once, with the CRID alone", len(requests.asked), requests.askedAsDevice())
+			}
+			if !enrolled {
+				t.Error("the machine did not enroll under the account")
+			}
+			if got, want := apiRequests(srv), enrollingShare(srv); strings.Join(got, "\n") != strings.Join(want, "\n") {
+				t.Errorf("qURL API requests = %q, want %q", got, want)
+			}
+		})
+
+		t.Run("a resource this machine may not open/"+mode.name, func(t *testing.T) {
+			srv := downloadServer(t)
+			shareNotFoundTwice(t, srv)
+			enrolled := false
+			requests := &linkRequests{err: notFound}
+			run := runShareMode(t, srv, srv.URL, mode, withLinkRequestsOf(accountKeyMachine(t, srv, &enrolled), requests))
+			if run.result.code != exitcode.NotFound {
+				t.Fatalf("exit = %d, want %d; stderr: %s", run.result.code, exitcode.NotFound, run.result.stderr.String())
+			}
+			run.mustNotHaveActed(t)
+			if !enrolled || len(requests.asked) != 1 || requests.askedAsDevice() != 0 {
+				t.Errorf("enrolled = %t, made the link request %d times, %d of them as a device; want the machine enrolled and one request with the CRID alone",
+					enrolled, len(requests.asked), requests.askedAsDevice())
+			}
+			if got, want := apiRequests(srv), enrollingShare(srv); strings.Join(got, "\n") != strings.Join(want, "\n") {
+				t.Errorf("qURL API requests = %q, want %q", got, want)
+			}
+		})
+
+		// With a share option: the share request first, as before. The
+		// owner's own resource is answered there and nothing else is looked
+		// at.
+		t.Run("share option, the owner's own resource/"+mode.name, func(t *testing.T) {
+			srv := downloadServer(t)
+			enrolled := false
+			configure := func(args []string) *runOpts {
+				opts := withLinkOffer(accountKeyMachine(t, srv, &enrolled), mustNotCheckTheLinkOffer(t))(append(args, "--session-duration", "5m"))
+				opts.requestCRIDLink, opts.requestCRIDLinkAsDevice = mustNotAskWithTheCRIDAlone(t), mustNotAskAsTheDevice(t)
+				opts.readDeviceKey = mustNotReadTheDeviceKey(t)
+				return opts
+			}
+			run := runShareMode(t, srv, srv.URL, mode, configure)
+			run.mustHaveDelivered(t, mode)
+			if !enrolled {
+				t.Error("the machine did not enroll under the account")
+			}
+			if got, want := apiRequests(srv), enrollingShare(srv); strings.Join(got, "\n") != strings.Join(want, "\n") {
+				t.Errorf("qURL API requests = %q, want %q", got, want)
+			}
+		})
+
+		t.Run("share option, somebody else's resource/"+mode.name, func(t *testing.T) {
+			srv := downloadServer(t)
+			shareNotFoundTwice(t, srv)
+			enrolled := false
+			requests := &linkRequests{link: issuedLink(srv.URL + apitest.DownloadPath)}
+			configure := withDeviceKey(withLinkRequestsOf(withArgs(accountKeyMachine(t, srv, &enrolled), "--session-duration", "5m"), requests), mustNotReadTheDeviceKey(t))
+			run := runShareMode(t, srv, srv.URL, mode, configure)
+			run.mustHaveDelivered(t, mode)
+			if !enrolled || len(requests.asked) != 1 || requests.askedAsDevice() != 0 {
+				t.Errorf("enrolled = %t, made the link request %d times, %d of them as a device; want the share path first, then one request with the CRID alone",
+					enrolled, len(requests.asked), requests.askedAsDevice())
 			}
 		})
 	}
+
+	// The read of the key on this machine is the production one, and it is
+	// read-only: the empty state directory is still empty after a run that
+	// was answered by the link request.
+	t.Run("the state directory stays empty", func(t *testing.T) {
+		srv := downloadServer(t)
+		enrolled := false
+		requests := &linkRequests{link: issuedLink(srv.URL + apitest.DownloadPath)}
+		var stateDir string
+		configure := func(args []string) *runOpts {
+			opts := withLinkRequestsOf(accountKeyMachine(t, srv, &enrolled), requests)(args)
+			stateDir = opts.shareStateDir
+			return opts
+		}
+		file := getModes()[1]
+		if file.name != "get file" {
+			t.Fatalf("second get mode is %q, want get file", file.name)
+		}
+		runShareMode(t, srv, srv.URL, file, configure).mustHaveDelivered(t, file)
+		entries, err := os.ReadDir(stateDir)
+		if err != nil || len(entries) != 0 {
+			t.Errorf("the state directory holds %d entries (error %v) after a run that the link request answered, want it empty", len(entries), err)
+		}
+	})
 }
 
-// TestGetVerifiesALinkGivenForTheCRIDAlone pins that a link from the second
+// TestGetVerifiesALinkGivenForTheCRIDAlone pins that a link from the link
 // request goes through the same check as a share link before anything is
 // done with it. A link that fails the check is discarded with exit code 12.
+//
+// That holds for both forms of the request. A device that asked as itself
+// stops at the failed check too: it does not go on to its share request.
 func TestGetVerifiesALinkGivenForTheCRIDAlone(t *testing.T) {
-	for _, mode := range getModes() {
-		t.Run(mode.name, func(t *testing.T) {
-			srv, link := portalServer(t)
-			requests := &linkRequests{link: issuedLink(link)}
-			stateDir := filepath.Join(t.TempDir(), "no-device-state")
-			configure := func(args []string) *runOpts {
-				opts := withLinkRequests(machineWithNoIdentity(t, stateDir), requests.answer)(args)
-				opts.verifyLink = func(context.Context, string, string) error { return consume.ErrLinkVerification }
-				opts.enterPortalGrant = func(context.Context, string) (consume.AccessGrant, error) {
-					t.Error("access was requested for a link that failed its check")
-					return consume.AccessGrant{}, errors.New("unexpected access request")
+	state := bootstrapRegisteredState(t)
+	for _, device := range []bool{false, true} {
+		for _, mode := range getModes() {
+			t.Run(fmt.Sprintf("device=%t/%s", device, mode.name), func(t *testing.T) {
+				srv, link := portalServer(t)
+				requests := &linkRequests{link: issuedLink(link)}
+				stateDir := filepath.Join(t.TempDir(), "no-device-state")
+				machine := machineWithNoIdentity(t, stateDir)
+				if device {
+					machine = withDeviceKey(enrolledDevice(t, state), deviceKeyOf(t, state).read)
 				}
-				return opts
-			}
+				configure := func(args []string) *runOpts {
+					opts := withLinkRequestsOf(machine, requests)(args)
+					opts.verifyLink = func(context.Context, string, string) error { return consume.ErrLinkVerification }
+					opts.enterPortalGrant = func(context.Context, string) (consume.AccessGrant, error) {
+						t.Error("access was requested for a link that failed its check")
+						return consume.AccessGrant{}, errors.New("unexpected access request")
+					}
+					return opts
+				}
 
-			run := runShareMode(t, srv, srv.URL, mode, configure)
-			if run.result.code != exitcode.VerificationFailed {
-				t.Fatalf("exit = %d, want %d; stderr: %s", run.result.code, exitcode.VerificationFailed, run.result.stderr.String())
-			}
-			run.mustNotHaveActed(t)
-			if !strings.Contains(run.result.stderr.String(), consume.MsgLinkVerification) {
-				t.Errorf("stderr = %q, want the existing discard message", run.result.stderr.String())
-			}
-			mustNeverFetchPortalPage(t, srv)
-		})
+				run := runShareMode(t, srv, srv.URL, mode, configure)
+				if run.result.code != exitcode.VerificationFailed {
+					t.Fatalf("exit = %d, want %d; stderr: %s", run.result.code, exitcode.VerificationFailed, run.result.stderr.String())
+				}
+				run.mustNotHaveActed(t)
+				if !strings.Contains(run.result.stderr.String(), consume.MsgLinkVerification) {
+					t.Errorf("stderr = %q, want the existing discard message", run.result.stderr.String())
+				}
+				mustNeverFetchPortalPage(t, srv)
+				wantAsDevice := 0
+				if device {
+					wantAsDevice = 1
+				}
+				if len(requests.asked) != 1 || requests.askedAsDevice() != wantAsDevice {
+					t.Errorf("made the link request %d times, %d of them as this device; want once, and %d as this device", len(requests.asked), requests.askedAsDevice(), wantAsDevice)
+				}
+				if got := apiRequests(srv); len(got) != 0 {
+					t.Errorf("qURL API requests = %q, want none: a link that fails its check ends the run", got)
+				}
+			})
+		}
 	}
 }
 
 // TestGetRefreshesALinkGivenForTheCRIDAlone covers a link given for the CRID
-// alone that expires before any byte is served. The download asks again the
-// same way: the second table in get_crid_link.go. The service gets one more
-// request with the CRID alone and nothing else.
+// alone that expires before any byte is served, in a run that the share
+// request cannot give a link. The download asks again the same way: the
+// third row of the refresh table in get_crid_link.go. The service gets one
+// more request with the CRID alone and nothing else.
 //
-// A device with an identity sends its share request once, for the first
-// link. It does not send it again at the refresh, although the share route
-// here would answer "not found" again and so lead to the same link. A
-// machine with no identity still sends nothing to the qURL API. Neither asks
-// a second time whether the request is offered.
+// The run has a share option, --session-duration, so a device with an
+// identity shares first. It sends its share request once, for the first
+// link, and gets "not found". It does not send it again at the refresh,
+// although the share route here would answer "not found" again and so lead
+// to the same link. A machine with no identity still sends nothing to the
+// qURL API. Neither asks a second time whether the request is offered, and
+// neither reads a device key.
 //
 // The reader is told about the publisher once, and once that
 // --session-duration was not applied.
+//
+// TestGetRefreshIsDecidedAgainAfterALinkFromTheLinkRequest has the refresh
+// of a device that made the link request first.
 func TestGetRefreshesALinkGivenForTheCRIDAlone(t *testing.T) {
 	state := bootstrapRegisteredState(t)
 	for _, device := range []bool{true, false} {
@@ -1646,13 +2226,16 @@ func TestGetRefreshesALinkGivenForTheCRIDAlone(t *testing.T) {
 				}
 
 				configure := func(args []string) *runOpts {
-					return withLinkOffer(withLinkRequests(machine, requests.answer), offer.answer)(append(args, "--session-duration", "5m"))
+					opts := withLinkOffer(withLinkRequestsOf(machine, requests), offer.answer)(append(args, "--session-duration", "5m"))
+					opts.readDeviceKey = mustNotReadTheDeviceKey(t)
+					return opts
 				}
 				run := runShareMode(t, srv, srv.URL, mode, configure)
 				run.mustHaveDelivered(t, mode)
 
-				if len(requests.asked) != 2 {
-					t.Errorf("asked with the CRID alone %d times, want twice: once, and once for the refresh", len(requests.asked))
+				if len(requests.asked) != 2 || requests.askedAsDevice() != 0 {
+					t.Errorf("made the link request %d times, %d of them as this device; want twice with the CRID alone: once, and once for the refresh",
+						len(requests.asked), requests.askedAsDevice())
 				}
 				if got := apiRequests(srv); strings.Join(got, "\n") != strings.Join(wantAPI, "\n") {
 					t.Errorf("qURL API requests = %q, want %q: the refresh sends no share request", got, wantAPI)
@@ -1675,11 +2258,15 @@ func TestGetRefreshesALinkGivenForTheCRIDAlone(t *testing.T) {
 	}
 }
 
-// TestGetRefreshStaysWithTheCRIDAlone pins the second row of the refresh
+// TestGetRefreshStaysWithTheCRIDAlone pins the third row of the refresh
 // table in get_crid_link.go for the case it was written for. The first link
 // of a download was given for the CRID alone, after the share request said
 // "not found". The link expires before any byte is served, and the download
 // asks again.
+//
+// A device gets into that row only when it shares first, so every run of a
+// device here has a share option, --session-duration. A machine with no
+// identity is in that row with or without one.
 //
 // Here the share route fails if it is asked a second time, with an answer
 // that is not "not found": the service is unavailable. When get decided
@@ -1782,7 +2369,7 @@ func TestGetRefreshStaysWithTheCRIDAlone(t *testing.T) {
 					machine := machineWithNoIdentity(t, stateDir)
 					wantShares, golden := 0, tc.golden
 					if device {
-						machine = enrolledDevice(t, state)
+						machine = withDeviceKey(withArgs(enrolledDevice(t, state), "--session-duration", "5m"), mustNotReadTheDeviceKey(t))
 						shareNotFoundThenUnavailable(t, srv)
 						wantShares = 1
 					} else if tc.goldenNoDevice != "" {
@@ -1884,19 +2471,41 @@ func TestGetRefreshCanChangeToALinkGivenForTheCRIDAlone(t *testing.T) {
 }
 
 // TestGetSessionDurationWithALinkGivenForTheCRIDAlone pins what happens to
-// --session-duration. The share request carries it, as before. A link given
-// for the CRID alone cannot, so get says the flag was not applied and uses
-// the link. On the share path the note never appears.
+// --session-duration. It is a share option, and only the share request can
+// carry it. So with the flag a device with an identity shares first, as
+// before, and does not read its device key. A link given for the CRID alone
+// cannot carry the flag, so get says the flag was not applied and uses the
+// link. On the share path the note never appears.
+//
+// Without the flag the device makes the link request first, and there is no
+// note: nothing was asked for that the link could not carry.
 func TestGetSessionDurationWithALinkGivenForTheCRIDAlone(t *testing.T) {
 	state := bootstrapRegisteredState(t)
+	// withTheFlag is the device with the flag, a read of the device key that
+	// fails the test, and a request as this device that fails it too.
+	withTheFlag := func(t *testing.T, answer func(context.Context, string) (*qurl.CRIDLink, error)) func(args []string) *runOpts {
+		return func(args []string) *runOpts {
+			opts := enrolledDevice(t, state)(append(args, "--session-duration", "5m"))
+			opts.requestCRIDLink, opts.requestCRIDLinkAsDevice = answer, mustNotAskAsTheDevice(t)
+			opts.readDeviceKey = mustNotReadTheDeviceKey(t)
+			return opts
+		}
+	}
 	for _, mode := range getModes() {
 		t.Run("share path/"+mode.name, func(t *testing.T) {
 			srv := downloadServer(t)
-			configure := func(args []string) *runOpts {
-				return withLinkRequests(enrolledDevice(t, state), mustNotAskWithTheCRIDAlone(t))(append(args, "--session-duration", "5m"))
-			}
-			run := runShareMode(t, srv, srv.URL, mode, configure)
+			var shareBody map[string]any
+			srv.Script(http.MethodPost, shareRoute(srv), func(w http.ResponseWriter, r *http.Request) {
+				if err := json.NewDecoder(r.Body).Decode(&shareBody); err != nil {
+					t.Errorf("decode share request: %v", err)
+				}
+				shareAnswerWithPublisher(t, srv, map[string]any{"name": apitest.DefaultPublisherName, "verified": false})(w, r)
+			})
+			run := runShareMode(t, srv, srv.URL, mode, withTheFlag(t, mustNotAskWithTheCRIDAlone(t)))
 			run.mustHaveDelivered(t, mode)
+			if shareBody["session_duration"] != "5m" {
+				t.Errorf("share request body = %v, want the requested session duration", shareBody)
+			}
 			if strings.Contains(run.result.stderr.String(), msgSessionDurationNotApplied) {
 				t.Errorf("stderr = %q, must not carry the note on the share path", run.result.stderr.String())
 			}
@@ -1912,27 +2521,36 @@ func TestGetSessionDurationWithALinkGivenForTheCRIDAlone(t *testing.T) {
 				apitest.HandlerNotFound404(t, "resource_not_found")(w, r)
 			})
 			requests := &linkRequests{link: issuedLink(srv.URL + apitest.DownloadPath)}
-			configure := func(args []string) *runOpts {
-				return withLinkRequests(enrolledDevice(t, state), requests.answer)(append(args, "--session-duration", "5m"))
+			// The share request must have been sent when the link request is
+			// made: the flag keeps the share request first.
+			sharesBefore := -1
+			answer := func(ctx context.Context, resourceCRID string) (*qurl.CRIDLink, error) {
+				sharesBefore = len(shareRequests(srv))
+				return requests.answer(ctx, resourceCRID)
 			}
-			run := runShareMode(t, srv, srv.URL, mode, configure)
+			run := runShareMode(t, srv, srv.URL, mode, withTheFlag(t, answer))
 			run.mustHaveDelivered(t, mode)
 			if shareBody["session_duration"] != "5m" {
 				t.Errorf("share request body = %v, want the requested session duration on the share path", shareBody)
+			}
+			if len(requests.asked) != 1 || sharesBefore != 1 {
+				t.Errorf("made the link request %d times, after %d share request(s); want once, after the one share request", len(requests.asked), sharesBefore)
 			}
 			if strings.Count(run.result.stderr.String(), msgSessionDurationNotApplied) != 1 {
 				t.Errorf("stderr = %q, want the note once", run.result.stderr.String())
 			}
 		})
 
-		t.Run("CRID alone, no flag/"+mode.name, func(t *testing.T) {
+		t.Run("link request first, no flag/"+mode.name, func(t *testing.T) {
 			srv := downloadServer(t)
-			shareNotFoundTwice(t, srv)
 			requests := &linkRequests{link: issuedLink(srv.URL + apitest.DownloadPath)}
 			run := runShareMode(t, srv, srv.URL, mode, withLinkRequests(enrolledDevice(t, state), requests.answer))
 			run.mustHaveDelivered(t, mode)
 			if strings.Contains(run.result.stderr.String(), msgSessionDurationNotApplied) {
 				t.Errorf("stderr = %q, must not carry the note when the flag was not given", run.result.stderr.String())
+			}
+			if got := shareRequests(srv); len(got) != 0 {
+				t.Errorf("the share request was sent %d times, want none: the link request gave the link", len(got))
 			}
 		})
 	}

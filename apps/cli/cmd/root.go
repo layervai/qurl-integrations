@@ -88,9 +88,9 @@ type globalOpts struct {
 	// cridLinkOffered reports whether this machine can ask for a link with
 	// only a CRID at all: offered, not offered (false and no error), or set
 	// up wrongly (an error). It needs no CRID, sends nothing and creates
-	// nothing. Only `qurl get` calls it, before requestCRIDLink. Tests always
-	// inject (the harness answers "not offered", as the shipped deployment
-	// does).
+	// nothing. Only `qurl get` calls it, before requestCRIDLink and
+	// requestCRIDLinkAsDevice. Tests always inject (the harness answers "not
+	// offered", as the shipped deployment does).
 	cridLinkOffered func() (bool, error)
 	// requestCRIDLink asks the service for a link with only a CRID, through
 	// the SDK, and returns the SDK's answer unchanged. It uses no device
@@ -99,6 +99,23 @@ type globalOpts struct {
 	// harness fails a test that reaches it without an answer), so no hermetic
 	// test sends a real request.
 	requestCRIDLink func(ctx context.Context, resourceCRID string) (*qurl.CRIDLink, error)
+	// requestCRIDLinkAsDevice asks the service for a link as this registered
+	// device, through the SDK, and returns the SDK's answer unchanged. The SDK
+	// sends a first request under a random key, and a second one under
+	// deviceStaticPrivateKey only when the first is answered "not found". The
+	// key stays the caller's. Only `qurl get` calls it, after cridLinkOffered
+	// said the request is offered and readDeviceKey gave a key. Tests always
+	// inject (the harness fails a test that reaches it without an answer), so
+	// no hermetic test sends a real request.
+	requestCRIDLinkAsDevice func(ctx context.Context, deviceStaticPrivateKey []byte, resourceCRID string) (*qurl.CRIDLink, error)
+	// readDeviceKey returns this device's static private key for
+	// requestCRIDLinkAsDevice, or no key and one fixed word for the reason.
+	// It only reads the device state: it creates nothing, changes nothing,
+	// takes no lock and sends nothing. The caller wipes the key after use.
+	// Only `qurl get` calls it, and only where the request is offered. Nil is
+	// the production reader, which is safe in a hermetic test: it reads a
+	// file in the test's own state directory.
+	readDeviceKey func(ctx context.Context) ([]byte, connectorstate.NoDeviceKey)
 	// linkSite returns the origin of the site where a person opens a resource
 	// in a browser with only its CRID, or the empty string when this install
 	// does not know it for its deployment. It reads settings only: it sends
@@ -346,8 +363,10 @@ func (o *globalOpts) nativeShareDaemon(stateDir, logDir string) (shareDaemonCont
 
 // applyLinkDefaults wires the link operations the SDK performs to one opener
 // over this invocation's environment: verifying a link, asking the platform
-// for access to one, and asking for one with only a CRID, which has a check
-// of its own for whether it can be asked here at all.
+// for access to one, and asking for one with only a CRID or as this device,
+// which has a check of its own for whether it can be asked here at all. It
+// also wires the read of the device key that the request as this device
+// takes.
 func (o *globalOpts) applyLinkDefaults() {
 	opener := &consume.AccessOpener{LookupEnv: o.lookupEnv}
 	if o.verifyLink == nil {
@@ -361,6 +380,12 @@ func (o *globalOpts) applyLinkDefaults() {
 	}
 	if o.requestCRIDLink == nil {
 		o.requestCRIDLink = opener.RequestCRIDLink
+	}
+	if o.requestCRIDLinkAsDevice == nil {
+		o.requestCRIDLinkAsDevice = opener.RequestCRIDLinkAsDevice
+	}
+	if o.readDeviceKey == nil {
+		o.readDeviceKey = o.readDeviceStaticPrivateKey
 	}
 	if o.linkSite == nil {
 		o.linkSite = opener.LinkSite
