@@ -39,11 +39,29 @@ func (o *AccessOpener) LinkSite() string {
 // ResourceAddress returns the address of the resource a CRID names on
 // linkSite, or the empty string when linkSite is empty.
 //
+// The CRID goes into the address as it is, and the address is what a person
+// is told to send to others. So the check is made here and not left to the
+// callers: a CRID is letters and digits, which mean nothing in an address. A
+// value with any other character gets no address, and the caller gives
+// people the value itself instead.
+//
 // TODO(upstream-contract): a resource's page on the link site is the site's
 // origin followed by a slash and the CRID.
 func ResourceAddress(linkSite, resourceCRID string) string {
-	if linkSite == "" || resourceCRID == "" {
+	if linkSite == "" || resourceCRID == "" || !lettersAndDigits(resourceCRID) {
 		return ""
 	}
 	return linkSite + "/" + resourceCRID
+}
+
+// lettersAndDigits reports whether value has only ASCII letters and digits.
+func lettersAndDigits(value string) bool {
+	for _, character := range value {
+		switch {
+		case character >= 'a' && character <= 'z', character >= 'A' && character <= 'Z', character >= '0' && character <= '9':
+		default:
+			return false
+		}
+	}
+	return true
 }

@@ -101,4 +101,15 @@ func TestResourceAddress(t *testing.T) {
 	if got := ResourceAddress("https://links.example.test", ""); got != "" {
 		t.Fatalf("an address was made without a CRID: %q", got)
 	}
+	// The address is sent to other people, so nothing that is not letters
+	// and digits is ever put into it: no other path, no query, no fragment,
+	// no other site, no escape and no space.
+	for _, value := range []string{
+		"qexample/../crid", "qexample?next=crid", "qexample#crid", "qexample@other.example", "qexample%2fcrid",
+		"qexample crid", "qexample\ncrid", "qexample.crid", "qexample:crid", "qexampl\u00e9crid", "//other.example",
+	} {
+		if got := ResourceAddress("https://links.example.test", value); got != "" {
+			t.Errorf("an address was made from %q: %q", value, got)
+		}
+	}
 }
